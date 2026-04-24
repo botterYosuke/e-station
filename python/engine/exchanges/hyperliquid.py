@@ -322,7 +322,6 @@ class HyperliquidWorker(ExchangeWorker):
                 continue
 
             token_indices = pair.get("tokens", [])
-            display_symbol = _create_display_symbol(pair["name"], tokens, token_indices)
 
             base_index = token_indices[0] if token_indices else None
             base_token = next((t for t in tokens if t.get("index") == base_index), None)
@@ -331,9 +330,12 @@ class HyperliquidWorker(ExchangeWorker):
             tick_size = _compute_tick_size(price, sz_decimals)
             min_qty = 10.0 ** (-sz_decimals) if sz_decimals > 0 else 1.0
 
+            # Use pair["name"] (e.g. "BTC/USDC", "@1") as the canonical API identifier.
+            # The Rust engine-client passes symbol directly as coin in subscribe/fetch commands,
+            # so this must match what Hyperliquid's REST/WS accepts.
             result.append(
                 {
-                    "symbol": display_symbol,
+                    "symbol": pair["name"],
                     "min_ticksize": tick_size,
                     "min_qty": min_qty,
                     "contract_size": None,
@@ -449,15 +451,14 @@ class HyperliquidWorker(ExchangeWorker):
                 price = _asset_price(ctx)
                 if price <= 0.0:
                     continue
-                token_indices = pair.get("tokens", [])
-                display_symbol = _create_display_symbol(pair["name"], tokens, token_indices)
                 try:
                     prev = float(ctx.get("prevDayPx") or 0)
                     mark = float(ctx.get("markPx") or 0)
                     volume = float(ctx.get("dayNtlVlm") or 0)
                 except (TypeError, ValueError):
                     continue
-                result[display_symbol] = {
+                # Key by raw pair name to match list_tickers symbol convention.
+                result[pair["name"]] = {
                     "mark_price": str(mark),
                     "daily_price_chg": str(_daily_price_chg_pct(price, prev)),
                     "daily_volume": str(volume),

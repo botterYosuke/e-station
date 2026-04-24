@@ -139,7 +139,9 @@ async def test_list_tickers_spot(worker: HyperliquidWorker, httpx_mock: HTTPXMoc
 
     tickers = await worker.list_tickers("spot")
     assert len(tickers) == 1
-    assert tickers[0]["symbol"] == "BTCUSDC"
+    # symbol must be the raw pair name (API identifier), NOT the display name.
+    # Rust engine-client passes this directly as coin in subscribe/fetch commands.
+    assert tickers[0]["symbol"] == "BTC/USDC"
 
 
 @pytest.mark.asyncio
@@ -165,8 +167,9 @@ async def test_list_tickers_spot_excludes_zero_price(worker: HyperliquidWorker, 
 
     tickers = await worker.list_tickers("spot")
     symbols = [t["symbol"] for t in tickers]
-    assert "BTCUSDC" in symbols
-    assert "DEADUSDC" not in symbols
+    # Raw pair names, not display names
+    assert "BTC/USDC" in symbols
+    assert "DEAD/USDC" not in symbols
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +321,8 @@ async def test_fetch_ticker_stats_all(worker: HyperliquidWorker, httpx_mock: HTT
 async def test_fetch_ticker_stats_spot(worker: HyperliquidWorker, httpx_mock: HTTPXMock):
     httpx_mock.add_response(url=_API_INFO, method="POST", json=_spot_meta_response())
 
-    stats = await worker.fetch_ticker_stats("BTCUSDC", "spot")
+    # Symbol must be the raw pair name (same as what list_tickers returns)
+    stats = await worker.fetch_ticker_stats("BTC/USDC", "spot")
     assert float(stats["mark_price"]) > 0
 
 
@@ -361,3 +365,95 @@ async def test_fetch_depth_snapshot_spot(worker: HyperliquidWorker, httpx_mock: 
     snap = await worker.fetch_depth_snapshot("BTC/USDC", "spot")
     assert snap["last_update_id"] == 1700000005000
     assert snap["bids"][0]["price"] == "68000.0"
+
+
+# ---------------------------------------------------------------------------
+# Round-trip tests: symbol returned by list_tickers must work in fetch/stream
+# These tests guard against the display-symbol vs API-identifier mismatch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spot_symbol_roundtrip_fetch_depth_snapshot(
+    worker: HyperliquidWorker, httpx_mock: HTTPXMock
+):
+    """Symbol from list_tickers("spot") must be accepted by fetch_depth_snapshot."""
+    # Step 1: list_tickers returns symbols
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=_spot_meta_response())
+    tickers = await worker.list_tickers("spot")
+    assert len(tickers) == 1
+    symbol = tickers[0]["symbol"]  # must be the API identifier
+
+    # Step 2: use that symbol directly in fetch_depth_snapshot
+    depth_data = {
+        "levels": [[{"px": "68000.0", "sz": "0.1"}], [{"px": "68010.0", "sz": "0.2"}]],
+        "time": 1700000005000,
+    }
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=depth_data)
+
+    # If symbol is the display name ("BTCUSDC"), Hyperliquid would reject it.
+    # The raw pair name ("BTC/USDC") is what the exchange expects.
+    snap = await worker.fetch_depth_snapshot(symbol, "spot")
+    assert snap["last_update_id"] == 1700000005000
+
+
+@pytest.mark.asyncio
+async def test_spot_symbol_roundtrip_fetch_ticker_stats(
+    worker: HyperliquidWorker, httpx_mock: HTTPXMock
+):
+    """Symbol from list_tickers("spot") must be accepted by fetch_ticker_stats."""
+    # Step 1: get the symbol
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=_spot_meta_response())
+    tickers = await worker.list_tickers("spot")
+    symbol = tickers[0]["symbol"]
+
+    # Step 2: fetch_ticker_stats using the same symbol
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=_spot_meta_response())
+    stats = await worker.fetch_ticker_stats(symbol, "spot")
+    assert float(stats["mark_price"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_spot_symbol_roundtrip_fetch_klines(
+    worker: HyperliquidWorker, httpx_mock: HTTPXMock
+):
+    """Symbol from list_tickers("spot") must be accepted by fetch_klines."""
+    # Step 1: get the symbol
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=_spot_meta_response())
+    tickers = await worker.list_tickers("spot")
+    symbol = tickers[0]["symbol"]
+
+    # Step 2: fetch_klines using the same symbol
+    klines_data = [
+        {
+            "t": 1700000000000, "T": 1700000060000, "s": symbol, "i": "1m",
+            "o": "68000.0", "h": "68100.0", "l": "67900.0", "c": "68050.0", "v": "0.5", "n": 5,
+        }
+    ]
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=klines_data)
+
+    klines = await worker.fetch_klines(symbol, "spot", "1m", limit=1)
+    assert len(klines) == 1
+    assert klines[0]["open_time_ms"] == 1700000000000
+
+
+@pytest.mark.asyncio
+async def test_perp_symbol_roundtrip_fetch_depth_snapshot(
+    worker: HyperliquidWorker, httpx_mock: HTTPXMock
+):
+    """Symbol from list_tickers('linear_perp') must be accepted by fetch_depth_snapshot."""
+    # Step 1: get the symbol
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=_perp_dexs_response())
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=_perp_meta_response())
+    tickers = await worker.list_tickers("linear_perp")
+    btc = next(t for t in tickers if t["symbol"] == "BTC")
+
+    # Step 2: fetch_depth_snapshot using the same symbol
+    depth_data = {
+        "levels": [[{"px": "68000.0", "sz": "1.0"}], [{"px": "68001.0", "sz": "0.5"}]],
+        "time": 1700000000000,
+    }
+    httpx_mock.add_response(url=_API_INFO, method="POST", json=depth_data)
+
+    snap = await worker.fetch_depth_snapshot(btc["symbol"], "linear_perp")
+    assert snap["last_update_id"] == 1700000000000
