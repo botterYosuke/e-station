@@ -31,6 +31,13 @@ impl CliArgs {
                 let url = Url::parse(&raw).map_err(|e| {
                     format!("invalid --data-engine-url value '{raw}': {e}")
                 })?;
+                if url.scheme() != "ws" {
+                    return Err(format!(
+                        "--data-engine-url: scheme '{}' is not supported; \
+                         use ws:// (loopback IPC does not require TLS)",
+                        url.scheme()
+                    ));
+                }
                 data_engine_url = Some(url);
             }
             // Unknown flags are silently ignored to stay forward-compatible.
@@ -72,12 +79,17 @@ mod tests {
     }
 
     #[test]
-    fn data_engine_url_accepts_wss_scheme() {
-        let cli =
-            CliArgs::parse_from(args(&["--data-engine-url", "wss://127.0.0.1:9001/engine"]))
-                .unwrap();
-        let url = cli.data_engine_url.unwrap();
-        assert_eq!(url.scheme(), "wss");
+    fn data_engine_url_rejects_wss_scheme() {
+        // wss:// is not supported: loopback IPC never needs TLS.
+        // The CLI should return a clear error so the user knows to use ws://.
+        let result =
+            CliArgs::parse_from(args(&["--data-engine-url", "wss://127.0.0.1:9001/engine"]));
+        assert!(result.is_err(), "wss:// should be rejected");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("not supported") || msg.contains("ws://"),
+            "error should mention ws://: {msg}"
+        );
     }
 
     #[test]

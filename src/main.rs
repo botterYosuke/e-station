@@ -82,7 +82,17 @@ fn main() {
             match rt.block_on(engine_client::EngineConnection::connect(&url_str, &token)) {
                 Ok(conn) => {
                     log::info!("Connected to external data engine at {url_str}");
-                    ENGINE_CONNECTION.set(Arc::new(conn)).ok();
+                    let conn = Arc::new(conn);
+                    ENGINE_CONNECTION.set(Arc::clone(&conn)).ok();
+
+                    // Monitor the external connection and signal the UI when it drops.
+                    rt.spawn(async move {
+                        conn.wait_closed().await;
+                        log::warn!("external engine connection lost");
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(true).ok();
+                        }
+                    });
                 }
                 Err(e) => {
                     log::error!("Failed to connect to data engine at {url_str}: {e}");
@@ -190,15 +200,27 @@ impl Flowsurface {
             })
             .expect("Failed to spawn adapter handles");
 
-        // If an external engine connection was established in main(), wire it in
-        // as the Binance backend, overriding the native Rust adapter.
+        // If an external engine connection was established in main(), wire in a
+        // HybridVenueBackend for Binance: metadata/stats stay on the NativeBackend
+        // (so the ticker list / sidebar always work), while streaming and data-fetch
+        // calls are routed through the Python IPC engine.
         if let Some(conn) = ENGINE_CONNECTION.get() {
-            let backend = Arc::new(engine_client::EngineClientBackend::new(
-                Arc::clone(conn),
-                "binance",
-            ));
-            handles.set_backend(exchange::adapter::Venue::Binance, backend);
-            log::info!("Binance backend: EngineClientBackend (Python IPC)");
+            use exchange::adapter::Venue;
+
+            // Keep the native Binance backend for metadata — only replace it in the
+            // hybrid when the handle is already spawned (it always is via spawn_all).
+            if let Some(native) = handles.get_backend_arc(Venue::Binance) {
+                let engine_backend = Arc::new(engine_client::EngineClientBackend::new(
+                    Arc::clone(conn),
+                    "binance",
+                ));
+                let hybrid = Arc::new(engine_client::HybridVenueBackend::new(
+                    native,
+                    engine_backend,
+                ));
+                handles.set_backend(Venue::Binance, hybrid);
+                log::info!("Binance backend: HybridVenueBackend (native metadata + Python IPC streams)");
+            }
         }
 
         let (main_window_id, open_main_window) = {

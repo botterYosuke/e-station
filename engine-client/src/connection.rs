@@ -32,6 +32,8 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct EngineConnection {
     sender: mpsc::Sender<Command>,
     events: broadcast::Sender<EngineEvent>,
+    /// Notified once when the WS read loop exits (remote close or IO error).
+    closed: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for EngineConnection {
@@ -55,10 +57,12 @@ impl EngineConnection {
         // Perform handshake with exclusive ws access before spawning the IO tasks.
         let ws = perform_handshake(ws, token, events_tx.clone()).await?;
 
-        // Spawn the read/write loops.
-        spawn_io_tasks(ws, cmd_rx, events_tx.clone());
+        let closed = Arc::new(tokio::sync::Notify::new());
 
-        Ok(Self { sender: cmd_tx, events: events_tx })
+        // Spawn the read/write loops.
+        spawn_io_tasks(ws, cmd_rx, events_tx.clone(), Arc::clone(&closed));
+
+        Ok(Self { sender: cmd_tx, events: events_tx, closed })
     }
 
     /// Send a command to the Python engine.
@@ -72,6 +76,15 @@ impl EngineConnection {
     /// Subscribe to all events broadcast from the Python engine.
     pub fn subscribe_events(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
+    }
+
+    /// Resolves once the underlying WebSocket read loop exits (remote close or IO error).
+    ///
+    /// Use this in `ProcessManager::run_with_recovery` instead of waiting for
+    /// `RecvError::Closed`, which never fires while `EngineConnection` itself
+    /// holds a `broadcast::Sender`.
+    pub async fn wait_closed(&self) {
+        self.closed.notified().await;
     }
 }
 
@@ -207,6 +220,7 @@ fn spawn_io_tasks(
     ws: FragmentCollector<TokioIo<Upgraded>>,
     mut cmd_rx: mpsc::Receiver<Command>,
     events_tx: broadcast::Sender<EngineEvent>,
+    closed: Arc<tokio::sync::Notify>,
 ) {
     // Split WebSocket into halves using an Arc<Mutex<…>> so we can drive read/write
     // from two separate tasks without moving the same value twice.
@@ -276,5 +290,7 @@ fn spawn_io_tasks(
             }
         }
         log::info!("engine ws read loop exited");
+        // Signal any callers of wait_closed() that the connection is gone.
+        closed.notify_waiters();
     });
 }

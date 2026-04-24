@@ -158,14 +158,11 @@ impl ProcessManager {
                     log::info!("engine connection established");
                     on_ready();
 
-                    // Wait for the connection to drop (read loop exits).
-                    let mut rx = conn.subscribe_events();
-                    loop {
-                        match rx.recv().await {
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            _ => continue,
-                        }
-                    }
+                    // Wait until the WS read loop exits (remote close or IO error).
+                    // Using wait_closed() instead of RecvError::Closed because
+                    // EngineConnection itself holds a broadcast::Sender, so the
+                    // channel is never "Closed" while the conn is alive.
+                    conn.wait_closed().await;
                     log::warn!("engine connection lost — will restart");
                 }
                 Err(e) => {

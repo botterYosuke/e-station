@@ -65,6 +65,11 @@ impl AdapterHandles {
     }
 
     fn get_backend(&self, venue: Venue) -> Option<Arc<dyn VenueBackend>> {
+        self.get_backend_arc(venue)
+    }
+
+    /// Returns a clone of the `Arc<dyn VenueBackend>` registered for `venue`, if any.
+    pub fn get_backend_arc(&self, venue: Venue) -> Option<Arc<dyn VenueBackend>> {
         match venue {
             Venue::Binance => self.binance.clone(),
             Venue::Bybit => self.bybit.clone(),

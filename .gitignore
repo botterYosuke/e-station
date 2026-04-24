@@ -6,3 +6,4 @@
 *.pyo
 .venv/
 python/.pytest_cache/
+uv.lock

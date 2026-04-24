@@ -9,7 +9,14 @@
       "Bash(awk '$1 > 100 {print}')",
       "Bash(grep -n \"pub fn active_layout_id\\\\|fn active_layout_id\\\\|pub fn get_mut\\\\|fn get_mut\" /c/Users/sasai/Documents/flowsurface/src/modal/*.rs)",
       "Bash(grep:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(echo \"FMT_EXIT=$?\")",
+      "PowerShell(Set-Location 'C:\\\\Users\\\\sasai\\\\Documents\\\\flowsurface'; $output = cargo clippy --lib 2>&1; $output | Select-String \"narrative|^error\" | Select-Object -First 30; Write-Host \"EXIT: $LASTEXITCODE\")",
+      "PowerShell(Set-Location 'C:\\\\Users\\\\sasai\\\\Documents\\\\flowsurface'; $output = cargo test --lib 2>&1; $output | Select-Object -Last 30; Write-Host \"EXIT: $LASTEXITCODE\")",
+      "PowerShell(Set-Location 'C:\\\\Users\\\\sasai\\\\Documents\\\\flowsurface'; $count = \\(git log main..HEAD --oneline\\).Count; Write-Host \"Commits ahead of main: $count\")",
+      "Bash(python -c \"import data\")",
+      "Bash(.venv\\\\Scripts\\\\python.exe --version)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import data; print\\('ok'\\)\")"
     ]
   }
 }
