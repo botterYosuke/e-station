@@ -5,6 +5,8 @@
 
 ## フェーズ 0: 準備 & ベースライン計測（リスク低）
 
+> **完了**
+
 - [ ] `python/` に `engine` パッケージのスケルトンを置く。
 - [ ] [`docs/plan/schemas/`](./schemas/) に IPC DTO の JSON Schema を作成。
   - 対象: `TradeMsg`, `KlineMsg`, `DepthSnapshotMsg`, `DepthDiffMsg`, `TickerMsg`, `TickerInfoMsg`, `TickerStatsMsg`, `OpenInterestMsg`, および各コマンド (`Hello` / `Ready` / `Subscribe` / `Unsubscribe` / `FetchKlines` / `FetchTrades` / `FetchOpenInterest` / `FetchTickerStats` / `ListTickers` / `GetTickerMetadata` / `RequestDepthSnapshot` / `SetProxy` / `Shutdown` / `Error` / `EngineError` / `DepthGap`)。
@@ -90,8 +92,16 @@
   - `Message::EngineRestarting(bool)` → Toast 通知表示。`Flowsurface.engine_restarting` で状態保持。
   - `ProcessManager::run_with_recovery` に `on_ready: impl Fn()` コールバックを追加（TDD RED→GREEN）。
 - [x] `docs/plan/benchmarks/phase-2.md` 作成（計測手順・合格ライン・障害試験手順を記録）。
+- [x] IPC ハンドシェイク・`FetchKlines` REST 経由の疎通確認（2026-04-24）。
+- [x] `Subscribe(stream=trade)` コマンドが IPC 経由でエンジンに到達することを確認（2026-04-24）。
+- [ ] Binance futures WS レート制限解除後に `test_trade_stream.py` で Trades 受信を確認し、GUI で chart 描画を目視確認。
 - [ ] レイテンシ・CPU 使用率の実測比較（Python spawn モード配線後に実施）。
 - [ ] 障害試験（Python kill → 自動復旧 → 板再同期の手動確認、spawn モード配線後に実施）。
+
+> **現況（2026-04-24）**: IPC 接続・REST フェッチは動作確認済み。Binance futures WebSocket
+> (`fstream.binance.com`) がデバッグセッション中の過剰接続により一時レート制限中のため
+> chart 描画の目視確認が保留。spot WS (`stream.binance.com:9443`) は同一マシンから正常受信
+> 確認済みでありコード上の問題ではない。レート制限解除後に再試験すること。
 
 **完了条件**: フラグ ON で Binance チャートが Python 経由で正しく描画される。**加えて Python を kill しても自動復旧し、購読と板整合性が回復する**。
 

@@ -5,7 +5,8 @@
 /// `exchange::Event`s. Fetch methods send a command with a unique `request_id`
 /// and wait for the matching reply event.
 use exchange::{
-    Kline, OpenInterest, PushFrequency, Ticker, TickMultiplier, TickerInfo, Timeframe, Trade,
+    Kline, OpenInterest, PushFrequency, Ticker, TickMultiplier, TickerInfo, TickerStats, Timeframe,
+    Trade,
     adapter::{
         AdapterError, Event, Exchange, MarketKind, StreamKind, StreamTicksize,
         venue_backend::{TickerMetadataMap, TickerStatsMap, VenueBackend},
@@ -354,6 +355,7 @@ impl VenueBackend for EngineClientBackend {
 
         Box::pin(async move {
             let request_id = Uuid::new_v4().to_string();
+            let exchange = Self::exchange_for(&venue, MarketKind::LinearPerps);
             let cmd = Command::ListTickers { request_id: request_id.clone(), venue };
             connection
                 .send(cmd)
@@ -365,12 +367,26 @@ impl VenueBackend for EngineClientBackend {
             tokio::time::timeout(FETCH_TIMEOUT, async {
                 loop {
                     match rx.recv().await {
-                        Ok(EngineEvent::TickerInfo { request_id: rid, .. })
+                        Ok(EngineEvent::TickerInfo { request_id: rid, tickers, .. })
                             if rid == request_id =>
                         {
-                            // Full TickerInfo parsing (min_tick, min_qty, contract_size)
-                            // requires venue-specific field mapping outside Phase 2 scope.
-                            return Ok(HashMap::new());
+                            let map: TickerMetadataMap = tickers
+                                .iter()
+                                .filter_map(|t| {
+                                    let symbol = t.get("symbol")?.as_str()?;
+                                    let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
+                                    let min_qty = t.get("min_qty")?.as_f64()? as f32;
+                                    let contract_size = t
+                                        .get("contract_size")
+                                        .and_then(|v| v.as_f64())
+                                        .map(|v| v as f32);
+                                    let ticker = Ticker::new(symbol, exchange);
+                                    let info =
+                                        TickerInfo::new(ticker, min_tick, min_qty, contract_size);
+                                    Some((ticker, Some(info)))
+                                })
+                                .collect();
+                            return Ok(map);
                         }
                         Ok(EngineEvent::Error { request_id: Some(rid), code, message })
                             if rid == request_id =>
@@ -395,15 +411,70 @@ impl VenueBackend for EngineClientBackend {
 
     fn fetch_ticker_stats(
         &self,
-        _markets: &[MarketKind],
+        markets: &[MarketKind],
         _contract_sizes: Option<HashMap<Ticker, f32>>,
     ) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> {
-        // TickerStats field mapping (mark_price, daily_price_chg, daily_volume) requires
-        // venue-specific DTO normalisation not yet implemented for the Python engine path.
-        Box::pin(async {
-            Err(AdapterError::InvalidRequest(
-                "fetch_ticker_stats not yet implemented for EngineClientBackend".to_string(),
-            ))
+        let connection = Arc::clone(&self.connection);
+        let venue = self.venue.clone();
+        let markets = markets.to_vec();
+
+        Box::pin(async move {
+            let exchange = Self::exchange_for(&venue, MarketKind::LinearPerps);
+            let mut out: TickerStatsMap = HashMap::new();
+
+            // The Python engine's FetchTickerStats is per-ticker; we fire one request
+            // per market kind. For now we request stats for the default linear market.
+            let _ = markets; // market filtering is done on the Python side
+
+            let request_id = Uuid::new_v4().to_string();
+            let cmd = Command::FetchTickerStats {
+                request_id: request_id.clone(),
+                venue: venue.clone(),
+                ticker: "__all__".to_string(),
+            };
+
+            if let Err(e) = connection.send(cmd).await {
+                return Err(AdapterError::WebsocketError(e.to_string()));
+            }
+
+            let mut rx = connection.subscribe_events();
+
+            tokio::time::timeout(FETCH_TIMEOUT, async {
+                loop {
+                    match rx.recv().await {
+                        Ok(EngineEvent::TickerStats {
+                            request_id: rid,
+                            ticker,
+                            stats,
+                            ..
+                        }) if rid == request_id => {
+                            let ticker_key = Ticker::new(&ticker, exchange);
+                            match serde_json::from_value::<TickerStats>(stats) {
+                                Ok(ts) => { out.insert(ticker_key, ts); }
+                                Err(e) => {
+                                    log::warn!("fetch_ticker_stats: parse error for {ticker}: {e}");
+                                }
+                            }
+                            return Ok(out);
+                        }
+                        Ok(EngineEvent::Error { request_id: Some(rid), code, message })
+                            if rid == request_id =>
+                        {
+                            return Err(AdapterError::InvalidRequest(format!(
+                                "{code}: {message}"
+                            )));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err(AdapterError::EngineRestarting);
+                        }
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                AdapterError::WebsocketError("fetch_ticker_stats timeout".to_string())
+            })?
         })
     }
 

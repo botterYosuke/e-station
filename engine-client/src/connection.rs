@@ -55,7 +55,9 @@ impl EngineConnection {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_BUFFER);
 
         // Perform handshake with exclusive ws access before spawning the IO tasks.
-        let ws = perform_handshake(ws, token, events_tx.clone()).await?;
+        let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, perform_handshake(ws, token, events_tx.clone()))
+            .await
+            .map_err(|_| EngineClientError::HandshakeTimeout)??;
 
         let closed = Arc::new(tokio::sync::Notify::new());
 

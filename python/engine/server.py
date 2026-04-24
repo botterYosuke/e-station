@@ -164,7 +164,7 @@ class DataEngineServer:
             await ws.send(
                 orjson.dumps(
                     EngineError(code="auth_failed", message="token mismatch").model_dump()
-                )
+                ).decode()
             )
             await ws.close()
             raise ValueError("auth_failed")
@@ -176,7 +176,7 @@ class DataEngineServer:
                         code="schema_mismatch",
                         message=f"expected major={SCHEMA_MAJOR}, got {msg.schema_major}",
                     ).model_dump()
-                )
+                ).decode()
             )
             await ws.close()
             raise ValueError("schema_mismatch")
@@ -193,7 +193,7 @@ class DataEngineServer:
                                 "code": "superseded",
                                 "message": "new client connected",
                             }
-                        )
+                        ).decode()
                     )
                     await self._current_conn.close()
                 except Exception:
@@ -211,7 +211,7 @@ class DataEngineServer:
                 "supports_depth_binary": False,
             },
         )
-        await ws.send(orjson.dumps(ready.model_dump(mode="json")))
+        await ws.send(orjson.dumps(ready.model_dump(mode="json")).decode())
 
     # ------------------------------------------------------------------
     # Receive loop — decode ops and dispatch
@@ -235,7 +235,7 @@ class DataEngineServer:
         while True:
             while self._outbox:
                 event = self._outbox.popleft()
-                await ws.send(orjson.dumps(event))
+                await ws.send(orjson.dumps(event).decode())
 
             if self._shutdown_event.is_set():
                 break
@@ -553,7 +553,7 @@ class DataEngineServer:
                         "code": code,
                         "message": message,
                     }
-                )
+                ).decode()
             )
         except Exception:
             pass
