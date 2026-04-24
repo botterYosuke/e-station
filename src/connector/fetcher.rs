@@ -474,7 +474,12 @@ pub fn fetch_trades_batched(
 
         while latest_trade_t < to_time {
             match handles
-                .fetch_trades(ticker_info, latest_trade_t, to_time, Some(data_path.clone()))
+                .fetch_trades(
+                    ticker_info,
+                    latest_trade_t,
+                    to_time,
+                    Some(data_path.clone()),
+                )
                 .await
             {
                 Ok(batch) => {
@@ -491,8 +496,7 @@ pub fn fetch_trades_batched(
                         if consecutive_empty_days >= MAX_EMPTY_DAYS {
                             return Err(AdapterError::InvalidRequest(format!(
                                 "fetch_trades_batched: {} consecutive empty days at t={} — aborting to avoid runaway requests",
-                                consecutive_empty_days,
-                                latest_trade_t,
+                                consecutive_empty_days, latest_trade_t,
                             )));
                         }
                         latest_trade_t = (latest_trade_t / DAY_MS + 1) * DAY_MS;
@@ -500,8 +504,7 @@ pub fn fetch_trades_batched(
                     }
                     consecutive_empty_days = 0;
 
-                    let last_trade_t =
-                        batch.last().map_or(latest_trade_t, |trade| trade.time);
+                    let last_trade_t = batch.last().map_or(latest_trade_t, |trade| trade.time);
                     latest_trade_t = (last_trade_t / DAY_MS + 1) * DAY_MS;
 
                     let () = progress.send(batch).await;
@@ -517,19 +520,18 @@ pub fn fetch_trades_batched(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exchange::adapter::Event;
+    use exchange::adapter::venue_backend::{TickerMetadataMap, TickerStatsMap};
     use exchange::adapter::{
         AdapterError, AdapterHandles, Exchange, MarketKind, Venue, VenueBackend,
     };
-    use exchange::adapter::venue_backend::{TickerMetadataMap, TickerStatsMap};
     use exchange::depth::DepthPayload;
     use exchange::{
-        Kline, OpenInterest, PushFrequency, Ticker, TickerInfo, TickMultiplier,
-        Timeframe, Trade,
+        Kline, OpenInterest, PushFrequency, TickMultiplier, Ticker, TickerInfo, Timeframe, Trade,
     };
-    use exchange::adapter::Event;
+    use iced::futures::StreamExt as _;
     use iced::futures::future::BoxFuture;
     use iced::futures::stream::BoxStream;
-    use iced::futures::StreamExt as _;
     use iced::task::Sipper as _;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -537,7 +539,12 @@ mod tests {
 
     fn make_trade(ts_ms: u64) -> Trade {
         use exchange::unit::{Price, Qty};
-        Trade { time: ts_ms, is_sell: false, price: Price::from_f32(100.0), qty: Qty::from_f32(1.0) }
+        Trade {
+            time: ts_ms,
+            is_sell: false,
+            price: Price::from_f32(100.0),
+            qty: Qty::from_f32(1.0),
+        }
     }
 
     /// Mock backend that always returns an empty trade list.
@@ -554,28 +561,57 @@ mod tests {
             Box::pin(std::future::ready(Ok(vec![])))
         }
 
-        fn kline_stream(&self, _: Vec<(TickerInfo, Timeframe)>, _: MarketKind) -> BoxStream<'static, Event> {
+        fn kline_stream(
+            &self,
+            _: Vec<(TickerInfo, Timeframe)>,
+            _: MarketKind,
+        ) -> BoxStream<'static, Event> {
             unimplemented!()
         }
         fn trade_stream(&self, _: Vec<TickerInfo>, _: MarketKind) -> BoxStream<'static, Event> {
             unimplemented!()
         }
-        fn depth_stream(&self, _: TickerInfo, _: Option<TickMultiplier>, _: PushFrequency) -> BoxStream<'static, Event> {
+        fn depth_stream(
+            &self,
+            _: TickerInfo,
+            _: Option<TickMultiplier>,
+            _: PushFrequency,
+        ) -> BoxStream<'static, Event> {
             unimplemented!()
         }
-        fn fetch_ticker_metadata(&self, _: &[MarketKind]) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> {
+        fn fetch_ticker_metadata(
+            &self,
+            _: &[MarketKind],
+        ) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> {
             unimplemented!()
         }
-        fn fetch_ticker_stats(&self, _: &[MarketKind], _: Option<HashMap<Ticker, f32>>) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> {
+        fn fetch_ticker_stats(
+            &self,
+            _: &[MarketKind],
+            _: Option<HashMap<Ticker, f32>>,
+        ) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> {
             unimplemented!()
         }
-        fn fetch_klines(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<Kline>, AdapterError>> {
+        fn fetch_klines(
+            &self,
+            _: TickerInfo,
+            _: Timeframe,
+            _: Option<(u64, u64)>,
+        ) -> BoxFuture<'_, Result<Vec<Kline>, AdapterError>> {
             unimplemented!()
         }
-        fn fetch_open_interest(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
+        fn fetch_open_interest(
+            &self,
+            _: TickerInfo,
+            _: Timeframe,
+            _: Option<(u64, u64)>,
+        ) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
             unimplemented!()
         }
-        fn request_depth_snapshot(&self, _: Ticker) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
+        fn request_depth_snapshot(
+            &self,
+            _: Ticker,
+        ) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
             unimplemented!()
         }
         fn health(&self) -> BoxFuture<'_, bool> {
@@ -591,7 +627,9 @@ mod tests {
 
     impl SequencedTrades {
         fn new(responses: Vec<Vec<Trade>>) -> Self {
-            Self { responses: Arc::new(tokio::sync::Mutex::new(responses.into())) }
+            Self {
+                responses: Arc::new(tokio::sync::Mutex::new(responses.into())),
+            }
         }
     }
 
@@ -610,15 +648,62 @@ mod tests {
             })
         }
 
-        fn kline_stream(&self, _: Vec<(TickerInfo, Timeframe)>, _: MarketKind) -> BoxStream<'static, Event> { unimplemented!() }
-        fn trade_stream(&self, _: Vec<TickerInfo>, _: MarketKind) -> BoxStream<'static, Event> { unimplemented!() }
-        fn depth_stream(&self, _: TickerInfo, _: Option<TickMultiplier>, _: PushFrequency) -> BoxStream<'static, Event> { unimplemented!() }
-        fn fetch_ticker_metadata(&self, _: &[MarketKind]) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> { unimplemented!() }
-        fn fetch_ticker_stats(&self, _: &[MarketKind], _: Option<HashMap<Ticker, f32>>) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> { unimplemented!() }
-        fn fetch_klines(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<Kline>, AdapterError>> { unimplemented!() }
-        fn fetch_open_interest(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> { unimplemented!() }
-        fn request_depth_snapshot(&self, _: Ticker) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> { unimplemented!() }
-        fn health(&self) -> BoxFuture<'_, bool> { unimplemented!() }
+        fn kline_stream(
+            &self,
+            _: Vec<(TickerInfo, Timeframe)>,
+            _: MarketKind,
+        ) -> BoxStream<'static, Event> {
+            unimplemented!()
+        }
+        fn trade_stream(&self, _: Vec<TickerInfo>, _: MarketKind) -> BoxStream<'static, Event> {
+            unimplemented!()
+        }
+        fn depth_stream(
+            &self,
+            _: TickerInfo,
+            _: Option<TickMultiplier>,
+            _: PushFrequency,
+        ) -> BoxStream<'static, Event> {
+            unimplemented!()
+        }
+        fn fetch_ticker_metadata(
+            &self,
+            _: &[MarketKind],
+        ) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> {
+            unimplemented!()
+        }
+        fn fetch_ticker_stats(
+            &self,
+            _: &[MarketKind],
+            _: Option<HashMap<Ticker, f32>>,
+        ) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> {
+            unimplemented!()
+        }
+        fn fetch_klines(
+            &self,
+            _: TickerInfo,
+            _: Timeframe,
+            _: Option<(u64, u64)>,
+        ) -> BoxFuture<'_, Result<Vec<Kline>, AdapterError>> {
+            unimplemented!()
+        }
+        fn fetch_open_interest(
+            &self,
+            _: TickerInfo,
+            _: Timeframe,
+            _: Option<(u64, u64)>,
+        ) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
+            unimplemented!()
+        }
+        fn request_depth_snapshot(
+            &self,
+            _: Ticker,
+        ) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
+            unimplemented!()
+        }
+        fn health(&self) -> BoxFuture<'_, bool> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]
@@ -626,15 +711,15 @@ mod tests {
         // 3 empty days → 1 data day → 3 empty days → 1 data day → loop ends → Ok
         const DAY_MS: u64 = 86_400_000;
         let responses: Vec<Vec<Trade>> = vec![
-            vec![],                                  // day 0 — empty
-            vec![],                                  // day 1 — empty
-            vec![],                                  // day 2 — empty
-            vec![make_trade(3 * DAY_MS + 1)],        // day 3 — data; counter resets
-            vec![],                                  // day 4 — empty
-            vec![],                                  // day 5 — empty
-            vec![],                                  // day 6 — empty
-            vec![make_trade(7 * DAY_MS + 1)],        // day 7 — data; counter resets
-            // to_time = 8*DAY_MS reached → loop exits
+            vec![],                           // day 0 — empty
+            vec![],                           // day 1 — empty
+            vec![],                           // day 2 — empty
+            vec![make_trade(3 * DAY_MS + 1)], // day 3 — data; counter resets
+            vec![],                           // day 4 — empty
+            vec![],                           // day 5 — empty
+            vec![],                           // day 6 — empty
+            vec![make_trade(7 * DAY_MS + 1)], // day 7 — data; counter resets
+                                              // to_time = 8*DAY_MS reached → loop exits
         ];
         let mut handles = AdapterHandles::default();
         handles.set_backend(Venue::Binance, Arc::new(SequencedTrades::new(responses)));
@@ -642,18 +727,15 @@ mod tests {
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
         let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
 
-        let mut straw = fetch_trades_batched(
-            handles,
-            ticker_info,
-            0,
-            8 * DAY_MS,
-            PathBuf::from("."),
-        )
-        .pin();
+        let mut straw =
+            fetch_trades_batched(handles, ticker_info, 0, 8 * DAY_MS, PathBuf::from(".")).pin();
 
         while straw.next().await.is_some() {}
         let result = straw.await;
-        assert!(result.is_ok(), "expected Ok after counter reset, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok after counter reset, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -670,14 +752,8 @@ mod tests {
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
         let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
 
-        let mut straw = fetch_trades_batched(
-            handles,
-            ticker_info,
-            0,
-            DAY_MS,
-            PathBuf::from("."),
-        )
-        .pin();
+        let mut straw =
+            fetch_trades_batched(handles, ticker_info, 0, DAY_MS, PathBuf::from(".")).pin();
 
         let mut emitted = 0usize;
         while straw.next().await.is_some() {
@@ -686,7 +762,10 @@ mod tests {
         assert_eq!(emitted, 1, "expected exactly one progress emission");
 
         let result = straw.await;
-        assert!(result.is_ok(), "expected Ok after day-boundary advance, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok after day-boundary advance, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -704,14 +783,9 @@ mod tests {
         let from_time = 0u64;
         let to_time = 30 * DAY_MS;
 
-        let mut straw = fetch_trades_batched(
-            handles,
-            ticker_info,
-            from_time,
-            to_time,
-            PathBuf::from("."),
-        )
-        .pin();
+        let mut straw =
+            fetch_trades_batched(handles, ticker_info, from_time, to_time, PathBuf::from("."))
+                .pin();
 
         while straw.next().await.is_some() {}
 

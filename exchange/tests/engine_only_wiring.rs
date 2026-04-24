@@ -3,12 +3,12 @@
 //! Verifies that `AdapterHandles` can be fully populated by individually
 //! injecting backends (engine-client path) without any native `spawn_*` calls.
 
-use flowsurface_exchange::adapter::{AdapterHandles, Exchange, Event, MarketKind, Venue};
 use flowsurface_exchange::adapter::venue_backend::VenueBackend;
-use flowsurface_exchange::{PushFrequency, Ticker, TickerInfo, Timeframe};
 use flowsurface_exchange::adapter::{AdapterError, StreamConfig};
+use flowsurface_exchange::adapter::{AdapterHandles, Event, Exchange, MarketKind, Venue};
 use flowsurface_exchange::depth::DepthPayload;
-use flowsurface_exchange::{Kline, OpenInterest, Trade, TickMultiplier};
+use flowsurface_exchange::{Kline, OpenInterest, TickMultiplier, Trade};
+use flowsurface_exchange::{PushFrequency, Ticker, TickerInfo, Timeframe};
 
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, StreamExt, empty};
@@ -158,9 +158,7 @@ async fn engine_backend_fetch_klines_returns_empty() {
         0.001,
         None,
     );
-    let result = handles
-        .fetch_klines(ticker_info, Timeframe::M1, None)
-        .await;
+    let result = handles.fetch_klines(ticker_info, Timeframe::M1, None).await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
 }

@@ -348,9 +348,23 @@ impl VenueBackend for EngineClientBackend {
                     Ok(EngineEvent::DepthGap { venue: ev_venue, ticker, market: ev_market, .. }) => {
                         if ev_venue != venue || ticker != ticker_sym { continue; }
                         if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
-                        log::warn!("DepthGap for {ticker} — disconnecting for clean reconnect");
-                        yield Event::Disconnected(exchange, "depth gap".to_string());
-                        return;
+                        // DepthGap is the engine's signal that sequence continuity was lost.
+                        // Treat it like a broadcast lag: reset the tracker and request a fresh
+                        // snapshot in-stream so the subscription keeps flowing without relying
+                        // on the UI layer to rebuild the `Subscription::run_with` identity.
+                        log::warn!("depth_stream: DepthGap for {ticker_sym} — forcing snapshot resync");
+                        tracker.lock().await.reset_ticker(&ticker_sym);
+                        if let Err(e) = connection
+                            .send(Command::RequestDepthSnapshot {
+                                request_id: Uuid::new_v4().to_string(),
+                                venue: venue.clone(),
+                                ticker: ticker_sym.clone(),
+                                market: Self::market_kind_to_ipc(market_kind),
+                            })
+                            .await
+                        {
+                            log::error!("depth_stream: failed to send RequestDepthSnapshot after DepthGap for {ticker_sym}: {e}");
+                        }
                     }
 
                     Ok(EngineEvent::Disconnected { venue: ev_venue, ticker, market: ev_market, reason, .. }) => {

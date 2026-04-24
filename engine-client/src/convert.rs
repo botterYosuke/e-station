@@ -107,9 +107,8 @@ pub fn depth_levels_to_payload(
     bids: &[DepthLevel],
     asks: &[DepthLevel],
 ) -> DepthPayload {
-    let to_de_orders = |levels: &[DepthLevel]| {
-        levels.iter().filter_map(DepthLevel::to_de_order).collect()
-    };
+    let to_de_orders =
+        |levels: &[DepthLevel]| levels.iter().filter_map(DepthLevel::to_de_order).collect();
 
     DepthPayload {
         last_update_id: sequence_id as u64,
@@ -216,7 +215,10 @@ mod tests {
         };
         let kline = msg.to_kline().expect("should parse");
         let total: f32 = kline.volume.total().to_f32_lossy();
-        assert!((total - 100.0).abs() < 0.1, "total volume mismatch: {total}");
+        assert!(
+            (total - 100.0).abs() < 0.1,
+            "total volume mismatch: {total}"
+        );
         assert!(
             matches!(kline.volume, Volume::BuySell(_, _)),
             "expected BuySell variant"
@@ -226,10 +228,19 @@ mod tests {
     #[test]
     fn depth_snapshot_roundtrip() {
         let bids = vec![
-            DepthLevel { price: "100.0".to_string(), qty: "1.5".to_string() },
-            DepthLevel { price: "99.0".to_string(), qty: "0.0".to_string() }, // zero → removed
+            DepthLevel {
+                price: "100.0".to_string(),
+                qty: "1.5".to_string(),
+            },
+            DepthLevel {
+                price: "99.0".to_string(),
+                qty: "0.0".to_string(),
+            }, // zero → removed
         ];
-        let asks = vec![DepthLevel { price: "101.0".to_string(), qty: "2.0".to_string() }];
+        let asks = vec![DepthLevel {
+            price: "101.0".to_string(),
+            qty: "2.0".to_string(),
+        }];
         let depth = depth_levels_to_arc_depth(&bids, &asks);
         // zero-qty bid is filtered out
         assert_eq!(depth.bids.len(), 1);
@@ -238,7 +249,10 @@ mod tests {
 
     #[test]
     fn oi_point_converts() {
-        let pt = OiPoint { ts_ms: 9_000, open_interest: "1234.5".to_string() };
+        let pt = OiPoint {
+            ts_ms: 9_000,
+            open_interest: "1234.5".to_string(),
+        };
         let oi = pt.to_open_interest().expect("should parse");
         assert_eq!(oi.time, 9_000);
         assert!((oi.value - 1234.5).abs() < 0.1, "oi mismatch: {}", oi.value);

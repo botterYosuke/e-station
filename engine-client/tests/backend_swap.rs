@@ -1,9 +1,9 @@
+use exchange::adapter::{AdapterHandles, Venue, VenueBackend};
 /// Compile-time check: `EngineClientBackend` satisfies `VenueBackend` and can be
 /// installed into `AdapterHandles` via `set_backend`.
 ///
 /// This test does not perform any IO — if it compiles, the trait bound is satisfied.
 use flowsurface_engine_client::EngineClientBackend;
-use exchange::adapter::{AdapterHandles, Venue, VenueBackend};
 use std::sync::Arc;
 
 /// Assert that `EngineClientBackend` is `Send + Sync` (required by `VenueBackend`).

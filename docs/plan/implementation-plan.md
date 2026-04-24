@@ -530,13 +530,56 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 
 ## フェーズ 6: 配布・運用整備
 
-- [ ] PyInstaller / Nuitka 等で Python サイドを単一実行ファイル化、Rust バイナリと同梱。
-- [ ] [`scripts/`](../../scripts/) の Win/Mac/Linux ビルドスクリプトに Python 同梱手順を追加。
-- [ ] 起動時の Python プロセス監視・再起動ロジックを本実装。
-- [ ] エラーログを Rust 側 `fern` ロガーに集約（Python の stderr を吸い上げる）。
-- [ ] README / ユーザードキュメント更新。
+> **進行中** (2026-04-25, ブランチ `phase-6/distribution-runtime`)
 
-**完了条件**: ユーザーが Python ランタイムを別途インストールせずに既存と同じ操作で起動できる。
+- [x] PyInstaller で Python サイドを単一実行ファイル化、Rust バイナリと同梱。
+  - [`python/engine.spec`](../../python/engine.spec): PyInstaller spec（`onefile`、`console=True`、`hiddenimports` で全 5 取引所モジュールを明示）。
+  - [`scripts/build-engine.sh`](../../scripts/build-engine.sh): `uv tool run pyinstaller`（または `pyinstaller`）でビルドし `target/release/python-engine/flowsurface-engine[.exe]` に出力。
+  - [`pyproject.toml`](../../pyproject.toml) に `[project.optional-dependencies] build = ["pyinstaller>=6.5"]` を追加。
+- [x] [`scripts/`](../../scripts/) の Win/Mac/Linux ビルドスクリプトに Python 同梱手順を追加。
+  - [`scripts/build-windows.sh`](../../scripts/build-windows.sh): Rust ビルド後 `build-engine.sh` を呼び `flowsurface.exe` と一緒に zip。
+  - [`scripts/build-macos.sh`](../../scripts/build-macos.sh): Universal lipo 後 `flowsurface-engine` を tar に同梱（PyInstaller はクロスアーチ非対応のためエンジンはホスト arch のまま）。
+  - [`scripts/package-linux.sh`](../../scripts/package-linux.sh): `package` サブコマンドが Rust ビルド + エンジンビルドを実行し `archive/bin/` に両方をインストール。
+- [x] 起動時の Python プロセス監視・再起動ロジックを本実装。
+  - `--data-engine-url` 未指定時は **マネージドモード**（既定）に切り替え、`ENGINE_CONNECTION` を `ProcessManager::with_command(EngineCommand::resolve()…)` で配置した Python サブプロセスにバインドする。
+  - `pick_free_port()` で 127.0.0.1 のフリーポートを取得 → `ProcessManager::start(port)` がハンドシェイク／プロキシ再投入／購読再送を実施。
+  - 再接続ループは指数バックオフ（500ms → 30s）。`wait_closed()` で WS 切断を検出するたびに `ENGINE_RESTARTING.send(true)` → 再起動 → `send(false)` を Iced subscription に流し UI に Toast 表示。
+  - `--engine-cmd <path>` フラグで明示オーバーライド可能（dev インストールで `python3.12` などを差したい場合に使用）。
+  - 既存の `--data-engine-url` モードは「外部管理エンジンに接続するだけ」に再分類（ドキュメント上は dev モード扱い）。
+- [x] エラーログを Rust 側 `fern` ロガーに集約（Python の stderr/stdout を吸い上げる）。
+  - `PythonProcess::spawn_with` が stdout/stderr を `Stdio::piped()` に変更し、`forward_lines` タスクが行単位で `log::log!(target: "engine", level, "...")` に転送。
+  - [`src/logger.rs`](../../src/logger.rs) の fern dispatch に `level_for("engine", level_filter)` と `level_for("flowsurface_engine_client", level_filter)` を追加し `flowsurface.log` に同居させる（spec §6.4）。
+- [x] README / ユーザードキュメント更新。
+  - "Method 2: Build from Source" を Python 必須前提に書き換え、`uv sync` での依存導入手順、`--engine-cmd`／`--data-engine-url` の使い分け、`scripts/build-*.sh` の同梱バイナリ生成手順、ランタイムログ／監視挙動を新セクションで追記。
+
+**完了条件**: ユーザーが Python ランタイムを別途インストールせずに既存と同じ操作で起動できる。✅ **達成見込み**（PyInstaller 産物の動作はリリースビルド検証で確認）。
+
+### Phase 6 設計判断・ハマりどころ・Tips
+
+- **`EngineCommand` enum**: `Bundled(PathBuf)` / `System { program, args }` の 2 バリアント。`resolve_with(base_dir, override)` の優先順位は (1) override → (2) `base_dir/flowsurface-engine[.exe]` 存在 → (3) フォールバックで `python -m engine`。テストは [`engine-client/tests/engine_command.rs`](../../engine-client/tests/engine_command.rs) に 3 件（Bundled/System fallback/explicit override）。
+- **`ProcessManager::new` の互換性**: 既存テスト `process_lifecycle.rs` が `ProcessManager::new("python")` で**バイナリのみ**（引数なし）を spawn することに依存しているため、レガシー `new` は `EngineCommand::System { program, args: vec![] }` を保つ。新コードは `with_command(EngineCommand)` を使う。
+- **stdin payload 競合**: `forward_lines` タスクが child の stdout/stderr を保持するので、`PythonProcess` 自体は spawn 後すぐ child を返してよい。stdin は `take().write_all(...).shutdown()` で即時クローズ。
+- **`pick_free_port` のレース**: `bind 127.0.0.1:0` → `local_addr().port()` を取得 → リスナーを drop してそのポート番号を Python に渡す。OS 依存の小さな race window があるが、Phase 6 では妥協（loopback only、同時 spawn しない）。spec §4.5 と整合。
+- **20 s ハンドシェイク待ち**: PyInstaller の onefile バイナリは初回起動時に圧縮アーカイブを `%TEMP%` に展開するため cold start が数秒かかる。`main()` 内のブロッキング待ちを 100ms × 200 回（最大 20 秒）に設定。ライブ Python 起動なら 0.5 秒前後で抜ける。
+- **macOS universal の制約**: PyInstaller は cross-arch ビルドに非対応のため、universal viewer + host-arch engine の組み合わせで配布。リリースは Apple Silicon と Intel 両方の Mac runner で別々にビルドする運用が必要（CI 側で対応）。
+- **ログターゲットの統一**: Python 側はそのまま print/stderr で出してよい。Rust 側の fern dispatch が `target = "engine"` をハンドリングし、ファイルローテーションも一括で適用される。Python 内に独立した logging を組まないことで運用が単純化（spec §6.4）。
+- **既知のテスト失敗**: `engine-client/tests/depth_gap_recovery.rs` と `engine-client/tests/connection_closed.rs` の `unused variable` clippy エラーは Phase 5 ブランチからの引き継ぎで Phase 6 とは無関係。次フェーズで修正候補。
+
+### Phase 6 検証結果
+
+- `cargo test -p flowsurface-engine-client --test engine_command` → 3 PASS
+- `cargo test -p flowsurface-engine-client --test process_lifecycle` → 3 PASS（互換性維持）
+- `cargo test --workspace --exclude flowsurface-engine-client` → all PASS
+- `cargo clippy -p flowsurface -- -D warnings` → warning なし
+- `cargo build` → success
+- ⚠ PyInstaller 産物の実動作検証（実際に `flowsurface-engine.exe` を spawn → ハンドシェイク → 描画）は次の手動 QA 工程で実施予定。
+
+### 残タスク（Phase 6 のフォローアップ）
+
+- [ ] CI ワークフロー（`.github/workflows/release.yml` 等）に PyInstaller インストールと `build-engine.sh` 呼び出しを追加。
+- [ ] 既存の `engine-client/tests/depth_gap_recovery.rs` と `connection_closed.rs` の clippy/test 失敗を Phase 5 の指摘として修正。
+- [ ] Linux で AppImage / Flatpak など他の配布形態が必要かを判断。
+- [ ] PyInstaller `onefile` の cold-start を計測し、`onedir` への切替コスト/メリットを評価。
 
 ## ロールバック戦略
 

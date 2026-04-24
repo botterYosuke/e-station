@@ -5,8 +5,91 @@
 /// restart logic and re-applies subscriptions after each recovery.
 use crate::{connection::EngineConnection, error::EngineClientError};
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{process::Child, sync::Mutex};
+
+// ── EngineCommand ─────────────────────────────────────────────────────────────
+
+/// How to launch the Python data engine.
+///
+/// In production the engine is shipped as a single PyInstaller-frozen binary
+/// installed next to `flowsurface(.exe)`.  In dev installs the engine is run
+/// as `python -m engine` from the repo's virtualenv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineCommand {
+    /// A standalone executable (PyInstaller / Nuitka output).
+    Bundled(PathBuf),
+    /// `python -m engine` — used when no bundled binary is found.
+    System {
+        program: String,
+        args: Vec<String>,
+    },
+}
+
+impl EngineCommand {
+    /// Convenience: resolve relative to `std::env::current_exe()`.
+    pub fn resolve() -> Result<Self, EngineClientError> {
+        let exe = std::env::current_exe()?;
+        let dir = exe
+            .parent()
+            .ok_or_else(|| std::io::Error::other("current_exe has no parent"))?
+            .to_path_buf();
+        Self::resolve_with(Some(&dir), None)
+    }
+
+    /// Resolve the engine command.
+    ///
+    /// Order of precedence:
+    /// 1. `explicit_override` — if provided, used verbatim as a `Bundled` command.
+    /// 2. `<base_dir>/flowsurface-engine[.exe]` if the file exists.
+    /// 3. `python -m engine` fallback for dev installs.
+    pub fn resolve_with(
+        base_dir: Option<&Path>,
+        explicit_override: Option<&Path>,
+    ) -> Result<Self, EngineClientError> {
+        if let Some(p) = explicit_override {
+            return Ok(EngineCommand::Bundled(p.to_path_buf()));
+        }
+
+        if let Some(dir) = base_dir {
+            let exe_name = if cfg!(windows) {
+                "flowsurface-engine.exe"
+            } else {
+                "flowsurface-engine"
+            };
+            let candidate = dir.join(exe_name);
+            if candidate.exists() {
+                return Ok(EngineCommand::Bundled(candidate));
+            }
+        }
+
+        Ok(EngineCommand::System {
+            program: "python".to_string(),
+            args: vec!["-m".to_string(), "engine".to_string()],
+        })
+    }
+
+    /// Underlying program path / name (for `Command::new`).
+    pub fn program(&self) -> &str {
+        match self {
+            EngineCommand::Bundled(p) => p.to_str().unwrap_or("flowsurface-engine"),
+            EngineCommand::System { program, .. } => program.as_str(),
+        }
+    }
+
+    /// Extra args to prepend before `Command::new(...).args(...)`.
+    pub fn args(&self) -> &[String] {
+        match self {
+            EngineCommand::Bundled(_) => &[],
+            EngineCommand::System { args, .. } => args.as_slice(),
+        }
+    }
+}
 
 const BACKOFF_BASE_MS: u64 = 500;
 const BACKOFF_MAX_MS: u64 = 30_000;
@@ -20,28 +103,51 @@ pub struct PythonProcess {
 }
 
 impl PythonProcess {
+    /// Backwards-compat shim: spawn via a bare program name (no extra args).
+    ///
+    /// Preserves the pre-Phase-6 contract used by older tests.  New callers
+    /// should prefer [`PythonProcess::spawn_with`], which accepts an
+    /// [`EngineCommand`] and pipes stderr/stdout into the Rust logger.
+    pub async fn spawn(python_cmd: &str, port: u16) -> Result<Self, EngineClientError> {
+        let cmd = EngineCommand::System {
+            program: python_cmd.to_string(),
+            args: Vec::new(),
+        };
+        Self::spawn_with(&cmd, port).await
+    }
+
     /// Spawn the Python data engine.
     ///
-    /// The engine is expected to read a single JSON line from stdin:
-    /// `{"port": <port>, "token": "<token>"}` then bind and serve.
-    pub async fn spawn(python_cmd: &str, port: u16) -> Result<Self, EngineClientError> {
+    /// The engine reads a single JSON line from stdin: `{"port": <port>,
+    /// "token": "<token>"}` then binds and serves.  Both stdout and stderr
+    /// are piped into the Rust `log` crate (engine messages surface in the
+    /// same `flowsurface.log` file as Rust messages — spec §6.4).
+    pub async fn spawn_with(cmd: &EngineCommand, port: u16) -> Result<Self, EngineClientError> {
         let token = generate_token();
-
         let stdin_payload = format!("{{\"port\":{port},\"token\":\"{token}\"}}\n");
 
-        let mut child = tokio::process::Command::new(python_cmd)
+        let mut command = tokio::process::Command::new(cmd.program());
+        command
+            .args(cmd.args())
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()?;
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
 
-        // Write the config to the engine's stdin.
+        let mut child = command.spawn()?;
+
         if let Some(stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             let mut stdin = stdin;
             stdin.write_all(stdin_payload.as_bytes()).await?;
             stdin.shutdown().await?;
+        }
+
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(forward_lines(stdout, log::Level::Info));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(forward_lines(stderr, log::Level::Warn));
         }
 
         Ok(Self { child, port, token })
@@ -75,7 +181,7 @@ pub struct SubscriptionKey {
 // ── ProcessManager ────────────────────────────────────────────────────────────
 
 pub struct ProcessManager {
-    pub python_cmd: String,
+    pub command: EngineCommand,
     pub active_subscriptions: Arc<Mutex<HashSet<SubscriptionKey>>>,
     /// Proxy URL kept as source-of-truth on the Rust side (spec §5.3, §5.4).
     /// Sent via `SetProxy` after every `Ready` handshake.
@@ -83,9 +189,19 @@ pub struct ProcessManager {
 }
 
 impl ProcessManager {
+    /// Backwards-compat constructor: wraps a bare program name into a
+    /// `EngineCommand::System { program, args: ["-m", "engine"] }`.
     pub fn new(python_cmd: impl Into<String>) -> Self {
+        let cmd = EngineCommand::System {
+            program: python_cmd.into(),
+            args: Vec::new(),
+        };
+        Self::with_command(cmd)
+    }
+
+    pub fn with_command(command: EngineCommand) -> Self {
         Self {
-            python_cmd: python_cmd.into(),
+            command,
             active_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             proxy_url: Arc::new(Mutex::new(None)),
         }
@@ -103,7 +219,7 @@ impl ProcessManager {
     /// 2. SetProxy       — if a proxy URL is stored
     /// 3. Subscribe      — re-send all active subscriptions
     pub async fn start(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
-        let mut proc = PythonProcess::spawn(&self.python_cmd, port).await?;
+        let mut proc = PythonProcess::spawn_with(&self.command, port).await?;
 
         let url = format!("ws://127.0.0.1:{port}");
 
@@ -207,6 +323,34 @@ impl ProcessManager {
             log::info!("restarting engine in {backoff_ms}ms …");
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
+        }
+    }
+}
+
+// ── stdout/stderr → log forwarding ────────────────────────────────────────────
+
+/// Read `reader` line by line and emit each line via `log::log!(level, ...)`.
+///
+/// Lines are tagged with `target = "engine"` so the fern dispatch can route
+/// them to the same sink as Rust-side `flowsurface_*` log targets.
+async fn forward_lines<R>(reader: R, level: log::Level)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut lines = BufReader::new(reader).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if !line.trim().is_empty() {
+                    log::log!(target: "engine", level, "{line}");
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                log::warn!(target: "engine", "engine pipe read error: {e}");
+                break;
+            }
         }
     }
 }

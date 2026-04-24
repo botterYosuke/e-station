@@ -1,10 +1,16 @@
 /// Command-line argument parsing for the Flowsurface viewer.
+use std::path::PathBuf;
 use url::Url;
 
 #[derive(Debug, Default)]
 pub struct CliArgs {
-    /// WebSocket URL of the Python data engine (required).
+    /// WebSocket URL of an externally managed Python data engine.
+    /// When set, Flowsurface connects to this URL and does not spawn the engine.
     pub data_engine_url: Option<Url>,
+    /// Override path to the engine executable (or `python` interpreter).
+    /// Used by `--engine-cmd` for dev installs that need a non-default
+    /// interpreter (e.g. inside a uv-managed virtualenv).
+    pub engine_cmd: Option<PathBuf>,
 }
 
 impl CliArgs {
@@ -17,9 +23,17 @@ impl CliArgs {
 
     pub fn parse_from(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut data_engine_url: Option<Url> = None;
+        let mut engine_cmd: Option<PathBuf> = None;
         let mut iter = args.skip(1); // skip executable name
 
         while let Some(arg) = iter.next() {
+            if arg == "--engine-cmd" {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| "--engine-cmd requires a value".to_string())?;
+                engine_cmd = Some(PathBuf::from(raw));
+                continue;
+            }
             if arg == "--data-engine-url" {
                 let raw = iter
                     .next()
@@ -45,7 +59,10 @@ impl CliArgs {
             // Unknown flags are silently ignored to stay forward-compatible.
         }
 
-        Ok(Self { data_engine_url })
+        Ok(Self {
+            data_engine_url,
+            engine_cmd,
+        })
     }
 }
 

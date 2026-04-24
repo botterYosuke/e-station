@@ -1,9 +1,8 @@
-use crate::{
-    Kline, OpenInterest, PushFrequency, Ticker, TickMultiplier, TickerInfo, TickerStats, Timeframe,
-    Trade,
-    depth::DepthPayload,
-};
 use super::{AdapterError, Event, MarketKind};
+use crate::{
+    Kline, OpenInterest, PushFrequency, TickMultiplier, Ticker, TickerInfo, TickerStats, Timeframe,
+    Trade, depth::DepthPayload,
+};
 
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;

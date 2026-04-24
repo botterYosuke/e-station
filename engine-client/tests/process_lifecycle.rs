@@ -143,7 +143,9 @@ async fn run_with_recovery_calls_on_restart_after_connection_loss() {
 #[tokio::test]
 async fn set_proxy_stores_url() {
     let manager = ProcessManager::new("python");
-    manager.set_proxy(Some("socks5://127.0.0.1:1080".to_string())).await;
+    manager
+        .set_proxy(Some("socks5://127.0.0.1:1080".to_string()))
+        .await;
     let stored = manager.proxy_url.lock().await.clone();
     assert_eq!(stored, Some("socks5://127.0.0.1:1080".to_string()));
 

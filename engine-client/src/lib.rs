@@ -21,7 +21,7 @@ pub use depth_tracker::DepthTracker;
 pub use error::EngineClientError;
 #[doc(hidden)]
 pub use hybrid::HybridVenueBackend;
-pub use process::{ProcessManager, PythonProcess, SubscriptionKey};
+pub use process::{EngineCommand, ProcessManager, PythonProcess, SubscriptionKey};
 
 /// IPC schema version — must match the Python engine's `SCHEMA_MAJOR`/`SCHEMA_MINOR`.
 pub const SCHEMA_MAJOR: u16 = 1;

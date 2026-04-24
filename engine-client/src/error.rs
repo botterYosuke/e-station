@@ -10,7 +10,9 @@ pub enum EngineClientError {
     #[error("Engine restarting")]
     EngineRestarting,
 
-    #[error("Schema version mismatch: local={local_major}.{local_minor}, remote={remote_major}.{remote_minor}")]
+    #[error(
+        "Schema version mismatch: local={local_major}.{local_minor}, remote={remote_major}.{remote_minor}"
+    )]
     SchemaMismatch {
         local_major: u16,
         local_minor: u16,

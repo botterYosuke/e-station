@@ -9,7 +9,6 @@ pub(crate) fn value_as_f32(value: &Value) -> Option<f32> {
     }
 }
 
-
 pub(crate) fn de_number_like_or_object<'de, D, T>(
     deserializer: D,
     expected_name: &'static str,

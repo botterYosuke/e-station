@@ -108,12 +108,19 @@ fn kline_msg_bad_open_returns_none() {
 #[test]
 fn depth_snapshot_bids_and_asks() {
     let bids = vec![
-        DepthLevel { price: "100.0".to_string(), qty: "5.0".to_string() },
-        DepthLevel { price: "99.0".to_string(), qty: "3.0".to_string() },
+        DepthLevel {
+            price: "100.0".to_string(),
+            qty: "5.0".to_string(),
+        },
+        DepthLevel {
+            price: "99.0".to_string(),
+            qty: "3.0".to_string(),
+        },
     ];
-    let asks = vec![
-        DepthLevel { price: "101.0".to_string(), qty: "4.0".to_string() },
-    ];
+    let asks = vec![DepthLevel {
+        price: "101.0".to_string(),
+        qty: "4.0".to_string(),
+    }];
     let depth = depth_levels_to_arc_depth(&bids, &asks);
     assert_eq!(depth.bids.len(), 2);
     assert_eq!(depth.asks.len(), 1);
@@ -122,8 +129,14 @@ fn depth_snapshot_bids_and_asks() {
 #[test]
 fn depth_snapshot_zero_qty_filtered() {
     let bids = vec![
-        DepthLevel { price: "100.0".to_string(), qty: "0.0".to_string() }, // removed
-        DepthLevel { price: "99.0".to_string(), qty: "1.0".to_string() },
+        DepthLevel {
+            price: "100.0".to_string(),
+            qty: "0.0".to_string(),
+        }, // removed
+        DepthLevel {
+            price: "99.0".to_string(),
+            qty: "1.0".to_string(),
+        },
     ];
     let asks = vec![];
     let depth = depth_levels_to_arc_depth(&bids, &asks);
@@ -134,8 +147,14 @@ fn depth_snapshot_zero_qty_filtered() {
 #[test]
 fn depth_snapshot_invalid_price_filtered() {
     let bids = vec![
-        DepthLevel { price: "INVALID".to_string(), qty: "1.0".to_string() },
-        DepthLevel { price: "50.0".to_string(), qty: "2.0".to_string() },
+        DepthLevel {
+            price: "INVALID".to_string(),
+            qty: "1.0".to_string(),
+        },
+        DepthLevel {
+            price: "50.0".to_string(),
+            qty: "2.0".to_string(),
+        },
     ];
     let depth = depth_levels_to_arc_depth(&bids, &[]);
     assert_eq!(depth.bids.len(), 1, "unparseable price should be skipped");
@@ -145,7 +164,10 @@ fn depth_snapshot_invalid_price_filtered() {
 
 #[test]
 fn oi_point_converts() {
-    let pt = OiPoint { ts_ms: 5_000, open_interest: "987654.32".to_string() };
+    let pt = OiPoint {
+        ts_ms: 5_000,
+        open_interest: "987654.32".to_string(),
+    };
     let oi = pt.to_open_interest().expect("should convert");
     assert_eq!(oi.time, 5_000);
     assert!((oi.value - 987654.32).abs() < 1.0, "oi value: {}", oi.value);
@@ -153,7 +175,10 @@ fn oi_point_converts() {
 
 #[test]
 fn oi_point_bad_value_returns_none() {
-    let pt = OiPoint { ts_ms: 0, open_interest: "nope".to_string() };
+    let pt = OiPoint {
+        ts_ms: 0,
+        open_interest: "nope".to_string(),
+    };
     assert!(pt.to_open_interest().is_none());
 }
 
@@ -176,8 +201,16 @@ fn kline_msg_with_taker_buy_volume_splits_volume() {
     // With taker_buy_volume, Volume::BuySell should be used
     match &kline.volume {
         exchange::Volume::BuySell(buy, sell) => {
-            assert!((buy.to_f32_lossy() - 60.0).abs() < 0.1, "buy volume: {}", buy.to_f32_lossy());
-            assert!((sell.to_f32_lossy() - 40.0).abs() < 0.1, "sell volume: {}", sell.to_f32_lossy());
+            assert!(
+                (buy.to_f32_lossy() - 60.0).abs() < 0.1,
+                "buy volume: {}",
+                buy.to_f32_lossy()
+            );
+            assert!(
+                (sell.to_f32_lossy() - 40.0).abs() < 0.1,
+                "sell volume: {}",
+                sell.to_f32_lossy()
+            );
         }
         exchange::Volume::TotalOnly(_) => {
             panic!("Expected BuySell volume, got TotalOnly");
@@ -202,7 +235,11 @@ fn kline_msg_without_taker_buy_volume_uses_total_only() {
     // Without taker_buy_volume, Volume::TotalOnly should be used
     match &kline.volume {
         exchange::Volume::TotalOnly(total) => {
-            assert!((total.to_f32_lossy() - 100.0).abs() < 0.1, "total volume: {}", total.to_f32_lossy());
+            assert!(
+                (total.to_f32_lossy() - 100.0).abs() < 0.1,
+                "total volume: {}",
+                total.to_f32_lossy()
+            );
         }
         exchange::Volume::BuySell(_, _) => {
             panic!("Expected TotalOnly volume, got BuySell");
@@ -227,10 +264,18 @@ fn kline_msg_taker_buy_larger_than_total_clamped_to_zero_sell() {
 
     match &kline.volume {
         exchange::Volume::BuySell(buy, sell) => {
-            assert!((buy.to_f32_lossy() - 100.1).abs() < 0.1, "buy volume: {}", buy.to_f32_lossy());
+            assert!(
+                (buy.to_f32_lossy() - 100.1).abs() < 0.1,
+                "buy volume: {}",
+                buy.to_f32_lossy()
+            );
             // sell should be clamped to 0, not negative
             let sell_val = sell.to_f32_lossy();
-            assert!(sell_val >= -0.01 && sell_val <= 0.01, "sell volume should be ~0, got {}", sell_val);
+            assert!(
+                sell_val >= -0.01 && sell_val <= 0.01,
+                "sell volume should be ~0, got {}",
+                sell_val
+            );
         }
         exchange::Volume::TotalOnly(_) => {
             panic!("Expected BuySell volume, got TotalOnly");

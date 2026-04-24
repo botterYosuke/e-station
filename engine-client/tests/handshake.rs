@@ -4,10 +4,10 @@
 /// It waits for a `Hello` frame and responds with `Ready`.
 use flowsurface_engine_client::{EngineConnection, SCHEMA_MAJOR, SCHEMA_MINOR};
 
+use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use futures_util::{SinkExt, StreamExt};
 
 /// Bind a random loopback port and return the listener + address.
 async fn bind_loopback() -> (TcpListener, SocketAddr) {
@@ -42,7 +42,9 @@ async fn spawn_mock_server(listener: TcpListener, token: &str) {
             "engine_session_id": "00000000-0000-0000-0000-000000000001",
             "capabilities": {}
         });
-        ws.send(Message::Text(ready.to_string().into())).await.unwrap();
+        ws.send(Message::Text(ready.to_string().into()))
+            .await
+            .unwrap();
     });
 }
 
@@ -86,7 +88,10 @@ async fn connect_rejects_wrong_schema_major() {
     let result = EngineConnection::connect(&url, token).await;
     assert!(result.is_err());
     let err_str = result.unwrap_err().to_string();
-    assert!(err_str.contains("Schema version mismatch"), "unexpected error: {err_str}");
+    assert!(
+        err_str.contains("Schema version mismatch"),
+        "unexpected error: {err_str}"
+    );
 }
 
 #[tokio::test]

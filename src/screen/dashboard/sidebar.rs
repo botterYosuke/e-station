@@ -126,10 +126,7 @@ impl Sidebar {
     }
 
     /// Propagate new handles after an engine reconnect; returns a re-fetch task.
-    pub fn update_handles(
-        &mut self,
-        handles: exchange::adapter::AdapterHandles,
-    ) -> Task<Message> {
+    pub fn update_handles(&mut self, handles: exchange::adapter::AdapterHandles) -> Task<Message> {
         self.tickers_table
             .update_handles(handles)
             .map(Message::TickersTable)

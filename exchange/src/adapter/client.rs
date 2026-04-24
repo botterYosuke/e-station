@@ -1,8 +1,9 @@
 use super::{
-    AdapterError, Event, Exchange, MarketKind, StreamConfig, Venue,
-    venue_backend::VenueBackend,
+    AdapterError, Event, Exchange, MarketKind, StreamConfig, Venue, venue_backend::VenueBackend,
 };
-use crate::{Kline, OpenInterest, Ticker, TickerInfo, TickerStats, Timeframe, Trade, depth::DepthPayload};
+use crate::{
+    Kline, OpenInterest, Ticker, TickerInfo, TickerStats, Timeframe, Trade, depth::DepthPayload,
+};
 
 use futures::{StreamExt, stream, stream::BoxStream};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -166,7 +167,9 @@ impl AdapterHandles {
         let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
-        backend.fetch_open_interest(ticker_info, timeframe, range).await
+        backend
+            .fetch_open_interest(ticker_info, timeframe, range)
+            .await
     }
 
     pub async fn fetch_trades(
@@ -180,7 +183,9 @@ impl AdapterHandles {
         let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
-        backend.fetch_trades(ticker_info, from_time, to_time, data_path).await
+        backend
+            .fetch_trades(ticker_info, from_time, to_time, data_path)
+            .await
     }
 
     /// Requests a fresh depth snapshot for the given ticker.

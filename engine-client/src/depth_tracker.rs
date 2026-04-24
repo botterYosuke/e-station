@@ -11,7 +11,9 @@ pub struct DepthTracker {
 
 impl DepthTracker {
     pub fn new() -> Self {
-        Self { state: HashMap::new() }
+        Self {
+            state: HashMap::new(),
+        }
     }
 
     /// Record a snapshot for `(ticker, session_id)` and return `true` (always accepted).
@@ -19,7 +21,8 @@ impl DepthTracker {
     /// Snapshots reset the sequence baseline for the session; a new session_id will
     /// also implicitly replace any previous session's state for that ticker.
     pub fn on_snapshot(&mut self, ticker: &str, session_id: &str, seq: i64) -> bool {
-        self.state.insert((ticker.to_owned(), session_id.to_owned()), seq);
+        self.state
+            .insert((ticker.to_owned(), session_id.to_owned()), seq);
         true
     }
 
@@ -27,13 +30,7 @@ impl DepthTracker {
     ///
     /// Returns `true` when the diff is contiguous (prev_seq matches last applied seq).
     /// Returns `false` when a gap is detected — the caller should request a new snapshot.
-    pub fn on_diff(
-        &mut self,
-        ticker: &str,
-        session_id: &str,
-        seq: i64,
-        prev_seq: i64,
-    ) -> bool {
+    pub fn on_diff(&mut self, ticker: &str, session_id: &str, seq: i64, prev_seq: i64) -> bool {
         let key = (ticker.to_owned(), session_id.to_owned());
         match self.state.get(&key) {
             Some(&last) if last == prev_seq => {

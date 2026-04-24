@@ -63,6 +63,17 @@ const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
     (exchange::adapter::Venue::Mexc, "mexc"),
 ];
 
+/// Bind to 127.0.0.1:0 to ask the OS for a free port, then immediately close
+/// the socket and return the port number for the engine subprocess to bind.
+///
+/// There is a small race window between releasing the port here and the engine
+/// rebinding it, but Phase 6 keeps Python on a TCP listener (the only IPC
+/// transport supported across all platforms) so this is the standard pattern.
+fn pick_free_port() -> Option<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+    listener.local_addr().ok().map(|a| a.port())
+}
+
 fn main() {
     let cli_args = cli::CliArgs::parse();
 
@@ -75,9 +86,13 @@ fn main() {
     let (restarting_tx, _restarting_rx) = tokio::sync::watch::channel(false);
     ENGINE_RESTARTING.set(restarting_tx).ok();
 
-    // When `--data-engine-url` is supplied, connect to the external Python engine
-    // before starting Iced.  A dedicated tokio runtime keeps the connection's
-    // background IO tasks alive for the full application lifetime.
+    // The Python data engine is normally spawned and supervised in-process by
+    // a `ProcessManager` running on a dedicated tokio runtime (Phase 6 default).
+    // `--data-engine-url` overrides this to connect to an externally managed
+    // engine (used for development / debugging).
+    //
+    // A dedicated tokio runtime keeps the connection's background IO tasks
+    // alive for the full application lifetime.
     let _engine_rt: Option<tokio::runtime::Runtime> = if let Some(ref url) =
         cli_args.data_engine_url
     {
@@ -163,7 +178,115 @@ fn main() {
 
         Some(rt)
     } else {
-        None
+        // Managed mode: spawn the bundled Python engine, supervise restarts.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("engine-client")
+            .build()
+            .expect("Failed to build engine-client tokio runtime");
+
+        let port = pick_free_port().unwrap_or(0);
+        if port == 0 {
+            log::error!("Could not allocate a loopback port for the Python data engine");
+            eprintln!("error: could not allocate a loopback port for the data engine");
+            std::process::exit(1);
+        }
+
+        let cmd = match engine_client::EngineCommand::resolve_with(
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                .as_deref(),
+            cli_args.engine_cmd.as_deref(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Failed to resolve engine command: {e}");
+                eprintln!("error: failed to resolve data-engine command: {e}");
+                std::process::exit(1);
+            }
+        };
+        log::info!("Spawning Python data engine: {cmd:?} on 127.0.0.1:{port}");
+
+        let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
+
+        // Push the saved proxy into the manager so it is re-applied after every
+        // handshake (initial spawn + every recovery).
+        if let Some(proxy) = data::config::proxy::load_startup_proxy() {
+            rt.block_on(manager.set_proxy(Some(proxy.to_url_string())));
+        }
+
+        let url = format!("ws://127.0.0.1:{port}");
+        log::info!("Engine URL: {url}");
+
+        // Spawn the recovery loop; track each handshake to swap ENGINE_CONNECTION.
+        let manager_clone = Arc::clone(&manager);
+        rt.spawn(async move {
+            // Inner loop: each iteration corresponds to one handshake/lifecycle.
+            //
+            // We can't reuse `run_with_recovery` directly because it doesn't
+            // expose the live `EngineConnection` to its caller — we need the
+            // connection to publish into `ENGINE_CONNECTION`.
+            let mut backoff_ms: u64 = 500;
+            loop {
+                match manager_clone.start(port).await {
+                    Ok(conn) => {
+                        backoff_ms = 500;
+                        let conn = Arc::new(conn);
+                        *ENGINE_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) =
+                            Some(Arc::clone(&conn));
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(false).ok();
+                        }
+                        log::info!("Python data engine ready on {url}");
+
+                        conn.wait_closed().await;
+                        log::warn!("Python engine connection lost — restarting");
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(true).ok();
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Engine start failed: {e}");
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(true).ok();
+                        }
+                    }
+                }
+                log::info!("Restarting Python engine in {backoff_ms}ms …");
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(30_000);
+            }
+        });
+
+        // Wait for the first handshake to populate ENGINE_CONNECTION, with a
+        // generous timeout that covers PyInstaller's cold-start overhead
+        // (decompression of the frozen archive on first launch).
+        let waited = rt.block_on(async {
+            for _ in 0..200 {
+                if ENGINE_CONNECTION
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some()
+                {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            false
+        });
+
+        if !waited {
+            log::error!("Python data engine did not become ready within 20 s");
+            eprintln!(
+                "error: Python data engine did not become ready within 20 s.\n\
+                 Check engine logs for startup errors."
+            );
+            std::process::exit(1);
+        }
+
+        Some(rt)
     };
 
     if ENGINE_CONNECTION
@@ -171,15 +294,8 @@ fn main() {
         .unwrap_or_else(|e| e.into_inner())
         .is_none()
     {
-        log::error!(
-            "No data engine connected. \
-             Use --data-engine-url <ws://host:port> to connect to the Python data engine."
-        );
-        eprintln!(
-            "error: --data-engine-url is required.\n\
-             Start the Python engine first and pass its WebSocket URL, e.g.:\n\
-             \n  flowsurface --data-engine-url ws://127.0.0.1:8765\n"
-        );
+        log::error!("Engine connection not initialised — refusing to start");
+        eprintln!("error: data engine connection failed to initialise");
         std::process::exit(1);
     }
 

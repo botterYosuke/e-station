@@ -10,7 +10,7 @@
 /// break the sidebar ticker list.  The hybrid keeps the native REST path for metadata
 /// while routing live streams through the Python engine.
 use exchange::{
-    Kline, OpenInterest, PushFrequency, Ticker, TickerInfo, TickMultiplier, Timeframe, Trade,
+    Kline, OpenInterest, PushFrequency, TickMultiplier, Ticker, TickerInfo, Timeframe, Trade,
     adapter::{
         AdapterError, Event, MarketKind,
         venue_backend::{TickerMetadataMap, TickerStatsMap, VenueBackend},
@@ -31,7 +31,10 @@ impl HybridVenueBackend {
     /// `metadata` is called for `fetch_ticker_metadata` / `fetch_ticker_stats`.
     /// `streaming` is called for all other methods.
     pub fn new(metadata: Arc<dyn VenueBackend>, streaming: Arc<dyn VenueBackend>) -> Self {
-        Self { metadata, streaming }
+        Self {
+            metadata,
+            streaming,
+        }
     }
 }
 
@@ -60,7 +63,8 @@ impl VenueBackend for HybridVenueBackend {
         tick_multiplier: Option<TickMultiplier>,
         push_freq: PushFrequency,
     ) -> BoxStream<'static, Event> {
-        self.streaming.depth_stream(ticker_info, tick_multiplier, push_freq)
+        self.streaming
+            .depth_stream(ticker_info, tick_multiplier, push_freq)
     }
 
     // ── Metadata — routed to the native backend ───────────────────────────────
@@ -97,7 +101,8 @@ impl VenueBackend for HybridVenueBackend {
         timeframe: Timeframe,
         range: Option<(u64, u64)>,
     ) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
-        self.streaming.fetch_open_interest(ticker_info, timeframe, range)
+        self.streaming
+            .fetch_open_interest(ticker_info, timeframe, range)
     }
 
     fn fetch_trades(
@@ -107,7 +112,8 @@ impl VenueBackend for HybridVenueBackend {
         to_time: u64,
         data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
-        self.streaming.fetch_trades(ticker_info, from_time, to_time, data_path)
+        self.streaming
+            .fetch_trades(ticker_info, from_time, to_time, data_path)
     }
 
     fn request_depth_snapshot(

@@ -20,6 +20,11 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-httpx>=0.30",
 ]
+# Used by `scripts/build-engine.sh` to freeze the engine into a
+# standalone `flowsurface-engine` binary (Phase 6 distribution).
+build = [
+    "pyinstaller>=6.5",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/engine"]

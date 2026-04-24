@@ -1,17 +1,19 @@
 //! Phase 0.5: VenueBackend trait abstraction tests.
 
-use flowsurface_exchange::adapter::{
-    AdapterError, AdapterHandles, Exchange, Event, MarketKind, StreamConfig, Venue,
+use flowsurface_exchange::adapter::venue_backend::{
+    TickerMetadataMap, TickerStatsMap, VenueBackend,
 };
-use flowsurface_exchange::adapter::venue_backend::{TickerMetadataMap, TickerStatsMap, VenueBackend};
+use flowsurface_exchange::adapter::{
+    AdapterError, AdapterHandles, Event, Exchange, MarketKind, StreamConfig, Venue,
+};
 use flowsurface_exchange::depth::DepthPayload;
 use flowsurface_exchange::{
-    Kline, OpenInterest, PushFrequency, Ticker, TickMultiplier, TickerInfo, Timeframe, Trade,
+    Kline, OpenInterest, PushFrequency, TickMultiplier, Ticker, TickerInfo, Timeframe, Trade,
 };
 
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, empty};
-use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
@@ -269,9 +271,7 @@ impl VenueBackend for CountingBackend {
         _range: Option<(u64, u64)>,
     ) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
         self.oi_calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async {
-            Err(AdapterError::InvalidRequest("unsupported".to_string()))
-        })
+        Box::pin(async { Err(AdapterError::InvalidRequest("unsupported".to_string())) })
     }
 
     fn fetch_trades(
@@ -282,9 +282,7 @@ impl VenueBackend for CountingBackend {
         _data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
         self.trades_calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async {
-            Err(AdapterError::InvalidRequest("unsupported".to_string()))
-        })
+        Box::pin(async { Err(AdapterError::InvalidRequest("unsupported".to_string())) })
     }
 
     fn request_depth_snapshot(
@@ -292,9 +290,7 @@ impl VenueBackend for CountingBackend {
         _ticker: Ticker,
     ) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
         self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async {
-            Err(AdapterError::InvalidRequest("unsupported".to_string()))
-        })
+        Box::pin(async { Err(AdapterError::InvalidRequest("unsupported".to_string())) })
     }
 
     fn health(&self) -> BoxFuture<'_, bool> {
@@ -313,7 +309,10 @@ fn set_backend_makes_venue_available() {
 
     handles.set_backend(Venue::Binance, Arc::new(StubBackend));
     assert!(handles.has_venue(Venue::Binance));
-    assert!(!handles.has_venue(Venue::Bybit), "only Binance should be set");
+    assert!(
+        !handles.has_venue(Venue::Bybit),
+        "only Binance should be set"
+    );
 }
 
 #[test]

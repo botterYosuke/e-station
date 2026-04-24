@@ -5,19 +5,21 @@
 //! cancel old stream tasks and start fresh ones — the mechanism that
 //! restores subscriptions after an engine reconnect.
 
+use flowsurface_exchange::adapter::venue_backend::{
+    TickerMetadataMap, TickerStatsMap, VenueBackend,
+};
 use flowsurface_exchange::adapter::{AdapterError, Event, Exchange, MarketKind, Venue};
-use flowsurface_exchange::adapter::venue_backend::{TickerMetadataMap, TickerStatsMap, VenueBackend};
 use flowsurface_exchange::adapter::{AdapterHandles, StreamConfig};
 use flowsurface_exchange::depth::DepthPayload;
 use flowsurface_exchange::{
-    Kline, OpenInterest, PushFrequency, Ticker, TickerInfo, TickMultiplier, Timeframe, Trade,
+    Kline, OpenInterest, PushFrequency, TickMultiplier, Ticker, TickerInfo, Timeframe, Trade,
 };
 
 use futures::future::BoxFuture;
-use futures::stream::{empty, BoxStream, StreamExt};
+use futures::stream::{BoxStream, StreamExt, empty};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -106,9 +108,7 @@ impl VenueBackend for StubBackend {
         &self,
         _ticker: Ticker,
     ) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
-        Box::pin(async {
-            Err(AdapterError::InvalidRequest("stub".to_string()))
-        })
+        Box::pin(async { Err(AdapterError::InvalidRequest("stub".to_string())) })
     }
 
     fn health(&self) -> BoxFuture<'_, bool> {
@@ -153,7 +153,10 @@ fn multiple_bumps_each_change_hash() {
     let h2 = compute_hash(&handles);
     assert_ne!(h0, h1, "first bump must change the hash");
     assert_ne!(h1, h2, "second bump must change the hash again");
-    assert_ne!(h0, h2, "hash after two bumps must differ from the initial hash");
+    assert_ne!(
+        h0, h2,
+        "hash after two bumps must differ from the initial hash"
+    );
 }
 
 // ── set_backend alone must NOT change the hash ───────────────────────────────
@@ -241,8 +244,14 @@ fn reconnect_scenario_produces_unique_hashes_each_cycle() {
     handles.bump_generation();
     let h_reconnect2 = compute_hash(&handles);
 
-    assert_ne!(h_initial, h_reconnect1, "first reconnect must change the hash");
-    assert_ne!(h_reconnect1, h_reconnect2, "second reconnect must change the hash again");
+    assert_ne!(
+        h_initial, h_reconnect1,
+        "first reconnect must change the hash"
+    );
+    assert_ne!(
+        h_reconnect1, h_reconnect2,
+        "second reconnect must change the hash again"
+    );
     assert_ne!(h_initial, h_reconnect2);
 }
 

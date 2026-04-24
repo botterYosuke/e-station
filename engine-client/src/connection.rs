@@ -248,82 +248,84 @@ fn spawn_io_tasks(
     events_tx: broadcast::Sender<EngineEvent>,
     closed: Arc<tokio::sync::Notify>,
 ) {
-    // Split WebSocket into halves using an Arc<Mutex<…>> so we can drive read/write
-    // from two separate tasks without moving the same value twice.
-    let ws = Arc::new(tokio::sync::Mutex::new(ws));
-    let ws_write = Arc::clone(&ws);
-
-    // Write task: drain the command channel and send JSON frames.
-    let closed_write = Arc::clone(&closed);
-    let events_tx_write = events_tx.clone();
+    // A single task owns the WebSocket and multiplexes reads, writes, ping/pong
+    // and close via `tokio::select!`. An earlier two-task design used an
+    // `Arc<Mutex<WebSocket>>`, but `read_frame().await` holds the mutex across
+    // `Pending` states and starves the writer — a write enqueued via `cmd_rx`
+    // would not flush until the next inbound frame happened to wake the reader.
+    // That deadlock made in-stream recovery (e.g. resync after `DepthGap`)
+    // silently never reach the engine.
     tokio::spawn(async move {
-        while let Some(cmd) = cmd_rx.recv().await {
-            let json = match serde_json::to_string(&cmd) {
-                Ok(j) => j,
-                Err(e) => {
-                    log::error!("failed to serialize command: {e}");
-                    continue;
-                }
-            };
-            let mut guard = ws_write.lock().await;
-            if let Err(e) = guard
-                .write_frame(Frame::text(Payload::Owned(json.into_bytes())))
-                .await
-            {
-                log::error!("engine ws write error: {e}");
-                let _ = events_tx_write.send(crate::dto::EngineEvent::ConnectionDropped);
-                closed_write.notify_waiters();
-                break;
-            }
-        }
-    });
-
-    // Read task: deserialize incoming frames and broadcast as EngineEvents.
-    tokio::spawn(async move {
+        let mut ws = ws;
         loop {
-            let frame = {
-                let mut guard = ws.lock().await;
-                match guard.read_frame().await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        log::warn!("engine ws read error: {e}");
-                        break;
-                    }
-                }
-            };
+            tokio::select! {
+                // Bias unspecified — both branches are equally important, but
+                // `cmd_rx` is checked first so pending writes are not held off
+                // by a steady stream of inbound frames.
+                biased;
 
-            match frame.opcode {
-                OpCode::Text => {
-                    let text = match std::str::from_utf8(&frame.payload) {
-                        Ok(t) => t.to_owned(),
+                cmd = cmd_rx.recv() => {
+                    let Some(cmd) = cmd else {
+                        // Sender dropped — connection is shutting down.
+                        break;
+                    };
+                    let json = match serde_json::to_string(&cmd) {
+                        Ok(j) => j,
                         Err(e) => {
-                            log::warn!("non-UTF8 engine frame: {e}");
+                            log::error!("failed to serialize command: {e}");
                             continue;
                         }
                     };
-                    match serde_json::from_str::<EngineEvent>(&text) {
-                        Ok(event) => {
-                            if events_tx.send(event).is_err() {
-                                log::warn!("engine event dropped: no active subscribers");
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("failed to parse engine event: {e} — frame: {text}");
-                        }
+                    if let Err(e) = ws
+                        .write_frame(Frame::text(Payload::Owned(json.into_bytes())))
+                        .await
+                    {
+                        log::error!("engine ws write error: {e}");
+                        break;
                     }
                 }
-                OpCode::Close => break,
-                OpCode::Ping => {
-                    // fastwebsockets does not auto-pong; send pong manually.
-                    let mut guard = ws.lock().await;
-                    let _ = guard
-                        .write_frame(Frame::pong(Payload::BorrowedMut(&mut [])))
-                        .await;
+
+                read = ws.read_frame() => {
+                    let frame = match read {
+                        Ok(f) => f,
+                        Err(e) => {
+                            log::warn!("engine ws read error: {e}");
+                            break;
+                        }
+                    };
+                    match frame.opcode {
+                        OpCode::Text => {
+                            let text = match std::str::from_utf8(&frame.payload) {
+                                Ok(t) => t.to_owned(),
+                                Err(e) => {
+                                    log::warn!("non-UTF8 engine frame: {e}");
+                                    continue;
+                                }
+                            };
+                            match serde_json::from_str::<EngineEvent>(&text) {
+                                Ok(event) => {
+                                    if events_tx.send(event).is_err() {
+                                        log::warn!("engine event dropped: no active subscribers");
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("failed to parse engine event: {e} — frame: {text}");
+                                }
+                            }
+                        }
+                        OpCode::Close => break,
+                        OpCode::Ping => {
+                            // fastwebsockets does not auto-pong; send pong manually.
+                            let _ = ws
+                                .write_frame(Frame::pong(Payload::BorrowedMut(&mut [])))
+                                .await;
+                        }
+                        _ => {} // Binary / Pong — ignored
+                    }
                 }
-                _ => {} // Binary / Pong — ignored
             }
         }
-        log::info!("engine ws read loop exited");
+        log::info!("engine ws io loop exited");
         // Unblock any in-flight fetch waiters before signalling wait_closed().
         let _ = events_tx.send(crate::dto::EngineEvent::ConnectionDropped);
         closed.notify_waiters();
