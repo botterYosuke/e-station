@@ -123,7 +123,7 @@
 優先順（取引所の安定度・利用頻度で並べ替え可）:
 
 - [x] Bybit ✅ (2026-04-24)
-- [ ] Hyperliquid
+- [x] Hyperliquid ✅ (2026-04-24)
 - [ ] OKX
 - [ ] MEXC
 
@@ -134,7 +134,58 @@
 
 **完了条件**: 全 5 取引所が Python 経由で動作。
 
-> **現況（2026-04-24）**: pytest 全体 54 件 PASS（Binance 33 + Bybit 21）。
+> **現況（2026-04-24）**: pytest 全体 85 件 PASS（Binance 33 + Bybit 21 + Hyperliquid 25 + その他 6）。
+
+### Hyperliquid 実装詳細（2026-04-24 完了）
+
+- **実装ファイル**: [`python/engine/exchanges/hyperliquid.py`](../../python/engine/exchanges/hyperliquid.py)
+- **テスト**: `python/tests/test_hyperliquid_rest.py` (16件) + `python/tests/test_hyperliquid_depth_sync.py` (9件) = 計 25件全 PASS
+- **server.py 統合**: `self._workers["hyperliquid"] = HyperliquidWorker()` 追加済み
+
+#### Binance/Bybit との主な差異
+
+| 項目 | Binance/Bybit | Hyperliquid |
+|------|---------------|-------------|
+| REST base | 各取引所 REST | `https://api.hyperliquid.xyz/info` (POST のみ) |
+| WS base | 各取引所 WS | `wss://api.hyperliquid.xyz/ws` |
+| WS subscribe | URL or JSON msg | `{"method":"subscribe","subscription":{...}}` |
+| Depth プロトコル | snapshot+diff (Binance) / snapshot-only WS (Bybit) | **毎回フル l2Book スナップショット** (diff なし) |
+| Depth シーケンス | Binance: U/u/pu / Bybit: u (monotonic) | `time` フィールド (ms) + 単調増加保証 |
+| レート制限 | 各取引所固有 | 1200 req/60sec (`HyperliquidLimiter`) |
+| OI | REST 履歴あり | **なし** (常に空リスト返却) |
+| Ticker symbol | "BTCUSDT" etc. | perp: "BTC" (coin name) / spot: "BTCUSDC" (display) |
+| Trade side | buy/sell 直接 | "A" = 売り aggressor → sell / "B" → buy |
+| Market | linear/inverse/spot | **linear_perp/spot のみ** (inverse なし) |
+| 複数 DEX | なし | perpDexs API で DEX 一覧取得 → マージ |
+
+#### HyperliquidDepthSyncer 設計
+
+Hyperliquid は **毎回完全な l2Book** を WS で配信する（diff なし）:
+1. 各 WS メッセージ → `DepthSnapshot` イベントを即時送出
+2. `sequence_id` = `time` フィールド (ms) 、ただし同一 time が連続した場合は +1 で単調増加を保証
+3. `DepthDiff` / `DepthGap` は一切発生しない
+4. 再同期が必要な場合は WS 再接続 → 次の l2Book メッセージが新スナップショットになる
+
+#### fetch_klines のタイムレンジ計算
+
+Hyperliquid の `candleSnapshot` は `startTime`/`endTime` のみで制御し `limit` パラメータがない:
+- `start_ms` と `end_ms` 両方指定 → そのまま使用
+- `start_ms` のみ省略 → `end_ms - limit * interval_ms` を計算
+- `end_ms` も省略 → 現在時刻を `end_ms` に使用
+
+#### spot ティッカー記号マッピング
+
+- pair name が `@N` 形式 → `base_name + quote_name` に展開 (e.g., "@1" → "BTCUSDC")
+- pair name が "/" 含む → "/" を除去 (e.g., "BTC/USDC" → "BTCUSDC")
+- WS subscribe では `coin` に display symbol を使用 (Hyperliquid は display name でも受け付ける)
+
+#### Tips
+
+- **全リクエストが同一 POST エンドポイント**: `https://api.hyperliquid.xyz/info` への POST のみ。テストでは pytest-httpx の FIFO レスポンス機能を使い複数コールをシミュレート。
+- **perpDexs 必須**: `list_tickers(linear_perp)` と `fetch_ticker_stats` はまず `perpDexs` を呼んで DEX 一覧を取得し、DEX ごとに `metaAndAssetCtxs` を呼ぶ。テストは `[null]` (メイン DEX のみ) を想定。
+- **midPx が `null` や空文字の場合がある**: `_asset_price` で `float(ctx.get("midPx") or 0)` として安全にゼロ fallback。
+- **tick_size 計算**: Rust の `compute_tick_size` をそのまま Python 移植。`_MAX_DECIMALS_PERP=6`, `_SIG_FIG_LIMIT=5` で BTC(5桁)=1.0、ETH(4桁,sz=4)=0.1 等を正しく計算。
+- **OI は非対応**: Hyperliquid は過去の OI 時系列 API を持たないため常に空リスト返却。UI は OI グラフを非表示にするだけで問題なし。
 
 ### Bybit 実装詳細（2026-04-24 完了）
 
