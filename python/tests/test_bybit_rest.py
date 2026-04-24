@@ -344,23 +344,8 @@ async def test_fetch_ticker_stats_not_found(worker: BybitWorker, httpx_mock: HTT
 
 
 @pytest.mark.asyncio
-async def test_fetch_depth_snapshot(worker: BybitWorker, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url=f"{_REST}/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=200",
-        json={
-            "retCode": 0,
-            "result": {
-                "s": "BTCUSDT",
-                "b": [["67990.0", "1.5"], ["67980.0", "2.0"]],
-                "a": [["68000.0", "0.5"], ["68010.0", "1.0"]],
-                "ts": 1700000000000,
-                "u": 99887766,
-            },
-        },
-    )
-
-    snap = await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
-
-    assert snap["last_update_id"] == 99887766
-    assert snap["bids"][0] == {"price": "67990.0", "qty": "1.5"}
-    assert snap["asks"][0] == {"price": "68000.0", "qty": "0.5"}
+async def test_fetch_depth_snapshot_not_implemented(worker: BybitWorker) -> None:
+    # REST snapshot u is 1000-level WS namespace, incompatible with orderbook.200.
+    # Bybit depth resync is WS-native (reconnect triggers a fresh type="snapshot").
+    with pytest.raises(NotImplementedError, match="orderbook.200"):
+        await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")

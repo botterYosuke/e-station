@@ -429,16 +429,15 @@ class BybitWorker(ExchangeWorker):
     # ------------------------------------------------------------------
 
     async def fetch_depth_snapshot(self, ticker: str, market: str) -> dict:
-        category = _market_category(market)
-        url = f"{_REST}/v5/market/orderbook?category={category}&symbol={ticker}&limit=200"
-        data = await self._get_json(url, weight=1)
-
-        result = data.get("result", {})
-        return {
-            "last_update_id": result["u"],
-            "bids": _depth_levels(result.get("b", [])),
-            "asks": _depth_levels(result.get("a", [])),
-        }
+        # REST orderbook `u` corresponds to the 1000-level WS stream namespace,
+        # not orderbook.200. Sequences are incompatible, so a REST snapshot would
+        # corrupt gap recovery. Bybit depth resync is WS-native: the stream
+        # reconnects and the exchange sends a fresh type="snapshot" message.
+        raise NotImplementedError(
+            "Bybit orderbook.200 depth resync is WS-native. "
+            "REST snapshot u is 1000-level WS namespace, not compatible with "
+            "orderbook.200 u. Reconnect the WS stream to receive a fresh snapshot."
+        )
 
     # ------------------------------------------------------------------
     # WebSocket: stream_trades
@@ -518,7 +517,7 @@ class BybitWorker(ExchangeWorker):
                                         "qty": t["v"],
                                         "side": "sell" if t["S"] == "Sell" else "buy",
                                         "ts_ms": t["T"],
-                                        "is_liquidation": t.get("BT", False),
+                                        "is_liquidation": False,
                                     }
                                     batch.append(trade)
                             except Exception as exc:
