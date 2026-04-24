@@ -701,6 +701,9 @@ class DataEngineServer:
         proxy_url = msg.get("url")
         for worker in self._workers.values():
             await worker.set_proxy(proxy_url)
+        # Cancel active streams so they reconnect through the new proxy.
+        # Fetch-only HTTP clients are already replaced lazily on next request.
+        await self._cancel_all_streams()
 
     # ------------------------------------------------------------------
     # Helpers

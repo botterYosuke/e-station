@@ -170,7 +170,6 @@ enum Message {
     WindowEvent(window::Event),
     ExitRequested(HashMap<window::Id, WindowSpec>),
     RestartRequested(Option<HashMap<window::Id, WindowSpec>>),
-    SaveStateRequested(HashMap<window::Id, WindowSpec>),
     GoBack,
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
@@ -379,9 +378,6 @@ impl Flowsurface {
             Message::ExitRequested(windows) => {
                 self.save_state_to_disk(&windows);
                 return iced::exit();
-            }
-            Message::SaveStateRequested(windows) => {
-                self.save_state_to_disk(&windows);
             }
             Message::RestartRequested(Some(windows)) => {
                 self.save_state_to_disk(&windows);
@@ -676,31 +672,43 @@ impl Flowsurface {
 
                 match action {
                     Some(network_manager::Action::ApplyProxy) => {
-                        if let Some(proxy) = self.network.proxy_cfg() {
-                            data::config::proxy::save_proxy_auth(&proxy);
+                        // Persist credentials to the OS keyring and URL to disk immediately
+                        // so changes survive a crash before the next graceful shutdown.
+                        let new_proxy = self.network.proxy_cfg();
+                        if let Some(proxy) = &new_proxy {
+                            data::config::proxy::save_proxy_auth(proxy);
                         }
-
-                        self.confirm_dialog = Some(
-                            screen::ConfirmDialog::new(
-                                "Proxy changes saved. Restart now to apply?".to_string(),
-                                Box::new(Message::RestartRequested(None)),
-                            )
-                            .with_confirm_btn_text("Restart now".to_string()),
+                        data::config::proxy::save_proxy_url(
+                            new_proxy.as_ref().map(|p| p.to_url_string_no_auth()).as_deref(),
                         );
 
-                        let main_window = self.main_window.id;
-                        let dashboard = self.active_dashboard_mut();
-
-                        let mut active_windows = dashboard
-                            .popout
-                            .keys()
-                            .copied()
-                            .collect::<Vec<window::Id>>();
-                        active_windows.push(main_window);
-
-                        return window::collect_window_specs(
-                            active_windows,
-                            Message::SaveStateRequested,
+                        // Apply live to the running engine — no restart required.
+                        let proxy_url =
+                            self.network.proxy_cfg().map(|p| p.to_url_string());
+                        return Task::perform(
+                            async move {
+                                if let Some(conn) = ENGINE_CONNECTION.get() {
+                                    conn.send(engine_client::dto::Command::SetProxy {
+                                        url: proxy_url,
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            |result| match result {
+                                Ok(()) => Message::NetworkManager(
+                                    network_manager::Message::ProxyResult(
+                                        network_manager::ProxyResult::Applied,
+                                    ),
+                                ),
+                                Err(e) => Message::NetworkManager(
+                                    network_manager::Message::ProxyResult(
+                                        network_manager::ProxyResult::Failed(e),
+                                    ),
+                                ),
+                            },
                         );
                     }
                     Some(network_manager::Action::Exit) => {

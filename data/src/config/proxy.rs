@@ -1,6 +1,34 @@
 use exchange::proxy::{Proxy, ProxyAuth};
 
 const KEYCHAIN_SERVICE: &str = "flowsurface.proxy";
+const PROXY_URL_FILE: &str = "proxy-url.json";
+
+/// Persist the proxy URL (without auth) to a dedicated file so it survives
+/// a crash between Apply and the next graceful shutdown.
+pub fn save_proxy_url(url: Option<&str>) {
+    match serde_json::to_string(&url) {
+        Ok(json) => {
+            if let Err(e) = crate::write_json_to_file(&json, PROXY_URL_FILE) {
+                log::warn!("Failed to save proxy URL to file: {e}");
+            }
+        }
+        Err(e) => log::warn!("Failed to serialize proxy URL: {e}"),
+    }
+}
+
+/// Load the proxy URL written by [`save_proxy_url`].
+/// Returns `None` if the file doesn't exist or cannot be parsed.
+pub fn load_proxy_url() -> Option<Option<String>> {
+    let path = crate::data_path(Some(PROXY_URL_FILE));
+    let contents = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<Option<String>>(&contents) {
+        Ok(url) => Some(url),
+        Err(e) => {
+            log::warn!("Failed to parse proxy URL file: {e}");
+            None
+        }
+    }
+}
 
 fn entry_for(proxy: &Proxy) -> Result<keyring::Entry, keyring::Error> {
     let key = proxy.to_url_string_no_auth();

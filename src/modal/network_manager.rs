@@ -15,6 +15,12 @@ pub enum Action {
 }
 
 #[derive(Debug, Clone)]
+pub enum ProxyResult {
+    Applied,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum Message {
     GoBack,
     ToggleShowPassword(bool),
@@ -28,6 +34,7 @@ pub enum Message {
     RequestApply,
     Cancel,
     Clear,
+    ProxyResult(ProxyResult),
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +200,14 @@ impl NetworkManager {
                 self.confirming_apply = false;
                 return Some(Action::Exit);
             }
+            Message::ProxyResult(ProxyResult::Applied) => {
+                self.effective_proxy_cfg = self.proxy_cfg();
+                self.error = None;
+                return Some(Action::Exit);
+            }
+            Message::ProxyResult(ProxyResult::Failed(e)) => {
+                self.error = Some(format!("Failed to apply proxy: {e}"));
+            }
         }
         None
     }
@@ -337,7 +352,7 @@ impl NetworkManager {
                     iced::widget::space::horizontal(),
                     container(
                         row![
-                            text("Changes will take effect after a restart"),
+                            text("Apply to running engine immediately?"),
                             confirm_btn(Message::Apply),
                             cancel_btn()
                         ]
@@ -351,7 +366,7 @@ impl NetworkManager {
                 let pending_info = if is_pending {
                     Some(tooltip(
                         button("i").style(style::button::info),
-                        Some("Pending changes require a full restart"),
+                        Some("Unapplied changes — click Apply to push to the running engine"),
                         iced::widget::tooltip::Position::Top,
                     ))
                 } else {

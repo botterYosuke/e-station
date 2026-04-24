@@ -38,12 +38,28 @@ impl CliArgs {
                         url.scheme()
                     ));
                 }
+                if !is_loopback(&url) {
+                    return Err(format!(
+                        "--data-engine-url: host '{}' is not a loopback address; \
+                         only 127.0.0.1, ::1, and localhost are allowed",
+                        url.host_str().unwrap_or("<none>")
+                    ));
+                }
                 data_engine_url = Some(url);
             }
             // Unknown flags are silently ignored to stay forward-compatible.
         }
 
         Ok(Self { data_engine_url })
+    }
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d == "localhost",
+        None => false,
     }
 }
 
@@ -116,5 +132,38 @@ mod tests {
         let result = CliArgs::parse_from(args(&["--data-engine-url", "not a url"]));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid --data-engine-url"));
+    }
+
+    #[test]
+    fn rejects_non_loopback_host() {
+        let result =
+            CliArgs::parse_from(args(&["--data-engine-url", "ws://example.com:8765"]));
+        assert!(result.is_err(), "remote host should be rejected");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("loopback"),
+            "error should mention loopback: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_localhost_domain() {
+        let cli =
+            CliArgs::parse_from(args(&["--data-engine-url", "ws://localhost:8765"])).unwrap();
+        assert!(cli.data_engine_url.is_some());
+    }
+
+    #[test]
+    fn accepts_ipv6_loopback() {
+        let cli =
+            CliArgs::parse_from(args(&["--data-engine-url", "ws://[::1]:8765"])).unwrap();
+        assert!(cli.data_engine_url.is_some());
+    }
+
+    #[test]
+    fn rejects_non_loopback_ipv4() {
+        let result =
+            CliArgs::parse_from(args(&["--data-engine-url", "ws://192.168.1.1:8765"]));
+        assert!(result.is_err(), "LAN address should be rejected");
     }
 }
