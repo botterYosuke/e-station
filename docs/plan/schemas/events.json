@@ -9,6 +9,7 @@
     { "$ref": "#/$defs/Connected" },
     { "$ref": "#/$defs/Disconnected" },
     { "$ref": "#/$defs/Trades" },
+    { "$ref": "#/$defs/TradesFetched" },
     { "$ref": "#/$defs/KlineUpdate" },
     { "$ref": "#/$defs/Klines" },
     { "$ref": "#/$defs/DepthSnapshot" },
@@ -104,6 +105,23 @@
           "type": "array",
           "items": { "$ref": "#/$defs/TradeMsg" }
         }
+      }
+    },
+    "TradesFetched": {
+      "description": "Chunked response to FetchTrades. is_last=true marks the final (or only) chunk.",
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "trades", "is_last"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "TradesFetched" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "trades": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TradeMsg" }
+        },
+        "is_last": { "type": "boolean" }
       }
     },
     "KlineMsg": {

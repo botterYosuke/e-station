@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_MAJOR: int = 1
-SCHEMA_MINOR: int = 0
+SCHEMA_MINOR: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +276,7 @@ class TradesFetched(IpcMessage):
     venue: str
     ticker: str
     trades: list[TradeMsg]
+    is_last: bool
 
 
 class Error(IpcMessage):
