@@ -67,6 +67,7 @@ pub trait VenueBackend: Send + Sync {
         &self,
         ticker_info: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>>;
 
@@ -373,19 +374,20 @@ impl VenueBackend for NativeBackend {
         &self,
         ticker_info: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
         match self {
             NativeBackend::Binance(h) => {
                 let h = h.clone();
                 Box::pin(async move {
-                    h.fetch_trades(ticker_info, from_time, data_path).await
+                    h.fetch_trades(ticker_info, from_time, to_time, data_path).await
                 })
             }
             NativeBackend::Hyperliquid(h) => {
                 let h = h.clone();
                 Box::pin(async move {
-                    h.fetch_trades(ticker_info, from_time, data_path).await
+                    h.fetch_trades(ticker_info, from_time, to_time, data_path).await
                 })
             }
             NativeBackend::Bybit(_) | NativeBackend::Okex(_) | NativeBackend::Mexc(_) => {

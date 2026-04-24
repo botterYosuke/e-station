@@ -685,6 +685,7 @@ impl VenueBackend for EngineClientBackend {
         &self,
         ticker_info: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
         let connection = Arc::clone(&self.connection);
@@ -693,10 +694,6 @@ impl VenueBackend for EngineClientBackend {
         Box::pin(async move {
             let request_id = Uuid::new_v4().to_string();
             let ticker_sym = ticker_info.ticker.to_string();
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
             let data_path_str = data_path.map(|p| p.to_string_lossy().into_owned());
 
             let cmd = Command::FetchTrades {
@@ -705,7 +702,7 @@ impl VenueBackend for EngineClientBackend {
                 ticker: ticker_sym,
                 market: Self::market_kind_to_ipc(ticker_info.market_type()),
                 start_ms: from_time as i64,
-                end_ms: now_ms,
+                end_ms: to_time as i64,
                 data_path: data_path_str,
             };
             let mut rx = connection.subscribe_events();

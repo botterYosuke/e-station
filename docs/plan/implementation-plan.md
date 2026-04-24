@@ -476,6 +476,29 @@ pytest 124/124 PASS の状態で実施したコードレビューで検出した
 - **インタデイ+ヒストリカルの結合**: 過去日のデータは historicアル zip を取得後、末尾の取引タイムスタンプから aggTrades API で残り時間を補完する。zip が空なら fallback で intraday のみ返却。
 - **`TradesFetched` vs `Trades`**: ストリームイベント (`Trades`) と REST レスポンス (`TradesFetched`) を別型として設計。backend.rs は両イベントを独立したパスで処理する。
 
+### フェーズ 4 完了後レビュー指摘 (2026-04-24) ✅
+
+Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)` の上下限契約に関する 3 件を修正。
+
+#### Finding #1 (High): Binance ヒストリカル取得で `from_time` 下限が無視されていた
+**症状**: `fetch_trades()` が `start_ms` から日付のみを抽出し `_fetch_historical_trades()` に渡す実装だったため、返却される aggTrades zip の全日分（`start_ms` より前のデータを含む）がそのままチャートに挿入されていた。Rust 側 `dashboard.rs` は `trade.time <= until_time` のみクリップし、下限は信頼していた。日中から始まるヒストリカル要求で過剰なデータが描画される。
+
+**修正**: [python/engine/exchanges/binance.py:522](../../python/engine/exchanges/binance.py#L522) — `_fetch_historical_trades()` の戻り値を `ts_ms >= start_ms` でフィルタしてから返却。根本原因を Python 側で封じ込めたため、`dashboard.rs` の下限クリップ追加は不要。
+
+#### Finding #2 (Medium): 空バッチが後続日のフェッチを打ち切っていた
+**症状**: Phase 4 で「1 リクエスト = 1 カレンダー日」契約に変更されたが、`fetch_trades_batched()` は空バッチで `break` する実装のままだった。流動性の低い銘柄・新規上場直後・取引所のデータ欠損などで 1 日分が空の場合、それ以降の全日がフェッチされず途切れる。
+
+**修正**: [src/connector/fetcher.rs:477](../../src/connector/fetcher.rs#L477) — 空バッチ時は `latest_trade_t` を翌日 midnight に進めて `continue`。全体ループ条件 `latest_trade_t < to_time` で自然終了する。
+
+#### Finding #3 (Medium): `to_time` 上限が IPC 層で失われ `now_ms` が送られていた
+**症状**: `fetch_trades_batched()` は `to_time` を保持するが、`VenueBackend::fetch_trades()` 以降のシグネチャが `from_time` のみで、`EngineClientBackend` はハードコードで `end_ms: now_ms` を送っていた。過去スライスを要求しても常に「現在まで」を取得しに行くため、レート制限・ダウンロード量が悪化。
+
+**修正**: `VenueBackend` トレイトに `to_time: u64` を追加して 9 ファイルで伝搬（`VenueBackend` トレイト、`AdapterHandles`、`FetchCommand::Trades`、`BinanceHandle`/`HyperliquidHandle`、Binance Worker `FetchCommandHandler` 実装、`binance/fetch.rs`、`EngineClientBackend`、`HybridBackend`、テストスタブ 2 箇所）。
+- [engine-client/src/backend.rs:708](../../engine-client/src/backend.rs#L708): `end_ms: to_time as i64`（旧: `now_ms`）。
+- [exchange/src/adapter/hub/binance/fetch.rs:704](../../exchange/src/adapter/hub/binance/fetch.rs#L704): ヒストリカル zip を `retain(|t| t.time >= from_time)`、intraday 拡張分を `filter(|t| t.time <= to_time)`。
+
+**テスト**: `cargo test -p flowsurface-exchange` 17/17 PASS。`cargo check --workspace` clean。Python 側は既存 `test_binance_fetch_trades.py` / `test_server_dispatch.py` が引き続き PASS。
+
 ## フェーズ 5: Rust から取引所コードを削除
 
 - [ ] `exchange/src/adapter/hub/` を削除。

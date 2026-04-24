@@ -520,7 +520,8 @@ class BinanceWorker(ExchangeWorker):
         from_date = dt.datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc).date()
 
         try:
-            return await self._fetch_historical_trades(ticker, market, from_date, data_path)
+            trades = await self._fetch_historical_trades(ticker, market, from_date, data_path)
+            return [t for t in trades if t["ts_ms"] >= start_ms]
         except Exception as exc:
             log.warning(
                 "Historical trade fetch failed for %s %s %s, falling back to intraday: %s",

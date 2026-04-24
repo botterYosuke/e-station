@@ -148,12 +148,14 @@ impl HyperliquidHandle {
         &self,
         ticker: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<std::path::PathBuf>,
     ) -> Result<Vec<Trade>, AdapterError> {
         self.request_port
             .request(move |reply| HyperliquidCommand::Trades {
                 ticker,
                 from_time,
+                to_time,
                 data_path,
                 reply,
             })

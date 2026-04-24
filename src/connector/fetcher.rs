@@ -470,12 +470,13 @@ pub fn fetch_trades_batched(
 
         while latest_trade_t < to_time {
             match handles
-                .fetch_trades(ticker_info, latest_trade_t, Some(data_path.clone()))
+                .fetch_trades(ticker_info, latest_trade_t, to_time, Some(data_path.clone()))
                 .await
             {
                 Ok(batch) => {
                     if batch.is_empty() {
-                        break;
+                        latest_trade_t = (latest_trade_t / DAY_MS + 1) * DAY_MS;
+                        continue;
                     }
 
                     let last_trade_t =

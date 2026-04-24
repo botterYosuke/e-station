@@ -52,6 +52,7 @@ enum FetchCommand<M> {
     Trades {
         ticker: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
         reply: ResponseTx<Vec<Trade>>,
     },
@@ -315,9 +316,10 @@ pub trait FetchCommandHandler<M> {
         &mut self,
         ticker_info: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
-        let _ = (ticker_info, from_time, data_path);
+        let _ = (ticker_info, from_time, to_time, data_path);
         Box::pin(async { Err(unsupported_fetch("Trades fetch")) })
     }
 }
@@ -387,10 +389,11 @@ where
         FetchCommand::Trades {
             ticker,
             from_time,
+            to_time,
             data_path,
             reply,
         } => {
-            let result = handler.fetch_trades(ticker, from_time, data_path).await;
+            let result = handler.fetch_trades(ticker, from_time, to_time, data_path).await;
             let _ = reply.send(result);
         }
     }

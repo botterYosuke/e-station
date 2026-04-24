@@ -674,6 +674,7 @@ pub(super) async fn fetch_trades(
     hub: &mut HttpHub<BinanceLimiter>,
     ticker_info: TickerInfo,
     from_time: u64,
+    to_time: u64,
     data_path: Option<PathBuf>,
 ) -> Result<Vec<Trade>, AdapterError> {
     let Some(data_path) = data_path else {
@@ -700,10 +701,12 @@ pub(super) async fn fetch_trades(
 
     match get_hist_trades_with_client(&client, ticker_info, from_date, data_path).await {
         Ok(mut trades) => {
+            trades.retain(|t| t.time >= from_time);
+
             if let Some(latest_trade) = trades.last().copied() {
                 match fetch_intraday_trades(hub, ticker_info, latest_trade.time).await {
                     Ok(intraday_trades) => {
-                        trades.extend(intraday_trades);
+                        trades.extend(intraday_trades.into_iter().filter(|t| t.time <= to_time));
                     }
                     Err(e) => {
                         log::error!("Failed to fetch intraday trades: {}", e);

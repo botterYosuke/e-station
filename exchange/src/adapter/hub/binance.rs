@@ -179,12 +179,14 @@ impl BinanceHandle {
         &self,
         ticker: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
     ) -> Result<Vec<Trade>, AdapterError> {
         self.request_port
             .request(move |reply| BinanceCommand::Trades {
                 ticker,
                 from_time,
+                to_time,
                 data_path,
                 reply,
             })
@@ -327,6 +329,7 @@ impl super::FetchCommandHandler<BinanceMarketScope> for Worker {
         &mut self,
         ticker_info: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
     ) -> futures::future::BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
         let market = ticker_info.market_type();
@@ -335,6 +338,7 @@ impl super::FetchCommandHandler<BinanceMarketScope> for Worker {
                 self.hub_for_market(market),
                 ticker_info,
                 from_time,
+                to_time,
                 data_path,
             )
             .await

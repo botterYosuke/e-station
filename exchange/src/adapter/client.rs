@@ -229,13 +229,14 @@ impl AdapterHandles {
         &self,
         ticker_info: TickerInfo,
         from_time: u64,
+        to_time: u64,
         data_path: Option<PathBuf>,
     ) -> Result<Vec<Trade>, AdapterError> {
         let venue = ticker_info.ticker.exchange.venue();
         let Some(backend) = self.get_backend(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
-        backend.fetch_trades(ticker_info, from_time, data_path).await
+        backend.fetch_trades(ticker_info, from_time, to_time, data_path).await
     }
     /// Requests a fresh depth snapshot for the given ticker.
     ///

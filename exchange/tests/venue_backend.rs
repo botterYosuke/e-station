@@ -101,6 +101,7 @@ impl VenueBackend for StubBackend {
         &self,
         _ticker_info: TickerInfo,
         _from_time: u64,
+        _to_time: u64,
         _data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
         Box::pin(async {
@@ -277,6 +278,7 @@ impl VenueBackend for CountingBackend {
         &self,
         _ticker_info: TickerInfo,
         _from_time: u64,
+        _to_time: u64,
         _data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
         self.trades_calls.fetch_add(1, Ordering::SeqCst);
@@ -436,7 +438,7 @@ async fn fetch_open_interest_delegates_to_backend() {
 async fn fetch_trades_delegates_to_backend() {
     let (handles, counters) = counting_handles();
     let _ = handles
-        .fetch_trades(binance_ticker_info(), 0, None)
+        .fetch_trades(binance_ticker_info(), 0, 0, None)
         .await;
     assert_eq!(counters.get(&counters.trades), 1);
 }
