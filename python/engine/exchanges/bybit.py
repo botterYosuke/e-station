@@ -395,13 +395,20 @@ class BybitWorker(ExchangeWorker):
         items = data.get("result", {}).get("list", [])
 
         def _parse(item: dict) -> dict:
-            turnover24h = float(item.get("turnover24h", 0))
+            mark_price = float(item.get("lastPrice", 0))
+            volume24h = float(item.get("volume24h", 0))
+            # Match Rust fetch.rs: inverse uses volume24h as-is (USD-denominated),
+            # linear/spot multiplies by mark_price to get USD value.
+            if category == "inverse":
+                daily_volume = volume24h
+            else:
+                daily_volume = volume24h * mark_price
             # price24hPcnt is a decimal fraction e.g. 0.025 = 2.5%
             pct = float(item.get("price24hPcnt", "0")) * 100.0
             return {
                 "mark_price": item["lastPrice"],
                 "daily_price_chg": str(pct),
-                "daily_volume": str(turnover24h),
+                "daily_volume": str(daily_volume),
             }
 
         if ticker == "__all__":

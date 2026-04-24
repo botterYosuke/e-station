@@ -292,7 +292,39 @@ async def test_fetch_ticker_stats(worker: BybitWorker, httpx_mock: HTTPXMock):
 
     assert stats["mark_price"] == "68000.0"
     assert float(stats["daily_price_chg"]) == pytest.approx(2.5, rel=1e-3)
-    assert "daily_volume" in stats
+    # linear: daily_volume = volume24h * mark_price (matches Rust fetch.rs)
+    assert float(stats["daily_volume"]) == pytest.approx(10000.0 * 68000.0, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_inverse_uses_volume24h(
+    worker: BybitWorker, httpx_mock: HTTPXMock
+):
+    """Inverse perpetuals use volume24h directly (USD-denominated), not turnover24h (BTC)."""
+    httpx_mock.add_response(
+        url=f"{_REST}/v5/market/tickers?category=inverse",
+        json={
+            "retCode": 0,
+            "result": {
+                "category": "inverse",
+                "list": [
+                    {
+                        "symbol": "BTCUSD",
+                        "lastPrice": "68000.0",
+                        "price24hPcnt": "0.01",
+                        "volume24h": "500000000.0",
+                        "turnover24h": "7352.94",
+                    },
+                ],
+            },
+        },
+    )
+
+    stats = await worker.fetch_ticker_stats("BTCUSD", "inverse_perp")
+
+    assert stats["mark_price"] == "68000.0"
+    # inverse: daily_volume = volume24h as-is (USD contracts), not turnover24h (BTC)
+    assert float(stats["daily_volume"]) == pytest.approx(500_000_000.0, rel=1e-6)
 
 
 @pytest.mark.asyncio
