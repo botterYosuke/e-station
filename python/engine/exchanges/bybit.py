@@ -227,6 +227,7 @@ class BybitWorker(ExchangeWorker):
         self._limiter = BybitLimiter()
         self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+        self._http_lock = asyncio.Lock()
         # Keyed by (ticker, market); set to trigger WS reconnect from outside the stream task.
         self._reconnect_triggers: dict[tuple[str, str], asyncio.Event] = {}
 
@@ -251,11 +252,13 @@ class BybitWorker(ExchangeWorker):
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                proxy=self._proxy,
-                timeout=15.0,
-                follow_redirects=True,
-            )
+            async with self._http_lock:
+                if self._client is None or self._client.is_closed:
+                    self._client = httpx.AsyncClient(
+                        proxy=self._proxy,
+                        timeout=15.0,
+                        follow_redirects=True,
+                    )
         return self._client
 
     async def _get_json(self, url: str, weight: int = 1) -> Any:
@@ -440,7 +443,11 @@ class BybitWorker(ExchangeWorker):
         # Bybit's REST orderbook uses a different sequence namespace than orderbook.200,
         # so REST snapshots cannot be spliced into the live WS feed. Resync is WS-native:
         # signal the active stream to reconnect; a fresh type="snapshot" arrives via WS.
-        self._reconnect_trigger(ticker, market).set()
+        # Only set the trigger if stream_depth is already running for this ticker/market;
+        # otherwise we would create an orphaned entry that is never cleaned up.
+        key = (ticker, market)
+        if key in self._reconnect_triggers:
+            self._reconnect_triggers[key].set()
         raise WsNativeResyncTriggered(
             "Bybit orderbook.200 depth resync is WS-native — reconnect triggered."
         )

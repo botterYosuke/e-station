@@ -201,6 +201,7 @@ class HyperliquidWorker(ExchangeWorker):
         self._limiter = HyperliquidLimiter()
         self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+        self._http_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # HTTP client lifecycle
@@ -217,11 +218,13 @@ class HyperliquidWorker(ExchangeWorker):
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                proxy=self._proxy,
-                timeout=15.0,
-                follow_redirects=True,
-            )
+            async with self._http_lock:
+                if self._client is None or self._client.is_closed:
+                    self._client = httpx.AsyncClient(
+                        proxy=self._proxy,
+                        timeout=15.0,
+                        follow_redirects=True,
+                    )
         return self._client
 
     async def _post_json(self, body: dict, weight: int = 1) -> Any:
@@ -323,8 +326,11 @@ class HyperliquidWorker(ExchangeWorker):
             token_indices = pair.get("tokens", [])
 
             base_index = token_indices[0] if token_indices else None
-            base_token = next((t for t in tokens if t.get("index") == base_index), None)
-            sz_decimals = int(base_token.get("szDecimals", 0)) if base_token else 0
+            base_token = (
+                next((t for t in tokens if isinstance(t, dict) and t.get("index") == base_index), None)
+                if base_index is not None else None
+            )
+            sz_decimals = int(base_token.get("szDecimals", 0)) if base_token is not None else 0
 
             tick_size = _compute_tick_size(price, sz_decimals)
             min_qty = 10.0 ** (-sz_decimals) if sz_decimals > 0 else 1.0

@@ -59,11 +59,22 @@ impl EngineClientBackend {
     ///
     /// Falls back to `BinanceLinear` so the stream can still emit meaningful events.
     fn exchange_for(venue: &str, market_kind: MarketKind) -> Exchange {
-        let venue_parsed = venue
-            .parse::<exchange::adapter::Venue>()
-            .unwrap_or(exchange::adapter::Venue::Binance);
-        Exchange::from_venue_and_market(venue_parsed, market_kind)
-            .unwrap_or(Exchange::BinanceLinear)
+        let venue_parsed = match venue.parse::<exchange::adapter::Venue>() {
+            Ok(v) => v,
+            Err(_) => {
+                log::warn!("exchange_for: unknown venue {venue:?} — falling back to Binance");
+                exchange::adapter::Venue::Binance
+            }
+        };
+        match Exchange::from_venue_and_market(venue_parsed, market_kind) {
+            Some(ex) => ex,
+            None => {
+                log::warn!(
+                    "exchange_for: no Exchange variant for venue={venue:?} market={market_kind:?} — falling back to BinanceLinear"
+                );
+                Exchange::BinanceLinear
+            }
+        }
     }
 }
 
@@ -130,7 +141,11 @@ impl VenueBackend for EngineClientBackend {
                         return;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("kline_stream: lagged by {n} events");
+                        // Klines have no resync mechanism — dropped events mean a permanent gap.
+                        // Terminate the stream so the consumer can re-subscribe and get fresh data.
+                        log::warn!("kline_stream: lagged by {n} events — stream restarting to recover gap");
+                        yield Event::Disconnected(exchange, format!("broadcast lagged by {n} events"));
+                        return;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());
@@ -201,7 +216,10 @@ impl VenueBackend for EngineClientBackend {
                         return;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("trade_stream: lagged by {n} events");
+                        // Trades have no resync mechanism — terminate so the consumer can re-subscribe.
+                        log::warn!("trade_stream: lagged by {n} events — stream restarting to recover gap");
+                        yield Event::Disconnected(exchange, format!("broadcast lagged by {n} events"));
+                        return;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());

@@ -208,8 +208,8 @@ class DataEngineServer:
                         ).decode()
                     )
                     await self._current_conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("Failed to close superseded connection: %s", exc)
                 # Cancel stream tasks from the old connection before handing
                 # over to the new client so they don't become zombie tasks.
                 await self._cancel_all_streams()
@@ -499,7 +499,8 @@ class DataEngineServer:
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
         timeframe = msg.get("timeframe", "1m")
-        limit = msg.get("limit", 400)
+        raw_limit = msg.get("limit", 400)
+        limit = raw_limit if isinstance(raw_limit, int) and 1 <= raw_limit <= 5000 else 400
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
@@ -522,7 +523,8 @@ class DataEngineServer:
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
         timeframe = msg.get("timeframe", "1h")
-        limit = msg.get("limit", 400)
+        raw_limit = msg.get("limit", 400)
+        limit = raw_limit if isinstance(raw_limit, int) and 1 <= raw_limit <= 5000 else 400
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
@@ -574,10 +576,11 @@ class DataEngineServer:
 
         market = _market_from_msg(msg, venue)
         handle = self._streams.get((venue, ticker, market, "depth"))
-        ssid = handle.current_ssid if handle is not None else None
-        if ssid is None:
-            ssid = client_ssid
-        if ssid is None:
+        # Capture ssid before the await for early validation only.
+        ssid_before = handle.current_ssid if handle is not None else None
+        if ssid_before is None:
+            ssid_before = client_ssid
+        if ssid_before is None:
             raise ValueError(
                 "RequestDepthSnapshot: no active depth stream and no stream_session_id provided"
             )
@@ -595,6 +598,14 @@ class DataEngineServer:
                 ticker,
             )
             return
+
+        # Re-read ssid AFTER the await — the stream may have reconnected during
+        # the fetch and updated current_ssid to a new session.  Fall back to the
+        # pre-await value only if the stream is no longer alive.
+        live_handle = self._streams.get((venue, ticker, market, "depth"))
+        live_ssid = live_handle.current_ssid if live_handle is not None else None
+        ssid = live_ssid or ssid_before
+
         self._outbox.append(
             {
                 "event": "DepthSnapshot",
@@ -635,8 +646,8 @@ class DataEngineServer:
                     }
                 ).decode()
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed to send error response: %s", exc)
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):

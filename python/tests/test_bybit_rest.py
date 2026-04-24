@@ -345,20 +345,32 @@ async def test_fetch_ticker_stats_not_found(worker: BybitWorker, httpx_mock: HTT
 
 
 @pytest.mark.asyncio
-async def test_fetch_depth_snapshot_triggers_reconnect(worker: BybitWorker) -> None:
+async def test_fetch_depth_snapshot_raises_ws_native_resync(worker: BybitWorker) -> None:
     # REST snapshot is incompatible with orderbook.200 namespace.
-    # The worker must set the reconnect trigger AND raise WsNativeResyncTriggered.
+    # Without an active stream the trigger must NOT be created (no orphaned entries).
     with pytest.raises(WsNativeResyncTriggered, match="orderbook.200"):
         await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
 
-    assert worker._reconnect_trigger("BTCUSDT", "linear_perp").is_set(), (
-        "reconnect trigger must be set so the active WS stream reconnects"
-    )
+    assert ("BTCUSDT", "linear_perp") not in worker._reconnect_triggers
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_sets_trigger_when_stream_active(worker: BybitWorker) -> None:
+    # When stream_depth is running it pre-registers the trigger; fetch_depth_snapshot
+    # must set it so the stream reconnects.
+    trigger = worker._reconnect_trigger("BTCUSDT", "linear_perp")
+    assert not trigger.is_set()
+
+    with pytest.raises(WsNativeResyncTriggered):
+        await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
+
+    assert trigger.is_set()
 
 
 @pytest.mark.asyncio
 async def test_fetch_depth_snapshot_trigger_independent_per_key(worker: BybitWorker) -> None:
     # Trigger for BTCUSDT must not bleed into ETHUSDT.
+    worker._reconnect_trigger("BTCUSDT", "linear_perp")  # pre-register only BTC
     try:
         await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
     except WsNativeResyncTriggered:

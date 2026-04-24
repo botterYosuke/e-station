@@ -34,7 +34,21 @@ async def test_fetch_depth_snapshot_raises_ws_native_resync(worker: BybitWorker)
     with pytest.raises(WsNativeResyncTriggered, match="orderbook.200"):
         await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
 
-    assert worker._reconnect_trigger("BTCUSDT", "linear_perp").is_set()
+    # No active stream → trigger should NOT be created (avoids orphaned dict entries).
+    assert ("BTCUSDT", "linear_perp") not in worker._reconnect_triggers
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_sets_trigger_when_stream_active(worker: BybitWorker) -> None:
+    """Trigger is set only when stream_depth has already registered the key."""
+    # Simulate an active stream_depth by pre-registering the trigger.
+    trigger = worker._reconnect_trigger("BTCUSDT", "linear_perp")
+    assert not trigger.is_set()
+
+    with pytest.raises(WsNativeResyncTriggered):
+        await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
+
+    assert trigger.is_set()
 
 
 @pytest.mark.asyncio
@@ -42,7 +56,8 @@ async def test_fetch_depth_snapshot_raises_for_inverse(worker: BybitWorker) -> N
     with pytest.raises(WsNativeResyncTriggered):
         await worker.fetch_depth_snapshot("BTCUSD", "inverse_perp")
 
-    assert worker._reconnect_trigger("BTCUSD", "inverse_perp").is_set()
+    # No active stream → no orphaned entry created.
+    assert ("BTCUSD", "inverse_perp") not in worker._reconnect_triggers
 
 
 # ---------------------------------------------------------------------------

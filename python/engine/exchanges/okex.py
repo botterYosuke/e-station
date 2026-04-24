@@ -220,6 +220,7 @@ class OkexWorker(ExchangeWorker):
         self._limiter = OkexLimiter()
         self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+        self._http_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # HTTP client lifecycle
@@ -236,11 +237,13 @@ class OkexWorker(ExchangeWorker):
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                proxy=self._proxy,
-                timeout=15.0,
-                follow_redirects=True,
-            )
+            async with self._http_lock:
+                if self._client is None or self._client.is_closed:
+                    self._client = httpx.AsyncClient(
+                        proxy=self._proxy,
+                        timeout=15.0,
+                        follow_redirects=True,
+                    )
         return self._client
 
     async def _get_json(self, url: str, weight: int = 1) -> Any:
@@ -638,7 +641,10 @@ class OkexWorker(ExchangeWorker):
                             if action not in ("snapshot", "update"):
                                 continue
 
-                            first = msg["data"][0]
+                            data_list = msg.get("data", [])
+                            if not data_list:
+                                continue
+                            first = data_list[0]
                             update_id = first.get("seqId", 0)
                             bids = first.get("bids", [])
                             asks = first.get("asks", [])

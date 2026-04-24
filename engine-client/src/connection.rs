@@ -275,7 +275,9 @@ fn spawn_io_tasks(
                     };
                     match serde_json::from_str::<EngineEvent>(&text) {
                         Ok(event) => {
-                            let _ = events_tx.send(event);
+                            if events_tx.send(event).is_err() {
+                                log::warn!("engine event dropped: no active subscribers");
+                            }
                         }
                         Err(e) => {
                             log::warn!("failed to parse engine event: {e} — frame: {text}");

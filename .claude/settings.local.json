@@ -67,7 +67,8 @@
       "PowerShell(git -C c:/Users/sasai/Documents/e-station diff --stat HEAD)",
       "PowerShell(git -C c:/Users/sasai/Documents/e-station show --stat c7b5153)",
       "PowerShell(git -C c:/Users/sasai/Documents/e-station show c7b5153 -- python/engine/schemas.py python/engine/server.py | Out-String -Width 300)",
-      "PowerShell(git -C c:/Users/sasai/Documents/e-station show c7b5153 -- python/engine/schemas.py | Out-String -Width 300)"
+      "PowerShell(git -C c:/Users/sasai/Documents/e-station show c7b5153 -- python/engine/schemas.py | Out-String -Width 300)",
+      "Bash(python -m py_compile python/engine/server.py python/engine/exchanges/bybit.py python/engine/exchanges/hyperliquid.py python/engine/exchanges/mexc.py python/engine/exchanges/okex.py)"
     ]
   }
 }

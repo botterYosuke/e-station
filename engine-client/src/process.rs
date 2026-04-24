@@ -105,11 +105,32 @@ impl ProcessManager {
     pub async fn start(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
         let mut proc = PythonProcess::spawn(&self.python_cmd, port).await?;
 
-        // Give the Python process a moment to bind.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
         let url = format!("ws://127.0.0.1:{port}");
-        let connection = EngineConnection::connect(&url, proc.token()).await?;
+
+        // Retry connecting with exponential backoff while the process is starting up.
+        // Total wait budget: 50+100+200+400+800+1600 ≈ 3.2 s before giving up.
+        const MAX_CONNECT_ATTEMPTS: u32 = 6;
+        let connection = {
+            let mut delay_ms = 50u64;
+            let mut attempt = 0u32;
+            loop {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                match EngineConnection::connect(&url, proc.token()).await {
+                    Ok(conn) => break conn,
+                    Err(EngineClientError::ConnectionRefused) if attempt < MAX_CONNECT_ATTEMPTS => {
+                        log::debug!(
+                            "engine not ready yet (attempt {}/{}), retrying in {}ms",
+                            attempt + 1,
+                            MAX_CONNECT_ATTEMPTS,
+                            delay_ms * 2,
+                        );
+                        delay_ms = (delay_ms * 2).min(1_600);
+                        attempt += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
 
         // Step 2: SetProxy (spec §5.4) — sent after Ready, before any Subscribe.
         let proxy = self.proxy_url.lock().await.clone();
@@ -134,8 +155,17 @@ impl ProcessManager {
         }
 
         // Detach the process — it outlives this function.
+        // kill_on_drop(true) ensures the child is killed when the task future is dropped.
         tokio::spawn(async move {
-            let _ = proc.wait().await;
+            match proc.wait().await {
+                Ok(status) if !status.success() => {
+                    log::warn!("python engine exited with status: {status}");
+                }
+                Err(e) => {
+                    log::warn!("failed to wait for python engine process: {e}");
+                }
+                _ => {}
+            }
         });
 
         Ok(connection)

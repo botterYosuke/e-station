@@ -212,6 +212,7 @@ class MexcWorker(ExchangeWorker):
         self._limiter = MexcLimiter()
         self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+        self._http_lock = asyncio.Lock()
         # Populated by _list_tickers_futures; keyed by futures symbol.
         self._contract_sizes: dict[str, float] = {}
 
@@ -230,11 +231,13 @@ class MexcWorker(ExchangeWorker):
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                proxy=self._proxy,
-                timeout=15.0,
-                follow_redirects=True,
-            )
+            async with self._http_lock:
+                if self._client is None or self._client.is_closed:
+                    self._client = httpx.AsyncClient(
+                        proxy=self._proxy,
+                        timeout=15.0,
+                        follow_redirects=True,
+                    )
         return self._client
 
     async def _get_json(self, url: str, weight: int = 1) -> Any:
@@ -582,13 +585,14 @@ class MexcWorker(ExchangeWorker):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         if market == "spot":
+            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": "trade"})
             outbox.append(
                 {
                     "event": "Disconnected",
                     "venue": "mexc",
                     "ticker": ticker,
                     "stream": "trade",
-                    "reason": "MEXC spot trade WebSocket not implemented",
+                    "reason": "MEXC spot trade WebSocket not supported",
                 }
             )
             return
@@ -711,13 +715,14 @@ class MexcWorker(ExchangeWorker):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         if market == "spot":
+            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": "depth"})
             outbox.append(
                 {
                     "event": "Disconnected",
                     "venue": "mexc",
                     "ticker": ticker,
                     "stream": "depth",
-                    "reason": "MEXC spot depth WebSocket not implemented",
+                    "reason": "MEXC spot depth WebSocket not supported",
                 }
             )
             return
@@ -835,13 +840,14 @@ class MexcWorker(ExchangeWorker):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         if market == "spot":
+            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": f"kline_{timeframe}"})
             outbox.append(
                 {
                     "event": "Disconnected",
                     "venue": "mexc",
                     "ticker": ticker,
                     "stream": f"kline_{timeframe}",
-                    "reason": "MEXC spot kline WebSocket is not supported",
+                    "reason": "MEXC spot kline WebSocket not supported",
                 }
             )
             return
