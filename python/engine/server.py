@@ -15,6 +15,7 @@ import websockets
 from websockets import ServerConnection
 
 from engine.exchanges.binance import BinanceWorker
+from engine.exchanges.bybit import BybitWorker
 from engine.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
@@ -87,9 +88,10 @@ class DataEngineServer:
         self._engine_session_id: UUID = uuid.uuid4()
         self._handshake_lock = asyncio.Lock()
 
-        # Per-venue workers (Phase 1: Binance only)
-        self._workers: dict[str, BinanceWorker] = {
+        # Per-venue workers
+        self._workers: dict[str, BinanceWorker | BybitWorker] = {
             "binance": BinanceWorker(),
+            "bybit": BybitWorker(),
         }
 
         # Active stream tasks keyed by (venue, ticker, stream)
@@ -570,11 +572,10 @@ class DataEngineServer:
 
 
 def _market(_ticker: str) -> str:
-    """Infer market type from ticker symbol (Phase 1: all Binance = linear_perp)."""
+    """Infer market type from ticker symbol (default: linear_perp for all venues)."""
     return "linear_perp"
 
 
-def _default_market(venue: str) -> str:
-    if venue == "binance":
-        return "linear_perp"
+def _default_market(_venue: str) -> str:
+    """Default market type per venue for list/metadata ops."""
     return "linear_perp"

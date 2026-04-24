@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections import deque
 from typing import Any
 
@@ -497,10 +496,9 @@ class BinanceWorker(ExchangeWorker):
                 on_ssid(ssid)
 
             batch: list[dict] = []
-            last_flush = time.monotonic()
 
             def _flush_batch() -> None:
-                nonlocal batch, last_flush
+                nonlocal batch
                 if not batch:
                     return
                 outbox.append(
@@ -513,7 +511,6 @@ class BinanceWorker(ExchangeWorker):
                     }
                 )
                 batch = []
-                last_flush = time.monotonic()
 
             try:
                 async with websockets.connect(url) as ws:
@@ -525,38 +522,36 @@ class BinanceWorker(ExchangeWorker):
                             "stream": "trade",
                         }
                     )
-                    while not stop_event.is_set():
-                        try:
-                            raw = await asyncio.wait_for(
-                                ws.recv(), timeout=_TRADE_BATCH_INTERVAL
-                            )
-                        except asyncio.TimeoutError:
+
+                    async def _flush_periodically() -> None:
+                        while True:
+                            await asyncio.sleep(_TRADE_BATCH_INTERVAL)
                             _flush_batch()
-                            continue
 
-                        if stop_event.is_set():
-                            break
-                        try:
-                            msg = orjson.loads(raw)
-                            data = msg.get("data", {})
-                            if not data:
-                                continue
+                    flush_task = asyncio.create_task(_flush_periodically())
+                    try:
+                        async for raw in ws:
+                            if stop_event.is_set():
+                                break
+                            try:
+                                msg = orjson.loads(raw)
+                                data = msg.get("data", {})
+                                if not data:
+                                    continue
 
-                            trade = {
-                                "price": data["p"],
-                                "qty": data["q"],
-                                "side": "sell" if data["m"] else "buy",
-                                "ts_ms": data["T"],
-                                "is_liquidation": False,
-                            }
-                            batch.append(trade)
-
-                            now = time.monotonic()
-                            if now - last_flush >= _TRADE_BATCH_INTERVAL:
-                                _flush_batch()
-                        except Exception as exc:
-                            log.warning("trade parse error: %s", exc)
-                    _flush_batch()
+                                trade = {
+                                    "price": data["p"],
+                                    "qty": data["q"],
+                                    "side": "sell" if data["m"] else "buy",
+                                    "ts_ms": data["T"],
+                                    "is_liquidation": False,
+                                }
+                                batch.append(trade)
+                            except Exception as exc:
+                                log.warning("trade parse error: %s", exc)
+                    finally:
+                        flush_task.cancel()
+                        _flush_batch()
 
             except Exception as exc:
                 _flush_batch()

@@ -120,7 +120,7 @@
 
 優先順（取引所の安定度・利用頻度で並べ替え可）:
 
-- [ ] Bybit
+- [x] Bybit ✅ (2026-04-24)
 - [ ] Hyperliquid
 - [ ] OKX
 - [ ] MEXC
@@ -131,6 +131,42 @@
 3. 統合テスト（Rust 側 UI で動作確認）
 
 **完了条件**: 全 5 取引所が Python 経由で動作。
+
+### Bybit 実装詳細（2026-04-24 完了）
+
+- **実装ファイル**: [`python/engine/exchanges/bybit.py`](../../python/engine/exchanges/bybit.py)
+- **テスト**: `python/tests/test_bybit_rest.py` (9件) + `python/tests/test_bybit_depth_sync.py` (10件) = 計 19件全 PASS
+- **server.py 統合**: `self._workers["bybit"] = BybitWorker()` 追加済み
+
+#### Binance との主な差異
+
+| 項目 | Binance | Bybit |
+|------|---------|-------|
+| REST base | `https://api.binance.com` etc. | `https://api.bybit.com` |
+| WS base | `wss://fstream.binance.com` etc. | `wss://stream.bybit.com/v5/public/{linear\|inverse\|spot}` |
+| WS subscribe | 接続 URL に stream 名を埋め込む | 接続後に `{"op":"subscribe","args":[...]}` を送信 |
+| Depth 初期化 | REST でスナップショット取得 → WS で diff | WS の最初のメッセージが type="snapshot" で完全板 |
+| Depth シーケンス | `U`/`u`/`pu` フィールド（Binance 独自） | `u` のみ（必ず連番 +1 で継続を検証） |
+| 板の resync | `BinanceDepthSyncer.resync()` → REST 再取得 | `needs_resync=True` → WS 再接続で新 snapshot を受信 |
+| レート制限 | 1200 weight/min + 300 raw/5min | 600 req/5sec (`BybitLimiter`) |
+| kline interval | "1m", "5m" ... | "1", "5", ..., "D" (数値文字列または "D") |
+| OI period | "1h", "4h" ... | "1h", "4h", "1d", "5min" ... |
+| Trade side | `m` (bool) → buy/sell | `S` ("Buy"/"Sell") |
+
+#### BybitDepthSyncer 設計
+
+Binance と異なり WS 自身がスナップショットを配信する:
+1. type="snapshot" メッセージで `_apply_snapshot` → DepthSnapshot イベント送出
+2. type="delta" で `_apply_delta` → `u == applied_seq + 1` を厳密チェック
+3. gap 検知 → DepthGap 送出 + `needs_resync=True` → stream_depth が WS 再接続
+4. スナップショット到着前のバッファリング (MAX_PENDING=512) → スナップショット後にリプレイ
+
+#### Tips
+
+- **Bybit OI は linear のみ**: `category=linear` 固定。inverse 板の OI は API 仕様が異なるため空リストを返す。
+- **Depth REST snapshot**: `RequestDepthSnapshot` op 対応のため `GET /v5/market/orderbook?category={cat}&symbol={sym}&limit=200` を `fetch_depth_snapshot` で実装。`result.u` を `last_update_id` として使用。
+- **Depth level**: `orderbook.200` トピックを使用（200レベル、100ms 更新）。更小レベル (50) も選択可。
+- **ticker_stats volume**: Bybit の `volume24h` は base asset 単位のため、`volume24h * lastPrice` で USD 換算している。
 
 ## フェーズ 4: ヒストリカルデータ・bulk download 移植
 
