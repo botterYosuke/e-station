@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
+from uuid import UUID
 
 import orjson
 import websockets
@@ -16,7 +18,6 @@ from flowsurface_data.schemas import (
     EngineError,
     Hello,
     Ready,
-    Shutdown,
 )
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,8 @@ class DataEngineServer:
         self._token = token
         self._current_conn: ServerConnection | None = None
         self._shutdown_event = asyncio.Event()
+        # Fixed for the lifetime of this process — changes only on restart.
+        self._engine_session_id: UUID = uuid.uuid4()
 
     async def serve(self) -> None:
         async with websockets.serve(
@@ -43,18 +46,9 @@ class DataEngineServer:
             await self._shutdown_event.wait()
 
     async def _handle(self, ws: ServerConnection) -> None:
-        # Supersede half-dead existing connection
-        if self._current_conn is not None:
-            try:
-                await self._current_conn.send(
-                    orjson.dumps({"event": "Error", "code": "superseded", "message": "new client connected"})
-                )
-                await self._current_conn.close()
-            except Exception:
-                pass
-
-        self._current_conn = ws
-
+        # NOTE: Do NOT supersede the existing connection here.
+        # Supersede happens only after token validation in _handshake(), so an
+        # unauthenticated loopback client cannot evict the legitimate Rust client.
         try:
             await self._handshake(ws)
             await self._dispatch_loop(ws)
@@ -89,13 +83,25 @@ class DataEngineServer:
             await ws.close()
             raise ValueError("schema_mismatch")
 
-        import uuid
+        # Token matches — now it is safe to supersede any half-dead connection.
+        if self._current_conn is not None:
+            try:
+                await self._current_conn.send(
+                    orjson.dumps(
+                        {"event": "Error", "code": "superseded", "message": "new client connected"}
+                    )
+                )
+                await self._current_conn.close()
+            except Exception:
+                pass
+
+        self._current_conn = ws
 
         ready = Ready(
             schema_major=SCHEMA_MAJOR,
             schema_minor=SCHEMA_MINOR,
             engine_version=_ENGINE_VERSION,
-            engine_session_id=uuid.uuid4(),
+            engine_session_id=self._engine_session_id,
             capabilities={"supported_venues": ["binance"]},
         )
         await ws.send(orjson.dumps(ready.model_dump(mode="json")))

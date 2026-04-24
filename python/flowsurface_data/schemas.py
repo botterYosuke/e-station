@@ -129,6 +129,25 @@ class EngineError(IpcMessage):
     message: str
 
 
+class Connected(IpcMessage):
+    """Exchange WebSocket connection established (mirrors exchange::Event::Connected)."""
+
+    event: Literal["Connected"] = "Connected"
+    venue: str
+    ticker: str
+    stream: str
+
+
+class Disconnected(IpcMessage):
+    """Exchange WebSocket connection lost (mirrors exchange::Event::Disconnected)."""
+
+    event: Literal["Disconnected"] = "Disconnected"
+    venue: str
+    ticker: str
+    stream: str
+    reason: str | None = None
+
+
 class TradeMsg(IpcMessage):
     price: str
     qty: str
