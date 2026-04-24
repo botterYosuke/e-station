@@ -125,16 +125,76 @@
 - [x] Bybit ✅ (2026-04-24)
 - [x] Hyperliquid ✅ (2026-04-24)
 - [x] OKX ✅ (2026-04-24, ブランチ `phase-3/okex-python-worker`)
-- [ ] MEXC
+- [x] MEXC ✅ (2026-04-24, ブランチ `phase-3/mexc-python-worker`)
 
 各取引所ごとに：
 1. `python/engine/exchanges/<venue>.py` 実装
 2. レート制限の移植
 3. 統合テスト（Rust 側 UI で動作確認）
 
-**完了条件**: 全 5 取引所が Python 経由で動作。
+**完了条件**: 全 5 取引所が Python 経由で動作。✅ **達成済み**
 
-> **現況（2026-04-24）**: pytest 全体 119 件 PASS（Binance 33 + Bybit 21 + Hyperliquid 29 + OKX 30 + その他 6）。残り MEXC のみ。
+> **現況（2026-04-24）**: pytest 全体 156 件 PASS（Binance 33 + Bybit 21 + Hyperliquid 29 + OKX 30 + MEXC 34 + その他 9）。全 5 取引所対応完了。
+
+### MEXC 実装詳細（2026-04-24 完了）
+
+- **実装ファイル**: [`python/engine/exchanges/mexc.py`](../../python/engine/exchanges/mexc.py)
+- **テスト**: `python/tests/test_mexc_rest.py` (22件) + `python/tests/test_mexc_depth_sync.py` (12件) = 計 34件全 PASS
+- **server.py 統合**: `self._workers["mexc"] = MexcWorker()` 追加済み
+
+#### Binance/OKX との主な差異
+
+| 項目 | Binance/OKX | MEXC |
+|------|-------------|------|
+| REST spot | 各取引所 REST | `https://api.mexc.com/api/v3` |
+| REST futures | 各取引所 REST | `https://api.mexc.com/api/v1/contract` |
+| WS endpoint | 各取引所 WS | `wss://contract.mexc.com/edge` (futures のみ) |
+| WS subscribe | URL / JSON op | `{"method": "sub.depth", "param": {"symbol": ...}}` |
+| Depth プロトコル | Snapshot+diff (Binance) / snapshot WS (OKX) | REST snapshot + WS version-based diff |
+| Depth シーケンス | Binance: U/u/pu / OKX: seqId | `version` (monotonic +1 per diff) |
+| レート制限 | 各取引所固有 | 10 req/2sec (`MexcLimiter`, TokenBucket capacity=10, refill=5/s) |
+| OI | REST 履歴あり | **なし** (常に空リスト返却) |
+| spot symbol | "BTCUSDT" etc. | spot: "BTCUSDT" / futures linear: "BTC_USDT" / futures inverse: "BTC_USD" |
+| Trade direction | buy/sell / side フィールド | `T`: 2=sell, それ以外=buy |
+| kline (REST spot) | 各取引所配列形式 | `[open_ts_ms, o, h, l, c, vol, close_ts_ms, ...]` 配列 |
+| kline (REST futures) | 各取引所固有 | `{ data: { time: [...sec], open: [...], ... } }` 形式 (timestamp は秒→ms変換必要) |
+| kline WS | OKX: "business" エンドポイント | futures WS のみ対応 (spot kline WS は非対応) |
+| spot stream | 全市場対応 | spot depth/kline/trades WS は非対応 (Disconnected を即時返却) |
+
+#### MexcDepthSyncer 設計
+
+MEXC WS は REST スナップショット取得後に diff のみ配信する:
+1. WS subscribe → 確認メッセージ受信 (`{symbol}.sub.depth` チャネル)
+2. REST `GET /v1/contract/depth/{symbol}` でスナップショット取得
+3. `apply_snapshot(version, bids, asks)` → `DepthSnapshot` イベント送出、`applied_version = version`
+4. 以降の WS diff (`{symbol}.depth` チャネル): `version == applied_version + 1` を厳密チェック
+5. gap 検知 → `DepthGap` 送出 + `needs_resync=True` → WS 再接続
+6. スナップショット前のバッファリング (MAX_PENDING=512) → スナップショット後にリプレイ
+
+#### fetch_klines のパラメータ
+
+- Spot: `GET /v3/klines?symbol={sym}&interval={1m|5m|...}&limit={n}&startTime={ms}&endTime={ms}`
+  - 結果は `[open_ts_ms, open, high, low, close, vol, close_ts_ms, asset_vol]` の配列
+- Futures: `GET /v1/contract/kline/{sym}?interval={Min1|...}&limit={n}&start={sec}&end={sec}`
+  - 結果は `{ data: { time: [...sec], open: [...], high: [...], low: [...], close: [...], vol: [...] } }` 形式
+  - timestamp は秒単位 → `* 1000` で ms 変換
+
+#### Spot WebSocket の非対応について
+
+MEXC の spot WS は `wss://wbs.mexc.com/ws` という別エンドポイントで、サブスクリプション形式も異なる。
+Rust の実装も futures WS (`contract.mexc.com`) のみを使用しているため、Python 側でも spot depth/kline/trades stream は
+`Disconnected` イベントを即時返却する設計とした。UI 側は native MEXC backend (spot) を引き続き使用するか、spot は表示しない設計で対応可能。
+
+#### Tips
+
+- **REST spot ticker stats の `priceChangePercent`**: 小数分率（例: `0.005` = 0.5%）→ `* 100` で % 変換
+- **REST futures ticker stats の `riseFallRate`**: 同様に小数分率 → `* 100` で % 変換
+- **Futures kline time は秒単位**: `time` 配列の値は UNIX 秒 → `* 1000` で ms 変換が必要（見落としやすい）
+- **linear / inverse 判定**: futures は symbol 末尾が `_USDT` = linear, `_USD`（かつ `_USDT` 非末尾）= inverse
+- **WS ping**: `{"method": "ping"}` を 15 秒ごとに送信。pong: `{"channel": "pong", ...}`
+- **Depth WS channel 名**: subscribe 確認 = `{symbol}.sub.depth`, diff = `{symbol}.depth`, trade = `{symbol}.deal`, kline = `{symbol}.kline`
+- **OI 非対応**: MEXC は過去の OI 時系列 API を持たないため常に空リスト返却。Hyperliquid と同様。
+- **Kline WS の `t` は秒**: REST futures kline 同様、WS kline の `t` フィールドも秒単位 → `* 1000` で ms 変換。
 
 ### OKX 実装詳細（2026-04-24 完了）
 
