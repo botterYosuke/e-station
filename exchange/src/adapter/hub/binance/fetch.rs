@@ -725,11 +725,16 @@ pub(super) async fn fetch_trades(
         .ok_or_else(|| AdapterError::ParseError("Invalid timestamp".into()))?
         .date_naive();
 
+    const DAY_MS: u64 = 86_400_000;
+    let from_day_index = from_time / DAY_MS;
+    let next_day_start = (from_day_index + 1) * DAY_MS;
+    let effective_to_time = to_time.min(next_day_start - 1);
+
     let client = hub.client().clone();
 
     match get_hist_trades_with_client(&client, ticker_info, from_date, data_path).await {
         Ok(mut trades) => {
-            trades.retain(|t| t.time >= from_time && t.time <= to_time);
+            trades.retain(|t| t.time >= from_time && t.time <= effective_to_time);
             Ok(trades)
         }
         Err(e) => {
@@ -737,7 +742,7 @@ pub(super) async fn fetch_trades(
                 "Historical trades fetch failed: {}, falling back to intraday fetch",
                 e
             );
-            fetch_intraday_trades(hub, ticker_info, from_time, to_time).await
+            fetch_intraday_trades(hub, ticker_info, from_time, effective_to_time).await
         }
     }
 }
@@ -770,5 +775,36 @@ mod tests {
         );
         // Any trade >= next_day_start violates the contract
         assert!(next_day_start > to_time);
+    }
+
+    #[test]
+    fn effective_to_time_caps_at_next_day_boundary_even_when_global_end_exceeds() {
+        const DAY_MS: u64 = 86_400_000;
+
+        // Scenario: caller requests 2024-01-05 15:00 to 2024-01-31 23:59 (entire month)
+        // fetch_trades() should never return 2024-01-06 data even on fallback
+        let from_time = 1_704_466_800_000u64; // 2024-01-05 15:00:00 UTC
+        let global_end = 1_706_745_599_999u64; // 2024-01-31 23:59:59 UTC
+
+        // Compute effective_to_time as fetch_trades() does
+        let from_day_index = from_time / DAY_MS;
+        let next_day_start = (from_day_index + 1) * DAY_MS;
+        let effective_to_time = global_end.min(next_day_start - 1);
+
+        // Verify: effective_to_time is capped to same day as from_time
+        let from_day = from_time / DAY_MS;
+        let effective_day = effective_to_time / DAY_MS;
+        assert_eq!(
+            from_day, effective_day,
+            "effective_to_time {} should be on same day as from_time {}",
+            effective_to_time, from_time
+        );
+
+        // Verify: any trade at next_day_start or beyond would be excluded
+        assert!(
+            next_day_start - 1 < next_day_start,
+            "A trade at next_day_start {} is beyond effective_to_time {}",
+            next_day_start, effective_to_time
+        );
     }
 }

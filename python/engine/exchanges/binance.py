@@ -520,18 +520,26 @@ class BinanceWorker(ExchangeWorker):
 
         from_date = dt.datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc).date()
 
+        # Cap to_time at single-day boundary (contract: fetch_trades returns trades in [start_ms, effective_end_ms) only)
+        _DAY_MS = 86_400_000
+        from_day_index = start_ms // _DAY_MS
+        next_day_start = (from_day_index + 1) * _DAY_MS
+        effective_end_ms = end_ms if end_ms else next_day_start - 1
+        if end_ms:
+            effective_end_ms = min(end_ms, next_day_start - 1)
+
         try:
             trades = await self._fetch_historical_trades(ticker, market, from_date, data_path)
             result = [t for t in trades if t["ts_ms"] >= start_ms]
-            if end_ms:
-                result = [t for t in result if t["ts_ms"] <= end_ms]
+            if effective_end_ms:
+                result = [t for t in result if t["ts_ms"] <= effective_end_ms]
             return result
         except (httpx.HTTPError, ValueError, zipfile.BadZipFile, OSError) as exc:
             log.warning(
                 "Historical trade fetch failed for %s %s %s, falling back to intraday: %s",
                 ticker, market, from_date, exc,
             )
-            return await self._fetch_intraday_trades(ticker, market, start_ms, end_ms=end_ms)
+            return await self._fetch_intraday_trades(ticker, market, start_ms, end_ms=effective_end_ms)
 
     async def _fetch_intraday_trades(
         self, ticker: str, market: str, start_ms: int, *, end_ms: int = 0
