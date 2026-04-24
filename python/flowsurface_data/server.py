@@ -10,8 +10,9 @@ from uuid import UUID
 
 import orjson
 import websockets
-from websockets.server import ServerConnection
+from websockets import ServerConnection
 
+from flowsurface_data.exchanges.binance import BinanceWorker
 from flowsurface_data.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
@@ -25,14 +26,58 @@ log = logging.getLogger(__name__)
 _ENGINE_VERSION = "0.1.0"
 
 
+# ---------------------------------------------------------------------------
+# Active stream bookkeeping
+# ---------------------------------------------------------------------------
+
+
+class _StreamHandle:
+    """Tracks a running stream task and its stop event."""
+
+    def __init__(self, task: asyncio.Task, stop: asyncio.Event) -> None:
+        self.task = task
+        self.stop = stop
+
+    async def cancel(self) -> None:
+        self.stop.set()
+        self.task.cancel()
+        try:
+            await self.task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# DataEngineServer
+# ---------------------------------------------------------------------------
+
+
 class DataEngineServer:
     def __init__(self, port: int, token: str) -> None:
         self._port = port
         self._token = token
         self._current_conn: ServerConnection | None = None
         self._shutdown_event = asyncio.Event()
-        # Fixed for the lifetime of this process — changes only on restart.
         self._engine_session_id: UUID = uuid.uuid4()
+
+        # Per-venue workers (Phase 1: Binance only)
+        self._workers: dict[str, BinanceWorker] = {
+            "binance": BinanceWorker(),
+        }
+
+        # Active stream tasks keyed by (venue, ticker, stream)
+        self._streams: dict[tuple[str, str, str], _StreamHandle] = {}
+
+        # Shared outbox — server drains this and sends to client
+        self._outbox: list[dict] = []
+        self._outbox_event = asyncio.Event()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def shutdown(self) -> None:
+        self._shutdown_event.set()
 
     async def serve(self) -> None:
         async with websockets.serve(
@@ -45,18 +90,25 @@ class DataEngineServer:
             log.info("Data engine listening on ws://127.0.0.1:%d", self._port)
             await self._shutdown_event.wait()
 
+    # ------------------------------------------------------------------
+    # Connection handling
+    # ------------------------------------------------------------------
+
     async def _handle(self, ws: ServerConnection) -> None:
-        # NOTE: Do NOT supersede the existing connection here.
-        # Supersede happens only after token validation in _handshake(), so an
-        # unauthenticated loopback client cannot evict the legitimate Rust client.
         try:
             await self._handshake(ws)
-            await self._dispatch_loop(ws)
+            await asyncio.gather(
+                self._recv_loop(ws),
+                self._send_loop(ws),
+            )
         except websockets.exceptions.ConnectionClosed:
             log.info("Client disconnected")
+        except Exception as exc:
+            log.error("Connection error: %s", exc)
         finally:
             if self._current_conn is ws:
                 self._current_conn = None
+            await self._cancel_all_streams()
 
     async def _handshake(self, ws: ServerConnection) -> None:
         raw = await ws.recv()
@@ -83,7 +135,7 @@ class DataEngineServer:
             await ws.close()
             raise ValueError("schema_mismatch")
 
-        # Token matches — now it is safe to supersede any half-dead connection.
+        # Token matches — supersede any half-dead connection
         if self._current_conn is not None:
             try:
                 await self._current_conn.send(
@@ -102,16 +154,327 @@ class DataEngineServer:
             schema_minor=SCHEMA_MINOR,
             engine_version=_ENGINE_VERSION,
             engine_session_id=self._engine_session_id,
-            capabilities={"supported_venues": ["binance"]},
+            capabilities={
+                "supported_venues": list(self._workers.keys()),
+                "supports_bulk_trades": False,
+                "supports_depth_binary": False,
+            },
         )
         await ws.send(orjson.dumps(ready.model_dump(mode="json")))
 
-    async def _dispatch_loop(self, ws: ServerConnection) -> None:
+    # ------------------------------------------------------------------
+    # Receive loop — decode ops and dispatch
+    # ------------------------------------------------------------------
+
+    async def _recv_loop(self, ws: ServerConnection) -> None:
         async for raw in ws:
             msg: dict[str, Any] = orjson.loads(raw)
             op = msg.get("op")
-            if op == "Shutdown":
-                self._shutdown_event.set()
+            try:
+                await self._dispatch(op, msg, ws)
+            except Exception as exc:
+                log.error("Dispatch error op=%s: %s", op, exc)
+                await self._send_error(ws, msg.get("request_id"), str(exc))
+
+    # ------------------------------------------------------------------
+    # Send loop — drains outbox and writes to client
+    # ------------------------------------------------------------------
+
+    async def _send_loop(self, ws: ServerConnection) -> None:
+        while True:
+            # Drain whatever is already in the outbox
+            while self._outbox:
+                event = self._outbox.pop(0)
+                await ws.send(orjson.dumps(event))
+
+            # Wait for more events
+            self._outbox_event.clear()
+            try:
+                await asyncio.wait_for(self._outbox_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+
+            if self._shutdown_event.is_set():
                 break
-            else:
-                log.debug("Received op=%s (not yet handled)", op)
+
+    # ------------------------------------------------------------------
+    # Op dispatcher
+    # ------------------------------------------------------------------
+
+    async def _dispatch(self, op: str | None, msg: dict, ws: ServerConnection) -> None:  # noqa: ARG002
+        if op == "Shutdown":
+            self._shutdown_event.set()
+
+        elif op == "Subscribe":
+            await self._handle_subscribe(msg)
+
+        elif op == "Unsubscribe":
+            await self._handle_unsubscribe(msg)
+
+        elif op == "ListTickers":
+            await self._handle_list_tickers(msg)
+
+        elif op == "GetTickerMetadata":
+            await self._handle_get_ticker_metadata(msg)
+
+        elif op == "FetchKlines":
+            await self._handle_fetch_klines(msg)
+
+        elif op == "FetchOpenInterest":
+            await self._handle_fetch_oi(msg)
+
+        elif op == "FetchTickerStats":
+            await self._handle_fetch_ticker_stats(msg)
+
+        elif op == "RequestDepthSnapshot":
+            await self._handle_request_depth_snapshot(msg)
+
+        elif op == "SetProxy":
+            self._handle_set_proxy(msg)
+
+        else:
+            log.debug("Unhandled op=%s", op)
+
+    # ------------------------------------------------------------------
+    # Subscribe / Unsubscribe
+    # ------------------------------------------------------------------
+
+    async def _handle_subscribe(self, msg: dict) -> None:
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        stream = msg.get("stream", "")
+
+        worker = self._workers.get(venue)
+        if worker is None:
+            log.warning("Subscribe: unknown venue %s", venue)
+            return
+
+        key = (venue, ticker, stream)
+        if key in self._streams:
+            log.debug("Already subscribed to %s", key)
+            return
+
+        stop = asyncio.Event()
+        ssid = f"{self._engine_session_id}:0"
+
+        if stream == "trade":
+            coro = worker.stream_trades(ticker, _market(ticker), ssid, self._outbox, stop)
+        elif stream == "depth":
+            coro = worker.stream_depth(ticker, _market(ticker), ssid, self._outbox, stop)
+        elif stream.startswith("kline_"):
+            tf = stream[len("kline_"):]
+            coro = worker.stream_kline(ticker, _market(ticker), tf, ssid, self._outbox, stop)
+        else:
+            log.warning("Unknown stream type: %s", stream)
+            return
+
+        task = asyncio.create_task(coro)
+        self._streams[key] = _StreamHandle(task, stop)
+
+        # Notify outbox consumer when stream emits
+        task.add_done_callback(lambda _: self._outbox_event.set())
+
+    async def _handle_unsubscribe(self, msg: dict) -> None:
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        stream = msg.get("stream", "")
+        key = (venue, ticker, stream)
+
+        handle = self._streams.pop(key, None)
+        if handle:
+            await handle.cancel()
+
+    # ------------------------------------------------------------------
+    # Fetch operations (one-shot, run as background tasks)
+    # ------------------------------------------------------------------
+
+    async def _handle_list_tickers(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        worker = self._workers.get(venue)
+        if worker is None:
+            return
+
+        async def _run() -> None:
+            tickers = await worker.list_tickers(_default_market(venue))
+            self._outbox.append(
+                {
+                    "event": "TickerInfo",
+                    "request_id": req_id,
+                    "venue": venue,
+                    "tickers": tickers,
+                }
+            )
+            self._outbox_event.set()
+
+        asyncio.create_task(_run())
+
+    async def _handle_get_ticker_metadata(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        worker = self._workers.get(venue)
+        if worker is None:
+            return
+
+        async def _run() -> None:
+            tickers = await worker.list_tickers(_default_market(venue))
+            meta = next((t for t in tickers if t["symbol"] == ticker), {})
+            self._outbox.append(
+                {
+                    "event": "TickerInfo",
+                    "request_id": req_id,
+                    "venue": venue,
+                    "tickers": [meta] if meta else [],
+                }
+            )
+            self._outbox_event.set()
+
+        asyncio.create_task(_run())
+
+    async def _handle_fetch_klines(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        timeframe = msg.get("timeframe", "1m")
+        limit = msg.get("limit", 400)
+        worker = self._workers.get(venue)
+        if worker is None:
+            return
+
+        async def _run() -> None:
+            klines = await worker.fetch_klines(ticker, _market(ticker), timeframe, limit=limit)
+            self._outbox.append(
+                {
+                    "event": "Klines",
+                    "request_id": req_id,
+                    "venue": venue,
+                    "ticker": ticker,
+                    "timeframe": timeframe,
+                    "klines": klines,
+                }
+            )
+            self._outbox_event.set()
+
+        asyncio.create_task(_run())
+
+    async def _handle_fetch_oi(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        timeframe = msg.get("timeframe", "1h")
+        limit = msg.get("limit", 400)
+        worker = self._workers.get(venue)
+        if worker is None:
+            return
+
+        async def _run() -> None:
+            oi = await worker.fetch_open_interest(ticker, _market(ticker), timeframe, limit=limit)
+            self._outbox.append(
+                {
+                    "event": "OpenInterest",
+                    "request_id": req_id,
+                    "venue": venue,
+                    "ticker": ticker,
+                    "data": oi,
+                }
+            )
+            self._outbox_event.set()
+
+        asyncio.create_task(_run())
+
+    async def _handle_fetch_ticker_stats(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        worker = self._workers.get(venue)
+        if worker is None:
+            return
+
+        async def _run() -> None:
+            stats = await worker.fetch_ticker_stats(ticker, _market(ticker))
+            self._outbox.append(
+                {
+                    "event": "TickerStats",
+                    "request_id": req_id,
+                    "venue": venue,
+                    "ticker": ticker,
+                    "stats": stats,
+                }
+            )
+            self._outbox_event.set()
+
+        asyncio.create_task(_run())
+
+    async def _handle_request_depth_snapshot(self, msg: dict) -> None:
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        worker = self._workers.get(venue)
+        if worker is None:
+            return
+
+        async def _run() -> None:
+            snap = await worker.fetch_depth_snapshot(ticker, _market(ticker))
+            ssid = f"{self._engine_session_id}:snap"
+            self._outbox.append(
+                {
+                    "event": "DepthSnapshot",
+                    "venue": venue,
+                    "ticker": ticker,
+                    "stream_session_id": ssid,
+                    "sequence_id": snap["last_update_id"],
+                    "bids": snap["bids"],
+                    "asks": snap["asks"],
+                }
+            )
+            self._outbox_event.set()
+
+        asyncio.create_task(_run())
+
+    def _handle_set_proxy(self, msg: dict) -> None:
+        proxy_url = msg.get("url")
+        for worker in self._workers.values():
+            worker._proxy = proxy_url
+            worker._client = None  # force reconnect with new proxy
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _send_error(
+        self, ws: ServerConnection, request_id: str | None, message: str
+    ) -> None:
+        try:
+            await ws.send(
+                orjson.dumps(
+                    {
+                        "event": "Error",
+                        "request_id": request_id,
+                        "code": "dispatch_error",
+                        "message": message,
+                    }
+                )
+            )
+        except Exception:
+            pass
+
+    async def _cancel_all_streams(self) -> None:
+        for handle in list(self._streams.values()):
+            await handle.cancel()
+        self._streams.clear()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for market routing
+# ---------------------------------------------------------------------------
+
+
+def _market(_ticker: str) -> str:
+    """Infer market type from ticker symbol (Phase 1: all Binance = linear_perp)."""
+    return "linear_perp"
+
+
+def _default_market(venue: str) -> str:
+    if venue == "binance":
+        return "linear_perp"
+    return "linear_perp"

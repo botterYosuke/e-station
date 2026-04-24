@@ -1,4 +1,8 @@
 .DS_Store
 /target
 /.vscode
-*.log
+*.log__pycache__/
+*.pyc
+*.pyo
+python/.venv/
+python/.pytest_cache/

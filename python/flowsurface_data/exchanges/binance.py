@@ -1,35 +1,696 @@
-"""Binance exchange worker — skeleton for Phase 1."""
+"""Binance exchange worker — REST and WebSocket for Phase 1."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections import deque
+from typing import Any
+
+import httpx
+
+from flowsurface_data.exchanges.base import ExchangeWorker
+from flowsurface_data.limiter import BinanceLimiter
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Endpoint constants
+# ---------------------------------------------------------------------------
 
-class BinanceWorker:
-    """Handles Binance REST and WebSocket data acquisition.
+_SPOT_REST = "https://api.binance.com"
+_LINEAR_REST = "https://fapi.binance.com"
+_INVERSE_REST = "https://dstream.binance.com"
 
-    Phase 1 skeleton — methods will be implemented incrementally.
+_SPOT_WS = "wss://stream.binance.com:9443"
+_LINEAR_WS = "wss://fstream.binance.com"
+_INVERSE_WS = "wss://dstream.binance.com"
+
+_TRADE_BATCH_INTERVAL = 0.033  # 33 ms
+
+
+def _rest_base(market: str) -> str:
+    if market == "linear_perp":
+        return _LINEAR_REST
+    if market == "inverse_perp":
+        return _INVERSE_REST
+    return _SPOT_REST
+
+
+def _ws_base(market: str) -> str:
+    if market == "linear_perp":
+        return _LINEAR_WS
+    if market == "inverse_perp":
+        return _INVERSE_WS
+    return _SPOT_WS
+
+
+def _is_perp(market: str) -> bool:
+    return market in ("linear_perp", "inverse_perp")
+
+
+# ---------------------------------------------------------------------------
+# BinanceDepthSyncer
+# ---------------------------------------------------------------------------
+
+
+class BinanceDepthSyncer:
+    """Implements the Binance depth consistency protocol for IPC.
+
+    Maintains the gap-detection state machine for a single (ticker, market)
+    and emits DepthSnapshot / DepthDiff / DepthGap dicts into outbox.
     """
 
-    BASE_REST = "https://fapi.binance.com"
-    BASE_WS = "wss://fstream.binance.com"
+    MAX_PENDING = 512
 
-    def __init__(self) -> None:
-        pass
+    def __init__(
+        self,
+        *,
+        venue: str,
+        ticker: str,
+        market: str,
+        stream_session_id: str,
+        snapshot_fetcher: Any,  # async callable () -> snapshot dict
+        outbox: list[dict],
+    ) -> None:
+        self._venue = venue
+        self._ticker = ticker
+        self._market = market
+        self._ssid = stream_session_id
+        self._snapshot_fetcher = snapshot_fetcher
+        self._outbox = outbox
+        self._applied_seq: int = 0
+        self._pending: deque[dict] = deque()
+        self._initialized = False
+        self._needs_resync = False
 
-    async def list_tickers(self) -> list[dict]:
-        raise NotImplementedError
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-    async def get_ticker_metadata(self, ticker: str) -> dict:
-        raise NotImplementedError
+    def queue_diff(self, diff: dict) -> None:
+        """Buffer a diff event received before initialize() is called."""
+        if len(self._pending) >= self.MAX_PENDING:
+            self._pending.popleft()
+        self._pending.append(diff)
 
-    async def fetch_klines(self, ticker: str, timeframe: str, limit: int) -> list[dict]:
-        raise NotImplementedError
+    async def initialize(self) -> None:
+        """Fetch the snapshot and replay any buffered diffs."""
+        await self._apply_snapshot()
+        self._initialized = True
 
-    async def fetch_open_interest(self, ticker: str, timeframe: str, limit: int) -> list[dict]:
-        raise NotImplementedError
+    async def apply_diff(self, diff: dict) -> None:
+        """Apply a live diff event. Detects gaps and triggers resync."""
+        if not self._initialized or self._needs_resync:
+            self.queue_diff(diff)
+            return
+        self._process_diff(diff)
 
-    async def fetch_ticker_stats(self, ticker: str) -> dict:
-        raise NotImplementedError
+    async def resync(self) -> None:
+        """Force a new snapshot fetch and replay buffered diffs."""
+        self._needs_resync = False
+        self._pending.clear()
+        await self._apply_snapshot()
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    async def _apply_snapshot(self) -> None:
+        snapshot = await self._snapshot_fetcher()
+        self._applied_seq = snapshot["last_update_id"]
+
+        self._outbox.append(
+            {
+                "event": "DepthSnapshot",
+                "venue": self._venue,
+                "ticker": self._ticker,
+                "stream_session_id": self._ssid,
+                "sequence_id": self._applied_seq,
+                "bids": snapshot["bids"],
+                "asks": snapshot["asks"],
+            }
+        )
+
+        # Replay buffered diffs, dropping stale ones
+        pending = list(self._pending)
+        self._pending.clear()
+        for diff in pending:
+            self._process_diff(diff, replaying=True)
+
+    def _process_diff(self, diff: dict, *, replaying: bool = False) -> None:
+        final_id: int = diff["u"]
+
+        # Drop stale events (already covered by snapshot)
+        if final_id <= self._applied_seq:
+            return
+
+        if self._applied_seq == 0:
+            # Newly initialised — skip stale
+            return
+
+        if self._applied_seq > 0 and not self._is_first_valid(diff):
+            # Gap detected
+            self._emit_gap()
+            if not replaying:
+                self._needs_resync = True
+                self.queue_diff(diff)
+            return
+
+        # Valid diff — emit and advance cursor
+        self._outbox.append(
+            {
+                "event": "DepthDiff",
+                "venue": self._venue,
+                "ticker": self._ticker,
+                "stream_session_id": self._ssid,
+                "sequence_id": final_id,
+                "prev_sequence_id": self._applied_seq,
+                "bids": diff.get("b", []),
+                "asks": diff.get("a", []),
+            }
+        )
+        self._applied_seq = final_id
+
+    def _is_first_valid(self, diff: dict) -> bool:
+        """Check whether this diff connects contiguously from current applied_seq."""
+        final_id: int = diff["u"]
+        first_id: int = diff["U"]
+        pu: int | None = diff.get("pu")
+
+        if pu is not None:
+            # Perp protocol: pu must equal previous applied_seq OR be within range
+            if self._applied_seq == 0:
+                return True
+            if pu == self._applied_seq:
+                return True
+            # Also accept: first diff after snapshot where U <= applied+1 <= u
+            next_expected = self._applied_seq + 1
+            if first_id <= next_expected <= final_id:
+                return True
+            return False
+        else:
+            # Spot protocol: first_id - 1 == applied_seq (or within range)
+            if self._applied_seq == 0:
+                return True
+            next_expected = self._applied_seq + 1
+            if first_id <= next_expected <= final_id:
+                return True
+            return False
+
+    def _emit_gap(self) -> None:
+        self._outbox.append(
+            {
+                "event": "DepthGap",
+                "venue": self._venue,
+                "ticker": self._ticker,
+                "stream_session_id": self._ssid,
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# BinanceWorker
+# ---------------------------------------------------------------------------
+
+
+class BinanceWorker(ExchangeWorker):
+    """Handles Binance REST and WebSocket data acquisition."""
+
+    def __init__(self, proxy: str | None = None) -> None:
+        self._limiter = BinanceLimiter()
+        self._proxy = proxy
+        self._client: httpx.AsyncClient | None = None
+
+    # ------------------------------------------------------------------
+    # HTTP client lifecycle
+    # ------------------------------------------------------------------
+
+    async def _http(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                proxy=self._proxy,
+                timeout=15.0,
+                follow_redirects=True,
+            )
+        return self._client
+
+    async def _get_json(self, url: str, weight: int = 1) -> Any:
+        await self._limiter.acquire_rest(weight)
+        client = await self._http()
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+    # ------------------------------------------------------------------
+    # REST: list_tickers
+    # ------------------------------------------------------------------
+
+    async def list_tickers(self, market: str) -> list[dict]:
+        base = _rest_base(market)
+        if market == "linear_perp":
+            url = f"{base}/fapi/v1/exchangeInfo"
+            weight = 1
+        elif market == "inverse_perp":
+            url = f"{base}/dapi/v1/exchangeInfo"
+            weight = 1
+        else:
+            url = f"{base}/api/v3/exchangeInfo"
+            weight = 20
+
+        data = await self._get_json(url, weight)
+        symbols = data.get("symbols", [])
+
+        result = []
+        for sym in symbols:
+            if sym.get("contractType") and sym["contractType"] != "PERPETUAL":
+                continue
+            quote = sym.get("quoteAsset", "")
+            if quote not in ("USDT", "USD", ""):
+                continue
+            status = sym.get("status", "")
+            if status not in ("TRADING", "HALT", ""):
+                continue
+
+            filters = sym.get("filters", [])
+            price_filter = next(
+                (f for f in filters if f.get("filterType") == "PRICE_FILTER"), None
+            )
+            lot_filter = next(
+                (f for f in filters if f.get("filterType") == "LOT_SIZE"), None
+            )
+            if price_filter is None or lot_filter is None:
+                continue
+
+            result.append(
+                {
+                    "symbol": sym["symbol"],
+                    "min_ticksize": float(price_filter["tickSize"]),
+                    "min_qty": float(lot_filter["minQty"]),
+                    "contract_size": sym.get("contractSize"),
+                }
+            )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # REST: fetch_klines
+    # ------------------------------------------------------------------
+
+    async def fetch_klines(
+        self,
+        ticker: str,
+        market: str,
+        timeframe: str,
+        *,
+        limit: int = 400,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> list[dict]:
+        base = _rest_base(market)
+        if market == "linear_perp":
+            endpoint = "/fapi/v1/klines"
+            weight = 2
+        elif market == "inverse_perp":
+            endpoint = "/dapi/v1/klines"
+            weight = 2
+        else:
+            endpoint = "/api/v3/klines"
+            weight = 2
+
+        url = f"{base}{endpoint}?symbol={ticker}&interval={timeframe}&limit={limit}"
+        if start_ms is not None:
+            url += f"&startTime={start_ms}"
+        if end_ms is not None:
+            url += f"&endTime={end_ms}"
+
+        rows = await self._get_json(url, weight)
+
+        klines = []
+        for row in rows:
+            open_time = row[0]
+            open_p = str(row[1])
+            high = str(row[2])
+            low = str(row[3])
+            close = str(row[4])
+            volume = str(row[5])
+            taker_buy_base = str(row[9])
+
+            klines.append(
+                {
+                    "open_time_ms": open_time,
+                    "open": open_p,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": volume,
+                    "taker_buy_base": taker_buy_base,
+                    "is_closed": True,
+                }
+            )
+
+        return klines
+
+    # ------------------------------------------------------------------
+    # REST: fetch_open_interest
+    # ------------------------------------------------------------------
+
+    async def fetch_open_interest(
+        self,
+        ticker: str,
+        market: str,
+        timeframe: str,
+        *,
+        limit: int = 400,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> list[dict]:
+        if market not in ("linear_perp", "inverse_perp"):
+            return []
+
+        base = _rest_base(market)
+        if market == "linear_perp":
+            url = f"{base}/futures/data/openInterestHist?symbol={ticker}&period={timeframe}&limit={limit}"
+            weight = 12
+        else:
+            url = f"{base}/futures/data/openInterestHist?symbol={ticker}&period={timeframe}&limit={limit}&contractType=PERPETUAL"
+            weight = 1
+
+        if start_ms is not None:
+            url += f"&startTime={start_ms}"
+        if end_ms is not None:
+            url += f"&endTime={end_ms}"
+
+        rows = await self._get_json(url, weight)
+
+        return [
+            {
+                "time_ms": int(row["timestamp"]),
+                "value": float(row["sumOpenInterest"]),
+            }
+            for row in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # REST: fetch_ticker_stats
+    # ------------------------------------------------------------------
+
+    async def fetch_ticker_stats(self, ticker: str, market: str) -> dict:
+        base = _rest_base(market)
+        if market == "linear_perp":
+            url = f"{base}/fapi/v1/ticker/24hr"
+            weight = 40
+        elif market == "inverse_perp":
+            url = f"{base}/dapi/v1/ticker/24hr"
+            weight = 40
+        else:
+            url = f"{base}/api/v3/ticker/24hr"
+            weight = 80
+
+        rows = await self._get_json(url, weight)
+        # API returns array; find our ticker
+        for item in rows:
+            if item.get("symbol") == ticker:
+                return {
+                    "mark_price": str(item["lastPrice"]),
+                    "daily_price_chg": str(item["priceChangePercent"]),
+                    "daily_volume": str(item.get("quoteVolume", item.get("volume", "0"))),
+                }
+        raise ValueError(f"Ticker {ticker} not found in stats response")
+
+    # ------------------------------------------------------------------
+    # REST: fetch_depth_snapshot
+    # ------------------------------------------------------------------
+
+    async def fetch_depth_snapshot(self, ticker: str, market: str) -> dict:
+        base = _rest_base(market)
+        if market == "linear_perp":
+            url = f"{base}/fapi/v1/depth?symbol={ticker}&limit=1000"
+            weight = 20
+        elif market == "inverse_perp":
+            url = f"{base}/dapi/v1/depth?symbol={ticker}&limit=1000"
+            weight = 20
+        else:
+            url = f"{base}/api/v3/depth?symbol={ticker}&limit=1000"
+            weight = 50
+
+        data = await self._get_json(url, weight)
+
+        return {
+            "last_update_id": data["lastUpdateId"],
+            "bids": data["bids"],
+            "asks": data["asks"],
+        }
+
+    # ------------------------------------------------------------------
+    # WebSocket: stream_trades
+    # ------------------------------------------------------------------
+
+    async def stream_trades(
+        self,
+        ticker: str,
+        market: str,
+        stream_session_id: str,
+        outbox: list[dict],
+        stop_event: asyncio.Event,
+    ) -> None:
+        import websockets
+
+        symbol = ticker.lower()
+        ws_base = _ws_base(market)
+        url = f"{ws_base}/stream?streams={symbol}@aggTrade"
+
+        batch: list[dict] = []
+        last_flush = time.monotonic()
+
+        while not stop_event.is_set():
+            try:
+                async with websockets.connect(url) as ws:
+                    outbox.append(
+                        {
+                            "event": "Connected",
+                            "venue": "binance",
+                            "ticker": ticker,
+                            "stream": "trade",
+                        }
+                    )
+                    async for raw in ws:
+                        if stop_event.is_set():
+                            break
+                        try:
+                            import orjson
+                            msg = orjson.loads(raw)
+                            data = msg.get("data", {})
+                            if not data:
+                                continue
+
+                            trade = {
+                                "price": data["p"],
+                                "qty": data["q"],
+                                "side": "sell" if data["m"] else "buy",
+                                "ts_ms": data["T"],
+                                "is_liquidation": False,
+                            }
+                            batch.append(trade)
+
+                            now = time.monotonic()
+                            if now - last_flush >= _TRADE_BATCH_INTERVAL:
+                                if batch:
+                                    outbox.append(
+                                        {
+                                            "event": "Trades",
+                                            "venue": "binance",
+                                            "ticker": ticker,
+                                            "stream_session_id": stream_session_id,
+                                            "trades": batch,
+                                        }
+                                    )
+                                    batch = []
+                                last_flush = now
+                        except Exception as exc:
+                            log.warning("trade parse error: %s", exc)
+
+            except Exception as exc:
+                outbox.append(
+                    {
+                        "event": "Disconnected",
+                        "venue": "binance",
+                        "ticker": ticker,
+                        "stream": "trade",
+                        "reason": str(exc),
+                    }
+                )
+                if not stop_event.is_set():
+                    await asyncio.sleep(1.0)
+
+    # ------------------------------------------------------------------
+    # WebSocket: stream_depth
+    # ------------------------------------------------------------------
+
+    async def stream_depth(
+        self,
+        ticker: str,
+        market: str,
+        stream_session_id: str,
+        outbox: list[dict],
+        stop_event: asyncio.Event,
+    ) -> None:
+        import websockets
+        import orjson
+
+        symbol = ticker.lower()
+        ws_base = _ws_base(market)
+        url = f"{ws_base}/stream?streams={symbol}@depth@100ms"
+
+        conn_counter = 0
+
+        while not stop_event.is_set():
+            conn_counter += 1
+            ssid = f"{stream_session_id}:{conn_counter}"
+
+            async def _fetch_snapshot() -> dict:
+                return await self.fetch_depth_snapshot(ticker, market)
+
+            syncer = BinanceDepthSyncer(
+                venue="binance",
+                ticker=ticker,
+                market=market,
+                stream_session_id=ssid,
+                snapshot_fetcher=_fetch_snapshot,
+                outbox=outbox,
+            )
+
+            try:
+                async with websockets.connect(url) as ws:
+                    outbox.append(
+                        {
+                            "event": "Connected",
+                            "venue": "binance",
+                            "ticker": ticker,
+                            "stream": "depth",
+                        }
+                    )
+
+                    # Kick off snapshot fetch while buffering incoming diffs
+                    init_task = asyncio.create_task(syncer.initialize())
+
+                    async for raw in ws:
+                        if stop_event.is_set():
+                            break
+                        try:
+                            msg = orjson.loads(raw)
+                            data = msg.get("data", {})
+                            if not data:
+                                continue
+
+                            diff = {
+                                "type": "perp_diff" if _is_perp(market) else "spot_diff",
+                                "U": data["U"],
+                                "u": data["u"],
+                                "pu": data.get("pu"),
+                                "b": data.get("b", []),
+                                "a": data.get("a", []),
+                                "T": data.get("T", data.get("E", 0)),
+                            }
+
+                            if init_task.done():
+                                await syncer.apply_diff(diff)
+                                if syncer._needs_resync:
+                                    await syncer.resync()
+                            else:
+                                syncer.queue_diff(diff)
+                        except Exception as exc:
+                            log.warning("depth parse error: %s", exc)
+
+                    if not init_task.done():
+                        init_task.cancel()
+
+            except Exception as exc:
+                outbox.append(
+                    {
+                        "event": "Disconnected",
+                        "venue": "binance",
+                        "ticker": ticker,
+                        "stream": "depth",
+                        "reason": str(exc),
+                    }
+                )
+                if not stop_event.is_set():
+                    await asyncio.sleep(1.0)
+
+    # ------------------------------------------------------------------
+    # WebSocket: stream_kline
+    # ------------------------------------------------------------------
+
+    async def stream_kline(
+        self,
+        ticker: str,
+        market: str,
+        timeframe: str,
+        stream_session_id: str,
+        outbox: list[dict],
+        stop_event: asyncio.Event,
+    ) -> None:
+        import websockets
+        import orjson
+
+        symbol = ticker.lower()
+        ws_base = _ws_base(market)
+        url = f"{ws_base}/stream?streams={symbol}@kline_{timeframe}"
+
+        while not stop_event.is_set():
+            try:
+                async with websockets.connect(url) as ws:
+                    outbox.append(
+                        {
+                            "event": "Connected",
+                            "venue": "binance",
+                            "ticker": ticker,
+                            "stream": f"kline_{timeframe}",
+                        }
+                    )
+                    async for raw in ws:
+                        if stop_event.is_set():
+                            break
+                        try:
+                            msg = orjson.loads(raw)
+                            data = msg.get("data", {})
+                            k = data.get("k", {})
+                            if not k:
+                                continue
+
+                            outbox.append(
+                                {
+                                    "event": "KlineUpdate",
+                                    "venue": "binance",
+                                    "ticker": ticker,
+                                    "timeframe": timeframe,
+                                    "stream_session_id": stream_session_id,
+                                    "kline": {
+                                        "open_time_ms": k["t"],
+                                        "open": k["o"],
+                                        "high": k["h"],
+                                        "low": k["l"],
+                                        "close": k["c"],
+                                        "volume": k["v"],
+                                        "taker_buy_base": k["V"],
+                                        "is_closed": k["x"],
+                                    },
+                                }
+                            )
+                        except Exception as exc:
+                            log.warning("kline parse error: %s", exc)
+
+            except Exception as exc:
+                outbox.append(
+                    {
+                        "event": "Disconnected",
+                        "venue": "binance",
+                        "ticker": ticker,
+                        "stream": f"kline_{timeframe}",
+                        "reason": str(exc),
+                    }
+                )
+                if not stop_event.is_set():
+                    await asyncio.sleep(1.0)
