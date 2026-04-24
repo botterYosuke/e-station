@@ -9,8 +9,10 @@ from collections import deque
 from typing import Any
 
 import httpx
+import orjson
+import websockets
 
-from data.exchanges.base import ExchangeWorker
+from data.exchanges.base import ExchangeWorker, OnSsidUpdate
 from data.limiter import BinanceLimiter
 
 log = logging.getLogger(__name__)
@@ -76,7 +78,7 @@ class BinanceDepthSyncer:
         market: str,
         stream_session_id: str,
         snapshot_fetcher: Any,  # async callable () -> snapshot dict
-        outbox: list[dict],
+        outbox: Any,  # supports .append(dict)
     ) -> None:
         self._venue = venue
         self._ticker = ticker
@@ -88,15 +90,29 @@ class BinanceDepthSyncer:
         self._pending: deque[dict] = deque()
         self._initialized = False
         self._needs_resync = False
+        # True only for the diff immediately following a snapshot. Permits the
+        # relaxed `U <= applied+1 <= u` match. Cleared after first valid diff.
+        self._just_applied_snapshot = False
+
+    @property
+    def needs_resync(self) -> bool:
+        return self._needs_resync
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def queue_diff(self, diff: dict) -> None:
-        """Buffer a diff event received before initialize() is called."""
+        """Buffer a diff event received before initialize() is called.
+
+        If the buffer overflows, we cannot drop silently (spec §4.4 — depth
+        diffs must not be dropped). Emit a gap and force resync instead.
+        """
         if len(self._pending) >= self.MAX_PENDING:
-            self._pending.popleft()
+            self._pending.clear()
+            self._emit_gap()
+            self._needs_resync = True
+            return
         self._pending.append(diff)
 
     async def initialize(self) -> None:
@@ -124,6 +140,7 @@ class BinanceDepthSyncer:
     async def _apply_snapshot(self) -> None:
         snapshot = await self._snapshot_fetcher()
         self._applied_seq = snapshot["last_update_id"]
+        self._just_applied_snapshot = True
 
         self._outbox.append(
             {
@@ -137,11 +154,15 @@ class BinanceDepthSyncer:
             }
         )
 
-        # Replay buffered diffs, dropping stale ones
+        # Replay buffered diffs, dropping stale ones.
         pending = list(self._pending)
         self._pending.clear()
         for diff in pending:
             self._process_diff(diff, replaying=True)
+            if self._needs_resync:
+                # A replayed diff revealed a gap — stop replaying;
+                # caller should trigger another resync.
+                break
 
     def _process_diff(self, diff: dict, *, replaying: bool = False) -> None:
         final_id: int = diff["u"]
@@ -151,14 +172,15 @@ class BinanceDepthSyncer:
             return
 
         if self._applied_seq == 0:
-            # Newly initialised — skip stale
+            # Not yet initialised (should not happen for live diffs — defensive)
             return
 
-        if self._applied_seq > 0 and not self._is_first_valid(diff):
-            # Gap detected
+        if not self._is_first_valid(diff):
+            # Gap detected — emit gap and require resync in both live and
+            # replay paths. Previously replay-mode silently skipped.
             self._emit_gap()
+            self._needs_resync = True
             if not replaying:
-                self._needs_resync = True
                 self.queue_diff(diff)
             return
 
@@ -176,32 +198,35 @@ class BinanceDepthSyncer:
             }
         )
         self._applied_seq = final_id
+        self._just_applied_snapshot = False
 
     def _is_first_valid(self, diff: dict) -> bool:
-        """Check whether this diff connects contiguously from current applied_seq."""
+        """Check whether this diff connects contiguously from applied_seq.
+
+        Perp (futures) protocol: `pu` is the prev final update id and must
+        equal `applied_seq` for strict continuity. Immediately after a
+        snapshot the first diff may straddle the boundary, in which case
+        `U <= applied_seq+1 <= u` is acceptable.
+
+        Spot protocol: no `pu`; require `U == applied_seq + 1` strictly
+        (straddle tolerated only immediately after a snapshot).
+        """
         final_id: int = diff["u"]
         first_id: int = diff["U"]
         pu: int | None = diff.get("pu")
+        next_expected = self._applied_seq + 1
 
         if pu is not None:
-            # Perp protocol: pu must equal previous applied_seq OR be within range
-            if self._applied_seq == 0:
-                return True
             if pu == self._applied_seq:
                 return True
-            # Also accept: first diff after snapshot where U <= applied+1 <= u
-            next_expected = self._applied_seq + 1
-            if first_id <= next_expected <= final_id:
-                return True
+            if self._just_applied_snapshot:
+                return first_id <= next_expected <= final_id
             return False
-        else:
-            # Spot protocol: first_id - 1 == applied_seq (or within range)
-            if self._applied_seq == 0:
-                return True
-            next_expected = self._applied_seq + 1
-            if first_id <= next_expected <= final_id:
-                return True
-            return False
+
+        # Spot
+        if self._just_applied_snapshot:
+            return first_id <= next_expected <= final_id
+        return first_id == next_expected
 
     def _emit_gap(self) -> None:
         self._outbox.append(
@@ -230,6 +255,15 @@ class BinanceWorker(ExchangeWorker):
     # ------------------------------------------------------------------
     # HTTP client lifecycle
     # ------------------------------------------------------------------
+
+    async def set_proxy(self, url: str | None) -> None:
+        self._proxy = url
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            except Exception as exc:
+                log.warning("Error closing httpx client: %s", exc)
+            self._client = None
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -274,7 +308,7 @@ class BinanceWorker(ExchangeWorker):
             if quote not in ("USDT", "USD", ""):
                 continue
             status = sym.get("status", "")
-            if status not in ("TRADING", "HALT", ""):
+            if status and status != "TRADING":
                 continue
 
             filters = sym.get("filters", [])
@@ -333,20 +367,14 @@ class BinanceWorker(ExchangeWorker):
 
         klines = []
         for row in rows:
-            open_time = row[0]
-            open_p = str(row[1])
-            high = str(row[2])
-            low = str(row[3])
-            close = str(row[4])
-            volume = str(row[5])
             klines.append(
                 {
-                    "open_time_ms": open_time,
-                    "open": open_p,
-                    "high": high,
-                    "low": low,
-                    "close": close,
-                    "volume": volume,
+                    "open_time_ms": row[0],
+                    "open": str(row[1]),
+                    "high": str(row[2]),
+                    "low": str(row[3]),
+                    "close": str(row[4]),
+                    "volume": str(row[5]),
                     "is_closed": True,
                 }
             )
@@ -410,7 +438,6 @@ class BinanceWorker(ExchangeWorker):
             weight = 80
 
         rows = await self._get_json(url, weight)
-        # API returns array; find our ticker
         for item in rows:
             if item.get("symbol") == ticker:
                 return {
@@ -453,35 +480,41 @@ class BinanceWorker(ExchangeWorker):
         ticker: str,
         market: str,
         stream_session_id: str,
-        outbox: list[dict],
+        outbox: Any,
         stop_event: asyncio.Event,
+        *,
+        on_ssid: OnSsidUpdate | None = None,
     ) -> None:
-        import websockets
-
         symbol = ticker.lower()
         ws_base = _ws_base(market)
         url = f"{ws_base}/stream?streams={symbol}@aggTrade"
-
-        batch: list[dict] = []
-        last_flush = time.monotonic()
-
-        def _flush_batch() -> None:
-            nonlocal batch, last_flush
-            if not batch:
-                return
-            outbox.append(
-                {
-                    "event": "Trades",
-                    "venue": "binance",
-                    "ticker": ticker,
-                    "stream_session_id": stream_session_id,
-                    "trades": batch,
-                }
-            )
-            batch = []
-            last_flush = time.monotonic()
+        conn_counter = 0
 
         while not stop_event.is_set():
+            conn_counter += 1
+            ssid = f"{stream_session_id}:{conn_counter}"
+            if on_ssid is not None:
+                on_ssid(ssid)
+
+            batch: list[dict] = []
+            last_flush = time.monotonic()
+
+            def _flush_batch() -> None:
+                nonlocal batch, last_flush
+                if not batch:
+                    return
+                outbox.append(
+                    {
+                        "event": "Trades",
+                        "venue": "binance",
+                        "ticker": ticker,
+                        "stream_session_id": ssid,
+                        "trades": batch,
+                    }
+                )
+                batch = []
+                last_flush = time.monotonic()
+
             try:
                 async with websockets.connect(url) as ws:
                     outbox.append(
@@ -504,7 +537,6 @@ class BinanceWorker(ExchangeWorker):
                         if stop_event.is_set():
                             break
                         try:
-                            import orjson
                             msg = orjson.loads(raw)
                             data = msg.get("data", {})
                             if not data:
@@ -528,6 +560,8 @@ class BinanceWorker(ExchangeWorker):
 
             except Exception as exc:
                 _flush_batch()
+                if stop_event.is_set():
+                    break
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -537,8 +571,7 @@ class BinanceWorker(ExchangeWorker):
                         "reason": str(exc),
                     }
                 )
-                if not stop_event.is_set():
-                    await asyncio.sleep(1.0)
+                await asyncio.sleep(1.0)
 
     # ------------------------------------------------------------------
     # WebSocket: stream_depth
@@ -549,12 +582,11 @@ class BinanceWorker(ExchangeWorker):
         ticker: str,
         market: str,
         stream_session_id: str,
-        outbox: list[dict],
+        outbox: Any,
         stop_event: asyncio.Event,
+        *,
+        on_ssid: OnSsidUpdate | None = None,
     ) -> None:
-        import websockets
-        import orjson
-
         symbol = ticker.lower()
         ws_base = _ws_base(market)
         url = f"{ws_base}/stream?streams={symbol}@depth@100ms"
@@ -564,6 +596,8 @@ class BinanceWorker(ExchangeWorker):
         while not stop_event.is_set():
             conn_counter += 1
             ssid = f"{stream_session_id}:{conn_counter}"
+            if on_ssid is not None:
+                on_ssid(ssid)
 
             async def _fetch_snapshot() -> dict:
                 return await self.fetch_depth_snapshot(ticker, market)
@@ -588,7 +622,6 @@ class BinanceWorker(ExchangeWorker):
                         }
                     )
 
-                    # Kick off snapshot fetch while buffering incoming diffs
                     init_task = asyncio.create_task(syncer.initialize())
 
                     async for raw in ws:
@@ -612,7 +645,7 @@ class BinanceWorker(ExchangeWorker):
 
                             if init_task.done():
                                 await syncer.apply_diff(diff)
-                                if syncer._needs_resync:
+                                if syncer.needs_resync:
                                     await syncer.resync()
                             else:
                                 syncer.queue_diff(diff)
@@ -623,6 +656,8 @@ class BinanceWorker(ExchangeWorker):
                         init_task.cancel()
 
             except Exception as exc:
+                if stop_event.is_set():
+                    break
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -632,8 +667,7 @@ class BinanceWorker(ExchangeWorker):
                         "reason": str(exc),
                     }
                 )
-                if not stop_event.is_set():
-                    await asyncio.sleep(1.0)
+                await asyncio.sleep(1.0)
 
     # ------------------------------------------------------------------
     # WebSocket: stream_kline
@@ -645,17 +679,22 @@ class BinanceWorker(ExchangeWorker):
         market: str,
         timeframe: str,
         stream_session_id: str,
-        outbox: list[dict],
+        outbox: Any,
         stop_event: asyncio.Event,
+        *,
+        on_ssid: OnSsidUpdate | None = None,
     ) -> None:
-        import websockets
-        import orjson
-
         symbol = ticker.lower()
         ws_base = _ws_base(market)
         url = f"{ws_base}/stream?streams={symbol}@kline_{timeframe}"
+        conn_counter = 0
 
         while not stop_event.is_set():
+            conn_counter += 1
+            ssid = f"{stream_session_id}:{conn_counter}"
+            if on_ssid is not None:
+                on_ssid(ssid)
+
             try:
                 async with websockets.connect(url) as ws:
                     outbox.append(
@@ -682,6 +721,7 @@ class BinanceWorker(ExchangeWorker):
                                     "venue": "binance",
                                     "ticker": ticker,
                                     "timeframe": timeframe,
+                                    "stream_session_id": ssid,
                                     "kline": {
                                         "open_time_ms": k["t"],
                                         "open": k["o"],
@@ -697,6 +737,8 @@ class BinanceWorker(ExchangeWorker):
                             log.warning("kline parse error: %s", exc)
 
             except Exception as exc:
+                if stop_event.is_set():
+                    break
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -706,5 +748,4 @@ class BinanceWorker(ExchangeWorker):
                         "reason": str(exc),
                     }
                 )
-                if not stop_event.is_set():
-                    await asyncio.sleep(1.0)
+                await asyncio.sleep(1.0)

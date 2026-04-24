@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any
+from collections.abc import Callable
+
+OnSsidUpdate = Callable[[str], None]
 
 
 class ExchangeWorker(ABC):
@@ -14,6 +16,10 @@ class ExchangeWorker(ABC):
     The inbox/outbox queues form the boundary: if we later split into
     subprocesses, only this interface needs to change.
     """
+
+    @abstractmethod
+    async def set_proxy(self, url: str | None) -> None:
+        """Apply a new proxy URL, closing any open HTTP client."""
 
     @abstractmethod
     async def list_tickers(self, market: str) -> list[dict]:
@@ -47,6 +53,8 @@ class ExchangeWorker(ABC):
         stream_session_id: str,
         outbox: list[dict],
         stop_event: asyncio.Event,
+        *,
+        on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         """Push trade batch events into outbox until stop_event is set."""
 
@@ -58,6 +66,8 @@ class ExchangeWorker(ABC):
         stream_session_id: str,
         outbox: list[dict],
         stop_event: asyncio.Event,
+        *,
+        on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         """Push depth diff/snapshot/gap events into outbox until stop_event is set."""
 
@@ -70,5 +80,7 @@ class ExchangeWorker(ABC):
         stream_session_id: str,
         outbox: list[dict],
         stop_event: asyncio.Event,
+        *,
+        on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         """Push kline update events into outbox until stop_event is set."""
