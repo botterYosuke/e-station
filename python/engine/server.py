@@ -14,6 +14,7 @@ import orjson
 import websockets
 from websockets import ServerConnection
 
+from engine.exchanges.base import WsNativeResyncTriggered
 from engine.exchanges.binance import BinanceWorker
 from engine.exchanges.bybit import BybitWorker
 from engine.exchanges.hyperliquid import HyperliquidWorker
@@ -389,6 +390,16 @@ class DataEngineServer:
         async def _run() -> None:
             try:
                 await coro
+            except ValueError as exc:
+                log.warning("Fetch bad request (request_id=%s): %s", request_id, exc)
+                self._outbox.append(
+                    {
+                        "event": "Error",
+                        "request_id": request_id,
+                        "code": "not_found",
+                        "message": str(exc),
+                    }
+                )
             except Exception as exc:
                 log.warning("Fetch failed (request_id=%s): %s", request_id, exc)
                 self._outbox.append(
@@ -524,7 +535,19 @@ class DataEngineServer:
                 "RequestDepthSnapshot: no active depth stream and no stream_session_id provided"
             )
 
-        snap = await worker.fetch_depth_snapshot(ticker, _market_from_msg(msg, venue))
+        try:
+            snap = await worker.fetch_depth_snapshot(ticker, _market_from_msg(msg, venue))
+        except WsNativeResyncTriggered:
+            # WS-native venues (e.g. Bybit orderbook.200) cannot provide a compatible REST
+            # snapshot. The worker signals its active WS stream to reconnect; Rust will
+            # receive a fresh DepthSnapshot via the stream once the WS reconnects.
+            log.info(
+                "RequestDepthSnapshot: WS-native resync triggered for %s/%s — "
+                "snapshot will arrive via stream reconnect",
+                venue,
+                ticker,
+            )
+            return
         self._outbox.append(
             {
                 "event": "DepthSnapshot",

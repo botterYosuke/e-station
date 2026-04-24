@@ -11,7 +11,7 @@ import httpx
 import orjson
 import websockets
 
-from engine.exchanges.base import ExchangeWorker, OnSsidUpdate
+from engine.exchanges.base import ExchangeWorker, OnSsidUpdate, WsNativeResyncTriggered
 from engine.limiter import TokenBucket
 
 log = logging.getLogger(__name__)
@@ -227,6 +227,14 @@ class BybitWorker(ExchangeWorker):
         self._limiter = BybitLimiter()
         self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+        # Keyed by (ticker, market); set to trigger WS reconnect from outside the stream task.
+        self._reconnect_triggers: dict[tuple[str, str], asyncio.Event] = {}
+
+    def _reconnect_trigger(self, ticker: str, market: str) -> asyncio.Event:
+        key = (ticker, market)
+        if key not in self._reconnect_triggers:
+            self._reconnect_triggers[key] = asyncio.Event()
+        return self._reconnect_triggers[key]
 
     # ------------------------------------------------------------------
     # HTTP client lifecycle
@@ -429,14 +437,12 @@ class BybitWorker(ExchangeWorker):
     # ------------------------------------------------------------------
 
     async def fetch_depth_snapshot(self, ticker: str, market: str) -> dict:
-        # REST orderbook `u` corresponds to the 1000-level WS stream namespace,
-        # not orderbook.200. Sequences are incompatible, so a REST snapshot would
-        # corrupt gap recovery. Bybit depth resync is WS-native: the stream
-        # reconnects and the exchange sends a fresh type="snapshot" message.
-        raise NotImplementedError(
-            "Bybit orderbook.200 depth resync is WS-native. "
-            "REST snapshot u is 1000-level WS namespace, not compatible with "
-            "orderbook.200 u. Reconnect the WS stream to receive a fresh snapshot."
+        # Bybit's REST orderbook uses a different sequence namespace than orderbook.200,
+        # so REST snapshots cannot be spliced into the live WS feed. Resync is WS-native:
+        # signal the active stream to reconnect; a fresh type="snapshot" arrives via WS.
+        self._reconnect_trigger(ticker, market).set()
+        raise WsNativeResyncTriggered(
+            "Bybit orderbook.200 depth resync is WS-native — reconnect triggered."
         )
 
     # ------------------------------------------------------------------
@@ -466,6 +472,7 @@ class BybitWorker(ExchangeWorker):
                 on_ssid(ssid)
 
             batch: list[dict] = []
+            _current_ssid = ssid  # freeze before closures so reconnect doesn't bleed
 
             def _flush_batch() -> None:
                 nonlocal batch
@@ -476,7 +483,7 @@ class BybitWorker(ExchangeWorker):
                         "event": "Trades",
                         "venue": "bybit",
                         "ticker": ticker,
-                        "stream_session_id": ssid,
+                        "stream_session_id": _current_ssid,
                         "trades": batch,
                     }
                 )
@@ -524,6 +531,10 @@ class BybitWorker(ExchangeWorker):
                                 log.warning("bybit trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
+                        try:
+                            await flush_task
+                        except asyncio.CancelledError:
+                            pass
                         _flush_batch()
 
             except Exception as exc:
@@ -562,76 +573,83 @@ class BybitWorker(ExchangeWorker):
             {"op": "subscribe", "args": [depth_topic]}
         ).decode()
         conn_counter = 0
+        reconnect_trigger = self._reconnect_trigger(ticker, market)
 
-        while not stop_event.is_set():
-            conn_counter += 1
-            ssid = f"{stream_session_id}:{conn_counter}"
-            if on_ssid is not None:
-                on_ssid(ssid)
+        try:
+            while not stop_event.is_set():
+                conn_counter += 1
+                ssid = f"{stream_session_id}:{conn_counter}"
+                if on_ssid is not None:
+                    on_ssid(ssid)
 
-            syncer = BybitDepthSyncer(
-                venue="bybit",
-                ticker=ticker,
-                stream_session_id=ssid,
-                outbox=outbox,
-            )
+                syncer = BybitDepthSyncer(
+                    venue="bybit",
+                    ticker=ticker,
+                    stream_session_id=ssid,
+                    outbox=outbox,
+                )
 
-            try:
-                async with websockets.connect(ws_url) as ws:
-                    await ws.send(subscribe_msg)
+                try:
+                    async with websockets.connect(ws_url) as ws:
+                        await ws.send(subscribe_msg)
+                        outbox.append(
+                            {
+                                "event": "Connected",
+                                "venue": "bybit",
+                                "ticker": ticker,
+                                "stream": "depth",
+                            }
+                        )
+
+                        async for raw in ws:
+                            if stop_event.is_set():
+                                break
+                            if reconnect_trigger.is_set():
+                                reconnect_trigger.clear()
+                                break
+                            try:
+                                msg = orjson.loads(raw)
+                                topic = msg.get("topic", "")
+                                if not topic.startswith("orderbook."):
+                                    continue
+
+                                msg_type = msg.get("type", "")
+                                if msg_type not in ("snapshot", "delta"):
+                                    continue
+
+                                data = msg.get("data", {})
+                                update_id = data.get("u", 0)
+                                bids = data.get("b", [])
+                                asks = data.get("a", [])
+
+                                syncer.process_message(
+                                    msg_type=msg_type,
+                                    update_id=update_id,
+                                    bids=bids,
+                                    asks=asks,
+                                )
+
+                                if syncer.needs_resync:
+                                    # Reconnect to get a fresh WS snapshot
+                                    break
+                            except Exception as exc:
+                                log.warning("bybit depth parse error: %s", exc)
+
+                except Exception as exc:
+                    if stop_event.is_set():
+                        break
                     outbox.append(
                         {
-                            "event": "Connected",
+                            "event": "Disconnected",
                             "venue": "bybit",
                             "ticker": ticker,
                             "stream": "depth",
+                            "reason": str(exc),
                         }
                     )
-
-                    async for raw in ws:
-                        if stop_event.is_set():
-                            break
-                        try:
-                            msg = orjson.loads(raw)
-                            topic = msg.get("topic", "")
-                            if not topic.startswith("orderbook."):
-                                continue
-
-                            msg_type = msg.get("type", "")
-                            if msg_type not in ("snapshot", "delta"):
-                                continue
-
-                            data = msg.get("data", {})
-                            update_id = data.get("u", 0)
-                            bids = data.get("b", [])
-                            asks = data.get("a", [])
-
-                            syncer.process_message(
-                                msg_type=msg_type,
-                                update_id=update_id,
-                                bids=bids,
-                                asks=asks,
-                            )
-
-                            if syncer.needs_resync:
-                                # Reconnect to get a fresh WS snapshot
-                                break
-                        except Exception as exc:
-                            log.warning("bybit depth parse error: %s", exc)
-
-            except Exception as exc:
-                if stop_event.is_set():
-                    break
-                outbox.append(
-                    {
-                        "event": "Disconnected",
-                        "venue": "bybit",
-                        "ticker": ticker,
-                        "stream": "depth",
-                        "reason": str(exc),
-                    }
-                )
-                await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.0)
+        finally:
+            self._reconnect_triggers.pop((ticker, market), None)
 
     # ------------------------------------------------------------------
     # WebSocket: stream_kline

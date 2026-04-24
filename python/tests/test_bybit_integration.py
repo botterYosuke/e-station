@@ -1,8 +1,8 @@
 """Integration tests for Bybit depth snapshot and trade stream correctness.
 
 Covers two bugs identified during phase-3 review:
-  1. REST fetch_depth_snapshot returns u from the 1000-level WS namespace,
-     incompatible with orderbook.200. Must raise NotImplementedError.
+  1. REST fetch_depth_snapshot is incompatible with orderbook.200 namespace.
+     Must raise WsNativeResyncTriggered and set the reconnect trigger.
   2. publicTrade BT field means "block trade", not liquidation.
 """
 
@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import orjson
 import pytest
 
+from engine.exchanges.base import WsNativeResyncTriggered
 from engine.exchanges.bybit import BybitWorker
 
 
@@ -28,16 +29,20 @@ def worker() -> BybitWorker:
 
 
 @pytest.mark.asyncio
-async def test_fetch_depth_snapshot_raises_not_implemented(worker: BybitWorker) -> None:
+async def test_fetch_depth_snapshot_raises_ws_native_resync(worker: BybitWorker) -> None:
     """REST orderbook u is 1000-level namespace; orderbook.200 resync is WS-native."""
-    with pytest.raises(NotImplementedError, match="orderbook.200"):
+    with pytest.raises(WsNativeResyncTriggered, match="orderbook.200"):
         await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
+
+    assert worker._reconnect_trigger("BTCUSDT", "linear_perp").is_set()
 
 
 @pytest.mark.asyncio
 async def test_fetch_depth_snapshot_raises_for_inverse(worker: BybitWorker) -> None:
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(WsNativeResyncTriggered):
         await worker.fetch_depth_snapshot("BTCUSD", "inverse_perp")
+
+    assert worker._reconnect_trigger("BTCUSD", "inverse_perp").is_set()
 
 
 # ---------------------------------------------------------------------------

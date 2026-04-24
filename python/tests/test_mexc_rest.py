@@ -408,8 +408,18 @@ async def test_fetch_ticker_stats_spot_volume_uses_quote_volume(worker, httpx_mo
 # ---------------------------------------------------------------------------
 
 
+def _detail_response(*items):
+    return {"data": list(items)}
+
+
 @pytest.mark.asyncio
 async def test_fetch_ticker_stats_futures_single(worker, httpx_mock: HTTPXMock):
+    # contract size = 0.001 BTC, price = 30000.5 USDT, volume24 = 1_000_000 contracts
+    # linear daily_volume = 1_000_000 * 0.001 * 30000.5 = 30_000_500
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_detail_response(_contract_item("BTC_USDT", contract_size=0.001)),
+    )
     httpx_mock.add_response(
         url=f"{_REST_V1}/ticker",
         json=_futures_tickers(
@@ -419,10 +429,86 @@ async def test_fetch_ticker_stats_futures_single(worker, httpx_mock: HTTPXMock):
     result = await worker.fetch_ticker_stats("BTC_USDT", "linear_perp")
     assert result["mark_price"] == "30000.5"
     assert abs(float(result["daily_price_chg"]) - 0.5) < 0.01
+    expected_volume = 1_000_000.0 * 0.001 * 30000.5
+    assert abs(float(result["daily_volume"]) - expected_volume) < 1.0, (
+        f"linear daily_volume mismatch: {result['daily_volume']} != {expected_volume}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_futures_single_inverse_daily_volume(worker, httpx_mock: HTTPXMock):
+    # inverse: daily_volume = volume24 * contract_size (no price multiplier)
+    # contract_size = 1 USD, volume24 = 500_000 contracts
+    # daily_volume = 500_000 * 1 = 500_000
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_detail_response(_contract_item("BTC_USD", contract_size=1.0, quote_coin="USD", settle_coin="BTC")),
+    )
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/ticker",
+        json=_futures_tickers(
+            _futures_ticker("BTC_USD", last_price="30000.0", volume24="500000.0"),
+        ),
+    )
+    result = await worker.fetch_ticker_stats("BTC_USD", "inverse_perp")
+    expected_volume = 500_000.0 * 1.0
+    assert abs(float(result["daily_volume"]) - expected_volume) < 1.0, (
+        f"inverse daily_volume mismatch: {result['daily_volume']} != {expected_volume}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_futures_skips_unknown_contract_size(worker, httpx_mock: HTTPXMock):
+    # Symbols absent from /detail must be excluded rather than emitting daily_volume=0.
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_detail_response(_contract_item("ETH_USDT", contract_size=0.01)),
+        # BTC_USDT intentionally absent
+    )
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/ticker",
+        json=_futures_tickers(
+            _futures_ticker("BTC_USDT"),
+            _futures_ticker("ETH_USDT"),
+        ),
+    )
+    result = await worker.fetch_ticker_stats("__all__", "linear_perp")
+    assert "ETH_USDT" in result
+    assert "BTC_USDT" not in result, (
+        "symbol with unknown contract size must be skipped, not returned with daily_volume=0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_futures_lazy_contract_sizes(worker, httpx_mock: HTTPXMock):
+    # If list_tickers was never called, _contract_sizes is empty.
+    # _fetch_ticker_stats_futures must auto-populate from /detail.
+    assert not worker._contract_sizes, "precondition: _contract_sizes must start empty"
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_detail_response(_contract_item("BTC_USDT", contract_size=0.001)),
+    )
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/ticker",
+        json=_futures_tickers(
+            _futures_ticker("BTC_USDT", last_price="50000.0", volume24="100.0"),
+        ),
+    )
+    result = await worker.fetch_ticker_stats("BTC_USDT", "linear_perp")
+    expected = 100.0 * 0.001 * 50000.0
+    assert abs(float(result["daily_volume"]) - expected) < 0.1
 
 
 @pytest.mark.asyncio
 async def test_fetch_ticker_stats_futures_all(worker, httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_detail_response(
+            _contract_item("BTC_USDT", contract_size=0.001),
+            _contract_item("ETH_USDT", contract_size=0.01),
+            _contract_item("BTC_USD", contract_size=1.0, quote_coin="USD", settle_coin="BTC"),
+        ),
+    )
     httpx_mock.add_response(
         url=f"{_REST_V1}/ticker",
         json=_futures_tickers(
@@ -440,6 +526,13 @@ async def test_fetch_ticker_stats_futures_all(worker, httpx_mock: HTTPXMock):
 
 @pytest.mark.asyncio
 async def test_fetch_ticker_stats_futures_all_inverse(worker, httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_detail_response(
+            _contract_item("BTC_USDT", contract_size=0.001),
+            _contract_item("BTC_USD", contract_size=1.0, quote_coin="USD", settle_coin="BTC"),
+        ),
+    )
     httpx_mock.add_response(
         url=f"{_REST_V1}/ticker",
         json=_futures_tickers(

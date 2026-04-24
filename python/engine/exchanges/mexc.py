@@ -212,6 +212,8 @@ class MexcWorker(ExchangeWorker):
         self._limiter = MexcLimiter()
         self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+        # Populated by _list_tickers_futures; keyed by futures symbol.
+        self._contract_sizes: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # HTTP client lifecycle
@@ -273,6 +275,14 @@ class MexcWorker(ExchangeWorker):
             )
         return result
 
+    async def _populate_contract_sizes(self) -> None:
+        """Fetch contract sizes from /detail if they have not been loaded yet."""
+        data = await self._get_json(f"{_REST_V1}/detail")
+        for item in data.get("data", []):
+            symbol = item.get("symbol", "")
+            if symbol:
+                self._contract_sizes[symbol] = float(item.get("contractSize", 1))
+
     async def _list_tickers_futures(self, market: str) -> list[dict]:
         data = await self._get_json(f"{_REST_V1}/detail")
         result = []
@@ -299,9 +309,11 @@ class MexcWorker(ExchangeWorker):
             contract_size = float(item.get("contractSize", 1))
             min_qty = min_vol * contract_size
 
+            symbol = item["symbol"]
+            self._contract_sizes[symbol] = contract_size
             result.append(
                 {
-                    "symbol": item["symbol"],
+                    "symbol": symbol,
                     "min_ticksize": price_unit,
                     "min_qty": min_qty,
                     "contract_size": contract_size,
@@ -470,6 +482,8 @@ class MexcWorker(ExchangeWorker):
         raise ValueError(f"Ticker {ticker!r} not found in MEXC spot stats response")
 
     async def _fetch_ticker_stats_futures(self, ticker: str, market: str) -> dict:
+        if not self._contract_sizes:
+            await self._populate_contract_sizes()
         data = await self._get_json(f"{_REST_V1}/ticker")
         items = data.get("data", [])
 
@@ -480,24 +494,36 @@ class MexcWorker(ExchangeWorker):
                 return _is_inverse(symbol)
             return True
 
-        def _parse(item: dict) -> dict:
+        def _parse(item: dict) -> dict | None:
+            symbol = item.get("symbol", "")
+            cs = self._contract_sizes.get(symbol)
+            if cs is None:
+                # Contract size unknown — skip to avoid silently emitting daily_volume=0.
+                log.debug("mexc ticker stats: skipping %s (contract size unknown)", symbol)
+                return None
             last_price = float(item.get("lastPrice", 0))
             rise_fall_rate = float(item.get("riseFallRate", 0))
             daily_price_chg = rise_fall_rate * 100.0
+            volume24 = float(item.get("volume24", 0))
+            if _is_inverse(symbol):
+                daily_volume_usd = volume24 * cs
+            else:
+                daily_volume_usd = volume24 * cs * last_price
             return {
                 "mark_price": item["lastPrice"],
                 "daily_price_chg": str(daily_price_chg),
-                # volume24 is in contracts; USD conversion would need contract_size
-                # Return raw volume24 as daily_volume for now
-                "daily_volume": str(item.get("volume24", "0")),
+                "daily_volume": str(daily_volume_usd),
             }
 
         if ticker == "__all__":
-            return {
-                item["symbol"]: _parse(item)
-                for item in items
-                if "symbol" in item and _matches_market(item["symbol"])
-            }
+            result = {}
+            for item in items:
+                sym = item.get("symbol", "")
+                if sym and _matches_market(sym):
+                    parsed = _parse(item)
+                    if parsed is not None:
+                        result[sym] = parsed
+            return result
 
         for item in items:
             if item.get("symbol") == ticker:
@@ -573,6 +599,7 @@ class MexcWorker(ExchangeWorker):
                 on_ssid(ssid)
 
             batch: list[dict] = []
+            _current_ssid = ssid  # freeze before closures so reconnect doesn't bleed
 
             def _flush_batch() -> None:
                 nonlocal batch
@@ -583,7 +610,7 @@ class MexcWorker(ExchangeWorker):
                         "event": "Trades",
                         "venue": "mexc",
                         "ticker": ticker,
-                        "stream_session_id": ssid,
+                        "stream_session_id": _current_ssid,
                         "trades": batch,
                     }
                 )
@@ -634,6 +661,14 @@ class MexcWorker(ExchangeWorker):
                     finally:
                         flush_task.cancel()
                         ping_task.cancel()
+                        try:
+                            await flush_task
+                        except asyncio.CancelledError:
+                            pass
+                        try:
+                            await ping_task
+                        except asyncio.CancelledError:
+                            pass
                         _flush_batch()
 
             except Exception as exc:
@@ -750,6 +785,10 @@ class MexcWorker(ExchangeWorker):
                                 log.warning("mexc depth parse error: %s", exc)
                     finally:
                         ping_task.cancel()
+                        try:
+                            await ping_task
+                        except asyncio.CancelledError:
+                            pass
 
             except Exception as exc:
                 if stop_event.is_set():
@@ -858,6 +897,10 @@ class MexcWorker(ExchangeWorker):
                                 log.warning("mexc kline parse error: %s", exc)
                     finally:
                         ping_task.cancel()
+                        try:
+                            await ping_task
+                        except asyncio.CancelledError:
+                            pass
 
             except Exception as exc:
                 if stop_event.is_set():

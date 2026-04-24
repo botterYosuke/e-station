@@ -9,6 +9,14 @@ from collections.abc import Callable
 OnSsidUpdate = Callable[[str], None]
 
 
+class WsNativeResyncTriggered(Exception):
+    """Raised by fetch_depth_snapshot() when the venue cannot provide a REST snapshot.
+
+    The worker has already signalled its live WS stream to reconnect; Rust will
+    receive a fresh DepthSnapshot via the stream once the WS reconnects.
+    """
+
+
 class ExchangeWorker(ABC):
     """Abstract exchange worker.
 

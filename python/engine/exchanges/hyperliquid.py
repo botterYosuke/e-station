@@ -514,6 +514,7 @@ class HyperliquidWorker(ExchangeWorker):
                 on_ssid(ssid)
 
             batch: list[dict] = []
+            _current_ssid = ssid  # freeze before closures so reconnect doesn't bleed
 
             def _flush_batch() -> None:
                 nonlocal batch
@@ -524,7 +525,7 @@ class HyperliquidWorker(ExchangeWorker):
                         "event": "Trades",
                         "venue": "hyperliquid",
                         "ticker": ticker,
-                        "stream_session_id": ssid,
+                        "stream_session_id": _current_ssid,
                         "trades": batch,
                     }
                 )
@@ -570,6 +571,10 @@ class HyperliquidWorker(ExchangeWorker):
                                 log.warning("hyperliquid trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
+                        try:
+                            await flush_task
+                        except asyncio.CancelledError:
+                            pass
                         _flush_batch()
 
             except Exception as exc:

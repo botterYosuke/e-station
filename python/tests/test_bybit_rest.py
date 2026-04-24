@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
+from engine.exchanges.base import WsNativeResyncTriggered
 from engine.exchanges.bybit import BybitWorker
 
 _REST = "https://api.bybit.com"
@@ -344,8 +345,23 @@ async def test_fetch_ticker_stats_not_found(worker: BybitWorker, httpx_mock: HTT
 
 
 @pytest.mark.asyncio
-async def test_fetch_depth_snapshot_not_implemented(worker: BybitWorker) -> None:
-    # REST snapshot u is 1000-level WS namespace, incompatible with orderbook.200.
-    # Bybit depth resync is WS-native (reconnect triggers a fresh type="snapshot").
-    with pytest.raises(NotImplementedError, match="orderbook.200"):
+async def test_fetch_depth_snapshot_triggers_reconnect(worker: BybitWorker) -> None:
+    # REST snapshot is incompatible with orderbook.200 namespace.
+    # The worker must set the reconnect trigger AND raise WsNativeResyncTriggered.
+    with pytest.raises(WsNativeResyncTriggered, match="orderbook.200"):
         await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
+
+    assert worker._reconnect_trigger("BTCUSDT", "linear_perp").is_set(), (
+        "reconnect trigger must be set so the active WS stream reconnects"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_trigger_independent_per_key(worker: BybitWorker) -> None:
+    # Trigger for BTCUSDT must not bleed into ETHUSDT.
+    try:
+        await worker.fetch_depth_snapshot("BTCUSDT", "linear_perp")
+    except WsNativeResyncTriggered:
+        pass
+
+    assert not worker._reconnect_trigger("ETHUSDT", "linear_perp").is_set()
