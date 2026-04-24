@@ -319,7 +319,16 @@ impl VenueBackend for EngineClientBackend {
                     }
 
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("depth_stream: lagged by {n} events");
+                        // Depth diffs must not be silently dropped (spec §4.4).
+                        // Force a snapshot resync so we never serve a corrupted book.
+                        log::warn!("depth_stream: lagged by {n} events — forcing resync for {ticker_sym}");
+                        tracker.lock().await.reset_ticker(&ticker_sym);
+                        let _ = connection
+                            .send(Command::RequestDepthSnapshot {
+                                venue: venue.clone(),
+                                ticker: ticker_sym.clone(),
+                            })
+                            .await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());
@@ -371,9 +380,7 @@ impl VenueBackend for EngineClientBackend {
                             )));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return Err(AdapterError::WebsocketError(
-                                "engine connection closed".to_string(),
-                            ));
+                            return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
                     }
@@ -391,8 +398,13 @@ impl VenueBackend for EngineClientBackend {
         _markets: &[MarketKind],
         _contract_sizes: Option<HashMap<Ticker, f32>>,
     ) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> {
-        // Phase 2: stats fetch is not yet mapped to Python engine output format.
-        Box::pin(async { Ok(HashMap::new()) })
+        // TickerStats field mapping (mark_price, daily_price_chg, daily_volume) requires
+        // venue-specific DTO normalisation not yet implemented for the Python engine path.
+        Box::pin(async {
+            Err(AdapterError::InvalidRequest(
+                "fetch_ticker_stats not yet implemented for EngineClientBackend".to_string(),
+            ))
+        })
     }
 
     fn fetch_klines(
@@ -447,9 +459,7 @@ impl VenueBackend for EngineClientBackend {
                             )));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return Err(AdapterError::WebsocketError(
-                                "engine connection closed".to_string(),
-                            ));
+                            return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
                     }
@@ -512,9 +522,7 @@ impl VenueBackend for EngineClientBackend {
                             )));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return Err(AdapterError::WebsocketError(
-                                "engine connection closed".to_string(),
-                            ));
+                            return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
                     }
@@ -558,17 +566,11 @@ impl VenueBackend for EngineClientBackend {
 
             let mut rx = connection.subscribe_events();
 
+            // The Python engine currently returns `not_supported` for FetchTrades.
+            // Match on Error with our request_id to surface that clearly.
             tokio::time::timeout(FETCH_TIMEOUT, async {
                 loop {
                     match rx.recv().await {
-                        // Python engine returns Trades with request_id for fetch results.
-                        Ok(EngineEvent::Trades { venue: _, ticker: _, trades, stream_session_id, .. })
-                            if stream_session_id == request_id =>
-                        {
-                            let result: Vec<Trade> =
-                                trades.iter().filter_map(|t| t.to_trade()).collect();
-                            return Ok(result);
-                        }
                         Ok(EngineEvent::Error { request_id: Some(rid), code, message })
                             if rid == request_id =>
                         {
@@ -577,9 +579,7 @@ impl VenueBackend for EngineClientBackend {
                             )));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return Err(AdapterError::WebsocketError(
-                                "engine connection closed".to_string(),
-                            ));
+                            return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
                     }
@@ -625,9 +625,7 @@ impl VenueBackend for EngineClientBackend {
                             )));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return Err(AdapterError::WebsocketError(
-                                "engine connection closed".to_string(),
-                            ));
+                            return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
                     }

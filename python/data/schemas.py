@@ -7,8 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-SCHEMA_MAJOR: int = 0
-SCHEMA_MINOR: int = 1
+SCHEMA_MAJOR: int = 1
+SCHEMA_MINOR: int = 0
 
 
 # ---------------------------------------------------------------------------

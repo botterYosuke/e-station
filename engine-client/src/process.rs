@@ -76,6 +76,9 @@ pub struct SubscriptionKey {
 pub struct ProcessManager {
     pub python_cmd: String,
     pub active_subscriptions: Arc<Mutex<HashSet<SubscriptionKey>>>,
+    /// Proxy URL kept as source-of-truth on the Rust side (spec §5.3, §5.4).
+    /// Sent via `SetProxy` after every `Ready` handshake.
+    pub proxy_url: Arc<Mutex<Option<String>>>,
 }
 
 impl ProcessManager {
@@ -83,11 +86,21 @@ impl ProcessManager {
         Self {
             python_cmd: python_cmd.into(),
             active_subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            proxy_url: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Spawn the Python process on `port`, wait for it to be ready,
-    /// connect the WebSocket, and return the `EngineConnection`.
+    /// Update the stored proxy URL; also re-applies it on the next restart.
+    pub async fn set_proxy(&self, url: Option<String>) {
+        *self.proxy_url.lock().await = url;
+    }
+
+    /// Spawn the Python process on `port`, handshake, then apply proxy + subscriptions.
+    ///
+    /// Recovery sequence (spec §4.5, §5.3):
+    /// 1. Hello / Ready  — already performed inside `EngineConnection::connect`
+    /// 2. SetProxy       — if a proxy URL is stored
+    /// 3. Subscribe      — re-send all active subscriptions
     pub async fn start(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
         let mut proc = PythonProcess::spawn(&self.python_cmd, port).await?;
 
@@ -97,7 +110,15 @@ impl ProcessManager {
         let url = format!("ws://127.0.0.1:{port}");
         let connection = EngineConnection::connect(&url, proc.token()).await?;
 
-        // Re-apply saved subscriptions (no-op on first start since the set is empty).
+        // Step 2: SetProxy (spec §5.4) — sent after Ready, before any Subscribe.
+        let proxy = self.proxy_url.lock().await.clone();
+        if proxy.is_some() {
+            let _ = connection
+                .send(crate::dto::Command::SetProxy { url: proxy })
+                .await;
+        }
+
+        // Step 3: re-apply saved subscriptions (no-op on first start).
         let subs = self.active_subscriptions.lock().await.clone();
         for sub in &subs {
             let _ = connection

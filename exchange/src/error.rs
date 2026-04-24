@@ -10,6 +10,9 @@ pub enum AdapterError {
     WebsocketError(String),
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
+    /// The Python data engine is restarting; callers should retry.
+    #[error("Engine restarting")]
+    EngineRestarting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -82,6 +85,7 @@ impl AdapterError {
             Self::ParseError(_) => AdapterErrorKind::Parse,
             Self::WebsocketError(_) => AdapterErrorKind::Websocket,
             Self::InvalidRequest(_) => AdapterErrorKind::InvalidRequest,
+            Self::EngineRestarting => AdapterErrorKind::Websocket,
         }
     }
 
@@ -125,6 +129,7 @@ impl AdapterError {
             Self::ParseError(_) => "Invalid server response. Check logs for details.".to_string(),
             Self::WebsocketError(_) => "Stream error. Check logs for details.".to_string(),
             Self::InvalidRequest(message) => message.clone(),
+            Self::EngineRestarting => "Data engine restarting. Please retry.".to_string(),
         }
     }
 

@@ -5,6 +5,14 @@ Schema versioning follows the policy in [spec.md §4.5.1](../spec.md#451-スキ�
 - **major** bump: breaking changes (field removal, rename, enum variant removal)
 - **minor** bump: backwards-compatible additions (new fields, new variants, new commands)
 
+## v1.0 (2026-04-24) — Phase 2 baseline (breaking)
+
+- **major bump 0→1**: Rust `engine-client` crate shipped with `SCHEMA_MAJOR = 1`.
+  Python `schemas.py` updated to match (`SCHEMA_MAJOR = 1, SCHEMA_MINOR = 0`).
+  The v0.1 schema was development-only and never reached a stable release, so bumping
+  major is cleaner than accumulating minor deltas on an unreleased version.
+- No message shape changes; bump reflects the first real handshake-enforced version.
+
 ## v0.1 (2026-04-24) — initial
 
 - First schema definition for Phase 0.
