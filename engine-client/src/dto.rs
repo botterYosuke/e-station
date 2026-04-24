@@ -23,11 +23,13 @@ pub enum Command {
         ticker: String,
         stream: String,
         timeframe: Option<String>,
+        market: String,
     },
     Unsubscribe {
         venue: String,
         ticker: String,
         stream: String,
+        market: String,
     },
     FetchKlines {
         request_id: String,
@@ -35,6 +37,7 @@ pub enum Command {
         ticker: String,
         timeframe: String,
         limit: u32,
+        market: String,
     },
     FetchTrades {
         request_id: String,
@@ -49,15 +52,18 @@ pub enum Command {
         ticker: String,
         timeframe: String,
         limit: u32,
+        market: String,
     },
     FetchTickerStats {
         request_id: String,
         venue: String,
         ticker: String,
+        market: String,
     },
     ListTickers {
         request_id: String,
         venue: String,
+        market: String,
     },
     GetTickerMetadata {
         request_id: String,
@@ -67,6 +73,7 @@ pub enum Command {
     RequestDepthSnapshot {
         venue: String,
         ticker: String,
+        market: String,
     },
     Shutdown,
 }

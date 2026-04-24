@@ -69,6 +69,7 @@ pub struct SubscriptionKey {
     pub ticker: String,
     pub stream: String,
     pub timeframe: Option<String>,
+    pub market: String,
 }
 
 // ── ProcessManager ────────────────────────────────────────────────────────────
@@ -127,6 +128,7 @@ impl ProcessManager {
                     ticker: sub.ticker.clone(),
                     stream: sub.stream.clone(),
                     timeframe: sub.timeframe.clone(),
+                    market: sub.market.clone(),
                 })
                 .await;
         }

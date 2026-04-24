@@ -437,13 +437,20 @@ class BinanceWorker(ExchangeWorker):
             weight = 80
 
         rows = await self._get_json(url, weight)
+
+        def _parse(item: dict) -> dict:
+            return {
+                "mark_price": str(item["lastPrice"]),
+                "daily_price_chg": str(item["priceChangePercent"]),
+                "daily_volume": str(item.get("quoteVolume", item.get("volume", "0"))),
+            }
+
+        if ticker == "__all__":
+            return {item["symbol"]: _parse(item) for item in rows if "symbol" in item}
+
         for item in rows:
             if item.get("symbol") == ticker:
-                return {
-                    "mark_price": str(item["lastPrice"]),
-                    "daily_price_chg": str(item["priceChangePercent"]),
-                    "daily_volume": str(item.get("quoteVolume", item.get("volume", "0"))),
-                }
+                return _parse(item)
         raise ValueError(f"Ticker {ticker} not found in stats response")
 
     # ------------------------------------------------------------------

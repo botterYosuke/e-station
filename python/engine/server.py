@@ -94,8 +94,8 @@ class DataEngineServer:
             "bybit": BybitWorker(),
         }
 
-        # Active stream tasks keyed by (venue, ticker, stream)
-        self._streams: dict[tuple[str, str, str], _StreamHandle] = {}
+        # Active stream tasks keyed by (venue, ticker, market, stream)
+        self._streams: dict[tuple[str, str, str, str], _StreamHandle] = {}
 
         # Monotonic counter to produce a fresh base ssid per subscribe
         self._stream_counter = 0
@@ -317,7 +317,8 @@ class DataEngineServer:
             log.warning("Subscribe: unknown venue %s", venue)
             return
 
-        key = (venue, ticker, stream)
+        market = _market_from_msg(msg, venue)
+        key = (venue, ticker, market, stream)
         if key in self._streams:
             log.debug("Already subscribed to %s", key)
             return
@@ -330,14 +331,13 @@ class DataEngineServer:
 
         def _on_ssid(new_ssid: str) -> None:
             handle.current_ssid = new_ssid
-
         if stream == "trade":
             coro = worker.stream_trades(
-                ticker, _market(ticker), base_ssid, self._outbox, stop, on_ssid=_on_ssid
+                ticker, market, base_ssid, self._outbox, stop, on_ssid=_on_ssid
             )
         elif stream == "depth":
             coro = worker.stream_depth(
-                ticker, _market(ticker), base_ssid, self._outbox, stop, on_ssid=_on_ssid
+                ticker, market, base_ssid, self._outbox, stop, on_ssid=_on_ssid
             )
         elif stream == "kline" or stream.startswith("kline_"):
             tf = timeframe or (
@@ -345,7 +345,7 @@ class DataEngineServer:
             )
             coro = worker.stream_kline(
                 ticker,
-                _market(ticker),
+                market,
                 tf,
                 base_ssid,
                 self._outbox,
@@ -366,7 +366,8 @@ class DataEngineServer:
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
         stream = msg.get("stream", "")
-        key = (venue, ticker, stream)
+        market = _market_from_msg(msg, venue)
+        key = (venue, ticker, market, stream)
 
         handle = self._streams.pop(key, None)
         if handle:
@@ -401,7 +402,7 @@ class DataEngineServer:
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
-        tickers = await worker.list_tickers(_default_market(venue))
+        tickers = await worker.list_tickers(_market_from_msg(msg, venue))
         self._outbox.append(
             {
                 "event": "TickerInfo",
@@ -418,7 +419,7 @@ class DataEngineServer:
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
-        tickers = await worker.list_tickers(_default_market(venue))
+        tickers = await worker.list_tickers(_market_from_msg(msg, venue))
         meta = next((t for t in tickers if t["symbol"] == ticker), None)
         self._outbox.append(
             {
@@ -439,7 +440,7 @@ class DataEngineServer:
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
         klines = await worker.fetch_klines(
-            ticker, _market(ticker), timeframe, limit=limit
+            ticker, _market_from_msg(msg, venue), timeframe, limit=limit
         )
         self._outbox.append(
             {
@@ -462,7 +463,7 @@ class DataEngineServer:
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
         oi = await worker.fetch_open_interest(
-            ticker, _market(ticker), timeframe, limit=limit
+            ticker, _market_from_msg(msg, venue), timeframe, limit=limit
         )
         self._outbox.append(
             {
@@ -481,7 +482,7 @@ class DataEngineServer:
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
-        stats = await worker.fetch_ticker_stats(ticker, _market(ticker))
+        stats = await worker.fetch_ticker_stats(ticker, _market_from_msg(msg, venue))
         self._outbox.append(
             {
                 "event": "TickerStats",
@@ -507,7 +508,8 @@ class DataEngineServer:
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
 
-        handle = self._streams.get((venue, ticker, "depth"))
+        market = _market_from_msg(msg, venue)
+        handle = self._streams.get((venue, ticker, market, "depth"))
         ssid = handle.current_ssid if handle is not None else None
         if ssid is None:
             ssid = client_ssid
@@ -516,7 +518,7 @@ class DataEngineServer:
                 "RequestDepthSnapshot: no active depth stream and no stream_session_id provided"
             )
 
-        snap = await worker.fetch_depth_snapshot(ticker, _market(ticker))
+        snap = await worker.fetch_depth_snapshot(ticker, _market_from_msg(msg, venue))
         self._outbox.append(
             {
                 "event": "DepthSnapshot",
@@ -571,12 +573,10 @@ class DataEngineServer:
 # ---------------------------------------------------------------------------
 
 
-def _market(_ticker: str) -> str:
-    """Infer market type from ticker symbol (Phase 1: all Binance = linear_perp)."""
-    return "linear_perp"
+def _market_from_msg(msg: dict, venue: str) -> str:
+    """Return the market kind sent by the Rust client, falling back to the venue default."""
+    return msg.get("market") or _default_market(venue)
 
 
 def _default_market(venue: str) -> str:
-    if venue == "binance":
-        return "linear_perp"
     return "linear_perp"

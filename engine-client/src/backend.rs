@@ -47,6 +47,14 @@ impl EngineClientBackend {
         }
     }
 
+    fn market_kind_to_ipc(mk: MarketKind) -> String {
+        match mk {
+            MarketKind::LinearPerps => "linear_perp".to_string(),
+            MarketKind::InversePerps => "inverse_perp".to_string(),
+            MarketKind::Spot => "spot".to_string(),
+        }
+    }
+
     /// Derive the `Exchange` variant that matches `venue + market_kind`.
     ///
     /// Falls back to `BinanceLinear` so the stream can still emit meaningful events.
@@ -81,6 +89,7 @@ impl VenueBackend for EngineClientBackend {
                     ticker: ticker_sym,
                     stream: "kline".to_string(),
                     timeframe: Some(tf_str),
+                    market: Self::market_kind_to_ipc(market_kind),
                 };
                 if let Err(e) = connection.send(cmd).await {
                     log::error!("kline_stream: subscribe failed: {e}");
@@ -153,6 +162,7 @@ impl VenueBackend for EngineClientBackend {
                     ticker: ticker_sym,
                     stream: "trade".to_string(),
                     timeframe: None,
+                    market: Self::market_kind_to_ipc(market_kind),
                 };
                 if let Err(e) = connection.send(cmd).await {
                     log::error!("trade_stream: subscribe failed: {e}");
@@ -226,6 +236,7 @@ impl VenueBackend for EngineClientBackend {
                 ticker: ticker_sym.clone(),
                 stream: "depth".to_string(),
                 timeframe: None,
+                market: Self::market_kind_to_ipc(market_kind),
             };
             if let Err(e) = connection.send(cmd).await {
                 yield Event::Disconnected(exchange, e.to_string());
@@ -284,6 +295,7 @@ impl VenueBackend for EngineClientBackend {
                                 .send(Command::RequestDepthSnapshot {
                                     venue: venue.clone(),
                                     ticker: ticker_sym.clone(),
+                                    market: Self::market_kind_to_ipc(market_kind),
                                 })
                                 .await;
                             continue;
@@ -309,6 +321,7 @@ impl VenueBackend for EngineClientBackend {
                             .send(Command::RequestDepthSnapshot {
                                 venue: venue.clone(),
                                 ticker: ticker_sym.clone(),
+                                market: Self::market_kind_to_ipc(market_kind),
                             })
                             .await;
                     }
@@ -328,6 +341,7 @@ impl VenueBackend for EngineClientBackend {
                             .send(Command::RequestDepthSnapshot {
                                 venue: venue.clone(),
                                 ticker: ticker_sym.clone(),
+                                market: Self::market_kind_to_ipc(market_kind),
                             })
                             .await;
                     }
@@ -351,61 +365,74 @@ impl VenueBackend for EngineClientBackend {
     ) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> {
         let connection = Arc::clone(&self.connection);
         let venue = self.venue.clone();
-        let _markets = markets.to_vec();
+        let markets = markets.to_vec();
 
         Box::pin(async move {
-            let request_id = Uuid::new_v4().to_string();
-            let exchange = Self::exchange_for(&venue, MarketKind::LinearPerps);
-            let cmd = Command::ListTickers { request_id: request_id.clone(), venue };
-            connection
-                .send(cmd)
-                .await
-                .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
+            let mut out: TickerMetadataMap = HashMap::new();
 
-            let mut rx = connection.subscribe_events();
+            for &market_kind in &markets {
+                let exchange = Self::exchange_for(&venue, market_kind);
+                let request_id = Uuid::new_v4().to_string();
+                let cmd = Command::ListTickers {
+                    request_id: request_id.clone(),
+                    venue: venue.clone(),
+                    market: Self::market_kind_to_ipc(market_kind),
+                };
+                connection
+                    .send(cmd)
+                    .await
+                    .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
 
-            tokio::time::timeout(FETCH_TIMEOUT, async {
-                loop {
-                    match rx.recv().await {
-                        Ok(EngineEvent::TickerInfo { request_id: rid, tickers, .. })
-                            if rid == request_id =>
-                        {
-                            let map: TickerMetadataMap = tickers
-                                .iter()
-                                .filter_map(|t| {
-                                    let symbol = t.get("symbol")?.as_str()?;
-                                    let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
-                                    let min_qty = t.get("min_qty")?.as_f64()? as f32;
-                                    let contract_size = t
-                                        .get("contract_size")
-                                        .and_then(|v| v.as_f64())
-                                        .map(|v| v as f32);
-                                    let ticker = Ticker::new(symbol, exchange);
-                                    let info =
-                                        TickerInfo::new(ticker, min_tick, min_qty, contract_size);
-                                    Some((ticker, Some(info)))
-                                })
-                                .collect();
-                            return Ok(map);
+                let mut rx = connection.subscribe_events();
+
+                let market_map = tokio::time::timeout(FETCH_TIMEOUT, async {
+                    loop {
+                        match rx.recv().await {
+                            Ok(EngineEvent::TickerInfo { request_id: rid, tickers, .. })
+                                if rid == request_id =>
+                            {
+                                let map: TickerMetadataMap = tickers
+                                    .iter()
+                                    .filter_map(|t| {
+                                        let symbol = t.get("symbol")?.as_str()?;
+                                        let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
+                                        let min_qty = t.get("min_qty")?.as_f64()? as f32;
+                                        let contract_size = t
+                                            .get("contract_size")
+                                            .and_then(|v| v.as_f64())
+                                            .map(|v| v as f32);
+                                        let ticker = Ticker::new(symbol, exchange);
+                                        let info = TickerInfo::new(
+                                            ticker, min_tick, min_qty, contract_size,
+                                        );
+                                        Some((ticker, Some(info)))
+                                    })
+                                    .collect();
+                                return Ok(map);
+                            }
+                            Ok(EngineEvent::Error { request_id: Some(rid), code, message })
+                                if rid == request_id =>
+                            {
+                                return Err(AdapterError::InvalidRequest(format!(
+                                    "{code}: {message}"
+                                )));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                return Err(AdapterError::EngineRestarting);
+                            }
+                            _ => continue,
                         }
-                        Ok(EngineEvent::Error { request_id: Some(rid), code, message })
-                            if rid == request_id =>
-                        {
-                            return Err(AdapterError::InvalidRequest(format!(
-                                "{code}: {message}"
-                            )));
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return Err(AdapterError::EngineRestarting);
-                        }
-                        _ => continue,
                     }
-                }
-            })
-            .await
-            .map_err(|_| {
-                AdapterError::WebsocketError("fetch_ticker_metadata timeout".to_string())
-            })?
+                })
+                .await
+                .map_err(|_| {
+                    AdapterError::WebsocketError("fetch_ticker_metadata timeout".to_string())
+                })??;
+
+                out.extend(market_map);
+            }
+
+            Ok(out)
         })
     }
 
@@ -419,62 +446,89 @@ impl VenueBackend for EngineClientBackend {
         let markets = markets.to_vec();
 
         Box::pin(async move {
-            let exchange = Self::exchange_for(&venue, MarketKind::LinearPerps);
             let mut out: TickerStatsMap = HashMap::new();
 
-            // The Python engine's FetchTickerStats is per-ticker; we fire one request
-            // per market kind. For now we request stats for the default linear market.
-            let _ = markets; // market filtering is done on the Python side
+            for &market_kind in &markets {
+                let exchange = Self::exchange_for(&venue, market_kind);
+                let request_id = Uuid::new_v4().to_string();
+                let cmd = Command::FetchTickerStats {
+                    request_id: request_id.clone(),
+                    venue: venue.clone(),
+                    ticker: "__all__".to_string(),
+                    market: Self::market_kind_to_ipc(market_kind),
+                };
 
-            let request_id = Uuid::new_v4().to_string();
-            let cmd = Command::FetchTickerStats {
-                request_id: request_id.clone(),
-                venue: venue.clone(),
-                ticker: "__all__".to_string(),
-            };
+                if let Err(e) = connection.send(cmd).await {
+                    return Err(AdapterError::WebsocketError(e.to_string()));
+                }
 
-            if let Err(e) = connection.send(cmd).await {
-                return Err(AdapterError::WebsocketError(e.to_string()));
+                let mut rx = connection.subscribe_events();
+
+                let market_stats: TickerStatsMap = tokio::time::timeout(FETCH_TIMEOUT, async {
+                    loop {
+                        match rx.recv().await {
+                            Ok(EngineEvent::TickerStats {
+                                request_id: rid,
+                                ticker,
+                                stats,
+                                ..
+                            }) if rid == request_id => {
+                                // Python returns a bulk {symbol: stats} object when ticker=="__all__"
+                                if ticker == "__all__" {
+                                    let bulk: HashMap<String, serde_json::Value> =
+                                        serde_json::from_value(stats).unwrap_or_default();
+                                    return Ok(bulk
+                                        .into_iter()
+                                        .filter_map(|(sym, sv)| {
+                                            let ts = serde_json::from_value::<TickerStats>(sv)
+                                                .map_err(|e| {
+                                                    log::warn!(
+                                                        "fetch_ticker_stats: parse error \
+                                                         for {sym}: {e}"
+                                                    );
+                                                })
+                                                .ok()?;
+                                            Some((Ticker::new(&sym, exchange), ts))
+                                        })
+                                        .collect());
+                                }
+                                // Single-ticker fallback (backward compat)
+                                let mut m = TickerStatsMap::new();
+                                match serde_json::from_value::<TickerStats>(stats) {
+                                    Ok(ts) => {
+                                        m.insert(Ticker::new(&ticker, exchange), ts);
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "fetch_ticker_stats: parse error for {ticker}: {e}"
+                                        );
+                                    }
+                                }
+                                return Ok(m);
+                            }
+                            Ok(EngineEvent::Error { request_id: Some(rid), code, message })
+                                if rid == request_id =>
+                            {
+                                return Err(AdapterError::InvalidRequest(format!(
+                                    "{code}: {message}"
+                                )));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                return Err(AdapterError::EngineRestarting);
+                            }
+                            _ => continue,
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| {
+                    AdapterError::WebsocketError("fetch_ticker_stats timeout".to_string())
+                })??;
+
+                out.extend(market_stats);
             }
 
-            let mut rx = connection.subscribe_events();
-
-            tokio::time::timeout(FETCH_TIMEOUT, async {
-                loop {
-                    match rx.recv().await {
-                        Ok(EngineEvent::TickerStats {
-                            request_id: rid,
-                            ticker,
-                            stats,
-                            ..
-                        }) if rid == request_id => {
-                            let ticker_key = Ticker::new(&ticker, exchange);
-                            match serde_json::from_value::<TickerStats>(stats) {
-                                Ok(ts) => { out.insert(ticker_key, ts); }
-                                Err(e) => {
-                                    log::warn!("fetch_ticker_stats: parse error for {ticker}: {e}");
-                                }
-                            }
-                            return Ok(out);
-                        }
-                        Ok(EngineEvent::Error { request_id: Some(rid), code, message })
-                            if rid == request_id =>
-                        {
-                            return Err(AdapterError::InvalidRequest(format!(
-                                "{code}: {message}"
-                            )));
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return Err(AdapterError::EngineRestarting);
-                        }
-                        _ => continue,
-                    }
-                }
-            })
-            .await
-            .map_err(|_| {
-                AdapterError::WebsocketError("fetch_ticker_stats timeout".to_string())
-            })?
+            Ok(out)
         })
     }
 
@@ -504,6 +558,7 @@ impl VenueBackend for EngineClientBackend {
                 ticker: ticker_sym,
                 timeframe: tf_str,
                 limit,
+                market: Self::market_kind_to_ipc(ticker_info.market_type()),
             };
             connection
                 .send(cmd)
@@ -557,7 +612,7 @@ impl VenueBackend for EngineClientBackend {
             let limit = range
                 .map(|(s, e)| {
                     let ms = timeframe.to_milliseconds().max(1);
-                    (e.saturating_sub(s) / ms).min(500) as u32
+                    (e.saturating_sub(s) / ms).min(200) as u32
                 })
                 .unwrap_or(200);
 
@@ -567,6 +622,7 @@ impl VenueBackend for EngineClientBackend {
                 ticker: ticker_sym,
                 timeframe: tf_str,
                 limit,
+                market: Self::market_kind_to_ipc(ticker_info.market_type()),
             };
             connection
                 .send(cmd)
@@ -674,6 +730,7 @@ impl VenueBackend for EngineClientBackend {
             let cmd = Command::RequestDepthSnapshot {
                 venue: venue.clone(),
                 ticker: ticker_sym.clone(),
+                market: Self::market_kind_to_ipc(ticker.market_type()),
             };
             connection
                 .send(cmd)
@@ -719,6 +776,7 @@ impl VenueBackend for EngineClientBackend {
                     request_id: "__health__".to_string(),
                     venue: "binance".to_string(),
                     ticker: "health".to_string(),
+                    market: "linear_perp".to_string(),
                 })
                 .await
                 .is_ok()

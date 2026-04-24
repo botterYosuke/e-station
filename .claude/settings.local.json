@@ -49,7 +49,19 @@
       "Bash(PowerShell -Command \"Get-Process flowsurface -ErrorAction SilentlyContinue | Stop-Process -Force\")",
       "Bash(python scripts/test_trade_stream.py 19876 test-phase2-token)",
       "PowerShell(netstat -an)",
-      "PowerShell(cd \"c:\\\\Users\\\\sasai\\\\Documents\\\\e-station\\\\python\"; $env:FLOWSURFACE_ENGINE_PORT=\"19876\"; $env:FLOWSURFACE_ENGINE_TOKEN=\"test-phase2-token\"; Start-Process python -ArgumentList \"-m\",\"engine\" -PassThru -WindowStyle Hidden | Select-Object Id)"
+      "PowerShell(cd \"c:\\\\Users\\\\sasai\\\\Documents\\\\e-station\\\\python\"; $env:FLOWSURFACE_ENGINE_PORT=\"19876\"; $env:FLOWSURFACE_ENGINE_TOKEN=\"test-phase2-token\"; Start-Process python -ArgumentList \"-m\",\"engine\" -PassThru -WindowStyle Hidden | Select-Object Id)",
+      "PowerShell($env:FLOWSURFACE_ENGINE_PORT=\"19876\"; $env:FLOWSURFACE_ENGINE_TOKEN=\"test-phase2-token\"; Start-Job -ScriptBlock { Set-Location \"c:\\\\Users\\\\sasai\\\\Documents\\\\e-station\\\\python\"; $env:FLOWSURFACE_ENGINE_PORT=\"19876\"; $env:FLOWSURFACE_ENGINE_TOKEN=\"test-phase2-token\"; python -m engine 2>&1 } | Select-Object Id,State)",
+      "PowerShell(netstat -ano | Select-String \"19876\" | ForEach-Object { $_.ToString\\(\\).Trim\\(\\) }; Get-Process -Id \\(netstat -ano | Select-String \"19876\" | ForEach-Object { \\($_ -split '\\\\s+'\\)[-1] } | Select-Object -First 1\\) -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CommandLine)",
+      "PowerShell(Get-Process | Where-Object { $_.Id -eq 12748 } | Select-Object Id,ProcessName,StartTime)",
+      "Bash(tasklist /fi \"pid eq 12748\")",
+      "PowerShell(tasklist /fi \"pid eq 12748\")",
+      "PowerShell(Stop-Process -Id 12748 -Force -ErrorAction SilentlyContinue)",
+      "Bash(python scripts/debug_engine_stream.py 19876 test-phase2-token)",
+      "Bash(python scripts/debug_binance_recv.py)",
+      "PowerShell(Stop-Process -Id 11304 -Force)",
+      "PowerShell(Stop-Process -Id 18164 -Force -ErrorAction SilentlyContinue)",
+      "Bash(python -)",
+      "Bash(python scripts/check_binance_ws.py \"wss://fstream.binance.com/stream?streams=btcusdt@aggTrade\" futures 15)"
     ]
   }
 }

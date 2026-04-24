@@ -360,6 +360,7 @@ class BybitWorker(ExchangeWorker):
         if market not in ("linear_perp", "inverse_perp"):
             return []
 
+        limit = min(limit, 200)
         category = _market_category(market)
         period = _OI_PERIOD.get(timeframe, "1h")
         url = f"{_REST}/v5/market/open-interest?category={category}&symbol={ticker}&intervalTime={period}&limit={limit}"
@@ -389,18 +390,28 @@ class BybitWorker(ExchangeWorker):
         data = await self._get_json(url, weight=1)
 
         items = data.get("result", {}).get("list", [])
+
+        def _parse(item: dict) -> dict:
+            last_price = float(item["lastPrice"])
+            volume24h = float(item.get("volume24h", 0))
+            # price24hPcnt is a decimal fraction e.g. 0.025 = 2.5%
+            pct = float(item.get("price24hPcnt", "0")) * 100.0
+            return {
+                "mark_price": item["lastPrice"],
+                "daily_price_chg": str(pct),
+                "daily_volume": str(volume24h * last_price),
+            }
+
+        if ticker == "__all__":
+            return {
+                item["symbol"]: _parse(item)
+                for item in items
+                if "symbol" in item and "lastPrice" in item
+            }
+
         for item in items:
             if item.get("symbol") == ticker:
-                last_price = float(item["lastPrice"])
-                volume24h = float(item.get("volume24h", 0))
-                # price24hPcnt is a decimal fraction e.g. 0.025 = 2.5%
-                pct = float(item.get("price24hPcnt", "0")) * 100.0
-                daily_volume = volume24h * last_price
-                return {
-                    "mark_price": item["lastPrice"],
-                    "daily_price_chg": str(pct),
-                    "daily_volume": str(daily_volume),
-                }
+                return _parse(item)
 
         raise ValueError(f"Ticker {ticker} not found in Bybit stats response")
 
