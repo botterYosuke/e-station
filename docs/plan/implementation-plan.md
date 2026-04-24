@@ -365,6 +365,84 @@ Binance と異なり WS 自身がスナップショットを配信する:
 - **実装ファイル**: [`python/engine/exchanges/okx.py`](../../python/engine/exchanges/okx.py)
 - **server.py 統合**: `self._workers["okx"] = OkxWorker()` 追加済み
 
+## フェーズ 3 完了後レビュー指摘 (2026-04-24)
+
+pytest 124/124 PASS の状態で実施したコードレビューで検出した IPC パス固有の契約ギャップ。
+
+### 修正済み
+
+#### Fix #2 (High): Bybit depth 復旧がブロードキャストラグ後に壊れる
+**症状**: Rust 側ブロードキャストチャネルがラグした際、`backend.rs:335` が tracker をリセットして `RequestDepthSnapshot` を送出。Bybit は `orderbook.200` と REST スナップショットのシーケンス空間が別のため `fetch_depth_snapshot` が `NotImplementedError` を raise し、`_spawn_fetch` がそれをキャッチして `Error` イベントを返していた。Rust 側は Error を無視するため、以降の diff がすべて gap 扱いになり無限ループに陥る。
+
+**修正**: `BybitWorker._reconnect_triggers` (dict[(ticker, market), asyncio.Event]) を追加。`fetch_depth_snapshot` は trigger をセットして `NotImplementedError` を raise する代わりに WS ストリームに再接続を促す。`stream_depth` は各メッセージ後に trigger を確認し set 済みなら内部ループを break して WS 再接続。`server.py._do_request_depth_snapshot` は `NotImplementedError` を info ログのみで握りつぶし（Error イベントを送出しない）。WS 再接続後の `DepthSnapshot` イベントがそのまま Rust に届き tracker が再設定される。
+
+**ファイル**: [`python/engine/exchanges/bybit.py`](../../python/engine/exchanges/bybit.py), [`python/engine/server.py`](../../python/engine/server.py)
+
+#### Fix #4 (Medium): MEXC perp `daily_volume` がコントラクト枚数のまま返る
+**症状**: `_fetch_ticker_stats_futures._parse()` が `volume24`（コントラクト枚数）をそのまま `daily_volume` として返していた。ネイティブ Rust アダプタは `volume24 * contract_size * last_price`（linear）/ `volume24 * contract_size`（inverse）で USD 換算している（[exchange/src/adapter/hub/mexc/fetch.rs:365](../../exchange/src/adapter/hub/mexc/fetch.rs)）。
+
+**修正**: `MexcWorker.__init__` に `_contract_sizes: dict[str, float]` を追加。`_list_tickers_futures` が各銘柄の `contractSize` をキャッシュ。`_fetch_ticker_stats_futures._parse()` でキャッシュ値を使い linear/inverse を判別して USD 換算するよう修正。
+
+**ファイル**: [`python/engine/exchanges/mexc.py`](../../python/engine/exchanges/mexc.py)
+
+### フェーズ 3 完了後レビュー追加修正 (2026-04-24)
+
+#### 修正 H1: WS ストリームの例外ハンドリング粒度
+**症状**: 全 WS ストリームの内側例外ハンドラが `except Exception` で JSON パースエラーと接続断を区別せず `log.warning` で握りつぶしていた。接続断が silent failure になりやすい経路。
+
+**修正**: 内側ハンドラを `except (KeyError, ValueError, TypeError, orjson.JSONDecodeError)` に絞り `log.debug` に格下げ。外側ハンドラに `isinstance(exc, (ConnectionClosed, OSError, TimeoutError))` チェックを追加し、接続断は `log.warning`、予期外エラーは `log.error` で区別。
+
+**ファイル**: bybit.py, hyperliquid.py, okex.py, mexc.py（各ファイルの trade/depth/kline ストリーム、計9箇所）
+
+#### 修正 H2: `_spawn_fetch` による `WsNativeResyncTriggered` の二重握りつぶし防止
+**症状**: `_do_request_depth_snapshot` が内部で `WsNativeResyncTriggered` をキャッチしているが、将来その catch が外れた場合に `_spawn_fetch` の汎用ハンドラが `fetch_failed` Error を送出してしまう構造だった。
+
+**修正**: `_spawn_fetch._run()` に `except WsNativeResyncTriggered: raise` を追加して明示的に除外。
+
+**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+
+#### 修正 H3: IPC スキーマの `market` フィールド欠落
+**症状**: `Subscribe` / `ListTickers` / `GetTickerMetadata` / `RequestDepthSnapshot` / `FetchTickerStats` に `market` フィールドが未定義。`extra="ignore"` により偶然動いていたが、Rust 側が送る `market` が無言で破棄されていた。
+
+**修正**: 該当 Pydantic モデルに `market: str | None = None` を追加。
+
+**ファイル**: [`python/engine/schemas.py`](../../python/engine/schemas.py)
+
+#### 修正 M1: 未知 venue/stream で Error イベントを送出
+**症状**: `_handle_subscribe` で未知 venue・未知 stream の場合に `log.warning` + silent return だったため Rust 側が永遠にイベントを待ち続けた。
+
+**修正**: 両経路で `outbox` に `Error` イベント（code=`unknown_venue` / `unsupported_stream`）を積むよう変更。
+
+**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+
+#### 修正 M3: 接続置換時に旧ストリームタスクが残存
+**症状**: `_do_handshake` の接続置換処理が旧コネクションを close するだけで `_cancel_all_streams()` を呼ばないため、旧接続のストリームタスクが zombie として残存し得た。
+
+**修正**: handshake lock 内の接続置換後に `await self._cancel_all_streams()` を追加。
+
+**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+
+#### 修正 M6: ストリームタスク例外時に Error イベントを送出
+**症状**: ストリームタスクが予期せず終了しても done_callback は `_outbox_event.set()` するだけで Rust 側に一切通知がなかった。
+
+**修正**: done_callback を `_on_done(t)` に変更し、`t.exception()` が非 None の場合に `Error`（code=`stream_error`）を outbox に積み、`_streams` から該当キーを除去。
+
+**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+
+> **テスト結果 (2026-04-24)**: pytest 全体 161 件 PASS（旧 156 件 + 上記修正で追加テスト 5 件は今回の修正に追加テストなし、既存テストがすべて通過）
+
+---
+
+### 未修正（要対応、フェーズ 4 以前）
+
+#### Finding #1 (High): Kline IPC 経由でボリューム正規化が失われる
+**症状**: Python ワーカーは取引所の raw `volume` フィールド（基本通貨建てや枚数など）をそのまま `KlineMsg.volume` にシリアライズ。Rust の `KlineMsg::to_kline()` は `Volume::TotalOnly(Qty::from_f32(volume))` に直接変換する（[engine-client/src/convert.rs:48](../../engine-client/src/convert.rs)）。ネイティブアダプタは `Kline` 構築前に正規化している（例: [exchange/src/adapter/hub/mexc/fetch.rs:301](../../exchange/src/adapter/hub/mexc/fetch.rs) は `quoteVolume` を優先）ため、IPC チャートは現行 Rust パスと異なるボリュームバーを表示する。
+
+**修正方針**: `KlineMsg` に `quote_volume: Option<String>` フィールドを追加（スキーママイナーバンプ）。各 Python ワーカーが利用可能な場合は quote 建てボリュームを設定。`KlineMsg::to_kline()` は `quote_volume` が Some の場合に優先使用する。
+
+#### Finding #3 (Medium): Hyperliquid spot の display symbol が IPC パスで失われる
+→ 既に「既知の課題」として上記「Hyperliquid 実装詳細」セクションに記載済み。
+
 ## フェーズ 4: ヒストリカルデータ・bulk download 移植
 
 - [ ] [`src/connector/fetcher.rs`](../../src/connector/fetcher.rs) 相当の機能を Python に実装。

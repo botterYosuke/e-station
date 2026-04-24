@@ -527,8 +527,8 @@ class BybitWorker(ExchangeWorker):
                                         "is_liquidation": False,
                                     }
                                     batch.append(trade)
-                            except Exception as exc:
-                                log.warning("bybit trade parse error: %s", exc)
+                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                log.debug("bybit trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
                         try:
@@ -541,6 +541,10 @@ class BybitWorker(ExchangeWorker):
                 _flush_batch()
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("bybit trade disconnected: %s", exc)
+                else:
+                    log.error("bybit trade unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -632,12 +636,16 @@ class BybitWorker(ExchangeWorker):
                                 if syncer.needs_resync:
                                     # Reconnect to get a fresh WS snapshot
                                     break
-                            except Exception as exc:
-                                log.warning("bybit depth parse error: %s", exc)
+                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                log.debug("bybit depth parse error: %s", exc)
 
                 except Exception as exc:
                     if stop_event.is_set():
                         break
+                    if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                        log.warning("bybit depth disconnected: %s", exc)
+                    else:
+                        log.error("bybit depth unexpected error: %s", exc)
                     outbox.append(
                         {
                             "event": "Disconnected",
@@ -720,12 +728,16 @@ class BybitWorker(ExchangeWorker):
                                         },
                                     }
                                 )
-                        except Exception as exc:
-                            log.warning("bybit kline parse error: %s", exc)
+                        except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                            log.debug("bybit kline parse error: %s", exc)
 
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("bybit kline disconnected: %s", exc)
+                else:
+                    log.error("bybit kline unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",

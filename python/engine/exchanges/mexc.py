@@ -656,8 +656,8 @@ class MexcWorker(ExchangeWorker):
                                         "is_liquidation": False,
                                     }
                                     batch.append(trade)
-                            except Exception as exc:
-                                log.warning("mexc trade parse error: %s", exc)
+                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                log.debug("mexc trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
                         ping_task.cancel()
@@ -675,6 +675,10 @@ class MexcWorker(ExchangeWorker):
                 _flush_batch()
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("mexc trade disconnected: %s", exc)
+                else:
+                    log.error("mexc trade unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -781,8 +785,8 @@ class MexcWorker(ExchangeWorker):
                                     if syncer.needs_resync:
                                         break
 
-                            except Exception as exc:
-                                log.warning("mexc depth parse error: %s", exc)
+                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                log.debug("mexc depth parse error: %s", exc)
                     finally:
                         ping_task.cancel()
                         try:
@@ -793,6 +797,10 @@ class MexcWorker(ExchangeWorker):
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("mexc depth disconnected: %s", exc)
+                else:
+                    log.error("mexc depth unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -893,8 +901,8 @@ class MexcWorker(ExchangeWorker):
                                         },
                                     }
                                 )
-                            except Exception as exc:
-                                log.warning("mexc kline parse error: %s", exc)
+                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                log.debug("mexc kline parse error: %s", exc)
                     finally:
                         ping_task.cancel()
                         try:
@@ -905,6 +913,10 @@ class MexcWorker(ExchangeWorker):
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("mexc kline disconnected: %s", exc)
+                else:
+                    log.error("mexc kline unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",

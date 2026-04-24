@@ -44,6 +44,7 @@ class Subscribe(IpcMessage):
     ticker: str
     stream: str
     timeframe: str | None = None
+    market: str | None = None
 
 
 class Unsubscribe(IpcMessage):
@@ -85,12 +86,14 @@ class FetchTickerStats(IpcMessage):
     request_id: str
     venue: str
     ticker: str
+    market: str | None = None
 
 
 class ListTickers(IpcMessage):
     op: Literal["ListTickers"] = "ListTickers"
     request_id: str
     venue: str
+    market: str | None = None
 
 
 class GetTickerMetadata(IpcMessage):
@@ -98,12 +101,14 @@ class GetTickerMetadata(IpcMessage):
     request_id: str
     venue: str
     ticker: str
+    market: str | None = None
 
 
 class RequestDepthSnapshot(IpcMessage):
     op: Literal["RequestDepthSnapshot"] = "RequestDepthSnapshot"
     venue: str
     ticker: str
+    market: str | None = None
 
 
 class Shutdown(IpcMessage):

@@ -207,6 +207,9 @@ class DataEngineServer:
                     await self._current_conn.close()
                 except Exception:
                     pass
+                # Cancel stream tasks from the old connection before handing
+                # over to the new client so they don't become zombie tasks.
+                await self._cancel_all_streams()
             self._current_conn = ws
 
         ready = Ready(
@@ -322,6 +325,15 @@ class DataEngineServer:
         worker = self._workers.get(venue)
         if worker is None:
             log.warning("Subscribe: unknown venue %s", venue)
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": None,
+                    "code": "unknown_venue",
+                    "message": f"Subscribe: unknown venue {venue!r}",
+                }
+            )
+            self._outbox_event.set()
             return
 
         market = _market_from_msg(msg, venue)
@@ -361,13 +373,38 @@ class DataEngineServer:
             )
         else:
             log.warning("Unknown stream type: %s", stream)
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": None,
+                    "code": "unsupported_stream",
+                    "message": f"Unknown stream type: {stream!r}",
+                }
+            )
+            self._outbox_event.set()
             return
 
         task = asyncio.create_task(coro)
         handle.task = task
         self._streams[key] = handle
 
-        task.add_done_callback(lambda _: self._outbox_event.set())
+        def _on_done(t: asyncio.Task) -> None:
+            self._outbox_event.set()
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    log.error("Stream task %s died unexpectedly: %s", key, exc)
+                    self._outbox.append(
+                        {
+                            "event": "Error",
+                            "request_id": None,
+                            "code": "stream_error",
+                            "message": f"Stream {key!r} terminated unexpectedly: {exc}",
+                        }
+                    )
+                    self._streams.pop(key, None)
+
+        task.add_done_callback(_on_done)
 
     async def _handle_unsubscribe(self, msg: dict) -> None:
         venue = msg.get("venue", "")
@@ -390,6 +427,11 @@ class DataEngineServer:
         async def _run() -> None:
             try:
                 await coro
+            except WsNativeResyncTriggered:
+                # _do_request_depth_snapshot handles this internally; re-raise so
+                # it is never silently converted to fetch_failed if the inner
+                # handler is ever removed.
+                raise
             except ValueError as exc:
                 log.warning("Fetch bad request (request_id=%s): %s", request_id, exc)
                 self._outbox.append(

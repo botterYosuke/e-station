@@ -546,8 +546,8 @@ class OkexWorker(ExchangeWorker):
                                         "is_liquidation": False,
                                     }
                                     batch.append(trade)
-                            except Exception as exc:
-                                log.warning("okex trade parse error: %s", exc)
+                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                log.debug("okex trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
                         try:
@@ -560,6 +560,10 @@ class OkexWorker(ExchangeWorker):
                 _flush_batch()
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("okex trade disconnected: %s", exc)
+                else:
+                    log.error("okex trade unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -642,12 +646,16 @@ class OkexWorker(ExchangeWorker):
                             if syncer.needs_resync:
                                 break
 
-                        except Exception as exc:
-                            log.warning("okex depth parse error: %s", exc)
+                        except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                            log.debug("okex depth parse error: %s", exc)
 
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("okex depth disconnected: %s", exc)
+                else:
+                    log.error("okex depth unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -733,12 +741,16 @@ class OkexWorker(ExchangeWorker):
                                         },
                                     }
                                 )
-                        except Exception as exc:
-                            log.warning("okex kline parse error: %s", exc)
+                        except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                            log.debug("okex kline parse error: %s", exc)
 
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("okex kline disconnected: %s", exc)
+                else:
+                    log.error("okex kline unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",

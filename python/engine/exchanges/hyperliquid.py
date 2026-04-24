@@ -567,8 +567,8 @@ class HyperliquidWorker(ExchangeWorker):
                                         "is_liquidation": False,
                                     }
                                     batch.append(trade)
-                            except Exception as exc:
-                                log.warning("hyperliquid trade parse error: %s", exc)
+                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                log.debug("hyperliquid trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
                         try:
@@ -581,6 +581,10 @@ class HyperliquidWorker(ExchangeWorker):
                 _flush_batch()
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("hyperliquid trade disconnected: %s", exc)
+                else:
+                    log.error("hyperliquid trade unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -653,12 +657,16 @@ class HyperliquidWorker(ExchangeWorker):
                                 bids=levels[0] if len(levels) > 0 else [],
                                 asks=levels[1] if len(levels) > 1 else [],
                             )
-                        except Exception as exc:
-                            log.warning("hyperliquid depth parse error: %s", exc)
+                        except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                            log.debug("hyperliquid depth parse error: %s", exc)
 
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("hyperliquid depth disconnected: %s", exc)
+                else:
+                    log.error("hyperliquid depth unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -741,12 +749,16 @@ class HyperliquidWorker(ExchangeWorker):
                                     },
                                 }
                             )
-                        except Exception as exc:
-                            log.warning("hyperliquid kline parse error: %s", exc)
+                        except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                            log.debug("hyperliquid kline parse error: %s", exc)
 
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                if isinstance(exc, (websockets.exceptions.ConnectionClosed, OSError, TimeoutError)):
+                    log.warning("hyperliquid kline disconnected: %s", exc)
+                else:
+                    log.error("hyperliquid kline unexpected error: %s", exc)
                 outbox.append(
                     {
                         "event": "Disconnected",
