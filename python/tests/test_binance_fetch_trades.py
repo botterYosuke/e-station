@@ -188,6 +188,89 @@ async def test_fetch_trades_historical_falls_back_on_404(
     assert trades[0]["price"] == "70000.0"
 
 
+# ---------------------------------------------------------------------------
+# Bug 1: intraday end_ms=0 must clamp to next midnight, not start_ms+24h
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_intraday_end_ms_zero_uses_next_midnight_not_plus_24h(
+    worker: BinanceWorker, httpx_mock: HTTPXMock
+):
+    """_fetch_intraday_trades with end_ms=0 must cap at the next calendar midnight.
+
+    Regression: the old code used start_ms + 86_400_000, which for a mid-day
+    start crosses into the next calendar day and breaks the one-day-per-batch
+    contract expected by the batch loop in fetcher.rs.
+    """
+    _DAY_MS = 86_400_000
+    # 2024-01-05 15:00:00 UTC
+    start_ms = 1_704_466_800_000
+    next_midnight = (start_ms // _DAY_MS + 1) * _DAY_MS   # 2024-01-06 00:00:00 UTC
+    after_midnight = next_midnight + 1_000                  # 2024-01-06 00:00:01 UTC
+
+    httpx_mock.add_response(
+        url=f"https://fapi.binance.com/fapi/v1/aggTrades?symbol=BTCUSDT&limit=1000&startTime={start_ms}",
+        json=[
+            {"T": start_ms, "p": "68000.0", "q": "0.5", "m": False, "a": 1},
+            {"T": next_midnight - 1_000, "p": "68001.0", "q": "0.1", "m": True, "a": 2},
+            {"T": after_midnight, "p": "68002.0", "q": "0.2", "m": False, "a": 3},
+        ],
+    )
+
+    trades = await worker._fetch_intraday_trades("BTCUSDT", "linear_perp", start_ms)
+
+    ts_list = [t["ts_ms"] for t in trades]
+    assert after_midnight not in ts_list, (
+        f"Trade at {after_midnight} (after midnight) must be excluded when end_ms=0; "
+        "the bug set end_ms=start_ms+24h which includes it"
+    )
+    assert start_ms in ts_list, "Trade at start_ms must be included"
+    assert next_midnight - 1_000 in ts_list, "Trade just before midnight must be included"
+
+
+@pytest.mark.asyncio
+async def test_fallback_mid_day_start_caps_at_calendar_midnight(
+    tmp_path, httpx_mock: HTTPXMock
+):
+    """When the zip fallback triggers mid-day, returned trades must not cross midnight.
+
+    This exercises the full fetch_trades → _fetch_intraday_trades path and
+    verifies the fix is wired end-to-end, not just in the helper.
+    """
+    _DAY_MS = 86_400_000
+    # 2024-01-05 15:00:00 UTC — mid-day, historical date to force zip path
+    start_ms = 1_704_466_800_000
+    next_midnight = (start_ms // _DAY_MS + 1) * _DAY_MS
+    after_midnight = next_midnight + 1_000
+
+    worker = BinanceWorker()
+
+    zip_url = (
+        "https://data.binance.vision/data/futures/um/daily/aggTrades"
+        "/BTCUSDT/BTCUSDT-aggTrades-2024-01-05.zip"
+    )
+    httpx_mock.add_response(url=zip_url, status_code=404)
+
+    httpx_mock.add_response(
+        url=f"https://fapi.binance.com/fapi/v1/aggTrades?symbol=BTCUSDT&limit=1000&startTime={start_ms}",
+        json=[
+            {"T": start_ms, "p": "68000.0", "q": "0.5", "m": False, "a": 1},
+            {"T": after_midnight, "p": "68002.0", "q": "0.2", "m": False, "a": 2},
+        ],
+    )
+
+    trades = await worker.fetch_trades(
+        "BTCUSDT", "linear_perp", start_ms, data_path=tmp_path
+    )
+
+    ts_list = [t["ts_ms"] for t in trades]
+    assert after_midnight not in ts_list, (
+        "Trade after midnight included in fallback — end_ms was start_ms+24h instead of next midnight"
+    )
+    assert start_ms in ts_list
+
+
 @pytest.fixture
 def worker():
     return BinanceWorker()

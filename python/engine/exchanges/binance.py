@@ -537,7 +537,7 @@ class BinanceWorker(ExchangeWorker):
     ) -> list[dict]:
         _DAY_MS = 86_400_000
         if end_ms == 0:
-            end_ms = start_ms + _DAY_MS
+            end_ms = (start_ms // _DAY_MS + 1) * _DAY_MS
         base = _rest_base(market)
         if market == "linear_perp":
             endpoint = f"{base}/fapi/v1/aggTrades"

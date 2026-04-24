@@ -479,12 +479,18 @@ pub fn fetch_trades_batched(
                     if batch.is_empty() {
                         consecutive_empty_days += 1;
                         if consecutive_empty_days >= MAX_CONSECUTIVE_EMPTY_DAYS {
-                            tracing::warn!(
-                                "fetch_trades_batched: {} consecutive empty days at t={}, stopping",
+                            log::warn!(
+                                "fetch_trades_batched: {} consecutive empty days at t={}, stopping before to_time={}",
                                 consecutive_empty_days,
-                                latest_trade_t
+                                latest_trade_t,
+                                to_time,
                             );
-                            break;
+                            return Err(AdapterError::InvalidRequest(format!(
+                                "No trades found after {} consecutive empty days (stopped at {}). \
+                                 The symbol may be illiquid, newly listed, or delisted.",
+                                MAX_CONSECUTIVE_EMPTY_DAYS,
+                                latest_trade_t,
+                            )));
                         }
                         latest_trade_t = (latest_trade_t / DAY_MS + 1) * DAY_MS;
                         continue;
@@ -505,4 +511,101 @@ pub fn fetch_trades_batched(
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::adapter::{
+        AdapterError, AdapterHandles, Exchange, MarketKind, Venue, VenueBackend,
+    };
+    use exchange::adapter::venue_backend::{TickerMetadataMap, TickerStatsMap};
+    use exchange::depth::DepthPayload;
+    use exchange::{
+        Kline, OpenInterest, PushFrequency, Ticker, TickerInfo, TickMultiplier,
+        Timeframe, Trade,
+    };
+    use exchange::adapter::Event;
+    use iced::futures::future::BoxFuture;
+    use iced::futures::stream::BoxStream;
+    use iced::futures::StreamExt as _;
+    use iced::task::Sipper as _;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// Mock backend that always returns an empty trade list.
+    struct AlwaysEmptyTrades;
+
+    impl VenueBackend for AlwaysEmptyTrades {
+        fn fetch_trades(
+            &self,
+            _: TickerInfo,
+            _: u64,
+            _: u64,
+            _: Option<PathBuf>,
+        ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
+            Box::pin(std::future::ready(Ok(vec![])))
+        }
+
+        fn kline_stream(&self, _: Vec<(TickerInfo, Timeframe)>, _: MarketKind) -> BoxStream<'static, Event> {
+            unimplemented!()
+        }
+        fn trade_stream(&self, _: Vec<TickerInfo>, _: MarketKind) -> BoxStream<'static, Event> {
+            unimplemented!()
+        }
+        fn depth_stream(&self, _: TickerInfo, _: Option<TickMultiplier>, _: PushFrequency) -> BoxStream<'static, Event> {
+            unimplemented!()
+        }
+        fn fetch_ticker_metadata(&self, _: &[MarketKind]) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> {
+            unimplemented!()
+        }
+        fn fetch_ticker_stats(&self, _: &[MarketKind], _: Option<HashMap<Ticker, f32>>) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> {
+            unimplemented!()
+        }
+        fn fetch_klines(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<Kline>, AdapterError>> {
+            unimplemented!()
+        }
+        fn fetch_open_interest(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
+            unimplemented!()
+        }
+        fn request_depth_snapshot(&self, _: Ticker) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
+            unimplemented!()
+        }
+        fn health(&self) -> BoxFuture<'_, bool> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn consecutive_empty_days_returns_error_not_ok() {
+        let mut handles = AdapterHandles::default();
+        handles.set_backend(Venue::Binance, Arc::new(AlwaysEmptyTrades));
+
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        const DAY_MS: u64 = 86_400_000;
+        // 10 days span — exceeds the MAX_CONSECUTIVE_EMPTY_DAYS=7 threshold
+        let from_time = 0u64;
+        let to_time = 10 * DAY_MS;
+
+        let mut straw = fetch_trades_batched(
+            handles,
+            ticker_info,
+            from_time,
+            to_time,
+            PathBuf::from("."),
+        )
+        .pin();
+
+        // Drain all progress items (empty trade batches are never emitted, so this is a no-op)
+        while straw.next().await.is_some() {}
+
+        let result = straw.await;
+        assert!(
+            result.is_err(),
+            "Expected Err when 7+ consecutive empty days occur, got Ok"
+        );
+    }
 }
