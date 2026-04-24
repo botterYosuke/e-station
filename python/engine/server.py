@@ -7,6 +7,7 @@ import hmac
 import logging
 import uuid
 from collections import deque
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -524,8 +525,6 @@ class DataEngineServer:
         )
 
     async def _do_fetch_trades(self, msg: dict) -> None:
-        from pathlib import Path
-
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
@@ -538,11 +537,6 @@ class DataEngineServer:
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
-
-        if not hasattr(worker, "fetch_trades"):
-            raise NotImplementedError(
-                f"fetch_trades not supported for venue {venue!r}"
-            )
 
         trades = await worker.fetch_trades(
             ticker, market, start_ms, end_ms=end_ms, data_path=data_path

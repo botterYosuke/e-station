@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 
 OnSsidUpdate = Callable[[str], None]
 
@@ -78,6 +79,18 @@ class ExchangeWorker(ABC):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         """Push depth diff/snapshot/gap events into outbox until stop_event is set."""
+
+    async def fetch_trades(
+        self,
+        ticker: str,
+        market: str,
+        start_ms: int,
+        *,
+        end_ms: int = 0,
+        data_path: Path | None = None,
+    ) -> list[dict]:
+        """Fetch trades for one calendar day starting from start_ms."""
+        raise NotImplementedError(f"{type(self).__name__} does not support fetch_trades")
 
     @abstractmethod
     async def stream_kline(

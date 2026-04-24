@@ -467,6 +467,8 @@ pub fn fetch_trades_batched(
     sipper(async move |mut progress| {
         let mut latest_trade_t = from_time;
         const DAY_MS: u64 = 86_400_000;
+        const MAX_CONSECUTIVE_EMPTY_DAYS: u32 = 7;
+        let mut consecutive_empty_days: u32 = 0;
 
         while latest_trade_t < to_time {
             match handles
@@ -475,9 +477,19 @@ pub fn fetch_trades_batched(
             {
                 Ok(batch) => {
                     if batch.is_empty() {
+                        consecutive_empty_days += 1;
+                        if consecutive_empty_days >= MAX_CONSECUTIVE_EMPTY_DAYS {
+                            tracing::warn!(
+                                "fetch_trades_batched: {} consecutive empty days at t={}, stopping",
+                                consecutive_empty_days,
+                                latest_trade_t
+                            );
+                            break;
+                        }
                         latest_trade_t = (latest_trade_t / DAY_MS + 1) * DAY_MS;
                         continue;
                     }
+                    consecutive_empty_days = 0;
 
                     let last_trade_t =
                         batch.last().map_or(latest_trade_t, |trade| trade.time);

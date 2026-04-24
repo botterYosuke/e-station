@@ -52,6 +52,7 @@ class Unsubscribe(IpcMessage):
     venue: str
     ticker: str
     stream: str
+    market: str | None = None
 
 
 class FetchKlines(IpcMessage):

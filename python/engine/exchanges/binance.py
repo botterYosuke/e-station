@@ -521,8 +521,11 @@ class BinanceWorker(ExchangeWorker):
 
         try:
             trades = await self._fetch_historical_trades(ticker, market, from_date, data_path)
-            return [t for t in trades if t["ts_ms"] >= start_ms]
-        except Exception as exc:
+            result = [t for t in trades if t["ts_ms"] >= start_ms]
+            if end_ms:
+                result = [t for t in result if t["ts_ms"] <= end_ms]
+            return result
+        except (httpx.HTTPError, ValueError, zipfile.BadZipFile, OSError) as exc:
             log.warning(
                 "Historical trade fetch failed for %s %s %s, falling back to intraday: %s",
                 ticker, market, from_date, exc,
@@ -532,6 +535,9 @@ class BinanceWorker(ExchangeWorker):
     async def _fetch_intraday_trades(
         self, ticker: str, market: str, start_ms: int, *, end_ms: int = 0
     ) -> list[dict]:
+        _DAY_MS = 86_400_000
+        if end_ms == 0:
+            end_ms = start_ms + _DAY_MS
         base = _rest_base(market)
         if market == "linear_perp":
             endpoint = f"{base}/fapi/v1/aggTrades"
