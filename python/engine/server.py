@@ -285,12 +285,7 @@ class DataEngineServer:
             self._spawn_fetch(self._do_fetch_klines(msg), msg.get("request_id"))
 
         elif op == "FetchTrades":
-            await self._send_error(
-                ws,
-                msg.get("request_id"),
-                "FetchTrades is not implemented in Phase 1",
-                code="not_supported",
-            )
+            self._spawn_fetch(self._do_fetch_trades(msg), msg.get("request_id"))
 
         elif op == "FetchOpenInterest":
             self._spawn_fetch(self._do_fetch_oi(msg), msg.get("request_id"))
@@ -445,6 +440,16 @@ class DataEngineServer:
                         "message": str(exc),
                     }
                 )
+            except NotImplementedError as exc:
+                log.warning("Fetch not implemented (request_id=%s): %s", request_id, exc)
+                self._outbox.append(
+                    {
+                        "event": "Error",
+                        "request_id": request_id,
+                        "code": "not_implemented",
+                        "message": str(exc),
+                    }
+                )
             except Exception as exc:
                 log.warning("Fetch failed (request_id=%s): %s", request_id, exc)
                 self._outbox.append(
@@ -515,6 +520,40 @@ class DataEngineServer:
                 "ticker": ticker,
                 "timeframe": timeframe,
                 "klines": klines,
+            }
+        )
+
+    async def _do_fetch_trades(self, msg: dict) -> None:
+        from pathlib import Path
+
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        ticker = msg.get("ticker", "")
+        market = _market_from_msg(msg, venue)
+        start_ms = int(msg.get("start_ms", 0))
+        end_ms = int(msg.get("end_ms", 0))
+        data_path_str: str | None = msg.get("data_path")
+        data_path = Path(data_path_str) if data_path_str else None
+
+        worker = self._workers.get(venue)
+        if worker is None:
+            raise ValueError(f"unknown venue: {venue}")
+
+        if not hasattr(worker, "fetch_trades"):
+            raise NotImplementedError(
+                f"fetch_trades not supported for venue {venue!r}"
+            )
+
+        trades = await worker.fetch_trades(
+            ticker, market, start_ms, end_ms=end_ms, data_path=data_path
+        )
+        self._outbox.append(
+            {
+                "event": "TradesFetched",
+                "request_id": req_id,
+                "venue": venue,
+                "ticker": ticker,
+                "trades": trades,
             }
         )
 

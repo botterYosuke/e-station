@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import datetime as dt
+import io
 import logging
+import zipfile
 from collections import deque
+from datetime import timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -366,17 +372,20 @@ class BinanceWorker(ExchangeWorker):
 
         klines = []
         for row in rows:
-            klines.append(
-                {
-                    "open_time_ms": row[0],
-                    "open": str(row[1]),
-                    "high": str(row[2]),
-                    "low": str(row[3]),
-                    "close": str(row[4]),
-                    "volume": str(row[5]),
-                    "is_closed": True,
-                }
-            )
+            entry: dict = {
+                "open_time_ms": row[0],
+                "open": str(row[1]),
+                "high": str(row[2]),
+                "low": str(row[3]),
+                "close": str(row[4]),
+                "volume": str(row[5]),
+                "is_closed": True,
+            }
+            if len(row) >= 11:
+                entry["quote_volume"] = str(row[7])
+                entry["taker_buy_volume"] = str(row[9])
+                entry["taker_buy_quote_volume"] = str(row[10])
+            klines.append(entry)
 
         return klines
 
@@ -476,6 +485,172 @@ class BinanceWorker(ExchangeWorker):
             "bids": _depth_levels(data["bids"]),
             "asks": _depth_levels(data["asks"]),
         }
+
+    # ------------------------------------------------------------------
+    # REST: fetch_trades (historical + intraday)
+    # ------------------------------------------------------------------
+
+    async def fetch_trades(
+        self,
+        ticker: str,
+        market: str,
+        start_ms: int,
+        *,
+        end_ms: int = 0,
+        data_path: Path | None = None,
+    ) -> list[dict]:
+        """Fetch trades for exactly one calendar day starting from start_ms.
+
+        For intraday dates (today), uses the aggTrades REST endpoint directly.
+        For historical dates, downloads the daily aggTrades zip from
+        data.binance.vision and caches it locally under data_path.
+        Each call returns one day; callers that need multiple days should
+        advance start_ms to the next day's midnight after each batch.
+        """
+        today_midnight_ms = int(
+            dt.datetime.now(tz=timezone.utc)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+            * 1000
+        )
+
+        if start_ms >= today_midnight_ms:
+            return await self._fetch_intraday_trades(ticker, market, start_ms, end_ms=end_ms)
+
+        from_date = dt.datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc).date()
+
+        try:
+            return await self._fetch_historical_trades(ticker, market, from_date, data_path)
+        except Exception as exc:
+            log.warning(
+                "Historical trade fetch failed for %s %s %s, falling back to intraday: %s",
+                ticker, market, from_date, exc,
+            )
+            return await self._fetch_intraday_trades(ticker, market, start_ms, end_ms=end_ms)
+
+    async def _fetch_intraday_trades(
+        self, ticker: str, market: str, start_ms: int, *, end_ms: int = 0
+    ) -> list[dict]:
+        base = _rest_base(market)
+        if market == "linear_perp":
+            endpoint = f"{base}/fapi/v1/aggTrades"
+            weight = 20
+        elif market == "inverse_perp":
+            endpoint = f"{base}/dapi/v1/aggTrades"
+            weight = 20
+        else:
+            endpoint = f"{base}/api/v3/aggTrades"
+            weight = 4
+
+        all_trades: list[dict] = []
+        from_id: int | None = None
+
+        while True:
+            if from_id is not None:
+                url = f"{endpoint}?symbol={ticker}&fromId={from_id}&limit=1000"
+            else:
+                url = f"{endpoint}?symbol={ticker}&limit=1000&startTime={start_ms}"
+
+            data = await self._get_json(url, weight)
+            if not data:
+                break
+
+            batch = [
+                {
+                    "ts_ms": int(row["T"]),
+                    "price": str(row["p"]),
+                    "qty": str(row["q"]),
+                    "side": "sell" if row["m"] else "buy",
+                    "is_liquidation": False,
+                }
+                for row in data
+            ]
+
+            if end_ms:
+                batch = [t for t in batch if t["ts_ms"] <= end_ms]
+
+            all_trades.extend(batch)
+
+            if len(data) < 1000:
+                break
+
+            if end_ms and int(data[-1]["T"]) > end_ms:
+                break
+
+            from_id = int(data[-1]["a"]) + 1
+
+        return all_trades
+
+    async def _fetch_historical_trades(
+        self,
+        ticker: str,
+        market: str,
+        date: dt.date,
+        data_path: Path | None,
+    ) -> list[dict]:
+        """Download or serve from cache the aggTrades zip for a single date."""
+        if market == "linear_perp":
+            subpath = f"data/futures/um/daily/aggTrades/{ticker}"
+        elif market == "inverse_perp":
+            subpath = f"data/futures/cm/daily/aggTrades/{ticker}"
+        else:
+            subpath = f"data/spot/daily/aggTrades/{ticker}"
+
+        date_str = date.strftime("%Y-%m-%d")
+        zip_filename = f"{ticker}-aggTrades-{date_str}.zip"
+
+        # Cache path
+        if data_path is not None:
+            cache_dir = data_path / subpath
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            zip_path = cache_dir / zip_filename
+        else:
+            zip_path = None
+
+        if zip_path is not None and zip_path.exists():
+            log.info("Using cached %s", zip_path)
+            zip_bytes = zip_path.read_bytes()
+        else:
+            url = f"https://data.binance.vision/{subpath}/{zip_filename}"
+            log.info("Downloading %s", url)
+            client = await self._http()
+            resp = await client.get(url)
+            if not resp.is_success:
+                raise ValueError(
+                    f"data.binance.vision returned {resp.status_code} for {url}"
+                )
+            zip_bytes = resp.content
+            if zip_path is not None:
+                zip_path.write_bytes(zip_bytes)
+
+        # Parse the zip → CSV
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            # The zip may contain one or more CSV files
+            csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
+            if not csv_names:
+                raise ValueError(f"No CSV in zip for {ticker} {date_str}")
+            with zf.open(csv_names[0]) as f:
+                reader = csv.reader(io.TextIOWrapper(f, encoding="utf-8"))
+                trades = []
+                for row in reader:
+                    if len(row) < 7:
+                        continue
+                    try:
+                        time_ms = int(row[5])
+                        is_sell = row[6].strip().lower() == "true"
+                        trades.append(
+                            {
+                                "ts_ms": time_ms,
+                                "price": row[1].strip(),
+                                "qty": row[2].strip(),
+                                "side": "sell" if is_sell else "buy",
+                                "is_liquidation": False,
+                            }
+                        )
+                    except (ValueError, IndexError):
+                        continue
+
+        return trades
 
     # ------------------------------------------------------------------
     # WebSocket: stream_trades

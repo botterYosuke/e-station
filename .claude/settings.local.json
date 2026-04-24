@@ -68,7 +68,11 @@
       "PowerShell(git -C c:/Users/sasai/Documents/e-station show --stat c7b5153)",
       "PowerShell(git -C c:/Users/sasai/Documents/e-station show c7b5153 -- python/engine/schemas.py python/engine/server.py | Out-String -Width 300)",
       "PowerShell(git -C c:/Users/sasai/Documents/e-station show c7b5153 -- python/engine/schemas.py | Out-String -Width 300)",
-      "Bash(python -m py_compile python/engine/server.py python/engine/exchanges/bybit.py python/engine/exchanges/hyperliquid.py python/engine/exchanges/mexc.py python/engine/exchanges/okex.py)"
+      "Bash(python -m py_compile python/engine/server.py python/engine/exchanges/bybit.py python/engine/exchanges/hyperliquid.py python/engine/exchanges/mexc.py python/engine/exchanges/okex.py)",
+      "Bash(git diff *)",
+      "Bash(sed -n '110,130p' engine-client/src/dto.rs)",
+      "Bash(sed -n '260,285p' python/engine/schemas.py)",
+      "Bash(sed -n '280,310p' python/engine/server.py)"
     ]
   }
 }

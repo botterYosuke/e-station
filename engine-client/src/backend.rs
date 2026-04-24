@@ -685,7 +685,7 @@ impl VenueBackend for EngineClientBackend {
         &self,
         ticker_info: TickerInfo,
         from_time: u64,
-        _data_path: Option<PathBuf>,
+        data_path: Option<PathBuf>,
     ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
         let connection = Arc::clone(&self.connection);
         let venue = self.venue.clone();
@@ -697,13 +697,16 @@ impl VenueBackend for EngineClientBackend {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
+            let data_path_str = data_path.map(|p| p.to_string_lossy().into_owned());
 
             let cmd = Command::FetchTrades {
                 request_id: request_id.clone(),
                 venue,
                 ticker: ticker_sym,
+                market: Self::market_kind_to_ipc(ticker_info.market_type()),
                 start_ms: from_time as i64,
                 end_ms: now_ms,
+                data_path: data_path_str,
             };
             let mut rx = connection.subscribe_events();
             connection
@@ -711,11 +714,16 @@ impl VenueBackend for EngineClientBackend {
                 .await
                 .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
 
-            // The Python engine currently returns `not_supported` for FetchTrades.
-            // Match on Error with our request_id to surface that clearly.
             tokio::time::timeout(FETCH_TIMEOUT, async {
                 loop {
                     match rx.recv().await {
+                        Ok(EngineEvent::TradesFetched { request_id: rid, trades, .. })
+                            if rid == request_id =>
+                        {
+                            let result: Vec<Trade> =
+                                trades.iter().filter_map(|t| t.to_trade()).collect();
+                            return Ok(result);
+                        }
                         Ok(EngineEvent::Error { request_id: Some(rid), code, message })
                             if rid == request_id =>
                         {

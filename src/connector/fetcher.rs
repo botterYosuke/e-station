@@ -466,6 +466,7 @@ pub fn fetch_trades_batched(
 ) -> impl Straw<(), Vec<Trade>, AdapterError> {
     sipper(async move |mut progress| {
         let mut latest_trade_t = from_time;
+        const DAY_MS: u64 = 86_400_000;
 
         while latest_trade_t < to_time {
             match handles
@@ -477,7 +478,11 @@ pub fn fetch_trades_batched(
                         break;
                     }
 
-                    latest_trade_t = batch.last().map_or(latest_trade_t, |trade| trade.time);
+                    let last_trade_t =
+                        batch.last().map_or(latest_trade_t, |trade| trade.time);
+                    // Advance to the next day boundary so repeated calls fetch
+                    // successive calendar days rather than re-fetching the same day.
+                    latest_trade_t = (last_trade_t / DAY_MS + 1) * DAY_MS;
 
                     let () = progress.send(batch).await;
                 }

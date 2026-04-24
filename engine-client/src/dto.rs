@@ -43,8 +43,10 @@ pub enum Command {
         request_id: String,
         venue: String,
         ticker: String,
+        market: String,
         start_ms: i64,
         end_ms: i64,
+        data_path: Option<String>,
     },
     FetchOpenInterest {
         request_id: String,
@@ -109,6 +111,12 @@ pub enum EngineEvent {
         venue: String,
         ticker: String,
         stream_session_id: String,
+        trades: Vec<TradeMsg>,
+    },
+    TradesFetched {
+        request_id: String,
+        venue: String,
+        ticker: String,
         trades: Vec<TradeMsg>,
     },
     KlineUpdate {
@@ -192,6 +200,16 @@ pub struct KlineMsg {
     pub close: String,
     pub volume: String,
     pub is_closed: bool,
+    /// Quote-asset volume (e.g. USDT). When present, used for `Volume::TotalOnly`
+    /// instead of base-asset `volume` for correct chart display.
+    #[serde(default)]
+    pub quote_volume: Option<String>,
+    /// Taker-buy base-asset volume. Used together with `volume` for buy/sell split.
+    #[serde(default)]
+    pub taker_buy_volume: Option<String>,
+    /// Taker-buy quote-asset volume. Used together with `quote_volume` for buy/sell split.
+    #[serde(default)]
+    pub taker_buy_quote_volume: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

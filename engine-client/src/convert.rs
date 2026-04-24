@@ -32,6 +32,12 @@ impl KlineMsg {
     /// Convert to the `exchange::Kline` domain type.
     ///
     /// Returns `None` when any OHLCV field cannot be parsed.
+    ///
+    /// Volume priority:
+    /// 1. If `taker_buy_volume` + `volume` are both present → `Volume::BuySell` using
+    ///    base-asset quantities (buy = taker_buy_volume, sell = volume - taker_buy_volume).
+    /// 2. If `quote_volume` is present → `Volume::TotalOnly` using quote-asset quantity.
+    /// 3. Fallback → `Volume::TotalOnly` using raw `volume` (base-asset, as before).
     pub fn to_kline(&self) -> Option<Kline> {
         let open: f32 = self.open.parse().ok()?;
         let high: f32 = self.high.parse().ok()?;
@@ -39,13 +45,30 @@ impl KlineMsg {
         let close: f32 = self.close.parse().ok()?;
         let volume: f32 = self.volume.parse().ok()?;
 
+        let vol = if let Some(buy_base) = self
+            .taker_buy_volume
+            .as_deref()
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            let sell_base = volume - buy_base;
+            Volume::BuySell(Qty::from_f32(buy_base), Qty::from_f32(sell_base))
+        } else if let Some(quote_vol) = self
+            .quote_volume
+            .as_deref()
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            Volume::TotalOnly(Qty::from_f32(quote_vol))
+        } else {
+            Volume::TotalOnly(Qty::from_f32(volume))
+        };
+
         Some(Kline {
             time: self.open_time_ms as u64,
             open: Price::from_f32(open),
             high: Price::from_f32(high),
             low: Price::from_f32(low),
             close: Price::from_f32(close),
-            volume: Volume::TotalOnly(Qty::from_f32(volume)),
+            volume: vol,
         })
     }
 }
@@ -172,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn kline_msg_converts() {
+    fn kline_msg_converts_fallback_to_base_volume() {
         let msg = KlineMsg {
             open_time_ms: 1_000,
             open: "100.0".to_string(),
@@ -181,11 +204,57 @@ mod tests {
             close: "105.0".to_string(),
             volume: "50.0".to_string(),
             is_closed: true,
+            quote_volume: None,
+            taker_buy_volume: None,
+            taker_buy_quote_volume: None,
         };
         let kline = msg.to_kline().expect("should parse");
         assert_eq!(kline.time, 1_000);
         let v: f32 = kline.volume.total().to_f32_lossy();
         assert!((v - 50.0).abs() < 0.01, "volume mismatch: {v}");
+    }
+
+    #[test]
+    fn kline_msg_uses_quote_volume_when_present() {
+        let msg = KlineMsg {
+            open_time_ms: 1_000,
+            open: "100.0".to_string(),
+            high: "110.0".to_string(),
+            low: "90.0".to_string(),
+            close: "105.0".to_string(),
+            volume: "50.0".to_string(),
+            is_closed: true,
+            quote_volume: Some("5000.0".to_string()),
+            taker_buy_volume: None,
+            taker_buy_quote_volume: None,
+        };
+        let kline = msg.to_kline().expect("should parse");
+        let v: f32 = kline.volume.total().to_f32_lossy();
+        assert!((v - 5000.0).abs() < 0.1, "quote volume mismatch: {v}");
+    }
+
+    #[test]
+    fn kline_msg_uses_buy_sell_split_when_taker_buy_volume_present() {
+        let msg = KlineMsg {
+            open_time_ms: 1_000,
+            open: "100.0".to_string(),
+            high: "110.0".to_string(),
+            low: "90.0".to_string(),
+            close: "105.0".to_string(),
+            volume: "100.0".to_string(),
+            is_closed: true,
+            quote_volume: Some("10000.0".to_string()),
+            taker_buy_volume: Some("60.0".to_string()),
+            taker_buy_quote_volume: Some("6300.0".to_string()),
+        };
+        let kline = msg.to_kline().expect("should parse");
+        // buy/sell split takes priority over quote_volume
+        let total: f32 = kline.volume.total().to_f32_lossy();
+        assert!((total - 100.0).abs() < 0.1, "total volume mismatch: {total}");
+        assert!(
+            matches!(kline.volume, Volume::BuySell(_, _)),
+            "expected BuySell variant"
+        );
     }
 
     #[test]

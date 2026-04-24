@@ -77,6 +77,9 @@ def _make_mock_worker():
         }
     )
     worker.fetch_ticker_stats = AsyncMock(return_value={"mark_price": "68000.0", "daily_price_chg": "1.5"})
+    worker.fetch_trades = AsyncMock(return_value=[
+        {"ts_ms": 1700000000000, "price": "68000.0", "qty": "0.5", "side": "buy", "is_liquidation": False},
+    ])
     worker.stream_trades = AsyncMock(return_value=None)
     worker.stream_depth = AsyncMock(return_value=None)
     worker.stream_kline = AsyncMock(return_value=None)
@@ -187,6 +190,62 @@ async def test_request_depth_snapshot_ws_native_resync_no_error_event(unused_tcp
 
 
 @pytest.mark.asyncio
+async def test_fetch_trades_returns_trades_fetched_event(running_server):
+    """FetchTrades op dispatches to worker.fetch_trades and emits TradesFetched."""
+    port, token, mock_worker = running_server
+
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "FetchTrades",
+        "request_id": "req-trades-001",
+        "venue": "binance",
+        "ticker": "BTCUSDT",
+        "market": "linear_perp",
+        "start_ms": 1700000000000,
+        "end_ms": 1700086400000,
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "TradesFetched", f"Expected TradesFetched, got: {msg}"
+    assert msg["request_id"] == "req-trades-001"
+    assert msg["venue"] == "binance"
+    assert msg["ticker"] == "BTCUSDT"
+    assert isinstance(msg["trades"], list)
+    assert len(msg["trades"]) == 1
+    assert msg["trades"][0]["price"] == "68000.0"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_trades_unknown_venue_returns_error(running_server):
+    """FetchTrades with an unknown venue returns an Error event."""
+    port, token, _ = running_server
+
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "FetchTrades",
+        "request_id": "req-trades-err",
+        "venue": "unknown_venue",
+        "ticker": "BTCUSDT",
+        "start_ms": 1700000000000,
+        "end_ms": 1700086400000,
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error"
+    assert msg["request_id"] == "req-trades-err"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
 async def test_list_tickers_response(running_server):
     port, token, _ = running_server
 
@@ -219,7 +278,8 @@ async def test_shutdown_op_stops_server(running_server):
 
 
 @pytest.mark.asyncio
-async def test_fetch_trades_returns_not_supported_error(running_server):
+async def test_fetch_trades_now_supported_returns_trades_fetched(running_server):
+    """Phase 4: FetchTrades is now implemented and returns TradesFetched (not Error)."""
     port, token, _ = running_server
     ws = await _connect_and_handshake(port, token)
     await ws.send(
@@ -229,16 +289,15 @@ async def test_fetch_trades_returns_not_supported_error(running_server):
                 "request_id": "req-trades",
                 "venue": "binance",
                 "ticker": "BTCUSDT",
-                "start_ms": 1,
-                "end_ms": 2,
+                "start_ms": 1700000000000,
+                "end_ms": 1700086400000,
             }
         )
     )
 
     raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
     msg = orjson.loads(raw)
-    assert msg["event"] == "Error"
+    assert msg["event"] == "TradesFetched", f"Expected TradesFetched, got: {msg}"
     assert msg["request_id"] == "req-trades"
-    assert msg["code"] == "not_supported"
 
     await ws.close()

@@ -68,8 +68,10 @@ class FetchTrades(IpcMessage):
     request_id: str
     venue: str
     ticker: str
+    market: str | None = None
     start_ms: int
     end_ms: int
+    data_path: str | None = None
 
 
 class FetchOpenInterest(IpcMessage):
@@ -178,6 +180,9 @@ class KlineMsg(IpcMessage):
     close: str
     volume: str
     is_closed: bool
+    quote_volume: str | None = None
+    taker_buy_volume: str | None = None
+    taker_buy_quote_volume: str | None = None
 
 
 class KlineUpdate(IpcMessage):
@@ -257,6 +262,14 @@ class TickerStatsMsg(IpcMessage):
     venue: str
     ticker: str
     stats: dict
+
+
+class TradesFetched(IpcMessage):
+    event: Literal["TradesFetched"] = "TradesFetched"
+    request_id: str
+    venue: str
+    ticker: str
+    trades: list[TradeMsg]
 
 
 class Error(IpcMessage):

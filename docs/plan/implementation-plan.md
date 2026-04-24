@@ -435,21 +435,46 @@ pytest 124/124 PASS の状態で実施したコードレビューで検出した
 
 ### 未修正（要対応、フェーズ 4 以前）
 
-#### Finding #1 (High): Kline IPC 経由でボリューム正規化が失われる
+#### Finding #1 (High): Kline IPC 経由でボリューム正規化が失われる ✅ (2026-04-24, phase-4/historical-trades)
 **症状**: Python ワーカーは取引所の raw `volume` フィールド（基本通貨建てや枚数など）をそのまま `KlineMsg.volume` にシリアライズ。Rust の `KlineMsg::to_kline()` は `Volume::TotalOnly(Qty::from_f32(volume))` に直接変換する（[engine-client/src/convert.rs:48](../../engine-client/src/convert.rs)）。ネイティブアダプタは `Kline` 構築前に正規化している（例: [exchange/src/adapter/hub/mexc/fetch.rs:301](../../exchange/src/adapter/hub/mexc/fetch.rs) は `quoteVolume` を優先）ため、IPC チャートは現行 Rust パスと異なるボリュームバーを表示する。
 
-**修正方針**: `KlineMsg` に `quote_volume: Option<String>` フィールドを追加（スキーママイナーバンプ）。各 Python ワーカーが利用可能な場合は quote 建てボリュームを設定。`KlineMsg::to_kline()` は `quote_volume` が Some の場合に優先使用する。
+**修正内容**:
+- `KlineMsg` に `quote_volume`, `taker_buy_volume`, `taker_buy_quote_volume` オプションフィールドを追加（Python schemas.py および Rust dto.rs）。
+- Binance worker の `fetch_klines` が `row[7]` (quote_asset_volume), `row[9]` (taker_buy_base), `row[10]` (taker_buy_quote) を設定するよう更新。
+- `KlineMsg::to_kline()` のボリューム優先度: 1) `taker_buy_volume` あり → `Volume::BuySell`、2) `quote_volume` あり → `Volume::TotalOnly(quote)`、3) fallback → raw `volume`。
 
-#### Finding #3 (Medium): Hyperliquid spot の display symbol が IPC パスで失われる
-→ 既に「既知の課題」として上記「Hyperliquid 実装詳細」セクションに記載済み。
+#### Finding #3 (Medium): Hyperliquid spot の display symbol が IPC パスで失われる ✅ (確認済み)
+→ `_list_tickers_spot()` がすでに `display_symbol` フィールドを返しており (`hyperliquid.py:342`)、Rust `backend.rs:425` が `Ticker::new_with_display(symbol, exchange, display_symbol)` で処理済み。追加修正不要。
 
-## フェーズ 4: ヒストリカルデータ・bulk download 移植
+## フェーズ 4: ヒストリカルデータ・bulk download 移植 ✅
 
-- [ ] [`src/connector/fetcher.rs`](../../src/connector/fetcher.rs) 相当の機能を Python に実装。
-- [ ] `data.binance.vision` からの zip/csv 取得・展開を Python で実施。
-- [ ] Rust 側は `FetchTrades` / `FetchKlines` コマンドを送って結果を待つだけにする。
+> **完了** (2026-04-24, ブランチ `phase-4/historical-trades`)
 
-**完了条件**: ヒストリカル trade のフェッチが Python に移管。
+- [x] `BinanceWorker.fetch_trades()` を Python に実装。
+  - 当日分: aggTrades REST API (`/fapi/v1/aggTrades`, `/api/v3/aggTrades` 等)
+  - 過去日分: `data.binance.vision` から zip/CSV をダウンロードしてローカルキャッシュ
+  - 404 時は intraday API にフォールバック
+  - キャッシュヒット時は再ダウンロードなし
+- [x] `TradesFetched` IPC イベントを Python schemas (`schemas.py`) と Rust DTO (`dto.rs`) に追加。
+- [x] `server.py` の `FetchTrades` dispatch を実装（旧 "not_supported" スタブから完全実装へ）。
+  - `_do_fetch_trades(msg)`: venue/market/start_ms/data_path を解析し `worker.fetch_trades()` を呼び出し結果を `TradesFetched` イベントとして送出。
+  - 未知 venue は `ValueError` → `Error` イベントに変換。
+  - `fetch_trades` 未実装 venue は `NotImplementedError` → `Error` イベントに変換。
+- [x] `Command::FetchTrades` に `market` フィールドを追加（Python server の `_market_from_msg` と対応）。
+- [x] Rust `EngineClientBackend::fetch_trades()` が `TradesFetched` イベントを受信し `Vec<Trade>` に変換して返すよう更新（旧実装は Error イベント待機のみ）。
+- [x] pytest 172 件全 PASS（旧 161 + 新 11）。
+- [x] `cargo test --workspace` 全 PASS。
+- [x] `cargo clippy -p flowsurface-engine-client -- -D warnings` warning なし。
+
+**完了条件**: ヒストリカル trade のフェッチが Python に移管。✅ **達成済み**
+
+### Phase 4 設計判断・Tips
+
+- **`fetch_trades` の責務境界**: Rust `fetch_trades_batched` は `fetch_trades` をループ呼び出しして `latest_trade_t` を更新する。Python は1リクエストで `start_ms` から1日分のデータを返す。Rust ループが `end_ms` に達するまで繰り返し呼び出す設計を維持。
+- **data_path は Rust 側からは渡さない**: 現在の `Command::FetchTrades` に `data_path` は未追加。Python サーバ側で `data_path` を環境変数 or 設定ファイルから管理する拡張に備えて `schemas.FetchTrades.data_path: str | None = None` は定義済み。
+- **aggTrades フォーマット**: zip 内 CSV のカラム順: `[agg_id, price, qty, first_trade_id, last_trade_id, timestamp_ms, is_buyer_maker]`。`is_buyer_maker` が `"true"` → sell、`"false"` → buy（Rust 実装 `DeTrade.is_sell: bool` と同等）。
+- **インタデイ+ヒストリカルの結合**: 過去日のデータは historicアル zip を取得後、末尾の取引タイムスタンプから aggTrades API で残り時間を補完する。zip が空なら fallback で intraday のみ返却。
+- **`TradesFetched` vs `Trades`**: ストリームイベント (`Trades`) と REST レスポンス (`TradesFetched`) を別型として設計。backend.rs は両イベントを独立したパスで処理する。
 
 ## フェーズ 5: Rust から取引所コードを削除
 

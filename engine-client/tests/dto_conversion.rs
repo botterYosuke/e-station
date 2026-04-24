@@ -76,6 +76,9 @@ fn kline_msg_converts() {
         close: "30500.0".to_string(),
         volume: "100.5".to_string(),
         is_closed: true,
+        quote_volume: None,
+        taker_buy_volume: None,
+        taker_buy_quote_volume: None,
     };
     let kline = msg.to_kline().expect("should convert");
     assert_eq!(kline.time, 1_700_000_000_000u64);
@@ -97,6 +100,9 @@ fn kline_msg_bad_open_returns_none() {
         close: "1.0".to_string(),
         volume: "1.0".to_string(),
         is_closed: false,
+        quote_volume: None,
+        taker_buy_volume: None,
+        taker_buy_quote_volume: None,
     };
     assert!(msg.to_kline().is_none());
 }
