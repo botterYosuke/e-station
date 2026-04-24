@@ -50,13 +50,23 @@ IPC 計画で取りこぼしがないよう一覧化する（Python 移管の初
 - Funding rate — インジケータ化されておらず、`TickerStats` にも含まれない。現行で REST を継続要求している経路は無い。将来追加時に IPC スキーマへ追加する。
 - Liquidations — 同上、現行に継続要求経路なし。
 
-### データフロー（現状）
-1. 起動時 `AdapterHandles::spawn_all()` で全取引所のハンドラを spawn ([`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs))。
+### データフロー（Phase 0.5 以降）
+
+**Phase 0.5 (2026-04-24)** で `VenueBackend` trait を導入した。これにより venue ごとに backend を差し替え可能になった。
+
+1. 起動時 `AdapterHandles::spawn_all()` で全取引所の `NativeBackend` を spawn ([`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs))。
+   - 内部的には `Arc<dyn VenueBackend>` として保持。`NativeBackend` enum が既存の `hub/{venue}` ハンドルをラップ。
+   - `set_backend(venue, Arc<dyn VenueBackend>)` で venue 単位に backend を上書き可能（Phase 2 での `EngineClientBackend` 差し込み口）。
 2. メタデータを REST で取得し `tickers_info` にキャッシュ。
-3. UI でティッカー選択 → `subscribe(StreamKind)` で WS を開く。
-4. `exchange::Event` 列挙体（`DepthReceived` / `TradesReceived` / `KlineReceived`）として UI に流す。
-5. [`src/screen/dashboard.rs`](../../src/screen/dashboard.rs) の `ingest_depth` / `ingest_trades` / `update_latest_klines` が消費。
+3. UI でティッカー選択 → `AdapterHandles::kline_stream` / `trade_stream` / `depth_stream` 経由で WS を開く。
+   - 各メソッドは `get_backend(venue)` → `backend.kline_stream(...)` と 2 段階で委譲。
+4. `exchange::Event` 列挙体（`DepthReceived` / `TradesReceived` / `KlineReceived`）として UI に流す（変更なし）。
+5. [`src/screen/dashboard.rs`](../../src/screen/dashboard.rs) の `ingest_depth` / `ingest_trades` / `update_latest_klines` が消費（変更なし）。
 6. インメモリ構造体に保持し、Iced が毎フレーム再描画。永続化 DB は無し。
+
+**追加された型・ファイル**:
+- [`exchange/src/adapter/venue_backend.rs`](../../exchange/src/adapter/venue_backend.rs): `VenueBackend` trait、`NativeBackend` enum、`TickerMetadataMap` / `TickerStatsMap` 型エイリアス。
+- [`exchange/tests/venue_backend.rs`](../../exchange/tests/venue_backend.rs): trait 抽象化の統合テスト。
 
 ## Python 側の現状
 - `python/` は **空ディレクトリ**。Cargo にも `pyo3` 等の Python 連携依存は **無し**。

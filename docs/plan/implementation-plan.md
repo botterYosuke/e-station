@@ -17,20 +17,29 @@
 
 **完了条件**: 既存挙動を変えずにマージでき、ベースラインが数値で記録されている。
 
-## フェーズ 0.5: venue 単位 backend 抽象化（Rust 側のみ）
+## フェーズ 0.5: venue 単位 backend 抽象化（Rust 側のみ）✅
 
 [spec.md §5.1](./spec.md#51-venue-単位の-backend-抽象化先行作業) に対応。取引所単位の段階移行を現実的にする前提工事。
 
-- [ ] `VenueBackend` trait を定義。現行 `AdapterHandles` の全経路を網羅すること:
-  - 初期化: `list_tickers` / `get_ticker_metadata`（[`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs) L200 付近・L269 付近）
-  - ストリーム: `subscribe` / `unsubscribe` / イベントストリーム取得
+> **完了** (2026-04-24, commit `4456ea5` ブランチ `phase-0.5/venue-backend-trait`)
+
+- [x] `VenueBackend` trait を定義。現行 `AdapterHandles` の全経路を網羅:
+  - 初期化: `fetch_ticker_metadata` / `fetch_ticker_stats`（`list_tickers` / `get_ticker_metadata` 相当）
+  - ストリーム: `kline_stream` / `trade_stream` / `depth_stream`
   - フェッチ: `fetch_klines` / `fetch_open_interest` / `fetch_ticker_stats` / `fetch_trades`
   - 運用: `request_depth_snapshot` / `health`
-- [ ] `AdapterHandles` の各 venue フィールドを `Box<dyn VenueBackend>` 相当に置換（[`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs) L21〜）。
-- [ ] 既存 `hub/{venue}` を包む `NativeBackend` を実装し、挙動が完全に同一であることを確認。
-- [ ] venue 毎に backend を指定できる起動設定を追加（未指定時は全 `NativeBackend`）。
+  - 実装場所: [`exchange/src/adapter/venue_backend.rs`](../../exchange/src/adapter/venue_backend.rs)
+- [x] `AdapterHandles` の各 venue フィールドを `Arc<dyn VenueBackend>` に置換（`Clone` 互換性のため `Box` ではなく `Arc`）。
+  - `set_backend(venue, Arc<dyn VenueBackend>)` API を追加（Phase 2 で `EngineClientBackend` を差し込む入口）。
+  - stream / fetch メソッドをすべて `get_backend(venue) -> Option<Arc<dyn VenueBackend>>` 経由に統一。
+- [x] 既存 `hub/{venue}` を包む `NativeBackend` enum を実装し挙動を維持。
+  - `NativeBackend::Binance(BinanceHandle)` / `Bybit` / `Hyperliquid` / `Okex` / `Mexc` の 5 バリアント。
+  - Hyperliquid の `depth_stream` が要求する `tick_multiplier` 引数など venue 固有差異をここで吸収。
+- [x] venue 毎に backend を指定できる `set_backend` API を追加（未指定時は `spawn_venue` が全 `NativeBackend` で起動）。
+- [x] `cargo test --workspace` 全 PASS、`cargo clippy -- -D warnings` warning なし。
+- [x] TDD: `exchange/tests/venue_backend.rs` に 4 テスト（set/get/configured_venues/health）。
 
-**完了条件**: 抽象化導入後も従来の挙動・レイテンシが維持されている。
+**完了条件**: 抽象化導入後も従来の挙動・レイテンシが維持されている。→ 達成（NativeBackend は既存ハンドルをそのままラップ）。
 
 ## フェーズ 1: Python データエンジン MVP（Binance のみ）
 

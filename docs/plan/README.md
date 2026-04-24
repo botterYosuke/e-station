@@ -18,7 +18,7 @@
 
 ### A. 移行境界の定義
 1. **IPC DTO 層**: 既存 Rust 型はそのまま serde に流せない（`Kline`/`OpenInterest` に派生なし、`Depth` は内部表現、`Event` は `Arc` / `Box<[T]>` を含む）。DTO 層を別定義する方針で進める。→ [spec.md §4.3](./spec.md#43-メッセージスキーマ)
-2. **`VenueBackend` trait の責務網羅**: ストリーム・フェッチ系だけでなく、`list_tickers` / `get_ticker_metadata` / `request_depth_snapshot` / `health` まで含める。現行 `AdapterHandles` の起動シーケンスをそのまま覆えること。→ [spec.md §5.1](./spec.md#51-venue-単位の-backend-抽象化先行作業)
+2. ✅ **`VenueBackend` trait の責務網羅** (Phase 0.5 完了): ストリーム・フェッチ系に加え `fetch_ticker_metadata` / `fetch_ticker_stats` / `request_depth_snapshot` / `health` を含む 9 メソッドで網羅。`NativeBackend` による既存動作の維持と `set_backend` による venue 単位 swap-in API を実装済み。→ [exchange/src/adapter/venue_backend.rs](../../exchange/src/adapter/venue_backend.rs)
 3. **Open Interest の完全経路**: インジケータが継続的に要求するため、Python MVP の初期スコープに OI REST を含める。IPC コマンド `FetchOpenInterest` / イベント `OpenInterest` を定義。→ [spec.md §4.2](./spec.md#42-メッセージ方向)
 
 ### B. 障害時整合性
