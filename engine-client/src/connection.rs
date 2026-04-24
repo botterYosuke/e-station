@@ -7,7 +7,7 @@
 ///
 /// The connection performs the `Hello`/`Ready` handshake on construction.
 use bytes::Bytes;
-use fastwebsockets::{Frame, FragmentCollector, OpCode, Payload};
+use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload};
 use http_body_util::Empty;
 use hyper::{
     Request,
@@ -55,16 +55,23 @@ impl EngineConnection {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_BUFFER);
 
         // Perform handshake with exclusive ws access before spawning the IO tasks.
-        let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, perform_handshake(ws, token, events_tx.clone()))
-            .await
-            .map_err(|_| EngineClientError::HandshakeTimeout)??;
+        let ws = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            perform_handshake(ws, token, events_tx.clone()),
+        )
+        .await
+        .map_err(|_| EngineClientError::HandshakeTimeout)??;
 
         let closed = Arc::new(tokio::sync::Notify::new());
 
         // Spawn the read/write loops.
         spawn_io_tasks(ws, cmd_rx, events_tx.clone(), Arc::clone(&closed));
 
-        Ok(Self { sender: cmd_tx, events: events_tx, closed })
+        Ok(Self {
+            sender: cmd_tx,
+            events: events_tx,
+            closed,
+        })
     }
 
     /// Send a command to the Python engine.
@@ -111,9 +118,9 @@ async fn connect_plain_ws(
         .ok_or_else(|| EngineClientError::WebSocket("missing host".to_string()))?
         .to_owned();
 
-    let port = parsed.port_or_known_default().ok_or_else(|| {
-        EngineClientError::WebSocket("missing port".to_string())
-    })?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| EngineClientError::WebSocket("missing port".to_string()))?;
 
     let addr = format!("{host}:{port}");
     let tcp = tokio::net::TcpStream::connect(&addr).await.map_err(|e| {
@@ -142,7 +149,10 @@ async fn connect_plain_ws(
         .header("Host", format!("{host}:{port}"))
         .header(UPGRADE, "websocket")
         .header(CONNECTION, "upgrade")
-        .header("Sec-WebSocket-Key", fastwebsockets::handshake::generate_key())
+        .header(
+            "Sec-WebSocket-Key",
+            fastwebsockets::handshake::generate_key(),
+        )
         .header("Sec-WebSocket-Version", "13")
         .body(Empty::<Bytes>::new())
         .map_err(|e| EngineClientError::WebSocket(e.to_string()))?;
@@ -187,7 +197,11 @@ async fn perform_handshake(
                 let event: EngineEvent = serde_json::from_str(text)?;
 
                 match &event {
-                    EngineEvent::Ready { schema_major, schema_minor, .. } => {
+                    EngineEvent::Ready {
+                        schema_major,
+                        schema_minor,
+                        ..
+                    } => {
                         if *schema_major != SCHEMA_MAJOR {
                             return Err(EngineClientError::SchemaMismatch {
                                 local_major: SCHEMA_MAJOR,
@@ -196,7 +210,9 @@ async fn perform_handshake(
                                 remote_minor: *schema_minor,
                             });
                         }
-                        log::info!("engine handshake complete: schema {schema_major}.{schema_minor}");
+                        log::info!(
+                            "engine handshake complete: schema {schema_major}.{schema_minor}"
+                        );
                         // Broadcast the Ready event so any subscriber can observe it.
                         let _ = events_tx.send(event);
                         return Ok(ws);
@@ -238,6 +254,8 @@ fn spawn_io_tasks(
     let ws_write = Arc::clone(&ws);
 
     // Write task: drain the command channel and send JSON frames.
+    let closed_write = Arc::clone(&closed);
+    let events_tx_write = events_tx.clone();
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             let json = match serde_json::to_string(&cmd) {
@@ -253,6 +271,8 @@ fn spawn_io_tasks(
                 .await
             {
                 log::error!("engine ws write error: {e}");
+                let _ = events_tx_write.send(crate::dto::EngineEvent::ConnectionDropped);
+                closed_write.notify_waiters();
                 break;
             }
         }
@@ -296,7 +316,9 @@ fn spawn_io_tasks(
                 OpCode::Ping => {
                     // fastwebsockets does not auto-pong; send pong manually.
                     let mut guard = ws.lock().await;
-                    let _ = guard.write_frame(Frame::pong(Payload::BorrowedMut(&mut []))).await;
+                    let _ = guard
+                        .write_frame(Frame::pong(Payload::BorrowedMut(&mut [])))
+                        .await;
                 }
                 _ => {} // Binary / Pong — ignored
             }

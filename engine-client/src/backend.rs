@@ -5,7 +5,7 @@
 /// `exchange::Event`s. Fetch methods send a command with a unique `request_id`
 /// and wait for the matching reply event.
 use exchange::{
-    Kline, OpenInterest, PushFrequency, Ticker, TickMultiplier, TickerInfo, TickerStats, Timeframe,
+    Kline, OpenInterest, PushFrequency, TickMultiplier, Ticker, TickerInfo, TickerStats, Timeframe,
     Trade,
     adapter::{
         AdapterError, Event, Exchange, MarketKind, StreamKind, StreamTicksize,
@@ -13,7 +13,7 @@ use exchange::{
     },
     depth::DepthPayload,
 };
-use futures::{future::BoxFuture, stream::BoxStream, StreamExt};
+use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -348,19 +348,9 @@ impl VenueBackend for EngineClientBackend {
                     Ok(EngineEvent::DepthGap { venue: ev_venue, ticker, market: ev_market, .. }) => {
                         if ev_venue != venue || ticker != ticker_sym { continue; }
                         if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
-                        tracker.lock().await.reset_ticker(&ticker);
-                        log::warn!("DepthGap for {ticker} — requesting new snapshot");
-                        if let Err(e) = connection
-                            .send(Command::RequestDepthSnapshot {
-                                request_id: Uuid::new_v4().to_string(),
-                                venue: venue.clone(),
-                                ticker: ticker_sym.clone(),
-                                market: Self::market_kind_to_ipc(market_kind),
-                            })
-                            .await
-                        {
-                            log::error!("depth_stream: failed to send RequestDepthSnapshot after DepthGap for {ticker}: {e}");
-                        }
+                        log::warn!("DepthGap for {ticker} — disconnecting for clean reconnect");
+                        yield Event::Disconnected(exchange, "depth gap".to_string());
+                        return;
                     }
 
                     Ok(EngineEvent::Disconnected { venue: ev_venue, ticker, market: ev_market, reason, .. }) => {
@@ -431,9 +421,11 @@ impl VenueBackend for EngineClientBackend {
                 let market_map = tokio::time::timeout(FETCH_TIMEOUT, async {
                     loop {
                         match rx.recv().await {
-                            Ok(EngineEvent::TickerInfo { request_id: rid, tickers, .. })
-                                if rid == request_id =>
-                            {
+                            Ok(EngineEvent::TickerInfo {
+                                request_id: rid,
+                                tickers,
+                                ..
+                            }) if rid == request_id => {
                                 let map: TickerMetadataMap = tickers
                                     .iter()
                                     .filter_map(|t| {
@@ -446,19 +438,27 @@ impl VenueBackend for EngineClientBackend {
                                             .get("contract_size")
                                             .and_then(|v| v.as_f64())
                                             .map(|v| v as f32);
-                                        let ticker =
-                                            Ticker::new_with_display(symbol, exchange, display_symbol);
+                                        let ticker = Ticker::new_with_display(
+                                            symbol,
+                                            exchange,
+                                            display_symbol,
+                                        );
                                         let info = TickerInfo::new(
-                                            ticker, min_tick, min_qty, contract_size,
+                                            ticker,
+                                            min_tick,
+                                            min_qty,
+                                            contract_size,
                                         );
                                         Some((ticker, Some(info)))
                                     })
                                     .collect();
                                 return Ok(map);
                             }
-                            Ok(EngineEvent::Error { request_id: Some(rid), code, message })
-                                if rid == request_id =>
-                            {
+                            Ok(EngineEvent::Error {
+                                request_id: Some(rid),
+                                code,
+                                message,
+                            }) if rid == request_id => {
                                 return Err(AdapterError::InvalidRequest(format!(
                                     "{code}: {message}"
                                 )));
@@ -624,19 +624,21 @@ impl VenueBackend for EngineClientBackend {
             tokio::time::timeout(FETCH_TIMEOUT, async {
                 loop {
                     match rx.recv().await {
-                        Ok(EngineEvent::Klines { request_id: rid, klines, .. })
-                            if rid == request_id =>
-                        {
+                        Ok(EngineEvent::Klines {
+                            request_id: rid,
+                            klines,
+                            ..
+                        }) if rid == request_id => {
                             let result: Vec<Kline> =
                                 klines.iter().filter_map(|k| k.to_kline()).collect();
                             return Ok(result);
                         }
-                        Ok(EngineEvent::Error { request_id: Some(rid), code, message })
-                            if rid == request_id =>
-                        {
-                            return Err(AdapterError::InvalidRequest(format!(
-                                "{code}: {message}"
-                            )));
+                        Ok(EngineEvent::Error {
+                            request_id: Some(rid),
+                            code,
+                            message,
+                        }) if rid == request_id => {
+                            return Err(AdapterError::InvalidRequest(format!("{code}: {message}")));
                         }
                         Ok(EngineEvent::ConnectionDropped)
                         | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -692,19 +694,21 @@ impl VenueBackend for EngineClientBackend {
             tokio::time::timeout(FETCH_TIMEOUT, async {
                 loop {
                     match rx.recv().await {
-                        Ok(EngineEvent::OpenInterest { request_id: rid, data, .. })
-                            if rid == request_id =>
-                        {
+                        Ok(EngineEvent::OpenInterest {
+                            request_id: rid,
+                            data,
+                            ..
+                        }) if rid == request_id => {
                             let result: Vec<OpenInterest> =
                                 data.iter().filter_map(|p| p.to_open_interest()).collect();
                             return Ok(result);
                         }
-                        Ok(EngineEvent::Error { request_id: Some(rid), code, message })
-                            if rid == request_id =>
-                        {
-                            return Err(AdapterError::InvalidRequest(format!(
-                                "{code}: {message}"
-                            )));
+                        Ok(EngineEvent::Error {
+                            request_id: Some(rid),
+                            code,
+                            message,
+                        }) if rid == request_id => {
+                            return Err(AdapterError::InvalidRequest(format!("{code}: {message}")));
                         }
                         Ok(EngineEvent::ConnectionDropped)
                         | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -715,9 +719,7 @@ impl VenueBackend for EngineClientBackend {
                 }
             })
             .await
-            .map_err(|_| {
-                AdapterError::WebsocketError("fetch_open_interest timeout".to_string())
-            })?
+            .map_err(|_| AdapterError::WebsocketError("fetch_open_interest timeout".to_string()))?
         })
     }
 
@@ -825,9 +827,7 @@ impl VenueBackend for EngineClientBackend {
                             ref bids,
                             ref asks,
                             ..
-                        }) if t == &ticker_sym
-                            && rid.as_deref().map_or(true, |r| r == request_id) =>
-                        {
+                        }) if t == &ticker_sym && rid.as_deref() == Some(request_id.as_str()) => {
                             return Ok(depth_levels_to_payload(sequence_id, bids, asks));
                         }
                         Ok(EngineEvent::Error {
@@ -835,9 +835,7 @@ impl VenueBackend for EngineClientBackend {
                             ref code,
                             ref message,
                         }) if rid == &request_id => {
-                            return Err(AdapterError::InvalidRequest(format!(
-                                "{code}: {message}"
-                            )));
+                            return Err(AdapterError::InvalidRequest(format!("{code}: {message}")));
                         }
                         Ok(EngineEvent::ConnectionDropped)
                         | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -860,7 +858,9 @@ impl VenueBackend for EngineClientBackend {
             let request_id = Uuid::new_v4().to_string();
             let mut rx = connection.subscribe_events();
             if connection
-                .send(Command::Ping { request_id: request_id.clone() })
+                .send(Command::Ping {
+                    request_id: request_id.clone(),
+                })
                 .await
                 .is_err()
             {
@@ -872,7 +872,8 @@ impl VenueBackend for EngineClientBackend {
                         Ok(EngineEvent::Pong { request_id: rid }) if rid == request_id => {
                             return true;
                         }
-                        Err(_) => return false,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         _ => continue,
                     }
                 }
@@ -895,10 +896,14 @@ fn apply_diff_levels(
     use exchange::unit::{Price, Qty};
 
     let apply = |map: &mut std::collections::BTreeMap<Price, Qty>,
-                     levels: &[crate::dto::DepthLevel]| {
+                 levels: &[crate::dto::DepthLevel]| {
         for level in levels {
-            let Ok(p) = level.price.parse::<f32>() else { continue };
-            let Ok(q) = level.qty.parse::<f32>() else { continue };
+            let Ok(p) = level.price.parse::<f32>() else {
+                continue;
+            };
+            let Ok(q) = level.qty.parse::<f32>() else {
+                continue;
+            };
             let price = Price::from_f32(p).round_to_min_tick(min_ticksize);
             let qty = Qty::from_f32(q);
             if qty.is_zero() {

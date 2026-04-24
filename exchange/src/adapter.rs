@@ -2,8 +2,8 @@ mod client;
 pub mod proxy;
 pub mod venue_backend;
 
-pub use super::error::AdapterError;
 use super::Timeframe;
+pub use super::error::AdapterError;
 use crate::{
     Kline, Price, PushFrequency, TickMultiplier, TickerInfo, Trade, depth::Depth, unit::Qty,
 };
@@ -32,7 +32,6 @@ pub fn allowed_multipliers_for_min_tick(min_ticksize: crate::unit::MinTicksize) 
         HL_MULTS_SAFE
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum MarketKind {

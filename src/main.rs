@@ -53,6 +53,16 @@ static ENGINE_CONNECTION: std::sync::RwLock<Option<Arc<engine_client::EngineConn
 static ENGINE_RESTARTING: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
     std::sync::OnceLock::new();
 
+/// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
+/// Referenced during initial setup and on every engine reconnect.
+const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
+    (exchange::adapter::Venue::Binance, "binance"),
+    (exchange::adapter::Venue::Bybit, "bybit"),
+    (exchange::adapter::Venue::Hyperliquid, "hyperliquid"),
+    (exchange::adapter::Venue::Okex, "okex"),
+    (exchange::adapter::Venue::Mexc, "mexc"),
+];
+
 fn main() {
     let cli_args = cli::CliArgs::parse();
 
@@ -60,106 +70,107 @@ fn main() {
 
     // Initialise the engine-restarting watch channel (used even in native mode
     // so the subscription is always wired up consistently).
-    let (restarting_tx, _) = tokio::sync::watch::channel(false);
+    // Keep `_restarting_rx` alive for the duration of main() so that send()
+    // never returns Err(no-receivers) before Iced's engine_status_stream subscribes.
+    let (restarting_tx, _restarting_rx) = tokio::sync::watch::channel(false);
     ENGINE_RESTARTING.set(restarting_tx).ok();
 
     // When `--data-engine-url` is supplied, connect to the external Python engine
     // before starting Iced.  A dedicated tokio runtime keeps the connection's
     // background IO tasks alive for the full application lifetime.
-    let _engine_rt: Option<tokio::runtime::Runtime> =
-        if let Some(ref url) = cli_args.data_engine_url {
-            let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
-            let url_str = url.to_string();
+    let _engine_rt: Option<tokio::runtime::Runtime> = if let Some(ref url) =
+        cli_args.data_engine_url
+    {
+        let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
+        let url_str = url.to_string();
 
-            log::info!("Data engine URL: {url_str} — connecting …");
+        log::info!("Data engine URL: {url_str} — connecting …");
 
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .thread_name("engine-client")
-                .build()
-                .expect("Failed to build engine-client tokio runtime");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("engine-client")
+            .build()
+            .expect("Failed to build engine-client tokio runtime");
 
-            match rt.block_on(engine_client::EngineConnection::connect(&url_str, &token)) {
-                Ok(conn) => {
-                    log::info!("Connected to external data engine at {url_str}");
-                    let conn = Arc::new(conn);
-                    *ENGINE_CONNECTION.write().unwrap() = Some(Arc::clone(&conn));
+        match rt.block_on(engine_client::EngineConnection::connect(&url_str, &token)) {
+            Ok(conn) => {
+                log::info!("Connected to external data engine at {url_str}");
+                let conn = Arc::new(conn);
+                *ENGINE_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::clone(&conn));
 
-                    // Push saved proxy to engine before Iced starts so that the
-                    // very first subscription fires through the proxy, not direct.
-                    // Uses the same resolution order as load_saved_state():
-                    // proxy-url.json → state.json fallback → keychain auth.
-                    if let Some(proxy) = data::config::proxy::load_startup_proxy() {
-                        let proxy_url = Some(proxy.to_url_string());
-                        match rt.block_on(
-                            conn.send(engine_client::dto::Command::SetProxy { url: proxy_url }),
-                        ) {
-                            Ok(()) => log::info!("Initial proxy sent to engine"),
-                            Err(e) => log::warn!("Failed to send initial proxy: {e}"),
-                        }
+                // Push saved proxy to engine before Iced starts so that the
+                // very first subscription fires through the proxy, not direct.
+                // Uses the same resolution order as load_saved_state():
+                // proxy-url.json → state.json fallback → keychain auth.
+                if let Some(proxy) = data::config::proxy::load_startup_proxy() {
+                    let proxy_url = Some(proxy.to_url_string());
+                    match rt.block_on(
+                        conn.send(engine_client::dto::Command::SetProxy { url: proxy_url }),
+                    ) {
+                        Ok(()) => log::info!("Initial proxy sent to engine"),
+                        Err(e) => log::warn!("Failed to send initial proxy: {e}"),
                     }
+                }
 
-                    // Monitor the connection and reconnect with exponential backoff on loss.
-                    let reconnect_url = url_str.clone();
-                    let reconnect_token = token.clone();
-                    rt.spawn(async move {
-                        let mut current_conn = conn;
+                // Monitor the connection and reconnect with exponential backoff on loss.
+                let reconnect_url = url_str.clone();
+                let reconnect_token = token.clone();
+                rt.spawn(async move {
+                    let mut current_conn = conn;
+                    loop {
+                        current_conn.wait_closed().await;
+                        log::warn!("external engine connection lost");
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(true).ok();
+                        }
+
+                        let mut delay = std::time::Duration::from_secs(1);
                         loop {
-                            current_conn.wait_closed().await;
-                            log::warn!("external engine connection lost");
-                            if let Some(tx) = ENGINE_RESTARTING.get() {
-                                tx.send(true).ok();
-                            }
-
-                            let mut delay = std::time::Duration::from_secs(1);
-                            loop {
-                                tokio::time::sleep(delay).await;
-                                log::info!(
-                                    "Attempting to reconnect to engine at {reconnect_url} …"
-                                );
-                                match engine_client::EngineConnection::connect(
-                                    &reconnect_url,
-                                    &reconnect_token,
-                                )
-                                .await
-                                {
-                                    Ok(new_conn) => {
-                                        log::info!(
-                                            "Reconnected to data engine at {reconnect_url}"
-                                        );
-                                        let new_conn = Arc::new(new_conn);
-                                        *ENGINE_CONNECTION.write().unwrap() =
-                                            Some(Arc::clone(&new_conn));
-                                        if let Some(tx) = ENGINE_RESTARTING.get() {
-                                            tx.send(false).ok();
-                                        }
-                                        current_conn = new_conn;
-                                        break;
+                            tokio::time::sleep(delay).await;
+                            log::info!("Attempting to reconnect to engine at {reconnect_url} …");
+                            match engine_client::EngineConnection::connect(
+                                &reconnect_url,
+                                &reconnect_token,
+                            )
+                            .await
+                            {
+                                Ok(new_conn) => {
+                                    log::info!("Reconnected to data engine at {reconnect_url}");
+                                    let new_conn = Arc::new(new_conn);
+                                    *ENGINE_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) =
+                                        Some(Arc::clone(&new_conn));
+                                    if let Some(tx) = ENGINE_RESTARTING.get() {
+                                        tx.send(false).ok();
                                     }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "Reconnect failed: {e}, retrying in {delay:?}"
-                                        );
-                                        delay =
-                                            (delay * 2).min(std::time::Duration::from_secs(60));
-                                    }
+                                    current_conn = new_conn;
+                                    break;
+                                }
+                                Err(e) => {
+                                    log::warn!("Reconnect failed: {e}, retrying in {delay:?}");
+                                    delay = (delay * 2).min(std::time::Duration::from_secs(60));
                                 }
                             }
                         }
-                    });
-                }
-                Err(e) => {
-                    log::error!("Failed to connect to data engine at {url_str}: {e}");
-                }
+                    }
+                });
             }
+            Err(e) => {
+                log::error!("Failed to connect to data engine at {url_str}: {e}");
+            }
+        }
 
-            Some(rt)
-        } else {
-            None
-        };
+        Some(rt)
+    } else {
+        None
+    };
 
-    if ENGINE_CONNECTION.read().unwrap().is_none() {
+    if ENGINE_CONNECTION
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none()
+    {
         log::error!(
             "No data engine connected. \
              Use --data-engine-url <ws://host:port> to connect to the Python data engine."
@@ -247,12 +258,17 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
     async_stream::stream! {
         let Some(tx) = ENGINE_RESTARTING.get() else { return; };
         let mut rx = tx.subscribe();
+        // Emit the current value immediately in case send(true) fired before we subscribed.
+        // subscribe() marks the current value as already-seen, so changed() would skip it.
+        if *rx.borrow() {
+            yield Message::EngineRestarting(true);
+        }
         loop {
             if rx.changed().await.is_err() {
                 break;
             }
             // Copy the bool before dropping the Ref so the guard doesn't cross an await.
-            let value = *rx.borrow();
+            let value = *rx.borrow_and_update();
             yield Message::EngineRestarting(value);
         }
     }
@@ -265,18 +281,13 @@ impl Flowsurface {
         // All venues are routed through the Python data engine via IPC.
         // ENGINE_CONNECTION is guaranteed to be set before Iced starts (main() exits if not).
         let mut handles = exchange::adapter::AdapterHandles::default();
-        if let Some(conn) = ENGINE_CONNECTION.read().unwrap().as_ref().cloned() {
-            use exchange::adapter::Venue;
-
-            let venue_names: &[(Venue, &str)] = &[
-                (Venue::Binance, "binance"),
-                (Venue::Bybit, "bybit"),
-                (Venue::Hyperliquid, "hyperliquid"),
-                (Venue::Okex, "okex"),
-                (Venue::Mexc, "mexc"),
-            ];
-
-            for &(venue, name) in venue_names {
+        if let Some(conn) = ENGINE_CONNECTION
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        {
+            for &(venue, name) in VENUE_NAMES {
                 let backend = Arc::new(engine_client::EngineClientBackend::new(
                     Arc::clone(&conn),
                     name,
@@ -351,20 +362,15 @@ impl Flowsurface {
                     self.notifications.push(Toast::error(
                         "データエンジン再起動中 — チャートは復旧後に自動更新されます".to_string(),
                     ));
-                } else if let Some(conn) =
-                    ENGINE_CONNECTION.read().unwrap().as_ref().cloned()
+                } else if let Some(conn) = ENGINE_CONNECTION
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .cloned()
                 {
                     // Rebuild backends with the new connection and bump the generation
                     // counter so iced assigns new subscription IDs and restarts streams.
-                    use exchange::adapter::Venue;
-                    let venue_names: &[(Venue, &str)] = &[
-                        (Venue::Binance, "binance"),
-                        (Venue::Bybit, "bybit"),
-                        (Venue::Hyperliquid, "hyperliquid"),
-                        (Venue::Okex, "okex"),
-                        (Venue::Mexc, "mexc"),
-                    ];
-                    for &(venue, name) in venue_names {
+                    for &(venue, name) in VENUE_NAMES {
                         let backend = Arc::new(engine_client::EngineClientBackend::new(
                             Arc::clone(&conn),
                             name,
@@ -376,9 +382,9 @@ impl Flowsurface {
                     // the engine's FIFO command channel.
                     if let Some(proxy_cfg) = self.network.proxy_cfg() {
                         let proxy_url = Some(proxy_cfg.to_url_string());
-                        if !conn.try_send_now(engine_client::dto::Command::SetProxy {
-                            url: proxy_url,
-                        }) {
+                        if !conn
+                            .try_send_now(engine_client::dto::Command::SetProxy { url: proxy_url })
+                        {
                             log::warn!("Failed to queue proxy for engine reconnect");
                         }
                     }
@@ -392,9 +398,8 @@ impl Flowsurface {
                         .update_handles(self.handles.clone())
                         .map(Message::Sidebar);
 
-                    self.notifications.push(Toast::info(
-                        "データエンジン接続を復旧しました".to_string(),
-                    ));
+                    self.notifications
+                        .push(Toast::info("データエンジン接続を復旧しました".to_string()));
                     return sidebar_refetch;
                 }
             }
@@ -785,8 +790,11 @@ impl Flowsurface {
                         // stream reconnection.  A subsequent engine-side failure (e.g.
                         // unreachable proxy) would surface as stream disconnects, not
                         // as a ProxyResult::Failed.
-                        let engine_conn =
-                            ENGINE_CONNECTION.read().unwrap().as_ref().cloned();
+                        let engine_conn = ENGINE_CONNECTION
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref()
+                            .cloned();
                         return Task::perform(
                             async move {
                                 if let Some(conn) = engine_conn {
@@ -799,22 +807,20 @@ impl Flowsurface {
                                 if let Some(proxy) = &new_proxy {
                                     data::config::proxy::save_proxy_auth(proxy);
                                 }
-                                data::config::proxy::save_proxy_url(
-                                    proxy_url_no_auth.as_deref(),
-                                );
+                                data::config::proxy::save_proxy_url(proxy_url_no_auth.as_deref());
                                 Ok(())
                             },
                             |result| match result {
-                                Ok(()) => Message::NetworkManager(
-                                    network_manager::Message::ProxyResult(
+                                Ok(()) => {
+                                    Message::NetworkManager(network_manager::Message::ProxyResult(
                                         network_manager::ProxyResult::Applied,
-                                    ),
-                                ),
-                                Err(e) => Message::NetworkManager(
-                                    network_manager::Message::ProxyResult(
+                                    ))
+                                }
+                                Err(e) => {
+                                    Message::NetworkManager(network_manager::Message::ProxyResult(
                                         network_manager::ProxyResult::Failed(e),
-                                    ),
-                                ),
+                                    ))
+                                }
                             },
                         );
                     }

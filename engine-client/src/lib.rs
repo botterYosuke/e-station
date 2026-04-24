@@ -19,6 +19,7 @@ pub use backend::EngineClientBackend;
 pub use connection::EngineConnection;
 pub use depth_tracker::DepthTracker;
 pub use error::EngineClientError;
+#[doc(hidden)]
 pub use hybrid::HybridVenueBackend;
 pub use process::{ProcessManager, PythonProcess, SubscriptionKey};
 

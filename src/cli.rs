@@ -1,13 +1,9 @@
 /// Command-line argument parsing for the Flowsurface viewer.
-///
-/// Phase 0: only `--data-engine-url` is introduced; all other behaviour
-/// remains unchanged when the flag is absent.
 use url::Url;
 
 #[derive(Debug, Default)]
 pub struct CliArgs {
-    /// WebSocket URL of an external Python data engine.
-    /// When `None` the app uses the built-in Rust exchange adapters.
+    /// WebSocket URL of the Python data engine (required).
     pub data_engine_url: Option<Url>,
 }
 
@@ -28,9 +24,8 @@ impl CliArgs {
                 let raw = iter
                     .next()
                     .ok_or_else(|| "--data-engine-url requires a value".to_string())?;
-                let url = Url::parse(&raw).map_err(|e| {
-                    format!("invalid --data-engine-url value '{raw}': {e}")
-                })?;
+                let url = Url::parse(&raw)
+                    .map_err(|e| format!("invalid --data-engine-url value '{raw}': {e}"))?;
                 if url.scheme() != "ws" {
                     return Err(format!(
                         "--data-engine-url: scheme '{}' is not supported; \
@@ -68,8 +63,7 @@ mod tests {
     use super::*;
 
     fn args(v: &[&str]) -> impl Iterator<Item = String> {
-        std::iter::once("flowsurface".to_string())
-            .chain(v.iter().map(|s| s.to_string()))
+        std::iter::once("flowsurface".to_string()).chain(v.iter().map(|s| s.to_string()))
     }
 
     #[test]
@@ -80,8 +74,7 @@ mod tests {
 
     #[test]
     fn data_engine_url_is_parsed() {
-        let cli =
-            CliArgs::parse_from(args(&["--data-engine-url", "ws://127.0.0.1:9001"])).unwrap();
+        let cli = CliArgs::parse_from(args(&["--data-engine-url", "ws://127.0.0.1:9001"])).unwrap();
         let url = cli.data_engine_url.expect("should have url");
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert_eq!(url.port(), Some(9001));
@@ -136,8 +129,7 @@ mod tests {
 
     #[test]
     fn rejects_non_loopback_host() {
-        let result =
-            CliArgs::parse_from(args(&["--data-engine-url", "ws://example.com:8765"]));
+        let result = CliArgs::parse_from(args(&["--data-engine-url", "ws://example.com:8765"]));
         assert!(result.is_err(), "remote host should be rejected");
         let msg = result.unwrap_err();
         assert!(
@@ -148,22 +140,19 @@ mod tests {
 
     #[test]
     fn accepts_localhost_domain() {
-        let cli =
-            CliArgs::parse_from(args(&["--data-engine-url", "ws://localhost:8765"])).unwrap();
+        let cli = CliArgs::parse_from(args(&["--data-engine-url", "ws://localhost:8765"])).unwrap();
         assert!(cli.data_engine_url.is_some());
     }
 
     #[test]
     fn accepts_ipv6_loopback() {
-        let cli =
-            CliArgs::parse_from(args(&["--data-engine-url", "ws://[::1]:8765"])).unwrap();
+        let cli = CliArgs::parse_from(args(&["--data-engine-url", "ws://[::1]:8765"])).unwrap();
         assert!(cli.data_engine_url.is_some());
     }
 
     #[test]
     fn rejects_non_loopback_ipv4() {
-        let result =
-            CliArgs::parse_from(args(&["--data-engine-url", "ws://192.168.1.1:8765"]));
+        let result = CliArgs::parse_from(args(&["--data-engine-url", "ws://192.168.1.1:8765"]));
         assert!(result.is_err(), "LAN address should be rejected");
     }
 }
