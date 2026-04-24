@@ -86,6 +86,29 @@ fn main() {
                     let conn = Arc::new(conn);
                     *ENGINE_CONNECTION.write().unwrap() = Some(Arc::clone(&conn));
 
+                    // Push saved proxy to engine before Iced starts so that the
+                    // very first subscription fires through the proxy, not direct.
+                    {
+                        let saved_url = data::config::proxy::load_proxy_url().flatten();
+                        let mut saved_proxy = saved_url
+                            .and_then(|u| exchange::proxy::Proxy::try_from_str_strict(&u).ok());
+                        if let Some(proxy) = saved_proxy.as_mut()
+                            && proxy.auth().is_none()
+                            && let Some(auth) = data::config::proxy::load_proxy_auth(proxy)
+                        {
+                            proxy.set_auth(Some(auth));
+                        }
+                        if let Some(proxy) = saved_proxy {
+                            let proxy_url = Some(proxy.to_url_string());
+                            match rt.block_on(
+                                conn.send(engine_client::dto::Command::SetProxy { url: proxy_url }),
+                            ) {
+                                Ok(()) => log::info!("Initial proxy sent to engine"),
+                                Err(e) => log::warn!("Failed to send initial proxy: {e}"),
+                            }
+                        }
+                    }
+
                     // Monitor the connection and reconnect with exponential backoff on loss.
                     let reconnect_url = url_str.clone();
                     let reconnect_token = token.clone();
@@ -225,8 +248,6 @@ enum Message {
     NetworkManager(modal::network_manager::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
-    /// Result of fire-and-forget SetProxy sent on startup or engine reconnect.
-    EngineProxySynced(Result<(), String>),
 }
 
 /// Builds a stream that emits `Message::EngineRestarting` whenever the engine
@@ -322,34 +343,12 @@ impl Flowsurface {
         );
         let load_layout = state.load_layout(active_layout_id.unique, main_window_id);
 
-        // Replay saved proxy into the engine — the engine starts with no proxy
-        // configured regardless of what the client persisted, so we must push it
-        // explicitly on every startup.
-        let proxy_sync_task = if let Some(proxy_cfg) = state.network.proxy_cfg() {
-            if let Some(conn) = ENGINE_CONNECTION.read().unwrap().as_ref().cloned() {
-                let proxy_url = Some(proxy_cfg.to_url_string());
-                Task::perform(
-                    async move {
-                        conn.send(engine_client::dto::Command::SetProxy { url: proxy_url })
-                            .await
-                            .map_err(|e| e.to_string())
-                    },
-                    Message::EngineProxySynced,
-                )
-            } else {
-                Task::none()
-            }
-        } else {
-            Task::none()
-        };
-
         (
             state,
             open_main_window
                 .discard()
                 .chain(load_layout)
-                .chain(launch_sidebar.map(Message::Sidebar))
-                .chain(proxy_sync_task),
+                .chain(launch_sidebar.map(Message::Sidebar)),
         )
     }
 
@@ -381,6 +380,18 @@ impl Flowsurface {
                         ));
                         self.handles.set_backend(venue, backend);
                     }
+                    // Re-apply saved proxy before bumping the generation so that
+                    // stream-subscribe commands are enqueued after SetProxy in
+                    // the engine's FIFO command channel.
+                    if let Some(proxy_cfg) = self.network.proxy_cfg() {
+                        let proxy_url = Some(proxy_cfg.to_url_string());
+                        if !conn.try_send_now(engine_client::dto::Command::SetProxy {
+                            url: proxy_url,
+                        }) {
+                            log::warn!("Failed to queue proxy for engine reconnect");
+                        }
+                    }
+
                     self.handles.bump_generation();
 
                     // Also propagate to the sidebar's TickersTable so it uses
@@ -390,28 +401,10 @@ impl Flowsurface {
                         .update_handles(self.handles.clone())
                         .map(Message::Sidebar);
 
-                    // Re-apply saved proxy — the freshly started engine has no
-                    // proxy configured until we push it again.
-                    let proxy_sync_task = if let Some(proxy_cfg) = self.network.proxy_cfg() {
-                        let proxy_url = Some(proxy_cfg.to_url_string());
-                        let conn_clone = Arc::clone(&conn);
-                        Task::perform(
-                            async move {
-                                conn_clone
-                                    .send(engine_client::dto::Command::SetProxy { url: proxy_url })
-                                    .await
-                                    .map_err(|e| e.to_string())
-                            },
-                            Message::EngineProxySynced,
-                        )
-                    } else {
-                        Task::none()
-                    };
-
                     self.notifications.push(Toast::info(
                         "データエンジン接続を復旧しました".to_string(),
                     ));
-                    return sidebar_refetch.chain(proxy_sync_task);
+                    return sidebar_refetch;
                 }
             }
             Message::MarketWsEvent(event) => {
@@ -737,15 +730,6 @@ impl Flowsurface {
                         }
                     }
                     None => {}
-                }
-            }
-            Message::EngineProxySynced(result) => {
-                if let Err(e) = result {
-                    log::warn!("Failed to sync proxy to engine: {e}");
-                    self.notifications
-                        .push(Toast::error(format!("Proxy sync failed: {e}")));
-                } else {
-                    log::info!("Proxy synced to engine");
                 }
             }
             Message::AudioStream(message) => {

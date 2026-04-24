@@ -75,6 +75,14 @@ impl EngineConnection {
             .map_err(|_| EngineClientError::WebSocket("command channel closed".to_string()))
     }
 
+    /// Non-async variant: enqueue `cmd` immediately without awaiting.
+    /// Returns `true` on success. Only fails if the channel is full (capacity
+    /// 256) or closed, both of which are effectively impossible for a single
+    /// command right after connection.
+    pub fn try_send_now(&self, cmd: Command) -> bool {
+        self.sender.try_send(cmd).is_ok()
+    }
+
     /// Subscribe to all events broadcast from the Python engine.
     pub fn subscribe_events(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
