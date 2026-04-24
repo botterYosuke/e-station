@@ -732,7 +732,9 @@ pub(super) async fn fetch_trades(
             trades.retain(|t| t.time >= from_time);
 
             if let Some(latest_trade) = trades.last().copied() {
-                match fetch_intraday_trades(hub, ticker_info, latest_trade.time, to_time).await {
+                const DAY_MS: u64 = 86_400_000;
+                let next_day_start = ((latest_trade.time / DAY_MS) + 1) * DAY_MS;
+                match fetch_intraday_trades(hub, ticker_info, next_day_start, to_time).await {
                     Ok(intraday_trades) => {
                         trades.extend(intraday_trades.into_iter().filter(|t| t.time <= to_time));
                     }

@@ -131,6 +131,7 @@ impl FetchRequest {
             (FetchRange::OpenInterest(s1, e1), FetchRange::OpenInterest(s2, e2)) => {
                 e1 == e2 && s1 == s2
             }
+            (FetchRange::Trades(s1, e1), FetchRange::Trades(s2, e2)) => e1 == e2 && s1 == s2,
             _ => false,
         }
     }
@@ -717,6 +718,31 @@ mod tests {
         assert!(
             result.is_err(),
             "Expected Err when 7+ consecutive empty days occur, got Ok"
+        );
+    }
+
+    #[test]
+    fn fetch_range_trades_dedup_same_with() {
+        // Regression: same_with() must detect identical Trades ranges to prevent
+        // duplicate parallel fetches of the same time span.
+
+        let trades_1 = FetchRequest::new(FetchRange::Trades(1000, 2000));
+        let trades_2 = FetchRequest::new(FetchRange::Trades(1000, 2000));
+        let trades_3 = FetchRequest::new(FetchRange::Trades(1000, 3000));
+
+        assert!(
+            trades_1.same_with(&trades_2),
+            "Identical Trades ranges (1000..2000) must be detected as the same"
+        );
+        assert!(
+            !trades_1.same_with(&trades_3),
+            "Different Trades ranges (1000..2000 vs 1000..3000) must be different"
+        );
+
+        let kline = FetchRequest::new(FetchRange::Kline(1000, 2000));
+        assert!(
+            !trades_1.same_with(&kline),
+            "Trades and Kline must never be the same, even with identical time ranges"
         );
     }
 }

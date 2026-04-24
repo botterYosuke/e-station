@@ -156,3 +156,84 @@ fn oi_point_bad_value_returns_none() {
     let pt = OiPoint { ts_ms: 0, open_interest: "nope".to_string() };
     assert!(pt.to_open_interest().is_none());
 }
+
+// ── Kline volume normalization (data-engine vs native path) ──────────────────────
+
+#[test]
+fn kline_msg_with_taker_buy_volume_splits_volume() {
+    let msg = KlineMsg {
+        open_time_ms: 1_700_000_000_000,
+        open: "30000.0".to_string(),
+        high: "31000.0".to_string(),
+        low: "29000.0".to_string(),
+        close: "30500.0".to_string(),
+        volume: "100.0".to_string(),
+        is_closed: true,
+        taker_buy_volume: Some("60.0".to_string()),
+    };
+    let kline = msg.to_kline().expect("should convert");
+
+    // With taker_buy_volume, Volume::BuySell should be used
+    match &kline.volume {
+        exchange::Volume::BuySell(buy, sell) => {
+            assert!((buy.to_f32_lossy() - 60.0).abs() < 0.1, "buy volume: {}", buy.to_f32_lossy());
+            assert!((sell.to_f32_lossy() - 40.0).abs() < 0.1, "sell volume: {}", sell.to_f32_lossy());
+        }
+        exchange::Volume::TotalOnly(_) => {
+            panic!("Expected BuySell volume, got TotalOnly");
+        }
+    }
+}
+
+#[test]
+fn kline_msg_without_taker_buy_volume_uses_total_only() {
+    let msg = KlineMsg {
+        open_time_ms: 1_700_000_000_000,
+        open: "30000.0".to_string(),
+        high: "31000.0".to_string(),
+        low: "29000.0".to_string(),
+        close: "30500.0".to_string(),
+        volume: "100.0".to_string(),
+        is_closed: true,
+        taker_buy_volume: None,
+    };
+    let kline = msg.to_kline().expect("should convert");
+
+    // Without taker_buy_volume, Volume::TotalOnly should be used
+    match &kline.volume {
+        exchange::Volume::TotalOnly(total) => {
+            assert!((total.to_f32_lossy() - 100.0).abs() < 0.1, "total volume: {}", total.to_f32_lossy());
+        }
+        exchange::Volume::BuySell(_, _) => {
+            panic!("Expected TotalOnly volume, got BuySell");
+        }
+    }
+}
+
+#[test]
+fn kline_msg_taker_buy_larger_than_total_clamped_to_zero_sell() {
+    // Regression: if taker_buy_volume > volume due to rounding, sell must clamp to 0, not negative
+    let msg = KlineMsg {
+        open_time_ms: 1_700_000_000_000,
+        open: "30000.0".to_string(),
+        high: "31000.0".to_string(),
+        low: "29000.0".to_string(),
+        close: "30500.0".to_string(),
+        volume: "100.0".to_string(),
+        is_closed: true,
+        taker_buy_volume: Some("100.1".to_string()), // > total
+    };
+    let kline = msg.to_kline().expect("should convert");
+
+    match &kline.volume {
+        exchange::Volume::BuySell(buy, sell) => {
+            assert!((buy.to_f32_lossy() - 100.1).abs() < 0.1, "buy volume: {}", buy.to_f32_lossy());
+            // sell should be clamped to 0, not negative
+            let sell_val = sell.to_f32_lossy();
+            assert!(sell_val >= -0.01 && sell_val <= 0.01, "sell volume should be ~0, got {}", sell_val);
+        }
+        exchange::Volume::TotalOnly(_) => {
+            panic!("Expected BuySell volume, got TotalOnly");
+        }
+    }
+}

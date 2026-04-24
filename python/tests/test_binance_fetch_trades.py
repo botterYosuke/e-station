@@ -271,6 +271,86 @@ async def test_fallback_mid_day_start_caps_at_calendar_midnight(
     assert start_ms in ts_list
 
 
+@pytest.mark.asyncio
+async def test_fetch_trades_historical_filters_by_start_ms(tmp_path, httpx_mock: HTTPXMock):
+    """Historical zip fetch should filter by start_ms and end_ms (if provided).
+
+    This ensures that when a start_ms falls mid-day, we get only trades
+    >= start_ms and, if specified, <= end_ms. This is the Python behavior.
+    """
+    # 2024-01-05 15:00:00 UTC — mid-day, will force zip path
+    start_ms = 1_704_466_800_000
+    # 2024-01-05 23:59:59:000 UTC — end of day
+    end_of_day_ms = 1_704_499_199_000
+
+    worker = BinanceWorker()
+
+    # Zip CSV has trades before and after start_ms
+    csv_bytes = _make_agg_trades_csv([
+        (1, "68000.0", "0.5", 1, 1, start_ms - 3_600_000, False),  # Before start_ms
+        (2, "68100.0", "0.3", 2, 2, start_ms, True),               # At start_ms
+        (3, "68200.0", "0.2", 3, 3, end_of_day_ms, False),         # Near end of day
+    ])
+    zip_bytes = _make_zip(csv_bytes, "BTCUSDT-aggTrades-2024-01-05.csv")
+
+    zip_url = (
+        "https://data.binance.vision/data/futures/um/daily/aggTrades"
+        "/BTCUSDT/BTCUSDT-aggTrades-2024-01-05.zip"
+    )
+    httpx_mock.add_response(url=zip_url, content=zip_bytes)
+
+    trades = await worker.fetch_trades("BTCUSDT", "linear_perp", start_ms, data_path=tmp_path)
+
+    # Only trades >= start_ms should be returned
+    assert all(t["ts_ms"] >= start_ms for t in trades), (
+        "All trades must have ts_ms >= start_ms"
+    )
+    # Should have exactly 2 trades (one before start_ms was filtered out)
+    assert len(trades) == 2, f"Expected 2 trades, got {len(trades)}"
+    assert trades[0]["ts_ms"] == start_ms
+
+
+@pytest.mark.asyncio
+async def test_fetch_trades_historical_with_end_ms(tmp_path, httpx_mock: HTTPXMock):
+    """Historical zip fetch with end_ms should also filter upper bound.
+
+    When end_ms is provided, trades should be in range [start_ms, end_ms].
+    """
+    # 2024-01-05 12:00:00 UTC
+    start_ms = 1_704_441_600_000
+    # 2024-01-05 18:00:00 UTC — mid-day cutoff
+    end_ms = 1_704_463_200_000
+    # 2024-01-05 23:59:59:000 UTC
+    end_of_day_ms = 1_704_499_199_000
+
+    worker = BinanceWorker()
+
+    csv_bytes = _make_agg_trades_csv([
+        (1, "68000.0", "0.5", 1, 1, start_ms, False),
+        (2, "68100.0", "0.3", 2, 2, end_ms - 1_000, True),
+        (3, "68200.0", "0.2", 3, 3, end_ms + 1_000, False),  # After end_ms
+        (4, "68300.0", "0.1", 4, 4, end_of_day_ms, True),     # After end_ms
+    ])
+    zip_bytes = _make_zip(csv_bytes, "BTCUSDT-aggTrades-2024-01-05.csv")
+
+    zip_url = (
+        "https://data.binance.vision/data/futures/um/daily/aggTrades"
+        "/BTCUSDT/BTCUSDT-aggTrades-2024-01-05.zip"
+    )
+    httpx_mock.add_response(url=zip_url, content=zip_bytes)
+
+    trades = await worker.fetch_trades(
+        "BTCUSDT", "linear_perp", start_ms, end_ms=end_ms, data_path=tmp_path
+    )
+
+    # All trades must be in range [start_ms, end_ms]
+    assert all(start_ms <= t["ts_ms"] <= end_ms for t in trades), (
+        "All trades must be in range [start_ms, end_ms]"
+    )
+    # Should have exactly 2 trades
+    assert len(trades) == 2, f"Expected 2 trades, got {len(trades)}"
+
+
 @pytest.fixture
 def worker():
     return BinanceWorker()
