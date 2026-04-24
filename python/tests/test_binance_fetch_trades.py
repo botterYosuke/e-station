@@ -230,6 +230,39 @@ async def test_intraday_end_ms_zero_uses_next_midnight_not_plus_24h(
 
 
 @pytest.mark.asyncio
+async def test_intraday_end_ms_zero_excludes_exact_next_midnight(
+    worker: BinanceWorker, httpx_mock: HTTPXMock
+):
+    """end_ms=0 path must exclude the trade at exactly next_day 00:00:00.000.
+
+    Contract: fetch_trades returns trades in [start_ms, next_day_start - 1],
+    matching the Rust historical path. A trade at exactly next_day_start
+    belongs to the following day's batch and must not leak into this one.
+    """
+    _DAY_MS = 86_400_000
+    # 2024-01-05 15:00:00 UTC
+    start_ms = 1_704_466_800_000
+    next_midnight = (start_ms // _DAY_MS + 1) * _DAY_MS
+
+    httpx_mock.add_response(
+        url=f"https://fapi.binance.com/fapi/v1/aggTrades?symbol=BTCUSDT&limit=1000&startTime={start_ms}",
+        json=[
+            {"T": start_ms, "p": "68000.0", "q": "0.5", "m": False, "a": 1},
+            {"T": next_midnight - 1, "p": "68001.0", "q": "0.1", "m": True, "a": 2},
+            {"T": next_midnight, "p": "68002.0", "q": "0.2", "m": False, "a": 3},
+        ],
+    )
+
+    trades = await worker._fetch_intraday_trades("BTCUSDT", "linear_perp", start_ms)
+
+    ts_list = [t["ts_ms"] for t in trades]
+    assert next_midnight not in ts_list, (
+        "Trade at exactly next_day 00:00:00.000 must be excluded when end_ms=0"
+    )
+    assert next_midnight - 1 in ts_list, "Trade at 23:59:59.999 must be included"
+
+
+@pytest.mark.asyncio
 async def test_fallback_mid_day_start_caps_at_calendar_midnight(
     tmp_path, httpx_mock: HTTPXMock
 ):

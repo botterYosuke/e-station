@@ -468,7 +468,7 @@ pub fn fetch_trades_batched(
     sipper(async move |mut progress| {
         let mut latest_trade_t = from_time;
         const DAY_MS: u64 = 86_400_000;
-        const MAX_CONSECUTIVE_EMPTY_DAYS: u32 = 7;
+        const EMPTY_DAYS_WARN_THRESHOLD: u32 = 7;
         let mut consecutive_empty_days: u32 = 0;
 
         while latest_trade_t < to_time {
@@ -479,19 +479,13 @@ pub fn fetch_trades_batched(
                 Ok(batch) => {
                     if batch.is_empty() {
                         consecutive_empty_days += 1;
-                        if consecutive_empty_days >= MAX_CONSECUTIVE_EMPTY_DAYS {
+                        if consecutive_empty_days == EMPTY_DAYS_WARN_THRESHOLD {
                             log::warn!(
-                                "fetch_trades_batched: {} consecutive empty days at t={}, stopping before to_time={}",
+                                "fetch_trades_batched: {} consecutive empty days at t={}, continuing toward to_time={}",
                                 consecutive_empty_days,
                                 latest_trade_t,
                                 to_time,
                             );
-                            return Err(AdapterError::InvalidRequest(format!(
-                                "No trades found after {} consecutive empty days (stopped at {}). \
-                                 The symbol may be illiquid, newly listed, or delisted.",
-                                MAX_CONSECUTIVE_EMPTY_DAYS,
-                                latest_trade_t,
-                            )));
                         }
                         latest_trade_t = (latest_trade_t / DAY_MS + 1) * DAY_MS;
                         continue;
@@ -500,8 +494,6 @@ pub fn fetch_trades_batched(
 
                     let last_trade_t =
                         batch.last().map_or(latest_trade_t, |trade| trade.time);
-                    // Advance to the next day boundary so repeated calls fetch
-                    // successive calendar days rather than re-fetching the same day.
                     latest_trade_t = (last_trade_t / DAY_MS + 1) * DAY_MS;
 
                     let () = progress.send(batch).await;
@@ -690,7 +682,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consecutive_empty_days_returns_error_not_ok() {
+    async fn long_empty_span_completes_without_error() {
+        // Illiquid symbol / data gap: even 30+ consecutive empty days must not
+        // abort the fetch. The loop should advance through every day and
+        // terminate naturally at to_time with Ok.
         let mut handles = AdapterHandles::default();
         handles.set_backend(Venue::Binance, Arc::new(AlwaysEmptyTrades));
 
@@ -698,9 +693,8 @@ mod tests {
         let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
 
         const DAY_MS: u64 = 86_400_000;
-        // 10 days span — exceeds the MAX_CONSECUTIVE_EMPTY_DAYS=7 threshold
         let from_time = 0u64;
-        let to_time = 10 * DAY_MS;
+        let to_time = 30 * DAY_MS;
 
         let mut straw = fetch_trades_batched(
             handles,
@@ -711,13 +705,12 @@ mod tests {
         )
         .pin();
 
-        // Drain all progress items (empty trade batches are never emitted, so this is a no-op)
         while straw.next().await.is_some() {}
 
         let result = straw.await;
         assert!(
-            result.is_err(),
-            "Expected Err when 7+ consecutive empty days occur, got Ok"
+            result.is_ok(),
+            "Expected Ok when every day is empty, got {result:?}"
         );
     }
 

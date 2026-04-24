@@ -546,8 +546,10 @@ class BinanceWorker(ExchangeWorker):
     ) -> list[dict]:
         _DAY_MS = 86_400_000
         if end_ms == 0:
-            # server.py always supplies end_ms > 0; this branch guards direct callers only
-            end_ms = (start_ms // _DAY_MS + 1) * _DAY_MS
+            # Match the [start_ms, next_day_start - 1] inclusive contract used by
+            # fetch_trades() and the Rust historical path so direct callers do not
+            # pick up a trade at exactly the next day's 00:00:00.000.
+            end_ms = (start_ms // _DAY_MS + 1) * _DAY_MS - 1
         base = _rest_base(market)
         if market == "linear_perp":
             endpoint = f"{base}/fapi/v1/aggTrades"
