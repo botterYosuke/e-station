@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "flowsurface/ipc/commands",
+  "title": "Rust → Python IPC Commands",
+  "description": "Commands sent from the Rust viewer to the Python data engine.",
+  "oneOf": [
+    { "$ref": "#/$defs/Hello" },
+    { "$ref": "#/$defs/SetProxy" },
+    { "$ref": "#/$defs/Subscribe" },
+    { "$ref": "#/$defs/Unsubscribe" },
+    { "$ref": "#/$defs/FetchKlines" },
+    { "$ref": "#/$defs/FetchTrades" },
+    { "$ref": "#/$defs/FetchOpenInterest" },
+    { "$ref": "#/$defs/FetchTickerStats" },
+    { "$ref": "#/$defs/ListTickers" },
+    { "$ref": "#/$defs/GetTickerMetadata" },
+    { "$ref": "#/$defs/RequestDepthSnapshot" },
+    { "$ref": "#/$defs/Shutdown" }
+  ],
+  "$defs": {
+    "Hello": {
+      "type": "object",
+      "required": ["op", "schema_major", "schema_minor", "client_version", "token"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Hello" },
+        "schema_major": { "type": "integer", "minimum": 0 },
+        "schema_minor": { "type": "integer", "minimum": 0 },
+        "client_version": { "type": "string" },
+        "token": { "type": "string", "minLength": 1 }
+      }
+    },
+    "SetProxy": {
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "SetProxy" },
+        "url": { "type": ["string", "null"] }
+      }
+    },
+    "Subscribe": {
+      "type": "object",
+      "required": ["op", "venue", "ticker", "stream"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Subscribe" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream": {
+          "type": "string",
+          "enum": ["trade", "depth", "kline"]
+        }
+      }
+    },
+    "Unsubscribe": {
+      "type": "object",
+      "required": ["op", "venue", "ticker", "stream"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Unsubscribe" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream": { "type": "string" }
+      }
+    },
+    "FetchKlines": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker", "timeframe", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchKlines" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "FetchTrades": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker", "start_ms", "end_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchTrades" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "start_ms": { "type": "integer" },
+        "end_ms": { "type": "integer" }
+      }
+    },
+    "FetchOpenInterest": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker", "timeframe", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchOpenInterest" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "FetchTickerStats": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchTickerStats" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" }
+      }
+    },
+    "ListTickers": {
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "ListTickers" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" }
+      }
+    },
+    "GetTickerMetadata": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "GetTickerMetadata" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" }
+      }
+    },
+    "RequestDepthSnapshot": {
+      "type": "object",
+      "required": ["op", "venue", "ticker"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "RequestDepthSnapshot" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" }
+      }
+    },
+    "Shutdown": {
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Shutdown" }
+      }
+    }
+  }
+}

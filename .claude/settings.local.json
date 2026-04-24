@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.e-shiten.jp)",
+      "Bash(grep -E \"\\\\.rs$\")",
+      "Bash(git rm:*)",
+      "Bash(git commit:*)",
+      "Bash(awk '/fn / {start=NR} /^}$/ && start {print NR-start, NR, $0}' /c/Users/sasai/Documents/flowsurface/exchange/src/adapter/tachibana.rs)",
+      "Bash(awk '$1 > 100 {print}')",
+      "Bash(grep -n \"pub fn active_layout_id\\\\|fn active_layout_id\\\\|pub fn get_mut\\\\|fn get_mut\" /c/Users/sasai/Documents/flowsurface/src/modal/*.rs)",
+      "Bash(grep:*)",
+      "Bash(git:*)"
+    ]
+  }
+}

@@ -37,6 +37,19 @@ Cargo workspace 構成 (`Cargo.toml`): `flowsurface` バイナリ + `flowsurface
 - HTTP は `reqwest` + Rustls、WS は `fastwebsockets`、JSON は `sonic-rs`。
 - trade バッファは 33.3ms ごとに flush。
 
+### 継続的に REST を叩く機能の棚卸し
+
+IPC 計画で取りこぼしがないよう一覧化する（Python 移管の初期スコープ確認用）:
+
+- **Open Interest**: [`src/chart/indicator/kline/open_interest.rs`](../../src/chart/indicator/kline/open_interest.rs) がインジケータとして継続的に `FetchRange::OpenInterest` を要求。→ MVP 必須。
+- **Ticker stats (24h)**: `TickerStats`（[`exchange/src/lib.rs`](../../exchange/src/lib.rs) L640 付近）。現行 `tickers_table.rs` で 24h 変化率・出来高・`mark_price` を表示するため取得。→ MVP 必須（`mark_price` はここに含まれる）。
+- **Kline 履歴フェッチ**: [`src/connector/fetcher.rs`](../../src/connector/fetcher.rs) 経由、ユーザー操作時（スクロール・期間変更）。
+- **Trade 履歴フェッチ**: 同上。Binance は `data.binance.vision` bulk download も利用。
+
+**独立インジケータが存在しないもの**（現時点でソースを grep して確認済み）:
+- Funding rate — インジケータ化されておらず、`TickerStats` にも含まれない。現行で REST を継続要求している経路は無い。将来追加時に IPC スキーマへ追加する。
+- Liquidations — 同上、現行に継続要求経路なし。
+
 ### データフロー（現状）
 1. 起動時 `AdapterHandles::spawn_all()` で全取引所のハンドラを spawn ([`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs))。
 2. メタデータを REST で取得し `tickers_info` にキャッシュ。

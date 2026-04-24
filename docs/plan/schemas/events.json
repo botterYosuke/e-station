@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "flowsurface/ipc/events",
+  "title": "Python → Rust IPC Events",
+  "description": "Events sent from the Python data engine to the Rust viewer.",
+  "oneOf": [
+    { "$ref": "#/$defs/Ready" },
+    { "$ref": "#/$defs/EngineError" },
+    { "$ref": "#/$defs/Trades" },
+    { "$ref": "#/$defs/KlineUpdate" },
+    { "$ref": "#/$defs/Klines" },
+    { "$ref": "#/$defs/DepthSnapshot" },
+    { "$ref": "#/$defs/DepthDiff" },
+    { "$ref": "#/$defs/DepthGap" },
+    { "$ref": "#/$defs/OpenInterest" },
+    { "$ref": "#/$defs/TickerInfo" },
+    { "$ref": "#/$defs/TickerStats" },
+    { "$ref": "#/$defs/Error" }
+  ],
+  "$defs": {
+    "Ready": {
+      "type": "object",
+      "required": ["event", "schema_major", "schema_minor", "engine_version", "engine_session_id", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Ready" },
+        "schema_major": { "type": "integer", "minimum": 0 },
+        "schema_minor": { "type": "integer", "minimum": 0 },
+        "engine_version": { "type": "string" },
+        "engine_session_id": { "type": "string", "format": "uuid" },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "supported_venues": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "supports_bulk_trades": { "type": "boolean" },
+            "supports_depth_binary": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    "EngineError": {
+      "type": "object",
+      "required": ["event", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "EngineError" },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "TradeMsg": {
+      "type": "object",
+      "required": ["price", "qty", "side", "ts_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "price": { "type": "string" },
+        "qty": { "type": "string" },
+        "side": { "type": "string", "enum": ["buy", "sell"] },
+        "ts_ms": { "type": "integer" },
+        "is_liquidation": { "type": "boolean", "default": false }
+      }
+    },
+    "Trades": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id", "trades"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Trades" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" },
+        "trades": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TradeMsg" }
+        }
+      }
+    },
+    "KlineMsg": {
+      "type": "object",
+      "required": ["open_time_ms", "open", "high", "low", "close", "volume", "is_closed"],
+      "additionalProperties": false,
+      "properties": {
+        "open_time_ms": { "type": "integer" },
+        "open": { "type": "string" },
+        "high": { "type": "string" },
+        "low": { "type": "string" },
+        "close": { "type": "string" },
+        "volume": { "type": "string" },
+        "is_closed": { "type": "boolean" }
+      }
+    },
+    "KlineUpdate": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "timeframe", "kline"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "KlineUpdate" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "kline": { "$ref": "#/$defs/KlineMsg" }
+      }
+    },
+    "Klines": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "timeframe", "klines"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Klines" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "klines": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/KlineMsg" }
+        }
+      }
+    },
+    "DepthLevel": {
+      "type": "object",
+      "required": ["price", "qty"],
+      "additionalProperties": false,
+      "properties": {
+        "price": { "type": "string" },
+        "qty": { "type": "string" }
+      }
+    },
+    "DepthSnapshot": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id", "sequence_id", "bids", "asks"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "DepthSnapshot" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" },
+        "sequence_id": { "type": "integer" },
+        "bids": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } },
+        "asks": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } },
+        "checksum": { "type": ["integer", "null"] }
+      }
+    },
+    "DepthDiff": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id", "sequence_id", "prev_sequence_id", "bids", "asks"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "DepthDiff" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" },
+        "sequence_id": { "type": "integer" },
+        "prev_sequence_id": { "type": "integer" },
+        "bids": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } },
+        "asks": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } }
+      }
+    },
+    "DepthGap": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "DepthGap" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" }
+      }
+    },
+    "OpenInterest": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OpenInterest" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ts_ms", "open_interest"],
+            "properties": {
+              "ts_ms": { "type": "integer" },
+              "open_interest": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "TickerInfo": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "tickers"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "TickerInfo" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "tickers": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "TickerStats": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "stats"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "TickerStats" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stats": { "type": "object" }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "required": ["event", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Error" },
+        "request_id": { "type": ["string", "null"] },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

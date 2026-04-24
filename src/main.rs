@@ -2,6 +2,7 @@
 
 mod audio;
 mod chart;
+mod cli;
 mod connector;
 mod layout;
 mod logger;
@@ -40,7 +41,13 @@ use iced::{
 use std::{borrow::Cow, collections::HashMap, vec};
 
 fn main() {
+    let cli_args = cli::CliArgs::parse();
+
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
+
+    if let Some(ref url) = cli_args.data_engine_url {
+        log::info!("Data engine URL: {url} (external engine mode — not yet wired)");
+    }
 
     std::thread::spawn(data::cleanup_old_market_data);
 

@@ -1,0 +1,8 @@
+/*
+Copyright (C) 2000 GOODLOTS CO.,LTD. ALL RIGHT RESERVED.
+Released under the MIT license
+https://www.e-shiten.jp/e_api/LICENSE.txt
+
+Product: mfds (realtime stock price board application modules).
+ */
+$(function(){$('li').on('click',function(){var id=$(this).attr('id');if(id){id='#'+id;$(top.frames[2].document).scrollTop($(id,top.frames[2].document.body).offset().top);}});})

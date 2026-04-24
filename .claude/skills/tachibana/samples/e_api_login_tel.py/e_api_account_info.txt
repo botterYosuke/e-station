@@ -1,0 +1,7 @@
+{
+	"sUserId":"SampleUserId",
+	"sPassword":"SamplePWD",
+	"sSecondPassword":"Sample2PWD",
+	"sUrl":"https://demo-kabuka.e-shiten.jp/e_api_v4r7/",
+	"sJsonOfmt":"5"
+}

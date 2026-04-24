@@ -3,38 +3,65 @@
 [`spec.md`](./spec.md) の構成へ段階的に移行するためのフェーズ分け。
 各フェーズは単独でマージ可能・動作確認可能な粒度を目指す。
 
-## フェーズ 0: 準備（リスク低）
+## フェーズ 0: 準備 & ベースライン計測（リスク低）
 
 - [ ] `python/` に `pyproject.toml` と `flowsurface_data` パッケージのスケルトンを置く。
-- [ ] [`docs/plan/schemas/`](./schemas/) に JSON Schema を作成（`Trade`, `Kline`, `Depth`, `Ticker`, `TickerInfo`, `TickerStats`, `OpenInterest`）。
-  - 既存 Rust 型 ([`exchange/src/lib.rs`](../../exchange/src/lib.rs) 周辺) を参照。
-- [ ] Rust 側に `--data-engine-url ws://...` CLI フラグを追加（未指定時は従来動作）。
+- [ ] [`docs/plan/schemas/`](./schemas/) に IPC DTO の JSON Schema を作成。
+  - 対象: `TradeMsg`, `KlineMsg`, `DepthSnapshotMsg`, `DepthDiffMsg`, `TickerMsg`, `TickerInfoMsg`, `TickerStatsMsg`, `OpenInterestMsg`, および各コマンド (`Hello` / `Ready` / `Subscribe` / `Unsubscribe` / `FetchKlines` / `FetchTrades` / `FetchOpenInterest` / `FetchTickerStats` / `ListTickers` / `GetTickerMetadata` / `RequestDepthSnapshot` / `SetProxy` / `Shutdown` / `Error` / `EngineError` / `DepthGap`)。
+  - 参考: 既存 Rust 型 [`exchange/src/lib.rs`](../../exchange/src/lib.rs), [`exchange/src/adapter.rs`](../../exchange/src/adapter.rs) の `Event`。
+  - スキーマ ⇔ 型定義の生成方針（`quicktype` / `datamodel-code-generator` 等）を決定。
+  - `schema_major` / `schema_minor` の運用ポリシーを [`CHANGELOG.md`](./schemas/) に記載。
+- [ ] Rust 側に `--data-engine-url ws://...` CLI フラグを追加（未指定時は従来動作）。dev モード時の接続トークンは環境変数 `FLOWSURFACE_ENGINE_TOKEN` から読み、本番同梱 spawn 時は stdin から受け取る（[spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御)）。
+- [ ] **ベースライン計測**（[spec.md §9.3](./spec.md#93-ベースライン計測)）を実施し `docs/plan/benchmarks/baseline.md` に記録。以降のフェーズで比較する基準。Windows (開発環境) 必須、可能なら Linux も。
 - [ ] 既存 Rust テストを通したまま CI を維持する。
 
-**完了条件**: 既存挙動を変えずにマージできる。
+**完了条件**: 既存挙動を変えずにマージでき、ベースラインが数値で記録されている。
+
+## フェーズ 0.5: venue 単位 backend 抽象化（Rust 側のみ）
+
+[spec.md §5.1](./spec.md#51-venue-単位の-backend-抽象化先行作業) に対応。取引所単位の段階移行を現実的にする前提工事。
+
+- [ ] `VenueBackend` trait を定義。現行 `AdapterHandles` の全経路を網羅すること:
+  - 初期化: `list_tickers` / `get_ticker_metadata`（[`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs) L200 付近・L269 付近）
+  - ストリーム: `subscribe` / `unsubscribe` / イベントストリーム取得
+  - フェッチ: `fetch_klines` / `fetch_open_interest` / `fetch_ticker_stats` / `fetch_trades`
+  - 運用: `request_depth_snapshot` / `health`
+- [ ] `AdapterHandles` の各 venue フィールドを `Box<dyn VenueBackend>` 相当に置換（[`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs) L21〜）。
+- [ ] 既存 `hub/{venue}` を包む `NativeBackend` を実装し、挙動が完全に同一であることを確認。
+- [ ] venue 毎に backend を指定できる起動設定を追加（未指定時は全 `NativeBackend`）。
+
+**完了条件**: 抽象化導入後も従来の挙動・レイテンシが維持されている。
 
 ## フェーズ 1: Python データエンジン MVP（Binance のみ）
 
-- [ ] `flowsurface_data.server` に WS サーバを実装（`websockets` ライブラリ）。
-- [ ] `exchanges/binance.py` で REST メタデータ + Kline + WebSocket trade/depth を実装。
+- [ ] `flowsurface_data.server` に WS サーバを実装（`websockets` ライブラリ）。loopback バインドのみ、単一クライアント制限 + トークン一致時の既存接続置換（[spec.md §4.5.2](./spec.md#452-既存接続の置換半死接続対策)）、接続トークン検証、起動ハンドシェイク（[spec.md §4.5](./spec.md#45-起動ハンドシェイク)）、ping/pong keepalive を初期実装に含める。
+- [ ] `ExchangeWorker` 抽象 / server↔worker dispatch の境界を最初から設ける（[spec.md §6.1](./spec.md#61-プロセスモデルフェーズ-1-時点)）。フェーズ 1 は asyncio 単一プロセスだが、将来 venue 分割できる構造で着地させる。
+- [ ] `exchanges/binance.py` で REST メタデータ + Kline + **Open Interest** + 24h 統計 + WebSocket trade/depth/kline を実装（OI はインジケータが継続要求するため初期から必須）。
+- [ ] depth 整合性プロトコル（[spec.md §4.4](./spec.md#44-バックプレッシャと整合性保証)）: `session_id` / `sequence_id` / `prev_sequence_id` の付与、gap 検知時の `DepthGap` 送出と自発的再スナップショット、checksum がある場合の検証を実装。
 - [ ] `limiter.py` で Binance のレート制限を移植（[`exchange/src/adapter/limiter.rs`](../../exchange/src/adapter/limiter.rs) を参考）。
 - [ ] スキーマは pydantic、出力は orjson。
-- [ ] 単独で `python -m flowsurface_data --port 8765` で起動でき、`wscat` 等で `subscribe` → trade イベントが流れることを確認。
-- [ ] pytest で REST/WS の最低限のテスト（モック取引所 or VCR）。
+- [ ] stdin から `{port, token}` JSON を受け取り、ランダムポート・トークンで起動できるようにする（開発時は環境変数フォールバックを許容）。
+- [ ] pytest で REST/WS の最低限のテスト（モック取引所 or VCR）＋ depth gap / session 切替の再同期テスト。
 
-**完了条件**: Python のみで Binance のリアルタイム trade を取得・配信できる。
+**完了条件**: Python のみで Binance のリアルタイム trade / depth / kline / OI を取得・配信でき、depth の gap 検知と再同期が動作する。
 
 ## フェーズ 2: Rust 側に engine-client を実装し Binance を切替
 
-- [ ] `engine-client` crate（または `exchange` を改修）に `EngineClient` を実装。
-  - 内部で WebSocket 接続、`Event` ストリームを `BoxStream` で公開。
-  - 既存 `AdapterHandles` と同じ `subscribe` / `unsubscribe` / `fetch_*` API を提供。
-- [ ] `--data-engine-url` 指定時のみ Binance を engine-client 経由に切替（feature flag or runtime switch）。
-- [ ] 起動時に Python サブプロセスを spawn する `src/engine/process.rs` を追加（オプトイン）。
-- [ ] UI 側の差分は最小（`AdapterHandles` の差し替えのみ理想）。
+- [ ] `engine-client` crate（または `exchange/engine_backend` モジュール）に IPC DTO と WebSocket クライアントを実装。
+- [ ] 起動ハンドシェイク（`Hello` / `Ready`、[spec.md §4.5](./spec.md#45-起動ハンドシェイク)）と接続トークン受け渡し（[spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御)）を実装。
+- [ ] `EngineClientBackend` が `VenueBackend` trait を実装（DTO ⇔ `exchange::Event` / `Kline` / `OpenInterest` / `Arc<Depth>` / `Box<[Trade]>` の相互変換もここで行う）。depth は `session_id` / `sequence_id` で gap 検知し、不一致なら `RequestDepthSnapshot` を送る（[spec.md §4.4](./spec.md#44-バックプレッシャと整合性保証)）。
+- [ ] **Python プロセス監視・自動再起動・状態再投入**（[spec.md §5.3](./spec.md#53-python-プロセス復旧プロトコル)）を実装:
+  - 購読セット・進行中フェッチ・プロキシ設定を Rust 側に保持。
+  - 異常終了検知 → 指数バックオフで spawn → `Hello`/`Ready` → `SetProxy` → 購読再送。
+  - 進行中フェッチは `EngineRestarting` で fail し UI にリトライさせる。
+  - UI に「データエンジン再起動中」ステータスを出す。
+- [ ] `--data-engine-url` 指定時に Binance の backend を `EngineClientBackend` に差し替える（フェーズ 0.5 で入れた venue 単位切替を利用）。
+- [ ] 起動時に Python サブプロセスを spawn する `src/engine/process.rs` を追加（オプトイン）。ポート・接続トークンは stdin 経由で Python に渡し、プロキシ資格情報は `Ready` 受領後の IPC `SetProxy` で渡す（[spec.md §5.4](./spec.md#54-プロキシ資格情報の受け渡し)）。
+- [ ] UI 側コードはゼロ変更を目標（`AdapterHandles` の API シェイプを維持）。ただし「エンジン再起動中」ステータス表示のための軽微な UI 追加は許容。
 - [ ] レイテンシ・CPU 使用率を旧構成と比較。
+- [ ] 障害試験: Python を kill → 自動復旧 → 板が snapshot で再同期されることを手動＋自動テストで確認。
 
-**完了条件**: フラグ ON で Binance チャートが Python 経由で正しく描画される。
+**完了条件**: フラグ ON で Binance チャートが Python 経由で正しく描画される。**加えて Python を kill しても自動復旧し、購読と板整合性が回復する**。
 
 ## フェーズ 3: 残り取引所の Python 移植
 
@@ -84,12 +111,17 @@
 - フェーズ 5 完了までは旧 Rust 実装が残っているため、`--data-engine-url` を外せば従来動作に戻せる。
 - フェーズ 5 のマージはタグを切ってから実施し、問題が出たら 1 リリース前に戻せるようにする。
 
-## 計測指標
+## 計測指標と合格ライン
 
-各フェーズ完了時に取得・記録する：
+詳細は [spec.md §9](./spec.md#9-非機能要件合格ライン)。各フェーズ完了時に再計測し `docs/plan/benchmarks/` に追記する。
 
-- 起動から最初の trade 表示までのレイテンシ
-- trade 受信から canvas 描画までの追加レイテンシ（IPC オーバーヘッド）
-- アイドル時 / 高負荷時の CPU・メモリ
-- バイナリサイズ
-- 異常系: WS 切断時の再接続時間、Python プロセス クラッシュ時の復旧時間
+フェーズ 2 合格ライン（抜粋）:
+- IPC 追加レイテンシ: 中央値 < 2 ms / p99 < 10 ms
+- Python クラッシュ → 自動復旧完了: < 3 秒
+- depth 再同期: < 500 ms
+- CPU 使用率: 現行 Rust 直結の +30% 以内
+- depth gap 検知漏れ: 0
+
+未達時の対応:
+- レイテンシ / CPU 不足 → [spec.md §4.3.1](./spec.md#431-depth-チャネルのバイナリ化検討) のバイナリ化を適用。
+- 慢性的な性能差 → [spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定) の案 C（Rust 直結の optional 残置）を再検討。

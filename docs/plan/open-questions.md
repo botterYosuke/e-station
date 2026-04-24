@@ -23,18 +23,25 @@
 
 ## C. 機能スコープ
 
-5. **WS 直結のオプション残置**
-   - フェーズ 5 で完全に Rust 側取引所コードを消す前提だが、低レイテンシ用途で「Rust 直結モード」を残してほしいニーズはあるか？
+5. **WS 直結のオプション残置（計画射程に直結、最優先で決定）**
+   - フェーズ 5 で完全に Rust 側取引所コードを消す前提だったが、[spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定) で案 A（撤去） / 案 B（恒久残置） / 案 C（optional feature）を列挙。
+   - 暫定は **案 A**。フェーズ 2 のレイテンシ計測結果で最終確定する。
+   - `VenueBackend` trait を「過渡的」とするか「長期 I/F」とするかが変わるため、フェーズ 0.5 着手前に確認したい。
 
 6. **マルチプロセス構成**
-   - Python を取引所ごとに別プロセスにするか、1 プロセス内で asyncio で扱うか。
-   - 5 取引所 × 多数ティッカーで GIL がボトルネックになる場合は分割が必要。
+   - フェーズ 1 は asyncio 単一プロセスで確定（[spec.md §6.1](./spec.md#61-プロセスモデルフェーズ-1-時点)）。
+   - 将来分割できるよう `ExchangeWorker` 抽象を先に入れる方針。GIL / CPU がボトルネックと判明した時点で分割。
+   - **残論点**: 分割時に使うのが `multiprocessing` か subprocess + IPC か。フェーズ 3 以降で決定でも可。
 
 ## D. 開発フロー
 
-7. **言語境界のスキーマ管理**
-   - JSON Schema 主、Rust と Python に手書きで型反映 → ドリフト発生リスクあり。
-   - 代替: `quicktype` or `datamodel-code-generator` でコード生成、または Rust 側で `serde` 定義を JSON Schema にエクスポートして Python へ。
+7. **言語境界のスキーマ管理（最優先で合意したい）**
+   - 本計画の中心論点。手書きで Rust / Python 両側に型を書くとドリフトしやすいため、**実装着手前に決める**。
+   - 候補:
+     - (a) JSON Schema を single source of truth にし、`quicktype` で Rust / Python 両方を生成。
+     - (b) Rust 側 `serde` 定義 + `schemars` で JSON Schema をエクスポート → Python は `datamodel-code-generator` で pydantic を生成。
+     - (c) `.proto` で定義して `prost` + `betterproto` を使う（将来の gRPC 切替にも繋がる）。
+   - 決定後、[spec.md §4.3](./spec.md#43-メッセージスキーマ) と [implementation-plan.md](./implementation-plan.md) フェーズ 0 の生成手順に反映する。
 
 8. **テスト戦略**
    - 取引所 API の VCR / モック方針。Live テストはどこまで CI に載せるか。
@@ -46,3 +53,8 @@
 
 10. **既存ユーザーの移行**
     - 既存リリースから引き継ぐ設定 (`config.json`, レイアウト) は維持予定だが、互換性を破る変更が出た場合のマイグレーションをどこまで自動化するか。
+
+## F. 雑多な確認
+
+11. **keyring の他用途**
+    - プロキシ資格情報以外に `keyring` crate を使っている機能が無いか。無ければフェーズ 5 で依存削除候補、ある場合は Rust 側に残す。着手前に要 grep 確認。
