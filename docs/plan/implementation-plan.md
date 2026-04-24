@@ -134,7 +134,7 @@
 
 **完了条件**: 全 5 取引所が Python 経由で動作。
 
-> **現況（2026-04-24）**: pytest 全体 85 件 PASS（Binance 33 + Bybit 21 + Hyperliquid 25 + その他 6）。
+> **現況（2026-04-24）**: pytest 全体 89 件 PASS（Binance 33 + Bybit 21 + Hyperliquid 29 + その他 6）。
 
 ### Hyperliquid 実装詳細（2026-04-24 完了）
 
@@ -178,6 +178,11 @@ Hyperliquid の `candleSnapshot` は `startTime`/`endTime` のみで制御し `l
 - pair name が `@N` 形式 → `base_name + quote_name` に展開 (e.g., "@1" → "BTCUSDC")
 - pair name が "/" 含む → "/" を除去 (e.g., "BTC/USDC" → "BTCUSDC")
 - WS subscribe では `coin` に display symbol を使用 (Hyperliquid は display name でも受け付ける)
+
+#### バグ修正（2026-04-24、レビュー後修正済み）
+
+- **Bug #1** `_list_tickers_spot` が display symbol ("BTCUSDC") を `symbol` として返していた → Rust の `engine-client/src/backend.rs:397` は `symbol` フィールドをそのまま `coin` として API コールに使うため、"BTC/USDC" (raw pair name) を返す形に修正。テスト `test_list_tickers_spot` / `test_list_tickers_spot_excludes_zero_price` / `test_fetch_ticker_stats_spot` を更新。commit `b754f40`
+- **Bug #1 再発防止**: spot round-trip テスト (`test_spot_symbol_roundtrip_*`) を 4 件追加。`list_tickers` 返値の symbol を直接 `fetch_depth_snapshot` / `fetch_ticker_stats` / `fetch_klines` に渡すことで契約を検証。
 
 #### Tips
 
