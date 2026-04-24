@@ -546,10 +546,30 @@ async fn fetch_intraday_trades(
     let ticker = ticker_info.ticker;
     let (symbol_str, market_type) = ticker.to_full_symbol_and_type();
 
+    #[cfg(test)]
+    let api_base_override = std::env::var("BINANCE_API_BASE_URL").ok();
     let (base_url, weight) = match market_type {
-        MarketKind::Spot => (format!("{SPOT_DOMAIN}/api/v3/aggTrades"), 4),
-        MarketKind::LinearPerps => (format!("{LINEAR_PERP_DOMAIN}/fapi/v1/aggTrades"), 20),
-        MarketKind::InversePerps => (format!("{INVERSE_PERP_DOMAIN}/dapi/v1/aggTrades"), 20),
+        MarketKind::Spot => {
+            #[cfg(test)]
+            let domain = api_base_override.as_deref().unwrap_or(SPOT_DOMAIN);
+            #[cfg(not(test))]
+            let domain = SPOT_DOMAIN;
+            (format!("{domain}/api/v3/aggTrades"), 4)
+        }
+        MarketKind::LinearPerps => {
+            #[cfg(test)]
+            let domain = api_base_override.as_deref().unwrap_or(LINEAR_PERP_DOMAIN);
+            #[cfg(not(test))]
+            let domain = LINEAR_PERP_DOMAIN;
+            (format!("{domain}/fapi/v1/aggTrades"), 20)
+        }
+        MarketKind::InversePerps => {
+            #[cfg(test)]
+            let domain = api_base_override.as_deref().unwrap_or(INVERSE_PERP_DOMAIN);
+            #[cfg(not(test))]
+            let domain = INVERSE_PERP_DOMAIN;
+            (format!("{domain}/dapi/v1/aggTrades"), 20)
+        }
     };
 
     let qty_norm = QtyNormalization::with_raw_qty_unit(
@@ -633,7 +653,12 @@ async fn get_hist_trades_with_client(
     if std::fs::metadata(&base_zip_path).is_ok() {
         log::info!("Using cached {}", zip_path);
     } else {
-        let url = format!("https://data.binance.vision/{zip_path}");
+        #[cfg(not(test))]
+        let hist_base = "https://data.binance.vision";
+        #[cfg(test)]
+        let hist_base = std::env::var("BINANCE_HIST_BASE_URL")
+            .unwrap_or_else(|_| "https://data.binance.vision".to_string());
+        let url = format!("{hist_base}/{zip_path}");
 
         log::info!("Downloading from {}", url);
 
@@ -859,30 +884,93 @@ mod tests {
         assert_eq!(effective_to_time, to_time);
     }
 
-    #[test]
-    fn fallback_receives_capped_to_time_argument() {
+    /// Mirrors Python's test_fallback_mid_day_start_caps_at_calendar_midnight.
+    ///
+    /// Calls fetch_trades() end-to-end with a mocked HTTP server:
+    /// - Historical zip returns 404 → fallback triggers
+    /// - Intraday API returns a trade on the same day and one after midnight
+    /// - Asserts the after-midnight trade is NOT in the result
+    #[tokio::test]
+    async fn fetch_trades_fallback_excludes_next_day_data() {
+        use crate::adapter::{
+            hub::HttpHub,
+            limiter::{DynamicRateLimiterConfig, HeaderDynamicRateLimiter},
+        };
+        use mockito::Server;
+        use serde_json::json;
+        use std::time::Duration;
+
         const DAY_MS: u64 = 86_400_000;
-
-        // This test verifies the fallback call receives capped to_time.
-        // When historical fails and fallback is invoked:
-        // - Original to_time might span multiple days (e.g., month end)
-        // - fallback must receive only [from_time, next_midnight - 1]
-
-        let from_time = 1_704_466_800_000u64; // Jan 5 15:00
-        let original_to_time = 1_706_745_599_999u64; // Jan 31 23:59
-
-        // Compute what should be passed to fetch_intraday_trades on fallback
+        // 2024-01-05 15:00:00 UTC — historical date (well before today), mid-day
+        let from_time = 1_704_466_800_000u64;
+        let to_time = 1_706_745_599_999u64; // Jan 31 23:59 — spans multiple days
         let next_midnight = ((from_time / DAY_MS) + 1) * DAY_MS;
-        let capped_to_time = original_to_time.min(next_midnight - 1);
-
-        // Verify: capped_to_time is on the same day as from_time
-        let from_day = from_time / DAY_MS;
-        let capped_day = capped_to_time / DAY_MS;
-        assert_eq!(from_day, capped_day);
-
-        // Verify: fallback calling fetch_intraday_trades with capped_to_time
-        // ensures trades are limited to [from_time, capped_to_time]
         let after_midnight = next_midnight + 1_000;
-        assert!(after_midnight > capped_to_time);
+
+        let mut server = Server::new_async().await;
+        let server_url = server.url();
+
+        // Zip 404 → forces fallback to intraday
+        let _zip_mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(404)
+            .create_async()
+            .await;
+
+        // Intraday response: one valid trade, one after-midnight trade
+        // fetch_trades must exclude the after-midnight trade via effective_to_time
+        let intraday_body = json!([
+            {"a": 1u64, "T": from_time,      "p": "68000.0", "q": "0.5", "m": false},
+            {"a": 2u64, "T": after_midnight,  "p": "68002.0", "q": "0.2", "m": false}
+        ])
+        .to_string();
+
+        let _intraday_mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(intraday_body)
+            .create_async()
+            .await;
+
+        // Override Binance URLs via env vars (intercepted in fetch.rs with #[cfg(test)])
+        // SAFETY: single-threaded test environment; no concurrent env reads
+        unsafe {
+            std::env::set_var("BINANCE_HIST_BASE_URL", &server_url);
+            std::env::set_var("BINANCE_API_BASE_URL", &server_url);
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("client");
+
+        let limiter = HeaderDynamicRateLimiter::new(DynamicRateLimiterConfig::new(
+            2400,
+            Duration::from_secs(60),
+            0.0,
+            "x-mbx-used-weight-1m",
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            None,
+        ));
+        let mut hub = HttpHub::from_parts(client, limiter);
+
+        let ticker = crate::Ticker::new("BTCUSDT", crate::adapter::Exchange::BinanceLinear);
+        let ticker_info = crate::TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = super::fetch_trades(&mut hub, ticker_info, from_time, to_time, Some(tmp.path().to_path_buf())).await;
+
+        let trades = result.expect("fetch_trades should succeed via fallback");
+        let times: Vec<u64> = trades.iter().map(|t| t.time).collect();
+
+        assert!(
+            !times.contains(&after_midnight),
+            "After-midnight trade should be excluded by effective_to_time cap. Got: {times:?}"
+        );
+        assert!(
+            times.contains(&from_time),
+            "Trade at from_time should be included. Got: {times:?}"
+        );
     }
 }

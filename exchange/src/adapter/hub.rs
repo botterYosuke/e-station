@@ -68,6 +68,11 @@ impl<L: RateLimiter> HttpHub<L> {
         Self::with_config(limiter, proxy_cfg)
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_parts(client: Client, limiter: L) -> Self {
+        Self { client, limiter }
+    }
+
     fn with_config(limiter: L, proxy_cfg: Option<super::Proxy>) -> Result<Self, AdapterError> {
         let builder = Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
