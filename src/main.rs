@@ -88,24 +88,15 @@ fn main() {
 
                     // Push saved proxy to engine before Iced starts so that the
                     // very first subscription fires through the proxy, not direct.
-                    {
-                        let saved_url = data::config::proxy::load_proxy_url().flatten();
-                        let mut saved_proxy = saved_url
-                            .and_then(|u| exchange::proxy::Proxy::try_from_str_strict(&u).ok());
-                        if let Some(proxy) = saved_proxy.as_mut()
-                            && proxy.auth().is_none()
-                            && let Some(auth) = data::config::proxy::load_proxy_auth(proxy)
-                        {
-                            proxy.set_auth(Some(auth));
-                        }
-                        if let Some(proxy) = saved_proxy {
-                            let proxy_url = Some(proxy.to_url_string());
-                            match rt.block_on(
-                                conn.send(engine_client::dto::Command::SetProxy { url: proxy_url }),
-                            ) {
-                                Ok(()) => log::info!("Initial proxy sent to engine"),
-                                Err(e) => log::warn!("Failed to send initial proxy: {e}"),
-                            }
+                    // Uses the same resolution order as load_saved_state():
+                    // proxy-url.json → state.json fallback → keychain auth.
+                    if let Some(proxy) = data::config::proxy::load_startup_proxy() {
+                        let proxy_url = Some(proxy.to_url_string());
+                        match rt.block_on(
+                            conn.send(engine_client::dto::Command::SetProxy { url: proxy_url }),
+                        ) {
+                            Ok(()) => log::info!("Initial proxy sent to engine"),
+                            Err(e) => log::warn!("Failed to send initial proxy: {e}"),
                         }
                     }
 
