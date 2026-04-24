@@ -181,6 +181,7 @@
       "additionalProperties": false,
       "properties": {
         "event": { "const": "DepthSnapshot" },
+        "request_id": { "type": "string" },
         "venue": { "type": "string" },
         "ticker": { "type": "string" },
         "stream_session_id": { "type": "string" },

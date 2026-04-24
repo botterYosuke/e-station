@@ -114,6 +114,7 @@ class GetTickerMetadata(IpcMessage):
 
 class RequestDepthSnapshot(IpcMessage):
     op: Literal["RequestDepthSnapshot"] = "RequestDepthSnapshot"
+    request_id: str
     venue: str
     ticker: str
     market: str | None = None
@@ -224,6 +225,7 @@ class DepthLevel(IpcMessage):
 
 class DepthSnapshotMsg(IpcMessage):
     event: Literal["DepthSnapshot"] = "DepthSnapshot"
+    request_id: str | None = None
     venue: str
     ticker: str
     market: str
