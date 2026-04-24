@@ -1,69 +1,38 @@
 mod client;
-mod connect;
-mod hub;
-mod limiter;
 pub mod proxy;
 pub mod venue_backend;
 
 pub use super::error::AdapterError;
-use super::{Ticker, Timeframe};
+use super::Timeframe;
 use crate::{
     Kline, Price, PushFrequency, TickMultiplier, TickerInfo, Trade, depth::Depth, unit::Qty,
 };
 
 use enum_map::{Enum, EnumMap};
-use futures::SinkExt;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc};
 
-pub use client::{
-    AdapterHandles, AdapterNetworkConfig, MAX_KLINE_STREAMS_PER_STREAM,
-    MAX_TRADE_TICKERS_PER_STREAM,
-};
+pub use client::{AdapterHandles, MAX_KLINE_STREAMS_PER_STREAM, MAX_TRADE_TICKERS_PER_STREAM};
 pub use proxy::Proxy;
 pub use venue_backend::VenueBackend;
 
-/// Buffer trades and flush in this interval
-const TRADE_BUCKET_INTERVAL: Duration = Duration::from_micros(33_333);
+// Hyperliquid-specific tick multiplier lookup table (moved from hub/hyperliquid).
+const _HL_MULTS_OVERFLOW: &[u16] = &[1, 10, 20, 50, 100, 1000, 10000];
+const _HL_MULTS_FRACTIONAL: &[u16] = &[1, 2, 5, 10, 100, 1000];
+const _HL_MULTS_SAFE: &[u16] = &[1, 10, 100, 1000];
 
+/// Returns valid tick multipliers for Hyperliquid depth streams given the minimum tick size.
 pub fn allowed_multipliers_for_min_tick(min_ticksize: crate::unit::MinTicksize) -> &'static [u16] {
-    hub::hyperliquid::allowed_multipliers_for_min_tick(min_ticksize)
-}
-
-async fn flush_trade_buffers<V>(
-    output: &mut futures::channel::mpsc::Sender<Event>,
-    ticker_info_map: &FxHashMap<Ticker, (TickerInfo, V)>,
-    trade_buffers_map: &mut FxHashMap<Ticker, Vec<Trade>>,
-) {
-    let interval_ms = TRADE_BUCKET_INTERVAL.as_millis() as u64;
-
-    for (ticker, trades_buffer) in trade_buffers_map.iter_mut() {
-        if trades_buffer.is_empty() {
-            continue;
-        }
-
-        let bucket_update_t = trades_buffer
-            .iter()
-            .map(|t| t.time)
-            .max()
-            .map(|t| (t / interval_ms) * interval_ms);
-
-        if let Some((ticker_info, _)) = ticker_info_map.get(ticker)
-            && let Some(update_t) = bucket_update_t
-        {
-            let _ = output
-                .send(Event::TradesReceived(
-                    StreamKind::Trades {
-                        ticker_info: *ticker_info,
-                    },
-                    update_t,
-                    std::mem::take(trades_buffer).into_boxed_slice(),
-                ))
-                .await;
-        }
+    if min_ticksize.power < 0 {
+        _HL_MULTS_FRACTIONAL
+    } else if min_ticksize.power > 0 {
+        _HL_MULTS_OVERFLOW
+    } else {
+        _HL_MULTS_SAFE
     }
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum MarketKind {

@@ -499,14 +499,34 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 
 **テスト**: `cargo test -p flowsurface-exchange` 17/17 PASS。`cargo check --workspace` clean。Python 側は既存 `test_binance_fetch_trades.py` / `test_server_dispatch.py` が引き続き PASS。
 
-## フェーズ 5: Rust から取引所コードを削除
+## フェーズ 5: Rust から取引所コードを削除 ✅
 
-- [ ] `exchange/src/adapter/hub/` を削除。
-- [ ] `limiter.rs`, `proxy.rs`（プロキシ設定の受け渡しは残す）, `connect.rs` の取引所固有部分を削除。
-- [ ] `reqwest`, `fastwebsockets`, `tokio-rustls`, `tokio-socks`, `sonic-rs`, `csv`, `zip` 等、Python 移管で不要になった依存を削除。
-- [ ] `--data-engine-url` フラグをデフォルト動作に格上げ、旧経路コードを撤去。
+> **完了** (2026-04-25, ブランチ `phase-5/remove-native-exchange`)
 
-**完了条件**: Rust ビルドが Iced と engine-client のみに依存し、ビルドサイズが縮む。
+- [x] `exchange/src/adapter/hub/` を削除（binance/bybit/hyperliquid/okex/mexc 全5取引所 + hub.rs）。
+- [x] `limiter.rs`, `connect.rs` を削除。`proxy.rs` は接続コード（`ProxyStream`, `connect_tcp`, `try_apply_proxy`）を削除、設定データ型（`Proxy`, `ProxyScheme`, `ProxyAuth`）のみ保持。
+- [x] `reqwest`, `fastwebsockets`, `tokio-rustls`, `tokio-socks`, `sonic-rs`, `csv`, `zip`, `bytes`, `hyper`, `hyper-util`, `http-body-util`, `webpki-roots`, `base64` を `exchange/Cargo.toml` から削除。
+- [x] `NativeBackend` enum を `venue_backend.rs` から削除。`VenueBackend` trait のみ保持。
+- [x] `AdapterHandles::spawn_all()`, `spawn_selected()`, `spawn_venue()` を `client.rs` から削除。
+- [x] `AdapterNetworkConfig` を削除（proxy 設定はネイティブ接続に不要）。
+- [x] `exchange/src/error.rs` を reqwest 非依存に簡略化（`FetchError` を `String` ベースに統一）。
+- [x] `allowed_multipliers_for_min_tick()` を `adapter.rs` にインライン移植（hub 非依存）。
+- [x] `--data-engine-url` フラグを必須化。未指定時はエラーメッセージを表示して終了。
+- [x] `main.rs` で全5取引所を `EngineClientBackend` 経由に配線（旧 `HybridVenueBackend` 不要）。
+- [x] `cargo test --workspace` 全 PASS（Rust: 82 件 + Python: 180 件）。
+- [x] `cargo clippy -- -D warnings` warning なし。
+- [x] TDD: `exchange/tests/engine_only_wiring.rs` に6テスト追加（全 PASS）。
+
+**完了条件**: Rust ビルドが Iced と engine-client のみに依存し、ビルドサイズが縮む。✅ **達成済み**
+
+### フェーズ 5 設計判断・ハマりどころ・Tips
+
+- **serde `std` feature の暗黙依存**: `exchange/Cargo.toml` に `serde.workspace = true` のみでは serde の `std`/`alloc` feature が有効にならず `Deserialize` derive が失敗する。reqwest が取り除かれると依存チェーン経由の有効化がなくなるため、`serde = { workspace = true, features = ["std"] }` を明示的に追加する必要があった。
+- **`FetchError` の简略化**: `exchange/src/error.rs` は reqwest の `Error`, `StatusCode`, `Method`, `Url` を多用していた。hub/ 削除後はこれらが不要になるため、`FetchError(String)` に統一し `ui_message()` をシンプルな文字列返却に変更。既存コードは `err.ui_message()` 呼び出しのみ使っており後方互換。
+- **`serde_util.rs` の dead code**: `de_string_to_number` と `value_as_u64` が hub/ でのみ使用されていたため削除。`value_as_f32` と `de_number_like_or_object` は lib.rs 内の型定義（DepthPayload 等）で使用継続。
+- **`allowed_multipliers_for_min_tick` の移植**: Hyperliquid の depth tick multiplier テーブルは定数 3 個 + 関数 1 個で完結。`adapter.rs` にそのままコピーするだけで OK（ロジック変更不要）。
+- **`--data-engine-url` 必須化のタイミング**: Iced の `daemon()` 起動前に `ENGINE_CONNECTION.get().is_none()` チェックを挿入。Iced の panic ハンドラに入る前に明確なエラーメッセージで終了できる。
+- **`HybridVenueBackend` の不要化**: フェーズ 2 では native metadata + Python stream のハイブリッド構成が必要だったが、フェーズ 5 では Python engine が全 metadata も担うためシンプルな `EngineClientBackend` × 5 に置き換え。`engine-client/src/hybrid.rs` と関連テストは次フェーズ以降の cleanup 候補（今回は残置）。
 
 ## フェーズ 6: 配布・運用整備
 

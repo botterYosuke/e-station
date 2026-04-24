@@ -104,6 +104,19 @@ fn main() {
             None
         };
 
+    if ENGINE_CONNECTION.get().is_none() {
+        log::error!(
+            "No data engine connected. \
+             Use --data-engine-url <ws://host:port> to connect to the Python data engine."
+        );
+        eprintln!(
+            "error: --data-engine-url is required.\n\
+             Start the Python engine first and pass its WebSocket URL, e.g.:\n\
+             \n  flowsurface --data-engine-url ws://127.0.0.1:8765\n"
+        );
+        std::process::exit(1);
+    }
+
     std::thread::spawn(data::cleanup_old_market_data);
 
     let _ = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
@@ -194,33 +207,29 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
         let saved_state = layout::load_saved_state();
-        let mut handles =
-            exchange::adapter::AdapterHandles::spawn_all(exchange::adapter::AdapterNetworkConfig {
-                proxy_cfg: saved_state.proxy_cfg.clone(),
-            })
-            .expect("Failed to spawn adapter handles");
 
-        // If an external engine connection was established in main(), wire in a
-        // HybridVenueBackend for Binance: metadata/stats stay on the NativeBackend
-        // (so the ticker list / sidebar always work), while streaming and data-fetch
-        // calls are routed through the Python IPC engine.
+        // All venues are routed through the Python data engine via IPC.
+        // ENGINE_CONNECTION is guaranteed to be set before Iced starts (main() exits if not).
+        let mut handles = exchange::adapter::AdapterHandles::default();
         if let Some(conn) = ENGINE_CONNECTION.get() {
             use exchange::adapter::Venue;
 
-            // Keep the native Binance backend for metadata — only replace it in the
-            // hybrid when the handle is already spawned (it always is via spawn_all).
-            if let Some(native) = handles.get_backend_arc(Venue::Binance) {
-                let engine_backend = Arc::new(engine_client::EngineClientBackend::new(
+            let venue_names: &[(Venue, &str)] = &[
+                (Venue::Binance, "binance"),
+                (Venue::Bybit, "bybit"),
+                (Venue::Hyperliquid, "hyperliquid"),
+                (Venue::Okex, "okex"),
+                (Venue::Mexc, "mexc"),
+            ];
+
+            for &(venue, name) in venue_names {
+                let backend = Arc::new(engine_client::EngineClientBackend::new(
                     Arc::clone(conn),
-                    "binance",
+                    name,
                 ));
-                let hybrid = Arc::new(engine_client::HybridVenueBackend::new(
-                    native,
-                    engine_backend,
-                ));
-                handles.set_backend(Venue::Binance, hybrid);
-                log::info!("Binance backend: HybridVenueBackend (native metadata + Python IPC streams)");
+                handles.set_backend(venue, backend);
             }
+            log::info!("All venue backends: EngineClientBackend (Python IPC)");
         }
 
         let (main_window_id, open_main_window) = {

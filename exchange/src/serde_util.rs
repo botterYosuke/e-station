@@ -1,16 +1,5 @@
 use serde::{Deserialize, Deserializer, de::Error as DeError};
 use serde_json::Value;
-use std::str::FromStr;
-
-pub(crate) fn de_string_to_number<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: FromStr,
-    T::Err: std::fmt::Display,
-{
-    let s = String::deserialize(deserializer)?;
-    s.parse::<T>().map_err(D::Error::custom)
-}
 
 pub(crate) fn value_as_f32(value: &Value) -> Option<f32> {
     match value {
@@ -20,15 +9,6 @@ pub(crate) fn value_as_f32(value: &Value) -> Option<f32> {
     }
 }
 
-pub(crate) fn value_as_u64(value: &Value) -> Option<u64> {
-    match value {
-        Value::String(s) => s.parse::<u64>().ok(),
-        Value::Number(n) => n
-            .as_u64()
-            .or_else(|| n.as_i64().and_then(|v| u64::try_from(v).ok())),
-        _ => None,
-    }
-}
 
 pub(crate) fn de_number_like_or_object<'de, D, T>(
     deserializer: D,
