@@ -149,7 +149,8 @@ impl VenueBackend for EngineClientBackend {
                         yield Event::Disconnected(exchange, format!("broadcast lagged by {n} events"));
                         return;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Ok(EngineEvent::ConnectionDropped)
+                    | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());
                         return;
                     }
@@ -225,7 +226,8 @@ impl VenueBackend for EngineClientBackend {
                         yield Event::Disconnected(exchange, format!("broadcast lagged by {n} events"));
                         return;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Ok(EngineEvent::ConnectionDropped)
+                    | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());
                         return;
                     }
@@ -319,6 +321,7 @@ impl VenueBackend for EngineClientBackend {
                         if !accepted {
                             if let Err(e) = connection
                                 .send(Command::RequestDepthSnapshot {
+                                    request_id: Uuid::new_v4().to_string(),
                                     venue: venue.clone(),
                                     ticker: ticker_sym.clone(),
                                     market: Self::market_kind_to_ipc(market_kind),
@@ -349,6 +352,7 @@ impl VenueBackend for EngineClientBackend {
                         log::warn!("DepthGap for {ticker} — requesting new snapshot");
                         if let Err(e) = connection
                             .send(Command::RequestDepthSnapshot {
+                                request_id: Uuid::new_v4().to_string(),
                                 venue: venue.clone(),
                                 ticker: ticker_sym.clone(),
                                 market: Self::market_kind_to_ipc(market_kind),
@@ -373,6 +377,7 @@ impl VenueBackend for EngineClientBackend {
                         tracker.lock().await.reset_ticker(&ticker_sym);
                         if let Err(e) = connection
                             .send(Command::RequestDepthSnapshot {
+                                request_id: Uuid::new_v4().to_string(),
                                 venue: venue.clone(),
                                 ticker: ticker_sym.clone(),
                                 market: Self::market_kind_to_ipc(market_kind),
@@ -382,7 +387,8 @@ impl VenueBackend for EngineClientBackend {
                             log::error!("depth_stream: failed to send RequestDepthSnapshot after lag for {ticker_sym}: {e}");
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Ok(EngineEvent::ConnectionDropped)
+                    | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());
                         return;
                     }
@@ -457,7 +463,8 @@ impl VenueBackend for EngineClientBackend {
                                     "{code}: {message}"
                                 )));
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            Ok(EngineEvent::ConnectionDropped)
+                            | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 return Err(AdapterError::EngineRestarting);
                             }
                             _ => continue,
@@ -556,7 +563,8 @@ impl VenueBackend for EngineClientBackend {
                                     "{code}: {message}"
                                 )));
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            Ok(EngineEvent::ConnectionDropped)
+                            | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 return Err(AdapterError::EngineRestarting);
                             }
                             _ => continue,
@@ -630,7 +638,8 @@ impl VenueBackend for EngineClientBackend {
                                 "{code}: {message}"
                             )));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Ok(EngineEvent::ConnectionDropped)
+                        | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
@@ -697,7 +706,8 @@ impl VenueBackend for EngineClientBackend {
                                 "{code}: {message}"
                             )));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Ok(EngineEvent::ConnectionDropped)
+                        | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
@@ -769,7 +779,8 @@ impl VenueBackend for EngineClientBackend {
                                 format!("fetch_trades broadcast lagged by {n}")
                             ));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Ok(EngineEvent::ConnectionDropped)
+                        | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,
@@ -790,8 +801,10 @@ impl VenueBackend for EngineClientBackend {
 
         Box::pin(async move {
             let ticker_sym = ticker.to_string();
+            let request_id = Uuid::new_v4().to_string();
 
             let cmd = Command::RequestDepthSnapshot {
+                request_id: request_id.clone(),
                 venue: venue.clone(),
                 ticker: ticker_sym.clone(),
                 market: Self::market_kind_to_ipc(ticker.market_type()),
@@ -805,17 +818,29 @@ impl VenueBackend for EngineClientBackend {
             tokio::time::timeout(SNAPSHOT_TIMEOUT, async {
                 loop {
                     match rx.recv().await {
-                        Ok(EngineEvent::DepthSnapshot { ticker: t, sequence_id, bids, asks, .. })
-                            if t == ticker_sym =>
+                        Ok(EngineEvent::DepthSnapshot {
+                            request_id: ref rid,
+                            ticker: ref t,
+                            sequence_id,
+                            ref bids,
+                            ref asks,
+                            ..
+                        }) if t == &ticker_sym
+                            && rid.as_deref().map_or(true, |r| r == request_id) =>
                         {
-                            return Ok(depth_levels_to_payload(sequence_id, &bids, &asks));
+                            return Ok(depth_levels_to_payload(sequence_id, bids, asks));
                         }
-                        Ok(EngineEvent::Error { code, message, .. }) => {
+                        Ok(EngineEvent::Error {
+                            request_id: Some(ref rid),
+                            ref code,
+                            ref message,
+                        }) if rid == &request_id => {
                             return Err(AdapterError::InvalidRequest(format!(
                                 "{code}: {message}"
                             )));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Ok(EngineEvent::ConnectionDropped)
+                        | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             return Err(AdapterError::EngineRestarting);
                         }
                         _ => continue,

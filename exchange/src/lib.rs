@@ -249,7 +249,7 @@ impl fmt::Display for SerTicker {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy)]
 pub struct Ticker {
     bytes: [u8; Ticker::MAX_LEN as usize],
     pub exchange: Exchange,
@@ -257,6 +257,21 @@ pub struct Ticker {
     // to show "HYPEUSDC" instead of "@107"
     display_bytes: [u8; Ticker::MAX_LEN as usize],
     has_display_symbol: bool,
+}
+
+impl PartialEq for Ticker {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes && self.exchange == other.exchange
+    }
+}
+
+impl Eq for Ticker {}
+
+impl std::hash::Hash for Ticker {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+        self.exchange.hash(state);
+    }
 }
 
 impl Ticker {

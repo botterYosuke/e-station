@@ -294,7 +294,8 @@ fn spawn_io_tasks(
             }
         }
         log::info!("engine ws read loop exited");
-        // Signal any callers of wait_closed() that the connection is gone.
+        // Unblock any in-flight fetch waiters before signalling wait_closed().
+        let _ = events_tx.send(crate::dto::EngineEvent::ConnectionDropped);
         closed.notify_waiters();
     });
 }

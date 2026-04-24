@@ -78,6 +78,7 @@ pub enum Command {
         ticker: String,
     },
     RequestDepthSnapshot {
+        request_id: String,
         venue: String,
         ticker: String,
         market: String,
@@ -153,6 +154,8 @@ pub enum EngineEvent {
         klines: Vec<KlineMsg>,
     },
     DepthSnapshot {
+        #[serde(default)]
+        request_id: Option<String>,
         venue: String,
         ticker: String,
         #[serde(default)]
@@ -206,6 +209,10 @@ pub enum EngineEvent {
         code: String,
         message: String,
     },
+    /// Synthetic event emitted by the Rust read loop when the WS connection drops.
+    /// Never sent by Python — used to unblock in-flight fetch waiters immediately.
+    #[serde(skip_deserializing)]
+    ConnectionDropped,
 }
 
 fn default_true() -> bool {

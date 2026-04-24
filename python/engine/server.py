@@ -655,6 +655,7 @@ class DataEngineServer:
         feed. If no depth stream is active for (venue, ticker), fall back
         to a client-supplied ssid if provided, else emit an Error.
         """
+        req_id: str | None = msg.get("request_id")
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
         client_ssid: str | None = msg.get("stream_session_id")
@@ -694,18 +695,19 @@ class DataEngineServer:
         live_ssid = live_handle.current_ssid if live_handle is not None else None
         ssid = live_ssid or ssid_before
 
-        self._outbox.append(
-            {
-                "event": "DepthSnapshot",
-                "venue": venue,
-                "ticker": ticker,
-                "market": market,
-                "stream_session_id": ssid,
-                "sequence_id": snap["last_update_id"],
-                "bids": snap["bids"],
-                "asks": snap["asks"],
-            }
-        )
+        payload: dict = {
+            "event": "DepthSnapshot",
+            "venue": venue,
+            "ticker": ticker,
+            "market": market,
+            "stream_session_id": ssid,
+            "sequence_id": snap["last_update_id"],
+            "bids": snap["bids"],
+            "asks": snap["asks"],
+        }
+        if req_id is not None:
+            payload["request_id"] = req_id
+        self._outbox.append(payload)
 
     async def _handle_set_proxy(self, msg: dict) -> None:
         proxy_url = msg.get("url")
