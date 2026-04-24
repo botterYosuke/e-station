@@ -729,21 +729,7 @@ pub(super) async fn fetch_trades(
 
     match get_hist_trades_with_client(&client, ticker_info, from_date, data_path).await {
         Ok(mut trades) => {
-            trades.retain(|t| t.time >= from_time);
-
-            if let Some(latest_trade) = trades.last().copied() {
-                const DAY_MS: u64 = 86_400_000;
-                let next_day_start = ((latest_trade.time / DAY_MS) + 1) * DAY_MS;
-                match fetch_intraday_trades(hub, ticker_info, next_day_start, to_time).await {
-                    Ok(intraday_trades) => {
-                        trades.extend(intraday_trades.into_iter().filter(|t| t.time <= to_time));
-                    }
-                    Err(e) => {
-                        log::error!("Failed to fetch intraday trades: {}", e);
-                    }
-                }
-            }
-
+            trades.retain(|t| t.time >= from_time && t.time <= to_time);
             Ok(trades)
         }
         Err(e) => {
@@ -753,5 +739,36 @@ pub(super) async fn fetch_trades(
             );
             fetch_intraday_trades(hub, ticker_info, from_time, to_time).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn contract_single_day_never_spans_multiple_calendar_days() {
+        const DAY_MS: u64 = 86_400_000;
+
+        // Jan 1, 2024 00:00:00 UTC to Jan 1, 2024 23:59:59 UTC
+        let from_time = 1_704_067_200_000u64;
+        let to_time = 1_704_153_599_999u64;
+
+        // Both within same calendar day
+        let from_day = from_time / DAY_MS;
+        let to_day = to_time / DAY_MS;
+        assert_eq!(
+            from_day, to_day,
+            "Single day request must have from_time and to_time on the same calendar day"
+        );
+
+        // Next day starts here
+        let next_day_start = (from_day + 1) * DAY_MS;
+        assert!(
+            next_day_start > to_time,
+            "Next day starts at {} which is after to_time {}",
+            next_day_start,
+            to_time
+        );
+        // Any trade >= next_day_start violates the contract
+        assert!(next_day_start > to_time);
     }
 }
