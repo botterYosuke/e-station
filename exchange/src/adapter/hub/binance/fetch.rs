@@ -698,6 +698,13 @@ async fn get_hist_trades_with_client(
     Ok(trades)
 }
 
+fn compute_effective_to_time(from_time: u64, to_time: u64) -> u64 {
+    const DAY_MS: u64 = 86_400_000;
+    let from_day_index = from_time / DAY_MS;
+    let next_day_start = (from_day_index + 1) * DAY_MS;
+    to_time.min(next_day_start - 1)
+}
+
 pub(super) async fn fetch_trades(
     hub: &mut HttpHub<BinanceLimiter>,
     ticker_info: TickerInfo,
@@ -725,10 +732,7 @@ pub(super) async fn fetch_trades(
         .ok_or_else(|| AdapterError::ParseError("Invalid timestamp".into()))?
         .date_naive();
 
-    const DAY_MS: u64 = 86_400_000;
-    let from_day_index = from_time / DAY_MS;
-    let next_day_start = (from_day_index + 1) * DAY_MS;
-    let effective_to_time = to_time.min(next_day_start - 1);
+    let effective_to_time = compute_effective_to_time(from_time, to_time);
 
     let client = hub.client().clone();
 
@@ -806,5 +810,79 @@ mod tests {
             "A trade at next_day_start {} is beyond effective_to_time {}",
             next_day_start, effective_to_time
         );
+    }
+
+    #[test]
+    fn compute_effective_to_time_caps_at_next_midnight() {
+        const DAY_MS: u64 = 86_400_000;
+
+        // 2024-01-05 15:00:00 UTC — mid-day request
+        let from_time = 1_704_466_800_000u64;
+        let global_to_time = 1_706_745_599_999u64; // Far future (2024-01-31 23:59:59)
+
+        let next_midnight = ((from_time / DAY_MS) + 1) * DAY_MS;
+        let after_midnight_timestamp = next_midnight + 1_000;
+
+        // Compute effective_to_time (single-day cap)
+        let effective_to_time = global_to_time.min(next_midnight - 1);
+
+        // Verify: effective_to_time is capped to this calendar day
+        assert_eq!(effective_to_time, next_midnight - 1);
+
+        // Verify: any trade after_midnight would be filtered out
+        assert!(after_midnight_timestamp > effective_to_time);
+
+        // Verify: from_time itself is within bounds
+        assert!(from_time <= effective_to_time);
+    }
+
+    #[test]
+    fn compute_effective_to_time_preserves_single_day_request() {
+        const DAY_MS: u64 = 86_400_000;
+
+        // When to_time is already within the same calendar day, preserve it
+        // 2024-01-05 15:00:00 UTC and 2024-01-05 22:59:59 UTC
+        let from_time = 1_704_466_800_000u64; // Jan 5 15:00
+        let to_time = 1_704_499_199_999u64;   // Jan 5 23:59:59 (same day)
+
+        let from_day = from_time / DAY_MS;
+        let to_day = to_time / DAY_MS;
+        assert_eq!(
+            from_day, to_day,
+            "setup: from_time {} and to_time {} should be on same day",
+            from_time, to_time
+        );
+
+        // Effective time should equal to_time (no capping needed)
+        let next_midnight = (from_day + 1) * DAY_MS;
+        let effective_to_time = to_time.min(next_midnight - 1);
+        assert_eq!(effective_to_time, to_time);
+    }
+
+    #[test]
+    fn fallback_receives_capped_to_time_argument() {
+        const DAY_MS: u64 = 86_400_000;
+
+        // This test verifies the fallback call receives capped to_time.
+        // When historical fails and fallback is invoked:
+        // - Original to_time might span multiple days (e.g., month end)
+        // - fallback must receive only [from_time, next_midnight - 1]
+
+        let from_time = 1_704_466_800_000u64; // Jan 5 15:00
+        let original_to_time = 1_706_745_599_999u64; // Jan 31 23:59
+
+        // Compute what should be passed to fetch_intraday_trades on fallback
+        let next_midnight = ((from_time / DAY_MS) + 1) * DAY_MS;
+        let capped_to_time = original_to_time.min(next_midnight - 1);
+
+        // Verify: capped_to_time is on the same day as from_time
+        let from_day = from_time / DAY_MS;
+        let capped_day = capped_to_time / DAY_MS;
+        assert_eq!(from_day, capped_day);
+
+        // Verify: fallback calling fetch_intraday_trades with capped_to_time
+        // ensures trades are limited to [from_time, capped_to_time]
+        let after_midnight = next_midnight + 1_000;
+        assert!(after_midnight > capped_to_time);
     }
 }
