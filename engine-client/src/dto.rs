@@ -82,6 +82,9 @@ pub enum Command {
         ticker: String,
         market: String,
     },
+    Ping {
+        request_id: String,
+    },
     Shutdown,
 }
 
@@ -123,6 +126,10 @@ pub enum EngineEvent {
         venue: String,
         ticker: String,
         trades: Vec<TradeMsg>,
+        /// `false` when more chunks follow; `true` on the final (or only) chunk.
+        /// Absent in legacy responses — treated as `true` for backward compat.
+        #[serde(default = "default_true")]
+        is_last: bool,
     },
     KlineUpdate {
         venue: String,
@@ -177,11 +184,18 @@ pub enum EngineEvent {
         ticker: String,
         stats: serde_json::Value,
     },
+    Pong {
+        request_id: String,
+    },
     Error {
         request_id: Option<String>,
         code: String,
         message: String,
     },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ── Message sub-types ─────────────────────────────────────────────────────────
@@ -205,16 +219,9 @@ pub struct KlineMsg {
     pub close: String,
     pub volume: String,
     pub is_closed: bool,
-    /// Quote-asset volume (e.g. USDT). When present, used for `Volume::TotalOnly`
-    /// instead of base-asset `volume` for correct chart display.
-    #[serde(default)]
-    pub quote_volume: Option<String>,
     /// Taker-buy base-asset volume. Used together with `volume` for buy/sell split.
     #[serde(default)]
     pub taker_buy_volume: Option<String>,
-    /// Taker-buy quote-asset volume. Used together with `quote_volume` for buy/sell split.
-    #[serde(default)]
-    pub taker_buy_quote_volume: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

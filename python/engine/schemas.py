@@ -52,6 +52,7 @@ class Unsubscribe(IpcMessage):
     venue: str
     ticker: str
     stream: str
+    timeframe: str | None = None
     market: str | None = None
 
 
@@ -62,6 +63,8 @@ class FetchKlines(IpcMessage):
     ticker: str
     timeframe: str
     limit: int
+    start_ms: int | None = None
+    end_ms: int | None = None
 
 
 class FetchTrades(IpcMessage):
@@ -82,6 +85,8 @@ class FetchOpenInterest(IpcMessage):
     ticker: str
     timeframe: str
     limit: int
+    start_ms: int | None = None
+    end_ms: int | None = None
 
 
 class FetchTickerStats(IpcMessage):

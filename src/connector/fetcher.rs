@@ -534,6 +534,11 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    fn make_trade(ts_ms: u64) -> Trade {
+        use exchange::unit::{Price, Qty};
+        Trade { time: ts_ms, is_sell: false, price: Price::from_f32(100.0), qty: Qty::from_f32(1.0) }
+    }
+
     /// Mock backend that always returns an empty trade list.
     struct AlwaysEmptyTrades;
 
@@ -575,6 +580,112 @@ mod tests {
         fn health(&self) -> BoxFuture<'_, bool> {
             unimplemented!()
         }
+    }
+
+    /// Mock that returns a pre-programmed sequence of responses, one per call.
+    /// After the sequence is exhausted every subsequent call returns `Ok(vec![])`.
+    struct SequencedTrades {
+        responses: Arc<tokio::sync::Mutex<std::collections::VecDeque<Vec<Trade>>>>,
+    }
+
+    impl SequencedTrades {
+        fn new(responses: Vec<Vec<Trade>>) -> Self {
+            Self { responses: Arc::new(tokio::sync::Mutex::new(responses.into())) }
+        }
+    }
+
+    impl VenueBackend for SequencedTrades {
+        fn fetch_trades(
+            &self,
+            _: TickerInfo,
+            _: u64,
+            _: u64,
+            _: Option<PathBuf>,
+        ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
+            let responses = Arc::clone(&self.responses);
+            Box::pin(async move {
+                let mut q = responses.lock().await;
+                Ok(q.pop_front().unwrap_or_default())
+            })
+        }
+
+        fn kline_stream(&self, _: Vec<(TickerInfo, Timeframe)>, _: MarketKind) -> BoxStream<'static, Event> { unimplemented!() }
+        fn trade_stream(&self, _: Vec<TickerInfo>, _: MarketKind) -> BoxStream<'static, Event> { unimplemented!() }
+        fn depth_stream(&self, _: TickerInfo, _: Option<TickMultiplier>, _: PushFrequency) -> BoxStream<'static, Event> { unimplemented!() }
+        fn fetch_ticker_metadata(&self, _: &[MarketKind]) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> { unimplemented!() }
+        fn fetch_ticker_stats(&self, _: &[MarketKind], _: Option<HashMap<Ticker, f32>>) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> { unimplemented!() }
+        fn fetch_klines(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<Kline>, AdapterError>> { unimplemented!() }
+        fn fetch_open_interest(&self, _: TickerInfo, _: Timeframe, _: Option<(u64, u64)>) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> { unimplemented!() }
+        fn request_depth_snapshot(&self, _: Ticker) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> { unimplemented!() }
+        fn health(&self) -> BoxFuture<'_, bool> { unimplemented!() }
+    }
+
+    #[tokio::test]
+    async fn consecutive_empty_days_resets_after_data() {
+        // 3 empty days → 1 data day → 3 empty days → 1 data day → loop ends → Ok
+        const DAY_MS: u64 = 86_400_000;
+        let responses: Vec<Vec<Trade>> = vec![
+            vec![],                                  // day 0 — empty
+            vec![],                                  // day 1 — empty
+            vec![],                                  // day 2 — empty
+            vec![make_trade(3 * DAY_MS + 1)],        // day 3 — data; counter resets
+            vec![],                                  // day 4 — empty
+            vec![],                                  // day 5 — empty
+            vec![],                                  // day 6 — empty
+            vec![make_trade(7 * DAY_MS + 1)],        // day 7 — data; counter resets
+            // to_time = 8*DAY_MS reached → loop exits
+        ];
+        let mut handles = AdapterHandles::default();
+        handles.set_backend(Venue::Binance, Arc::new(SequencedTrades::new(responses)));
+
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        let mut straw = fetch_trades_batched(
+            handles,
+            ticker_info,
+            0,
+            8 * DAY_MS,
+            PathBuf::from("."),
+        )
+        .pin();
+
+        while straw.next().await.is_some() {}
+        let result = straw.await;
+        assert!(result.is_ok(), "expected Ok after counter reset, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn latest_trade_t_advances_to_next_day_boundary() {
+        // Trade arrives mid-day; next fetch should start at the following day boundary.
+        const DAY_MS: u64 = 86_400_000;
+        // Trade is at 12h into day 0; from_time=0, to_time=DAY_MS.
+        // After processing the batch, latest_trade_t becomes DAY_MS (day 1 midnight).
+        // DAY_MS >= to_time=DAY_MS, so the loop terminates → Ok.
+        let responses = vec![vec![make_trade(DAY_MS / 2)]];
+        let mut handles = AdapterHandles::default();
+        handles.set_backend(Venue::Binance, Arc::new(SequencedTrades::new(responses)));
+
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        let mut straw = fetch_trades_batched(
+            handles,
+            ticker_info,
+            0,
+            DAY_MS,
+            PathBuf::from("."),
+        )
+        .pin();
+
+        let mut emitted = 0usize;
+        while straw.next().await.is_some() {
+            emitted += 1;
+        }
+        assert_eq!(emitted, 1, "expected exactly one progress emission");
+
+        let result = straw.await;
+        assert!(result.is_ok(), "expected Ok after day-boundary advance, got {result:?}");
     }
 
     #[tokio::test]

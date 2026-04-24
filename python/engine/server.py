@@ -299,6 +299,11 @@ class DataEngineServer:
                 self._do_request_depth_snapshot(msg), msg.get("request_id")
             )
 
+        elif op == "Ping":
+            self._outbox.append(
+                {"event": "Pong", "request_id": msg.get("request_id", "")}
+            )
+
         elif op == "SetProxy":
             await self._handle_set_proxy(msg)
 
@@ -337,13 +342,15 @@ class DataEngineServer:
 
         market = _market_from_msg(msg, venue)
 
-        # kline streams are keyed by timeframe; other streams by stream name only
-        if stream == "kline" or stream.startswith("kline_"):
-            tf = timeframe or (stream[len("kline_") :] if stream.startswith("kline_") else "1m")
-            key = (venue, ticker, market, "kline", tf)
-        else:
-            tf = None
-            key = (venue, ticker, market, stream)
+        # Keys are always 5-tuples: (venue, ticker, market, stream_type, tf).
+        # For non-kline streams tf=None; for klines tf is the timeframe string.
+        tf: str | None = None
+        if stream == "kline":
+            tf = timeframe or "1m"
+        elif stream.startswith("kline_"):
+            # legacy: timeframe-suffixed stream names (e.g. "kline_5m")
+            tf = timeframe or stream[len("kline_"):]
+        key = (venue, ticker, market, "kline" if tf is not None else stream, tf)
 
         if key in self._streams:
             log.debug("Already subscribed to %s", key)
@@ -417,11 +424,13 @@ class DataEngineServer:
         timeframe = msg.get("timeframe")
         market = _market_from_msg(msg, venue)
 
-        if stream == "kline" or stream.startswith("kline_"):
-            tf = timeframe or (stream[len("kline_"):] if stream.startswith("kline_") else "1m")
-            key = (venue, ticker, market, "kline", tf)
-        else:
-            key = (venue, ticker, market, stream)
+        tf: str | None = None
+        if stream == "kline":
+            tf = timeframe or "1m"
+        elif stream.startswith("kline_"):
+            # legacy: timeframe-suffixed stream names
+            tf = timeframe or stream[len("kline_"):]
+        key = (venue, ticker, market, "kline" if tf is not None else stream, tf)
 
         handle = self._streams.pop(key, None)
         if handle:
@@ -520,8 +529,8 @@ class DataEngineServer:
         limit = raw_limit if isinstance(raw_limit, int) and 1 <= raw_limit <= 5000 else 400
         raw_start = msg.get("start_ms")
         raw_end = msg.get("end_ms")
-        start_ms = int(raw_start) if raw_start else None
-        end_ms = int(raw_end) if raw_end else None
+        start_ms = int(raw_start) if raw_start is not None else None
+        end_ms = int(raw_end) if raw_end is not None else None
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
@@ -557,15 +566,30 @@ class DataEngineServer:
         trades = await worker.fetch_trades(
             ticker, market, start_ms, end_ms=end_ms, data_path=data_path
         )
-        self._outbox.append(
-            {
-                "event": "TradesFetched",
-                "request_id": req_id,
-                "venue": venue,
-                "ticker": ticker,
-                "trades": trades,
-            }
-        )
+        _CHUNK = 50_000
+        if not trades:
+            self._outbox.append(
+                {
+                    "event": "TradesFetched",
+                    "request_id": req_id,
+                    "venue": venue,
+                    "ticker": ticker,
+                    "trades": [],
+                    "is_last": True,
+                }
+            )
+        else:
+            for i in range(0, len(trades), _CHUNK):
+                self._outbox.append(
+                    {
+                        "event": "TradesFetched",
+                        "request_id": req_id,
+                        "venue": venue,
+                        "ticker": ticker,
+                        "trades": trades[i : i + _CHUNK],
+                        "is_last": i + _CHUNK >= len(trades),
+                    }
+                )
 
     async def _do_fetch_oi(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
@@ -576,8 +600,8 @@ class DataEngineServer:
         limit = raw_limit if isinstance(raw_limit, int) and 1 <= raw_limit <= 5000 else 400
         raw_start = msg.get("start_ms")
         raw_end = msg.get("end_ms")
-        start_ms = int(raw_start) if raw_start else None
-        end_ms = int(raw_end) if raw_end else None
+        start_ms = int(raw_start) if raw_start is not None else None
+        end_ms = int(raw_end) if raw_end is not None else None
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")

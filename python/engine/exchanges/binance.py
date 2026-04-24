@@ -381,10 +381,8 @@ class BinanceWorker(ExchangeWorker):
                 "volume": str(row[5]),
                 "is_closed": True,
             }
-            if len(row) >= 11:
-                entry["quote_volume"] = str(row[7])
+            if len(row) >= 10:
                 entry["taker_buy_volume"] = str(row[9])
-                entry["taker_buy_quote_volume"] = str(row[10])
             klines.append(entry)
 
         return klines
@@ -537,6 +535,7 @@ class BinanceWorker(ExchangeWorker):
     ) -> list[dict]:
         _DAY_MS = 86_400_000
         if end_ms == 0:
+            # server.py always supplies end_ms > 0; this branch guards direct callers only
             end_ms = (start_ms // _DAY_MS + 1) * _DAY_MS
         base = _rest_base(market)
         if market == "linear_perp":
@@ -628,7 +627,9 @@ class BinanceWorker(ExchangeWorker):
                 )
             zip_bytes = resp.content
             if zip_path is not None:
-                zip_path.write_bytes(zip_bytes)
+                tmp_path = zip_path.with_suffix(".zip.tmp")
+                tmp_path.write_bytes(zip_bytes)
+                tmp_path.replace(zip_path)
 
         # Parse the zip → CSV
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -639,8 +640,10 @@ class BinanceWorker(ExchangeWorker):
             with zf.open(csv_names[0]) as f:
                 reader = csv.reader(io.TextIOWrapper(f, encoding="utf-8"))
                 trades = []
+                skipped = 0
                 for row in reader:
                     if len(row) < 7:
+                        skipped += 1
                         continue
                     try:
                         time_ms = int(row[5])
@@ -655,7 +658,13 @@ class BinanceWorker(ExchangeWorker):
                             }
                         )
                     except (ValueError, IndexError):
+                        skipped += 1
                         continue
+                if skipped > 0:
+                    log.warning(
+                        "skipped %d malformed aggTrades rows for %s %s",
+                        skipped, ticker, date_str,
+                    )
 
         return trades
 

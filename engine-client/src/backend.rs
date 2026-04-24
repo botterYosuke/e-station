@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Timeout for one-shot fetch requests to the Python engine.
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Timeout for a depth snapshot request.
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -720,14 +720,19 @@ impl VenueBackend for EngineClientBackend {
                 .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
 
             tokio::time::timeout(FETCH_TIMEOUT, async {
+                let mut accumulated: Vec<Trade> = Vec::new();
                 loop {
                     match rx.recv().await {
-                        Ok(EngineEvent::TradesFetched { request_id: rid, trades, .. })
-                            if rid == request_id =>
-                        {
-                            let result: Vec<Trade> =
-                                trades.iter().filter_map(|t| t.to_trade()).collect();
-                            return Ok(result);
+                        Ok(EngineEvent::TradesFetched {
+                            request_id: rid,
+                            trades,
+                            is_last,
+                            ..
+                        }) if rid == request_id => {
+                            accumulated.extend(trades.iter().filter_map(|t| t.to_trade()));
+                            if is_last {
+                                return Ok(accumulated);
+                            }
                         }
                         Ok(EngineEvent::Error { request_id: Some(rid), code, message })
                             if rid == request_id =>
@@ -797,19 +802,30 @@ impl VenueBackend for EngineClientBackend {
     }
 
     fn health(&self) -> BoxFuture<'_, bool> {
-        // The backend is healthy if the command channel is still open.
         let connection = Arc::clone(&self.connection);
         Box::pin(async move {
-            // Send a no-op command to check liveliness.
-            connection
-                .send(Command::FetchTickerStats {
-                    request_id: "__health__".to_string(),
-                    venue: "binance".to_string(),
-                    ticker: "health".to_string(),
-                    market: "linear_perp".to_string(),
-                })
+            let request_id = Uuid::new_v4().to_string();
+            let mut rx = connection.subscribe_events();
+            if connection
+                .send(Command::Ping { request_id: request_id.clone() })
                 .await
-                .is_ok()
+                .is_err()
+            {
+                return false;
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match rx.recv().await {
+                        Ok(EngineEvent::Pong { request_id: rid }) if rid == request_id => {
+                            return true;
+                        }
+                        Err(_) => return false,
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false)
         })
     }
 }

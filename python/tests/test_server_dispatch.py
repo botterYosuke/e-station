@@ -301,3 +301,80 @@ async def test_fetch_trades_now_supported_returns_trades_fetched(running_server)
     assert msg["request_id"] == "req-trades"
 
     await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_kline_multiple_timeframes_coexist(running_server):
+    """Subscribing BTCUSDT 1m and 5m should create two independent streams."""
+    port, token, mock_worker = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    await ws.send(orjson.dumps({
+        "op": "Subscribe", "venue": "binance", "ticker": "BTCUSDT",
+        "stream": "kline", "timeframe": "1m",
+    }))
+    await asyncio.sleep(0.05)
+    assert mock_worker.stream_kline.call_count == 1
+
+    await ws.send(orjson.dumps({
+        "op": "Subscribe", "venue": "binance", "ticker": "BTCUSDT",
+        "stream": "kline", "timeframe": "5m",
+    }))
+    await asyncio.sleep(0.05)
+    assert mock_worker.stream_kline.call_count == 2, (
+        "5m subscribe should create a second stream, not overwrite the 1m stream"
+    )
+
+    await ws.send(orjson.dumps({
+        "op": "Unsubscribe", "venue": "binance", "ticker": "BTCUSDT",
+        "stream": "kline", "timeframe": "1m",
+    }))
+    await asyncio.sleep(0.05)
+    assert mock_worker.stream_kline.call_count == 2
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_klines_passes_start_end_ms_to_worker(running_server):
+    """FetchKlines must forward start_ms and end_ms to the worker (regression for dropped fields)."""
+    port, token, mock_worker = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "FetchKlines",
+        "request_id": "req-kline-range",
+        "venue": "binance",
+        "ticker": "BTCUSDT",
+        "timeframe": "1h",
+        "limit": 100,
+        "start_ms": 1_700_000_000_000,
+        "end_ms": 1_700_086_400_000,
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Klines", f"Expected Klines, got: {msg}"
+
+    _, call_kwargs = mock_worker.fetch_klines.call_args
+    assert call_kwargs.get("start_ms") == 1_700_000_000_000, "start_ms was not forwarded"
+    assert call_kwargs.get("end_ms") == 1_700_086_400_000, "end_ms was not forwarded"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_ping_returns_pong(running_server):
+    """Ping op must return a Pong event with the same request_id (health check contract)."""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    await ws.send(orjson.dumps({"op": "Ping", "request_id": "health-check-1"}))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Pong", f"Expected Pong, got: {msg}"
+    assert msg["request_id"] == "health-check-1"
+
+    await ws.close()
