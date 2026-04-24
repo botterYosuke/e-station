@@ -653,7 +653,7 @@ class DataEngineServer:
             raise ValueError(f"unknown venue: {venue}")
 
         market = _market_from_msg(msg, venue)
-        handle = self._streams.get((venue, ticker, market, "depth"))
+        handle = self._streams.get((venue, ticker, market, "depth", None))
         # Capture ssid before the await for early validation only.
         ssid_before = handle.current_ssid if handle is not None else None
         if ssid_before is None:
@@ -680,7 +680,7 @@ class DataEngineServer:
         # Re-read ssid AFTER the await — the stream may have reconnected during
         # the fetch and updated current_ssid to a new session.  Fall back to the
         # pre-await value only if the stream is no longer alive.
-        live_handle = self._streams.get((venue, ticker, market, "depth"))
+        live_handle = self._streams.get((venue, ticker, market, "depth", None))
         live_ssid = live_handle.current_ssid if live_handle is not None else None
         ssid = live_ssid or ssid_before
 
@@ -689,6 +689,7 @@ class DataEngineServer:
                 "event": "DepthSnapshot",
                 "venue": venue,
                 "ticker": ticker,
+                "market": market,
                 "stream_session_id": ssid,
                 "sequence_id": snap["last_update_id"],
                 "bids": snap["bids"],

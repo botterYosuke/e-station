@@ -115,8 +115,9 @@ impl VenueBackend for EngineClientBackend {
 
             loop {
                 match rx.recv().await {
-                    Ok(EngineEvent::KlineUpdate { venue: ev_venue, ticker, timeframe: tf_str, kline }) => {
+                    Ok(EngineEvent::KlineUpdate { venue: ev_venue, ticker, market: ev_market, timeframe: tf_str, kline }) => {
                         if ev_venue != venue { continue; }
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
 
                         let Some((ticker_info, timeframe)) = streams.iter().find(|(ti, tf)| {
                             ti.ticker.to_string() == ticker && timeframe_to_str(*tf) == tf_str
@@ -192,8 +193,9 @@ impl VenueBackend for EngineClientBackend {
 
             loop {
                 match rx.recv().await {
-                    Ok(EngineEvent::Trades { venue: ev_venue, ticker, trades, .. }) => {
+                    Ok(EngineEvent::Trades { venue: ev_venue, ticker, market: ev_market, trades, .. }) => {
                         if ev_venue != venue { continue; }
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
 
                         let Some(ticker_info) = tickers
                             .iter()
@@ -271,6 +273,7 @@ impl VenueBackend for EngineClientBackend {
                     Ok(EngineEvent::DepthSnapshot {
                         venue: ev_venue,
                         ticker,
+                        market: ev_market,
                         stream_session_id,
                         sequence_id,
                         bids,
@@ -278,6 +281,7 @@ impl VenueBackend for EngineClientBackend {
                         ..
                     }) => {
                         if ev_venue != venue || ticker != ticker_sym { continue; }
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
 
                         tracker.lock().await.on_snapshot(&ticker, &stream_session_id, sequence_id);
 
@@ -296,6 +300,7 @@ impl VenueBackend for EngineClientBackend {
                     Ok(EngineEvent::DepthDiff {
                         venue: ev_venue,
                         ticker,
+                        market: ev_market,
                         stream_session_id,
                         sequence_id,
                         prev_sequence_id,
@@ -303,6 +308,7 @@ impl VenueBackend for EngineClientBackend {
                         asks,
                     }) => {
                         if ev_venue != venue || ticker != ticker_sym { continue; }
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
 
                         let accepted = tracker.lock().await.on_diff(
                             &ticker, &stream_session_id, sequence_id, prev_sequence_id,
@@ -331,8 +337,9 @@ impl VenueBackend for EngineClientBackend {
                         yield Event::DepthReceived(stream_kind, seq_u64, arc_depth);
                     }
 
-                    Ok(EngineEvent::DepthGap { venue: ev_venue, ticker, .. }) => {
+                    Ok(EngineEvent::DepthGap { venue: ev_venue, ticker, market: ev_market, .. }) => {
                         if ev_venue != venue || ticker != ticker_sym { continue; }
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
                         tracker.lock().await.reset_ticker(&ticker);
                         log::warn!("DepthGap for {ticker} — requesting new snapshot");
                         let _ = connection

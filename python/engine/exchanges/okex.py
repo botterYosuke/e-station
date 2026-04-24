@@ -108,11 +108,13 @@ class OkexDepthSyncer:
         *,
         venue: str,
         ticker: str,
+        market: str,
         stream_session_id: str,
         outbox: Any,
     ) -> None:
         self._venue = venue
         self._ticker = ticker
+        self._market = market
         self._ssid = stream_session_id
         self._outbox = outbox
         self._applied_seq: int = 0
@@ -158,6 +160,7 @@ class OkexDepthSyncer:
                 "event": "DepthSnapshot",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": update_id,
                 "bids": _depth_levels(bids),
@@ -188,6 +191,7 @@ class OkexDepthSyncer:
                 "event": "DepthDiff",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": update_id,
                 "prev_sequence_id": self._applied_seq,
@@ -203,6 +207,7 @@ class OkexDepthSyncer:
                 "event": "DepthGap",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
             }
         )
@@ -505,6 +510,7 @@ class OkexWorker(ExchangeWorker):
                         "event": "Trades",
                         "venue": "okex",
                         "ticker": ticker,
+                        "market": market,
                         "stream_session_id": _current_ssid,
                         "trades": batch,
                     }
@@ -612,6 +618,7 @@ class OkexWorker(ExchangeWorker):
             syncer = OkexDepthSyncer(
                 venue="okex",
                 ticker=ticker,
+                market=market,
                 stream_session_id=ssid,
                 outbox=outbox,
             )
@@ -758,6 +765,7 @@ class OkexWorker(ExchangeWorker):
                                         "event": "KlineUpdate",
                                         "venue": "okex",
                                         "ticker": ticker,
+                                        "market": market,
                                         "timeframe": timeframe,
                                         "stream_session_id": ssid,
                                         "kline": {

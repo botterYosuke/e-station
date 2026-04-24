@@ -155,11 +155,13 @@ class HyperliquidDepthSyncer:
         *,
         venue: str,
         ticker: str,
+        market: str,
         stream_session_id: str,
         outbox: Any,
     ) -> None:
         self._venue = venue
         self._ticker = ticker
+        self._market = market
         self._ssid = stream_session_id
         self._outbox = outbox
         self._last_seq: int = 0
@@ -181,6 +183,7 @@ class HyperliquidDepthSyncer:
                 "event": "DepthSnapshot",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": seq,
                 "bids": [{"price": str(level["px"]), "qty": str(level["sz"])} for level in bids],
@@ -528,6 +531,7 @@ class HyperliquidWorker(ExchangeWorker):
                         "event": "Trades",
                         "venue": "hyperliquid",
                         "ticker": ticker,
+                        "market": market,
                         "stream_session_id": _current_ssid,
                         "trades": batch,
                     }
@@ -633,6 +637,7 @@ class HyperliquidWorker(ExchangeWorker):
             syncer = HyperliquidDepthSyncer(
                 venue="hyperliquid",
                 ticker=ticker,
+                market=market,
                 stream_session_id=ssid,
                 outbox=outbox,
             )
@@ -742,6 +747,7 @@ class HyperliquidWorker(ExchangeWorker):
                                     "event": "KlineUpdate",
                                     "venue": "hyperliquid",
                                     "ticker": ticker,
+                                    "market": market,
                                     "timeframe": timeframe,
                                     "stream_session_id": ssid,
                                     "kline": {

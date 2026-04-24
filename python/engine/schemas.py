@@ -174,6 +174,7 @@ class Trades(IpcMessage):
     event: Literal["Trades"] = "Trades"
     venue: str
     ticker: str
+    market: str
     stream_session_id: str
     trades: list[TradeMsg]
 
@@ -195,6 +196,7 @@ class KlineUpdate(IpcMessage):
     event: Literal["KlineUpdate"] = "KlineUpdate"
     venue: str
     ticker: str
+    market: str
     timeframe: str
     kline: KlineMsg
 
@@ -222,6 +224,7 @@ class DepthSnapshotMsg(IpcMessage):
     event: Literal["DepthSnapshot"] = "DepthSnapshot"
     venue: str
     ticker: str
+    market: str
     stream_session_id: str
     sequence_id: int
     bids: list[DepthLevel]
@@ -233,6 +236,7 @@ class DepthDiffMsg(IpcMessage):
     event: Literal["DepthDiff"] = "DepthDiff"
     venue: str
     ticker: str
+    market: str
     stream_session_id: str
     sequence_id: int
     prev_sequence_id: int
@@ -244,6 +248,7 @@ class DepthGap(IpcMessage):
     event: Literal["DepthGap"] = "DepthGap"
     venue: str
     ticker: str
+    market: str
     stream_session_id: str
 
 

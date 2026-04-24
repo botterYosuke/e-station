@@ -118,6 +118,8 @@ pub enum EngineEvent {
     Trades {
         venue: String,
         ticker: String,
+        #[serde(default)]
+        market: String,
         stream_session_id: String,
         trades: Vec<TradeMsg>,
     },
@@ -134,6 +136,8 @@ pub enum EngineEvent {
     KlineUpdate {
         venue: String,
         ticker: String,
+        #[serde(default)]
+        market: String,
         timeframe: String,
         kline: KlineMsg,
     },
@@ -147,6 +151,8 @@ pub enum EngineEvent {
     DepthSnapshot {
         venue: String,
         ticker: String,
+        #[serde(default)]
+        market: String,
         stream_session_id: String,
         sequence_id: i64,
         bids: Vec<DepthLevel>,
@@ -156,6 +162,8 @@ pub enum EngineEvent {
     DepthDiff {
         venue: String,
         ticker: String,
+        #[serde(default)]
+        market: String,
         stream_session_id: String,
         sequence_id: i64,
         prev_sequence_id: i64,
@@ -165,6 +173,8 @@ pub enum EngineEvent {
     DepthGap {
         venue: String,
         ticker: String,
+        #[serde(default)]
+        market: String,
         stream_session_id: String,
     },
     OpenInterest {

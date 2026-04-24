@@ -152,6 +152,7 @@ class BinanceDepthSyncer:
                 "event": "DepthSnapshot",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": self._applied_seq,
                 "bids": snapshot["bids"],
@@ -195,6 +196,7 @@ class BinanceDepthSyncer:
                 "event": "DepthDiff",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": final_id,
                 "prev_sequence_id": self._applied_seq,
@@ -239,6 +241,7 @@ class BinanceDepthSyncer:
                 "event": "DepthGap",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
             }
         )
@@ -705,6 +708,7 @@ class BinanceWorker(ExchangeWorker):
                         "event": "Trades",
                         "venue": "binance",
                         "ticker": ticker,
+                        "market": market,
                         "stream_session_id": _current_ssid,
                         "trades": batch,
                     }
@@ -918,6 +922,7 @@ class BinanceWorker(ExchangeWorker):
                                     "event": "KlineUpdate",
                                     "venue": "binance",
                                     "ticker": ticker,
+                                    "market": market,
                                     "timeframe": timeframe,
                                     "stream_session_id": ssid,
                                     "kline": {

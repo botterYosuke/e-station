@@ -108,11 +108,13 @@ class MexcDepthSyncer:
         *,
         venue: str,
         ticker: str,
+        market: str,
         stream_session_id: str,
         outbox: Any,
     ) -> None:
         self._venue = venue
         self._ticker = ticker
+        self._market = market
         self._ssid = stream_session_id
         self._outbox = outbox
         self._applied_version: int = -1
@@ -135,6 +137,7 @@ class MexcDepthSyncer:
                 "event": "DepthSnapshot",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": version,
                 "bids": bids,
@@ -180,6 +183,7 @@ class MexcDepthSyncer:
                 "event": "DepthDiff",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": version,
                 "prev_sequence_id": self._applied_version,
@@ -195,6 +199,7 @@ class MexcDepthSyncer:
                 "event": "DepthGap",
                 "venue": self._venue,
                 "ticker": self._ticker,
+                "market": self._market,
                 "stream_session_id": self._ssid,
             }
         )
@@ -620,6 +625,7 @@ class MexcWorker(ExchangeWorker):
                         "event": "Trades",
                         "venue": "mexc",
                         "ticker": ticker,
+                        "market": market,
                         "stream_session_id": _current_ssid,
                         "trades": batch,
                     }
@@ -744,6 +750,7 @@ class MexcWorker(ExchangeWorker):
             syncer = MexcDepthSyncer(
                 venue="mexc",
                 ticker=ticker,
+                market=market,
                 stream_session_id=ssid,
                 outbox=outbox,
             )
@@ -901,6 +908,7 @@ class MexcWorker(ExchangeWorker):
                                         "event": "KlineUpdate",
                                         "venue": "mexc",
                                         "ticker": ticker,
+                                        "market": market,
                                         "timeframe": recv_tf,
                                         "stream_session_id": ssid,
                                         "kline": {
