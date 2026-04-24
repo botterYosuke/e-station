@@ -71,6 +71,51 @@ async def test_list_tickers_linear_perp(worker: BybitWorker, httpx_mock: HTTPXMo
 
 
 @pytest.mark.asyncio
+async def test_list_tickers_excludes_non_trading_status(worker: BybitWorker, httpx_mock: HTTPXMock):
+    """Bug #2: non-Trading symbols must be excluded from list_tickers."""
+    httpx_mock.add_response(
+        url=f"{_REST}/v5/market/instruments-info?category=linear&limit=1000",
+        json={
+            "retCode": 0,
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "contractType": "LinearPerpetual",
+                        "quoteCoin": "USDT",
+                        "status": "Trading",
+                        "lotSizeFilter": {"minOrderQty": "0.001"},
+                        "priceFilter": {"tickSize": "0.10"},
+                    },
+                    {
+                        "symbol": "PRELAUNCHUSDT",
+                        "contractType": "LinearPerpetual",
+                        "quoteCoin": "USDT",
+                        "status": "PreLaunch",
+                        "lotSizeFilter": {"minOrderQty": "1"},
+                        "priceFilter": {"tickSize": "0.01"},
+                    },
+                    {
+                        "symbol": "SETTLEDUSDT",
+                        "contractType": "LinearPerpetual",
+                        "quoteCoin": "USDT",
+                        "status": "Settling",
+                        "lotSizeFilter": {"minOrderQty": "1"},
+                        "priceFilter": {"tickSize": "0.01"},
+                    },
+                ]
+            },
+        },
+    )
+
+    tickers = await worker.list_tickers("linear_perp")
+    symbols = [t["symbol"] for t in tickers]
+    assert "BTCUSDT" in symbols
+    assert "PRELAUNCHUSDT" not in symbols
+    assert "SETTLEDUSDT" not in symbols
+
+
+@pytest.mark.asyncio
 async def test_list_tickers_spot(worker: BybitWorker, httpx_mock: HTTPXMock):
     httpx_mock.add_response(
         url=f"{_REST}/v5/market/instruments-info?category=spot&limit=1000",
@@ -177,6 +222,33 @@ async def test_fetch_open_interest_linear(worker: BybitWorker, httpx_mock: HTTPX
     assert len(oi_list) == 2
     assert oi_list[0]["ts_ms"] == 1700003600000
     assert oi_list[0]["open_interest"] == "12500.00"
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_interest_inverse_uses_inverse_category(
+    worker: BybitWorker, httpx_mock: HTTPXMock
+):
+    """Bug #1: inverse_perp OI must use category=inverse, not category=linear."""
+    httpx_mock.add_response(
+        url=f"{_REST}/v5/market/open-interest?category=inverse&symbol=BTCUSD&intervalTime=1h&limit=2",
+        json={
+            "retCode": 0,
+            "result": {
+                "symbol": "BTCUSD",
+                "category": "inverse",
+                "list": [
+                    {"openInterest": "500.00", "timestamp": "1700003600000"},
+                    {"openInterest": "480.00", "timestamp": "1700000000000"},
+                ],
+            },
+        },
+    )
+
+    oi_list = await worker.fetch_open_interest("BTCUSD", "inverse_perp", "1h", limit=2)
+
+    assert len(oi_list) == 2
+    assert oi_list[0]["ts_ms"] == 1700003600000
+    assert oi_list[0]["open_interest"] == "500.00"
 
 
 @pytest.mark.asyncio

@@ -278,6 +278,10 @@ class BybitWorker(ExchangeWorker):
                 if market == "inverse_perp" and contract_type != "InversePerpetual":
                     continue
 
+            status = item.get("status", "")
+            if status and status != "Trading":
+                continue
+
             quote = item.get("quoteCoin", "")
             if quote not in ("USDT", "USD", ""):
                 continue
@@ -356,8 +360,9 @@ class BybitWorker(ExchangeWorker):
         if market not in ("linear_perp", "inverse_perp"):
             return []
 
+        category = _market_category(market)
         period = _OI_PERIOD.get(timeframe, "1h")
-        url = f"{_REST}/v5/market/open-interest?category=linear&symbol={ticker}&intervalTime={period}&limit={limit}"
+        url = f"{_REST}/v5/market/open-interest?category={category}&symbol={ticker}&intervalTime={period}&limit={limit}"
         if start_ms is not None:
             url += f"&startTime={start_ms}"
         if end_ms is not None:
