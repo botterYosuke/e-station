@@ -241,7 +241,7 @@ impl NetworkManager {
                 };
 
                 let mut lines = column![
-                    row![text("Effective:").size(11), text(effective).size(12),]
+                    row![text("Last sent:").size(11), text(effective).size(12),]
                         .spacing(4)
                         .align_y(iced::Alignment::Center)
                         .width(iced::Length::Fill),

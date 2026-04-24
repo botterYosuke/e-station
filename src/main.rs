@@ -225,6 +225,8 @@ enum Message {
     NetworkManager(modal::network_manager::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
+    /// Result of fire-and-forget SetProxy sent on startup or engine reconnect.
+    EngineProxySynced(Result<(), String>),
 }
 
 /// Builds a stream that emits `Message::EngineRestarting` whenever the engine
@@ -320,12 +322,34 @@ impl Flowsurface {
         );
         let load_layout = state.load_layout(active_layout_id.unique, main_window_id);
 
+        // Replay saved proxy into the engine — the engine starts with no proxy
+        // configured regardless of what the client persisted, so we must push it
+        // explicitly on every startup.
+        let proxy_sync_task = if let Some(proxy_cfg) = state.network.proxy_cfg() {
+            if let Some(conn) = ENGINE_CONNECTION.read().unwrap().as_ref().cloned() {
+                let proxy_url = Some(proxy_cfg.to_url_string());
+                Task::perform(
+                    async move {
+                        conn.send(engine_client::dto::Command::SetProxy { url: proxy_url })
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::EngineProxySynced,
+                )
+            } else {
+                Task::none()
+            }
+        } else {
+            Task::none()
+        };
+
         (
             state,
             open_main_window
                 .discard()
                 .chain(load_layout)
-                .chain(launch_sidebar.map(Message::Sidebar)),
+                .chain(launch_sidebar.map(Message::Sidebar))
+                .chain(proxy_sync_task),
         )
     }
 
@@ -366,10 +390,28 @@ impl Flowsurface {
                         .update_handles(self.handles.clone())
                         .map(Message::Sidebar);
 
+                    // Re-apply saved proxy — the freshly started engine has no
+                    // proxy configured until we push it again.
+                    let proxy_sync_task = if let Some(proxy_cfg) = self.network.proxy_cfg() {
+                        let proxy_url = Some(proxy_cfg.to_url_string());
+                        let conn_clone = Arc::clone(&conn);
+                        Task::perform(
+                            async move {
+                                conn_clone
+                                    .send(engine_client::dto::Command::SetProxy { url: proxy_url })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            },
+                            Message::EngineProxySynced,
+                        )
+                    } else {
+                        Task::none()
+                    };
+
                     self.notifications.push(Toast::info(
                         "データエンジン接続を復旧しました".to_string(),
                     ));
-                    return sidebar_refetch;
+                    return sidebar_refetch.chain(proxy_sync_task);
                 }
             }
             Message::MarketWsEvent(event) => {
@@ -695,6 +737,15 @@ impl Flowsurface {
                         }
                     }
                     None => {}
+                }
+            }
+            Message::EngineProxySynced(result) => {
+                if let Err(e) = result {
+                    log::warn!("Failed to sync proxy to engine: {e}");
+                    self.notifications
+                        .push(Toast::error(format!("Proxy sync failed: {e}")));
+                } else {
+                    log::info!("Proxy synced to engine");
                 }
             }
             Message::AudioStream(message) => {
