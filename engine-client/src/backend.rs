@@ -378,12 +378,12 @@ impl VenueBackend for EngineClientBackend {
                     venue: venue.clone(),
                     market: Self::market_kind_to_ipc(market_kind),
                 };
+                let mut rx = connection.subscribe_events();
+
                 connection
                     .send(cmd)
                     .await
                     .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-                let mut rx = connection.subscribe_events();
 
                 let market_map = tokio::time::timeout(FETCH_TIMEOUT, async {
                     loop {
@@ -458,11 +458,11 @@ impl VenueBackend for EngineClientBackend {
                     market: Self::market_kind_to_ipc(market_kind),
                 };
 
+                let mut rx = connection.subscribe_events();
+
                 if let Err(e) = connection.send(cmd).await {
                     return Err(AdapterError::WebsocketError(e.to_string()));
                 }
-
-                let mut rx = connection.subscribe_events();
 
                 let market_stats: TickerStatsMap = tokio::time::timeout(FETCH_TIMEOUT, async {
                     loop {

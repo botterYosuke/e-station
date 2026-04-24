@@ -362,7 +362,11 @@ class BybitWorker(ExchangeWorker):
 
         limit = min(limit, 200)
         category = _market_category(market)
-        period = _OI_PERIOD.get(timeframe, "1h")
+        period = _OI_PERIOD.get(timeframe)
+        if period is None:
+            raise ValueError(
+                f"unsupported OI timeframe {timeframe!r}; valid: {list(_OI_PERIOD)}"
+            )
         url = f"{_REST}/v5/market/open-interest?category={category}&symbol={ticker}&intervalTime={period}&limit={limit}"
         if start_ms is not None:
             url += f"&startTime={start_ms}"
@@ -392,14 +396,13 @@ class BybitWorker(ExchangeWorker):
         items = data.get("result", {}).get("list", [])
 
         def _parse(item: dict) -> dict:
-            last_price = float(item["lastPrice"])
-            volume24h = float(item.get("volume24h", 0))
+            turnover24h = float(item.get("turnover24h", 0))
             # price24hPcnt is a decimal fraction e.g. 0.025 = 2.5%
             pct = float(item.get("price24hPcnt", "0")) * 100.0
             return {
                 "mark_price": item["lastPrice"],
                 "daily_price_chg": str(pct),
-                "daily_volume": str(volume24h * last_price),
+                "daily_volume": str(turnover24h),
             }
 
         if ticker == "__all__":
