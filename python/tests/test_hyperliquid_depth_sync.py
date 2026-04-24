@@ -19,6 +19,7 @@ class TestHyperliquidDepthSyncer:
         syncer = HyperliquidDepthSyncer(
             venue="hyperliquid",
             ticker="BTC",
+            market="perp",
             stream_session_id=ssid,
             outbox=outbox,
         )

@@ -13,6 +13,7 @@ def _make_syncer(outbox=None):
     return OkexDepthSyncer(
         venue="okex",
         ticker="BTC-USDT",
+        market="linear",
         stream_session_id="test-session",
         outbox=outbox,
     ), outbox

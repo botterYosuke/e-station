@@ -223,7 +223,7 @@ class DataEngineServer:
             engine_session_id=self._engine_session_id,
             capabilities={
                 "supported_venues": list(self._workers.keys()),
-                "supports_bulk_trades": False,
+                "supports_bulk_trades": True,
                 "supports_depth_binary": False,
             },
         )

@@ -55,6 +55,7 @@ def test_trades_batch():
     trades_msg = Trades(
         venue="binance",
         ticker="BTCUSDT",
+        market="linear",
         stream_session_id="abc:1",
         trades=[
             TradeMsg(price="68000.0", qty="0.1", side="buy", ts_ms=1000),
@@ -68,6 +69,7 @@ def test_depth_diff_sequence_fields():
     diff = DepthDiffMsg(
         venue="binance",
         ticker="BTCUSDT",
+        market="linear",
         stream_session_id="abc:1",
         sequence_id=100,
         prev_sequence_id=99,
@@ -82,6 +84,7 @@ def test_depth_snapshot_optional_checksum():
     snap = DepthSnapshotMsg(
         venue="binance",
         ticker="BTCUSDT",
+        market="linear",
         stream_session_id="abc:1",
         sequence_id=50,
         bids=[],
@@ -91,7 +94,7 @@ def test_depth_snapshot_optional_checksum():
 
 
 def test_depth_gap_fields():
-    gap = DepthGap(venue="binance", ticker="BTCUSDT", stream_session_id="abc:1")
+    gap = DepthGap(venue="binance", ticker="BTCUSDT", market="linear", stream_session_id="abc:1")
     assert gap.event == "DepthGap"
 
 
@@ -99,6 +102,7 @@ def test_kline_update():
     ku = KlineUpdate(
         venue="binance",
         ticker="BTCUSDT",
+        market="linear",
         timeframe="1m",
         kline=KlineMsg(
             open_time_ms=1700000000000,

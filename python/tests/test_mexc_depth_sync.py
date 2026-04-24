@@ -13,6 +13,7 @@ def _make_syncer(outbox=None):
     return MexcDepthSyncer(
         venue="mexc",
         ticker="BTC_USDT",
+        market="spot",
         stream_session_id="test-session",
         outbox=outbox,
     ), outbox

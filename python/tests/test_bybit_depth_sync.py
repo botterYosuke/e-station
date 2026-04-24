@@ -17,6 +17,7 @@ class TestBybitDepthSyncer:
         syncer = BybitDepthSyncer(
             venue="bybit",
             ticker="BTCUSDT",
+            market="linear",
             stream_session_id=ssid,
             outbox=outbox,
         )
