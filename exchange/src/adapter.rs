@@ -3,6 +3,7 @@ mod connect;
 mod hub;
 mod limiter;
 pub mod proxy;
+pub mod venue_backend;
 
 pub use super::error::AdapterError;
 use super::{Ticker, Timeframe};
@@ -21,6 +22,7 @@ pub use client::{
     MAX_TRADE_TICKERS_PER_STREAM,
 };
 pub use proxy::Proxy;
+pub use venue_backend::VenueBackend;
 
 /// Buffer trades and flush in this interval
 const TRADE_BUCKET_INTERVAL: Duration = Duration::from_micros(33_333);
