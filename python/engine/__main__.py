@@ -21,7 +21,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _run(port: int, token: str) -> None:
-    from data.server import DataEngineServer
+    from engine.server import DataEngineServer
 
     server = DataEngineServer(port=port, token=token)
     await server.serve()

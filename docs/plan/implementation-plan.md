@@ -5,7 +5,7 @@
 
 ## フェーズ 0: 準備 & ベースライン計測（リスク低）
 
-- [ ] `python/` に `pyproject.toml` と `data` パッケージのスケルトンを置く。
+- [ ] `python/` に `data` パッケージのスケルトンを置く。
 - [ ] [`docs/plan/schemas/`](./schemas/) に IPC DTO の JSON Schema を作成。
   - 対象: `TradeMsg`, `KlineMsg`, `DepthSnapshotMsg`, `DepthDiffMsg`, `TickerMsg`, `TickerInfoMsg`, `TickerStatsMsg`, `OpenInterestMsg`, および各コマンド (`Hello` / `Ready` / `Subscribe` / `Unsubscribe` / `FetchKlines` / `FetchTrades` / `FetchOpenInterest` / `FetchTickerStats` / `ListTickers` / `GetTickerMetadata` / `RequestDepthSnapshot` / `SetProxy` / `Shutdown` / `Error` / `EngineError` / `DepthGap`)。
   - 参考: 既存 Rust 型 [`exchange/src/lib.rs`](../../exchange/src/lib.rs), [`exchange/src/adapter.rs`](../../exchange/src/adapter.rs) の `Event`。

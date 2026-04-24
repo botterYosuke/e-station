@@ -1,7 +1,7 @@
 """Tests for IPC schema models."""
 
 import pytest
-from data.schemas import (
+from engine.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
     DepthDiffMsg,

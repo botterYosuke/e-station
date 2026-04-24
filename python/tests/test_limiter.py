@@ -2,7 +2,7 @@
 
 import asyncio
 import pytest
-from data.limiter import TokenBucket, BinanceLimiter
+from engine.limiter import TokenBucket, BinanceLimiter
 
 
 @pytest.mark.asyncio

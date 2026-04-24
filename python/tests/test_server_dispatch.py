@@ -9,7 +9,7 @@ import orjson
 import pytest
 import websockets
 
-from data.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
 
 # ---------------------------------------------------------------------------
@@ -41,13 +41,13 @@ async def _connect_and_handshake(port: int, token: str) -> websockets.ClientConn
 @pytest.fixture
 async def running_server(unused_tcp_port):
     """Start DataEngineServer on a random port, yield (port, token), then stop."""
-    from data.server import DataEngineServer
+    from engine.server import DataEngineServer
 
     token = "test-token-abc123"
 
     # Patch BinanceWorker so no real network calls happen
     with patch(
-        "data.server.BinanceWorker",
+        "engine.server.BinanceWorker",
         return_value=_make_mock_worker(),
     ):
         server = DataEngineServer(port=unused_tcp_port, token=token)
@@ -126,10 +126,10 @@ async def test_wrong_token_disconnects(running_server):
 async def test_subscribe_trade_dispatches_to_worker(running_server):
     port, token = running_server
 
-    from data.server import DataEngineServer
+    from engine.server import DataEngineServer
 
     with patch(
-        "data.server.BinanceWorker",
+        "engine.server.BinanceWorker",
         return_value=_make_mock_worker(),
     ):
         ws = await _connect_and_handshake(port, token)

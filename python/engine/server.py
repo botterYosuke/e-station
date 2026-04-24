@@ -14,8 +14,8 @@ import orjson
 import websockets
 from websockets import ServerConnection
 
-from data.exchanges.binance import BinanceWorker
-from data.schemas import (
+from engine.exchanges.binance import BinanceWorker
+from engine.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
     EngineError,

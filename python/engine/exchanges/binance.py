@@ -12,8 +12,8 @@ import httpx
 import orjson
 import websockets
 
-from data.exchanges.base import ExchangeWorker, OnSsidUpdate
-from data.limiter import BinanceLimiter
+from engine.exchanges.base import ExchangeWorker, OnSsidUpdate
+from engine.limiter import BinanceLimiter
 
 log = logging.getLogger(__name__)
 

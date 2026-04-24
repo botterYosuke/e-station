@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from data.exchanges.binance import BinanceDepthSyncer
+from engine.exchanges.binance import BinanceDepthSyncer
 
 
 class TestDepthSyncerGapDetection:
