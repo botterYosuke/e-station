@@ -141,11 +141,13 @@ impl ProcessManager {
 
     /// Run the engine indefinitely, restarting with exponential backoff on failure.
     ///
-    /// `on_restart` is called each time a restart is triggered (e.g., to signal the UI).
+    /// - `on_ready`   — called once after each successful handshake (UI: clear "restarting").
+    /// - `on_restart` — called each time a restart is triggered   (UI: show "restarting").
     pub async fn run_with_recovery(
         self: Arc<Self>,
         port: u16,
         on_restart: impl Fn() + Send + Sync + 'static,
+        on_ready: impl Fn() + Send + Sync + 'static,
     ) {
         let mut backoff_ms = BACKOFF_BASE_MS;
 
@@ -154,6 +156,7 @@ impl ProcessManager {
                 Ok(conn) => {
                     backoff_ms = BACKOFF_BASE_MS; // reset on success
                     log::info!("engine connection established");
+                    on_ready();
 
                     // Wait for the connection to drop (read loop exits).
                     let mut rx = conn.subscribe_events();

@@ -79,11 +79,19 @@
 - [x] 統合テスト 36 件 全 PASS (`cargo test -p flowsurface-engine-client`)。
 - [x] `cargo clippy -p flowsurface-engine-client -- -D warnings` warning なし。
 
-**未完了（次フェーズで着手）**:
-- [ ] `--data-engine-url` CLI フラグで `src/main.rs` から `EngineClientBackend` を差し替える実装。
-- [ ] UI 側「エンジン再起動中」ステータス表示。
-- [ ] レイテンシ・CPU 使用率の実測比較。
-- [ ] 障害試験（Python kill → 自動復旧 → 板再同期の手動確認）。
+**完了（2026-04-24, ブランチ `phase-2/engine-client`）**:
+- [x] `--data-engine-url` CLI フラグで `src/main.rs` から `EngineClientBackend` を差し替える実装。
+  - `ENGINE_CONNECTION: OnceLock<Arc<EngineConnection>>` グローバルで接続を保持。
+  - 専用 tokio ランタイム（`engine-client` スレッド）が IO タスクを生涯保持。
+  - `Flowsurface::new()` が `set_backend(Venue::Binance, EngineClientBackend)` を注入。
+- [x] UI 側「エンジン再起動中」ステータス表示。
+  - `ENGINE_RESTARTING: OnceLock<watch::Sender<bool>>` グローバルで再起動状態を配信。
+  - `engine_status_stream()` → `Subscription::run` でイベントを Iced に流す。
+  - `Message::EngineRestarting(bool)` → Toast 通知表示。`Flowsurface.engine_restarting` で状態保持。
+  - `ProcessManager::run_with_recovery` に `on_ready: impl Fn()` コールバックを追加（TDD RED→GREEN）。
+- [x] `docs/plan/benchmarks/phase-2.md` 作成（計測手順・合格ライン・障害試験手順を記録）。
+- [ ] レイテンシ・CPU 使用率の実測比較（Python spawn モード配線後に実施）。
+- [ ] 障害試験（Python kill → 自動復旧 → 板再同期の手動確認、spawn モード配線後に実施）。
 
 **完了条件**: フラグ ON で Binance チャートが Python 経由で正しく描画される。**加えて Python を kill しても自動復旧し、購読と板整合性が回復する**。
 
@@ -94,6 +102,9 @@
 - **broadcast channel のラグ対策**: 容量 512 で設定。高頻度の depth diff はラグが発生しうるため `RecvError::Lagged` をログ警告でハンドリング。
 - **テストの crate 名**: package name `flowsurface-engine-client` → テスト内では `flowsurface_engine_client`（ハイフンがアンダースコアに変換される）。
 - **tokio-tungstenite 0.26**: `Message::Text` は `String` を直接受け取らず `.into()` が必要（`Utf8Bytes` ラッパー）。
+- **`--data-engine-url` wiring**: `Flowsurface::new()` は同期関数のため async 接続は `main()` 内の専用 tokio ランタイムで行い、`OnceLock` 経由で共有。ランタイムを `_engine_rt` 変数でライフタイム保持（`main()` 戻りまで保持）。
+- **`watch::Ref` + async**: `rx.borrow()` の戻り値 `Ref<'_, bool>` は `!Send`。`yield` の前に `let value = *rx.borrow();` でコピーしてから yield すること（Send 境界違反回避）。
+- **`Subscription::run` の制約**: Iced 0.14 の `Subscription::run` は `fn() -> S` のみ受け付ける（クロージャ不可）。グローバルへのアクセスが必要なら top-level 関数として定義し static を読む。
 
 ## フェーズ 3: 残り取引所の Python 移植
 

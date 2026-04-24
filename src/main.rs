@@ -38,16 +38,61 @@ use iced::{
         tooltip::Position as TooltipPosition,
     },
 };
-use std::{borrow::Cow, collections::HashMap, vec};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, vec};
+
+// ── Engine-client globals ─────────────────────────────────────────────────────
+
+/// Live connection to the external Python data engine (`--data-engine-url` mode).
+/// `None` when the flag was not provided or the connection failed.
+static ENGINE_CONNECTION: std::sync::OnceLock<Arc<engine_client::EngineConnection>> =
+    std::sync::OnceLock::new();
+
+/// `true` while the Python engine is being restarted (ProcessManager restart loop).
+/// Shared between the background restart task and the Iced subscription.
+static ENGINE_RESTARTING: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::OnceLock::new();
 
 fn main() {
     let cli_args = cli::CliArgs::parse();
 
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
-    if let Some(ref url) = cli_args.data_engine_url {
-        log::info!("Data engine URL: {url} (external engine mode — not yet wired)");
-    }
+    // Initialise the engine-restarting watch channel (used even in native mode
+    // so the subscription is always wired up consistently).
+    let (restarting_tx, _) = tokio::sync::watch::channel(false);
+    ENGINE_RESTARTING.set(restarting_tx).ok();
+
+    // When `--data-engine-url` is supplied, connect to the external Python engine
+    // before starting Iced.  A dedicated tokio runtime keeps the connection's
+    // background IO tasks alive for the full application lifetime.
+    let _engine_rt: Option<tokio::runtime::Runtime> =
+        if let Some(ref url) = cli_args.data_engine_url {
+            let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
+            let url_str = url.to_string();
+
+            log::info!("Data engine URL: {url_str} — connecting …");
+
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .thread_name("engine-client")
+                .build()
+                .expect("Failed to build engine-client tokio runtime");
+
+            match rt.block_on(engine_client::EngineConnection::connect(&url_str, &token)) {
+                Ok(conn) => {
+                    log::info!("Connected to external data engine at {url_str}");
+                    ENGINE_CONNECTION.set(Arc::new(conn)).ok();
+                }
+                Err(e) => {
+                    log::error!("Failed to connect to data engine at {url_str}: {e}");
+                }
+            }
+
+            Some(rt)
+        } else {
+            None
+        };
 
     std::thread::spawn(data::cleanup_old_market_data);
 
@@ -82,12 +127,17 @@ struct Flowsurface {
     timezone: data::UserTimezone,
     theme: data::Theme,
     notifications: Notifications,
+    /// `true` while the Python data engine is restarting.
+    engine_restarting: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
+    /// Fired by the engine-status subscription when the Python engine starts or
+    /// finishes a restart.  `true` = restarting, `false` = ready.
+    EngineRestarting(bool),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -114,14 +164,42 @@ enum Message {
     AudioStream(modal::audio::Message),
 }
 
+/// Builds a stream that emits `Message::EngineRestarting` whenever the engine
+/// restart state changes.  Uses the global `ENGINE_RESTARTING` watch channel.
+fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send + 'static {
+    async_stream::stream! {
+        let Some(tx) = ENGINE_RESTARTING.get() else { return; };
+        let mut rx = tx.subscribe();
+        loop {
+            if rx.changed().await.is_err() {
+                break;
+            }
+            // Copy the bool before dropping the Ref so the guard doesn't cross an await.
+            let value = *rx.borrow();
+            yield Message::EngineRestarting(value);
+        }
+    }
+}
+
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
         let saved_state = layout::load_saved_state();
-        let handles =
+        let mut handles =
             exchange::adapter::AdapterHandles::spawn_all(exchange::adapter::AdapterNetworkConfig {
                 proxy_cfg: saved_state.proxy_cfg.clone(),
             })
             .expect("Failed to spawn adapter handles");
+
+        // If an external engine connection was established in main(), wire it in
+        // as the Binance backend, overriding the native Rust adapter.
+        if let Some(conn) = ENGINE_CONNECTION.get() {
+            let backend = Arc::new(engine_client::EngineClientBackend::new(
+                Arc::clone(conn),
+                "binance",
+            ));
+            handles.set_backend(exchange::adapter::Venue::Binance, backend);
+            log::info!("Binance backend: EngineClientBackend (Python IPC)");
+        }
 
         let (main_window_id, open_main_window) = {
             let (position, size) = saved_state.window();
@@ -152,6 +230,7 @@ impl Flowsurface {
             theme: saved_state.theme,
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
+            engine_restarting: false,
         };
 
         if let Some(err) = audio_init_err {
@@ -181,6 +260,14 @@ impl Flowsurface {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EngineRestarting(restarting) => {
+                self.engine_restarting = restarting;
+                if restarting {
+                    self.notifications.push(Toast::error(
+                        "データエンジン再起動中 — チャートは復旧後に自動更新されます".to_string(),
+                    ));
+                }
+            }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
@@ -763,12 +850,16 @@ impl Flowsurface {
             }
         });
 
+        // Watch the engine-restarting flag and emit EngineRestarting messages.
+        let engine_status = Subscription::run(engine_status_stream);
+
         Subscription::batch(vec![
             exchange_streams,
             sidebar,
             window_events,
             tick,
             hotkeys,
+            engine_status,
         ])
     }
 
