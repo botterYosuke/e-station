@@ -560,12 +560,11 @@ impl VenueBackend for EngineClientBackend {
                 limit,
                 market: Self::market_kind_to_ipc(ticker_info.market_type()),
             };
+            let mut rx = connection.subscribe_events();
             connection
                 .send(cmd)
                 .await
                 .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-            let mut rx = connection.subscribe_events();
 
             tokio::time::timeout(FETCH_TIMEOUT, async {
                 loop {
@@ -624,12 +623,11 @@ impl VenueBackend for EngineClientBackend {
                 limit,
                 market: Self::market_kind_to_ipc(ticker_info.market_type()),
             };
+            let mut rx = connection.subscribe_events();
             connection
                 .send(cmd)
                 .await
                 .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-            let mut rx = connection.subscribe_events();
 
             tokio::time::timeout(FETCH_TIMEOUT, async {
                 loop {
@@ -686,12 +684,11 @@ impl VenueBackend for EngineClientBackend {
                 start_ms: from_time as i64,
                 end_ms: now_ms,
             };
+            let mut rx = connection.subscribe_events();
             connection
                 .send(cmd)
                 .await
                 .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-            let mut rx = connection.subscribe_events();
 
             // The Python engine currently returns `not_supported` for FetchTrades.
             // Match on Error with our request_id to surface that clearly.
@@ -732,12 +729,11 @@ impl VenueBackend for EngineClientBackend {
                 ticker: ticker_sym.clone(),
                 market: Self::market_kind_to_ipc(ticker.market_type()),
             };
+            let mut rx = connection.subscribe_events();
             connection
                 .send(cmd)
                 .await
                 .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-            let mut rx = connection.subscribe_events();
 
             tokio::time::timeout(SNAPSHOT_TIMEOUT, async {
                 loop {
