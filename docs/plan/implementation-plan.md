@@ -179,6 +179,11 @@ OKX `/market/history-candles` はページネーション cursor:
 - 返値配列: `[ts, oi_contracts, oi_currency]`、index[2] (oi_currency = BTC/USD建て) を使用
 - Rust Fetch.rs と同じ `oi_ccy` (index 2) を選択
 
+#### バグ修正（2026-04-24、レビュー後修正済み）
+
+- **Bug #1** `fetch_klines` が `limit=400`（server.py デフォルト）をそのまま OKX に渡していた → OKX の `/market/history-candles` max は 300 であり 400 は API エラー。`min(limit, 300)` でクランプ。テスト `test_fetch_klines_clamps_limit_to_okx_max` 追加。commit `7314502`
+- **Bug #2** `fetch_ticker_stats("__all__", "linear_perp")` が SWAP エンドポイントの全銘柄を返しており、inverse 銘柄（`-USD-SWAP` サフィックス）が混入していた → `_matches_market(inst_id)` で instId サフィックスにより絞り込み（linear: `-USDT-SWAP` / inverse: `-USD-SWAP`）。テスト 2件追加。commit `7314502`
+
 #### Tips
 
 - **WS 2エンドポイント**: trades/depth は `/public`、klines は `/business`。同一接続に混在不可。
@@ -186,6 +191,7 @@ OKX `/market/history-candles` はページネーション cursor:
 - **state フィルタ**: `state == "live"` のみ（spot）、SWAP は `state == "live"` + `ctType` + `settleCcy` で絞り込み。
 - **spot vol 計算**: `volCcy24h` は spot では quote 通貨 (USDT) 建て → そのまま daily_volume として使用。perp では base 通貨 (BTC/ETH) 建て → `volCcy24h * last_price` に変換。
 - **kline confirm フィールド**: index[8] が存在しない古いデータでも安全に処理できるよう `len(row) > 8 and row[8] == "1"` でチェック。
+- **kline limit クランプ**: OKX `/market/history-candles` の max は 300。server.py は `limit=400` をデフォルトで渡すため、必ず `min(limit, 300)` が必要。
 
 ### Hyperliquid 実装詳細（2026-04-24 完了）
 
