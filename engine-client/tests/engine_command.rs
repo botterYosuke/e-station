@@ -34,8 +34,7 @@ fn resolves_bundled_binary_next_to_exe() {
 fn falls_back_to_python_module_when_no_bundle() {
     let tmp = tempdir();
     // No bundled binary in tmp.path().
-    let cmd =
-        EngineCommand::resolve_with(Some(tmp.path()), None).expect("system python fallback");
+    let cmd = EngineCommand::resolve_with(Some(tmp.path()), None).expect("system python fallback");
     match cmd {
         EngineCommand::System { program, args } => {
             assert_eq!(program, "python");

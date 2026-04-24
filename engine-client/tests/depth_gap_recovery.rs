@@ -6,7 +6,9 @@
 use exchange::adapter::{Event, Exchange, venue_backend::VenueBackend};
 use exchange::{PushFrequency, Ticker, TickerInfo};
 use flowsurface_engine_client::dto::EngineEvent;
-use flowsurface_engine_client::{EngineClientBackend, EngineConnection, SCHEMA_MAJOR, SCHEMA_MINOR};
+use flowsurface_engine_client::{
+    EngineClientBackend, EngineConnection, SCHEMA_MAJOR, SCHEMA_MINOR,
+};
 
 use futures::StreamExt;
 use futures_util::SinkExt;
@@ -48,7 +50,9 @@ async fn depth_gap_triggers_snapshot_request_without_closing_stream() {
             "engine_session_id": "00000000-0000-0000-0000-000000000001",
             "capabilities": {}
         });
-        ws.send(Message::Text(ready.to_string().into())).await.unwrap();
+        ws.send(Message::Text(ready.to_string().into()))
+            .await
+            .unwrap();
 
         // Expect Subscribe (depth).
         let sub = ws.next().await.unwrap().unwrap().into_text().unwrap();
@@ -73,9 +77,9 @@ async fn depth_gap_triggers_snapshot_request_without_closing_stream() {
             "asks": [{"price": "50001.0", "qty": "1.0"}],
             "checksum": null,
         });
-        ws.send(Message::Text(snapshot.to_string().into())).await.unwrap();
-        ws.flush().await.unwrap();
-        eprintln!("[mock server] sent snapshot");
+        ws.send(Message::Text(snapshot.to_string().into()))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Send a DepthGap — the client must self-recover.
@@ -86,24 +90,20 @@ async fn depth_gap_triggers_snapshot_request_without_closing_stream() {
             "market": "linear_perp",
             "stream_session_id": "sess-1",
         });
-        ws.send(Message::Text(gap.to_string().into())).await.unwrap();
-        ws.flush().await.unwrap();
-        eprintln!("[mock server] sent gap");
+        ws.send(Message::Text(gap.to_string().into()))
+            .await
+            .unwrap();
 
         // Next command from the client must be RequestDepthSnapshot for BTCUSDT.
         let saw = match tokio::time::timeout(Duration::from_secs(3), ws.next()).await {
             Ok(Some(Ok(msg))) => {
                 let text = msg.into_text().unwrap();
-                eprintln!("[mock server] got client msg after gap: {text}");
                 let v: serde_json::Value = serde_json::from_str(&text).unwrap();
                 v["op"] == "RequestDepthSnapshot"
                     && v["ticker"] == "BTCUSDT"
                     && v["market"] == "linear_perp"
             }
-            other => {
-                eprintln!("[mock server] no client msg after gap: {other:?}");
-                false
-            }
+            _ => false,
         };
         let _ = saw_request_tx.send(saw);
 
@@ -141,7 +141,6 @@ async fn depth_gap_triggers_snapshot_request_without_closing_stream() {
     let mut saw_disconnect = false;
     let drain = async {
         while let Some(ev) = stream.next().await {
-            eprintln!("[client] event: {ev:?}");
             match ev {
                 Event::Connected(_) => connected = true,
                 Event::DepthReceived(_, _, _) => {
@@ -175,5 +174,4 @@ async fn depth_gap_triggers_snapshot_request_without_closing_stream() {
         depth_events >= 2,
         "expected pre-gap and post-gap DepthReceived events, got {depth_events}"
     );
-
 }

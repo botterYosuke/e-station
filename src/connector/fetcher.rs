@@ -469,7 +469,6 @@ pub fn fetch_trades_batched(
         let mut latest_trade_t = from_time;
         const DAY_MS: u64 = 86_400_000;
         const EMPTY_DAYS_WARN_THRESHOLD: u32 = 7;
-        const MAX_EMPTY_DAYS: u32 = 365;
         let mut consecutive_empty_days: u32 = 0;
 
         while latest_trade_t < to_time {
@@ -483,6 +482,8 @@ pub fn fetch_trades_batched(
                 .await
             {
                 Ok(batch) => {
+                    let prev_cursor = latest_trade_t;
+
                     if batch.is_empty() {
                         consecutive_empty_days += 1;
                         if consecutive_empty_days == EMPTY_DAYS_WARN_THRESHOLD {
@@ -493,21 +494,23 @@ pub fn fetch_trades_batched(
                                 to_time,
                             );
                         }
-                        if consecutive_empty_days >= MAX_EMPTY_DAYS {
-                            return Err(AdapterError::InvalidRequest(format!(
-                                "fetch_trades_batched: {} consecutive empty days at t={} — aborting to avoid runaway requests",
-                                consecutive_empty_days, latest_trade_t,
-                            )));
-                        }
                         latest_trade_t = (latest_trade_t / DAY_MS + 1) * DAY_MS;
-                        continue;
+                    } else {
+                        consecutive_empty_days = 0;
+                        let last_trade_t = batch.last().map_or(latest_trade_t, |trade| trade.time);
+                        latest_trade_t = (last_trade_t / DAY_MS + 1) * DAY_MS;
+                        let () = progress.send(batch).await;
                     }
-                    consecutive_empty_days = 0;
 
-                    let last_trade_t = batch.last().map_or(latest_trade_t, |trade| trade.time);
-                    latest_trade_t = (last_trade_t / DAY_MS + 1) * DAY_MS;
-
-                    let () = progress.send(batch).await;
+                    // The cursor must advance every iteration, otherwise we loop
+                    // forever. The day-aligned formula above guarantees a strict
+                    // increment, but we double-check to avoid silent runaway if
+                    // a future change breaks that invariant.
+                    if latest_trade_t <= prev_cursor {
+                        return Err(AdapterError::InvalidRequest(format!(
+                            "fetch_trades_batched: cursor failed to advance at t={prev_cursor} — aborting to avoid infinite loop",
+                        )));
+                    }
                 }
                 Err(err) => return Err(err),
             }
@@ -793,6 +796,36 @@ mod tests {
         assert!(
             result.is_ok(),
             "Expected Ok when every day is empty, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn span_beyond_legacy_365_day_cap_completes_without_error() {
+        // Regression: previously a hard `MAX_EMPTY_DAYS = 365` cap aborted any
+        // fetch that contained 365+ consecutive empty days, which broke valid
+        // long-history requests for illiquid symbols or ranges spanning the
+        // pre-listing era. The cursor advances monotonically by one day per
+        // empty batch, so the loop is bounded by `to_time` and needs no cap.
+        let mut handles = AdapterHandles::default();
+        handles.set_backend(Venue::Binance, Arc::new(AlwaysEmptyTrades));
+
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        const DAY_MS: u64 = 86_400_000;
+        let from_time = 0u64;
+        let to_time = 400 * DAY_MS;
+
+        let mut straw =
+            fetch_trades_batched(handles, ticker_info, from_time, to_time, PathBuf::from("."))
+                .pin();
+
+        while straw.next().await.is_some() {}
+
+        let result = straw.await;
+        assert!(
+            result.is_ok(),
+            "Expected Ok over 400 empty days (>365), got {result:?}"
         );
     }
 

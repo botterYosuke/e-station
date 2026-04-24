@@ -25,10 +25,7 @@ pub enum EngineCommand {
     /// A standalone executable (PyInstaller / Nuitka output).
     Bundled(PathBuf),
     /// `python -m engine` — used when no bundled binary is found.
-    System {
-        program: String,
-        args: Vec<String>,
-    },
+    System { program: String, args: Vec<String> },
 }
 
 impl EngineCommand {
