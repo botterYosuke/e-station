@@ -125,6 +125,16 @@ impl Sidebar {
         self.tickers_table.subscription().map(Message::TickersTable)
     }
 
+    /// Propagate new handles after an engine reconnect; returns a re-fetch task.
+    pub fn update_handles(
+        &mut self,
+        handles: exchange::adapter::AdapterHandles,
+    ) -> Task<Message> {
+        self.tickers_table
+            .update_handles(handles)
+            .map(Message::TickersTable)
+    }
+
     fn nav_buttons(
         &self,
         is_table_open: bool,

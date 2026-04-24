@@ -14,6 +14,9 @@ pub const MAX_KLINE_STREAMS_PER_STREAM: usize = 100;
 
 #[derive(Clone, Default)]
 pub struct AdapterHandles {
+    /// Incremented each time backends are rebuilt (e.g. after engine reconnect)
+    /// so that iced subscription IDs change and stale stream tasks are replaced.
+    generation: u64,
     binance: Option<Arc<dyn VenueBackend>>,
     bybit: Option<Arc<dyn VenueBackend>>,
     hyperliquid: Option<Arc<dyn VenueBackend>>,
@@ -33,6 +36,12 @@ impl AdapterHandles {
             Venue::Okex => self.okex = Some(backend),
             Venue::Mexc => self.mexc = Some(backend),
         }
+    }
+
+    /// Bumps the generation counter so all iced subscriptions built from this
+    /// handle get a new ID and are restarted on the next subscription cycle.
+    pub fn bump_generation(&mut self) {
+        self.generation += 1;
     }
 
     /// Returns a clone of the `Arc<dyn VenueBackend>` registered for `venue`, if any.
@@ -195,6 +204,6 @@ impl AdapterHandles {
 
 impl std::hash::Hash for AdapterHandles {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::any::TypeId::of::<Self>().hash(state);
+        self.generation.hash(state);
     }
 }

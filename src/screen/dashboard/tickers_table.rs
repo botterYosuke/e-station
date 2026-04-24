@@ -158,6 +158,23 @@ impl TickersTable {
         )
     }
 
+    /// Replace the stored handles with a freshly-connected set and re-fetch
+    /// all metadata so the sidebar recovers after an engine reconnect.
+    pub fn update_handles(&mut self, handles: AdapterHandles) -> Task<Message> {
+        self.handles = handles;
+        self.metadata_fetch_state = MetadataFetchState::with_pending(
+            self.selected_exchanges.iter().cloned(),
+        );
+
+        let fetch_tasks: Vec<Task<Message>> = self
+            .selected_exchanges
+            .iter()
+            .map(|&venue| fetch_metadata_task(&self.handles, venue))
+            .collect();
+
+        Task::batch(fetch_tasks)
+    }
+
     pub fn settings(&self) -> Settings {
         Settings {
             favorited_tickers: self.favorited_tickers.iter().copied().collect(),

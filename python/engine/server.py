@@ -102,8 +102,8 @@ class DataEngineServer:
             "okex": OkexWorker(),
         }
 
-        # Active stream tasks keyed by (venue, ticker, market, stream)
-        self._streams: dict[tuple[str, str, str, str], _StreamHandle] = {}
+        # Active stream tasks keyed by (venue, ticker, market, stream_type, timeframe|None)
+        self._streams: dict[tuple[str, str, str, str, str | None], _StreamHandle] = {}
 
         # Active fetch tasks (FetchKlines, RequestDepthSnapshot, etc.)
         self._fetch_tasks: set[asyncio.Task] = set()
@@ -446,6 +446,16 @@ class DataEngineServer:
         async def _run() -> None:
             try:
                 await coro
+            except asyncio.CancelledError:
+                self._outbox.append(
+                    {
+                        "event": "Error",
+                        "request_id": request_id,
+                        "code": "cancelled",
+                        "message": "request interrupted (proxy change or disconnect)",
+                    }
+                )
+                raise
             except WsNativeResyncTriggered:
                 # _do_request_depth_snapshot handles this internally; re-raise so
                 # it is never silently converted to fetch_failed if the inner
@@ -701,9 +711,22 @@ class DataEngineServer:
         proxy_url = msg.get("url")
         for worker in self._workers.values():
             await worker.set_proxy(proxy_url)
-        # Cancel active streams so they reconnect through the new proxy.
-        # Fetch-only HTTP clients are already replaced lazily on next request.
+
+        # Snapshot active subscriptions before cancelling so we can reopen
+        # them through the new proxy.  Fetch HTTP clients are replaced lazily.
+        active_subs = list(self._streams.keys())
         await self._cancel_all_streams()
+
+        for venue, ticker, market, stream_type, tf in active_subs:
+            await self._handle_subscribe(
+                {
+                    "venue": venue,
+                    "ticker": ticker,
+                    "stream": stream_type,
+                    "timeframe": tf,
+                    "market": market,
+                }
+            )
 
     # ------------------------------------------------------------------
     # Helpers
