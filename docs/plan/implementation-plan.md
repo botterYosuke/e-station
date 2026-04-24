@@ -124,7 +124,7 @@
 
 - [x] Bybit ✅ (2026-04-24)
 - [x] Hyperliquid ✅ (2026-04-24)
-- [ ] OKX
+- [x] OKX ✅ (2026-04-24, ブランチ `phase-3/okex-python-worker`)
 - [ ] MEXC
 
 各取引所ごとに：
@@ -134,7 +134,58 @@
 
 **完了条件**: 全 5 取引所が Python 経由で動作。
 
-> **現況（2026-04-24）**: pytest 全体 89 件 PASS（Binance 33 + Bybit 21 + Hyperliquid 29 + その他 6）。
+> **現況（2026-04-24）**: pytest 全体 119 件 PASS（Binance 33 + Bybit 21 + Hyperliquid 29 + OKX 30 + その他 6）。残り MEXC のみ。
+
+### OKX 実装詳細（2026-04-24 完了）
+
+- **実装ファイル**: [`python/engine/exchanges/okex.py`](../../python/engine/exchanges/okex.py)
+- **テスト**: `python/tests/test_okex_rest.py` (20件) + `python/tests/test_okex_depth_sync.py` (10件) = 計 30件全 PASS
+- **server.py 統合**: `self._workers["okex"] = OkexWorker()` 追加済み
+
+#### Binance/Bybit との主な差異
+
+| 項目 | Binance/Bybit | OKX |
+|------|---------------|-----|
+| REST base | 各取引所 REST | `https://www.okx.com/api/v5` |
+| WS base | 各取引所 WS | `wss://ws.okx.com/ws/v5/public` (trades/depth) / `wss://ws.okx.com/ws/v5/business` (klines) |
+| WS subscribe | URL / JSON msg | `{"op":"subscribe","args":[{"channel":"trades","instId":"BTC-USDT"}]}` |
+| Depth プロトコル | snapshot+diff (Binance) / snapshot-only WS (Bybit) | **snapshot+delta** (action="snapshot"/"update") |
+| Depth シーケンス | Binance: U/u/pu / Bybit: u (monotonic +1) | `seqId` (monotonic +1 per message) |
+| レート制限 | 各取引所固有 | 20 req/2sec (`OkexLimiter`, TokenBucket capacity=20, refill=10/s) |
+| OI | REST 履歴あり | REST `/rubik/stat/contracts/open-interest-history?instId=...&period=1H` |
+| symbol 形式 | "BTCUSDT" etc. | spot: "BTC-USDT" / linear: "BTC-USDT-SWAP" / inverse: "BTC-USD-SWAP" |
+| Trade side | buy/sell | `side` フィールドがそのまま "buy"/"sell" |
+| kline confirm | Bybit: `confirm` bool | index[8]: "1"=closed, "0"=open |
+| 板スナップショット | REST + WS | REST `/market/books?instId=...&sz=400` (seqId がシーケンス基準) |
+
+#### OkexDepthSyncer 設計
+
+Bybit 類似の snapshot+delta プロトコル:
+1. `action="snapshot"` → `DepthSnapshot` イベント送出、`applied_seq = seqId`
+2. `action="update"` → `seqId == applied_seq + 1` を厳密チェック
+3. gap 検知 → `DepthGap` 送出 + `needs_resync=True` → stream_depth が WS 再接続
+4. スナップショット到着前のバッファリング (MAX_PENDING=512) → スナップショット後にリプレイ
+5. 新 snapshot 到着時に `needs_resync=False` にリセット（Bybit と異なり同一 WS 接続内でスナップショット再取得可能）
+
+#### fetch_klines のパラメータ
+
+OKX `/market/history-candles` はページネーション cursor:
+- `before={start_ms}` → `ts > start_ms` なローソクを返す
+- `after={end_ms}` → `ts < end_ms` なローソクを返す
+- 結果は降順で返るため Python 側で `sort(key=open_time_ms)` で昇順化
+
+#### fetch_open_interest の注意
+
+- 返値配列: `[ts, oi_contracts, oi_currency]`、index[2] (oi_currency = BTC/USD建て) を使用
+- Rust Fetch.rs と同じ `oi_ccy` (index 2) を選択
+
+#### Tips
+
+- **WS 2エンドポイント**: trades/depth は `/public`、klines は `/business`。同一接続に混在不可。
+- **seqId は連番保証**: OKX API ドキュメントでは seqId は必ず +1 で増加。gap 検知は Bybit と同じロジックが適用可能。
+- **state フィルタ**: `state == "live"` のみ（spot）、SWAP は `state == "live"` + `ctType` + `settleCcy` で絞り込み。
+- **spot vol 計算**: `volCcy24h` は spot では quote 通貨 (USDT) 建て → そのまま daily_volume として使用。perp では base 通貨 (BTC/ETH) 建て → `volCcy24h * last_price` に変換。
+- **kline confirm フィールド**: index[8] が存在しない古いデータでも安全に処理できるよう `len(row) > 8 and row[8] == "1"` でチェック。
 
 ### Hyperliquid 実装詳細（2026-04-24 完了）
 
@@ -184,6 +235,16 @@ Hyperliquid の `candleSnapshot` は `startTime`/`endTime` のみで制御し `l
 - **Bug #1** `_list_tickers_spot` が display symbol ("BTCUSDC") を `symbol` として返していた → Rust の `engine-client/src/backend.rs:397` は `symbol` フィールドをそのまま `coin` として API コールに使うため、"BTC/USDC" (raw pair name) を返す形に修正。テスト `test_list_tickers_spot` / `test_list_tickers_spot_excludes_zero_price` / `test_fetch_ticker_stats_spot` を更新。commit `b754f40`
 - **Bug #1 再発防止**: spot round-trip テスト (`test_spot_symbol_roundtrip_*`) を 4 件追加。`list_tickers` 返値の symbol を直接 `fetch_depth_snapshot` / `fetch_ticker_stats` / `fetch_klines` に渡すことで契約を検証。
 
+#### 既知の課題（Medium）― IPC 経由の display symbol 欠落
+
+**状況**: Python IPC パスでは spot ティッカーの `symbol` フィールドが raw pair name（`BTC/USDC`, `@1` 等）のまま Rust 側に届く。`engine-client/src/backend.rs:397` は `Ticker::new(symbol, exchange)` に渡すだけなので、`BTCUSDC` / `HYPEUSDC` 相当の display alias が構築されない。ネイティブ Hyperliquid アダプタは [`exchange/src/adapter/hub/hyperliquid/fetch.rs:283`](../../exchange/src/adapter/hub/hyperliquid/fetch.rs) で display symbol を別途生成しており、IPC パスとで表示が乖離する。`@...` 形式の pair がサイドバー・保存レイアウト上に生のまま露出しうる。
+
+**影響範囲**: Hyperliquid Python worker が本番 wiring されるまでは潜在バグ（現状は native backend が生きている）。フル切替前に修正が必要。
+
+**修正方針**: `TickerInfoMsg` に `display_symbol: Optional[str]` フィールドを追加し、Python 側が `_spot_display(pair)` で生成した値（`@N` → `base+quote`、`/` 除去後の文字列）を乗せて送出。Rust 側 `engine-client/src/backend.rs` で `display_symbol` が Some の場合は `Ticker { symbol: display_symbol, raw: symbol }` 相当に展開する。`exchange/src/lib.rs:344` の既存 display 対応フィールドが使用できる。
+
+**検証済みテスト**: `uv run pytest python/tests/test_hyperliquid_rest.py python/tests/test_hyperliquid_depth_sync.py` → 29 PASS（2026-04-24）。
+
 #### Tips
 
 - **全リクエストが同一 POST エンドポイント**: `https://api.hyperliquid.xyz/info` への POST のみ。テストでは pytest-httpx の FIFO レスポンス機能を使い複数コールをシミュレート。
@@ -232,6 +293,11 @@ Binance と異なり WS 自身がスナップショットを配信する:
 - **Depth REST snapshot**: `RequestDepthSnapshot` op 対応のため `GET /v5/market/orderbook?category={cat}&symbol={sym}&limit=200` を `fetch_depth_snapshot` で実装。`result.u` を `last_update_id` として使用。
 - **Depth level**: `orderbook.200` トピックを使用（200レベル、100ms 更新）。更小レベル (50) も選択可。
 - **ticker_stats volume**: Bybit の `volume24h` は base asset 単位のため、`volume24h * lastPrice` で USD 換算している。
+
+### OKX 実装詳細（2026-04-24 完了）
+
+- **実装ファイル**: [`python/engine/exchanges/okx.py`](../../python/engine/exchanges/okx.py)
+- **server.py 統合**: `self._workers["okx"] = OkxWorker()` 追加済み
 
 ## フェーズ 4: ヒストリカルデータ・bulk download 移植
 

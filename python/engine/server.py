@@ -17,6 +17,7 @@ from websockets import ServerConnection
 from engine.exchanges.binance import BinanceWorker
 from engine.exchanges.bybit import BybitWorker
 from engine.exchanges.hyperliquid import HyperliquidWorker
+from engine.exchanges.okex import OkexWorker
 from engine.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
@@ -90,10 +91,11 @@ class DataEngineServer:
         self._handshake_lock = asyncio.Lock()
 
         # Per-venue workers
-        self._workers: dict[str, BinanceWorker | BybitWorker | HyperliquidWorker] = {
+        self._workers: dict[str, BinanceWorker | BybitWorker | HyperliquidWorker | OkexWorker] = {
             "binance": BinanceWorker(),
             "bybit": BybitWorker(),
             "hyperliquid": HyperliquidWorker(),
+            "okex": OkexWorker(),
         }
 
         # Active stream tasks keyed by (venue, ticker, market, stream)
