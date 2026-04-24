@@ -336,7 +336,15 @@ class DataEngineServer:
             return
 
         market = _market_from_msg(msg, venue)
-        key = (venue, ticker, market, stream)
+
+        # kline streams are keyed by timeframe; other streams by stream name only
+        if stream == "kline" or stream.startswith("kline_"):
+            tf = timeframe or (stream[len("kline_") :] if stream.startswith("kline_") else "1m")
+            key = (venue, ticker, market, "kline", tf)
+        else:
+            tf = None
+            key = (venue, ticker, market, stream)
+
         if key in self._streams:
             log.debug("Already subscribed to %s", key)
             return
@@ -357,10 +365,7 @@ class DataEngineServer:
             coro = worker.stream_depth(
                 ticker, market, base_ssid, self._outbox, stop, on_ssid=_on_ssid
             )
-        elif stream == "kline" or stream.startswith("kline_"):
-            tf = timeframe or (
-                stream[len("kline_") :] if stream.startswith("kline_") else "1m"
-            )
+        elif tf is not None:
             coro = worker.stream_kline(
                 ticker,
                 market,
@@ -409,8 +414,14 @@ class DataEngineServer:
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
         stream = msg.get("stream", "")
+        timeframe = msg.get("timeframe")
         market = _market_from_msg(msg, venue)
-        key = (venue, ticker, market, stream)
+
+        if stream == "kline" or stream.startswith("kline_"):
+            tf = timeframe or (stream[len("kline_"):] if stream.startswith("kline_") else "1m")
+            key = (venue, ticker, market, "kline", tf)
+        else:
+            key = (venue, ticker, market, stream)
 
         handle = self._streams.pop(key, None)
         if handle:
@@ -507,11 +518,16 @@ class DataEngineServer:
         timeframe = msg.get("timeframe", "1m")
         raw_limit = msg.get("limit", 400)
         limit = raw_limit if isinstance(raw_limit, int) and 1 <= raw_limit <= 5000 else 400
+        raw_start = msg.get("start_ms")
+        raw_end = msg.get("end_ms")
+        start_ms = int(raw_start) if raw_start else None
+        end_ms = int(raw_end) if raw_end else None
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
         klines = await worker.fetch_klines(
-            ticker, _market_from_msg(msg, venue), timeframe, limit=limit
+            ticker, _market_from_msg(msg, venue), timeframe, limit=limit,
+            start_ms=start_ms, end_ms=end_ms,
         )
         self._outbox.append(
             {
@@ -558,11 +574,16 @@ class DataEngineServer:
         timeframe = msg.get("timeframe", "1h")
         raw_limit = msg.get("limit", 400)
         limit = raw_limit if isinstance(raw_limit, int) and 1 <= raw_limit <= 5000 else 400
+        raw_start = msg.get("start_ms")
+        raw_end = msg.get("end_ms")
+        start_ms = int(raw_start) if raw_start else None
+        end_ms = int(raw_end) if raw_end else None
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
         oi = await worker.fetch_open_interest(
-            ticker, _market_from_msg(msg, venue), timeframe, limit=limit
+            ticker, _market_from_msg(msg, venue), timeframe, limit=limit,
+            start_ms=start_ms, end_ms=end_ms,
         )
         self._outbox.append(
             {

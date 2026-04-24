@@ -36,13 +36,27 @@ class ExchangeWorker(ABC):
 
     @abstractmethod
     async def fetch_klines(
-        self, ticker: str, market: str, timeframe: str, *, limit: int = 400
+        self,
+        ticker: str,
+        market: str,
+        timeframe: str,
+        *,
+        limit: int = 400,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> list[dict]:
         """Return kline data as list of dicts."""
 
     @abstractmethod
     async def fetch_open_interest(
-        self, ticker: str, market: str, timeframe: str, *, limit: int = 400
+        self,
+        ticker: str,
+        market: str,
+        timeframe: str,
+        *,
+        limit: int = 400,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> list[dict]:
         """Return open interest history as list of dicts."""
 

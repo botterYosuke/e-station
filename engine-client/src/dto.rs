@@ -29,6 +29,7 @@ pub enum Command {
         venue: String,
         ticker: String,
         stream: String,
+        timeframe: Option<String>,
         market: String,
     },
     FetchKlines {
@@ -37,6 +38,8 @@ pub enum Command {
         ticker: String,
         timeframe: String,
         limit: u32,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
         market: String,
     },
     FetchTrades {
@@ -54,6 +57,8 @@ pub enum Command {
         ticker: String,
         timeframe: String,
         limit: u32,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
         market: String,
     },
     FetchTickerStats {

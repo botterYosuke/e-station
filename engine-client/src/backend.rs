@@ -566,12 +566,14 @@ impl VenueBackend for EngineClientBackend {
             let request_id = Uuid::new_v4().to_string();
             let ticker_sym = ticker_info.ticker.to_string();
             let tf_str = timeframe_to_str(timeframe);
-            let limit = range
-                .map(|(s, e)| {
+            let (limit, start_ms, end_ms) = match range {
+                Some((s, e)) => {
                     let ms = timeframe.to_milliseconds().max(1);
-                    (e.saturating_sub(s) / ms).min(1500) as u32
-                })
-                .unwrap_or(500);
+                    let limit = (e.saturating_sub(s) / ms).min(1500) as u32;
+                    (limit, Some(s as i64), Some(e as i64))
+                }
+                None => (500, None, None),
+            };
 
             let cmd = Command::FetchKlines {
                 request_id: request_id.clone(),
@@ -579,6 +581,8 @@ impl VenueBackend for EngineClientBackend {
                 ticker: ticker_sym,
                 timeframe: tf_str,
                 limit,
+                start_ms,
+                end_ms,
                 market: Self::market_kind_to_ipc(ticker_info.market_type()),
             };
             let mut rx = connection.subscribe_events();
@@ -629,12 +633,14 @@ impl VenueBackend for EngineClientBackend {
             let request_id = Uuid::new_v4().to_string();
             let ticker_sym = ticker_info.ticker.to_string();
             let tf_str = timeframe_to_str(timeframe);
-            let limit = range
-                .map(|(s, e)| {
+            let (limit, start_ms, end_ms) = match range {
+                Some((s, e)) => {
                     let ms = timeframe.to_milliseconds().max(1);
-                    (e.saturating_sub(s) / ms).min(200) as u32
-                })
-                .unwrap_or(200);
+                    let limit = (e.saturating_sub(s) / ms).min(200) as u32;
+                    (limit, Some(s as i64), Some(e as i64))
+                }
+                None => (200, None, None),
+            };
 
             let cmd = Command::FetchOpenInterest {
                 request_id: request_id.clone(),
@@ -642,6 +648,8 @@ impl VenueBackend for EngineClientBackend {
                 ticker: ticker_sym,
                 timeframe: tf_str,
                 limit,
+                start_ms,
+                end_ms,
                 market: Self::market_kind_to_ipc(ticker_info.market_type()),
             };
             let mut rx = connection.subscribe_events();
