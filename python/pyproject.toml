@@ -22,11 +22,11 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["flowsurface_data"]
+packages = ["data"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["../tests/python"]
 
 [dependency-groups]
 dev = [

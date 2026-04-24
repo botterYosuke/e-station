@@ -43,6 +43,7 @@ class Subscribe(IpcMessage):
     venue: str
     ticker: str
     stream: str
+    timeframe: str | None = None
 
 
 class Unsubscribe(IpcMessage):
@@ -182,6 +183,11 @@ class KlineUpdate(IpcMessage):
     kline: KlineMsg
 
 
+class OpenInterestPoint(IpcMessage):
+    ts_ms: int
+    open_interest: str
+
+
 class Klines(IpcMessage):
     event: Literal["Klines"] = "Klines"
     request_id: str
@@ -230,7 +236,7 @@ class OpenInterestMsg(IpcMessage):
     request_id: str
     venue: str
     ticker: str
-    data: list[dict]
+    data: list[OpenInterestPoint]
 
 
 class TickerInfoMsg(IpcMessage):

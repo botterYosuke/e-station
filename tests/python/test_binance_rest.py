@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
-from flowsurface_data.exchanges.binance import BinanceWorker
+from data.exchanges.binance import BinanceWorker
 
 
 @pytest.fixture

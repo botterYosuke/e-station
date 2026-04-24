@@ -1,7 +1,7 @@
 """Tests for IPC schema models."""
 
 import pytest
-from flowsurface_data.schemas import (
+from data.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
     DepthDiffMsg,

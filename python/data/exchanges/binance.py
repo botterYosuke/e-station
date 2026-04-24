@@ -10,8 +10,8 @@ from typing import Any
 
 import httpx
 
-from flowsurface_data.exchanges.base import ExchangeWorker
-from flowsurface_data.limiter import BinanceLimiter
+from data.exchanges.base import ExchangeWorker
+from data.limiter import BinanceLimiter
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,10 @@ _LINEAR_WS = "wss://fstream.binance.com"
 _INVERSE_WS = "wss://dstream.binance.com"
 
 _TRADE_BATCH_INTERVAL = 0.033  # 33 ms
+
+
+def _depth_levels(levels: list[list[str]]) -> list[dict[str, str]]:
+    return [{"price": price, "qty": qty} for price, qty in levels]
 
 
 def _rest_base(market: str) -> str:
@@ -167,8 +171,8 @@ class BinanceDepthSyncer:
                 "stream_session_id": self._ssid,
                 "sequence_id": final_id,
                 "prev_sequence_id": self._applied_seq,
-                "bids": diff.get("b", []),
-                "asks": diff.get("a", []),
+                "bids": _depth_levels(diff.get("b", [])),
+                "asks": _depth_levels(diff.get("a", [])),
             }
         )
         self._applied_seq = final_id
@@ -335,8 +339,6 @@ class BinanceWorker(ExchangeWorker):
             low = str(row[3])
             close = str(row[4])
             volume = str(row[5])
-            taker_buy_base = str(row[9])
-
             klines.append(
                 {
                     "open_time_ms": open_time,
@@ -345,7 +347,6 @@ class BinanceWorker(ExchangeWorker):
                     "low": low,
                     "close": close,
                     "volume": volume,
-                    "taker_buy_base": taker_buy_base,
                     "is_closed": True,
                 }
             )
@@ -386,8 +387,8 @@ class BinanceWorker(ExchangeWorker):
 
         return [
             {
-                "time_ms": int(row["timestamp"]),
-                "value": float(row["sumOpenInterest"]),
+                "ts_ms": int(row["timestamp"]),
+                "open_interest": str(row["sumOpenInterest"]),
             }
             for row in rows
         ]
@@ -439,8 +440,8 @@ class BinanceWorker(ExchangeWorker):
 
         return {
             "last_update_id": data["lastUpdateId"],
-            "bids": data["bids"],
-            "asks": data["asks"],
+            "bids": _depth_levels(data["bids"]),
+            "asks": _depth_levels(data["asks"]),
         }
 
     # ------------------------------------------------------------------
@@ -464,6 +465,22 @@ class BinanceWorker(ExchangeWorker):
         batch: list[dict] = []
         last_flush = time.monotonic()
 
+        def _flush_batch() -> None:
+            nonlocal batch, last_flush
+            if not batch:
+                return
+            outbox.append(
+                {
+                    "event": "Trades",
+                    "venue": "binance",
+                    "ticker": ticker,
+                    "stream_session_id": stream_session_id,
+                    "trades": batch,
+                }
+            )
+            batch = []
+            last_flush = time.monotonic()
+
         while not stop_event.is_set():
             try:
                 async with websockets.connect(url) as ws:
@@ -475,7 +492,15 @@ class BinanceWorker(ExchangeWorker):
                             "stream": "trade",
                         }
                     )
-                    async for raw in ws:
+                    while not stop_event.is_set():
+                        try:
+                            raw = await asyncio.wait_for(
+                                ws.recv(), timeout=_TRADE_BATCH_INTERVAL
+                            )
+                        except asyncio.TimeoutError:
+                            _flush_batch()
+                            continue
+
                         if stop_event.is_set():
                             break
                         try:
@@ -496,22 +521,13 @@ class BinanceWorker(ExchangeWorker):
 
                             now = time.monotonic()
                             if now - last_flush >= _TRADE_BATCH_INTERVAL:
-                                if batch:
-                                    outbox.append(
-                                        {
-                                            "event": "Trades",
-                                            "venue": "binance",
-                                            "ticker": ticker,
-                                            "stream_session_id": stream_session_id,
-                                            "trades": batch,
-                                        }
-                                    )
-                                    batch = []
-                                last_flush = now
+                                _flush_batch()
                         except Exception as exc:
                             log.warning("trade parse error: %s", exc)
+                    _flush_batch()
 
             except Exception as exc:
+                _flush_batch()
                 outbox.append(
                     {
                         "event": "Disconnected",
@@ -666,7 +682,6 @@ class BinanceWorker(ExchangeWorker):
                                     "venue": "binance",
                                     "ticker": ticker,
                                     "timeframe": timeframe,
-                                    "stream_session_id": stream_session_id,
                                     "kline": {
                                         "open_time_ms": k["t"],
                                         "open": k["o"],
@@ -674,7 +689,6 @@ class BinanceWorker(ExchangeWorker):
                                         "low": k["l"],
                                         "close": k["c"],
                                         "volume": k["v"],
-                                        "taker_buy_base": k["V"],
                                         "is_closed": k["x"],
                                     },
                                 }

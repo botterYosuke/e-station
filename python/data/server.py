@@ -12,8 +12,8 @@ import orjson
 import websockets
 from websockets import ServerConnection
 
-from flowsurface_data.exchanges.binance import BinanceWorker
-from flowsurface_data.schemas import (
+from data.exchanges.binance import BinanceWorker
+from data.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
     EngineError,
@@ -24,6 +24,18 @@ from flowsurface_data.schemas import (
 log = logging.getLogger(__name__)
 
 _ENGINE_VERSION = "0.1.0"
+
+
+class _Outbox(list[dict]):
+    """List-like outbox that wakes the send loop whenever an event is appended."""
+
+    def __init__(self, wake_send_loop: Any) -> None:
+        super().__init__()
+        self._wake_send_loop = wake_send_loop
+
+    def append(self, item: dict) -> None:
+        super().append(item)
+        self._wake_send_loop()
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +70,7 @@ class DataEngineServer:
         self._token = token
         self._current_conn: ServerConnection | None = None
         self._shutdown_event = asyncio.Event()
+        self._outbox_event = asyncio.Event()
         self._engine_session_id: UUID = uuid.uuid4()
 
         # Per-venue workers (Phase 1: Binance only)
@@ -69,8 +82,7 @@ class DataEngineServer:
         self._streams: dict[tuple[str, str, str], _StreamHandle] = {}
 
         # Shared outbox — server drains this and sends to client
-        self._outbox: list[dict] = []
-        self._outbox_event = asyncio.Event()
+        self._outbox = _Outbox(self._outbox_event.set)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -78,6 +90,7 @@ class DataEngineServer:
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
+        self._outbox_event.set()
 
     async def serve(self) -> None:
         async with websockets.serve(
@@ -187,15 +200,15 @@ class DataEngineServer:
                 event = self._outbox.pop(0)
                 await ws.send(orjson.dumps(event))
 
-            # Wait for more events
-            self._outbox_event.clear()
-            try:
-                await asyncio.wait_for(self._outbox_event.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
-
             if self._shutdown_event.is_set():
                 break
+
+            # Wait for more events
+            self._outbox_event.clear()
+            if self._outbox:
+                self._outbox_event.set()
+                continue
+            await self._outbox_event.wait()
 
     # ------------------------------------------------------------------
     # Op dispatcher
@@ -204,6 +217,7 @@ class DataEngineServer:
     async def _dispatch(self, op: str | None, msg: dict, ws: ServerConnection) -> None:  # noqa: ARG002
         if op == "Shutdown":
             self._shutdown_event.set()
+            self._outbox_event.set()
 
         elif op == "Subscribe":
             await self._handle_subscribe(msg)
@@ -220,6 +234,14 @@ class DataEngineServer:
         elif op == "FetchKlines":
             await self._handle_fetch_klines(msg)
 
+        elif op == "FetchTrades":
+            await self._send_error(
+                ws,
+                msg.get("request_id"),
+                "FetchTrades is not implemented in Phase 1",
+                code="not_supported",
+            )
+
         elif op == "FetchOpenInterest":
             await self._handle_fetch_oi(msg)
 
@@ -233,7 +255,13 @@ class DataEngineServer:
             self._handle_set_proxy(msg)
 
         else:
-            log.debug("Unhandled op=%s", op)
+            log.warning("Unhandled op=%s", op)
+            await self._send_error(
+                ws,
+                msg.get("request_id"),
+                f"Unsupported op: {op}",
+                code="unsupported_op",
+            )
 
     # ------------------------------------------------------------------
     # Subscribe / Unsubscribe
@@ -243,6 +271,7 @@ class DataEngineServer:
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
         stream = msg.get("stream", "")
+        timeframe = msg.get("timeframe")
 
         worker = self._workers.get(venue)
         if worker is None:
@@ -261,8 +290,8 @@ class DataEngineServer:
             coro = worker.stream_trades(ticker, _market(ticker), ssid, self._outbox, stop)
         elif stream == "depth":
             coro = worker.stream_depth(ticker, _market(ticker), ssid, self._outbox, stop)
-        elif stream.startswith("kline_"):
-            tf = stream[len("kline_"):]
+        elif stream == "kline" or stream.startswith("kline_"):
+            tf = timeframe or (stream[len("kline_"):] if stream.startswith("kline_") else "1m")
             coro = worker.stream_kline(ticker, _market(ticker), tf, ssid, self._outbox, stop)
         else:
             log.warning("Unknown stream type: %s", stream)
@@ -305,7 +334,6 @@ class DataEngineServer:
                     "tickers": tickers,
                 }
             )
-            self._outbox_event.set()
 
         asyncio.create_task(_run())
 
@@ -328,7 +356,6 @@ class DataEngineServer:
                     "tickers": [meta] if meta else [],
                 }
             )
-            self._outbox_event.set()
 
         asyncio.create_task(_run())
 
@@ -354,7 +381,6 @@ class DataEngineServer:
                     "klines": klines,
                 }
             )
-            self._outbox_event.set()
 
         asyncio.create_task(_run())
 
@@ -379,7 +405,6 @@ class DataEngineServer:
                     "data": oi,
                 }
             )
-            self._outbox_event.set()
 
         asyncio.create_task(_run())
 
@@ -402,7 +427,6 @@ class DataEngineServer:
                     "stats": stats,
                 }
             )
-            self._outbox_event.set()
 
         asyncio.create_task(_run())
 
@@ -427,7 +451,6 @@ class DataEngineServer:
                     "asks": snap["asks"],
                 }
             )
-            self._outbox_event.set()
 
         asyncio.create_task(_run())
 
@@ -442,7 +465,12 @@ class DataEngineServer:
     # ------------------------------------------------------------------
 
     async def _send_error(
-        self, ws: ServerConnection, request_id: str | None, message: str
+        self,
+        ws: ServerConnection,
+        request_id: str | None,
+        message: str,
+        *,
+        code: str = "dispatch_error",
     ) -> None:
         try:
             await ws.send(
@@ -450,7 +478,7 @@ class DataEngineServer:
                     {
                         "event": "Error",
                         "request_id": request_id,
-                        "code": "dispatch_error",
+                        "code": code,
                         "message": message,
                     }
                 )

@@ -2,7 +2,7 @@
 
 import asyncio
 import pytest
-from flowsurface_data.limiter import TokenBucket, BinanceLimiter
+from data.limiter import TokenBucket, BinanceLimiter
 
 
 @pytest.mark.asyncio

@@ -4,5 +4,5 @@
 *.log__pycache__/
 *.pyc
 *.pyo
-python/.venv/
+.venv/
 python/.pytest_cache/

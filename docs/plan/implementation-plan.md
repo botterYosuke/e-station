@@ -5,7 +5,7 @@
 
 ## フェーズ 0: 準備 & ベースライン計測（リスク低）
 
-- [ ] `python/` に `pyproject.toml` と `flowsurface_data` パッケージのスケルトンを置く。
+- [ ] `python/` に `pyproject.toml` と `data` パッケージのスケルトンを置く。
 - [ ] [`docs/plan/schemas/`](./schemas/) に IPC DTO の JSON Schema を作成。
   - 対象: `TradeMsg`, `KlineMsg`, `DepthSnapshotMsg`, `DepthDiffMsg`, `TickerMsg`, `TickerInfoMsg`, `TickerStatsMsg`, `OpenInterestMsg`, および各コマンド (`Hello` / `Ready` / `Subscribe` / `Unsubscribe` / `FetchKlines` / `FetchTrades` / `FetchOpenInterest` / `FetchTickerStats` / `ListTickers` / `GetTickerMetadata` / `RequestDepthSnapshot` / `SetProxy` / `Shutdown` / `Error` / `EngineError` / `DepthGap`)。
   - 参考: 既存 Rust 型 [`exchange/src/lib.rs`](../../exchange/src/lib.rs), [`exchange/src/adapter.rs`](../../exchange/src/adapter.rs) の `Event`。
@@ -45,7 +45,7 @@
 
 > **完了** (2026-04-24, commit `51459a7` ブランチ `phase-1/python-data-engine`)
 
-- [x] `flowsurface_data.server` に WS サーバを実装（`websockets` ライブラリ）。loopback バインドのみ、単一クライアント制限 + トークン一致時の既存接続置換（[spec.md §4.5.2](./spec.md#452-既存接続の置換半死接続対策)）、接続トークン検証、起動ハンドシェイク（[spec.md §4.5](./spec.md#45-起動ハンドシェイク)）、ping/pong keepalive を初期実装に含める。
+- [x] `data.server` に WS サーバを実装（`websockets` ライブラリ）。loopback バインドのみ、単一クライアント制限 + トークン一致時の既存接続置換（[spec.md §4.5.2](./spec.md#452-既存接続の置換半死接続対策)）、接続トークン検証、起動ハンドシェイク（[spec.md §4.5](./spec.md#45-起動ハンドシェイク)）、ping/pong keepalive を初期実装に含める。
 - [x] `ExchangeWorker` 抽象 / server↔worker dispatch の境界を最初から設ける（[spec.md §6.1](./spec.md#61-プロセスモデルフェーズ-1-時点)）。フェーズ 1 は asyncio 単一プロセスだが、将来 venue 分割できる構造で着地させる。
 - [x] `exchanges/binance.py` で REST メタデータ + Kline + **Open Interest** + 24h 統計 + WebSocket trade/depth/kline を実装（OI はインジケータが継続要求するため初期から必須）。
 - [x] depth 整合性プロトコル（[spec.md §4.4](./spec.md#44-バックプレッシャと整合性保証)）: `session_id` / `sequence_id` / `prev_sequence_id` の付与、gap 検知時の `DepthGap` 送出と自発的再スナップショット、checksum がある場合の検証を実装。
@@ -84,7 +84,7 @@
 - [ ] MEXC
 
 各取引所ごとに：
-1. `python/flowsurface_data/exchanges/<venue>.py` 実装
+1. `python/data/exchanges/<venue>.py` 実装
 2. レート制限の移植
 3. 統合テスト（Rust 側 UI で動作確認）
 

@@ -1,4 +1,4 @@
-"""Entry point: python -m flowsurface_data"""
+"""Entry point: python -m data"""
 
 import argparse
 import asyncio
@@ -21,7 +21,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _run(port: int, token: str) -> None:
-    from flowsurface_data.server import DataEngineServer
+    from data.server import DataEngineServer
 
     server = DataEngineServer(port=port, token=token)
     await server.serve()
