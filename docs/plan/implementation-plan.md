@@ -56,11 +56,11 @@
 - [x] stdin から `{port, token}` JSON を受け取り、ランダムポート・トークンで起動できるようにする（開発時は環境変数フォールバックを許容）。
 - [x] pytest で REST/WS の最低限のテスト（モック取引所 or VCR）＋ depth gap / session 切替の再同期テスト。
 
-**完了条件**: Python のみで Binance のリアルタイム trade / depth / kline / OI を取得・配信でき、depth の gap 検知と再同期が動作する。 → **達成済み**（pytest 30件全 PASS）
+**完了条件**: Python のみで Binance のリアルタイム trade / depth / kline / OI を取得・配信でき、depth の gap 検知と再同期が動作する。 → **達成済み**（pytest Binance 33件全 PASS）
 
 ## フェーズ 2: Rust 側に engine-client を実装し Binance を切替
 
-> **部分完了** (2026-04-24, ブランチ `phase-1/python-data-engine`)
+> **部分完了** (2026-04-24, ブランチ `phase-2/wiring`)
 
 - [x] `engine-client` crate（`flowsurface-engine-client`）を `engine-client/` に新規作成し IPC DTO と WebSocket クライアントを実装。
   - `engine-client/src/dto.rs`: `Command` / `EngineEvent` / `TradeMsg` / `KlineMsg` / `DepthLevel` / `OiPoint`
@@ -95,14 +95,14 @@
 - [x] IPC ハンドシェイク・`FetchKlines` REST 経由の疎通確認（2026-04-24）。
 - [x] `Subscribe(stream=trade)` コマンドが IPC 経由でエンジンに到達することを確認（2026-04-24）。
 - [x] `test_trade_stream.py` で Trades 受信確認（spot endpoint で 30 件 PASS, 2026-04-24）。
-- [ ] futures throttle 解除後に `flowsurface --data-engine-url` で GUI chart 描画を目視確認。
+- [ ] `flowsurface --data-engine-url` で GUI chart 描画を目視確認（Binance futures WS throttle 解除後）。
 - [ ] レイテンシ・CPU 使用率の実測比較（Python spawn モード配線後に実施）。
 - [ ] 障害試験（Python kill → 自動復旧 → 板再同期の手動確認、spawn モード配線後に実施）。
 
-> **現況（2026-04-24）**: IPC 接続・REST フェッチは動作確認済み。Binance futures WebSocket
-> (`fstream.binance.com`) がデバッグセッション中の過剰接続により一時レート制限中のため
-> chart 描画の目視確認が保留。spot WS (`stream.binance.com:9443`) は同一マシンから正常受信
-> 確認済みでありコード上の問題ではない。レート制限解除後に再試験すること。
+> **現況（2026-04-24）**: IPC プロトコル層は全項目疎通確認済み（Hello/Ready, FetchKlines, Subscribe, Trades 受信）。
+> Binance futures WS (`fstream.binance.com`) のみデバッグ中の過剩接続による一時的な IP throttle が残っており、
+> GUI chart の目視確認が保留中。spot WS は正常動作しており **コードの問題ではない**。
+> spawn モード未配線のため自動復旧試験は次フェーズ以降に実施。
 
 **完了条件**: フラグ ON で Binance チャートが Python 経由で正しく描画される。**加えて Python を kill しても自動復旧し、購読と板整合性が回復する**。
 
@@ -116,6 +116,7 @@
 - **`--data-engine-url` wiring**: `Flowsurface::new()` は同期関数のため async 接続は `main()` 内の専用 tokio ランタイムで行い、`OnceLock` 経由で共有。ランタイムを `_engine_rt` 変数でライフタイム保持（`main()` 戻りまで保持）。
 - **`watch::Ref` + async**: `rx.borrow()` の戻り値 `Ref<'_, bool>` は `!Send`。`yield` の前に `let value = *rx.borrow();` でコピーしてから yield すること（Send 境界違反回避）。
 - **`Subscription::run` の制約**: Iced 0.14 の `Subscription::run` は `fn() -> S` のみ受け付ける（クロージャ不可）。グローバルへのアクセスが必要なら top-level 関数として定義し static を読む。
+- **`asyncio.wait_for(ws.recv(), timeout=短時間)` は Windows で禁止**: IocpProactor 上では短周期キャンセルが `websockets` 内部の受信バッファを破壊し、接続は維持されるがメッセージが無音になる。`async for raw in ws` + 別タスクによる定期フラッシュで代替すること（`stream_depth` / `stream_kline` の実装を参照）。
 
 ## フェーズ 3: 残り取引所の Python 移植
 
@@ -133,10 +134,12 @@
 
 **完了条件**: 全 5 取引所が Python 経由で動作。
 
+> **現況（2026-04-24）**: pytest 全体 54 件 PASS（Binance 33 + Bybit 21）。
+
 ### Bybit 実装詳細（2026-04-24 完了）
 
 - **実装ファイル**: [`python/engine/exchanges/bybit.py`](../../python/engine/exchanges/bybit.py)
-- **テスト**: `python/tests/test_bybit_rest.py` (9件) + `python/tests/test_bybit_depth_sync.py` (10件) = 計 19件全 PASS
+- **テスト**: `python/tests/test_bybit_rest.py` (11件) + `python/tests/test_bybit_depth_sync.py` (10件) = 計 21件全 PASS
 - **server.py 統合**: `self._workers["bybit"] = BybitWorker()` 追加済み
 
 #### Binance との主な差異
@@ -164,8 +167,8 @@ Binance と異なり WS 自身がスナップショットを配信する:
 
 #### バグ修正（2026-04-24、テスト追加で検出・修正済み）
 
-- **Bug #1** `fetch_open_interest` が `category=linear` 固定だったため inverse_perp で誤 API を叩いていた → `_market_category(market)` を使う形に修正。テスト `test_fetch_open_interest_inverse_uses_inverse_category` 追加。
-- **Bug #2** `list_tickers` が Bybit の `status` フィールドを無視しており、`PreLaunch` 等の非稼働銘柄が UI に混入する恐れがあった → `status != "Trading"` の場合は除外するよう修正。テスト `test_list_tickers_excludes_non_trading_status` 追加。
+- **Bug #1** `fetch_open_interest` が `category=linear` 固定だったため inverse_perp で誤 API を叩いていた → `_market_category(market)` を使う形に修正。テスト `test_fetch_open_interest_inverse_uses_inverse_category` 追加。commit `7fcb84f`
+- **Bug #2** `list_tickers` が Bybit の `status` フィールドを無視しており、`PreLaunch` / `Settling` 等の非稼働銘柄が UI に混入する恐れがあった → `status != "Trading"` の場合は除外するよう修正。テスト `test_list_tickers_excludes_non_trading_status` 追加。commit `0fde866`
 
 #### Tips
 
