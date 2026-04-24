@@ -14,9 +14,8 @@ pub type TickerStatsMap = HashMap<Ticker, TickerStats>;
 
 /// Per-venue data backend.
 ///
-/// The two implementations are:
-/// - `EngineClientBackend`: routes requests to the Python data engine via IPC (Phase 2+).
-/// - `HybridVenueBackend`: combines two backends (metadata from one, streams from another).
+/// The primary implementation is `EngineClientBackend`, which routes all requests
+/// to the Python data engine via IPC.
 pub trait VenueBackend: Send + Sync {
     fn kline_stream(
         &self,

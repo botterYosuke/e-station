@@ -18,18 +18,18 @@ pub use proxy::Proxy;
 pub use venue_backend::VenueBackend;
 
 // Hyperliquid-specific tick multiplier lookup table (moved from hub/hyperliquid).
-const _HL_MULTS_OVERFLOW: &[u16] = &[1, 10, 20, 50, 100, 1000, 10000];
-const _HL_MULTS_FRACTIONAL: &[u16] = &[1, 2, 5, 10, 100, 1000];
-const _HL_MULTS_SAFE: &[u16] = &[1, 10, 100, 1000];
+const HL_MULTS_OVERFLOW: &[u16] = &[1, 10, 20, 50, 100, 1000, 10000];
+const HL_MULTS_FRACTIONAL: &[u16] = &[1, 2, 5, 10, 100, 1000];
+const HL_MULTS_SAFE: &[u16] = &[1, 10, 100, 1000];
 
 /// Returns valid tick multipliers for Hyperliquid depth streams given the minimum tick size.
 pub fn allowed_multipliers_for_min_tick(min_ticksize: crate::unit::MinTicksize) -> &'static [u16] {
     if min_ticksize.power < 0 {
-        _HL_MULTS_FRACTIONAL
+        HL_MULTS_FRACTIONAL
     } else if min_ticksize.power > 0 {
-        _HL_MULTS_OVERFLOW
+        HL_MULTS_OVERFLOW
     } else {
-        _HL_MULTS_SAFE
+        HL_MULTS_SAFE
     }
 }
 

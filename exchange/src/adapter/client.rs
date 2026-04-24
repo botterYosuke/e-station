@@ -35,10 +35,6 @@ impl AdapterHandles {
         }
     }
 
-    fn get_backend(&self, venue: Venue) -> Option<Arc<dyn VenueBackend>> {
-        self.get_backend_arc(venue)
-    }
-
     /// Returns a clone of the `Arc<dyn VenueBackend>` registered for `venue`, if any.
     pub fn get_backend_arc(&self, venue: Venue) -> Option<Arc<dyn VenueBackend>> {
         match venue {
@@ -57,7 +53,7 @@ impl AdapterHandles {
     }
 
     pub fn has_venue(&self, venue: Venue) -> bool {
-        self.get_backend(venue).is_some()
+        self.get_backend_arc(venue).is_some()
     }
 
     fn missing_venue_stream(exchange: Exchange) -> BoxStream<'static, Event> {
@@ -80,7 +76,7 @@ impl AdapterHandles {
         let market_kind = config.exchange.market_type();
         let venue = config.exchange.venue();
 
-        self.get_backend(venue).map_or_else(
+        self.get_backend_arc(venue).map_or_else(
             || Self::missing_venue_stream(config.exchange),
             |backend| backend.kline_stream(streams, market_kind),
         )
@@ -94,7 +90,7 @@ impl AdapterHandles {
         let market_kind = config.exchange.market_type();
         let venue = config.exchange.venue();
 
-        self.get_backend(venue).map_or_else(
+        self.get_backend_arc(venue).map_or_else(
             || Self::missing_venue_stream(config.exchange),
             |backend| backend.trade_stream(tickers, market_kind),
         )
@@ -106,7 +102,7 @@ impl AdapterHandles {
         let push_freq = config.push_freq;
         let venue = config.exchange.venue();
 
-        self.get_backend(venue).map_or_else(
+        self.get_backend_arc(venue).map_or_else(
             || Self::missing_venue_stream(config.exchange),
             |backend| backend.depth_stream(ticker_info, tick_mltp, push_freq),
         )
@@ -119,7 +115,7 @@ impl AdapterHandles {
         venue: Venue,
         markets: &[MarketKind],
     ) -> Result<HashMap<Ticker, Option<TickerInfo>>, AdapterError> {
-        let Some(backend) = self.get_backend(venue) else {
+        let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
         backend.fetch_ticker_metadata(markets).await
@@ -132,7 +128,7 @@ impl AdapterHandles {
         markets: &[MarketKind],
         contract_sizes: Option<HashMap<Ticker, f32>>,
     ) -> Result<HashMap<Ticker, TickerStats>, AdapterError> {
-        let Some(backend) = self.get_backend(venue) else {
+        let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
         backend.fetch_ticker_stats(markets, contract_sizes).await
@@ -145,7 +141,7 @@ impl AdapterHandles {
         range: Option<(u64, u64)>,
     ) -> Result<Vec<Kline>, AdapterError> {
         let venue = ticker_info.ticker.exchange.venue();
-        let Some(backend) = self.get_backend(venue) else {
+        let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
         backend.fetch_klines(ticker_info, timeframe, range).await
@@ -158,7 +154,7 @@ impl AdapterHandles {
         range: Option<(u64, u64)>,
     ) -> Result<Vec<OpenInterest>, AdapterError> {
         let venue = ticker_info.ticker.exchange.venue();
-        let Some(backend) = self.get_backend(venue) else {
+        let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
         backend.fetch_open_interest(ticker_info, timeframe, range).await
@@ -172,7 +168,7 @@ impl AdapterHandles {
         data_path: Option<PathBuf>,
     ) -> Result<Vec<Trade>, AdapterError> {
         let venue = ticker_info.ticker.exchange.venue();
-        let Some(backend) = self.get_backend(venue) else {
+        let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
         backend.fetch_trades(ticker_info, from_time, to_time, data_path).await
@@ -184,7 +180,7 @@ impl AdapterHandles {
         ticker: Ticker,
     ) -> Result<DepthPayload, AdapterError> {
         let venue = ticker.exchange.venue();
-        let Some(backend) = self.get_backend(venue) else {
+        let Some(backend) = self.get_backend_arc(venue) else {
             return Err(Self::missing_venue_error(venue));
         };
         backend.request_depth_snapshot(ticker).await
@@ -192,7 +188,7 @@ impl AdapterHandles {
 
     /// Returns `Some(true/false)` when the backend for `venue` is configured, `None` otherwise.
     pub async fn venue_health(&self, venue: Venue) -> Option<bool> {
-        let backend = self.get_backend(venue)?;
+        let backend = self.get_backend_arc(venue)?;
         Some(backend.health().await)
     }
 }
