@@ -13,24 +13,30 @@ pub struct CliArgs {
 
 impl CliArgs {
     pub fn parse() -> Self {
-        Self::parse_from(std::env::args())
+        Self::parse_from(std::env::args()).unwrap_or_else(|e| {
+            eprintln!("flowsurface: {e}");
+            std::process::exit(1);
+        })
     }
 
-    pub fn parse_from(args: impl Iterator<Item = String>) -> Self {
+    pub fn parse_from(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut data_engine_url: Option<Url> = None;
         let mut iter = args.skip(1); // skip executable name
 
         while let Some(arg) = iter.next() {
             if arg == "--data-engine-url" {
-                let raw = iter.next().expect("--data-engine-url requires a value");
-                let url = Url::parse(&raw)
-                    .unwrap_or_else(|e| panic!("invalid --data-engine-url value '{raw}': {e}"));
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| "--data-engine-url requires a value".to_string())?;
+                let url = Url::parse(&raw).map_err(|e| {
+                    format!("invalid --data-engine-url value '{raw}': {e}")
+                })?;
                 data_engine_url = Some(url);
             }
             // Unknown flags are silently ignored to stay forward-compatible.
         }
 
-        Self { data_engine_url }
+        Ok(Self { data_engine_url })
     }
 }
 
@@ -45,13 +51,14 @@ mod tests {
 
     #[test]
     fn no_args_yields_none() {
-        let cli = CliArgs::parse_from(args(&[]));
+        let cli = CliArgs::parse_from(args(&[])).expect("should succeed");
         assert!(cli.data_engine_url.is_none());
     }
 
     #[test]
     fn data_engine_url_is_parsed() {
-        let cli = CliArgs::parse_from(args(&["--data-engine-url", "ws://127.0.0.1:9001"]));
+        let cli =
+            CliArgs::parse_from(args(&["--data-engine-url", "ws://127.0.0.1:9001"])).unwrap();
         let url = cli.data_engine_url.expect("should have url");
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert_eq!(url.port(), Some(9001));
@@ -60,14 +67,15 @@ mod tests {
 
     #[test]
     fn unknown_flags_are_ignored() {
-        let cli = CliArgs::parse_from(args(&["--unknown-flag", "value"]));
+        let cli = CliArgs::parse_from(args(&["--unknown-flag", "value"])).unwrap();
         assert!(cli.data_engine_url.is_none());
     }
 
     #[test]
     fn data_engine_url_accepts_wss_scheme() {
         let cli =
-            CliArgs::parse_from(args(&["--data-engine-url", "wss://127.0.0.1:9001/engine"]));
+            CliArgs::parse_from(args(&["--data-engine-url", "wss://127.0.0.1:9001/engine"]))
+                .unwrap();
         let url = cli.data_engine_url.unwrap();
         assert_eq!(url.scheme(), "wss");
     }
@@ -79,7 +87,22 @@ mod tests {
             "ignored",
             "--data-engine-url",
             "ws://127.0.0.1:8888",
-        ]));
+        ]))
+        .unwrap();
         assert!(cli.data_engine_url.is_some());
+    }
+
+    #[test]
+    fn missing_value_returns_error() {
+        let result = CliArgs::parse_from(args(&["--data-engine-url"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires a value"));
+    }
+
+    #[test]
+    fn invalid_url_returns_error() {
+        let result = CliArgs::parse_from(args(&["--data-engine-url", "not a url"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid --data-engine-url"));
     }
 }

@@ -3,7 +3,7 @@ use super::{
     hub::{binance, bybit, hyperliquid, mexc, okex},
     venue_backend::{NativeBackend, VenueBackend},
 };
-use crate::{Kline, OpenInterest, Ticker, TickerInfo, TickerStats, Timeframe, Trade};
+use crate::{Kline, OpenInterest, Ticker, TickerInfo, TickerStats, Timeframe, Trade, depth::DepthPayload};
 
 use futures::{StreamExt, stream, stream::BoxStream};
 use std::{collections::HashMap, collections::HashSet, path::PathBuf, sync::Arc};
@@ -231,6 +231,26 @@ impl AdapterHandles {
             return Err(Self::missing_venue_error(venue));
         };
         backend.fetch_trades(ticker_info, from_time, data_path).await
+    }
+    /// Requests a fresh depth snapshot for the given ticker.
+    ///
+    /// The venue is derived from `ticker.exchange`; returns an error if no backend is configured
+    /// for that venue or if the venue does not support depth snapshots.
+    pub async fn request_depth_snapshot(
+        &self,
+        ticker: Ticker,
+    ) -> Result<DepthPayload, AdapterError> {
+        let venue = ticker.exchange.venue();
+        let Some(backend) = self.get_backend(venue) else {
+            return Err(Self::missing_venue_error(venue));
+        };
+        backend.request_depth_snapshot(ticker).await
+    }
+
+    /// Returns `Some(true/false)` when the backend for `venue` is configured, `None` otherwise.
+    pub async fn venue_health(&self, venue: Venue) -> Option<bool> {
+        let backend = self.get_backend(venue)?;
+        Some(backend.health().await)
     }
 }
 
