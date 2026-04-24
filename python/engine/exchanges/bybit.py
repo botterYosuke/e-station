@@ -519,15 +519,18 @@ class BybitWorker(ExchangeWorker):
 
                                 trades_data = msg.get("data", [])
                                 for t in trades_data:
-                                    trade = {
-                                        "price": t["p"],
-                                        "qty": t["v"],
-                                        "side": "sell" if t["S"] == "Sell" else "buy",
-                                        "ts_ms": t["T"],
-                                        "is_liquidation": False,
-                                    }
-                                    batch.append(trade)
-                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                    try:
+                                        trade = {
+                                            "price": t["p"],
+                                            "qty": t["v"],
+                                            "side": "sell" if t["S"] == "Sell" else "buy",
+                                            "ts_ms": t["T"],
+                                            "is_liquidation": False,
+                                        }
+                                        batch.append(trade)
+                                    except (KeyError, ValueError, TypeError) as exc:
+                                        log.debug("bybit trade parse error: %s", exc)
+                            except (orjson.JSONDecodeError, ValueError, TypeError) as exc:
                                 log.debug("bybit trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()

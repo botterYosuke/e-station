@@ -527,7 +527,13 @@ class MexcWorker(ExchangeWorker):
 
         for item in items:
             if item.get("symbol") == ticker:
-                return _parse(item)
+                result = _parse(item)
+                if result is None:
+                    await self._populate_contract_sizes()
+                    result = _parse(item)
+                    if result is None:
+                        raise ValueError(f"Contract size unknown for {ticker!r} after retry")
+                return result
 
         raise ValueError(f"Ticker {ticker!r} not found in MEXC futures stats response")
 
@@ -716,12 +722,13 @@ class MexcWorker(ExchangeWorker):
             )
             return
 
+        ticker_upper = ticker.upper()
         subscribe_msg = orjson.dumps(
-            {"method": "sub.depth", "param": {"symbol": ticker}}
+            {"method": "sub.depth", "param": {"symbol": ticker_upper}}
         ).decode()
         conn_counter = 0
-        sub_confirm_channel = f"{ticker}.sub.depth"
-        depth_channel = f"{ticker}.depth"
+        sub_confirm_channel = f"{ticker_upper}.sub.depth"
+        depth_channel = f"{ticker_upper}.depth"
 
         while not stop_event.is_set():
             conn_counter += 1

@@ -456,6 +456,8 @@ class OkexWorker(ExchangeWorker):
     async def fetch_depth_snapshot(self, ticker: str, market: str) -> dict:
         url = f"{_REST}/market/books?instId={ticker}&sz=400"
         data = await self._get_json(url, weight=1)
+        if not data.get("data"):
+            raise ValueError(f"Empty depth snapshot for {ticker!r}: {data}")
         entry = data["data"][0]
         return {
             "last_update_id": entry["seqId"],
@@ -538,15 +540,18 @@ class OkexWorker(ExchangeWorker):
                                     continue
 
                                 for t in msg["data"]:
-                                    trade = {
-                                        "price": t["px"],
-                                        "qty": t["sz"],
-                                        "side": t["side"],
-                                        "ts_ms": int(t["ts"]),
-                                        "is_liquidation": False,
-                                    }
-                                    batch.append(trade)
-                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                    try:
+                                        trade = {
+                                            "price": t["px"],
+                                            "qty": t["sz"],
+                                            "side": t["side"],
+                                            "ts_ms": int(t["ts"]),
+                                            "is_liquidation": False,
+                                        }
+                                        batch.append(trade)
+                                    except (KeyError, ValueError, TypeError) as exc:
+                                        log.debug("okex trade parse error: %s", exc)
+                            except (orjson.JSONDecodeError, ValueError, TypeError) as exc:
                                 log.debug("okex trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
@@ -593,6 +598,7 @@ class OkexWorker(ExchangeWorker):
             {"op": "subscribe", "args": [{"channel": "books", "instId": ticker}]}
         ).decode()
         conn_counter = 0
+        resync_streak = 0
 
         while not stop_event.is_set():
             conn_counter += 1
@@ -607,6 +613,7 @@ class OkexWorker(ExchangeWorker):
                 outbox=outbox,
             )
 
+            broke_for_resync = False
             try:
                 async with websockets.connect(_WS_PUBLIC) as ws:
                     await ws.send(subscribe_msg)
@@ -644,6 +651,7 @@ class OkexWorker(ExchangeWorker):
                             )
 
                             if syncer.needs_resync:
+                                broke_for_resync = True
                                 break
 
                         except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
@@ -665,7 +673,23 @@ class OkexWorker(ExchangeWorker):
                         "reason": str(exc),
                     }
                 )
+                resync_streak = 0
                 await asyncio.sleep(1.0)
+                continue
+
+            if broke_for_resync and not stop_event.is_set():
+                resync_streak += 1
+                backoff = min(1.0 * (2 ** (resync_streak - 1)), 30.0)
+                if resync_streak > 1:
+                    log.warning(
+                        "okex depth %s: resync streak %d, backing off %.1fs",
+                        ticker,
+                        resync_streak,
+                        backoff,
+                    )
+                await asyncio.sleep(backoff)
+            else:
+                resync_streak = 0
 
     # ------------------------------------------------------------------
     # WebSocket: stream_kline

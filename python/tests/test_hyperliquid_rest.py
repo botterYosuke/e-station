@@ -142,6 +142,8 @@ async def test_list_tickers_spot(worker: HyperliquidWorker, httpx_mock: HTTPXMoc
     # symbol must be the raw pair name (API identifier), NOT the display name.
     # Rust engine-client passes this directly as coin in subscribe/fetch commands.
     assert tickers[0]["symbol"] == "BTC/USDC"
+    # display_symbol strips "/" for UI presentation
+    assert tickers[0]["display_symbol"] == "BTCUSDC"
 
 
 @pytest.mark.asyncio
@@ -170,6 +172,52 @@ async def test_list_tickers_spot_excludes_zero_price(worker: HyperliquidWorker, 
     # Raw pair names, not display names
     assert "BTC/USDC" in symbols
     assert "DEAD/USDC" not in symbols
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_spot_at_pair_display_symbol(worker: HyperliquidWorker, httpx_mock: HTTPXMock):
+    """@N pair names should produce a display_symbol composed of base+quote token names."""
+    tokens = [
+        {"name": "USDC", "szDecimals": 8, "index": 0},
+        {"name": "ETH", "szDecimals": 8, "index": 2},
+    ]
+    pairs = [{"name": "@1", "tokens": [2, 0], "index": 1}]
+    ctxs = [{"dayNtlVlm": "1000.0", "markPx": "3000.0", "midPx": "3000.0", "prevDayPx": "2900.0"}]
+    httpx_mock.add_response(
+        url=_API_INFO,
+        method="POST",
+        json=[{"tokens": tokens, "universe": pairs}, ctxs],
+    )
+
+    tickers = await worker.list_tickers("spot")
+    assert len(tickers) == 1
+    assert tickers[0]["symbol"] == "@1"
+    assert tickers[0]["display_symbol"] == "ETHUSDC"
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_spot_ctxs_by_enumeration(
+    worker: HyperliquidWorker, httpx_mock: HTTPXMock
+):
+    """fetch_ticker_stats spot must index ctxs by enumeration position, not pair['index'].
+
+    If pair['index'] != enumeration position (e.g. index=10 but enumeration=0),
+    using pair['index'] would read ctxs[10] which is either wrong or out-of-bounds.
+    """
+    tokens = [{"name": "USDC", "szDecimals": 8, "index": 0}]
+    # pair has internal index=10 but is at enumeration position 0
+    pairs = [{"name": "BTC/USDC", "tokens": [1, 0], "index": 10}]
+    ctxs = [{"dayNtlVlm": "9999.0", "markPx": "70000.0", "midPx": "70000.0", "prevDayPx": "68000.0"}]
+    httpx_mock.add_response(
+        url=_API_INFO,
+        method="POST",
+        json=[{"tokens": tokens, "universe": pairs}, ctxs],
+    )
+
+    stats = await worker.fetch_ticker_stats("BTC/USDC", "spot")
+    # ctxs[0] has markPx=70000; ctxs[10] does not exist → wrong result or KeyError
+    assert float(stats["mark_price"]) == pytest.approx(70000.0)
+    assert float(stats["daily_volume"]) == pytest.approx(9999.0)
 
 
 # ---------------------------------------------------------------------------

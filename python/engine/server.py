@@ -104,6 +104,9 @@ class DataEngineServer:
         # Active stream tasks keyed by (venue, ticker, market, stream)
         self._streams: dict[tuple[str, str, str, str], _StreamHandle] = {}
 
+        # Active fetch tasks (FetchKlines, RequestDepthSnapshot, etc.)
+        self._fetch_tasks: set[asyncio.Task] = set()
+
         # Monotonic counter to produce a fresh base ssid per subscribe
         self._stream_counter = 0
 
@@ -390,6 +393,7 @@ class DataEngineServer:
 
         def _on_done(t: asyncio.Task) -> None:
             self._outbox_event.set()
+            self._streams.pop(key, None)
             if not t.cancelled():
                 exc = t.exception()
                 if exc is not None:
@@ -402,7 +406,6 @@ class DataEngineServer:
                             "message": f"Stream {key!r} terminated unexpectedly: {exc}",
                         }
                     )
-                    self._streams.pop(key, None)
 
         task.add_done_callback(_on_done)
 
@@ -453,7 +456,9 @@ class DataEngineServer:
                     }
                 )
 
-        asyncio.create_task(_run())
+        task = asyncio.create_task(_run())
+        self._fetch_tasks.add(task)
+        task.add_done_callback(self._fetch_tasks.discard)
 
     async def _do_list_tickers(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
@@ -637,6 +642,13 @@ class DataEngineServer:
         for handle in list(self._streams.values()):
             await handle.cancel()
         self._streams.clear()
+        for task in list(self._fetch_tasks):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._fetch_tasks.clear()
 
 
 # ---------------------------------------------------------------------------

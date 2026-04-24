@@ -395,13 +395,16 @@ impl VenueBackend for EngineClientBackend {
                                     .iter()
                                     .filter_map(|t| {
                                         let symbol = t.get("symbol")?.as_str()?;
+                                        let display_symbol =
+                                            t.get("display_symbol").and_then(|v| v.as_str());
                                         let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
                                         let min_qty = t.get("min_qty")?.as_f64()? as f32;
                                         let contract_size = t
                                             .get("contract_size")
                                             .and_then(|v| v.as_f64())
                                             .map(|v| v as f32);
-                                        let ticker = Ticker::new(symbol, exchange);
+                                        let ticker =
+                                            Ticker::new_with_display(symbol, exchange, display_symbol);
                                         let info = TickerInfo::new(
                                             ticker, min_tick, min_qty, contract_size,
                                         );

@@ -61,7 +61,13 @@
       "PowerShell(Stop-Process -Id 11304 -Force)",
       "PowerShell(Stop-Process -Id 18164 -Force -ErrorAction SilentlyContinue)",
       "Bash(python -)",
-      "Bash(python scripts/check_binance_ws.py \"wss://fstream.binance.com/stream?streams=btcusdt@aggTrade\" futures 15)"
+      "Bash(python scripts/check_binance_ws.py \"wss://fstream.binance.com/stream?streams=btcusdt@aggTrade\" futures 15)",
+      "PowerShell(git -C c:/Users/sasai/Documents/e-station diff HEAD -- python/engine/schemas.py python/engine/server.py)",
+      "PowerShell(git -C c:/Users/sasai/Documents/e-station status --short)",
+      "PowerShell(git -C c:/Users/sasai/Documents/e-station diff --stat HEAD)",
+      "PowerShell(git -C c:/Users/sasai/Documents/e-station show --stat c7b5153)",
+      "PowerShell(git -C c:/Users/sasai/Documents/e-station show c7b5153 -- python/engine/schemas.py python/engine/server.py | Out-String -Width 300)",
+      "PowerShell(git -C c:/Users/sasai/Documents/e-station show c7b5153 -- python/engine/schemas.py | Out-String -Width 300)"
     ]
   }
 }

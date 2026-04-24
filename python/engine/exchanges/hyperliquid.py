@@ -314,9 +314,8 @@ class HyperliquidWorker(ExchangeWorker):
     async def _list_tickers_spot(self) -> list[dict]:
         tokens, pairs, ctxs = await self._fetch_spot_metadata()
         result = []
-        for pair in pairs:
-            pair_index = pair.get("index", 0)
-            ctx = ctxs[pair_index] if pair_index < len(ctxs) else {}
+        for i, pair in enumerate(pairs):
+            ctx = ctxs[i] if i < len(ctxs) else {}
             price = _asset_price(ctx)
             if price <= 0.0:
                 continue
@@ -330,12 +329,11 @@ class HyperliquidWorker(ExchangeWorker):
             tick_size = _compute_tick_size(price, sz_decimals)
             min_qty = 10.0 ** (-sz_decimals) if sz_decimals > 0 else 1.0
 
-            # Use pair["name"] (e.g. "BTC/USDC", "@1") as the canonical API identifier.
-            # The Rust engine-client passes symbol directly as coin in subscribe/fetch commands,
-            # so this must match what Hyperliquid's REST/WS accepts.
+            display_sym = _create_display_symbol(pair["name"], tokens, token_indices)
             result.append(
                 {
                     "symbol": pair["name"],
+                    "display_symbol": display_sym,
                     "min_ticksize": tick_size,
                     "min_qty": min_qty,
                     "contract_size": None,
@@ -445,9 +443,8 @@ class HyperliquidWorker(ExchangeWorker):
         if market == "spot":
             tokens, pairs, ctxs = await self._fetch_spot_metadata()
             result = {}
-            for pair in pairs:
-                pair_index = pair.get("index", 0)
-                ctx = ctxs[pair_index] if pair_index < len(ctxs) else {}
+            for i, pair in enumerate(pairs):
+                ctx = ctxs[i] if i < len(ctxs) else {}
                 price = _asset_price(ctx)
                 if price <= 0.0:
                     continue
@@ -558,16 +555,19 @@ class HyperliquidWorker(ExchangeWorker):
                                 if msg.get("channel") != "trades":
                                     continue
                                 for t in msg.get("data", []):
-                                    # "A" = aggressor is seller → is_sell
-                                    trade = {
-                                        "price": str(t["px"]),
-                                        "qty": str(t["sz"]),
-                                        "side": "sell" if t["side"] == "A" else "buy",
-                                        "ts_ms": int(t["time"]),
-                                        "is_liquidation": False,
-                                    }
-                                    batch.append(trade)
-                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                                    try:
+                                        # "A" = aggressor is seller → is_sell
+                                        trade = {
+                                            "price": str(t["px"]),
+                                            "qty": str(t["sz"]),
+                                            "side": "sell" if t["side"] == "A" else "buy",
+                                            "ts_ms": int(t["time"]),
+                                            "is_liquidation": False,
+                                        }
+                                        batch.append(trade)
+                                    except (KeyError, ValueError, TypeError) as exc:
+                                        log.debug("hyperliquid trade parse error: %s", exc)
+                            except (orjson.JSONDecodeError, ValueError, TypeError) as exc:
                                 log.debug("hyperliquid trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()
