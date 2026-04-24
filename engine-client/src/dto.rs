@@ -108,11 +108,15 @@ pub enum EngineEvent {
         venue: String,
         ticker: String,
         stream: String,
+        #[serde(default)]
+        market: String,
     },
     Disconnected {
         venue: String,
         ticker: String,
         stream: String,
+        #[serde(default)]
+        market: String,
         reason: Option<String>,
     },
     Trades {

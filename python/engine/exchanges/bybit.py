@@ -511,6 +511,7 @@ class BybitWorker(ExchangeWorker):
                             "venue": "bybit",
                             "ticker": ticker,
                             "stream": "trade",
+                            "market": market,
                         }
                     )
 
@@ -567,6 +568,7 @@ class BybitWorker(ExchangeWorker):
                         "venue": "bybit",
                         "ticker": ticker,
                         "stream": "trade",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -619,6 +621,7 @@ class BybitWorker(ExchangeWorker):
                                 "venue": "bybit",
                                 "ticker": ticker,
                                 "stream": "depth",
+                                "market": market,
                             }
                         )
 
@@ -669,6 +672,7 @@ class BybitWorker(ExchangeWorker):
                             "venue": "bybit",
                             "ticker": ticker,
                             "stream": "depth",
+                            "market": market,
                             "reason": str(exc),
                         }
                     )
@@ -714,6 +718,7 @@ class BybitWorker(ExchangeWorker):
                             "venue": "bybit",
                             "ticker": ticker,
                             "stream": f"kline_{timeframe}",
+                            "market": market,
                         }
                     )
                     async for raw in ws:
@@ -762,6 +767,7 @@ class BybitWorker(ExchangeWorker):
                         "venue": "bybit",
                         "ticker": ticker,
                         "stream": f"kline_{timeframe}",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )

@@ -72,7 +72,9 @@
       "Bash(git diff *)",
       "Bash(sed -n '110,130p' engine-client/src/dto.rs)",
       "Bash(sed -n '260,285p' python/engine/schemas.py)",
-      "Bash(sed -n '280,310p' python/engine/server.py)"
+      "Bash(sed -n '280,310p' python/engine/server.py)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(p['name'], p['version']\\) for p in d['packages']]\")",
+      "PowerShell(cargo test -p flowsurface-engine-client 2>&1)"
     ]
   }
 }

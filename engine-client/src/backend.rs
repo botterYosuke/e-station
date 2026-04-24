@@ -136,8 +136,9 @@ impl VenueBackend for EngineClientBackend {
                         };
                         yield Event::KlineReceived(stream_kind, k);
                     }
-                    Ok(EngineEvent::Disconnected { venue: ev_venue, reason, .. }) => {
+                    Ok(EngineEvent::Disconnected { venue: ev_venue, market: ev_market, reason, .. }) => {
                         if ev_venue != venue { continue; }
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
                         yield Event::Disconnected(exchange, reason.unwrap_or_default());
                         return;
                     }
@@ -212,8 +213,9 @@ impl VenueBackend for EngineClientBackend {
                         let stream_kind = StreamKind::Trades { ticker_info: *ticker_info };
                         yield Event::TradesReceived(stream_kind, ts, parsed.into_boxed_slice());
                     }
-                    Ok(EngineEvent::Disconnected { venue: ev_venue, reason, .. }) => {
+                    Ok(EngineEvent::Disconnected { venue: ev_venue, market: ev_market, reason, .. }) => {
                         if ev_venue != venue { continue; }
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
                         yield Event::Disconnected(exchange, reason.unwrap_or_default());
                         return;
                     }
@@ -351,9 +353,10 @@ impl VenueBackend for EngineClientBackend {
                             .await;
                     }
 
-                    Ok(EngineEvent::Disconnected { venue: ev_venue, ticker, .. }) => {
+                    Ok(EngineEvent::Disconnected { venue: ev_venue, ticker, market: ev_market, reason, .. }) => {
                         if ev_venue != venue || ticker != ticker_sym { continue; }
-                        yield Event::Disconnected(exchange, "engine disconnected".to_string());
+                        if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
+                        yield Event::Disconnected(exchange, reason.unwrap_or_else(|| "engine disconnected".to_string()));
                         return;
                     }
 
@@ -747,6 +750,12 @@ impl VenueBackend for EngineClientBackend {
                             return Err(AdapterError::InvalidRequest(format!(
                                 "{code}: {message}"
                             )));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            log::warn!("fetch_trades: broadcast lagged by {n} — aborting to avoid partial result");
+                            return Err(AdapterError::WebsocketError(
+                                format!("fetch_trades broadcast lagged by {n}")
+                            ));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             return Err(AdapterError::EngineRestarting);

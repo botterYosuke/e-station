@@ -590,13 +590,14 @@ class MexcWorker(ExchangeWorker):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         if market == "spot":
-            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": "trade"})
+            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": "trade", "market": market})
             outbox.append(
                 {
                     "event": "Disconnected",
                     "venue": "mexc",
                     "ticker": ticker,
                     "stream": "trade",
+                    "market": market,
                     "reason": "MEXC spot trade WebSocket not supported",
                 }
             )
@@ -641,6 +642,7 @@ class MexcWorker(ExchangeWorker):
                             "venue": "mexc",
                             "ticker": ticker,
                             "stream": "trade",
+                            "market": market,
                         }
                     )
 
@@ -701,6 +703,7 @@ class MexcWorker(ExchangeWorker):
                         "venue": "mexc",
                         "ticker": ticker,
                         "stream": "trade",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -721,13 +724,14 @@ class MexcWorker(ExchangeWorker):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         if market == "spot":
-            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": "depth"})
+            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": "depth", "market": market})
             outbox.append(
                 {
                     "event": "Disconnected",
                     "venue": "mexc",
                     "ticker": ticker,
                     "stream": "depth",
+                    "market": market,
                     "reason": "MEXC spot depth WebSocket not supported",
                 }
             )
@@ -764,6 +768,7 @@ class MexcWorker(ExchangeWorker):
                             "venue": "mexc",
                             "ticker": ticker,
                             "stream": "depth",
+                            "market": market,
                         }
                     )
 
@@ -789,6 +794,7 @@ class MexcWorker(ExchangeWorker):
                                                 "venue": "mexc",
                                                 "ticker": ticker,
                                                 "stream": "depth",
+                                                "market": market,
                                                 "reason": f"snapshot fetch failed: {exc}",
                                             }
                                         )
@@ -826,6 +832,7 @@ class MexcWorker(ExchangeWorker):
                         "venue": "mexc",
                         "ticker": ticker,
                         "stream": "depth",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -847,13 +854,14 @@ class MexcWorker(ExchangeWorker):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         if market == "spot":
-            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": f"kline_{timeframe}"})
+            outbox.append({"event": "Connected", "venue": "mexc", "ticker": ticker, "stream": f"kline_{timeframe}", "market": market})
             outbox.append(
                 {
                     "event": "Disconnected",
                     "venue": "mexc",
                     "ticker": ticker,
                     "stream": f"kline_{timeframe}",
+                    "market": market,
                     "reason": "MEXC spot kline WebSocket not supported",
                 }
             )
@@ -885,6 +893,7 @@ class MexcWorker(ExchangeWorker):
                             "venue": "mexc",
                             "ticker": ticker,
                             "stream": f"kline_{timeframe}",
+                            "market": market,
                         }
                     )
 
@@ -944,6 +953,7 @@ class MexcWorker(ExchangeWorker):
                         "venue": "mexc",
                         "ticker": ticker,
                         "stream": f"kline_{timeframe}",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )

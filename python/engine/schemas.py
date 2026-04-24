@@ -150,6 +150,7 @@ class Connected(IpcMessage):
     venue: str
     ticker: str
     stream: str
+    market: str = ""
 
 
 class Disconnected(IpcMessage):
@@ -159,6 +160,7 @@ class Disconnected(IpcMessage):
     venue: str
     ticker: str
     stream: str
+    market: str = ""
     reason: str | None = None
 
 

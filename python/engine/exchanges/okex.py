@@ -526,6 +526,7 @@ class OkexWorker(ExchangeWorker):
                             "venue": "okex",
                             "ticker": ticker,
                             "stream": "trade",
+                            "market": market,
                         }
                     )
 
@@ -584,6 +585,7 @@ class OkexWorker(ExchangeWorker):
                         "venue": "okex",
                         "ticker": ticker,
                         "stream": "trade",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -633,6 +635,7 @@ class OkexWorker(ExchangeWorker):
                             "venue": "okex",
                             "ticker": ticker,
                             "stream": "depth",
+                            "market": market,
                         }
                     )
 
@@ -683,6 +686,7 @@ class OkexWorker(ExchangeWorker):
                         "venue": "okex",
                         "ticker": ticker,
                         "stream": "depth",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -742,6 +746,7 @@ class OkexWorker(ExchangeWorker):
                             "venue": "okex",
                             "ticker": ticker,
                             "stream": f"kline_{timeframe}",
+                            "market": market,
                         }
                     )
 
@@ -795,6 +800,7 @@ class OkexWorker(ExchangeWorker):
                         "venue": "okex",
                         "ticker": ticker,
                         "stream": f"kline_{timeframe}",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )

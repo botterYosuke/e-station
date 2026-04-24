@@ -547,6 +547,7 @@ class HyperliquidWorker(ExchangeWorker):
                             "venue": "hyperliquid",
                             "ticker": ticker,
                             "stream": "trade",
+                            "market": market,
                         }
                     )
 
@@ -601,6 +602,7 @@ class HyperliquidWorker(ExchangeWorker):
                         "venue": "hyperliquid",
                         "ticker": ticker,
                         "stream": "trade",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -651,6 +653,7 @@ class HyperliquidWorker(ExchangeWorker):
                             "venue": "hyperliquid",
                             "ticker": ticker,
                             "stream": "depth",
+                            "market": market,
                         }
                     )
 
@@ -684,6 +687,7 @@ class HyperliquidWorker(ExchangeWorker):
                         "venue": "hyperliquid",
                         "ticker": ticker,
                         "stream": "depth",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -731,6 +735,7 @@ class HyperliquidWorker(ExchangeWorker):
                             "venue": "hyperliquid",
                             "ticker": ticker,
                             "stream": f"kline_{timeframe}",
+                            "market": market,
                         }
                     )
 
@@ -777,6 +782,7 @@ class HyperliquidWorker(ExchangeWorker):
                         "venue": "hyperliquid",
                         "ticker": ticker,
                         "stream": f"kline_{timeframe}",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )

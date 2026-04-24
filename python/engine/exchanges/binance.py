@@ -731,6 +731,7 @@ class BinanceWorker(ExchangeWorker):
                             "venue": "binance",
                             "ticker": ticker,
                             "stream": "trade",
+                            "market": market,
                         }
                     )
 
@@ -778,6 +779,7 @@ class BinanceWorker(ExchangeWorker):
                         "venue": "binance",
                         "ticker": ticker,
                         "stream": "trade",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -829,6 +831,7 @@ class BinanceWorker(ExchangeWorker):
                             "venue": "binance",
                             "ticker": ticker,
                             "stream": "depth",
+                            "market": market,
                         }
                     )
 
@@ -874,6 +877,7 @@ class BinanceWorker(ExchangeWorker):
                         "venue": "binance",
                         "ticker": ticker,
                         "stream": "depth",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
@@ -913,6 +917,7 @@ class BinanceWorker(ExchangeWorker):
                             "venue": "binance",
                             "ticker": ticker,
                             "stream": f"kline_{timeframe}",
+                            "market": market,
                         }
                     )
                     async for raw in ws:
@@ -956,6 +961,7 @@ class BinanceWorker(ExchangeWorker):
                         "venue": "binance",
                         "ticker": ticker,
                         "stream": f"kline_{timeframe}",
+                        "market": market,
                         "reason": str(exc),
                     }
                 )
