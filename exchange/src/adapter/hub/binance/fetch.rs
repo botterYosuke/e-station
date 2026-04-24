@@ -43,6 +43,8 @@ struct DeOpenInterest {
 
 #[derive(Deserialize, Debug)]
 struct DeTrade {
+    #[serde(rename = "a")]
+    id: u64,
     #[serde(rename = "T")]
     time: u64,
     #[serde(rename = "p", deserialize_with = "de_string_to_number")]
@@ -539,6 +541,7 @@ async fn fetch_intraday_trades(
     hub: &mut HttpHub<BinanceLimiter>,
     ticker_info: TickerInfo,
     from: u64,
+    to: u64,
 ) -> Result<Vec<Trade>, AdapterError> {
     let ticker = ticker_info.ticker;
     let (symbol_str, market_type) = ticker.to_full_symbol_and_type();
@@ -549,26 +552,51 @@ async fn fetch_intraday_trades(
         MarketKind::InversePerps => (format!("{INVERSE_PERP_DOMAIN}/dapi/v1/aggTrades"), 20),
     };
 
-    let mut url = format!("{base_url}?symbol={symbol_str}&limit=1000");
-    url.push_str(&format!("&startTime={from}"));
-
-    let de_trades: Vec<DeTrade> = hub.http_json_with_limiter(&url, weight, None, None).await?;
-
     let qty_norm = QtyNormalization::with_raw_qty_unit(
         volume_size_unit() == SizeUnit::Quote,
         ticker_info,
         raw_qty_unit_from_market_type(market_type),
     );
 
-    let trades = de_trades
-        .into_iter()
-        .map(|de_trade| Trade {
+    const PAGE_LIMIT: usize = 1000;
+    // Safety cap against runaway pagination. 10k pages × 1k trades = 10M trades,
+    // which already exceeds any plausible single-request range.
+    const MAX_PAGES: usize = 10_000;
+
+    let mut trades: Vec<Trade> = Vec::new();
+    let mut from_id: Option<u64> = None;
+
+    for _ in 0..MAX_PAGES {
+        let url = match from_id {
+            None => format!("{base_url}?symbol={symbol_str}&limit={PAGE_LIMIT}&startTime={from}"),
+            Some(id) => format!("{base_url}?symbol={symbol_str}&limit={PAGE_LIMIT}&fromId={id}"),
+        };
+
+        let page: Vec<DeTrade> = hub.http_json_with_limiter(&url, weight, None, None).await?;
+        if page.is_empty() {
+            break;
+        }
+
+        let page_len = page.len();
+        let last_id = page.last().map(|t| t.id);
+        let last_time = page.last().map(|t| t.time).unwrap_or(0);
+
+        trades.extend(page.into_iter().filter(|t| t.time <= to).map(|de_trade| Trade {
             time: de_trade.time,
             is_sell: de_trade.is_sell,
             price: Price::from_f32(de_trade.price).round_to_min_tick(ticker_info.min_ticksize),
             qty: qty_norm.normalize_qty(de_trade.qty, de_trade.price),
-        })
-        .collect();
+        }));
+
+        if page_len < PAGE_LIMIT || last_time > to {
+            break;
+        }
+
+        match last_id {
+            Some(id) => from_id = Some(id + 1),
+            None => break,
+        }
+    }
 
     Ok(trades)
 }
@@ -690,7 +718,7 @@ pub(super) async fn fetch_trades(
         .and_utc();
 
     if from_time as i64 >= today_midnight.timestamp_millis() {
-        return fetch_intraday_trades(hub, ticker_info, from_time).await;
+        return fetch_intraday_trades(hub, ticker_info, from_time, to_time).await;
     }
 
     let from_date = chrono::DateTime::from_timestamp_millis(from_time as i64)
@@ -704,7 +732,7 @@ pub(super) async fn fetch_trades(
             trades.retain(|t| t.time >= from_time);
 
             if let Some(latest_trade) = trades.last().copied() {
-                match fetch_intraday_trades(hub, ticker_info, latest_trade.time).await {
+                match fetch_intraday_trades(hub, ticker_info, latest_trade.time, to_time).await {
                     Ok(intraday_trades) => {
                         trades.extend(intraday_trades.into_iter().filter(|t| t.time <= to_time));
                     }
@@ -721,7 +749,7 @@ pub(super) async fn fetch_trades(
                 "Historical trades fetch failed: {}, falling back to intraday fetch",
                 e
             );
-            fetch_intraday_trades(hub, ticker_info, from_time).await
+            fetch_intraday_trades(hub, ticker_info, from_time, to_time).await
         }
     }
 }
