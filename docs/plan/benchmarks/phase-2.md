@@ -24,7 +24,7 @@
 ### 2.1 IPC 追加レイテンシ
 
 **手順**:
-1. `python -m data` を起動し Binance BTCUSDT に subscribe。
+1. `python -m engine` を起動し Binance BTCUSDT に subscribe。
 2. `--data-engine-url ws://127.0.0.1:<port>` で flowsurface を起動。
 3. Python 側で `EngineEvent.Trades` 送出時刻 (`sent_at_ms`) をペイロードに付与（デバッグ用 flag）。
 4. Rust 側で受信時刻 `recv_at_ms = SystemTime::now()` を記録し `recv_at_ms - sent_at_ms` を集計。
@@ -88,7 +88,7 @@ Get-Process python | Select-Object CPU, WorkingSet64
 
 ### 3.1 前提
 
-- `python -m data` が起動済みで環境変数 `FLOWSURFACE_ENGINE_TOKEN` / `FLOWSURFACE_ENGINE_PORT` が設定済み。
+- `python -m engine` が起動済みで環境変数 `FLOWSURFACE_ENGINE_TOKEN` / `FLOWSURFACE_ENGINE_PORT` が設定済み。
 - `flowsurface --data-engine-url ws://127.0.0.1:<port>` で起動。
 - Binance BTCUSDT のチャートが描画されていること。
 
