@@ -58,21 +58,42 @@
 
 ## フェーズ 2: Rust 側に engine-client を実装し Binance を切替
 
-- [ ] `engine-client` crate（または `exchange/engine_backend` モジュール）に IPC DTO と WebSocket クライアントを実装。
-- [ ] 起動ハンドシェイク（`Hello` / `Ready`、[spec.md §4.5](./spec.md#45-起動ハンドシェイク)）と接続トークン受け渡し（[spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御)）を実装。
-- [ ] `EngineClientBackend` が `VenueBackend` trait を実装（DTO ⇔ `exchange::Event` / `Kline` / `OpenInterest` / `Arc<Depth>` / `Box<[Trade]>` の相互変換もここで行う）。depth は `session_id` / `sequence_id` で gap 検知し、不一致なら `RequestDepthSnapshot` を送る（[spec.md §4.4](./spec.md#44-バックプレッシャと整合性保証)）。
-- [ ] **Python プロセス監視・自動再起動・状態再投入**（[spec.md §5.3](./spec.md#53-python-プロセス復旧プロトコル)）を実装:
-  - 購読セット・進行中フェッチ・プロキシ設定を Rust 側に保持。
-  - 異常終了検知 → 指数バックオフで spawn → `Hello`/`Ready` → `SetProxy` → 購読再送。
-  - 進行中フェッチは `EngineRestarting` で fail し UI にリトライさせる。
-  - UI に「データエンジン再起動中」ステータスを出す。
-- [ ] `--data-engine-url` 指定時に Binance の backend を `EngineClientBackend` に差し替える（フェーズ 0.5 で入れた venue 単位切替を利用）。
-- [ ] 起動時に Python サブプロセスを spawn する `src/engine/process.rs` を追加（オプトイン）。ポート・接続トークンは stdin 経由で Python に渡し、プロキシ資格情報は `Ready` 受領後の IPC `SetProxy` で渡す（[spec.md §5.4](./spec.md#54-プロキシ資格情報の受け渡し)）。
-- [ ] UI 側コードはゼロ変更を目標（`AdapterHandles` の API シェイプを維持）。ただし「エンジン再起動中」ステータス表示のための軽微な UI 追加は許容。
-- [ ] レイテンシ・CPU 使用率を旧構成と比較。
-- [ ] 障害試験: Python を kill → 自動復旧 → 板が snapshot で再同期されることを手動＋自動テストで確認。
+> **部分完了** (2026-04-24, ブランチ `phase-1/python-data-engine`)
+
+- [x] `engine-client` crate（`flowsurface-engine-client`）を `engine-client/` に新規作成し IPC DTO と WebSocket クライアントを実装。
+  - `engine-client/src/dto.rs`: `Command` / `EngineEvent` / `TradeMsg` / `KlineMsg` / `DepthLevel` / `OiPoint`
+  - `engine-client/src/convert.rs`: DTO ⇔ `exchange::` ドメイン型変換（`Trade` / `Kline` / `OpenInterest` / `Arc<Depth>`）
+  - `engine-client/src/error.rs`: `EngineClientError` (thiserror)
+- [x] 起動ハンドシェイク（`Hello` / `Ready`）と接続トークン受け渡しを実装（`engine-client/src/connection.rs`）。
+  - schema_major 不一致時 `SchemaMismatch` エラー
+  - broadcast channel でイベントをファンアウト
+- [x] `EngineClientBackend` が `VenueBackend` trait を実装（`engine-client/src/backend.rs`）。
+  - kline_stream / trade_stream / depth_stream
+  - fetch_klines / fetch_open_interest / fetch_trades / request_depth_snapshot
+  - depth は `session_id` / `sequence_id` で gap 検知し `RequestDepthSnapshot` を送る
+- [x] `DepthTracker` 状態機械で gap 検知（`engine-client/src/depth_tracker.rs`）。
+- [x] **Python プロセス監視・自動再起動・状態再投入** の骨格実装（`engine-client/src/process.rs`）:
+  - `PythonProcess::spawn()`: stdin 経由で `{port, token}` を渡す
+  - `ProcessManager::run_with_recovery()`: 指数バックオフで自動再起動・購読再送
+- [x] Workspace `Cargo.toml` に `engine-client` を追加。
+- [x] 統合テスト 36 件 全 PASS (`cargo test -p flowsurface-engine-client`)。
+- [x] `cargo clippy -p flowsurface-engine-client -- -D warnings` warning なし。
+
+**未完了（次フェーズで着手）**:
+- [ ] `--data-engine-url` CLI フラグで `src/main.rs` から `EngineClientBackend` を差し替える実装。
+- [ ] UI 側「エンジン再起動中」ステータス表示。
+- [ ] レイテンシ・CPU 使用率の実測比較。
+- [ ] 障害試験（Python kill → 自動復旧 → 板再同期の手動確認）。
 
 **完了条件**: フラグ ON で Binance チャートが Python 経由で正しく描画される。**加えて Python を kill しても自動復旧し、購読と板整合性が回復する**。
+
+### 設計判断・ハマりどころ・Tips
+
+- **FetchError は外部から構築不可**: `exchange::error::FetchError` のフィールドは `pub(crate)` のため `engine-client` からは構築できない。`AdapterError::InvalidRequest(String)` を代替として使用。
+- **async_stream クレート**: `VenueBackend` の `BoxStream<'static, Event>` 戻り値は `async_stream::stream!` マクロで実装。futures の `channel` パターンより記述が簡潔。
+- **broadcast channel のラグ対策**: 容量 512 で設定。高頻度の depth diff はラグが発生しうるため `RecvError::Lagged` をログ警告でハンドリング。
+- **テストの crate 名**: package name `flowsurface-engine-client` → テスト内では `flowsurface_engine_client`（ハイフンがアンダースコアに変換される）。
+- **tokio-tungstenite 0.26**: `Message::Text` は `String` を直接受け取らず `.into()` が必要（`Utf8Bytes` ラッパー）。
 
 ## フェーズ 3: 残り取引所の Python 移植
 
