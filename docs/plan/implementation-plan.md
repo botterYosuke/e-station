@@ -94,7 +94,8 @@
 - [x] `docs/plan/benchmarks/phase-2.md` 作成（計測手順・合格ライン・障害試験手順を記録）。
 - [x] IPC ハンドシェイク・`FetchKlines` REST 経由の疎通確認（2026-04-24）。
 - [x] `Subscribe(stream=trade)` コマンドが IPC 経由でエンジンに到達することを確認（2026-04-24）。
-- [ ] Binance futures WS レート制限解除後に `test_trade_stream.py` で Trades 受信を確認し、GUI で chart 描画を目視確認。
+- [x] `test_trade_stream.py` で Trades 受信確認（spot endpoint で 30 件 PASS, 2026-04-24）。
+- [ ] futures throttle 解除後に `flowsurface --data-engine-url` で GUI chart 描画を目視確認。
 - [ ] レイテンシ・CPU 使用率の実測比較（Python spawn モード配線後に実施）。
 - [ ] 障害試験（Python kill → 自動復旧 → 板再同期の手動確認、spawn モード配線後に実施）。
 
@@ -161,9 +162,14 @@ Binance と異なり WS 自身がスナップショットを配信する:
 3. gap 検知 → DepthGap 送出 + `needs_resync=True` → stream_depth が WS 再接続
 4. スナップショット到着前のバッファリング (MAX_PENDING=512) → スナップショット後にリプレイ
 
+#### バグ修正（2026-04-24、テスト追加で検出・修正済み）
+
+- **Bug #1** `fetch_open_interest` が `category=linear` 固定だったため inverse_perp で誤 API を叩いていた → `_market_category(market)` を使う形に修正。テスト `test_fetch_open_interest_inverse_uses_inverse_category` 追加。
+- **Bug #2** `list_tickers` が Bybit の `status` フィールドを無視しており、`PreLaunch` 等の非稼働銘柄が UI に混入する恐れがあった → `status != "Trading"` の場合は除外するよう修正。テスト `test_list_tickers_excludes_non_trading_status` 追加。
+
 #### Tips
 
-- **Bybit OI は linear のみ**: `category=linear` 固定。inverse 板の OI は API 仕様が異なるため空リストを返す。
+- **Bybit OI は linear/inverse 両対応**: `category` は `_market_category(market)` で決定。ただし inverse OI は spot 同様に空リストを返さず `category=inverse` で正しく取得できる。
 - **Depth REST snapshot**: `RequestDepthSnapshot` op 対応のため `GET /v5/market/orderbook?category={cat}&symbol={sym}&limit=200` を `fetch_depth_snapshot` で実装。`result.u` を `last_update_id` として使用。
 - **Depth level**: `orderbook.200` トピックを使用（200レベル、100ms 更新）。更小レベル (50) も選択可。
 - **ticker_stats volume**: Bybit の `volume24h` は base asset 単位のため、`volume24h * lastPrice` で USD 換算している。

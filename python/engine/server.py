@@ -572,10 +572,11 @@ class DataEngineServer:
 
 
 def _market(_ticker: str) -> str:
-    """Infer market type from ticker symbol (default: linear_perp for all venues)."""
+    """Infer market type from ticker symbol (Phase 1: all Binance = linear_perp)."""
     return "linear_perp"
 
 
-def _default_market(_venue: str) -> str:
-    """Default market type per venue for list/metadata ops."""
+def _default_market(venue: str) -> str:
+    if venue == "binance":
+        return "linear_perp"
     return "linear_perp"

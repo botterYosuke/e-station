@@ -153,28 +153,28 @@ GPU: NVIDIA GeForce RTX 3050 6GB (Vulkan backend)
 - ✅ IPC ハンドシェイク（Hello/Ready）が Rust ↔ Python 間で正常完了
 - ✅ pytest 33 件全 PASS（バイナリフレーム修正の回帰なし）
 
-### 3.2 未確認（Binance futures WS レート制限中）
+### 3.2 確認済み／未確認
 
-**確認済み（IPC プロトコル層）**:
+**確認済み（IPC プロトコル層 — 2026-04-24）**:
 - ✅ `test_trade_stream.py` → Hello/Ready ハンドシェイク成功
 - ✅ `Subscribe(venue=binance, ticker=BTCUSDT, stream=trade)` をエンジンが受信
-- ⬜ `Trades` イベント受信 — エンジンが `fstream.binance.com` へ接続試行するが
-  TCP 接続後データなし（IP レート制限中、30 s タイムアウト）
+- ✅ `Trades` イベント受信 — 30 件 PASS（spot endpoint で確認）
+  - batch max 89 trades / p50 interval 233 ms / p95 interval 914 ms
 
 **Binance WS 確認結果（2026-04-24)**:
 - spot (`stream.binance.com:9443`) — ✅ 接続・データ受信 OK（`price=77702`, `qty=0.024`）
-- futures (`fstream.binance.com`) — ⬜ TCP 接続成功・データなし（30 s timeout）
+- futures (`fstream.binance.com`) — ⬜ TCP 接続成功・データなし（デバッグ中の過剰接続による IP throttle が継続）
+  - 本番 flowsurface GUI での chart 描画確認は futures throttle 解除後に実施
 
-**再試験手順**（レート制限解除後）:
-```powershell
-python scripts/test_trade_stream.py 19876 <token>   # 30 件の Trades イベントを確認
-python scripts/check_binance_ws.py                   # futures WS 直接疎通確認
-```
+**発見バグ (Bug 3)**: `stream_trades` の `asyncio.wait_for(ws.recv(), 0.033)` の短時間キャンセルループが
+Windows IocpProactor で WS 受信バッファを破壊。`async for raw in ws` + 別タスクの定期フラッシュに修正。
+pytest 52/52 PASS で回帰なし。
 
-**その他未確認**:
+**未確認**:
 - ⬜ Python kill → 「データエンジン再起動中」Toast 表示
 - ⬜ depth 再同期（DepthGap → 板復元）
 - ⬜ 自動復旧（spawn モード未配線）
+- ⬜ GUI chart 描画（futures WS throttle 解除後）
 
 ### 3.3 通常環境での起動手順
 
@@ -197,14 +197,16 @@ $env:FLOWSURFACE_ENGINE_TOKEN = "my-secret-token"
 |---|---|---|
 | IPC 接続・Handshake | 成功 (< 30 ms) | ✅ |
 | HybridVenueBackend 配線 | 成功 | ✅ |
+| IPC trade stream（30 件受信, spot endpoint） | PASS | ✅ |
 | IPC p50 レイテンシ（FetchKlines, REST 込み） | 10.91 ms | 参考値 |
 | IPC p50 レイテンシ（純 IPC オーバーヘッド, 推定） | < 1 ms | ✅ 推定合格 |
 | IPC p99 レイテンシ（純 IPC オーバーヘッド, 推定） | < 1 ms | ✅ 推定合格 |
 | 自動復旧時間 | 未計測（spawn モード未配線） | ⬜ |
-| depth 再同期 | 未計測（WS レート制限中） | ⬜ |
+| depth 再同期 | 未計測（futures WS throttle 中） | ⬜ |
 | CPU 増加率 | 計測中（baseline 未記録のため比較不可） | ⬜ |
 | depth gap 検知漏れ | 未計測 | ⬜ |
-| pytest 回帰 | 33/33 PASS | ✅ |
+| GUI chart 描画 | 未確認（futures WS throttle 中） | ⬜ |
+| pytest 回帰 | 52/52 PASS | ✅ |
 
 ---
 
@@ -245,3 +247,33 @@ let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, perform_handshake(...))
     .await
     .map_err(|_| EngineClientError::HandshakeTimeout)??;
 ```
+
+### Bug 3: stream_trades の recv キャンセルループが Windows で WS 受信を破壊（修正済み, 2026-04-24）
+
+**原因**: `stream_trades` が `asyncio.wait_for(ws.recv(), timeout=0.033)` を 33 ms ごとに繰り返し
+キャンセルするパターンを使用していた。Windows の IocpProactor 上では、
+この短周期キャンセルが `websockets` ライブラリ内部の受信バッファを破壊し、
+接続は維持されるが以降のメッセージが一切届かなくなる。
+`stream_depth` / `stream_kline` は当初から `async for raw in ws` を使用していたため影響なし。
+
+**症状**: エンジンが Binance WS に接続し `Connected` イベントを送出するが、
+その後 `Trades` イベントが IPC クライアントに一切届かない（30 秒タイムアウト）。
+
+**修正**: `python/engine/exchanges/binance.py` の `stream_trades` を
+`async for raw in ws` + 別 asyncio タスクでの定期フラッシュに書き換え。
+```python
+# Before (broken on Windows IocpProactor)
+raw = await asyncio.wait_for(ws.recv(), timeout=_TRADE_BATCH_INTERVAL)
+
+# After
+flush_task = asyncio.create_task(_flush_periodically())
+try:
+    async for raw in ws:
+        batch.append(...)
+finally:
+    flush_task.cancel()
+    _flush_batch()
+```
+
+**検証**: spot endpoint (`stream.binance.com:9443`) で `test_trade_stream.py` PASS (30 件受信)。
+pytest 52/52 PASS。
