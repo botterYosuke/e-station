@@ -243,6 +243,21 @@ async def test_fetch_klines_unknown_timeframe_raises(worker):
 
 
 @pytest.mark.asyncio
+async def test_fetch_klines_clamps_limit_to_okx_max(worker, httpx_mock: HTTPXMock):
+    """Bug #1: limit > 300 must be clamped to 300 (OKX max for /market/history-candles)."""
+    httpx_mock.add_response(
+        url=re.compile(r".*/market/history-candles.*"),
+        json=_candles(
+            ["1700000000000", "30000", "30100", "29900", "30050", "10.5", "0", "0", "1"],
+        ),
+    )
+    await worker.fetch_klines("BTC-USDT", "spot", "1m", limit=400)
+    req_url = str(httpx_mock.get_requests()[0].url)
+    assert "limit=300" in req_url, f"Expected limit=300 in URL, got: {req_url}"
+    assert "limit=400" not in req_url
+
+
+@pytest.mark.asyncio
 async def test_fetch_klines_is_closed_from_confirm_field(worker, httpx_mock: HTTPXMock):
     httpx_mock.add_response(
         url=re.compile(r".*/market/history-candles.*"),
@@ -349,6 +364,36 @@ async def test_fetch_ticker_stats_not_found_raises(worker, httpx_mock: HTTPXMock
     )
     with pytest.raises(ValueError, match="not found"):
         await worker.fetch_ticker_stats("BTC-USDT", "spot")
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_all_linear_excludes_inverse(worker, httpx_mock: HTTPXMock):
+    """Bug #2: __all__ for linear_perp must not include inverse contracts."""
+    httpx_mock.add_response(
+        url=f"{_REST}/market/tickers?instType=SWAP",
+        json=_tickers(
+            {"instId": "BTC-USDT-SWAP", "last": "30000", "open24h": "29000", "volCcy24h": "100"},
+            {"instId": "BTC-USD-SWAP", "last": "30000", "open24h": "29000", "volCcy24h": "50"},
+        ),
+    )
+    result = await worker.fetch_ticker_stats("__all__", "linear_perp")
+    assert "BTC-USDT-SWAP" in result
+    assert "BTC-USD-SWAP" not in result, "inverse contract must not appear in linear_perp __all__"
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_all_inverse_excludes_linear(worker, httpx_mock: HTTPXMock):
+    """Bug #2: __all__ for inverse_perp must not include linear contracts."""
+    httpx_mock.add_response(
+        url=f"{_REST}/market/tickers?instType=SWAP",
+        json=_tickers(
+            {"instId": "BTC-USDT-SWAP", "last": "30000", "open24h": "29000", "volCcy24h": "100"},
+            {"instId": "BTC-USD-SWAP", "last": "30000", "open24h": "29000", "volCcy24h": "50"},
+        ),
+    )
+    result = await worker.fetch_ticker_stats("__all__", "inverse_perp")
+    assert "BTC-USD-SWAP" in result
+    assert "BTC-USDT-SWAP" not in result, "linear contract must not appear in inverse_perp __all__"
 
 
 # ---------------------------------------------------------------------------

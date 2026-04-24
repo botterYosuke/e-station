@@ -328,7 +328,7 @@ class OkexWorker(ExchangeWorker):
                 f"unsupported timeframe {timeframe!r}; valid: {list(_KLINE_BAR)}"
             )
 
-        url = f"{_REST}/market/history-candles?instId={ticker}&bar={bar}&limit={limit}"
+        url = f"{_REST}/market/history-candles?instId={ticker}&bar={bar}&limit={min(limit, 300)}"
         if start_ms is not None:
             url += f"&before={start_ms}"
         if end_ms is not None:
@@ -430,10 +430,17 @@ class OkexWorker(ExchangeWorker):
             }
 
         if ticker == "__all__":
+            def _matches_market(inst_id: str) -> bool:
+                if market == "linear_perp":
+                    return inst_id.endswith("-USDT-SWAP")
+                if market == "inverse_perp":
+                    return inst_id.endswith("-USD-SWAP")
+                return True  # spot: no additional filter needed
+
             return {
                 item["instId"]: _parse(item)
                 for item in items
-                if "instId" in item and "last" in item
+                if "instId" in item and "last" in item and _matches_market(item["instId"])
             }
 
         for item in items:
