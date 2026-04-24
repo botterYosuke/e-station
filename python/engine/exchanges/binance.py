@@ -7,11 +7,13 @@ import csv
 import datetime as dt
 import io
 import logging
+import os
 import zipfile
 from collections import deque
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import orjson
@@ -59,6 +61,18 @@ def _ws_base(market: str) -> str:
 
 def _is_perp(market: str) -> bool:
     return market in ("linear_perp", "inverse_perp")
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class _BinanceVisionError(RuntimeError):
+    """Non-404 HTTP error from data.binance.vision (e.g. 429, 5xx).
+
+    Raised to prevent fallback to the intraday API on rate-limit or server errors.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +273,10 @@ class BinanceWorker(ExchangeWorker):
         self._limiter = BinanceLimiter()
         self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+        # Keys accumulate for the lifetime of the worker (ticker, market, date_str).
+        # Acceptable for typical usage (tens of tickers × hundreds of days).
+        # TODO(Phase 6): evict stale entries with a TTL or weakref to bound memory.
+        self._download_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # HTTP client lifecycle
@@ -608,6 +626,12 @@ class BinanceWorker(ExchangeWorker):
         data_path: Path | None,
     ) -> list[dict]:
         """Download or serve from cache the aggTrades zip for a single date."""
+        if data_path is None:
+            log.warning(
+                "data_path is None for %s %s %s — no caching, will re-download every call",
+                ticker, market, date,
+            )
+
         if market == "linear_perp":
             subpath = f"data/futures/um/daily/aggTrades/{ticker}"
         elif market == "inverse_perp":
@@ -626,23 +650,38 @@ class BinanceWorker(ExchangeWorker):
         else:
             zip_path = None
 
-        if zip_path is not None and zip_path.exists():
-            log.info("Using cached %s", zip_path)
-            zip_bytes = zip_path.read_bytes()
-        else:
-            url = f"https://data.binance.vision/{subpath}/{zip_filename}"
-            log.info("Downloading %s", url)
-            client = await self._http()
-            resp = await client.get(url)
-            if not resp.is_success:
-                raise ValueError(
-                    f"data.binance.vision returned {resp.status_code} for {url}"
-                )
-            zip_bytes = resp.content
-            if zip_path is not None:
-                tmp_path = zip_path.with_suffix(".zip.tmp")
-                tmp_path.write_bytes(zip_bytes)
-                tmp_path.replace(zip_path)
+        # Serialize concurrent downloads of the same (ticker, market, date) to avoid
+        # race conditions on the .tmp file and redundant network requests.
+        lock_key = (ticker, market, date_str)
+        lock = self._download_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            if zip_path is not None and zip_path.exists():
+                log.info("Using cached %s", zip_path)
+                zip_bytes = zip_path.read_bytes()
+            else:
+                url = f"https://data.binance.vision/{subpath}/{zip_filename}"
+                log.info("Downloading %s", url)
+                client = await self._http()
+                resp = await client.get(url)
+                if resp.status_code == 404:
+                    raise FileNotFoundError(
+                        f"data.binance.vision 404 for {url}"
+                    )
+                if not resp.is_success:
+                    raise _BinanceVisionError(
+                        f"data.binance.vision returned {resp.status_code} for {url}"
+                    )
+                zip_bytes = resp.content
+                if zip_path is not None:
+                    tmp_path = zip_path.with_suffix(
+                        f".{os.getpid()}.{uuid4().hex}.tmp"
+                    )
+                    try:
+                        tmp_path.write_bytes(zip_bytes)
+                        tmp_path.replace(zip_path)
+                    except Exception:
+                        tmp_path.unlink(missing_ok=True)
+                        raise
 
         # Parse the zip → CSV
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:

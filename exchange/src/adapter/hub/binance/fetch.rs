@@ -750,7 +750,8 @@ pub(super) async fn fetch_trades(
         .and_utc();
 
     if from_time as i64 >= today_midnight.timestamp_millis() {
-        return fetch_intraday_trades(hub, ticker_info, from_time, to_time).await;
+        let effective_to_time = compute_effective_to_time(from_time, to_time);
+        return fetch_intraday_trades(hub, ticker_info, from_time, effective_to_time).await;
     }
 
     let from_date = chrono::DateTime::from_timestamp_millis(from_time as i64)
@@ -891,6 +892,7 @@ mod tests {
     /// - Intraday API returns a trade on the same day and one after midnight
     /// - Asserts the after-midnight trade is NOT in the result
     #[tokio::test]
+    #[serial_test::serial]
     async fn fetch_trades_fallback_excludes_next_day_data() {
         use crate::adapter::{
             hub::HttpHub,
@@ -933,8 +935,10 @@ mod tests {
             .create_async()
             .await;
 
-        // Override Binance URLs via env vars (intercepted in fetch.rs with #[cfg(test)])
-        // SAFETY: single-threaded test environment; no concurrent env reads
+        // Override Binance URLs via env vars (intercepted in fetch.rs with #[cfg(test)]).
+        // SAFETY: `#[serial_test::serial]` ensures this test runs exclusively — no other
+        // test reads or writes these env vars concurrently, satisfying set_var's requirement
+        // that no other threads observe the variable during the write.
         unsafe {
             std::env::set_var("BINANCE_HIST_BASE_URL", &server_url);
             std::env::set_var("BINANCE_API_BASE_URL", &server_url);

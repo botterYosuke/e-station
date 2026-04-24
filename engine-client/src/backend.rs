@@ -317,13 +317,16 @@ impl VenueBackend for EngineClientBackend {
                         );
 
                         if !accepted {
-                            let _ = connection
+                            if let Err(e) = connection
                                 .send(Command::RequestDepthSnapshot {
                                     venue: venue.clone(),
                                     ticker: ticker_sym.clone(),
                                     market: Self::market_kind_to_ipc(market_kind),
                                 })
-                                .await;
+                                .await
+                            {
+                                log::error!("depth_stream: failed to send RequestDepthSnapshot for {ticker_sym}: {e}");
+                            }
                             continue;
                         }
 
@@ -344,13 +347,16 @@ impl VenueBackend for EngineClientBackend {
                         if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
                         tracker.lock().await.reset_ticker(&ticker);
                         log::warn!("DepthGap for {ticker} — requesting new snapshot");
-                        let _ = connection
+                        if let Err(e) = connection
                             .send(Command::RequestDepthSnapshot {
                                 venue: venue.clone(),
                                 ticker: ticker_sym.clone(),
                                 market: Self::market_kind_to_ipc(market_kind),
                             })
-                            .await;
+                            .await
+                        {
+                            log::error!("depth_stream: failed to send RequestDepthSnapshot after DepthGap for {ticker}: {e}");
+                        }
                     }
 
                     Ok(EngineEvent::Disconnected { venue: ev_venue, ticker, market: ev_market, reason, .. }) => {
@@ -365,13 +371,16 @@ impl VenueBackend for EngineClientBackend {
                         // Force a snapshot resync so we never serve a corrupted book.
                         log::warn!("depth_stream: lagged by {n} events — forcing resync for {ticker_sym}");
                         tracker.lock().await.reset_ticker(&ticker_sym);
-                        let _ = connection
+                        if let Err(e) = connection
                             .send(Command::RequestDepthSnapshot {
                                 venue: venue.clone(),
                                 ticker: ticker_sym.clone(),
                                 market: Self::market_kind_to_ipc(market_kind),
                             })
-                            .await;
+                            .await
+                        {
+                            log::error!("depth_stream: failed to send RequestDepthSnapshot after lag for {ticker_sym}: {e}");
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());
@@ -507,7 +516,10 @@ impl VenueBackend for EngineClientBackend {
                                 // Python returns a bulk {symbol: stats} object when ticker=="__all__"
                                 if ticker == "__all__" {
                                     let bulk: HashMap<String, serde_json::Value> =
-                                        serde_json::from_value(stats).unwrap_or_default();
+                                        serde_json::from_value(stats).unwrap_or_else(|e| {
+                                            log::error!("fetch_ticker_stats: failed to parse bulk stats: {e}");
+                                            HashMap::new()
+                                        });
                                     return Ok(bulk
                                         .into_iter()
                                         .filter_map(|(sym, sv)| {

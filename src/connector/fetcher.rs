@@ -469,6 +469,7 @@ pub fn fetch_trades_batched(
         let mut latest_trade_t = from_time;
         const DAY_MS: u64 = 86_400_000;
         const EMPTY_DAYS_WARN_THRESHOLD: u32 = 7;
+        const MAX_EMPTY_DAYS: u32 = 365;
         let mut consecutive_empty_days: u32 = 0;
 
         while latest_trade_t < to_time {
@@ -486,6 +487,13 @@ pub fn fetch_trades_batched(
                                 latest_trade_t,
                                 to_time,
                             );
+                        }
+                        if consecutive_empty_days >= MAX_EMPTY_DAYS {
+                            return Err(AdapterError::InvalidRequest(format!(
+                                "fetch_trades_batched: {} consecutive empty days at t={} — aborting to avoid runaway requests",
+                                consecutive_empty_days,
+                                latest_trade_t,
+                            )));
                         }
                         latest_trade_t = (latest_trade_t / DAY_MS + 1) * DAY_MS;
                         continue;
