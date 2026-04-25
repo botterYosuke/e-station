@@ -171,9 +171,40 @@ pub enum EngineEvent {
     VenueCredentialsRefreshed {
         venue: String,
         session: TachibanaSessionWire,  // typed、Debug は手実装でマスク
+        // ── レビュー反映 (2026-04-25, ラウンド 4 / H11 持ち越し) ──
+        // user_id / password / is_demo を session と同梱し、Rust が
+        // keyring の 4 フィールドをアトミックに更新できるようにする。
+        // Phase 1 で plaintext を IPC に乗せる理由:
+        //   1. session URL のみを上書きすると keyring の user_id /
+        //      is_demo が前回ログイン時の値のまま固着し、デモ↔本番
+        //      切替やアカウント切替・パスワード変更で keyring drift
+        //      が発生する。次回 cold start の fast path が古い
+        //      creds を再送し、ログイン失敗ループに陥る。
+        //   2. plaintext 滞在時間は outbox 1 hop（Python → Rust →
+        //      keyring 書込み → 即時 drop）に抑え、Rust 側は
+        //      `Zeroizing<String>` で保持し書込み完了直後に zero
+        //      化する。これは MEDIUM-C6 規約の「Python 側 SecretStr
+        //      は Drop ゼロ化を保証しない」例外条項として明文化
+        //      （下記 §C6 参照）。
+        user_id: Option<String>,
+        password: Option<String>,
+        is_demo: Option<bool>,
     },
 }
 ```
+
+**MEDIUM-C6 例外条項（H11 関連）**: 上記 `VenueCredentialsRefreshed`
+の `user_id` / `password` / `is_demo` 経路は、Python 側 SecretStr の
+Drop ゼロ化が保証されないという制約に対する**やむを得ない例外**で
+ある。許容する根拠:
+
+- 経路全体が**1 hop**（Python `_venue_credentials_refreshed_event`
+  → IPC → Rust `handle_credentials_refreshed` hook → keyring 書込
+  → wire 値 drop）に閉じ、長期間の保持はしない。
+- Rust 側の wire 値は `Zeroizing<String>` で受け、書込直後の drop で
+  ゼロ化される。
+- その他の経路（`SetVenueCredentials` 等）は引き続き
+  `expose_secret()` を 1 箇所に集約する規約を維持する。
 
 - `VenueError{code:"session_expired"}` は runtime の `p_errno="2"` 検知時に、対応する `request_id` を持たない `SetVenueCredentials` 失敗時は起動シーケンスの `request_id` に紐付けて返す
 - 旧 `EngineError{code:"tachibana_session_expired"}` 表記は廃止。venue-scoped `VenueError` に一本化する

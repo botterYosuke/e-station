@@ -47,14 +47,14 @@ _HELPER_SOURCE = textwrap.dedent(
     session_token = "SESSION_TOKEN_SHOULD_NOT_LEAK"  # noqa: F841
 
     # Patch validate_session_on_startup at the import site used by
-    # `engine.server` so the production handler still runs `_latch.run_once`
+    # `engine.server` so the production handler still runs `latch.run_once`
     # but does NOT hit the network. The first invocation consumes the
     # latch; the second hits the same latch → RuntimeError → the
     # supervisor escalation path inside _do_set_venue_credentials runs.
-    async def fake_validate(session, *, _latch, p_no_counter, http_client=None):
+    async def fake_validate(session, *, latch, p_no_counter, http_client=None):
         async def _inner():
             return True
-        return await _latch.run_once(_inner())
+        return await latch.run_once(_inner())
 
     server_module.validate_session_on_startup = fake_validate
 

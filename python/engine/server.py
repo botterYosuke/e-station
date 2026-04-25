@@ -30,7 +30,10 @@ from engine.exchanges.tachibana_auth import (
     TachibanaSession,
     validate_session_on_startup,
 )
-from engine.exchanges.tachibana_login_flow import run_login as tachibana_run_login
+from engine.exchanges.tachibana_login_flow import (
+    run_login as tachibana_run_login,
+    _MSG_LOGIN_FAILED,
+)
 from engine.exchanges.tachibana_url import EventUrl, MasterUrl, PriceUrl, RequestUrl
 from engine.exchanges.binance import BinanceWorker
 from engine.exchanges.bybit import BybitWorker
@@ -830,7 +833,7 @@ class DataEngineServer:
             if session_payload:
                 try:
                     session = self._restore_session_from_payload(session_payload)
-                except (KeyError, TypeError) as exc:
+                except (KeyError, TypeError, ValueError, AttributeError) as exc:
                     log.error(
                         "SetVenueCredentials: malformed session payload: %s", exc
                     )
@@ -839,7 +842,7 @@ class DataEngineServer:
                     try:
                         await validate_session_on_startup(
                             session,
-                            _latch=self._tachibana_startup_latch,
+                            latch=self._tachibana_startup_latch,
                             p_no_counter=self._tachibana_p_no_counter,
                         )
                     except RuntimeError as exc:
@@ -912,17 +915,50 @@ class DataEngineServer:
             fallback_user_id = payload.get("user_id") or None
             fallback_password = payload.get("password") or None
             fallback_is_demo = payload.get("is_demo")
-            events = await tachibana_run_login(
-                request_id=request_id,
-                p_no_counter=self._tachibana_p_no_counter,
-                dev_login_allowed=self._dev_tachibana_login_allowed,
-                is_startup=True,
-                fallback_user_id=fallback_user_id,
-                fallback_password=fallback_password,
-                fallback_is_demo=(
-                    bool(fallback_is_demo) if fallback_is_demo is not None else None
-                ),
-            )
+            # H3 / M-14: any unexpected failure inside `run_login` must
+            # surface as a typed VenueError so the UI banner can classify
+            # it. Detail goes to the log; the user-facing message is the
+            # fixed Japanese banner string. Pinned by
+            # `python/tests/test_tachibana_login_unexpected_error.py`.
+            try:
+                events = await tachibana_run_login(
+                    request_id=request_id,
+                    p_no_counter=self._tachibana_p_no_counter,
+                    dev_login_allowed=self._dev_tachibana_login_allowed,
+                    is_startup=True,
+                    fallback_user_id=fallback_user_id,
+                    fallback_password=fallback_password,
+                    fallback_is_demo=(
+                        bool(fallback_is_demo) if fallback_is_demo is not None else None
+                    ),
+                )
+            except Exception as exc:
+                # M-LOG ラウンド 5: scrub credential-bearing locals
+                # **before** `log.exception` runs. Verbose log
+                # formatters (e.g. capture_locals=True traceback
+                # formatters used by some structured-logging stacks)
+                # render every frame's locals — leaving
+                # `fallback_password` / `payload` / `msg` bound here
+                # would surface the password in the rendered traceback
+                # even though the banner message stays generic.
+                fallback_password = None  # noqa: F841 — overwritten on purpose
+                fallback_user_id = None  # noqa: F841
+                fallback_is_demo = None  # noqa: F841
+                payload = None  # noqa: F841
+                msg = None  # noqa: F841
+                log.exception(
+                    "SetVenueCredentials: tachibana_run_login raised: %s", exc
+                )
+                self._emit(
+                    {
+                        "event": "VenueError",
+                        "venue": "tachibana",
+                        "request_id": request_id,
+                        "code": "login_failed",
+                        "message": _MSG_LOGIN_FAILED,
+                    }
+                )
+                return
             # Capture the validated session so future ops can use it.
             # If the payload is malformed, the Rust keyring will receive
             # the new session via VenueCredentialsRefreshed but the Python
@@ -938,7 +974,7 @@ class DataEngineServer:
                         self._tachibana_session = self._restore_session_from_payload(
                             ev["session"]
                         )
-                    except (KeyError, TypeError) as exc:
+                    except (KeyError, TypeError, ValueError, AttributeError) as exc:
                         log.error(
                             "VenueCredentialsRefreshed: malformed session payload (%s) — "
                             "Rust and Python will desynchronise; surfacing as VenueError",
@@ -977,21 +1013,75 @@ class DataEngineServer:
             return
 
         async with self._tachibana_login_inflight:
-            events = await tachibana_run_login(
-                request_id=request_id,
-                p_no_counter=self._tachibana_p_no_counter,
-                dev_login_allowed=self._dev_tachibana_login_allowed,
-                is_startup=False,
-            )
+            try:
+                events = await tachibana_run_login(
+                    request_id=request_id,
+                    p_no_counter=self._tachibana_p_no_counter,
+                    dev_login_allowed=self._dev_tachibana_login_allowed,
+                    is_startup=False,
+                )
+            except Exception as exc:
+                # H3 / M-14: any unexpected failure inside `run_login`
+                # (helper crash, asyncio cancel, etc.) used to bubble up
+                # to `_spawn_fetch` and surface as a generic Error event.
+                # Spec §6 says login failures must surface as a typed
+                # VenueError so the UI banner can classify them. Detail
+                # only goes to the log — the user-facing message is the
+                # fixed Japanese banner string. Secrets are never in
+                # `exc` (we never pass user_id/password into it), but
+                # we still keep the message generic to avoid future
+                # regressions.
+                #
+                # M-LOG ラウンド 5: this dispatcher does not bind any
+                # plaintext credentials in its frame (it does not
+                # accept fallback_*), so there is nothing to scrub
+                # here. Sister handler `_do_set_venue_credentials`
+                # *does* scrub — keep the symmetry comment so future
+                # edits adding fallback creds remember to mirror it.
+                log.exception(
+                    "RequestVenueLogin: tachibana_run_login raised: %s", exc
+                )
+                self._emit(
+                    {
+                        "event": "VenueError",
+                        "venue": "tachibana",
+                        "request_id": request_id,
+                        "code": "login_failed",
+                        "message": _MSG_LOGIN_FAILED,
+                    }
+                )
+                return
+
+            restore_failed = False
             for ev in events:
                 if ev.get("event") == "VenueCredentialsRefreshed":
+                    # H1: malformed session payload used to be swallowed
+                    # silently with `except (KeyError, TypeError): pass`.
+                    # Spec contract: every login failure surfaces as a
+                    # typed VenueError. Mirror `_do_set_venue_credentials`
+                    # so a desync between Rust and Python is observable.
                     try:
                         self._tachibana_session = self._restore_session_from_payload(
                             ev["session"]
                         )
-                    except (KeyError, TypeError):
-                        pass
+                    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                        log.error(
+                            "RequestVenueLogin: malformed VenueCredentialsRefreshed "
+                            "session payload (%s) — surfacing as VenueError",
+                            exc,
+                        )
+                        restore_failed = True
             self._emit_many(events)
+            if restore_failed:
+                self._emit(
+                    {
+                        "event": "VenueError",
+                        "venue": "tachibana",
+                        "request_id": request_id,
+                        "code": "session_restore_failed",
+                        "message": "セッション復元に失敗しました（Rust/Python 不整合の可能性）。再ログインしてください。",
+                    }
+                )
 
     async def _handle_set_proxy(self, msg: dict) -> None:
         proxy_url = msg.get("url")

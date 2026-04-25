@@ -30,16 +30,23 @@ credentials. `dev_login_allowed=False` (release builds) makes the env
 read a no-op even if the variables are set, ensuring release builds
 never auto-login.
 
-Env variable resolution order (canonical → legacy alias):
+Env variable schema (H10 — legacy aliases removed 2026-04-25):
 
-    user_id : DEV_TACHIBANA_USER_ID  → DEV_USER_ID
-    password: DEV_TACHIBANA_PASSWORD → DEV_PASSWORD
-    is_demo : DEV_TACHIBANA_DEMO     → DEV_IS_DEMO  (default True)
+    user_id : DEV_TACHIBANA_USER_ID
+    password: DEV_TACHIBANA_PASSWORD
+    is_demo : DEV_TACHIBANA_DEMO  (default True per F-Default-Demo)
 
-The legacy `DEV_USER_ID` / `DEV_PASSWORD` aliases exist because the
-current `.env` in this repo predates the venue-prefixed naming chosen
-by the architecture spec (SKILL.md S2). Both forms are accepted; the
-canonical form takes precedence so a future migration is non-breaking.
+The unprefixed `DEV_USER_ID` / `DEV_PASSWORD` / `DEV_IS_DEMO` aliases
+that the very-early `.env` template used are **no longer accepted** —
+they collided with other tooling and confused operators about which
+venue's creds were being read. Update your `.env` to the
+`DEV_TACHIBANA_*` form. The Rust release-profile guard
+(`dev_tachibana_login_allowed=false`) is unaffected.
+
+`fallback_user_id` / `fallback_password` / `fallback_is_demo` are
+silent re-login parameters consumed by `run_login` (typically the
+keyring-stored creds redirected by `_do_set_venue_credentials`); they
+are tried before the dialog spawns, only on `is_startup=True`.
 """
 
 from __future__ import annotations
@@ -87,17 +94,21 @@ def _truthy(s: Optional[str]) -> bool:
 
 
 def _load_dev_env() -> Optional[dict]:
-    """Read DEV_TACHIBANA_* / DEV_* env vars. Returns None if either of
+    """Read `DEV_TACHIBANA_*` env vars. Returns None if either of
     user_id / password is missing — the caller falls back to the dialog
-    path. is_demo defaults to True per F-Default-Demo (S2 in SKILL.md)."""
-    user_id = os.environ.get("DEV_TACHIBANA_USER_ID") or os.environ.get("DEV_USER_ID")
-    password = os.environ.get("DEV_TACHIBANA_PASSWORD") or os.environ.get("DEV_PASSWORD")
+    path. `is_demo` defaults to True per F-Default-Demo (S2 in SKILL.md).
+
+    H10 (2026-04-25): the legacy unprefixed aliases (`DEV_USER_ID` /
+    `DEV_PASSWORD` / `DEV_IS_DEMO`) are no longer recognised. They
+    collided with other tooling and made it ambiguous whose creds were
+    being read. Operators must switch their `.env` to the
+    `DEV_TACHIBANA_*` form.
+    """
+    user_id = os.environ.get("DEV_TACHIBANA_USER_ID")
+    password = os.environ.get("DEV_TACHIBANA_PASSWORD")
     if not user_id or not password:
         return None
-    raw_demo = (
-        os.environ.get("DEV_TACHIBANA_DEMO")
-        or os.environ.get("DEV_IS_DEMO")
-    )
+    raw_demo = os.environ.get("DEV_TACHIBANA_DEMO")
     is_demo = True if raw_demo is None else _truthy(raw_demo)
     return {"user_id": user_id, "password": password, "is_demo": is_demo}
 
@@ -130,7 +141,32 @@ async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
         await proc.stdin.drain()
         proc.stdin.close()
     except (BrokenPipeError, ConnectionResetError) as exc:
+        # H2 / M-3-py / M-15: previously we logged and continued, then
+        # blocked on `proc.communicate()` until the 10-min timeout.
+        # The helper is unable to receive its prefill payload — there
+        # is nothing to wait for. Tear it down immediately and surface
+        # `login_failed` so the user sees a banner instead of a 10-min
+        # silence.
+        #
+        # M-15 ラウンド 5 (orphan reap): `proc.terminate()` only sends
+        # the signal — without an `await proc.wait()` the helper PID
+        # lingers as a zombie until the parent exits. Always reap; if
+        # terminate() doesn't take effect within 5 s, escalate to kill().
         log.error("tachibana login dialog: failed to write stdin: %s", exc)
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (ProcessLookupError, asyncio.TimeoutError):
+            try:
+                proc.kill()
+                # Best-effort final reap; ignore secondary failures.
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    pass
+            except ProcessLookupError:
+                pass
+        raise LoginError(code="login_failed", message=_MSG_HELPER_NO_RESPONSE)
 
     try:
         # 10-minute total budget. Real interactive logins are typically

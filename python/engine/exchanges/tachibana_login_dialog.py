@@ -181,9 +181,16 @@ def _run_headless(stdin_payload: dict) -> int:
     `{"status": "cancelled"}` (the simplest signal for an aborted form).
     """
     prefill = stdin_payload.get("prefill") or {}
+    allow_prod = bool(stdin_payload.get("allow_prod_choice", False))
     user_id = str(prefill.get("user_id", ""))
     password = str(prefill.get("password", ""))
     is_demo = bool(prefill.get("is_demo", True))
+    # M16: when prod is not allowed, force is_demo=True regardless of
+    # what the prefill carried. This mirrors the GUI's L2 behaviour
+    # ("デモ環境固定" notice + radio hidden) and prevents a release
+    # build from sliding into prod via an unsanitised prefill.
+    if not allow_prod:
+        is_demo = True
 
     err = validate_input(user_id, password)
     if err is not None:
@@ -203,9 +210,31 @@ def _run_headless(stdin_payload: dict) -> int:
 
 
 def _read_stdin_payload() -> dict:
-    raw = sys.stdin.readline()
+    """Read the prefill / options JSON from stdin.
+
+    M-4 (2026-04-25): an empty stdin used to silently fall through as
+    `{}`, which the GUI then rendered as a blank dialog in production
+    and the headless mode treated as a missing-input cancellation —
+    but the helper still exited 0, leaving the parent unable to tell
+    "spawn raced" apart from "user cancelled". Treat empty stdin as a
+    hard cancel: emit `{"status": "cancelled"}` and exit non-zero so
+    `_spawn_login_dialog` can attribute the failure correctly.
+
+    M-IO ラウンド 5: also guard `OSError` from `readline()` (detached
+    console on Windows, pty tear-down on Linux). Without this guard
+    the helper exited with an unhandled traceback instead of the
+    structured `{"status":"cancelled"}` line, leaving the parent
+    unable to classify the failure under the venue contract."""
+    try:
+        raw = sys.stdin.readline()
+    except OSError as exc:
+        sys.stderr.write(f"login dialog: stdin read failed: {exc}\n")
+        _emit_result({"status": "cancelled"})
+        sys.exit(2)
     if not raw.strip():
-        return {}
+        sys.stderr.write("login dialog: no stdin payload received\n")
+        _emit_result({"status": "cancelled"})
+        sys.exit(2)
     return json.loads(raw)
 
 

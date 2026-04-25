@@ -210,11 +210,11 @@ def _raise_for_error(data: dict[str, Any], *, login_path: bool) -> None:
         # Default Japanese message is already set on UnreadNoticesError.
         raise err
     if isinstance(err, SessionExpiredError):
-        # On the login path the only legitimate way to hit p_errno=2 is a
-        # restored session that has just expired (architecture §6 wording).
-        # Override server text with the fixed banner string.
-        if login_path:
-            raise SessionExpiredError(message=_MSG_SESSION_EXPIRED_STARTUP)
+        # M1 / L-2: both branches used to override with the same fixed
+        # banner string. Collapse to a single raise — the login_path
+        # flag has no semantic effect for SessionExpiredError because
+        # the runtime path also wants the fixed Japanese banner (the
+        # server text is always Tachibana-internal wording).
         raise SessionExpiredError(message=_MSG_SESSION_EXPIRED_STARTUP)
     if login_path:
         log.error(
@@ -353,7 +353,7 @@ async def _do_validate(
 async def validate_session_on_startup(
     session: TachibanaSession,
     *,
-    _latch: StartupLatch,
+    latch: StartupLatch,
     p_no_counter: PNoCounter,
     http_client: Optional[httpx.AsyncClient] = None,
 ) -> bool:
@@ -365,8 +365,12 @@ async def validate_session_on_startup(
     (R4). A second invocation per process is a programmer bug and
     surfaces as `RuntimeError`, which the engine top-level supervisor
     catches and fails the process (L6).
+
+    L-7 (2026-04-25): the parameter was previously named `_latch` for
+    no good reason — the underscore prefix on a public keyword arg is
+    misleading. It is now `latch`; update call sites accordingly.
     """
-    return await _latch.run_once(
+    return await latch.run_once(
         _do_validate(
             session,
             p_no_counter=p_no_counter,

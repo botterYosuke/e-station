@@ -312,7 +312,7 @@ async def test_validate_session_http_503_maps_to_transport_error(
     latch = StartupLatch()
     with pytest.raises(LoginError) as exc_info:
         await validate_session_on_startup(
-            session, _latch=latch, p_no_counter=PNoCounter()
+            session, latch=latch, p_no_counter=PNoCounter()
         )
     assert exc_info.value.code == "transport_error"
 
@@ -333,7 +333,7 @@ async def test_validate_session_uses_get_issue_detail_with_pinned_payload(
     )
     session = _make_session()
     latch = StartupLatch()
-    ok = await validate_session_on_startup(session, _latch=latch, p_no_counter=PNoCounter())
+    ok = await validate_session_on_startup(session, latch=latch, p_no_counter=PNoCounter())
     assert ok is True
 
     request = httpx_mock.get_request()
@@ -357,7 +357,7 @@ async def test_validate_session_propagates_session_expired(httpx_mock: HTTPXMock
     session = _make_session()
     latch = StartupLatch()
     with pytest.raises(SessionExpiredError):
-        await validate_session_on_startup(session, _latch=latch, p_no_counter=PNoCounter())
+        await validate_session_on_startup(session, latch=latch, p_no_counter=PNoCounter())
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +419,8 @@ async def test_validate_session_runs_real_http_only_once(httpx_mock: HTTPXMock):
     latch = StartupLatch()
 
     results = await asyncio.gather(
-        validate_session_on_startup(session, _latch=latch, p_no_counter=PNoCounter()),
-        validate_session_on_startup(session, _latch=latch, p_no_counter=PNoCounter()),
+        validate_session_on_startup(session, latch=latch, p_no_counter=PNoCounter()),
+        validate_session_on_startup(session, latch=latch, p_no_counter=PNoCounter()),
         return_exceptions=True,
     )
     runtime_errors = [r for r in results if isinstance(r, RuntimeError)]

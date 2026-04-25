@@ -23,6 +23,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 log = { version = "0.4.22", default-features = true, features = ["std"] }
 thiserror = { version = "2.0.12", default-features = true, features = ["std"] }
 secrecy = { workspace = true }
+zeroize = { workspace = true }
 
 exchange.workspace = true
 engine-client.workspace = true
@@ -31,3 +32,4 @@ engine-client.workspace = true
 secrecy = { workspace = true }
 zeroize = { workspace = true }
 engine-client.workspace = true
+serial_test = "3"

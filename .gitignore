@@ -9,3 +9,4 @@ python/.pytest_cache/
 uv.lock
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+.env

@@ -79,41 +79,29 @@ pub fn classify_venue_error(code: &str) -> VenueErrorClass {
 mod venue_error_class_tests {
     use super::*;
 
-    #[test]
-    fn architecture_md_section_6_table_is_covered() {
-        // Every code that architecture.md §6 enumerates must produce a
-        // non-default classification — the unit assertion is "the row
-        // is wired up", not "this exact pair" (the pairs themselves are
-        // documented in the table and pinned by the per-row tests below).
-        let documented = [
-            "session_expired",
-            "login_failed",
-            "unread_notices",
-            "phone_auth_required",
-            "ticker_not_found",
-            "transport_error",
-        ];
-        for code in documented {
-            let class = classify_venue_error(code);
-            assert!(
-                class.action != VenueErrorAction::Hidden
-                    || class.severity == VenueErrorSeverity::Error,
-                "code {code} produced an unexpected fall-through default"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_code_is_fail_safe_error_hidden() {
-        let class = classify_venue_error("brand_new_code_for_phase_2");
-        assert_eq!(class.severity, VenueErrorSeverity::Error);
-        assert_eq!(class.action, VenueErrorAction::Hidden);
-    }
+    // M9: replace the loose "is wired up" loop with one explicit
+    // assertion per architecture.md §6 row. The previous form
+    // (`action != Hidden || severity == Error`) accidentally accepts
+    // (Error, Hidden) as well — i.e. the fail-safe default — for any
+    // row, so a regression that quietly demotes a documented row to
+    // (Error, Hidden) would not fail the table test. Pin the exact
+    // (severity, action) tuple per code instead.
 
     #[test]
     fn session_expired_is_error_relogin() {
         assert_eq!(
             classify_venue_error("session_expired"),
+            VenueErrorClass {
+                severity: VenueErrorSeverity::Error,
+                action: VenueErrorAction::Relogin,
+            }
+        );
+    }
+
+    #[test]
+    fn login_failed_is_error_relogin() {
+        assert_eq!(
+            classify_venue_error("login_failed"),
             VenueErrorClass {
                 severity: VenueErrorSeverity::Error,
                 action: VenueErrorAction::Relogin,
@@ -130,6 +118,46 @@ mod venue_error_class_tests {
                 action: VenueErrorAction::Relogin,
             }
         );
+    }
+
+    #[test]
+    fn phone_auth_required_is_error_dismiss() {
+        assert_eq!(
+            classify_venue_error("phone_auth_required"),
+            VenueErrorClass {
+                severity: VenueErrorSeverity::Error,
+                action: VenueErrorAction::Dismiss,
+            }
+        );
+    }
+
+    #[test]
+    fn ticker_not_found_is_warning_dismiss() {
+        assert_eq!(
+            classify_venue_error("ticker_not_found"),
+            VenueErrorClass {
+                severity: VenueErrorSeverity::Warning,
+                action: VenueErrorAction::Dismiss,
+            }
+        );
+    }
+
+    #[test]
+    fn transport_error_is_error_relogin() {
+        assert_eq!(
+            classify_venue_error("transport_error"),
+            VenueErrorClass {
+                severity: VenueErrorSeverity::Error,
+                action: VenueErrorAction::Relogin,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_code_is_fail_safe_error_hidden() {
+        let class = classify_venue_error("brand_new_code_for_phase_2");
+        assert_eq!(class.severity, VenueErrorSeverity::Error);
+        assert_eq!(class.action, VenueErrorAction::Hidden);
     }
 }
 

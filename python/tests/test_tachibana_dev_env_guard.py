@@ -15,7 +15,6 @@ without involving a real tkinter subprocess or live HTTP.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Optional
 from unittest.mock import patch
 
@@ -23,10 +22,6 @@ import pytest
 
 from engine.exchanges.tachibana_helpers import PNoCounter
 from engine.exchanges import tachibana_login_flow
-
-
-def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 @pytest.fixture
@@ -114,6 +109,43 @@ async def test_dev_login_allowed_uses_env_without_spawning_dialog(
     assert all(e.get("event") != "VenueLoginStarted" for e in events), (
         f"VenueLoginStarted must not fire on env fast path; got {events}"
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_dev_env_aliases_no_longer_trigger_fast_path(monkeypatch):
+    """H10: legacy unprefixed `DEV_USER_ID` / `DEV_PASSWORD` /
+    `DEV_IS_DEMO` aliases were removed in 2026-04-25. Even with all
+    three legacy variables set, `dev_login_allowed=True` must NOT take
+    the env fast path — only the canonical `DEV_TACHIBANA_*` form is
+    recognised. Regression test ensures the legacy reads do not creep
+    back in when the docstring is forgotten."""
+    monkeypatch.setenv("DEV_USER_ID", "legacyuser")
+    monkeypatch.setenv("DEV_PASSWORD", "legacypass")
+    monkeypatch.setenv("DEV_IS_DEMO", "true")
+    # Canonical names absent.
+    monkeypatch.delenv("DEV_TACHIBANA_USER_ID", raising=False)
+    monkeypatch.delenv("DEV_TACHIBANA_PASSWORD", raising=False)
+    monkeypatch.delenv("DEV_TACHIBANA_DEMO", raising=False)
+
+    spawn_called = []
+
+    async def _fake_spawn(prefill: Optional[dict]) -> Optional[dict]:
+        spawn_called.append(prefill)
+        return None
+
+    with patch.object(tachibana_login_flow, "_spawn_login_dialog", _fake_spawn):
+        events = await tachibana_login_flow.run_login(
+            request_id="rid-legacy",
+            p_no_counter=PNoCounter(),
+            dev_login_allowed=True,
+        )
+
+    # If legacy reads came back, dialog spawn would NOT be called.
+    assert len(spawn_called) == 1, (
+        f"Legacy DEV_* aliases must not enable the fast path; spawn calls = {spawn_called}"
+    )
+    assert events[0]["event"] == "VenueLoginStarted"
+    assert events[-1]["event"] == "VenueLoginCancelled"
 
 
 @pytest.mark.asyncio

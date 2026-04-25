@@ -80,20 +80,38 @@ async fn refresh_hook_callback_fires_with_session() {
         }))
         .await;
 
-    // Invoke through the public Mutex held on the manager, mirroring
-    // what `start()` does inline once the hook is installed.
-    let cb_guard = manager.on_venue_credentials_refreshed.lock().await;
-    let cb = cb_guard.as_ref().expect("hook installed");
-    cb(flowsurface_engine_client::process::VenueCredentialsRefresh {
+    // M11: drive the **production** entry point used by `start()` —
+    // `handle_credentials_refreshed` — instead of dereffing the hook
+    // mutex directly. A test that pokes the lock guard would not
+    // catch a regression where `start()` stops calling
+    // `handle_credentials_refreshed` and reverts to invoking the hook
+    // inline (skipping in-memory patching). This way a refactor that
+    // moves the dispatch wins or loses on a single observable contract.
+    manager.set_venue_credentials(cold_creds_no_session()).await;
+    let refresh = flowsurface_engine_client::process::VenueCredentialsRefresh {
         session: dummy_session(),
         user_id: None,
         password: None,
         is_demo: None,
-    });
+    };
+    ProcessManager::handle_credentials_refreshed(
+        &manager.venue_credentials,
+        &manager.on_venue_credentials_refreshed,
+        &refresh,
+    )
+    .await;
 
     assert_eq!(fired.load(Ordering::SeqCst), 1);
     assert_eq!(
         captured_url_event_ws.lock().unwrap().as_deref(),
         Some("wss://demo/evt/SES5/")
     );
+
+    // Also verify the in-memory store was patched as a side-effect of
+    // the same call (handle_credentials_refreshed = patch + hook in
+    // one production code path).
+    let store = manager.venue_credentials.lock().await;
+    let VenueCredentialsPayload::Tachibana(c) = &store[0];
+    let s = c.session.as_ref().expect("session populated by handler");
+    assert_eq!(s.url_event_ws.as_str(), "wss://demo/evt/SES5/");
 }

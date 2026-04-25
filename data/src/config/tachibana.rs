@@ -146,7 +146,18 @@ impl From<StoredSession> for TachibanaSession {
 pub fn load_tachibana_credentials() -> Option<TachibanaCredentials> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_KEY_USER).ok()?;
     let secret = entry.get_password().ok()?;
-    let stored: StoredCredentials = serde_json::from_str(&secret).ok()?;
+    // M-5: a corrupt JSON blob in the keyring used to be dropped silently
+    // with `serde_json::from_str(&secret).ok()?`, leaving operators
+    // unable to tell "no entry" apart from "entry is unreadable". Surface
+    // the parse error via warn so a keyring rotation / version skew is
+    // immediately diagnosable.
+    let stored: StoredCredentials = match serde_json::from_str(&secret) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("tachibana keyring entry is corrupt: {e}");
+            return None;
+        }
+    };
     Some(stored.into())
 }
 
@@ -200,16 +211,21 @@ pub fn save_tachibana_credentials(creds: &TachibanaCredentials) {
 /// don't need a direct dependency on `secrecy`.
 pub fn save_refreshed_credentials(
     user_id: String,
-    password: String,
+    password: zeroize::Zeroizing<String>,
     is_demo: bool,
     session: TachibanaSession,
 ) {
     let _guard = keyring_write_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // H4: take the password as `Zeroizing<String>` so the calling site
+    // (main.rs) cannot accidentally hold a plain `String` copy past the
+    // keyring write. We then convert into `SecretString` for the
+    // in-memory `TachibanaCredentials`; the original `Zeroizing` buffer
+    // is dropped + zeroed at the end of this scope.
     let creds = TachibanaCredentials {
         user_id,
-        password: SecretString::new(password),
+        password: SecretString::new((*password).clone()),
         // Phase 1 invariant (F-H5): second password is collected only in
         // Phase 2 (orders). Refresh therefore never carries it.
         second_password: None,

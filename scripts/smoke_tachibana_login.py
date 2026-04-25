@@ -2,8 +2,9 @@
 code path (`tachibana_login_flow.run_login` → `tachibana_auth.login` →
 `validate_session_on_startup`).
 
-Reads `.env` (DEV_USER_ID / DEV_PASSWORD / DEV_IS_DEMO), fires the dev
-fast path, and expects the canonical success log line
+Reads `.env` (DEV_TACHIBANA_USER_ID / DEV_TACHIBANA_PASSWORD /
+DEV_TACHIBANA_DEMO — H10 2026-04-25: legacy unprefixed names removed),
+fires the dev fast path, and expects the canonical success log line
 "Tachibana session validated successfully".
 
 Requires a phone-authenticated demo account. Exit code 0 on success,
@@ -99,7 +100,7 @@ async def main() -> int:
 
     latch = StartupLatch()
     await validate_session_on_startup(
-        session, _latch=latch, p_no_counter=p_no
+        session, latch=latch, p_no_counter=p_no
     )
     logging.info("Tachibana session validated successfully")
     return 0

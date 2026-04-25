@@ -285,6 +285,62 @@
 > **繰越 / 次イテレーション**:
 > - **Rust UI sidebar ボタン + Banner 拡張 (F-M1a / H3 / F-Login1)**: 本フェーズ完成のためには `src/screen/dashboard/sidebar.rs` に Tachibana 行のログインアイコン追加、`Banner` レンダラに `VenueLoginStarted` / `VenueLoginCancelled` 状態描画を追加する必要があるが、iced widget 構造の調整範囲が広いため別 PR で扱う。env fast path 実機テストは UI ボタン無しでも完了する。
 > - **MEDIUM-D3 E2E shell**: `tests/e2e/tachibana_relogin_after_cancel.sh` は HTTP API 経由のキャンセル → 再ログイン経路を要求。Rust UI 側の `RequestVenueLogin` 発火経路（sidebar ボタン）が無い現状ではドライブできないため、UI 拡張と同 PR で実装する。
+> - **H5 (Bundled to_str fallback)**: `EngineCommand::Bundled(p).program()` が `to_str().unwrap_or("flowsurface-engine")` で fallback している件。Windows 日本語 user パス等で潜在的な silent skip。**UI 拡張 T3.5 と同 PR** で `Path` をそのまま受ける版に直す。
+> - **H6 (test mock 所有権)**: `data/tests/tachibana_keyring_roundtrip.rs` の SharedBuilder/SharedStore がプロセス共有 `OnceLock<Mutex<HashMap>>` で複数テスト間に状態漏洩する件。`#[serial_test::serial]` は導入したが、テスト ID + 各テスト先頭で `delete_credential().ok()` する pattern を T3.5 で整理する。
+> - **H7 / H8 / H9 (iced 逸脱: ENGINE_CONNECTION static / block_on / callback と Subscription 二重経路)**: `src/main.rs` の `static ENGINE_CONNECTION: RwLock` + `rt.block_on` + 手動 reconnect callback は iced の Subscription / Task モデルから外れている。**UI 拡張 T3.5 と同 PR**（sidebar / banner と同じ層に閉じ込めて Subscription ベースに寄せる）。
+> - **H12 / H13 (型負債)**: `VenueReady` を typestate で表現する案 / `second_password` Wire 残存（`Option<String>` のまま wire に乗る）— **Phase O1 (Phase 2 直前のリファクタ)** に持ち越し。
+> - **W1 (handshake recv timeout)**: `EngineConnection::connect` の Hello / Ready 受信が timeout を持っていない件。HangしたPython を検知できない。**別 PR** で `tokio::time::timeout` を被せる。
+> - **M-12 (StoredCredentials Debug derive コメント)**: `StoredCredentials` は `Deserialize / Serialize` だけで `Debug` は derive していないが、コメントでその理由を 1 行残すべき。次回触るときに同梱。
+> - **M-19 (`VenueCredentialsRefreshed` Option<→ enum 化)**: 現在 `user_id` / `password` / `is_demo` を `Option<...>` で持っているが、本来 (a) all-Some（current emitter）か (b) all-None（legacy emitter）の 2 状態しか取らない。enum で表現すれば main.rs の `match (a, b, c)` から `(Some, Some, Some)` 残ケースが消える。次回 schema bump タイミング（Phase O1）で対応。
+>
+> **レビュー反映 (2026-04-25, ラウンド 4)**:
+>
+> Group A — docs only:
+> - ✅ **H11 + 持ち越し追記**: `architecture.md` §2.3 の `VenueCredentialsRefreshed` DTO に `user_id / password / is_demo` を追記し、Phase 1 で plaintext を IPC に乗せる根拠（keyring drift 防止 + outbox 1 hop）と MEDIUM-C6 例外条項を明文化。本ファイル「繰越 / 次イテレーション」に H5/H6/H7/H8/H9/H12/H13/W1/M-12/M-19 を追加。
+>
+> Group B — Rust 単体:
+> - ✅ **C1 (keyring 並列競合)**: `data/Cargo.toml [dev-dependencies]` に `serial_test = "3"` 追加、`data/tests/tachibana_keyring_roundtrip.rs` の 6 テスト全てに `#[serial_test::serial]` 付与。並列実行 5 連続グリーン。
+> - ✅ **M-5 (load_tachibana_credentials silent parse failure)**: `serde_json::from_str.ok()?` を `match` 展開し、Err 時 `log::warn!("tachibana keyring entry is corrupt: {e}")`。回帰テスト `test_load_tachibana_credentials_warns_when_keyring_payload_is_corrupt`（mock keyring に `"{not-json"` を仕込み `None` 返却を pin）。
+> - ✅ **H4 (save_refreshed_credentials password を `Zeroizing<String>` 化)**: シグネチャ変更、main.rs 側 `password.clone()` で `Zeroizing` のまま渡す。`data/Cargo.toml` に `zeroize` 本体依存追加。回帰テスト `test_save_refreshed_credentials_takes_zeroizing_password` でコンパイル契約を pin。
+>
+> Group C — Rust process.rs / error.rs:
+> - ✅ **M-3 silent (SetVenueCredentials send 失敗握り潰し)**: `apply_after_handshake` の `let _ = connection.send(...)` を `if let Err(...)` で error 分岐、warn + pending 削除 + failed_venues 追加 + continue。回帰テスト `engine-client/tests/process_send_failure_skips_subscribe.rs::apply_after_handshake_skips_subscribe_when_set_creds_send_fails`（mock WS が handshake 直後に close → cmd_rx drop → send 失敗 → 5 秒以内に return することで 60 秒ハングを防止）。
+> - ✅ **M10 (VenueReady タイムアウト時 failed_venues 更新)**: タイムアウト 2 箇所（外側 deadline + 内側 `Err(_elapsed)`）で残 pending を failed_venues に移動。`apply_after_handshake_with_timeout(connection, Duration)` テスト seam を追加（production は引数無し版が 60 秒固定）。回帰テスト `process_venue_ready_timeout_marks_failed.rs` で「200ms タイムアウト → SetVenueCredentials 送信あり / Subscribe 送信なし」を pin。
+> - ✅ **M11 (process_creds_refresh_hook テストを実 API 経由に)**: `refresh_hook_callback_fires_with_session` を `ProcessManager::handle_credentials_refreshed` 直叩きに書き換え、in-memory store の patch 副作用も同テストで pin。
+> - ✅ **M9 (classify_venue_error テスト exhaustive)**: `architecture_md_section_6_table_is_covered` のループを 6 個別 assert（session_expired / login_failed / unread_notices / phone_auth_required / ticker_not_found / transport_error）に分解。緩い `!= Hidden || == Error` 条件を排除。
+>
+> Group D — Python server.py:
+> - ✅ **H1 (`_do_request_venue_login` の `except (KeyError, TypeError): pass`)**: `_do_set_venue_credentials` と同じ pattern に揃え、malformed VenueCredentialsRefreshed → `VenueError{code:"session_restore_failed"}`。
+> - ✅ **H3 / M-14 (両 dispatcher の最外層 except Exception)**: 両関数で `tachibana_run_login` 呼出を try/except Exception で包み、`log.exception` 詳細 + `VenueError{code:"login_failed", message:_MSG_LOGIN_FAILED}`。新規テスト `test_tachibana_login_unexpected_error.py`（2 件）で「`RuntimeError("forced")` monkeypatch → VenueError 1 件 / banner 文言固定 / `'forced'` 非混入」を pin。
+> - ✅ **M-7 (`_restore_session_from_payload` 例外幅)**: `(KeyError, TypeError, ValueError, AttributeError)` に拡張（`str()` への None 渡し等を含む幅広い malformed payload を catch）。
+>
+> Group E — Python login_flow / dialog / auth:
+> - ✅ **H2 / M-3-py / M-15 (`_spawn_login_dialog` stdin BrokenPipe で即時 abort)**: `BrokenPipeError` / `ConnectionResetError` 検知時に `proc.terminate()` + `LoginError(code="login_failed", message=_MSG_HELPER_NO_RESPONSE)` を即 raise。`test_tachibana_login_helper_broken_pipe.py` で「`asyncio.wait_for` 到達なし + helper terminated」を pin。
+> - ✅ **H10 (`_load_dev_env` legacy alias 削除)**: `DEV_USER_ID` / `DEV_PASSWORD` / `DEV_IS_DEMO` を全廃。`DEV_TACHIBANA_*` のみ受理。`scripts/smoke_tachibana_login.py` docstring も追従。回帰テスト `test_legacy_dev_env_aliases_no_longer_trigger_fast_path` 追加（legacy 3 変数全部 set + canonical 3 変数全部 unset → fast path 起動せず dialog spawn）。**注意: 開発者の `.env` を `DEV_TACHIBANA_USER_ID/PASSWORD/DEMO` に rename する必要あり（本コミットでは `.env` 自体は触っていない）**。
+> - ✅ **M-4 (`_read_stdin_payload` stdin EOF を {} 扱い)**: 空 stdin 時に `_emit_result({"status":"cancelled"})` + `sys.exit(2)`。回帰テスト `test_empty_stdin_exits_non_zero_with_cancelled_payload` で exit code != 0 を pin。
+> - ✅ **M16 (headless `allow_prod_choice=False` で `is_demo=True` 強制)**: `_run_headless` で `allow_prod=False` のとき prefill 内容を無視して `is_demo=True`。回帰テスト 2 件（`test_headless_forces_is_demo_true_when_prod_choice_disallowed` / `test_headless_honours_is_demo_when_prod_choice_allowed`）で双方向 pin。
+> - ✅ **M2 / M-5 / M-17 (`__main__.py` CLI/env-var モードでも fast path 制御)**: `_env_dev_login_allowed()` ヘルパで `FLOWSURFACE_DEV_TACHIBANA_LOGIN_ALLOWED` env をチェック、CLI / env-var 経路でこれを参照。stdin 経路は Rust 制御である旨をコメント明記。`test_tachibana_main_dev_flag.py` で truthy / falsy / default の 3 ケース pin。
+>
+> Group F — REFACTOR-only:
+> - ✅ **M1 / L-2 (`_raise_for_error` 重複コード)**: SessionExpiredError 分岐の `if login_path` 両分岐が同じ → 1 行化。既存テスト緑のまま維持。
+> - ✅ **M-13 / L-1 / L-7 (docstring 更新 + 未使用 helper 削除 + `_latch` → `latch` rename)**: `tachibana_login_flow.py` docstring を H10 反映 + `fallback_*` 言及。`test_tachibana_dev_env_guard.py` の未使用 `asyncio.get_event_loop().run_until_complete` ヘルパを削除。`validate_session_on_startup` の `_latch` キーワード引数を `latch` に rename、callers (`server.py`, smoke スクリプト, supervisor テスト, `test_tachibana_auth.py` 4 箇所) を全て更新。
+>
+> **レビュー反映 (2026-04-25, ラウンド 5)**:
+>
+> Group A — Rust 単体:
+> - ✅ **R4-1 (`src/main.rs` `password.clone()` → 移動)**: `VenueCredentialsRefreshed` ハンドラ内 `match (...) { (Some(_), Some(password), Some(_)) => save_refreshed_credentials(user_id, password.clone(), ...) }` の `.clone()` を削除し `password` を直接 move。`Zeroizing<String>` 二重ヒープコピーを排除（intermediate copy が keyring 書き込み後も生存して zeroize されない問題の構造的根絶）。clippy / cargo test 緑のまま振る舞い不変。
+> - ✅ **R4-2 (`apply_after_handshake_with_timeout` の API surface 縮小)**: `pub` → `#[doc(hidden)] pub` に変更（rustdoc から非公開）。**注意**: 当初指示は `pub(crate)` だったが、Rust の integration tests (`engine-client/tests/`) は別 crate のため `pub(crate)` だとアクセス不可（コンパイルエラー）。`#[doc(hidden)]` で公開 API surface からは除外しつつ integration tests のコンパイルを保つ pragmatic な落とし所として採用。docstring に R4-2 の経緯と代替案を明記。
+>
+> Group B — Python login_flow (orphan reap):
+> - ✅ **M-15 ラウンド 5 (BrokenPipe で孤児プロセス回収)**: `_spawn_login_dialog` の `except (BrokenPipeError, ConnectionResetError)` ブロックで `proc.terminate()` 後に `await asyncio.wait_for(proc.wait(), 5.0)` で reap。`TimeoutError` / `ProcessLookupError` 時は `proc.kill()` + 2 秒の最終 reap でエスカレーション。`test_tachibana_login_helper_broken_pipe.py::test_broken_pipe_on_stdin_aborts_immediately` を拡張し、`FakeProc.wait_calls >= 1` と `returncode is not None` を assert（`terminate()` だけのコードでは fail する形に変更し RED→GREEN を実機確認）。
+>
+> Group C — Python server.py / __main__.py / dialog (defensive hardening):
+> - ✅ **M-LOG ラウンド 5 (log.exception ローカル変数経由の secrets 漏洩を構造的排除)**: `_do_set_venue_credentials` の最外層 `except Exception` 内で `log.exception(...)` を呼ぶ前に `fallback_password = None` / `fallback_user_id = None` / `fallback_is_demo = None` / `payload = None` / `msg = None` を実行し、frame locals から credential bearings を消去。`test_tachibana_login_unexpected_error.py` の secrets リテラルを `secret-password-UNIQUE-12345` / `user-id-UNIQUE-67890` にユニーク化し、`traceback.StackSummary.extract(..., capture_locals=True)` で `engine.server` frame に password 文字列が残らないことを assert（capture_locals 形式の verbose log formatter / better_exceptions スタックでも漏洩しないことを構造的に保証）。`_do_request_venue_login` 側は creds を frame に bind しないため scrub 不要だが、シンメトリ維持用のコメントを残置。
+> - ✅ **M-CFG ラウンド 5 (`__main__.py` stdin payload bool 型アサーション)**: `_coerce_dev_login_allowed(value)` ヘルパを新設し、`isinstance(value, bool)` でない場合 `log.warning("non-bool ...")` + `False` フォールバック。stdin 経路の `dev_tachibana_login_allowed` 解釈をこの helper 経由に置換し、`bool("false") == True` 系の silent enable を構造的根絶。`test_tachibana_main_dev_flag.py` に `test_parse_stdin_config_warns_and_falls_back_when_dev_flag_is_not_bool` / `test_coerce_dev_login_allowed_passes_through_real_bools` を追加。
+> - ✅ **M-IO ラウンド 5 (`_read_stdin_payload` `OSError` ガード)**: `tachibana_login_dialog._read_stdin_payload` の `sys.stdin.readline()` を `try/except OSError` で包み、Windows 切り離されコンソール / Linux pty tear-down 時に `_emit_result({"status":"cancelled"})` + `sys.exit(2)` で構造化終了。unhandled traceback による親側分類不能を回避。`test_tachibana_login_dialog_modes.py::test_oserror_on_stdin_exits_non_zero` で pin。
+>
+> Group D — テスト hardening (secrets ユニーク化):
+> - ✅ **テストの secrets ユニーク化**: `test_tachibana_login_unexpected_error.py` の `password = "p"` / `user_id = "u"` を `_UNIQUE_PASSWORD = "secret-password-UNIQUE-12345"` / `_UNIQUE_USER_ID = "user-id-UNIQUE-67890"` に変更。event repr / log record 全体に対して `assert UNIQUE not in ...` の形でチェックすることで、たまたま `"p"` が message に含まれて偽陽性にならない / 真陽性が確実に検出されるよう改善。`test_tachibana_startup_supervisor.py` は既に `uxf05882` / `vw20sr9h` / `SESSION_TOKEN_SHOULD_NOT_LEAK` の十分にユニークな sentinel 群を使用済み（再変更不要）。`test_tachibana_login_helper_broken_pipe.py` は creds を扱わないため対象外。
 
 - [x] ✅ `data/src/config/tachibana.rs` 新設（**現リポジトリには存在しないことを確認済み**。`data/src/config/proxy.rs` の keyring 実装パターンを参考にする）:
   - `TachibanaCredentials { user_id, password: SecretString, second_password: Option<SecretString>, is_demo }` — **Phase 1 では `second_password` フィールドを DTO スキーマに切るが、UI からは収集せず常に `None` を送る**（F-H5）。発注しないのに保持する攻撃面を作らない。Phase 2 着手時に値の収集・保持を有効化（スキーマは破壊変更にならない）

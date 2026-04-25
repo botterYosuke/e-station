@@ -260,9 +260,20 @@ fn main() {
                 // start fast-paths with stale credentials.
                 match (refresh.user_id, refresh.password, refresh.is_demo) {
                     (Some(user_id), Some(password), Some(is_demo)) => {
+                        // H4: pass the password through as `Zeroizing<String>`
+                        // (don't materialise a plain `String` here — the
+                        // intermediate copy would survive past the keyring
+                        // write and miss being zeroed).
+                        //
+                        // R4-1 ラウンド 5: move the `Zeroizing<String>`
+                        // directly. The previous `.clone()` produced a
+                        // second heap allocation that lived past the
+                        // keyring write — exactly the kind of
+                        // intermediate copy `Zeroizing` exists to
+                        // prevent.
                         data::config::tachibana::save_refreshed_credentials(
                             user_id,
-                            password.to_string(),
+                            password,
                             is_demo,
                             session,
                         );

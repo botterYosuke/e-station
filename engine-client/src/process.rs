@@ -429,6 +429,27 @@ impl ProcessManager {
     /// 6. Spawn the long-lived `VenueCredentialsRefreshed` listener.
     /// 7. Re-send saved subscriptions (excluding failed venues).
     pub async fn apply_after_handshake(&self, connection: &EngineConnection) {
+        const VENUE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+        self.apply_after_handshake_with_timeout(connection, VENUE_READY_TIMEOUT)
+            .await;
+    }
+
+    /// Same as [`Self::apply_after_handshake`] but accepts an explicit
+    /// VenueReady timeout. Used by tests so the 60-second production
+    /// budget doesn't block the suite. Production callers should always
+    /// use [`Self::apply_after_handshake`].
+    ///
+    /// R4-2 ラウンド 5: marked `#[doc(hidden)]` so it does not appear
+    /// in the public rustdoc surface. Integration tests live in their
+    /// own crates so we cannot use `pub(crate)` directly; the
+    /// hidden-from-docs marker is the closest practical equivalent
+    /// while keeping `cargo test` working without a feature flag.
+    #[doc(hidden)]
+    pub async fn apply_after_handshake_with_timeout(
+        &self,
+        connection: &EngineConnection,
+        venue_ready_timeout: Duration,
+    ) {
         // Step 1: subscribe early.
         let mut event_rx = connection.subscribe_events();
 
@@ -450,26 +471,58 @@ impl ProcessManager {
         let mut failed_venues: HashSet<&'static str> = HashSet::new();
         for payload in creds_snapshot {
             let request_id = uuid::Uuid::new_v4().to_string();
+            let venue_tag = payload.venue_tag();
             pending_request_ids.insert(request_id.clone());
-            request_id_to_venue.insert(request_id.clone(), payload.venue_tag());
-            let _ = connection
+            request_id_to_venue.insert(request_id.clone(), venue_tag);
+            // M-3 (silent): the send used to be `let _ = ...` which
+            // hid an Err return from the engine command channel
+            // (e.g. peer dropped between handshake and SetVenueCredentials).
+            // The pending entry would then linger until the VenueReady
+            // timeout, and Subscribe would still fire even though the
+            // creds never reached Python. Surface it: drop the pending
+            // entry so the wait loop doesn't block, mark the venue as
+            // failed so Subscribe is skipped, and continue with the
+            // next payload.
+            if let Err(err) = connection
                 .send(crate::dto::Command::SetVenueCredentials {
-                    request_id,
+                    request_id: request_id.clone(),
                     payload,
                 })
-                .await;
+                .await
+            {
+                log::warn!(
+                    "SetVenueCredentials send failed for venue={venue_tag}: {err} \
+                     — Subscribe will be skipped for this venue"
+                );
+                pending_request_ids.remove(&request_id);
+                request_id_to_venue.remove(&request_id);
+                failed_venues.insert(venue_tag);
+                continue;
+            }
         }
 
         // Step 4: wait for VenueReady / VenueError per request_id.
-        const VENUE_READY_TIMEOUT: Duration = Duration::from_secs(60);
         if !pending_request_ids.is_empty() {
-            let deadline = tokio::time::Instant::now() + VENUE_READY_TIMEOUT;
+            let deadline = tokio::time::Instant::now() + venue_ready_timeout;
             'wait: while !pending_request_ids.is_empty() {
                 let now = tokio::time::Instant::now();
                 if now >= deadline {
+                    // M10: previously we broke out of the wait but
+                    // continued to send Subscribe for venues whose
+                    // SetVenueCredentials never reached `VenueReady`
+                    // — which causes "not authenticated" stream errors
+                    // racing the user's eventual re-login. Mark every
+                    // remaining pending venue as failed so Subscribe
+                    // is skipped for it. The connection itself stays
+                    // up (no retry storm).
+                    for rid in pending_request_ids.iter() {
+                        if let Some(tag) = request_id_to_venue.get(rid).copied() {
+                            failed_venues.insert(tag);
+                        }
+                    }
                     log::warn!(
                         "Timed out waiting for VenueReady after SetVenueCredentials \
-                         ({} pending request_id(s)) — proceeding to subscribe anyway",
+                         ({} pending request_id(s)) — Subscribe will be skipped for those venues",
                         pending_request_ids.len(),
                     );
                     break;
@@ -566,9 +619,15 @@ impl ProcessManager {
                         break;
                     }
                     Err(_elapsed) => {
+                        // M10: see top of wait-loop — mark pending venues failed.
+                        for rid in pending_request_ids.iter() {
+                            if let Some(tag) = request_id_to_venue.get(rid).copied() {
+                                failed_venues.insert(tag);
+                            }
+                        }
                         log::warn!(
                             "Timed out waiting for VenueReady after SetVenueCredentials \
-                             ({} pending request_id(s)) — proceeding to subscribe anyway",
+                             ({} pending request_id(s)) — Subscribe will be skipped for those venues",
                             pending_request_ids.len(),
                         );
                         break;
