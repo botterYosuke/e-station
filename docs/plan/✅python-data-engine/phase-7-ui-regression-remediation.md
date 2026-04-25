@@ -53,7 +53,7 @@
 
 - [x] `engine-client` 側 (2026-04-25): `engine-client/tests/wait_ready.rs` を追加。`connect()` が `Ready` を block 待ちする不変条件と `wait_ready()` の即時 resolve 動作を明文化。将来の handshake 非同期化リファクタで UI-1 race が再発した場合に検知する。
 - [x] 「Ready 未受信時の fetch」: 現アーキテクチャでは `EngineConnection` 取得自体が `Ready` 受領に gate されているため、構造的に再現不能。Python 側 `test_handshake_calls_worker_prepare_before_ready` で worker 準備完了の前提も担保。
-- [-] Rust 側 `TickersTable::new_with_settings` → `UpdateMetadata` → `UpdateStats` 一気通貫テスト: **deferred**。大規模 mock の構築コストが高く、UI-1 根本原因が serde 不整合だったため `exchange/` の `daily_price_chg_*` 回帰テストでカバー済み。フェーズ 8 以降の改修で追加検討。
+- [x] Rust 側 `TickersTable::new_with_settings` → `UpdateMetadata` → `UpdateStats` 一気通貫テスト (2026-04-25): `src/screen/dashboard/tickers_table.rs` 末尾に `#[cfg(test)] mod tests` を追加し、`InertBackend`（`exchange/tests/venue_backend.rs::StubBackend` 同等パターン）を `AdapterHandles` に inject する形で 5 ケース実装。バイナリクレートに `lib.rs` が存在しないため `engine-client/tests/` 直下ではなく `tickers_table.rs` 内のプライベート mod に配置（`MetadataFetchState` のフィールドアクセスにも依存するため inline が技術的に正解）。回帰内容: ① `new_with_settings` が venue を `in_flight` にする / ② metadata→stats の正常系で `ticker_rows` 2 行 / ③ stats が metadata より先に来た場合 silently drop（UI-1 兄弟契約）/ ④ 部分 metadata では既知 ticker のみ採用 / ⑤ venue 不一致 stats は drop。`futures` を `[dev-dependencies]` に追加。
 
 **完了条件**: 起動直後に虚眼鏡を開くと全 5 venue の銘柄がリスト表示される状態が手動 QA + 自動テストの両方で確認できる。
 

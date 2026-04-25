@@ -23,7 +23,7 @@
 | 4 | ヒストリカルデータ bulk download 移植 | ✅ 完了 (2026-04-24) |
 | 5 | Rust から取引所コード削除 | ✅ 完了 (2026-04-25) |
 | 6 | 配布・運用整備 | 進行中 |
-| 7 | UI リグレッション修復・E2E 検証の明文化 | ほぼ完了 (2026-04-25) — T4.c (cold-start 計測) / T4.d (AppImage 判断) のみ別 PR → [`phase-7-ui-regression-remediation.md`](./phase-7-ui-regression-remediation.md) |
+| 7 | UI リグレッション修復・E2E 検証の明文化 | ✅ 完了 (2026-04-25) — T1.3 後半 / T4.c (Windows cold-start) / T4.d (AppImage/Flatpak 判断) すべてクローズ。macOS/Linux cold-start CI 計測のみ別 PR で追加予定 → [`phase-7-ui-regression-remediation.md`](./phase-7-ui-regression-remediation.md) |
 
 ---
 
