@@ -32,3 +32,17 @@
 ## 一行サマリ
 
 立花証券は「**認証つき・JST 営業時間・株式市場・板は 1 行ベースのスナップショット型・kline は日足のみ**」という暗号資産 venue とは性質の異なる venue。Phase 1 では **チャート閲覧（kline + 直近約定 + 板スナップショット）に絞ったリードオンリー統合** をデモ環境のみで成立させる。注文機能は v2 以降。
+
+## 実装前提の固定事項
+
+- **復旧シーケンスの source of truth は `ProcessManager`**。managed mode の再起動時は `Hello -> Ready -> SetProxy -> SetVenueCredentials -> VenueReady -> metadata fetch / resubscribe` を必ず再実行する
+- **`VenueReady` は冪等イベント**。Python 単独再起動で複数回受信してよい。Rust 側の resubscribe は `ProcessManager` 1 箇所に集約し、UI view 側は `VenueReady` イベントで新規 subscribe を発行しない
+- **立花 venue の業務リクエストは `VenueReady` 後にのみ許可**。`Ready` はエンジン全体の起動完了、`VenueReady` は立花認証・session validation 完了を表す
+- **runtime 中の自動再ログインは禁止**。`p_errno=2` 検知 → `tachibana_session_expired` を Rust UI に投げ、ユーザー再ログイン誘導。**定期 `validate_session` ポーリングも実装しない**（自動再ログイン禁止と矛盾するため）。再ログイン fallback は起動直後の session 検証失敗時に **1 回だけ** 許可
+- **第二暗証番号は Phase 1 から受け取って keyring / Python メモリに保持する**。発注には使わないが、後続フェーズでのスキーマ移行を避ける
+- **`MarketKind::Stock` 追加は最小変更では終わらない**。enum の網羅 match、UI の市場別表示、indicator 可用性、timeframe 可用性、market filter まで波及する前提で見積もる。T0.1 で `git grep` 棚卸し必須
+- **`TickerInfo` フィールド追加は Hash 影響を伴う**。`#[derive(Hash, Eq)]` で `HashMap` キーとして全クレートに広がっているため、`lot_size` / `quote_currency` 追加時は永続 state の migration 影響を T0 で確認する
+- **`Timeframe::D1` は既存型を流用**（新規追加不要）。日本語銘柄名は `TickerInfo` ではなく `TickerListed` event payload の `display_name_ja: Option<String>` で運搬
+- **マスタキャッシュ保存先は Rust から Python へ明示的に受け渡す**。現行の `stdin` 初期 payload は `port` / `token` のみなので、T0 で `config_dir` / `cache_dir` を初期 payload に追加する
+- **debug ビルドの env 名は venue prefix 付きで確定**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_SECOND_PASSWORD` / `DEV_TACHIBANA_DEMO`。SKILL.md S2/S3 の `DEV_USER_ID` 系は架空ファイル前提の旧表記なので T0 で SKILL.md を本計画側へ書き換える
+- **Python テストフレームワーク**は既存 [python/tests/](../../../python/tests/) と同じ `pytest-httpx` (`HTTPXMock`) に揃える。`respx` は採用しない

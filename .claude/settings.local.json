@@ -108,7 +108,17 @@
       "PowerShell(\"done\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('python/engine/exchanges/binance.py',encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('python/engine/exchanges/mexc.py',encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('python/engine/exchanges/binance.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('python/engine/exchanges/mexc.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(taskkill //F //IM python.exe)"
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(rm -f /tmp/engine.log /tmp/flowsurface.log)",
+      "Bash(uv run *)",
+      "Bash(echo \"engine_pid=$!\")",
+      "Bash(FLOWSURFACE_ENGINE_TOKEN=testtoken RUST_LOG=info,engine_client=debug,flowsurface=debug,flowsurface_engine_client=debug ./target/release/flowsurface.exe --data-engine-url ws://127.0.0.1:19876)",
+      "Bash(echo \"gui_pid=$!\")",
+      "Bash(FLOWSURFACE_ENGINE_TOKEN=testtoken RUST_LOG=debug ./target/release/flowsurface.exe --data-engine-url ws://127.0.0.1:19876)",
+      "Bash(> /tmp/engine.log)",
+      "Bash(echo \"engine pid=$!\")",
+      "Bash(./target/release/flowsurface.exe --data-engine-url ws://127.0.0.1:19876)",
+      "Bash(echo \"app pid=$!\")"
     ]
   }
 }

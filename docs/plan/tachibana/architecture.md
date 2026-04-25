@@ -59,8 +59,17 @@ pub enum Command {
 ```
 
 - `session` は **Rust が keyring から復元できた場合のみ** 含める。Python はまず `session` を試し、`p_errno="2"` で失敗したら `user_id/password` で再ログインする
+  - この再ログインは **起動直後の `SetVenueCredentials` 処理中に限る**。購読開始後の runtime で session expiry を検知した場合は再ログインせず `tachibana_session_expired` を返す
 - `second_password` は **Phase 2 以降の発注機能で使う**。Phase 1 では受け取って Python メモリに保持するだけ（漏らさない）
 - このコマンドは **`Ready` 受信後・任意の `Subscribe` 前** に送る（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §4.5 起動ハンドシェイク）
+
+### 2.1.1 起動パラメータとの責務分離
+
+- 現行の Python engine 起動パス（[engine-client/src/process.rs](../../../engine-client/src/process.rs)）は `stdin` で `port` / `token` しか渡していない
+- そのため **クレデンシャルや session は起動引数ではなく IPC コマンドで渡す** 方針を維持する
+- 一方でマスタキャッシュ保存先だけは Python 側単独では決められないため、T0 で次のどちらかを追加する
+  - `stdin` 初期 payload に `config_dir` / `cache_dir` を追加
+  - `SetEnginePaths` 相当の軽量コマンドを新設
 
 ### 2.2 ログ・テレメトリでのマスク
 
@@ -70,7 +79,7 @@ pub enum Command {
 
 ### 2.3 セッション再永続化
 
-Python が新規ログインに成功し新仮想 URL を取得したら、**`VenueCredentialsRefreshed` イベントを Rust に逆送**して Rust が keyring を更新する:
+Python が**起動時の session 検証または初回ログイン**に成功し新仮想 URL を取得したら、**`VenueCredentialsRefreshed` イベントを Rust に逆送**して Rust が keyring を更新する:
 
 ```rust
 pub enum EngineEvent {
@@ -84,6 +93,18 @@ pub enum EngineEvent {
 
 これにより Python 単独再起動 → Rust が keyring の最新 session を投入 → Python が validation 実行、というループが閉じる。
 
+### 2.4 再起動時の source of truth
+
+- **managed mode の再起動導線は `ProcessManager` が source of truth**。再接続時に `src/main.rs` がその場しのぎで `SetVenueCredentials` を送るのではなく、`ProcessManager` が proxy と同様に venue credentials も保持・再送する
+- 再起動後の正式シーケンスは次の通り:
+  1. `Hello -> Ready`
+  2. `SetProxy`
+  3. `SetVenueCredentials`
+  4. `VenueReady`
+  5. metadata fetch 再開
+  6. active subscriptions 再送
+- これにより [docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §5.3 の「recovery handshake 後に購読再送」という既存契約に、立花の認証状態を安全に差し込める
+
 ## 3. 起動シーケンス
 
 ```
@@ -93,12 +114,16 @@ Rust 起動
   ├─ Hello → Ready 受領
   ├─ SetProxy（必要時）
   ├─ SetVenueCredentials{venue:"tachibana", ...}  ← 新設
+  ├─ VenueReady{venue:"tachibana"}
   ├─ ListTickers{venue:"tachibana", market:"stock"}
   └─ Subscribe{venue:"tachibana", ticker:"7203", stream:"trade"|"depth", market:"stock"}
 ```
 
-- `SetVenueCredentials` 受領時、Python は **同期的にログイン or session validation を実施し、結果を `VenueReady{venue:"tachibana"}` か `EngineError` で返す**
-- Rust 側は `VenueReady` 受領前は立花 ticker の Subscribe を送らない（UI ではローディング表示）
+- `SetVenueCredentials` 受領時、Python は **同期的に session validation を実施し、必要なら 1 回だけ再ログインして、結果を `VenueReady{venue:"tachibana"}` か `EngineError` で返す**
+- `VenueReady` は **冪等イベント**。Python 単独再起動 → `SetVenueCredentials` 再注入 → `VenueReady` 再送、というサイクルを毎回踏む。Rust 側はこれを**最終受信状態**として保持し、`Disconnected{venue}`（プロセス再起動・WS 全切断など）を受けたらリセットする
+- **`VenueReady` 再受信時の重複防止**: active subscriptions の resubscribe は `ProcessManager`（[engine-client/src/process.rs](../../../engine-client/src/process.rs)）が **1 度だけ** 行う。UI 側の view code は `VenueReady` イベントに反応して新規 subscribe を発行しないこと（既存購読の参照カウントは ProcessManager 経由でのみ維持）
+- Rust 側は `VenueReady` 受領前は立花 ticker の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を送らない。UI では venue 単位のローディング表示を出す
+- 既存 sidebar は起動直後に metadata fetch を自動発火するため、立花追加時は **venue-ready ゲート** を `AdapterHandles` 呼び出し前に差し込む必要がある
 
 ## 4. Python 側ファイル構成
 
@@ -121,17 +146,19 @@ python/engine/
 
 - 依存追加: 立花 API は標準 HTTP/WS なので新規依存ゼロ。Shift-JIS は Python 標準 `bytes.decode("shift-jis")` で足りる
 - HTTP クライアントは既存 [python/engine/exchanges/binance.py](../../../python/engine/exchanges/binance.py) と同じく **`httpx`** に揃える。WS は同じく `websockets` を採用
-- mock サーバは既存テスト方針（`httpx` ベース）に合わせ **`pytest-httpx`** または **`respx`** を採用（`aiohttp.test_utils` は依存ツリーが分かれるので避ける）
+- mock サーバは既存 [python/tests/](../../../python/tests/) と同一ツールチェーン（`pytest-httpx` の `HTTPXMock` フィクスチャ）に揃える。`respx` は採用しない（混在を避ける）。WS は `websockets.serve` でローカルサーバを立てて FD/KP frame を再生
 
 ## 5. Rust 側の変更箇所
 
 | ファイル | 変更内容 |
 | :--- | :--- |
-| [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) | `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 追加。`FromStr` / `Display` / `ALL` 配列更新 |
+| [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) | `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 追加。`FromStr` / `Display` / `ALL` 配列更新、および `MarketKind` を網羅する既存 match の修正 |
 | [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::SetVenueCredentials` / `EngineEvent::VenueReady` / `EngineEvent::VenueCredentialsRefreshed` 追加。`schema_minor` を bump |
+| [engine-client/src/process.rs](../../../engine-client/src/process.rs) | `ProcessManager` が Tachibana credentials を保持し、再起動時に `SetProxy` の後で `SetVenueCredentials` を再送する |
 | `data/src/config/tachibana.rs`（新設） | `TachibanaCredentials` 型 + keyring 読み書き。SKILL.md R10 に従う。`data/src/config/proxy.rs` の暗号資産プロキシ keyring 実装を参考にする |
 | [src/main.rs](../../../src/main.rs) | 起動時に keyring から立花 creds を復元し `SetVenueCredentials` 投入 |
 | `src/screen/login.rs` の拡張または新画面 | 立花ログイン UI（user_id / password / second_password / is_demo チェックボックス） |
+| `src/screen/dashboard/tickers_table.rs` ほか UI | `VenueReady` 前の metadata fetch を抑止し、`MarketKind::Stock` に応じた market filter / indicator / timeframe / 表示文言を調整 |
 | [docs/plan/✅python-data-engine/](../✅python-data-engine/) `schemas/` | `commands.json` / `events.json` に新コマンド・イベントを記載、`CHANGELOG.md` 更新（※親計画ディレクトリ内のスキーマ。本計画 T0 で同期） |
 
 ## 6. 失敗モードと UI 表現
@@ -159,7 +186,7 @@ python/engine/
 
 ### 7.2 結合（Python + mock サーバ）
 
-- **`pytest-httpx` または `respx`** でデモサーバを擬似化（既存 Python 側スイートが `httpx` 中心のため）
+- **`pytest-httpx`**（`HTTPXMock` フィクスチャ）でデモサーバを擬似化。既存 [python/tests/test_binance_rest.py](../../../python/tests/test_binance_rest.py) のパターンを踏襲
   - `e_api_login_tel.py/e_api_login_response.txt` を fixture として再利用
   - 異常系: `p_errno=-62` (時間外) / `p_errno=2` (セッション切れ) / `sKinsyouhouMidokuFlg=1` (未読通知)
   - WebSocket は `websockets` の `serve` でローカルサーバを立てて FD/KP frame を再生
