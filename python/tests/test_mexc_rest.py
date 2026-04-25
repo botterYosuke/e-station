@@ -116,13 +116,14 @@ def _futures_ticker(
 # --- depth snapshot ---
 
 def _depth_snapshot(version=1000, timestamp=1700000000000, bids=None, asks=None):
+    # MEXC futures depth API returns levels as [price, vol, order_count] arrays.
     return {
         "code": 0,
         "data": {
             "version": version,
             "timestamp": timestamp,
-            "bids": bids or [{"price": 29999.0, "qty": 1.0}],
-            "asks": asks or [{"price": 30001.0, "qty": 0.5}],
+            "bids": bids or [[29999.0, 1.0, 1]],
+            "asks": asks or [[30001.0, 0.5, 1]],
         },
     }
 
@@ -556,8 +557,8 @@ async def test_fetch_depth_snapshot_futures(worker, httpx_mock: HTTPXMock):
         url=f"{_REST_V1}/depth/BTC_USDT",
         json=_depth_snapshot(
             version=9999,
-            bids=[{"price": 29999.0, "qty": 2.0}],
-            asks=[{"price": 30001.0, "qty": 1.0}],
+            bids=[[29999.0, 2.0, 1]],
+            asks=[[30001.0, 1.0, 1]],
         ),
     )
     result = await worker.fetch_depth_snapshot("BTC_USDT", "linear_perp")
@@ -565,6 +566,32 @@ async def test_fetch_depth_snapshot_futures(worker, httpx_mock: HTTPXMock):
     assert len(result["bids"]) == 1
     assert result["bids"][0]["price"] == "29999.0"
     assert result["asks"][0]["qty"] == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_futures_real_format(worker, httpx_mock: HTTPXMock):
+    """Regression for UI-2: MEXC depth API returns [price, vol, count] arrays.
+
+    Previously `_depth_levels` indexed `item["price"]` which raised TypeError
+    on every level → snapshot fetch failed → infinite reconnect loop.
+    """
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/depth/BTC_USDT",
+        json={
+            "success": True,
+            "code": 0,
+            "data": {
+                "version": 12345,
+                "timestamp": 1700000000000,
+                "bids": [[77577.8, 175490, 6], [77577.7, 700, 1]],
+                "asks": [[77578.0, 666, 1], [77578.1, 1227, 1]],
+            },
+        },
+    )
+    result = await worker.fetch_depth_snapshot("BTC_USDT", "linear_perp")
+    assert result["last_update_id"] == 12345
+    assert result["bids"][0] == {"price": "77577.8", "qty": "175490"}
+    assert result["asks"][0] == {"price": "77578.0", "qty": "666"}
 
 
 @pytest.mark.asyncio

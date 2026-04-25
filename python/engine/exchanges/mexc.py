@@ -55,9 +55,14 @@ _KLINE_FUTURES: dict[str, str] = {
 _INTERVAL_TO_TIMEFRAME: dict[str, str] = {v: k for k, v in _KLINE_FUTURES.items()}
 
 
-def _depth_levels(items: list[dict]) -> list[dict[str, str]]:
-    """Convert MEXC depth array [{price, qty, ...}] to IPC format."""
-    return [{"price": str(item["price"]), "qty": str(item["qty"])} for item in items]
+def _depth_levels(items: list) -> list[dict[str, str]]:
+    """Convert MEXC depth levels to IPC format.
+
+    MEXC futures depth (REST and WS) returns levels as `[price, vol, order_count]`
+    arrays. Indexing as a dict raised TypeError on every level, which previously
+    caused snapshot fetches and depth diffs to be silently dropped (UI-2).
+    """
+    return [{"price": str(item[0]), "qty": str(item[1])} for item in items]
 
 
 def _is_linear(symbol: str) -> bool:
