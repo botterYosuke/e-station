@@ -552,7 +552,7 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 - [x] README / ユーザードキュメント更新。
   - "Method 2: Build from Source" を Python 必須前提に書き換え、`uv sync` での依存導入手順、`--engine-cmd`／`--data-engine-url` の使い分け、`scripts/build-*.sh` の同梱バイナリ生成手順、ランタイムログ／監視挙動を新セクションで追記。
 
-**完了条件**: ユーザーが Python ランタイムを別途インストールせずに既存と同じ操作で起動できる。✅ **達成見込み**（PyInstaller 産物の動作はリリースビルド検証で確認）。
+**完了条件**: ユーザーが Python ランタイムを別途インストールせずに既存と同じ操作で起動できる。✅ **達成見込み**（PyInstaller 産物の動作はリリースビルド検証で確認）。**追加 (Phase 7)**: マージ前に `bash tests/e2e/smoke.sh` が PASS していること（handshake + 30s 無 silent failure）。手動 GUI シナリオは [`tests/e2e/README.md`](../../tests/e2e/README.md) を参照。
 
 ### Phase 6 設計判断・ハマりどころ・Tips
 
@@ -576,10 +576,10 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 
 ### 残タスク（Phase 6 のフォローアップ）
 
-- [ ] CI ワークフロー（`.github/workflows/release.yml` 等）に PyInstaller インストールと `build-engine.sh` 呼び出しを追加。
-- [ ] 既存の `engine-client/tests/depth_gap_recovery.rs` と `connection_closed.rs` の clippy/test 失敗を Phase 5 の指摘として修正。
-- [ ] Linux で AppImage / Flatpak など他の配布形態が必要かを判断。
-- [ ] PyInstaller `onefile` の cold-start を計測し、`onedir` への切替コスト/メリットを評価。
+- [x] CI ワークフロー (`.github/workflows/release.yaml`) に `astral-sh/setup-uv@v5` を追加 (2026-04-25, Phase 7 T4.a)。`build-engine.sh` は既に platform スクリプトから呼ばれていた。
+- [x] `engine-client/tests/connection_closed.rs` `dto_conversion.rs` の clippy 違反修正 (2026-04-25, Phase 7 T4.b, commit `17201d4`)。
+- [ ] Linux で AppImage / Flatpak など他の配布形態が必要かを判断。 *(Phase 7 で deferred)*
+- [ ] PyInstaller `onefile` の cold-start を計測し、`onedir` への切替コスト/メリットを評価。 *(Phase 7 で deferred)*
 
 ## ロールバック戦略
 

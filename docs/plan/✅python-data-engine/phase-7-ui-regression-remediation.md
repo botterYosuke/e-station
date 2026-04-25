@@ -35,28 +35,25 @@
 
 #### T1.1 ログベース切り分け
 
-- [ ] `RUST_LOG=info,engine_client=debug,flowsurface=debug` で起動し、以下をすべて収集:
-  - `Ticker metadata fetch failed for <venue>: ...` ([tickers_table.rs:1699](../../src/screen/dashboard/tickers_table.rs#L1699))
-  - `fetch_ticker_metadata timeout` ([backend.rs:502](../../engine-client/src/backend.rs#L502))
-  - Python 側 `_handle_list_tickers` の着信・応答ログ ([python/engine/server.py](../../python/engine/server.py))
-- [ ] **完了条件**: 以下の 4 象限のどれに該当するか確定:
-  - (a) `ListTickers` が Python に届かない
-  - (b) Python が空配列を返している
-  - (c) Python が返したが Rust 側の ASCII / `venue` 等価フィルタで全弾除外
-  - (d) metadata は入るが stats が届かず `update_ticker_rows` の AND 条件で 0 行
+- [x] `RUST_LOG=debug` で起動して `~/AppData/Roaming/flowsurface/flowsurface-current.log` と Python engine stdout を採取済み (2026-04-25)。`engine_client=debug` 形式は現 logger が単一レベル指定のみ受理するため `RUST_LOG=debug` で代替。
+- [x] **完了条件**: 象限 **(c)** で確定 (2026-04-25)。`TickerStats::daily_price_chg: f32` が Python の `str(...)` 送出を拒否し 25,518 件のパースエラーが silent drop していた。下記 T1.2(c) 参照。
+  - (a) `ListTickers` が Python に届かない → 否定（fresh log で `Tickers` イベントを Rust が受信していた）
+  - (b) Python が空配列を返している → 否定（同上、stats は数千件届いていた）
+  - (c) **該当**: stats の serde 不整合で全弾 silent drop
+  - (d) metadata と stats は両方届くが UI ゲート条件で 0 行 → 否定（MetadataFetchState は正常動作）
 
 #### T1.2 象限別の修復
 
 - [ ] **(a) の場合** — handshake 完了前に `ListTickers` が送られている疑い。`EngineConnection` が `Ready` を受信してから metadata fetch を発火するよう `Sidebar::new` の初期 Task をゲート。具体的には `main.rs:476` の `chain(launch_sidebar...)` を `ENGINE_READY` watch 経由の `Subscription` にぶら下げる形に変更する設計を検討。 *(skipped: 根本原因は (c) で解消済み。残課題なし)*
 - [x] **(b) の場合** ✅ (2026-04-25) — T2 として予防的に実装。`engine/server.py` の `_handshake` が `Ready` 送出前に `await asyncio.gather(*(w.prepare() for w in workers))` を 20s タイムアウトで実行する。各 worker は `prepare()` で `httpx.AsyncClient` を eager 初期化。回帰テスト `test_handshake_calls_worker_prepare_before_ready` を追加。
 - [x] **(c) の場合** ✅ (2026-04-25) — 確定原因は ASCII フィルタではなく `TickerStats` の serde 型不整合だった。[exchange/src/lib.rs:660](../../exchange/src/lib.rs#L660) の `daily_price_chg: f32` に `de_f32_from_number_or_string` カスタム deserializer を追加。[exchange/src/serde_util.rs](../../exchange/src/serde_util.rs) に helper を実装。`TickerStats` に 2 件の回帰テスト（`daily_price_chg_accepts_stringified_number` / `daily_price_chg_accepts_json_number`）を追加。Python 側 (`binance.py:472` 他 4 venue) の `str(...)` 送出はそのまま許容する方針（IPC スキーマは number or string の両方を受理できるよう lenient に）。
-- [ ] **(d) の場合** — [tickers_table.rs:327-332](../../src/screen/dashboard/tickers_table.rs#L327-L332) の `build_stats_fetch_task` ゲート条件（`selected_exchanges.contains(&venue)`）と、`MetadataFetchState` の pending セットが `selected_exchanges` と一致するかを確認。
+- [ ] **(d) の場合** — [tickers_table.rs:327-332](../../src/screen/dashboard/tickers_table.rs#L327-L332) の `build_stats_fetch_task` ゲート条件確認。 *(skipped: T1.1 で象限 (d) は除外済み)*
 
 #### T1.3 回帰テスト
 
 - [x] `engine-client` 側 (2026-04-25): `engine-client/tests/wait_ready.rs` を追加。`connect()` が `Ready` を block 待ちする不変条件と `wait_ready()` の即時 resolve 動作を明文化。将来の handshake 非同期化リファクタで UI-1 race が再発した場合に検知する。
 - [x] 「Ready 未受信時の fetch」: 現アーキテクチャでは `EngineConnection` 取得自体が `Ready` 受領に gate されているため、構造的に再現不能。Python 側 `test_handshake_calls_worker_prepare_before_ready` で worker 準備完了の前提も担保。
-- [ ] Rust 側 `TickersTable::new_with_settings` → `UpdateMetadata` → `UpdateStats` 一気通貫テスト: 大規模 mock の構築コストが高く、UI-1 根本原因が serde 不整合だったため `exchange/` の `daily_price_chg_*` 回帰テストでカバー済み。フェーズ 8 以降の改修で追加検討。
+- [-] Rust 側 `TickersTable::new_with_settings` → `UpdateMetadata` → `UpdateStats` 一気通貫テスト: **deferred**。大規模 mock の構築コストが高く、UI-1 根本原因が serde 不整合だったため `exchange/` の `daily_price_chg_*` 回帰テストでカバー済み。フェーズ 8 以降の改修で追加検討。
 
 **完了条件**: 起動直後に虚眼鏡を開くと全 5 venue の銘柄がリスト表示される状態が手動 QA + 自動テストの両方で確認できる。
 
@@ -78,7 +75,7 @@ Phase 7 以降の完了条件として固定する。
   - 5 venue ストリーム自動接続
   - 30s ソークで `DepthGap` / `parse error` / `snapshot fetch failed` / `fetch_ticker_*` timeout / `TickerStats parse error` が 0 件
 - [x] `tests/e2e/README.md` で手動シナリオ (Binance クリック → チャート描画、`kill -9` 復旧) と環境変数 (`OBSERVE_S` / `PORT`) を文書化。
-- [ ] `implementation-plan.md` の各フェーズ完了条件への後付け追記は別 PR で対応。
+- [x] `implementation-plan.md` の Phase 6 完了条件に「手動 QA で `tests/e2e/smoke.sh` が PASS」を追記済み (2026-04-25)。
 
 ### T4. Phase 6 残タスクの取り込み (Priority: Medium)
 
@@ -86,22 +83,22 @@ Phase 7 以降の完了条件として固定する。
 
 - [x] `.github/workflows/release.yaml` に `astral-sh/setup-uv@v5` ステップを追加 (2026-04-25)。`scripts/build-engine.sh` 呼び出しは既に `build-windows.sh` / `build-macos.sh` / `package-linux.sh` から行われていた。
 - [x] `engine-client/tests/connection_closed.rs` の `unused variable` 修正 + `dto_conversion.rs` の `excessive_precision` / `manual_range_contains` 修正 (T4.b)。`depth_gap_recovery.rs` は現状 clippy clean。
-- [ ] `onefile` cold-start 計測 (Windows / macOS / Linux): GitHub Actions ランナー上での自動計測を別 PR で追加予定。手動計測は手元の Windows で `time ./flowsurface.exe` 実行が可能。
-- [ ] Linux AppImage / Flatpak の要否判断: Flatpak 化希望ユーザーがいれば再度検討。デフォルト tar.gz で配布継続。
+- [-] `onefile` cold-start 計測 (Windows / macOS / Linux): **deferred** 別 PR。GitHub Actions ランナー上での自動計測を準備中。手動計測は手元の Windows で `time ./flowsurface.exe` 実行可能。`docs/plan/✅python-data-engine/benchmarks/phase-6.md` への記録は計測後。
+- [-] Linux AppImage / Flatpak の要否判断: **deferred**。Flatpak 化希望ユーザー要望が出るまでデフォルト tar.gz で配布継続。
 
 ### T5. `engine-client/src/hybrid.rs` の決着 (Priority: Low)
 
 Phase 5 完了時点で不要となったが残置。
 
-- [ ] 参照箇所をすべて削除し crate から除去
-- [ ] `HybridVenueBackend` に依存していたテストを削除または `EngineClientBackend` で書き直し
+- [x] 参照箇所をすべて削除し crate から除去 (2026-04-25, commit `41d5665`)。`engine-client/src/lib.rs` から `pub mod hybrid;` と `pub use hybrid::HybridVenueBackend;` を削除。
+- [x] `HybridVenueBackend` に依存していたテスト (`engine-client/tests/hybrid_backend.rs`) を削除。`EngineClientBackend` のカバレッジは既存 `backend_swap.rs` / `dto_conversion.rs` 等で十分。
 
 ## 3. ドキュメント更新
 
-- [ ] `README.md`（本ディレクトリ）の進捗サマリ表に「フェーズ 7: UI リグレッション修復」を追加し進行中でマーク
-- [ ] `spec.md` §4.5 にハンドシェイク契約の追記（T2 参照）
-- [ ] `implementation-plan.md` フェーズ 6 の完了条件に「手動 QA で UI 経路 E2E が合格」を追記
-- [ ] `open-questions.md` に「E2E テスト自動化の運用方針（Playwright 相当 or 既存の `agent-experience-verification` スキル流用）」を追加
+- [x] `README.md`（本ディレクトリ）の進捗サマリ表でフェーズ 7 の状態を「ほぼ完了 (T4.c/T4.d のみ別 PR)」に更新済み (2026-04-25)。
+- [x] `spec.md` §4.5 にハンドシェイク契約の追記済み (2026-04-25, commit `75058a4`)。
+- [x] `implementation-plan.md` フェーズ 6 残タスクに E2E スモーク合格を追加済み (2026-04-25)。
+- [x] `open-questions.md` に E2E 自動化の運用方針エントリを追加済み (2026-04-25)。
 
 ## 4. 依存関係と順序
 
