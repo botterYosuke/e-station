@@ -43,11 +43,7 @@ fn stdin_payload_includes_dev_tachibana_login_allowed_matching_build_profile() {
     // Profile-specific assertion. Cargo executes one of the two arms
     // depending on the active profile; both must agree on the contract.
     if cfg!(debug_assertions) {
-        assert_eq!(
-            flag,
-            Some(true),
-            "debug build must allow the dev fast path"
-        );
+        assert_eq!(flag, Some(true), "debug build must allow the dev fast path");
     } else {
         assert_eq!(
             flag,

@@ -1869,9 +1869,9 @@ mod tests {
     use exchange::unit::price::Price;
     use exchange::unit::qty::Qty;
     use exchange::{Kline, OpenInterest, PushFrequency, TickMultiplier, Timeframe, Trade};
+    use futures::StreamExt;
     use futures::future::BoxFuture;
     use futures::stream::{BoxStream, empty};
-    use futures::StreamExt;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1927,9 +1927,7 @@ mod tests {
             _timeframe: Timeframe,
             _range: Option<(u64, u64)>,
         ) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
-            Box::pin(async {
-                Err(AdapterError::InvalidRequest("inert".to_string()))
-            })
+            Box::pin(async { Err(AdapterError::InvalidRequest("inert".to_string())) })
         }
         fn fetch_trades(
             &self,
@@ -1938,17 +1936,13 @@ mod tests {
             _to_time: u64,
             _data_path: Option<PathBuf>,
         ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
-            Box::pin(async {
-                Err(AdapterError::InvalidRequest("inert".to_string()))
-            })
+            Box::pin(async { Err(AdapterError::InvalidRequest("inert".to_string())) })
         }
         fn request_depth_snapshot(
             &self,
             _ticker: Ticker,
         ) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
-            Box::pin(async {
-                Err(AdapterError::InvalidRequest("inert".to_string()))
-            })
+            Box::pin(async { Err(AdapterError::InvalidRequest("inert".to_string())) })
         }
         fn health(&self) -> BoxFuture<'_, bool> {
             Box::pin(async { true })
@@ -1988,7 +1982,8 @@ mod tests {
     #[test]
     fn new_with_settings_marks_selected_venue_in_flight() {
         let settings = settings_for(Venue::Bybit);
-        let (table, _task) = TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
+        let (table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
 
         assert!(table.metadata_fetch_state.is_in_flight(Venue::Bybit));
         assert!(!table.metadata_fetch_state.has_fetched(Venue::Bybit));
@@ -2085,8 +2080,7 @@ mod tests {
         let (mut table, _task) =
             TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
 
-        let (binance_btc, binance_btc_info) =
-            ticker_info_for(Exchange::BinanceLinear, "BTCUSDT");
+        let (binance_btc, binance_btc_info) = ticker_info_for(Exchange::BinanceLinear, "BTCUSDT");
         let mut metadata: HashMap<Ticker, Option<TickerInfo>> = HashMap::new();
         metadata.insert(binance_btc, Some(binance_btc_info));
         // We "pretend" the metadata arrived under the Binance venue path.

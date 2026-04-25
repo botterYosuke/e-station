@@ -67,3 +67,59 @@ def test_coerce_dev_login_allowed_passes_through_real_bools():
 
     assert engine_main._coerce_dev_login_allowed(True) is True
     assert engine_main._coerce_dev_login_allowed(False) is False
+
+
+def test_parse_stdin_config_exits_with_fatal_on_invalid_json(monkeypatch, capsys):
+    """MEDIUM-7 (ラウンド 6): a malformed stdin payload must not crash
+    with an opaque JSONDecodeError traceback. Surface a FATAL line on
+    stderr and `sys.exit(2)` so the Rust supervisor's restart loop sees
+    a clean signal."""
+    import io
+    from engine import __main__ as engine_main
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("{not valid json\n"))
+    import pytest
+
+    with pytest.raises(SystemExit) as excinfo:
+        engine_main._parse_stdin_config()
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "FATAL" in captured.err
+    assert "invalid stdin payload" in captured.err
+    # Defence-in-depth: the original raw text must not be echoed (the
+    # malformed payload could carry a token).
+    assert "{not valid json" not in captured.err
+
+
+def test_token_cli_emits_deprecation_warning(monkeypatch, caplog):
+    """HIGH-6 (ラウンド 6): the `--token=<value>` CLI is hidden from
+    `--help` (argparse.SUPPRESS) but still accepted for dev convenience.
+    When used, a one-shot deprecation warning must reach the log so
+    operators are nudged toward the stdin-payload / env-var path that
+    doesn't expose secrets to process listings.
+    """
+    import logging
+    from unittest.mock import patch, MagicMock
+    from engine import __main__ as engine_main
+
+    # Patch sys.argv so `_parse_args()` picks up our CLI.
+    monkeypatch.setattr("sys.argv", ["engine", "--port", "12345", "--token", "secret"])
+    # MEDIUM-2 (ラウンド 7): also patch `_run` itself so the coroutine
+    # produced by `_run(...)` inside `main()` does not leak as an
+    # unawaited coroutine RuntimeWarning. The previous version only
+    # patched `asyncio.run` to a no-op, which left the `_run(...)`
+    # coroutine (created by the unpatched coroutine function) garbage-
+    # collected without being awaited.
+    def _fake_run(*args, **kwargs):
+        return None  # not a coroutine — main()'s asyncio.run is also mocked
+    fake_run = MagicMock(side_effect=_fake_run)  # plain Mock, not AsyncMock
+    with patch.object(engine_main, "asyncio") as mock_asyncio, patch.object(
+        engine_main, "_run", fake_run
+    ), caplog.at_level(logging.WARNING):
+        # Keep `asyncio.run` as a no-op so main() returns without spawning anything.
+        mock_asyncio.run.return_value = None
+        engine_main.main()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("--token CLI" in m and "deprecated" in m for m in messages), (
+        f"expected deprecation warning for --token CLI, got {messages}"
+    )

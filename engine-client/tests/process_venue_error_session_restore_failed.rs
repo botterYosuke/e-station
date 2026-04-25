@@ -1,14 +1,18 @@
-//! M10 regression — when `SetVenueCredentials` is sent but the engine
-//! never returns `VenueReady` within the timeout window, the affected
-//! venue must be marked as failed so subsequent `Subscribe` commands
-//! are skipped. Without this, Subscribe races the user's eventual
-//! re-login and surfaces as "not authenticated" stream errors.
+//! M-R8-4 (ラウンド 8) regression — when Python emits ONLY
+//! `VenueError(session_restore_failed)` (no preceding `VenueReady` or
+//! `VenueCredentialsRefreshed`) for an in-flight `SetVenueCredentials`
+//! request, the Rust `apply_after_handshake` wait loop must:
 //!
-//! We drive `apply_after_handshake_with_timeout` (test-only seam) with
-//! a tight 200ms timeout. The mock server reads Hello, sends Ready,
-//! then deliberately ignores any further commands. After the timeout
-//! lapses we observe by side-effect: no Subscribe frame ever leaves
-//! the connection because `failed_venues` includes "tachibana".
+//! 1. Drop the matching `pending` entry.
+//! 2. Insert the venue tag into `failed_venues`.
+//! 3. Skip the subsequent `Subscribe` for that venue.
+//!
+//! The Python side already filters out `VenueReady` /
+//! `VenueCredentialsRefreshed` when `restore_failed=True` (HIGH-1
+//! ラウンド 7). This test pins the **Rust receiver** behaviour so a
+//! future regression that changes the `VenueError` arm (e.g. dropping
+//! the `failed_venues` insert) is caught here rather than only by an
+//! end-to-end smoke run.
 
 use flowsurface_engine_client::process::SubscriptionKey;
 use flowsurface_engine_client::{
@@ -16,9 +20,6 @@ use flowsurface_engine_client::{
     dto::{TachibanaCredentialsWire, VenueCredentialsPayload},
 };
 
-// MEDIUM-9 (ラウンド 6): default `WebSocketConfig` from
-// tokio_tungstenite has compression disabled in the pinned
-// versions. A future bump may change that — re-audit if upgrading.
 use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::Mutex};
@@ -30,10 +31,7 @@ async fn bind_loopback() -> (TcpListener, SocketAddr) {
     (listener, addr)
 }
 
-/// Mock server that completes the handshake and then records every
-/// further frame received so the test can assert the absence of
-/// `Subscribe` after the VenueReady timeout fires.
-async fn mock_handshake_record_frames(
+async fn mock_handshake_then_session_restore_failed(
     listener: TcpListener,
     token: String,
     received: Arc<Mutex<Vec<String>>>,
@@ -41,14 +39,12 @@ async fn mock_handshake_record_frames(
     tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = accept_async(tcp).await.unwrap();
-        // Read Hello
         if let Some(Ok(msg)) = ws.next().await {
             let text = msg.into_text().unwrap_or_default();
             let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
             assert_eq!(parsed["op"], "Hello");
             assert_eq!(parsed["token"], token.as_str());
         }
-        // Send Ready
         let ready = serde_json::json!({
             "event": "Ready",
             "schema_major": SCHEMA_MAJOR,
@@ -59,14 +55,31 @@ async fn mock_handshake_record_frames(
         });
         ws.send(Message::Text(ready.to_string().into())).await.ok();
 
-        // From here on, record every inbound frame but DO NOT respond
-        // — we want to drive the VenueReady timeout path.
         loop {
             tokio::select! {
                 msg = ws.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            received.lock().await.push(text.to_string());
+                            let s = text.to_string();
+                            received.lock().await.push(s.clone());
+                            if s.contains("\"SetVenueCredentials\"") {
+                                let parsed: serde_json::Value =
+                                    serde_json::from_str(&s).unwrap_or_default();
+                                let rid = parsed["request_id"].as_str().unwrap_or("").to_string();
+                                // Mirror the Python contract: filter out
+                                // VenueReady / VenueCredentialsRefreshed,
+                                // emit ONLY VenueError(session_restore_failed).
+                                let err_evt = serde_json::json!({
+                                    "event": "VenueError",
+                                    "venue": "tachibana",
+                                    "request_id": rid,
+                                    "code": "session_restore_failed",
+                                    "message": "セッション復元に失敗しました（テスト固定文言）",
+                                });
+                                ws.send(Message::Text(err_evt.to_string().into()))
+                                    .await
+                                    .ok();
+                            }
                         }
                         Some(Ok(Message::Close(_))) | None => break,
                         _ => {}
@@ -89,11 +102,12 @@ fn dummy_creds() -> VenueCredentialsPayload {
 }
 
 #[tokio::test]
-async fn venue_ready_timeout_marks_venue_failed_and_skips_subscribe() {
+async fn session_restore_failed_only_marks_venue_failed_and_skips_subscribe() {
     let (listener, addr) = bind_loopback().await;
-    let token = "venue-timeout-test-token";
+    let token = "session-restore-failed-token";
     let received = Arc::new(Mutex::new(Vec::<String>::new()));
-    mock_handshake_record_frames(listener, token.to_string(), Arc::clone(&received)).await;
+    mock_handshake_then_session_restore_failed(listener, token.to_string(), Arc::clone(&received))
+        .await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let url = format!("ws://{addr}");
@@ -114,12 +128,17 @@ async fn venue_ready_timeout_marks_venue_failed_and_skips_subscribe() {
         });
     }
 
-    // 200ms VenueReady timeout — well below the test's outer budget.
+    // Tight timeout — the VenueError arm should resolve in tens of ms.
+    let started = std::time::Instant::now();
     manager
-        .apply_after_handshake_with_timeout(&connection, Duration::from_millis(200))
+        .apply_after_handshake_with_timeout(&connection, Duration::from_secs(5))
         .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "VenueError(session_restore_failed) must unblock the wait immediately; elapsed={elapsed:?}"
+    );
 
-    // Give the writer a beat to flush any buffered frames.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let frames = received.lock().await.clone();
@@ -131,6 +150,6 @@ async fn venue_ready_timeout_marks_venue_failed_and_skips_subscribe() {
     );
     assert!(
         !saw_subscribe,
-        "Subscribe must NOT be sent for a venue whose VenueReady never arrived. frames={frames:?}"
+        "Subscribe MUST be skipped when only VenueError(session_restore_failed) was emitted. frames={frames:?}"
     );
 }

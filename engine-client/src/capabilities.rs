@@ -103,8 +103,8 @@ mod tests {
     #[test]
     fn returns_none_for_missing_venue() {
         let caps = caps();
-        let v: Option<Vec<String>> = venue_capability(&caps, "binance", "supported_timeframes")
-            .unwrap();
+        let v: Option<Vec<String>> =
+            venue_capability(&caps, "binance", "supported_timeframes").unwrap();
         assert!(v.is_none());
     }
 

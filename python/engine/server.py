@@ -774,25 +774,55 @@ class DataEngineServer:
     # ------------------------------------------------------------------
 
     def _emit(self, event: dict) -> None:
+        # MEDIUM-12: see implementation-plan.md round 6 group D for context.
+        # `_Outbox.append` already wakes the send loop via the registered
+        # `wake_send_loop` callback — no explicit `_outbox_event.set()` here.
         self._outbox.append(event)
-        self._outbox_event.set()
 
     def _emit_many(self, events: list[dict]) -> None:
         for ev in events:
             self._outbox.append(ev)
-        self._outbox_event.set()
 
     def _restore_session_from_payload(self, session_payload: dict) -> TachibanaSession:
         """Build a `TachibanaSession` from a wire dict (5 virtual URLs +
         expiry + tax bucket). The URLs arrive plain because the wire DTO
         has already done its `Zeroizing` round-trip on the Rust side; we
-        wrap them back into the newtype-tagged form."""
+        wrap them back into the newtype-tagged form.
+
+        MEDIUM-10 (ラウンド 6): the four HTTP virtual URLs must start
+        with `https://` and `url_event_ws` must start with `wss://`.
+        Without this gate, a corrupt keyring blob (or a misconfigured
+        proxy intercepting the validate-session response) could route
+        the next request through plaintext and leak the session
+        cookie. Reject malformed payloads with `ValueError`; the
+        caller's existing `(KeyError, TypeError, ValueError,
+        AttributeError)` handler then emits `session_restore_failed`.
+        """
+        url_request = session_payload["url_request"]
+        url_master = session_payload["url_master"]
+        url_price = session_payload["url_price"]
+        url_event = session_payload["url_event"]
+        url_event_ws = session_payload["url_event_ws"]
+        for label, value in (
+            ("url_request", url_request),
+            ("url_master", url_master),
+            ("url_price", url_price),
+            ("url_event", url_event),
+        ):
+            if not isinstance(value, str) or not value.startswith("https://"):
+                raise ValueError(
+                    f"session url {label!r} must start with https://"
+                )
+        if not isinstance(url_event_ws, str) or not url_event_ws.startswith(
+            "wss://"
+        ):
+            raise ValueError("session url 'url_event_ws' must start with wss://")
         return TachibanaSession(
-            url_request=RequestUrl(session_payload["url_request"]),
-            url_master=MasterUrl(session_payload["url_master"]),
-            url_price=PriceUrl(session_payload["url_price"]),
-            url_event=EventUrl(session_payload["url_event"]),
-            url_event_ws=session_payload["url_event_ws"],
+            url_request=RequestUrl(url_request),
+            url_master=MasterUrl(url_master),
+            url_price=PriceUrl(url_price),
+            url_event=EventUrl(url_event),
+            url_event_ws=url_event_ws,
             zyoutoeki_kazei_c=session_payload.get("zyoutoeki_kazei_c", ""),
             expires_at_ms=session_payload.get("expires_at_ms"),
         )
@@ -921,44 +951,51 @@ class DataEngineServer:
             # fixed Japanese banner string. Pinned by
             # `python/tests/test_tachibana_login_unexpected_error.py`.
             try:
-                events = await tachibana_run_login(
-                    request_id=request_id,
-                    p_no_counter=self._tachibana_p_no_counter,
-                    dev_login_allowed=self._dev_tachibana_login_allowed,
-                    is_startup=True,
-                    fallback_user_id=fallback_user_id,
-                    fallback_password=fallback_password,
-                    fallback_is_demo=(
-                        bool(fallback_is_demo) if fallback_is_demo is not None else None
-                    ),
-                )
-            except Exception as exc:
-                # M-LOG ラウンド 5: scrub credential-bearing locals
-                # **before** `log.exception` runs. Verbose log
-                # formatters (e.g. capture_locals=True traceback
-                # formatters used by some structured-logging stacks)
-                # render every frame's locals — leaving
-                # `fallback_password` / `payload` / `msg` bound here
-                # would surface the password in the rendered traceback
-                # even though the banner message stays generic.
+                try:
+                    events = await tachibana_run_login(
+                        request_id=request_id,
+                        p_no_counter=self._tachibana_p_no_counter,
+                        dev_login_allowed=self._dev_tachibana_login_allowed,
+                        is_startup=True,
+                        fallback_user_id=fallback_user_id,
+                        fallback_password=fallback_password,
+                        fallback_is_demo=(
+                            bool(fallback_is_demo) if fallback_is_demo is not None else None
+                        ),
+                    )
+                except Exception as exc:
+                    # H3 / M-14: any unexpected failure inside `run_login`
+                    # must surface as a typed VenueError so the UI banner
+                    # can classify it. Detail goes to the log; the user-
+                    # facing message is the fixed Japanese banner string.
+                    # Pinned by `test_tachibana_login_unexpected_error.py`.
+                    log.exception(
+                        "SetVenueCredentials: tachibana_run_login raised: %s", exc
+                    )
+                    self._emit(
+                        {
+                            "event": "VenueError",
+                            "venue": "tachibana",
+                            "request_id": request_id,
+                            "code": "login_failed",
+                            "message": _MSG_LOGIN_FAILED,
+                        }
+                    )
+                    return
+            finally:
+                # HIGH-7 (ラウンド 6): scrub credential-bearing locals on
+                # **every** exit path (success and failure). Previous
+                # placement only ran on the exception path; the success
+                # path left `fallback_password` / `payload` / `msg`
+                # bound on the frame, so a verbose-formatter traceback
+                # captured later — e.g. on the `_restore_session_from_
+                # payload` error branch below — would still render the
+                # password from this enclosing frame's locals.
                 fallback_password = None  # noqa: F841 — overwritten on purpose
                 fallback_user_id = None  # noqa: F841
                 fallback_is_demo = None  # noqa: F841
                 payload = None  # noqa: F841
                 msg = None  # noqa: F841
-                log.exception(
-                    "SetVenueCredentials: tachibana_run_login raised: %s", exc
-                )
-                self._emit(
-                    {
-                        "event": "VenueError",
-                        "venue": "tachibana",
-                        "request_id": request_id,
-                        "code": "login_failed",
-                        "message": _MSG_LOGIN_FAILED,
-                    }
-                )
-                return
             # Capture the validated session so future ops can use it.
             # If the payload is malformed, the Rust keyring will receive
             # the new session via VenueCredentialsRefreshed but the Python
@@ -981,6 +1018,19 @@ class DataEngineServer:
                             exc,
                         )
                         restore_failed = True
+            # HIGH-1 (ラウンド 7): when `restore_failed=True` we MUST NOT
+            # emit `VenueReady` (or `VenueCredentialsRefreshed`) for this
+            # `request_id` — the Rust `apply_after_handshake` wait loop
+            # treats `VenueReady` as terminal completion of the request,
+            # and any later `VenueError` would be silently dropped by
+            # the continuation listener (which logs but does not act).
+            # Filter the event list so only the failure surfaces.
+            if restore_failed:
+                events = [
+                    ev
+                    for ev in events
+                    if ev.get("event") not in ("VenueReady", "VenueCredentialsRefreshed")
+                ]
             self._emit_many(events)
             if restore_failed:
                 self._emit(
@@ -1071,6 +1121,17 @@ class DataEngineServer:
                             exc,
                         )
                         restore_failed = True
+            # HIGH-1 (ラウンド 7): mirror `_do_set_venue_credentials` —
+            # filter VenueReady / VenueCredentialsRefreshed when the
+            # restore failed so Rust's wait loop does not see a terminal
+            # success event under the same `request_id` followed by a
+            # silent VenueError.
+            if restore_failed:
+                events = [
+                    ev
+                    for ev in events
+                    if ev.get("event") not in ("VenueReady", "VenueCredentialsRefreshed")
+                ]
             self._emit_many(events)
             if restore_failed:
                 self._emit(

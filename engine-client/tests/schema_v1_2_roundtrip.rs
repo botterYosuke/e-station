@@ -19,9 +19,9 @@ fn python_dump(variant: &str) -> String {
         "RequestVenueLogin" => format!(
             r#"{{"op":"RequestVenueLogin","request_id":"{VALID_UUID}","venue":"tachibana"}}"#,
         ),
-        "VenueReady" => format!(
-            r#"{{"event":"VenueReady","venue":"tachibana","request_id":"{VALID_UUID}"}}"#,
-        ),
+        "VenueReady" => {
+            format!(r#"{{"event":"VenueReady","venue":"tachibana","request_id":"{VALID_UUID}"}}"#,)
+        }
         "VenueError" => format!(
             r#"{{"event":"VenueError","venue":"tachibana","request_id":"{VALID_UUID}","code":"session_expired","message":"再ログインしてください"}}"#,
         ),
@@ -31,9 +31,9 @@ fn python_dump(variant: &str) -> String {
         "VenueLoginStarted" => format!(
             r#"{{"event":"VenueLoginStarted","venue":"tachibana","request_id":"{VALID_UUID}"}}"#,
         ),
-        "VenueLoginCancelled" => String::from(
-            r#"{"event":"VenueLoginCancelled","venue":"tachibana","request_id":null}"#,
-        ),
+        "VenueLoginCancelled" => {
+            String::from(r#"{"event":"VenueLoginCancelled","venue":"tachibana","request_id":null}"#)
+        }
         _ => panic!("unknown variant {variant}"),
     }
 }

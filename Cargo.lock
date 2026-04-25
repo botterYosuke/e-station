@@ -978,6 +978,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -987,7 +988,7 @@ dependencies = [
  "chrono",
  "dirs-next",
  "enum-map",
- "flowsurface-engine-client",
+ "flowsurface-data",
  "flowsurface-exchange",
  "iced_core",
  "keyring",
@@ -1012,6 +1013,7 @@ dependencies = [
  "async-stream",
  "bytes",
  "fastwebsockets",
+ "flowsurface-data",
  "flowsurface-exchange",
  "futures",
  "futures-util",

@@ -453,12 +453,11 @@ impl VenueBackend for EngineClientBackend {
                                         }
                                         let display_symbol =
                                             t.get("display_symbol").and_then(|v| v.as_str());
-                                        let display_symbol =
-                                            display_symbol.filter(|d| {
-                                                d.is_ascii()
-                                                    && d.len() <= Ticker::MAX_LEN as usize
-                                                    && !d.contains('|')
-                                            });
+                                        let display_symbol = display_symbol.filter(|d| {
+                                            d.is_ascii()
+                                                && d.len() <= Ticker::MAX_LEN as usize
+                                                && !d.contains('|')
+                                        });
                                         let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
                                         let min_qty = t.get("min_qty")?.as_f64()? as f32;
                                         let contract_size = t

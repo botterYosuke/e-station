@@ -27,7 +27,23 @@ def _parse_stdin_config() -> dict[str, Any]:
     fall back to safe defaults so older Rust binaries remain compatible.
     """
     raw = sys.stdin.readline().strip()
-    cfg = json.loads(raw)
+    # MEDIUM-7 (ラウンド 6): a malformed stdin payload used to crash
+    # the engine with a bare `json.JSONDecodeError` traceback going
+    # to whatever stderr handler was wired up — an opaque failure for
+    # the Rust supervisor. Surface a FATAL line and exit 2 so the
+    # supervisor's restart loop can decide whether to retry or give
+    # up. We deliberately do **not** include `raw` itself in the log
+    # to avoid leaking a token if the malformation is a missing
+    # quote rather than an absent payload.
+    try:
+        cfg = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"FATAL: invalid stdin payload: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(2)
     # Defaults for forward / backward compat.
     cfg.setdefault("dev_tachibana_login_allowed", False)
     cfg.setdefault("config_dir", None)
@@ -38,7 +54,16 @@ def _parse_stdin_config() -> dict[str, Any]:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flowsurface data engine")
     parser.add_argument("--port", type=int, help="WebSocket port (dev mode only)")
-    parser.add_argument("--token", type=str, help="Connection token (dev mode only)")
+    # HIGH-6 (ラウンド 6): `--token=<value>` exposes the secret to any
+    # process listing tool (`ps`, `Get-Process -IncludeUserName`, /proc).
+    # The stdin payload path is the authoritative production transport.
+    # Hide the flag from `--help` and emit a one-shot deprecation warning
+    # below in `main()` when it is actually used. Removing the flag
+    # outright would break dev workflows that rely on
+    # `uv run python -m engine --port 19876 --token dev-token`; the
+    # SUPPRESS form keeps that working while making the secret-on-CLI
+    # smell visible in the log.
+    parser.add_argument("--token", type=str, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -97,6 +122,15 @@ def main() -> None:
     dev_tachibana_login_allowed = False
 
     if args.port and args.token:
+        # HIGH-6 (ラウンド 6): one-shot deprecation warning. The CLI
+        # `--token` is kept for dev convenience but is visible to
+        # process-listing tools — preferred path is the stdin payload
+        # (Rust supervisor) or `FLOWSURFACE_ENGINE_TOKEN` env var.
+        log.warning(
+            "--token CLI argument is deprecated and exposes the token via process "
+            "listings; prefer the stdin payload (managed mode) or "
+            "FLOWSURFACE_ENGINE_TOKEN env var (dev mode)"
+        )
         port, token = args.port, args.token
         dev_tachibana_login_allowed = _env_dev_login_allowed()
     else:

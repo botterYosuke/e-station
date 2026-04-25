@@ -10,8 +10,8 @@
 //! the gate behavior with an in-process mock WS server.
 
 use flowsurface_engine_client::{
-    dto::{TachibanaCredentialsWire, VenueCredentialsPayload},
     ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR, SubscriptionKey,
+    dto::{TachibanaCredentialsWire, VenueCredentialsPayload},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -130,7 +130,9 @@ async fn subscribe_is_not_sent_until_venue_ready_observed() {
         .expect("handshake");
 
     let manager = Arc::new(ProcessManager::new("python"));
-    manager.set_venue_credentials(dummy_creds_with_session()).await;
+    manager
+        .set_venue_credentials(dummy_creds_with_session())
+        .await;
     manager
         .active_subscriptions
         .lock()
@@ -242,7 +244,9 @@ async fn subscribe_is_skipped_when_set_venue_credentials_fails() {
         .expect("handshake");
 
     let manager = Arc::new(ProcessManager::new("python"));
-    manager.set_venue_credentials(dummy_creds_with_session()).await;
+    manager
+        .set_venue_credentials(dummy_creds_with_session())
+        .await;
     manager
         .active_subscriptions
         .lock()

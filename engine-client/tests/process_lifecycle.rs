@@ -165,8 +165,7 @@ fn stdin_payload_round_trips_tricky_token_via_production_builder() {
     let token = r#"hard"to\escape"#; // contains both " and \
 
     let line = build_stdin_payload(port, token).expect("must serialize");
-    let parsed: serde_json::Value =
-        serde_json::from_str(line.trim_end()).expect("must parse");
+    let parsed: serde_json::Value = serde_json::from_str(line.trim_end()).expect("must parse");
     assert_eq!(parsed["port"].as_u64(), Some(port as u64));
     assert_eq!(parsed["token"].as_str(), Some(token));
     assert!(parsed.get("dev_tachibana_login_allowed").is_some());

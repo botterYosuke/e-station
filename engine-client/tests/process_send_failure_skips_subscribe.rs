@@ -18,13 +18,21 @@
 //! request_id we never managed to send) and `failed_venues` is
 //! reflected in skipped Subscribe attempts.
 
-use flowsurface_engine_client::{
-    SCHEMA_MAJOR, SCHEMA_MINOR,
-    dto::{TachibanaCredentialsWire, VenueCredentialsPayload},
-    EngineConnection, ProcessManager,
-};
 use flowsurface_engine_client::process::SubscriptionKey;
+use flowsurface_engine_client::{
+    EngineConnection, ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR,
+    dto::{TachibanaCredentialsWire, VenueCredentialsPayload},
+};
 
+// MEDIUM-9 (ラウンド 6): `tokio_tungstenite::accept_async` uses the
+// crate's default `WebSocketConfig`, which has permessage-deflate
+// **disabled** in the `tungstenite` versions pinned in `Cargo.lock`.
+// The Python production server also disables compression
+// (`websockets.serve(compression=None)` — see CLAUDE.md). If a
+// future tungstenite update flips that default, fastwebsockets
+// (the production client) will reject RSV1=1 frames and these
+// mock-server tests will start failing in unexpected ways. Audit
+// `WebSocketConfig::default()` on every tungstenite bump.
 use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, time::Duration};
 use tokio::net::TcpListener;

@@ -67,7 +67,11 @@ fn explicit_override_takes_precedence() {
 #[test]
 fn python_interpreter_override_runs_engine_module() {
     let tmp = tempdir();
-    let py_name = if cfg!(windows) { "python.exe" } else { "python3" };
+    let py_name = if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python3"
+    };
     let py_path = tmp.path().join(py_name);
     fs::write(&py_path, b"stub").unwrap();
 

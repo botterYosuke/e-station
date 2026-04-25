@@ -30,7 +30,18 @@ import sys
 import textwrap
 
 
-SECRETS = ("uxf05882", "vw20sr9h", "SESSION_TOKEN_SHOULD_NOT_LEAK")
+# MEDIUM-3 (ラウンド 7): use sentinels that cannot collide with the
+# operator's `.env` (whose values are treated as production-shape
+# `uxNNNNNN` / 8-char password). A collision would make the
+# `assert SENTINEL not in output` check pass for the wrong reason
+# (the output legitimately contained the value because the dev login
+# fast path consumed the env). Unique high-entropy markers eliminate
+# that ambiguity.
+SECRETS = (
+    "TEST_SENTINEL_USER_5e8a1f3c",
+    "TEST_SENTINEL_PWD_9b2d7e4a",
+    "SESSION_TOKEN_SHOULD_NOT_LEAK",
+)
 
 
 _HELPER_SOURCE = textwrap.dedent(
@@ -42,8 +53,8 @@ _HELPER_SOURCE = textwrap.dedent(
     from engine.server import DataEngineServer
 
     # Sentinel secret material — must NOT appear in subprocess output.
-    user_id = "uxf05882"  # noqa: F841
-    password = "vw20sr9h"  # noqa: F841
+    user_id = "TEST_SENTINEL_USER_5e8a1f3c"  # noqa: F841
+    password = "TEST_SENTINEL_PWD_9b2d7e4a"  # noqa: F841
     session_token = "SESSION_TOKEN_SHOULD_NOT_LEAK"  # noqa: F841
 
     # Patch validate_session_on_startup at the import site used by

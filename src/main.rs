@@ -229,9 +229,7 @@ fn main() {
         // the manager — when Python restarts, the same payload is replayed.
         if let Some(creds) = data::config::tachibana::load_tachibana_credentials() {
             log::info!("Loaded tachibana session from keyring");
-            let payload = engine_client::dto::VenueCredentialsPayload::Tachibana(
-                (&creds).into(),
-            );
+            let payload = engine_client::dto::VenueCredentialsPayload::Tachibana((&creds).into());
             rt.block_on(manager.set_venue_credentials(payload));
         } else {
             log::info!("No tachibana credentials in keyring — login will be requested on demand");
@@ -246,44 +244,45 @@ fn main() {
         // therefore only does the keyring write — duplicating it with a
         // second listener in main.rs would re-introduce the load→set ABA
         // race the reviewer flagged.
-        rt.block_on(manager.set_on_venue_credentials_refreshed(Box::new(
-            move |refresh| {
+        rt.block_on(
+            manager.set_on_venue_credentials_refreshed(Box::new(move |refresh| {
+                // MEDIUM-7 (ラウンド 7): match on the explicit refresh
+                // variant rather than the previous three-Optional probe.
+                // `Full` is the only variant that warrants a full
+                // keyring write; `SessionOnly` rotates the session URLs
+                // only.
+                use engine_client::process::VenueCredentialsRefresh;
                 let session: data::config::tachibana::TachibanaSession =
-                    refresh.session.into();
-                // When Python supplies the full credential triple
-                // (current schema), persist all four fields. When only
-                // `session` is present (legacy emitter), splice it into
-                // the existing keyring entry to preserve user_id /
-                // password / is_demo. Without this branch, an account
-                // switch / demo↔prod toggle / password change in the
-                // dialog never reaches the keyring, and the next cold
-                // start fast-paths with stale credentials.
-                match (refresh.user_id, refresh.password, refresh.is_demo) {
-                    (Some(user_id), Some(password), Some(is_demo)) => {
-                        // H4: pass the password through as `Zeroizing<String>`
-                        // (don't materialise a plain `String` here — the
-                        // intermediate copy would survive past the keyring
-                        // write and miss being zeroed).
-                        //
-                        // R4-1 ラウンド 5: move the `Zeroizing<String>`
-                        // directly. The previous `.clone()` produced a
-                        // second heap allocation that lived past the
-                        // keyring write — exactly the kind of
-                        // intermediate copy `Zeroizing` exists to
-                        // prevent.
+                    refresh.session().clone().into();
+                match refresh {
+                    VenueCredentialsRefresh::Full {
+                        user_id,
+                        password,
+                        is_demo,
+                        ..
+                    } => {
+                        // H4 / R4-1: keep the password inside a
+                        // `Zeroizing<String>` envelope through the
+                        // entire flow into the keyring write. We
+                        // clone exactly once here; the cloned
+                        // envelope is moved into
+                        // `save_refreshed_credentials` and dropped+
+                        // zeroed at the end of that call.
+                        let pw_clone: zeroize::Zeroizing<String> =
+                            zeroize::Zeroizing::new((**password).clone());
                         data::config::tachibana::save_refreshed_credentials(
-                            user_id,
-                            password,
-                            is_demo,
+                            user_id.clone(),
+                            pw_clone,
+                            *is_demo,
                             session,
                         );
                     }
-                    _ => {
+                    VenueCredentialsRefresh::SessionOnly { .. } => {
                         data::config::tachibana::update_session_in_keyring(&session);
                     }
                 }
-            },
-        )));
+            })),
+        );
 
         let url = format!("ws://127.0.0.1:{port}");
         log::info!("Engine URL: {url}");
@@ -574,10 +573,20 @@ impl Flowsurface {
                     // the engine's FIFO command channel.  Send unconditionally —
                     // including `None` — so a user-cleared proxy cannot be revived
                     // by a stale value held in the freshly spawned engine.
+                    // CRITICAL-3 (ラウンド 6, downgraded): the
+                    // `try_send_now` here is a side-effect from inside
+                    // `update()`, which strictly speaking violates
+                    // iced's pure-update / `Task::perform`-side-effect
+                    // model. Same root cause as繰越項目 H7 / H8 / H9
+                    // (Phase O1: iced Subscription 化). Reworking the
+                    // proxy push into a `Task::perform` here would
+                    // touch enough surface that we keep the existing
+                    // shape and revisit holistically in Phase O1. See
+                    // `docs/plan/tachibana/implementation-plan.md`
+                    // 繰越項目 一覧.
                     let proxy_url = self.network.proxy_cfg().map(|p| p.to_url_string());
-                    if !conn.try_send_now(engine_client::dto::Command::SetProxy {
-                        url: proxy_url,
-                    }) {
+                    if !conn.try_send_now(engine_client::dto::Command::SetProxy { url: proxy_url })
+                    {
                         log::warn!("Failed to queue proxy for engine reconnect");
                     }
 
@@ -768,8 +777,9 @@ impl Flowsurface {
 
                             let resolved_streams =
                                 streams.into_iter().try_fold(vec![], |mut acc, persist| {
-                                    let resolver =
-                                        |t: &exchange::Ticker| tickers_info.get(t).and_then(|opt| *opt);
+                                    let resolver = |t: &exchange::Ticker| {
+                                        tickers_info.get(t).and_then(|opt| *opt)
+                                    };
 
                                     match persist.into_stream_kinds(resolver) {
                                         Ok(mut resolved) => {

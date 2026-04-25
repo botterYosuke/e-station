@@ -70,7 +70,10 @@ fn tachibana_ticker_info_uses_jpy_quote() {
         100,
     );
     assert_eq!(info.lot_size, Some(100));
-    assert_eq!(info.resolved_quote_currency(), flowsurface_exchange::QuoteCurrency::Jpy);
+    assert_eq!(
+        info.resolved_quote_currency(),
+        flowsurface_exchange::QuoteCurrency::Jpy
+    );
 }
 
 #[test]

@@ -42,6 +42,7 @@
 | Q37 | マスタ DL の kick タイミング | (a) `VenueReady` に含める / (b) `VenueReady` 直後に非同期 kick / (c) 初回 `ListTickers` で lazy | T4 | レビュー指摘 F-H6。**決定: (b)**。`VenueReady` 受信直後に `_ensure_master_loaded()` を `asyncio.create_task` で kick、`list_tickers` 等は内部で `await` する。`VenueReady` 自体は session 検証完了のみを意味する原則は維持 |
 | Q38 | 祝日のフェイルセーフ | (a) Phase 1 では考慮せず取引所エラーを `VenueError` に流す / (b) 「市場休業」相当エラーを検出して `Disconnected{reason:"market_closed"}` に倒す | T5 | レビュー指摘 F-M5a。**決定: (b)**。誤判定防止のため対象は明示的なエラーコードのみ。動的祝日カレンダーは引き続き Phase 2 |
 | Q39 | `BASE_URL_PROD` 定数の所在 | (a) Python 側 1 ファイル限定 / (b) Rust と Python 両方に持つ | T0 | レビュー指摘 F-L1。**決定: (a)** `python/engine/exchanges/tachibana_url.py` のみ。Rust 側は本番 URL リテラルを持たず、`tools/secret_scan.sh` の allowlist もこの 1 ファイルのみ |
+| Q40 | `phone_auth_required` の発火経路（実機調査必要） | (a) 立花 API のどの応答フィールド（`p_errno` / `sResultCode` / message 文字列）で電話認証未済を検出するか確定する / (b) 検出経路が無いことを公式に確認し dead code として削除 / (c) 防御的に table 登録を残しつつ実機調査を後続イテレーションへ繰越 | Phase O1 | MEDIUM-8 (ラウンド 6 強制修正 / Group F)。現状 `engine-client/src/error.rs::classify_venue_error` のテーブルに `phone_auth_required` が登録されているが、Python 側 (`python/engine/exchanges/tachibana_auth.py` / `server.py`) で該当 code を生成する経路が **存在しない** — 実機ログイン時に電話認証画面が出るケースを再現できる環境（demo or prod）で `p_errno` / `sResultCode` / `sCLMID` の応答コードを採取し、Python 側 emitter を追加した上で本テーブルを生かすか、削除するかを決める。**現時点では (c)** で運用、Phase O1 の実機調査タスクとして繰越。`docs/plan/tachibana/architecture.md §6` 失敗モード表にも同旨を明記済み |
 
 ## 決定済み（参考）
 

@@ -119,7 +119,20 @@ def _load_dev_env() -> Optional[dict]:
 async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
     """Run the tkinter helper as a subprocess. stdin: JSON prefill / opts.
     stdout (final line): JSON result. Returns the parsed result dict on
-    success, None on cancellation, or raises on transport / decode error."""
+    success, None on cancellation, or raises on transport / decode error.
+
+    Note (MEDIUM-11 ラウンド 6): the timeout-and-kill branch reads
+    `proc.stderr` only after `proc.communicate()` has already raised
+    `asyncio.TimeoutError`, which means the stderr pipe may have been
+    partially consumed by the killed `communicate()` call's internal
+    drain. The post-kill stderr read is therefore **best-effort**: we
+    capture whatever bytes are still available within a 1-second
+    budget and log them. Missing or truncated stderr in this branch is
+    expected, not a bug. Switching to a separate `proc.stderr.read()`
+    task started in parallel with `communicate()` would give complete
+    capture but adds significant complexity for a path that fires only
+    on a hung helper (10-min budget) — kept best-effort intentionally.
+    """
     cmd = [
         sys.executable,
         "-m",
@@ -159,11 +172,18 @@ async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
         except (ProcessLookupError, asyncio.TimeoutError):
             try:
                 proc.kill()
-                # Best-effort final reap; ignore secondary failures.
+                # Best-effort final reap; surface the unreaped PID via
+                # `log.error` so an OS-level zombie isn't a silent leak
+                # (MEDIUM-13 ラウンド 6 — previously this was a bare
+                # `pass` that hid kill failures).
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=2.0)
                 except (asyncio.TimeoutError, ProcessLookupError):
-                    pass
+                    log.error(
+                        "tachibana login dialog: failed to reap helper PID %s "
+                        "after kill — giving up; OS may show a zombie",
+                        proc.pid,
+                    )
             except ProcessLookupError:
                 pass
         raise LoginError(code="login_failed", message=_MSG_HELPER_NO_RESPONSE)
@@ -447,8 +467,19 @@ async def run_login(
             events.append(_login_cancelled_event(request_id))
             return events
 
-        dialog_user_id = result["user_id"]
-        dialog_password = result["password"]
+        # MEDIUM-14 (ラウンド 6): defensively `.get()` the credential
+        # fields. The helper contract guarantees them on `status=ok`,
+        # but a malformed result (helper version skew, partial JSON
+        # truncation) used to KeyError into the bare exception
+        # handler — yielding an opaque traceback rather than a typed
+        # `login_failed` banner. Surface explicitly instead.
+        dialog_user_id = result.get("user_id")
+        dialog_password = result.get("password")
+        if not dialog_user_id or not dialog_password:
+            log.error(
+                "tachibana login dialog: helper result missing credential fields"
+            )
+            raise LoginError(code="login_failed", message=_MSG_LOGIN_FAILED)
         dialog_is_demo = bool(result.get("is_demo", True))
         try:
             session = await _do_login_call(

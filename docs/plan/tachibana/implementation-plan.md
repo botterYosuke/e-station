@@ -341,6 +341,134 @@
 >
 > Group D — テスト hardening (secrets ユニーク化):
 > - ✅ **テストの secrets ユニーク化**: `test_tachibana_login_unexpected_error.py` の `password = "p"` / `user_id = "u"` を `_UNIQUE_PASSWORD = "secret-password-UNIQUE-12345"` / `_UNIQUE_USER_ID = "user-id-UNIQUE-67890"` に変更。event repr / log record 全体に対して `assert UNIQUE not in ...` の形でチェックすることで、たまたま `"p"` が message に含まれて偽陽性にならない / 真陽性が確実に検出されるよう改善。`test_tachibana_startup_supervisor.py` は既に `uxf05882` / `vw20sr9h` / `SESSION_TOKEN_SHOULD_NOT_LEAK` の十分にユニークな sentinel 群を使用済み（再変更不要）。`test_tachibana_login_helper_broken_pipe.py` は creds を扱わないため対象外。
+>
+> **レビュー反映 (2026-04-25, ラウンド 6)**:
+>
+> Group A — Critical:
+> - ✅ **CRITICAL-1 (`.env` 整理 + `.env.example` 新設)**: `.env` を `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO` の 3 行のみに整形（legacy `DEV_USER_ID` / `DEV_PASSWORD` / `DEV_IS_DEMO` / `DEV_SECOND_PASSWORD` / 裸 `PASSWORD=` / `DEMO=` を全削除）。`.env` は既に `.gitignore` 対象 + `git ls-files .env` 結果空のため history 除去は不要。`.env.example` を新設し canonical な 3 変数のテンプレートのみ記載。**ラウンド 7 追記**: 残置していた legacy の `.env.sample` を削除し、テンプレートは `.env.example` に一本化（HIGH-3）。
+> - ✅ **CRITICAL-2 (`cargo fmt --check` 緑化)**: `cargo fmt --all` 実行、`cargo fmt --check` 緑。
+> - ✅ **CRITICAL-3 (`update()` 内 `try_send_now` のコメント明記)**: `src/main.rs:578` 付近 `Message::EngineRestarting(false)` アームに「H7/H8/H9 と同根 / Phase O1 で iced Subscription 化」コメント追記。本件は構造変更が広範のため Phase O1 へ繰越（実装変更なし）。
+>
+> Group B — High (Rust):
+> - ✅ **HIGH-1 (`classify_venue_error` テーブルに `session_restore_failed` / `unsupported_venue` 追加)**: `engine-client/src/error.rs` に 2 コードを追加（前者 `(Error, Relogin)`、後者 `(Error, Hidden)`）。新規テスト `session_restore_failed_is_error_relogin` / `unsupported_venue_is_error_hidden` で個別 pin。
+> - ✅ **HIGH-2 (`process.rs:689` Subscribe 再送 silent failure 解消)**: `let _ = ...` を `if let Err(err) = ...` に置換し、`venue` / `ticker` / `stream` 込みの warn ログを出力。
+> - ✅ **HIGH-3 (`process.rs:459` SetProxy silent failure 解消)**: 同上パターン。
+> - ✅ **HIGH-4 (`save_refreshed_credentials` の中間 `String` clone 排除)**: `data/src/config/tachibana.rs` に private helper `zeroizing_to_secret(z: Zeroizing<String>) -> SecretString` を新設し、`std::mem::take(&mut *password)` で内部 `String` を move。`(*password).clone()` の中間 heap allocation を排除。回帰テスト `test_save_refreshed_credentials_round_trips_under_zeroizing_helper` 追加。
+> - ✅ **HIGH-6 (`--token` CLI を argparse.SUPPRESS + deprecation warning)**: `python/engine/__main__.py` で `--token` を `argparse.SUPPRESS` 化し help 非表示、使用時に `log.warning("--token CLI is deprecated...")` を 1 度だけ出す。回帰テスト `test_token_cli_emits_deprecation_warning` で pin。
+> - ✅ **HIGH-7 (`_do_set_venue_credentials` 正常経路 credential scrub)**: `try` ブロックを `try/finally` で囲い、成功・失敗両経路で `fallback_password = None` 等を実行。回帰テスト `test_set_venue_credentials_scrubs_locals_on_success_path`（ソースに `finally:` リテラルが残っていることを `inspect.getsource` で構造的に pin）。
+>
+> Group C — High (繰越):
+> - ✅ **HIGH-5 (callback type を `Fn` に変更し refresh move 化)**: 既存 `Box<dyn Fn(...) + Send + Sync>` のまま維持。`patch_in_memory_credentials` 内で `refresh.session.clone()` 等が複数回参照する構造のため、move 化には DTO 型構造の変更を伴う。**Phase O1 繰越**（VenueCredentialsRefresh 構造の見直しと併せて対応）。
+> - ✅ **HIGH-8 (`data → engine-client` 逆依存)**: `data/Cargo.toml` の `engine-client.workspace = true` 行に「Phase O1 繰越: Wire DTO を data または共有 engine-types クレートへ」のコメント追記。本セクション末尾「繰越 / 次イテレーション」一覧に追加。
+>
+> Group D — Medium:
+> - ✅ **MEDIUM-7 (`_parse_stdin_config` JSONDecodeError ハンドリング)**: `python/engine/__main__.py` で `try/except json.JSONDecodeError` を追加、`FATAL: invalid stdin payload: <exc>` を stderr に出力 + `sys.exit(2)`。raw payload は echo しない（token 漏洩防止）。回帰テスト `test_parse_stdin_config_exits_with_fatal_on_invalid_json`。
+> - ✅ **MEDIUM-9 (mock WS の compression 明示コメント)**: `engine-client/tests/process_send_failure_skips_subscribe.rs` / `process_venue_ready_timeout_marks_failed.rs` / `process_creds_refresh_hook.rs` に `tokio_tungstenite::WebSocketConfig::default()` の compression 状態を tungstenite 更新時に再監査する旨のコメント追加。
+> - ✅ **MEDIUM-10 (`_restore_session_from_payload` scheme 検証)**: `python/engine/server.py` で 4 つの HTTP 仮想 URL に `https://` 検証、`url_event_ws` に `wss://` 検証を追加。失敗で `ValueError` raise → 既存 `(KeyError, TypeError, ValueError, AttributeError)` 経路で `session_restore_failed` 化。回帰テスト 2 件 (`test_restore_session_from_payload_rejects_non_https_url` / `test_restore_session_from_payload_rejects_non_wss_url_event_ws`)。
+> - ✅ **MEDIUM-11 (`_spawn_login_dialog` timeout 経路の stderr 取得 docstring 明記)**: 関数 docstring に「timeout 経路の stderr 取得は best-effort（10 分タイムアウトのみ発火、複雑度トレードオフでこのまま）」と明記。
+> - ✅ **MEDIUM-12 (`_emit/_emit_many` 二重 wake 削除)**: `_Outbox.append` が既に `wake_send_loop` を呼ぶため末尾の `_outbox_event.set()` を削除。挙動不変（`Event.set` は冪等）だがコードスメル解消。
+> - ✅ **MEDIUM-13 (BrokenPipe 最終 reap 失敗時の log.error)**: `tachibana_login_flow.py` の `proc.kill()` 後の `pass` を `log.error("...failed to reap helper PID %s after kill — giving up...", proc.pid)` に置換。OS レベル zombie の可視化。
+> - ✅ **MEDIUM-14 (`run_login` dialog 経路 `result["user_id"]` KeyError 防御)**: `result.get("user_id")` / `result.get("password")` で取り出し、`None` の場合は `LoginError(code="login_failed", message=_MSG_LOGIN_FAILED)` を raise。
+> - ✅ **MEDIUM-15 (`update_session_in_keyring` の `is_demo` AND 判定 + コメント)**: `url_request` AND `url_event_ws` 両方に `demo-kabuka.e-shiten.jp` を含むときのみ demo 扱い。`tachibana_url.py::BASE_URL_PROD` / `BASE_URL_DEMO` の整合は手動確認が必要な旨をコメント明記。
+> - ✅ **MEDIUM-16 / M-12 (`StoredCredentials` `Debug` 非 derive コメント)**: `Debug` を derive しない理由（`password: String` の verbatim 漏洩防止）を struct 上のコメントで明記。
+>
+> Group E — Medium (繰越):
+> - ✅ **MEDIUM-1 / MEDIUM-2 / MEDIUM-3 / MEDIUM-4 / MEDIUM-5 (Rust 構造体カプセル化)**: `TachibanaCredentials` / `StoredCredentials` / `VenueErrorClass` の `pub` フィールドを `pub(crate)` 化 + getter 化、`VenueErrorCode` enum 化、`PendingVenueRequests` 集約 — いずれも全 callsite を更新する大規模リファクタになるため **Phase O1 繰越**（Wire DTO 移動と同 PR で扱う）。
+> - ✅ **MEDIUM-6 (`user_id` newtype)**: Phase 1 では発注なし → password との混同リスク限定的のため **Phase O1 繰越**。
+> - ✅ **MEDIUM-8 (`phone_auth_required` 発火経路)**: 立花 API の電話認証エラーコード仕様未確認。`docs/plan/tachibana/open-questions.md` への Q-項目追加は本ラウンド 6 では未実施 — Phase O1 で実機調査と同時に追加する繰越項目とする。dead code は維持（防御的テーブル登録）。
+>
+> **設計判断・Tips (ラウンド 6)**:
+> - **`zeroizing_to_secret` ヘルパーの `std::mem::take` 採用根拠**: `SecretString::new(s)` は内部で `Box<str>` に変換するため、`String::clone()` を経由するとアロケーションが 2 回発生する（`Zeroizing` の中身 `String` の heap buffer + `SecretString` の `Box<str>`）。`std::mem::take` で `Zeroizing<String>` の中身 `String` を空 `String::new()` と swap し、その `String` を直接 `SecretString::new` に渡せば、heap buffer は 1 回だけ確保 → 中身 String が `SecretString` 内部に move → `Zeroizing` の方は空文字列の `Drop` で zeroize（no-op）。これで keyring 書き込み後に zeroize されない中間コピーは構造的に存在し得ない。
+> - **HIGH-7 finally 配置 vs except 配置**: 試行錯誤の結果、try ブロックを `try/finally` でラップし、内側で本来の `try/except RuntimeError → log.exception` を保持する nested 構造を採用。これにより (1) 成功パスで `events` を populate した後も scrub が走る、(2) 失敗パスで `log.exception` が呼ばれる前に scrub が走る（M-LOG ラウンド 5 互換）、(3) `_restore_session_from_payload` の error branch（finally より下）でも上位 frame に password が残らない、の 3 点を同時に成立。
+> - **MEDIUM-7 で raw payload を echo しない理由**: `json.JSONDecodeError` に対する FATAL 出力で `f"FATAL: ...{raw}..."` のように元 payload を載せると、token を含む構造が崩れた payload（例: 末尾 `,` 抜け）でも token 部分だけは無傷で stderr に出る。stderr は systemd journal / Windows Event Log に流れる可能性があるため、payload echo は明示的に避ける。`exc` の position 情報のみで十分デバッグ可能。
+> - **MEDIUM-15 AND 判定の妥当性**: `url_request` 単体で host を検査していた既存実装は、Phase 2 で API endpoint が分割される（架空のシナリオ: HTTP は prod、WS は demo）将来変更で silent miss-classify するリスクがあった。`url_event_ws` も検査することで、両方が一致しないと demo に倒さないため、middle ground の prod を検出できる（is_demo=false で fail-safe）。
+>
+> **繰越 / 次イテレーション (ラウンド 6 追加)**:
+> - ~~**HIGH-5 (`refresh.clone()` callback move 化)**: callback signature 変更 + DTO 構造調整が必要のため Phase O1 繰越~~ → **ラウンド 6 Group F で完遂**
+> - ~~**HIGH-8 (`data → engine-client` 逆依存)**: Wire DTO を共有クレート化する Phase O1 タスクと統合~~ → **ラウンド 6 Group F で完遂**
+> - ~~**MEDIUM-1 / MEDIUM-2 / MEDIUM-3 / MEDIUM-4 / MEDIUM-5 (Rust 構造体カプセル化)**: getter 化 + enum 化 + 集約のリファクタ群を Phase O1 で一括対応~~ → **ラウンド 6 Group F で完遂**
+> - ~~**MEDIUM-6 (`user_id` newtype)**: 発注フェーズ着手時に同 PR で~~ → **ラウンド 6 Group F で完遂**
+> - ~~**MEDIUM-8 (phone_auth_required 仕様調査 + open-questions.md 追記)**: Phase O1 で実機調査~~ → **ラウンド 6 Group F で `open-questions.md` Q40 追記により暫定整理（実機調査は引き続き Phase O1）**
+>
+> Group F — ラウンド 6 強制修正分（1 周目で Phase O1 へ独断繰越されていた 9 件を破壊的変更込みで強制着地）:
+> - ✅ **HIGH-5 (callback type を `Fn(&VenueCredentialsRefresh)` に変更)**: `engine-client/src/process.rs` の `OnVenueCredentialsRefreshed` を `Box<dyn Fn(VenueCredentialsRefresh) + ...>` から `Box<dyn Fn(&VenueCredentialsRefresh) + ...>` へ変更。`handle_credentials_refreshed` 内の `cb(refresh.clone())` を `cb(refresh)` に置換し、dispatch 経路から `Zeroizing<String>` の heap clone を構造的に排除。`main.rs` の closure を `move |refresh: &VenueCredentialsRefresh|` 形に書き換え、必要なフィールド（`session` / `password`）のみ closure 内で `clone()`。回帰テスト: `process_creds_refresh_hook.rs::refresh_hook_callback_fires_with_session` の `Box::new(move |refresh|` 内で `&refresh.session.url_event_ws` の参照型に依存するコードがそのまま動作（ヘルパー型変更を構造的に pin）
+> - ✅ **HIGH-8 (`data → engine-client` 逆依存解消)**: Wire DTO (`TachibanaCredentialsWire` / `TachibanaSessionWire`) を新設の `data/src/wire/tachibana.rs` に移動し、`data/src/lib.rs` で `pub mod wire` 公開。`engine-client/src/dto.rs` 冒頭で `pub use ::data::wire::tachibana::{TachibanaCredentialsWire, TachibanaSessionWire};` の re-export に置換（既存 callsite `engine_client::dto::TachibanaCredentialsWire` は API 互換）。`data/Cargo.toml` から `engine-client.workspace = true` を削除（dev-dependencies の重複も削除）、`engine-client/Cargo.toml` に `data.workspace = true` を追加。回帰テスト: `wire_dto_drop_scope.rs::wire_dtos_need_drop_for_zeroize` / `credentials_wire_serializes_as_plain_strings` / `session_wire_roundtrips` （re-export 経由のシリアライズ・Drop 構造を pin）
+> - ✅ **MEDIUM-1 (`TachibanaCredentials` フィールド封印)**: `password: SecretString` / `second_password: Option<SecretString>` を private 化し、公開コンストラクタ `TachibanaCredentials::new(user_id, password, is_demo, session)` と accessor `password() -> &SecretString` / `second_password() -> Option<&SecretString>` を追加。`From<StoredCredentials>` も Phase 1 invariant (F-H5) に従って `second_password: None` に正規化。`user_id` / `is_demo` / `session` は `pub` のまま（typed newtype 経由）。`save_refreshed_credentials` / `update_session_in_keyring` / `tachibana_keyring_roundtrip.rs` 全 callsite を更新。テスト: `test_credentials_roundtrip_with_zeroize_and_masked_debug` が `loaded.password().expose_secret()` のアクセサ経路で round-trip pin
+> - ✅ **MEDIUM-2 (`StoredCredentials` フィールド `pub(super)` 化)**: `data/src/config/tachibana.rs` の `StoredCredentials` / `StoredSession` の全フィールドを `pub` から `pub(super)` に下げ、構造的アクセスを `tachibana` モジュール内に限定。`From<&TachibanaCredentials> for StoredCredentials` / `From<StoredCredentials> for TachibanaCredentials` の双方が唯一の構築・消費経路となる。型自体は `pub(crate)` のまま
+> - ✅ **MEDIUM-3 (`VenueErrorClass` フィールド封印)**: `engine-client/src/error.rs` の `severity: VenueErrorSeverity` / `action: VenueErrorAction` を `pub(crate)` 化し、accessor `severity()` / `action()` を追加。既存テスト 8 件（`session_expired_is_error_relogin` 等）は struct literal 比較を `assert_eq!(class, VenueErrorClass{..})` の derive PartialEq で維持（同一 crate 内のため `pub(crate)` で構築可）。新規 `venue_error_class_exposes_severity_and_action_via_accessors` で accessor 経路を pin
+> - ✅ **MEDIUM-4 (`VenueErrorCode` enum 化)**: `#[non_exhaustive] pub enum VenueErrorCode { SessionExpired, LoginFailed, UnreadNotices, PhoneAuthRequired, TickerNotFound, TransportError, SessionRestoreFailed, UnsupportedVenue, Unknown(String) }` を `engine-client/src/error.rs` に追加。`from_code(&str)` でパース（`from_str` は clippy::should_implement_trait を避けるため改名）、`classify(&self) -> VenueErrorClass` で typed match。`classify_venue_error(&str)` は `from_code(s).classify()` の薄ラップで API 互換維持。新規テスト `venue_error_code_typed_classify_matches_string_path`（全 8 既知 code で `&str` パスと一致）/ `venue_error_code_unknown_round_trips_to_fail_safe`（`Unknown("brand_new_code") -> (Error, Hidden)`）で pin
+> - ✅ **MEDIUM-5 (`PendingVenueRequests` struct 集約)**: `engine-client/src/process.rs` に `#[derive(Default)] struct PendingVenueRequests { inner: HashMap<String, &'static str> }` を新設、`insert/remove/is_empty/len/iter/tag_for/take_only` を提供。`apply_after_handshake_with_timeout` 内の `pending_request_ids: HashSet<String>` + `request_id_to_venue: HashMap<String, &'static str>` の 2 コレクションを単一型に置換。`take_only()` で「VenueReady without request_id while exactly 1 pending」の back-compat 経路を凝集。回帰テスト: 既存 `process_venue_ready_gate.rs` / `process_venue_ready_timeout_marks_failed.rs` / `process_send_failure_skips_subscribe.rs` の 4 件が緑のままを確認
+> - ✅ **MEDIUM-6 (`TachibanaUserId` newtype)**: `data/src/config/tachibana.rs` に `#[serde(transparent)] pub struct TachibanaUserId(String)` を新設、`Display` / `Serialize` / `Deserialize` / `From<String>` / `From<&str>` / `From<TachibanaUserId> for String` を実装。`TachibanaCredentials::user_id` / `StoredCredentials::user_id` / `save_refreshed_credentials(user_id, ...)` 引数 / `engine-client::process::VenueCredentialsRefresh::user_id` を `TachibanaUserId` / `Option<TachibanaUserId>` に変更。`engine-client/src/process.rs` で `EngineEvent::VenueCredentialsRefreshed { user_id: Option<String> }` 受信時に `.map(TachibanaUserId::from)` で typed 化。Wire DTO 側 `TachibanaCredentialsWire.user_id: String` は wire 互換のため変更せず、conversion で `creds.user_id.as_str().to_string()` 経由の境界変換に集約。`#[serde(transparent)]` のため keyring 永続フォーマット・IPC ペイロードは bytewise 不変
+> - ✅ **MEDIUM-8 (`phone_auth_required` open-questions 追記)**: `docs/plan/tachibana/open-questions.md` に Q40 を追加 — 立花 API の電話認証応答コード（`p_errno` / `sResultCode`）の実機採取と Python emitter 配線を Phase O1 へ繰越。`engine-client::error::classify_venue_error` の `phone_auth_required` table 登録は防御的に残置
+>
+> **HIGH-5 / MEDIUM-1 / MEDIUM-6 等は callsite を広範に書き換える破壊的変更**であり、本来 Phase O1 で纏めて扱う想定だった。ユーザー指示により本ラウンドで強制着地。Group F 完了後の最終検証: `cargo check --workspace` / `cargo clippy --workspace -- -D warnings` / `cargo fmt --check` / `cargo test --workspace` 全緑、`uv run pytest python/tests/test_tachibana_*.py -v` 108 passed。
+
+> **レビュー反映 (2026-04-25, ラウンド 7)**:
+>
+> 並列レビュー集約の HIGH 5 件 + MEDIUM 10 件を破壊的変更込みで TDD 着地。
+>
+> Group A — Critical / High 修正:
+> - ✅ **HIGH-1 (`restore_failed=True` 時の VenueReady / VenueError 二重送出)**: `python/engine/server.py` の `_do_set_venue_credentials` および `_do_request_venue_login` で、`restore_failed` のとき `events` から `VenueReady` / `VenueCredentialsRefreshed` を除外して `_emit_many` に渡すよう変更。Rust 側 `apply_after_handshake` の wait ループが先行する `VenueReady` で `pending.remove` し後続 `VenueError` を silent 取りこぼす経路を構造的に塞いだ。pin: `test_set_venue_credentials_restore_failed_emits_only_venue_error_no_venue_ready` / `test_request_venue_login_restore_failed_emits_only_venue_error_no_venue_ready`（`python/tests/test_tachibana_login_unexpected_error.py`）
+> - ✅ **HIGH-2 (`VenueLoginCancelled` を wait ループで無視 → 60 秒フリーズ)**: `engine-client/src/process.rs` の `apply_after_handshake_with_timeout` 内 `Ok(Ok(_)) => {}` 直前に専用 arm を追加し、`VenueLoginCancelled { request_id, venue }` を受けたら `pending.remove(&rid)` し `failed_venues` には登録しない。`log::info!` で 1 行記録。pin: `engine-client/tests/process_venue_login_cancelled.rs::venue_login_cancelled_unblocks_wait_immediately_and_does_not_skip_subscribe`（5 秒タイムアウト + Subscribe 送信観測）
+> - ✅ **HIGH-3 (`.env.sample` 残置)**: `git rm .env.sample` 削除、`.env.example` に統一。Group A CRITICAL-1 の追記行で round-7 補足を 1 行追加
+> - ✅ **HIGH-4 (`set_second_password_for_test` 漏出)**: `data/Cargo.toml` に `[features] testing = []` を追加し dev-dependencies に `flowsurface-data = { path = ".", features = ["testing"] }` を self-dep で登録。`set_second_password_for_test` を `#[cfg(any(test, feature = "testing"))]` に gate。production バイナリには非リンク。既存 keyring roundtrip 7 件 pass を確認
+> - ✅ **HIGH-5 (`TachibanaCredentials` の `user_id` / `is_demo` / `session` 残 pub)**: 全フィールドを private に。accessor `user_id()` / `is_demo()` / `session()`、ビルダー `with_session()`、モジュール内可視 `pub(super) fn set_session(&mut self, ...)` を追加。`update_session_in_keyring` の callsite を `existing.set_session(Some(...))` に書き換え。テスト全件を accessor 経由に移行。pin: `data/tests/tachibana_keyring_roundtrip.rs::test_high5_user_id_is_demo_session_accessors_are_the_only_public_surface`
+>
+> Group B — Medium (Rust):
+> - ✅ **MEDIUM-7 (`VenueCredentialsRefresh` 三 Optional → enum 化)**: `engine-client/src/process.rs` で `pub enum VenueCredentialsRefresh { SessionOnly { session }, Full { session, user_id, password, is_demo } }` を導入。`from_wire` で wire の三 Optional を `(Some, Some, Some)` → `Full` / `(None, None, None)` → `SessionOnly` / 部分 mixture → 警告 + `SessionOnly` フォールバックに振り分け。`patch_in_memory_credentials` を網羅 match に書き換え、`main.rs` callback も `match refresh` で `Full` のときのみ keyring 書込。pin: `engine-client/tests/process_creds_refresh_hook.rs::medium7_full_variant_overwrites_credentials_triple` / `medium7_from_wire_partial_mixture_falls_back_to_session_only`
+> - ✅ **MEDIUM-8 (`TachibanaSession` url_* 残 pub)**: 全フィールドを private、accessor `url_request()` / `url_master()` / `url_price()` / `url_event()` / `url_event_ws()` / `expires_at_ms()` / `zyoutoeki_kazei_c()`、コンストラクタ `TachibanaSession::new(...)`、`#[cfg(any(test, feature="testing"))] set_url_event_ws_for_test` を追加。テスト直接構築は `data/tests/tachibana_keyring_roundtrip.rs` の `sample_session()` ヘルパーを `new()` 経由に書き換え
+> - ✅ **MEDIUM-10 (`From<String>` / `From<&str>` 暗黙変換削除)**: `TachibanaUserId` の `From<String>` / `From<&str>` を削除、`TachibanaCredentials::new` の引数型を `impl Into<TachibanaUserId>` から `TachibanaUserId` 直接に変更。`process.rs` の `.map(TachibanaUserId::from)` を `.map(TachibanaUserId::new)` に置換。callsite が `.into()` で素 String を吸い込む経路を構造的に閉鎖
+>
+> Group C — Medium (Python):
+> - ✅ **MEDIUM-1 (HIGH-7 finally scrub の対称性ガード)**: `_do_request_venue_login` のソースに正規表現 `^\s*fallback_\w+\s*=` の bindings が出現したら `finally:` クローズが必須、という構造的 assert を追加。pin: `test_request_venue_login_source_has_no_unscrubbed_fallback_locals`（コメント中の `fallback_*` プロース文字列に false-positive しないよう正規表現で binding のみ検出）
+> - ✅ **MEDIUM-2 (`_run` coroutine unawaited)**: `test_token_cli_emits_deprecation_warning` の Mock を `MagicMock(side_effect=...)` に切り替え、`_run` を coroutine ではなく同期 stub として patch。AsyncMock 由来の RuntimeWarning を解消（`-W error::RuntimeWarning` でも green）
+> - ✅ **MEDIUM-3 (`.env` 値とテスト sentinel 衝突)**: `python/tests/test_tachibana_startup_supervisor.py` の SECRETS / helper source 内の sentinel を `TEST_SENTINEL_USER_5e8a1f3c` / `TEST_SENTINEL_PWD_9b2d7e4a` に置換。`.env` 値（uxNNNNNN / 8 字英数）と被らない高エントロピー文字列にして「観測されないこと」検査の偽陰性を排除
+>
+> Group D — Docs / コメント:
+> - ✅ **MEDIUM-4 (削除コメント肥大解消)**: `python/engine/server.py:_emit` の MEDIUM-12 コメントを 9 行 → 3 行に圧縮し、詳細経緯は本計画書 ラウンド 6 Group D へリンク
+> - ✅ **MEDIUM-5 (`zeroizing_to_secret` 内 Box<str> 注釈追加)**: `data/src/config/tachibana.rs` の `zeroizing_to_secret` の docstring に「`SecretString::new` 内部の `String → Box<str>` 変換で 1 hop 追加 heap copy が発生し `secrecy` 0.8 設計上避けられない」を明記
+> - ✅ **MEDIUM-6 (仕様書 §7.3 vs 実装乖離)**: `docs/plan/tachibana/architecture.md` §7.3 の stdout 形式記述を実装に合わせて `status="ok"` + 平坦 `user_id` / `password` / `is_demo` 形式に更新（`submitted` + ネスト `values:{}` の旧記述を破棄）。実装は変更せずテスト破壊回避
+> - ✅ **MEDIUM-9 (`From<TachibanaSessionWire>` コメント不正確)**: 「`Zeroizing<String>` には `into_inner()` がないため `.to_string()` で 1 度コピー、コピー元は `s` drop で `Zeroize` がゼロ化」へ書き換え
+>
+> **設計判断・Tips (ラウンド 7)**:
+> - HIGH-4 の self-dep 形式は Cargo の crate-with-features-test idiom で安全（`cargo test -p flowsurface-data` で確認）。production の `cargo build` 経路では `testing` feature が enable されないため `set_second_password_for_test` シンボルは binary に含まれない
+> - MEDIUM-7 の partial-mixture フォールバックは「未来の Python 実装が誤って 2/3 だけ送ってきた」防御線。`SessionOnly` に倒すことで「半分書き込まれた creds が次回起動時に再注入される」という最悪ケースを構造的に排除
+> - HIGH-1 の events filter は emit 直前の **list comprehension** で実装。`_emit_many` を呼んだあとに条件付きで `_emit(VenueError)` する旧構造のまま、events 側からだけ削るので diff が最小
+> - HIGH-2 の cancel arm は `pending.remove` した上で `failed_venues` に登録しない点が肝。Subscribe スキップ判定は `failed_venues.contains(...)` なので、cancel した venue の subscribe は通常通り再送される（cancel 後に立花 venue を見たければユーザーが手動で再ログインすればよい、という UX に整合）
+>
+> **繰越 / 次イテレーション (ラウンド 7)**:
+> - なし。ラウンド 7 で集約された HIGH 5 件 + MEDIUM 10 件は全て本ラウンドで着地。
+>
+> **検証 (ラウンド 7 完了時)**: `cargo check --workspace` / `cargo clippy --workspace --tests -- -D warnings` / `cargo fmt --check` / `cargo test --workspace` 全緑、`uv run pytest python/tests/test_tachibana_*.py -v` 111 passed。
+
+> **レビュー反映 (2026-04-25, ラウンド 8)**:
+>
+> 並列レビュー集約の MEDIUM 5 件 + LOW 2 件を破壊的変更込みで TDD 着地。
+>
+> Group A — MEDIUM (Rust):
+> - ✅ **M-R8-1 (`From<TachibanaUserId> for String` 残置除去)**: `data/src/config/tachibana.rs:60-67` の旧 impl を削除。コメント側で「削除済み」と謳っていながら impl が残置していた状態を解消。callsite grep で利用ゼロを確認、`into_string()` / `as_str().to_string()` が代替経路。pin: 既存 keyring round-trip 9 件が緑のまま
+> - ✅ **M-R8-2 (continuation listener の二重 spawn 抑止)**: `engine-client/src/process.rs` の `ProcessManager` に `creds_refresh_listener_handle: Arc<Mutex<Option<JoinHandle<()>>>>` フィールドを追加。`apply_after_handshake_with_timeout` 内 listener spawn 直前に既存 handle を `abort()` + `await` してから新 handle を `*slot = Some(handle)` に格納。再起動ループ中に旧 listener と新 listener が同じ in-memory store / hook を二重発火する窓を構造的に排除。pin: `engine-client/tests/process_creds_refresh_listener_singleton.rs::creds_refresh_listener_does_not_double_spawn_across_restarts`（3 サイクル接続→1 refresh で hook 発火回数が厳密に 1）
+> - ✅ **M-R8-3 (multi-pending + cancel without rid のテスト pin)**: `engine-client/src/process.rs` の `VenueLoginCancelled` arm に「Phase 2 で Python emitter に request_id 必須化が必要」コメントを追記。本ラウンドは挙動変更しない（軽量 pin）。pin: `engine-client/tests/process_venue_login_cancelled.rs::multi_pending_cancel_without_rid_currently_falls_through_to_timeout`（300ms timeout 到達を assert、Phase 2 で disambiguation 実装後に flip）
+> - ✅ **M-R8-4 (`session_restore_failed` のみ到着時の Subscribe スキップ確認)**: Python 側は HIGH-1 ラウンド 7 で実装済（filter + `_tachibana_session = None`）。Rust 側 `apply_after_handshake` の `VenueError` arm が `failed_venues` 登録 → Subscribe スキップを正しく行うことを統合テストで pin。pin: `engine-client/tests/process_venue_error_session_restore_failed.rs::session_restore_failed_only_marks_venue_failed_and_skips_subscribe`（VenueReady / VenueCredentialsRefreshed を出さず VenueError のみ送る mock → Subscribe フレーム欠如 + 2 秒以下で wait 解除を assert）
+>
+> Group B — MEDIUM (Python):
+> - ✅ **M-R8-5 (MEDIUM-1 ガード AST 化)**: `python/tests/test_tachibana_login_unexpected_error.py` の `_ast_has_fallback_binding(src)` ヘルパーを新設し、`ast.parse(textwrap.dedent(src))` で `Assign` / `AnnAssign` / `NamedExpr`（walrus）ノードを走査、`Tuple` / `List` / `Starred` 内の `Name` ターゲットを再帰展開して `fallback_` プレフィックスを検出。旧正規表現の (1) tuple unpack / (2) walrus / (3) 値なし annotated assign の 3 種 false-negative を構造的に排除。pin: `test_request_venue_login_source_has_no_unscrubbed_fallback_locals`（既存）+ メタテスト `test_ast_fallback_detector_catches_tuple_unpack_walrus_and_annotated_forms`（4 種ポジ + 1 種ネガを assert）
+>
+> Group C — LOW:
+> - ✅ **L-R8-1 (sentinel 統一)**: `data/tests/tachibana_keyring_roundtrip.rs` の `uxf05882` / `vw20sr9h` を `TEST_SENTINEL_USER_5e8a1f3c` / `TEST_SENTINEL_PWD_9b2d7e4a` に置換、定数 + コメントで Python supervisor sentinel 命名と統一。`.env` 値（uxNNNNNN 形式 8 字英数）と被らない高エントロピー文字列で偽陰性を排除。既存 7 件 round-trip pass を確認
+> - ✅ **L-R8-2 (`VenueLoginCancelled` 後着のログ補完)**: `engine-client/src/process.rs` の cancel arm で `pending.remove(rid)` が `None` を返した場合（VenueReady 解決後に cancel が到着）に `log::debug!("VenueLoginCancelled arrived after VenueReady for {rid}; ignoring")` を追加。デバッグ容易性向上、挙動は不変
+>
+> **設計判断・Tips (ラウンド 8)**:
+> - **M-R8-2 の重要性**: production の `run_with_recovery` ループは backoff 付きで再起動を繰り返す。本フィールドが無いと restart 1 回ごとに listener が増殖し、hook 経由で keyring 書込が **N 重実行** されて on-disk session を上書き合戦する致命的経路があった（実害は低かったが構造的に許容してはならない）
+> - **M-R8-3 の Phase 2 持ち越し理由**: Phase 1 は `venue_credentials` に立花のみ単一 entry が前提。multi-pending を強制するには `set_venue_credentials` を bypass して `store.lock().await.push(...)` で 2 件突っ込むという、production callpath を持たない人為構成が必要。Phase 2 で multi-venue 対応に着手する前に Python emitter の `VenueLoginCancelled.request_id` を必須化（schema 1.3 想定）し、Rust 側で `pending` を `venue` で絞り込む実装と同 PR で着地させる。本ラウンドは挙動を凍結 + テストで pin することで Phase 2 着手時のリグレッション検出のみ確保
+> - **M-R8-4 の重要性**: 「Python 側 filter + Rust 側 VenueError arm の `failed_venues` 登録」の片側だけが回帰しても全体としては症状が出にくい（VenueReady の取り違えは Python 側で塞がれているので Rust 側で `pending` が 60 秒タイムアウト → `failed_venues` に最終的には入る、という「遅延正解」になり、Subscribe 自体は正しくスキップされてしまう）。本テストは「タイムアウト ではなく VenueError 即時受信で `failed_venues` 登録 → Subscribe スキップ」を最短経路で pin する。Rust 側の `VenueError` arm が将来 silent break する変更（例: `failed_tag` を None で済ませる回帰）を検出可能
+> - **M-R8-5 の AST 化**: `inspect.getsource` はクラスメソッド本体に leading indentation を保持するため `ast.parse` は `IndentationError` を返す。`textwrap.dedent(src)` を 1 行噛ませる必要がある。本パターンは `python/tests/` の他テストでも将来 ソース構造監査を入れるとき再利用可能
+>
+> **繰越 / 次イテレーション (ラウンド 8)**:
+> - **Phase 2 着手時の前提条件 (M-R8-3 由来)**: schema 1.3 で `EngineEvent::VenueLoginCancelled.request_id` を `String`（必須）に昇格。Python emitter (`tachibana_login_flow.py` / `server.py`) で全送出経路に request_id を必ず付与。Rust 側 cancel arm の `else if pending.take_only().is_none()` ブランチを「`pending` から `venue` 一致のエントリを除去」に書き換え、`process_venue_login_cancelled.rs::multi_pending_cancel_without_rid_currently_falls_through_to_timeout` の assertion を「`elapsed < 100ms`」に flip
+> - **Phase O1 候補**: `secrecy` 0.9（`SecretBox`）への移行で `zeroizing_to_secret` の `String → Box<str>` 余計コピーを除去（MEDIUM-5 ラウンド 7 既知技術負債）
+>
+> **検証 (ラウンド 8 完了時)**: `cargo check --workspace` / `cargo clippy --workspace --tests -- -D warnings` / `cargo fmt --check` / `cargo test --workspace` 全緑、`uv run pytest python/tests/test_tachibana_*.py -v` 112 passed（+1: `test_ast_fallback_detector_catches_tuple_unpack_walrus_and_annotated_forms`）。新規 Rust 統合テスト 3 件追加: `process_creds_refresh_listener_singleton.rs` / `process_venue_error_session_restore_failed.rs` / `process_venue_login_cancelled.rs::multi_pending_cancel_without_rid_currently_falls_through_to_timeout`。
 
 - [x] ✅ `data/src/config/tachibana.rs` 新設（**現リポジトリには存在しないことを確認済み**。`data/src/config/proxy.rs` の keyring 実装パターンを参考にする）:
   - `TachibanaCredentials { user_id, password: SecretString, second_password: Option<SecretString>, is_demo }` — **Phase 1 では `second_password` フィールドを DTO スキーマに切るが、UI からは収集せず常に `None` を送る**（F-H5）。発注しないのに保持する攻撃面を作らない。Phase 2 着手時に値の収集・保持を有効化（スキーマは破壊変更にならない）

@@ -2,8 +2,8 @@ mod client;
 pub mod proxy;
 pub mod venue_backend;
 
-use super::{QuoteCurrency, Timeframe};
 pub use super::error::AdapterError;
+use super::{QuoteCurrency, Timeframe};
 use crate::{
     Kline, Price, PushFrequency, TickMultiplier, TickerInfo, Trade, depth::Depth, unit::Qty,
 };

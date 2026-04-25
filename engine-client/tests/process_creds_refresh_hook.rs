@@ -7,9 +7,13 @@
 //! directly so a future regression to a different field name (or to a
 //! different visibility scope that breaks the hook chain) is caught here.
 
+// MEDIUM-9 (ラウンド 6): no live mock WS in this file, but the
+// production refresh path interacts with the same WS layer audited
+// in process_send_failure_skips_subscribe.rs. Keep
+// `WebSocketConfig::default()` audited on tungstenite version bumps.
 use flowsurface_engine_client::{
-    dto::{TachibanaCredentialsWire, TachibanaSessionWire, VenueCredentialsPayload},
     ProcessManager,
+    dto::{TachibanaCredentialsWire, TachibanaSessionWire, VenueCredentialsPayload},
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,15 +55,14 @@ async fn patch_in_memory_session_replaces_session_field() {
     }
 
     // Production helper — same code path `start()` runs.
-    ProcessManager::patch_in_memory_session(
-        &manager.venue_credentials,
-        &dummy_session(),
-    )
-    .await;
+    ProcessManager::patch_in_memory_session(&manager.venue_credentials, &dummy_session()).await;
 
     let store = manager.venue_credentials.lock().await;
     let VenueCredentialsPayload::Tachibana(c) = &store[0];
-    let s = c.session.as_ref().expect("session populated by patch helper");
+    let s = c
+        .session
+        .as_ref()
+        .expect("session populated by patch helper");
     assert_eq!(s.url_event_ws.as_str(), "wss://demo/evt/SES5/");
     assert_eq!(s.url_request.as_str(), "https://demo/req/SES1/");
 }
@@ -73,10 +76,15 @@ async fn refresh_hook_callback_fires_with_session() {
 
     let fired_clone = Arc::clone(&fired);
     let captured_clone = Arc::clone(&captured_url_event_ws);
+    // HIGH-5 (ラウンド 6 強制修正 / Group F): callback signature is
+    // `Fn(&VenueCredentialsRefresh)` — pinned here so a regression to
+    // by-value (which would force a per-dispatch
+    // `Zeroizing<String>` heap clone of the password) breaks the
+    // build. The closure clones only the field it actually needs.
     manager
         .set_on_venue_credentials_refreshed(Box::new(move |refresh| {
             fired_clone.fetch_add(1, Ordering::SeqCst);
-            *captured_clone.lock().unwrap() = Some(refresh.session.url_event_ws.to_string());
+            *captured_clone.lock().unwrap() = Some(refresh.session().url_event_ws.to_string());
         }))
         .await;
 
@@ -88,11 +96,8 @@ async fn refresh_hook_callback_fires_with_session() {
     // inline (skipping in-memory patching). This way a refactor that
     // moves the dispatch wins or loses on a single observable contract.
     manager.set_venue_credentials(cold_creds_no_session()).await;
-    let refresh = flowsurface_engine_client::process::VenueCredentialsRefresh {
+    let refresh = flowsurface_engine_client::process::VenueCredentialsRefresh::SessionOnly {
         session: dummy_session(),
-        user_id: None,
-        password: None,
-        is_demo: None,
     };
     ProcessManager::handle_credentials_refreshed(
         &manager.venue_credentials,
@@ -114,4 +119,81 @@ async fn refresh_hook_callback_fires_with_session() {
     let VenueCredentialsPayload::Tachibana(c) = &store[0];
     let s = c.session.as_ref().expect("session populated by handler");
     assert_eq!(s.url_event_ws.as_str(), "wss://demo/evt/SES5/");
+}
+
+#[tokio::test]
+async fn medium7_full_variant_overwrites_credentials_triple() {
+    // MEDIUM-7 (ラウンド 7): the `Full` variant must replace user_id /
+    // password / is_demo in the in-memory store (so the next restart
+    // re-injects the post-login creds). The `SessionOnly` variant
+    // tested above only patches the session field.
+    use ::data::config::tachibana::TachibanaUserId;
+    use flowsurface_engine_client::process::VenueCredentialsRefresh;
+
+    let manager = Arc::new(ProcessManager::new("python"));
+    manager.set_venue_credentials(cold_creds_no_session()).await;
+
+    let refresh = VenueCredentialsRefresh::Full {
+        session: dummy_session(),
+        user_id: TachibanaUserId::new("new-user"),
+        password: zeroize::Zeroizing::new("new-pw".to_string()),
+        is_demo: false,
+    };
+    ProcessManager::handle_credentials_refreshed(
+        &manager.venue_credentials,
+        &manager.on_venue_credentials_refreshed,
+        &refresh,
+    )
+    .await;
+
+    let store = manager.venue_credentials.lock().await;
+    let VenueCredentialsPayload::Tachibana(c) = &store[0];
+    assert_eq!(c.user_id, "new-user", "Full variant must replace user_id");
+    assert_eq!(
+        c.password.as_str(),
+        "new-pw",
+        "Full variant must replace password"
+    );
+    assert!(!c.is_demo, "Full variant must replace is_demo");
+    assert_eq!(
+        c.session
+            .as_ref()
+            .expect("session populated")
+            .url_event_ws
+            .as_str(),
+        "wss://demo/evt/SES5/"
+    );
+}
+
+#[tokio::test]
+async fn medium7_from_wire_partial_mixture_falls_back_to_session_only() {
+    // MEDIUM-7 (ラウンド 7): a partial wire payload (e.g. user_id present
+    // but password absent) must NOT silently flow into the keyring as
+    // half-credentials. `from_wire` warns and falls back to `SessionOnly`.
+    use ::data::config::tachibana::TachibanaUserId;
+    use flowsurface_engine_client::process::VenueCredentialsRefresh;
+
+    let r = VenueCredentialsRefresh::from_wire(
+        dummy_session(),
+        Some(TachibanaUserId::new("u")),
+        None, // password missing → partial mixture
+        Some(true),
+    );
+    assert!(
+        matches!(r, VenueCredentialsRefresh::SessionOnly { .. }),
+        "partial wire mixture must fall back to SessionOnly"
+    );
+
+    // Full triple → Full variant.
+    let r2 = VenueCredentialsRefresh::from_wire(
+        dummy_session(),
+        Some(TachibanaUserId::new("u")),
+        Some(zeroize::Zeroizing::new("p".to_string())),
+        Some(true),
+    );
+    assert!(matches!(r2, VenueCredentialsRefresh::Full { .. }));
+
+    // All-None → SessionOnly variant.
+    let r3 = VenueCredentialsRefresh::from_wire(dummy_session(), None, None, None);
+    assert!(matches!(r3, VenueCredentialsRefresh::SessionOnly { .. }));
 }

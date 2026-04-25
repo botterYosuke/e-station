@@ -8,6 +8,7 @@ pub mod panel;
 pub mod stream;
 pub mod tickers_table;
 pub mod util;
+pub mod wire;
 
 use std::fs::File;
 use std::io::{Read, Write};

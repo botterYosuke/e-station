@@ -9,13 +9,60 @@
 //! Python restart. T0.2 ships only the types and a stub keyring API; the
 //! full restore/persist logic is implemented in T3.
 
-use engine_client::dto::{TachibanaCredentialsWire, TachibanaSessionWire};
+use crate::wire::tachibana::{TachibanaCredentialsWire, TachibanaSessionWire};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 
 const KEYCHAIN_SERVICE: &str = "flowsurface.tachibana";
 const KEYCHAIN_KEY_USER: &str = "user_id";
+
+/// MEDIUM-6 (ラウンド 6 強制修正 / Group F): newtype wrapper around the
+/// 立花証券 e支店 user identifier (`uxNNNNNN` form). Prevents accidental
+/// argument swap between `user_id` and other free-form `String`s
+/// (notably `password.expose_secret()`) at function boundaries. The
+/// inner `String` is **not** secret — it is logged in operator output —
+/// but mixing it up with a secret string is exactly the kind of bug
+/// the newtype pattern eliminates.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TachibanaUserId(String);
+
+impl TachibanaUserId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the newtype and return the inner `String`. Used at the
+    /// IPC wire boundary where the `TachibanaCredentialsWire.user_id`
+    /// field is plain `String` (the wire format is shared with Python).
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TachibanaUserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// MEDIUM-10 (ラウンド 7) / M-R8-1 (ラウンド 8): the previous
+// `From<String>` / `From<&str>` blanket impls let any plain string
+// flow into a `TachibanaUserId` implicitly via `.into()`, defeating
+// the newtype's purpose at any call site that took
+// `impl Into<TachibanaUserId>`. Use the explicit constructor
+// `TachibanaUserId::new(s)` instead — the call site is then a
+// deliberate, grep-able wrapping rather than an invisible coercion.
+// The reverse `From<TachibanaUserId> for String` is also dropped
+// (M-R8-1): callers use `into_string()` / `as_str().to_string()`. A
+// previously stale `impl From<TachibanaUserId> for String` was kept
+// alongside the comment by mistake; ラウンド 8 removes it so the
+// newtype's outbound surface is as deliberate as its inbound one.
 
 /// Process-local lock that serialises the load→modify→save sequence in
 /// [`update_session_in_keyring`]. Without it, two refreshes racing
@@ -34,16 +81,112 @@ fn keyring_write_lock() -> &'static Mutex<()> {
 /// Authoritative credentials. Phase 1 collects neither the second password
 /// nor a `session` (those arrive via the Python login flow in T3); the type
 /// is Phase-2-ready so the DTO doesn't need a breaking change later.
+///
+/// MEDIUM-1 (ラウンド 6 強制修正 / Group F): `password` and
+/// `second_password` are private and accessed via [`Self::password`] /
+/// [`Self::second_password`]. Construction is via [`Self::new`] (or via
+/// `From<StoredCredentials>` / the existing keyring-load path). A
+/// regression that makes either field `pub` again would let outside
+/// code build a `TachibanaCredentials` literal without going through
+/// the constructor — i.e. without honouring the Phase 1 invariant
+/// `second_password == None`.
 #[derive(Clone)]
 pub struct TachibanaCredentials {
-    pub user_id: String,
-    pub password: SecretString,
+    user_id: TachibanaUserId,
+    password: SecretString,
     /// Phase 1: always `None`. Phase 2 (orders) collects + persists this.
-    pub second_password: Option<SecretString>,
-    pub is_demo: bool,
+    second_password: Option<SecretString>,
+    is_demo: bool,
     /// Last validated session, if `keyring` had one. `None` means we must
     /// re-login on the next Python handshake.
-    pub session: Option<TachibanaSession>,
+    session: Option<TachibanaSession>,
+}
+
+impl TachibanaCredentials {
+    /// Public constructor enforcing the Phase 1 invariant
+    /// `second_password == None` (F-H5). The IPC wire-conversion impl
+    /// already carries a `debug_assert!`; this constructor is the
+    /// preferred entry point for runtime code in `data` / `flowsurface`.
+    pub fn new(
+        user_id: TachibanaUserId,
+        password: SecretString,
+        is_demo: bool,
+        session: Option<TachibanaSession>,
+    ) -> Self {
+        Self {
+            user_id,
+            password,
+            second_password: None,
+            is_demo,
+            session,
+        }
+    }
+
+    pub fn password(&self) -> &SecretString {
+        &self.password
+    }
+
+    pub fn second_password(&self) -> Option<&SecretString> {
+        self.second_password.as_ref()
+    }
+
+    /// HIGH-5 (ラウンド 7): accessor for the user identifier. Field is
+    /// private so external callers cannot mutate it; replacement goes
+    /// through the keyring helpers (`save_refreshed_credentials` etc.).
+    pub fn user_id(&self) -> &TachibanaUserId {
+        &self.user_id
+    }
+
+    /// HIGH-5 (ラウンド 7): accessor for the demo flag.
+    pub fn is_demo(&self) -> bool {
+        self.is_demo
+    }
+
+    /// HIGH-5 (ラウンド 7): accessor for the optional session. Returned
+    /// as `Option<&TachibanaSession>` so the caller cannot accidentally
+    /// take ownership without going through `clone()`.
+    pub fn session(&self) -> Option<&TachibanaSession> {
+        self.session.as_ref()
+    }
+
+    /// HIGH-5 (ラウンド 7): builder-style chained setter for the
+    /// optional session. Used by code that constructs credentials in
+    /// stages (currently only the `From<StoredCredentials>` impl path,
+    /// but exposed for future callers that don't have all fields at
+    /// `new()` time).
+    pub fn with_session(mut self, session: TachibanaSession) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// HIGH-5 (ラウンド 7): module-internal mutator for the session
+    /// field. Used by [`update_session_in_keyring`] when splicing a
+    /// fresh session into a previously-loaded credentials value.
+    /// Visibility is `pub(super)` so only the parent module
+    /// (`crate::config`) can call it; outside the crate the field is
+    /// effectively immutable.
+    pub(super) fn set_session(&mut self, session: Option<TachibanaSession>) {
+        self.session = session;
+    }
+
+    /// Test-only escape hatch used by
+    /// `tachibana_keyring_roundtrip.rs::test_phase1_second_password_guard_panics_in_debug`
+    /// to materialize the invalid Phase 1 state (`second_password ==
+    /// Some`) and exercise the debug_assert in
+    /// `From<&TachibanaCredentials> for TachibanaCredentialsWire`.
+    /// Production code MUST construct via [`Self::new`] so the F-H5
+    /// invariant cannot be reached by mistake.
+    ///
+    /// HIGH-4 (ラウンド 7): gated on `cfg(test)` for in-crate unit
+    /// tests *or* the `testing` cargo feature for integration tests
+    /// in `data/tests/`. Production binaries do **not** enable the
+    /// feature and therefore cannot link against this symbol — the
+    /// previous `#[doc(hidden)] pub` form was reachable from any
+    /// dependent crate at runtime.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_second_password_for_test(&mut self, sp: Option<SecretString>) {
+        self.second_password = sp;
+    }
 }
 
 impl std::fmt::Debug for TachibanaCredentials {
@@ -51,7 +194,10 @@ impl std::fmt::Debug for TachibanaCredentials {
         f.debug_struct("TachibanaCredentials")
             .field("user_id", &self.user_id)
             .field("password", &"***")
-            .field("second_password", &self.second_password.as_ref().map(|_| "***"))
+            .field(
+                "second_password",
+                &self.second_password.as_ref().map(|_| "***"),
+            )
             .field("is_demo", &self.is_demo)
             .field("session", &self.session)
             .finish()
@@ -64,18 +210,80 @@ impl std::fmt::Debug for TachibanaCredentials {
 /// them in logs is equivalent to leaking the password.
 #[derive(Clone)]
 pub struct TachibanaSession {
-    pub url_request: SecretString,
-    pub url_master: SecretString,
-    pub url_price: SecretString,
-    pub url_event: SecretString,
-    pub url_event_ws: SecretString,
+    // MEDIUM-8 (ラウンド 7): all fields private. Readers go through
+    // accessors (`url_request()` etc.) so a future refactor can change
+    // the in-memory layout (e.g. switch `SecretString` to
+    // `secrecy::SecretBox`) without touching every callsite.
+    url_request: SecretString,
+    url_master: SecretString,
+    url_price: SecretString,
+    url_event: SecretString,
+    url_event_ws: SecretString,
     /// `None` is allowed: 立花 API does not return an explicit expiry. The
     /// Python startup path treats `None` as "must call validate_session".
-    pub expires_at_ms: Option<i64>,
+    expires_at_ms: Option<i64>,
     /// 譲渡益課税区分 (`sZyoutoekiKazeiC`). Reused for order placement in
     /// Phase 2; not secret on its own but kept on the session struct so we
     /// don't have to carry a separate handle.
-    pub zyoutoeki_kazei_c: String,
+    zyoutoeki_kazei_c: String,
+}
+
+impl TachibanaSession {
+    /// MEDIUM-8 (ラウンド 7): explicit constructor. Test code that needs
+    /// a `TachibanaSession` literal goes through this — the field-by-
+    /// field literal form is not available outside the module. The
+    /// helper [`sample_session_for_test`] (cfg-gated) provides a
+    /// canonical fixture for integration tests.
+    pub fn new(
+        url_request: SecretString,
+        url_master: SecretString,
+        url_price: SecretString,
+        url_event: SecretString,
+        url_event_ws: SecretString,
+        expires_at_ms: Option<i64>,
+        zyoutoeki_kazei_c: impl Into<String>,
+    ) -> Self {
+        Self {
+            url_request,
+            url_master,
+            url_price,
+            url_event,
+            url_event_ws,
+            expires_at_ms,
+            zyoutoeki_kazei_c: zyoutoeki_kazei_c.into(),
+        }
+    }
+
+    pub fn url_request(&self) -> &SecretString {
+        &self.url_request
+    }
+    pub fn url_master(&self) -> &SecretString {
+        &self.url_master
+    }
+    pub fn url_price(&self) -> &SecretString {
+        &self.url_price
+    }
+    pub fn url_event(&self) -> &SecretString {
+        &self.url_event
+    }
+    pub fn url_event_ws(&self) -> &SecretString {
+        &self.url_event_ws
+    }
+    pub fn expires_at_ms(&self) -> Option<i64> {
+        self.expires_at_ms
+    }
+    pub fn zyoutoeki_kazei_c(&self) -> &str {
+        &self.zyoutoeki_kazei_c
+    }
+
+    /// MEDIUM-8 (ラウンド 7): replace the websocket URL only. Used by
+    /// the keyring round-trip integration test to simulate a server-
+    /// rotated session URL. Test-gated — production code constructs
+    /// a fresh `TachibanaSession` rather than mutating one in place.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_url_event_ws_for_test(&mut self, url: SecretString) {
+        self.url_event_ws = url;
+    }
 }
 
 impl std::fmt::Debug for TachibanaSession {
@@ -95,32 +303,54 @@ impl std::fmt::Debug for TachibanaSession {
 /// Plain-string mirror used only for keyring round-tripping. We keep it
 /// `Deserialize` only — there's no reason for runtime code to *create* a
 /// stored-form value other than from on-disk material.
+///
+/// MEDIUM-16 / M-12 (ラウンド 6): `Debug` is **deliberately not
+/// derived**. The plain `String` `password` field would otherwise leak
+/// verbatim into any `format!("{:?}", ...)` call — a regression of the
+/// `SecretString` masking that `TachibanaCredentials` enforces. If you
+/// ever need to debug the on-disk form, log only the field names that
+/// are not secret (`user_id` / `is_demo` / `expires_at_ms`).
+///
+/// MEDIUM-2 (ラウンド 6 強制修正 / Group F): fields are `pub(super)`
+/// rather than `pub`. The struct itself stays `pub(crate)` — only the
+/// `From<&TachibanaCredentials> for StoredCredentials` impl in this
+/// module is the legitimate construction path, and only the `From`
+/// pair into `TachibanaCredentials` is the legitimate consumption
+/// path. Keeping the fields `pub(super)` rather than `pub(crate)`
+/// confines structural access strictly to this module.
 #[derive(Deserialize, Serialize)]
 pub(crate) struct StoredCredentials {
-    pub user_id: String,
-    pub password: String,
-    pub second_password: Option<String>,
-    pub is_demo: bool,
-    pub session: Option<StoredSession>,
+    pub(super) user_id: TachibanaUserId,
+    pub(super) password: String,
+    pub(super) second_password: Option<String>,
+    pub(super) is_demo: bool,
+    pub(super) session: Option<StoredSession>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct StoredSession {
-    pub url_request: String,
-    pub url_master: String,
-    pub url_price: String,
-    pub url_event: String,
-    pub url_event_ws: String,
-    pub expires_at_ms: Option<i64>,
-    pub zyoutoeki_kazei_c: String,
+    pub(super) url_request: String,
+    pub(super) url_master: String,
+    pub(super) url_price: String,
+    pub(super) url_event: String,
+    pub(super) url_event_ws: String,
+    pub(super) expires_at_ms: Option<i64>,
+    pub(super) zyoutoeki_kazei_c: String,
 }
 
 impl From<StoredCredentials> for TachibanaCredentials {
     fn from(s: StoredCredentials) -> Self {
+        // Note: `second_password` is intentionally dropped on the way
+        // in (Phase 1 invariant F-H5: orders are not yet implemented,
+        // so a value would be unused attack surface). When Phase 2
+        // wires order placement we will add a separate
+        // `with_second_password` builder rather than re-exposing the
+        // field on `TachibanaCredentials`.
+        let _ = s.second_password;
         Self {
             user_id: s.user_id,
             password: SecretString::new(s.password),
-            second_password: s.second_password.map(SecretString::new),
+            second_password: None,
             is_demo: s.is_demo,
             session: s.session.map(Into::into),
         }
@@ -210,7 +440,7 @@ pub fn save_tachibana_credentials(creds: &TachibanaCredentials) {
 /// callers outside the `data` crate (notably `flowsurface` main.rs)
 /// don't need a direct dependency on `secrecy`.
 pub fn save_refreshed_credentials(
-    user_id: String,
+    user_id: TachibanaUserId,
     password: zeroize::Zeroizing<String>,
     is_demo: bool,
     session: TachibanaSession,
@@ -223,16 +453,51 @@ pub fn save_refreshed_credentials(
     // keyring write. We then convert into `SecretString` for the
     // in-memory `TachibanaCredentials`; the original `Zeroizing` buffer
     // is dropped + zeroed at the end of this scope.
-    let creds = TachibanaCredentials {
+    //
+    // MEDIUM-1 (ラウンド 6 強制修正): the public constructor
+    // `TachibanaCredentials::new` enforces `second_password == None`
+    // (F-H5) without exposing the field. Phase 2 will add an analogous
+    // `with_second_password` builder when the order surface is wired.
+    let creds = TachibanaCredentials::new(
         user_id,
-        password: SecretString::new((*password).clone()),
-        // Phase 1 invariant (F-H5): second password is collected only in
-        // Phase 2 (orders). Refresh therefore never carries it.
-        second_password: None,
+        zeroizing_to_secret(password),
         is_demo,
-        session: Some(session),
-    };
+        Some(session),
+    );
     save_tachibana_credentials(&creds);
+}
+
+/// HIGH-4 (ラウンド 6): move the inner `String` from a
+/// [`zeroize::Zeroizing`] envelope into a [`SecretString`] without
+/// going through a plain `String` clone. The previous pattern was
+/// `SecretString::new((*password).clone())`, which materialised an
+/// intermediate `String` heap allocation that lived past the
+/// keyring write — exactly the leak `Zeroizing` exists to prevent.
+///
+/// `std::mem::take` swaps the inner buffer out of the `Zeroizing`
+/// envelope. The emptied envelope is then dropped by the caller,
+/// which still runs the `Zeroize` impl on its (now-empty) buffer
+/// — harmless but kept for symmetry. The moved buffer travels into
+/// `SecretString` directly, so the only copies that exist are the
+/// `SecretString`'s internal `Box<str>` and (transiently) the
+/// caller's `Zeroizing<String>` shell.
+///
+/// MEDIUM-5 (ラウンド 7): `SecretString::new` internally converts
+/// the supplied `String` into a `Box<str>`. That conversion performs
+/// **one additional heap copy** (`String → Box<str>`) inside the
+/// `secrecy` crate which is not avoidable without changing crates
+/// — `secrecy` 0.8 stores secrets as `Box<str>` for size reasons.
+/// The original `Zeroizing<String>` argument is dropped at the end
+/// of this scope, and its (now-empty) inner buffer is zeroed by the
+/// `Zeroize` impl. The intermediate `String` produced by
+/// `mem::take` lives only inside `SecretString::new` and is
+/// immediately consumed; on the way through it is *not* zeroed (it
+/// is a plain `String`), so the lifetime window for the unprotected
+/// copy is bounded by this single function call. A future move to
+/// `secrecy::SecretBox` would close that gap; the current crate API
+/// is the trade-off documented here.
+fn zeroizing_to_secret(mut password: zeroize::Zeroizing<String>) -> SecretString {
+    SecretString::new(std::mem::take(&mut *password))
 }
 
 /// Persist a refreshed session into the OS keyring.
@@ -262,24 +527,34 @@ pub fn update_session_in_keyring(session: &TachibanaSession) {
         .unwrap_or_else(|e| e.into_inner());
     let creds = match load_tachibana_credentials() {
         Some(mut existing) => {
-            existing.session = Some(session.clone());
+            existing.set_session(Some(session.clone()));
             existing
         }
         None => {
-            // url_request lives inside `SecretString`; we expose it ONLY
-            // for the substring check (no log, no clone-out) and let it
-            // drop at the end of the borrow.
-            let is_demo = session
-                .url_request
-                .expose_secret()
-                .contains("demo-kabuka.e-shiten.jp");
-            TachibanaCredentials {
-                user_id: String::new(),
-                password: SecretString::new(String::new()),
-                second_password: None,
+            // url_request / url_event_ws live inside `SecretString`; we
+            // expose them ONLY for the substring check (no log, no
+            // clone-out) and let the borrow drop at the end of this
+            // scope.
+            //
+            // MEDIUM-15 (ラウンド 6): require **both** `url_request`
+            // (HTTPS) and `url_event_ws` (WSS) to carry the
+            // `demo-kabuka.e-shiten.jp` host before classifying as
+            // demo. A single field could in theory be misrouted (e.g.
+            // a future migration that introduces split hosts) and a
+            // single-field check would silently flip the prod/demo
+            // flag. The two valid hosts are pinned by
+            // `tachibana_url.py::BASE_URL_PROD` / `BASE_URL_DEMO` and
+            // by the `_validate_virtual_urls` https/wss checker — see
+            // also `_restore_session_from_payload`'s scheme guard.
+            const DEMO_HOST: &str = "demo-kabuka.e-shiten.jp";
+            let is_demo = session.url_request.expose_secret().contains(DEMO_HOST)
+                && session.url_event_ws.expose_secret().contains(DEMO_HOST);
+            TachibanaCredentials::new(
+                TachibanaUserId::new(String::new()),
+                SecretString::new(String::new()),
                 is_demo,
-                session: Some(session.clone()),
-            }
+                Some(session.clone()),
+            )
         }
     };
     save_tachibana_credentials(&creds);
@@ -292,7 +567,10 @@ impl From<&TachibanaCredentials> for StoredCredentials {
         Self {
             user_id: c.user_id.clone(),
             password: c.password.expose_secret().clone(),
-            second_password: c.second_password.as_ref().map(|s| s.expose_secret().clone()),
+            second_password: c
+                .second_password
+                .as_ref()
+                .map(|s| s.expose_secret().clone()),
             is_demo: c.is_demo,
             session: c.session.as_ref().map(StoredSession::from),
         }
@@ -333,7 +611,7 @@ impl From<&TachibanaCredentials> for TachibanaCredentialsWire {
             "second_password must be None in Phase 1 (F-H5)"
         );
         Self {
-            user_id: c.user_id.clone(),
+            user_id: c.user_id.as_str().to_string(),
             password: c.password.expose_secret().clone().into(),
             second_password: c
                 .second_password
@@ -347,11 +625,18 @@ impl From<&TachibanaCredentials> for TachibanaCredentialsWire {
 
 impl From<TachibanaSessionWire> for TachibanaSession {
     fn from(s: TachibanaSessionWire) -> Self {
-        // The wire DTO wraps URLs in `Zeroizing<String>`. We `clone()` the
-        // inner `String` once into `SecretString`, then drop the wire
-        // value (its `Zeroizing` wipes the original buffer). This is the
-        // single legitimate exit point for these strings out of the
-        // `Zeroizing` envelope.
+        // MEDIUM-9 (ラウンド 7): the wire DTO wraps URLs in
+        // `Zeroizing<String>`, which deref-targets to `String` but does
+        // **not** expose an `into_inner()`. To move the URL into a
+        // `SecretString` we therefore call `.to_string()` on the deref
+        // target — which performs **one** copy of the bytes into a
+        // fresh `String`. The original `Zeroizing<String>` source `s`
+        // is dropped at end of scope and its `Zeroize` impl wipes the
+        // inner buffer. The new `String` produced by `to_string()`
+        // immediately moves into `SecretString::new`, which performs
+        // the additional `String → Box<str>` repack documented on
+        // `zeroizing_to_secret`. This is the single legitimate exit
+        // point for these strings out of the `Zeroizing` envelope.
         Self {
             url_request: SecretString::new(s.url_request.to_string()),
             url_master: SecretString::new(s.url_master.to_string()),
