@@ -104,6 +104,21 @@ check "snapshot fetch failed"        "$ENGINE_LOG"    "snapshot fetch failures"
 check "parse error"                  "$ENGINE_LOG"    "engine parse errors"
 check "TickerStats.*parse error"     "$RUST_LOG_FILE" "ticker stats parse errors"
 
+# WebSocket protocol errors — covers "Reserved bits are not zero" (permessage-deflate
+# RSV1 frames from the Python engine reaching fastwebsockets) and similar framing bugs.
+check "engine ws read error"         "$RUST_LOG_FILE" "engine ws protocol error"
+
+# Connection stability — more than one handshake means the engine connection dropped
+# and recovered during the observation window.  One reconnect is tolerable noise;
+# two or more indicate a systematic issue (e.g. RSV frame rejection loop).
+handshakes=$(grep -c "engine handshake complete" "$RUST_LOG_FILE" 2>/dev/null | tr -d '\r\n[:space:]')
+handshakes=${handshakes:-0}
+if (( handshakes > 2 )); then
+    log "FAIL: connection stability — engine reconnected $((handshakes - 1)) time(s) during observation"
+    grep "engine handshake complete\|engine connection lost\|engine ws" "$RUST_LOG_FILE" | head -10 | sed 's/^/  /' >&2
+    fail=1
+fi
+
 if (( fail == 0 )); then
     log "PASS: $OBSERVE_S s clean"
     exit 0
