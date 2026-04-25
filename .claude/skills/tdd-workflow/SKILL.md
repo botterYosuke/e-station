@@ -1,12 +1,12 @@
 ---
 name: tdd-workflow
 description: Use this skill when writing new features, fixing bugs, or refactoring code. Enforces test-driven development with 80%+ coverage including unit, integration, and E2E tests.
-origin: ECC (customized for flowsurface)
+origin: ECC (customized for e-station)
 ---
 
-# Test-Driven Development Workflow — flowsurface (Rust)
+# Test-Driven Development Workflow — e-station (Rust + Python)
 
-このスキルは flowsurface プロジェクト（Rust + Iced GUI、ワークスペース構成）に特化した TDD フローを提供する。
+このスキルは e-station プロジェクト（Rust + Iced GUI、ワークスペース構成）に特化した TDD フローを提供する。
 
 ## When to Activate
 

@@ -48,7 +48,7 @@
 ### 2.3 MVP 必須に昇格した項目
 
 - **ザラ場時間帯の判定（MVP 必須、T5 で実装）**: JST 9:00–11:30 前場 / 12:30–15:25 後場連続 / **15:25–15:30 クロージング・オークション**（**2024-11-05 以降の現行東証取引時間**）。`Connected` を維持するのは **9:00–15:30 全体**。クロージング・オークション中は気配がほぼ動かなくても「市場時間外」UI を出さない。閉場（〜9:00 / 11:30〜12:30 / 15:30〜）でのみ subscribe を `Disconnected{reason:"market_closed"}` で停止する。**Phase 1 はハードコード**（祝日カレンダー判定なし）。営業日カレンダー動的取得（`CLMDateZyouhou`）は Phase 2 送り
-  - **発出粒度（M5 修正）**: `Disconnected` イベントは ticker/stream 粒度（[engine-client/src/dto.rs:115](../../../engine-client/src/dto.rs#L115)）のため、閉場帯に届いた立花 ticker subscribe ごとに 1 件返す。**Rust UI 側はバナー表示を venue 単位で de-dup**（複数銘柄購読中でも「市場時間外」バナーは 1 つ）。実装位置は `code` → severity マッピングと同じレイヤ（[engine-client/src/error.rs](../../../engine-client/src/error.rs) の `classify_*` 関数群、F-L9）に集約
+  - **発出粒度（M5 修正）**: `Disconnected` イベントは ticker/stream 粒度（[engine-client/src/dto.rs:201](../../../engine-client/src/dto.rs#L201)）のため、閉場帯に届いた立花 ticker subscribe ごとに 1 件返す。**Rust UI 側はバナー表示を venue 単位で de-dup**（複数銘柄購読中でも「市場時間外」バナーは 1 つ）。実装位置は `code` → severity マッピングと同じレイヤ（[engine-client/src/error.rs](../../../engine-client/src/error.rs) の `classify_*` 関数群、F-L9）に集約
 
 ### 2.4 ストレッチゴール（同フェーズ内で時間が許せば）
 
@@ -64,7 +64,7 @@
   - Python 側は **メモリのみ**で保持。ディスクには書かない
 - **第二暗証番号は Phase 1 では収集も保持もしない（F-H5）**: DTO スキーマ上は `second_password: Option<SecretString>` を切るが、Phase 1 では Rust 側の収集 UI も Python 側のメモリ保持も実装せず、常に `None` を送る。発注しないものを保持して攻撃面（コアダンプ・スワップ・GC 残存）を増やさない。Phase 2（発注機能）で値の収集・保持を有効化する。スキーマは破壊変更にならないため移行コストはない
 - ログ出力時は仮想 URL のホスト部分まで `***` マスク（プロセス再起動時に keyring から復元するため、URL がリークしても session 侵害にはなりうる）
-- **`DEV_TACHIBANA_*` env を読むのは Python 側 `tachibana_login_flow.py` のみ**（B1）。Rust 側に `#[cfg(debug_assertions)]` の env 取込みコードは追加しない。release ビルドでは Python 側でも env を完全無視する（`os.getenv` 経路を `if not RELEASE_BUILD` でガード、判定は親プロセスから渡す `TACHIBANA_DEV_LOGIN_ALLOWED` 起動 flag で行う）。**Phase 1 では `DEV_TACHIBANA_SECOND_PASSWORD` という env 名自体を採用しない**（F-H5: 第二暗証番号は Phase 1 で収集も保持もしないため、env 経路に存在させる必要がない。`os.getenv("DEV_TACHIBANA_SECOND_PASSWORD")` 等の呼出を Python 側に書かない）。Phase 2 着手時に env 名を改めて確定する
+- **`DEV_TACHIBANA_*` env を読むのは Python 側 `tachibana_login_flow.py` のみ**（B1）。Rust 側に `#[cfg(debug_assertions)]` の env 取込みコードは追加しない。release ビルドでは Python 側でも env を完全無視する（`os.getenv` 経路を `if not RELEASE_BUILD` でガード、判定は親プロセス（Rust）から `stdin` 初期 payload 内のフィールド `dev_tachibana_login_allowed: bool` として渡す（env 経路ではなく stdin payload で受け取る、architecture.md §2.1.1 H-2 修正と整合））。**Phase 1 では `DEV_TACHIBANA_SECOND_PASSWORD` という env 名自体を採用しない**（F-H5: 第二暗証番号は Phase 1 で収集も保持もしないため、env 経路に存在させる必要がない。`os.getenv("DEV_TACHIBANA_SECOND_PASSWORD")` 等の呼出を Python 側に書かない）。Phase 2 着手時に env 名を改めて確定する
 - **`DEV_TACHIBANA_DEMO` の既定値は `true`**（F-Default-Demo）。env 未設定でも demo URL を叩く。本番 URL を許可するには `TACHIBANA_ALLOW_PROD=1` を併用する必要があり、その判定は **`python/engine/exchanges/tachibana_url.py` 内 1 箇所だけ**で行う（F-L1）。SKILL.md S2 で旧表記されていた `DEV_IS_DEMO` / `TACHIBANA_USER_ID` / `TACHIBANA_PASSWORD` は採用しない
 - **`BASE_URL_PROD` 定数の所在は 1 ファイル限定（F-L1）**: 本番 URL リテラル `kabuka.e-shiten.jp` を持てるのは `python/engine/exchanges/tachibana_url.py` の冒頭定義 1 箇所のみ。Rust 側は本番 URL を持たない（Python から venue 設定経由で受け取る）。`tools/secret_scan.sh` の allowlist もこの 1 ファイルのみとする
 
@@ -82,7 +82,7 @@
   - ただし **アプリ起動直後の session 復元フェーズ**に限り、keyring 上の session 検証が失敗した場合は `user_id/password` による再ログインを 1 回だけ試してよい。ここで成功した session を再永続化する
   - **夜間閉局またぎ運用（F-m1）**: アプリを起動しっぱなしで翌日のザラ場開始を迎えた場合、最初の subscribe で `p_errno=2` を踏むのは仕様通り。Python 側は `VenueError{code:"session_expired"}` を返し、Rust UI は再ログインバナーを表示する。**ここで自動再ログインはしない**（電話認証完了の確認が取れないため）。ユーザーがバナーから再ログイン操作を行うと、起動時 fallback と同じ経路（`SetVenueCredentials` 再投入 → 1 回限りの user/password ログイン）を辿る
   - **「自動」と「手動（ユーザー明示）」の境界（LOW-3）**: 「自動再ログイン禁止」とは *Python / Rust がユーザー操作なしにパスワードを再送する*ことを禁止する。ユーザーがバナーから「ログイン」ボタンを押して `Command::RequestVenueLogin` が発火する経路は「ユーザー明示の再ログイン」であり禁止しない。実装者向け判別基準: **`RequestVenueLogin` コマンドの受信を起点とする経路 → 許可**、**Python 側内部ロジックが `p_errno=2` 検知後に自発的に再ログインを開始する経路 → 禁止**
-- **WebSocket 死活監視**: EVENT WS は **5 秒周期で `p_evt_cmd=KP`（KeepAlive）frame** を送ってくる。Python 側は KP 受信をタイマリセットに使い、**12 秒（KP 2 回欠損相当 + 2 秒 jitter）以上 KP も含めて全 frame が来なければ切断とみなして再接続**する。`Ping` フレームは `tokio-tungstenite` 等のライブラリ自動応答に頼らず手動で `Pong` を返す（SKILL.md EVENT 規約）
+- **WebSocket 死活監視**: EVENT WS は **5 秒周期で `p_evt_cmd=KP`（KeepAlive）frame** を送ってくる。Python 側は KP 受信をタイマリセットに使い、**12 秒（KP 2 回欠損相当 + 2 秒 jitter）以上 KP も含めて全 frame が来なければ切断とみなして再接続**する。WS は Python 側 (`tachibana_ws.py`、`websockets` ライブラリ) が担当する設計（architecture.md §4）のため、`websockets.connect(..., ping_interval=None, ping_timeout=None)` でライブラリ側の自動 Ping/Pong を完全に無効化し、`Ping` フレーム受信時は手動 Pong handler から `Pong` を返す（SKILL.md EVENT 規約）
 - `VenueReady{venue}` は **冪等イベント**として扱う。session が新たに validate / 再ログインされるたびに送ってよく、Rust 側は最後に受信した状態を保持する。**Python サブプロセス再起動検知時（次の `Hello` 受信時）に限り `VenueReady` 状態をリセット**し、再 ready 後に既存購読の重複再送を行わないこと（`ProcessManager` 側で active subscriptions を 1 度だけ resubscribe する）。`EngineEvent::Disconnected` は ticker/stream 粒度であり venue 全体の状態管理には使わない（C3 修正、architecture.md §3 と整合）
 - Python 単独再起動時（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §5.3 Python プロセス復旧プロトコル）は、**`ProcessManager` が source of truth になって** `SetProxy` に続けて `SetVenueCredentials` を再送し、`VenueReady` を待ってから metadata fetch / resubscribe を再開する
 

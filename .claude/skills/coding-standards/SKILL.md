@@ -1,6 +1,6 @@
 ---
 name: coding-standards
-description: Rust コーディング規約。命名規則・イミュータビリティ・エラーハンドリング・テスト・コード品質レビューの基準。flowsurface プロジェクト向け。
+description: Rust コーディング規約。命名規則・イミュータビリティ・エラーハンドリング・テスト・コード品質レビューの基準。e-station プロジェクト向け。
 origin: ECC
 ---
 

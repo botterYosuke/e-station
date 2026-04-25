@@ -1,12 +1,12 @@
 ---
 name: e2e-testing
-description: flowsurface E2E テストパターン。HTTP API（ポート 9876）経由でアプリを操作し bash スクリプトで検証する。Playwright は使用しない。
-origin: ECC (customized for flowsurface)
+description: e-station E2E テストパターン。HTTP API（ポート 9876）経由でアプリを操作し bash スクリプトで検証する。Playwright は使用しない。
+origin: ECC (customized for e-station)
 ---
 
-# E2E Testing — flowsurface (Rust + Iced GUI)
+# E2E Testing — e-station (Rust + Iced GUI)
 
-flowsurface は GUI アプリ（Iced フレームワーク）のため、Playwright / ブラウザは使用しない。
+e-station は GUI アプリ（Iced フレームワーク）のため、Playwright / ブラウザは使用しない。
 テストは **TCP :9876 の HTTP API** 経由でアプリを操作し、bash スクリプト + node で JSON を検証する。
 
 ---

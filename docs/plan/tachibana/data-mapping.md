@@ -32,7 +32,7 @@ pub enum Exchange {
 | 項目 | 立花 | 本アプリ |
 | :--- | :--- | :--- |
 | 銘柄コード | `sIssueCode` 4 桁数字 / 5 桁数字 / **末尾英字を含む 5 桁英数字**（新興市場の優先出資証券・新株予約権付社債で `130A0` のような表記あり） | `Ticker` の symbol 部分にそのまま入れる（ASCII 英数字のみ） |
-| 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は [exchange/src/lib.rs:291,303](../../../exchange/src/lib.rs#L291) で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに **`EngineEvent::TickerInfo` の各 ticker dict**（現状 `Vec<serde_json::Value>`、[engine-client/src/dto.rs:193](../../../engine-client/src/dto.rs#L193)）に Python 側が `display_name_ja: string \| null` キーを詰めて送る（T0.2 確定方針）。`TickerListed` という名の DTO 型は存在しない。Rust 側 UI は受信した dict から `display_name_ja` を取り出して `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T4 で実装）。**キー名の typo サイレント失敗防止**のため、Python 単体テストで `display_name_ja`（`display_name_jp` ではない）を assert する（M9） |
+| 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は [exchange/src/lib.rs:291,303](../../../exchange/src/lib.rs#L291) で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに **`EngineEvent::TickerInfo` の各 ticker dict**（現状 `Vec<serde_json::Value>`、[engine-client/src/dto.rs:279](../../../engine-client/src/dto.rs#L279)）に Python 側が `display_name_ja: string \| null` キーを詰めて送る（T0.2 確定方針）。`TickerListed` という名の DTO 型は存在しない。Rust 側 UI は受信した dict から `display_name_ja` を取り出して `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T4 で実装）。**キー名の typo サイレント失敗防止**のため、Python 単体テストで `display_name_ja`（`display_name_jp` ではない）を assert する（M9） |
 | 市場コード | `sSizyouC`（`00`=東証） | Phase 1 は東証固定 |
 | 売買単位 | 銘柄マスタ `sTatebaTanniSuu` | `TickerInfo.lot_size` 相当（新規プロパティ追加要） |
 | 呼値単位 | マスタ「呼値」テーブル（価格帯依存） | `Price` の min_ticksize で表現。**価格帯ごとに変わる** ため固定 1 値では足りない（§5 参照） |
@@ -114,7 +114,7 @@ DepthSnapshot {
 
 **Phase 1 推奨: (A)**（B4 改訂）。**「最小値の 0.1 円固定」は不採用**。理由は通常株（TOPIX100 を除く大半）の呼値刻みは 1 円〜10 円であり、0.1 円固定だと価格軸ラベルに無意味な小数桁（`7203.0` `7203.1` ...）が出てチャート可読性が下がるため。リードオンリーなので発注 reject は起きないが、UI 描画品質を優先する。`TickerInfo::new_stock` の引数で `min_ticksize: f32` を受け取る既存シグネチャはそのまま使え、Python 側 `tachibana_master.py` で「銘柄スナップショット価格 → 呼値刻み」を表引きで解決する。Phase 2（発注）で (C) に移行。
 
-**呼値テーブル（§2-12）の Python 側実装**: `tachibana_master.py` に `tick_size_for_price(price: Decimal) -> Decimal` を 1 関数置き、SKILL.md / マスタ I/F PDF の表に基づき価格帯 →刻み を hardcode（Phase 1）。テーブル変更は立花側で年単位の頻度なので Phase 1 では更新監視を入れない。
+**呼値テーブル（`api_request_if_master_v4r5.pdf` §2-12 参照、`manual_files/` に同梱）の Python 側実装**: `tachibana_master.py` に `tick_size_for_price(price: Decimal) -> Decimal` を 1 関数置き、PDF §2-12 の価格帯 → 刻み テーブルを hardcode（Phase 1）。実装者は PDF §2-12 を直接参照して全価格帯を写すこと（上記 3 行の抜粋は例示のみで全量ではない）。テーブル変更は立花側で年単位の頻度なので Phase 1 では更新監視を入れない。テスト: 各価格帯境界値（例 3000 円 / 3001 円 / 5000 円 / 5001 円 など）で正しい刻みが返ることを `test_tachibana_codec.py` か専用テストで確認する。
 
 `TickerInfo` 拡張案:
 

@@ -34,7 +34,10 @@ Rust src/api/order_api.rs
    │ ③ engine_client.send(Command::SubmitOrder { request_id, payload })
    ▼
 Python python/engine/server.py
-   │ ④ tachibana_orders.submit_new_order(session, second_password, req)
+   │ ④ Event::OrderSubmitted を即発行（立花 HTTP 送信の前。この時点で WAL に submit 行が既にある前提）
+   │    ※ HTTP 送信前に p_errno=2（session 切れ）等が即判明した場合は OrderSubmitted の後に
+   │      OrderRejected を続けて発行する。Rust 側 OrderSessionState はこの連続を許容すること
+   │ ⑤ tachibana_orders.submit_new_order(session, second_password, req)
    ▼
 Python tachibana_orders.py
    │ ⑤ NewOrderRequest を組み立て、_compose_request_payload() で
@@ -64,14 +67,42 @@ Python tachibana_event.py._receive_loop
    │ seen_eda_no に存在すれば skip（重複検知）
    ▼
 Python server.py
-   │ Event::OrderFilled / OrderPartiallyFilled / OrderCanceled / OrderRejected を IPC 送信
+   │ Event::OrderFilled / OrderCanceled / OrderRejected を IPC 送信
+   │   ※ OrderPartiallyFilled は存在しない。leaves_qty > 0 の OrderFilled = 部分約定（nautilus 流）
    ▼
 Rust 受信
    │ OrderSessionState.update_status(order_number, ...)
    │ UI 通知 + 注文一覧パネルの再描画
 ```
 
-### 2.3 第二暗証番号 forget フロー（Phase O0）
+**発注タイムアウト**: `engine_client.send(SubmitOrder)` → `OrderAccepted / OrderRejected` 待ちには **`tokio::time::timeout(Duration::from_secs(30), ...)`** を掛ける。タイムアウト時は HTTP 504 + `reason_code="INTERNAL_ERROR"` を返し、Python 側の応答を待つ接続を破棄する。WAL には `submit` 行が残るため、再起動後の `IdempotentReplay` で unknown 状態として扱われる。
+
+同様に `ModifyOrder` / `CancelOrder` にも 30 秒タイムアウトを適用する。
+
+### 2.3 取消フロー（Phase O1）
+
+立花の `CLMKabuCancelOrder` は `sOrderNumber`（`venue_order_id`）が必須だが、HTTP API は `client_order_id` を一次キーとする。そのため Rust 層で lookup してから Python に渡す。
+
+```
+ユーザー UI / curl
+   │ POST /api/order/cancel { client_order_id }
+   ▼
+Rust src/api/order_api.rs
+   │ ① OrderSessionState.get_venue_order_id(client_order_id)
+   │      → None（unknown）: 404 / IdempotentReplay ルールに準じる
+   │      → Some(venue_order_id): 続行
+   │ ② engine_client.send(Command::CancelOrder { client_order_id, venue_order_id })
+   ▼
+Python tachibana_orders.cancel_order(session, second_password, client_order_id, venue_order_id)
+   │ CLMKabuCancelOrder に sOrderNumber を載せて送信
+   ▼
+Rust 受信
+   │ Event::OrderPendingCancel → OrderSessionState 更新 → HTTP 200
+```
+
+**`venue_order_id` が unknown の場合**: `OrderSessionState` に `venue_order_id = None`（起動時復元の unknown 状態）の `client_order_id` へのキャンセル要求は **404 + `reason_code="ORDER_STATUS_UNKNOWN"`** で reject する。クライアントは `GET /api/order/list` で確認してから再試行すること。
+
+### 2.4 第二暗証番号 forget フロー（Phase O0）
 
 ```
 ユーザー（UI ボタン or curl）
@@ -101,7 +132,9 @@ Rust 受信
    │ 元の SubmitOrder フロー §2.1 の ⑨ 以降へ
 ```
 
-**注意**: `Command::SetSecondPassword` の `value` は IPC を経由するためプレーン文字列。Python 側で `SecretStr` 化すること。Debug 実装では `value` を `[REDACTED]` にマスクする（T0.3 の不変条件）。
+**注意**: `Command::SetSecondPassword` の `value` は IPC を経由するためプレーン `String`（`SecretString` は IPC JSON に送れない）。Python 側で `SecretStr` 化すること。
+
+**`Command` enum の `Debug` 手実装（セキュリティ必須・**Tpre.2 で実施**）**: `dto.rs` の `Command` に現在ある `#[derive(Debug)]` を **Tpre.2 でスキーマ拡張と同時に外して手実装に切り替える**。T0.3 まで先送りすると `SetSecondPassword` variant が derive された状態でコードが存在する期間が生じ、ログへの平文漏洩リスクがある。手実装では `SetSecondPassword { .. }` arm のみ `"SetSecondPassword { value: [REDACTED] }"` と出力し、他の variant は従来通り出力する。`value` が `[REDACTED]` にマスクされることを **Tpre.2 の受け入れ条件**として単体テストで検証すること。
 
 ## 3. IPC スキーマ拡張（schema 1.2 → 1.3）
 
@@ -131,7 +164,9 @@ pub enum Command {
         client_order_id: String,
         change: OrderModifyChange,      // qty / price / trigger / expire を Option で
     },
-    CancelOrder  { request_id: String, venue: String, client_order_id: String },
+    // Rust は OrderSessionState で client_order_id → venue_order_id を lookup してから Python に渡す（§2.3）
+    // venue_order_id が None（unknown）の場合は HTTP 404 reject し Python へ送らない
+    CancelOrder  { request_id: String, venue: String, client_order_id: String, venue_order_id: String },
     CancelAllOrders {
         request_id: String,
         venue: String,
@@ -147,12 +182,16 @@ pub struct SubmitOrderRequest {
     pub instrument_id: String,           // "7203.TSE"
     pub order_side: OrderSide,           // BUY | SELL
     pub order_type: OrderType,           // MARKET | LIMIT | STOP_MARKET | STOP_LIMIT | MARKET_IF_TOUCHED | LIMIT_IF_TOUCHED
+                                         // NOTE: MARKET_IF_TOUCHED / LIMIT_IF_TOUCHED は nautilus N2 互換のため型として保持するが、
+                                         //       Rust HTTP 層で 400 reject するため IPC に載ることは絶対にない（§10.1 参照）
     pub quantity: String,                // 精度保持の文字列（nautilus Quantity 互換）
     pub price: Option<String>,           // LIMIT 系で必須
     pub trigger_price: Option<String>,   // STOP / IF_TOUCHED 系で必須
     pub trigger_type: Option<TriggerType>,  // LAST | BID_ASK | INDEX 等。立花は LAST のみ
     pub time_in_force: TimeInForce,      // DAY | GTC | GTD | IOC | FOK | AT_THE_OPEN | AT_THE_CLOSE
-    pub expire_time_ns: Option<i64>,     // GTD で必須（nautilus と同じ ns 単位）
+    pub expire_time_ns: Option<i64>,     // GTD で必須（nautilus と同じ ns 単位 UTC）
+                                         // 変換経路: HTTP ISO8601 文字列 → Rust order_api.rs で UTC ns i64 に変換 → IPC
+                                         //           → Python 側で ns → JST YYYYMMDD に変換し sOrderExpireDay へ
     pub post_only: bool,
     pub reduce_only: bool,
     pub tags: Vec<String>,               // venue 拡張: "cash_margin=cash" / "account_type=specific" / "account_type=nisa" 等
@@ -173,6 +212,23 @@ pub enum OrderType {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TimeInForce {
     Day, Gtc, Gtd, Ioc, Fok, AtTheOpen, AtTheClose,
+}
+
+// ModifyOrder で変更可能なフィールド（すべて Option; None は変更しない意味）
+#[derive(Serialize, Deserialize)]
+pub struct OrderModifyChange {
+    pub new_quantity: Option<String>,        // 変更後数量（精度保持文字列）
+    pub new_price: Option<String>,           // 変更後指値価格
+    pub new_trigger_price: Option<String>,   // 変更後逆指値トリガー価格
+    pub new_expire_time_ns: Option<i64>,     // 変更後 GTD 期日（UTC ns）
+}
+
+// GetOrderList のフィルタ条件
+#[derive(Serialize, Deserialize)]
+pub struct OrderListFilter {
+    pub status: Option<String>,        // nautilus OrderStatus 文字列（例 "ACCEPTED"）; None = 全状態
+    pub instrument_id: Option<String>, // 例 "7203.TSE"; None = 全銘柄
+    pub date: Option<String>,          // YYYYMMDD JST; None = 当日
 }
 
 pub enum Event {
@@ -214,13 +270,16 @@ pub struct OrderRecordWire {
     pub time_in_force: TimeInForce,
     pub expire_time_ns: Option<i64>,
     pub status: String,                    // nautilus OrderStatus 文字列（例 "ACCEPTED"）
-    pub ts_event_ns: i64,                  // 立花の注文受付日時（JST → Unix ns）
+    pub ts_event_ms: i64,                  // 立花の注文受付日時（JST → Unix ms、他 IPC イベントと単位統一）
 }
 ```
 
 **`OrderPartiallyFilled` は持たない**: nautilus では「約定が起きるたびに `OrderFilled` を出し、`leaves_qty` で部分か全部かを判定」する流儀。本計画も合わせる。
 
-**`second_password` は IPC payload に含めない**: Python 側が `SetVenueCredentials` で受領した値をメモリから引く。これは nautilus 移行後も同じ（nautilus の `Strategy` 層では第二暗証番号を見せない）。
+**`second_password` の IPC 扱い**:
+- 既存の `TachibanaCredentialsWire.second_password: Option<String>` フィールドは Phase 1 から存在するが、Order Phase では **常に `None` で送信する**（`SetVenueCredentials` 経由では第二暗証番号を渡さない）
+- 発注時の第二暗証番号は専用の `Command::SetSecondPassword { value: String }` コマンドのみで伝達する。IPC payload（`SubmitOrderRequest` 等）には含めない
+- `TachibanaCredentialsWire.second_password` フィールドは **Phase O1 完了 PR で削除する**（Phase 1 の既存コードとの互換を O0 段階だけ保つ。O1 完了 PR のタスクに削除を含めること）
 
 ## 4. 冪等性（flowsurface `agent_session_state.rs` の移植）
 
@@ -229,10 +288,15 @@ pub struct OrderRecordWire {
 ```rust
 pub struct ClientOrderId(pub String);
 
+// nautilus OrderStatus と同じ文字列を保持する型エイリアス
+// 値は §10.5 の写像表の右列（"SUBMITTED" / "ACCEPTED" / ... / "REJECTED"）に限定
+// enum にせず String にすることで、将来の nautilus バージョン追加に対して後方互換を保つ
+type NautilusOrderStatus = String;
+
 pub struct AgentOrderRecord {
-    pub order_number: String,           // 立花 sOrderNumber、未確定時は空
+    pub venue_order_id: Option<String>, // 立花 sOrderNumber; Python 応答受領後に埋める（未確定時は None）
     pub request_key: u64,               // 入力 body の構造ハッシュ
-    pub status: OrderStatus,
+    pub status: NautilusOrderStatus,    // nautilus OrderStatus 文字列（§10.5）
 }
 
 pub enum PlaceOrderOutcome {
@@ -247,7 +311,7 @@ pub struct OrderSessionState {
 ```
 
 flowsurface との差分:
-- 立花は **`order_number` がサーバから後で返ってくる**ため、`Created` 受領時点では `order_number` が空。Python 応答で埋める
+- 立花は **`venue_order_id` がサーバから後で返ってくる**ため、`Created` 受領時点では `venue_order_id = None`。Python 応答で `update_venue_order_id()` を呼んで埋める
 - セッションが日跨ぎで切れるので **当日分のみ保持**
 - **プロセス再起動跨ぎは監査ログ WAL（§4.2）から復元**
 
@@ -256,7 +320,7 @@ flowsurface との差分:
 `Conflict` 判定の正本となる `request_key: u64` は **以下の規則で計算**する（実装時はこの規則をテストで pin する）:
 
 1. `SubmitOrderRequest` の以下フィールドのみを使う:
-   - `instrument_id`, `order_side`, `order_type`, `quantity`, `price`, `trigger_price`, `trigger_type`, `time_in_force`, `expire_time_ms`, `post_only`, `reduce_only`, `tags`
+   - `instrument_id`, `order_side`, `order_type`, `quantity`, `price`, `trigger_price`, `trigger_type`, `time_in_force`, `expire_time_ns`, `post_only`, `reduce_only`, `tags`
 2. `tags: Vec<String>` は **昇順ソート + 重複排除**したうえでハッシュ対象に含める
 3. `client_order_id` 自身は含めない（key 算出と key 自身の循環を避ける）
 4. `request_id` / `venue` は含めない（同じ注文の再送で別値になり得るため）
@@ -279,10 +343,18 @@ flowsurface との差分:
 ```
 
 - `submit` 行は **HTTP 送信直前**に `fsync` 込みで書く（クラッシュ時の不整合を最小化）
-- `accepted` / `rejected` 行は応答受領後に書く
+- `accepted` / `rejected` 行は応答受領後に `flush` で書く（`fsync` 不要）
+  - `accepted` が OS バッファ残りのままクラッシュした場合、Rust 起動時は `unknown` 状態で復元する。
+    Phase O1 の `GetOrderList` で `venue_order_id` を補完できるため許容する
 - **第二暗証番号は絶対に出さない**（unit テストで `grep -i second_password` 等で検証）
 
 ### 4.3 起動時復元（Phase O0 必須）
+
+**WAL 読み込みオーナーシップ**: WAL ファイル (`tachibana_orders.jsonl`) は Python が書き、**Rust が直接読む**。`data_path()` は Rust 側が起動時 config から知っている（Python IPC 経由で受け取る必要はない）。Rust アプリ起動直後（Python プロセス起動の前）に読むため、ファイルが存在しない場合は空 map で初期化すればよい（初回起動 / 昨日以前のみ）。
+
+**WAL パス安定性**: `data_path()` を設定で変更すると旧 WAL が読まれず重複発注防止が機能しなくなる。`tachibana_orders.jsonl` のパスは `data_path()` 変更後も旧パスを参照できるよう、**起動 config の `data_path` を変更したら旧 WAL を手動で移動またはリセットする**運用手順をドキュメントに記載すること（Phase O0 リリースノートに追記）。
+
+**同時アクセス**: Rust は Python プロセス起動前に WAL を読み（§4.3 の順序）、その後は Python のみが append する。両プロセスが同時にアクセスするウィンドウは原則ない。ただし Python 再起動タイミングで競合しうる場合は Python 側で `fcntl.flock(f, LOCK_EX)` を `submit` 行書き込み前後に取得・解放すること（Windows では `msvcrt.locking` で代替）。
 
 [implementation-plan T0.7](./implementation-plan.md) で以下を Phase O0 段階で実装:
 
@@ -320,7 +392,7 @@ flowsurface との差分:
 ### 5.2 入力 UI
 
 - **iced 側 modal**（tkinter ではない）。発注フォームの隣で完結させ UX を保つ
-- ユーザーがキャンセルした場合、`/api/order/submit` は 403 + `reason_code = "second_password_required"`
+- ユーザーがキャンセルした場合、`/api/order/submit` は 403 + `reason_code = "SECOND_PASSWORD_REQUIRED"`（spec.md §5.2 の SCREAMING_SNAKE_CASE に統一）
 - ログインダイアログ（tkinter）には第二暗証番号フィールドを **追加しない**
 
 ### 5.3 メモリ保持
@@ -341,17 +413,17 @@ flowsurface との差分:
 
 立花 EC フレームの主要項目（マニュアル §`#CLMEvent_EC` 参照）:
 
-| キー | 意味 | IPC への写像 |
+| 立花フレームキー | 意味 | IPC への写像 |
 |---|---|---|
 | `p_NO` | 注文番号 | `venue_order_id` |
-| `p_EDA` / `p_eda_no` | 約定枝番 | `eda_no`（重複検知キー） |
-| `p_NT` | 通知種別（注文受付・約定・取消・失効） | `OrderAccepted` / `OrderFilled` / `OrderCanceled` への分岐 |
-| `p_DH` | 約定単価 | `price` |
-| `p_DSU` | 約定数量 | `qty` |
-| `p_ZSU` | 残数量 | `remaining_qty`（部分約定判定） |
-| `p_OD` | 注文日時 | `ts_event_ms` |
+| `p_EDA` | 約定枝番（eda_no） | `trade_id`（IPC `OrderFilled.trade_id`、重複検知キー） |
+| `p_NT` | 通知種別（注文受付・約定・取消・失効） | `OrderAccepted` / `OrderFilled` / `OrderCanceled` / `OrderExpired` への分岐 |
+| `p_DH` | 約定単価 | `last_price` |
+| `p_DSU` | 約定数量 | `last_qty` |
+| `p_ZSU` | 残数量 | `leaves_qty`（部分約定判定。0 なら全約定） |
+| `p_OD` | 約定日時 | `ts_event_ms`（注文日時ではなく **約定日時**を使うこと） |
 
-**重複検知**: `(venue_order_id, eda_no)` の組をプロセスメモリ `set` に保持。再接続時の再送はここで弾く。
+**重複検知**: `(venue_order_id, trade_id)` の組をプロセスメモリ `set[tuple[str, str]]` に保持。IPC フィールド名 `trade_id` に統一する（`eda_no` / `p_EDA` / `p_eda_no` の混用を禁止）。再接続時の再送はここで弾く。
 
 ## 7. 設定値（起動 config / env）
 
@@ -376,7 +448,7 @@ env:
 | `tachibana_orders.TachibanaWireOrderRequest` (pydantic, 立花 wire 専用) | `tachibana::NewOrderRequest` | **これは内部 wire 型のみ**。public API は nautilus 互換 `NautilusOrderEnvelope` を受け取り、内部で `TachibanaWireOrderRequest` に写像する |
 | `tachibana_orders.TachibanaWireModifyRequest` | `tachibana::CorrectOrderRequest` | "correct" 用語は Python 内部に閉じる |
 | `tachibana_orders.TachibanaWireCancelRequest` | `tachibana::CancelOrderRequest` | 同 |
-| `tachibana_orders.NewOrderResponse` | `tachibana::NewOrderResponse` | `sWarningCode` / `sWarningText` も含める |
+| `tachibana_orders.NewOrderResponse` | `tachibana::NewOrderResponse` | `sWarningCode` / `sWarningText` も含める。**HTTP レスポンスの `warning_code` / `warning_text` フィールドに露出させること**（spec.md §4 の `POST /api/order/submit` レスポンスに追記済み）。立花が注文を受け付けつつ警告を返した場合にユーザーが気付けるようにする |
 | `tachibana_orders.ModifyOrderResponse` | `tachibana::ModifyOrderResponse` | 同 |
 | `tachibana_orders.OrderListRequest/Response/Record` | `tachibana::OrderListRequest/Response/OrderRecord` | 同 |
 | `tachibana_orders.submit_new_order()` | `tachibana::submit_new_order()` | 戻り値型は `Result[NewOrderResponse, OrderRejectedError]` |
@@ -384,6 +456,8 @@ env:
 | `tachibana_orders._compose_request_payload()` | `tachibana::serialize_order_request()` | `p_no` / `p_sd_date` / `sCLMID` 後付け |
 | `src/api/order_session_state.rs::OrderSessionState` | `flowsurface/src/api/agent_session_state.rs::AgentSessionState` | **Rust → Rust の移植**（Python ではない） |
 | `src/api/order_session_state.rs::PlaceOrderOutcome` | 同上 `PlaceOrderOutcome` | 同 |
+
+**`TachibanaWireOrderRequest.__repr__` のマスク対象**: `second_password` だけでなく、flowsurface `NewOrderRequest` の `Debug` 手実装に倣い **`user_id` / `password` もマスク**すること（エラーログへの認証情報混入防止）。
 
 ## 9. Python 単独モードへの含み
 
@@ -417,6 +491,20 @@ env:
 | `FOK` | 立花直接対応なし → **400 reject** | 同上 |
 | `AT_THE_OPEN` | `sCondition="2"`（寄付） | |
 | `AT_THE_CLOSE` | `sCondition="4"`（引け）または `"6"`（不成）| `tags=["close_strategy=funari"]` で `6` を選べる拡張 |
+
+#### 逆写像（CLMOrderList レスポンス → nautilus、Phase O1 で使用）
+
+`CLMOrderList` / `CLMOrderListDetail` の `sCondition` を `OrderRecordWire.time_in_force` に戻す写像:
+
+| 立花 `sCondition` | `sOrderExpireDay` | nautilus `TimeInForce` |
+|---|---|---|
+| `"0"` | `"0"`（当日） | `DAY` |
+| `"0"` | YYYYMMDD（将来日） | `GTD` |
+| `"2"` | — | `AT_THE_OPEN` |
+| `"4"` | — | `AT_THE_CLOSE` |
+| `"6"` | — | `AT_THE_CLOSE`（`tags` に `close_strategy=funari` を付与して返す） |
+
+GTC / IOC / FOK / GTC は立花が対応しないため逆写像不要。
 
 ### 10.3 OrderSide 写像
 
@@ -463,7 +551,9 @@ env:
 **バリデーション規則**（`_compose_request_payload` 内）:
 - `cash_margin=*` / `account_type=*` の**同種重複は 400 reject**（`reason_code="VENUE_UNSUPPORTED"`, `reason_text="CONFLICTING_TAGS: <details>"`）
 - 信用 + NISA など立花が拒否する組合せも同様に reject
+- `close_strategy=funari` は **`time_in_force=AT_THE_CLOSE` 以外との組合せは 400 reject**（`reason_code="VENUE_UNSUPPORTED"`, `reason_text="CONFLICTING_TAGS: close_strategy=funari requires AT_THE_CLOSE"`）
 - 未知 tag は warn して無視（fail-open、前方互換）
+- Rust HTTP 層では `tags` の各要素が `key=value` 形式（ASCII printable、`=` を 1 つ含む）であることのみ検証する。内容バリデーションは Python 側責務
 
 **新しい tag を追加するルール**: `key=value` 形式でこの表に登録してから `tachibana_orders.TAGS_REGISTRY` に反映する。
 

@@ -12,7 +12,7 @@ homepage.workspace = true
 [workspace.package]
 version = "0.8.7"
 edition = "2024"
-repository = "https://github.com/flowsurface-rs/flowsurface"
+repository = "https://github.com/botterYosuke/e-station"
 homepage = "https://flowsurface.com"
 
 [workspace]

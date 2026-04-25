@@ -1,6 +1,11 @@
 # 立花注文機能: 実装計画
 
-立花 Phase 1（[docs/plan/tachibana/implementation-plan.md](../tachibana/implementation-plan.md)）の T2（認証実装）以降が完了している前提。
+**前提条件（着手ブロッカー）**: 立花 Phase 1（[docs/plan/tachibana/implementation-plan.md](../tachibana/implementation-plan.md)）の T2（認証実装）以降が完了していること。具体的には以下のファイルが実在していること:
+
+- `python/engine/exchanges/tachibana_login.py`（認証・セッション管理）
+- `python/engine/exchanges/tachibana_event.py`（EVENT WebSocket 受信ループ、Phase O2 の EC パーサ追加先）
+
+**現状確認（2026-04-25）**: `python/engine/exchanges/` に tachibana 系ファイルが存在しない。**Phase 1 を先に完了させてから本計画に着手すること**。O-pre の Tpre タスクは Phase 1 の認証基盤が無くても型定義だけ進められるが、T0.3 以降は Phase 1 完了が必要。
 
 ## マイルストーン一覧
 
@@ -27,8 +32,10 @@
 - [ ] **実体ライブラリは**この時点では `pyproject.toml` に**追加しない**（nautilus 統合は N0 まで先送り）。型情報のみ先取り
 
 ### Tpre.2 IPC スキーマ確定
-- [ ] [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に [architecture.md §3](./architecture.md#3-ipc-スキーマ拡張schema-12--13) の `SubmitOrderRequest` / `OrderSide` / `OrderType` / `TimeInForce` / `OrderStatus` / `OrderEvent::*` を追加
+**前提**: Q0（nautilus バージョン固定方針）を本タスク着手前に open-questions.md に確定記録すること（Tpre.6 受け入れ条件から前倒し）。
+- [ ] [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に [architecture.md §3](./architecture.md#3-ipc-スキーマ拡張schema-12--13) の `SubmitOrderRequest` / `OrderSide` / `OrderType` / `TimeInForce` / `OrderModifyChange` / `OrderListFilter` / `OrderEvent::*` を追加
 - [ ] **enum の `serde rename_all = "SCREAMING_SNAKE_CASE"` を強制**（nautilus 文字列表現と一致）
+- [ ] **`Command` enum の `#[derive(Debug)]` をこのタスクで手実装に切り替える**（`SetSecondPassword` 追加前に実施。architecture.md §2.4 参照）。`value` が `[REDACTED]` にマスクされることをテストで検証すること（Tpre.2 の受け入れ条件）
 - [ ] [docs/plan/✅python-data-engine/schemas/commands.json](../✅python-data-engine/schemas/commands.json) と `events.json` を更新（schema 1.3）
 - [ ] [python/engine/schemas.py](../../../python/engine/schemas.py) に対応 pydantic モデル
 - [ ] **ラウンドトリップテスト**: Rust serialize → Python deserialize、Python serialize → Rust deserialize の両方向で全 enum 値を検証（typo を 1 文字でも入れたら CI で落ちること）
@@ -60,6 +67,8 @@
 - [ ] Python pytest 既存スイート緑
 - [ ] enum ラウンドトリップ網羅テスト緑
 - [ ] **N2 シミュレーションテスト**: `nautilus_trader.model.orders.MarketOrder.create(...)` で生成した値の dict を `NautilusOrderEnvelope.model_validate(...)` で読めることを確認するスタブテスト 1 本（nautilus を実 import せず、ハードコードした dict を使う）
+  **注**: Q0（nautilus バージョン固定方針）が Case C（CI 互換チェック）を採用しない場合、このテストは nautilus の型変更で陳腐化する。Q0 の決定（推奨: 案 A + C）を本 Phase 着手前に [open-questions.md Q0](./open-questions.md) に記録し確定すること
+- [ ] **Q0 決定済み**: nautilus バージョンが pin され、採用する互換チェック方式（CI の有無）が open-questions.md に記録されていること
 - [ ] **Tpre.5 EC 仕様根拠の所在が確定**（PDF 入手 / flowsurface 移植元の特定 / 生 frame サンプル いずれか 1 つ）
 
 これにより以降の Phase O0〜O3 は **「型は触らない、実装だけ足す」** モードで進められる。
@@ -89,8 +98,9 @@
 - [ ] `order_type=MARKET` / `order_side=BUY` / `time_in_force=DAY` / `tags=["cash_margin=cash"]` 以外は **Phase O0 では `OrderRejected{reason_code="UNSUPPORTED_IN_PHASE_O0"}` で reject**
 - [ ] `OrderSubmitted` → `OrderAccepted` の 2 段イベントを順番に発火（nautilus 流）。立花応答受領前に `OrderSubmitted`、`sOrderNumber` 採番後に `OrderAccepted`
 - [ ] **新規 events**: `Event::SecondPasswordRequired { request_id }`
-- [ ] **新規 commands**: `Command::SetSecondPassword { value: SecretString }` / `Command::ForgetSecondPassword`
-- [ ] DTO の `Debug` は手実装にし、`second_password` / `value` を含まない（IPC では送らない）。`[REDACTED]` マスク規約を維持
+- [ ] **新規 commands**: `Command::SetSecondPassword { value: String }` / `Command::ForgetSecondPassword`
+  （`SecretString` は IPC JSON に送れないため `String`。Python 側で `SecretStr` 化する）
+- [ ] **`Command` enum の `Debug` 手実装は Tpre.2 で実施済み**のため、`SetSecondPassword` 追加時はマスクが自動的に適用されることを確認するだけでよい（再実装不要）
 
 ### T0.4 Python 側 `tachibana_orders.py` の写像実装
 
@@ -104,7 +114,7 @@
   - 内部で `_envelope_to_wire(envelope, session, second_password) -> TachibanaWireOrderRequest` を呼ぶ。**写像は [architecture.md §10](./architecture.md#10-nautilus_trader-との型マッピング) の表に従って 1 箇所に集約**
   - 立花未対応の `order_type` / `time_in_force` 組合せは `UnsupportedOrderError` を上に返す（IPC 層で `OrderRejected{reason_code="VENUE_UNSUPPORTED"}` に写る）
 - [ ] `_compose_request_payload(wire: TachibanaWireOrderRequest) -> dict`:
-  - `p_no` = `tachibana_auth.next_p_no()`
+  - `p_no` = `tachibana_auth.next_p_no()`（Python asyncio は単一スレッドのため並行安全。`next_p_no()` が `await` を含まない同期カウンタであることを確認すること）
   - `p_sd_date` = `tachibana_auth.current_p_sd_date()`
   - `sCLMID` = `"CLMKabuNewOrder"`
   - `sJsonOfmt` = `"5"`
@@ -125,7 +135,8 @@
   - `Created` / `IdempotentReplay` / `Conflict` の 3 ケース
   - 立花差分: `order_number` を `Option<String>` で持ち、`OrderAccepted` 受信後に `update_order_number()` で埋める
 - [ ] `engine_client.send(SubmitOrder)` → `OrderAccepted` / `OrderRejected` を待機
-- [ ] HTTP 応答: 201 Created（新規）/ 200 OK（idempotent replay）/ 409 / 400 / 403 / 502
+  **タイムアウト**: `tokio::time::timeout(Duration::from_secs(30), ...)` を必ず掛ける。タイムアウト時は HTTP 504 + `reason_code="INTERNAL_ERROR"`（[architecture.md §2.1 タイムアウト節](./architecture.md#21-発注同期)）
+- [ ] HTTP 応答: 201 Created（新規）/ 200 OK（idempotent replay）/ 409 / 400 / 403 / 502 / 504（タイムアウト）
 
 ### T0.6 安全装置
 
@@ -138,7 +149,10 @@
 - [ ] `python/engine/exchanges/tachibana_orders.py` に `_audit_log_submit(payload)` / `_audit_log_accepted(...)` / `_audit_log_rejected(...)` を追加（[architecture.md §4.2](./architecture.md#42-監査ログwal-write-ahead-log)）
 - [ ] `data_path()/tachibana_orders.jsonl` に append:
   - `submit` 行は HTTP 送信 **直前**に `fsync` 込み（クラッシュ時の不整合最小化）
-  - `accepted` / `rejected` 行は応答受領後
+    Python 実装: `f.write(json_line + "\n"); f.flush(); os.fsync(f.fileno())`
+    async context では `loop.run_in_executor(None, os.fsync, f.fileno())` を使うこと（ブロッキング防止）
+  - `accepted` / `rejected` 行は応答受領後（`f.write + flush` で十分、fsync 不要）
+    - `accepted` が OS バッファ残りのままクラッシュした場合、起動時復元は `unknown` 状態になるが Phase O1 の `GetOrderList` で補完できる。この許容を意図的な設計として実装者にコメントで残すこと
   - **第二暗証番号は絶対に書かない**（unit テストで grep 検証）
 - [ ] **Rust 側 `OrderSessionState` の起動時復元**: アプリ起動 → 当日分 WAL を読み戻し → `client_order_id ↔ request_key ↔ venue_order_id` の map を復元
   - `submit` のみで `accepted`/`rejected` 無し → `unknown` 状態で復元（Phase O1 T1.5 で `GetOrderList` から確定）
@@ -156,6 +170,7 @@
 - [ ] **nautilus 互換性テスト**: nautilus を import しない状態で、`nautilus_trader.model.orders.MarketOrder.create(...)` 互換の dict を `NautilusOrderEnvelope.model_validate(...)` で読み込み可能（field 名・enum 文字列一致を検証）
 - [ ] Rust: `OrderSessionState` の `Created/IdempotentReplay/Conflict` 3 ケース（flowsurface 同名テストの移植）
 - [ ] Rust: `/api/order/submit` のスキーマバリデーション（不正 client_order_id、quantity=0、instrument_id 形式違反）
+- [ ] **Python: `TACHIBANA_ALLOW_PROD=1` ガードのテスト**: `os.getenv("TACHIBANA_ALLOW_PROD") != "1"` のとき本番 URL への送信がブロックされることを pytest で検証（`monkeypatch.delenv("TACHIBANA_ALLOW_PROD", raising=False)` を使う）
 - [ ] **手動 E2E**（CI 載せず、デモ環境クレデンシャル必須）: `s80_order_submit_demo.sh` で「現物・成行・買 100 株」が通る
 - [ ] **クラッシュリカバリ E2E**（`s80_order_crash_recovery_demo.sh`）:
   1. `POST /api/order/submit` を送信して WAL に `submit` 行が書かれた直後にプロセスを kill
@@ -181,7 +196,8 @@
 
 ### T1.3 Rust HTTP
 - [ ] `/api/order/modify` `/api/order/cancel` `/api/order/cancel-all` `/api/order/list`
-- [ ] `cancel-all` は確認モーダル必須（HTTP 層では `confirm: true` クエリ必須にする）
+- [ ] `cancel-all` は確認モーダル必須（HTTP 層では **JSON body に `confirm: true` を必須**とする。query param ではない。[spec.md §4](./spec.md#4-公開-apihttp) に準拠）
+- [ ] `/api/order/cancel` の Rust 実装では `OrderSessionState.get_venue_order_id(client_order_id)` で lookup し、`venue_order_id` を Python `cancel_order(...)` に渡すこと（[architecture.md §2.3](./architecture.md#23-取消フローphase-o1)）。`venue_order_id = None`（unknown）は 404 reject
 
 ### T1.4 UI: 注文一覧パネル
 - [ ] `src/screen/dashboard/panel/orders.rs`（新設）
@@ -192,11 +208,11 @@
 ### T1.5 起動時の台帳復元
 - [ ] **T0.7（監査ログ WAL）から `client_order_id ↔ sOrderNumber` を起動時に復元**（重複発注防止の本丸）
 - [ ] それでも欠損するもの（他端末から発注された当日注文等）は `VenueReady` 後の `GetOrderList` で `venue_order_id` ベースの別 map に入れる
-- [ ] `client_order_id` 不明の注文は HTTP `/api/order/modify` `/api/order/cancel` 入力として **`venue_order_id` も受理**できるようにする
+- [ ] `client_order_id` 不明の注文は HTTP `/api/order/modify` `/api/order/cancel` 入力として **`venue_order_id` も受理**できるようにする（spec.md §5 に記載）。`client_order_id` と `venue_order_id` が同時指定された場合は `client_order_id` 優先。応答の `client_order_id` は `null` を返す
 
 ### T1.6 テスト
 - [ ] Python: modify・取消の正常系・session 切れ
-- [ ] Rust: `/api/order/cancel-all` の `confirm` 必須チェック
+- [ ] Rust: `/api/order/cancel-all` の `confirm` 必須チェック（Phase O0 時点では 501 を返すことのテストも含める）
 - [ ] Rust: 起動時 WAL 復元 → 同一 `client_order_id` で再送 → `IdempotentReplay` を返すこと
 - [ ] 手動 E2E: `s81_order_modify_cancel_demo.sh`
 

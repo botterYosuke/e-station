@@ -1,11 +1,11 @@
 ---
 name: type-design-analyzer
-description: flowsurface 専用型設計アナライザー。Price/Qty Newtype・ReplayState などの状態機械・enum バリアントが不変条件を型レベルで表現できているかを評価する。新モジュール追加時・型のリファクタリング時に使う。
+description: e-station 専用型設計アナライザー。Price/Qty Newtype・ReplayState などの状態機械・enum バリアントが不変条件を型レベルで表現できているかを評価する。新モジュール追加時・型のリファクタリング時に使う。
 tools: ["Read", "Grep", "Glob", "Bash"]
 model: sonnet
 ---
 
-flowsurface の Rust 型設計を評価します。
+e-station の Rust 型設計を評価します。
 「不正な状態を型で表現不可にする（Make Illegal States Unrepresentable）」原則が守られているかを検査し、型安全性の改善点を提案します。
 
 ## 評価基準

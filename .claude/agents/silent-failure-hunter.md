@@ -1,11 +1,11 @@
 ---
 name: silent-failure-hunter
-description: flowsurface 専用サイレント障害ハンター。Rust / tokio / iced コードで握り潰されたエラー・不十分なログ・危険なフォールバック・エラー伝播の欠落を検出する。WebSocket・取引所アダプタ・チャンネル受信パスを重点的に検査する。
+description: e-station 専用サイレント障害ハンター。Rust / tokio / iced コードで握り潰されたエラー・不十分なログ・危険なフォールバック・エラー伝播の欠落を検出する。WebSocket・取引所アダプタ・Python エンジン IPC 受信パスを重点的に検査する。
 tools: ["Read", "Grep", "Glob", "Bash"]
 model: sonnet
 ---
 
-flowsurface の Rust / tokio / iced コードにおける「静かな障害」を検出します。
+e-station の Rust / tokio / iced コードにおける「静かな障害」を検出します。
 エラーが握り潰されると、チャートデータが更新されなくなる・リプレイが止まる・WebSocket が再接続しない、といった症状が出るまで原因を追えなくなります。
 
 ## 重点検査対象

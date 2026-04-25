@@ -14,8 +14,8 @@
 ### 2.1 Phase O0 — 第二暗証番号の収集と単純な現物成行発注（MVP）
 
 - 立花 Phase 1 spec §3.1 F-H5 の制約を **本フェーズで解禁**:
-  - DTO スキーマ上 `second_password: Option<SecretString>` は既に切られている → 値を埋める
-  - 収集 UI（Python tkinter ヘルパー）と Python メモリ保持を有効化
+  - `data::config::tachibana::TachibanaCredentials.second_password` は **常に `None` のまま**（keyring に書かない。[architecture.md §5](./architecture.md#5-第二暗証番号の取扱い) Q1 確定）
+  - 収集は iced modal（tkinter ではない）で発注時のみ。Python メモリ保持を有効化
 - 新規注文 API: `CLMKabuNewOrder`（現物のみ・成行のみ・買のみ・東証 `00`）
 - HTTP API `POST /api/order/submit` を Rust 側に新設
 - 結果は同期的に Python から戻す（`sOrderNumber` を含む）
@@ -96,10 +96,10 @@
 
 | メソッド | パス | リクエスト | レスポンス | フェーズ |
 |---|---|---|---|---|
-| `POST` | `/api/order/submit` | `{client_order_id, instrument_id, order_side, order_type, quantity, price?, time_in_force, ...}` (§5.1) | `{client_order_id, venue_order_id, status: "ACCEPTED"}` | O0 |
-| `POST` | `/api/order/modify` | `{client_order_id, quantity?, price?, trigger_price?, expire_time?}` | `{client_order_id, status: "PENDING_UPDATE"}` | O1 |
-| `POST` | `/api/order/cancel` | `{client_order_id}` | `{client_order_id, status: "PENDING_CANCEL"}` | O1 |
-| `POST` | `/api/order/cancel-all` | `{instrument_id?, order_side?, confirm: true}` | `{count}` | O1 |
+| `POST` | `/api/order/submit` | `{client_order_id, instrument_id, order_side, order_type, quantity, price?, time_in_force, ...}` (§5.1) | 201: `{client_order_id, venue_order_id, status: "ACCEPTED", warning_code?, warning_text?}` / 202: `{status: "SUBMITTED", venue_order_id: null, warning: "order_status_unknown"}`（idempotent replay で unknown） | O0 |
+| `POST` | `/api/order/modify` | `{client_order_id, quantity?, price?, trigger_price?, expire_time?}` または `{venue_order_id, quantity?, price?, trigger_price?, expire_time?}`（他端末注文） | `{client_order_id, status: "PENDING_UPDATE"}` | O1 |
+| `POST` | `/api/order/cancel` | `{client_order_id}` または `{venue_order_id}`（他端末注文。`client_order_id` 不明時のみ） | `{client_order_id, status: "PENDING_CANCEL"}` | O1 |
+| `POST` | `/api/order/cancel-all` | `{instrument_id?, order_side?, confirm: true}`（`confirm: true` は **JSON body 必須**、query param ではない）。**Phase O0 時点ではこのエンドポイントは未実装（501 Not Implemented を返す）** | `{count}` | O1 |
 | `GET` | `/api/order/list` | クエリ: `status?` / `instrument_id?` / `date?` | `{orders: [...]}` | O1 |
 | `POST` | `/api/order/forget-second-password` | （body 無し） | `{status: "OK"}` | O0 |
 | `GET` | `/api/order/positions` | — | 現物・信用建玉 | O3 |
@@ -116,7 +116,7 @@ JSON Schema は [`docs/plan/✅python-data-engine/schemas/`](../✅python-data-e
 Python に渡す前に **Rust 側で**早期に弾く:
 
 - `client_order_id`: 任意の文字列（UUID v4 推奨）。nautilus `ClientOrderId` 制約に合わせ **長さ 1〜36、ASCII printable のみ**
-- `instrument_id`: `<symbol>.<venue>` 形式。立花は `<4〜5 桁数字>.TSE`（例 `7203.TSE`）
+- `instrument_id`: `<symbol>.<venue>` 形式。**Phase O0〜O2 は東証（`TSE`）のみ受理**（例 `7203.TSE`）。大証(OSE)・名証(NSE)等への `sSizyouC` 写像は O3 以降で対応（[open-questions.md Q9](./open-questions.md) として追跡）
 - `order_side`: `"BUY"` / `"SELL"`（nautilus `OrderSide` enum 文字列）
 - `order_type`: `"MARKET"` / `"LIMIT"` / `"STOP_MARKET"` / `"STOP_LIMIT"` の 4 種のみ受理。nautilus `OrderType` には `MARKET_IF_TOUCHED` / `LIMIT_IF_TOUCHED` も存在するが、立花が直接対応しないため **HTTP 層で 400 reject**（`reason_code="VENUE_UNSUPPORTED"`、[architecture.md §10.1](./architecture.md#101-ordertype-写像)）。Phase O0 は `MARKET` のみ受理、O1 で `LIMIT`、O3 で `STOP_*` を順次解禁
 - `quantity`: 正の整数文字列。**nautilus の `Quantity` は文字列（precision 保持）が基本**なので合わせる。単元株チェックは Python 側で master 突合せ
@@ -124,7 +124,10 @@ Python に渡す前に **Rust 側で**早期に弾く:
 - `time_in_force`: `"DAY"` / `"GTD"` / `"AT_THE_OPEN"` / `"AT_THE_CLOSE"` の 4 種のみ受理。nautilus 列挙の `GTC` / `IOC` / `FOK` は立花が直接対応しないため **HTTP 層で 400 reject**（[architecture.md §10.2](./architecture.md#102-timeinforce-写像)）。Python 写像は `AT_THE_OPEN` → `sCondition=2`、`AT_THE_CLOSE` → `4`、`tags=["close_strategy=funari"]` 併用で `6`（不成）、それ以外は `0`
 - `expire_time`: ISO8601、`time_in_force=GTD` のとき必須。Python 側で `sOrderExpireDay` (YYYYMMDD JST) に変換、10 営業日上限を Python 側で検証
 - `trigger_price`: `order_type ∈ {STOP_MARKET, STOP_LIMIT}` のとき必須。立花 `sGyakusasiZyouken` に写像
+- `tags`: Rust HTTP 層では各要素が `key=value` 形式（ASCII printable、`=` を 1 つ含む）であることのみ検証し 400 reject。内容（未知タグ・組合せ）の検証は Python 側 `_compose_request_payload` 内責務
 - 上限（数量・金額）チェックは Python 側で master + 起動 config から
+
+**`venue_order_id` による modify/cancel（Phase O1 での他端末注文対応）**: 起動時 WAL 復元で `client_order_id` が不明な注文（他端末・他アプリ経由の当日注文）に対しては、`POST /api/order/modify` と `POST /api/order/cancel` で `venue_order_id` を直接受け入れる。この場合 `client_order_id` は応答に含まれない（`null`）。`client_order_id` と `venue_order_id` が同時に指定された場合は `client_order_id` を優先する。
 
 ## 5.1 nautilus 互換のリクエストシェイプ
 
@@ -174,7 +177,8 @@ Python に渡す前に **Rust 側で**早期に弾く:
 | `INSUFFICIENT_FUNDS` | Phase O3 余力ガード失敗 |
 | `SESSION_EXPIRED` | `p_errno=2` |
 | `VENUE_REJECTED` | 立花応答 `sResultCode≠0` の上記以外（`reason_text` に立花コードと文言） |
-| `INTERNAL_ERROR` | Rust / Python 内部例外 |
+| `ORDER_STATUS_UNKNOWN` | 起動時復元で `venue_order_id = None`（unknown）の注文への cancel / modify 要求。`GET /api/order/list` で確認後に再試行を促す |
+| `INTERNAL_ERROR` | Rust / Python 内部例外（タイムアウトを含む） |
 
 **`reason_text` フォーマット規約**:
 - `VENUE_REJECTED` / `VENUE_UNSUPPORTED`: `"<TACHIBANA_CODE_OR_TAG>: <message>"` の 1 行（改行禁止、最大 512 文字）

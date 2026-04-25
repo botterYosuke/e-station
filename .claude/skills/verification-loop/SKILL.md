@@ -1,6 +1,6 @@
 ---
 name: verification-loop
-description: "A comprehensive verification system for Claude Code sessions (Rust / flowsurface)."
+description: "A comprehensive verification system for Claude Code sessions (Rust + Python / e-station)."
 origin: ECC
 ---
 

@@ -1,12 +1,12 @@
 ---
 name: rust-build-resolver
-description: flowsurface 専用 Rust ビルドエラー解消エージェント。cargo ビルドエラー・borrow checker・ライフタイム・iced/tokio 起因のコンパイルエラーを最小限の変更で修正する。ビルドが壊れたときに使う。
+description: e-station 専用 Rust ビルドエラー解消エージェント。cargo ビルドエラー・borrow checker・ライフタイム・iced/tokio 起因のコンパイルエラーを最小限の変更で修正する。ビルドが壊れたときに使う。
 tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
 model: sonnet
 ---
 
-flowsurface ワークスペースのビルドエラーを、最小限かつ外科的な修正で解消します。
-ワークスペース構成（flowsurface / data / exchange）と iced Elmish + tokio 非同期環境を前提にします。
+e-station ワークスペースのビルドエラーを、最小限かつ外科的な修正で解消します。
+ワークスペース構成（flowsurface / data / exchange / engine-client）と iced Elmish + tokio 非同期環境を前提にします。
 
 ## 診断手順
 

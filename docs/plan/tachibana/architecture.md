@@ -143,6 +143,7 @@ pub struct TachibanaSessionWire {
 - 一方でマスタキャッシュ保存先だけは Python 側単独では決められないため、T0 で次のどちらかを追加する
   - `stdin` 初期 payload に `config_dir` / `cache_dir` を追加
   - `SetEnginePaths` 相当の軽量コマンドを新設
+- **`dev_tachibana_login_allowed` フラグの追加（H-2、T3 で実装）**: Python が debug ビルド専用の `DEV_TACHIBANA_*` env を読んでよいかを Rust が明示的に許可するフラグ。`stdin` 初期 payload に **`dev_tachibana_login_allowed: bool`** を追加する（最終 payload 形式: `{"port": N, "token": "...", "config_dir": "...", "cache_dir": "...", "dev_tachibana_login_allowed": bool}`）。Rust 側は `#[cfg(debug_assertions)]` で `true`、release では `false` を渡す。Python 側 `tachibana_login_flow.py` は `dev_tachibana_login_allowed == false` のとき `os.getenv("DEV_TACHIBANA_*")` を読まずスキップし、release ビルドでの env 混入を完全にガードする。`spec.md §3.1` の「`TACHIBANA_DEV_LOGIN_ALLOWED` 起動 flag」はこの方式で実現する
 
 ### 2.2 ログ・テレメトリでのマスク
 
@@ -210,7 +211,7 @@ Rust 起動
 
 - `SetVenueCredentials` 受領時、Python は session validation を実施し、必要なら 1 回だけ再ログインして、結果を `VenueReady{venue, request_id}` か `VenueError{venue, request_id, code, message}` で返す（`request_id` 相関で Rust 側が応答を突き合わせる）
 - **`VenueReady` の意味論**: 「認証・session validation 完了」を意味する。**マスタ初期 DL の完了は含まない**。マスタ取得完了は `ListTickers` 応答の到着で判定する（F12）
-- `VenueReady` は **冪等イベント**。Python 単独再起動 → `SetVenueCredentials` 再注入 → `VenueReady` 再送、というサイクルを毎回踏む。UI は初回 / 再送を区別しない前提（差異が必要になれば `session_id` 同梱で拡張）（F8）。Rust 側はこれを**最終受信状態**として保持し、**`ProcessManager` が Python サブプロセスの再起動を検知した時点（次の `Hello` 受信時）にリセット**する。`EngineEvent::Disconnected` は ticker/stream 粒度（`{venue, ticker, stream, market, reason}`、[engine-client/src/dto.rs:115](../../../engine-client/src/dto.rs#L115)）であって venue 全体の disconnected ではない点に注意（C3 修正）。WebSocket 切断などで全 ticker の `Disconnected` を受信しても `VenueReady` 状態は維持し、Python プロセス自体が落ちた時のみリセットする
+- `VenueReady` は **冪等イベント**。Python 単独再起動 → `SetVenueCredentials` 再注入 → `VenueReady` 再送、というサイクルを毎回踏む。UI は初回 / 再送を区別しない前提（差異が必要になれば `session_id` 同梱で拡張）（F8）。Rust 側はこれを**最終受信状態**として保持し、**`ProcessManager` が Python サブプロセスの再起動を検知した時点（次の `Hello` 受信時）にリセット**する。`EngineEvent::Disconnected` は ticker/stream 粒度（`{venue, ticker, stream, market, reason}`、[engine-client/src/dto.rs:201](../../../engine-client/src/dto.rs#L201)）であって venue 全体の disconnected ではない点に注意（C3 修正）。WebSocket 切断などで全 ticker の `Disconnected` を受信しても `VenueReady` 状態は維持し、Python プロセス自体が落ちた時のみリセットする
 - **`VenueReady` 再受信時の重複防止**: active subscriptions の resubscribe は `ProcessManager`（[engine-client/src/process.rs](../../../engine-client/src/process.rs)）が **1 度だけ** 行う。UI 側の view code は `VenueReady` イベントに反応して新規 subscribe を発行しないこと（既存購読の参照カウントは ProcessManager 経由でのみ維持）
 - Rust 側は `VenueReady` 受領前は立花 ticker の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を送らない。UI では venue 単位のローディング表示を出す
 - 既存 sidebar は起動直後に metadata fetch を自動発火するため、立花追加時は **venue-ready ゲート** を `AdapterHandles` 呼び出し前に差し込む必要がある
@@ -244,7 +245,7 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 | ファイル | 変更内容 |
 | :--- | :--- |
 | [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) | `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 追加。`FromStr` / `Display` / `ALL` 配列更新、および `MarketKind` を網羅する既存 match の修正 |
-| [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::SetVenueCredentials` / `EngineEvent::VenueReady` / `EngineEvent::VenueCredentialsRefreshed` 追加。`schema_minor` を bump |
+| [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::SetVenueCredentials` / `Command::RequestVenueLogin` / `EngineEvent::VenueReady` / `EngineEvent::VenueCredentialsRefreshed` / `EngineEvent::VenueLoginStarted` / `EngineEvent::VenueLoginCancelled` 追加。`schema_minor` を bump |
 | [engine-client/src/process.rs](../../../engine-client/src/process.rs) | `ProcessManager` が Tachibana credentials を保持し、再起動時に `SetProxy` の後で `SetVenueCredentials` を再送する |
 | `data/src/config/tachibana.rs`（新設） | `TachibanaCredentials` 型 + keyring 読み書き。SKILL.md R10 に従う。`data/src/config/proxy.rs` の暗号資産プロキシ keyring 実装を参考にする |
 | [src/main.rs](../../../src/main.rs) | 起動時に keyring から立花 creds を復元し `SetVenueCredentials` 投入 |
@@ -506,5 +507,5 @@ Rust 起動
 
 ### 8.5 シークレット流出ガード
 
-- リポジトリ全体に対する pre-commit `grep -E "(kabuka\.e-shiten|sUserId.*=.*['\"][^'\"]+['\"])"` で本番 URL・ハードコードクレデンシャルを禁止
+- リポジトリ全体に対する pre-commit secret scan は `tools/secret_scan_patterns.txt` を正本とし、`tools/secret_scan.{sh,ps1}` から呼び出す。本ドキュメントでは grep リテラルを重複定義しない（重複による drift 防止）。詳細・正本パターンは [implementation-plan.md T7](./implementation-plan.md) 参照
 - ログキャプチャテストで `sPassword` / `sSecondPassword` / 仮想 URL ホスト部分が出ないこと
