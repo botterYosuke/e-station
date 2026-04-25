@@ -51,6 +51,29 @@ class EventUrl(_BaseUrl):
     """`sUrlEvent` / `sUrlEventWebSocket` — EVENT push endpoint."""
 
 
+class AuthUrl(_BaseUrl):
+    """`{BASE_URL}` — pre-login auth endpoint base.
+
+    Distinct from the four virtual URLs above: it is **not** issued by the
+    server but is the static base host string. The login builder appends
+    ``auth/?{percent-encoded-JSON}`` to it.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Static base URLs (F-L1, single-source rule)
+# ---------------------------------------------------------------------------
+#
+# These two literals are the ONLY place in the repository where the
+# ``kabuka.e-shiten.jp`` host may appear (SKILL.md F-L1). The Phase 1 secret
+# scanner (T7) allowlists this file by name; any other module touching the
+# host string will fail pre-commit / CI. Demo and prod both ride the
+# ``e_api_v4r8`` path — Phase 1 is API-version compatible with v4r7 docs.
+
+BASE_URL_PROD: AuthUrl = AuthUrl("https://kabuka.e-shiten.jp/e_api_v4r8/")
+BASE_URL_DEMO: AuthUrl = AuthUrl("https://demo-kabuka.e-shiten.jp/e_api_v4r8/")
+
+
 # Allowed `sJsonOfmt` values (R5). "5" = browser-friendly + named keys (default
 # for REQUEST); "4" = one-record-per-line (only for `CLMEventDownload`).
 _ALLOWED_OFMT = frozenset({"4", "5"})
@@ -175,6 +198,48 @@ def build_request_url(
 
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"{base.value}?{func_replace_urlecnode(serialized)}"
+
+
+def build_auth_url(
+    base: AuthUrl,
+    json_obj: Mapping[str, object],
+    *,
+    sJsonOfmt: str = "5",
+) -> str:
+    """Build the pre-login auth URL: ``{base}auth/?{percent-encoded JSON}``.
+
+    Distinct from `build_request_url` because the auth endpoint:
+
+    * is reached via the static base URL rather than a virtual URL, and
+    * adds the literal ``auth/`` path segment between the base and the query.
+
+    `sJsonOfmt` defaults to ``"5"`` (R5 — browser-friendly, named keys) which
+    is the only value the auth endpoint accepts. ``"4"`` is rejected because
+    the login response must be a single JSON object, not one record per line.
+    """
+    if not isinstance(base, AuthUrl):
+        raise TypeError(
+            f"build_auth_url expects AuthUrl, got {type(base).__name__}"
+        )
+    if sJsonOfmt != "5":
+        raise ValueError(
+            f"auth endpoint requires sJsonOfmt='5' (R5), got {sJsonOfmt!r}"
+        )
+
+    payload: dict[str, object] = {**dict(json_obj), "sJsonOfmt": sJsonOfmt}
+
+    for key, value in payload.items():
+        if not isinstance(value, (str, int, float)):
+            raise TypeError(
+                f"build_auth_url: value for {key!r} must be str/int/float "
+                f"(got {type(value).__name__}); nested types are not supported"
+            )
+    string_values = [str(v) for v in payload.values()]
+    string_values += [str(k) for k in payload.keys()]
+    _check_no_control_chars(string_values)
+
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"{base.value}auth/?{func_replace_urlecnode(serialized)}"
 
 
 def build_event_url(base: EventUrl, params: Mapping[str, str]) -> str:

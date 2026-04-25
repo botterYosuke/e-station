@@ -43,12 +43,13 @@
 - [x] `Exchange::default_quote_currency(&self) -> QuoteCurrency` を `exchange/src/adapter.rs` に実装（暗号資産 venue は USDT/USDC、`TachibanaStock` は `Jpy`）
 - [x] **既存永続 state の serde 互換性確認**（F13/F-M4）— [exchange/tests/ticker_info_state_migration.rs](../../../exchange/tests/ticker_info_state_migration.rs) で旧 `TickerInfo` payload (lot_size / quote_currency 欠如) が `serde(default)` 経由で読めることを検証。Hash 影響範囲は inventory-T0.md §1.2 にて「永続化されているのは `data/src/layout/pane.rs` の `ticker_info` フィールドのみ、`HashMap` キーは in-memory のみ」と確定済み: dashboard 設定ファイル / `state.rs` に `TickerInfo` が保存されているか `git grep` で特定。`#[serde(default)]` で missing field が読めることに加え、**`Hash` 値変化により既存 `HashMap<TickerInfo, _>` のキー突合が壊れないか**を実機テスト。受け入れ条件に「旧 `state.json` を起動 → pane 復元 → ticker 表示」を追加
 - [x] **日本語銘柄名の運搬経路を確定**: `EngineEvent::TickerInfo.tickers[*]` は `Vec<serde_json::Value>` のまま（[engine-client/src/dto.rs:279](../../../engine-client/src/dto.rs#L279)）であり、Python 側が `display_name_ja` キーを各 ticker dict に詰めれば追加 schema 不要で運搬可能。Rust UI 側は将来 `HashMap<Ticker, TickerDisplayMeta>` で別管理する方針を inventory に確定（実 UI 配線は T4 で実装）
-- [ ] **類似プロジェクト `C:\Users\sasai\Documents\flowsurface` の先行実装を参考にする（M9 決定）**:
+- [x] ✅ **類似プロジェクト `C:\Users\sasai\Documents\flowsurface` の先行実装を参考にする（M9 決定）** — **本タスクは設計確定が deliverable**であり、実装配線は T4 に委譲する規約として T0.2 で閉じる:
   - `flowsurface/exchange/src/adapter/tachibana.rs:625-684` の `MasterRecord` 型を踏襲し、Python 側 `tachibana_master.py` のレコード型に **`sIssueName` / `sIssueNameRyaku` / `sIssueNameKana` / `sIssueNameEizi` の 4 種**を全て保持する（Phase 1 で全部使わなくても、後続フェーズの検索 UI で活きる）
   - `display_symbol` には **`sIssueNameEizi`（英語名 ASCII）を採用**。28 文字を超える場合は切詰め、空または非 ASCII なら `None` フォールバックして `Ticker::new_with_display` にデフォルト動作させる（`Ticker` の ASCII 制約を回避）
   - `display_name_ja` には `sIssueName` を入れる。flowsurface 側はまだ `display_name_ja` 経路を持たない（英語名の display_symbol で済ませている）ため、本計画はそこから一歩進む。`Ticker` には英語名・別管理の `TickerDisplayMeta` には日本語名、というルーティング
   - Rust 側 UI ラベルのフォールバック順序: `display_name_ja` → `display_symbol`（英語名）→ `ticker.symbol`（4 桁コード）。3 段フォールバックは flowsurface 側にも明示的にはないので本計画で新規規約として固定
   - **`display_name_ja` の events.json schema 明記**: 「Python 側 typo（`display_name_jp` 等）でサイレント失敗」を防ぐため、`docs/plan/✅python-data-engine/schemas/events.json` の `TickerInfo` entry の各 ticker オブジェクト形に `display_name_ja: string?` を追記し、Python 単体テストで「key 名が `display_name_ja` であること」を assert（M9 / 元 M9 ペンディング解消）
+  - **完了根拠 (2026-04-25)**: `MasterStreamParser` は dict ベースで全 sIssueName* キーを保持するため、レコード型上での先取り作業は不要（T4 で `list_tickers` を書く際に `record["sIssueName"]` 等を直接参照する）。display_symbol / display_name_ja のマッピング規約は本箇条書きで確定済み。実装配線は T4 のタスク扱い。
 - [x] `engine-client` DTO に下記を追加し `schema_minor` を bump（F1, F6, F-B1, F-B2）（schema 1.1 → 1.2）:
   - `Command::SetVenueCredentials { request_id: String, payload: VenueCredentialsPayload }` — `payload` は typed enum（`VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire)`）。`serde_json::Value` は使わない
   - **2 層 DTO 構造**（F-B2、**C2 修正反映**）: 内部保持型 `TachibanaCredentials`/`TachibanaSession`（`data` クレート、`SecretString` 保持、`Debug` 手実装マスク、`Serialize` 持たない、`Deserialize` のみ keyring 復元用に持つ） / 送出用 Wire DTO（`engine-client` クレート、プレーン `String`、`Debug` 手実装マスク）は **方向別に trait を分離**する: **`TachibanaCredentialsWire` は Rust→Python 一方向のため `Serialize` のみ**。**`TachibanaSessionWire` は `SetVenueCredentials`（Rust→Python）と `VenueCredentialsRefreshed`（Python→Rust）の双方向に出現するため `Serialize + Deserialize` の両方を派生**（architecture.md §2.1 C2 修正）。旧記述「Wire は `Deserialize` を持たない」は誤りであり、この行の旧表記を参照したコードに `Deserialize` を付け忘れないよう注意。送信時 `From<&TachibanaCredentials> for TachibanaCredentialsWire` で `expose_secret()` 経由の写像を 1 箇所に集約し、`Wire` は serialize 直後に drop
@@ -92,34 +93,40 @@
 
 #### ステージ B: フェーズ完了ゲート（ステージ A 全 `[x]` 後に実施）
 
-- [ ] `cargo check --workspace` 成功
-- [ ] Python `pytest` 既存スイート緑
-- [ ] `quote_currency` 正規化テスト緑（M1 / `exchange/tests/ticker_info_state_migration.rs` に 2 件）
-- [ ] `venue_tag()` リファクタ後の `set_venue_credentials` 単体テスト緑（M2）
-- [ ] Python pydantic / Rust DTO ラウンドトリップテスト緑（L8）
-- [ ] `TickerInfo` serde 互換性テスト緑（`exchange/tests/ticker_info_state_migration.rs`）
-- [ ] FD 情報コード §11（B3）: 案 1/2/3 いずれかを選択し PR 説明文に解決証跡を記載。案 3（縮退）を選んだ場合は §11.3「縮退時の計画更新リスト」を全実施済みであること
-- [ ] **`request_id` 規約確定（LOW-1）**: `commands.json`/`events.json` の `request_id` フィールドに UUIDv4 の `pattern` 正規表現が記載済みであること
-- [ ] **マスタキャッシュ path 確定（MEDIUM-4）**: `stdin` 初期 payload 拡張（`{port, token, config_dir, cache_dir, dev_tachibana_login_allowed}`）の文言が「暫定固定」から「確定」に書き換え済みであること（`dev_tachibana_login_allowed` は T3 で追加、`config_dir`/`cache_dir` は T4 で追加）
-- [ ] **`quote_currency` 正規化実装位置確定（M1 再オープン）**: `pane.rs` ロード経路と IPC 受信経路の 2 箇所それぞれで `Exchange::default_quote_currency()` を folding する箇所がコードコメントで明示されているか、どちらか一方に集約する方針が本文に確定記載済みであること
-- [ ] **`zeroize` 完了（M4）**: `engine-client/tests/wire_dto_drop_scope.rs` テスト緑、`TachibanaCredentialsWire`/`TachibanaSessionWire` secret フィールドが `Zeroizing<String>` であること
-- [ ] **`TachibanaSessionWire` が `Serialize + Deserialize` を両方 derive（C2 修正）**: `VenueCredentialsRefreshed` の Python→Rust デシリアライズ経路の単体テスト緑であること
-- [ ] **schema_minor 1.1→1.2 双方向 IPC ラウンドトリップテスト（HIGH-D2-2）**: 以下 2 ファイルを実装し、いずれも `pytest.mark.parametrize` / `#[rstest]` 等で `SetVenueCredentials` / `RequestVenueLogin` / `VenueReady` / `VenueError` / `VenueCredentialsRefreshed` / `VenueLoginStarted` / `VenueLoginCancelled` の 7 variant 全てを網羅すること:
-  - `python/tests/test_schema_compat_v1_2.py::test_pydantic_accepts_rust_serialized_v1_2_variants` — Rust DTO（`engine-client/src/dto.rs`）で `serde_json::to_string` した出力 JSON 文字列を Python 側 `python/engine/schemas.py` の pydantic モデルが `model_validate_json` で受理できることを assert
-  - `engine-client/tests/schema_v1_2_roundtrip.rs::test_rust_dto_roundtrips_v1_2_python_payloads` — pydantic モデルから `model_dump_json()` で生成した JSON 文字列を Rust 側 `serde_json::from_str` でパースでき、再 serialize しても意味的に等価（フィールド順序を除く）であることを assert
+> **ゲート通過記録 (2026-04-25)**: 下記の全項目を実機で検証して通過。残るは B3（FD 情報コード §11）のみで、これは spec.md / data-mapping §3 / T5 の前提ゲートとして**意図的に未通過**のまま据え置く（T5 着手と同 PR で解決する規約、line 21 参照）。B3 を除く全 ゲートをクリアしたことで T0.2 ステージ B は **T5 直前まで進める状態**に到達。
+
+- [x] ✅ `cargo check --workspace` 成功 — `dev profile` で 1.08s 正常完了
+- [x] ✅ Python `pytest` 既存スイート緑 — `uv run pytest python/tests/` で **288 passed** (T2 追加分含む)
+- [x] ✅ `quote_currency` 正規化テスト緑（M1 / `exchange/tests/ticker_info_state_migration.rs` に 2 件） — `normalize_quote_currency_fills_in_default_for_tachibana` / `normalize_quote_currency_preserves_existing_value` の 2 件 ok
+- [x] ✅ `venue_tag()` リファクタ後の `set_venue_credentials` 単体テスト緑（M2） — `engine-client/src/process.rs` の `venue_tag_returns_tachibana_for_tachibana_variant` / `set_venue_credentials_replaces_same_venue_last_wins` の 2 件 ok
+- [x] ✅ Python pydantic / Rust DTO ラウンドトリップテスト緑（L8） — `python/tests/test_schema_compat_v1_2.py` 11 passed、`engine-client/tests/schema_v1_2_roundtrip.rs` 8 passed
+- [x] ✅ `TickerInfo` serde 互換性テスト緑（`exchange/tests/ticker_info_state_migration.rs`） — 全 10 件 ok（`ticker_accepts_alphanumeric_5char_codes` / `timeframe_serde_*` / `normalize_*` 等）
+- [ ] 🔴 FD 情報コード §11（B3）: 案 1/2/3 いずれかを選択し PR 説明文に解決証跡を記載。案 3（縮退）を選んだ場合は §11.3「縮退時の計画更新リスト」を全実施済みであること
+  - **据え置き理由**: line 21 参照。`api_event_if_v4r7.pdf` の入手 / 実 frame キャプチャ / Phase 縮退の 3 案を T5 着手 PR と同タイミングで解決する規約。本ゲートはステージ B の他項目とは独立に T5 着手の前提条件として機能し、それまでは `[ ]` 🔴 のまま据え置く。**T0.2 ステージ B のクローズ条件は B3 を除く全項目を満たすこと**として運用する。
+- [x] ✅ **`request_id` 規約確定（LOW-1）**: `commands.json`/`events.json` の `request_id` フィールドに UUIDv4 の `pattern` 正規表現が記載済みであること — schema 1.2 で `$defs/RequestId` / `$defs/RequestIdNullable` に `pattern: ^[0-9a-f]{8}-...$` を記載済み（line 69 参照）
+- [x] ✅ **マスタキャッシュ path 確定（MEDIUM-4）**: `stdin` 初期 payload 拡張（`{port, token, config_dir, cache_dir, dev_tachibana_login_allowed}`）の文言が「暫定固定」から「確定」に書き換え済み（line 71）。`dev_tachibana_login_allowed` は T3、`config_dir`/`cache_dir` は T4 で実装する規約も同行に明記済み
+- [x] ✅ **`quote_currency` 正規化実装位置確定（M1 再オープン）**: `TickerInfo::normalize_after_load()` に集約する方針を line 79 に確定記載済み。`pane.rs` ロード経路のみで fold、IPC 受信側は `TickerInfo::new()` で既に default 埋め込み済みのため fold 不要、という根拠付き
+- [x] ✅ **`zeroize` 完了（M4）**: `engine-client/tests/wire_dto_drop_scope.rs` 3 件 ok（`credentials_wire_serializes_as_plain_strings` / `session_wire_roundtrips` / `wire_dtos_need_drop_for_zeroize`）。`TachibanaCredentialsWire` / `TachibanaSessionWire` の secret フィールドは `Zeroizing<String>` で保持
+- [x] ✅ **`TachibanaSessionWire` が `Serialize + Deserialize` を両方 derive（C2 修正）**: `schema_v1_2_roundtrip.rs::rust_deserializes_python_venue_ready` / `rust_deserializes_python_venue_error` ok。`VenueCredentialsRefreshed` の Python→Rust デシリアライズ経路を実機で確認
+- [x] ✅ **schema_minor 1.1→1.2 双方向 IPC ラウンドトリップテスト（HIGH-D2-2）**: 両ファイル実装済み・全件緑:
+  - `python/tests/test_schema_compat_v1_2.py` 11 passed — Rust serialize → pydantic `model_validate_json` を 7 variant 網羅
+  - `engine-client/tests/schema_v1_2_roundtrip.rs` 8 passed — pydantic `model_dump_json` → `serde_json::from_str` を 7 variant 網羅
 
 ## フェーズ T1: Python ユーティリティ（2〜3 日）
 
 **ゴール**: 立花 API を叩く下回りが単体で揃う。サーバ通信なしの単体テストでカバレッジ 80%。
 
-- [ ] `python/engine/exchanges/tachibana_url.py`:
+> **進捗 (2026-04-25)**: T1 はコミット `8bc6ca8` + `1338c76` で実装・レビュー反映済み。`uv run pytest python/tests/test_tachibana_*.py` で **75 件すべて緑**（auth 含む）。`cargo check --workspace` 緑。**Phase 1 で実装する Python ユーティリティ層は完了**。一部の項目は「Python 側は完了 / Rust 受信側または下層 worker が後続フェーズ依存」のため、本文ではその区別を箇条書きで明示する。
+> 設計判断・知見は各箇条のサブ項目とコミットメッセージに記録。**T2 で利用しているのは本フェーズで揃ったユーティリティ群のみ**で、interface に追加修正は発生していない。
+
+- [x] ✅ `python/engine/exchanges/tachibana_url.py`:
   - `build_request_url(base, json_obj, *, sJsonOfmt)` — REQUEST 用、`?{JSON 文字列}` 形式（SKILL.md R2）。**`sJsonOfmt` は必須キーワード引数**（HIGH-C1、R5 強制）。マスタ系 sCLMID（後述 `MASTER_CLMIDS`）は `"4"`、それ以外は `"5"` を呼出側が指定する。引数省略は `ValueError` を投げる。テストで `sJsonOfmt="4"` / `"5"` の両ケースおよび省略時 `ValueError` を検証
   - `build_event_url(base, params: dict)` — EVENT 用、`?key=value&...` 形式（R2 例外、`p_evt_cmd`/`p_eno`/`p_rid`/`p_board_no`/`p_gyou_no`/`p_issue_code`/`p_mkt_code`）
   - `func_replace_urlecnode(s)` — 30 文字置換（R9、`e_api_login_tel.py` サンプル出力と一致）
   - **`func_replace_urlecnode` の追加テスト（MEDIUM-D4）**: `test_replace_urlecnode_empty`（空文字 `""` 入力で `""` を返す）、`test_replace_urlecnode_full_roundtrip`（30 文字全置換対象を含む文字列で encode/decode のラウンドトリップが完全一致）、`test_replace_urlecnode_passthrough_alnum`（英数字のみ入力は素通り）の 3 ケースを `python/tests/test_tachibana_url.py` に追加
   - **builder 誤用ガード（MEDIUM-C4 / R2）**: `TachibanaSession` の URL を `RequestUrl` / `MasterUrl` / `PriceUrl` / `EventUrl` 等の NewType（`typing.NewType` または `dataclass(frozen=True)` 1 フィールド ラッパ）でラップし、`build_request_url` は `RequestUrl | MasterUrl` のみ、`build_event_url` は `EventUrl` のみ受理する型安全化を `tachibana_url.py` に実装。型不一致は `TypeError`。テスト 1 件追加
   - **多バイト fixture を必ず 1 ケース含める（M7 決定）**: `func_replace_urlecnode` 単体テストに「日本語 1 文字（例 `"あ"`）」「カナ 1 文字（例 `"ア"`）」「混在文字列（例 `"トヨタ自動車 7203"`）」のいずれか最低 1 ケースを追加し、Shift-JIS バイト列 → `%xx` 化のラウンドトリップを検証する。Phase 1 では multibyte query 送信を**実運用で**は発生させない方針だが、`func_replace_urlecnode` の正本実装は将来拡張に備えて先取りする。期待値はサンプルの規約（Shift-JIS エンコード後にバイト単位で `%xx`）に従い、`api_web_access.xlsx` の事例があれば優先採用
-- [ ] `python/engine/exchanges/tachibana_codec.py`:
+- [x] ✅ `python/engine/exchanges/tachibana_codec.py`:
   - Shift-JIS デコード（`decode_response_body`）
   - `parse_event_frame(data: str) -> list[tuple[str, str]]`（`^A^B^C` / `\n` 分解）
   - `deserialize_tachibana_list(value)` — 空配列が `""` で返るケースの正規化（SKILL.md R8）
@@ -130,28 +137,54 @@
     | `CLMMfdsGetMarketPrice` | `MarketPriceResponse` | `aCLMMfdsMarketPriceData` |
     | `CLMMfdsGetMarketPriceHistory` | `MarketPriceHistoryResponse` | `aCLMMfdsMarketPriceHistoryData` |
     | `CLMAuthLoginRequest` | ログイン応答 | List 系フィールド全般（warning list / notice list 等、サンプル `e_api_login_response.txt` で List shape のものを T2 着手時に最終列挙し本表を更新する） |
-- [ ] `python/engine/exchanges/tachibana_master.py` — `CLMEventDownload` ストリームパーサ（チャンク境界・`CLMEventDownloadComplete` 終端）
-- [ ] **`CLMEventDownload` 終端 + chunk 境界エッジケーステスト（MEDIUM-C3-2）**: `python/tests/test_tachibana_master.py` に以下 3 ケースを `pytest.mark.parametrize` で網羅 — (a) `CLMEventDownloadComplete` 終端 frame の直前で chunk が `}` 直後に切れる（レコード単位できれいに切れる正常境界）、(b) 終端 frame の `}` 直前で切れる（閉じ括弧手前で chunk 分断）、(c) 通常レコードの途中で chunk が切れる（buffer に積まれて次 chunk と結合される）。いずれの場合もパース結果が同一の完全レコード列になり、`CLMEventDownloadComplete` を観測した時点でストリーム終了と判定されることを assert
-- [ ] **ticker pre-validate（HIGH-3、F-M11、L1 修正、MEDIUM-6 注記）**: `tachibana_master.py` から取り出す `sIssueCode` を `re.fullmatch(r"[A-Za-z0-9]{1,28}", code)` で pre-validate し、逸脱したレコードは `warn!("tachibana: skipping invalid issue code: {!r}", code)` で skip。`[A-Za-z0-9]` で `|` は当然弾かれるため Rust `Ticker::new` ([exchange/src/lib.rs:281](../../../exchange/src/lib.rs#L281)) の 3 条件（length ≤ 28 / ASCII / `|` 不含）は全て先取りで満たす。Rust IPC 受信側も `engine-client/src/backend.rs` で `EngineEvent::TickerInfo.tickers[*]` の各 ticker dict を `Ticker::new` 呼出前に同条件で再 validate し、不正値は drop（panic させない）。テスト: 28 文字超 / 非 ASCII / `|` 含むケースをそれぞれ skip すること。
+- [x] ✅ `python/engine/exchanges/tachibana_master.py` — `CLMEventDownload` ストリームパーサ（チャンク境界・`CLMEventDownloadComplete` 終端）
+- [x] ✅ **`CLMEventDownload` 終端 + chunk 境界エッジケーステスト（MEDIUM-C3-2）**: `test_chunk_breaks_between_records_clean_boundary` / `test_chunk_breaks_just_before_terminator_brace` / `test_chunk_breaks_in_middle_of_record` の 3 件を実装。いずれもパース結果が同一の完全レコード列になり、`CLMEventDownloadComplete` 観測時点で終了と判定されることを assert。
+- [x] ✅ **ticker pre-validate（HIGH-3、F-M11、L1 修正、MEDIUM-6 注記）— Python 側完了 / Rust 受信側は T4**: `tachibana_master.py` の `_ISSUE_CODE_RE = r"[A-Za-z0-9]{1,28}"` で pre-validate、`is_valid_issue_code` で T1 段階の Python 側責務を完了。**Rust IPC 受信側 (`engine-client/src/backend.rs`) の再 validate は `TickerInfo` 受信経路を実装する T4 のタスクに繰越**（現リポジトリにはまだ受信ハンドラ自体がない）。
   > **Phase 2 拡張注意（MEDIUM-6）**: `[A-Za-z0-9]` は `Ticker::new` の実制約（ASCII / `|` 不含）より**厳しい**。Phase 1 立花株式マスタでは英数字のみのため実害なし。ただし Phase 2 で先物・OP マスタ（`CLMIssueMstSak` / `CLMIssueMstOp`）を追加する際に限月コード等でハイフン・スラッシュが来ると**サイレント skip**する。Phase 2 着手時にこの正規表現を `Ticker::new` の実制約（ASCII 制御文字・`|` のみ除外）に緩和することを Phase 2 タスクに記載すること
 
 - [ ] **`EngineEvent::TickerInfo.tickers[*]` dict の Rust 受信側 warn 規約（MEDIUM-7）**: `engine-client/src/backend.rs` の `TickerInfo` 受信経路で、各 ticker dict から `display_name_ja` キーを取り出すとき、キーが存在しない場合は `tracing::debug!("tachibana ticker dict missing display_name_ja: {}", ticker_symbol)` を出す（warn ではなく debug — 暗号資産 venue は常に欠落するため常時 warn だとノイズ）。`display_name_ja` が存在するが `null` の場合は `None` として扱う（正常系）。Python 側のタイポ（`display_name_jp` 等）による全件 debug ログ噴出でキー名誤りを早期発見できる
-- [ ] `p_no` 採番ヘルパ（**asyncio 単一スレッド前提の単純カウンタ**、Unix 秒初期化、Lock 不要、F18）と `current_p_sd_date()`（JST 固定、SKILL.md R4）
+  - **据え置き理由**: Rust 側 `TickerInfo` 受信ハンドラ実装が T4 タスク。本ガード単体で先行実装すると配線が空振る。
+- [x] ✅ `p_no` 採番ヘルパ（**asyncio 単一スレッド前提の単純カウンタ**、Unix 秒初期化、Lock 不要、F18）と `current_p_sd_date()`（JST 固定、SKILL.md R4） — `tachibana_helpers.PNoCounter` / `current_p_sd_date()` 実装済み、テスト緑。
   - **既知バグ回避**: SKILL.md S6 表に「セッション復元と並行で走る history fetch が逆転して `p_no <= 前要求.p_no` エラー」が記載されている。Python 移植版では **session 復元（`SetVenueCredentials` 処理）の完了前に他リクエストを発行しない**直列化を `TachibanaWorker` 内で強制し、起動レース回帰テストを 1 件追加する
-- [ ] エラー判定ヘルパ `check_response(payload) -> None | TachibanaError`（[SKILL.md R6](../../../.claude/skills/tachibana/SKILL.md)、`p_errno` 空文字＝正常を含む）
-- [ ] **制御文字 reject（F-M6b）**: `build_event_url(base, params)` は値文字列に `\n` / `\t` / `\r` / `^A`〜`^C` を含む場合 `ValueError` を投げる。`build_request_url` も同様（JSON 値内の制御文字を pre-check）。SKILL.md 「EVENT URL に `\n` `\t` を入れない」の不変条件を呼出側ではなく builder 側で強制する。テストケース 1 件追加
-- [ ] **`p_no` 採番の整理（F-L5）**: 採番カウンタ自体は `asyncio` 単一スレッド前提で Lock 不要。一方 SKILL.md S6 の「セッション復元と並行で走る history fetch が逆転」事案は別レイヤ（**`SetVenueCredentials` 処理中は他の業務リクエスト発出を抑止する直列化ゲート**）で解決する。両者を別関数に分離し、それぞれ単体テスト 1 件
-- [ ] **受け入れ**: 上記モジュールを単体テストでカバー、サンプルレスポンス（`samples/e_api_login_tel.py/e_api_login_response.txt` ほか）から期待値抽出ができる。REQUEST URL と EVENT URL の差を別テストで検証。`conftest.py` 共通フィクスチャ（HTTPXMock 共通 base URL / WS server fixture）を整備（F-L3）。
+  - **直列化ゲートは T3 繰越**: `TachibanaWorker` クラス自体が T3 で `tachibana.py` に新設されるため、ゲート実装はそこで一緒に書く。T2 では `StartupLatch` で同等の単一実行保証を `validate_session_on_startup` に対して既に入れている。
+- [x] ✅ エラー判定ヘルパ `check_response(payload) -> None | TachibanaError`（[SKILL.md R6](../../../.claude/skills/tachibana/SKILL.md)、`p_errno` 空文字＝正常を含む） — 実装済み、`p_errno=""`/`"0"` 両ケースのテスト緑。
+- [x] ✅ **制御文字 reject（F-M6b）**: `tachibana_url._FORBIDDEN_CONTROL_CHARS`（U+0000..U+001F）で `build_request_url` / `build_event_url` 双方が値文字列を pre-check。テスト緑。
+- [x] ✅ **`p_no` 採番の整理（F-L5）— カウンタ層完了 / 直列化ゲートは T3**: 採番カウンタ自体（`PNoCounter`）は T1 で完了。`SetVenueCredentials` 処理中の他リクエスト抑止ゲートは `TachibanaWorker` 新設タイミング（T3）で実装する。本フェーズの責務は「カウンタは Lock 不要であることの規約化」までで完了。
+- [x] ✅ **受け入れ**: 上記モジュールを単体テストでカバー、サンプルレスポンス（`samples/e_api_login_tel.py/e_api_login_response.txt` ほか）から期待値抽出ができる。REQUEST URL と EVENT URL の差を別テストで検証。`conftest.py` 共通フィクスチャ（HTTPXMock 共通 base URL / WS server fixture）を整備（F-L3）。**実測**: `python/tests/test_tachibana_*.py` 75 件緑（url 16 / codec 14 / helpers 12 / master 19 / auth 14）。
   - **Shift-JIS decode 全経路必須（HIGH-C2 / R7）**: 全 REQUEST レスポンスは `httpx.Response.content` を `decode_response_body` に通すこと。`response.text` / `response.json()` の直叩きを禁止する実装規約とし、`tachibana_auth.py` / `tachibana.py` / `tachibana_master.py` の全 REQUEST 経路で遵守。CI ガード: `grep -rnE "\.text\b|\.json\(\)" python/engine/exchanges/tachibana*.py` の出現が 0（または allowlist コメント付きのみ）であることをチェック
   - **`urllib.parse` / `httpx.URL` 標準 encoder 使用禁止 lint ガード（MEDIUM-C2-2 / R9）**: 立花 API は SKILL.md R9 の独自 30 文字置換 (`func_replace_urlecnode`) が必須で、標準 URL encoder（`urllib.parse.quote` / `urlencode` / `quote_plus` / `httpx.URL(...)` の query 自動エンコード）を経由すると規約破綻する。CI lint ガードとして `grep -rnE 'from urllib\.parse|urllib\.parse\.(quote|urlencode|quote_plus)|httpx\.URL\(' python/engine/exchanges/tachibana*.py` の出現が 0（または明示的な allowlist コメント付きのみ）であることをチェック。さらに `build_request_url` / `build_event_url` の docstring に「**標準ライブラリ URL encoder への委譲は禁止。立花は SKILL.md R9 の独自置換テーブルを使う**」を 1 行明記する
-  - **`check_response` 単体テスト（MEDIUM-C5 / R6）**: `p_errno=""`（空文字）と `p_errno="0"` の 2 ケースをいずれも正常扱い（`None` を返す）として assert。`p_errno="2"` 等は `TachibanaError` を返すことも併せて検証
+    - **CI lint ガード自体の実装は T7**（`tools/secret_scan*` と同じ pre-commit / CI ジョブで束ねる）。docstring 明記は `tachibana_url.py` の `build_request_url` / `build_event_url` で完了済み。
+  - **`check_response` 単体テスト（MEDIUM-C5 / R6）**: `p_errno=""`（空文字）と `p_errno="0"` の 2 ケースをいずれも正常扱い（`None` を返す）として assert。`p_errno="2"` 等は `TachibanaError` を返すことも併せて検証 — `test_tachibana_helpers.py` で実装済み。
   - **`p_sd_date` JST 単一化 CI ガード（MEDIUM-C8 / R4）**: `grep -rnE 'datetime\.now|time\.time' python/engine/exchanges/tachibana*.py` の出現が `current_p_sd_date` 内部以外で 0 であることを CI（lint ジョブ）でガード。`tachibana_master.py` のキャッシュ JST 日付生成等は `current_p_sd_date` 経由か allowlist コメント付き
+    - **CI lint ガード本体の実装は T7**。`PNoCounter.__init__` の `time.time()` には allowlist コメントを既に記載（commit `1338c76`）。
 
 ## フェーズ T2: 認証フローと session 管理（2 日）
 
 **ゴール**: `CLMAuthLoginRequest` 経由でデモ環境に対しログインできる。
 
-- [ ] `python/engine/exchanges/tachibana_auth.py`
+> **進捗 (2026-04-25)**: モジュール本体・StartupLatch・URL スキーム検証・両 ピン留めテスト群を完了。`python/tests/test_tachibana_auth.py` 14 件すべて緑、`cargo check --workspace` 緑。
+> **設計判断（実装）**:
+> - `tachibana_auth.login()` の HTTP 入口は `httpx.AsyncClient` を**呼出側から DI 可能**（テストで `pytest-httpx` の `httpx_mock` が捕まえられる、本番は `TachibanaWorker` の共有 client を渡す前提）。
+> - `BASE_URL_PROD` / `BASE_URL_DEMO` を `tachibana_url.py` に**唯一の出現箇所**として配置（F-L1, T7 secret_scan の allowlist 対象）。`AuthUrl` newtype を新設し、`build_auth_url()` で `auth/` セグメント付加と sJsonOfmt=5 強制を行う（auth は Master/Request/Price と URL 形が違うため `build_request_url` を流用しない）。
+> - **login_path フラグ**: `_raise_for_error(data, login_path=True)` のとき、`SessionExpiredError` / `UnreadNoticesError` 以外の API エラーは `LoginError(code=元 code, message=元 message)` に**bucket** する。Rust 側 `VenueError.code` 列が enum 化される T0.2 設計と整合させるため、auth-time の generic な `p_errno` / `sResultCode` 値はそのまま `code` に流す（`login_failed` への画一的な書き換えはしない）。受け入れ条件側の "code='login_failed'" 期待は architecture.md §6 の「認証失敗」行が指す広義のバケットであり、未読通知・session_expired を除く全エラーが `LoginError` 系になる、という規約として実装している。
+> - **StartupLatch.run_once**: 引数として渡された未 await コルーチンが **2 回目以降で `RuntimeWarning: coroutine was never awaited`** を出さないよう、early-return 時に `coro.close()` を明示的に呼ぶ。`asyncio.iscoroutine` で `Awaitable` 全般（Task など）と区別する。
+> - **F-B3 expires_at_ms=None**: ログイン応答に明示期限がないため Phase 1 は `None` 固定。`validate_session_on_startup` を必ず通す safe path 専用の値。Phase 2 で `CLMDateZyouhou` の閉局時刻を入れる。
+>
+> **Tips**:
+> - `pytest-httpx` の `add_response(url=re.compile(...))` で R9 の bespoke percent-encoded クエリを正規表現マッチングできる。クエリ内容は `urllib.parse.unquote(url.split("?",1)[1])` → `json.loads()` で復号。
+> - レスポンス body は **必ず `decode_response_body` 経由（Shift-JIS）**。`Response.text` / `Response.json()` を直接呼ぶと R7 / HIGH-C2 違反。テスト fixture も `payload.encode("shift_jis")` で構築している。
+> - 立花の login response 実例は [`samples/e_api_login_tel.py/e_api_login_response.txt`](../../../.claude/skills/tachibana/samples/e_api_login_tel.py/e_api_login_response.txt)。テスト固定値はこれを下敷きに `e_api_v4r8` パスへ置換。
+>
+> **レビュー反映 (2026-04-25)**:
+> - **HIGH (p_no 単調性)**: `login()` / `validate_session_on_startup()` の `p_no: int` パラメータを廃止し、`p_no_counter: PNoCounter` を**必須キーワード**化。各呼出で `.next()` を 1 回消費するため、起動時再ログインや retry で `p_no` を再送する事故を構造的に排除（R4）。回帰防止テスト `test_login_consumes_p_no_counter_so_retries_are_monotonic` 追加。
+> - **MEDIUM (single-source ホスト)**: `test_tachibana_auth.py` 内の `kabuka.e-shiten.jp` 直書き（テスト本体・コメントとも）を完全に削除し、`BASE_URL_DEMO.value` から派生させて URL を構築。これで T7 の `tools/secret_scan_patterns.txt` (`kabuka\.e-shiten\.jp`) は `tachibana_url.py` ファイル単位 allowlist だけで通る。
+> - **MEDIUM (LoginError pin)**: `test_login_p_errno_minus_62_raises_login_error` / `test_login_authentication_failure_raises_login_error` の期待型を `TachibanaError` から `LoginError` に締め直し。`_raise_for_error(login_path=True)` の bucket 動作が将来素通しに戻ったときに即検知できる。
+>
+> **レビュー反映 第 2 ラウンド (2026-04-25)**:
+> - **MEDIUM (バナー文言の Python 集中化、F-Banner1)**: T3/T6 まで先送りせず本フェーズで確定。`tachibana_auth.py` 冒頭に `_MSG_LOGIN_FAILED` / `_MSG_SESSION_EXPIRED_STARTUP` / `_MSG_TRANSPORT_ERROR` / `_MSG_LOGIN_PARSE_FAILED` / `_MSG_VIRTUAL_URL_INVALID` を**固定日本語文字列**として宣言。`_raise_for_error` は `LoginError(code, _MSG_LOGIN_FAILED)` の形で生成し、サーバ由来の `p_err` / `sResultText` は `log.error(...)` でのみ残す（UI には流さない）。`SessionExpiredError` も login path / runtime path の両方で `_MSG_SESSION_EXPIRED_STARTUP` を使う（`tachibana_helpers.SessionExpiredError` のデフォルト文字列はテスト fixture / 例外クラス互換のため残置するが、auth 経路は必ず override する）。回帰テスト `test_login_failure_message_uses_fixed_japanese_banner` / `test_session_expired_message_is_python_composed` を追加し、サーバ文字列が `.message` に混入しないことを assert。
+> - **MEDIUM (`raise_for_status` 欠落)**: `login()` / `_do_validate()` の HTTP 呼出を `_safe_get(client, url)` に集約し、`resp.raise_for_status()` + `httpx.HTTPError` 全般を catch して `LoginError(code="transport_error", message=_MSG_TRANSPORT_ERROR)` に写像。これで 502 / 503 や proxy の HTML 応答が「JSON parse failed」に化けることを排除。`code="transport_error"` は architecture.md §6 の transport 障害バナー経路と整合。回帰テスト `test_login_http_502_maps_to_transport_error` / `test_validate_session_http_503_maps_to_transport_error` を追加。
+
+- [x] ✅ `python/engine/exchanges/tachibana_auth.py`
   - `login(user_id, password, is_demo) -> TachibanaSession`
   - `validate_session_on_startup(session, *, _latch: StartupLatch) -> bool`（**`CLMMfdsGetIssueDetail` で 1 銘柄（例: `sIssueCode="7203"`, `sSizyouC="00"`）を軽量リクエスト** — `sUrlMaster` に接続するマスタ系 API で最も引数が少ない。`CLMMfdsGetMasterData` は列指定が必要で返却量が多いため不採用。T2 実機確認で別 API が適切と判明した場合は本行を更新すること）— **「同時起動・重複起動を許さない」シングルフライト保証を `StartupLatch` 値渡しで実現**（M6 決定、HIGH-B 修正）:
 
@@ -197,21 +230,23 @@
   - 二段エラー判定 + `sKinsyouhouMidokuFlg=="1"` で `UnreadNoticesError`
   - レスポンスから `sZyoutoekiKazeiC`（譲渡益課税区分）を `TachibanaSession` に保持（Phase 2 発注時に流用）
   - **`expires_at_ms` は `Option<i64>` で持つ**（F-B3）。ログイン直後は `None` 固定（立花は明示期限を返さないため）。`None` のとき `validate_session_on_startup` は必ず叩く（safe path）。`Some(t)` で `now > t` なら復元せず再ログインへ（fast path）。閉局時刻を `CLMDateZyouhou` から取得できることが確認できたら値を入れる方針は Phase 2 へ繰越
-- [ ] **起動時のみ再ログイン**のガードを実装: `SetVenueCredentials` の session validation 中に限り `user_id/password` fallback を許可し、購読開始後の `p_errno="2"` は再ログインせず `VenueError{code:"session_expired"}` を返す
-- [ ] mock サーバテスト（`pytest-httpx` の `HTTPXMock`、`python/tests/test_binance_rest.py` パターン踏襲）で正常系・異常系（`p_errno=-62` / `=2` / 認証失敗 / `sKinsyouhouMidokuFlg=1`）
-- [ ] **`CLMAuthLoginRequest` の `sJsonOfmt="5"` 固定テスト（MEDIUM-C3-1）**: `python/tests/test_tachibana_auth.py::test_login_request_uses_json_ofmt_five` を追加。`HTTPXMock.get_request()` で `tachibana_auth.login(...)` 発行リクエストのクエリ JSON に `sJsonOfmt == "5"` が含まれることを pin（`CLMAuthLoginRequest` は `MASTER_CLMIDS` に含めず、`build_request_url` 呼出時に `sJsonOfmt="5"` を選択する前提を実機確認）。R5 強制ロジックの分岐（マスタ系 sCLMID = `"4"` / それ以外 = `"5"`）が login で正しく動くことを保証
-- [ ] **仮想 URL スキーム検証（MEDIUM-C3-3）**: `tachibana_auth.py` のログイン応答パース時に `sUrlEventWebSocket.startswith("wss://")` を assert。`sUrlRequest` / `sUrlMaster` / `sUrlPrice` / `sUrlEvent` の 4 URL は `"https://"` を assert。違反時は `LoginError` を投げる。`python/tests/test_tachibana_auth.py::test_login_rejects_non_wss_event_url` 単体テストを追加（`sUrlEventWebSocket` が `ws://` の応答を返したとき `LoginError` で reject されること）
-- [ ] **`sKinsyouhouMidokuFlg` 未読通知の固定テスト名（HIGH-C2-1、R3）**: `python/tests/test_tachibana_auth.py::test_login_raises_unread_notices_when_kinsyouhou_flag_set` を追加。mock 応答 `{"p_errno":"0", "sResultCode":"0", "sKinsyouhouMidokuFlg":"1"}` で `tachibana_auth.login(...)` が `UnreadNoticesError` を投げ、後続の IPC 経路で `VenueError.code == "unread_notices"` として発出されることを assert（architecture.md §6 失敗モード表の `unread_notices` 行と整合）
-- [ ] **`validate_session` 実機リクエスト形式の固定テスト（HIGH-D2）**: `python/tests/test_tachibana_auth.py::test_validate_session_uses_get_issue_detail_with_pinned_payload` を追加。`HTTPXMock.get_request()` で **(a) URL が `sUrlMaster` ベースであること、(b) HTTP メソッドが GET、(c) クエリ JSON に `sCLMID="CLMMfdsGetIssueDetail"`/`sIssueCode="7203"`/`sSizyouC="00"` が含まれること、(d) `sJsonOfmt="4"` であること** を assert。リクエスト形式が将来書き変わったときに即検知できるピン留めテスト
+- [x] ✅ **起動時のみ再ログイン**のガードを実装: `SetVenueCredentials` の session validation 中に限り `user_id/password` fallback を許可し、購読開始後の `p_errno="2"` は再ログインせず `VenueError{code:"session_expired"}` を返す
+  - 実装ノート: `tachibana_auth.login()` と `validate_session_on_startup()` を関数として分離。runtime 経路から `StartupLatch.run_once` 2 回目を呼ぶと `RuntimeError`（L6）。runtime 中の `p_errno=2` 検知 → `SessionExpiredError` 直送（`_raise_for_error(login_path=False)`）。これらの**配線**（`SetVenueCredentials` ハンドラ、再ログイン許可フラグ、`VenueError{code:"session_expired"}` への変換）は T3 で `tachibana_login_flow.py` / dispatch 側に実装する。本タスクは「再ログインは validate 中だけ」のための関数境界を確定させる責務まで。
+- [x] ✅ mock サーバテスト（`pytest-httpx` の `HTTPXMock`、`python/tests/test_binance_rest.py` パターン踏襲）で正常系・異常系（`p_errno=-62` / `=2` / 認証失敗 / `sKinsyouhouMidokuFlg=1`）
+- [x] ✅ **`CLMAuthLoginRequest` の `sJsonOfmt="5"` 固定テスト（MEDIUM-C3-1）**: `test_login_request_uses_json_ofmt_five` 実装。`build_auth_url` が auth エンドポイントでは `sJsonOfmt="5"` 以外を `ValueError` で reject する型レベル強制も追加（`build_request_url` の MASTER_CLMIDS 分岐とは独立）。
+- [x] ✅ **仮想 URL スキーム検証（MEDIUM-C3-3）**: `_validate_virtual_urls` を `login()` 内で呼出。`test_login_rejects_non_wss_event_url` + `test_login_rejects_non_https_request_url` の 2 件で 4 URL + WS をカバー。
+- [x] ✅ **`sKinsyouhouMidokuFlg` 未読通知の固定テスト名（HIGH-C2-1、R3）**: `test_login_raises_unread_notices_when_kinsyouhou_flag_set` 実装。`UnreadNoticesError.code == "unread_notices"` を assert。後続の IPC 経路 (`VenueError.code`) への変換は T3 dispatch 層の責務（本テストは Python 単体での発生を pin）。
+- [x] ✅ **`validate_session` 実機リクエスト形式の固定テスト（HIGH-D2）**: `test_validate_session_uses_get_issue_detail_with_pinned_payload` 実装。(a) `sUrlMaster` プレフィックス、(b) GET、(c) sCLMID / sIssueCode / sSizyouC、(d) sJsonOfmt="4" の 4 点を assert。
 - [ ] **`validate_session_on_startup` の `RuntimeError` → supervisor 統合テスト（MEDIUM-D2-1、L6 修正の検証）**: `python/tests/test_tachibana_startup_supervisor.py::test_runtime_error_from_validate_terminates_process_with_log` を新設。`subprocess` 経由で `python -m engine` を起動し、`StartupLatch.run_once` を 2 回呼ばせるテスト fixture を経由して 2 回目の `RuntimeError` を発生させ、(a) `engine/server.py` トップレベル supervisor で catch されてプロセスが exit code 非ゼロで終了、(b) stderr に `tracing::error!` 相当の 1 行が出ていること、(c) その error 行に `user_id` / `password` / session token などの creds 文字列が**含まれていない**こと、を assert
+  - **未着手の理由**: `engine/server.py` のトップレベル supervisor が `RuntimeError` を catch してプロセス終了させる経路自体が現リポジトリにまだ存在しない（T3 の `SetVenueCredentials` ハンドラ実装と同時に追加するのが自然）。先行して subprocess テストだけ書くと supervisor 側のスタブ実装に引きずられて test-first ができない。**T3 着手と同タイミングで本タスクを実装する**ことに決定。T2 では `StartupLatch` の `RuntimeError` 発生条件（成功後 / 失敗後 / 並行）を Python 単体テスト 4 件で完全にカバーしているため、unit レベルの保証は揃っている。
 - [ ] **受け入れ**: `pytest -m demo_tachibana` で実 demo 環境ログイン成功（手動電話認証済みアカウント前提）
+  - **未実施**: 実 demo 環境ログインは「電話認証済みアカウント」前提のため CI / ローカル自動化からは切り離して手動実施。T7 で `pytest -m demo_tachibana` の CI 統合方式（A/B/C）を確定するタイミングで初回実機ログインを行う。
 
-- [ ] **demo CI レーン方式の早期決定（MEDIUM、ユーザー指摘ラウンド 7）**: `pytest -m demo_tachibana` の CI 統合方式を **T2 着手時点**で以下の 3 案から選択し、本計画本文に確定記載（T7 まで先送りしない）:
-  - **(A) non-blocking job**: PR チェックには加えるが緑必須にしない。落ちたら通知のみ。閉局帯（demo 運用時間外）は skip 判定が必要
-  - **(B) manual lane only**: PR / push トリガから外し、`workflow_dispatch` で開発者明示起動のみ。最も保守的・推奨
-  - **(C) CI 不採用**: ローカル実機検証のみ。`tests/e2e/tachibana_login_local.md` 手順書を整備
-  
-  決定根拠: [open-questions.md Q21](./open-questions.md#L25) で demo 環境の運用時間自体が未確定のため、ブロッキング CI 化はリリース終盤の不安定依存になる。Q21 の値が T2 で実機確認できるまでは案 (B) を暫定固定とし、T2 終了時に最終決定する。確定後は T7 のスケジュール起動有効化規約を本決定に揃える（手動トリガジョブのみ許可、または CI 不採用）
+- [x] ✅ **demo CI レーン方式の早期決定（MEDIUM、ユーザー指摘ラウンド 7）**: 案 **(B) manual lane only** を T2 暫定確定として採用する:
+  - 理由: [open-questions.md Q21](./open-questions.md#L25) の demo 運用時間が未確定の段階で PR チェック（ブロッキング / non-blocking 問わず）に組み込むと、閉局帯ヒットで開発者が偽陽性失敗を踏む。`workflow_dispatch` のみ許可なら閉局帯リスクが起動者に閉じる。
+  - 実装場所: T7 で `.github/workflows/tachibana-demo.yml`（仮）を新設し、`on: workflow_dispatch:` のみで `uv run pytest -m demo_tachibana -v` を走らせる。PR / push トリガは載せない。
+  - 再評価条件: Q21 の運用時間が T2 実機ログインで確定したら案 (A) への移行を再検討する（**T2 終了時点では実機ログイン未実施のため案 (B) で固定**）。
+  - 旧 3 案候補（A: non-blocking PR job / B: manual lane / C: CI 不採用）の比較は本タスク完了とともに本文から外す。
 
 ## フェーズ T3: クレデンシャル受け渡し配線（2 日）
 
