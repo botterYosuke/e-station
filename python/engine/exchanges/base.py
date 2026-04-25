@@ -26,6 +26,17 @@ class ExchangeWorker(ABC):
     subprocesses, only this interface needs to change.
     """
 
+    async def prepare(self) -> None:
+        """Eagerly initialize HTTP client + perform any cold-start work.
+
+        Called once during the handshake `_handshake` before the engine emits
+        `Ready` to the client. Workers should ensure that `list_tickers`,
+        `fetch_ticker_stats`, `fetch_klines`, etc. can be served immediately
+        on the next event-loop tick. Default is a no-op for workers that have
+        nothing to warm up (e.g. test stubs).
+        """
+        return None
+
     @abstractmethod
     async def set_proxy(self, url: str | None) -> None:
         """Apply a new proxy URL, closing any open HTTP client."""

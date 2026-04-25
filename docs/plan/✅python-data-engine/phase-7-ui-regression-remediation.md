@@ -47,8 +47,8 @@
 
 #### T1.2 象限別の修復
 
-- [ ] **(a) の場合** — handshake 完了前に `ListTickers` が送られている疑い。`EngineConnection` が `Ready` を受信してから metadata fetch を発火するよう `Sidebar::new` の初期 Task をゲート。具体的には `main.rs:476` の `chain(launch_sidebar...)` を `ENGINE_READY` watch 経由の `Subscription` にぶら下げる形に変更する設計を検討。
-- [ ] **(b) の場合** — Python ワーカーの HTTP クライアントが Ready 発行時点でまだウォームアップ済みでない。`engine/server.py` の `_do_handshake` で全 worker の `prepare()` を `await` してから `Ready` を送るよう修正。
+- [ ] **(a) の場合** — handshake 完了前に `ListTickers` が送られている疑い。`EngineConnection` が `Ready` を受信してから metadata fetch を発火するよう `Sidebar::new` の初期 Task をゲート。具体的には `main.rs:476` の `chain(launch_sidebar...)` を `ENGINE_READY` watch 経由の `Subscription` にぶら下げる形に変更する設計を検討。 *(skipped: 根本原因は (c) で解消済み。残課題なし)*
+- [x] **(b) の場合** ✅ (2026-04-25) — T2 として予防的に実装。`engine/server.py` の `_handshake` が `Ready` 送出前に `await asyncio.gather(*(w.prepare() for w in workers))` を 20s タイムアウトで実行する。各 worker は `prepare()` で `httpx.AsyncClient` を eager 初期化。回帰テスト `test_handshake_calls_worker_prepare_before_ready` を追加。
 - [x] **(c) の場合** ✅ (2026-04-25) — 確定原因は ASCII フィルタではなく `TickerStats` の serde 型不整合だった。[exchange/src/lib.rs:660](../../exchange/src/lib.rs#L660) の `daily_price_chg: f32` に `de_f32_from_number_or_string` カスタム deserializer を追加。[exchange/src/serde_util.rs](../../exchange/src/serde_util.rs) に helper を実装。`TickerStats` に 2 件の回帰テスト（`daily_price_chg_accepts_stringified_number` / `daily_price_chg_accepts_json_number`）を追加。Python 側 (`binance.py:472` 他 4 venue) の `str(...)` 送出はそのまま許容する方針（IPC スキーマは number or string の両方を受理できるよう lenient に）。
 - [ ] **(d) の場合** — [tickers_table.rs:327-332](../../src/screen/dashboard/tickers_table.rs#L327-L332) の `build_stats_fetch_task` ゲート条件（`selected_exchanges.contains(&venue)`）と、`MetadataFetchState` の pending セットが `selected_exchanges` と一致するかを確認。
 
@@ -63,11 +63,10 @@
 
 spec §4.5 は Hello/Ready の順序を固定しているが、**"Ready 発行時点で worker が業務リクエストを受理できること"** は未規定。
 
-- [ ] spec §4.5 に以下を追記:
-  > Python engine は `Ready` を送る前に、全 worker の REST/HTTP クライアント初期化（`aiohttp.ClientSession` 等）を完了しなければならない。`ListTickers` / `FetchTickerStats` / `FetchKlines` は `Ready` 受信直後から即時受理可能とする。
-- [ ] Python: `engine/server.py` の handshake で `await asyncio.gather(*(w.prepare() for w in workers))` を追加。各 worker に `async def prepare(self)` を生やし、`ClientSession` の構築 + DNS 事前解決までを行う。
-- [ ] Rust: `EngineConnection` に `wait_ready()` API を追加し、`AdapterHandles` 経由のあらゆる fetch 系呼び出しが `Ready` 到着を待ってから送信できるようにする。タイムアウトは 20 秒（Phase 6 の onefile cold-start を考慮）。
-- [ ] `engine-client/tests/` に「Ready 前 fetch は待機する」テストを追加。
+- [x] spec §4.5 に追記済み (2026-04-25): `Ready` 発行前提条件として全 worker の HTTP クライアント初期化完了を明文化。
+- [x] Python: `engine/server.py` の handshake で `await asyncio.gather(*(w.prepare() for w in workers))` を実装。各 worker に `async def prepare(self)` を追加し `_http()` を eager 初期化。20s タイムアウト + 警告ログでフォールバック。
+- [x] Rust: `EngineConnection::wait_ready()` を追加。現状 `connect()` が `Ready` 受領まで block する不変条件を持つため API は no-op。`AdapterHandles` がこの不変条件に依存していることをドキュメントするための明示的 API。
+- [x] Python 側に「Ready 前 prepare 完了」回帰テストを追加 (`test_handshake_calls_worker_prepare_before_ready`)。Rust 側は `connect()` 自体が `Ready` 待ちなので別途テスト不要。
 
 ### T3. UI 経路 E2E スモークテスト (Priority: High)
 

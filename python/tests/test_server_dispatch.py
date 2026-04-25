@@ -66,6 +66,7 @@ async def running_server(unused_tcp_port):
 
 def _make_mock_worker():
     worker = MagicMock()
+    worker.prepare = AsyncMock(return_value=None)
     worker.list_tickers = AsyncMock(return_value=[{"symbol": "BTCUSDT"}])
     worker.fetch_klines = AsyncMock(return_value=[])
     worker.fetch_open_interest = AsyncMock(return_value=[])
@@ -103,6 +104,17 @@ def unused_tcp_port():
 async def test_handshake_returns_ready(running_server):
     port, token, _ = running_server
     ws = await _connect_and_handshake(port, token)
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_handshake_calls_worker_prepare_before_ready(running_server):
+    """Spec §4.5 contract: workers must be warmed up before Ready is emitted."""
+    port, token, mock_worker = running_server
+    ws = await _connect_and_handshake(port, token)
+    # By the time the client receives Ready, prepare() must already have been
+    # awaited so the next op (e.g. ListTickers) can be served immediately.
+    mock_worker.prepare.assert_awaited()
     await ws.close()
 
 

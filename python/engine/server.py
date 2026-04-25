@@ -216,6 +216,20 @@ class DataEngineServer:
                 await self._cancel_all_streams()
             self._current_conn = ws
 
+        # Spec §4.5: warm every worker's HTTP client before announcing Ready,
+        # so the client may issue list_tickers / fetch_ticker_stats / fetch_klines
+        # immediately on the next event-loop tick without races against lazy
+        # ClientSession construction. Capped at 20 s to bound cold-start latency.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(w.prepare() for w in self._workers.values())),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning("Worker prepare() timed out after 20s; emitting Ready anyway")
+        except Exception as exc:
+            log.warning("Worker prepare() raised: %s; emitting Ready anyway", exc)
+
         ready = Ready(
             schema_major=SCHEMA_MAJOR,
             schema_minor=SCHEMA_MINOR,

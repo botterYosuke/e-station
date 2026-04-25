@@ -148,6 +148,7 @@ session ID の用語と型（混同防止）:
    - `token` は §4.1.1 で渡したランダム接続トークン。Python は不一致なら即切断。
 2. **Python → Rust: `Ready` もしくは `EngineError`**
    - `Ready` フィールド: `{schema_major: u16, schema_minor: u16, engine_version: str, engine_session_id: uuid, capabilities: {supported_venues: [...], supports_bulk_trades: bool, supports_depth_binary: bool, ...}}`。
+   - **`Ready` 発行前提条件 (Phase 7 追加)**: Python engine は `Ready` を送る前に、全 worker の HTTP クライアント (`httpx.AsyncClient` 等) 初期化を完了しなければならない。これにより `ListTickers` / `FetchTickerStats` / `FetchKlines` 等は `Ready` 受領直後から即時受理可能となる。サーバ実装は `await asyncio.gather(*(w.prepare() for w in workers))` を 20 秒タイムアウトで実行する。タイムアウト時は警告ログを残しつつ `Ready` を送出し、後続 fetch のエラーで個別判断する。
 3. **Rust → Python: `SetProxy`（必要時のみ）**
    - `Ready` 受領後に送る。
 4. **Rust → Python: マーケットデータ系コマンド**（`Subscribe` 等）。

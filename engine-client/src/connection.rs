@@ -95,6 +95,16 @@ impl EngineConnection {
         self.events.subscribe()
     }
 
+    /// Resolves once the engine has emitted `Ready`. Today this is a synchronous
+    /// invariant — `connect()` only returns after `perform_handshake` has
+    /// observed `Ready` — but exposing it as an explicit API lets callers
+    /// (`AdapterHandles`, fetch wrappers) document the dependency on the spec
+    /// §4.5 handshake contract without leaking that invariant. Safe to call
+    /// any number of times.
+    pub async fn wait_ready(&self) -> Result<(), EngineClientError> {
+        Ok(())
+    }
+
     /// Resolves once the underlying WebSocket read loop exits (remote close or IO error).
     ///
     /// Use this in `ProcessManager::run_with_recovery` instead of waiting for

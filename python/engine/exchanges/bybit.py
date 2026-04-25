@@ -255,6 +255,9 @@ class BybitWorker(ExchangeWorker):
                 log.warning("Error closing httpx client: %s", exc)
             self._client = None
 
+    async def prepare(self) -> None:
+        await self._http()
+
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             async with self._http_lock:

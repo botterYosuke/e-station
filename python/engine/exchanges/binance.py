@@ -300,6 +300,9 @@ class BinanceWorker(ExchangeWorker):
             )
         return self._client
 
+    async def prepare(self) -> None:
+        await self._http()
+
     async def _get_json(self, url: str, weight: int = 1) -> Any:
         await self._limiter.acquire_rest(weight)
         client = await self._http()
