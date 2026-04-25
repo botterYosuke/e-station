@@ -247,10 +247,30 @@ fn main() {
         // second listener in main.rs would re-introduce the load→set ABA
         // race the reviewer flagged.
         rt.block_on(manager.set_on_venue_credentials_refreshed(Box::new(
-            move |session_wire| {
+            move |refresh| {
                 let session: data::config::tachibana::TachibanaSession =
-                    session_wire.into();
-                data::config::tachibana::update_session_in_keyring(&session);
+                    refresh.session.into();
+                // When Python supplies the full credential triple
+                // (current schema), persist all four fields. When only
+                // `session` is present (legacy emitter), splice it into
+                // the existing keyring entry to preserve user_id /
+                // password / is_demo. Without this branch, an account
+                // switch / demo↔prod toggle / password change in the
+                // dialog never reaches the keyring, and the next cold
+                // start fast-paths with stale credentials.
+                match (refresh.user_id, refresh.password, refresh.is_demo) {
+                    (Some(user_id), Some(password), Some(is_demo)) => {
+                        data::config::tachibana::save_refreshed_credentials(
+                            user_id,
+                            password.to_string(),
+                            is_demo,
+                            session,
+                        );
+                    }
+                    _ => {
+                        data::config::tachibana::update_session_in_keyring(&session);
+                    }
+                }
             },
         )));
 

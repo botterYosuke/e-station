@@ -78,7 +78,7 @@ fn rust_deserializes_python_venue_credentials_refreshed() {
     let json = python_dump("VenueCredentialsRefreshed");
     let ev: EngineEvent = serde_json::from_str(&json).unwrap();
     match ev {
-        EngineEvent::VenueCredentialsRefreshed { venue, session } => {
+        EngineEvent::VenueCredentialsRefreshed { venue, session, .. } => {
             assert_eq!(venue, "tachibana");
             assert_eq!(session.expires_at_ms, Some(1_700_000_000_000));
             assert_eq!(&*session.url_event_ws, "wss://example.invalid/ws");

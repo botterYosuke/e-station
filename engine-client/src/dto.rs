@@ -334,6 +334,19 @@ pub enum EngineEvent {
     VenueCredentialsRefreshed {
         venue: String,
         session: TachibanaSessionWire,
+        /// Account identifier the user actually authenticated with. Optional
+        /// only for back-compat with schema 1.2 emitters that did not
+        /// include it; current Python populates it on every refresh.
+        #[serde(default)]
+        user_id: Option<String>,
+        /// Plain-text password held in `Zeroizing<String>` so the heap buffer
+        /// is wiped when the event is dropped.
+        #[serde(default)]
+        password: Option<Zeroizing<String>>,
+        /// `true` when the login hit the demo host. Mirrors the value the
+        /// dialog (or env / fallback path) used.
+        #[serde(default)]
+        is_demo: Option<bool>,
     },
     /// Python has spawned its tkinter login helper subprocess. The UI
     /// shows a generic "login dialog open" banner — it does NOT render

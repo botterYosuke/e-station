@@ -380,11 +380,26 @@ class VenueError(IpcMessage):
 
 
 class VenueCredentialsRefreshed(IpcMessage):
-    """Emitted after a startup-time re-login produces new virtual URLs."""
+    """Emitted after a startup-time re-login produces new virtual URLs.
+
+    Carries the *full* credential set used for the login (not only the
+    derived session URLs) so the Rust side can persist user_id / password /
+    is_demo into the keyring. Without these fields the keyring's account /
+    demo-flag / password drift away from the value the user just typed
+    into the dialog (e.g. account switch, demo→prod toggle, password
+    change), and the next cold-start fallback login uses stale data.
+
+    `user_id` / `password` / `is_demo` are optional only so older Rust
+    clients (schema 1.2 baseline) can still deserialize the event; new
+    Python emitters always populate them.
+    """
 
     event: Literal["VenueCredentialsRefreshed"] = "VenueCredentialsRefreshed"
     venue: str
     session: TachibanaSessionWire
+    user_id: str | None = None
+    password: str | None = None
+    is_demo: bool | None = None
 
 
 class VenueLoginStarted(IpcMessage):

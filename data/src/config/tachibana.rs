@@ -184,6 +184,41 @@ pub fn save_tachibana_credentials(creds: &TachibanaCredentials) {
     }
 }
 
+/// Persist a refreshed credential set (full triple) into the OS keyring.
+///
+/// Used when Python's `VenueCredentialsRefreshed` event includes the
+/// `user_id` / `password` / `is_demo` the user actually authenticated
+/// with — i.e. the full reverse-trip of `SetVenueCredentials`. Without
+/// this path, an account switch / demo↔prod toggle / password change
+/// performed in the login dialog never reaches the keyring (only the
+/// session URLs do), and the next cold-start fast path replays stale
+/// credentials.
+///
+/// Equivalent to building a [`TachibanaCredentials`] and calling
+/// [`save_tachibana_credentials`], but accepts plaintext password so
+/// callers outside the `data` crate (notably `flowsurface` main.rs)
+/// don't need a direct dependency on `secrecy`.
+pub fn save_refreshed_credentials(
+    user_id: String,
+    password: String,
+    is_demo: bool,
+    session: TachibanaSession,
+) {
+    let _guard = keyring_write_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let creds = TachibanaCredentials {
+        user_id,
+        password: SecretString::new(password),
+        // Phase 1 invariant (F-H5): second password is collected only in
+        // Phase 2 (orders). Refresh therefore never carries it.
+        second_password: None,
+        is_demo,
+        session: Some(session),
+    };
+    save_tachibana_credentials(&creds);
+}
+
 /// Persist a refreshed session into the OS keyring.
 ///
 /// * If a credentials entry already exists, splice the new session into
