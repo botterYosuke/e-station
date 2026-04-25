@@ -67,3 +67,46 @@ Rust 側の `fastwebsockets` 0.9.0 はこれを拒否して接続を切断 → `
 
 4. **Mock を使うテストの補完**: Mock ベースのテストは fast だが言語境界は確認できない。
    統合テスト（実サーバー起動）で補完する設計を標準とする。
+
+---
+
+## 2026-04-25: 立花 `_do_validate` のパラメータ名誤り (sIssueCode → sTargetIssueCode)
+
+**症状**: T3 で `validate_session_on_startup` を実機 demo 環境に向けて呼び出したところ、
+立花 API が `code=-1, message=（sTargetIssueCode:[NULL]）エラー` を返却。session validation
+が常に失敗し、起動時の自動 keyring 復元が動作しない。
+
+**根本原因**: T2 で `_do_validate` の `CLMMfdsGetIssueDetail` リクエスト payload を
+`{"sIssueCode": "7203", "sSizyouC": "00"}` で組み立てていたが、マニュアル
+`mfds_json_api_ref_text.html#CLMMfdsGetIssueDetail` の正しいパラメータ名は
+`sTargetIssueCode`（カンマ区切り銘柄コードリスト、`sSizyouC` は不要）。
+
+**修正**: `python/engine/exchanges/tachibana_auth.py::_do_validate` を
+`{"sTargetIssueCode": "7203"}` に修正し、HIGH-D2 pinned テスト
+(`test_validate_session_uses_get_issue_detail_with_pinned_payload`) を更新。
+
+**なぜ既存テストで発見できなかったか**:
+* HIGH-D2 pinned テストは **私たちが書いた誤った payload を pin していた** —
+  サーバー応答を `httpx_mock` で固定していたため、誤ったパラメータ名でも
+  「`sCLMID` / `sIssueCode` / `sSizyouC` / `sJsonOfmt` の 4 点が揃っている」を
+  assert してしまっていた。**実際の API がそのパラメータを受け付けるかは
+  検証していない**（同一言語テスト・Mock の補完不足）。
+* T2 受け入れ条件 `pytest -m demo_tachibana` は「実 demo 環境ログイン」を
+  指定していたが、電話認証済アカウント前提の手動レーンに置かれており
+  CI で実走しなかった。Phase 2 (B) 案（manual lane only）を採用していたため。
+
+**教訓**:
+
+1. **Mock 応答を pin したテストは「クライアント側の payload 構築」しか検証しない**:
+   サーバーが本当にそのパラメータを認識するかは別レイヤーのテストで補完する必要がある。
+   公式マニュアルのサンプル例（`mfds_json_api_ref_text.html` の `<td>` 内 JSON 例）と
+   照合する snapshot テストを追加することで誤りを早期検知できる。
+
+2. **手動 demo レーンの CI 統合タイミングを早める**: T2 段階で実機 smoke を
+   走らせていれば即発見できた。`scripts/smoke_tachibana_login.py` のような
+   一発実行可能なスクリプトを T1/T2 段階から保守する習慣をつける。
+
+3. **公式マニュアルの sample 例と pinned test は二重に揃える**: マニュアル
+   側の sample 例セクション (`<td>{ "sCLMID":"...", "sTargetIssueCode":"..." }</td>`)
+   からパラメータ名を抽出して pinned test の expected と比較する static 検査を
+   T7 lint phase に追加検討（現状 `tools/secret_scan*` 系と同列で実装可能）。

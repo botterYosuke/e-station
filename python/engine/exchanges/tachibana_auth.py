@@ -325,12 +325,15 @@ async def _do_validate(
     review picks a different probe, update both this function and the
     pinned test (HIGH-D2).
     """
+    # Manual reference: `mfds_json_api_ref_text.html#CLMMfdsGetIssueDetail`.
+    # The param name is `sTargetIssueCode` (comma-separated list), not
+    # `sIssueCode` + `sSizyouC`. Fixed in T3 after demo-environment
+    # smoke testing surfaced the typo.
     payload: dict[str, Any] = {
         "p_no": str(p_no_counter.next()),
         "p_sd_date": current_p_sd_date(),
         "sCLMID": "CLMMfdsGetIssueDetail",
-        "sIssueCode": "7203",
-        "sSizyouC": "00",
+        "sTargetIssueCode": "7203",
     }
     url = build_request_url(session.url_master, payload, sJsonOfmt="4")
 

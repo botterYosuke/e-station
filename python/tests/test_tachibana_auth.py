@@ -325,7 +325,7 @@ async def test_validate_session_http_503_maps_to_transport_error(
 async def test_validate_session_uses_get_issue_detail_with_pinned_payload(
     httpx_mock: HTTPXMock,
 ):
-    """HIGH-D2: assert (a) sUrlMaster base, (b) GET, (c) sCLMID/sIssueCode/sSizyouC, (d) sJsonOfmt='4'."""
+    """HIGH-D2: assert (a) sUrlMaster base, (b) GET, (c) sCLMID/sTargetIssueCode, (d) sJsonOfmt='4'."""
     httpx_mock.add_response(
         url=_MASTER_URL_RE,
         method="GET",
@@ -342,8 +342,9 @@ async def test_validate_session_uses_get_issue_detail_with_pinned_payload(
     assert str(request.url).startswith(session.url_master.value)
     query = _decode_query_json(str(request.url))
     assert query["sCLMID"] == "CLMMfdsGetIssueDetail"
-    assert query["sIssueCode"] == "7203"
-    assert query["sSizyouC"] == "00"
+    assert query["sTargetIssueCode"] == "7203"
+    assert "sIssueCode" not in query
+    assert "sSizyouC" not in query
     assert query["sJsonOfmt"] == "4"
 
 

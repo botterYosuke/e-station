@@ -154,35 +154,22 @@ async fn run_with_recovery_calls_on_restart_after_connection_loss() {
 // regression to a `format!`-based hand-rolled JSON encoder.
 
 #[test]
-fn stdin_payload_is_json_safe_for_tricky_inputs() {
-    // Mirror the production payload shape (port + token +
-    // dev_tachibana_login_allowed + future config/cache dirs).
+fn stdin_payload_round_trips_tricky_token_via_production_builder() {
+    // Calls the **production** builder so a regression to a
+    // `format!`-based hand-rolled JSON encoder is caught here. We
+    // cannot smuggle config_dir / cache_dir yet (T4) — they are
+    // covered by an `assert!` on parsed output once added.
+    use flowsurface_engine_client::process::build_stdin_payload;
+
     let port: u16 = 19876;
     let token = r#"hard"to\escape"#; // contains both " and \
-    let config_dir = r"C:\Users\日本語\config";
-    let cache_dir = r"C:\Users\日本語\cache";
-    let dev_tachibana_login_allowed = true;
 
-    let payload = serde_json::json!({
-        "port": port,
-        "token": token,
-        "dev_tachibana_login_allowed": dev_tachibana_login_allowed,
-        "config_dir": config_dir,
-        "cache_dir": cache_dir,
-    });
-    let line = serde_json::to_string(&payload).unwrap();
-
-    // Round-trip: parse the wire string back as JSON (Python's json.loads
-    // analogue) and assert every value survived.
-    let parsed: serde_json::Value = serde_json::from_str(&line).expect("must parse");
+    let line = build_stdin_payload(port, token).expect("must serialize");
+    let parsed: serde_json::Value =
+        serde_json::from_str(line.trim_end()).expect("must parse");
     assert_eq!(parsed["port"].as_u64(), Some(port as u64));
     assert_eq!(parsed["token"].as_str(), Some(token));
-    assert_eq!(
-        parsed["dev_tachibana_login_allowed"].as_bool(),
-        Some(dev_tachibana_login_allowed)
-    );
-    assert_eq!(parsed["config_dir"].as_str(), Some(config_dir));
-    assert_eq!(parsed["cache_dir"].as_str(), Some(cache_dir));
+    assert!(parsed.get("dev_tachibana_login_allowed").is_some());
 }
 
 /// `ProcessManager` exposes `set_proxy` which updates the stored proxy URL.

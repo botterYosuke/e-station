@@ -229,6 +229,70 @@ fn test_credentials_roundtrip_with_zeroize_and_masked_debug() {
 }
 
 #[test]
+fn test_update_session_in_keyring_creates_entry_when_none_exists() {
+    // Regression: the very first successful login arrives via
+    // `VenueCredentialsRefreshed` while the OS keyring is still empty.
+    // Earlier `update_session_in_keyring` short-circuited with a warning
+    // and never persisted the new session, so the next restart lost
+    // the session and had to re-login.
+    install_mock_keyring();
+    // Force a clean slate for this test.
+    if let Ok(entry) = keyring::Entry::new("flowsurface.tachibana", "user_id") {
+        entry.delete_credential().ok();
+    }
+    assert!(
+        load_tachibana_credentials().is_none(),
+        "test must start with empty keyring"
+    );
+
+    let session = sample_session();
+    flowsurface_data::config::tachibana::update_session_in_keyring(&session);
+
+    let loaded =
+        load_tachibana_credentials().expect("session-only entry must be created");
+    assert_eq!(loaded.user_id, "", "first-time entry has empty user_id");
+    assert_eq!(loaded.password.expose_secret(), "");
+    // is_demo inferred from the URL host.
+    assert!(
+        loaded.is_demo,
+        "demo-kabuka URL must imply is_demo=true; got {loaded:?}"
+    );
+    let s = loaded.session.expect("session persisted");
+    assert_eq!(
+        s.url_event_ws.expose_secret(),
+        session.url_event_ws.expose_secret()
+    );
+}
+
+#[test]
+fn test_update_session_in_keyring_preserves_existing_user_id() {
+    // When a prior entry exists, the user_id / password / is_demo are
+    // preserved and only the session is replaced.
+    install_mock_keyring();
+    let original = sample_creds(); // user_id=uxf05882, password=vw20sr9h
+    save_tachibana_credentials(&original);
+
+    // Build a *new* session with different URL fragments.
+    let mut new_session = sample_session();
+    new_session.url_event_ws =
+        SecretString::new("wss://demo-kabuka.e-shiten.jp/e_api_v4r8/evt/ROTATED/".into());
+
+    flowsurface_data::config::tachibana::update_session_in_keyring(&new_session);
+    let loaded = load_tachibana_credentials().expect("must round-trip");
+
+    assert_eq!(loaded.user_id, "uxf05882", "user_id must survive");
+    assert_eq!(
+        loaded.password.expose_secret(),
+        "vw20sr9h",
+        "password must survive"
+    );
+    assert!(
+        loaded.session.unwrap().url_event_ws.expose_secret().ends_with("ROTATED/"),
+        "session must be replaced"
+    );
+}
+
+#[test]
 #[should_panic(expected = "second_password must be None in Phase 1")]
 fn test_phase1_second_password_guard_panics_in_debug() {
     let creds = TachibanaCredentials {
