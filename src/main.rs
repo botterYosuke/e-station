@@ -59,11 +59,6 @@ static ENGINE_RESTARTING: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> 
 static ENGINE_MANAGER: std::sync::OnceLock<Arc<engine_client::ProcessManager>> =
     std::sync::OnceLock::new();
 
-/// Tokio handle for the engine-client runtime — used by UI handlers that need
-/// to call async `ProcessManager` APIs (e.g. `set_proxy`) without owning the
-/// runtime themselves.
-static ENGINE_RT_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
-
 /// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
 /// Referenced during initial setup and on every engine reconnect.
 const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
@@ -222,7 +217,6 @@ fn main() {
 
         let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
         ENGINE_MANAGER.set(Arc::clone(&manager)).ok();
-        ENGINE_RT_HANDLE.set(rt.handle().clone()).ok();
 
         // Push the saved proxy into the manager so it is re-applied after every
         // handshake (initial spawn + every recovery).
@@ -924,29 +918,24 @@ impl Flowsurface {
                             .unwrap_or_else(|e| e.into_inner())
                             .as_ref()
                             .cloned();
-
-                        // Update the ProcessManager's stored proxy *before* we
-                        // touch the live connection, so that even if the engine
-                        // crashes mid-Apply the next recovery handshake replays
-                        // the new value (or `None` clears the previous one).
-                        if let (Some(manager), Some(handle)) =
-                            (ENGINE_MANAGER.get(), ENGINE_RT_HANDLE.get())
-                        {
-                            let manager = Arc::clone(manager);
-                            let proxy_url_for_manager = proxy_url.clone();
-                            handle.spawn(async move {
-                                manager.set_proxy(proxy_url_for_manager).await;
-                            });
-                        }
+                        let manager = ENGINE_MANAGER.get().map(Arc::clone);
 
                         return Task::perform(
                             async move {
+                                // Send to the live engine first.  Only after that
+                                // succeeds do we update the recovery source-of-truth
+                                // and persist credentials — otherwise a failed
+                                // Apply would leave a stale "new" proxy queued for
+                                // the next engine restart.
                                 if let Some(conn) = engine_conn {
                                     conn.send(engine_client::dto::Command::SetProxy {
-                                        url: proxy_url,
+                                        url: proxy_url.clone(),
                                     })
                                     .await
                                     .map_err(|e| e.to_string())?;
+                                }
+                                if let Some(manager) = manager {
+                                    manager.set_proxy(proxy_url).await;
                                 }
                                 if let Some(proxy) = &new_proxy {
                                     data::config::proxy::save_proxy_auth(proxy);
