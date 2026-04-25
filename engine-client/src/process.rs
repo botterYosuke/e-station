@@ -3,7 +3,11 @@
 /// `PythonProcess` spawns the Python engine and communicates its `{port, token}`
 /// via stdin as a JSON line.  `ProcessManager` wraps it with exponential-backoff
 /// restart logic and re-applies subscriptions after each recovery.
-use crate::{connection::EngineConnection, dto::VenueCredentialsPayload, error::EngineClientError};
+use crate::{
+    connection::EngineConnection,
+    dto::{EngineEvent, TachibanaSessionWire, VenueCredentialsPayload},
+    error::EngineClientError,
+};
 
 use std::{
     collections::HashSet,
@@ -12,6 +16,16 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Child, sync::Mutex};
+
+/// Callback fired from inside `start()` whenever a `VenueCredentialsRefreshed`
+/// event is observed during the `SetVenueCredentials` → `VenueReady` window.
+/// Wired by `main.rs` to (a) persist the refreshed session into the OS
+/// keyring and (b) call back into `set_venue_credentials` so the next
+/// restart re-injects the new value. Held in an `Arc<Mutex<Option<...>>>`
+/// so it can be installed once and survive across `Arc<ProcessManager>`
+/// clones.
+pub type OnVenueCredentialsRefreshed =
+    Box<dyn Fn(TachibanaSessionWire) + Send + Sync + 'static>;
 
 // ── EngineCommand ─────────────────────────────────────────────────────────────
 
@@ -116,6 +130,39 @@ fn looks_like_python_interpreter(path: &Path) -> bool {
 const BACKOFF_BASE_MS: u64 = 500;
 const BACKOFF_MAX_MS: u64 = 30_000;
 
+/// Build the JSON line that the Rust supervisor writes to the Python
+/// engine's stdin during boot. Exposed at crate level so the dev-flag
+/// regression test (`engine-client/tests/dev_login_flag_release.rs`)
+/// can call exactly the production builder — that way a future change
+/// to the production payload (e.g. dropping `dev_tachibana_login_allowed`)
+/// breaks the test instead of going unnoticed.
+///
+/// Schema (T3 / schema 1.2):
+///
+/// ```json
+/// {
+///   "port": <u16>,
+///   "token": "<token>",
+///   "dev_tachibana_login_allowed": <bool>   // mirrors cfg!(debug_assertions)
+/// }
+/// ```
+///
+/// `dev_tachibana_login_allowed` reflects the **build profile** so a
+/// release binary can never enable Python's env fast path even if the
+/// surrounding shell has the dev variables set (R10 / architecture
+/// §2.1.1 / H-2).
+pub fn build_stdin_payload(port: u16, token: &str) -> Result<String, EngineClientError> {
+    let dev_tachibana_login_allowed = cfg!(debug_assertions);
+    let payload = serde_json::json!({
+        "port": port,
+        "token": token,
+        "dev_tachibana_login_allowed": dev_tachibana_login_allowed,
+    });
+    let mut s = serde_json::to_string(&payload)?;
+    s.push('\n');
+    Ok(s)
+}
+
 // ── PythonProcess ─────────────────────────────────────────────────────────────
 
 pub struct PythonProcess {
@@ -146,20 +193,7 @@ impl PythonProcess {
     /// same `flowsurface.log` file as Rust messages — spec §6.4).
     pub async fn spawn_with(cmd: &EngineCommand, port: u16) -> Result<Self, EngineClientError> {
         let token = generate_token();
-
-        // HIGH-B2-1: build the stdin payload via `serde_json::json!` so
-        // every value (token, future config_dir/cache_dir) is escaped by
-        // the JSON encoder. `dev_tachibana_login_allowed` mirrors the
-        // build profile — Python's `tachibana_login_flow` reads the env
-        // fast-path only when this is `true` (architecture.md §2.1.1, H-2).
-        let dev_tachibana_login_allowed = cfg!(debug_assertions);
-        let payload_value = serde_json::json!({
-            "port": port,
-            "token": token,
-            "dev_tachibana_login_allowed": dev_tachibana_login_allowed,
-        });
-        let mut stdin_payload = serde_json::to_string(&payload_value)?;
-        stdin_payload.push('\n');
+        let stdin_payload = build_stdin_payload(port, &token)?;
 
         let mut command = tokio::process::Command::new(cmd.program());
         command
@@ -225,6 +259,10 @@ pub struct ProcessManager {
     /// them after a Python restart (Tachibana managed-mode recovery, T3).
     /// One entry per venue, keyed by venue name string.
     pub venue_credentials: Arc<Mutex<Vec<VenueCredentialsPayload>>>,
+    /// Optional hook for `VenueCredentialsRefreshed` observed during the
+    /// in-`start()` synchronous wait. The hook lives across the whole
+    /// process lifetime; main.rs installs it once at boot.
+    pub on_venue_credentials_refreshed: Arc<Mutex<Option<OnVenueCredentialsRefreshed>>>,
 }
 
 impl ProcessManager {
@@ -244,7 +282,17 @@ impl ProcessManager {
             active_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             proxy_url: Arc::new(Mutex::new(None)),
             venue_credentials: Arc::new(Mutex::new(Vec::new())),
+            on_venue_credentials_refreshed: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Install the credentials-refresh callback. Replaces any prior hook.
+    /// `Box::new` is the simplest call-site; the manager wraps it further.
+    pub async fn set_on_venue_credentials_refreshed(
+        &self,
+        cb: OnVenueCredentialsRefreshed,
+    ) {
+        *self.on_venue_credentials_refreshed.lock().await = Some(cb);
     }
 
     /// Update the stored proxy URL; also re-applies it on the next restart.
@@ -262,6 +310,51 @@ impl ProcessManager {
         let tag = payload.venue_tag();
         store.retain(|p| p.venue_tag() != tag);
         store.push(payload);
+    }
+
+    /// Splice a refreshed `TachibanaSessionWire` into the stored Tachibana
+    /// credential payload. Called from inside `start()` when a
+    /// `VenueCredentialsRefreshed` arrives during the VenueReady wait so
+    /// the next restart re-injects the post-login session rather than
+    /// the pre-login one.
+    ///
+    /// Public so the regression test (`process_creds_refresh_hook.rs`)
+    /// can call exactly the production helper rather than re-implementing
+    /// it (which would defeat the regression check). Future venues add a
+    /// `match` arm — the explicit `match` rather than `if let` ensures
+    /// adding a new variant forces editing this site.
+    /// Single code path for `VenueCredentialsRefreshed` handling — used
+    /// both by the in-`start()` `VenueReady` wait *and* by the long-lived
+    /// continuation listener spawned at the end of `start()`. Keeping it
+    /// in one helper guarantees that an in-flight refresh and a post-
+    /// startup refresh apply identical side effects (in-memory patch +
+    /// keyring write via the registered hook). Order matters: patch the
+    /// in-memory store *before* invoking the hook so a hook that reads
+    /// back the manager state (e.g. for diagnostic logging) sees the
+    /// refreshed value rather than the stale one.
+    pub async fn handle_credentials_refreshed(
+        store: &Mutex<Vec<VenueCredentialsPayload>>,
+        hook: &Mutex<Option<OnVenueCredentialsRefreshed>>,
+        new_session: &TachibanaSessionWire,
+    ) {
+        Self::patch_in_memory_session(store, new_session).await;
+        if let Some(cb) = hook.lock().await.as_ref() {
+            cb(new_session.clone());
+        }
+    }
+
+    pub async fn patch_in_memory_session(
+        store: &Mutex<Vec<VenueCredentialsPayload>>,
+        new_session: &TachibanaSessionWire,
+    ) {
+        let mut guard = store.lock().await;
+        for payload in guard.iter_mut() {
+            match payload {
+                VenueCredentialsPayload::Tachibana(creds) => {
+                    creds.session = Some(new_session.clone());
+                }
+            }
+        }
     }
 
     /// Spawn the Python process on `port`, handshake, then apply proxy + subscriptions.
@@ -300,6 +393,13 @@ impl ProcessManager {
             }
         };
 
+        // Subscribe to engine events BEFORE any send so credentials-side
+        // events emitted during the synchronous `SetVenueCredentials →
+        // VenueReady` window cannot be missed by the broadcast channel
+        // (Findings #2). `subscribe_events` returns a fresh `Receiver`
+        // that captures every event from this point forward.
+        let mut event_rx = connection.subscribe_events();
+
         // Step 2: SetProxy (spec §5.4) — sent after Ready, before any Subscribe.
         let proxy = self.proxy_url.lock().await.clone();
         if proxy.is_some() {
@@ -311,18 +411,159 @@ impl ProcessManager {
         // Step 2b: re-inject venue credentials (Tachibana managed-mode
         // recovery — docs/plan/tachibana/architecture.md §2.4). Each payload
         // is cloned so the stored copy survives this restart cycle and can
-        // be re-sent on the next one. `request_id` is freshly generated:
-        // the Python side only uses it to correlate the resulting
-        // `VenueReady` / `VenueError`, not to deduplicate the send.
+        // be re-sent on the next one.
         let creds_snapshot = self.venue_credentials.lock().await.clone();
+        let mut pending_request_ids: HashSet<String> = HashSet::new();
         for payload in creds_snapshot {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            pending_request_ids.insert(request_id.clone());
             let _ = connection
                 .send(crate::dto::Command::SetVenueCredentials {
-                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_id,
                     payload,
                 })
                 .await;
         }
+
+        // Step 2c: wait until every `SetVenueCredentials` has produced a
+        // matching `VenueReady` (or `VenueError`) before resubscribing to
+        // streams (Findings #1). Architecture spec §2.4 sequence is
+        // `SetProxy → SetVenueCredentials → VenueReady → resubscribe`.
+        // The wait is bounded by `VENUE_READY_TIMEOUT` so a stuck Python
+        // can never block the manager indefinitely.
+        //
+        // While we wait we also handle `VenueCredentialsRefreshed`: the
+        // optional callback persists the new session, and the in-memory
+        // `venue_credentials` store is patched in-place so the next
+        // restart cycle re-injects the refreshed session rather than the
+        // pre-login one.
+        const VENUE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+        if !pending_request_ids.is_empty() {
+            let deadline = tokio::time::Instant::now() + VENUE_READY_TIMEOUT;
+            'wait: while !pending_request_ids.is_empty() {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    log::warn!(
+                        "Timed out waiting for VenueReady after SetVenueCredentials \
+                         ({} pending request_id(s)) — proceeding to subscribe anyway",
+                        pending_request_ids.len(),
+                    );
+                    break;
+                }
+                let remaining = deadline - now;
+                match tokio::time::timeout(remaining, event_rx.recv()).await {
+                    Ok(Ok(EngineEvent::VenueReady { request_id, .. })) => {
+                        match request_id {
+                            Some(rid) => {
+                                pending_request_ids.remove(&rid);
+                            }
+                            None if pending_request_ids.len() == 1 => {
+                                // Fallback for Python emitters that drop
+                                // request_id (legacy / future schema): if
+                                // only one is outstanding, attribute it.
+                                let only =
+                                    pending_request_ids.iter().next().cloned();
+                                if let Some(rid) = only {
+                                    pending_request_ids.remove(&rid);
+                                }
+                            }
+                            None => {
+                                log::warn!(
+                                    "VenueReady without request_id while {} are pending — cannot disambiguate",
+                                    pending_request_ids.len(),
+                                );
+                            }
+                        }
+                    }
+                    Ok(Ok(EngineEvent::VenueError {
+                        request_id,
+                        code,
+                        message,
+                        ..
+                    })) => {
+                        if let Some(rid) = &request_id {
+                            pending_request_ids.remove(rid);
+                        }
+                        log::warn!(
+                            "VenueError during startup: code={code} message={message}"
+                        );
+                    }
+                    Ok(Ok(EngineEvent::VenueCredentialsRefreshed { session, .. })) => {
+                        Self::handle_credentials_refreshed(
+                            &self.venue_credentials,
+                            &self.on_venue_credentials_refreshed,
+                            &session,
+                        )
+                        .await;
+                    }
+                    Ok(Ok(_)) => {
+                        // Other events flow past — the broadcast channel
+                        // has many other consumers (the stream handlers
+                        // in main.rs / backend.rs), so we just ignore
+                        // anything not addressed to us.
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                        log::warn!(
+                            "engine event broadcast lagged by {n} during VenueReady wait — resubscribing"
+                        );
+                        // A lagged Receiver may have skipped a
+                        // VenueCredentialsRefreshed mid-window. Resubscribe
+                        // so the continuation listener (spawned below)
+                        // picks up future refreshes, and break out of the
+                        // wait so we don't stall on a request_id we already
+                        // dropped.
+                        event_rx = connection.subscribe_events();
+                        break 'wait;
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        log::warn!(
+                            "engine connection dropped while waiting for VenueReady"
+                        );
+                        break;
+                    }
+                    Err(_elapsed) => {
+                        log::warn!(
+                            "Timed out waiting for VenueReady after SetVenueCredentials \
+                             ({} pending request_id(s)) — proceeding to subscribe anyway",
+                            pending_request_ids.len(),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Continuation listener: same `event_rx` carries forward so any
+        // `VenueCredentialsRefreshed` arriving *after* the start-up wait
+        // (user-initiated re-login via `RequestVenueLogin`, or a trailing
+        // refresh emitted right after `VenueReady`) is handled by the
+        // same code path. This is the *single* listener for refreshes —
+        // main.rs no longer spawns its own to avoid dual-write races on
+        // the keyring / in-memory store.
+        let creds_store = Arc::clone(&self.venue_credentials);
+        let hook = Arc::clone(&self.on_venue_credentials_refreshed);
+        tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(EngineEvent::VenueCredentialsRefreshed { session, .. }) => {
+                        ProcessManager::handle_credentials_refreshed(
+                            &creds_store,
+                            &hook,
+                            &session,
+                        )
+                        .await;
+                    }
+                    Ok(EngineEvent::ConnectionDropped) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!(
+                            "creds-refresh listener lagged by {n} — continuing on new tail"
+                        );
+                    }
+                    Ok(_) => {}
+                }
+            }
+        });
 
         // Step 3: re-apply saved subscriptions (no-op on first start).
         let subs = self.active_subscriptions.lock().await.clone();

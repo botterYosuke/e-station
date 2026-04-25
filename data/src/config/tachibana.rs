@@ -12,9 +12,24 @@
 use engine_client::dto::{TachibanaCredentialsWire, TachibanaSessionWire};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
 
 const KEYCHAIN_SERVICE: &str = "flowsurface.tachibana";
 const KEYCHAIN_KEY_USER: &str = "user_id";
+
+/// Process-local lock that serialises the load→modify→save sequence in
+/// [`update_session_in_keyring`]. Without it, two refreshes racing
+/// (e.g. the in-`start()` wait wins one event and the post-start
+/// continuation listener wins another that arrives micro-seconds later)
+/// can interleave their reads and writes and produce a torn
+/// `StoredCredentials` where the persisted `is_demo` / `user_id` no
+/// longer match the freshest `session`. Cross-process protection is out
+/// of scope here — multi-instance flowsurface is not a supported config
+/// — but a single-instance lock removes the within-process ABA window.
+fn keyring_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Authoritative credentials. Phase 1 collects neither the second password
 /// nor a `session` (those arrive via the Python login flow in T3); the type
@@ -169,14 +184,53 @@ pub fn save_tachibana_credentials(creds: &TachibanaCredentials) {
     }
 }
 
-/// Update only the session portion of the stored credentials. Used when
-/// `VenueCredentialsRefreshed` arrives after a successful startup re-login.
+/// Persist a refreshed session into the OS keyring.
+///
+/// * If a credentials entry already exists, splice the new session into
+///   it (preserving any prior `user_id` / `is_demo` so a re-login can
+///   prefill the dialog).
+/// * If no entry exists yet — i.e. **first-time login** — create a
+///   session-only entry. Empty `user_id` / `password` are coherent in
+///   Phase 1 because the runtime startup re-login path goes through the
+///   env fast path or the tkinter dialog, not the stored credentials.
+///   Without this branch, the very first successful login was lost on
+///   the next restart (no keyring write happened) and the user had to
+///   log in again every cold start.
+///
+/// `is_demo` is inferred from the session URL host. The two valid hosts
+/// (`demo-kabuka.e-shiten.jp` and `kabuka.e-shiten.jp`) are pinned by
+/// `tachibana_url.py::BASE_URL_PROD` / `BASE_URL_DEMO` and by the
+/// `_validate_virtual_urls` https/wss checker, so the substring match
+/// is stable.
 pub fn update_session_in_keyring(session: &TachibanaSession) {
-    let Some(mut creds) = load_tachibana_credentials() else {
-        log::warn!("update_session_in_keyring called but no creds in keyring");
-        return;
+    // Serialise the entire load→modify→save against any other concurrent
+    // refresh on the same process. The write lock is purely an in-process
+    // mutex; the actual keyring API does not expose file locking.
+    let _guard = keyring_write_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let creds = match load_tachibana_credentials() {
+        Some(mut existing) => {
+            existing.session = Some(session.clone());
+            existing
+        }
+        None => {
+            // url_request lives inside `SecretString`; we expose it ONLY
+            // for the substring check (no log, no clone-out) and let it
+            // drop at the end of the borrow.
+            let is_demo = session
+                .url_request
+                .expose_secret()
+                .contains("demo-kabuka.e-shiten.jp");
+            TachibanaCredentials {
+                user_id: String::new(),
+                password: SecretString::new(String::new()),
+                second_password: None,
+                is_demo,
+                session: Some(session.clone()),
+            }
+        }
     };
-    creds.session = Some(session.clone());
     save_tachibana_credentials(&creds);
 }
 

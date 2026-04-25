@@ -224,6 +224,36 @@ fn main() {
             rt.block_on(manager.set_proxy(Some(proxy.to_url_string())));
         }
 
+        // T3: restore Tachibana credentials from keyring so SetVenueCredentials
+        // is sent automatically after every handshake. The credentials live in
+        // the manager — when Python restarts, the same payload is replayed.
+        if let Some(creds) = data::config::tachibana::load_tachibana_credentials() {
+            log::info!("Loaded tachibana session from keyring");
+            let payload = engine_client::dto::VenueCredentialsPayload::Tachibana(
+                (&creds).into(),
+            );
+            rt.block_on(manager.set_venue_credentials(payload));
+        } else {
+            log::info!("No tachibana credentials in keyring — login will be requested on demand");
+        }
+
+        // Install the `VenueCredentialsRefreshed` hook BEFORE start() so
+        // refreshes emitted during the in-`start()` VenueReady wait are
+        // persisted synchronously into the OS keyring. ProcessManager
+        // handles the in-memory store update itself (patch_in_memory_session)
+        // and runs a single long-lived listener for refreshes that arrive
+        // *after* start() returns (user-initiated re-logins). This hook
+        // therefore only does the keyring write — duplicating it with a
+        // second listener in main.rs would re-introduce the load→set ABA
+        // race the reviewer flagged.
+        rt.block_on(manager.set_on_venue_credentials_refreshed(Box::new(
+            move |session_wire| {
+                let session: data::config::tachibana::TachibanaSession =
+                    session_wire.into();
+                data::config::tachibana::update_session_in_keyring(&session);
+            },
+        )));
+
         let url = format!("ws://127.0.0.1:{port}");
         log::info!("Engine URL: {url}");
 
@@ -247,6 +277,14 @@ fn main() {
                             tx.send(false).ok();
                         }
                         log::info!("Python data engine ready on {url}");
+
+                        // The credentials-refresh listener is owned by
+                        // ProcessManager::start() — see the continuation
+                        // task spawned at the end of `start()`. Spawning
+                        // another listener here would race the in-engine
+                        // one on the keyring (load→set ABA) and on the
+                        // in-memory creds store. One listener is the
+                        // invariant.
 
                         conn.wait_closed().await;
                         log::warn!("Python engine connection lost — restarting");
