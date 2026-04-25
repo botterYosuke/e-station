@@ -80,6 +80,16 @@
 - `instrument_id` の `<venue>` 部分が `TSE` 以外（`OSE`, `NSE`, `FKE` 等）のときの `sSizyouC` 写像表が未定義
 - Phase O0〜O2 は `TSE` のみ受理（HTTP 層で 400 reject）
 - O3 着手時に写像表を [architecture.md §10](./architecture.md#10-nautilus_trader-との型マッピング) に追記する
+- Tpre.2 着手前に `docs/plan/✅python-data-engine/schemas/` ディレクトリ（または `schemas.py` のあるパス）の実在確認を必須化する（A-L3）
+
+### Q10. nautilus_trader 用語の正本ファイル（B3R3-5, 2026-04-25 追記）
+
+- `docs/plan/nautilus_trader/spec.md` への双方向リンク整備が未完。
+- `NautilusOrderEnvelope` 等 nautilus 用語の定義正本ファイル（e-station リポジトリ内 or nautilus 上流ソース）を **Tpre.1 で確定**する。
+- 候補:
+  - 案 A: e-station 内 `docs/plan/nautilus_trader/spec.md` を正本とし、上流ソースは参照リンクのみ
+  - 案 B: 上流 `nautilus_trader.model.orders.Order` を正本とし、e-station 側は写経 + pin バージョン明記
+- Q0（バージョン pin）と一体で Tpre.1 着手時に確定する。
 
 ---
 
