@@ -12,15 +12,12 @@ pub mod convert;
 pub mod depth_tracker;
 pub mod dto;
 pub mod error;
-pub mod hybrid;
 pub mod process;
 
 pub use backend::EngineClientBackend;
 pub use connection::EngineConnection;
 pub use depth_tracker::DepthTracker;
 pub use error::EngineClientError;
-#[doc(hidden)]
-pub use hybrid::HybridVenueBackend;
 pub use process::{EngineCommand, ProcessManager, PythonProcess, SubscriptionKey};
 
 /// IPC schema version — must match the Python engine's `SCHEMA_MAJOR`/`SCHEMA_MINOR`.
