@@ -83,7 +83,7 @@ Phase 7 以降の完了条件として固定する。
 
 - [x] `.github/workflows/release.yaml` に `astral-sh/setup-uv@v5` ステップを追加 (2026-04-25)。`scripts/build-engine.sh` 呼び出しは既に `build-windows.sh` / `build-macos.sh` / `package-linux.sh` から行われていた。
 - [x] `engine-client/tests/connection_closed.rs` の `unused variable` 修正 + `dto_conversion.rs` の `excessive_precision` / `manual_range_contains` 修正 (T4.b)。`depth_gap_recovery.rs` は現状 clippy clean。
-- [-] `onefile` cold-start 計測 (Windows / macOS / Linux): **deferred** 別 PR。GitHub Actions ランナー上での自動計測を準備中。手動計測は手元の Windows で `time ./flowsurface.exe` 実行可能。`docs/plan/✅python-data-engine/benchmarks/phase-6.md` への記録は計測後。
+- [x] `onefile` cold-start 計測 (Windows): **完了** (2026-04-25)。手元 Windows 11 (i7-13700H, NVMe) で 6 iter 計測。first-run 0.782 s / warm median 0.797 s。spec §9.1 の復旧合格ライン 3 s に対し十分なマージン。記録: [benchmarks/phase-6.md](./benchmarks/phase-6.md)。macOS / Linux は GitHub Actions 自動計測 PR で別途追加 (deferred)。計測中に `scripts/build-engine.sh` の `uv tool run pyinstaller` が project deps (`orjson` 他) を解決しない既存バグを発見。phase-6.md §4.1 に詳細と workaround を記録（別 PR で恒久修正推奨）。
 - [x] Linux AppImage / Flatpak の要否判断 (2026-04-25): **不採用** で確定。判断根拠と再評価条件を [docs/plan/distribution-formats.md](../distribution-formats.md) に記録。要点: ① ユーザー要望ゼロ、② Flatpak は keyring / Vulkan / IPC loopback と sandbox の衝突コストが高い、③ AppImage は FUSE 依存と glibc 互換が tar.gz と本質的に変わらない。
 
 ### T5. `engine-client/src/hybrid.rs` の決着 (Priority: Low)
