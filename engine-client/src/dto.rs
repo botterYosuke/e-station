@@ -3,6 +3,7 @@
 /// Commands flow Rust → Python; Events flow Python → Rust.
 /// Both are transported as JSON text frames over a local WebSocket.
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 // ── Commands (Rust → Python) ──────────────────────────────────────────────────
 
@@ -114,6 +115,18 @@ pub enum VenueCredentialsPayload {
     Tachibana(TachibanaCredentialsWire),
 }
 
+impl VenueCredentialsPayload {
+    /// Stable venue identifier used for dedup in the credential store
+    /// (M2 / HIGH-B2-2). Adding a new variant here forces a new tag,
+    /// preventing the old variant-list-based retain logic from silently
+    /// going wrong when a second venue is added.
+    pub fn venue_tag(&self) -> &'static str {
+        match self {
+            VenueCredentialsPayload::Tachibana(_) => "tachibana",
+        }
+    }
+}
+
 impl std::fmt::Debug for VenueCredentialsPayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -132,8 +145,11 @@ impl std::fmt::Debug for VenueCredentialsPayload {
 #[derive(Clone, Serialize)]
 pub struct TachibanaCredentialsWire {
     pub user_id: String,
-    pub password: String,
-    pub second_password: Option<String>,
+    /// Plain-text password held in a `Zeroizing<String>` so the heap buffer
+    /// is wiped on drop (M4 / MEDIUM-B2-2). `Serialize` falls through to
+    /// `String`'s impl via `Deref` — no `serde` feature on `zeroize` needed.
+    pub password: Zeroizing<String>,
+    pub second_password: Option<Zeroizing<String>>,
     pub is_demo: bool,
     pub session: Option<TachibanaSessionWire>,
 }
@@ -152,11 +168,14 @@ impl std::fmt::Debug for TachibanaCredentialsWire {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TachibanaSessionWire {
-    pub url_request: String,
-    pub url_master: String,
-    pub url_price: String,
-    pub url_event: String,
-    pub url_event_ws: String,
+    /// Virtual URLs are session-bound secrets (architecture.md §2.1, F-B2)
+    /// and must be wiped on drop. `Zeroizing<String>` derives `Serialize` /
+    /// `Deserialize` transparently through the inner `String`.
+    pub url_request: Zeroizing<String>,
+    pub url_master: Zeroizing<String>,
+    pub url_price: Zeroizing<String>,
+    pub url_event: Zeroizing<String>,
+    pub url_event_ws: Zeroizing<String>,
     pub expires_at_ms: Option<i64>,
     pub zyoutoeki_kazei_c: String,
 }

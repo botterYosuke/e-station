@@ -246,13 +246,8 @@ impl ProcessManager {
     /// trigger.
     pub async fn set_venue_credentials(&self, payload: VenueCredentialsPayload) {
         let mut store = self.venue_credentials.lock().await;
-        // Replace any existing entry for the same venue tag.
-        let venue_tag = match &payload {
-            VenueCredentialsPayload::Tachibana(_) => "tachibana",
-        };
-        store.retain(|p| match p {
-            VenueCredentialsPayload::Tachibana(_) => venue_tag != "tachibana",
-        });
+        let tag = payload.venue_tag();
+        store.retain(|p| p.venue_tag() != tag);
         store.push(payload);
     }
 
@@ -425,4 +420,37 @@ fn generate_token() -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dto::{TachibanaCredentialsWire, VenueCredentialsPayload};
+
+    fn dummy_tachibana(user: &str) -> VenueCredentialsPayload {
+        VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire {
+            user_id: user.to_string(),
+            password: "p".to_string().into(),
+            second_password: None,
+            is_demo: true,
+            session: None,
+        })
+    }
+
+    #[test]
+    fn venue_tag_returns_tachibana_for_tachibana_variant() {
+        let p = dummy_tachibana("alice");
+        assert_eq!(p.venue_tag(), "tachibana");
+    }
+
+    #[tokio::test]
+    async fn set_venue_credentials_replaces_same_venue_last_wins() {
+        let pm = ProcessManager::new("python");
+        pm.set_venue_credentials(dummy_tachibana("alice")).await;
+        pm.set_venue_credentials(dummy_tachibana("bob")).await;
+        let store = pm.venue_credentials.lock().await;
+        assert_eq!(store.len(), 1, "same venue tag must dedupe to last entry");
+        let VenueCredentialsPayload::Tachibana(c) = &store[0];
+        assert_eq!(c.user_id, "bob", "last-write-wins for same venue tag");
+    }
 }

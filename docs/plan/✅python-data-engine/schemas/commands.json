@@ -20,6 +20,12 @@
     { "$ref": "#/$defs/RequestVenueLogin" }
   ],
   "$defs": {
+    "RequestId": {
+      "description": "UUIDv4 string per RFC 4122 (LOW-1 / F-L7). Python emits via str(uuid.uuid4()) — hyphenated lowercase.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "maxLength": 36
+    },
     "Hello": {
       "type": "object",
       "required": ["op", "schema_major", "schema_minor", "client_version", "token"],
@@ -202,7 +208,7 @@
       "additionalProperties": false,
       "properties": {
         "op": { "const": "SetVenueCredentials" },
-        "request_id": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
         "payload": { "$ref": "#/$defs/VenueCredentialsPayload" }
       }
     },
@@ -213,7 +219,7 @@
       "additionalProperties": false,
       "properties": {
         "op": { "const": "RequestVenueLogin" },
-        "request_id": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
         "venue": { "type": "string" }
       }
     }

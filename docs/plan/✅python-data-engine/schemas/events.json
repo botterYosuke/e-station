@@ -26,6 +26,19 @@
     { "$ref": "#/$defs/VenueLoginCancelled" }
   ],
   "$defs": {
+    "RequestId": {
+      "description": "UUIDv4 string per RFC 4122 (LOW-1 / F-L7). Python emits via str(uuid.uuid4()) — hyphenated lowercase.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "maxLength": 36
+    },
+    "RequestIdNullable": {
+      "description": "Nullable variant of RequestId (used for events that may correlate to a request or be unsolicited).",
+      "oneOf": [
+        { "$ref": "#/$defs/RequestId" },
+        { "type": "null" }
+      ]
+    },
     "Ready": {
       "type": "object",
       "required": ["event", "schema_major", "schema_minor", "engine_version", "engine_session_id", "capabilities"],
@@ -303,7 +316,7 @@
       "properties": {
         "event": { "const": "VenueReady" },
         "venue": { "type": "string" },
-        "request_id": { "type": ["string", "null"] }
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" }
       }
     },
     "VenueError": {
@@ -314,7 +327,7 @@
       "properties": {
         "event": { "const": "VenueError" },
         "venue": { "type": "string" },
-        "request_id": { "type": ["string", "null"] },
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" },
         "code": {
           "type": "string",
           "enum": [
@@ -348,7 +361,7 @@
       "properties": {
         "event": { "const": "VenueLoginStarted" },
         "venue": { "type": "string" },
-        "request_id": { "type": ["string", "null"] }
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" }
       }
     },
     "VenueLoginCancelled": {
@@ -358,7 +371,7 @@
       "properties": {
         "event": { "const": "VenueLoginCancelled" },
         "venue": { "type": "string" },
-        "request_id": { "type": ["string", "null"] }
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" }
       }
     }
   }

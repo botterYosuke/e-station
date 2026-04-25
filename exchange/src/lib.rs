@@ -209,7 +209,7 @@ impl SerTicker {
             return Ok(exchange);
         }
 
-        let normalized = ["Linear", "Inverse", "Spot"]
+        let normalized = ["Linear", "Inverse", "Spot", "Stock"]
             .into_iter()
             .find_map(|suffix| {
                 s.strip_suffix(suffix)
@@ -596,6 +596,22 @@ impl TickerInfo {
     pub fn resolved_quote_currency(&self) -> QuoteCurrency {
         self.quote_currency
             .unwrap_or_else(|| self.ticker.exchange.default_quote_currency())
+    }
+
+    /// Fold in the venue's default quote currency when the persisted /
+    /// IPC-received value is `None` (M1, F-M6a). This is the single
+    /// authoritative normalization helper — call it from every load path
+    /// so the UI formatter never sees `quote_currency: None`:
+    ///
+    /// - `data::layout::pane` saved-state.json deserialize
+    /// - `engine_client::backend` IPC `EngineEvent::TickerInfo` receive
+    ///
+    /// Centralizing the fold here means a future venue addition only has to
+    /// touch `Exchange::default_quote_currency()`.
+    pub fn normalize_after_load(&mut self) {
+        if self.quote_currency.is_none() {
+            self.quote_currency = Some(self.ticker.exchange.default_quote_currency());
+        }
     }
 
     pub fn market_type(&self) -> MarketKind {

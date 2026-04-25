@@ -101,6 +101,72 @@ fn timeframe_serde_accepts_legacy_variant_form() {
 }
 
 #[test]
+fn normalize_quote_currency_fills_in_default_for_crypto() {
+    // Old persisted payload (pre-T0.2) lacks quote_currency.
+    let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+    let ticker_json = serde_json::to_string(&ticker).unwrap();
+    let old_payload = format!(
+        r#"{{
+            "ticker": {ticker_json},
+            "min_ticksize": 0.1,
+            "min_qty": 0.001,
+            "contract_size": null
+        }}"#
+    );
+    let mut info: TickerInfo = serde_json::from_str(&old_payload).unwrap();
+    assert!(info.quote_currency.is_none());
+
+    info.normalize_after_load();
+
+    assert_eq!(
+        info.quote_currency,
+        Some(flowsurface_exchange::QuoteCurrency::Usdt),
+        "Binance must fold in Usdt as the venue default",
+    );
+}
+
+#[test]
+fn normalize_quote_currency_fills_in_default_for_tachibana() {
+    let ticker = Ticker::new("7203", Exchange::TachibanaStock);
+    let ticker_json = serde_json::to_string(&ticker).unwrap();
+    let old_payload = format!(
+        r#"{{
+            "ticker": {ticker_json},
+            "min_ticksize": 1.0,
+            "min_qty": 100.0,
+            "contract_size": null
+        }}"#
+    );
+    let mut info: TickerInfo = serde_json::from_str(&old_payload).unwrap();
+    assert!(info.quote_currency.is_none());
+
+    info.normalize_after_load();
+
+    assert_eq!(
+        info.quote_currency,
+        Some(flowsurface_exchange::QuoteCurrency::Jpy),
+        "Tachibana must fold in Jpy as the venue default",
+    );
+}
+
+#[test]
+fn normalize_quote_currency_preserves_existing_value() {
+    let mut info = TickerInfo::new(
+        Ticker::new("BTCUSDC", Exchange::BinanceSpot),
+        0.1,
+        0.001,
+        None,
+    );
+    info.quote_currency = Some(flowsurface_exchange::QuoteCurrency::Usdc);
+    info.normalize_after_load();
+    assert_eq!(
+        info.quote_currency,
+        Some(flowsurface_exchange::QuoteCurrency::Usdc),
+        "explicit value must not be overwritten",
+    );
+}
+
+#[test]
 fn stock_qty_in_quote_value_ignores_size_in_quote_ccy_flag() {
     use flowsurface_exchange::adapter::MarketKind;
     use flowsurface_exchange::unit::{Price, Qty};

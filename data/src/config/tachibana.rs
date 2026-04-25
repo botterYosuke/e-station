@@ -147,11 +147,11 @@ impl From<&TachibanaCredentials> for TachibanaCredentialsWire {
     fn from(c: &TachibanaCredentials) -> Self {
         Self {
             user_id: c.user_id.clone(),
-            password: c.password.expose_secret().clone(),
+            password: c.password.expose_secret().clone().into(),
             second_password: c
                 .second_password
                 .as_ref()
-                .map(|s| s.expose_secret().clone()),
+                .map(|s| s.expose_secret().clone().into()),
             is_demo: c.is_demo,
             session: c.session.as_ref().map(Into::into),
         }
@@ -161,11 +161,11 @@ impl From<&TachibanaCredentials> for TachibanaCredentialsWire {
 impl From<&TachibanaSession> for TachibanaSessionWire {
     fn from(s: &TachibanaSession) -> Self {
         Self {
-            url_request: s.url_request.expose_secret().clone(),
-            url_master: s.url_master.expose_secret().clone(),
-            url_price: s.url_price.expose_secret().clone(),
-            url_event: s.url_event.expose_secret().clone(),
-            url_event_ws: s.url_event_ws.expose_secret().clone(),
+            url_request: s.url_request.expose_secret().clone().into(),
+            url_master: s.url_master.expose_secret().clone().into(),
+            url_price: s.url_price.expose_secret().clone().into(),
+            url_event: s.url_event.expose_secret().clone().into(),
+            url_event_ws: s.url_event_ws.expose_secret().clone().into(),
             expires_at_ms: s.expires_at_ms,
             zyoutoeki_kazei_c: s.zyoutoeki_kazei_c.clone(),
         }
