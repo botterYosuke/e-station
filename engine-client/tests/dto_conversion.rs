@@ -170,7 +170,7 @@ fn oi_point_converts() {
     };
     let oi = pt.to_open_interest().expect("should convert");
     assert_eq!(oi.time, 5_000);
-    assert!((oi.value - 987654.32).abs() < 1.0, "oi value: {}", oi.value);
+    assert!((oi.value - 987_654.3).abs() < 1.0, "oi value: {}", oi.value);
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn kline_msg_taker_buy_larger_than_total_clamped_to_zero_sell() {
             // sell should be clamped to 0, not negative
             let sell_val = sell.to_f32_lossy();
             assert!(
-                sell_val >= -0.01 && sell_val <= 0.01,
+                (-0.01..=0.01).contains(&sell_val),
                 "sell volume should be ~0, got {}",
                 sell_val
             );

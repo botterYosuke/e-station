@@ -16,8 +16,7 @@ async fn bind_loopback() -> (TcpListener, SocketAddr) {
 }
 
 /// Server: accept → Hello → Ready → close.
-async fn spawn_ready_then_close(listener: TcpListener, token: &str) {
-    let token = token.to_owned();
+async fn spawn_ready_then_close(listener: TcpListener, _token: &str) {
     tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = accept_async(tcp).await.unwrap();
