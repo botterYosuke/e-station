@@ -699,9 +699,8 @@ impl Flowsurface {
 
                             let resolved_streams =
                                 streams.into_iter().try_fold(vec![], |mut acc, persist| {
-                                    let resolver = |t: &exchange::Ticker| {
-                                        tickers_info.get(t).and_then(|opt| *opt)
-                                    };
+                                    let resolver =
+                                        |t: &exchange::Ticker| tickers_info.get(t).and_then(|opt| *opt);
 
                                     match persist.into_stream_kinds(resolver) {
                                         Ok(mut resolved) => {

@@ -499,10 +499,11 @@ class DataEngineServer:
     async def _do_list_tickers(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
+        market = _market_from_msg(msg, venue)
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
-        tickers = await worker.list_tickers(_market_from_msg(msg, venue))
+        tickers = await worker.list_tickers(market)
         self._outbox.append(
             {
                 "event": "TickerInfo",

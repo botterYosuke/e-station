@@ -1691,18 +1691,19 @@ fn fetch_ticker_stats_task(
 fn fetch_metadata_task(handles: &AdapterHandles, venue: Venue) -> Task<Message> {
     let markets_to_fetch = available_markets(venue);
     let handles = handles.clone();
-    let fetch = async move { handles.fetch_ticker_metadata(venue, markets_to_fetch).await };
-
-    Task::perform(fetch, move |result| match result {
-        Ok(ticker_info) => Message::UpdateMetadata(venue, ticker_info),
-        Err(err) => {
-            log::error!("Ticker metadata fetch failed for {venue:?}: {err}");
-            Message::MetadataFetchFailed(
-                venue,
-                InternalError::Fetch(format!("{venue:?}: {}", err.ui_message())),
-            )
-        }
-    })
+    Task::perform(
+        async move { handles.fetch_ticker_metadata(venue, markets_to_fetch).await },
+        move |result| match result {
+            Ok(ticker_info) => Message::UpdateMetadata(venue, ticker_info),
+            Err(err) => {
+                log::error!("Ticker metadata fetch failed for {venue:?}: {err}");
+                Message::MetadataFetchFailed(
+                    venue,
+                    InternalError::Fetch(format!("{venue:?}: {}", err.ui_message())),
+                )
+            }
+        },
+    )
 }
 
 /// Keeps ticker-stats fetch behavior predictable and spam-safe.

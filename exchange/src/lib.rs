@@ -275,7 +275,7 @@ impl std::hash::Hash for Ticker {
 }
 
 impl Ticker {
-    const MAX_LEN: u8 = 28;
+    pub const MAX_LEN: u8 = 28;
 
     pub fn new(ticker: &str, exchange: Exchange) -> Self {
         Self::new_with_display(ticker, exchange, None)

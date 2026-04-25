@@ -420,17 +420,17 @@ impl VenueBackend for EngineClientBackend {
             for &market_kind in &markets {
                 let exchange = Self::exchange_for(&venue, market_kind);
                 let request_id = Uuid::new_v4().to_string();
+                let market_str = Self::market_kind_to_ipc(market_kind);
                 let cmd = Command::ListTickers {
                     request_id: request_id.clone(),
                     venue: venue.clone(),
-                    market: Self::market_kind_to_ipc(market_kind),
+                    market: market_str.clone(),
                 };
                 let mut rx = connection.subscribe_events();
 
-                connection
-                    .send(cmd)
-                    .await
-                    .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
+                if let Err(e) = connection.send(cmd).await {
+                    return Err(AdapterError::WebsocketError(e.to_string()));
+                }
 
                 let market_map = tokio::time::timeout(FETCH_TIMEOUT, async {
                     loop {
@@ -444,8 +444,20 @@ impl VenueBackend for EngineClientBackend {
                                     .iter()
                                     .filter_map(|t| {
                                         let symbol = t.get("symbol")?.as_str()?;
+                                        if !symbol.is_ascii()
+                                            || symbol.len() > Ticker::MAX_LEN as usize
+                                            || symbol.contains('|')
+                                        {
+                                            return None;
+                                        }
                                         let display_symbol =
                                             t.get("display_symbol").and_then(|v| v.as_str());
+                                        let display_symbol =
+                                            display_symbol.filter(|d| {
+                                                d.is_ascii()
+                                                    && d.len() <= Ticker::MAX_LEN as usize
+                                                    && !d.contains('|')
+                                            });
                                         let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
                                         let min_qty = t.get("min_qty")?.as_f64()? as f32;
                                         let contract_size = t
@@ -481,7 +493,7 @@ impl VenueBackend for EngineClientBackend {
                             | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 return Err(AdapterError::EngineRestarting);
                             }
-                            _ => continue,
+                            Ok(_) | Err(_) => continue,
                         }
                     }
                 })
