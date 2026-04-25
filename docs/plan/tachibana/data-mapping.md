@@ -22,7 +22,7 @@ pub enum Exchange {
 }
 ```
 
-- `MarketKind::Stock` の `qty_in_quote_value(qty, price, size_in_quote_ccy)` 実装は **常に `price * qty`**（quote = JPY、F-M3）。**`size_in_quote_ccy` 引数は `MarketKind::Stock` 内部で無視する**（呼出規約に頼らず enum 内部分岐で強制し、暗号資産パスからの誤呼出しで silently 誤値にならないようにする）。実装は `match self { MarketKind::Stock => price * qty, ... }` で `Stock` バリアントを最優先に分岐
+- `MarketKind::Stock` の `qty_in_quote_value(qty, price, size_in_quote_ccy)` 実装は **常に `price * qty`**（quote = JPY、F-M3b）。**`size_in_quote_ccy` 引数は `MarketKind::Stock` 内部で無視する**（呼出規約に頼らず enum 内部分岐で強制し、暗号資産パスからの誤呼出しで silently 誤値にならないようにする）。実装は `match self { MarketKind::Stock => price * qty, ... }` で `Stock` バリアントを最優先に分岐
 - 信用区分（`sGenkinShinyouKubun`）は **MarketKind では区別しない**（読み取り専用 Phase 1 ではチャート上区別不要）。発注時に別パラメータとして渡す（Phase 2）
 - IPC では `venue: "tachibana"` / `market: "stock"` を文字列で使う
 - 既存 UI には `Spot` / `LinearPerps` / `InversePerps` の 3 分岐を前提にした suffix・market filter・indicator 可用性・timeframe 可用性があるため、**`MarketKind::Stock` 追加は DTO だけでなく表示層の match も更新対象**とみなす（網羅 match の更新箇所は T0 で grep 棚卸し）
@@ -32,18 +32,20 @@ pub enum Exchange {
 | 項目 | 立花 | 本アプリ |
 | :--- | :--- | :--- |
 | 銘柄コード | `sIssueCode` 4 桁数字 / 5 桁数字 / **末尾英字を含む 5 桁英数字**（新興市場の優先出資証券・新株予約権付社債で `130A0` のような表記あり） | `Ticker` の symbol 部分にそのまま入れる（ASCII 英数字のみ） |
-| 表示名 | 銘柄マスタの銘柄名（Shift-JIS 漢字） | `Ticker::new` / `Ticker::new_with_display` は [exchange/src/lib.rs:291,303](../../../exchange/src/lib.rs#L291) で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに `engine-client::dto::TickerListed`（または `GetTickerMetadata` の応答）に `display_name_ja: Option<String>` を追加し、Rust 側 UI は `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T0 で DTO とキャッシュ両方を設計） |
+| 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は [exchange/src/lib.rs:291,303](../../../exchange/src/lib.rs#L291) で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに `engine-client::dto::TickerListed`（または `GetTickerMetadata` の応答）に `display_name_ja: Option<String>` を追加し、Rust 側 UI は `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T0 で DTO とキャッシュ両方を設計） |
 | 市場コード | `sSizyouC`（`00`=東証） | Phase 1 は東証固定 |
 | 売買単位 | 銘柄マスタ `sTatebaTanniSuu` | `TickerInfo.lot_size` 相当（新規プロパティ追加要） |
 | 呼値単位 | マスタ「呼値」テーブル（価格帯依存） | `Price` の min_ticksize で表現。**価格帯ごとに変わる** ため固定 1 値では足りない（§5 参照） |
 
 `Ticker::new("7203", Exchange::TachibanaStock)` のような文字列パスで素直に通る（現 API は第 2 引数 `Exchange` が必須、[exchange/src/lib.rs:281](../../../exchange/src/lib.rs#L281)）。既存 `Ticker::new` は ASCII 制約と `MAX_LEN` チェック（[lib.rs:290](../../../exchange/src/lib.rs#L290)）のみで、**`130A0` のような英字混在 5 桁 ticker も許容可能**。T4 では「実データで通ること」（ASCII 制約 + MAX_LEN 収容）の確認に留める（F2）。
 
+**先行実装参考（M9）**: 類似プロジェクト [flowsurface](file:///C:/Users/sasai/Documents/flowsurface) の `exchange/src/adapter/tachibana.rs:625-684` が同じ問題に対する `MasterRecord` 型（`sIssueName` / `sIssueNameRyaku` / `sIssueNameKana` / `sIssueNameEizi` の 4 種を全保持）と「`display_symbol` には英語名 `sIssueNameEizi` を採用、ASCII 28 文字に収まらないものは `None` フォールバック」というパターンを既に持っている。本計画では **同じ MasterRecord 4 フィールドを Python 側に踏襲**し、加えて `display_name_ja` (`sIssueName`) を別ルートで運ぶ（implementation-plan.md T0.2 の M9 項目）。
+
 ## 3. trade（FD frame からの合成）
 
 立花にはミリ秒単位のテープデータ API は存在しない。代わりに EVENT の **FD frame**（時価情報）が変化分のみ来る。Phase 1 では下記をもって "trade" とみなす:
 
-> **情報コード出典の注意（F-M2、F-H3）**: 下記の `DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` 等は SKILL.md には `DPP` 1 例しか記載がなく、公式 EVENT 仕様 PDF（`api_event_if_v4r7.pdf`）は `manual_files/` に同梱されていない。**T0 末で Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) のコード表抜粋を本節に転記する**こと（implementation-plan T0.1 タスク化）。**この一覧の確定は T1（codec）と T5（FD trade/depth）の前提条件**であり、未確定のまま下流フェーズに着手しない。それまで本節のコード名は暫定値として扱う。
+> **情報コード出典の注意（F-M2a、F-H3）**: 下記の `DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` 等は SKILL.md には `DPP` 1 例しか記載がなく、公式 EVENT 仕様 PDF（`api_event_if_v4r7.pdf`）は `manual_files/` に同梱されていない。**T0 末で Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) のコード表抜粋を本節に転記する**こと（implementation-plan T0.1 タスク化）。**この一覧の確定は T1（codec）と T5（FD trade/depth）の前提条件**であり、未確定のまま下流フェーズに着手しない。それまで本節のコード名は暫定値として扱う。
 
 
 | 立花 FD フィールド | 意味 | TradeMsg |
@@ -62,7 +64,7 @@ pub enum Exchange {
   4. trade 発火後に `prev_quote` を現 frame の best_bid/best_ask で更新
 - **初回 frame（prev_quote=None かつ prev_dv=None）は trade を発火しない**（F4）。初回 frame は quote 初期化と DV 初期化だけを行い、2 件目以降で trade 合成を開始する
 - 履歴が無くかつ tick rule も効かないエッジケースでは `buy` 既定、ただしログに `warn!("tachibana: initial trade side ambiguous")` を出す
-- **tick rule fallback テストケース（F-M8）**: `test_tachibana_fd_trade.py` に「DPP が前 frame の bid と ask の中値ぴったり / 直前 trade 価格より上昇 → `buy`」「同条件で直前 trade 価格より下落 → `sell`」「直前 trade も同値 → 既定 `buy` + warn ログ」の 3 ケースを追加
+- **tick rule fallback テストケース（F-M8b）**: `test_tachibana_fd_trade.py` に「DPP が前 frame の bid と ask の中値ぴったり / 直前 trade 価格より上昇 → `buy`」「同条件で直前 trade 価格より下落 → `sell`」「直前 trade も同値 → 既定 `buy` + warn ログ」の 3 ケースを追加
 
 **DV リセット条件（F4）**:
 - 新規 WebSocket 接続（`stream_session_id` が更新された場合）
@@ -106,11 +108,13 @@ DepthSnapshot {
 
 既存 `MinTicksize` は **1 値固定** を前提とした型（[exchange/src/unit.rs](../../../exchange/src/unit.rs) 周辺）。**3 つの選択肢**:
 
-- **(A) 最小値固定** — 0.1 円（優先株や ETF の最小刻み）を採用し、UI 描画は許容。発注時の価格丸めが立花側で reject されうる
+- **(A) 最小値固定** — `TickerInfo` 構築時に「当該銘柄の現在価格帯から呼値テーブル §2-12 を引いた 1 値」を埋める（例: 7203=1 円、9984=10 円、優先株 / 値嵩株 ETF=0.1 円）。**T4 のマスタ取得時にスナップショット価格を参照して決定**し、ザラ場中の価格帯遷移は無視する
 - **(B) `MinTicksize` を「価格帯テーブル参照可能」に拡張** — 既存型のオーバーホール。波及範囲が大きい
 - **(C) ticker ごとに「現在価格に応じた tick」を動的に再計算する** — `TickerInfo` を時価変動で更新
 
-**Phase 1 推奨: (A)**。Phase 1 はリードオンリーなので発注時の reject は起きない。チャート描画は最小刻みで十分機能する。Phase 2（発注）で (C) に移行。
+**Phase 1 推奨: (A)**（B4 改訂）。**「最小値の 0.1 円固定」は不採用**。理由は通常株（TOPIX100 を除く大半）の呼値刻みは 1 円〜10 円であり、0.1 円固定だと価格軸ラベルに無意味な小数桁（`7203.0` `7203.1` ...）が出てチャート可読性が下がるため。リードオンリーなので発注 reject は起きないが、UI 描画品質を優先する。`TickerInfo::new_stock` の引数で `min_ticksize: f32` を受け取る既存シグネチャはそのまま使え、Python 側 `tachibana_master.py` で「銘柄スナップショット価格 → 呼値刻み」を表引きで解決する。Phase 2（発注）で (C) に移行。
+
+**呼値テーブル（§2-12）の Python 側実装**: `tachibana_master.py` に `tick_size_for_price(price: Decimal) -> Decimal` を 1 関数置き、SKILL.md / マスタ I/F PDF の表に基づき価格帯 →刻み を hardcode（Phase 1）。テーブル変更は立花側で年単位の頻度なので Phase 1 では更新監視を入れない。
 
 `TickerInfo` 拡張案:
 
@@ -184,7 +188,7 @@ pub struct TickerInfo {
 ```
 
 - **`&'static str` は採用しない**: serde で受信した文字列を `&'static` に戻せず、`Hash`/`Eq` 派生が崩れるため。enum で表現し、不明値は serde error にする
-- **`Default` は付けない・`Option<QuoteCurrency>` で持つ（F-M6）**: `Default = Usdt` にしてしまうと、新フォーマット導入前の永続 state を読み戻したときに **立花銘柄まで `Usdt` で復元され UI が `$` 表記する**事故が起きる。`Option<QuoteCurrency>` + `#[serde(default)]` で missing field は `None`、`None` のときはフォーマッタが `Exchange`/`Venue` から venue ごとに決定論的に算出する（暗号資産 venue は USDT/USDC、立花は JPY）。**永続 state からの復元は読み込み時に必ず venue 由来の値を再注入**して `Some(...)` に正規化する
+- **`Default` は付けない・`Option<QuoteCurrency>` で持つ（F-M6a）**: `Default = Usdt` にしてしまうと、新フォーマット導入前の永続 state を読み戻したときに **立花銘柄まで `Usdt` で復元され UI が `$` 表記する**事故が起きる。`Option<QuoteCurrency>` + `#[serde(default)]` で missing field は `None`、`None` のときはフォーマッタが `Exchange`/`Venue` から venue ごとに決定論的に算出する（暗号資産 venue は USDT/USDC、立花は JPY）。**永続 state からの復元は読み込み時に必ず venue 由来の値を再注入**して `Some(...)` に正規化する
 - venue ごとの quote 抽出関数は `Exchange::default_quote_currency(&self) -> QuoteCurrency` として `exchange/src/adapter.rs` に実装。ticker 単位で例外がある場合のみ `Some(_)` で override
 - UI のフォーマッタはこの enum を見て `¥` / `$` プレフィックス + 桁区切りを切り替える
 

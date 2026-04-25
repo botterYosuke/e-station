@@ -82,8 +82,8 @@ E2E 検証やエージェント体験検証で flowsurface を起動し、立花
 
 | ビルド | 自動ログイン | デモトグル自動化 | 用途 |
 | :--- | :--- | :--- | :--- |
-| `target/debug/flowsurface.exe` | ✅（env 読む） | ✅（`DEV_IS_DEMO`） | E2E・検証・開発 |
-| `target/release/flowsurface.exe` | ❌（env は**完全無視**） | ❌ | 本番配布のみ |
+| `target/debug/flowsurface.exe` | ✅（Python 側が env を読む） | ✅（`DEV_TACHIBANA_DEMO`） | E2E・検証・開発 |
+| `target/release/flowsurface.exe` | ❌（Python 側も env を**完全無視**、release Python パスでガード） | ❌ | 本番配布のみ |
 
 **禁止**: release で起動してログイン画面が空なのを「env 未設定」と誤診断すること。release は env を読まない。
 
@@ -105,19 +105,16 @@ Get-Content .env | ForEach-Object {
 & .\target\debug\flowsurface.exe
 ```
 
-`.env` の想定キー（いずれも debug 専用）:
+`.env` の想定キー（いずれも debug 専用、**Python 側 `tachibana_login_flow.py` のみが読む**）:
 
 ```
 DEV_TACHIBANA_USER_ID=...          # 立花ユーザーID
 DEV_TACHIBANA_PASSWORD=...         # ログインパスワード
-DEV_TACHIBANA_SECOND_PASSWORD=...  # 第二暗証番号（Phase 2 発注で必要、Phase 1 では未使用）
-DEV_TACHIBANA_DEMO=true            # demo 環境強制フラグ（未設定時は demo 既定）
-DEV_IS_DEMO=true         # true でデモトグル ON（未設定・false だと本番環境に接続する！）
-TACHIBANA_USER_ID=...    # （旧称の互換キー、使われていなければ削除可）
-TACHIBANA_PASSWORD=...
+DEV_TACHIBANA_SECOND_PASSWORD=...  # 第二暗証番号（Phase 2 発注で必要、Phase 1 では収集も保持もしない）
+DEV_TACHIBANA_DEMO=true            # demo 環境フラグ（**未設定時は demo 既定**で本番に飛ばない）
 ```
 
-**`DEV_IS_DEMO=true` を必ず指定する**。未設定だと本番 URL に接続しに行き、R1 違反（実弾）を踏みうる。
+**`DEV_TACHIBANA_DEMO` 既定値は `true`**。未設定でも demo URL のみを叩く（spec.md §3.1 / architecture.md §7.7、F-Default-Demo）。**本番接続は別途 `TACHIBANA_ALLOW_PROD=1` を併用したときに限り Python URL builder が解禁する**（implementation-plan T7、Q7）。`DEV_IS_DEMO` / `TACHIBANA_USER_ID` / `TACHIBANA_PASSWORD` といった旧名は**いずれも採用しない**。`.env` に書かれていても Python は読まない（誤って残しても害は無いが混乱の元なので削除推奨）。
 
 ### S3. 2 回目以降の起動は **keyring が env より優先**される
 
@@ -130,7 +127,7 @@ INFO -- Tachibana session validated successfully, restoring
 ```
 
 意味:
-- **初回だけ**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO=true` が必要（手動の電話認証は別途ユーザーが済ませている前提）
+- **初回だけ**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` が必要（`DEV_TACHIBANA_DEMO` は未設定で OK、既定 demo）。手動の電話認証は別途ユーザーが済ませている前提
 - **2 回目以降**: 仮想 URL が夜間閉局までは keyring セッションで起動できる。env 未設定でも動く
 - **keyring を壊したいとき**: 専用 HTTP API は **将来実装予定（T3 以降）**。Phase 1 では keyring エントリ（service `flowsurface.tachibana`）を OS の keyring CLI（macOS: `security delete-generic-password`, Windows: `cmdkey /delete`, Linux: `secret-tool clear`）で直接削除する
 

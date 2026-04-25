@@ -8,7 +8,7 @@
 | Q4 | EVENT は HTTP long-poll か WebSocket か | (a) WS のみ / (b) フォールバック付き | T5 | サンプル WS 版のほうが軽量で構築が単純。**推奨: WS のみ**。HTTP long-poll は閉鎖環境向けの予備なので Phase 1 では切り捨て |
 | Q5 | 銘柄マスタ 21MB の保管場所 | メモリ展開のみ / アプリのキャッシュディレクトリに永続 | T4 | 起動時間と再ログイン頻度のトレードオフ。**推奨: 日付つきファイルでキャッシュ + 起動時に当日分なければ再取得** |
 | Q6 | 現物 / 信用の UI 区別 | しない（同一 ticker） / pane 単位で切替 | Phase 2 | Phase 1 はリードオンリーなので「区別不要」。発注時のみ重要 |
-| Q7 | release ビルドでの本番接続許可方法 | `TACHIBANA_ALLOW_PROD=1` env / 設定ファイル / 完全禁止 | T7 | 暫定: env でのみ許可（GUI には出さない）。UI 露出は別議論 |
+| Q7 | release ビルドでの本番接続許可方法 | `TACHIBANA_ALLOW_PROD=1` env / 設定ファイル / 完全禁止 | T7 | **決定（M8 改訂）**: `TACHIBANA_ALLOW_PROD=1` env を立てた起動セッションに限り、**Python tkinter ログインダイアログ内にデモ/本番ラジオを描画**して都度選択させる。env 無し → デモ固定（ラジオ非表示）。本番選択時は二段警告 modal で確認。メイン画面・設定からの常時 UI 露出は引き続きしない |
 | Q8 | 立花レート制限値 | サンプル準拠（3 秒リトライ）/ 公式値（不明） | T2 | サンプル `e_api_get_master_tel.py` の `time.sleep(3)` を上限の代理として採用、公式値が判明したら更新 |
 | Q9 | 銘柄セレクタの絞り込み UX | 全件表示 / 市場別 / 上場区分別 | T4 | 数千銘柄を一気に出すと UI 重い。インクリメンタル検索（コード or 名前先頭一致）を入れる |
 | Q10 | JST 表示と UTC ms 内部表現の境界 | チャート軸ラベルだけ JST / 全データ JST 化 | T4 | 既存暗号資産は UTC。venue ごとに表示タイムゾーンを切替できる仕組みが必要かは要 UX 議論 |
@@ -19,7 +19,7 @@
 | Q15 | ザラ場時間のソース | ハードコード（9:00–11:30 / 12:30–15:30）/ `CLMDateZyouhou` から動的取得 | T5 | 2024-11-05 の延長を踏まえると、将来の取引時間変更を吸収するためマスタ動的取得が望ましい。**推奨: Phase 1 はハードコード、Phase 2 で動的化** |
 | Q16 | 日本語銘柄名の IPC 伝搬方法 | `TickerInfo` 拡張 / `TickerInfo` event payload 拡張 / UI 側別キャッシュ | T0 | 既存 `display_symbol` は ASCII 制約あり。**決定: `engine-client::dto::TickerListed` / `TickerMetadata` 応答に `display_name_ja: Option<String>` を追加し、Rust UI 側は `HashMap<Ticker, TickerDisplayMeta>` で別管理。`TickerInfo` の Hash には含めない**（implementation-plan T0.2 に明記） |
 | Q17 | `NotImplementedError` の表現 | 現行 `not_implemented` のまま / venue 専用コード追加 | T6 | server 実装は一律 `not_implemented` を返す。Phase 1 は現行踏襲、専用コードは必要性が出てから |
-| Q18 | `TickerInfo` フィールド追加による Hash 影響 | (a) フィールド追加で永続 state を migrate / (b) 別 struct に分離 / (c) `quote_currency` を enum 化して破壊変更を最小化 | T0 | `TickerInfo` は `#[derive(Hash, Eq)]` で `HashMap` キーとして使われる。**決定: (c)** `QuoteCurrency` を `Option<QuoteCurrency>` で追加し（F-M6）、`None` 復元時は venue 由来値で正規化。永続 state は T0 で旧 `state.json` 起動テスト必須（F-M4） |
+| Q18 | `TickerInfo` フィールド追加による Hash 影響 | (a) フィールド追加で永続 state を migrate / (b) 別 struct に分離 / (c) `quote_currency` を enum 化して破壊変更を最小化 | T0 | `TickerInfo` は `#[derive(Hash, Eq)]` で `HashMap` キーとして使われる。**決定: (c)** `QuoteCurrency` を `Option<QuoteCurrency>` で追加し（F-M6a）、`None` 復元時は venue 由来値で正規化。永続 state は T0 で旧 `state.json` 起動テスト必須（F-M4） |
 | Q19 | trade `side` 推定アルゴリズム | (a) 直前 bid/ask との比較のみ（quote rule） / (b) Lee-Ready (quote rule + tick rule fallback) / (c) UI で常に neutral 色表示 | T5 | チャート上で buy/sell カラーを正しく出すため。**決定: (b)** quote rule を主とし、中値ぴったりは直前 trade との tick rule にフォールバック（data-mapping.md §3 に明記） |
 | Q20 | Shift-JIS デコード時の不正バイト | `errors="ignore"`（脱落） / `errors="replace"`（`?` 表示） / `errors="strict"`（例外） | T1 | 銘柄名の一部脱落は ticker selector 検索に支障。**推奨: `errors="replace"`** で `?` を出して表示の存在を残す。エラーメッセージ系は `replace` のままで可 |
 | Q21 | demo 環境の運用時間と CI スケジュール | 平日 8:00–18:00 JST 想定 / 公式値（不明） | T2 | demo にも夜間閉局あり。CI demo ジョブが閉局時に走ると毎回 fail。T2 でログイン応答などから運用時間を実機確認し、決まり次第 spec.md §4 / implementation-plan T7 を更新 |
@@ -40,7 +40,7 @@
 
 | Q36 | `Timeframe` の serde 形式 | (a) 既存の derive 任せ（`"D1"`） / (b) `#[serde(rename = "...")]` で `Display` と一致させる | T0 | レビュー指摘 F-H1。**決定: (b)**。capabilities (`["1d"]`) と既存 `Display` (`"1d"`) に揃える。既存暗号資産 venue 経路に IPC 形式変更が波及するため `cargo test --workspace` で回帰確認必須 |
 | Q37 | マスタ DL の kick タイミング | (a) `VenueReady` に含める / (b) `VenueReady` 直後に非同期 kick / (c) 初回 `ListTickers` で lazy | T4 | レビュー指摘 F-H6。**決定: (b)**。`VenueReady` 受信直後に `_ensure_master_loaded()` を `asyncio.create_task` で kick、`list_tickers` 等は内部で `await` する。`VenueReady` 自体は session 検証完了のみを意味する原則は維持 |
-| Q38 | 祝日のフェイルセーフ | (a) Phase 1 では考慮せず取引所エラーを `VenueError` に流す / (b) 「市場休業」相当エラーを検出して `Disconnected{reason:"market_closed"}` に倒す | T5 | レビュー指摘 F-M5。**決定: (b)**。誤判定防止のため対象は明示的なエラーコードのみ。動的祝日カレンダーは引き続き Phase 2 |
+| Q38 | 祝日のフェイルセーフ | (a) Phase 1 では考慮せず取引所エラーを `VenueError` に流す / (b) 「市場休業」相当エラーを検出して `Disconnected{reason:"market_closed"}` に倒す | T5 | レビュー指摘 F-M5a。**決定: (b)**。誤判定防止のため対象は明示的なエラーコードのみ。動的祝日カレンダーは引き続き Phase 2 |
 | Q39 | `BASE_URL_PROD` 定数の所在 | (a) Python 側 1 ファイル限定 / (b) Rust と Python 両方に持つ | T0 | レビュー指摘 F-L1。**決定: (a)** `python/engine/exchanges/tachibana_url.py` のみ。Rust 側は本番 URL リテラルを持たず、`tools/secret_scan.sh` の allowlist もこの 1 ファイルのみ |
 
 ## 決定済み（参考）
@@ -51,6 +51,6 @@
 - [x] **Phase 1 はリードオンリー**（[spec.md §2.2](./spec.md#22-含めないもの明示的に-phase-2-送り)）
 - [x] **電話認証はアプリの関与外**（ユーザーが事前完了している前提）
 - [x] **runtime の session expiry では自動再ログインしない**（起動時 session 復元失敗時のみ 1 回 fallback 可）
-- [x] **第二暗証番号は Phase 1 から受け取って保持する**（keyring + Python メモリ。発注には使わない）
+- [x] **第二暗証番号は Phase 1 では収集も保持もしない**（F-H5、Q11 改訂）。DTO スキーマには `Option<SecretString>` を切るが Rust UI / keyring / Python メモリのいずれにも値を入れず常に `None` を送る。Phase 2 着手時に値の収集・保持を有効化（スキーマ破壊変更なし）
 - [x] **managed mode の credentials 再注入は `ProcessManager` を source of truth にする**
 - [x] **立花 venue の metadata fetch / subscribe は `VenueReady` 後にのみ許可する**

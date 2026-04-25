@@ -61,11 +61,11 @@ pub struct TickerInfo {
 | ファイル | 行 | パターン | `Stock` の扱い |
 | :--- | ---: | :--- | :--- |
 | `exchange/src/adapter.rs` | 45-47 | `pub const ALL: [MarketKind; 3]` | 配列を `[MarketKind; 4]` へ拡張、`Stock` を追加 |
-| `exchange/src/adapter.rs` | 53-62 | `qty_in_quote_value` の match | **`Stock => price * qty`** を最優先で追加（F-M3、`size_in_quote_ccy` 引数を見ない） |
+| `exchange/src/adapter.rs` | 53-62 | `qty_in_quote_value` の match | **`Stock => price * qty`** を最優先で追加（F-M3b、`size_in_quote_ccy` 引数を見ない） |
 | `exchange/src/adapter.rs` | 71-75 | `Display` | `Stock => "Stock"` |
 | `exchange/src/adapter.rs` | 84-92 | `FromStr` | `"stock" => Stock` |
 | `exchange/src/adapter.rs` | 392-407 | `Exchange::market_type` | `TachibanaStock => Stock` |
-| `data/src/chart/indicator.rs:22-23, 54-55` | | `MarketKind::Spot => &Self::FOR_SPOT, ::LinearPerps \| ::InversePerps => &Self::FOR_PERPS` | `Stock => &Self::FOR_SPOT`（Phase 1 は spot 相当のインジケータ可用性。OI などは capabilities で UI 非活性化） |
+| `data/src/chart/indicator.rs:22-23, 54-55` | | `MarketKind::Spot => &Self::FOR_SPOT, ::LinearPerps \| ::InversePerps => &Self::FOR_PERPS` | `Stock => &Self::FOR_SPOT`（Phase 1 は spot 相当のインジケータ可用性。OI などは capabilities で UI 非活性化）。**M4 修正**: `FOR_SPOT` の実体（[data/src/chart/indicator.rs](../../../data/src/chart/indicator.rs)）を T0.2 着手時に列挙し、株式に意味を持たないもの（funding rate / open interest / liquidation 系など）が混入していないか確認する。混入していれば `Stock` 専用配列を別途用意するか、UI 側で個別非活性化する判断を T0.2 内で行う |
 | `data/src/tickers_table.rs:169-170` | | `Spot => "" / Perps => "P"` 表示サフィックス | `Stock => ""`（株式に Perp サフィックス不要） |
 | `engine-client/src/backend.rs:50-56` | | `market_kind_to_ipc` | `Stock => "stock"` |
 | `src/screen/dashboard/tickers_table.rs:63-66, 750-752, 1090-1091` | | venue ごとの `MarketKind` 配列、market filter ボタン、UI suffix | `Venue::Tachibana => &[MarketKind::Stock]`、Stock 用 market filter は Phase 1 では非表示推奨。Stock の suffix は `""` |
@@ -133,7 +133,7 @@ pub enum Timeframe {
 
 → **永続 state にも書かれているため、rename 適用時は古い形式 (`"D1"`) のロードを別途吸収**するか、**現状 JSON 出力 (`"D1"`) と Display (`"1d"`) の不整合を許容して新規ロード時のみ wire 形式**にするかの判断が必要。
 
-**判断**: T0.2 では全変種に `#[serde(rename = ...)]` を付与し、旧 `"D1"` 形式の互換は serde untagged enum か `#[serde(alias = "D1")]` で吸収する方針。最低限新規 IPC は `"1d"` で揃う。
+**判断**: T0.2 では全変種に `#[serde(rename = "1d")]` 等を付与し、書込み時は新形式 `"1d"` のみ、読込み時は `#[serde(alias = "D1")]` で旧形式を吸収する**フォワード互換のみ**の方針。**ロールバック非互換**（新形式で書かれた永続 state を旧バイナリへ戻すと panic）を [README.md](./README.md) ＋本ファイル §12 に明記。リリースノートにも書く。
 
 ## 6. `EngineEvent::Disconnected` の shape（F-H2）
 
@@ -180,7 +180,7 @@ pub struct ProcessManager {
 - `docs/plan/✅python-data-engine/schemas/events.json` ✅
 - `docs/plan/✅python-data-engine/schemas/CHANGELOG.md` ✅（最新は v1.1）
 
-## 11. FD 情報コード一覧（F-M2 / F-H3）
+## 11. FD 情報コード一覧（F-M2a / F-H3）
 
 立花 EVENT WebSocket / HTTP long-poll が返す **FD frame の情報コード**は、API ドキュメントの「**型_行番号_情報コード**」キー形式（`p_<行>_<コード>`）で運ばれる。
 
@@ -192,7 +192,26 @@ pub struct ProcessManager {
 
 ### 11.2 暫定コード名（plan 文書からの転記、未確認マーク付き）
 
-[data-mapping.md §3-4](./data-mapping.md) で使われている暫定名:
+**L5 修正**: `p_evt_cmd` 値（コマンド種別）と FD frame data key（`p_<行>_<コード>` の `<コード>` 部分）はレイヤが異なるため別表に分離する:
+
+#### 11.2.a `p_evt_cmd` 値（FD/EVENT 接続時の購読コマンド種別）
+
+これは EVENT URL の `?p_evt_cmd=...` に渡す値。FD frame の中身ではない。
+
+| コード | 意味 | 一次資料での確認 |
+| :--- | :--- | :--- |
+| `FD` | 時価情報配信 | ✅ 確認済（SKILL.md / サンプル L539-540） |
+| `KP` | KeepAlive frame（5 秒周期） | ✅ 確認済（SKILL.md ストリーム規約） |
+| `ST` | エラーステータス frame | ✅ 確認済（サンプル L539-540） |
+| `SS` | システムステータス frame | ✅ 確認済（サンプル L539-540） |
+| `US` | 運用ステータス frame | ✅ 確認済（サンプル L539-540） |
+| `EC` | 約定通知 frame（Phase 2 で利用） | ✅ 確認済（サンプル L539-540） |
+| `NS` | ニュース通知 | ✅ 確認済（重いため Phase 1 不使用） |
+| `RR` | 画面リフレッシュ | ✅ 確認済（不使用） |
+
+#### 11.2.b FD frame data key（`p_<行>_<コード>` の `<コード>` 部分）
+
+FD frame ペイロードのフィールド名。[data-mapping.md §3-4](./data-mapping.md) で trade/depth 合成に使用。
 
 | 暫定コード | 意味 | 一次資料での確認 |
 | :--- | :--- | :--- |
@@ -204,18 +223,18 @@ pub struct ProcessManager {
 | `GBK1..5` | 買気配 価格 1〜5 本目 | ⚠️ **未確認** |
 | `GAS1..5` | 売気配 株数 1〜5 本目 | ⚠️ **未確認** |
 | `GBS1..5` | 買気配 株数 1〜5 本目 | ⚠️ **未確認** |
-| `KP` | KeepAlive frame（5 秒周期） | ✅ 確認済（サンプル L582-583 の `p_evt_cmd=ST,KP,FD` 列挙、SKILL.md ストリーム規約） |
-| `ST` | エラーステータス frame | ✅ 確認済（サンプル L539-540） |
-| `SS` / `US` | システム / 注意状況 frame | ✅ 確認済（サンプル L539-540） |
-| `EC` | 約定通知 frame（Phase 2 で利用） | ✅ 確認済（サンプル L539-540） |
 
-### 11.3 ブロッカー扱いと対応方針
+### 11.3 ブロッカー扱いと対応方針（B3 再オープン）
 
 implementation-plan.md T0.1 の規約「**実コード名と一致しないものは「未確認」マークして T0 内で解消するか、解消できないならその情報コードを使う実装タスク自体を Phase 1 から外す**」に従い:
 
-1. **本 T0 で `api_event_if_v4r7.pdf` を入手して `manual_files/` に同梱する**（本ドキュメント作成時点ではユーザー側にて未投入）
-2. PDF 入手次第、§11.2 の暫定コード名を確定値で更新する
-3. PDF 入手不可で確定できない場合、**T1（codec）と T5（FD trade/depth）の着手前にユーザーに対応方針を確認**する。少なくとも `DPP` / `KP` / `ST` は確認済みなので Phase 1 の最低限（ZARA バ時間中の現値・KeepAlive・エラー検知）は実装可能。**気配 5 本（GAK/GBK/GAS/GBS）と DV ベースの trade 合成は確定コード待ち**
+**🔴 現状: T0 完了マーク (`[x]`) は B3 レビューで再オープン**。下記いずれか 1 つを T1 着手前に必ず満たすこと:
+
+1. **(推奨) `api_event_if_v4r7.pdf` を入手して `.claude/skills/tachibana/manual_files/` に同梱**し、§11.2 の暫定コード名を確定値で更新する
+2. **(代替) 実 frame キャプチャ**: ユーザー保有の Windows サンプル `e_api_websocket_receive_tel.py` をデモ環境に対して実行し、受信した FD frame の生バイト列（少なくとも 5 銘柄 × 30 秒分）を `manual_files/captured_fd_frames/*.bin` として保存。データから `p_<行>_<コード>` キー一覧を逆引きで確定する
+3. **(縮退) どちらも不可なら**: 該当情報コード（`DV` / `GAK*` / `GBK*` / `GAS*` / `GBS*` / `DPP_TIME` / `DDT`）を **使う実装タスクを Phase 1 から外す**。具体的には T5 の trade 合成と depth スナップショットを Phase 2 へ繰越し、Phase 1 は「日足 kline + ticker stats のみ」へさらに縮退する（spec.md §2.1 の修正が必要）
+
+**T1（codec）と T5（FD trade/depth）の着手前に、本 §11 を実体的に解決したかどうかを PR 説明文に明記すること**。`DPP` / `KP` / `ST` / `SS` / `US` / `EC` 確認済みコードのみで成立する範囲は T1 で先行着手してよい。
 
 T1 / T5 着手前のチェックリストとしてこの §11 を参照すること。
 
