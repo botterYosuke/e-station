@@ -7,6 +7,7 @@ pub mod unit;
 pub use adapter::{Event, proxy};
 use adapter::{Exchange, MarketKind};
 
+use serde_util::de_f32_from_number_or_string;
 use unit::price::de_price_from_number;
 use unit::price::{Price, PriceStep};
 pub use unit::qty::SizeUnit;
@@ -657,6 +658,7 @@ pub struct TickerStats {
     #[serde(deserialize_with = "de_price_from_number")]
     pub mark_price: Price,
     /// 24h price change in percentage (e.g., 0.05 for +5%, -0.02 for -2%)
+    #[serde(deserialize_with = "de_f32_from_number_or_string")]
     pub daily_price_chg: f32,
     /// 24h volume in USD
     #[serde(deserialize_with = "de_qty_from_number")]
@@ -746,5 +748,35 @@ impl TickMultiplier {
     pub fn multiply_with_min_tick_step(&self, ticker_info: TickerInfo) -> PriceStep {
         let min_step: PriceStep = ticker_info.min_ticksize.into();
         self.multiply_step(min_step)
+    }
+}
+
+#[cfg(test)]
+mod ticker_stats_tests {
+    use super::*;
+
+    // Regression: Python workers send `daily_price_chg` as str(...), which
+    // previously collapsed every `TickerStats` payload and left the sidebar
+    // empty on startup. See phase-7-ui-regression-remediation.md.
+    #[test]
+    fn daily_price_chg_accepts_stringified_number() {
+        let json = r#"{
+            "mark_price": 12345.67,
+            "daily_price_chg": "1.819720694033015",
+            "daily_volume": 1000.0
+        }"#;
+        let stats: TickerStats = serde_json::from_str(json).expect("stringified f32 parses");
+        assert!((stats.daily_price_chg - 1.819_720_7).abs() < 1e-4);
+    }
+
+    #[test]
+    fn daily_price_chg_accepts_json_number() {
+        let json = r#"{
+            "mark_price": 12345.67,
+            "daily_price_chg": -2.5,
+            "daily_volume": 1000.0
+        }"#;
+        let stats: TickerStats = serde_json::from_str(json).expect("numeric f32 parses");
+        assert!((stats.daily_price_chg - (-2.5)).abs() < 1e-6);
     }
 }
