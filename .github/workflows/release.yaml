@@ -117,6 +117,13 @@ jobs:
                   toolchain: ${{ steps.rust_toolchain.outputs.channel }}
                   override: true
 
+            # Required by scripts/build-engine.sh — fetches PyInstaller into an
+            # isolated tool env via `uv tool run`, no global pollution.
+            - name: Install uv (for Python engine PyInstaller build)
+              uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
             - name: Install linux deps
               if: startsWith(matrix.target.target, 'linux')
               run: |
