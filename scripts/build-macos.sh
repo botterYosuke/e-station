@@ -14,23 +14,58 @@ rustup target add aarch64-apple-darwin
 
 mkdir -p "$RELEASE_DIR"
 
-# Build the Python data engine once (PyInstaller is not cross-arch on macOS;
-# the resulting binary inherits the host architecture).  Universal viewer +
-# host-arch engine is acceptable for Phase 6 — the engine is forked, not
-# linked into the viewer.
-"$REPO_ROOT/scripts/build-engine.sh"
-ENGINE_BIN="$REPO_ROOT/target/release/python-engine/$ENGINE"
-if [ ! -f "$ENGINE_BIN" ]; then
-  echo "build-macos: engine binary not produced at $ENGINE_BIN" >&2
-  exit 1
-fi
+# PyInstaller cannot cross-build on macOS — the engine binary is locked to
+# the host architecture.  We refuse to ship a mismatched engine inside an
+# archive labelled for a different arch (would silently break on the user's
+# Mac).  Set `SKIP_ENGINE_ARCH_CHECK=1` to override (e.g. when each arch is
+# built on a separate runner that produces its own host-native engine, or
+# when intentionally producing a viewer-only archive).
+HOST_UNAME="$(uname -m)"  # x86_64 or arm64
+case "$HOST_UNAME" in
+  arm64)  HOST_ARCH="aarch64" ;;
+  x86_64) HOST_ARCH="x86_64" ;;
+  *)      HOST_ARCH="$HOST_UNAME" ;;
+esac
 
+build_engine_once() {
+  "$REPO_ROOT/scripts/build-engine.sh"
+  ENGINE_BIN="$REPO_ROOT/target/release/python-engine/$ENGINE"
+  if [ ! -f "$ENGINE_BIN" ]; then
+    echo "build-macos: engine binary not produced at $ENGINE_BIN" >&2
+    exit 1
+  fi
+}
+
+# Bundle the engine only if it matches the package arch.  `universal` is
+# treated as host-arch-only — there is no fat PyInstaller output, so a
+# universal archive can only ship a host-arch engine and would still fail
+# on the opposite arch.  Refuse rather than ship a broken artifact.
 package() {
   local arch="$1"
   local archive="$RELEASE_DIR/${TARGET}-${arch}-macos.tar.gz"
 
-  cp "$ENGINE_BIN" "$RELEASE_DIR/$ENGINE"
-  tar -czf "$archive" -C "$RELEASE_DIR" "$TARGET" "$ENGINE"
+  local include_engine=1
+  if [ "$arch" = "universal" ]; then
+    include_engine=0
+  elif [ "$arch" != "$HOST_ARCH" ]; then
+    include_engine=0
+  fi
+
+  if [ "$include_engine" -eq 0 ] && [ "${SKIP_ENGINE_ARCH_CHECK:-0}" != "1" ]; then
+    echo "build-macos: refusing to bundle host-arch engine ($HOST_ARCH) into '$arch' archive."
+    echo "             Build the engine on a matching-arch host and re-run, or set"
+    echo "             SKIP_ENGINE_ARCH_CHECK=1 to ship a viewer-only archive."
+    exit 1
+  fi
+
+  if [ "$include_engine" -eq 1 ]; then
+    build_engine_once
+    cp "$ENGINE_BIN" "$RELEASE_DIR/$ENGINE"
+    tar -czf "$archive" -C "$RELEASE_DIR" "$TARGET" "$ENGINE"
+  else
+    echo "build-macos: WARNING — packaging '$arch' WITHOUT engine (arch mismatch)."
+    tar -czf "$archive" -C "$RELEASE_DIR" "$TARGET"
+  fi
   echo "Created $archive"
 }
 

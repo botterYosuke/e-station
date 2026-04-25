@@ -53,6 +53,17 @@ static ENGINE_CONNECTION: std::sync::RwLock<Option<Arc<engine_client::EngineConn
 static ENGINE_RESTARTING: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
     std::sync::OnceLock::new();
 
+/// Active `ProcessManager` for managed mode (set when `--data-engine-url` is
+/// not supplied).  UI proxy changes reach the manager through this so that
+/// `SetProxy` is replayed on every recovery handshake.
+static ENGINE_MANAGER: std::sync::OnceLock<Arc<engine_client::ProcessManager>> =
+    std::sync::OnceLock::new();
+
+/// Tokio handle for the engine-client runtime — used by UI handlers that need
+/// to call async `ProcessManager` APIs (e.g. `set_proxy`) without owning the
+/// runtime themselves.
+static ENGINE_RT_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+
 /// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
 /// Referenced during initial setup and on every engine reconnect.
 const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
@@ -210,6 +221,8 @@ fn main() {
         log::info!("Spawning Python data engine: {cmd:?} on 127.0.0.1:{port}");
 
         let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
+        ENGINE_MANAGER.set(Arc::clone(&manager)).ok();
+        ENGINE_RT_HANDLE.set(rt.handle().clone()).ok();
 
         // Push the saved proxy into the manager so it is re-applied after every
         // handshake (initial spawn + every recovery).
@@ -493,16 +506,16 @@ impl Flowsurface {
                         ));
                         self.handles.set_backend(venue, backend);
                     }
-                    // Re-apply saved proxy before bumping the generation so that
-                    // stream-subscribe commands are enqueued after SetProxy in
-                    // the engine's FIFO command channel.
-                    if let Some(proxy_cfg) = self.network.proxy_cfg() {
-                        let proxy_url = Some(proxy_cfg.to_url_string());
-                        if !conn
-                            .try_send_now(engine_client::dto::Command::SetProxy { url: proxy_url })
-                        {
-                            log::warn!("Failed to queue proxy for engine reconnect");
-                        }
+                    // Re-apply current proxy state before bumping the generation so
+                    // that stream-subscribe commands are enqueued after SetProxy in
+                    // the engine's FIFO command channel.  Send unconditionally —
+                    // including `None` — so a user-cleared proxy cannot be revived
+                    // by a stale value held in the freshly spawned engine.
+                    let proxy_url = self.network.proxy_cfg().map(|p| p.to_url_string());
+                    if !conn.try_send_now(engine_client::dto::Command::SetProxy {
+                        url: proxy_url,
+                    }) {
+                        log::warn!("Failed to queue proxy for engine reconnect");
                     }
 
                     self.handles.bump_generation();
@@ -911,6 +924,21 @@ impl Flowsurface {
                             .unwrap_or_else(|e| e.into_inner())
                             .as_ref()
                             .cloned();
+
+                        // Update the ProcessManager's stored proxy *before* we
+                        // touch the live connection, so that even if the engine
+                        // crashes mid-Apply the next recovery handshake replays
+                        // the new value (or `None` clears the previous one).
+                        if let (Some(manager), Some(handle)) =
+                            (ENGINE_MANAGER.get(), ENGINE_RT_HANDLE.get())
+                        {
+                            let manager = Arc::clone(manager);
+                            let proxy_url_for_manager = proxy_url.clone();
+                            handle.spawn(async move {
+                                manager.set_proxy(proxy_url_for_manager).await;
+                            });
+                        }
+
                         return Task::perform(
                             async move {
                                 if let Some(conn) = engine_conn {

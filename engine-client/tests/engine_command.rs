@@ -64,6 +64,41 @@ fn explicit_override_takes_precedence() {
     }
 }
 
+#[test]
+fn python_interpreter_override_runs_engine_module() {
+    let tmp = tempdir();
+    let py_name = if cfg!(windows) { "python.exe" } else { "python3" };
+    let py_path = tmp.path().join(py_name);
+    fs::write(&py_path, b"stub").unwrap();
+
+    let cmd = EngineCommand::resolve_with(None, Some(&py_path)).unwrap();
+    match cmd {
+        EngineCommand::System { program, args } => {
+            assert_eq!(program, py_path.to_string_lossy());
+            assert_eq!(args, vec!["-m".to_string(), "engine".to_string()]);
+        }
+        other => panic!("expected System (python -m engine), got {other:?}"),
+    }
+}
+
+#[test]
+fn non_python_override_runs_as_bundled_binary() {
+    let tmp = tempdir();
+    let exe_name = if cfg!(windows) {
+        "my-engine.exe"
+    } else {
+        "my-engine"
+    };
+    let path = tmp.path().join(exe_name);
+    fs::write(&path, b"stub").unwrap();
+
+    let cmd = EngineCommand::resolve_with(None, Some(&path)).unwrap();
+    match cmd {
+        EngineCommand::Bundled(p) => assert_eq!(p, path),
+        other => panic!("expected Bundled, got {other:?}"),
+    }
+}
+
 // ── tiny tempdir helper to avoid pulling in the `tempfile` crate ──────────────
 
 struct TmpDir(std::path::PathBuf);

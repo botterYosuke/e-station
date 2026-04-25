@@ -42,7 +42,10 @@ impl EngineCommand {
     /// Resolve the engine command.
     ///
     /// Order of precedence:
-    /// 1. `explicit_override` — if provided, used verbatim as a `Bundled` command.
+    /// 1. `explicit_override` — if provided, treated as a Python interpreter
+    ///    when its filename matches `python*` / `py` (in which case we run
+    ///    `<override> -m engine`); otherwise treated as a frozen `Bundled`
+    ///    engine binary and run with no extra args.
     /// 2. `<base_dir>/flowsurface-engine[.exe]` if the file exists.
     /// 3. `python -m engine` fallback for dev installs.
     pub fn resolve_with(
@@ -50,7 +53,14 @@ impl EngineCommand {
         explicit_override: Option<&Path>,
     ) -> Result<Self, EngineClientError> {
         if let Some(p) = explicit_override {
-            return Ok(EngineCommand::Bundled(p.to_path_buf()));
+            return Ok(if looks_like_python_interpreter(p) {
+                EngineCommand::System {
+                    program: p.to_string_lossy().into_owned(),
+                    args: vec!["-m".to_string(), "engine".to_string()],
+                }
+            } else {
+                EngineCommand::Bundled(p.to_path_buf())
+            });
         }
 
         if let Some(dir) = base_dir {
@@ -86,6 +96,21 @@ impl EngineCommand {
             EngineCommand::System { args, .. } => args.as_slice(),
         }
     }
+}
+
+/// True iff the file name looks like a Python interpreter — used by
+/// `EngineCommand::resolve_with` to decide whether `--engine-cmd <path>`
+/// should be wrapped as `<path> -m engine` instead of run as a frozen binary.
+fn looks_like_python_interpreter(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let stem = name.strip_suffix(".exe").unwrap_or(name).to_ascii_lowercase();
+    // Matches: python, python3, python3.12, py, pypy, pypy3 — but not arbitrary
+    // binaries that happen to start with "p".
+    matches!(stem.as_str(), "py" | "pypy" | "pypy3")
+        || stem.starts_with("python")
+        || stem.starts_with("pypy")
 }
 
 const BACKOFF_BASE_MS: u64 = 500;
