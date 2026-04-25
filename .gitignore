@@ -7,3 +7,4 @@
 .venv/
 python/.pytest_cache/
 uv.lock
+.claude/scheduled_tasks.lock

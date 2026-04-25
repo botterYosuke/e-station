@@ -11,28 +11,47 @@
 - [ ] `git grep -n "TickerInfo"` / `HashMap.*TickerInfo` / `HashSet.*TickerInfo` の参照箇所を全数表化。`#[derive(Hash, Eq)]` 入りでフィールドを増やす影響を見積もる
 - [ ] `git grep -nE "MarketKind::(Spot|LinearPerps|InversePerps)"` で網羅 match の箇所を全部リストアップ（`exchange` / `engine-client` / `data` / `src` 配下）
 - [ ] `Ticker::new` ([exchange/src/lib.rs:281-291](../../../exchange/src/lib.rs#L281)) の `assert!(ticker.is_ascii())` を確認し、`130A0` 等が通ることをユニットテストで実機確認
-- [ ] `Timeframe::D1` ([exchange/src/lib.rs:83](../../../exchange/src/lib.rs#L83)) が IPC で `"1d"` 文字列にシリアライズされることを確認（新規 timeframe 追加は不要）
-- [ ] `ProcessManager` ([engine-client/src/process.rs](../../../engine-client/src/process.rs)) の proxy 保持パターンを読み、credentials 保持で必要な mutex / Arc 戦略を把握
+- [ ] `Timeframe::D1` ([exchange/src/lib.rs:83](../../../exchange/src/lib.rs#L83)) の **`Serialize` 実装が IPC で `"1d"` 文字列を返すこと**を `serde_json::to_string` でユニットテスト確認（F-m2、enum 既定の `"D1"` で出ているなら独自 `Serialize` 実装か `#[serde(rename = "1d")]` 追加が必要）
+- [ ] `ProcessManager` ([engine-client/src/process.rs](../../../engine-client/src/process.rs)) の proxy 保持パターンを読み、credentials 保持の **mutex / Arc 戦略を T0.2 のうちに確定**（F-m4）。proxy が `Arc<Mutex<Option<Proxy>>>` ならそれに揃える、`watch::channel` ならそれに揃える、と決め切る
+- [ ] `src/screen/` の現在構造を確認し、立花ログイン UI の追加先（既存 `login.rs` 拡張 or 新ファイル）を T0 のうちに暫定確定（F-m3）
 - [ ] `python/tests/test_*_rest.py` のモック方式（`pytest-httpx` / `HTTPXMock`）が他 venue で稼働中であることを確認
 - [ ] [docs/plan/✅python-data-engine/schemas/](../✅python-data-engine/schemas/) の `commands.json` / `events.json` が実在することを確認（実在を確認済み）
+- [ ] **FD 情報コード一覧抽出（F-M2）**: Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) と [`e_api_event_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_event_receive_tel.py/e_api_event_receive_tel.py) のコメント／コード表から FD frame の情報コード（`DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` ほか）を抜き出し、[data-mapping.md §3-4](./data-mapping.md) の表に転記する。実コード名と一致しないものは「未確認」マークして T1 まで持ち越し
 
 ### T0.2 型・スキーマ追加
 
 - [ ] `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` を [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) に追加
-- [ ] `QuoteCurrency` enum を新設（`Usdt`/`Usdc`/`Usd`/`Jpy`、`Hash + Eq + Serialize + Deserialize`）。`&'static str` は使わない（serde ラウンドトリップ不可）
-- [ ] `TickerInfo` に `lot_size: Option<u32>` と `quote_currency: QuoteCurrency` を追加。既存 venue 全件で `quote_currency` の初期化漏れがないようコンパイラに検出させる（フィールド追加で全コンストラクタが影響する）
+- [ ] **`MarketKind::Stock` の `qty_in_quote_value` は enum 内部分岐で `price * qty` 強制**（F-M3）。`size_in_quote_ccy` 引数を見ない実装にし、`Stock` 用ユニットテストで誤呼出（`size_in_quote_ccy=true`）でも常に `price*qty` になることを確認
+- [ ] **`secrecy = "0.8"` を `engine-client` / `data` の Cargo.toml に追加**（F-B1）。`SecretString` は **Rust 内部保持型**でのみ使い、IPC 送出時は `expose_secret()` 経由でプレーン `String` 化した送出専用 DTO（後述 `*Wire`）に写像する
+- [ ] `QuoteCurrency` enum を新設（`Usdt`/`Usdc`/`Usd`/`Jpy`、`Copy + Hash + Eq + Serialize + Deserialize`）。**`Default` は実装しない**（F-M6）。`&'static str` は使わない（serde ラウンドトリップ不可）
+- [ ] `TickerInfo` に `#[serde(default)]` 付きで `lot_size: Option<u32>` と `quote_currency: Option<QuoteCurrency>` を追加（F13/F-M6）。`TickerInfo` の `Copy` 制約を壊さない（`String` 追加禁止）。**`None` 復元時は読み込み層で `Exchange::default_quote_currency()` を使って `Some(_)` に正規化**し、UI フォーマッタへは常に `Some` で渡す
+- [ ] `Exchange::default_quote_currency(&self) -> QuoteCurrency` を `exchange/src/adapter.rs` に実装（暗号資産 venue は USDT/USDC、`TachibanaStock` は `Jpy`）
+- [ ] **既存永続 state の serde 互換性確認**（F13/F-M4）: dashboard 設定ファイル / `state.rs` に `TickerInfo` が保存されているか `git grep` で特定。`#[serde(default)]` で missing field が読めることに加え、**`Hash` 値変化により既存 `HashMap<TickerInfo, _>` のキー突合が壊れないか**を実機テスト。受け入れ条件に「旧 `state.json` を起動 → pane 復元 → ticker 表示」を追加
 - [ ] **日本語銘柄名の運搬経路を確定**: `engine-client::dto::TickerListed` / `TickerMetadata` 応答に `display_name_ja: Option<String>` を追加。Rust UI 側は `HashMap<Ticker, TickerDisplayMeta>` で別管理（`TickerInfo` の Hash には含めない）
-- [ ] `engine-client` DTO に下記を追加し `schema_minor` を bump:
-  - `Command::SetVenueCredentials { venue: String, credentials: serde_json::Value }`
-  - `EngineEvent::VenueReady { venue: String }`（**冪等イベント**）
-  - `EngineEvent::VenueCredentialsRefreshed { venue: String, session: serde_json::Value }`
-  - `Ready.capabilities.venue_capabilities` のサブ構造
-- [ ] **venue-ready ゲート方針を固定**: `Ready` と `VenueReady` の役割を分離し、立花 venue の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を `VenueReady` 後まで待たせる。`VenueReady` 再受信時に既存購読の重複再送が起きないよう `ProcessManager` 1 箇所で resubscribe を集約
+- [ ] `engine-client` DTO に下記を追加し `schema_minor` を bump（F1, F6, F-B1, F-B2）:
+  - `Command::SetVenueCredentials { request_id: String, payload: VenueCredentialsPayload }` — `payload` は typed enum（`VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire)`）。`serde_json::Value` は使わない
+  - **2 層 DTO 構造**（F-B2）: 内部保持型 `TachibanaCredentials`/`TachibanaSession`（`data` クレート、`SecretString` 保持、`Debug` 手実装マスク、`Serialize` 持たない、`Deserialize` のみ keyring 復元用に持つ） / 送出用 `TachibanaCredentialsWire`/`TachibanaSessionWire`（`engine-client` クレート、プレーン `String`、`Serialize` 派生、`Debug` 手実装マスク、`Deserialize` 持たない）。送信時 `From<&TachibanaCredentials> for TachibanaCredentialsWire` で `expose_secret()` 経由の写像を 1 箇所に集約し、`Wire` は serialize 直後に drop
+  - `TachibanaSessionWire.expires_at_ms: Option<i64>`（F-B3）。立花 API は明示的な期限を返さないため `None` を許容、`None` のとき起動時 `validate_session_on_startup` 必須
+  - `EngineEvent::VenueReady { venue: String, request_id: Option<String> }`（**冪等イベント**、`request_id` は `SetVenueCredentials` との相関用。UI は初回 / 再送を区別しない）
+  - `EngineEvent::VenueError { venue: String, request_id: Option<String>, code: String, message: String }` — 旧 `EngineError{code:"tachibana_session_expired"}` は廃止、`VenueError{code:"session_expired"}` に統一。**`message` は Python 側が user-facing 文言として詰める**（Rust 側は描画のみ、F-Banner1）。`code` の許容値（`session_expired` / `unread_notices` / `phone_auth_required` / `login_failed` / `ticker_not_found` …）は [architecture.md §6](./architecture.md#6-失敗モードと-ui-表現) の表に従い、`events.json` schema にも enum で列挙する
+  - `EngineEvent::VenueCredentialsRefreshed { venue: String, session: TachibanaSessionWire }`
+  - `EngineEvent::VenueLoginStarted { venue: String, request_id: Option<String> }` — Python が tkinter ログインヘルパーを spawn したことを Rust に通知（F-Login1、architecture.md §7.5）
+  - `EngineEvent::VenueLoginCancelled { venue: String, request_id: Option<String> }` — ユーザーがダイアログをキャンセルした
+  - `Command::RequestVenueLogin { request_id: String, venue: String }` — Rust UI から立花ログインを明示要求（architecture.md §7.5）
+  - **UI ツリー DSL 型（`VenueLoginForm` / `VenueUiNode` 等）は追加しない**。Python が独立 tkinter ウィンドウを持つため、Rust に UI 構造を渡す必要が無い
+  - `Ready.capabilities.venue_capabilities` のサブ構造（**Phase 1 は `serde_json::Value` のまま追加し、schema は Python 側で生成・Rust 側はパスを deserialize で読み出す方針で固定**、F-M8。typed 化は Phase 2 以降に再検討）
+- [ ] **venue-ready ゲート方針を固定**: `Ready` と `VenueReady` の役割を分離し、立花 venue の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を `VenueReady` 後まで待たせる。**`VenueReady` は「session 検証完了」のみを意味し、マスタ初期 DL 完了は含まない**（F12）。マスタ取得完了判定は `ListTickers` 応答到着で行う。`VenueReady` 再受信時に既存購読の重複再送が起きないよう `ProcessManager` 1 箇所で resubscribe を集約
 - [ ] **Python の保存先パス受け渡し方法を決定**: `stdin` 初期 payload 拡張（`{port, token, config_dir, cache_dir}`）を採用方針として暫定固定（軽量・既存パスの拡張で済む）。最終 OK は T0 レビューで
 - [ ] **env 変数名を venue prefix で確定**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_SECOND_PASSWORD` / `DEV_TACHIBANA_DEMO`。SKILL.md S2/S3 の旧 `DEV_USER_ID` 系（架空ファイル前提）は本フェーズで SKILL.md 側を書き換える
 - [ ] [docs/plan/✅python-data-engine/schemas/commands.json](../✅python-data-engine/schemas/commands.json) / `events.json` / `CHANGELOG.md` 更新
-- [ ] **SKILL.md の同期**: `.claude/skills/tachibana/SKILL.md` の R3/R4/R6/R10 / §Rust 実装の既存ヘルパー / S1〜S6 が架空のファイル参照（`exchange/src/adapter/tachibana.rs` / `data/src/config/tachibana.rs` / `src/screen/login.rs` / `src/connector/auth.rs` / `src/replay_api.rs`）と旧 env 名を含むため、本計画で決まった**実在パスと新 env 名**へ置換。実装未完の参照は「将来実装予定（T3 で新設）」と但し書き
-- [ ] **受け入れ**: `cargo check --workspace` 成功、Python `pytest` の既存スイート緑、棚卸し表が plan/ に commit 済み
+- [ ] **SKILL.md の同期（F-m5、唯一の正本タスク）**: `.claude/skills/tachibana/SKILL.md` の以下を本計画ベースで書き換える。README.md / spec.md 側の同種記述は本タスクへリンクする形に簡約済み:
+  - L8 警告ブロック（旧 env 名と架空ファイル参照）
+  - R3/R4/R6/R10
+  - §Rust 実装の既存ヘルパー（架空 `tachibana.rs` 参照）
+  - S1〜S6（架空 `src/screen/login.rs` / `src/connector/auth.rs` / `src/replay_api.rs` 参照）
+  - 環境変数名: `DEV_USER_ID` 系 → `DEV_TACHIBANA_*`
+  - 実装未完の参照は「将来実装予定（T3 で新設）」と但し書き
+- [ ] **受け入れ**: `cargo check --workspace` 成功、Python `pytest` の既存スイート緑、棚卸し表 + FD 情報コード一覧が plan/ に commit 済み、旧 `state.json` 起動テスト緑
 
 ## フェーズ T1: Python ユーティリティ（2〜3 日）
 
@@ -47,7 +66,7 @@
   - `parse_event_frame(data: str) -> list[tuple[str, str]]`（`^A^B^C` / `\n` 分解）
   - `deserialize_tachibana_list(value)` — 空配列が `""` で返るケースの正規化（SKILL.md R8）
 - [ ] `python/engine/exchanges/tachibana_master.py` — `CLMEventDownload` ストリームパーサ（チャンク境界・`CLMEventDownloadComplete` 終端）
-- [ ] `p_no` 採番ヘルパ（asyncio Lock + Unix 秒初期化の単調 int、SKILL.md R4）と `current_p_sd_date()`（JST 固定）
+- [ ] `p_no` 採番ヘルパ（**asyncio 単一スレッド前提の単純カウンタ**、Unix 秒初期化、Lock 不要、F18）と `current_p_sd_date()`（JST 固定、SKILL.md R4）
   - **既知バグ回避**: SKILL.md S6 表に「セッション復元と並行で走る history fetch が逆転して `p_no <= 前要求.p_no` エラー」が記載されている。Python 移植版では **session 復元（`SetVenueCredentials` 処理）の完了前に他リクエストを発行しない**直列化を `TachibanaWorker` 内で強制し、起動レース回帰テストを 1 件追加する
 - [ ] エラー判定ヘルパ `check_response(payload) -> None | TachibanaError`（[SKILL.md R6](../../../.claude/skills/tachibana/SKILL.md)、`p_errno` 空文字＝正常を含む）
 - [ ] **受け入れ**: 上記モジュールを単体テストでカバー、サンプルレスポンス（`samples/e_api_login_tel.py/e_api_login_response.txt` ほか）から期待値抽出ができる。REQUEST URL と EVENT URL の差を別テストで検証
@@ -58,10 +77,11 @@
 
 - [ ] `python/engine/exchanges/tachibana_auth.py`
   - `login(user_id, password, is_demo) -> TachibanaSession`
-  - `validate_session(session) -> bool`（`CLMMfdsGetMasterData` 軽量 1 件で生存確認）
+  - `validate_session_on_startup(session) -> bool`（`CLMMfdsGetMasterData` 軽量 1 件で生存確認）— **関数名で「起動時専用」を縛る**。runtime からは呼ばない（F10）
   - 二段エラー判定 + `sKinsyouhouMidokuFlg=="1"` で `UnreadNoticesError`
   - レスポンスから `sZyoutoekiKazeiC`（譲渡益課税区分）を `TachibanaSession` に保持（Phase 2 発注時に流用）
-- [ ] **起動時のみ再ログイン**のガードを実装: `SetVenueCredentials` の session validation 中に限り `user_id/password` fallback を許可し、購読開始後の `p_errno="2"` は再ログインせず `tachibana_session_expired` を返す
+  - **`expires_at_ms` は `Option<i64>` で持つ**（F-B3）。ログイン直後は `None` 固定（立花は明示期限を返さないため）。`None` のとき `validate_session_on_startup` は必ず叩く（safe path）。`Some(t)` で `now > t` なら復元せず再ログインへ（fast path）。閉局時刻を `CLMDateZyouhou` から取得できることが確認できたら値を入れる方針は Phase 2 へ繰越
+- [ ] **起動時のみ再ログイン**のガードを実装: `SetVenueCredentials` の session validation 中に限り `user_id/password` fallback を許可し、購読開始後の `p_errno="2"` は再ログインせず `VenueError{code:"session_expired"}` を返す
 - [ ] mock サーバテスト（`pytest-httpx` の `HTTPXMock`、`python/tests/test_binance_rest.py` パターン踏襲）で正常系・異常系（`p_errno=-62` / `=2` / 認証失敗 / `sKinsyouhouMidokuFlg=1`）
 - [ ] **受け入れ**: `pytest -m demo_tachibana` で実 demo 環境ログイン成功（手動電話認証済みアカウント前提）
 
@@ -73,7 +93,13 @@
   - `TachibanaCredentials { user_id, password: SecretString, second_password: SecretString, is_demo }`
   - `TachibanaSession { url_request, url_master, url_price, url_event, url_event_ws, expires_at_ms, zyoutoeki_kazei_c }`
   - keyring 読み書き
-- [ ] 立花ログイン UI を追加（user_id / password / second_password / is_demo）。`src/screen/login.rs` は **現リポジトリには未実装**のため、本フェーズで対応するログイン画面ファイルを新設する（既存 `src/screen/` の構造に沿わせ、配置は T3 着手時に設計メモで確定）。`#[cfg(debug_assertions)]` で `DEV_TACHIBANA_*` env 自動入力
+- [ ] **Rust UI 側**: 立花のログイン画面コードは**追加しない**。`Venue::Tachibana` 関連で「ログインダイアログを別ウィンドウで表示中」「ログインがキャンセルされました」を表示する汎用ステータスバナー（既存 `VenueError.message` レンダラの拡張）だけ実装する
+- [ ] **Python 側 `tachibana_login_dialog.py`** を新設（F-Login1、architecture.md §7.4）。`python -m engine.exchanges.tachibana_login_dialog` で起動できる単独実行可能スクリプト。tkinter で `Toplevel` モーダルを構築、stdin から JSON 起動引数を読み、stdout に結果 JSON を返して exit。立花固有のラベル・順序・警告ボックス（電話認証・デモ環境）はこのファイルに直書き
+- [ ] **Python 側 `tachibana_login_flow.py`** を新設。データエンジン側で `asyncio.create_subprocess_exec(sys.executable, "-m", "engine.exchanges.tachibana_login_dialog", ...)` で tkinter ヘルパーを spawn し、stdout を JSON parse、`tachibana_auth.login(...)` を実行、結果に応じて `VenueReady` / `VenueError` / `VenueLoginCancelled` を IPC 送信
+- [ ] Python 側の発火タイミングを実装: (a) `RequestVenueLogin` 受信、(b) `SetVenueCredentials` 認証失敗、(c) keyring session 失効検知（起動時のみ） — いずれも `tachibana_login_flow` を呼ぶ。失敗 3 回で `VenueError{code:"login_failed"}` で諦める
+- [ ] Rust UI: 立花機能を最初に開く操作（`Venue::Tachibana` ticker selector を開く / 立花 pane 追加）で `Command::RequestVenueLogin{ venue:"tachibana" }` を発火
+- [ ] **debug ビルドの env 自動入力は Python 側で処理**（architecture.md §7.7）: `tachibana_login_flow` が `DEV_TACHIBANA_*` env をチェックし、揃っていれば tkinter ヘルパーを spawn せずに直接 `tachibana_auth.login(...)` を実行する fast path を入れる。env 一部欠損ならヘルパーにプリフィルとして渡す。Rust 側の `#[cfg(debug_assertions)]` env 取り込みは**不要**（経路が Python 側に閉じる）
+- [ ] **tkinter ヘルパーの単体テスト**: `subprocess.run([sys.executable, "-m", ..., dialog])` を pytest から呼び、`headless=true` の起動引数で実 GUI を出さずにバリデーション規則だけテストできる「テスト専用モード」を `tachibana_login_dialog.py` に実装。実 GUI 確認は `pytest -m gui` で手動
 - [ ] [engine-client/src/backend.rs](../../../engine-client/src/backend.rs) で `SetVenueCredentials` 送信パスを実装（既存 `SetProxy` パターン踏襲、`backend.rs` の実在は `ls engine-client/src/` で確認済み）
 - [ ] [engine-client/src/process.rs](../../../engine-client/src/process.rs) に **Tachibana credentials の保持と再送**を追加し、managed mode の再起動時に `SetProxy -> SetVenueCredentials -> VenueReady -> resubscribe` を一貫して実行する
 - [ ] [src/main.rs](../../../src/main.rs) 起動シーケンスに「keyring 読込 → `ProcessManager` / 接続オブジェクトへ creds 注入 → SetVenueCredentials → VenueReady 待ち」を追加
@@ -104,9 +130,14 @@
   - **ST（エラーステータス）frame の処理**: 受信したら `EngineError` に変換、深刻なら subscribe 全停止
   - 受信バッファは `\n` または `^A` 区切りで蓄積分割（一塊チャンクに複数メッセージあり）
   - 切断 → `Disconnected` イベント、再接続は指数バックオフ
-- [ ] `TachibanaWorker.stream_trades` — FD frame → 出来高差分から `TradeMsg` 合成
-- [ ] `TachibanaWorker.stream_depth` — FD frame → 5 本気配 → `DepthSnapshot`（`DepthDiff` は生成しない）
-- [ ] `TachibanaWorker.fetch_depth_snapshot` — `CLMMfdsGetMarketPrice` ベースの初回 snapshot
+- [ ] `TachibanaWorker.stream_trades` — FD frame → 出来高差分から `TradeMsg` 合成（**前 frame 気配ベースの quote rule + 初回 frame 除外 + DV リセット検知**、data-mapping §3、F3/F4）
+  - 受け入れテスト（`test_tachibana_fd_trade.py`）:
+    1. 初回 frame では trade を発火しない（`prev_dv=None`）
+    2. 2 件目以降で DV 差分 > 0 のとき trade を 1 件生成
+    3. DV が前 frame より減少したら trade 発火せず `prev_dv` を再初期化
+    4. side は前 frame の best_bid/best_ask に対して判定（当該 frame の気配は使わない）
+- [ ] `TachibanaWorker.stream_depth` — FD frame → 5 本気配 → `DepthSnapshot`（`DepthDiff` は生成しない）。`sequence_id` は Python プロセス内 `AtomicI64`、`stream_session_id` 切替時に消費側リセット（F7）
+- [ ] `TachibanaWorker.fetch_depth_snapshot` — `CLMMfdsGetMarketPrice` ベースの初回 snapshot（ザラ場前後の 1 発、および FD WS が 12 秒以上無通信の再接続中フォールバック時のみ。**runtime の定期 polling は実装しない**、F-M1）
 - [ ] ザラ場時間判定（**JST 9:00–11:30 前場 / 12:30–15:25 後場連続 / 15:25–15:30 クロージング・オークション**、東証 2024-11-05 以降の現行時間）— **9:00–15:30 の間は `Connected` 維持**。クロージング・オークション中は気配が動かなくても「市場時間外」UI を出さない。閉場帯（〜9:00 / 11:30〜12:30 / 15:30〜）でのみ subscribe を `Disconnected{reason:"market_closed"}` で即返し、Python 側で polling/streaming を停止
 - [ ] **受け入れ**: ザラ場中 10 分間 7203 を購読し続けて drop 0、UI で trade ティッカーと板が動く。KP frame 受信ログがあること
 
@@ -114,7 +145,9 @@
 
 **ゴール**: Python 異常終了・session 切れ・ザラ場跨ぎでも UI が破綻しない。
 
-- [ ] `EngineError{code:"tachibana_session_expired"}` → Rust UI バナー
+- [ ] `VenueError{venue:"tachibana", code:"session_expired", message}` → Rust UI バナー（旧 `EngineError{code:"tachibana_session_expired"}` は廃止）。**バナー文言は Python が `message` に詰めて送る**（F-Banner1）。Rust 側は `message` をそのまま描画し、固定文言を持たない。`code` は severity（warning/error）とアクションボタン（再ログイン / 閉じる）の出し分けにのみ使う
+- [ ] **`VenueError.code` の enum 化（T0 schema 追加分の検証）**: Python 側の発出箇所（`tachibana_auth.py` / `tachibana_ws.py` / `tachibana.py`）で使う code 文字列が [architecture.md §6](./architecture.md#6-失敗モードと-ui-表現) の表と一致することを単体テストで検証。未知 code が発出されたら Rust 側はデフォルト severity（error）+ 再ログインボタン非表示で fail-safe に倒す
+- [ ] **バナー文言テスト**: `tachibana_auth.py` の各エラー分岐（`p_errno=2` / `sKinsyouhouMidokuFlg=1` / `sResultCode=10031` / 認証失敗）が Python 側で意図通りの `message` を生成することを `python/tests/test_tachibana_banner_messages.py` で固定（snapshot test）
 - [ ] `VenueCredentialsRefreshed` 経由で**起動時再ログイン後**の session を Rust が keyring 更新
 - [ ] Python 再起動シナリオの自動テスト（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §5.3 Python プロセス復旧プロトコル 流用）
 - [ ] ログにシークレット非漏洩テスト
@@ -130,7 +163,8 @@
 - [ ] release ビルドで env 自動ログインが完全に除外されていること（コンパイルエラー or 空関数）の検証
 - [ ] 本番 URL 設定の隠しフラグ（`TACHIBANA_ALLOW_PROD=1`）を実装、デフォルトは demo 強制
 - [ ] CI に `pytest -m demo_tachibana` を **手動トリガジョブ** として追加（毎 PR では走らせない）。スケジュール起動する場合は demo の閉局帯（平日 8:00–18:00 JST 想定、T2 で実機確認）を避ける
-- [ ] `tools/secret_scan.sh` 新設: `kabuka.e-shiten` / 仮想 URL ホスト / `sUserId` / `sPassword` / `sSecondPassword` を検出。pre-commit hook と CI ジョブの両方から同一スクリプトを呼ぶ（spec.md §4 受け入れ条件 6 と整合）
+- [ ] `tools/secret_scan.sh` 新設: `kabuka.e-shiten` / 仮想 URL ホスト / `sUserId` / `sPassword` / `sSecondPassword` を検出。pre-commit hook と CI ジョブの両方から同一スクリプトを呼ぶ（spec.md §4 受け入れ条件 6 と整合）。**`BASE_URL_PROD` を定義する 1 箇所（例: `python/engine/exchanges/tachibana_url.py`）はファイル単位で allowlist** し、それ以外のリテラル出現を全て fail させる（F11）。allowlist ファイルは冒頭コメントで理由を明示
+- [ ] **Windows 開発環境での pre-commit 整合（F-M5）**: 開発環境は Windows 中心であり pre-commit が PowerShell から起動するケースがある。`tools/secret_scan.sh` は git-bash / WSL を要件として README に明記し、pre-commit 設定で `bash tools/secret_scan.sh` 形式で呼ぶ（PowerShell 直起動を許さない）。CI でも `runs-on: ubuntu-latest` で実行。Windows ネイティブ pre-commit のために `tools/secret_scan.ps1` を将来追加するなら、両方が同じパターンを参照するよう正規表現を別ファイル `tools/secret_scan_patterns.txt` に切り出す
 
 ## Phase 2 以降（参考、計画外）
 

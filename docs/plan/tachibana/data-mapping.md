@@ -22,7 +22,7 @@ pub enum Exchange {
 }
 ```
 
-- `MarketKind::Stock` の `qty_in_quote_value(qty, price, size_in_quote_ccy)` 実装は **既存 `Spot` と同じ** `price * qty`（quote = JPY）で十分。`size_in_quote_ccy` 引数は呼び出し側が常に `false` を渡す前提（株式数量は base 通貨 = 株数で表現するため）。`MarketKind` 内部で「常に false 扱い」と書ける場所はないので、**呼び出し規約として data adapter / UI で false 固定**にする
+- `MarketKind::Stock` の `qty_in_quote_value(qty, price, size_in_quote_ccy)` 実装は **常に `price * qty`**（quote = JPY、F-M3）。**`size_in_quote_ccy` 引数は `MarketKind::Stock` 内部で無視する**（呼出規約に頼らず enum 内部分岐で強制し、暗号資産パスからの誤呼出しで silently 誤値にならないようにする）。実装は `match self { MarketKind::Stock => price * qty, ... }` で `Stock` バリアントを最優先に分岐
 - 信用区分（`sGenkinShinyouKubun`）は **MarketKind では区別しない**（読み取り専用 Phase 1 ではチャート上区別不要）。発注時に別パラメータとして渡す（Phase 2）
 - IPC では `venue: "tachibana"` / `market: "stock"` を文字列で使う
 - 既存 UI には `Spot` / `LinearPerps` / `InversePerps` の 3 分岐を前提にした suffix・market filter・indicator 可用性・timeframe 可用性があるため、**`MarketKind::Stock` 追加は DTO だけでなく表示層の match も更新対象**とみなす（網羅 match の更新箇所は T0 で grep 棚卸し）
@@ -37,20 +37,39 @@ pub enum Exchange {
 | 売買単位 | 銘柄マスタ `sTatebaTanniSuu` | `TickerInfo.lot_size` 相当（新規プロパティ追加要） |
 | 呼値単位 | マスタ「呼値」テーブル（価格帯依存） | `Price` の min_ticksize で表現。**価格帯ごとに変わる** ため固定 1 値では足りない（§5 参照） |
 
-`Ticker::new("7203")` のような文字列パスで素直に通る。既存 `Ticker::new` は ASCII 制約のみで、**`130A0` のような英字混在 5 桁 ticker も許容可能**。T4 では「実データで通ること」の確認に留める。
+`Ticker::new("7203", Exchange::TachibanaStock)` のような文字列パスで素直に通る（現 API は第 2 引数 `Exchange` が必須、[exchange/src/lib.rs:281](../../../exchange/src/lib.rs#L281)）。既存 `Ticker::new` は ASCII 制約と `MAX_LEN` チェック（[lib.rs:290](../../../exchange/src/lib.rs#L290)）のみで、**`130A0` のような英字混在 5 桁 ticker も許容可能**。T4 では「実データで通ること」（ASCII 制約 + MAX_LEN 収容）の確認に留める（F2）。
 
 ## 3. trade（FD frame からの合成）
 
 立花にはミリ秒単位のテープデータ API は存在しない。代わりに EVENT の **FD frame**（時価情報）が変化分のみ来る。Phase 1 では下記をもって "trade" とみなす:
 
+> **情報コード出典の注意（F-M2）**: 下記の `DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` 等は SKILL.md には `DPP` 1 例しか記載がなく、公式 EVENT 仕様 PDF（`api_event_if_v4r7.pdf`）は `manual_files/` に同梱されていない。**T0 末で Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) のコード表抜粋を本節に転記する**こと（implementation-plan T0.2 タスク化）。それまで本節のコード名は暫定値として扱う。
+
+
 | 立花 FD フィールド | 意味 | TradeMsg |
 | :--- | :--- | :--- |
 | `p_<行>_DPP` | 現在値 | `price` |
-| `p_<行>_DV` | 出来高（累積） | 前回値との差分を `qty` に |
-| `p_<行>_DPP_TIME` または `p_<行>_DDT` | 時刻 | `ts_ms`（JST → ms） |
-| 直前の bid/ask 比較 | — | `side`（**Quote rule**: 約定価格 ≥ 直前 ask → buy、≤ 直前 bid → sell、中値ぴったり → 直前 trade 価格と比較する Lee-Ready の tick rule にフォールバック。最初の trade（履歴なし）は `buy` 既定で UI 警告を出さない） |
+| `p_<行>_DV` | 出来高（累積、日中） | 前 frame 値との差分を `qty` に。**差分が正のときのみ trade を生成**。0 または負（セッション跨ぎ・銘柄差替えによるリセット）の場合は trade を発火せず `prev_dv` を現在値にリセット |
+| `p_<行>_DPP_TIME` | 現値 tick 時刻（秒精度） | `ts_ms`（JST → ms）**の第一候補**。無ければ `p_<行>_DDT`（frame 配信時刻）にフォールバック。両方無ければ受信時刻（F17） |
+| 前 frame の bid/ask | — | `side` を **Quote rule**（前 frame 気配と比較）で決定。下記参照 |
 
-- **不正確になりうるトレードオフ**: 立花の FD は出来高が累積で、複数約定が 1 frame に集約されることがある。Phase 1 では「frame ごとに 1 trade」精度に留める（v2 で正確化）
+**Quote rule の詳細（F3）**:
+- FD frame は DPP と GAK/GBK が**同一 frame で同時更新される**。当該 frame の気配と比較すると、約定を吸収した後の板と比較してしまい誤判定しやすい。
+- 実装は `TachibanaWorker` 内で `prev_quote: Option<(best_bid, best_ask)>` を保持し、frame 到着時に
+  1. まず DPP/DV から trade を合成（qty > 0 のときのみ、初回は skip）
+  2. side 判定には **`prev_quote` の best_bid / best_ask を使う**
+  3. `DPP >= prev_ask` → `buy` / `DPP <= prev_bid` → `sell` / 中値ぴったり → 直前 trade 価格との tick rule フォールバック
+  4. trade 発火後に `prev_quote` を現 frame の best_bid/best_ask で更新
+- **初回 frame（prev_quote=None かつ prev_dv=None）は trade を発火しない**（F4）。初回 frame は quote 初期化と DV 初期化だけを行い、2 件目以降で trade 合成を開始する
+- 履歴が無くかつ tick rule も効かないエッジケースでは `buy` 既定、ただしログに `warn!("tachibana: initial trade side ambiguous")` を出す
+
+**DV リセット条件（F4）**:
+- 新規 WebSocket 接続（`stream_session_id` が更新された場合）
+- 銘柄 subscribe の切り替え
+- 受信値が前 frame 値より小さい（日付跨ぎ・立花側リセット想定）
+- どのケースも `prev_dv` を `None` に戻し、次 frame は「初回」扱いで trade 発火しない
+
+- **不正確になりうるトレードオフ**: 立花の FD は出来高が累積で、複数約定が 1 frame に集約されることがある。Phase 1 では「frame ごとに 1 trade、qty は DV 差分」精度に留める（v2 で正確化）
 - `is_liquidation` は常に `false`
 - 板の変化（`p_<行>_GAK1..5` / `p_<行>_GBK1..5`）は trade ではなく **DepthSnapshot 更新トリガ** として扱う
 
@@ -70,6 +89,7 @@ DepthSnapshot {
 
 - **`DepthDiff` は生成しない**。FD frame ごとに常に新規 `DepthSnapshot` を送る（5 本のみなので帯域は問題なし）
 - Rust 側 [docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §4.4 バックプレッシャと整合性保証 の gap 検知ロジックは、**snapshot-only venue では `DepthDiff` を受けない限り誤動作しない**。Phase 1 は `DepthSnapshot` のみで成立させ、capabilities は主に UI 非活性化用途に使う
+- **`sequence_id` リセット規約（F7）**: Python 側プロセス内の `AtomicI64` で単調増加 ID を振る。Python 再起動や WebSocket 切断で counter は 0 に戻りうるが、`stream_session_id` の値を同時に更新するため、**消費側は `stream_session_id` 切替を検知したら sequence 比較をリセットする**。既存 gap-detector にもこの契約を明示することを T0 で schema に書き込む
 - 別ルート: ザラ場開始前 / 終了直後の板取得は `CLMMfdsGetMarketPrice` を 1 回叩いて `DepthSnapshot` を出す（ストリームに先立って 1 発投げる）
 
 ## 5. ticker metadata（呼値・売買単位）
@@ -100,8 +120,10 @@ pub struct TickerInfo {
 }
 ```
 
-> **注意**: 現行 [exchange/src/lib.rs:515](../../../exchange/src/lib.rs#L515) の `TickerInfo` は `#[derive(Hash, Eq)]` を持ち `HashMap` キー / `HashSet` 要素として全クレートで使われる。フィールド追加で hash 値が変わると **既存 UI 状態（pane ↔ ticker_info の紐づけ）と非互換**になる可能性がある。T0 では:
+> **注意（F13）**: 現行 [exchange/src/lib.rs:515](../../../exchange/src/lib.rs#L515) の `TickerInfo` は `#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]` を持ち `HashMap` キー / `HashSet` 要素として全クレートで使われる。**`Copy` が付いているため、追加フィールドも `Copy` を満たすこと**（`String` 禁止。日本語名は `TickerDisplayMeta` へ）。フィールド追加で hash 値が変わると既存 UI 状態（pane ↔ ticker_info の紐づけ）と非互換になる可能性がある。T0 では:
 > - `lot_size` / `quote_currency` 追加前に `git grep "TickerInfo"` / `HashMap.*TickerInfo` / `HashSet.*TickerInfo` で参照箇所を全数棚卸しする
+> - 追加フィールドは **`#[serde(default)]`** を付け、対応する `Default` 実装を用意する（既存永続 state に missing field でも読める）
+> - `QuoteCurrency` の `Default` は `Usdt`（暗号資産 venue 互換）、`lot_size: Option<u32>` は `None`
 > - hash 入りデータが永続化レイヤ（state.rs / dashboard 設定）にあれば schema migration が必要
 
 ## 6. kline
@@ -148,20 +170,21 @@ JPY が quote currency になる venue は本アプリ初。**通貨表示用フ
 ```rust
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum QuoteCurrency {
-    Usdt,   // 既定（暗号資産 venue）
+    Usdt,
     Usdc,
     Usd,
-    Jpy,    // 立花
+    Jpy,
 }
 
 pub struct TickerInfo {
     // ...
-    pub quote_currency: QuoteCurrency,
+    pub quote_currency: Option<QuoteCurrency>,
 }
 ```
 
 - **`&'static str` は採用しない**: serde で受信した文字列を `&'static` に戻せず、`Hash`/`Eq` 派生が崩れるため。enum で表現し、不明値は serde error にする
-- 既存暗号資産 venue は `Usdt` などにマッピング（venue ごとの quote 抽出は adapter 側で実装）
+- **`Default` は付けない・`Option<QuoteCurrency>` で持つ（F-M6）**: `Default = Usdt` にしてしまうと、新フォーマット導入前の永続 state を読み戻したときに **立花銘柄まで `Usdt` で復元され UI が `$` 表記する**事故が起きる。`Option<QuoteCurrency>` + `#[serde(default)]` で missing field は `None`、`None` のときはフォーマッタが `Exchange`/`Venue` から venue ごとに決定論的に算出する（暗号資産 venue は USDT/USDC、立花は JPY）。**永続 state からの復元は読み込み時に必ず venue 由来の値を再注入**して `Some(...)` に正規化する
+- venue ごとの quote 抽出関数は `Exchange::default_quote_currency(&self) -> QuoteCurrency` として `exchange/src/adapter.rs` に実装。ticker 単位で例外がある場合のみ `Some(_)` で override
 - UI のフォーマッタはこの enum を見て `¥` / `$` プレフィックス + 桁区切りを切り替える
 
 ## 12. capabilities ハンドシェイク（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §4.5 起動ハンドシェイク）

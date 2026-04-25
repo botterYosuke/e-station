@@ -27,18 +27,31 @@
   - マスタ: `e_api_get_master_tel.py`
 - コーディング規約・運用ルール: [.claude/skills/tachibana/SKILL.md](../../../.claude/skills/tachibana/SKILL.md)（**R1〜R10 を必ず守る**）
 
-> **重要（実装着手前に確認）**: SKILL.md は `exchange/src/adapter/tachibana.rs`（約 4,350 行）や `data/src/config/tachibana.rs` を「既存の参考実装」として参照しているが、**現リポジトリには存在しない**（git 全履歴で未確認）。本計画はすべて**ゼロから新設**する前提で書かれている。SKILL.md の R3/R4/R6/R10/§Rust 実装の既存ヘルパー節は**仕様の抽象記述**として読み、ファイル参照は実装の道標としては使えないことに注意。
+> **重要（実装着手前に確認）**: SKILL.md は `exchange/src/adapter/tachibana.rs`（約 4,350 行）や `data/src/config/tachibana.rs` を「既存の参考実装」として参照しているが、**現リポジトリには存在しない**（git 全履歴で未確認）。本計画はすべて**ゼロから新設**する前提で書かれている。SKILL.md の R3/R4/R6/R10/§Rust 実装の既存ヘルパー節は**仕様の抽象記述**として読み、ファイル参照は実装の道標としては使えないことに注意。SKILL.md 自体の書き換えタスクは [implementation-plan.md T0.2](./implementation-plan.md) に集約。
 
 ## 一行サマリ
 
 立花証券は「**認証つき・JST 営業時間・株式市場・板は 1 行ベースのスナップショット型・kline は日足のみ**」という暗号資産 venue とは性質の異なる venue。Phase 1 では **チャート閲覧（kline + 直近約定 + 板スナップショット）に絞ったリードオンリー統合** をデモ環境のみで成立させる。注文機能は v2 以降。
 
+## 長期方針（将来の Python 単独モード）
+
+- **将来、Rust（iced）を使わず Python 単独で動作する "Python-only モード" の新設を予定**している。Phase 1 はあくまで Rust + Python 構成だが、本計画で増やす機能は **「Python 側だけで完結できる構造」を優先**する
+- 結果として下記が原則:
+  - venue 固有の知識（API 呼出・パース・認証・UI 文言・ログイン画面）は **Python 側に集約**
+  - Rust 側はチャート描画・iced UI フレーム・keyring の OS bridge という汎用責務に絞る
+  - IPC（`engine-client`）は **薄い transport** に保つ。venue 固有 DTO（`TachibanaCredentialsWire` 等）は将来の Python-only モードで `engine-client` を経由しなくても、`tachibana_auth.py` などが直接使える形を維持
+  - tkinter ログインダイアログ・バナー文言・FD frame パースなど、Phase 1 で Python に置く実装は **Python-only モードでもそのまま再利用できる**
+- iced と tkinter の 2 つの windowing system が同時稼働することは**許容**（GUI 一貫性の不利を、venue 拡張容易性と Python-only モードへの将来移行コスト低減で正当化）
+- Python-only モードは別計画で扱う。本計画の範囲外だが、**設計判断で迷ったら「Python 単独でも動くか？」を判定基準の 1 つに使う**
+
 ## 実装前提の固定事項
 
 - **復旧シーケンスの source of truth は `ProcessManager`**。managed mode の再起動時は `Hello -> Ready -> SetProxy -> SetVenueCredentials -> VenueReady -> metadata fetch / resubscribe` を必ず再実行する
-- **`VenueReady` は冪等イベント**。Python 単独再起動で複数回受信してよい。Rust 側の resubscribe は `ProcessManager` 1 箇所に集約し、UI view 側は `VenueReady` イベントで新規 subscribe を発行しない
-- **立花 venue の業務リクエストは `VenueReady` 後にのみ許可**。`Ready` はエンジン全体の起動完了、`VenueReady` は立花認証・session validation 完了を表す
-- **runtime 中の自動再ログインは禁止**。`p_errno=2` 検知 → `tachibana_session_expired` を Rust UI に投げ、ユーザー再ログイン誘導。**定期 `validate_session` ポーリングも実装しない**（自動再ログイン禁止と矛盾するため）。再ログイン fallback は起動直後の session 検証失敗時に **1 回だけ** 許可
+- **`VenueReady` は冪等イベント**。`request_id` で `SetVenueCredentials` と相関させるが UI は初回 / 再送を区別しない。Rust 側の resubscribe は `ProcessManager` 1 箇所に集約し、UI view 側は `VenueReady` イベントで新規 subscribe を発行しない
+- **立花 venue の業務リクエストは `VenueReady` 後にのみ許可**。`Ready` はエンジン全体の起動完了、`VenueReady` は立花認証・session validation 完了（マスタ DL は含まない）を表す
+- **runtime 中の自動再ログインは禁止**。`p_errno=2` 検知 → `VenueError{venue:"tachibana", code:"session_expired"}` を Rust UI に投げ、ユーザー再ログイン誘導。**定期 `validate_session` ポーリングも実装しない**（自動再ログイン禁止と矛盾するため）。再ログイン fallback は起動直後の session 検証失敗時に **1 回だけ** 許可
+- **venue エラーは venue-scoped イベントで返す**。`VenueError { venue, request_id, code, message }` に統一し、旧 `EngineError{code:"tachibana_session_expired"}` 表記は使わない
+- **`SetVenueCredentials` payload は typed**。`serde_json::Value` を使わず `VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire)` で Rust 側 `Debug` マスクを効かせる。**内部保持型は `SecretString` でパスワード・仮想 URL をラップ**し、IPC 送出時のみプレーン `String` の `*Wire` DTO に写像する（architecture.md §2.1、F-B1/F-B2）
 - **第二暗証番号は Phase 1 から受け取って keyring / Python メモリに保持する**。発注には使わないが、後続フェーズでのスキーマ移行を避ける
 - **`MarketKind::Stock` 追加は最小変更では終わらない**。enum の網羅 match、UI の市場別表示、indicator 可用性、timeframe 可用性、market filter まで波及する前提で見積もる。T0.1 で `git grep` 棚卸し必須
 - **`TickerInfo` フィールド追加は Hash 影響を伴う**。`#[derive(Hash, Eq)]` で `HashMap` キーとして全クレートに広がっているため、`lot_size` / `quote_currency` 追加時は永続 state の migration 影響を T0 で確認する
