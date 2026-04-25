@@ -66,20 +66,38 @@ impl std::fmt::Display for Timeframe {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
 pub enum Timeframe {
+    // Wire format matches `Display` and the Python engine's `timeframe_to_str`.
+    // `alias` keeps backwards compat with old `saved-state.json` files that
+    // were serialized before the rename was introduced.
+    #[serde(rename = "100ms", alias = "MS100")]
     MS100,
+    #[serde(rename = "200ms", alias = "MS200")]
     MS200,
+    #[serde(rename = "300ms", alias = "MS300")]
     MS300,
+    #[serde(rename = "500ms", alias = "MS500")]
     MS500,
+    #[serde(rename = "1s", alias = "MS1000")]
     MS1000,
+    #[serde(rename = "1m", alias = "M1")]
     M1,
+    #[serde(rename = "3m", alias = "M3")]
     M3,
+    #[serde(rename = "5m", alias = "M5")]
     M5,
+    #[serde(rename = "15m", alias = "M15")]
     M15,
+    #[serde(rename = "30m", alias = "M30")]
     M30,
+    #[serde(rename = "1h", alias = "H1")]
     H1,
+    #[serde(rename = "2h", alias = "H2")]
     H2,
+    #[serde(rename = "4h", alias = "H4")]
     H4,
+    #[serde(rename = "12h", alias = "H12")]
     H12,
+    #[serde(rename = "1d", alias = "D1")]
     D1,
 }
 
@@ -512,12 +530,34 @@ pub enum StreamPairKind {
     MultiSource(Vec<TickerInfo>),
 }
 
+/// Quote currency a ticker is denominated in. Drives the price formatter
+/// (`¥` vs `$`) and digit grouping. Intentionally has no `Default` impl —
+/// see Q18 / F-M6: a `Default = Usdt` would let an old persisted state
+/// silently restore Tachibana tickers as USDT-denominated, hiding the bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum QuoteCurrency {
+    Usdt,
+    Usdc,
+    Usd,
+    Jpy,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]
 pub struct TickerInfo {
     pub ticker: Ticker,
     pub min_ticksize: MinTicksize,
     pub min_qty: MinQtySize,
     pub contract_size: Option<ContractSize>,
+    /// Equity lot size — Tachibana stocks are 100 shares per lot. `None` for
+    /// crypto venues. `#[serde(default)]` keeps old `saved-state.json` files
+    /// loadable (F13).
+    #[serde(default)]
+    pub lot_size: Option<u32>,
+    /// Quote currency — `None` is allowed at deserialize time; the loader is
+    /// expected to fold in `Exchange::default_quote_currency()` so that the
+    /// UI formatter never sees `None`. See F-M6.
+    #[serde(default)]
+    pub quote_currency: Option<QuoteCurrency>,
 }
 
 impl TickerInfo {
@@ -527,12 +567,35 @@ impl TickerInfo {
         min_qty: f32,
         contract_size: Option<f32>,
     ) -> Self {
+        let quote_currency = Some(ticker.exchange.default_quote_currency());
         Self {
             ticker,
             min_ticksize: MinTicksize::from(min_ticksize),
             min_qty: MinQtySize::from(min_qty),
             contract_size: contract_size.map(ContractSize::from),
+            lot_size: None,
+            quote_currency,
         }
+    }
+
+    /// Like `new`, but lets a venue (e.g. Tachibana) set the equity lot size.
+    pub fn new_stock(ticker: Ticker, min_ticksize: f32, min_qty: f32, lot_size: u32) -> Self {
+        let quote_currency = Some(ticker.exchange.default_quote_currency());
+        Self {
+            ticker,
+            min_ticksize: MinTicksize::from(min_ticksize),
+            min_qty: MinQtySize::from(min_qty),
+            contract_size: None,
+            lot_size: Some(lot_size),
+            quote_currency,
+        }
+    }
+
+    /// Resolved quote currency — falls back to the `Exchange` default when
+    /// the persisted value is missing.
+    pub fn resolved_quote_currency(&self) -> QuoteCurrency {
+        self.quote_currency
+            .unwrap_or_else(|| self.ticker.exchange.default_quote_currency())
     }
 
     pub fn market_type(&self) -> MarketKind {

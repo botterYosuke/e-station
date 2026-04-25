@@ -9,8 +9,9 @@
 ### 2.1 含めるもの
 
 - **新 venue `Venue::Tachibana`**（[exchange/src/adapter.rs L264](../../../exchange/src/adapter.rs#L264) に追加）
-- **新 `MarketKind::Stock`**（株式現物市場。信用は内部的に同じ market でハンドル）
+- **新 `MarketKind::Stock`**（株式現物市場。信用は内部的に同じ market でハンドル）。`qty_in_quote_value` は enum 内部分岐で `price * qty` を強制（[implementation-plan T0.1/T0.2](./implementation-plan.md) で呼出 6 箇所を棚卸し済み）
 - **新 `Exchange::TachibanaStock`**
+- **`Timeframe` の serde 形式統一（F-H1）**: 現状 `#[derive(Serialize)]` のみで `"D1"` / `"M1"` 等が出る既知の不整合がある。立花 capabilities (`["1d"]`) と既存 `Display` (`"1d"`) に合わせるため、`Timeframe` 全変種に `#[serde(rename = "...")]` を T0.2 で追加
 - **Python 実装** `python/engine/exchanges/tachibana.py`（`ExchangeWorker` 実装、デモ環境のみ）
   - 認証フロー（`CLMAuthLoginRequest` → 5 つの仮想 URL を取得 → `TachibanaSession` 保持）
   - ティッカー一覧（`CLMEventDownload` の `CLMIssueMstKabu` から銘柄マスタを取り出す）
@@ -59,8 +60,10 @@
   - Rust 側で OS keyring に保存（`data::config::tachibana`、新設）
   - Python 側に渡すのは IPC ハンドシェイク後の **`SetVenueCredentials` コマンド**（stdin / 環境変数を使わない、ログ出力でマスク）
   - Python 側は **メモリのみ**で保持。ディスクには書かない
+- **第二暗証番号は Phase 1 では収集も保持もしない（F-H5）**: DTO スキーマ上は `second_password: Option<SecretString>` を切るが、Phase 1 では Rust 側の収集 UI も Python 側のメモリ保持も実装せず、常に `None` を送る。発注しないものを保持して攻撃面（コアダンプ・スワップ・GC 残存）を増やさない。Phase 2（発注機能）で値の収集・保持を有効化する。スキーマは破壊変更にならないため移行コストはない
 - ログ出力時は仮想 URL のホスト部分まで `***` マスク（プロセス再起動時に keyring から復元するため、URL がリークしても session 侵害にはなりうる）
-- `DEV_TACHIBANA_*` env は `#[cfg(debug_assertions)]` ブロックでのみ参照（release では完全除外）
+- `DEV_TACHIBANA_*` env は `#[cfg(debug_assertions)]` ブロックでのみ参照（release では完全除外）。Phase 1 では `DEV_TACHIBANA_SECOND_PASSWORD` も**読み込まない**
+- **`BASE_URL_PROD` 定数の所在は 1 ファイル限定（F-L1）**: 本番 URL リテラル `kabuka.e-shiten.jp` を持てるのは `python/engine/exchanges/tachibana_url.py` の冒頭定義 1 箇所のみ。Rust 側は本番 URL を持たない（Python から venue 設定経由で受け取る）。`tools/secret_scan.sh` の allowlist もこの 1 ファイルのみとする
 
 ### 3.2 セッション寿命と復旧
 
@@ -83,7 +86,7 @@
 
 - FD frame 受信→ Rust 描画キュー投入: 中央値 < 50ms（株式は暗号資産より頻度が低いので緩め）
 - **板更新は FD ストリーム駆動が正**（FD frame ごとに `DepthSnapshot` を再生成、data-mapping §4）。REST `CLMMfdsGetMarketPrice` polling は (a) ザラ場前後の初回 snapshot 1 発、(b) FD WS が一定時間（KP 含めて 12 秒）無通信で再接続中のフォールバック時のみ。**runtime の定期 polling は実装しない**
-- マスタダウンロードは **起動時 1 回 + 日次更新のみ**、各 ticker subscribe ごとには走らせない
+- マスタダウンロードは **起動時 1 回 + 日次更新のみ**、各 ticker subscribe ごとには走らせない。**kick タイミングは `VenueReady` 受信直後**（`sUrlMaster` が必要なため）。完了は `ListTickers` 応答到着で判定（F-H6、`VenueReady` 自体には含めない）
 - 立花 venue の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` は **`VenueReady` 前に送らない**。`Ready` 直後に sidebar が自動 metadata fetch する既存導線があるため、Rust 側に venue-ready ゲートを追加する
 - マスタキャッシュを永続化する場合は、Python が保存先を推測しない。**Rust から `config_dir` または `cache_dir` を起動時に明示的に渡す**
 

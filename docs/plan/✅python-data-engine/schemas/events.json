@@ -18,7 +18,12 @@
     { "$ref": "#/$defs/OpenInterest" },
     { "$ref": "#/$defs/TickerInfo" },
     { "$ref": "#/$defs/TickerStats" },
-    { "$ref": "#/$defs/Error" }
+    { "$ref": "#/$defs/Error" },
+    { "$ref": "#/$defs/VenueReady" },
+    { "$ref": "#/$defs/VenueError" },
+    { "$ref": "#/$defs/VenueCredentialsRefreshed" },
+    { "$ref": "#/$defs/VenueLoginStarted" },
+    { "$ref": "#/$defs/VenueLoginCancelled" }
   ],
   "$defs": {
     "Ready": {
@@ -68,7 +73,7 @@
       }
     },
     "Disconnected": {
-      "description": "Exchange WebSocket stream disconnected (mirrors exchange::Event::Disconnected).",
+      "description": "Exchange WebSocket stream disconnected (mirrors exchange::Event::Disconnected). For Tachibana, `reason: \"market_closed\"` indicates the JST trading session boundary.",
       "type": "object",
       "required": ["event", "venue", "ticker", "stream"],
       "additionalProperties": false,
@@ -274,6 +279,86 @@
         "request_id": { "type": ["string", "null"] },
         "code": { "type": "string" },
         "message": { "type": "string" }
+      }
+    },
+    "TachibanaSessionWire": {
+      "type": "object",
+      "required": ["url_request", "url_master", "url_price", "url_event", "url_event_ws"],
+      "additionalProperties": false,
+      "properties": {
+        "url_request": { "type": "string" },
+        "url_master": { "type": "string" },
+        "url_price": { "type": "string" },
+        "url_event": { "type": "string" },
+        "url_event_ws": { "type": "string" },
+        "expires_at_ms": { "type": ["integer", "null"] },
+        "zyoutoeki_kazei_c": { "type": "string" }
+      }
+    },
+    "VenueReady": {
+      "description": "Idempotent: emitted after every successful SetVenueCredentials, including post-restart re-injection. Consumers must NOT trigger fresh subscriptions on receipt — ProcessManager owns resubscribe.",
+      "type": "object",
+      "required": ["event", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueReady" },
+        "venue": { "type": "string" },
+        "request_id": { "type": ["string", "null"] }
+      }
+    },
+    "VenueError": {
+      "description": "Venue-scoped error. `message` is user-facing and authored by Python (F-Banner1); the Rust UI displays it verbatim and does NOT compose its own banner text. `code` drives severity & action button only.",
+      "type": "object",
+      "required": ["event", "venue", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueError" },
+        "venue": { "type": "string" },
+        "request_id": { "type": ["string", "null"] },
+        "code": {
+          "type": "string",
+          "enum": [
+            "session_expired",
+            "unread_notices",
+            "phone_auth_required",
+            "login_failed",
+            "ticker_not_found",
+            "transport_error"
+          ]
+        },
+        "message": { "type": "string" }
+      }
+    },
+    "VenueCredentialsRefreshed": {
+      "description": "Emitted after a startup-time re-login produces fresh virtual URLs. Rust uses this to update the keyring entry.",
+      "type": "object",
+      "required": ["event", "venue", "session"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueCredentialsRefreshed" },
+        "venue": { "type": "string" },
+        "session": { "$ref": "#/$defs/TachibanaSessionWire" }
+      }
+    },
+    "VenueLoginStarted": {
+      "description": "Python has spawned the venue's login helper subprocess (Tachibana = tkinter dialog).",
+      "type": "object",
+      "required": ["event", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueLoginStarted" },
+        "venue": { "type": "string" },
+        "request_id": { "type": ["string", "null"] }
+      }
+    },
+    "VenueLoginCancelled": {
+      "type": "object",
+      "required": ["event", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueLoginCancelled" },
+        "venue": { "type": "string" },
+        "request_id": { "type": ["string", "null"] }
       }
     }
   }

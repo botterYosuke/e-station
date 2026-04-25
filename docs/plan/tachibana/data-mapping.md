@@ -43,7 +43,7 @@ pub enum Exchange {
 
 立花にはミリ秒単位のテープデータ API は存在しない。代わりに EVENT の **FD frame**（時価情報）が変化分のみ来る。Phase 1 では下記をもって "trade" とみなす:
 
-> **情報コード出典の注意（F-M2）**: 下記の `DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` 等は SKILL.md には `DPP` 1 例しか記載がなく、公式 EVENT 仕様 PDF（`api_event_if_v4r7.pdf`）は `manual_files/` に同梱されていない。**T0 末で Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) のコード表抜粋を本節に転記する**こと（implementation-plan T0.2 タスク化）。それまで本節のコード名は暫定値として扱う。
+> **情報コード出典の注意（F-M2、F-H3）**: 下記の `DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` 等は SKILL.md には `DPP` 1 例しか記載がなく、公式 EVENT 仕様 PDF（`api_event_if_v4r7.pdf`）は `manual_files/` に同梱されていない。**T0 末で Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) のコード表抜粋を本節に転記する**こと（implementation-plan T0.1 タスク化）。**この一覧の確定は T1（codec）と T5（FD trade/depth）の前提条件**であり、未確定のまま下流フェーズに着手しない。それまで本節のコード名は暫定値として扱う。
 
 
 | 立花 FD フィールド | 意味 | TradeMsg |
@@ -62,6 +62,7 @@ pub enum Exchange {
   4. trade 発火後に `prev_quote` を現 frame の best_bid/best_ask で更新
 - **初回 frame（prev_quote=None かつ prev_dv=None）は trade を発火しない**（F4）。初回 frame は quote 初期化と DV 初期化だけを行い、2 件目以降で trade 合成を開始する
 - 履歴が無くかつ tick rule も効かないエッジケースでは `buy` 既定、ただしログに `warn!("tachibana: initial trade side ambiguous")` を出す
+- **tick rule fallback テストケース（F-M8）**: `test_tachibana_fd_trade.py` に「DPP が前 frame の bid と ask の中値ぴったり / 直前 trade 価格より上昇 → `buy`」「同条件で直前 trade 価格より下落 → `sell`」「直前 trade も同値 → 既定 `buy` + warn ログ」の 3 ケースを追加
 
 **DV リセット条件（F4）**:
 - 新規 WebSocket 接続（`stream_session_id` が更新された場合）

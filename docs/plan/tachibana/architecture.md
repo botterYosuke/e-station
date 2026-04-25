@@ -113,7 +113,7 @@ pub struct TachibanaSessionWire {
 
 - `session` は **Rust が keyring から復元できた場合のみ** 含める。Python はまず `session` を試し、`p_errno="2"` で失敗したら `user_id/password` で再ログインする
   - この再ログインは **起動直後の `SetVenueCredentials` 処理中に限る**。購読開始後の runtime で session expiry を検知した場合は再ログインせず `VenueError{venue:"tachibana", code:"session_expired"}` を返す
-- `second_password` は **Phase 2 以降の発注機能で使う**。Phase 1 では受け取って Python メモリに保持するだけ（漏らさない）
+- `second_password` は **Phase 2 以降の発注機能で使う**。**Phase 1 では DTO スキーマ上 `Option<SecretString>` で持つが、収集も保持もせず常に `None` を送る**（F-H5）。発注しないものを Python メモリに保持して攻撃面を増やさない方針
 - このコマンドは **`Ready` 受信後・任意の `Subscribe` 前** に送る（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §4.5 起動ハンドシェイク）
 - **応答規約**: Python は 1 件の `SetVenueCredentials` に対し、成功時は `VenueReady{venue, request_id}` を、失敗時は `VenueError{venue, request_id, code, message}` を必ず 1 件だけ返す（F1）
 

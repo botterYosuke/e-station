@@ -5,6 +5,39 @@ Schema versioning follows the policy in [spec.md §4.5.1](../spec.md#451-スキ�
 - **major** bump: breaking changes (field removal, rename, enum variant removal)
 - **minor** bump: backwards-compatible additions (new fields, new variants, new commands)
 
+## v1.2 (2026-04-25) — Tachibana venue scaffolding (minor)
+
+- **minor bump 1.1→1.2**: added Tachibana 立花証券 venue support at the IPC
+  level. Backwards compatible: every new shape is additive.
+  - **New commands**:
+    - `SetVenueCredentials { request_id, payload: VenueCredentialsPayload }` —
+      tagged enum (today only `tachibana`) carrying user_id / password /
+      optional second_password / `is_demo` / optional virtual-URL session.
+      Sent at startup (keyring restore) and after managed-mode restart.
+    - `RequestVenueLogin { request_id, venue }` — Rust UI asks the engine
+      to drive the venue-specific login flow (Tachibana spawns a tkinter
+      helper subprocess).
+  - **New events**:
+    - `VenueReady { venue, request_id? }` — idempotent; emitted after every
+      successful `SetVenueCredentials`. Resubscribe is ProcessManager-owned;
+      consumers must not re-subscribe on receipt (architecture.md §3, F8).
+    - `VenueError { venue, request_id?, code, message }` — `code` enum
+      includes `session_expired` / `unread_notices` / `phone_auth_required` /
+      `login_failed` / `ticker_not_found` / `transport_error`. `message` is
+      Python-authored user-facing text (F-Banner1) — the Rust UI renders it
+      verbatim.
+    - `VenueCredentialsRefreshed { venue, session }` — startup re-login
+      produced fresh virtual URLs; Rust uses this to update keyring.
+    - `VenueLoginStarted { venue, request_id? }` — tkinter helper spawned.
+    - `VenueLoginCancelled { venue, request_id? }` — user closed the dialog.
+  - **`Disconnected.reason` convention**: `"market_closed"` is reserved for
+    Tachibana JST session boundaries; not a new field.
+  - **Capabilities path**: `Ready.capabilities.venue_capabilities[<venue>]`
+    is left untyped on the Rust side (F-M8) — Python is the schema source
+    of truth. Rust-side reads go through `engine_client::capabilities::
+    venue_capability` which returns `Result<Option<T>, _>` so missing /
+    malformed entries cannot silently default to `false`.
+
 ## v1.1 (2026-04-25) — TradesFetched documented (minor)
 
 - **minor bump 1.0→1.1**: added `TradesFetched` event definition with `is_last: bool`

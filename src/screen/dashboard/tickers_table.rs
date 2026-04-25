@@ -58,12 +58,21 @@ const COMPACT_ROW_HEIGHT: f32 = 28.0;
 const EXCHANGE_UNAVAILABLE_TOOLTIP: &str = "Metadata unavailable.\nCheck logs for details.";
 
 fn available_markets(venue: Venue) -> &'static [MarketKind] {
+    // Spot + LinearPerps + InversePerps for the crypto venues that support
+    // all three. `MarketKind::ALL` now includes `Stock`, so we list the
+    // crypto subset explicitly.
+    const CRYPTO_ALL: [MarketKind; 3] = [
+        MarketKind::Spot,
+        MarketKind::LinearPerps,
+        MarketKind::InversePerps,
+    ];
     match venue {
-        Venue::Binance | Venue::Bybit | Venue::Okex => &MarketKind::ALL,
+        Venue::Binance | Venue::Bybit | Venue::Okex => &CRYPTO_ALL,
         Venue::Hyperliquid => &[MarketKind::Spot, MarketKind::LinearPerps],
         // Skip metadata fetch for Mexc spot as it requires protobuf for websocket
         // TODO: include after protobuf implementation and Mexc spot markets ready to stream
         Venue::Mexc => &[MarketKind::LinearPerps, MarketKind::InversePerps],
+        Venue::Tachibana => &[MarketKind::Stock],
     }
 }
 
@@ -1087,7 +1096,7 @@ impl TickersTable {
                         + " "
                         + &market.to_string()
                         + match market {
-                            MarketKind::Spot => "",
+                            MarketKind::Spot | MarketKind::Stock => "",
                             MarketKind::LinearPerps | MarketKind::InversePerps => " Perp",
                         }
                 ),
@@ -1830,5 +1839,267 @@ impl StatsFetchState {
             1 => "..",
             _ => "...",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the metadata → stats flow that drives the sidebar
+    //! ticker list (Phase 7 T1.3 後半). UI-1 surfaced as 0-row sidebar after the
+    //! Python IPC migration; the root cause was a serde mismatch on
+    //! `TickerStats::daily_price_chg`, but this regression suite locks in the
+    //! adjacent state-machine contract:
+    //!
+    //!   1. `new_with_settings` marks the selected venues as `in_flight`.
+    //!   2. `UpdateMetadata` flips that venue to `fetched` and populates
+    //!      `tickers_info`.
+    //!   3. `UpdateStats` only inserts rows for tickers whose metadata is
+    //!      already known — stats for unknown tickers are dropped silently
+    //!      (and therefore must arrive *after* metadata).
+    //!
+    //! The test injects a no-op `VenueBackend` stub (mirroring the pattern in
+    //! `exchange/tests/venue_backend.rs`) so `AdapterHandles` can be
+    //! constructed without a live Python engine. Stub methods are never driven
+    //! because we feed `Message`s directly into `update()`.
+    use super::*;
+    use data::tickers_table::Settings;
+    use exchange::adapter::venue_backend::{TickerMetadataMap, TickerStatsMap, VenueBackend};
+    use exchange::adapter::{AdapterError, Event, Exchange};
+    use exchange::depth::DepthPayload;
+    use exchange::unit::price::Price;
+    use exchange::unit::qty::Qty;
+    use exchange::{Kline, OpenInterest, PushFrequency, TickMultiplier, Timeframe, Trade};
+    use futures::future::BoxFuture;
+    use futures::stream::{BoxStream, empty};
+    use futures::StreamExt;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    struct InertBackend;
+
+    impl VenueBackend for InertBackend {
+        fn kline_stream(
+            &self,
+            _streams: Vec<(TickerInfo, Timeframe)>,
+            _market_kind: MarketKind,
+        ) -> BoxStream<'static, Event> {
+            empty().boxed()
+        }
+        fn trade_stream(
+            &self,
+            _tickers: Vec<TickerInfo>,
+            _market_kind: MarketKind,
+        ) -> BoxStream<'static, Event> {
+            empty().boxed()
+        }
+        fn depth_stream(
+            &self,
+            _ticker_info: TickerInfo,
+            _tick_multiplier: Option<TickMultiplier>,
+            _push_freq: PushFrequency,
+        ) -> BoxStream<'static, Event> {
+            empty().boxed()
+        }
+        fn fetch_ticker_metadata(
+            &self,
+            _markets: &[MarketKind],
+        ) -> BoxFuture<'_, Result<TickerMetadataMap, AdapterError>> {
+            Box::pin(async { Ok(HashMap::default()) })
+        }
+        fn fetch_ticker_stats(
+            &self,
+            _markets: &[MarketKind],
+            _contract_sizes: Option<HashMap<Ticker, f32>>,
+        ) -> BoxFuture<'_, Result<TickerStatsMap, AdapterError>> {
+            Box::pin(async { Ok(HashMap::default()) })
+        }
+        fn fetch_klines(
+            &self,
+            _ticker_info: TickerInfo,
+            _timeframe: Timeframe,
+            _range: Option<(u64, u64)>,
+        ) -> BoxFuture<'_, Result<Vec<Kline>, AdapterError>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn fetch_open_interest(
+            &self,
+            _ticker_info: TickerInfo,
+            _timeframe: Timeframe,
+            _range: Option<(u64, u64)>,
+        ) -> BoxFuture<'_, Result<Vec<OpenInterest>, AdapterError>> {
+            Box::pin(async {
+                Err(AdapterError::InvalidRequest("inert".to_string()))
+            })
+        }
+        fn fetch_trades(
+            &self,
+            _ticker_info: TickerInfo,
+            _from_time: u64,
+            _to_time: u64,
+            _data_path: Option<PathBuf>,
+        ) -> BoxFuture<'_, Result<Vec<Trade>, AdapterError>> {
+            Box::pin(async {
+                Err(AdapterError::InvalidRequest("inert".to_string()))
+            })
+        }
+        fn request_depth_snapshot(
+            &self,
+            _ticker: Ticker,
+        ) -> BoxFuture<'_, Result<DepthPayload, AdapterError>> {
+            Box::pin(async {
+                Err(AdapterError::InvalidRequest("inert".to_string()))
+            })
+        }
+        fn health(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+    }
+
+    fn settings_for(venue: Venue) -> Settings {
+        Settings {
+            favorited_tickers: vec![],
+            show_favorites: false,
+            selected_sort_option: data::tickers_table::SortOptions::VolumeDesc,
+            selected_exchanges: vec![venue],
+            selected_markets: MarketKind::ALL.into_iter().collect(),
+        }
+    }
+
+    fn handles_with_inert(venue: Venue) -> AdapterHandles {
+        let mut handles = AdapterHandles::default();
+        handles.set_backend(venue, Arc::new(InertBackend));
+        handles
+    }
+
+    fn ticker_info_for(exchange: Exchange, symbol: &str) -> (Ticker, TickerInfo) {
+        let ticker = Ticker::new(symbol, exchange);
+        let info = TickerInfo::new(ticker, 0.1, 0.001, None);
+        (ticker, info)
+    }
+
+    fn stats_with(price: f32, change_pct: f32, volume: f32) -> TickerStats {
+        TickerStats {
+            mark_price: Price::from_f32(price),
+            daily_price_chg: change_pct,
+            daily_volume: Qty::from(volume),
+        }
+    }
+
+    #[test]
+    fn new_with_settings_marks_selected_venue_in_flight() {
+        let settings = settings_for(Venue::Bybit);
+        let (table, _task) = TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
+
+        assert!(table.metadata_fetch_state.is_in_flight(Venue::Bybit));
+        assert!(!table.metadata_fetch_state.has_fetched(Venue::Bybit));
+        assert!(table.ticker_rows.is_empty());
+        assert!(table.tickers_info.is_empty());
+    }
+
+    #[test]
+    fn update_metadata_then_update_stats_populates_ticker_rows() {
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
+
+        let (btc, btc_info) = ticker_info_for(Exchange::BybitLinear, "BTCUSDT");
+        let (eth, eth_info) = ticker_info_for(Exchange::BybitLinear, "ETHUSDT");
+        let mut metadata: HashMap<Ticker, Option<TickerInfo>> = HashMap::new();
+        metadata.insert(btc, Some(btc_info));
+        metadata.insert(eth, Some(eth_info));
+
+        let _ = table.update(Message::UpdateMetadata(Venue::Bybit, metadata));
+
+        assert!(table.metadata_fetch_state.has_fetched(Venue::Bybit));
+        assert!(!table.metadata_fetch_state.is_in_flight(Venue::Bybit));
+        assert_eq!(table.tickers_info.len(), 2);
+        assert!(table.ticker_rows.is_empty(), "stats not yet delivered");
+
+        let mut stats: HashMap<Ticker, TickerStats> = HashMap::new();
+        stats.insert(btc, stats_with(50_000.0, 0.025, 1_000_000.0));
+        stats.insert(eth, stats_with(3_000.0, -0.01, 500_000.0));
+
+        let _ = table.update(Message::UpdateStats(Venue::Bybit, stats));
+
+        assert_eq!(
+            table.ticker_rows.len(),
+            2,
+            "both metadata-known tickers must be inserted into the sidebar list"
+        );
+        let symbols: Vec<_> = table.ticker_rows.iter().map(|row| row.ticker).collect();
+        assert!(symbols.contains(&btc));
+        assert!(symbols.contains(&eth));
+    }
+
+    #[test]
+    fn update_stats_before_metadata_is_dropped_silently() {
+        // UI-1 sibling contract: stats arriving before metadata are filtered
+        // out by `update_ticker_rows` (it requires `tickers_info.contains_key`).
+        // If this invariant ever flips (e.g. someone "fixes" the filter), the
+        // sidebar would render rows whose precision and display data cannot be
+        // computed correctly.
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
+
+        let (btc, _) = ticker_info_for(Exchange::BybitLinear, "BTCUSDT");
+        let mut stats: HashMap<Ticker, TickerStats> = HashMap::new();
+        stats.insert(btc, stats_with(50_000.0, 0.0, 0.0));
+
+        let _ = table.update(Message::UpdateStats(Venue::Bybit, stats));
+
+        assert!(
+            table.ticker_rows.is_empty(),
+            "stats without prior metadata must not produce ticker rows"
+        );
+    }
+
+    #[test]
+    fn update_stats_drops_tickers_not_in_metadata_but_keeps_known_ones() {
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
+
+        let (btc, btc_info) = ticker_info_for(Exchange::BybitLinear, "BTCUSDT");
+        let (eth, _eth_info) = ticker_info_for(Exchange::BybitLinear, "ETHUSDT");
+        let mut metadata: HashMap<Ticker, Option<TickerInfo>> = HashMap::new();
+        metadata.insert(btc, Some(btc_info));
+
+        let _ = table.update(Message::UpdateMetadata(Venue::Bybit, metadata));
+
+        let mut stats: HashMap<Ticker, TickerStats> = HashMap::new();
+        stats.insert(btc, stats_with(50_000.0, 0.0, 0.0));
+        stats.insert(eth, stats_with(3_000.0, 0.0, 0.0));
+
+        let _ = table.update(Message::UpdateStats(Venue::Bybit, stats));
+
+        assert_eq!(table.ticker_rows.len(), 1);
+        assert_eq!(table.ticker_rows[0].ticker, btc);
+    }
+
+    #[test]
+    fn update_stats_filters_out_other_venues() {
+        // UpdateStats(venue=Bybit, stats={Binance ticker}) must NOT pollute
+        // the table — venue mismatch is dropped by `update_ticker_rows`.
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
+
+        let (binance_btc, binance_btc_info) =
+            ticker_info_for(Exchange::BinanceLinear, "BTCUSDT");
+        let mut metadata: HashMap<Ticker, Option<TickerInfo>> = HashMap::new();
+        metadata.insert(binance_btc, Some(binance_btc_info));
+        // We "pretend" the metadata arrived under the Binance venue path.
+        let _ = table.update(Message::UpdateMetadata(Venue::Binance, metadata));
+
+        let mut stats: HashMap<Ticker, TickerStats> = HashMap::new();
+        stats.insert(binance_btc, stats_with(50_000.0, 0.0, 0.0));
+        // Now deliver those stats under the Bybit venue path — must be dropped.
+        let _ = table.update(Message::UpdateStats(Venue::Bybit, stats));
+
+        assert!(
+            table.ticker_rows.is_empty(),
+            "stats announced for the wrong venue must not enter ticker_rows"
+        );
     }
 }

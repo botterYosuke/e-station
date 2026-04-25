@@ -12,7 +12,7 @@
 | Q8 | 立花レート制限値 | サンプル準拠（3 秒リトライ）/ 公式値（不明） | T2 | サンプル `e_api_get_master_tel.py` の `time.sleep(3)` を上限の代理として採用、公式値が判明したら更新 |
 | Q9 | 銘柄セレクタの絞り込み UX | 全件表示 / 市場別 / 上場区分別 | T4 | 数千銘柄を一気に出すと UI 重い。インクリメンタル検索（コード or 名前先頭一致）を入れる |
 | Q10 | JST 表示と UTC ms 内部表現の境界 | チャート軸ラベルだけ JST / 全データ JST 化 | T4 | 既存暗号資産は UTC。venue ごとに表示タイムゾーンを切替できる仕組みが必要かは要 UX 議論 |
-| Q11 | 第二暗証番号は Phase 1 で受け取るか | はい（keyring + Python メモリ保持、未使用） / いいえ（Phase 2 で追加） | T3 | **決定寄り**: 他文書は「Phase 1 から受け取る」前提で揃える。後続の発注フェーズでスキーマ移行を避けるため |
+| Q11 | 第二暗証番号は Phase 1 で受け取るか | (a) keyring + Python メモリ保持 / (b) スキーマだけ切って収集も保持もしない / (c) Phase 2 で追加 | T3 | **決定: (b)**（F-H5、レビュー指摘で更新）。`Option<SecretString>` を DTO に切るが Phase 1 では Rust UI が値を収集せず常に `None` を送る。Python は値を保持しない。発注しないものを保持して攻撃面（コアダンプ・スワップ・GC 残存）を増やさないため。Phase 2 で値の収集・保持を有効化（スキーマ破壊変更なし） |
 | Q12 | 当日統計の表記 | "Daily Change" 固定 / venue 別ラベル | T4 | UI 文言の都合。i18n の問題でもあるので軽め |
 | Q13 | SKILL.md の架空ファイル参照と env 名の扱い | (a) T0 で実在パス + 新 env 名へ書き換え / (b) SKILL.md は仕様抽象として残す | T0 | SKILL.md は `exchange/src/adapter/tachibana.rs` / `data/src/config/tachibana.rs` / `src/screen/login.rs` / `src/connector/auth.rs` / `src/replay_api.rs` を実在として記述、かつ env 名 `DEV_USER_ID` 系を使用しているが、いずれも git 履歴に存在しない。**決定: (a)** 実在パスと新 env 名 `DEV_TACHIBANA_*` で T0 実施（implementation-plan T0.2 に明記） |
 | Q14 | 英字混在 5 桁 ticker（例 `130A0`）対応 | 実データ確認のみ / 万一落ちたら修正 | T4 | 既存 `Ticker::new` は ASCII 英数字を受け入れるため、設計論点というより受け入れ確認に近い |
@@ -37,6 +37,11 @@
 | Q33 | tkinter とデータエンジン asyncio の共存 | (a) 同一プロセスで tkinter root を asyncio に統合 / (b) ログインヘルパーを別 subprocess に隔離 | T0 | tkinter は main thread 占有。**決定: (b)** `python -m engine.exchanges.tachibana_login_dialog` を `asyncio.create_subprocess_exec` で spawn し stdout/stdin で creds をやり取り（architecture.md §7.3） |
 | Q34 | iced + tkinter の 2 ウィンドウ同居の許容 | (a) GUI 一貫性のため避ける / (b) 許容する | T0 | **決定: (b) 許容**。ユーザーから明示の許諾あり。判断軸は「venue 固有 UI を venue コードに閉じ込めること」と「将来の Python 単独モード移行コスト低減」（README.md §長期方針） |
 | Q35 | 将来の Python 単独モード対応 | (a) Phase 1 では考慮しない / (b) Python に置く実装は Rust 非依存に保ち再利用可能にする | 設計指針 | **決定: (b)**。venue 固有の認証・パース・tkinter ログイン UI・バナー文言は Python に集約し、`engine-client` IPC を経由せずに直接呼べる構造を維持。Python 単独モード本体は別計画で扱う（README.md §長期方針） |
+
+| Q36 | `Timeframe` の serde 形式 | (a) 既存の derive 任せ（`"D1"`） / (b) `#[serde(rename = "...")]` で `Display` と一致させる | T0 | レビュー指摘 F-H1。**決定: (b)**。capabilities (`["1d"]`) と既存 `Display` (`"1d"`) に揃える。既存暗号資産 venue 経路に IPC 形式変更が波及するため `cargo test --workspace` で回帰確認必須 |
+| Q37 | マスタ DL の kick タイミング | (a) `VenueReady` に含める / (b) `VenueReady` 直後に非同期 kick / (c) 初回 `ListTickers` で lazy | T4 | レビュー指摘 F-H6。**決定: (b)**。`VenueReady` 受信直後に `_ensure_master_loaded()` を `asyncio.create_task` で kick、`list_tickers` 等は内部で `await` する。`VenueReady` 自体は session 検証完了のみを意味する原則は維持 |
+| Q38 | 祝日のフェイルセーフ | (a) Phase 1 では考慮せず取引所エラーを `VenueError` に流す / (b) 「市場休業」相当エラーを検出して `Disconnected{reason:"market_closed"}` に倒す | T5 | レビュー指摘 F-M5。**決定: (b)**。誤判定防止のため対象は明示的なエラーコードのみ。動的祝日カレンダーは引き続き Phase 2 |
+| Q39 | `BASE_URL_PROD` 定数の所在 | (a) Python 側 1 ファイル限定 / (b) Rust と Python 両方に持つ | T0 | レビュー指摘 F-L1。**決定: (a)** `python/engine/exchanges/tachibana_url.py` のみ。Rust 側は本番 URL リテラルを持たず、`tools/secret_scan.sh` の allowlist もこの 1 ファイルのみ |
 
 ## 決定済み（参考）
 

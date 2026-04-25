@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_MAJOR: int = 1
-SCHEMA_MINOR: int = 1
+SCHEMA_MINOR: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +122,60 @@ class RequestDepthSnapshot(IpcMessage):
 
 class Shutdown(IpcMessage):
     op: Literal["Shutdown"] = "Shutdown"
+
+
+# ── Tachibana 立花証券 venue credentials (Phase 1, T0.2) ────────────────────
+
+
+class TachibanaSessionWire(IpcMessage):
+    """5 virtual URLs returned by ``CLMAuthLoginRequest`` plus session metadata.
+
+    All URL fields cross the IPC boundary as plain strings; the Python side
+    keeps them in memory only (no disk) and the Rust side wraps them in
+    ``SecretString`` before storage. ``__repr__`` does not need extra
+    masking — pydantic does not include field values in ``BaseModel`` repr
+    when they are nested ``SecretStr``, but here we use ``str`` so callers
+    must avoid logging the raw model.
+    """
+
+    url_request: str
+    url_master: str
+    url_price: str
+    url_event: str
+    url_event_ws: str
+    expires_at_ms: int | None = None
+    zyoutoeki_kazei_c: str = ""
+
+
+class TachibanaCredentialsWire(IpcMessage):
+    user_id: str
+    password: str
+    second_password: str | None = None
+    is_demo: bool = True
+    session: TachibanaSessionWire | None = None
+
+
+class VenueCredentialsPayload(IpcMessage):
+    """Tagged union — today only the ``tachibana`` variant exists."""
+
+    venue: Literal["tachibana"]
+    user_id: str
+    password: str
+    second_password: str | None = None
+    is_demo: bool = True
+    session: TachibanaSessionWire | None = None
+
+
+class SetVenueCredentials(IpcMessage):
+    op: Literal["SetVenueCredentials"] = "SetVenueCredentials"
+    request_id: str
+    payload: VenueCredentialsPayload
+
+
+class RequestVenueLogin(IpcMessage):
+    op: Literal["RequestVenueLogin"] = "RequestVenueLogin"
+    request_id: str
+    venue: str
 
 
 # ---------------------------------------------------------------------------
@@ -293,3 +347,55 @@ class Error(IpcMessage):
     request_id: str | None = None
     code: str
     message: str
+
+
+# ── Tachibana / venue lifecycle events (Phase 1, T0.2) ─────────────────────
+
+
+class VenueReady(IpcMessage):
+    """Venue-scoped session validation completed (idempotent).
+
+    Tachibana emits this every time ``SetVenueCredentials`` succeeds —
+    including after a Python restart. The Rust UI must not generate
+    fresh subscriptions on receipt; ProcessManager owns the resubscribe
+    pathway (architecture.md §3, F8).
+    """
+
+    event: Literal["VenueReady"] = "VenueReady"
+    venue: str
+    request_id: str | None = None
+
+
+class VenueError(IpcMessage):
+    """Venue-scoped error. ``message`` is user-facing and Python-authored
+    (F-Banner1) — the Rust UI displays it verbatim and never composes its
+    own banner text.
+    """
+
+    event: Literal["VenueError"] = "VenueError"
+    venue: str
+    request_id: str | None = None
+    code: str  # e.g. "session_expired", "unread_notices", "login_failed"
+    message: str
+
+
+class VenueCredentialsRefreshed(IpcMessage):
+    """Emitted after a startup-time re-login produces new virtual URLs."""
+
+    event: Literal["VenueCredentialsRefreshed"] = "VenueCredentialsRefreshed"
+    venue: str
+    session: TachibanaSessionWire
+
+
+class VenueLoginStarted(IpcMessage):
+    """Python has spawned the tkinter login helper subprocess."""
+
+    event: Literal["VenueLoginStarted"] = "VenueLoginStarted"
+    venue: str
+    request_id: str | None = None
+
+
+class VenueLoginCancelled(IpcMessage):
+    event: Literal["VenueLoginCancelled"] = "VenueLoginCancelled"
+    venue: str
+    request_id: str | None = None

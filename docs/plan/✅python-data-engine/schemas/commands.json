@@ -15,7 +15,9 @@
     { "$ref": "#/$defs/ListTickers" },
     { "$ref": "#/$defs/GetTickerMetadata" },
     { "$ref": "#/$defs/RequestDepthSnapshot" },
-    { "$ref": "#/$defs/Shutdown" }
+    { "$ref": "#/$defs/Shutdown" },
+    { "$ref": "#/$defs/SetVenueCredentials" },
+    { "$ref": "#/$defs/RequestVenueLogin" }
   ],
   "$defs": {
     "Hello": {
@@ -153,6 +155,66 @@
       "additionalProperties": false,
       "properties": {
         "op": { "const": "Shutdown" }
+      }
+    },
+    "TachibanaSessionWire": {
+      "description": "5 virtual URLs from CLMAuthLoginRequest plus expiry & 譲渡益課税区分. Plain strings on the wire; both sides treat the values as secrets in memory.",
+      "type": "object",
+      "required": ["url_request", "url_master", "url_price", "url_event", "url_event_ws"],
+      "additionalProperties": false,
+      "properties": {
+        "url_request": { "type": "string" },
+        "url_master": { "type": "string" },
+        "url_price": { "type": "string" },
+        "url_event": { "type": "string" },
+        "url_event_ws": { "type": "string" },
+        "expires_at_ms": { "type": ["integer", "null"] },
+        "zyoutoeki_kazei_c": { "type": "string" }
+      }
+    },
+    "VenueCredentialsPayload": {
+      "description": "Tagged union of per-venue credential shapes. Today only `tachibana` is defined.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["venue", "user_id", "password"],
+          "additionalProperties": false,
+          "properties": {
+            "venue": { "const": "tachibana" },
+            "user_id": { "type": "string" },
+            "password": { "type": "string" },
+            "second_password": { "type": ["string", "null"] },
+            "is_demo": { "type": "boolean" },
+            "session": {
+              "anyOf": [
+                { "$ref": "#/$defs/TachibanaSessionWire" },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "SetVenueCredentials": {
+      "description": "Inject venue-scoped credentials. Sent at startup (keyring restore) and after managed-mode Python restart.",
+      "type": "object",
+      "required": ["op", "request_id", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "SetVenueCredentials" },
+        "request_id": { "type": "string" },
+        "payload": { "$ref": "#/$defs/VenueCredentialsPayload" }
+      }
+    },
+    "RequestVenueLogin": {
+      "description": "Rust UI asks the engine to drive a venue-specific login flow (Tachibana spawns a tkinter helper subprocess).",
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "RequestVenueLogin" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" }
       }
     }
   }

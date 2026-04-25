@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod proxy;
 pub mod sidebar;
 pub mod state;
+pub mod tachibana;
 pub mod theme;
 pub mod timezone;
 

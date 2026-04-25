@@ -3,7 +3,7 @@
 /// `PythonProcess` spawns the Python engine and communicates its `{port, token}`
 /// via stdin as a JSON line.  `ProcessManager` wraps it with exponential-backoff
 /// restart logic and re-applies subscriptions after each recovery.
-use crate::{connection::EngineConnection, error::EngineClientError};
+use crate::{connection::EngineConnection, dto::VenueCredentialsPayload, error::EngineClientError};
 
 use std::{
     collections::HashSet,
@@ -208,6 +208,10 @@ pub struct ProcessManager {
     /// Proxy URL kept as source-of-truth on the Rust side (spec §5.3, §5.4).
     /// Sent via `SetProxy` after every `Ready` handshake.
     pub proxy_url: Arc<Mutex<Option<String>>>,
+    /// Venue-scoped credentials kept as source-of-truth so we can re-inject
+    /// them after a Python restart (Tachibana managed-mode recovery, T3).
+    /// One entry per venue, keyed by venue name string.
+    pub venue_credentials: Arc<Mutex<Vec<VenueCredentialsPayload>>>,
 }
 
 impl ProcessManager {
@@ -226,12 +230,30 @@ impl ProcessManager {
             command,
             active_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             proxy_url: Arc::new(Mutex::new(None)),
+            venue_credentials: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Update the stored proxy URL; also re-applies it on the next restart.
     pub async fn set_proxy(&self, url: Option<String>) {
         *self.proxy_url.lock().await = url;
+    }
+
+    /// Replace the stored credential payload for the venue identified by the
+    /// payload's tag. The setter only updates the in-memory store; the
+    /// subsequent `SetVenueCredentials` IPC send is performed by `start()`
+    /// after every successful handshake. T3 wires the actual UI / keyring
+    /// trigger.
+    pub async fn set_venue_credentials(&self, payload: VenueCredentialsPayload) {
+        let mut store = self.venue_credentials.lock().await;
+        // Replace any existing entry for the same venue tag.
+        let venue_tag = match &payload {
+            VenueCredentialsPayload::Tachibana(_) => "tachibana",
+        };
+        store.retain(|p| match p {
+            VenueCredentialsPayload::Tachibana(_) => venue_tag != "tachibana",
+        });
+        store.push(payload);
     }
 
     /// Spawn the Python process on `port`, handshake, then apply proxy + subscriptions.
@@ -275,6 +297,22 @@ impl ProcessManager {
         if proxy.is_some() {
             let _ = connection
                 .send(crate::dto::Command::SetProxy { url: proxy })
+                .await;
+        }
+
+        // Step 2b: re-inject venue credentials (Tachibana managed-mode
+        // recovery — docs/plan/tachibana/architecture.md §2.4). Each payload
+        // is cloned so the stored copy survives this restart cycle and can
+        // be re-sent on the next one. `request_id` is freshly generated:
+        // the Python side only uses it to correlate the resulting
+        // `VenueReady` / `VenueError`, not to deduplicate the send.
+        let creds_snapshot = self.venue_credentials.lock().await.clone();
+        for payload in creds_snapshot {
+            let _ = connection
+                .send(crate::dto::Command::SetVenueCredentials {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    payload,
+                })
                 .await;
         }
 

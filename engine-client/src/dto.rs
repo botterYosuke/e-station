@@ -87,6 +87,92 @@ pub enum Command {
         request_id: String,
     },
     Shutdown,
+    /// Inject venue-scoped credentials into the Python engine. Used at
+    /// startup (keyring restore) and after a managed-mode restart.
+    /// `payload` is a tagged enum so each venue can carry its own typed
+    /// secret material; `serde_json::Value` is intentionally avoided so
+    /// the `Debug` impl on the wire DTO can mask sensitive fields.
+    SetVenueCredentials {
+        request_id: String,
+        payload: VenueCredentialsPayload,
+    },
+    /// Rust UI asks the engine to drive the venue's login UI — currently
+    /// only Tachibana, which spawns a tkinter helper subprocess.
+    RequestVenueLogin {
+        request_id: String,
+        venue: String,
+    },
+}
+
+// ── Venue credential payload (Rust → Python) ──────────────────────────────────
+
+/// Tagged enum. Today only `Tachibana` is defined; future venues add
+/// variants here.
+#[derive(Clone, Serialize)]
+#[serde(tag = "venue", rename_all = "snake_case")]
+pub enum VenueCredentialsPayload {
+    Tachibana(TachibanaCredentialsWire),
+}
+
+impl std::fmt::Debug for VenueCredentialsPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VenueCredentialsPayload::Tachibana(_) => f
+                .debug_struct("VenueCredentialsPayload::Tachibana")
+                .field("creds", &"***")
+                .finish(),
+        }
+    }
+}
+
+/// Plain-`String` mirror of `data::config::tachibana::TachibanaCredentials`,
+/// used only as the IPC wire format. Construct via [`From`] from the secret-
+/// holding internal type and drop the value as soon as serialization is
+/// done. Hand-rolled `Debug` masks every secret field.
+#[derive(Clone, Serialize)]
+pub struct TachibanaCredentialsWire {
+    pub user_id: String,
+    pub password: String,
+    pub second_password: Option<String>,
+    pub is_demo: bool,
+    pub session: Option<TachibanaSessionWire>,
+}
+
+impl std::fmt::Debug for TachibanaCredentialsWire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TachibanaCredentialsWire")
+            .field("user_id", &self.user_id)
+            .field("password", &"***")
+            .field("second_password", &self.second_password.as_ref().map(|_| "***"))
+            .field("is_demo", &self.is_demo)
+            .field("session", &self.session)
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TachibanaSessionWire {
+    pub url_request: String,
+    pub url_master: String,
+    pub url_price: String,
+    pub url_event: String,
+    pub url_event_ws: String,
+    pub expires_at_ms: Option<i64>,
+    pub zyoutoeki_kazei_c: String,
+}
+
+impl std::fmt::Debug for TachibanaSessionWire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TachibanaSessionWire")
+            .field("url_request", &"***")
+            .field("url_master", &"***")
+            .field("url_price", &"***")
+            .field("url_event", &"***")
+            .field("url_event_ws", &"***")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("zyoutoeki_kazei_c", &self.zyoutoeki_kazei_c)
+            .finish()
+    }
 }
 
 // ── Events (Python → Rust) ────────────────────────────────────────────────────
@@ -208,6 +294,38 @@ pub enum EngineEvent {
         request_id: Option<String>,
         code: String,
         message: String,
+    },
+    // ── Venue lifecycle events ────────────────────────────────────────────
+    //
+    // `VenueReady` is **idempotent**: Python re-emits it after every restart
+    // / `SetVenueCredentials`, and consumers must not generate side-effects
+    // that depend on it being a one-shot. `VenueError` carries a Python-
+    // authored `message` string — the Rust UI displays it verbatim and never
+    // composes its own banner text (see architecture.md §6, F-Banner1).
+    VenueReady {
+        venue: String,
+        request_id: Option<String>,
+    },
+    VenueError {
+        venue: String,
+        request_id: Option<String>,
+        code: String,
+        message: String,
+    },
+    VenueCredentialsRefreshed {
+        venue: String,
+        session: TachibanaSessionWire,
+    },
+    /// Python has spawned its tkinter login helper subprocess. The UI
+    /// shows a generic "login dialog open" banner — it does NOT render
+    /// the form itself.
+    VenueLoginStarted {
+        venue: String,
+        request_id: Option<String>,
+    },
+    VenueLoginCancelled {
+        venue: String,
+        request_id: Option<String>,
     },
     /// Synthetic event emitted by the Rust read loop when the WS connection drops.
     /// Never sent by Python — used to unblock in-flight fetch waiters immediately.

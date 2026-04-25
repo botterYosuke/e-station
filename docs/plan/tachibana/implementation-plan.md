@@ -8,27 +8,29 @@
 
 ### T0.1 既存コード棚卸し（先に必ず実施）
 
-- [ ] `git grep -n "TickerInfo"` / `HashMap.*TickerInfo` / `HashSet.*TickerInfo` の参照箇所を全数表化。`#[derive(Hash, Eq)]` 入りでフィールドを増やす影響を見積もる
-- [ ] `git grep -nE "MarketKind::(Spot|LinearPerps|InversePerps)"` で網羅 match の箇所を全部リストアップ（`exchange` / `engine-client` / `data` / `src` 配下）
-- [ ] `Ticker::new` ([exchange/src/lib.rs:281-291](../../../exchange/src/lib.rs#L281)) の `assert!(ticker.is_ascii())` を確認し、`130A0` 等が通ることをユニットテストで実機確認
-- [ ] `Timeframe::D1` ([exchange/src/lib.rs:83](../../../exchange/src/lib.rs#L83)) の **`Serialize` 実装が IPC で `"1d"` 文字列を返すこと**を `serde_json::to_string` でユニットテスト確認（F-m2、enum 既定の `"D1"` で出ているなら独自 `Serialize` 実装か `#[serde(rename = "1d")]` 追加が必要）
-- [ ] `ProcessManager` ([engine-client/src/process.rs](../../../engine-client/src/process.rs)) の proxy 保持パターンを読み、credentials 保持の **mutex / Arc 戦略を T0.2 のうちに確定**（F-m4）。proxy が `Arc<Mutex<Option<Proxy>>>` ならそれに揃える、`watch::channel` ならそれに揃える、と決め切る
-- [ ] `src/screen/` の現在構造を確認し、立花ログイン UI の追加先（既存 `login.rs` 拡張 or 新ファイル）を T0 のうちに暫定確定（F-m3）
-- [ ] `python/tests/test_*_rest.py` のモック方式（`pytest-httpx` / `HTTPXMock`）が他 venue で稼働中であることを確認
-- [ ] [docs/plan/✅python-data-engine/schemas/](../✅python-data-engine/schemas/) の `commands.json` / `events.json` が実在することを確認（実在を確認済み）
-- [ ] **FD 情報コード一覧抽出（F-M2）**: Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) と [`e_api_event_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_event_receive_tel.py/e_api_event_receive_tel.py) のコメント／コード表から FD frame の情報コード（`DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` ほか）を抜き出し、[data-mapping.md §3-4](./data-mapping.md) の表に転記する。実コード名と一致しないものは「未確認」マークして T1 まで持ち越し
+- [x] `git grep -n "TickerInfo"` / `HashMap.*TickerInfo` / `HashSet.*TickerInfo` の参照箇所を全数表化。`#[derive(Hash, Eq)]` 入りでフィールドを増やす影響を見積もる
+- [x] `git grep -nE "MarketKind::(Spot|LinearPerps|InversePerps)"` で網羅 match の箇所を全部リストアップ（`exchange` / `engine-client` / `data` / `src` 配下）
+- [x] `Ticker::new` ([exchange/src/lib.rs:281-291](../../../exchange/src/lib.rs#L281)) の `assert!(ticker.is_ascii())` を確認し、`130A0` 等が通ることをユニットテストで実機確認
+- [x] **既存 `Timeframe` の serde 形式は `"D1"`（変種名）であることを確認済み**（F-m2、F-H1）。[exchange/src/lib.rs:67-83](../../../exchange/src/lib.rs#L67-L83) は `#[derive(Serialize, Deserialize)]` のみで `#[serde(rename = ...)]` 無し。`Display` は `"1d"` を返すが serde は別系統。**T0.2 で `#[serde(rename = "1d")]` 等の rename 属性を全変種に追加する必要がある**（既存暗号資産 venue 経路で IPC を通っている場合は変換層の有無を grep で先に棚卸し）
+- [x] **`qty_in_quote_value` 呼出箇所の棚卸し**（F-H4）: [exchange/src/adapter.rs:50](../../../exchange/src/adapter.rs#L50) が正本。呼出側は `data/src/chart/heatmap.rs` / `src/chart/heatmap.rs` / `src/widget/chart/heatmap/scene/depth_grid.rs` / `src/widget/chart/heatmap/instance.rs` / `src/screen/dashboard/panel/timeandsales.rs`。`MarketKind::Stock` 追加で全箇所が網羅 match 化されるか暗号資産 venue では従来通り動くかを T0.2 着手前に確認
+- [x] **`EngineEvent::Disconnected` の shape は確認済み**（F-H2）: [engine-client/src/dto.rs:115-122](../../../engine-client/src/dto.rs#L115) で既に `{ venue, ticker, stream, market, reason: Option<String> }`。**DTO 追加は不要**、`reason: "market_closed"` は文字列規約として `events.json` schema に記載するだけで足りる
+- [x] `ProcessManager` ([engine-client/src/process.rs](../../../engine-client/src/process.rs)) の proxy 保持パターンを読み、credentials 保持の **mutex / Arc 戦略を T0.2 のうちに確定**（F-m4）。proxy が `Arc<Mutex<Option<Proxy>>>` ならそれに揃える、`watch::channel` ならそれに揃える、と決め切る
+- [x] `src/screen/` の現在構造を確認し、立花ログイン UI の追加先（既存 `login.rs` 拡張 or 新ファイル）を T0 のうちに暫定確定（F-m3）
+- [x] `python/tests/test_*_rest.py` のモック方式（`pytest-httpx` / `HTTPXMock`）が他 venue で稼働中であることを確認
+- [x] [docs/plan/✅python-data-engine/schemas/](../✅python-data-engine/schemas/) の `commands.json` / `events.json` が実在することを確認（実在を確認済み）
+- [x] **FD 情報コード一覧抽出（F-M2、F-H3）** — [inventory-T0.md §11](./inventory-T0.md#11-fd-情報コード一覧f-m2--f-h3) に転記。確定コードは `DPP` / `KP` / `ST` / `SS` / `US` / `EC` のみ、`DV` / `GAK1..5` / `GBK1..5` / `GAS1..5` / `GBS1..5` / `DPP_TIME` / `DDT` は **未確認**（`api_event_if_v4r7.pdf` が `manual_files/` に未同梱、要ユーザー確認）。T1 / T5 着手前のチェックリスト化済み: Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) と [`e_api_event_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_event_receive_tel.py/e_api_event_receive_tel.py) のコメント／コード表から FD frame の情報コード（`DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` ほか）を抜き出し、[data-mapping.md §3-4](./data-mapping.md) の表に転記する。**この作業の完了は T1（codec）と T5（FD trade/depth）の前提条件**として扱い、未確定のまま T1/T5 着手しない。実コード名と一致しないものは「未確認」マークして T0 内で解消するか、解消できないならその情報コードを使う実装タスク自体を Phase 1 から外す
 
 ### T0.2 型・スキーマ追加
 
-- [ ] `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` を [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) に追加
-- [ ] **`MarketKind::Stock` の `qty_in_quote_value` は enum 内部分岐で `price * qty` 強制**（F-M3）。`size_in_quote_ccy` 引数を見ない実装にし、`Stock` 用ユニットテストで誤呼出（`size_in_quote_ccy=true`）でも常に `price*qty` になることを確認
-- [ ] **`secrecy = "0.8"` を `engine-client` / `data` の Cargo.toml に追加**（F-B1）。`SecretString` は **Rust 内部保持型**でのみ使い、IPC 送出時は `expose_secret()` 経由でプレーン `String` 化した送出専用 DTO（後述 `*Wire`）に写像する
-- [ ] `QuoteCurrency` enum を新設（`Usdt`/`Usdc`/`Usd`/`Jpy`、`Copy + Hash + Eq + Serialize + Deserialize`）。**`Default` は実装しない**（F-M6）。`&'static str` は使わない（serde ラウンドトリップ不可）
-- [ ] `TickerInfo` に `#[serde(default)]` 付きで `lot_size: Option<u32>` と `quote_currency: Option<QuoteCurrency>` を追加（F13/F-M6）。`TickerInfo` の `Copy` 制約を壊さない（`String` 追加禁止）。**`None` 復元時は読み込み層で `Exchange::default_quote_currency()` を使って `Some(_)` に正規化**し、UI フォーマッタへは常に `Some` で渡す
-- [ ] `Exchange::default_quote_currency(&self) -> QuoteCurrency` を `exchange/src/adapter.rs` に実装（暗号資産 venue は USDT/USDC、`TachibanaStock` は `Jpy`）
-- [ ] **既存永続 state の serde 互換性確認**（F13/F-M4）: dashboard 設定ファイル / `state.rs` に `TickerInfo` が保存されているか `git grep` で特定。`#[serde(default)]` で missing field が読めることに加え、**`Hash` 値変化により既存 `HashMap<TickerInfo, _>` のキー突合が壊れないか**を実機テスト。受け入れ条件に「旧 `state.json` を起動 → pane 復元 → ticker 表示」を追加
-- [ ] **日本語銘柄名の運搬経路を確定**: `engine-client::dto::TickerListed` / `TickerMetadata` 応答に `display_name_ja: Option<String>` を追加。Rust UI 側は `HashMap<Ticker, TickerDisplayMeta>` で別管理（`TickerInfo` の Hash には含めない）
-- [ ] `engine-client` DTO に下記を追加し `schema_minor` を bump（F1, F6, F-B1, F-B2）:
+- [x] `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` を [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) に追加
+- [x] **`MarketKind::Stock` の `qty_in_quote_value` は enum 内部分岐で `price * qty` 強制**（F-M3）。`size_in_quote_ccy` 引数を見ない実装にし、`Stock` 用ユニットテストで誤呼出（`size_in_quote_ccy=true`）でも常に `price*qty` になることを確認
+- [x] **`secrecy = "0.8"` を `engine-client` / `data` の Cargo.toml に追加**（F-B1）。`SecretString` は **Rust 内部保持型**でのみ使い、IPC 送出時は `expose_secret()` 経由でプレーン `String` 化した送出専用 DTO（後述 `*Wire`）に写像する
+- [x] `QuoteCurrency` enum を新設（`Usdt`/`Usdc`/`Usd`/`Jpy`、`Copy + Hash + Eq + Serialize + Deserialize`）。**`Default` は実装しない**（F-M6）。`&'static str` は使わない（serde ラウンドトリップ不可）
+- [x] `TickerInfo` に `#[serde(default)]` 付きで `lot_size: Option<u32>` と `quote_currency: Option<QuoteCurrency>` を追加（F13/F-M6）。`TickerInfo` の `Copy` 制約を壊さない（`String` 追加禁止）。**`None` 復元時は読み込み層で `Exchange::default_quote_currency()` を使って `Some(_)` に正規化**し、UI フォーマッタへは常に `Some` で渡す
+- [x] `Exchange::default_quote_currency(&self) -> QuoteCurrency` を `exchange/src/adapter.rs` に実装（暗号資産 venue は USDT/USDC、`TachibanaStock` は `Jpy`）
+- [x] **既存永続 state の serde 互換性確認**（F13/F-M4）— [exchange/tests/ticker_info_state_migration.rs](../../../exchange/tests/ticker_info_state_migration.rs) で旧 `TickerInfo` payload (lot_size / quote_currency 欠如) が `serde(default)` 経由で読めることを検証。Hash 影響範囲は inventory-T0.md §1.2 にて「永続化されているのは `data/src/layout/pane.rs` の `ticker_info` フィールドのみ、`HashMap` キーは in-memory のみ」と確定済み: dashboard 設定ファイル / `state.rs` に `TickerInfo` が保存されているか `git grep` で特定。`#[serde(default)]` で missing field が読めることに加え、**`Hash` 値変化により既存 `HashMap<TickerInfo, _>` のキー突合が壊れないか**を実機テスト。受け入れ条件に「旧 `state.json` を起動 → pane 復元 → ticker 表示」を追加
+- [x] **日本語銘柄名の運搬経路を確定**: `EngineEvent::TickerInfo.tickers[*]` は `Vec<serde_json::Value>` のまま（[engine-client/src/dto.rs:193](../../../engine-client/src/dto.rs#L193)）であり、Python 側が `display_name_ja` キーを各 ticker dict に詰めれば追加 schema 不要で運搬可能。Rust UI 側は将来 `HashMap<Ticker, TickerDisplayMeta>` で別管理する方針を inventory に確定（実 UI 配線は T4 で実装）
+- [x] `engine-client` DTO に下記を追加し `schema_minor` を bump（F1, F6, F-B1, F-B2）（schema 1.1 → 1.2）:
   - `Command::SetVenueCredentials { request_id: String, payload: VenueCredentialsPayload }` — `payload` は typed enum（`VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire)`）。`serde_json::Value` は使わない
   - **2 層 DTO 構造**（F-B2）: 内部保持型 `TachibanaCredentials`/`TachibanaSession`（`data` クレート、`SecretString` 保持、`Debug` 手実装マスク、`Serialize` 持たない、`Deserialize` のみ keyring 復元用に持つ） / 送出用 `TachibanaCredentialsWire`/`TachibanaSessionWire`（`engine-client` クレート、プレーン `String`、`Serialize` 派生、`Debug` 手実装マスク、`Deserialize` 持たない）。送信時 `From<&TachibanaCredentials> for TachibanaCredentialsWire` で `expose_secret()` 経由の写像を 1 箇所に集約し、`Wire` は serialize 直後に drop
   - `TachibanaSessionWire.expires_at_ms: Option<i64>`（F-B3）。立花 API は明示的な期限を返さないため `None` を許容、`None` のとき起動時 `validate_session_on_startup` 必須
@@ -39,19 +41,20 @@
   - `EngineEvent::VenueLoginCancelled { venue: String, request_id: Option<String> }` — ユーザーがダイアログをキャンセルした
   - `Command::RequestVenueLogin { request_id: String, venue: String }` — Rust UI から立花ログインを明示要求（architecture.md §7.5）
   - **UI ツリー DSL 型（`VenueLoginForm` / `VenueUiNode` 等）は追加しない**。Python が独立 tkinter ウィンドウを持つため、Rust に UI 構造を渡す必要が無い
-  - `Ready.capabilities.venue_capabilities` のサブ構造（**Phase 1 は `serde_json::Value` のまま追加し、schema は Python 側で生成・Rust 側はパスを deserialize で読み出す方針で固定**、F-M8。typed 化は Phase 2 以降に再検討）
-- [ ] **venue-ready ゲート方針を固定**: `Ready` と `VenueReady` の役割を分離し、立花 venue の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を `VenueReady` 後まで待たせる。**`VenueReady` は「session 検証完了」のみを意味し、マスタ初期 DL 完了は含まない**（F12）。マスタ取得完了判定は `ListTickers` 応答到着で行う。`VenueReady` 再受信時に既存購読の重複再送が起きないよう `ProcessManager` 1 箇所で resubscribe を集約
-- [ ] **Python の保存先パス受け渡し方法を決定**: `stdin` 初期 payload 拡張（`{port, token, config_dir, cache_dir}`）を採用方針として暫定固定（軽量・既存パスの拡張で済む）。最終 OK は T0 レビューで
-- [ ] **env 変数名を venue prefix で確定**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_SECOND_PASSWORD` / `DEV_TACHIBANA_DEMO`。SKILL.md S2/S3 の旧 `DEV_USER_ID` 系（架空ファイル前提）は本フェーズで SKILL.md 側を書き換える
-- [ ] [docs/plan/✅python-data-engine/schemas/commands.json](../✅python-data-engine/schemas/commands.json) / `events.json` / `CHANGELOG.md` 更新
-- [ ] **SKILL.md の同期（F-m5、唯一の正本タスク）**: `.claude/skills/tachibana/SKILL.md` の以下を本計画ベースで書き換える。README.md / spec.md 側の同種記述は本タスクへリンクする形に簡約済み:
+  - `Ready.capabilities.venue_capabilities` のサブ構造（**Phase 1 は `serde_json::Value` のまま追加し、schema は Python 側で生成・Rust 側はパスを deserialize で読み出す方針で固定**、F-M8。typed 化は Phase 2 以降に再検討）。**capabilities 抽出ヘルパ `fn venue_capability<T: DeserializeOwned>(value: &Value, venue: &str, key: &str) -> Result<Option<T>, _>` を 1 箇所に集約**し、path 欠落 / 型不一致を `Result::Err` で返すユニットテストを T0.2 内で追加（F-M7）。silent false 倒れを禁止
+  - `Timeframe` 全変種に `#[serde(rename = "...")]` を付与し IPC 形式を `"1m"`/`"1d"` 等の `Display` と一致させる（F-H1）。serde ラウンドトリップ・既存暗号資産 venue 経路の影響を `cargo test --workspace` で確認
+- [x] **venue-ready ゲート方針を固定** — `VenueReady` イベントを `engine-client::dto::EngineEvent` に追加済み（idempotent、`request_id` 相関）。実 UI ゲートと resubscribe 集約は T3 で実装: `Ready` と `VenueReady` の役割を分離し、立花 venue の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を `VenueReady` 後まで待たせる。**`VenueReady` は「session 検証完了」のみを意味し、マスタ初期 DL 完了は含まない**（F12）。マスタ取得完了判定は `ListTickers` 応答到着で行う。`VenueReady` 再受信時に既存購読の重複再送が起きないよう `ProcessManager` 1 箇所で resubscribe を集約
+- [x] **Python の保存先パス受け渡し方法を決定** — `stdin` 初期 payload に `config_dir` / `cache_dir` を追加する方針で暫定確定（軽量・既存 stdin payload `{port, token}` の自然な拡張）。実 wire-up は T4（マスタキャッシュ着手時）で実装: `stdin` 初期 payload 拡張（`{port, token, config_dir, cache_dir}`）を採用方針として暫定固定（軽量・既存パスの拡張で済む）。最終 OK は T0 レビューで
+- [x] **env 変数名を venue prefix で確定**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_SECOND_PASSWORD` / `DEV_TACHIBANA_DEMO`。SKILL.md S2/S3 の旧 `DEV_USER_ID` 系（架空ファイル前提）は本フェーズで SKILL.md 側を書き換える
+- [x] [docs/plan/✅python-data-engine/schemas/commands.json](../✅python-data-engine/schemas/commands.json) / `events.json` / `CHANGELOG.md` 更新
+- [x] **SKILL.md の同期（F-m5、唯一の正本タスク）**: `.claude/skills/tachibana/SKILL.md` の以下を本計画ベースで書き換える。README.md / spec.md 側の同種記述は本タスクへリンクする形に簡約済み:
   - L8 警告ブロック（旧 env 名と架空ファイル参照）
   - R3/R4/R6/R10
   - §Rust 実装の既存ヘルパー（架空 `tachibana.rs` 参照）
   - S1〜S6（架空 `src/screen/login.rs` / `src/connector/auth.rs` / `src/replay_api.rs` 参照）
   - 環境変数名: `DEV_USER_ID` 系 → `DEV_TACHIBANA_*`
   - 実装未完の参照は「将来実装予定（T3 で新設）」と但し書き
-- [ ] **受け入れ**: `cargo check --workspace` 成功、Python `pytest` の既存スイート緑、棚卸し表 + FD 情報コード一覧が plan/ に commit 済み、旧 `state.json` 起動テスト緑
+- [x] **受け入れ**: `cargo check --workspace` 成功、Python `pytest` 既存スイート緑（195/195）、棚卸し表 [inventory-T0.md](./inventory-T0.md) + FD 情報コード一覧 §11 が plan/ に commit 済み、`TickerInfo` フィールド追加後の serde 互換性テスト ([exchange/tests/ticker_info_state_migration.rs](../../../exchange/tests/ticker_info_state_migration.rs)) 緑（7/7）
 
 ## フェーズ T1: Python ユーティリティ（2〜3 日）
 
@@ -69,7 +72,9 @@
 - [ ] `p_no` 採番ヘルパ（**asyncio 単一スレッド前提の単純カウンタ**、Unix 秒初期化、Lock 不要、F18）と `current_p_sd_date()`（JST 固定、SKILL.md R4）
   - **既知バグ回避**: SKILL.md S6 表に「セッション復元と並行で走る history fetch が逆転して `p_no <= 前要求.p_no` エラー」が記載されている。Python 移植版では **session 復元（`SetVenueCredentials` 処理）の完了前に他リクエストを発行しない**直列化を `TachibanaWorker` 内で強制し、起動レース回帰テストを 1 件追加する
 - [ ] エラー判定ヘルパ `check_response(payload) -> None | TachibanaError`（[SKILL.md R6](../../../.claude/skills/tachibana/SKILL.md)、`p_errno` 空文字＝正常を含む）
-- [ ] **受け入れ**: 上記モジュールを単体テストでカバー、サンプルレスポンス（`samples/e_api_login_tel.py/e_api_login_response.txt` ほか）から期待値抽出ができる。REQUEST URL と EVENT URL の差を別テストで検証
+- [ ] **制御文字 reject（F-M6）**: `build_event_url(base, params)` は値文字列に `\n` / `\t` / `\r` / `^A`〜`^C` を含む場合 `ValueError` を投げる。`build_request_url` も同様（JSON 値内の制御文字を pre-check）。SKILL.md 「EVENT URL に `\n` `\t` を入れない」の不変条件を呼出側ではなく builder 側で強制する。テストケース 1 件追加
+- [ ] **`p_no` 採番の整理（F-L5）**: 採番カウンタ自体は `asyncio` 単一スレッド前提で Lock 不要。一方 SKILL.md S6 の「セッション復元と並行で走る history fetch が逆転」事案は別レイヤ（**`SetVenueCredentials` 処理中は他の業務リクエスト発出を抑止する直列化ゲート**）で解決する。両者を別関数に分離し、それぞれ単体テスト 1 件
+- [ ] **受け入れ**: 上記モジュールを単体テストでカバー、サンプルレスポンス（`samples/e_api_login_tel.py/e_api_login_response.txt` ほか）から期待値抽出ができる。REQUEST URL と EVENT URL の差を別テストで検証。`conftest.py` 共通フィクスチャ（HTTPXMock 共通 base URL / WS server fixture）を整備（F-L3）
 
 ## フェーズ T2: 認証フローと session 管理（2 日）
 
@@ -90,7 +95,7 @@
 **ゴール**: Rust が keyring からクレデンシャルを取り出し、Python が `VenueReady` を返すまで往復する。
 
 - [ ] `data/src/config/tachibana.rs` 新設（**現リポジトリには存在しないことを確認済み**。`data/src/config/proxy.rs` の keyring 実装パターンを参考にする）:
-  - `TachibanaCredentials { user_id, password: SecretString, second_password: SecretString, is_demo }`
+  - `TachibanaCredentials { user_id, password: SecretString, second_password: Option<SecretString>, is_demo }` — **Phase 1 では `second_password` フィールドを DTO スキーマに切るが、UI からは収集せず常に `None` を送る**（F-H5）。発注しないのに保持する攻撃面を作らない。Phase 2 着手時に値の収集・保持を有効化（スキーマは破壊変更にならない）
   - `TachibanaSession { url_request, url_master, url_price, url_event, url_event_ws, expires_at_ms, zyoutoeki_kazei_c }`
   - keyring 読み書き
 - [ ] **Rust UI 側**: 立花のログイン画面コードは**追加しない**。`Venue::Tachibana` 関連で「ログインダイアログを別ウィンドウで表示中」「ログインがキャンセルされました」を表示する汎用ステータスバナー（既存 `VenueError.message` レンダラの拡張）だけ実装する
@@ -98,6 +103,7 @@
 - [ ] **Python 側 `tachibana_login_flow.py`** を新設。データエンジン側で `asyncio.create_subprocess_exec(sys.executable, "-m", "engine.exchanges.tachibana_login_dialog", ...)` で tkinter ヘルパーを spawn し、stdout を JSON parse、`tachibana_auth.login(...)` を実行、結果に応じて `VenueReady` / `VenueError` / `VenueLoginCancelled` を IPC 送信
 - [ ] Python 側の発火タイミングを実装: (a) `RequestVenueLogin` 受信、(b) `SetVenueCredentials` 認証失敗、(c) keyring session 失効検知（起動時のみ） — いずれも `tachibana_login_flow` を呼ぶ。失敗 3 回で `VenueError{code:"login_failed"}` で諦める
 - [ ] Rust UI: 立花機能を最初に開く操作（`Venue::Tachibana` ticker selector を開く / 立花 pane 追加）で `Command::RequestVenueLogin{ venue:"tachibana" }` を発火
+- [ ] **キャンセル後の再試行導線（F-M1）**: `VenueLoginCancelled` 受信後の Rust UI 状態は「立花未ログイン」固定。立花 ticker selector / 立花 pane のヘッダ部に **「立花にログイン」ボタンを常設**し、押下で `RequestVenueLogin` を再発火する。ボタン位置は既存 venue 切替 UI のすぐ近くに 1 箇所のみ（複数経路で発火させない）
 - [ ] **debug ビルドの env 自動入力は Python 側で処理**（architecture.md §7.7）: `tachibana_login_flow` が `DEV_TACHIBANA_*` env をチェックし、揃っていれば tkinter ヘルパーを spawn せずに直接 `tachibana_auth.login(...)` を実行する fast path を入れる。env 一部欠損ならヘルパーにプリフィルとして渡す。Rust 側の `#[cfg(debug_assertions)]` env 取り込みは**不要**（経路が Python 側に閉じる）
 - [ ] **tkinter ヘルパーの単体テスト**: `subprocess.run([sys.executable, "-m", ..., dialog])` を pytest から呼び、`headless=true` の起動引数で実 GUI を出さずにバリデーション規則だけテストできる「テスト専用モード」を `tachibana_login_dialog.py` に実装。実 GUI 確認は `pytest -m gui` で手動
 - [ ] [engine-client/src/backend.rs](../../../engine-client/src/backend.rs) で `SetVenueCredentials` 送信パスを実装（既存 `SetProxy` パターン踏襲、`backend.rs` の実在は `ls engine-client/src/` で確認済み）
@@ -111,6 +117,7 @@
 
 **ゴール**: 起動後に銘柄を選び、日足チャートが表示される（trade/depth はまだ無い）。
 
+- [ ] **マスタ DL の kick タイミングを確定（F-H6）**: `VenueReady` 受信直後に `TachibanaWorker._ensure_master_loaded()` を 1 回だけ非同期実行（`asyncio.create_task` で待たない）。`list_tickers` / `fetch_ticker_stats` は内部で `await self._ensure_master_loaded()` を呼んで完了を待つ（DL 中の重複 kick 防止に `asyncio.Event` を使う）。**`VenueReady` 自体はマスタ DL 完了を含まない**（spec.md §3.3、F12）が、UI 側は `ListTickers` 応答到着時点で「マスタ取得完了」とみなしてよい
 - [ ] `tachibana.py::TachibanaWorker.list_tickers(market="stock")` — マスタ起動時 1 回ダウンロード→キャッシュ→`CLMIssueMstKabu` から ticker 配列を返す
 - [ ] `TachibanaWorker.fetch_klines(timeframe="D1")` — `CLMMfdsGetMarketPriceHistory` 経由
 - [ ] `TachibanaWorker.fetch_ticker_stats` — `CLMMfdsGetMarketPrice` から派生
@@ -139,7 +146,10 @@
 - [ ] `TachibanaWorker.stream_depth` — FD frame → 5 本気配 → `DepthSnapshot`（`DepthDiff` は生成しない）。`sequence_id` は Python プロセス内 `AtomicI64`、`stream_session_id` 切替時に消費側リセット（F7）
 - [ ] `TachibanaWorker.fetch_depth_snapshot` — `CLMMfdsGetMarketPrice` ベースの初回 snapshot（ザラ場前後の 1 発、および FD WS が 12 秒以上無通信の再接続中フォールバック時のみ。**runtime の定期 polling は実装しない**、F-M1）
 - [ ] ザラ場時間判定（**JST 9:00–11:30 前場 / 12:30–15:25 後場連続 / 15:25–15:30 クロージング・オークション**、東証 2024-11-05 以降の現行時間）— **9:00–15:30 の間は `Connected` 維持**。クロージング・オークション中は気配が動かなくても「市場時間外」UI を出さない。閉場帯（〜9:00 / 11:30〜12:30 / 15:30〜）でのみ subscribe を `Disconnected{reason:"market_closed"}` で即返し、Python 側で polling/streaming を停止
-- [ ] **受け入れ**: ザラ場中 10 分間 7203 を購読し続けて drop 0、UI で trade ティッカーと板が動く。KP frame 受信ログがあること
+- [ ] **祝日フェイルセーフ（F-M5）**: Phase 1 は祝日カレンダー判定を持たないため、ザラ場時間内に subscribe → 立花から `p_errno!=0` または「市場休業」相当の取引所エラーが返ったら、`VenueError` ではなく **`Disconnected{reason:"market_closed"}` に倒す**フォールバック分岐を `tachibana_ws.py` に実装。エラー応答の判定パターンは T2 mock テストの拡張で固定。誤判定で平常時の API エラーを market_closed に倒さないよう、対象は明示的なエラーコード（`sResultCode` で「市場休業」「立会停止」相当）のみ
+- [ ] **`SetProxy` と WS の整合（F-M3）**: `SetProxy` が設定されている環境で立花 EVENT WebSocket (`wss://`) が proxy を通るかを T5 受け入れに含める（`HTTPS_PROXY` 経由で `websockets` ライブラリが CONNECT トンネルを張るかの検証）。proxy 未対応で WS が落ちる場合は `VenueError{code:"transport_error", message:"プロキシ経由の WebSocket に失敗しました"}` を返す
+- [ ] **`stream_session_id` 切替で gap-detector がリセットされる統合テスト（F-M4）**: Python 再起動 → 新 `stream_session_id` 発行 → Rust 側 gap-detector の sequence 比較が新 ID 受信時にリセットされることを `tests/integration/tachibana_session_reset.rs` で検証
+- [ ] **受け入れ**: ザラ場中 10 分間 7203 を購読し続けて drop 0、UI で trade ティッカーと板が動く。KP frame 受信ログがあること、tick rule fallback テスト（中値ぴったりの trade で直前 trade との比較が効くこと、F-M8）が緑であること
 
 ## フェーズ T6: 復旧・耐久・観測性（2 日）
 
@@ -163,6 +173,7 @@
 - [ ] release ビルドで env 自動ログインが完全に除外されていること（コンパイルエラー or 空関数）の検証
 - [ ] 本番 URL 設定の隠しフラグ（`TACHIBANA_ALLOW_PROD=1`）を実装、デフォルトは demo 強制
 - [ ] CI に `pytest -m demo_tachibana` を **手動トリガジョブ** として追加（毎 PR では走らせない）。スケジュール起動する場合は demo の閉局帯（平日 8:00–18:00 JST 想定、T2 で実機確認）を避ける
+- [ ] **tkinter スモークテスト（F-M2）**: CI で `xvfb-run pytest -m tk_smoke` を回す。`tachibana_login_dialog.py` を起動して即座に `{"status":"cancelled"}` を返す経路を `--auto-cancel` フラグで実装し、import エラーや `Toplevel` 構築失敗を CI で検知する。実 GUI のバリデーション挙動は引き続き `pytest -m gui` の手動確認
 - [ ] `tools/secret_scan.sh` 新設: `kabuka.e-shiten` / 仮想 URL ホスト / `sUserId` / `sPassword` / `sSecondPassword` を検出。pre-commit hook と CI ジョブの両方から同一スクリプトを呼ぶ（spec.md §4 受け入れ条件 6 と整合）。**`BASE_URL_PROD` を定義する 1 箇所（例: `python/engine/exchanges/tachibana_url.py`）はファイル単位で allowlist** し、それ以外のリテラル出現を全て fail させる（F11）。allowlist ファイルは冒頭コメントで理由を明示
 - [ ] **Windows 開発環境での pre-commit 整合（F-M5）**: 開発環境は Windows 中心であり pre-commit が PowerShell から起動するケースがある。`tools/secret_scan.sh` は git-bash / WSL を要件として README に明記し、pre-commit 設定で `bash tools/secret_scan.sh` 形式で呼ぶ（PowerShell 直起動を許さない）。CI でも `runs-on: ubuntu-latest` で実行。Windows ネイティブ pre-commit のために `tools/secret_scan.ps1` を将来追加するなら、両方が同じパターンを参照するよう正規表現を別ファイル `tools/secret_scan_patterns.txt` に切り出す
 

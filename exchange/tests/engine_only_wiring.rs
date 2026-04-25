@@ -120,7 +120,7 @@ fn all_venues_engine_handles() -> AdapterHandles {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn all_five_venues_wired_without_spawn() {
+fn all_venues_wired_without_spawn() {
     let handles = all_venues_engine_handles();
     for venue in Venue::ALL {
         assert!(
@@ -128,7 +128,7 @@ fn all_five_venues_wired_without_spawn() {
             "venue {venue:?} should be wired via engine backend"
         );
     }
-    assert_eq!(handles.configured_venues().count(), 5);
+    assert_eq!(handles.configured_venues().count(), Venue::ALL.len());
 }
 
 #[test]

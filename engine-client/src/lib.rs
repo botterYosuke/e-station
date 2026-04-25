@@ -7,6 +7,7 @@
 /// - [`EngineClientError`]: unified error type.
 /// - [`dto`] / [`convert`]: IPC message types and domain-type conversions.
 pub mod backend;
+pub mod capabilities;
 pub mod connection;
 pub mod convert;
 pub mod depth_tracker;
@@ -22,4 +23,4 @@ pub use process::{EngineCommand, ProcessManager, PythonProcess, SubscriptionKey}
 
 /// IPC schema version — must match the Python engine's `SCHEMA_MAJOR`/`SCHEMA_MINOR`.
 pub const SCHEMA_MAJOR: u16 = 1;
-pub const SCHEMA_MINOR: u16 = 1;
+pub const SCHEMA_MINOR: u16 = 2;
