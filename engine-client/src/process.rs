@@ -146,7 +146,20 @@ impl PythonProcess {
     /// same `flowsurface.log` file as Rust messages — spec §6.4).
     pub async fn spawn_with(cmd: &EngineCommand, port: u16) -> Result<Self, EngineClientError> {
         let token = generate_token();
-        let stdin_payload = format!("{{\"port\":{port},\"token\":\"{token}\"}}\n");
+
+        // HIGH-B2-1: build the stdin payload via `serde_json::json!` so
+        // every value (token, future config_dir/cache_dir) is escaped by
+        // the JSON encoder. `dev_tachibana_login_allowed` mirrors the
+        // build profile — Python's `tachibana_login_flow` reads the env
+        // fast-path only when this is `true` (architecture.md §2.1.1, H-2).
+        let dev_tachibana_login_allowed = cfg!(debug_assertions);
+        let payload_value = serde_json::json!({
+            "port": port,
+            "token": token,
+            "dev_tachibana_login_allowed": dev_tachibana_login_allowed,
+        });
+        let mut stdin_payload = serde_json::to_string(&payload_value)?;
+        stdin_payload.push('\n');
 
         let mut command = tokio::process::Command::new(cmd.program());
         command

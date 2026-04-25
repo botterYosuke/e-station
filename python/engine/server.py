@@ -84,9 +84,16 @@ class _StreamHandle:
 
 
 class DataEngineServer:
-    def __init__(self, port: int, token: str) -> None:
+    def __init__(
+        self,
+        port: int,
+        token: str,
+        *,
+        dev_tachibana_login_allowed: bool = False,
+    ) -> None:
         self._port = port
         self._token = token
+        self._dev_tachibana_login_allowed = dev_tachibana_login_allowed
         self._current_conn: ServerConnection | None = None
         self._shutdown_event = asyncio.Event()
         self._outbox_event = asyncio.Event()

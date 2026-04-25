@@ -127,13 +127,85 @@ impl From<StoredSession> for TachibanaSession {
 }
 
 /// Read previously-saved Tachibana credentials from the OS keyring. Returns
-/// `None` if no entry exists or the stored payload is unparseable. Full
-/// keyring write/refresh is wired up in T3.
+/// `None` if no entry exists or the stored payload is unparseable.
 pub fn load_tachibana_credentials() -> Option<TachibanaCredentials> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_KEY_USER).ok()?;
     let secret = entry.get_password().ok()?;
     let stored: StoredCredentials = serde_json::from_str(&secret).ok()?;
     Some(stored.into())
+}
+
+/// Persist the supplied credentials (including any newly issued session)
+/// into the OS keyring. The on-disk form is JSON via `StoredCredentials`
+/// — the same shape `load_tachibana_credentials` reads. Errors are
+/// logged but not propagated: the running session continues even if the
+/// keyring write fails (the user simply has to log in again next time).
+pub fn save_tachibana_credentials(creds: &TachibanaCredentials) {
+    let entry = match keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_KEY_USER) {
+        Ok(e) => e,
+        Err(err) => {
+            log::warn!(
+                "tachibana keyring entry init failed (service={KEYCHAIN_SERVICE} key={KEYCHAIN_KEY_USER}): {err}"
+            );
+            return;
+        }
+    };
+
+    let stored = StoredCredentials::from(creds);
+    let payload = match serde_json::to_string(&stored) {
+        Ok(s) => s,
+        Err(err) => {
+            log::warn!("tachibana keyring serialize failed: {err}");
+            return;
+        }
+    };
+
+    if let Err(err) = entry.set_password(&payload) {
+        log::warn!(
+            "tachibana keyring write failed (service={KEYCHAIN_SERVICE} key={KEYCHAIN_KEY_USER}): {err}"
+        );
+    } else {
+        log::info!("tachibana credentials stored in keyring");
+    }
+}
+
+/// Update only the session portion of the stored credentials. Used when
+/// `VenueCredentialsRefreshed` arrives after a successful startup re-login.
+pub fn update_session_in_keyring(session: &TachibanaSession) {
+    let Some(mut creds) = load_tachibana_credentials() else {
+        log::warn!("update_session_in_keyring called but no creds in keyring");
+        return;
+    };
+    creds.session = Some(session.clone());
+    save_tachibana_credentials(&creds);
+}
+
+// ── Stored ↔ runtime conversion ───────────────────────────────────────────────
+
+impl From<&TachibanaCredentials> for StoredCredentials {
+    fn from(c: &TachibanaCredentials) -> Self {
+        Self {
+            user_id: c.user_id.clone(),
+            password: c.password.expose_secret().clone(),
+            second_password: c.second_password.as_ref().map(|s| s.expose_secret().clone()),
+            is_demo: c.is_demo,
+            session: c.session.as_ref().map(StoredSession::from),
+        }
+    }
+}
+
+impl From<&TachibanaSession> for StoredSession {
+    fn from(s: &TachibanaSession) -> Self {
+        Self {
+            url_request: s.url_request.expose_secret().clone(),
+            url_master: s.url_master.expose_secret().clone(),
+            url_price: s.url_price.expose_secret().clone(),
+            url_event: s.url_event.expose_secret().clone(),
+            url_event_ws: s.url_event_ws.expose_secret().clone(),
+            expires_at_ms: s.expires_at_ms,
+            zyoutoeki_kazei_c: s.zyoutoeki_kazei_c.clone(),
+        }
+    }
 }
 
 // ── IPC wire conversions ──────────────────────────────────────────────────────
@@ -145,6 +217,16 @@ pub fn load_tachibana_credentials() -> Option<TachibanaCredentials> {
 
 impl From<&TachibanaCredentials> for TachibanaCredentialsWire {
     fn from(c: &TachibanaCredentials) -> Self {
+        // Phase 1 hard guard (H2 修正 / F-H5): the second password is part
+        // of the order-placement surface (Phase 2). Sending it across the
+        // IPC boundary in Phase 1 would create attack surface for code we
+        // don't yet validate. The debug_assert is a noop in release but
+        // catches mistakes in CI / debug builds before the wire payload
+        // ever leaves the process.
+        debug_assert!(
+            c.second_password.is_none(),
+            "second_password must be None in Phase 1 (F-H5)"
+        );
         Self {
             user_id: c.user_id.clone(),
             password: c.password.expose_secret().clone().into(),
@@ -154,6 +236,25 @@ impl From<&TachibanaCredentials> for TachibanaCredentialsWire {
                 .map(|s| s.expose_secret().clone().into()),
             is_demo: c.is_demo,
             session: c.session.as_ref().map(Into::into),
+        }
+    }
+}
+
+impl From<TachibanaSessionWire> for TachibanaSession {
+    fn from(s: TachibanaSessionWire) -> Self {
+        // The wire DTO wraps URLs in `Zeroizing<String>`. We `clone()` the
+        // inner `String` once into `SecretString`, then drop the wire
+        // value (its `Zeroizing` wipes the original buffer). This is the
+        // single legitimate exit point for these strings out of the
+        // `Zeroizing` envelope.
+        Self {
+            url_request: SecretString::new(s.url_request.to_string()),
+            url_master: SecretString::new(s.url_master.to_string()),
+            url_price: SecretString::new(s.url_price.to_string()),
+            url_event: SecretString::new(s.url_event.to_string()),
+            url_event_ws: SecretString::new(s.url_event_ws.to_string()),
+            expires_at_ms: s.expires_at_ms,
+            zyoutoeki_kazei_c: s.zyoutoeki_kazei_c,
         }
     }
 }

@@ -26,3 +26,8 @@ secrecy = { workspace = true }
 
 exchange.workspace = true
 engine-client.workspace = true
+
+[dev-dependencies]
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+engine-client.workspace = true
