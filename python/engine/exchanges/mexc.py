@@ -661,10 +661,17 @@ class MexcWorker(ExchangeWorker):
                                 break
                             try:
                                 msg = orjson.loads(raw)
+                                if not isinstance(msg, dict):
+                                    continue
                                 channel = msg.get("channel", "")
                                 if not channel.endswith(".deal"):
                                     continue
-                                for t in msg.get("data", []):
+                                data = msg.get("data", [])
+                                if not isinstance(data, list):
+                                    continue
+                                for t in data:
+                                    if not isinstance(t, dict):
+                                        continue
                                     direction = t.get("T", 1)
                                     trade = {
                                         "price": str(t["p"]),
@@ -674,7 +681,7 @@ class MexcWorker(ExchangeWorker):
                                         "is_liquidation": False,
                                     }
                                     batch.append(trade)
-                            except (KeyError, ValueError, TypeError, orjson.JSONDecodeError) as exc:
+                            except (KeyError, ValueError, TypeError, AttributeError, orjson.JSONDecodeError) as exc:
                                 log.debug("mexc trade parse error: %s", exc)
                     finally:
                         flush_task.cancel()

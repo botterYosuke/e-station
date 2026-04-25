@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 
 _SPOT_REST = "https://api.binance.com"
 _LINEAR_REST = "https://fapi.binance.com"
-_INVERSE_REST = "https://dstream.binance.com"
+_INVERSE_REST = "https://dapi.binance.com"
 
 _SPOT_WS = "wss://stream.binance.com:9443"
 _LINEAR_WS = "wss://fstream.binance.com"
