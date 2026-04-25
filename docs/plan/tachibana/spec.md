@@ -18,15 +18,15 @@
   - ティッカーメタデータ（呼値単位・売買単位・銘柄名）— **本線は銘柄マスタ（`CLMIssueMstKabu` + `CLMIssueSizyouMstKabu`）から合成**し、マスタ未掲載や追加情報が必要な場合のみ `CLMMfdsGetIssueDetail` をフォールバックで叩く（F9）
   - 日足 kline 履歴（`CLMMfdsGetMarketPriceHistory`）
   - 24h ticker stats 相当（`CLMMfdsGetMarketPrice` のスナップショットから派生）
-  - **取引（FD frame）ストリーム**: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）
-  - **板スナップショット**: `CLMMfdsGetMarketPrice` を周期的にポーリングし `DepthSnapshot` として配信（diff/L2 はサポートしない、§3 参照）
+  - **取引（FD frame）ストリーム**: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）。**T0.1 FD 情報コード明示ゲート（implementation-plan.md L21）の通過が前提**。ゲート未通過のまま B 系縮退を採るなら本項目（trade ストリーム）と次項目（板スナップショット）は MVP から外す
+  - **板スナップショット**: **FD frame 駆動が正**（FD frame ごとに 5 本気配を `DepthSnapshot` 化して配信、data-mapping §4）。`CLMMfdsGetMarketPrice` は (a) ザラ場前後の初回 snapshot、(b) FD WS 12 秒無通信の再接続中フォールバック、(c) `depth_unavailable` セーフティ発動時の polling fallback の **3 ケースに限定**（§3.3 と整合）。**runtime の定期 polling は実装しない**。`DepthDiff` / L2 はサポートしない
 - **Rust 側の最小変更**:
   - `Venue` / `Exchange` / `MarketKind` 拡張
   - `TachibanaCredentials` 型と keyring 永続化（[data/src/config/](../../../data/src/config/) 配下、`tachibana.rs` 新設）
   - 起動時にクレデンシャルを Python へ渡す IPC コマンド `SetVenueCredentials` と、再ログイン後 session を Rust へ返す `VenueCredentialsRefreshed`
   - **ログイン関連の画面（フォーム・エラー表示・確認モーダル）は Python が tkinter で独立ウィンドウとして開く**（[architecture.md §7](./architecture.md#7-ログイン画面の-python-駆動f-login1)、F-Login1）。Rust 側に立花のログイン画面コード（フィールド名・ラベル・順序）を書かない
   - GUI ライブラリは **tkinter（Python 標準ライブラリ）** を採用（追加依存ゼロ、日本語 IME 対応、軽量）。tkinter の制約（メインスレッド要求）はログインヘルパー subprocess 隔離で回避
-  - keyring に creds が無い／立花機能を使い始めた／session 期限切れの 3 ケースで Python が tkinter ヘルパー subprocess を spawn し、Rust UI には `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` で状態を伝える
+  - **tkinter ヘルパー spawn の起動条件（runtime 中の自動再ログイン禁止と整合、§3.2 LOW-3 参照）**: (a) アプリ起動直後の session 検証フェーズで keyring が空 / 復元 session が validate に失敗した場合、(b) Rust UI が `Command::RequestVenueLogin` を発火した場合、の 2 経路のみ。**runtime 中に `p_errno=2` を検知しても Python は自発的にダイアログを spawn しない**（`VenueError{code:"session_expired"}` を返すだけ）。Rust UI には `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` で状態を伝える
   - **「立花にログイン」ボタンの常設（LOW-7、F-M1a、H3 修正）**: `VenueLoginCancelled` 後の再ログイン導線として、**サイドバー（[src/screen/dashboard/sidebar.rs](../../../src/screen/dashboard/sidebar.rs)）の venue リスト項目「Tachibana」上**に常設する（`Venue::ALL` ベースで `VenueReady` 状態に依らず常時描画される領域）。**禁止配置**: 立花 ticker selector / 立花 pane のヘッダ部に置くと `VenueReady` 前は ticker selector / pane が空 or 非表示でデッドロックするため不可。フォールバックとしてメインウィンドウ上部のステータスバナー領域に「立花未ログイン」表示中のみ補助ボタンを許容。押下で `Command::RequestVenueLogin` を発火（複数経路で発火させない、[implementation-plan.md T3 H3 修正](./implementation-plan.md)）
   - `TickerInfo`・`Exchange::price_step` 等で立花特有の呼値単位を反映
   - `MarketKind::Stock` 追加に伴う UI / indicator / timeframe / market filter / 表示ラベルの網羅修正
@@ -102,6 +102,10 @@
 
 ## 4. 受け入れ条件（Phase 1 完了の定義）
 
+> **二段階受け入れ（FD ブロッカー条件分岐）**: FD 情報コード（`DV` / `GAK*` / `GBK*` / `DPP_TIME` / `DDT` 等）が T1 着手前に [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー扱いと対応方針b3-再オープン) のいずれかで実体解決した場合は **A 系（フル受け入れ）** を満たす。3 案で「Phase 縮退」を選んだ場合のみ **B 系（縮退受け入れ）** に切り替え、本節を改訂してから Phase 1 完了とする。data-mapping §3 注記、implementation-plan T0.1 ゲート、リスク表「FD 情報コード未確定」と整合。
+
+### A 系（フル受け入れ、FD ブロッカー解決済み時）
+
 1. デモ環境で `DEV_TACHIBANA_*` 設定 → debug ビルド起動 → keyring 保存 → 再起動で keyring 復元、までが手動で確認できる（demo 環境にも夜間閉局があるため、CI demo ジョブは閉局帯（demo の運用時間 = 平日 8:00–18:00 JST 想定、確定値は T2 で実機確認）を避けてスケジュールする）
 2. 任意の主要銘柄（例 `7203` トヨタ）を ticker selector から選び、日足チャート + 直近 trade（FD 由来）+ 5 本気配 snapshot が表示される
 3. ザラ場時間中、FD frame ストリームが `Connected` → trade イベントを継続配信できる（10 分以上連続稼働、drop なし）
@@ -110,3 +114,7 @@
 6. **本番 URL `kabuka.e-shiten.jp` がデフォルト設定では絶対に呼ばれないこと**（CI ジョブで `grep -E "kabuka\.e-shiten"` + ユニットテストで Python 側 URL 切替ロジックを検証。pre-commit / CI 双方で同一スクリプトを呼ぶ。重複定義を避けるため正本は `tools/secret_scan.sh` に置く — T7 で実装。**ただし `BASE_URL_PROD` 定数定義ファイル 1 箇所（`python/engine/exchanges/tachibana_url.py` の先頭数行）だけは allowlist で除外**し、それ以外からのリテラル出現を全て失敗させる、F11）
 7. ログとエラー応答に `sUserId` / `sPassword` / `sSecondPassword` / 仮想 URL の生値が現れないことを `tests/secret_redaction.py` で検証
 8. 起動時の session 復元に失敗した場合のみ再ログインが 1 回実行され、購読開始後の `p_errno="2"` では再ログインせず UI を明示エラーに遷移させる
+
+### B 系（縮退受け入れ、FD ブロッカー未解決時のみ適用）
+
+A 系の項目 2 / 3 を「日足 chart + ticker stats のみで表示が成立すること」に置換し、trade ストリーム / 5 本気配 / 10 分連続稼働は **Phase 1 完了条件から外す**（Phase 2 で FD コード確定後に復活）。項目 1 / 4 / 5 / 6 / 7 / 8 はそのまま適用。本節を「B 系適用」と書き換える PR が implementation-plan T0.1 ブロッカー解決 PR と紐付き必須。

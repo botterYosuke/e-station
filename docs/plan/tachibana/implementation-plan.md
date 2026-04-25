@@ -20,6 +20,18 @@
 - [x] [docs/plan/✅python-data-engine/schemas/](../✅python-data-engine/schemas/) の `commands.json` / `events.json` が実在することを確認（実在を確認済み）
 - [ ] 🔴 **FD 情報コード一覧抽出（F-M2a、F-H3、B3 再オープン、HIGH-2 ゲート、C1）— T0 完了マーカは `[ ]` のまま据え置く**。本項目を `[x]` にできるのは [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー扱いと対応方針b3-再オープン) の 3 案（PDF 同梱 / 実 frame キャプチャ / Phase 縮退）のいずれかを実体解決した PR のみ。確定コードは `DPP` / `KP`(*) / `ST`(*) / `SS`(*) / `US`(*) / `EC`(*) のみで `DV` / `GAK1..5` / `GBK1..5` / `GAS1..5` / `GBS1..5` / `DPP_TIME` / `DDT` は **未確認**（`api_event_if_v4r7.pdf` が `manual_files/` に未同梱）。(*) は `p_evt_cmd` 値であって FD frame data key ではない（inventory §11.2 の表を data key と evt_cmd で分割すること、L5）。**T5 着手の前提として 3 案のいずれかを実体解決必須**。T1 codec は確認済み data key (`DPP` のみ) の範囲で先行着手可。PR 説明文に解決証跡を必須記載
 
+  > **明示ゲート規約（HIGH、ユーザー指摘ラウンド 7）**: 本項目は spec.md §2.1（live trade / 5 本気配 board の MVP 採否）/ §4 受け入れ条件（A 系 / B 系の選択）/ data-mapping §3（side 判定・timestamp・depth 生成の最終化）の **前提ゲート**である。本項目が `[x]` になるまで以下を**禁止**:
+  >   - T5（trade/depth ストリーム実装）への着手と PR マージ
+  >   - data-mapping §3 の FD コード仮仕様部分への破壊変更（仮値前提のリファクタは可）
+  >   - spec.md §4 を「A 系適用」と確定させる文書 PR
+  >
+  > 解決時のチェックリスト:
+  > 1. 採用案（PDF 同梱 / 実 frame キャプチャ / Phase 縮退）を [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー扱いと対応方針b3-再オープン) に明記
+  > 2. data-mapping §3 の暫定コード（`DV` / `GAK*` / `GBK*` / `DPP_TIME` / `DDT`）を実値で確定 or 縮退案では当該節を「Phase 2 へ繰越」と書換
+  > 3. spec.md §2.1 の MVP / §4 受け入れを A 系 / B 系のどちらで確定させるかを 1 文で固定
+  > 4. 上記 PR 説明文に「採用案 / 確定コード / spec 改訂行」を 3 点セットで記載
+  > 5. 本行を `[x]` に書換（reviewer は上記 4 点のリンクを確認してマージ）
+
 ### T0.2 型・スキーマ追加
 
 - [x] `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` を [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) に追加
@@ -194,6 +206,13 @@
 - [ ] **`validate_session_on_startup` の `RuntimeError` → supervisor 統合テスト（MEDIUM-D2-1、L6 修正の検証）**: `python/tests/test_tachibana_startup_supervisor.py::test_runtime_error_from_validate_terminates_process_with_log` を新設。`subprocess` 経由で `python -m engine` を起動し、`StartupLatch.run_once` を 2 回呼ばせるテスト fixture を経由して 2 回目の `RuntimeError` を発生させ、(a) `engine/server.py` トップレベル supervisor で catch されてプロセスが exit code 非ゼロで終了、(b) stderr に `tracing::error!` 相当の 1 行が出ていること、(c) その error 行に `user_id` / `password` / session token などの creds 文字列が**含まれていない**こと、を assert
 - [ ] **受け入れ**: `pytest -m demo_tachibana` で実 demo 環境ログイン成功（手動電話認証済みアカウント前提）
 
+- [ ] **demo CI レーン方式の早期決定（MEDIUM、ユーザー指摘ラウンド 7）**: `pytest -m demo_tachibana` の CI 統合方式を **T2 着手時点**で以下の 3 案から選択し、本計画本文に確定記載（T7 まで先送りしない）:
+  - **(A) non-blocking job**: PR チェックには加えるが緑必須にしない。落ちたら通知のみ。閉局帯（demo 運用時間外）は skip 判定が必要
+  - **(B) manual lane only**: PR / push トリガから外し、`workflow_dispatch` で開発者明示起動のみ。最も保守的・推奨
+  - **(C) CI 不採用**: ローカル実機検証のみ。`tests/e2e/tachibana_login_local.md` 手順書を整備
+  
+  決定根拠: [open-questions.md Q21](./open-questions.md#L25) で demo 環境の運用時間自体が未確定のため、ブロッキング CI 化はリリース終盤の不安定依存になる。Q21 の値が T2 で実機確認できるまでは案 (B) を暫定固定とし、T2 終了時に最終決定する。確定後は T7 のスケジュール起動有効化規約を本決定に揃える（手動トリガジョブのみ許可、または CI 不採用）
+
 ## フェーズ T3: クレデンシャル受け渡し配線（2 日）
 
 **ゴール**: Rust が keyring からクレデンシャルを取り出し、Python が `VenueReady` を返すまで往復する。
@@ -321,7 +340,7 @@
 - [ ] README / SKILL.md に「立花 venue 利用の前提（電話認証済み口座が必要）」追記
 - [ ] release ビルドで env 自動ログインが完全に除外されていること（**`dev_tachibana_login_allowed: false` が Rust から送られ、Python 側 `tachibana_login_flow` が `os.getenv("DEV_TACHIBANA_*")` を読まないことを統合テストで確認**。`#[cfg(debug_assertions)]` でのコンパイル除外は採用しない — T3 で実装した runtime ガード方式を前提とする）
 - [ ] 本番 URL 設定の隠しフラグ（`TACHIBANA_ALLOW_PROD=1`）を実装、デフォルトは demo 強制
-- [ ] CI に `pytest -m demo_tachibana` を **手動トリガジョブ** として追加（毎 PR では走らせない）。スケジュール起動する場合は demo の閉局帯を避ける。**ゲート（H5 修正）**: スケジュール起動の有効化は [open-questions.md Q21](./open-questions.md#L25) の運用時間が T2 実機確認で確定してから。確定前は手動トリガのみ許可
+- [ ] CI に `pytest -m demo_tachibana` を **T2 で確定した方式（A/B/C）に従って統合**（毎 PR では走らせない原則は維持）。T2 で案 (B)（manual lane only）を採ったなら `workflow_dispatch` のみ実装、案 (C) なら CI 統合自体を行わない。スケジュール起動する場合は demo の閉局帯を避ける。**ゲート（H5 修正）**: スケジュール起動の有効化は [open-questions.md Q21](./open-questions.md#L25) の運用時間が T2 実機確認で確定してから。確定前は手動トリガのみ許可
 - [ ] **tkinter スモークテスト（F-M2c）**: CI で `xvfb-run pytest -m tk_smoke` を回す。`tachibana_login_dialog.py` を起動して即座に `{"status":"cancelled"}` を返す経路を `--auto-cancel` フラグで実装し、import エラーや `Toplevel` 構築失敗を CI で検知する。実 GUI のバリデーション挙動は引き続き `pytest -m gui` の手動確認
 - [ ] `tools/secret_scan.sh` 新設: `kabuka.e-shiten` / 仮想 URL ホスト / `sUserId` / `sPassword` / `sSecondPassword` を検出。pre-commit hook と CI ジョブの両方から同一スクリプトを呼ぶ（spec.md §4 受け入れ条件 6 と整合）。**`BASE_URL_PROD` を定義する 1 箇所（例: `python/engine/exchanges/tachibana_url.py`）はファイル単位で allowlist** し、それ以外のリテラル出現を全て fail させる（F11）。allowlist ファイルは冒頭コメントで理由を明示
 - [ ] **Windows 開発環境での pre-commit 整合（F-M5b、LOW-4 修正）**: 本リポジトリの開発主体は Windows であり、git-bash / WSL が常に使える前提は持てない。以下の 2 ファイルを**同時に**新設する:

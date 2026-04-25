@@ -12,7 +12,7 @@
 | 仮想 URL（セッション）の保持 | **Python メモリ + Rust keyring** | Python は揮発、Rust は永続。再起動時 Rust → Python へ再注入 |
 | マスタダウンロード（21MB ストリーム） | **Python** | 起動時 1 回 + 日次。`sJsonOfmt="4"` |
 | FD frame パース（Shift-JIS / 制御文字分解） | **Python** | `parse_event_frame` 相当を Python 実装 |
-| 板スナップショット polling | **Python** | フォーカス pane のみ高頻度。Rust 側で要求頻度を伝える |
+| 板生成（FD 駆動が正、REST は補助） | **Python** | FD frame ごとに `DepthSnapshot` を再生成。`CLMMfdsGetMarketPrice` polling は (a) ザラ場前後初回 / (b) FD WS 12 秒無通信時の再接続中フォールバック / (c) `depth_unavailable` セーフティ発動時の 3 ケースに限定（spec.md §2.1 / §3.3 と整合、runtime 定期 polling は不可） |
 | `p_no` 採番 / `p_sd_date` 生成 | **Python** | プロセス内 `AtomicU64` 相当 + JST chrono |
 | `p_errno` / `sResultCode` 二段判定 | **Python** | `EngineError` または `Error` イベントへマップ |
 | **ログイン画面の描画**（独立ウィンドウ、tkinter） | **Python**（`tachibana_login_dialog.py`、subprocess 隔離） | F-Login1、§7。Rust は描画コードを持たない |
@@ -397,7 +397,11 @@ python/engine/exchanges/
 - バリデーション失敗時は tkinter のラベル赤表示 + `messagebox` でユーザーに通知、submit させない（データエンジンに送り返さない）
 
 `tachibana_login_flow.py` の責務:
-- ログインが必要になった条件を判定（session expired / keyring に creds 無し / debug プリフィル env 存在）
+- ログインが必要になった条件を判定。**起動条件は spec.md §3.2 LOW-3 と整合する**:
+  - (a) アプリ起動直後の session 検証フェーズで keyring に creds が無い / 復元 session の validate が失敗した場合（fast-path、ユーザー操作なしで起動して可）
+  - (b) Rust UI が `Command::RequestVenueLogin` を送信した場合（ユーザー明示の再ログイン）
+  - (c) debug ビルドで `DEV_TACHIBANA_*` env が揃っている場合の fast-path（ヘルパー spawn せず直接 `tachibana_auth.login(...)`）
+  - **runtime 中に `p_errno=2` を検知してもこのフローは起動しない**（`VenueError{code:"session_expired"}` を返すのみ。Rust UI が `RequestVenueLogin` を送ってきたら (b) 経路に合流）
 - 起動 JSON を組立てて `asyncio.create_subprocess_exec(sys.executable, "-m", "engine.exchanges.tachibana_login_dialog", stdin=PIPE, stdout=PIPE)`
 - stdin 書込み・close → stdout 読込み・JSON parse
 - `submitted` なら `tachibana_auth.login(...)` を呼び、結果に応じて `VenueReady` または再度ヘルパー spawn（最大 3 回）

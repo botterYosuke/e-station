@@ -46,7 +46,7 @@
 
 ## 実装前提の固定事項
 
-- **復旧シーケンスの source of truth は `ProcessManager`**。managed mode の再起動時は `Hello -> Ready -> SetProxy -> SetVenueCredentials -> VenueReady -> metadata fetch / resubscribe` を必ず再実行する
+- **復旧シーケンスの source of truth は `ProcessManager`**。managed mode の再起動時は `Hello -> Ready -> SetProxy -> SetVenueCredentials -> VenueReady -> metadata fetch / resubscribe` を必ず再実行する。**現状実装の差分（T3 完了まで未満たし）**: [engine-client/src/process.rs](../../../engine-client/src/process.rs) の現行 `start()` は `SetVenueCredentials` 送信直後に `VenueReady` を待たずに resubscribe を発火する。`VenueReady` を同期点として待機する `oneshot::Sender` / `Notify` の wire-up は **T3 で実装**。本節の不変条件は T3 完了をもって有効化される旨を読者は認識すること
 - **`VenueReady` は冪等イベント**。`request_id` で `SetVenueCredentials` と相関させるが UI は初回 / 再送を区別しない。Rust 側の resubscribe は `ProcessManager` 1 箇所に集約し、UI view 側は `VenueReady` イベントで新規 subscribe を発行しない
 - **立花 venue の業務リクエストは `VenueReady` 後にのみ許可**。`Ready` はエンジン全体の起動完了、`VenueReady` は立花認証・session validation 完了（マスタ DL は含まない）を表す
 - **runtime 中の自動再ログインは禁止**。`p_errno=2` 検知 → `VenueError{venue:"tachibana", code:"session_expired"}` を Rust UI に投げ、ユーザー再ログイン誘導。**定期 `validate_session` ポーリングも実装しない**（自動再ログイン禁止と矛盾するため）。再ログイン fallback は起動直後の session 検証失敗時に **1 回だけ** 許可
@@ -56,6 +56,6 @@
 - **`MarketKind::Stock` 追加は最小変更では終わらない**。enum の網羅 match、UI の市場別表示、indicator 可用性、timeframe 可用性、market filter まで波及する前提で見積もる。T0.1 で `git grep` 棚卸し必須
 - **`TickerInfo` フィールド追加は Hash 影響を伴う**。`#[derive(Hash, Eq)]` で `HashMap` キーとして全クレートに広がっているため、`lot_size` / `quote_currency` 追加時は永続 state の migration 影響を T0 で確認する
 - **`Timeframe::D1` は既存型を流用**（新規追加不要）。日本語銘柄名は `TickerInfo` ではなく `EngineEvent::TickerInfo.tickers[*]` の各 ticker dict（現状 `Vec<serde_json::Value>`）に Python 側が `display_name_ja: Option<String>` キーを詰める方式で運搬する（T0.2 確定方針）。`TickerListed` という型は存在しない
-- **マスタキャッシュ保存先は Rust から Python へ明示的に受け渡す**。現行の `stdin` 初期 payload は `port` / `token` のみなので、T0 で `config_dir` / `cache_dir` を初期 payload に追加する
+- **マスタキャッシュ保存先は Rust から Python へ明示的に受け渡す**。現行の `stdin` 初期 payload は `port` / `token` のみなので、T0 で `config_dir` / `cache_dir` を初期 payload に追加する。**現状実装の差分（T3/T4 完了まで未接続）**: [engine-client/src/process.rs](../../../engine-client/src/process.rs) の stdin 書込みと [python/engine/__main__.py](../../../python/engine/__main__.py) の parser はいずれも `{port, token}` のみ。`config_dir` / `cache_dir` は T4（マスタキャッシュ）、`dev_tachibana_login_allowed` は T3（ログインフロー）で同時に追加する。本節および architecture.md §2.1.1 / spec.md §3.1 は **T3/T4 完了後に成立する不変条件** であり、それまで Python 側 fast-path / マスタキャッシュ機能は実装されていない
 - **debug ビルドの env 名は venue prefix 付きで確定（Phase 1）**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO` の 3 つのみ。`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 では**採用しない**（F-H5、第二暗証番号は収集も保持もしない）。SKILL.md S2/S3 の `DEV_USER_ID` 系は架空ファイル前提の旧表記なので T0 で SKILL.md を本計画側へ書き換える
 - **Python テストフレームワーク**は既存 [python/tests/](../../../python/tests/) と同じ `pytest-httpx` (`HTTPXMock`) に揃える。`respx` は採用しない

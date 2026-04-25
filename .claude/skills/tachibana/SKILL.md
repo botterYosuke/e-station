@@ -177,8 +177,8 @@ taskkill //PID <pid> //F
 
 - **本番 URL** `https://kabuka.e-shiten.jp/e_api_v4r8/` に接続すると、発注関連 API は**実際に市場へ注文が出る**。約定は取り消せない
 - **開発・テストはデモ環境** `https://demo-kabuka.e-shiten.jp/e_api_v4r8/` を使う
-- 既存実装: `BASE_URL_PROD` / `BASE_URL_DEMO` を `exchange::adapter::tachibana` 経由で切り替える。ハードコードしない
-- Rust テストでは `BASE_URL_DEMO` またはテスト用モック URL のみを使う
+- **URL リテラルの所在は 1 箇所限定（F-L1、L41 と整合）**: `BASE_URL_PROD` / `BASE_URL_DEMO` を持てるのは **`python/engine/exchanges/tachibana_url.py` の冒頭定義 1 箇所のみ**。Rust 側には本番 URL リテラルを書かず、Python から venue 設定経由で受け取る（旧版で参照していた `exchange::adapter::tachibana` 経由の Rust 側切替は本計画で**廃止**）
+- Python 側のテストでは `BASE_URL_DEMO` またはテスト用モック URL のみを使う（`HTTPXMock` 既定）
 
 ### R2. URL 形式は独自仕様（クエリ構造ではない）
 

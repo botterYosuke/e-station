@@ -98,3 +98,21 @@
 | MEDIUM-D3-1 | ログにシークレット非漏洩テストの具体名・対象未指定 | `implementation-plan.md` T6 | `test_tachibana_log_redaction.py::test_runtime_logs_do_not_contain_credentials_or_virtual_urls` 追加 |
 | MEDIUM-D3-2 | capabilities による UI 非活性化テスト未明記 | `implementation-plan.md` T6 | `engine-client/tests/capabilities_gate.rs::test_unsupported_timeframes_are_disabled_when_capabilities_received` 追加 |
 | MEDIUM-D3-3 | keyring read/write roundtrip + Zeroize テスト未明記 | `implementation-plan.md` T3 | `data/tests/tachibana_keyring_roundtrip.rs::test_credentials_roundtrip_with_zeroize_and_masked_debug` 追加 |
+
+## ラウンド 6（2026-04-25 ユーザー指摘反映）
+
+| 重要度 | Finding | 対応ファイル | 変更内容 |
+| :--- | :--- | :--- | :--- |
+| HIGH-U-1 | runtime 再ログイン境界が文書内で衝突（spec L29 が「session 期限切れで自動 spawn」、L81-84 が「runtime 自動再ログイン禁止」、architecture.md L399-404 が tachibana_login_flow に session expired を含めている） | `spec.md` §2.1 / `architecture.md` §7.4 | spec L29 を「(a) 起動直後 session 検証失敗時、(b) `RequestVenueLogin` 受信時の 2 経路のみ。runtime の `p_errno=2` 検知ではダイアログを spawn しない」に書換。architecture.md `tachibana_login_flow` 責務に同等の起動条件 (a)(b)(c) と「runtime ではフロー起動しない」を明記 |
+| HIGH-U-2 | 板のソースが矛盾（spec L22 が REST polling、L92-95 と data-mapping §4 と architecture.md §1 「板スナップショット polling」が FD 駆動正・REST 補助） | `spec.md` §2.1 / `architecture.md` §1 | spec.md L22 を「FD frame 駆動が正。REST は (a) 初回 / (b) FD 12s 無通信 fallback / (c) `depth_unavailable` polling fallback の 3 ケース限定」に統一。architecture.md §1 表の同行を「板生成（FD 駆動が正、REST は補助）」に書換 |
+| HIGH-U-3 | Phase 1 受け入れ条件と FD ブロッカー縮退の二重基準（implementation-plan は「縮退で kline + ticker stats のみ」としつつ spec §4 が trade + 5 本気配 + 10 分連続稼働を必須化） | `spec.md` §4 | A 系（フル受け入れ）/ B 系（縮退受け入れ、項目 2/3 を「日足 chart + ticker stats のみで成立」に置換）の二段階構造に分割。implementation-plan T0.1 ブロッカー解決 PR と紐付け必須を明記 |
+| HIGH-U-4 | `VenueReady` 同期点が現状実装に未追従、文書では「既に守るべき不変条件」と読める | `README.md` §実装前提 | 「現状実装の差分（T3 完了まで未満たし）: `process.rs` 現行 `start()` は `VenueReady` を待たずに resubscribe を発火。`oneshot::Sender` / `Notify` wire-up は T3 で実装。本節は T3 完了をもって有効化」を注記追加 |
+| MEDIUM-U-5 | stdin payload 拡張が既存実装に未接続（README/spec/architecture が `config_dir`/`cache_dir`/`dev_tachibana_login_allowed` を前提にするが `process.rs` / `__main__.py` は `{port, token}` のみ） | `README.md` §実装前提 | 「現状実装の差分（T3/T4 完了まで未接続）: stdin 書込みと `__main__.py` parser はいずれも `{port, token}` のみ。`config_dir`/`cache_dir` は T4、`dev_tachibana_login_allowed` は T3 で追加。architecture.md §2.1.1 / spec.md §3.1 は T3/T4 完了後に成立する不変条件であり、それまで Python 側 fast-path / マスタキャッシュ機能は未実装」を注記追加 |
+| MEDIUM-U-6 | SKILL.md L41 と L180 の方針矛盾（L41 は `BASE_URL_PROD` を `tachibana_url.py` 1 箇所限定、L180 は旧方針「`exchange::adapter::tachibana` 経由で切り替える」を残す） | `SKILL.md` R1 | L180 を「URL リテラルの所在は `python/engine/exchanges/tachibana_url.py` 1 箇所限定（L41 と整合）。Rust 側には本番 URL リテラルを書かず、旧版の `exchange::adapter::tachibana` 経由 Rust 側切替は本計画で廃止」に書換 |
+
+## ラウンド 7（2026-04-25 ユーザー指摘 第 2 弾）
+
+| 重要度 | Finding | 対応ファイル | 変更内容 |
+| :--- | :--- | :--- | :--- |
+| HIGH-U-7 | T0.1 FD 情報コード未確定のまま spec MVP / 受け入れが live FD 表示を前提にしている。T0.1 を「完了条件つきの明示ゲート」に直さないと T1/T5 が仮仕様で進んで手戻り | `implementation-plan.md` T0.1 / `spec.md` §2.1 | T0.1 ゲートに「明示ゲート規約」ブロックを追加（T5 着手 / data-mapping §3 破壊変更 / spec.md §4 A 系確定の 3 行為を `[x]` 化まで禁止）。解決時のチェックリスト 5 項目を明文化（採用案明記 / data-mapping §3 確定 / spec §2.1+§4 改訂 / PR 説明文 3 点セット / `[x]` 化）。spec.md §2.1 の trade ストリーム / 板スナップショット項目に「T0.1 ゲート前提、未通過なら B 系縮退で MVP から外す」と直接注記 |
+| MEDIUM-U-8 | demo CI レーン方式が T7 まで保留されているが [Q21](./open-questions.md#L25) の demo 運用時間自体が未確定。終盤に不安定依存が昇格するリスク | `implementation-plan.md` T2 / T7 | T2 受け入れ末尾に「demo CI レーン方式の早期決定」`[ ]` を新設し、案 (A) non-blocking job / (B) manual lane only / (C) CI 不採用 の 3 択を明記。Q21 確定までは案 (B) を暫定固定。T7 のスケジュール起動規約を「T2 で確定した方式に従う」に書換 |
