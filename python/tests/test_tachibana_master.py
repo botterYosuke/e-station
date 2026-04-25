@@ -150,6 +150,48 @@ def test_master_stream_parser_feed_and_done():
     assert [r.get("sIssueCode") for r in records] == ["7203"]
 
 
+def test_master_stream_parser_preserves_braces_inside_string_values():
+    """JSON `{` / `}` appearing inside a quoted string value must NOT terminate
+    a record early. Naive brace counting breaks here; raw_decode handles it.
+    """
+    # Unbalanced `}` inside the string value — naive depth counting hits 0
+    # at the in-string `}` and slices the record there, breaking JSON parsing.
+    rec = json.dumps({"sCLMID": "CLMIssueMstKabu", "sIssueCode": "7203", "sIssueName": "abc}def"})
+    body = (rec + _terminator()).encode("shift_jis")
+    parser = MasterStreamParser()
+    parser.feed(body)
+    assert parser.is_complete
+    records = parser.records()
+    assert len(records) == 1
+    assert records[0]["sIssueName"] == "abc}def"
+
+
+def test_master_stream_parser_japanese_value_split_across_chunks():
+    """Shift-JIS multibyte runs that straddle a chunk boundary must round-trip.
+
+    Naive chunk-by-chunk decode with errors='replace' would corrupt a 2-byte
+    character split between two chunks; an incremental decoder fixes this.
+    """
+    name = "トヨタ自動車"
+    rec = json.dumps({"sCLMID": "CLMIssueMstKabu", "sIssueCode": "7203", "sIssueName": name}, ensure_ascii=False)
+    body = (rec + _terminator()).encode("shift_jis")
+    # Cut inside the SJIS bytes for the Japanese name; split at every odd
+    # offset within the multibyte region to maximize the chance of cutting
+    # a 2-byte sequence in half.
+    name_bytes = name.encode("shift_jis")
+    name_start = body.find(name_bytes)
+    assert name_start > 0
+    cut = name_start + 1  # cut 1 byte into the multibyte run
+    chunks = [body[:cut], body[cut:]]
+    parser = MasterStreamParser()
+    for c in chunks:
+        parser.feed(c)
+    assert parser.is_complete
+    records = parser.records()
+    assert len(records) == 1
+    assert records[0]["sIssueName"] == name
+
+
 def test_master_stream_parser_skips_invalid_issue_code(caplog: pytest.LogCaptureFixture):
     """Records whose sIssueCode fails pre-validate are skipped with a warn log."""
     bad = _make_record({"sCLMID": "CLMIssueMstKabu", "sIssueCode": "7203|BAD"})

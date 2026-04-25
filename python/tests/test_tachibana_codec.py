@@ -63,6 +63,13 @@ def test_parse_event_frame_skips_blank_segments():
     assert parse_event_frame(data) == [("p_1_DPP", "1000")]
 
 
+def test_parse_event_frame_value_with_inner_kv_separator():
+    """A value that itself contains ^B is kept intact past the first split."""
+    data = "p_1_FOO\x02alpha\x02beta"
+    pairs = parse_event_frame(data)
+    assert pairs == [("p_1_FOO", "alpha\x02beta")]
+
+
 def test_parse_event_frame_skips_items_without_value_separator():
     data = "loose_item\x01p_1_DPP\x021000"
     assert parse_event_frame(data) == [("p_1_DPP", "1000")]

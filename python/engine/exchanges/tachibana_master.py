@@ -18,13 +18,12 @@ to drop malformed ``sIssueCode`` rows with a warn log, so downstream Rust
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import re
 from collections.abc import Iterable, Iterator
 from typing import Any
-
-from .tachibana_codec import decode_response_body
 
 log = logging.getLogger(__name__)
 
@@ -89,15 +88,20 @@ class MasterStreamParser:
         records = parser.records()
     """
 
-    __slots__ = ("_buf", "_records", "_complete")
+    __slots__ = ("_decoder", "_buf", "_records", "_complete", "_json")
 
     def __init__(self) -> None:
-        # The buffer is a *string* because Shift-JIS multibyte runs can span
-        # chunk boundaries; we let `decode_response_body` use 'replace' to
-        # avoid raising mid-stream.
+        # IncrementalDecoder safely holds partial multibyte sequences across
+        # chunk boundaries — fixes data corruption when a 2-byte SJIS char is
+        # split between two chunks (would otherwise become U+FFFD).
+        self._decoder = codecs.getincrementaldecoder("shift_jis")(errors="replace")
         self._buf: str = ""
         self._records: list[dict[str, Any]] = []
         self._complete: bool = False
+        # raw_decode is structure-aware: it ignores braces / quotes inside
+        # JSON string values, so an `sIssueName` like ``"abc}def"`` no longer
+        # truncates the surrounding record.
+        self._json = json.JSONDecoder()
 
     @property
     def is_complete(self) -> bool:
@@ -106,18 +110,13 @@ class MasterStreamParser:
     def feed(self, chunk: bytes) -> None:
         if self._complete:
             return
-        self._buf += decode_response_body(chunk)
+        self._buf += self._decoder.decode(chunk)
         self._drain()
 
     def records(self) -> list[dict[str, Any]]:
         return self._records
 
     def _drain(self) -> None:
-        # A record ends at the next `}`. We look for `{ ... }` pairs starting
-        # from the buffer head. Because each record is a flat JSON object
-        # without nested braces, a simple scan for the next `}` is sufficient
-        # — but we count `{` to be defensive in case future master records
-        # gain nested arrays of objects.
         while True:
             start = self._buf.find("{")
             if start < 0:
@@ -125,30 +124,16 @@ class MasterStreamParser:
                 self._buf = ""
                 return
 
-            depth = 0
-            end = -1
-            for i in range(start, len(self._buf)):
-                ch = self._buf[i]
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i
-                        break
-            if end < 0:
-                # Incomplete — leave the partial record in the buffer.
+            try:
+                record, end_idx = self._json.raw_decode(self._buf, start)
+            except json.JSONDecodeError:
+                # Either the record is incomplete (need more bytes) or it's
+                # genuinely malformed. We can't tell from raw_decode alone, so
+                # leave the partial record in the buffer and wait for more.
                 self._buf = self._buf[start:]
                 return
 
-            raw = self._buf[start : end + 1]
-            self._buf = self._buf[end + 1 :]
-
-            try:
-                record = json.loads(raw)
-            except json.JSONDecodeError as e:
-                log.warning("tachibana: malformed master record dropped: %s", e)
-                continue
+            self._buf = self._buf[end_idx:]
 
             if not isinstance(record, dict):
                 continue

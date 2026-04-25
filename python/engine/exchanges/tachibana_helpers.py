@@ -76,6 +76,10 @@ class PNoCounter:
     __slots__ = ("_value",)
 
     def __init__(self) -> None:
+        # allowlist: PNo monotonic init from Unix seconds (R4). The
+        # MEDIUM-C8 CI guard rejects bare time.time() / datetime.now() outside
+        # current_p_sd_date — this call is the documented exception because
+        # p_no MUST stay roughly increasing across cold restarts.
         self._value = int(time.time())
 
     def next(self) -> int:
@@ -83,6 +87,11 @@ class PNoCounter:
         return self._value
 
     def peek(self) -> int:
+        """Return the last value returned by `next()` (0-state before first `next()`).
+
+        Useful for tests/debug logs; not part of the request path. Call `next()`
+        whenever you need a fresh `p_no` to send.
+        """
         return self._value
 
 

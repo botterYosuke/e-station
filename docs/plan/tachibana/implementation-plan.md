@@ -270,6 +270,7 @@
 - [ ] `tachibana.py::TachibanaWorker.list_tickers(market="stock")` — マスタ起動時 1 回ダウンロード→キャッシュ→`CLMIssueMstKabu` から ticker 配列を返す
 - [ ] `TachibanaWorker.fetch_klines(timeframe="D1")` — `CLMMfdsGetMarketPriceHistory` 経由
 - [ ] `TachibanaWorker.fetch_ticker_stats` — `CLMMfdsGetMarketPrice` から派生
+- [ ] **T1 で deferred になった `deserialize_tachibana_list` 個別 dataclass テスト（T1 受け入れ §MEDIUM-C2-1 から繰越）**: T1 時点では対応 dataclass（`MarketPriceResponse` / `MarketPriceHistoryResponse` / ログイン応答）が未実装のため、空配列フィールドを `""` で受けて `[]` に正規化されることの単体テストは T4 で追加する。少なくとも `MarketPriceResponse.aCLMMfdsMarketPriceData` / `MarketPriceHistoryResponse.aCLMMfdsMarketPriceHistoryData` の 2 件
 - [ ] capabilities で `supported_timeframes=["1d"]` を Rust に伝え、UI で `1m` / `5m` / `1h` 等の選択を立花選択時に非活性化
 - [ ] **銘柄セレクタのインクリメンタル検索（L4 修正、Q9 決定の実装）**: 数千銘柄を一気に表示すると ticker selector の描画が重い。**コード前方一致 (`7203` で `7203*` ヒット) と表示名前方一致（`display_name_ja` / `display_name_en` 両方を対象）のインクリメンタル検索**を ticker selector に追加。実装位置は [src/screen/dashboard/tickers_table.rs](../../../src/screen/dashboard/tickers_table.rs) または立花専用フィルタ層。受け入れ条件 (項目「銘柄セレクタに数千件のリスト」) と合わせて検証する
 - [ ] マスタキャッシュ（`<cache_dir>/tachibana/master_<env>_<YYYYMMDD>.jsonl`）— T0 で決めたパス受け渡し方式に従って保存し、当日分があれば再ダウンロードしない。**`YYYYMMDD` は JST (`Asia/Tokyo`) 基準**（H4 修正）。立花の営業日と夜間閉局が JST 定義のため、UTC 基準だと日本時間 0:00–9:00 の起動で前日キャッシュが「当日扱い」されない（または逆）事故が起きる。Python 側 `tachibana_master.py` で `datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d")` を使う。

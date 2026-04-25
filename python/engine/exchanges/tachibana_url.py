@@ -55,10 +55,12 @@ class EventUrl(_BaseUrl):
 # for REQUEST); "4" = one-record-per-line (only for `CLMEventDownload`).
 _ALLOWED_OFMT = frozenset({"4", "5"})
 
-# Control characters that must never appear inside a URL we send. Tachibana's
-# server rejects them, and `\n` / `\t` in particular have caused production
-# incidents before (SKILL.md EVENT 規約 / F-M6b).
-_FORBIDDEN_CONTROL_CHARS = frozenset({"\n", "\t", "\r", "\x01", "\x02", "\x03"})
+# C0 control characters (U+0000..U+001F) must never appear inside a URL we
+# send. Tachibana's server rejects them, and `\n` / `\t` in particular have
+# caused production incidents before (SKILL.md EVENT 規約 / F-M6b). We reject
+# the entire C0 block — listing only `\n\t\r\x01..\x03` would let `\x00` and
+# `\x04..\x1F` slip through with no benefit to legitimate callers.
+_FORBIDDEN_CONTROL_CHARS = frozenset(chr(c) for c in range(0x20))
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +160,16 @@ def build_request_url(
 
     payload: dict[str, object] = {**dict(json_obj), "sJsonOfmt": sJsonOfmt}
 
-    string_values = [str(v) for v in payload.values() if isinstance(v, (str, int, float))]
+    # Accept only str / numeric scalars at the JSON value position. Booleans
+    # (an int subclass) ride along harmlessly; lists / dicts / None would
+    # bypass the control-char check, so they're rejected outright.
+    for key, value in payload.items():
+        if not isinstance(value, (str, int, float)):
+            raise TypeError(
+                f"build_request_url: value for {key!r} must be str/int/float "
+                f"(got {type(value).__name__}); nested types are not supported"
+            )
+    string_values = [str(v) for v in payload.values()]
     string_values += [str(k) for k in payload.keys()]
     _check_no_control_chars(string_values)
 

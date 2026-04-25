@@ -165,6 +165,17 @@ def test_build_event_url_rejects_request_url_type():
         build_event_url(bad, {"p_eno": "0"})  # type: ignore[arg-type]
 
 
+def test_build_request_url_rejects_unsupported_value_types():
+    """Non-(str|int|float|bool) values must be rejected explicitly (F-M6b strict)."""
+    base = RequestUrl("https://example.invalid/v4r8/request/")
+    with pytest.raises(TypeError):
+        build_request_url(base, {"sCLMID": "X", "evil": ["a", "b"]}, sJsonOfmt="5")
+    with pytest.raises(TypeError):
+        build_request_url(base, {"sCLMID": "X", "evil": {"k": "v"}}, sJsonOfmt="5")
+    with pytest.raises(TypeError):
+        build_request_url(base, {"sCLMID": "X", "evil": None}, sJsonOfmt="5")
+
+
 def test_build_event_url_rejects_control_chars():
     base = EventUrl("https://example.invalid/v4r8/event/")
     for bad in ["\n", "\t", "\r", "\x01", "\x02", "\x03"]:
