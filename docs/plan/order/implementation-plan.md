@@ -116,6 +116,7 @@
 
 ### T0.5 Rust HTTP API `/api/order/submit`
 
+- [ ] **`Cargo.toml` に `xxhash-rust` を追加**（`xxh3` feature を有効化）。`request_key` の `xxh3_64` で使用（[architecture.md §4.1](./architecture.md#41-request_key-の-canonicalization)）
 - [ ] `src/api/order_api.rs` 新設
 - [ ] 入力スキーマバリデーション（[spec.md §5](./spec.md#5-入力バリデーションrust-http-層)）
 - [ ] `src/api/order_session_state.rs` 新設 — flowsurface [`src/api/agent_session_state.rs`](../../../../flowsurface/src/api/agent_session_state.rs) の `AgentSessionState` を **Rust → Rust で移植**:
@@ -156,8 +157,13 @@
 - [ ] Rust: `OrderSessionState` の `Created/IdempotentReplay/Conflict` 3 ケース（flowsurface 同名テストの移植）
 - [ ] Rust: `/api/order/submit` のスキーマバリデーション（不正 client_order_id、quantity=0、instrument_id 形式違反）
 - [ ] **手動 E2E**（CI 載せず、デモ環境クレデンシャル必須）: `s80_order_submit_demo.sh` で「現物・成行・買 100 株」が通る
+- [ ] **クラッシュリカバリ E2E**（`s80_order_crash_recovery_demo.sh`）:
+  1. `POST /api/order/submit` を送信して WAL に `submit` 行が書かれた直後にプロセスを kill
+  2. 再起動 → 同一 `client_order_id` で再送
+  3. `IdempotentReplay`（HTTP 202 + `warning: order_status_unknown`）が返ること
+  4. デモ注文一覧で重複発注が起きていないことを確認
 
-**Exit 条件**: デモ環境で curl `/api/order/submit` → `sOrderNumber` が返る。監査ログに第二暗証番号が出ていないことを確認。
+**Exit 条件**: デモ環境で curl `/api/order/submit` → `sOrderNumber` が返る。監査ログに第二暗証番号が出ていないことを確認。クラッシュリカバリ E2E が手動で通ること。
 
 ---
 

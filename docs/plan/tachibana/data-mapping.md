@@ -32,7 +32,7 @@ pub enum Exchange {
 | 項目 | 立花 | 本アプリ |
 | :--- | :--- | :--- |
 | 銘柄コード | `sIssueCode` 4 桁数字 / 5 桁数字 / **末尾英字を含む 5 桁英数字**（新興市場の優先出資証券・新株予約権付社債で `130A0` のような表記あり） | `Ticker` の symbol 部分にそのまま入れる（ASCII 英数字のみ） |
-| 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は [exchange/src/lib.rs:291,303](../../../exchange/src/lib.rs#L291) で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに `engine-client::dto::TickerListed`（または `GetTickerMetadata` の応答）に `display_name_ja: Option<String>` を追加し、Rust 側 UI は `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T0 で DTO とキャッシュ両方を設計） |
+| 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は [exchange/src/lib.rs:291,303](../../../exchange/src/lib.rs#L291) で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに **`EngineEvent::TickerInfo` の各 ticker dict**（現状 `Vec<serde_json::Value>`、[engine-client/src/dto.rs:193](../../../engine-client/src/dto.rs#L193)）に Python 側が `display_name_ja: string \| null` キーを詰めて送る（T0.2 確定方針）。`TickerListed` という名の DTO 型は存在しない。Rust 側 UI は受信した dict から `display_name_ja` を取り出して `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T4 で実装）。**キー名の typo サイレント失敗防止**のため、Python 単体テストで `display_name_ja`（`display_name_jp` ではない）を assert する（M9） |
 | 市場コード | `sSizyouC`（`00`=東証） | Phase 1 は東証固定 |
 | 売買単位 | 銘柄マスタ `sTatebaTanniSuu` | `TickerInfo.lot_size` 相当（新規プロパティ追加要） |
 | 呼値単位 | マスタ「呼値」テーブル（価格帯依存） | `Price` の min_ticksize で表現。**価格帯ごとに変わる** ため固定 1 値では足りない（§5 参照） |
@@ -205,12 +205,13 @@ pub struct TickerInfo {
       "supports_historical_trades": false,
       "supports_open_interest": false,
       "supported_timeframes": ["1d"],
-      "requires_credentials": true,
-      "session_lifetime_seconds": 86400
+      "requires_credentials": true
     }
   }
 }
 ```
+
+> **`session_lifetime_seconds` は削除**（MEDIUM-2）。立花 API は session 有効期限を明示的に返さないため（Q28 / F-B3）、固定値 86400 は誤解を招く（「session は確実に 24h 続く」と読まれる）。起動時 `validate_session_on_startup` による実際の生存確認が正の手段であり、capabilities でハードコードした期限値は不要。期限情報が必要になったら `CLMDateZyouhou` から動的取得する（Phase 2 課題）。
 
 Rust 側はこれを見て、UI 上で立花 ticker 選択時に「分足切替」「OI インジケータ」「ヒストリカル trade ロード」を非活性化する。なお日本語銘柄名の表示可否は capabilities ではなく metadata DTO 側で扱う。
 

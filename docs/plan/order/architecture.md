@@ -71,6 +71,38 @@ Rust 受信
    │ UI 通知 + 注文一覧パネルの再描画
 ```
 
+### 2.3 第二暗証番号 forget フロー（Phase O0）
+
+```
+ユーザー（UI ボタン or curl）
+   │ POST /api/order/forget-second-password
+   ▼
+Rust src/api/order_api.rs
+   │ engine_client.send(Command::ForgetSecondPassword)
+   ▼
+Python python/engine/server.py
+   │ tachibana_session_holder.second_password = None
+   ▼
+Rust 受信
+   │ HTTP 200 { "status": "OK" }
+```
+
+`SetSecondPassword` フロー（第二暗証番号入力 modal から）:
+
+```
+iced modal（second_password.rs）
+   │ ユーザー入力 → Command::SetSecondPassword { request_id, value }
+   ▼
+Python python/engine/server.py
+   │ tachibana_session_holder.second_password = SecretStr(value)
+   │ 元の発注リクエスト（request_id で特定）を再開
+   ▼
+Rust 受信
+   │ 元の SubmitOrder フロー §2.1 の ⑨ 以降へ
+```
+
+**注意**: `Command::SetSecondPassword` の `value` は IPC を経由するためプレーン文字列。Python 側で `SecretStr` 化すること。Debug 実装では `value` を `[REDACTED]` にマスクする（T0.3 の不変条件）。
+
 ## 3. IPC スキーマ拡張（schema 1.2 → 1.3）
 
 [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に追加:
@@ -80,6 +112,14 @@ Rust 受信
 ```rust
 pub enum Command {
     // 既存 ...
+
+    // 第二暗証番号管理（Debug は手実装で value を [REDACTED] マスク）
+    SetSecondPassword {
+        request_id: String,    // 発注リクエストと相関
+        value: String,         // SecretString は IPC 越しに送れないため String; Python 側で SecretStr 化
+    },
+    ForgetSecondPassword,      // POST /api/order/forget-second-password → Python メモリクリア
+
     SubmitOrder {
         request_id: String,
         venue: String,                  // "tachibana" / 将来 "binance" 等
@@ -112,7 +152,7 @@ pub struct SubmitOrderRequest {
     pub trigger_price: Option<String>,   // STOP / IF_TOUCHED 系で必須
     pub trigger_type: Option<TriggerType>,  // LAST | BID_ASK | INDEX 等。立花は LAST のみ
     pub time_in_force: TimeInForce,      // DAY | GTC | GTD | IOC | FOK | AT_THE_OPEN | AT_THE_CLOSE
-    pub expire_time_ms: Option<i64>,     // GTD で必須
+    pub expire_time_ns: Option<i64>,     // GTD で必須（nautilus と同じ ns 単位）
     pub post_only: bool,
     pub reduce_only: bool,
     pub tags: Vec<String>,               // venue 拡張: "cash_margin=cash" / "account_type=specific" / "account_type=nisa" 等
@@ -156,6 +196,25 @@ pub enum Event {
         ts_event_ms: i64,
     },
     OrderListUpdated { request_id: String, orders: Vec<OrderRecordWire> },
+}
+
+// OrderListUpdated の要素型（CLMOrderList / CLMOrderListDetail から写像）
+#[derive(Serialize, Deserialize)]
+pub struct OrderRecordWire {
+    pub client_order_id: Option<String>,   // WAL 復元で紐付け済みなら Some、他端末発注なら None
+    pub venue_order_id: String,            // 立花 sOrderNumber
+    pub instrument_id: String,             // "<sIssueCode>.TSE"
+    pub order_side: OrderSide,
+    pub order_type: OrderType,
+    pub quantity: String,                  // 元発注数量
+    pub filled_qty: String,                // 約定済み数量
+    pub leaves_qty: String,                // 残数量
+    pub price: Option<String>,             // 指値価格
+    pub trigger_price: Option<String>,     // 逆指値トリガー
+    pub time_in_force: TimeInForce,
+    pub expire_time_ns: Option<i64>,
+    pub status: String,                    // nautilus OrderStatus 文字列（例 "ACCEPTED"）
+    pub ts_event_ns: i64,                  // 立花の注文受付日時（JST → Unix ns）
 }
 ```
 
@@ -229,8 +288,18 @@ flowsurface との差分:
 
 1. アプリ起動 → `OrderSessionState::new()` → 当日分 WAL を読み戻し
 2. `submit` だけがあって `accepted`/`rejected` が無い行は **「unknown 状態」**で復元（`venue_order_id = None`）
-3. ユーザーが同一 `client_order_id` で再送 → `IdempotentReplay` を返す（重複発注防止の本丸）
+3. ユーザーが同一 `client_order_id` で再送 → 下記ルールで処理（重複発注防止の本丸）
 4. unknown 状態の解決は `Phase O1` の `GetOrderList` 復元（[T1.5](./implementation-plan.md#t15-起動時の台帳復元)）で `venue_order_id` を埋める
+
+**unknown 状態への再送挙動（確定）**:
+
+| 再送の request_key | venue_order_id | 挙動 |
+|---|---|---|
+| 元の request_key と一致 | None（unknown） | `IdempotentReplay` を返す。HTTP 202 + `{"status": "SUBMITTED", "venue_order_id": null, "warning": "order_status_unknown"}` を返し、クライアントに `GetOrderList` で確認させる |
+| 元の request_key と不一致 | None（unknown） | `Conflict` → 409 Conflict を返す。重複発注を防ぐため、unknown でも別 body は拒否 |
+| — | Some（確定済み） | `IdempotentReplay` → HTTP 200 + `{"venue_order_id": "<sOrderNumber>"}` |
+
+**クライアントの責務**: `IdempotentReplay` で `venue_order_id: null` が返ったときは `GET /api/order/list` で当日台帳を照合してから次の操作に進むこと。
 
 ## 5. 第二暗証番号の取扱い
 
@@ -304,9 +373,9 @@ env:
 
 | 本計画の Python シンボル | flowsurface Rust シンボル | 備考 |
 |---|---|---|
-| `tachibana_orders.TachibanaWireRequest` (pydantic, 立花 wire 専用) | `tachibana::NewOrderRequest` | **これは内部 wire 型のみ**。public API は nautilus 互換 `NautilusOrderEnvelope` を受け取り、内部で `TachibanaWireRequest` に写像する |
-| `tachibana_orders.CorrectOrderRequest` | `tachibana::CorrectOrderRequest` | 同 |
-| `tachibana_orders.CancelOrderRequest` | `tachibana::CancelOrderRequest` | 同 |
+| `tachibana_orders.TachibanaWireOrderRequest` (pydantic, 立花 wire 専用) | `tachibana::NewOrderRequest` | **これは内部 wire 型のみ**。public API は nautilus 互換 `NautilusOrderEnvelope` を受け取り、内部で `TachibanaWireOrderRequest` に写像する |
+| `tachibana_orders.TachibanaWireModifyRequest` | `tachibana::CorrectOrderRequest` | "correct" 用語は Python 内部に閉じる |
+| `tachibana_orders.TachibanaWireCancelRequest` | `tachibana::CancelOrderRequest` | 同 |
 | `tachibana_orders.NewOrderResponse` | `tachibana::NewOrderResponse` | `sWarningCode` / `sWarningText` も含める |
 | `tachibana_orders.ModifyOrderResponse` | `tachibana::ModifyOrderResponse` | 同 |
 | `tachibana_orders.OrderListRequest/Response/Record` | `tachibana::OrderListRequest/Response/OrderRecord` | 同 |
@@ -360,22 +429,43 @@ env:
 
 ### 10.4 venue extension `tags` の正規化キー
 
-| tag 形式 | 立花への写像 | 用途 |
+これが **tag の正本レジストリ**。[spec.md §5.1](./spec.md#51-nautilus-互換のリクエストシェイプ) はサンプル提示のみ。新キーを追加する PR はこの表を更新すること。
+
+**`cash_margin` 値**（`sGenkinShinyouKubun` への写像）:
+
+| tag 値 | 立花値 | 意味 |
 |---|---|---|
-| `cash_margin=cash` | `sGenkinShinyouKubun="0"` | 現物（既定） |
-| `cash_margin=margin_credit_new_6m` | `sGenkinShinyouKubun="2"` | 制度信用新規 6 ヶ月 |
-| `cash_margin=margin_credit_close_6m` | `sGenkinShinyouKubun="4"` | 制度信用返済 6 ヶ月 |
-| `cash_margin=margin_general_new_6m` | `sGenkinShinyouKubun="6"` | 一般信用新規 6 ヶ月 |
-| `cash_margin=margin_general_close_6m` | `sGenkinShinyouKubun="8"` | 一般信用返済 6 ヶ月 |
-| `account_type=specific` | `sZyoutoekiKazeiC="1"`（特定） | 既定（ログイン応答値が "1" のとき） |
-| `account_type=general` | `sZyoutoekiKazeiC="3"`（一般） | |
-| `account_type=nisa` | `sZyoutoekiKazeiC="5"` | Phase O4 |
-| `close_action=physical_settle_buy` | `sBaibaiKubun="7"`（現引） | 信用建玉から現物受渡 |
-| `close_action=physical_settle_sell` | `sBaibaiKubun="5"`（現渡） | 同上、売 |
-| `close_strategy=funari` | `sCondition="6"`（不成） | `AT_THE_CLOSE` 併用時のみ意味あり |
+| `cash_margin=cash` | `"0"` | 現物（省略時の既定） |
+| `cash_margin=margin_credit_new` | `"2"` | 制度信用 新規 |
+| `cash_margin=margin_credit_repay` | `"4"` | 制度信用 返済 |
+| `cash_margin=margin_general_new` | `"6"` | 一般信用 新規 |
+| `cash_margin=margin_general_repay` | `"8"` | 一般信用 返済 |
+
+**`account_type` 値**（`sZyoutoekiKazeiC` への写像）— **省略時はログイン応答の `sZyoutoekiKazeiC` をパススルー**（口座属性と一致させる意図）:
+
+| tag 値 | 立花値 | 意味 |
+|---|---|---|
+| `account_type=specific_with_withholding` | `"1"` | 特定預り（源泉徴収あり） |
+| `account_type=specific_without_withholding` | `"3"` | 特定預り（源泉徴収なし） |
+| `account_type=general` | `"0"` | 一般預り |
+| `account_type=nisa_growth` | `"5"` | NISA 成長投資枠（Phase O4） |
+| `account_type=nisa_tsumitate` | `"6"` | NISA つみたて投資枠（Phase O4） |
+
+**その他**:
+
+| tag 値 | 立花への写像 | 用途 |
+|---|---|---|
+| `close_action=physical_settle_buy` | `sBaibaiKubun="7"`（現引） | 信用買建玉の現物受渡 |
+| `close_action=physical_settle_sell` | `sBaibaiKubun="5"`（現渡） | 信用売建玉の現物受渡 |
+| `close_strategy=funari` | `sCondition="6"`（不成） | `AT_THE_CLOSE` 併用時のみ有効（不成注文） |
 | `tategyoku=<id>` | `sTatebiType="1"` + `aCLMKabuHensaiData[*]` | 信用返済の建玉個別指定（複数指定可） |
 
-**新しい tag を追加するルール**: nautilus の `Order.tags` は `list[str]` なので、新キーは `key=value` 形式で `tachibana_orders.TAGS_REGISTRY` に登録。未知 tag は warn して無視（fail-open）。
+**バリデーション規則**（`_compose_request_payload` 内）:
+- `cash_margin=*` / `account_type=*` の**同種重複は 400 reject**（`reason_code="VENUE_UNSUPPORTED"`, `reason_text="CONFLICTING_TAGS: <details>"`）
+- 信用 + NISA など立花が拒否する組合せも同様に reject
+- 未知 tag は warn して無視（fail-open、前方互換）
+
+**新しい tag を追加するルール**: `key=value` 形式でこの表に登録してから `tachibana_orders.TAGS_REGISTRY` に反映する。
 
 ### 10.5 OrderStatus 写像（nautilus 完全準拠）
 

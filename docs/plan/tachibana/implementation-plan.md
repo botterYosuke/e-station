@@ -53,7 +53,8 @@
 - [x] **Python の保存先パス受け渡し方法を決定** — `stdin` 初期 payload に `config_dir` / `cache_dir` を追加する方針で暫定確定（軽量・既存 stdin payload `{port, token}` の自然な拡張）。実 wire-up は T4（マスタキャッシュ着手時）で実装: `stdin` 初期 payload 拡張（`{port, token, config_dir, cache_dir}`）を採用方針として暫定固定（軽量・既存パスの拡張で済む）。最終 OK は T0 レビューで
 - [x] **env 変数名を venue prefix で確定（Phase 1 採用は 3 つ）**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO`。`DEV_TACHIBANA_SECOND_PASSWORD` は **Phase 1 では採用しない**（F-H5: 第二暗証番号は収集も保持もしない方針との整合）。Python 実装側でも `os.getenv("DEV_TACHIBANA_SECOND_PASSWORD")` 系の呼出を書かないことを規約とする。Phase 2 着手時に env 名を改めて確定する。SKILL.md S2/S3 の旧 `DEV_USER_ID` 系（架空ファイル前提）は本フェーズで SKILL.md 側を書き換える
 - [x] [docs/plan/✅python-data-engine/schemas/commands.json](../✅python-data-engine/schemas/commands.json) / `events.json` / `CHANGELOG.md` 更新
-- [ ] **`request_id` の規約確定（LOW-1、F-L7、M1 修正）**: `Command::SetVenueCredentials` / `RequestVenueLogin` の `request_id` は **UUIDv4 文字列（RFC 4122）固定**。最大長 36 文字。Python 側は `uuid.uuid4().hex` ではなく `str(uuid.uuid4())` を使う（hyphen 入り）。`commands.json` / `events.json` に該当フィールドの `pattern` 正規表現を記載。Rust 側の `oneshot::Sender` / `Notify` 索引は `request_id` 単位で行う。**衝突時の挙動（M1 修正）**: 同一 request_id の二重送信は `ProcessManager` の setter 段階で **reject**（`Err(DuplicateRequestId)` を返す）し、上位 caller が `request_id` を生成し直す。「最後送信が勝ち、古い waiter は drop」案は採用しない（`oneshot::Sender` drop 時の `RecvError` を `VenueError` に変換する経路まで設計しないと caller hang or panic を生むため）
+- [ ] **`request_id` の規約確定（LOW-1、F-L7、M1 修正、MEDIUM-4 修正）**: `Command::SetVenueCredentials` / `RequestVenueLogin` の `request_id` は **UUIDv4 文字列（RFC 4122）固定**。最大長 36 文字。Python 側は `uuid.uuid4().hex` ではなく `str(uuid.uuid4())` を使う（hyphen 入り）。`commands.json` / `events.json` に該当フィールドの `pattern` 正規表現を記載。Rust 側の `oneshot::Sender` / `Notify` 索引は `request_id` 単位で行う。
+  - **衝突時の挙動（MEDIUM-4 修正）**: 同一 request_id の二重送信は **`oneshot::Sender` を `HashMap<request_id, oneshot::Sender<()>>` に `try_insert` する箇所で reject** する（`ProcessManager` の credentials setter ではなく、`SetVenueCredentials` 送信後に waiter を登録するヘルパー関数内）。`try_insert` が `Err(OccupiedEntry)` を返したら caller が `request_id` を生成し直す（`Err(DuplicateRequestId)` を返す）。`set_venue_credentials` setter は credentials を `Vec` に書き込むだけであり、request_id の衝突判定責務を持たない（roles が異なる）。「最後送信が勝ち、古い waiter は drop」案は採用しない（`oneshot::Sender` drop 時の `RecvError` を `VenueError` に変換する経路まで設計しないと caller hang or panic を生むため）
 - [ ] **マスタキャッシュ路 path 受け渡し方式の確定（MEDIUM-4）**: `stdin` 初期 payload 拡張案を**確定**とし、commands.json には影響しない（stdin 形式は別領域）。[engine-client/src/process.rs](../../../engine-client/src/process.rs) の現行 stdin 書込み箇所に `config_dir` / `cache_dir` を追加するパッチを T4 着手時に書く。本タスクは T0.2 の確定マークとして扱い、暫定固定の文言を「確定」に書き換える
 - [x] **SKILL.md の同期（F-m5、唯一の正本タスク）**: `.claude/skills/tachibana/SKILL.md` の以下を本計画ベースで書き換える。README.md / spec.md 側の同種記述は本タスクへリンクする形に簡約済み:
   - L8 警告ブロック（旧 env 名と架空ファイル参照）
@@ -64,8 +65,27 @@
   - 実装未完の参照は「将来実装予定（T3 で新設）」と但し書き
 - [ ] **`quote_currency` 正規化の実装位置を確定し、テスト追加（M1 再オープン）**: `Option<QuoteCurrency>` で `None` を返す deserialize 経路は (a) `data::layout::pane` の `saved-state.json` ロード時、(b) `engine_client::backend` で IPC 受信した `TickerInfo` を `exchange::TickerInfo` に詰め直す経路、の 2 箇所。**いずれの経路でも `Exchange::default_quote_currency()` を folding して `Some(_)` に正規化**してから上位レイヤに渡す。受入: `exchange/tests/ticker_info_state_migration.rs` に「旧 payload (`quote_currency` キー欠落) → ロード後に `Some(Jpy)` / `Some(Usdt)` 等の venue 既定値が入っている」ケースを 2 件追加（暗号資産 venue 1 + Tachibana 1）
 - [ ] **`VenueCredentialsPayload::venue_tag()` メソッド化（M2 再オープン）**: 現状 [engine-client/src/process.rs:247-257](../../../engine-client/src/process.rs#L247) の retain ロジックが variant 列挙ベースで、将来 venue 追加時にコンパイル網羅 OK のまま論理破綻する。`impl VenueCredentialsPayload { pub fn venue_tag(&self) -> &'static str }` を追加し、`set_venue_credentials` を `store.retain(|p| p.venue_tag() != payload.venue_tag())` に書換。同時に Wire 構造に対する `Hash + Eq` は不要（venue 名 1 文字列で識別）
-- [ ] 🔴 **`python/engine/schemas.py` の同期確認（L8 再オープン、M6 修正）**: `commands.json` / `events.json` を更新したら、Python 側 pydantic モデル（`SetVenueCredentials` / `VenueCredentialsPayload` / `VenueReady` / `VenueError` / `VenueCredentialsRefreshed` / `VenueLoginStarted` / `VenueLoginCancelled` / `RequestVenueLogin`）も同 PR 内で追加。tag フィールド `venue` の文字列値（`"tachibana"` 等）が両側で一致することをテスト 1 件で fix。**現状**: [python/engine/schemas.py](../../../python/engine/schemas.py) は `SCHEMA_MINOR=2` に bump 済みだが対応モデル未追加で、IPC 受信時に未知 op で例外になる状態。**T3 着手前に本項目を必ず `[x]` 化すること**（gate）。実態確認: `grep -c "VenueReady\|VenueError\|VenueCredentialsRefreshed\|VenueLoginStarted\|VenueLoginCancelled\|RequestVenueLogin\|VenueCredentialsPayload" python/engine/schemas.py` が 7 以上であること
-- [ ] **受け入れ**: `cargo check --workspace` 成功、Python `pytest` 既存スイート緑、棚卸し表 [inventory-T0.md](./inventory-T0.md) + FD 情報コード一覧 §11 の B3 ブロッカー実体解決、`quote_currency` 正規化テスト緑（M1）、`venue_tag()` リファクタ後の `set_venue_credentials` 単体テスト緑（M2）、Python pydantic / Rust DTO ラウンドトリップテスト緑（L8）、`TickerInfo` serde 互換性テスト ([exchange/tests/ticker_info_state_migration.rs](../../../exchange/tests/ticker_info_state_migration.rs)) 緑
+- [x] **`python/engine/schemas.py` の同期確認（L8、M6 修正）**: `commands.json` / `events.json` 更新と同期して、Python 側 pydantic モデルが追加済みであること。実測: `grep -c "VenueReady\|VenueError\|VenueCredentialsRefreshed\|VenueLoginStarted\|VenueLoginCancelled\|RequestVenueLogin\|VenueCredentialsPayload" python/engine/schemas.py` → **14** (閾値 7 以上を満足)。tag フィールド `venue` の文字列値が両側で一致するテスト追加は T3 の `test_tachibana_login.py` に含める
+
+---
+
+### T0.2 受け入れ（2 段構造）
+
+**個別作業の完了 ≠ フェーズ完了。以下を全て満たして初めて T0.2 完了とする。**
+
+#### ステージ A: 個別作業（上記 `[x]` / `[ ]` で追跡）
+
+上記の各行の `[x]` / `[ ]` で追跡する。
+
+#### ステージ B: フェーズ完了ゲート（ステージ A 全 `[x]` 後に実施）
+
+- [ ] `cargo check --workspace` 成功
+- [ ] Python `pytest` 既存スイート緑
+- [ ] `quote_currency` 正規化テスト緑（M1 / `exchange/tests/ticker_info_state_migration.rs` に 2 件）
+- [ ] `venue_tag()` リファクタ後の `set_venue_credentials` 単体テスト緑（M2）
+- [ ] Python pydantic / Rust DTO ラウンドトリップテスト緑（L8）
+- [ ] `TickerInfo` serde 互換性テスト緑（`exchange/tests/ticker_info_state_migration.rs`）
+- [ ] FD 情報コード §11（B3）: 案 1/2/3 いずれかを選択し PR 説明文に解決証跡を記載。案 3（縮退）を選んだ場合は §11.3「縮退時の計画更新リスト」を全実施済みであること
 
 ## フェーズ T1: Python ユーティリティ（2〜3 日）
 
@@ -81,7 +101,10 @@
   - `parse_event_frame(data: str) -> list[tuple[str, str]]`（`^A^B^C` / `\n` 分解）
   - `deserialize_tachibana_list(value)` — 空配列が `""` で返るケースの正規化（SKILL.md R8）
 - [ ] `python/engine/exchanges/tachibana_master.py` — `CLMEventDownload` ストリームパーサ（チャンク境界・`CLMEventDownloadComplete` 終端）
-- [ ] **ticker pre-validate（HIGH-3、F-M11、L1 修正）**: `tachibana_master.py` から取り出す `sIssueCode` を `re.fullmatch(r"[A-Za-z0-9]{1,28}", code)` で pre-validate し、逸脱したレコードは `warn!("tachibana: skipping invalid issue code: {!r}", code)` で skip。`[A-Za-z0-9]` で `|` は当然弾かれるため Rust `Ticker::new` ([exchange/src/lib.rs:281](../../../exchange/src/lib.rs#L281)) の 3 条件（length ≤ 28 / ASCII / `|` 不含）は全て先取りで満たす。Rust IPC 受信側も `engine-client/src/backend.rs` で `EngineEvent::TickerInfo.tickers[*]` の各 ticker dict を `Ticker::new` 呼出前に同条件で再 validate し、不正値は drop（panic させない）。テスト: 28 文字超 / 非 ASCII / `|` 含むケースをそれぞれ skip すること
+- [ ] **ticker pre-validate（HIGH-3、F-M11、L1 修正、MEDIUM-6 注記）**: `tachibana_master.py` から取り出す `sIssueCode` を `re.fullmatch(r"[A-Za-z0-9]{1,28}", code)` で pre-validate し、逸脱したレコードは `warn!("tachibana: skipping invalid issue code: {!r}", code)` で skip。`[A-Za-z0-9]` で `|` は当然弾かれるため Rust `Ticker::new` ([exchange/src/lib.rs:281](../../../exchange/src/lib.rs#L281)) の 3 条件（length ≤ 28 / ASCII / `|` 不含）は全て先取りで満たす。Rust IPC 受信側も `engine-client/src/backend.rs` で `EngineEvent::TickerInfo.tickers[*]` の各 ticker dict を `Ticker::new` 呼出前に同条件で再 validate し、不正値は drop（panic させない）。テスト: 28 文字超 / 非 ASCII / `|` 含むケースをそれぞれ skip すること。
+  > **Phase 2 拡張注意（MEDIUM-6）**: `[A-Za-z0-9]` は `Ticker::new` の実制約（ASCII / `|` 不含）より**厳しい**。Phase 1 立花株式マスタでは英数字のみのため実害なし。ただし Phase 2 で先物・OP マスタ（`CLMIssueMstSak` / `CLMIssueMstOp`）を追加する際に限月コード等でハイフン・スラッシュが来ると**サイレント skip**する。Phase 2 着手時にこの正規表現を `Ticker::new` の実制約（ASCII 制御文字・`|` のみ除外）に緩和することを Phase 2 タスクに記載すること
+
+- [ ] **`EngineEvent::TickerInfo.tickers[*]` dict の Rust 受信側 warn 規約（MEDIUM-7）**: `engine-client/src/backend.rs` の `TickerInfo` 受信経路で、各 ticker dict から `display_name_ja` キーを取り出すとき、キーが存在しない場合は `tracing::debug!("tachibana ticker dict missing display_name_ja: {}", ticker_symbol)` を出す（warn ではなく debug — 暗号資産 venue は常に欠落するため常時 warn だとノイズ）。`display_name_ja` が存在するが `null` の場合は `None` として扱う（正常系）。Python 側のタイポ（`display_name_jp` 等）による全件 debug ログ噴出でキー名誤りを早期発見できる
 - [ ] `p_no` 採番ヘルパ（**asyncio 単一スレッド前提の単純カウンタ**、Unix 秒初期化、Lock 不要、F18）と `current_p_sd_date()`（JST 固定、SKILL.md R4）
   - **既知バグ回避**: SKILL.md S6 表に「セッション復元と並行で走る history fetch が逆転して `p_no <= 前要求.p_no` エラー」が記載されている。Python 移植版では **session 復元（`SetVenueCredentials` 処理）の完了前に他リクエストを発行しない**直列化を `TachibanaWorker` 内で強制し、起動レース回帰テストを 1 件追加する
 - [ ] エラー判定ヘルパ `check_response(payload) -> None | TachibanaError`（[SKILL.md R6](../../../.claude/skills/tachibana/SKILL.md)、`p_errno` 空文字＝正常を含む）
@@ -95,12 +118,46 @@
 
 - [ ] `python/engine/exchanges/tachibana_auth.py`
   - `login(user_id, password, is_demo) -> TachibanaSession`
-  - `validate_session_on_startup(session) -> bool`（`CLMMfdsGetMasterData` 軽量 1 件で生存確認）— **「同時起動・重複起動を許さない」シングルフライト保証で縛る**（M6 決定）:
-    - `tachibana_auth.py` モジュールスコープに `_startup_validation_done: bool = False` と `_startup_validation_lock = asyncio.Lock()` を持つ
-    - 関数の入口で `async with _startup_validation_lock:` を取り、ロック内で `if _startup_validation_done: raise RuntimeError("validate_session_on_startup is single-shot; runtime callers must not invoke it")` を判定。成功・失敗いずれの終了でも `_startup_validation_done = True` をセット
-    - これにより (a) 起動時に 2 並列で呼ばれてもどちらか一方しか実走しない、(b) 1 度走った後の runtime 経路からの呼出は例外で fail-fast する、(c) 関数名規約の弱さ（F10 / M6）を Python 上で実体的に強制できる
-    - **L6 修正（例外スコープ規約）**: この `RuntimeError` は **内部不変条件違反（プログラマ向けクラッシュ）**であり user-facing にしない。`tachibana_login_flow.py` / `tachibana.py` の上位 caller では `RuntimeError` を catch せず、プロセス全体の supervisor（`engine/server.py` トップレベル）で初めて catch して `tracing::error!` + プロセス終了させる。`VenueError.message` 経路に乗せると bilingual な「シングルフライト違反」のような無意味なバナーが出るため禁止
-    - テスト追加: 同一プロセス内で 2 回連続呼出 → 2 回目は `RuntimeError`、`asyncio.gather(validate_session_on_startup(s), validate_session_on_startup(s))` → 片方は通って片方は `RuntimeError`、いずれの場合も Mock サーバへの実 HTTP は 1 回だけ発火（`HTTPXMock.get_requests()` で確認）
+  - `validate_session_on_startup(session, *, _latch: StartupLatch) -> bool`（`CLMMfdsGetMasterData` 軽量 1 件で生存確認）— **「同時起動・重複起動を許さない」シングルフライト保証を `StartupLatch` 値渡しで実現**（M6 決定、HIGH-B 修正）:
+
+    **設計変更（モジュールスコープ変数は採用しない）**: モジュールスコープの `_startup_validation_done: bool` は pytest が同一プロセスで複数テストを実行するため **テスト間で状態が漏洩**し、2 テスト目以降が必ず `RuntimeError` になる。さらに `TachibanaWorker` のライフサイクル（プロセス内で複数インスタンスを立てることは現在ないが将来の Python 単独モードで起こりうる）と噛み合わない。代わりに **インスタンスバウンドの `StartupLatch`** を採用する:
+
+    ```python
+    # tachibana_auth.py
+    import asyncio
+
+    class StartupLatch:
+        """validate_session_on_startup が 1 度だけ実行されることを保証する latch。
+        TachibanaWorker インスタンスごとに 1 つ持つ。pytest でも fixture reset で独立できる。"""
+        def __init__(self) -> None:
+            self._lock = asyncio.Lock()
+            self._done = False
+
+        async def run_once(self, coro):
+            """coro を最初の呼出時のみ実行し、以降の呼出は RuntimeError で fail-fast する。
+            並列呼出時はロックで直列化し、先行者が終わった後に後続は done=True を見て失敗する。"""
+            async with self._lock:
+                if self._done:
+                    raise RuntimeError(
+                        "validate_session_on_startup は 1 プロセスライフサイクル中に 1 度だけ呼べる。"
+                        "runtime 経路から呼ばれた場合はプログラムのバグ（L6）。"
+                    )
+                try:
+                    return await coro
+                finally:
+                    self._done = True
+
+    async def validate_session_on_startup(session: TachibanaSession, *, _latch: StartupLatch) -> bool:
+        return await _latch.run_once(_do_validate(session))
+    ```
+
+    - `TachibanaWorker.__init__` で `self._startup_latch = StartupLatch()` を持ち、`_latch=self._startup_latch` を渡して呼ぶ
+    - **L6 修正（例外スコープ規約）**: この `RuntimeError` は内部不変条件違反（プログラマ向けクラッシュ）。上位 caller は catch せず、`engine/server.py` トップレベル supervisor で初めて catch して `tracing::error!` + プロセス終了させる。`VenueError.message` 経路には乗せない
+    - **テスト方針**: `StartupLatch` を直接 `conftest.py` フィクスチャで新規生成するため、テスト間の状態漏洩はゼロ。追加テスト:
+      - `latch = StartupLatch()` を作り 2 回連続 `await latch.run_once(coro)` → 2 回目は `RuntimeError`
+      - `asyncio.gather(latch.run_once(coro), latch.run_once(coro))` → 片方は通って片方は `RuntimeError`
+      - Mock サーバへの実 HTTP は 1 回のみ（`HTTPXMock.get_requests()` で確認）
+      - 上記いずれも **モジュールスコープ変数を reset するフィクスチャ不要**
   - 二段エラー判定 + `sKinsyouhouMidokuFlg=="1"` で `UnreadNoticesError`
   - レスポンスから `sZyoutoekiKazeiC`（譲渡益課税区分）を `TachibanaSession` に保持（Phase 2 発注時に流用）
   - **`expires_at_ms` は `Option<i64>` で持つ**（F-B3）。ログイン直後は `None` 固定（立花は明示期限を返さないため）。`None` のとき `validate_session_on_startup` は必ず叩く（safe path）。`Some(t)` で `now > t` なら復元せず再ログインへ（fast path）。閉局時刻を `CLMDateZyouhou` から取得できることが確認できたら値を入れる方針は Phase 2 へ繰越
@@ -142,13 +199,26 @@
 
 **ゴール**: 起動後に銘柄を選び、日足チャートが表示される（trade/depth はまだ無い）。
 
-- [ ] **マスタ DL の kick タイミングを確定（F-H6）**: `VenueReady` 受信直後に `TachibanaWorker._ensure_master_loaded()` を 1 回だけ非同期実行（`asyncio.create_task` で待たない）。`list_tickers` / `fetch_ticker_stats` は内部で `await self._ensure_master_loaded()` を呼んで完了を待つ（DL 中の重複 kick 防止に `asyncio.Event` を使う）。**`VenueReady` 自体はマスタ DL 完了を含まない**（spec.md §3.3、F12）が、UI 側は `ListTickers` 応答到着時点で「マスタ取得完了」とみなしてよい
+- [ ] **マスタ DL の kick タイミングを確定（F-H6、MEDIUM-5 修正）**: `VenueReady` 受信直後に `TachibanaWorker._ensure_master_loaded()` を 1 回だけ `asyncio.create_task` で kick する。`list_tickers` / `fetch_ticker_stats` は内部で `await self._ensure_master_loaded()` を呼んで完了を待つ。**`VenueReady` 自体はマスタ DL 完了を含まない**（spec.md §3.3、F12）が、UI 側は `ListTickers` 応答到着時点で「マスタ取得完了」とみなしてよい。
+  - **重複 kick の race 防止（MEDIUM-5 修正）**: `asyncio.Event` だけでは「まだ `set()` 前 → 並列呼出が 2 本とも DL 開始」する race がある。正しい実装は `asyncio.Lock` + `asyncio.Event` の組合せ:
+    ```python
+    async def _ensure_master_loaded(self) -> None:
+        if self._master_loaded.is_set():
+            return                          # fast path: 完了済み
+        async with self._master_lock:       # Lock で直列化
+            if self._master_loaded.is_set():
+                return                      # double-checked: 先行者が完了済み
+            await self._download_master()
+            self._master_loaded.set()
+    ```
+    `self._master_lock = asyncio.Lock()` / `self._master_loaded = asyncio.Event()` を `TachibanaWorker.__init__` で初期化する。これにより並列呼出が来ても DL は 1 回だけ実行され、後続は Event 待ちに倒れる
 - [ ] `tachibana.py::TachibanaWorker.list_tickers(market="stock")` — マスタ起動時 1 回ダウンロード→キャッシュ→`CLMIssueMstKabu` から ticker 配列を返す
 - [ ] `TachibanaWorker.fetch_klines(timeframe="D1")` — `CLMMfdsGetMarketPriceHistory` 経由
 - [ ] `TachibanaWorker.fetch_ticker_stats` — `CLMMfdsGetMarketPrice` から派生
 - [ ] capabilities で `supported_timeframes=["1d"]` を Rust に伝え、UI で `1m` / `5m` / `1h` 等の選択を立花選択時に非活性化
 - [ ] **銘柄セレクタのインクリメンタル検索（L4 修正、Q9 決定の実装）**: 数千銘柄を一気に表示すると ticker selector の描画が重い。**コード前方一致 (`7203` で `7203*` ヒット) と表示名前方一致（`display_name_ja` / `display_name_en` 両方を対象）のインクリメンタル検索**を ticker selector に追加。実装位置は [src/screen/dashboard/tickers_table.rs](../../../src/screen/dashboard/tickers_table.rs) または立花専用フィルタ層。受け入れ条件 (項目「銘柄セレクタに数千件のリスト」) と合わせて検証する
-- [ ] マスタキャッシュ（`<config_dir>/tachibana/master_<YYYYMMDD>.jsonl` または `<cache_dir>/tachibana/...`）— T0 で決めたパス受け渡し方式に従って保存し、当日分があれば再ダウンロードしない。**`YYYYMMDD` は JST (`Asia/Tokyo`) 基準**（H4 修正）。立花の営業日と夜間閉局が JST 定義のため、UTC 基準だと日本時間 0:00–9:00 の起動で前日キャッシュが「当日扱い」されない（または逆）事故が起きる。Python 側 `tachibana_master.py` で `datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d")` を使う
+- [ ] マスタキャッシュ（`<cache_dir>/tachibana/master_<env>_<YYYYMMDD>.jsonl`）— T0 で決めたパス受け渡し方式に従って保存し、当日分があれば再ダウンロードしない。**`YYYYMMDD` は JST (`Asia/Tokyo`) 基準**（H4 修正）。立花の営業日と夜間閉局が JST 定義のため、UTC 基準だと日本時間 0:00–9:00 の起動で前日キャッシュが「当日扱い」されない（または逆）事故が起きる。Python 側 `tachibana_master.py` で `datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d")` を使う。
+  > **キー設計（LOW-1）**: ファイル名は `master_<env>_<YYYYMMDD>.jsonl`（例: `master_demo_20260425.jsonl` / `master_prod_20260425.jsonl`）。`env` 部分は `"demo"` または `"prod"` で決定する（`is_demo` フラグを `TachibanaWorker` が受け取る時点で確定）。`master_<YYYYMMDD>.jsonl` の環境別なしファイルは **同日中に demo/prod を切り替えるとキャッシュが汚染**されるため採用しない
 - [ ] **受け入れ**: `7203` の日足 1 年分が表示される、銘柄セレクタに数千件のリストが出る、`130A0` 等英字混在 ticker もリストに含まれる、日本語銘柄名が別メタデータ経路で検索または表示に使える
 
 ## フェーズ T5: trade / depth ストリーム（3〜4 日）
@@ -204,7 +274,12 @@
 - [ ] CI に `pytest -m demo_tachibana` を **手動トリガジョブ** として追加（毎 PR では走らせない）。スケジュール起動する場合は demo の閉局帯を避ける。**ゲート（H5 修正）**: スケジュール起動の有効化は [open-questions.md Q21](./open-questions.md#L25) の運用時間が T2 実機確認で確定してから。確定前は手動トリガのみ許可
 - [ ] **tkinter スモークテスト（F-M2c）**: CI で `xvfb-run pytest -m tk_smoke` を回す。`tachibana_login_dialog.py` を起動して即座に `{"status":"cancelled"}` を返す経路を `--auto-cancel` フラグで実装し、import エラーや `Toplevel` 構築失敗を CI で検知する。実 GUI のバリデーション挙動は引き続き `pytest -m gui` の手動確認
 - [ ] `tools/secret_scan.sh` 新設: `kabuka.e-shiten` / 仮想 URL ホスト / `sUserId` / `sPassword` / `sSecondPassword` を検出。pre-commit hook と CI ジョブの両方から同一スクリプトを呼ぶ（spec.md §4 受け入れ条件 6 と整合）。**`BASE_URL_PROD` を定義する 1 箇所（例: `python/engine/exchanges/tachibana_url.py`）はファイル単位で allowlist** し、それ以外のリテラル出現を全て fail させる（F11）。allowlist ファイルは冒頭コメントで理由を明示
-- [ ] **Windows 開発環境での pre-commit 整合（F-M5b）**: 開発環境は Windows 中心であり pre-commit が PowerShell から起動するケースがある。`tools/secret_scan.sh` は git-bash / WSL を要件として README に明記し、pre-commit 設定で `bash tools/secret_scan.sh` 形式で呼ぶ（PowerShell 直起動を許さない）。CI でも `runs-on: ubuntu-latest` で実行。Windows ネイティブ pre-commit のために `tools/secret_scan.ps1` を将来追加するなら、両方が同じパターンを参照するよう正規表現を別ファイル `tools/secret_scan_patterns.txt` に切り出す
+- [ ] **Windows 開発環境での pre-commit 整合（F-M5b、LOW-4 修正）**: 本リポジトリの開発主体は Windows であり、git-bash / WSL が常に使える前提は持てない。以下の 2 ファイルを**同時に**新設する:
+  - `tools/secret_scan.sh`（bash 版）— CI（`runs-on: ubuntu-latest`）と git-bash / WSL 環境の pre-commit で呼ぶ
+  - `tools/secret_scan.ps1`（PowerShell 版）— Windows ネイティブ pre-commit（PowerShell から起動）で呼ぶ
+  - パターン正規表現は `tools/secret_scan_patterns.txt` に 1 ファイルとして正本化し、両スクリプトがそれを読む。これにより「sh は更新したが ps1 は古い」ずれが起きない
+  - `tools/secret_scan.sh` は git-bash / WSL を要件として `tools/README.md` に明記。pre-commit 設定で bash 版を呼ぶ際は `bash tools/secret_scan.sh` 形式とし PowerShell 直起動は認めない
+  - CI では bash 版のみ使用（`runs-on: ubuntu-latest`）
 
 ## Phase 2 以降（参考、計画外）
 

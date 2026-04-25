@@ -23,11 +23,13 @@
   - 案 B: 毎回入力 → UX 破綻のため不採用
   - 案 C: keyring + N 時間揮発 → 案 A の懸念を完全には解消しないため不採用
 
-### Q2. `client_order_id` の発行元
-- 案 A: HTTP API クライアント（curl ユーザー / Python SDK）が UUID を生成して送る → Rust 側は受け取った値を idempotency key として使う（**flowsurface の方針**）
-- 案 B: Rust API 側で UUID を生成し、レスポンスで返す（idempotent re-submit ができない）
+### Q2. `client_order_id` の発行元 ✅ 確定（2026-04-25）
 
-flowsurface に倣い **案 A** が筋だが、UI 側で発注フォーム経由の場合は **iced 側で UUID を生成する**実装になる。これを徹底できるか。
+**決定**: **案 A** — クライアント側で UUID v4 を生成して送る（flowsurface 流）。Rust 側は受け取った値を idempotency key として使い、独自採番しない。
+
+- iced 発注フォームは送信時に `Uuid::new_v4()` を生成する（Rust 側責務）
+- curl / HTTP クライアント直叩きは送信側責務
+- 詳細は [spec.md §4](./spec.md#4-公開-apihttp)「`client_order_id` 発行元」節
 
 ### Q3. 発注 UI を iced に出すか Python tkinter に出すか
 - 立花のログインダイアログは tkinter（[docs/plan/tachibana/](../tachibana/)）

@@ -135,6 +135,11 @@ pub enum Timeframe {
 
 **判断**: T0.2 では全変種に `#[serde(rename = "1d")]` 等を付与し、書込み時は新形式 `"1d"` のみ、読込み時は `#[serde(alias = "D1")]` で旧形式を吸収する**フォワード互換のみ**の方針。**ロールバック非互換**（新形式で書かれた永続 state を旧バイナリへ戻すと panic）を [README.md](./README.md) ＋本ファイル §12 に明記。リリースノートにも書く。
 
+**マイグレーションテスト（LOW-2）**: `cargo test --workspace` だけでは旧形式の alias が全 use-site で機能するか保証しない。`exchange/tests/timeframe_state_migration.rs` を `ticker_info_state_migration.rs` と並列で新設し、以下をカバーする:
+- 旧形式 JSON `"D1"` / `"M1"` 等 15 変種すべてが `serde_json::from_str::<Timeframe>` で成功すること
+- 新形式 `"1d"` / `"1m"` で serialize 後に deserialize するラウンドトリップが通ること
+- `StreamKind::Kline { timeframe: Timeframe::D1 }` を旧形式で書いた `pane_state.json` fixture を `data::layout::pane` 経由でロードできること（saved-state 経路の統合確認）
+
 ## 6. `EngineEvent::Disconnected` の shape（F-H2）
 
 `engine-client/src/dto.rs:115-122`:
@@ -228,11 +233,22 @@ FD frame ペイロードのフィールド名。[data-mapping.md §3-4](./data-m
 
 implementation-plan.md T0.1 の規約「**実コード名と一致しないものは「未確認」マークして T0 内で解消するか、解消できないならその情報コードを使う実装タスク自体を Phase 1 から外す**」に従い:
 
-**🔴 現状: T0 完了マーク (`[x]`) は B3 レビューで再オープン**。下記いずれか 1 つを T1 着手前に必ず満たすこと:
+**🔴 現状: T0 完了マーク (`[x]`) は B3 レビューで再オープン**。
 
-1. **(推奨) `api_event_if_v4r7.pdf` を入手して `.claude/skills/tachibana/manual_files/` に同梱**し、§11.2 の暫定コード名を確定値で更新する
-2. **(代替) 実 frame キャプチャ**: ユーザー保有の Windows サンプル `e_api_websocket_receive_tel.py` をデモ環境に対して実行し、受信した FD frame の生バイト列（少なくとも 5 銘柄 × 30 秒分）を `manual_files/captured_fd_frames/*.bin` として保存。データから `p_<行>_<コード>` キー一覧を逆引きで確定する
-3. **(縮退) どちらも不可なら**: 該当情報コード（`DV` / `GAK*` / `GBK*` / `GAS*` / `GBS*` / `DPP_TIME` / `DDT`）を **使う実装タスクを Phase 1 から外す**。具体的には T5 の trade 合成と depth スナップショットを Phase 2 へ繰越し、Phase 1 は「日足 kline + ticker stats のみ」へさらに縮退する（spec.md §2.1 の修正が必要）
+> **重要度の再評価（Phase 1 生死に直結）**: 本ブロッカーが解消不能で縮退案（案 3）を取った場合、T5 の trade 合成・depth スナップショットが Phase 2 へ全繰越しとなり、Phase 1 の主要価値（trade/depth リアルタイム表示）が消滅する。spec.md §4 受け入れ条件 2〜3 も達成不能になる。**T1（codec）着手前にリスク識別し、T5 着手前に完全解消すること。** 案 3 を選んだ場合は下記「縮退時の計画更新リスト」をすべて実施してから T5 以降のタスクに着手する。
+
+**責任者・期限の明示**: 本ブロッカーは **T0 担当者が T0 完了前に案 1/2/3 のいずれかを選択し、PR 説明文に解決証跡を記載することで完了**とする。「後でやる」は認めない。
+
+**解消に必要なアクション（3 案のいずれか 1 つ）**:
+
+1. **(推奨) `api_event_if_v4r7.pdf` を入手して `.claude/skills/tachibana/manual_files/` に同梱**し、§11.2 の暫定コード名を確定値で更新する。PDF は立花証券公式サイトから入手できるが URL は公開状態が変わりうるため、ダウンロード日と入手元を同梱 `README_event_if.txt` に記録する
+2. **(代替) 実 frame キャプチャ**: ユーザー保有の Windows サンプル `e_api_websocket_receive_tel.py` をデモ環境に対して実行し、受信した FD frame の生バイト列（少なくとも 5 銘柄 × 30 秒分）を `manual_files/captured_fd_frames/*.bin` として保存。データから `p_<行>_<コード>` キー一覧を逆引きで確定し、§11.2.b の表を更新する
+3. **(縮退) どちらも T1 着手前に不可なら**: 該当情報コード（`DV` / `GAK*` / `GBK*` / `GAS*` / `GBS*` / `DPP_TIME` / `DDT`）を **使う実装タスクを Phase 1 から外す**。着手前に以下の計画更新をすべて実施すること:
+   - `spec.md §2.1` の「含めるもの」から FD ストリーム・DepthSnapshot 関連を削除し「Phase 2 送り」に移動
+   - `spec.md §4` 受け入れ条件 2〜3 を修正（kline + ticker stats のみで成立するよう書き直す）
+   - `data-mapping.md §3 / §4` を「Phase 2 へ繰越し（縮退）」とマーク
+   - `implementation-plan.md T5` タスクを全件 `[ ]` → Phase 2 送りに移動
+   - `architecture.md §4` Python ファイル構成から `tachibana_ws.py` を削除
 
 **T1（codec）と T5（FD trade/depth）の着手前に、本 §11 を実体的に解決したかどうかを PR 説明文に明記すること**。`DPP` / `KP` / `ST` / `SS` / `US` / `EC` 確認済みコードのみで成立する範囲は T1 で先行着手してよい。
 

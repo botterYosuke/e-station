@@ -38,7 +38,7 @@ flowsurface 立花 venue 統合は **Python 側 `python/engine/exchanges/tachiba
     - `api_overview_v4r7.pdf` — インタフェース概要（ComP2 からリンク）
     - `api_event_if_v4r7.pdf` / `api_event_if.xlsx` — EVENT I/F 利用方法・データ仕様（ComT6 からリンク、同内容の PDF/Excel 版）
     - これら外部資料を参照する場合はブラウザ側で e-shiten.jp の公開 URL を確認する。ローカルでは Python サンプルに抜粋コメントがあるのでそれを補助資料にする
-- **バージョン表記**: 本番 URL は現行 **v4r8**（`e_api_v4r8`）、ドキュメント類は v4r7 ファイル名のまま流用されている。Rust 側も `BASE_URL_*` は `v4r8`。v4r7 と v4r8 で互換を保つ方針のため、パラメータ仕様は v4r7 ドキュメントを参照してよい
+- **バージョン表記**: 本番 URL は現行 **v4r8**（`e_api_v4r8`）、ドキュメント類は v4r7 ファイル名のまま流用されている。**`BASE_URL_PROD` リテラル (`kabuka.e-shiten.jp`) を持てるのは `python/engine/exchanges/tachibana_url.py` の冒頭定義 1 箇所のみ**（F-L1）。Rust 側には本番 URL リテラルを書かず、Python から受け取る設計（architecture.md §1）。「Rust 側も `BASE_URL_*` は `v4r8`」という旧記述はこの方針変更により廃止。v4r7 と v4r8 で互換を保つ方針のため、パラメータ仕様は v4r7 ドキュメントを参照してよい
 - **Python サンプル（1 サンプル = 1 サブディレクトリ）**: `.claude/skills/tachibana/samples/e_api_*_tel.py/`
   - 各ディレクトリに `LICENSE` / `README.md` / `e_api_*.py` が同梱（`e_api_login_tel.py/` には更に `e_api_login_response.txt` と `e_api_account_info.txt` の実例 JSON が入っている）
   - ログイン: `e_api_login_tel.py/e_api_login_tel.py`

@@ -128,6 +128,7 @@ class DataEngineServer:
             self._port,
             ping_interval=15,
             ping_timeout=30,
+            compression=None,
         ):
             log.info("Data engine listening on ws://127.0.0.1:%d", self._port)
             await self._shutdown_event.wait()
