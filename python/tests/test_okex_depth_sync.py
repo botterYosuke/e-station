@@ -23,18 +23,26 @@ def _snapshot(update_id, bids=None, asks=None):
     return {
         "action": "snapshot",
         "update_id": update_id,
+        "prev_update_id": 0,
         "bids": bids or [["30000", "1.0", "0", "1"]],
         "asks": asks or [["30001", "0.5", "0", "1"]],
     }
 
 
-def _delta(update_id, bids=None, asks=None):
+def _delta(update_id, prev_update_id=None, bids=None, asks=None):
     return {
         "action": "update",
         "update_id": update_id,
+        "prev_update_id": prev_update_id if prev_update_id is not None else update_id - 1,
         "bids": bids or [],
         "asks": asks or [["30002", "0.3", "0", "1"]],
     }
+
+
+def _snapshot_msg(update_id, bids=None, asks=None):
+    msg = _snapshot(update_id, bids=bids, asks=asks)
+    msg["prev_update_id"] = 0
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +156,41 @@ def test_buffer_overflow_emits_gap_and_sets_needs_resync():
 
     gap_events = [e for e in outbox if e["event"] == "DepthGap"]
     assert len(gap_events) >= 1
+    assert syncer.needs_resync
+
+
+def test_non_contiguous_seqid_with_correct_prev_seqid_is_accepted():
+    """Regression for UI-3: OKX `books` channel chains via prevSeqId, not seqId+1.
+
+    seqId may jump arbitrarily; what matters is that prevSeqId of message N+1
+    equals seqId of message N. Previously the syncer asserted strict +1
+    increments and emitted DepthGap on every update → resync streak storm.
+    """
+    syncer, outbox = _make_syncer()
+    syncer.process_message(**_snapshot(update_id=1000))
+    outbox.clear()
+
+    syncer.process_message(**_delta(update_id=1500, prev_update_id=1000))
+    diffs = [e for e in outbox if e["event"] == "DepthDiff"]
+    gaps = [e for e in outbox if e["event"] == "DepthGap"]
+    assert len(diffs) == 1, f"expected DepthDiff, got {[e['event'] for e in outbox]}"
+    assert diffs[0]["sequence_id"] == 1500
+    assert diffs[0]["prev_sequence_id"] == 1000
+    assert len(gaps) == 0
+    assert not syncer.needs_resync
+
+
+def test_prev_seqid_mismatch_emits_depth_gap():
+    """If prevSeqId of incoming msg != last applied seqId, that's a real gap."""
+    syncer, outbox = _make_syncer()
+    syncer.process_message(**_snapshot(update_id=1000))
+    syncer.process_message(**_delta(update_id=1500, prev_update_id=1000))
+    outbox.clear()
+
+    # Next message claims to chain from 1499 (not 1500) → real gap
+    syncer.process_message(**_delta(update_id=1700, prev_update_id=1499))
+    gaps = [e for e in outbox if e["event"] == "DepthGap"]
+    assert len(gaps) == 1
     assert syncer.needs_resync
 
 

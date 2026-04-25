@@ -97,8 +97,10 @@ class OkexDepthSyncer:
     """Implements OKX WebSocket snapshot+delta depth protocol for IPC.
 
     OKX books channel: first message has action="snapshot", subsequent have
-    action="update". seqId increments by exactly 1 per update; gaps indicate
-    missed messages and require reconnection.
+    action="update". Each update message carries `seqId` and `prevSeqId`; the
+    chain is valid when `prevSeqId == previously_applied_seqId`. seqId values
+    are NOT necessarily contiguous — they may jump arbitrarily between updates.
+    A mismatch indicates missed messages and requires resync.
     """
 
     MAX_PENDING = 512
@@ -131,6 +133,7 @@ class OkexDepthSyncer:
         *,
         action: str,
         update_id: int,
+        prev_update_id: int,
         bids: list[list[str]],
         asks: list[list[str]],
     ) -> None:
@@ -138,17 +141,19 @@ class OkexDepthSyncer:
             self._apply_snapshot(update_id, bids, asks)
         elif action == "update":
             if not self._initialized or self._needs_resync:
-                self._buffer_delta(update_id, bids, asks)
+                self._buffer_delta(update_id, prev_update_id, bids, asks)
             else:
-                self._apply_delta(update_id, bids, asks)
+                self._apply_delta(update_id, prev_update_id, bids, asks)
 
-    def _buffer_delta(self, update_id: int, bids: list, asks: list) -> None:
+    def _buffer_delta(
+        self, update_id: int, prev_update_id: int, bids: list, asks: list
+    ) -> None:
         if len(self._pending) >= self.MAX_PENDING:
             self._pending.clear()
             self._emit_gap()
             self._needs_resync = True
             return
-        self._pending.append((update_id, bids, asks))
+        self._pending.append((update_id, prev_update_id, bids, asks))
 
     def _apply_snapshot(self, update_id: int, bids: list, asks: list) -> None:
         self._applied_seq = update_id
@@ -171,17 +176,21 @@ class OkexDepthSyncer:
         # Replay buffered deltas
         pending = list(self._pending)
         self._pending.clear()
-        for uid, b, a in pending:
-            self._apply_delta(uid, b, a)
+        for uid, prev_uid, b, a in pending:
+            self._apply_delta(uid, prev_uid, b, a)
             if self._needs_resync:
                 break
 
-    def _apply_delta(self, update_id: int, bids: list, asks: list) -> None:
+    def _apply_delta(
+        self, update_id: int, prev_update_id: int, bids: list, asks: list
+    ) -> None:
         # Drop stale events
         if update_id <= self._applied_seq:
             return
 
-        if update_id != self._applied_seq + 1:
+        # OKX `books` chains via prevSeqId, not strict +1. The chain is valid
+        # iff prevSeqId of this msg equals seqId of the last applied msg.
+        if prev_update_id != self._applied_seq:
             self._emit_gap()
             self._needs_resync = True
             return
@@ -194,7 +203,7 @@ class OkexDepthSyncer:
                 "market": self._market,
                 "stream_session_id": self._ssid,
                 "sequence_id": update_id,
-                "prev_sequence_id": self._applied_seq,
+                "prev_sequence_id": prev_update_id,
                 "bids": _depth_levels(bids),
                 "asks": _depth_levels(asks),
             }
@@ -655,13 +664,17 @@ class OkexWorker(ExchangeWorker):
                             if not data_list:
                                 continue
                             first = data_list[0]
-                            update_id = first.get("seqId", 0)
+                            update_id = int(first.get("seqId", 0))
+                            # OKX snapshot omits prevSeqId; default to 0 so the
+                            # syncer treats the snapshot as the chain origin.
+                            prev_update_id = int(first.get("prevSeqId", 0))
                             bids = first.get("bids", [])
                             asks = first.get("asks", [])
 
                             syncer.process_message(
                                 action=action,
                                 update_id=update_id,
+                                prev_update_id=prev_update_id,
                                 bids=bids,
                                 asks=asks,
                             )
