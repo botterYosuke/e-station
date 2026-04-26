@@ -7,8 +7,8 @@ use data::{
     InternalError,
     layout::pane::ContentKind,
     tickers_table::{
-        PriceChange, Settings, SortOptions, TickerDisplayData, TickerRowData, calc_search_rank,
-        compare_ticker_rows_by_sort, compute_display_data, market_suffix,
+        PriceChange, SearchRank, Settings, SortOptions, TickerDisplayData, TickerRowData,
+        calc_search_rank, compare_ticker_rows_by_sort, compute_display_data, market_suffix,
     },
 };
 use exchange::{
@@ -25,11 +25,14 @@ use iced::{
         space, text, text_input,
     },
 };
+use engine_client::TickerMetaMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::sync::Mutex as TokioMutex;
 
 /// How often to refresh stats while the ticker table is visible (seconds).
 const ACTIVE_UPDATE_INTERVAL: u64 = 13;
@@ -149,6 +152,13 @@ pub struct TickersTable {
     /// [`TickersTable::set_tachibana_ready(true)`] once `VenueReady`
     /// arrives.
     tachibana_fetch_pending: bool,
+    /// B5: Arc handle to the Tachibana display-metadata side-channel populated
+    /// by `EngineClientBackend::fetch_ticker_metadata`. Set from `main.rs`
+    /// after each `EngineConnected` event. `None` until the first connection.
+    ///
+    /// T35-H8 purity: **only** `try_lock()` is permitted in `filtered_rows`
+    /// and other rendering paths — `lock().await` is forbidden here.
+    tachibana_meta_handle: Option<Arc<TokioMutex<TickerMetaMap>>>,
 }
 
 impl TickersTable {
@@ -204,6 +214,7 @@ impl TickersTable {
                 handles,
                 tachibana_ready: false,
                 tachibana_fetch_pending: tachibana_initially_selected,
+                tachibana_meta_handle: None,
             },
             Task::batch(fetch_metadata),
         )
@@ -251,6 +262,14 @@ impl TickersTable {
         Task::none()
     }
 
+    /// B5: Wire the Tachibana display-metadata handle so `filtered_rows` can
+    /// do Japanese-name prefix search. Called from `main.rs` after each
+    /// `EngineConnected` event, right after the new backend is constructed.
+    /// Pass `None` to detach (e.g. on disconnect).
+    pub fn set_tachibana_meta_handle(&mut self, handle: Option<Arc<TokioMutex<TickerMetaMap>>>) {
+        self.tachibana_meta_handle = handle;
+    }
+
     /// Replace the stored handles with a freshly-connected set and re-fetch
     /// all metadata so the sidebar recovers after an engine reconnect.
     /// T35-U4 reconnect gate (review-fixes 2026-04-26 R2): Tachibana is
@@ -280,6 +299,13 @@ impl TickersTable {
             .collect();
 
         Task::batch(fetch_tasks)
+    }
+
+    /// Test-only helper: push a row directly into `ticker_rows` so unit tests
+    /// can exercise `filtered_rows` without going through the fetch pipeline.
+    #[cfg(test)]
+    pub fn push_ticker_row_for_test(&mut self, row: TickerRowData) {
+        self.ticker_rows.push(row);
     }
 
     pub fn settings(&self) -> Settings {
@@ -1068,6 +1094,41 @@ impl TickersTable {
         let matches_exchange =
             |row: &TickerRowData| self.selected_exchanges.contains(&row.exchange.venue());
 
+        // B5: snapshot the Tachibana meta map once per call — T35-H8 purity:
+        // `try_lock()` only, never `lock().await` on the rendering path.
+        let tachibana_meta = self
+            .tachibana_meta_handle
+            .as_ref()
+            .and_then(|h| h.try_lock().ok());
+
+        // Rank helper: ASCII first, then Japanese name fallback for Tachibana.
+        let rank_row = |row: &TickerRowData| -> Option<SearchRank> {
+            if let Some(rank) = calc_search_rank(&row.ticker, search_upper) {
+                return Some(rank);
+            }
+            // Japanese-name prefix fallback (Tachibana only). This branch is
+            // only reached when `calc_search_rank` returned None, which happens
+            // for queries that contain non-ASCII (e.g. katakana). The ASCII
+            // prefix checks inside `matches_tachibana_filter` will also fail
+            // for such queries, so the only net addition is the `display_name_ja`
+            // starts-with check.
+            if row.exchange.venue() == Venue::Tachibana {
+                let meta_opt = tachibana_meta
+                    .as_deref()
+                    .and_then(|m| m.get(&row.ticker));
+                if engine_client::tachibana_meta::matches_tachibana_filter(
+                    &row.ticker,
+                    meta_opt,
+                    search_upper,
+                ) {
+                    // Assign a bucket beyond the four ASCII buckets so
+                    // Japanese-name matches sort after all ASCII matches.
+                    return Some(SearchRank { bucket: 5, pos: 0, len: 0 });
+                }
+            }
+            None
+        };
+
         // Collect fav_rows with search ranks
         let mut fav_rows: Vec<_> = if self.show_favorites {
             self.ticker_rows
@@ -1078,9 +1139,7 @@ impl TickersTable {
                         && matches_market(row)
                         && matches_exchange(row)
                 })
-                .filter_map(|row| {
-                    calc_search_rank(&row.ticker, search_upper).map(|rank| (row, rank))
-                })
+                .filter_map(|row| rank_row(row).map(|rank| (row, rank)))
                 .collect()
         } else {
             Vec::new()
@@ -1105,7 +1164,7 @@ impl TickersTable {
                     && matches_market(row)
                     && matches_exchange(row)
             })
-            .filter_map(|row| calc_search_rank(&row.ticker, search_upper).map(|rank| (row, rank)))
+            .filter_map(|row| rank_row(row).map(|rank| (row, rank)))
             .collect();
 
         // Sort by (match bucket/pos), then selected sort, then length as last resort
@@ -2543,5 +2602,73 @@ mod tests {
             "post-Ready toggle goes through begin_venue → in_flight"
         );
         assert!(!table.tachibana_fetch_pending);
+    }
+
+    /// B5: `filtered_rows` must include a Tachibana ticker when the search
+    /// query is a Japanese prefix of `display_name_ja` stored in the meta
+    /// side-channel, and must exclude it when no handle is wired.
+    #[test]
+    fn japanese_name_query_matches_via_meta_handle() {
+        use engine_client::{TickerMetaMap, tachibana_meta::parse_tachibana_ticker_dict};
+        use exchange::adapter::Exchange;
+
+        let dict = serde_json::json!({
+            "symbol": "7203",
+            "display_name_ja": "トヨタ自動車",
+            "display_symbol": "TOYOTA",
+            "lot_size": 100,
+        });
+        let (ticker, _, meta) =
+            parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
+
+        // Populate the meta map.
+        let mut meta_map = TickerMetaMap::default();
+        meta_map.insert(ticker, meta);
+        let handle = Arc::new(TokioMutex::new(meta_map));
+
+        // Build a minimal TickerRowData for the Toyota ticker.
+        let stats: exchange::TickerStats = serde_json::from_value(serde_json::json!({
+            "mark_price": 0,
+            "daily_price_chg": 0.0,
+            "daily_volume": 0,
+        }))
+        .unwrap();
+        let row = TickerRowData {
+            exchange: Exchange::TachibanaStock,
+            ticker,
+            stats,
+            previous_stats: None,
+            is_favorited: false,
+        };
+
+        // Build a table that has Tachibana/Stock selected.
+        let settings = Settings {
+            selected_exchanges: vec![Venue::Tachibana],
+            selected_markets: vec![MarketKind::Stock],
+            ..Default::default()
+        };
+        let (mut table, _) =
+            TickersTable::new_with_settings(&settings, exchange::adapter::AdapterHandles::default());
+        table.push_ticker_row_for_test(row);
+        table.set_tachibana_meta_handle(Some(handle));
+
+        // (a) Japanese prefix must match via the side-channel.
+        let (_, rest) = table.filtered_rows("トヨタ", None);
+        assert!(
+            !rest.is_empty(),
+            "Japanese name prefix must match Tachibana ticker when meta handle is wired"
+        );
+
+        // (b) ASCII code still works (calc_search_rank path, not meta).
+        let (_, rest_ascii) = table.filtered_rows("7203", None);
+        assert!(!rest_ascii.is_empty(), "ASCII code query must still match");
+
+        // (c) Detaching the handle: Japanese query should no longer match.
+        table.set_tachibana_meta_handle(None);
+        let (_, rest_no_meta) = table.filtered_rows("トヨタ", None);
+        assert!(
+            rest_no_meta.is_empty(),
+            "Without meta handle, Japanese query must not produce a match"
+        );
     }
 }

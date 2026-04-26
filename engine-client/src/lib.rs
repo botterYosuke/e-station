@@ -16,7 +16,7 @@ pub mod error;
 pub mod process;
 pub mod tachibana_meta;
 
-pub use backend::EngineClientBackend;
+pub use backend::{EngineClientBackend, TickerMetaMap};
 pub use connection::EngineConnection;
 pub use depth_tracker::DepthTracker;
 pub use error::EngineClientError;

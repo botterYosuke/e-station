@@ -140,6 +140,17 @@ impl Sidebar {
             .map(Message::TickersTable)
     }
 
+    /// B5: Wire the Tachibana display-metadata handle so `filtered_rows` can
+    /// do Japanese-name prefix search. Delegates to `TickersTable`.
+    pub fn set_tachibana_meta_handle(
+        &mut self,
+        handle: Option<
+            std::sync::Arc<tokio::sync::Mutex<engine_client::TickerMetaMap>>,
+        >,
+    ) {
+        self.tickers_table.set_tachibana_meta_handle(handle);
+    }
+
     fn nav_buttons(
         &self,
         is_table_open: bool,

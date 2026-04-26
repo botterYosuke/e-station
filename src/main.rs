@@ -1057,13 +1057,24 @@ impl Flowsurface {
 
                 // Rebuild backends with the new connection and bump the generation
                 // counter so iced assigns new subscription IDs and restarts streams.
+                let mut tachibana_meta_handle = None;
                 for &(venue, name) in VENUE_NAMES {
                     let backend = Arc::new(engine_client::EngineClientBackend::new(
                         Arc::clone(&conn),
                         name,
                     ));
+                    // B5: capture the Tachibana meta handle before the backend
+                    // is moved into the type-erased `AdapterHandles`. This is
+                    // the only point where the typed `Arc<EngineClientBackend>`
+                    // is available to call `ticker_meta_handle()`.
+                    if venue == exchange::adapter::Venue::Tachibana {
+                        tachibana_meta_handle = Some(backend.ticker_meta_handle());
+                    }
                     self.handles.set_backend(venue, backend);
                 }
+                // Wire the handle into the sidebar's ticker filter so
+                // Japanese-name incremental search works after each reconnect.
+                self.sidebar.set_tachibana_meta_handle(tachibana_meta_handle);
 
                 // Re-apply current proxy state before bumping the generation so
                 // that stream-subscribe commands are enqueued after SetProxy in

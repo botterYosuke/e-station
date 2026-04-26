@@ -36,12 +36,11 @@ const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// so the UI (which only borrows the backend) can clone the handle and read
 /// asynchronously without deadlocking the fetch path.
 ///
-/// Visibility is `pub(crate)` because `TickerDisplayMeta` is a crate-internal
-/// type — exposing the alias publicly would leak an implementation detail and
-/// invite UI callers to take the async lock on the rendering path (a T35-H8
-/// purity violation). External callers go through `ticker_meta_handle()` and
-/// must use `try_lock()`.
-pub(crate) type TickerMetaMap = HashMap<exchange::Ticker, crate::tachibana_meta::TickerDisplayMeta>;
+/// Exposed as `pub` so the UI crate (`src`) can store and name the handle type
+/// in `TickersTable`. UI callers **must** use `try_lock()` on the rendering
+/// path (T35-H8 purity): `lock().await` is forbidden in `view()` /
+/// `filtered_rows`. External callers go through `ticker_meta_handle()`.
+pub type TickerMetaMap = HashMap<exchange::Ticker, crate::tachibana_meta::TickerDisplayMeta>;
 
 /// Venue-scoped backend for the Python data engine.
 ///
