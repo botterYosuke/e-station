@@ -354,7 +354,32 @@ enum VenueState {
 
 ---
 
-### Step F — U5 E2E shell
+### Step F — U5 E2E shell ⏸️ スケルトン着地 (2026-04-26) — 完走は HTTP API 着地後
+
+**目的**: HTTP API 経由で「初回ログイン → cancel → 再ログイン」シーケンスをスクリプト検証。
+
+> **完了サマリ (2026-04-26)**
+>
+> - ✅ `tests/e2e/tachibana_relogin_after_cancel.sh` 新設。エンジン + flowsurface 起動、handshake 検出、`VenueLoginStarted` / `VenueLoginCancelled` の grep 監視、cancel 注入経路の TODO まで一通り構造化済み。
+> - ⏸️ **完走は不可**: `src/replay_api.rs` (HTTP 制御 API、port 9876) が現リポジトリに未実装。`.claude/skills/e2e-testing/SKILL.md` で文書化されている API は別 PR スコープ。
+> - ✅ pre-flight gate: `src/main.rs` に `mod replay_api;` 宣言が無い場合は **exit 77 (autotools "skip")** で即座に終了。CI ダッシュボードで「未実装ゆえスキップ」と「実際の失敗」を区別可能。
+> - ✅ `EXPECT_STARTED_RE` / `EXPECT_CANCELLED_RE` を冒頭で定数化。エンジンログのフォーマットが変わったら 1 箇所修正で済む。
+> - ✅ DEV_TACHIBANA_* 未設定で dialog 経路を強制（fast-path 抑止）。
+> - ✅ Stage 1/2/3 の 30s/10s/10s 各タイムアウト値と grep 戻り値による合計件数 assertion (started=2, cancelled=1) を事前定義。HTTP API 着地時点で TODO ブロックの `curl -X POST ...` 行をアンコメントするだけで完走可能。
+> - ✅ `invariant-tests.md` に T35-U5-RelogE2E をスケルトン状態で追記。
+>
+> **CI 組込仕様 (plan §5 #7)**:
+>
+> - 組込先: `.github/workflows/e2e.yml::tachibana-relogin-after-cancel` ジョブ（nightly + PR ラベル `e2e`、`OBSERVE_S=60`）。**ワークフロー側の追加は別 PR**（本 T3.5 PR は workflow YAML を変更しない）。
+> - exit 77 を CI 側で「neutral / skip」扱いにする（GitHub Actions では `continue-on-error: false` のまま 77 を pass-through）。
+>
+> **設計上の落とし穴 (後続作業者向け / 完走 PR で対応)**
+>
+> - **HTTP API 実装範囲**: 最低限 `POST /api/sidebar/toggle-venue {"venue":"tachibana"}` と `POST /api/sidebar/tachibana/request-login`、加えて helper subprocess の cancel 注入経路（`POST /api/test/tachibana/cancel-helper`）の 3 endpoint が必要。
+> - **cancel 注入の実態**: tkinter helper の stdin EOF を投げる方法が論点。HTTP API 内で helper の `Child` ハンドルを保持して `child.stdin.take().drop()` する形か、あるいは Python 側で「次の helper request id がこれだったら EOF せよ」という mock-mode を入れるか。前者がシンプル。`tachibana_login_dialog.py --headless` の既存 `_read_stdin_payload` 仕様を流用すれば Python 側追加実装は不要。
+> - **`VenueLoginStarted` の "exactly 2" 判定**: ログのバッファリング遅延で行が遅れて出ると count に揺らぎが出る。stage3 終了後に **+5s slack で再判定**するロジックを足してもいいが、現状はストレートな数値比較で書いている。flake が出たら再判定窓を導入。
+> - **EXPECT_STARTED_RE のマッチ**: 現在は `VenueLoginStarted.*venue.*tachibana` でゆるく取っている。Rust ログは serde Debug 形式なので `VenueLoginStarted { venue: "tachibana", request_id: ... }` の形。誤マッチが起きたら `venue:\s*"tachibana"` のように `:` を要求する形に締める。
+> - **port 19877**: smoke.sh は 19876、本スクリプトは 19877 を default にして並列実行可能にしている。CI で順次実行するなら同じでもよい。
 
 **目的**: HTTP API 経由で「初回ログイン → cancel → 再ログイン」シーケンスをスクリプト検証。
 
