@@ -38,3 +38,26 @@
 
 ### LOW 持ち越し
 LOW 9 件は B5 へ繰越 (TickerMetaMap 再エクスポート、Option<&TickerDisplayMeta> doc、wait_ready スタブ将来リスク、try_send_now 戻り値、market_kind gating 等)。ユーザー判断 2(b) により LOW は同 PR 範囲外。
+
+## ラウンド 3（2026-04-26）
+
+### 統一決定
+1. `reset_ticker_meta()` を `async fn` 化して `blocking_lock()` 規約違反を解消 (H1, backend.rs 別 implementer 担当)
+2. callsite と reconnect モデルを計画書で明示 (H2, H3、本ドキュメント担当)
+3. dto.rs / connection.rs に Python 互換と reconnect cache の仕様コメントを追記 (M1, M3、別 implementer 担当)
+
+### Finding ID → 修正概要マッピング
+| Finding ID | 観点 | 対象ファイル | 修正概要 |
+|---|---|---|---|
+| H1 | est | engine-client/src/backend.rs | `reset_ticker_meta` を `async fn` 化、`blocking_lock` 削除（別 implementer 担当） |
+| H2 | est | implementation-plan.md §T4 (B5 繰越行) | `reset_ticker_meta()` callsite は B5 で `src/main.rs::on_ready` クロージャから呼ぶ旨を明記。R1 では public API 公開のみで callsite は B5 繰越であることを明示 |
+| H3 | est | implementation-plan.md §T4 末尾 | Phase 1 reconnect モデル = `EngineClientBackend` 再構築前提（古いインスタンス drop で `ticker_meta` も drop）であることを明記。`EngineRehello` 由来の reset hook（`update_handles` 経路で同 backend を使い回すケース）は Phase 2 (T7) で追加。本 Phase は新規構築モデルで silent gap が閉じることを設計仮定とする |
+| M1 | est | engine-client/src/dto.rs | Python 側は常に dict emit、`#[serde(default)]` は defensive 旨コメント追記（別 implementer 担当） |
+| M2 | est | engine-client/src/backend.rs | 1 backend = 1 venue 不変を doc 明示（別 implementer 担当） |
+| M3 | est | engine-client/src/connection.rs + implementation-plan.md §T7 | reconnect 時 capabilities snapshot 更新の `capabilities_changed_after_reconnect` pin test を T7 で追加予定の旨を計画書に 1 行追記 |
+
+### 本ドキュメント担当の修正範囲
+- `docs/plan/tachibana/implementation-plan.md` §T4 (B5 繰越行) に H2 callsite 明記を追記
+- `docs/plan/tachibana/implementation-plan.md` §T4 末尾に H3 Phase 1 reconnect モデルの設計仮定を新項目として追加
+- `docs/plan/tachibana/implementation-plan.md` §T7 に M3 `capabilities_changed_after_reconnect` pin test 追加予定を新項目として追加
+- 本ログ末尾に R3 セクションを追記
