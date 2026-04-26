@@ -97,7 +97,21 @@ fn spawn_venue_ready_bridge(rt: &tokio::runtime::Runtime, conn: &engine_client::
                 Ok(EngineEvent::VenueReady { venue, .. }) => {
                     cache.lock().await.insert(venue);
                 }
+                // Invalidate the readiness cache aggressively when the
+                // venue lifecycle leaves `Ready`. Without these arms a
+                // stale `Ready` from a previous session could survive
+                // a re-login dialog open / cancel pair and a later
+                // engine reconnect would resurrect it via
+                // `Message::EngineConnected`'s synthesized
+                // `VenueEvent::Ready`. Reviewer 2026-04-26 R4
+                // (MEDIUM-3).
                 Ok(EngineEvent::VenueError { venue, .. }) => {
+                    cache.lock().await.remove(&venue);
+                }
+                Ok(EngineEvent::VenueLoginStarted { venue, .. }) => {
+                    cache.lock().await.remove(&venue);
+                }
+                Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
                     cache.lock().await.remove(&venue);
                 }
                 Ok(_) => {}
@@ -125,14 +139,24 @@ fn cached_venue_is_ready(venue: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Wire-level identifier for the Tachibana venue. Centralised so a
+/// future rename or IPC schema change is a one-line patch instead of
+/// a cross-file grep.
+const TACHIBANA_VENUE_NAME: &str = "tachibana";
+
 /// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
 /// Referenced during initial setup and on every engine reconnect.
+/// **Includes `Tachibana`** — without the entry the venue would never
+/// receive an `EngineClientBackend` registration and every
+/// `fetch_ticker_metadata(Tachibana, …)` call would error with
+/// `No adapter handle configured`. Reviewer 2026-04-26 R4 (HIGH-1).
 const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
     (exchange::adapter::Venue::Binance, "binance"),
     (exchange::adapter::Venue::Bybit, "bybit"),
     (exchange::adapter::Venue::Hyperliquid, "hyperliquid"),
     (exchange::adapter::Venue::Okex, "okex"),
     (exchange::adapter::Venue::Mexc, "mexc"),
+    (exchange::adapter::Venue::Tachibana, TACHIBANA_VENUE_NAME),
 ];
 
 /// Bind to 127.0.0.1:0 to ask the OS for a free port, then immediately close
@@ -276,6 +300,18 @@ fn main() {
                                                     }
                                                     Ok(EngineEvent::VenueError {
                                                         venue, ..
+                                                    }) => {
+                                                        cache.lock().await.remove(&venue);
+                                                    }
+                                                    Ok(EngineEvent::VenueLoginStarted {
+                                                        venue,
+                                                        ..
+                                                    }) => {
+                                                        cache.lock().await.remove(&venue);
+                                                    }
+                                                    Ok(EngineEvent::VenueLoginCancelled {
+                                                        venue,
+                                                        ..
                                                     }) => {
                                                         cache.lock().await.remove(&venue);
                                                     }
@@ -460,6 +496,12 @@ fn main() {
                                             cache.lock().await.insert(venue);
                                         }
                                         Ok(EngineEvent::VenueError { venue, .. }) => {
+                                            cache.lock().await.remove(&venue);
+                                        }
+                                        Ok(EngineEvent::VenueLoginStarted { venue, .. }) => {
+                                            cache.lock().await.remove(&venue);
+                                        }
+                                        Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
                                             cache.lock().await.remove(&venue);
                                         }
                                         Ok(_) => {}
@@ -764,11 +806,6 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
     }
 }
 
-/// Wire-level identifier for the Tachibana venue. Centralised so a
-/// future rename or IPC schema change is a one-line patch instead of
-/// a cross-file grep.
-const TACHIBANA_VENUE_NAME: &str = "tachibana";
-
 /// Translate a low-level `EngineEvent` into a `Message::TachibanaVenueEvent`
 /// when it concerns the Tachibana venue lifecycle, otherwise `None`.
 /// Other venues are funnelled through their existing exchange-event
@@ -913,18 +950,15 @@ impl Flowsurface {
                 self.tachibana_state = next;
             }
             Message::RequestTachibanaLogin(trigger) => {
-                // Duplicate-press suppression: while a login dialog is
-                // already in flight, drop the request. Without this
-                // the auto-fire path would spawn a new tkinter helper
-                // every time the user toggled the Tachibana venue.
+                // Duplicate-press suppression: claim the LoginInFlight
+                // slot atomically BEFORE dispatching the IPC. Without
+                // this, two rapid presses (Auto + Manual or two manual
+                // double-clicks) both observe the FSM in `Idle` /
+                // `Ready` / `Error` and dispatch duplicate
+                // `RequestVenueLogin` IPC sends — a tkinter helper
+                // spawns twice. Reviewer 2026-04-26 R4 (MEDIUM-2).
                 // T35-U1-LoginButton / T35-U3-AutoRequestLogin.
                 log::info!("RequestTachibanaLogin trigger={trigger:?}");
-                if self.tachibana_state.is_login_in_flight() {
-                    log::debug!(
-                        "RequestTachibanaLogin({trigger:?}) ignored — login already in flight"
-                    );
-                    return Task::none();
-                }
                 let Some(conn) = self.engine_connection.as_ref().cloned() else {
                     log::warn!(
                         "RequestTachibanaLogin({trigger:?}) ignored — engine connection unavailable"
@@ -940,6 +974,12 @@ impl Flowsurface {
                     }
                     return Task::none();
                 };
+                if !self.tachibana_state.try_claim_login_in_flight() {
+                    log::debug!(
+                        "RequestTachibanaLogin({trigger:?}) ignored — login already in flight"
+                    );
+                    return Task::none();
+                }
                 return Task::perform(
                     async move {
                         let request_id = uuid::Uuid::new_v4().to_string();
@@ -954,12 +994,13 @@ impl Flowsurface {
                 );
             }
             Message::TachibanaLoginIpcResult(result) => {
-                // Engine emits `VenueLoginStarted` on success — we do
-                // NOT optimistically transition the FSM ourselves
-                // here, because an IPC failure would otherwise pin
-                // the state machine in `LoginInFlight` (the dup-press
-                // gate would then refuse every subsequent press).
-                // Review-fixes 2026-04-26 round 1.
+                // The optimistic `try_claim_login_in_flight` already
+                // moved the FSM into `LoginInFlight`. Engine's
+                // `VenueLoginStarted` is idempotent under that, but
+                // an IPC send failure means the engine never received
+                // the request and will not emit `VenueLoginStarted`
+                // — roll the FSM back to `Idle` so the user can
+                // retry. Reviewer 2026-04-26 R4 (MEDIUM-2).
                 match result {
                     Ok(()) => {
                         log::debug!("RequestVenueLogin IPC sent");
@@ -969,6 +1010,9 @@ impl Flowsurface {
                         self.notifications.push(Toast::error(format!(
                             "立花ログイン要求の送信に失敗しました: {err}"
                         )));
+                        if self.tachibana_state.is_login_in_flight() {
+                            self.tachibana_state = VenueState::Idle;
+                        }
                     }
                 }
             }

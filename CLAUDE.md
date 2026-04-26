@@ -152,3 +152,16 @@ cargo clippy -- -D warnings
   デフォルト設定による挙動差異を再現できない。統合テストで補完する
 - **リグレッションガード**: 設定値の削除で元に戻るタイプの修正には、
   その設定値の存在を assert するテストを追加すること
+
+---
+
+## レビュー時のスキル指定
+
+このリポジトリでコードレビュー・差分レビュー・PR レビューを行うときは、
+必ず `.claude/skills/e-station-review/SKILL.md` のスキルを Skill ツールで起動する。
+
+- スキル一覧上の表示名は `e-station-review`
+- frontmatter の `name:` が `review` なので組み込み `/review` と紛らわしいが、
+  **組み込み `/review` は使わない**
+- review-fix-loop のレビュー段でも、サブエージェントに e-station-review スキルを
+  使わせること

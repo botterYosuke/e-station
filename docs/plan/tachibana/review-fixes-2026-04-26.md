@@ -168,4 +168,22 @@
 | C-M3 | 3 | C | invariant-tests.md L24-81 | 「関連 SKILL ID」列を新設し、全 `T35-*` / `F-*` 行に R1〜R10 を逆引き紐付け |
 | C-L1 | — | C | spec.md §3.2 / architecture.md §7.5.1 | `DismissTachibanaBanner` の FSM 副作用（view-only か `Error → Idle` 遷移か）を実装確認の上で明記 |
 
+---
+
+## ラウンド 7（2026-04-26）
+
+> ラウンド 6 はサニティチェックのみで修正なし（MEDIUM 検出）のため、本セクションをラウンド 7 として記録する。R7 は R6 で検出された MEDIUM 指摘の修正を行う。
+
+### 統一決定 1〜2
+
+- **統一決定 1**: R5 で新設した `invariant-tests.md` の「関連 SKILL ID」列の semantic を厳格化する。列値は `SKILL.md` の R 番号定義に意味的に整合するもののみ記載し、無関係な行は `—` とする。不変条件 ID（`F-*` / `T35-*`）と SKILL R 番号の混在は禁止する（SKILL ID 列に `F-Banner1` 等の不変条件 ID を入れない）。
+- **統一決定 2**: ID prefix 規約節を `SKILL R*` 一本化する。R5 で重複列挙していた `R[0-9]+` 単独 prefix の言及を整理し、SKILL 由来の参照は常に `SKILL R*` 形式で表記する。
+
+### Finding ID → 修正概要マッピング
+
+| Finding ID | 統一決定 # | 観点 | 対象ファイル | 修正概要 |
+|------------|------------|------|---------------|----------|
+| R6-M1 | 1 | サニティ | invariant-tests.md L82 (`T35-U2-Banner`) | 「関連 SKILL ID」列値から不変条件 ID `F-Banner1` を削除（不変条件 ID と SKILL R 番号の混在排除） |
+| R6-M2 | 1 | サニティ | invariant-tests.md L69 ほか全 `T35-*` 行 | SKILL R 番号と意味整合しない紐付けを `—` に整理（`T35-H5/H7/H8/H9/U1/U3/U4/U4-FSM` 等は `—`、Credential 漏洩 / 仮想 URL 系のみ R3 / R10 を残す） |
+| R6-L2 | 2 | サニティ | invariant-tests.md L8 ID prefix 規約 | `SKILL R*` 一本化、`R[0-9]+` 単独 prefix 言及を整理 |
 

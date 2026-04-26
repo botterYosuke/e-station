@@ -58,6 +58,32 @@ impl VenueState {
     pub fn is_login_in_flight(&self) -> bool {
         matches!(self, VenueState::LoginInFlight)
     }
+
+    /// Atomically claim the `LoginInFlight` slot. Returns `true` and
+    /// advances `self` to `LoginInFlight` when no login was already in
+    /// flight; returns `false` and leaves `self` unchanged otherwise.
+    ///
+    /// **Why optimistic**: the engine's `VenueLoginStarted` event is
+    /// the canonical edge into `LoginInFlight`, but it only arrives
+    /// after a network round-trip. Without an optimistic transition
+    /// here, two rapid `RequestTachibanaLogin` messages (e.g. an Auto
+    /// fired by `ToggleExchangeFilter` racing a Manual button press)
+    /// both observe the FSM in `Idle` / `Ready` / `Error` and dispatch
+    /// duplicate IPC sends. Reviewer 2026-04-26 R4 (MEDIUM-2). The
+    /// engine's later `VenueLoginStarted` is idempotent under
+    /// `next()` (`LoginInFlight + LoginStarted = LoginInFlight`).
+    ///
+    /// On IPC failure the caller MUST roll the FSM back to `Idle`
+    /// (handled in `Message::TachibanaLoginIpcResult(Err)`) so the
+    /// state does not deadlock at `LoginInFlight` for a request that
+    /// never reached the engine.
+    pub fn try_claim_login_in_flight(&mut self) -> bool {
+        if self.is_login_in_flight() {
+            return false;
+        }
+        *self = VenueState::LoginInFlight;
+        true
+    }
 }
 
 /// Inputs that drive the FSM. The `Hello` variant covers Python
@@ -204,6 +230,39 @@ mod tests {
         }
         .next(VenueEvent::Dismissed);
         assert_eq!(s, VenueState::Idle);
+    }
+
+    #[test]
+    fn try_claim_login_in_flight_succeeds_from_idle() {
+        let mut s = VenueState::Idle;
+        assert!(s.try_claim_login_in_flight());
+        assert!(s.is_login_in_flight());
+    }
+
+    #[test]
+    fn try_claim_login_in_flight_succeeds_from_ready() {
+        // Re-login from Ready is allowed (user explicitly re-auths).
+        let mut s = VenueState::Ready;
+        assert!(s.try_claim_login_in_flight());
+        assert!(s.is_login_in_flight());
+    }
+
+    #[test]
+    fn try_claim_login_in_flight_succeeds_from_error() {
+        let class = classify_venue_error("session_expired");
+        let mut s = VenueState::Error {
+            class,
+            message: "x".to_string(),
+        };
+        assert!(s.try_claim_login_in_flight());
+        assert!(s.is_login_in_flight());
+    }
+
+    #[test]
+    fn try_claim_login_in_flight_rejects_when_already_in_flight() {
+        let mut s = VenueState::LoginInFlight;
+        assert!(!s.try_claim_login_in_flight());
+        assert!(s.is_login_in_flight()); // unchanged
     }
 
     #[test]

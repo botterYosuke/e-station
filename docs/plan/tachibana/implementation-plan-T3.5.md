@@ -89,6 +89,29 @@ R2 着地後にイベント順序と外部モード bootstrap の race 2 件 (HI
 - ✅ `cargo fmt --check` 緑
 - ✅ `tools/iced_purity_grep.sh` OK
 
+## レビュー修正 R4 (2026-04-26)
+
+R3 + R3.1 着地後にさらに 1 HIGH + 2 MEDIUM の指摘を消化。
+
+| ID | 指摘 | 対応 |
+|----|------|------|
+| **HIGH-1 (R4)** | `VENUE_NAMES` に `Venue::Tachibana` が抜け → `EngineClientBackend` が登録されず `fetch_ticker_metadata(Tachibana, …)` が `No adapter handle configured` で全失敗。U4 ゲートは通っても下流が silent に死ぬ | `VENUE_NAMES` に `(Venue::Tachibana, TACHIBANA_VENUE_NAME)` を追加。`TACHIBANA_VENUE_NAME` 定数を `engine_status_stream` の前から `VENUE_NAMES` の前に前方移動して再利用。`tests/venue_names_includes_tachibana.rs` で text-scan pin |
+| **MEDIUM-2 (R4)** | `RequestTachibanaLogin` の dup 抑止が `is_login_in_flight()` チェック単独で、`Task::perform` 後に state を変えていない。FSM が `LoginInFlight` に遷移するのは engine 側 `VenueLoginStarted` 受信時。その間に Auto+Manual 重複ないし手動連打が来ると IPC が複数飛ぶ | `VenueState::try_claim_login_in_flight(&mut self) -> bool` を新設（optimistic transition）。`Message::RequestTachibanaLogin` ハンドラは IPC 送信前に claim、`TachibanaLoginIpcResult(Err)` で rollback (`VenueState::Idle`) して deadlock 回避。FSM unit test 4 件追加 |
+| **MEDIUM-3 (R4)** | bridge / `ProcessManager.venue_ready_state` が `VenueReady`/`VenueError` のみで invalidate。`VenueLoginStarted` / `VenueLoginCancelled` を無視するため、stale Ready が re-login dialog 経由のキャンセルと engine reconnect をまたいで生存し、UI が勝手に Ready に戻る余地がある | 全 bridge body (helper + external reconnect inline + managed inline) と `ProcessManager.apply_after_handshake_with_timeout` 内の `VenueLoginCancelled` / `VenueLoginStarted` ブランチで `venue_ready_state.remove(venue)` を発火。`tests/venue_ready_bridge_invalidates_on_login_events.rs` で 4 アーム揃いを text-scan pin |
+
+### 追加テスト
+
+- `tests/venue_names_includes_tachibana.rs::venue_names_includes_tachibana_backend` (T35-VenueNamesIncludesTachibana)
+- `tests/venue_ready_bridge_invalidates_on_login_events.rs::every_venue_ready_bridge_handles_all_four_lifecycle_events` (T35-CacheInvalidation)
+- `src/venue_state.rs::tests::try_claim_login_in_flight_*` 4 件 (T35-DupPressClaim)
+
+### 累積完了判定
+
+- ✅ `cargo test --workspace` 全緑
+- ✅ `cargo clippy --workspace --tests -- -D warnings` 緑
+- ✅ `cargo fmt --check` 緑
+- ✅ `tools/iced_purity_grep.sh` OK
+
 ## レビュー修正 R3.1 (2026-04-26) — T35-RehelloOrder pin 追加
 
 `/e-station-review` skill による再点検で T35-RehelloOrder が source コメント＋ plan のみで CI 構造ガードが無いことを確認 (Findings F1: テスト不足)。`tests/engine_rehello_yields_before_engine_connected.rs` を新設し、`engine_status_stream` 関数本体を text scan で `EngineRehello` / `EngineConnected` の出現位置を比較、initial / changed 両分岐とも前者 < 後者であることを assert。`async_stream!` マクロボディは syn AST が parse できないため text scan で代替。`invariant-tests.md` の T35-RehelloOrder 行を新 pin に更新。

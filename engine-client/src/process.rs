@@ -801,6 +801,11 @@ impl ProcessManager {
                     // so the wait loop unblocks immediately and any
                     // already-saved subscriptions still reach Subscribe.
                     Ok(Ok(EngineEvent::VenueLoginCancelled { request_id, venue })) => {
+                        // Stale Ready entries must not survive a cancel
+                        // — otherwise a subsequent reconnect would
+                        // resurrect Ready via the UI bridge cache.
+                        // Reviewer 2026-04-26 R4 (MEDIUM-3).
+                        self.venue_ready_state.lock().await.remove(&venue);
                         if let Some(rid) = &request_id {
                             // L-R8-2 (ラウンド 8): a `pending.remove`
                             // returning `None` here means the cancel
@@ -847,6 +852,13 @@ impl ProcessManager {
                             "VenueLoginCancelled during startup: venue={venue} — \
                              treating as benign cancel (Subscribe NOT skipped)"
                         );
+                    }
+                    Ok(Ok(EngineEvent::VenueLoginStarted { venue, .. })) => {
+                        // A new login attempt opening means the prior
+                        // ready entry (if any) is stale until the next
+                        // `VenueReady` resolves. Reviewer 2026-04-26
+                        // R4 (MEDIUM-3).
+                        self.venue_ready_state.lock().await.remove(&venue);
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
