@@ -197,6 +197,47 @@ def tick_size_for_price(
     )
 
 
+def resolve_min_ticksize_for_issue(
+    issue_record: dict[str, Any],
+    yobine_table: dict[str, list[YobineBand]],
+    snapshot_price: Decimal | None,
+) -> Decimal:
+    """Resolve the tick size that applies to a given issue.
+
+    Glues ``CLMIssueSizyouMstKabu.sYobineTaniNumber`` to the live
+    ``yobine_table`` built from decoded CLMYobine records and returns the
+    tick size at ``snapshot_price``.
+
+    When ``snapshot_price`` is ``None`` (e.g. at startup before any quote
+    has arrived) we fall back to the **first band's tick** — i.e. the
+    finest tick in the table for that issue's yobine code. This is
+    conservative for the use we care about (display precision / quote
+    rounding before a real price is known): a too-fine tick will still
+    align with all coarser tiers, while a too-coarse tick at a low price
+    tier would round legal quotes onto illegal grids.
+
+    Args:
+        issue_record: A ``CLMIssueSizyouMstKabu`` row. Must carry
+            ``sYobineTaniNumber``.
+        yobine_table: ``{yobine_code: bands}`` typically built from
+            decoded CLMYobine records by the master loader.
+        snapshot_price: Latest price for the issue, or ``None`` when no
+            quote has been observed yet.
+
+    Raises:
+        KeyError: if ``issue_record["sYobineTaniNumber"]`` is missing
+            from ``yobine_table``. Callers must treat this as a master
+            integrity error (CLMYobine and CLMIssueSizyouMstKabu out of
+            sync) rather than silently fall through.
+    """
+    yobine_code = str(issue_record["sYobineTaniNumber"])
+    bands = yobine_table[yobine_code]  # KeyError on miss — by contract
+    if snapshot_price is None:
+        # First band carries the smallest kizun_price ⇒ the finest tick.
+        return bands[0].yobine_tanka
+    return tick_size_for_price(snapshot_price, yobine_code, yobine_table)
+
+
 # ASCII alnum, 1..28 chars. Tighter than `Ticker::new` (which only forbids
 # `|` and non-ASCII), because Phase 1 stock master never legitimately uses
 # punctuation. Phase 2 (futures/options) will need to relax this — see
