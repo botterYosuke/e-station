@@ -15,6 +15,7 @@
 | [invariant-tests.md](./invariant-tests.md) | T35- prefix の不変条件テスト一覧（Hello/Ready/SetVenueCredentials/VenueReady シーケンス、resubscribe 単一性ほか） |
 | [review-fixes-2026-04-25.md](./review-fixes-2026-04-25.md) | 2026-04-25 レビュー指摘の対応記録（H5 path fidelity / H6 keyring slot ほか） |
 | [review-fixes-2026-04-26.md](./review-fixes-2026-04-26.md) | 2026-04-26 PlanLoop ラウンド 3 修正記録（行番号 → path::symbol 機械置換、用語使い分け、T35- prefix 必須化、アンカー死活修正） |
+| [review-fixes-tachibana-docs-2026-04-26.md](./review-fixes-tachibana-docs-2026-04-26.md) | 2026-04-26 新セッション PlanLoop 修正記録（tachibana_ws.py 実装済み反映・インクリメンタル検索追記・invariant-tests エントリ追加・impl-plan B2/B5 整理ほか） |
 | [open-questions.md](./open-questions.md) | 未確定事項と決定期限 |
 
 ## 一次資料

@@ -188,6 +188,10 @@ pub enum EngineEvent {
         //      化する。これは MEDIUM-C6 規約の「Python 側 SecretStr
         //      は Drop ゼロ化を保証しない」例外条項として明文化
         //      （下記 §C6 参照）。
+        // ── None フィールドのセマンティクス ──
+        // None の場合、Rust は keyring の該当フィールドを変更しない（上書きしない）。
+        // Some(x) のときのみ keyring を更新する。
+        // つまり None は「このフィールドは今回のリフレッシュ対象外」を意味する。
         user_id: Option<String>,
         password: Option<String>,
         is_demo: Option<bool>,
@@ -259,7 +263,7 @@ python/engine/
 │   ├── tachibana_url.py      # build_request_url（REQUEST 用 JSON クエリ）/ build_event_url（EVENT 用 key=value 形式）/ func_replace_urlecnode（SKILL.md R2/R9）
 │   ├── tachibana_codec.py    # Shift-JIS デコード + parse_event_frame + deserialize_tachibana_list（空配列="" 正規化、SKILL.md R8）
 │   ├── tachibana_master.py   # CLMEventDownload ストリームパース
-│   └── tachibana_ws.py       # EVENT WebSocket クライアント（FD frame 中心、KP frame で死活監視）
+│   └── tachibana_ws.py       # EVENT WebSocket クライアント（FD frame 中心、KP frame で死活監視）— 実装済み（T5 で tachibana.py に配線）
 python/tests/                   # ← 既存テストと同じディレクトリに集約（F5）
 ├── test_tachibana_url.py        # REQUEST と EVENT で URL 形式が違うこと（R2）も検証
 ├── test_tachibana_codec.py      # Shift-JIS 往復 + 空配列 "" → [] 正規化（R8）
@@ -284,6 +288,9 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 | [src/main.rs](../../../src/main.rs) | 起動時に keyring から立花 creds を復元し `SetVenueCredentials` 投入 |
 | Rust UI（`src/screen/`） | **ログイン画面コードを追加しない**。Python ヘルパー spawn 中は「ログインダイアログを別ウィンドウで表示中」のステータスバナーだけ出す（汎用 string、立花知識なし） |
 | `src/screen/dashboard/tickers_table.rs` ほか UI | `VenueReady` 前の metadata fetch を抑止し、`MarketKind::Stock` に応じた market filter / indicator / timeframe / 表示文言を調整。**抑止は `src/venue_state.rs::VenueState` FSM が前提**（`Trigger::{Auto,Manual}` で auto-fire と手動再ログインを区別、`engine_status_stream` は `tokio::select!` 1 本に singleton 化）。pin: T35-U4-VenueReadyGate / T35-H9-SingleRecoveryPath（リグレッションは `tests/engine_status_subscription_is_singleton.rs` で固定） |
+| `engine-client/src/tachibana_meta.rs`（新設） | `TickerDisplayMeta` 型・`parse_tachibana_ticker_dict`・`matches_tachibana_filter`（HIGH-U-9 / T4-B5 着地済み） |
+| `engine-client/src/backend.rs`（既存） | `ticker_meta: Arc<Mutex<TickerMetaMap>>` フィールド・`ticker_meta_handle()`・`reset_ticker_meta()`（HIGH-U-9 着地済み） |
+| `src/screen/dashboard/tickers_table.rs`（既存） | `filtered_rows` への `matches_tachibana_filter` 組込み（T4-B5 着地済み） |
 | [docs/plan/✅python-data-engine/](../✅python-data-engine/) `schemas/` | `commands.json` / `events.json` に新コマンド・イベントを記載、`CHANGELOG.md` 更新（※親計画ディレクトリ内のスキーマ。本計画 T0 で同期） |
 
 ## 6. 失敗モードと UI 表現
@@ -463,7 +470,15 @@ pub enum EngineEvent {
     /// 既存（§2）— ログイン成功時に発火
     VenueReady { venue: String, request_id: Option<String> },
     VenueError { venue: String, request_id: Option<String>, code: String, message: String },
-    VenueCredentialsRefreshed { venue: String, session: TachibanaSessionWire },
+    VenueCredentialsRefreshed {
+        venue: String,
+        session: TachibanaSessionWire,  // typed、Debug は手実装でマスク
+        // None の場合、Rust は keyring の該当フィールドを変更しない（上書きしない）。
+        // Some(x) のときのみ keyring を更新する。詳細は §2.3 参照。
+        user_id: Option<String>,
+        password: Option<String>,
+        is_demo: Option<bool>,
+    },
 }
 
 pub enum Command {

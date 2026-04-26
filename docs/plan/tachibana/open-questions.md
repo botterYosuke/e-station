@@ -10,7 +10,7 @@
 | Q6 | 現物 / 信用の UI 区別 | しない（同一 ticker） / pane 単位で切替 | Phase 2 | Phase 1 はリードオンリーなので「区別不要」。発注時のみ重要 |
 | Q7 | release ビルドでの本番接続許可方法 | `TACHIBANA_ALLOW_PROD=1` env / 設定ファイル / 完全禁止 | T7 | **決定（M8 改訂）**: `TACHIBANA_ALLOW_PROD=1` env を立てた起動セッションに限り、**Python tkinter ログインダイアログ内にデモ/本番ラジオを描画**して都度選択させる。env 無し → デモ固定（ラジオ非表示）。本番選択時は二段警告 modal で確認。メイン画面・設定からの常時 UI 露出は引き続きしない |
 | Q8 | 立花レート制限値 | サンプル準拠（3 秒リトライ）/ 公式値（不明） | T2 | サンプル `e_api_get_master_tel.py` の `time.sleep(3)` を上限の代理として採用、公式値が判明したら更新 |
-| Q9 | 銘柄セレクタの絞り込み UX | 全件表示 / 市場別 / 上場区分別 | T4 | 数千銘柄を一気に出すと UI 重い。インクリメンタル検索（コード or 名前先頭一致）を入れる |
+| Q9 | 銘柄セレクタの絞り込み UX | 全件表示 / 市場別 / 上場区分別 | T4 | 数千銘柄を一気に出すと UI 重い。インクリメンタル検索（コード or 名前先頭一致）を入れる。**決定: コード前方一致 + 英語名（`display_symbol`）前方一致 + 日本語名（`display_name_ja`）前方一致の 3 経路（`matches_tachibana_filter`、T4-B5 着地済み）** |
 | Q10 | JST 表示と UTC ms 内部表現の境界 | チャート軸ラベルだけ JST / 全データ JST 化 | T4 | 既存暗号資産は UTC。venue ごとに表示タイムゾーンを切替できる仕組みが必要かは要 UX 議論 |
 | Q11 | 第二暗証番号は Phase 1 で受け取るか | (a) keyring + Python メモリ保持 / (b) スキーマだけ切って収集も保持もしない / (c) Phase 2 で追加 | T3 | **決定: (b)**（F-H5、レビュー指摘で更新）。`Option<SecretString>` を DTO に切るが Phase 1 では Rust UI が値を収集せず常に `None` を送る。Python は値を保持しない。発注しないものを保持して攻撃面（コアダンプ・スワップ・GC 残存）を増やさないため。Phase 2 で値の収集・保持を有効化（スキーマ破壊変更なし） |
 | Q12 | 当日統計の表記 | "Daily Change" 固定 / venue 別ラベル | T4 | UI 文言の都合。i18n の問題でもあるので軽め |
@@ -23,7 +23,7 @@
 | Q19 | trade `side` 推定アルゴリズム | (a) 直前 bid/ask との比較のみ（quote rule） / (b) Lee-Ready (quote rule + tick rule fallback) / (c) UI で常に neutral 色表示 | T5 | チャート上で buy/sell カラーを正しく出すため。**決定: (b)** quote rule を主とし、中値ぴったりは直前 trade との tick rule にフォールバック（data-mapping.md §3 に明記） |
 | Q20 | Shift-JIS デコード時の不正バイト | `errors="ignore"`（脱落） / `errors="replace"`（`?` 表示） / `errors="strict"`（例外） | T1 | 銘柄名の一部脱落は ticker selector 検索に支障。**推奨: `errors="replace"`** で `?` を出して表示の存在を残す。エラーメッセージ系は `replace` のままで可 |
 | <a id="L25"></a><a id="Q21"></a>Q21 | demo 環境の運用時間と CI スケジュール | 平日 8:00–18:00 JST 想定 / 公式値（不明） | T2 | demo にも夜間閉局あり。CI demo ジョブが閉局時に走ると毎回 fail。T2 でログイン応答などから運用時間を実機確認し、決まり次第 spec.md §4 / implementation-plan T7 を更新（詳細は下記 [## Q21 セクション](#q21--demo-環境の運用時間) 参照） |
-| Q22 | FD trade side 推定の quote 基準 | 当該 frame の bid/ask / 前 frame の bid/ask | T5 | FD は DPP と GAK/GBK が同一 frame で同時更新される。**決定: 前 frame bid/ask を保持して比較**（data-mapping §3、F3） |
+| Q22 | FD trade side 推定の quote 基準 | 当該 frame の bid/ask / 前 frame の bid/ask | T5 | FD は DPP と GAP/GBP が同一 frame で同時更新される。**決定: 前 frame bid/ask を保持して比較**（data-mapping §3、F3） |
 | Q23 | FD 初回 frame の扱い | trade 発火する / 発火しない | T5 | 初回は `prev_dv=None` / `prev_quote=None` のため qty も side も判定不能。**決定: 初回 frame は trade 発火せず、2 件目以降で合成開始**（F4） |
 | Q24 | `sequence_id` リセット時の整合性 | 厳格連続 / `stream_session_id` 更新時はリセット許可 | T5 | Python 再起動で local counter が 0 に戻る。**決定: `stream_session_id` 切替時は消費側 gap-detector がリセット**（F7） |
 | Q25 | `VenueReady` の完了境界 | session 検証完了のみ / マスタ DL 完了も含む | T0 | **決定: session 検証のみ**。マスタ DL は `ListTickers` 応答で判定（F12） |

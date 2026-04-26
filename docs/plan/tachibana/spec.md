@@ -15,11 +15,12 @@
 - **Python 実装** `python/engine/exchanges/tachibana.py`（`ExchangeWorker` 実装、デモ環境のみ）
   - 認証フロー（`CLMAuthLoginRequest` → 5 つの仮想 URL を取得 → `TachibanaSession` 保持）
   - ティッカー一覧（`CLMEventDownload` の `CLMIssueMstKabu` から銘柄マスタを取り出す）
+  - 銘柄コード・英語名（`display_symbol`）・日本語名（`display_name_ja`）の前方一致インクリメンタル検索（`matches_tachibana_filter`、T4-B5 着地済み）
   - ティッカーメタデータ（呼値単位・売買単位・銘柄名）— **本線は銘柄マスタ（`CLMIssueMstKabu` + `CLMIssueSizyouMstKabu` + `CLMYobine`）から合成**し、マスタ未掲載や追加情報が必要な場合のみ `CLMMfdsGetIssueDetail` をフォールバックで叩く（F9）。呼値は **per-stock 解決**（`CLMIssueSizyouMstKabu.sYobineTaniNumber` で `CLMYobine` 行を引いて band を選ぶ）であり、全銘柄共通の単一価格帯テーブルは存在しない（data-mapping.md §5）
   - 日足 kline 履歴（`CLMMfdsGetMarketPriceHistory`）
   - 24h ticker stats 相当（`CLMMfdsGetMarketPrice` のスナップショットから派生）
   - **取引（FD frame）ストリーム**: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）。**T0.1 FD 情報コード明示ゲート（implementation-plan.md L21）の通過が前提**。ゲート未通過のまま B 系縮退を採るなら本項目（trade ストリーム）と次項目（板スナップショット）は MVP から外す
-  - **板スナップショット**: **FD frame 駆動が正**（FD frame ごとに 5 本気配を `DepthSnapshot` 化して配信、data-mapping §4）。`CLMMfdsGetMarketPrice` は (a) ザラ場前後の初回 snapshot、(b) FD WS 12 秒無通信の再接続中フォールバック、(c) `depth_unavailable` セーフティ発動時の polling fallback の **3 ケースに限定**（§3.3 と整合）。**runtime の定期 polling は実装しない**。`DepthDiff` / L2 はサポートしない
+  - **板スナップショット**: **FD frame 駆動が正**（FD frame ごとに 10 本気配を `DepthSnapshot` 化して配信、data-mapping §4）。`CLMMfdsGetMarketPrice` は (a) ザラ場前後の初回 snapshot、(b) FD WS 12 秒無通信の再接続中フォールバック、(c) `depth_unavailable` セーフティ発動時の polling fallback の **3 ケースに限定**（§3.3 と整合）。**runtime の定期 polling は実装しない**。`DepthDiff` / L2 はサポートしない
 - **Rust 側の最小変更**:
   - `Venue` / `Exchange` / `MarketKind` 拡張
   - `TachibanaCredentials` 型と keyring 永続化（[data/src/config/](../../../data/src/config/) 配下、`tachibana.rs` 新設）
@@ -38,7 +39,7 @@
 - **発注・訂正・取消**（`CLMKabuNewOrder` / `CLMKabuCorrectOrder` / `CLMKabuCancelOrder*`）
   - 第二暗証番号の取り扱い、注文台帳 UI、約定通知 (`p_evt_cmd=EC`) の表示など、**ビュアーアプリの非ゴール**（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §8 と整合）
 - **本番環境（実弾）接続の常時 UI 露出** — `BASE_URL_PROD` の追加自体は許容するが、**通常起動時の UI（メイン画面・設定）には露出させない**。**`TACHIBANA_ALLOW_PROD=1` env が立っているときに限り、Python tkinter ログインダイアログにデモ/本番ラジオを描画**して都度選択させる（M8、architecture.md §7.4）。env が無いときはデモ固定。デフォルトは demo 強制
-- **板差分（Depth Diff）/ L2 リアルタイム板** — 立花 FD frame は「現値・気配 5 本」程度で、L2 差分配信ではない。Phase 1 では **snapshot のみ** を一定間隔で配信し、`DepthDiff` イベントは生成しない
+- **板差分（Depth Diff）/ L2 リアルタイム板** — 立花 FD frame は「現値・気配 10 本」程度で、L2 差分配信ではない。Phase 1 では **snapshot のみ** を一定間隔で配信し、`DepthDiff` イベントは生成しない
 - **OI（建玉残）チャート** — 株式に概念がない。`fetch_open_interest` は `NotImplementedError` を返す
 - **ヒストリカル trade（tick by tick 過去履歴）** — 立花は当日 FD frame の累積のみ、過去日のティック取得 API なし。`fetch_trades` は `NotImplementedError`
 - **分足・秒足 kline** — 立花の REST 履歴は日足のみ（`CLMMfdsGetMarketPriceHistory`）。分足は FD frame からアプリ側で集計可能だが Phase 1 では未対応
@@ -103,12 +104,12 @@
 
 ## 4. 受け入れ条件（Phase 1 完了の定義）
 
-> **二段階受け入れ（FD ブロッカー条件分岐）**: FD 情報コード（`DV` / `GAK*` / `GBK*` / `DPP_TIME` / `DDT` 等）が T1 着手前に [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー扱いと対応方針b3-再オープン) のいずれかで実体解決した場合は **A 系（フル受け入れ）** を満たす。3 案で「Phase 縮退」を選んだ場合のみ **B 系（縮退受け入れ）** に切り替え、本節を改訂してから Phase 1 完了とする。data-mapping §3 注記、implementation-plan T0.1 ゲート、リスク表「FD 情報コード未確定」と整合。
+> **二段階受け入れ（FD ブロッカー条件分岐）**: FD 情報コード（`DV` / `GAP*` / `GBP*` / `GAV*` / `GBV*` / `DPP:T` / `p_date` 等）が T1 着手前に [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー解消記録b3-クローズ) のいずれかで実体解決した場合は **A 系（フル受け入れ）** を満たす。3 案で「Phase 縮退」を選んだ場合のみ **B 系（縮退受け入れ）** に切り替え、本節を改訂してから Phase 1 完了とする。data-mapping §3 注記、implementation-plan T0.1 ゲート、リスク表「FD 情報コード未確定」と整合。
 
 ### A 系（フル受け入れ、FD ブロッカー解決済み時）
 
 1. デモ環境で `DEV_TACHIBANA_*` 設定 → debug ビルド起動 → keyring 保存 → 再起動で keyring 復元、までが手動で確認できる（demo 環境にも夜間閉局があるため、CI demo ジョブは閉局帯（demo の運用時間 = 平日 8:00–18:00 JST 想定、確定値は T2 で実機確認）を避けてスケジュールする）
-2. 任意の主要銘柄（例 `7203` トヨタ）を ticker selector から選び、日足チャート + 直近 trade（FD 由来）+ 5 本気配 snapshot が表示される
+2. 任意の主要銘柄（例 `7203` トヨタ）を ticker selector から選び、日足チャート + 直近 trade（FD 由来）+ 10 本気配 snapshot が表示される
 3. ザラ場時間中、FD frame ストリームが `Connected` → trade イベントを継続配信できる（10 分以上連続稼働、drop なし）
 4. 閉場時間に subscribe しても `Disconnected` → 「市場時間外」状態で UI が破綻しない
 5. Python が異常終了しても、Rust が指数バックオフで再起動しセッションを再注入、UI から見て自動復旧する
@@ -118,6 +119,6 @@
 
 ### B 系（縮退受け入れ、FD ブロッカー未解決時のみ適用）
 
-A 系の項目 2 / 3 を「日足 chart + ticker stats のみで表示が成立すること」に置換し、trade ストリーム / 5 本気配 / 10 分連続稼働は **Phase 1 完了条件から外す**（Phase 2 で FD コード確定後に復活）。項目 1 / 4 / 5 / 6 / 7 / 8 はそのまま適用。本節を「B 系適用」と書き換える PR が implementation-plan T0.1 ブロッカー解決 PR と紐付き必須。
+A 系の項目 2 / 3 を「日足 chart + ticker stats のみで表示が成立すること」に置換し、trade ストリーム / 10 本気配 / 10 分連続稼働は **Phase 1 完了条件から外す**（Phase 2 で FD コード確定後に復活）。項目 1 / 4 / 5 / 6 / 7 / 8 はそのまま適用。本節を「B 系適用」と書き換える PR が implementation-plan T0.1 ブロッカー解決 PR と紐付き必須。
 
 > **T35-U5 E2E 注記**: U5 E2E (`tests/e2e/tachibana_relogin_after_cancel.sh`) は `src/replay_api.rs` 着地まで CI で `exit 77` skip 扱いとし、A 系受け入れ判定からは除外する（HTTP API 着地後に完走、T3.5 Step F 整合）。

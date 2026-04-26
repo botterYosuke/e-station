@@ -54,3 +54,39 @@ fn test_tachibana_ticker_info_carries_yobine_code() {
         parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
     assert_eq!(meta.yobine_code(), Some("103"));
 }
+
+#[test]
+fn test_parse_tachibana_ticker_uses_min_ticksize_from_dict() {
+    // B5: when Python sends `min_ticksize` in the IPC dict, Rust must use
+    // it instead of TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32 (1.0).
+    // Use 0.1 (a valid Power10 value: 10^-1) to distinguish from the 1.0 placeholder.
+    let dict = json!({
+        "symbol": "7203",
+        "lot_size": 100,
+        "yobine_code": "103",
+        "min_ticksize": 0.1_f64,
+    });
+    let (_ticker, info, _meta) =
+        parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
+    assert!(
+        (info.min_ticksize.as_f32() - 0.1).abs() < 1e-6,
+        "min_ticksize should be 0.1 from dict, got {}",
+        info.min_ticksize.as_f32()
+    );
+}
+
+#[test]
+fn test_parse_tachibana_ticker_falls_back_to_placeholder_when_min_ticksize_absent() {
+    // B5: when `min_ticksize` is absent from the dict, the placeholder is used.
+    use flowsurface_engine_client::tachibana_meta::TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32;
+    let dict = json!({
+        "symbol": "7203",
+        "lot_size": 100,
+    });
+    let (_ticker, info, _meta) =
+        parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
+    assert!(
+        (info.min_ticksize.as_f32() - TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32).abs() < 1e-6,
+        "absent min_ticksize should fall back to placeholder"
+    );
+}

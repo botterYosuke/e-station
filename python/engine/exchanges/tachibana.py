@@ -60,11 +60,15 @@ from .tachibana_helpers import (
 from .tachibana_master import (
     YobineBand,
     decode_clm_yobine_record,
+    resolve_min_ticksize_for_issue,
 )
 from .tachibana_url import (
     PriceUrl,
     build_request_url,
+    func_replace_urlecnode,
 )
+from . import tachibana_ws as _tachibana_ws
+from .tachibana_ws import FdFrameProcessor, TachibanaEventWs
 
 log = logging.getLogger(__name__)
 
@@ -384,10 +388,16 @@ class TachibanaWorker(ExchangeWorker):
                 "yobine_code": yobine_code,
                 "sizyou_c": str(sizyou.get("sSizyouC", "")),
             }
-            # B2 design decision: omit min_ticksize when no snapshot price
-            # is available; Rust resolves it from yobine_code at TickerInfo
-            # construction time (B3 HIGH-U-9). If a fallback floor price
-            # ever becomes available here we can populate the key directly.
+            # B5: resolve min_ticksize from CLMYobine table using the
+            # conservative no-snapshot-price fallback (finest tick band).
+            # KeyError means CLMYobine data is missing for this yobine_code;
+            # Rust will then fall back to TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32.
+            if self._yobine_table:
+                try:
+                    tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, None)
+                    entry["min_ticksize"] = float(tick)
+                except (KeyError, ValueError):
+                    pass
             out.append(entry)
         return out
 
@@ -486,6 +496,23 @@ class TachibanaWorker(ExchangeWorker):
                 return sc or default
         return default
 
+    def _build_ws_url(self, ticker: str) -> str:
+        """Build the EVENT WebSocket subscription URL for a ticker."""
+        assert self._session is not None
+        sizyou_c = self._lookup_sizyou_c(ticker)
+        ws_base = self._session.url_event_ws.rstrip("?&")
+        encode = func_replace_urlecnode
+        params = "&".join([
+            f"p_rid={encode('22')}",
+            f"p_board_no={encode('1000')}",
+            f"p_gyou_no={encode('1')}",
+            f"p_mkt_code={encode(sizyou_c)}",
+            f"p_eno={encode('0')}",
+            f"p_evt_cmd={encode('ST,KP,FD')}",
+            f"p_issue_code={encode(ticker)}",
+        ])
+        return f"{ws_base}?{params}"
+
     # ------------------------------------------------------------------
     # fetch_ticker_stats (CLMMfdsGetMarketPrice)
     # ------------------------------------------------------------------
@@ -556,7 +583,50 @@ class TachibanaWorker(ExchangeWorker):
         *,
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
-        raise NotImplementedError("tachibana stream_trades is implemented in T5")
+        if not _tachibana_ws.is_market_open(datetime.now(timezone.utc)):
+            outbox.append({
+                "event": "Disconnected",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "stream": "trade",
+                "market": market,
+                "reason": "market_closed",
+            })
+            return
+
+        session = self._session
+        if session is None:
+            return
+
+        ws_url = self._build_ws_url(ticker)
+        processor = FdFrameProcessor(row="1")
+        conn_counter = 0
+
+        while not stop_event.is_set():
+            conn_counter += 1
+            ssid = f"{stream_session_id}:{conn_counter}"
+            if on_ssid is not None:
+                on_ssid(ssid)
+            processor.reset()
+
+            batch: list[dict] = []
+
+            async def _cb(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
+                if frame_type == "FD":
+                    trade, _ = processor.process(fields, recv_ts_ms)
+                    if trade:
+                        batch.append(trade)
+                        outbox.append({
+                            "event": "Trades",
+                            "venue": "tachibana",
+                            "ticker": ticker,
+                            "market": market,
+                            "stream_session_id": ssid,
+                            "trades": [trade],
+                        })
+
+            ws_client = TachibanaEventWs(ws_url, stop_event, ticker=ticker)
+            await ws_client.run(_cb)
 
     async def stream_depth(
         self,
@@ -568,7 +638,50 @@ class TachibanaWorker(ExchangeWorker):
         *,
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
-        raise NotImplementedError("tachibana stream_depth is implemented in T5")
+        if not _tachibana_ws.is_market_open(datetime.now(timezone.utc)):
+            outbox.append({
+                "event": "Disconnected",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "stream": "depth",
+                "market": market,
+                "reason": "market_closed",
+            })
+            return
+
+        session = self._session
+        if session is None:
+            return
+
+        ws_url = self._build_ws_url(ticker)
+        processor = FdFrameProcessor(row="1")
+        conn_counter = 0
+
+        while not stop_event.is_set():
+            conn_counter += 1
+            ssid = f"{stream_session_id}:{conn_counter}"
+            if on_ssid is not None:
+                on_ssid(ssid)
+            processor.reset()
+
+            async def _cb_depth(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
+                if frame_type == "FD":
+                    _, depth = processor.process(fields, recv_ts_ms)
+                    if depth:
+                        outbox.append({
+                            "event": "DepthSnapshot",
+                            "venue": "tachibana",
+                            "ticker": ticker,
+                            "market": market,
+                            "stream_session_id": ssid,
+                            "bids": depth["bids"],
+                            "asks": depth["asks"],
+                            "sequence_id": depth["sequence_id"],
+                            "recv_ts_ms": depth["recv_ts_ms"],
+                        })
+
+            ws_client = TachibanaEventWs(ws_url, stop_event, ticker=ticker)
+            await ws_client.run(_cb_depth)
 
     async def stream_kline(
         self,

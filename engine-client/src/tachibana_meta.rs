@@ -131,13 +131,16 @@ pub fn parse_tachibana_ticker_dict(
         .unwrap_or(100);
     let min_qty_f32 = lot_size as f32;
 
-    // Phase 1: see TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32 doc above.
-    let info = TickerInfo::new_stock(
-        ticker,
-        TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32,
-        min_qty_f32,
-        lot_size,
-    );
+    // B5: use Python-resolved min_ticksize when present; fall back to
+    // TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32 when the CLMYobine table was
+    // unavailable on the Python side (e.g. first startup before DL).
+    let min_ticksize = t
+        .get("min_ticksize")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32);
+    let info = TickerInfo::new_stock(ticker, min_ticksize, min_qty_f32, lot_size);
 
     let meta = TickerDisplayMeta {
         display_name_ja: t

@@ -149,3 +149,45 @@ async def test_unimplemented_streams_raise_not_implemented(tmp_path: Path):
         await worker.fetch_depth_snapshot("7203", "stock")
     with pytest.raises(NotImplementedError):
         await worker.fetch_open_interest("7203", "stock", "1d")
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_includes_min_ticksize_when_yobine_table_present(tmp_path: Path):
+    """B5: min_ticksize must be populated from CLMYobine when yobine_table is available."""
+    from decimal import Decimal
+
+    from engine.exchanges.tachibana_master import YobineBand
+
+    worker = TachibanaWorker(cache_dir=tmp_path, is_demo=True)
+    # Pre-populate master state directly so no network call occurs.
+    _make_master(worker)
+    # Override the empty yobine_table installed by _make_master with a real entry.
+    worker._yobine_table = {
+        "1": [
+            YobineBand(
+                kizun_price=Decimal("999999999"),
+                yobine_tanka=Decimal("1"),
+                decimals=0,
+            ),
+        ]
+    }
+    from engine.exchanges.tachibana import current_jst_yyyymmdd
+    worker._master_loaded_jst_date = current_jst_yyyymmdd()
+    worker._master_loaded.set()
+    tickers = await worker.list_tickers("stock")
+    by_symbol = {t["symbol"]: t for t in tickers}
+    assert "min_ticksize" in by_symbol["7203"], "min_ticksize must appear when yobine_table is populated"
+    assert by_symbol["7203"]["min_ticksize"] > 0
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_omits_min_ticksize_when_yobine_table_empty(tmp_path: Path):
+    """B5: min_ticksize must be absent (not crash) when yobine_table has no matching code."""
+    worker = _stubbed(tmp_path)
+    # empty yobine_table — no codes available
+    worker._yobine_table = {}
+    tickers = await worker.list_tickers("stock")
+    for t in tickers:
+        # Key may be absent but must never be 0.0 or negative
+        if "min_ticksize" in t:
+            assert t["min_ticksize"] > 0
