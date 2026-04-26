@@ -40,6 +40,8 @@ nautilus_trader は LGPL-3.0。
 
 **アクション**: N-pre Tpre.3 で配布形態（venv 配布 / PyInstaller / インストーラ同梱）を確定し、spec.md §5 を書き換える。PyInstaller 採用時は NOTICE ファイルと差し替え可能性の実装方針を同タスクで決める。
 
+**Exit 条件**: venv 配布を選択した場合は LGPL 追加対応不要 → Q5 即 Resolved。PyInstaller 採用を選択した場合のみ NOTICE ファイルと差し替え可能性の実装方針を同タスクで決めること。
+
 ---
 
 ### Q6. 既存暗号資産 venue の発注経路（Rust 実装）はあるのか ★N-pre ブロッカー

@@ -128,7 +128,7 @@ Rust src/api/order_api.rs
    │ engine_client.send(Command::ForgetSecondPassword)
    ▼
 Python python/engine/server.py
-   │ tachibana_auth.TachibanaSessionHolder.second_password = None
+   │ tachibana_auth.TachibanaSessionHolder（T0.4 新設）.second_password = None
    ▼
 Rust 受信
    │ HTTP 200 { "status": "OK" }
@@ -141,7 +141,7 @@ iced modal（second_password.rs）
    │ ユーザー入力 → Command::SetSecondPassword { request_id, value }
    ▼
 Python python/engine/server.py
-   │ tachibana_auth.TachibanaSessionHolder.second_password = SecretStr(value)
+   │ tachibana_auth.TachibanaSessionHolder（T0.4 新設）.second_password = SecretStr(value)
    │ 元の発注リクエスト（request_id で特定）を再開
    ▼
 Rust 受信
@@ -446,7 +446,7 @@ flowsurface との差分:
 - プロセス終了時に消える（永続化なし）
 - Python プロセスのコアダンプ・スワップ対策は `pydantic.SecretStr` に依存（best-effort）
 
-- **C-R5-H2 `SECOND_PASSWORD_INVALID`（立花 `p_errno=4`）受領時の挙動**: (1) Python メモリの `second_password` を即クリア（`TachibanaSessionHolder.second_password = None`）、(2) 連続 3 回（counter は holder 内部）で 30 分間 modal 表示を抑止（カウンタ・抑止期間ともに `[tachibana.order]` config 化、デフォルト 3 / 1800 秒）、(3) 抑止期間中の発注は HTTP 423 Locked + `reason_code="SECOND_PASSWORD_LOCKED"` で reject。立花側のアカウントロックを未然に防ぐ。**spec.md §5.2 へ反映必要**（`SECOND_PASSWORD_LOCKED | 423` を追加。spec 修正は別エージェントが担当）。
+- **C-R5-H2 `SECOND_PASSWORD_INVALID`（立花 `p_errno=4`）受領時の挙動**: (1) Python メモリの `second_password` を即クリア（`TachibanaSessionHolder.second_password = None`）、(2) 連続 3 回（counter は holder 内部）で 30 分間 modal 表示を抑止（カウンタ・抑止期間ともに `[tachibana.order]` config 化、デフォルト 3 / 1800 秒）、(3) 抑止期間中の発注は HTTP 423 Locked + `reason_code="SECOND_PASSWORD_LOCKED"` で reject。立花側のアカウントロックを未然に防ぐ。
 
 ### 5.4 forget API
 
@@ -500,6 +500,8 @@ env:
 ## 8. flowsurface との対応表
 
 実装時に「ここは flowsurface のどこを写すか」を即引けるよう一覧化:
+
+> ※ `TachibanaWire*` 型は T0.4 実装対象（未実装）。
 
 | 本計画の Python シンボル | flowsurface Rust シンボル | 備考 |
 |---|---|---|

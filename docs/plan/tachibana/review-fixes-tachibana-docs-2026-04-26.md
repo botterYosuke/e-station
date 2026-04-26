@@ -103,7 +103,43 @@
 
 ---
 
-## 完了サマリ
+## 新セッション・ラウンド 2 収束確認（2026-04-26）
+
+1件 MEDIUM 残存 → ラウンド3で即時修正。
+
+## 新セッション・ラウンド 3（2026-04-26）
+
+### Finding ID → 修正概要マッピング
+
+| Finding ID | 観点 | 対象ファイル | 修正概要 |
+|---|---|---|---|
+| MEDIUM-R3-1 | A+B | invariant-tests.md L36 + L47 | F-M6a および SKILL R2 行の一次資料節を `SKILL.md R2` に、テストパスを `test_tachibana_auth.py::test_login_rejects_non_wss_event_url` に修正 |
+
+---
+
+## 完了サマリ（新セッション）
+
+```
+=== 完了 ===
+全ラウンド数: 3（ラウンド1: 修正、ラウンド2: 収束確認、ラウンド3: 残存1件修正）
+修正した Finding 総数: HIGH 2 / MEDIUM 8 / LOW 4
+残存 LOW（対応不要）: 0件
+
+主要な反映成果:
+- tachibana_ws.py: T5 着地済みとして architecture.md §4 を更新
+- architecture.md §5: tachibana_meta.rs / backend.rs / tickers_table.rs の3行追加
+- spec.md §2.1: インクリメンタル検索（matches_tachibana_filter、T4-B5）を追記
+- invariant-tests.md: HIGH-C3-1/HIGH-D5/MEDIUM-D6/HIGH-D2-1-WsTimeout エントリ追加（4件）
+- invariant-tests.md: F-M5a/F-Banner1/SKILL R8/F-M6a/SKILL R2 の TBD・誤参照解消
+- implementation-plan.md: B2/B5 完了記録整理、holiday_fallback テスト関数名修正、T7 CI 組込タスク追記
+- open-questions.md: Q9 決定済みマーク追記
+- README.md: implementation-plan-T3.5.md の説明追加
+ログ: docs/plan/tachibana/review-fixes-tachibana-docs-2026-04-26.md
+```
+
+---
+
+## 完了サマリ（初回セッション）
 
 ```
 === 完了 ===

@@ -7,7 +7,7 @@
 | **N-pre** | feasibility / 配布形態 / pin 戦略 / 既存 Rust 発注経路の有無を確定（実装ゼロ）| python-data-engine 完了済 |
 | N0 | nautilus 同梱・サンプル戦略 headless で PnL が出る | N-pre |
 | N1 | `/api/replay/*` を nautilus で実装、Gymnasium env が回る、REPLAY 仮想注文を SimulatedExchange に流す、`POST /api/agent/narrative` を新設 | N0、order/ Phase O0 完了 |
-| N2 | 立花 `LiveExecutionClient` adapter（デモ）で実弾相当の発注往復が通る | N1、tachibana Phase 1 完了、order/ Phase O0〜O2 完了 |
+| N2 | 立花 `LiveExecutionClient` adapter（デモ）で実弾相当の発注往復が通る | N1、tachibana Phase 1 完了（T7 受け入れ緑）、order/ Phase O0〜O2 完了。**現状: T4 まで完了・T5〜T7 未着手** |
 | N3 | 暗号資産 venue を nautilus 側に移植 or 新規実装、Rust 発注コード撤去 | N2 |
 
 **Phase N1 の依存補正（C2）**: 旧版で「Phase 2（観測 API）完了済」を依存に挙げていたが、その「Phase 2」は本計画 N1 で置換・破棄する対象（[architecture.md §6](./architecture.md#6-既存計画との衝突点と整理)）。本計画では N1 の依存を「N0 + order/ Phase O0」に書き換え、自作 Virtual Exchange Engine の完成を依存条件にしない。
@@ -80,7 +80,7 @@
 ### N0.5 headless スモーク
 - `tests/python/test_nautilus_smoke.py`
   - `NautilusRunner.start_backtest(...)` を 1 回呼び、`Event::EngineStopped` が返る
-- 既存 E2E に `s60_nautilus_backtest_smoke.py` を追加（`IS_HEADLESS=true` 必須）
+- 既存 E2E に `s60_nautilus_backtest_smoke.py` を追加（`IS_HEADLESS=true` 必須）。smoke.sh 末尾から `uv run python tests/e2e/s60_nautilus_backtest_smoke.py` で呼び出す形式で既存 smoke.sh に追記する
 
 ### N0.6 決定論性テスト（M6 / spec §3.1）
 - [ ] `tests/python/test_nautilus_determinism.py`
@@ -90,7 +90,7 @@
   - `unittest.mock.patch("time.time")` / `patch("time.monotonic")` / `patch("datetime.datetime")` を固定値に差し替えても backtest 結果が変わらないことを検証
   - nautilus 内部で wall clock 参照箇所が見つかった場合は spike として記録し本テストで把握
 
-**Exit 条件**: 上記スモーク + 決定論性テストが CI で緑
+**Exit 条件**: 上記スモーク + 決定論性テストが `python-test.yml`（新設）の `uv run pytest tests/python/test_nautilus_determinism.py tests/python/test_nautilus_smoke.py` ジョブで緑になること
 
 ---
 
@@ -100,7 +100,7 @@
 
 ### N1.1 IPC schema 1.4
 - [ ] [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に `StartEngine` / `StopEngine` / `EngineStarted` / `EngineStopped` / `PositionOpened` / `PositionClosed`（venue / instrument_id / 文字列精度）を追加（[architecture.md §3](./architecture.md#3-新規-ipc-メッセージ)）
-- [ ] **`Order*` 系 / `SubmitOrder` 系は order/ Phase O-pre / O0 ですでに schema 1.3 に入っているはず**。本タスクはそれを前提に重複追加しない（C4 / order の整合）
+- [ ] **`Order*` 系 / `SubmitOrder` 系は order/ Phase O-pre PR のマージを確認してから着手すること。schema 1.3 が dto.rs に存在しない場合は N1.1 着手前ブロック**（C4 / order の整合）
 - [ ] `schema_minor` を `4` に上げる（C1 修正、`schema_version` の表記は使わない）。Hello / Ready capabilities に `nautilus.backtest=true, nautilus.live=false` を載せる
 - [ ] N-pre Tpre.1 の結論次第で `AdvanceClock` Command を追加 or 不要化
 - [ ] 既存テストが落ちないことを `cargo test -p engine-client` で確認、Python 側 `python/engine/schemas.py` も同 PR で同期
@@ -116,6 +116,9 @@
 - [ ] 仮想時刻同期: N-pre Tpre.1 の決定に従う（案 A=`AdvanceClock` 駆動 / 案 B=自走）
 
 ### N1.4 REPLAY 仮想注文ディスパッチャ（README §REPLAY モード仮想注文の取り込み）
+
+**前提**: `python/engine/exchanges/tachibana_orders.py` が存在し `submit_order` / `NautilusOrderEnvelope` が実装済みであること（order/ Phase O0 以上完了）
+
 - [ ] `python/engine/order_router.py` 新設
 - [ ] live モード時 → `tachibana_orders.submit_order(...)` に委譲（order/ 計画の関数を呼ぶ）
 - [ ] replay モード時 → `BacktestExecutionEngine.process_order(...)` に委譲
@@ -123,6 +126,7 @@
 - [ ] `client_order_id` 名前空間も live / replay で分離（同一 ID 投入時の干渉なし）
 - [ ] 第二暗証番号 modal は REPLAY ガードで skip
 - [ ] iced UI 差分（バナー「⏪ REPLAYモード中」、ボタンラベル「仮想注文確認」）の実装を含む
+- [ ] `tests/python/test_order_router_dispatch.py` を追加: live 時は `tachibana_orders.submit_order` が呼ばれること、replay 時は `tachibana_orders_replay.jsonl` に書き込まれることを mock で検証
 
 ### N1.5 ナラティブ API 新設（H5）
 - [ ] `POST /api/agent/narrative` を `src/api/agent_api.rs`（新設）に実装
@@ -140,7 +144,7 @@
 - [ ] [spec.md §3.3](./spec.md#33-パフォーマンス) の計測対象定義に従い「`start_backtest` 呼出 → `EngineStopped` IPC 受領」までの wall clock を計測
 - [ ] 30 秒 SLA を実測値で確定し spec を更新
 
-**Exit 条件**: `s51`〜`s53` ナラティブ系 E2E が全部緑のまま、`/api/replay/*` と `/api/order/*`（REPLAY モード）の挙動が nautilus 経由で同じ、1 年バックテスト SLA 確定、決定論性テスト（N0.6 を N1 入力に対して再走）が緑
+**Exit 条件**: `s51`〜`s53` ナラティブ系 E2E が全部緑のまま、`/api/replay/*` と `/api/order/*`（REPLAY モード）の挙動が nautilus 経由で同じ、1 年バックテスト SLA 確定、決定論性テスト（N0.6 を N1 入力に対して再走）が緑（`uv run pytest tests/python/test_nautilus_determinism.py -k n1_dataset` が pass すること）
 
 ---
 
@@ -149,6 +153,9 @@
 **前提**: order/ 計画の Phase O0〜O2 が完了し、`tachibana_orders.submit_order` / `modify_order` / `cancel_order` / EC frame パーサ / 第二暗証番号 UI / 監査ログ WAL がすべて稼働している。本フェーズは **nautilus への薄い adapter のみ**を書く。
 
 ### N2.1 nautilus `LiveExecutionClient` adapter
+
+**前提**: `python/engine/exchanges/tachibana_orders.py` が存在し `submit_order` / `NautilusOrderEnvelope` が実装済みであること（order/ Phase O0 以上完了）
+
 - [ ] `python/engine/nautilus/clients/tachibana.py` 新設
 - [ ] `LiveExecutionClient` を継承し、以下を **order/ の関数に委譲**:
   - `submit_order(Order)` → `tachibana_orders.submit_order(session, second_password, NautilusOrderEnvelope.from_nautilus(order))`
@@ -161,11 +168,12 @@
 - [ ] order/ の `tachibana_event._parse_ec_frame` の戻り値（`OrderEcEvent`）を nautilus `OrderFilled` / `OrderCanceled` / `OrderRejected` に変換
 - [ ] `LiveExecutionEngine.process_event(...)` に流す
 - [ ] **冪等化（M5）**: 同一 `p_eda_no` の EC が再送された場合に nautilus 側で 2 重 `OrderFilled` を発火しないよう、ClientOrderId 単位の seen-set を adapter 内に持つ。order/ の Python 側 seen-set と二重ガードになるが、IPC 経路を跨ぐ再起動時に守りを兼ねる
+- [ ] 検証テスト: N2.6 の同一 `p_eda_no` 重複受信テスト（`test_ec_idempotency`）が pass すること
 
 ### N2.3 注文 ID マッピングと再起動復元
 - [ ] nautilus `ClientOrderId` ⇔ 立花 `sOrderNumber` の双方向写像（order/ の `OrderSessionState` を流用）
 - [ ] プロセス再起動時: 立花 `CLMOrderList` を引き、未決注文を nautilus `Cache` に warm-up（[spec.md §3.2](./spec.md#32-セキュリティ) の persistence 無効・Cache warm-up 規約）
-- [ ] **persistence 設定（H3）**: nautilus `CacheConfig.database = None` を強制し、Parquet/SQLite 永続化を OFF にしたまま warm-up を毎回行う。テストで `CacheConfig` の設定値を assert
+- [ ] **persistence 設定（H3）**: `engine_runner.py` の `NautilusEngineConfig` 組み立て箇所で `database` を `None` にハードコードし、直後に `assert config.database is None` を入れる。Parquet/SQLite 永続化を OFF にしたまま warm-up を毎回行う。テストで `CacheConfig` の設定値を assert
 
 ### N2.4 市場時間帯ガード（M2）
 - [ ] 立花 venue が `Disconnected{reason:"market_closed"}` の間は `LiveExecutionClient.start()` を保留する

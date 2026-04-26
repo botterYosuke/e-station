@@ -193,7 +193,7 @@ Python に渡す前に **Rust 側で**早期に弾く:
 | `VENUE_UNSUPPORTED` | 400 | Python 写像層が立花未対応の組合せと判定（CONFLICTING_TAGS / MARKET_IF_TOUCHED / GTC 等を含む） |
 | `SECOND_PASSWORD_REQUIRED` | 401 | 第二暗証番号未保持で発注 |
 | `SECOND_PASSWORD_INVALID` | 401 | 立花応答 `p_errno=4` 等（第二暗証番号エラー） |
-| `SECOND_PASSWORD_LOCKED` | 423 | `SECOND_PASSWORD_INVALID` 連続 N 回（デフォルト 3 回）後、`second_password_lockout_secs`（デフォルト 1800 秒）の間 modal 表示と発注を抑止 |
+| `SECOND_PASSWORD_LOCKED` | 423 | `SECOND_PASSWORD_INVALID` 連続 N 回（デフォルト 3 回）後。抑止期間（`second_password_lockout_secs`、デフォルト 1800 秒）中は `SubmitOrder` / `ModifyOrder` / `CancelOrder` すべてを reject。時間経過で自動解除。 |
 | `SESSION_EXPIRED` | 503 | `p_errno=2`（OrderSessionState=frozen 中の全 `/api/order/*` 拒否を含む） |
 | `REPLAY_MODE_ACTIVE` | 503 | `replay_mode == true` の間の全 `/api/order/*`（C-H4、Phase O0 必須） |
 | `RATE_LIMITED` | 429 | 同一 `(instrument_id, side, qty, price)` の N 秒/Y 回連打検知（C-M3） |

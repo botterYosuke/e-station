@@ -571,7 +571,49 @@ class TachibanaWorker(ExchangeWorker):
         raise NotImplementedError("tachibana fetch_open_interest is implemented in T5")
 
     async def fetch_depth_snapshot(self, ticker: str, market: str) -> dict:
-        raise NotImplementedError("tachibana fetch_depth_snapshot is implemented in T5")
+        """Fetch a shallow depth snapshot via CLMMfdsGetMarketPrice (F-M12 / F-M1b).
+
+        Returns bids/asks extracted from the REST response.  The endpoint
+        carries best-bid/ask (GBP_1/GAP_1 etc.) not the full 10-level book,
+        so the result may have fewer than 10 levels.
+        """
+        if self._session is None:
+            return {}
+        sizyou_c = self._lookup_sizyou_c(ticker)
+        payload: dict[str, Any] = {
+            "p_no": str(self._p_no_counter.next()),
+            "p_sd_date": current_p_sd_date(),
+            "sCLMID": "CLMMfdsGetMarketPrice",
+            "sTargetIssueCode": ticker,
+            "sTargetSizyouC": sizyou_c,
+        }
+        url = build_request_url(self._session.url_price, payload, sJsonOfmt="5")
+        body = await self._http_get(url)
+        from engine.schemas import MarketPriceResponse  # local import
+
+        data = json.loads(decode_response_body(body))
+        err = check_response(data) if isinstance(data, dict) else None
+        if err is not None:
+            raise err
+        parsed = MarketPriceResponse.model_validate(data)
+        if not parsed.aCLMMfdsMarketPriceData:
+            return {}
+        first = parsed.aCLMMfdsMarketPriceData[0]
+
+        recv_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        bids: list[tuple[str, str]] = []
+        asks: list[tuple[str, str]] = []
+        for i in range(1, 11):
+            bp = str(first.get(f"sGBP_{i}", "") or first.get(f"sGBP{i}", ""))
+            bv = str(first.get(f"sGBV_{i}", "") or first.get(f"sGBV{i}", ""))
+            ap = str(first.get(f"sGAP_{i}", "") or first.get(f"sGAP{i}", ""))
+            av = str(first.get(f"sGAV_{i}", "") or first.get(f"sGAV{i}", ""))
+            if bp:
+                bids.append((bp, bv))
+            if ap:
+                asks.append((ap, av))
+
+        return {"bids": bids, "asks": asks, "recv_ts_ms": recv_ts_ms}
 
     async def stream_trades(
         self,
@@ -601,21 +643,19 @@ class TachibanaWorker(ExchangeWorker):
         ws_url = self._build_ws_url(ticker)
         processor = FdFrameProcessor(row="1")
         conn_counter = 0
+        _st_stopped: list[bool] = [False]
 
-        while not stop_event.is_set():
+        while not stop_event.is_set() and not _st_stopped[0]:
             conn_counter += 1
             ssid = f"{stream_session_id}:{conn_counter}"
             if on_ssid is not None:
                 on_ssid(ssid)
             processor.reset()
 
-            batch: list[dict] = []
-
             async def _cb(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
                 if frame_type == "FD":
                     trade, _ = processor.process(fields, recv_ts_ms)
                     if trade:
-                        batch.append(trade)
                         outbox.append({
                             "event": "Trades",
                             "venue": "tachibana",
@@ -624,8 +664,21 @@ class TachibanaWorker(ExchangeWorker):
                             "stream_session_id": ssid,
                             "trades": [trade],
                         })
+                elif frame_type == "ST":
+                    result_code = fields.get("sResultCode", "0")
+                    if result_code != "0":
+                        _st_stopped[0] = True
+                        outbox.append({
+                            "event": "Disconnected",
+                            "venue": "tachibana",
+                            "ticker": ticker,
+                            "stream": "trade",
+                            "market": market,
+                            "reason": "market_closed",
+                        })
+                        stop_event.set()
 
-            ws_client = TachibanaEventWs(ws_url, stop_event, ticker=ticker)
+            ws_client = TachibanaEventWs(ws_url, stop_event, ticker=ticker, proxy=self._proxy)
             await ws_client.run(_cb)
 
     async def stream_depth(
@@ -649,15 +702,42 @@ class TachibanaWorker(ExchangeWorker):
             })
             return
 
-        session = self._session
-        if session is None:
+        if self._session is None:
             return
 
         ws_url = self._build_ws_url(ticker)
         processor = FdFrameProcessor(row="1")
-        conn_counter = 0
+        depth_keys_seen: list[bool] = [False]
 
-        while not stop_event.is_set():
+        # Inner stop: set by outer stop_event OR by depth safety watchdog.
+        _inner_stop = asyncio.Event()
+
+        async def _sync_outer() -> None:
+            await stop_event.wait()
+            _inner_stop.set()
+
+        async def _safety_watchdog() -> None:
+            await asyncio.sleep(_tachibana_ws._DEPTH_SAFETY_TIMEOUT_S)
+            if not depth_keys_seen[0]:
+                outbox.append({
+                    "event": "VenueError",
+                    "venue": "tachibana",
+                    "ticker": ticker,
+                    "market": market,
+                    "code": "depth_unavailable",
+                    "message": (
+                        "立花の板情報が取得できません"
+                        "（FD frame に気配が含まれていません）。"
+                        "設定を確認してください"
+                    ),
+                })
+                _inner_stop.set()
+
+        sync_task = asyncio.create_task(_sync_outer())
+        safety_task = asyncio.create_task(_safety_watchdog())
+
+        conn_counter = 0
+        while not _inner_stop.is_set():
             conn_counter += 1
             ssid = f"{stream_session_id}:{conn_counter}"
             if on_ssid is not None:
@@ -668,6 +748,7 @@ class TachibanaWorker(ExchangeWorker):
                 if frame_type == "FD":
                     _, depth = processor.process(fields, recv_ts_ms)
                     if depth:
+                        depth_keys_seen[0] = True
                         outbox.append({
                             "event": "DepthSnapshot",
                             "venue": "tachibana",
@@ -680,8 +761,58 @@ class TachibanaWorker(ExchangeWorker):
                             "recv_ts_ms": depth["recv_ts_ms"],
                         })
 
-            ws_client = TachibanaEventWs(ws_url, stop_event, ticker=ticker)
+            ws_client = TachibanaEventWs(ws_url, _inner_stop, ticker=ticker, proxy=self._proxy)
             await ws_client.run(_cb_depth)
+
+        for t in (safety_task, sync_task):
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # depth_unavailable fired → polling fallback (F-M12)
+        if not depth_keys_seen[0] and not stop_event.is_set():
+            await self._depth_polling_fallback(
+                ticker, market, stream_session_id, outbox, stop_event
+            )
+
+    async def _depth_polling_fallback(
+        self,
+        ticker: str,
+        market: str,
+        stream_session_id: str,
+        outbox: list[dict],
+        stop_event: asyncio.Event,
+    ) -> None:
+        """CLMMfdsGetMarketPrice polling when depth_unavailable fires (plan §F-M12)."""
+        elapsed = 0.0
+        poll_counter = 0
+        while not stop_event.is_set() and elapsed < _tachibana_ws._DEPTH_POLL_MAX_S:
+            try:
+                snapshot = await self.fetch_depth_snapshot(ticker, market)
+                if snapshot.get("bids") or snapshot.get("asks"):
+                    poll_counter += 1
+                    outbox.append({
+                        "event": "DepthSnapshot",
+                        "venue": "tachibana",
+                        "ticker": ticker,
+                        "market": market,
+                        "stream_session_id": f"{stream_session_id}:poll:{poll_counter}",
+                        "bids": snapshot.get("bids", []),
+                        "asks": snapshot.get("asks", []),
+                        "sequence_id": poll_counter,
+                        "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
+                    })
+            except Exception as exc:
+                log.warning("tachibana: depth poll error for %s: %s", ticker, exc)
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=_tachibana_ws._DEPTH_POLL_INTERVAL_S
+                )
+                return
+            except asyncio.TimeoutError:
+                elapsed += _tachibana_ws._DEPTH_POLL_INTERVAL_S
 
     async def stream_kline(
         self,

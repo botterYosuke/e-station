@@ -567,7 +567,7 @@
   - **ST（エラーステータス）frame の処理（M6）**: 受信したら内容を parse し、**`sResultCode != "0"` かつシステム停止相当（`api_event_if_v4r7.pdf` 別紙で「全銘柄停止」「回線切断」相当コードと確認済みのもの）なら全購読停止**して `VenueError{code:"transport_error"}` を発出する。`sResultCode == "0"` の ST（情報通知レベル）は `tracing::info!` でログして継続。T5 実装時に実機 / PDF で深刻コードの具体値を確認し、本行を更新すること。Phase 1 保守的フォールバック: 「`sResultCode != "0"` なら全停止」で問題なければそれで実装し、後で緩和する
   - 受信バッファは `\n` または `^A` 区切りで蓄積分割（一塊チャンクに複数メッセージあり）
   - 切断 → `Disconnected` イベント、再接続は指数バックオフ
-- [ ] `TachibanaWorker.stream_trades` — FD frame → 出来高差分から `TradeMsg` 合成（**前 frame 気配ベースの quote rule + 初回 frame 除外 + DV リセット検知**、data-mapping §3、F3/F4）
+- [x] `TachibanaWorker.stream_trades` — FD frame → 出来高差分から `TradeMsg` 合成（**前 frame 気配ベースの quote rule + 初回 frame 除外 + DV リセット検知**、data-mapping §3、F3/F4）
   - 受け入れテスト（`test_tachibana_fd_trade.py`）:
     1. 初回 frame では trade を発火しない（`prev_dv=None`）
     2. 2 件目以降で DV 差分 > 0 のとき trade を 1 件生成

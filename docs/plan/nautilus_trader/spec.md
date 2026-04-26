@@ -3,7 +3,7 @@
 ## 1. ゴール
 
 1. **リプレイ機能**: nautilus `BacktestEngine` を使い、既存 `EventStore`（Klines / Trades / Snapshot）の履歴をフィードして決定論的にバックテストできる
-2. **発注機能**: nautilus `LiveExecutionEngine` を使い、立花証券（株式現物・Phase 2）と既存暗号資産 venue（Phase 3 以降）に実弾で発注できる
+2. **発注機能**: nautilus `LiveExecutionEngine` を使い、立花証券（株式現物・N2）と既存暗号資産 venue（N3 以降）に実弾で発注できる
 3. **ナラティブ連携**: nautilus `Strategy` の意思決定が自動で Phase 4a のナラティブ Store に記録される
 
 ## 2. スコープ
@@ -60,7 +60,7 @@ N0 着手前に以下の **ブロッカー**を解決する。すべてレビュ
   - `tachibana_event._parse_ec_frame` の戻り値 → nautilus `OrderFilled` / `OrderCanceled` イベントに変換し `LiveExecutionEngine.process_event(...)` に流す
 - 立花 API の写像規則は **[data-mapping.md](./data-mapping.md)** および [order/spec.md §6](../order/spec.md#6-nautilus_trader-互換要件不変条件) を参照（本 spec で重複定義しない）
 - 注文種別カバレッジは order/ の Phase O0〜O3 進捗に従う（O0=現物成行のみ、O3 で信用・逆指値・期日指定が解禁）
-- **デモ環境のみ**。本番は env フラグで明示的に許可しない限り使わせない（`TACHIBANA_ALLOW_PROD=1`、Phase 1 §3.1 と同じガード）
+- **デモ環境のみ**。本番は env フラグで明示的に許可しない限り使わせない（`TACHIBANA_ALLOW_PROD=1`、[tachibana/spec.md §3.1](../tachibana/spec.md#31-セキュリティ) と同じガード）
 
 ### 2.4 Phase N3 — 暗号資産 venue ExecutionClient（任意）
 

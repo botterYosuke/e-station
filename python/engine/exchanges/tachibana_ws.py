@@ -276,6 +276,14 @@ _DEAD_FRAME_TIMEOUT_S: float = 12.0
 # Exponential back-off for reconnects: [1, 2, 4, 8, 16, 30] seconds.
 _BACKOFF_CAPS = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 
+# depth_unavailable safety: if no FD frame with bid/ask keys arrives within
+# this many seconds of stream_depth start, emit VenueError (plan §T5 MEDIUM-6/F-M12).
+_DEPTH_SAFETY_TIMEOUT_S: float = 30.0
+
+# depth_unavailable polling fallback: interval and max duration (F-M12).
+_DEPTH_POLL_INTERVAL_S: float = 10.0
+_DEPTH_POLL_MAX_S: float = 300.0
+
 
 class TachibanaEventWs:
     """Async iterator that yields parsed FD-frame field dicts.
@@ -301,6 +309,7 @@ class TachibanaEventWs:
         *,
         ticker: str,
         venue: str = "tachibana",
+        proxy: str | None = None,
     ) -> None:
         from .tachibana_codec import decode_response_body, parse_event_frame
 
@@ -308,6 +317,7 @@ class TachibanaEventWs:
         self._stop = stop_event
         self._ticker = ticker
         self._venue = venue
+        self._proxy = proxy
         self._decode = decode_response_body
         self._parse = parse_event_frame
         self._conn_count = 0
@@ -354,10 +364,10 @@ class TachibanaEventWs:
                     pass
 
     async def _connect_once(self, callback: Any) -> None:
-        async with websockets.connect(
-            self._url,
-            ping_interval=None,  # manual ping/pong per SKILL.md R stream
-        ) as ws:
+        connect_kwargs: dict[str, Any] = {"ping_interval": None}
+        if self._proxy is not None:
+            connect_kwargs["proxy"] = self._proxy
+        async with websockets.connect(self._url, **connect_kwargs) as ws:
             log.debug("tachibana ws: connected to %s (conn #%d)", self._ticker, self._conn_count)
 
             loop = asyncio.get_event_loop()
