@@ -430,6 +430,16 @@ pub struct ProcessManager {
     /// unchanged; the regression this guards is fast restart loops in
     /// recovery storms.
     pub creds_refresh_listener_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Set of venue tags currently observed as `VenueReady` by the
+    /// post-handshake event drain. Populated inside
+    /// [`Self::apply_after_handshake_with_timeout`] as `VenueReady`
+    /// arrives, cleared on `VenueError`. Exposes the post-handshake
+    /// venue state to clients that subscribe to events **after**
+    /// `start()` returns (broadcast does not replay), so the iced UI
+    /// can synchronise its local FSM with venues whose initial
+    /// `VenueReady` was emitted before the UI subscription wired up.
+    /// Reviewer flagged the silent-loss path on 2026-04-26 (R2).
+    pub venue_ready_state: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ProcessManager {
@@ -451,7 +461,22 @@ impl ProcessManager {
             venue_credentials: Arc::new(Mutex::new(Vec::new())),
             on_venue_credentials_refreshed: Arc::new(Mutex::new(None)),
             creds_refresh_listener_handle: Arc::new(Mutex::new(None)),
+            venue_ready_state: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Non-blocking probe of the post-handshake venue readiness cache.
+    /// Returns `true` if the most recent observed lifecycle event for
+    /// `venue` was a `VenueReady` (and not a subsequent `VenueError`).
+    /// Used by `Flowsurface::Message::EngineConnected` to bootstrap
+    /// the FSM without racing the broadcast subscription window. Falls
+    /// back to `false` when the lock is contended — a benign miss
+    /// that only delays UI sync until the next live event.
+    pub fn try_is_venue_ready(&self, venue: &str) -> bool {
+        self.venue_ready_state
+            .try_lock()
+            .map(|state| state.contains(venue))
+            .unwrap_or(false)
     }
 
     /// Install the credentials-refresh callback. Replaces any prior hook.
@@ -681,28 +706,41 @@ impl ProcessManager {
                 }
                 let remaining = deadline - now;
                 match tokio::time::timeout(remaining, event_rx.recv()).await {
-                    Ok(Ok(EngineEvent::VenueReady { request_id, .. })) => match request_id {
-                        Some(rid) => {
-                            pending.remove(&rid);
-                        }
-                        None => {
-                            // Back-compat: a `VenueReady` without
-                            // `request_id` only disambiguates when
-                            // exactly one request is outstanding.
-                            if pending.take_only().is_none() {
-                                log::warn!(
-                                    "VenueReady without request_id while {} are pending — cannot disambiguate",
-                                    pending.len(),
-                                );
+                    Ok(Ok(EngineEvent::VenueReady { venue, request_id })) => {
+                        // Cache the post-handshake readiness so a UI
+                        // subscriber that wires up after `start()`
+                        // returns can still observe the state — the
+                        // broadcast channel itself does not replay.
+                        // Reviewer 2026-04-26 R2.
+                        self.venue_ready_state.lock().await.insert(venue);
+                        match request_id {
+                            Some(rid) => {
+                                pending.remove(&rid);
+                            }
+                            None => {
+                                // Back-compat: a `VenueReady` without
+                                // `request_id` only disambiguates when
+                                // exactly one request is outstanding.
+                                if pending.take_only().is_none() {
+                                    log::warn!(
+                                        "VenueReady without request_id while {} are pending — cannot disambiguate",
+                                        pending.len(),
+                                    );
+                                }
                             }
                         }
-                    },
+                    }
                     Ok(Ok(EngineEvent::VenueError {
                         request_id,
                         venue,
                         code,
                         message,
                     })) => {
+                        // Mirror VenueReady: clear the readiness cache
+                        // so a late UI subscriber does not bootstrap to
+                        // the obsolete Ready state after a recovery
+                        // that landed in Error.
+                        self.venue_ready_state.lock().await.remove(&venue);
                         // Attribute the failure to a venue tag — prefer
                         // the request_id mapping (authoritative), fall
                         // back to the event's `venue` string if Python

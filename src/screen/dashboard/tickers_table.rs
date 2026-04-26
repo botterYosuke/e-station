@@ -162,8 +162,18 @@ impl TickersTable {
     ) -> (Self, Task<Message>) {
         let selected_exchanges = settings.selected_exchanges.to_vec();
 
+        // T35-U4 startup gate (review-fixes 2026-04-26 R2): Tachibana
+        // metadata fetches must wait for `VenueReady`. A persisted
+        // selection or default-Settings inclusion would otherwise
+        // bypass U4 and fire `fetch_metadata_task(Tachibana)` against
+        // an un-authenticated venue. Skip Tachibana from the initial
+        // fetch list and mark a pending fetch instead — the watch on
+        // `set_tachibana_ready(true)` will replay it once the engine
+        // signals readiness.
+        let tachibana_initially_selected = selected_exchanges.contains(&Venue::Tachibana);
         let fetch_metadata = selected_exchanges
             .iter()
+            .filter(|venue| **venue != Venue::Tachibana)
             .map(|venue: &Venue| fetch_metadata_task(&handles, *venue))
             .collect::<Vec<_>>();
 
@@ -184,11 +194,16 @@ impl TickersTable {
                 selected_markets: settings.selected_markets.iter().cloned().collect(),
                 show_favorites: settings.show_favorites,
                 row_index: FxHashMap::default(),
-                metadata_fetch_state: MetadataFetchState::with_pending(selected_exchanges),
+                metadata_fetch_state: MetadataFetchState::with_pending(
+                    selected_exchanges
+                        .iter()
+                        .copied()
+                        .filter(|v| *v != Venue::Tachibana),
+                ),
                 stats_fetch_state: StatsFetchState::default(),
                 handles,
                 tachibana_ready: false,
-                tachibana_fetch_pending: false,
+                tachibana_fetch_pending: tachibana_initially_selected,
             },
             Task::batch(fetch_metadata),
         )
@@ -229,13 +244,28 @@ impl TickersTable {
 
     /// Replace the stored handles with a freshly-connected set and re-fetch
     /// all metadata so the sidebar recovers after an engine reconnect.
+    /// T35-U4 reconnect gate (review-fixes 2026-04-26 R2): Tachibana is
+    /// excluded from the refetch list when the venue is not yet
+    /// `Ready`. The `EngineRehello` that accompanies a reconnect resets
+    /// `tachibana_ready` to `false` (via `set_tachibana_ready(false)`),
+    /// so this path skips Tachibana and marks pending instead. The
+    /// next `VenueReady` replays it.
     pub fn update_handles(&mut self, handles: AdapterHandles) -> Task<Message> {
         self.handles = handles;
-        self.metadata_fetch_state =
-            MetadataFetchState::with_pending(self.selected_exchanges.iter().cloned());
-
-        let fetch_tasks: Vec<Task<Message>> = self
+        let venues_to_refetch: Vec<Venue> = self
             .selected_exchanges
+            .iter()
+            .copied()
+            .filter(|v| *v != Venue::Tachibana || self.tachibana_ready)
+            .collect();
+        // Tachibana selected but not yet ready → defer until VenueReady.
+        if self.selected_exchanges.contains(&Venue::Tachibana) && !self.tachibana_ready {
+            self.tachibana_fetch_pending = true;
+        }
+        self.metadata_fetch_state =
+            MetadataFetchState::with_pending(venues_to_refetch.iter().copied());
+
+        let fetch_tasks: Vec<Task<Message>> = venues_to_refetch
             .iter()
             .map(|&venue| fetch_metadata_task(&self.handles, venue))
             .collect();
@@ -2369,6 +2399,68 @@ mod tests {
         // resolve.
         assert!(!VenueState::Idle.is_login_in_flight());
         assert!(!VenueState::Ready.is_login_in_flight());
+    }
+
+    #[test]
+    fn tachibana_in_initial_settings_defers_fetch_to_pending() {
+        // T35-U4 startup gate (review-fixes 2026-04-26 R2): a persisted
+        // selection that includes Tachibana must NOT trigger an
+        // immediate `fetch_metadata_task(Tachibana)`. The fetch is
+        // recorded as pending and replays on the next VenueReady.
+        let mut settings = settings_for(Venue::Tachibana);
+        // Verify saved-state simulates an actual user selection.
+        assert!(settings.selected_exchanges.contains(&Venue::Tachibana));
+        // Add a non-Tachibana venue to verify the filter is per-venue
+        // (other venues still fire their fetches at startup).
+        settings.selected_exchanges.push(Venue::Bybit);
+        let (table, _initial_task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+
+        assert!(
+            !table.tachibana_ready,
+            "fresh TickersTable defaults to !ready"
+        );
+        assert!(
+            table.tachibana_fetch_pending,
+            "Tachibana in saved selection must mark pending so VenueReady replays it"
+        );
+        assert!(
+            !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
+            "no begin_venue mark on Tachibana before VenueReady"
+        );
+        assert!(
+            table.metadata_fetch_state.is_in_flight(Venue::Bybit),
+            "non-Tachibana venues are still fetched on startup"
+        );
+    }
+
+    #[test]
+    fn update_handles_skips_tachibana_when_not_ready() {
+        // T35-U4 reconnect gate (review-fixes 2026-04-26 R2): an
+        // engine reconnect that arrives while Tachibana is selected
+        // must not schedule a Tachibana metadata fetch. The
+        // `EngineRehello` that accompanies the reconnect resets
+        // `tachibana_ready` via `set_tachibana_ready(false)`, so the
+        // refetch must defer to the next VenueReady.
+        let settings = settings_for(Venue::Tachibana);
+        let (mut table, _) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+        // Bring Tachibana to Ready, then simulate the reconnect:
+        // EngineRehello → set_tachibana_ready(false) → update_handles.
+        let _ = table.set_tachibana_ready(true);
+        let _ = table.set_tachibana_ready(false);
+        assert!(!table.tachibana_ready);
+
+        let _refetch = table.update_handles(handles_with_inert(Venue::Tachibana));
+
+        assert!(
+            !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
+            "reconnect refetch must skip Tachibana while ungated"
+        );
+        assert!(
+            table.tachibana_fetch_pending,
+            "reconnect must mark Tachibana pending so the next VenueReady replays it"
+        );
     }
 
     #[test]

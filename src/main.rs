@@ -809,6 +809,27 @@ impl Flowsurface {
                 }
             }
             Message::TachibanaVenueEvent(event) => {
+                // Toast notifications for the in-flight / cancelled
+                // states. The banner only renders `Error`
+                // (F-Banner1: no Rust string literals in the banner),
+                // so the user-facing "ログイン中" / "キャンセル" feedback
+                // path goes through the existing toast channel where
+                // Rust strings are conventional. Reviewer 2026-04-26
+                // R2 (MED-3).
+                match &event {
+                    VenueEvent::LoginStarted => {
+                        self.notifications.push(Toast::info(
+                            "立花ログインダイアログを起動しました".to_string(),
+                        ));
+                    }
+                    VenueEvent::LoginCancelled => {
+                        self.notifications.push(Toast::warn(
+                            "立花ログインがキャンセルされました".to_string(),
+                        ));
+                    }
+                    _ => {}
+                }
+
                 let next =
                     std::mem::replace(&mut self.tachibana_state, VenueState::Idle).next(event);
                 let became_ready = next.is_ready();
@@ -858,6 +879,26 @@ impl Flowsurface {
                 if was_restarting {
                     self.notifications
                         .push(Toast::info("データエンジン接続を復旧しました".to_string()));
+                }
+
+                // Bridge the broadcast-replay gap: VenueReady emitted
+                // during `ProcessManager::start()`'s
+                // `apply_after_handshake` runs **before** this stream
+                // subscribes to events. The `ProcessManager` caches the
+                // post-handshake readiness state; if Tachibana is
+                // already Ready in that cache, synthesize a
+                // `VenueEvent::Ready` so the FSM bootstraps correctly.
+                // Reviewer 2026-04-26 R2 (HIGH-1).
+                if self
+                    .engine_manager
+                    .as_ref()
+                    .is_some_and(|m| m.try_is_venue_ready(TACHIBANA_VENUE_NAME))
+                    && !self.tachibana_state.is_ready()
+                {
+                    return Task::batch(vec![
+                        sidebar_refetch,
+                        Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready)),
+                    ]);
                 }
                 return sidebar_refetch;
             }

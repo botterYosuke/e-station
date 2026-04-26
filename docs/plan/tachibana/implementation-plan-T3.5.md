@@ -37,6 +37,34 @@
 
 R1 で **作業の安全性に直結する HIGH 全 4 件 + アクショナブル MEDIUM** を消化したため本 PR の review-fix-loop は R1 で収束扱い。残課題は上表で個別に追跡可能。
 
+## レビュー修正ラウンド R2 (2026-04-26)
+
+R1 着地後に追加で発見された 4 指摘 (HIGH 2, MEDIUM 2) を消化。
+
+| ID | 指摘 | 対応 |
+|----|------|------|
+| **HIGH-1** | broadcast::Receiver は replay しないため、`ProcessManager::start()` 内 `apply_after_handshake` 中に発火した `VenueReady` / `VenueError` が iced subscriber 接続時には消えており、UI が永久に Idle で固着する | `ProcessManager` に `venue_ready_state: Arc<Mutex<HashSet<String>>>` を追加し `apply_after_handshake_with_timeout` の VenueReady/VenueError ブランチで更新。新規公開 API `try_is_venue_ready(venue: &str) -> bool` を導入。`Flowsurface::Message::EngineConnected` で query して必要なら `VenueEvent::Ready` を synthesize |
+| **HIGH-2** | startup (`new_with_settings`) と reconnect (`update_handles`) 経路で Tachibana metadata fetch が即時発火しており U4 ゲートを迂回 | 両経路で Tachibana を初期 fetch リストから除外し `tachibana_fetch_pending = true` を立てる。次の `VenueReady` で replay |
+| **MED-3** | `VenueLoginStarted` / `VenueLoginCancelled` の UI feedback が無い (banner は Error 専用、F-Banner1 で Rust 側に literal を置けない制約と矛盾) | toast 通知に倒した。`Toast::info("立花ログインダイアログを起動しました")` / `Toast::warn("立花ログインがキャンセルされました")`。F-Banner1 はバナー描画への制約で toast には適用されない (既存 toast も Rust literal を持つ) |
+| **MED-4** | E2E スクリプトはスケルトンのまま | Step F の落とし穴に「HTTP API 着地後に完走可能」と既に明記済み。R2 では追加対応せず |
+
+### 追加テスト
+
+- `tachibana_in_initial_settings_defers_fetch_to_pending` — persisted Tachibana 選択時の startup gate
+- `update_handles_skips_tachibana_when_not_ready` — reconnect 時の gate
+
+### invariant-tests.md 追加
+
+- `T35-U4-StartupGate` (上記 2 テスト)
+- `T35-VenueReadyCache` (HIGH-1 修正の構造的 pin、ProcessManager 内部 state caching)
+
+### 完了判定
+
+- ✅ `cargo test --workspace` 全緑 (51 件)
+- ✅ `cargo clippy --workspace --tests -- -D warnings` 緑
+- ✅ `cargo fmt --check` 緑
+- ✅ `tools/iced_purity_grep.sh` OK
+
 > 脚注: spec.md §3.1 line 30 が立花ログインボタン位置として `sidebar.rs` を挙げているのは陳腐化記述。実コード上は `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` の venue 行が正本。本 PR スコープ外、別 PR で spec.md 同期予定。
 
 ---
