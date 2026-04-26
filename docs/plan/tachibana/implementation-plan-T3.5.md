@@ -216,9 +216,28 @@ enum VenueState {
 
 ---
 
-### Step C — U4 VenueReady ゲート
+### Step C — U4 VenueReady ゲート ✅ 完了 (2026-04-26)
 
 **目的**: U1 sidebar ボタンを書く**前に**ゲートを入れることで、ボタン押下前に Tachibana metadata fetch が走って空振る経路を構造的に潰す。
+
+> **完了サマリ (2026-04-26)**
+>
+> - ✅ `src/venue_state.rs` を新設し、`VenueState { Idle, LoginInFlight, Ready, Error { class, message } }` と `Trigger { Auto, Manual }`、`VenueEvent { LoginStarted, LoginCancelled, LoginError, Ready, EngineRehello }` を定義。`fn next(self, event) -> Self` を pure で実装し、8 件のユニットテストで遷移表を網羅 pin（VenueReady idempotency / EngineRehello が任意状態から Idle へ戻ること、LoginStarted が Error からも復帰可能であること、等）。
+> - ✅ `Flowsurface` 構造体に `tachibana_state: VenueState`（初期値 `Idle`）を追加。`Message::TachibanaVenueEvent(VenueEvent)` を新設。
+> - ✅ `engine_status_stream` を `tokio::select!` の event ブランチで拡張し、`EngineConnection::subscribe_events()` 経由の broadcast::Receiver から venue lifecycle events を pump する。`VenueReady{venue:"tachibana"}` / `VenueLoginStarted` / `VenueLoginCancelled` / `VenueError` を `map_engine_event_to_tachibana()` で `Message::TachibanaVenueEvent` に変換。EngineConnection が swap されるたび `event_rx` を更新し、同時に `VenueEvent::EngineRehello` を yield して FSM をリセット。**Subscription::run は依然 1 本**（H9 invariant 維持）。
+> - ✅ `TickersTable` に `tachibana_ready: bool` ミラー＋ `tachibana_fetch_pending: bool` を追加し、`set_tachibana_ready(bool) -> Task<Message>` を実装。Ready で pending=true → pending クリア＋`begin_venue` → fetch_metadata_task を返す。`Message::ToggleExchangeFilter(Venue::Tachibana)` ハンドラに「Ready でない場合は pending を立てて Action::Fetch を返さない」ゲートを挿入。
+> - ✅ `Flowsurface::update(Message::TachibanaVenueEvent)` で state 遷移→`set_tachibana_ready(is_ready)` の戻り Task を `Message::Sidebar(...::TickersTable(_))` で wrap して返却。
+> - ✅ U4 統合テスト 4 本を `tickers_table.rs::tests` に追加: `metadata_fetch_blocked_until_venue_ready` / `pending_fetch_replays_on_venue_ready` / `set_tachibana_ready_without_pending_is_no_op` / `toggle_after_venue_ready_falls_through_to_normal_fetch`。`InertBackend` 既存スタブを活用しているので mock 依存ゼロで済んでいる。
+> - ✅ `invariant-tests.md` に T35-U4-VenueReadyGate / T35-U4-FSM を追記。
+> - ✅ `cargo test --workspace` 全緑（33 unit tests inside flowsurface bin）/ `cargo clippy --workspace --tests -- -D warnings` 緑 / `cargo fmt --check` 緑 / `tools/iced_purity_grep.sh` OK。
+>
+> **設計上の落とし穴 (後続作業者向け)**
+>
+> - **テスト配置**: 計画書原文では `tests/tachibana_metadata_fetch_gated_by_venue_ready.rs` に mockall を使った integration test を置く想定だったが、flowsurface は binary-only クレートで `tests/*.rs` から内部 module を `use` できない。pragmatic な代替として **`src/screen/dashboard/tickers_table.rs::tests` 内の inline `#[cfg(test)]`** に置き、既存の `InertBackend` スタブを再利用した。FSM 部分は `src/venue_state.rs::tests` で完全網羅。external crate 化や lib target 追加は別 PR スコープ。
+> - **broadcast::Receiver 取り回し**: `tokio::select!` で `Option<broadcast::Receiver>` を扱うため、`event_fut = async { match &mut event_rx { Some(rx) => rx.recv().await.ok(), None => pending().await } }` パターンを採用。`pending::<Option<_>>().await` を None 側に充てて型一致させているのがポイント。`broadcast::Receiver` は lag したら `Err(Lagged)` を返すが `recv().await.ok()` で `None` になり、Outer match で `event_rx = None` にして次の EngineConnected を待つ設計（lossy だが UI 側で Ready/LoginStarted が re-emit されるので致命的ではない）。
+> - **EngineRehello の発火点**: 新しい EngineConnection を受け取った直後（initial / changed 両方）で **必ず** `Message::TachibanaVenueEvent(VenueEvent::EngineRehello)` を yield してから `EngineConnected` を流す。Python 側の subprocess 再起動は handshake 単位なので、古い `Ready` / `Error` を引き継がず Idle に戻すのが安全。Step E のバナー実装でこの仕様に依存するので変えないこと。
+> - **set_tachibana_ready の冪等性**: `was_ready=false → ready=true` でかつ pending=true のときだけ Task を返す。重複 Ready (Python の VenueReady idempotency 仕様) で fetch が二重に走るのを防いでいる。Step D で auto-fire を実装する際、初回 Ready で pending=true でなければ何も起こらず、初回 toggle で auto-fire が起動する流れになる。
+> - **Trigger enum**: Step D で使用予定。enum レベルで `#[allow(dead_code)]` を当てているため、Step D 着地時に外し忘れないこと。
 
 **現状把握** (`src/screen/dashboard/tickers_table.rs`):
 - `fetch_metadata_task(&self.handles, venue)` が venue 選択時に発火

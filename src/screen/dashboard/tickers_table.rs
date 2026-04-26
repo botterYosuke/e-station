@@ -124,6 +124,18 @@ pub struct TickersTable {
     metadata_fetch_state: MetadataFetchState,
     stats_fetch_state: StatsFetchState,
     handles: AdapterHandles,
+    /// Mirror of `Flowsurface::tachibana_state.is_ready()`. Updated via
+    /// [`TickersTable::set_tachibana_ready`]. Gates Tachibana metadata
+    /// fetches so we never call into an uninitialised venue
+    /// (T35-U4-VenueReadyGate). Default `false` — tachibana is gated
+    /// until the first `VenueReady`.
+    tachibana_ready: bool,
+    /// `true` when a `ToggleExchangeFilter(Venue::Tachibana)` was
+    /// observed but blocked because the venue was not yet `Ready`. The
+    /// pending request is replayed by
+    /// [`TickersTable::set_tachibana_ready(true)`] once `VenueReady`
+    /// arrives.
+    tachibana_fetch_pending: bool,
 }
 
 impl TickersTable {
@@ -162,9 +174,36 @@ impl TickersTable {
                 metadata_fetch_state: MetadataFetchState::with_pending(selected_exchanges),
                 stats_fetch_state: StatsFetchState::default(),
                 handles,
+                tachibana_ready: false,
+                tachibana_fetch_pending: false,
             },
             Task::batch(fetch_metadata),
         )
+    }
+
+    /// Update the cached "is the Tachibana venue currently `Ready`"
+    /// flag. Called by `Flowsurface::update` whenever
+    /// `tachibana_state` transitions. When the venue becomes ready and
+    /// a previous `ToggleExchangeFilter(Tachibana)` had been blocked,
+    /// returns the deferred metadata fetch as a `Task` so the caller
+    /// can chain it back into iced. Returns `Task::none()` otherwise.
+    ///
+    /// Pin: T35-U4-VenueReadyGate.
+    pub fn set_tachibana_ready(&mut self, ready: bool) -> Task<Message> {
+        let was_ready = self.tachibana_ready;
+        self.tachibana_ready = ready;
+
+        if ready && !was_ready && self.tachibana_fetch_pending {
+            self.tachibana_fetch_pending = false;
+            // Mirror the begin_venue side-effect that the gated branch
+            // skipped, so MetadataFetchState observes a "started" mark
+            // (idempotent — has_fetched will short-circuit subsequent
+            // toggles once data arrives).
+            if self.metadata_fetch_state.begin_venue(Venue::Tachibana) {
+                return fetch_metadata_task(&self.handles, Venue::Tachibana);
+            }
+        }
+        Task::none()
     }
 
     /// Replace the stored handles with a freshly-connected set and re-fetch
@@ -232,6 +271,15 @@ impl TickersTable {
                     self.stats_fetch_state.on_exchange_disabled(exch);
                 } else {
                     self.selected_exchanges.insert(exch);
+
+                    // Tachibana metadata fetches must wait for
+                    // `VenueReady`; until then we record a pending
+                    // request and let `set_tachibana_ready(true)`
+                    // replay it. T35-U4-VenueReadyGate.
+                    if exch == Venue::Tachibana && !self.tachibana_ready {
+                        self.tachibana_fetch_pending = true;
+                        return None;
+                    }
 
                     if !self.metadata_fetch_state.has_fetched(exch) {
                         if self.metadata_fetch_state.begin_venue(exch) {
@@ -2095,5 +2143,109 @@ mod tests {
             table.ticker_rows.is_empty(),
             "stats announced for the wrong venue must not enter ticker_rows"
         );
+    }
+
+    // ── T35-U4-VenueReadyGate ─────────────────────────────────────────────────
+    //
+    // The Tachibana venue cannot serve metadata until the engine has
+    // emitted `VenueReady`. Toggling the filter on before that point
+    // must record a pending request and skip the fetch; the same toggle
+    // re-fires when `set_tachibana_ready(true)` is called. See
+    // `docs/plan/tachibana/implementation-plan-T3.5.md` §3 Step C.
+
+    #[test]
+    fn metadata_fetch_blocked_until_venue_ready() {
+        let settings = settings_for(Venue::Bybit); // start with a non-tachibana venue selected
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+        // Sanity: tachibana_ready defaults to false (gated).
+        assert!(!table.tachibana_ready);
+        assert!(!table.tachibana_fetch_pending);
+
+        // Toggling Tachibana before VenueReady must mark a pending fetch
+        // and produce no Action::Fetch. The metadata fetch state must
+        // not advance to in-flight either, so a later replay knows to
+        // begin_venue afresh.
+        let action = table.update(Message::ToggleExchangeFilter(Venue::Tachibana));
+        assert!(
+            action.is_none(),
+            "ToggleExchangeFilter(Tachibana) before Ready must not return an Action::Fetch"
+        );
+        assert!(
+            table.tachibana_fetch_pending,
+            "blocked toggle must record a pending fetch"
+        );
+        assert!(
+            !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
+            "begin_venue must not run before VenueReady; the FSM stays untouched"
+        );
+        assert!(
+            table.selected_exchanges.contains(&Venue::Tachibana),
+            "the venue is still recorded as selected so the user's intent persists"
+        );
+    }
+
+    #[test]
+    fn pending_fetch_replays_on_venue_ready() {
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+
+        // Block one toggle while not Ready, then transition Ready.
+        let _ = table.update(Message::ToggleExchangeFilter(Venue::Tachibana));
+        assert!(table.tachibana_fetch_pending);
+
+        // set_tachibana_ready(true) must clear the pending flag, mark
+        // the venue in-flight (so subsequent toggles short-circuit via
+        // has_fetched / is_in_flight), and return a non-`Task::none()`
+        // task that will drive the actual fetch when polled by iced.
+        let _replay_task: Task<Message> = table.set_tachibana_ready(true);
+        assert!(
+            !table.tachibana_fetch_pending,
+            "pending flag must be cleared once replay is dispatched"
+        );
+        assert!(
+            table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
+            "begin_venue must mark the venue in-flight as part of the replay"
+        );
+        assert!(table.tachibana_ready);
+    }
+
+    #[test]
+    fn set_tachibana_ready_without_pending_is_no_op() {
+        // Receiving VenueReady before the user ever toggles Tachibana
+        // must not trigger a phantom fetch — we only replay something
+        // that was actually requested.
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+
+        let _ = table.set_tachibana_ready(true);
+        assert!(table.tachibana_ready);
+        assert!(
+            !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
+            "no pending request → no fetch on VenueReady"
+        );
+    }
+
+    #[test]
+    fn toggle_after_venue_ready_falls_through_to_normal_fetch() {
+        // Once Tachibana is Ready, the gate becomes a no-op and the
+        // existing metadata-fetch path takes over. We verify by
+        // observing that the venue transitions to in_flight via the
+        // standard begin_venue path (Action::Fetch returned).
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+
+        let _ = table.set_tachibana_ready(true);
+
+        let action = table.update(Message::ToggleExchangeFilter(Venue::Tachibana));
+        assert!(matches!(action, Some(Action::Fetch(_))));
+        assert!(
+            table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
+            "post-Ready toggle goes through begin_venue → in_flight"
+        );
+        assert!(!table.tachibana_fetch_pending);
     }
 }

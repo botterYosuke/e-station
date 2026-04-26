@@ -66,6 +66,8 @@
 | T35-H8-NoBlockOnInUpdate | implementation-plan-T3.5.md §3 Step A（H8: `update()` 内の `block_on(...)` を `Task::perform` 化、現状未出現の regression guard） | `tests/main_update_no_block_on.rs::update_body_has_no_block_on` | T3.5 |
 | T35-H9-SingleRecoveryPath | implementation-plan-T3.5.md §3 Step A（H9: 手動 reconnect callback / 二重経路を `Subscription::run` 単一化） | `tests/engine_status_subscription_is_singleton.rs::engine_status_subscription_is_singleton` | T3.5 |
 | T35-H7-DebugRedaction | implementation-plan-T3.5.md §3 Step A REFACTOR（`EngineConnection: Debug` の secret 焼付きガード） | `engine-client/tests/engine_connection_debug_redaction.rs::engine_connection_debug_does_not_leak_credentials` | T3.5 |
+| T35-U4-VenueReadyGate | implementation-plan-T3.5.md §3 Step C（U4: 立花 metadata fetch を `VenueReady` まで抑止し、pending fetch を `set_tachibana_ready(true)` で再生する） | `src/screen/dashboard/tickers_table.rs::tests::metadata_fetch_blocked_until_venue_ready` および `src/screen/dashboard/tickers_table.rs::tests::pending_fetch_replays_on_venue_ready` | T3.5 |
+| T35-U4-FSM | implementation-plan-T3.5.md §3.2（VenueState 二重フラグ廃止と単一 enum 化、9 通り遷移） | `src/venue_state.rs::tests::*`（fresh_state_is_idle_and_not_ready / login_started_transitions_idle_to_in_flight / ready_event_transitions_in_flight_to_ready / cancel_returns_to_idle_so_user_can_retry / error_carries_class_and_verbatim_message / login_started_can_recover_from_error / engine_rehello_always_resets_to_idle / ready_is_idempotent_under_repeated_ready_events） | T3.5 |
 
 ---
 

@@ -10,6 +10,7 @@ mod modal;
 mod notify;
 mod screen;
 mod style;
+mod venue_state;
 mod version;
 mod widget;
 mod window;
@@ -25,6 +26,7 @@ use modal::{
 use modal::{dashboard_modal, main_dialog_modal};
 use notify::Notifications;
 use screen::dashboard::{self, Dashboard};
+use venue_state::{VenueEvent, VenueState};
 use widget::{
     confirm_dialog_container,
     toast::{self, Toast},
@@ -431,6 +433,11 @@ struct Flowsurface {
     /// Active `ProcessManager` for managed mode (read once at startup from
     /// `ENGINE_MANAGER` so `update()` does not touch the static directly).
     engine_manager: Option<Arc<engine_client::ProcessManager>>,
+    /// Tachibana venue lifecycle state (see `venue_state.rs`). Replaces
+    /// the prior `tachibana_ready` / `tachibana_login_in_flight` double
+    /// flag with a single enum so illegal combinations are
+    /// unrepresentable. T35-U4-VenueReadyGate.
+    tachibana_state: VenueState,
 }
 
 #[derive(Debug, Clone)]
@@ -444,6 +451,11 @@ enum Message {
     /// Replaces the former `static ENGINE_CONNECTION` global read from
     /// `update()` (T35-H7-NoStaticInUpdate).
     EngineConnected(Arc<engine_client::EngineConnection>),
+    /// Fired when an engine event affecting the Tachibana venue
+    /// lifecycle (`VenueLoginStarted` / `VenueLoginCancelled` /
+    /// `VenueError` / `VenueReady`) arrives. Drives `tachibana_state`
+    /// transitions. T35-U4-VenueReadyGate / T35-U2-Banner.
+    TachibanaVenueEvent(VenueEvent),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -469,17 +481,21 @@ enum Message {
     AudioStream(modal::audio::Message),
 }
 
-/// Builds a single stream that emits both `Message::EngineRestarting`
-/// (engine restart transitions) and `Message::EngineConnected` (every
-/// successful handshake). Merging the two watch channels into one
-/// `Subscription::run` keeps the recovery path single-source and is
-/// required by invariant T35-H9-SingleRecoveryPath.
+/// Builds a single stream that emits engine restart transitions, fresh
+/// `EngineConnected` handshakes, and Tachibana venue lifecycle events
+/// (`VenueLoginStarted` / `VenueLoginCancelled` / `VenueError` /
+/// `VenueReady`). Merging everything into one `Subscription::run` keeps
+/// the recovery path single-source (invariant T35-H9-SingleRecoveryPath)
+/// and gives `update()` a single FIFO of state-affecting events.
 fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send + 'static {
     async_stream::stream! {
         let Some(restart_tx) = ENGINE_RESTARTING.get() else { return; };
         let Some(conn_tx) = ENGINE_CONNECTION_TX.get() else { return; };
         let mut restart_rx = restart_tx.subscribe();
         let mut conn_rx = conn_tx.subscribe();
+        let mut event_rx: Option<
+            tokio::sync::broadcast::Receiver<engine_client::dto::EngineEvent>,
+        > = None;
 
         // Emit current values immediately. subscribe() marks the current
         // value as already-seen, so `changed()` would otherwise skip the
@@ -490,7 +506,13 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
         // suspension points, breaking the `Send` bound iced requires.
         let initial_conn = { conn_rx.borrow_and_update().clone() };
         if let Some(conn) = initial_conn {
+            event_rx = Some(conn.subscribe_events());
             yield Message::EngineConnected(conn);
+            // Each fresh handshake represents a Python subprocess that
+            // re-pumps Hello → VenueReady from scratch — reset the
+            // venue FSM so a stale Ready/Error from before the restart
+            // does not survive.
+            yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
         }
         let initial_restart = { *restart_rx.borrow_and_update() };
         if initial_restart {
@@ -498,6 +520,15 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
         }
 
         loop {
+            // `event_rx` is `Option`-shaped; use `pending()` while it
+            // is `None` so the select arm stays sound but never wins.
+            let event_fut = async {
+                match &mut event_rx {
+                    Some(rx) => rx.recv().await.ok(),
+                    None => std::future::pending::<Option<_>>().await,
+                }
+            };
+
             tokio::select! {
                 changed = restart_rx.changed() => {
                     if changed.is_err() { break; }
@@ -508,11 +539,59 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                     if changed.is_err() { break; }
                     let value = { conn_rx.borrow_and_update().clone() };
                     if let Some(conn) = value {
+                        event_rx = Some(conn.subscribe_events());
                         yield Message::EngineConnected(conn);
+                        yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
+                    }
+                }
+                event = event_fut => {
+                    match event {
+                        Some(ev) => {
+                            if let Some(msg) = map_engine_event_to_tachibana(ev) {
+                                yield msg;
+                            }
+                        }
+                        None => {
+                            // Broadcast lagged or closed; drop the receiver
+                            // and wait for the next fresh connection.
+                            event_rx = None;
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Translate a low-level `EngineEvent` into a `Message::TachibanaVenueEvent`
+/// when it concerns the Tachibana venue lifecycle, otherwise `None`.
+/// Other venues are funnelled through their existing exchange-event
+/// path and don't need state-machine treatment.
+fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<Message> {
+    use engine_client::dto::EngineEvent;
+    match ev {
+        EngineEvent::VenueReady { venue, .. } if venue == "tachibana" => {
+            Some(Message::TachibanaVenueEvent(VenueEvent::Ready))
+        }
+        EngineEvent::VenueLoginStarted { venue, .. } if venue == "tachibana" => {
+            Some(Message::TachibanaVenueEvent(VenueEvent::LoginStarted))
+        }
+        EngineEvent::VenueLoginCancelled { venue, .. } if venue == "tachibana" => {
+            Some(Message::TachibanaVenueEvent(VenueEvent::LoginCancelled))
+        }
+        EngineEvent::VenueError {
+            venue,
+            code,
+            message,
+            ..
+        } if venue == "tachibana" => {
+            let class = engine_client::error::classify_venue_error(&code);
+            Some(Message::TachibanaVenueEvent(VenueEvent::LoginError {
+                class,
+                message,
+            }))
+        }
+        _ => None,
     }
 }
 
@@ -576,6 +655,7 @@ impl Flowsurface {
             engine_restarting: false,
             engine_connection: initial_conn,
             engine_manager,
+            tachibana_state: VenueState::Idle,
         };
 
         if let Some(err) = audio_init_err {
@@ -616,6 +696,20 @@ impl Flowsurface {
                 // by `Message::EngineConnected` so a single source of
                 // truth (the live connection) drives the swap. See
                 // T35-H9-SingleRecoveryPath.
+            }
+            Message::TachibanaVenueEvent(event) => {
+                let next =
+                    std::mem::replace(&mut self.tachibana_state, VenueState::Idle).next(event);
+                let became_ready = next.is_ready();
+                self.tachibana_state = next;
+
+                let replay = self
+                    .sidebar
+                    .tickers_table
+                    .set_tachibana_ready(became_ready)
+                    .map(|m| Message::Sidebar(dashboard::sidebar::Message::TickersTable(m)));
+
+                return replay;
             }
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
