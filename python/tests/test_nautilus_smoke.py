@@ -75,3 +75,17 @@ class TestNautilusRunnerSmoke:
     def test_stop_is_safe(self):
         runner = NautilusRunner()
         runner.stop()  # must not raise even if never started
+
+    def test_unsupported_currency_raises(self):
+        """H-3: サポート外の currency は ValueError を raise すること。"""
+        import pytest
+        runner = NautilusRunner()
+        with pytest.raises(ValueError, match="Unsupported currency"):
+            runner.start_backtest(
+                strategy_id="buy-and-hold",
+                ticker="7203",
+                venue="TSE",
+                klines=_year_klines(),
+                initial_cash=1_000_000,
+                currency="USD",
+            )

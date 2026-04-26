@@ -38,6 +38,7 @@ class BacktestResult:
     strategy_id: str
     final_equity: Decimal
     fill_timestamps: list[int] = field(default_factory=list)
+    fill_last_prices: list[str] = field(default_factory=list)
 
 
 class NautilusRunner:
@@ -63,8 +64,18 @@ class NautilusRunner:
     ) -> BacktestResult:
         """バックテストを実行し結果を返す。
 
+        strategy_id: IPC 経由で BacktestResult に返す外部 ID ("buy-and-hold" 等)。
+            nautilus 内部の StrategyConfig.strategy_id ("buy-and-hold-001") とは別物。
+            N1 の EngineStopped IPC イベントには本パラメータの値を使う。
+
         spec.md §3.2: assert config.cache.database is None を内部で検証する。
         """
+        if currency not in _CURRENCY_MAP:
+            raise ValueError(
+                f"Unsupported currency: {currency!r}. Supported: {list(_CURRENCY_MAP)}"
+            )
+        cur = _CURRENCY_MAP[currency]
+
         safe_id = strategy_id.replace("-", "").replace("_", "")[:8].upper() or "BACKTEST"
         cfg = BacktestEngineConfig(
             trader_id=f"RUNNER-{safe_id}",
@@ -75,46 +86,61 @@ class NautilusRunner:
 
         engine = BacktestEngine(config=cfg)
         self._engine = engine
+        try:
+            engine.add_venue(
+                venue=Venue(venue),
+                oms_type=OmsType.NETTING,
+                account_type=AccountType.CASH,
+                base_currency=cur,
+                starting_balances=[Money(initial_cash, cur)],
+            )
 
-        cur = _CURRENCY_MAP.get(currency, JPY)
-        engine.add_venue(
-            venue=Venue(venue),
-            oms_type=OmsType.NETTING,
-            account_type=AccountType.CASH,
-            base_currency=cur,
-            starting_balances=[Money(initial_cash, cur)],
-        )
+            # Instrument: N0 ではハードコード Equity（data-mapping.md §1 N0 仮置き）
+            from engine.nautilus.instrument_factory import make_equity_instrument
+            instrument = make_equity_instrument(ticker, venue)
+            engine.add_instrument(instrument)
 
-        # Instrument: N0 ではハードコード Equity（data-mapping.md §1 N0 仮置き）
-        from engine.nautilus.instrument_factory import make_equity_instrument
-        instrument = make_equity_instrument(ticker, venue)
-        engine.add_instrument(instrument)
+            bars = klines_to_bars(ticker, venue, klines)
+            if bars:
+                engine.add_data(bars)
 
-        bars = klines_to_bars(ticker, venue, klines)
-        if bars:
-            engine.add_data(bars)
+            strategy_instance = _make_strategy(strategy_id, instrument.id)
+            engine.add_strategy(strategy_instance)
 
-        strategy_instance = _make_strategy(strategy_id, instrument.id)
-        engine.add_strategy(strategy_instance)
+            log.info(
+                "[NautilusRunner] engine.run() starting: strategy=%r ticker=%r bars=%d",
+                strategy_id, ticker, len(bars),
+            )
+            engine.run()
+            log.info("[NautilusRunner] engine.run() completed: strategy=%r", strategy_id)
 
-        engine.run()
+            # 約定データ収集
+            fill_timestamps, fill_last_prices = _collect_fill_data(engine)
 
-        # 約定タイムスタンプ収集
-        fill_timestamps = _collect_fill_timestamps(engine)
+            # 最終残高（文字列精度保持、H2 規約）
+            account = engine.kernel.portfolio.account(Venue(venue))
+            if account is None:
+                raise RuntimeError(
+                    f"[NautilusRunner] portfolio.account returned None for venue={venue!r}"
+                )
+            balance = account.balance_total(cur)
+            final_equity = balance.as_decimal()
 
-        # 最終残高（文字列精度保持、H2 規約）
-        account = engine.kernel.portfolio.account(Venue(venue))
-        balance = account.balance_total(cur)
-        final_equity = balance.as_decimal()
-
-        engine.dispose()
-        self._engine = None
-
-        return BacktestResult(
-            strategy_id=strategy_id,
-            final_equity=final_equity,
-            fill_timestamps=fill_timestamps,
-        )
+            return BacktestResult(
+                strategy_id=strategy_id,
+                final_equity=final_equity,
+                fill_timestamps=fill_timestamps,
+                fill_last_prices=fill_last_prices,
+            )
+        except Exception:
+            log.error(
+                "[NautilusRunner] start_backtest failed for strategy=%r ticker=%r",
+                strategy_id, ticker, exc_info=True,
+            )
+            raise
+        finally:
+            engine.dispose()
+            self._engine = None
 
     def start_live(self) -> None:
         """N0 stub。N2 で LiveExecutionEngine を組み立てる。
@@ -137,22 +163,38 @@ class NautilusRunner:
 # ---------------------------------------------------------------------------
 
 def _make_strategy(strategy_id: str, instrument_id):
+    """nautilus Strategy インスタンスを生成して返す。
+
+    strategy_id は外部 IPC 用 ID ("buy-and-hold" 等)。
+    nautilus 内部の StrategyConfig.strategy_id ("buy-and-hold-001") とは別物。
+    N1 の EngineStopped IPC イベントには呼び出し元から渡された strategy_id の値を使う。
+    """
     if strategy_id == "buy-and-hold":
         return BuyAndHoldStrategy(instrument_id=instrument_id)
     raise ValueError(f"Unknown strategy_id: {strategy_id!r}. N0 supports 'buy-and-hold' only.")
 
 
-def _collect_fill_timestamps(engine: BacktestEngine) -> list[int]:
-    """約定タイムスタンプを昇順で返す（決定論性テスト用）。"""
+def _collect_fill_data(engine: BacktestEngine) -> tuple[list[int], list[str]]:
+    """約定タイムスタンプと約定価格を収集して返す（決定論性テスト用）。
+
+    戻り値: (sorted_timestamps, sorted_last_prices)
+    """
     try:
         fills = engine.kernel.cache.orders()
         timestamps: list[int] = []
+        last_prices: list[str] = []
         for order in fills:
             if order.is_closed:
                 # 最終イベントの ts_last を使う
                 ts = getattr(order, "ts_last", None)
                 if ts is not None:
                     timestamps.append(ts)
-        return sorted(timestamps)
-    except Exception:
-        return []
+                lp = getattr(order, "avg_px", None)
+                if lp is not None:
+                    last_prices.append(str(lp))
+        return sorted(timestamps), sorted(last_prices)
+    except Exception as exc:
+        log.warning(
+            "[NautilusRunner] _collect_fill_data failed: %s", exc, exc_info=True
+        )
+        return [], []  # 意図的フォールバック: IPC EngineStopped の送出をブロックしない

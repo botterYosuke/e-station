@@ -80,3 +80,33 @@ class TestKlineToBar:
         kline = _make_kline(open_="100000.0", high="110000.0", low="95000.0", close="100000.0")
         bars = klines_to_bars("7203", "TSE", [kline])
         assert str(bars[0].close) == "100000.0"
+
+
+# ---------------------------------------------------------------------------
+# H-1: KlineRow バリデーションテスト
+# ---------------------------------------------------------------------------
+
+class TestKlineRowValidation:
+    def test_invalid_date_raises_value_error(self):
+        """date が 8 桁数字でない場合は ValueError"""
+        import pytest
+        with pytest.raises(ValueError, match="KlineRow.date"):
+            KlineRow(date="2024-01-01", open="2000.0", high="2100.0", low="1900.0", close="2050.0", volume="5000")
+
+    def test_non_numeric_open_raises_value_error(self):
+        """open が Decimal 変換不可な場合は ValueError"""
+        import pytest
+        with pytest.raises(ValueError, match="KlineRow.open"):
+            KlineRow(date="20240101", open="N/A", high="2100.0", low="1900.0", close="2050.0", volume="5000")
+
+    def test_valid_kline_does_not_raise(self):
+        """正常な KlineRow は例外なし"""
+        row = KlineRow(date="20240101", open="2000.0", high="2100.0", low="1900.0", close="2050.0", volume="5000")
+        assert row.date == "20240101"
+
+    def test_kline_is_immutable(self):
+        """frozen=True でイミュータブルであること"""
+        import pytest
+        row = KlineRow(date="20240101", open="2000.0", high="2100.0", low="1900.0", close="2050.0", volume="5000")
+        with pytest.raises((AttributeError, TypeError)):
+            row.date = "20240102"  # type: ignore[misc]

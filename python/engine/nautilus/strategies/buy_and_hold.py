@@ -39,6 +39,7 @@ class BuyAndHoldStrategy(Strategy):
 
         instrument = self.cache.instrument(self.instrument_id)
         if instrument is None:
+            self.log.warning("on_bar: instrument not found in cache: %s", self.instrument_id)
             return
 
         order = self.order_factory.market(

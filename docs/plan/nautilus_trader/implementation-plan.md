@@ -86,6 +86,40 @@
 
 **Exit 条件達成**: スモーク + 決定論性テスト 計 8 件 GREEN (2026-04-26)
 
+### レビュー反映 (2026-04-26, ラウンド R1)
+
+#### 解消した指摘
+- ✅ C-1: `_collect_fill_timestamps` に `log.warning` 追加、意図的フォールバックをコメントで明示
+- ✅ C-2: `start_backtest` に try/finally 追加し dispose 漏れ解消
+- ✅ H-1: `KlineRow.__post_init__` バリデーション追加 + `frozen=True` 化
+- ✅ H-2: `engine.run()` の前後にログ追加
+- ✅ H-3: `currency` サイレントフォールバックを `ValueError` に変更
+- ✅ H-4: `BacktestResult.fill_last_prices` 追加 + 決定論性テスト `last_price` ビット一致・非空チェック
+- ✅ M-1: `portfolio.account` の None チェック追加
+- ✅ M-2: `test_wall_clock_independence` に `datetime.now` モックを追加
+- ✅ M-3: `strategy_id` 二層構造を docstring に明記
+- ✅ M-4: `test_data_mapping_instrument.py` を新規作成 (6 件)
+- ✅ M-5: `instrument_factory.py` の `ts_event=0` 仮置きを docstring に明記
+- ✅ M-6: `on_bar` の `instrument is None` に `log.warning` 追加
+
+#### 繰越 (次フェーズ検討)
+- H-5 (CI workflow): N1 着手前に `.github/workflows/python-test.yml` を追加すること（HIGH）
+- strategy_id の `Literal` or `Enum` 化: N1 IPC schema 実装時に合わせて型を確定する
+- `_date_to_ts_ns` の float 丸め誤差: N1 で nautilus 公式の timestamp_ns API に切り替え（テスト側の期待値も整数演算に統一）
+- data-mapping.md のテストパス (`tests/python/` → `python/tests/`) 修正: docs-only fix
+- `stop()` の N1 以降 asyncio lock 化: IPC ディスパッチャから並行呼出しされる場合に必要
+
+### レビュー反映 (2026-04-26, ラウンド R2)
+
+#### 解消した指摘
+- ✅ R2-MEDIUM-1 (SFH): `test_wall_clock_independence` の `datetime.datetime` パッチを削除（nautilus 内部干渉リスク解消）
+- ✅ R2-M-A (GPT): `test_two_runs_same_last_prices` に `assert len(fill_last_prices) > 0` 追加（偽陽性防止）
+- ✅ R2-M-B (GPT): `test_data_mapping_instrument.py` の `pytest.approx` を `str(price_increment) == "0.1"` に変更（Decimal 厳密比較）
+
+#### 知見
+- `_collect_fill_data` の `avg_px` フィールドは nautilus 1.225.0 で正常動作を確認（非空テストが PASS）
+- `fill_last_prices` の偽陽性ガードを `test_two_runs_same_last_prices` に入れることで、`avg_px` 属性名変更を将来のバージョンアップで即検知できる
+
 ---
 
 ## Phase N1: リプレイ HTTP API の差し替え + REPLAY 仮想注文 + ナラティブ API 新設

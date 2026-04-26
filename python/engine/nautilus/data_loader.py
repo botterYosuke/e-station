@@ -9,9 +9,10 @@ JST 変換規約: 立花日足の終値時刻 = 15:30 JST = 06:30 UTC
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
@@ -23,8 +24,11 @@ _CLOSE_MINUTE_JST = 30
 _PRICE_PRECISION = 1
 _SIZE_PRECISION = 0
 
+_DATE_RE = re.compile(r"^\d{8}$")
+_NUMERIC_FIELDS = ("open", "high", "low", "close", "volume")
 
-@dataclass
+
+@dataclass(frozen=True)
 class KlineRow:
     """立花 CLMMfdsGetMarketPriceHistory レスポンスの 1 本足."""
 
@@ -34,6 +38,20 @@ class KlineRow:
     low: str
     close: str
     volume: str
+
+    def __post_init__(self) -> None:
+        if not _DATE_RE.match(self.date):
+            raise ValueError(
+                f"KlineRow.date: expected YYYYMMDD (8 digits), got {self.date!r}"
+            )
+        for field_name in _NUMERIC_FIELDS:
+            value = getattr(self, field_name)
+            try:
+                Decimal(value)
+            except (InvalidOperation, TypeError) as exc:
+                raise ValueError(
+                    f"KlineRow.{field_name}: not convertible to Decimal: {value!r}"
+                ) from exc
 
 
 def klines_to_bars(

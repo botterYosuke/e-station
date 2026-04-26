@@ -30,6 +30,9 @@ def make_equity_instrument(
 
     Q8 決定: price_increment は 0.1 円固定（案 A）。
     実際の呼値丸めは _compose_request_payload で行う。
+
+    ts_event / ts_init: N0 仮置きで 0 をハードコード（data-mapping.md §2 "N0 仮置き"）。
+        N2 LiveExecutionClient では起動時刻(nanoseconds)を渡すこと。
     """
     return Equity(
         instrument_id=InstrumentId(Symbol(symbol), Venue(venue)),
