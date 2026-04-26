@@ -69,6 +69,45 @@ where
     Ok(Some(parsed))
 }
 
+/// Thin wrapper for the most common capability key — the per-venue list
+/// of supported timeframes (e.g. Tachibana = `["1d"]`). Returning
+/// `Ok(None)` means the venue did not advertise the constraint, which
+/// the UI must treat as "no restriction" (fail-open) per B3 §6 design
+/// note. `Ok(Some(vec![]))` is a malformed-but-typed advertisement
+/// — the caller decides whether to treat empty list as "nothing
+/// supported" or as a typo (currently surfaced verbatim).
+pub fn supported_timeframes_for(
+    capabilities: &Value,
+    venue: &str,
+) -> Result<Option<Vec<String>>, CapabilityError> {
+    venue_capability::<Vec<String>>(capabilities, venue, "supported_timeframes")
+}
+
+/// UI state-model gate: should the timeframe selector enable `tf` for
+/// `venue`?
+///
+/// - `Ok(true)` — the venue advertised `supported_timeframes` and `tf`
+///   is in the list, OR no `supported_timeframes` advertisement was
+///   made (capabilities-not-received => fail-open per B3 §6).
+/// - `Ok(false)` — the venue advertised an explicit list and `tf` is
+///   not in it (e.g. Tachibana + `"5m"`).
+/// - `Err(_)` — malformed `capabilities` blob; the caller should log
+///   and treat as fail-open to avoid a hard UI lockout from a
+///   schema bug.
+///
+/// `tf` is the wire string (e.g. `"1d"`, `"5m"` — see
+/// `engine_client::backend::timeframe_to_str`).
+pub fn is_timeframe_enabled(
+    capabilities: &Value,
+    venue: &str,
+    tf: &str,
+) -> Result<bool, CapabilityError> {
+    match supported_timeframes_for(capabilities, venue)? {
+        Some(list) => Ok(list.iter().any(|s| s == tf)),
+        None => Ok(true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +159,20 @@ mod tests {
         let caps = json!("oops");
         let v: Result<Option<bool>, _> = venue_capability(&caps, "tachibana", "x");
         assert!(matches!(v, Err(CapabilityError::RootNotObject)));
+    }
+
+    #[test]
+    fn test_supported_timeframes_for_tachibana_returns_1d() {
+        let caps = caps();
+        let v = supported_timeframes_for(&caps, "tachibana").unwrap();
+        assert_eq!(v, Some(vec!["1d".to_string()]));
+    }
+
+    #[test]
+    fn test_supported_timeframes_for_unknown_venue_returns_none() {
+        let caps = caps();
+        let v = supported_timeframes_for(&caps, "binance").unwrap();
+        assert!(v.is_none());
     }
 
     #[test]

@@ -444,6 +444,18 @@ impl VenueBackend for EngineClientBackend {
                                 let map: TickerMetadataMap = tickers
                                     .iter()
                                     .filter_map(|t| {
+                                        if market_kind == MarketKind::Stock {
+                                            // B3 HIGH-U-9: route Tachibana stock dicts through
+                                            // the typed parser so `lot_size` / `quote_currency`
+                                            // / `display_name_ja` are picked up. The display meta
+                                            // is dropped at this layer; B4 will plumb the
+                                            // `HashMap<Ticker, TickerDisplayMeta>` side-channel.
+                                            let (ticker, info, _meta) =
+                                                crate::tachibana_meta::parse_tachibana_ticker_dict(
+                                                    t, exchange,
+                                                )?;
+                                            return Some((ticker, Some(info)));
+                                        }
                                         let symbol = t.get("symbol")?.as_str()?;
                                         if !symbol.is_ascii()
                                             || symbol.len() > Ticker::MAX_LEN as usize

@@ -67,13 +67,22 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def _run(port: int, token: str, *, dev_tachibana_login_allowed: bool) -> None:
+async def _run(
+    port: int,
+    token: str,
+    *,
+    dev_tachibana_login_allowed: bool,
+    cache_dir: str | None = None,
+) -> None:
+    from pathlib import Path
+
     from engine.server import DataEngineServer
 
     server = DataEngineServer(
         port=port,
         token=token,
         dev_tachibana_login_allowed=dev_tachibana_login_allowed,
+        cache_dir=Path(cache_dir) if cache_dir else None,
     )
     await server.serve()
 
@@ -120,6 +129,7 @@ def main() -> None:
     args = _parse_args()
 
     dev_tachibana_login_allowed = False
+    cache_dir: str | None = None
 
     if args.port and args.token:
         # HIGH-6 (ラウンド 6): one-shot deprecation warning. The CLI
@@ -149,9 +159,15 @@ def main() -> None:
             dev_tachibana_login_allowed = _coerce_dev_login_allowed(
                 cfg.get("dev_tachibana_login_allowed", False)
             )
+            cache_dir = cfg.get("cache_dir")
 
     asyncio.run(
-        _run(port, token, dev_tachibana_login_allowed=dev_tachibana_login_allowed)
+        _run(
+            port,
+            token,
+            dev_tachibana_login_allowed=dev_tachibana_login_allowed,
+            cache_dir=cache_dir,
+        )
     )
 
 

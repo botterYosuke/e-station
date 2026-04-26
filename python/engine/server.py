@@ -40,6 +40,7 @@ from engine.exchanges.bybit import BybitWorker
 from engine.exchanges.hyperliquid import HyperliquidWorker
 from engine.exchanges.mexc import MexcWorker
 from engine.exchanges.okex import OkexWorker
+from engine.exchanges.tachibana import TachibanaWorker
 from engine.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
@@ -109,23 +110,50 @@ class DataEngineServer:
         token: str,
         *,
         dev_tachibana_login_allowed: bool = False,
+        cache_dir: Path | None = None,
+        tachibana_is_demo: bool = True,
     ) -> None:
         self._port = port
         self._token = token
         self._dev_tachibana_login_allowed = dev_tachibana_login_allowed
+        # B3: cache_dir is plumbed from __main__.py (T4 stdin payload). It
+        # falls back to a per-user default so dev mode (`uv run python -m
+        # engine --port ... --token ...`) keeps working without an explicit
+        # arg. The TachibanaWorker is the only worker that uses it (master
+        # cache path) so a None here would crash worker construction below.
+        if cache_dir is None:
+            cache_dir = Path.home() / ".cache" / "flowsurface" / "engine"
+        self._cache_dir = Path(cache_dir)
         self._current_conn: ServerConnection | None = None
         self._shutdown_event = asyncio.Event()
         self._outbox_event = asyncio.Event()
         self._engine_session_id: UUID = uuid.uuid4()
         self._handshake_lock = asyncio.Lock()
 
-        # Per-venue workers
-        self._workers: dict[str, BinanceWorker | BybitWorker | HyperliquidWorker | MexcWorker | OkexWorker] = {
+        # Per-venue workers. The Tachibana worker is constructed at init time
+        # (option (a) in B3 §3) with `session=None` so it sits dormant until
+        # `SetVenueCredentials` succeeds and `set_session(...)` injects the
+        # post-login `TachibanaSession`. This matches the lifecycle of the
+        # crypto workers (init-time construction, lazy first-call HTTP) and
+        # avoids a special-case "register-on-login" path in the dispatcher.
+        self._workers: dict[
+            str,
+            BinanceWorker
+            | BybitWorker
+            | HyperliquidWorker
+            | MexcWorker
+            | OkexWorker
+            | TachibanaWorker,
+        ] = {
             "binance": BinanceWorker(),
             "bybit": BybitWorker(),
             "hyperliquid": HyperliquidWorker(),
             "mexc": MexcWorker(),
             "okex": OkexWorker(),
+            "tachibana": TachibanaWorker(
+                cache_dir=self._cache_dir,
+                is_demo=tachibana_is_demo,
+            ),
         }
 
         # Active stream tasks keyed by (venue, ticker, market, stream_type, timeframe|None)
@@ -265,6 +293,28 @@ class DataEngineServer:
         except Exception as exc:
             log.warning("Worker prepare() raised: %s; emitting Ready anyway", exc)
 
+        # B3: aggregate per-venue capability dicts into a structured
+        # `venue_capabilities` block. Workers that override
+        # `capabilities()` to a non-empty dict get a venue entry; the
+        # legacy flat keys (`supported_venues` / `supports_bulk_trades` /
+        # `supports_depth_binary`) are retained verbatim so older Rust
+        # clients that haven't been recompiled against the new helper
+        # keep working (M1: avoid a one-shot schema bump that would
+        # double-bind UI release with engine release).
+        venue_caps: dict[str, dict] = {}
+        for venue, worker in self._workers.items():
+            try:
+                caps = worker.capabilities()
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning(
+                    "venue=%s capabilities() raised %s — omitting from Ready",
+                    venue,
+                    exc,
+                )
+                continue
+            if caps:
+                venue_caps[venue] = caps
+
         ready = Ready(
             schema_major=SCHEMA_MAJOR,
             schema_minor=SCHEMA_MINOR,
@@ -274,6 +324,7 @@ class DataEngineServer:
                 "supported_venues": list(self._workers.keys()),
                 "supports_bulk_trades": True,
                 "supports_depth_binary": False,
+                "venue_capabilities": venue_caps,
             },
         )
         await ws.send(orjson.dumps(ready.model_dump(mode="json")).decode())
@@ -538,6 +589,25 @@ class DataEngineServer:
                         "request_id": request_id,
                         "code": "not_implemented",
                         "message": str(exc),
+                    }
+                )
+            except TachibanaError as exc:
+                # B3 plan §T4 L548: surface the worker-side error code
+                # (e.g. `"not_implemented"` from VenueCapabilityError) as-is
+                # so the Rust UI can branch on `code` rather than
+                # string-matching the message.
+                log.warning(
+                    "Fetch tachibana error (request_id=%s code=%s): %s",
+                    request_id,
+                    exc.code,
+                    exc.message,
+                )
+                self._outbox.append(
+                    {
+                        "event": "Error",
+                        "request_id": request_id,
+                        "code": exc.code,
+                        "message": exc.message,
                     }
                 )
             except Exception as exc:

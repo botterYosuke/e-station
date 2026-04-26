@@ -14,6 +14,7 @@ pub mod depth_tracker;
 pub mod dto;
 pub mod error;
 pub mod process;
+pub mod tachibana_meta;
 
 pub use backend::EngineClientBackend;
 pub use connection::EngineConnection;

@@ -67,6 +67,7 @@ _ALL_WORKER_CLASSES = [
     "HyperliquidWorker",
     "MexcWorker",
     "OkexWorker",
+    "TachibanaWorker",
 ]
 
 
@@ -199,7 +200,7 @@ async def test_set_proxy_with_no_streams_does_not_crash(proxy_server):
 
 
 @pytest.mark.asyncio
-async def test_set_proxy_calls_set_proxy_on_all_five_workers(proxy_server):
+async def test_set_proxy_calls_set_proxy_on_all_workers(proxy_server):
     """set_proxy must be forwarded to every venue worker, not just the subscribed one."""
     port, token, worker = proxy_server
     ws = await _connect_and_handshake(port, token)
@@ -208,9 +209,11 @@ async def test_set_proxy_calls_set_proxy_on_all_five_workers(proxy_server):
     await ws.send(orjson.dumps({"op": "SetProxy", "url": new_url}))
     await asyncio.sleep(0.1)
 
-    # Five workers share one mock object — 5 calls expected
-    assert worker.set_proxy.call_count == 5, (
-        f"Expected 5 set_proxy calls (one per venue), got {worker.set_proxy.call_count}"
+    # All workers share one mock object — one set_proxy call per venue.
+    expected = len(_ALL_WORKER_CLASSES)
+    assert worker.set_proxy.call_count == expected, (
+        f"Expected {expected} set_proxy calls (one per venue), "
+        f"got {worker.set_proxy.call_count}"
     )
     worker.set_proxy.assert_called_with(new_url)
     await ws.close()

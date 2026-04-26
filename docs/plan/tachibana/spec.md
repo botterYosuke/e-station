@@ -15,7 +15,7 @@
 - **Python 実装** `python/engine/exchanges/tachibana.py`（`ExchangeWorker` 実装、デモ環境のみ）
   - 認証フロー（`CLMAuthLoginRequest` → 5 つの仮想 URL を取得 → `TachibanaSession` 保持）
   - ティッカー一覧（`CLMEventDownload` の `CLMIssueMstKabu` から銘柄マスタを取り出す）
-  - ティッカーメタデータ（呼値単位・売買単位・銘柄名）— **本線は銘柄マスタ（`CLMIssueMstKabu` + `CLMIssueSizyouMstKabu`）から合成**し、マスタ未掲載や追加情報が必要な場合のみ `CLMMfdsGetIssueDetail` をフォールバックで叩く（F9）
+  - ティッカーメタデータ（呼値単位・売買単位・銘柄名）— **本線は銘柄マスタ（`CLMIssueMstKabu` + `CLMIssueSizyouMstKabu` + `CLMYobine`）から合成**し、マスタ未掲載や追加情報が必要な場合のみ `CLMMfdsGetIssueDetail` をフォールバックで叩く（F9）。呼値は **per-stock 解決**（`CLMIssueSizyouMstKabu.sYobineTaniNumber` で `CLMYobine` 行を引いて band を選ぶ）であり、全銘柄共通の単一価格帯テーブルは存在しない（data-mapping.md §5）
   - 日足 kline 履歴（`CLMMfdsGetMarketPriceHistory`）
   - 24h ticker stats 相当（`CLMMfdsGetMarketPrice` のスナップショットから派生）
   - **取引（FD frame）ストリーム**: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）。**T0.1 FD 情報コード明示ゲート（implementation-plan.md L21）の通過が前提**。ゲート未通過のまま B 系縮退を採るなら本項目（trade ストリーム）と次項目（板スナップショット）は MVP から外す
@@ -28,7 +28,7 @@
   - GUI ライブラリは **tkinter（Python 標準ライブラリ）** を採用（追加依存ゼロ、日本語 IME 対応、軽量）。tkinter の制約（メインスレッド要求）はログインヘルパー subprocess 隔離で回避
   - **tkinter ヘルパー spawn の起動条件（runtime 中の自動再ログイン禁止と整合、§3.2 LOW-3 参照）**: (a) アプリ起動直後の session 検証フェーズで keyring が空 / 復元 session が validate に失敗した場合、(b) Rust UI が `Command::RequestVenueLogin` を発火した場合、の 2 経路のみ。**runtime 中に `p_errno=2` を検知しても Python は自発的にダイアログを spawn しない**（`VenueError{code:"session_expired"}` を返すだけ）。Rust UI には `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` で状態を伝える
   - **「立花にログイン」ボタンの常設（LOW-7、F-M1a、H3 修正）**: `VenueLoginCancelled` 後の再ログイン導線として、**サイドバー（[src/screen/dashboard/sidebar.rs](../../../src/screen/dashboard/sidebar.rs)）の venue リスト項目「Tachibana」上**に常設する（`Venue::ALL` ベースで `VenueReady` 状態に依らず常時描画される領域）。**禁止配置**: 立花 ticker selector / 立花 pane のヘッダ部に置くと `VenueReady` 前は ticker selector / pane が空 or 非表示でデッドロックするため不可。フォールバックとしてメインウィンドウ上部のステータスバナー領域に「立花未ログイン」表示中のみ補助ボタンを許容。押下で `Command::RequestVenueLogin` を発火（複数経路で発火させない、[implementation-plan.md T3 H3 修正](./implementation-plan.md)）
-  - `TickerInfo`・`Exchange::price_step` 等で立花特有の呼値単位を反映
+  - `TickerInfo`・`Exchange::price_step` 等で立花特有の呼値単位を反映（実装源は `CLMYobine` + `CLMIssueSizyouMstKabu.sYobineTaniNumber`、Phase 1 でも銘柄別呼値を使用、data-mapping.md §5）
   - `MarketKind::Stock` 追加に伴う UI / indicator / timeframe / market filter / 表示ラベルの網羅修正
 - **デモ環境のみ**: `https://demo-kabuka.e-shiten.jp/e_api_v4r8/`
 - **debug ビルドの env 自動ログイン**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO=true`（venue prefix を付けて将来の他 venue ID と衝突させない方針）。**`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 では予約名として一覧化せず、計画文書からも削除する**（F-H5、第二暗証番号は収集も保持もしない方針との整合）。Phase 2 着手時に env 名を改めて確定する。SKILL.md 側の `DEV_USER_ID` 旧表記の書き換えは [implementation-plan.md T0.2 の SKILL.md 同期タスク](./implementation-plan.md) に集約

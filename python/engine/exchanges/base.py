@@ -37,6 +37,20 @@ class ExchangeWorker(ABC):
         """
         return None
 
+    def capabilities(self) -> dict:
+        """Per-venue capability advertisement (B3 / plan §T4 L508-549).
+
+        The returned dict is merged into `Ready.capabilities.venue_capabilities[<venue>]`
+        verbatim. Empty dict means "no venue-specific capability constraints" — the
+        Rust UI then assumes every default-supported feature is available
+        (capabilities-not-received => fail-open per B3 design note).
+
+        Workers that *do* constrain features (e.g. Tachibana — only `"1d"`) must
+        override and return the constraint set so the UI can pre-disable
+        unsupported timeframes / features before the user clicks them.
+        """
+        return {}
+
     @abstractmethod
     async def set_proxy(self, url: str | None) -> None:
         """Apply a new proxy URL, closing any open HTTP client."""

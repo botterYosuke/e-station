@@ -3,7 +3,7 @@
 | # | 論点 | 候補 | 決定タイミング | 備考 |
 | :-- | :--- | :--- | :--- | :--- |
 | Q1 | クレデンシャル IPC コマンド名 | `SetVenueCredentials`（汎用）/ `SetTachibanaCredentials`（venue 固有） | T0 | **決定: 前者（generic + venue-tagged typed enum）**。payload は `serde_json::Value` ではなく `VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire)` で typed に持たせ、`Debug` マスク可能にする。`request_id` で `VenueReady`/`VenueError` と相関（F1/F6） |
-| Q2 | `MinTicksize` の価格帯対応 | (A) 最小値固定 / (B) 型拡張 / (C) 動的更新 | T4 | Phase 1 リードオンリーなら (A) で十分。Phase 2 で再検討（[data-mapping.md §5](./data-mapping.md#5-ticker-metadata呼値売買単位)） |
+| Q2 | `MinTicksize` の価格帯対応 | (A) per-stock 1 値固定 / (B) 型拡張 / (C) 動的更新 | T4 | **決定: (A) per-stock 1 値固定**。呼値は `CLMYobine`（`sYobineTaniNumber` ごとに 20 段の `sKizunPrice_n` / `sYobineTanka_n` / `sDecimal_n`）を master download で取得し、銘柄ごとに `CLMIssueSizyouMstKabu.sYobineTaniNumber` で参照して band を選ぶ。Phase 1 でも **per-stock 解決**を採用（旧「単一 hardcode 表 + `tick_size_for_price(price: Decimal) -> Decimal` 単一引数」前提は撤回）。資料_呼値の所在不明問題は `CLMYobine` 実データで Phase 1 実装前提として解決済み（B1 完了 / B2 で master 結合）。Phase 2（発注）で (B)/(C) 再検討（[data-mapping.md §5](./data-mapping.md#5-ticker-metadata呼値売買単位)） |
 | Q3 | 「diff のない venue」表現 | capabilities フラグ / stream-kind 追加 / 既存 DepthSnapshot の繰返しで運用 | T0 | **実装確認の結果、Phase 1 は `DepthSnapshot` の繰返しだけで成立見込み**。capabilities は主に UI 非活性化用途として残す |
 | Q4 | EVENT は HTTP long-poll か WebSocket か | (a) WS のみ / (b) フォールバック付き | T5 | サンプル WS 版のほうが軽量で構築が単純。**推奨: WS のみ**。HTTP long-poll は閉鎖環境向けの予備なので Phase 1 では切り捨て |
 | Q5 | 銘柄マスタ 21MB の保管場所 | メモリ展開のみ / アプリのキャッシュディレクトリに永続 | T4 | 起動時間と再ログイン頻度のトレードオフ。**推奨: 日付つきファイルでキャッシュ + 起動時に当日分なければ再取得** |

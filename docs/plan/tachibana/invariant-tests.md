@@ -53,6 +53,13 @@
 | HIGH-U-10c | implementation-plan.md T4（マスタ invalidation: `__init__` 再生成） | `python/tests/test_tachibana_master_invalidation.py::test_master_event_is_fresh_per_worker_init` | T4 |
 | HIGH-U-11p | implementation-plan.md T4（非 `"1d"` kline 拒否 / Python 側） | `python/tests/test_tachibana_fetch_klines_reject.py::test_fetch_klines_rejects_non_d1_timeframes` | T4 |
 | HIGH-U-11r | implementation-plan.md T4（非 `"1d"` kline 拒否 / Rust 復元 fail-safe） | `engine-client/tests/tachibana_kline_capability_gate.rs::test_restored_pane_with_non_d1_timeframe_does_not_crash` | T4 |
+| HIGH-D2-1-B1a | data-mapping.md §5.2 / implementation-plan.md T4 B1（`CLMYobine` decoder 20 スロット読出し） | `python/tests/test_tachibana_yobine.py::test_clm_yobine_decoder_collects_20_bands` | T4 |
+| HIGH-D2-1-B1b | data-mapping.md §5.2（`999999999` sentinel truncate） | `python/tests/test_tachibana_yobine.py::test_clm_yobine_decoder_truncates_at_999999999_sentinel` | T4 |
+| HIGH-D2-1-B1c | data-mapping.md §5.3（`tick_size_for_price` 代表 yobine_code 境界値 ±1 銭） | `python/tests/test_tachibana_yobine.py::test_tick_size_for_price_uses_first_band_le_price` | T4 |
+| HIGH-D2-1-B1d | data-mapping.md §5.3（未知 `yobine_code` で `KeyError`） | `python/tests/test_tachibana_yobine.py::test_tick_size_for_price_unknown_yobine_code_raises_keyerror` | T4 |
+| HIGH-D2-1-B1e | data-mapping.md §5.3（`price` は `Decimal` 限定、int/float 拒否） | `python/tests/test_tachibana_yobine.py::test_tick_size_for_price_decimal_only` | T4 |
+| HIGH-D2-1-B2a | data-mapping.md §5.4 / implementation-plan.md T4 B2（銘柄→ yobine_code → tick 解決） | `python/tests/test_tachibana_master_yobine_resolve.py::test_resolve_tick_size_for_issue_uses_clm_yobine_lookup` | T4 |
+| HIGH-D2-1-B2b | implementation-plan.md T4 B2（`yobine_table` invalidation: is_demo / JST / `__init__`） | `python/tests/test_tachibana_master_yobine_invalidation.py::test_yobine_table_reloaded_on_invalidation_triggers` | T4 |
 
 ---
 

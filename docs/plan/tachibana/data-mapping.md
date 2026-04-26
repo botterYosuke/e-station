@@ -35,7 +35,7 @@ pub enum Exchange {
 | 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は `exchange/src/lib.rs::Ticker::new` で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに **`EngineEvent::TickerInfo` の各 ticker dict**（現状 `Vec<serde_json::Value>`、`engine-client/src/dto.rs::EngineEvent::TickerInfo`）に Python 側が `display_name_ja: string \| null` キーを詰めて送る（T0.2 確定方針）。`TickerListed` という名の DTO 型は存在しない。Rust 側 UI は受信した dict から `display_name_ja` を取り出して `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T4 で実装）。**キー名の typo サイレント失敗防止**のため、Python 単体テストで `display_name_ja`（`display_name_jp` ではない）を assert する（M9） |
 | 市場コード | `sSizyouC`（`00`=東証） | Phase 1 は東証固定 |
 | 売買単位 | 銘柄マスタ `sTatebaTanniSuu` | `TickerInfo.lot_size` 相当（新規プロパティ追加要） |
-| 呼値単位 | マスタ「呼値」テーブル（価格帯依存） | `Price` の min_ticksize で表現。**価格帯ごとに変わる** ため固定 1 値では足りない（§5 参照） |
+| 呼値単位 | `CLMYobine` テーブル（`sYobineTaniNumber` ごとに 20 段の `sKizunPrice_n` / `sYobineTanka_n` / `sDecimal_n`）+ `CLMIssueSizyouMstKabu.sYobineTaniNumber`（銘柄→ yobine_code 参照） | 銘柄ごとに `sYobineTaniNumber` で `CLMYobine` 行を引き、現在価格に応じた band を選ぶ。固定 1 値ではなく **per-stock per-band** lookup（§5 参照） |
 
 `Ticker::new("7203", Exchange::TachibanaStock)` のような文字列パスで素直に通る（現 API は第 2 引数 `Exchange` が必須、`exchange/src/lib.rs::Ticker::new`）。既存 `Ticker::new` は ASCII 制約と `MAX_LEN` チェック（`exchange/src/lib.rs::Ticker::new`）のみで、**`130A0` のような英字混在 5 桁 ticker も許容可能**。T4 では「実データで通ること」（ASCII 制約 + MAX_LEN 収容）の確認に留める（F2）。
 
@@ -97,24 +97,26 @@ DepthSnapshot {
 
 ## 5. ticker metadata（呼値・売買単位）
 
-立花の呼値テーブル（マスタの「2-12 呼値」）は **価格帯ごとに刻みが変わる**:
+立花の呼値は **銘柄ごとに `CLMYobine` 行を引いて求める**。`CLMYobine` は `sYobineTaniNumber` 別の最大 20 段 band（`sKizunPrice_n` / `sYobineTanka_n` / `sDecimal_n`）を持ち、銘柄は `CLMIssueSizyouMstKabu.sYobineTaniNumber` でこれを参照する（B1 確定方針）。**全銘柄共通の単一 hardcode 表は存在しない**。`api_request_if_master_v4r5.pdf §2-12` は呼値テーブルの**構造説明**（PDF 内で「資料_呼値」を参照と明記）であり、PDF 単独で全価格帯を写経する旧前提は撤回。実値は **`CLMYobine` の master download** で常に取得する。
+
+スクリーンショット例（PDF §2-12、`sYobineTaniNumber=101` の抜粋。**hardcode 用ではなくテーブル形式の理解用**）:
 
 ```
 価格 ≤ 3,000:    1 円刻み
 価格 ≤ 5,000:    5 円刻み
 ...
-価格 > 30,000,000: 10,000 円刻み
+価格 > 30,000,000: 10,000 円刻み（999999999 sentinel 終端）
 ```
 
 既存 `MinTicksize` は **1 値固定** を前提とした型（[exchange/src/unit.rs](../../../exchange/src/unit.rs) 周辺）。**3 つの選択肢**:
 
-- **(A) 最小値固定** — `TickerInfo` 構築時に「当該銘柄の現在価格帯から呼値テーブル §2-12 を引いた 1 値」を埋める（例: 7203=1 円、9984=10 円、優先株 / 値嵩株 ETF=0.1 円）。**T4 のマスタ取得時にスナップショット価格を参照して決定**し、ザラ場中の価格帯遷移は無視する
-- **(B) `MinTicksize` を「価格帯テーブル参照可能」に拡張** — 既存型のオーバーホール。波及範囲が大きい
-- **(C) ticker ごとに「現在価格に応じた tick」を動的に再計算する** — `TickerInfo` を時価変動で更新
+- **(A) per-stock 1 値固定（Phase 1 採用、B4 改訂）** — `TickerInfo` 構築時に「当該銘柄の `sYobineTaniNumber` で `CLMYobine` を引き、現在価格帯から 1 band を選んだ刻み」を埋める。**T4 のマスタ取得時にスナップショット価格を参照して決定**し、ザラ場中の価格帯遷移は無視する。`tick_size_for_price(price, yobine_code, yobine_table)` の戻り値を `Decimal -> f32` で `TickerInfo::new_stock(min_ticksize: f32, ...)` に詰める
+- **(B) `MinTicksize` を「価格帯テーブル参照可能」に拡張** — 既存型のオーバーホール。波及範囲が大きい。Phase 2 候補
+- **(C) ticker ごとに「現在価格に応じた tick」を動的に再計算する** — `TickerInfo` を時価変動で更新。Phase 2（発注）候補
 
-**Phase 1 推奨: (A)**（B4 改訂）。**「最小値の 0.1 円固定」は不採用**。理由は通常株（TOPIX100 を除く大半）の呼値刻みは 1 円〜10 円であり、0.1 円固定だと価格軸ラベルに無意味な小数桁（`7203.0` `7203.1` ...）が出てチャート可読性が下がるため。リードオンリーなので発注 reject は起きないが、UI 描画品質を優先する。`TickerInfo::new_stock` の引数で `min_ticksize: f32` を受け取る既存シグネチャはそのまま使え、Python 側 `tachibana_master.py` で「銘柄スナップショット価格 → 呼値刻み」を表引きで解決する。Phase 2（発注）で (C) に移行。
+**Phase 1 採用: (A)**。**「最小値の 0.1 円固定」は不採用**。理由は通常株（TOPIX100 を除く大半）の呼値刻みは 1 円〜10 円であり、0.1 円固定だと価格軸ラベルに無意味な小数桁（`7203.0` `7203.1` ...）が出てチャート可読性が下がるため。リードオンリーなので発注 reject は起きないが、UI 描画品質を優先する。`sDecimal_n` 由来の量子化は trade price / depth price の **表示丸め**で別途使用する（軸ラベル刻みは `MinTicksize` 1 値で行う）。Phase 2（発注）で (C) に移行。
 
-**呼値テーブル（`api_request_if_master_v4r5.pdf` §2-12 参照、`manual_files/` に同梱）の Python 側実装**: `tachibana_master.py` に `tick_size_for_price(price: Decimal) -> Decimal` を 1 関数置き、PDF §2-12 の価格帯 → 刻み テーブルを hardcode（Phase 1）。実装者は PDF §2-12 を直接参照して全価格帯を写すこと（上記 3 行の抜粋は例示のみで全量ではない）。テーブル変更は立花側で年単位の頻度なので Phase 1 では更新監視を入れない。テスト: 各価格帯境界値（例 3000 円 / 3001 円 / 5000 円 / 5001 円 など）で正しい刻みが返ることを `test_tachibana_codec.py` か専用テストで確認する。
+**呼値テーブル（`api_request_if_master_v4r5.pdf` §2-12 参照）の Python 側実装（B1 改訂、A 方針確定）**: §2-12 は呼値テーブルの**構造説明**（最大 20 段の `(sKizunPrice_N, sYobineTanka_N, sDecimal_N)` を持つ `sYobineTaniNumber` 別 row）であり、全価格帯を 1 つの hardcode 表に閉じ込められる類のドキュメントではない（PDF 内で「資料_呼値」を参照と明記。実値はランタイムでマスタダウンロードから供給される）。よって per-stock の `sYobineCode = CLMIssueSizyouMstKabu.sYobineTaniNumber` を `CLMYobine` レコードに引き当てて刻みを決定する設計を採る。`tachibana_master.py` に `CLMYobine` dataclass / decoder（`YobineBand`, `CLMYobineRecord`, `decode_clm_yobine_record`）と純粋関数 `tick_size_for_price(price: Decimal, yobine_code: str, yobine_table: dict[str, list[YobineBand]]) -> Decimal`（最初に `price <= band.kizun_price` を満たす band の `yobine_tanka` を返す）を実装する（B1 で完了）。20 段のうち末尾は仕様上 `999999999` の sentinel が必ず入る（PDF 注記）ため、これをテーブルの cap として活用する。テスト fixture は PDF 画像で見えた例示行（`101`/`103`/`418` の 1〜2 段）で十分。`yobine_table` をどう持ち回るか・`TickerInfo` payload に `yobine_code` を載せるかは B2 で実装。
 
 `TickerInfo` 拡張案:
 
