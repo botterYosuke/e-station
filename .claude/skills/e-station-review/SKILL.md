@@ -1,44 +1,36 @@
 ---
 name: e-station-review
-description: 実装計画書・仕様書・設計書・未解決事項を起点に、実装差分を仕様適合・回帰・テスト不足の観点でレビューするためのスキル。特に phase / task / invariant / source of truth の取り違え、Rust-Python 境界のずれ、イベント順序や bootstrap 経路の見落としを防ぐ。
-origin: ECC (e-station 向けカスタム)
+description: e-station の実装レビュー用スキル。plan/spec/architecture/open questions の整合、phase/task/deferred の境界、Rust-Python 間の契約、bootstrap/reconnect/recovery の見落としや silent failure を優先して洗う。
+origin: ECC
 ---
 
 # e-station Review
 
-このスキルは、実装コードをレビューするときに「コードがきれいか」よりも先に、
-その変更が計画・仕様・設計・既知の制約に合っているかを確認するためのもの。
+このスキルは、コードが動くかだけではなく「計画どおりに安全に動くか」を見るためのレビュー手順です。特に phase またぎ、bootstrap、reconnect、FSM、gate、Rust-Python 境界での見落としを重点的に探します。
 
 ## 目的
-
-- 実装が `implementation-plan.md` の該当 task / phase / acceptance に沿っているか確認する
-- `spec.md` / `architecture.md` / `open-questions.md` と矛盾する実装を見つける
-- silent failure、回帰、gate すり抜け、別経路だけ壊れる実装を見つける
-- pin test が足りない変更を見つける
+- `implementation-plan.md` の task / phase / acceptance に照らして実装を確認する
+- `spec.md` / `architecture.md` / `open-questions.md` と矛盾する変更を見つける
+- silent failure、復旧経路、deferred 項目の取り違えを見つける
+- pin test が不足している高リスク箇所を先に挙げる
 
 ## 最初に読むもの
-
-最低限、以下は最初に読む。
-
 - 対象の `implementation-plan.md`
 - 関連する `spec.md`
 - 関連する `architecture.md`
 - 関連する `open-questions.md`
 
-レビューはコードを読んで終わりではなく、必ず文書の source of truth と照合する。
+レビューはコードから始めてもよいが、source of truth を読まずに「見た目でよさそう」と判断しない。
 
 ## 基本ルール
 
-### 1. 実装より先に計画を読む
+### 1. まず phase と task の境界を固定する
+- どの task をレビューしているかを明確にする
+- deferred / non-goal / follow-up を区別する
+- source of truth がどれかを先に固定してからコードを読む
 
-- どの task を実装した変更かを特定する
-- 完了条件、deferred 項目、non-goal を確認する
-- source of truth がどこかを決めてからコードを読む
-
-### 2. 用語の揺れを grep する
-
-レビュー開始時に、以下のような語を `rg` で拾って文脈を揃える。
-
+### 2. grep で用語の揺れを拾う
+最低限、次を `rg` で確認する。
 - `invariant`
 - `acceptance`
 - `source of truth`
@@ -50,138 +42,141 @@ origin: ECC (e-station 向けカスタム)
 - `Error`
 - `Login`
 
-### 3. 名前・型・wire 形状の一致を見る
-
+### 3. enum / DTO / event / wire を一周する
 - enum 名
 - DTO 名
 - event 名
-- field / key 名
+- field / key
 - wire 値
 - error code
-- phase 固有の feature flag / capability
+- phase 制約
+- feature flag / capability
 
-1 箇所だけ直っていて、他の出現箇所が古いままのケースを疑う。
+1 箇所だけ合っていても安心しない。出入口の全経路が揃っているかを見る。
 
 ### 4. Findings First
-
-レビュー結果は finding を先に出す。
-
-1. 仕様・計画との不整合
-2. gate / recovery / bootstrap の回帰
-3. 別経路だけ壊れる実装
-4. テスト不足や pin 漏れ
+レビュー結果は finding 優先で出す。
+1. バグ、回帰、仕様ズレ
+2. gate / recovery / bootstrap の穴
+3. silent failure
+4. pin test 不足
 
 ## 重点観点
 
-### 1. 仕様語と wire 形状の一致
-
-- 用語だけ正しくて wire 値が違っていないか
-- enum / schema / IPC の文字列が文書と一致しているか
-- UI 表示名と内部キーを取り違えていないか
+### 1. 仕様と wire の一致
+- 用語は正しくても wire 値が違っていないか
+- enum / schema / IPC の表記揺れがないか
+- UI 表示名と内部キー名を混同していないか
 
 例:
-
 - `D1` と `"1d"`
 - `display_symbol` と `display_name_en`
 - `VenueError` と `EngineError`
 
-### 2. deferred 項目の混入
-
-- 先の phase に送った task を今の phase に混ぜていないか
-- open question が未解決のまま実装を確定扱いしていないか
+### 2. deferred 項目の扱い
+- 別 phase に送った task を今 phase に紛れ込ませていないか
+- open question が未解決のまま実装を正当化していないか
 - source of truth が古い文書にずれていないか
 
-### 3. フェーズ跨ぎの整合
-
-- T3 の fix が T4/T5 の記述と矛盾していないか
-- ブロッカー解消のつもりで別 phase の前提を壊していないか
-- リスクや制約が README / plan / architecture の一部にしか書かれていない場合、それを見落としていないか
+### 3. フォローアップ前提の混入
+- T3 の fix が T4/T5 の前提を壊していないか
+- ブロッカー解消のつもりで別 phase の責務を持ち込んでいないか
+- リスクや制約が README / plan / architecture のどこか一箇所にしか書かれていない場合、それを見落としとして扱う
 
 ### 4. テストで pin すべき不変条件
-
-- 退行しやすい構造か
-- silent failure が起こるか
+- 構造的な不変条件か
+- silent failure が起きうるか
 - negative test が必要か
-- pin test があるべき箇所か
 
 特に次は pin を疑う。
-
-- 取りこぼしやすい event
+- 戻り値だけ正しくて event が欠ける
 - 1 回だけ起きるべき状態遷移
 - 復旧後の replay
-- 初期化時の hidden path
+- 普段通らない hidden path
 
-### 5. Rust と Python の境界
+### 5. Rust と Python の差分
+- IPC DTO / event の往復で形が一致しているか
+- Python 側の意味論が Rust 側の状態遷移と一致しているか
+- normalizer や helper に吸収される前提が混ざっていないか
 
-Rust と Python の両側にまたがる変更では、片側だけ読んで安心しない。
-
-- IPC DTO / event の双方で形が一致しているか
-- Python 側の意味論が Rust 側の想定と一致しているか
-- 変換関数や normalizer に暗黙の仕様が埋まっていないか
-
-### 6. ライフサイクル全体
-
-「通常操作」だけではなく、次も確認する。
-
+### 6. ライフサイクル全般
+ここが一番壊れやすい。次を確認する。
 - startup
 - reconnect
 - restore
-- persisted state の再適用
+- persisted state の再利用
 - retry / relogin
 - cancel / dismiss
 - helper / background task / callback
+- ready cache / sticky snapshot の invalidate 条件
 
-## 追加チェック: イベント順序と bootstrap 経路
+## 追加チェック: イベント順序と bootstrap 競合
 
-今回の見落としを踏まえ、今後はここを固定観点にする。
-FSM や gate が正しく見えても、イベント順序と別 bootstrap 経路の確認が抜けると実運用で壊れる。
-
+後発のイベントだけを追うと、前発の競合を見落としやすい。FSM や gate が正しく見えても、イベント順序や bootstrap 競合のレビューが抜けると本番で壊れる。
 - `EngineConnected` / `EngineRehello` / `VenueReady` / `VenueError` / reconnect callback / replay task の発火順を追う
 - gate を閉じる前に refetch / replay / resubscribe が走っていないか確認する
-- startup / reconnect / restore / persisted selection / `--data-engine-url` など bootstrap 経路を列挙する
-- managed mode だけで fix が成立していないか確認する
-- subscription 開始前に emit されたイベントを取りこぼしたとき、UI / FSM / gate がどう壊れるか確認する
-- watch / broadcast / callback / cached readiness / sticky snapshot のどれに依存しているか整理する
-- `new()` / `new_with_settings()` / `update_handles()` / restore helper / reconnect replay path が gate を迂回していないか個別に確認する
-- レビューコメントでは「FSM は正しい」で終わらせず、イベント順序・初期値・購読開始タイミングを別々に書く
+- startup / reconnect / restore / persisted selection / `--data-engine-url` など bootstrap 経路を全部見る
+- managed mode だけで fix して external mode を落としていないか確認する
+- subscription が emit した event を、UI / FSM / gate がどう消費するかまで見る
+- watch / broadcast / callback / cached readiness / sticky snapshot の寿命を確認する
+- `new()` / `new_with_settings()` / `update_handles()` / restore helper / reconnect replay path に同じ gate が入っているか確認する
 
-特に次を強く疑う。
-
+特に次を疑う。
 - reset event より先に reconnect 後 refetch が走る
-- bootstrap helper だけ gate を通らない
-- managed mode の readiness cache では救えるが external mode では救えない
+- bootstrap helper だけ gate を通り本線が通らない
+- managed mode の readiness cache では拾えるが external mode では拾えない
+
+## 追加チェック: 新規 venue / enum 追加時の配線監査
+
+新しい venue を足した review では、schema / gate / banner だけ見て安心しない。必ず end-to-end で配線を追う。
+- 登録表・fanout 配列・match を総点検する。例: `VENUE_NAMES` / `AdapterHandles::set_backend` / `get_backend_arc` / `available_markets` / capability map / filter button / metadata fetch / stats fetch / kline fetch
+- `VenueReady` 後に実際に叩かれる callsite から逆引きする。UI gate が正しくても backend 未登録なら本番で `No adapter handle configured` 系の失敗になる
+- 「起動時の初期構築」「reconnect 後の再構築」「restore 後の replay」で同じ venue が漏れていないかを別々に確認する
+- 新規 venue 追加 PR では「UI 操作 → backend call まで到達する」経路の pin 不足をまず疑う
+
+## 追加チェック: ready cache / sticky snapshot の invalidate
+
+readiness cache は `VenueError` でしか落としていないなら危険信号。
+- `LoginStarted` / `LoginCancelled` / relogin / reconnect でも stale ready を引きずらないか確認する
+- cache を読む側だけでなく、cache を更新する bridge task / callback / ProcessManager 側の寿命も追う
+- managed mode と external mode で同じ invalidation が効くかを分けて確認する
+
+## 追加チェック: ack 前の重複送信窓
+
+非同期 command の review では、「authoritative event が返るまで state が変わらない」設計を危険信号として扱う。
+- `RequestVenueLogin` / `Request*` 系で duplicate suppression を `VenueLoginStarted` 受信後にしか掛けていないなら、event 前の連打で多重送信できる
+- `Task::perform(...send...)` の直前で state を見ているだけなら、event 到着前の再押下窓がないか確認する
+- `Auto` と `Manual` が同じ command に収束する場合、両者が event 前に重なる race を疑う
+- テストが `LoginStarted` 後の idempotency しか pin していない場合、pre-ack duplicate の negative test 不足として扱う
 
 ## findings の型
-
-- `仕様不整合`: plan / spec / architecture と矛盾
-- `未実装`: 必須 task や field が抜けている
-- `回帰`: 既存 invariant や recovery path を壊している
+- `仕様ズレ`: plan / spec / architecture と不整合
+- `未実装`: 必須 task / field が欠けている
+- `順序バグ`: event / invariant / recovery path が壊れる
 - `silent failure`: ユーザーに見えない失敗が起きる
-- `別経路破綻`: startup / restore / reconnect / external mode のどれかだけ壊れる
-- `テスト不足`: positive case しかなく、negative / bootstrap / replay / race を押さえていない
+- `起動経路漏れ`: startup / restore / reconnect / external mode のどれかが落ちる
+- `テスト不足`: positive だけで negative / bootstrap / replay / race を押さえていない
 
 ## findings の書き方
 
 各 finding には最低限これを含める。
-
 - `path:line`
-- 何が問題か
-- どの仕様・計画・設計とズレているか
-- なぜ実害があるか
+- 何が壊れるか
+- どの仕様 / 設計 / source of truth とズレているか
+- なぜ見落としやすいか
 
 例:
 
 ```text
 - src/main.rs:568
-  reconnect 時に EngineConnected を EngineRehello より先に流しており、
+  reconnect 時に EngineConnected が EngineRehello より先に流れ、
   Tachibana の reset 前に sidebar.update_handles() が走る。
-  その結果、前回 Ready 状態を引きずったまま metadata refetch が発火し、
+  その結果、古い Ready 状態を見た metadata refetch が発火し、
   VenueReady gate をすり抜ける。
 ```
 
-## 実務メモ
-
-- 文書、実装、テスト、リスク記述が全部そろって初めて「レビューできた」とみなす
-- `exit 77` / `skip` / `scaffold` / `TODO(http-api)` / `placeholder` は、存在した時点で受け入れ済みとみなさない
-- 新しい gate / FSM / banner / recovery path を見たら、通常操作だけでなく bootstrap と reconnect を必ず確認する
-- 1 つの fix で複数経路を救っているように見える時ほど、別モードや別 helper の取りこぼしを疑う
+## メモ
+- `exit 77` / `skip` / `scaffold` / `TODO(http-api)` / `placeholder` は、その場で完了扱いしない
+- 新しい gate / FSM / banner / recovery path を見たら、bootstrap と reconnect を必ず追う
+- 1 つの fix で複数 bootstrap 経路を救っているように見えたら、本当に両方通るか疑う
+- helper や callback の寿命で隠れる race を甘く見ない

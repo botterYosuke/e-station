@@ -230,7 +230,16 @@ impl TickersTable {
         self.tachibana_ready = ready;
 
         if ready && !was_ready && self.tachibana_fetch_pending {
+            // Defence in depth: replay only when Tachibana is still in
+            // `selected_exchanges`. The toggle-OFF path already clears
+            // `tachibana_fetch_pending`, but this extra check makes
+            // `set_tachibana_ready` idempotent against an unselected
+            // venue regardless of how the pending flag drifted.
+            // Reviewer 2026-04-26 R5 (MEDIUM-1).
             self.tachibana_fetch_pending = false;
+            if !self.selected_exchanges.contains(&Venue::Tachibana) {
+                return Task::none();
+            }
             // Mirror the begin_venue side-effect that the gated branch
             // skipped, so MetadataFetchState observes a "started" mark
             // (idempotent — has_fetched will short-circuit subsequent
@@ -320,6 +329,14 @@ impl TickersTable {
                 if was_selected {
                     self.selected_exchanges.remove(&exch);
                     self.stats_fetch_state.on_exchange_disabled(exch);
+                    // Drop a still-pending Tachibana fetch when the
+                    // user deselects the venue. Without this, a later
+                    // `VenueReady` would replay a fetch the user has
+                    // explicitly cancelled. Reviewer 2026-04-26 R5
+                    // (MEDIUM-1).
+                    if exch == Venue::Tachibana {
+                        self.tachibana_fetch_pending = false;
+                    }
                 } else {
                     self.selected_exchanges.insert(exch);
 
@@ -2314,6 +2331,50 @@ mod tests {
             "begin_venue must mark the venue in-flight as part of the replay"
         );
         assert!(table.tachibana_ready);
+    }
+
+    #[test]
+    fn deselecting_tachibana_clears_pending_fetch_so_later_ready_does_not_replay() {
+        // Reviewer 2026-04-26 R5 (MEDIUM-1): toggle ON → toggle OFF
+        // must not leave a pending fetch behind. Otherwise a later
+        // VenueReady (e.g. user logged in via the always-visible
+        // sidebar button after deselecting the venue) replays a fetch
+        // for a venue the user explicitly cancelled.
+        use crate::venue_state::Trigger;
+        let settings = settings_for(Venue::Bybit); // start without Tachibana selected
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+
+        // Toggle ON while !ready → records pending + auto-fire login.
+        let on_action = table.update(Message::ToggleExchangeFilter(Venue::Tachibana));
+        assert!(matches!(
+            on_action,
+            Some(Action::RequestTachibanaLogin(Trigger::Auto))
+        ));
+        assert!(table.tachibana_fetch_pending);
+        assert!(table.selected_exchanges.contains(&Venue::Tachibana));
+
+        // Toggle OFF → must clear pending + remove from selection.
+        let off_action = table.update(Message::ToggleExchangeFilter(Venue::Tachibana));
+        assert!(off_action.is_none());
+        assert!(
+            !table.tachibana_fetch_pending,
+            "deselect must clear tachibana_fetch_pending"
+        );
+        assert!(!table.selected_exchanges.contains(&Venue::Tachibana));
+
+        // Later VenueReady arrives → must NOT replay a fetch.
+        let replay = table.set_tachibana_ready(true);
+        assert!(
+            !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
+            "VenueReady after deselect must not begin_venue(Tachibana)"
+        );
+        // `Task` does not implement Eq/Debug; the in_flight assert above
+        // is the load-bearing one. We additionally confirm the pending
+        // flag is still false (no resurrection path).
+        assert!(!table.tachibana_fetch_pending);
+        // Drop the returned Task explicitly so `_replay` is read.
+        drop(replay);
     }
 
     #[test]

@@ -89,6 +89,33 @@ pub fn view(state: &VenueState) -> Option<Element<'_, BannerMessage>> {
     }
 }
 
+/// Phase 1 暫定 fallback button labels — Rust 側に文字列リテラルを
+/// 持たせない F-Banner1 の制約は **Python が単一行 `VenueError.message`
+/// しか出していない現実と非互換** だった (reviewer 2026-04-26 R5
+/// MEDIUM-2)。Python が 3 行構造を採用するまでの暫定として、
+/// `class.action()` がボタンを要求し、かつ `parsed.button_label` が
+/// 取れないときに限ってここで定義する label を使う。Python が
+/// 3 行 message を emit するようになり次第、これらの定数を削除して
+/// F-Banner1 を完全な状態に戻すこと。spec.md §3.3 / open-questions.md
+/// に追跡項目を残す。
+const RELOGIN_LABEL_FALLBACK: &str = "再ログイン";
+const DISMISS_LABEL_FALLBACK: &str = "閉じる";
+
+/// Resolve the action button label. Returns `None` when the venue
+/// class action is `Hidden` (no button at all). Otherwise prefers
+/// the Python-supplied label (3rd line of `VenueError.message`)
+/// and falls back to the Phase 1 暫定 Rust constant.
+fn action_button_label<'a>(
+    parsed: &ParsedMessage<'a>,
+    action: VenueErrorAction,
+) -> Option<&'a str> {
+    match action {
+        VenueErrorAction::Hidden => None,
+        VenueErrorAction::Relogin => parsed.button_label.or(Some(RELOGIN_LABEL_FALLBACK)),
+        VenueErrorAction::Dismiss => parsed.button_label.or(Some(DISMISS_LABEL_FALLBACK)),
+    }
+}
+
 fn error_banner<'a>(class: &VenueErrorClass, message: &'a str) -> Element<'a, BannerMessage> {
     let parsed = parse_message(message);
     let severity = class.severity();
@@ -102,7 +129,7 @@ fn error_banner<'a>(class: &VenueErrorClass, message: &'a str) -> Element<'a, Ba
         col = col.push(text(body).size(11));
     }
 
-    if let Some(label) = parsed.button_label {
+    if let Some(label) = action_button_label(&parsed, action) {
         match action {
             VenueErrorAction::Relogin => {
                 col = col.push(button(text(label).size(11)).on_press(BannerMessage::Relogin));
@@ -111,10 +138,8 @@ fn error_banner<'a>(class: &VenueErrorClass, message: &'a str) -> Element<'a, Ba
                 col = col.push(button(text(label).size(11)).on_press(BannerMessage::Dismiss));
             }
             VenueErrorAction::Hidden => {
-                // Even if Python supplied a label, `Hidden` actions
-                // suppress the button — this is the documented
-                // architecture.md §6 behaviour for codes like
-                // `unsupported_venue` that no UI action can recover.
+                // Unreachable — `action_button_label` returns `None`
+                // for Hidden, so we never enter this match arm.
             }
         }
     }
@@ -274,6 +299,46 @@ mod tests {
                 "banner visibility after {event:?} from {start:?} mismatches"
             );
         }
+    }
+
+    #[test]
+    fn action_button_label_uses_python_supplied_label_when_present() {
+        let class = classify_venue_error("session_expired"); // Relogin
+        let parsed = parse_message("ヘッダ\n本文\n再ログイン Python");
+        let label = action_button_label(&parsed, class.action());
+        assert_eq!(label, Some("再ログイン Python"));
+    }
+
+    #[test]
+    fn action_button_label_falls_back_for_relogin_when_message_is_single_line() {
+        // Reviewer 2026-04-26 R5 (MEDIUM-2): Python emits single-line
+        // messages today (`_MSG_LOGIN_FAILED` etc.). Without a fallback
+        // the Relogin button silently disappears.
+        let class = classify_venue_error("session_expired"); // Relogin
+        let parsed = parse_message("セッション切れです");
+        let label = action_button_label(&parsed, class.action());
+        assert_eq!(label, Some(RELOGIN_LABEL_FALLBACK));
+        assert_eq!(label, Some("再ログイン"));
+    }
+
+    #[test]
+    fn action_button_label_falls_back_for_dismiss_when_message_is_single_line() {
+        let class = classify_venue_error("phone_auth_required"); // Dismiss
+        let parsed = parse_message("電話認証が必要です");
+        let label = action_button_label(&parsed, class.action());
+        assert_eq!(label, Some(DISMISS_LABEL_FALLBACK));
+        assert_eq!(label, Some("閉じる"));
+    }
+
+    #[test]
+    fn action_button_label_returns_none_for_hidden_even_with_third_line() {
+        // Hidden suppresses the button regardless of Python supplying
+        // a label — architecture.md §6 codes like `unsupported_venue`
+        // have no UI recovery path.
+        let class = classify_venue_error("unsupported_venue"); // Hidden
+        let parsed = parse_message("h\nb\n（無視されるラベル）");
+        let label = action_button_label(&parsed, class.action());
+        assert_eq!(label, None);
     }
 
     #[test]

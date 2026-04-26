@@ -89,6 +89,31 @@ R2 着地後にイベント順序と外部モード bootstrap の race 2 件 (HI
 - ✅ `cargo fmt --check` 緑
 - ✅ `tools/iced_purity_grep.sh` OK
 
+## レビュー修正 R5 (2026-04-26)
+
+R4 着地後にさらに 2 MEDIUM の指摘 (deselect 後 race / banner action label 出ない問題) を消化。
+
+| ID | 指摘 | 対応 |
+|----|------|------|
+| **MEDIUM-1 (R5)** | 未ログイン状態で Tachibana を ON → 解除したあとに `VenueReady` が来ると、ユーザが解除済みの venue に対して metadata fetch が走る。`Message::ToggleExchangeFilter` の deselect 経路は `selected_exchanges` から外すだけで `tachibana_fetch_pending` を落とさない。`set_tachibana_ready` も `selected_exchanges` を見ずに pending だけで replay する | deselect 経路で `tachibana_fetch_pending = false`。`set_tachibana_ready` 側でも `selected_exchanges.contains(&Venue::Tachibana)` を defence-in-depth で確認し、外れていれば `Task::none()`。unit pin 1 件 (T35-PendingClearOnDeselect) |
+| **MEDIUM-2 (R5)** | バナーの Relogin / Dismiss ボタンが Python の単一行 `VenueError.message` 下では描画されない（`parse_message` は 3 行目をボタンラベルとして要求し、それが無いと button 無し）。`tachibana_auth.py` の `_MSG_LOGIN_FAILED` / `_MSG_SESSION_EXPIRED_STARTUP` や `server.py` の `session_restore_failed` は単一行を emit しているため、`session_expired` / `login_failed` / `unread_notices` の再ログイン導線と `phone_auth_required` の閉じる導線が UI 上機能しない | `action_button_label(&parsed, action) -> Option<&'a str>` ヘルパを追加。Python が 3 行目を emit していればそれを優先、なければ Rust 定数 (`RELOGIN_LABEL_FALLBACK = "再ログイン"` / `DISMISS_LABEL_FALLBACK = "閉じる"`) にフォールバック。`Hidden` は無条件 `None`。F-Banner1 の "Rust に文字列リテラルを持たない" 制約は Phase 1 暫定で **部分緩和**。Python が 3 行 message を emit するように更新されれば定数を削除して F-Banner1 へ完全復帰可能。unit pin 4 件 (T35-BannerActionFallback) |
+
+### F-Banner1 partial relaxation (Phase 1 暫定運用)
+
+R5 MEDIUM-2 修正で R5 まで守ってきた "Rust 側にバナー文字列リテラルを持たない" 制約を 2 つの定数 (`RELOGIN_LABEL_FALLBACK` / `DISMISS_LABEL_FALLBACK`) に限り緩和した。理由:
+
+- 現状の Python は単一行 `VenueError.message` を emit しており、`parse_message` の 3 行構造は実装されていない
+- F-Banner1 を厳守するとボタンが永久に出ず、UI 上から再ログインや dismiss ができないという致命的 UX 劣化
+
+**復帰条件**: Python 側 (`tachibana_auth.py` の `_MSG_*` 定数および `server.py` の `session_restore_failed` 経路) が 3 行 `header\nbody\nbutton_label` 形式に揃ったタイミングで両定数を削除し、`action_button_label` を `parsed.button_label` 1 引き形式に戻す。フォローアップタスクとして `open-questions.md` / `spec.md §3.3` に追跡項目を残す。
+
+### 累積完了判定
+
+- ✅ `cargo test --workspace` 全緑
+- ✅ `cargo clippy --workspace --tests -- -D warnings` 緑
+- ✅ `cargo fmt --check` 緑
+- ✅ `tools/iced_purity_grep.sh` OK
+
 ## レビュー修正 R4 (2026-04-26)
 
 R3 + R3.1 着地後にさらに 1 HIGH + 2 MEDIUM の指摘を消化。
