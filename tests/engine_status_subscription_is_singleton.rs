@@ -44,7 +44,8 @@ impl<'ast> Visit<'ast> for SubscriptionRunCounter {
 
 #[test]
 fn engine_status_subscription_is_singleton() {
-    let src = std::fs::read_to_string("src/main.rs").expect("read src/main.rs");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let src = std::fs::read_to_string(path).expect("read src/main.rs");
     let file = syn::parse_file(&src).expect("parse src/main.rs");
     let mut v = SubscriptionRunCounter {
         in_subscription: false,

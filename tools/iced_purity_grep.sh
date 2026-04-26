@@ -30,6 +30,14 @@ fi
 # main.rs. We delimit by the next top-level `    fn ` declaration in
 # the same impl block (4-space indent + `fn `). This is good enough
 # for our single-impl Flowsurface struct.
+#
+# Limitation: nested `fn` definitions (closures, async-blocks) inside
+# update/subscription contribute their braces to `depth`, so the body
+# end-marker (a column-4 `}`) is occasionally mis-matched. The
+# load-bearing structural guard is the AST test in
+# `tests/main_update_no_static_access.rs` etc.; this grep is a fast
+# CI smoke and tolerated false-positives are preferred over silent
+# false-negatives.
 extract_fn() {
   local fn_name="$1"
   awk -v needle="    fn ${fn_name}(" '

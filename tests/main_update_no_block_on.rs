@@ -46,7 +46,8 @@ impl<'ast> Visit<'ast> for BlockOnVisitor {
 
 #[test]
 fn update_body_has_no_block_on() {
-    let src = std::fs::read_to_string("src/main.rs").expect("read src/main.rs");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let src = std::fs::read_to_string(path).expect("read src/main.rs");
     let file = syn::parse_file(&src).expect("parse src/main.rs");
     let mut v = BlockOnVisitor {
         in_update: false,

@@ -28,7 +28,7 @@ use iced::{Element, Length, Theme};
 use crate::venue_state::VenueState;
 
 #[derive(Debug, Clone)]
-pub enum BannerMessage {
+pub(crate) enum BannerMessage {
     /// User pressed the "再ログイン" button supplied via the third
     /// line of `VenueError.message`. Bubbles up as
     /// `Flowsurface::Message::RequestTachibanaLogin(Trigger::Manual)`.

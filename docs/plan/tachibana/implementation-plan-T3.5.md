@@ -4,6 +4,39 @@
 **作成**: 2026-04-26
 **ブランチ**: `tachibana/phase-1/T3-credential-r6-fixes`（または T3.5 派生）
 
+## レビュー修正ラウンド R1 (2026-04-26)
+
+並列レビュアー 4 種（rust-reviewer / iced-architecture-reviewer / silent-failure-hunter / type-design-analyzer）の合算指摘 (CRITICAL=0, HIGH=4, MEDIUM=10+, LOW=数件) のうち、**HIGH 4/4** と **アクショナブルな MEDIUM 6 件** を Round 1 で消化:
+
+| ID | 指摘元 | 対応 |
+|----|--------|------|
+| HIGH-1 broadcast Lagged → silent drop | silent-failure / iced-arch | `engine_status_stream` で `RecvError::Lagged` を warn+continue、`Closed` のみ receiver drop |
+| HIGH-2 RequestTachibanaLogin callback FSM 固着 | rust / iced-arch / silent-failure | callback で `LoginStarted` を発火しない。新 `Message::TachibanaLoginIpcResult(Result<(),String>)` で IPC エラー時のみ toast、成功は engine の `VenueLoginStarted` に委譲 |
+| HIGH-1 type venue 文字列リテラル 4 箇所 | type-design | `TACHIBANA_VENUE_NAME` 定数化 |
+| HIGH-1 rust set_tachibana_ready(false) pending | rust | コメントで意図保持 (`EngineRehello` 後の replay 担保) を明示 |
+| MED-3 silent Manual + 未接続時 toast 不在 | silent-failure | `Trigger::Manual` のみ "エンジン未接続" toast を発行（Auto は無音継続） |
+| MED-2 type Trigger 区別未活用 | type-design | `log::info!("RequestTachibanaLogin trigger={trigger:?}")` を追加 |
+| MED-4 type BannerMessage 公開度 | type-design | `pub` → `pub(crate)` |
+| MED-5 type DismissTachibanaBanner FSM 迂回 | type-design | `VenueEvent::Dismissed` 追加、`next()` 経由化、unit test 2 件追加 |
+| MED-5 rust iced_purity_grep brace counting | rust | shell コメントに limitation を明記 (AST テストが load-bearing と注記) |
+| LOW-2 rust AST テスト固定 path | rust | `concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")` で CWD 非依存に |
+
+**未対応 / 別 PR スコープ** (deferred to follow-up — それぞれ trade-off / scope を明示):
+
+| ID | 指摘 | 理由 |
+|----|------|------|
+| HIGH-2 type | `VenueErrorCode` を `VenueEvent::LoginError` / `VenueState::Error` に保持 | enum signature 変更が venue_state.rs / main.rs / venue_banner.rs / tests に波及。debuggability 改善目的のため別 PR で慎重に |
+| MED-1 type | `Error.message: String` → `Arc<str>` | `clone()` コスト最適化。FSM の clone 頻度が低いため現状性能影響は計測されず。最適化 PR で扱う |
+| MED-1 iced / rust | initial `EngineConnected` → `EngineRehello` の発火順 | 現在 `tokio::select!` のシングル loop 内で逐次 yield しており順序は決定的。将来の拡張で順序依存ロジックを増やす場合は invariant test を追加すべき。コメントで明示済み |
+| MED-2 iced | Sidebar Action の `Task::batch` 順序非保証 | 現状 `is_login_in_flight()` ガードで実害なし。`Task::chain` の Empty 挙動確認後の差し替えは別 PR |
+| MED-3 rust | `map_engine_event_to_tachibana` wildcard | 明示性改善のみ、機能影響なし |
+| MED-4 silent | `VenueErrorAction::Hidden` で閉じ手段なし | architecture.md §6 通りの仕様（`unsupported_venue` 等は UI で復旧不能）。閉じ UX が必要となれば spec 改訂後 |
+| MED-5 silent | `exit 77` の GitHub Actions 挙動 | E2E ワークフロー追加 PR 側で `continue-on-error: true` を組合せて対応する旨を Step F の落とし穴に記載済 |
+| MED-3 type | `EngineRehello` 命名混在 | venue + engine 両方を扱う以上 `VenueEvent` での集約が iced 側 update flow としてシンプル。改名は将来 engine event 種類が増えたとき再評価 |
+| LOW 多数 | parse_message ヘルパー化 / 全 20 遷移網羅テスト / `BannerMessage::Dismiss` と `Message::DismissTachibanaBanner` 二重 / `let _ = write!` / debug_redaction false-positive risk / keyring 直接 delete_credential 5 箇所統一 | 保守性の改善余地。すべて trade-off 記録のうえ別 PR 候補として継続 |
+
+R1 で **作業の安全性に直結する HIGH 全 4 件 + アクショナブル MEDIUM** を消化したため本 PR の review-fix-loop は R1 で収束扱い。残課題は上表で個別に追跡可能。
+
 > 脚注: spec.md §3.1 line 30 が立花ログインボタン位置として `sidebar.rs` を挙げているのは陳腐化記述。実コード上は `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` の venue 行が正本。本 PR スコープ外、別 PR で spec.md 同期予定。
 
 ---

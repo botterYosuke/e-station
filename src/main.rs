@@ -469,6 +469,13 @@ enum Message {
     /// considered acknowledged; a fresh `VenueError` from the engine
     /// will re-show the banner. T35-U2-Banner.
     DismissTachibanaBanner,
+    /// Result of the asynchronous `Command::RequestVenueLogin` IPC
+    /// send. The handler does not transition the FSM (the engine's
+    /// own `VenueLoginStarted` event is the authoritative trigger);
+    /// it only logs success and surfaces a toast on send failure so
+    /// the user knows their click did not silently disappear.
+    /// Review-fixes 2026-04-26 round 1.
+    TachibanaLoginIpcResult(Result<(), String>),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -535,9 +542,15 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
         loop {
             // `event_rx` is `Option`-shaped; use `pending()` while it
             // is `None` so the select arm stays sound but never wins.
+            // Surface the full `Result` (not `.ok()`) so the outer match
+            // can distinguish `Lagged` (receiver alive — log + retry)
+            // from `Closed` (receiver dead — wait for next handshake).
+            // Earlier code collapsed both into `None` and silently
+            // dropped venue lifecycle events; see review-fixes
+            // 2026-04-26 round 1.
             let event_fut = async {
                 match &mut event_rx {
-                    Some(rx) => rx.recv().await.ok(),
+                    Some(rx) => Some(rx.recv().await),
                     None => std::future::pending::<Option<_>>().await,
                 }
             };
@@ -558,15 +571,26 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                     }
                 }
                 event = event_fut => {
+                    use tokio::sync::broadcast::error::RecvError;
                     match event {
-                        Some(ev) => {
+                        Some(Ok(ev)) => {
                             if let Some(msg) = map_engine_event_to_tachibana(ev) {
                                 yield msg;
                             }
                         }
-                        None => {
-                            // Broadcast lagged or closed; drop the receiver
-                            // and wait for the next fresh connection.
+                        Some(Err(RecvError::Lagged(n))) => {
+                            // Receiver is still alive — keep it. Dropping
+                            // here would silently swallow every
+                            // VenueLoginStarted / VenueReady / VenueError
+                            // until the next EngineConnected, the exact
+                            // class of UI-freeze regression flagged in
+                            // review-fixes 2026-04-26 round 1.
+                            log::warn!(
+                                "engine_status_stream: broadcast lagged, dropped {n} \
+                                 events — venue lifecycle UI may have missed transitions"
+                            );
+                        }
+                        Some(Err(RecvError::Closed)) | None => {
                             event_rx = None;
                         }
                     }
@@ -576,6 +600,11 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
     }
 }
 
+/// Wire-level identifier for the Tachibana venue. Centralised so a
+/// future rename or IPC schema change is a one-line patch instead of
+/// a cross-file grep.
+const TACHIBANA_VENUE_NAME: &str = "tachibana";
+
 /// Translate a low-level `EngineEvent` into a `Message::TachibanaVenueEvent`
 /// when it concerns the Tachibana venue lifecycle, otherwise `None`.
 /// Other venues are funnelled through their existing exchange-event
@@ -583,13 +612,13 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
 fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<Message> {
     use engine_client::dto::EngineEvent;
     match ev {
-        EngineEvent::VenueReady { venue, .. } if venue == "tachibana" => {
+        EngineEvent::VenueReady { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
             Some(Message::TachibanaVenueEvent(VenueEvent::Ready))
         }
-        EngineEvent::VenueLoginStarted { venue, .. } if venue == "tachibana" => {
+        EngineEvent::VenueLoginStarted { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
             Some(Message::TachibanaVenueEvent(VenueEvent::LoginStarted))
         }
-        EngineEvent::VenueLoginCancelled { venue, .. } if venue == "tachibana" => {
+        EngineEvent::VenueLoginCancelled { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
             Some(Message::TachibanaVenueEvent(VenueEvent::LoginCancelled))
         }
         EngineEvent::VenueError {
@@ -597,7 +626,7 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             code,
             message,
             ..
-        } if venue == "tachibana" => {
+        } if venue == TACHIBANA_VENUE_NAME => {
             let class = engine_client::error::classify_venue_error(&code);
             Some(Message::TachibanaVenueEvent(VenueEvent::LoginError {
                 class,
@@ -711,7 +740,13 @@ impl Flowsurface {
                 // T35-H9-SingleRecoveryPath.
             }
             Message::DismissTachibanaBanner => {
-                self.tachibana_state = VenueState::Idle;
+                // Route the dismiss through the FSM `next()` table so
+                // the transition is unit-testable from `venue_state.rs`
+                // and `main.rs::update()` does not become a second
+                // source of truth for FSM mutations.
+                let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
+                    .next(VenueEvent::Dismissed);
+                self.tachibana_state = next;
             }
             Message::RequestTachibanaLogin(trigger) => {
                 // Duplicate-press suppression: while a login dialog is
@@ -719,6 +754,7 @@ impl Flowsurface {
                 // the auto-fire path would spawn a new tkinter helper
                 // every time the user toggled the Tachibana venue.
                 // T35-U1-LoginButton / T35-U3-AutoRequestLogin.
+                log::info!("RequestTachibanaLogin trigger={trigger:?}");
                 if self.tachibana_state.is_login_in_flight() {
                     log::debug!(
                         "RequestTachibanaLogin({trigger:?}) ignored — login already in flight"
@@ -729,6 +765,15 @@ impl Flowsurface {
                     log::warn!(
                         "RequestTachibanaLogin({trigger:?}) ignored — engine connection unavailable"
                     );
+                    if matches!(trigger, Trigger::Manual) {
+                        // Auto-fire is silent (the user just selected
+                        // the venue and may not yet expect feedback);
+                        // a manual button press deserves a visible
+                        // notice that the click did register.
+                        self.notifications.push(Toast::error(
+                            "立花ログイン要求を送信できません — エンジン未接続".to_string(),
+                        ));
+                    }
                     return Task::none();
                 };
                 return Task::perform(
@@ -736,19 +781,32 @@ impl Flowsurface {
                         let request_id = uuid::Uuid::new_v4().to_string();
                         conn.send(engine_client::dto::Command::RequestVenueLogin {
                             request_id,
-                            venue: "tachibana".to_string(),
+                            venue: TACHIBANA_VENUE_NAME.to_string(),
                         })
                         .await
+                        .map_err(|e| e.to_string())
                     },
-                    |result| {
-                        if let Err(err) = result {
-                            log::warn!("Failed to send RequestVenueLogin: {err}");
-                        }
-                        // No follow-up Message — the engine will emit
-                        // VenueLoginStarted which transitions the FSM.
-                        Message::TachibanaVenueEvent(VenueEvent::LoginStarted)
-                    },
+                    Message::TachibanaLoginIpcResult,
                 );
+            }
+            Message::TachibanaLoginIpcResult(result) => {
+                // Engine emits `VenueLoginStarted` on success — we do
+                // NOT optimistically transition the FSM ourselves
+                // here, because an IPC failure would otherwise pin
+                // the state machine in `LoginInFlight` (the dup-press
+                // gate would then refuse every subsequent press).
+                // Review-fixes 2026-04-26 round 1.
+                match result {
+                    Ok(()) => {
+                        log::debug!("RequestVenueLogin IPC sent");
+                    }
+                    Err(err) => {
+                        log::warn!("RequestVenueLogin IPC failed: {err}");
+                        self.notifications.push(Toast::error(format!(
+                            "立花ログイン要求の送信に失敗しました: {err}"
+                        )));
+                    }
+                }
             }
             Message::TachibanaVenueEvent(event) => {
                 let next =

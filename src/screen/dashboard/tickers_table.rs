@@ -201,6 +201,14 @@ impl TickersTable {
     /// returns the deferred metadata fetch as a `Task` so the caller
     /// can chain it back into iced. Returns `Task::none()` otherwise.
     ///
+    /// **`ready=false` semantics**: `tachibana_fetch_pending` is
+    /// **deliberately preserved**. An `EngineRehello`-driven reset
+    /// (which arrives as `set_tachibana_ready(false)`) means the
+    /// Python subprocess just restarted and a fresh `VenueReady` is
+    /// imminent; the user's previously-blocked toggle should still
+    /// replay on that next ready edge. Clearing pending here would
+    /// silently drop the user's intent. Review-fixes 2026-04-26.
+    ///
     /// Pin: T35-U4-VenueReadyGate.
     pub fn set_tachibana_ready(&mut self, ready: bool) -> Task<Message> {
         let was_ready = self.tachibana_ready;

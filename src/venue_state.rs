@@ -75,6 +75,10 @@ pub enum VenueEvent {
     Ready,
     /// Engine subprocess restart detected — reset to `Idle`.
     EngineRehello,
+    /// User pressed the banner's "閉じる" button. Transitions an
+    /// `Error` state back to `Idle` (acknowledged); other states are
+    /// idempotent so a stray dismiss has no effect.
+    Dismissed,
 }
 
 impl VenueState {
@@ -97,6 +101,12 @@ impl VenueState {
             (_, VenueEvent::Ready) => VenueState::Ready,
             (_, VenueEvent::LoginCancelled) => VenueState::Idle,
             (_, VenueEvent::LoginError { class, message }) => VenueState::Error { class, message },
+
+            // User-driven dismiss: only `Error` actually has anything
+            // to clear; other states ignore so a stray dismiss is a
+            // no-op.
+            (VenueState::Error { .. }, VenueEvent::Dismissed) => VenueState::Idle,
+            (other, VenueEvent::Dismissed) => other,
         }
     }
 }
@@ -183,5 +193,35 @@ mod tests {
         // it from Ready should keep us in Ready.
         let s = VenueState::Ready.next(VenueEvent::Ready);
         assert!(s.is_ready());
+    }
+
+    #[test]
+    fn dismissed_clears_error_to_idle() {
+        let class = classify_venue_error("phone_auth_required");
+        let s = VenueState::Error {
+            class,
+            message: "x".to_string(),
+        }
+        .next(VenueEvent::Dismissed);
+        assert_eq!(s, VenueState::Idle);
+    }
+
+    #[test]
+    fn dismissed_is_noop_for_non_error_states() {
+        // A stray Dismiss while Idle / Ready / LoginInFlight must not
+        // perturb the FSM.
+        assert_eq!(
+            VenueState::Idle.next(VenueEvent::Dismissed),
+            VenueState::Idle
+        );
+        assert_eq!(
+            VenueState::Ready.next(VenueEvent::Dismissed),
+            VenueState::Ready
+        );
+        assert!(
+            VenueState::LoginInFlight
+                .next(VenueEvent::Dismissed)
+                .is_login_in_flight()
+        );
     }
 }
