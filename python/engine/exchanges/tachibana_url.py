@@ -181,6 +181,26 @@ def build_request_url(
             f"sJsonOfmt must be '4' or '5' (R5), got {sJsonOfmt!r}"
         )
 
+    # sCLMID → URL-type guard (MEDIUM-C7 + B1). Master / price endpoints have
+    # dedicated virtual URLs and silently mis-routing them produces opaque
+    # server errors; surface the misuse at the Python boundary instead.
+    sclmid = json_obj.get("sCLMID") if isinstance(json_obj, Mapping) else None
+    if isinstance(sclmid, str):
+        # Local imports to avoid a module-level cycle (tachibana_master imports
+        # nothing from tachibana_url today, but keep the dependency edge clean).
+        from engine.exchanges.tachibana_master import MASTER_CLMIDS, PRICE_CLMIDS
+
+        if sclmid in MASTER_CLMIDS and not isinstance(base, MasterUrl):
+            raise TypeError(
+                f"build_request_url: sCLMID={sclmid!r} requires MasterUrl, "
+                f"got {type(base).__name__}"
+            )
+        if sclmid in PRICE_CLMIDS and not isinstance(base, PriceUrl):
+            raise TypeError(
+                f"build_request_url: sCLMID={sclmid!r} requires PriceUrl, "
+                f"got {type(base).__name__}"
+            )
+
     payload: dict[str, object] = {**dict(json_obj), "sJsonOfmt": sJsonOfmt}
 
     # Accept only str / numeric scalars at the JSON value position. Booleans

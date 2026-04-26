@@ -4,7 +4,7 @@
 
 ## 1. `TickerInfo` 参照箇所
 
-`exchange/src/lib.rs:515` で定義。
+`exchange/src/lib.rs::TickerInfo` で定義。
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]
 pub struct TickerInfo {
@@ -70,14 +70,14 @@ pub struct TickerInfo {
 | `engine-client/src/backend.rs:50-56` | | `market_kind_to_ipc` | `Stock => "stock"` |
 | `src/screen/dashboard/tickers_table.rs:63-66, 750-752, 1090-1091` | | venue ごとの `MarketKind` 配列、market filter ボタン、UI suffix | `Venue::Tachibana => &[MarketKind::Stock]`、Stock 用 market filter は Phase 1 では非表示推奨。Stock の suffix は `""` |
 | `src/screen/dashboard/pane.rs:529-530` | | `Spot => symbol / Perps => symbol + " PERP"` | `Stock => symbol` |
-| `exchange/src/lib.rs:367, 544` | | `MarketKind::LinearPerps`/`InversePerps` を直接比較 | `is_perps` は false のまま、Display ロジックは Hyperliquid 専用なので `Stock` は分岐不要 |
+| `exchange/src/lib.rs::TickerInfo`（`is_perps` / Display 系） | | `MarketKind::LinearPerps`/`InversePerps` を直接比較 | `is_perps` は false のまま、Display ロジックは Hyperliquid 専用なので `Stock` は分岐不要 |
 | `exchange/src/unit/qty.rs:225, 259, 269, 281` | | `matches!(market_kind, MarketKind::InversePerps)` | `Stock` は inverse でないため修正不要（`is_inverse=false`） |
 
 **T0.2 で対応すべき網羅 match の必須修正は 11 箇所**。`matches!()` でピンポイントに `InversePerps` のみ問う箇所は修正不要（`Stock` は inverse でない）。
 
 ## 3. `Ticker::new` の ASCII 制約と `MAX_LEN`
 
-`exchange/src/lib.rs:281-318` で定義。
+`exchange/src/lib.rs::Ticker::new` で定義。
 
 ```rust
 pub const MAX_LEN: u8 = 28;
@@ -108,7 +108,7 @@ assert!(!ticker.contains('|'), "Ticker cannot contain '|'");
 
 ## 5. `Timeframe` の serde 形式（F-H1）
 
-`exchange/src/lib.rs:67-83` の現状:
+`exchange/src/lib.rs::Timeframe` の現状:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
@@ -119,7 +119,7 @@ pub enum Timeframe {
 }
 ```
 
-`#[serde(rename = "...")]` 無し → JSON 化で `"D1"` などの**変種名**が出る。一方 `Display` (`exchange/src/lib.rs:41-65`) は `"1d"` などの **wire 形式**を返し、`engine-client::backend::timeframe_to_str` も同 wire 形式を使う。
+`#[serde(rename = "...")]` 無し → JSON 化で `"D1"` などの**変種名**が出る。一方 `Display` (`exchange/src/lib.rs::impl Display for Timeframe`) は `"1d"` などの **wire 形式**を返し、`engine-client::backend::timeframe_to_str` も同 wire 形式を使う。
 
 **T0.2 で全 15 変種に `#[serde(rename = "...")]` を付与**し、IPC / 永続 state の双方を `Display` と一致させる。永続 state ロード時の互換性は要検証（旧形式 `"D1"` で書かれていた場合）。
 
@@ -128,7 +128,7 @@ pub enum Timeframe {
 | 場所 | 用途 |
 | :--- | :--- |
 | `exchange/src/adapter.rs:96-110` `StreamKind::Kline { timeframe: Timeframe }` | 永続 state（pane 設定） |
-| `exchange/src/lib.rs:25-30` `PushFrequency::Custom(Timeframe)` | depth push freq、永続 state |
+| `exchange/src/lib.rs::PushFrequency` `PushFrequency::Custom(Timeframe)` | depth push freq、永続 state |
 | `data/src/chart.rs`, `data/src/layout/pane.rs` 等 | 永続 state |
 
 → **永続 state にも書かれているため、rename 適用時は古い形式 (`"D1"`) のロードを別途吸収**するか、**現状 JSON 出力 (`"D1"`) と Display (`"1d"`) の不整合を許容して新規ロード時のみ wire 形式**にするかの判断が必要。
@@ -142,7 +142,7 @@ pub enum Timeframe {
 
 ## 6. `EngineEvent::Disconnected` の shape（F-H2）
 
-`engine-client/src/dto.rs:115-122`:
+`engine-client/src/dto.rs::EngineEvent::Disconnected`:
 
 ```rust
 Disconnected {
@@ -159,7 +159,7 @@ Disconnected {
 
 ## 7. `ProcessManager` の credentials 保持戦略（F-m4）
 
-`engine-client/src/process.rs:205-211`:
+`engine-client/src/process.rs::ProcessManager`:
 
 ```rust
 pub struct ProcessManager {

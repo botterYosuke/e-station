@@ -116,3 +116,59 @@
 | :--- | :--- | :--- | :--- |
 | HIGH-U-7 | T0.1 FD 情報コード未確定のまま spec MVP / 受け入れが live FD 表示を前提にしている。T0.1 を「完了条件つきの明示ゲート」に直さないと T1/T5 が仮仕様で進んで手戻り | `implementation-plan.md` T0.1 / `spec.md` §2.1 | T0.1 ゲートに「明示ゲート規約」ブロックを追加（T5 着手 / data-mapping §3 破壊変更 / spec.md §4 A 系確定の 3 行為を `[x]` 化まで禁止）。解決時のチェックリスト 5 項目を明文化（採用案明記 / data-mapping §3 確定 / spec §2.1+§4 改訂 / PR 説明文 3 点セット / `[x]` 化）。spec.md §2.1 の trade ストリーム / 板スナップショット項目に「T0.1 ゲート前提、未通過なら B 系縮退で MVP から外す」と直接注記 |
 | MEDIUM-U-8 | demo CI レーン方式が T7 まで保留されているが [Q21](./open-questions.md#L25) の demo 運用時間自体が未確定。終盤に不安定依存が昇格するリスク | `implementation-plan.md` T2 / T7 | T2 受け入れ末尾に「demo CI レーン方式の早期決定」`[ ]` を新設し、案 (A) non-blocking job / (B) manual lane only / (C) CI 不採用 の 3 択を明記。Q21 確定までは案 (B) を暫定固定。T7 のスケジュール起動規約を「T2 で確定した方式に従う」に書換 |
+
+## ラウンド 8（2026-04-26 最終ラウンド・PlanLoop 上限到達 / 収束）
+
+【ラウンド 8 統一決定】
+
+- 行番号参照を全面シンボル参照化（`dto.rs` / `process.rs` / `lib.rs`）。`*.rs:NNN` 形式の参照は本ラウンドで撲滅し、以後は型名・関数名・モジュールパス基準で記述する。
+- 不変条件 ↔ テスト対応表 [`invariant-tests.md`](./invariant-tests.md) を新設し、テスト命名ドリフトを CI grep ガード `test_invariant_table_covers_all_ids` で防止する（未対応 ID = 0 を収束条件とする）。
+- LOW 3 件（panic backtrace 漏出ガード / nautilus 境界 lint CI yml / `PNoCounter` 再起動またぎ）は本 PlanLoop ではクローズせず、Phase O1 残論点として `open-questions.md` Q41 / Q42 / Q43 に記録して持ち越す。
+
+| 重要度 | Finding | 対応ファイル | 変更内容 |
+| :--- | :--- | :--- | :--- |
+| MEDIUM R8-B1 | 行番号参照（`dto.rs:102` 等）が rebase でドリフトしレビュー再現性を損なう | `inventory-T0.md` / `data-mapping.md` / `implementation-plan.md` | 行番号参照を型名・関数名・モジュールパス基準のシンボル参照に一括置換（例: `dto.rs:102` → `data::tachibana::dto::Credentials`）。以後の規約として「行番号参照は使用しない」を明記 |
+| MEDIUM R8-A1 | `dto.rs:102` 行番号参照が複数 PR を跨いでドリフト、`venue_capability` 集約方針が `open-questions.md` Q27 で読み取りづらい | `open-questions.md` Q27 | `dto.rs:102` 参照をシンボル参照（`Credentials` 型 / `data::tachibana::dto`）に置換。`venue_capability` が単一モジュールに集約済である旨を 1 行注記として追記 |
+| MEDIUM R8-D1 | 不変条件 ID と test 関数名の対応が散逸し、rename PR でドリフトする恐れ | 新規 `invariant-tests.md` + `implementation-plan.md` T7 | 単一正本 `invariant-tests.md` を新設（4 列表 / 冒頭に CI ガード仕様）。`implementation-plan.md` T7 に「CI grep ガード `test_invariant_table_covers_all_ids` 整備」タスクを追加 |
+| LOW R8-C1/C2/D2 | panic backtrace 漏出ガード / nautilus 境界 lint の CI yml / `PNoCounter` 再起動またぎ採番の 3 件は本 PlanLoop で詰めきれず | `open-questions.md` Q41 / Q42 / Q43 | Phase O1 残論点として 3 件分のエントリ（Q41 panic backtrace 漏出 / Q42 nautilus 境界 lint CI / Q43 `PNoCounter` 再起動またぎ）を追記。各 Q に確定タイミング・暫定方針・関連 Tx タスクを明記 |
+
+ラウンド 8 で MEDIUM ゼロ収束を達成し、PlanLoop（上限 8 ラウンド）を完了した。残存 LOW 3 件は Phase O1 残論点として `open-questions.md` に集約され、後続フェーズで個別解消する運びとする。
+
+## ラウンド 9（2026-04-26 ユーザー直接指摘 / T4 Rust 側配線・invalidation・fail-safe 不足）
+
+PlanLoop 収束後にユーザーから直接提起された T4 完了条件不足 3 件を反映。Rust 側受信配線・マスタ in-memory invalidation・非 `1d` kline fail-safe を T4 に明文化した。
+
+| 重要度 | Finding | 対応ファイル | 変更内容 |
+| :--- | :--- | :--- | :--- |
+| HIGH-U-9 | T4 完了条件に対し Rust 側 `TickerInfo` / 表示メタ配線が作業項目として不足。`engine-client/src/backend.rs::TickerMetadataMap` 構築は `TickerInfo::new(...)` 経路で `display_name_ja` / `lot_size` / JPY 正規化が落ちる。`exchange/src/lib.rs::TickerInfo::new_stock` / `normalize_after_load` を使う前提が計画に未明記 | `implementation-plan.md` T4 | `[ ]` Rust 側受信マッピング配線タスクを新規追加（`display_name_ja` 別 map 格納 / `new_stock` 使用 / `normalize_after_load` 必須経路 / `engine-client/tests/ticker_info_tachibana_mapping.rs::test_tachibana_ticker_info_carries_display_name_ja_and_lot_size` を pin）。受け入れ条件にも反映 |
+| HIGH-U-10 | マスタの in-memory 無効化条件が欠落。`VenueReady` は再ログイン・再起動で再送される前提だが `_master_loaded` Event とメモリ上マスタの reset 規約が無く、demo/prod 切替・JST 日跨ぎ・Python 再起動で前回内容を使い続ける穴 | `implementation-plan.md` T4 | `[ ]` マスタ in-memory invalidation 規約タスクを新規追加（`is_demo` 変更 / JST 日跨ぎ / `__init__` 再生成の 3 トリガで `_master_loaded.clear()` + メモリマップ破棄）。`python/tests/test_tachibana_master_invalidation.py` の 3 ケース（`test_master_reloaded_when_is_demo_flips` / `test_master_reloaded_after_jst_rollover_in_running_process` / `test_master_event_is_fresh_per_worker_init`）を pin |
+| HIGH-U-11 | `1d` 以外の kline 要求に対する Python 側 fail-safe が T4 不在。`data-mapping.md §6/§7` は Python が `Error{code:"not_implemented"}` で返す前提だが、UI 非活性化（L529）だけでは保存済み pane 復元や capabilities 適用前経路から非 `1d` 要求が flight する可能性 | `implementation-plan.md` T4 | `[ ]` Python `fetch_klines` 入口で `timeframe != "D1"` を即 `VenueError{code:"not_implemented"}` で拒否するタスクを新規追加。`python/tests/test_tachibana_fetch_klines_reject.py::test_fetch_klines_rejects_non_d1_timeframes`（`1m/5m/15m/1h/4h` の 5 ケース parametrize）+ `engine-client/tests/tachibana_kline_capability_gate.rs::test_restored_pane_with_non_d1_timeframe_does_not_crash` を pin。受け入れ条件にも反映 |
+
+ラウンド 9 は PlanLoop の自動レビューループ外で、ユーザー直接指摘により着地した補完反映。本反映により T4 完了条件が「Python 実装の粒度」と「Rust 受信配線・状態 invalidation・復元 fail-safe」の両側で揃ったため、T4 着手時に手戻りが発生しない構造となった。
+
+## ラウンド 10（2026-04-26 ユーザー直接指摘 / ラウンド 9 反映の内部矛盾 4 件）
+
+ラウンド 9 で T4 に追加した記述が他の確定記述と整合していない 4 件の矛盾をユーザーが直接指摘。本ラウンドで一貫性を回復した。
+
+| 重要度 | Finding | 対応ファイル | 変更内容 |
+| :--- | :--- | :--- | :--- |
+| HIGH-U-12 | `Timeframe` の wire 形式が T0.2 L67 で `"1d"` に統一されている前提だが、T4 L526 / L547 では `timeframe="D1"` / `timeframe != "D1"` と内部 enum 名で書かれており、正しい `"1d"` リクエストまで `not_implemented` になる恐れ | `implementation-plan.md` T4 | L526 を `fetch_klines(timeframe="1d")` に修正し、IPC は wire 値で受ける旨と T0.2 L67 / Q36 / F-H1 への参照を併記。L547 を「wire 値 `timeframe != "1d"` のとき即 `VenueError{code:"not_implemented", message:"tachibana supports 1d only in Phase 1"}`」に書換、判定対象が wire 文字列で Rust enum 内部名 `D1` ではない旨を明記 |
+| HIGH-U-13 | `quote_currency` 正規化の実装位置が矛盾。T0.2 L82 で「IPC 受信側は `TickerInfo::new()` で `Some(default)` 埋まるため fold 不要、saved-state ロード時のみ `normalize_after_load()` を呼ぶ」と確定済みなのに、T4 L540 で「IPC 受信ハンドラ内で必ず `normalize_after_load` を通す」と再指示しており実装者が迷う | `implementation-plan.md` T4 | L540 を「**IPC 受信側では実行しない**（T0.2 L82 確定）。`new_stock(...)` で構築する時点で `quote_currency` は `Exchange::default_quote_currency()` 由来 = `Some(QuoteCurrency::Jpy)` が埋まる。再 fold は単一規約を崩すため禁止」に書換。L541 のテスト assert も「`new_stock` 経由構築直後に `Some(QuoteCurrency::Jpy)` であること（`normalize_after_load` を介さず）」に揃えた |
+| HIGH-U-14 | FD 情報コード未確定ゲートが本文（T5 着手前）とリスク表（T1 着手前）でズレ。現実は T4 作業中で T1 codec は確認済み data key `DPP` の範囲で先行着手済みなので、リスク表「T1 着手前」は誤り | `implementation-plan.md` リスクと緩和表 | 「**T5 着手前に必ず実体解決**（T0.1 ゲート規約 L23–L35 と整合）。T1 codec は確認済み data key (`DPP` のみ) の範囲で先行着手可」に書換 |
+| HIGH-U-15 | T4 検索仕様に未定義フィールド `display_name_en` が突然登場。T0.2 L50/L52 確定では「英語名は `display_symbol`（`sIssueNameEizi` 由来 ASCII）、日本語名は `display_name_ja`」で固定されており、`display_name_en` は新設するのか既存 `display_symbol` を読むのか不明 | `implementation-plan.md` T4 | L530 / L538 の `display_name_en` 言及を `display_symbol`（英語名 = `sIssueNameEizi` 由来、T0.2 L50 確定）に書換。検索対象は「日本語名 `display_name_ja` と英語名 `display_symbol` の両方」に統一 |
+
+ラウンド 10 はラウンド 9 反映で混入した内部矛盾の補正。Grep 検証で `display_name_en` / `timeframe="D1"` / `timeframe != "D1"` / 「T1 着手前に必ず実体解決」がいずれも 0 件残存であることを機械確認した。本反映で T4 セクション内の wire 形式・正規化責務・ゲート対象・検索フィールド名がすべて T0.2 確定記述と整合した。
+
+## ラウンド 11（2026-04-26 PlanLoop 再起動 / ラウンド 9・10 反映の一貫性確認）
+
+ユーザー指示で PlanLoop を再起動し、4 観点合算レビューを 1 巡実施。ラウンド 9/10 で導入した記述と既存確定記述の整合・実装可能性を再検査した結果、HIGH 1 件 + MEDIUM 3 件を検出して反映した。
+
+| 重要度 | Finding | 対応ファイル | 変更内容 |
+| :--- | :--- | :--- | :--- |
+| HIGH R11-1 | ラウンド 9/10 で追加した 6 件の test 関数名が `invariant-tests.md` の表に未登録。T7 の CI grep ガード `test_invariant_table_covers_all_ids` 導入時に未対応 ID として検知され収束ブロッカーになる。さらに SKILL R4 行が `test_concurrent_callers_trigger_single_download`（マスタロック並列テスト）を pin しており SKILL R4（p_no 採番）と意味的に無関係 | `invariant-tests.md` 表 | HIGH-U-9 / HIGH-U-10a/b/c / HIGH-U-11p/r の 6 行を表末尾に追加（紐付き Tx は全て T4）。SKILL R4 行を `python/tests/test_tachibana_pno_counter.py::test_pno_monotonic_under_concurrency` に差し替え、SKILL R7 行を `python/tests/test_tachibana_encoding.py::test_shift_jis_request_response_pipeline`（Tx を T1）に修正（誤紐付け解消） |
+| MEDIUM R11-2 | HIGH-U-10 の JST 日跨ぎ invalidate で `current_p_sd_date()` を直接比較すると、同関数は `YYYY.MM.DD-hh:mm:ss.sss` のミリ秒精度値を返すため毎回不一致になり常時再ロードする実装ミスを誘発 | `implementation-plan.md` T4 マスタ invalidation 規約 | 「先頭 10 文字を切り出して比較、または専用ヘルパ `current_jst_yyyymmdd() -> str` を `tachibana_helpers.py` に新設（後者推奨、`strftime("%Y%m%d")` の薄ラッパで L531 のキャッシュファイル名と共通化）」を明記 |
+| MEDIUM R11-3 | HIGH-U-10 / HIGH-U-11 が前提とする `TachibanaWorker` クラスと `set_credentials` setter が現状の `python/engine/exchanges/` に未実装。T4 着手時に新設タスクが無いと配線漏れする | `implementation-plan.md` T4 冒頭 | `[ ]` `tachibana.py::TachibanaWorker` クラスと `set_credentials(creds)` setter の新設タスクを独立箇条書きで追加（is_demo 差分検知フック内蔵、`__init__` で `_master_loaded` / `_master_lock` 初期化） |
+| MEDIUM R11-4 | `open-questions.md` Q16 決定欄に旧記述「`engine-client::dto::TickerListed` / `TickerMetadata` 応答に `display_name_ja` を追加」が残存。README L58・T0.2 L47 で「`TickerListed` 型は存在しない」「`EngineEvent::TickerInfo.tickers[*]` dict 経路に確定」と明示済みのため、実装者が `TickerListed` 型を新設しようとする恐れ | `open-questions.md` Q16 | 決定欄を「`EngineEvent::TickerInfo.tickers[*]` の各 ticker dict に `display_name_ja: Option<String>` を追加（型新設なし）。Rust UI 側は `HashMap<Ticker, TickerDisplayMeta>` で別管理」に書換、旧記述が不採用である旨を明記 |
+
+ラウンド 11 で MEDIUM ゼロ収束を再達成。LOW（invariant-tests.md SKILL R7 の誤紐付け）はラウンド 11 中に R11-1 の修正と一括で解消済み。本ラウンドをもって `docs/plan/tachibana/` の Phase 1 計画レビューループは完全収束し、T4 着手の全前提（wire 形式・正規化責務・ゲート対象・検索フィールド名・`TachibanaWorker` 新設・JST 日付ヘルパ・invariant 表登録）が揃った。
+

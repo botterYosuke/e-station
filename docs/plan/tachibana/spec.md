@@ -48,7 +48,7 @@
 ### 2.3 MVP 必須に昇格した項目
 
 - **ザラ場時間帯の判定（MVP 必須、T5 で実装）**: JST 9:00–11:30 前場 / 12:30–15:25 後場連続 / **15:25–15:30 クロージング・オークション**（**2024-11-05 以降の現行東証取引時間**）。`Connected` を維持するのは **9:00–15:30 全体**。クロージング・オークション中は気配がほぼ動かなくても「市場時間外」UI を出さない。閉場（〜9:00 / 11:30〜12:30 / 15:30〜）でのみ subscribe を `Disconnected{reason:"market_closed"}` で停止する。**Phase 1 はハードコード**（祝日カレンダー判定なし）。営業日カレンダー動的取得（`CLMDateZyouhou`）は Phase 2 送り
-  - **発出粒度（M5 修正）**: `Disconnected` イベントは ticker/stream 粒度（[engine-client/src/dto.rs:201](../../../engine-client/src/dto.rs#L201)）のため、閉場帯に届いた立花 ticker subscribe ごとに 1 件返す。**Rust UI 側はバナー表示を venue 単位で de-dup**（複数銘柄購読中でも「市場時間外」バナーは 1 つ）。実装位置は `code` → severity マッピングと同じレイヤ（[engine-client/src/error.rs](../../../engine-client/src/error.rs) の `classify_*` 関数群、F-L9）に集約
+  - **発出粒度（M5 修正）**: `Disconnected` イベントは ticker/stream 粒度（`engine-client/src/dto.rs::EngineEvent::Disconnected`）のため、閉場帯に届いた立花 ticker subscribe ごとに 1 件返す。**Rust UI 側はバナー表示を venue 単位で de-dup**（複数銘柄購読中でも「市場時間外」バナーは 1 つ）。実装位置は `code` → severity マッピングと同じレイヤ（[engine-client/src/error.rs](../../../engine-client/src/error.rs) の `classify_*` 関数群、F-L9）に集約
 
 ### 2.4 ストレッチゴール（同フェーズ内で時間が許せば）
 

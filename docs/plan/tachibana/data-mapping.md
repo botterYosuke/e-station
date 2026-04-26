@@ -32,12 +32,12 @@ pub enum Exchange {
 | 項目 | 立花 | 本アプリ |
 | :--- | :--- | :--- |
 | 銘柄コード | `sIssueCode` 4 桁数字 / 5 桁数字 / **末尾英字を含む 5 桁英数字**（新興市場の優先出資証券・新株予約権付社債で `130A0` のような表記あり） | `Ticker` の symbol 部分にそのまま入れる（ASCII 英数字のみ） |
-| 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は [exchange/src/lib.rs:291,303](../../../exchange/src/lib.rs#L291) で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに **`EngineEvent::TickerInfo` の各 ticker dict**（現状 `Vec<serde_json::Value>`、[engine-client/src/dto.rs:279](../../../engine-client/src/dto.rs#L279)）に Python 側が `display_name_ja: string \| null` キーを詰めて送る（T0.2 確定方針）。`TickerListed` という名の DTO 型は存在しない。Rust 側 UI は受信した dict から `display_name_ja` を取り出して `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T4 で実装）。**キー名の typo サイレント失敗防止**のため、Python 単体テストで `display_name_ja`（`display_name_jp` ではない）を assert する（M9） |
+| 表示名（M9: 4 種を全保持） | `sIssueName`（漢字）/ `sIssueNameRyaku`（漢字略称）/ `sIssueNameKana`（カナ）/ `sIssueNameEizi`（英語名 ASCII） | `Ticker::new` / `Ticker::new_with_display` は `exchange/src/lib.rs::Ticker::new` で `assert!(is_ascii())` 強制。よって **日本語名は `Ticker` / `display_symbol` には絶対に入れない**。代わりに **`EngineEvent::TickerInfo` の各 ticker dict**（現状 `Vec<serde_json::Value>`、`engine-client/src/dto.rs::EngineEvent::TickerInfo`）に Python 側が `display_name_ja: string \| null` キーを詰めて送る（T0.2 確定方針）。`TickerListed` という名の DTO 型は存在しない。Rust 側 UI は受信した dict から `display_name_ja` を取り出して `HashMap<Ticker, TickerDisplayMeta>` で別管理する（T4 で実装）。**キー名の typo サイレント失敗防止**のため、Python 単体テストで `display_name_ja`（`display_name_jp` ではない）を assert する（M9） |
 | 市場コード | `sSizyouC`（`00`=東証） | Phase 1 は東証固定 |
 | 売買単位 | 銘柄マスタ `sTatebaTanniSuu` | `TickerInfo.lot_size` 相当（新規プロパティ追加要） |
 | 呼値単位 | マスタ「呼値」テーブル（価格帯依存） | `Price` の min_ticksize で表現。**価格帯ごとに変わる** ため固定 1 値では足りない（§5 参照） |
 
-`Ticker::new("7203", Exchange::TachibanaStock)` のような文字列パスで素直に通る（現 API は第 2 引数 `Exchange` が必須、[exchange/src/lib.rs:281](../../../exchange/src/lib.rs#L281)）。既存 `Ticker::new` は ASCII 制約と `MAX_LEN` チェック（[lib.rs:290](../../../exchange/src/lib.rs#L290)）のみで、**`130A0` のような英字混在 5 桁 ticker も許容可能**。T4 では「実データで通ること」（ASCII 制約 + MAX_LEN 収容）の確認に留める（F2）。
+`Ticker::new("7203", Exchange::TachibanaStock)` のような文字列パスで素直に通る（現 API は第 2 引数 `Exchange` が必須、`exchange/src/lib.rs::Ticker::new`）。既存 `Ticker::new` は ASCII 制約と `MAX_LEN` チェック（`exchange/src/lib.rs::Ticker::new`）のみで、**`130A0` のような英字混在 5 桁 ticker も許容可能**。T4 では「実データで通ること」（ASCII 制約 + MAX_LEN 収容）の確認に留める（F2）。
 
 **先行実装参考（M9）**: 類似プロジェクト [flowsurface](file:///C:/Users/sasai/Documents/flowsurface) の `exchange/src/adapter/tachibana.rs:625-684` が同じ問題に対する `MasterRecord` 型（`sIssueName` / `sIssueNameRyaku` / `sIssueNameKana` / `sIssueNameEizi` の 4 種を全保持）と「`display_symbol` には英語名 `sIssueNameEizi` を採用、ASCII 28 文字に収まらないものは `None` フォールバック」というパターンを既に持っている。本計画では **同じ MasterRecord 4 フィールドを Python 側に踏襲**し、加えて `display_name_ja` (`sIssueName`) を別ルートで運ぶ（implementation-plan.md T0.2 の M9 項目）。
 
@@ -125,7 +125,7 @@ pub struct TickerInfo {
 }
 ```
 
-> **注意（F13）**: 現行 [exchange/src/lib.rs:515](../../../exchange/src/lib.rs#L515) の `TickerInfo` は `#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]` を持ち `HashMap` キー / `HashSet` 要素として全クレートで使われる。**`Copy` が付いているため、追加フィールドも `Copy` を満たすこと**（`String` 禁止。日本語名は `TickerDisplayMeta` へ）。フィールド追加で hash 値が変わると既存 UI 状態（pane ↔ ticker_info の紐づけ）と非互換になる可能性がある。T0 では:
+> **注意（F13）**: 現行 `exchange/src/lib.rs::TickerInfo` の `TickerInfo` は `#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]` を持ち `HashMap` キー / `HashSet` 要素として全クレートで使われる。**`Copy` が付いているため、追加フィールドも `Copy` を満たすこと**（`String` 禁止。日本語名は `TickerDisplayMeta` へ）。フィールド追加で hash 値が変わると既存 UI 状態（pane ↔ ticker_info の紐づけ）と非互換になる可能性がある。T0 では:
 > - `lot_size` / `quote_currency` 追加前に `git grep "TickerInfo"` / `HashMap.*TickerInfo` / `HashSet.*TickerInfo` で参照箇所を全数棚卸しする
 > - 追加フィールドは **`#[serde(default)]`** を付け、対応する `Default` 実装を用意する（既存永続 state に missing field でも読める）
 > - `QuoteCurrency` の `Default` は `Usdt`（暗号資産 venue 互換）、`lot_size: Option<u32>` は `None`
@@ -136,7 +136,7 @@ pub struct TickerInfo {
 | 項目 | 立花 | engine DTO |
 | :--- | :--- | :--- |
 | 取得 API | `CLMMfdsGetMarketPriceHistory` | `FetchKlines` |
-| 時間枠 | **日足のみ**（最大約 20 年） | 既存 `Timeframe::D1`（[exchange/src/lib.rs:83](../../../exchange/src/lib.rs#L83)、IPC 文字列 `"1d"`）を**そのまま流用**。新規追加不要 |
+| 時間枠 | **日足のみ**（最大約 20 年） | 既存 `Timeframe::D1`（`exchange/src/lib.rs::Timeframe`、IPC 文字列 `"1d"`）を**そのまま流用**。新規追加不要 |
 | OHLCV | 始値・高値・安値・終値・出来高 | そのまま `KlineMsg` |
 | `is_closed` | 営業日が経過していれば true | JST 判定 |
 | `taker_buy_volume` | 取得不可 | `None` |
@@ -167,7 +167,7 @@ pub struct TickerInfo {
 
 | 立花 | 既存 IPC |
 | :--- | :--- |
-| 価格: 円・整数または小数点（呼値による） | `String`（[dto.rs L227 TradeMsg.price](../../../engine-client/src/dto.rs#L227)）— 既存通り |
+| 価格: 円・整数または小数点（呼値による） | `String`（`engine-client/src/dto.rs::TradeMsg`）— 既存通り |
 | 数量: 株・整数（売買単位の倍数） | `String` で渡す。Rust の `Qty` 復元は既存ロジック流用 |
 
 JPY が quote currency になる venue は本アプリ初。**通貨表示用フィールドを `TickerInfo` に追加する**:

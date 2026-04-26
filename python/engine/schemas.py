@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 1
 SCHEMA_MINOR: int = 2
@@ -414,3 +416,39 @@ class VenueLoginCancelled(IpcMessage):
     event: Literal["VenueLoginCancelled"] = "VenueLoginCancelled"
     venue: str
     request_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Tachibana REQUEST response models (T4 / B1)
+# ---------------------------------------------------------------------------
+#
+# These wrap the body of CLMMfdsGetMarketPrice / CLMMfdsGetMarketPriceHistory
+# responses, normalizing the empty-list-as-empty-string convention (R8) via
+# `deserialize_tachibana_list`. Deferred from T1 §MEDIUM-C2-1 — see
+# implementation-plan.md §T4.
+
+
+class MarketPriceResponse(IpcMessage):
+    """Response body of ``CLMMfdsGetMarketPrice``."""
+
+    sCLMID: str = ""
+    sResultCode: str = ""
+    aCLMMfdsMarketPriceData: list[dict] = Field(default_factory=list)
+
+    @field_validator("aCLMMfdsMarketPriceData", mode="before")
+    @classmethod
+    def _normalize_price_data(cls, v: Any) -> list:
+        return deserialize_tachibana_list(v)
+
+
+class MarketPriceHistoryResponse(IpcMessage):
+    """Response body of ``CLMMfdsGetMarketPriceHistory``."""
+
+    sCLMID: str = ""
+    sResultCode: str = ""
+    aCLMMfdsMarketPriceHistoryData: list[dict] = Field(default_factory=list)
+
+    @field_validator("aCLMMfdsMarketPriceHistoryData", mode="before")
+    @classmethod
+    def _normalize_history_data(cls, v: Any) -> list:
+        return deserialize_tachibana_list(v)

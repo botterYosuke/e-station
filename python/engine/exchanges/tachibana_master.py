@@ -23,6 +23,8 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -55,7 +57,144 @@ MASTER_CLMIDS: frozenset[str] = frozenset({
     "CLMIssueMstOther",
     "CLMOrderErrReason",
     "CLMDateZyouhou",
+    # Per-stock yobine (tick-band) table — referenced by
+    # CLMIssueSizyouMstKabu.sYobineTaniNumber. Decoded by
+    # `decode_clm_yobine_record` below.
+    "CLMYobine",
 })
+
+
+# Price-endpoint sCLMID set. These REQUEST endpoints must be sent against
+# `sUrlPrice`, not `sUrlRequest` / `sUrlMaster`. Confirmed against the
+# official samples ``e_api_get_market_price_tel.py`` and
+# ``e_api_get_market_price_history_tel.py``.
+PRICE_CLMIDS: frozenset[str] = frozenset({
+    "CLMMfdsGetMarketPrice",
+    "CLMMfdsGetMarketPriceHistory",
+})
+
+
+# ---------------------------------------------------------------------------
+# CLMYobine — per-stock tick band table (B1)
+# ---------------------------------------------------------------------------
+#
+# The §2-12 section of api_request_if_master_v4r5.pdf describes the
+# *structure* of the tick table (max 20 ``(sKizunPrice_N, sYobineTanka_N,
+# sDecimal_N)`` triples per ``sYobineTaniNumber``); the actual price→tick
+# values come from the runtime ``CLMYobine`` master stream, NOT a single
+# hardcoded table. ``CLMIssueSizyouMstKabu.sYobineTaniNumber`` references
+# the row that applies to a given issue.
+#
+# Spec invariant from the PDF screenshot: at least one of the 20 columns
+# always carries the sentinel ``999999999`` as ``sKizunPrice_N``. We use
+# that as the table cap — bands at/after the first sentinel are kept once
+# (so ``price <= cap`` always matches a legal price) and trailing duplicate
+# sentinels are dropped.
+
+YOBINE_PRICE_SENTINEL: Decimal = Decimal("999999999")
+
+
+@dataclass(frozen=True, slots=True)
+class YobineBand:
+    """One ``(基準値段, 呼値単価, 小数桁数)`` row from a CLMYobine record."""
+
+    kizun_price: Decimal
+    yobine_tanka: Decimal
+    decimals: int
+
+
+@dataclass(frozen=True, slots=True)
+class CLMYobineRecord:
+    """Decoded CLMYobine record. ``bands`` is order-preserving (slot 1..20)."""
+
+    sYobineTaniNumber: str
+    bands: list[YobineBand]
+
+
+def decode_clm_yobine_record(record: dict[str, Any]) -> CLMYobineRecord:
+    """Decode a raw CLMYobine record (one of the CLMEventDownload children).
+
+    Reads slots 1..20 as ``(sKizunPrice_N, sYobineTanka_N, sDecimal_N)``.
+    Trailing all-sentinel padding (``999999999`` cap repeated) is collapsed
+    so the returned ``bands`` list ends with exactly one cap row (the first
+    occurrence of the sentinel). This relies on the PDF invariant that the
+    sentinel is always present somewhere in the row.
+    """
+    if record.get("sCLMID") != "CLMYobine":
+        raise ValueError(
+            f"decode_clm_yobine_record: expected sCLMID='CLMYobine', "
+            f"got {record.get('sCLMID')!r}"
+        )
+
+    raw_bands: list[YobineBand] = []
+    for i in range(1, 21):
+        kizun_raw = record.get(f"sKizunPrice_{i}")
+        tanka_raw = record.get(f"sYobineTanka_{i}")
+        dec_raw = record.get(f"sDecimal_{i}")
+        if kizun_raw is None or tanka_raw is None or dec_raw is None:
+            # Missing slot — treat as end-of-table (defensive; well-formed
+            # CLMYobine always carries all 20).
+            break
+        raw_bands.append(
+            YobineBand(
+                kizun_price=Decimal(str(kizun_raw)),
+                yobine_tanka=Decimal(str(tanka_raw)),
+                decimals=int(dec_raw),
+            )
+        )
+
+    bands: list[YobineBand] = []
+    for band in raw_bands:
+        bands.append(band)
+        if band.kizun_price >= YOBINE_PRICE_SENTINEL:
+            # First sentinel = table cap; drop everything after.
+            break
+
+    return CLMYobineRecord(
+        sYobineTaniNumber=str(record["sYobineTaniNumber"]),
+        bands=bands,
+    )
+
+
+def tick_size_for_price(
+    price: Decimal,
+    yobine_code: str,
+    yobine_table: dict[str, list[YobineBand]],
+) -> Decimal:
+    """Return the tick size (呼値単価) that applies to ``price`` under
+    ``yobine_table[yobine_code]``.
+
+    Selection rule: the first band whose ``kizun_price >= price`` (i.e.
+    ``price <= kizun_price``) wins. ``bands`` is assumed to be in slot
+    order (1..20) which is also ascending by ``kizun_price`` per the
+    Tachibana master schema.
+
+    Args:
+        price: Must be a ``Decimal``. ``float`` / ``int`` are rejected to
+            avoid binary-float drift at tick boundaries.
+        yobine_code: ``sYobineTaniNumber`` from
+            ``CLMIssueSizyouMstKabu``.
+        yobine_table: ``{yobine_code: bands}`` dict, typically built from
+            decoded CLMYobine records.
+
+    Raises:
+        TypeError: if ``price`` is not a ``Decimal``.
+        KeyError: if ``yobine_code`` is not in ``yobine_table``.
+        ValueError: if no band matches (should not happen in practice
+            because the 999999999 sentinel caps every legal table).
+    """
+    if not isinstance(price, Decimal) or isinstance(price, bool):
+        raise TypeError(
+            f"tick_size_for_price: price must be Decimal, got {type(price).__name__}"
+        )
+    bands = yobine_table[yobine_code]  # KeyError on miss — by contract
+    for band in bands:
+        if price <= band.kizun_price:
+            return band.yobine_tanka
+    raise ValueError(
+        f"tick_size_for_price: no band matched price={price} for "
+        f"yobine_code={yobine_code!r} (table missing 999999999 cap?)"
+    )
 
 
 # ASCII alnum, 1..28 chars. Tighter than `Ticker::new` (which only forbids
