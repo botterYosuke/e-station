@@ -646,6 +646,20 @@
 - [ ] **`capabilities_changed_after_reconnect` pin test を追加（B4 R3 M3 繰越）**: reconnect 後に `EngineConnection::capabilities()` の snapshot が新値に更新されることを assert する pin test を `engine-client/tests/` 配下に新設。`EngineRehello` hook 実装（同 T7 で追加予定）と合わせて、backend 使い回し経路でも capabilities 差し替えが silent gap なく反映されることを確認する
 - [ ] **`src/replay_api.rs` 新設 + U5 E2E skip 解除（pin: T35-U5-RelogE2E）**: T3.5 Step F で着地した `tests/e2e/tachibana_relogin_after_cancel.sh` の skeleton（exit 77 skip 許容）の skip 解除に必要な HTTP API を `src/replay_api.rs` に新設し、`RequestVenueLogin` 発火 / `VenueLoginCancelled` 注入 / status 取得を E2E から駆動可能にする。skeleton の skip ガードを外し本実行（Phase O1 繰越候補）
 
+## 下流計画への影響
+
+本計画の完了（特に T2・T7）は、以下の下流計画のブロッカーを解除する。作業者はフェーズ完了時に下記リンク先の前提条件欄を確認すること。
+
+| 完了フェーズ | 解除されるブロッカー | 参照先 |
+|---|---|---|
+| **T2（認証実装）完了** | [order/ Phase O-pre](../order/implementation-plan.md) 着手可能。`tachibana_auth.py` / `tachibana_url.py` / `tachibana_codec.py` が order/ の前提依存ファイル | [order/implementation-plan.md 冒頭](../order/implementation-plan.md) |
+| **T4（マスタキャッシュ）完了** | IPC `stdin` 初期 payload への `config_dir` / `cache_dir` 追加が完了し、Python 側 fast-path が使えるようになる | [architecture.md §2.1.1](./architecture.md) |
+| **Phase 1 全完了（T7 受け入れ緑）** | nautilus N2（`LiveExecutionClient` デモ）の着手条件の一部を満たす | [nautilus_trader/implementation-plan.md Phase N2](../nautilus_trader/implementation-plan.md) |
+
+> **IPC schema 連鎖**: 本計画の T0.2 で schema **1.1 → 1.2** に bump する。order/ の Tpre.2（schema 1.2 → 1.3）は本計画の schema 1.2 ラウンドトリップテストが緑になるまで着手しないこと。連鎖の全体像は [docs/plan/README.md §実装トラック詳細](../README.md) を参照。
+
+---
+
 ## Phase 2 以降（参考、計画外）
 
 - 発注機能（`CLMKabuNewOrder` ほか）。第二暗証番号 UI、注文台帳、約定通知 (EC)、現引現渡
