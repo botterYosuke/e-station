@@ -241,11 +241,16 @@ impl EngineCommand {
         })
     }
 
-    /// Underlying program path / name (for `Command::new`).
-    pub fn program(&self) -> &str {
+    /// Underlying program path / name (for `Command::new`). Returns
+    /// `&OsStr` so paths that aren't valid UTF-8 (or simply contain
+    /// non-ASCII characters in user folders, e.g. `C:\Users\日本語\...`
+    /// on Windows) are passed through verbatim instead of being
+    /// silently replaced by a `"flowsurface-engine"` fallback string
+    /// — see invariant T35-H5-PathFidelity.
+    pub fn program(&self) -> &std::ffi::OsStr {
         match self {
-            EngineCommand::Bundled(p) => p.to_str().unwrap_or("flowsurface-engine"),
-            EngineCommand::System { program, .. } => program.as_str(),
+            EngineCommand::Bundled(p) => p.as_os_str(),
+            EngineCommand::System { program, .. } => std::ffi::OsStr::new(program.as_str()),
         }
     }
 

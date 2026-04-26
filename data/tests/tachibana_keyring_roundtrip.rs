@@ -126,6 +126,30 @@ fn install_mock_keyring() {
     keyring::set_default_credential_builder(Box::new(SharedBuilder) as Box<CredentialBuilder>);
 }
 
+/// Service / primary-user pair used by the production
+/// `save_tachibana_credentials` / `load_tachibana_credentials` API.
+/// Tests that share this fixed slot must reset it explicitly via
+/// [`fresh_keyring_slot`] before exercising the round-trip — see
+/// invariant T35-H6-KeyringSlotIsolation.
+const KEYRING_SERVICE: &str = "flowsurface.tachibana";
+const KEYRING_PRIMARY_USER: &str = "user_id";
+
+/// Wipe the production keyring slot (`flowsurface.tachibana::user_id`)
+/// so the calling test sees an empty store. The `SharedStore` backing
+/// the mock keyring is process-shared (`OnceLock<Mutex<HashMap>>`),
+/// so without this reset a credentials blob written by an earlier
+/// `#[serial]`-ordered test would still be visible.
+///
+/// `test_id` is informational — it surfaces in panic / log messages so
+/// flakes can be traced back to the offending caller. The function
+/// returns it verbatim for chaining.
+fn fresh_keyring_slot(test_id: &str) -> &str {
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_PRIMARY_USER) {
+        entry.delete_credential().ok();
+    }
+    test_id
+}
+
 fn sample_session() -> TachibanaSession {
     TachibanaSession::new(
         SecretString::new("https://demo-kabuka.e-shiten.jp/e_api_v4r8/req/SESSION1/".to_string()),
@@ -160,6 +184,7 @@ fn sample_creds() -> TachibanaCredentials {
 #[serial_test::serial]
 fn test_credentials_roundtrip_with_zeroize_and_masked_debug() {
     install_mock_keyring();
+    fresh_keyring_slot("test_credentials_roundtrip_with_zeroize_and_masked_debug");
 
     let creds = sample_creds();
 
@@ -295,6 +320,7 @@ fn test_update_session_in_keyring_preserves_existing_user_id() {
     // When a prior entry exists, the user_id / password / is_demo are
     // preserved and only the session is replaced.
     install_mock_keyring();
+    fresh_keyring_slot("test_update_session_in_keyring_preserves_existing_user_id");
     let original = sample_creds(); // uses TEST_SENTINEL_USER / TEST_SENTINEL_PWD
     save_tachibana_credentials(&original);
 
@@ -457,9 +483,50 @@ fn test_high5_user_id_is_demo_session_accessors_are_the_only_public_surface() {
 }
 
 #[test]
+#[serial_test::serial]
+fn keyring_slot_is_isolated_per_test() {
+    // Pin for invariant T35-H6-KeyringSlotIsolation.
+    //
+    // Plants residue into the production keyring slot (simulating
+    // leftover state from an earlier `#[serial]`-ordered test) and
+    // verifies that `fresh_keyring_slot` wipes it before the calling
+    // test exercises the production round-trip. Without this reset the
+    // process-shared `SharedStore` would silently expose a previous
+    // test's credentials to the next.
+    install_mock_keyring();
+
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_PRIMARY_USER)
+        .expect("mock entry must initialize");
+    entry
+        .set_password("RESIDUE_FROM_PRIOR_TEST")
+        .expect("mock backend accepts arbitrary payload");
+    assert_eq!(
+        entry.get_password().ok().as_deref(),
+        Some("RESIDUE_FROM_PRIOR_TEST"),
+        "precondition: residue must be visible before reset"
+    );
+
+    let returned_id = fresh_keyring_slot("keyring_slot_is_isolated_per_test");
+    assert_eq!(
+        returned_id, "keyring_slot_is_isolated_per_test",
+        "fresh_keyring_slot must return the test_id verbatim for chaining"
+    );
+
+    let probe = keyring::Entry::new(KEYRING_SERVICE, KEYRING_PRIMARY_USER)
+        .expect("mock entry must initialize");
+    assert!(
+        matches!(probe.get_password(), Err(keyring::Error::NoEntry)),
+        "fresh_keyring_slot must wipe the production slot; got {:?}",
+        probe.get_password()
+    );
+}
+
+#[test]
 #[should_panic(expected = "second_password must be None in Phase 1")]
 #[serial_test::serial]
 fn test_phase1_second_password_guard_panics_in_debug() {
+    install_mock_keyring();
+    fresh_keyring_slot("test_phase1_second_password_guard_panics_in_debug");
     // The public constructor disallows second_password by construction;
     // we still need to materialize the invalid state to pin the
     // debug_assert. Use a small private builder that bypasses `new`

@@ -170,9 +170,25 @@ enum VenueState {
 
 ---
 
-### Step B — H5 / H6 機械的修正
+### Step B — H5 / H6 機械的修正 ✅ 完了 (2026-04-26)
 
 **目的**: 副作用の少ない技術負債を先に潰し、後続ステップの差分を見やすくする。
+
+> **完了サマリ (2026-04-26)**
+>
+> - ✅ H5: `EngineCommand::program()` を `&str`（`to_str().unwrap_or("flowsurface-engine")` フォールバック付き）から **`&std::ffi::OsStr` 直接受け**に変更。`Bundled(PathBuf).program()` は `as_os_str()`、`System { program: String, .. }` は `OsStr::new(program.as_str())`。`tokio::process::Command::new` は `AsRef<OsStr>` を受けるため呼び出し側修正不要。
+> - ✅ H5 pin: `engine-client/tests/bundled_path_with_unicode.rs` に 3 件追加（`bundled_program_preserves_unicode_path` / `bundled_program_preserves_utf8_path` / `system_program_returns_program_string`）。コンパイルエラーで RED → 型変更で GREEN。
+> - ✅ H6: `data/tests/tachibana_keyring_roundtrip.rs` に **`fresh_keyring_slot(test_id) -> &str`** ヘルパーを追加。`KEYRING_SERVICE = "flowsurface.tachibana"` / `KEYRING_PRIMARY_USER = "user_id"` の production slot を `delete_credential().ok()` でリセットし、`#[serial]` 順依存の `SharedStore` 残留を解消。`test_id` は引数として受け取って verbatim 返却する（panic/log 文での追跡用）。
+> - ✅ H6: cleanup を欠いていた 3 テスト（`test_credentials_roundtrip_with_zeroize_and_masked_debug` / `test_update_session_in_keyring_preserves_existing_user_id` / `test_phase1_second_password_guard_panics_in_debug`）の冒頭に `fresh_keyring_slot(...)` を挿入。残り 5 件は元から explicit cleanup 済み。
+> - ✅ H6 pin: `keyring_slot_is_isolated_per_test` を追加。プロダクション slot に "RESIDUE_FROM_PRIOR_TEST" を仕込んで `fresh_keyring_slot` 呼び出し後に `Err(NoEntry)` になることを確認。
+> - ✅ 完了判定: `cargo test -p flowsurface-data --test tachibana_keyring_roundtrip -- --test-threads=4` を **5 回連続緑**（9/9 passed each run）。
+> - ✅ `invariant-tests.md` に T35-H5-PathFidelity / T35-H6-KeyringSlotIsolation を追記。
+> - ✅ `cargo fmt` / `cargo clippy --workspace --tests -- -D warnings` / `cargo test --workspace` 全緑、`tools/iced_purity_grep.sh` OK。
+>
+> **設計上の落とし穴 (後続作業者向け)**
+>
+> - 計画書原文には "test_id を user_id に組み込んで slot 衝突を回避する" 案も書かれていたが、production の `save/load_tachibana_credentials` が固定 user `"user_id"` を読むため slot 自体は process-shared で残らざるを得ない。実装は **fixed slot を毎回リセット**する形に倒した（`#[serial]` と組み合わせて十分）。production API に user_id 引数を足す案は別 PR スコープ。
+> - H5 のシグネチャ変更は呼出し側 0 件で済むが、将来 `program()` の戻り値を `format!("{}", ...)` に渡す箇所が出た場合は `Display` ではなく `display()` 経由（`OsStr::display()` は unstable のため `to_string_lossy()`）になることに注意。silent skip 防止という H5 の設計趣旨上、`to_string_lossy()` は invariant 違反のサインとしてレビューでチェックすべき。
 
 #### H5: `EngineCommand::Bundled` の `Path` 直接受け
 
