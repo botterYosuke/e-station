@@ -30,8 +30,8 @@
 | F-B2 | architecture.md §7.2 | `data/tests/tachibana_wire_dto.rs::test_wire_dto_serialize_derives_present` | `cargo test -p flowsurface-data --tests -- test_wire_dto_serialize_derives_present` | T3 | — |
 | F-L1 | SKILL.md R1 / spec.md §3.2 | `python/tests/test_tachibana_url_single_source.py::test_base_url_literal_appears_only_in_tachibana_url_py` | `uv run pytest python/tests/test_tachibana_url_single_source.py -v` | T1 | R1 |
 | F-L5 | SKILL.md R1 補遺 | T1 未実装（テスト未追加）— `test_base_url_is_single_source` 相当の関数は python/tests/ に存在しない。F-L1 の `test_base_url_literal_appears_only_in_tachibana_url_py` が意味的に近いが、F-L5 固有のテストは未作成 | T1 未実装（テスト未追加） | T1 | R1 |
-| F-M4 | data-mapping.md §4 | TBD（Tx で確定） | TBD | T5 | — |
-| F-M4b | data-mapping.md §4 注記 | TBD（Tx で確定） | TBD | T5 | — |
+| F-M4 | data-mapping.md §4 | `engine-client/tests/tachibana_session_reset.rs::depth_snapshot_with_new_session_id_deserializes` | `cargo test -p flowsurface-engine-client --test tachibana_session_reset` | T5 | — |
+| F-M4b | data-mapping.md §4 注記 | `engine-client/tests/tachibana_session_reset.rs::new_session_id_resets_gap_detector_and_accepts_diffs` | `cargo test -p flowsurface-engine-client --test tachibana_session_reset` | T5 | — |
 | F-M5a | data-mapping.md §5 | `python/tests/test_tachibana_holiday_fallback.py::test_subscribe_outside_market_hours_emits_disconnected` | `uv run pytest python/tests/test_tachibana_holiday_fallback.py -v` | T5 | — |
 | F-M6a | SKILL.md R2 | `python/tests/test_tachibana_auth.py::test_login_rejects_non_wss_event_url` | `uv run pytest python/tests/test_tachibana_auth.py::test_login_rejects_non_wss_event_url -v` | T5 | R2 |
 | F-M8 | data-mapping.md §8 | TBD（Tx で確定） | TBD | T5 | — |

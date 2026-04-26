@@ -556,7 +556,7 @@
 
 **ゴール**: ザラ場時間中、現値変化と 10 本気配がリアルタイムで更新される。
 
-- [ ] `tachibana_ws.py` — EVENT WebSocket クライアント（`p_evt_cmd=FD,KP,ST,SS,US,EC`、購読は最低でも `FD,KP,ST`）
+- [x] ✅ `tachibana_ws.py` — EVENT WebSocket クライアント（`p_evt_cmd=FD,KP,ST,SS,US,EC`、購読は最低でも `FD,KP,ST`）（ソース実態確認 2026-04-26: `python/engine/exchanges/tachibana_ws.py` 445 行。`TachibanaEventWs` クラス・`FdFrameProcessor` クラス・`is_market_open` 関数が実装済み。タイムアウトテスト `test_tachibana_ws_timeout.py` 2 件・WS プロキシテスト `test_tachibana_ws_proxy.py` 3 件も緑）
   - WebSocket URL は `build_event_url(session.url_event_ws, params)` で構築（R2 例外）
   - 自動 ping 無効化、手動 pong（[SKILL.md ストリーム規約](../../../.claude/skills/tachibana/SKILL.md)）
   - **KP（KeepAlive）frame の処理**: 5 秒周期で届く `p_evt_cmd=KP` を受信タイマーのリセットに使う。**12 秒**（KP 2 回欠損相当 + 2 秒 jitter、spec.md §3.2 と同値）以上 KP も含めて全 frame が来なければ切断とみなして再接続（指数バックオフ）
