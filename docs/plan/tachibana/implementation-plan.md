@@ -20,19 +20,9 @@
 - [x] `src/screen/` の現在構造を確認し、立花ログイン UI の追加先（既存 `login.rs` 拡張 or 新ファイル）を T0 のうちに暫定確定（F-m3）
 - [x] `python/tests/test_*_rest.py` のモック方式（`pytest-httpx` / `HTTPXMock`）が他 venue で稼働中であることを確認
 - [x] [docs/plan/✅python-data-engine/schemas/](../✅python-data-engine/schemas/) の `commands.json` / `events.json` が実在することを確認（実在を確認済み）
-- [ ] 🔴 **FD 情報コード一覧抽出（F-M2a、F-H3、B3 再オープン、HIGH-2 ゲート、C1）— T0 完了マーカは `[ ]` のまま据え置く**。本項目を `[x]` にできるのは [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー扱いと対応方針b3-再オープン) の 3 案（PDF 同梱 / 実 frame キャプチャ / Phase 縮退）のいずれかを実体解決した PR のみ。確定コードは `DPP` / `KP`(*) / `ST`(*) / `SS`(*) / `US`(*) / `EC`(*) のみで `DV` / `GAK1..5` / `GBK1..5` / `GAS1..5` / `GBS1..5` / `DPP_TIME` / `DDT` は **未確認**（`api_event_if_v4r7.pdf` が `manual_files/` に未同梱）。(*) は `p_evt_cmd` 値であって FD frame data key ではない（inventory §11.2 の表を data key と evt_cmd で分割すること、L5）。**T5 着手の前提として 3 案のいずれかを実体解決必須**。T1 codec は確認済み data key (`DPP` のみ) の範囲で先行着手可。PR 説明文に解決証跡を必須記載
+- [x] ✅ **FD 情報コード一覧確定（F-M2a、F-H3、B3 クローズ、2026-04-26）**: `.claude/skills/tachibana/manual_files/api_web_access.xlsx` 内の実 FD frame サンプル（2022-03-15）から全キー名を実値で確認。旧暫定名 `GAK/GBK/GAS/GBS`（→ 実: `GAP/GBP/GAV/GBV`）・`DPP_TIME`（→ 実: `DPP:T`）・`DDT`（→ 実: 共通ヘッダ `p_date`）はすべて誤りだったため訂正済み。気配本数は旧想定 5 本 → **実際は 10 本**。確定コード一覧: [inventory-T0.md §11.2.b](./inventory-T0.md#112b-fd-frame-data-key)・data-mapping.md §3/§4 を同日更新済み。**T5 着手ブロッカー解除**。
 
-  > **明示ゲート規約（HIGH、ユーザー指摘ラウンド 7）**: 本項目は spec.md §2.1（live trade / 5 本気配 board の MVP 採否）/ §4 受け入れ条件（A 系 / B 系の選択）/ data-mapping §3（side 判定・timestamp・depth 生成の最終化）の **前提ゲート**である。本項目が `[x]` になるまで以下を**禁止**:
-  >   - T5（trade/depth ストリーム実装）への着手と PR マージ
-  >   - data-mapping §3 の FD コード仮仕様部分への破壊変更（仮値前提のリファクタは可）
-  >   - spec.md §4 を「A 系適用」と確定させる文書 PR
-  >
-  > 解決時のチェックリスト:
-  > 1. 採用案（PDF 同梱 / 実 frame キャプチャ / Phase 縮退）を [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー扱いと対応方針b3-再オープン) に明記
-  > 2. data-mapping §3 の暫定コード（`DV` / `GAK*` / `GBK*` / `DPP_TIME` / `DDT`）を実値で確定 or 縮退案では当該節を「Phase 2 へ繰越」と書換
-  > 3. spec.md §2.1 の MVP / §4 受け入れを A 系 / B 系のどちらで確定させるかを 1 文で固定
-  > 4. 上記 PR 説明文に「採用案 / 確定コード / spec 改訂行」を 3 点セットで記載
-  > 5. 本行を `[x]` に書換（reviewer は上記 4 点のリンクを確認してマージ）
+  > ~~**明示ゲート規約（HIGH、ユーザー指摘ラウンド 7）**~~: ✅ 解消済み（2026-04-26）。T5 着手禁止は解除。
 
 ### T0.2 型・スキーマ追加
 

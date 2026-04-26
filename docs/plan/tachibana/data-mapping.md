@@ -45,18 +45,18 @@ pub enum Exchange {
 
 立花にはミリ秒単位のテープデータ API は存在しない。代わりに EVENT の **FD frame**（時価情報）が変化分のみ来る。Phase 1 では下記をもって "trade" とみなす:
 
-> **情報コード出典の注意（F-M2a、F-H3）**: 下記の `DPP` / `DV` / `DPP_TIME` / `DDT` / `GAK1..5` / `GBK1..5` 等は SKILL.md には `DPP` 1 例しか記載がなく、公式 EVENT 仕様 PDF（`api_event_if_v4r7.pdf`）は `manual_files/` に同梱されていない。**T0 末で Python サンプル [`e_api_websocket_receive_tel.py`](../../../.claude/skills/tachibana/samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) のコード表抜粋を本節に転記する**こと（implementation-plan T0.1 タスク化）。**この一覧の確定は T1（codec）と T5（FD trade/depth）の前提条件**であり、未確定のまま下流フェーズに着手しない。それまで本節のコード名は暫定値として扱う。
+> **✅ 2026-04-26 情報コード確定**: `.claude/skills/tachibana/manual_files/api_web_access.xlsx` 内の実 FD frame サンプル（2022-03-15）から全キー名を確認済み。旧暫定名（`GAK/GBK/GAS/GBS`、`DPP_TIME`、`DDT`）はすべて誤りだったため本節・§4 を訂正済み。詳細は [inventory-T0.md §11](./inventory-T0.md#112b-fd-frame-data-key) を参照。
 
 
 | 立花 FD フィールド | 意味 | TradeMsg |
 | :--- | :--- | :--- |
 | `p_<行>_DPP` | 現在値 | `price` |
 | `p_<行>_DV` | 出来高（累積、日中） | 前 frame 値との差分を `qty` に。**差分が正のときのみ trade を生成**。0 または負（セッション跨ぎ・銘柄差替えによるリセット）の場合は trade を発火せず `prev_dv` を現在値にリセット |
-| `p_<行>_DPP_TIME` | 現値 tick 時刻（秒精度） | `ts_ms`（JST → ms）**の第一候補**。無ければ `p_<行>_DDT`（frame 配信時刻）にフォールバック。両方無ければ受信時刻（F17） |
+| `p_<行>_DPP:T` | 現値 tick 時刻（`HH:MM` 形式、秒精度） | `ts_ms`（JST → ms）**の第一候補**。無ければ共通ヘッダ `p_date`（frame 配信時刻、`YYYY.MM.DD-HH:MM:SS.TTT`）にフォールバック。両方無ければ受信時刻（F17）|
 | 前 frame の bid/ask | — | `side` を **Quote rule**（前 frame 気配と比較）で決定。下記参照 |
 
 **Quote rule の詳細（F3）**:
-- FD frame は DPP と GAK/GBK が**同一 frame で同時更新される**。当該 frame の気配と比較すると、約定を吸収した後の板と比較してしまい誤判定しやすい。
+- FD frame は DPP と GAP/GBP が**同一 frame で同時更新される**。当該 frame の気配と比較すると、約定を吸収した後の板と比較してしまい誤判定しやすい。
 - 実装は `TachibanaWorker` 内で `prev_quote: Option<(best_bid, best_ask)>` を保持し、frame 到着時に
   1. まず DPP/DV から trade を合成（qty > 0 のときのみ、初回は skip）
   2. side 判定には **`prev_quote` の best_bid / best_ask を使う**
@@ -74,23 +74,23 @@ pub enum Exchange {
 
 - **不正確になりうるトレードオフ**: 立花の FD は出来高が累積で、複数約定が 1 frame に集約されることがある。Phase 1 では「frame ごとに 1 trade、qty は DV 差分」精度に留める（v2 で正確化）
 - `is_liquidation` は常に `false`
-- 板の変化（`p_<行>_GAK1..5` / `p_<行>_GBK1..5`）は trade ではなく **DepthSnapshot 更新トリガ** として扱う
+- 板の変化（`p_<行>_GAP1..10` / `p_<行>_GBP1..10`）は trade ではなく **DepthSnapshot 更新トリガ** として扱う
 
 ## 4. depth（板）
 
-立花は L2 差分配信を持たない。FD frame は **5 本気配 + 現値**。
+立花は L2 差分配信を持たない。FD frame は **10 本気配 + 現値**（旧想定 5 本は誤り。xlsx サンプルで `GAP1`〜`GAP10` / `GBP1`〜`GBP10` を確認済み）。
 
 ```
 DepthSnapshot {
-  bids: [(GBK1, GBS1), (GBK2, GBS2), ..., (GBK5, GBS5)],
-  asks: [(GAK1, GAS1), ...],
+  bids: [(GBP1, GBV1), (GBP2, GBV2), ..., (GBP10, GBV10)],
+  asks: [(GAP1, GAV1), (GAP2, GAV2), ..., (GAP10, GAV10)],
   sequence_id: <FD frame の到着順序カウンタ>,
   stream_session_id: "<engine_session_id>:<u32>",
   checksum: None,
 }
 ```
 
-- **`DepthDiff` は生成しない**。FD frame ごとに常に新規 `DepthSnapshot` を送る（5 本のみなので帯域は問題なし）
+- **`DepthDiff` は生成しない**。FD frame ごとに常に新規 `DepthSnapshot` を送る（10 本でも帯域は問題なし）
 - Rust 側 [docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §4.4 バックプレッシャと整合性保証 の gap 検知ロジックは、**snapshot-only venue では `DepthDiff` を受けない限り誤動作しない**。Phase 1 は `DepthSnapshot` のみで成立させ、capabilities は主に UI 非活性化用途に使う
 - **`sequence_id` リセット規約（F7）**: Python 側プロセス内の `AtomicI64` で単調増加 ID を振る。Python 再起動や WebSocket 切断で counter は 0 に戻りうるが、`stream_session_id` の値を同時に更新するため、**消費側は `stream_session_id` 切替を検知したら sequence 比較をリセットする**。既存 gap-detector にもこの契約を明示することを T0 で schema に書き込む
 - 別ルート: ザラ場開始前 / 終了直後の板取得は `CLMMfdsGetMarketPrice` を 1 回叩いて `DepthSnapshot` を出す（ストリームに先立って 1 発投げる）

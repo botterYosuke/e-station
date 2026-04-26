@@ -218,41 +218,44 @@ pub struct ProcessManager {
 
 FD frame ペイロードのフィールド名。[data-mapping.md §3-4](./data-mapping.md) で trade/depth 合成に使用。
 
-| 暫定コード | 意味 | 一次資料での確認 |
+> **✅ 2026-04-26 確定**: `.claude/skills/tachibana/manual_files/api_web_access.xlsx` に 2022-03-15 取得の実 FD frame サンプル（銘柄コード 6501 / 日経 225 index 等、約 34 frame）が含まれており、全キー名を実値で確認済み。暫定コード名（`GAK/GBK/GAS/GBS`、`DPP_TIME`、`DDT`）はすべて誤りだったため下表の通り訂正する。
+
+| 確定コード | 意味 | 一次資料での確認 |
 | :--- | :--- | :--- |
-| `DPP` | 現在値 | ✅ 確認済（サンプル L618 / HTML マニュアル `pDPP`） |
-| `DV` | 出来高（累積） | ⚠️ **未確認**。HTML マニュアルの `pDV`（履歴 API）と同名のため強い類推、要 EVENT 仕様 PDF |
-| `DPP_TIME` | 現値 tick 時刻 | ⚠️ **未確認** |
-| `DDT` | frame 配信時刻 | ⚠️ **未確認** |
-| `GAK1..5` | 売気配 価格 1〜5 本目 | ⚠️ **未確認** |
-| `GBK1..5` | 買気配 価格 1〜5 本目 | ⚠️ **未確認** |
-| `GAS1..5` | 売気配 株数 1〜5 本目 | ⚠️ **未確認** |
-| `GBS1..5` | 買気配 株数 1〜5 本目 | ⚠️ **未確認** |
+| `DPP` | 現在値 | ✅ 確認済（xlsx frame + HTML マニュアル `pDPP`） |
+| `DV` | 出来高（累積、日中） | ✅ 確認済（xlsx frame `p_1_DV=694300` 等） |
+| `DPP:T` | 現値 tick 時刻（`HH:MM` 形式、秒精度） | ✅ 確認済（xlsx frame `p_1_DPP:T=09:57`）。旧暫定名 `DPP_TIME` は**誤り** |
+| `p_date` | frame 配信時刻（共通ヘッダ、`YYYY.MM.DD-HH:MM:SS.TTT`） | ✅ 確認済（全 frame 共通。旧暫定名 `DDT` は**存在しない**） |
+| `GAP1`〜`GAP10` | 売気配 価格 1〜10 本目 | ✅ 確認済（xlsx frame。旧暫定名 `GAK1..5` は**誤り**。10 本まで存在） |
+| `GAV1`〜`GAV10` | 売気配 株数 1〜10 本目 | ✅ 確認済（xlsx frame。旧暫定名 `GAS1..5` は**誤り**。10 本まで存在） |
+| `GBP1`〜`GBP10` | 買気配 価格 1〜10 本目 | ✅ 確認済（xlsx frame。旧暫定名 `GBK1..5` は**誤り**。10 本まで存在） |
+| `GBV1`〜`GBV10` | 買気配 株数 1〜10 本目 | ✅ 確認済（xlsx frame。旧暫定名 `GBS1..5` は**誤り**。10 本まで存在） |
+| `QAP` | 最良売気配価格 | ✅ 確認済（xlsx frame） |
+| `QBP` | 最良買気配価格 | ✅ 確認済（xlsx frame） |
+| `QOV` | 売注文総株数 | ✅ 確認済（xlsx frame） |
+| `QUV` | 買注文総株数 | ✅ 確認済（xlsx frame） |
+| `VWAP` | VWAP | ✅ 確認済（xlsx frame） |
+| `AV` | 直近売数量 | ✅ 確認済（xlsx frame） |
+| `BV` | 直近買数量 | ✅ 確認済（xlsx frame） |
+| `PRP` | 前日終値 | ✅ 確認済（xlsx frame） |
+| `DOP` / `DOP:T` | 始値 / 始値時刻 | ✅ 確認済（xlsx frame） |
+| `DHP` / `DHP:T` | 高値 / 高値時刻 | ✅ 確認済（xlsx frame） |
+| `DLP` / `DLP:T` | 安値 / 安値時刻 | ✅ 確認済（xlsx frame） |
+| `DYRP` / `DYWP` | 前日比（%）/ 前日比（値） | ✅ 確認済（xlsx frame） |
+| `DPG` | 売買区分コード | ✅ 確認済（xlsx frame、値例: `0057`, `0058`） |
+| `DJ` | 売買代金（累積） | ✅ 確認済（xlsx frame） |
 
-### 11.3 ブロッカー扱いと対応方針（B3 再オープン）
+### 11.3 ブロッカー解消記録（B3 クローズ）
 
-implementation-plan.md T0.1 の規約「**実コード名と一致しないものは「未確認」マークして T0 内で解消するか、解消できないならその情報コードを使う実装タスク自体を Phase 1 から外す**」に従い:
+**✅ 2026-04-26 解消**: 採用案 = **案 2 相当（既存資料内の実 frame サンプル確認）**。
 
-**🔴 現状: T0 完了マーク (`[x]`) は B3 レビューで再オープン**。
+- 一次資料: `.claude/skills/tachibana/manual_files/api_web_access.xlsx`（2022-03-15 取得の実 FD frame 約 34 件を含む）
+- 確定コード: §11.2.b 表の通り。旧暫定名 `GAK/GBK/GAS/GBS` / `DPP_TIME` / `DDT` はすべて誤りで訂正済み
+- 気配本数: 旧想定 5 本 → **実際は 10 本**（`GAP1`〜`GAP10` / `GBP1`〜`GBP10`）
+- data-mapping.md §3 / §4 を同日訂正済み
+- implementation-plan.md T0.1 の該当 `[ ]` を `[x]` に更新済み
 
-> **重要度の再評価（Phase 1 生死に直結）**: 本ブロッカーが解消不能で縮退案（案 3）を取った場合、T5 の trade 合成・depth スナップショットが Phase 2 へ全繰越しとなり、Phase 1 の主要価値（trade/depth リアルタイム表示）が消滅する。spec.md §4 受け入れ条件 2〜3 も達成不能になる。**T1（codec）着手前にリスク識別し、T5 着手前に完全解消すること。** 案 3 を選んだ場合は下記「縮退時の計画更新リスト」をすべて実施してから T5 以降のタスクに着手する。
-
-**責任者・期限の明示**: 本ブロッカーは **T0 担当者が T0 完了前に案 1/2/3 のいずれかを選択し、PR 説明文に解決証跡を記載することで完了**とする。「後でやる」は認めない。
-
-**解消に必要なアクション（3 案のいずれか 1 つ）**:
-
-1. **(推奨) `api_event_if_v4r7.pdf` を入手して `.claude/skills/tachibana/manual_files/` に同梱**し、§11.2 の暫定コード名を確定値で更新する。PDF は立花証券公式サイトから入手できるが URL は公開状態が変わりうるため、ダウンロード日と入手元を同梱 `README_event_if.txt` に記録する
-2. **(代替) 実 frame キャプチャ**: ユーザー保有の Windows サンプル `e_api_websocket_receive_tel.py` をデモ環境に対して実行し、受信した FD frame の生バイト列（少なくとも 5 銘柄 × 30 秒分）を `manual_files/captured_fd_frames/*.bin` として保存。データから `p_<行>_<コード>` キー一覧を逆引きで確定し、§11.2.b の表を更新する
-3. **(縮退) どちらも T1 着手前に不可なら**: 該当情報コード（`DV` / `GAK*` / `GBK*` / `GAS*` / `GBS*` / `DPP_TIME` / `DDT`）を **使う実装タスクを Phase 1 から外す**。着手前に以下の計画更新をすべて実施すること:
-   - `spec.md §2.1` の「含めるもの」から FD ストリーム・DepthSnapshot 関連を削除し「Phase 2 送り」に移動
-   - `spec.md §4` 受け入れ条件 2〜3 を修正（kline + ticker stats のみで成立するよう書き直す）
-   - `data-mapping.md §3 / §4` を「Phase 2 へ繰越し（縮退）」とマーク
-   - `implementation-plan.md T5` タスクを全件 `[ ]` → Phase 2 送りに移動
-   - `architecture.md §4` Python ファイル構成から `tachibana_ws.py` を削除
-
-**T1（codec）と T5（FD trade/depth）の着手前に、本 §11 を実体的に解決したかどうかを PR 説明文に明記すること**。`DPP` / `KP` / `ST` / `SS` / `US` / `EC` 確認済みコードのみで成立する範囲は T1 で先行着手してよい。
-
-T1 / T5 着手前のチェックリストとしてこの §11 を参照すること。
+**T5 着手ブロッカー解除**: 本 §11 の解消により T5（FD trade/depth ストリーム実装）への着手が可能になった。
 
 ## 12. 残課題（T0 内で完結しないが T0 で記録すべきもの）
 
