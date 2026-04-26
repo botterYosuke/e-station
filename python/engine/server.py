@@ -41,12 +41,18 @@ from engine.exchanges.hyperliquid import HyperliquidWorker
 from engine.exchanges.mexc import MexcWorker
 from engine.exchanges.okex import OkexWorker
 from engine.exchanges.tachibana import TachibanaWorker
+from engine.exchanges.tachibana_orders import (
+    NautilusOrderEnvelope,
+    check_phase_o0_order,
+    submit_order as tachibana_submit_order,
+)
 from engine.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
     EngineError,
     Hello,
     Ready,
+    SubmitOrderRequest,
 )
 
 log = logging.getLogger(__name__)
@@ -169,6 +175,11 @@ class DataEngineServer:
         # Mark a single SetVenueCredentials in-flight so that double
         # injections from a flaky client don't race the dialog flow.
         self._tachibana_login_inflight = asyncio.Lock()
+
+        # ── Order Phase state (T0.3) ──────────────────────────────────
+        # 第二暗証番号: メモリのみ保持。ログ・WAL には出さない（C-M2, C-R2-H2）。
+        # `str | None` のまま保持し、呼び出し側で参照するだけにする。
+        self._second_password: str | None = None
 
         # Monotonic counter to produce a fresh base ssid per subscribe
         self._stream_counter = 0
@@ -417,6 +428,17 @@ class DataEngineServer:
                 self._do_request_venue_login(msg), msg.get("request_id")
             )
 
+        elif op == "SetSecondPassword":
+            self._handle_set_second_password(msg)
+
+        elif op == "ForgetSecondPassword":
+            self._second_password = None
+
+        elif op == "SubmitOrder":
+            self._spawn_fetch(
+                self._do_submit_order(msg), msg.get("request_id")
+            )
+
         else:
             log.warning("Unhandled op=%s", op)
             await self._send_error(
@@ -545,6 +567,98 @@ class DataEngineServer:
         handle = self._streams.pop(key, None)
         if handle:
             await handle.cancel()
+
+    # ------------------------------------------------------------------
+    # Order Phase handlers (T0.3)
+    # ------------------------------------------------------------------
+
+    def _handle_set_second_password(self, msg: dict) -> None:
+        # value は文字列として受け取り、メモリのみ保持。ログに出さない（C-M2）。
+        value = msg.get("value")
+        if value:
+            self._second_password = str(value)
+
+    async def _do_submit_order(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        raw_order = msg.get("order", {})
+
+        if venue not in self._workers:
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": req_id,
+                    "code": "unknown_venue",
+                    "message": f"SubmitOrder: unknown venue {venue!r}",
+                }
+            )
+            return
+
+        # Parse order (deny_unknown_fields は Rust 側 DTO で保証済み。
+        # Python 側は extra="forbid" で二重防御)
+        try:
+            order = SubmitOrderRequest.model_validate(raw_order)
+        except Exception as exc:
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": req_id,
+                    "code": "invalid_order",
+                    "message": str(exc),
+                }
+            )
+            return
+
+        # Phase O0 制限チェック
+        reason_code = check_phase_o0_order(order)
+        if reason_code is not None:
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": reason_code,
+                    "reason_text": "Not supported in Phase O0",
+                    "ts_event_ms": 0,
+                }
+            )
+            return
+
+        # 第二暗証番号チェック
+        if self._second_password is None:
+            self._outbox.append(
+                {
+                    "event": "SecondPasswordRequired",
+                    "request_id": req_id,
+                }
+            )
+            return
+
+        # 発注処理（T0.4）
+        import time
+
+        envelope = NautilusOrderEnvelope.model_validate(raw_order)
+        # OrderSubmitted を先行して発火（nautilus 流の 2 段イベント）
+        self._outbox.append(
+            {
+                "event": "OrderSubmitted",
+                "client_order_id": order.client_order_id,
+                "ts_event_ms": int(time.time() * 1000),
+            }
+        )
+        result = await tachibana_submit_order(
+            self._tachibana_session,
+            self._second_password,
+            envelope,
+            p_no_counter=self._tachibana_p_no_counter,
+        )
+        self._outbox.append(
+            {
+                "event": "OrderAccepted",
+                "client_order_id": result.client_order_id,
+                "venue_order_id": result.venue_order_id,
+                "ts_event_ms": int(time.time() * 1000),
+            }
+        )
 
     # ------------------------------------------------------------------
     # Fetch operation helpers (each is an async coroutine producing one event)

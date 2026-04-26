@@ -2,13 +2,17 @@
 
 ## 着手前に確定すべき事項
 
-### Q0. nautilus_trader バージョンを何で固定して型を写すか
-本計画は「nautilus 互換」を不変条件にしているが、nautilus は活発開発中で `OrderType` enum の値や field 名がマイナーバージョンで変わりうる。
-- 案 A: `nautilus_trader == 1.211.x` を Tpre 着手時に pin し、その時点のソースから型を抽出してハードコード。N2 移行時に最新版へ追従
-- 案 B: Tpre 段階でリリース版の最新 stable を採用（本日時点での latest）
-- 案 C: 型互換チェック CI を組む（nautilus を CI 環境にだけ install し、`NautilusOrderEnvelope` ↔ `nautilus_trader.model.orders.Order` の dict ラウンドトリップを毎日叩く）
+### Q0. nautilus_trader バージョンを何で固定して型を写すか ✅ 確定（2026-04-26）
 
-**推奨**: 案 A + 案 C の併用。pin したバージョンに対する互換性を CI で常時保証する。
+**決定**: **案 A + 案 C の併用**。
+
+- `nautilus_trader == 1.211.x` を参照バージョンとして pin し、ソースから型を抽出してハードコード（Tpre.1 で実施済み）
+- 型互換チェック CI を `test_nautilus_order_envelope.py` のハードコード dict テストで担保
+- N2 移行時に nautilus 本体を pyproject.toml に追加し、実際の import に切り替える
+- 候補バージョン: nautilus_trader 1.211.x（Tpre.1 時点での field 構成を参照）
+
+**Q10 も同時確定**: e-station 内 `docs/plan/nautilus_trader/spec.md` を正本とし、
+上流 nautilus_trader.model.orders.Order のソースは参照リンクのみとする（案 A）。
 
 
 
@@ -82,14 +86,10 @@
 - O3 着手時に写像表を [architecture.md §10](./architecture.md#10-nautilus_trader-との型マッピング) に追記する
 - Tpre.2 着手前に `docs/plan/✅python-data-engine/schemas/` ディレクトリ（または `schemas.py` のあるパス）の実在確認を必須化する（A-L3）
 
-### Q10. nautilus_trader 用語の正本ファイル（B3R3-5, 2026-04-25 追記）
+### Q10. nautilus_trader 用語の正本ファイル ✅ 確定（Q0 と同時確定, 2026-04-26）
 
-- `docs/plan/nautilus_trader/spec.md` への双方向リンク整備が未完。
-- `NautilusOrderEnvelope` 等 nautilus 用語の定義正本ファイル（e-station リポジトリ内 or nautilus 上流ソース）を **Tpre.1 で確定**する。
-- 候補:
-  - 案 A: e-station 内 `docs/plan/nautilus_trader/spec.md` を正本とし、上流ソースは参照リンクのみ
-  - 案 B: 上流 `nautilus_trader.model.orders.Order` を正本とし、e-station 側は写経 + pin バージョン明記
-- Q0（バージョン pin）と一体で Tpre.1 着手時に確定する。
+**決定**: **案 A** — e-station 内 `docs/plan/nautilus_trader/spec.md` を正本とし、
+上流ソースは参照リンクのみ。Q0 の決定（案 A + C 併用）に統合済み。
 
 ---
 

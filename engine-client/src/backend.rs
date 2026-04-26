@@ -530,6 +530,11 @@ impl VenueBackend for EngineClientBackend {
                                                 crate::tachibana_meta::parse_tachibana_ticker_dict(
                                                     t, exchange,
                                                 )?;
+                                            if meta.display_name_ja().is_none() {
+                                                log::debug!(
+                                                    "TickerInfo: display_name_ja absent for {ticker}"
+                                                );
+                                            }
                                             staged_meta.push((ticker, meta));
                                             return Some((ticker, Some(info)));
                                         }
