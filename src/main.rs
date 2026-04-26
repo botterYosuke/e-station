@@ -463,6 +463,12 @@ enum Message {
     /// (`Trigger::Auto`). The handler suppresses duplicates while
     /// `tachibana_state` is already `LoginInFlight`. T35-U1 / T35-U3.
     RequestTachibanaLogin(Trigger),
+    /// User pressed the banner's "閉じる"-style button. Transitions
+    /// `tachibana_state` back to `Idle` so the banner is hidden. The
+    /// underlying error condition (e.g. `phone_auth_required`) is
+    /// considered acknowledged; a fresh `VenueError` from the engine
+    /// will re-show the banner. T35-U2-Banner.
+    DismissTachibanaBanner,
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -703,6 +709,9 @@ impl Flowsurface {
                 // by `Message::EngineConnected` so a single source of
                 // truth (the live connection) drives the swap. See
                 // T35-H9-SingleRecoveryPath.
+            }
+            Message::DismissTachibanaBanner => {
+                self.tachibana_state = VenueState::Idle;
             }
             Message::RequestTachibanaLogin(trigger) => {
                 // Duplicate-press suppression: while a login dialog is
@@ -1329,15 +1338,30 @@ impl Flowsurface {
                 }
             };
 
-            let base = column![
-                header_title,
+            // Tachibana lifecycle banner (U2). Renders only when the
+            // FSM is in `Error`; other states return None and the
+            // column collapses naturally.
+            let banner = widget::venue_banner::view(&self.tachibana_state).map(|el| {
+                el.map(|msg| match msg {
+                    widget::venue_banner::BannerMessage::Relogin => {
+                        Message::RequestTachibanaLogin(Trigger::Manual)
+                    }
+                    widget::venue_banner::BannerMessage::Dismiss => Message::DismissTachibanaBanner,
+                })
+            });
+
+            let mut base = column![header_title];
+            if let Some(banner) = banner {
+                base = base.push(container(banner).padding(padding::all(8)));
+            }
+            base = base.push(
                 match sidebar_pos {
                     sidebar::Position::Left => row![sidebar_view, dashboard_view,],
                     sidebar::Position::Right => row![dashboard_view, sidebar_view],
                 }
                 .spacing(4)
                 .padding(8),
-            ];
+            );
 
             if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)

@@ -302,7 +302,28 @@ enum VenueState {
 
 ---
 
-### Step E — U2 ステータスバナー
+### Step E — U2 ステータスバナー ✅ 完了 (2026-04-26)
+
+> **完了サマリ (2026-04-26)**
+>
+> - ✅ `src/widget/venue_banner.rs` 新設。`view(state: &VenueState) -> Option<Element<BannerMessage>>` を提供し、`VenueState::Error` のみ Some を返す。`Idle` / `LoginInFlight` / `Ready` は None（自然消去 + ログイン中はダイアログ自体が affordance）。
+> - ✅ `BannerMessage { Relogin, Dismiss }` を定義。Flowsurface::view() 側で `Message::RequestTachibanaLogin(Trigger::Manual)` / `Message::DismissTachibanaBanner` にマップ。
+> - ✅ `Message::DismissTachibanaBanner` を新設し、update arm で `tachibana_state = VenueState::Idle` に倒す（次の VenueError でバナー再表示）。
+> - ✅ `parse_message` で `VenueError.message` を改行 3 行構造（header / body / button_label）に分解。1 行・2 行・空行の degraded ケースも graceful に扱う。
+> - ✅ Rust 側は **severity → palette role マッピング**のみを保持し、ボタンラベルなど文字列リテラルを一切持たない（F-Banner1）。`Error severity` → `palette.danger.weak`、`Warning severity` → `palette.warning.weak`。
+> - ✅ `VenueErrorAction` ハンドリング: `Relogin` → 第3行ラベルで Relogin ボタン、`Dismiss` → 第3行ラベルで Dismiss ボタン、`Hidden` → ボタン無し（`unsupported_venue` のように UI で復旧不能なケース）。
+> - ✅ Flowsurface::view() の `header_title` 直下にバナー領域を挿入。`column![header_title]` を mut にして `if let Some(banner)` で push する形に組み替え。
+> - ✅ ユニットテスト 11 件（idle/ready/loginInFlight が None / error が Some / parse の各境界 / banner_transitions テーブル / dismiss / hidden）。
+> - ✅ `invariant-tests.md` に T35-U2-Banner を追記。
+> - ✅ `cargo test --workspace` 全緑 (47 件) / `cargo clippy --workspace --tests -- -D warnings` 緑 / `cargo fmt --check` 緑 / `tools/iced_purity_grep.sh` OK。
+>
+> **設計上の落とし穴 (後続作業者向け)**
+>
+> - **文字列リテラル禁止の運用境界**: 「Rust 側はボタンラベルなど文字列リテラルを持たない」という F-Banner1 ルールを守ったため、`VenueError.message` が 1 行（旧式 emitter）の場合は **ボタンが表示されない**仕様に倒した。Python 側で 3 行構造を厳格に詰めるよう徹底すること。Phase 1 暫定運用 (`docs/plan/tachibana/spec.md` §3.3) で確認済。
+> - **LoginInFlight 中は無描画**: 「ログイン中…」のような Rust 側 literal を避けるため、`LoginInFlight` ではバナーを出さず tkinter ダイアログそのものを affordance とした。プラン本文の transition table 側も `LoginInFlight` 行は banner=false でテーブル定義している。
+> - **DismissTachibanaBanner の遷移先**: `VenueState::Idle` に倒す設計にした（`Error -> Idle`）。プラン §3.2 の transition table には明示行がないので、追加した形。意味論: ユーザがバナーを閉じた後は次の `VenueError` を待つ Idle 状態が自然。
+> - **`palette.warning.weak` の存在前提**: iced 0.14 の Theme palette が warning role を持つ前提で書いている。将来 iced を上げる際にこの enum 名が変わったらここを直すこと。
+> - **inline ボタンとの重複**: Step D の tickers_table 行直下「立花 ログイン」ボタンと、本 Step のバナー Relogin ボタンは Error 時に両方表示される。両方クリックしても Flowsurface の `is_login_in_flight()` ガードで重複は防げる（実害なし）。UX 改善で「Error 時は inline を隠す」最適化を入れる場合、`tickers_table::tachibana_login_btn` のレンダリング条件を `tachibana_ready || tachibana_state.is_idle()` 系に絞ること。
 
 **作業**:
 1. `Flowsurface` 構造体の `tachibana_state: VenueState`（§3.2）から `view()` 側でバナーを render する。`tachibana_banner: Option<TachibanaBannerState>` フィールドは設けない（状態の正本は `VenueState` 1 本）

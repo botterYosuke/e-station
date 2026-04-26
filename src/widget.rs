@@ -17,6 +17,7 @@ pub mod column_drag;
 pub mod decorate;
 pub mod multi_split;
 pub mod toast;
+pub mod venue_banner;
 
 pub const PANE_CONTROL_BTN_HEIGHT: f32 = 26.0;
 
