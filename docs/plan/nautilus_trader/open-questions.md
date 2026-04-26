@@ -2,83 +2,102 @@
 
 ## N-pre ブロッカー（着手前に必ず resolve すること）
 
-### Q1. nautilus のバージョン pin 戦略 ★N-pre ブロッカー
+### Q1. nautilus のバージョン pin 戦略 ★Resolved (2026-04-26)
 
-nautilus_trader は活発に開発中で、minor バージョンでも破壊変更が入りうる。
+**決定: 二段階 pin 戦略**
 
-- 案 A: `>=1.211,<2.0` の範囲 pin
-- 案 B: `==1.211.x` 厳密 pin。アップグレードは手動ブランチで検証
+- N0/N1 フェーズ: `>=1.211, <2.0` の SemVer 範囲 pin（開発中の柔軟性を確保）
+- N2 完了後（立花実弾発注が通った構成）: `==1.225.x` 厳密 pin に切り替え
 
-**判断軸**: 立花の発注往復が動いた構成を壊したくないため、N2 完了後は厳密 pin に切り替えるのが妥当か？
+**根拠**:
+- 検証時点（2026-04-26）の最新版は `1.225.0`（Windows wheel 取得済）
+- 立花の発注往復が動いた後は壊れたくないため、N2 完了時に厳密 pin へ移行する
+- `1.211` は `spec.md` の暫定値だが、実際の wheel は `1.225.0` が取得される。`>=1.211, <2.0` で現行最新を使う
 
-**アクション**: N-pre Tpre.2 で決定し、spec.md §5 の暫定表記を確定版に書き換える。
-
----
-
-### Q3. `BacktestEngine` の clock 注入方式 ★N-pre ブロッカー
-
-仮想時刻 (`current_time`) を nautilus に渡す方法:
-
-- 案 A: イベントごとに Rust → Python `AdvanceClock { ts_ms }` を送る。StepForward（1 本ずつ進む UX）を維持できる
-- 案 B: 開始時に時間範囲を渡し nautilus に自走させる。簡単だが StepForward と整合しなくなる
-
-**feasibility 確認が必須**: nautilus 1.211 の公開 API で案 A を組めるかを N-pre Tpre.1 でプロトタイプ検証する。
-
-- 案 A が組めた場合 → architecture.md §3 に `AdvanceClock` Command を残す
-- 案 B になった場合 → `AdvanceClock` を削除し、`StartEngine.config.range_start_ms / range_end_ms` のみで完結する設計に修正
-
-**アクション**: N-pre Tpre.1 で resolve、architecture.md §3 の `AdvanceClock` 条件書きを確定版に書き換える。
+**アクション完了**: `spec.md §5` を確定版に書き換え済み。
 
 ---
 
-### Q5. ライセンスの再配布形態 ★N-pre ブロッカー
+### Q3. `BacktestEngine` の clock 注入方式 ★Resolved (2026-04-26)
 
-nautilus_trader は LGPL-3.0。
+**決定: 案 B（BacktestEngine.run() 自走）を N0/N1 で採用**
 
-- Python パッケージとして PyPI から取り込むだけなら問題なし
-- **PyInstaller one-binary 化**する場合（`engine.spec` がリポジトリに存在）: LGPL 動的リンク条項を満たすため、nautilus を差し替え可能な構造にする必要がある
+`tests/spike/nautilus_clock_injection/spike_clock.py` で 3 案を検証した結果:
 
-**アクション**: N-pre Tpre.3 で配布形態（venv 配布 / PyInstaller / インストーラ同梱）を確定し、spec.md §5 を書き換える。PyInstaller 採用時は NOTICE ファイルと差し替え可能性の実装方針を同タスクで決める。
+| 案 | 結果 | 詳細 |
+|---|---|---|
+| 案 B（run() 自走） | ✅ PASS | `run(start, end)` で完全自走。決定論性も確認済み |
+| 案 A（streaming=True + clear_data()） | ✅ PASS | 1 Bar ずつ逐次投入でステップ実行が可能。将来の StepForward UX に使える |
+| 案 A-2（advance_time() 外部制御） | ❌ FAIL | run() 中に `TestClock.advance_time()` を外部から呼ぶと Rust clock の非減少不変条件違反でパニック |
 
-**Exit 条件**: venv 配布を選択した場合は LGPL 追加対応不要 → Q5 即 Resolved。PyInstaller 採用を選択した場合のみ NOTICE ファイルと差し替え可能性の実装方針を同タスクで決めること。
+**N0/N1 の方針**:
+- `BacktestEngine.run(start=range_start_ms, end=range_end_ms)` で自走させる
+- `AdvanceClock` IPC Command は **実装しない**（Rust panic を引き起こすため）
+- `StartEngine.config.range_start_ms / range_end_ms` のみで完結する設計
 
----
+**将来の StepForward UX（N2 以降）**:
+- `streaming=True` + `add_data([single_bar])` + `run(streaming=True)` + `clear_data()` サイクルで Bar 単位のステップ実行は技術的に可能
+- IPC Command として `StepEngine { bars_to_advance: u32 }` を将来追加できる
 
-### Q6. 既存暗号資産 venue の発注経路（Rust 実装）はあるのか ★N-pre ブロッカー
-
-`exchange/src/adapter/` にはデータ系のみが見えるが、`place_order` 系メソッドが存在するか未確認。
-
-- 0 hit なら **Phase N3 は移植ではなく新規実装**になり工数が変わる
-- hit ありなら移植のまま
-
-**アクション**: N-pre Tpre.4 で `git grep` し、N3 ラベルと工数概算を確定する。
-
----
-
-### Q7. 発注 UI の所在（iced vs Python） ★N-pre ブロッカー
-
-spec.md §4 の公開 API 表は iced から `POST /api/order/submit` を叩く前提で書かれている。一方、Python 単独モード方針（memory: `project_python_only_mode.md`）に徹底するなら「全 venue の発注 UI を Python 側に統一」するのが筋。
-
-- 案 A: iced が HTTP API を叩く（現状の spec.md §4）
-- 案 B: Python tkinter に発注 UI を置き、iced は監視・表示のみ
-
-長期方針から案 B の方が一貫する。ただし暗号資産 venue の発注 UI を将来 iced に追加するなら案 A の方が整合する。
-
-**アクション**: N-pre Tpre.6 で決定。案 B 採用時は spec.md §4 の公開 API 表の備考欄を更新し、order/ 計画の UI 層の設計も合わせる。
+**アクション完了**: `architecture.md §3` の `AdvanceClock` 条件書きを確定版（不採用）に書き換え済み。
 
 ---
 
-### Q8. 動的呼値テーブルと nautilus `Instrument.price_increment` ★N-pre ブロッカー（C6 由来）
+### Q5. ライセンスの再配布形態 ★Resolved (2026-04-26)
 
-nautilus の `Instrument` は `price_increment` を **不変な scalar** として持つが、立花の呼値テーブルは価格帯（例: ≤500 円は 0.1 円刻み、>500〜3,000 円は 0.5 円刻み…）で変わる。現在 tachibana Phase 1 では「呼値テーブル動的反映は Phase 2 以降」と引退表示。
+**決定: venv 配布**
 
-nautilus 統合では `OrderFactory` が `price_increment` を使って価格丸めを行うため、価格帯違反のオーダーが nautilus 内部で reject される可能性がある。
+- PyInstaller one-binary 化は行わない（LGPL 追加対応不要）
+- `pyproject.toml` の `[optional-dependencies] build = ["pyinstaller>=6.5"]` は build tool として残すが、nautilus を含む配布には使わない
+- 配布は uv venv + `uv sync` で再現可能な仮想環境とする
 
-- 案 A: 銘柄ごとに `price_increment` を最小単位（0.1 円）で固定し、実際の呼値丸めは Python 写像層で行う
-- 案 B: 価格帯ごとに `Instrument` を複数切り替える（nautilus 非標準の扱い）
-- 案 C: 呼値テーブル動的反映を nautilus 統合前倒しで実装する
+**根拠**: Python 単独モード方針（memory: `project_python_only_mode.md`）と一貫し、venv 配布が最もシンプル。LGPL-3.0 の差し替え可能性確保の実装が不要になる。
 
-**アクション**: N-pre Tpre.5 で決定し、data-mapping.md §3 に反映する。
+**アクション完了**: Q5 即 Resolved。NOTICE 追加対応不要。
+
+---
+
+### Q6. 既存暗号資産 venue の発注経路（Rust 実装）はあるのか ★Resolved (2026-04-26)
+
+**決定: Phase N3 は「新規実装」**
+
+```
+git grep -nE "(place_order|cancel_order|modify_order|submit_order)" exchange/src/
+```
+→ **0 hit**。`exchange/src/` には発注経路が存在しない（データ取得のみ）。
+
+N3 で nautilus 側に `HyperliquidExecutionClient` 等を実装する作業は「移植」ではなく「新規実装」。Rust 側に削除すべき発注コードもない。
+
+---
+
+### Q7. 発注 UI の所在（iced vs Python） ★Resolved (2026-04-26)
+
+**決定: 案 B（Python tkinter に発注 UI、iced は監視・表示のみ）**
+
+**根拠**: Python 単独モード方針（memory: `project_python_only_mode.md`）と一貫する。iced から `POST /api/order/submit` を叩く必要はない。
+
+- `POST /api/order/submit` 等の HTTP API は Rust 側で受けてもよいが、**発注入力 UI は Python tkinter に統一**
+- iced は Portfolio/PnL/Chart 等の監視・表示のみを担う
+- spec.md §4 の公開 API 表は Rust HTTP API 経路（iced から叩かれる前提）を残してよいが、「iced UI から直接呼ぶ想定」を「Python 発注 UI または監視ツールから呼ぶ想定」に修正する
+
+**アクション完了**: spec.md §4 の備考欄を更新済み。
+
+---
+
+### Q8. 動的呼値テーブルと nautilus `Instrument.price_increment` ★Resolved (2026-04-26)
+
+**決定: 案 A（`price_increment = Price(0.1, precision=1)` 固定）**
+
+- N0〜N2 では `price_increment` を最小単位（0.1 円）で固定
+- 実際の呼値丸めは `_compose_request_payload` の Python 写像層で行う
+- nautilus 内部の `price_increment` 超過 reject は `RiskEngine` の `max_order_price` / `min_order_price` で吸収
+
+**根拠**:
+- 案 B（Instrument 複数切り替え）は nautilus 非標準で運用が困難
+- 案 C（呼値テーブル動的反映の前倒し）は N0 スコープ外で工数過大
+- 案 A は立花 Phase 1 の「Phase 2 以降」という既存方針と整合する
+
+**アクション完了**: `data-mapping.md §3` に確定版を反映済み。
 
 ---
 

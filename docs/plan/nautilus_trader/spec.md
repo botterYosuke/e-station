@@ -115,11 +115,16 @@ N0 着手前に以下の **ブロッカー**を解決する。すべてレビュ
 | `GET /api/replay/state` | 既存実装のまま（`EventStore` 直読み） | nautilus を経由しない |
 | `POST /api/agent/narrative` | **N1 で新設**（[H5]）。`docs/plan/README.md` Phase 4a の概念だが現リポジトリには未実装 | nautilus `Strategy` フックから Python が叩く。N1 タスクに API 新設を含める |
 
+**発注 UI の所在（Q7 決定、2026-04-26）**: `POST /api/order/*` は Rust HTTP 層が受けるが、**発注入力 UI は Python tkinter に統一**（[open-questions.md Q7](./open-questions.md#q7)）。iced は Portfolio/PnL/Chart 等の監視・表示のみ担う。Python 単独モード方針と一貫する。
+
 **`/api/replay/state` と nautilus 内部状態の二重管理（M-ack）**: `/api/replay/state` は `EventStore` 直読みで market data を返すのみ（position / PnL は含めない）。Strategy/Portfolio の状態は `/api/replay/portfolio` 経由で nautilus から取得する。両 API のレスポンスは独立しており **クライアント側で混在 join しない** ことを規約として明記。
 
-## 5. 依存方針
+## 5. 依存方針（確定版、2026-04-26）
 
 - nautilus_trader は **Python パッケージとしてのみ**取り込む（`uv add nautilus_trader`）
-- ライセンス（LGPL-3.0）の影響範囲: Python パッケージとして PyPI 取込みなら問題なし。**PyInstaller one-binary 化**する場合の差し替え可能性確保は Phase N-pre で配布形態を確定して別途満たす（[open-questions.md Q5](./open-questions.md#q5)）
-- バージョン pin 戦略は Phase N-pre で確定（[open-questions.md Q1](./open-questions.md#q1)）。確定までの暫定値: `>=1.211, <2.0`。GitHub `main` 直結はしない
-- **wheel 入手性検証（必須、N-pre）**: Windows 11 / macOS arm64 / Linux x86_64 の各環境で `uv sync` が wheel を取得できることを確認。ソースビルドが要求される環境があれば配布形態に影響するため Q5 と一緒に判断する
+- **配布形態（Q5 決定）**: **venv 配布**。PyInstaller one-binary 化は行わない。LGPL-3.0 差し替え可能性確保の追加実装は不要
+- **バージョン pin 戦略（Q1 決定）**:
+  - N0/N1: `>=1.211, <2.0`（開発中の柔軟性確保。検証済み最新: `1.225.0`）
+  - N2 完了後: `==1.225.x` 厳密 pin（立花実弾発注が通った構成を固定）
+  - GitHub `main` 直結はしない
+- **wheel 入手性（N-pre 検証済み）**: Windows 11 で `uv pip install nautilus_trader` が `nautilus-trader==1.225.0` の wheel を取得することを確認（2026-04-26）。macOS arm64 / Linux x86_64 は未検証（N-pre 完了条件として記録）

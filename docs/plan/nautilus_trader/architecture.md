@@ -84,11 +84,7 @@ pub enum Command {
         config: EngineStartConfig,   // ticker, timeframe, range, initial_cash, clock_mode, ...
     },
     StopEngine { request_id: String, strategy_id: String },
-    AdvanceClock {                   // Q3 案 A 採用時のみ。N-pre プロトタイプで決まる
-        request_id: String,
-        strategy_id: String,
-        ts_event_ms: i64,
-    },
+    // AdvanceClock は不採用（Q3 決定 2026-04-26。下記参照）
 }
 
 pub enum EngineEvent {
@@ -120,7 +116,13 @@ pub enum EngineEvent {
 
 **venue フィールド（H1）**: ライブ立花とリプレイ SimulatedExchange が同時に動く可能性があるため、ポジション系イベントには `venue` を必須化する。`Order*` 系は order/ schema 側ですでに `venue_order_id` で振り分け可能。**venue 値は IPC スキーマ安定名（"tachibana", "replay"）のみを使用する。立花 API 固有語（sOrderNumber 等）は IPC フィールドに絶対に含めない。**
 
-**clock 注入（H4 / Q3）**: 上記 `AdvanceClock` Command は **N-pre プロトタイプで案 A（外部 clock 駆動）が feasibility 確認できた場合のみ採用**。案 B（nautilus 自走）採用時はこの Command を入れず、`StartEngine.config.range_start_ms / range_end_ms` だけで完結する。N-pre 結果を本セクションに追記すること。
+**clock 注入（H4 / Q3 決定、2026-04-26）**: `AdvanceClock` Command は **実装しない**。
+
+`tests/spike/nautilus_clock_injection/spike_clock.py` で確認した結果、`TestClock.advance_time()` を `run(streaming=True)` と組み合わせると Rust clock の非減少不変条件違反でパニックする。
+
+**採用方針（案 B）**: `BacktestEngine.run(start=range_start_ms, end=range_end_ms)` で自走。`StartEngine.config` に `range_start_ms / range_end_ms` のみ含める。
+
+**将来の StepForward（N2 以降）**: `streaming=True + add_data([bar]) + run + clear_data()` サイクルで Bar 単位ステップ実行が可能（spike 検証済み）。必要なら `StepEngine { bars_to_advance: u32 }` IPC Command を追加する。
 
 ## 4. データフロー（リプレイ）
 

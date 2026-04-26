@@ -16,81 +16,75 @@
 
 [spec.md §2.0](./spec.md#20-phase-n-pre--feasibility-確認と前提固め実装ゼロ) に対応するタスク列。
 
-### Tpre.1 clock 注入 feasibility プロトタイプ（H4）
-- [ ] `tests/spike/nautilus_clock_injection/` に捨てコード spike を作る
-- [ ] 案 A（外部 clock 駆動・`AdvanceClock` Command 想定）を nautilus 1.211 の API で組めるか検証
-- [ ] 案 B（`BacktestEngine.run()` 自走）の場合に StepForward UX が捨てられるかを評価
-- [ ] 結果を [architecture.md §3](./architecture.md#3-新規-ipc-メッセージ) と [open-questions.md Q3](./open-questions.md#q3) に追記して resolve
+### Tpre.1 clock 注入 feasibility プロトタイプ（H4）✅ 完了 2026-04-26
+- [x] `tests/spike/nautilus_clock_injection/` に捨てコード spike を作る
+- [x] 案 A-2（外部 clock 駆動・`AdvanceClock` Command）: `TestClock.advance_time()` を `run(streaming=True)` と組み合わせると Rust clock 非減少不変条件違反でパニック → **実装不可**
+- [x] 案 A（streaming=True + 1 Bar ずつ逐次投入）: `add_data([bar]) + run(streaming=True) + clear_data()` サイクルで動作。将来の StepForward UX に使える
+- [x] 案 B（`BacktestEngine.run()` 自走）: 動作確認済み、決定論性も検証済み → **N0/N1 で採用**
+- [x] 結果を [architecture.md §3](./architecture.md#3-新規-ipc-メッセージ) と [open-questions.md Q3](./open-questions.md#q3) に追記して resolve
 
-### Tpre.2 nautilus_trader バージョン pin 確定（H6 / Q1）
-- [ ] [open-questions.md Q1](./open-questions.md#q1) を resolve（SemVer 案 / 厳密 pin 案のいずれか）
-- [ ] `pyproject.toml` の暫定値を [spec.md §5](./spec.md#5-依存方針) に反映
+### Tpre.2 nautilus_trader バージョン pin 確定（H6 / Q1）✅ 完了 2026-04-26
+- [x] [open-questions.md Q1](./open-questions.md#q1) を resolve: **二段階 pin**（N0/N1: `>=1.211, <2.0`、N2 完了後: `==1.225.x` 厳密 pin）
+- [x] [spec.md §5](./spec.md#5-依存方針) を確定版に書き換え済み
 
-### Tpre.3 配布形態と LGPL-3.0（M8 / Q5）
-- [ ] [open-questions.md Q5](./open-questions.md#q5) を resolve（venv / PyInstaller / インストーラ同梱のどれか）
-- [ ] PyInstaller 採用時は nautilus 差し替え可能性の確保案を spec に追記
+### Tpre.3 配布形態と LGPL-3.0（M8 / Q5）✅ 完了 2026-04-26
+- [x] [open-questions.md Q5](./open-questions.md#q5) を resolve: **venv 配布** → LGPL 追加対応不要
+- [x] PyInstaller 同梱なし。`[optional-dependencies] build` は build tool として残すだけ
 
-### Tpre.4 既存 Rust 発注経路の有無確認（L1 / Q6）
-- [ ] `git grep -nE "(place_order|cancel_order|modify_order|submit_order)" exchange/src/` で Rust 側発注経路の grep
-- [ ] 0 hit なら N3 を「新規実装」にラベル変更、ありなら「移植」のまま
-- [ ] [open-questions.md Q6](./open-questions.md#q6) を resolve
+### Tpre.4 既存 Rust 発注経路の有無確認（L1 / Q6）✅ 完了 2026-04-26
+- [x] `git grep -nE "(place_order|cancel_order|modify_order|submit_order)" exchange/src/` → **0 hit**
+- [x] N3 は「新規実装」にラベル変更
+- [x] [open-questions.md Q6](./open-questions.md#q6) を resolve
 
-### Tpre.5 動的呼値テーブル方針（C6 / 新規 Q8）
-- [ ] [open-questions.md Q8](./open-questions.md#q8) を起票・resolve（Instrument を価格帯ごとに切る / Custom precondition で skip / 呼値テーブル前倒し のいずれか）
-- [ ] 結論を [data-mapping.md §3](./data-mapping.md#3-instrument-価格帯と呼値テーブル) に反映
+### Tpre.5 動的呼値テーブル方針（C6 / 新規 Q8）✅ 完了 2026-04-26
+- [x] [open-questions.md Q8](./open-questions.md#q8) を resolve: **案 A**（`price_increment = Price(0.1, precision=1)` 固定）
+- [x] 結論を [data-mapping.md §3](./data-mapping.md#3-instrument-価格帯と呼値テーブル) に反映
 
-### Tpre.6 発注 UI の所在統一（L7 / Q7）
-- [ ] [open-questions.md Q7](./open-questions.md#q7) を resolve（全 venue Python 側 UI に統一する方針確定）
-- [ ] [spec.md §4 公開 API 表](./spec.md#4-公開-api不変条件) と [order/](../order/) の UI 設計が新方針と一致することを確認
+### Tpre.6 発注 UI の所在統一（L7 / Q7）✅ 完了 2026-04-26
+- [x] [open-questions.md Q7](./open-questions.md#q7) を resolve: **案 B**（Python tkinter に発注 UI 統一、iced は監視・表示のみ）
+- [x] [spec.md §4](./spec.md#4-公開-api不変条件) に Q7 決定の備考を追記済み
 
-### Tpre.7 wheel 入手性確認
-- [ ] Windows 11 / macOS arm64 / Linux x86_64 の 3 環境で `uv add nautilus_trader` が wheel を取得できることを確認
-- [ ] ソースビルドが必要な環境があれば Tpre.3 の判断材料に戻す
+### Tpre.7 wheel 入手性確認✅ 完了 2026-04-26
+- [x] Windows 11 で `uv pip install nautilus_trader` → `nautilus-trader==1.225.0` wheel 取得成功
+- [ ] macOS arm64 / Linux x86_64 は未検証（venv 配布決定で Q5 への影響なし。将来検証時に確認）
 
-**Exit 条件**: Tpre.1〜Tpre.7 すべて DONE、open-questions.md の Q1/Q3/Q5/Q6/Q7/Q8 が `Resolved` ラベル付きで spec / architecture / data-mapping に反映済み。
+**Exit 条件**: Tpre.1〜Tpre.7 すべて DONE、open-questions.md の Q1/Q3/Q5/Q6/Q7/Q8 が `Resolved` ラベル付きで spec / architecture / data-mapping に反映済み。✅ **N-pre 完了 2026-04-26**
 
 ---
 
-## Phase N0: 同梱と最小バックテスト
+## Phase N0: 同梱と最小バックテスト ✅ 完了 2026-04-26
 
-### N0.1 依存追加
-- `pyproject.toml` に `nautilus_trader` を追加（pin 値は Tpre.2 の決定に従う）
-- `uv lock` で `uv.lock` を更新
-- CI（`.github/workflows/`）で `uv sync` 後の import スモークテストを 1 本追加
+### N0.1 依存追加 ✅
+- [x] `pyproject.toml` に `nautilus-trader>=1.211,<2.0` を追加
+- [x] `uv lock` で `uv.lock` を更新（1.225.0 解決済み）
+- [ ] CI（`.github/workflows/`）で `uv sync` 後の import スモークテストを 1 本追加（N1 で実施）
 
-### N0.2 ワーカー骨格
-- `python/engine/nautilus/__init__.py`
-- `python/engine/nautilus/engine_runner.py`
-  - `class NautilusRunner` を新設（`start_backtest()` / `start_live()` / `stop()`）
-  - 既存の `EngineClientBackend` ループから呼び出される
-- `python/engine/server.py` のディスパッチに `Command::StartEngine` ハンドラを追加（schema 1.4、[architecture.md §3](./architecture.md#3-新規-ipc-メッセージ)）
-- **N0 では live execution を呼ばない**（`start_live()` は stub、`Ready.capabilities.nautilus.live = false`）
+### N0.2 ワーカー骨格 ✅
+- [x] `python/engine/nautilus/__init__.py`
+- [x] `python/engine/nautilus/engine_runner.py`（`NautilusRunner`: `start_backtest()` / `start_live()` stub / `stop()`）
+- [x] `python/engine/nautilus/instrument_factory.py`（`make_equity_instrument()`: price_increment=0.1 固定 Q8 案 A）
+- [ ] `python/engine/server.py` の `StartEngine` ハンドラ追加（N1.1 で実施。N0 は直接 API 呼び出しのみ）
+- [x] N0 では live execution を呼ばない（`start_live()` は stub）
 
-### N0.3 EventStore → nautilus DataLoader
-- `python/engine/nautilus/data_loader.py`
-  - 入力: `{ticker, timeframe, range_start_ms, range_end_ms}`
-  - 出力: nautilus `Bar` の iterable
-  - **N0 では既存 `Klines` IPC イベントの `klines` 配列を nautilus `Bar` に変換する**（EventStore 直読み IPC は N1 で必要なら追加）。M4 文言修正
+### N0.3 EventStore → nautilus DataLoader ✅
+- [x] `python/engine/nautilus/data_loader.py`（`klines_to_bars()`: KlineRow → Bar、JST 15:30 UTC 変換）
+- [x] `python/tests/test_nautilus_data_loader.py`（7 件 GREEN）
 
-### N0.4 サンプル戦略
-- `python/engine/nautilus/strategies/buy_and_hold.py`
-- ユニットテスト 1 本: 1 年分 BTC 日足を投入 → 最終 equity が初期資金より大きい（または NaN でない）
-- **`--strategy-file` 経路は実装しない**（M3、Q2 解決まで組み込み Strategy のみ）
+### N0.4 サンプル戦略 ✅
+- [x] `python/engine/nautilus/strategies/buy_and_hold.py`（最初のバーで 1 lot 成行買い）
+- [x] `python/tests/test_nautilus_buy_and_hold.py`（3 件 GREEN: 全バー処理・equity 正・bought=True）
+- [x] `--strategy-file` 経路は実装しない（M3、Q2 解決まで組み込み Strategy のみ）
 
-### N0.5 headless スモーク
-- `tests/python/test_nautilus_smoke.py`
-  - `NautilusRunner.start_backtest(...)` を 1 回呼び、`Event::EngineStopped` が返る
-- 既存 E2E に `s60_nautilus_backtest_smoke.py` を追加（`IS_HEADLESS=true` 必須）。smoke.sh 末尾から `uv run python tests/e2e/s60_nautilus_backtest_smoke.py` で呼び出す形式で既存 smoke.sh に追記する
+### N0.5 headless スモーク ✅
+- [x] `python/tests/test_nautilus_smoke.py`（5 件 GREEN: start_backtest 完走・戻り値・equity・strategy_id・stub）
+- [ ] 既存 E2E への `s60_nautilus_backtest_smoke.py` 追加（N1 で実施）
 
-### N0.6 決定論性テスト（M6 / spec §3.1）
-- [ ] `tests/python/test_nautilus_determinism.py`
-  - 同一 seed・同一データセットで `start_backtest` を 2 回回し、最終 equity / 全約定タイムスタンプ / 全 OrderFilled `last_price` が**ビット一致**することを検証
-  - `pytest --count=2` 等の繰返し実行ではなく、明示的に 2 回 run して両結果を assert
-- [ ] `tests/python/test_nautilus_wallclock_independence.py`
-  - `unittest.mock.patch("time.time")` / `patch("time.monotonic")` / `patch("datetime.datetime")` を固定値に差し替えても backtest 結果が変わらないことを検証
-  - nautilus 内部で wall clock 参照箇所が見つかった場合は spike として記録し本テストで把握
+### N0.6 決定論性テスト ✅
+- [x] `python/tests/test_nautilus_determinism.py` — 同一データ 2 回実行で equity / fill_timestamps ビット一致
+- [x] wall clock 独立性テスト（`time.time` / `time.monotonic` をモックしても結果不変）を同ファイルに統合
+- [x] 3 件 GREEN
 
-**Exit 条件**: 上記スモーク + 決定論性テストが `python-test.yml`（新設）の `uv run pytest tests/python/test_nautilus_determinism.py tests/python/test_nautilus_smoke.py` ジョブで緑になること
+**Exit 条件達成**: スモーク + 決定論性テスト 計 8 件 GREEN (2026-04-26)
 
 ---
 

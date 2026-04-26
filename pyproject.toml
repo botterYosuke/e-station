@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.0",
     "orjson>=3.9",
     "httpx>=0.27",
+    "nautilus-trader>=1.211,<2.0",
 ]
 
 [project.optional-dependencies]
