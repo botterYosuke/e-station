@@ -624,6 +624,21 @@ impl ProcessManager {
         connection: &EngineConnection,
         venue_ready_timeout: Duration,
     ) {
+        // Step 0: drop any sticky readiness from a previous cycle.
+        // `venue_ready_state` survives across recovery loop iterations
+        // (the `Arc<Mutex<…>>` is owned by the `ProcessManager` which
+        // is reused). If the previous cycle observed `VenueReady` and
+        // the current cycle has no credentials to re-inject (e.g. the
+        // user logged out between cycles), no `SetVenueCredentials` is
+        // sent and no `VenueReady` / `VenueError` fires this cycle —
+        // the stale entry would then survive and `Flowsurface::Message::
+        // EngineConnected`'s `try_is_venue_ready` query would
+        // synthesize a phantom `VenueEvent::Ready`. Mirror the global
+        // `VENUE_READY_CACHE.clear()` that `main.rs` already performs
+        // before respawning the bridge. Reviewer 2026-04-26 R6
+        // (HIGH: sticky snapshot invalidate gap).
+        self.venue_ready_state.lock().await.clear();
+
         // Step 1: subscribe early.
         let mut event_rx = connection.subscribe_events();
 

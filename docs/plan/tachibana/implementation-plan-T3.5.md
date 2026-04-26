@@ -89,6 +89,25 @@ R2 着地後にイベント順序と外部モード bootstrap の race 2 件 (HI
 - ✅ `cargo fmt --check` 緑
 - ✅ `tools/iced_purity_grep.sh` OK
 
+## レビュー修正 R6 (2026-04-26)
+
+R5 着地後の `/e-station-review` skill 再点検で、ready cache の cycle 跨ぎ invalidate の非対称性 (HIGH) を発見。
+
+| ID | 指摘 | 対応 |
+|----|------|------|
+| **HIGH (R6)** | `ProcessManager.venue_ready_state` (managed mode 用 cache) が recovery loop の cycle 跨ぎでクリアされない。前回 cycle で `VenueReady` を観測 → cache に残る。今 cycle で credentials 無し（ユーザがログアウト）→ `SetVenueCredentials` 送らず → events 無し → cache は stale `tachibana=ready` を保持。`Flowsurface::Message::EngineConnected` の OR query (`manager_says_ready ‖ bridge_says_ready`) が stale=true で `VenueEvent::Ready` を synthesize → 本来 not-ready なのに UI が Ready に bootstrap される silent failure。R3 で `main.rs` 側の `VENUE_READY_CACHE.clear()` は recovery loop 開始時に呼んでいるが、`ProcessManager.venue_ready_state` だけが取り残されていた非対称性が見落としの根源 | `apply_after_handshake_with_timeout` 冒頭 (Step 0) に `self.venue_ready_state.lock().await.clear()` を追加。`subscribe_events()` より前に実行することで、新 cycle が確実に空 cache から始まることを保証 |
+
+### 追加 pin
+
+- `engine-client/tests/apply_after_handshake_clears_venue_ready_state.rs::apply_after_handshake_clears_stale_venue_ready_state` — text scan で関数本体冒頭に `venue_ready_state.lock().await.clear()` 呼び出し有 + `subscribe_events()` より前であることを pin (T35-VenueReadyStateCycleClear)
+
+### 累積完了判定
+
+- ✅ `cargo test --workspace` 全緑
+- ✅ `cargo clippy --workspace --tests -- -D warnings` 緑
+- ✅ `cargo fmt --check` 緑
+- ✅ `tools/iced_purity_grep.sh` OK
+
 ## レビュー修正 R5 (2026-04-26)
 
 R4 着地後にさらに 2 MEDIUM の指摘 (deselect 後 race / banner action label 出ない問題) を消化。
