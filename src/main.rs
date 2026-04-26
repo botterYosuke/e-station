@@ -42,11 +42,15 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc, vec};
 
 // ── Engine-client globals ─────────────────────────────────────────────────────
 
-/// Live connection to the external Python data engine (`--data-engine-url` mode).
-/// `None` when the flag was not provided or the connection failed.
-/// `RwLock` so the reconnect task can swap in a fresh connection without restarting.
-static ENGINE_CONNECTION: std::sync::RwLock<Option<Arc<engine_client::EngineConnection>>> =
-    std::sync::RwLock::new(None);
+/// Watch channel publishing the live `EngineConnection`. The recovery loop
+/// updates this on every successful handshake, and the engine-status
+/// subscription forwards each new value into iced as
+/// `Message::EngineConnected`. The static is only touched at startup
+/// (initialised in `main()`) and from the recovery loop / subscription
+/// stream — never from `Flowsurface::update()` (invariant T35-H7).
+static ENGINE_CONNECTION_TX: std::sync::OnceLock<
+    tokio::sync::watch::Sender<Option<Arc<engine_client::EngineConnection>>>,
+> = std::sync::OnceLock::new();
 
 /// `true` while the Python engine is being restarted (ProcessManager restart loop).
 /// Shared between the background restart task and the Iced subscription.
@@ -92,6 +96,14 @@ fn main() {
     let (restarting_tx, _restarting_rx) = tokio::sync::watch::channel(false);
     ENGINE_RESTARTING.set(restarting_tx).ok();
 
+    // Engine-connection watch channel — updated by the recovery loop and
+    // forwarded into iced by `engine_status_stream`. Keep `_conn_rx` alive
+    // for the duration of `main()` so `send()` never sees Err(no-receivers)
+    // before the iced subscription wires up its own subscriber.
+    let (conn_tx, _conn_rx) =
+        tokio::sync::watch::channel::<Option<Arc<engine_client::EngineConnection>>>(None);
+    ENGINE_CONNECTION_TX.set(conn_tx).ok();
+
     // The Python data engine is normally spawned and supervised in-process by
     // a `ProcessManager` running on a dedicated tokio runtime (Phase 6 default).
     // `--data-engine-url` overrides this to connect to an externally managed
@@ -118,8 +130,9 @@ fn main() {
             Ok(conn) => {
                 log::info!("Connected to external data engine at {url_str}");
                 let conn = Arc::new(conn);
-                *ENGINE_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) =
-                    Some(Arc::clone(&conn));
+                if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+                    tx.send(Some(Arc::clone(&conn))).ok();
+                }
 
                 // Push saved proxy to engine before Iced starts so that the
                 // very first subscription fires through the proxy, not direct.
@@ -160,8 +173,9 @@ fn main() {
                                 Ok(new_conn) => {
                                     log::info!("Reconnected to data engine at {reconnect_url}");
                                     let new_conn = Arc::new(new_conn);
-                                    *ENGINE_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) =
-                                        Some(Arc::clone(&new_conn));
+                                    if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+                                        tx.send(Some(Arc::clone(&new_conn))).ok();
+                                    }
                                     if let Some(tx) = ENGINE_RESTARTING.get() {
                                         tx.send(false).ok();
                                     }
@@ -301,8 +315,9 @@ fn main() {
                     Ok(conn) => {
                         backoff_ms = 500;
                         let conn = Arc::new(conn);
-                        *ENGINE_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) =
-                            Some(Arc::clone(&conn));
+                        if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+                            tx.send(Some(Arc::clone(&conn))).ok();
+                        }
                         if let Some(tx) = ENGINE_RESTARTING.get() {
                             tx.send(false).ok();
                         }
@@ -335,15 +350,15 @@ fn main() {
             }
         });
 
-        // Wait for the first handshake to populate ENGINE_CONNECTION, with a
-        // generous timeout that covers PyInstaller's cold-start overhead
-        // (decompression of the frozen archive on first launch).
+        // Wait for the first handshake to publish a connection on the
+        // watch channel, with a generous timeout that covers PyInstaller's
+        // cold-start overhead (decompression of the frozen archive on
+        // first launch).
         let waited = rt.block_on(async {
             for _ in 0..200 {
-                if ENGINE_CONNECTION
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_some()
+                if ENGINE_CONNECTION_TX
+                    .get()
+                    .is_some_and(|tx| tx.borrow().is_some())
                 {
                     return true;
                 }
@@ -364,10 +379,9 @@ fn main() {
         Some(rt)
     };
 
-    if ENGINE_CONNECTION
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_none()
+    if !ENGINE_CONNECTION_TX
+        .get()
+        .is_some_and(|tx| tx.borrow().is_some())
     {
         log::error!("Engine connection not initialised — refusing to start");
         eprintln!("error: data engine connection failed to initialise");
@@ -409,6 +423,14 @@ struct Flowsurface {
     notifications: Notifications,
     /// `true` while the Python data engine is restarting.
     engine_restarting: bool,
+    /// Live `EngineConnection`, populated by the engine-status subscription
+    /// (`Message::EngineConnected`). `None` until the first handshake event
+    /// reaches `update()`. Replaces the former `static ENGINE_CONNECTION`
+    /// (T35-H7-NoStaticInUpdate).
+    engine_connection: Option<Arc<engine_client::EngineConnection>>,
+    /// Active `ProcessManager` for managed mode (read once at startup from
+    /// `ENGINE_MANAGER` so `update()` does not touch the static directly).
+    engine_manager: Option<Arc<engine_client::ProcessManager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +440,10 @@ enum Message {
     /// Fired by the engine-status subscription when the Python engine starts or
     /// finishes a restart.  `true` = restarting, `false` = ready.
     EngineRestarting(bool),
+    /// Fired by the engine-status subscription on every successful handshake.
+    /// Replaces the former `static ENGINE_CONNECTION` global read from
+    /// `update()` (T35-H7-NoStaticInUpdate).
+    EngineConnected(Arc<engine_client::EngineConnection>),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -443,24 +469,49 @@ enum Message {
     AudioStream(modal::audio::Message),
 }
 
-/// Builds a stream that emits `Message::EngineRestarting` whenever the engine
-/// restart state changes.  Uses the global `ENGINE_RESTARTING` watch channel.
+/// Builds a single stream that emits both `Message::EngineRestarting`
+/// (engine restart transitions) and `Message::EngineConnected` (every
+/// successful handshake). Merging the two watch channels into one
+/// `Subscription::run` keeps the recovery path single-source and is
+/// required by invariant T35-H9-SingleRecoveryPath.
 fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send + 'static {
     async_stream::stream! {
-        let Some(tx) = ENGINE_RESTARTING.get() else { return; };
-        let mut rx = tx.subscribe();
-        // Emit the current value immediately in case send(true) fired before we subscribed.
-        // subscribe() marks the current value as already-seen, so changed() would skip it.
-        if *rx.borrow() {
+        let Some(restart_tx) = ENGINE_RESTARTING.get() else { return; };
+        let Some(conn_tx) = ENGINE_CONNECTION_TX.get() else { return; };
+        let mut restart_rx = restart_tx.subscribe();
+        let mut conn_rx = conn_tx.subscribe();
+
+        // Emit current values immediately. subscribe() marks the current
+        // value as already-seen, so `changed()` would otherwise skip the
+        // initial connection / restart state captured before the iced
+        // subscription wired up.
+        // Clone-then-drop the watch::Ref before any `yield`/`await` —
+        // the guard isn't `Send` and would otherwise be held across
+        // suspension points, breaking the `Send` bound iced requires.
+        let initial_conn = { conn_rx.borrow_and_update().clone() };
+        if let Some(conn) = initial_conn {
+            yield Message::EngineConnected(conn);
+        }
+        let initial_restart = { *restart_rx.borrow_and_update() };
+        if initial_restart {
             yield Message::EngineRestarting(true);
         }
+
         loop {
-            if rx.changed().await.is_err() {
-                break;
+            tokio::select! {
+                changed = restart_rx.changed() => {
+                    if changed.is_err() { break; }
+                    let value = { *restart_rx.borrow_and_update() };
+                    yield Message::EngineRestarting(value);
+                }
+                changed = conn_rx.changed() => {
+                    if changed.is_err() { break; }
+                    let value = { conn_rx.borrow_and_update().clone() };
+                    if let Some(conn) = value {
+                        yield Message::EngineConnected(conn);
+                    }
+                }
             }
-            // Copy the bool before dropping the Ref so the guard doesn't cross an await.
-            let value = *rx.borrow_and_update();
-            yield Message::EngineRestarting(value);
         }
     }
 }
@@ -470,23 +521,28 @@ impl Flowsurface {
         let saved_state = layout::load_saved_state();
 
         // All venues are routed through the Python data engine via IPC.
-        // ENGINE_CONNECTION is guaranteed to be set before Iced starts (main() exits if not).
+        // The watch channel is guaranteed to hold `Some(conn)` before iced
+        // starts (main() exits if the first handshake never landed).
+        // We read the channel's *current value* here — this is bootstrap
+        // setup, not `Flowsurface::update()`, so it does not violate
+        // T35-H7-NoStaticInUpdate.
         let mut handles = exchange::adapter::AdapterHandles::default();
-        if let Some(conn) = ENGINE_CONNECTION
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .cloned()
-        {
+        let initial_conn: Option<Arc<engine_client::EngineConnection>> = ENGINE_CONNECTION_TX
+            .get()
+            .and_then(|tx| tx.borrow().clone());
+        if let Some(conn) = initial_conn.as_ref() {
             for &(venue, name) in VENUE_NAMES {
                 let backend = Arc::new(engine_client::EngineClientBackend::new(
-                    Arc::clone(&conn),
+                    Arc::clone(conn),
                     name,
                 ));
                 handles.set_backend(venue, backend);
             }
             log::info!("All venue backends: EngineClientBackend (Python IPC)");
         }
+        // Read the manager once at startup; updates only flow through the
+        // ENGINE_MANAGER OnceLock at boot, so capturing it here is safe.
+        let engine_manager = ENGINE_MANAGER.get().map(Arc::clone);
 
         let (main_window_id, open_main_window) = {
             let (position, size) = saved_state.window();
@@ -518,6 +574,8 @@ impl Flowsurface {
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
             engine_restarting: false,
+            engine_connection: initial_conn,
+            engine_manager,
         };
 
         if let Some(err) = audio_init_err {
@@ -553,56 +611,50 @@ impl Flowsurface {
                     self.notifications.push(Toast::error(
                         "データエンジン再起動中 — チャートは復旧後に自動更新されます".to_string(),
                     ));
-                } else if let Some(conn) = ENGINE_CONNECTION
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .cloned()
-                {
-                    // Rebuild backends with the new connection and bump the generation
-                    // counter so iced assigns new subscription IDs and restarts streams.
-                    for &(venue, name) in VENUE_NAMES {
-                        let backend = Arc::new(engine_client::EngineClientBackend::new(
-                            Arc::clone(&conn),
-                            name,
-                        ));
-                        self.handles.set_backend(venue, backend);
-                    }
-                    // Re-apply current proxy state before bumping the generation so
-                    // that stream-subscribe commands are enqueued after SetProxy in
-                    // the engine's FIFO command channel.  Send unconditionally —
-                    // including `None` — so a user-cleared proxy cannot be revived
-                    // by a stale value held in the freshly spawned engine.
-                    // CRITICAL-3 (ラウンド 6, downgraded): the
-                    // `try_send_now` here is a side-effect from inside
-                    // `update()`, which strictly speaking violates
-                    // iced's pure-update / `Task::perform`-side-effect
-                    // model. Same root cause as繰越項目 H7 / H8 / H9
-                    // (Phase O1: iced Subscription 化). Reworking the
-                    // proxy push into a `Task::perform` here would
-                    // touch enough surface that we keep the existing
-                    // shape and revisit holistically in Phase O1. See
-                    // `docs/plan/tachibana/implementation-plan.md`
-                    // 繰越項目 一覧.
-                    let proxy_url = self.network.proxy_cfg().map(|p| p.to_url_string());
-                    if !conn.try_send_now(engine_client::dto::Command::SetProxy { url: proxy_url })
-                    {
-                        log::warn!("Failed to queue proxy for engine reconnect");
-                    }
+                }
+                // The actual backend rebuild + recovery toast are emitted
+                // by `Message::EngineConnected` so a single source of
+                // truth (the live connection) drives the swap. See
+                // T35-H9-SingleRecoveryPath.
+            }
+            Message::EngineConnected(conn) => {
+                let was_restarting = self.engine_restarting;
+                self.engine_connection = Some(Arc::clone(&conn));
 
-                    self.handles.bump_generation();
+                // Rebuild backends with the new connection and bump the generation
+                // counter so iced assigns new subscription IDs and restarts streams.
+                for &(venue, name) in VENUE_NAMES {
+                    let backend = Arc::new(engine_client::EngineClientBackend::new(
+                        Arc::clone(&conn),
+                        name,
+                    ));
+                    self.handles.set_backend(venue, backend);
+                }
 
-                    // Also propagate to the sidebar's TickersTable so it uses
-                    // the new connection for metadata/stats fetches.
-                    let sidebar_refetch = self
-                        .sidebar
-                        .update_handles(self.handles.clone())
-                        .map(Message::Sidebar);
+                // Re-apply current proxy state before bumping the generation so
+                // that stream-subscribe commands are enqueued after SetProxy in
+                // the engine's FIFO command channel.  Send unconditionally —
+                // including `None` — so a user-cleared proxy cannot be revived
+                // by a stale value held in the freshly spawned engine.
+                let proxy_url = self.network.proxy_cfg().map(|p| p.to_url_string());
+                if !conn.try_send_now(engine_client::dto::Command::SetProxy { url: proxy_url }) {
+                    log::warn!("Failed to queue proxy for engine reconnect");
+                }
 
+                self.handles.bump_generation();
+
+                // Also propagate to the sidebar's TickersTable so it uses
+                // the new connection for metadata/stats fetches.
+                let sidebar_refetch = self
+                    .sidebar
+                    .update_handles(self.handles.clone())
+                    .map(Message::Sidebar);
+
+                if was_restarting {
                     self.notifications
                         .push(Toast::info("データエンジン接続を復旧しました".to_string()));
-                    return sidebar_refetch;
                 }
+                return sidebar_refetch;
             }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
@@ -991,12 +1043,8 @@ impl Flowsurface {
                         // stream reconnection.  A subsequent engine-side failure (e.g.
                         // unreachable proxy) would surface as stream disconnects, not
                         // as a ProxyResult::Failed.
-                        let engine_conn = ENGINE_CONNECTION
-                            .read()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .as_ref()
-                            .cloned();
-                        let manager = ENGINE_MANAGER.get().map(Arc::clone);
+                        let engine_conn = self.engine_connection.as_ref().cloned();
+                        let manager = self.engine_manager.as_ref().map(Arc::clone);
 
                         return Task::perform(
                             async move {

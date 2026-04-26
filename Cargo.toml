@@ -80,3 +80,4 @@ debug = ["iced/hot"]
 
 [dev-dependencies]
 futures = "0.3"
+syn = { version = "2", features = ["full", "visit"] }

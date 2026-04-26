@@ -60,6 +60,10 @@
 | HIGH-D2-1-B1e | data-mapping.md §5.3（`price` は `Decimal` 限定、int/float 拒否） | `python/tests/test_tachibana_yobine.py::test_tick_size_for_price_decimal_only` | T4 |
 | HIGH-D2-1-B2a | data-mapping.md §5.4 / implementation-plan.md T4 B2（銘柄→ yobine_code → tick 解決） | `python/tests/test_tachibana_master_yobine_resolve.py::test_resolve_tick_size_for_issue_uses_clm_yobine_lookup` | T4 |
 | HIGH-D2-1-B2b | implementation-plan.md T4 B2（`yobine_table` invalidation: is_demo / JST / `__init__`） | `python/tests/test_tachibana_master_yobine_invalidation.py::test_yobine_table_reloaded_on_invalidation_triggers` | T4 |
+| T35-H7-NoStaticInUpdate | implementation-plan-T3.5.md §3 Step A（H7: `Flowsurface::update()` から `static ENGINE_CONNECTION` の直接読み出しを排除し、Subscription/Task 経由に置換） | `tests/main_update_no_static_access.rs::update_body_has_no_engine_connection_read` | T3.5 |
+| T35-H8-NoBlockOnInUpdate | implementation-plan-T3.5.md §3 Step A（H8: `update()` 内の `block_on(...)` を `Task::perform` 化、現状未出現の regression guard） | `tests/main_update_no_block_on.rs::update_body_has_no_block_on` | T3.5 |
+| T35-H9-SingleRecoveryPath | implementation-plan-T3.5.md §3 Step A（H9: 手動 reconnect callback / 二重経路を `Subscription::run` 単一化） | `tests/engine_status_subscription_is_singleton.rs::engine_status_subscription_is_singleton` | T3.5 |
+| T35-H7-DebugRedaction | implementation-plan-T3.5.md §3 Step A REFACTOR（`EngineConnection: Debug` の secret 焼付きガード） | `engine-client/tests/engine_connection_debug_redaction.rs::engine_connection_debug_does_not_leak_credentials` | T3.5 |
 
 ---
 

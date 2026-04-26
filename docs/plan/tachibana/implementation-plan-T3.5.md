@@ -1,0 +1,357 @@
+# T3.5 実装計画 — 立花 UI 拡張 + iced 逸脱解消
+
+**親計画**: [implementation-plan.md](./implementation-plan.md) フェーズ T3 の繰越項目（親 plan ラウンド 6「繰越 / 次イテレーション (ラウンド 6 追加)」セクション H5/H6/H7/H8/H9 と T3 タスクリスト deferred to T3.5 マーカー参照）
+**作成**: 2026-04-26
+**ブランチ**: `tachibana/phase-1/T3-credential-r6-fixes`（または T3.5 派生）
+
+> 脚注: spec.md §3.1 line 30 が立花ログインボタン位置として `sidebar.rs` を挙げているのは陳腐化記述。実コード上は `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` の venue 行が正本。本 PR スコープ外、別 PR で spec.md 同期予定。
+
+---
+
+## 1. ゴール
+
+T3 で「(deferred to T3.5)」とマークされた UI 5 項目と、同 PR 紐付けの技術負債（H5 / H6 / H7 / H8 / H9）を **1 つのまとまった変更**として着地させる。完了基準は:
+
+1. **production 起動経路で**「立花 venue 選択 → ログインダイアログ → VenueReady → 銘柄取得」が手動 bootstrap util なしで通ること
+2. `cargo test --workspace` / `cargo clippy --workspace --tests -- -D warnings` / `cargo fmt --check` / `uv run pytest python/tests/` 全緑
+3. `tests/e2e/tachibana_relogin_after_cancel.sh` 緑
+4. `src/main.rs` の `update()` 経路から `rt.block_on(...)` / `ENGINE_CONNECTION.read()` 直アクセスが **消える**（起動前の `main()` 直下の block_on は許容）
+
+---
+
+## 2. スコープ
+
+### 2.1 UI 5 項目（親 plan ラウンド 6「繰越 / 次イテレーション (ラウンド 6 追加)」由来）
+
+| ID | 項目 | 場所 |
+|----|------|------|
+| U1 | sidebar 立花ログインボタン（`Command::RequestVenueLogin{ venue:"tachibana" }` 発火） | `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` venue 行（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」） |
+| U2 | ステータスバナー（`VenueLoginStarted` / `VenueLoginCancelled` / `VenueError` 表示。`classify_venue_error` の戻り値だけ参照） | `src/notify.rs` および `src/widget/toast.rs` ／ 新規 `src/widget/venue_banner.rs`（候補）（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」） |
+| U3 | `Venue::Tachibana` 初回オープン時の自動 `RequestVenueLogin` 発火（ユーザーが Tachibana venue を選択した結果としての発火であり、spec.md §3.2 LOW-3「ユーザー明示の再ログイン」側に分類される） | tickers_table の `ToggleExchangeFilter(Tachibana)` ハンドラ（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」） |
+| U4 | `VenueReady` 前の Tachibana metadata / subscribe 抑止ゲート | tickers_table の `fetch_metadata_task` 経路（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」） |
+| U5 | E2E shell `tests/e2e/tachibana_relogin_after_cancel.sh` | 新規（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」） |
+
+### 2.2 同 PR 紐付け技術負債（親 plan ラウンド 6「繰越 / 次イテレーション (ラウンド 6 追加)」H5〜H9 由来）
+
+| ID | 項目 | 場所 |
+|----|------|------|
+| H5 | `EngineCommand::Bundled(p).program()` の `to_str().unwrap_or(...)` fallback を `Path` 直接受け化 | `engine-client/src/process.rs` の `EngineCommand::Bundled(p).program()` 実装箇所（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」H5） |
+| H6 | `data/tests/tachibana_keyring_roundtrip.rs::SharedBuilder` の `OnceLock<Mutex<HashMap>>` 状態漏洩を、テスト ID + 各テスト先頭 `delete_credential().ok()` パターンで整理 | `data/tests/tachibana_keyring_roundtrip.rs`（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」H6） |
+| H7 | `static ENGINE_CONNECTION: RwLock` への `update()` 内アクセスを iced `Task` 経由に置換 | `src/main.rs` 全体（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」H7） |
+| H8 | `update()` 内の `rt.block_on(...)` を `Task::perform(async {...})` 化 | `src/main.rs` 全体（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」H8） |
+| H9 | 手動 reconnect callback / 二重経路を Subscription 単一化 | `src/main.rs` recovery loop / engine_status_stream（親 plan 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」H9） |
+
+### 2.3 スコープ外（Phase O1 へ繰越固定）
+
+- W1 (handshake recv timeout) — 別 PR
+- H12 / H13 / M-19（typestate / wire schema 改造）
+- M-12 (StoredCredentials Debug derive コメント) — 次回触るとき
+- spec.md §3.1 line 30 の `sidebar.rs` 言及陳腐化修正 — 別 PR
+- `VenueError` payload への `action_label: Option<String>` 追加（architecture.md §6 への追記タスク） — 別 PR（Phase 1 では `message` フィールドへの改行区切りで暫定運用）
+
+---
+
+## 3. ステップ分割（TDD 順）
+
+各ステップは「RED（失敗テスト）→ GREEN（最小実装）→ REFACTOR」を 1 サイクルとし、ステップ完了ごとに `cargo test --workspace` / `pytest` が緑であることを保証する。**全ステップ完了後に `/review-fix-loop` を 1 周以上回す**。
+
+### 3.0 U1〜U5 / H5〜H9 → Step 対応マトリクス
+
+| ID | 着地 Step |
+|----|-----------|
+| U1 | Step D |
+| U2 | Step E |
+| U3 | Step C + Step D |
+| U4 | Step C |
+| U5 | Step F |
+| H5 | Step B |
+| H6 | Step B |
+| H7 | Step A |
+| H8 | Step A |
+| H9 | Step A |
+
+### 3.1 不変条件 ID 登録一覧（各 Step で `invariant-tests.md` に行追加）
+
+`T35-` プレフィックスは `invariant-tests.md` 既存 `F-H5` / `F-H6` との衝突回避（CI ガード `test_invariant_table_covers_all_ids` は `F-[A-Z0-9-]+` パターンで拾うため `T35-...` は別エントリとして登録）。
+
+| ID | 一次資料 | pin テスト | Step |
+|----|----------|-----------|------|
+| T35-H5-PathFidelity | T3.5 §3 Step B | `engine-client/tests/bundled_path_with_unicode.rs::bundled_program_preserves_unicode_path`（+ 非 Windows 環境向け `..._utf8_path`） | B |
+| T35-H6-KeyringSlotIsolation | T3.5 §3 Step B | `data/tests/tachibana_keyring_roundtrip.rs::keyring_slot_is_isolated_per_test` | B |
+| T35-H7-NoStaticInUpdate | T3.5 §3 Step A | `tests/main_update_no_static_access.rs::update_body_has_no_engine_connection_read` | A |
+| T35-H8-NoBlockOnInUpdate | T3.5 §3 Step A | `tests/main_update_no_block_on.rs::update_body_has_no_block_on` | A |
+| T35-H9-SingleRecoveryPath | T3.5 §3 Step A | `tests/engine_status_subscription_is_singleton.rs::engine_status_subscription_is_singleton` | A |
+| T35-U1-LoginButton | T3.5 §3 Step D | `tests/sidebar_login_button.rs::sidebar_login_button_emits_request_venue_login`（+ `..::duplicate_press_returns_task_none_while_login_in_flight`） | D |
+| T35-U2-Banner | T3.5 §3 Step E | `tests/tachibana_banner.rs::banner_transitions` | E |
+| T35-U3-AutoRequestLogin | T3.5 §3 Step C+D | `tests/tachibana_auto_request_login.rs::auto_request_login_on_first_open_classified_as_manual_trigger` | D |
+| T35-U4-VenueReadyGate | T3.5 §3 Step C | `tests/tachibana_metadata_fetch_gated_by_venue_ready.rs::metadata_fetch_blocked_until_venue_ready`（+ `..::pending_fetch_replays_on_venue_ready`） | C |
+| T35-U5-RelogE2E | T3.5 §3 Step F | `tests/e2e/tachibana_relogin_after_cancel.sh` | F |
+
+### 3.2 venue 状態モデル（全 Step 共通）
+
+`tachibana_ready: bool` と `tachibana_login_in_flight: bool` の二重フラグは廃止し、`Flowsurface` 構造体に **enum 1 本**の `tachibana_state: VenueState` を持たせる:
+
+```rust
+enum VenueState {
+    Idle,                                                  // 初期 / VenueLoginCancelled 後
+    LoginInFlight,                                         // VenueLoginStarted 受信 〜 VenueReady/Cancelled/Error 待ち
+    Ready,                                                 // VenueReady 受信後（metadata fetch / subscribe 解禁）
+    Error { class: VenueErrorClass, message: String },     // VenueError 受信後
+}
+```
+
+- Step C のゲート判定: `matches!(state, VenueState::Ready)`
+- Step D の重複押下抑止: `matches!(state, VenueState::LoginInFlight)`
+- `Hello` 再受信（subprocess 再起動検知）時は `VenueState::Idle` へリセット（spec.md §3.2 整合）
+- `tachibana_banner: Option<TachibanaBannerState>` フィールドは廃止し、`view()` 側で `VenueState` から render する形に統一
+
+`Trigger::{Auto, Manual}` enum で `RequestTachibanaLogin` の発火元を区別。`Auto` は `VenueState::Idle && first_open` のときのみ許可（U3 = LOW-3 「ユーザー明示」分類）。
+
+### 3.3 構造ガード（Step A REFACTOR 完了判定）
+
+`tests/main_update_no_static_access.rs` / `tests/main_update_no_block_on.rs` は `syn::parse_file` + `syn::visit::Visit` で `fn update` の `Block` のみを走査する **AST 検査** で実装する。テスト関数名:
+
+- `update_body_has_no_engine_connection_read`
+- `update_body_has_no_block_on`
+- `engine_status_subscription_is_singleton`（H9 完了判定）
+
+加えて `tools/iced_purity_grep.sh` を新設し `update()` / `subscription()` 内に `ENGINE_CONNECTION` / `ENGINE_MANAGER` / `ENGINE_RESTARTING` / `block_on(` リテラルが現れないことを grep ガード。CI 組込先は `.github/workflows/rust.yml::iced-purity-lint` ジョブ。
+
+---
+
+### Step A — H7/H8/H9 iced Subscription/Task 化（リスク高・先頭着手） ✅ 完了 (2026-04-26)
+
+**目的**: `update()` 内から static / block_on を排除。後続ステップで sidebar から `RequestVenueLogin` を送る経路を Task ベースで素直に書けるようにする土台。
+
+> **完了サマリ (2026-04-26)**
+>
+> - ✅ workspace root `tests/` に AST 構造ガード 3 本を追加（`main_update_no_static_access` / `main_update_no_block_on` / `engine_status_subscription_is_singleton`）。RED 時 1 本 fail（ENGINE_CONNECTION x2 + ENGINE_MANAGER x1 を update() 内に検出）、他 2 本は regression guard として最初から PASS。
+> - ✅ `static ENGINE_CONNECTION: RwLock<...>` を **`static ENGINE_CONNECTION_TX: OnceLock<watch::Sender<Option<Arc<EngineConnection>>>>`** に置換。recovery loop は `tx.send(Some(conn))` で publish。
+> - ✅ `Flowsurface` 構造体に `engine_connection: Option<Arc<EngineConnection>>` と `engine_manager: Option<Arc<ProcessManager>>` を追加。`engine_manager` は `Flowsurface::new()` で `ENGINE_MANAGER.get()` から一度だけ取得（new() は update() ではないので OK、AST テスト範囲外）。
+> - ✅ `Message::EngineConnected(Arc<EngineConnection>)` を新設し、backend 再構築 + `SetProxy` 再送 + sidebar refetch + 「復旧しました」toast をすべて当該ハンドラに集約。`Message::EngineRestarting(true)` は restarting flag セットと toast のみに簡素化。
+> - ✅ `engine_status_stream` を `tokio::select!` で `restart_rx.changed()` と `conn_rx.changed()` をマージし、**1 本の Subscription** で `EngineConnected` と `EngineRestarting` を yield する形に再構成。これで H9 invariant を満たしたまま EngineConnected を流せる。
+> - ✅ `tools/iced_purity_grep.sh` 新設（awk で `fn update(...)` / `fn subscription(...)` 本体を抽出し forbidden literal を grep。`.github/workflows/rust.yml::iced-purity-lint` への組込はワークフロー側 PR で実施）。
+> - ✅ `engine-client/tests/engine_connection_debug_redaction.rs` 追加。`EngineConnection` の Debug 実装が `finish_non_exhaustive()` を維持し、struct field 直書きの credential が混入しないことをソースレベルで pin。
+> - ✅ `invariant-tests.md` に T35-H7 / T35-H8 / T35-H9 / T35-H7-DebugRedaction を追記。
+> - ✅ `cargo test --workspace` / `cargo clippy --workspace --tests -- -D warnings` / `cargo fmt --check` 全緑。
+>
+> **設計上の落とし穴 (後続作業者向け)**
+>
+> - `tokio::sync::watch::Ref` ガードは `!Send`。`async_stream::stream!` の中で `borrow_and_update().clone()` の戻り値を変数束縛するときは **必ず `{ ... }` ブロックで明示的に drop** してから `yield`/`await` に進むこと（ガードが await を跨ぐと iced の `Send` バウンドで落ちる）。本 Step でこの罠を踏み 1 度ビルド失敗。
+> - `EngineRestarting(false)` ハンドラに残っていた backend 再構築は **完全に EngineConnected ハンドラへ移動**した。watch channel は coalesce するため、recovery loop が `conn_tx.send(Some)` → `restart_tx.send(false)` の順に発行しても、Subscription 側の `tokio::select!` がどちらを先に拾うかは非決定的。**EngineConnected を真の source-of-truth** として、EngineRestarting は通知用フラグだけにする責務分割が安全。
+> - `ENGINE_MANAGER` static は本 Step では「保持」だが、`update()` 内のアクセス（旧 L999）は `self.engine_manager` field 経由に移した。AST テストが `ENGINE_MANAGER` も forbidden ident に入れているため、将来の Step 追加で update() に再混入させないこと。
+> - Step C 以降で `RequestTachibanaLogin` を Task::perform 化する際は、本 Step で導入した `self.engine_connection.as_ref().cloned()` パターンをそのまま流用できる。`fn send_engine_command(conn, cmd) -> Task<Message>` ヘルパーは Step A で重複が 1 箇所しかなく集約しない判断 (YAGNI) ── 重複が 2+ になる Step C/D で改めて検討。
+
+**作業**:
+0a. workspace root `tests/` ディレクトリを新設する（既存 `tests/e2e/` と並置、Rust 統合テスト用）。`tests/main_update_no_static_access.rs` / `tests/main_update_no_block_on.rs` / `tests/engine_status_subscription_is_singleton.rs` / `tests/engine_connection_debug_redaction.rs`（および後続 Step C/D/E 由来のテスト）が flowsurface バイナリクレートの integration test としてこのディレクトリに配置される。
+0b. flowsurface root crate `Cargo.toml [dev-dependencies]` に `syn = { version = "2", features = ["full", "visit"] }` を追加（AST 構造ガード用）。AST 走査は `std::fs::read_to_string("src/main.rs")` で読み込み、`syn::parse_file` → `syn::visit::Visit` で `fn update` の `Block` のみを対象とする。
+1. `Arc<EngineConnection>` を `Flowsurface` 構造体のフィールドとして保持（`Option<Arc<EngineConnection>>`、reconnect で `Some` に置換）
+2. recovery loop が `EngineConnection` を確立したら `mpsc::Sender<Message>` で `Message::EngineConnected(Arc<EngineConnection>)` を投げる Subscription を新設（既存 `engine_status_stream` と同じ経路に乗せる）
+3. **置換対象**: `src/main.rs` の `update()` 関数本体内のすべての `ENGINE_CONNECTION.read()` / `rt.block_on(...)` 出現箇所（着手時に grep で再特定）。フィールドの `Arc<EngineConnection>` を `clone()` して `Task::perform(async move { conn.send(...).await })` に置換
+4. `static ENGINE_CONNECTION` を完全に削除（`ENGINE_MANAGER` / `ENGINE_RESTARTING` は起動時にしか触らないので段階的削除を別途検討、本ステップでは保持）
+5. **保持対象**: `main()` 直下（iced 起動前）の `rt.block_on(EngineConnection::connect)` / `manager.start()` 待ち合わせ — これは `update()` 経路ではないので置換対象外（親 plan の指摘対象外）。grep で `update()` 関数本体外のものは除外して扱う
+6. `invariant-tests.md` に **T35-H7-NoStaticInUpdate / T35-H8-NoBlockOnInUpdate / T35-H9-SingleRecoveryPath** を追加
+
+**RED テスト（AST ベース構造ガード）**:
+- `tests/main_update_no_static_access.rs::update_body_has_no_engine_connection_read` — `syn::parse_file` + `syn::visit::Visit` で `fn update` の `Block` のみを走査し `ENGINE_CONNECTION.read()` 呼び出しが 0 件であることを assert
+- `tests/main_update_no_block_on.rs::update_body_has_no_block_on` — 同様に `block_on(` 呼び出しが 0 件であることを assert
+- `tests/engine_status_subscription_is_singleton.rs::engine_status_subscription_is_singleton` — Subscription 単一化のガード（H9）
+- 加えて `tools/iced_purity_grep.sh` を CI から呼ぶ
+
+**GREEN**:
+- 上記置換を実施
+
+**REFACTOR**:
+- `Arc<EngineConnection>` 取得を `&self.engine_connection` ヘルパー化
+- `Task::perform` の重複パターンを `fn send_engine_command(conn, cmd) -> Task<Message>` に集約
+- `EngineConnection: Debug` derive が `Arc<EngineConnection>` 内部 secret を redact することを `engine-client/tests/engine_connection_debug_redaction.rs::engine_connection_debug_does_not_leak_credentials` で pin（secret 焼付きガード）
+
+**完了判定**: `cargo test --workspace` 緑 / 既存 GUI 起動 smoke が回帰しない / `iced_purity_grep.sh` 緑
+
+---
+
+### Step B — H5 / H6 機械的修正
+
+**目的**: 副作用の少ない技術負債を先に潰し、後続ステップの差分を見やすくする。
+
+#### H5: `EngineCommand::Bundled` の `Path` 直接受け
+
+**現状**: `engine-client/src/process.rs` の `EngineCommand::Bundled(p).program()` 実装が `to_str().unwrap_or("flowsurface-engine")` で fallback している。
+
+**作業**:
+- `program()` のシグネチャを `&str` 返却から `Cow<'_, OsStr>` または `&Path` 返却に変更
+- `Command::new(...)` 呼び出し側を `OsStr` / `Path` 経由に切替
+- Windows 日本語ユーザパスでも silent skip しないことを `engine-client/tests/bundled_path_with_unicode.rs::bundled_program_preserves_unicode_path` で pin（`PathBuf::from("C:\\Users\\日本語\\flowsurface-engine.exe")` を `Bundled` に渡し、`program()` 戻り値が `to_str()` 経由で文字落ちしないことを assert）。非 Windows 環境向けに `..._utf8_path` も追加
+- `invariant-tests.md` に **T35-H5-PathFidelity** を追加
+
+#### H6: `SharedBuilder` 状態漏洩整理
+
+**現状**: 7 件のテストが `#[serial_test::serial]` + プロセス共有 `OnceLock<Mutex<HashMap>>` で順序依存
+
+**作業**:
+- 各テスト関数の先頭で `keyring::Entry::new(SERVICE_NAME, &test_unique_user_id).delete_credential().ok()` を実行するヘルパー `fn fresh_keyring_slot(test_id: &str) -> String` を追加
+- テスト ID は `function_name!()` マクロ（`stdext::function_name!()` 相当）または手動定数で衝突を避ける
+- `#[serial_test::serial]` を維持（防御的、`SharedBuilder` 内部 HashMap が共有のため）
+- 既存 7 件のラウンドトリップが緑のまま通ることを確認
+- pin: `data/tests/tachibana_keyring_roundtrip.rs::keyring_slot_is_isolated_per_test`
+- `invariant-tests.md` に **T35-H6-KeyringSlotIsolation** を追加
+
+**完了判定**: `cargo test -p flowsurface-data --tests -- --test-threads=4 keyring_roundtrip` を **5 回連続緑**
+
+---
+
+### Step C — U4 VenueReady ゲート
+
+**目的**: U1 sidebar ボタンを書く**前に**ゲートを入れることで、ボタン押下前に Tachibana metadata fetch が走って空振る経路を構造的に潰す。
+
+**現状把握** (`src/screen/dashboard/tickers_table.rs`):
+- `fetch_metadata_task(&self.handles, venue)` が venue 選択時に発火
+- Tachibana 用 adapter handle が `VenueReady` 前でも metadata fetch を試行 → 空応答 or エラー
+
+**作業**:
+1. `Flowsurface` 構造体の `tachibana_state: VenueState` を §3.2 の通り保持
+2. tickers_table の `Message::ToggleExchangeFilter(Venue::Tachibana)` ハンドラで:
+   - `!matches!(state, VenueState::Ready)` のとき: metadata fetch を発火せず、pending fetch を保持 + U3 の自動 `RequestTachibanaLogin(Trigger::Auto)` 発火（`VenueState::Idle && first_open` のときのみ）
+   - `matches!(state, VenueState::Ready)` のとき: 既存経路で fetch
+3. `VenueReady{venue:"tachibana"}` を Subscription で受けたとき `tachibana_state = VenueState::Ready` + バナー消去 + 抑止していた pending fetch があれば再発火
+4. `invariant-tests.md` に **T35-U4-VenueReadyGate** を追加
+
+**RED テスト**:
+- `tests/tachibana_metadata_fetch_gated_by_venue_ready.rs::metadata_fetch_blocked_until_venue_ready` — `MockFetchMetadata::expect_call().times(0)` を `VenueReady` 発火前に検証
+- `tests/tachibana_metadata_fetch_gated_by_venue_ready.rs::pending_fetch_replays_on_venue_ready` — `VenueReady` 発火後 `MockFetchMetadata::expect_call().times(1)` を検証
+
+**GREEN**:
+- ゲートロジック実装
+
+**完了判定**: 上記 2 テスト緑 / ゲート未通過時に `fetch_metadata_task` が呼ばれないことを mock で pin
+
+---
+
+### Step D — U1 / U3 sidebar ログインボタン + 自動発火
+
+**作業**:
+1. `Message::RequestTachibanaLogin(Trigger)` を新設（`Trigger::{Auto, Manual}`）
+2. tickers_table の Tachibana 行ヘッダ（`exchange_filter_btn` の venue 行）にログインアイコンボタンを追加（**第 1 候補: ホバー時アイコン、第 2 候補: 行右端固定アイコン** — 親 plan ラウンド 6 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」準拠）
+3. ボタン押下で `Message::RequestTachibanaLogin(Trigger::Manual)` を emit、`update()` で `Task::perform(async move { conn.send(Command::RequestVenueLogin{ venue: "tachibana".into() }).await })`
+4. U3: Step C のゲート未通過時の自動発火経路を `Message::RequestTachibanaLogin(Trigger::Auto)` の self-emit で統一。`VenueLoginStarted` 受信で `VenueState::LoginInFlight` / `VenueReady` or `VenueLoginCancelled` or `VenueError` で別状態に遷移するため、重複発火抑止は `matches!(state, VenueState::LoginInFlight)` のとき `Task::none()` を返すことで実現
+5. **デッドロック回避**: ボタンは venue 状態に依らず常時表示（親 plan ラウンド 6 繰越 §「繰越 / 次イテレーション (ラウンド 6 追加)」「`VenueReady` 前は ListTickers が空 = 立花 ticker selector / pane が空 or 非表示の可能性」対策）
+6. `invariant-tests.md` に **T35-U1-LoginButton / T35-U3-AutoRequestLogin** を追加
+
+**RED テスト**:
+- `tests/sidebar_login_button.rs::sidebar_login_button_emits_request_venue_login` — ボタン押下 → `Command::RequestVenueLogin` が `EngineConnection::send` に渡ることを `mockall` でトレイト分離して pin（または simpler: `Flowsurface::update` を直叩きして返却 `Task` を観察）
+- `tests/sidebar_login_button.rs::duplicate_press_returns_task_none_while_login_in_flight` — `VenueState::LoginInFlight` の間は重複押下が `Task::none()` を返すことを pin
+- `tests/tachibana_auto_request_login.rs::auto_request_login_on_first_open_classified_as_manual_trigger` — 初回オープンの自動発火が U3=LOW-3「ユーザー明示」側に分類されること（`Trigger::Auto` だが LOW-3 帯に集計）を pin
+
+**完了判定**: production 経路で sidebar ボタンクリック → Python tkinter ログインダイアログが起動することを手動 smoke 確認
+
+---
+
+### Step E — U2 ステータスバナー
+
+**作業**:
+1. `Flowsurface` 構造体の `tachibana_state: VenueState`（§3.2）から `view()` 側でバナーを render する。`tachibana_banner: Option<TachibanaBannerState>` フィールドは設けない（状態の正本は `VenueState` 1 本）
+2. Subscription で `EngineEvent::VenueLoginStarted` / `VenueLoginCancelled` / `VenueError{venue:"tachibana"}` / `VenueReady{venue:"tachibana"}` を `Message::TachibanaVenueEvent(...)` にマップして `VenueState` を遷移させる
+3. `view()` の上部（既存 toast 領域近く、`src/notify.rs` および `src/widget/toast.rs` の隣に新規 `src/widget/venue_banner.rs`）にバナーレンダラを差し込む。`classify_venue_error` の戻り値で:
+   - `severity` → 色マッピング（Error=赤系 palette role / Warning=黄系 palette role）— **Rust 側は色マッピングのみを保持し、ボタンラベルなど文字列リテラルを持たない**（F-Banner1 整合）
+   - ボタン種別（Relogin / Dismiss / Hidden）と表示テキストは `VenueError` payload の `message` フィールドから取得。**Phase 1 暫定運用**として `message` を改行区切りで「ヘッダ\n本文\n[ボタンラベル]」という構造で Python 側が詰める形を許容（架空フィールド `action_label: Option<String>` を架けるのは architecture.md §6 への追記タスクとして別 PR に繰越し）
+   - `action == Relogin` → 1 つ目のボタンを表示し押下で `Message::RequestTachibanaLogin(Trigger::Manual)` emit
+   - `action == Dismiss` → 1 つ目のボタンを「閉じる」相当として表示
+   - `action == Hidden` → ボタンなし、メッセージのみ
+4. `VenueReady{venue:"tachibana"}` 受信で `VenueState::Ready` に遷移し、view 側がバナーを描画しない（自然消去）
+5. `invariant-tests.md` に **T35-U2-Banner** を追加
+
+**RED テスト（テーブル駆動）**:
+`tests/tachibana_banner.rs::banner_transitions` で以下の入力イベント列 → 期待 `VenueState` を固定テーブルで pin:
+
+| 入力イベント | 開始状態 | 期待状態 |
+|--------------|----------|----------|
+| `VenueLoginStarted` | `VenueState::Idle` | `VenueState::LoginInFlight` |
+| `VenueLoginCancelled` | `VenueState::LoginInFlight` | `VenueState::Idle` |
+| `VenueError{class:Auth, action:Relogin, message}` | `VenueState::LoginInFlight` | `VenueState::Error{class:Auth, message}` |
+| `VenueReady` | `VenueState::LoginInFlight` | `VenueState::Ready` |
+| `VenueLoginStarted` | `VenueState::Error{...}` | `VenueState::LoginInFlight` |
+
+加えて、`classify_venue_error("session_expired")` の `VenueError` を流したとき再ログインボタンが表示されることを `Element` 構造の検査 or text content 検査で pin。
+
+**完了判定**: 手動操作で「ログイン → キャンセル → バナー表示 → 再ログインボタン押下 → ダイアログ再出現」が確認できる
+
+---
+
+### Step F — U5 E2E shell
+
+**目的**: HTTP API 経由で「初回ログイン → cancel → 再ログイン」シーケンスをスクリプト検証。
+
+**現状**: `tests/e2e/smoke.sh` が既存。HTTP API ポート 9876 経由の操作パターンは `.claude/skills/e2e-testing/` に規約あり。
+
+**作業**:
+1. `tests/e2e/tachibana_relogin_after_cancel.sh` を新設
+2. シーケンス:
+   - flowsurface 起動（dev mode、`DEV_TACHIBANA_*` 未設定で dialog 経路強制）
+   - HTTP API で「Tachibana venue を選択」
+   - ログ grep で `VenueLoginStarted{venue:"tachibana"}` 1 件を 30s 以内に観測。grep 正規表現は shell 冒頭で `EXPECT_STARTED_RE='^.*VenueLoginStarted\{venue:"tachibana"\}.*$'` として定数化
+   - **cancel 注入経路**: 親（Rust 側 / E2E shell）が helper subprocess の stdin を **close (EOF)** することで `WM_DELETE_WINDOW` 相当の cancellation を発火させる。helper は `{"status":"cancelled"}` を stdout に emit する（`tachibana_login_dialog.py --headless` の既存仕様 — `review-fixes-2026-04-25.md` ラウンド 4 Group E「M16 / M-4 (`_read_stdin_payload` stdin EOF を {} 扱い)」参照）。stdin に "cancel コマンド" を流す方式は採用しない
+   - ログ grep で `VenueLoginCancelled` 1 件観測
+   - HTTP API で「再ログイン」ボタン相当発火
+   - ログ grep で `VenueLoginStarted` が **追加で 1 件**（合計 2 件）出ること、`VenueLoginCancelled` の直後に重複発火していないことを検証
+3. `OBSERVE_S=30` の根拠: 既存 smoke.sh の handshake 15s + cancel 往復 10s（コメントで明記）
+4. **CI 組込**: nightly + PR ラベル `e2e` でトリガ、`OBSERVE_S=60`。組込先は `.github/workflows/e2e.yml::tachibana-relogin-after-cancel` ジョブ
+5. `invariant-tests.md` に **T35-U5-RelogE2E** を追加
+
+**完了判定**: ローカルで `bash tests/e2e/tachibana_relogin_after_cancel.sh` 緑
+
+---
+
+## 4. リスクと緩和
+
+| リスク | 緩和 |
+|--------|------|
+| Step A の Subscription 化で既存の reconnect / VenueReady 待ちが回帰 | 既存 `process_venue_ready_gate.rs` / `process_creds_refresh_listener_singleton.rs` が緑のままを各 commit で確認 |
+| iced の `Task::perform` クロージャ内で `Arc<EngineConnection>` を `move` するときの所有権パターンが煩雑 | `fn send_engine_command(conn: Arc<EngineConnection>, cmd: Command) -> Task<Message>` ヘルパーに集約 |
+| sidebar UI 変更で既存 venue リスト描画が崩れる | Step D の前に既存 sidebar スクリーンショットを取り、変更後と目視比較 |
+| HTTP API 経由の cancel 注入経路が未整備 | tkinter helper の `--headless` モード stdin EOF 経路（既存 `_read_stdin_payload` 仕様）を流用、E2E shell から `coproc` で stdin close |
+| iced 逸脱解消で `_engine_rt` の所有権寿命が iced daemon 終了後まで必要 | 現状の `let _engine_rt: Option<tokio::runtime::Runtime>` を `iced::daemon().run()` の後まで生かす構造を維持（main() スコープに置きっぱなし） |
+
+---
+
+## 5. 受け入れ基準（PR マージ前）
+
+各行末に対応する CI ジョブ名を併記。
+
+1. ✅ `cargo check --workspace` — `.github/workflows/rust.yml::ci-test`
+2. ✅ `cargo clippy --workspace --tests -- -D warnings` — `.github/workflows/rust.yml::ci-test`
+3. ✅ `cargo fmt --check` — `.github/workflows/rust.yml::ci-test`
+4. ✅ `cargo test --workspace`（新規テスト含む） — `.github/workflows/rust.yml::ci-test`
+5. ✅ `uv run pytest python/tests/` — `.github/workflows/rust.yml::ci-test`
+6. ✅ `bash tests/e2e/smoke.sh`（既存回帰なし） — `.github/workflows/e2e.yml`
+7. ✅ `bash tests/e2e/tachibana_relogin_after_cancel.sh`（新規） — `.github/workflows/e2e.yml::tachibana-relogin-after-cancel`（nightly + PR ラベル `e2e`、`OBSERVE_S=60`）
+8. ✅ `cargo test -p flowsurface-data --tests -- --test-threads=4 keyring_roundtrip` を **5 回連続緑**（Step B H6 完了判定） — `.github/workflows/rust.yml::ci-test`
+9. ✅ 構造ガード `tools/iced_purity_grep.sh` 緑 — `.github/workflows/rust.yml::iced-purity-lint`
+10. ✅ 手動 smoke チェックリスト（ポジ + ネガ系）:
+    - (a) **ポジ**: bootstrap util なしで sidebar ボタン → ログイン → 銘柄一覧表示
+    - (b) **ネガ**: cancel → バナー Cancelled 表示
+    - (c) **ネガ**: `VenueError{action:Relogin}` 発生時に再ログインボタン表示
+    - (d) **ネガ**: ログイン中の二重押下が無反応
+11. ✅ `/review-fix-loop` 1 周以上で MEDIUM 以上の指摘ゼロ
+
+---
+
+## 6. 着手順序のロック
+
+**Step A → B → C → D → E → F の順番は変更不可**。理由:
+
+- A 先行: 後続ステップが Subscription/Task ベースの新 API を前提に書かれる
+- B は A の途中 commit に挟んでも独立だが、レビュー差分の見やすさのため A 完了後にまとめる
+- C は D の前提（ゲート無しに sidebar ボタンを足すと押す前に metadata fetch が空振る）
+- D は E の前提（バナーの「再ログイン」ボタンが `RequestTachibanaLogin(Trigger::Manual)` を emit するため）
+- F は最後（全 UI 経路が動いていないと shell が driveable にならない）
+
+---
+
+## 7. 実装着手チェックリスト（次の作業セッション開始時）
+
+- [ ] 本計画書をユーザに提示し承認を得る
+- [ ] Step A 着手前に `src/main.rs` の `update()` 関数本体と `subscription()` 関数本体（grep で対象箇所再特定）を完全に読む
+- [ ] Step C 着手前に `src/screen/dashboard/tickers_table.rs::fetch_metadata_task` と `Message::ToggleExchangeFilter` の流れを完全に読む
+- [ ] Step D 着手前に `tickers_table.rs::exchange_filter_btn` の venue 行レイアウト（icon/text 配置パターン）を読み、新規ボタン追加で崩れない場所を特定
+- [ ] Step E 着手前に `src/notify.rs` および `src/widget/toast.rs` の既存通知レンダラを読み、バナー実装の置き場所（`src/widget/venue_banner.rs` 候補）を決定
+- [ ] Step F 着手前に `.claude/skills/e2e-testing/SKILL.md`（あれば）を読み HTTP API 規約を確認
