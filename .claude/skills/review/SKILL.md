@@ -184,6 +184,16 @@ rg -n "決定|確定|正本|唯一|禁止|必須|受け入れ|TODO|Phase" docs/p
 - JST 日跨ぎや session 期限切れ時の挙動があるか
 - 長期稼働で単調増加する状態がないか
 
+特に event / subscription / watch / broadcast を使う設計では、
+**UI が購読を張る前に出たイベントを取り逃しても成立するか** を必ず確認する。
+
+追加チェック:
+
+- startup handshake 中に出た `VenueReady` / `VenueError` / `LoginStarted` を UI が後から購読しても整合が取れるか
+- 「接続確立後に subscribe」設計なら、初期状態の snapshot / replay / sticky state が別経路で保証されているか
+- reconnect 後の再初期化が、`main` の初回起動経路と同じ保証を持つか
+- `broadcast::Receiver` / watch / callback が「過去イベント非 replay」であることを前提に穴がないか
+
 ### 9. 複数入口の網羅
 
 UI ガードだけでは止まらない。
@@ -198,6 +208,16 @@ UI ガードだけでは止まらない。
 
 各入口に対して、必要なら **backend 側で fail-safe + テスト pin** があるかを見る。
 
+ここで重要なのは、**「主経路では gated」だけで安心しないこと**。
+1 つでも別入口が素通りなら、その gate は設計上未完成。
+
+追加チェック:
+
+- 初回トグルだけでなく、起動時の保存 state 復元でも同じ gate が効くか
+- reconnect 後の metadata refetch / resubscribe / auto replay でも同じ gate が効くか
+- helper 関数や `new()` / `update_handles()` のような初期化経路が gate を迂回していないか
+- UI 側の防御だけでなく backend / fetch 起点側にも fail-safe があるか
+
 ## 典型的な finding パターン
 
 - `矛盾`: 同じ文書内、または関連文書間で方針が食い違う
@@ -206,6 +226,8 @@ UI ガードだけでは止まらない。
 - `順序破綻`: 前提未確定のまま後続タスクが始められる
 - `テスト不足`: positive case しかなく silent failure を防げない
 - `責務曖昧`: Rust / Python / UI / backend のどこが正本か分からない
+- `入口漏れ`: UI の主経路だけ正しく、restore / reconnect / bootstrap など別入口が未考慮
+- `見かけ上の完了`: テストや E2E が scaffold / skip / TODO のままで、受け入れ条件を実際には満たしていない
 
 ## 出力形式
 
@@ -231,6 +253,8 @@ UI ガードだけでは止まらない。
 - 「完了根拠」「レビュー反映」ブロックは信用しすぎず、本文と照合する
 - 1 件見つけたら、その用語の全出現箇所を追う
 - 文体改善より先に、実装事故に直結する点を出す
+- `exit 77` / `skip` / `scaffold` / `TODO(http-api)` / `placeholder` のような語があれば、受け入れ条件達成済みと見なさない
+- 新しい gate / FSM / banner / recovery を見たら、「初回表示」「保存 state 復元」「再接続後」の 3 経路を必ず別々に確認する
 
 ## 修正提案を書くときの自己チェック
 

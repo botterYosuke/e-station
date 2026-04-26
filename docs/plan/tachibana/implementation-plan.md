@@ -14,7 +14,7 @@
 - [x] `git grep -nE "MarketKind::(Spot|LinearPerps|InversePerps)"` で網羅 match の箇所を全部リストアップ（`exchange` / `engine-client` / `data` / `src` 配下）
 - [x] `Ticker::new` (`exchange/src/lib.rs::Ticker::new`) の `assert!(ticker.is_ascii())` を確認し、`130A0` 等が通ることをユニットテストで実機確認
 - [x] **既存 `Timeframe` の serde 形式は `"D1"`（変種名）であることを確認済み**（F-m2、F-H1）。`exchange/src/lib.rs::Timeframe` は `#[derive(Serialize, Deserialize)]` のみで `#[serde(rename = ...)]` 無し。`Display` は `"1d"` を返すが serde は別系統。**T0.2 で `#[serde(rename = "1d")]` 等の rename 属性を全変種に追加する必要がある**（既存暗号資産 venue 経路で IPC を通っている場合は変換層の有無を grep で先に棚卸し）
-- [x] **`qty_in_quote_value` 呼出箇所の棚卸し**（F-H4、H1 修正）: [exchange/src/adapter.rs:53](../../../exchange/src/adapter.rs#L53) が正本。呼出は **9 箇所**（行番号付き全数表は [inventory-T0.md §4](./inventory-T0.md#4-qty_in_quote_value-呼出箇所f-h4)）。`MarketKind::Stock => price * qty` を enum 内部分岐で強制すれば呼出側コード変更不要
+- [x] **`qty_in_quote_value` 呼出箇所の棚卸し**（F-H4、H1 修正）: [`exchange/src/adapter.rs::qty_in_quote_value`](../../../exchange/src/adapter.rs) が正本。呼出は **9 箇所**（path::symbol 全数表は [inventory-T0.md §4](./inventory-T0.md#4-qty_in_quote_value-呼出箇所f-h4)）。`MarketKind::Stock => price * qty` を enum 内部分岐で強制すれば呼出側コード変更不要
 - [x] **`EngineEvent::Disconnected` の shape は確認済み**（F-H2）: `engine-client/src/dto.rs::EngineEvent::Disconnected` で既に `{ venue, ticker, stream, market, reason: Option<String> }`。**DTO 追加は不要**、`reason: "market_closed"` は文字列規約として `events.json` schema に記載するだけで足りる
 - [x] `ProcessManager` ([engine-client/src/process.rs](../../../engine-client/src/process.rs)) の proxy 保持パターンを読み、credentials 保持の **mutex / Arc 戦略を T0.2 のうちに確定**（F-m4）。proxy が `Arc<Mutex<Option<Proxy>>>` ならそれに揃える、`watch::channel` ならそれに揃える、と決め切る
 - [x] `src/screen/` の現在構造を確認し、立花ログイン UI の追加先（既存 `login.rs` 拡張 or 新ファイル）を T0 のうちに暫定確定（F-m3）
@@ -46,7 +46,7 @@
 - [x] **既存永続 state の serde 互換性確認**（F13/F-M4）— [exchange/tests/ticker_info_state_migration.rs](../../../exchange/tests/ticker_info_state_migration.rs) で旧 `TickerInfo` payload (lot_size / quote_currency 欠如) が `serde(default)` 経由で読めることを検証。Hash 影響範囲は inventory-T0.md §1.2 にて「永続化されているのは `data/src/layout/pane.rs` の `ticker_info` フィールドのみ、`HashMap` キーは in-memory のみ」と確定済み: dashboard 設定ファイル / `state.rs` に `TickerInfo` が保存されているか `git grep` で特定。`#[serde(default)]` で missing field が読めることに加え、**`Hash` 値変化により既存 `HashMap<TickerInfo, _>` のキー突合が壊れないか**を実機テスト。受け入れ条件に「旧 `state.json` を起動 → pane 復元 → ticker 表示」を追加
 - [x] **日本語銘柄名の運搬経路を確定**: `EngineEvent::TickerInfo.tickers[*]` は `Vec<serde_json::Value>` のまま（`engine-client/src/dto.rs::EngineEvent::TickerInfo`）であり、Python 側が `display_name_ja` キーを各 ticker dict に詰めれば追加 schema 不要で運搬可能。Rust UI 側は将来 `HashMap<Ticker, TickerDisplayMeta>` で別管理する方針を inventory に確定（実 UI 配線は T4 で実装）
 - [x] ✅ **類似プロジェクト `C:\Users\sasai\Documents\flowsurface` の先行実装を参考にする（M9 決定）** — **本タスクは設計確定が deliverable**であり、実装配線は T4 に委譲する規約として T0.2 で閉じる:
-  - `flowsurface/exchange/src/adapter/tachibana.rs:625-684` の `MasterRecord` 型を踏襲し、Python 側 `tachibana_master.py` のレコード型に **`sIssueName` / `sIssueNameRyaku` / `sIssueNameKana` / `sIssueNameEizi` の 4 種**を全て保持する（Phase 1 で全部使わなくても、後続フェーズの検索 UI で活きる）
+  - `flowsurface/exchange/src/adapter/tachibana.rs::MasterRecord` 型を踏襲し、Python 側 `tachibana_master.py` のレコード型に **`sIssueName` / `sIssueNameRyaku` / `sIssueNameKana` / `sIssueNameEizi` の 4 種**を全て保持する（Phase 1 で全部使わなくても、後続フェーズの検索 UI で活きる）
   - `display_symbol` には **`sIssueNameEizi`（英語名 ASCII）を採用**。28 文字を超える場合は切詰め、空または非 ASCII なら `None` フォールバックして `Ticker::new_with_display` にデフォルト動作させる（`Ticker` の ASCII 制約を回避）
   - `display_name_ja` には `sIssueName` を入れる。flowsurface 側はまだ `display_name_ja` 経路を持たない（英語名の display_symbol で済ませている）ため、本計画はそこから一歩進む。`Ticker` には英語名・別管理の `TickerDisplayMeta` には日本語名、というルーティング
   - Rust 側 UI ラベルのフォールバック順序: `display_name_ja` → `display_symbol`（英語名）→ `ticker.symbol`（4 桁コード）。3 段フォールバックは flowsurface 側にも明示的にはないので本計画で新規規約として固定
@@ -245,7 +245,7 @@
   - **未実施**: 実 demo 環境ログインは「電話認証済みアカウント」前提のため CI / ローカル自動化からは切り離して手動実施。T7 で `pytest -m demo_tachibana` の CI 統合方式（A/B/C）を確定するタイミングで初回実機ログインを行う。
 
 - [x] ✅ **demo CI レーン方式の早期決定（MEDIUM、ユーザー指摘ラウンド 7）**: 案 **(B) manual lane only** を T2 暫定確定として採用する:
-  - 理由: [open-questions.md Q21](./open-questions.md#L25) の demo 運用時間が未確定の段階で PR チェック（ブロッキング / non-blocking 問わず）に組み込むと、閉局帯ヒットで開発者が偽陽性失敗を踏む。`workflow_dispatch` のみ許可なら閉局帯リスクが起動者に閉じる。
+  - 理由: [open-questions.md Q21](./open-questions.md#q21--demo-環境の運用時間) の demo 運用時間が未確定の段階で PR チェック（ブロッキング / non-blocking 問わず）に組み込むと、閉局帯ヒットで開発者が偽陽性失敗を踏む。`workflow_dispatch` のみ許可なら閉局帯リスクが起動者に閉じる。
   - 実装場所: T7 で `.github/workflows/tachibana-demo.yml`（仮）を新設し、`on: workflow_dispatch:` のみで `uv run pytest -m demo_tachibana -v` を走らせる。PR / push トリガは載せない。
   - 再評価条件: Q21 の運用時間が T2 実機ログインで確定したら案 (A) への移行を再検討する（**T2 終了時点では実機ログイン未実施のため案 (B) で固定**）。
   - 旧 3 案候補（A: non-blocking PR job / B: manual lane / C: CI 不採用）の比較は本タスク完了とともに本文から外す。
@@ -285,7 +285,7 @@
 > - 上記は **バックエンド配線のみの完了**。 Rust UI の `RequestVenueLogin` 発火導線（sidebar ボタン）と Banner 拡張は未着手で **次イテレーション扱い**。本セクション末尾の「繰越 / 次イテレーション」一覧で明示している。
 >
 > **繰越 / 次イテレーション**:
-> - **Rust UI sidebar ボタン + Banner 拡張 (F-M1a / H3 / F-Login1)**: 本フェーズ完成のためには `src/screen/dashboard/sidebar.rs` に Tachibana 行のログインアイコン追加、`Banner` レンダラに `VenueLoginStarted` / `VenueLoginCancelled` 状態描画を追加する必要があるが、iced widget 構造の調整範囲が広いため別 PR で扱う。env fast path 実機テストは UI ボタン無しでも完了する。
+> - **Rust UI sidebar ボタン + Banner 拡張 (F-M1a / H3 / F-Login1)**: 本フェーズ完成のためには `tickers_table::exchange_filter_btn` 経路に着地（T3.5 Step D）し、Tachibana 行のログインアイコン追加、`Banner` レンダラに `VenueLoginStarted` / `VenueLoginCancelled` 状態描画を追加する必要があるが、iced widget 構造の調整範囲が広いため別 PR で扱う。env fast path 実機テストは UI ボタン無しでも完了する。
 > - **MEDIUM-D3 E2E shell**: `tests/e2e/tachibana_relogin_after_cancel.sh` は HTTP API 経由のキャンセル → 再ログイン経路を要求。Rust UI 側の `RequestVenueLogin` 発火経路（sidebar ボタン）が無い現状ではドライブできないため、UI 拡張と同 PR で実装する。
 > - **H5 (Bundled to_str fallback)**: `EngineCommand::Bundled(p).program()` が `to_str().unwrap_or("flowsurface-engine")` で fallback している件。Windows 日本語 user パス等で潜在的な silent skip。**UI 拡張 T3.5 と同 PR** で `Path` をそのまま受ける版に直す。
 > - **H6 (test mock 所有権)**: `data/tests/tachibana_keyring_roundtrip.rs` の SharedBuilder/SharedStore がプロセス共有 `OnceLock<Mutex<HashMap>>` で複数テスト間に状態漏洩する件。`#[serial_test::serial]` は導入したが、テスト ID + 各テスト先頭で `delete_credential().ok()` する pattern を T3.5 で整理する。
@@ -349,7 +349,7 @@
 > Group A — Critical:
 > - ✅ **CRITICAL-1 (`.env` 整理 + `.env.example` 新設)**: `.env` を `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO` の 3 行のみに整形（legacy `DEV_USER_ID` / `DEV_PASSWORD` / `DEV_IS_DEMO` / `DEV_SECOND_PASSWORD` / 裸 `PASSWORD=` / `DEMO=` を全削除）。`.env` は既に `.gitignore` 対象 + `git ls-files .env` 結果空のため history 除去は不要。`.env.example` を新設し canonical な 3 変数のテンプレートのみ記載。**ラウンド 7 追記**: 残置していた legacy の `.env.sample` を削除し、テンプレートは `.env.example` に一本化（HIGH-3）。
 > - ✅ **CRITICAL-2 (`cargo fmt --check` 緑化)**: `cargo fmt --all` 実行、`cargo fmt --check` 緑。
-> - ✅ **CRITICAL-3 (`update()` 内 `try_send_now` のコメント明記)**: `src/main.rs:578` 付近 `Message::EngineRestarting(false)` アームに「H7/H8/H9 と同根 / Phase O1 で iced Subscription 化」コメント追記。本件は構造変更が広範のため Phase O1 へ繰越（実装変更なし）。
+> - ✅ **CRITICAL-3 (`update()` 内 `try_send_now` のコメント明記)**: `src/main.rs::update::Message::EngineRestarting` アームに「H7/H8/H9 と同根 / Phase O1 で iced Subscription 化」コメント追記。本件は構造変更が広範のため Phase O1 へ繰越（実装変更なし）。
 >
 > Group B — High (Rust):
 > - ✅ **HIGH-1 (`classify_venue_error` テーブルに `session_restore_failed` / `unsupported_venue` 追加)**: `engine-client/src/error.rs` に 2 コードを追加（前者 `(Error, Relogin)`、後者 `(Error, Hidden)`）。新規テスト `session_restore_failed_is_error_relogin` / `unsupported_venue_is_error_hidden` で個別 pin。
@@ -448,7 +448,7 @@
 > 並列レビュー集約の MEDIUM 5 件 + LOW 2 件を破壊的変更込みで TDD 着地。
 >
 > Group A — MEDIUM (Rust):
-> - ✅ **M-R8-1 (`From<TachibanaUserId> for String` 残置除去)**: `data/src/config/tachibana.rs:60-67` の旧 impl を削除。コメント側で「削除済み」と謳っていながら impl が残置していた状態を解消。callsite grep で利用ゼロを確認、`into_string()` / `as_str().to_string()` が代替経路。pin: 既存 keyring round-trip 9 件が緑のまま
+> - ✅ **M-R8-1 (`From<TachibanaUserId> for String` 残置除去)**: `data/src/config/tachibana.rs::impl From<TachibanaUserId> for String` の旧 impl を削除。コメント側で「削除済み」と謳っていながら impl が残置していた状態を解消。callsite grep で利用ゼロを確認、`into_string()` / `as_str().to_string()` が代替経路。pin: 既存 keyring round-trip 9 件が緑のまま
 > - ✅ **M-R8-2 (continuation listener の二重 spawn 抑止)**: `engine-client/src/process.rs` の `ProcessManager` に `creds_refresh_listener_handle: Arc<Mutex<Option<JoinHandle<()>>>>` フィールドを追加。`apply_after_handshake_with_timeout` 内 listener spawn 直前に既存 handle を `abort()` + `await` してから新 handle を `*slot = Some(handle)` に格納。再起動ループ中に旧 listener と新 listener が同じ in-memory store / hook を二重発火する窓を構造的に排除。pin: `engine-client/tests/process_creds_refresh_listener_singleton.rs::creds_refresh_listener_does_not_double_spawn_across_restarts`（3 サイクル接続→1 refresh で hook 発火回数が厳密に 1）
 > - ✅ **M-R8-3 (multi-pending + cancel without rid のテスト pin)**: `engine-client/src/process.rs` の `VenueLoginCancelled` arm に「Phase 2 で Python emitter に request_id 必須化が必要」コメントを追記。本ラウンドは挙動変更しない（軽量 pin）。pin: `engine-client/tests/process_venue_login_cancelled.rs::multi_pending_cancel_without_rid_currently_falls_through_to_timeout`（300ms timeout 到達を assert、Phase 2 で disambiguation 実装後に flip）
 > - ✅ **M-R8-4 (`session_restore_failed` のみ到着時の Subscribe スキップ確認)**: Python 側は HIGH-1 ラウンド 7 で実装済（filter + `_tachibana_session = None`）。Rust 側 `apply_after_handshake` の `VenueError` arm が `failed_venues` 登録 → Subscribe スキップを正しく行うことを統合テストで pin。pin: `engine-client/tests/process_venue_error_session_restore_failed.rs::session_restore_failed_only_marks_venue_failed_and_skips_subscribe`（VenueReady / VenueCredentialsRefreshed を出さず VenueError のみ送る mock → Subscribe フレーム欠如 + 2 秒以下で wait 解除を assert）
@@ -478,13 +478,13 @@
   - `TachibanaSession { url_request, url_master, url_price, url_event, url_event_ws, expires_at_ms, zyoutoeki_kazei_c }`
   - keyring 読み書き
 - [x] ✅ **keyring read/write roundtrip + Zeroize テスト（MEDIUM-D3-3）**: `data/tests/tachibana_keyring_roundtrip.rs::test_credentials_roundtrip_with_zeroize_and_masked_debug` を新設。(a) `TachibanaCredentials` を keyring に書込→読出して値が完全一致すること、(b) `format!("{:?}", creds)` の Debug 出力に `password` / session token の平文文字列が含まれず `"***"` 等のマスク表現になっていること、(c) `TachibanaCredentials` が Drop されるとき `Zeroizing<String>` / `SecretString` 経由で内部メモリがゼロ化される経路（`zeroize::Zeroize` impl が呼ばれること）を assert。テストは keyring 実体への副作用を避けるため `keyring::set_default_credential_builder(mock::default_credential_builder())` でモック差替え
-- [~] **(deferred to T3.5)** **Rust UI 側**: 立花のログイン画面コードは**追加しない**。`Venue::Tachibana` 関連で「ログインダイアログを別ウィンドウで表示中」「ログインがキャンセルされました」を表示する汎用ステータスバナー（既存 `VenueError.message` レンダラの拡張）だけ実装する
+- [x] (T3.5 Step C-F で着地, → implementation-plan-T3.5.md §3) **Rust UI 側**: 立花のログイン画面コードは**追加しない**。`Venue::Tachibana` 関連で「ログインダイアログを別ウィンドウで表示中」「ログインがキャンセルされました」を表示する汎用ステータスバナー（既存 `VenueError.message` レンダラの拡張）だけ実装する
 - [x] ✅ **Python 側 `tachibana_login_dialog.py`** を新設（F-Login1、architecture.md §7.4）。`python -m engine.exchanges.tachibana_login_dialog` で起動できる単独実行可能スクリプト。tkinter で `Toplevel` モーダルを構築、stdin から JSON 起動引数を読み、stdout に結果 JSON を返して exit。立花固有のラベル・順序・警告ボックス（電話認証・デモ環境）はこのファイルに直書き
 - [x] ✅ **Python 側 `tachibana_login_flow.py`** を新設。データエンジン側で `asyncio.create_subprocess_exec(sys.executable, "-m", "engine.exchanges.tachibana_login_dialog", ...)` で tkinter ヘルパーを spawn し、stdout を JSON parse、`tachibana_auth.login(...)` を実行、結果に応じて `VenueReady` / `VenueError` / `VenueLoginCancelled` を IPC 送信
 - [x] ✅ Python 側の発火タイミングを実装: (a) `RequestVenueLogin` 受信、(b) `SetVenueCredentials` 認証失敗、(c) keyring session 失効検知（起動時のみ） — いずれも `tachibana_login_flow` を呼ぶ。失敗 3 回で `VenueError{code:"login_failed"}` で諦める
-- [~] **(deferred to T3.5)** Rust UI: 立花機能を最初に開く操作（`Venue::Tachibana` ticker selector を開く / 立花 pane 追加）で `Command::RequestVenueLogin{ venue:"tachibana" }` を発火
-- [~] **(deferred to T3.5)** **キャンセル後の再試行導線（F-M1a、H3 修正）**: `VenueLoginCancelled` 受信後の Rust UI 状態は「立花未ログイン」固定。**ボタン配置は `VenueReady` 前でも到達可能な経路に置く**こと（`VenueReady` 前は ListTickers が空 = 立花 ticker selector / pane が空 or 非表示の可能性があり、そこにボタンを置くとデッドロックする）。具体的には:
-  - **第 1 候補**: サイドバー（[src/screen/dashboard/sidebar.rs](../../../src/screen/dashboard/sidebar.rs)）の venue リスト項目「Tachibana」のホバー時アクションまたは項目右端のアイコン。Venue リスト自体は `VenueReady` 状態に依らず常時描画されている前提（`Venue::ALL` ベース）
+- [x] (T3.5 Step C-F で着地, → implementation-plan-T3.5.md §3) Rust UI: 立花機能を最初に開く操作（`Venue::Tachibana` ticker selector を開く / 立花 pane 追加）で `Command::RequestVenueLogin{ venue:"tachibana" }` を発火
+- [x] (T3.5 Step C-F で着地, → implementation-plan-T3.5.md §3) **キャンセル後の再試行導線（F-M1a、H3 修正）**: `VenueLoginCancelled` 受信後の Rust UI 状態は「立花未ログイン」固定。**ボタン配置は `VenueReady` 前でも到達可能な経路に置く**こと（`VenueReady` 前は ListTickers が空 = 立花 ticker selector / pane が空 or 非表示の可能性があり、そこにボタンを置くとデッドロックする）。具体的には:
+  - **第 1 候補**: `tickers_table::exchange_filter_btn` 経路に着地（T3.5 Step D U1 で実装済、`tickers_table.rs::sidebar_login_button_emits_request_venue_login` で pin）。venue フィルタボタン群「Tachibana」項目の inline 「ログイン」ボタンとして配置。Venue リスト自体は `VenueReady` 状態に依らず常時描画されている前提（`Venue::ALL` ベース）
   - **第 2 候補（フォールバック）**: メインウィンドウ上部のステータスバナー領域に「立花未ログイン」表示中のみ「ログイン」ボタンを表示
   - **禁止**: 「立花 ticker selector を開かないと押せない」「立花 pane を作らないと押せない」配置（VenueReady ゲートと矛盾）
   - 押下で `RequestVenueLogin` を発火。1 箇所のみ（複数経路で発火させない）
@@ -499,9 +499,9 @@
 - [x] ✅ [engine-client/src/process.rs](../../../engine-client/src/process.rs) に **Tachibana credentials の保持と再送**を追加し、managed mode の再起動時に `SetProxy -> SetVenueCredentials -> VenueReady -> resubscribe` を一貫して実行する
 - [x] ✅ [src/main.rs](../../../src/main.rs) 起動シーケンスに「keyring 読込 → `ProcessManager` / 接続オブジェクトへ creds 注入 → SetVenueCredentials → VenueReady 待ち」を追加
 - [x] ✅ `VenueCredentialsRefreshed` を受けて keyring session を更新する処理を Rust 側に実装（起動時再ログイン成功時のみ発火）
-- [~] **(deferred to T3.5)** 立花 venue 用の metadata / subscribe 要求を `VenueReady` まで抑止する UI ゲートを追加（sidebar 初期 metadata fetch を含む）
+- [x] (T3.5 Step C-F で着地, → implementation-plan-T3.5.md §3) 立花 venue 用の metadata / subscribe 要求を `VenueReady` まで抑止する UI ゲートを追加（VenueState FSM による venue gating、`tickers_table::exchange_filter_btn` 経路から initial metadata fetch を抑止）
 - [x] ✅ **Python 側 SecretStr の取扱い規約（MEDIUM-C6）**: Python 側 `SecretStr` は Drop ゼロ化を保証しない（言語制約、CPython は文字列を immutable / interning するため）。代わりに (a) tkinter ヘルパー subprocess の寿命を最小化（spawn → 認証 → 即 exit）、(b) `tachibana.py` 内で creds 文字列を変数経由で長時間保持しない（`TachibanaSession` は仮想 URL のみを保持し、`user_id` / `password` は authenticate 関数のローカル変数に閉じ込めて関数 return で破棄）、を実装規約として明文化する
-- [~] **(deferred to T3.5)** **VenueLoginCancelled 後の手動再ログイン E2E（MEDIUM-D3）**: `tests/e2e/tachibana_relogin_after_cancel.sh` を新設。HTTP API 経由で「(1) 立花 venue 初回オープン → `VenueLoginStarted` 観測 → ヘルパーへ cancel コマンド注入 → `VenueLoginCancelled` 観測、(2) 再ログインボタン押下相当の API → `VenueLoginStarted` がちょうど 1 件追加され、`VenueLoginCancelled` 直後に重複発火していないこと」を `flowsurface-current.log` の grep で検証
+- [x] (T3.5 Step C-F で着地, → implementation-plan-T3.5.md §3) **VenueLoginCancelled 後の手動再ログイン E2E（MEDIUM-D3）**: `tests/e2e/tachibana_relogin_after_cancel.sh` を新設。HTTP API 経由で「(1) 立花 venue 初回オープン → `VenueLoginStarted` 観測 → ヘルパーへ cancel コマンド注入 → `VenueLoginCancelled` 観測、(2) 再ログインボタン押下相当の API → `VenueLoginStarted` がちょうど 1 件追加され、`VenueLoginCancelled` 直後に重複発火していないこと」を `flowsurface-current.log` の grep で検証（U5 E2E shell スケルトンは Step F で skeleton を着地、HTTP API 着地後に skip 解除予定）
 - [x] ✅ **受け入れ**: debug ビルドで `.env` 設定 → 起動 → ログ「Tachibana session validated successfully」確認、再起動で keyring 復元動作。**実測 (2026-04-25)**: `uv run python scripts/smoke_tachibana_login.py` で `.env` の DEV_USER_ID / DEV_PASSWORD / DEV_IS_DEMO=true から `run_login` → `validate_session_on_startup` までを通し、stderr に「`Tachibana session validated successfully`」を確認。**Rust 側 GUI バイナリ起動による keyring 復元 → SetVenueCredentials → VenueReady E2E (2026-04-26 実測完了)**: 一時 bootstrap util（`RequestVenueLogin` を 1 回送出 → `VenueCredentialsRefreshed` hook で `data::config::tachibana::save_refreshed_credentials` 経路を通じ Windows Credential Manager に `LegacyGeneric:target=user_id.flowsurface.tachibana` を作成。検証後に削除）で keyring を populate した後 `target/debug/flowsurface.exe` を起動し、`Loaded tachibana session from keyring`（`src/main.rs:231`）→ `SetVenueCredentials`（`ProcessManager::apply_after_handshake` 内、暗黙）→ Python `Tachibana session validated successfully`（`server.py:1000`、INFO 一時可視化のため `logging.basicConfig` を `__main__.py` に挿入し検証後 revert）→ `Python data engine ready`（`src/main.rs:309` ＝ `apply_after_handshake` 完走 ＝ `VenueReady` 受信）までを **約 1.9 秒で完走**。`VenueError` / 再ログイン経路 / VenueReady タイムアウト警告は不発。なお T3.5 の sidebar 「立花ログイン」ボタンが未実装のため keyring を最初に populate する production 経路は依然として無く、ボタン実装と同時に bootstrap util を不要にする予定。
   - **`dev_tachibana_login_allowed` 統合テスト（HIGH-D1）**: `python/tests/test_tachibana_dev_env_guard.py`（`dev_tachibana_login_allowed=false` のとき `DEV_TACHIBANA_*` env が全て揃っていてもログイン fast path が起動せず tkinter ヘルパー spawn 経路に落ちることを `tachibana_login_flow` 単体で検証）と `engine-client/tests/dev_login_flag_release.rs`（release プロファイル相当のビルドフラグで `ProcessManager` の stdin payload に `dev_tachibana_login_allowed: false` が含まれることを assert）の 2 ファイルを実装し、`cargo test` / `pytest` 両方で実行
 
@@ -552,6 +552,7 @@
   - **テスト**: `python/tests/test_tachibana_master_invalidation.py` に 3 ケース (`test_master_reloaded_when_is_demo_flips` / `test_master_reloaded_after_jst_rollover_in_running_process` (`freezegun`) / `test_master_event_is_fresh_per_worker_init`) を追加
 - [ ] **非 `"1d"` kline 要求の Python 側明示拒否（HIGH-U-11）**: `data-mapping.md §6 / §7` は `FetchKlines{timeframe ∈ {"1m","5m","1h",...}}` を Python が `Error{code:"not_implemented"}` で返す前提だが、capabilities 適用前の保存済み pane 復元や既存導線から非 `"1d"` 要求が flight する可能性があるため、Rust UI 非活性化（L529）だけでは保護不十分。Python `tachibana.py::TachibanaWorker.fetch_klines` 入口で **wire 値 `timeframe != "1d"`** のとき即 `VenueError{code:"not_implemented", message:"tachibana supports 1d only in Phase 1"}` を返す実装に加え、テスト `python/tests/test_tachibana_fetch_klines_reject.py::test_fetch_klines_rejects_non_d1_timeframes`（`pytest.mark.parametrize` で `"1m" / "5m" / "15m" / "1h" / "4h"` の 5 ケース）を pin。判定対象は **wire 文字列**（T0.2 L67 で `#[serde(rename)]` 確定）であり、Rust enum 内部名 `D1` で比較しない。Rust 側 `engine-client/tests/tachibana_kline_capability_gate.rs::test_restored_pane_with_non_d1_timeframe_does_not_crash` で復元時に `not_implemented` を受けても UI が落ちないことも assert
 - [ ] **受け入れ**: `7203` の日足 1 年分が表示される、銘柄セレクタに数千件のリストが出る、`130A0` 等英字混在 ticker もリストに含まれる、日本語銘柄名が別メタデータ経路で検索または表示に使える、非 `1d` 要求は Python が `not_implemented` で明示拒否し UI が復元時に落ちない、`is_demo` 切替・JST 日跨ぎでマスタが再ロードされる
+- [ ] **T3.5 不変条件 pin の非退行ガード（T35-* 全 13 件）**: T3.5 で確立した不変条件 `T35-H5-PathFidelity` / `T35-H6-KeyringSlotIsolation` / `T35-H7-NoStaticInUpdate` / `T35-H7-DebugRedaction` / `T35-H8-NoBlockOnInUpdate` / `T35-H9-SingleRecoveryPath` / `T35-U1-LoginButton` / `T35-U2-Banner` / `T35-U2-BannerRedaction` / `T35-U3-AutoRequestLogin` / `T35-U4-VenueReadyGate` / `T35-U4-FSM` / `T35-U5-RelogE2E` の **全 13 件 pin テスト**が T4 着地時点で緑であること。検証コマンド: `cargo test --workspace && tools/iced_purity_grep.sh && bash tests/e2e/tachibana_relogin_after_cancel.sh`（U5 は HTTP API 未着地のため exit 77 skip 許容、`src/replay_api.rs` 着地後の skip 解除は T7 タスクで対応）。T4 で H7/H8/H9 が静かに退行する経路を構造的にブロックする受け入れ条件として機能する
 
 ## フェーズ T5: trade / depth ストリーム（3〜4 日）
 
@@ -614,7 +615,7 @@
 - [ ] README / SKILL.md に「立花 venue 利用の前提（電話認証済み口座が必要）」追記
 - [ ] release ビルドで env 自動ログインが完全に除外されていること（**`dev_tachibana_login_allowed: false` が Rust から送られ、Python 側 `tachibana_login_flow` が `os.getenv("DEV_TACHIBANA_*")` を読まないことを統合テストで確認**。`#[cfg(debug_assertions)]` でのコンパイル除外は採用しない — T3 で実装した runtime ガード方式を前提とする）
 - [ ] 本番 URL 設定の隠しフラグ（`TACHIBANA_ALLOW_PROD=1`）を実装、デフォルトは demo 強制
-- [ ] CI に `pytest -m demo_tachibana` を **T2 で確定した方式（A/B/C）に従って統合**（毎 PR では走らせない原則は維持）。T2 で案 (B)（manual lane only）を採ったなら `workflow_dispatch` のみ実装、案 (C) なら CI 統合自体を行わない。スケジュール起動する場合は demo の閉局帯を避ける。**ゲート（H5 修正）**: スケジュール起動の有効化は [open-questions.md Q21](./open-questions.md#L25) の運用時間が T2 実機確認で確定してから。確定前は手動トリガのみ許可
+- [ ] CI に `pytest -m demo_tachibana` を **T2 で確定した方式（A/B/C）に従って統合**（毎 PR では走らせない原則は維持）。T2 で案 (B)（manual lane only）を採ったなら `workflow_dispatch` のみ実装、案 (C) なら CI 統合自体を行わない。スケジュール起動する場合は demo の閉局帯を避ける。**ゲート（H5 修正）**: スケジュール起動の有効化は [open-questions.md Q21](./open-questions.md#q21--demo-環境の運用時間) の運用時間が T2 実機確認で確定してから。確定前は手動トリガのみ許可
 - [ ] **tkinter スモークテスト（F-M2c）**: CI で `xvfb-run pytest -m tk_smoke` を回す。`tachibana_login_dialog.py` を起動して即座に `{"status":"cancelled"}` を返す経路を `--auto-cancel` フラグで実装し、import エラーや `Toplevel` 構築失敗を CI で検知する。実 GUI のバリデーション挙動は引き続き `pytest -m gui` の手動確認
 - [ ] `tools/secret_scan.sh` 新設: `kabuka.e-shiten` / 仮想 URL ホスト / `sUserId` / `sPassword` / `sSecondPassword` を検出。pre-commit hook と CI ジョブの両方から同一スクリプトを呼ぶ（spec.md §4 受け入れ条件 6 と整合）。**`BASE_URL_PROD` を定義する 1 箇所（例: `python/engine/exchanges/tachibana_url.py`）はファイル単位で allowlist** し、それ以外のリテラル出現を全て fail させる（F11）。allowlist ファイルは冒頭コメントで理由を明示
 - [ ] **Windows 開発環境での pre-commit 整合（F-M5b、LOW-4 修正）**: 本リポジトリの開発主体は Windows であり、git-bash / WSL が常に使える前提は持てない。以下の 2 ファイルを**同時に**新設する:
@@ -639,6 +640,7 @@
   - `tools/tests/test_secret_scan.sh`（bash）: `tools/tests/fixtures/should_fail/*`（仮想 URL ホスト・`sUserId=...` リテラル等を含むダミー）に対して `tools/secret_scan.sh` が exit 1 を返すこと、および `tools/tests/fixtures/should_pass/tachibana_url.py`（`BASE_URL_PROD` を含むが allowlist ファイルとして許可されている想定）に対して exit 0 を返すことを assert
   - `tools/tests/test_secret_scan.ps1`（PowerShell）: 同等のシナリオを `tools/secret_scan.ps1` に対して実行（Windows ネイティブ pre-commit のリグレッション防止）
   - CI（ubuntu-latest）で `tools/tests/test_secret_scan.sh`、Windows ランナーで `tools/tests/test_secret_scan.ps1` を実行
+- [ ] **`src/replay_api.rs` 新設 + U5 E2E skip 解除（pin: T35-U5-RelogE2E）**: T3.5 Step F で着地した `tests/e2e/tachibana_relogin_after_cancel.sh` の skeleton（exit 77 skip 許容）の skip 解除に必要な HTTP API を `src/replay_api.rs` に新設し、`RequestVenueLogin` 発火 / `VenueLoginCancelled` 注入 / status 取得を E2E から駆動可能にする。skeleton の skip ガードを外し本実行（Phase O1 繰越候補）
 
 ## Phase 2 以降（参考、計画外）
 

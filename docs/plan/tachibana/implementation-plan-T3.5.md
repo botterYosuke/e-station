@@ -65,6 +65,30 @@ R1 着地後に追加で発見された 4 指摘 (HIGH 2, MEDIUM 2) を消化。
 - ✅ `cargo fmt --check` 緑
 - ✅ `tools/iced_purity_grep.sh` OK
 
+## レビュー修正ラウンド R3 (2026-04-26)
+
+R2 着地後にイベント順序と外部モード bootstrap の race 2 件 (HIGH 2) が新規発見されたため、追加パッチ。
+
+| ID | 指摘 | 対応 |
+|----|------|------|
+| **HIGH-1 (R3)** | `engine_status_stream` で `EngineConnected → EngineRehello` の順に yield しており、`EngineConnected` ハンドラの `sidebar.update_handles()` が **古い `tachibana_ready=true`** を参照して Tachibana 再フェッチを発火 → U4 ゲートを実質迂回 | yield 順序を **`EngineRehello → EngineConnected`** に入替 (initial / changed 両分岐)。`set_tachibana_ready(false)` が先に flag を倒すため `update_handles` の filter が正しく Tachibana を除外する |
+| **HIGH-2 (R3)** | 外部エンジンモード (`--data-engine-url`) は `ProcessManager` を持たず `venue_ready_state` cache が無い → 初回 `VenueReady` を取りこぼすと UI が永久 Idle | グローバル静的 `VENUE_READY_CACHE: OnceLock<Arc<Mutex<FxHashSet<String>>>>` を新設。両モードの recovery loop で `connect()` 直後に bridge task を spawn し、connection の broadcast events を購読してキャッシュを更新。`Flowsurface::Message::EngineConnected` ハンドラは ProcessManager cache と bridge cache を **OR query** |
+
+### 設計上の落とし穴 (後続作業者向け)
+
+- **bridge と ProcessManager の責務分担**: managed mode は `ProcessManager.venue_ready_state` (apply_after_handshake 内で更新) と新 bridge (post-start subscribe) の **二重キャッシュ**になる。両者で view が乖離するケースは現時点では考えにくい（ProcessManager.venue_ready_state は apply 中に書き、bridge は apply 後に書き続ける）が、もし新たな venue 種が増えたら ProcessManager 側もマルチ venue に対応させる必要あり。
+- **bridge の lifecycle**: 各接続に対して 1 つ。前の接続が drop される (`RecvError::Closed`) と bridge は自動終了。recovery loop が新しい conn を作るたび新 bridge を spawn。
+- **cache 透明性のための clear**: 再接続時に古い `VenueReady` 状態を引きずらないよう、新 bridge spawn 直前に `VENUE_READY_CACHE.clear()` を呼ぶ。
+- **bridge と engine_status_stream の event 受信は重複**: 同じ broadcast から 2 つのレシーバが両方読む形になる（bridge と engine_status_stream）。tokio broadcast はマルチ subscriber 対応なので問題なし。ただし lag したときに片方だけ Lagged を観測する可能性があるので、挙動が乖離したらまずここを疑う。
+- **テスト**: HIGH-1 / HIGH-2 ともに live broadcast / Stream 生成を要する race 検証で、現リポジトリにモック infra が無いため unit テストは追加していない。構造的に正しいことは plan 文書 + ソースコメントで pin。
+
+### 累積完了判定
+
+- ✅ `cargo test --workspace` 全緑 (51 件、R3 で新規追加なし)
+- ✅ `cargo clippy --workspace --tests -- -D warnings` 緑
+- ✅ `cargo fmt --check` 緑
+- ✅ `tools/iced_purity_grep.sh` OK
+
 > 脚注: spec.md §3.1 line 30 が立花ログインボタン位置として `sidebar.rs` を挙げているのは陳腐化記述。実コード上は `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` の venue 行が正本。本 PR スコープ外、別 PR で spec.md 同期予定。
 
 ---

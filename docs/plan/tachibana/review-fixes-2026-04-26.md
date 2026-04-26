@@ -92,3 +92,80 @@
 | L-R2-1 | — | （確認のみ）`H5/H6/H7/H8/H9` のタスク ID 記号は不変条件 ID と区別して残置で問題ないことを確認。 |
 | L-R2-2 | 1 | replace_all により §3.1 表外の本文中参照（Step A/B/C/D/E/F 末尾の `invariant-tests.md` サブタスク行）も同時置換され、表記揺れが残らないことを確認。 |
 
+---
+
+## ラウンド 3（2026-04-26）
+
+### 統一決定 1〜5
+
+- **統一決定 1**: `sidebar.rs` 表記を `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` に全置換する（T3.5 Step D 正本配置の確定。spec.md / implementation-plan.md / inventory-T0.md / architecture.md / invariant-tests.md / open-questions.md / README.md / review-fixes 系の計 10 ファイルへ波及）。
+- **統一決定 2**: VenueState 用語の使い分けを正本化する。`VenueLoginStarted` / `VenueLoginCancelled` / `VenueLoginReady` / `VenueLoginError` は **Python engine event DTO 名**、Rust UI 状態は `VenueState{Idle, LoginInFlight, Ready, Error{class,message}}` の 1 本化に統一する（spec.md §UI / invariant-tests.md L69 / architecture.md L279 等で書き分け）。
+- **統一決定 3**: `[~] (deferred to T3.5)` 完了マークを `[x] (T3.5 Step C-F 着地)` に反映する（implementation-plan.md L481-505 の T7-Phase 2 完了マーク更新）。
+- **統一決定 4**: 行番号参照の他ファイル波及置換を完了する（inventory-T0.md L41 の `sidebar.rs:249` 削除、spec.md L11 の `adapter.rs#L264` → `Exchange::TachibanaStock`、implementation-plan.md L248/L352/L617 の `open-questions.md#L25` → `#q21-...` アンカー化、L487 の sidebar.rs 残存撲滅）。
+- **統一決定 5**: 不変条件 ID の `T35-` prefix を親 `implementation-plan.md` 本文にも全面採用し、`invariant-tests.md` ヘッダの CI ガード regex を `F-[A-Z0-9-]+` から `(F|T35)-[A-Z0-9-]+` に拡張する（既存 F-* 系統と T35-* 系統を同一 CI ガードで pin）。
+
+### Finding ID → 修正概要マッピング
+
+| Finding ID | 統一決定 # | 観点 | 対象ファイル | 修正概要 |
+|------------|------------|------|---------------|----------|
+| A-H1 | 1 | A | spec.md §2.1 | `sidebar.rs` 配置記述を `tickers_table::exchange_filter_btn` に書換 |
+| A-H2 | 1, 3 | A | implementation-plan.md L288, L487 | `sidebar.rs` 残存記述削除 + `[~] (deferred to T3.5)` → `[x] (T3.5 Step C-F 着地)` |
+| A-M1 | 4 | A | inventory-T0.md L41 | `sidebar.rs:249` 行番号参照削除 + Tachibana ログイン UI 所在を `tickers_table::exchange_filter_btn` に補正 |
+| A-M2 | 3 | A | implementation-plan.md L481-505 | T7-Phase 2 行 `[~]` → `[x] (T3.5 Step C-F 着地)` 完了マーク更新 |
+| A-M3 | 2 | A | spec.md §UI | 旧 enum 並存記述を撤去し `VenueState{Idle/LoginInFlight/Ready/Error}` に 1 本化、Python DTO 名 `VenueLoginStarted/Cancelled/Ready/Error` との書き分けを脚注で明示 |
+| A-L1 | 4 | A | implementation-plan.md L248, L617 | `open-questions.md#L25` 行番号アンカー → `#q21-...` 安定アンカーに置換 |
+| A-L2 | 5 | A | invariant-tests.md ヘッダ | `T35-` prefix と既存 `F-` の併存方針、CI grep regex `(F|T35)-[A-Z0-9-]+` への拡張関係を冒頭に注記 |
+| A-L3 | — | A | README.md | 文書構成テーブルに T3.5 文書群（spec / implementation-plan / review-fixes-2026-04-25 / review-fixes-2026-04-26）4 行を追記 |
+| B-H1 | — | B | architecture.md L541 | `tests/integration/tachibana_handshake.rs` 仮称を実シンボル（`tests/engine_status_subscription_is_singleton.rs` 等）に差替 |
+| B-H2 | 2 | B | invariant-tests.md L69 | `set_tachibana_ready` 旧 API 呼出 pin → `VenueState::Ready` 遷移 pin に書換 |
+| B-H3 | — | B | architecture.md L279 | UI bridge 流路に `Message::TachibanaVenueEvent` 等の Python event DTO → `VenueState` 遷移経路を追加 |
+| B-M1 | 4 | B | inventory-T0.md / implementation-plan.md L352 | 行番号参照を `path::symbol` 形式に機械置換 |
+| B-M2 | 4 | B | spec.md L11 | `adapter.rs#L264` → `Exchange::TachibanaStock` シンボル参照に置換 |
+| B-M3 | 1 | B | implementation-plan.md L486-499 | H3 着地アンカーを `tickers_table::sidebar_login_button_emits_request_venue_login` テスト関数名で明記 |
+| B-L1 | — | B | architecture.md L284 | UI bridge 説明に `VenueState` FSM が前提であることの脚注を追加 |
+| B-L2 | — | B | README.md L48-52 | T3.5 着地（Step C-F 完了）を反映 |
+| B-L3 | — | B | open-questions.md L60 | 実装ファイル path リンク（`src/venue_state.rs` / `src/widget/venue_banner.rs`）を追記 |
+| C-H1 | 1 | C | spec.md §2.1 | A-H1 と統合（`sidebar.rs` 表記撲滅） |
+| C-H2 | — | C | invariant-tests.md | `T35-U2-BannerRedaction` 不変条件を新設し pin テストを登録 |
+| C-H3 | — | C | open-questions.md Q42 | 対象 path に `src/widget/venue_banner.rs` / `src/venue_state.rs` を追加 |
+| C-M1 | — | C | spec.md §4 末尾 | U5 E2E が HTTP API 着地までは `exit 77` で skip する旨を明示 |
+| C-M2 | — | C | implementation-plan.md T7 / Phase O1 | `replay_api.rs` 新設タスクを追加し U5 skip 解除条件として紐付 |
+| C-M3 | — | C | invariant-tests.md | `F-DevEnv-Release-Guard` 不変条件を新設（release ビルドでの dev 既定値漏れ防止） |
+| C-M4 | — | C | architecture.md §2.1 | `EngineConnection: Debug` の `finish_non_exhaustive` 規約を明文化（secret 焼付き防止） |
+| C-L1 | — | C | invariant-tests.md | `F-H5` の `second_password.is_none()` pin を追加 |
+| C-L2 | — | C | README.md L60 | `DEV_TACHIBANA_DEMO` の既定値 `true` を補完記載 |
+| C-L3 | 5 | C | invariant-tests.md L11-15 | CI grep regex を `F-[A-Z0-9-]+` → `(F|T35)-[A-Z0-9-]+` に拡張 |
+| D-H1 | — | D | invariant-tests.md | 各 pin テスト行に「実行コマンド」列を追加（`cargo test --test ...` / `pytest ...` / `bash tests/e2e/...` を明示） |
+| D-H2 | 5 | D | implementation-plan.md T4 | `T35-*` 全 11 件の pin テストが緑であることの listing を T4 受け入れ基準に追加 |
+| D-M1 | — | D | invariant-tests.md `T35-H7/H8/H9` | `tools/iced_purity_grep.sh` の assert を補助証跡として併記 |
+| D-M2 | — | D | invariant-tests.md `T35-H6/U5` | keyring 5 連続緑 / nightly + `e2e` ラベル運用を追記 |
+| D-L1 | — | D | invariant-tests.md `T35-U2-Banner` | 11 関数の glob を展開して個別関数名を明記 |
+
+
+---
+
+## ラウンド 5（2026-04-26）
+
+> ラウンド 4 はレビューのみ実施で修正なしのため、本セクションをラウンド 5 として記録する。
+
+### 統一決定 1〜3
+
+- **統一決定 1**: R3 で取りこぼした置換を完了する。`implementation-plan.md` L248 / L618 の `open-questions.md#L25` を `#q21--demo-環境の運用時間` 安定アンカーに置換し、`architecture.md` §7.5.1 の不変条件 ID drift（`T35-U2-StatusBanner` → `T35-U2-Banner`、`T35-U3-AutoFire` → `T35-U3-AutoRequestLogin`）を `invariant-tests.md` 正本に揃える。
+- **統一決定 2**: T4 受け入れ基準の `T35-*` listing を `invariant-tests.md` 正本（13 件）と同期する。`T35-H7-DebugRedaction` / `T35-U2-BannerRedaction` を追加し、誤名 `T35-VenueState` を `T35-U4-FSM` に正規化する（implementation-plan.md L555）。
+- **統一決定 3**: `invariant-tests.md` に「関連 SKILL ID」列を新設し、全 `T35-*` / `F-*` 行に SKILL R1〜R10 を逆引きで紐付ける。これにより review-fixes 系（R1〜R10）と pin テストの双方向トレーサビリティを確保する。
+
+### Finding ID → 修正概要マッピング
+
+| Finding ID | 統一決定 # | 観点 | 対象ファイル | 修正概要 |
+|------------|------------|------|---------------|----------|
+| H-1 | 1 | A | implementation-plan.md L248, L618 | `open-questions.md#L25` 行番号アンカー → `#q21--demo-環境の運用時間` 安定アンカー化（R3 取りこぼし分） |
+| H-2 | 2 | A+D | implementation-plan.md L555（T4 listing） | `T35-*` listing を 11 → 13 件に拡張、ID drift 解消（`T35-VenueState` → `T35-U4-FSM` 正規化） |
+| C-H1 | 1 | C | architecture.md §7.5.1 | `T35-U2-StatusBanner` → `T35-U2-Banner` / `T35-U3-AutoFire` → `T35-U3-AutoRequestLogin` の ID drift 解消 |
+| M-1 | 3 | A+D | invariant-tests.md L44 `F-DevEnv-Release-Guard` | glob 表記を個別関数名で pin（並列実行時の取りこぼし防止） |
+| M-2 | — | A+D | invariant-tests.md L28 `F-H5` | `second_password.is_none()` pin を統合（R3 C-L1 の補強） |
+| C-M1 | 3 | C | invariant-tests.md L77 `T35-U2-BannerRedaction` | 関連 SKILL ID 列に R3 / R10 を紐付け、相互参照リンクを追加 |
+| C-M2 | 3 | C | invariant-tests.md L44 `F-DevEnv-Release-Guard` | 関連 SKILL ID 列に R10 / R1 を紐付け |
+| C-M3 | 3 | C | invariant-tests.md L24-81 | 「関連 SKILL ID」列を新設し、全 `T35-*` / `F-*` 行に R1〜R10 を逆引き紐付け |
+| C-L1 | — | C | spec.md §3.2 / architecture.md §7.5.1 | `DismissTachibanaBanner` の FSM 副作用（view-only か `Error → Idle` 遷移か）を実装確認の上で明記 |
+
+

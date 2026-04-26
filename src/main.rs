@@ -65,6 +65,66 @@ static ENGINE_RESTARTING: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> 
 static ENGINE_MANAGER: std::sync::OnceLock<Arc<engine_client::ProcessManager>> =
     std::sync::OnceLock::new();
 
+/// Mode-agnostic post-handshake VenueReady cache. Both managed mode
+/// (`ProcessManager`) and external mode (`--data-engine-url`) write
+/// here from a bridge task that subscribes to the connection's
+/// broadcast events **before** the iced subscription wakes up. This
+/// closes the race in which the engine emits `VenueReady` between
+/// `connect()` returning and the iced subscription calling
+/// `subscribe_events()` (broadcast does not replay). Reviewer
+/// 2026-04-26 R3 (HIGH-2).
+static VENUE_READY_CACHE: std::sync::OnceLock<
+    Arc<tokio::sync::Mutex<rustc_hash::FxHashSet<String>>>,
+> = std::sync::OnceLock::new();
+
+/// Spawn a long-lived bridge that mirrors the connection's broadcast
+/// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
+/// here, before the connection is published to `ENGINE_CONNECTION_TX`,
+/// captures every `VenueReady`/`VenueError` even if iced is still
+/// starting up. The task self-terminates when the broadcast channel
+/// closes (i.e. when the connection drops).
+fn spawn_venue_ready_bridge(rt: &tokio::runtime::Runtime, conn: &engine_client::EngineConnection) {
+    let cache = match VENUE_READY_CACHE.get() {
+        Some(cache) => Arc::clone(cache),
+        None => return,
+    };
+    let mut event_rx = conn.subscribe_events();
+    rt.spawn(async move {
+        use engine_client::dto::EngineEvent;
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match event_rx.recv().await {
+                Ok(EngineEvent::VenueReady { venue, .. }) => {
+                    cache.lock().await.insert(venue);
+                }
+                Ok(EngineEvent::VenueError { venue, .. }) => {
+                    cache.lock().await.remove(&venue);
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(n)) => {
+                    log::warn!(
+                        "venue_ready_bridge lagged, dropped {n} events — UI may briefly mis-bootstrap"
+                    );
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Sync probe of the bridge cache — never blocks `Flowsurface::update`.
+/// Returns `false` on lock contention (rare; bridge holds the lock
+/// only for the duration of a single `HashSet` mutation), which means
+/// the UI may briefly miss a synthesized `VenueReady` and rely on the
+/// next live event instead. That's the same fallback semantics as
+/// `ProcessManager::try_is_venue_ready`.
+fn cached_venue_is_ready(venue: &str) -> bool {
+    VENUE_READY_CACHE
+        .get()
+        .and_then(|cache| cache.try_lock().ok().map(|state| state.contains(venue)))
+        .unwrap_or(false)
+}
+
 /// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
 /// Referenced during initial setup and on every engine reconnect.
 const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
@@ -106,6 +166,14 @@ fn main() {
         tokio::sync::watch::channel::<Option<Arc<engine_client::EngineConnection>>>(None);
     ENGINE_CONNECTION_TX.set(conn_tx).ok();
 
+    // VenueReady cache shared between both engine modes — see static
+    // doc comment on `VENUE_READY_CACHE`.
+    VENUE_READY_CACHE
+        .set(Arc::new(tokio::sync::Mutex::new(
+            rustc_hash::FxHashSet::default(),
+        )))
+        .ok();
+
     // The Python data engine is normally spawned and supervised in-process by
     // a `ProcessManager` running on a dedicated tokio runtime (Phase 6 default).
     // `--data-engine-url` overrides this to connect to an externally managed
@@ -132,6 +200,12 @@ fn main() {
             Ok(conn) => {
                 log::info!("Connected to external data engine at {url_str}");
                 let conn = Arc::new(conn);
+                // External mode has no ProcessManager → its
+                // `apply_after_handshake` cache is unavailable. Spawn
+                // the bridge BEFORE publishing the connection so the
+                // first `VenueReady` cannot race past the iced
+                // subscription. Reviewer 2026-04-26 R3 (HIGH-2).
+                spawn_venue_ready_bridge(&rt, &conn);
                 if let Some(tx) = ENGINE_CONNECTION_TX.get() {
                     tx.send(Some(Arc::clone(&conn))).ok();
                 }
@@ -175,6 +249,47 @@ fn main() {
                                 Ok(new_conn) => {
                                     log::info!("Reconnected to data engine at {reconnect_url}");
                                     let new_conn = Arc::new(new_conn);
+                                    // Drain the cache so the bridge
+                                    // for this fresh connection writes
+                                    // its current view, not the stale
+                                    // one from before the drop.
+                                    if let Some(cache) = VENUE_READY_CACHE.get() {
+                                        cache.lock().await.clear();
+                                    }
+                                    // Re-spawn the bridge against the
+                                    // fresh connection — the previous
+                                    // bridge's recv loop has already
+                                    // exited via RecvError::Closed.
+                                    let rt_handle = tokio::runtime::Handle::current();
+                                    let bridge_cache = VENUE_READY_CACHE.get().cloned();
+                                    if let Some(cache) = bridge_cache {
+                                        let mut event_rx = new_conn.subscribe_events();
+                                        rt_handle.spawn(async move {
+                                            use engine_client::dto::EngineEvent;
+                                            use tokio::sync::broadcast::error::RecvError;
+                                            loop {
+                                                match event_rx.recv().await {
+                                                    Ok(EngineEvent::VenueReady {
+                                                        venue, ..
+                                                    }) => {
+                                                        cache.lock().await.insert(venue);
+                                                    }
+                                                    Ok(EngineEvent::VenueError {
+                                                        venue, ..
+                                                    }) => {
+                                                        cache.lock().await.remove(&venue);
+                                                    }
+                                                    Ok(_) => {}
+                                                    Err(RecvError::Lagged(n)) => {
+                                                        log::warn!(
+                                                            "venue_ready_bridge lagged, dropped {n}"
+                                                        );
+                                                    }
+                                                    Err(RecvError::Closed) => break,
+                                                }
+                                            }
+                                        });
+                                    }
                                     if let Some(tx) = ENGINE_CONNECTION_TX.get() {
                                         tx.send(Some(Arc::clone(&new_conn))).ok();
                                     }
@@ -317,6 +432,46 @@ fn main() {
                     Ok(conn) => {
                         backoff_ms = 500;
                         let conn = Arc::new(conn);
+
+                        // Drain stale entries before the bridge for the
+                        // new connection takes over. apply_after_handshake
+                        // already populated `ProcessManager.venue_ready_state`,
+                        // but the global cache must reflect this fresh
+                        // connection's view, so a recovery loop iteration
+                        // doesn't carry stale ready-state from a prior
+                        // disconnect.
+                        if let Some(cache) = VENUE_READY_CACHE.get() {
+                            cache.lock().await.clear();
+                        }
+                        // Subscribe events on this connection BEFORE
+                        // publishing it to the watch channel — bridges
+                        // any window between iced's subscription and
+                        // the engine's first venue lifecycle emit.
+                        // Reviewer 2026-04-26 R3 (HIGH-2).
+                        let bridge_cache = VENUE_READY_CACHE.get().cloned();
+                        if let Some(cache) = bridge_cache {
+                            let mut event_rx = conn.subscribe_events();
+                            tokio::spawn(async move {
+                                use engine_client::dto::EngineEvent;
+                                use tokio::sync::broadcast::error::RecvError;
+                                loop {
+                                    match event_rx.recv().await {
+                                        Ok(EngineEvent::VenueReady { venue, .. }) => {
+                                            cache.lock().await.insert(venue);
+                                        }
+                                        Ok(EngineEvent::VenueError { venue, .. }) => {
+                                            cache.lock().await.remove(&venue);
+                                        }
+                                        Ok(_) => {}
+                                        Err(RecvError::Lagged(n)) => {
+                                            log::warn!("venue_ready_bridge lagged, dropped {n}");
+                                        }
+                                        Err(RecvError::Closed) => break,
+                                    }
+                                }
+                            });
+                        }
+
                         if let Some(tx) = ENGINE_CONNECTION_TX.get() {
                             tx.send(Some(Arc::clone(&conn))).ok();
                         }
@@ -527,12 +682,17 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
         let initial_conn = { conn_rx.borrow_and_update().clone() };
         if let Some(conn) = initial_conn {
             event_rx = Some(conn.subscribe_events());
-            yield Message::EngineConnected(conn);
-            // Each fresh handshake represents a Python subprocess that
-            // re-pumps Hello → VenueReady from scratch — reset the
-            // venue FSM so a stale Ready/Error from before the restart
-            // does not survive.
+            // **Order matters**: Rehello must arrive in `update()` BEFORE
+            // EngineConnected. EngineConnected calls
+            // `sidebar.update_handles()` which gates the Tachibana
+            // refetch on `tachibana_ready`; Rehello first transitions
+            // that flag to `false` (via `set_tachibana_ready(false)` in
+            // the `TachibanaVenueEvent` arm), so the subsequent
+            // EngineConnected refetch correctly excludes Tachibana
+            // until the next `VenueReady`. Reviewer 2026-04-26 R3
+            // (HIGH-1).
             yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
+            yield Message::EngineConnected(conn);
         }
         let initial_restart = { *restart_rx.borrow_and_update() };
         if initial_restart {
@@ -566,8 +726,12 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                     let value = { conn_rx.borrow_and_update().clone() };
                     if let Some(conn) = value {
                         event_rx = Some(conn.subscribe_events());
-                        yield Message::EngineConnected(conn);
+                        // See above — Rehello before Connected so the
+                        // FSM-driven gate flag flips before the
+                        // EngineConnected handler refetches
+                        // (T35-U4-StartupGate / R3 HIGH-1).
                         yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
+                        yield Message::EngineConnected(conn);
                     }
                 }
                 event = event_fut => {
@@ -881,18 +1045,23 @@ impl Flowsurface {
                         .push(Toast::info("データエンジン接続を復旧しました".to_string()));
                 }
 
-                // Bridge the broadcast-replay gap: VenueReady emitted
-                // during `ProcessManager::start()`'s
-                // `apply_after_handshake` runs **before** this stream
-                // subscribes to events. The `ProcessManager` caches the
-                // post-handshake readiness state; if Tachibana is
-                // already Ready in that cache, synthesize a
+                // Bridge the broadcast-replay gap from BOTH directions:
+                //   - managed mode: `ProcessManager` caches post-
+                //     `apply_after_handshake` readiness internally.
+                //   - external mode (`--data-engine-url`): the
+                //     mode-agnostic `VENUE_READY_CACHE` bridge task
+                //     captured `VenueReady` between connect() and
+                //     iced's late `subscribe_events()`.
+                // Either source being `true` means the engine
+                // currently considers Tachibana ready — synthesize
                 // `VenueEvent::Ready` so the FSM bootstraps correctly.
-                // Reviewer 2026-04-26 R2 (HIGH-1).
-                if self
+                // Reviewers 2026-04-26 R2 (HIGH-1) / R3 (HIGH-2).
+                let is_ready_from_manager = self
                     .engine_manager
                     .as_ref()
-                    .is_some_and(|m| m.try_is_venue_ready(TACHIBANA_VENUE_NAME))
+                    .is_some_and(|m| m.try_is_venue_ready(TACHIBANA_VENUE_NAME));
+                let is_ready_from_bridge = cached_venue_is_ready(TACHIBANA_VENUE_NAME);
+                if (is_ready_from_manager || is_ready_from_bridge)
                     && !self.tachibana_state.is_ready()
                 {
                     return Task::batch(vec![

@@ -25,20 +25,20 @@ pub struct TickerInfo {
 
 | クレート | ファイル | 用途 |
 | :--- | :--- | :--- |
-| exchange | `exchange/src/lib.rs` (515-550) | 定義本体・`new`/`market_type`/`is_perps`/`exchange` メソッド |
-| exchange | `exchange/src/adapter.rs:153` | `EnumMap<Exchange, Option<FxHashMap<TickerInfo, FxHashSet<StreamKind>>>>` — UniqueStreams のキー |
-| exchange | `exchange/src/adapter/venue_backend.rs:11` | `pub type TickerMetadataMap = HashMap<Ticker, Option<TickerInfo>>` |
-| exchange | `exchange/src/adapter/client.rs:127` | trait method `fetch_ticker_metadata` 戻り値 |
+| exchange | `exchange/src/lib.rs::TickerInfo` | 定義本体・`new`/`market_type`/`is_perps`/`exchange` メソッド |
+| exchange | `exchange/src/adapter.rs::UniqueStreams` | `EnumMap<Exchange, Option<FxHashMap<TickerInfo, FxHashSet<StreamKind>>>>` — UniqueStreams のキー |
+| exchange | `exchange/src/adapter/venue_backend.rs::TickerMetadataMap` | `pub type TickerMetadataMap = HashMap<Ticker, Option<TickerInfo>>` |
+| exchange | `exchange/src/adapter/client.rs::fetch_ticker_metadata` | trait method `fetch_ticker_metadata` 戻り値 |
 | exchange | `exchange/src/unit/qty.rs` | `Qty` フォーマッタへの `TickerInfo` 受け渡し |
 | exchange | `exchange/tests/*.rs` | 各種テスト |
 | engine-client | `engine-client/src/backend.rs` | `EngineClientBackend` 内 `Ticker::new_with_display` → `TickerInfo::new` の経路 |
 | engine-client | `engine-client/tests/depth_gap_recovery.rs` | depth テストの fixture |
 | data | `data/src/chart.rs`, `data/src/chart/heatmap.rs`, `data/src/chart/indicator.rs` | 集計ロジック |
-| data | `data/src/layout/pane.rs:240,251,252` | **永続化対象**: pane 設定に `ticker_info: TickerInfo` を保持 |
+| data | `data/src/layout/pane.rs::Pane`（`ticker_info` フィールド系） | **永続化対象**: pane 設定に `ticker_info: TickerInfo` を保持 |
 | data | `data/src/stream.rs` | `StreamSpec` resolver で `TickerInfo` を引く |
 | data | `data/src/tickers_table.rs` | tickers table 集計 |
-| src (UI) | `src/screen/dashboard/tickers_table.rs:92,106,1656` | `FxHashMap<Ticker, Option<TickerInfo>>` — UI sidebar の metadata cache |
-| src (UI) | `src/screen/dashboard/sidebar.rs:249` | sidebar が tickers_info を返す |
+| src (UI) | `src/screen/dashboard/tickers_table.rs::TickersTable`（`tickers_info` フィールド系） | `FxHashMap<Ticker, Option<TickerInfo>>` — UI sidebar の metadata cache |
+| src (UI) | `src/screen/dashboard/sidebar.rs::Sidebar::tickers_info` | sidebar が tickers_info を返す（**Tachibana ログイン UI は `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` 周辺の `tachibana_login_btn` に着地**, T3.5 Step D 参照） |
 | src (UI) | `src/screen/dashboard/pane.rs`, `src/screen/dashboard.rs`, `src/screen/dashboard/panel/{timeandsales,ladder}.rs` | UI 描画 |
 | src (UI) | `src/chart.rs`, `src/chart/{kline,heatmap,comparison}.rs`, `src/widget/chart{,/heatmap,/comparison}.rs` | チャート描画。`FxHashMap<TickerInfo, ...>` を多用 |
 | src (UI) | `src/widget/chart/heatmap/instance.rs`, `src/widget/chart/heatmap/scene/depth_grid.rs` | heatmap |
@@ -49,8 +49,8 @@ pub struct TickerInfo {
 
 | 場所 | 種別 | 備考 |
 | :--- | :--- | :--- |
-| `exchange/src/adapter.rs:153` | `FxHashMap<TickerInfo, FxHashSet<StreamKind>>` | UniqueStreams、in-memory only |
-| `src/chart/comparison.rs:28,30,351,356` | `FxHashMap<TickerInfo, _>` | runtime チャート、in-memory |
+| `exchange/src/adapter.rs::UniqueStreams` | `FxHashMap<TickerInfo, FxHashSet<StreamKind>>` | UniqueStreams、in-memory only |
+| `src/chart/comparison.rs`（`Comparison` 内 `FxHashMap<TickerInfo, _>` 系） | `FxHashMap<TickerInfo, _>` | runtime チャート、in-memory |
 
 → **永続化されているのは `data/src/layout/pane.rs` の `ticker_info: TickerInfo` フィールド**（Layout 経由 `saved-state.json`）。`HashMap` キーで永続化されている箇所はない。よって追加フィールドの `Hash` 値変化は in-memory map にのみ影響し、永続 state は **`#[serde(default)]` のフィールド追加で互換が取れる**。
 
@@ -58,20 +58,20 @@ pub struct TickerInfo {
 
 `MarketKind::Stock` 追加で **網羅 match を破る箇所**は以下。すべて `Stock` 分岐の追加が必要。
 
-| ファイル | 行 | パターン | `Stock` の扱い |
-| :--- | ---: | :--- | :--- |
-| `exchange/src/adapter.rs` | 45-47 | `pub const ALL: [MarketKind; 3]` | 配列を `[MarketKind; 4]` へ拡張、`Stock` を追加 |
-| `exchange/src/adapter.rs` | 53-62 | `qty_in_quote_value` の match | **`Stock => price * qty`** を最優先で追加（F-M3b、`size_in_quote_ccy` 引数を見ない） |
-| `exchange/src/adapter.rs` | 71-75 | `Display` | `Stock => "Stock"` |
-| `exchange/src/adapter.rs` | 84-92 | `FromStr` | `"stock" => Stock` |
-| `exchange/src/adapter.rs` | 392-407 | `Exchange::market_type` | `TachibanaStock => Stock` |
-| `data/src/chart/indicator.rs:22-23, 54-55` | | `MarketKind::Spot => &Self::FOR_SPOT, ::LinearPerps \| ::InversePerps => &Self::FOR_PERPS` | `Stock => &Self::FOR_SPOT`（Phase 1 は spot 相当のインジケータ可用性。OI などは capabilities で UI 非活性化）。**M4 修正**: `FOR_SPOT` の実体（[data/src/chart/indicator.rs](../../../data/src/chart/indicator.rs)）を T0.2 着手時に列挙し、株式に意味を持たないもの（funding rate / open interest / liquidation 系など）が混入していないか確認する。混入していれば `Stock` 専用配列を別途用意するか、UI 側で個別非活性化する判断を T0.2 内で行う |
-| `data/src/tickers_table.rs:169-170` | | `Spot => "" / Perps => "P"` 表示サフィックス | `Stock => ""`（株式に Perp サフィックス不要） |
-| `engine-client/src/backend.rs:50-56` | | `market_kind_to_ipc` | `Stock => "stock"` |
-| `src/screen/dashboard/tickers_table.rs:63-66, 750-752, 1090-1091` | | venue ごとの `MarketKind` 配列、market filter ボタン、UI suffix | `Venue::Tachibana => &[MarketKind::Stock]`、Stock 用 market filter は Phase 1 では非表示推奨。Stock の suffix は `""` |
-| `src/screen/dashboard/pane.rs:529-530` | | `Spot => symbol / Perps => symbol + " PERP"` | `Stock => symbol` |
-| `exchange/src/lib.rs::TickerInfo`（`is_perps` / Display 系） | | `MarketKind::LinearPerps`/`InversePerps` を直接比較 | `is_perps` は false のまま、Display ロジックは Hyperliquid 専用なので `Stock` は分岐不要 |
-| `exchange/src/unit/qty.rs:225, 259, 269, 281` | | `matches!(market_kind, MarketKind::InversePerps)` | `Stock` は inverse でないため修正不要（`is_inverse=false`） |
+| path::symbol | パターン | `Stock` の扱い |
+| :--- | :--- | :--- |
+| `exchange/src/adapter.rs::MarketKind::ALL` | `pub const ALL: [MarketKind; N]` | 配列を `[MarketKind; 4]` へ拡張、`Stock` を追加 |
+| `exchange/src/adapter.rs::MarketKind::qty_in_quote_value` | `qty_in_quote_value` の match | **`Stock => price * qty`** を最優先で追加（F-M3b、`size_in_quote_ccy` 引数を見ない） |
+| `exchange/src/adapter.rs::impl Display for MarketKind` | `Display` | `Stock => "Stock"` |
+| `exchange/src/adapter.rs::impl FromStr for MarketKind` | `FromStr` | `"stock" => Stock` |
+| `exchange/src/adapter.rs::Exchange::market_type` | `Exchange::market_type` | `TachibanaStock => Stock` |
+| `data/src/chart/indicator.rs::KlineIndicator::available_for` ほか（`FOR_SPOT` 分岐） | `MarketKind::Spot => &Self::FOR_SPOT, ::LinearPerps \| ::InversePerps => &Self::FOR_PERPS` | `Stock => &Self::FOR_SPOT`（Phase 1 は spot 相当のインジケータ可用性。OI などは capabilities で UI 非活性化）。**M4 修正**: `FOR_SPOT` の実体（[data/src/chart/indicator.rs](../../../data/src/chart/indicator.rs)）を T0.2 着手時に列挙し、株式に意味を持たないもの（funding rate / open interest / liquidation 系など）が混入していないか確認する。混入していれば `Stock` 専用配列を別途用意するか、UI 側で個別非活性化する判断を T0.2 内で行う |
+| `data/src/tickers_table.rs`（market suffix match） | `Spot => "" / Perps => "P"` 表示サフィックス | `Stock => ""`（株式に Perp サフィックス不要） |
+| `engine-client/src/backend.rs::market_kind_to_ipc` | `market_kind_to_ipc` | `Stock => "stock"` |
+| `src/screen/dashboard/tickers_table.rs`（venue ごとの `MarketKind` 配列・`exchange_filter_btn`・suffix 周辺） | venue ごとの `MarketKind` 配列、market filter ボタン、UI suffix | `Venue::Tachibana => &[MarketKind::Stock]`、Stock 用 market filter は Phase 1 では非表示推奨。Stock の suffix は `""` |
+| `src/screen/dashboard/pane.rs`（pane symbol 表示の MarketKind match） | `Spot => symbol / Perps => symbol + " PERP"` | `Stock => symbol` |
+| `exchange/src/lib.rs::TickerInfo`（`is_perps` / Display 系） | `MarketKind::LinearPerps`/`InversePerps` を直接比較 | `is_perps` は false のまま、Display ロジックは Hyperliquid 専用なので `Stock` は分岐不要 |
+| `exchange/src/unit/qty.rs`（`matches!(market_kind, MarketKind::InversePerps)` 系） | `matches!(market_kind, MarketKind::InversePerps)` | `Stock` は inverse でないため修正不要（`is_inverse=false`） |
 
 **T0.2 で対応すべき網羅 match の必須修正は 11 箇所**。`matches!()` でピンポイントに `InversePerps` のみ問う箇所は修正不要（`Stock` は inverse でない）。
 
@@ -92,17 +92,17 @@ assert!(!ticker.contains('|'), "Ticker cannot contain '|'");
 
 ## 4. `qty_in_quote_value` 呼出箇所（F-H4）
 
-正本: `exchange/src/adapter.rs:50`
+正本: `exchange/src/adapter.rs::MarketKind::qty_in_quote_value`
 
-呼出 9 箇所:
+呼出 9 箇所（path::symbol レベル）:
 
-| ファイル | 行 |
-| :--- | ---: |
-| `src/chart/heatmap.rs` | 539, 614 |
-| `src/widget/chart/heatmap/instance.rs` | 320 |
-| `src/widget/chart/heatmap/scene/depth_grid.rs` | 195, 585 |
-| `src/screen/dashboard/panel/timeandsales.rs` | 128, 230, 464 |
-| `data/src/chart/heatmap.rs` | 322, 496 |
+| path::symbol |
+| :--- |
+| `src/chart/heatmap.rs`（`qty_in_quote_value` 呼出 2 箇所） |
+| `src/widget/chart/heatmap/instance.rs`（`qty_in_quote_value` 呼出 1 箇所） |
+| `src/widget/chart/heatmap/scene/depth_grid.rs`（`qty_in_quote_value` 呼出 2 箇所） |
+| `src/screen/dashboard/panel/timeandsales.rs`（`qty_in_quote_value` 呼出 3 箇所） |
+| `data/src/chart/heatmap.rs`（`qty_in_quote_value` 呼出 2 箇所） |
 
 すべて `market_type.qty_in_quote_value(qty, price, size_in_quote_ccy)` のシグネチャで呼んでいる。`MarketKind::Stock => price * qty` を enum 内部で強制（`size_in_quote_ccy` 引数を無視）すれば、**呼出側コードは変更不要**で `Stock` venue でも正値が出る。網羅 match は match 内の追加分岐 1 行のみ。
 
@@ -127,7 +127,7 @@ pub enum Timeframe {
 
 | 場所 | 用途 |
 | :--- | :--- |
-| `exchange/src/adapter.rs:96-110` `StreamKind::Kline { timeframe: Timeframe }` | 永続 state（pane 設定） |
+| `exchange/src/adapter.rs::StreamKind::Kline { timeframe: Timeframe }` | 永続 state（pane 設定） |
 | `exchange/src/lib.rs::PushFrequency` `PushFrequency::Custom(Timeframe)` | depth push freq、永続 state |
 | `data/src/chart.rs`, `data/src/layout/pane.rs` 等 | 永続 state |
 

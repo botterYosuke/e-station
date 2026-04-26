@@ -130,6 +130,8 @@ pub struct TachibanaSessionWire {
 
 対応する Python 側 pydantic モデルは `pydantic.SecretStr` を使い、`__repr__` で `***` 化する。
 
+**`EngineConnection: Debug` 規約（pin: T35-H7-DebugRedaction）**: `engine_client::EngineConnection` の `Debug` 実装は **`finish_non_exhaustive()` のみ**を使い、内部フィールド（token / endpoint / credentials など）を直接書き出す `#[derive(Debug)]` 派生は禁止。リグレッションは `engine-client/tests/engine_connection_debug_redaction.rs` で pin 済み。新規フィールド追加時も同規約を維持する。
+
 - `session` は **Rust が keyring から復元できた場合のみ** 含める。Python はまず `session` を試し、`p_errno="2"` で失敗したら `user_id/password` で再ログインする
   - この再ログインは **起動直後の `SetVenueCredentials` 処理中に限る**。購読開始後の runtime で session expiry を検知した場合は再ログインせず `VenueError{venue:"tachibana", code:"session_expired"}` を返す
 - `second_password` は **Phase 2 以降の発注機能で使う**。**Phase 1 では DTO スキーマ上 `Option<SecretString>` で持つが、収集も保持もせず常に `None` を送る**（F-H5）。発注しないものを Python メモリに保持して攻撃面を増やさない方針
@@ -281,7 +283,7 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 | `data/src/config/tachibana.rs`（新設） | `TachibanaCredentials` 型 + keyring 読み書き。SKILL.md R10 に従う。`data/src/config/proxy.rs` の暗号資産プロキシ keyring 実装を参考にする |
 | [src/main.rs](../../../src/main.rs) | 起動時に keyring から立花 creds を復元し `SetVenueCredentials` 投入 |
 | Rust UI（`src/screen/`） | **ログイン画面コードを追加しない**。Python ヘルパー spawn 中は「ログインダイアログを別ウィンドウで表示中」のステータスバナーだけ出す（汎用 string、立花知識なし） |
-| `src/screen/dashboard/tickers_table.rs` ほか UI | `VenueReady` 前の metadata fetch を抑止し、`MarketKind::Stock` に応じた market filter / indicator / timeframe / 表示文言を調整 |
+| `src/screen/dashboard/tickers_table.rs` ほか UI | `VenueReady` 前の metadata fetch を抑止し、`MarketKind::Stock` に応じた market filter / indicator / timeframe / 表示文言を調整。**抑止は `src/venue_state.rs::VenueState` FSM が前提**（`Trigger::{Auto,Manual}` で auto-fire と手動再ログインを区別、`engine_status_stream` は `tokio::select!` 1 本に singleton 化）。pin: T35-U4-VenueReadyGate / T35-H9-SingleRecoveryPath（リグレッションは `tests/engine_status_subscription_is_singleton.rs` で固定） |
 | [docs/plan/✅python-data-engine/](../✅python-data-engine/) `schemas/` | `commands.json` / `events.json` に新コマンド・イベントを記載、`CHANGELOG.md` 更新（※親計画ディレクトリ内のスキーマ。本計画 T0 で同期） |
 
 ## 6. 失敗モードと UI 表現
@@ -479,6 +481,19 @@ pub enum Command {
 
 `SetVenueCredentials` の典型的な発火タイミングが「(a) 起動時に keyring から復元」「(b) Python 再起動後の再注入」の 2 つに集約される（runtime のユーザー入力経路は使わない）。
 
+#### 7.5.1 Rust UI bridge（DTO ↔ Iced Message ↔ FSM ↔ view）
+
+DTO 列挙（`engine_client::dto::EngineEvent::{VenueReady,VenueLoginStarted,VenueLoginCancelled,VenueError,VenueCredentialsRefreshed}`）は Rust UI 入口に **`Message::TachibanaVenueEvent` として 1 本化**して入る。**T4 着手者が辿るブリッジ層は以下の path::symbol で固定**:
+
+| 層 | path::symbol | 役割 |
+| :--- | :--- | :--- |
+| 受信ストリーム | `src/main.rs::Flowsurface::engine_status_stream`（`tokio::select!` 1 箇所、pin: T35-H9-SingleRecoveryPath） | engine status と venue event を単一 stream で受け、`Message::TachibanaVenueEvent(VenueEvent)` を発火 |
+| Iced Message 入口 | `src/main.rs::Flowsurface::Message::TachibanaVenueEvent` / `Message::RequestTachibanaLogin` / `Message::DismissTachibanaBanner` | UI 起点（ログインボタン押下 → `RequestTachibanaLogin` → `Command::RequestVenueLogin`、バナー閉じる → `DismissTachibanaBanner`） |
+| FSM | `src/venue_state.rs::{VenueState, Trigger, VenueEvent}` | DTO → Trigger 変換 + 状態遷移（`Idle → LoggingIn → Ready` / `Failed`）。`Trigger::{Auto,Manual}` で auto-fire と手動再ログインを区別 |
+| view | `src/widget/venue_banner.rs::view` / `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` | バナー描画と venue filter ボタン。`VenueState::Ready` 前は exchange_filter_btn の立花選択肢を disabled 表示 |
+
+**流路（不変）**: Python `EngineEvent` → `engine_status_stream`（`tokio::select!`）→ `Message::TachibanaVenueEvent` → `VenueState` FSM → `venue_banner::view` / `tickers_table::exchange_filter_btn`。逆方向は `view` の on_press → `Message::RequestTachibanaLogin` → `Command::RequestVenueLogin` のみ（pin: T35-U1-LoginButton / T35-U3-AutoRequestLogin / T35-U2-Banner / T35-U4-VenueReadyGate）。
+
 ### 7.6 起動シーケンス（更新版）
 
 ```
@@ -538,8 +553,10 @@ Rust 起動
 
 ### 8.3 結合（Rust + Python）
 
-- `tests/integration/tachibana_handshake.rs`: `SetVenueCredentials` → `VenueReady` の往復
-- `tests/integration/tachibana_subscribe.rs`: trade / depth subscribe → mock の FD frame → `Trades` / `DepthSnapshot` 受信
+- `engine-client/tests/handshake.rs` / `engine-client/tests/process_venue_ready_gate.rs` / `engine-client/tests/process_venue_ready_timeout_marks_failed.rs`: `SetVenueCredentials` → `VenueReady` 往復、ゲート、タイムアウト失敗（実シンボル: `engine_client::process::ProcessManager`）
+- `engine-client/tests/process_creds_refresh_hook.rs` / `engine-client/tests/process_creds_refresh_listener_singleton.rs`: `VenueCredentialsRefreshed` の hook 駆動と listener singleton 性
+- `engine-client/tests/process_venue_login_cancelled.rs` / `engine-client/tests/process_venue_error_session_restore_failed.rs`: ログインキャンセル・session 復元失敗時の状態遷移
+- trade / depth subscribe → mock の FD frame → `Trades` / `DepthSnapshot` 受信は Python 側 `python/tests/test_tachibana_e2e.py` および Rust 側 `engine-client/tests/depth_gap.rs` / `engine-client/tests/depth_gap_recovery.rs` で代替（Rust 単独の `tests/integration/tachibana_subscribe.rs` は新設しない）
 - 既存の Rust 単体は mockito を使う（プロジェクト共通方針）
 
 ### 8.4 E2E（demo 環境）
