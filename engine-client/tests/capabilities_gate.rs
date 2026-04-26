@@ -22,6 +22,7 @@ fn test_unsupported_timeframes_are_disabled_when_capabilities_received() {
         },
     });
     assert!(is_timeframe_enabled(&caps, "tachibana", "1d").unwrap());
+    assert!(!is_timeframe_enabled(&caps, "tachibana", "1m").unwrap());
     assert!(!is_timeframe_enabled(&caps, "tachibana", "5m").unwrap());
     assert!(!is_timeframe_enabled(&caps, "tachibana", "1h").unwrap());
 }

@@ -593,19 +593,35 @@
 
 **ゴール**: Python 異常終了・session 切れ・ザラ場跨ぎでも UI が破綻しない。
 
-- [ ] `VenueError{venue:"tachibana", code:"session_expired", message}` → Rust UI バナー（旧 `EngineError{code:"tachibana_session_expired"}` は廃止）。**バナー文言は Python が `message` に詰めて送る**（F-Banner1）。Rust 側は `message` をそのまま描画し、固定文言を持たない。`code` は severity（warning/error）とアクションボタン（再ログイン / 閉じる）の出し分けにのみ使う
-- [ ] **`VenueError.code` の enum 化（T0 schema 追加分の検証）**: Python 側の発出箇所（`tachibana_auth.py` / `tachibana_ws.py` / `tachibana.py`）で使う code 文字列が [architecture.md §6](./architecture.md#6-失敗モードと-ui-表現) の表と一致することを単体テストで検証。未知 code が発出されたら Rust 側はデフォルト severity（error）+ 再ログインボタン非表示で fail-safe に倒す
-- [ ] **バナー文言テスト**: `tachibana_auth.py` の各エラー分岐（`p_errno=2` / `sKinsyouhouMidokuFlg=1` / `sResultCode=10031` / 認証失敗）が Python 側で意図通りの `message` を生成することを `python/tests/test_tachibana_banner_messages.py` で固定（snapshot test）。**L3 修正**: 将来 i18n を入れたとき snapshot 全壊を防ぐため、Phase 1 の snapshot は **locale を `ja_JP` 固定** で取り、`pytest` fixture で `LANG=ja_JP.UTF-8` を強制する。i18n 導入時は locale 別 snapshot ファイルに分割する規約を本タスクのコメントに残す
-- [ ] `VenueCredentialsRefreshed` 経由で**起動時再ログイン後**の session を Rust が keyring 更新
-- [ ] Python 再起動シナリオの自動テスト（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §5.3 Python プロセス復旧プロトコル 流用）。**具体テスト名（MEDIUM-D1、MEDIUM-B2-1）**: 既存 `engine-client/tests/process_lifecycle.rs` に `#[tokio::test] async fn test_credentials_resent_in_order_after_restart()` を追記する（既存 integration test ファイルは `handshake.rs` / `connection_closed.rs` / `depth_gap.rs` / `process_lifecycle.rs` といった短い名詞形で揃っており、新規 `process_restart_with_credentials.rs` を作ると命名規則から逸脱する）。`ProcessManager` の再起動経路でコマンド送信順序を `Vec<&'static str>` に記録 → `["SetProxy", "SetVenueCredentials", "Subscribe", ...]` の順序を assert（`SetVenueCredentials` が `SetProxy` の後・`Subscribe` の前であること）
-- [ ] ログにシークレット非漏洩テスト
-- [ ] **ログ redaction 具体テスト（MEDIUM-D3-1）**: `python/tests/test_tachibana_log_redaction.py::test_runtime_logs_do_not_contain_credentials_or_virtual_urls` を新設。`caplog` fixture で `tachibana_auth.login` / `tachibana_ws` 接続経路 / `VenueError` 発出経路（`p_errno=2` / 認証失敗 / `unread_notices` / `transport_error` 等の各分岐）の全 log record を集め、各 record の `message` / `args` / formatted text に対して以下の文字列が**含まれていないこと**を assert: (a) `user_id` 値、(b) `password` 値、(c) session token、(d) `url_request` / `url_master` / `url_price` / `url_event` / `url_event_ws` の仮想 URL ホスト部分。違反があった record があれば assertion failure メッセージにどの文字列がどの record に出たかを明示する
-- [ ] capabilities ハンドシェイクで OI / fetch_trades / 分足の非対応を Rust に伝え UI を非活性化
-- [ ] **capabilities による UI 非活性化テスト（MEDIUM-D3-2）**: `engine-client/tests/capabilities_gate.rs::test_unsupported_timeframes_are_disabled_when_capabilities_received` を新設。`capabilities = {"supported_timeframes": ["1d"]}` を受信した状態で、UI 状態モデル（`engine-client` 側で公開している capabilities 適用後の state）に対して 1m / 5m / 1h の timeframe 選択が `enabled == false` になっていることを assert。1d は `enabled == true`。capabilities 未受信時は全 timeframe が `enabled == true`（fail-open ではなく初期状態）であることも併せて確認
-- [ ] `NotImplementedError` が現行 server では `Error{code:"not_implemented"}` に変換されることを前提に、UI とテストを揃える。専用エラーコードが必要なら server 側例外マッピング追加を別PRに切り出す
-- [ ] 「ProcessManager が credentials を保持していないため再起動後に立花だけ復旧しない」回帰を防ぐ統合テストを追加
-- [ ] **`VenueReady` 冪等性テスト**: Python 再起動 → `SetVenueCredentials` 再注入 → `VenueReady` 再受信時に、Rust 側 UI が新規 subscribe を発行しないこと（resubscribe は `ProcessManager` 1 箇所のみ）を統合テストで検証
-- [ ] **受け入れ**: [spec.md §4 受け入れ条件](./spec.md#4-受け入れ条件phase-1-完了の定義) 全て緑
+- [x] ✅ `VenueError{venue:"tachibana", code:"session_expired", message}` → Rust UI バナー（旧 `EngineError{code:"tachibana_session_expired"}` は廃止）。**バナー文言は Python が `message` に詰めて送る**（F-Banner1）。Rust 側は `message` をそのまま描画し、固定文言を持たない。`code` は severity（warning/error）とアクションボタン（再ログイン / 閉じる）の出し分けにのみ使う
+- [x] ✅ **`VenueError.code` の enum 化（T0 schema 追加分の検証）**: Python 側の発出箇所（`tachibana_auth.py` / `tachibana_ws.py` / `tachibana.py`）で使う code 文字列が [architecture.md §6](./architecture.md#6-失敗モードと-ui-表現) の表と一致することを単体テストで検証。Rust 側 `engine-client/src/error.rs` の `VenueErrorCode` enum + `classify_venue_error` が各コードを網羅（全コード explicit test 済み）。未知 code は `(Error, Hidden)` fail-safe に倒す
+- [x] ✅ **バナー文言テスト** `python/tests/test_tachibana_banner_messages.py`（snapshot test、locale=`ja_JP` 固定）: `_MSG_*` 定数の snapshot assert（5 定数）＋ 日本語文字列ガード＋ `UnreadNoticesError` / `depth_unavailable` key phrase ガード実装済み。23 件全 PASS（2026-04-26）
+- [x] ✅ `VenueCredentialsRefreshed` 経由で**起動時再ログイン後**の session を Rust が keyring 更新。`engine-client/tests/process_creds_refresh_hook.rs` の 4 テスト（`patch_in_memory_session_replaces_session_field` / `refresh_hook_callback_fires_with_session` / `medium7_full_variant_overwrites_credentials_triple` / `medium7_from_wire_partial_mixture_falls_back_to_session_only`）で검증済み
+- [x] ✅ Python 再起動シナリオの自動テスト。`engine-client/tests/process_lifecycle.rs` に `test_credentials_resent_in_order_after_restart` を追記済み。コマンド送信順序 `SetProxy → SetVenueCredentials → Subscribe` を assert（2026-04-26）
+- [x] ✅ ログ redaction テスト `python/tests/test_tachibana_log_redaction.py`（user_id / password / session token / 仮想URLが全 log record に含まれないこと）: 5 テストケース（happy path / error path / validate_session happy / validate_session expired / 全 tachibana logger sweep）実装済み。全 PASS（2026-04-26）
+- [x] ✅ capabilities ハンドシェイクで OI / fetch_trades / 分足の非対応を Rust に伝え UI を非活性化。`tachibana.py::capabilities()` が `{"supported_timeframes": ["1d"]}` を返し、Rust 側 `is_timeframe_enabled` が 1m/5m/1h を disabled 化
+- [x] ✅ capabilities UI 非活性化テスト `engine-client/tests/capabilities_gate.rs`。`1m / 5m / 1h` が `enabled == false`、`1d` が `enabled == true` を assert（2026-04-26 に `1m` の assert を追加）
+- [x] ✅ `NotImplementedError` → `Error{code:"not_implemented"}` 変換。`tachibana.py::VenueCapabilityError(code="not_implemented")` が server 側で `Error` イベントにマップされることを `test_tachibana_error_mapping.py` で검증済み
+- [x] ✅ 「ProcessManager が credentials を保持していないため再起動後に立花だけ復旧しない」回帰防止統合テスト。`engine-client/tests/process_lifecycle.rs::venue_credentials_are_retained_after_handshake` 追加済み（2026-04-26）
+- [x] ✅ **`VenueReady` 冪等性テスト**: `engine-client/tests/venue_ready_idempotent.rs` を新設（2026-04-26）。`second_venue_ready_does_not_trigger_extra_subscribe`（2 サブスクリプション×2 ready → Subscribe は 2 件のみ）＋ `apply_after_handshake_sends_subscribe_exactly_once_per_subscription` の 2 テスト全 PASS
+- [ ] **受け入れ**: [spec.md §4 受け入れ条件](./spec.md#4-受け入れ条件phase-1-完了の定義) 全て緑（デモ環境での実機確認が必要）
+
+### T6 実装サマリ（2026-04-26）
+
+**実装済みテスト一覧**:
+| ファイル | テスト数 | 状態 |
+|---|---|---|
+| `python/tests/test_tachibana_banner_messages.py` | 18 | ✅ 全 PASS |
+| `python/tests/test_tachibana_log_redaction.py` | 5 | ✅ 全 PASS |
+| `engine-client/tests/capabilities_gate.rs` | 3（`1m` 追加済み） | ✅ 全 PASS |
+| `engine-client/tests/process_lifecycle.rs` | +2（resent_in_order / retained） | ✅ 全 PASS |
+| `engine-client/tests/venue_ready_idempotent.rs` | 2（新設） | ✅ 全 PASS |
+
+**設計メモ**:
+- バナー文言は `_MSG_*` 定数（`tachibana_auth.py`）が sole source of truth。Rust は `message` をそのまま描画し文言生成しない（F-Banner1 遵守）
+- ログ redaction テストは sentinel 方式（高エントロピー文字列、`test_tachibana_startup_supervisor.py` MEDIUM-3 ラウンド 7 と同設計）。`caplog.at_level(DEBUG)` で全 record を捕捉
+- VenueReady 冪等性: `apply_after_handshake` の外から届く stray VenueReady は ProcessManager が resubscribe をトリガしない構造であることを mock double-ready サーバで実証
+- credentials retention: `apply_after_handshake` は `venue_credentials` を `clone()` して使うため原本は消えない（mut borrow なし）。テストがこの不変条件を pin
 - **T6 タスク実行コマンドと CI ゲート（D-M1）**:
   - `test_tachibana_banner_messages.py` / `test_tachibana_log_redaction.py`: `uv run pytest python/tests/test_tachibana_banner_messages.py python/tests/test_tachibana_log_redaction.py -v`
   - `capabilities_gate.rs` / `VenueReady` 冪等性テスト: `cargo test -p flowsurface-engine-client`

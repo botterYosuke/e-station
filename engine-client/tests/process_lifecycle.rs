@@ -2,11 +2,14 @@
 ///
 /// These tests use an in-process mock WS server (tokio-tungstenite) so no
 /// real Python engine is required.
-use flowsurface_engine_client::{ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR};
+use flowsurface_engine_client::{
+    ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR, SubscriptionKey,
+    dto::{TachibanaCredentialsWire, VenueCredentialsPayload},
+};
 
 use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, sync::Notify};
+use tokio::{net::TcpListener, sync::Notify, sync::mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -184,4 +187,202 @@ async fn set_proxy_stores_url() {
     manager.set_proxy(None).await;
     let stored = manager.proxy_url.lock().await.clone();
     assert!(stored.is_none());
+}
+
+// ── helpers for restart-scenario tests ────────────────────────────────────────
+
+fn dummy_creds() -> VenueCredentialsPayload {
+    VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire {
+        user_id: "u".to_string(),
+        password: "p".to_string().into(),
+        second_password: None,
+        is_demo: true,
+        session: None,
+    })
+}
+
+/// Mock server that records every `op` string in arrival order and responds
+/// with `VenueReady` after `SetVenueCredentials` so `apply_after_handshake`
+/// can complete.
+async fn mock_server_record_ops_with_venue_ready(
+    listener: TcpListener,
+    token: String,
+    ops_tx: mpsc::UnboundedSender<String>,
+) {
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(tcp).await.unwrap();
+
+        // Read Hello.
+        if let Some(Ok(msg)) = ws.next().await {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&msg.into_text().unwrap_or_default()).unwrap_or_default();
+            assert_eq!(parsed["op"], "Hello");
+            assert_eq!(parsed["token"], token.as_str());
+        }
+
+        // Send Ready.
+        let ready = serde_json::json!({
+            "event": "Ready",
+            "schema_major": SCHEMA_MAJOR,
+            "schema_minor": SCHEMA_MINOR,
+            "engine_version": "0.0.1-mock",
+            "engine_session_id": "00000000-0000-0000-0000-000000000002",
+            "capabilities": {}
+        });
+        ws.send(Message::Text(ready.to_string().into())).await.ok();
+
+        // Record subsequent ops; reply VenueReady to SetVenueCredentials.
+        while let Some(Ok(msg)) = ws.next().await {
+            let text = msg.into_text().unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+            let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let op = parsed["op"].as_str().unwrap_or("").to_string();
+            ops_tx.send(op.clone()).ok();
+
+            if op == "SetVenueCredentials" {
+                let request_id = parsed["request_id"].as_str().unwrap_or("").to_string();
+                let venue_ready = serde_json::json!({
+                    "event": "VenueReady",
+                    "venue": "tachibana",
+                    "request_id": request_id,
+                });
+                ws.send(Message::Text(venue_ready.to_string().into()))
+                    .await
+                    .ok();
+            }
+        }
+    });
+}
+
+// ── T6: test_credentials_resent_in_order_after_restart ────────────────────────
+//
+// Regression guard: after a Python restart (another `apply_after_handshake`
+// call), `ProcessManager` must resend credentials in the spec-mandated order:
+//   SetProxy → SetVenueCredentials → (wait VenueReady) → Subscribe
+//
+// Without this test, a refactor that moves or drops the SetVenueCredentials
+// step in `apply_after_handshake` would go undetected until a runtime failure.
+
+#[tokio::test]
+async fn test_credentials_resent_in_order_after_restart() {
+    let (listener, addr) = bind_loopback().await;
+    let (ops_tx, mut ops_rx) = mpsc::unbounded_channel::<String>();
+
+    let token = "restart-order-token";
+    mock_server_record_ops_with_venue_ready(listener, token.to_string(), ops_tx).await;
+
+    let url = format!("ws://{addr}");
+    let conn = flowsurface_engine_client::EngineConnection::connect(&url, token)
+        .await
+        .expect("handshake");
+
+    let manager = Arc::new(ProcessManager::new("python"));
+
+    // Configure proxy, credentials, and an active subscription — all three
+    // must be replayed during apply_after_handshake (the restart path).
+    manager
+        .set_proxy(Some("socks5://127.0.0.1:9050".to_string()))
+        .await;
+    manager.set_venue_credentials(dummy_creds()).await;
+    manager
+        .active_subscriptions
+        .lock()
+        .await
+        .insert(SubscriptionKey {
+            venue: "tachibana".into(),
+            ticker: "7203".into(),
+            stream: "trade".into(),
+            timeframe: None,
+            market: "stock".into(),
+        });
+
+    manager.apply_after_handshake(&conn).await;
+
+    // Let the mock server's read loop flush the Subscribe op.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut ops: Vec<String> = Vec::new();
+    while let Ok(op) = ops_rx.try_recv() {
+        ops.push(op);
+    }
+
+    // All three ops must be present.
+    let pos_proxy = ops
+        .iter()
+        .position(|o| o == "SetProxy")
+        .expect("SetProxy must be sent on restart (ops: {ops:?})");
+    let pos_creds = ops
+        .iter()
+        .position(|o| o == "SetVenueCredentials")
+        .expect("SetVenueCredentials must be sent on restart");
+    let pos_sub = ops
+        .iter()
+        .position(|o| o == "Subscribe")
+        .expect("Subscribe must be sent after VenueReady");
+
+    assert!(
+        pos_proxy < pos_creds,
+        "SetProxy must precede SetVenueCredentials (got order: {ops:?})"
+    );
+    assert!(
+        pos_creds < pos_sub,
+        "SetVenueCredentials must precede Subscribe (got order: {ops:?})"
+    );
+
+    drop(conn);
+}
+
+// ── T6: venue_credentials_are_retained_after_handshake ────────────────────────
+//
+// Regression guard for "ProcessManager が credentials を保持していないため
+// 再起動後に立花だけ復旧しない".
+//
+// Credentials stored via `set_venue_credentials` must remain in
+// `venue_credentials` after `apply_after_handshake` completes — they are
+// cloned during the handshake, never moved or cleared. A regression here
+// would cause the second (and all subsequent) restarts to skip
+// SetVenueCredentials entirely, leaving Tachibana permanently unauthenticated.
+
+#[tokio::test]
+async fn venue_credentials_are_retained_after_handshake() {
+    let (listener, addr) = bind_loopback().await;
+    let (ops_tx, _ops_rx) = mpsc::unbounded_channel::<String>();
+
+    let token = "creds-retained-token";
+    mock_server_record_ops_with_venue_ready(listener, token.to_string(), ops_tx).await;
+
+    let url = format!("ws://{addr}");
+    let conn = flowsurface_engine_client::EngineConnection::connect(&url, token)
+        .await
+        .expect("handshake");
+
+    let manager = Arc::new(ProcessManager::new("python"));
+    manager.set_venue_credentials(dummy_creds()).await;
+
+    {
+        let store = manager.venue_credentials.lock().await;
+        assert_eq!(store.len(), 1, "credentials must be stored before handshake");
+    }
+
+    manager.apply_after_handshake(&conn).await;
+
+    // After the handshake the credentials must still be in the store so that
+    // the next restart cycle can re-send them.
+    {
+        let store = manager.venue_credentials.lock().await;
+        assert_eq!(
+            store.len(),
+            1,
+            "credentials must be retained after apply_after_handshake — \
+             a regression here causes Tachibana to stay unauthenticated on restart"
+        );
+    }
+
+    drop(conn);
 }
