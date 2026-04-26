@@ -16,7 +16,7 @@ Coverage (architecture.md §6 failure-mode table):
   login_failed      — general auth failure
   transport_error   — HTTP/network failure during login
   login_parse_failed — malformed JSON response
-  virtual_url_invalid — response URLs fail scheme validation
+  virtual_url_invalid — response URLs fail scheme validation (raised as code="login_failed")
   depth_unavailable — no bid/ask keys in FD frames after 30 s (tachibana.py)
 """
 
@@ -127,7 +127,7 @@ def test_unread_notices_error_default_message_snapshot() -> None:
     """UnreadNoticesError default message is the pinned Japanese string."""
     err = UnreadNoticesError()
     assert err.code == "unread_notices"
-    assert err.message == "未読通知があるため仮想 URL が発行されません"
+    assert err.message == "立花からの未読通知があります。ブラウザで確認後に再ログインしてください"
     assert _is_japanese(err.message)
 
 
@@ -164,6 +164,59 @@ def test_depth_unavailable_message_contains_japanese_key_phrase() -> None:
     assert abs(idx_depth - idx_ita) < 300, (
         "'板情報' is not adjacent to the depth_unavailable code — "
         "the message may have been moved away from the code."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Functional: depth_unavailable VenueError message carries 板情報 (M-F)
+# ---------------------------------------------------------------------------
+# The depth_unavailable message is assembled inline in stream_depth().
+# Rather than relying solely on inspect.getsource() proximity, we also parse
+# the assembled string literal from the source and assert the field value
+# directly — so minor source layout changes (e.g. parenthesis grouping) do
+# not silently break the guard.
+
+
+def test_depth_unavailable_venue_error_message_contains_ita_joho() -> None:
+    """The depth_unavailable VenueError message must contain '板情報'.
+
+    tachibana.py._safety_watchdog appends a dict with:
+        {"event": "VenueError", "code": "depth_unavailable", "message": "..."}
+    We verify the message by parsing the adjacent string literals from source
+    and asserting the assembled value contains the key phrase.
+    """
+    import re
+    import inspect
+    import engine.exchanges.tachibana as tachibana_module
+
+    source = inspect.getsource(tachibana_module)
+
+    # Locate the depth_unavailable VenueError dict and extract the "message" value.
+    # The watchdog builds the message as an implicit string concatenation:
+    #   "message": (
+    #       "立花の板情報が取得できません"
+    #       "（FD frame に気配が含まれていません）。"
+    #       "設定を確認してください"
+    #   ),
+    pattern = re.compile(
+        r'"depth_unavailable".*?"message":\s*\(?\s*((?:"[^"]*"\s*)+)',
+        re.DOTALL,
+    )
+    m = pattern.search(source)
+    assert m is not None, (
+        "Could not locate the depth_unavailable message block in tachibana.py. "
+        "Update this test if the watchdog code structure changed."
+    )
+
+    parts = re.findall(r'"([^"]*)"', m.group(1))
+    assembled_message = "".join(parts)
+
+    assert "板情報" in assembled_message, (
+        f"depth_unavailable VenueError message must contain '板情報', "
+        f"got assembled message: {assembled_message!r}"
+    )
+    assert _is_japanese(assembled_message), (
+        f"depth_unavailable VenueError message must be Japanese: {assembled_message!r}"
     )
 
 

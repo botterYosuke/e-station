@@ -11,6 +11,7 @@ use data::{
         calc_search_rank, compare_ticker_rows_by_sort, compute_display_data, market_suffix,
     },
 };
+use engine_client::TickerMetaMap;
 use exchange::{
     Ticker, TickerInfo, TickerStats,
     adapter::{AdapterHandles, Exchange, MarketKind, Venue},
@@ -25,7 +26,6 @@ use iced::{
         space, text, text_input,
     },
 };
-use engine_client::TickerMetaMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     collections::HashMap,
@@ -1113,9 +1113,7 @@ impl TickersTable {
             // for such queries, so the only net addition is the `display_name_ja`
             // starts-with check.
             if row.exchange.venue() == Venue::Tachibana {
-                let meta_opt = tachibana_meta
-                    .as_deref()
-                    .and_then(|m| m.get(&row.ticker));
+                let meta_opt = tachibana_meta.as_deref().and_then(|m| m.get(&row.ticker));
                 if engine_client::tachibana_meta::matches_tachibana_filter(
                     &row.ticker,
                     meta_opt,
@@ -1123,7 +1121,11 @@ impl TickersTable {
                 ) {
                     // Assign a bucket beyond the four ASCII buckets so
                     // Japanese-name matches sort after all ASCII matches.
-                    return Some(SearchRank { bucket: 5, pos: 0, len: 0 });
+                    return Some(SearchRank {
+                        bucket: 5,
+                        pos: 0,
+                        len: 0,
+                    });
                 }
             }
             None
@@ -2647,8 +2649,10 @@ mod tests {
             selected_markets: vec![MarketKind::Stock],
             ..Default::default()
         };
-        let (mut table, _) =
-            TickersTable::new_with_settings(&settings, exchange::adapter::AdapterHandles::default());
+        let (mut table, _) = TickersTable::new_with_settings(
+            &settings,
+            exchange::adapter::AdapterHandles::default(),
+        );
         table.push_ticker_row_for_test(row);
         table.set_tachibana_meta_handle(Some(handle));
 

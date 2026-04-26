@@ -45,3 +45,9 @@ fn test_venue_without_constraint_is_fail_open() {
     // binance did not advertise — fail-open.
     assert!(is_timeframe_enabled(&caps, "binance", "5m").unwrap());
 }
+
+#[test]
+fn test_malformed_venue_capabilities_returns_err() {
+    let caps = serde_json::json!({ "venue_capabilities": "not_an_object" });
+    assert!(is_timeframe_enabled(&caps, "tachibana", "1d").is_err());
+}

@@ -143,6 +143,32 @@ the user does not need a system Python install.
     exponential backoff (500 ms → 30 s cap), reapplies the proxy, and
     re-subscribes every active stream.  Charts repopulate automatically.
 
+## Tachibana Securities (立花証券) Venue
+
+Flowsurface supports real-time Japanese stock charting via the Tachibana
+Securities e支店 API (Phase 1: read-only, demo environment).
+
+**Prerequisites for using the Tachibana venue:**
+
+- A **Tachibana Securities e支店 account** with **phone authentication** completed.
+  The API requires telephone-based authentication before any programmatic login
+  is possible; without it the login dialog will be blocked by the brokerage.
+- The account must be enrolled in the e支店 API service.
+- Phase 1 connects to the **demo environment** (`demo-kabuka.e-shiten.jp`) only.
+  Production access requires setting `TACHIBANA_ALLOW_PROD=1` at runtime.
+
+**Development / CI login** (debug builds only):
+
+```bash
+export DEV_TACHIBANA_USER_ID=your_user_id
+export DEV_TACHIBANA_PASSWORD=your_password
+export DEV_TACHIBANA_DEMO=true   # default; set to false to attempt prod (+ TACHIBANA_ALLOW_PROD=1)
+cargo run                        # debug build auto-logins via env, no dialog
+```
+
+Release builds ignore `DEV_TACHIBANA_*` entirely and always require the
+interactive login dialog.
+
 ## Credits and thanks to
 
 -   [Kraken Desktop](https://www.kraken.com/desktop) (formerly [Cryptowatch](https://blog.kraken.com/product/cryptowatch-to-sunset-kraken-pro-to-integrate-cryptowatch-features)), the main inspiration that sparked this project

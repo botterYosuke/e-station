@@ -302,29 +302,33 @@ async fn test_credentials_resent_in_order_after_restart() {
             market: "stock".into(),
         });
 
-    manager.apply_after_handshake(&conn).await;
+    manager
+        .apply_after_handshake_with_timeout(&conn, Duration::from_secs(5))
+        .await;
 
-    // Let the mock server's read loop flush the Subscribe op.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
+    // Drain ops with a deadline so CI load spikes don't cause false failures.
     let mut ops: Vec<String> = Vec::new();
-    while let Ok(op) = ops_rx.try_recv() {
-        ops.push(op);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        match tokio::time::timeout_at(deadline, ops_rx.recv()).await {
+            Ok(Some(op)) => ops.push(op),
+            Ok(None) | Err(_) => break,
+        }
     }
 
     // All three ops must be present.
     let pos_proxy = ops
         .iter()
         .position(|o| o == "SetProxy")
-        .expect("SetProxy must be sent on restart (ops: {ops:?})");
+        .unwrap_or_else(|| panic!("SetProxy must be sent on restart (ops: {ops:?})"));
     let pos_creds = ops
         .iter()
         .position(|o| o == "SetVenueCredentials")
-        .expect("SetVenueCredentials must be sent on restart");
+        .unwrap_or_else(|| panic!("SetVenueCredentials must be sent on restart (ops: {ops:?})"));
     let pos_sub = ops
         .iter()
         .position(|o| o == "Subscribe")
-        .expect("Subscribe must be sent after VenueReady");
+        .unwrap_or_else(|| panic!("Subscribe must be sent after VenueReady (ops: {ops:?})"));
 
     assert!(
         pos_proxy < pos_creds,
@@ -367,10 +371,16 @@ async fn venue_credentials_are_retained_after_handshake() {
 
     {
         let store = manager.venue_credentials.lock().await;
-        assert_eq!(store.len(), 1, "credentials must be stored before handshake");
+        assert_eq!(
+            store.len(),
+            1,
+            "credentials must be stored before handshake"
+        );
     }
 
-    manager.apply_after_handshake(&conn).await;
+    manager
+        .apply_after_handshake_with_timeout(&conn, Duration::from_secs(5))
+        .await;
 
     // After the handshake the credentials must still be in the store so that
     // the next restart cycle can re-send them.

@@ -60,6 +60,17 @@ flowsurface 立花 venue 統合は **Python 側 `python/engine/exchanges/tachiba
 
 ---
 
+## 立花 venue 利用の前提条件（T7 追記）
+
+立花証券 venue を使うには以下が**すべて**必要:
+
+1. **電話認証済みの立花証券 e支店 口座** — e支店 API は電話認証（電話番号照合）完了後でないとプログラマチックログインが成立しない。電話認証未済のアカウントでは tkinter ログインダイアログが弾かれる。
+2. **e支店 API サービスの申込み** — API 利用は口座開設とは別途申込みが必要な場合がある（立花証券営業窓口に確認すること）。
+3. **デモ環境デフォルト** — Phase 1 はデモ環境（`demo-kabuka.e-shiten.jp`）に接続する。本番接続には `TACHIBANA_ALLOW_PROD=1` env が必要（設定しても demo/prod 選択は tkinter ダイアログで都度行う）。
+4. **CI demo ジョブは `workflow_dispatch` のみ** — `pytest -m demo_tachibana` を回す CI ジョブ（`.github/workflows/tachibana-demo.yml`）は手動トリガ限定。PR/push への組み込みは閉局帯ヒットによる偽陰性を防ぐため禁止（open-questions.md Q21）。
+
+---
+
 ## いつこのスキルを発動するか
 
 - 立花証券 API に対する新規エンドポイント・新しい `sCLMID` を追加するとき

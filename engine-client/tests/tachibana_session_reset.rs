@@ -30,7 +30,11 @@ fn depth_snapshot_with_new_session_id_deserializes() {
     }"#;
     let parsed: EngineEvent = serde_json::from_str(payload).expect("DepthSnapshot should parse");
     match parsed {
-        EngineEvent::DepthSnapshot { stream_session_id, sequence_id, .. } => {
+        EngineEvent::DepthSnapshot {
+            stream_session_id,
+            sequence_id,
+            ..
+        } => {
             assert_eq!(stream_session_id, "session-2:1");
             assert_eq!(sequence_id, 1);
         }
@@ -47,8 +51,7 @@ async fn new_session_id_resets_gap_detector_and_accepts_diffs() {
     let addr = listener.local_addr().unwrap();
     let token = "tok";
 
-    let (snapshot_request_tx, snapshot_request_rx) =
-        tokio::sync::oneshot::channel::<bool>();
+    let (snapshot_request_tx, snapshot_request_rx) = tokio::sync::oneshot::channel::<bool>();
 
     tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
@@ -129,20 +132,15 @@ async fn new_session_id_resets_gap_detector_and_accepts_diffs() {
             .unwrap();
 
         // Wait briefly to see if the client sends RequestDepthSnapshot.
-        let saw_snapshot_request = match tokio::time::timeout(
-            Duration::from_millis(300),
-            ws.next(),
-        )
-        .await
-        {
-            Ok(Some(Ok(msg))) => {
-                let text = msg.into_text().unwrap_or_default();
-                let v: serde_json::Value =
-                    serde_json::from_str(&text).unwrap_or_default();
-                v["op"] == "RequestDepthSnapshot"
-            }
-            _ => false,
-        };
+        let saw_snapshot_request =
+            match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+                Ok(Some(Ok(msg))) => {
+                    let text = msg.into_text().unwrap_or_default();
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    v["op"] == "RequestDepthSnapshot"
+                }
+                _ => false,
+            };
         let _ = snapshot_request_tx.send(saw_snapshot_request);
 
         tokio::time::sleep(Duration::from_millis(100)).await;

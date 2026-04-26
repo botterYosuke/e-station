@@ -114,8 +114,12 @@ async fn mock_server_double_venue_ready(
                     // batch of Subscribes.
                     if subs_seen >= subscribe_count && !second_ready_sent {
                         second_ready_sent = true;
-                        // Small delay so the first Subscribe wave has been
-                        // fully processed client-side.
+                        // Short delay so apply_after_handshake (which waits for
+                        // VenueReady before sending Subscribe) has fully returned
+                        // and the client-side event loop is back in a quiescent
+                        // state. 50 ms is well within the test drain deadline
+                        // (500 ms) even under CI load, so this does not cause
+                        // spurious failures.
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         let extra_ready = serde_json::json!({
                             "event": "VenueReady",
@@ -174,21 +178,25 @@ async fn second_venue_ready_does_not_trigger_extra_subscribe() {
         });
     }
 
-    manager.apply_after_handshake(&conn).await;
+    manager
+        .apply_after_handshake_with_timeout(&conn, Duration::from_secs(5))
+        .await;
 
-    // Wait long enough for the server's extra VenueReady to arrive and for
-    // any hypothetical second Subscribe burst to be sent.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
+    // Drain ops with a deadline — wait long enough for the server's extra
+    // VenueReady to arrive and for any hypothetical second Subscribe burst to
+    // be sent, but without hard-coding a wall-clock sleep.
     let mut ops: Vec<String> = Vec::new();
-    while let Ok(op) = ops_rx.try_recv() {
-        ops.push(op);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        match tokio::time::timeout_at(deadline, ops_rx.recv()).await {
+            Ok(Some(op)) => ops.push(op),
+            Ok(None) | Err(_) => break,
+        }
     }
 
     let subscribe_count = ops.iter().filter(|o| o.as_str() == "Subscribe").count();
     assert_eq!(
-        subscribe_count,
-        ACTIVE_SUBS,
+        subscribe_count, ACTIVE_SUBS,
         "Subscribe must be sent exactly once per active subscription \
          ({ACTIVE_SUBS} expected), got {subscribe_count}. \
          Full op log: {ops:?}"
@@ -226,18 +234,23 @@ async fn apply_after_handshake_sends_subscribe_exactly_once_per_subscription() {
             market: "stock".into(),
         });
 
-    manager.apply_after_handshake(&conn).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    manager
+        .apply_after_handshake_with_timeout(&conn, Duration::from_secs(5))
+        .await;
 
+    // Drain ops with a deadline instead of a fixed sleep.
     let mut ops: Vec<String> = Vec::new();
-    while let Ok(op) = ops_rx.try_recv() {
-        ops.push(op);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        match tokio::time::timeout_at(deadline, ops_rx.recv()).await {
+            Ok(Some(op)) => ops.push(op),
+            Ok(None) | Err(_) => break,
+        }
     }
 
     let subscribe_count = ops.iter().filter(|o| o.as_str() == "Subscribe").count();
     assert_eq!(
-        subscribe_count,
-        1,
+        subscribe_count, 1,
         "exactly 1 Subscribe expected for 1 active subscription, got {subscribe_count}. \
          Full op log: {ops:?}"
     );

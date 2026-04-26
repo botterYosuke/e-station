@@ -372,13 +372,13 @@ flowsurface との差分:
 
 ```
 {"phase":"submit", "ts":..., "client_order_id":"...", "request_key":12345, "instrument_id":"7203.TSE", ...}
-{"phase":"accepted", "ts":..., "client_order_id":"...", "venue_order_id":"sOrderNumber=ABC", "p_no":...}
+{"phase":"accepted", "ts":..., "client_order_id":"...", "venue_order_id":"sOrderNumber=ABC", "p_no":..., "warning_code": null, "warning_text": null}
 {"phase":"rejected", "ts":..., "client_order_id":"...", "reason_code":"...", "reason_text":"..."}
 ```
 
 - `submit` 行は **HTTP 送信直前**に `fsync` 込みで書く（クラッシュ時の不整合を最小化）
 - **fsync 失敗時の扱い**: `submit` 行の `fsync` が失敗した場合は HTTP 500 + `reason_code="INTERNAL_ERROR"` で reject し、**WAL に書けない発注は立花へ送信しない**（write-ahead log の前提を崩さない）
-- `accepted` / `rejected` 行は応答受領後に `flush` で書く（`fsync` 不要）
+- `accepted` / `rejected` 行は応答受領後に `flush` で書く（`fsync` 不要）。`f.flush()` 直接呼び出し（同期）を許容する（`run_in_executor` 不要: `accepted` 行のバッファ残りクラッシュは Phase O1 `GetOrderList` で補完可能な設計のため同期 flush の遅延リスクを許容する）
   - `accepted` が OS バッファ残りのままクラッシュした場合、Rust 起動時は `unknown` 状態で復元する。
     Phase O1 の `GetOrderList` で `venue_order_id` を補完できるため許容する
 - **第二暗証番号は絶対に出さない**（unit テストで `grep -i second_password` 等で検証）

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 1
-SCHEMA_MINOR: int = 2
+SCHEMA_MINOR: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +178,102 @@ class RequestVenueLogin(IpcMessage):
     op: Literal["RequestVenueLogin"] = "RequestVenueLogin"
     request_id: str
     venue: str
+
+
+# ── Order Phase commands (schema 1.3) ────────────────────────────────────────
+
+
+class SetSecondPassword(IpcMessage):
+    """Set second password in Python memory for order submission.
+    `value` is transmitted as plain string; Python must wrap it in SecretStr.
+    """
+
+    op: Literal["SetSecondPassword"] = "SetSecondPassword"
+    request_id: str
+    value: str
+
+
+class ForgetSecondPassword(IpcMessage):
+    """Clear the second password from Python memory."""
+
+    op: Literal["ForgetSecondPassword"] = "ForgetSecondPassword"
+
+
+class SubmitOrderRequest(IpcMessage):
+    """Order placement request — shape matches the nautilus OrderFactory input.
+    extra='forbid' prevents second_password / p_no injection (C-R2-M3 / D3-1).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_order_id: str
+    instrument_id: str
+    order_side: str
+    order_type: str
+    quantity: str
+    price: str | None = None
+    trigger_price: str | None = None
+    trigger_type: str | None = None
+    time_in_force: str
+    expire_time_ns: int | None = None
+    post_only: bool
+    reduce_only: bool
+    tags: list[str] = Field(default_factory=list)
+
+
+class OrderModifyChange(IpcMessage):
+    """Fields that can be modified on an existing order; None = unchanged."""
+
+    new_quantity: str | None = None
+    new_price: str | None = None
+    new_trigger_price: str | None = None
+    new_expire_time_ns: int | None = None
+
+
+class OrderListFilter(IpcMessage):
+    """Filter for GetOrderList. All fields optional."""
+
+    status: str | None = None
+    instrument_id: str | None = None
+    date: str | None = None
+
+
+class SubmitOrder(IpcMessage):
+    op: Literal["SubmitOrder"] = "SubmitOrder"
+    request_id: str
+    venue: str
+    order: SubmitOrderRequest
+
+
+class ModifyOrder(IpcMessage):
+    op: Literal["ModifyOrder"] = "ModifyOrder"
+    request_id: str
+    venue: str
+    client_order_id: str
+    change: OrderModifyChange
+
+
+class CancelOrder(IpcMessage):
+    op: Literal["CancelOrder"] = "CancelOrder"
+    request_id: str
+    venue: str
+    client_order_id: str
+    venue_order_id: str
+
+
+class CancelAllOrders(IpcMessage):
+    op: Literal["CancelAllOrders"] = "CancelAllOrders"
+    request_id: str
+    venue: str
+    instrument_id: str | None = None
+    order_side: str | None = None
+
+
+class GetOrderList(IpcMessage):
+    op: Literal["GetOrderList"] = "GetOrderList"
+    request_id: str
+    venue: str
+    filter: OrderListFilter = Field(default_factory=OrderListFilter)
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +512,100 @@ class VenueLoginCancelled(IpcMessage):
     event: Literal["VenueLoginCancelled"] = "VenueLoginCancelled"
     venue: str
     request_id: str | None = None
+
+
+# ── Order Phase events (schema 1.3) ──────────────────────────────────────────
+
+
+class SecondPasswordRequired(IpcMessage):
+    event: Literal["SecondPasswordRequired"] = "SecondPasswordRequired"
+    request_id: str
+
+
+class OrderSubmitted(IpcMessage):
+    event: Literal["OrderSubmitted"] = "OrderSubmitted"
+    client_order_id: str
+    ts_event_ms: int
+
+
+class OrderAccepted(IpcMessage):
+    event: Literal["OrderAccepted"] = "OrderAccepted"
+    client_order_id: str
+    venue_order_id: str
+    ts_event_ms: int
+
+
+class OrderRejected(IpcMessage):
+    event: Literal["OrderRejected"] = "OrderRejected"
+    client_order_id: str
+    reason_code: str
+    reason_text: str = ""
+    ts_event_ms: int
+
+
+class OrderPendingUpdate(IpcMessage):
+    event: Literal["OrderPendingUpdate"] = "OrderPendingUpdate"
+    client_order_id: str
+    ts_event_ms: int
+
+
+class OrderPendingCancel(IpcMessage):
+    event: Literal["OrderPendingCancel"] = "OrderPendingCancel"
+    client_order_id: str
+    ts_event_ms: int
+
+
+class OrderFilled(IpcMessage):
+    """Order filled event. `leaves_qty == "0"` means full fill (nautilus convention)."""
+
+    event: Literal["OrderFilled"] = "OrderFilled"
+    client_order_id: str
+    venue_order_id: str
+    trade_id: str
+    last_qty: str
+    last_price: str
+    cumulative_qty: str
+    leaves_qty: str
+    ts_event_ms: int
+
+
+class OrderCanceled(IpcMessage):
+    event: Literal["OrderCanceled"] = "OrderCanceled"
+    client_order_id: str
+    venue_order_id: str
+    ts_event_ms: int
+
+
+class OrderExpired(IpcMessage):
+    event: Literal["OrderExpired"] = "OrderExpired"
+    client_order_id: str
+    venue_order_id: str
+    ts_event_ms: int
+
+
+class OrderRecordWire(IpcMessage):
+    """Single order record in OrderListUpdated."""
+
+    client_order_id: str | None = None
+    venue_order_id: str
+    instrument_id: str
+    order_side: str
+    order_type: str
+    quantity: str
+    filled_qty: str
+    leaves_qty: str
+    price: str | None = None
+    trigger_price: str | None = None
+    time_in_force: str
+    expire_time_ns: int | None = None
+    status: str
+    ts_event_ms: int
+
+
+class OrderListUpdated(IpcMessage):
+    event: Literal["OrderListUpdated"] = "OrderListUpdated"
+    request_id: str
+    orders: list[OrderRecordWire] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

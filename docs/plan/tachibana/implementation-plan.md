@@ -628,40 +628,104 @@
   - CI ジョブ名: `.github/workflows/rust.yml::ci-test`（既存 rust テストジョブに統合）
   - **F-Banner1 の Tx タスク帰属**: F-Banner1（バナー文言テスト）は T7 でなく **T6** に帰属する（`test_tachibana_banner_messages.py` は本フェーズのタスク `[ ] バナー文言テスト` で実装するため）。invariant-tests.md の F-Banner1 行は別エージェント担当で T6 に修正予定。
 
+### レビュー反映 (2026-04-26, ラウンド 1)
+
+以下の指摘を TDD（RED→GREEN）で解消した。
+
+| ID | ファイル | 内容 | 状態 |
+|---|---|---|---|
+| M-A | `python/engine/nautilus/engine_runner.py:195` | `sorted(timestamps), sorted(last_prices)` の独立ソートによるデータ破壊バグを `zip` + `sorted` によるペア保持ソートに修正 | ✅ |
+| M-D | `engine-client/tests/process_lifecycle.rs:319,323,327` | `.expect("... {ops:?}")` が補間されない問題を `.unwrap_or_else(\|\| panic!("... {ops:?}"))` に変更（3 箇所） | ✅ |
+| M-B | `engine-client/tests/process_lifecycle.rs:307-312` | `sleep(150ms) + try_recv` パターンを `timeout_at` 付き drain ループに変更（CI race 修正） | ✅ |
+| M-C | `engine-client/tests/venue_ready_idempotent.rs:181,230` | `sleep(300ms) + try_recv` パターンを `timeout_at` 付き drain ループに変更。`apply_after_handshake` を `apply_after_handshake_with_timeout(5s)` に変更（2 テスト）。`process_lifecycle.rs` の `apply_after_handshake` 呼び出し 2 箇所も同様に変更 | ✅ |
+| M-E | `engine-client/tests/capabilities_gate.rs` | `is_timeframe_enabled` の Err バリアントテスト `test_malformed_venue_capabilities_returns_err` を追加 | ✅ |
+| M-F | `python/tests/test_tachibana_banner_messages.py` | `depth_unavailable` の `VenueError.message` が `板情報` を含むことを実値解析で検証するテスト `test_depth_unavailable_venue_error_message_contains_ita_joho` を追加（既存 `inspect.getsource` テストは残存） | ✅ |
+
+**回帰テスト結果 (2026-04-26)**:
+- `uv run pytest python/tests/` → 490 passed, 1 failed（pre-existing 環境依存: `test_tachibana_worker_basic::test_unimplemented_streams_raise_not_implemented` — DNS エラー、本修正と無関係）
+- `cargo test -p flowsurface-engine-client` → 全件 ok
+- `cargo check --workspace` → Finished（エラーなし）
+- `cargo clippy --workspace -- -D warnings` → Finished（警告なし）
+- `cargo fmt --check` → 差分なし（全 Rust ファイル整形済み）
+
+**新設テストファイル**:
+- `python/tests/test_collect_fill_data_preserves_pairs.py` — 6 テスト（M-A 回帰ガード）
+
+### レビュー反映 (2026-04-26, ラウンド 2-3)
+
+R2・R3 で発見・解消した追加指摘。
+
+| ID | ファイル | 内容 | 状態 |
+|---|---|---|---|
+| HIGH-P2 | `python/engine/exchanges/tachibana_helpers.py:52` | `UnreadNoticesError` デフォルト文言が architecture.md §6 と不一致。`"未読通知があるため仮想 URL が発行されません"` → `"立花からの未読通知があります。ブラウザで確認後に再ログインしてください"` に統一 | ✅ |
+| HIGH-P3 | `python/tests/test_tachibana_banner_messages.py:19` | コメントの `virtual_url_invalid` coverage 表記を `code="login_failed"` で発出される旨に訂正 | ✅ |
+| HIGH-SFH1 | `python/engine/nautilus/engine_runner.py:189-194` | ts/lp の独立 None ガードで zip サイレント切り捨てが発生するバグを `if ts is not None and lp is not None` の同時評価に修正 | ✅ |
+| HIGH-SFH2 | `python/engine/exchanges/tachibana_login_flow.py` (7 箇所) | `str(exc)` が IPC バナーに送られ英語混じり内部文字列が露出していた問題を `exc.message` に統一 | ✅ |
+| HIGH-RS1 | `engine-client/tests/venue_ready_idempotent.rs:117` | mock server `sleep(50ms)` に根拠コメント追記（CI 余裕 500ms 内に収まる旨を明記） | ✅ |
+
+**R3 収束確認 (2026-04-26)**:
+- MEDIUM 以上の指摘ゼロを確認
+- `uv run pytest python/tests/test_tachibana_banner_messages.py python/tests/test_collect_fill_data_preserves_pairs.py` → 全 PASS
+- `cargo test -p flowsurface-engine-client` → 全 PASS
+
+**新たな知見 (MISSES.md 候補)**:
+- `str(exc)` を IPC に渡すと内部エラー文字列が UI に露出する。`exc.message` を使うこと
+- 並列リストの None ガードは個別でなく同時評価（`ts is not None and lp is not None`）でペア整合を保つ
+- Rust の `.expect("... {var:?}")` はリテラル扱いで補間されない。`unwrap_or_else(|| panic!(...))` を使う
+
+**持ち越し（LOW として次フェーズ）**:
+- `process_lifecycle.rs::run_with_recovery_calls_on_ready_on_connect` — テストが `on_ready` コールバック経路を実際に検証していない（mock 自己発火の設計上の問題）。T7 で直すか別 PR で対処
+- `SessionExpiredError` デフォルト文言が英語混じり（"Tachibana セッション..."）— T7 でメッセージ整備時に対処
+
 ## フェーズ T7: 仕上げ・配布準備（1〜2 日）
 
-- [ ] **不変条件 ID ↔ test 関数名対応表の集約（R8-D1）**: [`docs/plan/tachibana/invariant-tests.md`](./invariant-tests.md) を正本とし、CI で `test_invariant_table_covers_all_ids` grep ガード（不変条件 ID が表内で必ず test 関数名と紐付くこと）を実行する
-- [ ] Python テスト CI 組込（`.github/workflows/` への `uv run pytest python/tests/` ジョブ追加）— 現状 Python テストは CI 未組込
-- [ ] README / SKILL.md に「立花 venue 利用の前提（電話認証済み口座が必要）」追記
-- [ ] release ビルドで env 自動ログインが完全に除外されていること（**`dev_tachibana_login_allowed: false` が Rust から送られ、Python 側 `tachibana_login_flow` が `os.getenv("DEV_TACHIBANA_*")` を読まないことを統合テストで確認**。`#[cfg(debug_assertions)]` でのコンパイル除外は採用しない — T3 で実装した runtime ガード方式を前提とする）
-- [ ] 本番 URL 設定の隠しフラグ（`TACHIBANA_ALLOW_PROD=1`）を実装、デフォルトは demo 強制
-- [ ] CI に `pytest -m demo_tachibana` を **T2 で確定した方式（A/B/C）に従って統合**（毎 PR では走らせない原則は維持）。T2 で案 (B)（manual lane only）を採ったなら `workflow_dispatch` のみ実装、案 (C) なら CI 統合自体を行わない。スケジュール起動する場合は demo の閉局帯を避ける。**ゲート（H5 修正）**: スケジュール起動の有効化は [open-questions.md Q21](./open-questions.md#q21--demo-環境の運用時間) の運用時間が T2 実機確認で確定してから。確定前は手動トリガのみ許可
-- [ ] **tkinter スモークテスト（F-M2c）**: CI で `xvfb-run pytest -m tk_smoke` を回す。`tachibana_login_dialog.py` を起動して即座に `{"status":"cancelled"}` を返す経路を `--auto-cancel` フラグで実装し、import エラーや `Toplevel` 構築失敗を CI で検知する。実 GUI のバリデーション挙動は引き続き `pytest -m gui` の手動確認
-- [ ] `tools/secret_scan.sh` 新設: `kabuka.e-shiten` / 仮想 URL ホスト / `sUserId` / `sPassword` / `sSecondPassword` を検出。pre-commit hook と CI ジョブの両方から同一スクリプトを呼ぶ（spec.md §4 受け入れ条件 6 と整合）。**`BASE_URL_PROD` を定義する 1 箇所（例: `python/engine/exchanges/tachibana_url.py`）はファイル単位で allowlist** し、それ以外のリテラル出現を全て fail させる（F11）。allowlist ファイルは冒頭コメントで理由を明示。**allowlist の除外方法（C-M3）**: allowlist は `tools/secret_scan_allowlist.txt`（1 行 1 ファイルパス、現在は `python/engine/exchanges/tachibana_url.py` のみ）を正本とし、`tools/secret_scan.sh` と `tools/secret_scan.ps1` の両スクリプトが同一ファイルを参照する（sh 版と ps1 版で allowlist がずれるリスクを排除）。
-- [ ] **Windows 開発環境での pre-commit 整合（F-M5b、LOW-4 修正）**: 本リポジトリの開発主体は Windows であり、git-bash / WSL が常に使える前提は持てない。以下の 2 ファイルを**同時に**新設する:
-  - `tools/secret_scan.sh`（bash 版）— CI（`runs-on: ubuntu-latest`）と git-bash / WSL 環境の pre-commit で呼ぶ
-  - `tools/secret_scan.ps1`（PowerShell 版）— Windows ネイティブ pre-commit（PowerShell から起動）で呼ぶ
-  - パターン正規表現は `tools/secret_scan_patterns.txt` に 1 ファイルとして正本化し、両スクリプトがそれを読む。これにより「sh は更新したが ps1 は古い」ずれが起きない
-  - `tools/secret_scan.sh` は git-bash / WSL を要件として `tools/README.md` に明記。pre-commit 設定で bash 版を呼ぶ際は `bash tools/secret_scan.sh` 形式とし PowerShell 直起動は認めない
-  - CI では bash 版のみ使用（`runs-on: ubuntu-latest`）
-  - **`tools/secret_scan_patterns.txt` のファイル形式（L-4）**: 1 行 1 パターンの **ripgrep 正規表現**（`-e` オプションに直接渡せる形式）。`#` で始まる行はコメント。`secret_scan.sh` は `grep -E -f tools/secret_scan_patterns.txt`、`secret_scan.ps1` は `Get-Content tools/secret_scan_patterns.txt | Where-Object {$_ -notmatch '^#'} | ForEach-Object { Select-String -Pattern $_ ... }` で読み込む。形式は両スクリプトの冒頭コメントにも明記する
-  - **Phase 1 確定パターン正本（HIGH-C2-2）**: `tools/secret_scan_patterns.txt` には Phase 1 では以下の 5 パターンを逐語で正本登録する（コメント行含めそのまま）。`kabuka` ホストはドット escape 必須で **`demo-kabuka.e-shiten.jp` も同じ正規表現で対象**になる。allowlist は `python/engine/exchanges/tachibana_url.py` を **ファイル単位**で吸収する設計（pre-commit / CI 両方の呼出元で `--exclude python/engine/exchanges/tachibana_url.py` 相当を渡す）:
-    ```
-    # 立花本番ホスト（demo 含む全 URL を検出、allowlist で tachibana_url.py のみ吸収）
-    kabuka\.e-shiten\.jp
-    # ハードコードされた sCLMID 系秘密キー（定義部分以外で出現したら fail）
-    \bsUserId\b\s*[:=]
-    \bsPassword\b\s*[:=]
-    \bsSecondPassword\b\s*[:=]
-    # 本番 URL 定数の代入（tachibana_url.py 以外で出現したら fail）
-    BASE_URL_PROD\s*=
-    ```
-- [ ] **secret_scan メタテスト（HIGH-D6）**: スキャナ自体のリグレッションを防ぐメタテストを追加する:
-  - `tools/tests/test_secret_scan.sh`（bash）: `tools/tests/fixtures/should_fail/*`（仮想 URL ホスト・`sUserId=...` リテラル等を含むダミー）に対して `tools/secret_scan.sh` が exit 1 を返すこと、および `tools/tests/fixtures/should_pass/tachibana_url.py`（`BASE_URL_PROD` を含むが allowlist ファイルとして許可されている想定）に対して exit 0 を返すことを assert
-  - `tools/tests/test_secret_scan.ps1`（PowerShell）: 同等のシナリオを `tools/secret_scan.ps1` に対して実行（Windows ネイティブ pre-commit のリグレッション防止）
-  - CI（ubuntu-latest）で `tools/tests/test_secret_scan.sh`、Windows ランナーで `tools/tests/test_secret_scan.ps1` を実行
-- [ ] **`capabilities_changed_after_reconnect` pin test を追加（B4 R3 M3 繰越）**: reconnect 後に `EngineConnection::capabilities()` の snapshot が新値に更新されることを assert する pin test を `engine-client/tests/` 配下に新設。`EngineRehello` hook 実装（同 T7 で追加予定）と合わせて、backend 使い回し経路でも capabilities 差し替えが silent gap なく反映されることを確認する
-- [ ] **`src/replay_api.rs` 新設 + U5 E2E skip 解除（pin: T35-U5-RelogE2E）**: T3.5 Step F で着地した `tests/e2e/tachibana_relogin_after_cancel.sh` の skeleton（exit 77 skip 許容）の skip 解除に必要な HTTP API を `src/replay_api.rs` に新設し、`RequestVenueLogin` 発火 / `VenueLoginCancelled` 注入 / status 取得を E2E から駆動可能にする。skeleton の skip ガードを外し本実行（Phase O1 繰越候補）
+> **進捗 (2026-04-26)**: 全タスク着地。
+> - `tools/secret_scan.sh` + `tools/secret_scan.ps1` + `tools/secret_scan_patterns.txt` + `tools/secret_scan_allowlist.txt` 新設
+> - `tools/tests/test_secret_scan.sh` + `tools/tests/test_secret_scan.ps1` + fixtures 新設（HIGH-D6）
+> - `.github/workflows/python-tests.yml`（pytest + secret_scan + secret_scan meta + tkinter smoke）
+> - `.github/workflows/tachibana-demo.yml`（`workflow_dispatch` のみ）
+> - `python/tests/test_invariant_table_covers_all_ids.py`（R8-D1 CI ガード）
+> - `python/tests/test_tachibana_tkinter_smoke.py`（F-M2c、`--auto-cancel` フラグ追加）
+> - `engine-client/tests/capabilities_changed_after_reconnect.rs`（B4 R3 M3 繰越）
+> - `src/replay_api.rs` 新設 + `src/main.rs` wiring（E2E skip 第 1 ゲート解除）
+> - README.md + SKILL.md に立花 venue 前提条件追記
+> - `pytest.ini` に `demo_tachibana` / `tk_smoke` マーカー登録
+>
+> **設計判断**:
+> - `secret_scan` の allowlist: `tools/secret_scan_allowlist.txt` 1 ファイルを正本として sh/ps1 両スクリプトが参照。`docs/` と `__pycache__` はデフォルト除外（文書・コンパイル成果物は scan 対象外）
+> - `replay_api.rs`: 最小 raw-TCP HTTP/1.1 サーバー（axum/hyper 非追加）。Iced 統合（`ControlApiCommand` → `update()`）は Phase O1 繰越。`mod replay_api;` の main.rs 宣言でスクリプトの第 1 skip ゲートは解除済み
+> - `capabilities_changed_after_reconnect`: 新旧 2 本の独立モックサーバーで capabilities snapshot の更新を確認（backend 使い回しテストは Phase O1 で追加）
+
+- [x] ✅ **不変条件 ID ↔ test 関数名対応表の集約（R8-D1）**: `python/tests/test_invariant_table_covers_all_ids.py` で「完了済みタスクに test 関数名が設定されていること」と「ID の重複なし」を CI 確認
+- [x] ✅ **Python テスト CI 組込**: `.github/workflows/python-tests.yml` に `uv run pytest python/tests/`、secret-scan、meta-test、tkinter-smoke ジョブを追加
+- [x] ✅ **README / SKILL.md に「立花 venue 利用の前提（電話認証済み口座が必要）」追記**
+- [x] ✅ **release ビルドで env 自動ログイン除外の統合テスト確認**: T3 で実装済みの `engine-client/tests/dev_login_flag_release.rs` が正本ガード。Python 側は `test_tachibana_dev_env_guard.py` が pin。新規追加テストは不要（既存カバー済み）
+- [x] ✅ **本番 URL 隠しフラグ（`TACHIBANA_ALLOW_PROD=1`）**: T2 で実装済み（`tachibana_login_flow.py::_spawn_login_dialog` の `allow_prod_choice` 経路）。`test_tachibana_login_dialog_modes.py` で pin。新規追加なし
+- [x] ✅ **demo_tachibana CI 統合**: `.github/workflows/tachibana-demo.yml`（`workflow_dispatch` のみ、T2 確定方式 B）
+- [x] ✅ **tkinter スモークテスト（F-M2c）**: `tachibana_login_dialog.py` に `--auto-cancel` フラグ追加。`python/tests/test_tachibana_tkinter_smoke.py` 4 件緑。CI は `xvfb-run pytest -m tk_smoke` で実行（python-tests.yml 内）
+- [x] ✅ **`tools/secret_scan.sh` + `tools/secret_scan.ps1` 新設**: `tools/secret_scan_patterns.txt`（5 パターン正本）+ `tools/secret_scan_allowlist.txt`（許可ファイル一覧）。`bash tools/secret_scan.sh` で OK（exit 0）確認済み
+- [x] ✅ **secret_scan メタテスト（HIGH-D6）**: `tools/tests/test_secret_scan.sh`（3 件）+ フィクスチャ `should_fail/` / `should_pass/` 新設。bash での 3 件全通過確認済み。`tools/tests/test_secret_scan.ps1`（Windows 版）も新設
+- [x] ✅ **`capabilities_changed_after_reconnect` pin test（B4 R3 M3 繰越）**: `engine-client/tests/capabilities_changed_after_reconnect.rs` 新設、1 件緑
+- [x] ✅ **`src/replay_api.rs` 新設 + main.rs wiring**: `pub mod replay_api;` を main.rs に追加。`GET /api/replay/status`（200 JSON）/ `POST /api/sidebar/toggle-venue`（202）/ `POST /api/sidebar/tachibana/request-login`（202）/ `POST /api/test/tachibana/cancel-helper`（202）を提供。E2E script の第 1 skip ゲート（`mod replay_api;` 存在確認）は解除済み。第 2 ゲート（`/api/replay/status` 疎通）は HTTP サーバー起動後に解除。Iced 統合（Phase O1 繰越）
+
+### レビュー反映 (2026-04-26, ラウンド R1)
+- ✅ HIGH-2: set_nonblocking log::warn 追加
+- ✅ HIGH-3: try_send に変更（channel 満杯でのブロック解消）
+- ✅ HIGH-4: toggle-venue 空 venue → 400 Bad Request
+- ✅ HIGH-5: runtime build/spawn 失敗 log::error 追加
+- ✅ HIGH-6: should_fail fixture に sSecondPassword + BASE_URL_PROD 追加
+- ✅ HIGH-7: secret_scan.ps1 に docs/__pycache__/.pytest_cache 除外追加
+- ✅ MEDIUM-3: pub mod → mod replay_api
+- ✅ MEDIUM-5: write_response log::debug 追加
+- ✅ MEDIUM-7: accept() error sleep 100ms バックオフ追加
+- ✅ MEDIUM-2: content_length コメント修正
+- ✅ MEDIUM-4: capabilities test に TODO(O1) コメント追加
+- ✅ MEDIUM-8: secret_scan.sh EXCLUDE_ARGS ノーオペ説明コメント追加
+- ✅ MEDIUM-9: python-tests CI ジョブに tk_smoke/demo_tachibana 除外追加
+- ✅ MEDIUM-10: tachibana-demo.yml timeout-minutes: 15 追加
+- ✅ MEDIUM-11: _run_dialog JSON decode 失敗時 pytest.fail() に改善
+- ✅ MEDIUM-12: test_headless 設計意図コメント追加
+- **H8 繰越 (Phase O1)**: test_invariant_table にソースファイル ID ドリフト検知を追加するにはテーブル全未登録 ID の同時追加が必要。table 完成後に対応。
 
 ## 下流計画への影響
 

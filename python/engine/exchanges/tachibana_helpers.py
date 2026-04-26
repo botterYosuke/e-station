@@ -49,7 +49,7 @@ class LoginError(TachibanaError):
 class UnreadNoticesError(LoginError):
     """`sKinsyouhouMidokuFlg == "1"` — virtual URLs returned empty."""
 
-    def __init__(self, message: str = "未読通知があるため仮想 URL が発行されません") -> None:
+    def __init__(self, message: str = "立花からの未読通知があります。ブラウザで確認後に再ログインしてください") -> None:
         super().__init__(code="unread_notices", message=message)
 
 

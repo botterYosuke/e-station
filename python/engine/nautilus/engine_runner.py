@@ -185,14 +185,16 @@ def _collect_fill_data(engine: BacktestEngine) -> tuple[list[int], list[str]]:
         last_prices: list[str] = []
         for order in fills:
             if order.is_closed:
-                # 最終イベントの ts_last を使う
                 ts = getattr(order, "ts_last", None)
-                if ts is not None:
-                    timestamps.append(ts)
                 lp = getattr(order, "avg_px", None)
-                if lp is not None:
+                if ts is not None and lp is not None:
+                    timestamps.append(ts)
                     last_prices.append(str(lp))
-        return sorted(timestamps), sorted(last_prices)
+        pairs = sorted(zip(timestamps, last_prices), key=lambda p: p[0])
+        if pairs:
+            ts_out, px_out = zip(*pairs)
+            return list(ts_out), list(px_out)
+        return [], []
     except Exception as exc:
         log.warning(
             "[NautilusRunner] _collect_fill_data failed: %s", exc, exc_info=True

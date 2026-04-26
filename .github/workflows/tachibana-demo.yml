@@ -1,0 +1,43 @@
+name: Tachibana Demo Integration
+
+# T7: demo_tachibana CI — manual trigger only.
+# Running against the real demo environment requires a phone-authenticated
+# Tachibana account (DEV_TACHIBANA_USER_ID / DEV_TACHIBANA_PASSWORD set in
+# GitHub Secrets). PR/push triggers are intentionally excluded because the
+# demo environment has restricted operating hours (weekdays ~8:00–18:00 JST,
+# exact times TBD per open-questions.md Q21) and would cause spurious failures
+# outside those hours.
+#
+# Trigger manually via:
+#   gh workflow run tachibana-demo.yml
+# or via the GitHub Actions UI with optional env override.
+
+on:
+    workflow_dispatch:
+        inputs:
+            observe_seconds:
+                description: "Observation window in seconds (default: 30)"
+                required: false
+                default: "30"
+
+jobs:
+    demo-integration:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+
+        env:
+            DEV_TACHIBANA_USER_ID: ${{ secrets.DEV_TACHIBANA_USER_ID }}
+            DEV_TACHIBANA_PASSWORD: ${{ secrets.DEV_TACHIBANA_PASSWORD }}
+            DEV_TACHIBANA_DEMO: "true"
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Run demo_tachibana pytest marker
+              run: |
+                  uv run pytest python/tests/ -m demo_tachibana -v --timeout=120

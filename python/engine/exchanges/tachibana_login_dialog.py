@@ -245,7 +245,21 @@ def main() -> int:
         action="store_true",
         help="Skip GUI and validate stdin only (test mode).",
     )
+    parser.add_argument(
+        "--auto-cancel",
+        action="store_true",
+        help=(
+            "Immediately emit {\"status\":\"cancelled\"} without reading stdin or "
+            "showing a dialog. Used by CI tkinter smoke tests (F-M2c) and the "
+            "E2E cancel-injection path to verify the cancel contract without a "
+            "real display server or user interaction."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.auto_cancel:
+        _emit_result({"status": "cancelled"})
+        return 0
 
     try:
         payload = _read_stdin_payload()

@@ -144,9 +144,7 @@ impl Sidebar {
     /// do Japanese-name prefix search. Delegates to `TickersTable`.
     pub fn set_tachibana_meta_handle(
         &mut self,
-        handle: Option<
-            std::sync::Arc<tokio::sync::Mutex<engine_client::TickerMetaMap>>,
-        >,
+        handle: Option<std::sync::Arc<tokio::sync::Mutex<engine_client::TickerMetaMap>>>,
     ) {
         self.tickers_table.set_tachibana_meta_handle(handle);
     }

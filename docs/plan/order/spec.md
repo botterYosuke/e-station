@@ -203,7 +203,7 @@ Python に渡す前に **Rust 側で**早期に弾く:
 | `ORDER_STATUS_UNKNOWN` | 409 | 起動時復元で `venue_order_id = None`（unknown）の注文への cancel / modify 要求。`GET /api/order/list` で確認後に再試行を促す |
 | `INTERNAL_ERROR` | 500 | Rust / Python 内部例外（タイムアウトを含む） |
 
-詳細な HTTP ステータスのマッピングと再試行可否は [§4 表](#4-公開-apihttp) / [architecture.md §2.3](./architecture.md#23-順序とエラーモデル) / [architecture.md §4.3](./architecture.md#43-起動時復元phase-o0-必須) を参照。
+詳細な HTTP ステータスのマッピングと再試行可否は [§4 表](#4-公開-apihttp) / [architecture.md §2.3](./architecture.md#23-取消フローphase-o1) / [architecture.md §4.3](./architecture.md#43-起動時復元phase-o0-必須) を参照。
 
 **`reason_text` フォーマット規約**:
 - `VENUE_REJECTED` / `VENUE_UNSUPPORTED`: `"<TACHIBANA_CODE_OR_TAG>: <message>"` の 1 行（改行禁止、最大 512 文字）

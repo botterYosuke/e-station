@@ -8,6 +8,7 @@ mod layout;
 mod logger;
 mod modal;
 mod notify;
+mod replay_api;
 mod screen;
 mod style;
 mod venue_state;
@@ -75,6 +76,15 @@ static ENGINE_MANAGER: std::sync::OnceLock<Arc<engine_client::ProcessManager>> =
 /// 2026-04-26 R3 (HIGH-2).
 static VENUE_READY_CACHE: std::sync::OnceLock<
     Arc<tokio::sync::Mutex<rustc_hash::FxHashSet<String>>>,
+> = std::sync::OnceLock::new();
+
+/// Receiver end of the HTTP control API channel (port 9876).  Set once in
+/// `main()` after `replay_api::spawn` runs.  The Iced subscription
+/// `replay_api_stream` takes ownership of this receiver by draining it with
+/// `try_recv`; until Phase O1 wires up the full integration this is stored
+/// here but not yet polled by the Iced runtime.
+static CONTROL_API_RX: std::sync::OnceLock<
+    std::sync::Mutex<tokio::sync::mpsc::Receiver<replay_api::ControlApiCommand>>,
 > = std::sync::OnceLock::new();
 
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
@@ -589,6 +599,28 @@ fn main() {
 
     std::thread::spawn(data::cleanup_old_market_data);
 
+    // HTTP control API for E2E tests (T35-U5-RelogE2E, T7).
+    // Runs on a dedicated tokio runtime so it stays alive even when the engine
+    // runtime shuts down. Port 9876 conflicts are logged but non-fatal.
+    {
+        let api_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .thread_name("control-api")
+            .build()
+            .inspect_err(|e| log::error!("replay_api: failed to build runtime — {e}"))
+            .ok();
+        if let Some(rt) = api_rt {
+            if let Some(rx) = replay_api::spawn(rt.handle()) {
+                CONTROL_API_RX.set(std::sync::Mutex::new(rx)).ok();
+            }
+            std::thread::Builder::new()
+                .name("control-api-rt".into())
+                .spawn(move || rt.block_on(std::future::pending::<()>()))
+                .inspect_err(|e| log::error!("replay_api: failed to spawn runtime thread — {e}"))
+                .ok();
+        }
+    }
+
     let _ = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
         .settings(iced::Settings {
             antialiasing: true,
@@ -696,6 +728,10 @@ enum Message {
     NetworkManager(modal::network_manager::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
+    /// Forwarded from the HTTP control API (port 9876). Used by E2E tests to
+    /// drive venue login / cancellation without a GUI. (T35-U5-RelogE2E / T7)
+    #[allow(dead_code)]
+    ControlApi(replay_api::ControlApiCommand),
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1074,7 +1110,8 @@ impl Flowsurface {
                 }
                 // Wire the handle into the sidebar's ticker filter so
                 // Japanese-name incremental search works after each reconnect.
-                self.sidebar.set_tachibana_meta_handle(tachibana_meta_handle);
+                self.sidebar
+                    .set_tachibana_meta_handle(tachibana_meta_handle);
 
                 // Re-apply current proxy state before bumping the generation so
                 // that stream-subscribe commands are enqueued after SetProxy in
@@ -1615,6 +1652,11 @@ impl Flowsurface {
                 return window::collect_window_specs(active_windows, |windows| {
                     Message::RestartRequested(Some(windows))
                 });
+            }
+            Message::ControlApi(cmd) => {
+                // HTTP control API commands (T35-U5-RelogE2E, T7).
+                // Full Iced integration deferred to Phase O1 — log for now.
+                log::debug!("control-api command received: {cmd:?}");
             }
         }
         Task::none()

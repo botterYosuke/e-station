@@ -459,7 +459,7 @@ async def run_login(
             result = await _spawn_login_dialog(prefill=prefill)
         except LoginError as exc:
             log.error("tachibana login: dialog spawn failed: %s", exc)
-            events.append(_venue_error_event(request_id, exc.code, str(exc)))
+            events.append(_venue_error_event(request_id, exc.code, exc.message))
             return events
 
         if result is None:
@@ -490,16 +490,16 @@ async def run_login(
                 http_client=http_client,
             )
         except UnreadNoticesError as exc:
-            events.append(_venue_error_event(request_id, "unread_notices", str(exc)))
+            events.append(_venue_error_event(request_id, "unread_notices", exc.message))
             return events
         except SessionExpiredError as exc:
-            events.append(_venue_error_event(request_id, "session_expired", str(exc)))
+            events.append(_venue_error_event(request_id, "session_expired", exc.message))
             return events
         except LoginError as exc:
             log.warning(
                 "tachibana login: attempt %d/%d failed: %s", attempt, 3, exc
             )
-            last_error_event = _venue_error_event(request_id, exc.code, str(exc))
+            last_error_event = _venue_error_event(request_id, exc.code, exc.message)
             continue
         except TachibanaError as exc:
             last_error_event = _venue_error_event(
@@ -555,11 +555,11 @@ async def _try_silent_login(
             http_client=http_client,
         )
     except UnreadNoticesError as exc:
-        return _venue_error_event(request_id, "unread_notices", str(exc))
+        return _venue_error_event(request_id, "unread_notices", exc.message)
     except SessionExpiredError as exc:
-        return _venue_error_event(request_id, "session_expired", str(exc))
+        return _venue_error_event(request_id, "session_expired", exc.message)
     except LoginError as exc:
-        return _venue_error_event(request_id, exc.code, str(exc))
+        return _venue_error_event(request_id, exc.code, exc.message)
     except TachibanaError as exc:
         log.error("tachibana login: unexpected TachibanaError: %s", exc)
         return _venue_error_event(request_id, "login_failed", _MSG_LOGIN_FAILED)

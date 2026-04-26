@@ -14,7 +14,8 @@ pub use ::data::wire::tachibana::{TachibanaCredentialsWire, TachibanaSessionWire
 
 // ── Commands (Rust → Python) ──────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+// NOTE: Debug is intentionally hand-implemented below to mask SetSecondPassword.value.
+#[derive(Serialize)]
 #[serde(tag = "op")]
 pub enum Command {
     Hello {
@@ -110,6 +111,385 @@ pub enum Command {
         request_id: String,
         venue: String,
     },
+
+    // ── Order Phase (schema 1.3) ──────────────────────────────────────────
+    /// Set the second password in Python memory for order submission.
+    /// The `value` field carries the raw secret over IPC (plain String because
+    /// SecretString cannot cross the JSON boundary); Python must immediately
+    /// wrap it in `SecretStr`. Debug output masks `value` as `[REDACTED]`.
+    SetSecondPassword {
+        request_id: String,
+        value: String,
+    },
+    /// Clear the second password from Python memory (idle forget / explicit logout).
+    ForgetSecondPassword,
+
+    /// Submit a new order. `order` shape matches the nautilus OrderFactory input.
+    SubmitOrder {
+        request_id: String,
+        venue: String,
+        order: SubmitOrderRequest,
+    },
+    /// Modify an existing order (price / qty / trigger / expire).
+    ModifyOrder {
+        request_id: String,
+        venue: String,
+        client_order_id: String,
+        change: OrderModifyChange,
+    },
+    /// Cancel a specific order. Rust looks up `venue_order_id` via
+    /// `OrderSessionState` before sending — Python receives both IDs.
+    CancelOrder {
+        request_id: String,
+        venue: String,
+        client_order_id: String,
+        venue_order_id: String,
+    },
+    /// Cancel all open orders, optionally filtered by instrument and side.
+    CancelAllOrders {
+        request_id: String,
+        venue: String,
+        instrument_id: Option<String>,
+        order_side: Option<OrderSide>,
+    },
+    /// Fetch today's order list from the venue.
+    GetOrderList {
+        request_id: String,
+        venue: String,
+        filter: OrderListFilter,
+    },
+}
+
+/// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
+/// as `[REDACTED]`. All other variants delegate to their field `Debug` impls.
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Command::SetSecondPassword { request_id, .. } => f
+                .debug_struct("SetSecondPassword")
+                .field("request_id", request_id)
+                .field("value", &"[REDACTED]")
+                .finish(),
+            Command::Hello {
+                schema_major,
+                schema_minor,
+                client_version,
+                token: _,
+            } => f
+                .debug_struct("Hello")
+                .field("schema_major", schema_major)
+                .field("schema_minor", schema_minor)
+                .field("client_version", client_version)
+                .field("token", &"***")
+                .finish(),
+            Command::SetProxy { url } => f.debug_struct("SetProxy").field("url", url).finish(),
+            Command::Subscribe {
+                venue,
+                ticker,
+                stream,
+                timeframe,
+                market,
+            } => f
+                .debug_struct("Subscribe")
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .field("stream", stream)
+                .field("timeframe", timeframe)
+                .field("market", market)
+                .finish(),
+            Command::Unsubscribe {
+                venue,
+                ticker,
+                stream,
+                timeframe,
+                market,
+            } => f
+                .debug_struct("Unsubscribe")
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .field("stream", stream)
+                .field("timeframe", timeframe)
+                .field("market", market)
+                .finish(),
+            Command::FetchKlines {
+                request_id,
+                venue,
+                ticker,
+                timeframe,
+                limit,
+                start_ms,
+                end_ms,
+                market,
+            } => f
+                .debug_struct("FetchKlines")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .field("timeframe", timeframe)
+                .field("limit", limit)
+                .field("start_ms", start_ms)
+                .field("end_ms", end_ms)
+                .field("market", market)
+                .finish(),
+            Command::FetchTrades {
+                request_id,
+                venue,
+                ticker,
+                market,
+                start_ms,
+                end_ms,
+                data_path,
+            } => f
+                .debug_struct("FetchTrades")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .field("market", market)
+                .field("start_ms", start_ms)
+                .field("end_ms", end_ms)
+                .field("data_path", data_path)
+                .finish(),
+            Command::FetchOpenInterest {
+                request_id,
+                venue,
+                ticker,
+                timeframe,
+                limit,
+                start_ms,
+                end_ms,
+                market,
+            } => f
+                .debug_struct("FetchOpenInterest")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .field("timeframe", timeframe)
+                .field("limit", limit)
+                .field("start_ms", start_ms)
+                .field("end_ms", end_ms)
+                .field("market", market)
+                .finish(),
+            Command::FetchTickerStats {
+                request_id,
+                venue,
+                ticker,
+                market,
+            } => f
+                .debug_struct("FetchTickerStats")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .field("market", market)
+                .finish(),
+            Command::ListTickers {
+                request_id,
+                venue,
+                market,
+            } => f
+                .debug_struct("ListTickers")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("market", market)
+                .finish(),
+            Command::GetTickerMetadata {
+                request_id,
+                venue,
+                ticker,
+            } => f
+                .debug_struct("GetTickerMetadata")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .finish(),
+            Command::RequestDepthSnapshot {
+                request_id,
+                venue,
+                ticker,
+                market,
+            } => f
+                .debug_struct("RequestDepthSnapshot")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("ticker", ticker)
+                .field("market", market)
+                .finish(),
+            Command::Ping { request_id } => f
+                .debug_struct("Ping")
+                .field("request_id", request_id)
+                .finish(),
+            Command::Shutdown => write!(f, "Shutdown"),
+            Command::SetVenueCredentials {
+                request_id,
+                payload,
+            } => f
+                .debug_struct("SetVenueCredentials")
+                .field("request_id", request_id)
+                .field("payload", payload)
+                .finish(),
+            Command::RequestVenueLogin { request_id, venue } => f
+                .debug_struct("RequestVenueLogin")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .finish(),
+            Command::ForgetSecondPassword => write!(f, "ForgetSecondPassword"),
+            Command::SubmitOrder {
+                request_id,
+                venue,
+                order,
+            } => f
+                .debug_struct("SubmitOrder")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("order", order)
+                .finish(),
+            Command::ModifyOrder {
+                request_id,
+                venue,
+                client_order_id,
+                change,
+            } => f
+                .debug_struct("ModifyOrder")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("client_order_id", client_order_id)
+                .field("change", change)
+                .finish(),
+            Command::CancelOrder {
+                request_id,
+                venue,
+                client_order_id,
+                venue_order_id,
+            } => f
+                .debug_struct("CancelOrder")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("client_order_id", client_order_id)
+                .field("venue_order_id", venue_order_id)
+                .finish(),
+            Command::CancelAllOrders {
+                request_id,
+                venue,
+                instrument_id,
+                order_side,
+            } => f
+                .debug_struct("CancelAllOrders")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("instrument_id", instrument_id)
+                .field("order_side", order_side)
+                .finish(),
+            Command::GetOrderList {
+                request_id,
+                venue,
+                filter,
+            } => f
+                .debug_struct("GetOrderList")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .field("filter", filter)
+                .finish(),
+        }
+    }
+}
+
+// ── Order sub-types (schema 1.3) ──────────────────────────────────────────────
+
+/// Order placement request — shape matches the nautilus OrderFactory input.
+/// `deny_unknown_fields` prevents second_password / p_no injection via IPC (C-R2-M3 / D3-1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitOrderRequest {
+    pub client_order_id: String,
+    pub instrument_id: String,
+    pub order_side: OrderSide,
+    pub order_type: OrderType,
+    pub quantity: String,
+    pub price: Option<String>,
+    pub trigger_price: Option<String>,
+    pub trigger_type: Option<TriggerType>,
+    pub time_in_force: TimeInForce,
+    pub expire_time_ns: Option<i64>,
+    pub post_only: bool,
+    pub reduce_only: bool,
+    pub tags: Vec<String>,
+}
+
+/// Fields that can be modified on an existing order; `None` = unchanged.
+/// `deny_unknown_fields` prevents second_password injection (C-R2-M3 / D3-1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderModifyChange {
+    pub new_quantity: Option<String>,
+    pub new_price: Option<String>,
+    pub new_trigger_price: Option<String>,
+    pub new_expire_time_ns: Option<i64>,
+}
+
+/// Filter for `GetOrderList`. All fields are optional.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderListFilter {
+    pub status: Option<String>,
+    pub instrument_id: Option<String>,
+    pub date: Option<String>,
+}
+
+/// Wire representation of a single order record in `OrderListUpdated`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderRecordWire {
+    pub client_order_id: Option<String>,
+    pub venue_order_id: String,
+    pub instrument_id: String,
+    pub order_side: OrderSide,
+    pub order_type: OrderType,
+    pub quantity: String,
+    pub filled_qty: String,
+    pub leaves_qty: String,
+    pub price: Option<String>,
+    pub trigger_price: Option<String>,
+    pub time_in_force: TimeInForce,
+    pub expire_time_ns: Option<i64>,
+    pub status: String,
+    pub ts_event_ms: i64,
+}
+
+// ── Order enums (nautilus string representations, SCREAMING_SNAKE_CASE) ────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderType {
+    Market,
+    Limit,
+    StopMarket,
+    StopLimit,
+    MarketIfTouched,
+    LimitIfTouched,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TimeInForce {
+    Day,
+    Gtc,
+    Gtd,
+    Ioc,
+    Fok,
+    AtTheOpen,
+    AtTheClose,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TriggerType {
+    Last,
+    BidAsk,
+    Index,
 }
 
 // ── Venue credential payload (Rust → Python) ──────────────────────────────────
@@ -319,6 +699,79 @@ pub enum EngineEvent {
     /// Never sent by Python — used to unblock in-flight fetch waiters immediately.
     #[serde(skip_deserializing)]
     ConnectionDropped,
+
+    // ── Order Phase events (schema 1.3) ───────────────────────────────────
+
+    /// Python needs the second password before processing a SubmitOrder request.
+    SecondPasswordRequired {
+        request_id: String,
+    },
+
+    /// Order has been forwarded to the venue (before HTTP response).
+    OrderSubmitted {
+        client_order_id: String,
+        ts_event_ms: i64,
+    },
+
+    /// Venue accepted the order and assigned a `venue_order_id`.
+    OrderAccepted {
+        client_order_id: String,
+        venue_order_id: String,
+        ts_event_ms: i64,
+    },
+
+    /// Order was rejected (before acceptance or after a modify/cancel attempt).
+    OrderRejected {
+        client_order_id: String,
+        reason_code: String,
+        reason_text: String,
+        ts_event_ms: i64,
+    },
+
+    /// Modify request forwarded to venue; awaiting confirmation.
+    OrderPendingUpdate {
+        client_order_id: String,
+        ts_event_ms: i64,
+    },
+
+    /// Cancel request forwarded to venue; awaiting confirmation.
+    OrderPendingCancel {
+        client_order_id: String,
+        ts_event_ms: i64,
+    },
+
+    /// Order was fully or partially filled.
+    /// `leaves_qty == "0"` means full fill (nautilus convention).
+    OrderFilled {
+        client_order_id: String,
+        venue_order_id: String,
+        trade_id: String,
+        last_qty: String,
+        last_price: String,
+        cumulative_qty: String,
+        leaves_qty: String,
+        ts_event_ms: i64,
+    },
+
+    /// Order was canceled.
+    OrderCanceled {
+        client_order_id: String,
+        venue_order_id: String,
+        ts_event_ms: i64,
+    },
+
+    /// Order expired (GTD / AT_THE_CLOSE past closing time).
+    OrderExpired {
+        client_order_id: String,
+        venue_order_id: String,
+        ts_event_ms: i64,
+    },
+
+    /// Response to `GetOrderList`.
+    OrderListUpdated {
+        request_id: String,
+        orders: Vec<OrderRecordWire>,
+    },
 }
 
 fn default_true() -> bool {

@@ -1,0 +1,75 @@
+name: Python Tests
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
+
+jobs:
+    python-tests:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Run Python unit tests
+              run: uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana" -v --timeout=60
+
+    secret-scan:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Run secret scan (F-L1 / T7)
+              run: bash tools/secret_scan.sh
+
+    secret-scan-metatest:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Run secret_scan meta-tests (HIGH-D6)
+              run: bash tools/tests/test_secret_scan.sh
+
+    secret-scan-metatest-windows:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: windows-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Run secret_scan.ps1 meta-tests (HIGH-D6, Windows)
+              shell: pwsh
+              run: pwsh -NonInteractive -File tools/tests/test_secret_scan.ps1
+
+    tkinter-smoke:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install system dependencies (xvfb + tkinter)
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y xvfb python3-tk
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Run tkinter smoke tests (F-M2c)
+              run: xvfb-run uv run pytest python/tests/ -m tk_smoke -v --timeout=30
