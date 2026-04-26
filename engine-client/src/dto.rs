@@ -155,6 +155,11 @@ pub enum EngineEvent {
         schema_minor: u16,
         engine_version: String,
         engine_session_id: String,
+        // `#[serde(default)]` is a defensive read for older engines that may
+        // omit the field. The current Python `schemas.py` always emits a
+        // `dict` (via `Field(default_factory=dict)`), so `Value::Null` is not
+        // expected from production engines — `{}` is the empty case.
+        #[serde(default)]
         capabilities: serde_json::Value,
     },
     EngineError {

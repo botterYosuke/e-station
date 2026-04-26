@@ -34,23 +34,79 @@ pub const TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32: f32 = 1.0;
 
 /// Side-channel ticker metadata kept off `Ticker` per Q16. Populated by
 /// the `EngineEvent::TickerInfo` receive path for Tachibana stocks.
+///
+/// Fields are `pub(crate)` so the crate-internal parser
+/// (`parse_tachibana_ticker_dict`) and filter (`matches_tachibana_filter`)
+/// can construct/inspect values directly while keeping the in-memory
+/// layout an implementation detail of `engine-client`. External callers
+/// (UI, integration tests) read via the `display_name_ja()` /
+/// `yobine_code()` / `sizyou_c()` accessors below; tests outside this
+/// crate may construct instances via the `#[cfg(test)] for_test` helper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickerDisplayMeta {
     /// Japanese long name (`sIssueName` from `CLMIssueMstKabu`).
-    pub display_name_ja: Option<String>,
+    pub(crate) display_name_ja: Option<String>,
     /// `CLMYobine` table key — Rust resolves the snapshot tick value
     /// via the master table when a price is in hand (B5 follow-up).
-    pub yobine_code: Option<String>,
+    pub(crate) yobine_code: Option<String>,
     /// `sSizyouC` from `CLMIssueSizyouMstKabu` — required when issuing
     /// price/history requests for the right exchange (e.g. "00" =
     /// 東証, "02" = 名証).
-    pub sizyou_c: Option<String>,
+    pub(crate) sizyou_c: Option<String>,
+}
+
+impl TickerDisplayMeta {
+    /// Borrow the Japanese long name, if present.
+    pub fn display_name_ja(&self) -> Option<&str> {
+        self.display_name_ja.as_deref()
+    }
+
+    /// Borrow the `CLMYobine` table key, if present.
+    pub fn yobine_code(&self) -> Option<&str> {
+        self.yobine_code.as_deref()
+    }
+
+    /// Borrow the `sSizyouC` exchange code, if present.
+    pub fn sizyou_c(&self) -> Option<&str> {
+        self.sizyou_c.as_deref()
+    }
+
+    /// Test-only constructor for integration tests outside this crate
+    /// that need to fabricate a `TickerDisplayMeta` without going
+    /// through `parse_tachibana_ticker_dict`. Production code MUST NOT
+    /// use this — the only legitimate construction path is the parser.
+    #[cfg(test)]
+    pub fn for_test(
+        display_name_ja: Option<String>,
+        yobine_code: Option<String>,
+        sizyou_c: Option<String>,
+    ) -> Self {
+        Self {
+            display_name_ja,
+            yobine_code,
+            sizyou_c,
+        }
+    }
 }
 
 /// Parse one Tachibana ticker dict from `EngineEvent::TickerInfo.tickers`
 /// into the `(TickerInfo, TickerDisplayMeta)` pair. Returns `None` when
 /// the symbol is missing or fails the same ASCII / length / pipe-char
 /// guards `fetch_ticker_metadata` already enforces for crypto venues.
+///
+/// # Returns
+///
+/// `Some((Ticker, TickerInfo, TickerDisplayMeta))` on a well-formed dict:
+/// - `Ticker` — canonical ASCII identity (Q16 Hash key) plus optional
+///   English display string lifted from `display_symbol`.
+/// - `TickerInfo` — `min_ticksize` / `min_qty` / `lot_size` / quote
+///   currency, with `min_ticksize` the Phase 1 placeholder until the
+///   per-ticker resolved tick lands (B5 follow-up).
+/// - `TickerDisplayMeta` — the side-channel `display_name_ja` /
+///   `yobine_code` / `sizyou_c` triplet kept off `Ticker` per Q16.
+///
+/// Returns `None` when the `symbol` field is missing, non-ASCII, longer
+/// than `Ticker::MAX_LEN`, or contains the reserved `|` separator.
 pub fn parse_tachibana_ticker_dict(
     t: &Value,
     exchange: Exchange,
@@ -104,6 +160,51 @@ pub fn parse_tachibana_ticker_dict(
     Some((ticker, info, meta))
 }
 
+/// B4: incremental ticker filter for the Tachibana selector.
+///
+/// Returns `true` when `query` is a **prefix** of any of:
+/// - the ASCII ticker code (e.g. `"7203"`, `"130A0"`),
+/// - the English display symbol (e.g. `"TOYOTA"` derived from `sIssueNameEizi`),
+/// - the Japanese display name carried in the side-channel `meta`
+///   (e.g. `"トヨタ自動車"`).
+///
+/// ASCII matches are case-insensitive. Japanese matches are byte-level prefix
+/// (UTF-8 is self-synchronising so this is correct for CJK). `meta` may be
+/// `None` for tickers loaded before the metadata fetch completed; in that case
+/// only code/display-symbol prefixes are considered. An empty `query` matches
+/// everything.
+pub fn matches_tachibana_filter(
+    ticker: &Ticker,
+    meta: Option<&TickerDisplayMeta>,
+    query: &str,
+) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    let q_upper = query.to_ascii_uppercase();
+    let (mut code, _) = ticker.to_full_symbol_and_type();
+    code.make_ascii_uppercase();
+    if code.starts_with(&q_upper) {
+        return true;
+    }
+
+    let (mut disp, _) = ticker.display_symbol_and_type();
+    disp.make_ascii_uppercase();
+    if disp.starts_with(&q_upper) {
+        return true;
+    }
+
+    // Japanese path: byte-level starts_with is correct for UTF-8/CJK.
+    if let Some(name) = meta.and_then(|m| m.display_name_ja.as_deref())
+        && name.starts_with(query)
+    {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,9 +230,9 @@ mod tests {
         let (_, info, meta) = parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
         assert_eq!(info.lot_size, Some(100));
         assert_eq!(info.quote_currency, Some(QuoteCurrency::Jpy));
-        assert_eq!(meta.display_name_ja.as_deref(), Some("トヨタ自動車"));
-        assert_eq!(meta.yobine_code.as_deref(), Some("103"));
-        assert_eq!(meta.sizyou_c.as_deref(), Some("00"));
+        assert_eq!(meta.display_name_ja(), Some("トヨタ自動車"));
+        assert_eq!(meta.yobine_code(), Some("103"));
+        assert_eq!(meta.sizyou_c(), Some("00"));
     }
 
     #[test]
@@ -144,6 +245,59 @@ mod tests {
     fn empty_display_name_ja_becomes_none() {
         let dict = json!({"symbol": "7203", "display_name_ja": ""});
         let (_, _, meta) = parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
-        assert!(meta.display_name_ja.is_none());
+        assert!(meta.display_name_ja().is_none());
+    }
+
+    fn meta(name_ja: &str) -> TickerDisplayMeta {
+        TickerDisplayMeta {
+            display_name_ja: Some(name_ja.to_string()),
+            yobine_code: None,
+            sizyou_c: None,
+        }
+    }
+
+    fn ticker_with_display(symbol: &str, display: &str) -> Ticker {
+        Ticker::new_with_display(symbol, Exchange::TachibanaStock, Some(display))
+    }
+
+    #[test]
+    fn test_filter_by_code_prefix() {
+        let t = ticker_with_display("7203", "TOYOTA");
+        let m = meta("トヨタ自動車");
+        assert!(matches_tachibana_filter(&t, Some(&m), "7203"));
+        assert!(matches_tachibana_filter(&t, Some(&m), "72"));
+        assert!(!matches_tachibana_filter(&t, Some(&m), "9999"));
+        assert!(matches_tachibana_filter(&t, Some(&m), ""));
+    }
+
+    #[test]
+    fn test_filter_by_display_name_ja_prefix() {
+        let t = ticker_with_display("7203", "TOYOTA");
+        let m = meta("トヨタ自動車");
+        assert!(matches_tachibana_filter(&t, Some(&m), "ト"));
+        assert!(matches_tachibana_filter(&t, Some(&m), "トヨタ"));
+        assert!(!matches_tachibana_filter(&t, Some(&m), "自動車"));
+        assert!(!matches_tachibana_filter(&t, None, "ト"));
+    }
+
+    #[test]
+    fn test_filter_by_display_symbol_prefix() {
+        let t = ticker_with_display("7203", "TOYOTA");
+        let m = meta("トヨタ自動車");
+        assert!(matches_tachibana_filter(&t, Some(&m), "TOY"));
+        assert!(matches_tachibana_filter(&t, Some(&m), "toy"));
+        assert!(!matches_tachibana_filter(&t, Some(&m), "OTA"));
+    }
+
+    #[test]
+    fn test_filter_alphanumeric_ticker_130a0_visible() {
+        let t = ticker_with_display("130A0", "ALPHA NUM CO");
+        let m = meta("英数銘柄");
+        assert!(matches_tachibana_filter(&t, Some(&m), "130"));
+        assert!(matches_tachibana_filter(&t, Some(&m), "130A"));
+        assert!(matches_tachibana_filter(&t, Some(&m), "130a"));
+        assert!(matches_tachibana_filter(&t, Some(&m), "ALPHA"));
+        assert!(matches_tachibana_filter(&t, Some(&m), "英数"));
+        assert!(!matches_tachibana_filter(&t, Some(&m), "999"));
     }
 }

@@ -31,11 +31,36 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Timeout for a depth snapshot request.
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Side-channel `Ticker -> TickerDisplayMeta` map populated by
+/// `fetch_ticker_metadata` for Tachibana stocks. Wrapped in `Arc<Mutex<_>>`
+/// so the UI (which only borrows the backend) can clone the handle and read
+/// asynchronously without deadlocking the fetch path.
+///
+/// Visibility is `pub(crate)` because `TickerDisplayMeta` is a crate-internal
+/// type — exposing the alias publicly would leak an implementation detail and
+/// invite UI callers to take the async lock on the rendering path (a T35-H8
+/// purity violation). External callers go through `ticker_meta_handle()` and
+/// must use `try_lock()`.
+pub(crate) type TickerMetaMap = HashMap<exchange::Ticker, crate::tachibana_meta::TickerDisplayMeta>;
+
+/// Venue-scoped backend for the Python data engine.
+///
+/// **Invariant:** 1 backend instance corresponds to exactly one venue. Reuse
+/// across venues is not supported — the `ticker_meta` side-channel is keyed
+/// by `Ticker` (which embeds the `Exchange`) and the `fetch_ticker_metadata`
+/// preamble clears Tachibana entries gated on `MarketKind::Stock`, so swapping
+/// the `venue` field on a live backend would leave stale state. Spin up a
+/// fresh `EngineClientBackend` per venue switch instead.
 pub struct EngineClientBackend {
     connection: Arc<EngineConnection>,
     /// Venue string sent over IPC (e.g. `"binance"`).
     venue: String,
     depth_tracker: Arc<Mutex<DepthTracker>>,
+    /// B4: Tachibana display metadata captured during `fetch_ticker_metadata`
+    /// so the ticker selector can do incremental search by `display_name_ja`.
+    /// Empty for crypto venues — `parse_tachibana_ticker_dict` is only called
+    /// in the `MarketKind::Stock` branch.
+    ticker_meta: Arc<Mutex<TickerMetaMap>>,
 }
 
 impl EngineClientBackend {
@@ -44,7 +69,37 @@ impl EngineClientBackend {
             connection,
             venue: venue.into(),
             depth_tracker: Arc::new(Mutex::new(DepthTracker::new())),
+            ticker_meta: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// B4: Cheap-clone handle for the UI to read the Tachibana display
+    /// metadata side-channel. The map is populated by `fetch_ticker_metadata`
+    /// (B3 plumbing path); for crypto venues it stays empty and reads simply
+    /// miss.
+    ///
+    /// **Locking contract (T35-H8 purity):** callers MUST use
+    /// `try_lock()` from UI/rendering paths. `lock().await` is forbidden on
+    /// the `Application::update` path because it can serialize against the
+    /// fetch path that holds the same mutex while staging Tachibana metadata.
+    /// Use `blocking_lock()` only from synchronous, non-UI contexts where
+    /// blocking is acceptable.
+    pub fn ticker_meta_handle(&self) -> Arc<Mutex<TickerMetaMap>> {
+        Arc::clone(&self.ticker_meta)
+    }
+
+    /// B4 / H1-est: Reset the Tachibana display-metadata side-channel.
+    ///
+    /// Called on engine reconnect (or before a fresh `fetch_ticker_metadata`
+    /// run) so stale entries from a previous session never leak through.
+    ///
+    /// **Must be called from an async context.** This awaits the side-channel
+    /// mutex; the fetch staging section only holds the lock long enough to
+    /// drain a `Vec`, so the wait is bounded. We deliberately avoid
+    /// `blocking_lock()` here — it panics on a current-thread runtime and
+    /// risks deadlock by parking a multi-thread worker.
+    pub async fn reset_ticker_meta(&self) {
+        self.ticker_meta.lock().await.clear();
     }
 
     fn market_kind_to_ipc(mk: MarketKind) -> String {
@@ -414,9 +469,21 @@ impl VenueBackend for EngineClientBackend {
         let connection = Arc::clone(&self.connection);
         let venue = self.venue.clone();
         let markets = markets.to_vec();
+        // H1-est: Clone Arc before the async block so the inner future does not
+        // borrow `self` across await points.
+        let ticker_meta = Arc::clone(&self.ticker_meta);
 
         Box::pin(async move {
             let mut out: TickerMetadataMap = HashMap::new();
+
+            // H1-est: Idempotent reset of the Tachibana display-meta side
+            // channel. Callers may also invoke `reset_ticker_meta()` on
+            // reconnect, but doing it here too keeps the post-condition clean:
+            // after `fetch_ticker_metadata` returns, the map only reflects the
+            // tickers from this run.
+            if markets.iter().any(|m| matches!(m, MarketKind::Stock)) {
+                ticker_meta.lock().await.clear();
+            }
 
             for &market_kind in &markets {
                 let exchange = Self::exchange_for(&venue, market_kind);
@@ -433,6 +500,9 @@ impl VenueBackend for EngineClientBackend {
                     return Err(AdapterError::WebsocketError(e.to_string()));
                 }
 
+                // H2-rust: Clone the Arc *outside* the `async move` block so
+                // the inner future captures only the cheap handle, not `&self`.
+                let ticker_meta_for_capture = Arc::clone(&ticker_meta);
                 let market_map = tokio::time::timeout(FETCH_TIMEOUT, async {
                     loop {
                         match rx.recv().await {
@@ -441,19 +511,27 @@ impl VenueBackend for EngineClientBackend {
                                 tickers,
                                 ..
                             }) if rid == request_id => {
+                                // Stage Tachibana stock meta in a local buffer
+                                // first so we can take the async lock once
+                                // (rather than per-iteration) when the parse
+                                // loop completes.
+                                let mut staged_meta: Vec<(
+                                    exchange::Ticker,
+                                    crate::tachibana_meta::TickerDisplayMeta,
+                                )> = Vec::new();
                                 let map: TickerMetadataMap = tickers
                                     .iter()
                                     .filter_map(|t| {
                                         if market_kind == MarketKind::Stock {
-                                            // B3 HIGH-U-9: route Tachibana stock dicts through
-                                            // the typed parser so `lot_size` / `quote_currency`
-                                            // / `display_name_ja` are picked up. The display meta
-                                            // is dropped at this layer; B4 will plumb the
-                                            // `HashMap<Ticker, TickerDisplayMeta>` side-channel.
-                                            let (ticker, info, _meta) =
+                                            // B3 HIGH-U-9 + B4: route Tachibana stock dicts
+                                            // through the typed parser and stash the display
+                                            // meta in `self.ticker_meta` so the UI can do
+                                            // Japanese-name incremental search.
+                                            let (ticker, info, meta) =
                                                 crate::tachibana_meta::parse_tachibana_ticker_dict(
                                                     t, exchange,
                                                 )?;
+                                            staged_meta.push((ticker, meta));
                                             return Some((ticker, Some(info)));
                                         }
                                         let symbol = t.get("symbol")?.as_str()?;
@@ -490,6 +568,12 @@ impl VenueBackend for EngineClientBackend {
                                         Some((ticker, Some(info)))
                                     })
                                     .collect();
+                                if !staged_meta.is_empty() {
+                                    let mut guard = ticker_meta_for_capture.lock().await;
+                                    for (t, m) in staged_meta {
+                                        guard.insert(t, m);
+                                    }
+                                }
                                 return Ok(map);
                             }
                             Ok(EngineEvent::Error {
@@ -505,7 +589,21 @@ impl VenueBackend for EngineClientBackend {
                             | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 return Err(AdapterError::EngineRestarting);
                             }
-                            Ok(_) | Err(_) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                // M3-silent: never silently swallow a broadcast lag —
+                                // we may have skipped past the matching `TickerInfo`
+                                // reply for our `request_id`, which would deadlock
+                                // until the timeout. Surface as a recoverable error
+                                // so the caller can retry.
+                                log::warn!(
+                                    "fetch_ticker_metadata: broadcast lagged by {n} \
+                                     events — aborting to avoid missed reply"
+                                );
+                                return Err(AdapterError::WebsocketError(format!(
+                                    "fetch_ticker_metadata lagged by {n}"
+                                )));
+                            }
+                            Ok(_) => continue,
                         }
                     }
                 })

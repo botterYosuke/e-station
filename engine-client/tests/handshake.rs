@@ -100,3 +100,47 @@ async fn connect_refused_returns_error() {
     let result = EngineConnection::connect("ws://127.0.0.1:19999", "tok").await;
     assert!(result.is_err());
 }
+
+/// B4: `EngineConnection::capabilities()` exposes the `Ready.capabilities`
+/// snapshot to the UI so it can call `is_timeframe_enabled(...)` for venue
+/// gating without subscribing to the event broadcast.
+#[tokio::test]
+async fn capabilities_getter_exposes_ready_snapshot() {
+    let (listener, addr) = bind_loopback().await;
+    let token = "tok-caps";
+    let token_owned = token.to_owned();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(tcp).await.unwrap();
+        let _ = ws.next().await; // Hello
+        let ready = serde_json::json!({
+            "event": "Ready",
+            "schema_major": SCHEMA_MAJOR,
+            "schema_minor": SCHEMA_MINOR,
+            "engine_version": "1.0.0-mock",
+            "engine_session_id": "00000000-0000-0000-0000-000000000003",
+            "capabilities": {
+                "supported_venues": ["tachibana"],
+                "venue_capabilities": {
+                    "tachibana": {"supported_timeframes": ["1d"]}
+                }
+            }
+        });
+        let _ = ws.send(Message::Text(ready.to_string().into())).await;
+        let _ = token_owned;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let url = format!("ws://{addr}");
+    let conn = EngineConnection::connect(&url, token).await.unwrap();
+    let caps = conn.capabilities();
+    assert_eq!(
+        caps["venue_capabilities"]["tachibana"]["supported_timeframes"],
+        serde_json::json!(["1d"])
+    );
+
+    use flowsurface_engine_client::capabilities::is_timeframe_enabled;
+    assert!(is_timeframe_enabled(&caps, "tachibana", "1d").unwrap());
+    assert!(!is_timeframe_enabled(&caps, "tachibana", "5m").unwrap());
+}

@@ -34,7 +34,7 @@ fn test_tachibana_ticker_info_carries_display_name_ja_and_lot_size() {
         .expect("valid stock dict must parse");
 
     // (1) display_name_ja in side-channel meta.
-    assert_eq!(meta.display_name_ja.as_deref(), Some("トヨタ自動車"));
+    assert_eq!(meta.display_name_ja(), Some("トヨタ自動車"));
 
     // (2) lot_size survives.
     assert_eq!(info.lot_size, Some(100));
@@ -52,5 +52,5 @@ fn test_tachibana_ticker_info_carries_yobine_code() {
     });
     let (_ticker, _info, meta) =
         parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
-    assert_eq!(meta.yobine_code.as_deref(), Some("103"));
+    assert_eq!(meta.yobine_code(), Some("103"));
 }

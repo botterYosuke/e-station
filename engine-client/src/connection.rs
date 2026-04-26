@@ -15,6 +15,7 @@ use hyper::{
     upgrade::Upgraded,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc};
 
@@ -34,6 +35,11 @@ pub struct EngineConnection {
     events: broadcast::Sender<EngineEvent>,
     /// Notified once when the WS read loop exits (remote close or IO error).
     closed: Arc<tokio::sync::Notify>,
+    /// Snapshot of `Ready.capabilities` captured during the handshake. Stays
+    /// untyped on the Rust side per F-M8 — the UI probes specific paths via
+    /// `engine_client::capabilities`. Wrapped in `Arc` so cheap clones can
+    /// be passed into widget views without holding a connection borrow.
+    capabilities: Arc<Value>,
 }
 
 impl std::fmt::Debug for EngineConnection {
@@ -55,7 +61,7 @@ impl EngineConnection {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_BUFFER);
 
         // Perform handshake with exclusive ws access before spawning the IO tasks.
-        let ws = tokio::time::timeout(
+        let (ws, capabilities) = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             perform_handshake(ws, token, events_tx.clone()),
         )
@@ -71,7 +77,22 @@ impl EngineConnection {
             sender: cmd_tx,
             events: events_tx,
             closed,
+            capabilities: Arc::new(capabilities),
         })
+    }
+
+    /// Snapshot of `Ready.capabilities` captured during the handshake.
+    ///
+    /// Returned as an `Arc<Value>` so callers can hand the blob to the
+    /// `engine_client::capabilities::*` helpers without paying a clone per
+    /// UI frame. The blob is immutable for the lifetime of the connection
+    /// — a fresh handshake produces a new `EngineConnection`.
+    ///
+    /// UI code MUST NOT cache this `Arc` independently — always re-fetch via
+    /// the current `EngineConnection` so capability changes after a restart
+    /// are observed.
+    pub fn capabilities(&self) -> Arc<Value> {
+        Arc::clone(&self.capabilities)
     }
 
     /// Send a command to the Python engine.
@@ -180,7 +201,7 @@ async fn perform_handshake(
     mut ws: FragmentCollector<TokioIo<Upgraded>>,
     token: &str,
     events_tx: broadcast::Sender<EngineEvent>,
-) -> Result<FragmentCollector<TokioIo<Upgraded>>, EngineClientError> {
+) -> Result<(FragmentCollector<TokioIo<Upgraded>>, Value), EngineClientError> {
     // Send Hello
     let hello = Command::Hello {
         schema_major: SCHEMA_MAJOR,
@@ -206,32 +227,31 @@ async fn perform_handshake(
                     .map_err(|e| EngineClientError::WebSocket(e.to_string()))?;
                 let event: EngineEvent = serde_json::from_str(text)?;
 
-                match &event {
+                match event {
                     EngineEvent::Ready {
                         schema_major,
                         schema_minor,
+                        ref capabilities,
                         ..
                     } => {
-                        if *schema_major != SCHEMA_MAJOR {
+                        if schema_major != SCHEMA_MAJOR {
                             return Err(EngineClientError::SchemaMismatch {
                                 local_major: SCHEMA_MAJOR,
                                 local_minor: SCHEMA_MINOR,
-                                remote_major: *schema_major,
-                                remote_minor: *schema_minor,
+                                remote_major: schema_major,
+                                remote_minor: schema_minor,
                             });
                         }
                         log::info!(
                             "engine handshake complete: schema {schema_major}.{schema_minor}"
                         );
+                        let caps = capabilities.clone();
                         // Broadcast the Ready event so any subscriber can observe it.
                         let _ = events_tx.send(event);
-                        return Ok(ws);
+                        return Ok((ws, caps));
                     }
                     EngineEvent::EngineError { code, message } => {
-                        return Err(EngineClientError::EngineError {
-                            code: code.clone(),
-                            message: message.clone(),
-                        });
+                        return Err(EngineClientError::EngineError { code, message });
                     }
                     _ => {
                         // Unexpected event before Ready — broadcast it anyway and keep waiting.
