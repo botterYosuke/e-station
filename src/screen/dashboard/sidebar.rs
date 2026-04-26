@@ -32,6 +32,11 @@ pub enum Action {
         Option<data::layout::pane::ContentKind>,
     ),
     ErrorOccurred(data::InternalError),
+    /// Forwarded from `tickers_table::Action::RequestTachibanaLogin`.
+    /// Flowsurface drives the actual `RequestVenueLogin` IPC frame so
+    /// the duplicate-press suppression can consult `tachibana_state`
+    /// (which lives at the top level). T35-U1 / T35-U3.
+    RequestTachibanaLogin(crate::venue_state::Trigger),
 }
 
 impl Sidebar {
@@ -81,6 +86,9 @@ impl Sidebar {
                     }
                     Some(tickers_table::Action::FocusWidget(id)) => {
                         return (iced::widget::operation::focus(id), None);
+                    }
+                    Some(tickers_table::Action::RequestTachibanaLogin(trigger)) => {
+                        return (Task::none(), Some(Action::RequestTachibanaLogin(trigger)));
                     }
                     None => {}
                 }

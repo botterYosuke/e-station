@@ -262,7 +262,28 @@ enum VenueState {
 
 ---
 
-### Step D — U1 / U3 sidebar ログインボタン + 自動発火
+### Step D — U1 / U3 sidebar ログインボタン + 自動発火 ✅ 完了 (2026-04-26)
+
+> **完了サマリ (2026-04-26)**
+>
+> - ✅ `src/venue_state.rs::Trigger { Auto, Manual }` の `#[allow(dead_code)]` を撤去し本番で使用開始。
+> - ✅ `tickers_table::Action::RequestTachibanaLogin(Trigger)` / `Message::RequestTachibanaLogin(Trigger)` を新設。Manual ボタン経由・Auto auto-fire 経由ともに同じ Action variant に集約。
+> - ✅ `Sidebar::Action::RequestTachibanaLogin(Trigger)` を経由してバブルアップ。`Flowsurface::Message::RequestTachibanaLogin(Trigger)` で受け取り、`tachibana_state.is_login_in_flight()` をガードに `Task::perform(conn.send(Command::RequestVenueLogin{ request_id, venue: "tachibana" }))` を発行。
+> - ✅ Sidebar -> Flowsurface のディスパッチは `Task::done(Message::RequestTachibanaLogin(trigger))` を `Task::batch` に混ぜて元の Sidebar Task と並行実行する形にした（Sidebar 側の Action 通知が先行 task と競合しない）。
+> - ✅ `ToggleExchangeFilter(Venue::Tachibana)` のゲート分岐を `return Some(Action::RequestTachibanaLogin(Trigger::Auto))` に書き換え、pending fetch フラグは引き続き内部で立てる（`set_tachibana_ready(true)` で replay）。
+> - ✅ UI: tickers_table 側に `tachibana_login_btn()` を追加し、`exchange_filters` 描画ループで Tachibana 行のみ `column![filter_btn, login_btn].spacing(2)` 形式で常時表示。ラベルは `tachibana_ready` に応じて「立花 ログイン」/「立花 再ログイン」を切替（Step E のバナー側は Step E で別途実装）。プラン候補のホバーアイコン案ではなく「行右端固定アイコン」相当の simpler 案に倒した。
+> - ✅ テスト: tickers_table::tests に 3 件追加（`sidebar_login_button_emits_request_venue_login` / `auto_request_login_on_first_open_classified_as_manual_trigger` / `duplicate_press_returns_task_none_while_login_in_flight`）。既存 `metadata_fetch_blocked_until_venue_ready` を gate-block 後の Auto 戻り値に整合更新。
+> - ✅ duplicate-press 抑止は `VenueState::is_login_in_flight()` predicate を pin する形でテスト化（`tickers_table::tests::duplicate_press_returns_task_none_while_login_in_flight`）。Flowsurface インスタンス化を回避した代わりに、ガード判定そのものに対する unit pin として機能。
+> - ✅ `invariant-tests.md` に T35-U1-LoginButton / T35-U3-AutoRequestLogin 追記。
+> - ✅ `cargo test --workspace` 全緑（36 件）/ `cargo clippy --workspace --tests -- -D warnings` 緑 / `cargo fmt --check` 緑 / `tools/iced_purity_grep.sh` OK。
+>
+> **設計上の落とし穴 (後続作業者向け)**
+>
+> - `Sidebar::Action::RequestTachibanaLogin` を Flowsurface に届ける際、`task.map(Message::Sidebar)` と `Task::done(Message::RequestTachibanaLogin(trigger))` を **`Task::batch`** で並列実行する経路に倒した。`task.chain(...)` を使うと Sidebar 側 task が Empty 系（多くの場合 `Task::none()`）でも「次の task が走らない」case があり得る。Step E でバナーボタンから `Action::RequestTachibanaLogin(Manual)` を bubble するときも同じパターンで Flowsurface に到達させること。
+> - `RequestVenueLogin` IPC は ack を返さず、後続の `VenueLoginStarted` で FSM が `LoginInFlight` に遷移する。`Task::perform` の `then` callback では `Message::TachibanaVenueEvent(VenueEvent::LoginStarted)` を発火しないこと（**engine 側からの一次正本に統一**）。本実装は callback で `LoginStarted` を発火していないが、もし将来「ack 待ちの間に楽観的に LoginInFlight にしておきたい」最適化を入れるなら、`engine_status_stream` 側の VenueLoginStarted 受信と二重遷移が起きないことを再確認すること。
+>
+>   実装注意: 現状のコードは `LoginStarted` を **callback 内で発火している**（`Message::TachibanaVenueEvent(VenueEvent::LoginStarted)`）。これは IPC エラーで Engine 側 `VenueLoginStarted` が来ない場合のセーフティネット。FSM が `LoginInFlight -> LoginInFlight` で idempotent なので二重遷移自体は無害。本注意書きは将来の refactor で気にすべき点。
+> - inline ボタン UI は最低限の wiring。Step E でバナー実装するときに同じ「再ログイン」ボタンが追加されると重複表示になりうる。Step E 着手時に `tachibana_login_btn()` を「Idle のときだけ表示」に制限するか、バナー側を主として inline ボタンを Idle/Error 時のみに制限する判断が必要。
 
 **作業**:
 1. `Message::RequestTachibanaLogin(Trigger)` を新設（`Trigger::{Auto, Manual}`）

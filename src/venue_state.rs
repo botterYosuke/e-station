@@ -19,11 +19,6 @@ use engine_client::error::VenueErrorClass;
 /// the Tachibana venue tile (still classified as LOW-3 "ユーザー明示"
 /// per spec.md §3.2). `Manual` covers the explicit sidebar / banner
 /// "再ログイン" button presses.
-//
-// Step D wires the sidebar button that emits this; until then the
-// variants are unused. `dead_code` is suppressed at the enum level so a
-// genuine unused-variant regression after Step D still surfaces.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     /// First-time auto-fire on `Venue::Tachibana` selection while in

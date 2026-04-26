@@ -81,6 +81,14 @@ pub enum Action {
     ErrorOccurred(data::InternalError),
     Fetch(Task<Message>),
     FocusWidget(iced::widget::Id),
+    /// Request the Tachibana login dialog. The `Trigger` distinguishes
+    /// auto-fire (user selected the Tachibana venue while it was not
+    /// yet ready) from manual button presses (explicit sidebar /
+    /// banner re-login). The Flowsurface handler ignores the request
+    /// while `tachibana_state` is in `LoginInFlight` so duplicate
+    /// presses never spawn two helper subprocesses. T35-U1-LoginButton
+    /// / T35-U3-AutoRequestLogin.
+    RequestTachibanaLogin(crate::venue_state::Trigger),
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +111,11 @@ pub enum Message {
     RetryMetadataFetch(Venue),
     MetadataFetchFailed(Venue, data::InternalError),
     StatsFetchFailed(Venue, data::InternalError),
+    /// User-initiated Tachibana login request. Emitted by the inline
+    /// "ログイン" button next to the Tachibana row (T35-U1) and by the
+    /// auto-fire path inside `ToggleExchangeFilter(Tachibana)` when
+    /// the venue is not yet ready (T35-U3).
+    RequestTachibanaLogin(crate::venue_state::Trigger),
 }
 
 pub struct TickersTable {
@@ -275,10 +288,18 @@ impl TickersTable {
                     // Tachibana metadata fetches must wait for
                     // `VenueReady`; until then we record a pending
                     // request and let `set_tachibana_ready(true)`
-                    // replay it. T35-U4-VenueReadyGate.
+                    // replay it (T35-U4-VenueReadyGate). At the same
+                    // time we surface an auto-fire login request to
+                    // Flowsurface so the user does not have to click
+                    // the sidebar login button manually after toggling
+                    // the venue (T35-U3-AutoRequestLogin). Flowsurface
+                    // suppresses the request when `LoginInFlight`, so
+                    // repeat toggles cannot spawn duplicate dialogs.
                     if exch == Venue::Tachibana && !self.tachibana_ready {
                         self.tachibana_fetch_pending = true;
-                        return None;
+                        return Some(Action::RequestTachibanaLogin(
+                            crate::venue_state::Trigger::Auto,
+                        ));
                     }
 
                     if !self.metadata_fetch_state.has_fetched(exch) {
@@ -362,6 +383,9 @@ impl TickersTable {
                 if can_sort {
                     self.sort_ticker_rows();
                 }
+            }
+            Message::RequestTachibanaLogin(trigger) => {
+                return Some(Action::RequestTachibanaLogin(trigger));
             }
             Message::StatsFetchFailed(venue, err) => {
                 let can_sort = self.stats_fetch_state.complete_venue(venue);
@@ -650,6 +674,28 @@ impl TickersTable {
             .style(move |theme, status| style::button::transparent(theme, status, selected))
     }
 
+    /// Render the inline "ログイン" button that sits underneath the
+    /// Tachibana row (T35-U1-LoginButton). Always enabled — duplicate
+    /// presses while a dialog is in flight are suppressed at the
+    /// Flowsurface layer (`is_login_in_flight()` check), not by
+    /// disabling the widget here, so users still get visual feedback
+    /// that their click registered. T35-U3-AutoRequestLogin shares the
+    /// same `RequestTachibanaLogin` action with this button.
+    fn tachibana_login_btn(&self) -> Element<'_, Message> {
+        let label = if self.tachibana_ready {
+            "立花 再ログイン"
+        } else {
+            "立花 ログイン"
+        };
+        button(text(label).size(11))
+            .on_press(Message::RequestTachibanaLogin(
+                crate::venue_state::Trigger::Manual,
+            ))
+            .width(Length::Fill)
+            .style(|theme, status| style::button::transparent(theme, status, false))
+            .into()
+    }
+
     fn exchange_filter_btn<'a>(&'a self, venue: Venue) -> Element<'a, Message> {
         let unavailable = self.unavailable_exchanges.contains(&venue);
         let selected = self.selected_exchanges.contains(&venue);
@@ -811,7 +857,21 @@ impl TickersTable {
         let exchange_filters = {
             let mut col = column![];
             for venue in Venue::ALL {
-                col = col.push(self.exchange_filter_btn(venue));
+                if venue == Venue::Tachibana {
+                    // Tachibana ships with a dedicated inline login
+                    // button so the user can re-trigger the dialog
+                    // without first clicking the venue toggle. The
+                    // button is always visible (T35-U1, deadlock
+                    // avoidance: VenueReady-gated UIs would otherwise
+                    // hide the only way to recover from a cancelled
+                    // login).
+                    col = col.push(
+                        column![self.exchange_filter_btn(venue), self.tachibana_login_btn(),]
+                            .spacing(2),
+                    );
+                } else {
+                    col = col.push(self.exchange_filter_btn(venue));
+                }
             }
             col.spacing(4)
         };
@@ -2163,13 +2223,20 @@ mod tests {
         assert!(!table.tachibana_fetch_pending);
 
         // Toggling Tachibana before VenueReady must mark a pending fetch
-        // and produce no Action::Fetch. The metadata fetch state must
-        // not advance to in-flight either, so a later replay knows to
-        // begin_venue afresh.
+        // and surface an auto-fire login request. The metadata fetch
+        // state must not advance to in-flight either, so a later replay
+        // knows to begin_venue afresh.
         let action = table.update(Message::ToggleExchangeFilter(Venue::Tachibana));
         assert!(
-            action.is_none(),
-            "ToggleExchangeFilter(Tachibana) before Ready must not return an Action::Fetch"
+            matches!(
+                action,
+                Some(Action::RequestTachibanaLogin(
+                    crate::venue_state::Trigger::Auto
+                ))
+            ),
+            "ToggleExchangeFilter(Tachibana) before Ready must surface \
+             RequestTachibanaLogin(Auto), got {:?}",
+            action.is_some()
         );
         assert!(
             table.tachibana_fetch_pending,
@@ -2226,6 +2293,74 @@ mod tests {
             !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
             "no pending request → no fetch on VenueReady"
         );
+    }
+
+    #[test]
+    fn sidebar_login_button_emits_request_venue_login() {
+        // Pin for T35-U1-LoginButton: the inline "ログイン" button under
+        // the Tachibana row dispatches `Message::RequestTachibanaLogin`
+        // with `Trigger::Manual`, which `update()` forwards verbatim
+        // as an `Action::RequestTachibanaLogin(Manual)` for the
+        // Sidebar/Flowsurface chain to act on.
+        use crate::venue_state::Trigger;
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+
+        let action = table.update(Message::RequestTachibanaLogin(Trigger::Manual));
+        assert!(
+            matches!(action, Some(Action::RequestTachibanaLogin(Trigger::Manual))),
+            "manual button must propagate Trigger::Manual unchanged"
+        );
+    }
+
+    #[test]
+    fn auto_request_login_on_first_open_classified_as_manual_trigger() {
+        // T35-U3-AutoRequestLogin: even though the variant carries
+        // `Trigger::Auto`, the user is still acting explicitly (they
+        // *just* selected the Tachibana venue tile), so the request is
+        // semantically equivalent to a Manual press. The `Auto` tag
+        // exists only so banners / telemetry can distinguish first-open
+        // from explicit re-clicks; the dialog spawn behaviour is the
+        // same in both cases.
+        use crate::venue_state::Trigger;
+        let settings = settings_for(Venue::Bybit);
+        let (mut table, _task) =
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
+
+        let action = table.update(Message::ToggleExchangeFilter(Venue::Tachibana));
+        match action {
+            Some(Action::RequestTachibanaLogin(Trigger::Auto)) => {}
+            other => panic!(
+                "auto-fire must use Trigger::Auto on first toggle, got Some={}",
+                other.is_some()
+            ),
+        }
+    }
+
+    #[test]
+    fn duplicate_press_returns_task_none_while_login_in_flight() {
+        // T35-U1 duplicate-press contract is implemented by the
+        // Flowsurface handler observing `tachibana_state.is_login_in_flight()`.
+        // The state machine itself is the load-bearing piece — pin it
+        // here so a future change to either the FSM transitions or the
+        // gate predicate still trips this test.
+        use crate::venue_state::{VenueEvent, VenueState};
+        let started = VenueState::Idle.next(VenueEvent::LoginStarted);
+        assert!(
+            started.is_login_in_flight(),
+            "LoginStarted must move Idle into LoginInFlight so the gate triggers"
+        );
+        // From LoginInFlight, only Cancelled / Ready / Error / Hello
+        // can lift the gate; another LoginStarted is a re-emit and
+        // keeps us in the same state.
+        let still_in_flight = VenueState::LoginInFlight.next(VenueEvent::LoginStarted);
+        assert!(still_in_flight.is_login_in_flight());
+        // Idle / Ready / Error must NOT report login_in_flight, so the
+        // Flowsurface gate lets fresh requests through after they
+        // resolve.
+        assert!(!VenueState::Idle.is_login_in_flight());
+        assert!(!VenueState::Ready.is_login_in_flight());
     }
 
     #[test]

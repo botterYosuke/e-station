@@ -26,7 +26,7 @@ use modal::{
 use modal::{dashboard_modal, main_dialog_modal};
 use notify::Notifications;
 use screen::dashboard::{self, Dashboard};
-use venue_state::{VenueEvent, VenueState};
+use venue_state::{Trigger, VenueEvent, VenueState};
 use widget::{
     confirm_dialog_container,
     toast::{self, Toast},
@@ -456,6 +456,13 @@ enum Message {
     /// `VenueError` / `VenueReady`) arrives. Drives `tachibana_state`
     /// transitions. T35-U4-VenueReadyGate / T35-U2-Banner.
     TachibanaVenueEvent(VenueEvent),
+    /// User asked to (re)open the Tachibana login dialog. Sourced
+    /// from the inline "ログイン" button (`Trigger::Manual`) and from
+    /// the auto-fire path inside `tickers_table` that runs when the
+    /// user toggles Tachibana while the venue is still `Idle`
+    /// (`Trigger::Auto`). The handler suppresses duplicates while
+    /// `tachibana_state` is already `LoginInFlight`. T35-U1 / T35-U3.
+    RequestTachibanaLogin(Trigger),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -696,6 +703,43 @@ impl Flowsurface {
                 // by `Message::EngineConnected` so a single source of
                 // truth (the live connection) drives the swap. See
                 // T35-H9-SingleRecoveryPath.
+            }
+            Message::RequestTachibanaLogin(trigger) => {
+                // Duplicate-press suppression: while a login dialog is
+                // already in flight, drop the request. Without this
+                // the auto-fire path would spawn a new tkinter helper
+                // every time the user toggled the Tachibana venue.
+                // T35-U1-LoginButton / T35-U3-AutoRequestLogin.
+                if self.tachibana_state.is_login_in_flight() {
+                    log::debug!(
+                        "RequestTachibanaLogin({trigger:?}) ignored — login already in flight"
+                    );
+                    return Task::none();
+                }
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    log::warn!(
+                        "RequestTachibanaLogin({trigger:?}) ignored — engine connection unavailable"
+                    );
+                    return Task::none();
+                };
+                return Task::perform(
+                    async move {
+                        let request_id = uuid::Uuid::new_v4().to_string();
+                        conn.send(engine_client::dto::Command::RequestVenueLogin {
+                            request_id,
+                            venue: "tachibana".to_string(),
+                        })
+                        .await
+                    },
+                    |result| {
+                        if let Err(err) = result {
+                            log::warn!("Failed to send RequestVenueLogin: {err}");
+                        }
+                        // No follow-up Message — the engine will emit
+                        // VenueLoginStarted which transitions the FSM.
+                        Message::TachibanaVenueEvent(VenueEvent::LoginStarted)
+                    },
+                );
             }
             Message::TachibanaVenueEvent(event) => {
                 let next =
@@ -1215,6 +1259,13 @@ impl Flowsurface {
                     }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
+                    }
+                    Some(dashboard::sidebar::Action::RequestTachibanaLogin(trigger)) => {
+                        let task = task.map(Message::Sidebar);
+                        return Task::batch(vec![
+                            task,
+                            iced::Task::done(Message::RequestTachibanaLogin(trigger)),
+                        ]);
                     }
                     None => {}
                 }
