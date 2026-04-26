@@ -110,7 +110,10 @@ fn cancel_all_orders_with_filter_serializes() {
     };
     let json = serde_json::to_string(&cmd).unwrap();
     assert!(json.contains(r#""order_side":"SELL""#), "got: {json}");
-    assert!(json.contains(r#""instrument_id":"7203.TSE""#), "got: {json}");
+    assert!(
+        json.contains(r#""instrument_id":"7203.TSE""#),
+        "got: {json}"
+    );
 }
 
 // ── GetOrderList serialize ────────────────────────────────────────────────────
@@ -143,7 +146,10 @@ fn get_order_list_with_instrument_filter_serializes() {
         },
     };
     let json = serde_json::to_string(&cmd).unwrap();
-    assert!(json.contains(r#""instrument_id":"9984.TSE""#), "got: {json}");
+    assert!(
+        json.contains(r#""instrument_id":"9984.TSE""#),
+        "got: {json}"
+    );
 }
 
 // ── OrderListUpdated deserialize (Python → Rust) ──────────────────────────────

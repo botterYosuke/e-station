@@ -275,7 +275,7 @@ impl OrderSessionState {
         // 最初に見つかったものだけ更新する。
         let matched = self.map.iter_mut().find(|(_, rec)| {
             rec.venue_order_id.is_none()
-                // 既に venue_order_id が入っているエントリはスキップ（上書き禁止）
+            // 既に venue_order_id が入っているエントリはスキップ（上書き禁止）
         });
 
         if let Some((cid, record)) = matched {

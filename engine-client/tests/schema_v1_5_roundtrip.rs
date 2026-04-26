@@ -86,7 +86,12 @@ fn order_filled_partial_fill_deserializes() {
     );
     let ev: EngineEvent = serde_json::from_str(&json).unwrap();
     match ev {
-        EngineEvent::OrderFilled { leaves_qty, last_qty, trade_id, .. } => {
+        EngineEvent::OrderFilled {
+            leaves_qty,
+            last_qty,
+            trade_id,
+            ..
+        } => {
             assert_ne!(leaves_qty, "0", "部分約定は leaves_qty > 0");
             assert_eq!(leaves_qty, "50");
             assert_eq!(last_qty, "50");

@@ -82,10 +82,12 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
         let cid_can = cid.clone();
         iced::widget::row![
             text(label).size(12),
-            iced::widget::button(text("訂正").size(11))
-                .on_press(Message::ModifyClicked { client_order_id: cid_mod }),
-            iced::widget::button(text("取消").size(11))
-                .on_press(Message::CancelClicked { client_order_id: cid_can }),
+            iced::widget::button(text("訂正").size(11)).on_press(Message::ModifyClicked {
+                client_order_id: cid_mod
+            }),
+            iced::widget::button(text("取消").size(11)).on_press(Message::CancelClicked {
+                client_order_id: cid_can
+            }),
         ]
         .spacing(8)
         .into()
@@ -93,9 +95,7 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
 
     let content = column(rows).spacing(4);
 
-    container(scrollable(content))
-        .padding(8)
-        .into()
+    container(scrollable(content)).padding(8).into()
 }
 
 // ── OrderSide display helper ──────────────────────────────────────────────────

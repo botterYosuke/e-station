@@ -74,11 +74,7 @@ pub enum Message {
 pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
     if let Some(ref err) = panel.error {
         return center(
-            column![
-                text("余力取得エラー").size(13),
-                text(err.as_str()).size(11),
-            ]
-            .spacing(4),
+            column![text("余力取得エラー").size(13), text(err.as_str()).size(11),].spacing(4),
         )
         .into();
     }
@@ -109,8 +105,8 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
         None => row![text("信用余力: ---").size(12)],
     };
 
-    let refresh_btn = iced::widget::button(text("更新").size(11))
-        .on_press(Message::RefreshRequested);
+    let refresh_btn =
+        iced::widget::button(text("更新").size(11)).on_press(Message::RefreshRequested);
 
     let content = column![cash_row, credit_row, refresh_btn].spacing(6);
 

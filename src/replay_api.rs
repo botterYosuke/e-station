@@ -210,12 +210,8 @@ async fn handle_request(
         }
         ("POST", "/api/order/cancel-all") => {
             if let Some(state) = order_state {
-                crate::api::order_api::handle_cancel_all_request(
-                    &mut stream,
-                    &req.body,
-                    &state,
-                )
-                .await;
+                crate::api::order_api::handle_cancel_all_request(&mut stream, &req.body, &state)
+                    .await;
             } else {
                 write_response(
                     &mut stream,

@@ -900,9 +900,7 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             ..
         } => {
             let body = if leaves_qty == "0" {
-                format!(
-                    "約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（全約定）"
-                )
+                format!("約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（全約定）")
             } else {
                 format!(
                     "約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（残 {leaves_qty} 株）"

@@ -40,8 +40,8 @@ use std::{
 use engine_client::{
     EngineConnection,
     dto::{
-        Command, EngineEvent, OrderListFilter as IpcOrderListFilter, OrderModifyChange,
-        OrderSide, OrderType, SubmitOrderRequest, TimeInForce, TriggerType,
+        Command, EngineEvent, OrderListFilter as IpcOrderListFilter, OrderModifyChange, OrderSide,
+        OrderType, SubmitOrderRequest, TimeInForce, TriggerType,
     },
     order_session_state::{ClientOrderId, OrderSessionState, PlaceOrderOutcome},
 };
@@ -592,7 +592,10 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             return error_response(
                 404,
                 "ORDER_NOT_FOUND",
-                &format!("client_order_id {:?} not found or venue_order_id unknown", body.client_order_id),
+                &format!(
+                    "client_order_id {:?} not found or venue_order_id unknown",
+                    body.client_order_id
+                ),
             );
         }
     };
@@ -621,7 +624,11 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
         change,
     };
     if let Err(e) = conn.send(cmd).await {
-        return error_response(502, "INTERNAL_ERROR", &format!("failed to send to engine: {e}"));
+        return error_response(
+            502,
+            "INTERNAL_ERROR",
+            &format!("failed to send to engine: {e}"),
+        );
     }
 
     // ⑦ Wait for OrderPendingUpdate
@@ -639,7 +646,10 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
                 "status": "PENDING_UPDATE",
                 "ts_event_ms": ts_event_ms
             });
-            HttpResponse { status: 200, body: resp.to_string() }
+            HttpResponse {
+                status: 200,
+                body: resp.to_string(),
+            }
         }
         Ok(Err(msg)) => error_response(502, "INTERNAL_ERROR", &msg),
         Err(_) => error_response(504, "INTERNAL_ERROR", "modify order timed out"),
@@ -684,7 +694,10 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             return error_response(
                 404,
                 "ORDER_NOT_FOUND",
-                &format!("client_order_id {:?} not found or venue_order_id unknown", body.client_order_id),
+                &format!(
+                    "client_order_id {:?} not found or venue_order_id unknown",
+                    body.client_order_id
+                ),
             );
         }
     };
@@ -707,7 +720,11 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
         venue_order_id: venue_order_id.clone(),
     };
     if let Err(e) = conn.send(cmd).await {
-        return error_response(502, "INTERNAL_ERROR", &format!("failed to send to engine: {e}"));
+        return error_response(
+            502,
+            "INTERNAL_ERROR",
+            &format!("failed to send to engine: {e}"),
+        );
     }
 
     // ⑦ Wait for OrderPendingCancel
@@ -725,7 +742,10 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
                 "status": "PENDING_CANCEL",
                 "ts_event_ms": ts_event_ms
             });
-            HttpResponse { status: 200, body: resp.to_string() }
+            HttpResponse {
+                status: 200,
+                body: resp.to_string(),
+            }
         }
         Ok(Err(msg)) => error_response(502, "INTERNAL_ERROR", &msg),
         Err(_) => error_response(504, "INTERNAL_ERROR", "cancel order timed out"),
@@ -740,7 +760,11 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
 async fn cancel_all_orders(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse {
     // ① Parse — empty body is allowed (treated as `{}`, which will fail confirm check)
     let body: CancelAllBody = if raw_body.trim().is_empty() {
-        CancelAllBody { confirm: None, instrument_id: None, order_side: None }
+        CancelAllBody {
+            confirm: None,
+            instrument_id: None,
+            order_side: None,
+        }
     } else {
         match serde_json::from_str(raw_body) {
             Ok(b) => b,
@@ -814,11 +838,18 @@ async fn cancel_all_orders(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRe
         order_side,
     };
     if let Err(e) = conn.send(cmd).await {
-        return error_response(502, "INTERNAL_ERROR", &format!("failed to send to engine: {e}"));
+        return error_response(
+            502,
+            "INTERNAL_ERROR",
+            &format!("failed to send to engine: {e}"),
+        );
     }
 
     let resp = serde_json::json!({ "status": "accepted" });
-    HttpResponse { status: 202, body: resp.to_string() }
+    HttpResponse {
+        status: 202,
+        body: resp.to_string(),
+    }
 }
 
 /// `GET /api/order/list` core logic.
@@ -828,11 +859,17 @@ async fn cancel_all_orders(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRe
 async fn list_orders(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse {
     // ① Parse optional filter body (GET may have empty body)
     let filter_body: OrderListQueryBody = if raw_body.trim().is_empty() {
-        OrderListQueryBody { status: None, instrument_id: None, date: None }
+        OrderListQueryBody {
+            status: None,
+            instrument_id: None,
+            date: None,
+        }
     } else {
         match serde_json::from_str(raw_body) {
             Ok(b) => b,
-            Err(e) => return error_response(400, "VALIDATION_ERROR", &format!("invalid JSON: {e}")),
+            Err(e) => {
+                return error_response(400, "VALIDATION_ERROR", &format!("invalid JSON: {e}"));
+            }
         }
     };
 
@@ -858,7 +895,11 @@ async fn list_orders(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse
         filter,
     };
     if let Err(e) = conn.send(cmd).await {
-        return error_response(502, "INTERNAL_ERROR", &format!("failed to send to engine: {e}"));
+        return error_response(
+            502,
+            "INTERNAL_ERROR",
+            &format!("failed to send to engine: {e}"),
+        );
     }
 
     // ⑤ Wait for OrderListUpdated matching request_id
@@ -2411,7 +2452,11 @@ mod tests {
 
         let resp = cancel_all_orders("", &state).await;
         assert_eq!(resp.status, 400, "missing body should return 400");
-        assert!(resp.body.contains("CONFIRM_REQUIRED"), "body: {}", resp.body);
+        assert!(
+            resp.body.contains("CONFIRM_REQUIRED"),
+            "body: {}",
+            resp.body
+        );
     }
 
     /// cancel-all with `confirm: false` → 400 CONFIRM_REQUIRED
@@ -2428,7 +2473,11 @@ mod tests {
         let body = r#"{"confirm": false}"#;
         let resp = cancel_all_orders(body, &state).await;
         assert_eq!(resp.status, 400, "confirm:false should return 400");
-        assert!(resp.body.contains("CONFIRM_REQUIRED"), "body: {}", resp.body);
+        assert!(
+            resp.body.contains("CONFIRM_REQUIRED"),
+            "body: {}",
+            resp.body
+        );
     }
 
     /// cancel-all with `confirm: "true"` (string, not bool) → 400 CONFIRM_REQUIRED
@@ -2444,8 +2493,15 @@ mod tests {
 
         let body = r#"{"confirm": "true"}"#;
         let resp = cancel_all_orders(body, &state).await;
-        assert_eq!(resp.status, 400, "confirm:\"true\" (string) should return 400");
-        assert!(resp.body.contains("CONFIRM_REQUIRED"), "body: {}", resp.body);
+        assert_eq!(
+            resp.status, 400,
+            "confirm:\"true\" (string) should return 400"
+        );
+        assert!(
+            resp.body.contains("CONFIRM_REQUIRED"),
+            "body: {}",
+            resp.body
+        );
     }
 
     /// cancel-all with `confirm: true` (bool) and engine connected → 202 Accepted
@@ -2473,7 +2529,11 @@ mod tests {
 
         let body = r#"{"confirm": true}"#;
         let resp = cancel_all_orders(body, &state).await;
-        assert_eq!(resp.status, 202, "confirm:true should return 202; body={}", resp.body);
+        assert_eq!(
+            resp.status, 202,
+            "confirm:true should return 202; body={}",
+            resp.body
+        );
 
         drop(engine_tx);
     }
@@ -2491,7 +2551,11 @@ mod tests {
 
         let body = r#"{"client_order_id": "nonexistent-cid-00001"}"#;
         let resp = cancel_order(body, &state).await;
-        assert_eq!(resp.status, 404, "unknown cid should return 404; body={}", resp.body);
+        assert_eq!(
+            resp.status, 404,
+            "unknown cid should return 404; body={}",
+            resp.body
+        );
         assert!(resp.body.contains("ORDER_NOT_FOUND"), "body: {}", resp.body);
     }
 
