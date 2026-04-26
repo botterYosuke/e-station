@@ -19,8 +19,47 @@ The HTTP/REST scheme of the four virtual URLs is `https://`; only
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Mapping
+
+# ---------------------------------------------------------------------------
+# Production URL guard (T0.6)
+# ---------------------------------------------------------------------------
+
+# 本番環境のホスト名パターン（F-L1: このファイルにのみ記載を許可）
+PROD_URL_PATTERNS = ["kabuka.e-shiten.jp", "e-shiten.jp"]
+
+
+def is_production_url(url: str) -> bool:
+    """本番 URL かどうか検出する。
+
+    PROD_URL_PATTERNS のいずれかがホスト部分に含まれている場合に True を返す。
+    demo-kabuka.e-shiten.jp のようなデモ URL は False。
+    """
+    if not url:
+        return False
+    # デモ URL は本番扱いしない
+    if "demo-kabuka.e-shiten.jp" in url:
+        return False
+    return any(pattern in url for pattern in PROD_URL_PATTERNS)
+
+
+def guard_prod_url(url: str) -> None:
+    """本番 URL かつ TACHIBANA_ALLOW_PROD != "1" なら ValueError を raise する。
+
+    HTTP 送信直前に呼び出して誤発注を防ぐ安全装置（T0.6）。
+    TACHIBANA_ALLOW_PROD=1 が環境変数に設定されている場合のみ本番 URL への送信を許可する。
+
+    Raises:
+        ValueError: 本番 URL かつ TACHIBANA_ALLOW_PROD != "1" の場合
+    """
+    if is_production_url(url) and os.getenv("TACHIBANA_ALLOW_PROD") != "1":
+        raise ValueError(
+            f"Production URL is not allowed without TACHIBANA_ALLOW_PROD=1 "
+            f"(url host detected as production). "
+            f"Set TACHIBANA_ALLOW_PROD=1 to allow production orders."
+        )
 
 # ---------------------------------------------------------------------------
 # URL NewType wrappers

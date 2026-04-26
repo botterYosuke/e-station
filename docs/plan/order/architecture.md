@@ -27,8 +27,8 @@
    ▼
 Rust src/api/order_api.rs
    │ ① 入力検証（UUID, 銘柄コード形式, qty>0 …）
-   │ ② OrderSessionState.try_insert(client_order_id, request_key, new_venue_order_id)
-   │      （事前採番 UUID を 3 引数で渡す。flowsurface `place_or_replay` 踏襲）
+   │ ② OrderSessionState.try_insert(client_order_id, request_key)
+   │      （2 引数。venue_order_id は OrderAccepted 受信後に update_venue_order_id() で後着する）
    │      ├─ Created { client_order_id } → 続行
    │      ├─ IdempotentReplay { venue_order_id } → 既存 venue_order_id で 200 を即返却
    │      └─ Conflict  → 409
@@ -368,7 +368,83 @@ flowsurface との差分:
 
 ### 4.2 監査ログ WAL（write-ahead log）
 
-`tachibana_orders.jsonl`（[spec.md §3.2](./spec.md#32-安全装置誤発注防止)）を **発注前後 2 段階で append** し、起動時に復元できる WAL として使う:
+`tachibana_orders.jsonl`（[spec.md §3.2](./spec.md#32-安全装置誤発注防止)）を **発注前後 2 段階で append** し、起動時に復元できる WAL として使う。
+
+#### WAL フォーマット仕様（T0.7 確定版 — Agent C の Rust 実装がこの仕様を読む）
+
+各行は JSON オブジェクト + `\n` 終端（JSONL 形式）。ファイルエンコーディングは UTF-8。
+
+**submit 行**（HTTP 送信直前に fsync 込みで書く）:
+```json
+{
+  "phase": "submit",
+  "ts": 1700000000000,
+  "client_order_id": "cid-001",
+  "request_key": 12345,
+  "instrument_id": "7203.TSE",
+  "order_side": "BUY",
+  "order_type": "MARKET",
+  "quantity": "100"
+}
+```
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `phase` | `string` | 固定値 `"submit"` |
+| `ts` | `integer` | Unix ミリ秒（UTC）|
+| `client_order_id` | `string` | クライアント注文 ID（ASCII printable、1〜36 文字）|
+| `request_key` | `integer` | `xxh3_64` ハッシュ（u64）。Rust 側 canonicalization で計算、Python 側は 0 を仮置き（T0.7 時点）|
+| `instrument_id` | `string` | `"7203.TSE"` 形式 |
+| `order_side` | `string` | `"BUY"` または `"SELL"` |
+| `order_type` | `string` | `"MARKET"` / `"LIMIT"` 等 |
+| `quantity` | `string` | 発注数量（精度保持文字列）|
+
+**accepted 行**（応答受領後に flush で書く）:
+```json
+{
+  "phase": "accepted",
+  "ts": 1700000001000,
+  "client_order_id": "cid-001",
+  "venue_order_id": "ORD-001",
+  "p_no": 1700000001,
+  "warning_code": null,
+  "warning_text": null
+}
+```
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `phase` | `string` | 固定値 `"accepted"` |
+| `ts` | `integer` | Unix ミリ秒（UTC）|
+| `client_order_id` | `string` | submit と対応するクライアント注文 ID |
+| `venue_order_id` | `string \| null` | 立花 `sOrderNumber`。欠落時は `null` |
+| `p_no` | `integer` | 送信した `p_no` 値（単調増加保証の確認用）|
+| `warning_code` | `string \| null` | 立花 `sWarningCode`（正常時は空文字 or `null`）|
+| `warning_text` | `string \| null` | 立花 `sWarningText`（正常時は空文字 or `null`）|
+
+**rejected 行**（応答受領後に flush で書く）:
+```json
+{
+  "phase": "rejected",
+  "ts": 1700000001000,
+  "client_order_id": "cid-001",
+  "reason_code": "SESSION_EXPIRED",
+  "reason_text": "Tachibana セッションが切れています"
+}
+```
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `phase` | `string` | 固定値 `"rejected"` |
+| `ts` | `integer` | Unix ミリ秒（UTC）|
+| `client_order_id` | `string` | submit と対応するクライアント注文 ID |
+| `reason_code` | `string` | `SESSION_EXPIRED` / `VENUE_REJECTED` 等 |
+| `reason_text` | `string` | ヒューマンリーダブルなエラー詳細（第二暗証番号の実値を含まないこと）|
+
+**Rust 実装者向けの起動時復元ロジック**（`OrderSessionState::restore_from_wal`）:
+1. WAL ファイルを行単位で読み込む
+2. 末尾行に `\n` が無ければ truncated → スキップ + `tracing::warn!`（C-R5-H1）
+3. `phase == "submit"` の行を `client_order_id → (request_key, venue_order_id=None, status="SUBMITTED")` として map に登録
+4. `phase == "accepted"` の行で `venue_order_id` を後着更新（`update_venue_order_id`）、`status` を `"ACCEPTED"` に更新
+5. `phase == "rejected"` の行で当該エントリを map から除去（再送防止対象外）
+6. WAL に `submit` のみで `accepted`/`rejected` が無い行 → `unknown` 状態で保持（`venue_order_id = None`）
 
 ```
 {"phase":"submit", "ts":..., "client_order_id":"...", "request_key":12345, "instrument_id":"7203.TSE", ...}
@@ -519,7 +595,7 @@ env:
 | 本計画 `PlaceOrderOutcome::Created { client_order_id }` | flowsurface `PlaceOrderOutcome::Created { order_id }` | **意味反転ではなく rename**: 両者とも事前採番 UUID を返す。フィールド名の差（`order_id` → `client_order_id` への rename）であり、venue 採番値は本計画では `update_venue_order_id` で後着する |
 | `src/api/order_session_state.rs::OrderSessionState` | `flowsurface/src/api/agent_session_state.rs::AgentSessionState`（移植元） | **Rust → Rust の移植**（Python ではない） |
 | `src/api/order_session_state.rs::PlaceOrderOutcome` | `flowsurface/src/api/agent_session_state.rs::PlaceOrderOutcome`（移植元） | 同 |
-| `OrderSessionState::try_insert(client_order_id, request_key, new_venue_order_id)` | `AgentSessionState::place_or_replay(...)` | **3 引数化**: 事前採番 UUID を 3 引数で渡す。flowsurface `place_or_replay` 踏襲 |
+| `OrderSessionState::try_insert(client_order_id, request_key)` | `AgentSessionState::place_or_replay(...)` | **2 引数化**: venue_order_id は後着するため引数に含めない。`update_venue_order_id()` で OrderAccepted 受信後に埋める |
 
 **B-M3 `TachibanaWireOrderRequest.__repr__` のマスク対象**: **`second_password` のみマスク**（flowsurface `NewOrderRequest` の `Debug` 手実装と同等）。`user_id` / `password` は注文 wire（`CLMKabuNewOrder` 等）には載らないため、注文 wire 型のマスク対象には含めない。`user_id` / `password` のログ漏洩防止は別経路（認証 wire 型 `TachibanaCredentialsWire` / ログイン関連 helper）で対処する。
 

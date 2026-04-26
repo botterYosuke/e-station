@@ -9,6 +9,7 @@ description = "IPC client connecting Flowsurface to the Python data engine"
 
 [dependencies]
 exchange.workspace = true
+chrono.workspace = true
 # HIGH-8 (ラウンド 6 強制修正 / Group F): wire DTOs for venue payloads
 # (`TachibanaCredentialsWire` / `TachibanaSessionWire`) now live in
 # `data::wire::tachibana`. `engine-client::dto` re-exports them so
@@ -39,3 +40,5 @@ hyper-util = { version = "0.1.10", default-features = false }
 tokio = { version = "1.43", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
+tempfile = "3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

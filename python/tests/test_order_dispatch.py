@@ -132,8 +132,12 @@ async def test_submit_order_unknown_venue_returns_error(server):
 
 
 @pytest.mark.asyncio
-async def test_submit_order_unsupported_type_returns_order_rejected(server):
-    """LIMIT 注文 → OrderRejected{reason_code=UNSUPPORTED_IN_PHASE_O0}"""
+async def test_submit_order_limit_proceeds_past_phase_guard(server):
+    """Phase O3: LIMIT 注文は Phase O0 ガードを通過し、次の SecondPasswordRequired に到達する。
+
+    Phase O0 では UNSUPPORTED_IN_PHASE_O0 で reject されていたが、
+    Phase O3 では LIMIT が解禁されたため SecondPasswordRequired になる。
+    """
     port, token, _, __ = server
     ws = await _connect(port, token)
     cmd = _base_submit_order()
@@ -141,19 +145,42 @@ async def test_submit_order_unsupported_type_returns_order_rejected(server):
     cmd["order"]["price"] = "2000"
     await ws.send(orjson.dumps(cmd))
     evt = await _recv_event(ws)
-    assert evt["event"] == "OrderRejected"
-    assert evt["reason_code"] == "UNSUPPORTED_IN_PHASE_O0"
-    assert evt["client_order_id"] == "cid-test-001"
+    # Phase O3: LIMIT はガードを通過し、SecondPasswordRequired に到達する
+    assert evt["event"] == "SecondPasswordRequired", (
+        f"Phase O3: LIMIT 注文はガードを通過するため SecondPasswordRequired が期待されるが、"
+        f"got {evt!r}"
+    )
     await ws.close()
 
 
 @pytest.mark.asyncio
-async def test_submit_order_sell_returns_order_rejected(server):
-    """SELL 注文 → OrderRejected{reason_code=UNSUPPORTED_IN_PHASE_O0}"""
+async def test_submit_order_sell_proceeds_past_phase_guard(server):
+    """Phase O3: SELL 注文は Phase O0 ガードを通過し、SecondPasswordRequired に到達する。
+
+    Phase O0 では UNSUPPORTED_IN_PHASE_O0 で reject されていたが、
+    Phase O3 では SELL が解禁された。
+    """
     port, token, _, __ = server
     ws = await _connect(port, token)
     cmd = _base_submit_order()
     cmd["order"]["order_side"] = "SELL"
+    await ws.send(orjson.dumps(cmd))
+    evt = await _recv_event(ws)
+    # Phase O3: SELL はガードを通過し SecondPasswordRequired に到達する
+    assert evt["event"] == "SecondPasswordRequired", (
+        f"Phase O3: SELL 注文はガードを通過するため SecondPasswordRequired が期待されるが、"
+        f"got {evt!r}"
+    )
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_order_unsupported_type_market_if_touched_rejected(server):
+    """MARKET_IF_TOUCHED → OrderRejected{reason_code=UNSUPPORTED_IN_PHASE_O0} (立花未対応)"""
+    port, token, _, __ = server
+    ws = await _connect(port, token)
+    cmd = _base_submit_order()
+    cmd["order"]["order_type"] = "MARKET_IF_TOUCHED"
     await ws.send(orjson.dumps(cmd))
     evt = await _recv_event(ws)
     assert evt["event"] == "OrderRejected"
@@ -224,4 +251,122 @@ async def test_forget_second_password_causes_second_password_required(server):
     await ws.send(orjson.dumps(_base_submit_order("req-3")))
     evt = await _recv_event(ws)
     assert evt["event"] == "SecondPasswordRequired"
+    await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# M-1: SetSecondPassword — 空文字列でも _second_password が更新される
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_second_password_empty_string_does_not_update_state(server):
+    """空文字列 value では _second_password が更新されないこと（R2-MEDIUM）。
+
+    立花 API は空文字列の第二暗証番号を reject するため、空文字列を設定しても
+    _second_password は None のままにして VENUE_REJECTED を防ぐ。
+    """
+    _, _, srv, __ = server
+    # 初期状態は None
+    assert srv._second_password is None
+    # 空文字列を送信 → 無視されるべき
+    srv._handle_set_second_password({"value": ""})
+    assert srv._second_password is None, "_second_password must NOT be updated for empty string"
+
+    # 空白のみの文字列も無視されること
+    srv._handle_set_second_password({"value": "   "})
+    assert srv._second_password is None, "_second_password must NOT be updated for whitespace-only"
+
+    # 有効な文字列は設定されること
+    srv._handle_set_second_password({"value": "valid-pw"})
+    assert srv._second_password == "valid-pw", "_second_password must be updated for valid string"
+
+
+# ---------------------------------------------------------------------------
+# M-2: _do_submit_order — セッション未確立時に OrderRejected{NOT_LOGGED_IN} が返る
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_submit_order_not_logged_in_returns_order_rejected(server):
+    """セッション未確立時の SubmitOrder は OrderRejected{NOT_LOGGED_IN} を返す（M-2）。"""
+    port, token, srv, __ = server
+    ws = await _connect(port, token)
+
+    # 第二暗証番号を設定する（セッションチェックより先）
+    srv._handle_set_second_password({"value": "pw"})
+    # セッションは None のまま（_tachibana_session は設定しない）
+
+    await ws.send(orjson.dumps(_base_submit_order("req-not-logged")))
+    evt = await _recv_event(ws)
+    assert evt["event"] == "OrderRejected", f"expected OrderRejected, got {evt}"
+    assert evt["reason_code"] == "NOT_LOGGED_IN"
+    await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# C-1: _do_submit_order — HTTP エラー時に OrderRejected が発火される
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_submit_order_http_error_causes_order_rejected(server):
+    """tachibana_submit_order が httpx.ConnectError を上げると OrderRejected{TRANSPORT_ERROR} が返る（C-1）。"""
+    import httpx
+    from unittest.mock import patch, AsyncMock
+
+    port, token, srv, __ = server
+    ws = await _connect(port, token)
+
+    # セッションをダミーで設定
+    from unittest.mock import MagicMock
+    srv._tachibana_session = MagicMock()
+    srv._tachibana_session.zyoutoeki_kazei_c = "1"
+    srv._tachibana_session.url_request = MagicMock()
+    srv._handle_set_second_password({"value": "pw"})
+
+    with patch(
+        "engine.server.tachibana_submit_order",
+        new=AsyncMock(side_effect=httpx.ConnectError("connection refused")),
+    ):
+        await ws.send(orjson.dumps(_base_submit_order("req-transport-err")))
+        # OrderSubmitted が先に来るはず
+        evt1 = await _recv_event(ws)
+        assert evt1["event"] == "OrderSubmitted", f"expected OrderSubmitted first, got {evt1}"
+        # 次に OrderRejected が来るはず
+        evt2 = await _recv_event(ws)
+        assert evt2["event"] == "OrderRejected", f"expected OrderRejected, got {evt2}"
+        assert evt2["reason_code"] == "TRANSPORT_ERROR"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_order_session_expired_clears_second_password(server):
+    """SessionExpiredError 時は second_password がクリアされ OrderRejected{SESSION_EXPIRED} が返る（C-1 + M-14）。"""
+    from unittest.mock import patch, AsyncMock, MagicMock
+    from engine.exchanges.tachibana_helpers import SessionExpiredError
+
+    port, token, srv, __ = server
+    ws = await _connect(port, token)
+
+    srv._tachibana_session = MagicMock()
+    srv._tachibana_session.zyoutoeki_kazei_c = "1"
+    srv._tachibana_session.url_request = MagicMock()
+    srv._handle_set_second_password({"value": "sentinel"})
+    assert srv._second_password == "sentinel"
+
+    with patch(
+        "engine.server.tachibana_submit_order",
+        new=AsyncMock(side_effect=SessionExpiredError("expired")),
+    ):
+        await ws.send(orjson.dumps(_base_submit_order("req-session-exp")))
+        evt1 = await _recv_event(ws)
+        assert evt1["event"] == "OrderSubmitted"
+        evt2 = await _recv_event(ws)
+        assert evt2["event"] == "OrderRejected"
+        assert evt2["reason_code"] == "SESSION_EXPIRED"
+
+    # second_password はクリアされているはず
+    assert srv._second_password is None, "second_password must be cleared on SessionExpiredError"
     await ws.close()

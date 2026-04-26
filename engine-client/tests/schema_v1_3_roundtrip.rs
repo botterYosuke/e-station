@@ -159,8 +159,8 @@ fn order_submitted_event_deserializes() {
 }
 
 #[test]
-fn order_accepted_event_deserializes() {
-    let json = r#"{"event":"OrderAccepted","client_order_id":"abc","venue_order_id":"V123","ts_event_ms":1700000000001}"#;
+fn rust_deserializes_python_order_accepted() {
+    let json = r#"{"event":"OrderAccepted","client_order_id":"abc","venue_order_id":"ORD123","ts_event_ms":1700000000001}"#;
     let ev: EngineEvent = serde_json::from_str(json).unwrap();
     match ev {
         EngineEvent::OrderAccepted {
@@ -169,7 +169,37 @@ fn order_accepted_event_deserializes() {
             ..
         } => {
             assert_eq!(client_order_id, "abc");
-            assert_eq!(venue_order_id, "V123");
+            assert_eq!(venue_order_id, Some("ORD123".to_string()));
+        }
+        _ => panic!("expected OrderAccepted, got {:?}", ev),
+    }
+}
+
+#[test]
+fn rust_deserializes_python_order_accepted_with_null_venue_order_id() {
+    let json = r#"{"event":"OrderAccepted","client_order_id":"abc","venue_order_id":null,"ts_event_ms":1700000000001}"#;
+    let ev: EngineEvent = serde_json::from_str(json).unwrap();
+    match ev {
+        EngineEvent::OrderAccepted {
+            client_order_id,
+            venue_order_id,
+            ..
+        } => {
+            assert_eq!(client_order_id, "abc");
+            assert_eq!(venue_order_id, None);
+        }
+        _ => panic!("expected OrderAccepted, got {:?}", ev),
+    }
+}
+
+#[test]
+fn rust_deserializes_python_order_accepted_with_absent_venue_order_id() {
+    // `#[serde(default)]` — Python が venue_order_id フィールドを省略した場合も None になること
+    let json = r#"{"event":"OrderAccepted","client_order_id":"abc","ts_event_ms":1700000000001}"#;
+    let ev: EngineEvent = serde_json::from_str(json).unwrap();
+    match ev {
+        EngineEvent::OrderAccepted { venue_order_id, .. } => {
+            assert_eq!(venue_order_id, None);
         }
         _ => panic!("expected OrderAccepted, got {:?}", ev),
     }
@@ -268,7 +298,116 @@ fn time_in_force_serializes_screaming_snake_case() {
     );
 }
 
+/// SCHEMA_MINOR was 3 at schema 1.3; bumped to 4 in schema 1.4.
+/// This test verifies that the version has advanced past 3.
 #[test]
-fn schema_minor_is_3() {
-    assert_eq!(flowsurface_engine_client::SCHEMA_MINOR, 3);
+fn schema_minor_is_at_least_3() {
+    assert!(
+        flowsurface_engine_client::SCHEMA_MINOR >= 3,
+        "SCHEMA_MINOR should be >= 3, got {}",
+        flowsurface_engine_client::SCHEMA_MINOR
+    );
+}
+
+// ── M-4: SetSecondPassword / ForgetSecondPassword serialize ──────────────────
+
+#[test]
+fn rust_serializes_set_second_password() {
+    let cmd = Command::SetSecondPassword {
+        request_id: RID.to_string(),
+        value: "sentinel-value".to_string(),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    // op タグが正しいこと
+    assert!(json.contains(r#""op":"SetSecondPassword""#), "got: {json}");
+    // value フィールドが存在すること（Debug はマスクするが JSON serialize は平文）
+    assert!(json.contains(r#""value""#), "got: {json}");
+    // request_id が存在すること
+    assert!(json.contains(RID), "got: {json}");
+    // Debug でマスクされていることを確認
+    let debug_str = format!("{:?}", cmd);
+    assert!(
+        !debug_str.contains("sentinel-value"),
+        "Debug must mask value, got: {debug_str}"
+    );
+    assert!(
+        debug_str.contains("[REDACTED]"),
+        "Debug must show [REDACTED], got: {debug_str}"
+    );
+}
+
+#[test]
+fn rust_serializes_forget_second_password() {
+    let cmd = Command::ForgetSecondPassword;
+    let json = serde_json::to_string(&cmd).unwrap();
+    assert!(
+        json.contains(r#""op":"ForgetSecondPassword""#),
+        "got: {json}"
+    );
+}
+
+// ── M-5: Python → Rust event deserialize ─────────────────────────────────────
+
+#[test]
+fn rust_deserializes_python_second_password_required() {
+    let json = r#"{"event":"SecondPasswordRequired","request_id":"req-spw-1"}"#;
+    let ev: EngineEvent = serde_json::from_str(json).unwrap();
+    match ev {
+        EngineEvent::SecondPasswordRequired { request_id } => {
+            assert_eq!(request_id, "req-spw-1");
+        }
+        _ => panic!("expected SecondPasswordRequired, got {:?}", ev),
+    }
+}
+
+#[test]
+fn rust_deserializes_python_order_pending_update() {
+    let json =
+        r#"{"event":"OrderPendingUpdate","client_order_id":"cid-pu","ts_event_ms":1700000000100}"#;
+    let ev: EngineEvent = serde_json::from_str(json).unwrap();
+    match ev {
+        EngineEvent::OrderPendingUpdate {
+            client_order_id,
+            ts_event_ms,
+        } => {
+            assert_eq!(client_order_id, "cid-pu");
+            assert_eq!(ts_event_ms, 1_700_000_000_100);
+        }
+        _ => panic!("expected OrderPendingUpdate, got {:?}", ev),
+    }
+}
+
+#[test]
+fn rust_deserializes_python_order_pending_cancel() {
+    let json =
+        r#"{"event":"OrderPendingCancel","client_order_id":"cid-pc","ts_event_ms":1700000000200}"#;
+    let ev: EngineEvent = serde_json::from_str(json).unwrap();
+    match ev {
+        EngineEvent::OrderPendingCancel {
+            client_order_id,
+            ts_event_ms,
+        } => {
+            assert_eq!(client_order_id, "cid-pc");
+            assert_eq!(ts_event_ms, 1_700_000_000_200);
+        }
+        _ => panic!("expected OrderPendingCancel, got {:?}", ev),
+    }
+}
+
+#[test]
+fn rust_deserializes_python_order_expired() {
+    let json = r#"{"event":"OrderExpired","client_order_id":"cid-exp","venue_order_id":"V777","ts_event_ms":1700000000300}"#;
+    let ev: EngineEvent = serde_json::from_str(json).unwrap();
+    match ev {
+        EngineEvent::OrderExpired {
+            client_order_id,
+            venue_order_id,
+            ts_event_ms,
+        } => {
+            assert_eq!(client_order_id, "cid-exp");
+            assert_eq!(venue_order_id, "V777");
+            assert_eq!(ts_event_ms, 1_700_000_000_300);
+        }
+        _ => panic!("expected OrderExpired, got {:?}", ev),
+    }
 }

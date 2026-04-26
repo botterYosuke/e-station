@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api;
 mod audio;
 mod chart;
 mod cli;
@@ -610,7 +611,24 @@ fn main() {
             .inspect_err(|e| log::error!("replay_api: failed to build runtime — {e}"))
             .ok();
         if let Some(rt) = api_rt {
-            if let Some(rx) = replay_api::spawn(rt.handle()) {
+            let order_api_state = {
+                use std::sync::atomic::AtomicBool;
+                use tokio::sync::Mutex;
+                let session = Arc::new(Mutex::new(
+                    engine_client::order_session_state::OrderSessionState::new(),
+                ));
+                let engine_rx = ENGINE_CONNECTION_TX
+                    .get()
+                    .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
+                    .subscribe();
+                let is_replay_mode = Arc::new(AtomicBool::new(false));
+                Arc::new(api::order_api::OrderApiState::new(
+                    session,
+                    engine_rx,
+                    is_replay_mode,
+                ))
+            };
+            if let Some(rx) = replay_api::spawn(rt.handle(), Some(order_api_state)) {
                 CONTROL_API_RX.set(std::sync::Mutex::new(rx)).ok();
             }
             std::thread::Builder::new()
@@ -732,6 +750,9 @@ enum Message {
     /// drive venue login / cancellation without a GUI. (T35-U5-RelogE2E / T7)
     #[allow(dead_code)]
     ControlApi(replay_api::ControlApiCommand),
+    /// EC 約定通知（Phase O2 T2.4）。`OrderFilled` / `OrderCanceled` /
+    /// `OrderExpired` を受信したときに toast を surface する。
+    OrderToast(Toast),
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -870,6 +891,35 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
                 message,
             }))
         }
+        // ── Phase O2: EC 約定通知 (T2.4) ────────────────────────────────────
+        EngineEvent::OrderFilled {
+            client_order_id,
+            last_qty,
+            last_price,
+            leaves_qty,
+            ..
+        } => {
+            let body = if leaves_qty == "0" {
+                format!(
+                    "約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（全約定）"
+                )
+            } else {
+                format!(
+                    "約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（残 {leaves_qty} 株）"
+                )
+            };
+            Some(Message::OrderToast(Toast::info(body)))
+        }
+        EngineEvent::OrderCanceled {
+            client_order_id, ..
+        } => Some(Message::OrderToast(Toast::info(format!(
+            "注文取消完了: {client_order_id}"
+        )))),
+        EngineEvent::OrderExpired {
+            client_order_id, ..
+        } => Some(Message::OrderToast(Toast::warn(format!(
+            "注文失効: {client_order_id}"
+        )))),
         _ => None,
     }
 }
@@ -1393,6 +1443,10 @@ impl Flowsurface {
             }
             Message::RemoveNotification(index) => {
                 self.notifications.remove(index);
+            }
+            // EC 約定通知 toast (Phase O2 T2.4)
+            Message::OrderToast(toast) => {
+                self.notifications.push(toast);
             }
             Message::SetTimezone(tz) => {
                 self.timezone = tz;

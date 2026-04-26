@@ -6,9 +6,8 @@
 /// `update_venue_order_id()` で埋める。
 ///
 /// - **当日分のみ保持**: 日跨ぎセッション切れ後に `OrderSessionState::new()` で再作成。
-/// - **プロセス再起動跨ぎ**: WAL (Phase O0 T0.7) から復元する設計。本モジュールは
-///   in-memory 状態のみ管理し、WAL 読み書きは `order_api.rs` (Phase O0) 側の責務。
-use std::collections::HashMap;
+/// - **プロセス再起動跨ぎ**: WAL (Phase O0 T0.7) から `load_from_wal()` で復元する。
+use std::{collections::HashMap, path::Path};
 
 // ── 命名対応（flowsurface → e-station）─────────────────────────────────────
 // place_or_replay(...)      → try_insert(client_order_id, key)
@@ -41,7 +40,9 @@ pub enum PlaceOrderOutcome {
     /// 同一 `client_order_id` + 同一 `request_key` の再送。冪等応答を返す。
     IdempotentReplay { venue_order_id: Option<String> },
     /// 同一 `client_order_id` で異なる `request_key`（本体が違う）— 409 Conflict。
-    Conflict { existing_venue_order_id: Option<String> },
+    Conflict {
+        existing_venue_order_id: Option<String>,
+    },
 }
 
 /// 発注冪等性マップ。`Arc<Mutex<Self>>` で Axum State として渡す想定。
@@ -54,6 +55,132 @@ impl OrderSessionState {
         Self {
             map: HashMap::new(),
         }
+    }
+
+    /// WAL ファイル（JSONL 形式）から当日分のエントリを復元して返す。
+    ///
+    /// architecture.md §4.3 の起動時復元ロジックに対応する。
+    ///
+    /// - WAL ファイルが存在しない場合は空 map で初期化する（初回起動等）。
+    /// - 末尾行に `\n` が無い（truncated）場合はその行をスキップし `log::warn!` を出す。
+    /// - `phase == "submit"` 行: `client_order_id → AgentOrderRecord { venue_order_id: None, ... }` で登録。
+    /// - `phase == "accepted"` 行: `venue_order_id` を後着更新し `status` を `"ACCEPTED"` に変更。
+    /// - `phase == "rejected"` 行: エントリを map から除去（再送防止対象外）。
+    /// - 当日分のみ: `ts` フィールド（Unix ms UTC）が今日（UTC date）でなければスキップ。
+    pub fn load_from_wal(wal_path: &Path) -> Self {
+        let mut state = Self::new();
+
+        // 当日の UTC date（millisecond → day 判定用）
+        let today_utc = today_utc_date();
+
+        // truncation 検知のために生バイトを読み、自前で \n チェックを行う。
+        let raw_content = match std::fs::read(wal_path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 初回起動など — 空 map で OK
+                return state;
+            }
+            Err(e) => {
+                log::warn!("load_from_wal: failed to read WAL {wal_path:?}: {e}");
+                return state;
+            }
+        };
+
+        // 行分割: `\n` で区切り、各行の末尾 \n 有無を記録する。
+        // 最後の要素が空文字列（= ファイルが \n で終わっている）の場合はスキップ。
+        let text = String::from_utf8_lossy(&raw_content);
+        let all_lines: Vec<&str> = text.split('\n').collect();
+
+        // split('\n') の最後の要素はファイルが \n で終わる場合は空文字列になる。
+        // 例: "A\nB\n".split('\n') => ["A", "B", ""]
+        //     "A\nB".split('\n')   => ["A", "B"]      ← 末尾 \n なし = truncated
+        let n = all_lines.len();
+        for (i, raw_line) in all_lines.iter().enumerate() {
+            // 最後の要素が空文字列 = ファイルが \n で終わっていた（正常終端）
+            if i == n - 1 {
+                if raw_line.is_empty() {
+                    break; // 正常終端の空文字列 → スキップ
+                }
+                // 最後の要素が非空 → truncated（末尾 \n なし）
+                log::warn!(
+                    "load_from_wal: truncated WAL line skipped (no trailing newline): file={wal_path:?} line_index={i}"
+                );
+                break;
+            }
+
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let record: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("load_from_wal: invalid JSON at line {i}: {e}");
+                    continue;
+                }
+            };
+
+            // 当日チェック: ts フィールドが今日（UTC date）でなければスキップ。
+            let ts_ms = record.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+            if !is_today_utc(ts_ms, today_utc) {
+                continue;
+            }
+
+            let phase = match record.get("phase").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => {
+                    log::warn!("load_from_wal: missing 'phase' field at line {i}");
+                    continue;
+                }
+            };
+
+            let cid_str = match record.get("client_order_id").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    log::warn!("load_from_wal: missing 'client_order_id' at line {i}");
+                    continue;
+                }
+            };
+
+            match phase {
+                "submit" => {
+                    let request_key = record
+                        .get("request_key")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    state.map.insert(
+                        ClientOrderId(cid_str),
+                        AgentOrderRecord {
+                            venue_order_id: None,
+                            request_key,
+                            status: "SUBMITTED".to_string(),
+                        },
+                    );
+                }
+                "accepted" => {
+                    let venue_order_id = record
+                        .get("venue_order_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    if let Some(record) = state.map.get_mut(&ClientOrderId(cid_str)) {
+                        if record.venue_order_id.is_none() {
+                            record.venue_order_id = venue_order_id;
+                        }
+                        record.status = "ACCEPTED".to_string();
+                    }
+                }
+                "rejected" => {
+                    // 拒否済み → 再送防止対象外なので map から除去する。
+                    state.map.remove(&ClientOrderId(cid_str));
+                }
+                other => {
+                    log::warn!("load_from_wal: unknown phase {other:?} at line {i}, skipping");
+                }
+            }
+        }
+
+        state
     }
 
     /// `client_order_id` と `request_key` の組み合わせで挿入を試みる。
@@ -93,10 +220,23 @@ impl OrderSessionState {
     }
 
     /// Python から `sOrderNumber` を受け取ったら呼び出す。
-    pub fn update_venue_order_id(&mut self, client_order_id: ClientOrderId, venue_order_id: String) {
-        if let Some(record) = self.map.get_mut(&client_order_id) {
+    ///
+    /// `None → Some` の遷移のみ許容する。既に `Some` が入っている場合は上書きせず
+    /// `false` を返す（M-8: IdempotentReplay 時の二重セットを防ぐ）。
+    /// 登録済みでない `client_order_id` に対しても `false` を返す。
+    #[must_use = "false は None→Some 遷移が起きなかったことを示す"]
+    pub fn update_venue_order_id(
+        &mut self,
+        client_order_id: ClientOrderId,
+        venue_order_id: String,
+    ) -> bool {
+        if let Some(record) = self.map.get_mut(&client_order_id)
+            && record.venue_order_id.is_none()
+        {
             record.venue_order_id = Some(venue_order_id);
+            return true;
         }
+        false
     }
 
     /// `client_order_id` から `venue_order_id` を取得する（取消フロー §2.3）。
@@ -112,10 +252,63 @@ impl OrderSessionState {
             record.status = status;
         }
     }
+
+    /// `GetOrderList` 応答から `venue_order_id` が unknown な状態を補完する（T1.5）。
+    ///
+    /// WAL 起動時復元で `venue_order_id = None` のまま残ったエントリに対して、
+    /// `GetOrderList` 応答で返ってきた `venue_order_id` で `client_order_id` を特定する。
+    /// 同一 `venue_order_id` で登録済みの `client_order_id` が無い場合は何もしない。
+    ///
+    /// # Arguments
+    /// - `venue_order_id`: 立花 `sOrderNumber`
+    /// - `new_status`: `GetOrderList` 応答から得た nautilus OrderStatus 文字列
+    ///
+    /// # Returns
+    /// 更新が行われた場合は `Some(client_order_id)`、対象が見つからない場合は `None`。
+    pub fn update_venue_order_id_from_list(
+        &mut self,
+        venue_order_id: &str,
+        new_status: &str,
+    ) -> Option<ClientOrderId> {
+        // venue_order_id が None のエントリの中から、今回マッチするものを探す。
+        // 複数の unknown エントリが同一 venue_order_id を持つことは設計上あり得ないが、
+        // 最初に見つかったものだけ更新する。
+        let matched = self.map.iter_mut().find(|(_, rec)| {
+            rec.venue_order_id.is_none()
+                // 既に venue_order_id が入っているエントリはスキップ（上書き禁止）
+        });
+
+        if let Some((cid, record)) = matched {
+            record.venue_order_id = Some(venue_order_id.to_string());
+            record.status = new_status.to_string();
+            Some(cid.clone())
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for OrderSessionState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── WAL date helpers ─────────────────────────────────────────────────────────
+
+/// 今日の UTC 日付を `(year, month, day)` で返す。
+fn today_utc_date() -> (i32, u32, u32) {
+    use chrono::{Datelike, Utc};
+    let today = Utc::now().date_naive();
+    (today.year(), today.month(), today.day())
+}
+
+/// `ts_ms`（Unix milliseconds UTC）が `today`（UTC date）と同じ日かどうか判定する。
+fn is_today_utc(ts_ms: i64, today: (i32, u32, u32)) -> bool {
+    use chrono::{Datelike, TimeZone, Utc};
+    let Some(dt) = Utc.timestamp_millis_opt(ts_ms).single() else {
+        return false;
+    };
+    let d = dt.date_naive();
+    (d.year(), d.month(), d.day()) == today
 }

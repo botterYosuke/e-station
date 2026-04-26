@@ -1,8 +1,9 @@
 //! Tpre.2 / D3-1: SubmitOrderRequest / OrderModifyChange は deny_unknown_fields を付与し、
 //! second_password / secondPassword / p_no / 任意 _extra を含む JSON で deserialize error になることを assert。
 //! C-R2-M3 (invariant-tests.md) に対応。
+//! M-10: OrderListFilter にも deny_unknown_fields を追加し、未知フィールドを拒絶する。
 
-use flowsurface_engine_client::dto::{OrderModifyChange, SubmitOrderRequest};
+use flowsurface_engine_client::dto::{OrderListFilter, OrderModifyChange, SubmitOrderRequest};
 
 fn valid_submit_json() -> &'static str {
     r#"{
@@ -159,4 +160,66 @@ fn order_modify_change_accepts_valid_json() {
         "valid OrderModifyChange must deserialize: {:?}",
         result.err()
     );
+}
+
+// ── M-10: OrderListFilter deny_unknown_fields ─────────────────────────────────
+
+#[test]
+fn order_list_filter_rejects_unknown_field() {
+    let json = r#"{
+        "status": "ACCEPTED",
+        "instrument_id": null,
+        "date": null,
+        "_injected": "evil"
+    }"#;
+    let result: Result<OrderListFilter, _> = serde_json::from_str(json);
+    assert!(
+        result.is_err(),
+        "OrderListFilter must reject unknown fields, got Ok"
+    );
+}
+
+#[test]
+fn order_list_filter_accepts_valid_json() {
+    let json = r#"{
+        "status": "ACCEPTED",
+        "instrument_id": "7203.TSE",
+        "date": "20260426"
+    }"#;
+    let result: Result<OrderListFilter, _> = serde_json::from_str(json);
+    assert!(
+        result.is_ok(),
+        "valid OrderListFilter must deserialize: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn order_list_filter_accepts_all_none() {
+    let json = r#"{
+        "status": null,
+        "instrument_id": null,
+        "date": null
+    }"#;
+    let result: Result<OrderListFilter, _> = serde_json::from_str(json);
+    assert!(
+        result.is_ok(),
+        "all-null OrderListFilter must deserialize: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn order_list_filter_accepts_absent_optional_fields() {
+    let json = r#"{}"#;
+    let result: Result<OrderListFilter, _> = serde_json::from_str(json);
+    assert!(
+        result.is_ok(),
+        "absent fields must default to None: {:?}",
+        result.err()
+    );
+    let filter = result.unwrap();
+    assert!(filter.status.is_none());
+    assert!(filter.instrument_id.is_none());
+    assert!(filter.date.is_none());
 }

@@ -163,3 +163,26 @@ def test_second_password_is_in_wire():
 def test_second_password_not_in_repr():
     wire = _envelope_to_wire(_envelope(), _session(), "secret123")
     assert "secret123" not in repr(wire)
+
+
+# ---------------------------------------------------------------------------
+# C-3: __str__ / model_dump() / model_dump_json() でも second_password がマスクされる
+# ---------------------------------------------------------------------------
+
+
+def test_second_password_not_in_str():
+    """__str__ でも second_password が平文で出ないこと（C-3）。"""
+    wire = _envelope_to_wire(_envelope(), _session(), "secret")
+    assert "secret" not in str(wire)
+
+
+def test_second_password_not_in_model_dump_json():
+    """model_dump_json() でも second_password が平文で出ないこと（C-3）。"""
+    wire = _envelope_to_wire(_envelope(), _session(), "secret")
+    assert "secret" not in wire.model_dump_json()
+
+
+def test_second_password_masked_in_model_dump():
+    """model_dump()["second_password"] が '[REDACTED]' であること（C-3）。"""
+    wire = _envelope_to_wire(_envelope(), _session(), "secret")
+    assert wire.model_dump()["second_password"] == "[REDACTED]"

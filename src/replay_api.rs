@@ -20,11 +20,15 @@
 //! (`POST /api/test/tachibana/delete-session`) is only enabled in debug builds
 //! so it cannot accidentally clear prod keyring entries.
 
+use std::sync::Arc;
+
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::mpsc,
 };
+
+use crate::api::order_api::OrderApiState;
 
 /// Commands the HTTP server forwards into the Iced application via mpsc.
 // TODO(O1): venue fields are consumed in Flowsurface::update() once the
@@ -108,7 +112,11 @@ async fn write_response(stream: &mut TcpStream, status: u16, status_text: &str, 
 
 // ── Request handler ───────────────────────────────────────────────────────────
 
-async fn handle_request(mut stream: TcpStream, tx: mpsc::Sender<ControlApiCommand>) {
+async fn handle_request(
+    mut stream: TcpStream,
+    tx: mpsc::Sender<ControlApiCommand>,
+    order_state: Option<Arc<OrderApiState>>,
+) {
     let mut reader = BufReader::new(&mut stream);
     let req = match parse_request(&mut reader).await {
         Some(r) => r,
@@ -161,6 +169,76 @@ async fn handle_request(mut stream: TcpStream, tx: mpsc::Sender<ControlApiComman
             }
             write_response(&mut stream, 202, "Accepted", r#"{"status":"accepted"}"#).await;
         }
+        ("POST", "/api/order/submit") => {
+            if let Some(state) = order_state {
+                crate::api::order_api::handle_submit_request(&mut stream, &req.body, &state).await;
+            } else {
+                write_response(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    r#"{"reason_code":"INTERNAL_ERROR","reason_text":"order API not configured"}"#,
+                )
+                .await;
+            }
+        }
+        ("POST", "/api/order/modify") => {
+            if let Some(state) = order_state {
+                crate::api::order_api::handle_modify_request(&mut stream, &req.body, &state).await;
+            } else {
+                write_response(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    r#"{"reason_code":"INTERNAL_ERROR","reason_text":"order API not configured"}"#,
+                )
+                .await;
+            }
+        }
+        ("POST", "/api/order/cancel") => {
+            if let Some(state) = order_state {
+                crate::api::order_api::handle_cancel_request(&mut stream, &req.body, &state).await;
+            } else {
+                write_response(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    r#"{"reason_code":"INTERNAL_ERROR","reason_text":"order API not configured"}"#,
+                )
+                .await;
+            }
+        }
+        ("POST", "/api/order/cancel-all") => {
+            if let Some(state) = order_state {
+                crate::api::order_api::handle_cancel_all_request(
+                    &mut stream,
+                    &req.body,
+                    &state,
+                )
+                .await;
+            } else {
+                write_response(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    r#"{"reason_code":"INTERNAL_ERROR","reason_text":"order API not configured"}"#,
+                )
+                .await;
+            }
+        }
+        ("GET", "/api/order/list") => {
+            if let Some(state) = order_state {
+                crate::api::order_api::handle_list_request(&mut stream, &req.body, &state).await;
+            } else {
+                write_response(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    r#"{"reason_code":"INTERNAL_ERROR","reason_text":"order API not configured"}"#,
+                )
+                .await;
+            }
+        }
         _ => {
             write_response(&mut stream, 404, "Not Found", r#"{"error":"not found"}"#).await;
         }
@@ -176,7 +254,10 @@ async fn handle_request(mut stream: TcpStream, tx: mpsc::Sender<ControlApiComman
 ///
 /// The server binds immediately; if port 9876 is already in use the spawn
 /// is a no-op and `None` is returned (caller should log a warning).
-pub fn spawn(rt: &tokio::runtime::Handle) -> Option<mpsc::Receiver<ControlApiCommand>> {
+pub fn spawn(
+    rt: &tokio::runtime::Handle,
+    order_state: Option<Arc<OrderApiState>>,
+) -> Option<mpsc::Receiver<ControlApiCommand>> {
     let (tx, rx) = mpsc::channel::<ControlApiCommand>(64);
 
     let listener = match std::net::TcpListener::bind("127.0.0.1:9876") {
@@ -204,7 +285,8 @@ pub fn spawn(rt: &tokio::runtime::Handle) -> Option<mpsc::Receiver<ControlApiCom
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let tx_clone = tx.clone();
-                    tokio::spawn(handle_request(stream, tx_clone));
+                    let order_state_clone = order_state.clone();
+                    tokio::spawn(handle_request(stream, tx_clone, order_state_clone));
                 }
                 Err(e) => {
                     log::warn!("replay_api: accept error — {e}");

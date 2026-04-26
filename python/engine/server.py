@@ -18,6 +18,8 @@ import websockets
 from websockets import ServerConnection
 
 from engine.exchanges.base import WsNativeResyncTriggered
+import httpx
+
 from engine.exchanges.tachibana_helpers import (
     LoginError,
     PNoCounter,
@@ -43,9 +45,18 @@ from engine.exchanges.okex import OkexWorker
 from engine.exchanges.tachibana import TachibanaWorker
 from engine.exchanges.tachibana_orders import (
     NautilusOrderEnvelope,
+    UnsupportedOrderError,
+    InsufficientFundsError,
     check_phase_o0_order,
     submit_order as tachibana_submit_order,
+    modify_order as tachibana_modify_order,
+    cancel_order as tachibana_cancel_order,
+    cancel_all_orders as tachibana_cancel_all_orders,
+    fetch_order_list as tachibana_fetch_order_list,
+    fetch_buying_power as tachibana_fetch_buying_power,
+    fetch_credit_buying_power as tachibana_fetch_credit_buying_power,
 )
+from engine.schemas import OrderListFilter as SchemaOrderListFilter, OrderModifyChange as SchemaOrderModifyChange
 from engine.schemas import (
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
@@ -439,6 +450,26 @@ class DataEngineServer:
                 self._do_submit_order(msg), msg.get("request_id")
             )
 
+        elif op == "ModifyOrder":
+            self._spawn_fetch(
+                self._do_modify_order(msg), msg.get("request_id")
+            )
+
+        elif op == "CancelOrder":
+            self._spawn_fetch(
+                self._do_cancel_order(msg), msg.get("request_id")
+            )
+
+        elif op == "CancelAllOrders":
+            self._spawn_fetch(
+                self._do_cancel_all_orders(msg), msg.get("request_id")
+            )
+
+        elif op == "GetOrderList":
+            self._spawn_fetch(
+                self._do_get_order_list(msg), msg.get("request_id")
+            )
+
         else:
             log.warning("Unhandled op=%s", op)
             await self._send_error(
@@ -574,9 +605,12 @@ class DataEngineServer:
 
     def _handle_set_second_password(self, msg: dict) -> None:
         # value は文字列として受け取り、メモリのみ保持。ログに出さない（C-M2）。
+        # R2-MEDIUM: 空文字列・空白のみは立花 API が reject するため設定しない。
         value = msg.get("value")
-        if value:
-            self._second_password = str(value)
+        if not isinstance(value, str) or not value.strip():
+            log.warning("SetSecondPassword: value is empty or non-string — ignoring")
+            return
+        self._second_password = value
 
     async def _do_submit_order(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
@@ -633,6 +667,19 @@ class DataEngineServer:
             )
             return
 
+        # M-2: セッション未取得チェック
+        if self._tachibana_session is None:
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "NOT_LOGGED_IN",
+                    "reason_text": "Tachibana session is not established",
+                    "ts_event_ms": 0,
+                }
+            )
+            return
+
         # 発注処理（T0.4）
         import time
 
@@ -645,12 +692,83 @@ class DataEngineServer:
                 "ts_event_ms": int(time.time() * 1000),
             }
         )
-        result = await tachibana_submit_order(
-            self._tachibana_session,
-            self._second_password,
-            envelope,
-            p_no_counter=self._tachibana_p_no_counter,
-        )
+        # C-1: tachibana_submit_order の例外を適切な OrderRejected に写す
+        try:
+            result = await tachibana_submit_order(
+                self._tachibana_session,
+                self._second_password,
+                envelope,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            # M-14: セッション期限切れ時は second_password もクリア
+            self._second_password = None
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "SESSION_EXPIRED",
+                    "reason_text": "Session expired; please re-login",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
+        except InsufficientFundsError as exc:
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "INSUFFICIENT_FUNDS",
+                    "reason_text": str(exc),
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
+        except UnsupportedOrderError as exc:
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "VENUE_UNSUPPORTED",
+                    "reason_text": str(exc),
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
+        except TachibanaError:
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "VENUE_REJECTED",
+                    "reason_text": "Venue rejected the order",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError):
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "TRANSPORT_ERROR",
+                    "reason_text": "HTTP connection failed",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
+        except Exception:
+            log.exception("_do_submit_order: unexpected error for cid=%s", order.client_order_id)
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "INTERNAL_ERROR",
+                    "reason_text": "Internal error during order submission",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
         self._outbox.append(
             {
                 "event": "OrderAccepted",
@@ -659,6 +777,286 @@ class DataEngineServer:
                 "ts_event_ms": int(time.time() * 1000),
             }
         )
+
+    async def _do_modify_order(self, msg: dict) -> None:
+        import time
+
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        client_order_id = msg.get("client_order_id", "")
+        raw_change = msg.get("change", {})
+
+        if venue not in self._workers:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "unknown_venue",
+                "message": f"ModifyOrder: unknown venue {venue!r}",
+            })
+            return
+
+        if self._second_password is None:
+            self._outbox.append({
+                "event": "SecondPasswordRequired",
+                "request_id": req_id,
+            })
+            return
+
+        if self._tachibana_session is None:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "Tachibana session is not established",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        try:
+            change = SchemaOrderModifyChange.model_validate(raw_change)
+        except Exception as exc:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "invalid_change",
+                "message": str(exc),
+            })
+            return
+
+        # Emit OrderPendingUpdate before calling the venue
+        venue_order_id = msg.get("venue_order_id", "")
+        ts_now = int(time.time() * 1000)
+        self._outbox.append({
+            "event": "OrderPendingUpdate",
+            "client_order_id": client_order_id,
+            "ts_event_ms": ts_now,
+        })
+
+        try:
+            await tachibana_modify_order(
+                session=self._tachibana_session,
+                second_password=self._second_password,
+                client_order_id=client_order_id,
+                venue_order_id=venue_order_id,
+                change=change,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            self._second_password = None
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "SESSION_EXPIRED",
+                "reason_text": "Session expired; please re-login",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+        except Exception:
+            log.exception("_do_modify_order: unexpected error for cid=%s", client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "INTERNAL_ERROR",
+                "reason_text": "Internal error during order modification",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+
+    async def _do_cancel_order(self, msg: dict) -> None:
+        import time
+
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        client_order_id = msg.get("client_order_id", "")
+        venue_order_id = msg.get("venue_order_id", "")
+
+        if venue not in self._workers:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "unknown_venue",
+                "message": f"CancelOrder: unknown venue {venue!r}",
+            })
+            return
+
+        if self._second_password is None:
+            self._outbox.append({
+                "event": "SecondPasswordRequired",
+                "request_id": req_id,
+            })
+            return
+
+        if self._tachibana_session is None:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "Tachibana session is not established",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # Emit OrderPendingCancel before calling the venue
+        ts_now = int(time.time() * 1000)
+        self._outbox.append({
+            "event": "OrderPendingCancel",
+            "client_order_id": client_order_id,
+            "ts_event_ms": ts_now,
+        })
+
+        try:
+            await tachibana_cancel_order(
+                session=self._tachibana_session,
+                second_password=self._second_password,
+                client_order_id=client_order_id,
+                venue_order_id=venue_order_id,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            self._second_password = None
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "SESSION_EXPIRED",
+                "reason_text": "Session expired; please re-login",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+        except Exception:
+            log.exception("_do_cancel_order: unexpected error for cid=%s", client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "INTERNAL_ERROR",
+                "reason_text": "Internal error during order cancellation",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+
+    async def _do_cancel_all_orders(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        instrument_id = msg.get("instrument_id")
+        order_side = msg.get("order_side")
+
+        if venue not in self._workers:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "unknown_venue",
+                "message": f"CancelAllOrders: unknown venue {venue!r}",
+            })
+            return
+
+        if self._second_password is None:
+            self._outbox.append({
+                "event": "SecondPasswordRequired",
+                "request_id": req_id,
+            })
+            return
+
+        if self._tachibana_session is None:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "NOT_LOGGED_IN",
+                "message": "Tachibana session is not established",
+            })
+            return
+
+        try:
+            await tachibana_cancel_all_orders(
+                session=self._tachibana_session,
+                second_password=self._second_password,
+                instrument_id=instrument_id,
+                order_side=order_side,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            self._second_password = None
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_EXPIRED",
+                "message": "Session expired; please re-login",
+            })
+        except Exception:
+            log.exception("_do_cancel_all_orders: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error during cancel-all",
+            })
+
+    async def _do_get_order_list(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        raw_filter = msg.get("filter", {})
+
+        if venue not in self._workers:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "unknown_venue",
+                "message": f"GetOrderList: unknown venue {venue!r}",
+            })
+            return
+
+        if self._tachibana_session is None:
+            self._outbox.append({
+                "event": "OrderListUpdated",
+                "request_id": req_id,
+                "orders": [],
+            })
+            return
+
+        try:
+            filter_ = SchemaOrderListFilter.model_validate(raw_filter)
+            records = await tachibana_fetch_order_list(
+                session=self._tachibana_session,
+                filter=filter_,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            self._second_password = None
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_EXPIRED",
+                "message": "Session expired; please re-login",
+            })
+            return
+        except Exception:
+            log.exception("_do_get_order_list: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching order list",
+            })
+            return
+
+        orders_json = [
+            {
+                "client_order_id": r.client_order_id,
+                "venue_order_id": r.venue_order_id,
+                "instrument_id": r.instrument_id,
+                "order_side": r.order_side,
+                "order_type": r.order_type,
+                "quantity": r.quantity,
+                "filled_qty": r.filled_qty,
+                "leaves_qty": r.leaves_qty,
+                "price": r.price,
+                "trigger_price": r.trigger_price,
+                "time_in_force": r.time_in_force,
+                "expire_time_ns": r.expire_time_ns,
+                "status": r.status,
+                "ts_event_ms": r.ts_event_ms,
+            }
+            for r in records
+        ]
+        self._outbox.append({
+            "event": "OrderListUpdated",
+            "request_id": req_id,
+            "orders": orders_json,
+        })
 
     # ------------------------------------------------------------------
     # Fetch operation helpers (each is an async coroutine producing one event)

@@ -143,12 +143,20 @@ async def test_fetch_klines_d1_returns_kline_list(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_unimplemented_streams_raise_not_implemented(tmp_path: Path):
-    """ABC residual: stream_* / fetch_open_interest / fetch_depth_snapshot."""
+    """ABC residual: fetch_open_interest は NotImplementedError を上げる。"""
     worker = _stubbed(tmp_path)
     with pytest.raises(NotImplementedError):
-        await worker.fetch_depth_snapshot("7203", "stock")
-    with pytest.raises(NotImplementedError):
         await worker.fetch_open_interest("7203", "stock", "1d")
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_returns_empty_dict_when_session_is_none(tmp_path: Path):
+    """fetch_depth_snapshot は session=None のとき {} を返す（実装済み）。"""
+    worker = _stubbed(tmp_path)
+    # _stubbed は session=_fake_session() を渡すため、session を None に上書きする
+    worker._session = None
+    result = await worker.fetch_depth_snapshot("7203", "stock")
+    assert result == {}
 
 
 @pytest.mark.asyncio

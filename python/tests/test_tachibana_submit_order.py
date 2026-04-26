@@ -154,3 +154,33 @@ async def test_submit_order_raises_on_api_error():
     with patch("httpx.AsyncClient", return_value=mock_client):
         with pytest.raises(TachibanaError):
             await submit_order(_session(), "password", _market_buy_envelope())
+
+
+@pytest.mark.asyncio
+async def test_submit_order_venue_order_id_is_none_when_missing():
+    """sOrderNumber が欠落した場合、venue_order_id は None になること（H-5）。"""
+    import json as _json
+
+    data = {
+        "p_errno": "0",
+        "sResultCode": "0",
+        "sEigyouDay": "20260426",
+        "sWarningCode": "",
+        "sWarningText": "",
+        # sOrderNumber は意図的に省略
+    }
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.content = _json.dumps(data, ensure_ascii=False).encode("shift_jis")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await submit_order(_session(), "password", _market_buy_envelope())
+
+    assert result.venue_order_id is None, (
+        f"venue_order_id must be None when sOrderNumber is missing, got {result.venue_order_id!r}"
+    )

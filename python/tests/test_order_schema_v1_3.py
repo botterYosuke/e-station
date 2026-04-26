@@ -31,8 +31,9 @@ from engine.schemas import (
 
 # ── Schema version ────────────────────────────────────────────────────────────
 
-def test_schema_minor_is_3():
-    assert SCHEMA_MINOR == 3
+def test_schema_minor_is_at_least_3():
+    """SCHEMA_MINOR was 3 at schema 1.3; bumped to 4 in schema 1.4."""
+    assert SCHEMA_MINOR >= 3
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────

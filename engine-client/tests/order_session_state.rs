@@ -35,7 +35,12 @@ fn same_client_order_id_and_key_returns_idempotent_replay_when_no_venue_id() {
     // Second insert with same key → IdempotentReplay
     let outcome = state.try_insert(cid, key);
     assert!(
-        matches!(outcome, PlaceOrderOutcome::IdempotentReplay { venue_order_id: None }),
+        matches!(
+            outcome,
+            PlaceOrderOutcome::IdempotentReplay {
+                venue_order_id: None
+            }
+        ),
         "duplicate with same key must return IdempotentReplay(None), got {:?}",
         outcome
     );
@@ -48,7 +53,11 @@ fn same_client_order_id_and_key_returns_idempotent_replay_with_venue_id_after_up
     let key: u64 = 0xabcd;
 
     state.try_insert(cid.clone(), key);
-    state.update_venue_order_id(cid.clone(), "V999".to_string());
+    let updated = state.update_venue_order_id(cid.clone(), "V999".to_string());
+    assert!(
+        updated,
+        "update_venue_order_id must return true on first set"
+    );
 
     let outcome = state.try_insert(cid, key);
     assert!(
@@ -82,7 +91,8 @@ fn update_venue_order_id_updates_existing_record() {
     let cid = ClientOrderId("order-005".to_string());
     state.try_insert(cid.clone(), 0xbeef);
 
-    state.update_venue_order_id(cid.clone(), "V42".to_string());
+    let updated = state.update_venue_order_id(cid.clone(), "V42".to_string());
+    assert!(updated, "first update_venue_order_id must return true");
 
     let vid = state.get_venue_order_id(&cid);
     assert_eq!(vid, Some("V42"), "venue_order_id should be stored");
@@ -96,6 +106,30 @@ fn get_venue_order_id_returns_none_for_unknown() {
 }
 
 #[test]
+fn update_venue_order_id_does_not_overwrite_existing_venue_id() {
+    let mut state = make_state();
+    let cid = ClientOrderId("order-overwrite".to_string());
+    state.try_insert(cid.clone(), 0xc0de);
+
+    // 最初の update は成功する
+    let first = state.update_venue_order_id(cid.clone(), "FIRST".to_string());
+    assert!(first, "first update_venue_order_id must return true");
+    assert_eq!(state.get_venue_order_id(&cid), Some("FIRST"));
+
+    // 2 回目の update は上書きせず false を返す
+    let second = state.update_venue_order_id(cid.clone(), "SECOND".to_string());
+    assert!(
+        !second,
+        "second update_venue_order_id must return false (no overwrite)"
+    );
+    assert_eq!(
+        state.get_venue_order_id(&cid),
+        Some("FIRST"),
+        "venue_order_id must not be overwritten"
+    );
+}
+
+#[test]
 fn independent_client_order_ids_do_not_interfere() {
     let mut state = make_state();
     let cid_a = ClientOrderId("A".to_string());
@@ -104,7 +138,11 @@ fn independent_client_order_ids_do_not_interfere() {
     state.try_insert(cid_a.clone(), 0xAAA);
     state.try_insert(cid_b.clone(), 0xBBB);
 
-    state.update_venue_order_id(cid_a.clone(), "VA".to_string());
+    let updated = state.update_venue_order_id(cid_a.clone(), "VA".to_string());
+    assert!(
+        updated,
+        "update_venue_order_id must return true on first set"
+    );
 
     assert_eq!(state.get_venue_order_id(&cid_a), Some("VA"));
     assert_eq!(state.get_venue_order_id(&cid_b), None);

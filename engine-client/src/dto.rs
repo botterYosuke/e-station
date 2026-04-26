@@ -426,7 +426,9 @@ pub struct OrderModifyChange {
 }
 
 /// Filter for `GetOrderList`. All fields are optional.
+/// `deny_unknown_fields` prevents injection of unexpected fields via IPC (M-10).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderListFilter {
     pub status: Option<String>,
     pub instrument_id: Option<String>,
@@ -701,7 +703,6 @@ pub enum EngineEvent {
     ConnectionDropped,
 
     // ── Order Phase events (schema 1.3) ───────────────────────────────────
-
     /// Python needs the second password before processing a SubmitOrder request.
     SecondPasswordRequired {
         request_id: String,
@@ -714,9 +715,12 @@ pub enum EngineEvent {
     },
 
     /// Venue accepted the order and assigned a `venue_order_id`.
+    /// `venue_order_id` is `None` when the venue has not yet assigned an ID
+    /// (e.g. async acceptance paths). Python sends `null` in that case.
     OrderAccepted {
         client_order_id: String,
-        venue_order_id: String,
+        #[serde(default)]
+        venue_order_id: Option<String>,
         ts_event_ms: i64,
     },
 
