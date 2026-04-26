@@ -84,10 +84,14 @@ R2 着地後にイベント順序と外部モード bootstrap の race 2 件 (HI
 
 ### 累積完了判定
 
-- ✅ `cargo test --workspace` 全緑 (51 件、R3 で新規追加なし)
+- ✅ `cargo test --workspace` 全緑 (R3.1 で T35-RehelloOrder の構造 pin を追加: `tests/engine_rehello_yields_before_engine_connected.rs`)
 - ✅ `cargo clippy --workspace --tests -- -D warnings` 緑
 - ✅ `cargo fmt --check` 緑
 - ✅ `tools/iced_purity_grep.sh` OK
+
+## レビュー修正 R3.1 (2026-04-26) — T35-RehelloOrder pin 追加
+
+`/e-station-review` skill による再点検で T35-RehelloOrder が source コメント＋ plan のみで CI 構造ガードが無いことを確認 (Findings F1: テスト不足)。`tests/engine_rehello_yields_before_engine_connected.rs` を新設し、`engine_status_stream` 関数本体を text scan で `EngineRehello` / `EngineConnected` の出現位置を比較、initial / changed 両分岐とも前者 < 後者であることを assert。`async_stream!` マクロボディは syn AST が parse できないため text scan で代替。`invariant-tests.md` の T35-RehelloOrder 行を新 pin に更新。
 
 > 脚注: spec.md §3.1 line 30 が立花ログインボタン位置として `sidebar.rs` を挙げているのは陳腐化記述。実コード上は `src/screen/dashboard/tickers_table.rs::exchange_filter_btn` の venue 行が正本。本 PR スコープ外、別 PR で spec.md 同期予定。
 
