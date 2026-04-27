@@ -108,6 +108,11 @@ check "TickerStats.*parse error"     "$RUST_LOG_FILE" "ticker stats parse errors
 # RSV1 frames from the Python engine reaching fastwebsockets) and similar framing bugs.
 check "engine ws read error"         "$RUST_LOG_FILE" "engine ws protocol error"
 
+# Pipe read errors — non-UTF-8 bytes (e.g. Shift-JIS from Tachibana API) break the
+# stdout-forwarding loop, fill Python's stdout buffer, and deadlock the asyncio event loop.
+# Fix: engine-client/src/process.rs forward_lines() must continue (not break) on InvalidData.
+check "engine pipe read error"       "$RUST_LOG_FILE" "engine pipe broken (non-UTF-8 stdout)"
+
 # Connection stability — more than one handshake means the engine connection dropped
 # and recovered during the observation window.  One reconnect is tolerable noise;
 # two or more indicate a systematic issue (e.g. RSV frame rejection loop).

@@ -22,6 +22,8 @@
 | バグ動作 pin | 既存のバグ挙動（空返却・None 返却）をリグレッションガードとして固定し、正しい設計（raise 等）と乖離した状態を固める | 1 |
 | エラーパス副作用なし | ストリームワーカーの早期 return パスで outbox への積み忘れが発生し、Rust 側が「データが来ない」としか認識できない | 1 |
 | IPC イベント → UI 状態の未配線 | IPC イベントを受信して toast を出すだけで、対応する UI コンポーネントの状態（`submitting` フラグ等）をリセットしていない | 1 |
+| 初期化前データ到着 | UI コンポーネントが未初期化（`None`）の状態でデータが到着し、`if let Some(...)` でサイレントに無視される | 1 |
+| エラーハンドラ早期脱出 | エラー arm が `break` するため、一時的な IO エラー（非 UTF-8 バイト等）で pipe reader が停止し、書き手の stdout バッファが詰まる | 1 |
 
 ---
 
@@ -610,6 +612,118 @@ FD/KP/ST コールバックが一度も呼ばれない状態だった。
 3. **「全 Mock が同じ誤りを共有」の構造的危険性**:
    共通 Mock ビルダー関数がある場合、実装の誤りを Mock が補完して全テストが通ることがある。
    「実際のサーバーが送るフレームと Mock フレームは同一か」を定期的に実機観測で照合する習慣をつける。
+
+---
+
+## 2026-04-28 — Ladder が市場時間外に「Waiting for data...」のまま（初期化前データ到着）
+
+**見逃しパターン**: 初期化前データ到着（ライブデータ前提 と タイミング依存 の複合）
+
+**不具合の概要**:
+アプリ起動後（市場時間外）、TachibanaStock の Ladder（板）パネルが「Waiting for data...」のまま
+REST スナップショット（bid/ask 各 10 本）が表示されない。
+
+Python の `stream_depth` はセッションあり＋時間外の場合 `DepthSnapshot` を即座に送出するが、
+Rust 側の Ladder パネルが `Content::Ladder(None)` のまま（未初期化）なため、
+`ingest_depth` 内で `if let Some(panel) = panel { ... }` がサイレントに素通りしてデータが消える。
+
+**根本原因**:
+`resolve_streams` で `streams = Ready` にしてから、`ResolveContent`（次の tick で発火）が
+`set_content_and_streams` → `Content::Ladder(Some(...))` を作るまでの**1 フレーム以上の窓**が存在する。
+Python はローカルホスト IPC で < 1ms 以内に応答するため、`DepthReceived` がその窓の中に到着する。
+
+```
+resolve_streams() → streams=Ready → [iced が subscription 登録]
+  ↓ フレームN+1
+Python: Subscribe 受信 → DepthSnapshot を即送
+DepthReceived 到着 → ingest_depth → Ladder(None) → サイレントドロップ
+  ↓ 同フレームor次フレーム
+tick() → ResolveContent → set_content_and_streams → Ladder(Some(...)) ← 遅い
+```
+
+**修正**:
+`dashboard.rs::resolve_streams` で `streams = Ready` にした直後に
+`!content.initialized()` を確認し、`set_content_and_streams` を即呼び出す（1 フレーム待たない）。
+`ingest_depth` に `Ladder(None)` 到着時の警告ログを追加（今後のデバッグ用）。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `cargo test --workspace` | Ladder パネルの GUI 層（`pane::State`）には初期化前データ到着のシナリオを再現するテストがなかった |
+| `python/tests/` | Python は `DepthSnapshot` を正しく送出しており Python 側の問題ではない |
+| E2E smoke.sh | 「Ladder が空」= 正常起動と区別できない（データ表示のチェックがない） |
+| 全テスト共通 | `Content::Ladder(None)` への `if let Some(panel)` サイレントドロップは警告ログすら出ず、「データが来ない」とだけ見えた |
+
+**追加したテスト**:
+- `src/screen/dashboard/pane.rs::tests::set_content_and_streams_initializes_ladder_when_content_is_none`
+  — `Ladder(None)` + `streams=Ready` 状態から `set_content_and_streams` を呼ぶと `initialized()` が true になることを assert
+- `src/screen/dashboard/pane.rs::tests::stream_pair_kind_returns_some_when_streams_are_ready`
+  — `streams=Ready` のとき `stream_pair_kind()` が `SingleSource` を返すことを assert
+    （`resolve_streams` の eager 初期化ブランチが到達可能であることを保証）
+
+**リグレッション確認**: `set_content_and_streams` の Ladder ブランチで `Content::Ladder(None)` を返すよう変更すると test_1 が `initialized()` が false で FAIL することを確認。元に戻すと PASS。
+
+**教訓**:
+
+1. **「データより先に初期化を済ませる」不変条件の明示化**: GUI コンポーネントが `Option<T>` で
+   未初期化状態を持つ場合、外部データ到着時には `Some` になっていることを assert すべき。
+   `if let Some(...)` のサイレントドロップは「データが来ない」にしか見えず、根本原因特定が困難。
+
+2. **1 フレーム窓の危険性**: iced の更新サイクルでは「A のメッセージ処理 → subscription 登録 →
+   B のイベント到着」が 1 フレーム以内に起こりうる。特に localhost IPC は network latency が
+   ほぼゼロなので、「次の tick でやればいい」は実際に window を作る。状態変更後に依存する
+   初期化は即座（同一メッセージ処理内）に行う。
+
+3. **`Content::initialized()` のテスト追加を検討**: 新しい `Content` バリアントを追加する際は
+   「未初期化状態でデータが到着したとき何が起こるか」をテストで明示する。
+   `Panel(None).initialized() == false` かつ `Panel(None)` へのデータ挿入がサイレントに失敗する
+   設計を選ぶなら、挿入前に `initialized()` を assert する防衛コードを `ingest_depth` に置く。
+
+---
+
+## 2026-04-28 — Python stdout 非 UTF-8 バイトで pipe reader が停止 → asyncio deadlock → アプリ終了
+
+**見逃しパターン**: エラーハンドラ早期脱出 / ログ検査漏れ（複合）
+
+**不具合の概要**:
+Tachibana API のレスポンスに Shift-JIS 文字が含まれる場合、Python エンジンがそれをログ出力する。
+`engine-client/src/process.rs::forward_lines()` が `next_line()` からの `InvalidData` エラーを
+`break` で処理していたため、pipe reader タスクが終了する。
+Python の stdout pipe に reader がいなくなると、約 64KB のバッファが埋まった時点で
+Python の asyncio event loop がブロックし、アプリが数分以内に応答不能→終了する。
+
+**修正**: `forward_lines()` の `Err(e) if e.kind() == InvalidData` arm を `break` → `continue`（debug ログ付き skip）に変更。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `engine-client/tests/*.rs` | Mock サーバーを使用。実 Python subprocess が Shift-JIS 文字を stdout に出力するシナリオがない |
+| `tests/e2e/smoke.sh` | `engine ws read error` は検査していたが `engine pipe read error` は未検査 |
+| `src/process.rs::tests` | `forward_lines()` の非 UTF-8 入力に対する挙動のテストがなかった |
+
+**追加したテスト**:
+- `engine-client/src/process.rs::tests::forward_lines_does_not_stop_after_non_utf8_line`
+  — 非 UTF-8 バイトの後もタスクが継続（`is_finished() == false`）することを検証
+- `tests/e2e/smoke.sh` — `engine pipe read error` チェックを追加
+
+**リグレッション確認**: `InvalidData` arm に `break` を追加した状態で FAIL、削除で PASS。
+
+**教訓**:
+
+1. **pipe reader の `break` は「対向プロセスの stdout deadlock」を引き起こす**:
+   `forward_lines` のような「プロセス stdout を読む無限ループ」では、
+   回復可能なエラー（`InvalidData` 等）で `break` すると reader が消えて
+   書き手のバッファが詰まる。`break` は EOF や致命的 IO エラーのみに使う。
+
+2. **`smoke.sh` のパイプ系エラー網羅**:
+   `engine ws read error`（WebSocket 層）と同様に `engine pipe read error`（プロセス stdout 層）も
+   smoke test でチェックする。プロセス IPC 系のエラーログは必ず smoke.sh の check 対象にする。
+
+3. **`forward_lines` 系のテストは `JoinHandle::is_finished()` で継続性を assert する**:
+   「ログの内容」を確認する代わりに「タスクがまだ動いているか」を `is_finished()` で確認するパターンが
+   有効。非 UTF-8 入力後もタスクが alive であることを assert すれば、`break` → `continue` の退化を防止できる。
 
 ---
 

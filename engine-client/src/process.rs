@@ -490,6 +490,12 @@ where
                 }
             }
             Ok(None) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // Non-UTF-8 line (e.g. Shift-JIS content from Tachibana API).
+                // Skip and keep reading — breaking here would fill Python's
+                // stdout buffer and deadlock the asyncio event loop.
+                log::debug!(target: "engine", "engine pipe: non-UTF-8 line skipped");
+            }
             Err(e) => {
                 log::warn!(target: "engine", "engine pipe read error: {e}");
                 break;
@@ -513,6 +519,38 @@ fn generate_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies that `forward_lines` does NOT stop reading when it encounters a
+    /// non-UTF-8 line (e.g. Shift-JIS content from Tachibana API logging).
+    ///
+    /// Regression guard: if the `InvalidData` arm is changed back to `break`,
+    /// the task would finish immediately after the bad line, and `is_finished()`
+    /// would be `true` — causing this test to FAIL.
+    #[tokio::test]
+    async fn forward_lines_does_not_stop_after_non_utf8_line() {
+        use tokio::io::AsyncWriteExt;
+
+        let (reader, mut writer) = tokio::io::duplex(256);
+        let fwd = tokio::spawn(forward_lines(reader, log::Level::Info));
+
+        writer.write_all(b"valid line\n").await.unwrap();
+        // Non-UTF-8 byte (0xFF is never valid in UTF-8)
+        writer.write_all(b"\xFF bad bytes \n").await.unwrap();
+
+        // Yield so the spawned task can consume what we wrote.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // The task must still be running — it should be blocked waiting for more
+        // data, not have exited after the InvalidData error.
+        assert!(
+            !fwd.is_finished(),
+            "forward_lines broke out of the loop on InvalidData; \
+             fix: keep the `Err(e) if e.kind() == ErrorKind::InvalidData` arm as `continue`, not `break`"
+        );
+
+        drop(writer); // EOF — let the task finish cleanly
+        fwd.await.unwrap();
+    }
 
     #[tokio::test]
     async fn set_proxy_stores_url() {
