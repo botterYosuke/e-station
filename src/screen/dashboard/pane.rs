@@ -2550,3 +2550,73 @@ fn by_basis_default<T>(
         Basis::Tick(_) => on_tick(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::adapter::Exchange;
+
+    fn tachibana_ticker_info() -> TickerInfo {
+        let ticker = exchange::Ticker::new("7203", Exchange::TachibanaStock);
+        TickerInfo::new_stock(ticker, 1.0, 100.0, 100)
+    }
+
+    fn ladder_depth_stream(ti: TickerInfo) -> StreamKind {
+        StreamKind::Depth {
+            ticker_info: ti,
+            depth_aggr: exchange::adapter::StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        }
+    }
+
+    /// Regression guard for the race where DepthSnapshot arrives before Ladder
+    /// content is initialized (Content::Ladder(None)).
+    ///
+    /// When `resolve_streams` makes streams Ready, `set_content_and_streams` must
+    /// be called immediately so incoming data is not silently dropped.
+    #[test]
+    fn set_content_and_streams_initializes_ladder_when_content_is_none() {
+        let ti = tachibana_ticker_info();
+        let mut state = State::default();
+        state.content = Content::Ladder(None);
+        state.streams = ResolvedStream::Ready(vec![
+            ladder_depth_stream(ti),
+            StreamKind::Trades { ticker_info: ti },
+        ]);
+
+        assert!(
+            !state.content.initialized(),
+            "pre-condition: Ladder(None) must not be initialized"
+        );
+
+        state.set_content_and_streams(vec![ti], ContentKind::Ladder);
+
+        assert!(
+            state.content.initialized(),
+            "Ladder must be initialized after set_content_and_streams — \
+             if this fails, DepthSnapshot data arriving right after resolve_streams \
+             will be dropped into Content::Ladder(None)"
+        );
+    }
+
+    /// Verify that a Ladder with Ready streams can produce a valid stream_pair_kind,
+    /// which is the prerequisite for the eager initialization in resolve_streams.
+    #[test]
+    fn stream_pair_kind_returns_some_when_streams_are_ready() {
+        let ti = tachibana_ticker_info();
+        let mut state = State::default();
+        state.content = Content::Ladder(None);
+        state.streams = ResolvedStream::Ready(vec![
+            ladder_depth_stream(ti),
+            StreamKind::Trades { ticker_info: ti },
+        ]);
+
+        let kind = state.stream_pair_kind();
+        assert!(
+            matches!(kind, Some(StreamPairKind::SingleSource(_))),
+            "stream_pair_kind must return SingleSource when streams are Ready — \
+             if this fails, the eager initialization branch in resolve_streams will \
+             fall through to the None arm and leave Ladder uninitialized"
+        );
+    }
+}

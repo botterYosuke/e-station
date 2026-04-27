@@ -1779,6 +1779,9 @@ impl Flowsurface {
                         },
                     );
                 }
+                self.notifications
+                    .push(Toast::error("注文取消失敗: エンジン未接続".to_string()));
+                return Task::none();
             }
             // ── Phase U0: 第二暗証番号 modal ──────────────────────────────────
             Message::SecondPasswordRequired(request_id) => {
@@ -2794,10 +2797,8 @@ impl Flowsurface {
             // Phase U-pre: Order menu is rendered inline in the sidebar itself.
             sidebar::Menu::Order => {
                 if let Some(dialog) = &self.confirm_dialog {
-                    let dialog_content = confirm_dialog_container(
-                        dialog.clone(),
-                        Message::ToggleDialogModal(None),
-                    );
+                    let dialog_content =
+                        confirm_dialog_container(dialog.clone(), Message::ToggleDialogModal(None));
                     main_dialog_modal(base, dialog_content, Message::ToggleDialogModal(None))
                 } else {
                     base

@@ -313,7 +313,11 @@ mod tests {
         assert_eq!(panel.order_count(), 2);
 
         panel.set_orders(vec![make_record("c-3", "v-3")]);
-        assert_eq!(panel.order_count(), 1, "set_orders should replace previous list");
+        assert_eq!(
+            panel.order_count(),
+            1,
+            "set_orders should replace previous list"
+        );
 
         let action = update(
             &mut panel,
