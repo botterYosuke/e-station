@@ -236,7 +236,7 @@ fn test_same_key_gives_idempotent_replay_in_session_state() {
     let key = compute_key(&p);
 
     let mut state = OrderSessionState::new();
-    state.try_insert(ClientOrderId("cid-canonical-001".to_string()), key);
+    state.try_insert(ClientOrderId::try_new("cid-canonical-001").unwrap(), key);
 
     // tags を逆順にしても同じ key → IdempotentReplay
     let p_reversed = OrderParams {
@@ -250,7 +250,10 @@ fn test_same_key_gives_idempotent_replay_in_session_state() {
     };
     let key_reversed = compute_key(&p_reversed);
 
-    let outcome = state.try_insert(ClientOrderId("cid-canonical-001".to_string()), key_reversed);
+    let outcome = state.try_insert(
+        ClientOrderId::try_new("cid-canonical-001").unwrap(),
+        key_reversed,
+    );
     assert!(
         matches!(outcome, PlaceOrderOutcome::IdempotentReplay { .. }),
         "same canonical key must yield IdempotentReplay, got {outcome:?}",

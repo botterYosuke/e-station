@@ -141,9 +141,12 @@ impl RateLimiter {
     /// the new hit exceeds `max_hits`.
     fn record_and_check(&mut self, key: RateLimitKey, window: Duration, max_hits: u32) -> bool {
         let now = tokio::time::Instant::now();
-        let cutoff = now
-            .checked_sub(window)
-            .unwrap_or(tokio::time::Instant::now());
+        // A-5 (H-3): アンダーフロー時はウィンドウ計算不能 → 制限しない（false を返す）。
+        // 元の unwrap_or(now()) はアンダーフロー時に全エントリ evict してしまうバグがあった。
+        let cutoff = match now.checked_sub(window) {
+            Some(t) => t,
+            None => return false,
+        };
 
         let entry = self.hits.entry(key).or_default();
 
@@ -155,12 +158,6 @@ impl RateLimiter {
 
         // Check whether we've exceeded the limit.
         entry.len() > max_hits as usize
-    }
-
-    /// Inject a hit at a specific instant (test helper — compiled only in tests).
-    #[cfg(test)]
-    fn inject_hit_at(&mut self, key: RateLimitKey, at: tokio::time::Instant) {
-        self.hits.entry(key).or_default().push(at);
     }
 }
 
@@ -282,25 +279,43 @@ struct OrderListQueryBody {
 /// Entry point called by the TCP dispatcher for `POST /api/order/submit`.
 pub async fn handle_submit_request(stream: &mut TcpStream, body: &str, state: &Arc<OrderApiState>) {
     let response = submit_order(body, state).await;
-    let _ = stream
+    if let Err(e) = stream
         .write_all(format_http_response(response.status, &response.body).as_bytes())
-        .await;
+        .await
+    {
+        log::debug!(
+            "order_api: failed to write HTTP response (status={}): {e}",
+            response.status
+        );
+    }
 }
 
 /// Entry point for `POST /api/order/modify`.
 pub async fn handle_modify_request(stream: &mut TcpStream, body: &str, state: &Arc<OrderApiState>) {
     let response = modify_order(body, state).await;
-    let _ = stream
+    if let Err(e) = stream
         .write_all(format_http_response(response.status, &response.body).as_bytes())
-        .await;
+        .await
+    {
+        log::debug!(
+            "order_api: failed to write HTTP response (status={}): {e}",
+            response.status
+        );
+    }
 }
 
 /// Entry point for `POST /api/order/cancel`.
 pub async fn handle_cancel_request(stream: &mut TcpStream, body: &str, state: &Arc<OrderApiState>) {
     let response = cancel_order(body, state).await;
-    let _ = stream
+    if let Err(e) = stream
         .write_all(format_http_response(response.status, &response.body).as_bytes())
-        .await;
+        .await
+    {
+        log::debug!(
+            "order_api: failed to write HTTP response (status={}): {e}",
+            response.status
+        );
+    }
 }
 
 /// Entry point for `POST /api/order/cancel-all`.
@@ -310,17 +325,29 @@ pub async fn handle_cancel_all_request(
     state: &Arc<OrderApiState>,
 ) {
     let response = cancel_all_orders(body, state).await;
-    let _ = stream
+    if let Err(e) = stream
         .write_all(format_http_response(response.status, &response.body).as_bytes())
-        .await;
+        .await
+    {
+        log::debug!(
+            "order_api: failed to write HTTP response (status={}): {e}",
+            response.status
+        );
+    }
 }
 
 /// Entry point for `GET /api/order/list`.
 pub async fn handle_list_request(stream: &mut TcpStream, body: &str, state: &Arc<OrderApiState>) {
     let response = list_orders(body, state).await;
-    let _ = stream
+    if let Err(e) = stream
         .write_all(format_http_response(response.status, &response.body).as_bytes())
-        .await;
+        .await
+    {
+        log::debug!(
+            "order_api: failed to write HTTP response (status={}): {e}",
+            response.status
+        );
+    }
 }
 
 // ── Core handler ───────────────────────────────────────────────────────────────
@@ -434,7 +461,17 @@ async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
     let request_key = compute_request_key(&body, expire_time_ns);
 
     // ── ⑩ Idempotency check ──────────────────────────────────────────────────
-    let client_order_id = ClientOrderId(body.client_order_id.clone());
+    // A-2: client_order_id は validate() で検証済みのため try_new 成功が保証される。
+    let client_order_id = match ClientOrderId::try_new(&body.client_order_id) {
+        Some(c) => c,
+        None => {
+            log::error!(
+                "order_api: client_order_id validation mismatch for {:?}",
+                body.client_order_id
+            );
+            return error_response(500, "INTERNAL_ERROR", "client_order_id validation mismatch");
+        }
+    };
     let outcome = {
         let mut session = state.session.lock().await;
         session.try_insert(client_order_id.clone(), request_key)
@@ -481,6 +518,14 @@ async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             };
         }
         PlaceOrderOutcome::Created { .. } => {} // continue to submission
+        // A-8 (H-12): frozen セッション → 503 SESSION_EXPIRED。
+        PlaceOrderOutcome::SessionFrozen => {
+            return error_response(
+                503,
+                "SESSION_EXPIRED",
+                "session is frozen; please re-login before submitting orders",
+            );
+        }
     }
 
     // ── ⑪ Subscribe to events BEFORE sending command ─────────────────────────
@@ -514,7 +559,12 @@ async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
         Ok(OrderWaitResult::Accepted { venue_order_id, .. }) => {
             if let Some(ref vid) = venue_order_id {
                 let mut session = state.session.lock().await;
-                let _ = session.update_venue_order_id(client_order_id, vid.clone());
+                // A-4 (H-1): false は None→Some 遷移が起きなかったことを示す → ログ出力。
+                if !session.update_venue_order_id(client_order_id.clone(), vid.clone()) {
+                    log::warn!(
+                        "update_venue_order_id returned false: cid={client_order_id:?}, vid={vid}"
+                    );
+                }
             }
             let resp = serde_json::json!({
                 "client_order_id": cid,
@@ -530,6 +580,9 @@ async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             reason_code,
             reason_text,
         }) => {
+            if reason_code == "SESSION_EXPIRED" {
+                state.session.lock().await.freeze();
+            }
             let status = reason_code_to_status(&reason_code);
             let resp = serde_json::json!({
                 "reason_code": reason_code,
@@ -581,7 +634,16 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
     }
 
     // ③ Lookup venue_order_id
-    let cid = ClientOrderId(body.client_order_id.clone());
+    let cid = match ClientOrderId::try_new(&body.client_order_id) {
+        Some(c) => c,
+        None => {
+            return error_response(
+                400,
+                "VALIDATION_ERROR",
+                "client_order_id: must be 1-36 ASCII printable characters",
+            );
+        }
+    };
     let venue_order_id = {
         let session = state.session.lock().await;
         session.get_venue_order_id(&cid).map(str::to_string)
@@ -651,7 +713,12 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
                 body: resp.to_string(),
             }
         }
-        Ok(Err(msg)) => error_response(502, "INTERNAL_ERROR", &msg),
+        Ok(Err(msg)) => {
+            if msg.starts_with("SESSION_EXPIRED") {
+                state.session.lock().await.freeze();
+            }
+            error_response(502, "INTERNAL_ERROR", &msg)
+        }
         Err(_) => error_response(504, "INTERNAL_ERROR", "modify order timed out"),
     }
 }
@@ -683,7 +750,16 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
     }
 
     // ③ Lookup venue_order_id
-    let cid = ClientOrderId(body.client_order_id.clone());
+    let cid = match ClientOrderId::try_new(&body.client_order_id) {
+        Some(c) => c,
+        None => {
+            return error_response(
+                400,
+                "VALIDATION_ERROR",
+                "client_order_id: must be 1-36 ASCII printable characters",
+            );
+        }
+    };
     let venue_order_id = {
         let session = state.session.lock().await;
         session.get_venue_order_id(&cid).map(str::to_string)
@@ -747,7 +823,12 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
                 body: resp.to_string(),
             }
         }
-        Ok(Err(msg)) => error_response(502, "INTERNAL_ERROR", &msg),
+        Ok(Err(msg)) => {
+            if msg.starts_with("SESSION_EXPIRED") {
+                state.session.lock().await.freeze();
+            }
+            error_response(502, "INTERNAL_ERROR", &msg)
+        }
         Err(_) => error_response(504, "INTERNAL_ERROR", "cancel order timed out"),
     }
 }
@@ -913,7 +994,10 @@ async fn list_orders(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse
             let resp = serde_json::json!({ "orders": orders });
             HttpResponse {
                 status: 200,
-                body: serde_json::to_string(&resp).unwrap_or_default(),
+                body: serde_json::to_string(&resp).unwrap_or_else(|e| {
+                    log::error!("order_api: failed to serialize order list response — {e}");
+                    r#"{"orders":[]}"#.to_string()
+                }),
             }
         }
         Ok(Err(msg)) => error_response(502, "INTERNAL_ERROR", &msg),
@@ -942,19 +1026,30 @@ fn validate(body: &SubmitOrderBody) -> Result<(), HttpResponse> {
     }
 
     // instrument_id: <symbol>.TSE format (Phase O0–O2: TSE only)
-    if !body.instrument_id.ends_with(".TSE") {
-        return Err(error_response(
-            400,
-            "VALIDATION_ERROR",
-            "instrument_id: must be in <symbol>.TSE format (Phase O0–O2: TSE only)",
-        ));
-    }
-    let symbol = body.instrument_id.trim_end_matches(".TSE");
+    // A-6 (H-4): strip_suffix を使い、.TSE で終わらない / 二重 .TSE は 400 reject。
+    let symbol = match body.instrument_id.strip_suffix(".TSE") {
+        Some(s) => s,
+        None => {
+            return Err(error_response(
+                400,
+                "VALIDATION_ERROR",
+                "instrument_id: must end with .TSE (e.g. 7203.TSE)",
+            ));
+        }
+    };
     if symbol.is_empty() {
         return Err(error_response(
             400,
             "VALIDATION_ERROR",
             "instrument_id: symbol part must not be empty",
+        ));
+    }
+    // "7203.TSE.TSE" のような二重 suffix を reject（strip_suffix は 1 回しか除去しない）。
+    if symbol.ends_with(".TSE") {
+        return Err(error_response(
+            400,
+            "VALIDATION_ERROR",
+            "instrument_id: must not contain double .TSE suffix (e.g. 7203.TSE.TSE is invalid)",
         ));
     }
 
@@ -1186,7 +1281,10 @@ fn build_ipc_order(
 fn parse_order_side(s: &str) -> OrderSide {
     match s {
         "BUY" => OrderSide::Buy,
-        _ => OrderSide::Sell,
+        "SELL" => OrderSide::Sell,
+        other => {
+            unreachable!("parse_order_side: validate() must reject unknown values — got {other:?}")
+        }
     }
 }
 
@@ -1195,7 +1293,10 @@ fn parse_order_type(s: &str) -> OrderType {
         "MARKET" => OrderType::Market,
         "LIMIT" => OrderType::Limit,
         "STOP_MARKET" => OrderType::StopMarket,
-        _ => OrderType::StopLimit,
+        "STOP_LIMIT" => OrderType::StopLimit,
+        other => {
+            unreachable!("parse_order_type: validate() must reject unknown values — got {other:?}")
+        }
     }
 }
 
@@ -1204,7 +1305,10 @@ fn parse_time_in_force(s: &str) -> TimeInForce {
         "DAY" => TimeInForce::Day,
         "GTD" => TimeInForce::Gtd,
         "AT_THE_OPEN" => TimeInForce::AtTheOpen,
-        _ => TimeInForce::AtTheClose,
+        "AT_THE_CLOSE" => TimeInForce::AtTheClose,
+        other => unreachable!(
+            "parse_time_in_force: validate() must reject unknown values — got {other:?}"
+        ),
     }
 }
 
@@ -1265,7 +1369,13 @@ async fn wait_for_order_result(
             }) if rid == request_id => return OrderWaitResult::SecondPasswordRequired,
             Ok(EngineEvent::ConnectionDropped) => return OrderWaitResult::Disconnected,
             Ok(_) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                log::warn!(
+                    "order_api: broadcast receiver lagged by {n} messages — order event may have \
+                     been lost"
+                );
+                continue;
+            }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 return OrderWaitResult::Disconnected;
             }
@@ -1294,7 +1404,13 @@ async fn wait_for_pending_update(
             }
             Ok(EngineEvent::ConnectionDropped) => return Err("engine connection lost".to_string()),
             Ok(_) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                log::warn!(
+                    "order_api: broadcast receiver lagged by {n} messages — order event may have \
+                     been lost"
+                );
+                continue;
+            }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 return Err("engine connection closed".to_string());
             }
@@ -1323,7 +1439,13 @@ async fn wait_for_pending_cancel(
             }
             Ok(EngineEvent::ConnectionDropped) => return Err("engine connection lost".to_string()),
             Ok(_) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                log::warn!(
+                    "order_api: broadcast receiver lagged by {n} messages — order event may have \
+                     been lost"
+                );
+                continue;
+            }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 return Err("engine connection closed".to_string());
             }
@@ -1344,7 +1466,13 @@ async fn wait_for_order_list(
             }) if rid == request_id => return Ok(orders),
             Ok(EngineEvent::ConnectionDropped) => return Err("engine connection lost".to_string()),
             Ok(_) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                log::warn!(
+                    "order_api: broadcast receiver lagged by {n} messages — order event may have \
+                     been lost"
+                );
+                continue;
+            }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 return Err("engine connection closed".to_string());
             }

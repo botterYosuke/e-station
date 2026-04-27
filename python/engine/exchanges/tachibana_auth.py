@@ -379,9 +379,98 @@ async def validate_session_on_startup(
     )
 
 
+class TachibanaSessionHolder:
+    """第二暗証番号のメモリ保持 + idle forget タイマー + lockout state。
+
+    architecture.md §5.3 (C3 / C-R5-H2) の設計に従う。
+
+    * idle timer: SubmitOrder/ModifyOrder/CancelOrder/CancelAllOrders/SetSecondPassword
+      受信時に touch() でリセット。idle_forget_minutes 経過で自動 None 化。
+    * lockout: p_errno=4 (SECOND_PASSWORD_INVALID) が max_retries 回連続した場合に
+      lockout_secs 間は is_locked_out() が True を返す。SubmitOrder 成功時にカウンタリセット。
+    """
+
+    def __init__(
+        self,
+        idle_forget_minutes: float = 30.0,
+        max_retries: int = 3,
+        lockout_secs: float = 1800.0,
+    ) -> None:
+        self._password: str | None = None
+        self._idle_forget_secs = idle_forget_minutes * 60.0
+        self._max_retries = max_retries
+        self._lockout_secs = lockout_secs
+        self._last_use_time: float | None = None
+        self._invalid_count: int = 0
+        self._lockout_until: float | None = None
+
+    def _now(self) -> float:
+        import asyncio
+        import time
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:
+            return time.monotonic()
+
+    def set_password(self, value: str) -> None:
+        """SetSecondPassword コマンド受信時に呼ぶ。"""
+        self._password = value
+        self.touch()
+
+    def touch(self, now: float | None = None) -> None:
+        """idle timer をリセット。second_password を expose するコマンド受信時に呼ぶ。"""
+        self._last_use_time = now if now is not None else self._now()
+
+    def is_idle_expired(self, now: float | None = None) -> bool:
+        """idle forget 閾値を超えていれば True。"""
+        if self._last_use_time is None:
+            return False
+        t = now if now is not None else self._now()
+        return (t - self._last_use_time) >= self._idle_forget_secs
+
+    def is_locked_out(self, now: float | None = None) -> bool:
+        """lockout 期間中かを返す。"""
+        if self._lockout_until is None:
+            return False
+        t = now if now is not None else self._now()
+        if t >= self._lockout_until:
+            self._lockout_until = None
+            return False
+        return True
+
+    def get_password(self, now: float | None = None) -> str | None:
+        """発注時に呼ぶ。idle 期限切れなら自動クリアして None を返す。"""
+        if self.is_idle_expired(now):
+            self._password = None
+            self._last_use_time = None
+        return self._password
+
+    def clear(self) -> None:
+        """ForgetSecondPassword / p_errno=2 受領時に呼ぶ。"""
+        self._password = None
+        self._last_use_time = None
+
+    def on_invalid(self, now: float | None = None) -> bool:
+        """p_errno=4 (SECOND_PASSWORD_INVALID) 受領時に呼ぶ。
+        Returns True ならば lockout 状態に入った（以降の発注をブロックすべき）。
+        """
+        self._password = None
+        self._invalid_count += 1
+        if self._invalid_count >= self._max_retries:
+            t = now if now is not None else self._now()
+            self._lockout_until = t + self._lockout_secs
+            return True
+        return False
+
+    def on_submit_success(self) -> None:
+        """SubmitOrder 成功時に invalid_count をリセット。"""
+        self._invalid_count = 0
+
+
 __all__ = [
     "StartupLatch",
     "TachibanaSession",
+    "TachibanaSessionHolder",
     "login",
     "validate_session_on_startup",
 ]

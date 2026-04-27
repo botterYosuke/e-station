@@ -18,8 +18,33 @@ use std::{collections::HashMap, path::Path};
 /// `client_order_id` を強く型付けした newtype。
 /// nautilus の `ClientOrderId` 制約（長さ 1〜36、ASCII printable）は
 /// HTTP 層 (Phase O0 T0.5) で事前に検証済みを前提とし、ここでは保持のみ行う。
+///
+/// 内部フィールドは `pub(crate)` に制限する（A-2: C-3）。
+/// 外部からは `try_new()` または `ClientOrderId::from_str_unchecked()` でのみ構築する。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ClientOrderId(pub String);
+pub struct ClientOrderId(pub(crate) String);
+
+impl ClientOrderId {
+    /// バリデーション付きコンストラクタ（A-2: C-3）。
+    ///
+    /// 長さ 1〜36、ASCII printable（0x20〜0x7E）の制約を満たす場合のみ `Some` を返す。
+    /// `From<String>` / `From<&str>` は実装しない（意図しない構築を防ぐため）。
+    pub fn try_new(s: &str) -> Option<Self> {
+        if s.is_empty() || s.len() > 36 {
+            return None;
+        }
+        if !s.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+            return None;
+        }
+        Some(Self(s.to_string()))
+    }
+
+    /// 検証なしで構築する（WAL 復元・テスト内部専用）。
+    /// 呼び出し元が入力の安全性を保証する場合のみ使用する。
+    pub(crate) fn from_raw(s: String) -> Self {
+        Self(s)
+    }
+}
 
 /// 注文レコード（`OrderSessionState` マップの値型）。
 #[derive(Debug, Clone)]
@@ -43,18 +68,35 @@ pub enum PlaceOrderOutcome {
     Conflict {
         existing_venue_order_id: Option<String>,
     },
+    /// セッションが frozen 状態（p_errno=2 受領後）— 以降の発注はすべてここに。
+    SessionFrozen,
 }
 
 /// 発注冪等性マップ。`Arc<Mutex<Self>>` で Axum State として渡す想定。
 pub struct OrderSessionState {
     map: HashMap<ClientOrderId, AgentOrderRecord>,
+    /// `p_errno=2` 受領後に `true` にセット。`try_insert` が `SessionFrozen` を返す。
+    frozen: bool,
 }
 
 impl OrderSessionState {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            frozen: false,
         }
+    }
+
+    /// セッションを frozen 状態にする（A-8: H-12）。
+    ///
+    /// `p_errno=2` 受領後に呼び出す。以降の `try_insert` は `SessionFrozen` を返す。
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    /// セッションが frozen 状態かどうかを返す。
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     /// WAL ファイル（JSONL 形式）から当日分のエントリを復元して返す。
@@ -149,8 +191,27 @@ impl OrderSessionState {
                         .get("request_key")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
+                    // A-3 (H-14): request_key=0 の submit 行は map に登録しない。
+                    // Python 側が 0 を仮置きのまま書いた行は「未登録」として扱い、
+                    // 再起動後は新規発注として受け付ける（重複発注リスクより冪等性崩壊のほうが深刻）。
+                    if request_key == 0 {
+                        log::warn!(
+                            "load_from_wal: WAL submit line has request_key=0, skipping: cid={cid_str:?}"
+                        );
+                        continue;
+                    }
+                    // A-2 (C-3): WAL 復元パスでも try_new を通す。失敗した行は skip + warn。
+                    let cid = match ClientOrderId::try_new(&cid_str) {
+                        Some(c) => c,
+                        None => {
+                            log::warn!(
+                                "load_from_wal: invalid client_order_id skipped at line {i}: {cid_str:?}"
+                            );
+                            continue;
+                        }
+                    };
                     state.map.insert(
-                        ClientOrderId(cid_str),
+                        cid,
                         AgentOrderRecord {
                             venue_order_id: None,
                             request_key,
@@ -163,7 +224,8 @@ impl OrderSessionState {
                         .get("venue_order_id")
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
-                    if let Some(record) = state.map.get_mut(&ClientOrderId(cid_str)) {
+                    let cid_key = ClientOrderId::from_raw(cid_str);
+                    if let Some(record) = state.map.get_mut(&cid_key) {
                         if record.venue_order_id.is_none() {
                             record.venue_order_id = venue_order_id;
                         }
@@ -172,7 +234,7 @@ impl OrderSessionState {
                 }
                 "rejected" => {
                     // 拒否済み → 再送防止対象外なので map から除去する。
-                    state.map.remove(&ClientOrderId(cid_str));
+                    state.map.remove(&ClientOrderId::from_raw(cid_str));
                 }
                 other => {
                     log::warn!("load_from_wal: unknown phase {other:?} at line {i}, skipping");
@@ -185,6 +247,7 @@ impl OrderSessionState {
 
     /// `client_order_id` と `request_key` の組み合わせで挿入を試みる。
     ///
+    /// - frozen 状態 → `SessionFrozen`
     /// - 未登録 → `Created`
     /// - 登録済み + 同一 key → `IdempotentReplay { venue_order_id }`
     /// - 登録済み + 異なる key → `Conflict { existing_venue_order_id }`
@@ -193,6 +256,10 @@ impl OrderSessionState {
         client_order_id: ClientOrderId,
         request_key: u64,
     ) -> PlaceOrderOutcome {
+        // A-8 (H-12): frozen 状態では新規発注を拒否する。
+        if self.frozen {
+            return PlaceOrderOutcome::SessionFrozen;
+        }
         if let Some(record) = self.map.get(&client_order_id) {
             if record.request_key == request_key {
                 return PlaceOrderOutcome::IdempotentReplay {
@@ -270,13 +337,24 @@ impl OrderSessionState {
         venue_order_id: &str,
         new_status: &str,
     ) -> Option<ClientOrderId> {
-        // venue_order_id が None のエントリの中から、今回マッチするものを探す。
-        // 複数の unknown エントリが同一 venue_order_id を持つことは設計上あり得ないが、
-        // 最初に見つかったものだけ更新する。
-        let matched = self.map.iter_mut().find(|(_, rec)| {
-            rec.venue_order_id.is_none()
-            // 既に venue_order_id が入っているエントリはスキップ（上書き禁止）
-        });
+        // ① 既に venue_order_id が確定しているエントリを優先してステータス更新する。
+        //    GetOrderList で「知っている venue_order_id」が返ってきた場合はここで解決。
+        if let Some((cid, record)) = self
+            .map
+            .iter_mut()
+            .find(|(_, rec)| rec.venue_order_id.as_deref() == Some(venue_order_id))
+        {
+            record.status = new_status.to_string();
+            return Some(cid.clone());
+        }
+
+        // ② 一致するエントリがなければ、unknown（None）エントリに venue_order_id を割り当てる。
+        //    複数の unknown エントリが存在する場合は最初のものを選ぶ（WAL 復元は FIFO 順序が保証されないが
+        //    in-flight 注文が複数の unknown 状態になるシナリオは GetOrderList で一度に全件補完される）。
+        let matched = self
+            .map
+            .iter_mut()
+            .find(|(_, rec)| rec.venue_order_id.is_none());
 
         if let Some((cid, record)) = matched {
             record.venue_order_id = Some(venue_order_id.to_string());

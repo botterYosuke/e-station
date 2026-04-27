@@ -295,3 +295,85 @@ def test_submit_request_enum_passthrough(field, value, expected):
     req = SubmitOrderRequest.model_validate(data)
     dumped = json.loads(req.model_dump_json())
     assert dumped[field] == expected
+
+
+# ── B-1: OrderAccepted.venue_order_id は Optional ────────────────────────────
+
+
+def test_order_accepted_venue_order_id_can_be_none():
+    """B-1: venue_order_id=None で OrderAccepted を生成できること。"""
+    ev = OrderAccepted(
+        client_order_id="cid-001",
+        venue_order_id=None,
+        ts_event_ms=1_700_000_000_001,
+    )
+    d = json.loads(ev.model_dump_json())
+    assert d["event"] == "OrderAccepted"
+    assert d["venue_order_id"] is None
+
+
+def test_order_accepted_without_venue_order_id_defaults_to_none():
+    """B-1: venue_order_id を省略した場合も None になること。"""
+    ev = OrderAccepted(client_order_id="cid-001", ts_event_ms=1_700_000_000_001)
+    assert ev.venue_order_id is None
+
+
+# ── C-1: OrderListFilter と SetSecondPassword は extra="forbid" ───────────────
+
+
+def test_order_list_filter_rejects_unknown_field():
+    """C-1: OrderListFilter に未知フィールドを渡すと ValidationError が上がること。"""
+    with pytest.raises(Exception):
+        OrderListFilter.model_validate({"status": "ACCEPTED", "injected_field": "evil"})
+
+
+def test_set_second_password_rejects_unknown_field():
+    """C-1: SetSecondPassword に未知フィールドを渡すと ValidationError が上がること。"""
+    with pytest.raises(Exception):
+        SetSecondPassword.model_validate(
+            {
+                "op": "SetSecondPassword",
+                "request_id": "req-x",
+                "value": "pass",
+                "injected_field": "evil",
+            }
+        )
+
+
+# ── B-4: _sanitize_for_wal は \n / \t を除去する ─────────────────────────────
+
+
+def test_sanitize_for_wal_removes_newline():
+    """B-4: _sanitize_for_wal は生の \\n を除去すること。"""
+    from engine.exchanges.tachibana_orders import _sanitize_for_wal
+
+    result = _sanitize_for_wal("hello\nworld")
+    assert "\n" not in result, f"\\n should be removed, got {result!r}"
+    assert "hello" in result
+    assert "world" in result
+
+
+def test_sanitize_for_wal_removes_tab():
+    """B-4: _sanitize_for_wal は生の \\t を除去すること。"""
+    from engine.exchanges.tachibana_orders import _sanitize_for_wal
+
+    result = _sanitize_for_wal("hello\tworld")
+    assert "\t" not in result, f"\\t should be removed, got {result!r}"
+
+
+def test_sanitize_for_wal_removes_control_chars():
+    """B-4: _sanitize_for_wal は C0 制御文字（\\x01-\\x1f）を除去すること。"""
+    from engine.exchanges.tachibana_orders import _sanitize_for_wal
+
+    for code in range(0x01, 0x20):
+        ch = chr(code)
+        result = _sanitize_for_wal(f"a{ch}b")
+        assert ch not in result, f"control char {ch!r} should be removed, got {result!r}"
+
+
+def test_sanitize_for_wal_preserves_normal_text():
+    """B-4: _sanitize_for_wal は通常の ASCII 文字列を保持すること。"""
+    from engine.exchanges.tachibana_orders import _sanitize_for_wal
+
+    assert _sanitize_for_wal("hello world") == "hello world"
+    assert _sanitize_for_wal("7203.TSE") == "7203.TSE"

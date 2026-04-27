@@ -678,6 +678,13 @@ impl VenueBackend for EngineClientBackend {
                                                     );
                                                 })
                                                 .ok()?;
+                                            if !sym.is_ascii() {
+                                                log::warn!(
+                                                    "fetch_ticker_stats: skipping non-ASCII ticker key: {:?} (exchange={exchange:?})",
+                                                    sym
+                                                );
+                                                return None;
+                                            }
                                             Some((Ticker::new(&sym, exchange), ts))
                                         })
                                         .collect());

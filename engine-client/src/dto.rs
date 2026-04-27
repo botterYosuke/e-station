@@ -436,7 +436,10 @@ pub struct OrderListFilter {
 }
 
 /// Wire representation of a single order record in `OrderListUpdated`.
+/// `deny_unknown_fields` prevents unknown Python-side fields from silently
+/// passing through to Rust (C-2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderRecordWire {
     pub client_order_id: Option<String>,
     pub venue_order_id: String,

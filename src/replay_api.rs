@@ -163,11 +163,24 @@ async fn handle_request(
             }
             write_response(&mut stream, 202, "Accepted", r#"{"status":"accepted"}"#).await;
         }
+        // A-7 (H-5): テスト専用エンドポイントはデバッグビルドのみ有効。
+        // リリースビルドでは 404 を返す。
+        #[cfg(debug_assertions)]
         ("POST", "/api/test/tachibana/cancel-helper") => {
             if let Err(e) = tx.try_send(ControlApiCommand::CancelLoginHelper) {
                 log::warn!("replay_api: CancelLoginHelper dropped — channel full or closed: {e}");
             }
             write_response(&mut stream, 202, "Accepted", r#"{"status":"accepted"}"#).await;
+        }
+        #[cfg(not(debug_assertions))]
+        ("POST", path) if path.starts_with("/api/test/") => {
+            write_response(
+                &mut stream,
+                404,
+                "Not Found",
+                r#"{"error":"test endpoints not available in release builds"}"#,
+            )
+            .await;
         }
         ("POST", "/api/order/submit") => {
             if let Some(state) = order_state {

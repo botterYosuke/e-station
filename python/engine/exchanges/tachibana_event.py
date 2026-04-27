@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -191,6 +192,10 @@ class TachibanaEventClient:
         self,
         ws: object,
         on_event: object,
+        *,
+        reconnect_fn: object = None,
+        max_retries: int = 10,
+        base_backoff: float = 1.0,
     ) -> None:
         """EVENT WebSocket からフレームを受信して on_event コールバックを呼ぶ。
 
@@ -198,17 +203,63 @@ class TachibanaEventClient:
             - FD フレーム（p_evt_cmd="FD"）: 銘柄データ → on_event に FD として渡す
             - EC フレーム（p_evt_cmd="EC"）: 約定通知 → _parse_ec_frame → 重複検知 → on_event
 
+        再接続 (B-7):
+            `reconnect_fn` が渡された場合、WebSocket 切断後に指数バックオフで再接続を試みる。
+            `reconnect_fn` は引数なしで呼び出し可能な async callable で、
+            新しい WebSocket 接続オブジェクトを返す必要がある。
+            `reconnect_fn` が None の場合は再接続なし（従来動作）。
+            `max_retries` 回連続失敗したら諦めてループを終了する。
+
         Args:
             ws: EVENT WebSocket 接続オブジェクト（websockets.ClientConnection 相当）
             on_event: コールバック。on_event(frame_type: str, event: OrderEcEvent | dict) を呼ぶ
+            reconnect_fn: 再接続コールバック（async callable）。None の場合は再接続しない
+            max_retries: 連続再接続失敗の上限（デフォルト 10）
+            base_backoff: 再接続バックオフの基底秒数（デフォルト 1.0）
         """
         # NOTE: 実際の接続は Phase O2 統合テスト / E2E で検証する。
         # ここでは受信ループの骨格のみ実装する（モック化可能な形）。
-        async for raw_frame in ws:
+        current_ws = ws
+        retry_count = 0
+        _connect_time = _time.monotonic()
+
+        while True:
             try:
-                await self._process_frame(raw_frame, on_event)
+                async for raw_frame in current_ws:
+                    try:
+                        await self._process_frame(raw_frame, on_event)
+                    except Exception as exc:
+                        logger.error("EVENT フレーム処理エラー: %s", exc)
+                # WS が正常に終了した（サーバ側 close）
+                logger.info("EVENT WebSocket が正常終了した")
+                # 30 秒以上安定接続していた場合のみカウンタをリセット（即切断ループ防止）
+                if _time.monotonic() - _connect_time > 30.0:
+                    retry_count = 0
+                break
             except Exception as exc:
-                logger.error("EVENT フレーム処理エラー: %s", exc)
+                logger.warning("EVENT WebSocket 受信エラー: %s", exc)
+
+            # 再接続ロジック
+            if reconnect_fn is None:
+                break
+
+            retry_count += 1
+            if retry_count > max_retries:
+                logger.error(
+                    "EVENT WebSocket 再接続上限 (%d 回) に達した。ループを終了する", max_retries
+                )
+                break
+
+            backoff = min(base_backoff * (2 ** (retry_count - 1)), 60.0)
+            logger.info("EVENT WebSocket 再接続待機 %.1f 秒 (attempt %d/%d)", backoff, retry_count, max_retries)
+            await asyncio.sleep(backoff)
+
+            try:
+                current_ws = await reconnect_fn()
+                _connect_time = _time.monotonic()
+                logger.info("EVENT WebSocket 再接続成功")
+            except Exception as exc:
+                logger.warning("EVENT WebSocket 再接続失敗 (attempt %d): %s", retry_count, exc)
 
     async def _process_frame(self, raw_frame: object, on_event: object) -> None:
         """1 つのフレームを処理する。

@@ -614,8 +614,11 @@ fn main() {
             let order_api_state = {
                 use std::sync::atomic::AtomicBool;
                 use tokio::sync::Mutex;
+                // A-9 (H-2): 起動時に WAL から当日分を復元する。
+                // WAL ファイルが存在しない場合は空 map で初期化される（初回起動 / 昨日以前のみ）。
+                let wal_path = data::data_path(Some("tachibana_orders.jsonl"));
                 let session = Arc::new(Mutex::new(
-                    engine_client::order_session_state::OrderSessionState::new(),
+                    engine_client::order_session_state::OrderSessionState::load_from_wal(&wal_path),
                 ));
                 let engine_rx = ENGINE_CONNECTION_TX
                     .get()

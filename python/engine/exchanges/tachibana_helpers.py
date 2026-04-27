@@ -15,8 +15,9 @@ Error classes form a useful hierarchy::
 
     TachibanaError
     ├── LoginError
-    │   └── UnreadNoticesError    # sKinsyouhouMidokuFlg == "1"
-    └── SessionExpiredError       # p_errno == "2"
+    │   └── UnreadNoticesError         # sKinsyouhouMidokuFlg == "1"
+    ├── SessionExpiredError            # p_errno == "2"
+    └── SecondPasswordInvalidError     # p_errno == "4"
 """
 
 from __future__ import annotations
@@ -58,6 +59,13 @@ class SessionExpiredError(TachibanaError):
 
     def __init__(self, message: str = "Tachibana セッションが切れています") -> None:
         super().__init__(code="session_expired", message=message)
+
+
+class SecondPasswordInvalidError(TachibanaError):
+    """`p_errno == "4"` — 第二暗証番号が不一致。"""
+
+    def __init__(self, message: str = "第二暗証番号が正しくありません") -> None:
+        super().__init__(code="second_password_invalid", message=message)
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +141,8 @@ def check_response(payload: Mapping[str, Any]) -> TachibanaError | None:
         message = str(payload.get("p_err") or payload.get("sResultText") or "")
         if p_errno == "2":
             return SessionExpiredError(message=message or "Tachibana セッションが切れています")
+        if p_errno == "4":
+            return SecondPasswordInvalidError(message=message or "第二暗証番号が正しくありません")
         return TachibanaError(code=str(p_errno), message=message)
 
     sresult = payload.get("sResultCode", "")

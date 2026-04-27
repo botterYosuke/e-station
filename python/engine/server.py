@@ -23,6 +23,7 @@ import httpx
 from engine.exchanges.tachibana_helpers import (
     LoginError,
     PNoCounter,
+    SecondPasswordInvalidError,
     SessionExpiredError,
     TachibanaError,
     UnreadNoticesError,
@@ -30,6 +31,7 @@ from engine.exchanges.tachibana_helpers import (
 from engine.exchanges.tachibana_auth import (
     StartupLatch,
     TachibanaSession,
+    TachibanaSessionHolder,
     validate_session_on_startup,
 )
 from engine.exchanges.tachibana_login_flow import (
@@ -129,6 +131,7 @@ class DataEngineServer:
         dev_tachibana_login_allowed: bool = False,
         cache_dir: Path | None = None,
         tachibana_is_demo: bool = True,
+        wal_path: Path | None = None,
     ) -> None:
         self._port = port
         self._token = token
@@ -141,6 +144,12 @@ class DataEngineServer:
         if cache_dir is None:
             cache_dir = Path.home() / ".cache" / "flowsurface" / "engine"
         self._cache_dir = Path(cache_dir)
+        # B-3: WAL path for order audit log. Defaults to cache_dir / "tachibana_orders.jsonl".
+        self._wal_path: Path = (
+            Path(wal_path)
+            if wal_path is not None
+            else self._cache_dir / "tachibana_orders.jsonl"
+        )
         self._current_conn: ServerConnection | None = None
         self._shutdown_event = asyncio.Event()
         self._outbox_event = asyncio.Event()
@@ -188,9 +197,9 @@ class DataEngineServer:
         self._tachibana_login_inflight = asyncio.Lock()
 
         # ── Order Phase state (T0.3) ──────────────────────────────────
-        # 第二暗証番号: メモリのみ保持。ログ・WAL には出さない（C-M2, C-R2-H2）。
-        # `str | None` のまま保持し、呼び出し側で参照するだけにする。
-        self._second_password: str | None = None
+        # 第二暗証番号: TachibanaSessionHolder でメモリ保持。
+        # idle forget タイマー + lockout state を管理する（H-7: architecture.md §5.3）。
+        self._session_holder = TachibanaSessionHolder()
 
         # Monotonic counter to produce a fresh base ssid per subscribe
         self._stream_counter = 0
@@ -443,7 +452,8 @@ class DataEngineServer:
             self._handle_set_second_password(msg)
 
         elif op == "ForgetSecondPassword":
-            self._second_password = None
+            self._session_holder.clear()
+            log.info("ForgetSecondPassword received — clearing second_password from memory")
 
         elif op == "SubmitOrder":
             self._spawn_fetch(
@@ -610,7 +620,7 @@ class DataEngineServer:
         if not isinstance(value, str) or not value.strip():
             log.warning("SetSecondPassword: value is empty or non-string — ignoring")
             return
-        self._second_password = value
+        self._session_holder.set_password(value)
 
     async def _do_submit_order(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
@@ -657,8 +667,22 @@ class DataEngineServer:
             )
             return
 
-        # 第二暗証番号チェック
-        if self._second_password is None:
+        # lockout チェック（H-8: SECOND_PASSWORD_INVALID 連続 max_retries 回で抑止）
+        if self._session_holder.is_locked_out():
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "SECOND_PASSWORD_LOCKED",
+                    "reason_text": "Second password is locked out due to repeated failures",
+                    "ts_event_ms": 0,
+                }
+            )
+            return
+
+        # 第二暗証番号チェック（idle forget 適用済み）
+        second_password = self._session_holder.get_password()
+        if second_password is None:
             self._outbox.append(
                 {
                     "event": "SecondPasswordRequired",
@@ -666,6 +690,7 @@ class DataEngineServer:
                 }
             )
             return
+        self._session_holder.touch()
 
         # M-2: セッション未取得チェック
         if self._tachibana_session is None:
@@ -696,13 +721,14 @@ class DataEngineServer:
         try:
             result = await tachibana_submit_order(
                 self._tachibana_session,
-                self._second_password,
+                second_password,
                 envelope,
                 p_no_counter=self._tachibana_p_no_counter,
+                wal_path=self._wal_path,
             )
         except SessionExpiredError:
             # M-14: セッション期限切れ時は second_password もクリア
-            self._second_password = None
+            self._session_holder.clear()
             self._outbox.append(
                 {
                     "event": "OrderRejected",
@@ -735,6 +761,18 @@ class DataEngineServer:
                 }
             )
             return
+        except SecondPasswordInvalidError:
+            self._session_holder.on_invalid()
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "SECOND_PASSWORD_INVALID",
+                    "reason_text": "Second password is invalid",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
         except TachibanaError:
             self._outbox.append(
                 {
@@ -742,6 +780,22 @@ class DataEngineServer:
                     "client_order_id": order.client_order_id,
                     "reason_code": "VENUE_REJECTED",
                     "reason_text": "Venue rejected the order",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
+        except OSError as exc:
+            log.error(
+                "_do_submit_order: WAL I/O error for cid=%s — %s",
+                order.client_order_id,
+                exc,
+            )
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "WAL_ERROR",
+                    "reason_text": "WAL write failed; order not submitted",
                     "ts_event_ms": int(time.time() * 1000),
                 }
             )
@@ -769,6 +823,7 @@ class DataEngineServer:
                 }
             )
             return
+        self._session_holder.on_submit_success()
         self._outbox.append(
             {
                 "event": "OrderAccepted",
@@ -795,12 +850,24 @@ class DataEngineServer:
             })
             return
 
-        if self._second_password is None:
+        if self._session_holder.is_locked_out():
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "SECOND_PASSWORD_LOCKED",
+                "reason_text": "Second password is locked out due to repeated failures",
+                "ts_event_ms": 0,
+            })
+            return
+
+        second_password = self._session_holder.get_password()
+        if second_password is None:
             self._outbox.append({
                 "event": "SecondPasswordRequired",
                 "request_id": req_id,
             })
             return
+        self._session_holder.touch()
 
         if self._tachibana_session is None:
             self._outbox.append({
@@ -835,19 +902,28 @@ class DataEngineServer:
         try:
             await tachibana_modify_order(
                 session=self._tachibana_session,
-                second_password=self._second_password,
+                second_password=second_password,
                 client_order_id=client_order_id,
                 venue_order_id=venue_order_id,
                 change=change,
                 p_no_counter=self._tachibana_p_no_counter,
             )
         except SessionExpiredError:
-            self._second_password = None
+            self._session_holder.clear()
             self._outbox.append({
                 "event": "OrderRejected",
                 "client_order_id": client_order_id,
                 "reason_code": "SESSION_EXPIRED",
                 "reason_text": "Session expired; please re-login",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+        except SecondPasswordInvalidError:
+            self._session_holder.on_invalid()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "SECOND_PASSWORD_INVALID",
+                "reason_text": "Second password is invalid",
                 "ts_event_ms": int(time.time() * 1000),
             })
         except Exception:
@@ -877,12 +953,24 @@ class DataEngineServer:
             })
             return
 
-        if self._second_password is None:
+        if self._session_holder.is_locked_out():
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "SECOND_PASSWORD_LOCKED",
+                "reason_text": "Second password is locked out due to repeated failures",
+                "ts_event_ms": 0,
+            })
+            return
+
+        second_password = self._session_holder.get_password()
+        if second_password is None:
             self._outbox.append({
                 "event": "SecondPasswordRequired",
                 "request_id": req_id,
             })
             return
+        self._session_holder.touch()
 
         if self._tachibana_session is None:
             self._outbox.append({
@@ -905,18 +993,27 @@ class DataEngineServer:
         try:
             await tachibana_cancel_order(
                 session=self._tachibana_session,
-                second_password=self._second_password,
+                second_password=second_password,
                 client_order_id=client_order_id,
                 venue_order_id=venue_order_id,
                 p_no_counter=self._tachibana_p_no_counter,
             )
         except SessionExpiredError:
-            self._second_password = None
+            self._session_holder.clear()
             self._outbox.append({
                 "event": "OrderRejected",
                 "client_order_id": client_order_id,
                 "reason_code": "SESSION_EXPIRED",
                 "reason_text": "Session expired; please re-login",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+        except SecondPasswordInvalidError:
+            self._session_holder.on_invalid()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "SECOND_PASSWORD_INVALID",
+                "reason_text": "Second password is invalid",
                 "ts_event_ms": int(time.time() * 1000),
             })
         except Exception:
@@ -944,12 +1041,23 @@ class DataEngineServer:
             })
             return
 
-        if self._second_password is None:
+        if self._session_holder.is_locked_out():
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SECOND_PASSWORD_LOCKED",
+                "message": "Second password is locked out due to repeated failures",
+            })
+            return
+
+        second_password = self._session_holder.get_password()
+        if second_password is None:
             self._outbox.append({
                 "event": "SecondPasswordRequired",
                 "request_id": req_id,
             })
             return
+        self._session_holder.touch()
 
         if self._tachibana_session is None:
             self._outbox.append({
@@ -963,13 +1071,21 @@ class DataEngineServer:
         try:
             await tachibana_cancel_all_orders(
                 session=self._tachibana_session,
-                second_password=self._second_password,
+                second_password=second_password,
                 instrument_id=instrument_id,
                 order_side=order_side,
                 p_no_counter=self._tachibana_p_no_counter,
             )
+        except SecondPasswordInvalidError:
+            self._session_holder.on_invalid()
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SECOND_PASSWORD_INVALID",
+                "message": "Second password is invalid",
+            })
         except SessionExpiredError:
-            self._second_password = None
+            self._session_holder.clear()
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
@@ -1000,6 +1116,7 @@ class DataEngineServer:
             return
 
         if self._tachibana_session is None:
+            log.warning("_do_get_order_list: tachibana session not established — returning empty list")
             self._outbox.append({
                 "event": "OrderListUpdated",
                 "request_id": req_id,
@@ -1015,7 +1132,7 @@ class DataEngineServer:
                 p_no_counter=self._tachibana_p_no_counter,
             )
         except SessionExpiredError:
-            self._second_password = None
+            self._session_holder.clear()
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,

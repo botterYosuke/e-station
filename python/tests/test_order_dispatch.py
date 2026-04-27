@@ -268,18 +268,18 @@ async def test_set_second_password_empty_string_does_not_update_state(server):
     """
     _, _, srv, __ = server
     # 初期状態は None
-    assert srv._second_password is None
+    assert srv._session_holder._password is None
     # 空文字列を送信 → 無視されるべき
     srv._handle_set_second_password({"value": ""})
-    assert srv._second_password is None, "_second_password must NOT be updated for empty string"
+    assert srv._session_holder._password is None, "_password must NOT be updated for empty string"
 
     # 空白のみの文字列も無視されること
     srv._handle_set_second_password({"value": "   "})
-    assert srv._second_password is None, "_second_password must NOT be updated for whitespace-only"
+    assert srv._session_holder._password is None, "_password must NOT be updated for whitespace-only"
 
     # 有効な文字列は設定されること
     srv._handle_set_second_password({"value": "valid-pw"})
-    assert srv._second_password == "valid-pw", "_second_password must be updated for valid string"
+    assert srv._session_holder._password == "valid-pw", "_password must be updated for valid string"
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +354,7 @@ async def test_submit_order_session_expired_clears_second_password(server):
     srv._tachibana_session.zyoutoeki_kazei_c = "1"
     srv._tachibana_session.url_request = MagicMock()
     srv._handle_set_second_password({"value": "sentinel"})
-    assert srv._second_password == "sentinel"
+    assert srv._session_holder._password == "sentinel"
 
     with patch(
         "engine.server.tachibana_submit_order",
@@ -368,5 +368,5 @@ async def test_submit_order_session_expired_clears_second_password(server):
         assert evt2["reason_code"] == "SESSION_EXPIRED"
 
     # second_password はクリアされているはず
-    assert srv._second_password is None, "second_password must be cleared on SessionExpiredError"
+    assert srv._session_holder._password is None, "second_password must be cleared on SessionExpiredError"
     await ws.close()

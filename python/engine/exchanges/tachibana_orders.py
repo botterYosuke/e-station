@@ -426,7 +426,13 @@ def _envelope_to_wire(
         condition = "2"
     elif tif in ("AT_THE_CLOSE",):
         expire_day = "0"
-        condition = "4"
+        # D-3: close_strategy=funari tag → sCondition="6"（不成）
+        # close_strategy タグなし or close_strategy=hikitsuke → sCondition="4"（引け）
+        close_strategy_tag = next((t for t in (envelope.tags or []) if t.startswith("close_strategy=")), None)
+        if close_strategy_tag == "close_strategy=funari":
+            condition = "6"
+        else:
+            condition = "4"
     else:
         raise UnsupportedOrderError(
             "VENUE_UNSUPPORTED",
@@ -541,7 +547,7 @@ def _sanitize_for_wal(s: str) -> str:
     - C0 制御文字（\\x00-\\x1f, \\x7f）を除去する
     - JSON dumps で \\n / \\t はエスケープされるが、生の制御文字が混入しないよう事前除去する
     """
-    return "".join(ch for ch in s if (ord(ch) >= 0x20 or ch in ("\n", "\t")) and ord(ch) != 0x7F)
+    return "".join(ch for ch in s if ord(ch) >= 0x20 and ord(ch) != 0x7F)
 
 
 def _audit_log_submit(
@@ -1027,11 +1033,14 @@ def _order_record_to_wire(
         except ValueError:
             pass
 
+    tachibana_side = record.get("sOrderBaibaiKubun", record.get("sBaibaiKubun", ""))
+    order_side = _map_side(tachibana_side) if tachibana_side else "BUY"
+
     return OrderRecordWire(
         client_order_id=client_order_id,
         venue_order_id=record.get("sOrderOrderNumber", ""),
         instrument_id=instrument_id,
-        order_side="BUY",   # CLMOrderList は sBaibaiKubun を返さないため BUY でフォールバック
+        order_side=order_side,
         order_type=_map_order_type(order_price),
         quantity=order_qty,
         filled_qty=executed_qty,

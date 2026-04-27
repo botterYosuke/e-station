@@ -186,7 +186,10 @@ class RequestVenueLogin(IpcMessage):
 class SetSecondPassword(IpcMessage):
     """Set second password in Python memory for order submission.
     `value` is transmitted as plain string; Python must wrap it in SecretStr.
+    extra="forbid" prevents unknown-field injection (C-1).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["SetSecondPassword"] = "SetSecondPassword"
     request_id: str
@@ -231,7 +234,11 @@ class OrderModifyChange(IpcMessage):
 
 
 class OrderListFilter(IpcMessage):
-    """Filter for GetOrderList. All fields optional."""
+    """Filter for GetOrderList. All fields optional.
+    extra="forbid" prevents unknown-field injection (C-1).
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     status: str | None = None
     instrument_id: str | None = None
@@ -531,7 +538,7 @@ class OrderSubmitted(IpcMessage):
 class OrderAccepted(IpcMessage):
     event: Literal["OrderAccepted"] = "OrderAccepted"
     client_order_id: str
-    venue_order_id: str
+    venue_order_id: str | None = None  # B-1: None when venue did not return an order number
     ts_event_ms: int
 
 

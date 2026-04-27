@@ -76,7 +76,7 @@ fn test_wal_restore_submit_only() {
 
     // 同一 cid・同一 key → IdempotentReplay (venue_order_id = None)
     let mut state = state;
-    let outcome = state.try_insert(ClientOrderId("cid-wal-001".to_string()), 0xdead);
+    let outcome = state.try_insert(ClientOrderId::try_new("cid-wal-001").unwrap(), 0xdead);
     assert!(
         matches!(
             outcome,
@@ -97,7 +97,7 @@ fn test_wal_restore_accepted() {
 
     let mut state = OrderSessionState::load_from_wal(f.path());
 
-    let outcome = state.try_insert(ClientOrderId("cid-wal-002".to_string()), 0xbeef);
+    let outcome = state.try_insert(ClientOrderId::try_new("cid-wal-002").unwrap(), 0xbeef);
     assert!(
         matches!(
             outcome,
@@ -119,7 +119,7 @@ fn test_wal_restore_rejected_removes_entry() {
     let mut state = OrderSessionState::load_from_wal(f.path());
 
     // rejected 済み → 再送は Created として処理される（再発注可能）
-    let outcome = state.try_insert(ClientOrderId("cid-wal-003".to_string()), 0xcafe);
+    let outcome = state.try_insert(ClientOrderId::try_new("cid-wal-003").unwrap(), 0xcafe);
     assert!(
         matches!(outcome, PlaceOrderOutcome::Created { .. }),
         "rejected entry must be removed, allowing re-submit as Created, got {outcome:?}",
@@ -137,7 +137,7 @@ fn test_wal_restore_truncated_line() {
     let mut state = OrderSessionState::load_from_wal(f.path());
 
     // cid-004 は復元されている。
-    let out_004 = state.try_insert(ClientOrderId("cid-wal-004".to_string()), 0x1111);
+    let out_004 = state.try_insert(ClientOrderId::try_new("cid-wal-004").unwrap(), 0x1111);
     assert!(
         matches!(
             out_004,
@@ -149,7 +149,7 @@ fn test_wal_restore_truncated_line() {
     );
 
     // cid-005 は truncated なのでスキップ → Created になる（= 未登録）。
-    let out_005 = state.try_insert(ClientOrderId("cid-wal-005".to_string()), 0x2222);
+    let out_005 = state.try_insert(ClientOrderId::try_new("cid-wal-005").unwrap(), 0x2222);
     assert!(
         matches!(out_005, PlaceOrderOutcome::Created { .. }),
         "truncated line must be skipped (cid-005 should be Created, not IdempotentReplay), got {out_005:?}",
@@ -166,7 +166,7 @@ fn test_wal_restore_nonexistent_file() {
     let mut state = OrderSessionState::load_from_wal(path);
 
     // 空なので try_insert は Created になる。
-    let outcome = state.try_insert(ClientOrderId("cid-nonexistent".to_string()), 0xabcd);
+    let outcome = state.try_insert(ClientOrderId::try_new("cid-nonexistent").unwrap(), 0xabcd);
     assert!(
         matches!(outcome, PlaceOrderOutcome::Created { .. }),
         "non-existent WAL must give empty map (Created), got {outcome:?}",
@@ -180,7 +180,7 @@ fn test_wal_restore_empty_file() {
 
     let mut state = OrderSessionState::load_from_wal(f.path());
 
-    let outcome = state.try_insert(ClientOrderId("cid-empty".to_string()), 0xffff);
+    let outcome = state.try_insert(ClientOrderId::try_new("cid-empty").unwrap(), 0xffff);
     assert!(
         matches!(outcome, PlaceOrderOutcome::Created { .. }),
         "empty WAL must give empty map (Created), got {outcome:?}",
@@ -196,7 +196,7 @@ fn test_wal_restore_idempotent_replay() {
     let mut state = OrderSessionState::load_from_wal(f.path());
 
     // 1 回目: IdempotentReplay（復元済み）
-    let out1 = state.try_insert(ClientOrderId("cid-wal-replay".to_string()), 0x4242);
+    let out1 = state.try_insert(ClientOrderId::try_new("cid-wal-replay").unwrap(), 0x4242);
     assert!(
         matches!(
             out1,
@@ -208,7 +208,7 @@ fn test_wal_restore_idempotent_replay() {
     );
 
     // 2 回目も IdempotentReplay
-    let out2 = state.try_insert(ClientOrderId("cid-wal-replay".to_string()), 0x4242);
+    let out2 = state.try_insert(ClientOrderId::try_new("cid-wal-replay").unwrap(), 0x4242);
     assert!(
         matches!(
             out2,
@@ -229,9 +229,32 @@ fn test_wal_restore_unknown_conflict_on_different_key() {
     let mut state = OrderSessionState::load_from_wal(f.path());
 
     // 異なる key → Conflict
-    let outcome = state.try_insert(ClientOrderId("cid-wal-conflict".to_string()), 0xBBBB);
+    let outcome = state.try_insert(ClientOrderId::try_new("cid-wal-conflict").unwrap(), 0xBBBB);
     assert!(
         matches!(outcome, PlaceOrderOutcome::Conflict { .. }),
         "unknown state with different key must return Conflict, got {outcome:?}",
+    );
+}
+
+// A-3: request_key=0 の submit 行は復元でスキップされる（H-14）
+#[test]
+fn test_wal_restore_skips_request_key_zero() {
+    // request_key=0 の submit 行
+    let zero_key_line = format!(
+        "{}\n",
+        format!(
+            r#"{{"phase":"submit","ts":{ts},"client_order_id":"cid-key-zero","request_key":0,"instrument_id":"7203.TSE","order_side":"BUY","order_type":"MARKET","quantity":"100"}}"#,
+            ts = today_ts_ms(),
+        )
+    );
+    let f = write_wal(&[zero_key_line]);
+
+    let mut state = OrderSessionState::load_from_wal(f.path());
+
+    // request_key=0 の行はスキップ → Created（未登録）として扱われる
+    let outcome = state.try_insert(ClientOrderId::try_new("cid-key-zero").unwrap(), 0);
+    assert!(
+        matches!(outcome, PlaceOrderOutcome::Created { .. }),
+        "request_key=0 submit line must be skipped (should be Created), got {outcome:?}",
     );
 }

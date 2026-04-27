@@ -186,3 +186,109 @@ def test_second_password_masked_in_model_dump():
     """model_dump()["second_password"] が '[REDACTED]' であること（C-3）。"""
     wire = _envelope_to_wire(_envelope(), _session(), "secret")
     assert wire.model_dump()["second_password"] == "[REDACTED]"
+
+
+# ---------------------------------------------------------------------------
+# D-3: close_strategy=funari tag → sCondition="6"（不成）
+# ---------------------------------------------------------------------------
+
+
+def test_at_the_close_without_funari_tag_maps_to_condition_4():
+    """AT_THE_CLOSE + タグなし → sCondition="4"（引け）（D-3 デフォルト動作）。"""
+    wire = _envelope_to_wire(
+        _envelope(
+            time_in_force="AT_THE_CLOSE",
+            tags=["cash_margin=cash"],
+        ),
+        _session(),
+        "pw",
+    )
+    assert wire.condition == "4", f"Expected condition='4' (引け), got {wire.condition!r}"
+
+
+def test_at_the_close_with_funari_tag_maps_to_condition_6():
+    """AT_THE_CLOSE + close_strategy=funari → sCondition="6"（不成）（D-3）。"""
+    wire = _envelope_to_wire(
+        _envelope(
+            time_in_force="AT_THE_CLOSE",
+            tags=["cash_margin=cash", "close_strategy=funari"],
+        ),
+        _session(),
+        "pw",
+    )
+    assert wire.condition == "6", f"Expected condition='6' (不成), got {wire.condition!r}"
+
+
+def test_at_the_close_with_hikitsuke_tag_maps_to_condition_4():
+    """AT_THE_CLOSE + close_strategy=hikitsuke → sCondition="4"（引け）（D-3 明示指定）。"""
+    wire = _envelope_to_wire(
+        _envelope(
+            time_in_force="AT_THE_CLOSE",
+            tags=["cash_margin=cash", "close_strategy=hikitsuke"],
+        ),
+        _session(),
+        "pw",
+    )
+    assert wire.condition == "4", f"Expected condition='4' (引け), got {wire.condition!r}"
+
+
+# ---------------------------------------------------------------------------
+# B-6: _order_record_to_wire が sBaibaiKubun から order_side を読む
+# ---------------------------------------------------------------------------
+
+
+def test_order_record_to_wire_sell_side_from_baibai_kubun_1():
+    """sBaibaiKubun="1"（売）→ order_side="SELL"（B-6）。"""
+    from engine.exchanges.tachibana_orders import _order_record_to_wire
+
+    record = {
+        "sOrderOrderNumber": "ORD-001",
+        "sOrderIssueCode": "7203",
+        "sOrderBaibaiKubun": "1",  # 売
+        "sOrderOrderSuryou": "100",
+        "sOrderYakuzyouSuryo": "0",
+        "sOrderCurrentSuryou": "100",
+        "sOrderOrderPrice": "2500",
+        "sOrderStatus": "注文中",
+        "sOrderOrderDateTime": "20260426103000",
+    }
+    wire = _order_record_to_wire(record, None)
+    assert wire.order_side == "SELL", f"Expected SELL, got {wire.order_side!r}"
+
+
+def test_order_record_to_wire_buy_side_from_baibai_kubun_3():
+    """sBaibaiKubun="3"（買）→ order_side="BUY"（B-6）。"""
+    from engine.exchanges.tachibana_orders import _order_record_to_wire
+
+    record = {
+        "sOrderOrderNumber": "ORD-002",
+        "sOrderIssueCode": "7203",
+        "sOrderBaibaiKubun": "3",  # 買
+        "sOrderOrderSuryou": "100",
+        "sOrderYakuzyouSuryo": "0",
+        "sOrderCurrentSuryou": "100",
+        "sOrderOrderPrice": "2500",
+        "sOrderStatus": "注文中",
+        "sOrderOrderDateTime": "20260426103000",
+    }
+    wire = _order_record_to_wire(record, None)
+    assert wire.order_side == "BUY", f"Expected BUY, got {wire.order_side!r}"
+
+
+def test_order_record_to_wire_missing_side_falls_back_to_buy():
+    """sBaibaiKubun なし → order_side="BUY"（フォールバック）（B-6）。"""
+    from engine.exchanges.tachibana_orders import _order_record_to_wire
+
+    record = {
+        "sOrderOrderNumber": "ORD-003",
+        "sOrderIssueCode": "7203",
+        # no sBaibaiKubun / sOrderBaibaiKubun
+        "sOrderOrderSuryou": "100",
+        "sOrderYakuzyouSuryo": "0",
+        "sOrderCurrentSuryou": "100",
+        "sOrderOrderPrice": "2500",
+        "sOrderStatus": "注文中",
+        "sOrderOrderDateTime": "20260426103000",
+    }
+    wire = _order_record_to_wire(record, None)
+    assert wire.order_side == "BUY", f"Expected BUY fallback, got {wire.order_side!r}"
