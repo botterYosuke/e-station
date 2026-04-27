@@ -172,7 +172,9 @@ async def test_request_depth_snapshot_ws_native_resync_no_error_event(unused_tcp
         side_effect=WsNativeResyncTriggered("WS-native — reconnect triggered")
     )
 
-    with patch("engine.server.BinanceWorker", return_value=mock_worker):
+    noop_startup = AsyncMock(return_value=None)
+    with patch("engine.server.BinanceWorker", return_value=mock_worker), \
+         patch.object(DataEngineServer, "_startup_tachibana", noop_startup):
         server = DataEngineServer(port=unused_tcp_port, token=token)
         task = asyncio.create_task(server.serve())
         await asyncio.sleep(0.1)
@@ -196,8 +198,8 @@ async def test_request_depth_snapshot_ws_native_resync_no_error_event(unused_tcp
         server.shutdown()
         task.cancel()
         try:
-            await task
-        except (asyncio.CancelledError, Exception):
+            await asyncio.wait_for(task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
 
 
