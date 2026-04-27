@@ -381,3 +381,83 @@ patch.object(DataEngineServer, "_startup_tachibana", AsyncMock(return_value=None
    `ws.recv()` を 1 回だけ呼んで特定イベントを期待するテストは順序依存で壊れる。
    「他の非同期タスクが送りうるイベントは必ずモックで抑制する」か、
    「期待イベントが来るまでループして読み捨てる」かを設計段階で選択する。
+
+---
+
+## 2026-04-27 — `fetch_depth_snapshot` が session=None で `{}` を無音返却（バグ動作を pin）
+
+**見逃しパターン**: 「バグ動作を正として pin した」テスト（API 仕様固定なし の変形）
+
+**不具合の概要**:
+`fetch_depth_snapshot` は `session is None` のとき `{}` を返していた。
+呼び出し元 `_do_request_depth_snapshot` は `snap["last_update_id"]` を参照するため
+KeyError が発生し、`_spawn_fetch` の `except Exception` で汎用 Error が返るだけで
+「セッションがない」という原因は一切伝わらなかった。
+
+同じクラスの `fetch_klines` / `fetch_ticker_stats` / `_download_master` はいずれも
+`TachibanaError(code="no_session")` を raise する設計で統一されていた。
+
+**根本原因**:
+既存テスト `test_fetch_depth_snapshot_returns_empty_dict_when_session_is_none` が
+`assert result == {}` として**バグ動作そのものをリグレッションガードとして固定していた**。
+`fetch_klines` との一貫性（`no_session` raise）を比較・検証するテストがなかった。
+
+**修正**:
+- `fetch_depth_snapshot` の `session is None` 分岐を `TachibanaError(code="no_session", ...)` raise に変更
+- 既存テスト `test_fetch_depth_snapshot_returns_empty_dict_when_session_is_none` を
+  `test_fetch_depth_snapshot_raises_no_session_when_session_is_none` に更新
+
+**追加・変更したテスト**:
+- `python/tests/test_tachibana_worker_basic.py::test_fetch_depth_snapshot_raises_no_session_when_session_is_none`
+
+**リグレッション確認**: `git stash` で修正を戻した状態で旧テスト（`result == {}`）が PASS、
+新テスト（`pytest.raises(TachibanaError)`）が収集失敗することを確認。`git stash pop` で PASS。
+
+**教訓**:
+1. **「バグ動作を pin したテスト」の検出**: テスト名に `returns_empty` / `returns_none` が含まれる
+   `session=None` 分岐テストは「その返却値が意図か・バグか」を必ず隣接メソッドと比較する。
+   同クラスの他メソッドが同じ条件で `raise TachibanaError` するなら、
+   `return {}` を pin したテストはバグ動作を固定している可能性が高い。
+
+2. **「兄弟メソッドとの一貫性」アサーション**: `session is None` ガードを持つメソッド群は、
+   同じ挙動（raise / log+return / return only）を統一し、一方を変えたら他方も変えるルールを持つ。
+   テストでは「fetch_klines と fetch_depth_snapshot が同じコードを raise すること」を
+   1 つのファイルで比較テストとして書くのが理想。
+
+---
+
+## 2026-04-27 — `stream_trades` / `stream_depth` が session=None でログなし・Disconnected なしに終了
+
+**見逃しパターン**: エラーパス未テスト（silent return — 副作用なし）
+
+**不具合の概要**:
+`stream_trades` / `stream_depth` は `session is None` のとき `return` するだけで、
+outbox への `Disconnected` イベント積みも `log.warning` も行わなかった。
+Rust 側は「購読成功したつもりでデータが来ない」状態になる。
+
+**根本原因**:
+`session is None` の分岐にテストが一切なかった。市場クローズ時の同一パス
+（`_tachibana_ws.is_market_open` が False → `Disconnected` を積んで return）との
+対称性を検証するテストもなかった。
+
+**修正**:
+- `stream_trades` の `session is None` 分岐に `log.warning` + `Disconnected` outbox append を追加
+- `stream_depth` も同様
+
+**追加したテスト**:
+- `python/tests/test_tachibana_worker_basic.py::test_stream_trades_session_none_appends_disconnected_event`
+- `python/tests/test_tachibana_worker_basic.py::test_stream_depth_session_none_appends_disconnected_event`
+
+**リグレッション確認**: `git stash` で修正を戻した状態で両テストが
+`assert 0 == 1 (len(outbox))` で FAIL することを確認。`git stash pop` で PASS。
+
+**教訓**:
+1. **「副作用なし return」は outbox を期待するテストでしか検出できない**:
+   `return` だけの早期脱出は呼び出し元の視点では「データが来ない」ことしか分からない。
+   ストリームワーカーの全早期 return パスに「outbox へ何かを積んでから return する」という
+   設計ルールを持つ。積むべきイベント（`Disconnected` / `VenueError`）をテストで assert する。
+
+2. **「市場クローズ」と「セッションなし」の対称性**:
+   `is_market_open` が False の場合に `Disconnected` を積む実装があるなら、
+   `session is None` の場合も同様に積む必要がある。対称パスが存在するときは
+   「両方をテストしているか」をコードレビューで確認する。

@@ -9,6 +9,7 @@ import pytest
 
 from engine.exchanges.tachibana import TachibanaWorker
 from engine.exchanges.tachibana_auth import TachibanaSession
+from engine.exchanges.tachibana_helpers import TachibanaError
 from engine.exchanges.tachibana_url import EventUrl, MasterUrl, PriceUrl, RequestUrl
 
 
@@ -151,13 +152,13 @@ async def test_unimplemented_streams_raise_not_implemented(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_fetch_depth_snapshot_returns_empty_dict_when_session_is_none(tmp_path: Path):
-    """fetch_depth_snapshot は session=None のとき {} を返す（実装済み）。"""
+async def test_fetch_depth_snapshot_raises_no_session_when_session_is_none(tmp_path: Path):
+    """fetch_depth_snapshot は session=None のとき TachibanaError(code='no_session') を raise する。"""
     worker = _stubbed(tmp_path)
-    # _stubbed は session=_fake_session() を渡すため、session を None に上書きする
     worker._session = None
-    result = await worker.fetch_depth_snapshot("7203", "stock")
-    assert result == {}
+    with pytest.raises(TachibanaError) as exc_info:
+        await worker.fetch_depth_snapshot("7203", "stock")
+    assert exc_info.value.code == "no_session"
 
 
 @pytest.mark.asyncio
@@ -200,3 +201,62 @@ async def test_list_tickers_omits_min_ticksize_when_yobine_table_empty(tmp_path:
         # Key may be absent but must never be 0.0 or negative
         if "min_ticksize" in t:
             assert t["min_ticksize"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Problem 2: stream_trades / stream_depth session=None silent failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_trades_session_none_appends_disconnected_event(
+    tmp_path: Path,
+) -> None:
+    """stream_trades は session=None のとき Disconnected を outbox に積んでから return する。"""
+    import asyncio
+    from unittest.mock import patch
+
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    outbox: list[dict] = []
+    stop = asyncio.Event()
+
+    with patch(
+        "engine.exchanges.tachibana._tachibana_ws.is_market_open", return_value=True
+    ):
+        await worker.stream_trades("7203", "stock", "ssid-1", outbox, stop)
+
+    assert len(outbox) == 1
+    ev = outbox[0]
+    assert ev["event"] == "Disconnected"
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "trade"
+    assert ev["reason"] == "no_session"
+
+
+@pytest.mark.asyncio
+async def test_stream_depth_session_none_appends_disconnected_event(
+    tmp_path: Path,
+) -> None:
+    """stream_depth は session=None のとき Disconnected を outbox に積んでから return する。"""
+    import asyncio
+    from unittest.mock import patch
+
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    outbox: list[dict] = []
+    stop = asyncio.Event()
+
+    with patch(
+        "engine.exchanges.tachibana._tachibana_ws.is_market_open", return_value=True
+    ):
+        await worker.stream_depth("7203", "stock", "ssid-1", outbox, stop)
+
+    assert len(outbox) == 1
+    ev = outbox[0]
+    assert ev["event"] == "Disconnected"
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "depth"
+    assert ev["reason"] == "no_session"

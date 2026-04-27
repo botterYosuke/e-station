@@ -629,7 +629,10 @@ class TachibanaWorker(ExchangeWorker):
         carries 10-level bid/ask (GBP1..GBP10 / GAP1..GAP10).
         """
         if self._session is None:
-            return {}
+            raise TachibanaError(
+                code="no_session",
+                message="tachibana fetch_depth_snapshot requires a logged-in session",
+            )
         sizyou_c = self._lookup_sizyou_c(ticker)
         # sTargetColumn is required by the API (error -1 when absent).
         # FD codes for bid (GBP/GBV) and ask (GAP/GAV) 10 levels each.
@@ -697,6 +700,15 @@ class TachibanaWorker(ExchangeWorker):
 
         session = self._session
         if session is None:
+            log.warning("[tachibana] stream_trades: session is None — not streaming %s", ticker)
+            outbox.append({
+                "event": "Disconnected",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "stream": "trade",
+                "market": market,
+                "reason": "no_session",
+            })
             return
 
         ws_url = self._build_ws_url(ticker)
@@ -762,6 +774,15 @@ class TachibanaWorker(ExchangeWorker):
             return
 
         if self._session is None:
+            log.warning("[tachibana] stream_depth: session is None — not streaming %s", ticker)
+            outbox.append({
+                "event": "Disconnected",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "stream": "depth",
+                "market": market,
+                "reason": "no_session",
+            })
             return
 
         ws_url = self._build_ws_url(ticker)
