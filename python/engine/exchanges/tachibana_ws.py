@@ -125,7 +125,10 @@ class FdFrameProcessor:
             dpp = Decimal(dpp_str)
             dv = Decimal(dv_str)
         except InvalidOperation:
-            log.debug("tachibana ws: invalid DPP/DV in FD frame: %r / %r", dpp_str, dv_str)
+            log.warning(
+                "tachibana: FdFrameProcessor.process: InvalidOperation for row=%s fields_keys=%s",
+                self.row, list(fields.keys())[:5],
+            )
             return None, None
 
         depth = self._extract_depth(fields, recv_ts_ms)
@@ -204,17 +207,17 @@ class FdFrameProcessor:
         self, fields: dict[str, str], recv_ts_ms: int
     ) -> dict[str, Any] | None:
         row = self.row
-        bids: list[tuple[str, str]] = []
-        asks: list[tuple[str, str]] = []
+        bids: list[dict[str, str]] = []
+        asks: list[dict[str, str]] = []
         for i in range(1, 11):
             bp = fields.get(f"p_{row}_GBP{i}", "")
             bv = fields.get(f"p_{row}_GBV{i}", "")
             ap = fields.get(f"p_{row}_GAP{i}", "")
             av = fields.get(f"p_{row}_GAV{i}", "")
             if bp:
-                bids.append((bp, bv))
+                bids.append({"price": bp, "qty": bv})
             if ap:
-                asks.append((ap, av))
+                asks.append({"price": ap, "qty": av})
 
         if not bids and not asks:
             return None

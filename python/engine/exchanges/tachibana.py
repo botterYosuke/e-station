@@ -677,23 +677,25 @@ class TachibanaWorker(ExchangeWorker):
             raise err
         parsed = MarketPriceResponse.model_validate(data)
         if not parsed.aCLMMfdsMarketPrice:
-            return {"last_update_id": 0, "bids": [], "asks": [], "recv_ts_ms": 0}
+            recv_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            log.warning("tachibana: fetch_depth_snapshot: empty aCLMMfdsMarketPrice for %s", ticker)
+            return {"last_update_id": recv_ts_ms, "bids": [], "asks": [], "recv_ts_ms": recv_ts_ms}
         first = parsed.aCLMMfdsMarketPrice[0]
 
         recv_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        bids: list[tuple[str, str]] = []
-        asks: list[tuple[str, str]] = []
+        bids: list[dict[str, str]] = []
+        asks: list[dict[str, str]] = []
         for i in range(1, 11):
             bp = str(first.get(f"pGBP{i}", ""))
             bv = str(first.get(f"pGBV{i}", ""))
             ap = str(first.get(f"pGAP{i}", ""))
             av = str(first.get(f"pGAV{i}", ""))
             if bp:
-                bids.append((bp, bv))
+                bids.append({"price": bp, "qty": bv})
             if ap:
-                asks.append((ap, av))
+                asks.append({"price": ap, "qty": av})
 
-        return {"last_update_id": 0, "bids": bids, "asks": asks, "recv_ts_ms": recv_ts_ms}
+        return {"last_update_id": recv_ts_ms, "bids": bids, "asks": asks, "recv_ts_ms": recv_ts_ms}
 
     async def stream_trades(
         self,
@@ -803,7 +805,7 @@ class TachibanaWorker(ExchangeWorker):
                             "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
                         })
                 except Exception as exc:
-                    log.warning("tachibana: stream_depth market_closed initial snapshot failed for %s: %r", ticker, exc)
+                    log.warning("tachibana: stream_depth market_closed initial snapshot failed for %s: %r", ticker, exc, exc_info=True)
             outbox.append({
                 "event": "VenueError",
                 "venue": "tachibana",

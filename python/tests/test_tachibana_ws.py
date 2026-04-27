@@ -7,7 +7,9 @@ are needed.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import AsyncGenerator
+from unittest.mock import patch
 
 import pytest
 import websockets.server  # type: ignore[import-untyped]
@@ -253,6 +255,26 @@ class TestReconnect:
         assert len(received_fds) == 2
 
 
+class TestFdFrameProcessorInvalidOperation:
+    """M2: FdFrameProcessor.process() の InvalidOperation は log.warning で通知される。"""
+
+    def test_invalid_dpp_logs_warning_not_debug(self) -> None:
+        """壊れた DPP 値が来たとき log.warning が呼ばれること。"""
+        proc = FdFrameProcessor(row="1")
+        fields = {
+            "p_cmd": "FD",
+            "p_1_DPP": "NOT_A_NUMBER",
+            "p_1_DV": "100",
+        }
+        with patch("engine.exchanges.tachibana_ws.log") as mock_log:
+            trade, depth = proc.process(fields, recv_ts_ms=1000)
+        assert trade is None
+        assert depth is None
+        mock_log.warning.assert_called_once()
+        call_args = mock_log.warning.call_args[0]
+        assert "InvalidOperation" in call_args[0] or "invalid" in call_args[0].lower()
+
+
 class TestReceivedFrameFieldName:
     """Regression for: received frames use p_cmd (not p_evt_cmd) as the command key.
 
@@ -263,6 +285,8 @@ class TestReceivedFrameFieldName:
 
     Fix: ``TachibanaEventWs._recv_loop`` reads ``fields.get("p_cmd")`` not
     ``fields.get("p_evt_cmd")``.  Reverting that change would make this test FAIL.
+
+    姉妹クラス: TestProcessFrameDispatchKey in test_tachibana_event_receive_loop.py
     """
 
     @pytest.mark.asyncio

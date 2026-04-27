@@ -183,6 +183,10 @@ class TestReceiveLoopRetryCount:
 
 
 class TestProcessFrameDispatchKey:
+    """_process_frame が p_cmd キーでディスパッチすることを検証するリグレッションガード。
+    姉妹クラス: TestReceivedFrameFieldName in test_tachibana_ws.py
+    """
+
     @pytest.mark.asyncio
     async def test_p_cmd_fd_frame_triggers_on_event(self) -> None:
         """A frame with ``p_cmd=FD`` (real server format) fires on_event with 'FD'."""

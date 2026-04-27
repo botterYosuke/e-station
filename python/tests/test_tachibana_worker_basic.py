@@ -277,8 +277,10 @@ async def test_depth_polling_fallback_poll_timeout_appends_disconnected(
     stop = asyncio.Event()  # stop_event は set しない（上限到達ケース）
 
     # fetch_depth_snapshot は空を返すようにする（outbox に DepthSnapshot が積まれないように）
+    # last_update_id=1, recv_ts_ms=1 は「非ゼロ保証」（H1 修正後）と整合する最小値。
+    # bids/asks が空なので DepthSnapshot は積まれない（ポーリングタイムアウトのテスト目的に影響なし）。
     async def _empty_snap(ticker: str, market: str) -> dict:
-        return {"last_update_id": 0, "bids": [], "asks": [], "recv_ts_ms": 0}
+        return {"last_update_id": 1, "bids": [], "asks": [], "recv_ts_ms": 1}
 
     worker.fetch_depth_snapshot = AsyncMock(side_effect=_empty_snap)  # type: ignore[method-assign]
 
@@ -344,9 +346,10 @@ async def test_fetch_depth_snapshot_empty_response_contains_last_update_id(
     assert "last_update_id" in snap
     assert snap["bids"] == []
     assert snap["asks"] == []
-    # R2-M2: empty response must also carry recv_ts_ms (schema consistency)
+    # H1: empty response must carry a nonzero recv_ts_ms (current time in ms, not 0)
     assert "recv_ts_ms" in snap, "empty response must include recv_ts_ms key"
-    assert snap["recv_ts_ms"] == 0
+    assert snap["recv_ts_ms"] > 0, "empty response recv_ts_ms must be nonzero (current time)"
+    assert snap["last_update_id"] > 0, "empty response last_update_id must be nonzero (recv_ts_ms)"
 
 
 # ---------------------------------------------------------------------------

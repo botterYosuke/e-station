@@ -227,7 +227,66 @@ async def test_fetch_depth_snapshot_parses_fd_code_bid_ask_fields(tmp_path: Path
     assert len(bids) >= 2, f"bid が 2 件以上取得できるはずだが: {bids}"
     assert len(asks) >= 2, f"ask が 2 件以上取得できるはずだが: {asks}"
     # bid: 高値が先（降順）
-    bid_prices = [b[0] for b in bids if b[0]]
+    bid_prices = [b["price"] for b in bids if b.get("price")]
     assert "2878" in bid_prices, f"最良買気配 pGBP1=2878 が含まれていない: {bids}"
-    ask_prices = [a[0] for a in asks if a[0]]
+    ask_prices = [a["price"] for a in asks if a.get("price")]
     assert "2882" in ask_prices, f"最良売気配 pGAP1=2882 が含まれていない: {asks}"
+    # H1: last_update_id と recv_ts_ms が非ゼロであること
+    assert result.get("last_update_id", 0) > 0, (
+        f"last_update_id が 0 — 一意な非ゼロ値（recv_ts_ms）を使うべき: {result}"
+    )
+    assert result.get("recv_ts_ms", 0) > 0, (
+        f"recv_ts_ms が 0 — 現在時刻（ms）を使うべき: {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# H1 (empty): aCLMMfdsMarketPrice が空のとき last_update_id/recv_ts_ms が非ゼロ、警告ログが出る
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_empty_response_has_nonzero_ts_and_warns(tmp_path):
+    """aCLMMfdsMarketPrice が空のとき recv_ts_ms > 0、last_update_id > 0、warning ログが出る。
+
+    H1: 空レスポンスでも recv_ts_ms = 0 を返さない。
+    M1: aCLMMfdsMarketPrice が空のとき log.warning を出す。
+    """
+    import logging
+    from unittest.mock import patch as _patch
+
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPrice","sResultCode":"0",'
+            '"aCLMMfdsMarketPrice":[]}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)
+
+    warnings: list[str] = []
+
+    class _CaptureLogs(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.levelno >= logging.WARNING:
+                warnings.append(record.getMessage())
+
+    handler = _CaptureLogs()
+    logger = logging.getLogger("engine.exchanges.tachibana")
+    logger.addHandler(handler)
+    try:
+        result = await worker.fetch_depth_snapshot("7203", "stock")
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.get("recv_ts_ms", 0) > 0, (
+        f"空レスポンス時に recv_ts_ms が 0 — 現在時刻を使うべき: {result}"
+    )
+    assert result.get("last_update_id", 0) > 0, (
+        f"空レスポンス時に last_update_id が 0 — recv_ts_ms を使うべき: {result}"
+    )
+    assert any("empty" in w or "fetch_depth_snapshot" in w for w in warnings), (
+        f"aCLMMfdsMarketPrice 空のとき warning ログが出ていない: {warnings}"
+    )

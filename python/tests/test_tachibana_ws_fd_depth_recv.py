@@ -13,6 +13,8 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
+from engine.exchanges.tachibana_codec import parse_event_frame
+
 import pytest
 import websockets
 import websockets.server  # type: ignore[import-untyped]
@@ -82,7 +84,7 @@ def _build_fd_frame(
 
 def _build_kp_frame() -> bytes:
     """KP (keep-alive) フレーム。サーバーは 5 秒間送信がないと KP を送る。"""
-    return "p_cmd\x02KP".encode("shift_jis")
+    return "\x01p_cmd\x02KP".encode("shift_jis")
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +203,8 @@ async def test_stream_depth_depth_snapshot_bid_ask_values_match_fd_frame(
         f"bids 件数不一致: expected={len(expected_bids)} actual={len(received_bids)}"
     )
     for i, (exp_price, exp_vol) in enumerate(expected_bids):
-        got_price, got_vol = received_bids[i]
+        got_price = received_bids[i]["price"]
+        got_vol = received_bids[i]["qty"]
         assert got_price == exp_price, f"bids[{i}].price: expected={exp_price} got={got_price}"
         assert got_vol == exp_vol, f"bids[{i}].vol: expected={exp_vol} got={got_vol}"
 
@@ -211,7 +214,8 @@ async def test_stream_depth_depth_snapshot_bid_ask_values_match_fd_frame(
         f"asks 件数不一致: expected={len(expected_asks)} actual={len(received_asks)}"
     )
     for i, (exp_price, exp_vol) in enumerate(expected_asks):
-        got_price, got_vol = received_asks[i]
+        got_price = received_asks[i]["price"]
+        got_vol = received_asks[i]["qty"]
         assert got_price == exp_price, f"asks[{i}].price: expected={exp_price} got={got_price}"
         assert got_vol == exp_vol, f"asks[{i}].vol: expected={exp_vol} got={got_vol}"
 
@@ -273,5 +277,27 @@ async def test_stream_depth_10_level_depth_snapshot(
         f"10 段気配を期待したが asks={len(snap['asks'])} 段"
     )
     # 最良気配（1 位）の値を確認
-    assert snap["bids"][0][0] == str(base_price)
-    assert snap["asks"][0][0] == str(base_price + 1)
+    assert snap["bids"][0]["price"] == str(base_price)
+    assert snap["asks"][0]["price"] == str(base_price + 1)
+
+
+# ---------------------------------------------------------------------------
+# M3: _build_kp_frame() のプレフィックス検証
+# ---------------------------------------------------------------------------
+
+
+def test_build_kp_frame_is_parseable_and_has_p_cmd_kp() -> None:
+    """`_build_kp_frame()` が返すバイト列を parse_event_frame に通すと p_cmd=KP が得られる。
+
+    M3: `_build_kp_frame()` の先頭に \\x01 プレフィックスが必要。
+    parse_event_frame は先頭 \\x01 を区切りとして使うため、プレフィックスなしだと
+    先頭フィールドが読み飛ばされる。
+    """
+    kp_bytes = _build_kp_frame()
+    text = kp_bytes.decode("shift_jis")
+    pairs = parse_event_frame(text)
+    fields = dict(pairs)
+    assert fields.get("p_cmd") == "KP", (
+        f"parse_event_frame が p_cmd=KP を返さなかった。fields={fields}\n"
+        "原因: _build_kp_frame() の先頭に \\x01 プレフィックスが必要。"
+    )
