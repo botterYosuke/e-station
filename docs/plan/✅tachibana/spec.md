@@ -58,7 +58,7 @@
 ### 3.1 セキュリティ
 
 - ユーザー ID / パスワード / 第二暗証番号 / 仮想 URL 5 種は **すべて機密**（[SKILL.md R10](../../../.claude/skills/tachibana/SKILL.md)）
-  - **Python が OS ファイルシステムで管理**（`tachibana_account.json` に user_id + is_demo、`tachibana_session.json` に仮想 URL 5 種 + saved_at_ms）
+  - **Python が OS ファイルシステムで管理**（`tachibana_account.json` に user_id + is_demo、`tachibana_session.json` に仮想 URL 5 種 + `zyoutoeki_kazei_c`（課税区分コード）+ `saved_at_ms`）
   - **password はファイルに書かない**。tkinter ダイアログで毎回入力させるか、`DEV_TACHIBANA_PASSWORD` env（debug ビルドのみ）で供給する
   - Rust 側は creds / session を一切保持しない（keyring 不使用）。IPC で creds を送受信しない
 - **第二暗証番号は Phase 1 では収集も保持もしない（F-H5）**: DTO スキーマ上は `second_password: Option<SecretString>` を切るが、Phase 1 では Rust 側の収集 UI も Python 側のメモリ保持も実装せず、常に `None` を送る。発注しないものを保持して攻撃面（コアダンプ・スワップ・GC 残存）を増やさない。Phase 2（発注機能）で値の収集・保持を有効化する。スキーマは破壊変更にならないため移行コストはない
@@ -82,7 +82,7 @@
   - **夜間閉局またぎ運用（F-m1）**: アプリを起動しっぱなしで翌日のザラ場開始を迎えた場合、最初の subscribe で `p_errno=2` を踏むのは仕様通り。Python 側は `VenueError{code:"session_expired"}` を返し、Rust UI は再ログインバナーを表示する。**ここで自動再ログインはしない**（電話認証完了の確認が取れないため）。ユーザーがバナーから再ログイン操作を行うと、`Command::RequestVenueLogin` → Python が `tachibana_session.json` をクリアして `startup_login` を再実行する経路を辿る
   - **「自動」と「手動（ユーザー明示）」の境界（LOW-3）**: 「自動再ログイン禁止」とは *Python / Rust がユーザー操作なしにパスワードを再送する*ことを禁止する。ユーザーがバナーから「ログイン」ボタンを押して `Command::RequestVenueLogin` が発火する経路は「ユーザー明示の再ログイン」であり禁止しない。実装者向け判別基準: **`RequestVenueLogin` コマンドの受信を起点とする経路 → 許可**、**Python 側内部ロジックが `p_errno=2` 検知後に自発的に再ログインを開始する経路 → 禁止**
   - **バナー「閉じる」(`Message::DismissTachibanaBanner` / `VenueEvent::Dismissed`) の FSM 意味論（C-L1）**: `VenueState::Error{..} → Idle` の 1 遷移として `next()` テーブルに含まれる（`src/venue_state.rs::VenueState::next` の `(Error, Dismissed) → Idle` arm）。`Idle` / `LoginInFlight` / `Ready` で受けた場合は no-op（同状態を返す）であり副作用なし。Dismiss は keyring / Python セッション / 購読状態に触れないため、後続の `VenueError` 受信でバナーは再表示される（acknowledge セマンティクス）。既存 9 遷移にこの 1 遷移を加えた計 10 遷移が FSM 正本。
-- **WebSocket 死活監視**: EVENT WS は **5 秒周期で `p_evt_cmd=KP`（KeepAlive）frame** を送ってくる。Python 側は KP 受信をタイマリセットに使い、**12 秒（KP 2 回欠損相当 + 2 秒 jitter）以上 KP も含めて全 frame が来なければ切断とみなして再接続**する。WS は Python 側 (`tachibana_ws.py`、`websockets` ライブラリ) が担当する設計（architecture.md §4）のため、`websockets.connect(..., ping_interval=None, ping_timeout=None)` でライブラリ側の自動 Ping/Pong を完全に無効化し、`Ping` フレーム受信時は手動 Pong handler から `Pong` を返す（SKILL.md EVENT 規約）
+- **WebSocket 死活監視**: EVENT WS は **5 秒周期で `p_evt_cmd=KP`（KeepAlive）frame** を送ってくる。Python 側は KP 受信をタイマリセットに使い、**12 秒（KP 2 回欠損相当 + 2 秒 jitter）以上 KP も含めて全 frame が来なければ切断とみなして再接続**する（定数 `_DEAD_FRAME_TIMEOUT_S = 12.0`）。WS は Python 側 (`tachibana_ws.py`、`websockets` ライブラリ) が担当する設計（architecture.md §4）のため、`websockets.connect(..., ping_interval=None)` でライブラリ側の自動 Ping 送信を無効化する（`ping_timeout` は設定しない）。立花サーバ側が送ってくる websockets-level の `Ping` フレームにはライブラリが自動で `Pong` を返す（`ping_interval=None` のとき自動エコーは有効）
 - `VenueReady{venue}` は **冪等イベント**として扱う。session が新たに validate / 再ログインされるたびに送ってよく、Rust 側は最後に受信した状態を保持する。**Python サブプロセス再起動検知時（次の `Hello` 受信時）に限り `VenueReady` 状態をリセット**し、再 ready 後に既存購読の重複再送を行わないこと（`ProcessManager` 側で active subscriptions を 1 度だけ resubscribe する）。`EngineEvent::Disconnected` は ticker/stream 粒度であり venue 全体の状態管理には使わない（C3 修正、architecture.md §3 と整合）
 - Python 単独再起動時（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §5.3 Python プロセス復旧プロトコル）は、**Python プロセスが自律的に `startup_login` を再実行**し（`tachibana_session.json` / `tachibana_account.json` から復元 → 必要なら再ログイン → `VenueReady` 送信）、Rust は `VenueReady` を待ってから metadata fetch / resubscribe を再開する。`SetVenueCredentials` の再送は行わない
 
