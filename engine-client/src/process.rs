@@ -3,10 +3,7 @@
 /// `PythonProcess` spawns the Python engine and communicates its `{port, token}`
 /// via stdin as a JSON line.  `ProcessManager` wraps it with exponential-backoff
 /// restart logic and re-applies subscriptions after each recovery.
-use crate::{
-    connection::EngineConnection,
-    error::EngineClientError,
-};
+use crate::{connection::EngineConnection, error::EngineClientError};
 
 use std::{
     collections::HashSet,
@@ -15,7 +12,6 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Child, sync::Mutex};
-
 
 // ── EngineCommand ─────────────────────────────────────────────────────────────
 
@@ -521,7 +517,8 @@ mod tests {
     #[tokio::test]
     async fn set_proxy_stores_url() {
         let pm = ProcessManager::new("python");
-        pm.set_proxy(Some("socks5://127.0.0.1:1080".to_string())).await;
+        pm.set_proxy(Some("socks5://127.0.0.1:1080".to_string()))
+            .await;
         let stored = pm.proxy_url.lock().await.clone();
         assert_eq!(stored, Some("socks5://127.0.0.1:1080".to_string()));
         pm.set_proxy(None).await;

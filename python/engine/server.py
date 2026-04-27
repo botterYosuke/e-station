@@ -160,11 +160,11 @@ class DataEngineServer:
         self._handshake_lock = asyncio.Lock()
 
         # Per-venue workers. The Tachibana worker is constructed at init time
-        # (option (a) in B3 §3) with `session=None` so it sits dormant until
-        # `SetVenueCredentials` succeeds and `set_session(...)` injects the
-        # post-login `TachibanaSession`. This matches the lifecycle of the
-        # crypto workers (init-time construction, lazy first-call HTTP) and
-        # avoids a special-case "register-on-login" path in the dispatcher.
+        # with `session=None` so it sits dormant until `startup_login` completes
+        # and `_apply_tachibana_session(...)` injects the post-login
+        # `TachibanaSession`. This matches the lifecycle of the crypto workers
+        # (init-time construction, lazy first-call HTTP) and avoids a special-
+        # case "register-on-login" path in the dispatcher.
         self._workers: dict[
             str,
             BinanceWorker
@@ -271,13 +271,17 @@ class DataEngineServer:
         except Exception as exc:
             log.error("Connection error: %s", exc)
         finally:
-            if startup_task is not None and not startup_task.done():
-                startup_task.cancel()
+            task_to_cancel = self._tachibana_startup_task
+            if task_to_cancel is not None and not task_to_cancel.done():
+                task_to_cancel.cancel()
                 try:
-                    await startup_task
+                    await task_to_cancel
                 except (asyncio.CancelledError, Exception):
                     pass
             self._tachibana_startup_task = None
+            # Reset startup latch so the next reconnect can call
+            # validate_session_on_startup again without the L6 guard firing.
+            self._tachibana_startup_latch = StartupLatch()
             if self._current_conn is ws:
                 self._current_conn = None
             await self._cancel_all_streams()
@@ -459,9 +463,13 @@ class DataEngineServer:
             await self._handle_set_proxy(msg)
 
         elif op == "RequestVenueLogin":
-            self._spawn_fetch(
-                self._do_request_venue_login(msg), msg.get("request_id")
-            )
+            # B-3: do NOT wrap in _spawn_fetch — cancelled tasks would emit
+            # Error{code:cancelled} and leave VenueState stuck in LoginInFlight.
+            # _startup_tachibana creates its own task internally for the long-
+            # running login flow; the await here only blocks until the dispatch
+            # logic (in-flight check, session clear) completes, not until login
+            # finishes.
+            await self._do_request_venue_login(msg)
 
         elif op == "SetSecondPassword":
             self._handle_set_second_password(msg)
@@ -1537,7 +1545,7 @@ class DataEngineServer:
         """Drive Tachibana startup login (T-SC3).
 
         Called as a background task after handshake completes. Python
-        self-initiates login instead of waiting for SetVenueCredentials.
+        self-initiates login after handshake completes.
         Emits VenueReady / VenueError / VenueLoginCancelled to outbox.
         """
         async with self._tachibana_login_inflight:
@@ -1617,7 +1625,16 @@ class DataEngineServer:
         self._tachibana_session = None
         self._workers["tachibana"].set_session(None)
         tachibana_clear_session(self._cache_dir)
-        await self._startup_tachibana(request_id=request_id)
+        # B-3: spawn as a task so _dispatch_message returns immediately and the
+        # recv loop is not blocked while the login dialog is open.  The task is
+        # stored so the _handle finally block can cancel it on disconnect.
+        task = asyncio.create_task(self._startup_tachibana(request_id=request_id))
+        task.add_done_callback(
+            lambda t: log.error(
+                "_startup_tachibana task raised unexpectedly: %s", t.exception()
+            ) if not t.cancelled() and t.exception() is not None else None
+        )
+        self._tachibana_startup_task = task
 
     async def _handle_set_proxy(self, msg: dict) -> None:
         proxy_url = msg.get("url")

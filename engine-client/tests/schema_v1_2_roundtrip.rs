@@ -100,4 +100,3 @@ fn rust_serializes_request_venue_login() {
     assert!(s.contains(r#""venue":"tachibana""#));
     assert!(s.contains(VALID_UUID));
 }
-

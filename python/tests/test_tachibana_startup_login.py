@@ -97,7 +97,7 @@ async def test_startup_login_skips_cache_if_stale(
     dialog_result = {
         "status": "ok",
         "user_id": "test_user",
-        "password": "test_pass",
+        "password": "SENTINEL_PW_dXk9Qa",
         "is_demo": True,
     }
 
@@ -139,7 +139,7 @@ async def test_startup_login_skips_cache_if_no_file(
     dialog_result = {
         "status": "ok",
         "user_id": "test_user",
-        "password": "test_pass",
+        "password": "SENTINEL_PW_dXk9Qa",
         "is_demo": True,
     }
 
@@ -202,7 +202,7 @@ async def test_startup_login_saves_account_and_session_on_success(
     dialog_result = {
         "status": "ok",
         "user_id": "save_user",
-        "password": "save_pass",
+        "password": "SENTINEL_PW_g5Wm2R",
         "is_demo": True,
     }
 
@@ -225,3 +225,159 @@ async def test_startup_login_saves_account_and_session_on_success(
 
     mock_save_account.assert_called_once_with(tmp_path, "save_user", True)
     mock_save_session.assert_called_once_with(tmp_path, _SAMPLE_SESSION)
+
+
+# ---------------------------------------------------------------------------
+# B-1 TDD: startup_login RuntimeError → clear_session must be called
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_login_runtime_error_calls_clear_session(
+    tmp_path: Path, latch: StartupLatch, p_no_counter: PNoCounter
+) -> None:
+    """B-1: validate_session_on_startup が RuntimeError を raise したとき
+    clear_session が呼ばれてから RuntimeError が伝播すること。
+    """
+    with (
+        patch(f"{_MODULE}.load_session", return_value=_SAMPLE_SESSION),
+        patch(f"{_MODULE}._is_session_fresh", return_value=True),
+        patch(
+            f"{_MODULE}.validate_session_on_startup",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("StartupLatch violated"),
+        ),
+        patch(f"{_MODULE}.clear_session") as mock_clear,
+    ):
+        with pytest.raises(RuntimeError, match="StartupLatch violated"):
+            await startup_login(
+                tmp_path,
+                tmp_path,
+                p_no_counter=p_no_counter,
+                startup_latch=latch,
+            )
+
+    mock_clear.assert_called_once_with(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# D-2: T-SC5 必須テスト 3件 — server._startup_tachibana / _do_request_venue_login
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_tachibana_login_cancelled_emits_venue_login_cancelled(
+    tmp_path: Path,
+) -> None:
+    """D-2-1: startup_login が LoginCancelled を raise したとき
+    VenueLoginCancelled{venue:"tachibana"} が outbox に入ること。
+    """
+    from engine.server import DataEngineServer
+    from engine.exchanges.tachibana_login_flow import LoginCancelled
+
+    server = DataEngineServer(
+        port=19999,
+        token="tok",
+        cache_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    emitted: list[dict] = []
+
+    def _fake_emit(event: dict) -> None:
+        emitted.append(event)
+
+    with patch.object(server, "_emit", side_effect=_fake_emit):
+        with patch(
+            "engine.server.tachibana_startup_login",
+            new_callable=AsyncMock,
+            side_effect=LoginCancelled(),
+        ):
+            await server._startup_tachibana(request_id="req-cancel")
+
+    assert any(
+        e.get("event") == "VenueLoginCancelled" and e.get("venue") == "tachibana"
+        for e in emitted
+    ), f"Expected VenueLoginCancelled in emitted events, got: {emitted}"
+
+
+@pytest.mark.asyncio
+async def test_startup_tachibana_network_error_emits_venue_error_login_failed(
+    tmp_path: Path,
+) -> None:
+    """D-2-2: startup_login が LoginError(code='login_failed') を raise したとき
+    VenueError{code:'login_failed'} が outbox に入ること。
+    """
+    from engine.server import DataEngineServer
+    from engine.exchanges.tachibana_helpers import LoginError
+
+    server = DataEngineServer(
+        port=19999,
+        token="tok",
+        cache_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    emitted: list[dict] = []
+
+    def _fake_emit(event: dict) -> None:
+        emitted.append(event)
+
+    with patch.object(server, "_emit", side_effect=_fake_emit):
+        with patch(
+            "engine.server.tachibana_startup_login",
+            new_callable=AsyncMock,
+            side_effect=LoginError(code="login_failed", message="network error"),
+        ):
+            await server._startup_tachibana(request_id="req-err")
+
+    venue_errors = [e for e in emitted if e.get("event") == "VenueError"]
+    assert venue_errors, f"Expected VenueError in emitted events, got: {emitted}"
+    assert venue_errors[0].get("code") == "login_failed"
+    assert venue_errors[0].get("venue") == "tachibana"
+
+
+@pytest.mark.asyncio
+async def test_do_request_venue_login_inflight_emits_only_venue_login_started(
+    tmp_path: Path,
+) -> None:
+    """D-2-3: _tachibana_login_inflight.locked() が True のとき
+    _do_request_venue_login が VenueLoginStarted のみを emit して
+    startup_login を再実行しないこと。
+    """
+    from engine.server import DataEngineServer
+
+    server = DataEngineServer(
+        port=19999,
+        token="tok",
+        cache_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    emitted: list[dict] = []
+
+    def _fake_emit(event: dict) -> None:
+        emitted.append(event)
+
+    startup_called = []
+
+    async def _fake_startup(request_id: str | None = None) -> None:
+        startup_called.append(request_id)
+
+    # Simulate in-flight by acquiring the lock
+    async with server._tachibana_login_inflight:
+        with patch.object(server, "_emit", side_effect=_fake_emit):
+            with patch.object(server, "_startup_tachibana", side_effect=_fake_startup):
+                await server._do_request_venue_login({
+                    "op": "RequestVenueLogin",
+                    "request_id": "req-inflight",
+                    "venue": "tachibana",
+                })
+
+    assert startup_called == [], (
+        f"_startup_tachibana must not be called while login is in-flight, "
+        f"but got calls: {startup_called}"
+    )
+    assert any(
+        e.get("event") == "VenueLoginStarted" for e in emitted
+    ), f"Expected VenueLoginStarted in emitted events, got: {emitted}"

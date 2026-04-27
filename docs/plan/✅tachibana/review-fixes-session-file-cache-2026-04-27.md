@@ -109,3 +109,116 @@
 - `_tachibana_login_inflight`: T-SC3 / T-SC5 に存在 ✓
 
 **収束確定。全タスク（T-SC1〜T-SC6）の計画記述は実装に進める状態。**
+
+---
+
+## 実装コードレビュー（review-fix-loop）
+
+### 緊急バグ修正（ラウンド外・即時対応）
+
+- ✅ `_spawn_login_dialog` に `asyncio.CancelledError` ハンドラを追加
+  - **症状**: Rust が切断 → `startup_task.cancel()` 発火時、tkinter サブプロセスを kill せず放置 → Rust 再接続のたびに新しいダイアログが追加表示される
+  - **修正**: `CancelledError` を捕捉して `proc.terminate()` / `proc.kill()` でサブプロセスを確実に終了させてから re-raise
+
+---
+
+## レビュー反映 (2026-04-27, 実装ラウンド 1)
+
+### R1 Findings（CRITICAL 2 / HIGH 3 / MEDIUM 6）
+
+| ID | 重要度 | 内容 | 修正 |
+|---|---|---|---|
+| C-1 | CRITICAL | `_venue_credentials_refreshed_event` / `run_login` / `_try_silent_login` が IPC に `password` 平文を含む | ✅ 全削除 |
+| C-2 | CRITICAL | `schemas.py` に削除すべき旧型（`SetVenueCredentials` / `VenueCredentialsRefreshed` 等）が残存 | ✅ 全削除 |
+| H-1 | HIGH | `_do_request_venue_login` が `_spawn_fetch` 経由でキャンセル時に `Error{code:cancelled}` が出て VenueState が固着 | ✅ `create_task` に変更 |
+| H-2 | HIGH | `startup_login` RuntimeError 時に `clear_session` が呼ばれない → 再起動ループ | ✅ `clear_session` 追加 |
+| H-3 | HIGH | `StartupLatch` が reconnect 時にリセットされない → 2回目の reconnect で `os._exit(2)` | ✅ finally でリセット |
+| M-1 | MEDIUM | T-SC5 指定テスト 3件未実装（inflight/cancelled/network_error） | ✅ 追加 |
+| M-2 | MEDIUM | F-SC-Atomic：`os.replace` 前の中断シナリオテスト未実装 | ✅ 追加 |
+| M-3 | MEDIUM | `load_account`/`load_session` が全例外を無音で飲み込む | ✅ WARNING ログ追加 |
+| M-4 | MEDIUM | docstring/コメントに旧フロー（`SetVenueCredentials`・`keyring`）記述残存 | ✅ 更新 |
+| M-5 | MEDIUM | テスト sentinel `"test_pass"` 等が低品質 | ✅ `SENTINEL_PW_*` 形式に変更 |
+| M-6 | MEDIUM | `test_schema_compat_v1_2.py` が削除型を import → ImportError 予備軍 | ✅ 削除 |
+
+### 副次変更
+- `test_tachibana_login_started_semantics.py` 削除（`run_login` テスト）
+- `test_tachibana_dev_env_guard.py` を `startup_login` ベースに全面書き換え
+
+---
+
+## レビュー反映 (2026-04-27, 実装ラウンド 2)
+
+### R2 Findings（HIGH 2 / MEDIUM 3）
+
+| ID | 重要度 | 内容 | 修正 |
+|---|---|---|---|
+| R2-H-1 | HIGH | `_handle` finally がローカル変数 `startup_task` を使い、`_do_request_venue_login` 生成タスクが切断時に孤立 | ✅ `self._tachibana_startup_task` に統一 + `add_done_callback` 追加 |
+| R2-H-2 | HIGH | `invariant-tests.md` F-SC-Atomic エントリに `test_atomic_write_preserves_original_on_exception` が未登録 | ✅ 追記 |
+| R2-M-1 | MEDIUM | `_spawn_login_dialog` CancelledError ハンドラ内の二重キャンセルでサブプロセス kill がスキップされる可能性 | ✅ innermost except に `CancelledError` 追加 |
+| R2-M-2 | MEDIUM | dead event helper 4関数（`_venue_ready_event` 等）が呼び出し元なしで残存 | ✅ 全削除 |
+| R2-M-3 | MEDIUM | `tachibana.py`/`tachibana_auth.py` docstring に `SetVenueCredentials` 残滓 | ✅ `startup_login` 方式に書き換え |
+
+---
+
+## レビュー反映 (2026-04-27, 実装ラウンド 3)
+
+### R3 収束確認（CRITICAL 0 / HIGH 0 / MEDIUM 0）
+
+全チェック完了。残存 LOW 3件のみ（対応不要）:
+
+| ID | 内容 |
+|---|---|
+| L-1 | `_spawn_login_dialog` の JSON parse エラーログ `last_line[:40]` が理論上 password prefix を含む可能性（実害なし：到達条件は JSON 解析失敗時のみ） |
+| L-2 | `_handle` 内の `startup_task` ローカル変数が finally では未使用になったが残存（dead code、読者の混乱源） |
+| L-3 | `test_tachibana_startup_login.py` の `startup_login` 経由フローに対するログ漏洩 caplog テストが未追加 |
+
+### 最終検証（2026-04-27）
+
+| コマンド | 結果 |
+|---|---|
+| `uv run pytest python/tests/ -q` | ✅ 783 passed, 2 skipped |
+| `cargo test --workspace` | ✅ 全スイート ok |
+| `cargo fmt --check` | ✅ クリーン |
+| `cargo clippy --workspace -- -D warnings` | ✅ クリーン |
+
+**実装コードレビュー完了。MEDIUM 以上ゼロ確認。**
+
+---
+
+## レビュー反映 (2026-04-27, ラウンド 2)
+
+### 解消した指摘
+- ✅ R2-H-1: `_handle` finally を `self._tachibana_startup_task` に統一、done_callback 追加
+- ✅ R2-H-2: `invariant-tests.md` F-SC-Atomic エントリに `test_atomic_write_preserves_original_on_exception` 追記
+- ✅ R2-M-1: `_spawn_login_dialog` の二重キャンセル対策（innermost except に CancelledError 追加）
+- ✅ R2-M-2: dead event helper 4関数（_venue_ready_event 等）削除
+- ✅ R2-M-3: tachibana.py / tachibana_auth.py の SetVenueCredentials 残滓 docstring 修正
+
+---
+
+## レビュー反映 (2026-04-27, ラウンド 1 実装修正)
+
+### 解消した指摘
+
+- ✅ C-1: `_venue_credentials_refreshed_event` / `run_login` / `_try_silent_login` を削除（password 平文送出経路を完全除去）
+- ✅ C-2: `schemas.py` から `TachibanaSessionWire`・`TachibanaCredentialsWire`・`VenueCredentialsPayload`・`SetVenueCredentials`・`VenueCredentialsRefreshed` を削除
+- ✅ H-1: `_do_request_venue_login` を `_spawn_fetch` から切り離し、`asyncio.create_task` でブロッキング排除
+- ✅ H-2: `startup_login` RuntimeError 時に `clear_session` 追加
+- ✅ H-3: `_handle` finally ブロックで `StartupLatch` リセット
+- ✅ M-1: T-SC5 必須テスト 3件追加（`test_startup_tachibana_login_cancelled_emits_venue_login_cancelled` / `test_startup_tachibana_network_error_emits_venue_error_login_failed` / `test_do_request_venue_login_inflight_emits_only_venue_login_started`）
+- ✅ M-2: F-SC-Atomic 中断シナリオテスト追加（`test_atomic_write_preserves_original_on_exception`）
+- ✅ M-3: `load_account`/`load_session` の WARNING ログ追加（`FileNotFoundError` は `return None`、その他は `log.warning` 後 `return None`）
+- ✅ M-4/M-5: docstring/コメント更新（server.py L162-165 コメント・`_startup_tachibana` docstring・module docstring）
+- ✅ M-5: テスト sentinel 品質向上（`"test_pass"` → `"SENTINEL_PW_dXk9Qa"`、`"save_pass"` → `"SENTINEL_PW_g5Wm2R"`）
+- ✅ M-6: `test_schema_compat_v1_2.py` 削除
+
+### 副次的変更（削除に伴う連鎖）
+
+- `test_tachibana_login_started_semantics.py` を削除（`run_login` / `VenueCredentialsRefreshed` をテストしていた）
+- `test_tachibana_dev_env_guard.py` を `startup_login` ベースに書き換え（`F-DevEnv-Release-Guard` 不変条件は維持）
+
+### 設計判断・新たな知見
+
+1. **`_do_request_venue_login` の `asyncio.create_task` 化**: `_spawn_fetch` でラップするとキャンセル時に `Error{code:cancelled}` が outbox に入り VenueState が `LoginInFlight` で固着する。`_dispatch_message` で直接 `await _do_request_venue_login(msg)` し、内部で `asyncio.create_task(_startup_tachibana(...))` に移行。これにより recv ループはブロックせず、かつキャンセル時の spurious Error も発生しない。
+2. **`StartupLatch` リセット**: `_handle` の finally ブロックでリセットしないと、Python の reconnect 後に `validate_session_on_startup` が L6 ガードで即死する。`StartupLatch()` で新しいインスタンスに置き換えることで解決。
+3. **`test_schema_compat_v1_2.py` の削除**: 削除した IPC 型（`TachibanaSessionWire` / `VenueCredentialsPayload` / `SetVenueCredentials` / `VenueCredentialsRefreshed`）を import しているため、型削除後は ImportError になる。ファイルごと削除が正解。

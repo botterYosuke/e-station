@@ -280,3 +280,31 @@ def test_is_session_fresh_none_expires_at_ms_is_stale() -> None:
         expires_at_ms=None,
     )
     assert _is_session_fresh(session) is False
+
+
+# ---------------------------------------------------------------------------
+# D-1: F-SC-Atomic — interrupt scenario (os.replace fails)
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_write_preserves_original_on_exception(tmp_path: Path) -> None:
+    """F-SC-Atomic: os.replace 前に例外が発生しても元ファイルは保全されること。
+
+    D-1: save_session 中に os.replace が OSError を raise しても、
+    最終ファイル (tachibana_session.json) は旧内容のままであること。
+    また .tmp ファイルが残っていないこと（例外ハンドラで削除済み）。
+    """
+    from unittest.mock import patch
+    import engine.exchanges.tachibana_file_store as fs_mod
+
+    original_content = json.dumps({"original": True})
+    (tmp_path / SESSION_FILENAME).write_text(original_content, encoding="utf-8")
+
+    with patch.object(fs_mod.os, "replace", side_effect=OSError("disk full")):
+        with pytest.raises(OSError):
+            save_session(tmp_path, _SAMPLE_SESSION)
+
+    # 最終ファイルは旧データのまま
+    assert (tmp_path / SESSION_FILENAME).read_text(encoding="utf-8") == original_content
+    # .tmp ファイルは残らない（例外ハンドラで削除済み）
+    assert list(tmp_path.glob("*.tmp")) == []

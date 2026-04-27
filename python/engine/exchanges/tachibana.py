@@ -164,7 +164,7 @@ class TachibanaWorker(ExchangeWorker):
         """Inject the post-login `TachibanaSession`.
 
         Called by ``server.py`` via ``_apply_tachibana_session`` after
-        ``SetVenueCredentials`` / ``RequestVenueLogin`` login success.
+        ``startup_login`` / ``RequestVenueLogin`` login success.
         """
         self._session = session
 

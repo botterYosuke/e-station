@@ -1,6 +1,6 @@
 """HIGH-D1 — Python side of the `dev_tachibana_login_allowed` integration.
 
-The Python `tachibana_login_flow.run_login` must NEVER read
+The Python `tachibana_login_flow.startup_login` must NEVER read
 `DEV_TACHIBANA_*` / `DEV_*` env vars to skip the tkinter dialog when
 `dev_login_allowed=False`. This is the release-build guard: even if
 operators leave dev creds in the environment, a release build (which
@@ -11,16 +11,21 @@ proceeding via env is not.
 The test patches the dialog spawn to a sentinel that records calls and
 returns "cancelled", so we observe whether the env fast path was taken
 without involving a real tkinter subprocess or live HTTP.
+
+Invariant: F-DevEnv-Release-Guard (invariant-tests.md)
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from engine.exchanges.tachibana_helpers import PNoCounter
+from engine.exchanges.tachibana_auth import StartupLatch
+from engine.exchanges.tachibana_helpers import LoginError, PNoCounter
+from engine.exchanges.tachibana_login_flow import LoginCancelled, startup_login
 from engine.exchanges import tachibana_login_flow
 
 
@@ -28,7 +33,7 @@ from engine.exchanges import tachibana_login_flow
 def env_with_dev_creds(monkeypatch):
     """Set DEV_TACHIBANA_* env vars (the canonical names per SKILL.md)."""
     monkeypatch.setenv("DEV_TACHIBANA_USER_ID", "envuser")
-    monkeypatch.setenv("DEV_TACHIBANA_PASSWORD", "envpass")
+    monkeypatch.setenv("DEV_TACHIBANA_PASSWORD", "SENTINEL_PW_dXk9Qa")
     monkeypatch.setenv("DEV_TACHIBANA_DEMO", "true")
     # Ensure no legacy aliases pollute the test.
     monkeypatch.delenv("DEV_USER_ID", raising=False)
@@ -36,9 +41,13 @@ def env_with_dev_creds(monkeypatch):
     monkeypatch.delenv("DEV_IS_DEMO", raising=False)
 
 
+_MODULE = "engine.exchanges.tachibana_login_flow"
+
+
 @pytest.mark.asyncio
 async def test_dev_login_disallowed_does_not_fast_path_even_with_full_env(
     env_with_dev_creds,
+    tmp_path: Path,
 ):
     """`dev_login_allowed=False` must NEVER read env — even if every
     env var is present, the dialog spawn must be the only login path."""
@@ -46,16 +55,21 @@ async def test_dev_login_disallowed_does_not_fast_path_even_with_full_env(
 
     async def _fake_spawn(prefill: Optional[dict]) -> Optional[dict]:
         spawn_called.append(prefill)
-        return None  # simulate user cancellation
+        return None  # simulate user cancellation → LoginCancelled
 
-    with patch.object(
-        tachibana_login_flow, "_spawn_login_dialog", _fake_spawn
+    with (
+        patch(f"{_MODULE}.load_session", return_value=None),
+        patch(f"{_MODULE}.load_account", return_value=None),
+        patch(f"{_MODULE}._spawn_login_dialog", _fake_spawn),
     ):
-        events = await tachibana_login_flow.run_login(
-            request_id="rid-1",
-            p_no_counter=PNoCounter(),
-            dev_login_allowed=False,
-        )
+        with pytest.raises(LoginCancelled):
+            await startup_login(
+                tmp_path,
+                tmp_path,
+                p_no_counter=PNoCounter(),
+                startup_latch=StartupLatch(),
+                dev_login_allowed=False,
+            )
 
     # Dialog spawn was attempted (and cancelled).
     assert len(spawn_called) == 1, (
@@ -63,14 +77,11 @@ async def test_dev_login_disallowed_does_not_fast_path_even_with_full_env(
         f"dev_login_allowed=False, but spawn calls = {spawn_called}"
     )
 
-    # Event sequence must be VenueLoginStarted → VenueLoginCancelled.
-    assert events[0]["event"] == "VenueLoginStarted"
-    assert events[-1]["event"] == "VenueLoginCancelled"
-
 
 @pytest.mark.asyncio
 async def test_dev_login_allowed_uses_env_without_spawning_dialog(
     env_with_dev_creds,
+    tmp_path: Path,
 ):
     """Counter-positive: when `dev_login_allowed=True` AND env creds
     are present, the dialog must NOT be spawned — the fast path must
@@ -85,34 +96,33 @@ async def test_dev_login_allowed_uses_env_without_spawning_dialog(
     async def _fake_login(*args, **kwargs):
         # Fail with a typed login error so the test does not need an
         # HTTP mock; the assertion is purely about the *path taken*.
-        from engine.exchanges.tachibana_helpers import LoginError
-
         raise LoginError(code="login_failed", message="dummy")
 
     with (
-        patch.object(tachibana_login_flow, "_spawn_login_dialog", _fake_spawn),
-        patch.object(tachibana_login_flow, "tachibana_login", _fake_login),
+        patch(f"{_MODULE}.load_session", return_value=None),
+        patch(f"{_MODULE}.load_account", return_value=None),
+        patch(f"{_MODULE}._spawn_login_dialog", _fake_spawn),
+        patch(f"{_MODULE}._do_login_call", _fake_login),
     ):
-        events = await tachibana_login_flow.run_login(
-            request_id="rid-2",
-            p_no_counter=PNoCounter(),
-            dev_login_allowed=True,
-        )
+        with pytest.raises(LoginError):
+            await startup_login(
+                tmp_path,
+                tmp_path,
+                p_no_counter=PNoCounter(),
+                startup_latch=StartupLatch(),
+                dev_login_allowed=True,
+            )
 
     assert spawn_called == [], (
         "dialog must NOT be spawned when env fast path is available"
     )
-    # Fast path executed → only VenueError. **No VenueLoginStarted**:
-    # that event is reserved for the dialog-spawn path so the UI banner
-    # "別ウィンドウでログイン中" is never a lie (Findings #2).
-    assert any(e.get("event") == "VenueError" for e in events)
-    assert all(e.get("event") != "VenueLoginStarted" for e in events), (
-        f"VenueLoginStarted must not fire on env fast path; got {events}"
-    )
 
 
 @pytest.mark.asyncio
-async def test_legacy_dev_env_aliases_no_longer_trigger_fast_path(monkeypatch):
+async def test_legacy_dev_env_aliases_no_longer_trigger_fast_path(
+    monkeypatch,
+    tmp_path: Path,
+):
     """H10: legacy unprefixed `DEV_USER_ID` / `DEV_PASSWORD` /
     `DEV_IS_DEMO` aliases were removed in 2026-04-25. Even with all
     three legacy variables set, `dev_login_allowed=True` must NOT take
@@ -120,7 +130,7 @@ async def test_legacy_dev_env_aliases_no_longer_trigger_fast_path(monkeypatch):
     recognised. Regression test ensures the legacy reads do not creep
     back in when the docstring is forgotten."""
     monkeypatch.setenv("DEV_USER_ID", "legacyuser")
-    monkeypatch.setenv("DEV_PASSWORD", "legacypass")
+    monkeypatch.setenv("DEV_PASSWORD", "SENTINEL_PW_g5Wm2R")
     monkeypatch.setenv("DEV_IS_DEMO", "true")
     # Canonical names absent.
     monkeypatch.delenv("DEV_TACHIBANA_USER_ID", raising=False)
@@ -131,25 +141,33 @@ async def test_legacy_dev_env_aliases_no_longer_trigger_fast_path(monkeypatch):
 
     async def _fake_spawn(prefill: Optional[dict]) -> Optional[dict]:
         spawn_called.append(prefill)
-        return None
+        return None  # cancelled → LoginCancelled
 
-    with patch.object(tachibana_login_flow, "_spawn_login_dialog", _fake_spawn):
-        events = await tachibana_login_flow.run_login(
-            request_id="rid-legacy",
-            p_no_counter=PNoCounter(),
-            dev_login_allowed=True,
-        )
+    with (
+        patch(f"{_MODULE}.load_session", return_value=None),
+        patch(f"{_MODULE}.load_account", return_value=None),
+        patch(f"{_MODULE}._spawn_login_dialog", _fake_spawn),
+    ):
+        with pytest.raises(LoginCancelled):
+            await startup_login(
+                tmp_path,
+                tmp_path,
+                p_no_counter=PNoCounter(),
+                startup_latch=StartupLatch(),
+                dev_login_allowed=True,
+            )
 
     # If legacy reads came back, dialog spawn would NOT be called.
     assert len(spawn_called) == 1, (
         f"Legacy DEV_* aliases must not enable the fast path; spawn calls = {spawn_called}"
     )
-    assert events[0]["event"] == "VenueLoginStarted"
-    assert events[-1]["event"] == "VenueLoginCancelled"
 
 
 @pytest.mark.asyncio
-async def test_dev_login_allowed_falls_back_to_dialog_when_env_missing(monkeypatch):
+async def test_dev_login_allowed_falls_back_to_dialog_when_env_missing(
+    monkeypatch,
+    tmp_path: Path,
+):
     """`dev_login_allowed=True` but env not set → dialog is spawned."""
     for name in (
         "DEV_TACHIBANA_USER_ID",
@@ -165,15 +183,20 @@ async def test_dev_login_allowed_falls_back_to_dialog_when_env_missing(monkeypat
 
     async def _fake_spawn(prefill: Optional[dict]) -> Optional[dict]:
         spawn_called.append(prefill)
-        return None
+        return None  # cancelled → LoginCancelled
 
-    with patch.object(tachibana_login_flow, "_spawn_login_dialog", _fake_spawn):
-        events = await tachibana_login_flow.run_login(
-            request_id="rid-3",
-            p_no_counter=PNoCounter(),
-            dev_login_allowed=True,
-        )
+    with (
+        patch(f"{_MODULE}.load_session", return_value=None),
+        patch(f"{_MODULE}.load_account", return_value=None),
+        patch(f"{_MODULE}._spawn_login_dialog", _fake_spawn),
+    ):
+        with pytest.raises(LoginCancelled):
+            await startup_login(
+                tmp_path,
+                tmp_path,
+                p_no_counter=PNoCounter(),
+                startup_latch=StartupLatch(),
+                dev_login_allowed=True,
+            )
 
     assert len(spawn_called) == 1
-    assert events[0]["event"] == "VenueLoginStarted"
-    assert events[-1]["event"] == "VenueLoginCancelled"

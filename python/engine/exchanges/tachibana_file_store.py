@@ -70,7 +70,10 @@ def load_account(config_dir: Path) -> dict[str, Any] | None:
         if not isinstance(data.get("is_demo"), bool):
             return None
         return {"user_id": data["user_id"], "is_demo": data["is_demo"]}
-    except Exception:
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log.warning("tachibana_file_store: failed to load %s: %s", path, exc)
         return None
 
 
@@ -122,7 +125,10 @@ def load_session(cache_dir: Path) -> TachibanaSession | None:
             zyoutoeki_kazei_c=zyoutoeki_kazei_c,
             expires_at_ms=saved_at_ms,
         )
-    except Exception:
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log.warning("tachibana_file_store: failed to load %s: %s", path, exc)
         return None
 
 

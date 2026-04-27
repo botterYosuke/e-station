@@ -2,9 +2,7 @@
 ///
 /// These tests use an in-process mock WS server (tokio-tungstenite) so no
 /// real Python engine is required.
-use flowsurface_engine_client::{
-    ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR, SubscriptionKey,
-};
+use flowsurface_engine_client::{ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR, SubscriptionKey};
 
 use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -187,4 +185,3 @@ async fn set_proxy_stores_url() {
     let stored = manager.proxy_url.lock().await.clone();
     assert!(stored.is_none());
 }
-

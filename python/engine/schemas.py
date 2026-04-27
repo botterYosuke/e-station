@@ -126,54 +126,6 @@ class Shutdown(IpcMessage):
     op: Literal["Shutdown"] = "Shutdown"
 
 
-# ── Tachibana 立花証券 venue credentials (Phase 1, T0.2) ────────────────────
-
-
-class TachibanaSessionWire(IpcMessage):
-    """5 virtual URLs returned by ``CLMAuthLoginRequest`` plus session metadata.
-
-    All URL fields cross the IPC boundary as plain strings; the Python side
-    keeps them in memory only (no disk) and the Rust side wraps them in
-    ``SecretString`` before storage. ``__repr__`` does not need extra
-    masking — pydantic does not include field values in ``BaseModel`` repr
-    when they are nested ``SecretStr``, but here we use ``str`` so callers
-    must avoid logging the raw model.
-    """
-
-    url_request: str
-    url_master: str
-    url_price: str
-    url_event: str
-    url_event_ws: str
-    expires_at_ms: int | None = None
-    zyoutoeki_kazei_c: str = ""
-
-
-class TachibanaCredentialsWire(IpcMessage):
-    user_id: str
-    password: str
-    second_password: str | None = None
-    is_demo: bool = True
-    session: TachibanaSessionWire | None = None
-
-
-class VenueCredentialsPayload(IpcMessage):
-    """Tagged union — today only the ``tachibana`` variant exists."""
-
-    venue: Literal["tachibana"]
-    user_id: str
-    password: str
-    second_password: str | None = None
-    is_demo: bool = True
-    session: TachibanaSessionWire | None = None
-
-
-class SetVenueCredentials(IpcMessage):
-    op: Literal["SetVenueCredentials"] = "SetVenueCredentials"
-    request_id: str
-    payload: VenueCredentialsPayload
-
-
 class RequestVenueLogin(IpcMessage):
     op: Literal["RequestVenueLogin"] = "RequestVenueLogin"
     request_id: str
@@ -468,10 +420,9 @@ class Error(IpcMessage):
 class VenueReady(IpcMessage):
     """Venue-scoped session validation completed (idempotent).
 
-    Tachibana emits this every time ``SetVenueCredentials`` succeeds —
-    including after a Python restart. The Rust UI must not generate
-    fresh subscriptions on receipt; ProcessManager owns the resubscribe
-    pathway (architecture.md §3, F8).
+    Tachibana emits this after startup_login succeeds — including after a
+    Python restart. The Rust UI must not generate fresh subscriptions on
+    receipt; ProcessManager owns the resubscribe pathway (architecture.md §3, F8).
     """
 
     event: Literal["VenueReady"] = "VenueReady"
@@ -490,29 +441,6 @@ class VenueError(IpcMessage):
     request_id: str | None = None
     code: str  # e.g. "session_expired", "unread_notices", "login_failed"
     message: str
-
-
-class VenueCredentialsRefreshed(IpcMessage):
-    """Emitted after a startup-time re-login produces new virtual URLs.
-
-    Carries the *full* credential set used for the login (not only the
-    derived session URLs) so the Rust side can persist user_id / password /
-    is_demo into the keyring. Without these fields the keyring's account /
-    demo-flag / password drift away from the value the user just typed
-    into the dialog (e.g. account switch, demo→prod toggle, password
-    change), and the next cold-start fallback login uses stale data.
-
-    `user_id` / `password` / `is_demo` are optional only so older Rust
-    clients (schema 1.2 baseline) can still deserialize the event; new
-    Python emitters always populate them.
-    """
-
-    event: Literal["VenueCredentialsRefreshed"] = "VenueCredentialsRefreshed"
-    venue: str
-    session: TachibanaSessionWire
-    user_id: str | None = None
-    password: str | None = None
-    is_demo: bool | None = None
 
 
 class VenueLoginStarted(IpcMessage):
