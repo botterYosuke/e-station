@@ -10,7 +10,7 @@
 | パスワードの保持 | **Python メモリのみ**（tkinter ダイアログ入力 or debug env） | ディスクには書かない |
 | 電話認証完了の前提条件 | ユーザー操作（手動） | アプリは関与しない |
 | `CLMAuthLoginRequest` 実行と仮想 URL 5 種の取得 | **Python** | Rust の関与ゼロ |
-| 仮想 URL（セッション）の保持 | **Python**（メモリ + `tachibana_session.json`） | `cache_dir` 配下。JST 当日 15:30 未満のみ有効 |
+| 仮想 URL（セッション）の保持 | **Python**（メモリ + `tachibana_session.json`） | `cache_dir` 配下。JST 当日のもののみ fresh、broker 真の有効性は API validate に委譲 |
 | マスタダウンロード（21MB ストリーム） | **Python** | 起動時 1 回 + 日次。`sJsonOfmt="4"` |
 | FD frame パース（Shift-JIS / 制御文字分解） | **Python** | `parse_event_frame` 相当を Python 実装 |
 | 板生成（FD 駆動が正、REST は補助） | **Python** | FD frame ごとに `DepthSnapshot` を再生成。`CLMMfdsGetMarketPrice` polling は (a) ザラ場前後初回 / (b) FD WS 12 秒無通信時の再接続中フォールバック / (c) `depth_unavailable` セーフティ発動時の 3 ケースに限定（spec.md §2.1 / §3.3 と整合、runtime 定期 polling は不可） |
@@ -57,7 +57,7 @@ Python は OS ユーザーディレクトリ配下の 2 ファイルで認証情
 }
 ```
 
-**新鮮判定（`_is_session_fresh`）**: JST 当日 かつ `saved_at_ms < 15:30:00 JST` のもののみ有効。`saved_at_ms > now_ms`（クロックスキュー）は保守的に無効扱い。
+**新鮮判定（`_is_session_fresh`）**: `saved_at_ms` が JST 当日のもののみ有効。`saved_at_ms > now_ms`（クロックスキュー）は保守的に無効扱い。broker 側の真の有効期限（夜間閉局など）は `validate_session_on_startup` の API 呼出に委ねる（spec L81: "session 検証が失敗した場合のみ再ログイン"）。**旧仕様の 15:30 JST cutoff は廃止**（夕方ログイン後の再起動でも再ログインを強要されないようにするため、2026-04-27 修正）。
 
 **原子書き込み**: `tempfile.mkstemp` + `os.replace` でアトミックに書き込む（Windows/Unix 両対応）。
 

@@ -8,10 +8,12 @@ Atomic writes: tempfile + os.replace (POSIX and Windows both guarantee
 overwrite of an existing target with os.replace).
 
 Session freshness: a cached session is considered valid when it was saved
-on the current JST calendar day AND before JST 15:30:00.  Boundary is
-closed on the invalid side (>= 15:30:00 JST → invalid).  A saved_at_ms
-that is in the future relative to now (clock skew) is also treated as
-invalid (conservative fallback).
+on the current JST calendar day.  A saved_at_ms that is in the future
+relative to now (clock skew) is treated as invalid (conservative
+fallback).  The actual broker-side validity is the authoritative source
+and is checked by `validate_session_on_startup` — `_is_session_fresh`
+only gates whether we attempt that API call at all.  See spec.md §
+F-SC-FreshJST and spec.md L81 ("session 検証が失敗した場合のみ再ログイン").
 
 saved_at_ms is stored in expires_at_ms field of TachibanaSession so the
 caller can pass the loaded session directly to _is_session_fresh without
@@ -40,8 +42,6 @@ ACCOUNT_FILENAME = "tachibana_account.json"
 SESSION_FILENAME = "tachibana_session.json"
 
 _JST = timezone(timedelta(hours=9))
-_JST_CUTOFF_HOUR = 15
-_JST_CUTOFF_MINUTE = 30
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ def clear_session(cache_dir: Path) -> None:
 
 
 def _is_session_fresh(session: TachibanaSession) -> bool:
-    """Return True if the session was saved on the current JST day before JST 15:30.
+    """Return True if the session was saved on the current JST calendar day.
 
     session.expires_at_ms is used as the saved_at_ms timestamp (the field
     is populated by load_session — the Tachibana API itself never sets it).
@@ -155,7 +155,13 @@ def _is_session_fresh(session: TachibanaSession) -> bool:
     Invariants (F-SC-FreshJST):
     - saved_at_ms > now_ms (clock skew) → invalid
     - saved JST date != today JST date → invalid
-    - saved JST time >= 15:30:00 → invalid (boundary closed on invalid side)
+
+    The broker is the authoritative source of truth for whether the
+    session URLs still work — this gate only avoids hitting the network
+    for sessions that are obviously from a different JST day. Same-day
+    sessions are passed to `validate_session_on_startup`, which falls
+    back to the login dialog only when the API call itself fails (spec
+    line 81: "session 検証が失敗した場合のみ再ログイン").
     """
     saved_at_ms = session.expires_at_ms
     if saved_at_ms is None:
@@ -170,15 +176,7 @@ def _is_session_fresh(session: TachibanaSession) -> bool:
     saved_dt_jst = datetime.fromtimestamp(saved_at_ms / 1000, tz=_JST)
     now_dt_jst = datetime.fromtimestamp(now_ms / 1000, tz=_JST)
 
-    # Must be the same JST calendar day.
-    if saved_dt_jst.date() != now_dt_jst.date():
-        return False
-
-    # Cutoff: must be strictly before JST 15:30:00 (>= is invalid).
-    cutoff_jst = saved_dt_jst.replace(
-        hour=_JST_CUTOFF_HOUR, minute=_JST_CUTOFF_MINUTE, second=0, microsecond=0
-    )
-    return saved_dt_jst < cutoff_jst
+    return saved_dt_jst.date() == now_dt_jst.date()
 
 
 # ---------------------------------------------------------------------------

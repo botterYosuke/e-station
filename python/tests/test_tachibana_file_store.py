@@ -184,11 +184,16 @@ def test_atomic_write_leaves_no_tmp_on_success(tmp_path: Path) -> None:
 # JST = UTC+9 なので:
 #   "2026-04-27 06:00:00 UTC" = "2026-04-27 15:00:00 JST"
 #   "2026-04-27 03:00:00 UTC" = "2026-04-27 12:00:00 JST"
+#
+# 2026-04-27 修正: 旧仕様の「JST 15:30 cutoff」は廃止。同一 JST 日であれば
+# fresh とし、broker 側の真の有効性は validate_session_on_startup の API 呼出
+# に委ねる（spec L81: "session 検証が失敗した場合のみ再ログイン"）。
 # ---------------------------------------------------------------------------
 
 
-@freeze_time("2026-04-27 06:00:00")  # UTC → JST 15:00:00 (before cutoff 15:30)
-def test_is_session_fresh_same_day_before_cutoff() -> None:
+@freeze_time("2026-04-27 06:00:00")  # UTC → JST 15:00:00
+def test_is_session_fresh_same_day_morning() -> None:
+    """saved_at_ms が JST 同日午前 → True。"""
     saved_at_ms = _ms_for_jst(2026, 4, 27, 12, 0, 0)  # JST 12:00 同日
     session = TachibanaSession(
         url_request=_SAMPLE_SESSION.url_request,
@@ -202,10 +207,15 @@ def test_is_session_fresh_same_day_before_cutoff() -> None:
     assert _is_session_fresh(session) is True
 
 
-@freeze_time("2026-04-27 06:31:00")  # UTC → JST 15:31:00 (after cutoff)
-def test_is_session_fresh_same_day_at_cutoff_is_stale() -> None:
-    """saved_at_ms が JST 同日 15:30:00 ちょうど → False（境界は invalid 側）。"""
-    saved_at_ms = _ms_for_jst(2026, 4, 27, 15, 30, 0)  # JST 15:30:00 exactly
+@freeze_time("2026-04-27 10:00:00")  # UTC → JST 19:00:00
+def test_is_session_fresh_same_day_evening_after_old_cutoff() -> None:
+    """saved_at_ms が JST 同日 17:47（旧 cutoff 15:30 後） → True。
+
+    リグレッションガード: 2026-04-27 までは旧仕様の 15:30 JST cutoff により
+    夕方ログイン後の再起動でダイアログが必ず表示される不具合があった。
+    案 A 修正で同一 JST 日であれば fresh と判定する。
+    """
+    saved_at_ms = _ms_for_jst(2026, 4, 27, 17, 47, 0)  # JST 17:47 同日
     session = TachibanaSession(
         url_request=_SAMPLE_SESSION.url_request,
         url_master=_SAMPLE_SESSION.url_master,
@@ -215,13 +225,13 @@ def test_is_session_fresh_same_day_at_cutoff_is_stale() -> None:
         zyoutoeki_kazei_c="0",
         expires_at_ms=saved_at_ms,
     )
-    assert _is_session_fresh(session) is False
+    assert _is_session_fresh(session) is True
 
 
-@freeze_time("2026-04-27 06:31:00")  # UTC → JST 15:31:00
-def test_is_session_fresh_same_day_before_cutoff_minus_1s() -> None:
-    """saved_at_ms が JST 同日 15:29:59 → True。"""
-    saved_at_ms = _ms_for_jst(2026, 4, 27, 15, 29, 59)  # JST 15:29:59
+@freeze_time("2026-04-27 14:30:00")  # UTC → JST 23:30:00
+def test_is_session_fresh_same_day_late_night() -> None:
+    """saved_at_ms が JST 同日 23:00 → True（同一日付であれば常に fresh）。"""
+    saved_at_ms = _ms_for_jst(2026, 4, 27, 23, 0, 0)
     session = TachibanaSession(
         url_request=_SAMPLE_SESSION.url_request,
         url_master=_SAMPLE_SESSION.url_master,

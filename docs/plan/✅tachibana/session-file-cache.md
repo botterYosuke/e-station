@@ -98,7 +98,9 @@ def load_session(cache_dir: Path) -> TachibanaSession | None: ...
 // tachibana_p_no.json は作成しない（p_no は PNoCounter が管理する）
 ```
 
-`saved_at_ms` で当日判定する（JST 15:30 以降に保存 → 翌日朝に失効）。ファイルが壊れている場合は `None` を返す（例外を飲み込む）。ファイル書込みは `tempfile` + `os.replace` でアトミックに行う（Windows/Unix 両対応）。
+`saved_at_ms` で **同一 JST 日かどうかのみ**判定する（保存時刻 vs 現在時刻が同じ JST 日付なら fresh）。broker 真の有効期限（夜間閉局）は `validate_session_on_startup` の API 呼出に委ねるので、ここでは時刻 cutoff を持たない。ファイルが壊れている場合は `None` を返す（例外を飲み込む）。ファイル書込みは `tempfile` + `os.replace` でアトミックに行う（Windows/Unix 両対応）。
+
+> **2026-04-27 修正**: 旧仕様の「JST 15:30 cutoff」は廃止。15:30 JST 以降に保存された session も同日中は fresh と扱い、broker validate API が真の権威となる（spec L81: "session 検証が失敗した場合のみ再ログイン"）。旧仕様では夕方ログイン後の再起動でダイアログが必ず表示される回帰があった（`_is_session_fresh=False` → dialog fallthrough）。
 
 ### 3.2 `tachibana_login_flow.py` の変更
 
@@ -251,8 +253,9 @@ Command::RequestVenueLogin { request_id, venue }
 
 - `save_account` / `load_account`（user_id + is_demo のみ、password は保存しない）
 - `save_session` / `load_session`（p_no はファイル永続化しない — PNoCounter が Unix seconds で管理するため R4 単調増加 invariant を維持できる）
-- `_is_session_fresh(session)`: JST 当日 15:30 未満に保存されたものを有効判定
-  - 境界値は `< 15:30:00 JST` を有効とし、`>= 15:30:00 JST` は無効（境界は閉で無効側）
+- `_is_session_fresh(session)`: JST 同日に保存されたものを有効判定
+  - `saved_at_ms` の JST 日付 == 現在の JST 日付なら fresh
+  - 旧 15:30 JST cutoff は **2026-04-27 廃止**（broker 真の有効性は `validate_session_on_startup` API 呼出が権威）
   - `saved_at_ms > now_ms`（クロックスキューで保存時刻が未来になる場合）はセッションを**無効**扱いにする（保守的対処）
 - ファイルが壊れている場合は `None` を返す（例外を飲み込む）
 - ファイル書込みは `tempfile` + `os.replace` でアトミックに行う（`os.rename` ではなく `os.replace` を使用する。POSIX と Windows の両方で既存ファイルへの上書きが保証される）
