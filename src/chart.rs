@@ -690,6 +690,11 @@ impl ViewState {
         }
     }
 
+    #[cfg(test)]
+    pub fn latest_x(&self) -> u64 {
+        self.latest_x
+    }
+
     fn effective_tick_units(&self) -> i64 {
         if self.tick_size.units > 0 {
             self.tick_size.units

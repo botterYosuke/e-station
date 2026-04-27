@@ -7,6 +7,7 @@ pub mod unit;
 pub use adapter::{Event, proxy};
 use adapter::{Exchange, MarketKind};
 
+use serde_util::de_f32_from_number_or_string;
 use unit::price::de_price_from_number;
 use unit::price::{Price, PriceStep};
 pub use unit::qty::SizeUnit;
@@ -65,20 +66,38 @@ impl std::fmt::Display for Timeframe {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
 pub enum Timeframe {
+    // Wire format matches `Display` and the Python engine's `timeframe_to_str`.
+    // `alias` keeps backwards compat with old `saved-state.json` files that
+    // were serialized before the rename was introduced.
+    #[serde(rename = "100ms", alias = "MS100")]
     MS100,
+    #[serde(rename = "200ms", alias = "MS200")]
     MS200,
+    #[serde(rename = "300ms", alias = "MS300")]
     MS300,
+    #[serde(rename = "500ms", alias = "MS500")]
     MS500,
+    #[serde(rename = "1s", alias = "MS1000")]
     MS1000,
+    #[serde(rename = "1m", alias = "M1")]
     M1,
+    #[serde(rename = "3m", alias = "M3")]
     M3,
+    #[serde(rename = "5m", alias = "M5")]
     M5,
+    #[serde(rename = "15m", alias = "M15")]
     M15,
+    #[serde(rename = "30m", alias = "M30")]
     M30,
+    #[serde(rename = "1h", alias = "H1")]
     H1,
+    #[serde(rename = "2h", alias = "H2")]
     H2,
+    #[serde(rename = "4h", alias = "H4")]
     H4,
+    #[serde(rename = "12h", alias = "H12")]
     H12,
+    #[serde(rename = "1d", alias = "D1")]
     D1,
 }
 
@@ -190,7 +209,7 @@ impl SerTicker {
             return Ok(exchange);
         }
 
-        let normalized = ["Linear", "Inverse", "Spot"]
+        let normalized = ["Linear", "Inverse", "Spot", "Stock"]
             .into_iter()
             .find_map(|suffix| {
                 s.strip_suffix(suffix)
@@ -249,7 +268,7 @@ impl fmt::Display for SerTicker {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy)]
 pub struct Ticker {
     bytes: [u8; Ticker::MAX_LEN as usize],
     pub exchange: Exchange,
@@ -259,8 +278,23 @@ pub struct Ticker {
     has_display_symbol: bool,
 }
 
+impl PartialEq for Ticker {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes && self.exchange == other.exchange
+    }
+}
+
+impl Eq for Ticker {}
+
+impl std::hash::Hash for Ticker {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+        self.exchange.hash(state);
+    }
+}
+
 impl Ticker {
-    const MAX_LEN: u8 = 28;
+    pub const MAX_LEN: u8 = 28;
 
     pub fn new(ticker: &str, exchange: Exchange) -> Self {
         Self::new_with_display(ticker, exchange, None)
@@ -496,12 +530,34 @@ pub enum StreamPairKind {
     MultiSource(Vec<TickerInfo>),
 }
 
+/// Quote currency a ticker is denominated in. Drives the price formatter
+/// (`¥` vs `$`) and digit grouping. Intentionally has no `Default` impl —
+/// see Q18 / F-M6: a `Default = Usdt` would let an old persisted state
+/// silently restore Tachibana tickers as USDT-denominated, hiding the bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum QuoteCurrency {
+    Usdt,
+    Usdc,
+    Usd,
+    Jpy,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]
 pub struct TickerInfo {
     pub ticker: Ticker,
     pub min_ticksize: MinTicksize,
     pub min_qty: MinQtySize,
     pub contract_size: Option<ContractSize>,
+    /// Equity lot size — Tachibana stocks are 100 shares per lot. `None` for
+    /// crypto venues. `#[serde(default)]` keeps old `saved-state.json` files
+    /// loadable (F13).
+    #[serde(default)]
+    pub lot_size: Option<u32>,
+    /// Quote currency — `None` is allowed at deserialize time; the loader is
+    /// expected to fold in `Exchange::default_quote_currency()` so that the
+    /// UI formatter never sees `None`. See F-M6.
+    #[serde(default)]
+    pub quote_currency: Option<QuoteCurrency>,
 }
 
 impl TickerInfo {
@@ -511,11 +567,50 @@ impl TickerInfo {
         min_qty: f32,
         contract_size: Option<f32>,
     ) -> Self {
+        let quote_currency = Some(ticker.exchange.default_quote_currency());
         Self {
             ticker,
             min_ticksize: MinTicksize::from(min_ticksize),
             min_qty: MinQtySize::from(min_qty),
             contract_size: contract_size.map(ContractSize::from),
+            lot_size: None,
+            quote_currency,
+        }
+    }
+
+    /// Like `new`, but lets a venue (e.g. Tachibana) set the equity lot size.
+    pub fn new_stock(ticker: Ticker, min_ticksize: f32, min_qty: f32, lot_size: u32) -> Self {
+        let quote_currency = Some(ticker.exchange.default_quote_currency());
+        Self {
+            ticker,
+            min_ticksize: MinTicksize::from(min_ticksize),
+            min_qty: MinQtySize::from(min_qty),
+            contract_size: None,
+            lot_size: Some(lot_size),
+            quote_currency,
+        }
+    }
+
+    /// Resolved quote currency — falls back to the `Exchange` default when
+    /// the persisted value is missing.
+    pub fn resolved_quote_currency(&self) -> QuoteCurrency {
+        self.quote_currency
+            .unwrap_or_else(|| self.ticker.exchange.default_quote_currency())
+    }
+
+    /// Fold in the venue's default quote currency when the persisted /
+    /// IPC-received value is `None` (M1, F-M6a). This is the single
+    /// authoritative normalization helper — call it from every load path
+    /// so the UI formatter never sees `quote_currency: None`:
+    ///
+    /// - `data::layout::pane` saved-state.json deserialize
+    /// - `engine_client::backend` IPC `EngineEvent::TickerInfo` receive
+    ///
+    /// Centralizing the fold here means a future venue addition only has to
+    /// touch `Exchange::default_quote_currency()`.
+    pub fn normalize_after_load(&mut self) {
+        if self.quote_currency.is_none() {
+            self.quote_currency = Some(self.ticker.exchange.default_quote_currency());
         }
     }
 
@@ -642,6 +737,7 @@ pub struct TickerStats {
     #[serde(deserialize_with = "de_price_from_number")]
     pub mark_price: Price,
     /// 24h price change in percentage (e.g., 0.05 for +5%, -0.02 for -2%)
+    #[serde(deserialize_with = "de_f32_from_number_or_string")]
     pub daily_price_chg: f32,
     /// 24h volume in USD
     #[serde(deserialize_with = "de_qty_from_number")]
@@ -731,5 +827,35 @@ impl TickMultiplier {
     pub fn multiply_with_min_tick_step(&self, ticker_info: TickerInfo) -> PriceStep {
         let min_step: PriceStep = ticker_info.min_ticksize.into();
         self.multiply_step(min_step)
+    }
+}
+
+#[cfg(test)]
+mod ticker_stats_tests {
+    use super::*;
+
+    // Regression: Python workers send `daily_price_chg` as str(...), which
+    // previously collapsed every `TickerStats` payload and left the sidebar
+    // empty on startup. See phase-7-ui-regression-remediation.md.
+    #[test]
+    fn daily_price_chg_accepts_stringified_number() {
+        let json = r#"{
+            "mark_price": 12345.67,
+            "daily_price_chg": "1.819720694033015",
+            "daily_volume": 1000.0
+        }"#;
+        let stats: TickerStats = serde_json::from_str(json).expect("stringified f32 parses");
+        assert!((stats.daily_price_chg - 1.819_720_7).abs() < 1e-4);
+    }
+
+    #[test]
+    fn daily_price_chg_accepts_json_number() {
+        let json = r#"{
+            "mark_price": 12345.67,
+            "daily_price_chg": -2.5,
+            "daily_volume": 1000.0
+        }"#;
+        let stats: TickerStats = serde_json::from_str(json).expect("numeric f32 parses");
+        assert!((stats.daily_price_chg - (-2.5)).abs() < 1e-6);
     }
 }

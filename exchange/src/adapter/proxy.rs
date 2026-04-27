@@ -1,65 +1,6 @@
-use crate::error::AdapterError;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
-    net::TcpStream,
-};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
-
-const PROXY_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const PROXY_TUNNEL_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Debug)]
-pub enum ProxyStream {
-    Plain(TcpStream),
-    TlsToProxy(Box<tokio_rustls::client::TlsStream<TcpStream>>),
-}
-
-impl AsyncRead for ProxyStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        match &mut *self {
-            ProxyStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            ProxyStream::TlsToProxy(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for ProxyStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        match &mut *self {
-            ProxyStream::Plain(s) => Pin::new(s).poll_write(cx, data),
-            ProxyStream::TlsToProxy(s) => Pin::new(s).poll_write(cx, data),
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match &mut *self {
-            ProxyStream::Plain(s) => Pin::new(s).poll_flush(cx),
-            ProxyStream::TlsToProxy(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match &mut *self {
-            ProxyStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
-            ProxyStream::TlsToProxy(s) => Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
+// ── ProxyScheme ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ProxyScheme {
@@ -93,6 +34,8 @@ impl std::fmt::Display for ProxyScheme {
     }
 }
 
+// ── ProxyAuth ─────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ProxyAuth {
     username: Username,
@@ -118,6 +61,8 @@ impl ProxyAuth {
         self.password.as_str()
     }
 }
+
+// ── Proxy ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Proxy {
@@ -232,8 +177,6 @@ impl Proxy {
     }
 
     fn host_with_ipv6_brackets(host: &str) -> String {
-        // If `host` looks like an IPv6 literal and is not already bracketed,
-        // add brackets to produce a valid URL authority / socket address.
         let h = host.trim();
         if h.contains(':') && !h.starts_with('[') && !h.ends_with(']') {
             format!("[{h}]")
@@ -243,13 +186,6 @@ impl Proxy {
     }
 
     fn host_for_url_authority(&self) -> String {
-        // url::Url::host_str() returns IPv6 without brackets (e.g. "2001:db8::1"),
-        // but URL authority form requires brackets: "http://[2001:db8::1]:8080".
-        Self::host_with_ipv6_brackets(&self.host)
-    }
-
-    fn host_for_socket_addr(&self) -> String {
-        // Same bracket rule for "host:port" socket strings.
         Self::host_with_ipv6_brackets(&self.host)
     }
 
@@ -317,155 +253,6 @@ impl Proxy {
             None => self.to_url_string_no_auth(),
         }
     }
-
-    pub async fn connect_tcp(
-        &self,
-        target_host: &str,
-        target_port: u16,
-    ) -> Result<ProxyStream, AdapterError> {
-        match self.scheme {
-            ProxyScheme::Http => {
-                let proxy_addr = format!("{}:{}", self.host_for_socket_addr(), self.port);
-
-                let mut stream = tokio::time::timeout(
-                    PROXY_TCP_CONNECT_TIMEOUT,
-                    TcpStream::connect(&proxy_addr),
-                )
-                .await
-                .map_err(|_| {
-                    AdapterError::WebsocketError(format!("Proxy TCP connect timeout: {proxy_addr}"))
-                })?
-                .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-                let proxy_auth = self.auth.as_ref().map(|auth| {
-                    let token = BASE64.encode(format!("{}:{}", auth.username(), auth.password()));
-                    format!("Basic {token}")
-                });
-
-                tokio::time::timeout(
-                    PROXY_TUNNEL_TIMEOUT,
-                    http_connect_tunnel(
-                        &mut stream,
-                        target_host,
-                        target_port,
-                        proxy_auth.as_deref(),
-                    ),
-                )
-                .await
-                .map_err(|_| AdapterError::WebsocketError("Proxy CONNECT timeout".to_string()))??;
-
-                Ok(ProxyStream::Plain(stream))
-            }
-            ProxyScheme::Https => {
-                let proxy_addr = format!("{}:{}", self.host_for_socket_addr(), self.port);
-
-                let tcp = tokio::time::timeout(
-                    PROXY_TCP_CONNECT_TIMEOUT,
-                    TcpStream::connect(&proxy_addr),
-                )
-                .await
-                .map_err(|_| {
-                    AdapterError::WebsocketError(format!("Proxy TCP connect timeout: {proxy_addr}"))
-                })?
-                .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-                let server_name: tokio_rustls::rustls::ServerName =
-                    tokio_rustls::rustls::ServerName::try_from(self.host.as_str()).map_err(
-                        |_| AdapterError::ParseError("invalid proxy dnsname".to_string()),
-                    )?;
-
-                let mut tls = super::connect::TLS_CONNECTOR
-                    .connect(server_name, tcp)
-                    .await
-                    .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-                let proxy_auth = self.auth.as_ref().map(|auth| {
-                    let token = BASE64.encode(format!("{}:{}", auth.username(), auth.password()));
-                    format!("Basic {token}")
-                });
-
-                tokio::time::timeout(
-                    PROXY_TUNNEL_TIMEOUT,
-                    http_connect_tunnel(&mut tls, target_host, target_port, proxy_auth.as_deref()),
-                )
-                .await
-                .map_err(|_| AdapterError::WebsocketError("Proxy CONNECT timeout".to_string()))??;
-
-                Ok(ProxyStream::TlsToProxy(Box::new(tls)))
-            }
-            ProxyScheme::Socks5 => {
-                let proxy_addr = (self.host.as_str(), self.port);
-
-                let addrs = tokio::net::lookup_host((target_host, target_port))
-                    .await
-                    .map_err(|e| {
-                        AdapterError::WebsocketError(format!(
-                            "DNS lookup failed for {target_host}:{target_port}: {e}"
-                        ))
-                    })?;
-
-                let mut last_err: Option<String> = None;
-
-                for addr in addrs {
-                    let attempt = tokio::time::timeout(PROXY_TCP_CONNECT_TIMEOUT, async {
-                        match self.auth.as_ref() {
-                            Some(auth) => {
-                                tokio_socks::tcp::Socks5Stream::connect_with_password(
-                                    proxy_addr,
-                                    addr, // IP address => local DNS semantics
-                                    auth.username(),
-                                    auth.password(),
-                                )
-                                .await
-                                .map(|s| s.into_inner())
-                            }
-                            None => tokio_socks::tcp::Socks5Stream::connect(proxy_addr, addr)
-                                .await
-                                .map(|s| s.into_inner()),
-                        }
-                    })
-                    .await;
-
-                    match attempt {
-                        Ok(Ok(stream)) => return Ok(ProxyStream::Plain(stream)),
-                        Ok(Err(e)) => last_err = Some(e.to_string()),
-                        Err(_) => last_err = Some("SOCKS connect timeout".to_string()),
-                    }
-                }
-
-                Err(AdapterError::WebsocketError(format!(
-                    "SOCKS5 connect failed: {}",
-                    last_err.unwrap_or_else(|| "no resolved addresses".to_string())
-                )))
-            }
-
-            ProxyScheme::Socks5h => {
-                let proxy_addr = (self.host.as_str(), self.port);
-                let target_addr = (target_host, target_port);
-
-                let stream = tokio::time::timeout(PROXY_TCP_CONNECT_TIMEOUT, async {
-                    match self.auth.as_ref() {
-                        Some(auth) => tokio_socks::tcp::Socks5Stream::connect_with_password(
-                            proxy_addr,
-                            target_addr,
-                            auth.username(),
-                            auth.password(),
-                        )
-                        .await
-                        .map(|s| s.into_inner()),
-                        None => tokio_socks::tcp::Socks5Stream::connect(proxy_addr, target_addr)
-                            .await
-                            .map(|s| s.into_inner()),
-                    }
-                })
-                .await
-                .map_err(|_| AdapterError::WebsocketError("SOCKS connect timeout".to_string()))?
-                .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-                Ok(ProxyStream::Plain(stream))
-            }
-        }
-    }
 }
 
 impl std::fmt::Display for Proxy {
@@ -473,6 +260,8 @@ impl std::fmt::Display for Proxy {
         f.write_str(&self.to_log_string())
     }
 }
+
+// ── Username / Password (validated newtypes) ──────────────────────────────────
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -565,125 +354,4 @@ impl From<Password> for String {
     fn from(value: Password) -> Self {
         value.0
     }
-}
-
-fn authority_host_port(host: &str, port: u16) -> String {
-    let host = host.trim();
-    let host = if host.contains(':') && !host.starts_with('[') && !host.ends_with(']') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    format!("{host}:{port}")
-}
-
-async fn http_connect_tunnel<S>(
-    stream: &mut S,
-    target_host: &str,
-    target_port: u16,
-    proxy_authorization: Option<&str>,
-) -> Result<(), AdapterError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let authority = authority_host_port(target_host, target_port);
-
-    let mut req = format!(
-        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: keep-alive\r\n"
-    );
-
-    if let Some(auth) = proxy_authorization {
-        req.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
-    }
-    req.push_str("\r\n");
-
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-
-    let mut buf = Vec::with_capacity(1024);
-    let mut tmp = [0u8; 512];
-    const MAX_HDR: usize = 16 * 1024;
-
-    loop {
-        let n = stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
-        if n == 0 {
-            return Err(AdapterError::WebsocketError(
-                "Proxy closed connection during CONNECT".to_string(),
-            ));
-        }
-        buf.extend_from_slice(&tmp[..n]);
-
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        if buf.len() > MAX_HDR {
-            return Err(AdapterError::WebsocketError(
-                "Proxy CONNECT response headers too large".to_string(),
-            ));
-        }
-    }
-
-    let hdr = String::from_utf8_lossy(&buf);
-    let mut lines = hdr.lines();
-    let status_line = lines.next().unwrap_or("<no status line>");
-
-    let code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok());
-
-    match code {
-        Some(200) => Ok(()),
-        Some(407) => Err(AdapterError::WebsocketError(format!(
-            "Proxy CONNECT failed: {status_line} (proxy auth required)"
-        ))),
-        Some(code) => Err(AdapterError::WebsocketError(format!(
-            "Proxy CONNECT failed: {status_line} (status={code})"
-        ))),
-        None => Err(AdapterError::WebsocketError(format!(
-            "Proxy CONNECT failed: {status_line}"
-        ))),
-    }
-}
-
-pub fn try_apply_proxy(
-    builder: reqwest::ClientBuilder,
-    proxy_cfg: Option<&Proxy>,
-) -> reqwest::ClientBuilder {
-    let Some(cfg) = proxy_cfg else {
-        return builder;
-    };
-
-    let (scheme, auth) = (cfg.scheme(), cfg.auth());
-
-    let proxy_url = match (scheme, auth) {
-        (ProxyScheme::Socks5 | ProxyScheme::Socks5h, Some(_auth)) => cfg.to_url_string(),
-        _ => cfg.to_url_string_no_auth(),
-    };
-
-    let proxy = match reqwest::Proxy::all(proxy_url) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!(
-                "Failed to configure proxy (scheme={}): {}",
-                cfg.scheme().as_str(),
-                e
-            );
-            return builder;
-        }
-    };
-    let proxy = match (scheme, auth) {
-        (ProxyScheme::Http | ProxyScheme::Https, Some(auth)) => {
-            proxy.basic_auth(auth.username(), auth.password())
-        }
-        _ => proxy,
-    };
-
-    log::debug!("Using proxy for REST: {}", cfg.to_log_string());
-    builder.proxy(proxy)
 }

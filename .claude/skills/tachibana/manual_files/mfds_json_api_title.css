@@ -1,0 +1,81 @@
+@charset "ShiftJIS";
+/*
+ * Product:
+ *	mfds (realtime stock price board application modules).
+ *
+ * Copyright:
+ * 	Copyright (C) 2000 GOODLOTS CO.,LTD. ALL RIGHT RESERVED.
+ * 
+ * License:
+ *	Released under the MIT license
+ *	https://www.e-shiten.jp/e_api/LICENSE.txt
+ *
+ * Revision:
+ *	$Id: mfds_json_api_title.css 3578 2025-08-26 00:08:35Z yoshi $
+ * 
+ * Function:
+ 	MFDS, json-api HP menu module (v4.6-000).
+ *
+ * Create:
+ *	2023.12.31
+ *	Y.Yoshizawa
+ */
+
+body
+{
+	font-family:		Meiryo;			/* Meiryo UI				*/
+	color:			#000000;		/* 文字色－黒				*/
+	background-color:	#fafafa;		/* 背景色－白				*/
+	background-position:	left top;		/* 背景位置				*/
+	cursor:			default;		/* マウスカーソル－デフォルト		*/
+	margin:			0px;
+}
+
+
+.page_logo
+{
+	height:			28px;			/* 高さ					*/
+	width:			30px;			/* 横幅					*/
+}
+
+
+.page_title
+{
+	font-size:		20px;			/* 文字サイズ				*/
+	vertical-align:		top;			/* 縦位置				*/
+	padding:		0px 0px 0px 4px;	/* マージン（上右下左）			*/
+}
+
+
+.area_title
+{
+	width:			100%;
+	height:			36px;
+	position:		fixed;
+	background:		linear-gradient(#fefefe,#fafafa);		/* 背景色	*/
+	overflow:		hidden;
+	z-index:		1;
+/*	border:			1px #c0c0c0 solid;	/* セルの境界線				*/
+}
+
+.area_title_inside
+{
+	margin:			4px 4px 4px 4px;	/* マージン（上右下左）			*/
+}
+
+.area_body
+{
+	top:			44px;
+	width:			100%;
+	position:		absolute;
+	background:		linear-gradient(#fefefe,#fafafa);		/* 背景色	*/
+	overflow:		hidden;
+}
+
+.page_copyright
+{
+	margin:			0px 4px 4px 4px;	/* マージン（上右下左）			*/
+/*	border:			1px #c0c0c0 solid;	/* セルの境界線				*/
+}
+
+

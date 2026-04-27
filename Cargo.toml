@@ -12,14 +12,15 @@ homepage.workspace = true
 [workspace.package]
 version = "0.8.7"
 edition = "2024"
-repository = "https://github.com/flowsurface-rs/flowsurface"
+repository = "https://github.com/botterYosuke/e-station"
 homepage = "https://flowsurface.com"
 
 [workspace]
-members = [ "data", "exchange"]
+members = [ "data", "exchange", "engine-client"]
 
 [workspace.dependencies]
 iced_core = { version = "0.14.0", features = ["serde"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 chrono = { version = "0.4.40", default-features = false, features = ["serde", "now", "clock"] }
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 serde_json = "1.0.140"
@@ -32,8 +33,11 @@ rustc-hash = "2.1.1"
 enum-map = "2.7.3"
 url = "2.5.8"
 uuid = { version = "1.11.0", features = ["v4"] }
+secrecy = { version = "0.8", features = ["serde"] }
+zeroize = { version = "1.8", features = ["serde"] }
 exchange = { version = "0.8.7", path = "exchange", package = "flowsurface-exchange" }
 data = { version = "0.8.7", path = "data", package = "flowsurface-data" }
+engine-client = { version = "0.8.7", path = "engine-client", package = "flowsurface-engine-client" }
 
 [dependencies]
 iced = { version = "0.14.0", default-features = false, features = [
@@ -67,6 +71,18 @@ rand = "0.9.2"
 iced_wgpu = "0.14.0"
 exchange.workspace = true
 data.workspace = true
+engine-client.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync"] }
+async-stream = "0.3"
+zeroize.workspace = true
+xxhash-rust.workspace = true
 
 [features]
 debug = ["iced/hot"]
+
+[dev-dependencies]
+futures = "0.3"
+syn = { version = "2", features = ["full", "visit"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"

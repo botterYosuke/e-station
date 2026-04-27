@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Rust: Debug (CodeLLDB)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/flowsurface.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "${workspaceFolder}/.venv/Scripts;${env:PATH}"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "sourceLanguages": [
+                "rust"
+            ],
+            "preLaunchTask": "cargo build"
+        }
+    ]
+}

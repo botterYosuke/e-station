@@ -1,14 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api;
 mod audio;
 mod chart;
+mod cli;
 mod connector;
 mod layout;
 mod logger;
 mod modal;
 mod notify;
+mod replay_api;
 mod screen;
 mod style;
+mod venue_state;
 mod version;
 mod widget;
 mod window;
@@ -24,6 +28,7 @@ use modal::{
 use modal::{dashboard_modal, main_dialog_modal};
 use notify::Notifications;
 use screen::dashboard::{self, Dashboard};
+use venue_state::{Trigger, VenueEvent, VenueState};
 use widget::{
     confirm_dialog_container,
     toast::{self, Toast},
@@ -37,12 +42,545 @@ use iced::{
         tooltip::Position as TooltipPosition,
     },
 };
-use std::{borrow::Cow, collections::HashMap, vec};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, vec};
+
+// ── Engine-client globals ─────────────────────────────────────────────────────
+
+/// Watch channel publishing the live `EngineConnection`. The recovery loop
+/// updates this on every successful handshake, and the engine-status
+/// subscription forwards each new value into iced as
+/// `Message::EngineConnected`. The static is only touched at startup
+/// (initialised in `main()`) and from the recovery loop / subscription
+/// stream — never from `Flowsurface::update()` (invariant T35-H7).
+static ENGINE_CONNECTION_TX: std::sync::OnceLock<
+    tokio::sync::watch::Sender<Option<Arc<engine_client::EngineConnection>>>,
+> = std::sync::OnceLock::new();
+
+/// `true` while the Python engine is being restarted (ProcessManager restart loop).
+/// Shared between the background restart task and the Iced subscription.
+static ENGINE_RESTARTING: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::OnceLock::new();
+
+/// Active `ProcessManager` for managed mode (set when `--data-engine-url` is
+/// not supplied).  UI proxy changes reach the manager through this so that
+/// `SetProxy` is replayed on every recovery handshake.
+static ENGINE_MANAGER: std::sync::OnceLock<Arc<engine_client::ProcessManager>> =
+    std::sync::OnceLock::new();
+
+/// Mode-agnostic post-handshake VenueReady cache. Both managed mode
+/// (`ProcessManager`) and external mode (`--data-engine-url`) write
+/// here from a bridge task that subscribes to the connection's
+/// broadcast events **before** the iced subscription wakes up. This
+/// closes the race in which the engine emits `VenueReady` between
+/// `connect()` returning and the iced subscription calling
+/// `subscribe_events()` (broadcast does not replay). Reviewer
+/// 2026-04-26 R3 (HIGH-2).
+static VENUE_READY_CACHE: std::sync::OnceLock<
+    Arc<tokio::sync::Mutex<rustc_hash::FxHashSet<String>>>,
+> = std::sync::OnceLock::new();
+
+/// Receiver end of the HTTP control API channel (port 9876).  Set once in
+/// `main()` after `replay_api::spawn` runs.  `replay_api_stream` takes
+/// ownership of the inner `Receiver` via `Option::take()` on first poll;
+/// subsequent calls (Iced subscription identity is stable so there is only
+/// one) see `None` and return immediately — no panic, no double-receive.
+static CONTROL_API_RX: std::sync::OnceLock<
+    std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<replay_api::ControlApiCommand>>>,
+> = std::sync::OnceLock::new();
+
+/// Spawn a long-lived bridge that mirrors the connection's broadcast
+/// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
+/// here, before the connection is published to `ENGINE_CONNECTION_TX`,
+/// captures every `VenueReady`/`VenueError` even if iced is still
+/// starting up. The task self-terminates when the broadcast channel
+/// closes (i.e. when the connection drops).
+fn spawn_venue_ready_bridge(rt: &tokio::runtime::Runtime, conn: &engine_client::EngineConnection) {
+    let cache = match VENUE_READY_CACHE.get() {
+        Some(cache) => Arc::clone(cache),
+        None => return,
+    };
+    let mut event_rx = conn.subscribe_events();
+    rt.spawn(async move {
+        use engine_client::dto::EngineEvent;
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match event_rx.recv().await {
+                Ok(EngineEvent::VenueReady { venue, .. }) => {
+                    cache.lock().await.insert(venue);
+                }
+                // Invalidate the readiness cache aggressively when the
+                // venue lifecycle leaves `Ready`. Without these arms a
+                // stale `Ready` from a previous session could survive
+                // a re-login dialog open / cancel pair and a later
+                // engine reconnect would resurrect it via
+                // `Message::EngineConnected`'s synthesized
+                // `VenueEvent::Ready`. Reviewer 2026-04-26 R4
+                // (MEDIUM-3).
+                Ok(EngineEvent::VenueError { venue, .. }) => {
+                    cache.lock().await.remove(&venue);
+                }
+                Ok(EngineEvent::VenueLoginStarted { venue, .. }) => {
+                    cache.lock().await.remove(&venue);
+                }
+                Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
+                    cache.lock().await.remove(&venue);
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(n)) => {
+                    log::warn!(
+                        "venue_ready_bridge lagged, dropped {n} events — UI may briefly mis-bootstrap"
+                    );
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Sync probe of the bridge cache — never blocks `Flowsurface::update`.
+/// Returns `false` on lock contention (rare; bridge holds the lock
+/// only for the duration of a single `HashSet` mutation), which means
+/// the UI may briefly miss a synthesized `VenueReady` and rely on the
+/// next live event instead. That's the same fallback semantics as
+/// `ProcessManager::try_is_venue_ready`.
+fn cached_venue_is_ready(venue: &str) -> bool {
+    VENUE_READY_CACHE
+        .get()
+        .and_then(|cache| cache.try_lock().ok().map(|state| state.contains(venue)))
+        .unwrap_or(false)
+}
+
+/// Wire-level identifier for the Tachibana venue. Centralised so a
+/// future rename or IPC schema change is a one-line patch instead of
+/// a cross-file grep.
+const TACHIBANA_VENUE_NAME: &str = "tachibana";
+
+/// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
+/// Referenced during initial setup and on every engine reconnect.
+/// **Includes `Tachibana`** — without the entry the venue would never
+/// receive an `EngineClientBackend` registration and every
+/// `fetch_ticker_metadata(Tachibana, …)` call would error with
+/// `No adapter handle configured`. Reviewer 2026-04-26 R4 (HIGH-1).
+const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
+    (exchange::adapter::Venue::Binance, "binance"),
+    (exchange::adapter::Venue::Bybit, "bybit"),
+    (exchange::adapter::Venue::Hyperliquid, "hyperliquid"),
+    (exchange::adapter::Venue::Okex, "okex"),
+    (exchange::adapter::Venue::Mexc, "mexc"),
+    (exchange::adapter::Venue::Tachibana, TACHIBANA_VENUE_NAME),
+];
+
+/// Bind to 127.0.0.1:0 to ask the OS for a free port, then immediately close
+/// the socket and return the port number for the engine subprocess to bind.
+///
+/// There is a small race window between releasing the port here and the engine
+/// rebinding it, but Phase 6 keeps Python on a TCP listener (the only IPC
+/// transport supported across all platforms) so this is the standard pattern.
+fn pick_free_port() -> Option<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+    listener.local_addr().ok().map(|a| a.port())
+}
 
 fn main() {
+    let cli_args = cli::CliArgs::parse();
+
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
+    // Initialise the engine-restarting watch channel (used even in native mode
+    // so the subscription is always wired up consistently).
+    // Keep `_restarting_rx` alive for the duration of main() so that send()
+    // never returns Err(no-receivers) before Iced's engine_status_stream subscribes.
+    let (restarting_tx, _restarting_rx) = tokio::sync::watch::channel(false);
+    ENGINE_RESTARTING.set(restarting_tx).ok();
+
+    // Engine-connection watch channel — updated by the recovery loop and
+    // forwarded into iced by `engine_status_stream`. Keep `_conn_rx` alive
+    // for the duration of `main()` so `send()` never sees Err(no-receivers)
+    // before the iced subscription wires up its own subscriber.
+    let (conn_tx, _conn_rx) =
+        tokio::sync::watch::channel::<Option<Arc<engine_client::EngineConnection>>>(None);
+    ENGINE_CONNECTION_TX.set(conn_tx).ok();
+
+    // VenueReady cache shared between both engine modes — see static
+    // doc comment on `VENUE_READY_CACHE`.
+    VENUE_READY_CACHE
+        .set(Arc::new(tokio::sync::Mutex::new(
+            rustc_hash::FxHashSet::default(),
+        )))
+        .ok();
+
+    // The Python data engine is normally spawned and supervised in-process by
+    // a `ProcessManager` running on a dedicated tokio runtime (Phase 6 default).
+    // `--data-engine-url` overrides this to connect to an externally managed
+    // engine (used for development / debugging).
+    //
+    // A dedicated tokio runtime keeps the connection's background IO tasks
+    // alive for the full application lifetime.
+    let _engine_rt: Option<tokio::runtime::Runtime> = if let Some(ref url) =
+        cli_args.data_engine_url
+    {
+        let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
+        let url_str = url.to_string();
+
+        log::info!("Data engine URL: {url_str} — connecting …");
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("engine-client")
+            .build()
+            .expect("Failed to build engine-client tokio runtime");
+
+        match rt.block_on(engine_client::EngineConnection::connect(&url_str, &token)) {
+            Ok(conn) => {
+                log::info!("Connected to external data engine at {url_str}");
+                let conn = Arc::new(conn);
+                // External mode has no ProcessManager → its
+                // `apply_after_handshake` cache is unavailable. Spawn
+                // the bridge BEFORE publishing the connection so the
+                // first `VenueReady` cannot race past the iced
+                // subscription. Reviewer 2026-04-26 R3 (HIGH-2).
+                spawn_venue_ready_bridge(&rt, &conn);
+                if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+                    tx.send(Some(Arc::clone(&conn))).ok();
+                }
+
+                // Push saved proxy to engine before Iced starts so that the
+                // very first subscription fires through the proxy, not direct.
+                // Uses the same resolution order as load_saved_state():
+                // proxy-url.json → state.json fallback → keychain auth.
+                if let Some(proxy) = data::config::proxy::load_startup_proxy() {
+                    let proxy_url = Some(proxy.to_url_string());
+                    match rt.block_on(
+                        conn.send(engine_client::dto::Command::SetProxy { url: proxy_url }),
+                    ) {
+                        Ok(()) => log::info!("Initial proxy sent to engine"),
+                        Err(e) => log::warn!("Failed to send initial proxy: {e}"),
+                    }
+                }
+
+                // Monitor the connection and reconnect with exponential backoff on loss.
+                let reconnect_url = url_str.clone();
+                let reconnect_token = token.clone();
+                rt.spawn(async move {
+                    let mut current_conn = conn;
+                    loop {
+                        current_conn.wait_closed().await;
+                        log::warn!("external engine connection lost");
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(true).ok();
+                        }
+
+                        let mut delay = std::time::Duration::from_secs(1);
+                        loop {
+                            tokio::time::sleep(delay).await;
+                            log::info!("Attempting to reconnect to engine at {reconnect_url} …");
+                            match engine_client::EngineConnection::connect(
+                                &reconnect_url,
+                                &reconnect_token,
+                            )
+                            .await
+                            {
+                                Ok(new_conn) => {
+                                    log::info!("Reconnected to data engine at {reconnect_url}");
+                                    let new_conn = Arc::new(new_conn);
+                                    // Drain the cache so the bridge
+                                    // for this fresh connection writes
+                                    // its current view, not the stale
+                                    // one from before the drop.
+                                    if let Some(cache) = VENUE_READY_CACHE.get() {
+                                        cache.lock().await.clear();
+                                    }
+                                    // Re-spawn the bridge against the
+                                    // fresh connection — the previous
+                                    // bridge's recv loop has already
+                                    // exited via RecvError::Closed.
+                                    let rt_handle = tokio::runtime::Handle::current();
+                                    let bridge_cache = VENUE_READY_CACHE.get().cloned();
+                                    if let Some(cache) = bridge_cache {
+                                        let mut event_rx = new_conn.subscribe_events();
+                                        rt_handle.spawn(async move {
+                                            use engine_client::dto::EngineEvent;
+                                            use tokio::sync::broadcast::error::RecvError;
+                                            loop {
+                                                match event_rx.recv().await {
+                                                    Ok(EngineEvent::VenueReady {
+                                                        venue, ..
+                                                    }) => {
+                                                        cache.lock().await.insert(venue);
+                                                    }
+                                                    Ok(EngineEvent::VenueError {
+                                                        venue, ..
+                                                    }) => {
+                                                        cache.lock().await.remove(&venue);
+                                                    }
+                                                    Ok(EngineEvent::VenueLoginStarted {
+                                                        venue,
+                                                        ..
+                                                    }) => {
+                                                        cache.lock().await.remove(&venue);
+                                                    }
+                                                    Ok(EngineEvent::VenueLoginCancelled {
+                                                        venue,
+                                                        ..
+                                                    }) => {
+                                                        cache.lock().await.remove(&venue);
+                                                    }
+                                                    Ok(_) => {}
+                                                    Err(RecvError::Lagged(n)) => {
+                                                        log::warn!(
+                                                            "venue_ready_bridge lagged, dropped {n}"
+                                                        );
+                                                    }
+                                                    Err(RecvError::Closed) => break,
+                                                }
+                                            }
+                                        });
+                                    }
+                                    if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+                                        tx.send(Some(Arc::clone(&new_conn))).ok();
+                                    }
+                                    if let Some(tx) = ENGINE_RESTARTING.get() {
+                                        tx.send(false).ok();
+                                    }
+                                    current_conn = new_conn;
+                                    break;
+                                }
+                                Err(e) => {
+                                    log::warn!("Reconnect failed: {e}, retrying in {delay:?}");
+                                    delay = (delay * 2).min(std::time::Duration::from_secs(60));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                log::error!("Failed to connect to data engine at {url_str}: {e}");
+            }
+        }
+
+        Some(rt)
+    } else {
+        // Managed mode: spawn the bundled Python engine, supervise restarts.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("engine-client")
+            .build()
+            .expect("Failed to build engine-client tokio runtime");
+
+        let port = pick_free_port().unwrap_or(0);
+        if port == 0 {
+            log::error!("Could not allocate a loopback port for the Python data engine");
+            eprintln!("error: could not allocate a loopback port for the data engine");
+            std::process::exit(1);
+        }
+
+        let cmd = match engine_client::EngineCommand::resolve_with(
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                .as_deref(),
+            cli_args.engine_cmd.as_deref(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Failed to resolve engine command: {e}");
+                eprintln!("error: failed to resolve data-engine command: {e}");
+                std::process::exit(1);
+            }
+        };
+        log::info!("Spawning Python data engine: {cmd:?} on 127.0.0.1:{port}");
+
+        let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
+        ENGINE_MANAGER.set(Arc::clone(&manager)).ok();
+
+        // Push the saved proxy into the manager so it is re-applied after every
+        // handshake (initial spawn + every recovery).
+        if let Some(proxy) = data::config::proxy::load_startup_proxy() {
+            rt.block_on(manager.set_proxy(Some(proxy.to_url_string())));
+        }
+
+        let url = format!("ws://127.0.0.1:{port}");
+        log::info!("Engine URL: {url}");
+
+        // Spawn the recovery loop; track each handshake to swap ENGINE_CONNECTION.
+        let manager_clone = Arc::clone(&manager);
+        rt.spawn(async move {
+            // Inner loop: each iteration corresponds to one handshake/lifecycle.
+            //
+            // We can't reuse `run_with_recovery` directly because it doesn't
+            // expose the live `EngineConnection` to its caller — we need the
+            // connection to publish into `ENGINE_CONNECTION`.
+            let mut backoff_ms: u64 = 500;
+            loop {
+                match manager_clone.start(port).await {
+                    Ok(conn) => {
+                        backoff_ms = 500;
+                        let conn = Arc::new(conn);
+
+                        // Drain stale entries before the bridge for the
+                        // new connection takes over. apply_after_handshake
+                        // already populated `ProcessManager.venue_ready_state`,
+                        // but the global cache must reflect this fresh
+                        // connection's view, so a recovery loop iteration
+                        // doesn't carry stale ready-state from a prior
+                        // disconnect.
+                        if let Some(cache) = VENUE_READY_CACHE.get() {
+                            cache.lock().await.clear();
+                        }
+                        // Subscribe events on this connection BEFORE
+                        // publishing it to the watch channel — bridges
+                        // any window between iced's subscription and
+                        // the engine's first venue lifecycle emit.
+                        // Reviewer 2026-04-26 R3 (HIGH-2).
+                        let bridge_cache = VENUE_READY_CACHE.get().cloned();
+                        if let Some(cache) = bridge_cache {
+                            let mut event_rx = conn.subscribe_events();
+                            tokio::spawn(async move {
+                                use engine_client::dto::EngineEvent;
+                                use tokio::sync::broadcast::error::RecvError;
+                                loop {
+                                    match event_rx.recv().await {
+                                        Ok(EngineEvent::VenueReady { venue, .. }) => {
+                                            cache.lock().await.insert(venue);
+                                        }
+                                        Ok(EngineEvent::VenueError { venue, .. }) => {
+                                            cache.lock().await.remove(&venue);
+                                        }
+                                        Ok(EngineEvent::VenueLoginStarted { venue, .. }) => {
+                                            cache.lock().await.remove(&venue);
+                                        }
+                                        Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
+                                            cache.lock().await.remove(&venue);
+                                        }
+                                        Ok(_) => {}
+                                        Err(RecvError::Lagged(n)) => {
+                                            log::warn!("venue_ready_bridge lagged, dropped {n}");
+                                        }
+                                        Err(RecvError::Closed) => break,
+                                    }
+                                }
+                            });
+                        }
+
+                        if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+                            tx.send(Some(Arc::clone(&conn))).ok();
+                        }
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(false).ok();
+                        }
+                        log::info!("Python data engine ready on {url}");
+
+                        // The credentials-refresh listener is owned by
+                        // ProcessManager::start() — see the continuation
+                        // task spawned at the end of `start()`. Spawning
+                        // another listener here would race the in-engine
+                        // one on the keyring (load→set ABA) and on the
+                        // in-memory creds store. One listener is the
+                        // invariant.
+
+                        conn.wait_closed().await;
+                        log::warn!("Python engine connection lost — restarting");
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(true).ok();
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Engine start failed: {e}");
+                        if let Some(tx) = ENGINE_RESTARTING.get() {
+                            tx.send(true).ok();
+                        }
+                    }
+                }
+                log::info!("Restarting Python engine in {backoff_ms}ms …");
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(30_000);
+            }
+        });
+
+        // Wait for the first handshake to publish a connection on the
+        // watch channel, with a generous timeout that covers PyInstaller's
+        // cold-start overhead (decompression of the frozen archive on
+        // first launch).
+        let waited = rt.block_on(async {
+            for _ in 0..200 {
+                if ENGINE_CONNECTION_TX
+                    .get()
+                    .is_some_and(|tx| tx.borrow().is_some())
+                {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            false
+        });
+
+        if !waited {
+            log::error!("Python data engine did not become ready within 20 s");
+            eprintln!(
+                "error: Python data engine did not become ready within 20 s.\n\
+                 Check engine logs for startup errors."
+            );
+            std::process::exit(1);
+        }
+
+        Some(rt)
+    };
+
+    if !ENGINE_CONNECTION_TX
+        .get()
+        .is_some_and(|tx| tx.borrow().is_some())
+    {
+        log::error!("Engine connection not initialised — refusing to start");
+        eprintln!("error: data engine connection failed to initialise");
+        std::process::exit(1);
+    }
+
     std::thread::spawn(data::cleanup_old_market_data);
+
+    // HTTP control API for E2E tests (T35-U5-RelogE2E, T7).
+    // Runs on a dedicated tokio runtime so it stays alive even when the engine
+    // runtime shuts down. Port 9876 conflicts are logged but non-fatal.
+    {
+        let api_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .thread_name("control-api")
+            .build()
+            .inspect_err(|e| log::error!("replay_api: failed to build runtime — {e}"))
+            .ok();
+        if let Some(rt) = api_rt {
+            let order_api_state = {
+                use std::sync::atomic::AtomicBool;
+                use tokio::sync::Mutex;
+                // A-9 (H-2): 起動時に WAL から当日分を復元する。
+                // WAL ファイルが存在しない場合は空 map で初期化される（初回起動 / 昨日以前のみ）。
+                let wal_path = data::data_path(Some("tachibana_orders.jsonl"));
+                let session = Arc::new(Mutex::new(
+                    engine_client::order_session_state::OrderSessionState::load_from_wal(&wal_path),
+                ));
+                let engine_rx = ENGINE_CONNECTION_TX
+                    .get()
+                    .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
+                    .subscribe();
+                let is_replay_mode = Arc::new(AtomicBool::new(false));
+                Arc::new(api::order_api::OrderApiState::new(
+                    session,
+                    engine_rx,
+                    is_replay_mode,
+                ))
+            };
+            if let Some(rx) = replay_api::spawn(rt.handle(), Some(order_api_state)) {
+                CONTROL_API_RX.set(std::sync::Mutex::new(Some(rx))).ok();
+            }
+            std::thread::Builder::new()
+                .name("control-api-rt".into())
+                .spawn(move || rt.block_on(std::future::pending::<()>()))
+                .inspect_err(|e| log::error!("replay_api: failed to spawn runtime thread — {e}"))
+                .ok();
+        }
+    }
 
     let _ = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
         .settings(iced::Settings {
@@ -75,12 +613,59 @@ struct Flowsurface {
     timezone: data::UserTimezone,
     theme: data::Theme,
     notifications: Notifications,
+    /// `true` while the Python data engine is restarting.
+    engine_restarting: bool,
+    /// Live `EngineConnection`, populated by the engine-status subscription
+    /// (`Message::EngineConnected`). `None` until the first handshake event
+    /// reaches `update()`. Replaces the former `static ENGINE_CONNECTION`
+    /// (T35-H7-NoStaticInUpdate).
+    engine_connection: Option<Arc<engine_client::EngineConnection>>,
+    /// Active `ProcessManager` for managed mode (read once at startup from
+    /// `ENGINE_MANAGER` so `update()` does not touch the static directly).
+    engine_manager: Option<Arc<engine_client::ProcessManager>>,
+    /// Tachibana venue lifecycle state (see `venue_state.rs`). Replaces
+    /// the prior `tachibana_ready` / `tachibana_login_in_flight` double
+    /// flag with a single enum so illegal combinations are
+    /// unrepresentable. T35-U4-VenueReadyGate.
+    tachibana_state: VenueState,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
+    /// Fired by the engine-status subscription when the Python engine starts or
+    /// finishes a restart.  `true` = restarting, `false` = ready.
+    EngineRestarting(bool),
+    /// Fired by the engine-status subscription on every successful handshake.
+    /// Replaces the former `static ENGINE_CONNECTION` global read from
+    /// `update()` (T35-H7-NoStaticInUpdate).
+    EngineConnected(Arc<engine_client::EngineConnection>),
+    /// Fired when an engine event affecting the Tachibana venue
+    /// lifecycle (`VenueLoginStarted` / `VenueLoginCancelled` /
+    /// `VenueError` / `VenueReady`) arrives. Drives `tachibana_state`
+    /// transitions. T35-U4-VenueReadyGate / T35-U2-Banner.
+    TachibanaVenueEvent(VenueEvent),
+    /// User asked to (re)open the Tachibana login dialog. Sourced
+    /// from the inline "ログイン" button (`Trigger::Manual`) and from
+    /// the auto-fire path inside `tickers_table` that runs when the
+    /// user toggles Tachibana while the venue is still `Idle`
+    /// (`Trigger::Auto`). The handler suppresses duplicates while
+    /// `tachibana_state` is already `LoginInFlight`. T35-U1 / T35-U3.
+    RequestTachibanaLogin(Trigger),
+    /// User pressed the banner's "閉じる"-style button. Transitions
+    /// `tachibana_state` back to `Idle` so the banner is hidden. The
+    /// underlying error condition (e.g. `phone_auth_required`) is
+    /// considered acknowledged; a fresh `VenueError` from the engine
+    /// will re-show the banner. T35-U2-Banner.
+    DismissTachibanaBanner,
+    /// Result of the asynchronous `Command::RequestVenueLogin` IPC
+    /// send. The handler does not transition the FSM (the engine's
+    /// own `VenueLoginStarted` event is the authoritative trigger);
+    /// it only logs success and surfaces a toast on send failure so
+    /// the user knows their click did not silently disappear.
+    /// Review-fixes 2026-04-26 round 1.
+    TachibanaLoginIpcResult(Result<(), String>),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -90,7 +675,6 @@ enum Message {
     WindowEvent(window::Event),
     ExitRequested(HashMap<window::Id, WindowSpec>),
     RestartRequested(Option<HashMap<window::Id, WindowSpec>>),
-    SaveStateRequested(HashMap<window::Id, WindowSpec>),
     GoBack,
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
@@ -105,16 +689,229 @@ enum Message {
     NetworkManager(modal::network_manager::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
+    /// Forwarded from the HTTP control API (port 9876). Used by E2E tests to
+    /// drive venue login / cancellation without a GUI. (T35-U5-RelogE2E / T7)
+    #[allow(dead_code)]
+    ControlApi(replay_api::ControlApiCommand),
+    /// EC 約定通知（Phase O2 T2.4）。`OrderFilled` / `OrderCanceled` /
+    /// `OrderExpired` を受信したときに toast を surface する。
+    OrderToast(Toast),
+}
+
+/// Builds a single stream that emits engine restart transitions, fresh
+/// `EngineConnected` handshakes, and Tachibana venue lifecycle events
+/// (`VenueLoginStarted` / `VenueLoginCancelled` / `VenueError` /
+/// `VenueReady`). Merging everything into one `Subscription::run` keeps
+/// the recovery path single-source (invariant T35-H9-SingleRecoveryPath)
+/// and gives `update()` a single FIFO of state-affecting events.
+fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send + 'static {
+    async_stream::stream! {
+        let Some(restart_tx) = ENGINE_RESTARTING.get() else { return; };
+        let Some(conn_tx) = ENGINE_CONNECTION_TX.get() else { return; };
+        let mut restart_rx = restart_tx.subscribe();
+        let mut conn_rx = conn_tx.subscribe();
+        let mut event_rx: Option<
+            tokio::sync::broadcast::Receiver<engine_client::dto::EngineEvent>,
+        > = None;
+
+        // Emit current values immediately. subscribe() marks the current
+        // value as already-seen, so `changed()` would otherwise skip the
+        // initial connection / restart state captured before the iced
+        // subscription wired up.
+        // Clone-then-drop the watch::Ref before any `yield`/`await` —
+        // the guard isn't `Send` and would otherwise be held across
+        // suspension points, breaking the `Send` bound iced requires.
+        let initial_conn = { conn_rx.borrow_and_update().clone() };
+        if let Some(conn) = initial_conn {
+            event_rx = Some(conn.subscribe_events());
+            // **Order matters**: Rehello must arrive in `update()` BEFORE
+            // EngineConnected. EngineConnected calls
+            // `sidebar.update_handles()` which gates the Tachibana
+            // refetch on `tachibana_ready`; Rehello first transitions
+            // that flag to `false` (via `set_tachibana_ready(false)` in
+            // the `TachibanaVenueEvent` arm), so the subsequent
+            // EngineConnected refetch correctly excludes Tachibana
+            // until the next `VenueReady`. Reviewer 2026-04-26 R3
+            // (HIGH-1).
+            yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
+            yield Message::EngineConnected(conn);
+        }
+        let initial_restart = { *restart_rx.borrow_and_update() };
+        if initial_restart {
+            yield Message::EngineRestarting(true);
+        }
+
+        loop {
+            // `event_rx` is `Option`-shaped; use `pending()` while it
+            // is `None` so the select arm stays sound but never wins.
+            // Surface the full `Result` (not `.ok()`) so the outer match
+            // can distinguish `Lagged` (receiver alive — log + retry)
+            // from `Closed` (receiver dead — wait for next handshake).
+            // Earlier code collapsed both into `None` and silently
+            // dropped venue lifecycle events; see review-fixes
+            // 2026-04-26 round 1.
+            let event_fut = async {
+                match &mut event_rx {
+                    Some(rx) => Some(rx.recv().await),
+                    None => std::future::pending::<Option<_>>().await,
+                }
+            };
+
+            tokio::select! {
+                changed = restart_rx.changed() => {
+                    if changed.is_err() { break; }
+                    let value = { *restart_rx.borrow_and_update() };
+                    yield Message::EngineRestarting(value);
+                }
+                changed = conn_rx.changed() => {
+                    if changed.is_err() { break; }
+                    let value = { conn_rx.borrow_and_update().clone() };
+                    if let Some(conn) = value {
+                        event_rx = Some(conn.subscribe_events());
+                        // See above — Rehello before Connected so the
+                        // FSM-driven gate flag flips before the
+                        // EngineConnected handler refetches
+                        // (T35-U4-StartupGate / R3 HIGH-1).
+                        yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
+                        yield Message::EngineConnected(conn);
+                    }
+                }
+                event = event_fut => {
+                    use tokio::sync::broadcast::error::RecvError;
+                    match event {
+                        Some(Ok(ev)) => {
+                            if let Some(msg) = map_engine_event_to_tachibana(ev) {
+                                yield msg;
+                            }
+                        }
+                        Some(Err(RecvError::Lagged(n))) => {
+                            // Receiver is still alive — keep it. Dropping
+                            // here would silently swallow every
+                            // VenueLoginStarted / VenueReady / VenueError
+                            // until the next EngineConnected, the exact
+                            // class of UI-freeze regression flagged in
+                            // review-fixes 2026-04-26 round 1.
+                            log::warn!(
+                                "engine_status_stream: broadcast lagged, dropped {n} \
+                                 events — venue lifecycle UI may have missed transitions"
+                            );
+                        }
+                        Some(Err(RecvError::Closed)) | None => {
+                            event_rx = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Bridge the HTTP control API channel into the Iced message loop.
+///
+/// Takes ownership of the `mpsc::Receiver` stored in [`CONTROL_API_RX`] on
+/// first call (via `Option::take`).  Iced's `Subscription::run` identity is
+/// derived from the function pointer so this subscription is only created once
+/// per app lifetime — the `take()` on subsequent construction attempts (which
+/// don't happen in practice) would safely return `None` and exit the stream.
+fn replay_api_stream() -> impl iced::futures::Stream<Item = Message> + Send + 'static {
+    let rx_opt = CONTROL_API_RX
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|mut g| g.take());
+    async_stream::stream! {
+        let Some(mut rx) = rx_opt else { return; };
+        while let Some(cmd) = rx.recv().await {
+            yield Message::ControlApi(cmd);
+        }
+    }
+}
+
+/// Translate a low-level `EngineEvent` into a `Message::TachibanaVenueEvent`
+/// when it concerns the Tachibana venue lifecycle, otherwise `None`.
+/// Other venues are funnelled through their existing exchange-event
+/// path and don't need state-machine treatment.
+fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<Message> {
+    use engine_client::dto::EngineEvent;
+    match ev {
+        EngineEvent::VenueReady { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
+            Some(Message::TachibanaVenueEvent(VenueEvent::Ready))
+        }
+        EngineEvent::VenueLoginStarted { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
+            Some(Message::TachibanaVenueEvent(VenueEvent::LoginStarted))
+        }
+        EngineEvent::VenueLoginCancelled { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
+            Some(Message::TachibanaVenueEvent(VenueEvent::LoginCancelled))
+        }
+        EngineEvent::VenueError {
+            venue,
+            code,
+            message,
+            ..
+        } if venue == TACHIBANA_VENUE_NAME => {
+            let class = engine_client::error::classify_venue_error(&code);
+            Some(Message::TachibanaVenueEvent(VenueEvent::LoginError {
+                class,
+                message,
+            }))
+        }
+        // ── Phase O2: EC 約定通知 (T2.4) ────────────────────────────────────
+        EngineEvent::OrderFilled {
+            client_order_id,
+            last_qty,
+            last_price,
+            leaves_qty,
+            ..
+        } => {
+            let body = if leaves_qty == "0" {
+                format!("約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（全約定）")
+            } else {
+                format!(
+                    "約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（残 {leaves_qty} 株）"
+                )
+            };
+            Some(Message::OrderToast(Toast::info(body)))
+        }
+        EngineEvent::OrderCanceled {
+            client_order_id, ..
+        } => Some(Message::OrderToast(Toast::info(format!(
+            "注文取消完了: {client_order_id}"
+        )))),
+        EngineEvent::OrderExpired {
+            client_order_id, ..
+        } => Some(Message::OrderToast(Toast::warn(format!(
+            "注文失効: {client_order_id}"
+        )))),
+        _ => None,
+    }
 }
 
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
         let saved_state = layout::load_saved_state();
-        let handles =
-            exchange::adapter::AdapterHandles::spawn_all(exchange::adapter::AdapterNetworkConfig {
-                proxy_cfg: saved_state.proxy_cfg.clone(),
-            })
-            .expect("Failed to spawn adapter handles");
+
+        // All venues are routed through the Python data engine via IPC.
+        // The watch channel is guaranteed to hold `Some(conn)` before iced
+        // starts (main() exits if the first handshake never landed).
+        // We read the channel's *current value* here — this is bootstrap
+        // setup, not `Flowsurface::update()`, so it does not violate
+        // T35-H7-NoStaticInUpdate.
+        let mut handles = exchange::adapter::AdapterHandles::default();
+        let initial_conn: Option<Arc<engine_client::EngineConnection>> = ENGINE_CONNECTION_TX
+            .get()
+            .and_then(|tx| tx.borrow().clone());
+        if let Some(conn) = initial_conn.as_ref() {
+            for &(venue, name) in VENUE_NAMES {
+                let backend = Arc::new(engine_client::EngineClientBackend::new(
+                    Arc::clone(conn),
+                    name,
+                ));
+                handles.set_backend(venue, backend);
+            }
+            log::info!("All venue backends: EngineClientBackend (Python IPC)");
+        }
+        // Read the manager once at startup; updates only flow through the
+        // ENGINE_MANAGER OnceLock at boot, so capturing it here is safe.
+        let engine_manager = ENGINE_MANAGER.get().map(Arc::clone);
 
         let (main_window_id, open_main_window) = {
             let (position, size) = saved_state.window();
@@ -145,6 +942,10 @@ impl Flowsurface {
             theme: saved_state.theme,
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
+            engine_restarting: false,
+            engine_connection: initial_conn,
+            engine_manager,
+            tachibana_state: VenueState::Idle,
         };
 
         if let Some(err) = audio_init_err {
@@ -174,6 +975,215 @@ impl Flowsurface {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EngineRestarting(restarting) => {
+                self.engine_restarting = restarting;
+                if restarting {
+                    self.notifications.push(Toast::error(
+                        "データエンジン再起動中 — チャートは復旧後に自動更新されます".to_string(),
+                    ));
+                }
+                // The actual backend rebuild + recovery toast are emitted
+                // by `Message::EngineConnected` so a single source of
+                // truth (the live connection) drives the swap. See
+                // T35-H9-SingleRecoveryPath.
+            }
+            Message::DismissTachibanaBanner => {
+                // Route the dismiss through the FSM `next()` table so
+                // the transition is unit-testable from `venue_state.rs`
+                // and `main.rs::update()` does not become a second
+                // source of truth for FSM mutations.
+                let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
+                    .next(VenueEvent::Dismissed);
+                self.tachibana_state = next;
+            }
+            Message::RequestTachibanaLogin(trigger) => {
+                // Duplicate-press suppression: claim the LoginInFlight
+                // slot atomically BEFORE dispatching the IPC. Without
+                // this, two rapid presses (Auto + Manual or two manual
+                // double-clicks) both observe the FSM in `Idle` /
+                // `Ready` / `Error` and dispatch duplicate
+                // `RequestVenueLogin` IPC sends — a tkinter helper
+                // spawns twice. Reviewer 2026-04-26 R4 (MEDIUM-2).
+                // T35-U1-LoginButton / T35-U3-AutoRequestLogin.
+                log::info!("RequestTachibanaLogin trigger={trigger:?}");
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    log::warn!(
+                        "RequestTachibanaLogin({trigger:?}) ignored — engine connection unavailable"
+                    );
+                    if matches!(trigger, Trigger::Manual) {
+                        // Auto-fire is silent (the user just selected
+                        // the venue and may not yet expect feedback);
+                        // a manual button press deserves a visible
+                        // notice that the click did register.
+                        self.notifications.push(Toast::error(
+                            "立花ログイン要求を送信できません — エンジン未接続".to_string(),
+                        ));
+                    }
+                    return Task::none();
+                };
+                if !self.tachibana_state.try_claim_login_in_flight() {
+                    log::debug!(
+                        "RequestTachibanaLogin({trigger:?}) ignored — login already in flight"
+                    );
+                    return Task::none();
+                }
+                return Task::perform(
+                    async move {
+                        // request_id は Python エンジン側のログ相関 ID として使われる。
+                        // Rust 側では TachibanaLoginIpcResult のコールバックに乗らないため、
+                        // IPC 送信成功/失敗の照合には使用しない。
+                        let request_id = uuid::Uuid::new_v4().to_string();
+                        conn.send(engine_client::dto::Command::RequestVenueLogin {
+                            request_id,
+                            venue: TACHIBANA_VENUE_NAME.to_string(),
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                    },
+                    Message::TachibanaLoginIpcResult,
+                );
+            }
+            Message::TachibanaLoginIpcResult(result) => {
+                // The optimistic `try_claim_login_in_flight` already
+                // moved the FSM into `LoginInFlight`. Engine's
+                // `VenueLoginStarted` is idempotent under that, but
+                // an IPC send failure means the engine never received
+                // the request and will not emit `VenueLoginStarted`
+                // — roll the FSM back to `Idle` so the user can
+                // retry. Reviewer 2026-04-26 R4 (MEDIUM-2).
+                match result {
+                    Ok(()) => {
+                        log::debug!("RequestVenueLogin IPC sent");
+                    }
+                    Err(err) => {
+                        log::warn!("RequestVenueLogin IPC failed: {err}");
+                        self.notifications.push(Toast::error(format!(
+                            "立花ログイン要求の送信に失敗しました: {err}"
+                        )));
+                        // FSM の next() を意図的に迂回して直接 Idle に戻す。
+                        // IPC 送信が失敗した時点でエンジンには RequestVenueLogin が届いておらず、
+                        // VenueLoginStarted も来ない。LoginCancelled は「ユーザー操作でキャンセル」の
+                        // セマンティクスなので流用せず、ここで直接代入する。
+                        if self.tachibana_state.is_login_in_flight() {
+                            self.tachibana_state = VenueState::Idle;
+                        }
+                    }
+                }
+            }
+            Message::TachibanaVenueEvent(event) => {
+                // Toast notifications for the in-flight / cancelled
+                // states. The banner only renders `Error`
+                // (F-Banner1: no Rust string literals in the banner),
+                // so the user-facing "ログイン中" / "キャンセル" feedback
+                // path goes through the existing toast channel where
+                // Rust strings are conventional. Reviewer 2026-04-26
+                // R2 (MED-3).
+                match &event {
+                    VenueEvent::LoginStarted => {
+                        self.notifications.push(Toast::info(
+                            "立花ログインダイアログを起動しました".to_string(),
+                        ));
+                    }
+                    VenueEvent::LoginCancelled => {
+                        self.notifications.push(Toast::warn(
+                            "立花ログインがキャンセルされました".to_string(),
+                        ));
+                    }
+                    VenueEvent::Ready => {
+                        log::info!("tachibana: VenueReady — venue is now authenticated");
+                    }
+                    _ => {}
+                }
+
+                let next =
+                    std::mem::replace(&mut self.tachibana_state, VenueState::Idle).next(event);
+                let became_ready = next.is_ready();
+                self.tachibana_state = next;
+
+                let replay = self
+                    .sidebar
+                    .tickers_table
+                    .set_tachibana_ready(became_ready)
+                    .map(|m| Message::Sidebar(dashboard::sidebar::Message::TickersTable(m)));
+
+                return replay;
+            }
+            Message::EngineConnected(conn) => {
+                let was_restarting = self.engine_restarting;
+                self.engine_connection = Some(Arc::clone(&conn));
+
+                // Rebuild backends with the new connection and bump the generation
+                // counter so iced assigns new subscription IDs and restarts streams.
+                let mut tachibana_meta_handle = None;
+                for &(venue, name) in VENUE_NAMES {
+                    let backend = Arc::new(engine_client::EngineClientBackend::new(
+                        Arc::clone(&conn),
+                        name,
+                    ));
+                    // B5: capture the Tachibana meta handle before the backend
+                    // is moved into the type-erased `AdapterHandles`. This is
+                    // the only point where the typed `Arc<EngineClientBackend>`
+                    // is available to call `ticker_meta_handle()`.
+                    if venue == exchange::adapter::Venue::Tachibana {
+                        tachibana_meta_handle = Some(backend.ticker_meta_handle());
+                    }
+                    self.handles.set_backend(venue, backend);
+                }
+                // Wire the handle into the sidebar's ticker filter so
+                // Japanese-name incremental search works after each reconnect.
+                self.sidebar
+                    .set_tachibana_meta_handle(tachibana_meta_handle);
+
+                // Re-apply current proxy state before bumping the generation so
+                // that stream-subscribe commands are enqueued after SetProxy in
+                // the engine's FIFO command channel.  Send unconditionally —
+                // including `None` — so a user-cleared proxy cannot be revived
+                // by a stale value held in the freshly spawned engine.
+                let proxy_url = self.network.proxy_cfg().map(|p| p.to_url_string());
+                if !conn.try_send_now(engine_client::dto::Command::SetProxy { url: proxy_url }) {
+                    log::warn!("Failed to queue proxy for engine reconnect");
+                }
+
+                self.handles.bump_generation();
+
+                // Also propagate to the sidebar's TickersTable so it uses
+                // the new connection for metadata/stats fetches.
+                let sidebar_refetch = self
+                    .sidebar
+                    .update_handles(self.handles.clone())
+                    .map(Message::Sidebar);
+
+                if was_restarting {
+                    self.notifications
+                        .push(Toast::info("データエンジン接続を復旧しました".to_string()));
+                }
+
+                // Bridge the broadcast-replay gap from BOTH directions:
+                //   - managed mode: `ProcessManager` caches post-
+                //     `apply_after_handshake` readiness internally.
+                //   - external mode (`--data-engine-url`): the
+                //     mode-agnostic `VENUE_READY_CACHE` bridge task
+                //     captured `VenueReady` between connect() and
+                //     iced's late `subscribe_events()`.
+                // Either source being `true` means the engine
+                // currently considers Tachibana ready — synthesize
+                // `VenueEvent::Ready` so the FSM bootstraps correctly.
+                // Reviewers 2026-04-26 R2 (HIGH-1) / R3 (HIGH-2).
+                let is_ready_from_manager = self
+                    .engine_manager
+                    .as_ref()
+                    .is_some_and(|m| m.try_is_venue_ready(TACHIBANA_VENUE_NAME));
+                let is_ready_from_bridge = cached_venue_is_ready(TACHIBANA_VENUE_NAME);
+                if (is_ready_from_manager || is_ready_from_bridge)
+                    && !self.tachibana_state.is_ready()
+                {
+                    return Task::batch(vec![
+                        sidebar_refetch,
+                        Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready)),
+                    ]);
+                }
+                return sidebar_refetch;
+            }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
@@ -254,9 +1264,6 @@ impl Flowsurface {
             Message::ExitRequested(windows) => {
                 self.save_state_to_disk(&windows);
                 return iced::exit();
-            }
-            Message::SaveStateRequested(windows) => {
-                self.save_state_to_disk(&windows);
             }
             Message::RestartRequested(Some(windows)) => {
                 self.save_state_to_disk(&windows);
@@ -408,6 +1415,10 @@ impl Flowsurface {
             Message::RemoveNotification(index) => {
                 self.notifications.remove(index);
             }
+            // EC 約定通知 toast (Phase O2 T2.4)
+            Message::OrderToast(toast) => {
+                self.notifications.push(toast);
+            }
             Message::SetTimezone(tz) => {
                 self.timezone = tz;
             }
@@ -551,31 +1562,57 @@ impl Flowsurface {
 
                 match action {
                     Some(network_manager::Action::ApplyProxy) => {
-                        if let Some(proxy) = self.network.proxy_cfg() {
-                            data::config::proxy::save_proxy_auth(&proxy);
-                        }
+                        let new_proxy = self.network.proxy_cfg();
+                        let proxy_url = new_proxy.as_ref().map(|p| p.to_url_string());
+                        let proxy_url_no_auth =
+                            new_proxy.as_ref().map(|p| p.to_url_string_no_auth());
 
-                        self.confirm_dialog = Some(
-                            screen::ConfirmDialog::new(
-                                "Proxy changes saved. Restart now to apply?".to_string(),
-                                Box::new(Message::RestartRequested(None)),
-                            )
-                            .with_confirm_btn_text("Restart now".to_string()),
-                        );
+                        // Apply live to the running engine — no restart required.
+                        // Credentials and URL are persisted only after conn.send()
+                        // succeeds (i.e. the IPC frame was enqueued without error).
+                        // Note: the IPC protocol has no SetProxy ACK; success here
+                        // means the engine received the command, not that it completed
+                        // stream reconnection.  A subsequent engine-side failure (e.g.
+                        // unreachable proxy) would surface as stream disconnects, not
+                        // as a ProxyResult::Failed.
+                        let engine_conn = self.engine_connection.as_ref().cloned();
+                        let manager = self.engine_manager.as_ref().map(Arc::clone);
 
-                        let main_window = self.main_window.id;
-                        let dashboard = self.active_dashboard_mut();
-
-                        let mut active_windows = dashboard
-                            .popout
-                            .keys()
-                            .copied()
-                            .collect::<Vec<window::Id>>();
-                        active_windows.push(main_window);
-
-                        return window::collect_window_specs(
-                            active_windows,
-                            Message::SaveStateRequested,
+                        return Task::perform(
+                            async move {
+                                // Send to the live engine first.  Only after that
+                                // succeeds do we update the recovery source-of-truth
+                                // and persist credentials — otherwise a failed
+                                // Apply would leave a stale "new" proxy queued for
+                                // the next engine restart.
+                                if let Some(conn) = engine_conn {
+                                    conn.send(engine_client::dto::Command::SetProxy {
+                                        url: proxy_url.clone(),
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                }
+                                if let Some(manager) = manager {
+                                    manager.set_proxy(proxy_url).await;
+                                }
+                                if let Some(proxy) = &new_proxy {
+                                    data::config::proxy::save_proxy_auth(proxy);
+                                }
+                                data::config::proxy::save_proxy_url(proxy_url_no_auth.as_deref());
+                                Ok(())
+                            },
+                            |result| match result {
+                                Ok(()) => {
+                                    Message::NetworkManager(network_manager::Message::ProxyResult(
+                                        network_manager::ProxyResult::Applied,
+                                    ))
+                                }
+                                Err(e) => {
+                                    Message::NetworkManager(network_manager::Message::ProxyResult(
+                                        network_manager::ProxyResult::Failed(e),
+                                    ))
+                                }
+                            },
                         );
                     }
                     Some(network_manager::Action::Exit) => {
@@ -617,6 +1654,13 @@ impl Flowsurface {
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
                     }
+                    Some(dashboard::sidebar::Action::RequestTachibanaLogin(trigger)) => {
+                        let task = task.map(Message::Sidebar);
+                        return Task::batch(vec![
+                            task,
+                            iced::Task::done(Message::RequestTachibanaLogin(trigger)),
+                        ]);
+                    }
                     None => {}
                 }
 
@@ -633,6 +1677,21 @@ impl Flowsurface {
                 return window::collect_window_specs(active_windows, |windows| {
                     Message::RestartRequested(Some(windows))
                 });
+            }
+            Message::ControlApi(cmd) => {
+                use replay_api::ControlApiCommand;
+                log::debug!("control-api command received: {cmd:?}");
+                match cmd {
+                    ControlApiCommand::RequestVenueLogin { venue }
+                        if venue == TACHIBANA_VENUE_NAME =>
+                    {
+                        return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Manual));
+                    }
+                    ControlApiCommand::ToggleVenue { venue } if venue == TACHIBANA_VENUE_NAME => {
+                        return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Auto));
+                    }
+                    _ => {}
+                }
             }
         }
         Task::none()
@@ -679,15 +1738,30 @@ impl Flowsurface {
                 }
             };
 
-            let base = column![
-                header_title,
+            // Tachibana lifecycle banner (U2). Renders only when the
+            // FSM is in `Error`; other states return None and the
+            // column collapses naturally.
+            let banner = widget::venue_banner::view(&self.tachibana_state).map(|el| {
+                el.map(|msg| match msg {
+                    widget::venue_banner::BannerMessage::Relogin => {
+                        Message::RequestTachibanaLogin(Trigger::Manual)
+                    }
+                    widget::venue_banner::BannerMessage::Dismiss => Message::DismissTachibanaBanner,
+                })
+            });
+
+            let mut base = column![header_title];
+            if let Some(banner) = banner {
+                base = base.push(container(banner).padding(padding::all(8)));
+            }
+            base = base.push(
                 match sidebar_pos {
                     sidebar::Position::Left => row![sidebar_view, dashboard_view,],
                     sidebar::Position::Right => row![dashboard_view, sidebar_view],
                 }
                 .spacing(4)
                 .padding(8),
-            ];
+            );
 
             if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
@@ -756,12 +1830,17 @@ impl Flowsurface {
             }
         });
 
+        // Watch the engine-restarting flag and emit EngineRestarting messages.
+        let engine_status = Subscription::run(engine_status_stream);
+
         Subscription::batch(vec![
             exchange_streams,
             sidebar,
             window_events,
             tick,
             hotkeys,
+            engine_status,
+            Subscription::run(replay_api_stream),
         ])
     }
 

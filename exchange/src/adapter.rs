@@ -1,65 +1,35 @@
 mod client;
-mod connect;
-mod hub;
-mod limiter;
 pub mod proxy;
+pub mod venue_backend;
 
 pub use super::error::AdapterError;
-use super::{Ticker, Timeframe};
+use super::{QuoteCurrency, Timeframe};
 use crate::{
     Kline, Price, PushFrequency, TickMultiplier, TickerInfo, Trade, depth::Depth, unit::Qty,
 };
 
 use enum_map::{Enum, EnumMap};
-use futures::SinkExt;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc};
 
-pub use client::{
-    AdapterHandles, AdapterNetworkConfig, MAX_KLINE_STREAMS_PER_STREAM,
-    MAX_TRADE_TICKERS_PER_STREAM,
-};
+pub use client::{AdapterHandles, MAX_KLINE_STREAMS_PER_STREAM, MAX_TRADE_TICKERS_PER_STREAM};
 pub use proxy::Proxy;
+pub use venue_backend::VenueBackend;
 
-/// Buffer trades and flush in this interval
-const TRADE_BUCKET_INTERVAL: Duration = Duration::from_micros(33_333);
+// Hyperliquid-specific tick multiplier lookup table (moved from hub/hyperliquid).
+const HL_MULTS_OVERFLOW: &[u16] = &[1, 10, 20, 50, 100, 1000, 10000];
+const HL_MULTS_FRACTIONAL: &[u16] = &[1, 2, 5, 10, 100, 1000];
+const HL_MULTS_SAFE: &[u16] = &[1, 10, 100, 1000];
 
+/// Returns valid tick multipliers for Hyperliquid depth streams given the minimum tick size.
 pub fn allowed_multipliers_for_min_tick(min_ticksize: crate::unit::MinTicksize) -> &'static [u16] {
-    hub::hyperliquid::allowed_multipliers_for_min_tick(min_ticksize)
-}
-
-async fn flush_trade_buffers<V>(
-    output: &mut futures::channel::mpsc::Sender<Event>,
-    ticker_info_map: &FxHashMap<Ticker, (TickerInfo, V)>,
-    trade_buffers_map: &mut FxHashMap<Ticker, Vec<Trade>>,
-) {
-    let interval_ms = TRADE_BUCKET_INTERVAL.as_millis() as u64;
-
-    for (ticker, trades_buffer) in trade_buffers_map.iter_mut() {
-        if trades_buffer.is_empty() {
-            continue;
-        }
-
-        let bucket_update_t = trades_buffer
-            .iter()
-            .map(|t| t.time)
-            .max()
-            .map(|t| (t / interval_ms) * interval_ms);
-
-        if let Some((ticker_info, _)) = ticker_info_map.get(ticker)
-            && let Some(update_t) = bucket_update_t
-        {
-            let _ = output
-                .send(Event::TradesReceived(
-                    StreamKind::Trades {
-                        ticker_info: *ticker_info,
-                    },
-                    update_t,
-                    std::mem::take(trades_buffer).into_boxed_slice(),
-                ))
-                .await;
-        }
+    if min_ticksize.power < 0 {
+        HL_MULTS_FRACTIONAL
+    } else if min_ticksize.power > 0 {
+        HL_MULTS_OVERFLOW
+    } else {
+        HL_MULTS_SAFE
     }
 }
 
@@ -68,25 +38,32 @@ pub enum MarketKind {
     Spot,
     LinearPerps,
     InversePerps,
+    /// Equity (cash & margin) markets — Phase 1 covers Tachibana 立花証券 only.
+    Stock,
 }
 
 impl MarketKind {
-    pub const ALL: [MarketKind; 3] = [
+    pub const ALL: [MarketKind; 4] = [
         MarketKind::Spot,
         MarketKind::LinearPerps,
         MarketKind::InversePerps,
+        MarketKind::Stock,
     ];
 
     pub fn qty_in_quote_value(&self, qty: Qty, price: Price, size_in_quote_ccy: bool) -> f32 {
-        let qty = qty.to_f32_lossy();
+        let qty_f = qty.to_f32_lossy();
 
         match self {
-            MarketKind::InversePerps => qty,
-            _ => {
+            // Stocks: quote value is always price * qty (JPY). The
+            // `size_in_quote_ccy` flag is ignored on purpose — the crypto-only
+            // call sites pass it and we must not silently produce a wrong value.
+            MarketKind::Stock => price.to_f32() * qty_f,
+            MarketKind::InversePerps => qty_f,
+            MarketKind::Spot | MarketKind::LinearPerps => {
                 if size_in_quote_ccy {
-                    qty
+                    qty_f
                 } else {
-                    price.to_f32() * qty
+                    price.to_f32() * qty_f
                 }
             }
         }
@@ -102,6 +79,7 @@ impl std::fmt::Display for MarketKind {
                 MarketKind::Spot => "Spot",
                 MarketKind::LinearPerps => "Linear",
                 MarketKind::InversePerps => "Inverse",
+                MarketKind::Stock => "Stock",
             }
         )
     }
@@ -117,6 +95,8 @@ impl FromStr for MarketKind {
             Ok(Self::LinearPerps)
         } else if s.eq_ignore_ascii_case("inverse") {
             Ok(Self::InversePerps)
+        } else if s.eq_ignore_ascii_case("stock") {
+            Ok(Self::Stock)
         } else {
             Err(format!("Invalid market kind: {}", s))
         }
@@ -298,15 +278,18 @@ pub enum Venue {
     Hyperliquid,
     Okex,
     Mexc,
+    /// 立花証券 e支店 (Japanese equities). Phase 1 is read-only; demo only.
+    Tachibana,
 }
 
 impl Venue {
-    pub const ALL: [Venue; 5] = [
+    pub const ALL: [Venue; 6] = [
         Venue::Bybit,
         Venue::Binance,
         Venue::Hyperliquid,
         Venue::Okex,
         Venue::Mexc,
+        Venue::Tachibana,
     ];
 }
 
@@ -321,6 +304,7 @@ impl std::fmt::Display for Venue {
                 Venue::Hyperliquid => "Hyperliquid",
                 Venue::Okex => "OKX",
                 Venue::Mexc => "MEXC",
+                Venue::Tachibana => "Tachibana",
             }
         )
     }
@@ -340,6 +324,8 @@ impl FromStr for Venue {
             Ok(Self::Okex)
         } else if s.eq_ignore_ascii_case("mexc") {
             Ok(Self::Mexc)
+        } else if s.eq_ignore_ascii_case("tachibana") {
+            Ok(Self::Tachibana)
         } else {
             Err(format!("Invalid venue: {}", s))
         }
@@ -362,6 +348,8 @@ pub enum Exchange {
     MexcLinear,
     MexcInverse,
     MexcSpot,
+    /// 立花証券 e支店 — Tokyo Stock Exchange equities (cash & margin merged).
+    TachibanaStock,
 }
 
 impl std::fmt::Display for Exchange {
@@ -395,7 +383,7 @@ impl FromStr for Exchange {
 }
 
 impl Exchange {
-    pub const ALL: [Exchange; 14] = [
+    pub const ALL: [Exchange; 15] = [
         Exchange::BinanceLinear,
         Exchange::BinanceInverse,
         Exchange::BinanceSpot,
@@ -410,6 +398,7 @@ impl Exchange {
         Exchange::MexcLinear,
         Exchange::MexcInverse,
         Exchange::MexcSpot,
+        Exchange::TachibanaStock,
     ];
 
     pub fn from_venue_and_market(venue: Venue, market: MarketKind) -> Option<Self> {
@@ -434,6 +423,7 @@ impl Exchange {
             | Exchange::HyperliquidSpot
             | Exchange::OkexSpot
             | Exchange::MexcSpot => MarketKind::Spot,
+            Exchange::TachibanaStock => MarketKind::Stock,
         }
     }
 
@@ -446,6 +436,23 @@ impl Exchange {
             Exchange::HyperliquidLinear | Exchange::HyperliquidSpot => Venue::Hyperliquid,
             Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => Venue::Okex,
             Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => Venue::Mexc,
+            Exchange::TachibanaStock => Venue::Tachibana,
+        }
+    }
+
+    /// Quote currency the venue's instruments are denominated in by default.
+    /// Used by `TickerInfo` to seed `quote_currency` when the persisted state
+    /// has no value.
+    pub fn default_quote_currency(&self) -> QuoteCurrency {
+        match self.venue() {
+            Venue::Tachibana => QuoteCurrency::Jpy,
+            // Crypto venues: USDT for derivatives + most spot pairs is a
+            // reasonable default; the actual currency is conveyed by the
+            // ticker symbol suffix (USDT/USDC/USD) which the formatter can
+            // detect when present.
+            Venue::Binance | Venue::Bybit | Venue::Okex | Venue::Mexc | Venue::Hyperliquid => {
+                QuoteCurrency::Usdt
+            }
         }
     }
 
@@ -488,6 +495,10 @@ impl Exchange {
                 Timeframe::KLINE.contains(&tf)
                     && !matches!(tf, Timeframe::M3 | Timeframe::H2 | Timeframe::H12)
             }
+            // Tachibana (立花) returns daily klines only via
+            // CLMMfdsGetMarketPriceHistory; sub-day timeframes are aggregated
+            // client-side from FD frames in a future phase.
+            Venue::Tachibana => tf == Timeframe::D1,
         }
     }
 

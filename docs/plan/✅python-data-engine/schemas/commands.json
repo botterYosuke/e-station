@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "flowsurface/ipc/commands",
+  "title": "Rust → Python IPC Commands",
+  "description": "Commands sent from the Rust viewer to the Python data engine.",
+  "oneOf": [
+    { "$ref": "#/$defs/Hello" },
+    { "$ref": "#/$defs/SetProxy" },
+    { "$ref": "#/$defs/Subscribe" },
+    { "$ref": "#/$defs/Unsubscribe" },
+    { "$ref": "#/$defs/FetchKlines" },
+    { "$ref": "#/$defs/FetchTrades" },
+    { "$ref": "#/$defs/FetchOpenInterest" },
+    { "$ref": "#/$defs/FetchTickerStats" },
+    { "$ref": "#/$defs/ListTickers" },
+    { "$ref": "#/$defs/GetTickerMetadata" },
+    { "$ref": "#/$defs/RequestDepthSnapshot" },
+    { "$ref": "#/$defs/Shutdown" },
+    { "$ref": "#/$defs/SetVenueCredentials" },
+    { "$ref": "#/$defs/RequestVenueLogin" }
+  ],
+  "$defs": {
+    "RequestId": {
+      "description": "UUIDv4 string per RFC 4122 (LOW-1 / F-L7). Python emits via str(uuid.uuid4()) — hyphenated lowercase.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "maxLength": 36
+    },
+    "Hello": {
+      "type": "object",
+      "required": ["op", "schema_major", "schema_minor", "client_version", "token"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Hello" },
+        "schema_major": { "type": "integer", "minimum": 0 },
+        "schema_minor": { "type": "integer", "minimum": 0 },
+        "client_version": { "type": "string" },
+        "token": { "type": "string", "minLength": 1 }
+      }
+    },
+    "SetProxy": {
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "SetProxy" },
+        "url": { "type": ["string", "null"] }
+      }
+    },
+    "Subscribe": {
+      "type": "object",
+      "required": ["op", "venue", "ticker", "stream"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Subscribe" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream": {
+          "type": "string",
+          "enum": ["trade", "depth", "kline"]
+        },
+        "timeframe": { "type": ["string", "null"] }
+      }
+    },
+    "Unsubscribe": {
+      "type": "object",
+      "required": ["op", "venue", "ticker", "stream"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Unsubscribe" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream": { "type": "string" }
+      }
+    },
+    "FetchKlines": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker", "timeframe", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchKlines" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "FetchTrades": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker", "start_ms", "end_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchTrades" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "start_ms": { "type": "integer" },
+        "end_ms": { "type": "integer" }
+      }
+    },
+    "FetchOpenInterest": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker", "timeframe", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchOpenInterest" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "FetchTickerStats": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "FetchTickerStats" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" }
+      }
+    },
+    "ListTickers": {
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "ListTickers" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" }
+      }
+    },
+    "GetTickerMetadata": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "GetTickerMetadata" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" }
+      }
+    },
+    "RequestDepthSnapshot": {
+      "type": "object",
+      "required": ["op", "request_id", "venue", "ticker"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "RequestDepthSnapshot" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" }
+      }
+    },
+    "Shutdown": {
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Shutdown" }
+      }
+    },
+    "TachibanaSessionWire": {
+      "description": "5 virtual URLs from CLMAuthLoginRequest plus expiry & 譲渡益課税区分. Plain strings on the wire; both sides treat the values as secrets in memory.",
+      "type": "object",
+      "required": ["url_request", "url_master", "url_price", "url_event", "url_event_ws"],
+      "additionalProperties": false,
+      "properties": {
+        "url_request": { "type": "string" },
+        "url_master": { "type": "string" },
+        "url_price": { "type": "string" },
+        "url_event": { "type": "string" },
+        "url_event_ws": { "type": "string" },
+        "expires_at_ms": { "type": ["integer", "null"] },
+        "zyoutoeki_kazei_c": { "type": "string" }
+      }
+    },
+    "VenueCredentialsPayload": {
+      "description": "Tagged union of per-venue credential shapes. Today only `tachibana` is defined.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["venue", "user_id", "password"],
+          "additionalProperties": false,
+          "properties": {
+            "venue": { "const": "tachibana" },
+            "user_id": { "type": "string" },
+            "password": { "type": "string" },
+            "second_password": { "type": ["string", "null"] },
+            "is_demo": { "type": "boolean" },
+            "session": {
+              "anyOf": [
+                { "$ref": "#/$defs/TachibanaSessionWire" },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "SetVenueCredentials": {
+      "description": "Inject venue-scoped credentials. Sent at startup (keyring restore) and after managed-mode Python restart.",
+      "type": "object",
+      "required": ["op", "request_id", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "SetVenueCredentials" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "payload": { "$ref": "#/$defs/VenueCredentialsPayload" }
+      }
+    },
+    "RequestVenueLogin": {
+      "description": "Rust UI asks the engine to drive a venue-specific login flow (Tachibana spawns a tkinter helper subprocess).",
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "RequestVenueLogin" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" }
+      }
+    }
+  }
+}

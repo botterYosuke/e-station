@@ -27,6 +27,19 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Add any `MarketKind` variants that are missing from `selected_markets`.
+    /// Called after deserializing saved-state so old states saved before a new
+    /// variant (e.g. `Stock`) was added still show the new markets.
+    pub fn migrate(&mut self) {
+        for kind in MarketKind::ALL {
+            if !self.selected_markets.contains(&kind) {
+                self.selected_markets.push(kind);
+            }
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub enum SortOptions {
     #[default]
@@ -166,7 +179,7 @@ pub fn calc_search_rank(ticker: &Ticker, query: &str) -> Option<SearchRank> {
 
 pub fn market_suffix(market: MarketKind) -> &'static str {
     match market {
-        MarketKind::Spot => "",
+        MarketKind::Spot | MarketKind::Stock => "",
         MarketKind::LinearPerps | MarketKind::InversePerps => "P",
     }
 }
@@ -242,4 +255,62 @@ fn split_price_changes(
 
 fn price_to_display_string(price: Price, precision: Option<MinTicksize>) -> Option<String> {
     precision.map(|precision| price.to_string(precision))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_adds_stock_to_legacy_selected_markets() {
+        // Simulate a saved-state that was created before MarketKind::Stock was added.
+        let mut settings = Settings {
+            selected_markets: vec![
+                MarketKind::Spot,
+                MarketKind::InversePerps,
+                MarketKind::LinearPerps,
+            ],
+            ..Settings::default()
+        };
+        settings.migrate();
+        assert!(
+            settings.selected_markets.contains(&MarketKind::Stock),
+            "migrate() must add MarketKind::Stock to a legacy saved-state missing it"
+        );
+    }
+
+    #[test]
+    fn migrate_is_idempotent() {
+        let mut settings = Settings::default();
+        // Run migrate twice — no duplicates should appear.
+        settings.migrate();
+        settings.migrate();
+        for kind in MarketKind::ALL {
+            let count = settings
+                .selected_markets
+                .iter()
+                .filter(|&&k| k == kind)
+                .count();
+            assert_eq!(
+                count, 1,
+                "MarketKind::{kind:?} appears {count} times after two migrate() calls; expected 1"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_covers_all_market_kinds() {
+        // Start with an empty selected_markets list (maximally old saved-state).
+        let mut settings = Settings {
+            selected_markets: vec![],
+            ..Settings::default()
+        };
+        settings.migrate();
+        for kind in MarketKind::ALL {
+            assert!(
+                settings.selected_markets.contains(&kind),
+                "migrate() must add MarketKind::{kind:?} when starting from an empty list"
+            );
+        }
+    }
 }

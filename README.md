@@ -64,6 +64,8 @@ Since these binaries are currently unsigned they might get flagged.
 #### Requirements
 
 -   [Rust toolchain](https://www.rust-lang.org/tools/install)
+-   [Python 3.11+](https://www.python.org/downloads/) — runs the data engine
+-   [`uv`](https://github.com/astral-sh/uv) (recommended) for managing the Python environment
 -   [Git version control system](https://git-scm.com/)
 -   System dependencies:
     -   **Linux**:
@@ -73,28 +75,99 @@ Since these binaries are currently unsigned they might get flagged.
     -   **macOS**: Install Xcode Command Line Tools: `xcode-select --install`
     -   **Windows**: No additional dependencies required
 
-#### Option A: `cargo install`
+#### Option A: Cloning the repo (recommended for development)
 
 ```bash
-# Install latest globally
-cargo install --git https://github.com/flowsurface-rs/flowsurface flowsurface
-
-# Run
-flowsurface
-```
-
-#### Option B: Cloning the repo
-
-```bash
-# Clone the repository
 git clone https://github.com/flowsurface-rs/flowsurface
-
 cd flowsurface
 
-# Build and run
-cargo build --release
+# Install Python deps (the data engine that supplies all market data)
+uv sync
+
+# Run viewer + data engine.  When `--data-engine-url` is omitted, the
+# viewer spawns and supervises the engine automatically.
 cargo run --release
 ```
+
+If `uv` is unavailable, set `--engine-cmd` to point at a Python interpreter that
+has the `engine` package importable:
+
+```bash
+PYTHONPATH=python cargo run --release -- --engine-cmd python3
+```
+
+To attach the viewer to an externally managed engine (useful when iterating on
+Python code), launch the engine first and pass its WebSocket URL:
+
+```bash
+# Terminal 1 — engine on a fixed dev port
+FLOWSURFACE_ENGINE_TOKEN=devtoken \
+PYTHONPATH=python python -m engine --port 8765 --token devtoken
+
+# Terminal 2 — viewer connects, does not spawn its own engine
+FLOWSURFACE_ENGINE_TOKEN=devtoken \
+cargo run --release -- --data-engine-url ws://127.0.0.1:8765
+```
+
+#### Option B: Building a redistributable bundle
+
+The release scripts under [`scripts/`](./scripts/) freeze the engine into a
+single executable (via [PyInstaller](https://pyinstaller.org/)) and ship it
+alongside the viewer.  Install PyInstaller first:
+
+```bash
+uv tool install pyinstaller   # recommended
+# or: pip install pyinstaller
+```
+
+Then run the platform-specific script:
+
+```bash
+scripts/build-windows.sh      # → target/release/win-portable/
+scripts/build-macos.sh        # → target/release/flowsurface-*-macos.tar.gz
+scripts/package-linux.sh package
+```
+
+Each archive contains both `flowsurface(.exe)` and `flowsurface-engine(.exe)`.
+At runtime the viewer locates the engine binary next to its own executable, so
+the user does not need a system Python install.
+
+### Runtime behaviour
+
+-   **Logs**: viewer logs go to `flowsurface.log` (same directory as the
+    binary on portable installs, or the user data folder otherwise).  The
+    engine's stdout/stderr is forwarded into the same file under the `engine`
+    log target — no separate Python log to chase.
+-   **Engine supervision**: if the engine process crashes, the viewer
+    surfaces a "data engine restarting" toast, restarts the engine with
+    exponential backoff (500 ms → 30 s cap), reapplies the proxy, and
+    re-subscribes every active stream.  Charts repopulate automatically.
+
+## Tachibana Securities (立花証券) Venue
+
+Flowsurface supports real-time Japanese stock charting via the Tachibana
+Securities e支店 API (Phase 1: read-only, demo environment).
+
+**Prerequisites for using the Tachibana venue:**
+
+- A **Tachibana Securities e支店 account** with **phone authentication** completed.
+  The API requires telephone-based authentication before any programmatic login
+  is possible; without it the login dialog will be blocked by the brokerage.
+- The account must be enrolled in the e支店 API service.
+- Phase 1 connects to the **demo environment** (`demo-kabuka.e-shiten.jp`) only.
+  Production access requires setting `TACHIBANA_ALLOW_PROD=1` at runtime.
+
+**Development / CI login** (debug builds only):
+
+```bash
+export DEV_TACHIBANA_USER_ID=your_user_id
+export DEV_TACHIBANA_PASSWORD=your_password
+export DEV_TACHIBANA_DEMO=true   # default; set to false to attempt prod (+ TACHIBANA_ALLOW_PROD=1)
+cargo run                        # debug build auto-logins via env, no dialog
+```
+
+Release builds ignore `DEV_TACHIBANA_*` entirely and always require the
+interactive login dialog.
 
 ## Credits and thanks to
 

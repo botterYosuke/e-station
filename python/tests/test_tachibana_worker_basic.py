@@ -1,0 +1,376 @@
+"""TDD: TachibanaWorker happy paths (B2)."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from engine.exchanges.tachibana import TachibanaWorker
+from engine.exchanges.tachibana_auth import TachibanaSession
+from engine.exchanges.tachibana_helpers import TachibanaError
+from engine.exchanges.tachibana_url import EventUrl, MasterUrl, PriceUrl, RequestUrl
+
+
+def _fake_session() -> TachibanaSession:
+    return TachibanaSession(
+        url_request=RequestUrl("https://example.test/request/"),
+        url_master=MasterUrl("https://example.test/master/"),
+        url_price=PriceUrl("https://example.test/price/"),
+        url_event=EventUrl("https://example.test/event/"),
+        url_event_ws="wss://example.test/event/",
+        zyoutoeki_kazei_c="",
+    )
+
+
+def _make_master(worker: TachibanaWorker) -> None:
+    worker._master_records = {
+        "CLMIssueMstKabu": [
+            {"sIssueCode": "7203", "sIssueName": "トヨタ自動車", "sIssueNameEizi": "TOYOTA MOTOR"},
+            {"sIssueCode": "130A0", "sIssueName": "テスト英数銘柄", "sIssueNameEizi": "TEST ALPHA"},
+        ],
+        "CLMIssueSizyouMstKabu": [
+            {
+                "sIssueCode": "7203",
+                "sSizyouC": "00",
+                "sBaibaiTaniNumber": "100",
+                "sYobineTaniNumber": "1",
+            },
+            {
+                "sIssueCode": "130A0",
+                "sSizyouC": "00",
+                "sBaibaiTaniNumber": "100",
+                "sYobineTaniNumber": "1",
+            },
+        ],
+    }
+    worker._yobine_table = {}
+
+
+def _stubbed(tmp_path: Path) -> TachibanaWorker:
+    worker = TachibanaWorker(cache_dir=tmp_path, is_demo=True, session=_fake_session())
+
+    async def _fake() -> None:
+        _make_master(worker)
+
+    worker._download_master = AsyncMock(side_effect=_fake)  # type: ignore[method-assign]
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_loads_master_lazily(tmp_path: Path):
+    worker = _stubbed(tmp_path)
+    assert worker._master_loaded.is_set() is False
+    tickers = await worker.list_tickers("stock")
+    assert worker._master_loaded.is_set() is True
+    assert len(tickers) >= 1
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_includes_display_name_ja_key(tmp_path: Path):
+    worker = _stubbed(tmp_path)
+    tickers = await worker.list_tickers("stock")
+    by_symbol = {t["symbol"]: t for t in tickers}
+    assert "display_name_ja" in by_symbol["7203"]
+    assert by_symbol["7203"]["display_name_ja"] == "トヨタ自動車"
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_includes_yobine_code(tmp_path: Path):
+    worker = _stubbed(tmp_path)
+    tickers = await worker.list_tickers("stock")
+    for t in tickers:
+        assert "yobine_code" in t
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_includes_quote_currency_jpy(tmp_path: Path):
+    worker = _stubbed(tmp_path)
+    tickers = await worker.list_tickers("stock")
+    for t in tickers:
+        assert t["quote_currency"] == "JPY"
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_includes_alphanumeric_ticker_130A0(tmp_path: Path):
+    worker = _stubbed(tmp_path)
+    tickers = await worker.list_tickers("stock")
+    symbols = [t["symbol"] for t in tickers]
+    assert "130A0" in symbols
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_returns_dict(tmp_path: Path):
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        # Response uses aCLMMfdsMarketPrice (actual API key) and FD codes (pDPP etc.)
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPrice","sResultCode":"0",'
+            '"aCLMMfdsMarketPrice":['
+            '{"sIssueCode":"7203","pDPP":"2880","tDPP:T":"15:00",'
+            '"pDOP":"2860","pDHP":"2900","pDLP":"2800","pDV":"1234567"}'
+            ']}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    stats = await worker.fetch_ticker_stats("7203", "stock")
+    assert isinstance(stats, dict)
+    assert "last_price" in stats or "close" in stats
+
+
+@pytest.mark.asyncio
+async def test_fetch_klines_d1_returns_kline_list(tmp_path: Path):
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPriceHistory","sResultCode":"0",'
+            '"aCLMMfdsMarketPriceHistory":['
+            '{"sDate":"20260424","pDOP":"2860","pDHP":"2900","pDLP":"2800","pDPP":"2880","pDV":"123456"},'
+            '{"sDate":"20260425","pDOP":"2870","pDHP":"2890","pDLP":"2810","pDPP":"2880","pDV":"222222"}'
+            ']}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    rows = await worker.fetch_klines("7203", "stock", "1d", limit=2)
+    assert isinstance(rows, list) and len(rows) == 2
+    for row in rows:
+        for key in ("open_time_ms", "open", "high", "low", "close", "volume"):
+            assert key in row
+
+
+@pytest.mark.asyncio
+async def test_unimplemented_streams_raise_not_implemented(tmp_path: Path):
+    """ABC residual: fetch_open_interest は NotImplementedError を上げる。"""
+    worker = _stubbed(tmp_path)
+    with pytest.raises(NotImplementedError):
+        await worker.fetch_open_interest("7203", "stock", "1d")
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_raises_no_session_when_session_is_none(tmp_path: Path):
+    """fetch_depth_snapshot は session=None のとき TachibanaError(code='no_session') を raise する。"""
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    with pytest.raises(TachibanaError) as exc_info:
+        await worker.fetch_depth_snapshot("7203", "stock")
+    assert exc_info.value.code == "no_session"
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_includes_min_ticksize_when_yobine_table_present(tmp_path: Path):
+    """B5: min_ticksize must be populated from CLMYobine when yobine_table is available."""
+    from decimal import Decimal
+
+    from engine.exchanges.tachibana_master import YobineBand
+
+    worker = TachibanaWorker(cache_dir=tmp_path, is_demo=True)
+    # Pre-populate master state directly so no network call occurs.
+    _make_master(worker)
+    # Override the empty yobine_table installed by _make_master with a real entry.
+    worker._yobine_table = {
+        "1": [
+            YobineBand(
+                kizun_price=Decimal("999999999"),
+                yobine_tanka=Decimal("1"),
+                decimals=0,
+            ),
+        ]
+    }
+    from engine.exchanges.tachibana import current_jst_yyyymmdd
+    worker._master_loaded_jst_date = current_jst_yyyymmdd()
+    worker._master_loaded.set()
+    tickers = await worker.list_tickers("stock")
+    by_symbol = {t["symbol"]: t for t in tickers}
+    assert "min_ticksize" in by_symbol["7203"], "min_ticksize must appear when yobine_table is populated"
+    assert by_symbol["7203"]["min_ticksize"] > 0
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_omits_min_ticksize_when_yobine_table_empty(tmp_path: Path):
+    """B5: min_ticksize must be absent (not crash) when yobine_table has no matching code."""
+    worker = _stubbed(tmp_path)
+    # empty yobine_table — no codes available
+    worker._yobine_table = {}
+    tickers = await worker.list_tickers("stock")
+    for t in tickers:
+        # Key may be absent but must never be 0.0 or negative
+        if "min_ticksize" in t:
+            assert t["min_ticksize"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Problem 2: stream_trades / stream_depth session=None silent failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_trades_session_none_appends_disconnected_event(
+    tmp_path: Path,
+) -> None:
+    """stream_trades は session=None のとき Disconnected を outbox に積んでから return する。"""
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    outbox: list[dict] = []
+    stop = asyncio.Event()
+
+    with patch(
+        "engine.exchanges.tachibana._tachibana_ws.is_market_open", return_value=True
+    ):
+        await worker.stream_trades("7203", "stock", "ssid-1", outbox, stop)
+
+    assert len(outbox) == 1
+    ev = outbox[0]
+    assert ev["event"] == "Disconnected"
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "trade"
+    assert ev["reason"] == "no_session"
+    assert ev["market"] == "stock"
+
+
+@pytest.mark.asyncio
+async def test_stream_depth_session_none_appends_disconnected_event(
+    tmp_path: Path,
+) -> None:
+    """stream_depth は session=None のとき Disconnected を outbox に積んでから return する。"""
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    outbox: list[dict] = []
+    stop = asyncio.Event()
+
+    with patch(
+        "engine.exchanges.tachibana._tachibana_ws.is_market_open", return_value=True
+    ):
+        await worker.stream_depth("7203", "stock", "ssid-1", outbox, stop)
+
+    assert len(outbox) == 1
+    ev = outbox[0]
+    assert ev["event"] == "Disconnected"
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "depth"
+    assert ev["reason"] == "no_session"
+    assert ev["market"] == "stock"
+
+
+# ---------------------------------------------------------------------------
+# R2-M1: _depth_polling_fallback must push Disconnected on poll timeout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_depth_polling_fallback_poll_timeout_appends_disconnected(
+    tmp_path: Path,
+) -> None:
+    """_depth_polling_fallback は poll 上限到達後（stop_event 未セット）に
+    Disconnected(reason='poll_timeout') を outbox に積む。"""
+    from unittest.mock import patch as _patch
+
+    worker = _stubbed(tmp_path)
+    outbox: list[dict] = []
+    stop = asyncio.Event()  # stop_event は set しない（上限到達ケース）
+
+    # fetch_depth_snapshot は空を返すようにする（outbox に DepthSnapshot が積まれないように）
+    async def _empty_snap(ticker: str, market: str) -> dict:
+        return {"last_update_id": 0, "bids": [], "asks": [], "recv_ts_ms": 0}
+
+    worker.fetch_depth_snapshot = AsyncMock(side_effect=_empty_snap)  # type: ignore[method-assign]
+
+    # ポーリングが即終了するよう上限・間隔を極小にパッチ
+    with (
+        _patch("engine.exchanges.tachibana_ws._DEPTH_POLL_MAX_S", 0.05),
+        _patch("engine.exchanges.tachibana_ws._DEPTH_POLL_INTERVAL_S", 0.02),
+    ):
+        await worker._depth_polling_fallback("7203", "stock", "ssid-1", outbox, stop)
+
+    # 最後のイベントが Disconnected(reason='poll_timeout') であること
+    disconnected_events = [e for e in outbox if e.get("event") == "Disconnected"]
+    assert disconnected_events, "poll timeout should append a Disconnected event"
+    ev = disconnected_events[-1]
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "depth"
+    assert ev["market"] == "stock"
+    assert ev["reason"] == "poll_timeout"
+
+
+# ---------------------------------------------------------------------------
+# C-1: fetch_depth_snapshot must include last_update_id in return value
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_contains_last_update_id_key(tmp_path: Path) -> None:
+    """fetch_depth_snapshot は成功時に last_update_id キーを含む dict を返す。"""
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPrice","sResultCode":"0",'
+            '"aCLMMfdsMarketPrice":['
+            '{"sIssueCode":"7203","pGBP1":"2880","pGBV1":"100",'
+            '"pGAP1":"2881","pGAV1":"200"}'
+            ']}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    snap = await worker.fetch_depth_snapshot("7203", "stock")
+    assert "last_update_id" in snap, "fetch_depth_snapshot must include last_update_id key"
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_empty_response_contains_last_update_id(
+    tmp_path: Path,
+) -> None:
+    """空レスポンス時も last_update_id キーを含む dict を返す（KeyError 回避）。"""
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPrice","sResultCode":"0",'
+            '"aCLMMfdsMarketPrice":[]}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    snap = await worker.fetch_depth_snapshot("7203", "stock")
+    assert "last_update_id" in snap
+    assert snap["bids"] == []
+    assert snap["asks"] == []
+    # R2-M2: empty response must also carry recv_ts_ms (schema consistency)
+    assert "recv_ts_ms" in snap, "empty response must include recv_ts_ms key"
+    assert snap["recv_ts_ms"] == 0
+
+
+# ---------------------------------------------------------------------------
+# H-1: _depth_polling_fallback must push Disconnected when session is None
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_depth_polling_fallback_session_none_appends_disconnected(
+    tmp_path: Path,
+) -> None:
+    """_depth_polling_fallback は session=None のとき Disconnected を outbox に積んで即 return する。"""
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    outbox: list[dict] = []
+    stop = asyncio.Event()
+
+    await worker._depth_polling_fallback("7203", "stock", "ssid-1", outbox, stop)
+
+    assert len(outbox) == 1
+    ev = outbox[0]
+    assert ev["event"] == "Disconnected"
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "depth"
+    assert ev["market"] == "stock"
+    assert ev["reason"] == "no_session"

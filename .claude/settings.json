@@ -1,0 +1,96 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo llvm-cov:*)",
+      "Bash(cargo watch:*)",
+      "Bash(uv run:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(uv run python:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(bash tests/e2e/smoke.sh)",
+      "Bash(bash tests/e2e/smoke.sh:*)",
+      "Bash(bash scripts/:*)",
+      "Bash(chmod +x tests/e2e/smoke.sh)",
+      "Bash(./target/debug/flowsurface.exe:*)",
+      "Bash(./target/release/flowsurface.exe:*)",
+      "Bash(./target/release/python-engine/flowsurface-engine.exe:*)",
+      "Bash(tasklist:*)",
+      "Bash(taskkill:*)",
+      "Bash(ps -W)",
+      "Bash(disown)",
+      "Bash(jobs)",
+      "Bash(git:*)",
+      "Bash(echo:*)",
+      "Bash(tee:*)",
+      "Bash(grep:*)",
+      "Bash(awk:*)",
+      "Bash(sed:*)",
+      "Bash(wc:*)",
+      "Bash(find:*)",
+      "Bash(rm -f:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(python:*)",
+      "Bash(python -c:*)",
+      "Bash(node -e:*)",
+      "PowerShell(Get-Process:*)",
+      "PowerShell(Stop-Process:*)",
+      "PowerShell(netstat:*)",
+      "PowerShell(cargo:*)",
+      "PowerShell(git:*)",
+      "Read(/tmp/**)",
+      "Read(C:/tmp/**)",
+      "Edit(/.claude/skills/**)",
+      "WebSearch",
+      "WebFetch(domain:www.e-shiten.jp)"
+    ],
+    "additionalDirectories": [
+      "\\tmp",
+      "C:\\tmp"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)",
+            "statusMessage": "Formatting Rust...",
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "cargo check 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)|Edit(*Cargo.toml)|Write(*Cargo.toml)",
+            "statusMessage": "Checking compilation...",
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "grep -q 'compression=None' python/engine/server.py || echo '[WARN] python/engine/server.py: compression=None が見つかりません — MISSES.md 2026-04-25 の RSV1 圧縮バグ再発リスク'",
+            "if": "Edit(python/engine/server.py)|Write(python/engine/server.py)",
+            "statusMessage": "Checking WebSocket compression setting...",
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "rust_major=$(grep -oP 'pub const SCHEMA_MAJOR: u16 = \\K[0-9]+' engine-client/src/lib.rs 2>/dev/null) && py_major=$(grep -oP '^SCHEMA_MAJOR: int = \\K[0-9]+' python/engine/schemas.py 2>/dev/null) && [ \"$rust_major\" = \"$py_major\" ] || echo \"[WARN] SCHEMA_MAJOR 不一致: Rust=$rust_major Python=$py_major — IPC ハンドシェイクが失敗します\"",
+            "if": "Edit(engine-client/src/lib.rs)|Write(engine-client/src/lib.rs)|Edit(python/engine/schemas.py)|Write(python/engine/schemas.py)",
+            "statusMessage": "Validating IPC schema versions...",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

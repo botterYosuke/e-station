@@ -526,7 +526,7 @@ impl State {
             let mut label = {
                 let symbol = base_ti.ticker.display_symbol_and_type().0;
                 match base_ti.ticker.market_type() {
-                    MarketKind::Spot => symbol,
+                    MarketKind::Spot | MarketKind::Stock => symbol,
                     MarketKind::LinearPerps | MarketKind::InversePerps => symbol + " PERP",
                 }
             };

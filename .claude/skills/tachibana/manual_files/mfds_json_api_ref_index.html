@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<!-- saved from url=(0058)https://www.e-shiten.jp/e_api/mfds_json_api_ref_index.html -->
+<html lang="ja" data-jetski-tab-id="error">
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=Shift_JIS">
+    <meta http-equiv="content-style-type" content="text/css">
+    <meta http-equiv="content-script-type" content="text/javascript">
+    <meta http-equiv="cache-control" content="no-store,no-cache,must-revalidate,post-check=0,pre-check=0">
+    <meta http-equiv="expires" content="1">
+    <meta http-equiv="pragma" content="no-cache">
+    <meta http-equiv="access-control-allow-origin" content="*">
+    <meta http-equiv="access-control-allow-credentials" content="true">
+    <script type="text/javascript" src="./jquery-3.3.1.min.js.ダウンロード"></script>
+    <script type="text/javascript" src="./mfds_json_api_refference.js.ダウンロード"></script>
+    <link rel="stylesheet" type="text/css" href="./mfds_json_api_refference.css">
+    <title>立花証券・ｅ支店・ＡＰＩは無料で利用できる日本株 API です。取引や株価・ニュースの取得を高速に処理できます。</title>
+</head>
+
+<body><span class="cTITLE">e_api refference manual</span><br>
+    <ol>
+        <li class="c1" id="ComT1"><span>共通説明</span></li>
+        <ol>
+            <li class="c2" id="ComP1"><span>ｅ支店・ＡＰＩ専用ＵＲＬ</span></li>
+            <li class="c2" id="ComP2"><span>インタフェース概要</span></li>
+            <li class="c2" id="ComP3"><span>ブラウザからの利用方法</span></li>
+            <li class="c2" id="ComP4"><span>共通項目、認証機能</span></li>
+            <li class="c2" id="ComP5"><span>マスタデータ利用方法</span></li>
+            <li class="c2" id="ComP7"><span>EXCEL(VBA)からの利用方法</span></li>
+        </ol>
+        <li class="c1" id="ComT2"><span>認証機能（認証I/F）</span></li>
+        <ol>
+            <li class="c2" id="CLMAuthLoginRequest"><span>ログイン</span></li>
+            <li class="c2" id="CLMAuthLogoutRequest"><span>ログアウト</span></li>
+        </ol>
+        <li class="c1" id="ComT3"><span>業務機能（REQUEST I/F）</span></li>
+        <ol>
+            <li class="c2" id="CLMKabuNewOrder"><span>株式新規注文</span></li>
+            <li class="c2" id="CLMKabuCorrectOrder"><span>株式訂正注文</span></li>
+            <li class="c2" id="CLMKabuCancelOrder"><span>株式取消注文</span></li>
+            <li class="c2" id="CLMKabuCancelOrderAll"><span>株式一括取消</span></li>
+            <li class="c2" id="CLMGenbutuKabuList"><span>現物保有銘柄一覧</span></li>
+            <li class="c2" id="CLMShinyouTategyokuList"><span>信用建玉一覧</span></li>
+            <li class="c2" id="CLMZanKaiKanougaku"><span>買余力</span></li>
+            <li class="c2" id="CLMZanShinkiKanoIjiritu"><span>建余力＆本日維持率</span></li>
+            <li class="c2" id="CLMZanUriKanousuu"><span>売却可能数量</span></li>
+            <li class="c2" id="CLMOrderList"><span>注文一覧</span></li>
+            <li class="c2" id="CLMOrderListDetail"><span>注文約定一覧（詳細）</span></li>
+            <li class="c2" id="CLMZanKaiSummary"><span>可能額サマリー</span></li>
+            <li class="c2" id="CLMZanKaiKanougakuSuii"><span>可能額推移</span></li>
+            <li class="c2" id="CLMZanKaiGenbutuKaitukeSyousai"><span>現物株式買付可能額詳細</span></li>
+            <li class="c2" id="CLMZanKaiSinyouSinkidateSyousai"><span>信用新規建て可能額詳細</span></li>
+            <li class="c2" id="CLMZanRealHosyoukinRitu"><span>リアル保証金率</span></li>
+        </ol>
+        <li class="c1" id="ComT4"><span>マスタ機能（REQUEST I/F）</span></li>
+        <ol>
+            <li class="c2" id="CLMEventDownload"><span>マスタ情報ダウンロード</span></li>
+            <li class="c2" id="CLMMfdsGetMasterData"><span>マスタ情報問合取得</span></li>
+            <li class="c2" id="CLMMfdsGetNewsHead"><span>ニュースヘッダー問合取得</span></li>
+            <li class="c2" id="CLMMfdsGetNewsBody"><span>ニュースボディー問合取得</span></li>
+            <li class="c2" id="CLMMfdsGetIssueDetail"><span>銘柄詳細情報問合取得</span></li>
+            <li class="c2" id="CLMMfdsGetSyoukinZan"><span>証金残情報問合取得</span></li>
+            <li class="c2" id="CLMMfdsGetShinyouZan"><span>信用残情報問合取得</span></li>
+            <li class="c2" id="CLMMfdsGetHibuInfo"><span>逆日歩情報問合取得</span></li>
+        </ol>
+        <li class="c1" id="ComT5"><span>時価情報機能（REQUEST I/F）</span></li>
+        <ol>
+            <li class="c2" id="CLMMfdsGetMarketPrice"><span>時価情報問合取得</span></li>
+            <li class="c2" id="CLMMfdsGetMarketPriceHistory"><span>蓄積情報問合取得</span></li>
+        </ol>
+        <li class="c1" id="ComT6"><span>注文約定通知（EVENT I/F）</span></li>
+        <li class="c1" id="ComT7"><span>結果コード、警告コード表</span></li>
+        <li class="c1" id="ComT8">リンク</li>
+        <ol>
+            <li class="c2"><a href="https://www.e-shiten.jp/e_api/mfds_json_api_ref_index.html#ComT8"
+                    onclick="window.open(&#39;https://www.e-shiten.jp/&#39;)"><span>立花証券ｅ支店</span></a><br></li>
+            <li class="c2"><a href="https://www.e-shiten.jp/e_api/mfds_json_api_ref_index.html#ComT8"
+                    onclick="window.open(&#39;https://www.e-shiten.jp/important_info/20200821.html&#39;)"><span>ＡＰＩサービス開始のご案内</span></a><br>
+            </li>
+            <li class="c2"><a href="https://www.e-shiten.jp/e_api/mfds_json_api_ref_index.html#ComT8"
+                    onclick="window.open(&#39;mfds_json_api_menu.html&#39;)"><span>ｅ支店・ＡＰＩ専用ページ</span></a><br></li>
+        </ol>
+    </ol>
+</body>
+
+</html>

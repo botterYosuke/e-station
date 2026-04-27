@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "flowsurface/ipc/events",
+  "title": "Python → Rust IPC Events",
+  "description": "Events sent from the Python data engine to the Rust viewer.",
+  "oneOf": [
+    { "$ref": "#/$defs/Ready" },
+    { "$ref": "#/$defs/EngineError" },
+    { "$ref": "#/$defs/Connected" },
+    { "$ref": "#/$defs/Disconnected" },
+    { "$ref": "#/$defs/Trades" },
+    { "$ref": "#/$defs/TradesFetched" },
+    { "$ref": "#/$defs/KlineUpdate" },
+    { "$ref": "#/$defs/Klines" },
+    { "$ref": "#/$defs/DepthSnapshot" },
+    { "$ref": "#/$defs/DepthDiff" },
+    { "$ref": "#/$defs/DepthGap" },
+    { "$ref": "#/$defs/OpenInterest" },
+    { "$ref": "#/$defs/TickerInfo" },
+    { "$ref": "#/$defs/TickerStats" },
+    { "$ref": "#/$defs/Error" },
+    { "$ref": "#/$defs/VenueReady" },
+    { "$ref": "#/$defs/VenueError" },
+    { "$ref": "#/$defs/VenueCredentialsRefreshed" },
+    { "$ref": "#/$defs/VenueLoginStarted" },
+    { "$ref": "#/$defs/VenueLoginCancelled" }
+  ],
+  "$defs": {
+    "RequestId": {
+      "description": "UUIDv4 string per RFC 4122 (LOW-1 / F-L7). Python emits via str(uuid.uuid4()) — hyphenated lowercase.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "maxLength": 36
+    },
+    "RequestIdNullable": {
+      "description": "Nullable variant of RequestId (used for events that may correlate to a request or be unsolicited).",
+      "oneOf": [
+        { "$ref": "#/$defs/RequestId" },
+        { "type": "null" }
+      ]
+    },
+    "Ready": {
+      "type": "object",
+      "required": ["event", "schema_major", "schema_minor", "engine_version", "engine_session_id", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Ready" },
+        "schema_major": { "type": "integer", "minimum": 0 },
+        "schema_minor": { "type": "integer", "minimum": 0 },
+        "engine_version": { "type": "string" },
+        "engine_session_id": { "type": "string", "format": "uuid" },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "supported_venues": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "supports_bulk_trades": { "type": "boolean" },
+            "supports_depth_binary": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    "EngineError": {
+      "type": "object",
+      "required": ["event", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "EngineError" },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "Connected": {
+      "description": "Exchange WebSocket stream connected (mirrors exchange::Event::Connected).",
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Connected" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream": { "type": "string" }
+      }
+    },
+    "Disconnected": {
+      "description": "Exchange WebSocket stream disconnected (mirrors exchange::Event::Disconnected). For Tachibana, `reason: \"market_closed\"` indicates the JST trading session boundary.",
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Disconnected" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream": { "type": "string" },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "TradeMsg": {
+      "type": "object",
+      "required": ["price", "qty", "side", "ts_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "price": { "type": "string" },
+        "qty": { "type": "string" },
+        "side": { "type": "string", "enum": ["buy", "sell"] },
+        "ts_ms": { "type": "integer" },
+        "is_liquidation": { "type": "boolean", "default": false }
+      }
+    },
+    "Trades": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id", "trades"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Trades" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" },
+        "trades": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TradeMsg" }
+        }
+      }
+    },
+    "TradesFetched": {
+      "description": "Chunked response to FetchTrades. is_last=true marks the final (or only) chunk.",
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "trades", "is_last"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "TradesFetched" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "trades": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TradeMsg" }
+        },
+        "is_last": { "type": "boolean" }
+      }
+    },
+    "KlineMsg": {
+      "type": "object",
+      "required": ["open_time_ms", "open", "high", "low", "close", "volume", "is_closed"],
+      "additionalProperties": false,
+      "properties": {
+        "open_time_ms": { "type": "integer" },
+        "open": { "type": "string" },
+        "high": { "type": "string" },
+        "low": { "type": "string" },
+        "close": { "type": "string" },
+        "volume": { "type": "string" },
+        "is_closed": { "type": "boolean" }
+      }
+    },
+    "KlineUpdate": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "timeframe", "kline"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "KlineUpdate" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "kline": { "$ref": "#/$defs/KlineMsg" }
+      }
+    },
+    "Klines": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "timeframe", "klines"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Klines" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "klines": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/KlineMsg" }
+        }
+      }
+    },
+    "DepthLevel": {
+      "type": "object",
+      "required": ["price", "qty"],
+      "additionalProperties": false,
+      "properties": {
+        "price": { "type": "string" },
+        "qty": { "type": "string" }
+      }
+    },
+    "DepthSnapshot": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id", "sequence_id", "bids", "asks"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "DepthSnapshot" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" },
+        "sequence_id": { "type": "integer" },
+        "bids": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } },
+        "asks": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } },
+        "checksum": { "type": ["integer", "null"] }
+      }
+    },
+    "DepthDiff": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id", "sequence_id", "prev_sequence_id", "bids", "asks"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "DepthDiff" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" },
+        "sequence_id": { "type": "integer" },
+        "prev_sequence_id": { "type": "integer" },
+        "bids": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } },
+        "asks": { "type": "array", "items": { "$ref": "#/$defs/DepthLevel" } }
+      }
+    },
+    "DepthGap": {
+      "type": "object",
+      "required": ["event", "venue", "ticker", "stream_session_id"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "DepthGap" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stream_session_id": { "type": "string" }
+      }
+    },
+    "OpenInterest": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OpenInterest" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ts_ms", "open_interest"],
+            "properties": {
+              "ts_ms": { "type": "integer" },
+              "open_interest": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "TickerInfo": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "tickers"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "TickerInfo" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "tickers": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "TickerStats": {
+      "type": "object",
+      "required": ["event", "request_id", "venue", "ticker", "stats"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "TickerStats" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "ticker": { "type": "string" },
+        "stats": { "type": "object" }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "required": ["event", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "Error" },
+        "request_id": { "type": ["string", "null"] },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "TachibanaSessionWire": {
+      "type": "object",
+      "required": ["url_request", "url_master", "url_price", "url_event", "url_event_ws"],
+      "additionalProperties": false,
+      "properties": {
+        "url_request": { "type": "string" },
+        "url_master": { "type": "string" },
+        "url_price": { "type": "string" },
+        "url_event": { "type": "string" },
+        "url_event_ws": { "type": "string" },
+        "expires_at_ms": { "type": ["integer", "null"] },
+        "zyoutoeki_kazei_c": { "type": "string" }
+      }
+    },
+    "VenueReady": {
+      "description": "Idempotent: emitted after every successful SetVenueCredentials, including post-restart re-injection. Consumers must NOT trigger fresh subscriptions on receipt — ProcessManager owns resubscribe.",
+      "type": "object",
+      "required": ["event", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueReady" },
+        "venue": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" }
+      }
+    },
+    "VenueError": {
+      "description": "Venue-scoped error. `message` is user-facing and authored by Python (F-Banner1); the Rust UI displays it verbatim and does NOT compose its own banner text. `code` drives severity & action button only.",
+      "type": "object",
+      "required": ["event", "venue", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueError" },
+        "venue": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "session_expired",
+            "unread_notices",
+            "phone_auth_required",
+            "login_failed",
+            "ticker_not_found",
+            "transport_error"
+          ]
+        },
+        "message": { "type": "string" }
+      }
+    },
+    "VenueCredentialsRefreshed": {
+      "description": "Emitted after a startup-time re-login produces fresh virtual URLs. Rust uses this to update the keyring entry.",
+      "type": "object",
+      "required": ["event", "venue", "session"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueCredentialsRefreshed" },
+        "venue": { "type": "string" },
+        "session": { "$ref": "#/$defs/TachibanaSessionWire" }
+      }
+    },
+    "VenueLoginStarted": {
+      "description": "Python has spawned the venue's login helper subprocess (Tachibana = tkinter dialog).",
+      "type": "object",
+      "required": ["event", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueLoginStarted" },
+        "venue": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" }
+      }
+    },
+    "VenueLoginCancelled": {
+      "type": "object",
+      "required": ["event", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "VenueLoginCancelled" },
+        "venue": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/RequestIdNullable" }
+      }
+    }
+  }
+}

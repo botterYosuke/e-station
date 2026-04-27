@@ -32,6 +32,11 @@ pub enum Action {
         Option<data::layout::pane::ContentKind>,
     ),
     ErrorOccurred(data::InternalError),
+    /// Forwarded from `tickers_table::Action::RequestTachibanaLogin`.
+    /// Flowsurface drives the actual `RequestVenueLogin` IPC frame so
+    /// the duplicate-press suppression can consult `tachibana_state`
+    /// (which lives at the top level). T35-U1 / T35-U3.
+    RequestTachibanaLogin(crate::venue_state::Trigger),
 }
 
 impl Sidebar {
@@ -82,6 +87,9 @@ impl Sidebar {
                     Some(tickers_table::Action::FocusWidget(id)) => {
                         return (iced::widget::operation::focus(id), None);
                     }
+                    Some(tickers_table::Action::RequestTachibanaLogin(trigger)) => {
+                        return (Task::none(), Some(Action::RequestTachibanaLogin(trigger)));
+                    }
                     None => {}
                 }
             }
@@ -123,6 +131,22 @@ impl Sidebar {
 
     pub fn subscription(&self) -> Subscription<Message> {
         self.tickers_table.subscription().map(Message::TickersTable)
+    }
+
+    /// Propagate new handles after an engine reconnect; returns a re-fetch task.
+    pub fn update_handles(&mut self, handles: exchange::adapter::AdapterHandles) -> Task<Message> {
+        self.tickers_table
+            .update_handles(handles)
+            .map(Message::TickersTable)
+    }
+
+    /// B5: Wire the Tachibana display-metadata handle so `filtered_rows` can
+    /// do Japanese-name prefix search. Delegates to `TickersTable`.
+    pub fn set_tachibana_meta_handle(
+        &mut self,
+        handle: Option<std::sync::Arc<tokio::sync::Mutex<engine_client::TickerMetaMap>>>,
+    ) {
+        self.tickers_table.set_tachibana_meta_handle(handle);
     }
 
     fn nav_buttons(

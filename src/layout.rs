@@ -363,8 +363,16 @@ pub fn load_saved_state() -> SavedState {
             crate::connector::fetcher::toggle_trade_fetch(state.trade_fetch_enabled);
             exchange::unit::qty::set_preferred_currency(state.size_in_quote_ccy);
 
+            // If a dedicated proxy-url file exists (written on each Apply, survives crashes),
+            // prefer it over the URL baked into the state JSON.
+            let base_proxy_url: Option<Option<String>> = data::config::proxy::load_proxy_url();
+            let mut proxy_cfg: Option<exchange::proxy::Proxy> = match base_proxy_url {
+                Some(Some(url)) => exchange::proxy::Proxy::try_from_str_strict(&url).ok(),
+                Some(None) => None,
+                None => state.proxy_cfg,
+            };
+
             // Hydrate proxy auth from keychain (keeps auth out of persisted JSON)
-            let mut proxy_cfg = state.proxy_cfg;
             if let Some(proxy) = proxy_cfg.as_mut()
                 && proxy.auth().is_none()
                 && let Some(auth) = data::config::proxy::load_proxy_auth(proxy)

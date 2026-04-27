@@ -1,4 +1,12 @@
 .DS_Store
 /target
 /.vscode
-*.log
+*.log__pycache__/
+*.pyc
+*.pyo
+.venv/
+python/.pytest_cache/
+uv.lock
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+.env
