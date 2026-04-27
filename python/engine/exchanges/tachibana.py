@@ -498,7 +498,7 @@ class TachibanaWorker(ExchangeWorker):
         low_p = str(row.get("pDLP", "")).strip()
         close_p = str(row.get("pDPP", "")).strip()
         volume_v = str(row.get("pDV", "")).strip()
-        if not (open_p and high_p and low_p and close_p):
+        if not (open_p and high_p and low_p and close_p and volume_v):
             return None
         return {
             "open_time_ms": open_time_ms,

@@ -119,3 +119,13 @@ list_return = dic_return.get('aCLMMfdsMarketPrice')
 
 ### GP-M1: NOT A BUG（設計上の差異）
 `_row_to_kline` の `open_time_ms` は「日足開始時刻 = 0:00 JST」、`data_loader.py` の `_date_to_ts_ns` は「大引け = 15:30 JST」を `ts_event` として使う別用途。バグではない。
+
+## レビュー反映 (2026-04-27, ラウンド 2)
+
+### 解消した指摘
+- ✅ R2-H1: `_row_to_kline` の OHLC ガードに `volume_v` を追加（`pDV=""` を Python 側でスキップし Rust 側 silent drop を防止）
+- ✅ R2-M-A: `test_fetch_klines_skips_row_with_empty_ohlc_field` に `pDV` ケースを追加
+- ✅ R2-M-B: ログ assert に `"sDate=" in r.message` を追加してフォーマットを固定
+
+### 残存 LOW（対応不要）
+- R2-L1: `test_fetch_klines_accepts_1d` の Shift-JIS encode にコメント不足（機能影響なし）

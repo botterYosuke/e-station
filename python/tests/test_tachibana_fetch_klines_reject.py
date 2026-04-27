@@ -143,7 +143,7 @@ async def test_fetch_klines_skips_invalid_sdate_and_returns_valid(
 
     # A debug log mentioning the bad sDate must have been emitted.
     assert any(
-        "skipped" in r.message and "BADDATE" in r.message
+        "skipped" in r.message and "BADDATE" in r.message and "sDate=" in r.message
         for r in caplog.records
         if r.levelno == logging.DEBUG
     ), f"Expected skip-log not found in: {[r.message for r in caplog.records]}"
@@ -179,7 +179,7 @@ async def test_fetch_klines_raises_parse_error_on_list_response(tmp_path: Path) 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "empty_field",
-    ["pDOP", "pDHP", "pDLP", "pDPP"],
+    ["pDOP", "pDHP", "pDLP", "pDPP", "pDV"],  # ← pDV 追加
 )
 async def test_fetch_klines_skips_row_with_empty_ohlc_field(
     tmp_path: Path, empty_field: str
