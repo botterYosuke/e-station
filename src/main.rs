@@ -1144,19 +1144,20 @@ impl Flowsurface {
                     _ => {}
                 }
 
-                let old_state =
-                    std::mem::replace(&mut self.tachibana_state, VenueState::Idle);
-                let was_ready = old_state.is_ready();
+                let old_state = std::mem::replace(&mut self.tachibana_state, VenueState::Idle);
+                // Capture before `next()` consumes old_state.
+                let needs_bump =
+                    old_state.is_login_in_flight() || matches!(old_state, VenueState::Error { .. });
                 let next = old_state.next(event);
                 let is_ready = next.is_ready();
                 self.tachibana_state = next;
 
-                if !was_ready && is_ready {
-                    // Session just became available. Bump the subscription
-                    // generation so the depth stream restarts with a valid
-                    // session. Without this, off-hours stream_depth calls
-                    // that fired before session establishment return without
-                    // a DepthSnapshot, leaving the Ladder empty.
+                // Bump only when the session *newly* becomes available from a
+                // state that required a login round-trip (LoginInFlight) or a
+                // re-authentication after an error. Transitions from Idle or
+                // Ready → Ready must NOT bump — those paths mean EngineConnected
+                // already bumped (Idle) or the event is idempotent (Ready→Ready).
+                if needs_bump && is_ready {
                     self.handles.bump_generation();
                     log::info!(
                         "tachibana: session established — restarting subscriptions (gen bumped)"
@@ -1248,6 +1249,21 @@ impl Flowsurface {
                 return sidebar_refetch;
             }
             Message::MarketWsEvent(event) => {
+                // M2: when the Tachibana depth stream reconnects (market
+                // reopened after off-hours) while the FSM is stuck in an Error
+                // state (e.g. market_closed banner), synthesize VenueReady to
+                // clear the banner and re-arm the subscription bump path.
+                if let exchange::Event::Connected(exchange::adapter::Exchange::TachibanaStock) =
+                    &event
+                    && matches!(self.tachibana_state, VenueState::Error { .. })
+                {
+                    log::info!(
+                        "tachibana: depth stream reconnected while in Error state \
+                         — synthesizing VenueReady to clear banner"
+                    );
+                    return Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready));
+                }
+
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
 

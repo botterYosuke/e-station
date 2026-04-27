@@ -124,32 +124,49 @@ pub fn view<T: Panel>(panel: &'_ T, ...) -> Element<'_, Message> {
 - `stream_depth` は市場時間外 + `_session is None` → DepthSnapshot なし・VenueError・Disconnected で返る
 - ログ: `VenueReady` 着信後に depth subscription 再起動がない
 
-### 採用した設計
+### 採用した設計（rev.2 — review-fix-loop ラウンド 1 反映）
 
 **`src/main.rs` — `VenueEvent::Ready` ハンドラ**
 
 ```rust
 let old_state = std::mem::replace(&mut self.tachibana_state, VenueState::Idle);
-let was_ready = old_state.is_ready();
 let next = old_state.next(event);
 let is_ready = next.is_ready();
 self.tachibana_state = next;
 
-if !was_ready && is_ready {
+if (old_state.is_login_in_flight() || matches!(old_state, VenueState::Error { .. }))
+    && is_ready
+{
     self.handles.bump_generation();
     log::info!("tachibana: session established — restarting subscriptions (gen bumped)");
 }
 ```
 
-- 遷移が `非Ready → Ready` の場合のみ `bump_generation()` を呼ぶ（冪等重複なし）
-- `became_ready` の意味を「現在 ready か」から「初めて ready になったか」に厳密化
-- `set_tachibana_ready` には `is_ready`（現在値）を渡す（従来通り）
+- `LoginInFlight → Ready`（ログイン完了）または `Error → Ready`（再ログイン / 市場再開）の場合のみバンプ
+- `Idle → Ready`（EngineConnected 後の合成）はスキップ → EngineConnected がすでにバンプ済みのため二重バンプを防止
+- `Ready → Ready`（冪等）もスキップ
+
+**`src/main.rs` — `MarketWsEvent::Connected` ハンドラ（M2 追加）**
+
+```rust
+if let exchange::Event::Connected(exchange::adapter::Exchange::TachibanaStock) = &event {
+    if matches!(self.tachibana_state, VenueState::Error { .. }) {
+        return Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready));
+    }
+}
+```
+
+- 市場再開後に depth ストリームが再接続した際、`Error(market_closed)` バナーを自動クリアする
 
 ### 他 Venue への影響
 
 - `bump_generation()` はすべての venue サブスクリプション ID を変更する
-- VenueReady はアプリ起動直後（≈1–2 秒）にしか発生しないため、Binance/Bybit の brief reconnect は許容範囲
-- 再ログイン時も同様：セッション再確立後に全 subscription が再起動するのは意図的
+- VenueReady はアプリ起動直後・再ログイン時・Python 再起動後に発生する（起動直後のみではない）
+- Binance/Bybit の brief reconnect は許容範囲（セッション再確立後に全 subscription が再起動するのは意図的）
+
+### 既知の制限（繰越）
+
+- **M3 — VenueError の FSM ルーティング**: `classify_venue_error` の全エラーが `LoginError` として FSM に入るため、`Ready` 状態から `Error` への遷移が起きる。市場時間外の `market_closed` はその一例。FSM に `OperationalError`（セッション維持）と `AuthError`（セッション破棄）を区別するバリアントを追加することで根本解決できるが、FSM リファクタリングを要するため次イテレーション以降に持ち越す。
 
 ### UX フロー（修正後）
 
