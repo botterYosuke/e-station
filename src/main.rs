@@ -1089,6 +1089,9 @@ impl Flowsurface {
                 }
                 return Task::perform(
                     async move {
+                        // request_id は Python エンジン側のログ相関 ID として使われる。
+                        // Rust 側では TachibanaLoginIpcResult のコールバックに乗らないため、
+                        // IPC 送信成功/失敗の照合には使用しない。
                         let request_id = uuid::Uuid::new_v4().to_string();
                         conn.send(engine_client::dto::Command::RequestVenueLogin {
                             request_id,
@@ -1117,6 +1120,10 @@ impl Flowsurface {
                         self.notifications.push(Toast::error(format!(
                             "立花ログイン要求の送信に失敗しました: {err}"
                         )));
+                        // FSM の next() を意図的に迂回して直接 Idle に戻す。
+                        // IPC 送信が失敗した時点でエンジンには RequestVenueLogin が届いておらず、
+                        // VenueLoginStarted も来ない。LoginCancelled は「ユーザー操作でキャンセル」の
+                        // セマンティクスなので流用せず、ここで直接代入する。
                         if self.tachibana_state.is_login_in_flight() {
                             self.tachibana_state = VenueState::Idle;
                         }

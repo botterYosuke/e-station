@@ -228,7 +228,7 @@ async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
         log.error(
             "tachibana login dialog: helper exited code=%s stderr=%r",
             proc.returncode,
-            stderr.decode("utf-8", errors="replace") if stderr else "",
+            stderr.decode("utf-8", errors="replace")[:1000] if stderr else "",
         )
         raise LoginError(code="login_failed", message=_MSG_HELPER_NO_RESPONSE)
 
@@ -248,7 +248,7 @@ async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
     except json.JSONDecodeError as exc:
         log.error(
             "tachibana login dialog: failed to parse helper result %r: %s",
-            last_line,
+            last_line[:40] if last_line else "(empty)",
             exc,
         )
         raise LoginError(code="login_failed", message=_MSG_HELPER_NO_RESPONSE)
@@ -256,7 +256,7 @@ async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
     if result.get("status") == "cancelled":
         return None
     if result.get("status") != "ok":
-        log.error("tachibana login dialog: unexpected status %r", result)
+        log.error("tachibana login dialog: unexpected status %r", result.get("status"))
         raise LoginError(code="login_failed", message=_MSG_HELPER_NO_RESPONSE)
     return result
 
@@ -477,7 +477,8 @@ async def run_login(
         dialog_password = result.get("password")
         if not dialog_user_id or not dialog_password:
             log.error("tachibana login dialog: helper result missing credential fields")
-            raise LoginError(code="login_failed", message=_MSG_LOGIN_FAILED)
+            events.append(_venue_error_event(request_id, "login_failed", _MSG_LOGIN_FAILED))
+            return events
         dialog_is_demo = bool(result.get("is_demo", True))
         try:
             session = await _do_login_call(

@@ -2609,8 +2609,8 @@ mod tests {
     /// B5: `filtered_rows` must include a Tachibana ticker when the search
     /// query is a Japanese prefix of `display_name_ja` stored in the meta
     /// side-channel, and must exclude it when no handle is wired.
-    #[test]
-    fn japanese_name_query_matches_via_meta_handle() {
+    #[tokio::test]
+    async fn japanese_name_query_matches_via_meta_handle() {
         use engine_client::{TickerMetaMap, tachibana_meta::parse_tachibana_ticker_dict};
         use exchange::adapter::Exchange;
 

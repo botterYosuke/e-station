@@ -161,8 +161,11 @@ class TachibanaWorker(ExchangeWorker):
     # ------------------------------------------------------------------
 
     def set_session(self, session: TachibanaSession) -> None:
-        """Inject the post-login `TachibanaSession` (called by server.py
-        after `SetVenueCredentials`). Wired further in B3."""
+        """Inject the post-login `TachibanaSession`.
+
+        Called by ``server.py`` via ``_apply_tachibana_session`` after
+        ``SetVenueCredentials`` / ``RequestVenueLogin`` login success.
+        """
         self._session = session
 
     def set_credentials_demo_flag(self, is_demo: bool) -> None:

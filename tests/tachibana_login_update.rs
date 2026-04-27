@@ -28,6 +28,8 @@ fn read_handler_body() -> String {
 
     // 次の `Message::` アームの開始位置を末端とする（最大 3000 バイト）。
     // これにより他のハンドラの記述が混入しない。
+    // RequestTachibanaLogin アーム本体は ~2378 バイト（2026-04 計測）。
+    // 3000 バイトは 1 アーム分を確実に収める余裕値。
     let after = &src[start..];
     let end = after
         .find("\n            Message::")
@@ -109,5 +111,21 @@ fn request_login_returns_none_when_no_connection() {
         "Message::RequestTachibanaLogin handler must return `Task::none()` \
          when the engine connection is unavailable. \
          T35-LoginUpdate."
+    );
+
+    // `engine_connection` チェックと `Task::none()` の因果関係を確認する。
+    // engine_connection の参照位置から後方 1000 バイト以内に Task::none() が存在することで、
+    // 「engine_connection が None のとき Task::none() を返す」というガード節の近傍共存を pin する。
+    // (None チェックの else ブロック内で return Task::none() するため、前後ではなく後方を確認)
+    let ec_pos = body
+        .find("engine_connection")
+        .expect("engine_connection not found");
+    let window_end = (ec_pos + 1000).min(body.len());
+    let window = &body[ec_pos..window_end];
+    assert!(
+        window.contains("Task::none()"),
+        "Task::none() must appear within 1000 bytes after `engine_connection` in the handler body. \
+         This ensures the guard clause (no connection → early return) remains causally \
+         co-located with the connection check. T35-LoginUpdate."
     );
 }
