@@ -1,6 +1,6 @@
 # 修正計画: Fetch error -1 (sTargetColumn NULL) 2026-04-27
 
-## 状況: 調査完了・修正実装中
+## 状況: 実装完了・review-fix-loop 実施中（2026-04-27）
 
 ## 1. エラーの概要
 

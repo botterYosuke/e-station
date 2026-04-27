@@ -1252,11 +1252,6 @@ class DataEngineServer:
                     }
                 )
                 raise
-            except WsNativeResyncTriggered:
-                # _do_request_depth_snapshot handles this internally; re-raise so
-                # it is never silently converted to fetch_failed if the inner
-                # handler is ever removed.
-                raise
             except ValueError as exc:
                 log.warning("Fetch bad request (request_id=%s): %s", request_id, exc)
                 self._outbox.append(

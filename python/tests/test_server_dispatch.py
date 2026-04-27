@@ -34,6 +34,22 @@ async def _connect_and_handshake(port: int, token: str) -> websockets.ClientConn
     return ws
 
 
+async def _wait_for_port(port: int, timeout: float = 2.0) -> None:
+    """Poll until the TCP port is accepting connections."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.close()
+            await writer.wait_closed()
+            return
+        except OSError:
+            if loop.time() >= deadline:
+                raise TimeoutError(f"port {port} not open after {timeout}s")
+            await asyncio.sleep(0.01)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -47,20 +63,21 @@ async def running_server(unused_tcp_port):
     token = "test-token-abc123"
     mock_worker = _make_mock_worker()
 
-    # Patch BinanceWorker so no real network calls happen
-    with patch("engine.server.BinanceWorker", return_value=mock_worker):
+    noop_startup = AsyncMock(return_value=None)
+    with patch("engine.server.BinanceWorker", return_value=mock_worker), \
+         patch.object(DataEngineServer, "_startup_tachibana", noop_startup):
         server = DataEngineServer(port=unused_tcp_port, token=token)
         task = asyncio.create_task(server.serve())
 
-        await asyncio.sleep(0.1)  # let server start
+        await _wait_for_port(unused_tcp_port)
 
         yield unused_tcp_port, token, mock_worker
 
         server.shutdown()
         task.cancel()
         try:
-            await task
-        except (asyncio.CancelledError, Exception):
+            await asyncio.wait_for(task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
 
 
@@ -177,7 +194,7 @@ async def test_request_depth_snapshot_ws_native_resync_no_error_event(unused_tcp
          patch.object(DataEngineServer, "_startup_tachibana", noop_startup):
         server = DataEngineServer(port=unused_tcp_port, token=token)
         task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.1)
+        await _wait_for_port(unused_tcp_port)
 
         ws = await _connect_and_handshake(unused_tcp_port, token)
 
@@ -188,17 +205,21 @@ async def test_request_depth_snapshot_ws_native_resync_no_error_event(unused_tcp
             "stream_session_id": "sess-1",
         }))
 
-        # No Error event should arrive — timeout IS the success path.
-        with pytest.raises(asyncio.TimeoutError):
+        # Give dispatch time to complete, then assert no Error event was emitted.
+        await asyncio.sleep(0.05)
+        mock_worker.fetch_depth_snapshot.assert_awaited_once()
+        try:
             raw = await asyncio.wait_for(ws.recv(), timeout=0.2)
             msg = orjson.loads(raw)
-            assert msg.get("event") != "Error", f"Unexpected Error event: {msg}"
+            pytest.fail(f"Unexpected event received: {msg}")
+        except asyncio.TimeoutError:
+            pass  # expected: WsNativeResyncTriggered was swallowed, no event emitted
 
         await ws.close()
         server.shutdown()
         task.cancel()
         try:
-            await asyncio.wait_for(task, timeout=5.0)
+            await asyncio.wait_for(task, timeout=10.0)
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
 

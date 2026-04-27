@@ -38,10 +38,10 @@ def test_market_price_history_response_normalizes_empty_array_field():
         {
             "sCLMID": "CLMMfdsGetMarketPriceHistory",
             "sResultCode": "0",
-            "aCLMMfdsMarketPriceHistoryData": "",
+            "aCLMMfdsMarketPriceHistory": "",
         }
     )
-    assert parsed.aCLMMfdsMarketPriceHistoryData == []
+    assert parsed.aCLMMfdsMarketPriceHistory == []
 
 
 def test_market_price_history_response_keeps_real_array_field():
@@ -49,7 +49,7 @@ def test_market_price_history_response_keeps_real_array_field():
         {
             "sCLMID": "CLMMfdsGetMarketPriceHistory",
             "sResultCode": "0",
-            "aCLMMfdsMarketPriceHistoryData": [{"sHizukeJikoku": "20260425"}],
+            "aCLMMfdsMarketPriceHistory": [{"sDate": "20260425"}],
         }
     )
-    assert len(parsed.aCLMMfdsMarketPriceHistoryData) == 1
+    assert len(parsed.aCLMMfdsMarketPriceHistory) == 1

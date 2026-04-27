@@ -438,8 +438,10 @@ class TachibanaWorker(ExchangeWorker):
             "p_no": str(self._p_no_counter.next()),
             "p_sd_date": current_p_sd_date(),
             "sCLMID": "CLMMfdsGetMarketPriceHistory",
-            "sTargetIssueCode": ticker,
-            "sTargetSizyouC": sizyou_c,
+            # CLMMfdsGetMarketPriceHistory uses sIssueCode/sSizyouC (not sTargetIssueCode/sTargetSizyouC).
+            # See sample: e_api_get_histrical_price_daily_tel.py L482-483.
+            "sIssueCode": ticker,
+            "sSizyouC": sizyou_c,
         }
         url = build_request_url(self._session.url_price, payload, sJsonOfmt="5")
         body = await self._http_get(url)
@@ -452,7 +454,7 @@ class TachibanaWorker(ExchangeWorker):
         parsed = MarketPriceHistoryResponse.model_validate(data)
 
         rows: list[dict] = []
-        for raw in parsed.aCLMMfdsMarketPriceHistoryData:
+        for raw in parsed.aCLMMfdsMarketPriceHistory:
             row = self._row_to_kline(raw)
             if row is not None:
                 rows.append(row)
@@ -466,10 +468,9 @@ class TachibanaWorker(ExchangeWorker):
     def _row_to_kline(row: dict) -> dict | None:
         """Reshape one CLMMfdsGetMarketPriceHistory row into the standard
         kline dict (matches `binance.py::fetch_klines` shape)."""
-        # Field mapping per data-mapping.md §6.
-        # sHFutureBA=open, BB=high, BC=low, BD=close, BE=volume,
-        # BF=YYYYMMDD trade date.
-        date_str = str(row.get("sHFutureBF", "")).strip()
+        # Field mapping per sample e_api_get_histrical_price_daily_tel.py L490-495:
+        # sDate=YYYYMMDD, pDOP=open, pDHP=high, pDLP=low, pDPP=close, pDV=volume.
+        date_str = str(row.get("sDate", "")).strip()
         if len(date_str) != 8 or not date_str.isdigit():
             return None
         try:
@@ -484,11 +485,11 @@ class TachibanaWorker(ExchangeWorker):
         open_time_ms = int(jst_midnight.timestamp() * 1000)
         return {
             "open_time_ms": open_time_ms,
-            "open": str(row.get("sHFutureBA", "")),
-            "high": str(row.get("sHFutureBB", "")),
-            "low": str(row.get("sHFutureBC", "")),
-            "close": str(row.get("sHFutureBD", "")),
-            "volume": str(row.get("sHFutureBE", "")),
+            "open": str(row.get("pDOP", "")),
+            "high": str(row.get("pDHP", "")),
+            "low": str(row.get("pDLP", "")),
+            "close": str(row.get("pDPP", "")),
+            "volume": str(row.get("pDV", "")),
             "is_closed": True,
         }
 
@@ -537,7 +538,8 @@ class TachibanaWorker(ExchangeWorker):
             if not sizyou_rows:
                 log.warning(
                     "[tachibana] fetch_ticker_stats(__all__): CLMIssueSizyouMstKabu is empty"
-                    " — master may not be loaded (session=%s)",
+                    " — master_loaded=%s session=%s",
+                    self._master_loaded.is_set(),
                     self._session is not None,
                 )
             bulk: dict[str, Any] = {}

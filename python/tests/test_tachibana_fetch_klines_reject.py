@@ -57,8 +57,8 @@ async def test_fetch_klines_accepts_1d(tmp_path: Path):
         # MarketPriceHistoryResponse with one row.
         body = (
             '{"sCLMID":"CLMMfdsGetMarketPriceHistory","sResultCode":"0",'
-            '"aCLMMfdsMarketPriceHistoryData":['
-            '{"sHFutureBA":"2860","sHFutureBB":"2900","sHFutureBC":"2800","sHFutureBD":"2880","sHFutureBE":"123456","sHFutureBF":"20260424"}'
+            '"aCLMMfdsMarketPriceHistory":['
+            '{"sDate":"20260424","pDOP":"2860","pDHP":"2900","pDLP":"2800","pDPP":"2880","pDV":"123456"}'
             ']}'
         )
         return body.encode("shift_jis")
@@ -71,3 +71,31 @@ async def test_fetch_klines_accepts_1d(tmp_path: Path):
     row = result[0]
     for key in ("open_time_ms", "open", "high", "low", "close", "volume"):
         assert key in row
+
+
+@pytest.mark.asyncio
+async def test_fetch_klines_sends_sIssueCode_not_sTargetIssueCode(tmp_path: Path):
+    """Regression guard: CLMMfdsGetMarketPriceHistory requires sIssueCode/sSizyouC,
+    not sTargetIssueCode/sTargetSizyouC (API returns error -1 if wrong param used)."""
+    from urllib.parse import unquote
+
+    worker = _stubbed_worker(tmp_path)
+    captured_urls: list[str] = []
+
+    async def _fake_get(url: str) -> bytes:
+        captured_urls.append(url)
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPriceHistory","sResultCode":"0",'
+            '"aCLMMfdsMarketPriceHistory":[]}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    await worker.fetch_klines("7203", "stock", "1d", limit=1)
+
+    assert len(captured_urls) == 1
+    decoded = unquote(captured_urls[0])
+    assert '"sIssueCode"' in decoded, f"sIssueCode missing from payload: {decoded}"
+    assert '"sTargetIssueCode"' not in decoded, f"sTargetIssueCode must not appear: {decoded}"
+    assert '"sSizyouC"' in decoded, f"sSizyouC missing from payload: {decoded}"
+    assert '"sTargetSizyouC"' not in decoded, f"sTargetSizyouC must not appear: {decoded}"

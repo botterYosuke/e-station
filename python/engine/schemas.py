@@ -581,13 +581,17 @@ class MarketPriceResponse(IpcMessage):
 
 
 class MarketPriceHistoryResponse(IpcMessage):
-    """Response body of ``CLMMfdsGetMarketPriceHistory``."""
+    """Response body of ``CLMMfdsGetMarketPriceHistory``.
+
+    The actual API response key is ``aCLMMfdsMarketPriceHistory`` (confirmed from
+    e_api_get_histrical_price_daily_tel.py L843 and the manual response example).
+    """
 
     sCLMID: str = ""
     sResultCode: str = ""
-    aCLMMfdsMarketPriceHistoryData: list[dict] = Field(default_factory=list)
+    aCLMMfdsMarketPriceHistory: list[dict] = Field(default_factory=list)
 
-    @field_validator("aCLMMfdsMarketPriceHistoryData", mode="before")
+    @field_validator("aCLMMfdsMarketPriceHistory", mode="before")
     @classmethod
     def _normalize_history_data(cls, v: Any) -> list:
         return deserialize_tachibana_list(v)

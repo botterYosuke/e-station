@@ -127,9 +127,9 @@ async def test_fetch_klines_d1_returns_kline_list(tmp_path: Path):
     async def _fake_get(url: str) -> bytes:
         body = (
             '{"sCLMID":"CLMMfdsGetMarketPriceHistory","sResultCode":"0",'
-            '"aCLMMfdsMarketPriceHistoryData":['
-            '{"sHFutureBA":"2860","sHFutureBB":"2900","sHFutureBC":"2800","sHFutureBD":"2880","sHFutureBE":"123456","sHFutureBF":"20260424"},'
-            '{"sHFutureBA":"2870","sHFutureBB":"2890","sHFutureBC":"2810","sHFutureBD":"2880","sHFutureBE":"222222","sHFutureBF":"20260425"}'
+            '"aCLMMfdsMarketPriceHistory":['
+            '{"sDate":"20260424","pDOP":"2860","pDHP":"2900","pDLP":"2800","pDPP":"2880","pDV":"123456"},'
+            '{"sDate":"20260425","pDOP":"2870","pDHP":"2890","pDLP":"2810","pDPP":"2880","pDV":"222222"}'
             ']}'
         )
         return body.encode("shift_jis")
