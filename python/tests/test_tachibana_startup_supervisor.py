@@ -110,6 +110,13 @@ def test_runtime_error_from_validate_terminates_process_with_log():
         [sys.executable, "-c", _HELPER_SOURCE],
         capture_output=True,
         text=True,
+        # errors="replace" prevents UnicodeDecodeError in _readerthread when
+        # the child writes UTF-8 (e.g. PYTHONUTF8=1 set by VS Code) but the
+        # parent decodes with the Windows system codepage (cp932). Without
+        # this, the reader thread crashes and proc.stderr is left as None.
+        # All checked strings (L6 banner, SECRETS) are pure ASCII, so
+        # replacement of non-ASCII bytes with '?' does not affect correctness.
+        errors="replace",
         timeout=30,
     )
 

@@ -6,7 +6,6 @@ import asyncio
 import hmac
 import logging
 import os
-import sys
 import uuid
 from collections import deque
 from pathlib import Path
@@ -1554,8 +1553,8 @@ class DataEngineServer:
         """Persist *session* to both server state and the TachibanaWorker.
 
         Must be called instead of bare ``self._tachibana_session = session``
-        so the worker's ``_session`` field (used by every API call) is always
-        kept in sync.  Previously the worker was never updated, which caused
+        so the worker's ``_session`` field (checked by each API call before
+        making network requests) is always kept in sync.  Previously the worker was never updated, which caused
         ``no_session`` errors on the first metadata fetch immediately after
         login (logged at 10:45:48 in the 2026-04-27 session).
         """
@@ -1620,12 +1619,16 @@ class DataEngineServer:
                             "StartupLatch invariant violated (L6) — terminating engine: %s",
                             exc,
                         )
-                        # Make sure the message reaches stderr before exit
-                        # so the supervisor test (MEDIUM-D2-1) can grep it.
-                        sys.stderr.write(
-                            "FATAL: StartupLatch invariant violated (L6)\n"
+                        # os.write bypasses all Python buffering and issues a
+                        # synchronous WriteFile syscall to fd 2 (the pipe).
+                        # This guarantees the banner is in the pipe buffer
+                        # before os._exit() closes the process — on Windows,
+                        # sys.stderr.flush() alone cannot guarantee this when
+                        # the pipe write is pending in async I/O.
+                        os.write(
+                            2,
+                            b"FATAL: StartupLatch invariant violated (L6)\n",
                         )
-                        sys.stderr.flush()
                         os._exit(2)
                     except UnreadNoticesError as exc:
                         # Spec: "ブラウザで未読通知を確認後に再ログインしてください".
