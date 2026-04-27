@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -213,9 +214,6 @@ async def test_stream_trades_session_none_appends_disconnected_event(
     tmp_path: Path,
 ) -> None:
     """stream_trades は session=None のとき Disconnected を outbox に積んでから return する。"""
-    import asyncio
-    from unittest.mock import patch
-
     worker = _stubbed(tmp_path)
     worker._session = None
     outbox: list[dict] = []
@@ -233,6 +231,7 @@ async def test_stream_trades_session_none_appends_disconnected_event(
     assert ev["ticker"] == "7203"
     assert ev["stream"] == "trade"
     assert ev["reason"] == "no_session"
+    assert ev["market"] == "stock"
 
 
 @pytest.mark.asyncio
@@ -240,9 +239,6 @@ async def test_stream_depth_session_none_appends_disconnected_event(
     tmp_path: Path,
 ) -> None:
     """stream_depth は session=None のとき Disconnected を outbox に積んでから return する。"""
-    import asyncio
-    from unittest.mock import patch
-
     worker = _stubbed(tmp_path)
     worker._session = None
     outbox: list[dict] = []
@@ -259,4 +255,122 @@ async def test_stream_depth_session_none_appends_disconnected_event(
     assert ev["venue"] == "tachibana"
     assert ev["ticker"] == "7203"
     assert ev["stream"] == "depth"
+    assert ev["reason"] == "no_session"
+    assert ev["market"] == "stock"
+
+
+# ---------------------------------------------------------------------------
+# R2-M1: _depth_polling_fallback must push Disconnected on poll timeout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_depth_polling_fallback_poll_timeout_appends_disconnected(
+    tmp_path: Path,
+) -> None:
+    """_depth_polling_fallback は poll 上限到達後（stop_event 未セット）に
+    Disconnected(reason='poll_timeout') を outbox に積む。"""
+    from unittest.mock import patch as _patch
+
+    worker = _stubbed(tmp_path)
+    outbox: list[dict] = []
+    stop = asyncio.Event()  # stop_event は set しない（上限到達ケース）
+
+    # fetch_depth_snapshot は空を返すようにする（outbox に DepthSnapshot が積まれないように）
+    async def _empty_snap(ticker: str, market: str) -> dict:
+        return {"last_update_id": 0, "bids": [], "asks": [], "recv_ts_ms": 0}
+
+    worker.fetch_depth_snapshot = AsyncMock(side_effect=_empty_snap)  # type: ignore[method-assign]
+
+    # ポーリングが即終了するよう上限・間隔を極小にパッチ
+    with (
+        _patch("engine.exchanges.tachibana_ws._DEPTH_POLL_MAX_S", 0.05),
+        _patch("engine.exchanges.tachibana_ws._DEPTH_POLL_INTERVAL_S", 0.02),
+    ):
+        await worker._depth_polling_fallback("7203", "stock", "ssid-1", outbox, stop)
+
+    # 最後のイベントが Disconnected(reason='poll_timeout') であること
+    disconnected_events = [e for e in outbox if e.get("event") == "Disconnected"]
+    assert disconnected_events, "poll timeout should append a Disconnected event"
+    ev = disconnected_events[-1]
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "depth"
+    assert ev["market"] == "stock"
+    assert ev["reason"] == "poll_timeout"
+
+
+# ---------------------------------------------------------------------------
+# C-1: fetch_depth_snapshot must include last_update_id in return value
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_contains_last_update_id_key(tmp_path: Path) -> None:
+    """fetch_depth_snapshot は成功時に last_update_id キーを含む dict を返す。"""
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPrice","sResultCode":"0",'
+            '"aCLMMfdsMarketPrice":['
+            '{"sIssueCode":"7203","pGBP1":"2880","pGBV1":"100",'
+            '"pGAP1":"2881","pGAV1":"200"}'
+            ']}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    snap = await worker.fetch_depth_snapshot("7203", "stock")
+    assert "last_update_id" in snap, "fetch_depth_snapshot must include last_update_id key"
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_empty_response_contains_last_update_id(
+    tmp_path: Path,
+) -> None:
+    """空レスポンス時も last_update_id キーを含む dict を返す（KeyError 回避）。"""
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPrice","sResultCode":"0",'
+            '"aCLMMfdsMarketPrice":[]}'
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    snap = await worker.fetch_depth_snapshot("7203", "stock")
+    assert "last_update_id" in snap
+    assert snap["bids"] == []
+    assert snap["asks"] == []
+    # R2-M2: empty response must also carry recv_ts_ms (schema consistency)
+    assert "recv_ts_ms" in snap, "empty response must include recv_ts_ms key"
+    assert snap["recv_ts_ms"] == 0
+
+
+# ---------------------------------------------------------------------------
+# H-1: _depth_polling_fallback must push Disconnected when session is None
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_depth_polling_fallback_session_none_appends_disconnected(
+    tmp_path: Path,
+) -> None:
+    """_depth_polling_fallback は session=None のとき Disconnected を outbox に積んで即 return する。"""
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    outbox: list[dict] = []
+    stop = asyncio.Event()
+
+    await worker._depth_polling_fallback("7203", "stock", "ssid-1", outbox, stop)
+
+    assert len(outbox) == 1
+    ev = outbox[0]
+    assert ev["event"] == "Disconnected"
+    assert ev["venue"] == "tachibana"
+    assert ev["ticker"] == "7203"
+    assert ev["stream"] == "depth"
+    assert ev["market"] == "stock"
     assert ev["reason"] == "no_session"

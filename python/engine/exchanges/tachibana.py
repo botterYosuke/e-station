@@ -659,7 +659,7 @@ class TachibanaWorker(ExchangeWorker):
             raise err
         parsed = MarketPriceResponse.model_validate(data)
         if not parsed.aCLMMfdsMarketPrice:
-            return {}
+            return {"last_update_id": 0, "bids": [], "asks": [], "recv_ts_ms": 0}
         first = parsed.aCLMMfdsMarketPrice[0]
 
         recv_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -675,7 +675,7 @@ class TachibanaWorker(ExchangeWorker):
             if ap:
                 asks.append((ap, av))
 
-        return {"bids": bids, "asks": asks, "recv_ts_ms": recv_ts_ms}
+        return {"last_update_id": 0, "bids": bids, "asks": asks, "recv_ts_ms": recv_ts_ms}
 
     async def stream_trades(
         self,
@@ -698,9 +698,8 @@ class TachibanaWorker(ExchangeWorker):
             })
             return
 
-        session = self._session
-        if session is None:
-            log.warning("[tachibana] stream_trades: session is None — not streaming %s", ticker)
+        if self._session is None:
+            log.warning("tachibana: stream_trades: session is None — not streaming %s", ticker)
             outbox.append({
                 "event": "Disconnected",
                 "venue": "tachibana",
@@ -774,7 +773,7 @@ class TachibanaWorker(ExchangeWorker):
             return
 
         if self._session is None:
-            log.warning("[tachibana] stream_depth: session is None — not streaming %s", ticker)
+            log.warning("tachibana: stream_depth: session is None — not streaming %s", ticker)
             outbox.append({
                 "event": "Disconnected",
                 "venue": "tachibana",
@@ -866,6 +865,19 @@ class TachibanaWorker(ExchangeWorker):
         stop_event: asyncio.Event,
     ) -> None:
         """CLMMfdsGetMarketPrice polling when depth_unavailable fires (plan §F-M12)."""
+        if self._session is None:
+            log.warning(
+                "tachibana: _depth_polling_fallback: session is None — skipping for %s", ticker
+            )
+            outbox.append({
+                "event": "Disconnected",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "stream": "depth",
+                "market": market,
+                "reason": "no_session",
+            })
+            return
         elapsed = 0.0
         poll_counter = 0
         while not stop_event.is_set() and elapsed < _tachibana_ws._DEPTH_POLL_MAX_S:
@@ -893,6 +905,16 @@ class TachibanaWorker(ExchangeWorker):
                 return
             except asyncio.TimeoutError:
                 elapsed += _tachibana_ws._DEPTH_POLL_INTERVAL_S
+        # ポーリング上限到達（stop_event 未セット）— Rust 側にストリーム終了を通知する
+        if not stop_event.is_set():
+            outbox.append({
+                "event": "Disconnected",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "stream": "depth",
+                "market": market,
+                "reason": "poll_timeout",
+            })
 
     async def stream_kline(
         self,

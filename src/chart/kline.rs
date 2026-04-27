@@ -628,6 +628,13 @@ impl KlineChart {
                 timeseries.insert_klines(klines_raw);
                 timeseries.insert_trades_existing_buckets(&self.raw_trades);
 
+                if let Some(latest_t) = klines_raw.iter().map(|k| k.time).max() {
+                    let chart = self.mut_state();
+                    if latest_t > chart.latest_x {
+                        chart.latest_x = latest_t;
+                    }
+                }
+
                 self.indicators
                     .values_mut()
                     .filter_map(Option::as_mut)
@@ -1870,4 +1877,64 @@ impl BidAskArea {
 #[inline]
 fn should_show_text(cell_height_unscaled: f32, cell_width_unscaled: f32, min_w: f32) -> bool {
     cell_height_unscaled > 8.0 && cell_width_unscaled > min_w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use data::chart::{Autoscale, Basis, KlineChartKind, ViewConfig};
+    use exchange::adapter::Exchange;
+    use exchange::unit::{Price, PriceStep, Qty};
+    use exchange::{Kline, Ticker, TickerInfo, Timeframe, Volume};
+
+    fn test_ticker_info() -> TickerInfo {
+        TickerInfo::new(Ticker::new("BTCUSDT", Exchange::BinanceLinear), 1.0, 0.001, None)
+    }
+
+    fn test_kline(time_ms: u64) -> Kline {
+        Kline {
+            time: time_ms,
+            open: Price::from_f32(2860.0),
+            high: Price::from_f32(2900.0),
+            low: Price::from_f32(2840.0),
+            close: Price::from_f32(2880.0),
+            volume: Volume::TotalOnly(Qty::from_f32(1000.0)),
+        }
+    }
+
+    /// Regression: closed-market chart (e.g. Tachibana on weekends) stayed blank
+    /// because insert_hist_klines never updated chart.latest_x from 0.
+    /// With latest_x=0 the FitToVisible autoscale inspects timestamp 0 (Unix epoch)
+    /// instead of the actual kline range, finds no data, and never scales the Y-axis.
+    #[test]
+    fn insert_hist_klines_updates_latest_x() {
+        let step = PriceStep { units: 100_000_000 };
+        let mut chart = KlineChart::new(
+            ViewConfig {
+                splits: vec![0.8],
+                autoscale: Some(Autoscale::FitToVisible),
+            },
+            Basis::Time(Timeframe::D1),
+            step,
+            &[],
+            vec![],
+            &[],
+            test_ticker_info(),
+            &KlineChartKind::Candles,
+        );
+        assert_eq!(chart.state().latest_x(), 0, "empty chart starts at latest_x=0");
+
+        let ts = 1_776_956_400_000u64; // 2026-04-24 JST midnight
+        let klines = vec![
+            test_kline(ts - 86_400_000), // April 23
+            test_kline(ts),              // April 24 (newest)
+        ];
+        chart.insert_hist_klines(uuid::Uuid::new_v4(), &klines);
+
+        assert_eq!(
+            chart.state().latest_x(),
+            ts,
+            "latest_x must advance to newest kline timestamp after insert_hist_klines"
+        );
+    }
 }
