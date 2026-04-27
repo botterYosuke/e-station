@@ -235,7 +235,10 @@ struct SubmitOrderBody {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModifyOrderBody {
-    client_order_id: String,
+    #[serde(default)]
+    client_order_id: Option<String>,
+    #[serde(default)]
+    venue_order_id: Option<String>,
     change: ModifyChangeBody,
 }
 
@@ -255,7 +258,10 @@ struct ModifyChangeBody {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CancelOrderBody {
-    client_order_id: String,
+    #[serde(default)]
+    client_order_id: Option<String>,
+    #[serde(default)]
+    venue_order_id: Option<String>,
 }
 
 /// `POST /api/order/cancel-all` body — `confirm: true` is **required**.
@@ -616,19 +622,29 @@ async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
 /// `POST /api/order/modify` core logic.
 ///
 /// Flow:
-/// 1. Parse body → ModifyOrderBody
-/// 2. Lookup `venue_order_id` via OrderSessionState → 404 if None
+/// 1. Parse body → ModifyOrderBody (client_order_id or venue_order_id required)
+/// 2. Resolve (effective_cid, effective_vid):
+///    - client_order_id present: look up venue_order_id from session → 404 if not found
+///    - venue_order_id only (other-terminal order): synthetic UUID as client_order_id
 /// 3. Require `guard_config.enabled` → 503
 /// 4. Get EngineConnection → 502 if None
 /// 5. Subscribe events BEFORE send
 /// 6. Send `Command::ModifyOrder`
-/// 7. Wait for `OrderPendingUpdate` → 200
+/// 7. Wait for `OrderPendingUpdate` → 200 (client_order_id=null when venue_order_id path)
 async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse {
     // ① Parse
     let body: ModifyOrderBody = match serde_json::from_str(raw_body) {
         Ok(b) => b,
         Err(e) => return error_response(400, "VALIDATION_ERROR", &format!("invalid JSON: {e}")),
     };
+
+    if body.client_order_id.is_none() && body.venue_order_id.is_none() {
+        return error_response(
+            400,
+            "VALIDATION_ERROR",
+            "one of client_order_id or venue_order_id is required",
+        );
+    }
 
     // ① b Session frozen check (same pattern as submit_order)
     if state.session.lock().await.is_frozen() {
@@ -644,34 +660,40 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
         );
     }
 
-    // ③ Lookup venue_order_id
-    let cid = match ClientOrderId::try_new(&body.client_order_id) {
-        Some(c) => c,
-        None => {
-            return error_response(
-                400,
-                "VALIDATION_ERROR",
-                "client_order_id: must be 1-36 ASCII printable characters",
-            );
-        }
-    };
-    let venue_order_id = {
-        let session = state.session.lock().await;
-        session.get_venue_order_id(&cid).map(str::to_string)
-    };
-    let venue_order_id = match venue_order_id {
-        Some(v) => v,
-        None => {
-            return error_response(
-                404,
-                "ORDER_NOT_FOUND",
-                &format!(
-                    "client_order_id {:?} not found or venue_order_id unknown",
-                    body.client_order_id
-                ),
-            );
-        }
-    };
+    // ③ Resolve effective (client_order_id, venue_order_id)
+    // client_order_id takes priority when both are provided (spec.md §5)
+    let (effective_cid, effective_vid, respond_cid) =
+        if let Some(ref cid_raw) = body.client_order_id {
+            let cid = match ClientOrderId::try_new(cid_raw) {
+                Some(c) => c,
+                None => {
+                    return error_response(
+                        400,
+                        "VALIDATION_ERROR",
+                        "client_order_id: must be 1-36 ASCII printable characters",
+                    );
+                }
+            };
+            let vid = {
+                let session = state.session.lock().await;
+                session.get_venue_order_id(&cid).map(str::to_string)
+            };
+            match vid {
+                Some(v) => (cid_raw.clone(), Some(v), Some(cid_raw.clone())),
+                None => {
+                    return error_response(
+                        404,
+                        "ORDER_NOT_FOUND",
+                        &format!("client_order_id {cid_raw:?} not found or venue_order_id unknown"),
+                    );
+                }
+            }
+        } else {
+            // venue_order_id-only path (other-terminal order)
+            let vid = body.venue_order_id.as_deref().unwrap().to_string();
+            let synthetic_cid = uuid::Uuid::new_v4().to_string();
+            (synthetic_cid, Some(vid), None)
+        };
 
     // ④ Engine connection
     let conn: Arc<EngineConnection> = match state.engine_rx.borrow().clone() {
@@ -693,7 +715,8 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
     let cmd = Command::ModifyOrder {
         request_id: request_id.clone(),
         venue: "tachibana".to_string(),
-        client_order_id: body.client_order_id.clone(),
+        client_order_id: effective_cid.clone(),
+        venue_order_id: effective_vid.clone(),
         change,
     };
     if let Err(e) = conn.send(cmd).await {
@@ -705,17 +728,16 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
     }
 
     // ⑦ Wait for OrderPendingUpdate
-    let cid_str = body.client_order_id.clone();
     match tokio::time::timeout(
         state.submit_timeout,
-        wait_for_pending_update(&cid_str, events_rx),
+        wait_for_pending_update(&effective_cid, events_rx),
     )
     .await
     {
         Ok(Ok(ts_event_ms)) => {
             let resp = serde_json::json!({
-                "client_order_id": cid_str,
-                "venue_order_id": venue_order_id,
+                "client_order_id": respond_cid,
+                "venue_order_id": effective_vid,
                 "status": "PENDING_UPDATE",
                 "ts_event_ms": ts_event_ms
             });
@@ -738,19 +760,29 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
 /// `POST /api/order/cancel` core logic.
 ///
 /// Flow:
-/// 1. Parse body → CancelOrderBody
-/// 2. Guard enabled → 503
-/// 3. Lookup `venue_order_id` → 404 if None
+/// 1. Parse body → CancelOrderBody (client_order_id or venue_order_id required)
+/// 2. Resolve (effective_cid, effective_vid):
+///    - client_order_id present: look up venue_order_id from session → 404 if not found
+///    - venue_order_id only (other-terminal order): synthetic UUID as client_order_id
+/// 3. Guard enabled → 503
 /// 4. Engine connection → 502
 /// 5. Subscribe events BEFORE send
 /// 6. `Command::CancelOrder`
-/// 7. Wait for `OrderPendingCancel` → 200
+/// 7. Wait for `OrderPendingCancel` → 200 (client_order_id=null when venue_order_id path)
 async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse {
     // ① Parse
     let body: CancelOrderBody = match serde_json::from_str(raw_body) {
         Ok(b) => b,
         Err(e) => return error_response(400, "VALIDATION_ERROR", &format!("invalid JSON: {e}")),
     };
+
+    if body.client_order_id.is_none() && body.venue_order_id.is_none() {
+        return error_response(
+            400,
+            "VALIDATION_ERROR",
+            "one of client_order_id or venue_order_id is required",
+        );
+    }
 
     // ① b Session frozen check (same pattern as submit_order)
     if state.session.lock().await.is_frozen() {
@@ -766,34 +798,40 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
         );
     }
 
-    // ③ Lookup venue_order_id
-    let cid = match ClientOrderId::try_new(&body.client_order_id) {
-        Some(c) => c,
-        None => {
-            return error_response(
-                400,
-                "VALIDATION_ERROR",
-                "client_order_id: must be 1-36 ASCII printable characters",
-            );
-        }
-    };
-    let venue_order_id = {
-        let session = state.session.lock().await;
-        session.get_venue_order_id(&cid).map(str::to_string)
-    };
-    let venue_order_id = match venue_order_id {
-        Some(v) => v,
-        None => {
-            return error_response(
-                404,
-                "ORDER_NOT_FOUND",
-                &format!(
-                    "client_order_id {:?} not found or venue_order_id unknown",
-                    body.client_order_id
-                ),
-            );
-        }
-    };
+    // ③ Resolve effective (client_order_id, venue_order_id)
+    // client_order_id takes priority when both are provided (spec.md §5)
+    let (effective_cid, effective_vid, respond_cid) =
+        if let Some(ref cid_raw) = body.client_order_id {
+            let cid = match ClientOrderId::try_new(cid_raw) {
+                Some(c) => c,
+                None => {
+                    return error_response(
+                        400,
+                        "VALIDATION_ERROR",
+                        "client_order_id: must be 1-36 ASCII printable characters",
+                    );
+                }
+            };
+            let vid = {
+                let session = state.session.lock().await;
+                session.get_venue_order_id(&cid).map(str::to_string)
+            };
+            match vid {
+                Some(v) => (cid_raw.clone(), v, Some(cid_raw.clone())),
+                None => {
+                    return error_response(
+                        404,
+                        "ORDER_NOT_FOUND",
+                        &format!("client_order_id {cid_raw:?} not found or venue_order_id unknown"),
+                    );
+                }
+            }
+        } else {
+            // venue_order_id-only path (other-terminal order)
+            let vid = body.venue_order_id.as_deref().unwrap().to_string();
+            let synthetic_cid = uuid::Uuid::new_v4().to_string();
+            (synthetic_cid, vid, None)
+        };
 
     // ④ Engine connection
     let conn: Arc<EngineConnection> = match state.engine_rx.borrow().clone() {
@@ -809,8 +847,8 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
     let cmd = Command::CancelOrder {
         request_id: request_id.clone(),
         venue: "tachibana".to_string(),
-        client_order_id: body.client_order_id.clone(),
-        venue_order_id: venue_order_id.clone(),
+        client_order_id: effective_cid.clone(),
+        venue_order_id: effective_vid.clone(),
     };
     if let Err(e) = conn.send(cmd).await {
         return error_response(
@@ -821,17 +859,16 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
     }
 
     // ⑦ Wait for OrderPendingCancel
-    let cid_str = body.client_order_id.clone();
     match tokio::time::timeout(
         state.submit_timeout,
-        wait_for_pending_cancel(&cid_str, events_rx),
+        wait_for_pending_cancel(&effective_cid, events_rx),
     )
     .await
     {
         Ok(Ok(ts_event_ms)) => {
             let resp = serde_json::json!({
-                "client_order_id": cid_str,
-                "venue_order_id": venue_order_id,
+                "client_order_id": respond_cid,
+                "venue_order_id": effective_vid,
                 "status": "PENDING_CANCEL",
                 "ts_event_ms": ts_event_ms
             });
@@ -2734,6 +2771,82 @@ mod tests {
             resp.body
         );
         assert!(resp.body.contains("ORDER_NOT_FOUND"), "body: {}", resp.body);
+    }
+
+    /// cancel with no identifiers → 400 VALIDATION_ERROR
+    #[tokio::test]
+    async fn test_cancel_without_any_id_returns_400() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(session, engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits()),
+        );
+
+        let body = r#"{}"#;
+        let resp = cancel_order(body, &state).await;
+        assert_eq!(resp.status, 400, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("VALIDATION_ERROR"),
+            "body: {}",
+            resp.body
+        );
+    }
+
+    /// cancel with venue_order_id only (other-terminal order) reaches engine (502 = engine not connected)
+    #[tokio::test]
+    async fn test_cancel_with_venue_order_id_only_bypasses_session_lookup() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(session, engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits()),
+        );
+
+        let body = r#"{"venue_order_id": "ORD-OTHER-TERMINAL-001"}"#;
+        let resp = cancel_order(body, &state).await;
+        // No session entry for this venue_order_id; should reach engine (502 = not connected)
+        assert_eq!(resp.status, 502, "body: {}", resp.body);
+    }
+
+    /// modify with no identifiers → 400 VALIDATION_ERROR
+    #[tokio::test]
+    async fn test_modify_without_any_id_returns_400() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(session, engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits()),
+        );
+
+        let body = r#"{"change": {"new_price": "3700"}}"#;
+        let resp = modify_order(body, &state).await;
+        assert_eq!(resp.status, 400, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("VALIDATION_ERROR"),
+            "body: {}",
+            resp.body
+        );
+    }
+
+    /// modify with venue_order_id only (other-terminal order) reaches engine (502 = engine not connected)
+    #[tokio::test]
+    async fn test_modify_with_venue_order_id_only_bypasses_session_lookup() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(session, engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits()),
+        );
+
+        let body = r#"{"venue_order_id": "ORD-OTHER-001", "change": {"new_price": "3750"}}"#;
+        let resp = modify_order(body, &state).await;
+        // No session entry needed; should reach engine (502 = not connected)
+        assert_eq!(resp.status, 502, "body: {}", resp.body);
     }
 
     /// Different (instrument_id, order_side, quantity, price) keys are independent.

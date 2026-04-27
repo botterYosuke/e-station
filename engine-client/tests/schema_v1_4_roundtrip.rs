@@ -33,6 +33,7 @@ fn modify_order_serializes_with_new_price() {
         request_id: RID.to_string(),
         venue: "tachibana".to_string(),
         client_order_id: CID.to_string(),
+        venue_order_id: None,
         change: OrderModifyChange {
             new_quantity: None,
             new_price: Some("3700".to_string()),
@@ -54,6 +55,7 @@ fn modify_order_serializes_with_new_quantity() {
         request_id: RID.to_string(),
         venue: "tachibana".to_string(),
         client_order_id: CID.to_string(),
+        venue_order_id: None,
         change: OrderModifyChange {
             new_quantity: Some("200".to_string()),
             new_price: None,

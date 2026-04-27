@@ -118,6 +118,9 @@ pub enum Command {
         request_id: String,
         venue: String,
         client_order_id: String,
+        /// Present when the caller knows the venue order ID directly (other-terminal orders).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        venue_order_id: Option<String>,
         change: OrderModifyChange,
     },
     /// Cancel a specific order. Rust looks up `venue_order_id` via
@@ -321,12 +324,14 @@ impl std::fmt::Debug for Command {
                 request_id,
                 venue,
                 client_order_id,
+                venue_order_id,
                 change,
             } => f
                 .debug_struct("ModifyOrder")
                 .field("request_id", request_id)
                 .field("venue", venue)
                 .field("client_order_id", client_order_id)
+                .field("venue_order_id", venue_order_id)
                 .field("change", change)
                 .finish(),
             Command::CancelOrder {

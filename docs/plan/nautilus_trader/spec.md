@@ -54,9 +54,9 @@ N0 着手前に以下の **ブロッカー**を解決する。すべてレビュ
 
 - `python/engine/exchanges/tachibana_nautilus.py` を新設し、nautilus の `LiveExecutionClient` を実装
 - **前提: [docs/plan/✅order/](../✅order/) Phase O0〜O2 が完了していること**（Phase 1 + order/ の Python 関数・IPC enum・第二暗証番号 UI・EC frame パーサ・`tachibana_orders.NautilusOrderEnvelope` がすでに揃っている前提）
-- 本フェーズでは **`tachibana_nautilus.py` を nautilus `LiveExecutionClient` の薄い adapter として書く**:
+- 本フェーズでは **`tachibana_nautilus.py` を nautilus `LiveExecutionClient` の薄い adapter として書く**。発注ロジック本体は **`python/engine/exchanges/tachibana_orders.py` をそのまま再利用**（重複実装しない）:
   - nautilus の `LiveExecutionClient.submit_order(Order)` → `tachibana_orders.submit_order(session, second_password, NautilusOrderEnvelope.from_nautilus(order))`
-  - 同様に `modify_order` / `cancel_order` を委譲
+  - 同様に `tachibana_orders.modify_order` / `tachibana_orders.cancel_order` を委譲（署名は [order/spec.md §6.3](../✅order/spec.md#63-python-関数シグネチャ必須) に準拠済み）
   - `tachibana_event._parse_ec_frame` の戻り値 → nautilus `OrderFilled` / `OrderCanceled` イベントに変換し `LiveExecutionEngine.process_event(...)` に流す
 - 立花 API の写像規則は **[data-mapping.md](./data-mapping.md)** および [order/spec.md §6](../✅order/spec.md#6-nautilus_trader-互換要件不変条件) を参照（本 spec で重複定義しない）
 - 注文種別カバレッジは order/ の Phase O0〜O3 進捗に従う（O0=現物成行のみ、O3 で信用・逆指値・期日指定が解禁）

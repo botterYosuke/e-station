@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 0
+SCHEMA_MINOR: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +217,7 @@ class ModifyOrder(IpcMessage):
     request_id: str
     venue: str
     client_order_id: str
+    venue_order_id: Optional[str] = None
     change: OrderModifyChange
 
 
