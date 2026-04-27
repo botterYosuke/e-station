@@ -94,6 +94,9 @@ async def proxy_server(unused_tcp_port):
             stack.enter_context(
                 patch(f"engine.server.{cls_name}", return_value=worker)
             )
+        stack.enter_context(
+            patch.object(DataEngineServer, "_startup_tachibana", AsyncMock(return_value=None))
+        )
 
         server = DataEngineServer(port=unused_tcp_port, token=token)
         serve_task = asyncio.create_task(server.serve())
@@ -379,6 +382,9 @@ async def test_set_proxy_cancels_inflight_fetch_klines_emits_error(unused_tcp_po
             stack.enter_context(
                 patch(f"engine.server.{cls_name}", return_value=worker)
             )
+        stack.enter_context(
+            patch.object(DataEngineServer, "_startup_tachibana", AsyncMock(return_value=None))
+        )
 
         server = DataEngineServer(port=unused_tcp_port, token=token)
         serve_task = asyncio.create_task(server.serve())
@@ -434,6 +440,9 @@ async def test_set_proxy_cancels_inflight_fetch_trades_emits_error(unused_tcp_po
             stack.enter_context(
                 patch(f"engine.server.{cls_name}", return_value=worker)
             )
+        stack.enter_context(
+            patch.object(DataEngineServer, "_startup_tachibana", AsyncMock(return_value=None))
+        )
 
         server = DataEngineServer(port=unused_tcp_port, token=token)
         serve_task = asyncio.create_task(server.serve())
@@ -489,6 +498,9 @@ async def test_error_event_contains_human_readable_message(unused_tcp_port):
             stack.enter_context(
                 patch(f"engine.server.{cls_name}", return_value=worker)
             )
+        stack.enter_context(
+            patch.object(DataEngineServer, "_startup_tachibana", AsyncMock(return_value=None))
+        )
 
         server = DataEngineServer(port=unused_tcp_port, token=token)
         serve_task = asyncio.create_task(server.serve())
