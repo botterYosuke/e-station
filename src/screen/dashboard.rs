@@ -91,6 +91,9 @@ pub enum Event {
         streams: Vec<PersistStreamKind>,
     },
     RequestPalette,
+    OrderEntryAction(super::dashboard::panel::order_entry::Action),
+    OrderListAction(super::dashboard::panel::orders::Action),
+    BuyingPowerAction(super::dashboard::panel::buying_power::Action),
 }
 
 impl Dashboard {
@@ -218,16 +221,8 @@ impl Dashboard {
                     }
                 }
                 pane::Message::SplitPane(axis, pane) => {
-                    let focus_pane = if let Some((new_pane, _)) =
-                        self.panes.split(axis, pane, pane::State::new())
-                    {
-                        Some(new_pane)
-                    } else {
-                        None
-                    };
-
-                    if Some(focus_pane).is_some() {
-                        self.focus = Some((window, focus_pane.unwrap()));
+                    if let Some((new_pane, _)) = self.panes.split(axis, pane, pane::State::new()) {
+                        self.focus = Some((window, new_pane));
                     }
                 }
                 pane::Message::ClosePane(pane) => {
@@ -406,6 +401,15 @@ impl Dashboard {
                             }
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
+                            }
+                            pane::Effect::OrderEntryAction(action) => {
+                                return (Task::none(), Some(Event::OrderEntryAction(action)));
+                            }
+                            pane::Effect::OrderListAction(action) => {
+                                return (Task::none(), Some(Event::OrderListAction(action)));
+                            }
+                            pane::Effect::BuyingPowerAction(action) => {
+                                return (Task::none(), Some(Event::BuyingPowerAction(action)));
                             }
                         };
                         return (task, None);
@@ -610,6 +614,65 @@ impl Dashboard {
                     .iter_mut()
                     .map(|(pane, state)| (*window_id, *pane, state))
             }))
+    }
+
+    /// Distribute a fresh order list to all `OrderList` panes on any window.
+    pub fn distribute_order_list(
+        &mut self,
+        main_window: window::Id,
+        orders: Vec<engine_client::dto::OrderRecordWire>,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::OrderList(panel) = &mut state.content {
+                    panel.set_orders(orders.clone());
+                }
+            });
+    }
+
+    /// Reset the `submitting` flag on every `OrderEntry` pane whose
+    /// `pending_request_id` matches `client_order_id`.
+    pub fn notify_order_accepted(&mut self, main_window: window::Id, client_order_id: &str) {
+        let mut matched = 0usize;
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::OrderEntry(panel) = &mut state.content
+                    && panel.pending_request_id.as_deref() == Some(client_order_id)
+                {
+                    panel.on_accepted();
+                    matched += 1;
+                }
+            });
+        if matched == 0 {
+            log::debug!(
+                "[OrderEntry] notify_order_accepted: no pane matched client_order_id={client_order_id}"
+            );
+        }
+    }
+
+    /// Reset the `submitting` flag (with rejection reason) on every
+    /// `OrderEntry` pane whose `pending_request_id` matches `client_order_id`.
+    pub fn notify_order_rejected(
+        &mut self,
+        main_window: window::Id,
+        client_order_id: &str,
+        reason: String,
+    ) {
+        let mut matched = 0usize;
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::OrderEntry(panel) = &mut state.content
+                    && panel.pending_request_id.as_deref() == Some(client_order_id)
+                {
+                    panel.on_rejected(reason.clone());
+                    matched += 1;
+                }
+            });
+        if matched == 0 {
+            log::debug!(
+                "[OrderEntry] notify_order_rejected: no pane matched client_order_id={client_order_id}"
+            );
+        }
     }
 
     pub fn view<'a>(
@@ -1159,6 +1222,7 @@ impl Dashboard {
                 }
             },
             Some(pane::Action::Panel(_action)) => {}
+            Some(pane::Action::OrderEntry(_action)) => {}
             Some(pane::Action::ResolveStreams(streams)) => {
                 tasks.push(Task::done(Message::ResolveStreams(
                     state.unique_id(),

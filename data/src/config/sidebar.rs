@@ -70,4 +70,5 @@ pub enum Menu {
     Audio,
     ThemeEditor,
     Network,
+    Order,
 }

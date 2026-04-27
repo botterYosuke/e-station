@@ -1,7 +1,9 @@
 pub mod audio;
 pub mod layout_manager;
 pub mod network_manager;
+pub mod order_modify;
 pub mod pane;
+pub mod second_password;
 pub mod theme_editor;
 
 use iced::widget::{center, container, mouse_area, opaque, stack};

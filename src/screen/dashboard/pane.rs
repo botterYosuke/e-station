@@ -16,7 +16,10 @@ use crate::{
         },
     },
     screen::dashboard::{
-        panel::{self, ladder::Ladder, timeandsales::TimeAndSales},
+        panel::{
+            self, buying_power::BuyingPowerPanel, ladder::Ladder, order_entry::OrderEntryPanel,
+            timeandsales::TimeAndSales,
+        },
         tickers_table::TickersTable,
     },
     style::{self, Icon, icon_text},
@@ -53,6 +56,9 @@ pub enum Effect {
     RequestFetch(Vec<FetchSpec>),
     SwitchTickersInGroup(TickerInfo),
     FocusWidget(iced::widget::Id),
+    OrderEntryAction(panel::order_entry::Action),
+    OrderListAction(panel::orders::Action),
+    BuyingPowerAction(panel::buying_power::Action),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -68,6 +74,7 @@ pub enum Action {
     Panel(panel::Action),
     ResolveStreams(Vec<PersistStreamKind>),
     ResolveContent,
+    OrderEntry(panel::order_entry::Action),
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +111,9 @@ pub enum Event {
     ComparisonChartInteraction(super::chart::comparison::Message),
     HeatmapShaderInteraction(crate::widget::chart::heatmap::Message),
     MiniTickersListInteraction(modal::pane::mini_tickers_list::Message),
+    OrderEntryMsg(panel::order_entry::Message),
+    OrderListMsg(panel::orders::Message),
+    BuyingPowerMsg(panel::buying_power::Message),
 }
 
 pub struct State {
@@ -120,6 +130,15 @@ pub struct State {
 impl State {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a new pane pre-loaded with the given content kind.
+    /// Used by `Action::OpenOrderPanel` to split a pane and set its content immediately.
+    pub fn with_kind(kind: ContentKind) -> Self {
+        Self {
+            content: Content::placeholder(kind),
+            ..Default::default()
+        }
     }
 
     pub fn from_config(
@@ -396,7 +415,20 @@ impl State {
 
                     (content, streams)
                 }
-                ContentKind::Starter => unreachable!(),
+                // Order panels and Starter do not need ticker streams — they are
+                // created via `State::with_kind()` which bypasses this function.
+                // If this path is reached it is a logic error, but we return an
+                // empty stream set rather than panicking so the UI stays alive.
+                ContentKind::Starter
+                | ContentKind::OrderEntry
+                | ContentKind::OrderList
+                | ContentKind::BuyingPower => {
+                    log::warn!(
+                        "set_content_and_streams called for non-stream content {:?}; ignoring",
+                        kind
+                    );
+                    return vec![];
+                }
             }
         };
 
@@ -559,7 +591,14 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
-        } else if !matches!(self.content, Content::Starter) && !self.has_stream() {
+        } else if !matches!(
+            self.content,
+            Content::Starter
+                | Content::OrderEntry(_)
+                | Content::OrderList(_)
+                | Content::BuyingPower(_)
+        ) && !self.has_stream()
+        {
             let content = row![
                 text("Choose a ticker")
                     .size(13)
@@ -1056,6 +1095,46 @@ impl State {
                     )
                 }
             }
+            Content::OrderEntry(panel) => {
+                let base = panel
+                    .view()
+                    .map(move |msg| Message::PaneEvent(id, Event::OrderEntryMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::OrderList(panel) => {
+                let base = panel::orders::view(panel)
+                    .map(move |msg| Message::PaneEvent(id, Event::OrderListMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::BuyingPower(panel) => {
+                let base = panel::buying_power::view(panel)
+                    .map(move |msg| Message::PaneEvent(id, Event::BuyingPowerMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
         };
 
         match &self.status {
@@ -1132,7 +1211,13 @@ impl State {
             Event::ContentSelected(kind) => {
                 self.content = Content::placeholder(kind);
 
-                if !matches!(kind, ContentKind::Starter) {
+                if !matches!(
+                    kind,
+                    ContentKind::Starter
+                        | ContentKind::OrderEntry
+                        | ContentKind::OrderList
+                        | ContentKind::BuyingPower
+                ) {
                     self.streams = ResolvedStream::waiting(vec![]);
                     let modal = Modal::MiniTickersList(MiniPanel::new());
 
@@ -1516,6 +1601,27 @@ impl State {
                     }
                 }
             }
+            Event::OrderEntryMsg(msg) => {
+                if let Content::OrderEntry(panel) = &mut self.content
+                    && let Some(action) = panel.update(msg)
+                {
+                    return Some(Effect::OrderEntryAction(action));
+                }
+            }
+            Event::OrderListMsg(msg) => {
+                if let Content::OrderList(panel) = &mut self.content
+                    && let Some(action) = panel::orders::update(panel, msg)
+                {
+                    return Some(Effect::OrderListAction(action));
+                }
+            }
+            Event::BuyingPowerMsg(msg) => {
+                if let Content::BuyingPower(panel) = &mut self.content
+                    && let Some(action) = panel::buying_power::update(panel, msg)
+                {
+                    return Some(Effect::BuyingPowerAction(action));
+                }
+            }
         }
         None
     }
@@ -1754,7 +1860,10 @@ impl State {
             Content::Ladder(panel) => panel
                 .as_mut()
                 .and_then(|p| p.invalidate(Some(now)).map(Action::Panel)),
-            Content::Starter => None,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
             Content::Comparison(chart) => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
@@ -1783,7 +1892,10 @@ impl State {
             }
             Content::Ladder(_) | Content::TimeAndSales(_) => Some(100),
             Content::ShaderHeatmap { .. } => None,
-            Content::Starter => None,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
         }
     }
 
@@ -1869,6 +1981,12 @@ pub enum Content {
     TimeAndSales(Option<TimeAndSales>),
     Ladder(Option<Ladder>),
     Comparison(Option<ComparisonChart>),
+    /// Order Entry panel (U0)
+    OrderEntry(OrderEntryPanel),
+    /// Order List panel (U1)
+    OrderList(panel::orders::OrdersPanel),
+    /// Buying Power panel (U3)
+    BuyingPower(BuyingPowerPanel),
 }
 
 impl Content {
@@ -2074,6 +2192,9 @@ impl Content {
             ContentKind::ComparisonChart => Content::Comparison(None),
             ContentKind::TimeAndSales => Content::TimeAndSales(None),
             ContentKind::Ladder => Content::Ladder(None),
+            ContentKind::OrderEntry => Content::OrderEntry(OrderEntryPanel::new()),
+            ContentKind::OrderList => Content::OrderList(panel::orders::OrdersPanel::new()),
+            ContentKind::BuyingPower => Content::BuyingPower(BuyingPowerPanel::new()),
         }
     }
 
@@ -2084,7 +2205,10 @@ impl Content {
             Content::TimeAndSales(panel) => Some(panel.as_ref()?.last_update()),
             Content::Ladder(panel) => Some(panel.as_ref()?.last_update()),
             Content::Comparison(chart) => Some(chart.as_ref()?.last_update()),
-            Content::Starter => None,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
         }
     }
@@ -2161,7 +2285,10 @@ impl Content {
             | Content::Ladder(_)
             | Content::Starter
             | Content::Comparison(_)
-            | Content::ShaderHeatmap { .. } => {
+            | Content::ShaderHeatmap { .. }
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => {
                 panic!("indicator reorder on {} pane", self)
             }
         }
@@ -2204,7 +2331,10 @@ impl Content {
             Content::TimeAndSales(_)
             | Content::Ladder(_)
             | Content::Starter
-            | Content::Comparison(_) => None,
+            | Content::Comparison(_)
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
         }
     }
 
@@ -2266,6 +2396,9 @@ impl Content {
             Content::Comparison(_) => ContentKind::ComparisonChart,
             Content::Starter => ContentKind::Starter,
             Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
+            Content::OrderEntry(_) => ContentKind::OrderEntry,
+            Content::OrderList(_) => ContentKind::OrderList,
+            Content::BuyingPower(_) => ContentKind::BuyingPower,
         }
     }
 
@@ -2283,7 +2416,10 @@ impl Content {
             Content::TimeAndSales(panel) => panel.is_some(),
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
-            Content::Starter => true,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => true,
         }
     }
 }
@@ -2303,6 +2439,9 @@ impl PartialEq for Content {
                 | (Content::Kline { .. }, Content::Kline { .. })
                 | (Content::TimeAndSales(_), Content::TimeAndSales(_))
                 | (Content::Ladder(_), Content::Ladder(_))
+                | (Content::OrderEntry(_), Content::OrderEntry(_))
+                | (Content::OrderList(_), Content::OrderList(_))
+                | (Content::BuyingPower(_), Content::BuyingPower(_))
         )
     }
 }

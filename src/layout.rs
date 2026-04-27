@@ -180,6 +180,13 @@ impl From<&pane::State> for data::Pane {
                     link_group: pane.link_group,
                 }
             }
+            // Phase U-pre stubs: persist as Starter so layouts round-trip safely.
+            // U0/U1/U3 will introduce dedicated Pane variants.
+            pane::Content::OrderEntry(_)
+            | pane::Content::OrderList(_)
+            | pane::Content::BuyingPower(_) => data::Pane::Starter {
+                link_group: pane.link_group,
+            },
         }
     }
 }

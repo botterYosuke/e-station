@@ -19,6 +19,7 @@ pub enum Message {
     ToggleSidebarMenu(Option<sidebar::Menu>),
     SetSidebarPosition(sidebar::Position),
     TickersTable(super::tickers_table::Message),
+    OrderPanelRequested(data::layout::pane::ContentKind),
 }
 
 pub struct Sidebar {
@@ -37,6 +38,9 @@ pub enum Action {
     /// the duplicate-press suppression can consult `tachibana_state`
     /// (which lives at the top level). T35-U1 / T35-U3.
     RequestTachibanaLogin(crate::venue_state::Trigger),
+    /// User selected an order panel from the sidebar Order menu.
+    /// Flowsurface splits the focused pane and opens the selected content.
+    OpenOrderPanel(data::layout::pane::ContentKind),
 }
 
 impl Sidebar {
@@ -93,6 +97,11 @@ impl Sidebar {
                     None => {}
                 }
             }
+            Message::OrderPanelRequested(kind) => {
+                // Close the order menu after selection
+                self.set_menu(None);
+                return (Task::none(), Some(Action::OpenOrderPanel(kind)));
+            }
         }
 
         (Task::none(), None)
@@ -121,11 +130,23 @@ impl Sidebar {
             column![]
         };
 
+        let order_menu = if self.is_menu_active(sidebar::Menu::Order) {
+            self.order_menu_view().width(140)
+        } else {
+            column![].width(0)
+        };
+
+        let is_order_menu_open = self.is_menu_active(sidebar::Menu::Order);
+
         match state.position {
-            sidebar::Position::Left => row![nav_buttons, tickers_table],
-            sidebar::Position::Right => row![tickers_table, nav_buttons],
+            sidebar::Position::Left => row![nav_buttons, tickers_table, order_menu],
+            sidebar::Position::Right => row![order_menu, tickers_table, nav_buttons],
         }
-        .spacing(if is_table_open { 8 } else { 4 })
+        .spacing(if is_table_open || is_order_menu_open {
+            8
+        } else {
+            4
+        })
         .into()
     }
 
@@ -217,15 +238,51 @@ impl Sidebar {
             )
         };
 
+        let order_btn = {
+            let is_active = self.is_menu_active(sidebar::Menu::Order);
+
+            button_with_tooltip(
+                icon_text(Icon::Edit, 14)
+                    .width(24)
+                    .align_x(Alignment::Center),
+                Message::ToggleSidebarMenu(Some(sidebar::Menu::Order)),
+                Some("Order"),
+                tooltip_position,
+                move |theme, status| crate::style::button::transparent(theme, status, is_active),
+            )
+        };
+
         column![
             ticker_search_button,
             layout_modal_button,
             audio_btn,
+            order_btn,
             space::vertical(),
             settings_modal_button,
         ]
         .width(32)
         .spacing(8)
+    }
+
+    fn order_menu_view(&self) -> iced::widget::Column<'_, Message> {
+        use data::layout::pane::ContentKind;
+
+        // U0: Order Entry is enabled.
+        let entry_btn = iced::widget::button(iced::widget::text("Order Entry").size(13))
+            .on_press(Message::OrderPanelRequested(ContentKind::OrderEntry))
+            .style(|theme, status| crate::style::button::transparent(theme, status, false));
+
+        // U1: Order List is now enabled.
+        let list_btn = iced::widget::button(iced::widget::text("Order List").size(13))
+            .on_press(Message::OrderPanelRequested(ContentKind::OrderList))
+            .style(|theme, status| crate::style::button::transparent(theme, status, false));
+
+        // U3: enabled.
+        let power_btn = iced::widget::button(iced::widget::text("Buying Power").size(13))
+            .on_press(Message::OrderPanelRequested(ContentKind::BuyingPower))
+            .style(|theme, status| crate::style::button::transparent(theme, status, false));
+
+        column![entry_btn, list_btn, power_btn].spacing(4)
     }
 
     pub fn hide_tickers_table(&mut self) -> bool {

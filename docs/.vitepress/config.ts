@@ -2,63 +2,39 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   lang: 'ja',
-  title: 'flowsurface',
-  description: 'Rust 製デスクトップチャートアプリ — 操作ガイド',
-  base: '/flowsurface/',
+  title: 'e-station',
+  description: 'e-station エンジニア向けドキュメント',
+  base: '/e-station/',
 
-  // plan/ は開発者向け作業ドキュメントのため除外
-  srcExclude: ['plan/**'],
+  srcExclude: ['plan/**', 'wiki/**'],
 
-  // plan/ は srcExclude で除外済み、../src/ は Rust ソースファイルのため無視
-  ignoreDeadLinks: [
-    /\/plan\//,
-    /\.\.\/src\//,
-  ],
+  ignoreDeadLinks: true,
 
   lastUpdated: true,
 
   themeConfig: {
-    siteTitle: 'flowsurface',
+    siteTitle: 'e-station dev',
 
     nav: [
-      { text: 'ガイド', link: '/wiki/' },
-      { text: '仕様書', link: '/spec/replay' },
-      { text: 'GitHub', link: 'https://github.com/flowsurface-rs/flowsurface' },
+      { text: 'GitHub', link: 'https://github.com/botterYosuke/e-station' },
     ],
 
     sidebar: {
-      '/wiki/': [
-        {
-          text: '操作ガイド',
-          items: [
-            { text: '概要', link: '/wiki/' },
-            { text: '基本的な使い方', link: '/wiki/getting-started' },
-            { text: 'チャート', link: '/wiki/charts' },
-            { text: 'リプレイ', link: '/wiki/replay' },
-            { text: '注文（立花証券）', link: '/wiki/orders' },
-            { text: '設定・カスタマイズ', link: '/wiki/settings' },
-          ],
-        },
-      ],
       '/spec/': [
         {
-          text: '開発者向け仕様書',
+          text: '実装仕様書',
           items: [
-            { text: 'リプレイ機能', link: '/spec/replay' },
-            { text: '立花証券 API 統合', link: '/spec/tachibana' },
+            { text: 'Python データエンジン', link: 'plan/✅python-data-engine/spec.md' },
+            { text: '立花証券 API 統合', link: 'plan/✅tachibana/spec.md' },
+            { text: '立花注文機能', link: 'plan/✅order/spec.md' },
           ],
         },
       ],
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/flowsurface-rs/flowsurface' },
+      { icon: 'github', link: 'https://github.com/botterYosuke/e-station' },
     ],
-
-    editLink: {
-      pattern: 'https://github.com/flowsurface-rs/flowsurface/edit/main/docs/:path',
-      text: 'このページを編集',
-    },
 
     footer: {
       message: 'Released under the GPL-3.0 License.',

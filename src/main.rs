@@ -628,6 +628,9 @@ struct Flowsurface {
     /// flag with a single enum so illegal combinations are
     /// unrepresentable. T35-U4-VenueReadyGate.
     tachibana_state: VenueState,
+    /// 第二暗証番号 modal。`SecondPasswordRequired` IPC イベントで Some に、
+    /// Submit / Cancel / Dismiss で None に戻る。
+    second_password_modal: Option<modal::second_password::SecondPasswordModal>,
 }
 
 #[derive(Debug, Clone)]
@@ -696,6 +699,29 @@ enum Message {
     /// EC 約定通知（Phase O2 T2.4）。`OrderFilled` / `OrderCanceled` /
     /// `OrderExpired` を受信したときに toast を surface する。
     OrderToast(Toast),
+    /// `GetOrderList` IPC レスポンス — 全 OrderList ペインに配信する（Phase U1）。
+    OrderListUpdated(Vec<engine_client::dto::OrderRecordWire>),
+    /// Python エンジンが第二暗証番号を要求した。request_id は `SetSecondPassword` に使う。
+    SecondPasswordRequired(String),
+    /// 第二暗証番号 modal を閉じ、`ForgetSecondPassword` を IPC 送信する。
+    DismissSecondPasswordModal,
+    /// 第二暗証番号 modal 内部のメッセージ。
+    SecondPasswordModalMsg(modal::second_password::Message),
+    /// User confirmed the order dialog; forward `ConfirmSubmit` to the focused
+    /// `OrderEntryPanel` and then process the resulting `SubmitOrder` IPC call.
+    ConfirmOrderEntrySubmit,
+    /// `OrderAccepted` IPC event — reset `submitting` on the matching
+    /// `OrderEntryPanel` and surface a toast.
+    OrderAccepted {
+        client_order_id: String,
+        venue_order_id: Option<String>,
+    },
+    /// `OrderRejected` IPC event — reset `submitting` on the matching
+    /// `OrderEntryPanel` with the rejection reason, and surface a toast.
+    OrderRejected {
+        client_order_id: String,
+        reason: String,
+    },
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -881,6 +907,28 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
         } => Some(Message::OrderToast(Toast::warn(format!(
             "注文失効: {client_order_id}"
         )))),
+        // ── Phase U0: 第二暗証番号 / 注文受付・拒否 ────────────────────────
+        EngineEvent::SecondPasswordRequired { request_id } => {
+            Some(Message::SecondPasswordRequired(request_id))
+        }
+        EngineEvent::OrderAccepted {
+            client_order_id,
+            venue_order_id,
+            ..
+        } => Some(Message::OrderAccepted {
+            client_order_id,
+            venue_order_id,
+        }),
+        EngineEvent::OrderRejected {
+            client_order_id,
+            reason_code,
+            reason_text,
+            ..
+        } => Some(Message::OrderRejected {
+            client_order_id,
+            reason: format!("[{reason_code}] {reason_text}"),
+        }),
+        EngineEvent::OrderListUpdated { orders, .. } => Some(Message::OrderListUpdated(orders)),
         _ => None,
     }
 }
@@ -946,6 +994,7 @@ impl Flowsurface {
             engine_connection: initial_conn,
             engine_manager,
             tachibana_state: VenueState::Idle,
+            second_password_modal: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -1401,6 +1450,207 @@ impl Flowsurface {
 
                             Task::none()
                         }
+                        Some(dashboard::Event::OrderEntryAction(action)) => {
+                            use crate::screen::dashboard::panel::order_entry::{
+                                Action, CashMarginKind,
+                            };
+
+                            fn cash_margin_tag(kind: CashMarginKind) -> String {
+                                match kind {
+                                    CashMarginKind::Cash => "cash_margin=cash".to_string(),
+                                    CashMarginKind::MarginCreditNew => {
+                                        "cash_margin=margin_credit_new".to_string()
+                                    }
+                                    CashMarginKind::MarginCreditRepay => {
+                                        "cash_margin=margin_credit_repay".to_string()
+                                    }
+                                    CashMarginKind::MarginGeneralNew => {
+                                        "cash_margin=margin_general_new".to_string()
+                                    }
+                                    CashMarginKind::MarginGeneralRepay => {
+                                        "cash_margin=margin_general_repay".to_string()
+                                    }
+                                }
+                            }
+
+                            match action {
+                                Action::RequestConfirm {
+                                    instrument_id,
+                                    order_side,
+                                    order_type,
+                                    quantity,
+                                    price,
+                                } => {
+                                    let price_str = price
+                                        .as_deref()
+                                        .map(|p| format!(" @ {p}"))
+                                        .unwrap_or_default();
+                                    let side_str = match order_side {
+                                        engine_client::dto::OrderSide::Buy => "買い",
+                                        engine_client::dto::OrderSide::Sell => "売り",
+                                    };
+                                    let type_str = match order_type {
+                                        engine_client::dto::OrderType::Market => "成行",
+                                        engine_client::dto::OrderType::Limit => "指値",
+                                        engine_client::dto::OrderType::StopMarket => "逆指値成行",
+                                        engine_client::dto::OrderType::StopLimit => "逆指値指値",
+                                        engine_client::dto::OrderType::MarketIfTouched => {
+                                            "マーケットイフタッチ"
+                                        }
+                                        engine_client::dto::OrderType::LimitIfTouched => {
+                                            "リミットイフタッチ"
+                                        }
+                                    };
+                                    let body = format!(
+                                        "{instrument_id} {side_str} {quantity}株 {type_str}{price_str}"
+                                    );
+                                    let dialog = screen::ConfirmDialog::new(
+                                        body,
+                                        Box::new(Message::ConfirmOrderEntrySubmit),
+                                    )
+                                    .with_confirm_btn_text("注文を発注する".to_string());
+                                    self.confirm_dialog = Some(dialog);
+                                    Task::none()
+                                }
+                                Action::SubmitOrder {
+                                    request_id,
+                                    venue,
+                                    instrument_id,
+                                    order_side,
+                                    order_type,
+                                    quantity,
+                                    price,
+                                    trigger_price,
+                                    cash_margin,
+                                } => {
+                                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                        let request_key =
+                                            xxhash_rust::xxh3::xxh3_64(request_id.as_bytes());
+                                        let order = engine_client::dto::SubmitOrderRequest {
+                                            client_order_id: request_id.clone(),
+                                            instrument_id,
+                                            order_side,
+                                            order_type,
+                                            quantity,
+                                            price,
+                                            trigger_price,
+                                            trigger_type: None,
+                                            time_in_force: engine_client::dto::TimeInForce::Day,
+                                            expire_time_ns: None,
+                                            post_only: false,
+                                            reduce_only: false,
+                                            tags: vec![cash_margin_tag(cash_margin)],
+                                            request_key,
+                                        };
+                                        let request_id_err = request_id.clone();
+                                        return Task::perform(
+                                            async move {
+                                                conn.send(
+                                                    engine_client::dto::Command::SubmitOrder {
+                                                        request_id,
+                                                        venue,
+                                                        order,
+                                                    },
+                                                )
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                            },
+                                            move |res| match res {
+                                                Ok(()) => Message::OrderToast(Toast::info(
+                                                    "注文送信完了".to_string(),
+                                                )),
+                                                Err(err) => Message::OrderRejected {
+                                                    client_order_id: request_id_err,
+                                                    reason: format!("IPC 送信失敗: {err}"),
+                                                },
+                                            },
+                                        );
+                                    }
+                                    // engine_connection が None — submitting をリセットして toast を出す
+                                    Task::done(Message::OrderRejected {
+                                        client_order_id: request_id,
+                                        reason: "エンジン未接続".to_string(),
+                                    })
+                                }
+                            }
+                        }
+                        Some(dashboard::Event::BuyingPowerAction(_action)) => {
+                            // GetBuyingPower IPC は未実装（dto.rs に Command がない）
+                            self.notifications.push(crate::widget::toast::Toast::warn(
+                                "余力情報取得: IPC 未実装（準備中）".to_string(),
+                            ));
+                            Task::none()
+                        }
+                        Some(dashboard::Event::OrderListAction(action)) => {
+                            use crate::screen::dashboard::panel::orders::Action;
+                            match action {
+                                Action::RequestOrderList => {
+                                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                        return Task::perform(
+                                            async move {
+                                                conn.send(
+                                                    engine_client::dto::Command::GetOrderList {
+                                                        request_id: uuid::Uuid::new_v4()
+                                                            .to_string(),
+                                                        venue: crate::TACHIBANA_VENUE_NAME
+                                                            .to_string(),
+                                                        filter:
+                                                            engine_client::dto::OrderListFilter {
+                                                                status: None,
+                                                                instrument_id: None,
+                                                                date: None,
+                                                            },
+                                                    },
+                                                )
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                            },
+                                            |res| match res {
+                                                Ok(()) => Message::OrderToast(Toast::info(
+                                                    "注文一覧を取得中...".to_string(),
+                                                )),
+                                                Err(err) => Message::OrderToast(Toast::error(
+                                                    format!("注文一覧取得失敗: {err}"),
+                                                )),
+                                            },
+                                        );
+                                    }
+                                    Task::none()
+                                }
+                                Action::CancelOrder {
+                                    client_order_id,
+                                    venue_order_id,
+                                } => {
+                                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                        return Task::perform(
+                                            async move {
+                                                conn.send(
+                                                    engine_client::dto::Command::CancelOrder {
+                                                        request_id: uuid::Uuid::new_v4()
+                                                            .to_string(),
+                                                        venue: crate::TACHIBANA_VENUE_NAME
+                                                            .to_string(),
+                                                        client_order_id,
+                                                        venue_order_id,
+                                                    },
+                                                )
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                            },
+                                            |res| match res {
+                                                Ok(()) => Message::OrderToast(Toast::info(
+                                                    "注文取消送信".to_string(),
+                                                )),
+                                                Err(err) => Message::OrderToast(Toast::error(
+                                                    format!("注文取消失敗: {err}"),
+                                                )),
+                                            },
+                                        );
+                                    }
+                                    Task::none()
+                                }
+                            }
+                        }
                         None => Task::none(),
                     };
 
@@ -1418,6 +1668,146 @@ impl Flowsurface {
             // EC 約定通知 toast (Phase O2 T2.4)
             Message::OrderToast(toast) => {
                 self.notifications.push(toast);
+            }
+            // Phase U1: distribute fresh order list to all OrderList panes
+            Message::OrderListUpdated(orders) => {
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .distribute_order_list(main_window, orders);
+            }
+            // Phase U0: OrderAccepted — reset submitting flag + toast
+            Message::OrderAccepted {
+                client_order_id,
+                venue_order_id,
+            } => {
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .notify_order_accepted(main_window, &client_order_id);
+                let vid = venue_order_id.unwrap_or_default();
+                self.notifications.push(Toast::info(format!(
+                    "注文受付: {client_order_id} (venue: {vid})"
+                )));
+            }
+            // Phase U0: OrderRejected — reset submitting flag with reason + toast
+            Message::OrderRejected {
+                client_order_id,
+                reason,
+            } => {
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut().notify_order_rejected(
+                    main_window,
+                    &client_order_id,
+                    reason.clone(),
+                );
+                self.notifications.push(Toast::error(format!(
+                    "注文拒否: {client_order_id} {reason}"
+                )));
+            }
+            // ── Phase U0: 注文確認ダイアログ → ConfirmSubmit ──────────────────
+            Message::ConfirmOrderEntrySubmit => {
+                self.confirm_dialog = None;
+                let main_window_id = self.main_window.id;
+                let dashboard = self.active_dashboard_mut();
+                if let Some((window_id, focused_pane)) = dashboard.focus
+                    && window_id == main_window_id
+                {
+                    // Dispatch ConfirmSubmit to the focused pane through the
+                    // standard Pane → PaneEvent → OrderEntryMsg path so that
+                    // the `OrderEntryAction` handler picks up the resulting
+                    // SubmitOrder and fires the IPC call.
+                    return iced::Task::done(Message::Dashboard {
+                        layout_id: None,
+                        event: dashboard::Message::Pane(
+                            main_window_id,
+                            dashboard::pane::Message::PaneEvent(
+                                focused_pane,
+                                dashboard::pane::Event::OrderEntryMsg(
+                                    crate::screen::dashboard::panel::order_entry::Message::ConfirmSubmit,
+                                ),
+                            ),
+                        ),
+                    });
+                }
+                self.notifications.push(crate::widget::toast::Toast::error(
+                    "注文を確定するには発注ペインをクリックしてください".to_string(),
+                ));
+                return Task::none();
+            }
+            // ── Phase U0: 第二暗証番号 modal ──────────────────────────────────
+            Message::SecondPasswordRequired(request_id) => {
+                self.second_password_modal =
+                    Some(modal::second_password::SecondPasswordModal::new(request_id));
+            }
+            Message::DismissSecondPasswordModal => {
+                self.second_password_modal = None;
+                if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                    return Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::ForgetSecondPassword)
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
+                        |res| match res {
+                            Ok(()) => Message::OrderToast(Toast::info(
+                                "第二暗証番号を解除しました".to_string(),
+                            )),
+                            Err(err) => Message::OrderToast(Toast::error(format!(
+                                "ForgetSecondPassword 送信失敗: {err}"
+                            ))),
+                        },
+                    );
+                }
+            }
+            Message::SecondPasswordModalMsg(msg) => {
+                if let Some(modal) = &mut self.second_password_modal {
+                    match modal.update(msg) {
+                        Some(modal::second_password::Action::Submit { value }) => {
+                            let request_id = modal.request_id.clone();
+                            self.second_password_modal = None;
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                return Task::perform(
+                                    async move {
+                                        conn.send(engine_client::dto::Command::SetSecondPassword {
+                                            request_id,
+                                            value,
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                    },
+                                    |res| match res {
+                                        Ok(()) => Message::OrderToast(Toast::info(
+                                            "第二暗証番号を送信しました".to_string(),
+                                        )),
+                                        Err(err) => Message::OrderToast(Toast::error(format!(
+                                            "第二暗証番号送信失敗: {err}"
+                                        ))),
+                                    },
+                                );
+                            }
+                        }
+                        Some(modal::second_password::Action::Cancel) => {
+                            self.second_password_modal = None;
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                return Task::perform(
+                                    async move {
+                                        conn.send(engine_client::dto::Command::ForgetSecondPassword)
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                    },
+                                    |res| match res {
+                                        Ok(()) => Message::OrderToast(Toast::info(
+                                            "第二暗証番号を解除しました".to_string(),
+                                        )),
+                                        Err(err) => Message::OrderToast(Toast::error(format!(
+                                            "ForgetSecondPassword 送信失敗: {err}"
+                                        ))),
+                                    },
+                                );
+                            }
+                        }
+                        None => {}
+                    }
+                }
             }
             Message::SetTimezone(tz) => {
                 self.timezone = tz;
@@ -1654,6 +2044,27 @@ impl Flowsurface {
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
                     }
+                    Some(dashboard::sidebar::Action::OpenOrderPanel(kind)) => {
+                        let main_window = self.main_window;
+                        let dashboard = self.active_dashboard_mut();
+                        if let Some((window_id, focused_pane)) = dashboard.focus
+                            && window_id == main_window.id
+                        {
+                            let new_state = dashboard::pane::State::with_kind(kind);
+                            if let Some((new_pane, _)) = dashboard.panes.split(
+                                pane_grid::Axis::Horizontal,
+                                focused_pane,
+                                new_state,
+                            ) {
+                                dashboard.focus = Some((window_id, new_pane));
+                            }
+                        } else {
+                            self.notifications.push(Toast::error(
+                                "注文パネルを開くにはまずペインを選択してください".to_string(),
+                            ));
+                        }
+                        return task.map(Message::Sidebar);
+                    }
                     Some(dashboard::sidebar::Action::RequestTachibanaLogin(trigger)) => {
                         let task = task.map(Message::Sidebar);
                         return Task::batch(vec![
@@ -1781,7 +2192,7 @@ impl Flowsurface {
             .into()
         };
 
-        toast::Manager::new(
+        let toasted: Element<'_, Message> = toast::Manager::new(
             content,
             self.notifications.toasts(),
             match sidebar_pos {
@@ -1790,7 +2201,14 @@ impl Flowsurface {
             },
             Message::RemoveNotification,
         )
-        .into()
+        .into();
+
+        if let Some(modal) = &self.second_password_modal {
+            let modal_view = modal.view().map(Message::SecondPasswordModalMsg);
+            main_dialog_modal(toasted, modal_view, Message::DismissSecondPasswordModal)
+        } else {
+            toasted
+        }
     }
 
     fn theme(&self, _window: window::Id) -> iced_core::Theme {
@@ -2326,6 +2744,9 @@ impl Flowsurface {
                     base_content
                 }
             }
+            // Phase U-pre: Order menu is rendered inline in the sidebar itself.
+            // No overlay modal is needed here.
+            sidebar::Menu::Order => base,
         }
     }
 

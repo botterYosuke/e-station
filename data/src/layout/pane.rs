@@ -204,10 +204,13 @@ pub enum ContentKind {
     ComparisonChart,
     TimeAndSales,
     Ladder,
+    OrderEntry,
+    OrderList,
+    BuyingPower,
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 8] = [
+    pub const ALL: [ContentKind; 11] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -216,6 +219,9 @@ impl ContentKind {
         ContentKind::ComparisonChart,
         ContentKind::TimeAndSales,
         ContentKind::Ladder,
+        ContentKind::OrderEntry,
+        ContentKind::OrderList,
+        ContentKind::BuyingPower,
     ];
 }
 
@@ -230,6 +236,9 @@ impl std::fmt::Display for ContentKind {
             ContentKind::ComparisonChart => "Comparison Chart",
             ContentKind::TimeAndSales => "Time&Sales",
             ContentKind::Ladder => "DOM/Ladder",
+            ContentKind::OrderEntry => "Order Entry",
+            ContentKind::OrderList => "Order List",
+            ContentKind::BuyingPower => "Buying Power",
         };
         write!(f, "{s}")
     }
@@ -297,7 +306,11 @@ impl PaneSetup {
                         Basis::default_kline_time(Some(base_ticker), Timeframe::M15)
                     }))
                 }
-                ContentKind::Starter | ContentKind::TimeAndSales => None,
+                ContentKind::Starter
+                | ContentKind::TimeAndSales
+                | ContentKind::OrderEntry
+                | ContentKind::OrderList
+                | ContentKind::BuyingPower => None,
             };
 
         let tick_multiplier = match content_kind {
@@ -319,7 +332,10 @@ impl PaneSetup {
             ContentKind::CandlestickChart
             | ContentKind::ComparisonChart
             | ContentKind::TimeAndSales
-            | ContentKind::Starter => current_tick_multiplier,
+            | ContentKind::Starter
+            | ContentKind::OrderEntry
+            | ContentKind::OrderList
+            | ContentKind::BuyingPower => current_tick_multiplier,
         };
 
         let price_step = match tick_multiplier {

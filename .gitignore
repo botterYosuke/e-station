@@ -10,3 +10,5 @@ uv.lock
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
 .env
+docs/node_modules/
+docs/.vitepress/dist/

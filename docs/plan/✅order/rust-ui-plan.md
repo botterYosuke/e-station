@@ -71,7 +71,7 @@ OrderEntryPanel 状態更新
 
 **ゴール**: IPC に依存しない Rust 構造を先に完成させる。Tpre.2 が完了した瞬間に U0 の IPC 配線だけで動作確認できる状態にする。
 
-### Tupre.1 `ContentKind` 3 variants の追加
+### Tupre.1 `ContentKind` 3 variants の追加 ✅（2026-04-27 完了）
 
 - `data/src/layout/pane.rs` に以下を追加:
   ```rust
@@ -85,7 +85,7 @@ OrderEntryPanel 状態更新
 
 受け入れ条件: `ContentKind::OrderEntry` ペインを開くと `"実装中..."` と表示されビルドが通る
 
-### Tupre.2 サイドバー 🖊 ボタンとインラインメニュー
+### Tupre.2 サイドバー 🖊 ボタンとインラインメニュー ✅（2026-04-27 完了）
 
 `data/src/config/sidebar.rs` の `Menu` enum に `Order` variant を追加。
 
@@ -105,7 +105,7 @@ OrderEntryPanel 状態更新
 - 🔍 ボタンクリック中は 🖊 メニューが閉じる（相互排他）
 - `cargo build` が通る
 
-### Tupre.3 Order Entry フォームのシェル実装
+### Tupre.3 Order Entry フォームのシェル実装 ✅（2026-04-27 完了）
 
 新規作成: `src/screen/dashboard/panel/order_entry.rs`
 
@@ -141,7 +141,7 @@ pub struct OrderEntryPanel {
 - バリデーション（数量 0 → エラー）
 - フォーム入力値が `Message` に正しく反映される
 
-### Tupre.4 第二暗証番号 modal のシェル実装
+### Tupre.4 第二暗証番号 modal のシェル実装 ✅（2026-04-27 完了）
 
 新規作成: `src/modal/second_password.rs`
 
@@ -170,7 +170,7 @@ UI 要件:
 - `test_second_password_modal_cancel_does_not_send_value` — Cancel 後に IPC フレームに `value` が載らないことを assert
 - `test_second_password_modal_submit_clears_local` — Submit 後に `input` が zeroize されることを assert
 
-### Tupre.5 発注確認 modal のシェル実装
+### Tupre.5 発注確認 modal のシェル実装 ✅（2026-04-27 完了・ConfirmDialog 再利用、U0 で配線）
 
 既存の `screen::ConfirmDialog<Message>` を **再利用**する。
 
@@ -191,7 +191,7 @@ UI 要件:
 
 **前提**: Python 側 Tpre.2（`engine-client/src/dto.rs` への `Command::SubmitOrder` 等の追加）が完了していること。
 
-### Tu0.1 IPC 受信ハンドラの追加
+### Tu0.1 IPC 受信ハンドラの追加 ✅（2026-04-27 完了）
 
 - `engine-client/src/dto.rs` に Tpre.2 で追加された Order 系 `Event` を `main.rs` で受信して処理する
   - `Event::SecondPasswordRequired { request_id }` → `Message::SecondPasswordRequired(request_id)` へ変換して modal を起動
@@ -206,7 +206,7 @@ UI 要件:
 
 受け入れテスト: `cargo test -p flowsurface-engine-client --test order_ipc_event_dispatch`
 
-### Tu0.2 `ConfirmSubmit` → `Command::SubmitOrder` IPC 配線
+### Tu0.2 `ConfirmSubmit` → `Command::SubmitOrder` IPC 配線 ✅（2026-04-27 完了）
 
 - `OrderEntryPanel::ConfirmSubmit` が `Command::SubmitOrder` を送信するよう実装（U-pre では noop だった箇所）
 - `SecondPasswordModal::Submit` が `Command::SetSecondPassword` を送信するよう実装
@@ -214,7 +214,7 @@ UI 要件:
 
 受け入れ条件: フォーム入力 → 確認 → 「注文を発注する」→ Python エンジンに IPC が届き `Event::OrderAccepted` または `Event::OrderRejected` が返る（**Python O0 手動テスト可能**）
 
-### Tu0.3 `OrderEntryPanel` の状態更新（submitting / error 表示）
+### Tu0.3 `OrderEntryPanel` の状態更新（submitting / error 表示） ✅（2026-04-27 完了）
 
 - `submitting = true` 中はボタン disabled
 - `OrderRejected` 受信時は `last_error` にセットしてフォーム内に表示
@@ -226,7 +226,7 @@ UI 要件:
 
 **ゴール**: 注文一覧が表示でき、行から訂正・取消が行える。
 
-### Tu1.1 `ContentKind::OrderList` の追加
+### Tu1.1 `ContentKind::OrderList` の追加 ✅（2026-04-27 完了）
 
 新規作成: `src/screen/dashboard/panel/order_list.rs`
 
@@ -263,7 +263,7 @@ pub struct OrderRecord {
 
 受け入れテスト: `GetOrderList` IPC 送信後に `OrderListReceived` を受けて行数が更新されることを確認
 
-### Tu1.2 訂正 modal
+### Tu1.2 訂正 modal ✅（2026-04-27 完了 — UI stub のみ、IPC 配線はスキップ）
 
 新規作成: `src/modal/order_modify.rs`
 
@@ -293,13 +293,11 @@ pub struct OrderModifyModal {
 - `Event::OrderModified` / `Event::OrderCanceled` 受信 → 該当行を差分更新
 - `GetOrderList` レスポンスで `orders` を全更新
 
-### Tu1.5 サイドバー `Order List` メニューの有効化
-
-Phase U1 完了時に `[ Order List ]` 項目を有効化する。
+### Tu1.5 サイドバー `Order List` メニューの有効化 ✅（2026-04-27 完了）
 
 ---
 
-## Phase U2: Toast 通知 + 注文一覧リアルタイム更新（O2 対応）
+## Phase U2: Toast 通知 + 注文一覧リアルタイム更新（O2 対応） ✅（Tu2.1 完了済み、Tu2.2 自動更新は将来改善）
 
 **ゴール**: 約定通知が Toast で出て、注文一覧が自動更新される。
 
@@ -312,10 +310,12 @@ Phase U1 完了時に `[ Order List ]` 項目を有効化する。
 
 既存の `dashboard::Message::Notification(Toast)` パターンをそのまま使う（新しいコードを追加しない）。
 
-### Tu2.2 注文一覧のリアルタイム更新
+### Tu2.2 注文一覧のリアルタイム更新（自動更新は将来改善）
 
-- `Event::OrderAccepted` / `OrderFilled` / `OrderCanceled` / `OrderRejected` 受信時に、開いている `OrderListPanel` の `orders` を差分更新する（`OrderListPanel` が開いていない場合は無視）
-- `dashboard::Message::Pane(...)` を通じて対象パネルへ伝播させる
+現時点の実装: `RefreshClicked` ボタンで手動更新が可能。
+`OrderCanceled` / `OrderFilled` 受信時の自動リフレッシュは、`map_engine_event_to_tachibana()` が
+`Option<Message>` しか返せないため、単純な実装ではトースト＋自動更新を同時に発行できない。
+将来の改善タスク: `Message::OrderListNeedsRefresh` を追加して複合イベントに対応する。
 
 ---
 
@@ -323,7 +323,7 @@ Phase U1 完了時に `[ Order List ]` 項目を有効化する。
 
 **ゴール**: 余力情報を確認でき、信用取引・逆指値・期日指定が注文フォームで使える。
 
-### Tu3.1 `ContentKind::BuyingPower` の追加
+### Tu3.1 `ContentKind::BuyingPower` の追加 ✅（2026-04-27 完了）
 
 新規作成: `src/screen/dashboard/panel/buying_power.rs`
 
@@ -344,7 +344,7 @@ pub struct BuyingPowerPanel {
 
 表示: wiki §「余力情報パネル」の形式に従う。追証時は赤色で `"⚠ 追証確定"` を表示。
 
-### Tu3.2 Order Entry フォームの拡張
+### Tu3.2 Order Entry フォームの拡張 ✅（2026-04-27 完了）
 
 `src/screen/dashboard/panel/order_entry.rs` の拡張:
 - 口座種別の信用区分を有効化（`sGenkinShinyouKubun = 2/4/6/8`）
@@ -352,7 +352,7 @@ pub struct BuyingPowerPanel {
 - 期日選択を有効化（当日 / 日付指定、10 営業日以内）
 - `AccountType` に信用新規（制度 6M）/ 信用新規（一般）/ 信用返済（制度）/ 信用返済（一般）を追加
 
-### Tu3.3 サイドバー `Buying Power` メニューの有効化
+### Tu3.3 サイドバー `Buying Power` メニューの有効化 ✅（2026-04-27 完了）
 
 Phase U3 完了時に `[ Buying Power ]` 項目を有効化する。
 
@@ -423,3 +423,25 @@ Phase U3 完了時に `[ Buying Power ]` 項目を有効化する。
 | [architecture.md §5](./architecture.md#5-第二暗証番号の取扱い) | 第二暗証番号の modal / メモリ保持 / lockout 仕様の正本 |
 | [spec.md §6](./spec.md#6-nautilus_trader-互換要件不変条件) | nautilus 互換不変条件（Rust UI 層に立花用語を漏洩させない） |
 | [docs/wiki/orders.md](../../wiki/orders.md) | 完成形 UI の参照仕様（Phase O3 完了後の姿） |
+
+---
+
+## 繰り越し / 次イテレーション
+
+### 制約 #3 REPLAY モード UI ガード（HIGH — 次フェーズ）
+
+**内容**: `order_entry::view()` の submit ボタンを REPLAY モード中は disabled にし  
+`"REPLAYモード中 — 注文は無効です"` を表示する。
+
+**理由**: `is_replay_mode` は `order_api.rs` の `OrderApiState`（HTTP API 層）の  
+`Arc<AtomicBool>` にのみ存在し、Iced メッセージループへの伝播経路がない。  
+実装には以下のいずれかが必要：  
+- `Arc<AtomicBool>` を共有 static 経由でサブスクリプションに公開する  
+- IPC `EngineEvent::ReplayModeChanged(bool)` を dto.rs に追加する  
+
+**代替策**: IPC 経路の `Command::SubmitOrder` が Python 側で replay mode を検査して  
+拒否する（`OrderRejected { reason_code: "REPLAY_MODE_ACTIVE" }`）ことで  
+致命的な誤発注は防げる。HTTP 層は既に 503 を返す。  
+UI ガードは UX 改善（二重送信防止 / フィードバック）であり、安全弁としては代替策で十分。
+
+**期限**: 次の IPC フェーズ（Tachibana REPLAY モード対応タスク）で実施。

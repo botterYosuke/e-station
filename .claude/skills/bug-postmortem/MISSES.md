@@ -21,6 +21,7 @@
 | IPC 契約の片側未実装 | Rust が特殊パス（`"__all__"` 等）を送る契約が `backend.rs` に書かれているが、Python 側の対応実装とテストが追いついていない | 1 |
 | バグ動作 pin | 既存のバグ挙動（空返却・None 返却）をリグレッションガードとして固定し、正しい設計（raise 等）と乖離した状態を固める | 1 |
 | エラーパス副作用なし | ストリームワーカーの早期 return パスで outbox への積み忘れが発生し、Rust 側が「データが来ない」としか認識できない | 1 |
+| IPC イベント → UI 状態の未配線 | IPC イベントを受信して toast を出すだけで、対応する UI コンポーネントの状態（`submitting` フラグ等）をリセットしていない | 1 |
 
 ---
 
@@ -609,3 +610,59 @@ FD/KP/ST コールバックが一度も呼ばれない状態だった。
 3. **「全 Mock が同じ誤りを共有」の構造的危険性**:
    共通 Mock ビルダー関数がある場合、実装の誤りを Mock が補完して全テストが通ることがある。
    「実際のサーバーが送るフレームと Mock フレームは同一か」を定期的に実機観測で照合する習慣をつける。
+
+---
+
+## 2026-04-27 — `OrderAccepted`/`OrderRejected` 受信後に `submitting` フラグが永久 true のままになる
+
+**見逃しパターン**: IPC イベント → UI 状態の未配線
+
+**不具合の概要**:
+注文送信後、`OrderEntryPanel.submitting = true` にセットされるが、`OrderAccepted`/`OrderRejected`
+IPC イベントを受信しても `submitting` がリセットされず、注文ボタンが永久に無効化されたままになる。
+
+**根本原因**:
+`map_engine_event_to_tachibana()` では `OrderAccepted`/`OrderRejected` を
+`Message::OrderToast(...)` に変換して toast だけを表示していた。
+`OrderEntryPanel.on_accepted()` / `on_rejected(reason)` を呼ぶ経路が存在しなかった。
+
+`on_accepted()`/`on_rejected()` メソッド自体は `order_entry.rs` に実装済み・テスト済みだったが、
+`main.rs` → `dashboard.rs` → `pane.rs` → `order_entry.rs` の伝播パスが全く配線されていなかった。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `order_entry.rs` の `on_accepted_clears_submitting_and_error` | `on_accepted()` を直接呼ぶ単体テスト。`main.rs` からの呼び出しパスは検証していない |
+| `order_entry.rs` の `on_rejected_sets_error_and_clears_submitting` | 同上 |
+| `cargo test --workspace` 全体 | IPC イベント受信 → UI 状態変化の E2E 経路をカバーするテストがない |
+
+`on_accepted()`/`on_rejected()` が実装・テスト済みという事実が「配線も完了している」という
+錯覚を生んだ。実装と配線は別のレイヤーであり、両方を検証する必要がある。
+
+**修正**:
+1. `main.rs` に `Message::OrderAccepted { client_order_id, venue_order_id }` と
+   `Message::OrderRejected { client_order_id, reason }` を追加
+2. `map_engine_event_to_tachibana()` で `OrderAccepted`/`OrderRejected` をこれらの新変数にマップ
+3. `update()` ハンドラで `dashboard.notify_order_accepted()` / `notify_order_rejected()` を呼んでから toast を push
+4. `dashboard.rs` に `notify_order_accepted()` / `notify_order_rejected()` メソッドを追加。
+   `iter_all_panes_mut()` で全ペインを走査し `pending_request_id` が一致する `OrderEntry` パネルにのみ呼ぶ
+
+**追加したテスト**: なし（既存の `on_accepted`/`on_rejected` 単体テストが PASS 継続を確認）
+
+**教訓**:
+
+1. **「実装済み」と「配線済み」は別のレイヤー**: メソッドが実装済み・テスト済みでも、
+   呼び出し側の経路（IPC イベント → Message → update() → component）が配線されていなければ
+   実行されない。新しいコンポーネントメソッドを追加したら「どこから呼ばれるか」を
+   必ず確認し、end-to-end の呼び出しパスを持つ統合テストを書く。
+
+2. **「toast を出す」≠「UI 状態をリセットする」**: IPC イベントハンドラで toast を表示する
+   実装は「通知は機能している」という安心感を与えるが、UI コンポーネントの
+   状態変化（`submitting`, `pending_request_id` 等）は別途配線が必要。
+   IPC イベントが UI の複数レイヤーに影響する場合は、全レイヤーへの伝播をチェックリスト化する。
+
+3. **`distribute_order_list` をモデルに**: `dashboard.rs` に `distribute_order_list()` という
+   「全 OrderList パネルにデータを配信する」パターンが既にある。
+   同様のパターンを必要とする新機能（`notify_order_accepted` 等）は、このパターンを参照して
+   一貫した実装を行う。パターンの例が存在するときはそれに倣う。

@@ -1,12 +1,11 @@
-//! Phase O3 — Buying Power panel (minimal stub / T3.4).
+//! Phase O3 — Buying Power panel (Tu3.1).
 //!
 //! Displays the current buying power from `fetch_buying_power()` API.
 //! Periodic refresh is triggered by the parent dashboard on a timer.
 //!
-//! Current state: scaffold — renders placeholder until populated via HTTP
-//! `GET /api/order/buying-power`. The panel also shows a summary of
-//! margin credit available when `CreditBuyingPowerResult` is available.
-#![allow(dead_code)] // scaffold — not yet wired into the dashboard pane router
+//! IPC: `GetBuyingPower` command and `BuyingPowerUpdated` event are not yet
+//! present in `engine-client/src/dto.rs`. The panel is wired into the pane
+//! router so the UI structure is ready; the actual IPC will be added later.
 
 use iced::{
     Element,
@@ -60,12 +59,29 @@ impl BuyingPowerPanel {
     }
 }
 
+// ── Actions ───────────────────────────────────────────────────────────────────
+
+/// Actions produced by the panel and consumed by the dashboard / main.rs.
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// 将来 IPC が追加されたときに使用。
+    RequestBuyingPower,
+}
+
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub enum Message {
     /// ユーザーが余力更新ボタンを押した。
     RefreshRequested,
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+
+pub fn update(_panel: &mut BuyingPowerPanel, msg: Message) -> Option<Action> {
+    match msg {
+        Message::RefreshRequested => Some(Action::RequestBuyingPower),
+    }
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────
@@ -117,6 +133,8 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
 
 /// 発注フォームの信用/現物セレクタの状態。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+#[allow(dead_code)]
 pub enum CashMarginSelection {
     /// 現物（cash）— デフォルト
     #[default]
@@ -131,6 +149,8 @@ pub enum CashMarginSelection {
     MarginGeneralRepay,
 }
 
+// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+#[allow(dead_code)]
 impl CashMarginSelection {
     /// IPC tags に変換する。
     pub fn to_tag(&self) -> &'static str {
@@ -157,6 +177,8 @@ impl CashMarginSelection {
 
 /// 逆指値フォームの状態。
 #[derive(Debug, Clone, Default)]
+// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+#[allow(dead_code)]
 pub struct StopOrderForm {
     /// 逆指値注文を有効にするかどうか。
     pub enabled: bool,
@@ -168,6 +190,8 @@ pub struct StopOrderForm {
 
 /// 逆指値注文の種別。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+#[allow(dead_code)]
 pub enum StopOrderType {
     /// 逆指値成行
     #[default]
@@ -178,6 +202,8 @@ pub enum StopOrderType {
 
 /// 期日指定フォームの状態。
 #[derive(Debug, Clone, Default)]
+// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+#[allow(dead_code)]
 pub struct GtdForm {
     /// GTD（期日指定）を有効にするかどうか。
     pub enabled: bool,
@@ -188,6 +214,13 @@ pub struct GtdForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_requested_returns_action() {
+        let mut panel = BuyingPowerPanel::new();
+        let action = update(&mut panel, Message::RefreshRequested);
+        assert!(matches!(action, Some(Action::RequestBuyingPower)));
+    }
 
     #[test]
     fn cash_margin_selection_to_tag() {
