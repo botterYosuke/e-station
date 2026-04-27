@@ -750,6 +750,7 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             let reason_code = msg.split_once(": ").map(|(c, _)| c).unwrap_or(&msg);
             if reason_code == "SESSION_EXPIRED" {
                 state.session.lock().await.freeze();
+                return error_response(502, "SESSION_EXPIRED", &msg);
             }
             error_response(502, "INTERNAL_ERROR", &msg)
         }
@@ -881,6 +882,7 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             let reason_code = msg.split_once(": ").map(|(c, _)| c).unwrap_or(&msg);
             if reason_code == "SESSION_EXPIRED" {
                 state.session.lock().await.freeze();
+                return error_response(502, "SESSION_EXPIRED", &msg);
             }
             error_response(502, "INTERNAL_ERROR", &msg)
         }
@@ -1724,7 +1726,14 @@ mod tests {
     }
 
     /// Spawn a mock engine that sends OrderRejected.
-    fn spawn_mock_engine_rejects(listener: TcpListener, client_order_id: &str, reason_code: &str) {
+    ///
+    /// Returns the `JoinHandle` so callers can detect mock panics:
+    /// `handle.await.expect("mock server panicked")`.
+    fn spawn_mock_engine_rejects(
+        listener: TcpListener,
+        client_order_id: &str,
+        reason_code: &str,
+    ) -> tokio::task::JoinHandle<()> {
         let cid = client_order_id.to_owned();
         let rc = reason_code.to_owned();
         tokio::spawn(async move {
@@ -1733,7 +1742,7 @@ mod tests {
             let _ = ws.next().await;
             ws_send_ready(&mut ws).await;
 
-            // Read SubmitOrder
+            // Read incoming command (SubmitOrder / ModifyOrder / CancelOrder).
             let _ = ws.next().await;
 
             // Send OrderRejected
@@ -1749,7 +1758,7 @@ mod tests {
                 .unwrap();
 
             tokio::time::sleep(Duration::from_millis(200)).await;
-        });
+        })
     }
 
     /// Spawn a mock engine that never responds to SubmitOrder (for timeout test).
@@ -2915,7 +2924,7 @@ mod tests {
     async fn test_insufficient_funds_returns_403() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
         let cid = "cid-insuf-001";
-        spawn_mock_engine_rejects(ws_listener, cid, "INSUFFICIENT_FUNDS");
+        let _mock_handle = spawn_mock_engine_rejects(ws_listener, cid, "INSUFFICIENT_FUNDS");
 
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
@@ -3006,6 +3015,151 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
         assert_eq!(json["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+    }
+
+    // ── B-1c: SESSION_EXPIRED detection → session freeze (T1.6) ─────────────
+
+    /// modify_order: engine returns SESSION_EXPIRED → session freezes, 502 on
+    /// first detection, 503 SESSION_EXPIRED on subsequent calls.
+    ///
+    /// Tests the R2-H2 detection path: p_errno=2 from Python propagates as
+    /// reason_code="SESSION_EXPIRED" in OrderRejected → freeze() + HTTP 502 →
+    /// next call returns 503 via is_frozen() guard.
+    #[tokio::test]
+    async fn test_modify_session_expired_detection_freezes_session() {
+        let cid = "modify-session-expired-cid-001";
+        let vid = "VENUE-MODIFY-EXPIRY-001";
+
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let mock_handle = spawn_mock_engine_rejects(ws_listener, cid, "SESSION_EXPIRED");
+
+        let conn = connect_engine(ws_addr).await;
+        let (_engine_tx, engine_rx) = watch::channel(Some(conn));
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+
+        // Pre-populate session so modify_order can resolve venue_order_id.
+        {
+            let mut s = session.lock().await;
+            let c = ClientOrderId::try_new(cid).unwrap();
+            let outcome = s.try_insert(c.clone(), 11111u64);
+            assert!(
+                matches!(outcome, PlaceOrderOutcome::Created { .. }),
+                "test setup: try_insert must succeed; got {outcome:?}"
+            );
+            let ok = s.update_venue_order_id(c, vid.to_string());
+            assert!(ok, "test setup: update_venue_order_id must succeed");
+        }
+
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(Arc::clone(&session), engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits())
+                .with_timeout(Duration::from_secs(5)),
+        );
+
+        let raw = serde_json::json!({
+            "client_order_id": cid,
+            "change": { "new_price": "3600" }
+        })
+        .to_string();
+
+        // First call: SESSION_EXPIRED detected from engine → 502 SESSION_EXPIRED + session freezes.
+        let resp = modify_order(&raw, &state).await;
+        assert_eq!(
+            resp.status, 502,
+            "SESSION_EXPIRED detection must return 502; body={}",
+            resp.body
+        );
+        let json1: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json1["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+
+        // is_frozen() must be true before the 2nd call; this assert enforces the ordering
+        // guarantee that the 2nd call hits the is_frozen() guard rather than re-entering the engine.
+        assert!(
+            session.lock().await.is_frozen(),
+            "session must be frozen after SESSION_EXPIRED detection via modify"
+        );
+
+        // Second call: session already frozen → 503 SESSION_EXPIRED.
+        let resp2 = modify_order(&raw, &state).await;
+        assert_eq!(
+            resp2.status, 503,
+            "frozen session modify must return 503; body={}",
+            resp2.body
+        );
+        let json2: serde_json::Value = serde_json::from_str(&resp2.body).unwrap();
+        assert_eq!(json2["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+
+        mock_handle.await.expect("mock server panicked");
+    }
+
+    /// cancel_order: engine returns SESSION_EXPIRED → session freezes, 502 on
+    /// first detection, 503 SESSION_EXPIRED on subsequent calls.
+    #[tokio::test]
+    async fn test_cancel_session_expired_detection_freezes_session() {
+        let cid = "cancel-session-expired-cid-001";
+        let vid = "VENUE-CANCEL-EXPIRY-001";
+
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let mock_handle = spawn_mock_engine_rejects(ws_listener, cid, "SESSION_EXPIRED");
+
+        let conn = connect_engine(ws_addr).await;
+        let (_engine_tx, engine_rx) = watch::channel(Some(conn));
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+
+        // Pre-populate session so cancel_order can resolve venue_order_id.
+        {
+            let mut s = session.lock().await;
+            let c = ClientOrderId::try_new(cid).unwrap();
+            let outcome = s.try_insert(c.clone(), 22222u64);
+            assert!(
+                matches!(outcome, PlaceOrderOutcome::Created { .. }),
+                "test setup: try_insert must succeed; got {outcome:?}"
+            );
+            let ok = s.update_venue_order_id(c, vid.to_string());
+            assert!(ok, "test setup: update_venue_order_id must succeed");
+        }
+
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(Arc::clone(&session), engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits())
+                .with_timeout(Duration::from_secs(5)),
+        );
+
+        let raw = serde_json::json!({
+            "client_order_id": cid
+        })
+        .to_string();
+
+        // First call: SESSION_EXPIRED detected from engine → 502 SESSION_EXPIRED + session freezes.
+        let resp = cancel_order(&raw, &state).await;
+        assert_eq!(
+            resp.status, 502,
+            "SESSION_EXPIRED detection must return 502; body={}",
+            resp.body
+        );
+        let json1: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json1["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+
+        // is_frozen() must be true before the 2nd call; this assert enforces the ordering
+        // guarantee that the 2nd call hits the is_frozen() guard rather than re-entering the engine.
+        assert!(
+            session.lock().await.is_frozen(),
+            "session must be frozen after SESSION_EXPIRED detection via cancel"
+        );
+
+        // Second call: session already frozen → 503 SESSION_EXPIRED.
+        let resp2 = cancel_order(&raw, &state).await;
+        assert_eq!(
+            resp2.status, 503,
+            "frozen session cancel must return 503; body={}",
+            resp2.body
+        );
+        let json2: serde_json::Value = serde_json::from_str(&resp2.body).unwrap();
+        assert_eq!(json2["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+
+        mock_handle.await.expect("mock server panicked");
     }
 
     // ── B-2: unknown trigger_type rejected by validate() ─────────────────────

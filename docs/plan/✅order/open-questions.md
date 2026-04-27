@@ -50,10 +50,14 @@
 - `require_confirmation = false` に設定した場合のみモーダルを省略可能
 - 理由: 実弾取引で手戻りが効かないため。上級者は設定で緩和できる
 
-### Q5. EVENT EC フレームの仕様根拠
+### Q5. EVENT EC フレームの仕様根拠 ✅ 解決（2026-04-28）
+
+**解決**: samples による仕様代替で Phase O2 実装は完了済み。
+
 - `api_event_if_v4r7.pdf` / `api_event_if.xlsx` は `manual_files/` に同梱されていない（SKILL.md L39 参照）
-- Phase O2 着手前に **PDF 入手 or 実 frame キャプチャ or flowsurface パーサ移植**のいずれかが必要
-- **対応**: [implementation-plan Tpre.5](./implementation-plan.md#tpre5-event-ec-フレームの仕様根拠を確保q5phase-o2-ブロッカ解消) に O-pre タスクとして昇格済み（O2 着手の前提条件）
+- **確認結果（2026-04-28）**: flowsurface `exchange/src/adapter/tachibana.rs` に EC 専用パーサは存在しない
+- **採用した根拠**: `.claude/skills/tachibana/samples/e_api_event_receive_tel.py`（行 534–568）に EC フレーム仕様（`^A`/`^B`/`^C` デリミタ、p_evt_cmd 値一覧、EC=注文約定通知）が Python コメントで完全に記載されており、Phase O2 実装（`tachibana_event.py._parse_ec_frame`）はこれを根拠として完了済み
+- 実 frame キャプチャ（デモ環境接続が可能になった際）は任意で追加可能だが、実装に必須ではない
 
 ### Q6. 発注 HTTP API の認証 ✅ 確定（2026-04-25）
 
