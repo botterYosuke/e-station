@@ -102,7 +102,7 @@ list_return = dic_return.get('aCLMMfdsMarketPrice')
 - ✅ 4. RED テスト追加・FAIL 確認 (`test_tachibana_market_price_payload.py` 5 テスト、全 FAIL 実証)
 - ✅ 5. GREEN: 最小修正で PASS (schemas.py + tachibana.py 修正、790 テスト全通過)
 - ✅ 6. REFACTOR: 不要なフォールバック (`sGBP_{i}` 等) 除去・コメント整理済み
-- [ ] 7. review-fix-loop
+- ✅ 7. review-fix-loop
 - ✅ 8. /bug-postmortem (MISSES.md に「API 仕様固定なし」パターンを追記)
 - ✅ 9. リグレッション確認: 修正前 5 FAIL → 修正後 5 PASS を自動スクリプトで実証
 
@@ -129,3 +129,17 @@ list_return = dic_return.get('aCLMMfdsMarketPrice')
 
 ### 残存 LOW（対応不要）
 - R2-L1: `test_fetch_klines_accepts_1d` の Shift-JIS encode にコメント不足（機能影響なし）
+
+## レビュー反映 (2026-04-27, ラウンド 3)
+
+### 解消した指摘
+- ✅ H-1: fetch_ticker_stats / fetch_depth_snapshot に非 dict ガード追加
+- ✅ M-1: ViewState::latest_x を pub(crate) に変更
+- ✅ M-2: テスト OR 条件を修正 (last_price のみ assert)
+- ✅ M-3: fetch_ticker_stats single-ticker no_session テスト追加
+- ✅ M-4: _row_to_kline スキップ時の warning ログ追加
+- ✅ M-5: TickBased ブランチで req_id を mark_failed
+
+### 残存 LOW
+- L-1: タイムスタンプコメント不正確（機能影響なし）
+- L-2: disconnected_events count 未 assert（既存テストで補完済み）

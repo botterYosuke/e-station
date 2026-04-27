@@ -1,4 +1,4 @@
-"""TDD: SetProxy + WS integration (T5, plan §F-M3a / MEDIUM-D5).
+﻿"""TDD: SetProxy + WS integration (T5, plan §F-M3a / MEDIUM-D5).
 
 Verifies that TachibanaEventWs passes proxy=<url> to websockets.connect when
 a proxy is configured.  Uses a pure-asyncio CONNECT proxy so no external
@@ -103,7 +103,7 @@ async def test_ws_connects_through_local_connect_proxy() -> None:
 
     # Start the WS target server
     async def _ws_handler(ws: websockets.server.WebSocketServerProtocol) -> None:
-        text = "\x01p_evt_cmd\x02KP"
+        text = "\x01p_cmd\x02KP"
         await ws.send(text.encode("shift_jis"))
         stop.set()
         await asyncio.sleep(0.5)

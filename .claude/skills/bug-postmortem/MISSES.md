@@ -15,7 +15,7 @@
 | 再接続隠蔽 | 自動リカバリが成功するため初回失敗が観測ウィンドウに残らない | 1 |
 | 冪等性未検証 | 「変更なし」の入力パスがテストされておらず、副作用の有無が見逃される | 1 |
 | 共有状態の独立構築 | 同じ論理状態を複数オブジェクトが「デフォルト引数で各自構築」してしまい、`is` 同一性が崩れて値の重複・順序逆転が起こる | 1 |
-| API 仕様固定なし | Mock レスポンスが誤ったキー名・フィールド名を前提に書かれており、実 API の必須パラメータ欠落・レスポンス形式ズレを素通りする | 1 |
+| API 仕様固定なし | Mock レスポンスが誤ったキー名・フィールド名を前提に書かれており、実 API の必須パラメータ欠落・レスポンス形式ズレを素通りする | 2 |
 | ライブデータ前提 | テストが「常にライブストリームあり」を前提とし、市場クローズ・週末など「ストリームなし」で起動するシナリオを未検証 | 1 |
 | saved-state migration 未実装 | enum バリアント追加時に、追加前の saved-state を読んだ場合の migration テストがなく、旧フォーマットでの起動時のみ再現するバグを見逃す | 1 |
 | IPC 契約の片側未実装 | Rust が特殊パス（`"__all__"` 等）を送る契約が `backend.rs` に書かれているが、Python 側の対応実装とテストが追いついていない | 1 |
@@ -541,3 +541,71 @@ if let Some(latest_t) = klines_raw.iter().map(|k| k.time).max() {
    チャート初期化後に `latest_x` が正しく設定されていないと、
    挿入されたデータが正しく表示されない。
    `latest_x` を変更・リセットする操作は必ず `FitToVisible` が期待する不変条件との整合を確認する。
+
+---
+
+## 2026-04-27 — 立花 EVENT WebSocket の受信フレームが `p_cmd` ではなく `p_evt_cmd` で参照されていた
+
+**見逃しパターン**: API 仕様固定なし（Mock が誤ったフィールド名で書かれており、実 API との乖離を素通り）
+
+**不具合の概要**:
+アプリ起動後、立花証券の Ladder（板情報）ペインが「Waiting for data...」のまま更新されない。
+WebSocket 接続は確立しサーバーから FD フレームが届いているにもかかわらず、
+`TachibanaEventWs._recv_loop` が FD/KP/ST を一切認識せずコールバックが呼ばれない。
+
+**根本原因**:
+Tachibana EVENT WebSocket の受信フレームはコマンド種別を `p_cmd` フィールドに格納する（例: `\x01p_cmd\x02FD`）。
+しかし `TachibanaEventWs._recv_loop` が `fields.get("p_evt_cmd", "")` を参照していた。
+
+`p_evt_cmd` は**購読 URL のリクエストパラメータ**（`p_evt_cmd=ST,KP,FD`）であり、
+サーバーが返す受信フレームのフィールド名とは別物。
+実サーバーは受信フレームに `p_evt_cmd` を含まないため、`evt_cmd` は常に空文字列になり、
+FD/KP/ST コールバックが一度も呼ばれない状態だった。
+
+**なぜ既存テストで発見できなかったか**:
+
+全ての WS フレーム Mock ビルダー関数が同じ誤ったフィールド名 `p_evt_cmd` を使っていた。
+実装とテストが「一貫して間違った前提」を共有していたため、すべてのテストがパスしていた。
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_fd_frame_triggers_callback` | `_encode_fd_frame` が `\x01p_evt_cmd\x02FD` を送信 → 実装も `p_evt_cmd` を参照 → 偶然一致 |
+| `test_kp_frame_triggers_callback` | `_kp_frame_bytes` が `\x01p_evt_cmd\x02KP` を送信 → 同様に偶然一致 |
+| `test_st_frame_nonzero_triggers_callback` | `_st_frame_bytes` が `\x01p_evt_cmd\x02ST` を送信 → 同様に偶然一致 |
+| 他全 WS テスト | すべて誤ったフィールド名の Mock を共有 |
+
+実サーバーのフレーム内容（`p_cmd\x02FD`）を実際に受信して照合するテストが一切なかった。
+
+**修正**:
+- `python/engine/exchanges/tachibana_ws.py` 行 390:
+  `fields.get("p_evt_cmd", "")` → `fields.get("p_cmd", "")`
+- `python/tests/test_tachibana_ws.py` — 全 Mock ビルダーを `p_cmd` に修正
+- `python/tests/test_tachibana_ws_fd_depth_recv.py`、`test_tachibana_ws_proxy.py`、
+  `test_tachibana_ws_timeout.py`、`test_tachibana_depth_safety.py`、
+  `test_tachibana_holiday_fallback.py`、`test_tachibana_fd_trade.py` — 同様に修正
+
+**追加したテスト**:
+- `python/tests/test_tachibana_ws.py::TestReceivedFrameFieldName::test_frame_with_p_cmd_key_triggers_fd_callback`
+  — 実サーバーフォーマット（`p_cmd=FD`）でコールバックが呼ばれることを検証。
+  エラーメッセージに「`fields.get('p_cmd')` を使うこと」を明記
+- `python/tests/test_tachibana_ws.py::TestReceivedFrameFieldName::test_frame_with_p_evt_cmd_key_does_not_trigger_callback`
+  — 誤ったキー名（`p_evt_cmd`）ではコールバックが呼ばれないことを検証（リグレッション防止）
+
+**リグレッション確認**:
+- 修正前（`p_evt_cmd` に戻した状態）: 両テストが FAIL（`2 failed in 5.23s`）
+- 修正後（`p_cmd` に戻した状態）: 両テストが PASS、全テストスイート 844 passed
+
+**教訓**:
+
+1. **Mock フレームは「実サーバーが送るフォーマット」で書く**:
+   Mock フレームのフィールド名を実装と揃えるだけでは不十分。
+   「実サーバーが実際に送るフォーマット」を公式サンプルやマニュアルで確認し、Mock に反映する。
+   今回は公式サンプル `e_api_websocket_receive_tel.py` で `p_cmd` を確認できた。
+
+2. **リクエストパラメータと受信フレームフィールドは別名**:
+   Tachibana の `p_evt_cmd=ST,KP,FD`（URL パラメータ）と受信フレームの `p_cmd=FD`（フィールド名）は
+   役割が異なる別名。同じ名前に見えるが混同しやすい。API ドキュメントで受信フレーム仕様を明示的に確認する。
+
+3. **「全 Mock が同じ誤りを共有」の構造的危険性**:
+   共通 Mock ビルダー関数がある場合、実装の誤りを Mock が補完して全テストが通ることがある。
+   「実際のサーバーが送るフレームと Mock フレームは同一か」を定期的に実機観測で照合する習慣をつける。

@@ -1,4 +1,4 @@
-"""TDD: depth_unavailable safety (T5, plan §T5 MEDIUM-6 / F-M12 / HIGH-D4).
+﻿"""TDD: depth_unavailable safety (T5, plan §T5 MEDIUM-6 / F-M12 / HIGH-D4).
 
 depth_unavailable fires when stream_depth receives FD frames with no bid/ask
 keys for _DEPTH_SAFETY_TIMEOUT_S seconds.  When bid/ask keys arrive in time,
@@ -47,7 +47,7 @@ def _make_worker(tmp_path: Path) -> TachibanaWorker:
 def _fd_no_depth() -> bytes:
     """FD frame WITHOUT bid/ask keys (no GAP/GBP)."""
     text = (
-        "\x01p_evt_cmd\x02FD"
+        "\x01p_cmd\x02FD"
         "\x01p_1_DPP\x022500"
         "\x01p_1_DV\x02100"
         "\x01p_date\x022024.01.01-09:30:00.000"
@@ -58,7 +58,7 @@ def _fd_no_depth() -> bytes:
 def _fd_with_depth() -> bytes:
     """FD frame WITH bid/ask keys."""
     text = (
-        "\x01p_evt_cmd\x02FD"
+        "\x01p_cmd\x02FD"
         "\x01p_1_DPP\x022500"
         "\x01p_1_DV\x02100"
         "\x01p_1_GAP1\x022501"

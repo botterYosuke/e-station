@@ -76,6 +76,13 @@ pub enum VenueErrorCode {
     TransportError,
     SessionRestoreFailed,
     UnsupportedVenue,
+    /// Depth stream returned `market_closed` — exchange is outside trading
+    /// hours. Shown as a warning-level dismissible banner; no re-login needed.
+    MarketClosed,
+    /// Depth stream received no bid/ask keys within the safety timeout; a
+    /// REST polling fallback has been activated. Shown as a warning-level
+    /// dismissible banner.
+    DepthUnavailable,
     /// Any code that isn't yet known in this table. The classifier
     /// returns `(Error, Hidden)` for these, matching the
     /// `classify_venue_error` fail-safe default.
@@ -98,6 +105,8 @@ impl VenueErrorCode {
             "transport_error" => VenueErrorCode::TransportError,
             "session_restore_failed" => VenueErrorCode::SessionRestoreFailed,
             "unsupported_venue" => VenueErrorCode::UnsupportedVenue,
+            "market_closed" => VenueErrorCode::MarketClosed,
+            "depth_unavailable" => VenueErrorCode::DepthUnavailable,
             other => VenueErrorCode::Unknown(other.to_string()),
         }
     }
@@ -150,6 +159,14 @@ impl VenueErrorCode {
             VenueErrorCode::UnsupportedVenue => VenueErrorClass {
                 severity: Error,
                 action: Hidden,
+            },
+            VenueErrorCode::MarketClosed => VenueErrorClass {
+                severity: Warning,
+                action: Dismiss,
+            },
+            VenueErrorCode::DepthUnavailable => VenueErrorClass {
+                severity: Warning,
+                action: Dismiss,
             },
             VenueErrorCode::Unknown(_) => VenueErrorClass {
                 severity: Error,
@@ -270,6 +287,28 @@ mod venue_error_class_tests {
     }
 
     #[test]
+    fn market_closed_is_warning_dismiss() {
+        assert_eq!(
+            classify_venue_error("market_closed"),
+            VenueErrorClass {
+                severity: VenueErrorSeverity::Warning,
+                action: VenueErrorAction::Dismiss,
+            }
+        );
+    }
+
+    #[test]
+    fn depth_unavailable_is_warning_dismiss() {
+        assert_eq!(
+            classify_venue_error("depth_unavailable"),
+            VenueErrorClass {
+                severity: VenueErrorSeverity::Warning,
+                action: VenueErrorAction::Dismiss,
+            }
+        );
+    }
+
+    #[test]
     fn unknown_code_is_fail_safe_error_hidden() {
         let class = classify_venue_error("brand_new_code_for_phase_2");
         assert_eq!(class.severity(), VenueErrorSeverity::Error);
@@ -301,6 +340,8 @@ mod venue_error_class_tests {
             "transport_error",
             "session_restore_failed",
             "unsupported_venue",
+            "market_closed",
+            "depth_unavailable",
         ] {
             let typed = VenueErrorCode::from_code(code).classify();
             let stringly = classify_venue_error(code);

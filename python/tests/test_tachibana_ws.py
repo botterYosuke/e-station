@@ -1,4 +1,4 @@
-"""TDD: TachibanaEventWs — Shift-JIS decode, ST frame, depth_unavailable (T5).
+﻿"""TDD: TachibanaEventWs — Shift-JIS decode, ST frame, depth_unavailable (T5).
 
 Uses a local websockets.serve mock server so no real Tachibana credentials
 are needed.
@@ -24,7 +24,7 @@ from engine.exchanges.tachibana_ws import FdFrameProcessor, TachibanaEventWs
 def _encode_fd_frame(row: str = "1", dpp: str = "2500", dv: str = "100") -> bytes:
     """Build a minimal FD frame as Shift-JIS bytes."""
     text = (
-        f"\x01p_evt_cmd\x02FD"
+        f"\x01p_cmd\x02FD"
         f"\x01p_{row}_DPP\x02{dpp}"
         f"\x01p_{row}_DV\x02{dv}"
         f"\x01p_{row}_GAP1\x02{int(dpp)+1}"
@@ -37,18 +37,18 @@ def _encode_fd_frame(row: str = "1", dpp: str = "2500", dv: str = "100") -> byte
 
 
 def _kp_frame_bytes() -> bytes:
-    return "\x01p_evt_cmd\x02KP".encode("shift_jis")
+    return "\x01p_cmd\x02KP".encode("shift_jis")
 
 
 def _st_frame_bytes(result_code: str = "1") -> bytes:
-    text = f"\x01p_evt_cmd\x02ST\x01sResultCode\x02{result_code}"
+    text = f"\x01p_cmd\x02ST\x01sResultCode\x02{result_code}"
     return text.encode("shift_jis")
 
 
 def _kanji_fd_frame_bytes() -> bytes:
     """FD frame containing Japanese kanji in a field value (HIGH-C3-1)."""
     text = (
-        "\x01p_evt_cmd\x02FD"
+        "\x01p_cmd\x02FD"
         "\x01p_1_DPP\x022500"
         "\x01p_1_DV\x02100"
         "\x01p_1_name\x02株式会社テスト"  # kanji + kana
@@ -251,3 +251,97 @@ class TestReconnect:
 
         assert conn_count == 2
         assert len(received_fds) == 2
+
+
+class TestReceivedFrameFieldName:
+    """Regression for: received frames use p_cmd (not p_evt_cmd) as the command key.
+
+    The EVENT WebSocket subscription URL uses the *parameter* ``p_evt_cmd=ST,KP,FD``
+    to declare which events to receive.  The *received* frames, however, carry the
+    command in a field named ``p_cmd`` (e.g. ``p_cmd\x02FD``).  These are two
+    different names for two different roles: request vs. response.
+
+    Fix: ``TachibanaEventWs._recv_loop`` reads ``fields.get("p_cmd")`` not
+    ``fields.get("p_evt_cmd")``.  Reverting that change would make this test FAIL.
+    """
+
+    @pytest.mark.asyncio
+    async def test_frame_with_p_cmd_key_triggers_fd_callback(self) -> None:
+        """A frame containing ``p_cmd=FD`` (real server format) must fire the FD callback."""
+        stop = asyncio.Event()
+        collected: list[str] = []
+
+        async def _cb(frame_type: str, fields: dict, ts: int) -> None:
+            collected.append(frame_type)
+            stop.set()
+
+        # Real server format: command key is p_cmd, NOT p_evt_cmd
+        frame = (
+            "\x01p_cmd\x02FD"
+            "\x01p_1_DPP\x023000"
+            "\x01p_1_DV\x02500"
+            "\x01p_date\x022025.01.01-09:30:00.000"
+        ).encode("shift_jis")
+
+        async def _handler(ws: websockets.server.WebSocketServerProtocol) -> None:
+            await ws.send(frame)
+            await ws.close()
+
+        async with websockets.serve(_handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            ws_client = TachibanaEventWs(f"ws://127.0.0.1:{port}", stop, ticker="7203")
+            await asyncio.wait_for(ws_client.run(_cb), timeout=3.0)
+
+        assert "FD" in collected, (
+            "FD callback was not triggered.\n"
+            "Fix: TachibanaEventWs._recv_loop must read fields.get('p_cmd'), "
+            "not fields.get('p_evt_cmd'). The received frame field is 'p_cmd'; "
+            "'p_evt_cmd' is only the subscription URL parameter."
+        )
+
+    @pytest.mark.asyncio
+    async def test_frame_with_p_evt_cmd_key_does_not_trigger_callback(self) -> None:
+        """A frame using the wrong key ``p_evt_cmd`` must NOT fire any callback.
+
+        The server sends two frames in sequence:
+        1. A bad frame with ``p_evt_cmd=FD`` — must be ignored.
+        2. A known-good ``p_cmd=KP`` frame — confirms the dispatch loop ran.
+
+        Asserting that KP was received proves the loop processed both frames;
+        asserting that FD was not received proves the wrong key is truly ignored
+        (not silently dropped by an exception before dispatch).
+        """
+        stop = asyncio.Event()
+        collected: list[str] = []
+
+        async def _cb(frame_type: str, fields: dict, ts: int) -> None:
+            collected.append(frame_type)
+            if frame_type == "KP":
+                stop.set()
+
+        bad_frame = (
+            "\x01p_evt_cmd\x02FD"
+            "\x01p_1_DPP\x023000"
+            "\x01p_1_DV\x02500"
+        ).encode("shift_jis")
+        kp_frame = "\x01p_cmd\x02KP".encode("shift_jis")
+
+        async def _handler(ws: websockets.server.WebSocketServerProtocol) -> None:
+            await ws.send(bad_frame)
+            await ws.send(kp_frame)
+            await asyncio.sleep(0.5)
+            await ws.close()
+
+        async with websockets.serve(_handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            ws_client = TachibanaEventWs(f"ws://127.0.0.1:{port}", stop, ticker="7203")
+            await asyncio.wait_for(ws_client.run(_cb), timeout=3.0)
+
+        assert "KP" in collected, (
+            "KP frame not received — dispatch loop may not have run at all. "
+            "Cannot conclude that the bad key was correctly ignored."
+        )
+        assert "FD" not in collected, (
+            "FD callback was triggered by a frame with 'p_evt_cmd' key.\n"
+            "The implementation must only respond to 'p_cmd', not 'p_evt_cmd'."
+        )

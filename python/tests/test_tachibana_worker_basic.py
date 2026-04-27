@@ -119,7 +119,7 @@ async def test_fetch_ticker_stats_returns_dict(tmp_path: Path):
     worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
     stats = await worker.fetch_ticker_stats("7203", "stock")
     assert isinstance(stats, dict)
-    assert "last_price" in stats or "close" in stats
+    assert stats.get("last_price") is not None
 
 
 @pytest.mark.asyncio
@@ -374,3 +374,52 @@ async def test_depth_polling_fallback_session_none_appends_disconnected(
     assert ev["stream"] == "depth"
     assert ev["market"] == "stock"
     assert ev["reason"] == "no_session"
+
+
+# ---------------------------------------------------------------------------
+# H-1: fetch_ticker_stats / fetch_depth_snapshot non-dict guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_raises_parse_error_on_list_response(tmp_path: Path) -> None:
+    """fetch_ticker_stats は API が JSON 配列を返したとき TachibanaError(code='parse_error') を raise する。"""
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(_url: str) -> bytes:
+        # API returns a JSON array instead of the expected dict
+        return b'[{"unexpected": "array"}]'
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    with pytest.raises(TachibanaError) as exc_info:
+        await worker.fetch_ticker_stats("7203", "stock")
+    assert exc_info.value.code == "parse_error"
+
+
+@pytest.mark.asyncio
+async def test_fetch_depth_snapshot_raises_parse_error_on_list_response(tmp_path: Path) -> None:
+    """fetch_depth_snapshot は API が JSON 配列を返したとき TachibanaError(code='parse_error') を raise する。"""
+    worker = _stubbed(tmp_path)
+
+    async def _fake_get(_url: str) -> bytes:
+        return b'[{"unexpected": "array"}]'
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+    with pytest.raises(TachibanaError) as exc_info:
+        await worker.fetch_depth_snapshot("7203", "stock")
+    assert exc_info.value.code == "parse_error"
+
+
+# ---------------------------------------------------------------------------
+# M-3: fetch_ticker_stats single-ticker no_session test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_stats_raises_when_session_is_none(tmp_path: Path) -> None:
+    """fetch_ticker_stats は session=None のとき TachibanaError(code='no_session') を raise する。"""
+    worker = _stubbed(tmp_path)
+    worker._session = None
+    with pytest.raises(TachibanaError) as exc_info:
+        await worker.fetch_ticker_stats("7203", "stock")
+    assert exc_info.value.code == "no_session"

@@ -22,7 +22,7 @@ def _fields(
 ) -> dict[str, str]:
     """Build a minimal FD frame fields dict."""
     return {
-        "p_evt_cmd": "FD",
+        "p_cmd": "FD",
         f"p_{row}_DPP": dpp,
         f"p_{row}_DV": dv,
         f"p_{row}_GAP1": gap1,
@@ -196,7 +196,7 @@ class TestDepthOutput:
     def test_depth_has_ten_levels(self) -> None:
         """DepthSnapshot should contain up to 10 bid/ask levels."""
         fields: dict[str, str] = {
-            "p_evt_cmd": "FD",
+            "p_cmd": "FD",
             "p_1_DPP": "2500",
             "p_1_DV": "100",
             "p_date": "2024.01.01-09:30:00.000",
@@ -215,7 +215,7 @@ class TestDepthOutput:
     def test_depth_absent_when_no_bid_ask_keys(self) -> None:
         """No GAP/GBP keys → depth is None."""
         fields = {
-            "p_evt_cmd": "FD",
+            "p_cmd": "FD",
             "p_1_DPP": "2500",
             "p_1_DV": "100",
             "p_date": "2024.01.01-09:30:00.000",
@@ -249,7 +249,7 @@ class TestTimestamp:
     def test_ts_ms_falls_back_to_recv_when_no_p_date(self) -> None:
         """ts_ms falls back to recv_ts_ms when no p_date."""
         fields_no_date = {
-            "p_evt_cmd": "FD",
+            "p_cmd": "FD",
             "p_1_DPP": "2500",
             "p_1_DV": "100",
             "p_1_GAP1": "2501",

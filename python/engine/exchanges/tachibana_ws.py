@@ -387,7 +387,7 @@ class TachibanaEventWs:
                     pairs = self._parse(text)
                     fields: dict[str, str] = {k: v for k, v in pairs}
 
-                    evt_cmd = fields.get("p_evt_cmd", "")
+                    evt_cmd = fields.get("p_cmd", "")
                     if evt_cmd == "KP":
                         log.debug("tachibana ws: KP recv %s", self._ticker)
                         await callback("KP", fields, recv_ts_ms)

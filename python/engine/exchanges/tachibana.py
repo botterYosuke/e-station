@@ -459,6 +459,7 @@ class TachibanaWorker(ExchangeWorker):
         parsed = MarketPriceHistoryResponse.model_validate(data)
 
         rows: list[dict] = []
+        skipped = 0
         for raw in parsed.aCLMMfdsMarketPriceHistory:
             row = self._row_to_kline(raw)
             if row is None:
@@ -466,8 +467,15 @@ class TachibanaWorker(ExchangeWorker):
                     "[tachibana] fetch_klines: skipped invalid row sDate=%r",
                     raw.get("sDate"),
                 )
+                skipped += 1
             else:
                 rows.append(row)
+        if skipped > 0:
+            log.warning(
+                "[tachibana] fetch_klines: skipped %d rows with empty/invalid OHLCV for %s",
+                skipped,
+                ticker,
+            )
         # Tachibana returns oldest-first; honour the caller's `limit`
         # by trimming to the most recent N entries.
         if limit and len(rows) > limit:
@@ -589,7 +597,12 @@ class TachibanaWorker(ExchangeWorker):
         from engine.schemas import MarketPriceResponse  # local import
 
         data = json.loads(decode_response_body(body))
-        err = check_response(data) if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise TachibanaError(
+                code="parse_error",
+                message=f"CLMMfdsGetMarketPrice: expected dict, got {type(data).__name__}",
+            )
+        err = check_response(data)
         if err is not None:
             raise err
         parsed = MarketPriceResponse.model_validate(data)
@@ -654,7 +667,12 @@ class TachibanaWorker(ExchangeWorker):
         from engine.schemas import MarketPriceResponse  # local import
 
         data = json.loads(decode_response_body(body))
-        err = check_response(data) if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise TachibanaError(
+                code="parse_error",
+                message=f"CLMMfdsGetMarketPrice: expected dict, got {type(data).__name__}",
+            )
+        err = check_response(data)
         if err is not None:
             raise err
         parsed = MarketPriceResponse.model_validate(data)
@@ -762,6 +780,39 @@ class TachibanaWorker(ExchangeWorker):
         on_ssid: OnSsidUpdate | None = None,
     ) -> None:
         if not _tachibana_ws.is_market_open(datetime.now(timezone.utc)):
+            # spec §3.3 (a): ザラ場前後の初回 snapshot 1 発 — 市場時間外でも REST から
+            # 最後の気配を取得して DepthSnapshot を 1 件返してから終了する。
+            if self._session is not None:
+                try:
+                    snapshot = await self.fetch_depth_snapshot(ticker, market)
+                    if snapshot.get("bids") or snapshot.get("asks"):
+                        log.info(
+                            "tachibana: stream_depth market_closed initial snapshot: "
+                            "ticker=%s bids=%d asks=%d",
+                            ticker, len(snapshot.get("bids", [])), len(snapshot.get("asks", [])),
+                        )
+                        outbox.append({
+                            "event": "DepthSnapshot",
+                            "venue": "tachibana",
+                            "ticker": ticker,
+                            "market": market,
+                            "stream_session_id": f"{stream_session_id}:initial",
+                            "bids": snapshot.get("bids", []),
+                            "asks": snapshot.get("asks", []),
+                            "sequence_id": 0,
+                            "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
+                        })
+                except Exception as exc:
+                    log.warning("tachibana: stream_depth market_closed initial snapshot failed for %s: %r", ticker, exc)
+            outbox.append({
+                "event": "VenueError",
+                "venue": "tachibana",
+                "code": "market_closed",
+                "message": (
+                    "東証は現在市場時間外です（前場 9:00–11:30、後場 12:30–15:30）。\n"
+                    "Candlesチャートは引き続き使用できます。"
+                ),
+            })
             outbox.append({
                 "event": "Disconnected",
                 "venue": "tachibana",
