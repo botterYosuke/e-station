@@ -252,6 +252,20 @@ But with:
 * Phase 4b: Multi-agent synchronization (in progress)
 * Phase 4c: Strategy evolution + marketplace (future)
 
+## 実装トラック詳細（立花証券 e支店 統合）
+
+| フェーズ | 内容 | 状態 |
+|---|---|---|
+| **Tachibana Phase 1** | 認証・マーケットデータ受信（FD/EC）・気配 | ✅ 完了 |
+| **Order Phase O-pre** | IPC 型定義・スキーマ凍結 | ✅ 完了 |
+| **Order Phase O0** | 第二暗証番号 iced modal・現物成行買・WAL 冪等再送 | ✅ 完了 |
+| **Order Phase O1** | 訂正・取消・注文一覧 | ✅ 完了 |
+| **Order Phase O2** | EVENT EC 約定通知・重複検知 | ✅ 完了 |
+| **Order Phase O3** | 信用・逆指値・期日指定・余力 API | ✅ 完了 |
+| **Rust UI U-pre〜U3** | Order Entry / Order List / Buying Power パネル | ✅ 完了（scaffold） |
+
+計画ドキュメント: [docs/plan/✅order/](✅order/)
+
 ---
 
 ## Design Principles

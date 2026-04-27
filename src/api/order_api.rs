@@ -2987,4 +2987,128 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
         assert_eq!(json["reason_code"].as_str(), Some("VALIDATION_ERROR"));
     }
+
+    // ── B-4: frozen session rejects submit ────────────────────────────────────
+
+    /// submit_order on a frozen session → 503 SESSION_EXPIRED.
+    ///
+    /// `submit_order` の凍結チェックは step ⑩ (try_insert → SessionFrozen) で行われる。
+    /// step ⑧ (エンジン接続確認) より後なので、エンジンが接続された状態でテストする必要がある。
+    #[tokio::test]
+    async fn test_submit_after_session_frozen_returns_503() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        // The mock engine only needs to perform the handshake; submit won't reach it.
+        tokio::spawn(async move {
+            use futures_util::StreamExt as _;
+            use tokio_tungstenite::accept_async;
+            if let Ok((tcp, _)) = ws_listener.accept().await {
+                if let Ok(mut ws) = accept_async(tcp).await {
+                    let _ = ws.next().await; // consume Hello
+                    ws_send_ready(&mut ws).await;
+                    // Hold the connection open so engine_rx stays Some.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        });
+
+        let conn = connect_engine(ws_addr).await;
+        let (_engine_tx, engine_rx) = watch::channel(Some(conn));
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        // Freeze the session (simulates p_errno=2 detection).
+        session.lock().await.freeze();
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(Arc::clone(&session), engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits()),
+        );
+
+        let body = default_submit_body("frozen-submit-cid-001");
+        let resp = submit_order(&body, &state).await;
+
+        assert_eq!(
+            resp.status, 503,
+            "frozen session submit must return 503; body={}",
+            resp.body
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+    }
+
+    // ── T0.7: idempotent replay with different tags order ─────────────────────
+
+    /// 同一論理リクエスト（tags 順序違い）の 2 連投 → 201 Created + 200 IdempotentReplay。
+    /// WAL 冪等再送テスト: tags の順序が違っても同一 request_key になるため、
+    /// 2 回目は 200 で返る。
+    #[tokio::test]
+    async fn test_idempotent_replay_with_different_tags_order_returns_200() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let cid = "order-idempotent-tags-uuid-00099";
+        let vid = "VENUE-ORDER-099";
+        spawn_mock_engine_accepts(ws_listener, cid, vid);
+
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(Arc::clone(&session), engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits())
+                .with_timeout(Duration::from_secs(5)),
+        );
+
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // First request: tags in order [cash_margin=cash, account_type=specific_with_withholding]
+        let body1 = serde_json::json!({
+            "client_order_id": cid,
+            "instrument_id": "7203.TSE",
+            "order_side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "100",
+            "price": null,
+            "trigger_price": null,
+            "trigger_type": null,
+            "time_in_force": "DAY",
+            "expire_time": null,
+            "post_only": false,
+            "reduce_only": false,
+            "tags": ["cash_margin=cash", "account_type=specific_with_withholding"]
+        })
+        .to_string();
+
+        // Second request: tags in reverse order (must produce the same request_key)
+        let body2 = serde_json::json!({
+            "client_order_id": cid,
+            "instrument_id": "7203.TSE",
+            "order_side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "100",
+            "price": null,
+            "trigger_price": null,
+            "trigger_type": null,
+            "time_in_force": "DAY",
+            "expire_time": null,
+            "post_only": false,
+            "reduce_only": false,
+            "tags": ["account_type=specific_with_withholding", "cash_margin=cash"]
+        })
+        .to_string();
+
+        let (status1, _) = http_post(port, "/api/order/submit", &body1).await;
+        assert_eq!(status1, 201, "first request (tags order A) must return 201");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (status2, resp_body2) = http_post(port, "/api/order/submit", &body2).await;
+        assert_eq!(
+            status2, 200,
+            "second request (tags order B, same key) must return 200 idempotent replay; \
+             body={resp_body2}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body2).unwrap();
+        assert_eq!(json["venue_order_id"].as_str(), Some(vid));
+
+        drop(engine_tx);
+    }
 }

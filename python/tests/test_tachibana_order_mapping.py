@@ -292,3 +292,26 @@ def test_order_record_to_wire_missing_side_falls_back_to_buy():
     }
     wire = _order_record_to_wire(record, None)
     assert wire.order_side == "BUY", f"Expected BUY fallback, got {wire.order_side!r}"
+
+
+# ---------------------------------------------------------------------------
+# logging マスク横断テスト: second_password が logging 経由で漏洩しないこと
+# ---------------------------------------------------------------------------
+
+
+def test_second_password_not_in_log_output(caplog):
+    """logging.getLogger().info(obj) でも second_password が平文で出ないこと。
+
+    TachibanaWireOrderRequest の __repr__ / __str__ / model_dump_json() は
+    @field_serializer によって second_password を "[REDACTED]" に置換する（C-3）。
+    この保護が logging 経由の出力にも有効であることを確認する。
+    """
+    import logging
+
+    wire = _envelope_to_wire(_envelope(), _session(), "secret_log_test")
+    with caplog.at_level(logging.INFO):
+        logging.getLogger().info("wire request: %s", wire)
+    assert "secret_log_test" not in caplog.text, (
+        "second_password must not appear in log output; "
+        "logging.info() calls str(wire) which should be masked by field_serializer"
+    )

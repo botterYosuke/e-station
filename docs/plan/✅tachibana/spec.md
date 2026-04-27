@@ -32,10 +32,10 @@
 - **デモ環境のみ**: `https://demo-kabuka.e-shiten.jp/e_api_v4r8/`
 - **debug ビルドの env 自動ログイン**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO=true`（venue prefix を付けて将来の他 venue ID と衝突させない方針）。**`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 では予約名として一覧化せず、計画文書からも削除する**（F-H5、第二暗証番号は収集も保持もしない方針との整合）。Phase 2 着手時に env 名を改めて確定する。SKILL.md 側の `DEV_USER_ID` 旧表記の書き換えは [implementation-plan.md T0.2 の SKILL.md 同期タスク](./implementation-plan.md) に集約
 
-### 2.2 含めないもの（明示的に Phase 2+ 送り）
+### 2.2 含めないもの（Phase 1 スコープ外）
 
 - **発注・訂正・取消**（`CLMKabuNewOrder` / `CLMKabuCorrectOrder` / `CLMKabuCancelOrder*`）
-  - 第二暗証番号の取り扱い、注文台帳 UI、約定通知 (`p_evt_cmd=EC`) の表示など、**ビュアーアプリの非ゴール**（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §8 と整合）
+  - 第二暗証番号の取り扱い、注文台帳 UI、約定通知 (`p_evt_cmd=EC`) の表示などは **[docs/plan/✅order/](../✅order/) で管理**（Order Phase O0〜O3 として実装済み）。Phase 1 本文書のスコープ外
 - **本番環境（実弾）接続の常時 UI 露出** — `BASE_URL_PROD` の追加自体は許容するが、**通常起動時の UI（メイン画面・設定）には露出させない**。**`TACHIBANA_ALLOW_PROD=1` env が立っているときに限り、Python tkinter ログインダイアログにデモ/本番ラジオを描画**して都度選択させる（M8、architecture.md §7.4）。env が無いときはデモ固定。デフォルトは demo 強制
 - **板差分（Depth Diff）/ L2 リアルタイム板** — 立花 FD frame は「現値・気配 10 本」程度で、L2 差分配信ではない。Phase 1 では **snapshot のみ** を一定間隔で配信し、`DepthDiff` イベントは生成しない
 - **OI（建玉残）チャート** — 株式に概念がない。`fetch_open_interest` は `NotImplementedError` を返す
