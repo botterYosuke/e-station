@@ -364,12 +364,12 @@ class TachibanaWorker(ExchangeWorker):
 
         # Per-issue display name (CLMIssueMstKabu has the canonical names).
         names_by_code: dict[str, dict] = {
-            str(r.get("sIssueCode", "")): r for r in kabu_rows
+            str(r.get("sIssueCode", "")).strip(): r for r in kabu_rows
         }
 
         out: list[dict] = []
         for sizyou in sizyou_rows:
-            code = str(sizyou.get("sIssueCode", ""))
+            code = str(sizyou.get("sIssueCode", "")).strip()
             if not code:
                 continue
             kabu = names_by_code.get(code, {})
@@ -520,8 +520,35 @@ class TachibanaWorker(ExchangeWorker):
     # fetch_ticker_stats (CLMMfdsGetMarketPrice)
     # ------------------------------------------------------------------
 
-    async def fetch_ticker_stats(self, ticker: str, market: str = "stock") -> dict:
+    async def fetch_ticker_stats(self, ticker: str, market: str = "stock") -> dict[str, Any]:
+        # Returns dict[str, dict[str, Any]] (bulk placeholder map) when ticker == "__all__",
+        # or dict[str, Any] (single ticker stats) otherwise.
         await self._ensure_master_loaded()
+
+        # No active session is required for the __all__ path: master data is already
+        # loaded from the on-disk cache and does not need a live HTTP session.
+        # The caller (Rust) may issue __all__ before the session is re-established
+        # after a reconnect.
+        # Bulk case: Rust requests "__all__" to populate the sidebar ticker list.
+        # Return placeholder zero-stats for every ticker in the master so that
+        # ticker_rows can be created even before any real prices are received.
+        if ticker == "__all__":
+            sizyou_rows = self._master_records.get("CLMIssueSizyouMstKabu", [])
+            if not sizyou_rows:
+                log.warning(
+                    "[tachibana] fetch_ticker_stats(__all__): CLMIssueSizyouMstKabu is empty"
+                    " — master may not be loaded (session=%s)",
+                    self._session is not None,
+                )
+            bulk: dict[str, Any] = {}
+            for row in sizyou_rows:
+                # .strip() keeps keys consistent with list_tickers(), which also
+                # strips sIssueCode before registering symbols with Rust.
+                code = str(row.get("sIssueCode", "")).strip()
+                if code:
+                    bulk[code] = {"mark_price": 0, "daily_price_chg": 0, "daily_volume": 0}
+            return bulk
+
         if self._session is None:
             raise TachibanaError(
                 code="no_session",

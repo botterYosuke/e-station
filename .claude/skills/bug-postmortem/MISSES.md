@@ -16,6 +16,8 @@
 | 冪等性未検証 | 「変更なし」の入力パスがテストされておらず、副作用の有無が見逃される | 1 |
 | 共有状態の独立構築 | 同じ論理状態を複数オブジェクトが「デフォルト引数で各自構築」してしまい、`is` 同一性が崩れて値の重複・順序逆転が起こる | 1 |
 | API 仕様固定なし | Mock レスポンスが誤ったキー名・フィールド名を前提に書かれており、実 API の必須パラメータ欠落・レスポンス形式ズレを素通りする | 1 |
+| saved-state migration 未実装 | enum バリアント追加時に、追加前の saved-state を読んだ場合の migration テストがなく、旧フォーマットでの起動時のみ再現するバグを見逃す | 1 |
+| IPC 契約の片側未実装 | Rust が特殊パス（`"__all__"` 等）を送る契約が `backend.rs` に書かれているが、Python 側の対応実装とテストが追いついていない | 1 |
 
 ---
 
@@ -275,3 +277,59 @@ worker は独自の `PNoCounter` を生成。
    サーバー起動が高速なテスト環境では確実に再現する一方、本番ではプロセス起動の
    タイミング次第で「たまに通る」ように見える。値ベースのテストでは検出困難なため、
    構造的不変条件 (`is` 同一性) を直接 assert する。
+
+---
+
+## 2026-04-27 — 立花銘柄一覧がサイドバーに表示されない（saved-state migration 未実装 + IPC 契約片側未実装の複合）
+
+**見逃しパターン**: saved-state migration 未実装 / IPC 契約の片側未実装（複合）
+
+**不具合の概要**:
+アプリ起動後、立花銘柄がサイドバーに一切表示されない。`VenueReady` は正常受信。
+2 つの独立したバグが重なっていた。
+
+**Bug 1: `MarketKind::Stock` が saved-state の `selected_markets` に含まれない**
+
+`MarketKind::Stock` は立花連携と同時に追加された新バリアント。それ以前に保存した
+`saved-state.json` には `["Spot","InversePerps","LinearPerps"]` しかなく、
+デシリアライズ時に自動補完（migration）が走らないため、全立花銘柄が
+`matches_market = false` でフィルタされて表示ゼロになる。
+
+`Settings::default()` は `MarketKind::ALL`（Stock 含む）を使うため、fresh な
+saved-state または default 起動では再現しない。**既存 saved-state がある環境でのみ発生**する。
+
+**Bug 2: `TachibanaWorker.fetch_ticker_stats("__all__")` 未実装**
+
+Rust の `fetch_ticker_stats_task`（`engine-client/src/backend.rs`）は全銘柄 stats を
+一括取得するため `ticker = "__all__"` で Python に送る。Python の `TachibanaWorker`
+には `__all__` 分岐がなく、`"__all__"` を銘柄コードとして API に渡して API エラー。
+`ticker_rows` に stats がなければ行が追加されないため、表示ゼロになる。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `filtered_rows` テスト | `selected_markets` を `default()`（全種含む）で固定しており、旧フォーマット移行シナリオがない |
+| `push_ticker_row_for_test` ヘルパー | 直接 rows を操作するため stats fetch パスを通らない |
+| `test_server_dispatch.py` | `FetchTickerStats` を `"__all__"` で呼ぶケースが未カバー |
+| 手動実機テスト | fresh な saved-state では `Stock` が含まれるため再現しない |
+
+**修正**:
+- `Settings::migrate()` を追加し `new_with_settings` で呼び出す（旧 saved-state を自動補完）
+- `TachibanaWorker.fetch_ticker_stats` に `"__all__"` 分岐を追加（マスタからゼロ値プレースホルダーを生成）
+
+**追加したテスト**:
+- `data/src/tickers_table.rs::tests::migrate_adds_stock_to_legacy_selected_markets` — 旧フォーマットで migrate 後に Stock が追加されること
+- `data/src/tickers_table.rs::tests::migrate_is_idempotent` — 2 回呼んでも重複しないこと
+- `data/src/tickers_table.rs::tests::migrate_covers_all_market_kinds` — 空リストから全 MarketKind::ALL が入ること
+- `python/tests/test_tachibana_fetch_all_stats.py::test_fetch_ticker_stats_all_returns_bulk_placeholders`
+- `python/tests/test_tachibana_fetch_all_stats.py::test_fetch_ticker_stats_all_returns_empty_when_master_empty`
+- `python/tests/test_tachibana_fetch_all_stats.py::test_fetch_ticker_stats_all_skips_empty_issue_code`
+
+**教訓**:
+
+1. **saved-state migration テストの必須化**: `Settings` / `State` 型の `#[derive(Deserialize)]` に新フィールドや新 enum バリアントを追加した場合、「旧フォーマット（そのフィールドが存在しない）でデシリアライズ → migration 後に新バリアントが含まれる」ことを assert するテストをセットで書く。`default()` を使う既存テストではこのシナリオを踏まない。
+
+2. **IPC 契約テスト**: Rust `backend.rs` にある「Python に送る特殊パス」（`"__all__"` 等）は、Python 側の実装と 1:1 で対応するテストを書く。Rust 側の `if ticker == "__all__"` という分岐を追加したタイミングで、Python 側に「`fetch_ticker_stats("__all__", ...)` が dict を返すこと」のテストを追加することをルールにする。
+
+3. **「fresh 環境でのみ確認」の罠**: migration 系バグは開発者の環境が常に最新（fresh）であるため手動テストで発見できない。「旧フォーマット saved-state でのみ再現」するバグは自動テストでしか網羅できない。

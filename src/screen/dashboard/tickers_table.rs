@@ -170,6 +170,12 @@ impl TickersTable {
         settings: &Settings,
         handles: AdapterHandles,
     ) -> (Self, Task<Message>) {
+        // Migrate on the fly: if saved-state was written before a new MarketKind
+        // variant existed, ensure it is present in the working copy of settings.
+        let mut settings = settings.clone();
+        settings.migrate();
+        let settings = &settings;
+
         let selected_exchanges = settings.selected_exchanges.to_vec();
 
         // T35-U4 startup gate (review-fixes 2026-04-26 R2): Tachibana
@@ -934,6 +940,7 @@ impl TickersTable {
         let spot_market_button = self.market_filter_btn("Spot", MarketKind::Spot);
         let linear_markets_btn = self.market_filter_btn("Linear", MarketKind::LinearPerps);
         let inverse_markets_btn = self.market_filter_btn("Inverse", MarketKind::InversePerps);
+        let stock_market_btn = self.market_filter_btn("Stock", MarketKind::Stock);
 
         let exchange_filters = {
             let mut col = column![];
@@ -980,6 +987,7 @@ impl TickersTable {
                 spot_market_button.width(Length::Fill),
                 linear_markets_btn.width(Length::Fill),
                 inverse_markets_btn.width(Length::Fill),
+                stock_market_btn.width(Length::Fill),
             ]
             .spacing(4),
             rule::horizontal(1.0).style(style::split_ruler),
