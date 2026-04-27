@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
-SCHEMA_MAJOR: int = 1
-SCHEMA_MINOR: int = 6
+SCHEMA_MAJOR: int = 2
+SCHEMA_MINOR: int = 0
 
 
 # ---------------------------------------------------------------------------

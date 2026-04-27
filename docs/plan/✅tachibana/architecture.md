@@ -6,19 +6,19 @@
 
 | 責務 | 所在 | 備考 |
 | :--- | :--- | :--- |
-| ユーザー ID / パスワード / 第二暗証番号の保存 | **Rust（keyring）** | `data::config::tachibana`（新設） |
+| ユーザー ID / is_demo の保存 | **Python**（`tachibana_account.json`） | `config_dir` 配下。password はファイルに書かない |
+| パスワードの保持 | **Python メモリのみ**（tkinter ダイアログ入力 or debug env） | ディスクには書かない |
 | 電話認証完了の前提条件 | ユーザー操作（手動） | アプリは関与しない |
-| `CLMAuthLoginRequest` 実行と仮想 URL 5 種の取得 | **Python** | クレデンシャルは Rust から IPC で受領 |
-| 仮想 URL（セッション）の保持 | **Python メモリ + Rust keyring** | Python は揮発、Rust は永続。再起動時 Rust → Python へ再注入 |
+| `CLMAuthLoginRequest` 実行と仮想 URL 5 種の取得 | **Python** | Rust の関与ゼロ |
+| 仮想 URL（セッション）の保持 | **Python**（メモリ + `tachibana_session.json`） | `cache_dir` 配下。JST 当日 15:30 未満のみ有効 |
 | マスタダウンロード（21MB ストリーム） | **Python** | 起動時 1 回 + 日次。`sJsonOfmt="4"` |
 | FD frame パース（Shift-JIS / 制御文字分解） | **Python** | `parse_event_frame` 相当を Python 実装 |
 | 板生成（FD 駆動が正、REST は補助） | **Python** | FD frame ごとに `DepthSnapshot` を再生成。`CLMMfdsGetMarketPrice` polling は (a) ザラ場前後初回 / (b) FD WS 12 秒無通信時の再接続中フォールバック / (c) `depth_unavailable` セーフティ発動時の 3 ケースに限定（spec.md §2.1 / §3.3 と整合、runtime 定期 polling は不可） |
 | `p_no` 採番 / `p_sd_date` 生成 | **Python** | プロセス内 `AtomicU64` 相当 + JST chrono |
 | `p_errno` / `sResultCode` 二段判定 | **Python** | `EngineError` または `Error` イベントへマップ |
 | **ログイン画面の描画**（独立ウィンドウ、tkinter） | **Python**（`tachibana_login_dialog.py`、subprocess 隔離） | F-Login1、§7。Rust は描画コードを持たない |
-| **ログイン画面の発火タイミング判定** | **Python**（`tachibana_login_flow.py`） | session 失効・creds 未注入・debug env 検知時に Python ヘルパーを spawn |
-| **ログイン入力値の収集** | **Python**（tkinter ヘルパー → stdout JSON） | creds は Rust 経路を通らない（runtime ユーザー入力時） |
-| 起動時の keyring 復元クレデンシャル注入 | **Rust → Python**（`SetVenueCredentials`） | typed payload は維持（`SecretString` セキュリティ、F-B1/F-B2） |
+| **ログイン画面の発火タイミング判定** | **Python**（`tachibana_login_flow.py`、`startup_login`） | session 失効・ファイルキャッシュなし・debug env 検知時に Python ヘルパーを spawn |
+| **ログイン入力値の収集** | **Python**（tkinter ヘルパー → stdout JSON） | creds は Rust 経路を通らない |
 | バナー文言（`VenueError.message`） | **Python** | Rust UI は `message` をそのまま描画（F-Banner1、§6） |
 | UI のフレーム（チャート / ticker selector / バナー枠 / ログインフォーム枠） | **Rust** | 既存 iced レイアウトを流用 |
 
@@ -28,227 +28,98 @@
 
 > **補足**: SKILL.md は `exchange/src/adapter/tachibana.rs` を実在する参考実装として記述しているが、本リポジトリには存在しない（git 履歴上も未確認）。本計画は Rust adapter を**新設しない**（Python 側に集約）方針なので、SKILL.md L41/L431 の Rust ヘルパー参照は**仕様の抽象記述として読み替える**こと。
 
-## 2. クレデンシャル受け渡しのプロトコル拡張
+## 2. Python 自律ログイン方式（session-file-cache 適用後）
 
-既存 IPC（[engine-client/src/dto.rs](../../../engine-client/src/dto.rs)）には `SetProxy` しかない。立花のクレデンシャルを安全に渡すため、**`SetVenueCredentials` コマンドを新設**する。
+立花のクレデンシャル・セッション管理は **Python に完全に閉じる**。Rust は creds / session を一切保持しない。`SetVenueCredentials` IPC コマンドおよび `VenueCredentialsRefreshed` IPC イベントは削除済み。
 
-### 2.1 新設 IPC コマンド
+### 2.1 ファイルキャッシュ構成
 
-venue 固有のクレデンシャル shape は **`serde_json::Value` を渡さない**。Rust 側で `Debug` マスクを効かせるため、typed enum で受け渡す（F6）。
+Python は OS ユーザーディレクトリ配下の 2 ファイルで認証情報を管理する:
 
-**`secrecy` クレート導入方針（F-B1）**: `engine-client` / `data` の `Cargo.toml` に `secrecy = "0.8"` を追加。`SecretString` は **Rust 内部の保持型**として使い、IPC へ送出する直前にだけ `expose_secret()` で `&str` を取り出して JSON 化する。
+| ファイル | 場所 | 内容 |
+| :--- | :--- | :--- |
+| `tachibana_account.json` | `config_dir/` | `user_id` + `is_demo`（password は書かない） |
+| `tachibana_session.json` | `cache_dir/` | 仮想 URL 5 種 + `saved_at_ms` |
 
-**`Serialize` の整合（F-B2）**: `secrecy::SecretString` は `Serialize` を実装しない。よって IPC 送出用 DTO は **2 層構造**にする:
+```json
+// tachibana_account.json
+{ "user_id": "12345678", "is_demo": true }
 
-- 内部保持型 `TachibanaCredentials` / `TachibanaSession`（`data` クレート、`SecretString` 保持、`Debug` 手実装でマスク、`Serialize` は持たせない、`Deserialize` は keyring 復元用にのみ持つ）
-- 送出用 DTO `TachibanaCredentialsWire` / `TachibanaSessionWire`（`engine-client` クレート、フィールドはプレーン `String`、`Debug` は手実装で値マスク）
-
-**Wire DTO の Serialize / Deserialize 方向（C2 修正）**: IPC は双方向のため、Wire 型の trait 実装は **流れる方向ごと** に決める:
-
-| Wire 型 | 出現するメッセージ | Rust 視点の方向 | 実装 |
-| :--- | :--- | :--- | :--- |
-| `TachibanaCredentialsWire` | `Command::SetVenueCredentials` | Rust → Python | `Serialize` のみ |
-| `TachibanaSessionWire` (送信側) | `Command::SetVenueCredentials.payload.session` | Rust → Python | `Serialize` |
-| `TachibanaSessionWire` (受信側) | `EngineEvent::VenueCredentialsRefreshed.session` | Python → Rust | `Deserialize` |
-
-`TachibanaSessionWire` は **両方向に出現する** ため `Serialize + Deserialize` の両方を派生する（命名は同一型を使い回す）。`TachibanaCredentialsWire` は Rust→Python 一方向のみなので `Serialize` のみで足りる。「Wire は Deserialize を持たない」という旧方針は誤り。
-
-送信時は `From<&TachibanaCredentials> for TachibanaCredentialsWire` で `expose_secret()` 経由の写像を 1 箇所に集約し、`Wire` 値はその場で serialize → drop して長時間メモリに残さない。受信時は `TryFrom<TachibanaSessionWire> for TachibanaSession` で `SecretString::from()` 経由の写像を 1 箇所に集約。
-
-**Wire の zeroize（M4 追記、M3 修正）**: プレーン `String` を直持ちすると `Drop` でゼロクリアされず、シリアライズバッファ・serde 中間 Cow・スワップアウト後のページ等に平文が残りうる。`engine-client` の `Cargo.toml` に `zeroize = "1"` を追加し、`TachibanaCredentialsWire` / `TachibanaSessionWire` の secret フィールドを `zeroize::Zeroizing<String>` で持つ（`Serialize` は `&str` を経由するので impl は維持できる）。`Drop` でメモリゼロ化される一方、関数引数 / クローンで複製されたバッファまでは追えないので、**Wire 値はスコープを最小化（serialize 直後に明示 drop）する規約**を `engine-client/src/backend.rs` の `SetVenueCredentials` 送信パスに `// SAFETY-LITE: ...` コメント付きで記す。
-
-**回帰テスト（M3 修正）**: `engine-client/tests/wire_dto_drop_scope.rs` に下記を追加:
-- (a) Wire 値を作って `serde_json::to_string` した後にスコープを抜けると、`Zeroizing` の `Drop` が呼ばれること（`Drop` 実装の存在を `std::mem::needs_drop::<TachibanaCredentialsWire>()` で確認）
-- (b) `SetVenueCredentials` 送信関数のシグネチャが Wire 値を **値渡し（move）で受け取り関数内で drop される** ことを型レベルで保証（`fn send(_: TachibanaCredentialsWire)` 形式、`&` 参照渡しは禁止）
-- ヒープ実メモリのゼロ化検証は OS 依存で flaky なので入れない（コードレビューで Wire 値の clone / Arc 包みを禁止する規約をコメントで残す）
-
-```rust
-// data/src/config/tachibana.rs（内部保持型）
-use secrecy::SecretString;
-
-pub struct TachibanaCredentials {
-    pub user_id: String,
-    pub password: SecretString,
-    pub second_password: Option<SecretString>, // F-H5: Phase 1 では常に None
-    pub is_demo: bool,
-    pub session: Option<TachibanaSession>, // keyring 復元時のみ Some
-}
-
-pub struct TachibanaSession {
-    pub url_request: SecretString,
-    pub url_master: SecretString,
-    pub url_price: SecretString,
-    pub url_event: SecretString,
-    pub url_event_ws: SecretString,
-    pub expires_at_ms: Option<i64>, // None なら起動時 validation 必須（F-B3）
-    pub zyoutoeki_kazei_c: String,  // 譲渡益課税区分（発注時に再利用）
-}
-
-// engine-client/src/dto.rs（送出用 Wire DTO）
-pub enum Command {
-    // ... 既存 ...
-    SetVenueCredentials {
-        request_id: String,
-        payload: VenueCredentialsPayload,
-    },
-}
-
-#[derive(Serialize)]
-#[serde(tag = "venue", rename_all = "snake_case")]
-pub enum VenueCredentialsPayload {
-    Tachibana(TachibanaCredentialsWire),
-}
-
-// Debug は手実装でマスク。Derive(Debug) は使わない。
-// Rust → Python 一方向なので Serialize のみ
-#[derive(Serialize)]
-pub struct TachibanaCredentialsWire {
-    pub user_id: String,
-    pub password: String,
-    pub second_password: Option<String>, // F-H5: Phase 1 では常に None
-    pub is_demo: bool,
-    pub session: Option<TachibanaSessionWire>,
-}
-
-// Session は Rust↔Python 双方向（SetVenueCredentials 送信 + VenueCredentialsRefreshed 受信）
-#[derive(Serialize, Deserialize)]
-pub struct TachibanaSessionWire {
-    pub url_request: String,
-    pub url_master: String,
-    pub url_price: String,
-    pub url_event: String,
-    pub url_event_ws: String,
-    pub expires_at_ms: Option<i64>,
-    pub zyoutoeki_kazei_c: String,
+// tachibana_session.json
+{
+  "url_request":      "https://demo-kabuka.e-shiten.jp/e_api_v4r8/xxxxxx/",
+  "url_master":       "...",
+  "url_price":        "...",
+  "url_event":        "...",
+  "url_event_ws":     "...",
+  "zyoutoeki_kazei_c": "1",
+  "saved_at_ms":      1745712000000
 }
 ```
 
-`expires_at_ms` の決定方針（F-B3）:
-- 立花 API は session の正確な期限値を返さない（夜間閉局までという運用情報のみ、SKILL.md R3）
-- **方針**: `Option<i64>` で持ち、ログイン直後は `None`（= 起動時 `validate_session_on_startup` が必須）。今後 `CLMDateZyouhou` から閉局時刻を取得できることが判明したら値を入れる
-- keyring から復元する `expires_at_ms = Some(t)` のとき、`now > t` なら復元せず再ログイン経路へ進む（fast path）。`None` のときは validation を必ず叩く（safe path）
+**新鮮判定（`_is_session_fresh`）**: JST 当日 かつ `saved_at_ms < 15:30:00 JST` のもののみ有効。`saved_at_ms > now_ms`（クロックスキュー）は保守的に無効扱い。
 
-対応する Python 側 pydantic モデルは `pydantic.SecretStr` を使い、`__repr__` で `***` 化する。
+**原子書き込み**: `tempfile.mkstemp` + `os.replace` でアトミックに書き込む（Windows/Unix 両対応）。
 
-**`EngineConnection: Debug` 規約（pin: T35-H7-DebugRedaction）**: `engine_client::EngineConnection` の `Debug` 実装は **`finish_non_exhaustive()` のみ**を使い、内部フィールド（token / endpoint / credentials など）を直接書き出す `#[derive(Debug)]` 派生は禁止。リグレッションは `engine-client/tests/engine_connection_debug_redaction.rs` で pin 済み。新規フィールド追加時も同規約を維持する。
+### 2.1.1 起動パラメータ
 
-- `session` は **Rust が keyring から復元できた場合のみ** 含める。Python はまず `session` を試し、`p_errno="2"` で失敗したら `user_id/password` で再ログインする
-  - この再ログインは **起動直後の `SetVenueCredentials` 処理中に限る**。購読開始後の runtime で session expiry を検知した場合は再ログインせず `VenueError{venue:"tachibana", code:"session_expired"}` を返す
-- `second_password` は **Phase 2 以降の発注機能で使う**。**Phase 1 では DTO スキーマ上 `Option<SecretString>` で持つが、収集も保持もせず常に `None` を送る**（F-H5）。発注しないものを Python メモリに保持して攻撃面を増やさない方針
-- このコマンドは **`Ready` 受信後・任意の `Subscribe` 前** に送る（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §4.5 起動ハンドシェイク）
-- **応答規約**: Python は 1 件の `SetVenueCredentials` に対し、成功時は `VenueReady{venue, request_id}` を、失敗時は `VenueError{venue, request_id, code, message}` を必ず 1 件だけ返す（F1）
+`stdin` 初期 payload 形式（Rust → Python）:
 
-### 2.1.1 起動パラメータとの責務分離
+```json
+{"port": N, "token": "...", "config_dir": "...", "cache_dir": "...", "dev_tachibana_login_allowed": bool}
+```
 
-- 現行の Python engine 起動パス（[engine-client/src/process.rs](../../../engine-client/src/process.rs)）は `stdin` で `port` / `token` しか渡していない
-- そのため **クレデンシャルや session は起動引数ではなく IPC コマンドで渡す** 方針を維持する
-- 一方でマスタキャッシュ保存先だけは Python 側単独では決められないため、T0 で次のどちらかを追加する
-  - `stdin` 初期 payload に `config_dir` / `cache_dir` を追加
-  - `SetEnginePaths` 相当の軽量コマンドを新設
-- **`dev_tachibana_login_allowed` フラグの追加（H-2、T3 で実装）**: Python が debug ビルド専用の `DEV_TACHIBANA_*` env を読んでよいかを Rust が明示的に許可するフラグ。`stdin` 初期 payload に **`dev_tachibana_login_allowed: bool`** を追加する（最終 payload 形式: `{"port": N, "token": "...", "config_dir": "...", "cache_dir": "...", "dev_tachibana_login_allowed": bool}`）。Rust 側は `#[cfg(debug_assertions)]` で `true`、release では `false` を渡す。Python 側 `tachibana_login_flow.py` は `dev_tachibana_login_allowed == false` のとき `os.getenv("DEV_TACHIBANA_*")` を読まずスキップし、release ビルドでの env 混入を完全にガードする。`spec.md §3.1` の「`TACHIBANA_DEV_LOGIN_ALLOWED` 起動 flag」はこの方式で実現する
+- `config_dir`: `tachibana_account.json` の保存先
+- `cache_dir`: `tachibana_session.json` の保存先
+- `dev_tachibana_login_allowed`: `true`（debug ビルド）のときのみ Python が `DEV_TACHIBANA_*` env を読む。Rust 側は `#[cfg(debug_assertions)]` で制御し、release では必ず `false` を渡す
 
 ### 2.2 ログ・テレメトリでのマスク
 
-- Rust 側の `Debug` 派生で `password` / `second_password` / `session.url_*` をマスクする `SecretString` 型を導入
-- Python 側は `engine.exchanges.tachibana.SessionState` を `__repr__` でマスク（pydantic の `SecretStr` を採用）
+- Python 側は `tachibana_session.json` の URL をログに出力しない（仮想 URL はホスト部まで `***` マスク）
+- `tachibana_account.json` の `user_id` はログ出力しても可（公開情報に近い識別子）
 - IPC のシリアライズ時にマスクは行わない（loopback + token 認証で守る）
 
-### 2.3 セッション再永続化
+**`EngineConnection: Debug` 規約（pin: T35-H7-DebugRedaction）**: `engine_client::EngineConnection` の `Debug` 実装は **`finish_non_exhaustive()` のみ**を使い、内部フィールドを直接書き出す `#[derive(Debug)]` 派生は禁止。リグレッションは `engine-client/tests/engine_connection_debug_redaction.rs` で pin 済み。
 
-Python が**起動時の session 検証または初回ログイン**に成功し新仮想 URL を取得したら、**`VenueCredentialsRefreshed` イベントを Rust に逆送**して Rust が keyring を更新する:
+### 2.3 セッション永続化
 
-```rust
-pub enum EngineEvent {
-    // ...
-    VenueReady {
-        venue: String,
-        request_id: Option<String>, // SetVenueCredentials の request_id（再接続時 None 可）
-    },
-    VenueError {
-        venue: String,
-        request_id: Option<String>,
-        code: String,      // "session_expired" | "unread_notices" | "login_failed" ...
-        message: String,
-    },
-    VenueCredentialsRefreshed {
-        venue: String,
-        session: TachibanaSessionWire,  // typed、Debug は手実装でマスク
-        // ── レビュー反映 (2026-04-25, ラウンド 4 / H11 持ち越し) ──
-        // user_id / password / is_demo を session と同梱し、Rust が
-        // keyring の 4 フィールドをアトミックに更新できるようにする。
-        // Phase 1 で plaintext を IPC に乗せる理由:
-        //   1. session URL のみを上書きすると keyring の user_id /
-        //      is_demo が前回ログイン時の値のまま固着し、デモ↔本番
-        //      切替やアカウント切替・パスワード変更で keyring drift
-        //      が発生する。次回 cold start の fast path が古い
-        //      creds を再送し、ログイン失敗ループに陥る。
-        //   2. plaintext 滞在時間は outbox 1 hop（Python → Rust →
-        //      keyring 書込み → 即時 drop）に抑え、Rust 側は
-        //      `Zeroizing<String>` で保持し書込み完了直後に zero
-        //      化する。これは MEDIUM-C6 規約の「Python 側 SecretStr
-        //      は Drop ゼロ化を保証しない」例外条項として明文化
-        //      （下記 §C6 参照）。
-        // ── None フィールドのセマンティクス ──
-        // None の場合、Rust は keyring の該当フィールドを変更しない（上書きしない）。
-        // Some(x) のときのみ keyring を更新する。
-        // つまり None は「このフィールドは今回のリフレッシュ対象外」を意味する。
-        user_id: Option<String>,
-        password: Option<String>,
-        is_demo: Option<bool>,
-    },
-}
-```
+Python が起動時の session 検証または初回ログインに成功したら、**`tachibana_session.json` をアトミック上書き**する。Rust への逆送（`VenueCredentialsRefreshed`）は不要。Python が source of truth であるため、Rust は session を持たない。
 
-**MEDIUM-C6 例外条項（H11 関連）**: 上記 `VenueCredentialsRefreshed`
-の `user_id` / `password` / `is_demo` 経路は、Python 側 SecretStr の
-Drop ゼロ化が保証されないという制約に対する**やむを得ない例外**で
-ある。許容する根拠:
-
-- 経路全体が**1 hop**（Python `_venue_credentials_refreshed_event`
-  → IPC → Rust `handle_credentials_refreshed` hook → keyring 書込
-  → wire 値 drop）に閉じ、長期間の保持はしない。
-- Rust 側の wire 値は `Zeroizing<String>` で受け、書込直後の drop で
-  ゼロ化される。
-- その他の経路（`SetVenueCredentials` 等）は引き続き
-  `expose_secret()` を 1 箇所に集約する規約を維持する。
-
-- `VenueError{code:"session_expired"}` は runtime の `p_errno="2"` 検知時に、対応する `request_id` を持たない `SetVenueCredentials` 失敗時は起動シーケンスの `request_id` に紐付けて返す
+- `VenueError{code:"session_expired"}` は runtime の `p_errno="2"` 検知時に発出する
 - 旧 `EngineError{code:"tachibana_session_expired"}` 表記は廃止。venue-scoped `VenueError` に一本化する
-
-これにより Python 単独再起動 → Rust が keyring の最新 session を投入 → Python が validation 実行、というループが閉じる。
 
 ### 2.4 再起動時の source of truth
 
-- **managed mode の再起動導線は `ProcessManager` が source of truth**。再接続時に `src/main.rs` がその場しのぎで `SetVenueCredentials` を送るのではなく、`ProcessManager` が proxy と同様に venue credentials も保持・再送する
+- **Python プロセスが自律的に `startup_login` を再実行**する。Rust は credentials を保持せず、再注入もしない
 - 再起動後の正式シーケンスは次の通り:
   1. `Hello -> Ready`
-  2. `SetProxy`
-  3. `SetVenueCredentials`（venue ごとに 1 回。`ProcessManager.venue_credentials` を順に送る）
-  4. `VenueReady` を **同期点** として待機（`tokio::sync::Notify` か `oneshot::channel` で `request_id` 単位で受信完了を await）
-  5. metadata fetch 再開
+  2. `SetProxy`（必要時）
+  3. Python が自律的に `_startup_tachibana` → `startup_login` を実行
+  4. Python が `VenueReady{venue:"tachibana"}` を送信（**同期点**）
+  5. Rust が `VenueReady` を受信 → metadata fetch 再開
   6. active subscriptions 再送
 - これにより [docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §5.3 の「recovery handshake 後に購読再送」という既存契約に、立花の認証状態を安全に差し込める
-- **`engine-client/src/process.rs` の `ProcessManager::start()` 内コメント（M3 追記）**: 現状コメントは `Hello/Ready → SetProxy → Subscribe` のみで `SetVenueCredentials` ステップが欠落している。**T3 で実装する際に、コメントブロックに `(3) SetVenueCredentials (per venue) → wait VenueReady` を必ず差し込む**。さらに「`VenueReady` を待ってから resubscribe する同期点」を実装するチャネル / Notify の選択は T3 の作業項目とし、以下のいずれかで具体化:
-  - `Arc<Mutex<HashMap<String /*venue*/, oneshot::Sender<()>>>>` を持ち、`SetVenueCredentials` 送信時に `oneshot` を登録、`VenueReady` 受信ハンドラで `send(())`、`start()` 側は `oneshot::Receiver::await`
-  - もしくは venue ごとの `tokio::sync::Notify` を保持し、`VenueReady` 受信で `notify_one()`、`start()` 側は `notified().await`
 
 ## 3. 起動シーケンス
 
 ```
 Rust 起動
-  ├─ keyring から TachibanaCredentials を読む（任意）
   ├─ Python サブプロセス spawn（既存 src/main.rs のフロー）
   ├─ Hello → Ready 受領
   ├─ SetProxy（必要時）
-  ├─ SetVenueCredentials{venue:"tachibana", ...}  ← 新設
-  ├─ VenueReady{venue:"tachibana"}
+  ├─ [Python 自律] _startup_tachibana → startup_login
+  │     ├─ tachibana_session.json を確認
+  │     │     ├─ 有効 → validate_session_on_startup（API ping）→ 成功 → 以下へ
+  │     │     └─ 無効 / なし → tachibana_account.json を確認 → tkinter ダイアログ
+  │     │                     → ログイン → session/account ファイルを保存
+  │     └─ VenueReady{venue:"tachibana"}  ← Python から Rust へ
   ├─ ListTickers{venue:"tachibana", market:"stock"}
   └─ Subscribe{venue:"tachibana", ticker:"7203", stream:"trade"|"depth", market:"stock"}
 ```
 
-- `SetVenueCredentials` 受領時、Python は session validation を実施し、必要なら 1 回だけ再ログインして、結果を `VenueReady{venue, request_id}` か `VenueError{venue, request_id, code, message}` で返す（`request_id` 相関で Rust 側が応答を突き合わせる）
+- Python は handshake 完了後に自律的に `_startup_tachibana` を開始する。Rust は `VenueReady` を venue 文字列 `"tachibana"` で待つ（`venue_ready_timeout` 60 秒以内）
 - **`VenueReady` の意味論**: 「認証・session validation 完了」を意味する。**マスタ初期 DL の完了は含まない**。マスタ取得完了は `ListTickers` 応答の到着で判定する（F12）
-- `VenueReady` は **冪等イベント**。Python 単独再起動 → `SetVenueCredentials` 再注入 → `VenueReady` 再送、というサイクルを毎回踏む。UI は初回 / 再送を区別しない前提（差異が必要になれば `session_id` 同梱で拡張）（F8）。Rust 側はこれを**最終受信状態**として保持し、**`ProcessManager` が Python サブプロセスの再起動を検知した時点（次の `Hello` 受信時）にリセット**する。`EngineEvent::Disconnected` は ticker/stream 粒度（`{venue, ticker, stream, market, reason}`、`engine-client/src/dto.rs::EngineEvent::Disconnected`）であって venue 全体の disconnected ではない点に注意（C3 修正）。WebSocket 切断などで全 ticker の `Disconnected` を受信しても `VenueReady` 状態は維持し、Python プロセス自体が落ちた時のみリセットする
+- `VenueReady` は **冪等イベント**。Python 単独再起動 → `startup_login` 再実行 → `VenueReady` 再送、というサイクルを毎回踏む。UI は初回 / 再送を区別しない前提（差異が必要になれば `session_id` 同梱で拡張）（F8）。Rust 側はこれを**最終受信状態**として保持し、**`ProcessManager` が Python サブプロセスの再起動を検知した時点（次の `Hello` 受信時）にリセット**する。`EngineEvent::Disconnected` は ticker/stream 粒度（`{venue, ticker, stream, market, reason}`、`engine-client/src/dto.rs::EngineEvent::Disconnected`）であって venue 全体の disconnected ではない点に注意（C3 修正）。WebSocket 切断などで全 ticker の `Disconnected` を受信しても `VenueReady` 状態は維持し、Python プロセス自体が落ちた時のみリセットする
 - **`VenueReady` 再受信時の重複防止**: active subscriptions の resubscribe は `ProcessManager`（[engine-client/src/process.rs](../../../engine-client/src/process.rs)）が **1 度だけ** 行う。UI 側の view code は `VenueReady` イベントに反応して新規 subscribe を発行しないこと（既存購読の参照カウントは ProcessManager 経由でのみ維持）
 - Rust 側は `VenueReady` 受領前は立花 ticker の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を送らない。UI では venue 単位のローディング表示を出す
 - 既存 sidebar は起動直後に metadata fetch を自動発火するため、立花追加時は **venue-ready ゲート** を `AdapterHandles` 呼び出し前に差し込む必要がある
@@ -282,16 +153,17 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 | ファイル | 変更内容 |
 | :--- | :--- |
 | [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) | `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 追加。`FromStr` / `Display` / `ALL` 配列更新、および `MarketKind` を網羅する既存 match の修正 |
-| [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::SetVenueCredentials` / `Command::RequestVenueLogin` / `EngineEvent::VenueReady` / `EngineEvent::VenueCredentialsRefreshed` / `EngineEvent::VenueLoginStarted` / `EngineEvent::VenueLoginCancelled` 追加。`schema_minor` を bump |
-| [engine-client/src/process.rs](../../../engine-client/src/process.rs) | `ProcessManager` が Tachibana credentials を保持し、再起動時に `SetProxy` の後で `SetVenueCredentials` を再送する |
-| `data/src/config/tachibana.rs`（新設） | `TachibanaCredentials` 型 + keyring 読み書き。SKILL.md R10 に従う。`data/src/config/proxy.rs` の暗号資産プロキシ keyring 実装を参考にする |
-| [src/main.rs](../../../src/main.rs) | 起動時に keyring から立花 creds を復元し `SetVenueCredentials` 投入 |
+| [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::RequestVenueLogin` / `EngineEvent::VenueReady` / `EngineEvent::VenueLoginStarted` / `EngineEvent::VenueLoginCancelled` / `EngineEvent::VenueError` 追加。`SCHEMA_MAJOR = 2`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更のため major を bump） |
+| [engine-client/src/process.rs](../../../engine-client/src/process.rs) | `apply_after_handshake_with_timeout` から `SetVenueCredentials` 送信ステップを削除。`VenueReady` を venue 文字列 `"tachibana"` で待つ方式に変更。`credentials_by_venue` 保持フィールドを削除 |
+| [src/main.rs](../../../src/main.rs) | keyring 復元・`SetVenueCredentials` 投入コードを削除。Python が自律起動するため Rust の関与不要 |
 | Rust UI（`src/screen/`） | **ログイン画面コードを追加しない**。Python ヘルパー spawn 中は「ログインダイアログを別ウィンドウで表示中」のステータスバナーだけ出す（汎用 string、立花知識なし） |
 | `src/screen/dashboard/tickers_table.rs` ほか UI | `VenueReady` 前の metadata fetch を抑止し、`MarketKind::Stock` に応じた market filter / indicator / timeframe / 表示文言を調整。**抑止は `src/venue_state.rs::VenueState` FSM が前提**（`Trigger::{Auto,Manual}` で auto-fire と手動再ログインを区別、`engine_status_stream` は `tokio::select!` 1 本に singleton 化）。pin: T35-U4-VenueReadyGate / T35-H9-SingleRecoveryPath（リグレッションは `tests/engine_status_subscription_is_singleton.rs` で固定） |
 | `engine-client/src/tachibana_meta.rs`（新設） | `TickerDisplayMeta` 型・`parse_tachibana_ticker_dict`・`matches_tachibana_filter`（HIGH-U-9 / T4-B5 着地済み） |
 | `engine-client/src/backend.rs`（既存） | `ticker_meta: Arc<Mutex<TickerMetaMap>>` フィールド・`ticker_meta_handle()`・`reset_ticker_meta()`（HIGH-U-9 着地済み） |
 | `src/screen/dashboard/tickers_table.rs`（既存） | `filtered_rows` への `matches_tachibana_filter` 組込み（T4-B5 着地済み） |
 | [docs/plan/✅python-data-engine/](../✅python-data-engine/) `schemas/` | `commands.json` / `events.json` に新コマンド・イベントを記載、`CHANGELOG.md` 更新（※親計画ディレクトリ内のスキーマ。本計画 T0 で同期） |
+| ~~`data/src/config/tachibana.rs`~~（削除済み） | `TachibanaCredentials` 型 + keyring 操作コードは Python 自律管理方式への移行で全削除 |
+| ~~`data/src/wire/tachibana.rs`~~（削除済み） | `TachibanaCredentialsWire` / `TachibanaSessionWire` は IPC から creds 送受信を廃止したため全削除 |
 
 ## 6. 失敗モードと UI 表現
 
@@ -299,7 +171,7 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 
 | 状態 | `VenueError.code` | バナー文言（Python が `message` に詰める例） | UI severity / アクション |
 | :--- | :--- | :--- | :--- |
-| クレデンシャル未設定 | （`VenueError` ではなく Rust の keyring 不在検出） | （Rust が固定文言でログイン誘導） | login 画面遷移 |
+| クレデンシャル未設定 / 初回起動 | （`VenueError` ではなく Python が自律的に tkinter ダイアログを表示） | （Python が `VenueLoginStarted` を先送りし、ダイアログでユーザーに入力させる） | `VenueLoginStarted` → ダイアログ |
 | 電話認証未済 | `phone_auth_required` | 「先に立花の電話認証を完了してください」 | error / 閉じる |
 | 仮想 URL 期限切れ | `session_expired` | 「立花のセッションが切れました（夜間閉局）。再ログインしてください」 | error / 再ログイン |
 | 未読通知あり | `unread_notices` | 「立花からの未読通知があります。ブラウザで確認後に再ログインしてください」 | warning / 再ログイン |
@@ -445,7 +317,7 @@ python/engine/exchanges/
 
 `tachibana_login_flow.py` の責務:
 - ログインが必要になった条件を判定。**起動条件は spec.md §3.2 LOW-3 と整合する**:
-  - (a) アプリ起動直後の session 検証フェーズで keyring に creds が無い / 復元 session の validate が失敗した場合（fast-path、ユーザー操作なしで起動して可）
+  - (a) アプリ起動直後の session 検証フェーズで `tachibana_session.json` が無い / 復元 session の validate が失敗した場合（fast-path、ユーザー操作なしで起動して可）
   - (b) Rust UI が `Command::RequestVenueLogin` を送信した場合（ユーザー明示の再ログイン）
   - (c) debug ビルドで `DEV_TACHIBANA_*` env が揃っている場合の fast-path（ヘルパー spawn せず直接 `tachibana_auth.login(...)`）
   - **runtime 中に `p_errno=2` を検知してもこのフローは起動しない**（`VenueError{code:"session_expired"}` を返すのみ。Rust UI が `RequestVenueLogin` を送ってきたら (b) 経路に合流）
@@ -467,38 +339,29 @@ pub enum EngineEvent {
     VenueLoginStarted { venue: String, request_id: Option<String> },
     /// ユーザーがダイアログをキャンセルした
     VenueLoginCancelled { venue: String, request_id: Option<String> },
-    /// 既存（§2）— ログイン成功時に発火
+    /// ログイン成功時に発火
     VenueReady { venue: String, request_id: Option<String> },
     VenueError { venue: String, request_id: Option<String>, code: String, message: String },
-    VenueCredentialsRefreshed {
-        venue: String,
-        session: TachibanaSessionWire,  // typed、Debug は手実装でマスク
-        // None の場合、Rust は keyring の該当フィールドを変更しない（上書きしない）。
-        // Some(x) のときのみ keyring を更新する。詳細は §2.3 参照。
-        user_id: Option<String>,
-        password: Option<String>,
-        is_demo: Option<bool>,
-    },
+    // VenueCredentialsRefreshed は削除済み（Python が tachibana_session.json で自前永続化）
 }
 
 pub enum Command {
     // ...
-    /// Rust UI が「立花にログインしたい」と表明する。Python はヘルパーを spawn して応答する
+    /// Rust UI が「立花にログインしたい」と表明する。Python はセッションをクリアして startup_login を再実行する
     RequestVenueLogin { request_id: String, venue: String },
+    // SetVenueCredentials は削除済み（Python が自律起動するため Rust からの creds 注入は不要）
 }
 ```
 
-**`Command::SetVenueCredentials` の位置付け変更（重要）**:
-- 旧計画では Rust UI が入力値を受け取って `SetVenueCredentials` に詰めて送っていた
-- 新計画では **Python ヘルパーが直接 creds を受け取る**ため、Rust UI が creds を扱わない経路が増える
-- ただし **keyring 復元経路は引き続き `SetVenueCredentials` を使う**（Rust が keyring から読んだ creds を Python に注入する起動時パスは変わらない）
-- Python 単独再起動時の credentials 再注入も `SetVenueCredentials`。**ProcessManager は keyring 復元 creds を保持し再送する**（既存方針 [README.md](./README.md) 維持）
-
-`SetVenueCredentials` の典型的な発火タイミングが「(a) 起動時に keyring から復元」「(b) Python 再起動後の再注入」の 2 つに集約される（runtime のユーザー入力経路は使わない）。
+**Python 自律ログイン方式の IPC コントラクト**:
+- Rust が creds / session を保持・送信することはない
+- Python は handshake 後に自律的に `startup_login` を実行し、結果を `VenueReady` または `VenueError` で返す
+- ユーザーが再ログインを要求した場合は `Command::RequestVenueLogin` のみを使う。Python はこれを受けてセッションをクリアし `startup_login` を再実行する
+- `SCHEMA_MAJOR = 2`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更）
 
 #### 7.5.1 Rust UI bridge（DTO ↔ Iced Message ↔ FSM ↔ view）
 
-DTO 列挙（`engine_client::dto::EngineEvent::{VenueReady,VenueLoginStarted,VenueLoginCancelled,VenueError,VenueCredentialsRefreshed}`）は Rust UI 入口に **`Message::TachibanaVenueEvent` として 1 本化**して入る。**T4 着手者が辿るブリッジ層は以下の path::symbol で固定**:
+DTO 列挙（`engine_client::dto::EngineEvent::{VenueReady,VenueLoginStarted,VenueLoginCancelled,VenueError}`）は Rust UI 入口に **`Message::TachibanaVenueEvent` として 1 本化**して入る。**T4 着手者が辿るブリッジ層は以下の path::symbol で固定**:
 
 | 層 | path::symbol | 役割 |
 | :--- | :--- | :--- |
@@ -513,18 +376,18 @@ DTO 列挙（`engine_client::dto::EngineEvent::{VenueReady,VenueLoginStarted,Ven
 
 ```
 Rust 起動
-  ├─ keyring から TachibanaCredentials を読む（任意）
   ├─ Python サブプロセス spawn → Hello → Ready
   ├─ SetProxy（必要時）
-  ├─ 分岐 ───
-  │   ├─ keyring に creds あり: SetVenueCredentials 即送信
-  │   │     ├─ Python: session validation 成功 → VenueReady
-  │   │     └─ Python: session 失敗 → tachibana_login_flow を起動 → tkinter ヘルパー spawn
-  │   │              → 認証成功 → VenueCredentialsRefreshed → keyring 更新 → VenueReady
-  │   │              → キャンセル → VenueLoginCancelled
-  │   └─ keyring に creds 無し: 何も送らない
-  │         （Rust UI が立花機能に触れたとき RequestVenueLogin を送り、上のフローに合流）
-  └─ ListTickers / Subscribe（VenueReady 後）
+  └─ [Python 自律] _startup_tachibana → startup_login
+        ├─ tachibana_session.json 確認 → 有効 → validate_session_on_startup → 成功 → VenueReady
+        └─ 無効 / なし → tachibana_account.json 確認 → tkinter ヘルパー spawn
+                 → 認証成功 → account/session ファイル保存 → VenueReady
+                 → キャンセル → VenueLoginCancelled
+       （Rust は VenueReady を venue:"tachibana" で最大 60 秒待つ）
+     ListTickers / Subscribe（VenueReady 後）
+
+再ログイン時
+  Rust UI → RequestVenueLogin → Python: session クリア → startup_login 再実行 → 同上フロー
 ```
 
 **ループ規約（再ログイン時）**:
@@ -568,11 +431,12 @@ Rust 起動
 
 ### 8.3 結合（Rust + Python）
 
-- `engine-client/tests/handshake.rs` / `engine-client/tests/process_venue_ready_gate.rs` / `engine-client/tests/process_venue_ready_timeout_marks_failed.rs`: `SetVenueCredentials` → `VenueReady` 往復、ゲート、タイムアウト失敗（実シンボル: `engine_client::process::ProcessManager`）
-- `engine-client/tests/process_creds_refresh_hook.rs` / `engine-client/tests/process_creds_refresh_listener_singleton.rs`: `VenueCredentialsRefreshed` の hook 駆動と listener singleton 性
+- `engine-client/tests/handshake.rs` / `engine-client/tests/process_venue_ready_gate.rs` / `engine-client/tests/process_venue_ready_timeout_marks_failed.rs`: Python 自律 `startup_login` → `VenueReady` 受信、ゲート、タイムアウト失敗（実シンボル: `engine_client::process::ProcessManager`）
 - `engine-client/tests/process_venue_login_cancelled.rs` / `engine-client/tests/process_venue_error_session_restore_failed.rs`: ログインキャンセル・session 復元失敗時の状態遷移
 - trade / depth subscribe → mock の FD frame → `Trades` / `DepthSnapshot` 受信は Python 側 `python/tests/test_tachibana_e2e.py` および Rust 側 `engine-client/tests/depth_gap.rs` / `engine-client/tests/depth_gap_recovery.rs` で代替（Rust 単独の `tests/integration/tachibana_subscribe.rs` は新設しない）
 - 既存の Rust 単体は mockito を使う（プロジェクト共通方針）
+- ~~`engine-client/tests/process_creds_refresh_hook.rs`~~ / ~~`engine-client/tests/process_creds_refresh_listener_singleton.rs`~~（削除済み）: `VenueCredentialsRefreshed` は廃止済み
+- ~~`engine-client/tests/schema_v1_2_roundtrip.rs`~~（`SetVenueCredentials` / `VenueCredentialsRefreshed` テスト関数のみ削除）: ファイル自体は v1.x 互換テストとして維持
 
 ### 8.4 E2E（demo 環境）
 

@@ -31,13 +31,13 @@ from engine.exchanges.tachibana_auth import (
     StartupLatch,
     TachibanaSession,
     TachibanaSessionHolder,
-    validate_session_on_startup,
 )
+from engine.exchanges.tachibana_file_store import clear_session as tachibana_clear_session
 from engine.exchanges.tachibana_login_flow import (
-    run_login as tachibana_run_login,
+    LoginCancelled,
+    startup_login as tachibana_startup_login,
     _MSG_LOGIN_FAILED,
 )
-from engine.exchanges.tachibana_url import EventUrl, MasterUrl, PriceUrl, RequestUrl
 from engine.exchanges.binance import BinanceWorker
 from engine.exchanges.bybit import BybitWorker
 from engine.exchanges.hyperliquid import HyperliquidWorker
@@ -129,6 +129,7 @@ class DataEngineServer:
         *,
         dev_tachibana_login_allowed: bool = False,
         cache_dir: Path | None = None,
+        config_dir: Path | None = None,
         tachibana_is_demo: bool = True,
         wal_path: Path | None = None,
     ) -> None:
@@ -143,6 +144,9 @@ class DataEngineServer:
         if cache_dir is None:
             cache_dir = Path.home() / ".cache" / "flowsurface" / "engine"
         self._cache_dir = Path(cache_dir)
+        if config_dir is None:
+            config_dir = Path.home() / ".config" / "flowsurface" / "engine"
+        self._config_dir = Path(config_dir)
         # B-3: WAL path for order audit log. Defaults to cache_dir / "tachibana_orders.jsonl".
         self._wal_path: Path = (
             Path(wal_path)
@@ -187,13 +191,18 @@ class DataEngineServer:
         # Active fetch tasks (FetchKlines, RequestDepthSnapshot, etc.)
         self._fetch_tasks: set[asyncio.Task] = set()
 
-        # ── Tachibana state (T3) ──────────────────────────────────────
+        # Current proxy URL applied to workers. Initialized to None (no proxy).
+        # _handle_set_proxy skips _cancel_all_streams when the URL is unchanged.
+        self._proxy_url: str | None = None
+
+        # ── Tachibana state (T3 / T-SC3) ─────────────────────────────
         self._tachibana_p_no_counter = PNoCounter()
         self._tachibana_startup_latch = StartupLatch()
         self._tachibana_session: TachibanaSession | None = None
-        # Mark a single SetVenueCredentials in-flight so that double
-        # injections from a flaky client don't race the dialog flow.
+        # Guards startup_login against concurrent execution (double-start prevention).
         self._tachibana_login_inflight = asyncio.Lock()
+        # Task handle for the background startup login (cancelled on disconnect).
+        self._tachibana_startup_task: asyncio.Task | None = None
 
         # ── Order Phase state (T0.3) ──────────────────────────────────
         # 第二暗証番号: TachibanaSessionHolder でメモリ保持。
@@ -232,8 +241,13 @@ class DataEngineServer:
     async def _handle(self, ws: ServerConnection) -> None:
         recv_task: asyncio.Task | None = None
         send_task: asyncio.Task | None = None
+        startup_task: asyncio.Task | None = None
         try:
             await self._handshake(ws)
+            # T-SC3: Python self-initiates Tachibana login after handshake.
+            # The task runs concurrently with the recv/send loops.
+            startup_task = asyncio.create_task(self._startup_tachibana())
+            self._tachibana_startup_task = startup_task
             recv_task = asyncio.create_task(self._recv_loop(ws))
             send_task = asyncio.create_task(self._send_loop(ws))
             done, pending = await asyncio.wait(
@@ -257,6 +271,13 @@ class DataEngineServer:
         except Exception as exc:
             log.error("Connection error: %s", exc)
         finally:
+            if startup_task is not None and not startup_task.done():
+                startup_task.cancel()
+                try:
+                    await startup_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._tachibana_startup_task = None
             if self._current_conn is ws:
                 self._current_conn = None
             await self._cancel_all_streams()
@@ -436,11 +457,6 @@ class DataEngineServer:
 
         elif op == "SetProxy":
             await self._handle_set_proxy(msg)
-
-        elif op == "SetVenueCredentials":
-            self._spawn_fetch(
-                self._do_set_venue_credentials(msg), msg.get("request_id")
-            )
 
         elif op == "RequestVenueLogin":
             self._spawn_fetch(
@@ -1505,50 +1521,6 @@ class DataEngineServer:
         for ev in events:
             self._outbox.append(ev)
 
-    def _restore_session_from_payload(self, session_payload: dict) -> TachibanaSession:
-        """Build a `TachibanaSession` from a wire dict (5 virtual URLs +
-        expiry + tax bucket). The URLs arrive plain because the wire DTO
-        has already done its `Zeroizing` round-trip on the Rust side; we
-        wrap them back into the newtype-tagged form.
-
-        MEDIUM-10 (ラウンド 6): the four HTTP virtual URLs must start
-        with `https://` and `url_event_ws` must start with `wss://`.
-        Without this gate, a corrupt keyring blob (or a misconfigured
-        proxy intercepting the validate-session response) could route
-        the next request through plaintext and leak the session
-        cookie. Reject malformed payloads with `ValueError`; the
-        caller's existing `(KeyError, TypeError, ValueError,
-        AttributeError)` handler then emits `session_restore_failed`.
-        """
-        url_request = session_payload["url_request"]
-        url_master = session_payload["url_master"]
-        url_price = session_payload["url_price"]
-        url_event = session_payload["url_event"]
-        url_event_ws = session_payload["url_event_ws"]
-        for label, value in (
-            ("url_request", url_request),
-            ("url_master", url_master),
-            ("url_price", url_price),
-            ("url_event", url_event),
-        ):
-            if not isinstance(value, str) or not value.startswith("https://"):
-                raise ValueError(
-                    f"session url {label!r} must start with https://"
-                )
-        if not isinstance(url_event_ws, str) or not url_event_ws.startswith(
-            "wss://"
-        ):
-            raise ValueError("session url 'url_event_ws' must start with wss://")
-        return TachibanaSession(
-            url_request=RequestUrl(url_request),
-            url_master=MasterUrl(url_master),
-            url_price=PriceUrl(url_price),
-            url_event=EventUrl(url_event),
-            url_event_ws=url_event_ws,
-            zyoutoeki_kazei_c=session_payload.get("zyoutoeki_kazei_c", ""),
-            expires_at_ms=session_payload.get("expires_at_ms"),
-        )
-
     def _apply_tachibana_session(self, session: TachibanaSession) -> None:
         """Persist *session* to both server state and the TachibanaWorker.
 
@@ -1561,230 +1533,67 @@ class DataEngineServer:
         self._tachibana_session = session
         self._workers["tachibana"].set_session(session)
 
-    async def _do_set_venue_credentials(self, msg: dict) -> None:
-        """Handle `SetVenueCredentials` for the Tachibana venue.
+    async def _startup_tachibana(self, request_id: str | None = None) -> None:
+        """Drive Tachibana startup login (T-SC3).
 
-        Behavior (architecture.md §6, T3):
-
-        * If the payload carries an existing session, validate it once
-          via `validate_session_on_startup`. Success → `VenueReady`,
-          stale (`p_errno=2`) → drive a fresh login (env fast path or
-          dialog) using the payload's `user_id`/`password` as fallback.
-        * If the payload has no session, drive a login directly (this is
-          the very-first-launch / keyring-empty path).
+        Called as a background task after handshake completes. Python
+        self-initiates login instead of waiting for SetVenueCredentials.
+        Emits VenueReady / VenueError / VenueLoginCancelled to outbox.
         """
-        request_id = msg.get("request_id")
-        payload = msg.get("payload") or {}
-        if payload.get("venue") != "tachibana":
-            log.warning(
-                "SetVenueCredentials: unsupported venue=%r (only tachibana)",
-                payload.get("venue"),
-            )
-            self._emit(
-                {
-                    "event": "VenueError",
-                    "venue": payload.get("venue", ""),
-                    "request_id": request_id,
-                    "code": "unsupported_venue",
-                    "message": "対応していない venue です",
-                }
-            )
-            return
-
         async with self._tachibana_login_inflight:
-            # Step 1: try restoring an existing session if present.
-            session_payload = payload.get("session")
-            if session_payload:
-                try:
-                    session = self._restore_session_from_payload(session_payload)
-                except (KeyError, TypeError, ValueError, AttributeError) as exc:
-                    log.error(
-                        "SetVenueCredentials: malformed session payload: %s", exc
-                    )
-                    session = None
-                else:
-                    try:
-                        await validate_session_on_startup(
-                            session,
-                            latch=self._tachibana_startup_latch,
-                            p_no_counter=self._tachibana_p_no_counter,
-                        )
-                    except RuntimeError as exc:
-                        # L6 — programmer bug: validate_session_on_startup
-                        # was called more than once per process. Architecture
-                        # spec dictates that this must terminate the process
-                        # so the orchestrator (Rust ProcessManager) can
-                        # restart it cleanly.
-                        log.error(
-                            "StartupLatch invariant violated (L6) — terminating engine: %s",
-                            exc,
-                        )
-                        # os.write bypasses all Python buffering and issues a
-                        # synchronous WriteFile syscall to fd 2 (the pipe).
-                        # This guarantees the banner is in the pipe buffer
-                        # before os._exit() closes the process — on Windows,
-                        # sys.stderr.flush() alone cannot guarantee this when
-                        # the pipe write is pending in async I/O.
-                        os.write(
-                            2,
-                            b"FATAL: StartupLatch invariant violated (L6)\n",
-                        )
-                        os._exit(2)
-                    except UnreadNoticesError as exc:
-                        # Spec: "ブラウザで未読通知を確認後に再ログインしてください".
-                        # This is *not* an auto-recoverable failure — we
-                        # must surface it to the user verbatim instead of
-                        # spawning the login dialog (Findings #3).
-                        # `UnreadNoticesError` inherits from `LoginError`
-                        # so this branch must precede the LoginError catch.
-                        log.info(
-                            "tachibana startup validation surfaced unread notices: %s",
-                            exc,
-                        )
-                        self._emit(
-                            {
-                                "event": "VenueError",
-                                "venue": "tachibana",
-                                "request_id": request_id,
-                                "code": "unread_notices",
-                                "message": str(exc),
-                            }
-                        )
-                        return
-                    except SessionExpiredError as exc:
-                        log.info(
-                            "tachibana session expired on startup, will re-login: %s",
-                            exc,
-                        )
-                        session = None
-                    except (LoginError, TachibanaError) as exc:
-                        log.warning(
-                            "tachibana startup validation failed (%s); falling through to login",
-                            exc,
-                        )
-                        session = None
-                    else:
-                        self._apply_tachibana_session(session)
-                        log.info("Tachibana session validated successfully")
-                        self._emit(
-                            {
-                                "event": "VenueReady",
-                                "venue": "tachibana",
-                                "request_id": request_id,
-                            }
-                        )
-                        return
-
-            # Step 2: fresh login (env fast path → keyring-fallback creds → dialog).
-            # Pass through any plaintext user_id / password / is_demo
-            # carried by the SetVenueCredentials payload so a startup
-            # re-login can re-use them silently before falling back to
-            # the dialog (Findings #3 / docstring contract).
-            fallback_user_id = payload.get("user_id") or None
-            fallback_password = payload.get("password") or None
-            fallback_is_demo = payload.get("is_demo")
-            # H3 / M-14: any unexpected failure inside `run_login` must
-            # surface as a typed VenueError so the UI banner can classify
-            # it. Detail goes to the log; the user-facing message is the
-            # fixed Japanese banner string. Pinned by
-            # `python/tests/test_tachibana_login_unexpected_error.py`.
             try:
-                try:
-                    events = await tachibana_run_login(
-                        request_id=request_id,
-                        p_no_counter=self._tachibana_p_no_counter,
-                        dev_login_allowed=self._dev_tachibana_login_allowed,
-                        is_startup=True,
-                        fallback_user_id=fallback_user_id,
-                        fallback_password=fallback_password,
-                        fallback_is_demo=(
-                            bool(fallback_is_demo) if fallback_is_demo is not None else None
-                        ),
-                    )
-                except Exception as exc:
-                    # H3 / M-14: any unexpected failure inside `run_login`
-                    # must surface as a typed VenueError so the UI banner
-                    # can classify it. Detail goes to the log; the user-
-                    # facing message is the fixed Japanese banner string.
-                    # Pinned by `test_tachibana_login_unexpected_error.py`.
-                    log.exception(
-                        "SetVenueCredentials: tachibana_run_login raised: %s", exc
-                    )
-                    self._emit(
-                        {
-                            "event": "VenueError",
-                            "venue": "tachibana",
-                            "request_id": request_id,
-                            "code": "login_failed",
-                            "message": _MSG_LOGIN_FAILED,
-                        }
-                    )
-                    return
-            finally:
-                # HIGH-7 (ラウンド 6): scrub credential-bearing locals on
-                # **every** exit path (success and failure). Previous
-                # placement only ran on the exception path; the success
-                # path left `fallback_password` / `payload` / `msg`
-                # bound on the frame, so a verbose-formatter traceback
-                # captured later — e.g. on the `_restore_session_from_
-                # payload` error branch below — would still render the
-                # password from this enclosing frame's locals.
-                fallback_password = None  # noqa: F841 — overwritten on purpose
-                fallback_user_id = None  # noqa: F841
-                fallback_is_demo = None  # noqa: F841
-                payload = None  # noqa: F841
-                msg = None  # noqa: F841
-            # Capture the validated session so future ops can use it.
-            # If the payload is malformed, the Rust keyring will receive
-            # the new session via VenueCredentialsRefreshed but the Python
-            # in-memory session will still be the stale one — the two
-            # sides desynchronise silently. Log + emit VenueError instead
-            # of swallowing the exception so the supervisor can react and
-            # the user sees a concrete failure rather than a "looks-OK"
-            # state that breaks on the next price request.
-            restore_failed = False
-            for ev in events:
-                if ev.get("event") == "VenueCredentialsRefreshed":
-                    try:
-                        self._apply_tachibana_session(
-                            self._restore_session_from_payload(ev["session"])
-                        )
-                    except (KeyError, TypeError, ValueError, AttributeError) as exc:
-                        log.error(
-                            "VenueCredentialsRefreshed: malformed session payload (%s) — "
-                            "Rust and Python will desynchronise; surfacing as VenueError",
-                            exc,
-                        )
-                        restore_failed = True
-            # HIGH-1 (ラウンド 7): when `restore_failed=True` we MUST NOT
-            # emit `VenueReady` (or `VenueCredentialsRefreshed`) for this
-            # `request_id` — the Rust `apply_after_handshake` wait loop
-            # treats `VenueReady` as terminal completion of the request,
-            # and any later `VenueError` would be silently dropped by
-            # the continuation listener (which logs but does not act).
-            # Filter the event list so only the failure surfaces.
-            if restore_failed:
-                events = [
-                    ev
-                    for ev in events
-                    if ev.get("event") not in ("VenueReady", "VenueCredentialsRefreshed")
-                ]
-            self._emit_many(events)
-            if restore_failed:
-                self._emit(
-                    {
-                        "event": "VenueError",
-                        "venue": "tachibana",
-                        "request_id": request_id,
-                        "code": "session_restore_failed",
-                        "message": "セッション復元に失敗しました（Rust/Python 不整合の可能性）。再ログインしてください。",
-                    }
+                session = await tachibana_startup_login(
+                    self._config_dir,
+                    self._cache_dir,
+                    p_no_counter=self._tachibana_p_no_counter,
+                    startup_latch=self._tachibana_startup_latch,
+                    dev_login_allowed=self._dev_tachibana_login_allowed,
                 )
+            except LoginCancelled:
+                log.info("tachibana startup: user cancelled login")
+                self._emit({
+                    "event": "VenueLoginCancelled",
+                    "venue": "tachibana",
+                    "request_id": request_id,
+                })
+                return
+            except RuntimeError as exc:
+                log.error(
+                    "StartupLatch invariant violated (L6) — terminating engine: %s", exc
+                )
+                os.write(2, b"FATAL: StartupLatch invariant violated (L6)\n")
+                os._exit(2)
+            except UnreadNoticesError as exc:
+                log.info("tachibana startup: unread notices: %s", exc)
+                self._emit({
+                    "event": "VenueError",
+                    "venue": "tachibana",
+                    "request_id": request_id,
+                    "code": "unread_notices",
+                    "message": str(exc),
+                })
+                return
+            except (LoginError, TachibanaError, Exception) as exc:
+                log.exception("_startup_tachibana: login failed: %s", exc)
+                self._emit({
+                    "event": "VenueError",
+                    "venue": "tachibana",
+                    "request_id": request_id,
+                    "code": "login_failed",
+                    "message": _MSG_LOGIN_FAILED,
+                })
+                return
+
+            self._apply_tachibana_session(session)
+            log.info("Tachibana session established successfully")
+            self._emit({
+                "event": "VenueReady",
+                "venue": "tachibana",
+                "request_id": request_id,
+            })
 
     async def _do_request_venue_login(self, msg: dict) -> None:
-        """`RequestVenueLogin` from the Rust UI — drive a fresh login
-        regardless of any stored session. This is the user-initiated path
-        (sidebar button, banner action)."""
+        """`RequestVenueLogin` from the Rust UI — drive a fresh login."""
         request_id = msg.get("request_id")
         venue = msg.get("venue")
         if venue != "tachibana":
@@ -1800,90 +1609,22 @@ class DataEngineServer:
             )
             return
 
-        async with self._tachibana_login_inflight:
-            try:
-                events = await tachibana_run_login(
-                    request_id=request_id,
-                    p_no_counter=self._tachibana_p_no_counter,
-                    dev_login_allowed=self._dev_tachibana_login_allowed,
-                    is_startup=False,
-                )
-            except Exception as exc:
-                # H3 / M-14: any unexpected failure inside `run_login`
-                # (helper crash, asyncio cancel, etc.) used to bubble up
-                # to `_spawn_fetch` and surface as a generic Error event.
-                # Spec §6 says login failures must surface as a typed
-                # VenueError so the UI banner can classify them. Detail
-                # only goes to the log — the user-facing message is the
-                # fixed Japanese banner string. Secrets are never in
-                # `exc` (we never pass user_id/password into it), but
-                # we still keep the message generic to avoid future
-                # regressions.
-                #
-                # M-LOG ラウンド 5: this dispatcher does not bind any
-                # plaintext credentials in its frame (it does not
-                # accept fallback_*), so there is nothing to scrub
-                # here. Sister handler `_do_set_venue_credentials`
-                # *does* scrub — keep the symmetry comment so future
-                # edits adding fallback creds remember to mirror it.
-                log.exception(
-                    "RequestVenueLogin: tachibana_run_login raised: %s", exc
-                )
-                self._emit(
-                    {
-                        "event": "VenueError",
-                        "venue": "tachibana",
-                        "request_id": request_id,
-                        "code": "login_failed",
-                        "message": _MSG_LOGIN_FAILED,
-                    }
-                )
-                return
+        if self._tachibana_login_inflight.locked():
+            log.info("RequestVenueLogin: login already in-flight, re-emitting VenueLoginStarted")
+            self._emit({"event": "VenueLoginStarted", "venue": "tachibana", "request_id": request_id})
+            return
 
-            restore_failed = False
-            for ev in events:
-                if ev.get("event") == "VenueCredentialsRefreshed":
-                    # H1: malformed session payload used to be swallowed
-                    # silently with `except (KeyError, TypeError): pass`.
-                    # Spec contract: every login failure surfaces as a
-                    # typed VenueError. Mirror `_do_set_venue_credentials`
-                    # so a desync between Rust and Python is observable.
-                    try:
-                        self._apply_tachibana_session(
-                            self._restore_session_from_payload(ev["session"])
-                        )
-                    except (KeyError, TypeError, ValueError, AttributeError) as exc:
-                        log.error(
-                            "RequestVenueLogin: malformed VenueCredentialsRefreshed "
-                            "session payload (%s) — surfacing as VenueError",
-                            exc,
-                        )
-                        restore_failed = True
-            # HIGH-1 (ラウンド 7): mirror `_do_set_venue_credentials` —
-            # filter VenueReady / VenueCredentialsRefreshed when the
-            # restore failed so Rust's wait loop does not see a terminal
-            # success event under the same `request_id` followed by a
-            # silent VenueError.
-            if restore_failed:
-                events = [
-                    ev
-                    for ev in events
-                    if ev.get("event") not in ("VenueReady", "VenueCredentialsRefreshed")
-                ]
-            self._emit_many(events)
-            if restore_failed:
-                self._emit(
-                    {
-                        "event": "VenueError",
-                        "venue": "tachibana",
-                        "request_id": request_id,
-                        "code": "session_restore_failed",
-                        "message": "セッション復元に失敗しました（Rust/Python 不整合の可能性）。再ログインしてください。",
-                    }
-                )
+        self._tachibana_session = None
+        self._workers["tachibana"].set_session(None)
+        tachibana_clear_session(self._cache_dir)
+        await self._startup_tachibana(request_id=request_id)
 
     async def _handle_set_proxy(self, msg: dict) -> None:
         proxy_url = msg.get("url")
+        if proxy_url == self._proxy_url:
+            return
+        self._proxy_url = proxy_url
+
         for worker in self._workers.values():
             await worker.set_proxy(proxy_url)
 

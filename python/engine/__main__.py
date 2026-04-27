@@ -64,6 +64,7 @@ def _parse_args() -> argparse.Namespace:
     # SUPPRESS form keeps that working while making the secret-on-CLI
     # smell visible in the log.
     parser.add_argument("--token", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--config-dir", type=str, default=None, help="Config directory (dev mode)")
     return parser.parse_args()
 
 
@@ -73,6 +74,7 @@ async def _run(
     *,
     dev_tachibana_login_allowed: bool,
     cache_dir: str | None = None,
+    config_dir: str | None = None,
 ) -> None:
     from pathlib import Path
 
@@ -83,6 +85,7 @@ async def _run(
         token=token,
         dev_tachibana_login_allowed=dev_tachibana_login_allowed,
         cache_dir=Path(cache_dir) if cache_dir else None,
+        config_dir=Path(config_dir) if config_dir else None,
     )
     await server.serve()
 
@@ -135,6 +138,7 @@ def main() -> None:
 
     dev_tachibana_login_allowed = False
     cache_dir: str | None = None
+    config_dir: str | None = None
 
     if args.port and args.token:
         # HIGH-6 (ラウンド 6): one-shot deprecation warning. The CLI
@@ -148,6 +152,7 @@ def main() -> None:
         )
         port, token = args.port, args.token
         dev_tachibana_login_allowed = _env_dev_login_allowed()
+        config_dir = getattr(args, "config_dir", None)
     else:
         # Production: receive config from Rust via stdin
         env_port = os.environ.get("FLOWSURFACE_ENGINE_PORT")
@@ -155,6 +160,7 @@ def main() -> None:
         if env_port and env_token:
             port, token = int(env_port), env_token
             dev_tachibana_login_allowed = _env_dev_login_allowed()
+            config_dir = getattr(args, "config_dir", None)
         else:
             # The stdin path is Rust-controlled. The flag rides the
             # build profile (debug = True, release = False) — see
@@ -165,6 +171,7 @@ def main() -> None:
                 cfg.get("dev_tachibana_login_allowed", False)
             )
             cache_dir = cfg.get("cache_dir")
+            config_dir = cfg.get("config_dir")
 
     asyncio.run(
         _run(
@@ -172,6 +179,7 @@ def main() -> None:
             token,
             dev_tachibana_login_allowed=dev_tachibana_login_allowed,
             cache_dir=cache_dir,
+            config_dir=config_dir,
         )
     )
 

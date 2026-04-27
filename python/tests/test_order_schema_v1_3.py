@@ -31,9 +31,10 @@ from engine.schemas import (
 
 # ── Schema version ────────────────────────────────────────────────────────────
 
-def test_schema_minor_is_at_least_3():
-    """SCHEMA_MINOR was 3 at schema 1.3; bumped to 4 in schema 1.4."""
-    assert SCHEMA_MINOR >= 3
+def test_schema_major_is_at_least_2():
+    """SCHEMA_MAJOR bumped to 2 in T-SC3 (SetVenueCredentials/VenueCredentialsRefreshed deleted)."""
+    from engine.schemas import SCHEMA_MAJOR
+    assert SCHEMA_MAJOR >= 2
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────

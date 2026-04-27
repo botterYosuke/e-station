@@ -56,13 +56,24 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 import httpx
 
 from .tachibana_auth import (
+    StartupLatch,
     TachibanaSession,
     login as tachibana_login,
+    validate_session_on_startup,
+)
+from .tachibana_file_store import (
+    _is_session_fresh,
+    clear_session,
+    load_account,
+    load_session,
+    save_account,
+    save_session,
 )
 from .tachibana_helpers import (
     LoginError,
@@ -75,6 +86,11 @@ from .tachibana_helpers import (
 log = logging.getLogger(__name__)
 
 VENUE = "tachibana"
+
+
+class LoginCancelled(Exception):
+    """Raised by startup_login when the user dismisses the login dialog."""
+
 
 # ── Banner text (F-Banner1) ──────────────────────────────────────────────────
 
@@ -574,7 +590,130 @@ async def _try_silent_login(
     return None
 
 
+async def startup_login(
+    config_dir: Path,
+    cache_dir: Path,
+    *,
+    p_no_counter: PNoCounter,
+    startup_latch: StartupLatch,
+    dev_login_allowed: bool = False,
+    http_client: Optional[httpx.AsyncClient] = None,
+) -> TachibanaSession:
+    """Drive the Tachibana startup login flow (T-SC2).
+
+    Returns TachibanaSession on success.
+    Raises LoginCancelled if the user dismissed the login dialog.
+    Raises LoginError / TachibanaError on network or API failure.
+
+    Flow:
+    1. Load cached session; if fresh, validate via API ping — return on success.
+    2. Load account info for dialog prefill.
+    3. Dev env fast path (dev_login_allowed only): skip dialog if env creds set.
+    4. Tkinter dialog → login API → save account + session.
+    """
+    # ── 1. Session cache fast path ────────────────────────────────────────
+    cached = load_session(cache_dir)
+    if cached and _is_session_fresh(cached):
+        try:
+            await validate_session_on_startup(
+                cached,
+                latch=startup_latch,
+                p_no_counter=p_no_counter,
+                http_client=http_client,
+            )
+            log.info("tachibana startup_login: cached session is valid, skipping login")
+            return cached
+        except (LoginError, SessionExpiredError) as exc:
+            log.info(
+                "tachibana startup_login: cached session invalid (%s), will re-login",
+                exc,
+            )
+            clear_session(cache_dir)
+        except RuntimeError as exc:
+            # StartupLatch violated (L6) — propagate so server can exit.
+            raise
+
+    # ── 2. Account prefill ────────────────────────────────────────────────
+    account = load_account(config_dir)
+    prefill_user_id: Optional[str] = account["user_id"] if account else None
+    prefill_is_demo: bool = account["is_demo"] if account else True
+
+    # ── 3. Dev env fast path (dev_login_allowed only, spec §3.1 F-DevEnv-Release-Guard) ──
+    if dev_login_allowed:
+        env_creds = _load_dev_env()
+        if env_creds is not None:
+            log.info(
+                "tachibana startup_login: using dev env fast path (is_demo=%s)",
+                env_creds["is_demo"],
+            )
+            session = await _do_login_call(
+                env_creds["user_id"],
+                env_creds["password"],
+                env_creds["is_demo"],
+                p_no_counter=p_no_counter,
+                http_client=http_client,
+            )
+            save_account(config_dir, env_creds["user_id"], env_creds["is_demo"])
+            save_session(cache_dir, session)
+            return session
+
+    # ── 4. Dialog path ────────────────────────────────────────────────────
+    prefill: Optional[dict] = None
+    if prefill_user_id is not None:
+        prefill = {"user_id": prefill_user_id, "is_demo": prefill_is_demo}
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, 4):  # up to 3 retries
+        try:
+            result = await _spawn_login_dialog(prefill=prefill)
+        except LoginError as exc:
+            log.error("tachibana startup_login: dialog spawn failed: %s", exc)
+            raise
+
+        if result is None:
+            raise LoginCancelled()
+
+        dialog_user_id = result.get("user_id")
+        dialog_password = result.get("password")
+        if not dialog_user_id or not dialog_password:
+            log.error("tachibana startup_login: helper result missing credential fields")
+            raise LoginError(code="login_failed", message=_MSG_LOGIN_FAILED)
+        dialog_is_demo = bool(result.get("is_demo", True))
+
+        try:
+            session = await _do_login_call(
+                dialog_user_id,
+                dialog_password,
+                dialog_is_demo,
+                p_no_counter=p_no_counter,
+                http_client=http_client,
+            )
+        except UnreadNoticesError:
+            raise
+        except SessionExpiredError:
+            raise
+        except LoginError as exc:
+            log.warning(
+                "tachibana startup_login: attempt %d/3 failed: %s", attempt, exc
+            )
+            last_exc = exc
+            continue
+        except TachibanaError as exc:
+            log.error("tachibana startup_login: unexpected TachibanaError: %s", exc)
+            last_exc = exc
+            continue
+
+        # Success — persist account (password excluded) and session.
+        save_account(config_dir, dialog_user_id, dialog_is_demo)
+        save_session(cache_dir, session)
+        return session
+
+    raise last_exc or LoginError(code="login_failed", message=_MSG_LOGIN_FAILED)
+
+
 __all__ = [
     "run_login",
+    "startup_login",
+    "LoginCancelled",
     "VENUE",
 ]

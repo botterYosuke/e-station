@@ -14,16 +14,14 @@ const CID: &str = "4f5e6d7c-8b9a-0c1d-2e3f-4a5b6c7d8e9f";
 const VID: &str = "ORD-2026-001";
 const TID: &str = "EDA-001";
 
-// ── SCHEMA_MINOR version guard ────────────────────────────────────────────────
+// ── Schema version guard ────────────────────────────────────────────────────
 
+// Schema 2.x contains schema 1.5 variants (order events).
 #[test]
-fn schema_minor_is_5() {
-    // H-E: SCHEMA_MINOR was bumped from 5 to 6 when request_key was added to
-    // SubmitOrderRequest.  This guard now checks for >= 5 (Phase O2 baseline).
+fn schema_major_is_at_least_2_for_order_events() {
     assert!(
-        flowsurface_engine_client::SCHEMA_MINOR >= 5,
-        "SCHEMA_MINOR must be >= 5 for Phase O2, got {}",
-        flowsurface_engine_client::SCHEMA_MINOR
+        flowsurface_engine_client::SCHEMA_MAJOR >= 2,
+        "SCHEMA_MAJOR must be >= 2 (schema 1.5 order events included in schema 2.x)"
     );
 }
 

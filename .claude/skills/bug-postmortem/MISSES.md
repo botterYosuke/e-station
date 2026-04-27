@@ -13,6 +13,7 @@
 | 同一言語テスト | Python→Python または Rust→Rust で完結し、言語境界の挙動が未検証 | 1 |
 | ログ検査漏れ | smoke.sh の grep パターンが実際の障害ログと不一致 | 1 |
 | 再接続隠蔽 | 自動リカバリが成功するため初回失敗が観測ウィンドウに残らない | 1 |
+| 冪等性未検証 | 「変更なし」の入力パスがテストされておらず、副作用の有無が見逃される | 1 |
 
 ---
 
@@ -110,3 +111,31 @@ Rust 側の `fastwebsockets` 0.9.0 はこれを拒否して接続を切断 → `
    側の sample 例セクション (`<td>{ "sCLMID":"...", "sTargetIssueCode":"..." }</td>`)
    からパラメータ名を抽出して pinned test の expected と比較する static 検査を
    T7 lint phase に追加検討（現状 `tools/secret_scan*` 系と同列で実装可能）。
+
+---
+
+## 2026-04-27 — SetProxy(None) が起動時フェッチを全キャンセル
+
+**見逃しパターン**: 冪等性未検証
+
+**根本原因**:
+`_handle_set_proxy()` はプロキシ URL が変わっていなくても常に `_cancel_all_streams()` を呼んでいた。
+`Message::EngineConnected` ハンドラが接続のたびに `SetProxy(None)` を送信する（プロキシ未設定でも）。
+`TickersTable::new()` で起動時に生成されたフェッチタスクが Python 側で実行中に `SetProxy(None)` が届くと全タスクがキャンセルされ、
+全取引所に `cancelled: request interrupted (proxy change or disconnect)` エラーが表示された。
+
+既存テスト `test_server_proxy.py` は「プロキシ URL が変わる」ケース（None → "http://..."）しかカバーしておらず、
+「URL が変わらない」（None → None）ケースの副作用が検証されていなかった。
+
+**追加したテスト**:
+- `python/tests/test_server_proxy.py::test_set_proxy_none_when_already_none_does_not_cancel_streams`
+- `python/tests/test_server_proxy.py::test_set_proxy_same_url_twice_does_not_double_restart`
+
+**修正内容**:
+- `DataEngineServer.__init__` に `self._proxy_url: str | None = None` を追加
+- `_handle_set_proxy` 冒頭に `if proxy_url == self._proxy_url: return` を追加
+
+**教訓**:
+状態を更新するハンドラには必ず「変更なし」の入力パスをテストする。
+特に「コネクション復旧時に毎回送られるコマンド」（SetProxy, SetVenueCredentials 等）は
+起動・再接続シーケンスとの競合を想定した冪等性テストを書く習慣をつける。

@@ -14,16 +14,14 @@ const CID: &str = "4f5e6d7c-8b9a-0c1d-2e3f-4a5b6c7d8e9f";
 const VID: &str = "ORD-2026-001";
 const RID: &str = "req-v1.4-001";
 
-// ── SCHEMA_MINOR version guard ────────────────────────────────────────────────
+// ── Schema version guard ────────────────────────────────────────────────────
 
-// NOTE: SCHEMA_MINOR は Phase O2 で 5 に bump された (schema_v1_5_roundtrip.rs を参照)。
-// このテストは schema 1.4 の variant shape が正しいことを検証する目的のため、
-// バージョン番号の exact match ガードは schema_v1_5_roundtrip.rs に移譲する。
+// Schema 2.x contains schema 1.4 variants (order lifecycle events).
 #[test]
-fn schema_minor_is_at_least_4() {
+fn schema_major_is_at_least_2() {
     assert!(
-        flowsurface_engine_client::SCHEMA_MINOR >= 4,
-        "SCHEMA_MINOR must be >= 4 (Phase O1 introduced v1.4 variants)"
+        flowsurface_engine_client::SCHEMA_MAJOR >= 2,
+        "SCHEMA_MAJOR must be >= 2 (schema 1.4 order variants included in schema 2.x)"
     );
 }
 

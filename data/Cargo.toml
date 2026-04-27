@@ -22,26 +22,8 @@ open = "5.3.2"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 log = { version = "0.4.22", default-features = true, features = ["std"] }
 thiserror = { version = "2.0.12", default-features = true, features = ["std"] }
-secrecy = { workspace = true }
-zeroize = { workspace = true }
 
 exchange.workspace = true
-# HIGH-8 (ラウンド 6 強制修正 / Group F): the previous reverse edge
-# `data → engine-client` (for wire DTOs) was eliminated in this
-# round. The Wire DTOs (`TachibanaCredentialsWire` /
-# `TachibanaSessionWire`) now live in `data::wire::tachibana`, and
-# `engine-client::dto` re-exports them from there. `data` no longer
-# depends on `engine-client`.
-
-[features]
-# HIGH-4 (ラウンド 7): expose `set_second_password_for_test` only when
-# this feature is on. Production binaries do not enable it, so the
-# escape hatch cannot be reached from outside test code. Integration
-# tests in `data/tests/` activate it via dev-dependencies.
-testing = []
 
 [dev-dependencies]
-secrecy = { workspace = true }
-zeroize = { workspace = true }
 serial_test = "3"
-flowsurface-data = { path = ".", features = ["testing"] }

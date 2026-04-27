@@ -3,6 +3,8 @@
 Fix 1: after SetProxy, all active streams are resubscribed through the new proxy.
 Fix 2: in-flight fetch tasks cancelled by SetProxy emit an Error event instead of
        silently timing out.
+Fix 3: SetProxy with the same URL (including None→None) is idempotent — active
+       streams and in-flight fetches must NOT be cancelled when proxy is unchanged.
 """
 
 from __future__ import annotations
@@ -272,6 +274,80 @@ async def test_set_proxy_clears_then_reopens_stream_not_duplicating(proxy_server
     assert worker.stream_kline.call_count == 3, (
         f"Expected 3 stream_kline calls (initial + 2 resubscriptions), "
         f"got {worker.stream_kline.call_count}"
+    )
+    await ws.close()
+
+
+# ── Fix 3: idempotent SetProxy does not cancel streams ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_set_proxy_none_when_already_none_does_not_cancel_streams(proxy_server):
+    """SetProxy(None) when proxy is already None must NOT restart active streams.
+
+    Regression test for: _handle_set_proxy always calling _cancel_all_streams(),
+    even when the proxy URL had not changed (None → None on every EngineConnected).
+
+    Fix: server tracks _proxy_url; if url == _proxy_url the handler returns early.
+    Without this fix, every engine reconnect would cancel all in-flight startup
+    fetches via the unconditional _cancel_all_streams() call.
+    """
+    port, token, worker = proxy_server
+    ws = await _connect_and_handshake(port, token)
+
+    await ws.send(orjson.dumps({
+        "op": "Subscribe",
+        "venue": "binance",
+        "ticker": "BTCUSDT",
+        "stream": "kline",
+        "timeframe": "1m",
+    }))
+    await asyncio.sleep(0.05)
+    assert worker.stream_kline.call_count == 1, "stream must start after Subscribe"
+
+    # Send SetProxy(None) — proxy was already None (default state, no change)
+    await ws.send(orjson.dumps({"op": "SetProxy", "url": None}))
+    await asyncio.sleep(0.1)
+
+    assert worker.stream_kline.call_count == 1, (
+        "SetProxy(None) when proxy is already None must NOT restart streams.\n"
+        "Fix: add 'if proxy_url == self._proxy_url: return' guard in "
+        "_handle_set_proxy() in python/engine/server.py."
+    )
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_set_proxy_same_url_twice_does_not_double_restart(proxy_server):
+    """Sending the same non-None proxy URL twice must only restart streams once.
+
+    Regression guard: idempotency check applies to non-None URLs too.
+    """
+    port, token, worker = proxy_server
+    ws = await _connect_and_handshake(port, token)
+
+    await ws.send(orjson.dumps({
+        "op": "Subscribe",
+        "venue": "binance",
+        "ticker": "BTCUSDT",
+        "stream": "kline",
+        "timeframe": "1m",
+    }))
+    await asyncio.sleep(0.05)
+    assert worker.stream_kline.call_count == 1
+
+    proxy_url = "http://proxy.example.com:8080"
+    # First SetProxy — URL changes (None → proxy_url): stream must restart
+    await ws.send(orjson.dumps({"op": "SetProxy", "url": proxy_url}))
+    await asyncio.sleep(0.1)
+    assert worker.stream_kline.call_count == 2, "first SetProxy must restart stream"
+
+    # Second SetProxy with same URL — no change: stream must NOT restart again
+    await ws.send(orjson.dumps({"op": "SetProxy", "url": proxy_url}))
+    await asyncio.sleep(0.1)
+    assert worker.stream_kline.call_count == 2, (
+        "SetProxy with the same URL must be idempotent — stream must not restart.\n"
+        "Fix: 'if proxy_url == self._proxy_url: return' in _handle_set_proxy()."
     )
     await ws.close()
 

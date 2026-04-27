@@ -313,26 +313,15 @@ fn trigger_type_screaming_snake_case() {
     assert_eq!(index, r#""INDEX""#);
 }
 
-/// SCHEMA_MINOR was 3 at schema 1.3; bumped to 4 in schema 1.4.
-/// This test verifies that the version has advanced past 3.
+/// Schema 2.0: SCHEMA_MAJOR bumped to 2, SCHEMA_MINOR reset to 0.
+/// SetVenueCredentials / VenueCredentialsRefreshed removed; Python autonomous login.
 #[test]
-fn schema_minor_is_at_least_3() {
-    assert!(
-        flowsurface_engine_client::SCHEMA_MINOR >= 3,
-        "SCHEMA_MINOR should be >= 3, got {}",
-        flowsurface_engine_client::SCHEMA_MINOR
-    );
-}
-
-/// H-E: SCHEMA_MINOR bumped to 6 when request_key was added to SubmitOrderRequest.
-/// Pin this so accidental downgrades are caught immediately.
-#[test]
-fn schema_minor_is_6() {
+fn schema_major_is_2() {
     assert_eq!(
-        flowsurface_engine_client::SCHEMA_MINOR,
-        6,
-        "SCHEMA_MINOR must be 6 after H-E request_key IPC addition, got {}",
-        flowsurface_engine_client::SCHEMA_MINOR
+        flowsurface_engine_client::SCHEMA_MAJOR,
+        2,
+        "SCHEMA_MAJOR must be 2 (schema 2.x autonomous-login series), got {}",
+        flowsurface_engine_client::SCHEMA_MAJOR
     );
 }
 
