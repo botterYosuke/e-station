@@ -233,8 +233,18 @@
 - [x] ✅ **`validate_session` 実機リクエスト形式の固定テスト（HIGH-D2）**: `test_validate_session_uses_get_issue_detail_with_pinned_payload` 実装。(a) `sUrlMaster` プレフィックス、(b) GET、(c) sCLMID / sIssueCode / sSizyouC、(d) sJsonOfmt="4" の 4 点を assert。
 - [x] ✅ **`validate_session_on_startup` の `RuntimeError` → supervisor 統合テスト（MEDIUM-D2-1、L6 修正の検証）** — T3 で実装済 (`python/tests/test_tachibana_startup_supervisor.py`、subprocess 経由で実 `_do_set_venue_credentials` を 2 度叩き、`os._exit(2)` 経路 + 全 secrets 非漏洩を pin): `python/tests/test_tachibana_startup_supervisor.py::test_runtime_error_from_validate_terminates_process_with_log` を新設。`subprocess` 経由で `python -m engine` を起動し、`StartupLatch.run_once` を 2 回呼ばせるテスト fixture を経由して 2 回目の `RuntimeError` を発生させ、(a) `engine/server.py` トップレベル supervisor で catch されてプロセスが exit code 非ゼロで終了、(b) stderr に `tracing::error!` 相当の 1 行が出ていること、(c) その error 行に `user_id` / `password` / session token などの creds 文字列が**含まれていない**こと、を assert
   - **未着手の理由**: `engine/server.py` のトップレベル supervisor が `RuntimeError` を catch してプロセス終了させる経路自体が現リポジトリにまだ存在しない（T3 の `SetVenueCredentials` ハンドラ実装と同時に追加するのが自然）。先行して subprocess テストだけ書くと supervisor 側のスタブ実装に引きずられて test-first ができない。**T3 着手と同タイミングで本タスクを実装する**ことに決定。T2 では `StartupLatch` の `RuntimeError` 発生条件（成功後 / 失敗後 / 並行）を Python 単体テスト 4 件で完全にカバーしているため、unit レベルの保証は揃っている。
-- [ ] **受け入れ**: `pytest -m demo_tachibana` で実 demo 環境ログイン成功（手動電話認証済みアカウント前提）
-  - **未実施**: 実 demo 環境ログインは「電話認証済みアカウント」前提のため CI / ローカル自動化からは切り離して手動実施。T7 で `pytest -m demo_tachibana` の CI 統合方式（A/B/C）を確定するタイミングで初回実機ログインを行う。
+- [x] ✅ **受け入れ**: `pytest -m demo_tachibana` で実 demo 環境ログイン成功（手動電話認証済みアカウント前提）
+  - **実施日**: 2026-04-27
+  - **ハング原因の確定した根本原因**: `httpx.AsyncClient(timeout=15.0)` のスカラー値は Windows において TCP connect フェーズに適用されず、仮想 URL 期限切れ時（DNS は解決するが TCP SYN に応答なし）に無期限でブロックする silent hang を引き起こす。`httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)` のコンポーネント指定形式に変更することで回避。
+  - **修正箇所**:
+    - `python/engine/__main__.py`: `main()` 冒頭に `logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)` を追加（Python ログが NullHandler に吸われ Rust 側に転送されていなかった問題を解消）
+    - `python/engine/exchanges/tachibana_auth.py`: `login()` 内および `_do_validate()` 内の `httpx.AsyncClient(timeout=15.0)` を `httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)` に変更
+    - `python/tests/test_tachibana_demo_login.py`: `pytest -m demo_tachibana` で実行するデモログインテスト 2 件を新規作成（`test_demo_login_returns_valid_session` / `test_demo_session_validates_on_startup`）
+  - **再現・回避 Tips**:
+    - Windows で silent hang が疑われる場合はまず httpx の timeout を `httpx.Timeout(connect=N, ...)` 形式に変更すること
+    - 環境変数引き渡しは `set -a && source .env && set +a` を使う（`source .env` のみでは Python subprocess に変数が引き継がれない）
+    - デバッグビルドで `cargo run` したとき `dev_tachibana_login_allowed=true` になる（release ビルドでは `false`）
+    - `uv run pytest python/tests/ -m demo_tachibana -v` の前に `.env` を読み込むこと
 
 - [x] ✅ **demo CI レーン方式の早期決定（MEDIUM、ユーザー指摘ラウンド 7）**: 案 **(B) manual lane only** を T2 暫定確定として採用する:
   - 理由: [open-questions.md Q21](./open-questions.md#q21--demo-環境の運用時間) の demo 運用時間が未確定の段階で PR チェック（ブロッキング / non-blocking 問わず）に組み込むと、閉局帯ヒットで開発者が偽陽性失敗を踏む。`workflow_dispatch` のみ許可なら閉局帯リスクが起動者に閉じる。

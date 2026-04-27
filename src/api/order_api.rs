@@ -208,6 +208,7 @@ impl OrderApiState {
 // ── HTTP wire types ────────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubmitOrderBody {
     client_order_id: String,
     instrument_id: String,
@@ -232,12 +233,14 @@ struct SubmitOrderBody {
 // ── HTTP wire types (Phase O1) ─────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ModifyOrderBody {
     client_order_id: String,
     change: ModifyChangeBody,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ModifyChangeBody {
     #[serde(default)]
     new_quantity: Option<String>,
@@ -250,12 +253,14 @@ struct ModifyChangeBody {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CancelOrderBody {
     client_order_id: String,
 }
 
 /// `POST /api/order/cancel-all` body — `confirm: true` is **required**.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CancelAllBody {
     confirm: Option<serde_json::Value>,
     #[serde(default)]
@@ -265,6 +270,7 @@ struct CancelAllBody {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OrderListQueryBody {
     #[serde(default)]
     status: Option<String>,
@@ -533,7 +539,7 @@ async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
 
     // ── ⑫ Build and send SubmitOrder command ─────────────────────────────────
     let request_id = uuid::Uuid::new_v4().to_string();
-    let ipc_order = build_ipc_order(&body, expire_time_ns, &request_id);
+    let ipc_order = build_ipc_order(&body, expire_time_ns, &request_id, request_key);
     let cmd = Command::SubmitOrder {
         request_id: request_id.clone(),
         venue: "tachibana".to_string(),
@@ -623,6 +629,11 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
         Ok(b) => b,
         Err(e) => return error_response(400, "VALIDATION_ERROR", &format!("invalid JSON: {e}")),
     };
+
+    // ① b Session frozen check (same pattern as submit_order)
+    if state.session.lock().await.is_frozen() {
+        return error_response(503, "SESSION_EXPIRED", "session is frozen; please re-login");
+    }
 
     // ② Guard
     if !state.guard_config.enabled {
@@ -714,7 +725,8 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             }
         }
         Ok(Err(msg)) => {
-            if msg.starts_with("SESSION_EXPIRED") {
+            let reason_code = msg.split_once(": ").map(|(c, _)| c).unwrap_or(&msg);
+            if reason_code == "SESSION_EXPIRED" {
                 state.session.lock().await.freeze();
             }
             error_response(502, "INTERNAL_ERROR", &msg)
@@ -739,6 +751,11 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
         Ok(b) => b,
         Err(e) => return error_response(400, "VALIDATION_ERROR", &format!("invalid JSON: {e}")),
     };
+
+    // ① b Session frozen check (same pattern as submit_order)
+    if state.session.lock().await.is_frozen() {
+        return error_response(503, "SESSION_EXPIRED", "session is frozen; please re-login");
+    }
 
     // ② Guard
     if !state.guard_config.enabled {
@@ -824,7 +841,8 @@ async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
             }
         }
         Ok(Err(msg)) => {
-            if msg.starts_with("SESSION_EXPIRED") {
+            let reason_code = msg.split_once(": ").map(|(c, _)| c).unwrap_or(&msg);
+            if reason_code == "SESSION_EXPIRED" {
                 state.session.lock().await.freeze();
             }
             error_response(502, "INTERNAL_ERROR", &msg)
@@ -911,6 +929,19 @@ async fn cancel_all_orders(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRe
     };
 
     // ⑥ Send CancelAllOrders (fire-and-forget)
+    //
+    // Design note (C-1):
+    //   cancel_all is fire-and-forget — we return HTTP 202 immediately without
+    //   waiting for Python to finish the batch cancellation.  Because of this,
+    //   a SESSION_EXPIRED error that Python discovers while processing the batch
+    //   cannot be reflected synchronously in OrderSessionState.freeze().
+    //
+    //   Mitigation (H-A):  The is_frozen() guard in modify_order and cancel_order
+    //   will capture SESSION_EXPIRED on the *next* submit / modify / cancel
+    //   operation and return HTTP 503 SESSION_EXPIRED at that point.
+    //   Any in-flight cancel_all tasks that raise SessionExpiredError on the
+    //   Python side will log the error and update the WAL, so the state is
+    //   recovered correctly on the next restart.
     let request_id = uuid::Uuid::new_v4().to_string();
     let cmd = Command::CancelAllOrders {
         request_id,
@@ -1146,6 +1177,20 @@ fn validate(body: &SubmitOrderBody) -> Result<(), HttpResponse> {
         }
     }
 
+    // trigger_type: must be LAST, BID_ASK, or INDEX when present
+    if let Some(tt) = body.trigger_type.as_deref() {
+        match tt {
+            "LAST" | "BID_ASK" | "INDEX" => {}
+            _ => {
+                return Err(error_response(
+                    400,
+                    "VENUE_UNSUPPORTED",
+                    "trigger_type: must be LAST, BID_ASK, or INDEX",
+                ));
+            }
+        }
+    }
+
     // expire_time: required for GTD
     if body.time_in_force == "GTD" && body.expire_time.is_none() {
         return Err(error_response(
@@ -1260,6 +1305,7 @@ fn build_ipc_order(
     body: &SubmitOrderBody,
     expire_time_ns: Option<i64>,
     _request_id: &str,
+    request_key: u64,
 ) -> SubmitOrderRequest {
     SubmitOrderRequest {
         client_order_id: body.client_order_id.clone(),
@@ -1275,6 +1321,7 @@ fn build_ipc_order(
         post_only: body.post_only,
         reduce_only: body.reduce_only,
         tags: body.tags.clone(),
+        request_key,
     }
 }
 
@@ -1317,7 +1364,9 @@ fn parse_trigger_type(s: &str) -> Option<TriggerType> {
         "LAST" => Some(TriggerType::Last),
         "BID_ASK" => Some(TriggerType::BidAsk),
         "INDEX" => Some(TriggerType::Index),
-        _ => None,
+        other => unreachable!(
+            "parse_trigger_type: validate() must reject unknown values — got {other:?}"
+        ),
     }
 }
 
@@ -2784,5 +2833,158 @@ mod tests {
         );
 
         drop(engine_tx);
+    }
+
+    // ── B-1: is_frozen() checks for modify / cancel ───────────────────────────
+
+    /// modify_order on a frozen session → 503 SESSION_EXPIRED
+    #[tokio::test]
+    async fn test_modify_after_session_frozen_returns_503() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        // Freeze the session.
+        session.lock().await.freeze();
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(Arc::clone(&session), engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits()),
+        );
+
+        let raw = serde_json::json!({
+            "client_order_id": "frozen-modify-cid-001",
+            "change": {
+                "new_price": "3600"
+            }
+        })
+        .to_string();
+
+        let resp = modify_order(&raw, &state).await;
+        assert_eq!(
+            resp.status, 503,
+            "modify on frozen session must return 503, got {}; body={}",
+            resp.status, resp.body
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+    }
+
+    /// cancel_order on a frozen session → 503 SESSION_EXPIRED
+    #[tokio::test]
+    async fn test_cancel_after_session_frozen_returns_503() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        session.lock().await.freeze();
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(
+            OrderApiState::new(Arc::clone(&session), engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits()),
+        );
+
+        let raw = serde_json::json!({
+            "client_order_id": "frozen-cancel-cid-001"
+        })
+        .to_string();
+
+        let resp = cancel_order(&raw, &state).await;
+        assert_eq!(
+            resp.status, 503,
+            "cancel on frozen session must return 503, got {}; body={}",
+            resp.status, resp.body
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json["reason_code"].as_str(), Some("SESSION_EXPIRED"));
+    }
+
+    // ── B-2: unknown trigger_type rejected by validate() ─────────────────────
+
+    /// Unknown trigger_type → 400 VENUE_UNSUPPORTED
+    #[tokio::test]
+    async fn test_unknown_trigger_type_returns_400() {
+        let state = no_engine_state(OrderGuardConfig::enabled_no_limits());
+
+        let raw = serde_json::json!({
+            "client_order_id": "trigger-bad-cid-001",
+            "instrument_id": "7203.TSE",
+            "order_side": "BUY",
+            "order_type": "STOP_MARKET",
+            "quantity": "100",
+            "trigger_price": "2900",
+            "trigger_type": "UNKNOWN_TRIGGER",
+            "time_in_force": "DAY",
+            "post_only": false,
+            "reduce_only": false,
+            "tags": []
+        })
+        .to_string();
+
+        let resp = submit_order(&raw, &state).await;
+        assert_eq!(
+            resp.status, 400,
+            "unknown trigger_type must return 400, got {}; body={}",
+            resp.status, resp.body
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json["reason_code"].as_str(), Some("VENUE_UNSUPPORTED"));
+    }
+
+    /// Known trigger_type "LAST" passes validate() and proceeds to engine check (502)
+    #[tokio::test]
+    async fn test_known_trigger_type_last_passes_validation() {
+        let state = no_engine_state(OrderGuardConfig::enabled_no_limits());
+
+        let raw = serde_json::json!({
+            "client_order_id": "trigger-last-cid-001",
+            "instrument_id": "7203.TSE",
+            "order_side": "BUY",
+            "order_type": "STOP_MARKET",
+            "quantity": "100",
+            "trigger_price": "2900",
+            "trigger_type": "LAST",
+            "time_in_force": "DAY",
+            "post_only": false,
+            "reduce_only": false,
+            "tags": []
+        })
+        .to_string();
+
+        let resp = submit_order(&raw, &state).await;
+        // 502 = guard passed, engine not connected — validation succeeded.
+        assert_eq!(
+            resp.status, 502,
+            "LAST trigger_type should pass validation and reach engine check (502), got {}; \
+             body={}",
+            resp.status, resp.body
+        );
+    }
+
+    // ── B-3: deny_unknown_fields for SubmitOrderBody ──────────────────────────
+
+    /// SubmitOrderBody with unknown field → 400 VALIDATION_ERROR
+    #[tokio::test]
+    async fn test_submit_unknown_field_returns_400() {
+        let state = no_engine_state(OrderGuardConfig::enabled_no_limits());
+
+        let raw = serde_json::json!({
+            "client_order_id": "unknown-field-cid-001",
+            "instrument_id": "7203.TSE",
+            "order_side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "100",
+            "time_in_force": "DAY",
+            "post_only": false,
+            "reduce_only": false,
+            "tags": [],
+            "injected_secret": "evil"
+        })
+        .to_string();
+
+        let resp = submit_order(&raw, &state).await;
+        assert_eq!(
+            resp.status, 400,
+            "unknown field in submit body must return 400, got {}; body={}",
+            resp.status, resp.body
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json["reason_code"].as_str(), Some("VALIDATION_ERROR"));
     }
 }

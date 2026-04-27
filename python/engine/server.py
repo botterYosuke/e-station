@@ -681,6 +681,7 @@ class DataEngineServer:
             return
 
         # 第二暗証番号チェック（idle forget 適用済み）
+        self._session_holder.touch()
         second_password = self._session_holder.get_password()
         if second_password is None:
             self._outbox.append(
@@ -690,7 +691,6 @@ class DataEngineServer:
                 }
             )
             return
-        self._session_holder.touch()
 
         # M-2: セッション未取得チェック
         if self._tachibana_session is None:
@@ -717,6 +717,11 @@ class DataEngineServer:
                 "ts_event_ms": int(time.time() * 1000),
             }
         )
+        # H-E: IPC SubmitOrder.order.request_key を submit_order に渡す。
+        # Rust 側で計算した xxh3_64 ハッシュを WAL submit 行に書くことで、
+        # 再起動後の OrderSessionState::load_from_wal() が冪等性マップを復元できる。
+        ipc_request_key: int = raw_order.get("request_key", 0)
+
         # C-1: tachibana_submit_order の例外を適切な OrderRejected に写す
         try:
             result = await tachibana_submit_order(
@@ -725,6 +730,7 @@ class DataEngineServer:
                 envelope,
                 p_no_counter=self._tachibana_p_no_counter,
                 wal_path=self._wal_path,
+                request_key=ipc_request_key,
             )
         except SessionExpiredError:
             # M-14: セッション期限切れ時は second_password もクリア
@@ -794,7 +800,7 @@ class DataEngineServer:
                 {
                     "event": "OrderRejected",
                     "client_order_id": order.client_order_id,
-                    "reason_code": "WAL_ERROR",
+                    "reason_code": "INTERNAL_ERROR",
                     "reason_text": "WAL write failed; order not submitted",
                     "ts_event_ms": int(time.time() * 1000),
                 }
@@ -860,6 +866,7 @@ class DataEngineServer:
             })
             return
 
+        self._session_holder.touch()
         second_password = self._session_holder.get_password()
         if second_password is None:
             self._outbox.append({
@@ -867,7 +874,6 @@ class DataEngineServer:
                 "request_id": req_id,
             })
             return
-        self._session_holder.touch()
 
         if self._tachibana_session is None:
             self._outbox.append({
@@ -935,6 +941,8 @@ class DataEngineServer:
                 "reason_text": "Internal error during order modification",
                 "ts_event_ms": int(time.time() * 1000),
             })
+        else:
+            self._session_holder.on_submit_success()
 
     async def _do_cancel_order(self, msg: dict) -> None:
         import time
@@ -963,6 +971,7 @@ class DataEngineServer:
             })
             return
 
+        self._session_holder.touch()
         second_password = self._session_holder.get_password()
         if second_password is None:
             self._outbox.append({
@@ -970,7 +979,6 @@ class DataEngineServer:
                 "request_id": req_id,
             })
             return
-        self._session_holder.touch()
 
         if self._tachibana_session is None:
             self._outbox.append({
@@ -1025,6 +1033,8 @@ class DataEngineServer:
                 "reason_text": "Internal error during order cancellation",
                 "ts_event_ms": int(time.time() * 1000),
             })
+        else:
+            self._session_holder.on_submit_success()
 
     async def _do_cancel_all_orders(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
@@ -1050,6 +1060,7 @@ class DataEngineServer:
             })
             return
 
+        self._session_holder.touch()
         second_password = self._session_holder.get_password()
         if second_password is None:
             self._outbox.append({
@@ -1057,7 +1068,6 @@ class DataEngineServer:
                 "request_id": req_id,
             })
             return
-        self._session_holder.touch()
 
         if self._tachibana_session is None:
             self._outbox.append({
@@ -1069,7 +1079,7 @@ class DataEngineServer:
             return
 
         try:
-            await tachibana_cancel_all_orders(
+            result = await tachibana_cancel_all_orders(
                 session=self._tachibana_session,
                 second_password=second_password,
                 instrument_id=instrument_id,
@@ -1100,6 +1110,20 @@ class DataEngineServer:
                 "code": "INTERNAL_ERROR",
                 "message": "Internal error during cancel-all",
             })
+        else:
+            self._session_holder.on_submit_success()
+            if result.failed_count > 0:
+                log.warning(
+                    "cancel_all partial failure: canceled=%d failed=%d",
+                    result.canceled_count,
+                    result.failed_count,
+                )
+                self._outbox.append({
+                    "event": "Error",
+                    "request_id": req_id,
+                    "code": "PARTIAL_CANCEL_FAILURE",
+                    "message": f"canceled={result.canceled_count} failed={result.failed_count}",
+                })
 
     async def _do_get_order_list(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
@@ -1526,6 +1550,18 @@ class DataEngineServer:
             expires_at_ms=session_payload.get("expires_at_ms"),
         )
 
+    def _apply_tachibana_session(self, session: TachibanaSession) -> None:
+        """Persist *session* to both server state and the TachibanaWorker.
+
+        Must be called instead of bare ``self._tachibana_session = session``
+        so the worker's ``_session`` field (used by every API call) is always
+        kept in sync.  Previously the worker was never updated, which caused
+        ``no_session`` errors on the first metadata fetch immediately after
+        login (logged at 10:45:48 in the 2026-04-27 session).
+        """
+        self._tachibana_session = session
+        self._workers["tachibana"].set_session(session)
+
     async def _do_set_venue_credentials(self, msg: dict) -> None:
         """Handle `SetVenueCredentials` for the Tachibana venue.
 
@@ -1625,7 +1661,7 @@ class DataEngineServer:
                         )
                         session = None
                     else:
-                        self._tachibana_session = session
+                        self._apply_tachibana_session(session)
                         log.info("Tachibana session validated successfully")
                         self._emit(
                             {
@@ -1707,8 +1743,8 @@ class DataEngineServer:
             for ev in events:
                 if ev.get("event") == "VenueCredentialsRefreshed":
                     try:
-                        self._tachibana_session = self._restore_session_from_payload(
-                            ev["session"]
+                        self._apply_tachibana_session(
+                            self._restore_session_from_payload(ev["session"])
                         )
                     except (KeyError, TypeError, ValueError, AttributeError) as exc:
                         log.error(
@@ -1810,8 +1846,8 @@ class DataEngineServer:
                     # typed VenueError. Mirror `_do_set_venue_credentials`
                     # so a desync between Rust and Python is observable.
                     try:
-                        self._tachibana_session = self._restore_session_from_payload(
-                            ev["session"]
+                        self._apply_tachibana_session(
+                            self._restore_session_from_payload(ev["session"])
                         )
                     except (KeyError, TypeError, ValueError, AttributeError) as exc:
                         log.error(

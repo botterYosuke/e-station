@@ -80,12 +80,12 @@ static VENUE_READY_CACHE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 /// Receiver end of the HTTP control API channel (port 9876).  Set once in
-/// `main()` after `replay_api::spawn` runs.  The Iced subscription
-/// `replay_api_stream` takes ownership of this receiver by draining it with
-/// `try_recv`; until Phase O1 wires up the full integration this is stored
-/// here but not yet polled by the Iced runtime.
+/// `main()` after `replay_api::spawn` runs.  `replay_api_stream` takes
+/// ownership of the inner `Receiver` via `Option::take()` on first poll;
+/// subsequent calls (Iced subscription identity is stable so there is only
+/// one) see `None` and return immediately — no panic, no double-receive.
 static CONTROL_API_RX: std::sync::OnceLock<
-    std::sync::Mutex<tokio::sync::mpsc::Receiver<replay_api::ControlApiCommand>>,
+    std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<replay_api::ControlApiCommand>>>,
 > = std::sync::OnceLock::new();
 
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
@@ -632,7 +632,7 @@ fn main() {
                 ))
             };
             if let Some(rx) = replay_api::spawn(rt.handle(), Some(order_api_state)) {
-                CONTROL_API_RX.set(std::sync::Mutex::new(rx)).ok();
+                CONTROL_API_RX.set(std::sync::Mutex::new(Some(rx))).ok();
             }
             std::thread::Builder::new()
                 .name("control-api-rt".into())
@@ -862,6 +862,26 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                     }
                 }
             }
+        }
+    }
+}
+
+/// Bridge the HTTP control API channel into the Iced message loop.
+///
+/// Takes ownership of the `mpsc::Receiver` stored in [`CONTROL_API_RX`] on
+/// first call (via `Option::take`).  Iced's `Subscription::run` identity is
+/// derived from the function pointer so this subscription is only created once
+/// per app lifetime — the `take()` on subsequent construction attempts (which
+/// don't happen in practice) would safely return `None` and exit the stream.
+fn replay_api_stream() -> impl iced::futures::Stream<Item = Message> + Send + 'static {
+    let rx_opt = CONTROL_API_RX
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|mut g| g.take());
+    async_stream::stream! {
+        let Some(mut rx) = rx_opt else { return; };
+        while let Some(cmd) = rx.recv().await {
+            yield Message::ControlApi(cmd);
         }
     }
 }
@@ -1121,6 +1141,9 @@ impl Flowsurface {
                         self.notifications.push(Toast::warn(
                             "立花ログインがキャンセルされました".to_string(),
                         ));
+                    }
+                    VenueEvent::Ready => {
+                        log::info!("tachibana: VenueReady — venue is now authenticated");
                     }
                     _ => {}
                 }
@@ -1709,9 +1732,19 @@ impl Flowsurface {
                 });
             }
             Message::ControlApi(cmd) => {
-                // HTTP control API commands (T35-U5-RelogE2E, T7).
-                // Full Iced integration deferred to Phase O1 — log for now.
+                use replay_api::ControlApiCommand;
                 log::debug!("control-api command received: {cmd:?}");
+                match cmd {
+                    ControlApiCommand::RequestVenueLogin { venue }
+                        if venue == TACHIBANA_VENUE_NAME =>
+                    {
+                        return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Manual));
+                    }
+                    ControlApiCommand::ToggleVenue { venue } if venue == TACHIBANA_VENUE_NAME => {
+                        return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Auto));
+                    }
+                    _ => {}
+                }
             }
         }
         Task::none()
@@ -1860,6 +1893,7 @@ impl Flowsurface {
             tick,
             hotkeys,
             engine_status,
+            Subscription::run(replay_api_stream),
         ])
     }
 

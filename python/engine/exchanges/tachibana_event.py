@@ -85,8 +85,8 @@ def _parse_p_od_to_utc_ms(p_od: str) -> int:
         dt = datetime.strptime(p_od[:14], "%Y%m%d%H%M%S").replace(tzinfo=_JST)
         return int(dt.timestamp() * 1000)
     except ValueError:
-        logger.warning("p_OD パースエラー: %r", p_od)
-        return 0
+        logger.warning("p_OD パースエラー: %r、現在時刻で代替", p_od)
+        return int(_time.time() * 1000)
 
 
 def _parse_ec_frame(items: list[tuple[str, str]]) -> OrderEcEvent:
@@ -235,7 +235,11 @@ class TachibanaEventClient:
                 # 30 秒以上安定接続していた場合のみカウンタをリセット（即切断ループ防止）
                 if _time.monotonic() - _connect_time > 30.0:
                     retry_count = 0
-                break
+                # 正常クローズ後も reconnect_fn が None でなければ再接続試行する。
+                # reconnect_fn=None の場合は従来どおり終了する。
+                self.reset_seen_trades()
+                if reconnect_fn is None:
+                    break
             except Exception as exc:
                 logger.warning("EVENT WebSocket 受信エラー: %s", exc)
 
@@ -254,12 +258,32 @@ class TachibanaEventClient:
             logger.info("EVENT WebSocket 再接続待機 %.1f 秒 (attempt %d/%d)", backoff, retry_count, max_retries)
             await asyncio.sleep(backoff)
 
-            try:
-                current_ws = await reconnect_fn()
-                _connect_time = _time.monotonic()
-                logger.info("EVENT WebSocket 再接続成功")
-            except Exception as exc:
-                logger.warning("EVENT WebSocket 再接続失敗 (attempt %d): %s", retry_count, exc)
+            # reconnect_fn が失敗した場合は current_ws を更新せず再試行する。
+            # stale な current_ws を async for するとループ先頭で再び例外が発生し
+            # retry_count が二重インクリメントされるため、成功するまで
+            # ここで内側ループを回す（M-2 二重インクリメント修正）。
+            while True:
+                try:
+                    current_ws = await reconnect_fn()
+                    _connect_time = _time.monotonic()
+                    logger.info("EVENT WebSocket 再接続成功")
+                    break
+                except Exception as exc:
+                    logger.warning("EVENT WebSocket 再接続失敗 (attempt %d): %s", retry_count, exc)
+                    if retry_count >= max_retries:
+                        logger.error(
+                            "EVENT WebSocket 再接続上限 (%d 回) に達した。ループを終了する", max_retries
+                        )
+                        return
+                    retry_count += 1
+                    backoff = min(base_backoff * (2 ** (retry_count - 1)), 60.0)
+                    logger.info(
+                        "EVENT WebSocket 再接続待機 %.1f 秒 (attempt %d/%d)",
+                        backoff,
+                        retry_count,
+                        max_retries,
+                    )
+                    await asyncio.sleep(backoff)
 
     async def _process_frame(self, raw_frame: object, on_event: object) -> None:
         """1 つのフレームを処理する。

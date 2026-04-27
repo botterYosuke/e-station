@@ -412,6 +412,13 @@ pub struct SubmitOrderRequest {
     pub post_only: bool,
     pub reduce_only: bool,
     pub tags: Vec<String>,
+    /// xxh3_64 hash of the canonical order request, computed by Rust before sending.
+    /// Python uses this value verbatim when writing the WAL submit row so that
+    /// `OrderSessionState::load_from_wal()` can restore the idempotency map on
+    /// restart.  A value of `0` means "unknown / not computed" and causes the
+    /// WAL entry to be skipped during restore (H-E / architecture.md §4.1).
+    #[serde(default)]
+    pub request_key: u64,
 }
 
 /// Fields that can be modified on an existing order; `None` = unchanged.

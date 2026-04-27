@@ -126,6 +126,11 @@ def _env_dev_login_allowed() -> bool:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+        stream=sys.stderr,
+    )
     args = _parse_args()
 
     dev_tachibana_login_allowed = False

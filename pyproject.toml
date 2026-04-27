@@ -34,6 +34,9 @@ packages = ["python/engine"]
 asyncio_mode = "auto"
 pythonpath = ["python"]
 testpaths = ["python/tests"]
+markers = [
+    "demo_tachibana: requires real Tachibana demo account credentials (DEV_TACHIBANA_USER_ID / DEV_TACHIBANA_PASSWORD)",
+]
 
 [tool.pyright]
 extraPaths = ["python"]

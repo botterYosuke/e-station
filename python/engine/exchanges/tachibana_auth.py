@@ -285,7 +285,12 @@ async def login(
     url = build_auth_url(base, payload, sJsonOfmt="5")
 
     own_client = http_client is None
-    client = http_client or httpx.AsyncClient(timeout=15.0)
+    # Use explicit per-component timeouts instead of a single scalar.
+    # On Windows, a scalar timeout of 15.0 is treated as read-only and
+    # does not bound the connect phase when the virtual URL has expired
+    # (DNS resolves but TCP SYN never gets a reply), causing a silent hang.
+    _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
+    client = http_client or httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT)
     try:
         body = await _safe_get(client, url)
     finally:
@@ -338,7 +343,8 @@ async def _do_validate(
     url = build_request_url(session.url_master, payload, sJsonOfmt="4")
 
     own_client = http_client is None
-    client = http_client or httpx.AsyncClient(timeout=15.0)
+    _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
+    client = http_client or httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT)
     try:
         body = await _safe_get(client, url)
     finally:

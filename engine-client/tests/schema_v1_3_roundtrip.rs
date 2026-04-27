@@ -4,7 +4,7 @@
 
 use flowsurface_engine_client::dto::{
     Command, EngineEvent, OrderListFilter, OrderModifyChange, OrderSide, OrderType,
-    SubmitOrderRequest, TimeInForce,
+    SubmitOrderRequest, TimeInForce, TriggerType,
 };
 
 const CID: &str = "3e4d5f6a-7b8c-9d0e-1f2a-3b4c5d6e7f80";
@@ -32,6 +32,7 @@ fn submit_order_serializes_market_buy() {
             post_only: false,
             reduce_only: false,
             tags: vec!["cash_margin=cash".to_string()],
+            request_key: 0,
         },
     };
     let json = serde_json::to_string(&cmd).unwrap();
@@ -43,6 +44,7 @@ fn submit_order_serializes_market_buy() {
     assert!(json.contains(r#""time_in_force":"DAY""#), "got: {json}");
     assert!(json.contains(r#""post_only":false"#), "got: {json}");
     assert!(json.contains(r#""cash_margin=cash""#), "got: {json}");
+    assert!(json.contains(r#""request_key":0"#), "got: {json}");
 }
 
 #[test]
@@ -64,6 +66,7 @@ fn submit_order_serializes_limit_sell() {
             post_only: false,
             reduce_only: false,
             tags: vec![],
+            request_key: 0,
         },
     };
     let json = serde_json::to_string(&cmd).unwrap();
@@ -298,6 +301,18 @@ fn time_in_force_serializes_screaming_snake_case() {
     );
 }
 
+// ── C-1 (M-3): TriggerType SCREAMING_SNAKE_CASE roundtrip ────────────────────
+
+#[test]
+fn trigger_type_screaming_snake_case() {
+    let last = serde_json::to_string(&TriggerType::Last).unwrap();
+    assert_eq!(last, r#""LAST""#);
+    let bid_ask = serde_json::to_string(&TriggerType::BidAsk).unwrap();
+    assert_eq!(bid_ask, r#""BID_ASK""#);
+    let index = serde_json::to_string(&TriggerType::Index).unwrap();
+    assert_eq!(index, r#""INDEX""#);
+}
+
 /// SCHEMA_MINOR was 3 at schema 1.3; bumped to 4 in schema 1.4.
 /// This test verifies that the version has advanced past 3.
 #[test]
@@ -307,6 +322,70 @@ fn schema_minor_is_at_least_3() {
         "SCHEMA_MINOR should be >= 3, got {}",
         flowsurface_engine_client::SCHEMA_MINOR
     );
+}
+
+/// H-E: SCHEMA_MINOR bumped to 6 when request_key was added to SubmitOrderRequest.
+/// Pin this so accidental downgrades are caught immediately.
+#[test]
+fn schema_minor_is_6() {
+    assert_eq!(
+        flowsurface_engine_client::SCHEMA_MINOR,
+        6,
+        "SCHEMA_MINOR must be 6 after H-E request_key IPC addition, got {}",
+        flowsurface_engine_client::SCHEMA_MINOR
+    );
+}
+
+/// H-E: SubmitOrderRequest serializes request_key as a numeric field.
+/// Nonzero value round-trips correctly through JSON.
+#[test]
+fn submit_order_request_key_roundtrips() {
+    let req = SubmitOrderRequest {
+        client_order_id: CID.to_string(),
+        instrument_id: "7203.TSE".to_string(),
+        order_side: OrderSide::Buy,
+        order_type: OrderType::Market,
+        quantity: "100".to_string(),
+        price: None,
+        trigger_price: None,
+        trigger_type: None,
+        time_in_force: TimeInForce::Day,
+        expire_time_ns: None,
+        post_only: false,
+        reduce_only: false,
+        tags: vec![],
+        request_key: 1_234_567_890_u64,
+    };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(
+        json.contains(r#""request_key":1234567890"#),
+        "request_key must serialize as numeric: {json}"
+    );
+    let decoded: SubmitOrderRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.request_key, 1_234_567_890_u64);
+}
+
+/// H-E: SubmitOrderRequest without request_key in JSON defaults to 0 (backward compat).
+#[test]
+fn submit_order_request_key_defaults_to_zero_when_absent() {
+    // Simulate an old Rust sender that does not include request_key
+    let json = r#"{
+        "client_order_id": "old-cid",
+        "instrument_id": "7203.TSE",
+        "order_side": "BUY",
+        "order_type": "MARKET",
+        "quantity": "100",
+        "price": null,
+        "trigger_price": null,
+        "trigger_type": null,
+        "time_in_force": "DAY",
+        "expire_time_ns": null,
+        "post_only": false,
+        "reduce_only": false,
+        "tags": []
+    }"#;
+    let req: SubmitOrderRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(req.request_key, 0, "absent request_key must default to 0");
 }
 
 // ── M-4: SetSecondPassword / ForgetSecondPassword serialize ──────────────────

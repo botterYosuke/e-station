@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 1
-SCHEMA_MINOR: int = 5
+SCHEMA_MINOR: int = 6
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +199,8 @@ class SetSecondPassword(IpcMessage):
 class ForgetSecondPassword(IpcMessage):
     """Clear the second password from Python memory."""
 
+    model_config = ConfigDict(extra="forbid")
+
     op: Literal["ForgetSecondPassword"] = "ForgetSecondPassword"
 
 
@@ -222,10 +224,16 @@ class SubmitOrderRequest(IpcMessage):
     post_only: bool
     reduce_only: bool
     tags: list[str] = Field(default_factory=list)
+    # xxh3_64 computed by Rust before sending; 0 means unknown (skip WAL restore).
+    # H-E: passed through IPC so Python can write it verbatim to the WAL submit row,
+    # enabling OrderSessionState::load_from_wal() to restore the idempotency map.
+    request_key: int = 0
 
 
 class OrderModifyChange(IpcMessage):
     """Fields that can be modified on an existing order; None = unchanged."""
+
+    model_config = ConfigDict(extra="forbid")
 
     new_quantity: str | None = None
     new_price: str | None = None
@@ -592,6 +600,8 @@ class OrderExpired(IpcMessage):
 
 class OrderRecordWire(IpcMessage):
     """Single order record in OrderListUpdated."""
+
+    model_config = ConfigDict(extra="forbid")
 
     client_order_id: str | None = None
     venue_order_id: str

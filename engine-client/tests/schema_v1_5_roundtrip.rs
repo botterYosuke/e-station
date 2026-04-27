@@ -18,10 +18,12 @@ const TID: &str = "EDA-001";
 
 #[test]
 fn schema_minor_is_5() {
-    assert_eq!(
-        flowsurface_engine_client::SCHEMA_MINOR,
-        5,
-        "SCHEMA_MINOR must be 5 for Phase O2"
+    // H-E: SCHEMA_MINOR was bumped from 5 to 6 when request_key was added to
+    // SubmitOrderRequest.  This guard now checks for >= 5 (Phase O2 baseline).
+    assert!(
+        flowsurface_engine_client::SCHEMA_MINOR >= 5,
+        "SCHEMA_MINOR must be >= 5 for Phase O2, got {}",
+        flowsurface_engine_client::SCHEMA_MINOR
     );
 }
 

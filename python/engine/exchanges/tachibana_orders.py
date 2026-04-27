@@ -689,6 +689,7 @@ async def submit_order(
     *,
     p_no_counter: Optional[Any] = None,
     wal_path: Optional[Path] = None,
+    request_key: int = 0,
 ) -> SubmitOrderResult:
     """CLMKabuNewOrder を立花 REQUEST API に送信する（T0.4 + T0.6 + T0.7）。
 
@@ -702,6 +703,11 @@ async def submit_order(
 
     安全装置（T0.6）:
         - 本番 URL かつ TACHIBANA_ALLOW_PROD != "1" の場合は ValueError を raise
+
+    Args:
+        request_key: xxh3_64 hash computed by Rust (H-E / architecture.md §4.1).
+            Value of 0 means "unknown" — WAL restore will skip this entry.
+            Passed from IPC Command::SubmitOrder.request_key via server._do_submit_order.
 
     Raises:
         SessionExpiredError: p_errno=2 応答時
@@ -729,11 +735,6 @@ async def submit_order(
     # T0.7: WAL に submit 行を書く（HTTP 送信直前・fsync 必須）
     # p_no は _compose_request_payload() で既に確定済み
     submitted_p_no = int(payload["p_no"])
-
-    # request_key: submit 行のみに書くメタデータ（Rust 側で request_key 計算するが
-    # Python WAL では order.client_order_id をキーとして識別するため 0 を仮置き）
-    # TODO T0.7: xxh3_64 canonicalization は Rust 側で計算（architecture.md §4.1）
-    request_key: int = 0
 
     if wal_path is not None:
         wal_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1363,7 +1364,11 @@ async def cancel_all_orders(
     Returns:
         CancelAllResult（canceled_count / failed_count）
     """
-    from engine.exchanges.tachibana_helpers import PNoCounter
+    from engine.exchanges.tachibana_helpers import (
+        PNoCounter,
+        SecondPasswordInvalidError,
+        SessionExpiredError,
+    )
 
     if p_no_counter is None:
         p_no_counter = PNoCounter()
@@ -1400,9 +1405,20 @@ async def cancel_all_orders(
                 wal_path=wal_path,
             )
             canceled += 1
-        except Exception:
+        except SecondPasswordInvalidError:
             logger.warning(
-                "cancel_all_orders: failed to cancel venue_order_id=%s", record.venue_order_id
+                "cancel_all_orders: second_password invalid for %s", record.venue_order_id
+            )
+            failed += 1
+            raise  # _do_cancel_all_orders で on_invalid() を呼ばせる
+        except SessionExpiredError:
+            logger.error(
+                "cancel_all_orders: session expired for %s", record.venue_order_id
+            )
+            raise  # セッション切れは全ループ中断
+        except Exception as e:
+            logger.warning(
+                "cancel_all_orders: failed to cancel %s: %s", record.venue_order_id, e
             )
             failed += 1
 
