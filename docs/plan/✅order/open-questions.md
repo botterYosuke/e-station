@@ -93,6 +93,12 @@
 
 ---
 
+### Q-CI-1. `cargo test --workspace` の CI ジョブ未設定
+
+**Q-CI-1: `cargo test --workspace` の CI ジョブ未設定** — `.github/workflows/` に Rust テストを実行するジョブが存在しない。`python-tests.yml` / `format.yml` / `lint.yml` はあるが Rust 統合テスト（`engine-client/tests/`・`src/api/order_api.rs`）がCIゲートされていない。Phase O1 着手前に `rust-tests.yml` を新設することを推奨（`cargo test --workspace` を `pull_request` + `push: branches: [main]` で実行）。
+
+---
+
 ## 着手後に決めれば良い事項
 
 - 監査ログのローテーション戦略（日次 / サイズベース / 圧縮）

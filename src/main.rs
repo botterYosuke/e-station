@@ -710,6 +710,11 @@ enum Message {
     /// User confirmed the order dialog; forward `ConfirmSubmit` to the focused
     /// `OrderEntryPanel` and then process the resulting `SubmitOrder` IPC call.
     ConfirmOrderEntrySubmit,
+    /// User confirmed the cancel-order dialog; send `CancelOrder` IPC.
+    ConfirmCancelOrder {
+        client_order_id: String,
+        venue_order_id: String,
+    },
     /// `OrderAccepted` IPC event — reset `submitting` on the matching
     /// `OrderEntryPanel` and surface a toast.
     OrderAccepted {
@@ -1651,32 +1656,17 @@ impl Flowsurface {
                                     client_order_id,
                                     venue_order_id,
                                 } => {
-                                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                                        return Task::perform(
-                                            async move {
-                                                conn.send(
-                                                    engine_client::dto::Command::CancelOrder {
-                                                        request_id: uuid::Uuid::new_v4()
-                                                            .to_string(),
-                                                        venue: crate::TACHIBANA_VENUE_NAME
-                                                            .to_string(),
-                                                        client_order_id,
-                                                        venue_order_id,
-                                                    },
-                                                )
-                                                .await
-                                                .map_err(|e| e.to_string())
-                                            },
-                                            |res| match res {
-                                                Ok(()) => Message::OrderToast(Toast::info(
-                                                    "注文取消送信".to_string(),
-                                                )),
-                                                Err(err) => Message::OrderToast(Toast::error(
-                                                    format!("注文取消失敗: {err}"),
-                                                )),
-                                            },
-                                        );
-                                    }
+                                    let body =
+                                        format!("注文 {} を取り消しますか？", client_order_id);
+                                    let dialog = screen::ConfirmDialog::new(
+                                        body,
+                                        Box::new(Message::ConfirmCancelOrder {
+                                            client_order_id,
+                                            venue_order_id,
+                                        }),
+                                    )
+                                    .with_confirm_btn_text("取消実行".to_string());
+                                    self.confirm_dialog = Some(dialog);
                                     Task::none()
                                 }
                             }
@@ -1762,6 +1752,33 @@ impl Flowsurface {
                     "注文を確定するには発注ペインをクリックしてください".to_string(),
                 ));
                 return Task::none();
+            }
+            // ── Phase U1: 注文取消確認ダイアログ → CancelOrder IPC ─────────────
+            Message::ConfirmCancelOrder {
+                client_order_id,
+                venue_order_id,
+            } => {
+                self.confirm_dialog = None;
+                if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                    return Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::CancelOrder {
+                                request_id: uuid::Uuid::new_v4().to_string(),
+                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                client_order_id,
+                                venue_order_id,
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        |res| match res {
+                            Ok(()) => Message::OrderToast(Toast::info("注文取消送信".to_string())),
+                            Err(err) => {
+                                Message::OrderToast(Toast::error(format!("注文取消失敗: {err}")))
+                            }
+                        },
+                    );
+                }
             }
             // ── Phase U0: 第二暗証番号 modal ──────────────────────────────────
             Message::SecondPasswordRequired(request_id) => {
@@ -2775,8 +2792,17 @@ impl Flowsurface {
                 }
             }
             // Phase U-pre: Order menu is rendered inline in the sidebar itself.
-            // No overlay modal is needed here.
-            sidebar::Menu::Order => base,
+            sidebar::Menu::Order => {
+                if let Some(dialog) = &self.confirm_dialog {
+                    let dialog_content = confirm_dialog_container(
+                        dialog.clone(),
+                        Message::ToggleDialogModal(None),
+                    );
+                    main_dialog_modal(base, dialog_content, Message::ToggleDialogModal(None))
+                } else {
+                    base
+                }
+            }
         }
     }
 

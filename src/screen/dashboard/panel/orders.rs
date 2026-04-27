@@ -243,4 +243,87 @@ mod tests {
         panel.set_orders(records);
         assert_eq!(panel.order_count(), 2);
     }
+
+    /// T2.4: After `OrderListUpdated` → `set_orders`, cancelling a known order
+    /// resolves venue_order_id and produces a `CancelOrder` action.
+    #[test]
+    fn cancel_clicked_known_order_returns_cancel_action_with_venue_id() {
+        use engine_client::dto::{OrderRecordWire, OrderSide, OrderType, TimeInForce};
+        let mut panel = OrdersPanel::new();
+
+        let record = OrderRecordWire {
+            client_order_id: Some("c-42".to_string()),
+            venue_order_id: "v-99".to_string(),
+            instrument_id: "7203.TSE".to_string(),
+            order_side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: "100".to_string(),
+            filled_qty: "0".to_string(),
+            leaves_qty: "100".to_string(),
+            price: None,
+            trigger_price: None,
+            time_in_force: TimeInForce::Day,
+            expire_time_ns: None,
+            status: "OPEN".to_string(),
+            ts_event_ms: 0,
+        };
+        panel.set_orders(vec![record]);
+
+        let action = update(
+            &mut panel,
+            Message::CancelClicked {
+                client_order_id: "c-42".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                &action,
+                Some(Action::CancelOrder {
+                    client_order_id,
+                    venue_order_id,
+                }) if client_order_id == "c-42" && venue_order_id == "v-99"
+            ),
+            "expected CancelOrder with correct ids, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn set_orders_replaces_previous_list() {
+        use engine_client::dto::{OrderRecordWire, OrderSide, OrderType, TimeInForce};
+        let mut panel = OrdersPanel::new();
+
+        let make_record = |cid: &str, vid: &str| OrderRecordWire {
+            client_order_id: Some(cid.to_string()),
+            venue_order_id: vid.to_string(),
+            instrument_id: "7203.TSE".to_string(),
+            order_side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: "100".to_string(),
+            filled_qty: "0".to_string(),
+            leaves_qty: "100".to_string(),
+            price: None,
+            trigger_price: None,
+            time_in_force: TimeInForce::Day,
+            expire_time_ns: None,
+            status: "OPEN".to_string(),
+            ts_event_ms: 0,
+        };
+
+        panel.set_orders(vec![make_record("c-1", "v-1"), make_record("c-2", "v-2")]);
+        assert_eq!(panel.order_count(), 2);
+
+        panel.set_orders(vec![make_record("c-3", "v-3")]);
+        assert_eq!(panel.order_count(), 1, "set_orders should replace previous list");
+
+        let action = update(
+            &mut panel,
+            Message::CancelClicked {
+                client_order_id: "c-1".to_string(),
+            },
+        );
+        assert!(
+            action.is_none(),
+            "stale order c-1 should not be cancellable after replacement"
+        );
+    }
 }

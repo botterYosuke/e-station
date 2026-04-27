@@ -2408,7 +2408,7 @@ impl Content {
         }
     }
 
-    fn initialized(&self) -> bool {
+    pub fn initialized(&self) -> bool {
         match self {
             Content::Heatmap { chart, .. } => chart.is_some(),
             Content::ShaderHeatmap { chart, .. } => chart.is_some(),

@@ -1095,6 +1095,10 @@ impl Dashboard {
                         pane::Content::Ladder(panel) => {
                             if let Some(panel) = panel {
                                 panel.insert_depth(depth, depth_update_t);
+                            } else {
+                                log::warn!(
+                                    "depth data for {stream:?} arrived before Ladder was initialized — dropped"
+                                );
                             }
                         }
                         _ => {
@@ -1268,6 +1272,21 @@ impl Dashboard {
     ) -> Task<Message> {
         if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id) {
             state.streams = ResolvedStream::Ready(streams.clone());
+
+            // Eagerly initialize content so that data arriving in the very next
+            // frame (e.g. a DepthSnapshot sent immediately by Python on Subscribe)
+            // is not silently dropped into Content::Ladder(None).
+            if !state.content.initialized() {
+                match state.stream_pair_kind() {
+                    Some(StreamPairKind::SingleSource(ticker)) => {
+                        state.set_content_and_streams(vec![ticker], state.content.kind());
+                    }
+                    Some(StreamPairKind::MultiSource(tickers)) => {
+                        state.set_content_and_streams(tickers, state.content.kind());
+                    }
+                    None => {}
+                }
+            }
         }
         self.refresh_streams(main_window)
     }
