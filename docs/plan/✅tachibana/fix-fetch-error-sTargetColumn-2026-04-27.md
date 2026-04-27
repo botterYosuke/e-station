@@ -105,3 +105,17 @@ list_return = dic_return.get('aCLMMfdsMarketPrice')
 - [ ] 7. review-fix-loop
 - ✅ 8. /bug-postmortem (MISSES.md に「API 仕様固定なし」パターンを追記)
 - ✅ 9. リグレッション確認: 修正前 5 FAIL → 修正後 5 PASS を自動スクリプトで実証
+
+## レビュー反映 (2026-04-27, ラウンド 1)
+
+### 解消した指摘
+- ✅ SFH-M1: `_row_to_kline` None 返却時にデバッグログを追加（呼び出し元ループで `sDate` を記録）
+- ✅ SFH-M2: `fetch_klines` で非 dict 応答時に `TachibanaError(parse_error)` を即 raise（`check_response` スキップ排除）
+- ✅ GP-M2: `_row_to_kline` で OHLC フィールドが空文字の行を `None` 返却でスキップ
+
+### 持ち越し（既存挙動・今回修正スコープ外）
+- SFH-H1: `fetch_depth_snapshot` が `session=None` で `{}` 返却（`fetch_klines` と非対称）— 既存テスト `test_fetch_depth_snapshot_returns_empty_dict_when_session_is_none` が承認済み設計のため保留
+- SFH-M3: `stream_trades`/`stream_depth` の `session=None` silent return — 今回スコープ外
+
+### GP-M1: NOT A BUG（設計上の差異）
+`_row_to_kline` の `open_time_ms` は「日足開始時刻 = 0:00 JST」、`data_loader.py` の `_date_to_ts_ns` は「大引け = 15:30 JST」を `ts_event` として使う別用途。バグではない。

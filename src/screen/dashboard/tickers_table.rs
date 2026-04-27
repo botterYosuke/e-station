@@ -596,36 +596,41 @@ impl TickersTable {
             .filter(|(t, _)| self.tickers_info.contains_key(t) && t.exchange.venue() == venue);
 
         for (ticker, new_stats) in iter {
-            let precision = self
+            // Prefer the canonical Ticker from tickers_info: it carries the display_symbol
+            // set during metadata fetch (e.g. sIssueNameEizi for Tachibana), whereas the
+            // stats key is built with Ticker::new() and has no display_symbol.
+            let (canonical, precision) = self
                 .tickers_info
-                .get(&ticker)
-                .and_then(|info| info.as_ref().map(|ti| ti.min_ticksize));
+                .get_key_value(&ticker)
+                .map(|(k, info)| (*k, info.as_ref().map(|ti| ti.min_ticksize)))
+                .unwrap_or((ticker, None));
 
             if let Some(&idx) = self.row_index.get(&ticker) {
                 let row = &mut self.ticker_rows[idx];
+                row.ticker = canonical;
                 let previous_price = Some(row.stats.mark_price);
                 row.previous_stats = Some(row.stats);
                 row.stats = new_stats;
 
                 self.display_cache.insert(
-                    ticker,
-                    compute_display_data(&ticker, &row.stats, previous_price, precision),
+                    canonical,
+                    compute_display_data(&canonical, &row.stats, previous_price, precision),
                 );
             } else {
                 let new_row = TickerRowData {
-                    exchange: ticker.exchange,
-                    ticker,
+                    exchange: canonical.exchange,
+                    ticker: canonical,
                     stats: new_stats,
                     previous_stats: None,
-                    is_favorited: self.favorited_tickers.contains(&ticker),
+                    is_favorited: self.favorited_tickers.contains(&canonical),
                 };
                 self.ticker_rows.push(new_row);
                 let idx = self.ticker_rows.len() - 1;
-                self.row_index.insert(ticker, idx);
+                self.row_index.insert(canonical, idx);
 
                 self.display_cache.insert(
-                    ticker,
-                    compute_display_data(&ticker, &self.ticker_rows[idx].stats, None, precision),
+                    canonical,
+                    compute_display_data(&canonical, &self.ticker_rows[idx].stats, None, precision),
                 );
             }
         }

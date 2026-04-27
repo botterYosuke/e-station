@@ -448,7 +448,12 @@ class TachibanaWorker(ExchangeWorker):
         from engine.schemas import MarketPriceHistoryResponse  # local import (cycle-safe)
 
         data = json.loads(decode_response_body(body))
-        err = check_response(data) if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise TachibanaError(
+                code="parse_error",
+                message=f"CLMMfdsGetMarketPriceHistory: expected dict response, got {type(data).__name__}",
+            )
+        err = check_response(data)
         if err is not None:
             raise err
         parsed = MarketPriceHistoryResponse.model_validate(data)
@@ -456,7 +461,12 @@ class TachibanaWorker(ExchangeWorker):
         rows: list[dict] = []
         for raw in parsed.aCLMMfdsMarketPriceHistory:
             row = self._row_to_kline(raw)
-            if row is not None:
+            if row is None:
+                log.debug(
+                    "[tachibana] fetch_klines: skipped invalid row sDate=%r",
+                    raw.get("sDate"),
+                )
+            else:
                 rows.append(row)
         # Tachibana returns oldest-first; honour the caller's `limit`
         # by trimming to the most recent N entries.
@@ -483,13 +493,20 @@ class TachibanaWorker(ExchangeWorker):
         except ValueError:
             return None
         open_time_ms = int(jst_midnight.timestamp() * 1000)
+        open_p = str(row.get("pDOP", "")).strip()
+        high_p = str(row.get("pDHP", "")).strip()
+        low_p = str(row.get("pDLP", "")).strip()
+        close_p = str(row.get("pDPP", "")).strip()
+        volume_v = str(row.get("pDV", "")).strip()
+        if not (open_p and high_p and low_p and close_p):
+            return None
         return {
             "open_time_ms": open_time_ms,
-            "open": str(row.get("pDOP", "")),
-            "high": str(row.get("pDHP", "")),
-            "low": str(row.get("pDLP", "")),
-            "close": str(row.get("pDPP", "")),
-            "volume": str(row.get("pDV", "")),
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
+            "close": close_p,
+            "volume": volume_v,
             "is_closed": True,
         }
 

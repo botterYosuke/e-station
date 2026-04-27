@@ -1,7 +1,15 @@
-"""TDD: HIGH-U-11 — non-1d timeframe fetch_klines is rejected at the worker boundary."""
+"""TDD tests for fetch_klines rejection scenarios.
+
+Covers:
+- HIGH-U-11: non-1d timeframe is rejected at the worker boundary
+- M-1: invalid sDate rows are skipped with debug log
+- M-2: non-dict API response raises TachibanaError(parse_error)
+- M-3: OHLC empty-string rows are skipped
+"""
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -9,6 +17,7 @@ import pytest
 
 from engine.exchanges.tachibana import TachibanaWorker, VenueCapabilityError
 from engine.exchanges.tachibana_auth import TachibanaSession
+from engine.exchanges.tachibana_helpers import TachibanaError
 from engine.exchanges.tachibana_url import EventUrl, MasterUrl, PriceUrl, RequestUrl
 
 
@@ -99,3 +108,111 @@ async def test_fetch_klines_sends_sIssueCode_not_sTargetIssueCode(tmp_path: Path
     assert '"sTargetIssueCode"' not in decoded, f"sTargetIssueCode must not appear: {decoded}"
     assert '"sSizyouC"' in decoded, f"sSizyouC missing from payload: {decoded}"
     assert '"sTargetSizyouC"' not in decoded, f"sTargetSizyouC must not appear: {decoded}"
+
+
+# ---------------------------------------------------------------------------
+# M-1: invalid sDate rows are skipped; valid rows are returned; log emitted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_klines_skips_invalid_sdate_and_returns_valid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M-1: row with bad sDate is skipped with a debug log; valid row still returned."""
+    worker = _stubbed_worker(tmp_path)
+
+    async def _fake_get(url: str) -> bytes:
+        body = (
+            '{"sCLMID":"CLMMfdsGetMarketPriceHistory","sResultCode":"0",'
+            '"aCLMMfdsMarketPriceHistory":['
+            '{"sDate":"BADDATE","pDOP":"100","pDHP":"110","pDLP":"90","pDPP":"105","pDV":"1000"},'
+            '{"sDate":"20260424","pDOP":"2860","pDHP":"2900","pDLP":"2800","pDPP":"2880","pDV":"123456"}'
+            "]}"
+        )
+        return body.encode("shift_jis")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.DEBUG, logger="engine.exchanges.tachibana"):
+        result = await worker.fetch_klines("7203", "stock", "1d", limit=10)
+
+    # Only the valid row is returned.
+    assert len(result) == 1
+    assert result[0]["open"] == "2860"
+
+    # A debug log mentioning the bad sDate must have been emitted.
+    assert any(
+        "skipped" in r.message and "BADDATE" in r.message
+        for r in caplog.records
+        if r.levelno == logging.DEBUG
+    ), f"Expected skip-log not found in: {[r.message for r in caplog.records]}"
+
+
+# ---------------------------------------------------------------------------
+# M-2: non-dict API response raises TachibanaError(parse_error)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_klines_raises_parse_error_on_list_response(tmp_path: Path) -> None:
+    """M-2: when the API returns a JSON array instead of a dict, TachibanaError is raised."""
+    worker = _stubbed_worker(tmp_path)
+
+    async def _fake_get(_url: str) -> bytes:
+        return b"[1, 2, 3]"
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+
+    with pytest.raises(TachibanaError) as excinfo:
+        await worker.fetch_klines("7203", "stock", "1d", limit=10)
+
+    assert excinfo.value.code == "parse_error"
+    assert "dict" in excinfo.value.message.lower()
+
+
+# ---------------------------------------------------------------------------
+# M-3: OHLC empty-string rows are skipped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "empty_field",
+    ["pDOP", "pDHP", "pDLP", "pDPP"],
+)
+async def test_fetch_klines_skips_row_with_empty_ohlc_field(
+    tmp_path: Path, empty_field: str
+) -> None:
+    """M-3: a row where any of OHLC is empty string is skipped; valid sibling row returned."""
+    worker = _stubbed_worker(tmp_path)
+
+    base = {"pDOP": "100", "pDHP": "110", "pDLP": "90", "pDPP": "105", "pDV": "500"}
+    bad = {**base, empty_field: ""}
+
+    import json as _json
+
+    rows = [
+        bad,
+        {"sDate": "20260424", **base},
+    ]
+    # Attach sDate only to bad row too so the date parse succeeds and we reach OHLC check.
+    rows[0]["sDate"] = "20260423"
+
+    async def _fake_get(url: str) -> bytes:
+        body = _json.dumps(
+            {
+                "sCLMID": "CLMMfdsGetMarketPriceHistory",
+                "sResultCode": "0",
+                "aCLMMfdsMarketPriceHistory": rows,
+            }
+        )
+        return body.encode("utf-8")
+
+    worker._http_get = AsyncMock(side_effect=_fake_get)  # type: ignore[method-assign]
+
+    result = await worker.fetch_klines("7203", "stock", "1d", limit=10)
+
+    # Only the row with all OHLC populated must survive.
+    assert len(result) == 1
+    assert result[0]["open"] == "100"
