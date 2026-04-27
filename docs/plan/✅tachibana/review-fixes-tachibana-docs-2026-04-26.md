@@ -1,6 +1,6 @@
-# docs/plan/tachibana 全体 PlanLoop 修正ログ — 2026-04-26
+# docs/plan/✅tachibana 全体 PlanLoop 修正ログ — 2026-04-26
 
-対象: `docs/plan/tachibana/` 全計画文書
+対象: `docs/plan/✅tachibana/` 全計画文書
 スキル: `.claude/skills/review-fix-loop/PlanLoop.md`
 着手: 2026-04-26
 ブランチ: `tachibana/phase-1/T4-B2`
@@ -134,7 +134,7 @@
 - implementation-plan.md: B2/B5 完了記録整理、holiday_fallback テスト関数名修正、T7 CI 組込タスク追記
 - open-questions.md: Q9 決定済みマーク追記
 - README.md: implementation-plan-T3.5.md の説明追加
-ログ: docs/plan/tachibana/review-fixes-tachibana-docs-2026-04-26.md
+ログ: docs/plan/✅tachibana/review-fixes-tachibana-docs-2026-04-26.md
 ```
 
 ---
@@ -156,5 +156,5 @@
 - func_replace_urlecnode: JSON 全体一度通す規約を明記
 - validate_session_on_startup: session=None cold start の条件分岐を明記
 - secret_scan allowlist 方式を明記
-ログ: docs/plan/tachibana/review-fixes-tachibana-docs-2026-04-26.md
+ログ: docs/plan/✅tachibana/review-fixes-tachibana-docs-2026-04-26.md
 ```

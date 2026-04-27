@@ -1,6 +1,6 @@
 # 立花 注文計画 レビュー修正ログ（2026-04-26）
 
-> 前日ログ: docs/plan/order/review-fixes-2026-04-25.md（ラウンド 1〜6 完了）
+> 前日ログ: docs/plan/✅order/review-fixes-2026-04-25.md（ラウンド 1〜6 完了）
 
 ## ラウンド 1（2026-04-26）
 
@@ -29,6 +29,6 @@
 | Finding ID | 観点 | 対象ファイル | 修正概要 |
 |---|---|---|---|
 | A-M1 R8 | 文書間整合 | spec.md:206 | `#23-順序とエラーモデル` → `#23-取消フローphase-o1` に修正 |
-| A-D-M2 R8 | テスト不足 | docs/plan/order/invariant-tests.md | 不変条件 ID ↔ test 関数名対応表を新規作成 |
+| A-D-M2 R8 | テスト不足 | docs/plan/✅order/invariant-tests.md | 不変条件 ID ↔ test 関数名対応表を新規作成 |
 | C-M1 R8 | 仕様漏れ | architecture.md §4.2 | WAL accepted 行に warning_code/warning_text（null 可）を追加 |
 | C-M2 R8 | 仕様漏れ | architecture.md §4.2 / implementation-plan.md T0.7 | accepted/rejected 行の f.flush() 直接呼び出し許容を明記 |

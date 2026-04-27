@@ -189,7 +189,7 @@
   - `submit_order(Order)` → `tachibana_orders.submit_order(session, second_password, NautilusOrderEnvelope.from_nautilus(order))`
   - `modify_order` → `tachibana_orders.modify_order(...)`
   - `cancel_order` → `tachibana_orders.cancel_order(...)`
-- [ ] 立花 API 写像（`OrderType` / `TimeInForce` / `cash_margin` / `account_type`）は **[order/spec.md §6](../order/spec.md#6-nautilus_trader-互換要件不変条件) と [data-mapping.md](./data-mapping.md) に従う**。本ファイル内に重複定義しない
+- [ ] 立花 API 写像（`OrderType` / `TimeInForce` / `cash_margin` / `account_type`）は **[order/spec.md §6](../✅order/spec.md#6-nautilus_trader-互換要件不変条件) と [data-mapping.md](./data-mapping.md) に従う**。本ファイル内に重複定義しない
 
 ### N2.2 EC frame → nautilus イベント変換
 - [ ] `python/engine/nautilus/clients/tachibana_event_bridge.py` 新設
@@ -205,7 +205,7 @@
 
 ### N2.4 市場時間帯ガード（M2）
 - [ ] 立花 venue が `Disconnected{reason:"market_closed"}` の間は `LiveExecutionClient.start()` を保留する
-- [ ] HTTP API 層 (`order_api.rs`) で `MARKET_CLOSED` を先行 reject（[order/spec.md §5.2](../order/spec.md#52-reason_code-体系観測性)）
+- [ ] HTTP API 層 (`order_api.rs`) で `MARKET_CLOSED` を先行 reject（[order/spec.md §5.2](../✅order/spec.md#52-reason_code-体系観測性)）
 - [ ] nautilus 内部で reject されてナラティブが汚染されないよう、ExecutionClient `start()` 前に `RiskEngine` への渡し前段で stop する経路を確認
 
 ### N2.5 セーフティ（order/ と二重ガード）
@@ -215,7 +215,7 @@
 
 ### N2.6 E2E と単体テスト
 - [ ] `s70_tachibana_nautilus_demo_order.py`（CI には載せない、ローカル手動。デモ環境クレデンシャルが必要）
-- [ ] ユニットテスト: nautilus `OrderFactory` から発注 → adapter → mock `tachibana_orders` の往復で order/ の **`OrderType` 全 6 種 + `TimeInForce` 全 7 種**（[order/spec.md §6.1](../order/spec.md#61-用語型の整合必須)）を検証
+- [ ] ユニットテスト: nautilus `OrderFactory` から発注 → adapter → mock `tachibana_orders` の往復で order/ の **`OrderType` 全 6 種 + `TimeInForce` 全 7 種**（[order/spec.md §6.1](../✅order/spec.md#61-用語型の整合必須)）を検証
 - [ ] **追加テスト**: 部分約定 EC を 2 件流して `cumulative_qty` / `leaves_qty` が nautilus `OrderFilled` で正しく累積すること
 - [ ] **追加テスト**: cancel リクエスト送信中に EC fill が来るレースで `OrderStatus` が壊れないこと
 - [ ] **追加テスト**: 同一 `p_eda_no` の EC 重複受信で `OrderFilled` が 1 回しか発火しないこと
@@ -245,7 +245,7 @@
 ## 横断タスク
 
 - [ ] `docs/plan/README.md` の Phase 2 セクションを「nautilus 統合」に書き換え（N1 完了直後）
-- [ ] `docs/plan/tachibana/implementation-plan.md` の Phase 2（発注）タスクが [docs/plan/order/](../order/) と本計画 N2 に分離されていることを再確認し、引退表示を update（N2 着手時）
+- [ ] `docs/plan/✅tachibana/implementation-plan.md` の Phase 2（発注）タスクが [docs/plan/✅order/](../✅order/) と本計画 N2 に分離されていることを再確認し、引退表示を update（N2 着手時）
 - [ ] CLAUDE.md / SKILL.md（tachibana）に nautilus 経由の発注フローを追記:
   - SKILL.md L8 警告ブロック近傍に「N2 以降は `tachibana_orders.*` が `LiveExecutionClient` adapter 経由で nautilus から呼ばれる」追記
   - SKILL.md R10 に nautilus persistence 無効方針の参照リンク

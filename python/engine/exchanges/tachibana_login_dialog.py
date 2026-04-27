@@ -1,6 +1,6 @@
 """Tkinter login dialog helper for the Tachibana e-shiten venue.
 
-Architecture: [docs/plan/tachibana/architecture.md §7.4](../../../docs/plan/tachibana/architecture.md#74).
+Architecture: [docs/plan/✅tachibana/architecture.md §7.4](../../../docs/plan/✅tachibana/architecture.md#74).
 
 Run as a subprocess of `engine.exchanges.tachibana_login_flow`:
 
@@ -249,7 +249,7 @@ def main() -> int:
         "--auto-cancel",
         action="store_true",
         help=(
-            "Immediately emit {\"status\":\"cancelled\"} without reading stdin or "
+            'Immediately emit {"status":"cancelled"} without reading stdin or '
             "showing a dialog. Used by CI tkinter smoke tests (F-M2c) and the "
             "E2E cancel-injection path to verify the cancel contract without a "
             "real display server or user interaction."

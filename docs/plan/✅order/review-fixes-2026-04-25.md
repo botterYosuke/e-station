@@ -72,7 +72,7 @@
 | C-R2-L3 R2 | 仕様漏れ | architecture.md §4.2 | `p_errno=""` 正常時は WAL に rejected 行を書かない注記 |
 | D2-H1 R2 | テスト不足 | implementation-plan.md 横断タスク | nautilus 互換境界 lint を CI ゲート（`.github/workflows/*.yml`）に組込明記 |
 | D2-H2 R2 | テスト不足 | implementation-plan.md T0.7 | `python/tests/test_audit_log_no_secret.py` で WAL に第二暗証番号値が出ないことを assert |
-| D2-M1 R2 | テスト不足 | implementation-plan.md Tpre.6 | `docs/plan/order/invariant-tests.md` に不変条件 ID ↔ test 関数名の対応表を作成 |
+| D2-M1 R2 | テスト不足 | implementation-plan.md Tpre.6 | `docs/plan/✅order/invariant-tests.md` に不変条件 ID ↔ test 関数名の対応表を作成 |
 | D2-M2 R2 | テスト不足 | implementation-plan.md T0.6 | `cargo test --test order_rate_limit`（N+1 連打で 429 + `RATE_LIMITED`） |
 | D2-M3 R2 | テスト不足 | implementation-plan.md T0.3 | `python/tests/test_second_password_idle_forget.py` |
 | D2-M4 R2 | テスト不足 | implementation-plan.md T0.4 / T0.7 | `python/tests/test_p_no_counter_monotonic.py`（再起動・time freeze） |

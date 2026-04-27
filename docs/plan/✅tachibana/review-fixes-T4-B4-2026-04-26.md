@@ -57,7 +57,7 @@ LOW 9 件は B5 へ繰越 (TickerMetaMap 再エクスポート、Option<&TickerD
 | M3 | est | engine-client/src/connection.rs + implementation-plan.md §T7 | reconnect 時 capabilities snapshot 更新の `capabilities_changed_after_reconnect` pin test を T7 で追加予定の旨を計画書に 1 行追記 |
 
 ### 本ドキュメント担当の修正範囲
-- `docs/plan/tachibana/implementation-plan.md` §T4 (B5 繰越行) に H2 callsite 明記を追記
-- `docs/plan/tachibana/implementation-plan.md` §T4 末尾に H3 Phase 1 reconnect モデルの設計仮定を新項目として追加
-- `docs/plan/tachibana/implementation-plan.md` §T7 に M3 `capabilities_changed_after_reconnect` pin test 追加予定を新項目として追加
+- `docs/plan/✅tachibana/implementation-plan.md` §T4 (B5 繰越行) に H2 callsite 明記を追記
+- `docs/plan/✅tachibana/implementation-plan.md` §T4 末尾に H3 Phase 1 reconnect モデルの設計仮定を新項目として追加
+- `docs/plan/✅tachibana/implementation-plan.md` §T7 に M3 `capabilities_changed_after_reconnect` pin test 追加予定を新項目として追加
 - 本ログ末尾に R3 セクションを追記

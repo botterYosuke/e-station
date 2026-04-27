@@ -23,10 +23,10 @@
 ### 必読ドキュメント
 
 ```text
-{{plan_doc}}              # 例: docs/plan/tachibana/implementation-plan.md
-{{spec_doc}}              # 例: docs/plan/tachibana/spec.md
-{{architecture_doc}}      # 例: docs/plan/tachibana/architecture.md
-{{open_questions_doc}}    # 例: docs/plan/tachibana/open-questions.md
+{{plan_doc}}              # 例: docs/plan/✅tachibana/implementation-plan.md
+{{spec_doc}}              # 例: docs/plan/✅tachibana/spec.md
+{{architecture_doc}}      # 例: docs/plan/✅tachibana/architecture.md
+{{open_questions_doc}}    # 例: docs/plan/✅tachibana/open-questions.md
 {{feature_skill}}         # 例: .claude/skills/tachibana/SKILL.md
 .claude/skills/bug-postmortem/MISSES.md
 .claude/skills/review-fix-loop/SKILL.md
@@ -127,16 +127,16 @@ repo_name:           e-station
 feature:             立花証券統合
 phase_id:            T3
 phase_title:         クレデンシャル受け渡し配線
-plan_doc:            docs/plan/tachibana/implementation-plan.md
-spec_doc:            docs/plan/tachibana/spec.md
-architecture_doc:    docs/plan/tachibana/architecture.md
-open_questions_doc:  docs/plan/tachibana/open-questions.md
+plan_doc:            docs/plan/✅tachibana/implementation-plan.md
+spec_doc:            docs/plan/✅tachibana/spec.md
+architecture_doc:    docs/plan/✅tachibana/architecture.md
+open_questions_doc:  docs/plan/✅tachibana/open-questions.md
 feature_skill:       .claude/skills/tachibana/SKILL.md
 test_glob:           python/tests/test_tachibana_*.py
-out_of_scope_paths:  docs/plan/order/
+out_of_scope_paths:  docs/plan/✅order/
                      .claude/skills/<other>/
                      docs/wiki/
-plan_doc_style_ref:  docs/plan/tachibana/implementation-plan.md L154-185 (T2 スタイル)
+plan_doc_style_ref:  docs/plan/✅tachibana/implementation-plan.md L154-185 (T2 スタイル)
 verify_cmds:         cargo check --workspace
                      cargo clippy --workspace -- -D warnings
                      cargo fmt --check

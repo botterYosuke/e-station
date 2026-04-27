@@ -5,7 +5,7 @@
 //! connection and manager handles flow into `update()` through the
 //! `Flowsurface` struct (populated by a `Subscription`).
 //!
-//! See `docs/plan/tachibana/implementation-plan-T3.5.md` §3 Step A.
+//! See `docs/plan/✅tachibana/implementation-plan-T3.5.md` §3 Step A.
 
 use syn::visit::Visit;
 

@@ -70,7 +70,7 @@
 
 [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（schema 1.4）。
 
-**`SubmitOrder` / `CancelOrder` / `ModifyOrder` および全 `Order*` イベントは [order/architecture.md §3](../order/architecture.md#3-ipc-スキーマ拡張schema-12--13) で schema 1.3 として設計定義済み（dto.rs への追加は order/ Phase O-pre で実施予定・現時点未実装）**。本計画は **発注系を再定義しない**。本計画で追加するのは backtest engine ライフサイクルのみ:
+**`SubmitOrder` / `CancelOrder` / `ModifyOrder` および全 `Order*` イベントは [order/architecture.md §3](../✅order/architecture.md#3-ipc-スキーマ拡張schema-12--13) で schema 1.3 として設計定義済み（dto.rs への追加は order/ Phase O-pre で実施予定・現時点未実装）**。本計画は **発注系を再定義しない**。本計画で追加するのは backtest engine ライフサイクルのみ:
 
 > **実装状態**: 以下のコードブロックは N0.2/N1.1 で dto.rs に追加予定（現時点未実装）。
 
@@ -186,6 +186,6 @@ Python: nautilus_trader + 既存 venue worker + narrative store + (任意) FastA
 
 そのため:
 - nautilus 関連コードは **`engine-client` IPC を介さず直接 Python から叩ける**よう、`engine_runner.py` に CLI / library 二系統のエントリを切る
-- 立花 Phase 1 の tkinter ログイン UI は **subprocess 隔離経由**でのみ再利用する（[tachibana/architecture.md §7.3「プロセスモデル: ログインヘルパー subprocess」](../tachibana/architecture.md#73-プロセスモデル-ログインヘルパー-subprocess) の subprocess 隔離方針と整合）。engine 本体プロセス（nautilus が稼働するプロセス）から `import tkinter` しない。tkinter は常に `python -m engine.exchanges.tachibana_login_dialog` の独立プロセスで起動する
+- 立花 Phase 1 の tkinter ログイン UI は **subprocess 隔離経由**でのみ再利用する（[tachibana/architecture.md §7.3「プロセスモデル: ログインヘルパー subprocess」](../✅tachibana/architecture.md#73-プロセスモデル-ログインヘルパー-subprocess) の subprocess 隔離方針と整合）。engine 本体プロセス（nautilus が稼働するプロセス）から `import tkinter` しない。tkinter は常に `python -m engine.exchanges.tachibana_login_dialog` の独立プロセスで起動する
 
 **subprocess への credential 渡し・受け取りの境界（C2）**: ログインヘルパー subprocess は OS pipe（stdin/stdout）経由で credential を受け渡す。具体的には、データエンジンが `asyncio.create_subprocess_exec` で spawn し、stdin に起動 JSON を 1 回だけ書き込んで close する。ヘルパーは収集した credential を stdout に JSON 1 行で返して即終了する。データエンジン受信後は直ちに `SecretStr` にラップし、stdout バッファへの参照を解放する。subprocess 終了後に OS がページを回収することでメモリを解放する。credential は subprocess の短命メモリと OS pipe のみに滞在し、長期保持しない。

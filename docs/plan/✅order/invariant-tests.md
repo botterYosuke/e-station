@@ -22,4 +22,4 @@
 
 - 上記テスト関数名欄が「TBD」のものは対応テストが未実装。実装時に本表を更新すること。
 - `test_invariant_tests_doc.py` は本ファイルに登場する不変条件 ID がすべて `spec.md §6` の記述と一致することを assert し、陳腐化したら CI が落ちる運用にする。
-- 本表は `docs/plan/order/implementation-plan.md` Tpre.6 受け入れ条件 D2-M1 R2 に対応する成果物。
+- 本表は `docs/plan/✅order/implementation-plan.md` Tpre.6 受け入れ条件 D2-M1 R2 に対応する成果物。

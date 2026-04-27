@@ -1,7 +1,7 @@
 """Tachibana login orchestration — the bridge between the IPC server,
 the env / keyring fast paths, and the tkinter login helper subprocess.
 
-Architecture: [docs/plan/tachibana/architecture.md §7](../../../docs/plan/tachibana/architecture.md).
+Architecture: [docs/plan/✅tachibana/architecture.md §7](../../../docs/plan/✅tachibana/architecture.md).
 
 Public entry point:
 
@@ -214,7 +214,9 @@ async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
                     proc.stderr.read(), timeout=1.0
                 )
             except (asyncio.TimeoutError, Exception) as exc:
-                log.debug("tachibana login dialog: stderr read after kill failed: %s", exc)
+                log.debug(
+                    "tachibana login dialog: stderr read after kill failed: %s", exc
+                )
         if leftover_stderr:
             log.error(
                 "tachibana login dialog: stderr after timeout/kill = %r",
@@ -266,9 +268,7 @@ def _venue_ready_event(request_id: Optional[str]) -> dict:
     return {"event": "VenueReady", "venue": VENUE, "request_id": request_id}
 
 
-def _venue_error_event(
-    request_id: Optional[str], code: str, message: str
-) -> dict:
+def _venue_error_event(request_id: Optional[str], code: str, message: str) -> dict:
     return {
         "event": "VenueError",
         "venue": VENUE,
@@ -476,9 +476,7 @@ async def run_login(
         dialog_user_id = result.get("user_id")
         dialog_password = result.get("password")
         if not dialog_user_id or not dialog_password:
-            log.error(
-                "tachibana login dialog: helper result missing credential fields"
-            )
+            log.error("tachibana login dialog: helper result missing credential fields")
             raise LoginError(code="login_failed", message=_MSG_LOGIN_FAILED)
         dialog_is_demo = bool(result.get("is_demo", True))
         try:
@@ -493,12 +491,12 @@ async def run_login(
             events.append(_venue_error_event(request_id, "unread_notices", exc.message))
             return events
         except SessionExpiredError as exc:
-            events.append(_venue_error_event(request_id, "session_expired", exc.message))
+            events.append(
+                _venue_error_event(request_id, "session_expired", exc.message)
+            )
             return events
         except LoginError as exc:
-            log.warning(
-                "tachibana login: attempt %d/%d failed: %s", attempt, 3, exc
-            )
+            log.warning("tachibana login: attempt %d/%d failed: %s", attempt, 3, exc)
             last_error_event = _venue_error_event(request_id, exc.code, exc.message)
             continue
         except TachibanaError as exc:

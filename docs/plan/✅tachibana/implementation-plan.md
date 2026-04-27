@@ -2,7 +2,7 @@
 
 親計画 [docs/plan/✅python-data-engine/implementation-plan.md](../✅python-data-engine/implementation-plan.md) のフェーズ 6 完了後、または並行で着手する追加トラックとして位置づける。
 
-> **不変条件 ID ↔ test 関数名対応は [`docs/plan/tachibana/invariant-tests.md`](./invariant-tests.md) を正本とする**（本ファイル内の各章で言及される不変条件 ID の test 紐付けは同表を参照）。
+> **不変条件 ID ↔ test 関数名対応は [`docs/plan/✅tachibana/invariant-tests.md`](./invariant-tests.md) を正本とする**（本ファイル内の各章で言及される不変条件 ID の test 紐付けは同表を参照）。
 
 ## フェーズ T0: 既存型棚卸し + 仕様凍結 + スキーマ拡張（2〜3 日）
 
@@ -379,7 +379,7 @@
 > Group E — Medium (繰越):
 > - ✅ **MEDIUM-1 / MEDIUM-2 / MEDIUM-3 / MEDIUM-4 / MEDIUM-5 (Rust 構造体カプセル化)**: `TachibanaCredentials` / `StoredCredentials` / `VenueErrorClass` の `pub` フィールドを `pub(crate)` 化 + getter 化、`VenueErrorCode` enum 化、`PendingVenueRequests` 集約 — いずれも全 callsite を更新する大規模リファクタになるため **Phase O1 繰越**（Wire DTO 移動と同 PR で扱う）。
 > - ✅ **MEDIUM-6 (`user_id` newtype)**: Phase 1 では発注なし → password との混同リスク限定的のため **Phase O1 繰越**。
-> - ✅ **MEDIUM-8 (`phone_auth_required` 発火経路)**: 立花 API の電話認証エラーコード仕様未確認。`docs/plan/tachibana/open-questions.md` への Q-項目追加は本ラウンド 6 では未実施 — Phase O1 で実機調査と同時に追加する繰越項目とする。dead code は維持（防御的テーブル登録）。
+> - ✅ **MEDIUM-8 (`phone_auth_required` 発火経路)**: 立花 API の電話認証エラーコード仕様未確認。`docs/plan/✅tachibana/open-questions.md` への Q-項目追加は本ラウンド 6 では未実施 — Phase O1 で実機調査と同時に追加する繰越項目とする。dead code は維持（防御的テーブル登録）。
 >
 > **設計判断・Tips (ラウンド 6)**:
 > - **`zeroizing_to_secret` ヘルパーの `std::mem::take` 採用根拠**: `SecretString::new(s)` は内部で `Box<str>` に変換するため、`String::clone()` を経由するとアロケーションが 2 回発生する（`Zeroizing` の中身 `String` の heap buffer + `SecretString` の `Box<str>`）。`std::mem::take` で `Zeroizing<String>` の中身 `String` を空 `String::new()` と swap し、その `String` を直接 `SecretString::new` に渡せば、heap buffer は 1 回だけ確保 → 中身 String が `SecretString` 内部に move → `Zeroizing` の方は空文字列の `Drop` で zeroize（no-op）。これで keyring 書き込み後に zeroize されない中間コピーは構造的に存在し得ない。
@@ -403,7 +403,7 @@
 > - ✅ **MEDIUM-4 (`VenueErrorCode` enum 化)**: `#[non_exhaustive] pub enum VenueErrorCode { SessionExpired, LoginFailed, UnreadNotices, PhoneAuthRequired, TickerNotFound, TransportError, SessionRestoreFailed, UnsupportedVenue, Unknown(String) }` を `engine-client/src/error.rs` に追加。`from_code(&str)` でパース（`from_str` は clippy::should_implement_trait を避けるため改名）、`classify(&self) -> VenueErrorClass` で typed match。`classify_venue_error(&str)` は `from_code(s).classify()` の薄ラップで API 互換維持。新規テスト `venue_error_code_typed_classify_matches_string_path`（全 8 既知 code で `&str` パスと一致）/ `venue_error_code_unknown_round_trips_to_fail_safe`（`Unknown("brand_new_code") -> (Error, Hidden)`）で pin
 > - ✅ **MEDIUM-5 (`PendingVenueRequests` struct 集約)**: `engine-client/src/process.rs` に `#[derive(Default)] struct PendingVenueRequests { inner: HashMap<String, &'static str> }` を新設、`insert/remove/is_empty/len/iter/tag_for/take_only` を提供。`apply_after_handshake_with_timeout` 内の `pending_request_ids: HashSet<String>` + `request_id_to_venue: HashMap<String, &'static str>` の 2 コレクションを単一型に置換。`take_only()` で「VenueReady without request_id while exactly 1 pending」の back-compat 経路を凝集。回帰テスト: 既存 `process_venue_ready_gate.rs` / `process_venue_ready_timeout_marks_failed.rs` / `process_send_failure_skips_subscribe.rs` の 4 件が緑のままを確認
 > - ✅ **MEDIUM-6 (`TachibanaUserId` newtype)**: `data/src/config/tachibana.rs` に `#[serde(transparent)] pub struct TachibanaUserId(String)` を新設、`Display` / `Serialize` / `Deserialize` / `From<String>` / `From<&str>` / `From<TachibanaUserId> for String` を実装。`TachibanaCredentials::user_id` / `StoredCredentials::user_id` / `save_refreshed_credentials(user_id, ...)` 引数 / `engine-client::process::VenueCredentialsRefresh::user_id` を `TachibanaUserId` / `Option<TachibanaUserId>` に変更。`engine-client/src/process.rs` で `EngineEvent::VenueCredentialsRefreshed { user_id: Option<String> }` 受信時に `.map(TachibanaUserId::from)` で typed 化。Wire DTO 側 `TachibanaCredentialsWire.user_id: String` は wire 互換のため変更せず、conversion で `creds.user_id.as_str().to_string()` 経由の境界変換に集約。`#[serde(transparent)]` のため keyring 永続フォーマット・IPC ペイロードは bytewise 不変
-> - ✅ **MEDIUM-8 (`phone_auth_required` open-questions 追記)**: `docs/plan/tachibana/open-questions.md` に Q40 を追加 — 立花 API の電話認証応答コード（`p_errno` / `sResultCode`）の実機採取と Python emitter 配線を Phase O1 へ繰越。`engine-client::error::classify_venue_error` の `phone_auth_required` table 登録は防御的に残置
+> - ✅ **MEDIUM-8 (`phone_auth_required` open-questions 追記)**: `docs/plan/✅tachibana/open-questions.md` に Q40 を追加 — 立花 API の電話認証応答コード（`p_errno` / `sResultCode`）の実機採取と Python emitter 配線を Phase O1 へ繰越。`engine-client::error::classify_venue_error` の `phone_auth_required` table 登録は防御的に残置
 >
 > **HIGH-5 / MEDIUM-1 / MEDIUM-6 等は callsite を広範に書き換える破壊的変更**であり、本来 Phase O1 で纏めて扱う想定だった。ユーザー指示により本ラウンドで強制着地。Group F 完了後の最終検証: `cargo check --workspace` / `cargo clippy --workspace -- -D warnings` / `cargo fmt --check` / `cargo test --workspace` 全緑、`uv run pytest python/tests/test_tachibana_*.py -v` 108 passed。
 
@@ -431,7 +431,7 @@
 > Group D — Docs / コメント:
 > - ✅ **MEDIUM-4 (削除コメント肥大解消)**: `python/engine/server.py:_emit` の MEDIUM-12 コメントを 9 行 → 3 行に圧縮し、詳細経緯は本計画書 ラウンド 6 Group D へリンク
 > - ✅ **MEDIUM-5 (`zeroizing_to_secret` 内 Box<str> 注釈追加)**: `data/src/config/tachibana.rs` の `zeroizing_to_secret` の docstring に「`SecretString::new` 内部の `String → Box<str>` 変換で 1 hop 追加 heap copy が発生し `secrecy` 0.8 設計上避けられない」を明記
-> - ✅ **MEDIUM-6 (仕様書 §7.3 vs 実装乖離)**: `docs/plan/tachibana/architecture.md` §7.3 の stdout 形式記述を実装に合わせて `status="ok"` + 平坦 `user_id` / `password` / `is_demo` 形式に更新（`submitted` + ネスト `values:{}` の旧記述を破棄）。実装は変更せずテスト破壊回避
+> - ✅ **MEDIUM-6 (仕様書 §7.3 vs 実装乖離)**: `docs/plan/✅tachibana/architecture.md` §7.3 の stdout 形式記述を実装に合わせて `status="ok"` + 平坦 `user_id` / `password` / `is_demo` 形式に更新（`submitted` + ネスト `values:{}` の旧記述を破棄）。実装は変更せずテスト破壊回避
 > - ✅ **MEDIUM-9 (`From<TachibanaSessionWire>` コメント不正確)**: 「`Zeroizing<String>` には `into_inner()` がないため `.to_string()` で 1 度コピー、コピー元は `s` drop で `Zeroize` がゼロ化」へ書き換え
 >
 > **設計判断・Tips (ラウンド 7)**:
@@ -743,7 +743,7 @@ R2・R3 で発見・解消した追加指摘。
 
 | 完了フェーズ | 解除されるブロッカー | 参照先 |
 |---|---|---|
-| **T2（認証実装）完了** | [order/ Phase O-pre](../order/implementation-plan.md) 着手可能。`tachibana_auth.py` / `tachibana_url.py` / `tachibana_codec.py` が order/ の前提依存ファイル | [order/implementation-plan.md 冒頭](../order/implementation-plan.md) |
+| **T2（認証実装）完了** | [order/ Phase O-pre](../✅order/implementation-plan.md) 着手可能。`tachibana_auth.py` / `tachibana_url.py` / `tachibana_codec.py` が order/ の前提依存ファイル | [order/implementation-plan.md 冒頭](../✅order/implementation-plan.md) |
 | **T4（マスタキャッシュ）完了** | IPC `stdin` 初期 payload への `config_dir` / `cache_dir` 追加が完了し、Python 側 fast-path が使えるようになる | [architecture.md §2.1.1](./architecture.md) |
 | **Phase 1 全完了（T7 受け入れ緑）** | nautilus N2（`LiveExecutionClient` デモ）の着手条件の一部を満たす | [nautilus_trader/implementation-plan.md Phase N2](../nautilus_trader/implementation-plan.md) |
 

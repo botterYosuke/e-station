@@ -2,7 +2,7 @@
 
 ## 1. 配置原則
 
-[docs/plan/tachibana/architecture.md §1](../tachibana/architecture.md) の Python 集約方針を踏襲。発注経路の追加責務は以下:
+[docs/plan/✅tachibana/architecture.md §1](../✅tachibana/architecture.md) の Python 集約方針を踏襲。発注経路の追加責務は以下:
 
 | 責務 | 所在 |
 |---|---|
@@ -500,7 +500,7 @@ flowsurface との差分:
 
 ### 5.1 取得タイミング（Phase O0）
 
-- ログイン時には収集しない（[tachibana/architecture.md F-H5](../tachibana/architecture.md) の Phase 1 方針を維持）
+- ログイン時には収集しない（[tachibana/architecture.md F-H5](../✅tachibana/architecture.md) の Phase 1 方針を維持）
 - `POST /api/order/submit` で **Python 側に未保持なら** Rust 側に `Event::SecondPasswordRequired { request_id }` を返す → iced 側で modal を出して入力 → `Command::SetSecondPassword { value }` で Python に渡す → Python メモリに保持 → 元の発注リクエストを再開
 - 同一プロセス内では以降の発注で再入力不要（メモリヒット）
 - `data::config::tachibana::TachibanaCredentials.second_password: Option<SecretString>` は **常に `None` のまま**（keyring に書かない）

@@ -36,31 +36,31 @@ N0 着手前に以下の **ブロッカー**を解決する。すべてレビュ
 - フロント（iced）からは引き続き同じ HTTP エンドポイントを叩く想定。**API 契約は変えない**（自作エンジン → nautilus の置き換えはユーザーから見えない）
 - 既存 `FlowsurfaceEnv`（Gymnasium）は HTTP 越しなのでそのまま動く
 
-**REPLAY モード仮想注文の統合（[docs/plan/order/](../order/) からの引き取り）**:
+**REPLAY モード仮想注文の統合（[docs/plan/✅order/](../✅order/) からの引き取り）**:
 
-- `docs/plan/order/` で実装した `POST /api/order/submit` `/api/order/modify` `/api/order/cancel` を REPLAY モード時に **`SimulatedExchange` 経由にルーティング**
+- `docs/plan/✅order/` で実装した `POST /api/order/submit` `/api/order/modify` `/api/order/cancel` を REPLAY モード時に **`SimulatedExchange` 経由にルーティング**
 - Python 側 `tachibana_orders.NautilusOrderEnvelope` を共通入力とし、ディスパッチャ（`python/engine/order_router.py` 新設）で live / replay を分岐:
   - live → `tachibana_orders.submit_order(...)` → 立花 HTTP
   - replay → `BacktestExecutionEngine.process_order(...)` → SimulatedExchange
 - iced 側 UI 差分（[wiki UX](../../wiki/orders.md#replay-モード中の動作)）:
   - バナー「⏪ REPLAYモード中 — 注文は無効です」
   - ボタンラベル「仮想注文確認」
-  - 第二暗証番号 modal を **出さない**（[order/architecture.md §5](../order/architecture.md#5-第二暗証番号の取扱い) の `Event::SecondPasswordRequired` 発火を REPLAY ガードで skip）
+  - 第二暗証番号 modal を **出さない**（[order/architecture.md §5](../✅order/architecture.md#5-第二暗証番号の取扱い) の `Event::SecondPasswordRequired` 発火を REPLAY ガードで skip）
 - 約定通知は live と同じ IPC `Event::OrderFilled` を使う（UI はバナー以外で live/replay を区別しない）
-- 監査ログ WAL（[order/architecture.md §4.2](../order/architecture.md#42-監査ログwal-write-ahead-log)）は REPLAY モードでは別ファイル `tachibana_orders_replay.jsonl` に出す（live と混ざらないようにする）
+- 監査ログ WAL（[order/architecture.md §4.2](../✅order/architecture.md#42-監査ログwal-write-ahead-log)）は REPLAY モードでは別ファイル `tachibana_orders_replay.jsonl` に出す（live と混ざらないようにする）
 - `client_order_id` の名前空間は live / replay で分離（同一 ID を投入しても干渉しない）
 
 ### 2.3 Phase N2 — 立花 ExecutionClient
 
 - `python/engine/exchanges/tachibana_nautilus.py` を新設し、nautilus の `LiveExecutionClient` を実装
-- **前提: [docs/plan/order/](../order/) Phase O0〜O2 が完了していること**（Phase 1 + order/ の Python 関数・IPC enum・第二暗証番号 UI・EC frame パーサ・`tachibana_orders.NautilusOrderEnvelope` がすでに揃っている前提）
+- **前提: [docs/plan/✅order/](../✅order/) Phase O0〜O2 が完了していること**（Phase 1 + order/ の Python 関数・IPC enum・第二暗証番号 UI・EC frame パーサ・`tachibana_orders.NautilusOrderEnvelope` がすでに揃っている前提）
 - 本フェーズでは **`tachibana_nautilus.py` を nautilus `LiveExecutionClient` の薄い adapter として書く**:
   - nautilus の `LiveExecutionClient.submit_order(Order)` → `tachibana_orders.submit_order(session, second_password, NautilusOrderEnvelope.from_nautilus(order))`
   - 同様に `modify_order` / `cancel_order` を委譲
   - `tachibana_event._parse_ec_frame` の戻り値 → nautilus `OrderFilled` / `OrderCanceled` イベントに変換し `LiveExecutionEngine.process_event(...)` に流す
-- 立花 API の写像規則は **[data-mapping.md](./data-mapping.md)** および [order/spec.md §6](../order/spec.md#6-nautilus_trader-互換要件不変条件) を参照（本 spec で重複定義しない）
+- 立花 API の写像規則は **[data-mapping.md](./data-mapping.md)** および [order/spec.md §6](../✅order/spec.md#6-nautilus_trader-互換要件不変条件) を参照（本 spec で重複定義しない）
 - 注文種別カバレッジは order/ の Phase O0〜O3 進捗に従う（O0=現物成行のみ、O3 で信用・逆指値・期日指定が解禁）
-- **デモ環境のみ**。本番は env フラグで明示的に許可しない限り使わせない（`TACHIBANA_ALLOW_PROD=1`、[tachibana/spec.md §3.1](../tachibana/spec.md#31-セキュリティ) と同じガード）
+- **デモ環境のみ**。本番は env フラグで明示的に許可しない限り使わせない（`TACHIBANA_ALLOW_PROD=1`、[tachibana/spec.md §3.1](../✅tachibana/spec.md#31-セキュリティ) と同じガード）
 
 ### 2.4 Phase N3 — 暗号資産 venue ExecutionClient（任意）
 
@@ -95,7 +95,7 @@ N0 着手前に以下の **ブロッカー**を解決する。すべてレビュ
 - リプレイは headless で動く（既存 `--headless` モードに乗る）
 - **計測対象の定義**: 「1 年・日足・1 銘柄」の計測対象は **`NautilusRunner.start_backtest()` 呼出から `Event::EngineStopped` の IPC 受領までの wall clock**（IPC 越し全往復、ナラティブ書込み込み）。`BacktestEngine.run()` 単体時間は別ベンチマークとして計測
 - **30 秒以内**を目安（具体目標は N1 の終盤で計測してから確定）。実測値は [docs/plan/✅python-data-engine/benchmarks/](../✅python-data-engine/benchmarks/) に nautilus 用ベースラインを別ファイルで追加して保存
-- **市場時間帯と LiveExecutionEngine（M2）**: 立花 venue が閉場帯で `Disconnected{reason:"market_closed"}` を返している間、nautilus `LiveExecutionEngine` への発注は **HTTP API 層 (`order_api.rs`) で先行 reject** する（reason_code=`MARKET_CLOSED`、[order/spec.md §5.2](../order/spec.md#52-reason_code-体系観測性)）。nautilus 内部で reject されると `Strategy.on_event(OrderRejected)` 経由でナラティブが汚染されるため、**venue が閉場中は ExecutionClient を `start()` しない**運用にする
+- **市場時間帯と LiveExecutionEngine（M2）**: 立花 venue が閉場帯で `Disconnected{reason:"market_closed"}` を返している間、nautilus `LiveExecutionEngine` への発注は **HTTP API 層 (`order_api.rs`) で先行 reject** する（reason_code=`MARKET_CLOSED`、[order/spec.md §5.2](../✅order/spec.md#52-reason_code-体系観測性)）。nautilus 内部で reject されると `Strategy.on_event(OrderRejected)` 経由でナラティブが汚染されるため、**venue が閉場中は ExecutionClient を `start()` しない**運用にする
 
 ### 3.4 観測性
 
@@ -104,7 +104,7 @@ N0 着手前に以下の **ブロッカー**を解決する。すべてレビュ
 
 ## 4. 公開 API（不変条件）
 
-`POST /api/order/*` は [docs/plan/order/](../order/) で定義済み。本計画 N1/N2 でも **API 契約・冪等性規約・reason_code 体系を変更しない**。N1 では REPLAY モード時のみ Python ディスパッチャが SimulatedExchange に流す（[README.md §REPLAY モード仮想注文の取り込み](./README.md#replay-モード仮想注文の取り込み)）。
+`POST /api/order/*` は [docs/plan/✅order/](../✅order/) で定義済み。本計画 N1/N2 でも **API 契約・冪等性規約・reason_code 体系を変更しない**。N1 では REPLAY モード時のみ Python ディスパッチャが SimulatedExchange に流す（[README.md §REPLAY モード仮想注文の取り込み](./README.md#replay-モード仮想注文の取り込み)）。
 
 リプレイ・ナラティブ系の API:
 

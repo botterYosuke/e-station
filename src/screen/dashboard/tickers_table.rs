@@ -2327,7 +2327,7 @@ mod tests {
     // emitted `VenueReady`. Toggling the filter on before that point
     // must record a pending request and skip the fetch; the same toggle
     // re-fires when `set_tachibana_ready(true)` is called. See
-    // `docs/plan/tachibana/implementation-plan-T3.5.md` §3 Step C.
+    // `docs/plan/✅tachibana/implementation-plan-T3.5.md` §3 Step C.
 
     #[test]
     fn metadata_fetch_blocked_until_venue_ready() {

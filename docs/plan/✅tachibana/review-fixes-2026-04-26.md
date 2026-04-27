@@ -1,6 +1,6 @@
 # implementation-plan-T3.5.md PlanLoop 修正ログ — 2026-04-26
 
-対象: `docs/plan/tachibana/implementation-plan-T3.5.md`
+対象: `docs/plan/✅tachibana/implementation-plan-T3.5.md`
 スキル: `.claude/skills/review/SKILL.md` + `.claude/skills/review-fix-loop/PlanLoop.md`
 着手: 2026-04-26
 ブランチ: `tachibana/phase-1/T3-credential-r6-fixes`

@@ -475,7 +475,7 @@ enum VenueState {
 >
 > **設計上の落とし穴 (後続作業者向け)**
 >
-> - **文字列リテラル禁止の運用境界**: 「Rust 側はボタンラベルなど文字列リテラルを持たない」という F-Banner1 ルールを守ったため、`VenueError.message` が 1 行（旧式 emitter）の場合は **ボタンが表示されない**仕様に倒した。Python 側で 3 行構造を厳格に詰めるよう徹底すること。Phase 1 暫定運用 (`docs/plan/tachibana/spec.md` §3.3) で確認済。
+> - **文字列リテラル禁止の運用境界**: 「Rust 側はボタンラベルなど文字列リテラルを持たない」という F-Banner1 ルールを守ったため、`VenueError.message` が 1 行（旧式 emitter）の場合は **ボタンが表示されない**仕様に倒した。Python 側で 3 行構造を厳格に詰めるよう徹底すること。Phase 1 暫定運用 (`docs/plan/✅tachibana/spec.md` §3.3) で確認済。
 > - **LoginInFlight 中は無描画**: 「ログイン中…」のような Rust 側 literal を避けるため、`LoginInFlight` ではバナーを出さず tkinter ダイアログそのものを affordance とした。プラン本文の transition table 側も `LoginInFlight` 行は banner=false でテーブル定義している。
 > - **DismissTachibanaBanner の遷移先**: `VenueState::Idle` に倒す設計にした（`Error -> Idle`）。プラン §3.2 の transition table には明示行がないので、追加した形。意味論: ユーザがバナーを閉じた後は次の `VenueError` を待つ Idle 状態が自然。
 > - **`palette.warning.weak` の存在前提**: iced 0.14 の Theme palette が warning role を持つ前提で書いている。将来 iced を上げる際にこの enum 名が変わったらここを直すこと。

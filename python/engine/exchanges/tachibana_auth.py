@@ -11,7 +11,7 @@
   ``CLMMfdsGetIssueDetail`` ping (sIssueCode=7203, sSizyouC=00) used only
   during ``SetVenueCredentials`` to confirm a restored session. Runtime
   ``p_errno=2`` detection takes the `VenueError{code:"session_expired"}`
-  path instead — see [architecture.md §6](../../../docs/plan/tachibana/architecture.md#6-失敗モードと-ui-表現).
+  path instead — see [architecture.md §6](../../../docs/plan/✅tachibana/architecture.md#6-失敗モードと-ui-表現).
 
 Banner text (`message`) is composed here so that Rust UI never carries
 fixed Tachibana-specific strings (F-Banner1).
@@ -61,18 +61,14 @@ log = logging.getLogger(__name__)
 # wording (e.g. "session expired", "invalid credentials") that breaks the
 # Japanese banner contract — and is logged separately for triage instead.
 
-_MSG_LOGIN_FAILED = (
-    "ログインに失敗しました。ID / パスワードを確認してください"
-)
+_MSG_LOGIN_FAILED = "ログインに失敗しました。ID / パスワードを確認してください"
 _MSG_SESSION_EXPIRED_STARTUP = (
     "立花のセッションが切れました（夜間閉局）。再ログインしてください"
 )
 _MSG_TRANSPORT_ERROR = (
     "立花サーバとの通信に失敗しました。ネットワーク / プロキシ設定を確認してください"
 )
-_MSG_LOGIN_PARSE_FAILED = (
-    "立花ログイン応答の形式が不正です。サポートに連絡してください"
-)
+_MSG_LOGIN_PARSE_FAILED = "立花ログイン応答の形式が不正です。サポートに連絡してください"
 _MSG_VIRTUAL_URL_INVALID = (
     "立花ログイン応答の URL が想定と異なります。サポートに連絡してください"
 )
@@ -413,6 +409,7 @@ class TachibanaSessionHolder:
     def _now(self) -> float:
         import asyncio
         import time
+
         try:
             return asyncio.get_running_loop().time()
         except RuntimeError:
