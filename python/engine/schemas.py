@@ -564,13 +564,17 @@ class OrderListUpdated(IpcMessage):
 
 
 class MarketPriceResponse(IpcMessage):
-    """Response body of ``CLMMfdsGetMarketPrice``."""
+    """Response body of ``CLMMfdsGetMarketPrice``.
+
+    The actual API response key is ``aCLMMfdsMarketPrice`` (confirmed from
+    e_api_get_price_from_file_tel.py L936 and the manual response example).
+    """
 
     sCLMID: str = ""
     sResultCode: str = ""
-    aCLMMfdsMarketPriceData: list[dict] = Field(default_factory=list)
+    aCLMMfdsMarketPrice: list[dict] = Field(default_factory=list)
 
-    @field_validator("aCLMMfdsMarketPriceData", mode="before")
+    @field_validator("aCLMMfdsMarketPrice", mode="before")
     @classmethod
     def _normalize_price_data(cls, v: Any) -> list:
         return deserialize_tachibana_list(v)

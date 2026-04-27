@@ -159,6 +159,13 @@ class DataEngineServer:
         self._engine_session_id: UUID = uuid.uuid4()
         self._handshake_lock = asyncio.Lock()
 
+        # Tachibana p_no counter MUST be constructed before the worker dict
+        # so the worker shares the same monotonic counter as
+        # `validate_session_on_startup`. Two independent counters initialized
+        # in the same Unix second emit identical p_no sequences and trigger
+        # 立花 API error 6 (`p_no <= 前要求p_no`).
+        self._tachibana_p_no_counter = PNoCounter()
+
         # Per-venue workers. The Tachibana worker is constructed at init time
         # with `session=None` so it sits dormant until `startup_login` completes
         # and `_apply_tachibana_session(...)` injects the post-login
@@ -182,6 +189,7 @@ class DataEngineServer:
             "tachibana": TachibanaWorker(
                 cache_dir=self._cache_dir,
                 is_demo=tachibana_is_demo,
+                p_no_counter=self._tachibana_p_no_counter,
             ),
         }
 
@@ -196,7 +204,9 @@ class DataEngineServer:
         self._proxy_url: str | None = None
 
         # ── Tachibana state (T3 / T-SC3) ─────────────────────────────
-        self._tachibana_p_no_counter = PNoCounter()
+        # `self._tachibana_p_no_counter` is constructed earlier (above the
+        # worker dict) so the TachibanaWorker can share it. See the comment
+        # there for the p_no monotonicity rationale.
         self._tachibana_startup_latch = StartupLatch()
         self._tachibana_session: TachibanaSession | None = None
         # Guards startup_login against concurrent execution (double-start prevention).

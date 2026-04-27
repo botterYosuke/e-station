@@ -534,6 +534,9 @@ class TachibanaWorker(ExchangeWorker):
             "sCLMID": "CLMMfdsGetMarketPrice",
             "sTargetIssueCode": ticker,
             "sTargetSizyouC": sizyou_c,
+            # sTargetColumn is required by the API (error -1 when absent).
+            # Field names in the response match the FD codes specified here.
+            "sTargetColumn": "pDPP,pDOP,pDHP,pDLP,pDV,tDPP:T",
         }
         url = build_request_url(self._session.url_price, payload, sJsonOfmt="5")
         body = await self._http_get(url)
@@ -544,17 +547,17 @@ class TachibanaWorker(ExchangeWorker):
         if err is not None:
             raise err
         parsed = MarketPriceResponse.model_validate(data)
-        if not parsed.aCLMMfdsMarketPriceData:
+        if not parsed.aCLMMfdsMarketPrice:
             return {"symbol": ticker}
-        first = parsed.aCLMMfdsMarketPriceData[0]
+        first = parsed.aCLMMfdsMarketPrice[0]
         return {
             "symbol": ticker,
-            "last_price": str(first.get("sCurrentPrice", "")),
-            "open": str(first.get("sOpenPrice", "")),
-            "high": str(first.get("sHighPrice", "")),
-            "low": str(first.get("sLowPrice", "")),
-            "volume": str(first.get("sVolume", "")),
-            "ts": str(first.get("sCurrentPriceTime", "")),
+            "last_price": str(first.get("pDPP", "")),
+            "open": str(first.get("pDOP", "")),
+            "high": str(first.get("pDHP", "")),
+            "low": str(first.get("pDLP", "")),
+            "volume": str(first.get("pDV", "")),
+            "ts": str(first.get("tDPP:T", "")),
         }
 
     # ------------------------------------------------------------------
@@ -577,18 +580,25 @@ class TachibanaWorker(ExchangeWorker):
         """Fetch a shallow depth snapshot via CLMMfdsGetMarketPrice (F-M12 / F-M1b).
 
         Returns bids/asks extracted from the REST response.  The endpoint
-        carries best-bid/ask (GBP_1/GAP_1 etc.) not the full 10-level book,
-        so the result may have fewer than 10 levels.
+        carries 10-level bid/ask (GBP1..GBP10 / GAP1..GAP10).
         """
         if self._session is None:
             return {}
         sizyou_c = self._lookup_sizyou_c(ticker)
+        # sTargetColumn is required by the API (error -1 when absent).
+        # FD codes for bid (GBP/GBV) and ask (GAP/GAV) 10 levels each.
+        depth_cols = ",".join(
+            f"pGBP{i},pGBV{i}" for i in range(1, 11)
+        ) + "," + ",".join(
+            f"pGAP{i},pGAV{i}" for i in range(1, 11)
+        )
         payload: dict[str, Any] = {
             "p_no": str(self._p_no_counter.next()),
             "p_sd_date": current_p_sd_date(),
             "sCLMID": "CLMMfdsGetMarketPrice",
             "sTargetIssueCode": ticker,
             "sTargetSizyouC": sizyou_c,
+            "sTargetColumn": depth_cols,
         }
         url = build_request_url(self._session.url_price, payload, sJsonOfmt="5")
         body = await self._http_get(url)
@@ -599,18 +609,18 @@ class TachibanaWorker(ExchangeWorker):
         if err is not None:
             raise err
         parsed = MarketPriceResponse.model_validate(data)
-        if not parsed.aCLMMfdsMarketPriceData:
+        if not parsed.aCLMMfdsMarketPrice:
             return {}
-        first = parsed.aCLMMfdsMarketPriceData[0]
+        first = parsed.aCLMMfdsMarketPrice[0]
 
         recv_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         bids: list[tuple[str, str]] = []
         asks: list[tuple[str, str]] = []
         for i in range(1, 11):
-            bp = str(first.get(f"sGBP_{i}", "") or first.get(f"sGBP{i}", ""))
-            bv = str(first.get(f"sGBV_{i}", "") or first.get(f"sGBV{i}", ""))
-            ap = str(first.get(f"sGAP_{i}", "") or first.get(f"sGAP{i}", ""))
-            av = str(first.get(f"sGAV_{i}", "") or first.get(f"sGAV{i}", ""))
+            bp = str(first.get(f"pGBP{i}", ""))
+            bv = str(first.get(f"pGBV{i}", ""))
+            ap = str(first.get(f"pGAP{i}", ""))
+            av = str(first.get(f"pGAV{i}", ""))
             if bp:
                 bids.append((bp, bv))
             if ap:

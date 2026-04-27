@@ -16,10 +16,10 @@ def test_market_price_response_normalizes_empty_array_field():
         {
             "sCLMID": "CLMMfdsGetMarketPrice",
             "sResultCode": "0",
-            "aCLMMfdsMarketPriceData": "",
+            "aCLMMfdsMarketPrice": "",
         }
     )
-    assert parsed.aCLMMfdsMarketPriceData == []
+    assert parsed.aCLMMfdsMarketPrice == []
 
 
 def test_market_price_response_keeps_real_array_field():
@@ -27,10 +27,10 @@ def test_market_price_response_keeps_real_array_field():
         {
             "sCLMID": "CLMMfdsGetMarketPrice",
             "sResultCode": "0",
-            "aCLMMfdsMarketPriceData": [{"sIssueCode": "7203"}],
+            "aCLMMfdsMarketPrice": [{"sIssueCode": "7203"}],
         }
     )
-    assert parsed.aCLMMfdsMarketPriceData == [{"sIssueCode": "7203"}]
+    assert parsed.aCLMMfdsMarketPrice == [{"sIssueCode": "7203"}]
 
 
 def test_market_price_history_response_normalizes_empty_array_field():

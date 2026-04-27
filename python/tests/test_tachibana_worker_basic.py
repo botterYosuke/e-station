@@ -104,11 +104,12 @@ async def test_fetch_ticker_stats_returns_dict(tmp_path: Path):
     worker = _stubbed(tmp_path)
 
     async def _fake_get(url: str) -> bytes:
+        # Response uses aCLMMfdsMarketPrice (actual API key) and FD codes (pDPP etc.)
         body = (
             '{"sCLMID":"CLMMfdsGetMarketPrice","sResultCode":"0",'
-            '"aCLMMfdsMarketPriceData":['
-            '{"sIssueCode":"7203","sCurrentPrice":"2880","sCurrentPriceTime":"15:00:00",'
-            '"sOpenPrice":"2860","sHighPrice":"2900","sLowPrice":"2800","sVolume":"1234567"}'
+            '"aCLMMfdsMarketPrice":['
+            '{"sIssueCode":"7203","pDPP":"2880","tDPP:T":"15:00",'
+            '"pDOP":"2860","pDHP":"2900","pDLP":"2800","pDV":"1234567"}'
             ']}'
         )
         return body.encode("shift_jis")
