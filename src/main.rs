@@ -1144,15 +1144,29 @@ impl Flowsurface {
                     _ => {}
                 }
 
-                let next =
-                    std::mem::replace(&mut self.tachibana_state, VenueState::Idle).next(event);
-                let became_ready = next.is_ready();
+                let old_state =
+                    std::mem::replace(&mut self.tachibana_state, VenueState::Idle);
+                let was_ready = old_state.is_ready();
+                let next = old_state.next(event);
+                let is_ready = next.is_ready();
                 self.tachibana_state = next;
+
+                if !was_ready && is_ready {
+                    // Session just became available. Bump the subscription
+                    // generation so the depth stream restarts with a valid
+                    // session. Without this, off-hours stream_depth calls
+                    // that fired before session establishment return without
+                    // a DepthSnapshot, leaving the Ladder empty.
+                    self.handles.bump_generation();
+                    log::info!(
+                        "tachibana: session established — restarting subscriptions (gen bumped)"
+                    );
+                }
 
                 let replay = self
                     .sidebar
                     .tickers_table
-                    .set_tachibana_ready(became_ready)
+                    .set_tachibana_ready(is_ready)
                     .map(|m| Message::Sidebar(dashboard::sidebar::Message::TickersTable(m)));
 
                 return replay;
