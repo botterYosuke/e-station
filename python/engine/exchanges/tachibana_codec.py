@@ -12,10 +12,24 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _ITEM_SEP = "\x01"   # ^A item separator
 _KV_SEP = "\x02"     # ^B key/value separator
+
+# e-shiten.jp hostnames are dynamically assigned virtual URLs returned after
+# login (sUrlRequest / sUrlEvent). They must never appear in WAL/logs/reason_text.
+_VIRTUAL_URL_RE = re.compile(r"https?://\S*e-shiten\.jp\S*", re.IGNORECASE)
+
+
+def mask_virtual_url(s: str) -> str:
+    """Replace Tachibana virtual URLs (e-shiten.jp) with ``[MASKED_URL]``.
+
+    Call this before writing any string that originates from a login response
+    to WAL entries, log messages, or error reason_text (architecture.md C-H1).
+    """
+    return _VIRTUAL_URL_RE.sub("[MASKED_URL]", s)
 
 
 def decode_response_body(payload: bytes) -> str:

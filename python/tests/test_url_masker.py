@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from engine.exchanges.tachibana_codec import mask_virtual_url
 from engine.exchanges.tachibana_url import guard_prod_url, is_production_url
 
 
@@ -105,3 +106,50 @@ def test_guard_prod_url_passes_demo_url(demo_url: str, monkeypatch):
     monkeypatch.delenv("TACHIBANA_ALLOW_PROD", raising=False)
     # should not raise
     guard_prod_url(demo_url)
+
+
+# ---------------------------------------------------------------------------
+# C-H1: mask_virtual_url — e-shiten.jp 仮想 URL のマスク
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # 単独 URL がそのままマスクされる
+        (
+            "https://kabuka.e-shiten.jp/e_api_v4r8/",
+            "[MASKED_URL]",
+        ),
+        # http も対象
+        (
+            "http://demo-kabuka.e-shiten.jp/e_api_v4r7/request",
+            "[MASKED_URL]",
+        ),
+        # 文中に埋め込まれた URL をマスク、前後のテキストは保持
+        (
+            "sUrlRequest=https://kabuka.e-shiten.jp/e_api_v4r8/ ok",
+            "sUrlRequest=[MASKED_URL] ok",
+        ),
+        # 複数 URL が含まれる場合すべてマスク
+        (
+            "req=https://kabuka.e-shiten.jp/req/ evt=https://kabuka.e-shiten.jp/evt/",
+            "req=[MASKED_URL] evt=[MASKED_URL]",
+        ),
+        # e-shiten.jp を含まない文字列は変更なし
+        (
+            "https://example.com/path?q=1",
+            "https://example.com/path?q=1",
+        ),
+        # 空文字列
+        ("", ""),
+        # クエリ・パスを含む長い URL
+        (
+            "url=https://kabuka.e-shiten.jp/e_api_v4r8/?key=val&x=1",
+            "url=[MASKED_URL]",
+        ),
+    ],
+)
+def test_mask_virtual_url(raw: str, expected: str):
+    """mask_virtual_url が e-shiten.jp URL を [MASKED_URL] に置換する (C-H1)。"""
+    assert mask_virtual_url(raw) == expected
