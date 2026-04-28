@@ -267,18 +267,15 @@ impl Sidebar {
     fn order_menu_view(&self) -> iced::widget::Column<'_, Message> {
         use data::layout::pane::ContentKind;
 
-        // U0: Order Entry is enabled.
-        let entry_btn = iced::widget::button(iced::widget::text("Order Entry").size(13))
+        let entry_btn = iced::widget::button(iced::widget::text("注文入力").size(13))
             .on_press(Message::OrderPanelRequested(ContentKind::OrderEntry))
             .style(|theme, status| crate::style::button::transparent(theme, status, false));
 
-        // U1: Order List is now enabled.
-        let list_btn = iced::widget::button(iced::widget::text("Order List").size(13))
+        let list_btn = iced::widget::button(iced::widget::text("注文一覧").size(13))
             .on_press(Message::OrderPanelRequested(ContentKind::OrderList))
             .style(|theme, status| crate::style::button::transparent(theme, status, false));
 
-        // U3: enabled.
-        let power_btn = iced::widget::button(iced::widget::text("Buying Power").size(13))
+        let power_btn = iced::widget::button(iced::widget::text("買余力").size(13))
             .on_press(Message::OrderPanelRequested(ContentKind::BuyingPower))
             .style(|theme, status| crate::style::button::transparent(theme, status, false));
 

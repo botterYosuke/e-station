@@ -37,7 +37,7 @@ pub enum Pane {
         studies: Vec<HeatmapStudy>,
         #[serde(deserialize_with = "ok_or_default", default)]
         stream_type: Vec<PersistStreamKind>,
-        #[serde(deserialize_with = "ok_or_default")]
+        #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
         #[serde(deserialize_with = "ok_or_default", default)]
         indicators: Vec<HeatmapIndicator>,
@@ -49,7 +49,7 @@ pub enum Pane {
         studies: Vec<HeatmapStudy>,
         #[serde(deserialize_with = "ok_or_default", default)]
         stream_type: Vec<PersistStreamKind>,
-        #[serde(deserialize_with = "ok_or_default")]
+        #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
         #[serde(deserialize_with = "ok_or_default", default)]
         indicators: Vec<HeatmapIndicator>,
@@ -61,7 +61,7 @@ pub enum Pane {
         kind: KlineChartKind,
         #[serde(deserialize_with = "ok_or_default", default)]
         stream_type: Vec<PersistStreamKind>,
-        #[serde(deserialize_with = "ok_or_default")]
+        #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
         #[serde(deserialize_with = "ok_or_default", default)]
         indicators: Vec<KlineIndicator>,
@@ -69,21 +69,40 @@ pub enum Pane {
         link_group: Option<LinkGroup>,
     },
     ComparisonChart {
+        #[serde(deserialize_with = "ok_or_default", default)]
         stream_type: Vec<PersistStreamKind>,
-        #[serde(deserialize_with = "ok_or_default")]
+        #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
     TimeAndSales {
+        #[serde(deserialize_with = "ok_or_default", default)]
         stream_type: Vec<PersistStreamKind>,
+        #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
     Ladder {
+        #[serde(deserialize_with = "ok_or_default", default)]
         stream_type: Vec<PersistStreamKind>,
+        #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
+    // link_group は将来の銘柄連動（グループ A の銘柄で注文を入れる等）のための
+    // 予約フィールド。現時点では stream_pair() が None を返すため実質未使用。
+    OrderEntry {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
+    OrderList {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
+    BuyingPower {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
@@ -199,6 +218,8 @@ pub enum ContentKind {
     Starter,
     HeatmapChart,
     ShaderHeatmap,
+    // FootprintChart と CandlestickChart は Pane enum に専用バリアントを持たず、
+    // 両者とも Pane::KlineChart バリアントで表現される（kind フィールドで区別）。
     FootprintChart,
     CandlestickChart,
     ComparisonChart,
@@ -236,9 +257,9 @@ impl std::fmt::Display for ContentKind {
             ContentKind::ComparisonChart => "Comparison Chart",
             ContentKind::TimeAndSales => "Time&Sales",
             ContentKind::Ladder => "DOM/Ladder",
-            ContentKind::OrderEntry => "Order Entry",
-            ContentKind::OrderList => "Order List",
-            ContentKind::BuyingPower => "Buying Power",
+            ContentKind::OrderEntry => "注文入力",
+            ContentKind::OrderList => "注文一覧",
+            ContentKind::BuyingPower => "買余力",
         };
         write!(f, "{s}")
     }
@@ -363,5 +384,55 @@ impl PaneSetup {
             depth_aggr,
             push_freq,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_order_entry_roundtrip() {
+        let pane = Pane::OrderEntry { link_group: None };
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, Pane::OrderEntry { link_group: None }));
+    }
+
+    #[test]
+    fn pane_order_list_roundtrip_with_link_group() {
+        let pane = Pane::OrderList {
+            link_group: Some(LinkGroup::A),
+        };
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored,
+            Pane::OrderList {
+                link_group: Some(LinkGroup::A)
+            }
+        ));
+    }
+
+    #[test]
+    fn pane_buying_power_roundtrip() {
+        let pane = Pane::BuyingPower { link_group: None };
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, Pane::BuyingPower { link_group: None }));
+    }
+
+    #[test]
+    fn pane_order_entry_missing_link_group_defaults_to_none() {
+        let json = r#"{"OrderEntry": {}}"#;
+        let pane: Pane = serde_json::from_str(json).unwrap();
+        assert!(matches!(pane, Pane::OrderEntry { link_group: None }));
+    }
+
+    #[test]
+    fn pane_old_ladder_state_deserializes_ok() {
+        let json = r#"{"Ladder":{"stream_type":[],"settings":{},"link_group":null}}"#;
+        let pane: Pane = serde_json::from_str(json).unwrap();
+        assert!(matches!(pane, Pane::Ladder { .. }));
     }
 }

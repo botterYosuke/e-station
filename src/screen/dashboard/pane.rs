@@ -629,6 +629,27 @@ impl State {
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
         }
 
+        let order_panel_title: Option<&'static str> = match &self.content {
+            Content::OrderEntry(_) => Some("注文入力"),
+            Content::OrderList(_) => Some("注文一覧"),
+            Content::BuyingPower(_) => Some("買余力"),
+            Content::Starter
+            | Content::Heatmap { .. }
+            | Content::ShaderHeatmap { .. }
+            | Content::Kline { .. }
+            | Content::TimeAndSales(_)
+            | Content::Ladder(_)
+            | Content::Comparison(_) => None,
+        };
+        if let Some(title) = order_panel_title {
+            top_left_buttons = top_left_buttons.push(
+                text(title)
+                    .size(13)
+                    .align_y(Alignment::Center)
+                    .line_height(1.4),
+            );
+        }
+
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
             if let Modal::StreamModifier(modifier) = m {
                 Some(modifier)
@@ -2408,8 +2429,12 @@ impl Content {
     }
 
     pub fn update_theme(&mut self, theme: &iced_core::Theme) {
-        if let Content::ShaderHeatmap { chart: Some(c), .. } = self {
-            c.update_theme(theme);
+        match self {
+            Content::ShaderHeatmap { chart: Some(c), .. } => c.update_theme(theme),
+            Content::Ladder(Some(panel)) => {
+                panel.invalidate(None);
+            }
+            _ => {}
         }
     }
 
