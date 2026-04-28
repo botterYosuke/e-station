@@ -12,7 +12,11 @@ where
     D: Deserializer<'a>,
 {
     let v: serde_json::Value = Deserialize::deserialize(deserializer)?;
-    Ok(T::deserialize(v).unwrap_or_default())
+    let result = T::deserialize(v.clone());
+    if let Err(ref e) = result {
+        log::warn!("ok_or_default: deserialization failed, using default. error={e} value={v}");
+    }
+    Ok(result.unwrap_or_default())
 }
 
 pub fn abbr_large_numbers(value: f32) -> String {

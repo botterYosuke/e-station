@@ -269,9 +269,10 @@ impl VenueBackend for EngineClientBackend {
                         let stream_kind = StreamKind::Trades { ticker_info: *ticker_info };
                         yield Event::TradesReceived(stream_kind, ts, parsed.into_boxed_slice());
                     }
-                    Ok(EngineEvent::Disconnected { venue: ev_venue, market: ev_market, reason, .. }) => {
+                    Ok(EngineEvent::Disconnected { venue: ev_venue, stream: ev_stream, market: ev_market, reason, .. }) => {
                         if ev_venue != venue { continue; }
                         if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
+                        if ev_stream != "trade" { continue; }
                         yield Event::Disconnected(exchange, reason.unwrap_or_default());
                         return;
                     }
@@ -422,9 +423,10 @@ impl VenueBackend for EngineClientBackend {
                         }
                     }
 
-                    Ok(EngineEvent::Disconnected { venue: ev_venue, ticker, market: ev_market, reason, .. }) => {
+                    Ok(EngineEvent::Disconnected { venue: ev_venue, ticker, stream: ev_stream, market: ev_market, reason, .. }) => {
                         if ev_venue != venue || ticker != ticker_sym { continue; }
                         if !ev_market.is_empty() && ev_market != Self::market_kind_to_ipc(market_kind) { continue; }
+                        if ev_stream != "depth" { continue; }
                         yield Event::Disconnected(exchange, reason.unwrap_or_else(|| "engine disconnected".to_string()));
                         return;
                     }

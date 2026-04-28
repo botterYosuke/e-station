@@ -219,6 +219,18 @@ class DataEngineServer:
         # 第二暗証番号: TachibanaSessionHolder でメモリ保持。
         # idle forget タイマー + lockout state を管理する（H-7: architecture.md §5.3）。
         self._session_holder = TachibanaSessionHolder()
+        # Dev fast path: DEV_TACHIBANA_SECOND_PASSWORD が設定されており、かつ
+        # dev_login_allowed=True のとき起動時に第二暗証番号を事前注入する。
+        # E2E テスト / CI デモジョブ専用。iced modal は不要になる。
+        # 値は絶対ログに出さない（C-M2）。
+        if self._dev_tachibana_login_allowed:
+            _dev_sp = os.environ.get("DEV_TACHIBANA_SECOND_PASSWORD", "")
+            if _dev_sp:
+                self._session_holder.set_password(_dev_sp)
+                log.info(
+                    "second_password pre-populated from DEV_TACHIBANA_SECOND_PASSWORD"
+                    " (dev fast path — E2E/CI use only)"
+                )
 
         # C-2: in-flight SubmitOrder カウンタ。ForgetSecondPassword 受信時のログ用。
         # asyncio 単一スレッドなので lock 不要。
