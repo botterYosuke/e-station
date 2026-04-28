@@ -15,6 +15,9 @@ pub enum Command {
         schema_minor: u16,
         client_version: String,
         token: String,
+        /// N1.13: 起動時に固定する mode (`"live"` | `"replay"`).
+        /// Python 側で StartEngine.engine との整合チェックに使う。
+        mode: String,
     },
     SetProxy {
         url: Option<String>,
@@ -151,6 +154,28 @@ pub enum Command {
         request_id: String,
         venue: String,
     },
+
+    // ── nautilus_trader 統合 (schema 2.4 / N1.1) ──────────────────────────
+    /// Start a nautilus engine (Backtest or Live) for the given strategy.
+    StartEngine {
+        request_id: String,
+        engine: EngineKind,
+        strategy_id: String,
+        config: EngineStartConfig,
+    },
+    /// Stop the running engine for the given strategy.
+    StopEngine {
+        request_id: String,
+        strategy_id: String,
+    },
+    /// Load replay data (J-Quants) into the BacktestEngine.
+    LoadReplayData {
+        request_id: String,
+        instrument_id: String,
+        start_date: String,
+        end_date: String,
+        granularity: ReplayGranularity,
+    },
 }
 
 /// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
@@ -168,12 +193,14 @@ impl std::fmt::Debug for Command {
                 schema_minor,
                 client_version,
                 token: _,
+                mode,
             } => f
                 .debug_struct("Hello")
                 .field("schema_major", schema_major)
                 .field("schema_minor", schema_minor)
                 .field("client_version", client_version)
                 .field("token", &"***")
+                .field("mode", mode)
                 .finish(),
             Command::SetProxy { url } => f.debug_struct("SetProxy").field("url", url).finish(),
             Command::Subscribe {
@@ -380,8 +407,70 @@ impl std::fmt::Debug for Command {
                 .field("request_id", request_id)
                 .field("venue", venue)
                 .finish(),
+            Command::StartEngine {
+                request_id,
+                engine,
+                strategy_id,
+                config,
+            } => f
+                .debug_struct("StartEngine")
+                .field("request_id", request_id)
+                .field("engine", engine)
+                .field("strategy_id", strategy_id)
+                .field("config", config)
+                .finish(),
+            Command::StopEngine {
+                request_id,
+                strategy_id,
+            } => f
+                .debug_struct("StopEngine")
+                .field("request_id", request_id)
+                .field("strategy_id", strategy_id)
+                .finish(),
+            Command::LoadReplayData {
+                request_id,
+                instrument_id,
+                start_date,
+                end_date,
+                granularity,
+            } => f
+                .debug_struct("LoadReplayData")
+                .field("request_id", request_id)
+                .field("instrument_id", instrument_id)
+                .field("start_date", start_date)
+                .field("end_date", end_date)
+                .field("granularity", granularity)
+                .finish(),
         }
     }
+}
+
+// ── nautilus 統合 sub-types (schema 2.4 / N1.1) ───────────────────────────────
+
+/// Which nautilus engine to start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EngineKind {
+    Backtest,
+    Live,
+}
+
+/// Replay data granularity (Trade tick / 1-min Bar / Daily Bar).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplayGranularity {
+    Trade,
+    Minute,
+    Daily,
+}
+
+/// Engine start config — shape mirrors `python/engine/nautilus/engine_runner.py`
+/// arguments. Decimal-precision fields stay as strings to avoid f64 round-trip loss.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineStartConfig {
+    pub instrument_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub initial_cash: String,
+    pub granularity: ReplayGranularity,
 }
 
 // ── Order sub-types (schema 1.3) ──────────────────────────────────────────────
@@ -727,6 +816,47 @@ pub enum EngineEvent {
     OrderListUpdated {
         request_id: String,
         orders: Vec<OrderRecordWire>,
+    },
+
+    // ── nautilus 統合 events (schema 2.4 / N1.1) ──────────────────────────
+    /// Engine started successfully (replay BacktestEngine or live LiveExecutionEngine).
+    EngineStarted {
+        strategy_id: String,
+        account_id: String,
+        ts_event_ms: i64,
+    },
+    /// Engine stopped. `final_equity` is decimal-string for precision safety.
+    EngineStopped {
+        strategy_id: String,
+        final_equity: String,
+        ts_event_ms: i64,
+    },
+    /// Replay data load completed. Counters help the UI display progress.
+    ReplayDataLoaded {
+        strategy_id: String,
+        bars_loaded: u64,
+        trades_loaded: u64,
+        ts_event_ms: i64,
+    },
+    /// nautilus Position opened (transition flat → long/short).
+    PositionOpened {
+        strategy_id: String,
+        venue: String,
+        instrument_id: String,
+        position_id: String,
+        side: String,
+        opened_qty: String,
+        avg_open_price: String,
+        ts_event_ms: i64,
+    },
+    /// nautilus Position closed (transition long/short → flat).
+    PositionClosed {
+        strategy_id: String,
+        venue: String,
+        instrument_id: String,
+        position_id: String,
+        realized_pnl: String,
+        ts_event_ms: i64,
     },
 
     // ── Buying Power Phase (schema 2.1) ───────────────────────────────────

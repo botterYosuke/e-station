@@ -174,6 +174,9 @@ class DataEngineServer:
         self._outbox_event = asyncio.Event()
         self._engine_session_id: UUID = uuid.uuid4()
         self._handshake_lock = asyncio.Lock()
+        # N1.13: 起動時固定 mode (`"live"` | `"replay"`).
+        # Hello 受信時に上書きする。default は旧クライアント互換の "live"。
+        self._mode: str = "live"
 
         # Tachibana p_no counter MUST be constructed before the worker dict
         # so the worker shares the same monotonic counter as
@@ -360,6 +363,9 @@ class DataEngineServer:
             await ws.close()
             raise ValueError("auth_failed")
 
+        # N1.13: capture mode from Hello so dispatch policies (mode helper) can read it.
+        self._mode = msg.mode
+
         if msg.schema_major != SCHEMA_MAJOR:
             await ws.send(
                 orjson.dumps(
@@ -440,6 +446,11 @@ class DataEngineServer:
                 "supports_bulk_trades": True,
                 "supports_depth_binary": False,
                 "venue_capabilities": venue_caps,
+                # N1.1: Phase N1 では BacktestEngine のみ実装、Live は N2 から。
+                "nautilus": {"backtest": True, "live": False},
+                # N1.13: クライアントから受け取った mode をエコーバック。
+                # UI 側は capabilities["mode"] で正規化された値を読む。
+                "mode": self._mode,
             },
         )
         await ws.send(orjson.dumps(ready.model_dump(mode="json")).decode())

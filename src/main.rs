@@ -231,7 +231,11 @@ fn main() {
             .build()
             .expect("Failed to build engine-client tokio runtime");
 
-        match rt.block_on(engine_client::EngineConnection::connect(&url_str, &token)) {
+        let mode_str = cli_args.mode.as_str();
+        log::info!("Started in mode: {mode_str}");
+        match rt.block_on(engine_client::EngineConnection::connect_with_mode(
+            &url_str, &token, mode_str,
+        )) {
             Ok(conn) => {
                 log::info!("Connected to external data engine at {url_str}");
                 let conn = Arc::new(conn);
@@ -262,6 +266,7 @@ fn main() {
                 // Monitor the connection and reconnect with exponential backoff on loss.
                 let reconnect_url = url_str.clone();
                 let reconnect_token = token.clone();
+                let reconnect_mode = mode_str.to_string();
                 rt.spawn(async move {
                     let mut current_conn = conn;
                     loop {
@@ -275,9 +280,10 @@ fn main() {
                         loop {
                             tokio::time::sleep(delay).await;
                             log::info!("Attempting to reconnect to engine at {reconnect_url} …");
-                            match engine_client::EngineConnection::connect(
+                            match engine_client::EngineConnection::connect_with_mode(
                                 &reconnect_url,
                                 &reconnect_token,
+                                &reconnect_mode,
                             )
                             .await
                             {
@@ -394,6 +400,11 @@ fn main() {
         log::info!("Spawning Python data engine: {cmd:?} on 127.0.0.1:{port}");
 
         let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
+        // N1.13: propagate the CLI mode so every handshake (initial + recovery)
+        // sends the same value in Hello.
+        let mode_str = cli_args.mode.as_str();
+        log::info!("Started in mode: {mode_str}");
+        rt.block_on(manager.set_mode(mode_str));
         ENGINE_MANAGER.set(Arc::clone(&manager)).ok();
 
         // Push the saved proxy into the manager so it is re-applied after every
@@ -567,14 +578,12 @@ fn main() {
                 let is_replay_mode = Arc::new(AtomicBool::new(false));
                 // FLOWSURFACE_ORDER_GUARD_ENABLED=1 で発注 API を有効化する（明示 opt-in）。
                 // 未設定時はデフォルトの enabled=false のまま 503 で reject（誤発注防止）。
-                let guard_config = if std::env::var("FLOWSURFACE_ORDER_GUARD_ENABLED")
-                    .as_deref()
-                    == Ok("1")
-                {
-                    api::order_api::OrderGuardConfig::enabled_no_limits()
-                } else {
-                    api::order_api::OrderGuardConfig::default()
-                };
+                let guard_config =
+                    if std::env::var("FLOWSURFACE_ORDER_GUARD_ENABLED").as_deref() == Ok("1") {
+                        api::order_api::OrderGuardConfig::enabled_no_limits()
+                    } else {
+                        api::order_api::OrderGuardConfig::default()
+                    };
                 Arc::new(
                     api::order_api::OrderApiState::new(session, engine_rx, is_replay_mode)
                         .with_guard_config(guard_config),

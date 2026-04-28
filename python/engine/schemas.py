@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 2
+SCHEMA_MINOR: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +33,9 @@ class Hello(IpcMessage):
     schema_minor: int
     client_version: str
     token: str
+    # N1.13: 起動時固定 mode (`"live"` | `"replay"`).
+    # 旧クライアント互換のため省略時は "live" にフォールバック。
+    mode: Literal["live", "replay"] = "live"
 
 
 class SetProxy(IpcMessage):
@@ -568,6 +571,88 @@ class OrderListUpdated(IpcMessage):
     event: Literal["OrderListUpdated"] = "OrderListUpdated"
     request_id: str
     orders: list[OrderRecordWire] = Field(default_factory=list)
+
+
+# ── nautilus_trader 統合 (schema 2.4 / N1.1) ────────────────────────────────
+
+
+class EngineStartConfig(IpcMessage):
+    """Engine start config — mirrors `engine_runner.py` arguments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instrument_id: str
+    start_date: str
+    end_date: str
+    initial_cash: str
+    granularity: Literal["Trade", "Minute", "Daily"]
+
+
+class StartEngine(IpcMessage):
+    op: Literal["StartEngine"] = "StartEngine"
+    request_id: str
+    engine: Literal["Backtest", "Live"]
+    strategy_id: str
+    config: EngineStartConfig
+
+
+class StopEngine(IpcMessage):
+    op: Literal["StopEngine"] = "StopEngine"
+    request_id: str
+    strategy_id: str
+
+
+class LoadReplayData(IpcMessage):
+    op: Literal["LoadReplayData"] = "LoadReplayData"
+    request_id: str
+    instrument_id: str
+    start_date: str
+    end_date: str
+    granularity: Literal["Trade", "Minute", "Daily"]
+
+
+class EngineStarted(IpcMessage):
+    event: Literal["EngineStarted"] = "EngineStarted"
+    strategy_id: str
+    account_id: str
+    ts_event_ms: int
+
+
+class EngineStopped(IpcMessage):
+    event: Literal["EngineStopped"] = "EngineStopped"
+    strategy_id: str
+    final_equity: str
+    ts_event_ms: int
+
+
+class ReplayDataLoaded(IpcMessage):
+    event: Literal["ReplayDataLoaded"] = "ReplayDataLoaded"
+    strategy_id: str
+    bars_loaded: int
+    trades_loaded: int
+    ts_event_ms: int
+
+
+class PositionOpened(IpcMessage):
+    event: Literal["PositionOpened"] = "PositionOpened"
+    strategy_id: str
+    venue: str
+    instrument_id: str
+    position_id: str
+    side: str
+    opened_qty: str
+    avg_open_price: str
+    ts_event_ms: int
+
+
+class PositionClosed(IpcMessage):
+    event: Literal["PositionClosed"] = "PositionClosed"
+    strategy_id: str
+    venue: str
+    instrument_id: str
+    position_id: str
+    realized_pnl: str
+    ts_event_ms: int
 
 
 # ── Buying Power Phase (schema 2.1) ─────────────────────────────────────────
