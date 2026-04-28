@@ -41,7 +41,7 @@ use data::{
 };
 use exchange::{
     Kline, OpenInterest, StreamPairKind, TickMultiplier, TickerInfo, Timeframe,
-    adapter::{MarketKind, StreamKind, StreamTicksize},
+    adapter::{Exchange, MarketKind, StreamKind, StreamTicksize},
     unit::PriceStep,
 };
 use iced::{
@@ -1622,11 +1622,10 @@ impl State {
                 if let Some(Modal::MiniTickersList(ref mut mini_panel)) = self.modal
                     && let Some(action) = mini_panel.update(message)
                 {
-                    self.modal = Some(Modal::MiniTickersList(mini_panel.clone()));
-
                     let crate::modal::pane::mini_tickers_list::Action::RowSelected(sel) = action;
                     match sel {
                         crate::modal::pane::mini_tickers_list::RowSelection::Add(ti) => {
+                            self.modal = Some(Modal::MiniTickersList(mini_panel.clone()));
                             if let Content::Comparison(chart) = &mut self.content
                                 && let Some(c) = chart
                             {
@@ -1636,6 +1635,7 @@ impl State {
                             }
                         }
                         crate::modal::pane::mini_tickers_list::RowSelection::Remove(ti) => {
+                            self.modal = Some(Modal::MiniTickersList(mini_panel.clone()));
                             if let Content::Comparison(chart) = &mut self.content
                                 && let Some(c) = chart
                             {
@@ -1646,6 +1646,14 @@ impl State {
                         }
                         crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti) => {
                             if let Content::OrderEntry(panel) = &mut self.content {
+                                if ti.ticker.exchange != Exchange::TachibanaStock {
+                                    self.notifications.push(Toast::warn(
+                                        "注文入力パネルは立花証券銘柄のみ対応しています"
+                                            .to_string(),
+                                    ));
+                                    self.modal = None;
+                                    return None;
+                                }
                                 let display = ti.ticker.display_symbol_and_type().0;
                                 let instrument_id =
                                     format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
@@ -1653,6 +1661,9 @@ impl State {
                                 self.modal = None;
                                 return None;
                             }
+                            // Non-OrderEntry panes delegate exchange validation to the
+                            // switch_tickers_in_group call chain; only OrderEntry requires
+                            // a TachibanaStock guard here.
                             return Some(Effect::SwitchTickersInGroup(ti));
                         }
                     }
@@ -2615,7 +2626,6 @@ fn by_basis_default<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exchange::adapter::Exchange;
 
     fn tachibana_ticker_info() -> TickerInfo {
         let ticker = exchange::Ticker::new("7203", Exchange::TachibanaStock);

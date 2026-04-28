@@ -709,6 +709,29 @@ impl Dashboard {
         }
     }
 
+    /// Reset the `submitting` flag on every `OrderEntry` pane when the engine
+    /// connection drops, so the submit button becomes re-enabled once the
+    /// connection is restored.
+    pub fn notify_engine_disconnected(&mut self, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::OrderEntry(panel) = &mut state.content {
+                    panel.on_engine_disconnected();
+                }
+            });
+    }
+
+    /// Clear the disconnection error on every `OrderEntry` pane when the
+    /// engine connection is restored.
+    pub fn notify_engine_reconnected(&mut self, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::OrderEntry(panel) = &mut state.content {
+                    panel.on_engine_reconnected();
+                }
+            });
+    }
+
     pub fn view<'a>(
         &'a self,
         main_window: &'a Window,

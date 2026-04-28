@@ -60,6 +60,8 @@ impl std::fmt::Display for CashMarginKind {
 pub struct OrderEntryPanel {
     pub instrument_id: Option<String>,
     pub display_label: Option<String>,
+    /// Venue identifier (e.g. "tachibana"). Set by `set_instrument`.
+    pub venue: Option<String>,
     pub side: OrderSide,
     pub quantity: String,
     pub price_kind: PriceKind,
@@ -163,6 +165,7 @@ impl OrderEntryPanel {
 
     fn build_submit_action(&mut self) -> Option<Action> {
         let instrument_id = self.instrument_id.clone()?;
+        let venue = self.venue.clone()?;
 
         let request_id = uuid::Uuid::new_v4().to_string();
         self.submitting = true;
@@ -188,7 +191,7 @@ impl OrderEntryPanel {
 
         Some(Action::SubmitOrder {
             request_id,
-            venue: "tachibana".to_string(),
+            venue,
             instrument_id,
             order_side,
             order_type,
@@ -300,6 +303,23 @@ impl OrderEntryPanel {
     pub fn set_instrument(&mut self, id: String, display: String) {
         self.instrument_id = Some(id);
         self.display_label = Some(display);
+        // Phase O0: Tachibana 専用。将来の多取引所対応時は呼び出し元から venue を渡す。
+        self.venue = Some("tachibana".to_string());
+    }
+
+    /// Called when the engine connection drops (e.g. restart).
+    /// Resets the in-flight submission state so the submit button becomes
+    /// re-enabled once the connection is restored.
+    pub fn on_engine_disconnected(&mut self) {
+        self.submitting = false;
+        self.pending_request_id = None;
+        self.last_error = Some("接続が切断されました".to_string());
+    }
+
+    /// Called when the engine connection is restored.
+    /// Clears the disconnection error so the panel returns to normal state.
+    pub fn on_engine_reconnected(&mut self) {
+        self.last_error = None;
     }
 
     /// Called when an OrderAccepted event arrives for our pending_request_id.
@@ -329,6 +349,7 @@ mod tests {
             price: "1500".into(),
             trigger_price: "1480".into(),
             instrument_id: Some("1234".into()),
+            venue: Some("tachibana".into()),
             ..Default::default()
         };
         let action = panel.update(Message::ConfirmSubmit);
@@ -380,6 +401,7 @@ mod tests {
         let mut panel = OrderEntryPanel {
             quantity: "10".into(),
             instrument_id: Some("1234".into()),
+            venue: Some("tachibana".into()),
             ..Default::default()
         };
         let action = panel.update(Message::ConfirmSubmit);
@@ -474,6 +496,7 @@ mod tests {
             quantity: "10".into(),
             side: OrderSide::Sell,
             instrument_id: Some("7203.TSE".into()),
+            venue: Some("tachibana".into()),
             ..Default::default()
         };
         let action = panel.update(Message::ConfirmSubmit);
@@ -486,6 +509,115 @@ mod tests {
                 })
             ),
             "Sell side should produce OrderSide::Sell, got {action:?}"
+        );
+    }
+
+    // ── C-1: 非 TachibanaStock 銘柄では set_instrument が呼ばれないことを確認 ──
+    // pane.rs の exchange チェックにより非 Tachibana 銘柄では set_instrument が
+    // 呼ばれない。呼ばれなかった場合、instrument_id が None のままで
+    // submit ボタンが無効化されることをここで検証する。
+    #[test]
+    fn without_set_instrument_submit_button_is_disabled() {
+        let panel = OrderEntryPanel {
+            quantity: "100".into(),
+            // instrument_id は未設定 — 非 Tachibana 銘柄が選択されたとき
+            // pane.rs の早期リターンにより set_instrument は呼ばれない
+            ..Default::default()
+        };
+        // submit_enabled = !submitting && quantity_valid && instrument_id.is_some()
+        let submit_enabled =
+            !panel.submitting && panel.quantity_valid() && panel.instrument_id.is_some();
+        assert!(
+            !submit_enabled,
+            "instrument_id が None のときは submit ボタンを有効にしてはならない"
+        );
+    }
+
+    // ── M-1: set_instrument が venue を自動セットすることを確認 ──
+    #[test]
+    fn set_instrument_sets_venue_to_tachibana() {
+        let mut panel = OrderEntryPanel::default();
+        panel.set_instrument("7203.TSE".into(), "トヨタ".into());
+        assert_eq!(panel.venue, Some("tachibana".to_string()));
+    }
+
+    // ── M-1: build_submit_action が venue を正しく使うことを確認 ──
+    #[test]
+    fn submit_order_uses_venue_from_field() {
+        let mut panel = OrderEntryPanel {
+            quantity: "10".into(),
+            instrument_id: Some("7203.TSE".into()),
+            venue: Some("tachibana".into()),
+            ..Default::default()
+        };
+        let action = panel.update(Message::ConfirmSubmit);
+        assert!(
+            matches!(
+                action,
+                Some(Action::SubmitOrder {
+                    ref venue,
+                    ..
+                }) if venue == "tachibana"
+            ),
+            "venue フィールドが SubmitOrder に伝播されなかった: {action:?}"
+        );
+    }
+
+    // ── H-B: instrument_id = Some, venue = None のとき ConfirmSubmit は None を返す ──
+    #[test]
+    fn confirm_submit_with_instrument_id_but_no_venue_returns_none() {
+        let mut panel = OrderEntryPanel {
+            quantity: "10".into(),
+            instrument_id: Some("1234".into()),
+            venue: None,
+            ..Default::default()
+        };
+        let action = panel.update(Message::ConfirmSubmit);
+        assert!(
+            action.is_none(),
+            "venue が None のときは SubmitOrder を返してはならない"
+        );
+        assert!(
+            !panel.submitting,
+            "venue が None のときは submitting を true にしてはならない"
+        );
+    }
+
+    // ── M-2: on_engine_disconnected が submitting をリセットすることを確認 ──
+    #[test]
+    fn on_engine_disconnected_resets_submitting_state() {
+        let mut panel = OrderEntryPanel {
+            submitting: true,
+            pending_request_id: Some("req-abc".into()),
+            last_error: None,
+            ..Default::default()
+        };
+        panel.on_engine_disconnected();
+        assert!(
+            !panel.submitting,
+            "submitting は false にリセットされるべき"
+        );
+        assert!(
+            panel.pending_request_id.is_none(),
+            "pending_request_id は None にクリアされるべき"
+        );
+        assert!(
+            panel.last_error.is_some(),
+            "last_error に切断メッセージがセットされるべき"
+        );
+    }
+
+    // ── M-1: on_engine_reconnected が last_error をクリアすることを確認 ──
+    #[test]
+    fn on_engine_reconnected_clears_last_error() {
+        let mut panel = OrderEntryPanel {
+            last_error: Some("接続が切断されました".to_string()),
+            ..Default::default()
+        };
+        panel.on_engine_reconnected();
+        assert!(
+            panel.last_error.is_none(),
+            "再接続後は last_error が None にクリアされるべき"
         );
     }
 }

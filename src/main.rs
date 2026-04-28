@@ -1074,6 +1074,12 @@ impl Flowsurface {
                     self.notifications.push(Toast::error(
                         "データエンジン再起動中 — チャートは復旧後に自動更新されます".to_string(),
                     ));
+                    let main_window = self.main_window.id;
+                    self.layout_manager
+                        .iter_dashboards_mut()
+                        .for_each(|dashboard| {
+                            dashboard.notify_engine_disconnected(main_window);
+                        });
                 }
                 // The actual backend rebuild + recovery toast are emitted
                 // by `Message::EngineConnected` so a single source of
@@ -1304,6 +1310,17 @@ impl Flowsurface {
                 if was_restarting {
                     self.notifications
                         .push(Toast::info("データエンジン接続を復旧しました".to_string()));
+                }
+
+                // Clear the disconnection error from all OrderEntry panes so
+                // they return to normal state after reconnect (M-1).
+                {
+                    let main_window = self.main_window.id;
+                    self.layout_manager
+                        .iter_dashboards_mut()
+                        .for_each(|dashboard| {
+                            dashboard.notify_engine_reconnected(main_window);
+                        });
                 }
 
                 // Bridge the broadcast-replay gap from BOTH directions:
