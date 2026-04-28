@@ -163,7 +163,14 @@ class SubmitOrderRequest(IpcMessage):
 
     model_config = ConfigDict(extra="forbid")
 
-    client_order_id: str
+    client_order_id: str = Field(min_length=1, max_length=36)
+
+    @field_validator("client_order_id")
+    @classmethod
+    def _validate_client_order_id(cls, v: str) -> str:
+        if not v.isascii() or not v.isprintable():
+            raise ValueError("client_order_id must be ASCII printable (spec.md §5)")
+        return v
     instrument_id: str
     order_side: str
     order_type: str

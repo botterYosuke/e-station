@@ -747,7 +747,7 @@ class DataEngineServer:
         # 発注処理（T0.4）
         import time
 
-        envelope = NautilusOrderEnvelope.model_validate(raw_order)
+        envelope = NautilusOrderEnvelope.model_validate(order.model_dump())
         # OrderSubmitted を先行して発火（nautilus 流の 2 段イベント）
         self._outbox.append(
             {

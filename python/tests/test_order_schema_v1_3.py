@@ -378,3 +378,49 @@ def test_sanitize_for_wal_preserves_normal_text():
 
     assert _sanitize_for_wal("hello world") == "hello world"
     assert _sanitize_for_wal("7203.TSE") == "7203.TSE"
+
+
+# ── H-4: SubmitOrderRequest.client_order_id バリデーション ────────────────────
+
+_BASE_ORDER = {
+    "instrument_id": "7203.TSE",
+    "order_side": "BUY",
+    "order_type": "MARKET",
+    "quantity": "100",
+    "price": None,
+    "trigger_price": None,
+    "trigger_type": None,
+    "time_in_force": "DAY",
+    "expire_time_ns": None,
+    "post_only": False,
+    "reduce_only": False,
+    "tags": [],
+}
+
+
+@pytest.mark.parametrize("cid", [
+    "cid-001",
+    "a",                                     # 最短（1文字）
+    "a" * 36,                                # 最長（36文字）
+    "550e8400-e29b-41d4-a716-446655440000",  # UUID v4
+    "!@#$%^&*()-_=+",                        # ASCII 記号
+])
+def test_client_order_id_valid(cid):
+    """H-4: 有効な ASCII printable 1-36 文字は受理される。"""
+    req = SubmitOrderRequest.model_validate({**_BASE_ORDER, "client_order_id": cid})
+    assert req.client_order_id == cid
+
+
+@pytest.mark.parametrize("cid,desc", [
+    ("", "空文字列"),
+    ("a" * 37, "37文字 (max=36)"),
+    ("abc\x01def", "制御文字を含む"),
+    ("abc\ndef", "改行文字を含む"),
+    ("abc\tdef", "タブ文字を含む"),
+    ("café", "非 ASCII 文字を含む"),
+    ("注文", "日本語"),
+])
+def test_client_order_id_invalid(cid, desc):  # noqa: ARG001
+    """H-4: 無効な client_order_id は ValidationError が上がること。"""
+    with pytest.raises(Exception, match=r"(?i)client_order_id|string_too_short|string_too_long|value_error"):
+        SubmitOrderRequest.model_validate({**_BASE_ORDER, "client_order_id": cid})

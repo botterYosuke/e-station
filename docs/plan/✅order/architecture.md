@@ -61,6 +61,37 @@ Rust 受信
    │ ⑪ HTTP 200 を返却
 ```
 
+**H-2 SecondPasswordRequired ポリシー（確定）**:
+
+Python が `_do_submit_order` を処理した時点で第二暗証番号がメモリに無い場合、以下の fire-and-forget 方式を採る。
+
+```
+Python
+   │ second_password is None
+   │ → Event::SecondPasswordRequired { request_id } を IPC 送信
+   │ → ハンドラを return（OrderRejected は送らない）
+   ▼
+Rust order_api.rs
+   │ OrderWaitResult::SecondPasswordRequired → HTTP 401
+   │   { "reason_code": "SECOND_PASSWORD_REQUIRED" }
+   ▼
+Rust main.rs（IPC イベント購読経路）
+   │ EngineEvent::SecondPasswordRequired { request_id } → modal 表示
+   ▼
+ユーザー入力
+   │ → Command::SetSecondPassword { value } を IPC 送信
+   ▼
+HTTP 呼び出し側
+   │ 401 受信後、同一 client_order_id で POST /api/order/submit を再送
+   │ OrderSessionState の try_insert が IdempotentReplay をガード
+   │ → 2 回目は second_password 設定済みのため正常に処理される
+```
+
+**不変条件**:
+- Python は SecondPasswordRequired を送った後 OrderRejected を送らない（Rust の OrderWaitResult が SecondPasswordRequired になり HTTP 401 で終了するため）
+- 再送時の idempotency は `client_order_id + request_key` ペアで担保（WAL 復元も同様）
+- 再送は無制限ではなく HTTP 呼び出し側の責務。Python には自動リトライ機構を持たせない（単一責務）
+
 ### 2.2 約定通知（非同期、Phase O2）
 
 ```
