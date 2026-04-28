@@ -77,6 +77,7 @@ pub struct OrderEntryPanel {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    OpenInstrumentPicker,
     SideChanged(OrderSide),
     QuantityChanged(String),
     PriceKindChanged(PriceKind),
@@ -89,6 +90,7 @@ pub enum Message {
 
 #[derive(Debug, Clone)]
 pub enum Action {
+    OpenInstrumentPicker,
     /// Show an order confirmation dialog before submitting.
     RequestConfirm {
         instrument_id: String,
@@ -117,6 +119,7 @@ impl OrderEntryPanel {
 
     pub fn update(&mut self, message: Message) -> Option<Action> {
         match message {
+            Message::OpenInstrumentPicker => return Some(Action::OpenInstrumentPicker),
             Message::SideChanged(side) => self.side = side,
             Message::QuantityChanged(qty) => self.quantity = qty,
             Message::PriceKindChanged(kind) => self.price_kind = kind,
@@ -251,7 +254,7 @@ impl OrderEntryPanel {
         );
 
         let mut form = column![
-            text(instrument_label).size(14),
+            button(text(instrument_label).size(14)).on_press(Message::OpenInstrumentPicker),
             side_row,
             qty_input,
             price_kind_row,

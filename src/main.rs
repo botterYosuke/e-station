@@ -1376,6 +1376,7 @@ impl Flowsurface {
                         log::info!("a stream disconnected from {exchange} WS: {reason:?}");
                     }
                     exchange::Event::DepthReceived(stream, depth_update_t, depth) => {
+                        log::info!(target: "engine", "DepthReceived event fired for {stream:?}");
                         let task = dashboard
                             .ingest_depth(&stream, depth_update_t, &depth, main_window_id)
                             .map(move |msg| Message::Dashboard {
@@ -1605,6 +1606,7 @@ impl Flowsurface {
                             }
 
                             match action {
+                                Action::OpenInstrumentPicker => Task::none(),
                                 Action::RequestConfirm {
                                     instrument_id,
                                     order_side,

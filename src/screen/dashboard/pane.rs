@@ -650,29 +650,6 @@ impl State {
             );
         }
 
-        if let Content::OrderEntry(panel) = &self.content {
-            let label = panel.display_label.as_deref().unwrap_or("銘柄未選択");
-            let ticker_btn = button(
-                text(label)
-                    .size(13)
-                    .align_y(Alignment::Center)
-                    .line_height(1.4),
-            )
-            .on_press(Message::PaneEvent(
-                id,
-                Event::ShowModal(Modal::MiniTickersList(MiniPanel::new())),
-            ))
-            .style(|theme, status| {
-                style::button::modifier(
-                    theme,
-                    status,
-                    !matches!(self.modal, Some(Modal::MiniTickersList(_))),
-                )
-            })
-            .height(widget::PANE_CONTROL_BTN_HEIGHT);
-            top_left_buttons = top_left_buttons.push(ticker_btn);
-        }
-
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
             if let Modal::StreamModifier(modifier) = m {
                 Some(modifier)
@@ -1673,7 +1650,11 @@ impl State {
                 if let Content::OrderEntry(panel) = &mut self.content
                     && let Some(action) = panel.update(msg)
                 {
-                    return Some(Effect::OrderEntryAction(action));
+                    if matches!(action, panel::order_entry::Action::OpenInstrumentPicker) {
+                        self.modal = Some(Modal::MiniTickersList(MiniPanel::new()));
+                    } else {
+                        return Some(Effect::OrderEntryAction(action));
+                    }
                 }
             }
             Event::OrderListMsg(msg) => {

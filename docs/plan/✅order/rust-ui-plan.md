@@ -137,7 +137,19 @@ pub struct OrderEntryPanel {
 - 「売り」ボタンは disabled + tooltip `"Phase O1 で実装予定"`
 - 口座種別・期日・逆指値は grayed out + 同様の tooltip
 
-銘柄選択（2026-04-28 実装 ✅ / レビュー収束済み）: タイトルバーに「銘柄未選択」ボタンを追加。クリックで既存の `MiniTickersList` モーダルが開き、ティッカーを選択すると `instrument_id`（`<code>.TSE` 形式）と `display_label` および `venue`（`"tachibana"` 固定）がセットされる。`pane.rs` の `MiniTickersListInteraction` ハンドラで `RowSelection::Switch(ti)` を受け取ったとき、`Content::OrderEntry` の場合は `Exchange::TachibanaStock` ガードを通過したものだけ `panel.set_instrument(id, display)` を呼んでモーダルを閉じる（`SwitchTickersInGroup` には進まない。非対応取引所は `Toast::warn` を表示）。`venue` はハードコードせず `set_instrument()` がフィールドに自動設定し `build_submit_action` が参照する。エンジン切断時（`EngineRestarting(true)`）は `layout_manager.iter_dashboards_mut()` 経由で全レイアウトの `on_engine_disconnected()` を呼び `submitting` をリセット。再接続時（`EngineConnected`）は `on_engine_reconnected()` で `last_error` をクリア。レビュー詳細は [review-fixes-2026-04-28.md §銘柄選択](./review-fixes-2026-04-28.md) を参照。
+銘柄選択（2026-04-28 実装 ✅ / レビュー収束済み）:
+
+**配置変更 ✅（完了）**: 初期実装はタイトルバーにボタンを置いていたが、**Body 内の「銘柄未選択」静的テキストをボタンに差し替え**、タイトルバーのボタンは削除。
+
+実装済み内容:
+1. `order_entry::Message::OpenInstrumentPicker` / `order_entry::Action::OpenInstrumentPicker` を追加
+2. `order_entry.rs` `view()` の `text(instrument_label).size(14)` → `button(text(...)).on_press(Message::OpenInstrumentPicker)` に変更
+3. `order_entry.rs` `update()` で `Message::OpenInstrumentPicker` → `Some(Action::OpenInstrumentPicker)` を返す
+4. `pane.rs` `Event::OrderEntryMsg` ハンドラで `Action::OpenInstrumentPicker` を受け `self.modal = Some(Modal::MiniTickersList(MiniPanel::new()))` をセット（`Effect::OrderEntryAction` には伝播しない）
+5. `pane.rs` の title bar `ticker_btn` ブロック（`Content::OrderEntry` ガード）を削除
+6. `main.rs` に `Action::OpenInstrumentPicker => Task::none()` を追加（pane.rs で処理済みのため Task 不要）
+
+その他の設計（変更なし）: `MiniTickersListInteraction` の `RowSelection::Switch` で `TachibanaStock` ガード → `panel.set_instrument(id, display)` 呼び出し → `self.modal = None`。`venue` は `set_instrument()` が自動設定。エンジン切断/再接続は `on_engine_disconnected()` / `on_engine_reconnected()` 経由。レビュー詳細は [review-fixes-2026-04-28.md §銘柄選択](./review-fixes-2026-04-28.md) を参照。
 
 受け入れテスト: `src/screen/dashboard/panel/order_entry.rs` の `#[cfg(test)]` 内で
 - バリデーション（数量 0 → エラー）

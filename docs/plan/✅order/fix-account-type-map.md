@@ -1,8 +1,10 @@
 # B-M4 修正計画: `sZyoutoekiKazeiC` マッピング確定
 
 **作成日**: 2026-04-28  
+**完了日**: 2026-04-28  
+**ステータス**: ✅ 実装済み・テスト全緑・全受け入れ条件クリア  
 **根拠**: マニュアル調査完了（B-M4 pin 要件の解消）  
-**優先度**: HIGH（現行コードのマッピングに誤りがあり、実発注時に誤った口座区分で送信される）
+~~**優先度**: HIGH（現行コードのマッピングに誤りがあり、実発注時に誤った口座区分で送信される）~~
 
 ---
 
@@ -33,6 +35,28 @@
 | `account_type=general` | `"0"` | **存在しない値** | **無効な値** |
 | `account_type=nisa_growth` | `"5"` | **一般NISA** | タグ名と値の意味が逆（"5"は成長ではなく一般NISA） |
 | `account_type=nisa_tsumitate` | `"6"` | **NISA成長投資枠** | タグ名と値の意味が逆（"6"はつみたてではなく成長投資枠） |
+
+### 1.2.1 調査結果（2026-04-28）— 修正は既に適用済み
+
+実際のコード（`python/engine/exchanges/tachibana_orders.py`）を確認した結果、**§1.2 の差分表に示した誤りは既に修正済み**であった。
+
+現行 `_ACCOUNT_TYPE_MAP`（確認済み）:
+
+```python
+_ACCOUNT_TYPE_MAP: dict[str, str] = {
+    "account_type=specific":    "1",  # 特定口座
+    "account_type=general":     "3",  # 一般口座
+    "account_type=nisa":        "5",  # 一般NISA（2024年以降売却のみ可）
+    "account_type=nisa_growth": "6",  # NISA成長投資枠（N成長）
+}
+```
+
+- 旧タグ名（`specific_with_withholding` / `specific_without_withholding` / `nisa_tsumitate`）: **コードに存在しない** ✅  
+- 無効値 `"0"`: **コードに存在しない** ✅  
+- `src/api/order_api.rs`: 旧タグ名は**存在しない** ✅  
+- `architecture.md §10.4`: B-M4 を「確定（2026-04-28）」で更新済み ✅  
+- `invariant-tests.md`: B-M4 不変条件エントリ追加済み ✅  
+- `test_account_type_map_matches_manual`: PASS ✅
 
 ### 1.3 源泉徴収区分について
 

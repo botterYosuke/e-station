@@ -103,6 +103,22 @@
 
 ---
 
+### Q11. 発注 E2E における第二暗証番号のヘッドレス注入方法（未決定）
+
+**背景**: `.env` にデモクレデンシャルが揃い（2026-04-28 確認）、ログイン E2E (`tests/e2e/tachibana_demo_login.sh`) は実行可能。しかし発注 E2E は第二暗証番号が必要で、現在は iced modal 経由でしか入力できない設計（Q1 案 D）のためヘッドレス実行できない。
+
+**選択肢**:
+
+| 案 | 概要 | メリット | デメリット |
+|---|---|---|---|
+| **A** | 専用スクリプトが Python エンジンに直接 WebSocket 接続し `SetSecondPassword` + `SubmitOrder` を送信 | GUI 不要・CI 化可能 | エンジン直結なので Rust HTTP 層をスキップ |
+| **B** | `DEV_TACHIBANA_SECOND_PASSWORD=xxx` env を Python 側 dev fast path として追加（ログインの `FLOWSURFACE_DEV_TACHIBANA_LOGIN_ALLOWED=1` と同じ思想） | フルスタック E2E が CI 化可能 | env に第二暗証番号が残る（開発用途限定でも管理コスト） |
+| **C** | E2E スクリプトは Rust アプリ＋GUI を起動し、第二暗証番号は人手で modal に入力してから curl で発注 | 変更ゼロ | 自動化不可・手動操作が必要 |
+
+**現時点のデフォルト**: 案 C（手動 GUI）で先に動作確認し、CI 自動化が必要になった時点で案 A または B を選択する。
+
+---
+
 ## 着手後に決めれば良い事項
 
 - 監査ログのローテーション戦略（日次 / サイズベース / 圧縮）
