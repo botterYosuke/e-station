@@ -118,3 +118,57 @@ if kind == ContentKind::BuyingPower
 | `src/screen/dashboard/panel/buying_power.rs` | BuyingPower パネル実装 |
 | `src/screen/dashboard.rs:633–637` | `has_buying_power_pane()` / `distribute_buying_power()` |
 | `docs/plan/✅order/task-buying-power-ipc.md` | IPC 配線の完成計画書（背景） |
+
+---
+
+## レビュー反映 (2026-04-28, ラウンド 1)
+
+### 解消した指摘
+
+| ID | 重要度 | 概要 | 修正 |
+|----|--------|------|------|
+| C1 | CRITICAL | split 失敗後も `buying_power_request_id` を書き込んで IPC が飛ぶ | `pane_added` フラグ導入、split 成功後のみ auto-fetch を実行 |
+| H1 | HIGH | `send()` Err 後に `buying_power_request_id` が Some のまま固着 | Err 時に `Message::IpcError { request_id: Some(req_id) }` で既存ハンドラにルーティング → 自動クリア |
+| H2 | HIGH | `buying_power_request_id` が Some 中の上書き（in-flight 競合） | `self.buying_power_request_id.is_none()` ガードを追加 |
+| H3 | HIGH | VenueReady auto-fetch が `buying_power_request_id` を設定しない非対称 | VenueReady ハンドラも req_id を生成・記録するよう対称化 |
+| H4 | HIGH | コメント「一度だけ走るため」が reconnect 再発火の実態と不一致 | コメントを実際の挙動（reconnect カバーも明記）に修正 |
+| M1 | MEDIUM | `engine_connection = None` 時にサイレント失敗 | `log::warn!("[BuyingPower auto-fetch] tachibana is ready but engine_connection is None")` を追加 |
+
+### R2 で解消した指摘
+
+| ID | 重要度 | 概要 | 修正 |
+|----|--------|------|------|
+| R2-H1 | HIGH | `BuyingPowerAction` の send Err が `OrderToast` に落ちて req_id が固着 | `req_id_for_err` + `Message::IpcError` ルーティングに統一 |
+| R2-H2 | HIGH | `EngineConnected` 時に `buying_power_request_id` がリセットされない | `EngineConnected` 冒頭で `= None` 追加 |
+| R2-M2 | MEDIUM | VenueReady auto_fetch に `is_none()` ガードがない | `&& self.buying_power_request_id.is_none()` ガード追加 |
+| R2-M3 | MEDIUM | `IpcError` ハンドラの unrouted 分岐にログなし | `else { log::debug!(...) }` 追加 |
+
+### R3 で解消した指摘
+
+| ID | 重要度 | 概要 | 修正 |
+|----|--------|------|------|
+| R3-H1 | HIGH | `BuyingPowerAction` に `is_none()` ガードがない（連打で in-flight 上書き） | `if self.buying_power_request_id.is_some() { return Task::none(); }` を先頭に追加 |
+| R3-M1 | MEDIUM | `req_id_for_err.clone()` が `FnOnce` クロージャ内で冗長（3 箇所） | `.clone()` 削除。`Task::perform` は `FnOnce` を受け取ることを確認（iced 0.14.0） |
+
+### 持ち越し（対応不要と判断した LOW/MEDIUM）
+
+| ID | 重要度 | 理由 |
+|----|--------|------|
+| M2 | MEDIUM | unrouted `IpcError` のログなし — R2-M3 で修正済み |
+| M3 | MEDIUM | `Task::batch` 順序非保証 — 実質リスクは極小（localhost IPC の RTT は数 ms） |
+| M4 | MEDIUM | 新パスのテスト不足 — Rust GUI 層のハンドラ単体テストは困難。E2E でカバー |
+| L1 | LOW | `use ContentKind` をスコープ先頭に移動 — ✅ 修正済み（fmt で整理） |
+
+### 設計判断
+
+- 元の計画案（`|_| Message::None`）は `Message::None` 未定義のため不採用。代わりに Err を `Message::IpcError` で既存ハンドラにルーティングする方式を採用。これにより send 失敗時もパネルにエラー表示が届く。
+- `buying_power_request_id.is_none()` ガードにより、in-flight 中の重複 auto-fetch をスキップ。ただしユーザーの手動更新（BuyingPowerAction）は常に上書きする（既存動作を維持）。
+- VenueReady ハンドラの対称化も同時実施。今後 `GetBuyingPower` を送る経路は全て req_id を記録する統一方針。
+
+### R4 で解消した指摘（最終）
+
+| ID | 重要度 | 概要 | 修正 |
+|----|--------|------|------|
+| LOW-1 | LOW | VenueReady ハンドラの `req_id_for_err.clone()` が残存（`Task::perform` は `FnOnce` のため冗長） | `req_id_for_err.clone()` → `req_id_for_err`（`main.rs:1241`） |
+
+**R4 結果: MEDIUM 以上ゼロ — 収束。review-fix-loop 完了。**

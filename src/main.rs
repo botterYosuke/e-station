@@ -1216,39 +1216,49 @@ impl Flowsurface {
 
                 // Auto-fetch buying power on venue ready if a pane is visible.
                 let main_window = self.main_window.id;
-                let auto_fetch =
-                    if is_ready && self.active_dashboard().has_buying_power_pane(main_window) {
-                        if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                            Task::perform(
-                                async move {
-                                    conn.send(engine_client::dto::Command::GetBuyingPower {
-                                        request_id: uuid::Uuid::new_v4().to_string(),
-                                        venue: crate::TACHIBANA_VENUE_NAME.to_string(),
-                                    })
-                                    .await
-                                    .map_err(|e| e.to_string())
+                let auto_fetch = if is_ready
+                    && self.buying_power_request_id.is_none()
+                    && self.active_dashboard().has_buying_power_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        let req_id = uuid::Uuid::new_v4().to_string();
+                        self.buying_power_request_id = Some(req_id.clone());
+                        let req_id_for_err = req_id.clone();
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetBuyingPower {
+                                    request_id: req_id,
+                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            move |res| match res {
+                                Ok(()) => Message::OrderToast(Toast::info(
+                                    "余力情報を取得中...".to_string(),
+                                )),
+                                Err(err) => Message::IpcError {
+                                    request_id: Some(req_id_for_err),
+                                    code: "send_failed".to_string(),
+                                    message: err,
                                 },
-                                |res| match res {
-                                    Ok(()) => Message::OrderToast(Toast::info(
-                                        "余力情報を取得中...".to_string(),
-                                    )),
-                                    Err(err) => Message::OrderToast(Toast::error(format!(
-                                        "余力自動取得失敗: {err}"
-                                    ))),
-                                },
-                            )
-                        } else {
-                            Task::none()
-                        }
+                            },
+                        )
                     } else {
                         Task::none()
-                    };
+                    }
+                } else {
+                    Task::none()
+                };
 
                 return replay.chain(auto_fetch);
             }
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
                 self.engine_connection = Some(Arc::clone(&conn));
+                // In-flight buying-power requests are lost on reconnect; reset to
+                // avoid blocking future auto-fetches via the is_none() guard.
+                self.buying_power_request_id = None;
 
                 // Rebuild backends with the new connection and bump the generation
                 // counter so iced assigns new subscription IDs and restarts streams.
@@ -1679,9 +1689,15 @@ impl Flowsurface {
                             }
                         }
                         Some(dashboard::Event::BuyingPowerAction(_action)) => {
+                            // Guard: skip if a request is already in-flight to avoid
+                            // overwriting the pending req_id and breaking IpcError routing.
+                            if self.buying_power_request_id.is_some() {
+                                return Task::none();
+                            }
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                 let req_id = uuid::Uuid::new_v4().to_string();
                                 self.buying_power_request_id = Some(req_id.clone());
+                                let req_id_for_err = req_id.clone();
                                 return Task::perform(
                                     async move {
                                         conn.send(engine_client::dto::Command::GetBuyingPower {
@@ -1691,13 +1707,15 @@ impl Flowsurface {
                                         .await
                                         .map_err(|e| e.to_string())
                                     },
-                                    |res| match res {
+                                    move |res| match res {
                                         Ok(()) => Message::OrderToast(Toast::info(
                                             "余力情報を取得中...".to_string(),
                                         )),
-                                        Err(err) => Message::OrderToast(Toast::error(format!(
-                                            "余力取得失敗: {err}"
-                                        ))),
+                                        Err(err) => Message::IpcError {
+                                            request_id: Some(req_id_for_err),
+                                            code: "send_failed".to_string(),
+                                            message: err,
+                                        },
                                     },
                                 );
                             }
@@ -1818,6 +1836,11 @@ impl Flowsurface {
                     let main_window = self.main_window.id;
                     self.active_dashboard_mut()
                         .distribute_buying_power_error(main_window, format!("[{code}] {message}"));
+                } else {
+                    log::debug!(
+                        "[IpcError] unrouted: request_id={request_id:?}, code={code}, \
+                         message={message}"
+                    );
                 }
             }
             // Phase U0: OrderAccepted — reset submitting flag + toast
@@ -2220,8 +2243,10 @@ impl Flowsurface {
                         self.notifications.push(Toast::error(err.to_string()));
                     }
                     Some(dashboard::sidebar::Action::OpenOrderPanel(kind)) => {
+                        use data::layout::pane::ContentKind;
                         let main_window = self.main_window;
                         let dashboard = self.active_dashboard_mut();
+                        let mut pane_added = false;
                         if let Some((window_id, focused_pane)) = dashboard.focus
                             && window_id == main_window.id
                         {
@@ -2232,12 +2257,58 @@ impl Flowsurface {
                                 new_state,
                             ) {
                                 dashboard.focus = Some((window_id, new_pane));
+                                pane_added = true;
                             }
                         } else {
                             self.notifications.push(Toast::error(
                                 "注文パネルを開くにはまずペインを選択してください".to_string(),
                             ));
                         }
+
+                        // VenueReady 後にペインを追加した場合の自動フェッチキャッチアップ。
+                        // VenueReady 時の自動フェッチは既存ペインだけを対象とするため、
+                        // 後から追加したペインはここでフェッチする。
+                        // reconnect による VenueReady 再発火も同じ経路をカバーする。
+                        if pane_added
+                            && kind == ContentKind::BuyingPower
+                            && self.tachibana_state.is_ready()
+                            && self.buying_power_request_id.is_none()
+                        {
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let req_id = uuid::Uuid::new_v4().to_string();
+                                self.buying_power_request_id = Some(req_id.clone());
+                                let req_id_for_err = req_id.clone();
+                                return Task::batch(vec![
+                                    task.map(Message::Sidebar),
+                                    Task::perform(
+                                        async move {
+                                            conn.send(engine_client::dto::Command::GetBuyingPower {
+                                                request_id: req_id,
+                                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                            })
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                        },
+                                        move |res| match res {
+                                            Ok(()) => Message::OrderToast(Toast::info(
+                                                "余力情報を取得中...".to_string(),
+                                            )),
+                                            Err(err) => Message::IpcError {
+                                                request_id: Some(req_id_for_err),
+                                                code: "send_failed".to_string(),
+                                                message: err,
+                                            },
+                                        },
+                                    ),
+                                ]);
+                            } else {
+                                log::warn!(
+                                    "[BuyingPower auto-fetch] tachibana is ready but \
+                                     engine_connection is None"
+                                );
+                            }
+                        }
+
                         return task.map(Message::Sidebar);
                     }
                     Some(dashboard::sidebar::Action::RequestTachibanaLogin(trigger)) => {
