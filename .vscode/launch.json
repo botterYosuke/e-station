@@ -2,11 +2,33 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Rust: Debug (CodeLLDB)",
+            "name": "live - Rust: Debug (CodeLLDB)",
             "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/target/debug/flowsurface.exe",
-            "args": [],
+            "args": [
+                "--mode",
+                "live"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "${workspaceFolder}/.venv/Scripts;${env:PATH}"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "sourceLanguages": [
+                "rust"
+            ],
+            "preLaunchTask": "cargo build"
+        },
+        {
+            "name": "replay - Rust: Debug (CodeLLDB)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/flowsurface.exe",
+            "args": [
+                "--mode",
+                "replay"
+            ],
             "cwd": "${workspaceFolder}",
             "env": {
                 "PATH": "${workspaceFolder}/.venv/Scripts;${env:PATH}"
