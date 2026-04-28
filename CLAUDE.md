@@ -29,7 +29,10 @@ engine-client/tests/  # Rust 統合テスト（tokio-tungstenite モック）
 5. 追加したログをすべて削除する
 ```
 
-ログは `~/AppData/Roaming/flowsurface/flowsurface-current.log` に出力される。
+ログの出力先はビルド種別で異なる：
+
+- **release ビルド** (`cargo build --release`): `~/AppData/Roaming/flowsurface/flowsurface-current.log`
+- **debug ビルド** (`cargo build`): ターミナルの stdout
 
 ### ステップ 2: 修正後に `/bug-postmortem` を起動する
 
@@ -75,6 +78,7 @@ uv run pytest python/tests/ -v
 | `test_server_dispatch.py` | IPC コマンドのディスパッチ |
 | `test_server_proxy.py` | SetProxy 後のストリーム再購読 |
 | `test_server_ws_compat.py` | WebSocket フレーム互換性（圧縮・RSV ビット） |
+| `test_tachibana_dev_env_guard.py` | release 時に dev 自動ログインが動かないことを保証 |
 | `test_*_rest.py` | 各取引所 REST クライアント |
 | `test_*_depth_sync.py` | 各取引所 Depth 同期 |
 
@@ -131,12 +135,84 @@ cargo clippy -- -D warnings
 
 ---
 
+## 立花証券 安全装置
+
+### dev ログイン（自動ログイン）はリリースビルドで動作しない
+
+`DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO` の env var
+による自動ログイン fast path が有効になる条件は起動経路によって異なる。
+
+| 起動経路 | fast path が有効になる条件 |
+|---------|--------------------------|
+| `cargo run`（debug ビルド） | `DEV_TACHIBANA_*` env var が設定されていれば自動で有効 |
+| `cargo run --release`（release ビルド） | 無効（`dev_tachibana_login_allowed=False` が渡される） |
+| `uv run python -m engine ...`（手動起動） | `DEV_TACHIBANA_*` に加えて `FLOWSURFACE_DEV_TACHIBANA_LOGIN_ALLOWED=1` も必要 |
+
+release ビルドではたとえ env var が設定されていても自動ログインは行われずダイアログが表示される。
+これは意図的な安全装置（`python/tests/test_tachibana_dev_env_guard.py` で保護）。
+
+- dev creds の env var 名は `DEV_TACHIBANA_*` 形式のみ有効（旧 `DEV_USER_ID` 等は削除済み）
+
+### 本番 URL への送信には `TACHIBANA_ALLOW_PROD=1` が必要
+
+HTTP 送信直前に `guard_prod_url()` が呼ばれ、本番 URL かつ
+`TACHIBANA_ALLOW_PROD != "1"` なら `ValueError` を raise して送信を遮断する。
+デモ URL（`demo-kabuka.e-shiten.jp`）は本番扱いしない。
+
+```bash
+# 本番環境で実行する場合のみ設定する
+TACHIBANA_ALLOW_PROD=1 cargo run --release
+```
+
+誤って設定しないこと。`python/engine/exchanges/tachibana_url.py:48` 参照。
+
+---
+
+## 立花証券 実機診断スクリプト
+
+ログを追加する前に、まずこれらのスクリプトで接続経路を切り分けること。
+
+```bash
+# EVENT WebSocket への接続・FD フレーム受信を診断（板情報が届くか確認）
+uv run python scripts/diagnose_tachibana_ws.py
+uv run python scripts/diagnose_tachibana_ws.py --ticker 6758 --frames 5
+
+# ログインフロー単体の smoke（Rust 不要・HTTP のみ）
+uv run python scripts/smoke_tachibana_login.py
+```
+
+`diagnose_tachibana_ws.py` は REST snapshot → WS 接続 → KP/FD フレーム受信の
+5 ステップを順に検証し、どこで切れているかを出力する。
+
+`.env` に `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO=true`
+が必要。デモ口座のみ対応。
+
+---
+
+## 永続状態ファイル
+
+デバッグ時は以下のファイルが再現性に影響する。
+
+| ファイル | 場所 | 役割 |
+|---------|------|------|
+| `saved-state.json` | `%APPDATA%\flowsurface\saved-state.json` | UI 状態（ペイン構成・ウィンドウサイズ）を起動時に復元する |
+| `tachibana_orders.jsonl` | `~/.cache/flowsurface/engine/tachibana_orders.jsonl` | 発注 WAL。Python が書き、Rust が読む。重複発注防止に使う |
+
+- `saved-state.json` が残っていると前回の UI レイアウトが復元される。
+  再現手順を書くときは「初期状態か保存済み状態か」を明記すること
+- `tachibana_orders.jsonl` の WAL パスは `data_path` に依存する。
+  パスを変えると別の WAL を参照するため、重複発注防止が効かなくなる。変更しないこと
+
+---
+
 ## アーキテクチャ上の注意点
 
 ### IPC 境界（Rust ↔ Python WebSocket）
 
-- **スキーマバージョン**: `engine-client/src/lib.rs` の `SCHEMA_MAJOR/MINOR` と
-  `python/engine/schemas.py` の `SCHEMA_MAJOR/MINOR` を常に一致させる（major のみ検査）
+- **スキーマバージョン**: ハンドシェイク失敗の条件は `SCHEMA_MAJOR` の不一致のみ。
+  `SCHEMA_MINOR` はログに記録されるだけで接続を切らない。
+  ただし `engine-client/src/lib.rs` と `python/engine/schemas.py` の両 `SCHEMA_MAJOR` は
+  常に一致させること
 - **圧縮設定**: `websockets.serve(compression=None)` は必須。
   fastwebsockets は permessage-deflate を実装しておらず、RSV1=1 フレームを受信すると
   接続を切断する（`MISSES.md` 2026-04-25 参照）
@@ -177,3 +253,4 @@ cargo clippy -- -D warnings
   **組み込み `/review` は使わない**
 - review-fix-loop のレビュー段でも、サブエージェントに e-station-review スキルを
   使わせること
+
