@@ -5,10 +5,10 @@
 
 | 不変条件 ID | 説明 | テストファイル | 関数名 | ステータス |
 |---|---|---|---|---|
-| A-H2 | `reason_code` は SCREAMING_SNAKE_CASE 固定文字列のみ（spec.md §5.2） | TBD | TBD | 未実装 (Phase O1 以降) |
-| C-H1 | 仮想 URL（sUrlRequest / sUrlEvent / sUrlEventWebSocket）と p_no クエリを WAL・ログ・reason_text に出さない。`mask_virtual_url()` 必須（spec.md §3.1 / §3.4） | `python/tests/test_url_masker.py` | TBD | 未実装 (Phase O1 以降) |
-| C-H2 | 立花 HTTP リクエストは Shift-JIS + `func_replace_urlecnode` パーセントエンコード必須（spec.md §3.0） | TBD | TBD | 未実装 (Phase O1 以降) |
-| C-H3 | 約定通知重複検知キーは `(venue_order_id, trade_id)` タプル。`trade_id` 単独では衝突しうるため `venue_order_id` と組で比較する（spec.md §3.3） | TBD | TBD | 未実装 (Phase O2) |
+| A-H2 | `reason_code` は SCREAMING_SNAKE_CASE 固定文字列のみ（spec.md §5.2） | `python/tests/test_invariant_reason_code.py` | `test_canonical_codes_are_screaming_snake_case` / `test_all_reason_codes_in_source_are_canonical` / `test_all_reason_codes_in_source_are_screaming_snake_case` | ✅ 実装済み (2026-04-28) |
+| C-H1 | 仮想 URL（sUrlRequest / sUrlEvent / sUrlEventWebSocket）と p_no クエリを WAL・ログ・reason_text に出さない。`mask_virtual_url()` 必須（spec.md §3.1 / §3.4） | `python/tests/test_url_masker.py` | `test_mask_virtual_url` | ✅ 実装済み (2026-04-28) |
+| C-H2 | 立花 HTTP リクエストは Shift-JIS + `func_replace_urlecnode` パーセントエンコード必須（spec.md §3.0） | `python/tests/test_url_encode_pipeline.py` | `TestFuncReplaceUrlecnode` / `test_build_request_url_uses_tachibana_encoding` / `test_build_request_url_encodes_plus_not_as_space` | ✅ 実装済み (2026-04-28) |
+| C-H3 | 約定通知重複検知キーは `(venue_order_id, trade_id)` タプル。`trade_id` 単独では衝突しうるため `venue_order_id` と組で比較する（spec.md §3.3） | `python/tests/test_ec_dedup.py` | `test_dedup_same_key_returns_false_then_true` / `test_dedup_different_venue_order_id_is_independent` / `test_dedup_reset_clears_seen_keys` | ✅ 実装済み (2026-04-28) |
 | C-H4 | `replay_mode == true` のとき全 `/api/order/*` を 503 + `reason_code="REPLAY_MODE_ACTIVE"` で拒否。Rust HTTP 層最前段で判定し Python に到達させない（spec.md §3.2） | `src/api/order_api.rs` | `test_submit_order_replay_mode_returns_503` | ✅ 実装済み (O0) |
 | C-M2 | 第二暗証番号は Python メモリのみ保持。アイドル N 分・夜間閉局・仮想 URL refresh のいずれかで自動 forget する（spec.md §3.1） | `python/tests/test_tachibana_session_holder.py` | `test_idle_forget_returns_none_after_expiry` / `test_clear_resets_password` | ✅ 実装済み (O0) |
 | C-M3 | 同一 `(instrument_id, order_side, quantity, price)` が N 秒以内に Y 回以上送られたら 429 + `reason_code="RATE_LIMITED"`（spec.md §3.2） | `src/api/order_api.rs` | `test_rate_limit_rejects_on_n_plus_1` / `test_rate_limit_resets_after_window` / `test_rate_limit_different_key_independent_counter` | ✅ 実装済み (O0) |

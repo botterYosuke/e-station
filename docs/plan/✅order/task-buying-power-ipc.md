@@ -23,9 +23,9 @@ IPC Command/Event が存在しないため Rust UI から呼べない。
 | Python `server.py` import | ✅ import 済み（行57-58）。dispatch は**未配線** |
 | `engine-client/src/dto.rs` `Command::GetBuyingPower` | ❌ 未追加 |
 | `engine-client/src/dto.rs` `Event::BuyingPowerUpdated` | ❌ 未追加 |
-| `python/engine/schemas.py` 対応モデル | ❌ 未追加（現 SCHEMA_MINOR=1） |
+| `python/engine/schemas.py` 対応モデル | ✅ 追加済み（SCHEMA_MINOR=2 に bump 済み） |
 | `src/screen/dashboard/panel/buying_power.rs` | ✅ scaffold 実装済み。`set_cash_buying_power` / `set_credit_buying_power` メソッドあり |
-| `src/main.rs:1618` `BuyingPowerAction` ハンドラ | ❌ 固定 toast を返すだけ（IPC 未呼び出し） |
+| `src/main.rs` `BuyingPowerAction` ハンドラ | ❌ 固定 toast を返すだけ（IPC 未呼び出し） |
 
 ---
 
@@ -34,7 +34,7 @@ IPC Command/Event が存在しないため Rust UI から呼べない。
 1. **IPC schema バージョニング必須**: Rust と Python の両方で `SCHEMA_MINOR` を `1 → 2` に bump する。
    - Rust: `engine-client/src/lib.rs` の `SCHEMA_MINOR`
    - Python: `python/engine/schemas.py` の `SCHEMA_MINOR`
-   - ルール詳細は `docs/plan/✅python-data-engine/spec.md` §4.5.1 参照
+   - ルール詳細は `docs/plan/✅python-data-engine/spec.md §4.5.1`（minor 差は警告のみで接続継続・SCHEMA_MINOR bump は同期運用のため必須）参照
 2. **dto.rs の命名規則**: Command/Event タグは PascalCase（`GetBuyingPower`, `BuyingPowerUpdated`）。値 enum（`OrderSide` 等）は `SCREAMING_SNAKE_CASE`。
 3. **立花固有語禁止**: `sCLMID` / `CLMZan` などの立花 API 固有語を IPC 層（dto.rs / schemas.py / Rust UI）に漏らさない（`test_nautilus_boundary_lint.py` がガード）。
 4. **Release ビルドの dev ログイン禁止**: dev 環境変数の追加経路を増やす場合は必ず `F-DevEnv-Release-Guard` を通す。
@@ -77,18 +77,20 @@ Event::BuyingPowerUpdated {
 
 - `GetBuyingPower` コマンドを受けたら `tachibana_fetch_buying_power` + `tachibana_fetch_credit_buying_power` を呼び、
   `BuyingPowerUpdated` イベントを返す
-- `InsufficientFundsError` は既存の `OrderRejected` 経路に乗せるか、エラーフィールドを返すかを判断する（spec に記述がなければ `BuyingPowerUpdated` に `error` フィールド追加を検討）
+- **決定**: `InsufficientFundsError` は `_do_get_buying_power` では個別ハンドリングしない。`SessionExpiredError` 以外の例外はすべて generic catch → `Error(code: "INTERNAL_ERROR")` イベントを返す。`OrderRejected` 経路・エラーフィールド追加は採用しない。
 
 ### Step 4: main.rs の BuyingPowerAction ハンドラ実装
 
-- `src/main.rs:1618` の固定 toast を削除し、`Command::GetBuyingPower` を IPC 送信する
-- `Event::BuyingPowerUpdated` を受けて `BuyingPowerPanel::set_cash_buying_power` / `set_credit_buying_power` を呼ぶ
-- ハンドラのパターンは `OrderListAction::RequestOrderList`（`main.rs:1628`）を参照
+- `src/main.rs`（`BuyingPowerAction` ハンドラ）の固定 toast を削除し、`Command::GetBuyingPower` を IPC 送信する
+- `Event::BuyingPowerUpdated` を受けて `distribute_buying_power()` 経由で `set_cash_buying_power` / `set_credit_buying_power` を一括呼び出しする
+- `cash_available → spot_buying_power`, `credit_available → credit_buying_power` を set するメソッドを呼ぶ。`cash_shortfall` はパネルに直接マップするフィールドなし（表示なし）
+- ハンドラのパターンは `src/main.rs`（`GetOrderList` IPC 送信パターン）を参照
 
 ### Step 5: ラウンドトリップテスト追加
 
-- Rust: `engine-client/tests/` に `schema_v2_x_roundtrip.rs` または既存 `schema_v1_3_roundtrip.rs` を拡張
+- Rust: `engine-client/tests/schema_v2_1_roundtrip.rs` を追加
 - Python: `python/tests/test_buying_power_ipc.py` を新規作成（`GetBuyingPowerCommand` / `BuyingPowerUpdatedEvent` の serialize/deserialize）
+- Python: `python/tests/test_server_buying_power_dispatch.py` — dispatch 経路（正常系・SESSION_NOT_ESTABLISHED・INTERNAL_ERROR）を追加済み（J-7/J-9/J-11）
 
 ---
 
@@ -101,6 +103,9 @@ Event::BuyingPowerUpdated {
 - [x] `/ipc-schema-check` スキルで SCHEMA_MINOR の Rust / Python 整合が確認できる
 - [x] `cargo clippy -- -D warnings` クリーン
 - [x] 実装完了後に `.claude/skills/review-fix-loop/SKILL.md` でレビューと修正を行う
+- [x] `docs/plan/✅python-data-engine/schemas/commands.json` と `events.json` に `GetBuyingPower` / `BuyingPowerUpdated` が追記されていること
+- [x] `python/tests/test_server_buying_power_dispatch.py` が全緑
+- [x] 追加テストファイルが `cargo test --workspace` / `uv run pytest python/tests/ -v` で CI に自動収集されることを確認済み
 
 ---
 
@@ -127,10 +132,24 @@ Event::BuyingPowerUpdated {
 - ✅ cargo test / cargo clippy 全緑
 - ✅ review-fix-loop 完了（3ラウンド、MEDIUM+ ゼロ収束）
 
+### BuyingPower 新規登録後の自動フェッチ（fix-buying-power-auto-fetch-on-add-2026-04-28）
+
+**問題**: 起動後にサイドバーから「買余力」ペインを新規登録した場合、`GetBuyingPower` IPC が発行されず「更新」ボタンを手動で押すまで余力が表示されなかった。VenueReady ハンドラの自動フェッチは 1 度しか走らないため、後から追加したペインはキャッチアップできなかった。
+
+- ✅ `OpenOrderPanel(ContentKind::BuyingPower)` ハンドラに auto-fetch ロジックを追加（`src/main.rs`）
+- ✅ `pane_added` フラグ導入: ペイン分割成功後のみ IPC を発行（split 失敗時の誤発行を防止）
+- ✅ `buying_power_request_id.is_none()` ガード: in-flight 競合を防止
+- ✅ send Err を `Message::IpcError` にルーティングして既存クリアロジックに乗せる
+- ✅ `EngineConnected` 冒頭で `buying_power_request_id = None` リセット（再接続時の固着防止）
+- ✅ VenueReady ハンドラに `is_none()` ガードと req_id 記録を追加（3 経路を対称化）
+- ✅ cargo test / cargo clippy 全緑
+- ✅ review-fix-loop 完了（R4 収束、MEDIUM+ ゼロ）
+- 計画書: `docs/plan/✅order/fix-buying-power-auto-fetch-on-add-2026-04-28.md`
+- （auto-fetch 経路は Rust unit test 未起票 — `buying_power_request_id.is_none()` ガードのロジックテストは今後の改善候補）
+
 ### 新たな知見・設計判断・Tips
 
-- `Message::BuyingPowerUpdated` には `request_id` / `venue` を含めない設計にした。
-  これらは IPC ルーティング用で Rust UI 側では不要（全 BuyingPower ペインにブロードキャストするだけ）。
+- `Message::BuyingPowerUpdated`（Rust 内部型）には `request_id` / `venue` を含めない設計にした。wire 上の IPC Event（Python→Rust）は `request_id`/`venue` を含む。Rust の engine-client がデシリアライズ後に除外して内部 Message に変換する。
   `OrderListUpdated` も同様の構造（orders のみ）。
 - `distribute_buying_power` を dashboard.rs に追加し、`set_cash_buying_power` と
   `set_credit_buying_power` を 1 回のイベントでまとめて呼ぶ設計にした（2回 IPC を飛ばさない）。
@@ -148,7 +167,7 @@ Event::BuyingPowerUpdated {
 | `python/engine/exchanges/tachibana_orders.py:1551` | `fetch_buying_power` 実装済み |
 | `python/engine/exchanges/tachibana_orders.py:1602` | `fetch_credit_buying_power` 実装済み |
 | `src/screen/dashboard/panel/buying_power.rs` | Rust UI パネル（scaffold 済み） |
-| `src/main.rs:1618` | `BuyingPowerAction` ハンドラ（scaffold のみ） |
+| `src/main.rs` | `BuyingPowerAction` ハンドラ（実装済み） |
 | `docs/plan/✅order/implementation-plan.md` | Phase O3 T3.2/T3.4 の詳細 |
 | `docs/plan/✅order/rust-ui-plan.md` | Phase U3 Tu3.1 の詳細 |
 | `docs/plan/✅python-data-engine/spec.md §4.5.1` | IPC schema バージョニングルール |

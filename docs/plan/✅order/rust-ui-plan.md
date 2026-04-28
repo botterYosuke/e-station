@@ -105,13 +105,15 @@ OrderEntryPanel 状態更新
 - 🔍 ボタンクリック中は 🖊 メニューが閉じる（相互排他）
 - `cargo build` が通る
 
-### Tupre.3 Order Entry フォームのシェル実装 ✅（2026-04-27 完了）
+### Tupre.3 Order Entry フォームのシェル実装 ✅（2026-04-27 完了 / 2026-04-28 銘柄選択ボタン追加）
 
 新規作成: `src/screen/dashboard/panel/order_entry.rs`
 
 ```rust
 pub struct OrderEntryPanel {
-    instrument_id: Option<String>,  // 連動中のティッカー（表示のみ、手動変更不可）
+    instrument_id: Option<String>,  // 注文 API に渡す instrument_id（例: "7203.TSE"）
+    display_label: Option<String>,  // タイトルバー表示用のティッカー表示名（例: "TOYOTA"）
+    venue: Option<String>,          // set_instrument() が自動設定（例: "tachibana"）
     side: OrderSide,                // BUY のみ有効（Phase O0）
     quantity: String,               // テキスト入力（正の整数）
     price_kind: PriceKind,          // Market / Limit
@@ -135,7 +137,7 @@ pub struct OrderEntryPanel {
 - 「売り」ボタンは disabled + tooltip `"Phase O1 で実装予定"`
 - 口座種別・期日・逆指値は grayed out + 同様の tooltip
 
-銘柄連動: チャートペインのフォーカス変更時に `instrument_id` を自動更新する（`panel::Action::TickerChanged(TickerInfo)` 経由）
+銘柄選択（2026-04-28 実装 ✅ / レビュー収束済み）: タイトルバーに「銘柄未選択」ボタンを追加。クリックで既存の `MiniTickersList` モーダルが開き、ティッカーを選択すると `instrument_id`（`<code>.TSE` 形式）と `display_label` および `venue`（`"tachibana"` 固定）がセットされる。`pane.rs` の `MiniTickersListInteraction` ハンドラで `RowSelection::Switch(ti)` を受け取ったとき、`Content::OrderEntry` の場合は `Exchange::TachibanaStock` ガードを通過したものだけ `panel.set_instrument(id, display)` を呼んでモーダルを閉じる（`SwitchTickersInGroup` には進まない。非対応取引所は `Toast::warn` を表示）。`venue` はハードコードせず `set_instrument()` がフィールドに自動設定し `build_submit_action` が参照する。エンジン切断時（`EngineRestarting(true)`）は `layout_manager.iter_dashboards_mut()` 経由で全レイアウトの `on_engine_disconnected()` を呼び `submitting` をリセット。再接続時（`EngineConnected`）は `on_engine_reconnected()` で `last_error` をクリア。レビュー詳細は [review-fixes-2026-04-28.md §銘柄選択](./review-fixes-2026-04-28.md) を参照。
 
 受け入れテスト: `src/screen/dashboard/panel/order_entry.rs` の `#[cfg(test)]` 内で
 - バリデーション（数量 0 → エラー）
@@ -282,16 +284,17 @@ pub struct OrderModifyModal {
 - `Submit` → 第二暗証番号未保持時は `SecondPasswordRequired` フローに合流 → `Command::ModifyOrder` IPC 送信
 - `Cancel` → modal を閉じる
 
-### Tu1.3 取消確認 modal
+### Tu1.3 取消確認 modal ✅（2026-04-28 完了）
 
 既存 `ConfirmDialog` を再利用:
 - body: `"注文番号 XXXXXXXX を取消しますか？"`
 - 「取消する」→ 第二暗証番号未保持チェック → `Command::CancelOrder` IPC 送信
+- 実装: `Action::CancelOrder` → `ConfirmDialog` → `Message::ConfirmCancelOrder` → `Command::CancelOrder` IPC 送信（`src/main.rs:1780-1930`）
 
-### Tu1.4 IPC 受信ハンドラの追加（O1 分）
+### Tu1.4 IPC 受信ハンドラの追加（O1 分） ✅（2026-04-28 完了）
 
-- `Event::OrderModified` / `Event::OrderCanceled` 受信 → 該当行を差分更新
-- `GetOrderList` レスポンスで `orders` を全更新
+- `Event::OrderModified` / `Event::OrderCanceled` の行差分更新は**不採用**。代わりに `GetOrderList` → `Event::OrderListUpdated` → `Dashboard::distribute_order_list()` → 全 `OrderList` ペインに `set_orders()` 配信（全リスト更新方式）。
+- `GetOrderList` レスポンスで `orders` を全更新（`Message::OrderListUpdated`、`src/main.rs:1818`）
 
 ### Tu1.5 サイドバー `Order List` メニューの有効化 ✅（2026-04-27 完了）
 
@@ -316,6 +319,7 @@ pub struct OrderModifyModal {
 `OrderCanceled` / `OrderFilled` 受信時の自動リフレッシュは、`map_engine_event_to_tachibana()` が
 `Option<Message>` しか返せないため、単純な実装ではトースト＋自動更新を同時に発行できない。
 将来の改善タスク: `Message::OrderListNeedsRefresh` を追加して複合イベントに対応する。
+詳細設計: `docs/plan/✅order/fix-order-list-auto-refresh-2026-04-28.md`（未実装）。
 
 ---
 
@@ -344,6 +348,8 @@ pub struct BuyingPowerPanel {
 
 表示: wiki §「余力情報パネル」の形式に従う。追証時は赤色で `"⚠ 追証確定"` を表示。
 
+**後日バグ修正（2026-04-28）**: サイドバーから BuyingPower ペインを新規登録した場合、VenueReady 後でも `GetBuyingPower` が自動発行されなかった（VenueReady ハンドラは起動時 1 度しか走らないため）。`OpenOrderPanel(ContentKind::BuyingPower)` ハンドラに auto-fetch ロジックを追加して修正。VenueReady / BuyingPowerAction / OpenOrderPanel の 3 経路を `buying_power_request_id` 記録で対称化。詳細: `docs/plan/✅order/fix-buying-power-auto-fetch-on-add-2026-04-28.md`。
+
 ### Tu3.2 Order Entry フォームの拡張 ✅（2026-04-27 完了）
 
 `src/screen/dashboard/panel/order_entry.rs` の拡張:
@@ -368,7 +374,7 @@ Phase U3 完了時に `[ Buying Power ]` 項目を有効化する。
 | `src/screen/dashboard/pane.rs` | 追記（`Content` variants、スタブ view/update arm） | **U-pre**/U1/U3 |
 | `src/screen/dashboard/panel.rs` | 追記（module 宣言 3 つ） | **U-pre** |
 | `src/screen/dashboard/sidebar.rs` | 追記（🖊 ボタン + インラインメニュー） | **U-pre**/U1/U3 |
-| `src/screen/dashboard/panel/order_entry.rs` | **新規**（シェルは U-pre、IPC 配線は U0） | **U-pre**/U0/U3 |
+| `src/screen/dashboard/panel/order_entry.rs` | **新規**（シェルは U-pre、IPC 配線は U0、銘柄選択ボタンは 2026-04-28） | **U-pre**/U0/U3 |
 | `src/screen/dashboard/panel/order_list.rs` | **新規** | U1 |
 | `src/screen/dashboard/panel/buying_power.rs` | **新規** | U3 |
 | `src/modal/second_password.rs` | **新規**（シェルは U-pre、IPC 配線は U0） | **U-pre**/U0 |
