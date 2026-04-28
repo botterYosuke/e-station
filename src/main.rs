@@ -565,11 +565,20 @@ fn main() {
                     .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
                     .subscribe();
                 let is_replay_mode = Arc::new(AtomicBool::new(false));
-                Arc::new(api::order_api::OrderApiState::new(
-                    session,
-                    engine_rx,
-                    is_replay_mode,
-                ))
+                // FLOWSURFACE_ORDER_GUARD_ENABLED=1 で発注 API を有効化する（明示 opt-in）。
+                // 未設定時はデフォルトの enabled=false のまま 503 で reject（誤発注防止）。
+                let guard_config = if std::env::var("FLOWSURFACE_ORDER_GUARD_ENABLED")
+                    .as_deref()
+                    == Ok("1")
+                {
+                    api::order_api::OrderGuardConfig::enabled_no_limits()
+                } else {
+                    api::order_api::OrderGuardConfig::default()
+                };
+                Arc::new(
+                    api::order_api::OrderApiState::new(session, engine_rx, is_replay_mode)
+                        .with_guard_config(guard_config),
+                )
             };
             if let Some(rx) = replay_api::spawn(rt.handle(), Some(order_api_state)) {
                 CONTROL_API_RX.set(std::sync::Mutex::new(Some(rx))).ok();

@@ -5,10 +5,10 @@
 | Phase | ゴール | 依存 |
 |---|---|---|
 | **N-pre** | feasibility / 配布形態 / pin 戦略 / 既存 Rust 発注経路の有無を確定（実装ゼロ）| python-data-engine 完了済 |
-| N0 | nautilus 同梱・サンプル戦略 headless で PnL が出る | N-pre |
-| N1 | `/api/replay/*` を nautilus で実装、Gymnasium env が回る、REPLAY 仮想注文を SimulatedExchange に流す、`POST /api/agent/narrative` を新設 | N0、order/ Phase O0 完了 |
-| N2 | 立花 `LiveExecutionClient` adapter（デモ）で実弾相当の発注往復が通る | N1、tachibana Phase 1 完了（T7 受け入れ緑）、order/ Phase O0〜O2 完了。**現状: T4 まで完了・T5〜T7 未着手** |
-| N3 | 暗号資産 venue を nautilus 側に移植 or 新規実装、Rust 発注コード撤去 | N2 |
+| N0 | nautilus 同梱・サンプル戦略 headless で PnL が出る（**Bar ベース MVP**）| N-pre |
+| **N1** | **J-Quants → TradeTick → BacktestEngine の replay モード成立**、`/api/replay/*` を nautilus で実装、Gymnasium env が回る、REPLAY 仮想注文を SimulatedExchange に流す、`POST /api/agent/narrative` を新設、live/replay 互換 lint | N0、order/ Phase O0 完了 |
+| N2 | 立花 `LiveExecutionClient` adapter（デモ）で実弾相当の発注往復が通る、**立花 FD frame → TradeTick の LiveDataClient** | N1、tachibana Phase 1 完了（T7 受け入れ緑）、order/ Phase O0〜O2 完了 |
+| N3 | 暗号資産 venue を nautilus 側に新規実装、Rust 発注コード撤去 | N2 |
 
 **Phase N1 の依存補正（C2）**: 旧版で「Phase 2（観測 API）完了済」を依存に挙げていたが、その「Phase 2」は本計画 N1 で置換・破棄する対象（[architecture.md §6](./architecture.md#6-既存計画との衝突点と整理)）。本計画では N1 の依存を「N0 + order/ Phase O0」に書き換え、自作 Virtual Exchange Engine の完成を依存条件にしない。
 
@@ -122,63 +122,121 @@
 
 ---
 
-## Phase N1: リプレイ HTTP API の差し替え + REPLAY 仮想注文 + ナラティブ API 新設
+## Phase N1: TradeTick 抽象 + J-Quants ローダ + REPLAY 仮想注文 + ナラティブ API
 
-**PR 切り方の規約（M7）**: N1 の `/api/replay/order` 自作 → nautilus 経由の置換は **1 PR でアトミック**にマージする。互換シムを残さないため、置換期間中の窓を作らない。Gym env / iced UI が壊れる可能性のあるリファクタは N1 内で別 PR に切らない。
+**スコープの中心は「J-Quants 過去歩み値で BacktestEngine を回すこと」**。これにより replay モードが実用化する。Strategy インタフェースは TradeTick 一本に統一し、live/replay 互換性を CI で守る。
+
+**PR 切り方の規約**: N1.1〜N1.3（IPC schema + J-Quants loader + replay API 差し替え）は **1 PR でアトミック**にマージする。互換シムを残さない。
+
+### N1.0 ホットフィックス: 立花曖昧 side → `None` 化（Q11-pre）⭐ 先行修正
+- [ ] [`tachibana_ws.py:190`](../../../python/engine/exchanges/tachibana_ws.py#L190) `_determine_side` 戻り値を `str | None` に変更し、曖昧時 `None` を返す
+- [ ] 呼出側（[tachibana_ws.py:156](../../../python/engine/exchanges/tachibana_ws.py#L156) 付近）で `None` を内部表現の `"unknown"` に写像（既存 trade dict のキー互換は維持）
+- [ ] 既存テスト `python/tests/test_tachibana_ws_*.py` の曖昧 side 期待値を `"buy"` → `"unknown"` に書き換え
+- [ ] [bug-postmortem](../../../.claude/skills/bug-postmortem/SKILL.md) を起動し MISSES.md に「曖昧 side が `"buy"` 寄せ → live/replay 互換性で false positive」を記録
+- [ ] N2.0 の `tachibana_data.py` 実装時に `"unknown"` → `AggressorSide.NO_AGGRESSOR` に写像
 
 ### N1.1 IPC schema 1.4
-- [ ] [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に `StartEngine` / `StopEngine` / `EngineStarted` / `EngineStopped` / `PositionOpened` / `PositionClosed`（venue / instrument_id / 文字列精度）を追加（[architecture.md §3](./architecture.md#3-新規-ipc-メッセージ)）
-- [ ] **`Order*` 系 / `SubmitOrder` 系は order/ Phase O-pre PR のマージを確認してから着手すること。schema 1.3 が dto.rs に存在しない場合は N1.1 着手前ブロック**（C4 / order の整合）
-- [ ] `schema_minor` を `4` に上げる（C1 修正、`schema_version` の表記は使わない）。Hello / Ready capabilities に `nautilus.backtest=true, nautilus.live=false` を載せる
-- [ ] N-pre Tpre.1 の結論次第で `AdvanceClock` Command を追加 or 不要化
-- [ ] 既存テストが落ちないことを `cargo test -p engine-client` で確認、Python 側 `python/engine/schemas.py` も同 PR で同期
+- [ ] [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に追加（[architecture.md §3](./architecture.md#3-新規-ipc-メッセージ)）:
+  - `Command::StartEngine` / `StopEngine`
+  - `Command::LoadReplayData { instrument_id, start_date, end_date, granularity }`
+  - `EngineEvent::EngineStarted` / `EngineStopped`
+  - `EngineEvent::ReplayDataLoaded { bars_loaded, trades_loaded }`
+  - `EngineEvent::PositionOpened` / `PositionClosed`（venue / instrument_id / 文字列精度）
+- [ ] **`Order*` 系は order/ Phase O-pre PR マージ確認後**に着手
+- [ ] `schema_minor` を `4` に上げる。Hello / Ready capabilities に `nautilus.backtest=true, nautilus.live=false` を載せる
+- [ ] `cargo test -p engine-client` で既存テストが落ちないことを確認、Python 側 `python/engine/schemas.py` も同 PR で同期
 
-### N1.2 Rust 側 replay_api 差し替え（C3 修正）
-- [ ] `git grep -nE "VirtualExchangeEngine|replay/order"` で**現リポジトリに自作 Virtual Exchange Engine の Rust 実装が存在しないことを確認**してから着手（旧 plan の「あれば削除」hedge は廃止）
-- [ ] `src/replay_api.rs`（または該当ファイル）の `/api/replay/order` ハンドラを「`engine_client.send(SubmitOrder { venue: "replay", ... })` → `OrderFilled` を待つ」フローに書き換え
-- [ ] `/api/replay/portfolio` も `engine_client.send(GetPortfolio)`（新設）に置換
+### N1.2 J-Quants ローダ + Instrument cache 実装 ⭐ replay モードの中核
+- [ ] `python/engine/nautilus/jquants_loader.py` 新設（[data-mapping.md §1.3 / §8](./data-mapping.md#13-replay-j-quants-equities_trades_csvgz--tradetick)）
+  - [ ] `jquants_code_to_instrument_id(code)`: `"13010"` → `"1301.TSE"`、末尾非 0 で `ValueError`
+  - [ ] `load_trades(instrument_id, start_date, end_date) -> Iterator[TradeTick]`: `S:\j-quants\equities_trades_*.csv.gz` を gzip stream で順次読み、銘柄・期間でフィルタ
+  - [ ] `load_minute_bars(...)`: bar `ts_event` を **close 時刻**に揃える（Q9）
+  - [ ] `load_daily_bars(...)`: 同上、JST 15:30 で揃える
+  - [ ] 全関数: メモリ全量展開しない iterator 設計
+- [ ] `python/engine/nautilus/instrument_cache.py` 新設（Q10 案 B + fallback A）
+  - [ ] live モードで取得した `sHikaku` を `~/.cache/flowsurface/instrument_master.json` に永続化
+  - [ ] `get_lot_size(instrument_id) -> int`: cache hit ならそれを返す、miss なら `100` + `log.warning`
+  - [ ] `instrument_factory.make_equity_instrument()` から優先参照
+  - [ ] 起動 config の `lot_size_override` を最優先で適用
+- [ ] `python/tests/test_jquants_loader.py`:
+  - [ ] InstrumentId 写像（正常 / 末尾非 0 raise）
+  - [ ] マイクロ秒精度 timestamp 復元
+  - [ ] `aggressor_side == NO_AGGRESSOR`
+  - [ ] 銘柄フィルタ・期間フィルタ
+  - [ ] 月境界をまたぐ期間で複数ファイル開ける
+- [ ] テスト用フィクスチャ: 小さい CSV を `python/tests/fixtures/jquants_trades_sample.csv.gz` に配置（実 J-Quants ファイルは CI に持ち込まない）
+
+### N1.3 Rust 側 replay_api 差し替え + replay/load 新設
+- [ ] `git grep -nE "VirtualExchangeEngine|replay/order"` で**現リポジトリに自作 Virtual Exchange Engine の Rust 実装が存在しないことを確認**してから着手
+- [ ] `src/replay_api.rs` に `POST /api/replay/load` を新設し `Command::LoadReplayData` に橋渡し
+- [ ] `/api/replay/order` を「`engine_client.send(SubmitOrder { venue: "replay", ... })` → `OrderFilled` を待つ」フローに書き換え
+- [ ] `/api/replay/portfolio` を nautilus `Portfolio` 取得に置換
 - [ ] 自作 Rust 実装が見つかった場合は同 PR で削除、互換シムは残さない
 
-### N1.3 nautilus 側 SubmitOrder ハンドラ
-- [ ] `engine_runner.py` で `BacktestEngine.submit_order` を呼び、約定後に `OrderFilled` を IPC で返送
-- [ ] 仮想時刻同期: N-pre Tpre.1 の決定に従う（案 A=`AdvanceClock` 駆動 / 案 B=自走）
+### N1.4 nautilus 側 BacktestEngine ハンドラ
+- [ ] `engine_runner.py` の `start_backtest()` を J-Quants 入力対応に拡張:
+  - [ ] `LoadReplayData` IPC を受けて `jquants_loader.load_trades(...)` から `BacktestEngine.add_data(ticks)`
+  - [ ] `BacktestEngine.run(start, end)` で自走（[Q3 案 B](./open-questions.md#q3)）
+  - [ ] `ReplayDataLoaded` イベントで `bars_loaded` / `trades_loaded` を IPC 返送
+- [ ] `engine_runner.py` で `SubmitOrder` を受けたとき `BacktestExecutionEngine.process_order(...)` で約定判定し `OrderFilled` を IPC で返送
+- [ ] 約定モデル: 直近 TradeTick の last_price ベースの fill（[architecture.md §4](./architecture.md#4-データフローreplay-モード)）。指値は `last_price` クロスで fill
 
-### N1.4 REPLAY 仮想注文ディスパッチャ（README §REPLAY モード仮想注文の取り込み）
+### N1.5 REPLAY 仮想注文ディスパッチャ
 
-**前提**: `python/engine/exchanges/tachibana_orders.py` が存在し `submit_order` / `NautilusOrderEnvelope` が実装済みであること（order/ Phase O0 以上完了）
+**前提**: `python/engine/exchanges/tachibana_orders.py` が存在し `submit_order` / `NautilusOrderEnvelope` が実装済み（order/ Phase O0 以上完了）
 
 - [ ] `python/engine/order_router.py` 新設
-- [ ] live モード時 → `tachibana_orders.submit_order(...)` に委譲（order/ 計画の関数を呼ぶ）
-- [ ] replay モード時 → `BacktestExecutionEngine.process_order(...)` に委譲
-- [ ] 監査ログ WAL は `tachibana_orders.jsonl`（live）と `tachibana_orders_replay.jsonl`（replay）の 2 系統に分離
-- [ ] `client_order_id` 名前空間も live / replay で分離（同一 ID 投入時の干渉なし）
+- [ ] live モード → `tachibana_orders.submit_order(...)` に委譲
+- [ ] replay モード → `BacktestExecutionEngine.process_order(...)` に委譲
+- [ ] 監査ログ WAL: `tachibana_orders.jsonl`（live）と `tachibana_orders_replay.jsonl`（replay）に分離
+- [ ] `client_order_id` 名前空間を live / replay で分離
 - [ ] 第二暗証番号 modal は REPLAY ガードで skip
-- [ ] iced UI 差分（バナー「⏪ REPLAYモード中」、ボタンラベル「仮想注文確認」）の実装を含む
-- [ ] `tests/python/test_order_router_dispatch.py` を追加: live 時は `tachibana_orders.submit_order` が呼ばれること、replay 時は `tachibana_orders_replay.jsonl` に書き込まれることを mock で検証
+- [ ] iced UI 差分（バナー「⏪ REPLAYモード中」、ボタンラベル「仮想注文確認」）
+- [ ] `python/tests/test_order_router_dispatch.py`: live 時は `tachibana_orders.submit_order` 呼出、replay 時は `tachibana_orders_replay.jsonl` 書込を mock で検証
 
-### N1.5 ナラティブ API 新設（H5）
-- [ ] `POST /api/agent/narrative` を `src/api/agent_api.rs`（新設）に実装
-- [ ] 既存リポジトリには未実装のため、**本タスクが「初実装」**（旧 spec の「既存実装のまま」表記は誤り、本計画で訂正）
+### N1.6 ナラティブ API 新設（H5）
+- [ ] `POST /api/agent/narrative` を `src/api/agent_api.rs`（新設）に実装（**本タスクが初実装**）
 - [ ] `python/engine/nautilus/narrative_hook.py` を新設し、`Strategy.on_event` で `OrderFilled` を捕捉 → POST（`linked_order_id` を埋める）
 - [ ] 文書間整合: [docs/plan/README.md](../README.md) Phase 4a の概念定義と矛盾しないこと
 
-### N1.6 Gymnasium 互換性確認
+### N1.7 Gymnasium 互換性確認
 - [ ] `FlowsurfaceEnv.step()` が変わらず動くこと
-- [ ] `tests/python/test_flowsurface_env_with_nautilus.py`
-- [ ] **追加テスト（M6）**: 部分約定 / cancel-after-fill レース / EC frame 重複受信のシナリオを mock で再現し、nautilus `OrderFilled` の累積と `leaves_qty` 整合をテスト
+- [ ] `python/tests/test_flowsurface_env_with_nautilus.py`
+- [ ] **追加テスト**: 部分約定 / cancel-after-fill レース / EC frame 重複受信を mock で再現
 
-### N1.7 性能ベンチマーク
-- [ ] [docs/plan/✅python-data-engine/benchmarks/](../✅python-data-engine/benchmarks/) に `nautilus_replay_baseline.py` 等を追加
-- [ ] [spec.md §3.3](./spec.md#33-パフォーマンス) の計測対象定義に従い「`start_backtest` 呼出 → `EngineStopped` IPC 受領」までの wall clock を計測
-- [ ] 30 秒 SLA を実測値で確定し spec を更新
+### N1.8 live/replay 互換 lint ⭐ 新設
+- [ ] `python/tests/test_strategy_compat_lint.py`: ユーザー Strategy ファイルの AST を解析し、`on_order_book_*` / `on_quote_tick` の定義があれば fail（[spec.md §3.5.4](./spec.md#354-互換性-ci-検査n18-で追加)）
+- [ ] 組み込み `BuyAndHold` を **live mock + replay J-Quants の両方**で走らせ最終ポジション方向が一致するスモークテスト（`test_strategy_live_replay_smoke.py`）
+- [ ] CI に組み込み (`uv run pytest python/tests/test_strategy_compat_lint.py`)
 
-**Exit 条件**: `s51`〜`s53` ナラティブ系 E2E が全部緑のまま、`/api/replay/*` と `/api/order/*`（REPLAY モード）の挙動が nautilus 経由で同じ、1 年バックテスト SLA 確定、決定論性テスト（N0.6 を N1 入力に対して再走）が緑（`uv run pytest tests/python/test_nautilus_determinism.py -k n1_dataset` が pass すること）
+### N1.9 決定論性テスト（tick ベース）
+- [ ] `python/tests/test_nautilus_determinism_tick.py`: J-Quants 同一ファイル・同一銘柄で `start_backtest()` を 2 回回して equity / fill_timestamps / fill_last_prices ビット一致
+- [ ] N0.6 の Bar ベース版と並列で維持
+
+### N1.10 性能ベンチマーク
+- [ ] `nautilus_replay_baseline.py` を追加
+- [ ] 「`start_backtest` 呼出 → `EngineStopped` IPC 受領」までの wall clock を計測
+- [ ] **目標**: 1 銘柄 1 ヶ月分 trade tick で 60 秒以内（[spec.md §3.3](./spec.md#33-パフォーマンス)）。実測値で確定し spec 更新
+
+**Exit 条件**:
+- J-Quants `equities_trades_202401.csv.gz` から 1 銘柄をロードし、`BuyAndHold` 戦略でバックテストが完走、`OrderFilled` が IPC 経由で受信できる
+- N1.8 の live/replay smoke が両方緑
+- N1.9 の tick 決定論性テストが緑
+- `s51`〜`s53` ナラティブ系 E2E が全部緑のまま、`/api/replay/*` と `/api/order/*`（REPLAY モード）の挙動が nautilus 経由で同じ
+- 1 ヶ月バックテスト SLA 確定
 
 ---
 
 ## Phase N2: 立花 ExecutionClient（デモ）
 
 **前提**: order/ 計画の Phase O0〜O2 が完了し、`tachibana_orders.submit_order` / `modify_order` / `cancel_order` / EC frame パーサ / 第二暗証番号 UI / 監査ログ WAL がすべて稼働している。本フェーズは **nautilus への薄い adapter のみ**を書く。
+
+### N2.0 立花 LiveDataClient（FD frame → TradeTick）⭐ 新設
+- [ ] `python/engine/nautilus/clients/tachibana_data.py` 新設
+- [ ] 既存 `tachibana_ws._FdFrameProcessor` の trade dict 出力を nautilus `TradeTick` に変換（[data-mapping.md §1.2](./data-mapping.md#12-live-立花-fd-frame--tradetick)）
+- [ ] `LiveDataClient` を継承し `LiveDataEngine.process(tick)` に流す
+- [ ] `aggressor_side` 推定不能の場合は `NO_AGGRESSOR` に写像（[tachibana_ws.py:183](../../../python/engine/exchanges/tachibana_ws.py#L183) の警告を補足）
+- [ ] テスト: FD frame サンプル → TradeTick 変換、`NO_AGGRESSOR` 比率の sanity check
 
 ### N2.1 nautilus `LiveExecutionClient` adapter
 

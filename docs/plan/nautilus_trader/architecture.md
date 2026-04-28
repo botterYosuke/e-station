@@ -10,32 +10,34 @@
 │  ├─ exchange/ (暗号資産 adapter) ← データ取得用に役割を絞る  │
 │  └─ engine-client/              ← Python ワーカーへの IPC  │
 └────────────────┬────────────────────────────────────────┘
-                 │ IPC (stdin/stdout JSON, schema 1.4（予定）)
+                 │ IPC (stdin/stdout JSON, schema 1.4)
 ┌────────────────▼────────────────────────────────────────┐
 │ Python (engine プロセス)                                  │
 │                                                          │
-│  既存ワーカー（venue 直結）             新ワーカー         │
+│  既存ワーカー（venue 直結）             nautilus ワーカー   │
 │  ┌──────────────────────┐  ┌──────────────────────────┐ │
 │  │ python/engine/       │  │ python/engine/nautilus/  │ │
 │  │   exchanges/         │  │  ├─ engine_runner.py     │ │
 │  │   ・hyperliquid      │  │  ├─ data_loader.py       │ │
-│  │   ・bybit            │  │  ├─ strategy_bridge.py   │ │
-│  │   ・tachibana (P1)   │  │  └─ narrative_hook.py    │ │
-│  └──────────────────────┘  └────────────┬─────────────┘ │
+│  │   ・bybit            │  │  ├─ jquants_loader.py ⭐ │ │
+│  │   ・tachibana (P1)   │  │  ├─ strategies/          │ │
+│  └──────────────────────┘  │  ├─ clients/             │ │
+│                            │  │   ├─ tachibana_data ⭐│ │
+│                            │  │   └─ tachibana.py     │ │
+│                            │  └─ narrative_hook.py    │ │
+│                            └────────────┬─────────────┘ │
 │                                          │ in-process    │
 │                            ┌─────────────▼─────────────┐ │
 │                            │ nautilus_trader (PyPI)    │ │
-│                            │  ・BacktestEngine         │ │
+│                            │  ・BacktestEngine (replay)│ │
 │                            │  ・LiveExecutionEngine    │ │
+│                            │  ・LiveDataEngine ⭐      │ │
 │                            │  ・Strategy / OrderFactory│ │
-│                            └─────────────┬─────────────┘ │
-│                                          │              │
-│           ┌──────────────────────────────┴────────────┐ │
-│           │ ExecutionClient 実装（venue ごと）          │ │
-│           │  ├─ tachibana_nautilus.py (P1 認証を再利用) │ │
-│           │  └─ hyperliquid_nautilus.py (Phase N3)     │ │
-│           └────────────────────────────────────────────┘ │
+│                            │  ・BarAggregator ⭐       │ │
+│                            └───────────────────────────┘ │
 └──────────────────────────────────────────────────────────┘
+
+⭐ = N1 / N2 で新設
 ```
 
 ### 責務分割
@@ -43,149 +45,172 @@
 | 責務 | 所在 | 備考 |
 | :--- | :--- | :--- |
 | HTTP API のレスポンス組立 | **Rust** | 既存 `replay_api.rs` を維持 |
-| 履歴データの正本 | **Rust `EventStore`** | nautilus にコピー注入する。nautilus 側の Parquet キャッシュは使わない |
-| バックテスト実行 | **Python `nautilus.BacktestEngine`** | Rust から「リプレイ開始」コマンドを受けて起動 |
-| ライブ発注の意思決定 | **Python `Strategy`** | ユーザー実装（or 既定の hand-off ブリッジ） |
+| 履歴データの正本（Klines） | **Rust `EventStore`** | nautilus にコピー注入 |
+| **過去歩み値・分足の正本（J-Quants）** | **`S:\j-quants\` 直読み** | `python/engine/nautilus/jquants_loader.py` がストリーム読込 |
+| バックテスト実行（replay） | **Python `nautilus.BacktestEngine`** | Rust から「リプレイ開始」コマンドを受けて起動 |
+| ライブ発注の意思決定 | **Python `Strategy`** | ユーザー実装（N0/N1 は組み込みのみ） |
 | ライブ発注の送信 | **Python `LiveExecutionClient`** | venue ごとに 1 実装 |
-| 立花の認証・session 管理 | **Python（既存 Phase 1 コード）** | nautilus には完成済み client を渡すだけ。重複実装しない。URL builder は既存 `tachibana_url.py` の `DEV_TACHIBANA_DEMO` チェック → `TACHIBANA_ALLOW_PROD` チェックの 2 段ガードをそのまま再利用。`TachibanaExecutionClient` に独自 prod ガードを実装しない |
-| ナラティブの記録 | **Python `narrative_hook.py`** | nautilus の `Strategy.on_event` から `/api/agent/narrative` を叩く |
+| **ライブ歩み値配信** | **Python `LiveDataClient`（N2 で新設）** | 立花 FD frame → `TradeTick` |
+| 立花の認証・session 管理 | **Python（既存 Phase 1 コード）** | 重複実装しない |
+| ナラティブの記録 | **Python `narrative_hook.py`** | nautilus `Strategy.on_event` から `/api/agent/narrative` を叩く |
 | keyring 永続化 | **Rust `data::config`** | 既存どおり |
 
-**Rust 直結（NativeBackend）は使わない**: 立花計画と同じく、`EngineClientBackend` 一本に統一。
+**Rust 直結（NativeBackend）は使わない**: `EngineClientBackend` 一本に統一。
 
 ## 2. プロセス起動とハンドシェイク
 
-既存 IPC は `Command::Hello` variant の `schema_major / schema_minor` 2 フィールド構成（[engine-client/src/dto.rs](../../../engine-client/src/dto.rs)）。立花 Phase 1 が schema 1.2、order/ 計画が schema 1.3 を切るため、**本計画は schema 1.4** とする。
+既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。本計画は **schema 1.4**。
 
-[python-data-engine/spec.md](../✅python-data-engine/spec.md) §4.5 のハンドシェイクに以下を追加:
-
-1. Rust → Python: `Hello { schema_major: 1, schema_minor: 4, ..., capabilities: { ..., nautilus: true } }`
-2. Python → Rust: `Ready { schema_major: 1, schema_minor: 4, capabilities: { ..., nautilus: { backtest: true, live: false_until_n2 } } }`
+1. Rust → Python: `Hello { schema_major: 1, schema_minor: 4, capabilities: { nautilus: true } }`
+2. Python → Rust: `Ready { schema_major: 1, schema_minor: 4, capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`
 3. Rust → Python: `SetVenueCredentials`（既存）
-4. **新**: Rust → Python: `Command::StartEngine { ... }` を送信（下記 §3）
-   - `mode: "backtest"` のとき `BacktestEngine` を組み立て、`/api/replay/*` のリクエストを受け付け始める
-   - `mode: "live"` のとき `LiveExecutionEngine` を組み立て、登録された ExecutionClient を `start()` する（venue 閉場中は `start()` を保留、[spec.md §3.3](./spec.md#33-パフォーマンス)）
+4. Rust → Python: `Command::StartEngine { mode, ... }`（§3 参照）
+   - `mode: "backtest"` → `BacktestEngine` 起動 + J-Quants ロード（`/api/replay/load` → §4）
+   - `mode: "live"` → `LiveExecutionEngine` + `LiveDataEngine` 起動（venue 閉場中は `start()` 保留）
 
 ## 3. 新規 IPC メッセージ
 
-[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（schema 1.4）。
-
-**`SubmitOrder` / `CancelOrder` / `ModifyOrder` および全 `Order*` イベントは [order/architecture.md §3](../✅order/architecture.md#3-ipc-スキーマ拡張schema-12--13) で schema 1.3 として設計定義済み（dto.rs への追加は order/ Phase O-pre で実施予定・現時点未実装）**。本計画は **発注系を再定義しない**。本計画で追加するのは backtest engine ライフサイクルのみ:
-
-> **実装状態**: 以下のコードブロックは N0.2/N1.1 で dto.rs に追加予定（現時点未実装）。
+[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（schema 1.4）。**`SubmitOrder` / `Order*` 系は order/ schema 1.3 で定義済み**。本計画で追加するのは backtest engine ライフサイクルと replay データロード:
 
 ```rust
 pub enum Command {
-    // 既存（schema 1.2 / 1.3）...
     StartEngine {
         request_id: String,
         engine: EngineKind,          // Backtest | Live
         strategy_id: String,
-        config: EngineStartConfig,   // ticker, timeframe, range, initial_cash, clock_mode, ...
+        config: EngineStartConfig,   // ticker, range, initial_cash, granularity
     },
     StopEngine { request_id: String, strategy_id: String },
-    // AdvanceClock は不採用（Q3 決定 2026-04-26。下記参照）
+    LoadReplayData {                 // ⭐ N1 新設
+        request_id: String,
+        instrument_id: String,       // "1301.TSE"
+        start_date: String,          // "2024-01-01"
+        end_date: String,            // "2024-01-31"
+        granularity: ReplayGranularity, // Trade | Minute | Daily
+    },
 }
+
+pub enum ReplayGranularity { Trade, Minute, Daily }
 
 pub enum EngineEvent {
-    // 既存 + order/ 由来の Order* イベント ...
     EngineStarted { strategy_id: String, account_id: String, ts_event_ms: i64 },
     EngineStopped { strategy_id: String, final_equity: String, ts_event_ms: i64 },
-    PositionOpened {
+    ReplayDataLoaded {               // ⭐ N1 新設
         strategy_id: String,
-        venue: String,               // "tachibana" / "replay" — 立花と replay 同時稼働時の振り分け（H1）
-        instrument_id: String,
-        position_id: String,
-        side: PositionSide,          // LONG | SHORT
-        opened_qty: String,          // 文字列で精度保持（H2、既存 TradeMsg 規約に整合）
-        avg_open_price: String,
+        bars_loaded: u64,
+        trades_loaded: u64,
         ts_event_ms: i64,
     },
-    PositionClosed {
-        strategy_id: String,
-        venue: String,
-        instrument_id: String,
-        position_id: String,
-        realized_pnl: String,        // 文字列、JPY は整数として扱う（立花仕様）
-        ts_event_ms: i64,
-    },
+    PositionOpened { strategy_id, venue, instrument_id, position_id, side, opened_qty, avg_open_price, ts_event_ms },
+    PositionClosed { strategy_id, venue, instrument_id, position_id, realized_pnl, ts_event_ms },
 }
 ```
 
-**精度保持規約（H2）**: 数量・価格・PnL は **文字列**で運ぶ（既存 `TradeMsg` / `KlineMsg` / `DepthLevel` の `String` 規約に揃える）。`f64` 変換は Rust UI レンダラ層が最後に行う。
+**精度保持規約（H2）**: 数量・価格・PnL は **文字列**で運ぶ。`f64` 変換は Rust UI レンダラ層が最後に行う。
 
-**venue フィールド（H1）**: ライブ立花とリプレイ SimulatedExchange が同時に動く可能性があるため、ポジション系イベントには `venue` を必須化する。`Order*` 系は order/ schema 側ですでに `venue_order_id` で振り分け可能。**venue 値は IPC スキーマ安定名（"tachibana", "replay"）のみを使用する。立花 API 固有語（sOrderNumber 等）は IPC フィールドに絶対に含めない。**
+**venue フィールド（H1）**: ポジション系イベントには `venue` を必須化。値は IPC スキーマ安定名（`"tachibana"` / `"replay"`）のみ。
 
-**clock 注入（H4 / Q3 決定、2026-04-26）**: `AdvanceClock` Command は **実装しない**。
+**clock 注入（H4 / Q3 決定）**: `AdvanceClock` Command は **実装しない**。`BacktestEngine.run(start, end)` で自走（[open-questions.md Q3](./open-questions.md#q3)）。
 
-`tests/spike/nautilus_clock_injection/spike_clock.py` で確認した結果、`TestClock.advance_time()` を `run(streaming=True)` と組み合わせると Rust clock の非減少不変条件違反でパニックする。
-
-**採用方針（案 B）**: `BacktestEngine.run(start=range_start_ms, end=range_end_ms)` で自走。`StartEngine.config` に `range_start_ms / range_end_ms` のみ含める。
-
-**将来の StepForward（N2 以降）**: `streaming=True + add_data([bar]) + run + clear_data()` サイクルで Bar 単位ステップ実行が可能（spike 検証済み）。必要なら `StepEngine { bars_to_advance: u32 }` IPC Command を追加する。
-
-## 4. データフロー（リプレイ）
+## 4. データフロー（replay モード）
 
 ```
-Rust HTTP /api/replay/order
-   │ POST {side, qty, price, ...}
+Rust HTTP /api/replay/load
+   │ POST {instrument_id: "1301.TSE", start_date, end_date, granularity: "trade"}
    ▼
-Rust replay_api.rs
-   │ engine_client.send(Command::SubmitOrder { venue: "replay", order })
+engine_client.send(Command::LoadReplayData { ... })
    ▼
-Python nautilus/engine_runner.py
-   │ BacktestEngine.submit_order(OrderFactory.market(...))
+Python nautilus/jquants_loader.py
+   │ ストリーム読込: gzip.open("S:/j-quants/equities_trades_202401.csv.gz")
+   │ 銘柄フィルタ + 期間フィルタ
+   │ Code "13010" → InstrumentId("1301.TSE")（末尾 0 切り）
+   ▼
+TradeTick リスト → BacktestEngine.add_data(ticks)
+   ▼
+Strategy.on_trade_tick(tick)  ←─ ★Strategy はここを実装する★
+   │ （必要なら BarAggregator 経由で on_bar も発火）
+   │
+   │ ユーザー判断: BacktestEngine.submit_order(...)
    ▼
 nautilus SimulatedExchange
-   │ 仮想時刻の Trade イベントで約定判定
+   │ TradeTick の価格・サイズで約定判定（板なしなので last-trade-fill モデル）
    ▼
 Strategy.on_event(OrderFilled)
-   │ narrative_hook.record(Outcome)  ──→ HTTP /api/agent/narrative
+   │ narrative_hook.record(Outcome) ──→ HTTP /api/agent/narrative
    ▼
 Event::OrderFilled → IPC → Rust → HTTP レスポンス
 ```
 
-決定論性のため、`BacktestEngine` の `clock` は **Rust から渡す `current_time`** を真として進め、`time.time()` を一切参照しない。
+**replay モードの約定判定**: 板履歴がないため、`SimulatedExchange` の matching engine は **直近 TradeTick の last_price ベース**で fill する。指値は `last_price <= limit_price`（買い）/ `>= limit_price`（売り）で fill する単純モデル。これは現実の板状況より楽観的だが、戦略の方向性検証には十分（[spec.md §3.5.3](./spec.md#353-既知のlivereplay差分) で利用者に明示）。
 
-## 5. データフロー（ライブ・立花発注）
+## 5. データフロー（live モード・立花）
 
 ```
-ユーザー UI 操作（or Python Strategy）
+立花 EVENT WebSocket (FD frame)
    ▼
-Python LiveExecutionEngine.submit_order
+python/engine/exchanges/tachibana_ws._FdFrameProcessor
+   │ trade dict + depth dict を合成
    ▼
-TachibanaExecutionClient
-   │ 既存 tachibana セッション・URL ルーティングを再利用
+python/engine/nautilus/clients/tachibana_data.py  ⭐ N2 新設
+   │ trade dict → nautilus TradeTick に変換
+   │ LiveDataEngine.process(tick)
+   ▼
+Strategy.on_trade_tick(tick)  ←─ ★replay と同一インタフェース★
+   │
+   │ ユーザー判断: LiveExecutionEngine.submit_order(...)
+   ▼
+TachibanaExecutionClient (= python/engine/nautilus/clients/tachibana.py)
+   │ tachibana_orders.submit_order(...) に委譲（重複実装しない）
    │ POST CLMKabuNewOrder
    ▼
 EVENT WebSocket (p_evt_cmd=EC)
    ▼
-parse → nautilus OrderFilled イベント
+tachibana_event_bridge._parse_ec_frame → nautilus OrderFilled
    ▼
 Strategy.on_event → narrative_hook
    ▼
 Event::OrderFilled → IPC → Rust → UI 反映
 ```
 
-## 6. 既存計画との衝突点と整理
+## 6. live / replay 互換のための共通インタフェース ⭐ 2026-04-28 追記
+
+ユーザー Strategy が `on_trade_tick(tick)` を実装すれば、以下のどちらの経路でも同じハンドラが呼ばれる:
+
+```python
+class MyStrategy(Strategy):
+    def on_trade_tick(self, tick: TradeTick):
+        # tick.instrument_id, tick.price, tick.size, tick.ts_event は live/replay で同じ意味
+        ...
+
+    def on_bar(self, bar: Bar):
+        # BarAggregator が tick から作るか、replay モードで J-Quants 直接投入
+        ...
+```
+
+**禁止メソッド（[spec.md §3.5.2](./spec.md#352-戦略コード規約)）**:
+- `on_order_book_*` — replay で板を作らないため
+- `on_quote_tick` — 同上
+
+これらは N1.8 の lint で検出する。
+
+## 7. 既存計画との衝突点と整理
 
 | 衝突点 | 解消方針 |
 |---|---|
-| Phase 2「自作 Virtual Exchange Engine」 | **破棄**。nautilus `BacktestEngine` で代替。`docs/plan/README.md` Phase 2 セクションは `Phase 2 = nautilus 統合` に書き換え（N1 完了時点で）。※ `docs/plan/README.md` は N1 完了前は未更新のため、リンクが dead になる場合がある。N1 完了時に同時更新すること |
-| 立花 Phase 2 発注経路 | **書き直し**。`tachibana/` 計画の Phase 2 タスクは `tachibana_nautilus.py` 実装タスクに置換（spec.md §2.3 と整合） |
-| Rust 側発注 adapter（暗号資産） | **段階廃止**。Phase N3 で nautilus 側に移植後、Rust の発注経路は削除。データ取得（subscribe）は維持 |
-| ナラティブの `outcome` 自動連携 | **そのまま**。書き込み元が `FillEvent` から nautilus `OrderFilled` に変わるが、HTTP API 契約は不変 |
+| Phase 2「自作 Virtual Exchange Engine」 | **破棄**。nautilus `BacktestEngine` で代替 |
+| 立花 Phase 2 発注経路 | **書き直し**。`tachibana_nautilus.py` 実装タスクに置換 |
+| Rust 側発注 adapter（暗号資産） | **段階廃止**。Phase N3 で nautilus 側に新規実装後、Rust の発注経路は削除 |
+| ナラティブの `outcome` 自動連携 | **そのまま**。書き込み元が `FillEvent` から nautilus `OrderFilled` に変わる |
+| **N0 の EventStore 直読み Bar ローダ** | **両立**。日足長期テスト用に N0 ローダは残し、N1 の J-Quants tick ローダを並列追加 |
 
-## 7. Python 単独モードへの含み
+## 8. Python 単独モードへの含み
 
-Rust（iced）を外す将来モードでは、以下のレイヤーだけで動く:
+Rust（iced）を外す将来モードでは:
 
 ```
-Python: nautilus_trader + 既存 venue worker + narrative store + (任意) FastAPI で HTTP API を露出
+Python: nautilus_trader + jquants_loader + 既存 venue worker + narrative store + (任意) FastAPI
 ```
 
-そのため:
-- nautilus 関連コードは **`engine-client` IPC を介さず直接 Python から叩ける**よう、`engine_runner.py` に CLI / library 二系統のエントリを切る
-- 立花 Phase 1 の tkinter ログイン UI は **subprocess 隔離経由**でのみ再利用する（[tachibana/architecture.md §7.3「プロセスモデル: ログインヘルパー subprocess」](../✅tachibana/architecture.md#73-プロセスモデル-ログインヘルパー-subprocess) の subprocess 隔離方針と整合）。engine 本体プロセス（nautilus が稼働するプロセス）から `import tkinter` しない。tkinter は常に `python -m engine.exchanges.tachibana_login_dialog` の独立プロセスで起動する
-
-**subprocess への credential 渡し・受け取りの境界（C2）**: ログインヘルパー subprocess は OS pipe（stdin/stdout）経由で credential を受け渡す。具体的には、データエンジンが `asyncio.create_subprocess_exec` で spawn し、stdin に起動 JSON を 1 回だけ書き込んで close する。ヘルパーは収集した credential を stdout に JSON 1 行で返して即終了する。データエンジン受信後は直ちに `SecretStr` にラップし、stdout バッファへの参照を解放する。subprocess 終了後に OS がページを回収することでメモリを解放する。credential は subprocess の短命メモリと OS pipe のみに滞在し、長期保持しない。
+- nautilus 関連コードは `engine-client` IPC を介さず直接 Python から叩けるよう、`engine_runner.py` に CLI / library 二系統のエントリを切る
+- 立花 Phase 1 の tkinter ログイン UI は **subprocess 隔離経由**で再利用（[tachibana/architecture.md §7.3](../✅tachibana/architecture.md#73-プロセスモデル-ログインヘルパー-subprocess)）
+- J-Quants ローダは Rust に依存しないので Python 単独モードで完全に独立して動く

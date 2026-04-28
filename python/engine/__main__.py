@@ -134,6 +134,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         stream=sys.stderr,
     )
+    # C-M2: httpx/httpcore の INFO ログには立花 API の URL が含まれ、
+    # クエリパラメータに sSecondPassword が露出するため WARNING 以上に抑制する。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     args = _parse_args()
 
     dev_tachibana_login_allowed = False

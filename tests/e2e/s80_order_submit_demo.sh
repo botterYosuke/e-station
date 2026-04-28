@@ -149,7 +149,7 @@ fi
 log "flowsurface 起動 ($BINARY)"
 mkdir -p "$(dirname "$RUST_LOG_FILE")" 2>/dev/null || true
 : > "$RUST_LOG_FILE" 2>/dev/null || true
-FLOWSURFACE_ENGINE_TOKEN="$TOKEN" RUST_LOG=info \
+FLOWSURFACE_ENGINE_TOKEN="$TOKEN" FLOWSURFACE_ORDER_GUARD_ENABLED=1 RUST_LOG=info \
     "$BINARY" --data-engine-url "ws://127.0.0.1:$PORT" > "$RUST_LOG_FILE" 2>&1 &
 APP_PID=$!
 

@@ -70,6 +70,20 @@ from engine.schemas import (
 
 log = logging.getLogger(__name__)
 
+# C-M2: httpx/httpcore の INFO/DEBUG ログには立花 API の URL が含まれ、
+# クエリパラメータ sSecondPassword が露出するため WARNING 以上に抑制する。
+# setLevel(WARNING) に加えて addFilter も設定することで確実に抑制する。
+def _make_min_level_filter(min_level: int) -> logging.Filter:
+    class _Filter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return record.levelno >= min_level
+    return _Filter()
+
+for _http_logger_name in ("httpx", "httpcore"):
+    _l = logging.getLogger(_http_logger_name)
+    _l.setLevel(logging.WARNING)
+    _l.addFilter(_make_min_level_filter(logging.WARNING))
+
 _ENGINE_VERSION = "0.1.0"
 
 
@@ -689,6 +703,13 @@ class DataEngineServer:
         self._session_holder.set_password(value)
 
     async def _do_submit_order(self, msg: dict) -> None:
+        # TEMPORARY DEBUG: httpx logger level check before submit
+        _hx_debug = logging.getLogger("httpx")
+        log.debug(
+            "DEBUG_SUBMIT: httpx level=%s effective=%s INFO_enabled=%s filters=%s",
+            _hx_debug.level, _hx_debug.getEffectiveLevel(),
+            _hx_debug.isEnabledFor(logging.INFO), _hx_debug.filters
+        )
         # C-2: in-flight カウンタをインクリメント（architecture.md §2.4 競合ポリシー）。
         self._submit_order_inflight_count += 1
         try:

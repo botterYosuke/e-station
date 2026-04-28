@@ -91,9 +91,8 @@ impl Default for OrderGuardConfig {
 impl OrderGuardConfig {
     /// Convenience constructor: guard enabled with no quantity/yen limits.
     ///
-    /// Useful for tests that want to exercise the happy path without
-    /// accidentally triggering the "not configured" 503.
-    #[cfg(test)]
+    /// Useful for tests and for the `FLOWSURFACE_ORDER_GUARD_ENABLED=1` env var
+    /// path in `main.rs`.
     pub fn enabled_no_limits() -> Self {
         Self {
             enabled: true,
