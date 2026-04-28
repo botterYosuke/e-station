@@ -228,6 +228,28 @@ async def test_login_p_errno_minus_62_raises_login_error(httpx_mock: HTTPXMock):
     assert exc_info.value.code == "-62"
 
 
+async def test_login_p_errno_minus_62_uses_service_out_of_hours_banner(
+    httpx_mock: HTTPXMock,
+):
+    """`p_errno=-62` ("システムサービス時間外") MUST surface a dedicated banner
+    instead of the misleading "ID / パスワードを確認してください" string. The
+    server-side wording (`p_err`) still must not leak (F-Banner1)."""
+    _add_login_response(
+        httpx_mock,
+        _ok_login_payload(p_errno="-62", p_err="システムサービス時間外。"),
+    )
+    with pytest.raises(LoginError) as exc_info:
+        await login("uid", "pwd", is_demo=True, p_no_counter=PNoCounter())
+    msg = exc_info.value.message
+    assert "サービス時間外" in msg
+    assert "ID" not in msg and "パスワード" not in msg, (
+        "service-hours banner must NOT recycle the credential-check wording"
+    )
+    assert "システムサービス時間外。" not in msg, (
+        "raw server p_err text must not leak into the banner (F-Banner1)"
+    )
+
+
 async def test_login_authentication_failure_raises_login_error(httpx_mock: HTTPXMock):
     """Same guarantee for `sResultCode != "0"` on the auth path."""
     _add_login_response(

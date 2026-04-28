@@ -789,3 +789,63 @@ R2・R3 で発見・解消した追加指摘。
 | T6 | 2 日 |
 | T7 | 1〜2 日 |
 | **合計** | **16〜21 日**（1 人換算、デモ環境動作確認込み） |
+
+---
+
+## REPLAY 機能 完成・実機動作確認記録（2026-04-29）
+
+立花経路と隣接する nautilus_trader REPLAY 機能の最終配線・実機動作確認をここに記録する（`tachibana_orders_replay.jsonl` WAL を共用するため tachibana 計画にも併記）。
+
+### 実装した残課題
+
+| ID | 内容 | コミット |
+|---|---|---|
+| **N1.5 配線** | `python/engine/server.py::_do_submit_order_inner` の `OrderRejected{REPLAY_NOT_IMPLEMENTED}` 早期 reject を解除し、`submit_order_replay` 呼出しに置換。`OrderAccepted` を返却。`tachibana_orders_replay.jsonl` に `REPLAY-` プレフィックス付き CID で WAL 記録 | `2c77374` |
+| **N1.11-ui** | `Content::ReplayControl` pane に 1x/10x/100x 速度ボタンを実装。`Effect::SetReplaySpeed → dashboard::Event::ReplaySpeedAction → Command::SetReplaySpeed` IPC 送信 | `2c77374` |
+| **N1.12 Rust UI** | Kline chart に ExecutionMarker（BUY=緑/SELL=赤の四角）と StrategySignal（ダイヤモンド形状、SignalKind 別色）の overlay 描画レイヤーを追加。`distribute_execution_markers` / `distribute_strategy_signals` を新設 | `2c77374` |
+| **N1.14 overlay クリア** | `AutoGenerateReplayPanes` 受信時に `clear_chart_overlays()` を呼ぶ。`/api/replay/load` 再実行で overlay がリセットされる | `2c77374` |
+| **N1.11 SetReplaySpeed dispatch（実機検証で発見）** | `server.py` の op dispatch 分岐に `SetReplaySpeed` が欠落しており Python が `Error{unsupported_op}` を返していた。`elif op == "SetReplaySpeed"` を追加して `self._replay_speed_multiplier` に保存 | `9a23573` |
+
+### テスト結果
+
+| スイート | 結果 |
+|---|---|
+| Python (`uv run pytest python/tests/`) | **1300 passed**（4 件追加: `TestServerReplayRouting` 3 件 + 既存テスト 2 件更新）/ 2 skipped |
+| Rust (`cargo test --workspace`) | **198+ tests / 0 failed** |
+| `cargo clippy --workspace -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+
+### 実機動作確認（2026-04-29 08:00–08:05 JST、Windows 11）
+
+`flowsurface.exe --mode replay` を起動して以下のエンドツーエンドフローを HTTP API + IPC ログで検証した。
+
+| 項目 | 確認方法 | 結果 |
+|---|---|---|
+| アプリ起動 | `flowsurface.exe --mode replay` | GUI 起動・Vulkan/RTX 3050 認識・Hello/Ready 1 秒以内成立 |
+| HTTP API | `GET /api/replay/status` | `{"status":"ok","version":"0.8.7"}` |
+| Hello capabilities | IPC ログ | `mode:replay` で `nautilus.backtest=true, nautilus.live=false` を含む Ready |
+| **N1.2 J-Quants ロード** | `POST /api/replay/load` 1301.TSE 2024-01-04（1日） | `trades_loaded:1563` で成功（〜93 秒） |
+| **N1.14 自動 pane 生成** | `auto-generated TimeAndSales / CandlestickChart pane for 1301.TSE` ログ確認 | OK |
+| **N1.5 仮想注文 IPC 配線** | `POST /api/replay/order` 2 件 | IPC で `OrderSubmitted`+`OrderAccepted` を受信、`REPLAY_NOT_IMPLEMENTED` reject なし |
+| **N1.5 WAL 記録** | `~/.cache/flowsurface/engine/tachibana_orders_replay.jsonl` | `REPLAY-TEST-CID-001` / `REPLAY-FINAL-CID-002` 等が 1301.TSE で記録、`REPLAY-` プレフィックス + 名前空間分離が機能 |
+| **N1.11 速度コントロール IPC** | `POST /api/replay/control multiplier=10/100` | Python ログ `INFO engine.server SetReplaySpeed: multiplier=10/100` 記録、Error なし |
+
+### 実機検証で発見した不具合
+
+**バグ**: 実機テスト中に `SetReplaySpeed` IPC で Python が `Error{unsupported_op:"SetReplaySpeed"}` を返していた。
+
+**根本原因**: `server.py::_handle_message` の op dispatch 分岐に `SetReplaySpeed` が欠落していた（N1.11 完了報告で見落とし）。dto.rs と schemas.py には追加されていたが、`_handle_message` の `elif op == ...` チェーンには追加忘れ。
+
+**修正**: `LoadReplayData` の隣に `elif op == "SetReplaySpeed"` 分岐を追加（commit `9a23573`）。
+
+**教訓**: IPC schema 追加時は **dto.rs / schemas.py / server.py の `_handle_message` dispatch** の 3 箇所すべてを更新する必要がある。bug-postmortem の MISSES に「新規 IPC op 追加時の 3 層整合性チェックリスト」を追加検討。
+
+### 未検証項目（GUI/データ依存・将来検証）
+
+- **ExecutionMarker / StrategySignal の overlay 視覚確認**: 実 BacktestEngine 起動 (`StartEngine` IPC + 戦略実行) が必要。コードと配線は完了済みだが点描の見え方は GUI 目視確認が要
+- **1ヶ月分 backtest SLA**: 1日分 1301.TSE で 1,563 件 / 〜93 秒。1ヶ月分は loader 単独で数十分かかる見込み（spec.md §3.3 の 60 秒 SLA は要再評価）
+- **デモ発注 (N2)**: `scripts/s70_tachibana_nautilus_demo_order.py` 手動実行で立花デモ口座への往復確認
+
+### 結論
+
+REPLAY 機能のコアパス（**load → 自動 pane 生成 → 仮想注文 WAL 記録 → 速度コントロール IPC**）はすべてエンドツーエンドで動作することを実機で確認した。立花共用 WAL (`tachibana_orders_replay.jsonl`) も期待通り `REPLAY-` プレフィックスで分離記録されている。残るは GUI 上での overlay 視覚確認と、デモ口座での実発注往復のみ。
