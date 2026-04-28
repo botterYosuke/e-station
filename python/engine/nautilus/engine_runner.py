@@ -712,11 +712,12 @@ class NautilusRunner:
               N2 以降で nautilus.live=true に切り替える（server.py で設定）。
         """
         # N2.3: persistence=None assertion（spec.md §3.2）
+        # 将来 CacheConfig を外部から受け取る際のガード: database=None が維持されていることを保証。
         from nautilus_trader.config import CacheConfig
         config = CacheConfig(database=None)
         assert config.database is None, "N2 invariant: CacheConfig.database must be None"
         log.info(
-            "start_live() called — N2 TachibanaLiveExecutionClient integration active. "
+            "start_live() called — adapter classes ready, server.py wiring pending (N3). "
             "CacheConfig.database=%s (persistence=OFF)", config.database
         )
 

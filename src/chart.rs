@@ -690,6 +690,10 @@ impl ViewState {
         }
     }
 
+    pub fn ticker_info(&self) -> TickerInfo {
+        self.ticker_info
+    }
+
     #[cfg(test)]
     pub(crate) fn latest_x(&self) -> u64 {
         self.latest_x

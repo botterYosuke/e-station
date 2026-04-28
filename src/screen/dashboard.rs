@@ -847,10 +847,21 @@ impl Dashboard {
         // This is a pre-existing constraint of iced's pane_grid API.
         let mut last_split_pane = base_pane;
 
+        if !is_first {
+            for kind in ["TimeAndSales", "CandlestickChart"] {
+                if let Some(pane) = self
+                    .replay_pane_registry
+                    .get_registered_pane(instrument_id, kind)
+                    && let Some(state) = self.panes.get_mut(pane)
+                {
+                    state.clear_replay_chart_data();
+                }
+            }
+        }
+
         // N1.14: is_first ガード — reload 時 (同一銘柄の2回目以降) は
         // TimeAndSales / CandlestickChart の重複生成を防ぐ。
-        // TODO(N1.14): reload 時に既存 pane の chart buffer / overlay をクリアする
-        //   処理は KlineChart API の確定後に追加する。
+        // clear_replay_chart_data() で既存 pane のバッファをクリアする (実装済み)。
         if is_first
             && self
                 .replay_pane_registry
@@ -859,6 +870,8 @@ impl Dashboard {
             let new_state = pane::State::with_kind(data::layout::pane::ContentKind::TimeAndSales);
             if let Some((new_pane, _)) = self.panes.split(axis, last_split_pane, new_state) {
                 log::info!("replay_api: auto-generated TimeAndSales pane for {instrument_id}");
+                self.replay_pane_registry
+                    .register_pane(instrument_id, "TimeAndSales", new_pane);
                 self.focus = Some((main_window_id, new_pane));
                 last_split_pane = new_pane;
             }
@@ -873,6 +886,11 @@ impl Dashboard {
                 pane::State::with_kind(data::layout::pane::ContentKind::CandlestickChart);
             if let Some((new_pane, _)) = self.panes.split(axis, last_split_pane, new_state) {
                 log::info!("replay_api: auto-generated CandlestickChart pane for {instrument_id}");
+                self.replay_pane_registry.register_pane(
+                    instrument_id,
+                    "CandlestickChart",
+                    new_pane,
+                );
                 self.focus = Some((main_window_id, new_pane));
                 last_split_pane = new_pane;
             }

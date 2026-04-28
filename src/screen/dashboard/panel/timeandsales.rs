@@ -99,6 +99,16 @@ impl TimeAndSales {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.recent_trades.clear();
+        self.paused_trades_buffer.clear();
+        self.hist_agg = HistAgg::default();
+        self.max_filtered_qty = Qty::ZERO;
+        self.is_paused = false;
+        self.scroll_offset = 0.0;
+        self.cache = canvas::Cache::default();
+    }
+
     pub fn insert_buffer(&mut self, trades_buffer: &[Trade]) {
         let size_filter = self.config.trade_size_filter;
 

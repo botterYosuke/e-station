@@ -605,7 +605,7 @@
 - ✅ /api/replay/load 再実行時の重複 pane 生成を防止 (is_first ガード、2026-04-29)
       → TimeAndSales / CandlestickChart: is_first ガードで reload 時の重複生成を防止
       → OrderList / BuyingPower: loaded_count()==1 ガードで2銘柄目以降の重複生成を防止
-- [ ] /api/replay/load 再実行時の chart buffer / overlay クリア（TODO: KlineChart API 確定後）
+- ✅ /api/replay/load 再実行時の chart buffer クリア（overlay クリアは N1.12 UI フェーズ待ち、2026-04-29）
 - ✅ tests: replay_pane_registry (6 件) + replay_api N1.14 テスト (2 件) GREEN
       - 同 instrument の二重 load で 400 にならない (reload 可)
       - 5 銘柄目の load が 400 になること

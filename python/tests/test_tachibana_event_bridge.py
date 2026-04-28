@@ -291,3 +291,49 @@ class TestOrderIdMap:
     def test_unknown_venue_order_id_returns_none(self):
         om = OrderIdMap()
         assert om.get_client_order_id("UNKNOWN") is None
+
+
+# ---------------------------------------------------------------------------
+# P-2: canceled / expired で order_info が None の場合の WARNING ログ
+# ---------------------------------------------------------------------------
+
+
+class TestMissingOrderInfoWarning:
+    """order_info が None の時に WARNING が出て generate_order_canceled が呼ばれない。"""
+
+    def _make_bridge_with_venue_only(self) -> tuple[TachibanaEventBridge, MagicMock]:
+        """venue_order_id のみ登録（client_order_id → order_info なし）のブリッジ。"""
+        client = MagicMock()
+        order_map = OrderIdMap()
+        # venue → client のマッピングだけ作り、order_info (by_client) は登録しない
+        order_map._by_venue["ORDER-NOINFO"] = "CLIENT-NOINFO"
+        bridge = TachibanaEventBridge(client=client, order_id_map=order_map)
+        return bridge, client
+
+    def test_canceled_warns_when_order_info_missing(self, caplog):
+        import logging
+        bridge, client = self._make_bridge_with_venue_only()
+        ec = _make_ec(
+            venue_order_id="ORDER-NOINFO",
+            notification_type="3",
+            last_price=None,
+            last_qty=None,
+        )
+        with caplog.at_level(logging.WARNING, logger="engine.nautilus.clients.tachibana_event_bridge"):
+            bridge.process_ec_event(ec)
+        assert not client.generate_order_canceled.called
+        assert any("skipping canceled/expired" in r.message for r in caplog.records)
+
+    def test_expired_warns_when_order_info_missing(self, caplog):
+        import logging
+        bridge, client = self._make_bridge_with_venue_only()
+        ec = _make_ec(
+            venue_order_id="ORDER-NOINFO",
+            notification_type="4",
+            last_price=None,
+            last_qty=None,
+        )
+        with caplog.at_level(logging.WARNING, logger="engine.nautilus.clients.tachibana_event_bridge"):
+            bridge.process_ec_event(ec)
+        assert not client.generate_order_canceled.called
+        assert any("skipping canceled/expired" in r.message for r in caplog.records)

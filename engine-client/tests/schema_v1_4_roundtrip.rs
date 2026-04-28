@@ -19,9 +19,10 @@ const RID: &str = "req-v1.4-001";
 // Schema 2.x contains schema 1.4 variants (order lifecycle events).
 #[test]
 fn schema_major_is_at_least_2() {
-    assert!(
-        flowsurface_engine_client::SCHEMA_MAJOR >= 2,
-        "SCHEMA_MAJOR must be >= 2 (schema 1.4 order variants included in schema 2.x)"
+    assert_eq!(
+        flowsurface_engine_client::SCHEMA_MAJOR,
+        2,
+        "SCHEMA_MAJOR must be 2 for schema 2.x (1.4 order variants). Update this test when bumping major."
     );
 }
 
@@ -187,6 +188,11 @@ fn order_list_updated_with_one_record_deserializes() {
             assert_eq!(orders[0].client_order_id, Some("cid-001".to_string()));
             assert_eq!(orders[0].quantity, "100");
             assert_eq!(orders[0].status, "SUBMITTED");
+            // venue キーなし JSON → serde default "tachibana" が適用されることを pin
+            assert_eq!(
+                orders[0].venue, "tachibana",
+                "venue should default to tachibana when absent from JSON"
+            );
         }
         _ => panic!("expected OrderListUpdated, got {:?}", ev),
     }

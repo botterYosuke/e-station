@@ -170,6 +170,10 @@ class TachibanaEventBridge:
 
         order_info = self._order_id_map.get_order_info(client_order_id)
         if order_info is None:
+            log.warning(
+                "EventBridge: no order info for client_order_id=%s — skipping canceled/expired",
+                client_order_id,
+            )
             return
 
         ts_ns = ec.ts_event_ms * 1_000_000
@@ -193,6 +197,10 @@ class TachibanaEventBridge:
 
         order_info = self._order_id_map.get_order_info(client_order_id)
         if order_info is None:
+            log.warning(
+                "EventBridge: no order info for client_order_id=%s — skipping canceled/expired",
+                client_order_id,
+            )
             return
 
         ts_ns = ec.ts_event_ms * 1_000_000
@@ -282,6 +290,7 @@ class OrderIdMap:
             "STOP_LIMIT": OrderType.STOP_LIMIT,
         }
 
+        warmed_count = 0
         for rec in records:
             coid = getattr(rec, "client_order_id", None)
             void = getattr(rec, "venue_order_id", None)
@@ -293,15 +302,27 @@ class OrderIdMap:
             if not void or status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
                 continue
 
+            # P-11: instrument_id が None の場合はスキップ
+            if not instrument_id:
+                log.warning(
+                    "OrderIdMap.warm_up: record has no instrument_id, venue_order_id=%s — skipping",
+                    void,
+                )
+                continue
+
             if coid is None:
                 coid = f"WARM-{void}"
 
             self.register(
                 client_order_id=coid,
                 venue_order_id=void,
-                instrument_id=instrument_id or "",
+                instrument_id=instrument_id,
                 strategy_id=strategy_id,
                 order_side=_SIDE_MAP.get(order_side_str, OrderSide.BUY),
                 order_type=_TYPE_MAP.get(order_type_str, OrderType.MARKET),
             )
-        log.info("OrderIdMap: warmed up %d orders from CLMOrderList", len(records))
+            warmed_count += 1
+        log.info(
+            "OrderIdMap: warmed up %d/%d orders from CLMOrderList (skipped %d terminal)",
+            warmed_count, len(records), len(records) - warmed_count,
+        )

@@ -157,6 +157,39 @@ impl State {
         }
     }
 
+    pub fn clear_replay_chart_data(&mut self) {
+        match &mut self.content {
+            Content::Kline {
+                chart: Some(c),
+                indicators,
+                ..
+            } => {
+                let Basis::Time(timeframe) = c.basis() else {
+                    return;
+                };
+                let layout = c.chart_layout();
+                let step = c.tick_size();
+                let ticker_info = c.ticker_info();
+                let kind = c.kind().clone();
+                let new_chart = KlineChart::new(
+                    layout,
+                    Basis::Time(timeframe),
+                    step,
+                    &[],
+                    vec![],
+                    indicators,
+                    ticker_info,
+                    &kind,
+                );
+                *c = new_chart;
+            }
+            Content::TimeAndSales(Some(p)) => {
+                p.clear();
+            }
+            _ => {}
+        }
+    }
+
     pub fn from_config(
         content: Content,
         streams: Vec<PersistStreamKind>,

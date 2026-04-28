@@ -169,7 +169,7 @@ class TachibanaLiveDataClient(LiveDataClient):
         seq = counter.get(ts_ms, 0)
         counter[ts_ms] = seq + 1
         # 古い ts_ms エントリを GC（直近 1 件だけ保持）
-        if len(counter) > 2:
+        if len(counter) > 1:
             oldest = min(counter)
             del counter[oldest]
         return seq

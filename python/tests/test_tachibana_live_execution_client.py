@@ -84,6 +84,7 @@ class TestOrderToEnvelope:
         (2, "LIMIT"),
         (3, "STOP_MARKET"),
         (4, "STOP_LIMIT"),
+        (5, "MARKET_TO_LIMIT"),
         (6, "MARKET_IF_TOUCHED"),
         (7, "LIMIT_IF_TOUCHED"),
     ])
@@ -229,3 +230,52 @@ class TestCacheConfigPersistenceOff:
 
         config = CacheConfig(database=None)
         assert config.database is None
+
+    def test_start_live_completes_without_exception(self):
+        """start_live() が例外なく終了すること（P-5）。"""
+        from engine.nautilus.engine_runner import NautilusRunner
+
+        runner = NautilusRunner()
+        # 例外が出なければ OK
+        runner.start_live()
+
+    def test_start_live_log_message(self, caplog):
+        """start_live() が新しいログメッセージを出力すること（P-5）。"""
+        import logging
+        from engine.nautilus.engine_runner import NautilusRunner
+
+        runner = NautilusRunner()
+        with caplog.at_level(logging.INFO, logger="engine.nautilus.engine_runner"):
+            runner.start_live()
+        assert any("adapter classes ready" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# P-3: _check_safety_limits の parse error が reject に変わること
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyLimitsParseError:
+    def test_safety_limits_invalid_quantity_returns_reject_reason(self):
+        """数値変換不可な quantity を渡すと None ではなくエラー文字列が返ること（P-3）。"""
+
+        class _BadOrder:
+            quantity = "not-a-number"
+            price = None
+
+        result = _check_safety_limits(_BadOrder(), max_qty=1000, max_notional_jpy=None)
+        assert result is not None
+        assert "SAFETY_CHECK_ERROR" in result
+
+
+# ---------------------------------------------------------------------------
+# P-4: _order_to_envelope の unknown side が ValueError を raise すること
+# ---------------------------------------------------------------------------
+
+
+class TestOrderToEnvelopeUnknownSide:
+    def test_unknown_side_raises_value_error(self):
+        """未知の side 値を渡すと ValueError が上がること（P-4）。"""
+        order = _FakeOrder(side=99)  # 未知の side
+        with pytest.raises(ValueError, match="unknown side value"):
+            _order_to_envelope(order)

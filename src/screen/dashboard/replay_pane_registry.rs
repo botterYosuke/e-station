@@ -4,7 +4,8 @@
 /// The registry enforces `MAX_REPLAY_INSTRUMENTS` distinct instruments per
 /// session and prevents re-generating panes that the user has explicitly
 /// closed.
-use std::collections::HashSet;
+use iced::widget::pane_grid;
+use std::collections::{HashMap, HashSet};
 
 /// Logical identity of an auto-generated replay pane.
 /// `pane_kind` is a `&'static str` so comparisons are zero-cost.
@@ -20,6 +21,8 @@ pub struct ReplayPaneRegistry {
     loaded: HashSet<String>,
     /// Panes closed by the user — must never be auto-recreated.
     dismissed: HashSet<PaneIdentity>,
+    /// Live pane IDs for auto-generated panes (used to clear data on reload).
+    registered: HashMap<PaneIdentity, pane_grid::Pane>,
 }
 
 impl ReplayPaneRegistry {
@@ -27,6 +30,7 @@ impl ReplayPaneRegistry {
         Self {
             loaded: HashSet::new(),
             dismissed: HashSet::new(),
+            registered: HashMap::new(),
         }
     }
 
@@ -62,6 +66,34 @@ impl ReplayPaneRegistry {
     /// Number of distinct instruments loaded so far.
     pub fn loaded_count(&self) -> usize {
         self.loaded.len()
+    }
+
+    pub fn register_pane(
+        &mut self,
+        instrument_id: &str,
+        pane_kind: &'static str,
+        pane: pane_grid::Pane,
+    ) {
+        self.registered.insert(
+            PaneIdentity {
+                instrument_id: instrument_id.to_string(),
+                pane_kind,
+            },
+            pane,
+        );
+    }
+
+    pub fn get_registered_pane(
+        &self,
+        instrument_id: &str,
+        pane_kind: &'static str,
+    ) -> Option<pane_grid::Pane> {
+        self.registered
+            .get(&PaneIdentity {
+                instrument_id: instrument_id.to_string(),
+                pane_kind,
+            })
+            .copied()
     }
 }
 

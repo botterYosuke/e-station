@@ -921,6 +921,8 @@ class OrderRecordWire:
     ts_event_ms: int
     trigger_price: Optional[str] = None
     expire_time_ns: Optional[int] = None
+    # P-1: venue フィールド追加（dto.rs OrderRecordWire との IPC 契約一致）
+    venue: str = "tachibana"
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1051,7 @@ def _order_record_to_wire(
         time_in_force="DAY",  # CLMOrderList は sCondition を返さない場合もある
         status=status,
         ts_event_ms=ts_event_ms,
+        venue="tachibana",  # P-1: 明示設定
     )
 
 

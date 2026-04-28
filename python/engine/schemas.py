@@ -586,6 +586,8 @@ class OrderRecordWire(IpcMessage):
     expire_time_ns: int | None = None
     status: str
     ts_event_ms: int
+    # P-1: venue フィールド追加（dto.rs OrderRecordWire との IPC 契約一致）
+    venue: str = "tachibana"
 
 
 class OrderListUpdated(IpcMessage):

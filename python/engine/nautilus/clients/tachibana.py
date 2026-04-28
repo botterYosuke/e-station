@@ -101,36 +101,38 @@ def _order_to_envelope(order: Any) -> NautilusOrderEnvelope:
     tif_str = _TIF_MAP.get(tif_val, str(order.time_in_force))
 
     side_val = int(order.side)
-    side_str = _SIDE_MAP.get(side_val, "BUY")
+    side_str = _SIDE_MAP.get(side_val)
+    if side_str is None:
+        raise ValueError(f"unknown side value: {side_val!r}")
 
     # price / trigger_price / expire_time_ns
     price_str: Optional[str] = None
     if hasattr(order, "price") and order.price is not None:
         try:
             price_str = str(order.price)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("_order_to_envelope: %s conversion failed: %s", "price", exc)
 
     trigger_price_str: Optional[str] = None
     if hasattr(order, "trigger_price") and order.trigger_price is not None:
         try:
             trigger_price_str = str(order.trigger_price)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("_order_to_envelope: %s conversion failed: %s", "trigger_price", exc)
 
     trigger_type_str: Optional[str] = None
     if hasattr(order, "trigger_type") and order.trigger_type is not None:
         try:
             trigger_type_str = str(order.trigger_type)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("_order_to_envelope: %s conversion failed: %s", "trigger_type", exc)
 
     expire_time_ns: Optional[int] = None
     if hasattr(order, "expire_time") and order.expire_time is not None:
         try:
             expire_time_ns = int(order.expire_time)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("_order_to_envelope: %s conversion failed: %s", "expire_time_ns", exc)
 
     tags: list[str] = []
     if hasattr(order, "tags") and order.tags:
@@ -174,8 +176,9 @@ def _check_safety_limits(
             qty = int(Decimal(str(order.quantity)))
             if qty > max_qty:
                 return f"QUANTITY_EXCEEDED: {qty} > max_qty={max_qty}"
-        except Exception:
-            pass
+        except Exception as exc:
+            log.error("_check_safety_limits: parse error: %s", exc)
+            return f"SAFETY_CHECK_ERROR: {exc}"
 
     if max_notional_jpy is not None and hasattr(order, "price") and order.price is not None:
         try:
@@ -186,8 +189,9 @@ def _check_safety_limits(
                 return (
                     f"NOTIONAL_EXCEEDED: {notional} > max_notional_jpy={max_notional_jpy}"
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.error("_check_safety_limits: parse error: %s", exc)
+            return f"SAFETY_CHECK_ERROR: {exc}"
 
     return None
 
@@ -341,7 +345,22 @@ class TachibanaLiveExecutionClient(LiveExecutionClient):
             )
             return
 
-        envelope = _order_to_envelope(order)
+        try:
+            envelope = _order_to_envelope(order)
+        except ValueError as e:
+            log.error(
+                "_submit_order: _order_to_envelope failed for %s: %s",
+                client_order_id,
+                e,
+            )
+            self.generate_order_denied(
+                strategy_id=command.strategy_id,
+                instrument_id=order.instrument_id,
+                client_order_id=order.client_order_id,
+                reason=f"UNKNOWN_SIDE: {e}",
+                ts_event=ts_ns,
+            )
+            return
 
         try:
             result = await _tachibana_submit_order(

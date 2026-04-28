@@ -145,3 +145,63 @@ fn auto_generate_guards_order_list_with_loaded_count_one() {
         "auto_generate_replay_panes must guard OrderList/BuyingPower with loaded_count() == 1; got:\n(omitted)"
     );
 }
+
+#[test]
+fn pane_state_has_clear_replay_chart_data() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/screen/dashboard/pane.rs"
+    ))
+    .expect("read pane.rs");
+    assert!(
+        src.contains("fn clear_replay_chart_data"),
+        "pane::State must have clear_replay_chart_data"
+    );
+}
+
+#[test]
+fn time_and_sales_has_clear_method() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/screen/dashboard/panel/timeandsales.rs"
+    ))
+    .expect("read timeandsales.rs");
+    assert!(
+        src.contains("fn clear("),
+        "TimeAndSales must have clear() method"
+    );
+}
+
+#[test]
+fn auto_generate_replay_panes_clears_on_reload() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/screen/dashboard.rs"
+    ))
+    .expect("read dashboard.rs");
+    assert!(
+        src.contains("clear_replay_chart_data"),
+        "auto_generate_replay_panes must call clear_replay_chart_data on reload"
+    );
+    assert!(
+        src.contains("get_registered_pane"),
+        "auto_generate_replay_panes must use get_registered_pane"
+    );
+}
+
+#[test]
+fn replay_pane_registry_tracks_pane_ids() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/screen/dashboard/replay_pane_registry.rs"
+    ))
+    .expect("read replay_pane_registry.rs");
+    assert!(
+        src.contains("register_pane"),
+        "ReplayPaneRegistry must have register_pane"
+    );
+    assert!(
+        src.contains("get_registered_pane"),
+        "ReplayPaneRegistry must have get_registered_pane"
+    );
+}

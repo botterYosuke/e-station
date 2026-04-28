@@ -209,7 +209,7 @@ async def run_smoke() -> None:
     # NOTE: ナラティブへの反映は NautilusRunner.start_live() 経由で確認。
     # このスクリプトは HTTP レイヤーのみ検証する。
 
-    sys.exit(0 if filled else 0)  # 約定しなくても発注成功なら 0
+    sys.exit(0)  # 発注成功 (約定は 30 秒内に確認できなかった場合も 0 — デモ板状況に依存)
 
 
 if __name__ == "__main__":
