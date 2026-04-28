@@ -267,7 +267,7 @@ assert config.cache.database is None
 ```
 S:\j-quants\
   equities_bars_daily_YYYYMM.csv.gz       (月次)
-  equities_bars_minute_YYYYMMDD.csv.gz    (日次)
+  equities_bars_minute_YYYYMM.csv.gz      (月次)  ⚠️ N1.2 訂正: 旧記述 "YYYYMMDD 日次" は実態と乖離
   equities_trades_YYYYMM.csv.gz           (月次)
 ```
 
@@ -278,7 +278,7 @@ S:\j-quants\
 | granularity | 開く必要のあるファイル |
 |---|---|
 | `Trade` | `equities_trades_{YYYYMM}.csv.gz` を期間に重なる月だけ順次 stream-open |
-| `Minute` | `equities_bars_minute_{YYYYMMDD}.csv.gz` を期間内の各取引日について順次 |
+| `Minute` | `equities_bars_minute_{YYYYMM}.csv.gz` を期間に重なる月だけ順次 stream-open（N1.2 訂正済み） |
 | `Daily` | `equities_bars_daily_{YYYYMM}.csv.gz` を期間に重なる月だけ |
 
 ### 8.3 ローダ実装方針
@@ -295,9 +295,11 @@ trades:       Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionI
               例: 2024-01-04,13010,09:00:00.165806,01,3775,1100,000000000010
 
 minute_bars:  Date,Time,Code,O,H,L,C,Vo,Va
-              例: 2026-02-18,09:00,13010,5180,5180,5180,5180,2100,10878000
+              例: 2024-01-04,09:00,13010,3775,3775,3760,3760,2400,9056500
 
-daily_bars:   既存 N0 互換（実物確認時にカラム名を本表に固定する）
+daily_bars:   Date,Code,O,H,L,C,UL,LL,Vo,Va,AdjFactor   (N1.2 で実物確認 2026-04-28)
+              例: 2024-01-04,13010,3775.0,3825.0,3755.0,3815.0,0,0,21400.0,81210000.0,1.0
+              UL/LL: 値幅制限フラグ (0/1)、AdjFactor: 調整係数 — N1 では無視
 ```
 
 ### 8.5 InstrumentId 例外検出
