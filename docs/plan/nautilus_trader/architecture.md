@@ -54,6 +54,10 @@
 | 立花の認証・session 管理 | **Python（既存 Phase 1 コード）** | 重複実装しない |
 | ナラティブの記録 | **Python `narrative_hook.py`** | nautilus `Strategy.on_event` から `/api/agent/narrative` を叩く |
 | keyring 永続化 | **Rust `data::config`** | 既存どおり |
+| **REPLAY pane の自動生成と identity 管理** | **Rust UI（iced）** | `(mode, instrument_id, pane_kind)` で identity を取り、`/api/replay/load` 成功イベントを契機に生成判定を行う |
+| **REPLAY 注文一覧 view** | **Rust UI（iced）** | `OrderListStore` を venue で 2 view に分割。REPLAY view は `venue="replay"` のイベントのみ反映、バナー付き |
+| **REPLAY 買付余力 view** | **Rust UI（iced）** | `BuyingPowerStore` を venue で 2 view に分割。REPLAY view は `EngineEvent::ReplayBuyingPower` のみ反映、`CLMZanKaiKanougaku` を一切参照しない |
+| **REPLAY portfolio snapshot** | **Python `python/engine/nautilus/portfolio_view.py`（新設）** | nautilus `Portfolio` から `cash` / `equity` / `mark_to_market` を 1 秒間隔で算出 |
 
 **Rust 直結（NativeBackend）は使わない**: `EngineClientBackend` 一本に統一。
 
@@ -61,8 +65,8 @@
 
 既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。本計画は **schema 1.4**。
 
-1. Rust → Python: `Hello { schema_major: 1, schema_minor: 4, capabilities: { nautilus: true } }`
-2. Python → Rust: `Ready { schema_major: 1, schema_minor: 4, capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`
+1. Rust → Python: `Hello { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
+2. Python → Rust: `Ready { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
 3. Rust → Python: `SetVenueCredentials`（既存）
 4. Rust → Python: `Command::StartEngine { mode, ... }`（§3 参照）
    - `mode: "backtest"` → `BacktestEngine` 起動 + J-Quants ロード（`/api/replay/load` → §4）
@@ -88,6 +92,9 @@ pub enum Command {
         end_date: String,            // "2024-01-31"
         granularity: ReplayGranularity, // Trade | Minute | Daily
     },
+    // ⭐ N1 新設: streaming ループ間の wall-clock pacing を変える（D4 / D7）
+    // Pause / Resume / Seek は N1 では追加しない（Q14 で再評価）
+    SetReplaySpeed { request_id: String, multiplier: u32 },   // 1 | 10 | 100
 }
 
 pub enum ReplayGranularity { Trade, Minute, Daily }
@@ -103,8 +110,39 @@ pub enum EngineEvent {
     },
     PositionOpened { strategy_id, venue, instrument_id, position_id, side, opened_qty, avg_open_price, ts_event_ms },
     PositionClosed { strategy_id, venue, instrument_id, position_id, realized_pnl, ts_event_ms },
+    // ⭐ N1 新設: OrderFilled 由来・narrative_hook が自動送出（D6）
+    ExecutionMarker {
+        strategy_id: String,
+        instrument_id: String,
+        side: OrderSide,             // Buy | Sell
+        price: String,               // 文字列精度規約
+        qty: String,
+        ts_event_ms: i64,
+        client_order_id: String,
+    },
+    // ⭐ N1 新設: Strategy.emit_signal(...) による明示送出（D6）
+    StrategySignal {
+        strategy_id: String,
+        instrument_id: String,
+        signal_kind: SignalKind,     // EntryLong | EntryShort | Exit | Annotate
+        side: Option<OrderSide>,
+        price: Option<String>,       // 注釈のみで価格を持たないケースあり
+        ts_event_ms: i64,
+        tag: Option<String>,         // Annotate 時の任意ラベル
+        note: Option<String>,
+    },
+    // ⭐ N1 新設: REPLAY 買付余力（D9.6、schema 1.4）
+    ReplayBuyingPower {
+        strategy_id: String,
+        cash: String,                // 文字列精度規約
+        buying_power: String,        // N1 は cash と同値（現物のみ）
+        equity: String,              // cash + Σ position MTM
+        ts_event_ms: i64,            // 仮想時刻
+    },
 }
 ```
+
+**replay 中の市場データは既存 `EngineEvent::Trades` / `EngineEvent::KlineUpdate` を再利用する**（D5）。新規 market data event は足さない。`engine_runner.py` の data feed 直前で「Rust 向けにも 1 件複製送出」する経路を 1 箇所追加するのみ。venue タグは `"replay"`。
 
 **精度保持規約（H2）**: 数量・価格・PnL は **文字列**で運ぶ。`f64` 変換は Rust UI レンダラ層が最後に行う。
 
@@ -113,6 +151,10 @@ pub enum EngineEvent {
 **clock 注入（H4 / Q3 決定）**: `AdvanceClock` Command は **実装しない**。`BacktestEngine.run(start, end)` で自走（[open-questions.md Q3](./open-questions.md#q3)）。
 
 ## 4. データフロー（replay モード）
+
+**`/api/replay/load` 成功 → Rust UI が Tick + Candlestick + 注文一覧 + 買付余力 の 4 種 pane を自動生成（identity 重複なら skip）**
+**→ それぞれが対応する IPC（`Trades` / `KlineUpdate` / `Order*` / `ReplayBuyingPower`）を venue=replay で購読する**
+（identity = `(mode=replay, instrument_id, pane_kind, granularity?)`、D9 参照）
 
 ```
 Rust HTTP /api/replay/load
@@ -139,9 +181,14 @@ Strategy.on_event(OrderFilled)
    │ narrative_hook.record(Outcome) ──→ HTTP /api/agent/narrative
    ▼
 Event::OrderFilled → IPC → Rust → HTTP レスポンス
+   │
+   ├─ OrderFilled → ExecutionMarker → iced execution layer
+   └─ Strategy.emit_signal → StrategySignal → iced signal layer
 ```
 
 **replay モードの約定判定**: 板履歴がないため、`SimulatedExchange` の matching engine は **直近 TradeTick の last_price ベース**で fill する。指値は `last_price <= limit_price`（買い）/ `>= limit_price`（売り）で fill する単純モデル。これは現実の板状況より楽観的だが、戦略の方向性検証には十分（[spec.md §3.5.3](./spec.md#353-既知のlivereplay差分) で利用者に明示）。
+
+**REPLAY 中は立花 `CLMZanKaiKanougaku` HTTP 呼び出しを `order_router.py` で skip する**（D9.6 の誤参照防止コードガード）。
 
 ## 5. データフロー（live モード・立花）
 
@@ -192,6 +239,24 @@ class MyStrategy(Strategy):
 - `on_quote_tick` — 同上
 
 これらは N1.8 の lint で検出する。
+
+### 6.1 再生コントロールと実行モデル
+
+D4 の写像。N1 では実行モデルを 2 経路に分け、どちらでも仮想時刻 `tick.ts_event` の独立性を保つ。
+
+- **headless / 決定論性検証**: 既存の `BacktestEngine.run(start, end)` 自走をそのまま使う（N0.6 / N1.9 の wall clock 非参照テストはこの経路で維持）
+- **UI 駆動 viewer**: streaming=True ループ（[Tpre.1 spike](./implementation-plan.md#tpre1-clock-注入-feasibility-プロトタイプh4--完了-2026-04-26) 案 A）を採用し、bar/tick を 1 件ずつ `add_data([item])` → `run(streaming=True)` → `clear_data()` で進める
+- **`SetReplaySpeed` の作用範囲**: streaming ループ間の sleep のみを操作する。pacing 式は D7 の
+
+  ```
+  sleep_sec = min(max(dt_event_sec, MIN_TICK_DT_SEC) / multiplier, SLEEP_CAP_SEC)
+  ```
+
+  - `MIN_TICK_DT_SEC = 0.001`（同一マイクロ秒バーストでも UI 描画整合のため最低 1ms 刻む）
+  - `SLEEP_CAP_SEC = 0.200`（1 sleep の上限）
+  - セッション境界（前場-後場 11:30〜12:30 / 引け後 / 営業日跨ぎ）は multiplier に依存せず `sleep=0` で**即時通過**
+  - 仮想時刻 `tick.ts_event` は J-Quants オリジナル値をそのまま流し、wall clock から独立で multiplier にも依存しない
+- **Pause / Seek は本フェーズでは実装しない**。streaming ループの suspend / 中間 tick の skip は決定論性テストの仮定や fill in-flight UX に影響するため、Q14（open-questions.md）で N2 以降に再評価する
 
 ## 7. 既存計画との衝突点と整理
 

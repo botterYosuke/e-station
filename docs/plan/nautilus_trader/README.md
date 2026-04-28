@@ -19,6 +19,20 @@
 | **live** | 立花 EVENT WebSocket（FD frame） | ○（FD frame 上位 10 段） | ○（FD frame から `FdFrameProcessor` で合成） | ○（履歴 API + tick 集約） |
 | **replay** | J-Quants CSV（`S:\j-quants\`） | **× 過去板データなし** | ○（`equities_trades_*.csv.gz`） | ○（`equities_bars_daily/minute_*.csv.gz`） |
 
+> **D1（不変条件・確定 2026-04-28）**: **板（OrderBook / QuoteTick）は live 専用**。
+> J-Quants には板履歴がないため、replay モードでは OrderBook / QuoteTick を提供しない。
+> これは計画レベルの不変条件であり、後から「分足から板を合成」方向への drift を防ぐ。
+> 詳細は [archive/replay-ui-role-revision-2026-04-28.md §D1](./archive/replay-ui-role-revision-2026-04-28.md) を参照。
+
+> **D8（モード切替セマンティクス・確定 2026-04-28）**: モードはアプリ起動時に
+> `--mode {live|replay}` で 1 回だけ決定し、プロセス寿命中は変更しない。ランタイムの
+> `live ⇄ replay` 切替コマンド（HTTP / IPC）は提供せず、モード変更は `StopEngine` →
+> プロセス再起動でのみ行う。in-memory state（chart 履歴・order list・overlay・
+> ClientOrderId → OrderState map など）はモード境界を跨いで保持しない（`saved-state.json`
+> による UI レイアウト復元のみ引き継ぐ）。N1 で `--mode live` を起動しても nautilus
+> `LiveExecutionEngine` は N2 まで起動しない（Hello capabilities `nautilus.live=false`
+> を維持）。詳細は [archive/replay-ui-role-revision-2026-04-28.md §D8](./archive/replay-ui-role-revision-2026-04-28.md) を参照。
+
 ### 重要な制約（confirmed 2026-04-28）
 
 1. **板に依存する戦略は live 専用**。replay では再現できない。CI で「`Strategy` が `on_order_book_*` を実装している場合 replay モードを禁止」する lint を入れる（[spec.md §3.5](./spec.md#35-livereplay-互換不変条件)）
@@ -62,3 +76,29 @@
 - nautilus を入れることで「Rust（iced）を将来外しても、Python だけで戦略 + 発注 + バックテストが回る」状態を確保する
 - Rust 側の `exchange/` クレート（暗号資産 adapter）は **データ取得・チャート描画用途**に役割を絞り、発注経路は nautilus に一本化する
 - **Strategy は TradeTick 一本で書く**規約により、replay で書いた戦略を live にデプロイできる（[spec.md §3.5](./spec.md#35-livereplay-互換不変条件)）
+
+## Rust UI の役割境界（2026-04-28 確定）
+
+Rust UI（iced）は matplotlib 代替ではなく、**「再生中の市場の様子」と「戦略の挙動」の
+目視**に役割を絞る。詳細は [archive/replay-ui-role-revision-2026-04-28.md](./archive/replay-ui-role-revision-2026-04-28.md) を参照。
+
+- **D2（採用機能）**: replay 中に Rust UI が担うのは以下 3 点のみ:
+  1. 時系列再生中のローソク足・歩み値表示（既存 `EngineEvent::Trades` /
+     `EngineEvent::KlineUpdate` を再利用、新規 market data IPC は足さない）
+  2. 戦略マーカーのオーバーレイ（`ExecutionMarker`＝OrderFilled 由来の自動レイヤー /
+     `StrategySignal`＝Strategy が `emit_signal()` で明示送出する 2 系統に分離）
+  3. 再生速度コントロール（1x / 10x / 100x。streaming=True 経路で wall-clock pacing。
+     pause / seek は N1 では含めず [Q14](./open-questions.md#q14) で再評価）
+- **D3（不採用領域）**: PnL 曲線・パラメータヒートマップ・最適化結果の可視化は iced で
+  実装しない。これらは AI ナラティブ層（`POST /api/agent/narrative`）に保存し、必要なら
+  marimo / Jupyter から narrative store を読んで分析する運用とする
+- **D9（REPLAY 銘柄追加時の自動配線）**: REPLAY 対象に銘柄を追加（`POST /api/replay/load`
+  成功）すると、Rust UI は当該銘柄の **Tick pane と Candlestick(1m) pane を自動生成**
+  する。同 identity（`mode=replay, instrument_id, pane_kind, granularity?`）の pane が
+  既存ならば再利用し重複生成しない。同時表示銘柄数の hard limit は
+  `MAX_REPLAY_INSTRUMENTS = 4`（超過時は `/api/replay/load` を 400 で拒否）。あわせて
+  REPLAY 専用の **注文一覧 pane**（`venue="replay"` フィルタ・`⏪ REPLAY` バナー付き・
+  `tachibana_orders_replay.jsonl` と整合）と **買付余力表示**（新規 IPC
+  `EngineEvent::ReplayBuyingPower`、現物のみ・`cash` ベース）を自動生成し、live と分離
+  表示する。**REPLAY 中に立花 `CLMZanKaiKanougaku` を一切参照しない**ことを
+  `order_router.py` のコードガードで強制し、実残高で発注可能と誤解する事故を防ぐ

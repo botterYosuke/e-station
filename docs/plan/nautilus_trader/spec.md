@@ -73,6 +73,45 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 - 既存 `FlowsurfaceEnv`（Gymnasium）は HTTP 越しなのでそのまま動く
 - `POST /api/agent/narrative` を新設（H5）
 
+#### 2.2.5 N1.11〜N1.16 追加スコープ（2026-04-28 確定、UI 役割境界の確定に伴う）
+
+詳細は [./archive/replay-ui-role-revision-2026-04-28.md](./archive/replay-ui-role-revision-2026-04-28.md) を参照。
+
+- **N1.11（新設）** Replay 再生 speed コントロール（streaming=True 経路）+ IPC
+  `Command::SetReplaySpeed` を schema 1.4 に追加。`add_data([item]) → run(streaming=True)
+  → clear_data()` を 1 件ずつ回し、ループ間に
+  `sleep_sec = min(max(dt_event_sec, MIN_TICK_DT_SEC) / multiplier, SLEEP_CAP_SEC)`
+  （`MIN_TICK_DT_SEC=0.001`、`SLEEP_CAP_SEC=0.200`）で sleep。前場-後場・引け後・営業日
+  跨ぎは sleep=0 で即時通過。**Pause / Seek は N1 では含めない**（Q14 で再評価）
+- **N1.12（新設）** `EngineEvent::ExecutionMarker`（OrderFilled 由来・`narrative_hook.py`
+  が自動送出）と `EngineEvent::StrategySignal`（Strategy が `emit_signal(kind, side,
+  price, tag, note)` で明示送出。`signal_kind ∈ {EntryLong, EntryShort, Exit, Annotate}`）
+  を追加。iced 側 chart pane に execution layer / signal layer の 2 レイヤーを重ねる。
+  `signal_kind` の wire 表現（enum vs `kind: String`）は [Q13](./open-questions.md#q13)
+  で確定するまで暫定 enum 実装、後方互換性を破らない
+- **N1.13（新設）** 起動時モード固定の CLI 引数 `--mode {live|replay}` を追加（必須・
+  デフォルトなし、D8 起動時固定の踏襲、デフォルトなし）。Hello に mode を載せて
+  Python 側 NautilusRunner に渡し、mode と `StartEngine.engine` の不一致は `ValueError`
+  で拒否。**ランタイム切替コマンドは追加しない**。`--mode live` で起動しても N1 では
+  nautilus `LiveExecutionEngine` は起動せず、Hello capabilities `nautilus.live=false`
+  を維持。ランタイム切替の責務は [Q15](./open-questions.md#q15) で N2 着手前に再評価
+- **N1.14（新設）** REPLAY 銘柄追加時に Tick pane と Candlestick(1m) pane を自動生成。
+  `ReplayPaneRegistry` で identity = `(mode=replay, instrument_id, pane_kind,
+  granularity?)` を管理し重複生成防止。1 銘柄目は横並び 2 分割、2 銘柄目以降はフォーカス
+  pane を縦分割。`MAX_REPLAY_INSTRUMENTS = 4` 超過は HTTP 400。手動 close した自動生成
+  pane は同セッション中は再生成しない
+- **N1.15（新設）** REPLAY 注文一覧 pane を 1 銘柄目の `/api/replay/load` 成功時に
+  自動生成（identity = `(mode=replay, pane_kind=order_list)`、銘柄非依存で 1 つだけ）。
+  pane header に `⏪ REPLAY` バナー、`venue="replay"` のイベントのみ反映、live の
+  注文一覧を汚染しない。`/api/order/list?venue=replay` を新設、`tachibana_orders_replay.jsonl`
+  WAL と整合
+- **N1.16（新設）** REPLAY 買付余力表示。新規 IPC `EngineEvent::ReplayBuyingPower
+  { strategy_id, cash, buying_power, equity, ts_event_ms }` を schema 1.4 に追加。
+  `python/engine/nautilus/portfolio_view.py` を新設し nautilus `Portfolio.account_for_venue(SIM)`
+  から 1 秒間隔 + 約定即時のハイブリッドで snapshot 送出。N1 は **現物のみ**
+  （`buying_power = cash`）。`order_router.py` に **REPLAY モード時は立花
+  `CLMZanKaiKanougaku` HTTP を skip する明示ガード**を入れる（誤参照防止コードガード）
+
 ### 2.3 Phase N2 — 立花 ExecutionClient
 
 - `python/engine/exchanges/tachibana_nautilus.py` を新設し、nautilus `LiveExecutionClient` を実装
@@ -102,10 +141,18 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 ### 3.1 決定論性
 
-- リプレイは **同じ入力 → 同じ PnL** を保証する。`BacktestEngine` の clock を仮想時刻モードで使い、wall clock を一切参照しない
+- リプレイ（`run()` 自走経路）は **同じ入力 → 同じ PnL** を保証する。`BacktestEngine` の
+  clock を仮想時刻モードで使い、**wall clock を一切参照しない**。本不変条件は `run()`
+  自走経路に**限定**する（headless / 決定論性検証用）
+- UI 駆動 replay viewer（streaming=True 経路）は wall-clock pacing を許す（speed 1x /
+  10x / 100x の sleep を streaming ループ間に挟む）。ただし Strategy が観測する
+  仮想時刻（`tick.ts_event`）は wall clock から独立であることを保つ
+- 決定論性テスト（N0.6 / N1.9）は **`run()` 自走経路でのみ実施**する。streaming 経路は
+  pacing テスト（N1.11）で個別に検証する
 - ナラティブの `timestamp` も仮想時刻で記録
 - **検証テスト（必須）**: 同一 J-Quants ファイル・同一銘柄で `start_backtest(...)` を 2 回回し、最終 equity / 全 fill timestamps / 全 `OrderFilled.last_price` がビット一致（`tests/python/test_nautilus_determinism_tick.py`、N1 で追加）
-- **wall clock 非参照テスト**: `time.time` / `time.monotonic` / `datetime.now` を mock しても結果不変
+- **wall clock 非参照テスト**: `run()` 自走経路で `time.time` / `time.monotonic` /
+  `datetime.now` を mock しても結果不変
 
 ### 3.2 セキュリティ
 
@@ -139,6 +186,8 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 | `Instrument` | ✅ | ✅ | 静的情報、両方で同じ写像 |
 | `AccountState` / `Position` | ✅ | ✅ | live は立花 API、replay は SimulatedExchange |
 
+**この不変条件は計画レベルで確定（2026-04-28）**。
+
 #### 3.5.2 戦略コード規約
 
 - ✅ 推奨: `on_trade_tick(tick: TradeTick)` 中心に書く
@@ -167,13 +216,22 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 リプレイ・ナラティブ系の API:
 
-| エンドポイント | 動作 | 備考 |
+| エンドポイント | body | IPC 写像 |
 |---|---|---|
-| `POST /api/replay/order` | nautilus `OrderFactory` で発注 → `BacktestEngine` 即時約定判定 | legacy パス。新規実装は `/api/order/submit` を REPLAY モードで使う方を推奨 |
-| `GET /api/replay/portfolio` | nautilus `Portfolio` から position / PnL を取得 | |
-| `GET /api/replay/state` | 既存実装のまま（market data のみ。position / PnL は `/api/replay/portfolio` から） | |
-| `POST /api/replay/load` | **N1 で新設**。J-Quants ファイルを指定して BacktestEngine にロード（`{instrument_id, start_date, end_date, granularity: "trade"\|"minute"\|"daily"}`） | |
-| `POST /api/agent/narrative` | **N1 で新設**（H5） | nautilus `Strategy` フックから Python が叩く |
+| `POST /api/replay/order` | — | — |
+| `GET /api/replay/portfolio` | — | — |
+| `GET /api/replay/state` | — | — |
+| `POST /api/replay/load` | `{instrument_id, start_date, end_date, granularity: "trade"\|"minute"\|"daily"}` | — |
+| `POST /api/replay/control` | `{action: "speed", multiplier: 1\|10\|100}` | `Command::SetReplaySpeed { multiplier }` |
+| `POST /api/agent/narrative` | — | — |
+
+注記:
+- `POST /api/replay/order`: nautilus `OrderFactory` で発注 → `BacktestEngine` 即時約定判定。legacy パス。新規実装は `/api/order/submit` を REPLAY モードで使う方を推奨。
+- `GET /api/replay/portfolio`: nautilus `Portfolio` から position / PnL を取得。
+- `GET /api/replay/state`: 既存実装のまま（market data のみ。position / PnL は `/api/replay/portfolio` から）。
+- `POST /api/replay/load`: **N1 で新設**。J-Quants ファイルを指定して BacktestEngine にロード。**5 件目以降は 400（`MAX_REPLAY_INSTRUMENTS=4`、D9.4）**。
+- `POST /api/replay/control`: **N1 で新設**。**N1 で受理する action は `"speed"` のみ**。`pause` / `seek` を含む他 action は **400 Bad Request**。`play` は提供しない（streaming ループの開始は既存の `StartEngine` に統一）。
+- `POST /api/agent/narrative`: **N1 で新設**（H5）。nautilus `Strategy` フックから Python が叩く。
 
 **発注 UI の所在（Q7 決定）**: 発注入力 UI は Python tkinter に統一。iced は監視・表示のみ。
 

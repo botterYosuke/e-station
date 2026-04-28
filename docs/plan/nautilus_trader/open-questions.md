@@ -199,6 +199,36 @@ Parquet キャッシュを有効化したい場合は、立花の session 情報
 
 ---
 
+### Q13. `StrategySignal.signal_kind` の語彙確定 ★Open (2026-04-28 新設)
+
+`StrategySignal.signal_kind` の語彙確定: `EntryLong / EntryShort / Exit / Annotate` の 4 値で N1 を始める。`Annotate` の `tag: String` を後方互換に保ったまま語彙を増やせるか（dto.rs の enum vs `kind: String` の選択）。
+
+---
+
+### Q14. Replay の Pause / Seek 実行モデル ★Open (2026-04-28 新設、R2 でクリティカル化)
+
+- 現状 Q3 は「`run(start, end)` 自走 + wall clock 非参照」で確定済み
+- N1 で speed pacing は streaming=True 経路（Tpre.1 spike 案 A）で実装する
+- **Pause / Seek を将来導入する場合に streaming 経路に統合するか、別の実行モードを増やすかは未定**
+- サブ問題:
+  - Pause 中の fill in-flight（指値が pause 直前にクロスしている）の扱い
+  - Seek（未来方向）で中間 tick を Strategy が見ない場合の決定論性テスト戦略
+  - Seek（巻き戻し）は `BacktestEngine` 再起動が必要 → state cache の初期化責務
+- N2 着手前に再評価する
+
+---
+
+### Q15. ランタイム `live ⇄ replay` 切替を将来導入する場合の責務 ★Open (2026-04-28 新設、D8 連動)
+
+- 立花 EVENT WebSocket 購読の解除・再購読の整合性
+- 板ペイン visibility 制御（ペイン破棄か空保持か）
+- in-memory order list のスコープ（モード境界で空 / live と replay で 2 つ持つ）
+- selected instrument / chart range の引継ぎ可否
+- nautilus `BacktestEngine` と `LiveExecutionEngine` の同時起動可否
+- N1 では未解決のまま起動時固定で逃げる。N2 着手前に再評価
+
+---
+
 ### その他（実装フェーズで確定）
 
 - バックテスト性能 SLA の具体値（spec.md §3.3 を N1.10 実測で確定）

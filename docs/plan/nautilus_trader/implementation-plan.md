@@ -180,6 +180,7 @@
   - [ ] `ReplayDataLoaded` イベントで `bars_loaded` / `trades_loaded` を IPC 返送
 - [ ] `engine_runner.py` で `SubmitOrder` を受けたとき `BacktestExecutionEngine.process_order(...)` で約定判定し `OrderFilled` を IPC で返送
 - [ ] 約定モデル: 直近 TradeTick の last_price ベースの fill（[architecture.md §4](./architecture.md#4-データフローreplay-モード)）。指値は `last_price` クロスで fill
+- [ ] **replay 用 market data IPC を新設しない（既存 `EngineEvent::Trades` / `KlineUpdate` を再利用）**（D5）。`engine_runner.py` の data feed 直前に Rust 向け複製送出を 1 箇所追加するのみ
 
 ### N1.5 REPLAY 仮想注文ディスパッチャ
 
@@ -218,12 +219,141 @@
 - [ ] 「`start_backtest` 呼出 → `EngineStopped` IPC 受領」までの wall clock を計測
 - [ ] **目標**: 1 銘柄 1 ヶ月分 trade tick で 60 秒以内（[spec.md §3.3](./spec.md#33-パフォーマンス)）。実測値で確定し spec 更新
 
+### N1.11 Replay 再生 speed コントロール（streaming=True 経路）
+- [ ] engine-client/src/dto.rs に Command::SetReplaySpeed { multiplier } を追加
+      （Pause/Resume/Seek は本タスクに含めない）
+- [ ] python/engine/nautilus/engine_runner.py に streaming ループ実装を追加:
+      add_data([item]) → run(streaming=True) → clear_data() を 1 件ずつ回す
+- [ ] ループ間に D7 の pacing 式で sleep を挟む:
+      sleep_sec = min(max(dt_event_sec, 0.001) / multiplier, 0.200)
+      （multiplier=1/10/100、SLEEP_CAP=200ms、MIN_TICK_DT=1ms）
+- [ ] 前場-後場 / 引け後 / 営業日跨ぎのギャップは sleep=0 で即時通過(D7)
+- [ ] 営業日跨ぎ時に UI 向け date-change マーカーを 1 件 emit
+- [ ] 既存 run(start, end) 自走経路は headless / 決定論性テストで温存
+- [ ] iced 側にコントロールバー pane を新設(1x / 10x / 100x ボタンのみ)
+- [ ] src/api/replay_api.rs: POST /api/replay/control で action="speed" のみ受理、
+      他 action は 400 Bad Request を返す
+- [ ] python/tests/test_replay_speed.py:
+      - speed=10 で wall clock が ~1/10 になること（セッション内 tick 列で計測）
+      - 仮想時刻（tick.ts_event）は multiplier 不変であること
+      - 11:30 JST 跨ぎ tick で sleep=0 になること
+      - 営業日跨ぎ tick で sleep=0 + date-change マーカー 1 件 emit
+      - 同一マイクロ秒バーストでも MIN_TICK_DT_SEC=1ms が下限になること
+      - 1 sleep が SLEEP_CAP_SEC=200ms を超えないこと
+- [ ] N0.6 / N1.9 の決定論性テストが run() 自走経路で引き続き緑であること
+
+### N1.12 ExecutionMarker / StrategySignal IPC + UI overlay
+- [ ] engine-client/src/dto.rs に EngineEvent::ExecutionMarker / StrategySignal を追加
+- [ ] python/engine/nautilus/narrative_hook.py で OrderFilled 受領時に
+      ExecutionMarker を自動送出（fill 由来の自動レイヤー）
+- [ ] python/engine/nautilus/strategy_helpers.py 新設: Strategy mixin に
+      emit_signal(kind, side=None, price=None, tag=None, note=None) を追加し、
+      StrategySignal IPC を送出
+- [ ] BuyAndHold を改造して買い前にエントリー検討の StrategySignal(EntryLong) を出すサンプル化
+- [ ] iced 側 chart pane に 2 レイヤー追加（execution layer / signal layer）
+- [ ] python/tests/test_execution_marker_emit.py: OrderFilled → ExecutionMarker 1:1
+- [ ] python/tests/test_strategy_signal_emit.py: emit_signal() 呼出 → IPC 1 件、
+      未約定でも独立に出ること
+- [ ] `signal_kind` の wire 表現（enum vs `kind: String`）は [Q13](./open-questions.md#q13) で確定するまで暫定 enum 実装、後方互換性を破らない
+
+### N1.13 起動時モード固定（live / replay）
+- [ ] Rust 側 main.rs に CLI 引数 --mode {live|replay} を追加（必須・デフォルトなし、D8 起動時固定の踏襲）
+- [ ] IPC Hello に mode を載せ、Python 側で受け取って NautilusRunner に渡す
+- [ ] Python 側 server.py の mode 別起動責務（既存「live は N2 から」と整合）:
+      - replay: BacktestEngine を起動、LiveExecutionEngine は触らない
+      - live  : 既存 Phase 1 の立花 EVENT WS 閲覧経路を起動。
+                nautilus LiveExecutionEngine は N1 では起動しない（stub のまま）。
+                Hello capabilities は nautilus.live=false を維持
+      - mode と StartEngine.engine の不一致は ValueError で拒否
+- [ ] iced 側: mode に応じて Depth ペイン visibility・order UI 文言・バナーを切替
+- [ ] 切替コマンド（IPC / HTTP）は追加しない
+- [ ] python/tests/test_mode_isolation.py:
+      - live モードで /api/replay/* が 400 を返す
+      - replay モードで /api/order/submit が REPLAY ディスパッチに流れる
+      - mode 不一致の StartEngine が拒否される
+      - live モードで Hello.capabilities.nautilus.live が false のまま
+- [ ] tests/e2e/s55_mode_startup_smoke.sh: --mode live と --mode replay の両方で
+      ハンドシェイクと最小 stream が動くこと
+- [ ] ランタイム切替の責務は [Q15](./open-questions.md#q15) で N2 着手前に再評価
+
+### N1.14 REPLAY 銘柄追加時のチャート pane 自動生成（D9.1〜D9.4）
+- [ ] iced 側に ReplayPaneRegistry を新設し identity = (mode=replay, instrument_id, pane_kind, granularity?) を管理
+- [ ] /api/replay/load 成功（ReplayDataLoaded 受信）を契機に Tick pane と
+      Candlestick(1m) pane の生成判定を回す
+- [ ] 既存 identity が存在する場合は新規生成しない（重複生成防止）
+- [ ] 生成位置ルール（D9.3）:
+      - 1 銘柄目: 横並び 2 分割
+      - 2 銘柄目以降: フォーカス pane を縦分割
+- [ ] MAX_REPLAY_INSTRUMENTS = 4 を超える load は HTTP 400
+- [ ] ユーザーが手動 close した自動生成 pane は同セッション中は再生成しない
+      （registry に user_dismissed フラグを持つ）
+- [ ] StopEngine では自動生成 pane を残す。/api/replay/load 再実行時は overlay と
+      chart buffer をクリア
+- [ ] tests/test_replay_pane_registry.rs:
+      - 同 instrument の二重 load で pane が増えないこと
+      - 4 銘柄超過の load が 400 になること
+      - StopEngine 後も pane が残ること
+      - 再 load で overlay / buffer がクリアされること
+      - 手動 close 後に再 load しても自動生成されないこと
+- [ ] tests/e2e/s56_replay_pane_autogen.sh:
+      /api/replay/load 1 件で Tick + Candlestick の 2 pane が現れること
+
+### N1.15 REPLAY 注文一覧 pane（D9.5）
+- [ ] iced 側 OrderListStore を venue で 2 view（live / replay）に分割
+- [ ] 1 銘柄目の /api/replay/load 成功時に REPLAY 注文一覧 pane を 1 枚自動生成
+      （identity = (mode=replay, pane_kind=order_list)、銘柄非依存で 1 つだけ）
+- [ ] pane header に「⏪ REPLAY」バナー + live と区別された配色
+- [ ] EngineEvent::Order* を venue でフィルタし REPLAY view にのみ反映
+- [ ] HTTP /api/order/list?venue=replay を新設（既存 live は default 動作維持）
+- [ ] tachibana_orders_replay.jsonl WAL の内容と REPLAY 注文一覧の整合を保つ
+      （再起動時の warm-up は WAL 起点）
+- [ ] tests/test_replay_order_list_view.rs:
+      - venue=replay の OrderFilled が REPLAY view にのみ入り live view を汚染しないこと
+      - /api/replay/load 再実行で REPLAY 注文一覧がクリアされること
+      - StopEngine 後も最終状態が残ること
+- [ ] python/tests/test_order_list_api_venue_filter.py:
+      - /api/order/list?venue=replay が tachibana_orders_replay.jsonl のみ返すこと
+
+### N1.16 REPLAY 買付余力（D9.6）
+- [ ] engine-client/src/dto.rs に EngineEvent::ReplayBuyingPower を追加（schema 1.4）
+- [ ] python/engine/nautilus/portfolio_view.py を新設:
+      - nautilus Portfolio.account_for_venue(SIM) から cash / equity を取得
+      - 仮想 position の MTM を直近 TradeTick.price で算出
+      - 1 秒間隔 + 約定即時のハイブリッド送出
+- [ ] 起動 config の initial_cash を NautilusRunner に渡し、Portfolio 初期化に使う
+- [ ] python/engine/order_router.py: REPLAY モード時は CLMZanKaiKanougaku の HTTP
+      呼び出しを skip する明示ガード（assert mode != "replay" or skip_clm_call）
+- [ ] iced 側 BuyingPowerStore を venue で 2 view に分割し、REPLAY view は
+      ReplayBuyingPower のみ反映（CLMZanKaiKanougaku を参照しない）
+- [ ] 表示器に「⏪ REPLAY」バナー、live と区別された配色
+- [ ] HTTP /api/replay/portfolio のレスポンスに cash / buying_power / equity を追加
+- [ ] python/tests/test_replay_buying_power.py:
+      - 仮想買い約定で cash が支払額分だけ減ること
+      - 売り約定で cash が受取額分だけ増えること
+      - position 保有中の equity = cash + MTM になること
+      - /api/replay/load 再実行で initial_cash から再計算されること
+      - REPLAY 中に CLMZanKaiKanougaku が呼ばれないこと（mock で 0 call assert）
+- [ ] tests/test_replay_buying_power_view.rs:
+      - REPLAY view が ReplayBuyingPower で更新され live view が影響を受けないこと
+- [ ] tests/e2e/s57_replay_buying_power_smoke.sh:
+      load → 仮想買い → cash 減少 → 売り → cash 復元 が UI に反映されること
+
 **Exit 条件**:
 - J-Quants `equities_trades_202401.csv.gz` から 1 銘柄をロードし、`BuyAndHold` 戦略でバックテストが完走、`OrderFilled` が IPC 経由で受信できる
 - N1.8 の live/replay smoke が両方緑
 - N1.9 の tick 決定論性テストが緑
 - `s51`〜`s53` ナラティブ系 E2E が全部緑のまま、`/api/replay/*` と `/api/order/*`（REPLAY モード）の挙動が nautilus 経由で同じ
 - 1 ヶ月バックテスト SLA 確定
+- 再生 **speed** コントロール（1x / 10x / 100x）が iced UI から効くこと
+- `ExecutionMarker` が `BuyAndHold` の fill に対応する位置に点描されること
+- 組み込み Strategy が `emit_signal()` で出した `StrategySignal` が overlay に表示されること
+- `/api/replay/load` を 1 件投げるだけで Tick pane と Candlestick pane が自動生成されること（D9.1〜D9.4）
+- 同銘柄を 2 回 load しても pane が増えないこと（D9 重複生成防止）
+- 5 銘柄目の load が 400 で拒否されること（D9 上限ガード）
+- REPLAY の仮想注文・仮想約定に応じて REPLAY 注文一覧が更新され、live 注文一覧を汚染しないこと（D9.5）
+- REPLAY の portfolio / cash 変化に応じて REPLAY 買付余力表示が更新されること（D9.6）
+- REPLAY 中に立花 `CLMZanKaiKanougaku` HTTP が呼ばれないこと（D9.6 誤参照防止コードガード）
+- pause / seek は **N1 Exit 条件に含めない**（Q14 で再評価）
 
 ---
 
