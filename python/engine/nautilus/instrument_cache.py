@@ -98,6 +98,9 @@ class InstrumentCache:
         lot_size: int,
         price_precision: int = _FALLBACK_PRICE_PRECISION,
     ) -> None:
+        # TODO(N2): N2 の立花 LiveDataClient で複数 worker から並行 update が走る
+        # ようになったら threading.RLock で保護する。N1 ではシングルスレッド前提で
+        # GIL に依存。
         self._instruments[instrument_id] = {
             "lot_size": int(lot_size),
             "price_precision": int(price_precision),
@@ -135,14 +138,21 @@ class InstrumentCache:
             }
 
     def _persist(self) -> None:
+        """tmp → fsync → os.replace の atomic write。
+
+        OS クラッシュで本体が 0 バイト化したり tmp の partial write が見えたりしないよう
+        書込み完了後に fsync で disk まで降ろす。``os.replace`` は POSIX/Windows 共に
+        atomic（同一 filesystem 内）。
+        """
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._cache_path.with_name(self._cache_path.name + ".tmp")
         payload = {
             "version": _CACHE_VERSION,
             "instruments": self._instruments,
         }
-        tmp_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, self._cache_path)

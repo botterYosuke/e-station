@@ -32,6 +32,69 @@ class TestInstrumentIdMapping:
         with pytest.raises(ValueError, match="length"):
             jquants_code_to_instrument_id("123")
 
+    def test_non_numeric_prefix_raises(self) -> None:
+        with pytest.raises(ValueError, match="not numeric"):
+            jquants_code_to_instrument_id("abcd0")
+
+    def test_inverted_period_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="must be >="):
+            list(
+                load_trades(
+                    "1301.TSE",
+                    start_date="2024-02-01",
+                    end_date="2024-01-04",
+                    base_dir=FIXTURES,
+                )
+            )
+
+    def test_short_row_emits_warning_once(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # 短行を 2 行入れた壊れた CSV を作る
+        import gzip
+        broken_dir = tmp_path / "broken"
+        broken_dir.mkdir()
+        path = broken_dir / "equities_trades_202401.csv.gz"
+        with gzip.open(path, "wt", encoding="utf-8", newline="") as f:
+            f.write("Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionId\n")
+            f.write("2024-01-04,13010,09:00:00.000000,01,3775,100,000000000001\n")
+            f.write("incomplete,row\n")  # 短行 1
+            f.write("another,short,row\n")  # 短行 2
+        with caplog.at_level("WARNING", logger="engine.nautilus.jquants_loader"):
+            ticks = list(
+                load_trades(
+                    "1301.TSE",
+                    start_date="2024-01-04",
+                    end_date="2024-01-04",
+                    base_dir=broken_dir,
+                )
+            )
+        assert len(ticks) == 1  # 短行は skip
+        warnings = [r for r in caplog.records if "columns" in r.getMessage()]
+        assert len(warnings) == 1, "短行 warning は file 単位で 1 回のみ"
+
+    def test_trade_time_without_microseconds_is_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        import gzip
+        d = tmp_path / "no_us"
+        d.mkdir()
+        path = d / "equities_trades_202401.csv.gz"
+        with gzip.open(path, "wt", encoding="utf-8", newline="") as f:
+            f.write("Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionId\n")
+            f.write("2024-01-04,13010,09:00:00,01,3775,100,000000000001\n")  # %f なし
+        ticks = list(
+            load_trades(
+                "1301.TSE",
+                start_date="2024-01-04",
+                end_date="2024-01-04",
+                base_dir=d,
+            )
+        )
+        assert len(ticks) == 1
+        # ns 末尾は 0
+        assert ticks[0].ts_event % 1_000_000_000 == 0
+
 
 class TestLoadTrades:
     def test_filters_by_instrument_id(self) -> None:
@@ -59,10 +122,12 @@ class TestLoadTrades:
             )
         )
         assert len(ticks) == 3  # 2024-01-04 の 1301 は 3 行
+        # 全 tick が 2024-01-04 JST に属する（UTC では 2024-01-03 後半 + 2024-01-04 前半）
+        import datetime as dt
+        JST = dt.timezone(dt.timedelta(hours=9))
         for t in ticks:
-            # ts_event は JST 09:00〜12:30 → UTC 00:00〜03:30 ⇒ 全て 2024-01-03 (UTC) 〜 2024-01-04 (UTC)
-            # でも内訳は変わらず 3 件
-            pass
+            ts_jst = dt.datetime.fromtimestamp(t.ts_event / 1_000_000_000, tz=JST)
+            assert ts_jst.date() == dt.date(2024, 1, 4)
 
     def test_crosses_month_boundary(self) -> None:
         # 1/30 から 2/2 にまたがる
