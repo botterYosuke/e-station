@@ -176,6 +176,15 @@ pub enum Command {
         end_date: String,
         granularity: ReplayGranularity,
     },
+
+    // ── N1.11: Replay speed control ───────────────────────────────────────
+    /// Set the replay playback speed multiplier.
+    /// `multiplier` is a positive integer: 1 = real-time, 10 = 10x speed, etc.
+    /// Sent via `POST /api/replay/control` with `{"action":"speed","multiplier":N}`.
+    SetReplaySpeed {
+        request_id: String,
+        multiplier: u32,
+    },
 }
 
 /// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
@@ -441,6 +450,14 @@ impl std::fmt::Debug for Command {
                 .field("end_date", end_date)
                 .field("granularity", granularity)
                 .finish(),
+            Command::SetReplaySpeed {
+                request_id,
+                multiplier,
+            } => f
+                .debug_struct("SetReplaySpeed")
+                .field("request_id", request_id)
+                .field("multiplier", multiplier)
+                .finish(),
         }
     }
 }
@@ -602,6 +619,12 @@ pub enum EngineEvent {
         #[serde(default)]
         capabilities: serde_json::Value,
     },
+    /// 接続レベル切断 frame と StartEngine 例外通知 outbox event の **両用 wire 形** を共有する (H-F).
+    ///
+    /// - `strategy_id == None` … handshake / 接続レベルエラー
+    ///   (auth_failed / schema_mismatch 等)。受信側は接続を切断する。
+    /// - `strategy_id == Some(_)` … 走行中 strategy の outbox event。
+    ///   受信側は該当 strategy の state machine にだけ反映し、接続自体は維持する。
     EngineError {
         code: String,
         message: String,
@@ -861,6 +884,40 @@ pub enum EngineEvent {
         ts_event_ms: i64,
     },
 
+    // ── N1.12: Execution marker + strategy signal events ─────────────────
+    /// Python emitted when a `OrderFilled` event is received for a nautilus strategy.
+    /// One `ExecutionMarker` is emitted per `OrderFilled` (1:1 mapping).
+    ExecutionMarker {
+        strategy_id: String,
+        instrument_id: String,
+        /// `"BUY"` | `"SELL"`
+        side: String,
+        /// Fill price as decimal string.
+        price: String,
+        ts_event_ms: i64,
+    },
+
+    /// Explicit signal emitted by a strategy via `StrategySignalMixin.emit_signal()`.
+    /// Independent of fills — a strategy can emit signals without any order activity.
+    StrategySignal {
+        strategy_id: String,
+        instrument_id: String,
+        signal_kind: SignalKind,
+        /// `"BUY"` | `"SELL"` | null
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side: Option<String>,
+        /// Price level as decimal string, or null.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        price: Option<String>,
+        /// Short machine-readable label (e.g. `"entry"`, `"stop"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        /// Human-readable annotation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        ts_event_ms: i64,
+    },
+
     // ── Buying Power Phase (schema 2.1) ───────────────────────────────────
     /// Response to `GetBuyingPower`. Contains current cash and credit buying power.
     BuyingPowerUpdated {
@@ -875,10 +932,36 @@ pub enum EngineEvent {
         /// 取得時刻 Unix ミリ秒
         ts_ms: i64,
     },
+
+    // ── N1.16: REPLAY 仮想買付余力 ────────────────────────────────────────────
+    /// REPLAY モードの仮想買付余力（portfolio_view.py が送出）。
+    /// cash / buying_power / equity はすべて decimal 文字列（float 丸め防止）。
+    ReplayBuyingPower {
+        strategy_id: String,
+        cash: String,
+        buying_power: String,
+        equity: String,
+        ts_event_ms: i64,
+    },
 }
 
 fn default_true() -> bool {
     true
+}
+
+// ── N1.12 signal kind (暫定語彙 / Q13 確定まで) ──────────────────────────────
+
+/// Signal kind vocabulary for `StrategySignal`.
+///
+/// Provisional values covering N1 scope (Q13 open — final vocabulary TBD in N2).
+/// Adding new variants is backward-compatible because the wire representation is
+/// the PascalCase variant name (serde default).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SignalKind {
+    EntryLong,
+    EntryShort,
+    Exit,
+    Annotate,
 }
 
 // ── Message sub-types ─────────────────────────────────────────────────────────

@@ -16,11 +16,21 @@ use iced::{
 #[derive(Debug, Default)]
 pub struct OrdersPanel {
     orders: Vec<OrderRecordWire>,
+    /// True when this panel shows REPLAY orders (shows "⏪ REPLAY" banner).
+    pub is_replay: bool,
 }
 
 impl OrdersPanel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a replay-mode panel (shows "⏪ REPLAY" banner in the header).
+    pub fn new_replay() -> Self {
+        Self {
+            orders: vec![],
+            is_replay: true,
+        }
     }
 
     /// Update the order list from an `OrderListUpdated` IPC event.
@@ -96,7 +106,13 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
         .on_press(Message::RefreshClicked)
         .padding([2, 8]);
 
-    let header = row![refresh_btn].spacing(4).padding([4, 8]);
+    let header = if panel.is_replay {
+        row![text("⏪ REPLAY").size(11), refresh_btn]
+            .spacing(4)
+            .padding([4, 8])
+    } else {
+        row![refresh_btn].spacing(4).padding([4, 8])
+    };
 
     if panel.is_empty() {
         return column![header, center(text("注文なし").size(14))].into();

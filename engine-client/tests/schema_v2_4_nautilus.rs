@@ -10,7 +10,7 @@
 //! 互換性: `architecture.md` は `schema_minor=4` を要求。`SCHEMA_MAJOR` は 2 のまま。
 
 use flowsurface_engine_client::dto::{
-    Command, EngineEvent, EngineKind, EngineStartConfig, ReplayGranularity,
+    Command, EngineEvent, EngineKind, EngineStartConfig, ReplayGranularity, SignalKind,
 };
 
 // ── Schema version guard ────────────────────────────────────────────────────
@@ -268,5 +268,174 @@ fn position_closed_deserializes() {
             assert_eq!(ts_event_ms, 1_700_000_000_004);
         }
         other => panic!("expected PositionClosed, got {other:?}"),
+    }
+}
+
+// ── N1.11: SetReplaySpeed ────────────────────────────────────────────────────
+
+#[test]
+fn set_replay_speed_serializes() {
+    let cmd = Command::SetReplaySpeed {
+        request_id: "req-speed-1".to_string(),
+        multiplier: 10,
+    };
+    let json = serde_json::to_string(&cmd).expect("must serialize");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["op"], "SetReplaySpeed");
+    assert_eq!(v["request_id"], "req-speed-1");
+    assert_eq!(v["multiplier"], 10);
+}
+
+#[test]
+fn set_replay_speed_debug_shows_multiplier() {
+    let cmd = Command::SetReplaySpeed {
+        request_id: "r1".to_string(),
+        multiplier: 5,
+    };
+    let dbg = format!("{cmd:?}");
+    assert!(dbg.contains("SetReplaySpeed"));
+    assert!(dbg.contains("multiplier: 5"));
+}
+
+// ── N1.12: ExecutionMarker + StrategySignal ──────────────────────────────────
+
+#[test]
+fn execution_marker_deserializes() {
+    let json = r#"{
+        "event": "ExecutionMarker",
+        "strategy_id": "buy-and-hold-001",
+        "instrument_id": "1301.TSE",
+        "side": "BUY",
+        "price": "1500.0",
+        "ts_event_ms": 1700000000010
+    }"#;
+    let ev: EngineEvent = serde_json::from_str(json).expect("must deserialize");
+    match ev {
+        EngineEvent::ExecutionMarker {
+            strategy_id,
+            instrument_id,
+            side,
+            price,
+            ts_event_ms,
+        } => {
+            assert_eq!(strategy_id, "buy-and-hold-001");
+            assert_eq!(instrument_id, "1301.TSE");
+            assert_eq!(side, "BUY");
+            assert_eq!(price, "1500.0");
+            assert_eq!(ts_event_ms, 1_700_000_000_010);
+        }
+        other => panic!("expected ExecutionMarker, got {other:?}"),
+    }
+}
+
+#[test]
+fn strategy_signal_deserializes_full() {
+    let json = r#"{
+        "event": "StrategySignal",
+        "strategy_id": "buy-and-hold-001",
+        "instrument_id": "1301.TSE",
+        "signal_kind": "EntryLong",
+        "side": "BUY",
+        "price": "1500.0",
+        "tag": "entry",
+        "note": "first bar",
+        "ts_event_ms": 1700000000020
+    }"#;
+    let ev: EngineEvent = serde_json::from_str(json).expect("must deserialize");
+    match ev {
+        EngineEvent::StrategySignal {
+            strategy_id,
+            instrument_id,
+            signal_kind,
+            side,
+            price,
+            tag,
+            note,
+            ts_event_ms,
+        } => {
+            assert_eq!(strategy_id, "buy-and-hold-001");
+            assert_eq!(instrument_id, "1301.TSE");
+            assert_eq!(signal_kind, SignalKind::EntryLong);
+            assert_eq!(side, Some("BUY".to_string()));
+            assert_eq!(price, Some("1500.0".to_string()));
+            assert_eq!(tag, Some("entry".to_string()));
+            assert_eq!(note, Some("first bar".to_string()));
+            assert_eq!(ts_event_ms, 1_700_000_000_020);
+        }
+        other => panic!("expected StrategySignal, got {other:?}"),
+    }
+}
+
+#[test]
+fn strategy_signal_deserializes_minimal() {
+    // side/price/tag/note are all optional
+    let json = r#"{
+        "event": "StrategySignal",
+        "strategy_id": "strat-001",
+        "instrument_id": "1301.TSE",
+        "signal_kind": "Annotate",
+        "ts_event_ms": 1700000000030
+    }"#;
+    let ev: EngineEvent = serde_json::from_str(json).expect("must deserialize");
+    match ev {
+        EngineEvent::StrategySignal {
+            signal_kind,
+            side,
+            price,
+            tag,
+            note,
+            ..
+        } => {
+            assert_eq!(signal_kind, SignalKind::Annotate);
+            assert!(side.is_none());
+            assert!(price.is_none());
+            assert!(tag.is_none());
+            assert!(note.is_none());
+        }
+        other => panic!("expected StrategySignal, got {other:?}"),
+    }
+}
+
+#[test]
+fn signal_kind_serializes_as_pascal_case() {
+    assert_eq!(
+        serde_json::to_string(&SignalKind::EntryLong).unwrap(),
+        "\"EntryLong\""
+    );
+    assert_eq!(
+        serde_json::to_string(&SignalKind::EntryShort).unwrap(),
+        "\"EntryShort\""
+    );
+    assert_eq!(
+        serde_json::to_string(&SignalKind::Exit).unwrap(),
+        "\"Exit\""
+    );
+    assert_eq!(
+        serde_json::to_string(&SignalKind::Annotate).unwrap(),
+        "\"Annotate\""
+    );
+}
+
+// ── N1.16: ReplayBuyingPower ─────────────────────────────────────────────────
+
+#[test]
+fn replay_buying_power_deserializes() {
+    let json = r#"{"event":"ReplayBuyingPower","strategy_id":"buy-and-hold","cash":"980000.00","buying_power":"980000.00","equity":"990000.00","ts_event_ms":1704268800000}"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::ReplayBuyingPower {
+            strategy_id,
+            cash,
+            buying_power,
+            equity,
+            ts_event_ms,
+        } => {
+            assert_eq!(strategy_id, "buy-and-hold");
+            assert_eq!(cash, "980000.00");
+            assert_eq!(buying_power, "980000.00");
+            assert_eq!(equity, "990000.00");
+            assert_eq!(ts_event_ms, 1_704_268_800_000);
+        }
+        other => panic!("expected ReplayBuyingPower, got {other:?}"),
     }
 }

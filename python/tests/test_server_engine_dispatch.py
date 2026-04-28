@@ -40,20 +40,50 @@ class _ListOutbox:
         return iter(list(self._q))
 
 
+# M-9: DataEngineServer の必須属性が増えたら本ヘルパーも更新する。コードレビューで
+# ``DataEngineServer.__init__`` の本体と ``_REQUIRED_ATTRS`` の差分を確認すること。
+# サイレント未設定で AttributeError が出ないよう、ここでは「_make_server で未設定に
+# なった属性を即座に発見する」目的の集中管理を行う。
+_REQUIRED_ATTRS: dict[str, object] = {
+    "_outbox": None,         # 各テストで _ListOutbox に差し替える
+    "_mode": "replay",
+    "_workers": None,        # 同上 (MagicMock)
+    "_tachibana_session": None,
+    "_tachibana_p_no_counter": None,
+    "_session_holder": None,
+    "_engine_tasks": None,
+}
+
+
 def _make_server(mode: str = "replay"):
-    """Create a minimal DataEngineServer with mocked dependencies."""
+    """Create a minimal DataEngineServer with mocked dependencies.
+
+    M-9: 必須属性は ``_REQUIRED_ATTRS`` に集約し dict + 構築ループで設定する。
+    DataEngineServer に新しい必須属性が増えたら ``_REQUIRED_ATTRS`` も合わせて更新する
+    こと。silent な ``AttributeError`` 黙殺を防ぐため、レビュー時は
+    ``DataEngineServer.__init__`` の body との差分を必ず確認する。
+
+    `for_testing(...)` クラスメソッド導入は影響範囲が広いため本ラウンドでは見送り。
+    """
     from engine.server import DataEngineServer
 
     with patch.object(DataEngineServer, "__init__", lambda self, **_: None):
         server = DataEngineServer()
 
-    server._outbox = _ListOutbox()  # H5: duck-type スタブに差し替え
-    server._mode = mode
-    server._workers = {"tachibana": MagicMock()}
-    server._tachibana_session = None
-    server._tachibana_p_no_counter = MagicMock()
-    server._session_holder = MagicMock()
-    server._engine_tasks = {}  # N1.4 で使う
+    # M-9: 必須属性をループで設定 (レビュー粒度を ``_REQUIRED_ATTRS`` 1 箇所に集約)
+    defaults: dict[str, object] = {
+        "_outbox": _ListOutbox(),  # H5: duck-type スタブ
+        "_mode": mode,
+        "_workers": {"tachibana": MagicMock()},
+        "_tachibana_session": None,
+        "_tachibana_p_no_counter": MagicMock(),
+        "_session_holder": MagicMock(),
+        "_engine_tasks": {},
+    }
+    # _REQUIRED_ATTRS に列挙された属性をすべて設定する。差分があれば KeyError で
+    # 検出する (silent 黙殺防止)。
+    for attr in _REQUIRED_ATTRS:
+        setattr(server, attr, defaults[attr])
     return server
 
 
@@ -393,6 +423,97 @@ class TestStartEngineMissingRequestId:
 
         # 早期 return するので outbox に何も積まれない
         assert len(server._outbox) == 0
+
+
+class TestM7ReplayVenueSubmitOrderRejected:
+    """M-7: venue=='replay' SubmitOrder は OrderRejected{REPLAY_NOT_IMPLEMENTED} を返す。"""
+
+    @pytest.mark.asyncio
+    async def test_replay_venue_submit_order_rejected_with_replay_not_implemented(self) -> None:
+        server = _make_server(mode="replay")
+        # _do_submit_order_inner が参照するカウンタ
+        server._submit_order_inflight_count = 0
+        msg = {
+            "op": "SubmitOrder",
+            "request_id": "req-replay-order",
+            "venue": "replay",
+            "order": {
+                "client_order_id": "replay-cid-007",
+                "instrument_id": "1301.TSE",
+                "order_side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "100",
+                "time_in_force": "DAY",
+                "post_only": False,
+                "reduce_only": False,
+            },
+        }
+        await server._do_submit_order_inner(msg)
+        rejected = [e for e in server._outbox if e.get("event") == "OrderRejected"]
+        assert len(rejected) == 1
+        assert rejected[0]["reason_code"] == "REPLAY_NOT_IMPLEMENTED"
+        assert rejected[0]["client_order_id"] == "replay-cid-007"
+        # OrderSubmitted は出ないこと (早期 reject)
+        assert not any(e.get("event") == "OrderSubmitted" for e in server._outbox)
+
+
+class TestM10UnknownEngineKind:
+    """M-10: validate_start_engine の unknown engine kind は別 code で出す。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_engine_kind_returns_distinct_code(self) -> None:
+        server = _make_server(mode="replay")
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-unknown-kind",
+            "engine": "Bogus",  # validate_start_engine が UnknownEngineKindError
+            "strategy_id": "x",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+            },
+        }
+        await server._handle_start_engine(msg, base_dir=FIXTURES)
+        errors = [e for e in server._outbox if e.get("event") == "Error"]
+        assert len(errors) == 1
+        assert errors[0]["request_id"] == "req-unknown-kind"
+        assert errors[0]["code"] == "unknown_engine_kind"
+
+
+class TestM14StartEngineRaceGuard:
+    """M-14: 同 strategy_id 連投で _engine_tasks が上書きされないこと。"""
+
+    @pytest.mark.asyncio
+    async def test_second_start_engine_with_same_strategy_id_is_rejected(self) -> None:
+        server = _make_server(mode="replay")
+        # 1 回目走行中を擬似再現: _engine_tasks に既存 entry を入れる
+        server._engine_tasks["dup-strategy"] = MagicMock()
+        existing_runner = server._engine_tasks["dup-strategy"]
+
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-dup",
+            "engine": "Backtest",
+            "strategy_id": "dup-strategy",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+            },
+        }
+        await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        errors = [e for e in server._outbox if e.get("event") == "Error"]
+        assert len(errors) == 1
+        assert errors[0]["request_id"] == "req-dup"
+        assert errors[0]["code"] == "engine_already_running"
+        # 既存 runner 上書きが起きていない
+        assert server._engine_tasks["dup-strategy"] is existing_runner
 
 
 class TestStartEngineLowATasksCleanup:

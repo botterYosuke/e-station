@@ -1,13 +1,19 @@
-"""BuyAndHold サンプル戦略 (N0.4 / N1.4 拡張)
+"""BuyAndHold サンプル戦略 (N0.4 / N1.4 拡張 / N1.12 StrategySignal サンプル)
 
 最初の入力 (Bar or TradeTick) で lot_size 分だけ成行買いし、以後はホールドし続ける。
 backtest の決定論性テスト・smoke テスト・replay E2E の入力として使う。
 
 N1.4 拡張: ``subscribe_kind`` (``"bar"`` | ``"trade"``) で購読対象を切替。
 ``"bar"`` 時は ``bar_type`` (``"-1-DAY-MID-EXTERNAL"`` 等) を指定。
+
+N1.12 拡張: 買い注文を出す直前に ``StrategySignal(EntryLong)`` を emit する。
+``on_event`` callback が設定されている場合のみ送出（後方互換）。
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any, Literal
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar, BarType, TradeTick
@@ -15,19 +21,34 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 
+from engine.nautilus.strategy_helpers import StrategySignalMixin
 
-class BuyAndHoldStrategy(Strategy):
-    """最初のバー / 最初の trade tick で 1 lot 成行買い、以後は放置するシンプル戦略。"""
+SubscribeKind = Literal["bar", "trade"]
+
+
+class BuyAndHoldStrategy(StrategySignalMixin, Strategy):
+    """最初のバー / 最初の trade tick で 1 lot 成行買い、以後は放置するシンプル戦略。
+
+    N1.12: 買い前に ``StrategySignal(EntryLong)`` を emit するサンプル実装。
+    ``on_event`` callback が渡された場合のみ IPC が送出される（後方互換）。
+    """
 
     def __init__(
         self,
         instrument_id: InstrumentId,
         *,
-        subscribe_kind: str = "bar",
+        subscribe_kind: SubscribeKind = "bar",
         bar_type_str: str | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(config=StrategyConfig(strategy_id="buy-and-hold-001"))
         self.instrument_id = instrument_id
+        # M-13: Literal["bar","trade"] 以外は ValueError で早期失敗。空白入り
+        # ("trade ") や大文字違い ("Bar"/"BAR") も rejected。
+        if subscribe_kind not in ("bar", "trade"):
+            raise ValueError(
+                f"subscribe_kind must be 'bar' or 'trade', got {subscribe_kind!r}"
+            )
         self.subscribe_kind = subscribe_kind
         # N0 互換: 既定 "-1-DAY-MID-EXTERNAL" を維持。N1.4 replay (bars) は
         # ``"-1-MINUTE-LAST-EXTERNAL"`` などを呼出側から指定する。
@@ -35,6 +56,14 @@ class BuyAndHoldStrategy(Strategy):
         self.bar_count = 0
         self.tick_count = 0
         self.bought = False
+
+        # N1.12: StrategySignalMixin を初期化する（on_event が None でも後方互換）
+        if on_event is not None:
+            self.setup_signal_mixin(
+                strategy_id="buy-and-hold-001",
+                instrument_id=str(instrument_id),
+                on_event=on_event,
+            )
 
     def on_start(self) -> None:
         instrument = self.cache.instrument(self.instrument_id)
@@ -55,6 +84,10 @@ class BuyAndHoldStrategy(Strategy):
                 "instrument not found in cache: %s", self.instrument_id
             )
             return
+
+        # N1.12: 買い注文の直前に EntryLong シグナルを emit する
+        self.emit_signal("EntryLong", side="BUY", tag="entry")
+
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.BUY,

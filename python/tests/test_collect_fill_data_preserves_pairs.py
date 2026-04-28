@@ -17,6 +17,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from engine.nautilus.engine_runner import _collect_fill_data
 
 
@@ -118,11 +120,25 @@ def test_collect_fill_data_skips_open_orders() -> None:
     assert prices == ["20.0"]
 
 
-def test_collect_fill_data_exception_returns_empty() -> None:
-    """If cache.orders() raises, the function must return ([], []) gracefully."""
+def test_collect_fill_data_recoverable_exception_returns_empty() -> None:
+    """H-I: 想定可能な属性欠落 (AttributeError/KeyError/TypeError) は握って ([], [])。
+
+    元実装は ``except Exception`` で全捕捉していたが、本物の不具合 (RuntimeError 等) を
+    隠蔽しないよう想定可能な型のみに絞った。"""
     engine = MagicMock()
-    engine.kernel.cache.orders.side_effect = RuntimeError("cache unavailable")
+    engine.kernel.cache.orders.side_effect = AttributeError("cache attr missing")
 
     timestamps, prices = _collect_fill_data(engine)
     assert timestamps == []
     assert prices == []
+
+
+def test_collect_fill_data_unexpected_exception_propagates() -> None:
+    """H-I: 想定外の例外 (RuntimeError 等) は握り潰さず raise する。
+
+    呼出側 (start_backtest_replay の except) で EngineStopped 補完 + EngineError 経由で
+    Rust に通知される。"""
+    engine = MagicMock()
+    engine.kernel.cache.orders.side_effect = RuntimeError("cache unavailable")
+    with pytest.raises(RuntimeError, match="cache unavailable"):
+        _collect_fill_data(engine)

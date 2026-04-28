@@ -15,12 +15,18 @@ use iced::{
 /// Buying power panel state.
 #[derive(Debug, Default)]
 pub struct BuyingPowerPanel {
-    /// 現物買付余力（円）
+    /// REPLAY モードのパネルかどうか（true = REPLAY, false = live）
+    pub is_replay: bool,
+    /// 現物買付余力（円）。live モード専用。
     cash_available: Option<i64>,
-    /// 現物余力不足額（円）
+    /// 現物余力不足額（円）。live モード専用。
     cash_shortfall: Option<i64>,
-    /// 信用新規可能額（円）
+    /// 信用新規可能額（円）。live モード専用。
     credit_available: Option<i64>,
+    /// REPLAY モード: 仮想 cash（decimal 文字列）
+    replay_cash: Option<String>,
+    /// REPLAY モード: 仮想 equity（decimal 文字列）
+    replay_equity: Option<String>,
     /// 最終更新時刻（Unix ミリ秒）
     last_updated_ms: Option<i64>,
     /// エラーメッセージ（API 呼び出し失敗時）
@@ -30,6 +36,28 @@ pub struct BuyingPowerPanel {
 impl BuyingPowerPanel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// REPLAY モード専用パネルを生成する。
+    pub fn new_replay() -> Self {
+        Self {
+            is_replay: true,
+            ..Self::default()
+        }
+    }
+
+    /// REPLAY ポートフォリオデータを更新する。
+    pub fn set_replay_portfolio(
+        &mut self,
+        cash: String,
+        _buying_power: String,
+        equity: String,
+        ts_ms: i64,
+    ) {
+        self.replay_cash = Some(cash);
+        self.replay_equity = Some(equity);
+        self.last_updated_ms = Some(ts_ms);
+        self.error = None;
     }
 
     /// 現物余力データを更新する。
@@ -92,6 +120,24 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
             column![text("余力取得エラー").size(13), text(err.as_str()).size(11),].spacing(4),
         )
         .into();
+    }
+
+    // REPLAY モード: 仮想ポートフォリオ表示
+    if panel.is_replay {
+        let banner = text("⏪ REPLAY").size(10);
+        let cash_row = match &panel.replay_cash {
+            Some(cash) => row![text("仮想余力:").size(12), text(cash.as_str()).size(12)].spacing(8),
+            None => row![text("仮想余力: ---").size(12)],
+        };
+        let equity_row = match &panel.replay_equity {
+            Some(equity) => {
+                row![text("評価額:").size(12), text(equity.as_str()).size(12)].spacing(8)
+            }
+            None => row![text("評価額: ---").size(12)],
+        };
+        return container(column![banner, cash_row, equity_row].spacing(6))
+            .padding(8)
+            .into();
     }
 
     let cash_row = match panel.cash_available {
@@ -257,5 +303,32 @@ mod tests {
         let mut panel = BuyingPowerPanel::new();
         panel.set_error("API connection failed".to_string());
         assert!(panel.error.is_some());
+    }
+
+    // ── N1.16: REPLAY panel tests ────────────────────────────────────────
+
+    #[test]
+    fn replay_panel_is_marked_replay() {
+        let panel = BuyingPowerPanel::new_replay();
+        assert!(panel.is_replay);
+    }
+
+    #[test]
+    fn live_panel_is_not_marked_replay() {
+        let panel = BuyingPowerPanel::new();
+        assert!(!panel.is_replay);
+    }
+
+    #[test]
+    fn replay_panel_set_portfolio_updates_cash() {
+        let mut panel = BuyingPowerPanel::new_replay();
+        panel.set_replay_portfolio(
+            "980000".to_string(),
+            "980000".to_string(),
+            "990000".to_string(),
+            1_704_268_800_000,
+        );
+        assert_eq!(panel.replay_cash.as_deref(), Some("980000"));
+        assert_eq!(panel.replay_equity.as_deref(), Some("990000"));
     }
 }

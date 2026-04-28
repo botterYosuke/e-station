@@ -225,3 +225,26 @@ def test_hello_defaults_mode_to_live_when_absent() -> None:
     }
     obj = s.Hello.model_validate(data)
     assert obj.mode == "live"
+
+
+# ── M-4: EngineError.strategy_id="" 正規化 ─────────────────────────────────
+
+
+def test_engine_error_normalizes_empty_strategy_id_to_none() -> None:
+    """M-4: EngineError(strategy_id="") は .strategy_id is None になる。"""
+    obj = s.EngineError(code="x", message="y", strategy_id="")
+    assert obj.strategy_id is None
+
+
+def test_engine_error_keeps_nonempty_strategy_id() -> None:
+    """M-4: 非空 strategy_id はそのまま保持される。"""
+    obj = s.EngineError(code="x", message="y", strategy_id="strat-1")
+    assert obj.strategy_id == "strat-1"
+
+
+def test_engine_error_normalizes_empty_strategy_id_via_validate() -> None:
+    """M-4: model_validate 経由でも空文字 → None になる (wire 互換)。"""
+    obj = s.EngineError.model_validate(
+        {"event": "EngineError", "code": "x", "message": "y", "strategy_id": ""}
+    )
+    assert obj.strategy_id is None

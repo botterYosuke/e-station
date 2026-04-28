@@ -41,6 +41,7 @@ use tokio::{
     sync::{Mutex, mpsc, watch},
 };
 
+use crate::api::agent_api::AgentApiState;
 use crate::api::order_api::OrderApiState;
 
 /// Commands the HTTP server forwards into the Iced application via mpsc.
@@ -55,6 +56,12 @@ pub enum ControlApiCommand {
     CancelLoginHelper,
     /// Request venue login (equivalent to pressing the "再ログイン" button).
     RequestVenueLogin { venue: String },
+    /// Instruct the Iced app to auto-generate REPLAY panes for the given
+    /// instrument (N1.14). Sent after `ReplayDataLoaded` is received.
+    AutoGenerateReplayPanes {
+        instrument_id: String,
+        strategy_id: String,
+    },
 }
 
 /// Status snapshot returned by `GET /api/replay/status`.
@@ -62,6 +69,18 @@ pub enum ControlApiCommand {
 struct StatusResponse<'a> {
     status: &'a str,
     version: &'a str,
+}
+
+// ── N1.16: Replay portfolio cache ────────────────────────────────────────────
+
+/// Last-seen `ReplayBuyingPower` snapshot, cached for `GET /api/replay/portfolio`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReplayPortfolioSnapshot {
+    pub strategy_id: String,
+    pub cash: String,
+    pub buying_power: String,
+    pub equity: String,
+    pub ts_event_ms: i64,
 }
 
 // ── Replay API state (N1.3) ───────────────────────────────────────────────────
@@ -85,7 +104,19 @@ pub struct ReplayApiState {
     /// `ReplayDataLoaded` (which has no `request_id` in schema 2.4) cannot
     /// be cross-correlated.
     load_lock: Mutex<()>,
+    /// Instruments loaded at least once this session (used to enforce
+    /// MAX_REPLAY_INSTRUMENTS and to pass instrument_id to AutoGenerateReplayPanes).
+    loaded_instruments: Mutex<Vec<String>>,
+    /// Channel to send ControlApiCommand to the iced app (None in tests).
+    /// Wrapped in `Mutex` so it can be set after `Arc::new()` inside `spawn()`.
+    control_tx: Mutex<Option<mpsc::Sender<ControlApiCommand>>>,
+    /// N1.16: last-seen ReplayBuyingPower event, served by GET /api/replay/portfolio.
+    /// Uses std::sync::Mutex so it can be updated synchronously from Flowsurface::update().
+    portfolio: std::sync::Mutex<Option<ReplayPortfolioSnapshot>>,
 }
+
+/// Maximum number of distinct instruments that can be loaded in one replay session.
+pub const MAX_REPLAY_INSTRUMENTS: usize = 4;
 
 impl ReplayApiState {
     pub fn new(
@@ -97,6 +128,37 @@ impl ReplayApiState {
             mode: mode.into(),
             load_timeout: Duration::from_secs(60),
             load_lock: Mutex::new(()),
+            loaded_instruments: Mutex::new(Vec::new()),
+            control_tx: Mutex::new(None),
+            portfolio: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Attach a `ControlApiCommand` sender so that successful loads can notify
+    /// the Iced app to auto-generate panes (N1.14).
+    /// This is called inside `spawn()` after `Arc::new()`.
+    pub async fn set_control_tx(&self, tx: mpsc::Sender<ControlApiCommand>) {
+        *self.control_tx.lock().await = Some(tx);
+    }
+
+    /// Cache a `ReplayBuyingPower` snapshot so `GET /api/replay/portfolio` can serve it.
+    /// Called synchronously from `Flowsurface::update()` on `Message::ReplayBuyingPower`.
+    pub fn update_replay_portfolio(
+        &self,
+        strategy_id: String,
+        cash: String,
+        buying_power: String,
+        equity: String,
+        ts_event_ms: i64,
+    ) {
+        if let Ok(mut guard) = self.portfolio.lock() {
+            *guard = Some(ReplayPortfolioSnapshot {
+                strategy_id,
+                cash,
+                buying_power,
+                equity,
+                ts_event_ms,
+            });
         }
     }
 
@@ -116,7 +178,10 @@ struct ReplayLoadBody {
     instrument_id: String,
     start_date: String,
     end_date: String,
-    granularity: String,
+    /// `ReplayGranularity` を serde で直接受ける（H-D 修正）。`"Trade"` /
+    /// `"Minute"` / `"Daily"` 以外は serde が `Err` を返し、呼出側で 400 に
+    /// 変換される。手動の `parse_granularity()` ヘルパーは廃止。
+    granularity: ReplayGranularity,
 }
 
 #[derive(serde::Serialize)]
@@ -192,26 +257,17 @@ async fn write_error(stream: &mut TcpStream, status: u16, status_text: &str, err
 
 // ── Replay endpoint helpers (N1.3) ────────────────────────────────────────────
 
-fn parse_granularity(raw: &str) -> Option<ReplayGranularity> {
-    match raw {
-        "Trade" => Some(ReplayGranularity::Trade),
-        "Minute" => Some(ReplayGranularity::Minute),
-        "Daily" => Some(ReplayGranularity::Daily),
-        _ => None,
-    }
-}
-
-/// Validate ISO-8601 date `YYYY-MM-DD` (very strict — Python loader expects this form).
+/// Validate ISO-8601 date `YYYY-MM-DD` with **calendar validation** (H-A 修正).
+///
+/// `chrono::NaiveDate::parse_from_str` で月日範囲・閏年も検証する。旧実装は
+/// 文字種・桁数しか見ていなかったため `"2024-13-01"` / `"2024-02-30"` /
+/// 非閏年の `"2023-02-29"` 等が通過し、Python loader 側で
+/// `FileNotFoundError` 等を引き起こす危険があった。
 fn is_iso_date(s: &str) -> bool {
     if s.len() != 10 {
         return false;
     }
-    let bytes = s.as_bytes();
-    bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[..4].iter().all(|b| b.is_ascii_digit())
-        && bytes[5..7].iter().all(|b| b.is_ascii_digit())
-        && bytes[8..10].iter().all(|b| b.is_ascii_digit())
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
 
 /// `POST /api/replay/load` — bridge to `Command::LoadReplayData`.
@@ -247,6 +303,23 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
         write_error(stream, 400, "Bad Request", "instrument_id is required").await;
         return;
     }
+
+    // ③b Check MAX_REPLAY_INSTRUMENTS (N1.14).
+    // Reload of an already-loaded instrument is always allowed.
+    {
+        let instruments = state.loaded_instruments.lock().await;
+        if !instruments.contains(&parsed.instrument_id)
+            && instruments.len() >= MAX_REPLAY_INSTRUMENTS
+        {
+            let body = serde_json::json!({
+                "error": "max_instruments_exceeded",
+                "max": MAX_REPLAY_INSTRUMENTS,
+            })
+            .to_string();
+            write_response(stream, 400, "Bad Request", &body).await;
+            return;
+        }
+    }
     if !is_iso_date(&parsed.start_date) {
         write_error(
             stream,
@@ -267,19 +340,9 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
         .await;
         return;
     }
-    let granularity = match parse_granularity(&parsed.granularity) {
-        Some(g) => g,
-        None => {
-            write_error(
-                stream,
-                400,
-                "Bad Request",
-                "granularity must be 'Trade', 'Minute', or 'Daily'",
-            )
-            .await;
-            return;
-        }
-    };
+    // H-D: `granularity` は `ReplayLoadBody` で serde 直受け済み。不正値は
+    // ② の `serde_json::from_str` が 400 を返している。
+    let granularity = parsed.granularity;
 
     // ④ Get engine connection (drop the watch::Ref before any await)
     let conn_opt = state.engine_rx.borrow().clone();
@@ -343,8 +406,10 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    log::warn!("replay_api: broadcast lagged by {n}; ReplayDataLoaded may be lost");
-                    continue;
+                    // H-B: broadcast が遅延すると `ReplayDataLoaded` を取りこぼす
+                    // 可能性があるため即時に 503 を返し、呼出側に再試行させる。
+                    log::warn!("replay_api: broadcast lagged by {n}; aborting LoadReplayData wait");
+                    return ReplayLoadOutcome::Lagged { skipped: n };
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     return ReplayLoadOutcome::Disconnected;
@@ -359,6 +424,31 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
             bars_loaded,
             trades_loaded,
         }) => {
+            // N1.14: Track loaded instrument and notify Iced app.
+            let strategy_id_for_cmd = {
+                // We don't have strategy_id here (not stored in outcome), use empty string.
+                // The strategy_id from ReplayDataLoaded is not captured in this path;
+                // we use an empty string as placeholder (same as mock engine tests use "").
+                String::new()
+            };
+            {
+                let mut instruments = state.loaded_instruments.lock().await;
+                if !instruments.contains(&parsed.instrument_id) {
+                    instruments.push(parsed.instrument_id.clone());
+                }
+            }
+            {
+                let tx_guard = state.control_tx.lock().await;
+                if let Some(tx) = tx_guard.as_ref() {
+                    let cmd = ControlApiCommand::AutoGenerateReplayPanes {
+                        instrument_id: parsed.instrument_id.clone(),
+                        strategy_id: strategy_id_for_cmd,
+                    };
+                    if let Err(e) = tx.try_send(cmd) {
+                        log::warn!("replay_api: AutoGenerateReplayPanes dropped — {e}");
+                    }
+                }
+            }
             let body = serde_json::to_string(&ReplayLoadOk {
                 status: "ok",
                 bars_loaded,
@@ -389,6 +479,15 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
             )
             .await;
         }
+        Ok(ReplayLoadOutcome::Lagged { skipped }) => {
+            // H-B: broadcast 遅延を 503 で明示的に通知する
+            let body = serde_json::json!({
+                "error": "events lagged",
+                "skipped": skipped,
+            })
+            .to_string();
+            write_response(stream, 503, "Service Unavailable", &body).await;
+        }
         Err(_timeout) => {
             write_response(stream, 504, "Gateway Timeout", r#"{"error":"timeout"}"#).await;
         }
@@ -405,14 +504,115 @@ enum ReplayLoadOutcome {
         message: String,
     },
     Disconnected,
+    /// H-B: tokio broadcast の `RecvError::Lagged` を表す。
+    Lagged {
+        skipped: u64,
+    },
 }
 
-/// `GET /api/replay/portfolio` — N1.3 skeleton.
+// ── N1.11: Replay control request body ───────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayControlBody {
+    action: String,
+    multiplier: Option<u32>,
+}
+
+/// `POST /api/replay/control` — N1.11 speed control.
 ///
-/// Real nautilus `Portfolio` integration lands in **N1.16** (`ReplayBuyingPower`).
-/// Until then the endpoint returns 200 with a deterministic
-/// `{ status: "not_implemented", phase: "N1.16" }` body so callers and tests
-/// can pin the expected wire shape.
+/// Only `action="speed"` is accepted in N1 scope (Q14: Pause/Resume/Seek are
+/// out of scope for N1). Returns `200 {"status":"ok","multiplier":N}` on
+/// success, `400` for unknown actions or missing/zero multiplier.
+async fn handle_replay_control(stream: &mut TcpStream, body: &str, state: &Arc<ReplayApiState>) {
+    if state.mode != "replay" {
+        write_error(
+            stream,
+            400,
+            "Bad Request",
+            "replay endpoints are only available in --mode replay",
+        )
+        .await;
+        return;
+    }
+
+    let parsed: ReplayControlBody = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            write_error(stream, 400, "Bad Request", &format!("invalid JSON: {e}")).await;
+            return;
+        }
+    };
+
+    if parsed.action != "speed" {
+        write_error(
+            stream,
+            400,
+            "Bad Request",
+            &format!(
+                "unsupported action {:?}; only \"speed\" is supported in N1 (Q14)",
+                parsed.action
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let multiplier = match parsed.multiplier {
+        Some(m) if m >= 1 => m,
+        Some(_) => {
+            write_error(stream, 400, "Bad Request", "multiplier must be >= 1").await;
+            return;
+        }
+        None => {
+            write_error(
+                stream,
+                400,
+                "Bad Request",
+                "multiplier is required for action=speed",
+            )
+            .await;
+            return;
+        }
+    };
+
+    let conn_opt = state.engine_rx.borrow().clone();
+    let conn = match conn_opt {
+        Some(c) => c,
+        None => {
+            write_error(stream, 502, "Bad Gateway", "engine not connected").await;
+            return;
+        }
+    };
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let cmd = Command::SetReplaySpeed {
+        request_id,
+        multiplier,
+    };
+    if let Err(e) = conn.send(cmd).await {
+        write_error(
+            stream,
+            502,
+            "Bad Gateway",
+            &format!("failed to forward SetReplaySpeed to engine: {e}"),
+        )
+        .await;
+        return;
+    }
+
+    let resp_body = serde_json::json!({
+        "status": "ok",
+        "multiplier": multiplier,
+    })
+    .to_string();
+    write_response(stream, 200, "OK", &resp_body).await;
+}
+
+/// `GET /api/replay/portfolio` — N1.16 live data.
+///
+/// Returns the last `ReplayBuyingPower` snapshot received from the Python engine.
+/// Returns `{"status":"not_ready"}` if no fill events have occurred yet.
 async fn handle_replay_portfolio(stream: &mut TcpStream, state: &Arc<ReplayApiState>) {
     if state.mode != "replay" {
         write_error(
@@ -424,11 +624,19 @@ async fn handle_replay_portfolio(stream: &mut TcpStream, state: &Arc<ReplayApiSt
         .await;
         return;
     }
-    let body = serde_json::json!({
-        "status": "not_implemented",
-        "phase": "N1.16",
-    })
-    .to_string();
+    let snapshot = state.portfolio.lock().ok().and_then(|g| g.clone());
+    let body = match snapshot {
+        Some(snap) => serde_json::json!({
+            "status": "ok",
+            "strategy_id": snap.strategy_id,
+            "cash": snap.cash,
+            "buying_power": snap.buying_power,
+            "equity": snap.equity,
+            "ts_event_ms": snap.ts_event_ms,
+        })
+        .to_string(),
+        None => serde_json::json!({ "status": "not_ready" }).to_string(),
+    };
     write_response(stream, 200, "OK", &body).await;
 }
 
@@ -545,6 +753,7 @@ async fn handle_request(
     tx: mpsc::Sender<ControlApiCommand>,
     order_state: Option<Arc<OrderApiState>>,
     replay_state: Option<Arc<ReplayApiState>>,
+    agent_state: Option<Arc<AgentApiState>>,
 ) {
     let mut reader = BufReader::new(&mut stream);
     let req = match parse_request(&mut reader).await {
@@ -580,6 +789,19 @@ async fn handle_request(
         ("POST", "/api/replay/order") => {
             if let Some(rs) = replay_state.as_ref() {
                 handle_replay_order(&mut stream, &req.body, rs).await;
+            } else {
+                write_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    "replay API not configured",
+                )
+                .await;
+            }
+        }
+        ("POST", "/api/replay/control") => {
+            if let Some(rs) = replay_state.as_ref() {
+                handle_replay_control(&mut stream, &req.body, rs).await;
             } else {
                 write_error(
                     &mut stream,
@@ -716,6 +938,32 @@ async fn handle_request(
                 .await;
             }
         }
+        ("POST", "/api/agent/narrative") => {
+            if let Some(state) = agent_state {
+                crate::api::agent_api::handle_post_narrative(&mut stream, &req.body, &state).await;
+            } else {
+                write_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    "agent API not configured",
+                )
+                .await;
+            }
+        }
+        ("GET", "/api/agent/narrative") => {
+            if let Some(state) = agent_state {
+                crate::api::agent_api::handle_get_narrative(&mut stream, &state).await;
+            } else {
+                write_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    "agent API not configured",
+                )
+                .await;
+            }
+        }
         _ => {
             write_response(&mut stream, 404, "Not Found", r#"{"error":"not found"}"#).await;
         }
@@ -735,6 +983,7 @@ pub fn spawn(
     rt: &tokio::runtime::Handle,
     order_state: Option<Arc<OrderApiState>>,
     replay_state: Option<Arc<ReplayApiState>>,
+    agent_state: Option<Arc<AgentApiState>>,
 ) -> Option<mpsc::Receiver<ControlApiCommand>> {
     let (tx, rx) = mpsc::channel::<ControlApiCommand>(64);
 
@@ -750,7 +999,16 @@ pub fn spawn(
         return None;
     }
 
+    // N1.14: wire the ControlApiCommand sender into ReplayApiState so that
+    // successful LoadReplayData can trigger pane auto-generation.
+    let tx_for_replay = tx.clone();
+
     rt.spawn(async move {
+        // Inject the sender before the accept loop starts.
+        if let Some(rs) = &replay_state {
+            rs.set_control_tx(tx_for_replay).await;
+        }
+
         let listener = match TcpListener::from_std(listener) {
             Ok(l) => l,
             Err(e) => {
@@ -765,11 +1023,13 @@ pub fn spawn(
                     let tx_clone = tx.clone();
                     let order_state_clone = order_state.clone();
                     let replay_state_clone = replay_state.clone();
+                    let agent_state_clone = agent_state.clone();
                     tokio::spawn(handle_request(
                         stream,
                         tx_clone,
                         order_state_clone,
                         replay_state_clone,
+                        agent_state_clone,
                     ));
                 }
                 Err(e) => {
@@ -921,7 +1181,13 @@ mod tests {
             while let Ok((stream, _)) = listener.accept().await {
                 let tx_clone = tx.clone();
                 let replay_state = Arc::clone(&replay_state);
-                tokio::spawn(handle_request(stream, tx_clone, None, Some(replay_state)));
+                tokio::spawn(handle_request(
+                    stream,
+                    tx_clone,
+                    None,
+                    Some(replay_state),
+                    None,
+                ));
             }
         });
         port
@@ -1028,6 +1294,113 @@ mod tests {
         assert_eq!(status, 400);
     }
 
+    /// H-A: カレンダー検証（月日範囲・閏年）。
+    #[tokio::test]
+    async fn replay_load_rejects_calendar_invalid_dates() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let invalid_cases = [
+            ("2024-13-01", "2024-01-31"), // 月 13
+            ("2024-01-32", "2024-01-31"), // 日 32
+            ("2024-02-30", "2024-02-28"), // 2 月に 30 日は無い
+            ("2023-02-29", "2023-03-01"), // 非閏年の 2/29
+        ];
+        for (start, end) in invalid_cases {
+            let body = serde_json::json!({
+                "instrument_id": "1301.TSE",
+                "start_date": start,
+                "end_date": end,
+                "granularity": "Trade",
+            })
+            .to_string();
+            let (status, resp_body) = http_request(port, "POST", "/api/replay/load", &body).await;
+            assert_eq!(
+                status, 400,
+                "expected 400 for start={start} end={end}; got status={status}, body={resp_body}"
+            );
+        }
+    }
+
+    /// H-B: broadcast が `Lagged` を起こした場合に 503 + body `{"error":"events lagged"}`
+    /// を返す。
+    #[tokio::test]
+    async fn replay_load_returns_503_on_broadcast_lagged() {
+        // BROADCAST_CAPACITY (engine-client::connection: 512) を超える数の
+        // ダミーイベントを ReplayDataLoaded より前に送り、receiver の lag を強制する。
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+
+        tokio::spawn(async move {
+            let (tcp, _) = ws_listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ws.next().await; // Hello
+            ws_send_ready(&mut ws).await;
+
+            // Wait for LoadReplayData
+            let cmd_msg = ws.next().await;
+            let _request_id: Option<String> = if let Some(Ok(m)) = cmd_msg {
+                let text = m.into_text().unwrap();
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                v["request_id"].as_str().map(ToOwned::to_owned)
+            } else {
+                None
+            };
+
+            // Flood with > BROADCAST_CAPACITY filler events to force Lagged.
+            // EngineEvent::Disconnected は handler の `Ok(_) => continue` 分岐で
+            // 単純に skip されるので副作用が少ないフィラーとして使う。
+            // BROADCAST_CAPACITY = 512 を大きく超える数を `feed` で一気に積み、
+            // 最後にまとめて `flush` することで receiver が Lagged を起こすほどの
+            // backpressure を作る。
+            for i in 0..20_000_u32 {
+                let evt = serde_json::json!({
+                    "event": "Disconnected",
+                    "venue": "filler",
+                    "ticker": format!("F{i}"),
+                    "stream": "k",
+                    "market": "",
+                    "reason": null,
+                });
+                ws.feed(Message::Text(evt.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            ws.flush().await.unwrap();
+            // 最後に ReplayDataLoaded を送るが、Lagged が先に発火するはず
+            let evt = serde_json::json!({
+                "event": "ReplayDataLoaded",
+                "strategy_id": "",
+                "bars_loaded": 0,
+                "trades_loaded": 0,
+                "ts_event_ms": 1_700_000_000_000_i64,
+            });
+            ws.send(Message::Text(evt.to_string().into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        });
+
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        // Receiver が drain しないよう、HTTP リクエストを投げる前に少しだけ待ち、
+        // mock 側がフィラーを送り始めてから処理させる。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (status, body) =
+            http_request(port, "POST", "/api/replay/load", &default_load_body()).await;
+        assert_eq!(status, 503, "Lagged should map to 503; body={body}");
+        let json: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        assert_eq!(json["error"], "events lagged");
+        drop(engine_tx);
+    }
+
     #[tokio::test]
     async fn replay_load_rejects_empty_instrument_id() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
@@ -1104,16 +1477,37 @@ mod tests {
     // ── /api/replay/portfolio ────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn replay_portfolio_skeleton_returns_not_implemented() {
+    async fn replay_portfolio_returns_not_ready_before_fill() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
         let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, body) = http_request(port, "GET", "/api/replay/portfolio", "").await;
-        assert_eq!(status, 200, "skeleton should return 200; body={body}");
+        assert_eq!(status, 200, "should return 200 before any fill; body={body}");
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["status"], "not_implemented");
-        assert_eq!(json["phase"], "N1.16");
+        assert_eq!(json["status"], "not_ready");
+    }
+
+    #[tokio::test]
+    async fn replay_portfolio_returns_cached_snapshot_after_update() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        state.update_replay_portfolio(
+            "strat-001".to_string(),
+            "980000".to_string(),
+            "980000".to_string(),
+            "990000".to_string(),
+            1_704_268_800_000,
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (status, body) = http_request(port, "GET", "/api/replay/portfolio", "").await;
+        assert_eq!(status, 200, "should return 200 with cached data; body={body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["cash"], "980000");
+        assert_eq!(json["equity"], "990000");
+        assert_eq!(json["strategy_id"], "strat-001");
     }
 
     #[tokio::test]
@@ -1186,5 +1580,121 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, _) = http_request(port, "POST", "/api/replay/order", "not json").await;
         assert_eq!(status, 400);
+    }
+
+    // ── N1.14: MAX_REPLAY_INSTRUMENTS & reload ────────────────────────────────
+
+    fn load_body_for(instrument_id: &str) -> String {
+        serde_json::json!({
+            "instrument_id": instrument_id,
+            "start_date": "2024-01-04",
+            "end_date": "2024-01-31",
+            "granularity": "Trade",
+        })
+        .to_string()
+    }
+
+    /// Helper: spawn a mock engine that responds to N successive LoadReplayData
+    /// commands with ReplayDataLoaded, then sleeps.
+    fn spawn_mock_engine_multi_load(listener: TcpListener, responses: usize) {
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ws.next().await; // Hello
+            ws_send_ready(&mut ws).await;
+
+            for _ in 0..responses {
+                // Wait for a LoadReplayData command
+                let msg = ws.next().await;
+                if msg.is_none() {
+                    return;
+                }
+                let evt = serde_json::json!({
+                    "event": "ReplayDataLoaded",
+                    "strategy_id": "",
+                    "bars_loaded": 0u64,
+                    "trades_loaded": 0u64,
+                    "ts_event_ms": 1_700_000_000_000_i64,
+                });
+                ws.send(Message::Text(evt.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+    }
+
+    /// 5th distinct instrument is rejected with HTTP 400 and `max_instruments_exceeded`.
+    #[tokio::test]
+    async fn replay_load_rejects_fifth_instrument() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        // Need 4 successful loads before the 5th is rejected.
+        spawn_mock_engine_multi_load(ws_listener, 4);
+
+        let conn = connect_engine(ws_addr).await;
+        let (_engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Load 4 distinct instruments — all should succeed.
+        for i in 1..=4 {
+            let (status, body) = http_request(
+                port,
+                "POST",
+                "/api/replay/load",
+                &load_body_for(&format!("{i}30{i}.TSE")),
+            )
+            .await;
+            assert_eq!(status, 200, "instrument {i} should succeed; body={body}");
+        }
+
+        // 5th distinct instrument must fail.
+        let (status, body) =
+            http_request(port, "POST", "/api/replay/load", &load_body_for("9999.TSE")).await;
+        assert_eq!(
+            status, 400,
+            "5th distinct instrument must be rejected; body={body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"], "max_instruments_exceeded");
+        assert_eq!(json["max"].as_u64(), Some(4));
+    }
+
+    /// Reloading the same instrument does not count as a new entry.
+    #[tokio::test]
+    async fn replay_load_allows_reload_same_instrument() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        // Two loads for the same instrument.
+        spawn_mock_engine_multi_load(ws_listener, 2);
+
+        let conn = connect_engine(ws_addr).await;
+        let (_engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let (status1, body1) =
+            http_request(port, "POST", "/api/replay/load", &load_body_for("1301.TSE")).await;
+        assert_eq!(status1, 200, "1st load should succeed; body={body1}");
+
+        // Reload the same instrument — must not be rejected.
+        let (status2, body2) =
+            http_request(port, "POST", "/api/replay/load", &load_body_for("1301.TSE")).await;
+        assert_eq!(
+            status2, 200,
+            "reload of same instrument must succeed; body={body2}"
+        );
+
+        // loaded_instruments count must remain 1 (not 2).
+        let count = state.loaded_instruments.lock().await.len();
+        assert_eq!(
+            count, 1,
+            "loaded_instruments should have 1 entry after reload"
+        );
     }
 }

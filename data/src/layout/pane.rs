@@ -228,10 +228,14 @@ pub enum ContentKind {
     OrderEntry,
     OrderList,
     BuyingPower,
+    /// N1.11: Replay speed control pane skeleton.
+    /// TODO(N1.11-ui): 実際の UI 描画は N1.11 UI フェーズで実装する。
+    /// 現在は PaneKind enum への variant 追加のみ（iced コントロールバー pane skeleton）。
+    ReplayControl,
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 11] = [
+    pub const ALL: [ContentKind; 12] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -243,6 +247,7 @@ impl ContentKind {
         ContentKind::OrderEntry,
         ContentKind::OrderList,
         ContentKind::BuyingPower,
+        ContentKind::ReplayControl,
     ];
 }
 
@@ -260,6 +265,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::OrderEntry => "注文入力",
             ContentKind::OrderList => "注文一覧",
             ContentKind::BuyingPower => "買余力",
+            ContentKind::ReplayControl => "リプレイ速度",
         };
         write!(f, "{s}")
     }
@@ -290,8 +296,7 @@ impl PaneSetup {
             .map(|ti| ti.ticker.exchange.is_depth_client_aggr())
             .unwrap_or(is_client_aggr);
 
-        let basis =
-            match content_kind {
+        let basis = match content_kind {
                 ContentKind::HeatmapChart => {
                     let current = current_basis.and_then(|b| match b {
                         Basis::Time(tf) if exchange.supports_heatmap_timeframe(tf) => Some(b),
@@ -331,7 +336,9 @@ impl PaneSetup {
                 | ContentKind::TimeAndSales
                 | ContentKind::OrderEntry
                 | ContentKind::OrderList
-                | ContentKind::BuyingPower => None,
+                | ContentKind::BuyingPower
+                // N1.11: ReplayControl は ticker stream を必要としない
+                | ContentKind::ReplayControl => None,
             };
 
         let tick_multiplier = match content_kind {
@@ -356,7 +363,9 @@ impl PaneSetup {
             | ContentKind::Starter
             | ContentKind::OrderEntry
             | ContentKind::OrderList
-            | ContentKind::BuyingPower => current_tick_multiplier,
+            | ContentKind::BuyingPower
+            // N1.11: ReplayControl は tick multiplier 不要
+            | ContentKind::ReplayControl => current_tick_multiplier,
         };
 
         let price_step = match tick_multiplier {

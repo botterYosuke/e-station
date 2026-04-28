@@ -75,3 +75,40 @@ class TestInstrumentCachePersistence:
         cache = InstrumentCache(cache_path=cache_path)
         # 壊れていても fallback で動作
         assert cache.get_lot_size("9999.TSE") == 100
+
+
+class TestM5PersistFailureHandling:
+    """M-5: _persist の例外で in-memory が dirty にならない。"""
+
+    def test_oserror_during_persist_does_not_corrupt_in_memory(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """open() が OSError → warning ログ + in-memory state は変更されない。
+        get_lot_size() は fallback を返す。"""
+        from unittest.mock import patch
+
+        cache_path = tmp_path / "master.json"
+        cache = InstrumentCache(cache_path=cache_path)
+        # 既存値を入れて永続化成功させる
+        cache.update_from_live("7203.TSE", lot_size=100, price_precision=1)
+        # 以後の open を OSError にする
+        import builtins
+
+        real_open = builtins.open
+
+        def failing_open(path, *args, **kwargs):
+            # tmp ファイルへの write open のみ失敗させる
+            if str(path).endswith(".tmp"):
+                raise OSError("synthetic disk full")
+            return real_open(path, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=failing_open):
+            # exception が漏れないこと
+            cache.update_from_live("9984.TSE", lot_size=200, price_precision=1)
+
+        # in-memory に新エントリが反映されていない (M-5)
+        # → get_lot_size("9984.TSE") は fallback (100) を返す
+        result = cache.get_lot_size("9984.TSE")
+        assert result == 100
+        # 既存エントリは残っている
+        assert cache.get_lot_size("7203.TSE") == 100

@@ -148,6 +148,10 @@ pub enum EngineEvent {
 
 **venue フィールド（H1）**: ポジション系イベントには `venue` を必須化。値は IPC スキーマ安定名（`"tachibana"` / `"replay"`）のみ。
 
+**BacktestEngine 内部 venue と外向け IPC venue の分離 (H-H)**: BacktestEngine 内部の venue は instrument_id 由来（例 `"TSE"`）で扱い、IPC で送出する `EngineStarted.account_id` / `Position*` / `Order*` の venue タグには `_IPC_VENUE_TAG = "replay"` 定数を必ず使う。両者は別空間。`engine_runner.py` 冒頭の `_IPC_VENUE_TAG` を参照すること。
+
+**`EngineEvent::EngineError` の二役 (H-F)**: 同一 wire 形を **(1) handshake 切断 frame** と **(2) StartEngine 例外通知 outbox event** の両方が共有する。`strategy_id == None` で (1) 接続レベルエラー、`strategy_id == Some(_)` で (2) strategy 固有 outbox event を表す。受信側 (Rust) は `strategy_id` で分岐し、(1) は接続を切る・(2) は接続維持して該当 strategy state machine にだけ反映する。
+
 **clock 注入（H4 / Q3 決定）**: `AdvanceClock` Command は **実装しない**。`BacktestEngine.run(start, end)` で自走（[open-questions.md Q3](./open-questions.md#q3)）。
 
 ## 4. データフロー（replay モード）

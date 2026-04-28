@@ -88,6 +88,11 @@ static CONTROL_API_RX: std::sync::OnceLock<
     std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<replay_api::ControlApiCommand>>>,
 > = std::sync::OnceLock::new();
 
+/// Shared REPLAY API state — used in `Message::ReplayBuyingPower` to cache the
+/// portfolio snapshot for `GET /api/replay/portfolio` without a tokio await.
+static REPLAY_API_STATE: std::sync::OnceLock<Arc<replay_api::ReplayApiState>> =
+    std::sync::OnceLock::new();
+
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
 /// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
 /// here, before the connection is published to `ENGINE_CONNECTION_TX`,
@@ -604,9 +609,16 @@ fn main() {
                     cli_args.mode.as_str(),
                 ))
             };
-            if let Some(rx) =
-                replay_api::spawn(rt.handle(), Some(order_api_state), Some(replay_api_state))
-            {
+            // N1.16: cache Arc for Message::ReplayBuyingPower handler.
+            REPLAY_API_STATE.set(Arc::clone(&replay_api_state)).ok();
+            // N1.6: AgentApiState はインメモリ narrative ストア。
+            let agent_api_state = Arc::new(api::agent_api::AgentApiState::new());
+            if let Some(rx) = replay_api::spawn(
+                rt.handle(),
+                Some(order_api_state),
+                Some(replay_api_state),
+                Some(agent_api_state),
+            ) {
                 CONTROL_API_RX.set(std::sync::Mutex::new(Some(rx))).ok();
             }
             std::thread::Builder::new()
@@ -771,6 +783,14 @@ enum Message {
         cash_shortfall: i64,
         credit_available: i64,
         ts_ms: i64,
+    },
+    /// N1.16: `EngineEvent::ReplayBuyingPower` — REPLAY 仮想ポートフォリオ更新。
+    ReplayBuyingPower {
+        strategy_id: String,
+        cash: String,
+        buying_power: String,
+        equity: String,
+        ts_event_ms: i64,
     },
     /// `EngineEvent::Error` — routed to the BuyingPower panel if `request_id`
     /// matches the pending buying-power request, otherwise silently ignored.
@@ -997,6 +1017,20 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             cash_shortfall,
             credit_available,
             ts_ms,
+        }),
+        // N1.16: REPLAY 仮想ポートフォリオ更新イベント
+        EngineEvent::ReplayBuyingPower {
+            strategy_id,
+            cash,
+            buying_power,
+            equity,
+            ts_event_ms,
+        } => Some(Message::ReplayBuyingPower {
+            strategy_id,
+            cash,
+            buying_power,
+            equity,
+            ts_event_ms,
         }),
         EngineEvent::Error {
             request_id,
@@ -1873,6 +1907,31 @@ impl Flowsurface {
                     ts_ms,
                 );
             }
+            // N1.16: REPLAY 仮想ポートフォリオ更新 — dashboard に配布 + HTTP キャッシュ更新
+            Message::ReplayBuyingPower {
+                strategy_id,
+                cash,
+                buying_power,
+                equity,
+                ts_event_ms,
+            } => {
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut().distribute_replay_buying_power(
+                    main_window,
+                    cash.clone(),
+                    equity.clone(),
+                    ts_event_ms,
+                );
+                if let Some(state) = REPLAY_API_STATE.get() {
+                    state.update_replay_portfolio(
+                        strategy_id,
+                        cash,
+                        buying_power,
+                        equity,
+                        ts_event_ms,
+                    );
+                }
+            }
             // Phase U3: IpcError → route to BuyingPower panel if request_id matches
             Message::IpcError {
                 request_id,
@@ -2399,6 +2458,14 @@ impl Flowsurface {
                     }
                     ControlApiCommand::ToggleVenue { venue } if venue == TACHIBANA_VENUE_NAME => {
                         return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Auto));
+                    }
+                    ControlApiCommand::AutoGenerateReplayPanes {
+                        instrument_id,
+                        strategy_id: _,
+                    } => {
+                        let main_window_id = self.main_window.id;
+                        let dashboard = self.active_dashboard_mut();
+                        dashboard.auto_generate_replay_panes(main_window_id, &instrument_id);
                     }
                     _ => {}
                 }

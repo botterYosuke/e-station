@@ -206,6 +206,107 @@ class TestDeterminism:
         assert r1.trades_loaded == r2.trades_loaded
 
 
+class TestHHIpcVenueTag:
+    """H-H: 外向け IPC EngineStarted.account_id は ``replay-`` prefix を使う。"""
+
+    def test_engine_started_account_id_uses_ipc_venue_tag(self) -> None:
+        events, on_event = _collect_events()
+        runner = NautilusRunner()
+        runner.start_backtest_replay(
+            strategy_id="buy-and-hold",
+            instrument_id="1301.TSE",
+            start_date="2024-01-04",
+            end_date="2024-01-05",
+            granularity="Trade",
+            initial_cash=1_000_000,
+            base_dir=FIXTURES,
+            on_event=on_event,
+        )
+        started = next(e for e in events if e["event"] == "EngineStarted")
+        # H-H: 内部 venue (TSE) ではなく外向け IPC venue tag (replay) を使う
+        assert started["account_id"].startswith("replay-"), (
+            f"account_id must use _IPC_VENUE_TAG, got {started['account_id']!r}"
+        )
+
+
+class TestHCEngineStartedFailureRecovery:
+    """H-C: ``add_venue`` 等が raise しても EngineStopped が補完送出される。"""
+
+    def test_emit_engine_stopped_when_load_trades_raises(self) -> None:
+        from unittest.mock import patch
+
+        events, on_event = _collect_events()
+        runner = NautilusRunner()
+
+        # try ブロック内で raise させるため load_trades を mock。EngineStarted 送出後・
+        # ReplayDataLoaded 送出前のフェーズで例外が発生する状況を再現する。
+        with patch(
+            "engine.nautilus.engine_runner.load_trades",
+            side_effect=RuntimeError("synthetic load_trades failure"),
+        ):
+            with pytest.raises(RuntimeError, match="synthetic load_trades failure"):
+                runner.start_backtest_replay(
+                    strategy_id="hc-strategy",
+                    instrument_id="1301.TSE",
+                    start_date="2024-01-04",
+                    end_date="2024-01-05",
+                    granularity="Trade",
+                    initial_cash=1_000_000,
+                    base_dir=FIXTURES,
+                    on_event=on_event,
+                )
+
+        kinds = [e["event"] for e in events]
+        # H-C: EngineStarted の後に EngineStopped 補完が emit される
+        assert "EngineStarted" in kinds
+        assert "EngineStopped" in kinds
+        assert kinds.index("EngineStarted") < kinds.index("EngineStopped")
+        # ReplayDataLoaded は出ない (load フェーズで失敗)
+        assert "ReplayDataLoaded" not in kinds
+        stopped = next(e for e in events if e["event"] == "EngineStopped")
+        assert stopped["final_equity"] == "0"
+        assert stopped["strategy_id"] == "hc-strategy"
+
+
+class TestHICollectFillDataDeterminism:
+    """H-I: 同 ts 内も (ts, price) lex sort で安定する。"""
+
+    def test_collect_fill_data_lex_sort_when_ts_collide(self) -> None:
+        from engine.nautilus.engine_runner import _collect_fill_data
+
+        # 同 ts のフィル 3 件 + 別 ts 1 件
+        class _O:
+            def __init__(self, ts, px, closed=True):
+                self.ts_last = ts
+                self.avg_px = px
+                self.is_closed = closed
+
+        class _Cache:
+            def __init__(self, orders):
+                self._orders = orders
+
+            def orders(self):
+                return self._orders
+
+        class _Kernel:
+            def __init__(self, orders):
+                self.cache = _Cache(orders)
+
+        class _FakeEngine:
+            def __init__(self, orders):
+                self.kernel = _Kernel(orders)
+
+        # 入力順序を変えて 2 回呼んでもビット一致するはず
+        orders_a = [_O(100, "3"), _O(100, "1"), _O(100, "2"), _O(50, "9")]
+        orders_b = [_O(50, "9"), _O(100, "2"), _O(100, "1"), _O(100, "3")]
+        ts_a, px_a = _collect_fill_data(_FakeEngine(orders_a), "x")
+        ts_b, px_b = _collect_fill_data(_FakeEngine(orders_b), "x")
+        assert (ts_a, px_a) == (ts_b, px_b)
+        # 期待: ts ascending, 同 ts 内は price ascending
+        assert ts_a == [50, 100, 100, 100]
+        assert px_a == ["9", "1", "2", "3"]
+
+
 class TestModeValidation:
     def test_validate_start_engine_rejects_live_backtest(self) -> None:
         """mode='live' で StartEngine.engine='Backtest' は engine.mode で拒否される。

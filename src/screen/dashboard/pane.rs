@@ -141,6 +141,22 @@ impl State {
         }
     }
 
+    /// N1.15: Create a REPLAY OrderList pane (shows "⏪ REPLAY" banner).
+    pub fn new_replay_order_list() -> Self {
+        Self {
+            content: Content::OrderList(panel::orders::OrdersPanel::new_replay()),
+            ..Default::default()
+        }
+    }
+
+    /// N1.16: Create a REPLAY BuyingPower pane (shows "⏪ REPLAY" banner).
+    pub fn new_replay_buying_power() -> Self {
+        Self {
+            content: Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new_replay()),
+            ..Default::default()
+        }
+    }
+
     pub fn from_config(
         content: Content,
         streams: Vec<PersistStreamKind>,
@@ -422,7 +438,9 @@ impl State {
                 ContentKind::Starter
                 | ContentKind::OrderEntry
                 | ContentKind::OrderList
-                | ContentKind::BuyingPower => {
+                | ContentKind::BuyingPower
+                // N1.11: ReplayControl は ticker ストリーム不要のコントロール pane
+                | ContentKind::ReplayControl => {
                     debug_assert!(
                         false,
                         "set_content_and_streams called for non-stream content {kind:?}; \
@@ -639,7 +657,9 @@ impl State {
             | Content::Kline { .. }
             | Content::TimeAndSales(_)
             | Content::Ladder(_)
-            | Content::Comparison(_) => None,
+            | Content::Comparison(_)
+            // N1.11: ReplayControl はタイトルなし（TODO: 将来 "リプレイ速度" を返す）
+            | Content::ReplayControl => None,
         };
         if let Some(title) = order_panel_title {
             top_left_buttons = top_left_buttons.push(
@@ -1161,6 +1181,20 @@ impl State {
                     tickers_table,
                 )
             }
+            // N1.11: ReplayControl skeleton — TODO(N1.11-ui): 実際の速度コントロール UI を実装する。
+            Content::ReplayControl => {
+                let base: Element<_> =
+                    center(text("Replay Control — TODO(N1.11-ui)").size(14)).into();
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
         };
 
         match &self.status {
@@ -1243,6 +1277,8 @@ impl State {
                         | ContentKind::OrderEntry
                         | ContentKind::OrderList
                         | ContentKind::BuyingPower
+                        // N1.11: ReplayControl は ticker 選択を必要としない
+                        | ContentKind::ReplayControl
                 ) {
                     self.streams = ResolvedStream::waiting(vec![]);
                     let modal = Modal::MiniTickersList(MiniPanel::new());
@@ -1912,7 +1948,8 @@ impl State {
             Content::Starter
             | Content::OrderEntry(_)
             | Content::OrderList(_)
-            | Content::BuyingPower(_) => None,
+            | Content::BuyingPower(_)
+            | Content::ReplayControl => None,
             Content::Comparison(chart) => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
@@ -1944,7 +1981,8 @@ impl State {
             Content::Starter
             | Content::OrderEntry(_)
             | Content::OrderList(_)
-            | Content::BuyingPower(_) => None,
+            | Content::BuyingPower(_)
+            | Content::ReplayControl => None,
         }
     }
 
@@ -2036,6 +2074,9 @@ pub enum Content {
     OrderList(panel::orders::OrdersPanel),
     /// Buying Power panel (U3)
     BuyingPower(BuyingPowerPanel),
+    /// N1.11: Replay speed control pane skeleton.
+    /// TODO(N1.11-ui): 実際の UI 描画は N1.11 UI フェーズで実装する。
+    ReplayControl,
 }
 
 impl Content {
@@ -2244,6 +2285,8 @@ impl Content {
             ContentKind::OrderEntry => Content::OrderEntry(OrderEntryPanel::new()),
             ContentKind::OrderList => Content::OrderList(panel::orders::OrdersPanel::new()),
             ContentKind::BuyingPower => Content::BuyingPower(BuyingPowerPanel::new()),
+            // N1.11: skeleton のみ — 実際の UI は TODO(N1.11-ui)
+            ContentKind::ReplayControl => Content::ReplayControl,
         }
     }
 
@@ -2257,7 +2300,8 @@ impl Content {
             Content::Starter
             | Content::OrderEntry(_)
             | Content::OrderList(_)
-            | Content::BuyingPower(_) => None,
+            | Content::BuyingPower(_)
+            | Content::ReplayControl => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
         }
     }
@@ -2337,7 +2381,8 @@ impl Content {
             | Content::ShaderHeatmap { .. }
             | Content::OrderEntry(_)
             | Content::OrderList(_)
-            | Content::BuyingPower(_) => {
+            | Content::BuyingPower(_)
+            | Content::ReplayControl => {
                 panic!("indicator reorder on {} pane", self)
             }
         }
@@ -2383,7 +2428,8 @@ impl Content {
             | Content::Comparison(_)
             | Content::OrderEntry(_)
             | Content::OrderList(_)
-            | Content::BuyingPower(_) => None,
+            | Content::BuyingPower(_)
+            | Content::ReplayControl => None,
         }
     }
 
@@ -2448,6 +2494,7 @@ impl Content {
             Content::OrderEntry(_) => ContentKind::OrderEntry,
             Content::OrderList(_) => ContentKind::OrderList,
             Content::BuyingPower(_) => ContentKind::BuyingPower,
+            Content::ReplayControl => ContentKind::ReplayControl,
         }
     }
 
@@ -2472,7 +2519,9 @@ impl Content {
             Content::Starter
             | Content::OrderEntry(_)
             | Content::OrderList(_)
-            | Content::BuyingPower(_) => true,
+            | Content::BuyingPower(_)
+            // N1.11: ReplayControl は常に initialized（表示するコンテンツが固定）
+            | Content::ReplayControl => true,
         }
     }
 }
@@ -2495,6 +2544,7 @@ impl PartialEq for Content {
                 | (Content::OrderEntry(_), Content::OrderEntry(_))
                 | (Content::OrderList(_), Content::OrderList(_))
                 | (Content::BuyingPower(_), Content::BuyingPower(_))
+                | (Content::ReplayControl, Content::ReplayControl)
         )
     }
 }

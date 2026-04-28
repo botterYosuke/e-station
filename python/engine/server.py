@@ -68,7 +68,11 @@ from engine.schemas import (
     Ready,
     SubmitOrderRequest,
 )
-from engine.mode import validate_start_engine
+from engine.mode import (
+    ModeMismatchError,
+    UnknownEngineKindError,
+    validate_start_engine,
+)
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +278,13 @@ class DataEngineServer:
         # N1.4: 走行中 NautilusRunner マッピング (strategy_id → runner)。
         # StartEngine で登録、StopEngine から参照、完了時に pop される。
         self._engine_tasks: dict[str, Any] = {}
+
+        # N1.16: REPLAY 仮想ポートフォリオ（CLMZanKaiKanougaku を呼ばない純粋 Python 実装）。
+        # LoadReplayData 受信時に initial_cash で reset() する。
+        from decimal import Decimal as _Decimal
+        from engine.nautilus.portfolio_view import PortfolioView as _PortfolioView
+        self._replay_portfolio = _PortfolioView(_Decimal("1000000"))
+        self._replay_strategy_id: str = ""
 
         self._outbox = _Outbox(self._outbox_event.set)
 
@@ -772,6 +783,22 @@ class DataEngineServer:
         venue = msg.get("venue", "")
         raw_order = msg.get("order", {})
 
+        # M-7: venue=="replay" は N1.5 で実装する仮想注文経路。N1.4 段階では
+        # _workers に "replay" が登録されないため `unknown_venue` で reject されてしまうが、
+        # 「未実装」の意図を Rust 側に明示するため専用 reason_code で OrderRejected を返す。
+        if venue == "replay":
+            cid = (raw_order or {}).get("client_order_id", "") if isinstance(raw_order, dict) else ""
+            self._outbox.append(
+                {
+                    "event": "OrderRejected",
+                    "client_order_id": cid,
+                    "reason_code": "REPLAY_NOT_IMPLEMENTED",
+                    "reason_text": "REPLAY 仮想注文は N1.5 で実装",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            return
+
         if venue not in self._workers:
             self._outbox.append(
                 {
@@ -850,9 +877,7 @@ class DataEngineServer:
             )
             return
 
-        # 発注処理（T0.4）
-        import time
-
+        # 発注処理（T0.4） — `time` はモジュール冒頭で import 済み
         envelope = NautilusOrderEnvelope.model_validate(order.model_dump())
         # OrderSubmitted を先行して発火（nautilus 流の 2 段イベント）
         self._outbox.append(
@@ -1273,10 +1298,63 @@ class DataEngineServer:
                     "message": f"canceled={result.canceled_count} failed={result.failed_count}",
                 })
 
+    async def _do_get_order_list_replay(self, msg: dict) -> None:
+        """N1.15: GetOrderList{venue='replay'} — WAL から注文一覧を返す。
+
+        tachibana_orders_replay.jsonl を読み、phase='submit' のエントリのみを
+        OrderRecordWire 形式の dict に変換して OrderListUpdated として返す。
+        WAL が存在しない場合は空リストを返す。
+        """
+        import json
+
+        req_id = msg.get("request_id", "")
+        wal_path = self._cache_dir / "tachibana_orders_replay.jsonl"
+
+        orders = []
+        if wal_path.exists():
+            with open(wal_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("phase") != "submit":
+                        continue
+                    qty = entry.get("quantity", "0")
+                    orders.append({
+                        "client_order_id": entry.get("client_order_id", ""),
+                        "venue_order_id": "",
+                        "instrument_id": entry.get("instrument_id", ""),
+                        "order_side": entry.get("order_side", ""),
+                        "order_type": entry.get("order_type", ""),
+                        "quantity": qty,
+                        "filled_qty": "0",
+                        "leaves_qty": qty,
+                        "price": entry.get("price"),
+                        "trigger_price": None,
+                        "time_in_force": "DAY",
+                        "expire_time_ns": None,
+                        "status": "SUBMITTED",
+                        "ts_event_ms": entry.get("ts", 0),
+                    })
+
+        self._outbox.append({
+            "event": "OrderListUpdated",
+            "request_id": req_id,
+            "orders": orders,
+        })
+
     async def _do_get_order_list(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         raw_filter = msg.get("filter", {})
+
+        # N1.15: replay venue は WAL から返す（_workers に登録されていないため先に分岐）
+        if venue == "replay":
+            return await self._do_get_order_list_replay(msg)
 
         if venue not in self._workers:
             self._outbox.append({
@@ -1355,6 +1433,10 @@ class DataEngineServer:
     async def _do_get_buying_power(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
+        # N1.16: REPLAY モードでは CLMZanKaiKanougaku を呼ばない（D9.6 ガード）。
+        if venue == "replay":
+            await self._do_get_buying_power_replay(msg)
+            return
         if venue not in self._workers:
             self._outbox.append({
                 "event": "Error",
@@ -1412,6 +1494,16 @@ class DataEngineServer:
             "credit_available": credit_result.available_amount,
             "ts_ms": ts_ms,
         })
+
+    async def _do_get_buying_power_replay(self, msg: dict) -> None:
+        """REPLAY 余力: CLMZanKaiKanougaku を呼ばずに PortfolioView から返す（D9.6 明示ガード）。"""
+        req_id = msg.get("request_id", "")
+        # CLMZanKaiKanougaku は呼ばない（D9.6 明示ガード）
+        ipc_dict = self._replay_portfolio.to_ipc_dict(
+            strategy_id=self._replay_strategy_id,
+        )
+        ipc_dict["request_id"] = req_id
+        self._outbox.append(ipc_dict)
 
     # ------------------------------------------------------------------
     # Fetch operation helpers (each is an async coroutine producing one event)
@@ -2080,7 +2172,7 @@ class DataEngineServer:
 
         try:
             validate_start_engine(self._mode, engine_kind)
-        except ValueError as exc:
+        except ModeMismatchError as exc:
             # H3: バリデーション失敗は Error{request_id} のみ送出。
             # EngineError は接続レベル専用 (auth_failed / schema_mismatch) に限定する。
             self._outbox.append(
@@ -2089,6 +2181,31 @@ class DataEngineServer:
                     "request_id": request_id,
                     "code": "mode_mismatch",
                     "message": str(exc),
+                }
+            )
+            return
+        except UnknownEngineKindError as exc:
+            # M-10: 不明な engine kind は別 code で返す
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "unknown_engine_kind",
+                    "message": str(exc),
+                }
+            )
+            return
+
+        # M-14: 同一 strategy_id が既に走行中なら早期 reject (race guard)。
+        # 連投で _engine_tasks を上書きすると、先行 runner ハンドルを失い StopEngine が
+        # 効かなくなる。
+        if strategy_id in self._engine_tasks:
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "engine_already_running",
+                    "message": f"engine for strategy_id={strategy_id!r} is already running",
                 }
             )
             return

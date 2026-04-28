@@ -30,22 +30,35 @@ def order_dispatch_target(mode: Mode) -> Literal["live", "replay"]:
     return mode
 
 
+class ModeMismatchError(ValueError):
+    """`Hello.mode` と `StartEngine.engine` の整合不一致 (M-10)."""
+
+
+class UnknownEngineKindError(ValueError):
+    """`StartEngine.engine` が `"Backtest"` / `"Live"` 以外 (M-10)."""
+
+
 def validate_start_engine(mode: Mode, engine_kind: str) -> None:
     """Hello.mode と `StartEngine.engine` の整合チェック。
 
-    - mode=replay でなければ `engine="Backtest"` は不可
-    - mode=live でなければ `engine="Live"` は不可
+    - mode=replay でなければ `engine="Backtest"` は不可 → ``ModeMismatchError``
+    - mode=live でなければ `engine="Live"` は不可 → ``ModeMismatchError``
+    - 上記以外の engine_kind → ``UnknownEngineKindError``
+
+    M-10: 呼出側 (server.py) で別 ``code`` (`mode_mismatch` / `unknown_engine_kind`) に
+    分岐するため例外型を分けた。``ModeMismatchError``・``UnknownEngineKindError`` は
+    ``ValueError`` のサブクラスなので既存の ``except ValueError`` ハンドラとも互換。
     """
     if engine_kind == "Backtest" and mode != "replay":
-        raise ValueError(
+        raise ModeMismatchError(
             f"StartEngine.engine='Backtest' requires mode='replay', got mode={mode!r}"
         )
     if engine_kind == "Live" and mode != "live":
-        raise ValueError(
+        raise ModeMismatchError(
             f"StartEngine.engine='Live' requires mode='live', got mode={mode!r}"
         )
     if engine_kind not in ("Backtest", "Live"):
-        raise ValueError(f"unknown engine kind: {engine_kind!r}")
+        raise UnknownEngineKindError(f"unknown engine kind: {engine_kind!r}")
 
 
 def nautilus_capabilities(mode: Mode) -> dict[str, bool]:
