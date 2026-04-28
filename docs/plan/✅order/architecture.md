@@ -739,15 +739,14 @@ GTC / IOC / FOK / GTC は立花が対応しないため逆写像不要。
 
 **`account_type` 値**（`sZyoutoekiKazeiC` への写像）— **省略時はログイン応答の `sZyoutoekiKazeiC` をパススルー**（口座属性と一致させる意図）:
 
-> **B-M4 マニュアルで pin 必須（Tpre.5）**: 下表の値は flowsurface コメント（"1=特定, 3=一般, 5=NISA, 6=N成長"）と食い違っている。**Tpre.5 で立花マニュアル §`#CLMKabuNewOrder` の `sZyoutoekiKazeiC` 定義値を正本として pin** したうえで、本表を確定する。本表は pin 完了までは暫定値であり、レビューチェックでは「マニュアル参照済みか」を確認すること。
+> **B-M4 確定（2026-04-28）**: 立花マニュアル §`CLMKabuNewOrder` の `sZyoutoekiKazeiC` 定義値を正本として確定。源泉徴収区分はこのフィールドで区別しない（ログイン応答の別フィールドで管理）。
 
-| tag 値 | 立花値（**マニュアルで pin 必須（Tpre.5）**） | 意味 |
+| tag 値 | 立花値 | 意味 |
 |---|---|---|
-| `account_type=specific_with_withholding` | `"1"` | 特定預り（源泉徴収あり） |
-| `account_type=specific_without_withholding` | `"3"` | 特定預り（源泉徴収なし） |
-| `account_type=general` | `"0"` | 一般預り |
-| `account_type=nisa_growth` | `"5"` | NISA 成長投資枠（Phase O4） |
-| `account_type=nisa_tsumitate` | `"6"` | NISA つみたて投資枠（Phase O4） |
+| `account_type=specific` | `"1"` | 特定口座 |
+| `account_type=general` | `"3"` | 一般口座 |
+| `account_type=nisa` | `"5"` | 一般NISA（2024年以降売却のみ可） |
+| `account_type=nisa_growth` | `"6"` | NISA成長投資枠（Phase O4） |
 
 **その他**:
 

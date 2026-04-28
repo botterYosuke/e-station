@@ -18,6 +18,8 @@
 | C-R2-L1 | EVENT URL 構築時に `\n` / `\t` / `\x01-\x03` 等の制御文字を reject（除去ではなく reject に統一）（architecture.md §6） | `python/tests/test_event_url_sanitize.py` | `test_build_event_url_rejects_control_char_in_value` / `test_build_event_url_rejects_control_char_in_key` / `test_build_event_url_does_not_silently_strip` | ✅ 実装済み (O0) |
 | C-R5-H2 | `SECOND_PASSWORD_INVALID` が連続 N 回（デフォルト 3 回）で lockout 状態に遷移し、`SubmitOrder` / `ModifyOrder` / `CancelOrder` を 423 + `reason_code="SECOND_PASSWORD_LOCKED"` で reject する（spec.md §5.2） | `python/tests/test_second_password_lockout.py` | `test_submit_rejects_when_locked_out` / `test_three_invalid_via_server_triggers_lockout_response` / `test_lockout_expires_after_1800_seconds` | ✅ 実装済み (O0) |
 
+| B-M4 | `_ACCOUNT_TYPE_MAP` の各キー・値がマニュアル確定値（`"1"`=特定, `"3"`=一般, `"5"`=一般NISA, `"6"`=NISA成長投資枠）と一致し、無効値 `"0"` および旧タグ名が存在しない | `python/tests/test_tachibana_order_mapping.py` | `test_account_type_map_matches_manual` | ✅ 実装済み (2026-04-28) |
+
 ## 備考
 
 - 上記テスト関数名欄が「TBD」のものは対応テストが未実装。実装時に本表を更新すること。

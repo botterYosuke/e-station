@@ -129,6 +129,27 @@ def test_tags_cash_maps_to_0():
 
 
 # ---------------------------------------------------------------------------
+# B-M4: _ACCOUNT_TYPE_MAP がマニュアル確定値と一致すること
+# ---------------------------------------------------------------------------
+
+
+def test_account_type_map_matches_manual():
+    """B-M4: sZyoutoekiKazeiC の値がマニュアル確定値と一致することを assert。"""
+    from engine.exchanges.tachibana_orders import _ACCOUNT_TYPE_MAP
+
+    assert _ACCOUNT_TYPE_MAP["account_type=specific"] == "1"
+    assert _ACCOUNT_TYPE_MAP["account_type=general"] == "3"
+    assert _ACCOUNT_TYPE_MAP["account_type=nisa"] == "5"
+    assert _ACCOUNT_TYPE_MAP["account_type=nisa_growth"] == "6"
+    # 旧タグ名が存在しないこと
+    assert "account_type=specific_with_withholding" not in _ACCOUNT_TYPE_MAP
+    assert "account_type=specific_without_withholding" not in _ACCOUNT_TYPE_MAP
+    assert "account_type=nisa_tsumitate" not in _ACCOUNT_TYPE_MAP
+    # "0" が値として存在しないこと
+    assert "0" not in _ACCOUNT_TYPE_MAP.values()
+
+
+# ---------------------------------------------------------------------------
 # account_type: session fallback
 # ---------------------------------------------------------------------------
 

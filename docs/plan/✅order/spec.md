@@ -166,7 +166,7 @@ Python に渡す前に **Rust 側で**早期に弾く:
   "trigger_type": null,
   "post_only": false,
   "reduce_only": false,
-  "tags": ["cash_margin=cash", "account_type=specific_with_withholding"]
+  "tags": ["cash_margin=cash", "account_type=specific"]
 }
 ```
 

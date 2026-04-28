@@ -149,13 +149,13 @@ def test_account_type_map_matches_manual():
 
 ## 7. 受け入れ条件
 
-- [ ] `_ACCOUNT_TYPE_MAP` にキー `account_type=specific_with_withholding` が存在しない
-- [ ] `_ACCOUNT_TYPE_MAP` に値 `"0"` が存在しない
-- [ ] `_ACCOUNT_TYPE_MAP["account_type=general"] == "3"`
-- [ ] `_ACCOUNT_TYPE_MAP["account_type=nisa"] == "5"`
-- [ ] `_ACCOUNT_TYPE_MAP["account_type=nisa_growth"] == "6"`
-- [ ] `test_account_type_map_matches_manual` が PASS
-- [ ] `uv run pytest python/tests/ -q` 全緑
-- [ ] `architecture.md §10.4` の B-M4 注記が「確定（2026-04-28）」になっている
-- [ ] `src/api/order_api.rs` に旧タグ名が存在しない
-- [ ] `invariant-tests.md` に B-M4 不変条件エントリが追加されている
+- [x] ✅ `_ACCOUNT_TYPE_MAP` にキー `account_type=specific_with_withholding` が存在しない
+- [x] ✅ `_ACCOUNT_TYPE_MAP` に値 `"0"` が存在しない
+- [x] ✅ `_ACCOUNT_TYPE_MAP["account_type=general"] == "3"`
+- [x] ✅ `_ACCOUNT_TYPE_MAP["account_type=nisa"] == "5"`
+- [x] ✅ `_ACCOUNT_TYPE_MAP["account_type=nisa_growth"] == "6"`
+- [x] ✅ `test_account_type_map_matches_manual` が PASS
+- [x] ✅ `uv run pytest python/tests/ -q` 全緑
+- [x] ✅ `architecture.md §10.4` の B-M4 注記が「確定（2026-04-28）」になっている
+- [x] ✅ `src/api/order_api.rs` に旧タグ名が存在しない
+- [x] ✅ `invariant-tests.md` に B-M4 不変条件エントリが追加されている

@@ -2296,7 +2296,7 @@ mod tests {
             "time_in_force": "DAY",
             "post_only": false,
             "reduce_only": false,
-            "tags": ["account_type=specific_with_withholding", "cash_margin=cash"]
+            "tags": ["account_type=specific", "cash_margin=cash"]
         })
         .to_string();
 
@@ -2309,7 +2309,7 @@ mod tests {
             "time_in_force": "DAY",
             "post_only": false,
             "reduce_only": false,
-            "tags": ["cash_margin=cash", "account_type=specific_with_withholding"]
+            "tags": ["cash_margin=cash", "account_type=specific"]
         })
         .to_string();
 
@@ -3326,7 +3326,7 @@ mod tests {
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // First request: tags in order [cash_margin=cash, account_type=specific_with_withholding]
+        // First request: tags in order [cash_margin=cash, account_type=specific]
         let body1 = serde_json::json!({
             "client_order_id": cid,
             "instrument_id": "7203.TSE",
@@ -3340,7 +3340,7 @@ mod tests {
             "expire_time": null,
             "post_only": false,
             "reduce_only": false,
-            "tags": ["cash_margin=cash", "account_type=specific_with_withholding"]
+            "tags": ["cash_margin=cash", "account_type=specific"]
         })
         .to_string();
 
@@ -3358,7 +3358,7 @@ mod tests {
             "expire_time": null,
             "post_only": false,
             "reduce_only": false,
-            "tags": ["account_type=specific_with_withholding", "cash_margin=cash"]
+            "tags": ["account_type=specific", "cash_margin=cash"]
         })
         .to_string();
 
