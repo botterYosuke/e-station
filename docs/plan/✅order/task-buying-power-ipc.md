@@ -114,7 +114,7 @@ Event::BuyingPowerUpdated {
 - ✅ Step 4: main.rs ハンドラ実装（BuyingPowerAction IPC 送信 + BuyingPowerUpdated 受信）
 - ✅ Step 5: ラウンドトリップテスト追加（schema_v2_1_roundtrip.rs / test_buying_power_ipc.py）
 - ✅ Acceptance criteria 全項目確認（cargo test / pytest / clippy / ipc-schema-check 全緑）
-- [ ] review-fix-loop 完了
+- ✅ review-fix-loop 完了
 
 ### Ladder ヘッダ追加（fix-ladder-header-2026-04-28）
 
@@ -125,6 +125,7 @@ Event::BuyingPowerUpdated {
 - ✅ header_geo（背景＋境界線＋ラベル）をオーバーレイとして描画
 - ✅ 3 つのユニットテスト追加・全 PASS（mid_screen_y / build_price_grid None / narrow_pane）
 - ✅ cargo test / cargo clippy 全緑
+- ✅ review-fix-loop 完了（3ラウンド、MEDIUM+ ゼロ収束）
 
 ### 新たな知見・設計判断・Tips
 

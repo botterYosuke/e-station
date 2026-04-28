@@ -316,3 +316,43 @@ None => {
 - ヘッダのトグル設定（`Config` への追加）: 常時表示で十分
 - ヘッダ行クリックでのソート: Ladder は板表示専用であり不要
 - 英語ラベル: 現状日本株向け UI のため日本語を採用
+
+---
+
+## 実装結果・レビュー反映（2026-04-28）
+
+### 計画からの差分
+
+| 項目 | 計画 | 実際 |
+|------|------|------|
+| `HEADER_HEIGHT` | `= ROW_HEIGHT` | `= 16.0`（独立リテラル）。ROW_HEIGHT と値は同じだが意図的に分離し、将来の変更が互いに影響しないよう明示的にコメントを付した |
+| テーマ変更時のキャッシュクリア | 計画書では「`Panel::invalidate` 経由で自動クリアされる」として追加実装不要と記載 | **修正**: `pane.rs::update_theme` が `Content::Ladder` を処理していなかった（HIGH 指摘）。`Content::Ladder(Some(panel)) => panel.invalidate(None)` を追加 |
+| `draw()` の事前計算 | `cols_opt: Option<ColumnRanges>` のみ事前計算 | `price_state_opt: Option<(PriceGrid, PriceLayout, ColumnRanges)>` として三値を一括事前計算。`PriceGrid` を `#[derive(Copy, Clone)]` にして `orderbook_visual` クロージャへの Copy キャプチャを可能にし、`build_price_grid()` の二重呼び出しを解消 |
+| `draw_cell_text` | `text: &str` + `text.to_string()` | `text: impl Into<String>` + `text.into()`。所有権ありの `String` call site で再アロケーションを回避 |
+
+### review-fix-loop 結果
+
+- ラウンド数: 3（Round 3 で MEDIUM+ ゼロ収束）
+- 使用レビュアー: `rust-reviewer` / `iced-architecture-reviewer` / `silent-failure-hunter` / `type-design-analyzer`
+
+**Round 1 で検出・修正した項目:**
+
+| 重大度 | 内容 |
+|--------|------|
+| HIGH | `pane.rs::update_theme` が Ladder を処理しないためテーマ切替時に `header_cache` が stale → `Content::Ladder` アーム追加 |
+| MEDIUM | `ColumnRanges` / `PriceLayout` に `#[derive(Debug, Clone, Copy)]` なし → 追加 |
+| MEDIUM | `draw_vsplit` スキップ条件（`top <= HEADER_HEIGHT`）に説明コメントなし → 追加 |
+| LOW | テストの期待値が `100.0` ハードコード → 定数から計算する式に変更 |
+| LOW | `HEADER_HEIGHT = ROW_HEIGHT` で二定数が暗黙結合 → 独立リテラルに変更 |
+
+**Round 2 で検出・修正した項目:**
+
+| 重大度 | 内容 |
+|--------|------|
+| MEDIUM | `build_price_grid()` / `column_ranges()` が毎フレーム二重呼び出し → `PriceGrid: Copy` 化 + `price_state_opt` 一本化 |
+| MEDIUM | `draw_cell_text` が `text.to_string()` で毎呼び出しアロケーション → `impl Into<String>` 化 |
+
+**残存 LOW（対応見送り）:**
+
+- `Maxima` / `VisibleRow` / `DomRow` / `PriceGrid` に `#[derive(Debug)]` なし
+- `ColumnRanges` の `sell` / `buy` フィールド名が `sell_trade` / `buy_trade` の方が明確
