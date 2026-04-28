@@ -1968,18 +1968,35 @@ class DataEngineServer:
         """LoadReplayData IPC: J-Quants ファイルを件数確認だけして ReplayDataLoaded 送出。
 
         ``base_dir`` はテスト用 fixtures パス上書き。本番は ``None`` (= S:/j-quants)。
-        """
-        from engine.nautilus.jquants_loader import (
-            load_daily_bars,
-            load_minute_bars,
-            load_trades,
-        )
 
+        M3: mode="live" では replay 系 IPC を受理しない（D8 / spec §3.2 起動時固定）。
+        Error{request_id, code="mode_mismatch"} を返して即 return する。
+        """
         instrument_id = msg.get("instrument_id", "")
         start_date = msg.get("start_date", "")
         end_date = msg.get("end_date", "")
         granularity = msg.get("granularity", "Trade")
         request_id = msg.get("request_id")
+
+        if self._mode != "replay":
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "mode_mismatch",
+                    "message": (
+                        f"LoadReplayData rejected: mode={self._mode!r} "
+                        "(replay IPC only allowed in mode='replay')"
+                    ),
+                }
+            )
+            return
+
+        from engine.nautilus.jquants_loader import (
+            load_daily_bars,
+            load_minute_bars,
+            load_trades,
+        )
 
         try:
             bars_loaded = 0

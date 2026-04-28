@@ -53,6 +53,31 @@ class TestLoadReplayDataDispatch:
         assert events[0]["trades_loaded"] == 4
         assert events[0]["bars_loaded"] == 0
 
+    @pytest.mark.asyncio
+    async def test_load_replay_data_rejected_in_live_mode(self) -> None:
+        """M3: mode='live' では LoadReplayData を Error{mode_mismatch} で拒否し
+        J-Quants ファイルを開かない（D8 起動時固定 / spec §3.2）。"""
+        server = _make_server(mode="live")
+        msg = {
+            "op": "LoadReplayData",
+            "request_id": "req-load-live",
+            "instrument_id": "1301.TSE",
+            "start_date": "2024-01-04",
+            "end_date": "2024-01-05",
+            "granularity": "Trade",
+        }
+        await server._handle_load_replay_data(msg, base_dir=FIXTURES)
+
+        # ReplayDataLoaded は流れない
+        assert not any(
+            e.get("event") == "ReplayDataLoaded" for e in server._outbox
+        )
+        # Error{request_id, code="mode_mismatch"} が記録される
+        errors = [e for e in server._outbox if e.get("event") == "Error"]
+        assert len(errors) == 1
+        assert errors[0]["request_id"] == "req-load-live"
+        assert errors[0]["code"] == "mode_mismatch"
+
 
 class TestStartEngineDispatch:
     """StartEngine IPC が EngineStarted → EngineStopped を outbox に流すこと。"""
