@@ -128,12 +128,27 @@
 
 **PR 切り方の規約**: N1.1〜N1.3（IPC schema + J-Quants loader + replay API 差し替え）は **1 PR でアトミック**にマージする。互換シムを残さない。
 
-### N1.0 ホットフィックス: 立花曖昧 side → `None` 化（Q11-pre）⭐ 先行修正
-- [ ] [`tachibana_ws.py:190`](../../../python/engine/exchanges/tachibana_ws.py#L190) `_determine_side` 戻り値を `str | None` に変更し、曖昧時 `None` を返す
-- [ ] 呼出側（[tachibana_ws.py:156](../../../python/engine/exchanges/tachibana_ws.py#L156) 付近）で `None` を内部表現の `"unknown"` に写像（既存 trade dict のキー互換は維持）
-- [ ] 既存テスト `python/tests/test_tachibana_ws_*.py` の曖昧 side 期待値を `"buy"` → `"unknown"` に書き換え
-- [ ] [bug-postmortem](../../../.claude/skills/bug-postmortem/SKILL.md) を起動し MISSES.md に「曖昧 side が `"buy"` 寄せ → live/replay 互換性で false positive」を記録
-- [ ] N2.0 の `tachibana_data.py` 実装時に `"unknown"` → `AggressorSide.NO_AGGRESSOR` に写像
+### N1.0 ホットフィックス: 立花曖昧 side → `None` 化（Q11-pre）⭐ 先行修正 ✅ 完了 2026-04-28
+- [x] ✅ [`tachibana_ws.py:190`](../../../python/engine/exchanges/tachibana_ws.py#L190) `_determine_side` 戻り値を `str | None` に変更し、曖昧時 `None` を返す
+- [x] ✅ 呼出側（[tachibana_ws.py:156](../../../python/engine/exchanges/tachibana_ws.py#L156) 付近）で `None` を内部表現の `"unknown"` に写像（既存 trade dict のキー互換は維持）
+- [x] ✅ 既存テスト `python/tests/test_tachibana_fd_trade.py::test_tick_rule_up_gives_buy` の曖昧 side 期待値を `"buy"` → `"unknown"` に書き換え
+- [x] ✅ [bug-postmortem](../../../.claude/skills/bug-postmortem/SKILL.md) を起動し MISSES.md に「曖昧 side が `"buy"` 寄せ → live/replay 互換性で false positive」を記録（2026-04-28 エントリ、教訓 3 点）
+- [ ] N2.0 の `tachibana_data.py` 実装時に `"unknown"` → `AggressorSide.NO_AGGRESSOR` に写像（**N2 で実施**）
+
+#### 状況・知見・Tips（2026-04-28 R0 完了報告）
+
+**状況**: tachibana_ws.py / test_tachibana_fd_trade.py / MISSES.md の 3 ファイルを更新し commit 済み。test_tachibana_fd_trade.py 19 件全 GREEN。リグレッション確認: 旧実装（`return "buy"`）に戻すと `test_tick_rule_up_gives_buy` が `assert 'buy' == 'unknown'` で FAIL することを `git stash` で実証済み。
+
+**新たな知見**:
+- 「現状動作 pin」型のバグは、テストコメントに「default buy」のように **誤った仕様前提が文章化されている** ことで識別しやすい。テストコメント内の "default" / "fallback" / "current behavior" などのキーワードは仕様の正しさが検証されていない可能性のシグナルとして使える。
+- `_determine_side` 戻り値の型変更（`str` → `str | None`）は呼出箇所が 1 箇所だったため安全に伝搬したが、複数箇所ある関数の戻り値型変更時は grep で全箇所を確認するルールが必要。
+
+**設計思想と背景**:
+- 曖昧時に `None` を内部表現として返し、呼出側で `"unknown"` 文字列に写像する二段構成を採用。理由: (a) `_determine_side` の責務は side 推定のみで、推定不能を `Optional` で素直に表現する、(b) trade dict の `side` キーは下流の集計ロジック（live/replay 互換）が文字列を期待するため `"unknown"` センチネル文字列で表現する、(c) N2.0 で `AggressorSide.NO_AGGRESSOR` 写像時に `"unknown"` を switch するのが直感的。
+- 却下案: `_determine_side` が直接 `"unknown"` を返す → 集計側の責務分離が崩れる、`Literal["buy", "sell", "unknown"]` enum 化 → N1.0 のスコープを超える型整理になる。
+
+**Tips**:
+- `git stash push -- <path>` で特定ファイルだけ stash → リグレッション実証 → `git stash pop` で復元、というパターンは TDD 事後検証に有効。本セッションでも N1.0 の事後検証で活用。
 
 ### N1.1 IPC schema 1.4
 - [ ] [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に追加（[architecture.md §3](./architecture.md#3-新規-ipc-メッセージ)）:

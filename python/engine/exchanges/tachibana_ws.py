@@ -151,12 +151,12 @@ class FdFrameProcessor:
         else:
             qty = dv - self._prev_dv
             if qty > 0:
-                side = self._determine_side(dpp)
+                _side = self._determine_side(dpp)
                 ts_ms = self._parse_ts_ms(fields, recv_ts_ms, row)
                 trade = {
                     "price": str(dpp),
                     "qty": str(qty),
-                    "side": side,
+                    "side": _side if _side is not None else "unknown",
                     "ts_ms": ts_ms,
                     "is_liquidation": False,
                 }
@@ -173,8 +173,8 @@ class FdFrameProcessor:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _determine_side(self, price: Decimal) -> str:
-        """Quote rule + tick rule (F3, data-mapping §3)."""
+    def _determine_side(self, price: Decimal) -> str | None:
+        """Quote rule + tick rule (F3, data-mapping §3). Returns None when ambiguous."""
         if self._prev_ask is not None and price >= self._prev_ask:
             return "buy"
         if self._prev_bid is not None and price <= self._prev_bid:
@@ -187,7 +187,7 @@ class FdFrameProcessor:
                 return "sell"
         # Ambiguous (F-M8b)
         log.warning("tachibana ws: trade side ambiguous for price %s", price)
-        return "buy"
+        return None
 
     def _extract_best_bid(self, fields: dict[str, str]) -> Decimal | None:
         v = fields.get(f"p_{self.row}_GBP1", "")

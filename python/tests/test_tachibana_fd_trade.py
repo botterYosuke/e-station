@@ -145,8 +145,8 @@ class TestSideDetermination:
             _fields("1", "2503", "120", gap1="2504", gbp1="2502"), recv_ts_ms=2_000
         )
         assert trade3 is not None
-        # same as prev_trade → ambiguous → default buy
-        assert trade3["side"] == "buy"
+        # same as prev_trade → ambiguous → unknown
+        assert trade3["side"] == "unknown"
 
     def test_tick_rule_up_price_above_prev_trade(self) -> None:
         """Midpoint + price > prev_trade → buy (F-M8b explicit case)."""
