@@ -48,6 +48,7 @@ nav:
       - Python データエンジン: plan/✅python-data-engine/spec.md
       - 立花証券 API 統合: plan/✅tachibana/spec.md
       - 立花注文機能: plan/✅order/spec.md
+      - nautilus_trader 統合: plan/✅nautilus_trader/spec.md
 
 markdown_extensions:
   - admonition
