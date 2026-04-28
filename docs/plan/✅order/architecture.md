@@ -124,7 +124,7 @@ Rust 受信
 - WAL に `{"phase":"session_expired", ...}` 行を必ず書く（再起動時の状況復元用）
 - `frozen` 解除は再ログイン成功イベント (`VenueCredentialsRefreshed`) 受領時のみ
 
-**B-L1 REPLAY モード注記**: REPLAY モードは N1 で別ファイル分岐前提（本計画スコープ外）。本計画では live のみ扱う。詳細は [docs/plan/nautilus_trader/spec.md](../nautilus_trader/spec.md) を参照。
+**B-L1 REPLAY モード注記**: REPLAY モードは N1 で別ファイル分岐前提（本計画スコープ外）。本計画では live のみ扱う。詳細は [docs/plan/✅nautilus_trader/spec.md](../✅nautilus_trader/spec.md) を参照。
 
 ### 2.3 取消フロー（Phase O1）
 
@@ -516,7 +516,7 @@ flowsurface との差分:
 - **第二暗証番号は絶対に出さない**（unit テストで `grep -i second_password` 等で検証）
 - **C-H1 仮想 URL マスク**: 仮想 URL（`url_request` / `url_master` / `url_event` / `url_price` 等、ログイン応答で取得される一時 URL）は **WAL／ログ／`reason_text`／監査ログから完全除外**する。`tachibana_codec.mask_virtual_url(s: str) -> str` を 1 箇所だけ定義し、送信前後ですべての文字列出力経路を必ず通すこと（レビューチェック項目）。
 - **L4 制御文字対策**: WAL の各行は **ASCII printable + UTF-8** に正規化する。改行は `\n` エスケープ、Shift-JIS 由来の制御文字（`\x00`–`\x1f`、`\x7f`）は除去する。JSON エンコード前に `s.encode("utf-8", "replace")` でサニタイズ。
-- **B-L1 REPLAY ガード**: REPLAY モードは N1 で別ファイル分岐前提。本計画では live のみ扱う（[docs/plan/nautilus_trader/spec.md](../nautilus_trader/spec.md) 参照）。WAL ファイル名は live 固定で `tachibana_orders.jsonl`、REPLAY が導入されるときは別ファイルに分岐する。
+- **B-L1 REPLAY ガード**: REPLAY モードは N1 で別ファイル分岐前提。本計画では live のみ扱う（[docs/plan/✅nautilus_trader/spec.md](../✅nautilus_trader/spec.md) 参照）。WAL ファイル名は live 固定で `tachibana_orders.jsonl`、REPLAY が導入されるときは別ファイルに分岐する。
 - **C-R2-L3 `p_errno` 空（正常）扱い**: `p_errno == ""`（正常）の場合は rejected 行を書かない（= 正常レスポンスのみ accepted/filled で記録）。
 - **C-R5-H1 Truncation 復元規約**: 復元時に最終行に `\n` が無ければ truncated（fsync 前の crash）とみなしスキップ + structured log で WARN を出す。partial 行は再生対象外で、対応する `client_order_id` は WAL 上「未送信」扱い → 起動後 `OrderSessionState` には登場しない。
 

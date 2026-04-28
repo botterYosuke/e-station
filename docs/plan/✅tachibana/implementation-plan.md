@@ -745,7 +745,7 @@ R2・R3 で発見・解消した追加指摘。
 |---|---|---|
 | **T2（認証実装）完了** | [order/ Phase O-pre](../✅order/implementation-plan.md) 着手可能。`tachibana_auth.py` / `tachibana_url.py` / `tachibana_codec.py` が order/ の前提依存ファイル | [order/implementation-plan.md 冒頭](../✅order/implementation-plan.md) |
 | **T4（マスタキャッシュ）完了** | IPC `stdin` 初期 payload への `config_dir` / `cache_dir` 追加が完了し、Python 側 fast-path が使えるようになる | [architecture.md §2.1.1](./architecture.md) |
-| **Phase 1 全完了（T7 受け入れ緑）** | nautilus N2（`LiveExecutionClient` デモ）の着手条件の一部を満たす | [nautilus_trader/implementation-plan.md Phase N2](../nautilus_trader/implementation-plan.md) |
+| **Phase 1 全完了（T7 受け入れ緑）** | nautilus N2（`LiveExecutionClient` デモ）の着手条件の一部を満たす | [nautilus_trader/implementation-plan.md Phase N2](../✅nautilus_trader/implementation-plan.md) |
 
 > **IPC schema 連鎖**: 本計画の T0.2 で schema **1.1 → 1.2** に bump する。order/ の Tpre.2（schema 1.2 → 1.3）は本計画の schema 1.2 ラウンドトリップテストが緑になるまで着手しないこと。連鎖の全体像は [docs/plan/README.md §実装トラック詳細](../README.md) を参照。
 

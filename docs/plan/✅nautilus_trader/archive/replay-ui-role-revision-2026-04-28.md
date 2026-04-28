@@ -27,7 +27,7 @@ affects: README.md / spec.md / architecture.md / implementation-plan.md / open-q
 
 ## 背景
 
-`docs/plan/nautilus_trader/` で live / replay 2モード化が決まったが、replay 中の
+`docs/plan/✅nautilus_trader/` で live / replay 2モード化が決まったが、replay 中の
 Rust UI（iced）が何を担うか、matplotlib などの「戦略構築中の目視ツール」を
 代替できるかが未確定だった。本書で確定する。
 

@@ -1,7 +1,7 @@
 ---
 date: 2026-04-28
 status: converged
-scope: docs/plan/nautilus_trader/{README,spec,architecture,implementation-plan,open-questions}.md
+scope: docs/plan/✅nautilus_trader/{README,spec,architecture,implementation-plan,open-questions}.md
 trigger: archive/replay-ui-role-revision-2026-04-28.md（R7 確定）の 5 文書反映後の review-fix-loop
 rounds: 2
 ---
@@ -89,4 +89,4 @@ rounds: 2
   - **archive 相対パス**: 計画文書から archive への参照は `./archive/...` 形式で統一
   - **Hello/Ready ハンドシェイクの `mode` フィールド**: schema_minor=4 / N1.13 / D8 起動時固定と整合する形で architecture §2 サンプルに明示
   - **N1.13 の `--mode` 必須化**: D8 §6 起動例の踏襲として spec / impl 両方で根拠を明示
-- ログ: docs/plan/nautilus_trader/review-fixes-2026-04-28.md
+- ログ: docs/plan/✅nautilus_trader/review-fixes-2026-04-28.md
