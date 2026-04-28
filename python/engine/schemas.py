@@ -281,6 +281,7 @@ class EngineError(IpcMessage):
     event: Literal["EngineError"] = "EngineError"
     code: str
     message: str
+    strategy_id: str | None = None  # None = 接続レベルエラー
 
 
 class Connected(IpcMessage):

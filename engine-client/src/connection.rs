@@ -266,7 +266,7 @@ async fn perform_handshake(
                         let _ = events_tx.send(event);
                         return Ok((ws, caps));
                     }
-                    EngineEvent::EngineError { code, message } => {
+                    EngineEvent::EngineError { code, message, .. } => {
                         return Err(EngineClientError::EngineError { code, message });
                     }
                     _ => {

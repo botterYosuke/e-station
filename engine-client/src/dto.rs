@@ -605,6 +605,8 @@ pub enum EngineEvent {
     EngineError {
         code: String,
         message: String,
+        #[serde(default)]
+        strategy_id: Option<String>,
     },
     Connected {
         venue: String,

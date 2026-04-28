@@ -2017,7 +2017,12 @@ class DataEngineServer:
             else:
                 raise ValueError(f"unknown granularity: {granularity!r}")
         except Exception as exc:
-            log.error("LoadReplayData failed: %s", exc)
+            log.error(
+                "LoadReplayData failed: instrument_id=%r granularity=%r",
+                instrument_id,
+                granularity,
+                exc_info=True,
+            )
             self._outbox.append(
                 {
                     "event": "Error",
@@ -2066,13 +2071,8 @@ class DataEngineServer:
         try:
             validate_start_engine(self._mode, engine_kind)
         except ValueError as exc:
-            self._outbox.append(
-                {
-                    "event": "EngineError",
-                    "code": "mode_mismatch",
-                    "message": str(exc),
-                }
-            )
+            # H3: バリデーション失敗は Error{request_id} のみ送出。
+            # EngineError は接続レベル専用 (auth_failed / schema_mismatch) に限定する。
             self._outbox.append(
                 {
                     "event": "Error",
@@ -2103,6 +2103,20 @@ class DataEngineServer:
                 started_marker["sent"] = True
             _on_event(evt)
 
+        # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
+        try:
+            initial_cash = int(config.get("initial_cash", "0"))
+        except (ValueError, TypeError) as exc:
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "invalid_config",
+                    "message": f"initial_cash: {exc}",
+                }
+            )
+            return
+
         def _run() -> None:
             runner.start_backtest_replay(
                 strategy_id=strategy_id,
@@ -2110,15 +2124,51 @@ class DataEngineServer:
                 start_date=config.get("start_date", ""),
                 end_date=config.get("end_date", ""),
                 granularity=config.get("granularity", "Trade"),
-                initial_cash=int(config.get("initial_cash", "0")),
+                initial_cash=initial_cash,
                 base_dir=base_dir,
                 on_event=_on_event_tracked,
             )
 
         try:
-            await asyncio.to_thread(_run)
+            # H2: timeout=3600s でラップし、TimeoutError を code="timeout" で送出。
+            await asyncio.wait_for(asyncio.to_thread(_run), timeout=3600.0)
+        except asyncio.TimeoutError as exc:
+            log.error(
+                "StartEngine timed out: strategy_id=%r",
+                strategy_id,
+                exc_info=True,
+            )
+            if started_marker["sent"]:
+                self._outbox.append(
+                    {
+                        "event": "EngineStopped",
+                        "strategy_id": strategy_id,
+                        "final_equity": "0",
+                        "ts_event_ms": int(time.time() * 1000),
+                    }
+                )
+            # M2: Pydantic モデル経由で送出。strategy_id を含める (M1)。
+            from engine.schemas import EngineError as EngineErrorModel
+
+            self._outbox.append(
+                EngineErrorModel(
+                    code="timeout",
+                    message=str(exc),
+                    strategy_id=strategy_id,
+                ).model_dump()
+            )
+            # H1: Error{request_id} で Rust の待機を解除する
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "timeout",
+                    "message": str(exc),
+                }
+            )
         except Exception as exc:
-            log.error("StartEngine failed: %s", exc)
+            # M3: exc_info=True を追加し strategy_id をコンテキストとして記録
+            log.error("StartEngine failed: strategy_id=%r", strategy_id, exc_info=True)
             # H1: EngineStarted を送出済みで EngineStopped を未送出なら補完。
             # Rust 側 state machine が stuck しないようにする。
             if started_marker["sent"]:
@@ -2130,9 +2180,21 @@ class DataEngineServer:
                         "ts_event_ms": int(time.time() * 1000),
                     }
                 )
+            # M2: Pydantic モデル経由で送出。strategy_id を含める (M1)。
+            from engine.schemas import EngineError as EngineErrorModel
+
+            self._outbox.append(
+                EngineErrorModel(
+                    code="engine_run_failed",
+                    message=str(exc),
+                    strategy_id=strategy_id,
+                ).model_dump()
+            )
+            # H1: Error{request_id} で Rust の 60 秒ハングを解消
             self._outbox.append(
                 {
-                    "event": "EngineError",
+                    "event": "Error",
+                    "request_id": request_id,
                     "code": "engine_run_failed",
                     "message": str(exc),
                 }
