@@ -628,6 +628,24 @@ class DataEngineServer:
                 self._handle_load_replay_data(msg), msg.get("request_id")
             )
 
+        elif op == "SetReplaySpeed":
+            # N1.11: streaming 経路の pacing multiplier を変更する。
+            # 走行中の BacktestEngine が無い場合は no-op で ack のみ返す。
+            multiplier = msg.get("multiplier", 1)
+            request_id = msg.get("request_id", "")
+            if hasattr(self, "_replay_speed_multiplier"):
+                self._replay_speed_multiplier = multiplier
+            else:
+                self._replay_speed_multiplier = multiplier
+            log.info(
+                "SetReplaySpeed: multiplier=%d request_id=%s",
+                multiplier,
+                request_id,
+            )
+            # 簡易 ack: SetReplaySpeed は Error response を返さないのが Rust 期待。
+            # 走行中の streaming runner は self._replay_speed_multiplier を読むことで
+            # 次の tick から新しい速度を使う。
+
         else:
             log.warning("Unhandled op=%s", op)
             await self._send_error(
@@ -1938,12 +1956,19 @@ class DataEngineServer:
                 return
             except (LoginError, TachibanaError, Exception) as exc:
                 log.exception("_startup_tachibana: login failed: %s", exc)
+                # Honour the message that the auth layer composed (Python is
+                # the banner-text source of truth, F-Banner1) so situational
+                # variants like "service out of hours" reach the UI instead
+                # of being flattened to the generic "ID/パスワード" string.
+                # Falls back when the underlying exception did not supply one
+                # (e.g. raw `Exception`).
+                msg = getattr(exc, "message", "") or _MSG_LOGIN_FAILED
                 self._emit({
                     "event": "VenueError",
                     "venue": "tachibana",
                     "request_id": request_id,
                     "code": "login_failed",
-                    "message": _MSG_LOGIN_FAILED,
+                    "message": msg,
                 })
                 return
 
