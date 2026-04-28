@@ -33,7 +33,8 @@
     { "$ref": "#/$defs/OrderFilled" },
     { "$ref": "#/$defs/OrderCanceled" },
     { "$ref": "#/$defs/OrderExpired" },
-    { "$ref": "#/$defs/OrderListUpdated" }
+    { "$ref": "#/$defs/OrderListUpdated" },
+    { "$ref": "#/$defs/BuyingPowerUpdated" }
   ],
   "$defs": {
     "RequestId": {
@@ -534,6 +535,21 @@
         "expire_time_ns": { "type": ["integer", "null"] },
         "status": { "$ref": "#/$defs/OrderStatus" },
         "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "BuyingPowerUpdated": {
+      "description": "Response to GetBuyingPower. Contains current cash and credit buying power. Schema MINOR=2.",
+      "type": "object",
+      "required": ["event", "request_id", "venue", "cash_available", "cash_shortfall", "credit_available", "ts_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "BuyingPowerUpdated" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "cash_available": { "type": "integer" },
+        "cash_shortfall": { "type": "integer", "minimum": 0 },
+        "credit_available": { "type": "integer" },
+        "ts_ms": { "type": "integer" }
       }
     }
   }

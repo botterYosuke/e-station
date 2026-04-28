@@ -117,6 +117,30 @@ def test_rust_ui_src_has_no_tachibana_specific_terms():
     )
 
 
+def test_buying_power_ipc_classes_have_no_tachibana_specific_terms():
+    """GetBuyingPower と BuyingPowerUpdated クラスのフィールドに立花固有禁止語が含まれないこと。
+
+    schemas.py は MarketPriceResponse など合法的に sCLMID を持つクラスを含む。
+    IPC Command/Event クラスは FORBIDDEN_WORDS を一切含んではならない。
+    """
+    from engine.schemas import GetBuyingPower, BuyingPowerUpdated
+
+    violations = []
+    for cls in (GetBuyingPower, BuyingPowerUpdated):
+        field_names = list(cls.model_fields.keys())
+        for word in FORBIDDEN_WORDS:
+            for name in field_names:
+                if word in name:
+                    violations.append(
+                        f"  {cls.__name__}.{name} contains forbidden term: '{word}'"
+                    )
+
+    assert not violations, (
+        "IPC BuyingPower classes must not contain Tachibana-specific terms:\n"
+        + "\n".join(violations)
+    )
+
+
 def test_engine_client_lib_rs_has_no_tachibana_specific_terms():
     """engine-client/src/lib.rs に立花固有禁止語が含まれないこと。"""
     lib_path = REPO_ROOT / "engine-client" / "src" / "lib.rs"

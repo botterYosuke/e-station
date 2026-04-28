@@ -423,6 +423,11 @@ impl State {
                 | ContentKind::OrderEntry
                 | ContentKind::OrderList
                 | ContentKind::BuyingPower => {
+                    debug_assert!(
+                        false,
+                        "set_content_and_streams called for non-stream content {kind:?}; \
+                         this is a logic error"
+                    );
                     log::warn!(
                         "set_content_and_streams called for non-stream content {:?}; ignoring",
                         kind
@@ -2618,5 +2623,12 @@ mod tests {
              if this fails, the eager initialization branch in resolve_streams will \
              fall through to the None arm and leave Ladder uninitialized"
         );
+    }
+
+    #[test]
+    fn order_panes_are_always_initialized() {
+        assert!(Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()).initialized());
+        assert!(Content::OrderList(panel::orders::OrdersPanel::new()).initialized());
+        assert!(Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()).initialized());
     }
 }

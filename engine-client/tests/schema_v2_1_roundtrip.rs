@@ -9,10 +9,11 @@ use flowsurface_engine_client::dto::{Command, EngineEvent};
 // ── Schema version guard ────────────────────────────────────────────────────
 
 #[test]
-fn schema_minor_is_at_least_2_for_buying_power() {
-    assert!(
-        flowsurface_engine_client::SCHEMA_MINOR >= 2,
-        "SCHEMA_MINOR must be >= 2 for BuyingPower IPC"
+fn schema_minor_is_2_for_buying_power() {
+    assert_eq!(
+        flowsurface_engine_client::SCHEMA_MINOR,
+        2,
+        "SCHEMA_MINOR must be exactly 2 for BuyingPower IPC"
     );
 }
 

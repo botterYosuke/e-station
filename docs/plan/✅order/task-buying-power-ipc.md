@@ -35,7 +35,7 @@ IPC Command/Event が存在しないため Rust UI から呼べない。
    - Rust: `engine-client/src/lib.rs` の `SCHEMA_MINOR`
    - Python: `python/engine/schemas.py` の `SCHEMA_MINOR`
    - ルール詳細は `docs/plan/✅python-data-engine/spec.md` §4.5.1 参照
-2. **dto.rs の命名規則**: `serde(rename_all = "SCREAMING_SNAKE_CASE")` を全 enum に維持。
+2. **dto.rs の命名規則**: Command/Event タグは PascalCase（`GetBuyingPower`, `BuyingPowerUpdated`）。値 enum（`OrderSide` 等）は `SCREAMING_SNAKE_CASE`。
 3. **立花固有語禁止**: `sCLMID` / `CLMZan` などの立花 API 固有語を IPC 層（dto.rs / schemas.py / Rust UI）に漏らさない（`test_nautilus_boundary_lint.py` がガード）。
 4. **Release ビルドの dev ログイン禁止**: dev 環境変数の追加経路を増やす場合は必ず `F-DevEnv-Release-Guard` を通す。
 5. **既存テストをリグレッションさせない**: `cargo test --workspace` / `uv run pytest python/tests/ -v` が全緑であること。
@@ -115,6 +115,16 @@ Event::BuyingPowerUpdated {
 - ✅ Step 5: ラウンドトリップテスト追加（schema_v2_1_roundtrip.rs / test_buying_power_ipc.py）
 - ✅ Acceptance criteria 全項目確認（cargo test / pytest / clippy / ipc-schema-check 全緑）
 - [ ] review-fix-loop 完了
+
+### Ladder ヘッダ追加（fix-ladder-header-2026-04-28）
+
+- ✅ HEADER_HEIGHT 定数追加（= ROW_HEIGHT = 16.0）
+- ✅ header_cache フィールド追加・初期化・invalidate() でクリア
+- ✅ visible_rows() / price_to_screen_y() の mid_screen_y をヘッダ分オフセット
+- ✅ draw_vsplit を HEADER_HEIGHT 起点に修正（ヘッダ領域に縦線が入らない）
+- ✅ header_geo（背景＋境界線＋ラベル）をオーバーレイとして描画
+- ✅ 3 つのユニットテスト追加・全 PASS（mid_screen_y / build_price_grid None / narrow_pane）
+- ✅ cargo test / cargo clippy 全緑
 
 ### 新たな知見・設計判断・Tips
 

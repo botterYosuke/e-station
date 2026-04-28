@@ -24,7 +24,8 @@
     { "$ref": "#/$defs/ModifyOrder" },
     { "$ref": "#/$defs/CancelOrder" },
     { "$ref": "#/$defs/CancelAllOrders" },
-    { "$ref": "#/$defs/GetOrderList" }
+    { "$ref": "#/$defs/GetOrderList" },
+    { "$ref": "#/$defs/GetBuyingPower" }
   ],
   "$defs": {
     "RequestId": {
@@ -290,6 +291,17 @@
         "request_id": { "$ref": "#/$defs/RequestId" },
         "venue": { "type": "string" },
         "filter": { "$ref": "#/$defs/OrderListFilter" }
+      }
+    },
+    "GetBuyingPower": {
+      "description": "Fetch current buying power (cash + credit) from the venue. Added in schema MINOR=2.",
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "GetBuyingPower" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" }
       }
     },
     "OrderSide": {

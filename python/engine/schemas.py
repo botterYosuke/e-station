@@ -569,6 +569,8 @@ class OrderListUpdated(IpcMessage):
 class BuyingPowerUpdated(IpcMessage):
     """Response to GetBuyingPower. Contains current cash and credit buying power."""
 
+    model_config = ConfigDict(extra="forbid")
+
     event: Literal["BuyingPowerUpdated"] = "BuyingPowerUpdated"
     request_id: str
     venue: str

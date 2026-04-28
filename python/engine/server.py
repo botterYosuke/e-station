@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import logging
 import os
+import time
 import uuid
 from collections import deque
 from pathlib import Path
@@ -1238,8 +1239,6 @@ class DataEngineServer:
         })
 
     async def _do_get_buying_power(self, msg: dict) -> None:
-        import time
-
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
 
@@ -1253,6 +1252,7 @@ class DataEngineServer:
             return
 
         if self._tachibana_session is None:
+            log.warning("_do_get_buying_power: tachibana session not established (request_id=%s)", req_id)
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,

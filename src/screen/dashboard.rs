@@ -654,6 +654,16 @@ impl Dashboard {
             });
     }
 
+    /// Propagate a buying-power fetch error to all `BuyingPower` panes.
+    pub fn distribute_buying_power_error(&mut self, main_window: window::Id, message: String) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::BuyingPower(panel) = &mut state.content {
+                    panel.set_error(message.clone());
+                }
+            });
+    }
+
     /// Reset the `submitting` flag on every `OrderEntry` pane whose
     /// `pending_request_id` matches `client_order_id`.
     pub fn notify_order_accepted(&mut self, main_window: window::Id, client_order_id: &str) {

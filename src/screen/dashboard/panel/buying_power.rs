@@ -1,11 +1,9 @@
-//! Phase O3 — Buying Power panel (Tu3.1).
+//! Phase U3 — Buying Power panel (Tu3.1). IPC 配線完了。
 //!
-//! Displays the current buying power from `fetch_buying_power()` API.
-//! Periodic refresh is triggered by the parent dashboard on a timer.
-//!
-//! IPC: `GetBuyingPower` command and `BuyingPowerUpdated` event are not yet
-//! present in `engine-client/src/dto.rs`. The panel is wired into the pane
-//! router so the UI structure is ready; the actual IPC will be added later.
+//! 余力パネル。現物買付余力・信用新規可能額を `GetBuyingPower` IPC で取得して表示する。
+//! - IPC 送信: `src/main.rs` の `BuyingPowerAction` ハンドラ
+//! - IPC 受信 (成功): `Event::BuyingPowerUpdated` → `distribute_buying_power()`
+//! - IPC 受信 (失敗): `EngineEvent::Error` → `Message::IpcError` → `distribute_buying_power_error()`
 
 use iced::{
     Element,
@@ -46,6 +44,7 @@ impl BuyingPowerPanel {
     pub fn set_credit_buying_power(&mut self, available: i64, ts_ms: i64) {
         self.credit_available = Some(available);
         self.last_updated_ms = Some(ts_ms);
+        self.error = None;
     }
 
     /// エラー状態にする。
@@ -133,7 +132,7 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
 
 /// 発注フォームの信用/現物セレクタの状態。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+// Phase O3 フォーム拡張 UI 未実装（Order Entry フォームへの統合は別タスク）
 #[allow(dead_code)]
 pub enum CashMarginSelection {
     /// 現物（cash）— デフォルト
@@ -149,7 +148,7 @@ pub enum CashMarginSelection {
     MarginGeneralRepay,
 }
 
-// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+// Phase O3 フォーム拡張 UI 未実装（Order Entry フォームへの統合は別タスク）
 #[allow(dead_code)]
 impl CashMarginSelection {
     /// IPC tags に変換する。
@@ -177,7 +176,7 @@ impl CashMarginSelection {
 
 /// 逆指値フォームの状態。
 #[derive(Debug, Clone, Default)]
-// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+// Phase O3 フォーム拡張 UI 未実装（Order Entry フォームへの統合は別タスク）
 #[allow(dead_code)]
 pub struct StopOrderForm {
     /// 逆指値注文を有効にするかどうか。
@@ -190,7 +189,7 @@ pub struct StopOrderForm {
 
 /// 逆指値注文の種別。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+// Phase O3 フォーム拡張 UI 未実装（Order Entry フォームへの統合は別タスク）
 #[allow(dead_code)]
 pub enum StopOrderType {
     /// 逆指値成行
@@ -202,7 +201,7 @@ pub enum StopOrderType {
 
 /// 期日指定フォームの状態。
 #[derive(Debug, Clone, Default)]
-// Phase O3 scaffold — GetBuyingPower IPC 未実装（dto.rs に Command 追加後に削除）
+// Phase O3 フォーム拡張 UI 未実装（Order Entry フォームへの統合は別タスク）
 #[allow(dead_code)]
 pub struct GtdForm {
     /// GTD（期日指定）を有効にするかどうか。

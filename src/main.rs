@@ -631,6 +631,9 @@ struct Flowsurface {
     /// 第二暗証番号 modal。`SecondPasswordRequired` IPC イベントで Some に、
     /// Submit / Cancel / Dismiss で None に戻る。
     second_password_modal: Option<modal::second_password::SecondPasswordModal>,
+    /// `GetBuyingPower` IPC 送信時に記録した request_id。
+    /// `BuyingPowerUpdated` または `IpcError` 受信時にクリアする。
+    buying_power_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -733,6 +736,13 @@ enum Message {
         cash_shortfall: i64,
         credit_available: i64,
         ts_ms: i64,
+    },
+    /// `EngineEvent::Error` — routed to the BuyingPower panel if `request_id`
+    /// matches the pending buying-power request, otherwise silently ignored.
+    IpcError {
+        request_id: Option<String>,
+        code: String,
+        message: String,
     },
 }
 
@@ -946,12 +956,21 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             cash_shortfall,
             credit_available,
             ts_ms,
-            ..
+            .. // request_id / venue are IPC routing fields; UI broadcasts to all BuyingPower panes
         } => Some(Message::BuyingPowerUpdated {
             cash_available,
             cash_shortfall,
             credit_available,
             ts_ms,
+        }),
+        EngineEvent::Error {
+            request_id,
+            code,
+            message,
+        } => Some(Message::IpcError {
+            request_id,
+            code,
+            message,
         }),
         _ => None,
     }
@@ -1019,6 +1038,7 @@ impl Flowsurface {
             engine_manager,
             tachibana_state: VenueState::Idle,
             second_password_modal: None,
+            buying_power_request_id: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -1660,10 +1680,12 @@ impl Flowsurface {
                         }
                         Some(dashboard::Event::BuyingPowerAction(_action)) => {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let req_id = uuid::Uuid::new_v4().to_string();
+                                self.buying_power_request_id = Some(req_id.clone());
                                 return Task::perform(
                                     async move {
                                         conn.send(engine_client::dto::Command::GetBuyingPower {
-                                            request_id: uuid::Uuid::new_v4().to_string(),
+                                            request_id: req_id,
                                             venue: crate::TACHIBANA_VENUE_NAME.to_string(),
                                         })
                                         .await
@@ -1679,7 +1701,10 @@ impl Flowsurface {
                                     },
                                 );
                             }
-                            Task::none()
+                            // J-4: エンジン未接続時はユーザーに通知する
+                            Task::done(Message::OrderToast(Toast::error(
+                                "エンジン未接続: 余力情報を取得できません".to_string(),
+                            )))
                         }
                         Some(dashboard::Event::OrderListAction(action)) => {
                             use crate::screen::dashboard::panel::orders::Action;
@@ -1760,13 +1785,14 @@ impl Flowsurface {
                 self.active_dashboard_mut()
                     .distribute_order_list(main_window, orders);
             }
-            // Phase U3: distribute fresh buying power to all BuyingPower panes
+            // Phase U3: broadcast to all BuyingPower panes; silently no-ops if no pane exists
             Message::BuyingPowerUpdated {
                 cash_available,
                 cash_shortfall,
                 credit_available,
                 ts_ms,
             } => {
+                self.buying_power_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut().distribute_buying_power(
                     main_window,
@@ -1775,6 +1801,24 @@ impl Flowsurface {
                     credit_available,
                     ts_ms,
                 );
+            }
+            // Phase U3: IpcError → route to BuyingPower panel if request_id matches
+            Message::IpcError {
+                request_id,
+                code,
+                message,
+            } => {
+                let is_buying_power = self
+                    .buying_power_request_id
+                    .as_deref()
+                    .zip(request_id.as_deref())
+                    .is_some_and(|(bp, err)| bp == err);
+                if is_buying_power {
+                    self.buying_power_request_id = None;
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut()
+                        .distribute_buying_power_error(main_window, format!("[{code}] {message}"));
+                }
             }
             // Phase U0: OrderAccepted — reset submitting flag + toast
             Message::OrderAccepted {
