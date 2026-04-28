@@ -268,6 +268,13 @@ impl canvas::Program<Message> for Ladder {
                 let mut best_ask_y: Option<f32> = None;
 
                 for visible_row in visible_rows.iter() {
+                    // Skip rows whose text centre falls inside the header zone;
+                    // fill_text renders above canvas fill_rectangle layers in iced,
+                    // so the header's opaque background alone cannot suppress them.
+                    if visible_row.y + ROW_HEIGHT / 2.0 < HEADER_HEIGHT {
+                        continue;
+                    }
+
                     match visible_row.row {
                         DomRow::Ask { price, .. }
                             if Some(price)
