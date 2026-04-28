@@ -144,6 +144,13 @@ pub enum Command {
         venue: String,
         filter: OrderListFilter,
     },
+
+    // ── Buying Power Phase (schema 2.1) ───────────────────────────────────
+    /// Fetch current buying power (cash + credit) from the venue.
+    GetBuyingPower {
+        request_id: String,
+        venue: String,
+    },
 }
 
 /// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
@@ -367,6 +374,11 @@ impl std::fmt::Debug for Command {
                 .field("request_id", request_id)
                 .field("venue", venue)
                 .field("filter", filter)
+                .finish(),
+            Command::GetBuyingPower { request_id, venue } => f
+                .debug_struct("GetBuyingPower")
+                .field("request_id", request_id)
+                .field("venue", venue)
                 .finish(),
         }
     }
@@ -715,6 +727,21 @@ pub enum EngineEvent {
     OrderListUpdated {
         request_id: String,
         orders: Vec<OrderRecordWire>,
+    },
+
+    // ── Buying Power Phase (schema 2.1) ───────────────────────────────────
+    /// Response to `GetBuyingPower`. Contains current cash and credit buying power.
+    BuyingPowerUpdated {
+        request_id: String,
+        venue: String,
+        /// 現物買付余力（円）
+        cash_available: i64,
+        /// 現物余力不足額（円、0 は不足なし）
+        cash_shortfall: i64,
+        /// 信用新規可能額（円）
+        credit_available: i64,
+        /// 取得時刻 Unix ミリ秒
+        ts_ms: i64,
     },
 }
 

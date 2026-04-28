@@ -513,6 +513,11 @@ class DataEngineServer:
                 self._do_get_order_list(msg), msg.get("request_id")
             )
 
+        elif op == "GetBuyingPower":
+            self._spawn_fetch(
+                self._do_get_buying_power(msg), msg.get("request_id")
+            )
+
         else:
             log.warning("Unhandled op=%s", op)
             await self._send_error(
@@ -1230,6 +1235,69 @@ class DataEngineServer:
             "event": "OrderListUpdated",
             "request_id": req_id,
             "orders": orders_json,
+        })
+
+    async def _do_get_buying_power(self, msg: dict) -> None:
+        import time
+
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+
+        if venue not in self._workers:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "unknown_venue",
+                "message": f"GetBuyingPower: unknown venue {venue!r}",
+            })
+            return
+
+        if self._tachibana_session is None:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_NOT_ESTABLISHED",
+                "message": "GetBuyingPower: tachibana session not established",
+            })
+            return
+
+        try:
+            cash_result = await tachibana_fetch_buying_power(
+                session=self._tachibana_session,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+            credit_result = await tachibana_fetch_credit_buying_power(
+                session=self._tachibana_session,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            self._session_holder.clear()
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_EXPIRED",
+                "message": "Session expired; please re-login",
+            })
+            return
+        except Exception:
+            log.exception("_do_get_buying_power: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching buying power",
+            })
+            return
+
+        ts_ms = int(time.time() * 1000)
+        self._outbox.append({
+            "event": "BuyingPowerUpdated",
+            "request_id": req_id,
+            "venue": venue,
+            "cash_available": cash_result.available_amount,
+            "cash_shortfall": cash_result.shortfall,
+            "credit_available": credit_result.available_amount,
+            "ts_ms": ts_ms,
         })
 
     # ------------------------------------------------------------------

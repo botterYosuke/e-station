@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 1
+SCHEMA_MINOR: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +242,15 @@ class GetOrderList(IpcMessage):
     request_id: str
     venue: str
     filter: OrderListFilter = Field(default_factory=OrderListFilter)
+
+
+# ── Buying Power Phase (schema 2.1) ─────────────────────────────────────────
+
+
+class GetBuyingPower(IpcMessage):
+    op: Literal["GetBuyingPower"] = "GetBuyingPower"
+    request_id: str
+    venue: str
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +561,21 @@ class OrderListUpdated(IpcMessage):
     event: Literal["OrderListUpdated"] = "OrderListUpdated"
     request_id: str
     orders: list[OrderRecordWire] = Field(default_factory=list)
+
+
+# ── Buying Power Phase (schema 2.1) ─────────────────────────────────────────
+
+
+class BuyingPowerUpdated(IpcMessage):
+    """Response to GetBuyingPower. Contains current cash and credit buying power."""
+
+    event: Literal["BuyingPowerUpdated"] = "BuyingPowerUpdated"
+    request_id: str
+    venue: str
+    cash_available: int   # 現物買付余力（円）
+    cash_shortfall: int   # 現物余力不足額（円、0 は不足なし）
+    credit_available: int  # 信用新規可能額（円）
+    ts_ms: int             # 取得時刻 Unix ミリ秒
 
 
 # ---------------------------------------------------------------------------

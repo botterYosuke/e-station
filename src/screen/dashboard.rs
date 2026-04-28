@@ -630,6 +630,24 @@ impl Dashboard {
             });
     }
 
+    /// Distribute a fresh buying power snapshot to all `BuyingPower` panes.
+    pub fn distribute_buying_power(
+        &mut self,
+        main_window: window::Id,
+        cash_available: i64,
+        cash_shortfall: i64,
+        credit_available: i64,
+        ts_ms: i64,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::BuyingPower(panel) = &mut state.content {
+                    panel.set_cash_buying_power(cash_available, cash_shortfall, ts_ms);
+                    panel.set_credit_buying_power(credit_available, ts_ms);
+                }
+            });
+    }
+
     /// Reset the `submitting` flag on every `OrderEntry` pane whose
     /// `pending_request_id` matches `client_order_id`.
     pub fn notify_order_accepted(&mut self, main_window: window::Id, client_order_id: &str) {

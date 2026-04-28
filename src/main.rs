@@ -727,6 +727,13 @@ enum Message {
         client_order_id: String,
         reason: String,
     },
+    /// `BuyingPowerUpdated` IPC event — distribute to all BuyingPower panes.
+    BuyingPowerUpdated {
+        cash_available: i64,
+        cash_shortfall: i64,
+        credit_available: i64,
+        ts_ms: i64,
+    },
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -934,6 +941,18 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             reason: format!("[{reason_code}] {reason_text}"),
         }),
         EngineEvent::OrderListUpdated { orders, .. } => Some(Message::OrderListUpdated(orders)),
+        EngineEvent::BuyingPowerUpdated {
+            cash_available,
+            cash_shortfall,
+            credit_available,
+            ts_ms,
+            ..
+        } => Some(Message::BuyingPowerUpdated {
+            cash_available,
+            cash_shortfall,
+            credit_available,
+            ts_ms,
+        }),
         _ => None,
     }
 }
@@ -1610,10 +1629,28 @@ impl Flowsurface {
                             }
                         }
                         Some(dashboard::Event::BuyingPowerAction(_action)) => {
-                            // GetBuyingPower IPC は未実装（dto.rs に Command がない）
-                            self.notifications.push(crate::widget::toast::Toast::warn(
-                                "余力情報取得: IPC 未実装（準備中）".to_string(),
-                            ));
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                return Task::perform(
+                                    async move {
+                                        conn.send(
+                                            engine_client::dto::Command::GetBuyingPower {
+                                                request_id: uuid::Uuid::new_v4().to_string(),
+                                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                            },
+                                        )
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                    },
+                                    |res| match res {
+                                        Ok(()) => Message::OrderToast(Toast::info(
+                                            "余力情報を取得中...".to_string(),
+                                        )),
+                                        Err(err) => Message::OrderToast(Toast::error(format!(
+                                            "余力取得失敗: {err}"
+                                        ))),
+                                    },
+                                );
+                            }
                             Task::none()
                         }
                         Some(dashboard::Event::OrderListAction(action)) => {
@@ -1694,6 +1731,22 @@ impl Flowsurface {
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
                     .distribute_order_list(main_window, orders);
+            }
+            // Phase U3: distribute fresh buying power to all BuyingPower panes
+            Message::BuyingPowerUpdated {
+                cash_available,
+                cash_shortfall,
+                credit_available,
+                ts_ms,
+            } => {
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut().distribute_buying_power(
+                    main_window,
+                    cash_available,
+                    cash_shortfall,
+                    credit_available,
+                    ts_ms,
+                );
             }
             // Phase U0: OrderAccepted — reset submitting flag + toast
             Message::OrderAccepted {
