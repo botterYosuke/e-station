@@ -62,3 +62,66 @@ fn orders_panel_view_shows_replay_banner() {
         "view() must check is_replay and show REPLAY banner; got:\n{src}"
     );
 }
+
+/// N1.15: OrderRecordWire に venue フィールドが存在し、
+/// serde default (non-replay = "tachibana") が設定されている
+#[test]
+fn order_record_wire_has_venue_field_with_default() {
+    let dto_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/engine-client/src/dto.rs"
+    ))
+    .expect("read dto.rs");
+    assert!(
+        dto_src.contains("pub venue: String"),
+        "OrderRecordWire must have `pub venue: String` field; got:\n(omitted)"
+    );
+    assert!(
+        dto_src.contains("serde(default") && dto_src.contains("tachibana"),
+        "OrderRecordWire.venue must have a serde default of 'tachibana'; got:\n(omitted)"
+    );
+}
+
+/// N1.15: distribute_order_list が is_replay に基づいて venue でフィルタする
+#[test]
+fn distribute_order_list_filters_by_venue() {
+    let dashboard_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/screen/dashboard.rs"
+    ))
+    .expect("read dashboard.rs");
+    assert!(
+        dashboard_src.contains("is_replay") && dashboard_src.contains("venue"),
+        "distribute_order_list must filter orders by venue/is_replay; got:\n(omitted)"
+    );
+}
+
+/// N1.14: auto_generate_replay_panes が reload 時 (is_first=false) には
+/// TimeAndSales / CandlestickChart を重複生成しない (is_first ガード)
+#[test]
+fn auto_generate_guards_timeandsales_with_is_first() {
+    let dashboard_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/screen/dashboard.rs"
+    ))
+    .expect("read dashboard.rs");
+    // is_first && should_generate(... "TimeAndSales") のパターンが存在することを確認
+    assert!(
+        dashboard_src.contains("is_first") && dashboard_src.contains("TimeAndSales"),
+        "auto_generate_replay_panes must guard TimeAndSales with is_first; got:\n(omitted)"
+    );
+}
+
+/// N1.14: OrderList と BuyingPower の自動生成は loaded_count()==1 でガードされる
+#[test]
+fn auto_generate_guards_order_list_with_loaded_count_one() {
+    let dashboard_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/screen/dashboard.rs"
+    ))
+    .expect("read dashboard.rs");
+    assert!(
+        dashboard_src.contains("loaded_count()") && dashboard_src.contains("== 1"),
+        "auto_generate_replay_panes must guard OrderList/BuyingPower with loaded_count() == 1; got:\n(omitted)"
+    );
+}

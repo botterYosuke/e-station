@@ -199,6 +199,79 @@ class TestOrderListApiVenueFilter:
         assert event.get("code") != "unknown_venue"
 
 
+class TestVenueField:
+    """N1.15: _do_get_order_list_replay が返す orders に venue='replay' が含まれる。"""
+
+    @pytest.mark.asyncio
+    async def test_replay_order_has_venue_replay(self, tmp_path):
+        """submit エントリから生成された OrderRecord に venue='replay' が含まれる。"""
+        _write_replay_wal(
+            tmp_path,
+            [
+                {
+                    "phase": "submit",
+                    "ts": 1700000000000,
+                    "client_order_id": "REPLAY-v-001",
+                    "instrument_id": "7203.TSE",
+                    "order_side": "BUY",
+                    "order_type": "MARKET",
+                    "quantity": "100",
+                }
+            ],
+        )
+        server = _make_server(tmp_path)
+        msg = {"op": "GetOrderList", "request_id": "req-venue-1", "venue": "replay"}
+
+        await server._do_get_order_list_replay(msg)
+
+        event = list(server._outbox)[0]
+        assert event["orders"][0]["venue"] == "replay"
+
+    @pytest.mark.asyncio
+    async def test_live_order_has_venue_tachibana(self, tmp_path):
+        """venue=tachibana の GetOrderList が返す OrderRecord に venue='tachibana' が含まれる。
+
+        tachibana_fetch_order_list をモックして venue フィールドの有無を確認する。
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from engine.server import DataEngineServer
+
+        # OrderRecord 風の mock オブジェクト
+        record = MagicMock()
+        record.client_order_id = "live-001"
+        record.venue_order_id = "V-001"
+        record.instrument_id = "6758.TSE"
+        record.order_side = "BUY"
+        record.order_type = "LIMIT"
+        record.quantity = "100"
+        record.filled_qty = "0"
+        record.leaves_qty = "100"
+        record.price = "3000"
+        record.trigger_price = None
+        record.time_in_force = "DAY"
+        record.expire_time_ns = None
+        record.status = "SUBMITTED"
+        record.ts_event_ms = 1700000000000
+
+        server = _make_server(tmp_path)
+        server._tachibana_session = MagicMock()  # session 確立済みとする
+        server._cache_dir = tmp_path  # _make_server は tmp_path を使う
+
+        msg = {"op": "GetOrderList", "request_id": "req-venue-2", "venue": "tachibana"}
+
+        with patch(
+            "engine.server.tachibana_fetch_order_list", AsyncMock(return_value=[record])
+        ):
+            await server._do_get_order_list(msg)
+
+        outbox = list(server._outbox)
+        assert len(outbox) == 1
+        event = outbox[0]
+        assert event["event"] == "OrderListUpdated"
+        assert event["orders"][0]["venue"] == "tachibana"
+
+
 class TestOSErrorHandling:
     """M-6: _do_get_order_list_replay が OSError をハンドルして Error IPC を返す。"""
 

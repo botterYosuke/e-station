@@ -259,6 +259,7 @@ fn order_record_wire_roundtrip() {
         expire_time_ns: None,
         status: "ACCEPTED".to_string(),
         ts_event_ms: 1_745_640_000_000,
+        venue: "tachibana".to_string(),
     };
 
     let json = serde_json::to_string(&record).unwrap();

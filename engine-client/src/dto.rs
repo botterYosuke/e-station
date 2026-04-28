@@ -583,6 +583,10 @@ pub struct OrderListFilter {
     pub date: Option<String>,
 }
 
+fn default_order_record_venue() -> String {
+    "tachibana".to_string()
+}
+
 /// Wire representation of a single order record in `OrderListUpdated`.
 /// `deny_unknown_fields` prevents unknown Python-side fields from silently
 /// passing through to Rust (C-2).
@@ -603,6 +607,10 @@ pub struct OrderRecordWire {
     pub expire_time_ns: Option<i64>,
     pub status: String,
     pub ts_event_ms: i64,
+    /// Venue that owns this order: "tachibana" for live orders, "replay" for REPLAY WAL orders.
+    /// Defaults to "tachibana" for backwards-compatibility.
+    #[serde(default = "default_order_record_venue")]
+    pub venue: String,
 }
 
 // ── Order enums (nautilus string representations, SCREAMING_SNAKE_CASE) ────────

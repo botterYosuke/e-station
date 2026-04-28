@@ -663,7 +663,20 @@ impl Dashboard {
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, state)| {
                 if let pane::Content::OrderList(panel) = &mut state.content {
-                    panel.set_orders(orders.clone());
+                    // N1.15: venue でフィルタ — REPLAY pane は venue="replay" のみ、
+                    // live pane は venue!="replay" のみを表示する。
+                    let filtered: Vec<_> = orders
+                        .iter()
+                        .filter(|o| {
+                            if panel.is_replay {
+                                o.venue == "replay"
+                            } else {
+                                o.venue != "replay"
+                            }
+                        })
+                        .cloned()
+                        .collect();
+                    panel.set_orders(filtered);
                 }
             });
     }
@@ -831,9 +844,14 @@ impl Dashboard {
 
         let mut last_split_pane = base_pane;
 
-        if self
-            .replay_pane_registry
-            .should_generate(instrument_id, "TimeAndSales")
+        // N1.14: is_first ガード — reload 時 (同一銘柄の2回目以降) は
+        // TimeAndSales / CandlestickChart の重複生成を防ぐ。
+        // TODO(N1.14): reload 時に既存 pane の chart buffer / overlay をクリアする
+        //   処理は KlineChart API の確定後に追加する。
+        if is_first
+            && self
+                .replay_pane_registry
+                .should_generate(instrument_id, "TimeAndSales")
         {
             let new_state = pane::State::with_kind(data::layout::pane::ContentKind::TimeAndSales);
             if let Some((new_pane, _)) = self.panes.split(axis, last_split_pane, new_state) {
@@ -843,9 +861,10 @@ impl Dashboard {
             }
         }
 
-        if self
-            .replay_pane_registry
-            .should_generate(instrument_id, "CandlestickChart")
+        if is_first
+            && self
+                .replay_pane_registry
+                .should_generate(instrument_id, "CandlestickChart")
         {
             let new_state =
                 pane::State::with_kind(data::layout::pane::ContentKind::CandlestickChart);
@@ -856,9 +875,12 @@ impl Dashboard {
             }
         }
 
-        // N1.15: 1 銘柄目のロード時のみ、セッションレベルの REPLAY 注文一覧 pane を生成。
-        // instrument_id は空文字（銘柄非依存の 1 セッション 1 枚）。
-        if is_first && self.replay_pane_registry.should_generate("", "OrderList") {
+        // N1.15: セッションレベルの REPLAY 注文一覧 pane は最初の1銘柄ロード時のみ生成。
+        // loaded_count() == 1 で「2銘柄目以降の is_first」との重複生成を防ぐ。
+        if is_first
+            && self.replay_pane_registry.loaded_count() == 1
+            && self.replay_pane_registry.should_generate("", "OrderList")
+        {
             let new_state = pane::State::new_replay_order_list();
             if let Some((new_pane, _)) =
                 self.panes
@@ -870,8 +892,11 @@ impl Dashboard {
             }
         }
 
-        // N1.16: 1 銘柄目のロード時のみ、セッションレベルの REPLAY 買付余力 pane を生成。
-        if is_first && self.replay_pane_registry.should_generate("", "BuyingPower") {
+        // N1.16: セッションレベルの REPLAY 買付余力 pane は最初の1銘柄ロード時のみ生成。
+        if is_first
+            && self.replay_pane_registry.loaded_count() == 1
+            && self.replay_pane_registry.should_generate("", "BuyingPower")
+        {
             let new_state = pane::State::new_replay_buying_power();
             if let Some((new_pane, _)) =
                 self.panes

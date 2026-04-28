@@ -1353,6 +1353,7 @@ class DataEngineServer:
                             "expire_time_ns": None,
                             "status": "SUBMITTED",
                             "ts_event_ms": entry.get("ts", 0),
+                            "venue": "replay",
                         })
         except OSError as exc:
             log.error("_do_get_order_list_replay: failed to read WAL: %s", exc)
@@ -1444,6 +1445,7 @@ class DataEngineServer:
                 "expire_time_ns": r.expire_time_ns,
                 "status": r.status,
                 "ts_event_ms": r.ts_event_ms,
+                "venue": "tachibana",
             }
             for r in records
         ]

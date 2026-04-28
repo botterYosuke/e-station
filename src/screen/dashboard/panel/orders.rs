@@ -237,6 +237,7 @@ mod tests {
                 expire_time_ns: None,
                 status: "OPEN".to_string(),
                 ts_event_ms: 0,
+                venue: "tachibana".to_string(),
             },
             OrderRecordWire {
                 client_order_id: Some("c-2".to_string()),
@@ -253,6 +254,7 @@ mod tests {
                 expire_time_ns: None,
                 status: "OPEN".to_string(),
                 ts_event_ms: 0,
+                venue: "tachibana".to_string(),
             },
         ];
 
@@ -282,6 +284,7 @@ mod tests {
             expire_time_ns: None,
             status: "OPEN".to_string(),
             ts_event_ms: 0,
+            venue: "tachibana".to_string(),
         };
         panel.set_orders(vec![record]);
 
@@ -323,6 +326,7 @@ mod tests {
             expire_time_ns: None,
             status: "OPEN".to_string(),
             ts_event_ms: 0,
+            venue: "tachibana".to_string(),
         };
 
         panel.set_orders(vec![make_record("c-1", "v-1"), make_record("c-2", "v-2")]);
