@@ -45,6 +45,7 @@ from engine.exchanges.hyperliquid import HyperliquidWorker
 from engine.exchanges.mexc import MexcWorker
 from engine.exchanges.okex import OkexWorker
 from engine.exchanges.tachibana import TachibanaWorker
+from engine.exchanges.tachibana_event import OrderEcEvent, TachibanaEventClient
 from engine.exchanges.tachibana_orders import (
     NautilusOrderEnvelope,
     UnsupportedOrderError,
@@ -229,6 +230,16 @@ class DataEngineServer:
         # Task handle for the background startup login (cancelled on disconnect).
         self._tachibana_startup_task: asyncio.Task | None = None
 
+        # ── Phase O2: EVENT WebSocket EC 約定通知 ────────────────────────
+        # venue_order_id → client_order_id 逆引きマップ（EC フレームには client_order_id がない）
+        self._venue_to_client: dict[str, str] = {}
+        # venue_order_id → 累積約定数量（int）。部分約定の積算に使う
+        self._fill_cumulative: dict[str, int] = {}
+        # EVENT WebSocket 受信クライアント（重複検知 seen set を保持）
+        self._event_client = TachibanaEventClient()
+        # EVENT 受信ループのバックグラウンドタスク
+        self._event_task: asyncio.Task | None = None
+
         # ── Order Phase state (T0.3) ──────────────────────────────────
         # 第二暗証番号: TachibanaSessionHolder でメモリ保持。
         # idle forget タイマー + lockout state を管理する（H-7: architecture.md §5.3）。
@@ -320,6 +331,14 @@ class DataEngineServer:
                 except (asyncio.CancelledError, Exception):
                     pass
             self._tachibana_startup_task = None
+            # Phase O2: EVENT ループも停止する
+            if self._event_task is not None and not self._event_task.done():
+                self._event_task.cancel()
+                try:
+                    await self._event_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._event_task = None
             # Reset startup latch so the next reconnect can call
             # validate_session_on_startup again without the L6 guard firing.
             self._tachibana_startup_latch = StartupLatch()
@@ -926,6 +945,9 @@ class DataEngineServer:
                 "ts_event_ms": int(time.time() * 1000),
             }
         )
+        # Phase O2: EC フレームの venue_order_id → client_order_id 逆引きマップを更新
+        if result.venue_order_id:
+            self._venue_to_client[result.venue_order_id] = result.client_order_id
 
     async def _do_modify_order(self, msg: dict) -> None:
         import time
@@ -1261,6 +1283,11 @@ class DataEngineServer:
                 "message": "Internal error fetching order list",
             })
             return
+
+        # Phase O2: OrderListUpdated の応答で venue_order_id → client_order_id を補完する。
+        for r in records:
+            if r.venue_order_id and r.client_order_id:
+                self._venue_to_client[r.venue_order_id] = r.client_order_id
 
         orders_json = [
             {
@@ -1720,6 +1747,94 @@ class DataEngineServer:
                 "venue": "tachibana",
                 "request_id": request_id,
             })
+            # Phase O2: VenueReady 後に EVENT WebSocket 受信ループを起動する。
+            # 既存タスクが残っていれば（再ログイン時）キャンセルして再起動する。
+            if self._event_task is not None and not self._event_task.done():
+                self._event_task.cancel()
+            self._event_task = asyncio.create_task(
+                self._run_event_loop(session.url_event_ws)
+            )
+
+    async def _run_event_loop(self, url: str) -> None:
+        """EVENT WebSocket に接続して EC 約定通知の受信ループを実行する（Phase O2）。
+
+        VenueReady 後にバックグラウンドタスクとして起動される。
+        再接続は TachibanaEventClient.receive_loop() の reconnect_fn で処理する。
+        """
+        async def _reconnect() -> object:
+            return await websockets.connect(url, compression=None)
+
+        try:
+            ws = await websockets.connect(url, compression=None)
+            log.info("EVENT WebSocket 接続完了")
+            await self._event_client.receive_loop(
+                ws,
+                self._on_ec_event,
+                reconnect_fn=_reconnect,
+            )
+        except asyncio.CancelledError:
+            log.info("EVENT WebSocket ループがキャンセルされました")
+            raise
+        except Exception as exc:
+            log.error("EVENT WebSocket ループが終了しました: %s", exc)
+
+    async def _on_ec_event(self, frame_type: str, event: object) -> None:
+        """EC フレームを IPC イベントに変換して outbox に push する（Phase O2）。
+
+        TachibanaEventClient.receive_loop() の on_event コールバック。
+        notification_type:
+            "1" = 受付（OrderAccepted は submit 時に処理済み → 無視）
+            "2" = 約定 → OrderFilled
+            "3" = 取消 → OrderCanceled
+            "4" = 失効 → OrderExpired
+        """
+        if frame_type != "EC":
+            return
+
+        ec: OrderEcEvent = event  # type: ignore[assignment]
+        client_order_id = self._venue_to_client.get(ec.venue_order_id)
+        if not client_order_id:
+            log.warning(
+                "EC event: venue_order_id=%r の client_order_id が不明 (マップ未登録)",
+                ec.venue_order_id,
+            )
+            return
+
+        nt = ec.notification_type
+        if nt == "1":
+            return  # 受付通知は OrderAccepted で処理済み
+        elif nt == "2":
+            last_qty_int = int(ec.last_qty or "0")
+            prev = self._fill_cumulative.get(ec.venue_order_id, 0)
+            cumulative = prev + last_qty_int
+            self._fill_cumulative[ec.venue_order_id] = cumulative
+            self._outbox.append({
+                "event": "OrderFilled",
+                "client_order_id": client_order_id,
+                "venue_order_id": ec.venue_order_id,
+                "trade_id": ec.trade_id,
+                "last_qty": ec.last_qty or "0",
+                "last_price": ec.last_price or "0",
+                "cumulative_qty": str(cumulative),
+                "leaves_qty": ec.leaves_qty or "0",
+                "ts_event_ms": ec.ts_event_ms,
+            })
+        elif nt == "3":
+            self._outbox.append({
+                "event": "OrderCanceled",
+                "client_order_id": client_order_id,
+                "venue_order_id": ec.venue_order_id,
+                "ts_event_ms": ec.ts_event_ms,
+            })
+        elif nt == "4":
+            self._outbox.append({
+                "event": "OrderExpired",
+                "client_order_id": client_order_id,
+                "venue_order_id": ec.venue_order_id,
+                "ts_event_ms": ec.ts_event_ms,
+            })
+        else:
+            log.debug("EC event: 未知の notification_type=%r (無視)", nt)
 
     async def _do_request_venue_login(self, msg: dict) -> None:
         """`RequestVenueLogin` from the Rust UI — drive a fresh login."""

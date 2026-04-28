@@ -30,6 +30,7 @@ def _make_server(holder: MagicMock, session: MagicMock) -> object:
     srv._outbox = []
     srv._workers = {"tachibana": MagicMock()}
     srv._submit_order_inflight_count = 0
+    srv._venue_to_client = {}
     return srv
 
 
