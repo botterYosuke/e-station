@@ -62,7 +62,7 @@ bash tests/e2e/tachibana_demo_login.sh
 - ✅ `cargo test --workspace` 全グリーン
 - ✅ `uv run pytest python/tests/ -q` 全グリーン（775 passed, 2 skipped）
 - ✅ E2E スクリプト実行 PASS（VenueReady / dev fast path / is_demo=True 全確認、no_session エラーなし）
-- [ ] `/review-fix-loop` スキルでレビュー
+- [x] `/review-fix-loop` スキルでレビュー
 
 ## 設計上の判断
 

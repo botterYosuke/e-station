@@ -94,13 +94,13 @@ Event::BuyingPowerUpdated {
 
 ## Acceptance criteria（完了条件）
 
-- [ ] 余力パネルの「更新」ボタンを押すと IPC 経由で現物余力・信用余力が取得されてパネルに表示される
-- [ ] "余力情報取得: IPC 未実装（準備中）" の toast が出なくなる
-- [ ] `cargo test --workspace` 全緑
-- [ ] `uv run pytest python/tests/ -v` 全緑
-- [ ] `/ipc-schema-check` スキルで SCHEMA_MINOR の Rust / Python 整合が確認できる
-- [ ] `cargo clippy -- -D warnings` クリーン
-- [ ] 実装完了後に `.claude/skills/review-fix-loop/SKILL.md` でレビューと修正を行う
+- [x] 余力パネルの「更新」ボタンを押すと IPC 経由で現物余力・信用余力が取得されてパネルに表示される
+- [x] "余力情報取得: IPC 未実装（準備中）" の toast が出なくなる
+- [x] `cargo test --workspace` 全緑
+- [x] `uv run pytest python/tests/ -v` 全緑
+- [x] `/ipc-schema-check` スキルで SCHEMA_MINOR の Rust / Python 整合が確認できる
+- [x] `cargo clippy -- -D warnings` クリーン
+- [x] 実装完了後に `.claude/skills/review-fix-loop/SKILL.md` でレビューと修正を行う
 
 ---
 

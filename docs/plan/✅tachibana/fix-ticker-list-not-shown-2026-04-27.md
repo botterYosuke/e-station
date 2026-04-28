@@ -143,12 +143,12 @@ async def fetch_ticker_stats(self, ticker: str, market: str = "stock") -> dict:
 
 ## 5. Acceptance criteria
 
-- [ ] 1. 既存 saved-state（Stock なし）でアプリを起動しても立花銘柄が表示される
-- [ ] 2. "Stock" フィルタボタンが UI に表示され、on/off が機能する
-- [ ] 3. `fetch_ticker_stats("__all__", "stock")` がマスタ銘柄数分のプレースホルダーを返す
-- [ ] 4. `Settings::migrate()` のユニットテスト追加
-- [ ] 5. `fetch_ticker_stats.__all__` のユニットテスト追加
-- [ ] 6. /bug-postmortem（MISSES.md に「saved-state フォーマット migration 未実装」パターン追記）
+- [x] 1. 既存 saved-state（Stock なし）でアプリを起動しても立花銘柄が表示される
+- [x] 2. "Stock" フィルタボタンが UI に表示され、on/off が機能する
+- [x] 3. `fetch_ticker_stats("__all__", "stock")` がマスタ銘柄数分のプレースホルダーを返す
+- [x] 4. `Settings::migrate()` のユニットテスト追加
+- [x] 5. `fetch_ticker_stats.__all__` のユニットテスト追加
+- [x] 6. /bug-postmortem（MISSES.md に「saved-state フォーマット migration 未実装」パターン追記）
 
 ## レビュー反映 (2026-04-27, ラウンド 1)
 

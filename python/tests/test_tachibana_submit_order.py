@@ -184,3 +184,85 @@ async def test_submit_order_venue_order_id_is_none_when_missing():
     assert result.venue_order_id is None, (
         f"venue_order_id must be None when sOrderNumber is missing, got {result.venue_order_id!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_submit_order_japanese_error_message_survives_shift_jis_roundtrip():
+    """Shift-JIS ラウンドトリップ受け入れテスト。
+
+    立花サーバーが Shift-JIS でエンコードした日本語エラー文（ひらがな・漢字含む）を
+    decode_response_body() → json.loads() → check_response() と経由したとき、
+    TachibanaError.message が文字化けなく UTF-8 で取れること。
+    """
+    import json as _json
+
+    # 実際の立花エラー文に近い日本語（ひらがな・漢字・カタカナ混在）
+    japanese_error = "注文数量がふせいです。ご確認ください。"
+
+    data = {
+        "p_errno": "0",
+        "sResultCode": "ERR123",
+        "sResultText": japanese_error,
+        "sOrderNumber": "",
+        "sEigyouDay": "20260428",
+        "sWarningCode": "",
+        "sWarningText": "",
+    }
+    # 立花サーバーが返すのは Shift-JIS bytes
+    sjis_body = _json.dumps(data, ensure_ascii=False).encode("shift_jis")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.content = sjis_body
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        with pytest.raises(TachibanaError) as exc_info:
+            await submit_order(_session(), "password", _market_buy_envelope())
+
+    err = exc_info.value
+    assert err.message == japanese_error, (
+        f"Shift-JIS roundtrip failed: expected {japanese_error!r}, got {err.message!r}"
+    )
+    assert err.code == "ERR123"
+
+
+@pytest.mark.asyncio
+async def test_submit_order_p_errno_japanese_message_survives_shift_jis_roundtrip():
+    """p_errno エラー時の日本語メッセージも Shift-JIS ラウンドトリップで化けないこと。"""
+    import json as _json
+
+    japanese_error = "セッションが切れました。再ログインしてください。"
+
+    data = {
+        "p_errno": "9",  # 2 以外の p_errno（SessionExpired 以外の API レベルエラー）
+        "p_err": japanese_error,
+        "sResultCode": "0",
+        "sOrderNumber": "",
+        "sEigyouDay": "20260428",
+        "sWarningCode": "",
+        "sWarningText": "",
+    }
+    sjis_body = _json.dumps(data, ensure_ascii=False).encode("shift_jis")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.content = sjis_body
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        with pytest.raises(TachibanaError) as exc_info:
+            await submit_order(_session(), "password", _market_buy_envelope())
+
+    err = exc_info.value
+    assert err.message == japanese_error, (
+        f"Shift-JIS roundtrip failed for p_err field: expected {japanese_error!r}, got {err.message!r}"
+    )
