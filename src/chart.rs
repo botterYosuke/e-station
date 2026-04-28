@@ -691,7 +691,7 @@ impl ViewState {
     }
 
     #[cfg(test)]
-    pub fn latest_x(&self) -> u64 {
+    pub(crate) fn latest_x(&self) -> u64 {
         self.latest_x
     }
 

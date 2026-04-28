@@ -1,5 +1,5 @@
 use crate::modal::layout_manager::LayoutManager;
-use crate::screen::dashboard::{Dashboard, pane};
+use crate::screen::dashboard::{Dashboard, pane, panel};
 use data::{
     UserTimezone,
     layout::{WindowSpec, pane::Axis},
@@ -180,6 +180,15 @@ impl From<&pane::State> for data::Pane {
                     link_group: pane.link_group,
                 }
             }
+            pane::Content::OrderEntry(_) => data::Pane::OrderEntry {
+                link_group: pane.link_group,
+            },
+            pane::Content::OrderList(_) => data::Pane::OrderList {
+                link_group: pane.link_group,
+            },
+            pane::Content::BuyingPower(_) => data::Pane::BuyingPower {
+                link_group: pane.link_group,
+            },
         }
     }
 }
@@ -307,6 +316,25 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
                 link_group,
             ))
         }
+        // OrderEntry/OrderList/BuyingPower require no streams and are always initialized.
+        data::Pane::OrderEntry { link_group } => Configuration::Pane(pane::State::from_config(
+            pane::Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()),
+            vec![],
+            data::layout::pane::Settings::default(),
+            link_group,
+        )),
+        data::Pane::OrderList { link_group } => Configuration::Pane(pane::State::from_config(
+            pane::Content::OrderList(panel::orders::OrdersPanel::new()),
+            vec![],
+            data::layout::pane::Settings::default(),
+            link_group,
+        )),
+        data::Pane::BuyingPower { link_group } => Configuration::Pane(pane::State::from_config(
+            pane::Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            vec![],
+            data::layout::pane::Settings::default(),
+            link_group,
+        )),
     }
 }
 

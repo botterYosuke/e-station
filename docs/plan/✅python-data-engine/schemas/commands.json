@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "flowsurface/ipc/commands",
   "title": "Rust → Python IPC Commands",
-  "description": "Commands sent from the Rust viewer to the Python data engine.",
+  "description": "Commands sent from the Rust viewer to the Python data engine. Schema MAJOR=2.",
   "oneOf": [
     { "$ref": "#/$defs/Hello" },
     { "$ref": "#/$defs/SetProxy" },
@@ -16,8 +16,16 @@
     { "$ref": "#/$defs/GetTickerMetadata" },
     { "$ref": "#/$defs/RequestDepthSnapshot" },
     { "$ref": "#/$defs/Shutdown" },
-    { "$ref": "#/$defs/SetVenueCredentials" },
-    { "$ref": "#/$defs/RequestVenueLogin" }
+    { "$ref": "#/$defs/Ping" },
+    { "$ref": "#/$defs/RequestVenueLogin" },
+    { "$ref": "#/$defs/SetSecondPassword" },
+    { "$ref": "#/$defs/ForgetSecondPassword" },
+    { "$ref": "#/$defs/SubmitOrder" },
+    { "$ref": "#/$defs/ModifyOrder" },
+    { "$ref": "#/$defs/CancelOrder" },
+    { "$ref": "#/$defs/CancelAllOrders" },
+    { "$ref": "#/$defs/GetOrderList" },
+    { "$ref": "#/$defs/GetBuyingPower" }
   ],
   "$defs": {
     "RequestId": {
@@ -59,7 +67,8 @@
           "type": "string",
           "enum": ["trade", "depth", "kline"]
         },
-        "timeframe": { "type": ["string", "null"] }
+        "timeframe": { "type": ["string", "null"] },
+        "market": { "type": ["string", "null"] }
       }
     },
     "Unsubscribe": {
@@ -70,7 +79,8 @@
         "op": { "const": "Unsubscribe" },
         "venue": { "type": "string" },
         "ticker": { "type": "string" },
-        "stream": { "type": "string" }
+        "stream": { "type": "string" },
+        "market": { "type": ["string", "null"] }
       }
     },
     "FetchKlines": {
@@ -83,7 +93,10 @@
         "venue": { "type": "string" },
         "ticker": { "type": "string" },
         "timeframe": { "type": "string" },
-        "limit": { "type": "integer", "minimum": 1 }
+        "limit": { "type": "integer", "minimum": 1 },
+        "start_ms": { "type": ["integer", "null"] },
+        "end_ms": { "type": ["integer", "null"] },
+        "market": { "type": ["string", "null"] }
       }
     },
     "FetchTrades": {
@@ -96,7 +109,9 @@
         "venue": { "type": "string" },
         "ticker": { "type": "string" },
         "start_ms": { "type": "integer" },
-        "end_ms": { "type": "integer" }
+        "end_ms": { "type": "integer" },
+        "market": { "type": ["string", "null"] },
+        "data_path": { "type": ["string", "null"] }
       }
     },
     "FetchOpenInterest": {
@@ -109,7 +124,10 @@
         "venue": { "type": "string" },
         "ticker": { "type": "string" },
         "timeframe": { "type": "string" },
-        "limit": { "type": "integer", "minimum": 1 }
+        "limit": { "type": "integer", "minimum": 1 },
+        "start_ms": { "type": ["integer", "null"] },
+        "end_ms": { "type": ["integer", "null"] },
+        "market": { "type": ["string", "null"] }
       }
     },
     "FetchTickerStats": {
@@ -120,7 +138,8 @@
         "op": { "const": "FetchTickerStats" },
         "request_id": { "type": "string" },
         "venue": { "type": "string" },
-        "ticker": { "type": "string" }
+        "ticker": { "type": "string" },
+        "market": { "type": ["string", "null"] }
       }
     },
     "ListTickers": {
@@ -130,7 +149,8 @@
       "properties": {
         "op": { "const": "ListTickers" },
         "request_id": { "type": "string" },
-        "venue": { "type": "string" }
+        "venue": { "type": "string" },
+        "market": { "type": ["string", "null"] }
       }
     },
     "GetTickerMetadata": {
@@ -152,7 +172,8 @@
         "op": { "const": "RequestDepthSnapshot" },
         "request_id": { "type": "string" },
         "venue": { "type": "string" },
-        "ticker": { "type": "string" }
+        "ticker": { "type": "string" },
+        "market": { "type": ["string", "null"] }
       }
     },
     "Shutdown": {
@@ -163,53 +184,13 @@
         "op": { "const": "Shutdown" }
       }
     },
-    "TachibanaSessionWire": {
-      "description": "5 virtual URLs from CLMAuthLoginRequest plus expiry & 譲渡益課税区分. Plain strings on the wire; both sides treat the values as secrets in memory.",
+    "Ping": {
       "type": "object",
-      "required": ["url_request", "url_master", "url_price", "url_event", "url_event_ws"],
+      "required": ["op", "request_id"],
       "additionalProperties": false,
       "properties": {
-        "url_request": { "type": "string" },
-        "url_master": { "type": "string" },
-        "url_price": { "type": "string" },
-        "url_event": { "type": "string" },
-        "url_event_ws": { "type": "string" },
-        "expires_at_ms": { "type": ["integer", "null"] },
-        "zyoutoeki_kazei_c": { "type": "string" }
-      }
-    },
-    "VenueCredentialsPayload": {
-      "description": "Tagged union of per-venue credential shapes. Today only `tachibana` is defined.",
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["venue", "user_id", "password"],
-          "additionalProperties": false,
-          "properties": {
-            "venue": { "const": "tachibana" },
-            "user_id": { "type": "string" },
-            "password": { "type": "string" },
-            "second_password": { "type": ["string", "null"] },
-            "is_demo": { "type": "boolean" },
-            "session": {
-              "anyOf": [
-                { "$ref": "#/$defs/TachibanaSessionWire" },
-                { "type": "null" }
-              ]
-            }
-          }
-        }
-      ]
-    },
-    "SetVenueCredentials": {
-      "description": "Inject venue-scoped credentials. Sent at startup (keyring restore) and after managed-mode Python restart.",
-      "type": "object",
-      "required": ["op", "request_id", "payload"],
-      "additionalProperties": false,
-      "properties": {
-        "op": { "const": "SetVenueCredentials" },
-        "request_id": { "$ref": "#/$defs/RequestId" },
-        "payload": { "$ref": "#/$defs/VenueCredentialsPayload" }
+        "op": { "const": "Ping" },
+        "request_id": { "$ref": "#/$defs/RequestId" }
       }
     },
     "RequestVenueLogin": {
@@ -221,6 +202,190 @@
         "op": { "const": "RequestVenueLogin" },
         "request_id": { "$ref": "#/$defs/RequestId" },
         "venue": { "type": "string" }
+      }
+    },
+    "SetSecondPassword": {
+      "description": "Send the second password to Python memory for the next order submission. `value` is the raw secret; Python wraps it in SecretStr immediately. Debug output masks `value` as [REDACTED] (D2-M5).",
+      "type": "object",
+      "required": ["op", "request_id", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "SetSecondPassword" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ForgetSecondPassword": {
+      "description": "Explicitly clear the second password from Python memory (idle forget / explicit logout).",
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "ForgetSecondPassword" }
+      }
+    },
+    "SubmitOrder": {
+      "description": "Submit a new order to the venue. `order` shape matches the nautilus OrderFactory input (spec.md §5).",
+      "type": "object",
+      "required": ["op", "request_id", "venue", "order"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "SubmitOrder" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" },
+        "order": { "$ref": "#/$defs/SubmitOrderRequest" }
+      }
+    },
+    "ModifyOrder": {
+      "description": "Modify price / qty / trigger / expire of an existing order. `request_key` は不要（WAL 冪等は submit 専用。ModifyOrder/CancelOrder は WAL スコープ外）。",
+      "type": "object",
+      "required": ["op", "request_id", "venue", "client_order_id", "change"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "ModifyOrder" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" },
+        "client_order_id": { "type": "string" },
+        "venue_order_id": { "type": ["string", "null"] },
+        "change": { "$ref": "#/$defs/OrderModifyChange" }
+      }
+    },
+    "CancelOrder": {
+      "description": "Cancel a specific order. Rust looks up venue_order_id via OrderSessionState before sending. `request_key` は不要（WAL 冪等は submit 専用。ModifyOrder/CancelOrder は WAL スコープ外）。",
+      "type": "object",
+      "required": ["op", "request_id", "venue", "client_order_id", "venue_order_id"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "CancelOrder" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" },
+        "client_order_id": { "type": "string" },
+        "venue_order_id": { "type": "string" }
+      }
+    },
+    "CancelAllOrders": {
+      "description": "Cancel all open orders for a venue, optionally filtered by instrument and side.",
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "CancelAllOrders" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" },
+        "instrument_id": { "type": ["string", "null"] },
+        "order_side": {
+          "oneOf": [
+            { "$ref": "#/$defs/OrderSide" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "GetOrderList": {
+      "description": "Fetch today's order list from the venue.",
+      "type": "object",
+      "required": ["op", "request_id", "venue", "filter"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "GetOrderList" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" },
+        "filter": { "$ref": "#/$defs/OrderListFilter" }
+      }
+    },
+    "GetBuyingPower": {
+      "description": "Fetch current buying power (cash + credit) from the venue. Added in schema MINOR=2.",
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "GetBuyingPower" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" }
+      }
+    },
+    "OrderSide": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE order side.",
+      "type": "string",
+      "enum": ["BUY", "SELL"]
+    },
+    "OrderType": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE order type.",
+      "type": "string",
+      "enum": ["MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT", "MARKET_IF_TOUCHED", "LIMIT_IF_TOUCHED"]
+    },
+    "TimeInForce": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE time-in-force.",
+      "type": "string",
+      "enum": ["DAY", "GTC", "GTD", "IOC", "FOK", "AT_THE_OPEN", "AT_THE_CLOSE"]
+    },
+    "TriggerType": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE stop-order trigger type. Only LAST is supported in Phase O0-O3.",
+      "type": "string",
+      "enum": ["LAST", "BID_ASK", "INDEX"]
+    },
+    "SubmitOrderRequest": {
+      "description": "Order placement payload — fields match nautilus OrderFactory. deny_unknown_fields prevents second_password / p_no injection via IPC (C-R2-M3 / D3-1).",
+      "type": "object",
+      "required": [
+        "client_order_id", "instrument_id", "order_side", "order_type",
+        "quantity", "time_in_force", "post_only", "reduce_only", "tags"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "client_order_id": {
+          "description": "ASCII printable, 1–36 chars (spec.md §5).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 36
+        },
+        "instrument_id": {
+          "description": "Format: '<code>.<suffix>/<venue>' e.g. '7203.T/TSE'.",
+          "type": "string"
+        },
+        "order_side": { "$ref": "#/$defs/OrderSide" },
+        "order_type": { "$ref": "#/$defs/OrderType" },
+        "quantity": { "type": "string" },
+        "price": { "type": ["string", "null"] },
+        "trigger_price": { "type": ["string", "null"] },
+        "trigger_type": {
+          "oneOf": [
+            { "$ref": "#/$defs/TriggerType" },
+            { "type": "null" }
+          ]
+        },
+        "time_in_force": { "$ref": "#/$defs/TimeInForce" },
+        "expire_time_ns": { "type": ["integer", "null"] },
+        "post_only": { "type": "boolean" },
+        "reduce_only": { "type": "boolean" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "request_key": {
+          "description": "xxh3_64 hash of canonical order, computed by Rust. 0 = unknown. Used for WAL idempotency restore (architecture.md §4.1).",
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "OrderModifyChange": {
+      "description": "Fields to modify on an existing order; null = unchanged. deny_unknown_fields (C-R2-M3).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "new_quantity": { "type": ["string", "null"] },
+        "new_price": { "type": ["string", "null"] },
+        "new_trigger_price": { "type": ["string", "null"] },
+        "new_expire_time_ns": { "type": ["integer", "null"] }
+      }
+    },
+    "OrderListFilter": {
+      "description": "Filter criteria for GetOrderList. All fields optional.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": ["string", "null"] },
+        "instrument_id": { "type": ["string", "null"] },
+        "date": { "type": ["string", "null"] }
       }
     }
   }

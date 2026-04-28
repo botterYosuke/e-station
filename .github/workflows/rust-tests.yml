@@ -1,0 +1,24 @@
+name: Rust Tests
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+jobs:
+    rust-tests:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install stable Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo dependencies
+              uses: Swatinem/rust-cache@v2
+
+            - name: Run Rust workspace tests
+              run: cargo test --workspace

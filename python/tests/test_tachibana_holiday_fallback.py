@@ -1,4 +1,4 @@
-"""TDD: Holiday/market-closed → Disconnected fallback (T5, plan §T5 F-M5a).
+﻿"""TDD: Holiday/market-closed → Disconnected fallback (T5, plan §T5 F-M5a).
 
 Tests cover:
 * Outside trading hours → stream_trades/stream_depth immediately emits
@@ -52,7 +52,7 @@ def _make_worker(tmp_path: Path, ws_url: str = "wss://example.test/event/") -> T
 
 def _st_frame(result_code: str) -> bytes:
     """Build a Shift-JIS ST frame with the given sResultCode."""
-    text = f"\x01p_evt_cmd\x02ST\x01sResultCode\x02{result_code}"
+    text = f"\x01p_cmd\x02ST\x01sResultCode\x02{result_code}"
     return text.encode("shift_jis")
 
 

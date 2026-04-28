@@ -2,10 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "flowsurface/ipc/events",
   "title": "Python → Rust IPC Events",
-  "description": "Events sent from the Python data engine to the Rust viewer.",
+  "description": "Events sent from the Python data engine to the Rust viewer. Schema MAJOR=2.",
   "oneOf": [
     { "$ref": "#/$defs/Ready" },
     { "$ref": "#/$defs/EngineError" },
+    { "$ref": "#/$defs/Pong" },
     { "$ref": "#/$defs/Connected" },
     { "$ref": "#/$defs/Disconnected" },
     { "$ref": "#/$defs/Trades" },
@@ -21,9 +22,19 @@
     { "$ref": "#/$defs/Error" },
     { "$ref": "#/$defs/VenueReady" },
     { "$ref": "#/$defs/VenueError" },
-    { "$ref": "#/$defs/VenueCredentialsRefreshed" },
     { "$ref": "#/$defs/VenueLoginStarted" },
-    { "$ref": "#/$defs/VenueLoginCancelled" }
+    { "$ref": "#/$defs/VenueLoginCancelled" },
+    { "$ref": "#/$defs/SecondPasswordRequired" },
+    { "$ref": "#/$defs/OrderSubmitted" },
+    { "$ref": "#/$defs/OrderAccepted" },
+    { "$ref": "#/$defs/OrderRejected" },
+    { "$ref": "#/$defs/OrderPendingUpdate" },
+    { "$ref": "#/$defs/OrderPendingCancel" },
+    { "$ref": "#/$defs/OrderFilled" },
+    { "$ref": "#/$defs/OrderCanceled" },
+    { "$ref": "#/$defs/OrderExpired" },
+    { "$ref": "#/$defs/OrderListUpdated" },
+    { "$ref": "#/$defs/BuyingPowerUpdated" }
   ],
   "$defs": {
     "RequestId": {
@@ -38,6 +49,15 @@
         { "$ref": "#/$defs/RequestId" },
         { "type": "null" }
       ]
+    },
+    "Pong": {
+      "type": "object",
+      "required": ["op", "request_id"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "Pong" },
+        "request_id": { "type": "string" }
+      }
     },
     "Ready": {
       "type": "object",
@@ -294,22 +314,8 @@
         "message": { "type": "string" }
       }
     },
-    "TachibanaSessionWire": {
-      "type": "object",
-      "required": ["url_request", "url_master", "url_price", "url_event", "url_event_ws"],
-      "additionalProperties": false,
-      "properties": {
-        "url_request": { "type": "string" },
-        "url_master": { "type": "string" },
-        "url_price": { "type": "string" },
-        "url_event": { "type": "string" },
-        "url_event_ws": { "type": "string" },
-        "expires_at_ms": { "type": ["integer", "null"] },
-        "zyoutoeki_kazei_c": { "type": "string" }
-      }
-    },
     "VenueReady": {
-      "description": "Idempotent: emitted after every successful SetVenueCredentials, including post-restart re-injection. Consumers must NOT trigger fresh subscriptions on receipt — ProcessManager owns resubscribe.",
+      "description": "Idempotent: emitted after every successful startup_login. Consumers must NOT trigger fresh subscriptions on receipt — ProcessManager owns resubscribe.",
       "type": "object",
       "required": ["event", "venue"],
       "additionalProperties": false,
@@ -342,17 +348,6 @@
         "message": { "type": "string" }
       }
     },
-    "VenueCredentialsRefreshed": {
-      "description": "Emitted after a startup-time re-login produces fresh virtual URLs. Rust uses this to update the keyring entry.",
-      "type": "object",
-      "required": ["event", "venue", "session"],
-      "additionalProperties": false,
-      "properties": {
-        "event": { "const": "VenueCredentialsRefreshed" },
-        "venue": { "type": "string" },
-        "session": { "$ref": "#/$defs/TachibanaSessionWire" }
-      }
-    },
     "VenueLoginStarted": {
       "description": "Python has spawned the venue's login helper subprocess (Tachibana = tkinter dialog).",
       "type": "object",
@@ -372,6 +367,189 @@
         "event": { "const": "VenueLoginCancelled" },
         "venue": { "type": "string" },
         "request_id": { "$ref": "#/$defs/RequestIdNullable" }
+      }
+    },
+    "SecondPasswordRequired": {
+      "description": "Python needs the second password before it can process a SubmitOrder request. Rust must display the second-password modal and respond with SetSecondPassword. tachibana 専用イベント。複数 venue サポート時は venue フィールドを追加すること。",
+      "type": "object",
+      "required": ["event", "request_id"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "SecondPasswordRequired" },
+        "request_id": { "type": "string" }
+      }
+    },
+    "OrderSubmitted": {
+      "description": "Order has been forwarded to the venue's HTTP API (before response). Emitted before OrderAccepted or OrderRejected.",
+      "type": "object",
+      "required": ["event", "client_order_id", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderSubmitted" },
+        "client_order_id": { "type": "string" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderAccepted": {
+      "description": "Venue accepted the order and assigned a venue_order_id. venue_order_id may be null on async acceptance paths.",
+      "type": "object",
+      "required": ["event", "client_order_id", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderAccepted" },
+        "client_order_id": { "type": "string" },
+        "venue_order_id": { "type": ["string", "null"] },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderRejected": {
+      "description": "Order was rejected before or after acceptance (also covers modify/cancel rejection). reason_code is SCREAMING_SNAKE_CASE (spec.md §5.2).",
+      "type": "object",
+      "required": ["event", "client_order_id", "reason_code", "reason_text", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderRejected" },
+        "client_order_id": { "type": "string" },
+        "reason_code": {
+          "description": "SCREAMING_SNAKE_CASE reject reason. Known values: UNSUPPORTED_IN_PHASE_O0, NOT_LOGGED_IN, TRANSPORT_ERROR, SESSION_EXPIRED, SECOND_PASSWORD_REQUIRED, SECOND_PASSWORD_LOCKED, SECOND_PASSWORD_INVALID, INSUFFICIENT_FUNDS, VENUE_UNSUPPORTED, RATE_LIMITED, INTERNAL_ERROR.",
+          "type": "string"
+        },
+        "reason_text": { "type": "string" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderPendingUpdate": {
+      "description": "Modify request forwarded to venue; awaiting confirmation.",
+      "type": "object",
+      "required": ["event", "client_order_id", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderPendingUpdate" },
+        "client_order_id": { "type": "string" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderPendingCancel": {
+      "description": "Cancel request forwarded to venue; awaiting confirmation.",
+      "type": "object",
+      "required": ["event", "client_order_id", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderPendingCancel" },
+        "client_order_id": { "type": "string" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderFilled": {
+      "description": "Order was fully or partially filled. leaves_qty='0' means full fill (nautilus convention). Emitted by EC frame parser (Phase O2).",
+      "type": "object",
+      "required": ["event", "client_order_id", "venue_order_id", "trade_id", "last_qty", "last_price", "cumulative_qty", "leaves_qty", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderFilled" },
+        "client_order_id": { "type": "string" },
+        "venue_order_id": { "type": "string" },
+        "trade_id": { "type": "string" },
+        "last_qty": { "type": "string" },
+        "last_price": { "type": "string" },
+        "cumulative_qty": { "type": "string" },
+        "leaves_qty": { "type": "string" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderCanceled": {
+      "description": "Order was successfully canceled.",
+      "type": "object",
+      "required": ["event", "client_order_id", "venue_order_id", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderCanceled" },
+        "client_order_id": { "type": "string" },
+        "venue_order_id": { "type": "string" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderExpired": {
+      "description": "Order expired (GTD past expiry date, or AT_THE_CLOSE past closing time).",
+      "type": "object",
+      "required": ["event", "client_order_id", "venue_order_id", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderExpired" },
+        "client_order_id": { "type": "string" },
+        "venue_order_id": { "type": "string" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "OrderListUpdated": {
+      "description": "Response to GetOrderList — today's order records from the venue.",
+      "type": "object",
+      "required": ["event", "request_id", "orders"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "OrderListUpdated" },
+        "request_id": { "type": "string" },
+        "orders": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/OrderRecordWire" }
+        }
+      }
+    },
+    "OrderSide": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE order side.",
+      "type": "string",
+      "enum": ["BUY", "SELL"]
+    },
+    "OrderType": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE order type.",
+      "type": "string",
+      "enum": ["MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT", "MARKET_IF_TOUCHED", "LIMIT_IF_TOUCHED"]
+    },
+    "TimeInForce": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE time-in-force.",
+      "type": "string",
+      "enum": ["DAY", "GTC", "GTD", "IOC", "FOK", "AT_THE_OPEN", "AT_THE_CLOSE"]
+    },
+    "OrderStatus": {
+      "description": "Nautilus SCREAMING_SNAKE_CASE order status.",
+      "type": "string",
+      "enum": ["INITIALIZED", "SUBMITTED", "ACCEPTED", "PARTIALLY_FILLED", "FILLED", "PENDING_UPDATE", "PENDING_CANCEL", "CANCELED", "EXPIRED", "REJECTED"]
+    },
+    "OrderRecordWire": {
+      "description": "Single order record from GetOrderList. deny_unknown_fields (C-2).",
+      "type": "object",
+      "required": ["venue_order_id", "instrument_id", "order_side", "order_type", "quantity", "filled_qty", "leaves_qty", "time_in_force", "status", "ts_event_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "client_order_id": { "type": ["string", "null"] },
+        "venue_order_id": { "type": "string" },
+        "instrument_id": { "type": "string" },
+        "order_side": { "$ref": "#/$defs/OrderSide" },
+        "order_type": { "$ref": "#/$defs/OrderType" },
+        "quantity": { "type": "string" },
+        "filled_qty": { "type": "string" },
+        "leaves_qty": { "type": "string" },
+        "price": { "type": ["string", "null"] },
+        "trigger_price": { "type": ["string", "null"] },
+        "time_in_force": { "$ref": "#/$defs/TimeInForce" },
+        "expire_time_ns": { "type": ["integer", "null"] },
+        "status": { "$ref": "#/$defs/OrderStatus" },
+        "ts_event_ms": { "type": "integer" }
+      }
+    },
+    "BuyingPowerUpdated": {
+      "description": "Response to GetBuyingPower. Contains current cash and credit buying power. Schema MINOR=2.",
+      "type": "object",
+      "required": ["event", "request_id", "venue", "cash_available", "cash_shortfall", "credit_available", "ts_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "BuyingPowerUpdated" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "cash_available": { "type": "integer" },
+        "cash_shortfall": { "type": "integer", "minimum": 0 },
+        "credit_available": { "type": "integer" },
+        "ts_ms": { "type": "integer" }
       }
     }
   }

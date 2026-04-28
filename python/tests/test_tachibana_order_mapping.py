@@ -129,6 +129,27 @@ def test_tags_cash_maps_to_0():
 
 
 # ---------------------------------------------------------------------------
+# B-M4: _ACCOUNT_TYPE_MAP がマニュアル確定値と一致すること
+# ---------------------------------------------------------------------------
+
+
+def test_account_type_map_matches_manual():
+    """B-M4: sZyoutoekiKazeiC の値がマニュアル確定値と一致することを assert。"""
+    from engine.exchanges.tachibana_orders import _ACCOUNT_TYPE_MAP
+
+    assert _ACCOUNT_TYPE_MAP["account_type=specific"] == "1"
+    assert _ACCOUNT_TYPE_MAP["account_type=general"] == "3"
+    assert _ACCOUNT_TYPE_MAP["account_type=nisa"] == "5"
+    assert _ACCOUNT_TYPE_MAP["account_type=nisa_growth"] == "6"
+    # 旧タグ名が存在しないこと
+    assert "account_type=specific_with_withholding" not in _ACCOUNT_TYPE_MAP
+    assert "account_type=specific_without_withholding" not in _ACCOUNT_TYPE_MAP
+    assert "account_type=nisa_tsumitate" not in _ACCOUNT_TYPE_MAP
+    # "0" が値として存在しないこと
+    assert "0" not in _ACCOUNT_TYPE_MAP.values()
+
+
+# ---------------------------------------------------------------------------
 # account_type: session fallback
 # ---------------------------------------------------------------------------
 
@@ -292,3 +313,26 @@ def test_order_record_to_wire_missing_side_falls_back_to_buy():
     }
     wire = _order_record_to_wire(record, None)
     assert wire.order_side == "BUY", f"Expected BUY fallback, got {wire.order_side!r}"
+
+
+# ---------------------------------------------------------------------------
+# logging マスク横断テスト: second_password が logging 経由で漏洩しないこと
+# ---------------------------------------------------------------------------
+
+
+def test_second_password_not_in_log_output(caplog):
+    """logging.getLogger().info(obj) でも second_password が平文で出ないこと。
+
+    TachibanaWireOrderRequest の __repr__ / __str__ / model_dump_json() は
+    @field_serializer によって second_password を "[REDACTED]" に置換する（C-3）。
+    この保護が logging 経由の出力にも有効であることを確認する。
+    """
+    import logging
+
+    wire = _envelope_to_wire(_envelope(), _session(), "secret_log_test")
+    with caplog.at_level(logging.INFO):
+        logging.getLogger().info("wire request: %s", wire)
+    assert "secret_log_test" not in caplog.text, (
+        "second_password must not appear in log output; "
+        "logging.info() calls str(wire) which should be masked by field_serializer"
+    )

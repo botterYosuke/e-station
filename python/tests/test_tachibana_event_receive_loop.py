@@ -169,3 +169,61 @@ class TestReceiveLoopRetryCount:
             f"初期 ws は 1 回だけイテレーションされるべきだが {ws.iterate_count} 回イテレーションされた"
             f"（バグがある場合は reconnect 失敗後に stale ws が再イテレーションされる）"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: _process_frame dispatches on p_cmd, NOT p_evt_cmd
+#
+# The EVENT WebSocket subscription URL uses ``p_evt_cmd=FD,EC`` to declare
+# which events to subscribe to.  Received frames carry the command in a
+# field named ``p_cmd`` (e.g. ``p_cmd=FD``).  These are different names for
+# different roles.  Reverting to ``p_evt_cmd`` in _process_frame would make
+# these tests FAIL.
+# ---------------------------------------------------------------------------
+
+
+class TestProcessFrameDispatchKey:
+    """_process_frame が p_cmd キーでディスパッチすることを検証するリグレッションガード。
+    姉妹クラス: TestReceivedFrameFieldName in test_tachibana_ws.py
+    """
+
+    @pytest.mark.asyncio
+    async def test_p_cmd_fd_frame_triggers_on_event(self) -> None:
+        """A frame with ``p_cmd=FD`` (real server format) fires on_event with 'FD'."""
+        from engine.exchanges.tachibana_event import TachibanaEventClient
+
+        client = TachibanaEventClient()
+        collected: list[str] = []
+
+        async def _on_event(frame_type: str, data: object) -> None:
+            collected.append(frame_type)
+
+        frame = "\x01p_cmd=FD\x01p_1_DPP=2500\x01p_1_DV=100"
+        await client._process_frame(frame, _on_event)
+
+        assert "FD" in collected, (
+            "on_event was not called with 'FD'. "
+            "Fix: _process_frame must read frame_dict.get('p_cmd'), not 'p_evt_cmd'."
+        )
+
+    @pytest.mark.asyncio
+    async def test_p_evt_cmd_fd_frame_does_not_trigger_on_event(self) -> None:
+        """A frame with the wrong key ``p_evt_cmd=FD`` must NOT fire on_event.
+
+        Confirms that reverting the p_cmd fix would break this test.
+        """
+        from engine.exchanges.tachibana_event import TachibanaEventClient
+
+        client = TachibanaEventClient()
+        collected: list[str] = []
+
+        async def _on_event(frame_type: str, data: object) -> None:
+            collected.append(frame_type)
+
+        bad_frame = "\x01p_evt_cmd=FD\x01p_1_DPP=2500\x01p_1_DV=100"
+        await client._process_frame(bad_frame, _on_event)
+
+        assert "FD" not in collected, (
+            "on_event was triggered by a frame with 'p_evt_cmd' key. "
+            "_process_frame must only dispatch on 'p_cmd'."
+        )

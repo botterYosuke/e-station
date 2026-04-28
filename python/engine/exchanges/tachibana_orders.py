@@ -95,7 +95,7 @@ class TachibanaWireOrderRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # 口座区分 (sZyoutoekiKazeiC): "1"=特定源泉, "3"=特定非源泉, "0"=一般 etc.
+    # 口座区分 (sZyoutoekiKazeiC): "1"=特定, "3"=一般, "5"=一般NISA, "6"=NISA成長投資枠
     account_type: str
     # 銘柄コード (sIssueCode): 例 "7203"
     issue_code: str
@@ -285,11 +285,10 @@ _CASH_MARGIN_MAP: dict[str, str] = {
     "cash_margin=margin_general_repay": "8",
 }
 _ACCOUNT_TYPE_MAP: dict[str, str] = {
-    "account_type=specific_with_withholding": "1",
-    "account_type=specific_without_withholding": "3",
-    "account_type=general": "0",
-    "account_type=nisa_growth": "5",
-    "account_type=nisa_tsumitate": "6",
+    "account_type=specific":    "1",  # 特定口座
+    "account_type=general":     "3",  # 一般口座
+    "account_type=nisa":        "5",  # 一般NISA（2024年以降売却のみ可）
+    "account_type=nisa_growth": "6",  # NISA成長投資枠（N成長）
 }
 
 
@@ -1594,8 +1593,8 @@ async def fetch_buying_power(
     if err is not None:
         raise err
 
-    available = int(data.get("sZanKaiKanougakuGoukei", "0") or "0")
-    shortfall = int(data.get("sZanKaiKanougakuHusoku", "0") or "0")
+    available = int(data.get("sSummaryGenkabuKaituke", "0") or "0")
+    shortfall = 1 if data.get("sHusokukinHasseiFlg", "0") == "1" else 0
     return BuyingPowerResult(available_amount=available, shortfall=shortfall)
 
 
@@ -1645,8 +1644,8 @@ async def fetch_credit_buying_power(
     if err is not None:
         raise err
 
-    available = int(data.get("sZanShinkiKanoIjirituGoukei", "0") or "0")
-    shortfall = int(data.get("sZanShinkiKanoIjirituHusoku", "0") or "0")
+    available = int(data.get("sSummarySinyouSinkidate", "0") or "0")
+    shortfall = 0
     return CreditBuyingPowerResult(available_amount=available, shortfall=shortfall)
 
 

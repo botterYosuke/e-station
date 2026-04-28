@@ -61,6 +61,37 @@ Rust 受信
    │ ⑪ HTTP 200 を返却
 ```
 
+**H-2 SecondPasswordRequired ポリシー（確定）**:
+
+Python が `_do_submit_order` を処理した時点で第二暗証番号がメモリに無い場合、以下の fire-and-forget 方式を採る。
+
+```
+Python
+   │ second_password is None
+   │ → Event::SecondPasswordRequired { request_id } を IPC 送信
+   │ → ハンドラを return（OrderRejected は送らない）
+   ▼
+Rust order_api.rs
+   │ OrderWaitResult::SecondPasswordRequired → HTTP 401
+   │   { "reason_code": "SECOND_PASSWORD_REQUIRED" }
+   ▼
+Rust main.rs（IPC イベント購読経路）
+   │ EngineEvent::SecondPasswordRequired { request_id } → modal 表示
+   ▼
+ユーザー入力
+   │ → Command::SetSecondPassword { value } を IPC 送信
+   ▼
+HTTP 呼び出し側
+   │ 401 受信後、同一 client_order_id で POST /api/order/submit を再送
+   │ OrderSessionState の try_insert が IdempotentReplay をガード
+   │ → 2 回目は second_password 設定済みのため正常に処理される
+```
+
+**不変条件**:
+- Python は SecondPasswordRequired を送った後 OrderRejected を送らない（Rust の OrderWaitResult が SecondPasswordRequired になり HTTP 401 で終了するため）
+- 再送時の idempotency は `client_order_id + request_key` ペアで担保（WAL 復元も同様）
+- 再送は無制限ではなく HTTP 呼び出し側の責務。Python には自動リトライ機構を持たせない（単一責務）
+
 ### 2.2 約定通知（非同期、Phase O2）
 
 ```
@@ -149,6 +180,31 @@ Rust 受信
 ```
 
 **注意**: `Command::SetSecondPassword` の `value` は IPC を経由するためプレーン `String`（`SecretString` は IPC JSON に送れない）。Python 側で `SecretStr` 化すること。
+
+**C-2: ForgetSecondPassword ↔ in-flight SubmitOrder 競合ポリシー（確定 2026-04-28）**:
+
+`POST /api/order/forget-second-password` と in-flight な `SubmitOrder` が同時に発生した場合の動作を以下のように規定する。
+
+- **ポリシー**: `ForgetSecondPassword` は **即時適用**する（in-flight SubmitOrder の完了を待たない）。
+- **根拠**: Python asyncio は単一スレッドであるため、`ForgetSecondPassword` の処理は必ず `await` ポイント間に割り込む。`_do_submit_order` は `second_password` を `self._session_holder.get_password()` でローカル変数に取得済みのため、その後に holder をクリアしても in-flight SubmitOrder には影響しない。
+- **影響**: in-flight SubmitOrder は保持済みの `second_password` ローカル変数で正常に完了する。holder をクリアした後に発行される次の SubmitOrder は `SecondPasswordRequired` で応答される。
+- **ログ**: `ForgetSecondPassword` 受信時に in-flight な SubmitOrder が存在する場合（`_submit_order_inflight_count > 0`）は `log.info` で件数を記録する（デバッグ用途）。`SubmitOrder` の in-flight カウントは `_do_submit_order` の先頭でインクリメント、`finally` でデクリメントする。
+
+```
+ForgetSecondPassword 受信（asyncio recv_loop）
+   │ _session_holder.clear()  ← 即時クリア
+   │ if _submit_order_inflight_count > 0:
+   │     log.info("ForgetSecondPassword: %d SubmitOrder(s) in-flight; "
+   │              "they will complete with already-captured second_password", count)
+   ▼
+既存 in-flight SubmitOrder（asyncio task, 別コルーチン）
+   │ second_password = <ローカル変数に取得済み>  ← holder クリアの影響を受けない
+   │ await tachibana_submit_order(..., second_password, ...)
+   ▼
+次の SubmitOrder（holder クリア後）
+   │ second_password = self._session_holder.get_password()
+   │ → None → SecondPasswordRequired を返す
+```
 
 **`Command` enum の `Debug` 手実装（セキュリティ必須・**Tpre.2 で実施**）**: `dto.rs` の `Command` に現在ある `#[derive(Debug)]` を **Tpre.2 でスキーマ拡張と同時に外して手実装に切り替える**。T0.3 まで先送りすると `SetSecondPassword` variant が derive された状態でコードが存在する期間が生じ、ログへの平文漏洩リスクがある。手実装では `SetSecondPassword { .. }` arm のみ `"SetSecondPassword { value: [REDACTED] }"` と出力し、他の variant は従来通り出力する。`value` が `[REDACTED]` にマスクされることを **Tpre.2 の受け入れ条件**として単体テストで検証すること。
 
@@ -683,15 +739,14 @@ GTC / IOC / FOK / GTC は立花が対応しないため逆写像不要。
 
 **`account_type` 値**（`sZyoutoekiKazeiC` への写像）— **省略時はログイン応答の `sZyoutoekiKazeiC` をパススルー**（口座属性と一致させる意図）:
 
-> **B-M4 マニュアルで pin 必須（Tpre.5）**: 下表の値は flowsurface コメント（"1=特定, 3=一般, 5=NISA, 6=N成長"）と食い違っている。**Tpre.5 で立花マニュアル §`#CLMKabuNewOrder` の `sZyoutoekiKazeiC` 定義値を正本として pin** したうえで、本表を確定する。本表は pin 完了までは暫定値であり、レビューチェックでは「マニュアル参照済みか」を確認すること。
+> **B-M4 確定（2026-04-28）**: 立花マニュアル §`CLMKabuNewOrder` の `sZyoutoekiKazeiC` 定義値を正本として確定。源泉徴収区分はこのフィールドで区別しない（ログイン応答の別フィールドで管理）。
 
-| tag 値 | 立花値（**マニュアルで pin 必須（Tpre.5）**） | 意味 |
+| tag 値 | 立花値 | 意味 |
 |---|---|---|
-| `account_type=specific_with_withholding` | `"1"` | 特定預り（源泉徴収あり） |
-| `account_type=specific_without_withholding` | `"3"` | 特定預り（源泉徴収なし） |
-| `account_type=general` | `"0"` | 一般預り |
-| `account_type=nisa_growth` | `"5"` | NISA 成長投資枠（Phase O4） |
-| `account_type=nisa_tsumitate` | `"6"` | NISA つみたて投資枠（Phase O4） |
+| `account_type=specific` | `"1"` | 特定口座 |
+| `account_type=general` | `"3"` | 一般口座 |
+| `account_type=nisa` | `"5"` | 一般NISA（2024年以降売却のみ可） |
+| `account_type=nisa_growth` | `"6"` | NISA成長投資枠（Phase O4） |
 
 **その他**:
 

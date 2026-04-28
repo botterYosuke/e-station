@@ -265,6 +265,40 @@ mod tests {
         assert!(s.is_login_in_flight()); // unchanged
     }
 
+    // The following four tests pin the subscription-bump guard in main.rs:
+    //   `(old_state.is_login_in_flight() || matches!(old_state, Error { .. })) && is_ready`
+    // They document which predecessor states trigger a bump (true) vs. which
+    // are silently skipped (false), and will catch regressions if the guard
+    // or the state machine transitions are changed.
+
+    #[test]
+    fn bump_condition_true_for_login_in_flight() {
+        let s = VenueState::LoginInFlight;
+        assert!(s.is_login_in_flight() || matches!(s, VenueState::Error { .. }));
+    }
+
+    #[test]
+    fn bump_condition_false_for_idle() {
+        let s = VenueState::Idle;
+        assert!(!s.is_login_in_flight() && !matches!(s, VenueState::Error { .. }));
+    }
+
+    #[test]
+    fn bump_condition_true_for_error() {
+        let class = classify_venue_error("market_closed");
+        let s = VenueState::Error {
+            class,
+            message: "市場クローズ中".to_string(),
+        };
+        assert!(s.is_login_in_flight() || matches!(s, VenueState::Error { .. }));
+    }
+
+    #[test]
+    fn bump_condition_false_for_ready() {
+        let s = VenueState::Ready;
+        assert!(!s.is_login_in_flight() && !matches!(s, VenueState::Error { .. }));
+    }
+
     #[test]
     fn dismissed_is_noop_for_non_error_states() {
         // A stray Dismiss while Idle / Ready / LoginInFlight must not

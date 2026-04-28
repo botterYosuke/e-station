@@ -32,10 +32,10 @@
 - **デモ環境のみ**: `https://demo-kabuka.e-shiten.jp/e_api_v4r8/`
 - **debug ビルドの env 自動ログイン**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO=true`（venue prefix を付けて将来の他 venue ID と衝突させない方針）。**`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 では予約名として一覧化せず、計画文書からも削除する**（F-H5、第二暗証番号は収集も保持もしない方針との整合）。Phase 2 着手時に env 名を改めて確定する。SKILL.md 側の `DEV_USER_ID` 旧表記の書き換えは [implementation-plan.md T0.2 の SKILL.md 同期タスク](./implementation-plan.md) に集約
 
-### 2.2 含めないもの（明示的に Phase 2+ 送り）
+### 2.2 含めないもの（Phase 1 スコープ外）
 
 - **発注・訂正・取消**（`CLMKabuNewOrder` / `CLMKabuCorrectOrder` / `CLMKabuCancelOrder*`）
-  - 第二暗証番号の取り扱い、注文台帳 UI、約定通知 (`p_evt_cmd=EC`) の表示など、**ビュアーアプリの非ゴール**（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §8 と整合）
+  - 第二暗証番号の取り扱い、注文台帳 UI、約定通知 (`p_evt_cmd=EC`) の表示などは **[docs/plan/✅order/](../✅order/) で管理**（Order Phase O0〜O3 として実装済み）。Phase 1 本文書のスコープ外
 - **本番環境（実弾）接続の常時 UI 露出** — `BASE_URL_PROD` の追加自体は許容するが、**通常起動時の UI（メイン画面・設定）には露出させない**。**`TACHIBANA_ALLOW_PROD=1` env が立っているときに限り、Python tkinter ログインダイアログにデモ/本番ラジオを描画**して都度選択させる（M8、architecture.md §7.4）。env が無いときはデモ固定。デフォルトは demo 強制
 - **板差分（Depth Diff）/ L2 リアルタイム板** — 立花 FD frame は「現値・気配 10 本」程度で、L2 差分配信ではない。Phase 1 では **snapshot のみ** を一定間隔で配信し、`DepthDiff` イベントは生成しない
 - **OI（建玉残）チャート** — 株式に概念がない。`fetch_open_interest` は `NotImplementedError` を返す
@@ -58,10 +58,10 @@
 ### 3.1 セキュリティ
 
 - ユーザー ID / パスワード / 第二暗証番号 / 仮想 URL 5 種は **すべて機密**（[SKILL.md R10](../../../.claude/skills/tachibana/SKILL.md)）
-  - **Python が OS ファイルシステムで管理**（`tachibana_account.json` に user_id + is_demo、`tachibana_session.json` に仮想 URL 5 種 + saved_at_ms）
+  - **Python が OS ファイルシステムで管理**（`tachibana_account.json` に user_id + is_demo、`tachibana_session.json` に仮想 URL 5 種 + `zyoutoeki_kazei_c`（課税区分コード）+ `saved_at_ms`）
   - **password はファイルに書かない**。tkinter ダイアログで毎回入力させるか、`DEV_TACHIBANA_PASSWORD` env（debug ビルドのみ）で供給する
   - Rust 側は creds / session を一切保持しない（keyring 不使用）。IPC で creds を送受信しない
-- **第二暗証番号は Phase 1 では収集も保持もしない（F-H5）**: DTO スキーマ上は `second_password: Option<SecretString>` を切るが、Phase 1 では Rust 側の収集 UI も Python 側のメモリ保持も実装せず、常に `None` を送る。発注しないものを保持して攻撃面（コアダンプ・スワップ・GC 残存）を増やさない。Phase 2（発注機能）で値の収集・保持を有効化する。スキーマは破壊変更にならないため移行コストはない
+- **第二暗証番号は Phase 1 では収集も保持もしない（F-H5）**: DTO スキーマ上は `second_password: Option<SecretString>` を切るが、Phase 1 では Rust 側の収集 UI も Python 側のメモリ保持も実装せず、常に `None` を送る。発注しないものを保持して攻撃面（コアダンプ・スワップ・GC 残存）を増やさない。Phase 2（発注機能）で値の収集・保持を有効化する。スキーマは破壊変更にならないため移行コストはない。**Phase O0（発注機能初期フェーズ）においても F-H5 は解除しない**: Order Phase が開始しても第二暗証番号の収集方式は変更される（iced modal 経由で実行時取得）が、F-H5 の「ファイルに書かない・Python メモリに長期保持しない」制約は継続する。iced modal で取得した値は Python に転送後、当該リクエスト完了時点で Python メモリから削除する（`SecondPasswordHolder.clear()` 呼び出し）
 - ログ出力時は仮想 URL のホスト部分まで `***` マスク（`tachibana_session.json` に保存される夜間閉局まで有効な 1 日券のため、URL がリークしても session 侵害にはなりうる）
 - **`DEV_TACHIBANA_*` env を読むのは Python 側 `tachibana_login_flow.py` のみ**（B1）。Rust 側に `#[cfg(debug_assertions)]` の env 取込みコードは追加しない。release ビルドでは Python 側でも env を完全無視する（`os.getenv` 経路を `if not RELEASE_BUILD` でガード、判定は親プロセス（Rust）から `stdin` 初期 payload 内のフィールド `dev_tachibana_login_allowed: bool` として渡す（env 経路ではなく stdin payload で受け取る、architecture.md §2.1 H-2 修正と整合）。pin: invariant-tests.md `F-DevEnv-Release-Guard`（既存テスト `python/tests/test_tachibana_dev_env_guard.py` を release ビルドの完全ガード assert として登録、本体追記は別 implementer 担当）。**Phase 1 では `DEV_TACHIBANA_SECOND_PASSWORD` という env 名自体を採用しない**（F-H5: 第二暗証番号は Phase 1 で収集も保持もしないため、env 経路に存在させる必要がない。`os.getenv("DEV_TACHIBANA_SECOND_PASSWORD")` 等の呼出を Python 側に書かない）。Phase 2 着手時に env 名を改めて確定する
 - **`DEV_TACHIBANA_DEMO` の既定値は `true`**（F-Default-Demo）。env 未設定でも demo URL を叩く。本番 URL を許可するには `TACHIBANA_ALLOW_PROD=1` を併用する必要があり、その判定は **`python/engine/exchanges/tachibana_url.py` 内 1 箇所だけ**で行う（F-L1）。SKILL.md S2 で旧表記されていた `DEV_IS_DEMO` / `TACHIBANA_USER_ID` / `TACHIBANA_PASSWORD` は採用しない
@@ -82,7 +82,7 @@
   - **夜間閉局またぎ運用（F-m1）**: アプリを起動しっぱなしで翌日のザラ場開始を迎えた場合、最初の subscribe で `p_errno=2` を踏むのは仕様通り。Python 側は `VenueError{code:"session_expired"}` を返し、Rust UI は再ログインバナーを表示する。**ここで自動再ログインはしない**（電話認証完了の確認が取れないため）。ユーザーがバナーから再ログイン操作を行うと、`Command::RequestVenueLogin` → Python が `tachibana_session.json` をクリアして `startup_login` を再実行する経路を辿る
   - **「自動」と「手動（ユーザー明示）」の境界（LOW-3）**: 「自動再ログイン禁止」とは *Python / Rust がユーザー操作なしにパスワードを再送する*ことを禁止する。ユーザーがバナーから「ログイン」ボタンを押して `Command::RequestVenueLogin` が発火する経路は「ユーザー明示の再ログイン」であり禁止しない。実装者向け判別基準: **`RequestVenueLogin` コマンドの受信を起点とする経路 → 許可**、**Python 側内部ロジックが `p_errno=2` 検知後に自発的に再ログインを開始する経路 → 禁止**
   - **バナー「閉じる」(`Message::DismissTachibanaBanner` / `VenueEvent::Dismissed`) の FSM 意味論（C-L1）**: `VenueState::Error{..} → Idle` の 1 遷移として `next()` テーブルに含まれる（`src/venue_state.rs::VenueState::next` の `(Error, Dismissed) → Idle` arm）。`Idle` / `LoginInFlight` / `Ready` で受けた場合は no-op（同状態を返す）であり副作用なし。Dismiss は keyring / Python セッション / 購読状態に触れないため、後続の `VenueError` 受信でバナーは再表示される（acknowledge セマンティクス）。既存 9 遷移にこの 1 遷移を加えた計 10 遷移が FSM 正本。
-- **WebSocket 死活監視**: EVENT WS は **5 秒周期で `p_evt_cmd=KP`（KeepAlive）frame** を送ってくる。Python 側は KP 受信をタイマリセットに使い、**12 秒（KP 2 回欠損相当 + 2 秒 jitter）以上 KP も含めて全 frame が来なければ切断とみなして再接続**する。WS は Python 側 (`tachibana_ws.py`、`websockets` ライブラリ) が担当する設計（architecture.md §4）のため、`websockets.connect(..., ping_interval=None, ping_timeout=None)` でライブラリ側の自動 Ping/Pong を完全に無効化し、`Ping` フレーム受信時は手動 Pong handler から `Pong` を返す（SKILL.md EVENT 規約）
+- **WebSocket 死活監視**: EVENT WS は **5 秒周期で `p_evt_cmd=KP`（KeepAlive）frame** を送ってくる。Python 側は KP 受信をタイマリセットに使い、**12 秒（KP 2 回欠損相当 + 2 秒 jitter）以上 KP も含めて全 frame が来なければ切断とみなして再接続**する（定数 `_DEAD_FRAME_TIMEOUT_S = 12.0`）。WS は Python 側 (`tachibana_ws.py`、`websockets` ライブラリ) が担当する設計（architecture.md §4）のため、`websockets.connect(..., ping_interval=None)` でライブラリ側の自動 Ping 送信を無効化する（`ping_timeout` は設定しない）。立花サーバ側が送ってくる websockets-level の `Ping` フレームにはライブラリが自動で `Pong` を返す（`ping_interval=None` のとき自動エコーは有効）
 - `VenueReady{venue}` は **冪等イベント**として扱う。session が新たに validate / 再ログインされるたびに送ってよく、Rust 側は最後に受信した状態を保持する。**Python サブプロセス再起動検知時（次の `Hello` 受信時）に限り `VenueReady` 状態をリセット**し、再 ready 後に既存購読の重複再送を行わないこと（`ProcessManager` 側で active subscriptions を 1 度だけ resubscribe する）。`EngineEvent::Disconnected` は ticker/stream 粒度であり venue 全体の状態管理には使わない（C3 修正、architecture.md §3 と整合）
 - Python 単独再起動時（[docs/plan/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §5.3 Python プロセス復旧プロトコル）は、**Python プロセスが自律的に `startup_login` を再実行**し（`tachibana_session.json` / `tachibana_account.json` から復元 → 必要なら再ログイン → `VenueReady` 送信）、Rust は `VenueReady` を待ってから metadata fetch / resubscribe を再開する。`SetVenueCredentials` の再送は行わない
 

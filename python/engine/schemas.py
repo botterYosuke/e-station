@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 0
+SCHEMA_MINOR: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +33,9 @@ class Hello(IpcMessage):
     schema_minor: int
     client_version: str
     token: str
+    # N1.13: 起動時固定 mode (`"live"` | `"replay"`).
+    # 旧クライアント互換のため省略時は "live" にフォールバック。
+    mode: Literal["live", "replay"] = "live"
 
 
 class SetProxy(IpcMessage):
@@ -163,15 +166,22 @@ class SubmitOrderRequest(IpcMessage):
 
     model_config = ConfigDict(extra="forbid")
 
-    client_order_id: str
+    client_order_id: str = Field(min_length=1, max_length=36)
+
+    @field_validator("client_order_id")
+    @classmethod
+    def _validate_client_order_id(cls, v: str) -> str:
+        if not v.isascii() or not v.isprintable():
+            raise ValueError("client_order_id must be ASCII printable (spec.md §5)")
+        return v
     instrument_id: str
-    order_side: str
-    order_type: str
+    order_side: Literal["BUY", "SELL"]
+    order_type: Literal["MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT", "MARKET_IF_TOUCHED", "LIMIT_IF_TOUCHED"]
     quantity: str
     price: str | None = None
     trigger_price: str | None = None
     trigger_type: str | None = None
-    time_in_force: str
+    time_in_force: Literal["DAY", "GTC", "GTD", "IOC", "FOK", "AT_THE_OPEN", "AT_THE_CLOSE"]
     expire_time_ns: int | None = None
     post_only: bool
     reduce_only: bool
@@ -217,6 +227,7 @@ class ModifyOrder(IpcMessage):
     request_id: str
     venue: str
     client_order_id: str
+    venue_order_id: Optional[str] = None
     change: OrderModifyChange
 
 
@@ -241,6 +252,15 @@ class GetOrderList(IpcMessage):
     request_id: str
     venue: str
     filter: OrderListFilter = Field(default_factory=OrderListFilter)
+
+
+# ── Buying Power Phase (schema 2.1) ─────────────────────────────────────────
+
+
+class GetBuyingPower(IpcMessage):
+    op: Literal["GetBuyingPower"] = "GetBuyingPower"
+    request_id: str
+    venue: str
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +571,105 @@ class OrderListUpdated(IpcMessage):
     event: Literal["OrderListUpdated"] = "OrderListUpdated"
     request_id: str
     orders: list[OrderRecordWire] = Field(default_factory=list)
+
+
+# ── nautilus_trader 統合 (schema 2.4 / N1.1) ────────────────────────────────
+
+
+class EngineStartConfig(IpcMessage):
+    """Engine start config — mirrors `engine_runner.py` arguments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instrument_id: str
+    start_date: str
+    end_date: str
+    initial_cash: str
+    granularity: Literal["Trade", "Minute", "Daily"]
+
+
+class StartEngine(IpcMessage):
+    op: Literal["StartEngine"] = "StartEngine"
+    request_id: str
+    engine: Literal["Backtest", "Live"]
+    strategy_id: str
+    config: EngineStartConfig
+
+
+class StopEngine(IpcMessage):
+    op: Literal["StopEngine"] = "StopEngine"
+    request_id: str
+    strategy_id: str
+
+
+class LoadReplayData(IpcMessage):
+    op: Literal["LoadReplayData"] = "LoadReplayData"
+    request_id: str
+    instrument_id: str
+    start_date: str
+    end_date: str
+    granularity: Literal["Trade", "Minute", "Daily"]
+
+
+class EngineStarted(IpcMessage):
+    event: Literal["EngineStarted"] = "EngineStarted"
+    strategy_id: str
+    account_id: str
+    ts_event_ms: int
+
+
+class EngineStopped(IpcMessage):
+    event: Literal["EngineStopped"] = "EngineStopped"
+    strategy_id: str
+    final_equity: str
+    ts_event_ms: int
+
+
+class ReplayDataLoaded(IpcMessage):
+    event: Literal["ReplayDataLoaded"] = "ReplayDataLoaded"
+    strategy_id: str
+    bars_loaded: int
+    trades_loaded: int
+    ts_event_ms: int
+
+
+class PositionOpened(IpcMessage):
+    event: Literal["PositionOpened"] = "PositionOpened"
+    strategy_id: str
+    venue: str
+    instrument_id: str
+    position_id: str
+    side: str
+    opened_qty: str
+    avg_open_price: str
+    ts_event_ms: int
+
+
+class PositionClosed(IpcMessage):
+    event: Literal["PositionClosed"] = "PositionClosed"
+    strategy_id: str
+    venue: str
+    instrument_id: str
+    position_id: str
+    realized_pnl: str
+    ts_event_ms: int
+
+
+# ── Buying Power Phase (schema 2.1) ─────────────────────────────────────────
+
+
+class BuyingPowerUpdated(IpcMessage):
+    """Response to GetBuyingPower. Contains current cash and credit buying power."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["BuyingPowerUpdated"] = "BuyingPowerUpdated"
+    request_id: str
+    venue: str
+    cash_available: int   # 現物買付余力（円）
+    cash_shortfall: int   # 現物余力不足額（円、0 は不足なし）
+    credit_available: int  # 信用新規可能額（円）
+    ts_ms: int             # 取得時刻 Unix ミリ秒
 
 
 # ---------------------------------------------------------------------------

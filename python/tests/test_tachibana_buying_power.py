@@ -70,8 +70,8 @@ async def test_fetch_buying_power_parses_response():
         "p_errno": "0",
         "sResultCode": "0",
         "sCLMID": "CLMZanKaiKanougaku",
-        "sZanKaiKanougakuGoukei": "500000",   # 現物買付可能額合計
-        "sZanKaiKanougakuHusoku": "0",          # 余力不足額
+        "sSummaryGenkabuKaituke": "500000",   # 現物買付余力
+        "sHusokukinHasseiFlg": "0",           # 不足金発生フラグ（0=不足なし）
     }
     mock_client = _mock_client(data)
     with patch("httpx.AsyncClient", return_value=mock_client):
@@ -84,19 +84,19 @@ async def test_fetch_buying_power_parses_response():
 
 @pytest.mark.asyncio
 async def test_fetch_buying_power_detects_shortfall():
-    """余力不足額 > 0 → BuyingPowerResult.shortfall > 0。"""
+    """sHusokukinHasseiFlg == '1' → BuyingPowerResult.shortfall > 0。"""
     data = {
         "p_errno": "0",
         "sResultCode": "0",
         "sCLMID": "CLMZanKaiKanougaku",
-        "sZanKaiKanougakuGoukei": "0",
-        "sZanKaiKanougakuHusoku": "100000",
+        "sSummaryGenkabuKaituke": "0",
+        "sHusokukinHasseiFlg": "1",   # 不足金発生
     }
     mock_client = _mock_client(data)
     with patch("httpx.AsyncClient", return_value=mock_client):
         result = await fetch_buying_power(_session())
 
-    assert result.shortfall == 100000
+    assert result.shortfall > 0
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +111,9 @@ async def test_fetch_credit_buying_power_parses_response():
         "p_errno": "0",
         "sResultCode": "0",
         "sCLMID": "CLMZanShinkiKanoIjiritu",
-        "sZanShinkiKanoIjirituGoukei": "1000000",  # 信用新規可能額
-        "sZanShinkiKanoIjirituHusoku": "0",
+        "sSummarySinyouSinkidate": "1000000",  # 信用新規建て可能額
+        "sItakuhosyoukin": "30.00",
+        "sOisyouKakuteiFlg": "0",
     }
     mock_client = _mock_client(data)
     with patch("httpx.AsyncClient", return_value=mock_client):
@@ -209,13 +210,13 @@ async def test_fetch_positions_cash_parses_response():
 
 @pytest.mark.asyncio
 async def test_insufficient_funds_rejects_order():
-    """余力不足 fetch_buying_power → InsufficientFundsError が raise される。"""
+    """sHusokukinHasseiFlg=='1' → shortfall > 0 → 呼び出し元が InsufficientFundsError を raise できる。"""
     data = {
         "p_errno": "0",
         "sResultCode": "0",
         "sCLMID": "CLMZanKaiKanougaku",
-        "sZanKaiKanougakuGoukei": "0",
-        "sZanKaiKanougakuHusoku": "50000",
+        "sSummaryGenkabuKaituke": "0",
+        "sHusokukinHasseiFlg": "1",
     }
     mock_client = _mock_client(data)
     with patch("httpx.AsyncClient", return_value=mock_client):
@@ -225,9 +226,9 @@ async def test_insufficient_funds_rejects_order():
     with pytest.raises(InsufficientFundsError) as exc_info:
         if result.shortfall > 0:
             raise InsufficientFundsError(
-                f"Insufficient funds: shortfall={result.shortfall}",
+                f"Insufficient funds: shortfall_flag={result.shortfall}",
                 shortfall=result.shortfall,
             )
 
-    assert exc_info.value.shortfall == 50000
+    assert exc_info.value.shortfall > 0
     assert exc_info.value.reason_code == "INSUFFICIENT_FUNDS"

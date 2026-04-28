@@ -200,8 +200,8 @@ class TachibanaEventClient:
         """EVENT WebSocket からフレームを受信して on_event コールバックを呼ぶ。
 
         フレーム種別の判定:
-            - FD フレーム（p_evt_cmd="FD"）: 銘柄データ → on_event に FD として渡す
-            - EC フレーム（p_evt_cmd="EC"）: 約定通知 → _parse_ec_frame → 重複検知 → on_event
+            - FD フレーム（p_cmd="FD"）: 銘柄データ → on_event に FD として渡す
+            - EC フレーム（p_cmd="EC"）: 約定通知 → _parse_ec_frame → 重複検知 → on_event
 
         再接続 (B-7):
             `reconnect_fn` が渡された場合、WebSocket 切断後に指数バックオフで再接続を試みる。
@@ -288,7 +288,7 @@ class TachibanaEventClient:
     async def _process_frame(self, raw_frame: object, on_event: object) -> None:
         """1 つのフレームを処理する。
 
-        フレームを ^A（\x01）区切りで分割し、p_evt_cmd で FD / EC を判定する。
+        フレームを ^A（\x01）区切りで分割し、p_cmd で FD / EC を判定する。
 
         Args:
             raw_frame: 受信した生フレーム（str または bytes）
@@ -305,7 +305,7 @@ class TachibanaEventClient:
                 items.append((key.strip(), value.strip()))
 
         frame_dict = dict(items)
-        evt_cmd = frame_dict.get("p_evt_cmd", "")
+        evt_cmd = frame_dict.get("p_cmd", "")
 
         if evt_cmd == "EC":
             await self._handle_ec_frame(items, on_event)

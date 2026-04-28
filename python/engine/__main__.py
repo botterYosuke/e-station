@@ -134,6 +134,19 @@ def main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         stream=sys.stderr,
     )
+    # C-M2: httpx/httpcore の INFO/DEBUG ログには立花 API の URL が含まれ、
+    # クエリパラメータに sSecondPassword が露出するため WARNING 以上に抑制する。
+    # setLevel だけでは httpcore.* 子ロガーに伝播しないケースがあるため、
+    # ルートハンドラにもフィルタを追加してベルト＋サスペンダーで対処する。
+    def _http_lib_filter(record: logging.LogRecord) -> bool:
+        if record.name.startswith(("httpx", "httpcore")):
+            return record.levelno >= logging.WARNING
+        return True
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    for _h in logging.root.handlers:
+        _h.addFilter(_http_lib_filter)
     args = _parse_args()
 
     dev_tachibana_login_allowed = False

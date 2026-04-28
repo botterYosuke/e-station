@@ -5,16 +5,16 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'mkdocs.yml'
+      - 'pyproject.toml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
-# GitHub Pages へのデプロイに必要な権限
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# 同時デプロイを防ぐ（進行中のデプロイはキャンセルしない）
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -26,25 +26,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # lastUpdated 用に全履歴を取得
+          fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          node-version: 20
+          enable-cache: true
 
-      - name: Install dependencies
-        run: npm install
-        working-directory: docs
+      - name: Set up Python
+        run: uv python install 3.11
 
-      - name: Build VitePress site
-        run: npm run build
-        working-directory: docs
+      - name: Build MkDocs site
+        run: uv run --group docs mkdocs build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/.vitepress/dist
+          path: site
 
   deploy:
     environment:

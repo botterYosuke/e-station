@@ -73,9 +73,8 @@
 
 ### 3.1 セキュリティ
 
-- 第二暗証番号（`sSecondPassword`）の取り扱い:
-  - **保存しない方針を再検討**: keyring に保存するか、起動セッションごとに毎回入力させるか。Q1 で確定（[open-questions.md](./open-questions.md)）
-  - 暫定: **OS keyring に保存し、起動時に復元**（user_id/password と同じ扱い）
+- 第二暗証番号（`sSecondPassword`）の取り扱い（Q1 確定: 2026-04-25）:
+  - **keyring に保存しない**。発注時のみ iced modal で入力させ、Python メモリ上でのみ保持する（§2.1 F-H5 確定）
   - Python メモリ上は `SecretStr`（pydantic）で保持し、`__repr__` で `***` 化
   - **ログに絶対出さない**: `Debug` 系のフォーマット時はマスク（flowsurface の `NewOrderRequest` の手動 `Debug` 実装に倣う）
   - **アイドル forget**（C-M2）: 以下のいずれかで Python メモリから自動 forget する:
@@ -121,9 +120,9 @@
 | `POST` | `/api/order/cancel` | `{client_order_id}` または `{venue_order_id}`（他端末注文。`client_order_id` 不明時のみ） | `{client_order_id, status: "PENDING_CANCEL"}` | O1 |
 | `POST` | `/api/order/cancel-all` | `{instrument_id?, order_side?, confirm: true}`（`confirm: true` は **JSON body 必須**、query param ではない）。**Phase O0 時点ではこのエンドポイントは未実装（501 Not Implemented を返す）** | `{count}` | O1 |
 | `GET` | `/api/order/list` | クエリ: `status?` / `instrument_id?` / `date?` | `{orders: [...]}` | O1 |
-| `POST` | `/api/order/forget-second-password` | （body 無し） | `{status: "OK"}` | O0 |
-| `GET` | `/api/order/positions` | — | 現物・信用建玉 | O3 |
-| `GET` | `/api/order/buying-power` | — | 余力 | O3 |
+| `POST` | `/api/order/forget-second-password` | （body 無し） | `{status: "OK"}` | O0 （未実装） |
+| `GET` | `/api/order/positions` | — | 現物・信用建玉 | O3 （未実装） |
+| `GET` | `/api/order/buying-power` | — | 余力 | O3 （未実装。BuyingPowerPanel は UI 実装済み） |
 
 **重要**: API は **`client_order_id` を一次キー**として動作する（nautilus 流）。`venue_order_id`（立花 `sOrderNumber`）は応答に含めるが、後続の `/modify` `/cancel` 入力は `client_order_id` で受ける。Rust 側 `OrderSessionState` が双方向写像を保持。WAL 復元で `client_order_id` が不明な「他端末経由の当日注文」のみ `venue_order_id` での `/modify` `/cancel` を受理する（[architecture.md §4.3](./architecture.md#43-起動時復元phase-o0-必須) / [T1.5](./implementation-plan.md#t15-起動時の台帳復元)）。
 
@@ -167,7 +166,7 @@ Python に渡す前に **Rust 側で**早期に弾く:
   "trigger_type": null,
   "post_only": false,
   "reduce_only": false,
-  "tags": ["cash_margin=cash", "account_type=specific_with_withholding"]
+  "tags": ["cash_margin=cash", "account_type=specific"]
 }
 ```
 

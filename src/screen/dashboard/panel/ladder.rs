@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 
 const TEXT_SIZE: f32 = 11.0;
 const ROW_HEIGHT: f32 = 16.0;
+// Currently equal to ROW_HEIGHT; kept as a separate constant so a future change
+// to row height doesn't silently alter the header geometry.
+const HEADER_HEIGHT: f32 = 16.0;
 
 // Total width ratios must sum to 1.0
 /// Uses half of the width for each side of the order quantity columns
@@ -58,6 +61,7 @@ pub struct Ladder {
     ticker_info: TickerInfo,
     pub config: Config,
     cache: canvas::Cache,
+    header_cache: canvas::Cache,
     last_tick: Instant,
     pub step: PriceStep,
     scroll_px: f32,
@@ -75,6 +79,7 @@ impl Ladder {
             config: config.unwrap_or_default(),
             ticker_info,
             cache: canvas::Cache::default(),
+            header_cache: canvas::Cache::default(),
             last_tick: Instant::now(),
             step,
             scroll_px: 0.0,
@@ -182,6 +187,7 @@ impl Ladder {
 
     pub fn invalidate(&mut self, now: Option<Instant>) -> Option<super::Action> {
         self.cache.clear();
+        self.header_cache.clear();
         if let Some(now) = now {
             self.last_tick = now;
         }
@@ -242,11 +248,19 @@ impl canvas::Program<Message> for Ladder {
 
         let divider_color = style::split_ruler(theme).color;
 
-        let orderbook_visual = self.cache.draw(renderer, bounds.size(), |frame| {
-            if let Some(grid) = self.build_price_grid() {
+        // Pre-compute layout state once; captured by copy into both cache closures.
+        // PriceGrid/PriceLayout/ColumnRanges are all Copy so no allocation is incurred.
+        let price_state_opt: Option<(PriceGrid, PriceLayout, ColumnRanges)> =
+            self.build_price_grid().map(|grid| {
                 let layout = self.price_layout_for(bounds.width, &grid);
                 let cols = self.column_ranges(bounds.width, layout.price_px);
+                (grid, layout, cols)
+            });
+        let cols_opt: Option<ColumnRanges> = price_state_opt.map(|(_, _, c)| c);
+        let label_color = palette.background.base.text.scale_alpha(0.55);
 
+        let orderbook_visual = self.cache.draw(renderer, bounds.size(), |frame| {
+            if let Some((grid, layout, cols)) = price_state_opt {
                 let (visible_rows, maxima) = self.visible_rows(bounds, &grid);
 
                 let mut spread_row: Option<(f32, f32)> = None;
@@ -254,6 +268,13 @@ impl canvas::Program<Message> for Ladder {
                 let mut best_ask_y: Option<f32> = None;
 
                 for visible_row in visible_rows.iter() {
+                    // Skip rows whose text centre falls inside the header zone;
+                    // fill_text renders above canvas fill_rectangle layers in iced,
+                    // so the header's opaque background alone cannot suppress them.
+                    if visible_row.y + ROW_HEIGHT / 2.0 < HEADER_HEIGHT {
+                        continue;
+                    }
+
                     match visible_row.row {
                         DomRow::Ask { price, .. }
                             if Some(price)
@@ -367,15 +388,17 @@ impl canvas::Program<Message> for Ladder {
                     );
                 }
 
-                // Price column vertical dividers with a gap over the spread row (if visible)
+                // Price column vertical dividers (start below header, gap over spread row).
+                // When the spread row scrolls above HEADER_HEIGHT, the top segment is
+                // intentionally omitted — the header overlay covers that region.
                 let mut draw_vsplit = |x: f32, gap: Option<(f32, f32)>| {
                     let x = x.floor() + 0.5;
                     match gap {
                         Some((top, bottom)) => {
-                            if top > 0.0 {
+                            if top > HEADER_HEIGHT {
                                 frame.fill_rectangle(
-                                    Point::new(x, 0.0),
-                                    Size::new(1.0, top.max(0.0)),
+                                    Point::new(x, HEADER_HEIGHT),
+                                    Size::new(1.0, top - HEADER_HEIGHT),
                                     divider_color,
                                 );
                             }
@@ -389,8 +412,8 @@ impl canvas::Program<Message> for Ladder {
                         }
                         None => {
                             frame.fill_rectangle(
-                                Point::new(x, 0.0),
-                                Size::new(1.0, bounds.height),
+                                Point::new(x, HEADER_HEIGHT),
+                                Size::new(1.0, (bounds.height - HEADER_HEIGHT).max(0.0)),
                                 divider_color,
                             );
                         }
@@ -428,7 +451,40 @@ impl canvas::Program<Message> for Ladder {
             }
         });
 
-        vec![orderbook_visual]
+        let header_geo = self
+            .header_cache
+            .draw(renderer, bounds.size(), move |frame| {
+                let bg = palette.background.base.color;
+                frame.fill_rectangle(
+                    Point::new(0.0, 0.0),
+                    Size::new(bounds.width, HEADER_HEIGHT),
+                    bg,
+                );
+                frame.fill_rectangle(
+                    Point::new(0.0, HEADER_HEIGHT - 1.0),
+                    Size::new(bounds.width, 1.0),
+                    divider_color,
+                );
+
+                if let Some(cols) = cols_opt {
+                    let labels: &[(&str, f32, Alignment)] = &[
+                        ("買板", cols.bid_order.0 + 6.0, Alignment::Start),
+                        ("売T", cols.sell.1 - 6.0, Alignment::End),
+                        (
+                            "価格",
+                            (cols.price.0 + cols.price.1) * 0.5,
+                            Alignment::Center,
+                        ),
+                        ("買T", cols.buy.0 + 6.0, Alignment::Start),
+                        ("売板", cols.ask_order.1 - 6.0, Alignment::End),
+                    ];
+                    for &(label, x, align) in labels {
+                        Self::draw_cell_text(frame, label, x, 0.0, label_color, align);
+                    }
+                }
+            });
+
+        vec![orderbook_visual, header_geo]
     }
 }
 
@@ -445,6 +501,7 @@ struct VisibleRow {
     sell_t: Qty,
 }
 
+#[derive(Debug, Clone, Copy)]
 struct ColumnRanges {
     bid_order: (f32, f32),
     sell: (f32, f32),
@@ -453,6 +510,7 @@ struct ColumnRanges {
     ask_order: (f32, f32),
 }
 
+#[derive(Debug, Clone, Copy)]
 struct PriceLayout {
     price_px: f32,
     inside_pad_px: f32,
@@ -579,7 +637,7 @@ impl Ladder {
             );
             let qty_txt = self.format_quantity(order_qty);
             let x_text = cols.bid_order.0 + 6.0;
-            Self::draw_cell_text(frame, &qty_txt, x_text, y, text_color, Alignment::Start);
+            Self::draw_cell_text(frame, qty_txt, x_text, y, text_color, Alignment::Start);
         } else {
             Self::fill_bar(
                 frame,
@@ -594,7 +652,7 @@ impl Ladder {
             );
             let qty_txt = self.format_quantity(order_qty);
             let x_text = cols.ask_order.1 - 6.0;
-            Self::draw_cell_text(frame, &qty_txt, x_text, y, text_color, Alignment::End);
+            Self::draw_cell_text(frame, qty_txt, x_text, y, text_color, Alignment::End);
         }
 
         // Sell trades (right-to-left)
@@ -616,7 +674,7 @@ impl Ladder {
         };
         Self::draw_cell_text(
             frame,
-            &sell_txt,
+            sell_txt,
             cols.sell.1 - 6.0,
             y,
             text_color,
@@ -642,7 +700,7 @@ impl Ladder {
         };
         Self::draw_cell_text(
             frame,
-            &buy_txt,
+            buy_txt,
             cols.buy.0 + 6.0,
             y,
             text_color,
@@ -654,7 +712,7 @@ impl Ladder {
         let price_x_center = (cols.price.0 + cols.price.1) * 0.5;
         Self::draw_cell_text(
             frame,
-            &price_text,
+            price_text,
             price_x_center,
             y,
             side_color,
@@ -695,14 +753,14 @@ impl Ladder {
 
     fn draw_cell_text(
         frame: &mut iced::widget::canvas::Frame,
-        text: &str,
+        text: impl Into<String>,
         x_anchor: f32,
         y: f32,
         color: iced::Color,
         align: Alignment,
     ) {
         frame.fill_text(Text {
-            content: text.to_string(),
+            content: text.into(),
             position: Point::new(x_anchor, y + ROW_HEIGHT / 2.0),
             color,
             size: TEXT_SIZE.into(),
@@ -784,7 +842,7 @@ impl Ladder {
         let mut visible: Vec<VisibleRow> = Vec::new();
         let mut maxima = Maxima::default();
 
-        let mid_screen_y = bounds.height * 0.5;
+        let mid_screen_y = HEADER_HEIGHT + (bounds.height - HEADER_HEIGHT).max(0.0) * 0.5;
         let scroll = self.scroll_px;
 
         let y0 = mid_screen_y + PriceGrid::top_y(0) - scroll;
@@ -862,7 +920,7 @@ impl Ladder {
     }
 
     fn price_to_screen_y(&self, price: Price, grid: &PriceGrid, bounds_height: f32) -> Option<f32> {
-        let mid_screen_y = bounds_height * 0.5;
+        let mid_screen_y = HEADER_HEIGHT + (bounds_height - HEADER_HEIGHT).max(0.0) * 0.5;
         let scroll = self.scroll_px;
 
         let idx = if price >= grid.best_ask {
@@ -887,6 +945,7 @@ enum DomRow {
     Bid { price: Price, qty: Qty },
 }
 
+#[derive(Copy, Clone)]
 struct PriceGrid {
     best_bid: Price,
     best_ask: Price,
@@ -910,5 +969,67 @@ impl PriceGrid {
 
     fn top_y(idx: i32) -> f32 {
         (idx as f32) * ROW_HEIGHT - ROW_HEIGHT * 0.5
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::adapter::Exchange;
+    use exchange::{Ticker, TickerInfo};
+
+    fn test_ticker_info() -> TickerInfo {
+        let ticker = Ticker::new("7203", Exchange::TachibanaStock);
+        TickerInfo::new_stock(ticker, 1.0, 100.0, 100)
+    }
+
+    fn default_step() -> PriceStep {
+        PriceStep::from_f32_lossy(1.0)
+    }
+
+    #[test]
+    fn mid_screen_y_is_offset_by_header_height() {
+        let ladder = Ladder::new(None, test_ticker_info(), default_step());
+        let step = default_step();
+        let best_bid = Price::from_f32_lossy(1000.0);
+        let best_ask = best_bid.add_steps(1, step);
+        let grid = PriceGrid {
+            best_bid,
+            best_ask,
+            tick: step,
+        };
+        let bounds = iced::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let (visible, _) = ladder.visible_rows(bounds, &grid);
+        let divider = visible
+            .iter()
+            .find(|r| matches!(r.row, DomRow::CenterDivider))
+            .expect("CenterDivider row must be present");
+        let height = 200.0_f32;
+        let mid = HEADER_HEIGHT + (height - HEADER_HEIGHT).max(0.0) * 0.5;
+        let expected_y = mid + PriceGrid::top_y(0);
+        assert!(
+            (divider.y - expected_y).abs() < 0.01,
+            "expected divider y≈{expected_y}, got {}",
+            divider.y
+        );
+    }
+
+    #[test]
+    fn build_price_grid_returns_none_when_empty() {
+        let ladder = Ladder::new(None, test_ticker_info(), default_step());
+        assert!(ladder.build_price_grid().is_none());
+    }
+
+    #[test]
+    fn narrow_pane_column_ranges_does_not_panic() {
+        let ladder = Ladder::new(None, test_ticker_info(), default_step());
+        for width in [0.0_f32, 1.0, 30.0, 60.0] {
+            let _ = ladder.column_ranges(width, 20.0);
+        }
     }
 }

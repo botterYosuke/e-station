@@ -401,13 +401,13 @@ Rust 起動
 - env が揃っている場合は **ヘルパーを spawn せず**、env 値で直接 `tachibana_auth.login(...)` を実行する fast path を入れる
 - env が一部欠損なら、欠けた項目だけプリフィルされた状態でヘルパーを表示する
 - `is_demo` 既定値は `True` 強制（env 未指定時）。SKILL.md R1 の実弾事故防止
-- **Phase 1 で採用する env 名は 3 つのみ**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO`（venue prefix 付き）。**`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 では採用しない**（F-H5: 第二暗証番号は収集も保持もしないため env 経路に存在させる必要がない）。`tachibana_login_flow` 内で `os.getenv("DEV_TACHIBANA_SECOND_PASSWORD")` 等の呼出を書かないことを実装規約とする。Phase 2（発注）着手時に env 名を改めて確定する
+- **採用する env 名は 3 つのみ**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO`（venue prefix 付き）。**`DEV_TACHIBANA_SECOND_PASSWORD` はログイン時（Phase 1 / Phase O0 以降とも）採用しない**（F-H5: **Phase O0 でも解除しない**。発注時は iced modal で取得・メモリのみ保持する方式に変更。env 経路は採用しない）。`tachibana_login_flow` 内で `os.getenv("DEV_TACHIBANA_SECOND_PASSWORD")` 等の呼出を書かないことを実装規約とする
 
 **プリフィルの出典は env のみ（M5 決定）**:
 - ヘルパー `prefill.user_id` は `DEV_TACHIBANA_USER_ID` の値だけを反映する。**直前 spawn でユーザーが入力した user_id は次の spawn に持ち回らない**
 - 理由は (a) creds をデータエンジン側のメモリに長時間滞在させない、(b) 「失敗時の再 spawn」と「キャンセル後の手動再ログイン」で挙動を分岐させない単純化、(c) Python 単独モード移行時にも同じ規約で済むため
 - 結果として認証 3 回失敗時のリトライ UX は「user_id を毎回 env から再投入（または手で再入力）」となる。env を設定済みのユーザーは fast path で抜けるため再 spawn 自体ほぼ走らない
-- パスワードは **prefill に絶対載せない**（env fast path で消費するか、ヘルパー初期表示は空欄）。第二暗証番号は Phase 1 では入力欄自体を表示しない（F-H5）
+- パスワードは **prefill に絶対載せない**（env fast path で消費するか、ヘルパー初期表示は空欄）。第二暗証番号はログインダイアログに入力欄を追加しない（F-H5: **Phase O0 以降も解除しない**。発注時は iced modal で取得・メモリのみ保持）。Rust は modal の入力値を `Command::SetSecondPassword` として Python に送信し、Python 側は値を `SecretStr` でラップしてメモリ保持する（idle forget タイマーで自動消去、architecture.md §5.3）。
 
 
 ## 8. テスト戦略

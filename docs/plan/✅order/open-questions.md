@@ -50,10 +50,14 @@
 - `require_confirmation = false` に設定した場合のみモーダルを省略可能
 - 理由: 実弾取引で手戻りが効かないため。上級者は設定で緩和できる
 
-### Q5. EVENT EC フレームの仕様根拠
+### Q5. EVENT EC フレームの仕様根拠 ✅ 解決（2026-04-28）
+
+**解決**: samples による仕様代替で Phase O2 実装は完了済み。
+
 - `api_event_if_v4r7.pdf` / `api_event_if.xlsx` は `manual_files/` に同梱されていない（SKILL.md L39 参照）
-- Phase O2 着手前に **PDF 入手 or 実 frame キャプチャ or flowsurface パーサ移植**のいずれかが必要
-- **対応**: [implementation-plan Tpre.5](./implementation-plan.md#tpre5-event-ec-フレームの仕様根拠を確保q5phase-o2-ブロッカ解消) に O-pre タスクとして昇格済み（O2 着手の前提条件）
+- **確認結果（2026-04-28）**: flowsurface `exchange/src/adapter/tachibana.rs` に EC 専用パーサは存在しない
+- **採用した根拠**: `.claude/skills/tachibana/samples/e_api_event_receive_tel.py`（行 534–568）に EC フレーム仕様（`^A`/`^B`/`^C` デリミタ、p_evt_cmd 値一覧、EC=注文約定通知）が Python コメントで完全に記載されており、Phase O2 実装（`tachibana_event.py._parse_ec_frame`）はこれを根拠として完了済み
+- 実 frame キャプチャ（デモ環境接続が可能になった際）は任意で追加可能だが、実装に必須ではない
 
 ### Q6. 発注 HTTP API の認証 ✅ 確定（2026-04-25）
 
@@ -90,6 +94,28 @@
 
 **決定**: **案 A** — e-station 内 `docs/plan/nautilus_trader/spec.md` を正本とし、
 上流ソースは参照リンクのみ。Q0 の決定（案 A + C 併用）に統合済み。
+
+---
+
+### Q-CI-1. `cargo test --workspace` の CI ジョブ未設定 ✅ 解決（2026-04-28）
+
+**解決**: `.github/workflows/rust-tests.yml` を新設。`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2` + `cargo test --workspace` を `pull_request` + `push: branches: [main]` で実行するジョブを追加済み。
+
+---
+
+### Q11. 発注 E2E における第二暗証番号のヘッドレス注入方法（未決定）
+
+**背景**: `.env` にデモクレデンシャルが揃い（2026-04-28 確認）、ログイン E2E (`tests/e2e/tachibana_demo_login.sh`) は実行可能。しかし発注 E2E は第二暗証番号が必要で、現在は iced modal 経由でしか入力できない設計（Q1 案 D）のためヘッドレス実行できない。
+
+**選択肢**:
+
+| 案 | 概要 | メリット | デメリット |
+|---|---|---|---|
+| **A** | 専用スクリプトが Python エンジンに直接 WebSocket 接続し `SetSecondPassword` + `SubmitOrder` を送信 | GUI 不要・CI 化可能 | エンジン直結なので Rust HTTP 層をスキップ |
+| **B** | `DEV_TACHIBANA_SECOND_PASSWORD=xxx` env を Python 側 dev fast path として追加（ログインの `FLOWSURFACE_DEV_TACHIBANA_LOGIN_ALLOWED=1` と同じ思想） | フルスタック E2E が CI 化可能 | env に第二暗証番号が残る（開発用途限定でも管理コスト） |
+| **C** | E2E スクリプトは Rust アプリ＋GUI を起動し、第二暗証番号は人手で modal に入力してから curl で発注 | 変更ゼロ | 自動化不可・手動操作が必要 |
+
+**現時点のデフォルト**: 案 C（手動 GUI）で先に動作確認し、CI 自動化が必要になった時点で案 A または B を選択する。
 
 ---
 

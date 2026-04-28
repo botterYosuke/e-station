@@ -16,7 +16,10 @@ use crate::{
         },
     },
     screen::dashboard::{
-        panel::{self, ladder::Ladder, timeandsales::TimeAndSales},
+        panel::{
+            self, buying_power::BuyingPowerPanel, ladder::Ladder, order_entry::OrderEntryPanel,
+            timeandsales::TimeAndSales,
+        },
         tickers_table::TickersTable,
     },
     style::{self, Icon, icon_text},
@@ -38,7 +41,7 @@ use data::{
 };
 use exchange::{
     Kline, OpenInterest, StreamPairKind, TickMultiplier, TickerInfo, Timeframe,
-    adapter::{MarketKind, StreamKind, StreamTicksize},
+    adapter::{Exchange, MarketKind, StreamKind, StreamTicksize},
     unit::PriceStep,
 };
 use iced::{
@@ -53,6 +56,9 @@ pub enum Effect {
     RequestFetch(Vec<FetchSpec>),
     SwitchTickersInGroup(TickerInfo),
     FocusWidget(iced::widget::Id),
+    OrderEntryAction(panel::order_entry::Action),
+    OrderListAction(panel::orders::Action),
+    BuyingPowerAction(panel::buying_power::Action),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -68,6 +74,7 @@ pub enum Action {
     Panel(panel::Action),
     ResolveStreams(Vec<PersistStreamKind>),
     ResolveContent,
+    OrderEntry(panel::order_entry::Action),
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +111,9 @@ pub enum Event {
     ComparisonChartInteraction(super::chart::comparison::Message),
     HeatmapShaderInteraction(crate::widget::chart::heatmap::Message),
     MiniTickersListInteraction(modal::pane::mini_tickers_list::Message),
+    OrderEntryMsg(panel::order_entry::Message),
+    OrderListMsg(panel::orders::Message),
+    BuyingPowerMsg(panel::buying_power::Message),
 }
 
 pub struct State {
@@ -120,6 +130,15 @@ pub struct State {
 impl State {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a new pane pre-loaded with the given content kind.
+    /// Used by `Action::OpenOrderPanel` to split a pane and set its content immediately.
+    pub fn with_kind(kind: ContentKind) -> Self {
+        Self {
+            content: Content::placeholder(kind),
+            ..Default::default()
+        }
     }
 
     pub fn from_config(
@@ -396,7 +415,25 @@ impl State {
 
                     (content, streams)
                 }
-                ContentKind::Starter => unreachable!(),
+                // Order panels and Starter do not need ticker streams — they are
+                // created via `State::with_kind()` which bypasses this function.
+                // If this path is reached it is a logic error, but we return an
+                // empty stream set rather than panicking so the UI stays alive.
+                ContentKind::Starter
+                | ContentKind::OrderEntry
+                | ContentKind::OrderList
+                | ContentKind::BuyingPower => {
+                    debug_assert!(
+                        false,
+                        "set_content_and_streams called for non-stream content {kind:?}; \
+                         this is a logic error"
+                    );
+                    log::warn!(
+                        "set_content_and_streams called for non-stream content {:?}; ignoring",
+                        kind
+                    );
+                    return vec![];
+                }
             }
         };
 
@@ -559,7 +596,14 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
-        } else if !matches!(self.content, Content::Starter) && !self.has_stream() {
+        } else if !matches!(
+            self.content,
+            Content::Starter
+                | Content::OrderEntry(_)
+                | Content::OrderList(_)
+                | Content::BuyingPower(_)
+        ) && !self.has_stream()
+        {
             let content = row![
                 text("Choose a ticker")
                     .size(13)
@@ -583,6 +627,27 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
+        }
+
+        let order_panel_title: Option<&'static str> = match &self.content {
+            Content::OrderEntry(_) => Some("注文入力"),
+            Content::OrderList(_) => Some("注文一覧"),
+            Content::BuyingPower(_) => Some("買余力"),
+            Content::Starter
+            | Content::Heatmap { .. }
+            | Content::ShaderHeatmap { .. }
+            | Content::Kline { .. }
+            | Content::TimeAndSales(_)
+            | Content::Ladder(_)
+            | Content::Comparison(_) => None,
+        };
+        if let Some(title) = order_panel_title {
+            top_left_buttons = top_left_buttons.push(
+                text(title)
+                    .size(13)
+                    .align_y(Alignment::Center)
+                    .line_height(1.4),
+            );
         }
 
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
@@ -1056,6 +1121,46 @@ impl State {
                     )
                 }
             }
+            Content::OrderEntry(panel) => {
+                let base = panel
+                    .view()
+                    .map(move |msg| Message::PaneEvent(id, Event::OrderEntryMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::OrderList(panel) => {
+                let base = panel::orders::view(panel)
+                    .map(move |msg| Message::PaneEvent(id, Event::OrderListMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::BuyingPower(panel) => {
+                let base = panel::buying_power::view(panel)
+                    .map(move |msg| Message::PaneEvent(id, Event::BuyingPowerMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
         };
 
         match &self.status {
@@ -1132,7 +1237,13 @@ impl State {
             Event::ContentSelected(kind) => {
                 self.content = Content::placeholder(kind);
 
-                if !matches!(kind, ContentKind::Starter) {
+                if !matches!(
+                    kind,
+                    ContentKind::Starter
+                        | ContentKind::OrderEntry
+                        | ContentKind::OrderList
+                        | ContentKind::BuyingPower
+                ) {
                     self.streams = ResolvedStream::waiting(vec![]);
                     let modal = Modal::MiniTickersList(MiniPanel::new());
 
@@ -1488,11 +1599,10 @@ impl State {
                 if let Some(Modal::MiniTickersList(ref mut mini_panel)) = self.modal
                     && let Some(action) = mini_panel.update(message)
                 {
-                    self.modal = Some(Modal::MiniTickersList(mini_panel.clone()));
-
                     let crate::modal::pane::mini_tickers_list::Action::RowSelected(sel) = action;
                     match sel {
                         crate::modal::pane::mini_tickers_list::RowSelection::Add(ti) => {
+                            self.modal = Some(Modal::MiniTickersList(mini_panel.clone()));
                             if let Content::Comparison(chart) = &mut self.content
                                 && let Some(c) = chart
                             {
@@ -1502,6 +1612,7 @@ impl State {
                             }
                         }
                         crate::modal::pane::mini_tickers_list::RowSelection::Remove(ti) => {
+                            self.modal = Some(Modal::MiniTickersList(mini_panel.clone()));
                             if let Content::Comparison(chart) = &mut self.content
                                 && let Some(c) = chart
                             {
@@ -1511,9 +1622,53 @@ impl State {
                             }
                         }
                         crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti) => {
+                            if let Content::OrderEntry(panel) = &mut self.content {
+                                if ti.ticker.exchange != Exchange::TachibanaStock {
+                                    self.notifications.push(Toast::warn(
+                                        "注文入力パネルは立花証券銘柄のみ対応しています"
+                                            .to_string(),
+                                    ));
+                                    self.modal = None;
+                                    return None;
+                                }
+                                let display = ti.ticker.display_symbol_and_type().0;
+                                let instrument_id =
+                                    format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
+                                panel.set_instrument(instrument_id, display);
+                                self.modal = None;
+                                return None;
+                            }
+                            // Non-OrderEntry panes delegate exchange validation to the
+                            // switch_tickers_in_group call chain; only OrderEntry requires
+                            // a TachibanaStock guard here.
                             return Some(Effect::SwitchTickersInGroup(ti));
                         }
                     }
+                }
+            }
+            Event::OrderEntryMsg(msg) => {
+                if let Content::OrderEntry(panel) = &mut self.content
+                    && let Some(action) = panel.update(msg)
+                {
+                    if matches!(action, panel::order_entry::Action::OpenInstrumentPicker) {
+                        self.modal = Some(Modal::MiniTickersList(MiniPanel::new()));
+                    } else {
+                        return Some(Effect::OrderEntryAction(action));
+                    }
+                }
+            }
+            Event::OrderListMsg(msg) => {
+                if let Content::OrderList(panel) = &mut self.content
+                    && let Some(action) = panel::orders::update(panel, msg)
+                {
+                    return Some(Effect::OrderListAction(action));
+                }
+            }
+            Event::BuyingPowerMsg(msg) => {
+                if let Content::BuyingPower(panel) = &mut self.content
+                    && let Some(action) = panel::buying_power::update(panel, msg)
+                {
+                    return Some(Effect::BuyingPowerAction(action));
                 }
             }
         }
@@ -1754,7 +1909,10 @@ impl State {
             Content::Ladder(panel) => panel
                 .as_mut()
                 .and_then(|p| p.invalidate(Some(now)).map(Action::Panel)),
-            Content::Starter => None,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
             Content::Comparison(chart) => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
@@ -1783,7 +1941,10 @@ impl State {
             }
             Content::Ladder(_) | Content::TimeAndSales(_) => Some(100),
             Content::ShaderHeatmap { .. } => None,
-            Content::Starter => None,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
         }
     }
 
@@ -1869,6 +2030,12 @@ pub enum Content {
     TimeAndSales(Option<TimeAndSales>),
     Ladder(Option<Ladder>),
     Comparison(Option<ComparisonChart>),
+    /// Order Entry panel (U0)
+    OrderEntry(OrderEntryPanel),
+    /// Order List panel (U1)
+    OrderList(panel::orders::OrdersPanel),
+    /// Buying Power panel (U3)
+    BuyingPower(BuyingPowerPanel),
 }
 
 impl Content {
@@ -2074,6 +2241,9 @@ impl Content {
             ContentKind::ComparisonChart => Content::Comparison(None),
             ContentKind::TimeAndSales => Content::TimeAndSales(None),
             ContentKind::Ladder => Content::Ladder(None),
+            ContentKind::OrderEntry => Content::OrderEntry(OrderEntryPanel::new()),
+            ContentKind::OrderList => Content::OrderList(panel::orders::OrdersPanel::new()),
+            ContentKind::BuyingPower => Content::BuyingPower(BuyingPowerPanel::new()),
         }
     }
 
@@ -2084,7 +2254,10 @@ impl Content {
             Content::TimeAndSales(panel) => Some(panel.as_ref()?.last_update()),
             Content::Ladder(panel) => Some(panel.as_ref()?.last_update()),
             Content::Comparison(chart) => Some(chart.as_ref()?.last_update()),
-            Content::Starter => None,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
         }
     }
@@ -2161,7 +2334,10 @@ impl Content {
             | Content::Ladder(_)
             | Content::Starter
             | Content::Comparison(_)
-            | Content::ShaderHeatmap { .. } => {
+            | Content::ShaderHeatmap { .. }
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => {
                 panic!("indicator reorder on {} pane", self)
             }
         }
@@ -2204,7 +2380,10 @@ impl Content {
             Content::TimeAndSales(_)
             | Content::Ladder(_)
             | Content::Starter
-            | Content::Comparison(_) => None,
+            | Content::Comparison(_)
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => None,
         }
     }
 
@@ -2266,16 +2445,23 @@ impl Content {
             Content::Comparison(_) => ContentKind::ComparisonChart,
             Content::Starter => ContentKind::Starter,
             Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
+            Content::OrderEntry(_) => ContentKind::OrderEntry,
+            Content::OrderList(_) => ContentKind::OrderList,
+            Content::BuyingPower(_) => ContentKind::BuyingPower,
         }
     }
 
     pub fn update_theme(&mut self, theme: &iced_core::Theme) {
-        if let Content::ShaderHeatmap { chart: Some(c), .. } = self {
-            c.update_theme(theme);
+        match self {
+            Content::ShaderHeatmap { chart: Some(c), .. } => c.update_theme(theme),
+            Content::Ladder(Some(panel)) => {
+                panel.invalidate(None);
+            }
+            _ => {}
         }
     }
 
-    fn initialized(&self) -> bool {
+    pub fn initialized(&self) -> bool {
         match self {
             Content::Heatmap { chart, .. } => chart.is_some(),
             Content::ShaderHeatmap { chart, .. } => chart.is_some(),
@@ -2283,7 +2469,10 @@ impl Content {
             Content::TimeAndSales(panel) => panel.is_some(),
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
-            Content::Starter => true,
+            Content::Starter
+            | Content::OrderEntry(_)
+            | Content::OrderList(_)
+            | Content::BuyingPower(_) => true,
         }
     }
 }
@@ -2303,6 +2492,9 @@ impl PartialEq for Content {
                 | (Content::Kline { .. }, Content::Kline { .. })
                 | (Content::TimeAndSales(_), Content::TimeAndSales(_))
                 | (Content::Ladder(_), Content::Ladder(_))
+                | (Content::OrderEntry(_), Content::OrderEntry(_))
+                | (Content::OrderList(_), Content::OrderList(_))
+                | (Content::BuyingPower(_), Content::BuyingPower(_))
         )
     }
 }
@@ -2409,5 +2601,81 @@ fn by_basis_default<T>(
     match basis.unwrap_or(Basis::Time(default_tf)) {
         Basis::Time(tf) => on_time(tf),
         Basis::Tick(_) => on_tick(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tachibana_ticker_info() -> TickerInfo {
+        let ticker = exchange::Ticker::new("7203", Exchange::TachibanaStock);
+        TickerInfo::new_stock(ticker, 1.0, 100.0, 100)
+    }
+
+    fn ladder_depth_stream(ti: TickerInfo) -> StreamKind {
+        StreamKind::Depth {
+            ticker_info: ti,
+            depth_aggr: exchange::adapter::StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        }
+    }
+
+    /// Regression guard for the race where DepthSnapshot arrives before Ladder
+    /// content is initialized (Content::Ladder(None)).
+    ///
+    /// When `resolve_streams` makes streams Ready, `set_content_and_streams` must
+    /// be called immediately so incoming data is not silently dropped.
+    #[test]
+    fn set_content_and_streams_initializes_ladder_when_content_is_none() {
+        let ti = tachibana_ticker_info();
+        let mut state = State::default();
+        state.content = Content::Ladder(None);
+        state.streams = ResolvedStream::Ready(vec![
+            ladder_depth_stream(ti),
+            StreamKind::Trades { ticker_info: ti },
+        ]);
+
+        assert!(
+            !state.content.initialized(),
+            "pre-condition: Ladder(None) must not be initialized"
+        );
+
+        state.set_content_and_streams(vec![ti], ContentKind::Ladder);
+
+        assert!(
+            state.content.initialized(),
+            "Ladder must be initialized after set_content_and_streams — \
+             if this fails, DepthSnapshot data arriving right after resolve_streams \
+             will be dropped into Content::Ladder(None)"
+        );
+    }
+
+    /// Verify that a Ladder with Ready streams can produce a valid stream_pair_kind,
+    /// which is the prerequisite for the eager initialization in resolve_streams.
+    #[test]
+    fn stream_pair_kind_returns_some_when_streams_are_ready() {
+        let ti = tachibana_ticker_info();
+        let mut state = State::default();
+        state.content = Content::Ladder(None);
+        state.streams = ResolvedStream::Ready(vec![
+            ladder_depth_stream(ti),
+            StreamKind::Trades { ticker_info: ti },
+        ]);
+
+        let kind = state.stream_pair_kind();
+        assert!(
+            matches!(kind, Some(StreamPairKind::SingleSource(_))),
+            "stream_pair_kind must return SingleSource when streams are Ready — \
+             if this fails, the eager initialization branch in resolve_streams will \
+             fall through to the None arm and leave Ladder uninitialized"
+        );
+    }
+
+    #[test]
+    fn order_panes_are_always_initialized() {
+        assert!(Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()).initialized());
+        assert!(Content::OrderList(panel::orders::OrdersPanel::new()).initialized());
+        assert!(Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()).initialized());
     }
 }

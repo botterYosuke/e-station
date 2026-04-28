@@ -52,6 +52,20 @@ impl EngineConnection {
     /// Connect to the Python engine at `url` (e.g. `ws://127.0.0.1:9999`),
     /// send `Hello`, and wait for `Ready` — verifying the schema version.
     pub async fn connect(url: &str, token: &str) -> Result<Self, EngineClientError> {
+        // Default to "live" — preserves pre-N1.13 behaviour for callers that
+        // don't know about modes. Application code (`src/main.rs`) must call
+        // `connect_with_mode` once it has parsed `--mode`.
+        Self::connect_with_mode(url, token, "live").await
+    }
+
+    /// N1.13: connect and announce the runtime mode (`"live"` | `"replay"`).
+    /// Python uses this to gate `/api/replay/*` and reject `StartEngine.engine`
+    /// mismatches early.
+    pub async fn connect_with_mode(
+        url: &str,
+        token: &str,
+        mode: &str,
+    ) -> Result<Self, EngineClientError> {
         let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, connect_plain_ws(url))
             .await
             .map_err(|_| EngineClientError::HandshakeTimeout)?
@@ -63,7 +77,7 @@ impl EngineConnection {
         // Perform handshake with exclusive ws access before spawning the IO tasks.
         let (ws, capabilities) = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
-            perform_handshake(ws, token, events_tx.clone()),
+            perform_handshake(ws, token, mode, events_tx.clone()),
         )
         .await
         .map_err(|_| EngineClientError::HandshakeTimeout)??;
@@ -200,6 +214,7 @@ async fn connect_plain_ws(
 async fn perform_handshake(
     mut ws: FragmentCollector<TokioIo<Upgraded>>,
     token: &str,
+    mode: &str,
     events_tx: broadcast::Sender<EngineEvent>,
 ) -> Result<(FragmentCollector<TokioIo<Upgraded>>, Value), EngineClientError> {
     // Send Hello
@@ -208,6 +223,7 @@ async fn perform_handshake(
         schema_minor: SCHEMA_MINOR,
         client_version: CLIENT_VERSION.to_string(),
         token: token.to_string(),
+        mode: mode.to_string(),
     };
     let hello_json = serde_json::to_string(&hello)?;
     ws.write_frame(Frame::text(Payload::Owned(hello_json.into_bytes())))

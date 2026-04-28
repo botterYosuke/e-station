@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import logging
 import os
+import time
 import uuid
 from collections import deque
 from pathlib import Path
@@ -44,6 +45,7 @@ from engine.exchanges.hyperliquid import HyperliquidWorker
 from engine.exchanges.mexc import MexcWorker
 from engine.exchanges.okex import OkexWorker
 from engine.exchanges.tachibana import TachibanaWorker
+from engine.exchanges.tachibana_event import OrderEcEvent, TachibanaEventClient
 from engine.exchanges.tachibana_orders import (
     NautilusOrderEnvelope,
     UnsupportedOrderError,
@@ -66,8 +68,23 @@ from engine.schemas import (
     Ready,
     SubmitOrderRequest,
 )
+from engine.mode import validate_start_engine
 
 log = logging.getLogger(__name__)
+
+# C-M2: httpx/httpcore の INFO/DEBUG ログには立花 API の URL が含まれ、
+# クエリパラメータ sSecondPassword が露出するため WARNING 以上に抑制する。
+# setLevel(WARNING) に加えて addFilter も設定することで確実に抑制する。
+def _make_min_level_filter(min_level: int) -> logging.Filter:
+    class _Filter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return record.levelno >= min_level
+    return _Filter()
+
+for _http_logger_name in ("httpx", "httpcore"):
+    _l = logging.getLogger(_http_logger_name)
+    _l.setLevel(logging.WARNING)
+    _l.addFilter(_make_min_level_filter(logging.WARNING))
 
 _ENGINE_VERSION = "0.1.0"
 
@@ -158,6 +175,9 @@ class DataEngineServer:
         self._outbox_event = asyncio.Event()
         self._engine_session_id: UUID = uuid.uuid4()
         self._handshake_lock = asyncio.Lock()
+        # N1.13: 起動時固定 mode (`"live"` | `"replay"`).
+        # Hello 受信時に上書きする。default は旧クライアント互換の "live"。
+        self._mode: str = "live"
 
         # Tachibana p_no counter MUST be constructed before the worker dict
         # so the worker shares the same monotonic counter as
@@ -214,13 +234,43 @@ class DataEngineServer:
         # Task handle for the background startup login (cancelled on disconnect).
         self._tachibana_startup_task: asyncio.Task | None = None
 
+        # ── Phase O2: EVENT WebSocket EC 約定通知 ────────────────────────
+        # venue_order_id → client_order_id 逆引きマップ（EC フレームには client_order_id がない）
+        self._venue_to_client: dict[str, str] = {}
+        # venue_order_id → 累積約定数量（int）。部分約定の積算に使う
+        self._fill_cumulative: dict[str, int] = {}
+        # EVENT WebSocket 受信クライアント（重複検知 seen set を保持）
+        self._event_client = TachibanaEventClient()
+        # EVENT 受信ループのバックグラウンドタスク
+        self._event_task: asyncio.Task | None = None
+
         # ── Order Phase state (T0.3) ──────────────────────────────────
         # 第二暗証番号: TachibanaSessionHolder でメモリ保持。
         # idle forget タイマー + lockout state を管理する（H-7: architecture.md §5.3）。
         self._session_holder = TachibanaSessionHolder()
+        # Dev fast path: DEV_TACHIBANA_SECOND_PASSWORD が設定されており、かつ
+        # dev_login_allowed=True のとき起動時に第二暗証番号を事前注入する。
+        # E2E テスト / CI デモジョブ専用。iced modal は不要になる。
+        # 値は絶対ログに出さない（C-M2）。
+        if self._dev_tachibana_login_allowed:
+            _dev_sp = os.environ.get("DEV_TACHIBANA_SECOND_PASSWORD", "")
+            if _dev_sp:
+                self._session_holder.set_password(_dev_sp)
+                log.info(
+                    "second_password pre-populated from DEV_TACHIBANA_SECOND_PASSWORD"
+                    " (dev fast path — E2E/CI use only)"
+                )
+
+        # C-2: in-flight SubmitOrder カウンタ。ForgetSecondPassword 受信時のログ用。
+        # asyncio 単一スレッドなので lock 不要。
+        self._submit_order_inflight_count: int = 0
 
         # Monotonic counter to produce a fresh base ssid per subscribe
         self._stream_counter = 0
+
+        # N1.4: 走行中 NautilusRunner マッピング (strategy_id → runner)。
+        # StartEngine で登録、StopEngine から参照、完了時に pop される。
+        self._engine_tasks: dict[str, Any] = {}
 
         self._outbox = _Outbox(self._outbox_event.set)
 
@@ -289,6 +339,14 @@ class DataEngineServer:
                 except (asyncio.CancelledError, Exception):
                     pass
             self._tachibana_startup_task = None
+            # Phase O2: EVENT ループも停止する
+            if self._event_task is not None and not self._event_task.done():
+                self._event_task.cancel()
+                try:
+                    await self._event_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._event_task = None
             # Reset startup latch so the next reconnect can call
             # validate_session_on_startup again without the L6 guard firing.
             self._tachibana_startup_latch = StartupLatch()
@@ -309,6 +367,9 @@ class DataEngineServer:
             )
             await ws.close()
             raise ValueError("auth_failed")
+
+        # N1.13: capture mode from Hello so dispatch policies (mode helper) can read it.
+        self._mode = msg.mode
 
         if msg.schema_major != SCHEMA_MAJOR:
             await ws.send(
@@ -390,6 +451,11 @@ class DataEngineServer:
                 "supports_bulk_trades": True,
                 "supports_depth_binary": False,
                 "venue_capabilities": venue_caps,
+                # N1.1: Phase N1 では BacktestEngine のみ実装、Live は N2 から。
+                "nautilus": {"backtest": True, "live": False},
+                # N1.13: クライアントから受け取った mode をエコーバック。
+                # UI 側は capabilities["mode"] で正規化された値を読む。
+                "mode": self._mode,
             },
         )
         await ws.send(orjson.dumps(ready.model_dump(mode="json")).decode())
@@ -485,8 +551,19 @@ class DataEngineServer:
             self._handle_set_second_password(msg)
 
         elif op == "ForgetSecondPassword":
+            # C-2: 即時クリア（architecture.md §2.4 競合ポリシー）。
+            # in-flight な SubmitOrder がある場合も待たずにクリアする。
+            # 各 _do_submit_order は second_password をローカル変数に取得済みのため影響なし。
+            inflight = self._submit_order_inflight_count
             self._session_holder.clear()
-            log.info("ForgetSecondPassword received — clearing second_password from memory")
+            if inflight > 0:
+                log.info(
+                    "ForgetSecondPassword: %d SubmitOrder(s) in-flight; "
+                    "they will complete with already-captured second_password",
+                    inflight,
+                )
+            else:
+                log.info("ForgetSecondPassword received — clearing second_password from memory")
 
         elif op == "SubmitOrder":
             self._spawn_fetch(
@@ -511,6 +588,30 @@ class DataEngineServer:
         elif op == "GetOrderList":
             self._spawn_fetch(
                 self._do_get_order_list(msg), msg.get("request_id")
+            )
+
+        elif op == "GetBuyingPower":
+            self._spawn_fetch(
+                self._do_get_buying_power(msg), msg.get("request_id")
+            )
+
+        elif op == "StartEngine":
+            # N1.4: BacktestEngine 起動。replay モード必須。
+            self._spawn_fetch(
+                self._handle_start_engine(msg), msg.get("request_id")
+            )
+
+        elif op == "StopEngine":
+            # N1.4: 走行中 BacktestEngine を停止する。
+            self._spawn_fetch(
+                self._handle_stop_engine(msg), msg.get("request_id")
+            )
+
+        elif op == "LoadReplayData":
+            # N1.4: J-Quants データを事前ロードして件数だけ通知する。
+            # StartEngine が config に同等情報を持つので、本コマンドは事前確認用途。
+            self._spawn_fetch(
+                self._handle_load_replay_data(msg), msg.get("request_id")
             )
 
         else:
@@ -656,6 +757,14 @@ class DataEngineServer:
         self._session_holder.set_password(value)
 
     async def _do_submit_order(self, msg: dict) -> None:
+        # C-2: in-flight カウンタをインクリメント（architecture.md §2.4 競合ポリシー）。
+        self._submit_order_inflight_count += 1
+        try:
+            await self._do_submit_order_inner(msg)
+        finally:
+            self._submit_order_inflight_count -= 1
+
+    async def _do_submit_order_inner(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         raw_order = msg.get("order", {})
@@ -741,7 +850,7 @@ class DataEngineServer:
         # 発注処理（T0.4）
         import time
 
-        envelope = NautilusOrderEnvelope.model_validate(raw_order)
+        envelope = NautilusOrderEnvelope.model_validate(order.model_dump())
         # OrderSubmitted を先行して発火（nautilus 流の 2 段イベント）
         self._outbox.append(
             {
@@ -871,6 +980,9 @@ class DataEngineServer:
                 "ts_event_ms": int(time.time() * 1000),
             }
         )
+        # Phase O2: EC フレームの venue_order_id → client_order_id 逆引きマップを更新
+        if result.venue_order_id:
+            self._venue_to_client[result.venue_order_id] = result.client_order_id
 
     async def _do_modify_order(self, msg: dict) -> None:
         import time
@@ -1207,6 +1319,11 @@ class DataEngineServer:
             })
             return
 
+        # Phase O2: OrderListUpdated の応答で venue_order_id → client_order_id を補完する。
+        for r in records:
+            if r.venue_order_id and r.client_order_id:
+                self._venue_to_client[r.venue_order_id] = r.client_order_id
+
         orders_json = [
             {
                 "client_order_id": r.client_order_id,
@@ -1230,6 +1347,67 @@ class DataEngineServer:
             "event": "OrderListUpdated",
             "request_id": req_id,
             "orders": orders_json,
+        })
+
+    async def _do_get_buying_power(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        if venue not in self._workers:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "unknown_venue",
+                "message": f"GetBuyingPower: unknown venue {venue!r}",
+            })
+            return
+
+        if self._tachibana_session is None:
+            log.warning("_do_get_buying_power: tachibana session not established (request_id=%s)", req_id)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_NOT_ESTABLISHED",
+                "message": "GetBuyingPower: tachibana session not established",
+            })
+            return
+
+        try:
+            cash_result = await tachibana_fetch_buying_power(
+                session=self._tachibana_session,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+            credit_result = await tachibana_fetch_credit_buying_power(
+                session=self._tachibana_session,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            self._session_holder.clear()
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_EXPIRED",
+                "message": "Session expired; please re-login",
+            })
+            return
+        except Exception:
+            log.exception("_do_get_buying_power: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching buying power",
+            })
+            return
+
+        ts_ms = int(time.time() * 1000)
+        self._outbox.append({
+            "event": "BuyingPowerUpdated",
+            "request_id": req_id,
+            "venue": venue,
+            "cash_available": cash_result.available_amount,
+            "cash_shortfall": cash_result.shortfall,
+            "credit_available": credit_result.available_amount,
+            "ts_ms": ts_ms,
         })
 
     # ------------------------------------------------------------------
@@ -1604,6 +1782,94 @@ class DataEngineServer:
                 "venue": "tachibana",
                 "request_id": request_id,
             })
+            # Phase O2: VenueReady 後に EVENT WebSocket 受信ループを起動する。
+            # 既存タスクが残っていれば（再ログイン時）キャンセルして再起動する。
+            if self._event_task is not None and not self._event_task.done():
+                self._event_task.cancel()
+            self._event_task = asyncio.create_task(
+                self._run_event_loop(session.url_event_ws)
+            )
+
+    async def _run_event_loop(self, url: str) -> None:
+        """EVENT WebSocket に接続して EC 約定通知の受信ループを実行する（Phase O2）。
+
+        VenueReady 後にバックグラウンドタスクとして起動される。
+        再接続は TachibanaEventClient.receive_loop() の reconnect_fn で処理する。
+        """
+        async def _reconnect() -> object:
+            return await websockets.connect(url, compression=None)
+
+        try:
+            ws = await websockets.connect(url, compression=None)
+            log.info("EVENT WebSocket 接続完了")
+            await self._event_client.receive_loop(
+                ws,
+                self._on_ec_event,
+                reconnect_fn=_reconnect,
+            )
+        except asyncio.CancelledError:
+            log.info("EVENT WebSocket ループがキャンセルされました")
+            raise
+        except Exception as exc:
+            log.error("EVENT WebSocket ループが終了しました: %s", exc)
+
+    async def _on_ec_event(self, frame_type: str, event: object) -> None:
+        """EC フレームを IPC イベントに変換して outbox に push する（Phase O2）。
+
+        TachibanaEventClient.receive_loop() の on_event コールバック。
+        notification_type:
+            "1" = 受付（OrderAccepted は submit 時に処理済み → 無視）
+            "2" = 約定 → OrderFilled
+            "3" = 取消 → OrderCanceled
+            "4" = 失効 → OrderExpired
+        """
+        if frame_type != "EC":
+            return
+
+        ec: OrderEcEvent = event  # type: ignore[assignment]
+        client_order_id = self._venue_to_client.get(ec.venue_order_id)
+        if not client_order_id:
+            log.warning(
+                "EC event: venue_order_id=%r の client_order_id が不明 (マップ未登録)",
+                ec.venue_order_id,
+            )
+            return
+
+        nt = ec.notification_type
+        if nt == "1":
+            return  # 受付通知は OrderAccepted で処理済み
+        elif nt == "2":
+            last_qty_int = int(ec.last_qty or "0")
+            prev = self._fill_cumulative.get(ec.venue_order_id, 0)
+            cumulative = prev + last_qty_int
+            self._fill_cumulative[ec.venue_order_id] = cumulative
+            self._outbox.append({
+                "event": "OrderFilled",
+                "client_order_id": client_order_id,
+                "venue_order_id": ec.venue_order_id,
+                "trade_id": ec.trade_id,
+                "last_qty": ec.last_qty or "0",
+                "last_price": ec.last_price or "0",
+                "cumulative_qty": str(cumulative),
+                "leaves_qty": ec.leaves_qty or "0",
+                "ts_event_ms": ec.ts_event_ms,
+            })
+        elif nt == "3":
+            self._outbox.append({
+                "event": "OrderCanceled",
+                "client_order_id": client_order_id,
+                "venue_order_id": ec.venue_order_id,
+                "ts_event_ms": ec.ts_event_ms,
+            })
+        elif nt == "4":
+            self._outbox.append({
+                "event": "OrderExpired",
+                "client_order_id": client_order_id,
+                "venue_order_id": ec.venue_order_id,
+                "ts_event_ms": ec.ts_event_ms,
+            })
+        else:
+            log.debug("EC event: 未知の notification_type=%r (無視)", nt)
 
     async def _do_request_venue_login(self, msg: dict) -> None:
         """`RequestVenueLogin` from the Rust UI — drive a fresh login."""
@@ -1691,6 +1957,188 @@ class DataEngineServer:
             )
         except Exception as exc:
             log.debug("Failed to send error response: %s", exc)
+
+    # ------------------------------------------------------------------
+    # N1.4: nautilus engine dispatch (StartEngine / StopEngine / LoadReplayData)
+    # ------------------------------------------------------------------
+
+    async def _handle_load_replay_data(
+        self, msg: dict, *, base_dir: Path | None = None
+    ) -> None:
+        """LoadReplayData IPC: J-Quants ファイルを件数確認だけして ReplayDataLoaded 送出。
+
+        ``base_dir`` はテスト用 fixtures パス上書き。本番は ``None`` (= S:/j-quants)。
+        """
+        from engine.nautilus.jquants_loader import (
+            load_daily_bars,
+            load_minute_bars,
+            load_trades,
+        )
+
+        instrument_id = msg.get("instrument_id", "")
+        start_date = msg.get("start_date", "")
+        end_date = msg.get("end_date", "")
+        granularity = msg.get("granularity", "Trade")
+        request_id = msg.get("request_id")
+
+        try:
+            bars_loaded = 0
+            trades_loaded = 0
+            kwargs = {"base_dir": base_dir} if base_dir is not None else {}
+            if granularity == "Trade":
+                trades_loaded = sum(
+                    1 for _ in load_trades(instrument_id, start_date, end_date, **kwargs)
+                )
+            elif granularity == "Minute":
+                bars_loaded = sum(
+                    1 for _ in load_minute_bars(instrument_id, start_date, end_date, **kwargs)
+                )
+            elif granularity == "Daily":
+                bars_loaded = sum(
+                    1 for _ in load_daily_bars(instrument_id, start_date, end_date, **kwargs)
+                )
+            else:
+                raise ValueError(f"unknown granularity: {granularity!r}")
+        except Exception as exc:
+            log.error("LoadReplayData failed: %s", exc)
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "load_replay_data_failed",
+                    "message": str(exc),
+                }
+            )
+            return
+
+        self._outbox.append(
+            {
+                "event": "ReplayDataLoaded",
+                "strategy_id": "",  # 単独 LoadReplayData では空
+                "bars_loaded": bars_loaded,
+                "trades_loaded": trades_loaded,
+                "ts_event_ms": int(time.time() * 1000),
+            }
+        )
+
+    async def _handle_start_engine(
+        self, msg: dict, *, base_dir: Path | None = None
+    ) -> None:
+        """StartEngine IPC: BacktestEngine を起動して EngineStarted/EngineStopped を送出。
+
+        mode と engine kind の不整合は ``validate_start_engine`` が ValueError を
+        raise → EngineError outbox 送出。
+
+        実行は ``asyncio.to_thread`` で別 thread に逃がす。BacktestEngine.run() は
+        同期実行で長時間 block するので、event loop を塞がないため。
+        IPC イベントは別 thread から ``loop.call_soon_threadsafe(self._outbox.append, evt)``
+        経由で main loop に戻して append する (C1)。``_Outbox.append`` 内の
+        ``asyncio.Event.set`` が main loop 上で実行されることを保証する。
+
+        例外時 (engine.run() が途中で raise) は ``EngineStarted`` 送出済みで
+        ``EngineStopped`` が抜けるため、except で final_equity="0" の
+        EngineStopped を補完送出する (H1)。
+        """
+        from engine.nautilus.engine_runner import NautilusRunner
+
+        engine_kind = msg.get("engine", "")
+        strategy_id = msg.get("strategy_id", "")
+        config = msg.get("config", {})
+        request_id = msg.get("request_id")
+
+        try:
+            validate_start_engine(self._mode, engine_kind)
+        except ValueError as exc:
+            self._outbox.append(
+                {
+                    "event": "EngineError",
+                    "code": "mode_mismatch",
+                    "message": str(exc),
+                }
+            )
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "mode_mismatch",
+                    "message": str(exc),
+                }
+            )
+            return
+
+        runner = NautilusRunner()
+        # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
+        self._engine_tasks[strategy_id] = runner
+
+        # C1: 別 thread から append すると asyncio.Event.set が thread-unsafe。
+        # call_soon_threadsafe で main loop に戻して append する。
+        loop = asyncio.get_running_loop()
+
+        def _on_event(evt: dict) -> None:
+            loop.call_soon_threadsafe(self._outbox.append, evt)
+
+        # H1 補助: EngineStarted を送出したかどうかを worker thread から記録する。
+        # 例外時に未送出なら EngineStopped 補完を抑制する。
+        started_marker = {"sent": False}
+
+        def _on_event_tracked(evt: dict) -> None:
+            if evt.get("event") == "EngineStarted":
+                started_marker["sent"] = True
+            _on_event(evt)
+
+        def _run() -> None:
+            runner.start_backtest_replay(
+                strategy_id=strategy_id,
+                instrument_id=config.get("instrument_id", ""),
+                start_date=config.get("start_date", ""),
+                end_date=config.get("end_date", ""),
+                granularity=config.get("granularity", "Trade"),
+                initial_cash=int(config.get("initial_cash", "0")),
+                base_dir=base_dir,
+                on_event=_on_event_tracked,
+            )
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception as exc:
+            log.error("StartEngine failed: %s", exc)
+            # H1: EngineStarted を送出済みで EngineStopped を未送出なら補完。
+            # Rust 側 state machine が stuck しないようにする。
+            if started_marker["sent"]:
+                self._outbox.append(
+                    {
+                        "event": "EngineStopped",
+                        "strategy_id": strategy_id,
+                        "final_equity": "0",
+                        "ts_event_ms": int(time.time() * 1000),
+                    }
+                )
+            self._outbox.append(
+                {
+                    "event": "EngineError",
+                    "code": "engine_run_failed",
+                    "message": str(exc),
+                }
+            )
+        finally:
+            self._engine_tasks.pop(strategy_id, None)
+
+    async def _handle_stop_engine(self, msg: dict) -> None:
+        """StopEngine IPC: 走行中 NautilusRunner を停止する。
+
+        N1.4 では BacktestEngine.run() が完了するまで待つしかないため、
+        記録されている runner があれば ``stop()`` を呼ぶだけ。完了待ちは
+        ``_handle_start_engine`` の to_thread 完了に任せる。
+        """
+        strategy_id = msg.get("strategy_id", "")
+        runner = self._engine_tasks.get(strategy_id)
+        if runner is None:
+            log.info("StopEngine: no running engine for strategy_id=%r", strategy_id)
+            return
+        try:
+            runner.stop()
+        except Exception as exc:
+            log.warning("StopEngine: runner.stop() raised: %s", exc)
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):

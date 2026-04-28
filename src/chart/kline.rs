@@ -648,7 +648,10 @@ impl KlineChart {
                 }
                 self.invalidate(None);
             }
-            PlotData::TickBased(_) => {}
+            PlotData::TickBased(_) => {
+                self.request_handler
+                    .mark_failed(req_id, "not a time-based chart".to_string());
+            }
         }
     }
 
@@ -1888,7 +1891,12 @@ mod tests {
     use exchange::{Kline, Ticker, TickerInfo, Timeframe, Volume};
 
     fn test_ticker_info() -> TickerInfo {
-        TickerInfo::new(Ticker::new("BTCUSDT", Exchange::BinanceLinear), 1.0, 0.001, None)
+        TickerInfo::new(
+            Ticker::new("BTCUSDT", Exchange::BinanceLinear),
+            1.0,
+            0.001,
+            None,
+        )
     }
 
     fn test_kline(time_ms: u64) -> Kline {
@@ -1922,7 +1930,11 @@ mod tests {
             test_ticker_info(),
             &KlineChartKind::Candles,
         );
-        assert_eq!(chart.state().latest_x(), 0, "empty chart starts at latest_x=0");
+        assert_eq!(
+            chart.state().latest_x(),
+            0,
+            "empty chart starts at latest_x=0"
+        );
 
         let ts = 1_776_956_400_000u64; // 2026-04-24 JST midnight
         let klines = vec![

@@ -272,3 +272,27 @@ fn try_new_valid_ascii_printable_returns_some() {
         "valid ASCII printable must return Some"
     );
 }
+
+#[test]
+fn try_new_single_char_returns_some() {
+    assert!(
+        ClientOrderId::try_new("x").is_some(),
+        "single-char string must return Some"
+    );
+}
+
+#[test]
+fn try_new_del_char_returns_none() {
+    assert!(
+        ClientOrderId::try_new("order\x7f").is_none(),
+        "DEL (0x7F) must return None"
+    );
+}
+
+#[test]
+fn try_new_space_is_valid() {
+    assert!(
+        ClientOrderId::try_new(" ").is_some(),
+        "space (0x20) is a valid ASCII printable char and must return Some"
+    );
+}

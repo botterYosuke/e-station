@@ -259,6 +259,9 @@ pub struct ProcessManager {
     /// `VenueReady` was emitted before the UI subscription wired up.
     /// Reviewer flagged the silent-loss path on 2026-04-26 (R2).
     pub venue_ready_state: Arc<Mutex<HashSet<String>>>,
+    /// N1.13: 起動時固定 mode。`"live"` か `"replay"` を `set_mode()` で
+    /// 注入してから `start()` する。default は `"live"`。
+    mode: Arc<Mutex<String>>,
 }
 
 impl ProcessManager {
@@ -278,7 +281,15 @@ impl ProcessManager {
             active_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             proxy_url: Arc::new(Mutex::new(None)),
             venue_ready_state: Arc::new(Mutex::new(HashSet::new())),
+            mode: Arc::new(Mutex::new("live".to_string())),
         }
+    }
+
+    /// N1.13: set the runtime mode. Must be called before `start()` so the
+    /// first Hello carries the right value. After-the-fact changes don't
+    /// affect already-handshaken connections (D8 起動時固定方針).
+    pub async fn set_mode(&self, mode: impl Into<String>) {
+        *self.mode.lock().await = mode.into();
     }
 
     /// Non-blocking probe of the post-handshake venue readiness cache.
@@ -394,7 +405,8 @@ impl ProcessManager {
             let mut attempt = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                match EngineConnection::connect(&url, proc.token()).await {
+                let mode = self.mode.lock().await.clone();
+                match EngineConnection::connect_with_mode(&url, proc.token(), &mode).await {
                     Ok(conn) => break conn,
                     Err(EngineClientError::ConnectionRefused) if attempt < MAX_CONNECT_ATTEMPTS => {
                         log::debug!(
@@ -490,6 +502,12 @@ where
                 }
             }
             Ok(None) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // Non-UTF-8 line (e.g. Shift-JIS content from Tachibana API).
+                // Skip and keep reading — breaking here would fill Python's
+                // stdout buffer and deadlock the asyncio event loop.
+                log::debug!(target: "engine", "engine pipe: non-UTF-8 line skipped");
+            }
             Err(e) => {
                 log::warn!(target: "engine", "engine pipe read error: {e}");
                 break;
@@ -513,6 +531,38 @@ fn generate_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies that `forward_lines` does NOT stop reading when it encounters a
+    /// non-UTF-8 line (e.g. Shift-JIS content from Tachibana API logging).
+    ///
+    /// Regression guard: if the `InvalidData` arm is changed back to `break`,
+    /// the task would finish immediately after the bad line, and `is_finished()`
+    /// would be `true` — causing this test to FAIL.
+    #[tokio::test]
+    async fn forward_lines_does_not_stop_after_non_utf8_line() {
+        use tokio::io::AsyncWriteExt;
+
+        let (reader, mut writer) = tokio::io::duplex(256);
+        let fwd = tokio::spawn(forward_lines(reader, log::Level::Info));
+
+        writer.write_all(b"valid line\n").await.unwrap();
+        // Non-UTF-8 byte (0xFF is never valid in UTF-8)
+        writer.write_all(b"\xFF bad bytes \n").await.unwrap();
+
+        // Yield so the spawned task can consume what we wrote.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // The task must still be running — it should be blocked waiting for more
+        // data, not have exited after the InvalidData error.
+        assert!(
+            !fwd.is_finished(),
+            "forward_lines broke out of the loop on InvalidData; \
+             fix: keep the `Err(e) if e.kind() == ErrorKind::InvalidData` arm as `continue`, not `break`"
+        );
+
+        drop(writer); // EOF — let the task finish cleanly
+        fwd.await.unwrap();
+    }
 
     #[tokio::test]
     async fn set_proxy_stores_url() {

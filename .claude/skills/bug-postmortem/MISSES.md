@@ -15,12 +15,15 @@
 | 再接続隠蔽 | 自動リカバリが成功するため初回失敗が観測ウィンドウに残らない | 1 |
 | 冪等性未検証 | 「変更なし」の入力パスがテストされておらず、副作用の有無が見逃される | 1 |
 | 共有状態の独立構築 | 同じ論理状態を複数オブジェクトが「デフォルト引数で各自構築」してしまい、`is` 同一性が崩れて値の重複・順序逆転が起こる | 1 |
-| API 仕様固定なし | Mock レスポンスが誤ったキー名・フィールド名を前提に書かれており、実 API の必須パラメータ欠落・レスポンス形式ズレを素通りする | 1 |
+| API 仕様固定なし | Mock レスポンスが誤ったキー名・フィールド名を前提に書かれており、実 API の必須パラメータ欠落・レスポンス形式ズレを素通りする | 2 |
 | ライブデータ前提 | テストが「常にライブストリームあり」を前提とし、市場クローズ・週末など「ストリームなし」で起動するシナリオを未検証 | 1 |
 | saved-state migration 未実装 | enum バリアント追加時に、追加前の saved-state を読んだ場合の migration テストがなく、旧フォーマットでの起動時のみ再現するバグを見逃す | 1 |
 | IPC 契約の片側未実装 | Rust が特殊パス（`"__all__"` 等）を送る契約が `backend.rs` に書かれているが、Python 側の対応実装とテストが追いついていない | 1 |
-| バグ動作 pin | 既存のバグ挙動（空返却・None 返却）をリグレッションガードとして固定し、正しい設計（raise 等）と乖離した状態を固める | 1 |
+| バグ動作 pin | 既存のバグ挙動（空返却・None 返却）をリグレッションガードとして固定し、正しい設計（raise 等）と乖離した状態を固める | 2 |
 | エラーパス副作用なし | ストリームワーカーの早期 return パスで outbox への積み忘れが発生し、Rust 側が「データが来ない」としか認識できない | 1 |
+| IPC イベント → UI 状態の未配線 | IPC イベントを受信して toast を出すだけで、対応する UI コンポーネントの状態（`submitting` フラグ等）をリセットしていない | 1 |
+| 初期化前データ到着 | UI コンポーネントが未初期化（`None`）の状態でデータが到着し、`if let Some(...)` でサイレントに無視される | 1 |
+| エラーハンドラ早期脱出 | エラー arm が `break` するため、一時的な IO エラー（非 UTF-8 バイト等）で pipe reader が停止し、書き手の stdout バッファが詰まる | 1 |
 
 ---
 
@@ -541,3 +544,284 @@ if let Some(latest_t) = klines_raw.iter().map(|k| k.time).max() {
    チャート初期化後に `latest_x` が正しく設定されていないと、
    挿入されたデータが正しく表示されない。
    `latest_x` を変更・リセットする操作は必ず `FitToVisible` が期待する不変条件との整合を確認する。
+
+---
+
+## 2026-04-27 — 立花 EVENT WebSocket の受信フレームが `p_cmd` ではなく `p_evt_cmd` で参照されていた
+
+**見逃しパターン**: API 仕様固定なし（Mock が誤ったフィールド名で書かれており、実 API との乖離を素通り）
+
+**不具合の概要**:
+アプリ起動後、立花証券の Ladder（板情報）ペインが「Waiting for data...」のまま更新されない。
+WebSocket 接続は確立しサーバーから FD フレームが届いているにもかかわらず、
+`TachibanaEventWs._recv_loop` が FD/KP/ST を一切認識せずコールバックが呼ばれない。
+
+**根本原因**:
+Tachibana EVENT WebSocket の受信フレームはコマンド種別を `p_cmd` フィールドに格納する（例: `\x01p_cmd\x02FD`）。
+しかし `TachibanaEventWs._recv_loop` が `fields.get("p_evt_cmd", "")` を参照していた。
+
+`p_evt_cmd` は**購読 URL のリクエストパラメータ**（`p_evt_cmd=ST,KP,FD`）であり、
+サーバーが返す受信フレームのフィールド名とは別物。
+実サーバーは受信フレームに `p_evt_cmd` を含まないため、`evt_cmd` は常に空文字列になり、
+FD/KP/ST コールバックが一度も呼ばれない状態だった。
+
+**なぜ既存テストで発見できなかったか**:
+
+全ての WS フレーム Mock ビルダー関数が同じ誤ったフィールド名 `p_evt_cmd` を使っていた。
+実装とテストが「一貫して間違った前提」を共有していたため、すべてのテストがパスしていた。
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_fd_frame_triggers_callback` | `_encode_fd_frame` が `\x01p_evt_cmd\x02FD` を送信 → 実装も `p_evt_cmd` を参照 → 偶然一致 |
+| `test_kp_frame_triggers_callback` | `_kp_frame_bytes` が `\x01p_evt_cmd\x02KP` を送信 → 同様に偶然一致 |
+| `test_st_frame_nonzero_triggers_callback` | `_st_frame_bytes` が `\x01p_evt_cmd\x02ST` を送信 → 同様に偶然一致 |
+| 他全 WS テスト | すべて誤ったフィールド名の Mock を共有 |
+
+実サーバーのフレーム内容（`p_cmd\x02FD`）を実際に受信して照合するテストが一切なかった。
+
+**修正**:
+- `python/engine/exchanges/tachibana_ws.py` 行 390:
+  `fields.get("p_evt_cmd", "")` → `fields.get("p_cmd", "")`
+- `python/tests/test_tachibana_ws.py` — 全 Mock ビルダーを `p_cmd` に修正
+- `python/tests/test_tachibana_ws_fd_depth_recv.py`、`test_tachibana_ws_proxy.py`、
+  `test_tachibana_ws_timeout.py`、`test_tachibana_depth_safety.py`、
+  `test_tachibana_holiday_fallback.py`、`test_tachibana_fd_trade.py` — 同様に修正
+
+**追加したテスト**:
+- `python/tests/test_tachibana_ws.py::TestReceivedFrameFieldName::test_frame_with_p_cmd_key_triggers_fd_callback`
+  — 実サーバーフォーマット（`p_cmd=FD`）でコールバックが呼ばれることを検証。
+  エラーメッセージに「`fields.get('p_cmd')` を使うこと」を明記
+- `python/tests/test_tachibana_ws.py::TestReceivedFrameFieldName::test_frame_with_p_evt_cmd_key_does_not_trigger_callback`
+  — 誤ったキー名（`p_evt_cmd`）ではコールバックが呼ばれないことを検証（リグレッション防止）
+
+**リグレッション確認**:
+- 修正前（`p_evt_cmd` に戻した状態）: 両テストが FAIL（`2 failed in 5.23s`）
+- 修正後（`p_cmd` に戻した状態）: 両テストが PASS、全テストスイート 844 passed
+
+**教訓**:
+
+1. **Mock フレームは「実サーバーが送るフォーマット」で書く**:
+   Mock フレームのフィールド名を実装と揃えるだけでは不十分。
+   「実サーバーが実際に送るフォーマット」を公式サンプルやマニュアルで確認し、Mock に反映する。
+   今回は公式サンプル `e_api_websocket_receive_tel.py` で `p_cmd` を確認できた。
+
+2. **リクエストパラメータと受信フレームフィールドは別名**:
+   Tachibana の `p_evt_cmd=ST,KP,FD`（URL パラメータ）と受信フレームの `p_cmd=FD`（フィールド名）は
+   役割が異なる別名。同じ名前に見えるが混同しやすい。API ドキュメントで受信フレーム仕様を明示的に確認する。
+
+3. **「全 Mock が同じ誤りを共有」の構造的危険性**:
+   共通 Mock ビルダー関数がある場合、実装の誤りを Mock が補完して全テストが通ることがある。
+   「実際のサーバーが送るフレームと Mock フレームは同一か」を定期的に実機観測で照合する習慣をつける。
+
+---
+
+## 2026-04-28 — Ladder が市場時間外に「Waiting for data...」のまま（初期化前データ到着）
+
+**見逃しパターン**: 初期化前データ到着（ライブデータ前提 と タイミング依存 の複合）
+
+**不具合の概要**:
+アプリ起動後（市場時間外）、TachibanaStock の Ladder（板）パネルが「Waiting for data...」のまま
+REST スナップショット（bid/ask 各 10 本）が表示されない。
+
+Python の `stream_depth` はセッションあり＋時間外の場合 `DepthSnapshot` を即座に送出するが、
+Rust 側の Ladder パネルが `Content::Ladder(None)` のまま（未初期化）なため、
+`ingest_depth` 内で `if let Some(panel) = panel { ... }` がサイレントに素通りしてデータが消える。
+
+**根本原因**:
+`resolve_streams` で `streams = Ready` にしてから、`ResolveContent`（次の tick で発火）が
+`set_content_and_streams` → `Content::Ladder(Some(...))` を作るまでの**1 フレーム以上の窓**が存在する。
+Python はローカルホスト IPC で < 1ms 以内に応答するため、`DepthReceived` がその窓の中に到着する。
+
+```
+resolve_streams() → streams=Ready → [iced が subscription 登録]
+  ↓ フレームN+1
+Python: Subscribe 受信 → DepthSnapshot を即送
+DepthReceived 到着 → ingest_depth → Ladder(None) → サイレントドロップ
+  ↓ 同フレームor次フレーム
+tick() → ResolveContent → set_content_and_streams → Ladder(Some(...)) ← 遅い
+```
+
+**修正**:
+`dashboard.rs::resolve_streams` で `streams = Ready` にした直後に
+`!content.initialized()` を確認し、`set_content_and_streams` を即呼び出す（1 フレーム待たない）。
+`ingest_depth` に `Ladder(None)` 到着時の警告ログを追加（今後のデバッグ用）。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `cargo test --workspace` | Ladder パネルの GUI 層（`pane::State`）には初期化前データ到着のシナリオを再現するテストがなかった |
+| `python/tests/` | Python は `DepthSnapshot` を正しく送出しており Python 側の問題ではない |
+| E2E smoke.sh | 「Ladder が空」= 正常起動と区別できない（データ表示のチェックがない） |
+| 全テスト共通 | `Content::Ladder(None)` への `if let Some(panel)` サイレントドロップは警告ログすら出ず、「データが来ない」とだけ見えた |
+
+**追加したテスト**:
+- `src/screen/dashboard/pane.rs::tests::set_content_and_streams_initializes_ladder_when_content_is_none`
+  — `Ladder(None)` + `streams=Ready` 状態から `set_content_and_streams` を呼ぶと `initialized()` が true になることを assert
+- `src/screen/dashboard/pane.rs::tests::stream_pair_kind_returns_some_when_streams_are_ready`
+  — `streams=Ready` のとき `stream_pair_kind()` が `SingleSource` を返すことを assert
+    （`resolve_streams` の eager 初期化ブランチが到達可能であることを保証）
+
+**リグレッション確認**: `set_content_and_streams` の Ladder ブランチで `Content::Ladder(None)` を返すよう変更すると test_1 が `initialized()` が false で FAIL することを確認。元に戻すと PASS。
+
+**教訓**:
+
+1. **「データより先に初期化を済ませる」不変条件の明示化**: GUI コンポーネントが `Option<T>` で
+   未初期化状態を持つ場合、外部データ到着時には `Some` になっていることを assert すべき。
+   `if let Some(...)` のサイレントドロップは「データが来ない」にしか見えず、根本原因特定が困難。
+
+2. **1 フレーム窓の危険性**: iced の更新サイクルでは「A のメッセージ処理 → subscription 登録 →
+   B のイベント到着」が 1 フレーム以内に起こりうる。特に localhost IPC は network latency が
+   ほぼゼロなので、「次の tick でやればいい」は実際に window を作る。状態変更後に依存する
+   初期化は即座（同一メッセージ処理内）に行う。
+
+3. **`Content::initialized()` のテスト追加を検討**: 新しい `Content` バリアントを追加する際は
+   「未初期化状態でデータが到着したとき何が起こるか」をテストで明示する。
+   `Panel(None).initialized() == false` かつ `Panel(None)` へのデータ挿入がサイレントに失敗する
+   設計を選ぶなら、挿入前に `initialized()` を assert する防衛コードを `ingest_depth` に置く。
+
+---
+
+## 2026-04-28 — Python stdout 非 UTF-8 バイトで pipe reader が停止 → asyncio deadlock → アプリ終了
+
+**見逃しパターン**: エラーハンドラ早期脱出 / ログ検査漏れ（複合）
+
+**不具合の概要**:
+Tachibana API のレスポンスに Shift-JIS 文字が含まれる場合、Python エンジンがそれをログ出力する。
+`engine-client/src/process.rs::forward_lines()` が `next_line()` からの `InvalidData` エラーを
+`break` で処理していたため、pipe reader タスクが終了する。
+Python の stdout pipe に reader がいなくなると、約 64KB のバッファが埋まった時点で
+Python の asyncio event loop がブロックし、アプリが数分以内に応答不能→終了する。
+
+**修正**: `forward_lines()` の `Err(e) if e.kind() == InvalidData` arm を `break` → `continue`（debug ログ付き skip）に変更。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `engine-client/tests/*.rs` | Mock サーバーを使用。実 Python subprocess が Shift-JIS 文字を stdout に出力するシナリオがない |
+| `tests/e2e/smoke.sh` | `engine ws read error` は検査していたが `engine pipe read error` は未検査 |
+| `src/process.rs::tests` | `forward_lines()` の非 UTF-8 入力に対する挙動のテストがなかった |
+
+**追加したテスト**:
+- `engine-client/src/process.rs::tests::forward_lines_does_not_stop_after_non_utf8_line`
+  — 非 UTF-8 バイトの後もタスクが継続（`is_finished() == false`）することを検証
+- `tests/e2e/smoke.sh` — `engine pipe read error` チェックを追加
+
+**リグレッション確認**: `InvalidData` arm に `break` を追加した状態で FAIL、削除で PASS。
+
+**教訓**:
+
+1. **pipe reader の `break` は「対向プロセスの stdout deadlock」を引き起こす**:
+   `forward_lines` のような「プロセス stdout を読む無限ループ」では、
+   回復可能なエラー（`InvalidData` 等）で `break` すると reader が消えて
+   書き手のバッファが詰まる。`break` は EOF や致命的 IO エラーのみに使う。
+
+2. **`smoke.sh` のパイプ系エラー網羅**:
+   `engine ws read error`（WebSocket 層）と同様に `engine pipe read error`（プロセス stdout 層）も
+   smoke test でチェックする。プロセス IPC 系のエラーログは必ず smoke.sh の check 対象にする。
+
+3. **`forward_lines` 系のテストは `JoinHandle::is_finished()` で継続性を assert する**:
+   「ログの内容」を確認する代わりに「タスクがまだ動いているか」を `is_finished()` で確認するパターンが
+   有効。非 UTF-8 入力後もタスクが alive であることを assert すれば、`break` → `continue` の退化を防止できる。
+
+---
+
+## 2026-04-27 — `OrderAccepted`/`OrderRejected` 受信後に `submitting` フラグが永久 true のままになる
+
+**見逃しパターン**: IPC イベント → UI 状態の未配線
+
+**不具合の概要**:
+注文送信後、`OrderEntryPanel.submitting = true` にセットされるが、`OrderAccepted`/`OrderRejected`
+IPC イベントを受信しても `submitting` がリセットされず、注文ボタンが永久に無効化されたままになる。
+
+**根本原因**:
+`map_engine_event_to_tachibana()` では `OrderAccepted`/`OrderRejected` を
+`Message::OrderToast(...)` に変換して toast だけを表示していた。
+`OrderEntryPanel.on_accepted()` / `on_rejected(reason)` を呼ぶ経路が存在しなかった。
+
+`on_accepted()`/`on_rejected()` メソッド自体は `order_entry.rs` に実装済み・テスト済みだったが、
+`main.rs` → `dashboard.rs` → `pane.rs` → `order_entry.rs` の伝播パスが全く配線されていなかった。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `order_entry.rs` の `on_accepted_clears_submitting_and_error` | `on_accepted()` を直接呼ぶ単体テスト。`main.rs` からの呼び出しパスは検証していない |
+| `order_entry.rs` の `on_rejected_sets_error_and_clears_submitting` | 同上 |
+| `cargo test --workspace` 全体 | IPC イベント受信 → UI 状態変化の E2E 経路をカバーするテストがない |
+
+`on_accepted()`/`on_rejected()` が実装・テスト済みという事実が「配線も完了している」という
+錯覚を生んだ。実装と配線は別のレイヤーであり、両方を検証する必要がある。
+
+**修正**:
+1. `main.rs` に `Message::OrderAccepted { client_order_id, venue_order_id }` と
+   `Message::OrderRejected { client_order_id, reason }` を追加
+2. `map_engine_event_to_tachibana()` で `OrderAccepted`/`OrderRejected` をこれらの新変数にマップ
+3. `update()` ハンドラで `dashboard.notify_order_accepted()` / `notify_order_rejected()` を呼んでから toast を push
+4. `dashboard.rs` に `notify_order_accepted()` / `notify_order_rejected()` メソッドを追加。
+   `iter_all_panes_mut()` で全ペインを走査し `pending_request_id` が一致する `OrderEntry` パネルにのみ呼ぶ
+
+**追加したテスト**: なし（既存の `on_accepted`/`on_rejected` 単体テストが PASS 継続を確認）
+
+**教訓**:
+
+1. **「実装済み」と「配線済み」は別のレイヤー**: メソッドが実装済み・テスト済みでも、
+   呼び出し側の経路（IPC イベント → Message → update() → component）が配線されていなければ
+   実行されない。新しいコンポーネントメソッドを追加したら「どこから呼ばれるか」を
+   必ず確認し、end-to-end の呼び出しパスを持つ統合テストを書く。
+
+2. **「toast を出す」≠「UI 状態をリセットする」**: IPC イベントハンドラで toast を表示する
+   実装は「通知は機能している」という安心感を与えるが、UI コンポーネントの
+   状態変化（`submitting`, `pending_request_id` 等）は別途配線が必要。
+   IPC イベントが UI の複数レイヤーに影響する場合は、全レイヤーへの伝播をチェックリスト化する。
+
+3. **`distribute_order_list` をモデルに**: `dashboard.rs` に `distribute_order_list()` という
+   「全 OrderList パネルにデータを配信する」パターンが既にある。
+   同様のパターンを必要とする新機能（`notify_order_accepted` 等）は、このパターンを参照して
+   一貫した実装を行う。パターンの例が存在するときはそれに倣う。
+
+---
+
+## 2026-04-28 — `_determine_side` が曖昧 side を `"buy"` に固定 (false positive)
+
+**見逃しパターン**: バグ動作 pin
+
+**不具合の概要**:
+`tachibana_ws.py::FdFrameProcessor._determine_side` は、quote rule（price vs ask/bid）も
+tick rule（price vs prev_trade_price）も適用できない「曖昧」ケースで `return "buy"` を返していた。
+これにより、midpoint で前回価格と同値の取引は無条件に buy 判定され、買い出来高が水増しされる。
+live/replay 互換ロジックで side を集計する N1 フェーズで false positive になるため N1.0 として先行修正。
+
+**修正**:
+- `_determine_side` の戻り値型を `str` → `str | None` に変更し、曖昧ケースで `None` を返す
+- 呼び出し側: `_side if _side is not None else "unknown"` で `trade["side"]` を設定
+
+**なぜ既存テストが見逃したか**:
+`test_tachibana_fd_trade.py::TestSideDetermination::test_tick_rule_up_gives_buy` に
+「`same as prev_trade → ambiguous → default buy`」というコメントとともに `assert trade3["side"] == "buy"`
+が書かれており、**バグ挙動を正の仕様として固定していた**。
+テストが「現状動作を固定する」のではなく「正しい仕様を固定する」べきところで誤りを内包していた。
+
+**追加したテスト**:
+- `python/tests/test_tachibana_fd_trade.py::TestSideDetermination::test_tick_rule_up_gives_buy` — 期待値を `"buy"` → `"unknown"` に修正
+
+**リグレッション確認**: 旧実装（`return "buy"`）に戻した状態で `trade3["side"] == "unknown"` が FAIL することを実証。
+
+**教訓**:
+
+1. **「動いている挙動を pin する」テストは仕様の正しさを保証しない**:
+   `assert side == "buy"` は「現在の実装がそう返す」ことを固定するが、
+   「そう返すべき」かどうかは別問題。曖昧ケースの戻り値を変更したとき、
+   テストが FAIL せずに PASS し続けたなら、テストは誤った仕様を守り続けている。
+   テストを書くときは「なぜその値が正しいか」を明文化し、コメントで根拠を示す。
+
+2. **`None`/`unknown` の導入はリグレッションの温床**:
+   `str` 返却 → `str | None` 返却 の型変更は、呼び出し側が `None` を扱わないと
+   そのまま `None` が dict に入り下流で TypeError になる。
+   型変更と同時に呼び出し側の全箇所を grep して `None` ハンドリングを確認すること。
+
+3. **曖昧判定は `"unknown"` として伝搬させる**:
+   `"buy"` や `"sell"` のデフォルト値で埋めると、集計ロジック（live/replay 互換）で
+   false positive になる。side が不明なら `"unknown"` を明示することで、
+   集計側がフィルタリングまたは別処理できるようにする。

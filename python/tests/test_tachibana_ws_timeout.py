@@ -1,4 +1,4 @@
-"""TDD: TachibanaEventWs dead-frame timeout (T5, plan §T5 M2 修正).
+﻿"""TDD: TachibanaEventWs dead-frame timeout (T5, plan §T5 M2 修正).
 
 The implementation patches _DEAD_FRAME_TIMEOUT_S to a small value for speed.
 """
@@ -17,7 +17,7 @@ from engine.exchanges.tachibana_ws import TachibanaEventWs
 
 def _encode_fd(dv: str = "100") -> bytes:
     text = (
-        "\x01p_evt_cmd\x02FD"
+        "\x01p_cmd\x02FD"
         "\x01p_1_DPP\x022500"
         f"\x01p_1_DV\x02{dv}"
         "\x01p_1_GAP1\x022501"

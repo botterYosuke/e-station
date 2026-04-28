@@ -2,7 +2,23 @@
 use std::path::PathBuf;
 use url::Url;
 
-#[derive(Debug, Default)]
+/// N1.13: 起動時固定モード。CLI `--mode {live|replay}` で指定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Live,
+    Replay,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Live => "live",
+            Mode::Replay => "replay",
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct CliArgs {
     /// WebSocket URL of an externally managed Python data engine.
     /// When set, Flowsurface connects to this URL and does not spawn the engine.
@@ -11,6 +27,18 @@ pub struct CliArgs {
     /// Used by `--engine-cmd` for dev installs that need a non-default
     /// interpreter (e.g. inside a uv-managed virtualenv).
     pub engine_cmd: Option<PathBuf>,
+    /// N1.13: 起動時固定モード。`--mode {live|replay}` で必須。
+    pub mode: Mode,
+}
+
+impl Default for CliArgs {
+    fn default() -> Self {
+        Self {
+            data_engine_url: None,
+            engine_cmd: None,
+            mode: Mode::Live,
+        }
+    }
 }
 
 impl CliArgs {
@@ -24,9 +52,25 @@ impl CliArgs {
     pub fn parse_from(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut data_engine_url: Option<Url> = None;
         let mut engine_cmd: Option<PathBuf> = None;
+        let mut mode: Option<Mode> = None;
         let mut iter = args.skip(1); // skip executable name
 
         while let Some(arg) = iter.next() {
+            if arg == "--mode" {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| "--mode requires a value (live | replay)".to_string())?;
+                mode = Some(match raw.as_str() {
+                    "live" => Mode::Live,
+                    "replay" => Mode::Replay,
+                    other => {
+                        return Err(format!(
+                            "--mode: '{other}' is not a valid mode; use 'live' or 'replay'"
+                        ));
+                    }
+                });
+                continue;
+            }
             if arg == "--engine-cmd" {
                 let raw = iter
                     .next()
@@ -59,9 +103,15 @@ impl CliArgs {
             // Unknown flags are silently ignored to stay forward-compatible.
         }
 
+        let mode = mode.ok_or_else(|| {
+            "--mode is required (use 'live' or 'replay'); e.g. `flowsurface --mode replay`"
+                .to_string()
+        })?;
+
         Ok(Self {
             data_engine_url,
             engine_cmd,
+            mode,
         })
     }
 }
@@ -83,15 +133,29 @@ mod tests {
         std::iter::once("flowsurface".to_string()).chain(v.iter().map(|s| s.to_string()))
     }
 
+    /// Helper for pre-N1.13 tests that don't care about mode — auto-injects
+    /// `--mode live` so legacy invariants stay focused on URL / engine-cmd.
+    fn args_with_live(v: &[&str]) -> impl Iterator<Item = String> {
+        let mut all: Vec<String> = vec!["flowsurface".to_string()];
+        all.extend(v.iter().map(|s| s.to_string()));
+        all.push("--mode".to_string());
+        all.push("live".to_string());
+        all.into_iter()
+    }
+
     #[test]
     fn no_args_yields_none() {
-        let cli = CliArgs::parse_from(args(&[])).expect("should succeed");
+        let cli = CliArgs::parse_from(args_with_live(&[])).expect("should succeed");
         assert!(cli.data_engine_url.is_none());
     }
 
     #[test]
     fn data_engine_url_is_parsed() {
-        let cli = CliArgs::parse_from(args(&["--data-engine-url", "ws://127.0.0.1:9001"])).unwrap();
+        let cli = CliArgs::parse_from(args_with_live(&[
+            "--data-engine-url",
+            "ws://127.0.0.1:9001",
+        ]))
+        .unwrap();
         let url = cli.data_engine_url.expect("should have url");
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert_eq!(url.port(), Some(9001));
@@ -100,8 +164,45 @@ mod tests {
 
     #[test]
     fn unknown_flags_are_ignored() {
-        let cli = CliArgs::parse_from(args(&["--unknown-flag", "value"])).unwrap();
+        let cli = CliArgs::parse_from(args_with_live(&["--unknown-flag", "value"])).unwrap();
         assert!(cli.data_engine_url.is_none());
+    }
+
+    // ── N1.13: --mode parsing ──────────────────────────────────────────
+
+    #[test]
+    fn mode_is_required() {
+        let result = CliArgs::parse_from(args(&[]));
+        assert!(result.is_err(), "missing --mode must error");
+        assert!(result.unwrap_err().contains("--mode is required"));
+    }
+
+    #[test]
+    fn mode_live_parses() {
+        let cli = CliArgs::parse_from(args(&["--mode", "live"])).unwrap();
+        assert_eq!(cli.mode, Mode::Live);
+        assert_eq!(cli.mode.as_str(), "live");
+    }
+
+    #[test]
+    fn mode_replay_parses() {
+        let cli = CliArgs::parse_from(args(&["--mode", "replay"])).unwrap();
+        assert_eq!(cli.mode, Mode::Replay);
+        assert_eq!(cli.mode.as_str(), "replay");
+    }
+
+    #[test]
+    fn mode_rejects_unknown_value() {
+        let result = CliArgs::parse_from(args(&["--mode", "paper"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a valid mode"));
+    }
+
+    #[test]
+    fn mode_requires_value() {
+        let result = CliArgs::parse_from(args(&["--mode"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires a value"));
     }
 
     #[test]
@@ -120,7 +221,7 @@ mod tests {
 
     #[test]
     fn mixed_args_with_data_engine_url() {
-        let cli = CliArgs::parse_from(args(&[
+        let cli = CliArgs::parse_from(args_with_live(&[
             "--some-flag",
             "ignored",
             "--data-engine-url",
@@ -157,13 +258,18 @@ mod tests {
 
     #[test]
     fn accepts_localhost_domain() {
-        let cli = CliArgs::parse_from(args(&["--data-engine-url", "ws://localhost:8765"])).unwrap();
+        let cli = CliArgs::parse_from(args_with_live(&[
+            "--data-engine-url",
+            "ws://localhost:8765",
+        ]))
+        .unwrap();
         assert!(cli.data_engine_url.is_some());
     }
 
     #[test]
     fn accepts_ipv6_loopback() {
-        let cli = CliArgs::parse_from(args(&["--data-engine-url", "ws://[::1]:8765"])).unwrap();
+        let cli =
+            CliArgs::parse_from(args_with_live(&["--data-engine-url", "ws://[::1]:8765"])).unwrap();
         assert!(cli.data_engine_url.is_some());
     }
 

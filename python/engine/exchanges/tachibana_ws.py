@@ -125,7 +125,10 @@ class FdFrameProcessor:
             dpp = Decimal(dpp_str)
             dv = Decimal(dv_str)
         except InvalidOperation:
-            log.debug("tachibana ws: invalid DPP/DV in FD frame: %r / %r", dpp_str, dv_str)
+            log.warning(
+                "tachibana: FdFrameProcessor.process: InvalidOperation for row=%s fields_keys=%s",
+                self.row, list(fields.keys())[:5],
+            )
             return None, None
 
         depth = self._extract_depth(fields, recv_ts_ms)
@@ -148,12 +151,12 @@ class FdFrameProcessor:
         else:
             qty = dv - self._prev_dv
             if qty > 0:
-                side = self._determine_side(dpp)
+                _side = self._determine_side(dpp)
                 ts_ms = self._parse_ts_ms(fields, recv_ts_ms, row)
                 trade = {
                     "price": str(dpp),
                     "qty": str(qty),
-                    "side": side,
+                    "side": _side if _side is not None else "unknown",
                     "ts_ms": ts_ms,
                     "is_liquidation": False,
                 }
@@ -170,8 +173,8 @@ class FdFrameProcessor:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _determine_side(self, price: Decimal) -> str:
-        """Quote rule + tick rule (F3, data-mapping §3)."""
+    def _determine_side(self, price: Decimal) -> str | None:
+        """Quote rule + tick rule (F3, data-mapping §3). Returns None when ambiguous."""
         if self._prev_ask is not None and price >= self._prev_ask:
             return "buy"
         if self._prev_bid is not None and price <= self._prev_bid:
@@ -184,7 +187,7 @@ class FdFrameProcessor:
                 return "sell"
         # Ambiguous (F-M8b)
         log.warning("tachibana ws: trade side ambiguous for price %s", price)
-        return "buy"
+        return None
 
     def _extract_best_bid(self, fields: dict[str, str]) -> Decimal | None:
         v = fields.get(f"p_{self.row}_GBP1", "")
@@ -204,17 +207,17 @@ class FdFrameProcessor:
         self, fields: dict[str, str], recv_ts_ms: int
     ) -> dict[str, Any] | None:
         row = self.row
-        bids: list[tuple[str, str]] = []
-        asks: list[tuple[str, str]] = []
+        bids: list[dict[str, str]] = []
+        asks: list[dict[str, str]] = []
         for i in range(1, 11):
             bp = fields.get(f"p_{row}_GBP{i}", "")
             bv = fields.get(f"p_{row}_GBV{i}", "")
             ap = fields.get(f"p_{row}_GAP{i}", "")
             av = fields.get(f"p_{row}_GAV{i}", "")
             if bp:
-                bids.append((bp, bv))
+                bids.append({"price": bp, "qty": bv})
             if ap:
-                asks.append((ap, av))
+                asks.append({"price": ap, "qty": av})
 
         if not bids and not asks:
             return None
@@ -387,7 +390,7 @@ class TachibanaEventWs:
                     pairs = self._parse(text)
                     fields: dict[str, str] = {k: v for k, v in pairs}
 
-                    evt_cmd = fields.get("p_evt_cmd", "")
+                    evt_cmd = fields.get("p_cmd", "")
                     if evt_cmd == "KP":
                         log.debug("tachibana ws: KP recv %s", self._ticker)
                         await callback("KP", fields, recv_ts_ms)
