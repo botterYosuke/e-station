@@ -124,7 +124,7 @@ cargo build --release
 uv run python -m engine --port 19876 --token dev-token
 
 # エンジンに接続してアプリ起動
-cargo run -- --data-engine-url ws://127.0.0.1:19876/
+cargo run -- --mode live --data-engine-url ws://127.0.0.1:19876/
 
 # Rust フォーマット
 cargo fmt
@@ -132,6 +132,27 @@ cargo fmt
 # Rust lint
 cargo clippy -- -D warnings
 ```
+
+### 起動モード（`--mode` は必須）
+
+N1.13 以降、`flowsurface` 起動時に `--mode {live|replay}` の指定が**必須**になった。
+省略すると即座に終了する：
+
+```
+flowsurface: --mode is required (use 'live' or 'replay'); e.g. `flowsurface --mode replay`
+```
+
+| モード | 用途 | 起動例 |
+|--------|------|--------|
+| `live` | 取引所からのリアルタイムデータを購読する通常運用 | `cargo run -- --mode live` |
+| `replay` | 録画済みデータの再生（`/replay/*` HTTP API が有効化される） | `cargo run -- --mode replay` |
+
+VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vscode/launch.json) に
+`Rust: Debug (CodeLLDB) - live` / `Rust: Debug (CodeLLDB) - replay` の 2 構成を
+用意してある。デバッグサイドバーの起動構成セレクタから選ぶこと。
+
+新しい起動経路（CI スクリプト・ドキュメント・別の launch.json 等）を追加するときは
+必ず `--mode` を渡すこと。忘れると上記メッセージで即終了する。
 
 ---
 
