@@ -62,6 +62,9 @@
 - `src/layout.rs` に変換関数のユニットテストを追加
 - `pane_grid` 依存の import を全ファイルから削除
 - `saved-state.json` 旧フォーマットとの互換確認
+- `tests/e2e/smoke.sh` に FloatingPane 関連の観測項目を追加すること:
+  - `WindowMoved` ログがハンドシェイク完了後に到達することを確認
+  - 観測ウィンドウ中にクラッシュ（プロセス異常終了）が発生しないことを確認
 
 ---
 

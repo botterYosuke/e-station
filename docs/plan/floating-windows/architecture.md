@@ -17,32 +17,37 @@ Dashboard (src/screen/dashboard.rs)
 
 ```
 Dashboard (src/screen/dashboard.rs)
-  ├─ windows:   Vec<FloatingPane>                         ← 平坦リスト（末尾が最前面）
+  ├─ windows:   Vec<FloatingPane>                         ← 平坦リスト（挿入順・順序固定）
   ├─ camera:    Camera                                    ← ズーム・パン状態
   ├─ focus:     Option<(window::Id, uuid::Uuid)>
-  └─ popout:    HashMap<window::Id, (Vec<FloatingPane>, WindowSpec)>
+  └─ popout:    HashMap<window::Id, (Vec<FloatingPane>, WindowSpec, Camera)>
 ```
 
 ペイン識別子は `pane_grid::Pane` → `uuid::Uuid` に統一。
-z 順は `Vec` のインデックスで管理し、末尾が最前面。
+z 順は `FloatingPane.z_index: u32` フィールドで管理する。クリック時に対象パネルの `z_index` を
+`windows` 内の最大値 + 1 に更新する。Vec の要素順序は変更しない（後述）。
+
+`max(z_index) + 1` が `u32::MAX - windows.len()` を超えた場合は、全パネルの `z_index` を
+0..N の連番に再正規化してからフォーカスパネルを N-1 に設定する（u32 オーバーフロー対策）。
 
 ---
 
 ## 3. レイヤ構成
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  iced メインウィンドウ                                │
-│  ┌───────────────────────────────────────────────┐  │
-│  │  Dashboard::view()                             │  │
-│  │  └─ FloatingPanes ウィジェット (src/widget/)   │  │
-│  │       ├─ Camera 変換（ワールド ↔ スクリーン）  │  │
-│  │       ├─ FloatingPane[0] (タイトルバー+コンテンツ) │
-│  │       ├─ FloatingPane[1]                       │  │
-│  │       └─ FloatingPane[N] ← 最前面              │  │
-│  └───────────────────────────────────────────────┘  │
-│  popout: HashMap<window::Id, Vec<FloatingPane>>      │
-└─────────────────────────────────────────────────────┘
++-----------------------------------------------------+
+|  iced メインウィンドウ                                |
+|  +-----------------------------------------------+  |
+|  |  Dashboard::view()                             |  |
+|  |  +- FloatingPanes ウィジェット (src/widget/)   |  |
+|  |       +- Camera 変換（ワールド <-> スクリーン） |  |
+|  |       +- FloatingPane[0] (タイトルバー+コンテンツ) |
+|  |       +- FloatingPane[1]                       |  |
+|  |       +- FloatingPane[N] <- 最前面             |  |
+|  +-----------------------------------------------+  |
+|  popout: HashMap<window::Id,                         |
+|          (Vec<FloatingPane>, WindowSpec, Camera)>    |
++-----------------------------------------------------+
 ```
 
 ---
@@ -99,6 +104,27 @@ fn zoom_at(camera: &Camera, cursor: Point, delta: f32) -> Camera {
 | コンテンツ領域の描画 | 各 `pane::State::view()` の `Element` |
 | メッセージ発行 | コールバック（`on_move` / `on_resize` / `on_focus` / `on_close` / `on_camera`） |
 
+### `Widget::diff()` の実装方針
+
+`diff()` は `tree.diff_children(&self.panels)` を使う（`multi_split.rs` と同じパターン。
+ただしルーラー要素は含まない）。
+
+```rust
+fn diff(&self, tree: &mut Tree) {
+    tree.diff_children(&self.panels);
+}
+```
+
+`diff_children()` はインデックス順に State を照合するため、`panels` の **Vec 順序が安定している**
+ことが前提。z_index でフォーカス順を管理し Vec の要素を並び替えないことでこの前提を満たす。
+
+もし Vec を並び替えると `diff_children()` が誤った State を別パネルに割り当てクラッシュする。
+この制約を守るため、フォーカス変更では要素移動ではなく `z_index` のみを更新する。
+
+`draw()` / `layout()` では `z_index` 昇順でソートしたインデックス列を用いて描画・レイアウトを行う。
+
+---
+
 ### 内部状態（`Widget::state()` で保持）
 
 ```rust
@@ -130,13 +156,35 @@ iced の `Node::with_children` + `Node::move_to` を使用。
 | `MouseButtonPressed(Left)` | タイトルバー上 | `drag` 開始、`on_focus` 発行 |
 | `MouseButtonPressed(Left)` | リサイズハンドル上 | `resize` 開始、`on_focus` 発行 |
 | `MouseButtonPressed(Left/Middle)` | どのパネルにも当たらない | `pan` 開始 |
-| `CursorMoved` | `drag` 中 | delta をワールド座標に逆変換して加算 |
+| `CursorMoved` | `drag` 中 | delta をワールド座標に逆変換して加算（`on_move` は発行しない） |
 | `CursorMoved` | `resize` 中 | edge 方向に応じて `FloatRect` 更新 |
 | `CursorMoved` | `pan` 中 | `camera.pan` 更新、`on_camera` 発行 |
 | `WheelScrolled` | 任意 | `zoom_at(cursor, delta * ZOOM_STEP)`、`on_camera` 発行 |
 | `MouseButtonReleased` | `drag` 中 | 最終位置で `on_move` 発行、`drag` 解除 |
 | `MouseButtonReleased` | `resize` 中 | 最終 rect で `on_resize` 発行、`resize` 解除 |
+| `Window(Unfocused)` | `drag`/`resize`/`pan` 中 | 各状態を即時リセット（操作中断） |
+| `CursorLeft` | `drag`/`resize`/`pan` 中 | 各状態を即時リセット（操作中断） |
 | その他 | コンテンツ上 | z 順の最前面から順に子 `on_event` に委譲 |
+
+### `Widget::overlay()` の実装方針
+
+子ウィジェット（各パネルのコンテンツ要素）が overlay（モーダル・ドロップダウン等）を
+持つ場合に備え、`overlay()` を実装する。
+
+```rust
+fn overlay<'b>(
+    &'b mut self,
+    tree: &'b mut Tree,
+    layout: Layout<'_>,
+    renderer: &Renderer,
+    translation: Vector,
+) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+    overlay::from_children(&mut self.panels, tree, layout, renderer, translation)
+}
+```
+
+`overlay::from_children` は iced 標準ヘルパーで、全パネルの overlay を集約する
+（z 順は `overlay::from_children` の内部実装に依存）。
 
 ### 定数
 
@@ -180,7 +228,7 @@ pub enum Axis { Horizontal, Vertical }
 // 変更後
 pub struct Dashboard {
     pub windows: Vec<FloatingPaneData>,
-    pub popout:  Vec<(Vec<FloatingPaneData>, WindowSpec)>,
+    pub popout:  Vec<(Vec<FloatingPaneData>, WindowSpec, Camera)>,
     pub camera:  Camera,
 }
 ```
@@ -192,9 +240,10 @@ pub struct Dashboard {
 ```rust
 // src/screen/dashboard.rs — 新規型
 pub struct FloatingPane {
-    pub id:   uuid::Uuid,
-    pub rect: FloatRect,
-    pub pane: pane::State,
+    pub id:      uuid::Uuid,
+    pub rect:    FloatRect,
+    pub pane:    pane::State,
+    pub z_index: u32,   // クリックで max(z_index)+1 に更新。Vec の順序は変えない
 }
 
 // Dashboard 構造体の変更後
@@ -202,7 +251,7 @@ pub struct Dashboard {
     pub windows:  Vec<FloatingPane>,
     pub camera:   Camera,
     pub focus:    Option<(window::Id, uuid::Uuid)>,
-    pub popout:   HashMap<window::Id, (Vec<FloatingPane>, WindowSpec)>,
+    pub popout:   HashMap<window::Id, (Vec<FloatingPane>, WindowSpec, Camera)>,
     pub streams:  UniqueStreams,
     layout_id:    uuid::Uuid,
 }
@@ -254,14 +303,37 @@ pub fn floating_pane_from_data(data: data::FloatingPaneData) -> FloatingPane
 pub fn floating_pane_to_data(pane: &FloatingPane) -> data::FloatingPaneData
 ```
 
+### `From<&Dashboard> for data::Dashboard` 変換
+
+`src/layout.rs` の変換実装では `camera` フィールドを必ず引き継ぐこと。
+
+```rust
+impl From<&Dashboard> for data::Dashboard {
+    fn from(dashboard: &Dashboard) -> Self {
+        Self {
+            windows: dashboard.windows.iter().map(floating_pane_to_data).collect(),
+            popout:  /* ... */,
+            camera:  dashboard.camera,  // ← 必須。省略すると Camera がデフォルトにリセットされる
+        }
+    }
+}
+```
+
 ### `saved-state.json` 互換
 
 破壊的変更（`pane` ツリー → `windows` フラットリスト）。
 旧フォーマットは `ok_or_default` で空リストにフォールバックする。
+`camera` は旧フォーマットに存在しないため `#[serde(default)]` でデフォルト値にフォールバックする。
 
 ```rust
 #[serde(deserialize_with = "ok_or_default", default)]
 pub windows: Vec<FloatingPaneData>,
+
+#[serde(default)]
+pub camera: Camera,
+
+#[serde(default)]
+pub popout: Vec<(Vec<FloatingPaneData>, WindowSpec, Camera)>,
 ```
 
 ---
@@ -312,7 +384,7 @@ for fp in &mut self.windows {
 | リスク | 対策 |
 |--------|------|
 | iced `Widget::layout` で絶対座標が想定通り動かない | `src/widget/multi_split.rs` を参考にする |
-| ウィジェットツリーの子数とウィンドウ数がズレてパニック | `Widget::diff()` で子ツリーを正しく同期する |
+| ウィジェットツリーの子数とウィンドウ数がズレてパニック | `diff_children()` を使い Vec 順序を固定する。z 順は `z_index` フィールドで管理し Vec の並び替えは行わない |
 | `pane::State::view()` 戻り値変更でモーダル呼び出しが全滅 | Phase 2 で型変更とモーダル関数修正を同一 Phase で必ず同時実施 |
 | `main.rs` の `OpenOrderPanel` ハンドラの `panes.split()` 残留 | Phase 4 の修正チェックリストに明示的に含める |
 | saved-state.json 旧フォーマットでクラッシュ | `ok_or_default` を各フィールドに適用（既存パターン踏襲） |
