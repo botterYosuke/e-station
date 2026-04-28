@@ -601,8 +601,11 @@
 - ✅ MAX_REPLAY_INSTRUMENTS = 4 を超える load は HTTP 400 `{"error":"max_instruments_exceeded","max":4}`
 - ✅ ユーザーが手動 close した自動生成 pane は同セッション中は再生成しない
       `ClosePane` → `replay_pane_registry.dismiss()`
-- [ ] StopEngine では自動生成 pane を残す。/api/replay/load 再実行時は overlay と
-      chart buffer をクリア（N1.14 後続 UI フェーズ）
+- ✅ StopEngine では自動生成 pane を残す（StopEngine で pane 削除するコードなし）
+- ✅ /api/replay/load 再実行時の重複 pane 生成を防止 (is_first ガード、2026-04-29)
+      → TimeAndSales / CandlestickChart: is_first ガードで reload 時の重複生成を防止
+      → OrderList / BuyingPower: loaded_count()==1 ガードで2銘柄目以降の重複生成を防止
+- [ ] /api/replay/load 再実行時の chart buffer / overlay クリア（TODO: KlineChart API 確定後）
 - ✅ tests: replay_pane_registry (6 件) + replay_api N1.14 テスト (2 件) GREEN
       - 同 instrument の二重 load で 400 にならない (reload 可)
       - 5 銘柄目の load が 400 になること
@@ -616,16 +619,21 @@
 - `control_tx: Mutex<Option<Sender>>` にすることで `Arc` のまま `spawn()` 内で注入可能
 - `strategy_id_for_cmd` は空文字（ReplayDataLoaded から取得できないため）
 
-### N1.15 REPLAY 注文一覧 pane（D9.5）
-- [ ] iced 側 OrderListStore を venue で 2 view（live / replay）に分割
+### N1.15 REPLAY 注文一覧 pane（D9.5）✅ 完了 2026-04-29
+- ✅ iced 側 OrderListStore を venue で 2 view（live / replay）に分割
+      → `OrderRecordWire` に `venue: String` フィールド追加（serde default="tachibana"）
+      → `distribute_order_list`: is_replay pane は venue="replay" のみ、live pane は venue!="replay" のみ
+      → Python `_do_get_order_list_replay`: 各 order に `venue="replay"` を付与
+      → Python `_do_get_order_list` (tachibana): 各 order に `venue="tachibana"` を付与
 - ✅ 1 銘柄目の /api/replay/load 成功時に REPLAY 注文一覧 pane を 1 枚自動生成
       （identity = (mode=replay, pane_kind=order_list)、銘柄非依存で 1 つだけ）
-      → `auto_generate_replay_panes` に `is_first && should_generate("", "OrderList")` 分岐追加
+      → `auto_generate_replay_panes` に `is_first && loaded_count()==1 && should_generate("", "OrderList")` 分岐
       → `ClosePane` で `OrderList(is_replay=true)` を dismiss("", "OrderList") に記録
 - ✅ pane header に「⏪ REPLAY」バナー
       → `OrdersPanel::is_replay: bool` (pub) + `new_replay()` + view() バナー分岐
 - [ ] pane header に live と区別された配色（DEFERRED: スタイリングは N1 後半）
-- [ ] EngineEvent::Order* を venue でフィルタし REPLAY view にのみ反映
+- ✅ EngineEvent::Order* (live) が REPLAY view を汚染しない
+      → distribute_order_list の venue フィルタで保証
 - ✅ GetOrderList venue=replay を Python server.py に新設
       → `_do_get_order_list_replay()`: tachibana_orders_replay.jsonl WAL から phase=submit を返す
       → `_do_get_order_list()` 先頭で venue="replay" を先行分岐（unknown_venue エラー回避）
@@ -636,12 +644,17 @@
       - `orders_panel_new_replay_sets_is_replay_true` — new_replay() が is_replay=true
       - `orders_panel_new_has_is_replay_false` — new() は Default=false
       - `orders_panel_view_shows_replay_banner` — view() が REPLAY バナー分岐を持つ
+      - `order_record_wire_has_venue_field_with_default` — venue フィールド + serde default
+      - `distribute_order_list_filters_by_venue` — venue/is_replay フィルタ
+      - `auto_generate_guards_timeandsales_with_is_first` — is_first ガード
+      - `auto_generate_guards_order_list_with_loaded_count_one` — loaded_count()==1 ガード
 - ✅ python/tests/test_order_list_api_venue_filter.py:
       - WAL なしで空リスト返却
       - submit エントリが OrderRecordWire 形式に変換される
       - phase=submit のみ含む（fill/cancel は除外）
       - tachibana_orders.jsonl は参照しない
       - venue=replay で unknown_venue エラーにならない
+      - TestVenueField: replay 注文に venue="replay"、live 注文に venue="tachibana"
 
 **実装メモ**:
 - `_do_get_order_list_replay` は `self._cache_dir / "tachibana_orders_replay.jsonl"` を WAL パスとして使用
