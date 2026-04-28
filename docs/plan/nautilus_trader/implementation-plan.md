@@ -911,6 +911,52 @@ N1.16 REPLAY 買付余力の review-fix-loop R1 指摘 19 件（C-1 × 1, H × 8
 
 ---
 
+## レビュー反映 (2026-04-29, R2 review-fix R2)
+
+R2 review-fix-loop ラウンド 2 で 9 件 (CRITICAL × 1, HIGH × 3, MEDIUM × 5) を反映した。
+SCHEMA_MAJOR / MINOR は据え置き。
+
+### 修正項目
+
+| 分類 | ID | 修正概要 | 主な変更ファイル |
+|------|------|----------|------------------|
+| CRITICAL | **C-1** | N1.5 「✅ 完了」表記と M-7 dead-code reject の矛盾を計画書側で解消。N1.5 セクション冒頭に「配線繰越 → N1.11」明記、N1.11 セクションに wiring task 追加 | `docs/plan/nautilus_trader/implementation-plan.md` |
+| HIGH | **H-1** | `start_backtest_replay` (non-streaming) に `stop_ts_ms == 0` ガードを追加し、正常系で EngineStopped 送出後の例外で fallback emit が走らないようにする (streaming 版と同じパターンに揃える) | `python/engine/nautilus/engine_runner.py` |
+| HIGH | **H-2** | `_handle_start_engine` の append 経路を分離: worker thread (`_on_event`) は `call_soon_threadsafe`、main thread (validation / race guard / parse / Timeout / except) は直 `_outbox.append`。これで `asyncio.CancelledError` でも main-thread Error が落ちない | `python/engine/server.py` |
+| HIGH | **H-3** | `REPLAY_NOT_IMPLEMENTED` を data-mapping.md §5.3 に canonical 記載 (一時 code、N1.11 完了で廃止予定) | `docs/plan/nautilus_trader/data-mapping.md` |
+| MEDIUM | **M-1** | `src/replay_api.rs::handle_replay_order` で `parsed.clone()` を排除し、`cid` を先に `to_owned()` で抜き取って `parsed` を `from_value` に move | `src/replay_api.rs` |
+| MEDIUM | **M-2** | `ControlApiCommand::AutoGenerateReplayPanes.strategy_id` を `String` → `Option<String>` に変更し、`ReplayDataLoaded.strategy_id` を unwrap せずに伝搬。`main.rs` 受信側はログに残しつつ `auto_generate_replay_panes` 呼出は従来通り | `src/replay_api.rs`, `src/main.rs` |
+| MEDIUM | **M-5** | `test_schemas_nautilus.py` の `Hello` テストで hardcode `4` を `s.SCHEMA_MINOR`/`s.SCHEMA_MAJOR` 動的参照に変更。旧 client 互換は `test_old_client_minor_4_compatible` で 1 件 pin | `python/tests/test_schemas_nautilus.py` |
+| MEDIUM | **M-7** | replay venue M-7 早期 reject で `OrderRejected` の前に `OrderSubmitted` を emit する (通常経路と対称化、UI submitting フラグ stuck 防止) | `python/engine/server.py` |
+| MEDIUM | **M-8** | `_handle_start_engine` 受理時点で `_replay_strategy_id = strategy_id` を確定。`_handle_stop_engine` および `start_engine` の `finally` で同 strategy_id をリセット | `python/engine/server.py` |
+
+### 追加リグレッションテスト
+
+- `replay_load_propagates_strategy_id_to_auto_generate_command` (`src/replay_api.rs`) — null / "strat-001" 双方向で M-2 検証
+- `TestH1NoDoubleEngineStoppedEmit` 2 件 (`python/tests/test_engine_runner_replay.py`) — 正常系 1 件 + post-emit raise でも単独 emit
+- `test_old_client_minor_4_compatible` (`python/tests/test_schemas_nautilus.py`) — 旧 minor=4 client 互換 pin
+- `test_cancelled_error_still_emits_error_to_outbox` (`python/tests/test_server_engine_dispatch.py`) — H-2 cancel-safe 検証
+
+### 既存テストの更新
+
+- `TestM7ReplayVenueSubmitOrderRejected` — OrderSubmitted 不在 assert を「OrderSubmitted → OrderRejected の順序保証」に書き換え
+- `TestHGCallSoonThreadsafeUnification` の 4 ケース — main-thread 経路は `call_soon_threadsafe` を **使わない**、worker-thread のみ使うという H-2 の新セマンティクスに合わせて assertion を反転
+
+### 完了確認
+
+- `cargo test --workspace` 全緑 (487 passed; baseline 486 + 1 新規)
+- `uv run pytest python/tests/ -q` 全緑 (1188 passed, 2 skipped; baseline 1181 + 7 新規)
+- `cargo clippy --workspace -- -D warnings` クリーン
+- `cargo fmt --check` クリーン
+- `cargo build --workspace` クリーン
+
+### R3 への残課題
+
+- **MEDIUM 残**: M-3 (bridge 重複) / M-4 (JoinHandle) / M-6 (`_REQUIRED_ATTRS` introspection) / M-9 (emit 失敗 mask)
+- **LOW**: 6 件 (詳細はレビューレポート参照)
+
+---
+
 ## 脚注
 
 [^n1.11-rust-dto]: N1.11 Rust DTO — `engine-client/src/dto.rs` に `Command::SetReplaySpeed { request_id: String, multiplier: u32 }` を追加。`python/engine/schemas.py` に `SetReplaySpeed` Pydantic クラスを追加。`engine-client/tests/schema_v2_4_nautilus.rs` に `set_replay_speed_serializes` / `set_replay_speed_debug_shows_multiplier` 2 件追加。SCHEMA_MAJOR=2 / SCHEMA_MINOR=4 は変更なし（後方互換フィールド追加のみ）。

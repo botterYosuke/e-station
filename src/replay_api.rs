@@ -1281,7 +1281,7 @@ mod tests {
     #[tokio::test]
     async fn replay_load_returns_200_when_engine_acknowledges() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
-        let _mock = spawn_mock_engine_load(ws_listener, 0, 1234, None, false);
+        let mock = spawn_mock_engine_load(ws_listener, 0, 1234, None, false);
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
@@ -1299,6 +1299,7 @@ mod tests {
         assert_eq!(json["trades_loaded"].as_u64(), Some(1234));
         assert_eq!(json["bars_loaded"].as_u64(), Some(0));
         drop(engine_tx);
+        mock.await.expect("mock server panicked");
     }
 
     /// M-2 (R2 review-fix R2): `ReplayDataLoaded.strategy_id` を Option<String> として
@@ -1311,7 +1312,7 @@ mod tests {
         // Case A: strategy_id = null (単独 LoadReplayData 経路)
         {
             let (ws_listener, ws_addr) = bind_ws_loopback().await;
-            let _mock = spawn_mock_engine_load_with_strategy_id(
+            let mock_a = spawn_mock_engine_load_with_strategy_id(
                 ws_listener,
                 0,
                 1234,
@@ -1352,12 +1353,13 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
             drop(engine_tx);
+            mock_a.await.expect("mock server (Case A) panicked");
         }
 
         // Case B: strategy_id = "strat-001" (StartEngine 経路)
         {
             let (ws_listener, ws_addr) = bind_ws_loopback().await;
-            let _mock = spawn_mock_engine_load_with_strategy_id(
+            let mock_b = spawn_mock_engine_load_with_strategy_id(
                 ws_listener,
                 0,
                 1234,
@@ -1391,6 +1393,7 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
             drop(engine_tx);
+            mock_b.await.expect("mock server (Case B) panicked");
         }
     }
 
@@ -1582,7 +1585,7 @@ mod tests {
     #[tokio::test]
     async fn replay_load_returns_400_on_mode_mismatch_error() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
-        let _mock = spawn_mock_engine_load(
+        let mock = spawn_mock_engine_load(
             ws_listener,
             0,
             0,
@@ -1604,12 +1607,13 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["code"], "mode_mismatch");
         drop(engine_tx);
+        mock.await.expect("mock server panicked");
     }
 
     #[tokio::test]
     async fn replay_load_returns_504_on_timeout() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
-        let _mock = spawn_mock_engine_load(ws_listener, 0, 0, None, true); // silent
+        let mock = spawn_mock_engine_load(ws_listener, 0, 0, None, true); // silent
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
@@ -1624,6 +1628,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["error"], "timeout");
         drop(engine_tx);
+        mock.await.expect("mock server panicked");
     }
 
     #[tokio::test]

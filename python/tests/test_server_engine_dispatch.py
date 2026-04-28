@@ -54,6 +54,7 @@ _REQUIRED_ATTRS: dict[str, object] = {
     "_engine_tasks": None,
     "_replay_portfolio": None,  # N1.16: PortfolioView
     "_replay_strategy_id": None,
+    "_cache_dir": None,  # _do_get_order_list_replay が参照
 }
 
 
@@ -75,6 +76,7 @@ def _make_server(mode: str = "replay"):
     # M-9: 必須属性をループで設定 (レビュー粒度を ``_REQUIRED_ATTRS`` 1 箇所に集約)
     from decimal import Decimal
     from engine.nautilus.portfolio_view import PortfolioView
+    from pathlib import Path
     defaults: dict[str, object] = {
         "_outbox": _ListOutbox(),  # H5: duck-type スタブ
         "_mode": mode,
@@ -85,6 +87,7 @@ def _make_server(mode: str = "replay"):
         "_engine_tasks": {},
         "_replay_portfolio": PortfolioView(Decimal("1000000")),  # N1.16
         "_replay_strategy_id": "",
+        "_cache_dir": Path("/tmp/test-engine-cache"),
     }
     # _REQUIRED_ATTRS に列挙された属性をすべて設定する。差分があれば KeyError で
     # 検出する (silent 黙殺防止)。
