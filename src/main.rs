@@ -1194,7 +1194,37 @@ impl Flowsurface {
                     .set_tachibana_ready(is_ready)
                     .map(|m| Message::Sidebar(dashboard::sidebar::Message::TickersTable(m)));
 
-                return replay;
+                // Auto-fetch buying power on venue ready if a pane is visible.
+                let main_window = self.main_window.id;
+                let auto_fetch =
+                    if is_ready && self.active_dashboard().has_buying_power_pane(main_window) {
+                        if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                            Task::perform(
+                                async move {
+                                    conn.send(engine_client::dto::Command::GetBuyingPower {
+                                        request_id: uuid::Uuid::new_v4().to_string(),
+                                        venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                },
+                                |res| match res {
+                                    Ok(()) => Message::OrderToast(Toast::info(
+                                        "余力情報を取得中...".to_string(),
+                                    )),
+                                    Err(err) => Message::OrderToast(Toast::error(format!(
+                                        "余力自動取得失敗: {err}"
+                                    ))),
+                                },
+                            )
+                        } else {
+                            Task::none()
+                        }
+                    } else {
+                        Task::none()
+                    };
+
+                return replay.chain(auto_fetch);
             }
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
@@ -1632,12 +1662,10 @@ impl Flowsurface {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                 return Task::perform(
                                     async move {
-                                        conn.send(
-                                            engine_client::dto::Command::GetBuyingPower {
-                                                request_id: uuid::Uuid::new_v4().to_string(),
-                                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
-                                            },
-                                        )
+                                        conn.send(engine_client::dto::Command::GetBuyingPower {
+                                            request_id: uuid::Uuid::new_v4().to_string(),
+                                            venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                        })
                                         .await
                                         .map_err(|e| e.to_string())
                                     },

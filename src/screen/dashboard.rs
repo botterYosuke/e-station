@@ -630,6 +630,12 @@ impl Dashboard {
             });
     }
 
+    /// Returns `true` if at least one `BuyingPower` pane exists on any window.
+    pub fn has_buying_power_pane(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window)
+            .any(|(_, _, state)| matches!(state.content, pane::Content::BuyingPower(_)))
+    }
+
     /// Distribute a fresh buying power snapshot to all `BuyingPower` panes.
     pub fn distribute_buying_power(
         &mut self,
