@@ -1593,8 +1593,8 @@ async def fetch_buying_power(
     if err is not None:
         raise err
 
-    available = int(data.get("sZanKaiKanougakuGoukei", "0") or "0")
-    shortfall = int(data.get("sZanKaiKanougakuHusoku", "0") or "0")
+    available = int(data.get("sSummaryGenkabuKaituke", "0") or "0")
+    shortfall = 1 if data.get("sHusokukinHasseiFlg", "0") == "1" else 0
     return BuyingPowerResult(available_amount=available, shortfall=shortfall)
 
 
@@ -1644,8 +1644,8 @@ async def fetch_credit_buying_power(
     if err is not None:
         raise err
 
-    available = int(data.get("sZanShinkiKanoIjirituGoukei", "0") or "0")
-    shortfall = int(data.get("sZanShinkiKanoIjirituHusoku", "0") or "0")
+    available = int(data.get("sSummarySinyouSinkidate", "0") or "0")
+    shortfall = 0
     return CreditBuyingPowerResult(available_amount=available, shortfall=shortfall)
 
 

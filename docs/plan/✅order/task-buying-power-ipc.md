@@ -132,6 +132,23 @@ Event::BuyingPowerUpdated {
 - ✅ cargo test / cargo clippy 全緑
 - ✅ review-fix-loop 完了（3ラウンド、MEDIUM+ ゼロ収束）
 
+### 買余力 ¥0 表示 — フィールド名不一致の修正（fix-buying-power-field-names-2026-04-28）
+
+**問題**: デモ口座（初期資金 2000万円）にログインしても `現物余力: ¥0 / 信用余力: ¥0` と表示された。
+
+**原因**: `sJsonOfmt="5"` の `CLMZanKaiKanougaku` / `CLMZanShinkiKanoIjiritu` レスポンスは Summary 系フィールド名を使用しており、コードが期待する旧フィールド名が存在しなかった。`dict.get()` のデフォルト `"0"` にフォールバックし続けた。
+
+| エンドポイント | 旧フィールド（誤）| 実際のフィールド（正）|
+|---|---|---|
+| `CLMZanKaiKanougaku` | `sZanKaiKanougakuGoukei` | `sSummaryGenkabuKaituke` |
+| `CLMZanKaiKanougaku` | `sZanKaiKanougakuHusoku`（額）| `sHusokukinHasseiFlg`（0/1 フラグ）|
+| `CLMZanShinkiKanoIjiritu` | `sZanShinkiKanoIjirituGoukei` | `sSummarySinyouSinkidate` |
+
+- ✅ `fetch_buying_power` / `fetch_credit_buying_power` のフィールド名修正
+- ✅ テストデータを実際の API レスポンス形式に更新（6/6 PASS → 全 948 テスト PASS）
+- ✅ `scripts/diagnose_buying_power.py` を追加（実機検証・再発防止用）
+- 計画書: `docs/plan/✅order/fix-buying-power-field-names-2026-04-28.md`
+
 ### BuyingPower 新規登録後の自動フェッチ（fix-buying-power-auto-fetch-on-add-2026-04-28）
 
 **問題**: 起動後にサイドバーから「買余力」ペインを新規登録した場合、`GetBuyingPower` IPC が発行されず「更新」ボタンを手動で押すまで余力が表示されなかった。VenueReady ハンドラの自動フェッチは 1 度しか走らないため、後から追加したペインはキャッチアップできなかった。

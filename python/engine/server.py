@@ -1276,7 +1276,6 @@ class DataEngineServer:
     async def _do_get_buying_power(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
-
         if venue not in self._workers:
             self._outbox.append({
                 "event": "Error",
