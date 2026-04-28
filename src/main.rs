@@ -575,7 +575,10 @@ fn main() {
                     .get()
                     .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
                     .subscribe();
-                let is_replay_mode = Arc::new(AtomicBool::new(false));
+                // N1.13 / N1.3: REPLAY モードフラグは CLI `--mode` から伝搬する。
+                // is_replay_mode=true のとき /api/order/submit は 503 で reject され、
+                // 発注は /api/replay/order に流れる。
+                let is_replay_mode = Arc::new(AtomicBool::new(cli_args.mode == cli::Mode::Replay));
                 // FLOWSURFACE_ORDER_GUARD_ENABLED=1 で発注 API を有効化する（明示 opt-in）。
                 // 未設定時はデフォルトの enabled=false のまま 503 で reject（誤発注防止）。
                 let guard_config =
@@ -589,7 +592,21 @@ fn main() {
                         .with_guard_config(guard_config),
                 )
             };
-            if let Some(rx) = replay_api::spawn(rt.handle(), Some(order_api_state)) {
+            // N1.3: ReplayApiState は engine_rx + mode を保持して
+            // /api/replay/{load,order,portfolio} を駆動する。
+            let replay_api_state = {
+                let engine_rx = ENGINE_CONNECTION_TX
+                    .get()
+                    .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
+                    .subscribe();
+                Arc::new(replay_api::ReplayApiState::new(
+                    engine_rx,
+                    cli_args.mode.as_str(),
+                ))
+            };
+            if let Some(rx) =
+                replay_api::spawn(rt.handle(), Some(order_api_state), Some(replay_api_state))
+            {
                 CONTROL_API_RX.set(std::sync::Mutex::new(Some(rx))).ok();
             }
             std::thread::Builder::new()

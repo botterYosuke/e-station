@@ -227,12 +227,47 @@
 - **InstrumentCache.shared() のテスト分離**: シングルトンが test 間でリークするのを防ぐため、`InstrumentCache.reset_shared_for_testing()` を public に出した。`monkeypatch.setattr("engine.nautilus.instrument_cache._default_cache_path", lambda: tmp_path/...)` と組み合わせると、test ごとにクリーンな cache を持てる。
 - **Decimal 経由の Price 構築**: `Price(Decimal("3775.0"), precision=1)` のように Decimal 経由にすると float 経路のラウンディング誤差を完全に避けられる（J-Quants daily の `"3775.0"` 文字列をそのまま `Decimal()` に渡す）。
 
-### N1.3 Rust 側 replay_api 差し替え + replay/load 新設
-- [ ] `git grep -nE "VirtualExchangeEngine|replay/order"` で**現リポジトリに自作 Virtual Exchange Engine の Rust 実装が存在しないことを確認**してから着手
-- [ ] `src/replay_api.rs` に `POST /api/replay/load` を新設し `Command::LoadReplayData` に橋渡し
-- [ ] `/api/replay/order` を「`engine_client.send(SubmitOrder { venue: "replay", ... })` → `OrderFilled` を待つ」フローに書き換え
-- [ ] `/api/replay/portfolio` を nautilus `Portfolio` 取得に置換
-- [ ] 自作 Rust 実装が見つかった場合は同 PR で削除、互換シムは残さない
+### N1.3 Rust 側 replay_api 差し替え + replay/load 新設 ✅ 完了 2026-04-28（一部 N1.5 / N1.16 繰越）
+- [x] ✅ `git grep -nE "VirtualExchangeEngine|virtual_exchange|replay_engine|replay/order" src/ exchange/ engine-client/ python/` を実行 → **0 hit**（test_mode_isolation.py の文字列リテラル `/api/replay/order` のみ一致）。**Rust 自作 Virtual Exchange Engine は存在しないので削除タスク不要**
+- [x] ✅ `src/replay_api.rs` に `POST /api/replay/load` を新設し `Command::LoadReplayData` に橋渡し（バリデーション + UUID v4 request_id + 60 秒タイムアウト + ReplayDataLoaded 待ち + Error{mode_mismatch} → 400 マップ）
+- [x] ✅ `POST /api/replay/order` を新設し `engine_client.send(SubmitOrder { venue: "replay", ... })` を発行
+- [ ] ⏭ **N1.5 繰越**: `OrderFilled` を待つフロー。Python 側で replay venue の SubmitOrder を `BacktestExecutionEngine` にディスパッチする wrapper Strategy が未実装のため、本タスクでは IPC 送出 → 202 Accepted で返す skeleton に留めた
+- [x] ✅ `GET /api/replay/portfolio` を skeleton 実装（200 + `{"status":"not_implemented","phase":"N1.16"}`）
+- [ ] ⏭ **N1.16 繰越**: nautilus `Portfolio` から cash / buying_power / equity を取得する本実装
+- [x] ✅ 自作 Rust 実装は存在しなかったため削除なし（互換シムも残らない）
+
+#### 状況・知見・Tips（2026-04-28 R2 完了報告 — N1.3）
+
+**状況**:
+- 新規ファイル: `tests/e2e/s58_replay_load_smoke.sh`（手動 smoke skeleton。CI には載せない）
+- 更新ファイル: `src/replay_api.rs`（`ReplayApiState` 新設・3 エンドポイント追加・テスト 13 件追加）、`src/main.rs`（`is_replay_mode` を CLI mode から伝搬 + `ReplayApiState` を構築 + `replay_api::spawn` 引数追加）、`engine-client/src/connection.rs`（pre-existing dirty state を build できる最小 1 行修正 — 後述）、`docs/plan/nautilus_trader/implementation-plan.md`
+- テスト結果:
+  - `cargo test --workspace`: **453 passed / 0 failed**（49 test binaries すべて ok）
+  - 新規 13 件: `replay_api::tests` (Load 7 / Portfolio 2 / Order 3 / live mode 拒否 1)
+  - Python 既存: **1033 passed / 2 skipped**（不変、N1.4 完了報告値と一致）
+- ビルド/lint: `cargo build --workspace` clean、`cargo fmt --check` clean、`cargo clippy --workspace -- -D warnings` clean。`replay_api` モジュールに警告 0
+
+**新たな知見**:
+- **`tokio::sync::watch::Ref` は `Send` でない**ため `state.engine_rx.borrow().clone()` を `match` の中で受けて await を跨ぐと "future is not Send" で `tokio::spawn` に渡せなくなる。修正は `let conn_opt = state.engine_rx.borrow().clone();` で `Arc<EngineConnection>` を抜き出して Ref をスコープから抜けさせる。`order_api::submit_order` でも同じパターン
+- **`EngineEvent::ReplayDataLoaded` は schema 2.4 で `request_id` を持たない**ため、HTTP 多重 LoadReplayData リクエストは混線する。`ReplayApiState` に `load_lock: Mutex<()>` を持たせて HTTP ハンドラ側でシリアライズし 1:1 対応を強制
+- **`SubmitOrderRequest` の `tags` フィールドは serde の default 指定が無い**ため、`/api/replay/order` のテスト body にも `"tags": []` を必ず含める必要がある。`/api/order/submit` の HTTP 入力型 `SubmitOrderBody` は `#[serde(default)] tags: Vec<String>` で省略可、IPC 側 `SubmitOrderRequest` は必須、という非対称あり
+- **未コミット dirty state の発見**: 受領時 `git status` clean だったが `git stash` した瞬間に `dto.rs` (EngineError に strategy_id) / `schemas.py` / `server.py` / `test_server_engine_dispatch.py` の未コミット差分が露出した。N1.4 直近作業の WIP 残骸と推測。`engine-client/src/dto.rs` で `EngineError` に `strategy_id: Option<String>` が追加されていたため `connection.rs:269` の構造体パターンが破綻。**1 行 `..` 追加でビルドを通す最小修正**（IPC schema 自体には触っていない）
+
+**設計思想と背景**:
+- **`request_id` 採番方法 (UUID v4)**: `uuid::Uuid::new_v4()` で生成。理由: (a) 既に workspace dep、(b) `order_api::submit_order` と同一パターンで読みやすい、(c) `Error{request_id}` 経路で correlation するには十分な衝突耐性。`load_lock` でシリアライズしているため厳密には `request_id` なしでも動くが、Error 経路で同 `request_id` 一致を確認することで「無関係なシステム Error をたまたま拾う」事故を防ぐ
+- **`/api/replay/order` を独立エンドポイントにした判断**: `/api/order/submit` の `is_replay_mode` 経路で吸収する案も検討したが却下。理由: (a) N1.13 で `/api/order/submit` は replay モードで 503 を返す挙動が固定（`test_submit_order_replay_mode_returns_503`）、(b) replay 注文は WAL を別ファイル (`tachibana_orders_replay.jsonl`) にする方針が N1.5 計画にあり共有すると `OrderSessionState` の WAL 読込分離が後で複雑化、(c) spec.md §4 の API 表に `/api/replay/order` が legacy パスとして明記。N1.3 では薄い専用エンドポイントとして開通させ N1.5 で OrderFilled 統合と WAL 分離を一緒にやる
+- **`/api/replay/portfolio` skeleton の戻り値選択 (200 vs 501)**: 200 + `{"status":"not_implemented","phase":"N1.16"}` を採用。理由: (a) UI から見ると 4xx/5xx は banner で alert する経路、200 + ステータス文字列なら静かにスキップできる、(b) 後で本実装が入ったとき HTTP コード自体は変わらず body 形状だけ拡張すればよい (forward-compatible)、(c) テストで `phase: "N1.16"` を pin することで「本実装が入ったときに必ずテストが落ちて気づく」ガードになる
+- **`SubmitOrder` の OrderFilled 統合を N1.5 に繰越した理由**: 計画書 N1.4 完了報告に記載のとおり、外部 IPC `SubmitOrder` を `BacktestEngine.run()` 中に差し込むには wrapper Strategy + queue + WAL 連携が必要で N1.5 の REPLAY ディスパッチャと同時実装が整理良。N1.3 独立スコープでは IPC 送出パスを開通させて 202 Accepted で返すまでに留め、HTTP → IPC ラッパとしての役割を完遂
+- **timeout 60 秒の根拠**: spec.md §3.3 のパフォーマンス目標「1 銘柄 1 ヶ月分 trade tick で 60 秒以内」。J-Quants `equities_trades_YYYYMM.csv.gz` (1 銘柄 1 ヶ月) のロード件数読み上げが 60 秒を超えるなら別問題。タイムアウトを短くするとレシピャル loader が完走前に 504 を返してしまう
+- **`is_replay_mode` を CLI mode から伝搬**: `main.rs` で `Arc::new(AtomicBool::new(false))` ハードコードを `cli_args.mode == cli::Mode::Replay` に書き換え。N1.13 `--mode replay` 起動時に `/api/order/submit` が 503 reject、注文は `/api/replay/order` に流れる動線が貫通
+- **`connection.rs` の `..` パッチ**: pre-existing N1.4 残骸 dirty state を build できる最小フィックス。schema 自体に変更は加えていない（N1.3 不変条件「IPC schema 変更しない」を守りつつ workspace ビルド成功条件を満たす）
+
+**Tips**:
+- `cargo test -p flowsurface --bin flowsurface replay_api::` で N1.3 の 13 件だけ素早く回せる（`--lib` ではなく `--bin` 指定。flowsurface は binary crate）
+- engine-client mock は `tokio_tungstenite::accept_async` ベース。Hello → Ready → 1 コマンド受信 → イベント送出 の流れを `spawn_mock_engine_load` / `spawn_mock_engine_capture` に集約
+- `tokio::sync::oneshot::Receiver<serde_json::Value>` で「mock engine が受け取ったコマンド本体を test 側で assert」できる。`SubmitOrder` の wire 表現が `op` / `venue` / `order` で正しいか直接検証可能
+- `tokio::sync::watch::Ref` の Send 制約: match arm 内で Ref を await 跨ぎで保持しないため `let _opt = state.engine_rx.borrow().clone()` で必ず一度落とす
+- E2E smoke (`s58_replay_load_smoke.sh`) は `/api/replay/status` 到達確認後にしか POST しないので binary 未起動時は SKIP で正常終了（CI を壊さない設計）
 
 ### N1.4 nautilus 側 BacktestEngine ハンドラ ✅ 完了 2026-04-28（一部 N1.5 繰越）
 - [x] ✅ `engine_runner.py` の `start_backtest()` を J-Quants 入力対応に拡張:
@@ -275,6 +310,18 @@
 - **BacktestEngine のスレッド境界**: `asyncio.to_thread(_run)` で逃がした関数は thread のメインが完了するまで返らないが、その内部から呼ぶ `self._outbox.append` は別 thread からの append でも次回 `_send_loop` 周回で drain される。`_outbox_event.set()` の thread-safety は厳密でないが、`_send_loop` は `wait()` の前に常に `_outbox` の長さを確認するため deadlock しない。
 - **strategy_id "buy-and-hold" のみサポート**: N1.4 では `_make_replay_strategy` でハードコード分岐。N1.6 で narrative_hook と `--strategy-file` を入れるときに plugin 化する。それまでは `ValueError` で明示拒否する（silent fallback 禁止）。
 - **`granularity="Trade"` で 0 件ロード**: fixtures に存在しない code (例: `1306.TSE`) を渡すと、jquants_loader は trades file 自体は存在するので `FileNotFoundError` ではなく空 iterator を返す。`engine.add_data([])` は呼ばないようにガード (`if ticks:`) してあるが、空でも run() は完了する（戦略は何もしない）。`final_equity == initial_cash` であることを `test_empty_range_still_emits_engine_stopped` で確認。
+
+### レビュー反映 (2026-04-28, ラウンド 1)
+- ✅ H1: engine_run_failed 時に Error{request_id} 追加 → Rust 60s ハング解消
+- ✅ H2: asyncio.to_thread に timeout=3600s 追加
+- ✅ H3: validate_start_engine 失敗の EngineError 二重送出を除去 (Error のみに統一)
+- ✅ H4: test_start_engine_live_mode_rejects_backtest に request_id 確認追加
+- ✅ H5: test _outbox=[] を _ListOutbox duck-type スタブに差し替え
+- ✅ M1: EngineError schema + Rust dto に strategy_id 追加
+- ✅ M2: EngineError 送出を Pydantic model.dump() に統一
+- ✅ M3: log.error に exc_info=True 追加 (2 箇所)
+- ✅ M4: int(initial_cash) を to_thread 前にバリデーション
+- ✅ M5-M7: テスト追加 (strategy_id/stop/ReplayDataLoaded)
 
 ### N1.5 REPLAY 仮想注文ディスパッチャ
 
