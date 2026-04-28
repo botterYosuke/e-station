@@ -181,6 +181,31 @@ Rust 受信
 
 **注意**: `Command::SetSecondPassword` の `value` は IPC を経由するためプレーン `String`（`SecretString` は IPC JSON に送れない）。Python 側で `SecretStr` 化すること。
 
+**C-2: ForgetSecondPassword ↔ in-flight SubmitOrder 競合ポリシー（確定 2026-04-28）**:
+
+`POST /api/order/forget-second-password` と in-flight な `SubmitOrder` が同時に発生した場合の動作を以下のように規定する。
+
+- **ポリシー**: `ForgetSecondPassword` は **即時適用**する（in-flight SubmitOrder の完了を待たない）。
+- **根拠**: Python asyncio は単一スレッドであるため、`ForgetSecondPassword` の処理は必ず `await` ポイント間に割り込む。`_do_submit_order` は `second_password` を `self._session_holder.get_password()` でローカル変数に取得済みのため、その後に holder をクリアしても in-flight SubmitOrder には影響しない。
+- **影響**: in-flight SubmitOrder は保持済みの `second_password` ローカル変数で正常に完了する。holder をクリアした後に発行される次の SubmitOrder は `SecondPasswordRequired` で応答される。
+- **ログ**: `ForgetSecondPassword` 受信時に in-flight な SubmitOrder が存在する場合（`_submit_order_inflight_count > 0`）は `log.info` で件数を記録する（デバッグ用途）。`SubmitOrder` の in-flight カウントは `_do_submit_order` の先頭でインクリメント、`finally` でデクリメントする。
+
+```
+ForgetSecondPassword 受信（asyncio recv_loop）
+   │ _session_holder.clear()  ← 即時クリア
+   │ if _submit_order_inflight_count > 0:
+   │     log.info("ForgetSecondPassword: %d SubmitOrder(s) in-flight; "
+   │              "they will complete with already-captured second_password", count)
+   ▼
+既存 in-flight SubmitOrder（asyncio task, 別コルーチン）
+   │ second_password = <ローカル変数に取得済み>  ← holder クリアの影響を受けない
+   │ await tachibana_submit_order(..., second_password, ...)
+   ▼
+次の SubmitOrder（holder クリア後）
+   │ second_password = self._session_holder.get_password()
+   │ → None → SecondPasswordRequired を返す
+```
+
 **`Command` enum の `Debug` 手実装（セキュリティ必須・**Tpre.2 で実施**）**: `dto.rs` の `Command` に現在ある `#[derive(Debug)]` を **Tpre.2 でスキーマ拡張と同時に外して手実装に切り替える**。T0.3 まで先送りすると `SetSecondPassword` variant が derive された状態でコードが存在する期間が生じ、ログへの平文漏洩リスクがある。手実装では `SetSecondPassword { .. }` arm のみ `"SetSecondPassword { value: [REDACTED] }"` と出力し、他の variant は従来通り出力する。`value` が `[REDACTED]` にマスクされることを **Tpre.2 の受け入れ条件**として単体テストで検証すること。
 
 ## 3. IPC スキーマ拡張（schema 1.2 → 1.3）

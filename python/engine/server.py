@@ -220,6 +220,10 @@ class DataEngineServer:
         # idle forget タイマー + lockout state を管理する（H-7: architecture.md §5.3）。
         self._session_holder = TachibanaSessionHolder()
 
+        # C-2: in-flight SubmitOrder カウンタ。ForgetSecondPassword 受信時のログ用。
+        # asyncio 単一スレッドなので lock 不要。
+        self._submit_order_inflight_count: int = 0
+
         # Monotonic counter to produce a fresh base ssid per subscribe
         self._stream_counter = 0
 
@@ -486,8 +490,19 @@ class DataEngineServer:
             self._handle_set_second_password(msg)
 
         elif op == "ForgetSecondPassword":
+            # C-2: 即時クリア（architecture.md §2.4 競合ポリシー）。
+            # in-flight な SubmitOrder がある場合も待たずにクリアする。
+            # 各 _do_submit_order は second_password をローカル変数に取得済みのため影響なし。
+            inflight = self._submit_order_inflight_count
             self._session_holder.clear()
-            log.info("ForgetSecondPassword received — clearing second_password from memory")
+            if inflight > 0:
+                log.info(
+                    "ForgetSecondPassword: %d SubmitOrder(s) in-flight; "
+                    "they will complete with already-captured second_password",
+                    inflight,
+                )
+            else:
+                log.info("ForgetSecondPassword received — clearing second_password from memory")
 
         elif op == "SubmitOrder":
             self._spawn_fetch(
@@ -662,6 +677,14 @@ class DataEngineServer:
         self._session_holder.set_password(value)
 
     async def _do_submit_order(self, msg: dict) -> None:
+        # C-2: in-flight カウンタをインクリメント（architecture.md §2.4 競合ポリシー）。
+        self._submit_order_inflight_count += 1
+        try:
+            await self._do_submit_order_inner(msg)
+        finally:
+            self._submit_order_inflight_count -= 1
+
+    async def _do_submit_order_inner(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         raw_order = msg.get("order", {})

@@ -276,4 +276,6 @@ def _make_server(holder: MagicMock, session: MagicMock) -> object:
     srv._outbox = []
     # _workers に "tachibana" が含まれていないと early-return する
     srv._workers = {"tachibana": MagicMock()}
+    # C-2: in-flight カウンタ（_do_submit_order で使用）
+    srv._submit_order_inflight_count = 0
     return srv

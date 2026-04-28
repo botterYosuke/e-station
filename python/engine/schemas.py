@@ -172,13 +172,13 @@ class SubmitOrderRequest(IpcMessage):
             raise ValueError("client_order_id must be ASCII printable (spec.md §5)")
         return v
     instrument_id: str
-    order_side: str
-    order_type: str
+    order_side: Literal["BUY", "SELL"]
+    order_type: Literal["MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT", "MARKET_IF_TOUCHED", "LIMIT_IF_TOUCHED"]
     quantity: str
     price: str | None = None
     trigger_price: str | None = None
     trigger_type: str | None = None
-    time_in_force: str
+    time_in_force: Literal["DAY", "GTC", "GTD", "IOC", "FOK", "AT_THE_OPEN", "AT_THE_CLOSE"]
     expire_time_ns: int | None = None
     post_only: bool
     reduce_only: bool
