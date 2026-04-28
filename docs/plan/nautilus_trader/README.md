@@ -66,9 +66,12 @@
 `docs/plan/✅order/` で **スコープ外**とした REPLAY モード仮想注文（[wiki UX](../../wiki/orders.md#replay-モード中の動作)）は本計画の **Phase N1** に集約する:
 
 - `POST /api/order/submit` 等を REPLAY モード時は **nautilus `BacktestEngine` の `SimulatedExchange` に流す**
-- iced 側 UI は live / replay の判定で見た目を切替（バナー「⏪ REPLAYモード中 — 注文は無効です」、ボタンラベル「仮想注文確認」）
+- 発注入力 UI は **Python tkinter 側**で live / replay の判定に応じて文言を切替
+  （例: バナー「⏪ REPLAYモード中 — 実注文は送信されません」、確認文言「仮想注文確認」）。
+  iced は監視・表示のみを担い、注文入力責務は持たない
 - Python 側は同じ `tachibana_orders.NautilusOrderEnvelope` を使い、live なら `LiveExecutionClient`、replay なら `BacktestExecutionEngine` にディスパッチ → **API 契約・envelope 型は live / replay で完全共有**
-- 約定通知も同じ IPC `Event::OrderFilled` を使い、UI は live / replay を区別しない（バナーのみで判断）
+- 約定通知イベント型は live と同じ IPC `Event::Order*` を再利用するが、UI ストアは
+  `venue="replay"` で view を分離し、REPLAY 注文一覧・REPLAY 買付余力にのみ反映する
 - 第二暗証番号入力 modal は REPLAY モードでは出さない（[order/architecture.md §5](../✅order/architecture.md#5-第二暗証番号の取扱い) の取得タイミングを REPLAY ガードで skip）
 
 ## 長期方針

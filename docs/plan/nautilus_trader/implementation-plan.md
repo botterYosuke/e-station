@@ -192,7 +192,9 @@
 - [ ] 監査ログ WAL: `tachibana_orders.jsonl`（live）と `tachibana_orders_replay.jsonl`（replay）に分離
 - [ ] `client_order_id` 名前空間を live / replay で分離
 - [ ] 第二暗証番号 modal は REPLAY ガードで skip
-- [ ] iced UI 差分（バナー「⏪ REPLAYモード中」、ボタンラベル「仮想注文確認」）
+- [ ] 発注入力 UI（Python tkinter）を replay モード文言に切替
+      （例: バナー「⏪ REPLAYモード中 — 実注文は送信されません」、確認文言「仮想注文確認」）
+- [ ] iced は監視・表示のみを担い、注文入力責務を持たないことを維持
 - [ ] `python/tests/test_order_router_dispatch.py`: live 時は `tachibana_orders.submit_order` 呼出、replay 時は `tachibana_orders_replay.jsonl` 書込を mock で検証
 
 ### N1.6 ナラティブ API 新設（H5）

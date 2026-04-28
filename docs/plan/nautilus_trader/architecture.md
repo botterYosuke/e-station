@@ -54,7 +54,7 @@
 | 立花の認証・session 管理 | **Python（既存 Phase 1 コード）** | 重複実装しない |
 | ナラティブの記録 | **Python `narrative_hook.py`** | nautilus `Strategy.on_event` から `/api/agent/narrative` を叩く |
 | keyring 永続化 | **Rust `data::config`** | 既存どおり |
-| **REPLAY pane の自動生成と identity 管理** | **Rust UI（iced）** | `(mode, instrument_id, pane_kind)` で identity を取り、`/api/replay/load` 成功イベントを契機に生成判定を行う |
+| **REPLAY pane の自動生成と identity 管理** | **Rust UI（iced）** | chart pane は `(mode, instrument_id, pane_kind, granularity?)`、order list / buying power pane は `(mode, pane_kind)` で identity を取り、`/api/replay/load` 成功イベントを契機に生成判定を行う |
 | **REPLAY 注文一覧 view** | **Rust UI（iced）** | `OrderListStore` を venue で 2 view に分割。REPLAY view は `venue="replay"` のイベントのみ反映、バナー付き |
 | **REPLAY 買付余力 view** | **Rust UI（iced）** | `BuyingPowerStore` を venue で 2 view に分割。REPLAY view は `EngineEvent::ReplayBuyingPower` のみ反映、`CLMZanKaiKanougaku` を一切参照しない |
 | **REPLAY portfolio snapshot** | **Python `python/engine/nautilus/portfolio_view.py`（新設）** | nautilus `Portfolio` から `cash` / `equity` / `mark_to_market` を 1 秒間隔で算出 |
@@ -68,13 +68,13 @@
 1. Rust → Python: `Hello { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
 2. Python → Rust: `Ready { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
 3. Rust → Python: `SetVenueCredentials`（既存）
-4. Rust → Python: `Command::StartEngine { mode, ... }`（§3 参照）
-   - `mode: "backtest"` → `BacktestEngine` 起動 + J-Quants ロード（`/api/replay/load` → §4）
-   - `mode: "live"` → `LiveExecutionEngine` + `LiveDataEngine` 起動（venue 閉場中は `start()` 保留）
+4. Rust → Python: `Command::StartEngine { engine, ... }`（§3 参照）
+   - `engine: Backtest` + `Hello.mode="replay"` → `BacktestEngine` 起動 + J-Quants ロード（`/api/replay/load` → §4）
+   - `engine: Live` + `Hello.mode="live"` → **N1 では**既存 Phase 1 の立花 EVENT WS 閲覧経路のみ起動し、nautilus `LiveExecutionEngine` / `LiveDataEngine` は stub のまま。**N2 から** live engine 起動に切り替える
 
 ## 3. 新規 IPC メッセージ
 
-[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（schema 1.4）。**`SubmitOrder` / `Order*` 系は order/ schema 1.3 で定義済み**。本計画で追加するのは backtest engine ライフサイクルと replay データロード:
+[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（schema 1.4）。**`SubmitOrder` / `Order*` 系は order/ schema 1.3 で定義済み**。本計画で追加するのは backtest engine ライフサイクル、replay データロード、speed 制御、overlay、REPLAY 買付余力:
 
 ```rust
 pub enum Command {
@@ -154,7 +154,7 @@ pub enum EngineEvent {
 
 **`/api/replay/load` 成功 → Rust UI が Tick + Candlestick + 注文一覧 + 買付余力 の 4 種 pane を自動生成（identity 重複なら skip）**
 **→ それぞれが対応する IPC（`Trades` / `KlineUpdate` / `Order*` / `ReplayBuyingPower`）を venue=replay で購読する**
-（identity = `(mode=replay, instrument_id, pane_kind, granularity?)`、D9 参照）
+（chart pane の identity = `(mode=replay, instrument_id, pane_kind, granularity?)`、注文一覧 / 買付余力は `(mode=replay, pane_kind)`、D9 参照）
 
 ```
 Rust HTTP /api/replay/load

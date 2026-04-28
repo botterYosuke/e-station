@@ -59,11 +59,13 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 - `python/engine/order_router.py` 新設で live / replay を分岐:
   - live → `tachibana_orders.submit_order(...)` → 立花 HTTP
   - replay → `BacktestExecutionEngine.process_order(...)` → SimulatedExchange
-- iced 側 UI 差分（[wiki UX](../../wiki/orders.md#replay-モード中の動作)）:
-  - バナー「⏪ REPLAYモード中 — 注文は無効です」
-  - ボタンラベル「仮想注文確認」
+- 発注入力 UI（Python tkinter）は replay モード用文言に切替（[wiki UX](../../wiki/orders.md#replay-モード中の動作)）:
+  - バナー例「⏪ REPLAYモード中 — 実注文は送信されません」
+  - 確認文言「仮想注文確認」
   - 第二暗証番号 modal を **出さない**
-- 約定通知は live と同じ IPC `Event::OrderFilled`（UI はバナー以外で live/replay を区別しない）
+- iced は監視・表示のみを担い、注文入力責務は持たない（Q7 決定）
+- 約定通知イベント型は live と同じ IPC `Event::Order*` を再利用するが、UI ストアは
+  `venue="replay"` で view を分離し、REPLAY 注文一覧・REPLAY 買付余力にのみ反映する
 - 監査ログ WAL は `tachibana_orders_replay.jsonl` に分離
 - `client_order_id` の名前空間も live / replay で分離
 
