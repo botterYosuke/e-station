@@ -413,3 +413,433 @@ async def test_ping_returns_pong(running_server):
     assert msg["request_id"] == "health-check-1"
 
     await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# N3.C: SubmitOrder venue guard tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_submit_order_hyperliquid_venue_returns_unsupported_order_venue(running_server):
+    """venue="hyperliquid" の SubmitOrder は unsupported_order_venue エラーを返す。
+    hyperliquid は _workers に登録されていても発注 IPC 経路はサポートしない。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "SubmitOrder",
+        "request_id": "req-hl-001",
+        "venue": "hyperliquid",
+        "order": {
+            "client_order_id": "cid-hl-001",
+            "symbol": "BTC-USDC",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": "0.01",
+            "request_key": 0,
+        },
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-hl-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_order_unknown_venue_returns_unsupported_order_venue(running_server):
+    """venue="unknown_xyz" の SubmitOrder は unsupported_order_venue エラーを返す。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "SubmitOrder",
+        "request_id": "req-unk-001",
+        "venue": "unknown_xyz",
+        "order": {
+            "client_order_id": "cid-unk-001",
+            "symbol": "BTC-USDC",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": "0.01",
+            "request_key": 0,
+        },
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-unk-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_order_tachibana_venue_proceeds_to_tachibana_logic(running_server):
+    """venue="tachibana" は unsupported_order_venue を返さず tachibana 固有の処理に進む。
+    セッション未確立なので NOT_LOGGED_IN または SecondPasswordRequired が返る。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "SubmitOrder",
+        "request_id": "req-tac-001",
+        "venue": "tachibana",
+        "order": {
+            "client_order_id": "cid-tac-001",
+            "symbol": "7203",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": "1",
+            "request_key": 0,
+        },
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    # venue guard を通過したことを確認: unsupported_order_venue ではない
+    assert msg.get("code") != "unsupported_order_venue", (
+        "venue='tachibana' should not be rejected by venue guard"
+    )
+    # tachibana 固有のエラー（NOT_LOGGED_IN / SecondPasswordRequired / OrderRejected など）
+    # が返ることで tachibana 経路に到達したことを確認する
+    assert msg.get("event") in ("OrderRejected", "SecondPasswordRequired", "Error"), (
+        f"Unexpected event for tachibana venue: {msg}"
+    )
+
+    await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# N3 H3: CancelOrder / ModifyOrder venue guard tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_hyperliquid_venue_returns_unsupported_order_venue(running_server):
+    """venue="hyperliquid" の CancelOrder は unsupported_order_venue エラーを返す。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "CancelOrder",
+        "request_id": "req-cancel-hl-001",
+        "venue": "hyperliquid",
+        "client_order_id": "cid-hl-001",
+        "venue_order_id": "99999",
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-cancel-hl-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_unknown_venue_returns_unsupported_order_venue(running_server):
+    """venue="unknown_xyz" の CancelOrder は unsupported_order_venue エラーを返す。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "CancelOrder",
+        "request_id": "req-cancel-unk-001",
+        "venue": "unknown_xyz",
+        "client_order_id": "cid-unk-001",
+        "venue_order_id": "11111",
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-cancel-unk-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_modify_order_hyperliquid_venue_returns_unsupported_order_venue(running_server):
+    """venue="hyperliquid" の ModifyOrder は unsupported_order_venue エラーを返す。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "ModifyOrder",
+        "request_id": "req-modify-hl-001",
+        "venue": "hyperliquid",
+        "client_order_id": "cid-hl-001",
+        "change": {"new_quantity": "0.2"},
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-modify-hl-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_modify_order_unknown_venue_returns_unsupported_order_venue(running_server):
+    """venue="unknown_xyz" の ModifyOrder は unsupported_order_venue エラーを返す。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "ModifyOrder",
+        "request_id": "req-modify-unk-001",
+        "venue": "unknown_xyz",
+        "client_order_id": "cid-unk-001",
+        "change": {"new_quantity": "0.3"},
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-modify-unk-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_tachibana_venue_proceeds_to_tachibana_logic(running_server):
+    """venue="tachibana" の CancelOrder は unsupported_order_venue を返さず tachibana 経路に進む。
+    セッション未確立なので NOT_LOGGED_IN / SecondPasswordRequired などが返る。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "CancelOrder",
+        "request_id": "req-cancel-tac-001",
+        "venue": "tachibana",
+        "client_order_id": "cid-tac-001",
+        "venue_order_id": "88888",
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    # venue guard を通過したことを確認: unsupported_order_venue ではない
+    assert msg.get("code") != "unsupported_order_venue", (
+        "venue='tachibana' should not be rejected by venue guard"
+    )
+    # tachibana 固有のエラーが返ることで tachibana 経路に到達したことを確認する
+    assert msg.get("event") in ("OrderRejected", "SecondPasswordRequired", "OrderPendingCancel", "Error"), (
+        f"Unexpected event for tachibana cancel: {msg}"
+    )
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_modify_order_tachibana_venue_proceeds_to_tachibana_logic(running_server):
+    """venue="tachibana" の ModifyOrder は unsupported_order_venue を返さず tachibana 経路に進む。
+    セッション未確立なので NOT_LOGGED_IN / SecondPasswordRequired などが返る。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "ModifyOrder",
+        "request_id": "req-modify-tac-001",
+        "venue": "tachibana",
+        "client_order_id": "cid-tac-001",
+        "change": {"new_quantity": "2"},
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    # venue guard を通過したことを確認: unsupported_order_venue ではない
+    assert msg.get("code") != "unsupported_order_venue", (
+        "venue='tachibana' should not be rejected by venue guard"
+    )
+    # tachibana 固有のエラーが返ることで tachibana 経路に到達したことを確認する
+    assert msg.get("event") in ("OrderRejected", "SecondPasswordRequired", "Error"), (
+        f"Unexpected event for tachibana modify: {msg}"
+    )
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_order_replay_venue_still_handled_separately(running_server):
+    """venue="replay" は専用 REPLAY_NOT_IMPLEMENTED 分岐で処理される（N3.C 変更なし）。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "SubmitOrder",
+        "request_id": "req-replay-001",
+        "venue": "replay",
+        "order": {
+            "client_order_id": "cid-replay-001",
+            "symbol": "7203",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": "1",
+            "request_key": 0,
+        },
+    }
+    await ws.send(orjson.dumps(req))
+
+    # OrderSubmitted が先に来る（M-7 R2: 対称化）
+    raw1 = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg1 = orjson.loads(raw1)
+    assert msg1.get("event") == "OrderSubmitted", (
+        f"Expected OrderSubmitted first for replay, got: {msg1}"
+    )
+
+    raw2 = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg2 = orjson.loads(raw2)
+    assert msg2.get("event") == "OrderRejected", f"Expected OrderRejected, got: {msg2}"
+    assert msg2.get("reason_code") == "REPLAY_NOT_IMPLEMENTED", (
+        f"Expected REPLAY_NOT_IMPLEMENTED, got: {msg2.get('reason_code')!r}"
+    )
+
+    await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# N3 R2-M2: replay venue の CancelOrder/ModifyOrder が unsupported_order_venue を返すこと
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_replay_venue_returns_unsupported_order_venue(running_server):
+    """venue="replay" の CancelOrder は unsupported_order_venue エラーを返す（R2-M2）。
+    replay 注文のキャンセルは N1.15 の UI ガードで事前に抑止されるが、
+    IPC に届いた場合は venue ガードで拒否する。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "CancelOrder",
+        "request_id": "req-cancel-replay-001",
+        "venue": "replay",
+        "client_order_id": "cid-replay-001",
+        "venue_order_id": "77777",
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-cancel-replay-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_modify_order_replay_venue_returns_unsupported_order_venue(running_server):
+    """venue="replay" の ModifyOrder は unsupported_order_venue エラーを返す（R2-M2）。
+    replay 注文の訂正は N1.15 の UI ガードで事前に抑止されるが、
+    IPC に届いた場合は venue ガードで拒否する。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "ModifyOrder",
+        "request_id": "req-modify-replay-001",
+        "venue": "replay",
+        "client_order_id": "cid-replay-001",
+        "change": {"new_quantity": "2"},
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-modify-replay-001"
+
+    await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# N3 R2-M3: CancelAllOrders venue guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_orders_hyperliquid_venue_returns_unsupported_order_venue(running_server):
+    """venue="hyperliquid" の CancelAllOrders は unsupported_order_venue エラーを返す（R2-M3）。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "CancelAllOrders",
+        "request_id": "req-cancelall-hl-001",
+        "venue": "hyperliquid",
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "Error", f"Expected Error, got: {msg}"
+    assert msg.get("code") == "unsupported_order_venue", (
+        f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
+    )
+    assert msg["request_id"] == "req-cancelall-hl-001"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_orders_tachibana_venue_proceeds(running_server):
+    """venue="tachibana" の CancelAllOrders は unsupported_order_venue を返さず tachibana 経路に進む（R2-M3）。
+    セッション未確立なので NOT_LOGGED_IN / SecondPasswordRequired などが返る。"""
+    port, token, _ = running_server
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "CancelAllOrders",
+        "request_id": "req-cancelall-tac-001",
+        "venue": "tachibana",
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    # unsupported_order_venue ではなく tachibana ロジックに進んでいることを確認
+    assert msg.get("code") != "unsupported_order_venue", f"unexpected unsupported_order_venue: {msg}"
+    # tachibana 固有のエラーが返ることで tachibana 経路に到達したことを確認する
+    assert msg.get("event") in ("Error", "SecondPasswordRequired"), (
+        f"Unexpected event for tachibana cancel-all: {msg}"
+    )
+
+    await ws.close()

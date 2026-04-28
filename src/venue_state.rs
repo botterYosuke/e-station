@@ -47,6 +47,12 @@ pub enum VenueState {
     Error {
         class: VenueErrorClass,
         message: String,
+        /// `true` iff the originating `VenueError.code` was
+        /// `"market_closed"`. Stored as a dedicated bool so
+        /// `is_market_closed()` can distinguish `market_closed` from
+        /// other `(Warning, Dismiss)` codes like `depth_unavailable`
+        /// that share the same `VenueErrorClass` (H1 fix).
+        market_closed: bool,
     },
 }
 
@@ -57,6 +63,25 @@ impl VenueState {
 
     pub fn is_login_in_flight(&self) -> bool {
         matches!(self, VenueState::LoginInFlight)
+    }
+
+    /// Returns `true` when the venue is in a `market_closed` error state.
+    ///
+    /// Used by the order API pre-reject guard (N3.B): the HTTP handler checks
+    /// this flag before forwarding a `SubmitOrder` to the engine so that the
+    /// "market closed" 409 is returned immediately without a round-trip.
+    ///
+    /// H1 fix: reads the dedicated `market_closed` field rather than comparing
+    /// `VenueErrorClass` values, which cannot distinguish `market_closed` from
+    /// other `(Warning, Dismiss)` codes such as `depth_unavailable`.
+    pub fn is_market_closed(&self) -> bool {
+        matches!(
+            self,
+            VenueState::Error {
+                market_closed: true,
+                ..
+            }
+        )
     }
 
     /// Atomically claim the `LoginInFlight` slot. Returns `true` and
@@ -97,6 +122,9 @@ pub enum VenueEvent {
     LoginError {
         class: VenueErrorClass,
         message: String,
+        /// `true` iff the originating `VenueError.code` was
+        /// `"market_closed"` (H1: mirrors `VenueState::Error.market_closed`).
+        market_closed: bool,
     },
     Ready,
     /// Engine subprocess restart detected — reset to `Idle`.
@@ -126,7 +154,18 @@ impl VenueState {
             // restart that has already re-pumped Hello → Idle).
             (_, VenueEvent::Ready) => VenueState::Ready,
             (_, VenueEvent::LoginCancelled) => VenueState::Idle,
-            (_, VenueEvent::LoginError { class, message }) => VenueState::Error { class, message },
+            (
+                _,
+                VenueEvent::LoginError {
+                    class,
+                    message,
+                    market_closed,
+                },
+            ) => VenueState::Error {
+                class,
+                message,
+                market_closed,
+            },
 
             // User-driven dismiss: only `Error` actually has anything
             // to clear; other states ignore so a stray dismiss is a
@@ -175,9 +214,12 @@ mod tests {
         let s = VenueState::LoginInFlight.next(VenueEvent::LoginError {
             class,
             message: "セッションの有効期限が切れました".to_string(),
+            market_closed: false,
         });
         match s {
-            VenueState::Error { class: c, message } => {
+            VenueState::Error {
+                class: c, message, ..
+            } => {
                 assert_eq!(c, class);
                 assert_eq!(message, "セッションの有効期限が切れました");
             }
@@ -191,6 +233,7 @@ mod tests {
         let s = VenueState::Error {
             class,
             message: "認証失敗".to_string(),
+            market_closed: false,
         }
         .next(VenueEvent::LoginStarted);
         assert!(s.is_login_in_flight());
@@ -206,6 +249,7 @@ mod tests {
             VenueState::Error {
                 class,
                 message: "x".to_string(),
+                market_closed: false,
             },
         ];
         for state in states {
@@ -227,6 +271,7 @@ mod tests {
         let s = VenueState::Error {
             class,
             message: "x".to_string(),
+            market_closed: false,
         }
         .next(VenueEvent::Dismissed);
         assert_eq!(s, VenueState::Idle);
@@ -253,6 +298,7 @@ mod tests {
         let mut s = VenueState::Error {
             class,
             message: "x".to_string(),
+            market_closed: false,
         };
         assert!(s.try_claim_login_in_flight());
         assert!(s.is_login_in_flight());
@@ -289,6 +335,7 @@ mod tests {
         let s = VenueState::Error {
             class,
             message: "市場クローズ中".to_string(),
+            market_closed: true,
         };
         assert!(s.is_login_in_flight() || matches!(s, VenueState::Error { .. }));
     }
@@ -297,6 +344,59 @@ mod tests {
     fn bump_condition_false_for_ready() {
         let s = VenueState::Ready;
         assert!(!s.is_login_in_flight() && !matches!(s, VenueState::Error { .. }));
+    }
+
+    // ── is_market_closed() tests (N3.B) ──────────────────────────────────────
+
+    #[test]
+    fn is_market_closed_returns_true_for_market_closed_error() {
+        let class = classify_venue_error("market_closed");
+        let s = VenueState::Error {
+            class,
+            message: "市場クローズ中".to_string(),
+            market_closed: true,
+        };
+        assert!(s.is_market_closed());
+    }
+
+    #[test]
+    fn is_market_closed_returns_false_for_ready() {
+        assert!(!VenueState::Ready.is_market_closed());
+    }
+
+    #[test]
+    fn is_market_closed_returns_false_for_idle() {
+        assert!(!VenueState::Idle.is_market_closed());
+    }
+
+    #[test]
+    fn is_market_closed_returns_false_for_login_in_flight() {
+        assert!(!VenueState::LoginInFlight.is_market_closed());
+    }
+
+    #[test]
+    fn is_market_closed_returns_false_for_other_errors() {
+        let class = classify_venue_error("session_expired");
+        let s = VenueState::Error {
+            class,
+            message: "session expired".to_string(),
+            market_closed: false,
+        };
+        assert!(!s.is_market_closed());
+    }
+
+    // H1 / M5: depth_unavailable shares (Warning, Dismiss) with market_closed;
+    // is_market_closed() must return false.
+    #[test]
+    fn is_market_closed_returns_false_for_depth_unavailable() {
+        use engine_client::error::classify_venue_error;
+        let class = classify_venue_error("depth_unavailable");
+        let s = VenueState::Error {
+            class,
+            message: "depth unavailable".to_string(),
+            market_closed: false,
+        };
+        assert!(!s.is_market_closed());
     }
 
     #[test]
@@ -315,6 +415,50 @@ mod tests {
             VenueState::LoginInFlight
                 .next(VenueEvent::Dismissed)
                 .is_login_in_flight()
+        );
+    }
+
+    // ── R2-M1: DismissTachibanaBanner → AtomicBool clear (H2 fix) ────────────
+
+    #[test]
+    fn dismissed_from_market_closed_error_makes_is_market_closed_false() {
+        // Error{market_closed: true} → Dismissed → Idle, is_market_closed() = false
+        // H2 fix: DismissTachibanaBanner ハンドラが store(is_market_closed()) を呼ぶ
+        // ため、この遷移後は must_not_be_market_closed となる
+        let class = classify_venue_error("market_closed");
+        let s = VenueState::Error {
+            class,
+            message: "市場クローズ中".to_string(),
+            market_closed: true,
+        };
+        assert!(
+            s.is_market_closed(),
+            "precondition: should start as market_closed"
+        );
+        let next = s.next(VenueEvent::Dismissed);
+        assert_eq!(next, VenueState::Idle);
+        assert!(
+            !next.is_market_closed(),
+            "after dismiss, is_market_closed must be false"
+        );
+    }
+
+    #[test]
+    fn login_started_from_market_closed_error_makes_is_market_closed_false() {
+        // Error{market_closed: true} → LoginStarted → LoginInFlight, is_market_closed() = false
+        // ReLogin パスでもフラグが解除されることを保証する
+        let class = classify_venue_error("market_closed");
+        let s = VenueState::Error {
+            class,
+            message: "市場クローズ中".to_string(),
+            market_closed: true,
+        };
+        assert!(s.is_market_closed(), "precondition");
+        let next = s.next(VenueEvent::LoginStarted);
+        assert!(next.is_login_in_flight());
+        assert!(
+            !next.is_market_closed(),
+            "LoginInFlight is not market_closed"
         );
     }
 }

@@ -13,8 +13,9 @@
 //!     ▼
 //! order_api::handle_submit_request()
 //!     │ ① validate input
-//!     │ ② check REPLAY mode → 503
-//!     │ ③ check OrderGuardConfig.enabled → 503 if not configured
+//!     │ ② check MARKET_CLOSED → 409
+//!     │ ③ check REPLAY mode → 503
+//!     │ ④ check OrderGuardConfig.enabled → 503 if not configured
 //!     │ ④ OrderGuardConfig: qty/yen limits → 400; rate limit → 429
 //!     │ ⑤ OrderSessionState.try_insert(client_order_id, request_key)
 //!     │      Created         → continue
@@ -164,13 +165,16 @@ impl RateLimiter {
 
 /// Shared state for the order API handler.
 pub struct OrderApiState {
-    pub session: Arc<Mutex<OrderSessionState>>,
-    pub engine_rx: watch::Receiver<Option<Arc<EngineConnection>>>,
-    pub is_replay_mode: Arc<AtomicBool>,
+    pub(crate) session: Arc<Mutex<OrderSessionState>>,
+    pub(crate) engine_rx: watch::Receiver<Option<Arc<EngineConnection>>>,
+    pub(crate) is_replay_mode: Arc<AtomicBool>,
+    /// Market-closed flag set by the main thread when tachibana VenueError(market_closed) arrives.
+    /// Checked early in submit_order to return 409 before touching the engine connection.
+    pub(crate) is_market_closed: Arc<AtomicBool>,
     /// Timeout waiting for `OrderAccepted`/`OrderRejected`. Default 30 s.
-    pub submit_timeout: Duration,
+    pub(crate) submit_timeout: Duration,
     /// Safety guard configuration. Default: `enabled: false` → 503.
-    pub guard_config: OrderGuardConfig,
+    pub(crate) guard_config: OrderGuardConfig,
     /// Sliding-window rate limiter (one counter per key).
     rate_limiter: Mutex<RateLimiter>,
 }
@@ -185,6 +189,7 @@ impl OrderApiState {
             session,
             engine_rx,
             is_replay_mode,
+            is_market_closed: Arc::new(AtomicBool::new(false)),
             submit_timeout: Duration::from_secs(30),
             guard_config: OrderGuardConfig::default(), // enabled: false
             rate_limiter: Mutex::new(RateLimiter::new()),
@@ -200,6 +205,12 @@ impl OrderApiState {
     /// Override the guard configuration (builder pattern).
     pub fn with_guard_config(mut self, cfg: OrderGuardConfig) -> Self {
         self.guard_config = cfg;
+        self
+    }
+
+    /// Override the market-closed flag (builder pattern, N3.B).
+    pub fn with_market_closed_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.is_market_closed = flag;
         self
     }
 }
@@ -369,7 +380,12 @@ struct HttpResponse {
 }
 
 async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse {
-    // ── ① REPLAY mode guard ───────────────────────────────────────────────────
+    // ── ① Market-closed guard (N3.B) ─────────────────────────────────────────
+    if state.is_market_closed.load(Ordering::Acquire) {
+        return error_response(409, "MARKET_CLOSED", "market is currently closed");
+    }
+
+    // ── ② REPLAY mode guard ───────────────────────────────────────────────────
     if state.is_replay_mode.load(Ordering::Acquire) {
         return error_response(503, "REPLAY_MODE_ACTIVE", "replay mode is active");
     }
@@ -631,6 +647,10 @@ async fn submit_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
 /// 6. Send `Command::ModifyOrder`
 /// 7. Wait for `OrderPendingUpdate` → 200 (client_order_id=null when venue_order_id path)
 async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse {
+    // NOTE(N3.B): is_market_closed guard is intentionally NOT applied here.
+    // During market-closed state, cancelling or modifying an existing order is
+    // still permitted. Only SubmitOrder is blocked.
+
     // ① Parse
     let body: ModifyOrderBody = match serde_json::from_str(raw_body) {
         Ok(b) => b,
@@ -770,6 +790,10 @@ async fn modify_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpRespons
 /// 6. `Command::CancelOrder`
 /// 7. Wait for `OrderPendingCancel` → 200 (client_order_id=null when venue_order_id path)
 async fn cancel_order(raw_body: &str, state: &Arc<OrderApiState>) -> HttpResponse {
+    // NOTE(N3.B): is_market_closed guard is intentionally NOT applied here.
+    // During market-closed state, cancelling or modifying an existing order is
+    // still permitted. Only SubmitOrder is blocked.
+
     // ① Parse
     let body: CancelOrderBody = match serde_json::from_str(raw_body) {
         Ok(b) => b,
@@ -3376,5 +3400,91 @@ mod tests {
         assert_eq!(json["venue_order_id"].as_str(), Some(vid));
 
         drop(engine_tx);
+    }
+
+    // ── N3.B: market-closed flag pre-reject tests ─────────────────────────────
+
+    /// is_market_closed=true → 409 MARKET_CLOSED (no engine needed).
+    #[tokio::test]
+    async fn market_closed_flag_returns_409() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let is_market_closed = Arc::new(AtomicBool::new(true)); // market is CLOSED
+        let state = Arc::new(
+            OrderApiState::new(session, engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits())
+                .with_market_closed_flag(Arc::clone(&is_market_closed)),
+        );
+
+        let body = default_submit_body("market-closed-cid-001");
+        let resp = submit_order(&body, &state).await;
+
+        assert_eq!(
+            resp.status, 409,
+            "market closed must return 409, got {}; body={}",
+            resp.status, resp.body
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json["reason_code"].as_str(), Some("MARKET_CLOSED"));
+    }
+
+    /// is_market_closed=false → NOT rejected by market-closed guard.
+    /// The request proceeds past the guard (guard_config enabled, no engine → 502).
+    #[tokio::test]
+    async fn market_open_flag_does_not_reject_early() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        let is_replay = Arc::new(AtomicBool::new(false));
+        let is_market_closed = Arc::new(AtomicBool::new(false)); // market is OPEN
+        let state = Arc::new(
+            OrderApiState::new(session, engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits())
+                .with_market_closed_flag(Arc::clone(&is_market_closed)),
+        );
+
+        let body = default_submit_body("market-open-cid-001");
+        let resp = submit_order(&body, &state).await;
+
+        // Must NOT be 409 MARKET_CLOSED — any other status is acceptable.
+        assert_ne!(
+            resp.status, 409,
+            "market open must not return 409; body={}",
+            resp.body
+        );
+        if resp.status == 409 {
+            let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap_or_default();
+            assert_ne!(
+                json["reason_code"].as_str(),
+                Some("MARKET_CLOSED"),
+                "reason_code must not be MARKET_CLOSED when market is open"
+            );
+        }
+    }
+
+    /// market-closed check fires BEFORE replay-mode check (ordering test).
+    #[tokio::test]
+    async fn market_closed_check_fires_before_replay_mode() {
+        let (_engine_tx, engine_rx) = watch::channel(None::<Arc<EngineConnection>>);
+        let session = Arc::new(Mutex::new(OrderSessionState::new()));
+        // Both flags set to true — MARKET_CLOSED must win (fired first).
+        let is_replay = Arc::new(AtomicBool::new(true));
+        let is_market_closed = Arc::new(AtomicBool::new(true));
+        let state = Arc::new(
+            OrderApiState::new(session, engine_rx, is_replay)
+                .with_guard_config(OrderGuardConfig::enabled_no_limits())
+                .with_market_closed_flag(Arc::clone(&is_market_closed)),
+        );
+
+        let body = default_submit_body("market-closed-before-replay-cid-001");
+        let resp = submit_order(&body, &state).await;
+
+        assert_eq!(
+            resp.status, 409,
+            "MARKET_CLOSED must be checked before REPLAY_MODE; got {}; body={}",
+            resp.status, resp.body
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(json["reason_code"].as_str(), Some("MARKET_CLOSED"));
     }
 }

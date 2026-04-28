@@ -780,6 +780,65 @@
 
 割愛（N2 完了時に詳細化）。Rust 側 `exchange/` の `place_order` / `cancel_order` 経路を削除し、nautilus 側 `HyperliquidExecutionClient` 等に置き換える。データ取得経路は触らない。
 
+### N3.A: HyperliquidExecutionClient スケルトン ✅ 完了 2026-04-29
+
+**目的**: N3 本格実装の前に `HyperliquidExecutionClient` の FSM 骨格を確立し、
+`generate_order_canceled()` の呼び出し漏れ（MEDIUM-1）を修正する。
+
+**実装ファイル**:
+- `python/engine/nautilus/clients/hyperliquid.py` — `HyperliquidExecutionClient` 新規作成
+  - `_submit_order`: `hl_submit_order` stub に委譲、成功時 `generate_order_submitted` + `generate_order_accepted`、失敗時 `generate_order_denied`
+  - `_modify_order`: `hl_modify_order` stub に委譲、失敗時 `generate_order_modify_rejected`
+  - `_cancel_order`: `hl_cancel_order` stub に委譲、**成功時 `generate_order_canceled`**、失敗時 `generate_order_cancel_rejected`
+  - `hl_submit_order` / `hl_modify_order` / `hl_cancel_order`: `NotImplementedError` stub（Hyperliquid SDK 統合は後続タスク）
+
+**テスト追加** (`python/tests/test_hyperliquid_execution_client.py`):
+- `test_cancel_order_calls_hl_cancel` — HL cancel API 呼び出し + `generate_order_canceled` 呼び出しを検証
+- `test_cancel_order_cancel_rejected_on_failure` — 失敗時 `generate_order_cancel_rejected`
+- `test_submit_order_calls_hl_submit` — HL submit API 呼び出し + submitted/accepted 呼び出しを検証
+- `test_submit_order_denied_on_failure` — 失敗時 `generate_order_denied`
+- `test_modify_order_calls_hl_modify` — HL modify API 呼び出しを検証
+- `test_modify_order_rejected_on_failure` — 失敗時 `generate_order_modify_rejected`
+
+**検証**: `uv run pytest python/tests/` 全 1265 件 GREEN (2 skipped)。
+
+---
+
+### N3.C: 発注経路 venue ガード強化 ✅ 完了 2026-04-29
+
+**目的**: `SubmitOrder` IPC の `venue` を `"tachibana"` のみに制限する。
+暗号資産 venue（`"hyperliquid"` 等）は `_workers` に登録されているため `unknown_venue` チェックをすり抜け、tachibana 固有の `NOT_LOGGED_IN` 等が返る問題を解消する。
+
+**変更**: `python/engine/server.py` の `_do_submit_order_inner()` — `if venue not in self._workers` チェックを削除し、`if venue != "tachibana"` チェック（`code: "unsupported_order_venue"`）に置き換え。
+
+**テスト追加** (`python/tests/test_server_dispatch.py`):
+- `test_submit_order_hyperliquid_venue_returns_unsupported_order_venue`
+- `test_submit_order_unknown_venue_returns_unsupported_order_venue`
+- `test_submit_order_tachibana_venue_proceeds_to_tachibana_logic`
+- `test_submit_order_replay_venue_still_handled_separately`
+
+**既存テスト更新** (`python/tests/test_order_dispatch.py`):
+- `test_submit_order_unknown_venue_returns_error` の期待 code を `unknown_venue` → `unsupported_order_venue` に更新
+
+**検証**: `uv run pytest python/tests/` 全 1259 件 GREEN。
+
+---
+
+### N3.B: Rust HTTP 層での `market_closed` 早期 reject ✅ 完了 2026-04-29
+
+**目的**: 市場閉場中に `POST /api/order/submit` が Python エンジンに到達する前に 409 を返す。
+
+**実装ファイル**:
+- `src/venue_state.rs` — `VenueState::is_market_closed() -> bool` 追加
+- `src/api/order_api.rs` — `OrderApiState.is_market_closed: Arc<AtomicBool>` フィールド追加、`submit_order()` の先頭に ① market-closed guard (409) を追加（② REPLAY guard より前）、`with_market_closed_flag()` builder メソッド追加
+- `src/main.rs` — `static ORDER_API_MARKET_CLOSED`, `Flowsurface.order_api_market_closed` フィールド追加、`TachibanaVenueEvent` ハンドラで `store()` 同期
+
+**テスト追加**:
+- `src/venue_state.rs::tests`: `is_market_closed_returns_true_for_market_closed_error`, `is_market_closed_returns_false_for_ready`, `is_market_closed_returns_false_for_idle`, `is_market_closed_returns_false_for_login_in_flight`, `is_market_closed_returns_false_for_other_errors`
+- `src/api/order_api.rs::tests`: `market_closed_flag_returns_409`, `market_open_flag_does_not_reject_early`, `market_closed_check_fires_before_replay_mode`
+
+**検証**: `cargo test --workspace` 全 GREEN、`cargo clippy -- -D warnings` クリーン、`cargo fmt --check` クリーン。
+
 ---
 
 ## 削除リスト（N1 完了時点）
@@ -1080,6 +1139,80 @@ Phase N2（tachibana LiveDataClient / LiveExecutionClient adapter）の review-f
 - **指値注文 price validation**: `_order_to_envelope` 内では `price=None` を WARNING で握りつぶしていたが、LIMIT 系注文では `ValueError` → `generate_order_denied` にエスカレーションしないと API 到達後に初めてエラーが発覚する
 - **inspect.getsource テスト**: ソース文字列検査は「同義リファクタリング」に対して脆弱。`"database=None"` と `"config.database is None"` の 2 つを AND 条件で検査することで、片方の削除を検出できる
 - **MagicMock(spec=) によるプライベート辞書アクセス廃止**: テストが内部辞書を直接操作すると `OrderIdMap` のバックエンド変更で壊れる。`spec=OrderIdMap` で公開 API のみ mock することで保護できる
+
+---
+
+## レビュー反映 (2026-04-29, N3 R1〜R3)
+
+Phase N3（暗号資産 venue 移植・HyperliquidExecutionClient / Rust HTTP 市場閉場ガード）の review-fix-loop を 3 ラウンドで実施。
+
+### ラウンド別件数推移
+
+| ラウンド | CRITICAL | HIGH | MEDIUM | LOW |
+|----------|----------|------|--------|-----|
+| R1 初回  | 0        | 4    | 9      | —   |
+| R2 再レビュー | 0   | 1    | 4      | —   |
+| R3 サニティ | 0     | 0    | 2      | —   |
+| 収束     | 0        | 0    | 0      | —   |
+
+### R1 で解消した主な指摘
+
+| ID | 解消概要 |
+|----|---------|
+| H: is_market_closed() 偽陽性 | `VenueState::Error` に `market_closed: bool` フィールドを追加。旧実装は `class == VenueErrorCode::MarketClosed.classify()` で `DepthUnavailable` が同じ `VenueErrorClass { Warning, Dismiss }` を持つため偽陽性が発生していた。`is_market_closed()` を `matches!(self, VenueState::Error { market_closed: true, .. })` に変更して分離。`VenueEvent::LoginError` にも `market_closed: bool` を追加し `main.rs` で `code == "market_closed"` 時のみ `true` をセット |
+| H: DismissTachibanaBanner で AtomicBool 未クリア | `DismissTachibanaBanner` ハンドラで FSM 更新後に `self.order_api_market_closed.store(self.tachibana_state.is_market_closed(), Ordering::Release)` を呼ぶよう修正。未修正では dismiss 後も `is_market_closed=true` のまま全発注が 409 で永久ブロックされていた |
+| H: cancel/modify/cancel_all 発注経路の venue ガード欠落 | `server.py` の `_do_cancel_order`・`_do_modify_order`・`_do_cancel_all_orders` に `if venue != "tachibana"` ガード（`code: "unsupported_order_venue"`）を追加。N3.C では `_do_submit_order_inner` のみに追加されており、cancel/modify 経路は旧 `if venue not in self._workers` チェックが残っていた |
+| H: NautilusTrader Order の AttributeError | `_hl_submit_order` は `order_side: str` / `order_type: str` の文字列フィールドを期待するが、nautilus `Order` は `.side: OrderSide` enum / `.order_type: OrderType` enum を持つ。`_order_to_hl_envelope(order)` 変換関数を追加し `_submit_order` 入口で変換 |
+| M: max_qty_per_order で float() 失敗時フォールバック 0.0 | `float()` 変換失敗時に `order_qty = 0.0` にフォールバックすると `> max_qty_per_order` チェックが常に通過する。変換失敗時は `generate_order_denied` + return に変更 |
+| M: venue_order_id に "None"/"0" 文字列が通過 | `str(VenueOrderId("None"))` = `"None"` は truthy なため `if not venue_order_id_str` をすり抜けていた。`or venue_order_id_str in ("None", "0", "none")` を追加して早期 cancel_rejected |
+| M: touch() がセッション未確立時も呼ばれる | `session_holder.touch()` を `self._tachibana_session is None` チェックの後に移動し、セッション未確立時にパスワード有効期限タイムスタンプが更新されないよう修正 |
+| M: `order_api.rs` フィールド可視性 | `OrderApiState` の `session`・`engine_rx`・`is_replay_mode`・`is_market_closed`・`submit_timeout`・`guard_config` を `pub` → `pub(crate)` に変更 |
+
+### R2 で解消した主な指摘
+
+| ID | 解消概要 |
+|----|---------|
+| H: OnceLock 初期化エラーのサイレント無視 | `ORDER_API_MARKET_CLOSED.set()` の `.ok()` → `.is_err()` + `log::warn!` に変更し、二重初期化を可視化 |
+| M: OrderApiState::new() の unwrap_or_else フォールバックが無音 | `log::debug!` ログを追加 |
+| M: cancel/modify ハンドラへの is_market_closed ガード適用判断 | cancel/modify には意図的に market_closed ガードを適用しない（既発注の取消・変更は閉場中も許可するべき）ことを `// NOTE(N3.B)` コメントで明文化 |
+| M: venue_banner.rs のパターンマッチ | `VenueState::Error { class, message }` → `{ class, message, .. }` に変更し新 `market_closed` フィールドに対応 |
+
+### R3 で解消した主な指摘
+
+| ID | 解消概要 |
+|----|---------|
+| M: is_market_closed FSM テストの網羅性 | `is_market_closed_returns_false_for_depth_unavailable`（旧偽陽性ケース）・`dismissed_from_market_closed_error_makes_is_market_closed_false`・`login_started_from_market_closed_error_makes_is_market_closed_false` の 3 テストを `venue_state.rs` に追加 |
+| M: cancel/modify 向け dispatch テスト | `python/tests/test_server_dispatch.py` に cancel/modify/cancel_all の venue ガードテスト（hyperliquid・unknown・tachibana・replay 各ケース）を追加 |
+
+### 主要な設計変更
+
+- **`market_closed: bool` フィールド方式の採用理由**: `VenueErrorClass { Warning, Dismiss }` は `MarketClosed` と `DepthUnavailable` の両コードが共有するクラスのため class 比較では区別不能。専用フィールドで表現することで `is_market_closed()` が任意の `VenueState` の組合せに対して正確な結果を返せるようになった
+- **`_order_to_hl_envelope()` 変換レイヤーの設計**: nautilus `Order` 型のフィールド（`.side: OrderSide` enum）と `_build_order_action()` が要求する wire フォーマット（`order_side: str`）のインピーダンス不一致を薄い変換オブジェクトで吸収。変換失敗は `generate_order_denied` にエスカレーション（サイレント握り潰しなし）
+- **touch() 順序規約**: セッション存在確認 → touch() の順序を3つの IPC ハンドラ（cancel/modify/cancel_all）すべてで統一
+
+### 追加テスト一覧
+
+**Rust（+5 件、198 件合計）**:
+- `is_market_closed_returns_true_for_market_closed_error`（既存）
+- `is_market_closed_returns_false_for_depth_unavailable`（新規）
+- `dismissed_from_market_closed_error_makes_is_market_closed_false`（新規）
+- `login_started_from_market_closed_error_makes_is_market_closed_false`（新規）
+- `is_market_closed_returns_false_for_other_errors`（整理）
+
+**Python（+22 件、1295 件合計）**:
+- `test_submit_order_converts_nautilus_order_to_hl_envelope`
+- `test_submit_order_exceeding_max_qty_calls_generate_order_denied`
+- `test_submit_order_with_invalid_qty_calls_generate_order_denied`
+- `test_extract_venue_order_id_from_filled_status`
+- `test_cancel_order_with_invalid_venue_order_id_calls_cancel_rejected`（None / "" / 0 / "None" の 4 パラメータ）
+- cancel/modify/cancel_all の venue ガードテスト（hyperliquid・unknown・tachibana・replay 各ケース、計 12 件以上）
+
+### 完了確認
+
+- `cargo test --workspace` **198 passed** (全テストスイート通過)
+- `uv run pytest python/tests/ -q` **1295 passed, 2 skipped**
+- `cargo clippy --workspace -- -D warnings` クリーン
+- `cargo fmt --check` クリーン
 
 ---
 

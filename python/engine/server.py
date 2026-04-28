@@ -812,13 +812,15 @@ class DataEngineServer:
             )
             return
 
-        if venue not in self._workers:
+        # N3.C: 発注経路は "tachibana" のみ ("replay" は上のブランチで処理済み)
+        # 暗号資産 venue は自身のデータワーカーを持つが、発注 IPC 経路はサポートしない
+        if venue != "tachibana":
             self._outbox.append(
                 {
                     "event": "Error",
                     "request_id": req_id,
-                    "code": "unknown_venue",
-                    "message": f"SubmitOrder: unknown venue {venue!r}",
+                    "code": "unsupported_order_venue",
+                    "message": f"SubmitOrder: venue {venue!r} does not support orders via this IPC path",
                 }
             )
             return
@@ -1033,12 +1035,16 @@ class DataEngineServer:
         client_order_id = msg.get("client_order_id", "")
         raw_change = msg.get("change", {})
 
-        if venue not in self._workers:
+        # N3.C: 発注 IPC 経路は tachibana のみサポート。
+        # "hyperliquid" / "replay" / その他 venue はここで拒否する。
+        # replay 注文のキャンセル/訂正は N1.15 の UI ガードで事前に抑止されているため
+        # IPC に届くことは通常ない。
+        if venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
-                "code": "unknown_venue",
-                "message": f"ModifyOrder: unknown venue {venue!r}",
+                "code": "unsupported_order_venue",
+                "message": f"ModifyOrder: venue {venue!r} does not support orders via this IPC path",
             })
             return
 
@@ -1052,15 +1058,6 @@ class DataEngineServer:
             })
             return
 
-        self._session_holder.touch()
-        second_password = self._session_holder.get_password()
-        if second_password is None:
-            self._outbox.append({
-                "event": "SecondPasswordRequired",
-                "request_id": req_id,
-            })
-            return
-
         if self._tachibana_session is None:
             self._outbox.append({
                 "event": "OrderRejected",
@@ -1068,6 +1065,15 @@ class DataEngineServer:
                 "reason_code": "NOT_LOGGED_IN",
                 "reason_text": "Tachibana session is not established",
                 "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        self._session_holder.touch()
+        second_password = self._session_holder.get_password()
+        if second_password is None:
+            self._outbox.append({
+                "event": "SecondPasswordRequired",
+                "request_id": req_id,
             })
             return
 
@@ -1138,12 +1144,16 @@ class DataEngineServer:
         client_order_id = msg.get("client_order_id", "")
         venue_order_id = msg.get("venue_order_id", "")
 
-        if venue not in self._workers:
+        # N3.C: 発注 IPC 経路は tachibana のみサポート。
+        # "hyperliquid" / "replay" / その他 venue はここで拒否する。
+        # replay 注文のキャンセル/訂正は N1.15 の UI ガードで事前に抑止されているため
+        # IPC に届くことは通常ない。
+        if venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
-                "code": "unknown_venue",
-                "message": f"CancelOrder: unknown venue {venue!r}",
+                "code": "unsupported_order_venue",
+                "message": f"CancelOrder: venue {venue!r} does not support orders via this IPC path",
             })
             return
 
@@ -1157,15 +1167,6 @@ class DataEngineServer:
             })
             return
 
-        self._session_holder.touch()
-        second_password = self._session_holder.get_password()
-        if second_password is None:
-            self._outbox.append({
-                "event": "SecondPasswordRequired",
-                "request_id": req_id,
-            })
-            return
-
         if self._tachibana_session is None:
             self._outbox.append({
                 "event": "OrderRejected",
@@ -1173,6 +1174,15 @@ class DataEngineServer:
                 "reason_code": "NOT_LOGGED_IN",
                 "reason_text": "Tachibana session is not established",
                 "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        self._session_holder.touch()
+        second_password = self._session_holder.get_password()
+        if second_password is None:
+            self._outbox.append({
+                "event": "SecondPasswordRequired",
+                "request_id": req_id,
             })
             return
 
@@ -1228,12 +1238,16 @@ class DataEngineServer:
         instrument_id = msg.get("instrument_id")
         order_side = msg.get("order_side")
 
-        if venue not in self._workers:
+        # N3.C: 発注 IPC 経路は tachibana のみサポート。
+        # "hyperliquid" / "replay" / その他 venue はここで拒否する。
+        # replay 注文の一括キャンセルは N1.15 の UI ガードで事前に抑止されているため
+        # IPC に届くことは通常ない。
+        if venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
-                "code": "unknown_venue",
-                "message": f"CancelAllOrders: unknown venue {venue!r}",
+                "code": "unsupported_order_venue",
+                "message": f"CancelAllOrders: venue {venue!r} does not support orders via this IPC path",
             })
             return
 
@@ -1246,21 +1260,21 @@ class DataEngineServer:
             })
             return
 
-        self._session_holder.touch()
-        second_password = self._session_holder.get_password()
-        if second_password is None:
-            self._outbox.append({
-                "event": "SecondPasswordRequired",
-                "request_id": req_id,
-            })
-            return
-
         if self._tachibana_session is None:
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
                 "code": "NOT_LOGGED_IN",
                 "message": "Tachibana session is not established",
+            })
+            return
+
+        self._session_holder.touch()
+        second_password = self._session_holder.get_password()
+        if second_password is None:
+            self._outbox.append({
+                "event": "SecondPasswordRequired",
+                "request_id": req_id,
             })
             return
 

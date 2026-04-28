@@ -7,7 +7,7 @@
 - 各テストは独立した outbox イベントを確認する
 
 対象 T0.3 受け入れ条件:
-  - SubmitOrder / venue=unknown → Error イベント（unknown_venue）
+  - SubmitOrder / venue=unknown → Error イベント（unsupported_order_venue）
   - SubmitOrder / venue=tachibana / UNSUPPORTED 条件 → OrderRejected (UNSUPPORTED_IN_PHASE_O0)
   - SubmitOrder / venue=tachibana / 第二暗証番号未設定 → SecondPasswordRequired
   - SetSecondPassword → 次の SubmitOrder で SecondPasswordRequired が出なくなる
@@ -119,7 +119,7 @@ async def server(unused_tcp_port):
 
 @pytest.mark.asyncio
 async def test_submit_order_unknown_venue_returns_error(server):
-    """venue=unknown → Error{code=unknown_venue}"""
+    """venue=unknown → Error{code=unsupported_order_venue} (N3.C: venue guard)"""
     port, token, _, __ = server
     ws = await _connect(port, token)
     cmd = _base_submit_order()
@@ -127,7 +127,7 @@ async def test_submit_order_unknown_venue_returns_error(server):
     await ws.send(orjson.dumps(cmd))
     evt = await _recv_event(ws)
     assert evt["event"] == "Error"
-    assert evt.get("code") == "unknown_venue"
+    assert evt.get("code") == "unsupported_order_venue"
     await ws.close()
 
 

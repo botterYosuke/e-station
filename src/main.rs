@@ -93,6 +93,13 @@ static CONTROL_API_RX: std::sync::OnceLock<
 static REPLAY_API_STATE: std::sync::OnceLock<Arc<replay_api::ReplayApiState>> =
     std::sync::OnceLock::new();
 
+/// Shared market-closed flag (N3.B). Set in `main()` after creating the
+/// `OrderApiState`, then read from `Flowsurface::new()` so that
+/// `Message::TachibanaVenueEvent` can store it in `self.order_api_market_closed`
+/// and update it atomically.
+static ORDER_API_MARKET_CLOSED: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
 /// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
 /// here, before the connection is published to `ENGINE_CONNECTION_TX`,
@@ -594,9 +601,22 @@ fn main() {
                     } else {
                         api::order_api::OrderGuardConfig::default()
                     };
+                // N3.B: create shared market-closed flag and publish to static
+                // so Flowsurface::new() can clone it for TachibanaVenueEvent syncing.
+                let market_closed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                if ORDER_API_MARKET_CLOSED
+                    .set(Arc::clone(&market_closed_flag))
+                    .is_err()
+                {
+                    log::warn!(
+                        "ORDER_API_MARKET_CLOSED already initialized \
+                         — flag sharing may be broken"
+                    );
+                }
                 Arc::new(
                     api::order_api::OrderApiState::new(session, engine_rx, is_replay_mode)
-                        .with_guard_config(guard_config),
+                        .with_guard_config(guard_config)
+                        .with_market_closed_flag(market_closed_flag),
                 )
             };
             // N1.3: ReplayApiState は engine_rx + mode を保持して
@@ -686,6 +706,9 @@ struct Flowsurface {
     /// `GetBuyingPower` IPC 送信時に記録した request_id。
     /// `BuyingPowerUpdated` または `IpcError` 受信時にクリアする。
     buying_power_request_id: Option<String>,
+    /// Shared market-closed flag for order_api pre-reject (N3.B).
+    /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
+    order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -960,6 +983,7 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             Some(Message::TachibanaVenueEvent(VenueEvent::LoginError {
                 class,
                 message,
+                market_closed: code == "market_closed",
             }))
         }
         // ── Phase O2: EC 約定通知 (T2.4) ────────────────────────────────────
@@ -1113,6 +1137,19 @@ impl Flowsurface {
             tachibana_state: VenueState::Idle,
             second_password_modal: None,
             buying_power_request_id: None,
+            // N3.B: reuse the flag that was published to ORDER_API_MARKET_CLOSED
+            // by main(). Falls back to a fresh flag (e.g. in tests / hot-reload).
+            order_api_market_closed: ORDER_API_MARKET_CLOSED
+                .get()
+                .map(Arc::clone)
+                .unwrap_or_else(|| {
+                    // Control API disabled (api_rt = None) — no HTTP handler will read this flag.
+                    log::debug!(
+                        "ORDER_API_MARKET_CLOSED not set; using standalone flag \
+                         (control API disabled)"
+                    );
+                    Arc::new(std::sync::atomic::AtomicBool::new(false))
+                }),
         };
 
         if let Some(err) = audio_init_err {
@@ -1168,6 +1205,14 @@ impl Flowsurface {
                 let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
                     .next(VenueEvent::Dismissed);
                 self.tachibana_state = next;
+                // H2 fix: sync the AtomicBool after dismiss so the order API
+                // pre-reject guard does not remain true after the banner is
+                // closed. Without this store() the flag stays `true` and
+                // SubmitOrder returns 409 MARKET_CLOSED indefinitely.
+                self.order_api_market_closed.store(
+                    self.tachibana_state.is_market_closed(),
+                    std::sync::atomic::Ordering::Release,
+                );
             }
             Message::RequestTachibanaLogin(trigger) => {
                 // Duplicate-press suppression: claim the LoginInFlight
@@ -1275,6 +1320,12 @@ impl Flowsurface {
                 let next = old_state.next(event);
                 let is_ready = next.is_ready();
                 self.tachibana_state = next;
+
+                // N3.B: sync market-closed state to order_api pre-reject flag.
+                self.order_api_market_closed.store(
+                    self.tachibana_state.is_market_closed(),
+                    std::sync::atomic::Ordering::Release,
+                );
 
                 // Bump only when the session *newly* becomes available from a
                 // state that required a login round-trip (LoginInFlight) or a
