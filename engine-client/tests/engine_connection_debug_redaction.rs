@@ -5,7 +5,7 @@
 //! so future field additions do not silently leak through derive
 //! propagation.
 //!
-//! See `docs/plan/✅tachibana/implementation-plan-T3.5.md` §3 Step A
+//! See `docs/✅tachibana/implementation-plan-T3.5.md` §3 Step A
 //! REFACTOR ("secret 焼付きガード").
 
 use std::path::PathBuf;

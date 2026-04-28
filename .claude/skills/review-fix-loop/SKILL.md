@@ -18,7 +18,7 @@ origin: ECC (e-station 向けカスタム)
 
 | 対象 | 参照ファイル |
 |---|---|
-| 計画書（`docs/plan/` 配下の `.md` ファイル群） | [`PlanLoop.md`](./PlanLoop.md) |
+| 計画書（`docs/` 配下の `.md` ファイル群） | [`PlanLoop.md`](./PlanLoop.md) |
 | ソースコード（Rust / Python 実装ファイル） | [`ImplementationLoop.md`](./ImplementationLoop.md) |
 
 > **計画書とコードの両方が対象の場合**: `ImplementationLoop` を先行させる。`general-purpose` レビュアーの観点が計画書クロスチェックを兼ねるため、コード収束後に計画書の「レビュー反映」ブロック追記のみ `PlanLoop` で仕上げる。

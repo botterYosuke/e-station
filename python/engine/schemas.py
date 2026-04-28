@@ -1,4 +1,4 @@
-"""IPC message schemas — pydantic models matching docs/plan/schemas/*.json"""
+"""IPC message schemas — pydantic models matching docs/schemas/*.json"""
 
 from __future__ import annotations
 
@@ -174,14 +174,24 @@ class SubmitOrderRequest(IpcMessage):
         if not v.isascii() or not v.isprintable():
             raise ValueError("client_order_id must be ASCII printable (spec.md §5)")
         return v
+
     instrument_id: str
     order_side: Literal["BUY", "SELL"]
-    order_type: Literal["MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT", "MARKET_IF_TOUCHED", "LIMIT_IF_TOUCHED"]
+    order_type: Literal[
+        "MARKET",
+        "LIMIT",
+        "STOP_MARKET",
+        "STOP_LIMIT",
+        "MARKET_IF_TOUCHED",
+        "LIMIT_IF_TOUCHED",
+    ]
     quantity: str
     price: str | None = None
     trigger_price: str | None = None
     trigger_type: str | None = None
-    time_in_force: Literal["DAY", "GTC", "GTD", "IOC", "FOK", "AT_THE_OPEN", "AT_THE_CLOSE"]
+    time_in_force: Literal[
+        "DAY", "GTC", "GTD", "IOC", "FOK", "AT_THE_OPEN", "AT_THE_CLOSE"
+    ]
     expire_time_ns: int | None = None
     post_only: bool
     reduce_only: bool
@@ -515,7 +525,9 @@ class OrderSubmitted(IpcMessage):
 class OrderAccepted(IpcMessage):
     event: Literal["OrderAccepted"] = "OrderAccepted"
     client_order_id: str
-    venue_order_id: str | None = None  # B-1: None when venue did not return an order number
+    venue_order_id: str | None = (
+        None  # B-1: None when venue did not return an order number
+    )
     ts_event_ms: int
 
 
@@ -723,10 +735,10 @@ class StrategySignal(IpcMessage):
     strategy_id: str
     instrument_id: str
     signal_kind: Literal["EntryLong", "EntryShort", "Exit", "Annotate"]
-    side: str | None = None      # "BUY" | "SELL" | None
-    price: str | None = None     # decimal string or None
-    tag: str | None = None       # short machine-readable label
-    note: str | None = None      # human-readable annotation
+    side: str | None = None  # "BUY" | "SELL" | None
+    price: str | None = None  # decimal string or None
+    tag: str | None = None  # short machine-readable label
+    note: str | None = None  # human-readable annotation
     ts_event_ms: int
 
 
@@ -759,10 +771,10 @@ class BuyingPowerUpdated(IpcMessage):
     event: Literal["BuyingPowerUpdated"] = "BuyingPowerUpdated"
     request_id: str
     venue: str
-    cash_available: int   # 現物買付余力（円）
-    cash_shortfall: int   # 現物余力不足額（円、0 は不足なし）
+    cash_available: int  # 現物買付余力（円）
+    cash_shortfall: int  # 現物余力不足額（円、0 は不足なし）
     credit_available: int  # 信用新規可能額（円）
-    ts_ms: int             # 取得時刻 Unix ミリ秒
+    ts_ms: int  # 取得時刻 Unix ミリ秒
 
 
 # ---------------------------------------------------------------------------

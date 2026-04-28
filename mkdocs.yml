@@ -8,7 +8,7 @@ edit_uri: edit/main/docs/
 docs_dir: docs
 site_dir: site
 
-# 公開対象を docs/plan/✅*/spec.md と docs/index.md だけに絞る。
+# 公開対象を docs/✅*/spec.md と docs/index.md だけに絞る。
 # MkDocs 1.6+ の exclude_docs は gitignore 形式で、! で再包含できる。
 exclude_docs: |
   *.json

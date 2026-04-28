@@ -1,7 +1,7 @@
 """Tachibana login orchestration — the bridge between the IPC server,
 the env fast paths, and the tkinter login helper subprocess.
 
-Architecture: [docs/plan/✅tachibana/architecture.md §7](../../../docs/plan/✅tachibana/architecture.md).
+Architecture: [docs/✅tachibana/architecture.md §7](../../../docs/✅tachibana/architecture.md).
 
 Public entry point:
 
@@ -219,7 +219,11 @@ async def _spawn_login_dialog(prefill: Optional[dict]) -> Optional[dict]:
                 proc.kill()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=2.0)
-                except (asyncio.TimeoutError, ProcessLookupError, asyncio.CancelledError):
+                except (
+                    asyncio.TimeoutError,
+                    ProcessLookupError,
+                    asyncio.CancelledError,
+                ):
                     log.error(
                         "tachibana login dialog: helper pid=%d did not exit after kill on cancel",
                         proc.pid,
@@ -404,7 +408,9 @@ async def startup_login(
         dialog_user_id = result.get("user_id")
         dialog_password = result.get("password")
         if not dialog_user_id or not dialog_password:
-            log.error("tachibana startup_login: helper result missing credential fields")
+            log.error(
+                "tachibana startup_login: helper result missing credential fields"
+            )
             raise LoginError(code="login_failed", message=_MSG_LOGIN_FAILED)
         dialog_is_demo = bool(result.get("is_demo", True))
 

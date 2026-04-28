@@ -264,7 +264,7 @@ But with:
 | **Order Phase O3** | 信用・逆指値・期日指定・余力 API | ✅ 完了 |
 | **Rust UI U-pre〜U3** | Order Entry / Order List / Buying Power パネル | ✅ 完了（scaffold） |
 
-計画ドキュメント: [docs/plan/✅order/](✅order/)
+計画ドキュメント: [docs/✅order/](✅order/)
 
 ---
 

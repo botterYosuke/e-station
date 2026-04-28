@@ -4,7 +4,7 @@
 //! goes through `Task::perform(...)` so the iced runtime stays
 //! single-threaded and pure.
 //!
-//! See `docs/plan/✅tachibana/implementation-plan-T3.5.md` §3 Step A.
+//! See `docs/✅tachibana/implementation-plan-T3.5.md` §3 Step A.
 
 use syn::visit::Visit;
 

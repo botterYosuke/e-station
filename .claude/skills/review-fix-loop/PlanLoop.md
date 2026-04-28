@@ -1,12 +1,12 @@
 # PlanLoop — 計画書レビュー・修正ループ
 
-計画書（`docs/plan/` 配下の `.md` ファイル群）のレビュー・更新に使う。
+計画書（`docs/` 配下の `.md` ファイル群）のレビュー・更新に使う。
 共通ルール・収束基準は [`SKILL.md`](./SKILL.md) を参照。
 
 ---
 
 あなたはオーケストレーターです。
-計画文書群（`docs/plan/<area>/*.md`）に対して「レビュー → 集約 → 統一方針決定 → 修正 → 検証」を 1 ラウンドとし、MEDIUM 以上の Finding がゼロになるまで反復させます。
+計画文書群（`docs/<area>/*.md`）に対して「レビュー → 集約 → 統一方針決定 → 修正 → 検証」を 1 ラウンドとし、MEDIUM 以上の Finding がゼロになるまで反復させます。
 
 > 使い方: ファイル末尾の「汎用呼び出しテンプレート」を新しい会話にコピーし、`{{}}` プレースホルダーを実値に置換して使う。汎用ロジックはこちら、案件固有情報はテンプレートで渡す。
 
@@ -83,7 +83,7 @@
 **各 implementer への指示テンプレ**:
 
 ```
-docs/plan/<area>/<FILE>.md を以下の Finding に従って修正する。
+docs/<area>/<FILE>.md を以下の Finding に従って修正する。
 **<FILE>.md のみ書き換え**。他は Read のみ可。
 
 【統一決定（全エージェント共通）】
@@ -152,7 +152,7 @@ Step 1 に戻る。次ラウンドのレビュー指示には:
 - 不変条件: ...
 - 設計規約: ...
 - テスト観点: ...
-ログ: docs/plan/<area>/review-fixes-<日付>.md
+ログ: docs/<area>/review-fixes-<日付>.md
 ```
 
 ## ループ上限と escape hatch
@@ -239,11 +239,11 @@ Step 1 に戻る。次ラウンドのレビュー指示には:
 ### 対象ドキュメント
 
 ```text
-docs/plan/{{plan_area}}/README.md
-docs/plan/{{plan_area}}/spec.md
-docs/plan/{{plan_area}}/architecture.md
-docs/plan/{{plan_area}}/implementation-plan.md
-docs/plan/{{plan_area}}/open-questions.md
+docs/{{plan_area}}/README.md
+docs/{{plan_area}}/spec.md
+docs/{{plan_area}}/architecture.md
+docs/{{plan_area}}/implementation-plan.md
+docs/{{plan_area}}/open-questions.md
 ```
 
 ### 参照ドキュメント（読み取り専用）
@@ -258,7 +258,7 @@ CLAUDE.md
 ### スコープ外（subagent が触らないこと）
 
 ```text
-docs/plan/<other-area>/     # 別エリアの計画書
+docs/<other-area>/     # 別エリアの計画書
 src/ engine-client/ python/ # 実装ファイル（計画書レビューのスコープ外）
 ```
 
