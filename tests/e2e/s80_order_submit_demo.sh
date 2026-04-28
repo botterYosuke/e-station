@@ -68,8 +68,18 @@ EXPECT_VENUE_READY_RE='tachibana: VenueReady — venue is now authenticated'
 EXPECT_SP_FAST_PATH='second_password pre-populated from DEV_TACHIBANA_SECOND_PASSWORD'
 
 cleanup() {
-    [[ -n "${ENGINE_PID:-}" ]] && kill -9 "$ENGINE_PID" 2>/dev/null || true
-    [[ -n "${APP_PID:-}" ]]    && kill -9 "$APP_PID"    2>/dev/null || true
+    # On Windows, kill -9 kills uv.exe but not the Python subprocess it spawned.
+    # Use taskkill /T to kill the entire process tree.
+    if [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+        [[ -n "${ENGINE_PID:-}" ]] && taskkill /PID "$ENGINE_PID" /F /T 2>/dev/null || true
+        [[ -n "${APP_PID:-}" ]]    && taskkill /PID "$APP_PID"    /F /T 2>/dev/null || true
+        # Belt-and-suspenders: kill any process still on the engine port
+        stale_engine=$(netstat -ano 2>/dev/null | awk '/:'"$PORT"' +0\.0\.0\.0:0 +LISTENING/{print $NF}' | sort -u)
+        for pid in $stale_engine; do taskkill /PID "$pid" /F /T 2>/dev/null || true; done
+    else
+        [[ -n "${ENGINE_PID:-}" ]] && kill -9 "$ENGINE_PID" 2>/dev/null || true
+        [[ -n "${APP_PID:-}" ]]    && kill -9 "$APP_PID"    2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 

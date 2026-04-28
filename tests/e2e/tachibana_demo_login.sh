@@ -63,8 +63,15 @@ EXPECT_DEMO_FLAG_RE='is_demo=True'
 EXPECT_HANDSHAKE_RE='engine handshake complete|Python data engine ready|Connected to external data engine'
 
 cleanup() {
-    [[ -n "${ENGINE_PID:-}" ]] && kill -9 "$ENGINE_PID" 2>/dev/null || true
-    [[ -n "${APP_PID:-}" ]]    && kill -9 "$APP_PID"    2>/dev/null || true
+    if [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+        [[ -n "${ENGINE_PID:-}" ]] && taskkill /PID "$ENGINE_PID" /F /T 2>/dev/null || true
+        [[ -n "${APP_PID:-}" ]]    && taskkill /PID "$APP_PID"    /F /T 2>/dev/null || true
+        stale_engine=$(netstat -ano 2>/dev/null | awk '/:'"$PORT"' +0\.0\.0\.0:0 +LISTENING/{print $NF}' | sort -u)
+        for pid in $stale_engine; do taskkill /PID "$pid" /F /T 2>/dev/null || true; done
+    else
+        [[ -n "${ENGINE_PID:-}" ]] && kill -9 "$ENGINE_PID" 2>/dev/null || true
+        [[ -n "${APP_PID:-}" ]]    && kill -9 "$APP_PID"    2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 

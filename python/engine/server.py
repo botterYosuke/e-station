@@ -703,13 +703,6 @@ class DataEngineServer:
         self._session_holder.set_password(value)
 
     async def _do_submit_order(self, msg: dict) -> None:
-        # TEMPORARY DEBUG: httpx logger level check before submit
-        _hx_debug = logging.getLogger("httpx")
-        log.debug(
-            "DEBUG_SUBMIT: httpx level=%s effective=%s INFO_enabled=%s filters=%s",
-            _hx_debug.level, _hx_debug.getEffectiveLevel(),
-            _hx_debug.isEnabledFor(logging.INFO), _hx_debug.filters
-        )
         # C-2: in-flight カウンタをインクリメント（architecture.md §2.4 競合ポリシー）。
         self._submit_order_inflight_count += 1
         try:
