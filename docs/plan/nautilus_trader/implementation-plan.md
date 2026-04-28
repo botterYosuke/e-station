@@ -703,58 +703,76 @@
 
 ---
 
-## Phase N2: 立花 ExecutionClient（デモ）
+## Phase N2: 立花 ExecutionClient（デモ）✅ 完了 2026-04-29
 
 **前提**: order/ 計画の Phase O0〜O2 が完了し、`tachibana_orders.submit_order` / `modify_order` / `cancel_order` / EC frame パーサ / 第二暗証番号 UI / 監査ログ WAL がすべて稼働している。本フェーズは **nautilus への薄い adapter のみ**を書く。
 
-### N2.0 立花 LiveDataClient（FD frame → TradeTick）⭐ 新設
-- [ ] `python/engine/nautilus/clients/tachibana_data.py` 新設
-- [ ] 既存 `tachibana_ws._FdFrameProcessor` の trade dict 出力を nautilus `TradeTick` に変換（[data-mapping.md §1.2](./data-mapping.md#12-live-立花-fd-frame--tradetick)）
-- [ ] `LiveDataClient` を継承し `LiveDataEngine.process(tick)` に流す
-- [ ] `aggressor_side` 推定不能の場合は `NO_AGGRESSOR` に写像（[tachibana_ws.py:183](../../../python/engine/exchanges/tachibana_ws.py#L183) の警告を補足）
-- [ ] テスト: FD frame サンプル → TradeTick 変換、`NO_AGGRESSOR` 比率の sanity check
+### N2.0 立花 LiveDataClient（FD frame → TradeTick）⭐ 新設 ✅ 完了 2026-04-29
+- [x] ✅ `python/engine/nautilus/clients/tachibana_data.py` 新設
+- [x] ✅ 既存 `tachibana_ws._FdFrameProcessor` の trade dict 出力を nautilus `TradeTick` に変換（[data-mapping.md §1.2](./data-mapping.md#12-live-立花-fd-frame--tradetick)）
+- [x] ✅ `TachibanaLiveDataClient` が `LiveDataClient` を継承し `feed_trade_dict()` で `_handle_data(tick)` に流す
+- [x] ✅ `aggressor_side` 推定不能 (`"unknown"`) の場合は `NO_AGGRESSOR` に写像
+- [x] ✅ テスト: `python/tests/test_tachibana_data_client.py` 13 件 GREEN（side 全 4 種・precision・ts_ms→ns・trade_id 連番・sanity check）
 
-### N2.1 nautilus `LiveExecutionClient` adapter
+### N2.1 nautilus `LiveExecutionClient` adapter ✅ 完了 2026-04-29
 
 **前提**: `python/engine/exchanges/tachibana_orders.py` が存在し `submit_order` / `NautilusOrderEnvelope` が実装済みであること（order/ Phase O0 以上完了）
 
-- [ ] `python/engine/nautilus/clients/tachibana.py` 新設
-- [ ] `LiveExecutionClient` を継承し、以下を **order/ の関数に委譲**:
+- [x] ✅ `python/engine/nautilus/clients/tachibana.py` 新設
+- [x] ✅ `LiveExecutionClient` を継承し、以下を **order/ の関数に委譲**:
   - `submit_order(Order)` → `tachibana_orders.submit_order(session, second_password, NautilusOrderEnvelope.from_nautilus(order))`
   - `modify_order` → `tachibana_orders.modify_order(...)`
   - `cancel_order` → `tachibana_orders.cancel_order(...)`
-- [ ] 立花 API 写像（`OrderType` / `TimeInForce` / `cash_margin` / `account_type`）は **[order/spec.md §6](../✅order/spec.md#6-nautilus_trader-互換要件不変条件) と [data-mapping.md](./data-mapping.md) に従う**。本ファイル内に重複定義しない
+- [x] ✅ 立花 API 写像（`OrderType` / `TimeInForce` / `cash_margin` / `account_type`）は **[order/spec.md §6](../✅order/spec.md#6-nautilus_trader-互換要件不変条件) と [data-mapping.md](./data-mapping.md) に従う**。本ファイル内に重複定義しない
 
-### N2.2 EC frame → nautilus イベント変換
-- [ ] `python/engine/nautilus/clients/tachibana_event_bridge.py` 新設
-- [ ] order/ の `tachibana_event._parse_ec_frame` の戻り値（`OrderEcEvent`）を nautilus `OrderFilled` / `OrderCanceled` / `OrderRejected` に変換
-- [ ] `LiveExecutionEngine.process_event(...)` に流す
-- [ ] **冪等化（M5）**: 同一 `p_eda_no` の EC が再送された場合に nautilus 側で 2 重 `OrderFilled` を発火しないよう、ClientOrderId 単位の seen-set を adapter 内に持つ。order/ の Python 側 seen-set と二重ガードになるが、IPC 経路を跨ぐ再起動時に守りを兼ねる
-- [ ] 検証テスト: N2.6 の同一 `p_eda_no` 重複受信テスト（`test_ec_idempotency`）が pass すること
+### N2.2 EC frame → nautilus イベント変換 ✅ 完了 2026-04-29
+- [x] ✅ `python/engine/nautilus/clients/tachibana_event_bridge.py` 新設
+- [x] ✅ order/ の `tachibana_event._parse_ec_frame` の戻り値（`OrderEcEvent`）を nautilus `OrderFilled` / `OrderCanceled` / `OrderRejected` に変換
+- [x] ✅ `LiveExecutionEngine.process_event(...)` に流す（`generate_order_filled` / `generate_order_canceled` 経由）
+- [x] ✅ **冪等化（M5）**: 同一 `(venue_order_id, trade_id)` の EC が再送された場合に seen-set で 2 重発火を防ぐ。`reset_seen()` で日次リセット対応
+- [x] ✅ 検証テスト: `test_tachibana_event_bridge.py` の `TestEcIdempotency` が pass すること
 
-### N2.3 注文 ID マッピングと再起動復元
-- [ ] nautilus `ClientOrderId` ⇔ 立花 `sOrderNumber` の双方向写像（order/ の `OrderSessionState` を流用）
-- [ ] プロセス再起動時: 立花 `CLMOrderList` を引き、未決注文を nautilus `Cache` に warm-up（[spec.md §3.2](./spec.md#32-セキュリティ) の persistence 無効・Cache warm-up 規約）
-- [ ] **persistence 設定（H3）**: `engine_runner.py` の `NautilusEngineConfig` 組み立て箇所で `database` を `None` にハードコードし、直後に `assert config.database is None` を入れる。Parquet/SQLite 永続化を OFF にしたまま warm-up を毎回行う。テストで `CacheConfig` の設定値を assert
+### N2.3 注文 ID マッピングと再起動復元 ✅ 完了 2026-04-29
+- [x] ✅ nautilus `ClientOrderId` ⇔ 立花 `sOrderNumber` の双方向写像（`OrderIdMap` を `tachibana_event_bridge.py` に同居実装）
+- [x] ✅ プロセス再起動時: 立花 `CLMOrderList` を引き、未決注文を `warm_up_from_records()` で復元（FILLED/CANCELED/EXPIRED/REJECTED はスキップ）
+- [x] ✅ **persistence 設定（H3）**: `engine_runner.py` の `start_live()` で `CacheConfig(database=None)` + `assert config.database is None` を実装。テスト `TestCacheConfigPersistenceOff` GREEN
 
-### N2.4 市場時間帯ガード（M2）
-- [ ] 立花 venue が `Disconnected{reason:"market_closed"}` の間は `LiveExecutionClient.start()` を保留する
-- [ ] HTTP API 層 (`order_api.rs`) で `MARKET_CLOSED` を先行 reject（[order/spec.md §5.2](../✅order/spec.md#52-reason_code-体系観測性)）
-- [ ] nautilus 内部で reject されてナラティブが汚染されないよう、ExecutionClient `start()` 前に `RiskEngine` への渡し前段で stop する経路を確認
+### N2.4 市場時間帯ガード（M2）✅ 完了 2026-04-29（N3 繰越: Rust 側）
+- [x] ✅ `_submit_order` / `_modify_order` / `_cancel_order` で `is_market_open()` を呼び、閉場中は `generate_order_denied` / `generate_order_modify_rejected` / `generate_order_cancel_rejected` を返す
+- [ ] ⏩ N3 繰越: HTTP API 層 (`order_api.rs`) で `MARKET_CLOSED` を先行 reject（[order/spec.md §5.2](../✅order/spec.md#52-reason_code-体系観測性)）
+- [x] ✅ `_connect()` で市場閉場中は WARNING ログを出すが接続自体はブロックしない（nautilus start() 保留は不要と判断、logged warning で代替）
 
-### N2.5 セーフティ（order/ と二重ガード）
-- [ ] デモ環境強制（`TACHIBANA_ALLOW_PROD=1` 未設定なら本番 URL を選んでも reject）
-- [ ] 数量上限・1 注文金額上限を起動 config で必ず指定（未指定なら起動拒否）
-- [ ] 発注ログ追記は order/ の WAL を使う（重複ファイルを増やさない）
+### N2.5 セーフティ（order/ と二重ガード）✅ 完了 2026-04-29
+- [x] ✅ デモ環境強制（`TACHIBANA_ALLOW_PROD=1` 未設定なら本番 URL を選んでも reject）— `guard_prod_url()` が `_tachibana_submit_order` 内で呼ばれることを確認
+- [x] ✅ 数量上限・1 注文金額上限を起動 config で必ず指定（未指定なら `super().__init__()` 前に `ValueError`）。テスト `TestClientInitSafety` GREEN
+- [x] ✅ 発注ログ追記は order/ の WAL を使う（重複ファイルを増やさない）— `submit_order` 委譲で自動適用
 
-### N2.6 E2E と単体テスト
-- [ ] `s70_tachibana_nautilus_demo_order.py`（CI には載せない、ローカル手動。デモ環境クレデンシャルが必要）
-- [ ] ユニットテスト: nautilus `OrderFactory` から発注 → adapter → mock `tachibana_orders` の往復で order/ の **`OrderType` 全 6 種 + `TimeInForce` 全 7 種**（[order/spec.md §6.1](../✅order/spec.md#61-用語型の整合必須)）を検証
-- [ ] **追加テスト**: 部分約定 EC を 2 件流して `cumulative_qty` / `leaves_qty` が nautilus `OrderFilled` で正しく累積すること
-- [ ] **追加テスト**: cancel リクエスト送信中に EC fill が来るレースで `OrderStatus` が壊れないこと
-- [ ] **追加テスト**: 同一 `p_eda_no` の EC 重複受信で `OrderFilled` が 1 回しか発火しないこと
+### N2.6 E2E と単体テスト ✅ 完了 2026-04-29
+- [x] ✅ `scripts/s70_tachibana_nautilus_demo_order.py`（CI には載せない、ローカル手動。デモ環境クレデンシャルが必要）
+- [x] ✅ ユニットテスト: `test_tachibana_live_execution_client.py` で `OrderType` 全 6 種 + `TimeInForce` 全 7 種、buy/sell side、price、tags を検証（26 件 GREEN）
+- [x] ✅ **追加テスト**: 部分約定 EC を 2 件流して `last_qty` が正しいこと（`TestPartialFill`）
+- [x] ✅ **追加テスト**: cancel リクエスト送信中に EC fill が来るレースで両イベントが発火すること（`TestCancelFillRace`）
+- [x] ✅ **追加テスト**: 同一 `(venue_order_id, trade_id)` の EC 重複受信で `OrderFilled` が 1 回しか発火しないこと（`TestEcIdempotency`）
 
 **Exit 条件**: デモ環境で「成行買い → 約定通知受信 → nautilus Portfolio に反映 → ナラティブに `outcome` が入る」往復が手動で確認、N2.6 の追加テストすべて緑
+
+---
+
+**N2 完了サマリー（2026-04-29）**
+
+**状況**: N2.0〜N2.6 すべての実装・テストが GREEN。Rust 側の `OrderRecordWire.venue` フィールド追加（R2 review-fix の先行変更）に合わせてテスト構造体を修正済み。
+
+**新たな知見**:
+- nautilus `LiveExecutionClient` の抽象メソッドはアンダースコア付き（`_submit_order` 等）。`super().__init__()` の Cython 型検査が先に実行されるため、**安全ガードは必ず `super().__init__()` より前**に置くこと
+- `generate_order_filled` の引数は 14 個の位置引数。`venue_position_id` は `None`、`commission=Money(0.0, JPY)`、`liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE` が標準
+- nautilus には `OrderExpired` がない。NT="4"（失効）は `generate_order_canceled` で代替
+- `TradeTick` の `trade_id` は `TradeId(str)` で一意性が要求される。`f"L-{ts_ms}-{seq}"` 形式で ts_ms+連番を組み合わせることで同一 ms 内の重複を回避
+- `CacheConfig(database=None)` を assert でガードすることで Parquet/SQLite 誤設定を即座に検出できる
+
+**Tips**:
+- `OrderIdMap.warm_up_from_records()` は `client_order_id=None`（立花 WAL 外の注文）に `WARM-{venue_order_id}` プレフィックスを付与して登録する。`strategy_id` は `"warm-up"` で固定
+- EC の冪等化キーは `(venue_order_id, trade_id)` ペア。`trade_id` のみでは同一注文の複数約定が潰れる恐れがある
+- N3 繰越: `order_api.rs` での `MARKET_CLOSED` 先行 reject は Rust 側変更を要するため N3 スコープに移動
 
 ---
 

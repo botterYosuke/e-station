@@ -842,6 +842,9 @@ impl Dashboard {
             return;
         };
 
+        // Note: last_split_pane is updated only when panes.split() succeeds. If
+        // split returns None (grid full), subsequent panes fall back to base_pane.
+        // This is a pre-existing constraint of iced's pane_grid API.
         let mut last_split_pane = base_pane;
 
         // N1.14: is_first ガード — reload 時 (同一銘柄の2回目以降) は

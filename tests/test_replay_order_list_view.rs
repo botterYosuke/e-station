@@ -83,6 +83,7 @@ fn order_record_wire_has_venue_field_with_default() {
 }
 
 /// N1.15: distribute_order_list が is_replay に基づいて venue でフィルタする
+/// フィルタ式 `o.venue == "replay"` と `o.venue != "replay"` が存在することを pin
 #[test]
 fn distribute_order_list_filters_by_venue() {
     let dashboard_src = std::fs::read_to_string(concat!(
@@ -91,8 +92,27 @@ fn distribute_order_list_filters_by_venue() {
     ))
     .expect("read dashboard.rs");
     assert!(
-        dashboard_src.contains("is_replay") && dashboard_src.contains("venue"),
-        "distribute_order_list must filter orders by venue/is_replay; got:\n(omitted)"
+        dashboard_src.contains("o.venue == \"replay\""),
+        "distribute_order_list must contain `o.venue == \"replay\"` filter; got:\n(omitted)"
+    );
+    assert!(
+        dashboard_src.contains("o.venue != \"replay\""),
+        "distribute_order_list must contain `o.venue != \"replay\"` filter; got:\n(omitted)"
+    );
+}
+
+/// N1.15: REPLAY pane では取消・訂正ボタンが非表示 (is_replay ガード)
+#[test]
+fn orders_panel_replay_hides_cancel_modify_buttons() {
+    let src = read_orders_panel_source();
+    assert!(
+        src.contains("is_replay") && src.contains("REPLAY") && src.contains("venue_order_id"),
+        "orders.rs must guard cancel/modify by is_replay; got:\n(omitted)"
+    );
+    // update() が REPLAY pane で cancel を無視するガードを含むことを確認
+    assert!(
+        src.contains("CancelClicked") && src.contains("is_replay"),
+        "update() must short-circuit CancelClicked when is_replay; got:\n(omitted)"
     );
 }
 

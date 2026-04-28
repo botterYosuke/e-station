@@ -273,4 +273,32 @@ fn order_record_wire_roundtrip() {
     assert_eq!(roundtripped.price, record.price);
     assert_eq!(roundtripped.status, record.status);
     assert_eq!(roundtripped.ts_event_ms, record.ts_event_ms);
+    assert_eq!(roundtripped.venue, record.venue);
+}
+
+/// N1.15: Old Python (no venue field) → new Rust deserializes with default "tachibana"
+#[test]
+fn order_record_wire_venue_defaults_to_tachibana_when_absent() {
+    let json_no_venue = r#"{
+        "client_order_id": "cid-old",
+        "venue_order_id": "V-OLD",
+        "instrument_id": "7203.TSE",
+        "order_side": "BUY",
+        "order_type": "LIMIT",
+        "quantity": "100",
+        "filled_qty": "0",
+        "leaves_qty": "100",
+        "price": "3000",
+        "trigger_price": null,
+        "time_in_force": "DAY",
+        "expire_time_ns": null,
+        "status": "ACCEPTED",
+        "ts_event_ms": 0
+    }"#;
+
+    let record: OrderRecordWire = serde_json::from_str(json_no_venue).unwrap();
+    assert_eq!(
+        record.venue, "tachibana",
+        "venue must default to 'tachibana' when absent from JSON"
+    );
 }

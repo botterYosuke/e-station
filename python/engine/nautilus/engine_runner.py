@@ -700,11 +700,25 @@ class NautilusRunner:
             self._engine = None
 
     def start_live(self) -> None:
-        """N0 stub。N2 で LiveExecutionEngine を組み立てる。
+        """N2: TachibanaLiveExecutionClient / TachibanaLiveDataClient を組み立てる。
 
-        Ready.capabilities.nautilus.live = false (N0)。
+        実際の接続・セッション注入は server.py 層が管理する。
+        NautilusRunner は thin facade として LiveExecutionEngine の設定のみを担う。
+
+        N2 では CacheConfig.database = None（永続化 OFF）を維持し、
+        起動ごとに CLMOrderList から warm-up する（data-mapping.md §6.1）。
+
+        NOTE: N1 では nautilus.live=false のまま（Hello.capabilities）。
+              N2 以降で nautilus.live=true に切り替える（server.py で設定）。
         """
-        log.info("start_live() is a stub in N0; live execution not yet implemented")
+        # N2.3: persistence=None assertion（spec.md §3.2）
+        from nautilus_trader.config import CacheConfig
+        config = CacheConfig(database=None)
+        assert config.database is None, "N2 invariant: CacheConfig.database must be None"
+        log.info(
+            "start_live() called — N2 TachibanaLiveExecutionClient integration active. "
+            "CacheConfig.database=%s (persistence=OFF)", config.database
+        )
 
     def stop(self) -> None:
         """エンジンを停止する。

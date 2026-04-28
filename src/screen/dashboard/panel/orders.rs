@@ -79,6 +79,9 @@ pub enum Action {
 pub fn update(panel: &mut OrdersPanel, msg: Message) -> Option<Action> {
     match msg {
         Message::RefreshClicked => Some(Action::RequestOrderList),
+        // N1.15: REPLAY pane では取消・訂正 IPC を発行しない。
+        // REPLAY 注文は venue_order_id="" のため tachibana cancel API に渡せない。
+        Message::CancelClicked { .. } | Message::ModifyClicked { .. } if panel.is_replay => None,
         Message::CancelClicked { client_order_id } => {
             let venue_order_id = panel
                 .orders
@@ -118,6 +121,7 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
         return column![header, center(text("注文なし").size(14))].into();
     }
 
+    let is_replay = panel.is_replay;
     let rows = panel.orders.iter().map(|order| {
         let cid = order
             .client_order_id
@@ -125,25 +129,30 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
             .unwrap_or_else(|| order.venue_order_id.clone());
         let label = format!(
             "{} {} {} {} @ {} [{}]",
-            order.venue_order_id,
             order.instrument_id,
             order.order_side.as_str(),
             order.quantity,
             order.price.as_deref().unwrap_or("MKT"),
             order.status,
+            cid,
         );
-        let cid_mod = cid.clone();
-        row![
-            text(label).size(12),
-            button(text("訂正").size(11)).on_press(Message::ModifyClicked {
-                client_order_id: cid_mod
-            }),
-            button(text("取消").size(11)).on_press(Message::CancelClicked {
-                client_order_id: cid
-            }),
-        ]
-        .spacing(8)
-        .into()
+        // N1.15: REPLAY 注文は venue_order_id="" のため取消・訂正は無効。
+        if is_replay {
+            row![text(label).size(12)].spacing(8).into()
+        } else {
+            let cid_mod = cid.clone();
+            row![
+                text(label).size(12),
+                button(text("訂正").size(11)).on_press(Message::ModifyClicked {
+                    client_order_id: cid_mod
+                }),
+                button(text("取消").size(11)).on_press(Message::CancelClicked {
+                    client_order_id: cid
+                }),
+            ]
+            .spacing(8)
+            .into()
+        }
     });
 
     let content = column(rows).spacing(4);
