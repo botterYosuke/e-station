@@ -359,4 +359,56 @@ mod tests {
             "stale order c-1 should not be cancellable after replacement"
         );
     }
+
+    /// N1.15: REPLAY pane で CancelClicked を発行しても None が返る（IPC を発行しない）
+    #[test]
+    fn cancel_clicked_on_replay_panel_returns_none() {
+        use engine_client::dto::{OrderRecordWire, OrderSide, OrderType, TimeInForce};
+
+        let mut panel = OrdersPanel::new_replay();
+        panel.set_orders(vec![OrderRecordWire {
+            client_order_id: Some("replay-c-1".to_string()),
+            venue_order_id: "".to_string(),
+            instrument_id: "7203.TSE".to_string(),
+            order_side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: "100".to_string(),
+            filled_qty: "0".to_string(),
+            leaves_qty: "100".to_string(),
+            price: None,
+            trigger_price: None,
+            time_in_force: TimeInForce::Day,
+            expire_time_ns: None,
+            status: "SUBMITTED".to_string(),
+            ts_event_ms: 0,
+            venue: "replay".to_string(),
+        }]);
+
+        let action = update(
+            &mut panel,
+            Message::CancelClicked {
+                client_order_id: "replay-c-1".to_string(),
+            },
+        );
+        assert!(
+            action.is_none(),
+            "REPLAY pane must not produce CancelOrder; got {action:?}"
+        );
+    }
+
+    /// N1.15: REPLAY pane で ModifyClicked を発行しても None が返る
+    #[test]
+    fn modify_clicked_on_replay_panel_returns_none() {
+        let mut panel = OrdersPanel::new_replay();
+        let action = update(
+            &mut panel,
+            Message::ModifyClicked {
+                client_order_id: "replay-c-1".to_string(),
+            },
+        );
+        assert!(
+            action.is_none(),
+            "REPLAY pane must not produce ModifyOrder; got {action:?}"
+        );
+    }
 }
