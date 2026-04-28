@@ -1,5 +1,5 @@
 """Smoke test: drive a real-demo Tachibana login through the production
-code path (`tachibana_login_flow.run_login` → `tachibana_auth.login` →
+code path (`tachibana_login_flow.startup_login` → `tachibana_auth.login` →
 `validate_session_on_startup`).
 
 Reads `.env` (DEV_TACHIBANA_USER_ID / DEV_TACHIBANA_PASSWORD /
@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -50,57 +52,42 @@ async def main() -> int:
         validate_session_on_startup,
     )
     from engine.exchanges.tachibana_helpers import PNoCounter
-    from engine.exchanges.tachibana_login_flow import run_login
-    from engine.exchanges.tachibana_url import (
-        EventUrl,
-        MasterUrl,
-        PriceUrl,
-        RequestUrl,
+    from engine.exchanges.tachibana_login_flow import (
+        LoginCancelled,
+        startup_login,
     )
-    from engine.exchanges.tachibana_auth import TachibanaSession
+
+    # Use throw-away config / cache dirs so a stale cached session from a
+    # previous smoke run cannot mask a real login regression. The dev fast
+    # path skips the tkinter dialog when DEV_TACHIBANA_* env vars are set.
+    tmp_root = Path(tempfile.mkdtemp(prefix="tachibana_smoke_"))
+    config_dir = tmp_root / "config"
+    cache_dir = tmp_root / "cache"
+    config_dir.mkdir()
+    cache_dir.mkdir()
 
     p_no = PNoCounter()
-    events = await run_login(
-        request_id="smoke-1",
-        p_no_counter=p_no,
-        dev_login_allowed=True,
-        is_startup=True,
-    )
-
-    print("=== Login events ===", file=sys.stderr)
-    for ev in events:
-        # Mask URL values explicitly so we never print session secrets.
-        masked = {
-            k: ("***" if k == "session" else v)
-            for k, v in ev.items()
-        }
-        print(masked, file=sys.stderr)
-
-    if not any(ev.get("event") == "VenueReady" for ev in events):
-        logging.error("LOGIN FAILED — no VenueReady in event sequence")
+    try:
+        session = await startup_login(
+            config_dir,
+            cache_dir,
+            p_no_counter=p_no,
+            startup_latch=StartupLatch(),
+            dev_login_allowed=True,
+        )
+    except LoginCancelled:
+        logging.error("LOGIN FAILED — dialog was cancelled (DEV_TACHIBANA_* unset?)")
         return 1
+    finally:
+        # Best-effort cleanup; smoke runs are short-lived.
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
-    # Reconstruct the session from VenueCredentialsRefreshed and validate
-    # it via the same path SetVenueCredentials uses on startup.
-    refresh = next(
-        (ev for ev in events if ev.get("event") == "VenueCredentialsRefreshed"),
-        None,
-    )
-    assert refresh is not None
-    s = refresh["session"]
-    session = TachibanaSession(
-        url_request=RequestUrl(s["url_request"]),
-        url_master=MasterUrl(s["url_master"]),
-        url_price=PriceUrl(s["url_price"]),
-        url_event=EventUrl(s["url_event"]),
-        url_event_ws=s["url_event_ws"],
-        zyoutoeki_kazei_c=s.get("zyoutoeki_kazei_c", ""),
-        expires_at_ms=s.get("expires_at_ms"),
-    )
-
-    latch = StartupLatch()
+    # Re-validate via the same path SetVenueCredentials uses on startup.
+    # `startup_login` already validated cached sessions internally, but
+    # re-running on the freshly minted session catches regressions where
+    # a brand-new session wouldn't survive the post-login ping.
     await validate_session_on_startup(
-        session, latch=latch, p_no_counter=p_no
+        session, latch=StartupLatch(), p_no_counter=p_no
     )
     logging.info("Tachibana session validated successfully")
     return 0
