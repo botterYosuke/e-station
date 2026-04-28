@@ -1018,6 +1018,71 @@ ImplementationLoop の収束基準は MEDIUM 以上ゼロ。残 MEDIUM 3 / LOW 6
 
 ---
 
+## レビュー反映 (2026-04-29, N2 R1〜R3)
+
+Phase N2（tachibana LiveDataClient / LiveExecutionClient adapter）の review-fix-loop を 3 ラウンドで実施。
+
+### ラウンド別件数推移
+
+| ラウンド | CRITICAL | HIGH | MEDIUM | LOW |
+|----------|----------|------|--------|-----|
+| R1 初回  | 0        | 9    | 7      | 5   |
+| R2 再レビュー | 0   | 3    | 4      | 4   |
+| R3 サニティ | 0     | 1    | 2      | 1   |
+| 収束     | 0        | 0    | 0      | —   |
+
+### R1 で解消した主な指摘
+
+| ID | 解消概要 |
+|----|---------|
+| H: IPC venue 欠如 | `python/engine/schemas.py` と `tachibana_orders.py` の `OrderRecordWire` に `venue: str = "tachibana"` を追加 |
+| H: cancel/expire 無音 | `_handle_canceled` / `_handle_expired` で `order_info is None` 時に `log.warning` を追加 |
+| H: safety_limits 黙殺 | `except Exception: pass` → `log.error + return "SAFETY_CHECK_ERROR: {exc}"` |
+| H: side フォールバック "BUY" | `_SIDE_MAP.get(side_val, "BUY")` → `ValueError` raise → `generate_order_denied` |
+| H: start_live() tautology | assert コメント強化 + テスト書き直し (inspect.getsource ベース) |
+| M: MARKET_TO_LIMIT(5) 欠落 | パラメータテストに追加 |
+| M: warm_up count ログ | 実際の登録数 (`warmed_count/len(records)`) をログ出力 |
+| M: s70 exit code 常に 0 | `sys.exit(0 if filled else 0)` → `sys.exit(0)` + コメント整合 |
+| M: _seq_per_ms GC 閾値 | `> 2` → `> 1`（直近 1 件保持） |
+| M: price 変換無音 | `except Exception: pass` → `log.warning(...)` |
+| M: instrument_id None 続行 | スキップ + `log.warning` |
+| Rust: schema_major == 2 | `>= 2` → `assert_eq!(..SCHEMA_MAJOR, 2, ...)` |
+| Rust: venue default assert | `order_list_updated_with_one_record_deserializes` に `orders[0].venue == "tachibana"` を追加 |
+
+### R2 で解消した主な指摘
+
+| ID | 解消概要 |
+|----|---------|
+| H: FSM 違反 | `_submit_order` 例外時の `generate_order_rejected` → `generate_order_denied(reason="SUBMIT_FAILED: ...")` |
+| H: ValueError escape | `except ValueError` → `except Exception` for `_order_to_envelope` 呼び出しラップ |
+| H: reset_seen() TODO | `tachibana_event_bridge.py` の `reset_seen()` 定義に N3 繰越 TODO コメント追加 |
+| M: TestCacheConfig 自己発火 | `inspect.getsource` で `"database=None"` AND `"config.database is None"` を検査するテストに変更 |
+| M: _by_venue 直接アクセス | `TestMissingOrderInfoWarning` を `MagicMock(spec=OrderIdMap)` 経由に書き直し |
+| M: order_side フォールバック無音 | `warm_up_from_records` で未知 order_side/order_type 時に `log.warning` を追加 |
+| M: warm_up() 成否不明 | 戻り値 `None` → `bool`（成功 `True`、失敗 `False`） |
+
+### R3 で解消した主な指摘
+
+| ID | 解消概要 |
+|----|---------|
+| H: 指値注文 price=None 続行 | `_order_to_envelope` で LIMIT/STOP_LIMIT/LIMIT_IF_TOUCHED/MARKET_TO_LIMIT + price is None → `ValueError` raise（→ `generate_order_denied`）。対応テスト `TestOrderToEnvelopeLimitPriceRequired` 3 件追加。既存 `test_order_type_mapping` に `needs_price` パラメータを追加して LIMIT 系はダミー price を渡すよう修正 |
+| M: inspect.getsource 検査強化 | `"config.database is None"` の存在も同時 assert |
+
+### 繰越事項（N3 スコープ）
+
+- **server.py 未配線**: `TachibanaEventBridge.process_ec_event` と `warm_up()` を `server.py` の EC ハンドラに接続することが未完了。adapter クラス自体は実装済みで isolation テスト GREEN。N3 で `LiveExecutionEngine` 統合と同時に配線する
+- **reset_seen() 日次リセット**: 夜間閉局時（立花 ST フレーム検知後）に `reset_seen()` を呼ぶ配線が未完了。N3 繰越（`tachibana_event_bridge.py:reset_seen()` に TODO コメント追記済み）
+- **order_api.rs MARKET_CLOSED 先行 reject**: Rust 側の HTTP API 層での閉場前 reject。N3 スコープに明記済み
+
+### 新たな知見
+
+- **nautilus FSM 規約**: `generate_order_rejected` は `generate_order_submitted` 後でないと FSM 違反。HTTP 送信失敗（ネットワークエラー）は `generate_order_denied` で「発注未確認」として扱うべき
+- **指値注文 price validation**: `_order_to_envelope` 内では `price=None` を WARNING で握りつぶしていたが、LIMIT 系注文では `ValueError` → `generate_order_denied` にエスカレーションしないと API 到達後に初めてエラーが発覚する
+- **inspect.getsource テスト**: ソース文字列検査は「同義リファクタリング」に対して脆弱。`"database=None"` と `"config.database is None"` の 2 つを AND 条件で検査することで、片方の削除を検出できる
+- **MagicMock(spec=) によるプライベート辞書アクセス廃止**: テストが内部辞書を直接操作すると `OrderIdMap` のバックエンド変更で壊れる。`spec=OrderIdMap` で公開 API のみ mock することで保護できる
+
+---
+
 ## 脚注
 
 [^n1.11-rust-dto]: N1.11 Rust DTO — `engine-client/src/dto.rs` に `Command::SetReplaySpeed { request_id: String, multiplier: u32 }` を追加。`python/engine/schemas.py` に `SetReplaySpeed` Pydantic クラスを追加。`engine-client/tests/schema_v2_4_nautilus.rs` に `set_replay_speed_serializes` / `set_replay_speed_debug_shows_multiplier` 2 件追加。SCHEMA_MAJOR=2 / SCHEMA_MINOR=4 は変更なし（後方互換フィールド追加のみ）。

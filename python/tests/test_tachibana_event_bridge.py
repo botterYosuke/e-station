@@ -299,14 +299,20 @@ class TestOrderIdMap:
 
 
 class TestMissingOrderInfoWarning:
-    """order_info が None の時に WARNING が出て generate_order_canceled が呼ばれない。"""
+    """order_info が None の時に WARNING が出て generate_order_canceled が呼ばれない。
+
+    OrderIdMap の公開 API (get_client_order_id / get_order_info) を MagicMock で
+    差し替えて「venue→client は引けるが client→info は None」状態を再現する。
+    プライベート辞書 (_by_venue / _by_client) への直接アクセスは行わない。
+    """
 
     def _make_bridge_with_venue_only(self) -> tuple[TachibanaEventBridge, MagicMock]:
-        """venue_order_id のみ登録（client_order_id → order_info なし）のブリッジ。"""
+        """venue_order_id → client_order_id は解決できるが order_info が None のブリッジ。"""
         client = MagicMock()
-        order_map = OrderIdMap()
-        # venue → client のマッピングだけ作り、order_info (by_client) は登録しない
-        order_map._by_venue["ORDER-NOINFO"] = "CLIENT-NOINFO"
+        # OrderIdMap の公開 API を MagicMock で差し替える
+        order_map = MagicMock(spec=OrderIdMap)
+        order_map.get_client_order_id.return_value = "CLIENT-NOINFO"
+        order_map.get_order_info.return_value = None
         bridge = TachibanaEventBridge(client=client, order_id_map=order_map)
         return bridge, client
 

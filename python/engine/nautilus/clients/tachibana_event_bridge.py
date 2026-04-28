@@ -100,6 +100,8 @@ class TachibanaEventBridge:
                 ec.venue_order_id,
             )
 
+    # TODO(N3): 毎日の市場クローズ後（立花 ST フレーム検知時）に server.py から呼ぶこと。
+    # server.py 配線が未完了（N3 繰越）のため、現在は日次リセットが実行されない。
     def reset_seen(self) -> None:
         """日次リセット。夜間閉局後に呼ぶ。"""
         self._seen.clear()
@@ -313,13 +315,31 @@ class OrderIdMap:
             if coid is None:
                 coid = f"WARM-{void}"
 
+            _mapped_side = _SIDE_MAP.get(order_side_str)
+            if _mapped_side is None:
+                log.warning(
+                    "OrderIdMap.warm_up: unknown order_side %r for venue_order_id=%s — defaulting to BUY",
+                    order_side_str,
+                    void,
+                )
+                _mapped_side = OrderSide.BUY
+
+            _mapped_type = _TYPE_MAP.get(order_type_str)
+            if _mapped_type is None:
+                log.warning(
+                    "OrderIdMap.warm_up: unknown order_type %r for venue_order_id=%s — defaulting to MARKET",
+                    order_type_str,
+                    void,
+                )
+                _mapped_type = OrderType.MARKET
+
             self.register(
                 client_order_id=coid,
                 venue_order_id=void,
                 instrument_id=instrument_id,
                 strategy_id=strategy_id,
-                order_side=_SIDE_MAP.get(order_side_str, OrderSide.BUY),
-                order_type=_TYPE_MAP.get(order_type_str, OrderType.MARKET),
+                order_side=_mapped_side,
+                order_type=_mapped_type,
             )
             warmed_count += 1
         log.info(

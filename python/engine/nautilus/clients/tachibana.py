@@ -106,12 +106,15 @@ def _order_to_envelope(order: Any) -> NautilusOrderEnvelope:
         raise ValueError(f"unknown side value: {side_val!r}")
 
     # price / trigger_price / expire_time_ns
+    _price_requires_types = {"LIMIT", "STOP_LIMIT", "LIMIT_IF_TOUCHED", "MARKET_TO_LIMIT"}
     price_str: Optional[str] = None
     if hasattr(order, "price") and order.price is not None:
         try:
             price_str = str(order.price)
         except Exception as exc:
             log.warning("_order_to_envelope: %s conversion failed: %s", "price", exc)
+    if order_type_str in _price_requires_types and price_str is None:
+        raise ValueError(f"order_type={order_type_str} requires price but price is None or unconvertible")
 
     trigger_price_str: Optional[str] = None
     if hasattr(order, "trigger_price") and order.trigger_price is not None:
@@ -254,11 +257,14 @@ class TachibanaLiveExecutionClient(LiveExecutionClient):
     # N2.3: Cache warm-up
     # ------------------------------------------------------------------
 
-    async def warm_up(self) -> None:
+    async def warm_up(self) -> bool:
         """CLMOrderList から当日未決注文を OrderIdMap に登録する（N2.3）。
 
         SetVenueCredentials → VenueReady 受信後、LiveExecutionEngine.start() 前に呼ぶ。
         warm-up 完了前に submit_order を受けた場合はキューに積む実装は N3 以降。
+
+        Returns:
+            True on success, False if CLMOrderList fetch failed.
         """
         try:
             records = await _tachibana_fetch_order_list(
@@ -267,8 +273,10 @@ class TachibanaLiveExecutionClient(LiveExecutionClient):
             )
             self._order_id_map.warm_up_from_records(records, self._strategy_id)
             log.info("warm_up: %d open orders loaded from CLMOrderList", len(records))
+            return True
         except Exception as exc:
             log.error("warm_up: failed to fetch CLMOrderList: %s", exc, exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # N2.1: LiveExecutionClient abstract methods
@@ -347,7 +355,7 @@ class TachibanaLiveExecutionClient(LiveExecutionClient):
 
         try:
             envelope = _order_to_envelope(order)
-        except ValueError as e:
+        except Exception as e:
             log.error(
                 "_submit_order: _order_to_envelope failed for %s: %s",
                 client_order_id,
@@ -357,7 +365,7 @@ class TachibanaLiveExecutionClient(LiveExecutionClient):
                 strategy_id=command.strategy_id,
                 instrument_id=order.instrument_id,
                 client_order_id=order.client_order_id,
-                reason=f"UNKNOWN_SIDE: {e}",
+                reason=f"ENVELOPE_ERROR: {e}",
                 ts_event=ts_ns,
             )
             return
@@ -376,11 +384,11 @@ class TachibanaLiveExecutionClient(LiveExecutionClient):
                 exc,
                 exc_info=True,
             )
-            self.generate_order_rejected(
+            self.generate_order_denied(
                 strategy_id=command.strategy_id,
                 instrument_id=order.instrument_id,
                 client_order_id=order.client_order_id,
-                reason=str(exc),
+                reason=f"SUBMIT_FAILED: {exc}",
                 ts_event=ts_ns,
             )
             return

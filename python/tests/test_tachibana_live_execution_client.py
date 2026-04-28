@@ -79,17 +79,18 @@ class _FakeSubmitCommand:
 class TestOrderToEnvelope:
     """OrderType 全 6 種 + TimeInForce 全 7 種 の写像"""
 
-    @pytest.mark.parametrize("order_type_val,expected", [
-        (1, "MARKET"),
-        (2, "LIMIT"),
-        (3, "STOP_MARKET"),
-        (4, "STOP_LIMIT"),
-        (5, "MARKET_TO_LIMIT"),
-        (6, "MARKET_IF_TOUCHED"),
-        (7, "LIMIT_IF_TOUCHED"),
+    @pytest.mark.parametrize("order_type_val,expected,needs_price", [
+        (1, "MARKET", False),
+        (2, "LIMIT", True),
+        (3, "STOP_MARKET", False),
+        (4, "STOP_LIMIT", True),
+        (5, "MARKET_TO_LIMIT", True),
+        (6, "MARKET_IF_TOUCHED", False),
+        (7, "LIMIT_IF_TOUCHED", True),
     ])
-    def test_order_type_mapping(self, order_type_val: int, expected: str):
-        order = _FakeOrder(order_type=order_type_val)
+    def test_order_type_mapping(self, order_type_val: int, expected: str, needs_price: bool):
+        price = "3000" if needs_price else None
+        order = _FakeOrder(order_type=order_type_val, price=price)
         env = _order_to_envelope(order)
         assert env.order_type == expected
 
@@ -226,10 +227,23 @@ class TestCacheConfigPersistenceOff:
     """persistence=None が OFF になっていること。"""
 
     def test_cache_config_database_is_none(self):
-        from nautilus_trader.config import CacheConfig
+        """start_live() が CacheConfig(database=None) を使っていることをソース検査で確認する。
 
-        config = CacheConfig(database=None)
-        assert config.database is None
+        自己発火パターン（CacheConfig を自前で作るだけ）を避け、実際に start_live()
+        の実装が database=None を維持していることを AST / ソース検査で保証する。
+        """
+        import inspect
+        from engine.nautilus.engine_runner import NautilusRunner
+
+        src = inspect.getsource(NautilusRunner.start_live)
+        assert "database=None" in src, (
+            "start_live() must construct CacheConfig(database=None) "
+            "to keep nautilus persistence OFF (spec.md §3.2)"
+        )
+        assert "config.database is None" in src, (
+            "start_live() must assert config.database is None "
+            "as a guard against future misconfiguration"
+        )
 
     def test_start_live_completes_without_exception(self):
         """start_live() が例外なく終了すること（P-5）。"""
@@ -279,3 +293,28 @@ class TestOrderToEnvelopeUnknownSide:
         order = _FakeOrder(side=99)  # 未知の side
         with pytest.raises(ValueError, match="unknown side value"):
             _order_to_envelope(order)
+
+
+# ---------------------------------------------------------------------------
+# R3: 指値注文で price=None の場合に ValueError が上がること
+# ---------------------------------------------------------------------------
+
+
+class TestOrderToEnvelopeLimitPriceRequired:
+    def test_limit_order_without_price_raises(self):
+        """LIMIT 注文で price=None の場合に ValueError が上がること（R3-HIGH-1）。"""
+        order = _FakeOrder(order_type=2, price=None)  # 2=LIMIT
+        with pytest.raises(ValueError, match="requires price"):
+            _order_to_envelope(order)
+
+    def test_stop_limit_order_without_price_raises(self):
+        """STOP_LIMIT 注文で price=None の場合に ValueError が上がること。"""
+        order = _FakeOrder(order_type=4, price=None)  # 4=STOP_LIMIT
+        with pytest.raises(ValueError, match="requires price"):
+            _order_to_envelope(order)
+
+    def test_market_order_without_price_passes(self):
+        """MARKET 注文では price=None でも ValueError が上がらないこと。"""
+        order = _FakeOrder(order_type=1, price=None)  # 1=MARKET
+        env = _order_to_envelope(order)
+        assert env.price is None
