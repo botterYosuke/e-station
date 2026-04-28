@@ -650,6 +650,29 @@ impl State {
             );
         }
 
+        if let Content::OrderEntry(panel) = &self.content {
+            let label = panel.display_label.as_deref().unwrap_or("銘柄未選択");
+            let ticker_btn = button(
+                text(label)
+                    .size(13)
+                    .align_y(Alignment::Center)
+                    .line_height(1.4),
+            )
+            .on_press(Message::PaneEvent(
+                id,
+                Event::ShowModal(Modal::MiniTickersList(MiniPanel::new())),
+            ))
+            .style(|theme, status| {
+                style::button::modifier(
+                    theme,
+                    status,
+                    !matches!(self.modal, Some(Modal::MiniTickersList(_))),
+                )
+            })
+            .height(widget::PANE_CONTROL_BTN_HEIGHT);
+            top_left_buttons = top_left_buttons.push(ticker_btn);
+        }
+
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
             if let Modal::StreamModifier(modifier) = m {
                 Some(modifier)
@@ -1622,6 +1645,14 @@ impl State {
                             }
                         }
                         crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti) => {
+                            if let Content::OrderEntry(panel) = &mut self.content {
+                                let display = ti.ticker.display_symbol_and_type().0;
+                                let instrument_id =
+                                    format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
+                                panel.set_instrument(instrument_id, display);
+                                self.modal = None;
+                                return None;
+                            }
                             return Some(Effect::SwitchTickersInGroup(ti));
                         }
                     }

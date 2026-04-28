@@ -59,6 +59,7 @@ impl std::fmt::Display for CashMarginKind {
 #[derive(Debug, Default)]
 pub struct OrderEntryPanel {
     pub instrument_id: Option<String>,
+    pub display_label: Option<String>,
     pub side: OrderSide,
     pub quantity: String,
     pub price_kind: PriceKind,
@@ -199,7 +200,7 @@ impl OrderEntryPanel {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let instrument_label = self.instrument_id.as_deref().unwrap_or("銘柄未選択");
+        let instrument_label = self.display_label.as_deref().unwrap_or("銘柄未選択");
 
         let side_row = {
             let is_buy = self.side == OrderSide::Buy;
@@ -296,8 +297,9 @@ impl OrderEntryPanel {
         self.quantity.parse::<u64>().map(|v| v > 0).unwrap_or(false)
     }
 
-    pub fn set_instrument(&mut self, id: String) {
+    pub fn set_instrument(&mut self, id: String, display: String) {
         self.instrument_id = Some(id);
+        self.display_label = Some(display);
     }
 
     /// Called when an OrderAccepted event arrives for our pending_request_id.
