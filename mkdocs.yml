@@ -1,0 +1,80 @@
+site_name: e-station dev
+site_description: e-station エンジニア向けドキュメント
+site_url: https://botteryosuke.github.io/e-station/
+repo_url: https://github.com/botterYosuke/e-station
+repo_name: botterYosuke/e-station
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+# 公開対象を docs/plan/✅*/spec.md と docs/index.md だけに絞る。
+# MkDocs 1.6+ の exclude_docs は gitignore 形式で、! で再包含できる。
+exclude_docs: |
+  *.json
+  .vitepress/
+  plan/**
+  wiki/**
+  !plan/✅*/spec.md
+
+theme:
+  name: material
+  language: ja
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: ダークモードに切替
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: ライトモードに切替
+
+nav:
+  - ホーム: index.md
+  - 実装仕様書:
+      - Python データエンジン: plan/✅python-data-engine/spec.md
+      - 立花証券 API 統合: plan/✅tachibana/spec.md
+      - 立花注文機能: plan/✅order/spec.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search:
+      lang:
+        - ja
+        - en
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/botterYosuke/e-station
+
+copyright: Released under the GPL-3.0 License.
