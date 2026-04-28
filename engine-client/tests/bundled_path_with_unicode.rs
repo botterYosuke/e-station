@@ -7,7 +7,7 @@
 //! implementation went `path.to_str().unwrap_or("flowsurface-engine")`,
 //! which would mask any non-UTF-8 path component as a missing binary.
 //!
-//! See `docs/plan/✅tachibana/implementation-plan-T3.5.md` §3 Step B (H5).
+//! See `docs/✅tachibana/implementation-plan-T3.5.md` §3 Step B (H5).
 
 use std::ffi::OsStr;
 use std::path::PathBuf;

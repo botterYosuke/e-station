@@ -11,7 +11,7 @@
   ``CLMMfdsGetIssueDetail`` ping (sIssueCode=7203, sSizyouC=00) used only
   during ``startup_login`` to confirm a restored session. Runtime
   ``p_errno=2`` detection takes the `VenueError{code:"session_expired"}`
-  path instead — see [architecture.md §6](../../../docs/plan/✅tachibana/architecture.md#6-失敗モードと-ui-表現).
+  path instead — see [architecture.md §6](../../../docs/✅tachibana/architecture.md#6-失敗モードと-ui-表現).
 
 Banner text (`message`) is composed here so that Rust UI never carries
 fixed Tachibana-specific strings (F-Banner1).

@@ -62,7 +62,7 @@ Understanding what persists helps you compact with confidence:
 
 ## Best Practices
 
-1. **Compact after planning** — Once plan is finalized in TodoWrite or `docs/plan/`, compact to start fresh
+1. **Compact after planning** — Once plan is finalized in TodoWrite or `docs/`, compact to start fresh
 2. **Compact after debugging** — Clear error-resolution context before continuing
 3. **Don't compact mid-implementation** — Preserve context for related changes
 4. **Write before compacting** — Save important context to files or memory before compacting

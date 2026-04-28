@@ -20,7 +20,10 @@ import os
 import pytest
 
 from engine.exchanges.tachibana_auth import TachibanaSession, login, validate_session_on_startup, StartupLatch
-from engine.exchanges.tachibana_helpers import PNoCounter
+from engine.exchanges.tachibana_helpers import LoginError, PNoCounter
+
+# Tachibana demo API is only available during market hours.
+_OUTSIDE_HOURS_ERRNO = "-62"
 
 pytestmark = pytest.mark.demo_tachibana
 
@@ -49,7 +52,12 @@ async def test_demo_login_returns_valid_session() -> None:
     user_id, password = _get_demo_creds()
 
     counter = PNoCounter()
-    session = await login(user_id, password, is_demo=True, p_no_counter=counter)
+    try:
+        session = await login(user_id, password, is_demo=True, p_no_counter=counter)
+    except LoginError as e:
+        if e.code == _OUTSIDE_HOURS_ERRNO:
+            pytest.skip("Tachibana demo API is outside service hours (p_errno=-62)")
+        raise
 
     assert isinstance(session, TachibanaSession)
     assert str(session.url_request).startswith("https://"), f"url_request={session.url_request}"
@@ -65,7 +73,12 @@ async def test_demo_session_validates_on_startup() -> None:
     user_id, password = _get_demo_creds()
 
     counter = PNoCounter()
-    session = await login(user_id, password, is_demo=True, p_no_counter=counter)
+    try:
+        session = await login(user_id, password, is_demo=True, p_no_counter=counter)
+    except LoginError as e:
+        if e.code == _OUTSIDE_HOURS_ERRNO:
+            pytest.skip("Tachibana demo API is outside service hours (p_errno=-62)")
+        raise
 
     latch = StartupLatch()
     result = await validate_session_on_startup(session, latch=latch, p_no_counter=counter)

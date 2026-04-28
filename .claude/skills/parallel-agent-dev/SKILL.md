@@ -71,8 +71,8 @@ origin: ECC (e-station 向けカスタム)
 
 オーケストレーターは必ず以下を先に読む:
 
-1. `docs/plan/<feature>/implementation-plan.md` — タスク一覧と完了条件
-2. `docs/plan/<feature>/architecture.md` — アーキテクチャ・境界・不変条件
+1. `docs/<feature>/implementation-plan.md` — タスク一覧と完了条件
+2. `docs/<feature>/architecture.md` — アーキテクチャ・境界・不変条件
 3. 関連する `spec.md` / `open-questions.md`
 
 読んだ後、**タスク間の依存関係を手元でまとめる**:

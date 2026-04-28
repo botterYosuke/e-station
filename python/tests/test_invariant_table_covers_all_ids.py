@@ -21,7 +21,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).parents[2]
-INVARIANT_TABLE = REPO_ROOT / "docs" / "plan" / "✅tachibana" / "invariant-tests.md"
+INVARIANT_TABLE = REPO_ROOT / "docs" / "✅tachibana" / "invariant-tests.md"
 
 # ---------------------------------------------------------------------------
 # Table parser

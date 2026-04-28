@@ -5,7 +5,7 @@
 //! Splitting the recovery path into two subscriptions reintroduces the
 //! "manual reconnect callback" duplication that H9 is meant to remove.
 //!
-//! See `docs/plan/✅tachibana/implementation-plan-T3.5.md` §3 Step A.
+//! See `docs/✅tachibana/implementation-plan-T3.5.md` §3 Step A.
 
 use syn::visit::Visit;
 

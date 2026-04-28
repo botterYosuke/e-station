@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[2]
-INVARIANT_TABLE = REPO_ROOT / "docs" / "plan" / "✅order" / "invariant-tests.md"
+INVARIANT_TABLE = REPO_ROOT / "docs" / "✅order" / "invariant-tests.md"
 
 # ---------------------------------------------------------------------------
 # Table parser

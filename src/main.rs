@@ -827,6 +827,19 @@ enum Message {
         code: String,
         message: String,
     },
+    /// N1.12: `EngineEvent::ExecutionMarker` — overlay dot on all Kline charts.
+    ExecutionMarkerReceived {
+        side: String,
+        price: String,
+        ts_event_ms: i64,
+    },
+    /// N1.12: `EngineEvent::StrategySignal` — overlay diamond on all Kline charts.
+    StrategySignalReceived {
+        signal_kind: engine_client::dto::SignalKind,
+        price: Option<String>,
+        ts_event_ms: i64,
+        tag: Option<String>,
+    },
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1069,6 +1082,30 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             request_id,
             code,
             message,
+        }),
+        // N1.12: ExecutionMarker → chart overlay
+        EngineEvent::ExecutionMarker {
+            side,
+            price,
+            ts_event_ms,
+            ..
+        } => Some(Message::ExecutionMarkerReceived {
+            side,
+            price,
+            ts_event_ms,
+        }),
+        // N1.12: StrategySignal → chart overlay
+        EngineEvent::StrategySignal {
+            signal_kind,
+            price,
+            ts_event_ms,
+            tag,
+            ..
+        } => Some(Message::StrategySignalReceived {
+            signal_kind,
+            price,
+            ts_event_ms,
+            tag,
         }),
         _ => None,
     }
@@ -1922,6 +1959,31 @@ impl Flowsurface {
                                 }
                             }
                         }
+                        // N1.11-ui: relay speed button press to IPC
+                        Some(dashboard::Event::ReplaySpeedAction(multiplier)) => {
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let request_id = uuid::Uuid::new_v4().to_string();
+                                return Task::perform(
+                                    async move {
+                                        conn.send(engine_client::dto::Command::SetReplaySpeed {
+                                            request_id,
+                                            multiplier,
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                    },
+                                    |res| match res {
+                                        Ok(()) => Message::OrderToast(Toast::info(
+                                            "再生速度を変更しました".to_string(),
+                                        )),
+                                        Err(err) => Message::OrderToast(Toast::error(format!(
+                                            "再生速度変更失敗: {err}"
+                                        ))),
+                                    },
+                                );
+                            }
+                            Task::none()
+                        }
                         None => Task::none(),
                     };
 
@@ -2015,6 +2077,40 @@ impl Flowsurface {
                          message={message}"
                     );
                 }
+            }
+            // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
+            Message::ExecutionMarkerReceived {
+                side,
+                price,
+                ts_event_ms,
+            } => {
+                let price_f32 = price.parse::<f32>().unwrap_or(0.0);
+                let data = crate::chart::kline::ExecutionMarkerData {
+                    side,
+                    price_f32,
+                    ts_event_ms,
+                };
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .distribute_execution_markers(main_window, data);
+            }
+            // N1.12: StrategySignal → broadcast overlay diamond to all Kline charts
+            Message::StrategySignalReceived {
+                signal_kind,
+                price,
+                ts_event_ms,
+                tag,
+            } => {
+                let price_f32 = price.and_then(|p| p.parse::<f32>().ok());
+                let data = crate::chart::kline::StrategySignalData {
+                    signal_kind,
+                    price_f32,
+                    ts_event_ms,
+                    tag,
+                };
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .distribute_strategy_signals(main_window, data);
             }
             // Phase U0: OrderAccepted — reset submitting flag + toast
             Message::OrderAccepted {
@@ -2534,6 +2630,8 @@ impl Flowsurface {
                         );
                         let main_window_id = self.main_window.id;
                         let dashboard = self.active_dashboard_mut();
+                        // N1.14: clear any stale overlay markers before loading new replay data.
+                        dashboard.clear_chart_overlays(main_window_id);
                         dashboard.auto_generate_replay_panes(main_window_id, &instrument_id);
                     }
                     _ => {}

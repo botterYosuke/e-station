@@ -98,6 +98,8 @@ pub enum Event {
     OrderEntryAction(super::dashboard::panel::order_entry::Action),
     OrderListAction(super::dashboard::panel::orders::Action),
     BuyingPowerAction(super::dashboard::panel::buying_power::Action),
+    /// N1.11-ui: User pressed a speed button in a `ReplayControl` pane.
+    ReplaySpeedAction(u32),
 }
 
 impl Dashboard {
@@ -449,6 +451,10 @@ impl Dashboard {
                             pane::Effect::BuyingPowerAction(action) => {
                                 return (Task::none(), Some(Event::BuyingPowerAction(action)));
                             }
+                            // N1.11-ui: relay speed button press to main.rs
+                            pane::Effect::SetReplaySpeed(multiplier) => {
+                                return (Task::none(), Some(Event::ReplaySpeedAction(multiplier)));
+                            }
                         };
                         return (task, None);
                     }
@@ -728,6 +734,40 @@ impl Dashboard {
                         ts_ms,
                     );
                 }
+            });
+    }
+
+    /// N1.12: Distribute an `ExecutionMarker` to all Kline panes.
+    /// In replay mode all panes show data for the same instrument, so we broadcast
+    /// unconditionally rather than filtering by instrument_id.
+    pub fn distribute_execution_markers(
+        &mut self,
+        main_window: window::Id,
+        data: chart::kline::ExecutionMarkerData,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                state.push_execution_marker(data.clone());
+            });
+    }
+
+    /// N1.12: Distribute a `StrategySignal` to all Kline panes.
+    pub fn distribute_strategy_signals(
+        &mut self,
+        main_window: window::Id,
+        data: chart::kline::StrategySignalData,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                state.push_strategy_signal(data.clone());
+            });
+    }
+
+    /// N1.14: Clear all Kline chart overlay markers (called on `replay/load` re-run).
+    pub fn clear_chart_overlays(&mut self, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                state.clear_overlay_markers();
             });
     }
 

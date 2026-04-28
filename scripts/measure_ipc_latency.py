@@ -2,7 +2,7 @@
 Phase-2 IPC benchmark preflight.
 
 This script is intentionally positioned as a "preflight" benchmark rather than
-the final acceptance benchmark from docs/plan/benchmarks/phase-2.md.
+the final acceptance benchmark from docs/benchmarks/phase-2.md.
 
 What this script does:
 - measures Hello -> Ready handshake round-trip on localhost

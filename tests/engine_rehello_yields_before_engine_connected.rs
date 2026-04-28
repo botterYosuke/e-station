@@ -8,7 +8,7 @@
 //! `sidebar.update_handles()` while `tachibana_ready` still mirrors the
 //! previous (now-stale) connection's `Ready` state — Tachibana
 //! metadata refetch then bypasses the U4 gate. See
-//! `docs/plan/✅tachibana/implementation-plan-T3.5.md` §レビュー修正 R3.
+//! `docs/✅tachibana/implementation-plan-T3.5.md` §レビュー修正 R3.
 //!
 //! This is a source-level text scan rather than an AST/syn visitor
 //! because the relevant `yield` expressions live inside an

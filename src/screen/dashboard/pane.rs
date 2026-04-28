@@ -59,6 +59,8 @@ pub enum Effect {
     OrderEntryAction(panel::order_entry::Action),
     OrderListAction(panel::orders::Action),
     BuyingPowerAction(panel::buying_power::Action),
+    /// N1.11-ui: User pressed a speed button in `ReplayControl` pane.
+    SetReplaySpeed(u32),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -114,6 +116,8 @@ pub enum Event {
     OrderEntryMsg(panel::order_entry::Message),
     OrderListMsg(panel::orders::Message),
     BuyingPowerMsg(panel::buying_power::Message),
+    /// N1.11-ui: User pressed a replay speed button (1 | 10 | 100).
+    SetReplaySpeed(u32),
 }
 
 pub struct State {
@@ -187,6 +191,27 @@ impl State {
                 p.clear();
             }
             _ => {}
+        }
+    }
+
+    /// N1.12: Push an `ExecutionMarker` into the Kline chart, if this pane holds one.
+    pub fn push_execution_marker(&mut self, data: chart::kline::ExecutionMarkerData) {
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+            c.push_execution_marker(data);
+        }
+    }
+
+    /// N1.12: Push a `StrategySignal` into the Kline chart, if this pane holds one.
+    pub fn push_strategy_signal(&mut self, data: chart::kline::StrategySignalData) {
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+            c.push_strategy_signal(data);
+        }
+    }
+
+    /// N1.12 / N1.14: Clear all chart overlay markers.
+    pub fn clear_overlay_markers(&mut self) {
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+            c.clear_overlay_markers();
         }
     }
 
@@ -1214,10 +1239,26 @@ impl State {
                     tickers_table,
                 )
             }
-            // N1.11: ReplayControl skeleton — TODO(N1.11-ui): 実際の速度コントロール UI を実装する。
+            // N1.11-ui: ReplayControl — speed button row (1x / 10x / 100x).
             Content::ReplayControl => {
-                let base: Element<_> =
-                    center(text("Replay Control — TODO(N1.11-ui)").size(14)).into();
+                let speed_buttons = row![
+                    button(text("1x").size(14))
+                        .on_press(Message::PaneEvent(id, Event::SetReplaySpeed(1)))
+                        .padding([4, 10]),
+                    button(text("10x").size(14))
+                        .on_press(Message::PaneEvent(id, Event::SetReplaySpeed(10)))
+                        .padding([4, 10]),
+                    button(text("100x").size(14))
+                        .on_press(Message::PaneEvent(id, Event::SetReplaySpeed(100)))
+                        .padding([4, 10]),
+                ]
+                .spacing(8);
+                let base: Element<_> = center(
+                    column![text("再生速度").size(12), speed_buttons,]
+                        .spacing(8)
+                        .align_x(Alignment::Center),
+                )
+                .into();
                 self.compose_stack_view(
                     base,
                     id,
@@ -1739,6 +1780,10 @@ impl State {
                 {
                     return Some(Effect::BuyingPowerAction(action));
                 }
+            }
+            // N1.11-ui: Relay speed-button press to the dashboard.
+            Event::SetReplaySpeed(multiplier) => {
+                return Some(Effect::SetReplaySpeed(multiplier));
             }
         }
         None
