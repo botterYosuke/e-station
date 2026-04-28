@@ -16,11 +16,21 @@ use iced::{
 #[derive(Debug, Default)]
 pub struct OrdersPanel {
     orders: Vec<OrderRecordWire>,
+    /// True when this panel shows REPLAY orders (shows "⏪ REPLAY" banner).
+    pub is_replay: bool,
 }
 
 impl OrdersPanel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a replay-mode panel (shows "⏪ REPLAY" banner in the header).
+    pub fn new_replay() -> Self {
+        Self {
+            orders: vec![],
+            is_replay: true,
+        }
     }
 
     /// Update the order list from an `OrderListUpdated` IPC event.
@@ -69,6 +79,9 @@ pub enum Action {
 pub fn update(panel: &mut OrdersPanel, msg: Message) -> Option<Action> {
     match msg {
         Message::RefreshClicked => Some(Action::RequestOrderList),
+        // N1.15: REPLAY pane では取消・訂正 IPC を発行しない。
+        // REPLAY 注文は venue_order_id="" のため tachibana cancel API に渡せない。
+        Message::CancelClicked { .. } | Message::ModifyClicked { .. } if panel.is_replay => None,
         Message::CancelClicked { client_order_id } => {
             let venue_order_id = panel
                 .orders
@@ -96,12 +109,19 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
         .on_press(Message::RefreshClicked)
         .padding([2, 8]);
 
-    let header = row![refresh_btn].spacing(4).padding([4, 8]);
+    let header = if panel.is_replay {
+        row![text("⏪ REPLAY").size(11), refresh_btn]
+            .spacing(4)
+            .padding([4, 8])
+    } else {
+        row![refresh_btn].spacing(4).padding([4, 8])
+    };
 
     if panel.is_empty() {
         return column![header, center(text("注文なし").size(14))].into();
     }
 
+    let is_replay = panel.is_replay;
     let rows = panel.orders.iter().map(|order| {
         let cid = order
             .client_order_id
@@ -109,25 +129,30 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
             .unwrap_or_else(|| order.venue_order_id.clone());
         let label = format!(
             "{} {} {} {} @ {} [{}]",
-            order.venue_order_id,
             order.instrument_id,
             order.order_side.as_str(),
             order.quantity,
             order.price.as_deref().unwrap_or("MKT"),
             order.status,
+            cid,
         );
-        let cid_mod = cid.clone();
-        row![
-            text(label).size(12),
-            button(text("訂正").size(11)).on_press(Message::ModifyClicked {
-                client_order_id: cid_mod
-            }),
-            button(text("取消").size(11)).on_press(Message::CancelClicked {
-                client_order_id: cid
-            }),
-        ]
-        .spacing(8)
-        .into()
+        // N1.15: REPLAY 注文は venue_order_id="" のため取消・訂正は無効。
+        if is_replay {
+            row![text(label).size(12)].spacing(8).into()
+        } else {
+            let cid_mod = cid.clone();
+            row![
+                text(label).size(12),
+                button(text("訂正").size(11)).on_press(Message::ModifyClicked {
+                    client_order_id: cid_mod
+                }),
+                button(text("取消").size(11)).on_press(Message::CancelClicked {
+                    client_order_id: cid
+                }),
+            ]
+            .spacing(8)
+            .into()
+        }
     });
 
     let content = column(rows).spacing(4);
@@ -221,6 +246,7 @@ mod tests {
                 expire_time_ns: None,
                 status: "OPEN".to_string(),
                 ts_event_ms: 0,
+                venue: "tachibana".to_string(),
             },
             OrderRecordWire {
                 client_order_id: Some("c-2".to_string()),
@@ -237,6 +263,7 @@ mod tests {
                 expire_time_ns: None,
                 status: "OPEN".to_string(),
                 ts_event_ms: 0,
+                venue: "tachibana".to_string(),
             },
         ];
 
@@ -266,6 +293,7 @@ mod tests {
             expire_time_ns: None,
             status: "OPEN".to_string(),
             ts_event_ms: 0,
+            venue: "tachibana".to_string(),
         };
         panel.set_orders(vec![record]);
 
@@ -307,6 +335,7 @@ mod tests {
             expire_time_ns: None,
             status: "OPEN".to_string(),
             ts_event_ms: 0,
+            venue: "tachibana".to_string(),
         };
 
         panel.set_orders(vec![make_record("c-1", "v-1"), make_record("c-2", "v-2")]);
@@ -328,6 +357,58 @@ mod tests {
         assert!(
             action.is_none(),
             "stale order c-1 should not be cancellable after replacement"
+        );
+    }
+
+    /// N1.15: REPLAY pane で CancelClicked を発行しても None が返る（IPC を発行しない）
+    #[test]
+    fn cancel_clicked_on_replay_panel_returns_none() {
+        use engine_client::dto::{OrderRecordWire, OrderSide, OrderType, TimeInForce};
+
+        let mut panel = OrdersPanel::new_replay();
+        panel.set_orders(vec![OrderRecordWire {
+            client_order_id: Some("replay-c-1".to_string()),
+            venue_order_id: "".to_string(),
+            instrument_id: "7203.TSE".to_string(),
+            order_side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: "100".to_string(),
+            filled_qty: "0".to_string(),
+            leaves_qty: "100".to_string(),
+            price: None,
+            trigger_price: None,
+            time_in_force: TimeInForce::Day,
+            expire_time_ns: None,
+            status: "SUBMITTED".to_string(),
+            ts_event_ms: 0,
+            venue: "replay".to_string(),
+        }]);
+
+        let action = update(
+            &mut panel,
+            Message::CancelClicked {
+                client_order_id: "replay-c-1".to_string(),
+            },
+        );
+        assert!(
+            action.is_none(),
+            "REPLAY pane must not produce CancelOrder; got {action:?}"
+        );
+    }
+
+    /// N1.15: REPLAY pane で ModifyClicked を発行しても None が返る
+    #[test]
+    fn modify_clicked_on_replay_panel_returns_none() {
+        let mut panel = OrdersPanel::new_replay();
+        let action = update(
+            &mut panel,
+            Message::ModifyClicked {
+                client_order_id: "replay-c-1".to_string(),
+            },
+        );
+        assert!(
+            action.is_none(),
+            "REPLAY pane must not produce ModifyOrder; got {action:?}"
         );
     }
 }

@@ -4,7 +4,7 @@
 - Event  系: EngineStarted / EngineStopped / ReplayDataLoaded /
              PositionOpened / PositionClosed
 - Literal 制約違反 (engine="Bogus" / granularity="Bogus") で ValidationError
-- SCHEMA_MINOR == 4
+- SCHEMA_MINOR == 5
 """
 
 from __future__ import annotations
@@ -24,8 +24,9 @@ def _roundtrip(model_cls, data: dict) -> dict:
 # ── Schema version ──────────────────────────────────────────────────────────
 
 
-def test_schema_minor_is_4_for_nautilus() -> None:
-    assert s.SCHEMA_MINOR == 4
+def test_schema_minor_is_5_for_nautilus() -> None:
+    # R2 review-fix R1b M-8: SCHEMA_MINOR を 4 → 5 に bump (ReplayDataLoaded.strategy_id Optional)
+    assert s.SCHEMA_MINOR == 5
     assert s.SCHEMA_MAJOR == 2
 
 
@@ -165,6 +166,34 @@ def test_replay_data_loaded_roundtrip() -> None:
     out = _roundtrip(s.ReplayDataLoaded, data)
     assert out["bars_loaded"] == 1234
     assert out["trades_loaded"] == 56789
+    assert out["strategy_id"] == "strat-001"
+
+
+def test_replay_data_loaded_accepts_null_strategy_id() -> None:
+    """M-8 (R1b / schema 2.5): 単独 LoadReplayData では strategy_id=None を受け付ける。"""
+    data = {
+        "event": "ReplayDataLoaded",
+        "strategy_id": None,
+        "bars_loaded": 0,
+        "trades_loaded": 4,
+        "ts_event_ms": 1700000000002,
+    }
+    obj = s.ReplayDataLoaded.model_validate(data)
+    assert obj.strategy_id is None
+    out = orjson.loads(orjson.dumps(obj.model_dump(mode="json")))
+    assert out["strategy_id"] is None
+
+
+def test_replay_data_loaded_default_strategy_id_when_field_absent() -> None:
+    """M-8: strategy_id フィールド省略時もデフォルト None で deserialize できる。"""
+    data = {
+        "event": "ReplayDataLoaded",
+        "bars_loaded": 0,
+        "trades_loaded": 4,
+        "ts_event_ms": 1700000000002,
+    }
+    obj = s.ReplayDataLoaded.model_validate(data)
+    assert obj.strategy_id is None
 
 
 def test_position_opened_roundtrip() -> None:
@@ -202,10 +231,11 @@ def test_position_closed_roundtrip() -> None:
 
 
 def test_hello_accepts_mode_field() -> None:
+    # M-5 (R2 review-fix R2): SCHEMA_MINOR を動的参照する (旧 client 互換は別テスト)
     data = {
         "op": "Hello",
-        "schema_major": 2,
-        "schema_minor": 4,
+        "schema_major": s.SCHEMA_MAJOR,
+        "schema_minor": s.SCHEMA_MINOR,
         "client_version": "test-0.0.0",
         "token": "tok",
         "mode": "replay",
@@ -216,12 +246,56 @@ def test_hello_accepts_mode_field() -> None:
 
 def test_hello_defaults_mode_to_live_when_absent() -> None:
     """Backward compat: older clients that don't set mode default to "live"."""
+    # M-5 (R2 review-fix R2): SCHEMA_MINOR を動的参照する
     data = {
         "op": "Hello",
-        "schema_major": 2,
-        "schema_minor": 4,
+        "schema_major": s.SCHEMA_MAJOR,
+        "schema_minor": s.SCHEMA_MINOR,
         "client_version": "test-0.0.0",
         "token": "tok",
     }
     obj = s.Hello.model_validate(data)
     assert obj.mode == "live"
+
+
+def test_old_client_minor_4_compatible() -> None:
+    """旧 client (SCHEMA_MINOR=4) からの Hello もハンドシェイク成功する。
+
+    SCHEMA_MAJOR の不一致のみが切断条件。MINOR 不一致は WARN のみで接続維持
+    （`engine-client/src/connection.rs` の handshake 規約）。
+    Hello deserialize 自体は MINOR 値に依存しないため、旧 minor=4 を投げても
+    pydantic の validate は通る (M-5, R2 review-fix R2 で明示 pin)。
+    """
+    data = {
+        "op": "Hello",
+        "schema_major": 2,
+        "schema_minor": 4,  # 旧 client (R1b 以前)
+        "client_version": "old-client",
+        "token": "tok",
+    }
+    obj = s.Hello.model_validate(data)
+    assert obj.schema_minor == 4
+    assert obj.mode == "live"
+
+
+# ── M-4: EngineError.strategy_id="" 正規化 ─────────────────────────────────
+
+
+def test_engine_error_normalizes_empty_strategy_id_to_none() -> None:
+    """M-4: EngineError(strategy_id="") は .strategy_id is None になる。"""
+    obj = s.EngineError(code="x", message="y", strategy_id="")
+    assert obj.strategy_id is None
+
+
+def test_engine_error_keeps_nonempty_strategy_id() -> None:
+    """M-4: 非空 strategy_id はそのまま保持される。"""
+    obj = s.EngineError(code="x", message="y", strategy_id="strat-1")
+    assert obj.strategy_id == "strat-1"
+
+
+def test_engine_error_normalizes_empty_strategy_id_via_validate() -> None:
+    """M-4: model_validate 経由でも空文字 → None になる (wire 互換)。"""
+    obj = s.EngineError.model_validate(
+        {"event": "EngineError", "code": "x", "message": "y", "strategy_id": ""}
+    )
+    assert obj.strategy_id is None

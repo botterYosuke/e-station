@@ -510,6 +510,10 @@ impl KlineChart {
         self.chart.basis
     }
 
+    pub fn ticker_info(&self) -> TickerInfo {
+        self.chart.ticker_info()
+    }
+
     pub fn change_tick_size(&mut self, new_step: PriceStep) {
         let chart = self.mut_state();
 

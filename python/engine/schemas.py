@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 4
+SCHEMA_MINOR: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -278,9 +278,30 @@ class Ready(IpcMessage):
 
 
 class EngineError(IpcMessage):
+    """接続レベル切断 frame と StartEngine 例外通知 outbox event の **両用 wire 形** を共有する (H-F).
+
+    - ``strategy_id is None`` → 接続レベル/handshake 系のエラー
+      (auth_failed / schema_mismatch 等)。Rust 側は接続を切断する。
+    - ``strategy_id == <id>`` → 走行中 strategy の outbox event。Rust 側は
+      該当 strategy の state machine にだけ反映し、接続自体は維持する。
+
+    解釈分岐の責務は受信側 (Rust ``EngineEvent::EngineError``) にある。
+    送出側は意味に応じて strategy_id を必ず正しく付ける／付けないを選ぶこと。
+    """
+
     event: Literal["EngineError"] = "EngineError"
     code: str
     message: str
+    strategy_id: str | None = None  # None = 接続レベルエラー
+
+    @field_validator("strategy_id", mode="before")
+    @classmethod
+    def _normalize_empty_strategy_id(cls, v: Any) -> Any:
+        # M-4: 空文字を None に正規化する。送出側が strategy_id="" を渡しても
+        # 受信側の解釈が「接続レベル」(None) と一致するようにする。
+        if isinstance(v, str) and v == "":
+            return None
+        return v
 
 
 class Connected(IpcMessage):
@@ -565,6 +586,8 @@ class OrderRecordWire(IpcMessage):
     expire_time_ns: int | None = None
     status: str
     ts_event_ms: int
+    # P-1: venue フィールド追加（dto.rs OrderRecordWire との IPC 契約一致）
+    venue: str = "tachibana"
 
 
 class OrderListUpdated(IpcMessage):
@@ -627,7 +650,9 @@ class EngineStopped(IpcMessage):
 
 class ReplayDataLoaded(IpcMessage):
     event: Literal["ReplayDataLoaded"] = "ReplayDataLoaded"
-    strategy_id: str
+    # M-8 (R1b / schema 2.5): 単独 LoadReplayData は戦略未起動なので
+    # strategy_id を None で送る。``start_backtest_replay`` 経路は具体値を入れる。
+    strategy_id: str | None = None
     bars_loaded: int
     trades_loaded: int
     ts_event_ms: int
@@ -652,6 +677,74 @@ class PositionClosed(IpcMessage):
     instrument_id: str
     position_id: str
     realized_pnl: str
+    ts_event_ms: int
+
+
+# ── N1.11: Replay speed control command ─────────────────────────────────────
+
+
+class SetReplaySpeed(IpcMessage):
+    """Set replay playback speed multiplier (N1.11).
+
+    ``multiplier`` must be >= 1. Sent via ``POST /api/replay/control``
+    with ``{"action": "speed", "multiplier": N}``.
+    """
+
+    op: Literal["SetReplaySpeed"] = "SetReplaySpeed"
+    request_id: str
+    multiplier: int
+
+
+# ── N1.12: Execution marker + strategy signal events ────────────────────────
+
+
+class ExecutionMarker(IpcMessage):
+    """Emitted by NarrativeHook when an OrderFilled event is received (N1.12).
+
+    One ``ExecutionMarker`` is emitted per ``OrderFilled`` (1:1 mapping).
+    """
+
+    event: Literal["ExecutionMarker"] = "ExecutionMarker"
+    strategy_id: str
+    instrument_id: str
+    side: str  # "BUY" | "SELL"
+    price: str  # decimal string
+    ts_event_ms: int
+
+
+class StrategySignal(IpcMessage):
+    """Explicit signal emitted by a strategy via ``StrategySignalMixin.emit_signal()`` (N1.12).
+
+    Independent of fills — a strategy can emit signals without any order activity.
+    ``signal_kind`` vocabulary is provisional (Q13 open): EntryLong / EntryShort / Exit / Annotate.
+    """
+
+    event: Literal["StrategySignal"] = "StrategySignal"
+    strategy_id: str
+    instrument_id: str
+    signal_kind: Literal["EntryLong", "EntryShort", "Exit", "Annotate"]
+    side: str | None = None      # "BUY" | "SELL" | None
+    price: str | None = None     # decimal string or None
+    tag: str | None = None       # short machine-readable label
+    note: str | None = None      # human-readable annotation
+    ts_event_ms: int
+
+
+# ── N1.16: REPLAY 仮想買付余力 ──────────────────────────────────────────────
+
+
+class ReplayBuyingPower(IpcMessage):
+    """REPLAY モードの仮想買付余力（portfolio_view.py が送出）。
+    cash / buying_power / equity はすべて decimal 文字列（float 丸め防止）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["ReplayBuyingPower"] = "ReplayBuyingPower"
+    strategy_id: str
+    cash: str
+    buying_power: str
+    equity: str
     ts_event_ms: int
 
 

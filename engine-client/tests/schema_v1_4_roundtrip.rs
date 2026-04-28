@@ -19,9 +19,10 @@ const RID: &str = "req-v1.4-001";
 // Schema 2.x contains schema 1.4 variants (order lifecycle events).
 #[test]
 fn schema_major_is_at_least_2() {
-    assert!(
-        flowsurface_engine_client::SCHEMA_MAJOR >= 2,
-        "SCHEMA_MAJOR must be >= 2 (schema 1.4 order variants included in schema 2.x)"
+    assert_eq!(
+        flowsurface_engine_client::SCHEMA_MAJOR,
+        2,
+        "SCHEMA_MAJOR must be 2 for schema 2.x (1.4 order variants). Update this test when bumping major."
     );
 }
 
@@ -187,6 +188,11 @@ fn order_list_updated_with_one_record_deserializes() {
             assert_eq!(orders[0].client_order_id, Some("cid-001".to_string()));
             assert_eq!(orders[0].quantity, "100");
             assert_eq!(orders[0].status, "SUBMITTED");
+            // venue キーなし JSON → serde default "tachibana" が適用されることを pin
+            assert_eq!(
+                orders[0].venue, "tachibana",
+                "venue should default to tachibana when absent from JSON"
+            );
         }
         _ => panic!("expected OrderListUpdated, got {:?}", ev),
     }
@@ -259,6 +265,7 @@ fn order_record_wire_roundtrip() {
         expire_time_ns: None,
         status: "ACCEPTED".to_string(),
         ts_event_ms: 1_745_640_000_000,
+        venue: "tachibana".to_string(),
     };
 
     let json = serde_json::to_string(&record).unwrap();
@@ -272,4 +279,32 @@ fn order_record_wire_roundtrip() {
     assert_eq!(roundtripped.price, record.price);
     assert_eq!(roundtripped.status, record.status);
     assert_eq!(roundtripped.ts_event_ms, record.ts_event_ms);
+    assert_eq!(roundtripped.venue, record.venue);
+}
+
+/// N1.15: Old Python (no venue field) → new Rust deserializes with default "tachibana"
+#[test]
+fn order_record_wire_venue_defaults_to_tachibana_when_absent() {
+    let json_no_venue = r#"{
+        "client_order_id": "cid-old",
+        "venue_order_id": "V-OLD",
+        "instrument_id": "7203.TSE",
+        "order_side": "BUY",
+        "order_type": "LIMIT",
+        "quantity": "100",
+        "filled_qty": "0",
+        "leaves_qty": "100",
+        "price": "3000",
+        "trigger_price": null,
+        "time_in_force": "DAY",
+        "expire_time_ns": null,
+        "status": "ACCEPTED",
+        "ts_event_ms": 0
+    }"#;
+
+    let record: OrderRecordWire = serde_json::from_str(json_no_venue).unwrap();
+    assert_eq!(
+        record.venue, "tachibana",
+        "venue must default to 'tachibana' when absent from JSON"
+    );
 }

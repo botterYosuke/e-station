@@ -88,6 +88,18 @@ static CONTROL_API_RX: std::sync::OnceLock<
     std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<replay_api::ControlApiCommand>>>,
 > = std::sync::OnceLock::new();
 
+/// Shared REPLAY API state — used in `Message::ReplayBuyingPower` to cache the
+/// portfolio snapshot for `GET /api/replay/portfolio` without a tokio await.
+static REPLAY_API_STATE: std::sync::OnceLock<Arc<replay_api::ReplayApiState>> =
+    std::sync::OnceLock::new();
+
+/// Shared market-closed flag (N3.B). Set in `main()` after creating the
+/// `OrderApiState`, then read from `Flowsurface::new()` so that
+/// `Message::TachibanaVenueEvent` can store it in `self.order_api_market_closed`
+/// and update it atomically.
+static ORDER_API_MARKET_CLOSED: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
 /// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
 /// here, before the connection is published to `ENGINE_CONNECTION_TX`,
@@ -231,10 +243,11 @@ fn main() {
             .build()
             .expect("Failed to build engine-client tokio runtime");
 
-        let mode_str = cli_args.mode.as_str();
-        log::info!("Started in mode: {mode_str}");
+        // R1b H-E: cli::Mode → engine_client::dto::AppMode を境界で写す。
+        let app_mode: engine_client::dto::AppMode = cli_args.mode.into();
+        log::info!("Started in mode: {}", app_mode.as_wire_str());
         match rt.block_on(engine_client::EngineConnection::connect_with_mode(
-            &url_str, &token, mode_str,
+            &url_str, &token, app_mode,
         )) {
             Ok(conn) => {
                 log::info!("Connected to external data engine at {url_str}");
@@ -266,7 +279,7 @@ fn main() {
                 // Monitor the connection and reconnect with exponential backoff on loss.
                 let reconnect_url = url_str.clone();
                 let reconnect_token = token.clone();
-                let reconnect_mode = mode_str.to_string();
+                let reconnect_mode = app_mode;
                 rt.spawn(async move {
                     let mut current_conn = conn;
                     loop {
@@ -283,7 +296,7 @@ fn main() {
                             match engine_client::EngineConnection::connect_with_mode(
                                 &reconnect_url,
                                 &reconnect_token,
-                                &reconnect_mode,
+                                reconnect_mode,
                             )
                             .await
                             {
@@ -402,9 +415,10 @@ fn main() {
         let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
         // N1.13: propagate the CLI mode so every handshake (initial + recovery)
         // sends the same value in Hello.
-        let mode_str = cli_args.mode.as_str();
-        log::info!("Started in mode: {mode_str}");
-        rt.block_on(manager.set_mode(mode_str));
+        // R1b H-E: cli::Mode → engine_client::dto::AppMode を境界で写す。
+        let app_mode: engine_client::dto::AppMode = cli_args.mode.into();
+        log::info!("Started in mode: {}", app_mode.as_wire_str());
+        rt.block_on(manager.set_mode(app_mode));
         ENGINE_MANAGER.set(Arc::clone(&manager)).ok();
 
         // Push the saved proxy into the manager so it is re-applied after every
@@ -575,7 +589,10 @@ fn main() {
                     .get()
                     .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
                     .subscribe();
-                let is_replay_mode = Arc::new(AtomicBool::new(false));
+                // N1.13 / N1.3: REPLAY モードフラグは CLI `--mode` から伝搬する。
+                // is_replay_mode=true のとき /api/order/submit は 503 で reject され、
+                // 発注は /api/replay/order に流れる。
+                let is_replay_mode = Arc::new(AtomicBool::new(cli_args.mode == cli::Mode::Replay));
                 // FLOWSURFACE_ORDER_GUARD_ENABLED=1 で発注 API を有効化する（明示 opt-in）。
                 // 未設定時はデフォルトの enabled=false のまま 503 で reject（誤発注防止）。
                 let guard_config =
@@ -584,12 +601,49 @@ fn main() {
                     } else {
                         api::order_api::OrderGuardConfig::default()
                     };
+                // N3.B: create shared market-closed flag and publish to static
+                // so Flowsurface::new() can clone it for TachibanaVenueEvent syncing.
+                let market_closed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                if ORDER_API_MARKET_CLOSED
+                    .set(Arc::clone(&market_closed_flag))
+                    .is_err()
+                {
+                    log::warn!(
+                        "ORDER_API_MARKET_CLOSED already initialized \
+                         — flag sharing may be broken"
+                    );
+                }
                 Arc::new(
                     api::order_api::OrderApiState::new(session, engine_rx, is_replay_mode)
-                        .with_guard_config(guard_config),
+                        .with_guard_config(guard_config)
+                        .with_market_closed_flag(market_closed_flag),
                 )
             };
-            if let Some(rx) = replay_api::spawn(rt.handle(), Some(order_api_state)) {
+            // N1.3: ReplayApiState は engine_rx + mode を保持して
+            // /api/replay/{load,order,portfolio} を駆動する。
+            let replay_api_state = {
+                let engine_rx = ENGINE_CONNECTION_TX
+                    .get()
+                    .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
+                    .subscribe();
+                Arc::new(replay_api::ReplayApiState::new(
+                    engine_rx,
+                    // R1b H-E: cli::Mode → AppMode を境界で写す。
+                    engine_client::dto::AppMode::from(cli_args.mode),
+                ))
+            };
+            // N1.16: cache Arc for Message::ReplayBuyingPower handler.
+            if REPLAY_API_STATE.set(Arc::clone(&replay_api_state)).is_err() {
+                log::warn!("replay_api: REPLAY_API_STATE already initialized");
+            }
+            // N1.6: AgentApiState はインメモリ narrative ストア。
+            let agent_api_state = Arc::new(api::agent_api::AgentApiState::new());
+            if let Some(rx) = replay_api::spawn(
+                rt.handle(),
+                Some(order_api_state),
+                Some(replay_api_state),
+                Some(agent_api_state),
+            ) {
                 CONTROL_API_RX.set(std::sync::Mutex::new(Some(rx))).ok();
             }
             std::thread::Builder::new()
@@ -652,6 +706,9 @@ struct Flowsurface {
     /// `GetBuyingPower` IPC 送信時に記録した request_id。
     /// `BuyingPowerUpdated` または `IpcError` 受信時にクリアする。
     buying_power_request_id: Option<String>,
+    /// Shared market-closed flag for order_api pre-reject (N3.B).
+    /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
+    order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -754,6 +811,14 @@ enum Message {
         cash_shortfall: i64,
         credit_available: i64,
         ts_ms: i64,
+    },
+    /// N1.16: `EngineEvent::ReplayBuyingPower` — REPLAY 仮想ポートフォリオ更新。
+    ReplayBuyingPower {
+        strategy_id: String,
+        cash: String,
+        buying_power: String,
+        equity: String,
+        ts_event_ms: i64,
     },
     /// `EngineEvent::Error` — routed to the BuyingPower panel if `request_id`
     /// matches the pending buying-power request, otherwise silently ignored.
@@ -918,6 +983,7 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             Some(Message::TachibanaVenueEvent(VenueEvent::LoginError {
                 class,
                 message,
+                market_closed: code == "market_closed",
             }))
         }
         // ── Phase O2: EC 約定通知 (T2.4) ────────────────────────────────────
@@ -980,6 +1046,20 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             cash_shortfall,
             credit_available,
             ts_ms,
+        }),
+        // N1.16: REPLAY 仮想ポートフォリオ更新イベント
+        EngineEvent::ReplayBuyingPower {
+            strategy_id,
+            cash,
+            buying_power,
+            equity,
+            ts_event_ms,
+        } => Some(Message::ReplayBuyingPower {
+            strategy_id,
+            cash,
+            buying_power,
+            equity,
+            ts_event_ms,
         }),
         EngineEvent::Error {
             request_id,
@@ -1057,6 +1137,19 @@ impl Flowsurface {
             tachibana_state: VenueState::Idle,
             second_password_modal: None,
             buying_power_request_id: None,
+            // N3.B: reuse the flag that was published to ORDER_API_MARKET_CLOSED
+            // by main(). Falls back to a fresh flag (e.g. in tests / hot-reload).
+            order_api_market_closed: ORDER_API_MARKET_CLOSED
+                .get()
+                .map(Arc::clone)
+                .unwrap_or_else(|| {
+                    // Control API disabled (api_rt = None) — no HTTP handler will read this flag.
+                    log::debug!(
+                        "ORDER_API_MARKET_CLOSED not set; using standalone flag \
+                         (control API disabled)"
+                    );
+                    Arc::new(std::sync::atomic::AtomicBool::new(false))
+                }),
         };
 
         if let Some(err) = audio_init_err {
@@ -1112,6 +1205,14 @@ impl Flowsurface {
                 let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
                     .next(VenueEvent::Dismissed);
                 self.tachibana_state = next;
+                // H2 fix: sync the AtomicBool after dismiss so the order API
+                // pre-reject guard does not remain true after the banner is
+                // closed. Without this store() the flag stays `true` and
+                // SubmitOrder returns 409 MARKET_CLOSED indefinitely.
+                self.order_api_market_closed.store(
+                    self.tachibana_state.is_market_closed(),
+                    std::sync::atomic::Ordering::Release,
+                );
             }
             Message::RequestTachibanaLogin(trigger) => {
                 // Duplicate-press suppression: claim the LoginInFlight
@@ -1219,6 +1320,12 @@ impl Flowsurface {
                 let next = old_state.next(event);
                 let is_ready = next.is_ready();
                 self.tachibana_state = next;
+
+                // N3.B: sync market-closed state to order_api pre-reject flag.
+                self.order_api_market_closed.store(
+                    self.tachibana_state.is_market_closed(),
+                    std::sync::atomic::Ordering::Release,
+                );
 
                 // Bump only when the session *newly* becomes available from a
                 // state that required a login round-trip (LoginInFlight) or a
@@ -1856,6 +1963,36 @@ impl Flowsurface {
                     ts_ms,
                 );
             }
+            // N1.16: REPLAY 仮想ポートフォリオ更新 — dashboard に配布 + HTTP キャッシュ更新
+            Message::ReplayBuyingPower {
+                strategy_id,
+                cash,
+                buying_power,
+                equity,
+                ts_event_ms,
+            } => {
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut().distribute_replay_buying_power(
+                    main_window,
+                    cash.clone(),
+                    buying_power.clone(),
+                    equity.clone(),
+                    ts_event_ms,
+                );
+                if let Some(state) = REPLAY_API_STATE.get() {
+                    state.update_replay_portfolio(
+                        strategy_id,
+                        cash,
+                        buying_power,
+                        equity,
+                        ts_event_ms,
+                    );
+                } else {
+                    log::warn!(
+                        "replay_api: REPLAY_API_STATE not initialized, skipping portfolio update"
+                    );
+                }
+            }
             // Phase U3: IpcError → route to BuyingPower panel if request_id matches
             Message::IpcError {
                 request_id,
@@ -2382,6 +2519,22 @@ impl Flowsurface {
                     }
                     ControlApiCommand::ToggleVenue { venue } if venue == TACHIBANA_VENUE_NAME => {
                         return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Auto));
+                    }
+                    ControlApiCommand::AutoGenerateReplayPanes {
+                        instrument_id,
+                        strategy_id,
+                    } => {
+                        // M-2 (R2 review-fix R2): strategy_id を Option<String> として保持。
+                        // None = 単独 LoadReplayData 経路、Some(_) = StartEngine 経由 load。
+                        // 現状 dashboard.auto_generate_replay_panes は strategy_id を要求しないが、
+                        // ログに記録しておくことで N1.14 以降の pane 紐付け実装に流用できる。
+                        log::debug!(
+                            "AutoGenerateReplayPanes: instrument_id={instrument_id:?} \
+                             strategy_id={strategy_id:?}"
+                        );
+                        let main_window_id = self.main_window.id;
+                        let dashboard = self.active_dashboard_mut();
+                        dashboard.auto_generate_replay_panes(main_window_id, &instrument_id);
                     }
                     _ => {}
                 }

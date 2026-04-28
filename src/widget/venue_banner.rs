@@ -84,7 +84,7 @@ fn parse_message(message: &str) -> ParsedMessage<'_> {
 /// `Ready`).
 pub fn view(state: &VenueState) -> Option<Element<'_, BannerMessage>> {
     match state {
-        VenueState::Error { class, message } => Some(error_banner(class, message)),
+        VenueState::Error { class, message, .. } => Some(error_banner(class, message)),
         VenueState::Idle | VenueState::LoginInFlight | VenueState::Ready => None,
     }
 }
@@ -194,6 +194,7 @@ mod tests {
         let state = VenueState::Error {
             class,
             message: "セッション切れ\n再ログインしてください\n再ログイン".to_string(),
+            market_closed: false,
         };
         assert!(view(&state).is_some());
     }
@@ -269,10 +270,12 @@ mod tests {
                 VenueEvent::LoginError {
                     class,
                     message: "x".to_string(),
+                    market_closed: false,
                 },
                 VenueState::Error {
                     class,
                     message: "x".to_string(),
+                    market_closed: false,
                 },
                 true,
             ),
@@ -280,6 +283,7 @@ mod tests {
                 VenueState::Error {
                     class,
                     message: "y".to_string(),
+                    market_closed: false,
                 },
                 VenueEvent::LoginStarted,
                 VenueState::LoginInFlight,
@@ -347,6 +351,7 @@ mod tests {
         let state = VenueState::Error {
             class,
             message: "電話認証\n所定の手順で認証してください\n閉じる".to_string(),
+            market_closed: false,
         };
         assert!(view(&state).is_some());
     }
@@ -363,6 +368,7 @@ mod tests {
         let state = VenueState::Error {
             class,
             message: "未対応 venue\n本文\n（無視されるラベル）".to_string(),
+            market_closed: false,
         };
         assert!(view(&state).is_some());
     }

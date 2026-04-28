@@ -213,6 +213,14 @@ nautilus の `Equity` を使う。
 
 `tachibana_orders._map_tachibana_state_to_nautilus()` に集約。
 
+### 5.3 reason_code（暫定一覧）
+
+| reason_code | 用途 | スコープ |
+|---|---|---|
+| `REPLAY_NOT_IMPLEMENTED` | REPLAY 仮想注文の本配線が N1.11 まで保留中であることを示す。Rust UI は本 code 受信時に toast 表示のみ、submitting フラグは reset する。N1.11 完了後にこの code は廃止する。 | 一時（N1.5 〜 N1.11） |
+
+通常運用の reason_code 体系（`MARKET_CLOSED` / `INSUFFICIENT_FUNDS` 等）は [`docs/plan/✅order/spec.md §5.2`](../✅order/spec.md#52-reason_code-体系観測性) を参照する。本表は N1 期間中に追加された REPLAY 専用の暫定 code のみを記載する。
+
 ---
 
 ## 6. Cache warm-up vs persistence

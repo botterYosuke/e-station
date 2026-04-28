@@ -39,6 +39,10 @@ CANONICAL_REASON_CODES: frozenset[str] = frozenset(
         "NOT_LOGGED_IN",
         # CONFLICTING_TAGS: spec §4 に記載の VENUE_UNSUPPORTED の sub-code
         "CONFLICTING_TAGS",
+        # REPLAY_NOT_IMPLEMENTED: M-7 (R2 review-fix R1a) — venue=="replay" の
+        # SubmitOrder を N1.4 で受けた場合に N1.5 未実装を明示する一時 reason_code。
+        # N1.5 で wrapper Strategy が実装され次第、本コードは削除する。
+        "REPLAY_NOT_IMPLEMENTED",
     }
 )
 

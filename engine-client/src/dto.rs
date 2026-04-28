@@ -4,6 +4,45 @@
 /// Both are transported as JSON text frames over a local WebSocket.
 use serde::{Deserialize, Serialize};
 
+/// N1.13 / R1b H-E: 起動時固定モード。CLI `--mode {live|replay}` で指定する。
+///
+/// 旧コードは `String` (`"live"` | `"replay"`) で保持していたが、型不一致と
+/// typo を防ぐために enum に格上げ。wire 表現 (Hello.mode の JSON 値) は
+/// `serde(rename_all = "lowercase")` により従来通り小文字文字列。
+///
+/// `Default = Live` は handshake 時の旧クライアント互換 (mode 欠落時の
+/// fallback) を保つために存在する。Python 側 `Hello.mode: Literal[...] = "live"`
+/// と同じ意味。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppMode {
+    #[default]
+    Live,
+    Replay,
+}
+
+impl AppMode {
+    /// Wire-form string (`"live"` | `"replay"`). Convenient for log lines and
+    /// HTTP error messages. Always lowercase to match the JSON serialisation.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            AppMode::Live => "live",
+            AppMode::Replay => "replay",
+        }
+    }
+
+    /// Parse the wire-form string. Returns `Err` for any value other than
+    /// `"live"` / `"replay"`. Use this at parse boundaries (CLI / HTTP query)
+    /// where typos must be caught early.
+    pub fn from_wire_str(s: &str) -> Result<Self, &'static str> {
+        match s {
+            "live" => Ok(AppMode::Live),
+            "replay" => Ok(AppMode::Replay),
+            _ => Err("unknown app mode (expected \"live\" or \"replay\")"),
+        }
+    }
+}
+
 // ── Commands (Rust → Python) ──────────────────────────────────────────────────
 
 // NOTE: Debug is intentionally hand-implemented below to mask SetSecondPassword.value.
@@ -15,9 +54,13 @@ pub enum Command {
         schema_minor: u16,
         client_version: String,
         token: String,
-        /// N1.13: 起動時に固定する mode (`"live"` | `"replay"`).
+        /// N1.13 / R1b H-E: 起動時に固定する mode (`AppMode::Live` | `AppMode::Replay`).
         /// Python 側で StartEngine.engine との整合チェックに使う。
-        mode: String,
+        /// wire 表現は serde rename_all = "lowercase" で `"live"` / `"replay"` の
+        /// 小文字文字列 (Python `Hello.mode: Literal["live","replay"]` と互換)。
+        /// `#[serde(default)]` で旧 client (mode 欠落) から `Live` にフォールバック。
+        #[serde(default)]
+        mode: AppMode,
     },
     SetProxy {
         url: Option<String>,
@@ -176,6 +219,15 @@ pub enum Command {
         end_date: String,
         granularity: ReplayGranularity,
     },
+
+    // ── N1.11: Replay speed control ───────────────────────────────────────
+    /// Set the replay playback speed multiplier.
+    /// `multiplier` is a positive integer: 1 = real-time, 10 = 10x speed, etc.
+    /// Sent via `POST /api/replay/control` with `{"action":"speed","multiplier":N}`.
+    SetReplaySpeed {
+        request_id: String,
+        multiplier: u32,
+    },
 }
 
 /// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
@@ -200,7 +252,7 @@ impl std::fmt::Debug for Command {
                 .field("schema_minor", schema_minor)
                 .field("client_version", client_version)
                 .field("token", &"***")
-                .field("mode", mode)
+                .field("mode", &mode.as_wire_str())
                 .finish(),
             Command::SetProxy { url } => f.debug_struct("SetProxy").field("url", url).finish(),
             Command::Subscribe {
@@ -441,6 +493,14 @@ impl std::fmt::Debug for Command {
                 .field("end_date", end_date)
                 .field("granularity", granularity)
                 .finish(),
+            Command::SetReplaySpeed {
+                request_id,
+                multiplier,
+            } => f
+                .debug_struct("SetReplaySpeed")
+                .field("request_id", request_id)
+                .field("multiplier", multiplier)
+                .finish(),
         }
     }
 }
@@ -523,6 +583,10 @@ pub struct OrderListFilter {
     pub date: Option<String>,
 }
 
+fn default_order_record_venue() -> String {
+    "tachibana".to_string()
+}
+
 /// Wire representation of a single order record in `OrderListUpdated`.
 /// `deny_unknown_fields` prevents unknown Python-side fields from silently
 /// passing through to Rust (C-2).
@@ -543,6 +607,10 @@ pub struct OrderRecordWire {
     pub expire_time_ns: Option<i64>,
     pub status: String,
     pub ts_event_ms: i64,
+    /// Venue that owns this order: "tachibana" for live orders, "replay" for REPLAY WAL orders.
+    /// Defaults to "tachibana" for backwards-compatibility.
+    #[serde(default = "default_order_record_venue")]
+    pub venue: String,
 }
 
 // ── Order enums (nautilus string representations, SCREAMING_SNAKE_CASE) ────────
@@ -602,9 +670,17 @@ pub enum EngineEvent {
         #[serde(default)]
         capabilities: serde_json::Value,
     },
+    /// 接続レベル切断 frame と StartEngine 例外通知 outbox event の **両用 wire 形** を共有する (H-F).
+    ///
+    /// - `strategy_id == None` … handshake / 接続レベルエラー
+    ///   (auth_failed / schema_mismatch 等)。受信側は接続を切断する。
+    /// - `strategy_id == Some(_)` … 走行中 strategy の outbox event。
+    ///   受信側は該当 strategy の state machine にだけ反映し、接続自体は維持する。
     EngineError {
         code: String,
         message: String,
+        #[serde(default)]
+        strategy_id: Option<String>,
     },
     Connected {
         venue: String,
@@ -832,8 +908,16 @@ pub enum EngineEvent {
         ts_event_ms: i64,
     },
     /// Replay data load completed. Counters help the UI display progress.
+    ///
+    /// M-8 (R1b / schema 2.5): `strategy_id` was tightened from `String` to
+    /// `Option<String>` because the standalone `LoadReplayData` IPC (used by
+    /// `/api/replay/load` before any strategy is started) has no meaningful
+    /// strategy id. Old senders that omit the field deserialise as `None`
+    /// thanks to `#[serde(default)]`. The in-engine `start_backtest_replay`
+    /// path still emits a concrete strategy id (`Some(...)`).
     ReplayDataLoaded {
-        strategy_id: String,
+        #[serde(default)]
+        strategy_id: Option<String>,
         bars_loaded: u64,
         trades_loaded: u64,
         ts_event_ms: i64,
@@ -859,6 +943,40 @@ pub enum EngineEvent {
         ts_event_ms: i64,
     },
 
+    // ── N1.12: Execution marker + strategy signal events ─────────────────
+    /// Python emitted when a `OrderFilled` event is received for a nautilus strategy.
+    /// One `ExecutionMarker` is emitted per `OrderFilled` (1:1 mapping).
+    ExecutionMarker {
+        strategy_id: String,
+        instrument_id: String,
+        /// `"BUY"` | `"SELL"`
+        side: String,
+        /// Fill price as decimal string.
+        price: String,
+        ts_event_ms: i64,
+    },
+
+    /// Explicit signal emitted by a strategy via `StrategySignalMixin.emit_signal()`.
+    /// Independent of fills — a strategy can emit signals without any order activity.
+    StrategySignal {
+        strategy_id: String,
+        instrument_id: String,
+        signal_kind: SignalKind,
+        /// `"BUY"` | `"SELL"` | null
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side: Option<String>,
+        /// Price level as decimal string, or null.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        price: Option<String>,
+        /// Short machine-readable label (e.g. `"entry"`, `"stop"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        /// Human-readable annotation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        ts_event_ms: i64,
+    },
+
     // ── Buying Power Phase (schema 2.1) ───────────────────────────────────
     /// Response to `GetBuyingPower`. Contains current cash and credit buying power.
     BuyingPowerUpdated {
@@ -873,10 +991,36 @@ pub enum EngineEvent {
         /// 取得時刻 Unix ミリ秒
         ts_ms: i64,
     },
+
+    // ── N1.16: REPLAY 仮想買付余力 ────────────────────────────────────────────
+    /// REPLAY モードの仮想買付余力（portfolio_view.py が送出）。
+    /// cash / buying_power / equity はすべて decimal 文字列（float 丸め防止）。
+    ReplayBuyingPower {
+        strategy_id: String,
+        cash: String,
+        buying_power: String,
+        equity: String,
+        ts_event_ms: i64,
+    },
 }
 
 fn default_true() -> bool {
     true
+}
+
+// ── N1.12 signal kind (暫定語彙 / Q13 確定まで) ──────────────────────────────
+
+/// Signal kind vocabulary for `StrategySignal`.
+///
+/// Provisional values covering N1 scope (Q13 open — final vocabulary TBD in N2).
+/// Adding new variants is backward-compatible because the wire representation is
+/// the PascalCase variant name (serde default).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SignalKind {
+    EntryLong,
+    EntryShort,
+    Exit,
+    Annotate,
 }
 
 // ── Message sub-types ─────────────────────────────────────────────────────────

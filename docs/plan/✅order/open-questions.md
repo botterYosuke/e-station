@@ -11,7 +11,7 @@
 - N2 移行時に nautilus 本体を pyproject.toml に追加し、実際の import に切り替える
 - 候補バージョン: nautilus_trader 1.211.x（Tpre.1 時点での field 構成を参照）
 
-**Q10 も同時確定**: e-station 内 `docs/plan/nautilus_trader/spec.md` を正本とし、
+**Q10 も同時確定**: e-station 内 `docs/plan/✅nautilus_trader/spec.md` を正本とし、
 上流 nautilus_trader.model.orders.Order のソースは参照リンクのみとする（案 A）。
 
 
@@ -92,7 +92,7 @@
 
 ### Q10. nautilus_trader 用語の正本ファイル ✅ 確定（Q0 と同時確定, 2026-04-26）
 
-**決定**: **案 A** — e-station 内 `docs/plan/nautilus_trader/spec.md` を正本とし、
+**決定**: **案 A** — e-station 内 `docs/plan/✅nautilus_trader/spec.md` を正本とし、
 上流ソースは参照リンクのみ。Q0 の決定（案 A + C 併用）に統合済み。
 
 ---

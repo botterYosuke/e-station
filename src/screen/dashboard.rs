@@ -1,5 +1,6 @@
 pub mod pane;
 pub mod panel;
+pub mod replay_pane_registry;
 pub mod sidebar;
 pub mod tickers_table;
 
@@ -63,6 +64,8 @@ pub struct Dashboard {
     pub popout: HashMap<window::Id, (pane_grid::State<pane::State>, WindowSpec)>,
     pub streams: UniqueStreams,
     layout_id: uuid::Uuid,
+    /// N1.14: tracks auto-generated REPLAY panes and user dismissals.
+    pub replay_pane_registry: replay_pane_registry::ReplayPaneRegistry,
 }
 
 impl Default for Dashboard {
@@ -73,6 +76,7 @@ impl Default for Dashboard {
             streams: UniqueStreams::default(),
             popout: HashMap::new(),
             layout_id: uuid::Uuid::new_v4(),
+            replay_pane_registry: replay_pane_registry::ReplayPaneRegistry::new(),
         }
     }
 }
@@ -143,6 +147,7 @@ impl Dashboard {
             streams: UniqueStreams::default(),
             popout,
             layout_id,
+            replay_pane_registry: replay_pane_registry::ReplayPaneRegistry::new(),
         }
     }
 
@@ -226,6 +231,39 @@ impl Dashboard {
                     }
                 }
                 pane::Message::ClosePane(pane) => {
+                    // N1.14: If this is an auto-generated replay pane, record
+                    // the dismissal so it is not recreated on reload.
+                    if let Some(state) = self.panes.get(pane) {
+                        // N1.15: REPLAY OrderList pane は銘柄非依存 (instrument_id="") で dismiss。
+                        if let pane::Content::OrderList(panel) = &state.content
+                            && panel.is_replay
+                        {
+                            self.replay_pane_registry.dismiss("", "OrderList");
+                        }
+                        // N1.16: REPLAY BuyingPower pane も session-level dismiss (instrument_id="")。
+                        if let pane::Content::BuyingPower(panel) = &state.content
+                            && panel.is_replay
+                        {
+                            self.replay_pane_registry.dismiss("", "BuyingPower");
+                        }
+
+                        let instrument_id = state
+                            .streams
+                            .find_ready_map(|sk| Some(sk.ticker_info().ticker.to_string()));
+                        if let Some(inst_id) = instrument_id {
+                            let pane_kind: Option<&'static str> = match &state.content {
+                                pane::Content::TimeAndSales(_) => Some("TimeAndSales"),
+                                pane::Content::Kline {
+                                    kind: data::chart::KlineChartKind::Candles,
+                                    ..
+                                } => Some("CandlestickChart"),
+                                _ => None,
+                            };
+                            if let Some(kind) = pane_kind {
+                                self.replay_pane_registry.dismiss(&inst_id, kind);
+                            }
+                        }
+                    }
                     if let Some((_, sibling)) = self.panes.close(pane) {
                         self.focus = Some((window, sibling));
                     }
@@ -625,7 +663,20 @@ impl Dashboard {
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, state)| {
                 if let pane::Content::OrderList(panel) = &mut state.content {
-                    panel.set_orders(orders.clone());
+                    // N1.15: venue でフィルタ — REPLAY pane は venue="replay" のみ、
+                    // live pane は venue!="replay" のみを表示する。
+                    let filtered: Vec<_> = orders
+                        .iter()
+                        .filter(|o| {
+                            if panel.is_replay {
+                                o.venue == "replay"
+                            } else {
+                                o.venue != "replay"
+                            }
+                        })
+                        .cloned()
+                        .collect();
+                    panel.set_orders(filtered);
                 }
             });
     }
@@ -647,9 +698,35 @@ impl Dashboard {
     ) {
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, state)| {
-                if let pane::Content::BuyingPower(panel) = &mut state.content {
+                if let pane::Content::BuyingPower(panel) = &mut state.content
+                    && !panel.is_replay
+                {
                     panel.set_cash_buying_power(cash_available, cash_shortfall, ts_ms);
                     panel.set_credit_buying_power(credit_available, ts_ms);
+                }
+            });
+    }
+
+    /// N1.16: REPLAY BuyingPower snapshot を REPLAY 専用パネルに配布する。
+    pub fn distribute_replay_buying_power(
+        &mut self,
+        main_window: window::Id,
+        cash: String,
+        buying_power: String,
+        equity: String,
+        ts_ms: i64,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::BuyingPower(panel) = &mut state.content
+                    && panel.is_replay
+                {
+                    panel.set_replay_portfolio(
+                        cash.clone(),
+                        buying_power.clone(),
+                        equity.clone(),
+                        ts_ms,
+                    );
                 }
             });
     }
@@ -730,6 +807,126 @@ impl Dashboard {
                     panel.on_engine_reconnected();
                 }
             });
+    }
+
+    /// N1.14: Auto-generate REPLAY panes for the given instrument.
+    ///
+    /// Called from `Flowsurface::update()` when
+    /// `ControlApiCommand::AutoGenerateReplayPanes` is received.  Uses
+    /// `ReplayPaneRegistry` to decide whether each pane kind should be created
+    /// (skipped if user has manually dismissed it).
+    ///
+    /// Split rule (D9.3):
+    /// - 1st instrument: `Axis::Vertical` (side-by-side: Tick left, Candle right)
+    /// - 2nd+ instrument: `Axis::Horizontal` (below the focused pane)
+    pub fn auto_generate_replay_panes(&mut self, main_window_id: window::Id, instrument_id: &str) {
+        let is_first = !self.replay_pane_registry.is_loaded(instrument_id);
+        self.replay_pane_registry.mark_loaded(instrument_id);
+
+        let axis = if is_first {
+            pane_grid::Axis::Vertical
+        } else {
+            pane_grid::Axis::Horizontal
+        };
+
+        // Resolve the pane to split: prefer the focused main-window pane,
+        // fall back to the last pane in the grid.
+        let base_pane = self
+            .focus
+            .filter(|(w, _)| *w == main_window_id)
+            .and_then(|(_, p)| self.panes.get(p).map(|_| p))
+            .or_else(|| self.panes.iter().last().map(|(p, _)| *p));
+
+        let Some(base_pane) = base_pane else {
+            log::warn!("replay_api: no pane available to split for {instrument_id}");
+            return;
+        };
+
+        // Note: last_split_pane is updated only when panes.split() succeeds. If
+        // split returns None (grid full), subsequent panes fall back to base_pane.
+        // This is a pre-existing constraint of iced's pane_grid API.
+        let mut last_split_pane = base_pane;
+
+        if !is_first {
+            for kind in ["TimeAndSales", "CandlestickChart"] {
+                if let Some(pane) = self
+                    .replay_pane_registry
+                    .get_registered_pane(instrument_id, kind)
+                    && let Some(state) = self.panes.get_mut(pane)
+                {
+                    state.clear_replay_chart_data();
+                }
+            }
+        }
+
+        // N1.14: is_first ガード — reload 時 (同一銘柄の2回目以降) は
+        // TimeAndSales / CandlestickChart の重複生成を防ぐ。
+        // clear_replay_chart_data() で既存 pane のバッファをクリアする (実装済み)。
+        if is_first
+            && self
+                .replay_pane_registry
+                .should_generate(instrument_id, "TimeAndSales")
+        {
+            let new_state = pane::State::with_kind(data::layout::pane::ContentKind::TimeAndSales);
+            if let Some((new_pane, _)) = self.panes.split(axis, last_split_pane, new_state) {
+                log::info!("replay_api: auto-generated TimeAndSales pane for {instrument_id}");
+                self.replay_pane_registry
+                    .register_pane(instrument_id, "TimeAndSales", new_pane);
+                self.focus = Some((main_window_id, new_pane));
+                last_split_pane = new_pane;
+            }
+        }
+
+        if is_first
+            && self
+                .replay_pane_registry
+                .should_generate(instrument_id, "CandlestickChart")
+        {
+            let new_state =
+                pane::State::with_kind(data::layout::pane::ContentKind::CandlestickChart);
+            if let Some((new_pane, _)) = self.panes.split(axis, last_split_pane, new_state) {
+                log::info!("replay_api: auto-generated CandlestickChart pane for {instrument_id}");
+                self.replay_pane_registry.register_pane(
+                    instrument_id,
+                    "CandlestickChart",
+                    new_pane,
+                );
+                self.focus = Some((main_window_id, new_pane));
+                last_split_pane = new_pane;
+            }
+        }
+
+        // N1.15: セッションレベルの REPLAY 注文一覧 pane は最初の1銘柄ロード時のみ生成。
+        // loaded_count() == 1 で「2銘柄目以降の is_first」との重複生成を防ぐ。
+        if is_first
+            && self.replay_pane_registry.loaded_count() == 1
+            && self.replay_pane_registry.should_generate("", "OrderList")
+        {
+            let new_state = pane::State::new_replay_order_list();
+            if let Some((new_pane, _)) =
+                self.panes
+                    .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
+            {
+                log::info!("replay_api: auto-generated REPLAY OrderList pane");
+                self.focus = Some((main_window_id, new_pane));
+                last_split_pane = new_pane;
+            }
+        }
+
+        // N1.16: セッションレベルの REPLAY 買付余力 pane は最初の1銘柄ロード時のみ生成。
+        if is_first
+            && self.replay_pane_registry.loaded_count() == 1
+            && self.replay_pane_registry.should_generate("", "BuyingPower")
+        {
+            let new_state = pane::State::new_replay_buying_power();
+            if let Some((new_pane, _)) =
+                self.panes
+                    .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
+            {
+                log::info!("replay_api: auto-generated REPLAY BuyingPower pane");
+                self.focus = Some((main_window_id, new_pane));
+            }
+        }
     }
 
     pub fn view<'a>(

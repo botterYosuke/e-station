@@ -49,11 +49,11 @@
 
 ### 2.5 含めないもの
 
-**REPLAY モード仮想注文**: 本計画のスコープ外。**[nautilus_trader 統合 Phase N1](../nautilus_trader/README.md#replay-モード仮想注文の取り込み)** で実装する。本計画の Python 関数（`tachibana_orders.NautilusOrderEnvelope` 等）と HTTP API は N1 でそのまま再利用される設計（live / replay ディスパッチャを N1 で前段に追加）。
+**REPLAY モード仮想注文**: 本計画のスコープ外。**[nautilus_trader 統合 Phase N1](../✅nautilus_trader/README.md#replay-モード仮想注文の取り込み)** で実装する。本計画の Python 関数（`tachibana_orders.NautilusOrderEnvelope` 等）と HTTP API は N1 でそのまま再利用される設計（live / replay ディスパッチャを N1 で前段に追加）。
 
 **引き取り境界**（B-L1）: REPLAY モード中の仮想注文 WAL は、N1 で **`tachibana_orders_replay.jsonl`** に分岐して記録する（本計画の `tachibana_orders.jsonl` は live のみ扱う）。本計画の Phase O0〜O3 では `replay_mode == true` の間は全 `/api/order/*` を 503 + `reason_code="REPLAY_MODE_ACTIVE"` で拒否する（§3.2）ため、本計画から WAL に replay 行は混入しない。
 
-**立花証券以外の venue への発注**: 本計画は **立花証券単独**。暗号資産 venue（Binance / Bybit / Hyperliquid 等）への発注経路は本計画に含めない。それらは [nautilus_trader 計画 Phase N3](../nautilus_trader/spec.md#24-phase-n3--暗号資産-venue-executionclient任意) で扱う。本計画で書く HTTP API・IPC・`tachibana_orders.py` は立花前提の写像のみを実装する。
+**立花証券以外の venue への発注**: 本計画は **立花証券単独**。暗号資産 venue（Binance / Bybit / Hyperliquid 等）への発注経路は本計画に含めない。それらは [nautilus_trader 計画 Phase N3](../✅nautilus_trader/spec.md#24-phase-n3--暗号資産-venue-executionclient任意) で扱う。本計画で書く HTTP API・IPC・`tachibana_orders.py` は立花前提の写像のみを実装する。
 
 **Phase O4+ に送り**:
 
@@ -223,7 +223,7 @@ Python に渡す前に **Rust 側で**早期に弾く:
 
 ## 6. nautilus_trader 互換要件（不変条件）
 
-将来 [docs/plan/nautilus_trader/](../nautilus_trader/) Phase N2 で nautilus `LiveExecutionClient` に切り替えるとき、本計画で書く Python レイヤを **そのまま nautilus に組み込める**ことを設計目標とする。これに反する実装は禁止:
+将来 [docs/plan/✅nautilus_trader/](../✅nautilus_trader/) Phase N2 で nautilus `LiveExecutionClient` に切り替えるとき、本計画で書く Python レイヤを **そのまま nautilus に組み込める**ことを設計目標とする。これに反する実装は禁止:
 
 ### 6.1 用語・型の整合（必須）
 

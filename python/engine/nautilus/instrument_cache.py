@@ -101,12 +101,34 @@ class InstrumentCache:
         # TODO(N2): N2 の立花 LiveDataClient で複数 worker から並行 update が走る
         # ようになったら threading.RLock で保護する。N1 ではシングルスレッド前提で
         # GIL に依存。
-        self._instruments[instrument_id] = {
+        new_entry = {
             "lot_size": int(lot_size),
             "price_precision": int(price_precision),
             "updated_ts_ms": int(time.time() * 1000),
         }
-        self._persist()
+        # M-5: 順序を「先に永続化試行 → 成功時のみ in-memory 反映」に変更。
+        # 永続化が OSError で失敗した場合に in-memory だけ更新されてプロセス間で
+        # 観測値が分岐する状況を避ける。
+        merged = dict(self._instruments)
+        merged[instrument_id] = new_entry
+        try:
+            self._persist(merged)
+        except OSError as exc:
+            logger.warning(
+                "instrument cache persist failed for %s (%s); keeping in-memory state unchanged",
+                instrument_id,
+                exc,
+            )
+            # tmp 残留があれば cleanup を試みる (失敗しても無視)
+            tmp_path = self._cache_path.with_name(self._cache_path.name + ".tmp")
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            return
+        # 永続化成功時のみ in-memory 反映
+        self._instruments = merged
 
     # ------------------------------------------------------------------
     # internals
@@ -137,18 +159,22 @@ class InstrumentCache:
                 str(k): dict(v) for k, v in instruments.items() if isinstance(v, dict)
             }
 
-    def _persist(self) -> None:
+    def _persist(self, instruments: dict[str, dict] | None = None) -> None:
         """tmp → fsync → os.replace の atomic write。
 
         OS クラッシュで本体が 0 バイト化したり tmp の partial write が見えたりしないよう
         書込み完了後に fsync で disk まで降ろす。``os.replace`` は POSIX/Windows 共に
         atomic（同一 filesystem 内）。
+
+        M-5: ``instruments`` を引数で受け取れるようにし、in-memory 反映前の
+        永続化試行をサポートする。``None`` の場合は ``self._instruments`` を使う
+        (旧挙動)。
         """
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._cache_path.with_name(self._cache_path.name + ".tmp")
         payload = {
             "version": _CACHE_VERSION,
-            "instruments": self._instruments,
+            "instruments": self._instruments if instruments is None else instruments,
         }
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         with open(tmp_path, "wb") as f:

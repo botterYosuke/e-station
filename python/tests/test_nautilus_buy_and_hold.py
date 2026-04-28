@@ -8,6 +8,8 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
+import pytest
+
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
 from nautilus_trader.model.currencies import JPY
@@ -106,3 +108,45 @@ class TestBuyAndHoldStrategy:
         self.engine.add_strategy(strategy)
         self.engine.run()
         assert strategy.bought is True
+
+
+# ── M-13: subscribe_kind Literal validation ────────────────────────────────
+
+
+class TestM13SubscribeKindLiteral:
+    """M-13: subscribe_kind は 'bar' or 'trade' のみ受理。"""
+
+    def setup_method(self):
+        # 共通 instrument は不要 (init で raise するので)
+        from nautilus_trader.model.identifiers import InstrumentId
+        self.iid = InstrumentId.from_str("1301.TSE")
+
+    def test_rejects_capital_bar(self):
+        from engine.nautilus.strategies.buy_and_hold import BuyAndHoldStrategy
+        with pytest.raises(ValueError):
+            BuyAndHoldStrategy(instrument_id=self.iid, subscribe_kind="Bar")
+
+    def test_rejects_uppercase_bar(self):
+        from engine.nautilus.strategies.buy_and_hold import BuyAndHoldStrategy
+        with pytest.raises(ValueError):
+            BuyAndHoldStrategy(instrument_id=self.iid, subscribe_kind="BAR")
+
+    def test_rejects_trailing_space(self):
+        from engine.nautilus.strategies.buy_and_hold import BuyAndHoldStrategy
+        with pytest.raises(ValueError):
+            BuyAndHoldStrategy(instrument_id=self.iid, subscribe_kind="trade ")
+
+    def test_rejects_unrelated_string(self):
+        from engine.nautilus.strategies.buy_and_hold import BuyAndHoldStrategy
+        with pytest.raises(ValueError):
+            BuyAndHoldStrategy(instrument_id=self.iid, subscribe_kind="x")
+
+    def test_accepts_bar(self):
+        from engine.nautilus.strategies.buy_and_hold import BuyAndHoldStrategy
+        s = BuyAndHoldStrategy(instrument_id=self.iid, subscribe_kind="bar")
+        assert s.subscribe_kind == "bar"
+
+    def test_accepts_trade(self):
+        from engine.nautilus.strategies.buy_and_hold import BuyAndHoldStrategy
+        s = BuyAndHoldStrategy(instrument_id=self.iid, subscribe_kind="trade")
+        assert s.subscribe_kind == "trade"
