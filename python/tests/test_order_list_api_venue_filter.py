@@ -197,3 +197,78 @@ class TestOrderListApiVenueFilter:
         # エラーではなく OrderListUpdated が返ること
         assert event["event"] == "OrderListUpdated"
         assert event.get("code") != "unknown_venue"
+
+
+class TestOSErrorHandling:
+    """M-6: _do_get_order_list_replay が OSError をハンドルして Error IPC を返す。"""
+
+    @pytest.mark.asyncio
+    async def test_wal_oserror_returns_error_event(self, tmp_path):
+        """WAL 読み込みで OSError が発生した場合、Error IPC が返り outbox が空でない。"""
+        server = _make_server(tmp_path)
+        msg = {"op": "GetOrderList", "request_id": "req-oserr", "venue": "replay"}
+
+        # wal_path.exists() → True, open() → OSError をシミュレート
+        wal_path = tmp_path / "tachibana_orders_replay.jsonl"
+        wal_path.touch()
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            await server._do_get_order_list_replay(msg)
+
+        outbox = list(server._outbox)
+        assert len(outbox) == 1
+        event = outbox[0]
+        assert event["event"] == "Error"
+        assert event["code"] == "order_list_read_failed"
+        assert "disk full" in event["message"]
+
+
+class TestLiveReplayMixed:
+    """M-7: live/replay 混在シナリオ — venue='replay' は WAL のみ、live は tachibana のみ。"""
+
+    @pytest.mark.asyncio
+    async def test_replay_request_does_not_touch_live_worker(self, tmp_path):
+        """venue='replay' のリクエストが live worker (_workers) を参照しないこと。"""
+        _write_replay_wal(tmp_path, [])
+        server = _make_server(tmp_path)
+        # live worker を登録して、replay リクエストがそれを参照しないことを確認
+        server._workers["tachibana"] = MagicMock()
+
+        msg = {"op": "GetOrderList", "request_id": "req-mix-1", "venue": "replay"}
+        await server._do_get_order_list(msg)
+
+        # live worker の fetch 系メソッドは呼ばれない
+        server._workers["tachibana"].get_orders.assert_not_called()
+
+        outbox = list(server._outbox)
+        assert len(outbox) == 1
+        assert outbox[0]["event"] == "OrderListUpdated"
+
+    @pytest.mark.asyncio
+    async def test_live_request_does_not_invoke_replay_wal_path(self, tmp_path):
+        """venue='tachibana' のリクエストが _do_get_order_list_replay を呼ばないこと。
+
+        _do_get_order_list_replay をモックして呼ばれないことを確認する。
+        """
+        from unittest.mock import AsyncMock
+        _write_replay_wal(tmp_path, [
+            {
+                "phase": "submit",
+                "client_order_id": "coid-999",
+                "instrument_id": "1301.TSE",
+                "order_side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "100",
+                "ts": 1700000000000,
+            }
+        ])
+        server = _make_server(tmp_path)
+        msg = {"op": "GetOrderList", "request_id": "req-mix-2", "venue": "tachibana"}
+
+        with patch.object(server, "_do_get_order_list_replay", AsyncMock()) as mock_replay:
+            try:
+                await server._do_get_order_list(msg)
+            except Exception:
+                pass  # live worker fetch might fail in test env
+
+        # replay WAL 経路は呼ばれない
+        mock_replay.assert_not_called()

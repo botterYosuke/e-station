@@ -6,9 +6,6 @@
 /// closed.
 use std::collections::HashSet;
 
-#[allow(dead_code)]
-pub const MAX_REPLAY_INSTRUMENTS: usize = 4;
-
 /// Logical identity of an auto-generated replay pane.
 /// `pane_kind` is a `&'static str` so comparisons are zero-cost.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

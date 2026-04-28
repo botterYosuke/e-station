@@ -339,6 +339,13 @@
 
 ### N1.5 REPLAY 仮想注文ディスパッチャ ✅ 完了 2026-04-28
 
+> ⚠️ **配線繰越（R2 review-fix R2 で明文化）**: `python/engine/order_router.py` 自体は実装完了しているが、
+> `server.py` の `_do_submit_order_inner` 経路では M-7 (R1a) で導入した
+> 「venue == "replay" を `OrderRejected{REPLAY_NOT_IMPLEMENTED}` で早期 reject」分岐がそのまま残る。
+> production caller からは `route_submit_order` が呼ばれない（`grep` 0 hit）。
+> `_do_submit_order_inner` → `route_submit_order(...)` の配線は **N1.11 (streaming + speed control)** で
+> 同時に行う。N1.11 完了後に `REPLAY_NOT_IMPLEMENTED` reason_code は廃止する（H-3, R2 review-fix R2）。
+
 **前提**: `python/engine/exchanges/tachibana_orders.py` が存在し `submit_order` / `NautilusOrderEnvelope` が実装済み（order/ Phase O0 以上完了）
 
 - [x] ✅ `python/engine/order_router.py` 新設
@@ -476,6 +483,11 @@
       - 同一マイクロ秒バーストでも MIN_TICK_DT_SEC=1ms が下限になること
       - 1 sleep が SLEEP_CAP_SEC=200ms を超えないこと
 - [x] ✅ N0.6 / N1.9 の決定論性テストが run() 自走経路で引き続き緑であること
+- [ ] **N1.5 配線繰越** (R2 review-fix R2 で追加): `python/engine/server.py::_do_submit_order_inner` の M-7 早期 reject
+      （`OrderRejected{REPLAY_NOT_IMPLEMENTED}`）を解除し、`route_submit_order(mode="replay", ...)` を呼ぶ
+      配線を追加する。`replay` venue の SubmitOrder が `REPLAY_NOT_IMPLEMENTED` で reject されない経路を
+      `python/tests/test_order_router_dispatch.py` に新規ケースとして追加して pin する。
+      この配線完了をもって `REPLAY_NOT_IMPLEMENTED` reason_code を data-mapping.md / spec.md から削除する。
 
 #### 状況・知見・Tips（2026-04-28 完了報告 — N1.11）
 

@@ -268,6 +268,88 @@ class TestHCEngineStartedFailureRecovery:
         assert stopped["strategy_id"] == "hc-strategy"
 
 
+class TestH1NoDoubleEngineStoppedEmit:
+    """H-1 (R2 review-fix R2): non-streaming 版でも EngineStopped が二重 emit されない。
+
+    streaming 版には既に `stop_ts_event_ms == 0` ガードがあるが non-streaming にも同じ
+    ガードを追加した。本テストは正常系で EngineStopped が 1 回だけ emit されることを
+    pin する（normal-path emit と except 補完 emit の重複を検出）。
+    """
+
+    def test_engine_stopped_emitted_exactly_once_on_success(self) -> None:
+        """正常系: EngineStopped は 1 回だけ emit される。"""
+        events, on_event = _collect_events()
+        runner = NautilusRunner()
+        runner.start_backtest_replay(
+            strategy_id="buy-and-hold",
+            instrument_id="1301.TSE",
+            start_date="2024-01-04",
+            end_date="2024-01-05",
+            granularity="Trade",
+            initial_cash=1_000_000,
+            base_dir=FIXTURES,
+            on_event=on_event,
+        )
+        stopped = [e for e in events if e["event"] == "EngineStopped"]
+        assert len(stopped) == 1, (
+            f"EngineStopped should be emitted exactly once, got {len(stopped)}: "
+            f"{[e for e in events]}"
+        )
+
+    def test_engine_stopped_not_double_emitted_when_post_run_raises(self) -> None:
+        """正常系で engine.run() 完走後に後段が raise しても、normal-path で
+        既に emit 済みの EngineStopped に対する補完 emit は走らない (二重 emit 防止)。
+
+        ``_collect_fill_data`` を mock して raise させ、normal-path EngineStopped 送出後
+        の例外で except 補完が走らないことを assert。
+        """
+        from unittest.mock import patch
+
+        events, on_event = _collect_events()
+        runner = NautilusRunner()
+
+        # _collect_fill_data は EngineStopped emit より前に呼ばれるので、
+        # post-run exception 経路を作るには engine.run() 完走後・EngineStopped emit 後に
+        # raise させる必要がある。ReplayBacktestResult 構築側を壊して再現する。
+        original_init = None
+        from engine.nautilus import engine_runner as er
+
+        original_init = er.ReplayBacktestResult.__init__
+
+        call_count = {"n": 0}
+
+        def boom(*args, **kwargs):
+            call_count["n"] += 1
+            # 1 回目だけ raise (このテスト内で他の dataclass 構築には影響させない)
+            raise RuntimeError("synthetic post-emit failure")
+
+        with patch.object(er.ReplayBacktestResult, "__init__", boom):
+            with pytest.raises(RuntimeError, match="synthetic post-emit failure"):
+                runner.start_backtest_replay(
+                    strategy_id="buy-and-hold",
+                    instrument_id="1301.TSE",
+                    start_date="2024-01-04",
+                    end_date="2024-01-05",
+                    granularity="Trade",
+                    initial_cash=1_000_000,
+                    base_dir=FIXTURES,
+                    on_event=on_event,
+                )
+
+        # H-1: stop_ts_ms != 0 なので except 補完は走らないはず
+        stopped = [e for e in events if e["event"] == "EngineStopped"]
+        assert len(stopped) == 1, (
+            f"EngineStopped should not be double-emitted; got {len(stopped)}"
+        )
+        # 元の except 補完 emit (final_equity='0') ではなく normal-path の値が残ることも確認
+        assert stopped[0]["final_equity"] != "0", (
+            "normal-path EngineStopped should be preserved, not overwritten by fallback"
+        )
+
+        # 復元
+        er.ReplayBacktestResult.__init__ = original_init
+
+
 class TestHICollectFillDataDeterminism:
     """H-I: 同 ts 内も (ts, price) lex sort で安定する。"""
 

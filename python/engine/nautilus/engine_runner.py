@@ -79,6 +79,16 @@ class BacktestResult:
 
 
 @dataclass
+class FillRecord:
+    """PortfolioView.on_fill() に渡すための約定レコード（C-1 fix）。"""
+
+    instrument_id: str
+    side: str  # "BUY" or "SELL"
+    qty: Decimal
+    price: Decimal
+
+
+@dataclass
 class ReplayBacktestResult(BacktestResult):
     """``start_backtest_replay()`` の戻り値。
 
@@ -91,6 +101,7 @@ class ReplayBacktestResult(BacktestResult):
     account_id: str = ""
     start_ts_event_ms: int = 0
     stop_ts_event_ms: int = 0
+    portfolio_fills: list["FillRecord"] = field(default_factory=list)
 
 
 
@@ -270,6 +281,10 @@ class NautilusRunner:
         # internal BacktestEngine の venue (TSE 等) とは別空間。
         account_id = f"{_IPC_VENUE_TAG}-{cfg.trader_id}"
         start_ts_ms = int(time.time() * 1000)
+        # H-1 (R2 review-fix R2): 二重送出ガード。正常系で EngineStopped を emit したら
+        # stop_ts_ms に値を立て、except 側はそれが 0 のときだけ補完 emit する。
+        # streaming 版 (start_backtest_replay_streaming) と同じパターンに揃える。
+        stop_ts_ms: int = 0
         # H-C: EngineStarted の emit を try 内に移し、emit 自体が raise した場合も
         # except に降りて EngineStopped 補完が走るようにする。
         try:
@@ -366,6 +381,7 @@ class NautilusRunner:
             )
 
             fill_timestamps, fill_last_prices = _collect_fill_data(engine, strategy_id)
+            portfolio_fills = _collect_portfolio_fills(engine, strategy_id)
 
             account = engine.kernel.portfolio.account(Venue(venue))
             if account is None:
@@ -383,11 +399,14 @@ class NautilusRunner:
                 "ts_event_ms": stop_ts_ms,
             })
 
+            # H-1: stop_ts_ms はここで初めて非ゼロになる。これ以降の except は
+            # 「EngineStopped 既送出」とみなし二重 emit を抑制する。
             return ReplayBacktestResult(
                 strategy_id=strategy_id,
                 final_equity=final_equity,
                 fill_timestamps=fill_timestamps,
                 fill_last_prices=fill_last_prices,
+                portfolio_fills=portfolio_fills,
                 bars_loaded=bars_loaded,
                 trades_loaded=trades_loaded,
                 account_id=account_id,
@@ -401,20 +420,22 @@ class NautilusRunner:
             )
             # H-C: try 内例外で EngineStopped が抜けるのを補完。
             # final_equity は失敗時 fallback の "0"、ts は now()。
-            # 二重送出防止のため stop_ts_event_ms == 0 (= 未到達) のときだけ emit する。
-            try:
-                emit({
-                    "event": "EngineStopped",
-                    "strategy_id": strategy_id,
-                    "final_equity": "0",
-                    "ts_event_ms": int(time.time() * 1000),
-                })
-            except Exception:
-                # emit 自体が壊れていても元例外を mask しない
-                log.exception(
-                    "[NautilusRunner] EngineStopped fallback emit failed: strategy=%r",
-                    strategy_id,
-                )
+            # H-1 (R2 review-fix R2): stop_ts_ms == 0 のときだけ emit して二重送出を防ぐ。
+            # streaming 版と同じガードに揃えた。
+            if stop_ts_ms == 0:
+                try:
+                    emit({
+                        "event": "EngineStopped",
+                        "strategy_id": strategy_id,
+                        "final_equity": "0",
+                        "ts_event_ms": int(time.time() * 1000),
+                    })
+                except Exception:
+                    # emit 自体が壊れていても元例外を mask しない
+                    log.exception(
+                        "[NautilusRunner] EngineStopped fallback emit failed: strategy=%r",
+                        strategy_id,
+                    )
             raise
         finally:
             engine.dispose()
@@ -743,6 +764,51 @@ def _make_strategy(strategy_id: str, instrument_id):
     if strategy_id == "buy-and-hold":
         return BuyAndHoldStrategy(instrument_id=instrument_id)
     raise ValueError(f"Unknown strategy_id: {strategy_id!r}. N0 supports 'buy-and-hold' only.")
+
+
+def _collect_portfolio_fills(
+    engine: BacktestEngine, strategy_id: str = ""
+) -> "list[FillRecord]":
+    """PortfolioView.on_fill() 用に約定レコードを収集する（C-1 fix）。
+
+    order.side / filled_qty / avg_px / instrument_id が欠落している場合は
+    そのオーダーをスキップする。
+    """
+    try:
+        orders = engine.kernel.cache.orders()
+        fills: list[FillRecord] = []
+        for order in orders:
+            if not getattr(order, "is_closed", False):
+                continue
+            inst = getattr(order, "instrument_id", None)
+            side_raw = getattr(order, "side", None)
+            qty_raw = getattr(order, "filled_qty", None)
+            px_raw = getattr(order, "avg_px", None)
+            if inst is None or side_raw is None or qty_raw is None or px_raw is None:
+                continue
+            try:
+                side_str = side_raw.name  # OrderSide.BUY → "BUY"
+            except AttributeError:
+                side_str = str(side_raw)
+            try:
+                qty = Decimal(str(qty_raw))
+                price = Decimal(str(px_raw))
+            except Exception:
+                continue
+            if qty <= 0 or price <= 0:
+                continue
+            fills.append(FillRecord(
+                instrument_id=str(inst),
+                side=side_str,
+                qty=qty,
+                price=price,
+            ))
+        return fills
+    except (AttributeError, KeyError, TypeError):
+        log.exception(
+            "[NautilusRunner] _collect_portfolio_fills failed: strategy=%r", strategy_id
+        )
+        return []
 
 
 def _collect_fill_data(

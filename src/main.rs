@@ -613,7 +613,9 @@ fn main() {
                 ))
             };
             // N1.16: cache Arc for Message::ReplayBuyingPower handler.
-            REPLAY_API_STATE.set(Arc::clone(&replay_api_state)).ok();
+            if REPLAY_API_STATE.set(Arc::clone(&replay_api_state)).is_err() {
+                log::warn!("replay_api: REPLAY_API_STATE already initialized");
+            }
             // N1.6: AgentApiState はインメモリ narrative ストア。
             let agent_api_state = Arc::new(api::agent_api::AgentApiState::new());
             if let Some(rx) = replay_api::spawn(
@@ -1922,6 +1924,7 @@ impl Flowsurface {
                 self.active_dashboard_mut().distribute_replay_buying_power(
                     main_window,
                     cash.clone(),
+                    buying_power.clone(),
                     equity.clone(),
                     ts_event_ms,
                 );
@@ -1932,6 +1935,10 @@ impl Flowsurface {
                         buying_power,
                         equity,
                         ts_event_ms,
+                    );
+                } else {
+                    log::warn!(
+                        "replay_api: REPLAY_API_STATE not initialized, skipping portfolio update"
                     );
                 }
             }
@@ -2464,8 +2471,16 @@ impl Flowsurface {
                     }
                     ControlApiCommand::AutoGenerateReplayPanes {
                         instrument_id,
-                        strategy_id: _,
+                        strategy_id,
                     } => {
+                        // M-2 (R2 review-fix R2): strategy_id を Option<String> として保持。
+                        // None = 単独 LoadReplayData 経路、Some(_) = StartEngine 経由 load。
+                        // 現状 dashboard.auto_generate_replay_panes は strategy_id を要求しないが、
+                        // ログに記録しておくことで N1.14 以降の pane 紐付け実装に流用できる。
+                        log::debug!(
+                            "AutoGenerateReplayPanes: instrument_id={instrument_id:?} \
+                             strategy_id={strategy_id:?}"
+                        );
                         let main_window_id = self.main_window.id;
                         let dashboard = self.active_dashboard_mut();
                         dashboard.auto_generate_replay_panes(main_window_id, &instrument_id);

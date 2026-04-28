@@ -240,6 +240,12 @@ impl Dashboard {
                         {
                             self.replay_pane_registry.dismiss("", "OrderList");
                         }
+                        // N1.16: REPLAY BuyingPower pane も session-level dismiss (instrument_id="")。
+                        if let pane::Content::BuyingPower(panel) = &state.content
+                            && panel.is_replay
+                        {
+                            self.replay_pane_registry.dismiss("", "BuyingPower");
+                        }
 
                         let instrument_id = state
                             .streams
@@ -679,7 +685,9 @@ impl Dashboard {
     ) {
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, state)| {
-                if let pane::Content::BuyingPower(panel) = &mut state.content {
+                if let pane::Content::BuyingPower(panel) = &mut state.content
+                    && !panel.is_replay
+                {
                     panel.set_cash_buying_power(cash_available, cash_shortfall, ts_ms);
                     panel.set_credit_buying_power(credit_available, ts_ms);
                 }
@@ -691,6 +699,7 @@ impl Dashboard {
         &mut self,
         main_window: window::Id,
         cash: String,
+        buying_power: String,
         equity: String,
         ts_ms: i64,
     ) {
@@ -701,7 +710,7 @@ impl Dashboard {
                 {
                     panel.set_replay_portfolio(
                         cash.clone(),
-                        cash.clone(), // buying_power == cash for now
+                        buying_power.clone(),
                         equity.clone(),
                         ts_ms,
                     );
@@ -849,11 +858,7 @@ impl Dashboard {
 
         // N1.15: 1 銘柄目のロード時のみ、セッションレベルの REPLAY 注文一覧 pane を生成。
         // instrument_id は空文字（銘柄非依存の 1 セッション 1 枚）。
-        if is_first
-            && self
-                .replay_pane_registry
-                .should_generate("", "OrderList")
-        {
+        if is_first && self.replay_pane_registry.should_generate("", "OrderList") {
             let new_state = pane::State::new_replay_order_list();
             if let Some((new_pane, _)) =
                 self.panes
@@ -866,11 +871,7 @@ impl Dashboard {
         }
 
         // N1.16: 1 銘柄目のロード時のみ、セッションレベルの REPLAY 買付余力 pane を生成。
-        if is_first
-            && self
-                .replay_pane_registry
-                .should_generate("", "BuyingPower")
-        {
+        if is_first && self.replay_pane_registry.should_generate("", "BuyingPower") {
             let new_state = pane::State::new_replay_buying_power();
             if let Some((new_pane, _)) =
                 self.panes

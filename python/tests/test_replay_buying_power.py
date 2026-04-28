@@ -84,7 +84,11 @@ class TestReplayBuyingPowerClmGuard:
 
     @pytest.mark.asyncio
     async def test_clm_not_called_in_replay(self):
-        """venue='replay' の GetBuyingPower リクエストが tachibana_fetch_buying_power を呼ばないこと。"""
+        """venue='replay' の GetBuyingPower は public _do_get_buying_power 経由で呼ぶ。
+
+        H-E: ReplayBuyingPower は push event なので request_id フィールドを持たない。
+        H-F: 内部メソッド _do_get_buying_power_replay を直接叩かず公開経路を使う。
+        """
         from engine.server import DataEngineServer
 
         server = DataEngineServer(port=0, token="test")
@@ -99,12 +103,12 @@ class TestReplayBuyingPowerClmGuard:
         ) as mock_clm, patch(
             "engine.server.tachibana_fetch_credit_buying_power"
         ) as mock_credit:
-            await server._do_get_buying_power_replay(msg)
+            await server._do_get_buying_power(msg)
             mock_clm.assert_not_called()
             mock_credit.assert_not_called()
 
-        # outbox should have gotten a ReplayBuyingPower event
+        # outbox should have gotten a ReplayBuyingPower push event (no request_id)
         server._outbox.append.assert_called_once()
         args = server._outbox.append.call_args[0][0]
         assert args["event"] == "ReplayBuyingPower"
-        assert args["request_id"] == "r-001"
+        assert "request_id" not in args, "ReplayBuyingPower must not include request_id"

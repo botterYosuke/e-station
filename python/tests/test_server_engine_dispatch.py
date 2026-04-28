@@ -52,6 +52,8 @@ _REQUIRED_ATTRS: dict[str, object] = {
     "_tachibana_p_no_counter": None,
     "_session_holder": None,
     "_engine_tasks": None,
+    "_replay_portfolio": None,  # N1.16: PortfolioView
+    "_replay_strategy_id": None,
 }
 
 
@@ -71,6 +73,8 @@ def _make_server(mode: str = "replay"):
         server = DataEngineServer()
 
     # M-9: 必須属性をループで設定 (レビュー粒度を ``_REQUIRED_ATTRS`` 1 箇所に集約)
+    from decimal import Decimal
+    from engine.nautilus.portfolio_view import PortfolioView
     defaults: dict[str, object] = {
         "_outbox": _ListOutbox(),  # H5: duck-type スタブ
         "_mode": mode,
@@ -79,6 +83,8 @@ def _make_server(mode: str = "replay"):
         "_tachibana_p_no_counter": MagicMock(),
         "_session_holder": MagicMock(),
         "_engine_tasks": {},
+        "_replay_portfolio": PortfolioView(Decimal("1000000")),  # N1.16
+        "_replay_strategy_id": "",
     }
     # _REQUIRED_ATTRS に列挙された属性をすべて設定する。差分があれば KeyError で
     # 検出する (silent 黙殺防止)。
@@ -454,8 +460,15 @@ class TestM7ReplayVenueSubmitOrderRejected:
         assert len(rejected) == 1
         assert rejected[0]["reason_code"] == "REPLAY_NOT_IMPLEMENTED"
         assert rejected[0]["client_order_id"] == "replay-cid-007"
-        # OrderSubmitted は出ないこと (早期 reject)
-        assert not any(e.get("event") == "OrderSubmitted" for e in server._outbox)
+
+        # M-7 (R2 review-fix R2): OrderSubmitted も先に emit される (通常経路と対称)。
+        # Rust UI の submitting フラグを reset するため。
+        submitted = [e for e in server._outbox if e.get("event") == "OrderSubmitted"]
+        assert len(submitted) == 1
+        assert submitted[0]["client_order_id"] == "replay-cid-007"
+        # 順序: OrderSubmitted → OrderRejected
+        events = [e.get("event") for e in server._outbox]
+        assert events.index("OrderSubmitted") < events.index("OrderRejected")
 
 
 class TestM10UnknownEngineKind:
@@ -518,21 +531,23 @@ class TestM14StartEngineRaceGuard:
 
 
 class TestHGCallSoonThreadsafeUnification:
-    """H-G: ``_handle_start_engine`` 内の ``_outbox.append`` は **全経路** が
-    ``loop.call_soon_threadsafe`` を経由すること。
+    """H-G / H-2: ``_handle_start_engine`` の append 経路の使い分け。
 
-    R2 review-fix R1b H-G: worker thread からの append は ``call_soon_threadsafe``
-    を通すのに対し、main thread (validation 失敗 / race guard / parse 失敗 /
-    TimeoutError / except) からの append は直接 ``self._outbox.append`` を
-    呼んでいた。混在させると pending callback と main-thread 直 append の
-    順序逆転リスクが残るため、main thread 経路も ``call_soon_threadsafe`` で
-    統一する。
+    - **worker thread** (``asyncio.to_thread`` 内 ``_on_event``) →
+      ``loop.call_soon_threadsafe`` 経由で main loop に戻す。
+    - **main thread** (validation 失敗 / race guard / parse 失敗 / TimeoutError /
+      except) → 直接 ``self._outbox.append`` する。これにより
+      ``_handle_start_engine`` が ``asyncio.CancelledError`` でキャンセルされたときも
+      Error イベントが落ちない (H-2, R2 review-fix R2)。
+
+    本クラスの各テストは「main-thread 経路は **直 append**、worker 経路は
+    **call_soon_threadsafe** 経由」という分離契約を pin する。
     """
 
     @pytest.mark.asyncio
-    async def test_validation_error_uses_call_soon_threadsafe(self) -> None:
-        """validate_start_engine 失敗パス: Error{mode_mismatch} が
-        ``loop.call_soon_threadsafe`` 経由で積まれること (現状: 直接 append)。"""
+    async def test_validation_error_uses_direct_append(self) -> None:
+        """H-2: validation 失敗 (main thread coroutine 内) は直接 ``_outbox.append`` する。
+        ``call_soon_threadsafe`` を呼ばないので、cancel 時も Error が落ちない。"""
         import asyncio
 
         server = _make_server(mode="live")  # live mode で Backtest → mode_mismatch
@@ -571,15 +586,14 @@ class TestHGCallSoonThreadsafeUnification:
         errors = [e for e in outbox_list if e.get("event") == "Error"]
         assert len(errors) == 1
         assert errors[0]["code"] == "mode_mismatch"
-        # 全 outbox エントリが call_soon_threadsafe 経由で schedule されたこと
-        # (R1b H-G の中心アサーション)
-        assert len(scheduled) == len(outbox_list)
-        assert scheduled == outbox_list
+        # H-2: main thread 経路は call_soon_threadsafe を経由しない (直 append)
+        assert scheduled == [], (
+            f"main-thread validation error should bypass call_soon_threadsafe; got {scheduled}"
+        )
 
     @pytest.mark.asyncio
-    async def test_race_guard_uses_call_soon_threadsafe(self) -> None:
-        """同 strategy_id 連投 race guard: Error{engine_already_running} も
-        ``call_soon_threadsafe`` 経由で積む。"""
+    async def test_race_guard_uses_direct_append(self) -> None:
+        """H-2: race guard (main thread) も直 append。"""
         import asyncio
 
         server = _make_server(mode="replay")
@@ -614,12 +628,15 @@ class TestHGCallSoonThreadsafeUnification:
             await server._handle_start_engine(msg, base_dir=FIXTURES)
 
         outbox_list = list(server._outbox)
-        assert len(scheduled) == len(outbox_list)
-        assert scheduled == outbox_list
+        # H-2: race guard も main thread 経路なので直 append (call_soon_threadsafe 不使用)
+        assert len(outbox_list) >= 1
+        assert scheduled == [], (
+            f"main-thread race guard should bypass call_soon_threadsafe; got {scheduled}"
+        )
 
     @pytest.mark.asyncio
-    async def test_invalid_initial_cash_uses_call_soon_threadsafe(self) -> None:
-        """initial_cash parse 失敗パスも ``call_soon_threadsafe`` 経由で append。"""
+    async def test_invalid_initial_cash_uses_direct_append(self) -> None:
+        """H-2: initial_cash parse 失敗 (main thread) も直 append。"""
         import asyncio
 
         server = _make_server(mode="replay")
@@ -653,13 +670,18 @@ class TestHGCallSoonThreadsafeUnification:
             await server._handle_start_engine(msg, base_dir=FIXTURES)
 
         outbox_list = list(server._outbox)
-        assert len(scheduled) == len(outbox_list)
-        assert scheduled == outbox_list
+        # H-2: parse 失敗も main thread 経路なので直 append
+        assert len(outbox_list) >= 1
+        assert scheduled == [], (
+            f"main-thread invalid-config should bypass call_soon_threadsafe; got {scheduled}"
+        )
 
     @pytest.mark.asyncio
-    async def test_failure_path_uses_call_soon_threadsafe(self) -> None:
-        """EngineStarted 後の except パス (EngineStopped + EngineError + Error)
-        も全て ``call_soon_threadsafe`` 経由で append。"""
+    async def test_failure_path_worker_uses_call_soon_threadsafe_main_uses_direct(self) -> None:
+        """EngineStarted 後の except パスは worker thread の EngineStarted のみ
+        ``call_soon_threadsafe`` 経由で、main thread の (EngineStopped 補完 +
+        EngineError + Error) は直 append される。
+        H-2 (R2 review-fix R2): 経路ごとに append 方式が切り替わることを pin する。"""
         import asyncio
 
         server = _make_server(mode="replay")
@@ -705,14 +727,60 @@ class TestHGCallSoonThreadsafeUnification:
             await server._handle_start_engine(msg, base_dir=FIXTURES)
 
         outbox_list = list(server._outbox)
-        # 全 entry が call_soon_threadsafe 経由
-        assert len(scheduled) == len(outbox_list)
-        assert scheduled == outbox_list
+        # H-2: worker thread が emit した EngineStarted のみ call_soon_threadsafe 経由。
+        # except 補完 (EngineStopped / EngineError / Error) は main thread 経路で直 append。
+        assert len(scheduled) == 1, (
+            f"only worker-thread EngineStarted should use call_soon_threadsafe; got {scheduled}"
+        )
+        assert scheduled[0].get("event") == "EngineStarted"
         # 順序保証: EngineStarted → EngineStopped → EngineError → Error
         kinds = [e.get("event") for e in outbox_list]
         assert kinds.index("EngineStarted") < kinds.index("EngineStopped")
         assert kinds.index("EngineStopped") < kinds.index("EngineError")
         assert kinds.index("EngineError") < kinds.index("Error")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_still_emits_error_to_outbox(self) -> None:
+        """H-2 リグレッション: ``_handle_start_engine`` が ``asyncio.CancelledError``
+        でキャンセルされても、validation で出した Error{code=...} は outbox に
+        積まれている。
+
+        R1b H-G の ``call_soon_threadsafe`` 統一だと、scheduled callback が
+        cancel 後に drain されず Error が落ちる cancel-unsafe な経路を作っていた。
+        H-2 (R2 review-fix R2) で main thread 経路を直 append に戻したことを pin する。
+        """
+        import asyncio
+
+        server = _make_server(mode="live")  # live mode で Backtest → mode_mismatch
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-h2-cancel",
+            "engine": "Backtest",
+            "strategy_id": "h2-cancel",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+            },
+        }
+
+        # _handle_start_engine を Task として走らせ、すぐ cancel する。
+        task = asyncio.create_task(server._handle_start_engine(msg, base_dir=FIXTURES))
+        await asyncio.sleep(0)  # 1 step 進めて validation を通過させる
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Error{mode_mismatch} が outbox に少なくとも 1 件積まれていること
+        errors = [e for e in server._outbox if e.get("event") == "Error"]
+        assert len(errors) >= 1, (
+            f"Error event should survive cancellation; outbox={list(server._outbox)}"
+        )
+        assert errors[0]["code"] == "mode_mismatch"
 
 
 class TestStartEngineLowATasksCleanup:

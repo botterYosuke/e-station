@@ -231,10 +231,11 @@ def test_position_closed_roundtrip() -> None:
 
 
 def test_hello_accepts_mode_field() -> None:
+    # M-5 (R2 review-fix R2): SCHEMA_MINOR を動的参照する (旧 client 互換は別テスト)
     data = {
         "op": "Hello",
-        "schema_major": 2,
-        "schema_minor": 4,
+        "schema_major": s.SCHEMA_MAJOR,
+        "schema_minor": s.SCHEMA_MINOR,
         "client_version": "test-0.0.0",
         "token": "tok",
         "mode": "replay",
@@ -245,14 +246,35 @@ def test_hello_accepts_mode_field() -> None:
 
 def test_hello_defaults_mode_to_live_when_absent() -> None:
     """Backward compat: older clients that don't set mode default to "live"."""
+    # M-5 (R2 review-fix R2): SCHEMA_MINOR を動的参照する
     data = {
         "op": "Hello",
-        "schema_major": 2,
-        "schema_minor": 4,
+        "schema_major": s.SCHEMA_MAJOR,
+        "schema_minor": s.SCHEMA_MINOR,
         "client_version": "test-0.0.0",
         "token": "tok",
     }
     obj = s.Hello.model_validate(data)
+    assert obj.mode == "live"
+
+
+def test_old_client_minor_4_compatible() -> None:
+    """旧 client (SCHEMA_MINOR=4) からの Hello もハンドシェイク成功する。
+
+    SCHEMA_MAJOR の不一致のみが切断条件。MINOR 不一致は WARN のみで接続維持
+    （`engine-client/src/connection.rs` の handshake 規約）。
+    Hello deserialize 自体は MINOR 値に依存しないため、旧 minor=4 を投げても
+    pydantic の validate は通る (M-5, R2 review-fix R2 で明示 pin)。
+    """
+    data = {
+        "op": "Hello",
+        "schema_major": 2,
+        "schema_minor": 4,  # 旧 client (R1b 以前)
+        "client_version": "old-client",
+        "token": "tok",
+    }
+    obj = s.Hello.model_validate(data)
+    assert obj.schema_minor == 4
     assert obj.mode == "live"
 
 

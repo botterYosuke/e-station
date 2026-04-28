@@ -786,15 +786,28 @@ class DataEngineServer:
         # M-7: venue=="replay" は N1.5 で実装する仮想注文経路。N1.4 段階では
         # _workers に "replay" が登録されないため `unknown_venue` で reject されてしまうが、
         # 「未実装」の意図を Rust 側に明示するため専用 reason_code で OrderRejected を返す。
+        #
+        # M-7 (R2 review-fix R2): 通常の Tachibana 経路（Submitted → Accepted/Rejected）と
+        # 対称化するため、OrderRejected の前に OrderSubmitted を emit する。これにより
+        # Rust UI の submitting フラグが OrderSubmitted で reset され、続く OrderRejected の
+        # toast 表示後に stuck しない。
         if venue == "replay":
             cid = (raw_order or {}).get("client_order_id", "") if isinstance(raw_order, dict) else ""
+            ts_event_ms = int(time.time() * 1000)
+            self._outbox.append(
+                {
+                    "event": "OrderSubmitted",
+                    "client_order_id": cid,
+                    "ts_event_ms": ts_event_ms,
+                }
+            )
             self._outbox.append(
                 {
                     "event": "OrderRejected",
                     "client_order_id": cid,
                     "reason_code": "REPLAY_NOT_IMPLEMENTED",
                     "reason_text": "REPLAY 仮想注文は N1.5 で実装",
-                    "ts_event_ms": int(time.time() * 1000),
+                    "ts_event_ms": ts_event_ms,
                 }
             )
             return
@@ -1311,35 +1324,45 @@ class DataEngineServer:
         wal_path = self._cache_dir / "tachibana_orders_replay.jsonl"
 
         orders = []
-        if wal_path.exists():
-            with open(wal_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("phase") != "submit":
-                        continue
-                    qty = entry.get("quantity", "0")
-                    orders.append({
-                        "client_order_id": entry.get("client_order_id", ""),
-                        "venue_order_id": "",
-                        "instrument_id": entry.get("instrument_id", ""),
-                        "order_side": entry.get("order_side", ""),
-                        "order_type": entry.get("order_type", ""),
-                        "quantity": qty,
-                        "filled_qty": "0",
-                        "leaves_qty": qty,
-                        "price": entry.get("price"),
-                        "trigger_price": None,
-                        "time_in_force": "DAY",
-                        "expire_time_ns": None,
-                        "status": "SUBMITTED",
-                        "ts_event_ms": entry.get("ts", 0),
-                    })
+        try:
+            if wal_path.exists():
+                with open(wal_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if entry.get("phase") != "submit":
+                            continue
+                        qty = entry.get("quantity", "0")
+                        orders.append({
+                            "client_order_id": entry.get("client_order_id", ""),
+                            "venue_order_id": "",
+                            "instrument_id": entry.get("instrument_id", ""),
+                            "order_side": entry.get("order_side", ""),
+                            "order_type": entry.get("order_type", ""),
+                            "quantity": qty,
+                            "filled_qty": "0",
+                            "leaves_qty": qty,
+                            "price": entry.get("price"),
+                            "trigger_price": None,
+                            "time_in_force": "DAY",
+                            "expire_time_ns": None,
+                            "status": "SUBMITTED",
+                            "ts_event_ms": entry.get("ts", 0),
+                        })
+        except OSError as exc:
+            log.error("_do_get_order_list_replay: failed to read WAL: %s", exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "order_list_read_failed",
+                "message": str(exc),
+            })
+            return
 
         self._outbox.append({
             "event": "OrderListUpdated",
@@ -1496,13 +1519,15 @@ class DataEngineServer:
         })
 
     async def _do_get_buying_power_replay(self, msg: dict) -> None:
-        """REPLAY 余力: CLMZanKaiKanougaku を呼ばずに PortfolioView から返す（D9.6 明示ガード）。"""
-        req_id = msg.get("request_id", "")
+        """REPLAY 余力: CLMZanKaiKanougaku を呼ばずに PortfolioView から返す（D9.6 明示ガード）。
+
+        H-E: ReplayBuyingPower は push event なので request_id を付与しない。
+        Rust 側スキーマが extra="forbid" であるためフィールド追加は forbidden。
+        """
         # CLMZanKaiKanougaku は呼ばない（D9.6 明示ガード）
         ipc_dict = self._replay_portfolio.to_ipc_dict(
             strategy_id=self._replay_strategy_id,
         )
-        ipc_dict["request_id"] = req_id
         self._outbox.append(ipc_dict)
 
     # ------------------------------------------------------------------
@@ -2128,6 +2153,11 @@ class DataEngineServer:
             )
             return
 
+        # H-H: LoadReplayData 時にポートフォリオをリセット（strategy 確定前なので cash=0）。
+        from decimal import Decimal as _Decimal
+        self._replay_strategy_id = ""
+        self._replay_portfolio.reset(_Decimal(0))
+
         self._outbox.append(
             {
                 "event": "ReplayDataLoaded",
@@ -2179,18 +2209,34 @@ class DataEngineServer:
             log.warning("StartEngine: missing request_id, ignoring")
             return
 
-        # H-G (R1b): main thread / worker thread どちらからの append も
-        # ``loop.call_soon_threadsafe`` で main loop に戻して dispatch する。
-        # main thread から呼んでも追加コストはほぼゼロで、worker thread からの
-        # callback と順序保証されるメリットの方が大きい (R2 review-fix R1b H-G)。
+        # H-2 (R2 review-fix R2): R1b の H-G で main thread と worker thread の
+        # append を ``call_soon_threadsafe`` 経由で統一したが、これは
+        # ``_handle_start_engine`` が ``asyncio.CancelledError`` を受け取ったときに
+        # scheduled callback が drain されず Error イベントが落ちる cancel-unsafe な
+        # 経路を生む。main thread 経路 (validation 失敗 / race guard / parse 失敗 /
+        # TimeoutError / except) は coroutine 内で実行されているため race がなく、
+        # 直接 ``self._outbox.append(...)`` で安全に書ける。
+        # worker thread 経路 (``asyncio.to_thread`` 内の ``_on_event``) のみ
+        # ``call_soon_threadsafe`` で main loop に戻す。
         loop = asyncio.get_running_loop()
 
-        def _emit(evt: dict) -> None:
+        def _emit_direct(evt: dict) -> None:
+            """Main-thread (coroutine) 経路用。直接 outbox に append する。"""
+            self._outbox.append(evt)
+
+        def _emit_threadsafe(evt: dict) -> None:
+            """Worker-thread (``asyncio.to_thread``) 経路用。``call_soon_threadsafe``
+            で main loop に戻して append を schedule する。
+            """
             loop.call_soon_threadsafe(self._outbox.append, evt)
 
-        # H-G (R1b): _emit は ``call_soon_threadsafe`` で append を schedule するため
-        # 戻り値を使うには loop を 1 回 yield して callback を drain する必要がある。
-        # ヘルパで return 前に必ず呼ぶ。
+        # H-2: 内部互換のため ``_emit`` 名は残す (main-thread 直 append としてセマンティク変更)。
+        # 既存パスは _emit_direct と等価。
+        _emit = _emit_direct
+
+        # _drain は ``asyncio.to_thread`` 完了後の保険として継続する。
+        # worker thread が schedule した callback を drain して呼び出し側が
+        # outbox を直ちに観測できる semantics を保つ。
         async def _drain() -> None:
             await asyncio.sleep(0)
 
@@ -2258,10 +2304,18 @@ class DataEngineServer:
         # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
         self._engine_tasks[strategy_id] = runner
 
-        # C1 / H-G: worker thread からの append も ``_emit`` を使うことで main thread
-        # 直 append との順序を保つ。
+        # M-8 (R2 review-fix R2): StartEngine 受理直後に _replay_strategy_id を確定させる。
+        # これ以降に GetBuyingPower(replay) が走った場合でも正しい strategy_id が
+        # ReplayBuyingPower イベントに乗る。runner 完了後の result からの上書きはそのまま
+        # 残す（fallback として最終的な値で上書きする想定）。
+        if self._mode == "replay":
+            self._replay_strategy_id = strategy_id
+
+        # C1 / H-2 (R2 review-fix R2): worker thread からの append は
+        # ``_emit_threadsafe`` (= ``call_soon_threadsafe``) を使う。main thread の
+        # 直 append とは別経路だが、両者とも asyncio loop の単一スレッド上で順序付けられる。
         def _on_event(evt: dict) -> None:
-            _emit(evt)
+            _emit_threadsafe(evt)
 
         # H1 補助: EngineStarted を送出したかどうかを worker thread から記録する。
         # 例外時に未送出なら EngineStopped 補完を抑制する。
@@ -2273,8 +2327,11 @@ class DataEngineServer:
                 started_marker["sent"] = True
             _on_event(evt)
 
+        # C-1: result_holder で ReplayBacktestResult をキャプチャし、fills を portfolio に反映。
+        result_holder: list = [None]
+
         def _run() -> None:
-            runner.start_backtest_replay(
+            result_holder[0] = runner.start_backtest_replay(
                 strategy_id=strategy_id,
                 instrument_id=config.get("instrument_id", ""),
                 start_date=config.get("start_date", ""),
@@ -2288,6 +2345,16 @@ class DataEngineServer:
         try:
             # H2: timeout=3600s でラップし、TimeoutError を code="timeout" で送出。
             await asyncio.wait_for(asyncio.to_thread(_run), timeout=3600.0)
+            # C-1: 実行完了後に fills を PortfolioView に反映する。
+            result = result_holder[0]
+            if result is not None:
+                from decimal import Decimal as _Decimal
+                self._replay_strategy_id = result.strategy_id
+                self._replay_portfolio.reset(_Decimal(initial_cash))
+                for fill in result.portfolio_fills:
+                    self._replay_portfolio.on_fill(
+                        fill.instrument_id, fill.side, fill.qty, fill.price
+                    )
         except asyncio.TimeoutError as exc:
             log.error(
                 "StartEngine timed out: strategy_id=%r",
@@ -2359,6 +2426,11 @@ class DataEngineServer:
             )
         finally:
             self._engine_tasks.pop(strategy_id, None)
+            # M-8 (R2 review-fix R2): 走行終了時に _replay_strategy_id をリセット。
+            # 次の GetBuyingPower(replay) は空 strategy_id を返し、UI 側で
+            # 「未実行」を識別できるようにする。
+            if self._mode == "replay" and self._replay_strategy_id == strategy_id:
+                self._replay_strategy_id = ""
             # H-G (R1b): 関数 return 前に scheduled callback を drain して呼び出し側
             # (テスト含む) が outbox を直ちに観測できるようにする。
             await _drain()
@@ -2379,6 +2451,11 @@ class DataEngineServer:
             runner.stop()
         except Exception as exc:
             log.warning("StopEngine: runner.stop() raised: %s", exc)
+        # M-8 (R2 review-fix R2): StopEngine 受理時点で _replay_strategy_id を直ちに
+        # クリアする。runner 完了は別 thread で進行するため、その間の
+        # GetBuyingPower(replay) も「未実行」として扱う。
+        if self._mode == "replay" and self._replay_strategy_id == strategy_id:
+            self._replay_strategy_id = ""
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):

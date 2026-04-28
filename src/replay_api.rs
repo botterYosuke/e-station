@@ -58,9 +58,13 @@ pub enum ControlApiCommand {
     RequestVenueLogin { venue: String },
     /// Instruct the Iced app to auto-generate REPLAY panes for the given
     /// instrument (N1.14). Sent after `ReplayDataLoaded` is received.
+    ///
+    /// `strategy_id` は `ReplayDataLoaded.strategy_id`（`Option<String>`）を
+    /// そのまま伝搬する。単独 `LoadReplayData` 経路では `None`、
+    /// `StartEngine` 経由の load では具体値が入る (M-2, R2 review-fix R2)。
     AutoGenerateReplayPanes {
         instrument_id: String,
-        strategy_id: String,
+        strategy_id: Option<String>,
     },
 }
 
@@ -153,14 +157,19 @@ impl ReplayApiState {
         equity: String,
         ts_event_ms: i64,
     ) {
-        if let Ok(mut guard) = self.portfolio.lock() {
-            *guard = Some(ReplayPortfolioSnapshot {
-                strategy_id,
-                cash,
-                buying_power,
-                equity,
-                ts_event_ms,
-            });
+        match self.portfolio.lock() {
+            Ok(mut guard) => {
+                *guard = Some(ReplayPortfolioSnapshot {
+                    strategy_id,
+                    cash,
+                    buying_power,
+                    equity,
+                    ts_event_ms,
+                });
+            }
+            Err(e) => {
+                log::error!("replay_api: portfolio Mutex poisoned in update_replay_portfolio: {e}");
+            }
         }
     }
 
@@ -387,11 +396,13 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
         loop {
             match events_rx.recv().await {
                 Ok(EngineEvent::ReplayDataLoaded {
+                    strategy_id,
                     bars_loaded,
                     trades_loaded,
                     ..
                 }) => {
                     return ReplayLoadOutcome::Ok {
+                        strategy_id,
                         bars_loaded,
                         trades_loaded,
                     };
@@ -423,16 +434,15 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
 
     match outcome {
         Ok(ReplayLoadOutcome::Ok {
+            strategy_id: loaded_strategy_id,
             bars_loaded,
             trades_loaded,
         }) => {
             // N1.14: Track loaded instrument and notify Iced app.
-            let strategy_id_for_cmd = {
-                // We don't have strategy_id here (not stored in outcome), use empty string.
-                // The strategy_id from ReplayDataLoaded is not captured in this path;
-                // we use an empty string as placeholder (same as mock engine tests use "").
-                String::new()
-            };
+            // M-2 (R2 review-fix R2): propagate strategy_id from ReplayDataLoaded as
+            // Option<String>. None は単独 LoadReplayData 経路、Some(_) は
+            // StartEngine 経由 load を表す（情報損失せず Iced まで運ぶ）。
+            let strategy_id_for_cmd: Option<String> = loaded_strategy_id;
             {
                 let mut instruments = state.loaded_instruments.lock().await;
                 if !instruments.contains(&parsed.instrument_id) {
@@ -444,10 +454,18 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
                 if let Some(tx) = tx_guard.as_ref() {
                     let cmd = ControlApiCommand::AutoGenerateReplayPanes {
                         instrument_id: parsed.instrument_id.clone(),
-                        strategy_id: strategy_id_for_cmd,
+                        strategy_id: strategy_id_for_cmd.clone(),
                     };
-                    if let Err(e) = tx.try_send(cmd) {
-                        log::warn!("replay_api: AutoGenerateReplayPanes dropped — {e}");
+                    match tx.try_send(cmd) {
+                        Ok(_) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            log::warn!(
+                                "replay_api: AutoGenerateReplayPanes channel full, dropping"
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            log::error!("replay_api: AutoGenerateReplayPanes channel closed");
+                        }
                     }
                 }
             }
@@ -498,6 +516,7 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
 
 enum ReplayLoadOutcome {
     Ok {
+        strategy_id: Option<String>,
         bars_loaded: u64,
         trades_loaded: u64,
     },
@@ -626,7 +645,19 @@ async fn handle_replay_portfolio(stream: &mut TcpStream, state: &Arc<ReplayApiSt
         .await;
         return;
     }
-    let snapshot = state.portfolio.lock().ok().and_then(|g| g.clone());
+    let snapshot_result: Result<Option<ReplayPortfolioSnapshot>, String> = state
+        .portfolio
+        .lock()
+        .map(|g| g.clone())
+        .map_err(|e| e.to_string());
+    let snapshot = match snapshot_result {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("replay_api: portfolio Mutex poisoned in handle_replay_portfolio: {e}");
+            write_error(stream, 500, "Internal Server Error", "internal").await;
+            return;
+        }
+    };
     let body = match snapshot {
         Some(snap) => serde_json::json!({
             "status": "ok",
@@ -683,14 +714,13 @@ async fn handle_replay_order(stream: &mut TcpStream, body: &str, state: &Arc<Rep
         }
     };
 
-    let cid = order_obj
-        .get("client_order_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if cid.is_empty() {
-        write_error(stream, 400, "Bad Request", "client_order_id is required").await;
-        return;
-    }
+    let cid: String = match order_obj.get("client_order_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => {
+            write_error(stream, 400, "Bad Request", "client_order_id is required").await;
+            return;
+        }
+    };
 
     let conn_opt = state.engine_rx.borrow().clone();
     let conn = match conn_opt {
@@ -703,8 +733,8 @@ async fn handle_replay_order(stream: &mut TcpStream, body: &str, state: &Arc<Rep
 
     // Build IPC SubmitOrder. Use serde_json::from_value to reuse the
     // engine_client SubmitOrderRequest shape (same field names).
-    let order: engine_client::dto::SubmitOrderRequest = match serde_json::from_value(parsed.clone())
-    {
+    // M-1 (R2 review-fix R2): `parsed` を move して clone を削減する。
+    let order: engine_client::dto::SubmitOrderRequest = match serde_json::from_value(parsed) {
         Ok(o) => o,
         Err(e) => {
             write_error(
@@ -1092,7 +1122,27 @@ mod tests {
         trades_loaded: u64,
         error: Option<(String, String)>,
         silent: bool,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
+        spawn_mock_engine_load_with_strategy_id(
+            listener,
+            bars_loaded,
+            trades_loaded,
+            error,
+            silent,
+            serde_json::Value::String(String::new()),
+        )
+    }
+
+    /// `spawn_mock_engine_load` の strategy_id 指定可能版。
+    /// `serde_json::Value::Null` を渡すと `"strategy_id": null` を emit する。
+    fn spawn_mock_engine_load_with_strategy_id(
+        listener: TcpListener,
+        bars_loaded: u64,
+        trades_loaded: u64,
+        error: Option<(String, String)>,
+        silent: bool,
+        strategy_id: serde_json::Value,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = accept_async(tcp).await.unwrap();
@@ -1127,7 +1177,7 @@ mod tests {
             } else {
                 let evt = serde_json::json!({
                     "event": "ReplayDataLoaded",
-                    "strategy_id": "",
+                    "strategy_id": strategy_id,
                     "bars_loaded": bars_loaded,
                     "trades_loaded": trades_loaded,
                     "ts_event_ms": 1_700_000_000_000_i64,
@@ -1137,7 +1187,7 @@ mod tests {
                     .unwrap();
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
-        });
+        })
     }
 
     /// Mock engine: on any command, drain it and send nothing — the test
@@ -1177,7 +1227,6 @@ mod tests {
     async fn spawn_test_http_server(replay_state: Arc<ReplayApiState>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        // No-op tx (channel never read in these tests).
         let (tx, _rx) = mpsc::channel::<ControlApiCommand>(8);
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -1232,7 +1281,7 @@ mod tests {
     #[tokio::test]
     async fn replay_load_returns_200_when_engine_acknowledges() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
-        spawn_mock_engine_load(ws_listener, 0, 1234, None, false);
+        let _mock = spawn_mock_engine_load(ws_listener, 0, 1234, None, false);
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
@@ -1250,6 +1299,99 @@ mod tests {
         assert_eq!(json["trades_loaded"].as_u64(), Some(1234));
         assert_eq!(json["bars_loaded"].as_u64(), Some(0));
         drop(engine_tx);
+    }
+
+    /// M-2 (R2 review-fix R2): `ReplayDataLoaded.strategy_id` を Option<String> として
+    /// `AutoGenerateReplayPanes` コマンドにそのまま伝搬する（情報損失しない）。
+    ///
+    /// engine が `null` を送れば None、`"strat-001"` を送れば Some("strat-001") に
+    /// なることを検証する。
+    #[tokio::test]
+    async fn replay_load_propagates_strategy_id_to_auto_generate_command() {
+        // Case A: strategy_id = null (単独 LoadReplayData 経路)
+        {
+            let (ws_listener, ws_addr) = bind_ws_loopback().await;
+            let _mock = spawn_mock_engine_load_with_strategy_id(
+                ws_listener,
+                0,
+                1234,
+                None,
+                false,
+                serde_json::Value::Null,
+            );
+            let conn = connect_engine(ws_addr).await;
+            let (engine_tx, engine_rx) = watch::channel(Some(conn));
+            let state = Arc::new(
+                ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                    .with_load_timeout(Duration::from_secs(5)),
+            );
+            let (cmd_tx, mut cmd_rx) = mpsc::channel::<ControlApiCommand>(8);
+            state.set_control_tx(cmd_tx).await;
+            let port = spawn_test_http_server(Arc::clone(&state)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+
+            let (status, _) =
+                http_request(port, "POST", "/api/replay/load", &default_load_body()).await;
+            assert_eq!(status, 200);
+
+            let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+                .await
+                .expect("AutoGenerateReplayPanes timeout")
+                .expect("channel closed");
+            match cmd {
+                ControlApiCommand::AutoGenerateReplayPanes {
+                    instrument_id,
+                    strategy_id,
+                } => {
+                    assert_eq!(instrument_id, "1301.TSE");
+                    assert_eq!(
+                        strategy_id, None,
+                        "null strategy_id should propagate as None"
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+            drop(engine_tx);
+        }
+
+        // Case B: strategy_id = "strat-001" (StartEngine 経路)
+        {
+            let (ws_listener, ws_addr) = bind_ws_loopback().await;
+            let _mock = spawn_mock_engine_load_with_strategy_id(
+                ws_listener,
+                0,
+                1234,
+                None,
+                false,
+                serde_json::Value::String("strat-001".to_string()),
+            );
+            let conn = connect_engine(ws_addr).await;
+            let (engine_tx, engine_rx) = watch::channel(Some(conn));
+            let state = Arc::new(
+                ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                    .with_load_timeout(Duration::from_secs(5)),
+            );
+            let (cmd_tx, mut cmd_rx) = mpsc::channel::<ControlApiCommand>(8);
+            state.set_control_tx(cmd_tx).await;
+            let port = spawn_test_http_server(Arc::clone(&state)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+
+            let (status, _) =
+                http_request(port, "POST", "/api/replay/load", &default_load_body()).await;
+            assert_eq!(status, 200);
+
+            let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+                .await
+                .expect("AutoGenerateReplayPanes timeout")
+                .expect("channel closed");
+            match cmd {
+                ControlApiCommand::AutoGenerateReplayPanes { strategy_id, .. } => {
+                    assert_eq!(strategy_id.as_deref(), Some("strat-001"));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+            drop(engine_tx);
+        }
     }
 
     #[tokio::test]
@@ -1440,7 +1582,7 @@ mod tests {
     #[tokio::test]
     async fn replay_load_returns_400_on_mode_mismatch_error() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
-        spawn_mock_engine_load(
+        let _mock = spawn_mock_engine_load(
             ws_listener,
             0,
             0,
@@ -1467,7 +1609,7 @@ mod tests {
     #[tokio::test]
     async fn replay_load_returns_504_on_timeout() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
-        spawn_mock_engine_load(ws_listener, 0, 0, None, true); // silent
+        let _mock = spawn_mock_engine_load(ws_listener, 0, 0, None, true); // silent
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(

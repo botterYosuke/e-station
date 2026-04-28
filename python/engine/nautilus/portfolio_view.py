@@ -6,8 +6,11 @@ Fill イベントを受け取り cash / equity をリアルタイムに追跡す
 
 from __future__ import annotations
 
+import logging
 import time
 from decimal import Decimal
+
+log = logging.getLogger(__name__)
 
 
 class PortfolioView:
@@ -31,6 +34,8 @@ class PortfolioView:
         self, instrument_id: str, side: str, qty: Decimal, price: Decimal
     ) -> None:
         """約定イベントを処理して cash / position を更新する。"""
+        if qty <= 0 or price <= 0:
+            return
         amount = qty * price
         if side == "BUY":
             self._cash -= amount
@@ -71,6 +76,11 @@ class PortfolioView:
         last_prices: dict[str, Decimal] | None = None,
     ) -> dict:
         """ReplayBuyingPower IPC event dict を返す。"""
+        if self._positions and not last_prices:
+            log.warning(
+                "PortfolioView.to_ipc_dict: %d position(s) held but last_prices=None, MTM=0",
+                len(self._positions),
+            )
         eq = self.equity(last_prices)
         return {
             "event": "ReplayBuyingPower",
