@@ -22,8 +22,8 @@
 //! affordance, and `Ready` / `Idle` are quiescent states.
 
 use engine_client::error::{VenueErrorAction, VenueErrorClass, VenueErrorSeverity};
-use iced::widget::{button, column, container, text};
-use iced::{Element, Length, Theme};
+use iced::widget::{button, container, row, text};
+use iced::{Alignment, Element, Length, Theme};
 
 use crate::venue_state::VenueState;
 
@@ -121,30 +121,27 @@ fn error_banner<'a>(class: &VenueErrorClass, message: &'a str) -> Element<'a, Ba
     let severity = class.severity();
     let action = class.action();
 
-    let mut col = column![].spacing(4);
+    let mut r = row![].spacing(8).align_y(Alignment::Center);
     if let Some(header) = parsed.header {
-        col = col.push(text(header).size(13));
+        r = r.push(text(header).size(13));
     }
     if let Some(body) = parsed.body {
-        col = col.push(text(body).size(11));
+        r = r.push(text(body).size(11));
     }
 
     if let Some(label) = action_button_label(&parsed, action) {
         match action {
             VenueErrorAction::Relogin => {
-                col = col.push(button(text(label).size(11)).on_press(BannerMessage::Relogin));
+                r = r.push(button(text(label).size(11)).on_press(BannerMessage::Relogin));
             }
             VenueErrorAction::Dismiss => {
-                col = col.push(button(text(label).size(11)).on_press(BannerMessage::Dismiss));
+                r = r.push(button(text(label).size(11)).on_press(BannerMessage::Dismiss));
             }
-            VenueErrorAction::Hidden => {
-                // Unreachable — `action_button_label` returns `None`
-                // for Hidden, so we never enter this match arm.
-            }
+            VenueErrorAction::Hidden => {}
         }
     }
 
-    container(col)
+    container(r)
         .width(Length::Fill)
         .padding(8)
         .style(move |theme| banner_container_style(theme, severity))
