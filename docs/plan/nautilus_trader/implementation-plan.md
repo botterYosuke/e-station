@@ -950,10 +950,40 @@ SCHEMA_MAJOR / MINOR は据え置き。
 - `cargo fmt --check` クリーン
 - `cargo build --workspace` クリーン
 
-### R3 への残課題
+### R2 review-fix-loop 終了 (2026-04-29) — 残課題は次フェーズに繰越
 
-- **MEDIUM 残**: M-3 (bridge 重複) / M-4 (JoinHandle) / M-6 (`_REQUIRED_ATTRS` introspection) / M-9 (emit 失敗 mask)
-- **LOW**: 6 件 (詳細はレビューレポート参照)
+ImplementationLoop の収束基準は MEDIUM 以上ゼロ。残 MEDIUM 3 / LOW 6 は user 明示承認 (2026-04-29) で次フェーズの review-fix-loop に繰越。R2 (= N1.2/N1.3/N1.4) スコープでの review-fix-loop はここで終了。
+
+#### 繰越 MEDIUM (3 件)
+
+| ID | 概要 | 拾い先フェーズ | 場所 |
+|---|---|---|---|
+| **M-3** | `src/main.rs:310-350` の reconnect bridge インライン実装が `spawn_venue_ready_bridge` と 35 行重複。将来 lifecycle event 追加時に更新漏れリスク | N1.13 ランタイム切替 (Q15) または独立リファクタ | `src/main.rs` |
+| **M-6** | `python/tests/test_server_engine_dispatch._make_server` の `_REQUIRED_ATTRS` リストが `DataEngineServer.__init__` 実体属性と乖離した時に AttributeError 経由でしか検出できない (silent miss リスク) | N1.5 review-fix-loop または `DataEngineServer.for_testing()` 導入を独立タスクで | `python/tests/test_server_engine_dispatch.py` |
+| **M-9** | `python/engine/nautilus/engine_runner.py:412` で `emit(EngineStopped)` 失敗時の except ブロックが `raise` を省略しており、元例外がスタック上で mask される。`_spawn_fetch` で `code="fetch_failed"` という汎用エラーが返り `EngineStopped` も届かない経路が残る | N1.11 streaming 配線時に統一して対応（同ファイルの streaming 版と挙動を揃える） | `python/engine/nautilus/engine_runner.py` |
+
+#### 繰越 LOW (6 件)
+
+| ID | 概要 | 拾い先 |
+|---|---|---|
+| **L-1** | `src/replay_api.rs:743` の `request_id.clone()` が move に置換可能 | N1.11 review-fix-loop |
+| **L-2** | `engine-client/tests/schema_v2_4_nautilus.rs:10` のコメントが `schema_minor=4` のまま陳腐化 (実値は 5) | docs only — 任意タイミング |
+| **L-3** | `architecture.md §3` の H-F 解説で Rust `Some(_)` と Python `None` 表記が混在、自然言語で統一推奨 | docs only — 任意タイミング |
+| **L-4** | `engine_runner.py:_collect_fill_data` で `avg_px=None` のときに silent skip し log.debug が無い | N1.11 streaming 配線時 |
+| **L-5** | `python/engine/mode.py:50` のコメントで `ModeMismatchError` / `UnknownEngineKindError` が `ValueError` のサブクラスである旨が将来の `except ValueError` 経路で誤捕捉を招く可能性に言及していない | N1.5 review-fix-loop |
+| **L-6** | bug-postmortem パターン候補: 「並行 review-fix セッションが同一 commit 範囲を分担した時、片方の agent が先行 commit を見落として STOP+REPORT を出すパターン」を `MISSES.md` に追記候補として記録 | bug-postmortem skill |
+
+### R2 review-fix-loop 完了サマリ
+
+- 全ラウンド数: **2** (R1 = R1a + R1b 集約 + 並行 ffb3a2e、R2 = 本ラウンド + 並行 6a7d75b)
+- 修正 Finding 総数: CRITICAL 1 / HIGH 12 / MEDIUM 13
+- 残存 LOW (繰越): 6 件
+- 主要な反映成果:
+  - **型安全**: `AppMode` enum, `ReplayGranularity` serde 直受け, `ModeMismatchError`/`UnknownEngineKindError` 階層, `Literal["bar","trade"]`
+  - **silent failure 除去**: `is_iso_date` chrono カレンダー検証, `Lagged` 503 即時, `EngineStarted` try 内移動, `EngineStopped` 二重送出ガード, `_persist` atomic write 順序, `_collect_fill_data` 例外型限定+lex sort, `_outbox.append` thread 分離 (cancel-safe), `OrderSubmitted → OrderRejected` 順序保証
+  - **IPC 整合**: `SCHEMA_MINOR 4→5`, `ReplayDataLoaded.strategy_id` Optional, `EngineError.strategy_id` Optional + 空文字正規化, `REPLAY_NOT_IMPLEMENTED` canonical 記載
+  - **テスト追加**: 約 35 件の新規 pin (cargo test 453→487 / pytest 1033→1188)
+  - **計画書整合**: N1.5 配線繰越 → N1.11 明示, N1.11 に wiring task 追加, R1a/R1b/R2 反映ブロック self-contained
 
 ---
 
