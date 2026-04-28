@@ -323,6 +323,20 @@
 - ✅ M4: int(initial_cash) を to_thread 前にバリデーション
 - ✅ M5-M7: テスト追加 (strategy_id/stop/ReplayDataLoaded)
 
+### レビュー反映 (2026-04-28, ラウンド 2-3)
+- ✅ HIGH: TimeoutError パス started_marker 競合 → EngineStopped を無条件送出に変更
+- ✅ HIGH: TimeoutError 後に runner.stop() を呼び worker thread へ停止シグナル送信
+- ✅ MEDIUM: TimeoutError.message 空文字 → フォールバック固定文字列
+- ✅ MEDIUM: request_id=None ガード追加 → 早期 return
+- ✅ MEDIUM: EngineError ローカルインポートを関数先頭に移動 (重複除去)
+- ✅ MEDIUM: _Outbox に __iter__ 追加、_ListOutbox スタブと対称性確保
+- ✅ LOW: _engine_tasks 残骸 (initial_cash parse 失敗パス) 解消
+- ✅ LOW: docstring を H3 修正後の実挙動 (Error のみ) に更新
+- ✅ LOW: test_engine_started_then_failure に Error{request_id} 検証追加
+- 新規テスト: 12 件 (8 既存 + 4 新規)、全 pytest 1037 passed 確認済み
+- 設計判断: EngineError は接続レベル専用 (auth_failed/schema_mismatch)、
+  コマンドレベルのエラーは Error{request_id} に統一
+
 ### N1.5 REPLAY 仮想注文ディスパッチャ
 
 **前提**: `python/engine/exchanges/tachibana_orders.py` が存在し `submit_order` / `NautilusOrderEnvelope` が実装済み（order/ Phase O0 以上完了）

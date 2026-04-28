@@ -323,9 +323,6 @@ class TestStartEngineTimeoutRecovery:
 
         # started_marker["sent"] が False のまま TimeoutError を発生させる
         # (EngineStarted を送出しないまま timeout)
-        async def fake_to_thread(fn, *args, **kwargs):
-            raise asyncio.TimeoutError()
-
         with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError()):
             await server._handle_start_engine(msg, base_dir=FIXTURES)
 

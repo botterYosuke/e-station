@@ -109,6 +109,9 @@ class _Outbox:
     def __bool__(self) -> bool:
         return bool(self._q)
 
+    def __iter__(self):
+        return iter(list(self._q))
+
 
 # ---------------------------------------------------------------------------
 # Active stream bookkeeping
@@ -2049,7 +2052,7 @@ class DataEngineServer:
         """StartEngine IPC: BacktestEngine を起動して EngineStarted/EngineStopped を送出。
 
         mode と engine kind の不整合は ``validate_start_engine`` が ValueError を
-        raise → EngineError outbox 送出。
+        raise → Error{request_id, code='mode_mismatch'} 送出。
 
         実行は ``asyncio.to_thread`` で別 thread に逃がす。BacktestEngine.run() は
         同期実行で長時間 block するので、event loop を塞がないため。
@@ -2061,12 +2064,19 @@ class DataEngineServer:
         ``EngineStopped`` が抜けるため、except で final_equity="0" の
         EngineStopped を補完送出する (H1)。
         """
+        from engine.schemas import EngineError as EngineErrorModel
         from engine.nautilus.engine_runner import NautilusRunner
 
         engine_kind = msg.get("engine", "")
         strategy_id = msg.get("strategy_id", "")
         config = msg.get("config", {})
         request_id = msg.get("request_id")
+
+        # MEDIUM-2: request_id が None/空の場合は防御的に早期 return する。
+        # Rust 側の StartEngine は必ず request_id を付けるが、不正メッセージ対策。
+        if not request_id:
+            log.warning("StartEngine: missing request_id, ignoring")
+            return
 
         try:
             validate_start_engine(self._mode, engine_kind)
@@ -2079,6 +2089,22 @@ class DataEngineServer:
                     "request_id": request_id,
                     "code": "mode_mismatch",
                     "message": str(exc),
+                }
+            )
+            return
+
+        # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
+        # LOW-A: バリデーション成功後に runner と _engine_tasks を登録することで、
+        # parse 失敗時に残骸が _engine_tasks に残らない。
+        try:
+            initial_cash = int(config.get("initial_cash", "0"))
+        except (ValueError, TypeError) as exc:
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "invalid_config",
+                    "message": f"initial_cash: {exc}",
                 }
             )
             return
@@ -2096,26 +2122,13 @@ class DataEngineServer:
 
         # H1 補助: EngineStarted を送出したかどうかを worker thread から記録する。
         # 例外時に未送出なら EngineStopped 補完を抑制する。
+        # ただし TimeoutError パスでは started_marker に依存しない (HIGH-1)。
         started_marker = {"sent": False}
 
         def _on_event_tracked(evt: dict) -> None:
             if evt.get("event") == "EngineStarted":
                 started_marker["sent"] = True
             _on_event(evt)
-
-        # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
-        try:
-            initial_cash = int(config.get("initial_cash", "0"))
-        except (ValueError, TypeError) as exc:
-            self._outbox.append(
-                {
-                    "event": "Error",
-                    "request_id": request_id,
-                    "code": "invalid_config",
-                    "message": f"initial_cash: {exc}",
-                }
-            )
-            return
 
         def _run() -> None:
             runner.start_backtest_replay(
@@ -2138,22 +2151,27 @@ class DataEngineServer:
                 strategy_id,
                 exc_info=True,
             )
-            if started_marker["sent"]:
-                self._outbox.append(
-                    {
-                        "event": "EngineStopped",
-                        "strategy_id": strategy_id,
-                        "final_equity": "0",
-                        "ts_event_ms": int(time.time() * 1000),
-                    }
-                )
-            # M2: Pydantic モデル経由で送出。strategy_id を含める (M1)。
-            from engine.schemas import EngineError as EngineErrorModel
-
+            # worker thread はキャンセルできないが stop() シグナルを送ってリソースを解放する。
+            try:
+                runner.stop()
+            except Exception:
+                pass
+            # HIGH-1: timeout 後も worker thread は走り続けるため started_marker に依存しない。
+            # Rust 側は EngineStarted なしの EngineStopped を no-op として扱う。
+            self._outbox.append(
+                {
+                    "event": "EngineStopped",
+                    "strategy_id": strategy_id,
+                    "final_equity": "0",
+                    "ts_event_ms": int(time.time() * 1000),
+                }
+            )
+            # MEDIUM-1: str(asyncio.TimeoutError()) は空文字なので fallback メッセージを使う。
+            timeout_msg = str(exc) or f"StartEngine timed out after 3600s: strategy_id={strategy_id!r}"
             self._outbox.append(
                 EngineErrorModel(
                     code="timeout",
-                    message=str(exc),
+                    message=timeout_msg,
                     strategy_id=strategy_id,
                 ).model_dump()
             )
@@ -2163,7 +2181,7 @@ class DataEngineServer:
                     "event": "Error",
                     "request_id": request_id,
                     "code": "timeout",
-                    "message": str(exc),
+                    "message": timeout_msg,
                 }
             )
         except Exception as exc:
@@ -2180,9 +2198,6 @@ class DataEngineServer:
                         "ts_event_ms": int(time.time() * 1000),
                     }
                 )
-            # M2: Pydantic モデル経由で送出。strategy_id を含める (M1)。
-            from engine.schemas import EngineError as EngineErrorModel
-
             self._outbox.append(
                 EngineErrorModel(
                     code="engine_run_failed",
