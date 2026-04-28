@@ -792,22 +792,58 @@ class DataEngineServer:
         # Rust UI の submitting フラグが OrderSubmitted で reset され、続く OrderRejected の
         # toast 表示後に stuck しない。
         if venue == "replay":
-            cid = (raw_order or {}).get("client_order_id", "") if isinstance(raw_order, dict) else ""
+            # Parse order (replay は session/second_password 不要)
+            try:
+                order = SubmitOrderRequest.model_validate(raw_order)
+            except Exception as exc:
+                self._outbox.append(
+                    {
+                        "event": "Error",
+                        "request_id": req_id,
+                        "code": "invalid_order",
+                        "message": str(exc),
+                    }
+                )
+                return
+
             ts_event_ms = int(time.time() * 1000)
             self._outbox.append(
                 {
                     "event": "OrderSubmitted",
-                    "client_order_id": cid,
+                    "client_order_id": order.client_order_id,
                     "ts_event_ms": ts_event_ms,
                 }
             )
+
+            from engine.order_router import submit_order_replay
+
+            envelope = NautilusOrderEnvelope.model_validate(order.model_dump())
+            wal_path = self._cache_dir / "tachibana_orders_replay.jsonl"
+            try:
+                result = submit_order_replay(envelope, wal_path=wal_path)
+            except OSError as exc:
+                log.error(
+                    "_do_submit_order_replay: WAL I/O error for cid=%s — %s",
+                    order.client_order_id,
+                    exc,
+                )
+                self._outbox.append(
+                    {
+                        "event": "OrderRejected",
+                        "client_order_id": order.client_order_id,
+                        "reason_code": "TRANSPORT_ERROR",
+                        "reason_text": "WAL write failed",
+                        "ts_event_ms": int(time.time() * 1000),
+                    }
+                )
+                return
+
             self._outbox.append(
                 {
-                    "event": "OrderRejected",
-                    "client_order_id": cid,
-                    "reason_code": "REPLAY_NOT_IMPLEMENTED",
-                    "reason_text": "REPLAY 仮想注文は N1.5 で実装",
-                    "ts_event_ms": ts_event_ms,
+                    "event": "OrderAccepted",
+                    "client_order_id": result["client_order_id"],
+                    "venue_order_id": "",
+                    "ts_event_ms": int(time.time() * 1000),
                 }
             )
             return

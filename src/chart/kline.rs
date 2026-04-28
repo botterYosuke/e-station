@@ -12,6 +12,27 @@ use data::chart::kline::{
     ClusterKind, ClusterScaling, FootprintStudy, KlineDataPoint, KlineTrades, NPoc, PointOfControl,
 };
 use data::chart::{Autoscale, KlineChartKind, ViewConfig};
+use engine_client::dto::SignalKind;
+
+/// Overlay data for ExecutionMarker points on the Kline chart (N1.12).
+#[derive(Clone, Debug)]
+pub struct ExecutionMarkerData {
+    /// `"BUY"` | `"SELL"`
+    pub side: String,
+    /// Fill price parsed from the decimal string.
+    pub price_f32: f32,
+    pub ts_event_ms: i64,
+}
+
+/// Overlay data for StrategySignal markers on the Kline chart (N1.12).
+#[derive(Clone, Debug)]
+pub struct StrategySignalData {
+    pub signal_kind: SignalKind,
+    /// Price level; `None` means no specific price (annotation-only signal).
+    pub price_f32: Option<f32>,
+    pub ts_event_ms: i64,
+    pub tag: Option<String>,
+}
 
 use data::util::abbr_large_numbers;
 use exchange::unit::{Price, PriceStep, Qty};
@@ -160,6 +181,10 @@ pub struct KlineChart {
     request_handler: RequestHandler,
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
+    /// N1.12: Execution marker overlays.
+    pub execution_markers: Vec<ExecutionMarkerData>,
+    /// N1.12: Strategy signal overlays.
+    pub strategy_signals: Vec<StrategySignalData>,
 }
 
 impl KlineChart {
@@ -250,6 +275,8 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    execution_markers: Vec::new(),
+                    strategy_signals: Vec::new(),
                 }
             }
             Basis::Tick(interval) => {
@@ -306,6 +333,8 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    execution_markers: Vec::new(),
+                    strategy_signals: Vec::new(),
                 }
             }
         }
@@ -579,6 +608,25 @@ impl KlineChart {
         }
 
         self.invalidate(None);
+    }
+
+    /// N1.12: Push an `ExecutionMarker` overlay point onto the chart.
+    pub fn push_execution_marker(&mut self, data: ExecutionMarkerData) {
+        self.execution_markers.push(data);
+        self.chart.cache.clear_all();
+    }
+
+    /// N1.12: Push a `StrategySignal` overlay point onto the chart.
+    pub fn push_strategy_signal(&mut self, data: StrategySignalData) {
+        self.strategy_signals.push(data);
+        self.chart.cache.clear_all();
+    }
+
+    /// N1.12 / N1.14: Clear all overlay markers (execution + strategy signal).
+    pub fn clear_overlay_markers(&mut self) {
+        self.execution_markers.clear();
+        self.strategy_signals.clear();
+        self.chart.cache.clear_all();
     }
 
     pub fn insert_trades(&mut self, buffer: &[Trade]) {
@@ -992,6 +1040,44 @@ impl canvas::Program<Message> for KlineChart {
             }
 
             chart.draw_last_price_line(frame, palette, region);
+
+            // N1.12: ExecutionMarker overlay — BUY = green dot, SELL = red dot
+            for marker in &self.execution_markers {
+                let price = Price::from_f32(marker.price_f32);
+                let x = interval_to_x(marker.ts_event_ms as u64);
+                let y = price_to_y(price);
+                let color = if marker.side == "BUY" {
+                    palette.success.base.color
+                } else {
+                    palette.danger.base.color
+                };
+                frame.fill_rectangle(Point::new(x - 4.0, y - 4.0), Size::new(8.0, 8.0), color);
+            }
+
+            // N1.12: StrategySignal overlay — small diamond at price level
+            for signal in &self.strategy_signals {
+                let Some(price_f32) = signal.price_f32 else {
+                    continue;
+                };
+                let price = Price::from_f32(price_f32);
+                let x = interval_to_x(signal.ts_event_ms as u64);
+                let y = price_to_y(price);
+                let color = match signal.signal_kind {
+                    SignalKind::EntryLong => palette.success.strong.color,
+                    SignalKind::EntryShort => palette.danger.strong.color,
+                    SignalKind::Exit => palette.secondary.base.color,
+                    SignalKind::Annotate => palette.primary.base.color,
+                };
+                let size = 6.0;
+                let diamond = Path::new(|p| {
+                    p.move_to(Point::new(x, y - size));
+                    p.line_to(Point::new(x + size, y));
+                    p.line_to(Point::new(x, y + size));
+                    p.line_to(Point::new(x - size, y));
+                    p.close();
+                });
+                frame.fill(&diamond, color);
+            }
         });
 
         let crosshair = chart.cache.crosshair.draw(renderer, bounds_size, |frame| {

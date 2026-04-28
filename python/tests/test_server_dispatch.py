@@ -693,7 +693,7 @@ async def test_modify_order_tachibana_venue_proceeds_to_tachibana_logic(running_
 
 @pytest.mark.asyncio
 async def test_submit_order_replay_venue_still_handled_separately(running_server):
-    """venue="replay" は専用 REPLAY_NOT_IMPLEMENTED 分岐で処理される（N3.C 変更なし）。"""
+    """venue="replay" は N1.5 以降 OrderAccepted を返す（REPLAY_NOT_IMPLEMENTED は廃止）。"""
     port, token, _ = running_server
     ws = await _connect_and_handshake(port, token)
 
@@ -703,27 +703,31 @@ async def test_submit_order_replay_venue_still_handled_separately(running_server
         "venue": "replay",
         "order": {
             "client_order_id": "cid-replay-001",
-            "symbol": "7203",
-            "side": "buy",
-            "order_type": "market",
+            "instrument_id": "7203.TSE",
+            "order_side": "BUY",
+            "order_type": "MARKET",
             "quantity": "1",
+            "time_in_force": "DAY",
+            "post_only": False,
+            "reduce_only": False,
             "request_key": 0,
         },
     }
     await ws.send(orjson.dumps(req))
 
-    # OrderSubmitted が先に来る（M-7 R2: 対称化）
+    # OrderSubmitted が先に来る
     raw1 = await asyncio.wait_for(ws.recv(), timeout=2.0)
     msg1 = orjson.loads(raw1)
     assert msg1.get("event") == "OrderSubmitted", (
         f"Expected OrderSubmitted first for replay, got: {msg1}"
     )
 
+    # N1.5: REPLAY_NOT_IMPLEMENTED ではなく OrderAccepted が返る
     raw2 = await asyncio.wait_for(ws.recv(), timeout=2.0)
     msg2 = orjson.loads(raw2)
-    assert msg2.get("event") == "OrderRejected", f"Expected OrderRejected, got: {msg2}"
-    assert msg2.get("reason_code") == "REPLAY_NOT_IMPLEMENTED", (
-        f"Expected REPLAY_NOT_IMPLEMENTED, got: {msg2.get('reason_code')!r}"
+    assert msg2.get("event") == "OrderAccepted", f"Expected OrderAccepted, got: {msg2}"
+    assert msg2.get("client_order_id", "").startswith("REPLAY-"), (
+        f"Expected REPLAY- prefix, got: {msg2.get('client_order_id')!r}"
     )
 
     await ws.close()

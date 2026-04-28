@@ -10,8 +10,6 @@ live / replay モードに応じた注文ルーティングを検証する:
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
 import asyncio
 
 import pytest
@@ -220,3 +218,92 @@ def test_route_submit_order_replay_dispatches_to_replay(tmp_path, monkeypatch):
     )
     assert calls == ["replay"]
     assert result["venue"] == "replay"
+
+
+# ---------------------------------------------------------------------------
+# TestServerReplayRouting
+# ---------------------------------------------------------------------------
+
+
+class TestServerReplayRouting:
+    """server.py が replay venue の SubmitOrder を REPLAY_NOT_IMPLEMENTED で reject しないことを確認する。
+
+    N1.5 配線: _do_submit_order_inner の M-7 早期 reject 解除。
+    """
+
+    def _make_submit_order_msg(self) -> dict:
+        return {
+            "op": "SubmitOrder",
+            "request_id": "test-req-1",
+            "venue": "replay",
+            "order": {
+                "client_order_id": "CID-001",
+                "instrument_id": "1301.TSE",
+                "order_side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "100",
+                "price": None,
+                "time_in_force": "DAY",
+                "post_only": False,
+                "reduce_only": False,
+                "tags": [],
+                "request_key": 0,
+            },
+        }
+
+    def test_replay_submit_order_returns_accepted_not_rejected(self, tmp_path):
+        """venue=replay の SubmitOrder が OrderAccepted を返す（REPLAY_NOT_IMPLEMENTED ではない）。"""
+        from engine.server import DataEngineServer
+
+        server = DataEngineServer.__new__(DataEngineServer)
+        server._cache_dir = tmp_path
+        server._outbox = []
+        server._submit_order_inflight_count = 0
+
+        import asyncio
+
+        msg = self._make_submit_order_msg()
+        asyncio.run(server._do_submit_order_inner(msg))
+
+        events = [e["event"] for e in server._outbox]
+        assert "OrderSubmitted" in events
+        assert "OrderAccepted" in events
+        assert "REPLAY_NOT_IMPLEMENTED" not in str(server._outbox)
+
+    def test_replay_submit_order_writes_wal(self, tmp_path):
+        """venue=replay の SubmitOrder が WAL ファイルに記録される。"""
+        from engine.server import DataEngineServer
+        import json
+
+        server = DataEngineServer.__new__(DataEngineServer)
+        server._cache_dir = tmp_path
+        server._outbox = []
+        server._submit_order_inflight_count = 0
+
+        import asyncio
+
+        msg = self._make_submit_order_msg()
+        asyncio.run(server._do_submit_order_inner(msg))
+
+        wal_path = tmp_path / "tachibana_orders_replay.jsonl"
+        assert wal_path.exists()
+        line = json.loads(wal_path.read_text().strip())
+        assert line["phase"] == "submit"
+        assert "REPLAY-" in line["client_order_id"]
+
+    def test_replay_accepted_client_order_id_has_replay_prefix(self, tmp_path):
+        """OrderAccepted の client_order_id が REPLAY- プレフィックスを持つ。"""
+        from engine.server import DataEngineServer
+
+        server = DataEngineServer.__new__(DataEngineServer)
+        server._cache_dir = tmp_path
+        server._outbox = []
+        server._submit_order_inflight_count = 0
+
+        import asyncio
+
+        msg = self._make_submit_order_msg()
+        asyncio.run(server._do_submit_order_inner(msg))
+
+        accepted = next(e for e in server._outbox if e["event"] == "OrderAccepted")
+        assert accepted["client_order_id"].startswith("REPLAY-")

@@ -474,7 +474,10 @@
 - [x] ✅ 前場-後場 / 引け後 / 営業日跨ぎのギャップは sleep=0 で即時通過(D7)
 - [x] ✅ 営業日跨ぎ時に UI 向け date-change マーカーを 1 件 emit
 - [x] ✅ 既存 run(start, end) 自走経路は headless / 決定論性テストで温存
-- [x] ✅ iced 側に `Content::ReplayControl` pane 骨格を新設（TODO(N1.11-ui): 1x/10x/100x ボタン実装は N1.14 以降）[^n1.11-rust-pane]
+- [x] ✅ iced 側に `Content::ReplayControl` pane を実装（1x/10x/100x ボタン完了 2026-04-29）[^n1.11-rust-pane]
+      - `src/screen/dashboard/pane.rs`: 速度ボタン UI 実装、Effect::SetReplaySpeed(u32) 追加
+      - `src/screen/dashboard.rs`: Event::ReplaySpeedAction(u32) 追加
+      - `src/main.rs`: Command::SetReplaySpeed IPC 送信ハンドラ追加
 - [x] ✅ src/replay_api.rs: `POST /api/replay/control` で `action="speed"` のみ受理、
       他 action は 400 Bad Request を返す[^n1.11-rust-api]
 - [x] ✅ python/tests/test_replay_speed.py:
@@ -483,11 +486,10 @@
       - 同一マイクロ秒バーストでも MIN_TICK_DT_SEC=1ms が下限になること
       - 1 sleep が SLEEP_CAP_SEC=200ms を超えないこと
 - [x] ✅ N0.6 / N1.9 の決定論性テストが run() 自走経路で引き続き緑であること
-- [ ] **N1.5 配線繰越** (R2 review-fix R2 で追加): `python/engine/server.py::_do_submit_order_inner` の M-7 早期 reject
-      （`OrderRejected{REPLAY_NOT_IMPLEMENTED}`）を解除し、`route_submit_order(mode="replay", ...)` を呼ぶ
-      配線を追加する。`replay` venue の SubmitOrder が `REPLAY_NOT_IMPLEMENTED` で reject されない経路を
-      `python/tests/test_order_router_dispatch.py` に新規ケースとして追加して pin する。
-      この配線完了をもって `REPLAY_NOT_IMPLEMENTED` reason_code を data-mapping.md / spec.md から削除する。
+- [x] ✅ **N1.5 配線完了 (2026-04-29)**: `python/engine/server.py::_do_submit_order_inner` の M-7 早期 reject
+      （`OrderRejected{REPLAY_NOT_IMPLEMENTED}`）を解除し、`submit_order_replay(mode="replay", ...)` を呼ぶ
+      配線を追加。`OrderAccepted` が返るようになり、`REPLAY_NOT_IMPLEMENTED` は廃止。
+      `python/tests/test_order_router_dispatch.py::TestServerReplayRouting` 3 件 GREEN。
 
 #### 状況・知見・Tips（2026-04-28 完了報告 — N1.11）
 
@@ -522,7 +524,10 @@
       `emit_signal(kind, side=None, price=None, tag=None, note=None)` を追加し、
       StrategySignal IPC を送出
 - [x] ✅ BuyAndHold を改造して買い前にエントリー検討の `StrategySignal(EntryLong)` を出すサンプル化
-- [ ] ⏭ iced 側 chart pane に 2 レイヤー追加（execution layer / signal layer）は N1.14 以降に委譲
+- [x] ✅ iced 側 Kline chart pane に 2 レイヤー追加（execution layer / signal layer）完了 (2026-04-29)
+      - `src/chart/kline.rs`: ExecutionMarkerData / StrategySignalData struct 追加、push_*/clear_overlay_markers() メソッド追加、draw() に overlay 描画（BUY=緑四角, SELL=赤四角, Signal=ダイヤモンド）
+      - `src/screen/dashboard.rs`: distribute_execution_markers() / distribute_strategy_signals() / clear_chart_overlays() 追加
+      - `src/main.rs`: ExecutionMarkerReceived / StrategySignalReceived Message 追加、map_engine_event_to_tachibana に追加、update() ハンドラ追加
 - [x] ✅ python/tests/test_execution_marker_emit.py: OrderFilled → ExecutionMarker 1:1（7 件 GREEN）
 - [x] ✅ python/tests/test_strategy_signal_emit.py: emit_signal() 呼出 → IPC 1 件、
       未約定でも独立に出ること（12 件 GREEN）

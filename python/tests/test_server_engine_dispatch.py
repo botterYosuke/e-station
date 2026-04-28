@@ -436,11 +436,12 @@ class TestStartEngineMissingRequestId:
 
 
 class TestM7ReplayVenueSubmitOrderRejected:
-    """M-7: venue=='replay' SubmitOrder は OrderRejected{REPLAY_NOT_IMPLEMENTED} を返す。"""
+    """M-7 (N1.5): venue=='replay' SubmitOrder は OrderAccepted を返す（REPLAY_NOT_IMPLEMENTED は廃止）。"""
 
     @pytest.mark.asyncio
-    async def test_replay_venue_submit_order_rejected_with_replay_not_implemented(self) -> None:
+    async def test_replay_venue_submit_order_rejected_with_replay_not_implemented(self, tmp_path) -> None:
         server = _make_server(mode="replay")
+        server._cache_dir = tmp_path
         # _do_submit_order_inner が参照するカウンタ
         server._submit_order_inflight_count = 0
         msg = {
@@ -459,19 +460,23 @@ class TestM7ReplayVenueSubmitOrderRejected:
             },
         }
         await server._do_submit_order_inner(msg)
-        rejected = [e for e in server._outbox if e.get("event") == "OrderRejected"]
-        assert len(rejected) == 1
-        assert rejected[0]["reason_code"] == "REPLAY_NOT_IMPLEMENTED"
-        assert rejected[0]["client_order_id"] == "replay-cid-007"
 
-        # M-7 (R2 review-fix R2): OrderSubmitted も先に emit される (通常経路と対称)。
-        # Rust UI の submitting フラグを reset するため。
+        # N1.5 以降: REPLAY_NOT_IMPLEMENTED で reject しない
+        rejected = [e for e in server._outbox if e.get("event") == "OrderRejected"]
+        assert len(rejected) == 0
+        assert "REPLAY_NOT_IMPLEMENTED" not in str(list(server._outbox))
+
+        # OrderSubmitted → OrderAccepted の順で emit される
         submitted = [e for e in server._outbox if e.get("event") == "OrderSubmitted"]
         assert len(submitted) == 1
         assert submitted[0]["client_order_id"] == "replay-cid-007"
-        # 順序: OrderSubmitted → OrderRejected
+
+        accepted = [e for e in server._outbox if e.get("event") == "OrderAccepted"]
+        assert len(accepted) == 1
+        assert accepted[0]["client_order_id"].startswith("REPLAY-")
+
         events = [e.get("event") for e in server._outbox]
-        assert events.index("OrderSubmitted") < events.index("OrderRejected")
+        assert events.index("OrderSubmitted") < events.index("OrderAccepted")
 
 
 class TestM10UnknownEngineKind:
