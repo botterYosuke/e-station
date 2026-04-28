@@ -68,6 +68,7 @@ from engine.schemas import (
     Ready,
     SubmitOrderRequest,
 )
+from engine.mode import validate_start_engine
 
 log = logging.getLogger(__name__)
 
@@ -266,6 +267,10 @@ class DataEngineServer:
 
         # Monotonic counter to produce a fresh base ssid per subscribe
         self._stream_counter = 0
+
+        # N1.4: 走行中 NautilusRunner マッピング (strategy_id → runner)。
+        # StartEngine で登録、StopEngine から参照、完了時に pop される。
+        self._engine_tasks: dict[str, Any] = {}
 
         self._outbox = _Outbox(self._outbox_event.set)
 
@@ -588,6 +593,25 @@ class DataEngineServer:
         elif op == "GetBuyingPower":
             self._spawn_fetch(
                 self._do_get_buying_power(msg), msg.get("request_id")
+            )
+
+        elif op == "StartEngine":
+            # N1.4: BacktestEngine 起動。replay モード必須。
+            self._spawn_fetch(
+                self._handle_start_engine(msg), msg.get("request_id")
+            )
+
+        elif op == "StopEngine":
+            # N1.4: 走行中 BacktestEngine を停止する。
+            self._spawn_fetch(
+                self._handle_stop_engine(msg), msg.get("request_id")
+            )
+
+        elif op == "LoadReplayData":
+            # N1.4: J-Quants データを事前ロードして件数だけ通知する。
+            # StartEngine が config に同等情報を持つので、本コマンドは事前確認用途。
+            self._spawn_fetch(
+                self._handle_load_replay_data(msg), msg.get("request_id")
             )
 
         else:
@@ -1933,6 +1957,188 @@ class DataEngineServer:
             )
         except Exception as exc:
             log.debug("Failed to send error response: %s", exc)
+
+    # ------------------------------------------------------------------
+    # N1.4: nautilus engine dispatch (StartEngine / StopEngine / LoadReplayData)
+    # ------------------------------------------------------------------
+
+    async def _handle_load_replay_data(
+        self, msg: dict, *, base_dir: Path | None = None
+    ) -> None:
+        """LoadReplayData IPC: J-Quants ファイルを件数確認だけして ReplayDataLoaded 送出。
+
+        ``base_dir`` はテスト用 fixtures パス上書き。本番は ``None`` (= S:/j-quants)。
+        """
+        from engine.nautilus.jquants_loader import (
+            load_daily_bars,
+            load_minute_bars,
+            load_trades,
+        )
+
+        instrument_id = msg.get("instrument_id", "")
+        start_date = msg.get("start_date", "")
+        end_date = msg.get("end_date", "")
+        granularity = msg.get("granularity", "Trade")
+        request_id = msg.get("request_id")
+
+        try:
+            bars_loaded = 0
+            trades_loaded = 0
+            kwargs = {"base_dir": base_dir} if base_dir is not None else {}
+            if granularity == "Trade":
+                trades_loaded = sum(
+                    1 for _ in load_trades(instrument_id, start_date, end_date, **kwargs)
+                )
+            elif granularity == "Minute":
+                bars_loaded = sum(
+                    1 for _ in load_minute_bars(instrument_id, start_date, end_date, **kwargs)
+                )
+            elif granularity == "Daily":
+                bars_loaded = sum(
+                    1 for _ in load_daily_bars(instrument_id, start_date, end_date, **kwargs)
+                )
+            else:
+                raise ValueError(f"unknown granularity: {granularity!r}")
+        except Exception as exc:
+            log.error("LoadReplayData failed: %s", exc)
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "load_replay_data_failed",
+                    "message": str(exc),
+                }
+            )
+            return
+
+        self._outbox.append(
+            {
+                "event": "ReplayDataLoaded",
+                "strategy_id": "",  # 単独 LoadReplayData では空
+                "bars_loaded": bars_loaded,
+                "trades_loaded": trades_loaded,
+                "ts_event_ms": int(time.time() * 1000),
+            }
+        )
+
+    async def _handle_start_engine(
+        self, msg: dict, *, base_dir: Path | None = None
+    ) -> None:
+        """StartEngine IPC: BacktestEngine を起動して EngineStarted/EngineStopped を送出。
+
+        mode と engine kind の不整合は ``validate_start_engine`` が ValueError を
+        raise → EngineError outbox 送出。
+
+        実行は ``asyncio.to_thread`` で別 thread に逃がす。BacktestEngine.run() は
+        同期実行で長時間 block するので、event loop を塞がないため。
+        IPC イベントは別 thread から ``loop.call_soon_threadsafe(self._outbox.append, evt)``
+        経由で main loop に戻して append する (C1)。``_Outbox.append`` 内の
+        ``asyncio.Event.set`` が main loop 上で実行されることを保証する。
+
+        例外時 (engine.run() が途中で raise) は ``EngineStarted`` 送出済みで
+        ``EngineStopped`` が抜けるため、except で final_equity="0" の
+        EngineStopped を補完送出する (H1)。
+        """
+        from engine.nautilus.engine_runner import NautilusRunner
+
+        engine_kind = msg.get("engine", "")
+        strategy_id = msg.get("strategy_id", "")
+        config = msg.get("config", {})
+        request_id = msg.get("request_id")
+
+        try:
+            validate_start_engine(self._mode, engine_kind)
+        except ValueError as exc:
+            self._outbox.append(
+                {
+                    "event": "EngineError",
+                    "code": "mode_mismatch",
+                    "message": str(exc),
+                }
+            )
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "mode_mismatch",
+                    "message": str(exc),
+                }
+            )
+            return
+
+        runner = NautilusRunner()
+        # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
+        self._engine_tasks[strategy_id] = runner
+
+        # C1: 別 thread から append すると asyncio.Event.set が thread-unsafe。
+        # call_soon_threadsafe で main loop に戻して append する。
+        loop = asyncio.get_running_loop()
+
+        def _on_event(evt: dict) -> None:
+            loop.call_soon_threadsafe(self._outbox.append, evt)
+
+        # H1 補助: EngineStarted を送出したかどうかを worker thread から記録する。
+        # 例外時に未送出なら EngineStopped 補完を抑制する。
+        started_marker = {"sent": False}
+
+        def _on_event_tracked(evt: dict) -> None:
+            if evt.get("event") == "EngineStarted":
+                started_marker["sent"] = True
+            _on_event(evt)
+
+        def _run() -> None:
+            runner.start_backtest_replay(
+                strategy_id=strategy_id,
+                instrument_id=config.get("instrument_id", ""),
+                start_date=config.get("start_date", ""),
+                end_date=config.get("end_date", ""),
+                granularity=config.get("granularity", "Trade"),
+                initial_cash=int(config.get("initial_cash", "0")),
+                base_dir=base_dir,
+                on_event=_on_event_tracked,
+            )
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception as exc:
+            log.error("StartEngine failed: %s", exc)
+            # H1: EngineStarted を送出済みで EngineStopped を未送出なら補完。
+            # Rust 側 state machine が stuck しないようにする。
+            if started_marker["sent"]:
+                self._outbox.append(
+                    {
+                        "event": "EngineStopped",
+                        "strategy_id": strategy_id,
+                        "final_equity": "0",
+                        "ts_event_ms": int(time.time() * 1000),
+                    }
+                )
+            self._outbox.append(
+                {
+                    "event": "EngineError",
+                    "code": "engine_run_failed",
+                    "message": str(exc),
+                }
+            )
+        finally:
+            self._engine_tasks.pop(strategy_id, None)
+
+    async def _handle_stop_engine(self, msg: dict) -> None:
+        """StopEngine IPC: 走行中 NautilusRunner を停止する。
+
+        N1.4 では BacktestEngine.run() が完了するまで待つしかないため、
+        記録されている runner があれば ``stop()`` を呼ぶだけ。完了待ちは
+        ``_handle_start_engine`` の to_thread 完了に任せる。
+        """
+        strategy_id = msg.get("strategy_id", "")
+        runner = self._engine_tasks.get(strategy_id)
+        if runner is None:
+            log.info("StopEngine: no running engine for strategy_id=%r", strategy_id)
+            return
+        try:
+            runner.stop()
+        except Exception as exc:
+            log.warning("StopEngine: runner.stop() raised: %s", exc)
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):

@@ -234,14 +234,47 @@
 - [ ] `/api/replay/portfolio` を nautilus `Portfolio` 取得に置換
 - [ ] 自作 Rust 実装が見つかった場合は同 PR で削除、互換シムは残さない
 
-### N1.4 nautilus 側 BacktestEngine ハンドラ
-- [ ] `engine_runner.py` の `start_backtest()` を J-Quants 入力対応に拡張:
-  - [ ] `LoadReplayData` IPC を受けて `jquants_loader.load_trades(...)` から `BacktestEngine.add_data(ticks)`
-  - [ ] `BacktestEngine.run(start, end)` で自走（[Q3 案 B](./open-questions.md#q3)）
-  - [ ] `ReplayDataLoaded` イベントで `bars_loaded` / `trades_loaded` を IPC 返送
-- [ ] `engine_runner.py` で `SubmitOrder` を受けたとき `BacktestExecutionEngine.process_order(...)` で約定判定し `OrderFilled` を IPC で返送
-- [ ] 約定モデル: 直近 TradeTick の last_price ベースの fill（[architecture.md §4](./architecture.md#4-データフローreplay-モード)）。指値は `last_price` クロスで fill
-- [ ] **replay 用 market data IPC を新設しない（既存 `EngineEvent::Trades` / `KlineUpdate` を再利用）**（D5）。`engine_runner.py` の data feed 直前に Rust 向け複製送出を 1 箇所追加するのみ
+### N1.4 nautilus 側 BacktestEngine ハンドラ ✅ 完了 2026-04-28（一部 N1.5 繰越）
+- [x] ✅ `engine_runner.py` の `start_backtest()` を J-Quants 入力対応に拡張:
+  - [x] ✅ `LoadReplayData` IPC を受けて `jquants_loader.load_trades(...)` から `BacktestEngine.add_data(ticks)`（`start_backtest_replay()` 新設）
+  - [x] ✅ `BacktestEngine.run()` で自走（[Q3 案 B](./open-questions.md#q3)）
+  - [x] ✅ `ReplayDataLoaded` イベントで `bars_loaded` / `trades_loaded` を IPC 返送（`on_event` callback 経由）
+- [ ] ⏭ **N1.5 繰越**: `engine_runner.py` で `SubmitOrder` を受けたとき `BacktestExecutionEngine.process_order(...)` で約定判定し `OrderFilled` を IPC で返送（外部 SubmitOrder の replay 内 queue 投入は wrapper Strategy が必要、N1.5 REPLAY 仮想注文ディスパッチャと一緒に実装するのが整理良）
+- [ ] ⏭ **N1.5 繰越**: 約定モデル: 直近 TradeTick の last_price ベースの fill。指値は `last_price` クロスで fill
+- [ ] ⏭ **N1.11 繰越**: replay 用 market data の Rust UI 複製送出は no-op。tick 数十万件を 1 件ずつ IPC で流すと爆発するため、N1.11 streaming で sleep pacing と一緒に実装する。N1.4 では `ReplayDataLoaded` の件数通知のみ。
+
+#### 状況・知見・Tips（2026-04-28 R2 完了報告 — N1.4）
+
+**状況**:
+- 新規ファイル: `python/tests/test_engine_runner_replay.py` (10 件), `python/tests/test_server_engine_dispatch.py` (4 件)
+- 更新ファイル: `python/engine/nautilus/engine_runner.py`（`ReplayBacktestResult` / `start_backtest_replay()` / `_make_replay_strategy()` 追加・103 行増）、`python/engine/server.py`（`StartEngine` / `StopEngine` / `LoadReplayData` 分岐 + `_handle_*` 3 メソッド追加・146 行増）、`python/engine/nautilus/strategies/buy_and_hold.py`（`subscribe_kind` / `bar_type_str` 引数追加で trade tick 経路に対応）、`docs/plan/nautilus_trader/implementation-plan.md`
+- テスト結果: 全体 **1029 passed / 2 skipped**（既存 1015 + N1.4 新規 14 = 1029、N0 互換テスト破壊なし）。`cargo build --workspace` clean。
+- 新規 14 件内訳: `test_engine_runner_replay.py` 10 件（Trades 4 / Bars 2 / Edge 2 / Determinism 1 / Mode 1）+ `test_server_engine_dispatch.py` 4 件（Load 1 / Start 2 / Stop 1）
+
+**新たな知見**:
+- **nautilus BacktestEngine 内部 venue は data の `instrument_id` の venue タグと一致させる必要がある**。`jquants_loader` は `1301.TSE` という instrument_id で TradeTick を emit するので、BacktestEngine の `add_venue(Venue("REPLAY"), ...)` + `add_instrument(make_equity_instrument(symbol, "REPLAY"))` にすると `add_data(ticks)` で `Instrument 1301.TSE not found` で raise する。設計書 D5 の「venue タグは `replay`」は **IPC EngineEvent の wire 表現** に関するもので、内部 BacktestEngine の venue とは独立している。本実装では nautilus 内部 venue は `instrument_id.venue.value` (= `"TSE"`) を使い、IPC 送出時に必要なら `"replay"` をスタンプする方針にした。
+- **`BacktestEngine.run()` は同期実行で長時間 block する**。サーバ event loop を塞がないため `asyncio.to_thread(_run)` で別 thread に逃がす。`_outbox.append` は `deque.append + Event.set` で、`deque.append` は GIL 保護のもと atomic なので thread から呼んでも安全（次の `_send_loop` 周回で必ず drain される）。`Event.set()` は厳密には main loop からのみ安全だが、本実装では set されなくても次の append で叩き起こされる経路があり、最悪でも次の Ping/Pong まで遅延するだけで欠落はしない。
+- **strategy `BuyAndHold` を trade tick 対応にした**: 既存の `subscribe_bars(BarType...)` だけでは TradeTick 経路で全く on_bar が発火しない。`subscribe_kind="trade"` で `subscribe_trade_ticks(instrument_id)` + `on_trade_tick` を追加。N0 互換のため default は `"bar"`。
+- **`InstrumentId.from_str("INVALID-ID")` は ValueError を raise する**ことを利用して、`start_backtest_replay()` の入口で format validation が自動で効く。明示的な regex バリデータは不要。
+
+**設計思想と背景**:
+- **後方互換 API (`start_backtest` vs `start_backtest_replay`) を分けた理由**: N0 既存テスト 8 件 (`test_nautilus_smoke.py` / `test_nautilus_buy_and_hold.py` / `test_nautilus_determinism.py` / `test_nautilus_data_loader.py`) を破壊しないため。N0 は `klines: list[KlineRow]` を引数で受け取る Bar 経路、N1.4 は J-Quants パスから loader 起動する経路と、入力の抽象レベルが完全に異なる。同じ関数で両方サポートしようとすると引数列が肥大化し silent failure リスクが上がる。
+- **`on_event` callback 設計**: IPC 送出の責務を engine_runner から server.py に分離する。engine_runner は「event dict を作って渡す」までを担い、outbox / WebSocket への積み方は server.py 側の責務。これにより engine_runner 単体テストで IPC 送出を mock 不要で検証できる（test_engine_runner_replay.py で `events: list[dict]` に append するだけ）。
+- **SubmitOrder の replay 経路を N1.5 に繰越した判断根拠**:
+  - 外部 IPC `SubmitOrder` を `BacktestEngine.run()` 中の Strategy に「外部から差し込む」には wrapper Strategy が `submit_order_queue: queue.Queue` を持ち、`on_trade_tick` で queue を drain → `self.submit_order(...)` を呼ぶ設計が必要。
+  - 加えて N1.5 で実装する `order_router.py`（live / replay 切替）と `tachibana_orders_replay.jsonl` WAL がスコープに重なる。
+  - 単独で書くと wrapper Strategy + queue + WAL 連携で 3 時間以内に収まらないと判断（実測 1 時間でスケルトンの設計図のみ書ける程度）。
+  - **N1.4 ではユーザー Strategy が `on_trade_tick` 内で `self.submit_order(...)` する経路だけサポート** し、外部 IPC `SubmitOrder` の replay venue 内部 queue 投入は N1.5 で実装する。本ファイルの計画書 N1.5 章に記述あり。
+- **market data 複製送出 (Trades/KlineUpdate) を N1.11 に繰越した判断**: 1 銘柄 1 ヶ月の trade tick は数十万件。1 件ずつ IPC で流すとフレーム数とシリアライズコストが爆発する。N1.11 streaming は `streaming=True` + `add_data([item]) → run() → clear_data()` のループで 1 件ずつ pacing するのでそこと一緒に複製送出を実装するのが効率的。N1.4 では headless 自走経路（`run()` 一発）のみ動かし、UI 描画は `ReplayDataLoaded` の件数通知だけで暫定運用する。
+- **venue 内部値の選択**: `_REPLAY_VENUE = "REPLAY"` 定数を用意して全銘柄を REPLAY venue に集約する案も検討したが、`jquants_loader` が emit する TradeTick の `instrument_id` は固定で `1301.TSE` 形式のため、loader 側を venue パラメタライズしない限り合わない。loader 側を変えると N1.2 の API 互換が崩れ test 22 件のリグレッションコストが発生するため、本タスクでは BacktestEngine 内部の venue は `instrument_id.venue.value` を使う方針にした（コメントで明示）。
+- **`asyncio.to_thread` の選択**: `ThreadPoolExecutor` も検討したが、`asyncio.to_thread` は 3.9+ 標準で daemon thread を自動管理し、submit-side が cancel された場合の thread 側挙動は明文化されている。本タスクのレベル（同時 1 走行）では `to_thread` で十分。
+- **StopEngine の簡素実装**: BacktestEngine.run() の途中 cancel は nautilus 公式 API では非対応（最後まで走り切る）。`runner.stop()` を呼ぶと engine.dispose() を呼ぶが、to_thread 内で run() 中なら Cython 内部で再 dispose 防護が走り raise する可能性がある。本タスクでは「running 中の StopEngine は no-op + log info、終了は run() 完了時の自然停止」とした。streaming 経路 (N1.11) で chunk 間に stop signal を見る形にすれば中途 cancel 可能になるが、本タスク対象外。
+
+**Tips**:
+- **テスト用 J-Quants fixtures**: `python/tests/fixtures/equities_trades_202401.csv.gz` 等を `base_dir=FIXTURES` で渡すと runner / server.py の handler 両方で同じ fixtures を共有できる。`base_dir` は `start_backtest_replay()` / `_handle_load_replay_data()` / `_handle_start_engine()` の private 引数で、本番呼出では `None` (= デフォルト `S:/j-quants`) になる。
+- **BacktestEngine のスレッド境界**: `asyncio.to_thread(_run)` で逃がした関数は thread のメインが完了するまで返らないが、その内部から呼ぶ `self._outbox.append` は別 thread からの append でも次回 `_send_loop` 周回で drain される。`_outbox_event.set()` の thread-safety は厳密でないが、`_send_loop` は `wait()` の前に常に `_outbox` の長さを確認するため deadlock しない。
+- **strategy_id "buy-and-hold" のみサポート**: N1.4 では `_make_replay_strategy` でハードコード分岐。N1.6 で narrative_hook と `--strategy-file` を入れるときに plugin 化する。それまでは `ValueError` で明示拒否する（silent fallback 禁止）。
+- **`granularity="Trade"` で 0 件ロード**: fixtures に存在しない code (例: `1306.TSE`) を渡すと、jquants_loader は trades file 自体は存在するので `FileNotFoundError` ではなく空 iterator を返す。`engine.add_data([])` は呼ばないようにガード (`if ticks:`) してあるが、空でも run() は完了する（戦略は何もしない）。`final_equity == initial_cash` であることを `test_empty_range_still_emits_engine_stopped` で確認。
 
 ### N1.5 REPLAY 仮想注文ディスパッチャ
 
