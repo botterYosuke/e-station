@@ -18,6 +18,18 @@ impl Mode {
     }
 }
 
+/// R1b H-E: CLI モードを IPC 層の `AppMode` に変換する。
+/// 両者は意味的に同一だが、CLI 層は `src/cli.rs` ローカルなのに対し
+/// `AppMode` は engine-client クレートの IPC 公開型。境界で 1:1 に写す。
+impl From<Mode> for engine_client::dto::AppMode {
+    fn from(m: Mode) -> Self {
+        match m {
+            Mode::Live => engine_client::dto::AppMode::Live,
+            Mode::Replay => engine_client::dto::AppMode::Replay,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CliArgs {
     /// WebSocket URL of an externally managed Python data engine.

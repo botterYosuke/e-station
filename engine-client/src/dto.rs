@@ -4,6 +4,45 @@
 /// Both are transported as JSON text frames over a local WebSocket.
 use serde::{Deserialize, Serialize};
 
+/// N1.13 / R1b H-E: 起動時固定モード。CLI `--mode {live|replay}` で指定する。
+///
+/// 旧コードは `String` (`"live"` | `"replay"`) で保持していたが、型不一致と
+/// typo を防ぐために enum に格上げ。wire 表現 (Hello.mode の JSON 値) は
+/// `serde(rename_all = "lowercase")` により従来通り小文字文字列。
+///
+/// `Default = Live` は handshake 時の旧クライアント互換 (mode 欠落時の
+/// fallback) を保つために存在する。Python 側 `Hello.mode: Literal[...] = "live"`
+/// と同じ意味。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppMode {
+    #[default]
+    Live,
+    Replay,
+}
+
+impl AppMode {
+    /// Wire-form string (`"live"` | `"replay"`). Convenient for log lines and
+    /// HTTP error messages. Always lowercase to match the JSON serialisation.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            AppMode::Live => "live",
+            AppMode::Replay => "replay",
+        }
+    }
+
+    /// Parse the wire-form string. Returns `Err` for any value other than
+    /// `"live"` / `"replay"`. Use this at parse boundaries (CLI / HTTP query)
+    /// where typos must be caught early.
+    pub fn from_wire_str(s: &str) -> Result<Self, &'static str> {
+        match s {
+            "live" => Ok(AppMode::Live),
+            "replay" => Ok(AppMode::Replay),
+            _ => Err("unknown app mode (expected \"live\" or \"replay\")"),
+        }
+    }
+}
+
 // ── Commands (Rust → Python) ──────────────────────────────────────────────────
 
 // NOTE: Debug is intentionally hand-implemented below to mask SetSecondPassword.value.
@@ -15,9 +54,13 @@ pub enum Command {
         schema_minor: u16,
         client_version: String,
         token: String,
-        /// N1.13: 起動時に固定する mode (`"live"` | `"replay"`).
+        /// N1.13 / R1b H-E: 起動時に固定する mode (`AppMode::Live` | `AppMode::Replay`).
         /// Python 側で StartEngine.engine との整合チェックに使う。
-        mode: String,
+        /// wire 表現は serde rename_all = "lowercase" で `"live"` / `"replay"` の
+        /// 小文字文字列 (Python `Hello.mode: Literal["live","replay"]` と互換)。
+        /// `#[serde(default)]` で旧 client (mode 欠落) から `Live` にフォールバック。
+        #[serde(default)]
+        mode: AppMode,
     },
     SetProxy {
         url: Option<String>,
@@ -209,7 +252,7 @@ impl std::fmt::Debug for Command {
                 .field("schema_minor", schema_minor)
                 .field("client_version", client_version)
                 .field("token", &"***")
-                .field("mode", mode)
+                .field("mode", &mode.as_wire_str())
                 .finish(),
             Command::SetProxy { url } => f.debug_struct("SetProxy").field("url", url).finish(),
             Command::Subscribe {
@@ -857,8 +900,16 @@ pub enum EngineEvent {
         ts_event_ms: i64,
     },
     /// Replay data load completed. Counters help the UI display progress.
+    ///
+    /// M-8 (R1b / schema 2.5): `strategy_id` was tightened from `String` to
+    /// `Option<String>` because the standalone `LoadReplayData` IPC (used by
+    /// `/api/replay/load` before any strategy is started) has no meaningful
+    /// strategy id. Old senders that omit the field deserialise as `None`
+    /// thanks to `#[serde(default)]`. The in-engine `start_backtest_replay`
+    /// path still emits a concrete strategy id (`Some(...)`).
     ReplayDataLoaded {
-        strategy_id: String,
+        #[serde(default)]
+        strategy_id: Option<String>,
         bars_loaded: u64,
         trades_loaded: u64,
         ts_event_ms: i64,

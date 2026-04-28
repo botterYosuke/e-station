@@ -2131,7 +2131,10 @@ class DataEngineServer:
         self._outbox.append(
             {
                 "event": "ReplayDataLoaded",
-                "strategy_id": "",  # 単独 LoadReplayData では空
+                # M-8 (R1b / schema 2.5): 単独 LoadReplayData は strategy 未起動のため
+                # null を送る (旧 minor=4 では "" だった)。Rust 側は Option<String>::None
+                # で受ける。strategy 経路 (start_backtest_replay) は別 emit で具体値。
+                "strategy_id": None,
                 "bars_loaded": bars_loaded,
                 "trades_loaded": trades_loaded,
                 "ts_event_ms": int(time.time() * 1000),
@@ -2152,6 +2155,12 @@ class DataEngineServer:
         経由で main loop に戻して append する (C1)。``_Outbox.append`` 内の
         ``asyncio.Event.set`` が main loop 上で実行されることを保証する。
 
+        H-G (R1b): main thread からのエラー append (validation 失敗 / race guard /
+        parse 失敗 / TimeoutError / except) も同様に ``call_soon_threadsafe`` で
+        統一する。混在させると worker thread が schedule 済の callback と main thread
+        の直 append が逆順で観測される race が残る。
+        ``_emit`` ローカル関数で単一窓口化する。
+
         例外時 (engine.run() が途中で raise) は ``EngineStarted`` 送出済みで
         ``EngineStopped`` が抜けるため、except で final_equity="0" の
         EngineStopped を補完送出する (H1)。
@@ -2170,12 +2179,27 @@ class DataEngineServer:
             log.warning("StartEngine: missing request_id, ignoring")
             return
 
+        # H-G (R1b): main thread / worker thread どちらからの append も
+        # ``loop.call_soon_threadsafe`` で main loop に戻して dispatch する。
+        # main thread から呼んでも追加コストはほぼゼロで、worker thread からの
+        # callback と順序保証されるメリットの方が大きい (R2 review-fix R1b H-G)。
+        loop = asyncio.get_running_loop()
+
+        def _emit(evt: dict) -> None:
+            loop.call_soon_threadsafe(self._outbox.append, evt)
+
+        # H-G (R1b): _emit は ``call_soon_threadsafe`` で append を schedule するため
+        # 戻り値を使うには loop を 1 回 yield して callback を drain する必要がある。
+        # ヘルパで return 前に必ず呼ぶ。
+        async def _drain() -> None:
+            await asyncio.sleep(0)
+
         try:
             validate_start_engine(self._mode, engine_kind)
         except ModeMismatchError as exc:
             # H3: バリデーション失敗は Error{request_id} のみ送出。
             # EngineError は接続レベル専用 (auth_failed / schema_mismatch) に限定する。
-            self._outbox.append(
+            _emit(
                 {
                     "event": "Error",
                     "request_id": request_id,
@@ -2183,10 +2207,11 @@ class DataEngineServer:
                     "message": str(exc),
                 }
             )
+            await _drain()
             return
         except UnknownEngineKindError as exc:
             # M-10: 不明な engine kind は別 code で返す
-            self._outbox.append(
+            _emit(
                 {
                     "event": "Error",
                     "request_id": request_id,
@@ -2194,13 +2219,14 @@ class DataEngineServer:
                     "message": str(exc),
                 }
             )
+            await _drain()
             return
 
         # M-14: 同一 strategy_id が既に走行中なら早期 reject (race guard)。
         # 連投で _engine_tasks を上書きすると、先行 runner ハンドルを失い StopEngine が
         # 効かなくなる。
         if strategy_id in self._engine_tasks:
-            self._outbox.append(
+            _emit(
                 {
                     "event": "Error",
                     "request_id": request_id,
@@ -2208,6 +2234,7 @@ class DataEngineServer:
                     "message": f"engine for strategy_id={strategy_id!r} is already running",
                 }
             )
+            await _drain()
             return
 
         # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
@@ -2216,7 +2243,7 @@ class DataEngineServer:
         try:
             initial_cash = int(config.get("initial_cash", "0"))
         except (ValueError, TypeError) as exc:
-            self._outbox.append(
+            _emit(
                 {
                     "event": "Error",
                     "request_id": request_id,
@@ -2224,18 +2251,17 @@ class DataEngineServer:
                     "message": f"initial_cash: {exc}",
                 }
             )
+            await _drain()
             return
 
         runner = NautilusRunner()
         # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
         self._engine_tasks[strategy_id] = runner
 
-        # C1: 別 thread から append すると asyncio.Event.set が thread-unsafe。
-        # call_soon_threadsafe で main loop に戻して append する。
-        loop = asyncio.get_running_loop()
-
+        # C1 / H-G: worker thread からの append も ``_emit`` を使うことで main thread
+        # 直 append との順序を保つ。
         def _on_event(evt: dict) -> None:
-            loop.call_soon_threadsafe(self._outbox.append, evt)
+            _emit(evt)
 
         # H1 補助: EngineStarted を送出したかどうかを worker thread から記録する。
         # 例外時に未送出なら EngineStopped 補完を抑制する。
@@ -2275,7 +2301,7 @@ class DataEngineServer:
                 pass
             # HIGH-1: timeout 後も worker thread は走り続けるため started_marker に依存しない。
             # Rust 側は EngineStarted なしの EngineStopped を no-op として扱う。
-            self._outbox.append(
+            _emit(
                 {
                     "event": "EngineStopped",
                     "strategy_id": strategy_id,
@@ -2285,7 +2311,7 @@ class DataEngineServer:
             )
             # MEDIUM-1: str(asyncio.TimeoutError()) は空文字なので fallback メッセージを使う。
             timeout_msg = str(exc) or f"StartEngine timed out after 3600s: strategy_id={strategy_id!r}"
-            self._outbox.append(
+            _emit(
                 EngineErrorModel(
                     code="timeout",
                     message=timeout_msg,
@@ -2293,7 +2319,7 @@ class DataEngineServer:
                 ).model_dump()
             )
             # H1: Error{request_id} で Rust の待機を解除する
-            self._outbox.append(
+            _emit(
                 {
                     "event": "Error",
                     "request_id": request_id,
@@ -2307,7 +2333,7 @@ class DataEngineServer:
             # H1: EngineStarted を送出済みで EngineStopped を未送出なら補完。
             # Rust 側 state machine が stuck しないようにする。
             if started_marker["sent"]:
-                self._outbox.append(
+                _emit(
                     {
                         "event": "EngineStopped",
                         "strategy_id": strategy_id,
@@ -2315,7 +2341,7 @@ class DataEngineServer:
                         "ts_event_ms": int(time.time() * 1000),
                     }
                 )
-            self._outbox.append(
+            _emit(
                 EngineErrorModel(
                     code="engine_run_failed",
                     message=str(exc),
@@ -2323,7 +2349,7 @@ class DataEngineServer:
                 ).model_dump()
             )
             # H1: Error{request_id} で Rust の 60 秒ハングを解消
-            self._outbox.append(
+            _emit(
                 {
                     "event": "Error",
                     "request_id": request_id,
@@ -2333,6 +2359,9 @@ class DataEngineServer:
             )
         finally:
             self._engine_tasks.pop(strategy_id, None)
+            # H-G (R1b): 関数 return 前に scheduled callback を drain して呼び出し側
+            # (テスト含む) が outbox を直ちに観測できるようにする。
+            await _drain()
 
     async def _handle_stop_engine(self, msg: dict) -> None:
         """StopEngine IPC: 走行中 NautilusRunner を停止する。

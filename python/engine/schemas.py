@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 4
+SCHEMA_MINOR: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +648,9 @@ class EngineStopped(IpcMessage):
 
 class ReplayDataLoaded(IpcMessage):
     event: Literal["ReplayDataLoaded"] = "ReplayDataLoaded"
-    strategy_id: str
+    # M-8 (R1b / schema 2.5): 単独 LoadReplayData は戦略未起動なので
+    # strategy_id を None で送る。``start_backtest_replay`` 経路は具体値を入れる。
+    strategy_id: str | None = None
     bars_loaded: int
     trades_loaded: int
     ts_event_ms: int

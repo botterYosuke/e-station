@@ -95,8 +95,10 @@ pub struct ReplayPortfolioSnapshot {
 /// disambiguated, so we serialise them.
 pub struct ReplayApiState {
     pub engine_rx: watch::Receiver<Option<Arc<EngineConnection>>>,
-    /// `"live"` | `"replay"`.
-    pub mode: String,
+    /// R1b H-E: 起動時固定モード。`AppMode::Live` か `AppMode::Replay`。
+    /// 旧 `String` 比較は typo (`"reply"`) で sliently 通る危険があったため
+    /// enum に格上げ。`AppMode::default() == Live` (handshake fallback と同じ)。
+    pub mode: engine_client::dto::AppMode,
     /// Timeout for `LoadReplayData` → `ReplayDataLoaded`. Default 60 s
     /// (J-Quants 1-month trade tick load target per spec.md §3.3).
     pub load_timeout: Duration,
@@ -121,7 +123,7 @@ pub const MAX_REPLAY_INSTRUMENTS: usize = 4;
 impl ReplayApiState {
     pub fn new(
         engine_rx: watch::Receiver<Option<Arc<EngineConnection>>>,
-        mode: impl Into<String>,
+        mode: impl Into<engine_client::dto::AppMode>,
     ) -> Self {
         Self {
             engine_rx,
@@ -278,7 +280,7 @@ fn is_iso_date(s: &str) -> bool {
 /// `Error{}` returns 503. Timeout → 504.
 async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<ReplayApiState>) {
     // ① Reject early on live mode
-    if state.mode != "replay" {
+    if state.mode != engine_client::dto::AppMode::Replay {
         write_error(
             stream,
             400,
@@ -525,7 +527,7 @@ struct ReplayControlBody {
 /// out of scope for N1). Returns `200 {"status":"ok","multiplier":N}` on
 /// success, `400` for unknown actions or missing/zero multiplier.
 async fn handle_replay_control(stream: &mut TcpStream, body: &str, state: &Arc<ReplayApiState>) {
-    if state.mode != "replay" {
+    if state.mode != engine_client::dto::AppMode::Replay {
         write_error(
             stream,
             400,
@@ -614,7 +616,7 @@ async fn handle_replay_control(stream: &mut TcpStream, body: &str, state: &Arc<R
 /// Returns the last `ReplayBuyingPower` snapshot received from the Python engine.
 /// Returns `{"status":"not_ready"}` if no fill events have occurred yet.
 async fn handle_replay_portfolio(stream: &mut TcpStream, state: &Arc<ReplayApiState>) {
-    if state.mode != "replay" {
+    if state.mode != engine_client::dto::AppMode::Replay {
         write_error(
             stream,
             400,
@@ -650,7 +652,7 @@ async fn handle_replay_portfolio(stream: &mut TcpStream, state: &Arc<ReplayApiSt
 ///
 /// In live mode this endpoint returns 400 (replay-only).
 async fn handle_replay_order(stream: &mut TcpStream, body: &str, state: &Arc<ReplayApiState>) {
-    if state.mode != "replay" {
+    if state.mode != engine_client::dto::AppMode::Replay {
         write_error(
             stream,
             400,
@@ -1234,7 +1236,8 @@ mod tests {
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
-            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5)),
         );
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1252,7 +1255,10 @@ mod tests {
     #[tokio::test]
     async fn replay_load_rejects_invalid_json() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, body) =
@@ -1263,7 +1269,10 @@ mod tests {
     #[tokio::test]
     async fn replay_load_rejects_unknown_granularity() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let body = serde_json::json!({
@@ -1280,7 +1289,10 @@ mod tests {
     #[tokio::test]
     async fn replay_load_rejects_invalid_date() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let body = serde_json::json!({
@@ -1298,7 +1310,10 @@ mod tests {
     #[tokio::test]
     async fn replay_load_rejects_calendar_invalid_dates() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -1385,7 +1400,8 @@ mod tests {
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
-            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5)),
         );
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         // Receiver が drain しないよう、HTTP リクエストを投げる前に少しだけ待ち、
@@ -1404,7 +1420,10 @@ mod tests {
     #[tokio::test]
     async fn replay_load_rejects_empty_instrument_id() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let body = serde_json::json!({
@@ -1431,7 +1450,8 @@ mod tests {
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
-            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5)),
         );
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1451,7 +1471,8 @@ mod tests {
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
-            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_millis(150)),
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_millis(150)),
         );
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1466,7 +1487,10 @@ mod tests {
     #[tokio::test]
     async fn replay_load_rejected_in_live_mode() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "live"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Live,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, _) =
@@ -1479,11 +1503,17 @@ mod tests {
     #[tokio::test]
     async fn replay_portfolio_returns_not_ready_before_fill() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, body) = http_request(port, "GET", "/api/replay/portfolio", "").await;
-        assert_eq!(status, 200, "should return 200 before any fill; body={body}");
+        assert_eq!(
+            status, 200,
+            "should return 200 before any fill; body={body}"
+        );
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["status"], "not_ready");
     }
@@ -1491,7 +1521,10 @@ mod tests {
     #[tokio::test]
     async fn replay_portfolio_returns_cached_snapshot_after_update() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         state.update_replay_portfolio(
             "strat-001".to_string(),
             "980000".to_string(),
@@ -1502,7 +1535,10 @@ mod tests {
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, body) = http_request(port, "GET", "/api/replay/portfolio", "").await;
-        assert_eq!(status, 200, "should return 200 with cached data; body={body}");
+        assert_eq!(
+            status, 200,
+            "should return 200 with cached data; body={body}"
+        );
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["status"], "ok");
         assert_eq!(json["cash"], "980000");
@@ -1513,7 +1549,10 @@ mod tests {
     #[tokio::test]
     async fn replay_portfolio_rejected_in_live_mode() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "live"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Live,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, _) = http_request(port, "GET", "/api/replay/portfolio", "").await;
@@ -1528,7 +1567,10 @@ mod tests {
         let cmd_rx = spawn_mock_engine_capture(ws_listener);
         let conn = connect_engine(ws_addr).await;
         let (engine_tx, engine_rx) = watch::channel(Some(conn));
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -1565,7 +1607,10 @@ mod tests {
     #[tokio::test]
     async fn replay_order_rejected_in_live_mode() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "live"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Live,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, _) = http_request(port, "POST", "/api/replay/order", "{}").await;
@@ -1575,7 +1620,10 @@ mod tests {
     #[tokio::test]
     async fn replay_order_rejects_invalid_body() {
         let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
-        let state = Arc::new(ReplayApiState::new(engine_rx, "replay"));
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
         let port = spawn_test_http_server(state).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         let (status, _) = http_request(port, "POST", "/api/replay/order", "not json").await;
@@ -1634,7 +1682,8 @@ mod tests {
         let conn = connect_engine(ws_addr).await;
         let (_engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
-            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5)),
         );
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1673,7 +1722,8 @@ mod tests {
         let conn = connect_engine(ws_addr).await;
         let (_engine_tx, engine_rx) = watch::channel(Some(conn));
         let state = Arc::new(
-            ReplayApiState::new(engine_rx, "replay").with_load_timeout(Duration::from_secs(5)),
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5)),
         );
         let port = spawn_test_http_server(Arc::clone(&state)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -236,10 +236,11 @@ fn main() {
             .build()
             .expect("Failed to build engine-client tokio runtime");
 
-        let mode_str = cli_args.mode.as_str();
-        log::info!("Started in mode: {mode_str}");
+        // R1b H-E: cli::Mode → engine_client::dto::AppMode を境界で写す。
+        let app_mode: engine_client::dto::AppMode = cli_args.mode.into();
+        log::info!("Started in mode: {}", app_mode.as_wire_str());
         match rt.block_on(engine_client::EngineConnection::connect_with_mode(
-            &url_str, &token, mode_str,
+            &url_str, &token, app_mode,
         )) {
             Ok(conn) => {
                 log::info!("Connected to external data engine at {url_str}");
@@ -271,7 +272,7 @@ fn main() {
                 // Monitor the connection and reconnect with exponential backoff on loss.
                 let reconnect_url = url_str.clone();
                 let reconnect_token = token.clone();
-                let reconnect_mode = mode_str.to_string();
+                let reconnect_mode = app_mode;
                 rt.spawn(async move {
                     let mut current_conn = conn;
                     loop {
@@ -288,7 +289,7 @@ fn main() {
                             match engine_client::EngineConnection::connect_with_mode(
                                 &reconnect_url,
                                 &reconnect_token,
-                                &reconnect_mode,
+                                reconnect_mode,
                             )
                             .await
                             {
@@ -407,9 +408,10 @@ fn main() {
         let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
         // N1.13: propagate the CLI mode so every handshake (initial + recovery)
         // sends the same value in Hello.
-        let mode_str = cli_args.mode.as_str();
-        log::info!("Started in mode: {mode_str}");
-        rt.block_on(manager.set_mode(mode_str));
+        // R1b H-E: cli::Mode → engine_client::dto::AppMode を境界で写す。
+        let app_mode: engine_client::dto::AppMode = cli_args.mode.into();
+        log::info!("Started in mode: {}", app_mode.as_wire_str());
+        rt.block_on(manager.set_mode(app_mode));
         ENGINE_MANAGER.set(Arc::clone(&manager)).ok();
 
         // Push the saved proxy into the manager so it is re-applied after every
@@ -606,7 +608,8 @@ fn main() {
                     .subscribe();
                 Arc::new(replay_api::ReplayApiState::new(
                     engine_rx,
-                    cli_args.mode.as_str(),
+                    // R1b H-E: cli::Mode → AppMode を境界で写す。
+                    engine_client::dto::AppMode::from(cli_args.mode),
                 ))
             };
             // N1.16: cache Arc for Message::ReplayBuyingPower handler.

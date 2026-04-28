@@ -108,7 +108,8 @@ class TestLoadReplayDataDispatch:
         assert len(events) == 1
         assert events[0]["trades_loaded"] == 4
         assert events[0]["bars_loaded"] == 0
-        assert events[0]["strategy_id"] == ""  # M7: 単独 LoadReplayData では空
+        # M-8 (R1b / schema 2.5): 単独 LoadReplayData では strategy_id=None を送る。
+        assert events[0]["strategy_id"] is None
 
     @pytest.mark.asyncio
     async def test_load_replay_data_rejected_in_live_mode(self) -> None:
@@ -514,6 +515,204 @@ class TestM14StartEngineRaceGuard:
         assert errors[0]["code"] == "engine_already_running"
         # 既存 runner 上書きが起きていない
         assert server._engine_tasks["dup-strategy"] is existing_runner
+
+
+class TestHGCallSoonThreadsafeUnification:
+    """H-G: ``_handle_start_engine`` 内の ``_outbox.append`` は **全経路** が
+    ``loop.call_soon_threadsafe`` を経由すること。
+
+    R2 review-fix R1b H-G: worker thread からの append は ``call_soon_threadsafe``
+    を通すのに対し、main thread (validation 失敗 / race guard / parse 失敗 /
+    TimeoutError / except) からの append は直接 ``self._outbox.append`` を
+    呼んでいた。混在させると pending callback と main-thread 直 append の
+    順序逆転リスクが残るため、main thread 経路も ``call_soon_threadsafe`` で
+    統一する。
+    """
+
+    @pytest.mark.asyncio
+    async def test_validation_error_uses_call_soon_threadsafe(self) -> None:
+        """validate_start_engine 失敗パス: Error{mode_mismatch} が
+        ``loop.call_soon_threadsafe`` 経由で積まれること (現状: 直接 append)。"""
+        import asyncio
+
+        server = _make_server(mode="live")  # live mode で Backtest → mode_mismatch
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-hg-val",
+            "engine": "Backtest",
+            "strategy_id": "hg-val",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+            },
+        }
+
+        loop = asyncio.get_running_loop()
+        scheduled: list = []
+        original_cs = loop.call_soon_threadsafe
+
+        def spy(callback, *args):
+            # _outbox.append への schedule のみ収集する
+            try:
+                if getattr(callback, "__self__", None) is server._outbox:
+                    scheduled.append(args[0] if args else None)
+            except Exception:
+                pass
+            return original_cs(callback, *args)
+
+        with patch.object(loop, "call_soon_threadsafe", side_effect=spy):
+            await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        # Error{mode_mismatch} が outbox に 1 件存在する
+        outbox_list = list(server._outbox)
+        errors = [e for e in outbox_list if e.get("event") == "Error"]
+        assert len(errors) == 1
+        assert errors[0]["code"] == "mode_mismatch"
+        # 全 outbox エントリが call_soon_threadsafe 経由で schedule されたこと
+        # (R1b H-G の中心アサーション)
+        assert len(scheduled) == len(outbox_list)
+        assert scheduled == outbox_list
+
+    @pytest.mark.asyncio
+    async def test_race_guard_uses_call_soon_threadsafe(self) -> None:
+        """同 strategy_id 連投 race guard: Error{engine_already_running} も
+        ``call_soon_threadsafe`` 経由で積む。"""
+        import asyncio
+
+        server = _make_server(mode="replay")
+        server._engine_tasks["dup-hg"] = MagicMock()
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-hg-dup",
+            "engine": "Backtest",
+            "strategy_id": "dup-hg",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+            },
+        }
+
+        loop = asyncio.get_running_loop()
+        scheduled: list = []
+        original_cs = loop.call_soon_threadsafe
+
+        def spy(callback, *args):
+            try:
+                if getattr(callback, "__self__", None) is server._outbox:
+                    scheduled.append(args[0] if args else None)
+            except Exception:
+                pass
+            return original_cs(callback, *args)
+
+        with patch.object(loop, "call_soon_threadsafe", side_effect=spy):
+            await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        outbox_list = list(server._outbox)
+        assert len(scheduled) == len(outbox_list)
+        assert scheduled == outbox_list
+
+    @pytest.mark.asyncio
+    async def test_invalid_initial_cash_uses_call_soon_threadsafe(self) -> None:
+        """initial_cash parse 失敗パスも ``call_soon_threadsafe`` 経由で append。"""
+        import asyncio
+
+        server = _make_server(mode="replay")
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-hg-cash",
+            "engine": "Backtest",
+            "strategy_id": "hg-cash",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "not-int",
+                "granularity": "Trade",
+            },
+        }
+
+        loop = asyncio.get_running_loop()
+        scheduled: list = []
+        original_cs = loop.call_soon_threadsafe
+
+        def spy(callback, *args):
+            try:
+                if getattr(callback, "__self__", None) is server._outbox:
+                    scheduled.append(args[0] if args else None)
+            except Exception:
+                pass
+            return original_cs(callback, *args)
+
+        with patch.object(loop, "call_soon_threadsafe", side_effect=spy):
+            await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        outbox_list = list(server._outbox)
+        assert len(scheduled) == len(outbox_list)
+        assert scheduled == outbox_list
+
+    @pytest.mark.asyncio
+    async def test_failure_path_uses_call_soon_threadsafe(self) -> None:
+        """EngineStarted 後の except パス (EngineStopped + EngineError + Error)
+        も全て ``call_soon_threadsafe`` 経由で append。"""
+        import asyncio
+
+        server = _make_server(mode="replay")
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-hg-fail",
+            "engine": "Backtest",
+            "strategy_id": "hg-fail",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+            },
+        }
+
+        def fake_start(*, on_event, strategy_id, **kw):
+            on_event({
+                "event": "EngineStarted",
+                "strategy_id": strategy_id,
+                "account_id": "TEST",
+                "ts_event_ms": 1000,
+            })
+            raise RuntimeError("hg fail")
+
+        loop = asyncio.get_running_loop()
+        scheduled: list = []
+        original_cs = loop.call_soon_threadsafe
+
+        def spy(callback, *args):
+            try:
+                if getattr(callback, "__self__", None) is server._outbox:
+                    scheduled.append(args[0] if args else None)
+            except Exception:
+                pass
+            return original_cs(callback, *args)
+
+        with patch.object(loop, "call_soon_threadsafe", side_effect=spy), patch(
+            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay",
+            side_effect=fake_start,
+        ):
+            await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        outbox_list = list(server._outbox)
+        # 全 entry が call_soon_threadsafe 経由
+        assert len(scheduled) == len(outbox_list)
+        assert scheduled == outbox_list
+        # 順序保証: EngineStarted → EngineStopped → EngineError → Error
+        kinds = [e.get("event") for e in outbox_list]
+        assert kinds.index("EngineStarted") < kinds.index("EngineStopped")
+        assert kinds.index("EngineStopped") < kinds.index("EngineError")
+        assert kinds.index("EngineError") < kinds.index("Error")
 
 
 class TestStartEngineLowATasksCleanup:

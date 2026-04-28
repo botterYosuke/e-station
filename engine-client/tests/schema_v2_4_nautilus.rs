@@ -10,17 +10,19 @@
 //! 互換性: `architecture.md` は `schema_minor=4` を要求。`SCHEMA_MAJOR` は 2 のまま。
 
 use flowsurface_engine_client::dto::{
-    Command, EngineEvent, EngineKind, EngineStartConfig, ReplayGranularity, SignalKind,
+    AppMode, Command, EngineEvent, EngineKind, EngineStartConfig, ReplayGranularity, SignalKind,
 };
 
 // ── Schema version guard ────────────────────────────────────────────────────
 
 #[test]
-fn schema_minor_is_4_for_nautilus() {
+fn schema_minor_is_5_for_nautilus() {
+    // R2 review-fix R1b M-8: ReplayDataLoaded.strategy_id を Optional に緩和し
+    // SCHEMA_MINOR を 4 → 5 に bump。MAJOR は据え置き (互換維持; minor mismatch は WARN のみ)。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        4,
-        "SCHEMA_MINOR must be exactly 4 for nautilus integration (Phase N1)"
+        5,
+        "SCHEMA_MINOR must be 5 after M-8 (ReplayDataLoaded.strategy_id Optional)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -29,21 +31,100 @@ fn schema_minor_is_4_for_nautilus() {
     );
 }
 
+// ── M-8: ReplayDataLoaded.strategy_id Optional (R1b) ─────────────────────────
+
+#[test]
+fn replay_data_loaded_deserializes_with_null_strategy_id() {
+    // 単独 LoadReplayData (戦略未起動) では strategy_id = null を許可する。
+    let json = r#"{
+        "event": "ReplayDataLoaded",
+        "strategy_id": null,
+        "bars_loaded": 0,
+        "trades_loaded": 4,
+        "ts_event_ms": 1700000000000
+    }"#;
+    let ev: EngineEvent = serde_json::from_str(json).expect("must deserialize null strategy_id");
+    match ev {
+        EngineEvent::ReplayDataLoaded {
+            strategy_id,
+            bars_loaded,
+            trades_loaded,
+            ..
+        } => {
+            assert!(strategy_id.is_none());
+            assert_eq!(bars_loaded, 0);
+            assert_eq!(trades_loaded, 4);
+        }
+        other => panic!("expected ReplayDataLoaded, got {other:?}"),
+    }
+}
+
+#[test]
+fn replay_data_loaded_deserializes_when_strategy_id_field_absent() {
+    // 旧 Python サーバ (minor=4) が strategy_id を送ってこないケース互換確認。
+    let json = r#"{
+        "event": "ReplayDataLoaded",
+        "bars_loaded": 12,
+        "trades_loaded": 0,
+        "ts_event_ms": 1700000000000
+    }"#;
+    let ev: EngineEvent =
+        serde_json::from_str(json).expect("must deserialize missing strategy_id (serde default)");
+    match ev {
+        EngineEvent::ReplayDataLoaded { strategy_id, .. } => {
+            assert!(strategy_id.is_none());
+        }
+        other => panic!("expected ReplayDataLoaded, got {other:?}"),
+    }
+}
+
 // ── Hello.mode field (N1.13) ────────────────────────────────────────────────
 
 #[test]
 fn hello_includes_mode_field() {
+    // R1b H-E: Hello.mode は wire 上は "live" / "replay" 文字列のまま (Python と互換)。
+    // Rust 内部では ``AppMode`` enum を使い、serde rename_all = "lowercase" で wire 互換。
     let cmd = Command::Hello {
         schema_major: 2,
-        schema_minor: 4,
+        schema_minor: 5,
         client_version: "test-0.0.0".to_string(),
         token: "tok".to_string(),
-        mode: "replay".to_string(),
+        mode: AppMode::Replay,
     };
     let json = serde_json::to_string(&cmd).expect("must serialize");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["op"], "Hello");
     assert_eq!(v["mode"], "replay");
+}
+
+// ── R1b H-E: AppMode enum (wire = "live" / "replay") ─────────────────────────
+
+#[test]
+fn app_mode_serializes_lowercase() {
+    assert_eq!(
+        serde_json::to_string(&AppMode::Live).unwrap(),
+        "\"live\"",
+        "AppMode::Live wire form must be the lowercase string \"live\""
+    );
+    assert_eq!(
+        serde_json::to_string(&AppMode::Replay).unwrap(),
+        "\"replay\"",
+        "AppMode::Replay wire form must be the lowercase string \"replay\""
+    );
+}
+
+#[test]
+fn app_mode_deserializes_lowercase() {
+    let live: AppMode = serde_json::from_str("\"live\"").unwrap();
+    assert_eq!(live, AppMode::Live);
+    let replay: AppMode = serde_json::from_str("\"replay\"").unwrap();
+    assert_eq!(replay, AppMode::Replay);
+}
+
+#[test]
+fn app_mode_default_is_live_for_backward_compat() {
+    // R1b H-E: 旧クライアント / 旧サーバ互換のため default は Live。
+    assert_eq!(AppMode::default(), AppMode::Live);
 }
 
 // ── Sub-types ───────────────────────────────────────────────────────────────
@@ -192,7 +273,8 @@ fn replay_data_loaded_deserializes() {
             trades_loaded,
             ts_event_ms,
         } => {
-            assert_eq!(strategy_id, "strat-001");
+            // M-8: Option<String> へ。strategy_id 文字列付きは Some(...) で来る。
+            assert_eq!(strategy_id.as_deref(), Some("strat-001"));
             assert_eq!(bars_loaded, 1234);
             assert_eq!(trades_loaded, 56789);
             assert_eq!(ts_event_ms, 1_700_000_000_002);

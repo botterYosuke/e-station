@@ -4,7 +4,7 @@
 - Event  系: EngineStarted / EngineStopped / ReplayDataLoaded /
              PositionOpened / PositionClosed
 - Literal 制約違反 (engine="Bogus" / granularity="Bogus") で ValidationError
-- SCHEMA_MINOR == 4
+- SCHEMA_MINOR == 5
 """
 
 from __future__ import annotations
@@ -24,8 +24,9 @@ def _roundtrip(model_cls, data: dict) -> dict:
 # ── Schema version ──────────────────────────────────────────────────────────
 
 
-def test_schema_minor_is_4_for_nautilus() -> None:
-    assert s.SCHEMA_MINOR == 4
+def test_schema_minor_is_5_for_nautilus() -> None:
+    # R2 review-fix R1b M-8: SCHEMA_MINOR を 4 → 5 に bump (ReplayDataLoaded.strategy_id Optional)
+    assert s.SCHEMA_MINOR == 5
     assert s.SCHEMA_MAJOR == 2
 
 
@@ -165,6 +166,34 @@ def test_replay_data_loaded_roundtrip() -> None:
     out = _roundtrip(s.ReplayDataLoaded, data)
     assert out["bars_loaded"] == 1234
     assert out["trades_loaded"] == 56789
+    assert out["strategy_id"] == "strat-001"
+
+
+def test_replay_data_loaded_accepts_null_strategy_id() -> None:
+    """M-8 (R1b / schema 2.5): 単独 LoadReplayData では strategy_id=None を受け付ける。"""
+    data = {
+        "event": "ReplayDataLoaded",
+        "strategy_id": None,
+        "bars_loaded": 0,
+        "trades_loaded": 4,
+        "ts_event_ms": 1700000000002,
+    }
+    obj = s.ReplayDataLoaded.model_validate(data)
+    assert obj.strategy_id is None
+    out = orjson.loads(orjson.dumps(obj.model_dump(mode="json")))
+    assert out["strategy_id"] is None
+
+
+def test_replay_data_loaded_default_strategy_id_when_field_absent() -> None:
+    """M-8: strategy_id フィールド省略時もデフォルト None で deserialize できる。"""
+    data = {
+        "event": "ReplayDataLoaded",
+        "bars_loaded": 0,
+        "trades_loaded": 4,
+        "ts_event_ms": 1700000000002,
+    }
+    obj = s.ReplayDataLoaded.model_validate(data)
+    assert obj.strategy_id is None
 
 
 def test_position_opened_roundtrip() -> None:

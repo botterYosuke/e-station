@@ -259,9 +259,9 @@ pub struct ProcessManager {
     /// `VenueReady` was emitted before the UI subscription wired up.
     /// Reviewer flagged the silent-loss path on 2026-04-26 (R2).
     pub venue_ready_state: Arc<Mutex<HashSet<String>>>,
-    /// N1.13: 起動時固定 mode。`"live"` か `"replay"` を `set_mode()` で
-    /// 注入してから `start()` する。default は `"live"`。
-    mode: Arc<Mutex<String>>,
+    /// N1.13 / R1b H-E: 起動時固定 mode (`AppMode`)。`set_mode()` で注入してから
+    /// `start()` する。default は `AppMode::Live`。
+    mode: Arc<Mutex<crate::dto::AppMode>>,
 }
 
 impl ProcessManager {
@@ -281,15 +281,15 @@ impl ProcessManager {
             active_subscriptions: Arc::new(Mutex::new(HashSet::new())),
             proxy_url: Arc::new(Mutex::new(None)),
             venue_ready_state: Arc::new(Mutex::new(HashSet::new())),
-            mode: Arc::new(Mutex::new("live".to_string())),
+            mode: Arc::new(Mutex::new(crate::dto::AppMode::Live)),
         }
     }
 
-    /// N1.13: set the runtime mode. Must be called before `start()` so the
-    /// first Hello carries the right value. After-the-fact changes don't
-    /// affect already-handshaken connections (D8 起動時固定方針).
-    pub async fn set_mode(&self, mode: impl Into<String>) {
-        *self.mode.lock().await = mode.into();
+    /// N1.13 / R1b H-E: set the runtime mode. Must be called before `start()`
+    /// so the first Hello carries the right value. After-the-fact changes
+    /// don't affect already-handshaken connections (D8 起動時固定方針).
+    pub async fn set_mode(&self, mode: crate::dto::AppMode) {
+        *self.mode.lock().await = mode;
     }
 
     /// Non-blocking probe of the post-handshake venue readiness cache.
@@ -405,8 +405,8 @@ impl ProcessManager {
             let mut attempt = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                let mode = self.mode.lock().await.clone();
-                match EngineConnection::connect_with_mode(&url, proc.token(), &mode).await {
+                let mode = *self.mode.lock().await;
+                match EngineConnection::connect_with_mode(&url, proc.token(), mode).await {
                     Ok(conn) => break conn,
                     Err(EngineClientError::ConnectionRefused) if attempt < MAX_CONNECT_ATTEMPTS => {
                         log::debug!(
