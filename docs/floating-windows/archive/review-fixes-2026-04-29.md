@@ -1,68 +1,116 @@
-# Floating Windows 計画書 レビュー修正ログ
+# Floating Windows — レビュー修正ログ
+
+本ドキュメントは `docs/floating-windows/` 配下の spec / architecture / implementation-plan / open-questions / README に対する
+レビュー結果と統一決定、適用すべき修正項目（Findings）を記録する。レビューラウンドごとに追記する。
+
+対象ファイル:
+
+- `docs/floating-windows/README.md`
+- `docs/floating-windows/spec.md`
+- `docs/floating-windows/architecture.md`
+- `docs/floating-windows/implementation-plan.md`
+- `docs/floating-windows/open-questions.md`
+
+## 統一決定
+
+ラウンド横断で確定した方針。以後の修正・追記はすべてこの決定に従う。
+
+- **旧 saved-state は破棄してデフォルトレイアウトで起動する。** `data::layout::Dashboard` に
+  `schema_version: u32` を導入し、未知バージョンを検出したら一律デフォルトに落とす。
+  legacy fixture を 2 件用意して migration ロジックの非存在を回帰テストでガードする。
+- **popout（独立 OS ウィンドウ）は Phase 6 までスコープ外**。当面は非永続扱いとし、
+  open-questions に **Q6（popout の永続化と OS ウィンドウ管理方針）** として正式起票する。
+- **`focus` 型を `Option<PaneLocation>` に抽象化する。** architecture.md にある
+  `focus: Option<(window::Id, uuid::Uuid)>` は popout の扱いを Q1 解決後まで保留できるよう
+  抽象型へ差し替える。具体型はQ1解決後に確定する。
+- **Phase 2 spike の最初の deliverable に「wgpu 共存性 PoC」を含める。**
+  iced 0.14 系 (wgpu 27) と Bevy (wgpu 23/24) の併存可否を実機で判定する。
+  Q1 が解決するまで Phase 4 には進まない（ハードゲート）。
+- **不変条件 ID の命名を統一する。** 機能要件 `F1〜F10`、非機能要件 `NF1〜NF7`。
+  追加仕様には `INV-CLOSE-1` など prefix 付きの ID を使う。test 関数名との対応表は
+  `spec.md` 内にインラインで併記する（外部表に逃さない）。
+- **座標系を明示する。** logical px、原点 top-left、Y 軸下向き。
+  `Camera` は world→screen の affine 変換として定義する（ズーム＋パン）。
+- **削除対象規模を明記する。** `PaneGrid::split` 呼び出し 6 箇所
+  （`main.rs:2538` / `dashboard.rs:231,519,547,911,927`）、`pane_grid::Pane` 実コード約 39 箇所、
+  影響ファイル 6 件。implementation-plan.md にファイル別の削除対象を明示する。
+- **README 関連計画リストに `docs/✅order/` および `docs/✅tachibana/` を追加する。**
+  既存の link path 表記と合わせる。
 
 ## ラウンド 1（2026-04-29）
 
-### 統一決定
+### 統一決定（R1）
 
-1. Camera.pan 型分割: `data::Camera` は `pan: (f32, f32)`、ウィジェット内 Camera は `pan: iced::Point`（非Serialize）
-2. z_order フィールド削除: FloatingPanes 構造体から削除。z 順は FloatingPane.z_index で管理
-3. From実装に camera 追記: `camera: dashboard.camera` を追加
-4. ok_or_default の camera 適用: `data::Dashboard.camera` に `#[serde(default)]` を追加
-5. popout Camera 永続化: `data::Dashboard.popout` を `Vec<(Vec<FloatingPaneData>, WindowSpec, Camera)>` に変更
-6. z_index オーバーフロー対策: `max+1` が閾値超えで 0..N 再正規化を仕様化
-7. Widget::overlay(): `overlay::from_children` 呼び出しを architecture.md §5 に追記
-8. フォーカス消失リセット: Unfocused/CursorLeft でも drag/resize/pan をリセット
-9. link_group_button: 「構造体フィールド」→「関数引数とクロージャ境界」に修正
-10. Phase 6 テスト観測点: ファイル名・コマンド・assert 内容を明記
+- 旧 saved-state は破棄してデフォルトレイアウトで起動、`schema_version: u32` を `data::layout::Dashboard` に導入
+- popout は Phase 6 までスコープ外（非永続）。Q6 として open-questions に正式起票
+- architecture.md の `focus: Option<(window::Id, uuid::Uuid)>` を `Option<PaneLocation>` に抽象化、Q1 解決後に具体化
+- Phase 2 spike の最初の deliverable に「wgpu 共存性 PoC（iced 0.14+wgpu27 と Bevy=wgpu23/24 の併存判定）」を含める。Q1 解決まで Phase 4 不可
+- 不変条件 ID は F1〜F10 / NF1〜NF7、追加仕様には `INV-CLOSE-1` 等の prefix。test 関数名対応表は spec.md 内 inline
+- 座標系: logical px、原点 top-left、Y 軸下向き、`Camera` は world→screen affine
+- 削除対象規模: `PaneGrid::split` 呼び出し 6 箇所（main.rs:2538 / dashboard.rs:231,519,547,911,927）/ `pane_grid::Pane` 実コード約 39 箇所 / 6 ファイル
+- 関連計画リストに `docs/✅order/` `docs/✅tachibana/` を追加
 
-### Findings 一覧
+### Findings 表（R1）
 
-| Finding ID | 観点 | 対象ファイル | 問題概要 | 優先度 | 修正概要 |
-|---|---|---|---|---|---|
-| A1 | A | implementation-plan.md:256–258 | FloatingPane に z_index なし | HIGH | z_index: u32 を追加 |
-| A2/C5 | A/C | implementation-plan.md:487–499, architecture.md:§9 | From実装に camera なし | HIGH | camera: dashboard.camera を追記 |
-| A3 | A | implementation-plan.md:159–165 | CursorMoved/drag中に on_move 発行と誤記（Q1と矛盾） | HIGH | 内部 rect 更新のみに修正 |
-| A4 | A | implementation-plan.md:35–57 | z_order フィールドが z_index 方式と齟齬 | MEDIUM | フィールド削除 |
-| A5/B5 | A/B | implementation-plan.md:97–98, architecture.md:§4 | Camera.pan 型不一致（iced::Point vs (f32,f32)） | MEDIUM | 型分割を明記 |
-| A6 | A | open-questions.md:Q5 | implementation-plan.md への反映漏れ未記載 | MEDIUM | 注記を更新 |
-| A7 | A | README.md:26 | open-questions 説明が「未解決事項」のまま | LOW | README.md を更新（※別対応） |
-| B1 | B | implementation-plan.md:392 | link_group_button を構造体フィールドとして誤記 | HIGH | 関数引数・クロージャ境界に修正 |
-| B2 | B | implementation-plan.md:339 | view() 変更前シグネチャに panes: usize 欠落 | HIGH | 追記 |
-| B3 | B | implementation-plan.md:414 | focus 参照が5箇所と誤記（実際は6箇所） | HIGH | main.rs:2988–2990 を追加 |
-| B4 | B | architecture.md:§5 | diff() 記述がルーラー要素混在と誤解されやすい | MEDIUM | 「ルーラー要素含まず」と明示 |
-| B6 | B | implementation-plan.md:339 | 行番号参照 pane.rs:539 が陳腐化 | LOW | シンボル名参照に置換 |
-| C1 | C | architecture.md:§9 | camera への ok_or_default 未記載 | HIGH | serde(default) を追記 |
-| C2 | C | architecture.md:§2,§6 | popout Camera 永続化スキーマ未規定 | HIGH | popout 型に Camera を追加 |
-| C3 | C | architecture.md:§2 | z_index u32 オーバーフロー境界条件未定義 | HIGH | 再正規化仕様を追記 |
-| C4 | C | architecture.md:§5 | フォーカス消失時のリセット経路未記載 | MEDIUM | イベント表に追記 |
-| C6 | C | architecture.md:§5 | Widget::overlay() 実装方針未記載 | MEDIUM | overlay::from_children を追記 |
-| C7 | C | architecture.md:§4 | zoom_at clamp後のfactor補足なし | LOW | 補足を追記（任意） |
-| D-01 | D | implementation-plan.md:755–761 | Phase 6 テストにファイル名・コマンド・assert未記載 | HIGH | 観測点を追記 |
-| D-02 | D | implementation-plan.md | Vec順序固定のpin testなし | HIGH | vec_order_stable_on_focus_change を追加 |
-| D-03 | D | implementation-plan.md | Camera変換ユニットテストなし | HIGH | camera_roundtrip を追加 |
-| D-04 | D | implementation-plan.md | 旧フォーマット変換テストなし | HIGH | legacy_pane_format_falls_back_to_empty を追加 |
-| D-05 | D | implementation-plan.md | popout Camera独立性テストなし | MEDIUM | popout_camera_independent を追加 |
-| D-06 | D | spec.md:59–65 | E2E smoke test 観測項目追加が計画に未記載 | MEDIUM | smoke.sh への追加を明記 |
-| D-07 | D | implementation-plan.md | negative testなし | MEDIUM | close_nonexistent_pane_is_noop を追加 |
+| ID | 観点 | 重大度 | 対象 | 修正概要 |
+|---|---|---|---|---|
+| H-A (H1+HB1) | A,B | HIGH | spec/arch/open-q | Q1 + wgpu 共存判定を Phase 2 spike PoC に統合、Q1 解決まで Phase 4 不可 |
+| H-B (H2+H4+MC3) | A,C | HIGH | spec/arch/open-q | popout は Phase 6 までスコープ外、独立 focus/z/Camera 不変条件 NF7 追加、Q6 起票 |
+| H-C (H3+HC2+MD1) | C,D | HIGH | spec/impl-plan | 旧 saved-state 破棄 + schema_version 導入 + legacy fixture 2 件 |
+| H-D (HC1) | C | HIGH | arch §4.5 | pane teardown 契約 INV-CLOSE-1 を §4.5 に明記 |
+| H-E (H5) | A | HIGH | arch §1 | focus 型を `Option<PaneLocation>` に抽象化 |
+| H-F (HB2) | B | HIGH | impl-plan §3 | split() 除去対象 6 箇所をファイル別に明示 |
+| H-G (HD1) | D | HIGH | spec/impl-plan | Phase 1 acceptance に必須 test 関数名 4 件 |
+| H-H (HD2) | D | HIGH | spec/impl-plan | Phase 3 メッセージ 6 種の単体テスト計画 |
+| M1 | A | MEDIUM | spec/arch | Dashboard 名前混線解消（完全修飾名） |
+| M2 | A | MEDIUM | spec | Phase 4 acceptance に placeholder 内容明記 |
+| M3 | B | MEDIUM | impl-plan/arch | Bevy features / wgpu バージョン制約 |
+| M4 | A | MEDIUM | README | 関連計画 nautilus 引き取り境界 |
+| M5 | D | MEDIUM | spec | Phase 6 テスト観測点具体化（ログ・コマンド） |
+| M6 | A | MEDIUM | README | 関連計画 link path 表記統一 |
+| M7 | A | MEDIUM | impl-plan §4 | Phase 別 acceptance 表に組み替え |
+| M8 | A | MEDIUM | README | ゴール表に永続化型行を追加 |
+| MB1 | B | MEDIUM | impl-plan | replay_pane_registry.rs を Phase 3 ファイルリストに追加 |
+| MB2 | B | MEDIUM | spec | 現行 pane: Pane → windows 移行は default fallback |
+| MB3 | B | MEDIUM | README | 関連計画に order/tachibana 追加 |
+| MC1 | C | MEDIUM | spec §1 | 座標系・単位系定義段落を追加 |
+| MC2 | C | MEDIUM | spec NF6 | viewport clamp 不変条件 |
+| MD2 | D | MEDIUM | spec | Phase 2 spike 観測値（min size / zoom 範囲等） |
+| MD3 | D | MEDIUM | spec | Phase 6 e2e smoke 追加観測点 3 件 |
+| MD4 | D | MEDIUM | impl-plan | CI ゲート組込 |
+| L1 | A | LOW | README | "FloatingPanes" 表記の言い換え |
+| L2 | C | LOW | open-q | Q5 過渡期同期の選択肢列挙 |
+| L3 | A | LOW | arch | PaneKind の責務一行追記 / open-q の決定構造 |
+| LB1 | B | LOW | impl-plan | シンボル参照精度向上 |
+| LB2 | B | LOW | README | archive 旧計画転換理由を追記 |
+| LC1 | C | LOW | arch | z-order 決定論性 |
+| LC2 | C | LOW | arch | iced UI と Bevy のイベント競合順序 |
+| LD1 | D | LOW | open-q | Q7 Bevy 自動テスト方針起票 |
 
 ## ラウンド 2（2026-04-29）
 
-### 統一決定
+### 統一決定（R2）
+- Phase 3 メッセージ名は 6 イベント `WindowMoved` / `WindowResized` / `WindowFocused` / `WindowClosed` / `WindowAdded` / `CameraChanged` のみ（`Spawn/Move/Resize/Close/Focus/ZoomPan` 表記は廃止）
+- `schema_version: u32` バンプ規則: 後方互換あり追加はバンプしない（serde `#[serde(default)]` で吸収）/ 破壊変更のみ +1 / Phase 1 = v1 / version 不在 or 最新より小は破棄しデフォルト起動
+- DPR 値は永続化しない。座標は保存時 logical px、復元時は NF6 viewport clamp で吸収
+- `INV-CLOSE-1` teardown: 逐次実行 / 個別 5s タイムアウト / closing 中 input 不可 / 順序は 購読 stream cancel → aggregator drop → `replay_pane_registry` 解除 → data モデル除去
+- CI: 既存 `.github/workflows/rust-tests.yml` に `bevy-spike-build` job を追加（新規 yml は作らない）
+- arch §5.5 PoC NG plan B (c) iced 完全置換は modal/settings/tachibana ログイン UI 再実装 = 計画リセット相当
 
-1. GUI 層 Dashboard.popout 型に Camera を追加: `HashMap<window::Id, (Vec<FloatingPane>, WindowSpec, Camera)>`
-2. architecture.md §5 CursorMoved/drag 行に「on_move は発行しない」を明示追記
-3. implementation-plan.md link_group_button 節に変更前シグネチャを追加
-4. architecture.md §9 popout フィールドに `#[serde(default)]` を追記
-5. implementation-plan.md Phase 5 にフレームレート検証観測項目を追記
+### Findings 表
 
-### Findings 一覧
-
-| Finding ID | 観点 | 対象ファイル | 問題概要 | 優先度 | 修正概要 |
-|---|---|---|---|---|---|
-| R2-A1 | A | architecture.md:§7, implementation-plan.md:287 | GUI 層 Dashboard.popout に Camera 欠落 | HIGH | Camera を追加 |
-| R2-A2 | A | architecture.md:§5 イベント表 | CursorMoved/drag 行に「on_move は発行しない」が未記載 | MEDIUM | 追記 |
-| R2-B1 | B | implementation-plan.md:398–413 | link_group_button 変更前シグネチャ未記載 | HIGH | 変更前コードブロックを追加 |
-| C8 | C | architecture.md:§9 | popout への serde(default) 未記載 | MEDIUM | #[serde(default)] を追記 |
-| C9 | C | architecture.md:§5 | overlay 全パネル集約方針の明示なし | LOW | 一文追記 |
-| D-08 | D | implementation-plan.md:Phase 5 | フレームレート検証手順未記載 | MEDIUM | 観測項目を追記 |
-| D-09 | D | implementation-plan.md:811–823 | vec_order_stable_on_focus_change テストが不完全擬似コード | LOW | 初期化コードを補完（次ラウンドで対応） |
+| ID | 観点 | 重大度 | 対象 | 修正概要 |
+|---|---|---|---|---|
+| H-R2-1 | A | HIGH | impl-plan §4 | Phase 3 6 メッセージ名を spec の 6 イベント名 (`WindowMoved` 系) に統一 |
+| H-R2-C1 | C | HIGH | spec NF4, open-q Q8 | `schema_version` バンプ規則を明記、Q8 起票 |
+| H-R2-C2 | C | HIGH | spec §1, open-q Q9 | DPR 値非永続化を座標系段落に追記、Q9 起票 |
+| M-R2-1 | A | MEDIUM | impl-plan §4 | Phase 6 e2e 表に 3 観測項目すべて反映 |
+| M-R2-2 | A | MEDIUM | impl-plan §4 | INV-CLOSE-1 を Phase 4 行 assert に紐付け |
+| M-R2-3 | A | MEDIUM | impl-plan §4.1 | CI workflow を実在 `rust-tests.yml` に追加 job 形式で記述 |
+| M-R2-C1 | C | MEDIUM | spec F6, arch §4.5 | INV-CLOSE-1 の teardown 順序・タイムアウト・input 不可を明記 |
+| M-R2-C2 | C | MEDIUM | impl-plan Phase 3 | `PaneLocation` pattern match 箇所列挙を Phase 3 acceptance に追加 |
+| M-R2-C3 | C | MEDIUM | arch §5.5 | PoC NG (c) は計画リセット相当を明記 |
+| L-R2-1 | A | LOW | README | 関連計画 path 実在保証注記（任意） |
+| L-R2-2 | A | LOW | impl-plan §4.1 | `Q6` → `Q7` typo 修正 |
+| L-R2-C1 | C | LOW | spec §2 Phase 6 | e2e ログ責務を `tracing::info!` と注記 |
+| L-R2-C2 | C | LOW | arch §5 | popout は Phase 6 までは機能維持を冒頭に明記 |

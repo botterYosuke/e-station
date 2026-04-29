@@ -2,102 +2,144 @@
 
 ## 1. ゴール
 
-1. **フローティングレイアウト**: メインウィンドウ内のパネルを任意の位置・サイズに配置・移動・リサイズできる
-2. **ズーム・パン**: スクロールホイールでズーム、空白ドラッグでパン（Figma / Blender 操作感）
-3. **既存コンテンツの完全移行**: Heatmap / Kline / Ladder / TAS / Starter など全コンテンツ種別が新レイアウト上で動作する
-4. **popout 継続**: OS レベルの別ウィンドウ（popout）機能は変更なく維持する
-5. **saved-state 互換フォールバック**: 旧フォーマット（`pane` ツリー）は起動時に自動的に空ウィンドウリストにフォールバックする
+1. Bevy ベースの dashboard で pane を任意位置・任意サイズに配置できる
+2. スクロールホイールでズーム、空白ドラッグでパンできる
+3. Heatmap / Kline / Ladder / TAS / Starter など既存コンテンツを移行する
+4. popout を維持する（Phase 6 までスコープ外・非永続）
+5. `saved-state.json` の旧フォーマットは破棄してデフォルトレイアウトで起動する
 
----
+### 座標系・単位系
+
+座標は **logical px**（HiDPI スケール後の論理ピクセル）、原点は **top-left**、Y 軸は
+**下向き**。`Camera` は world 座標 → screen 座標への **affine 変換**（translation + uniform
+scale）として定義する。回転・剪断は持たない。
+
+DPR 値は永続化しない。`saved-state` の座標は保存時の logical px のまま、復元時は NF6
+の viewport clamp で吸収する。
 
 ## 2. スコープ
 
-### Phase 1 — データクレート: `FloatRect` / `FloatingPaneData` 追加
+### Phase 1 — データモデル更新（`data::layout::Dashboard`）
 
-- `data/src/layout/mod.rs` に `FloatRect`（`x, y, width, height: f32`）を追加
-- `data/src/layout/pane.rs` から `Pane::Split` と `Axis` を削除、`FloatingPaneData` を追加
-- `data/src/layout/dashboard.rs` の `Dashboard` 構造体を `windows: Vec<FloatingPaneData>` に書き換え
-- `Camera`（`pan: (f32,f32)`, `zoom: f32`）を `data` クレートに追加
-- **ゴール**: `cargo test -p data` が通る
+ここで言う `Dashboard` は永続化用の `data::layout::Dashboard` を指す（GUI state である
+`crate::screen::dashboard::Dashboard` とは別物）。
 
-### Phase 2 — GUI 状態と型の移行
+- `FloatRect` を追加
+- `FloatingPaneData` を追加
+- `Camera` を追加
+- `data::layout::Dashboard` 永続化モデルを `windows: Vec<FloatingPaneData>` ベースへ変更
+- `schema_version: u32` を導入
+- 現行 `pane: Pane`（split 木）→ `windows: Vec<FloatingPaneData>` への移行は best-effort
+  せず、旧フォーマットは破棄して default fallback で吸収する
+- ゴール: `cargo test -p data` が通り、最低以下の test 関数が green になる:
+  - `floatrect_rejects_negative_size`
+  - `floating_pane_data_serde_roundtrip`
+  - `camera_zoom_clamped`
+  - `dashboard_legacy_pane_grid_falls_back_to_default`
 
-- `src/screen/dashboard.rs` の `Dashboard` 構造体を `Vec<FloatingPane>` ベースに変更
-- `pane::Message` の追加・削除・引数型変更（`pane_grid::Pane` → `uuid::Uuid`）
-- `pane::State::view()` の戻り値を `pane_grid::Content` → `Element` に変更
-- `src/modal/pane/settings.rs`（7関数）・`src/modal/pane/indicators.rs`（4関数）の引数型変更
-- `src/widget.rs` の `link_group_button` 識別子型変更
-- **ゴール**: `cargo check` が通る（`view()` は一時的にダミーを返してよい）
+### Phase 2 — Bevy Spike
 
-### Phase 3 — `FloatingPanes` カスタムウィジェット実装
+- `bevy` 依存を追加
+- 検証用バイナリで 1 pane のドラッグ・8 方向リサイズ・ズーム・パンを実装
+- focus / z-order / 最小サイズを確認
+- **wgpu 共存性 PoC** を含む（iced 0.14 + wgpu 27 と Bevy が同一プロセスで wgpu を共存
+  させられるかを実機で確認する）
+- 合否観測値:
+  - 最小サイズ: 120 × 80 px
+  - focus 取得 pane の `PaneZ` が他 pane の最大値 +1 以上
+  - ズーム範囲 0.25 〜 4.0
+  - ホイール 1 ノッチで 1.1 倍
+  - wgpu 共存可否（iced 0.14 + wgpu 27 と Bevy）
+- ゴール: 最小プロトタイプが動き、Q1（wgpu 共存）の判定が出る。**Q1 解決まで Phase 4 へ
+  進めない**
 
-- `src/widget/floating_panes.rs` を新規作成
-- `Camera` の `world_to_screen` / `screen_to_world` / `zoom_at` 実装
-- `Widget::layout()` — カメラ変換を適用した絶対座標配置
-- `Widget::draw()` — タイトルバー（28px）+ コンテンツ描画
-- `Widget::on_event()` — ドラッグ・リサイズ（8方向）・パン・ズーム
-- `Widget::mouse_interaction()` — カーソル形状切り替え
-- **ゴール**: `cargo build` でウィジェットがビルドできる
+### Phase 3 — GUI 状態移行（`crate::screen::dashboard::Dashboard`）
 
-### Phase 4 — `Dashboard::view()` 切り替えと動作確認
+ここで言う `Dashboard` は GUI state の `crate::screen::dashboard::Dashboard` を指す
+（永続化型 `data::layout::Dashboard` とは別物）。
 
-- `src/screen/dashboard.rs` の `view()` を `FloatingPanes` に切り替え
-- `update()` で新メッセージ（`WindowMoved` / `WindowResized` / `WindowFocused` / `WindowClosed` / `WindowAdded` / `CameraChanged`）を処理
-- `tick()` の `maximized_pane` 最適化をフォーカスベース（非フォーカスは N フレームに 1 回）に変更
-- `src/style.rs` の `pub fn pane_grid()` と `Highlight`/`Line` インポートを削除
-- `src/main.rs` の `dashboard.focus` 直接参照 5 箇所を `uuid::Uuid` ベースに修正
-- `OpenOrderPanel` ハンドラの `dashboard.panes.split()` 直接呼び出しを `WindowAdded` 経由に変更
-- **ゴール**: アプリが起動し、パネルをドラッグ移動・クローズできる
+- `crate::screen::dashboard::Dashboard` を `Vec<FloatingPane>` ベースへ変更
+- `pane_grid::Pane` を `uuid::Uuid` に置換
+- focus 型は `Option<PaneLocation>` に抽象化（Q1 解決後に具体化）
+- `WindowMoved` / `WindowResized` / `WindowFocused` / `WindowClosed` / `WindowAdded` /
+  `CameraChanged` の 6 イベントを整備
+- 各イベントに対する state 変化 assert を `src/screen/dashboard.rs` の
+  `#[cfg(test)] mod tests` に追加。最低限:
+  - `WindowClosed` → focus が次に高い z の pane へ移る
+  - `WindowAdded` → 新 pane が最前面（`PaneZ` が最大）
+  - `WindowFocused` → `PaneZ` が他 pane の最大値 +1
+- `src/layout.rs` の変換を更新
+- ゴール: 状態が `pane_grid` から独立する
 
-### Phase 5 — タイトルバー UI とパネル追加 UI
+### Phase 4 — Bevy frontend 接続
 
-- タイトルバー: コンテンツ種別アイコン / ラベル + ×ボタン + ドラッグハンドル
-- パネル追加: サイドバーボタン（ラベル "Add Window"）または `Ctrl+N` から `WindowAdded` を発行
-- 既存「銘柄選択パレット」フローとの統合確認
-- **ゴール**: 既存の全コンテンツ種別が表示できる
+**Q1（wgpu 共存性）が Phase 2 で解決していることが前提条件**。
 
-### Phase 6 — テスト・クリーンアップ
+- Bevy 側で pane entity / camera / hit test / z-order を実装
+- dashboard から Bevy frontend を起動・更新できるようにする
+- `main.rs` の `dashboard.panes.split()` 直接呼び出しを除去
+- pane 内容は **placeholder（pane id と種別ラベルのみ）**。実コンテンツ移行は Phase 5
+- ゴール: アプリ上で pane の移動・クローズ・ズーム・パンが動く
 
-- `data/src/layout/pane.rs` に `FloatingPaneData` の roundtrip テストを追加
-- `src/layout.rs` に変換関数のユニットテストを追加
-- `pane_grid` 依存の import を全ファイルから削除
-- `saved-state.json` 旧フォーマットとの互換確認
-- `tests/e2e/smoke.sh` に FloatingPane 関連の観測項目を追加すること:
-  - `WindowMoved` ログがハンドシェイク完了後に到達することを確認
-  - 観測ウィンドウ中にクラッシュ（プロセス異常終了）が発生しないことを確認
+### Phase 5 — コンテンツ移行
 
----
+- pane タイトルバー UI
+- pane 追加 UI
+- 設定 UI / インジケーター UI
+- 既存コンテンツ種別の表示移行
+- ゴール: 既存コンテンツが Bevy dashboard 上で表示できる
+
+### Phase 6 — テストとクリーンアップ
+
+- roundtrip テスト
+- layout 変換テスト
+- `pane_grid` import の全削除（split() 6 箇所 / `pane_grid::Pane` ~39 箇所 / 6 ファイル）
+- `saved-state.json` 互換確認: `tests/fixtures/saved-state-legacy-*.json` を 2 種
+  （pane_grid 単段 / popout あり）置き、`Dashboard::deserialize` が `windows: vec![]`
+  で fallback することを assert する
+- popout が main と独立した Camera / z-stack で動くことを確認する（または non-goal と
+  して確定させる）。永続化はスコープ外
+- e2e smoke 観測項目（追加観測点）:
+  1. `floating windows: dashboard_loaded uuids=N` ログが存在する
+  2. `camera saved zoom=` が観測ウィンドウ中 1 回以上出る
+  3. `pane_grid` 文字列が `flowsurface-current.log` に出現しない
+
+  これらは Rust GUI 側の `tracing::info!` で出力する。
 
 ## 3. 含めないもの
 
-- **OS レベルウィンドウ数の増減**: popout の追加・削除ロジックはそのまま維持し、本計画では変更しない
-- **タブ化・グループ化**: フローティングパネルのタブ表示やスナップグリッドは本計画スコープ外
-- **アニメーション**: ドラッグ時のスムーズアニメーションは Phase 5 完了後に判断
-- **キーボードナビゲーション**: パネル間のフォーカス移動ショートカットは Phase 6 以降
-
----
+- タブ化
+- スナップグリッド
+- 派手なアニメーション
+- 高度なキーボードナビゲーション
+- popout の永続化（Phase 6 までスコープ外。非永続で main と独立した Camera / z-stack
+  を持たせるに留める）
+- 旧 `saved-state.json` フォーマットの互換 deserialize（破棄してデフォルトレイアウトで
+  起動する方針）
 
 ## 4. 機能要件
 
 | ID | 要件 |
 |----|------|
-| F1 | パネルをドラッグでメインウィンドウ内の任意位置に移動できる |
-| F2 | パネルの 8 方向エッジをドラッグしてリサイズできる。最小サイズは `240×150px`（ワールド座標） |
-| F3 | スクロールホイールでカーソル位置を中心にズームできる（0.25〜4.0 倍） |
-| F4 | 空白部分をドラッグまたはホイールボタンドラッグでパンできる |
-| F5 | パネルをクリックするとフォーカスが移動し、最前面に表示される |
-| F6 | タイトルバーの ×ボタンでパネルを閉じられる |
-| F7 | サイドバーまたはショートカットで新規パネルを追加できる |
-| F8 | カメラ状態（ズーム・パン）はレイアウトごとに `saved-state.json` に保存・復元される |
-| F9 | popout 機能（OS 別ウィンドウ）は引き続き動作する |
-
----
+| F1 | pane をドラッグ移動できる |
+| F2 | pane を 8 方向リサイズできる |
+| F3 | カーソル中心ズームができる |
+| F4 | 空白ドラッグまたは中ボタンでパンできる |
+| F5 | クリックで focus と最前面化ができる |
+| F6 | タイトルバーから pane を閉じられる（`INV-CLOSE-1`: クローズ時に pane が保持する購読・aggregator・`replay_pane_registry` 登録を解放してから data モデルから除去する。teardown は **逐次実行**、各リソース drop に **5s タイムアウト** を設ける。closing 中の pane は **input 不可**（クリック・ドラッグ無視）） |
+| F7 | 新規 pane を追加できる |
+| F8 | camera 状態を保存・復元できる |
+| F9 | popout が継続動作する（main と独立した focus / z-stack / `Camera`、非永続） |
+| F10 | dashboard frontend が `pane_grid` に依存しない |
 
 ## 5. 非機能要件
 
 | ID | 要件 |
 |----|------|
-| NF1 | フォーカス中パネルの `tick()` は毎フレーム実行。非フォーカスは 4 フレームに 1 回以下 |
-| NF2 | ドラッグ中の中間座標はウィジェット内部状態で管理し、`MouseButtonReleased` 時のみ `on_move` を発行してアプリ State 更新頻度を抑える |
-| NF3 | ズーム倍率変更時は `on_camera` を毎ノッチ発行するが、State 更新コストは `Camera` 値 1 個のコピーのみ |
-| NF4 | `saved-state.json` 旧フォーマット（`pane` ツリー）は `ok_or_default` でフォールバックし、クラッシュしない |
+| NF1 | focus 中 pane の更新は毎フレーム、非 focus は間引き可能 |
+| NF2 | ドラッグ中間状態は frontend ローカルで持ち、commit を絞る |
+| NF3 | camera 更新コストは低く保つ |
+| NF4 | 旧 `saved-state.json` でクラッシュしない（互換 deserialize は試みず、`schema_version: u32` の不一致または不在を検知したら破棄して default レイアウトで起動する。バンプ規則: 後方互換ありフィールド追加は serde `#[serde(default)]` で吸収しバンプしない / 破壊変更時のみ +1 / Phase 1 を v1 とする / version 不在 or 最新より小は破棄してデフォルト起動する） |
+| NF5 | レイアウトモデルは frontend 非依存を保つ |
+| NF6 | pane の可視矩形は viewport と最低 64 px × 64 px 重なる（`Camera` 復元時に clamp する） |
+| NF7 | popout は main と独立した focus / z-stack / `Camera` を持つ（Phase 6 までスコープ外、非永続） |
