@@ -12,10 +12,9 @@ site_dir: site
 # MkDocs 1.6+ の exclude_docs は gitignore 形式で、! で再包含できる。
 exclude_docs: |
   *.json
-  .vitepress/
   plan/**
   wiki/**
-  !plan/✅*/spec.md
+  */archive/**
 
 theme:
   name: material
@@ -45,10 +44,10 @@ theme:
 nav:
   - ホーム: index.md
   - 実装仕様書:
-      - Python データエンジン: plan/✅python-data-engine/spec.md
-      - 立花証券 API 統合: plan/✅tachibana/spec.md
-      - 立花注文機能: plan/✅order/spec.md
-      - nautilus_trader 統合: plan/✅nautilus_trader/spec.md
+      - Python データエンジン: ✅python-data-engine/spec.md
+      - 立花証券 API 統合: ✅tachibana/spec.md
+      - 立花注文機能: ✅order/spec.md
+      - nautilus_trader 統合: ✅nautilus_trader/spec.md
 
 markdown_extensions:
   - admonition

@@ -8,10 +8,15 @@ use crate::{connection::EngineConnection, error::EngineClientError};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{process::Child, sync::Mutex};
+
+const DEFAULT_PROBE_URL: &str = "ws://127.0.0.1:19876/";
 
 // ── EngineCommand ─────────────────────────────────────────────────────────────
 
@@ -262,6 +267,10 @@ pub struct ProcessManager {
     /// N1.13 / R1b H-E: 起動時固定 mode (`AppMode`)。`set_mode()` で注入してから
     /// `start()` する。default は `AppMode::Live`。
     mode: Arc<Mutex<crate::dto::AppMode>>,
+    /// How many times the spawn path has been taken in `start_or_attach`.
+    /// Used as a test seam — integration tests assert on this to distinguish
+    /// attach (count stays 0) from spawn (count increments).
+    spawn_count: AtomicUsize,
 }
 
 impl ProcessManager {
@@ -282,6 +291,7 @@ impl ProcessManager {
             proxy_url: Arc::new(Mutex::new(None)),
             venue_ready_state: Arc::new(Mutex::new(HashSet::new())),
             mode: Arc::new(Mutex::new(crate::dto::AppMode::Live)),
+            spawn_count: AtomicUsize::new(0),
         }
     }
 
@@ -386,6 +396,62 @@ impl ProcessManager {
         drop(event_rx);
     }
 
+    /// How many times the spawn path has been taken since this `ProcessManager`
+    /// was created.  Integration tests use this to assert that `start_or_attach`
+    /// attached to an existing engine (count == 0) vs. spawned a new one (count > 0).
+    pub fn spawn_count(&self) -> usize {
+        self.spawn_count.load(Ordering::Relaxed)
+    }
+
+    /// Try to attach to a running engine at `ws://127.0.0.1:19876/`, falling
+    /// back to a fresh Python spawn when:
+    /// - `FLOWSURFACE_ENGINE_TOKEN` env var is unset or empty (skip probe entirely)
+    /// - The probe TCP connect times out (2 s)
+    /// - The probe handshake fails (token mismatch / SCHEMA_MAJOR mismatch / any error)
+    ///
+    /// The attach/spawn policy lives entirely here so `src/main.rs` stays thin.
+    pub async fn start_or_attach(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
+        let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
+        self.try_attach_or_spawn(port, DEFAULT_PROBE_URL, &token)
+            .await
+    }
+
+    /// Testable seam for `start_or_attach`: accepts an explicit probe URL and
+    /// token so integration tests can inject a mock server without touching
+    /// global env vars or relying on a fixed port 19876.
+    #[doc(hidden)]
+    pub async fn try_attach_or_spawn(
+        &self,
+        port: u16,
+        probe_url: &str,
+        token: &str,
+    ) -> Result<EngineConnection, EngineClientError> {
+        if !token.is_empty() {
+            let mode = *self.mode.lock().await;
+            match EngineConnection::probe(probe_url, token, mode).await {
+                Ok(conn) => {
+                    log::info!(
+                        target: "engine_client::process",
+                        "attached to external engine at {probe_url}"
+                    );
+                    self.apply_after_handshake(&conn).await;
+                    return Ok(conn);
+                }
+                Err(e) => {
+                    log::info!(
+                        target: "engine_client::process",
+                        "external probe failed: {e}"
+                    );
+                }
+            }
+        }
+        log::info!(target: "engine_client::process", "spawning python engine on port {port}");
+        // Relaxed ordering is sufficient: spawn_count is a test-only seam with no
+        // ordering relationship to other shared state.
+        self.spawn_count.fetch_add(1, Ordering::Relaxed);
+        self.start(port).await
+    }
+
     /// Spawn the Python process on `port`, handshake, then apply proxy + subscriptions.
     ///
     /// Recovery sequence (spec §4.5, §5.3):
@@ -446,6 +512,12 @@ impl ProcessManager {
     ///
     /// - `on_ready`   — called once after each successful handshake (UI: clear "restarting").
     /// - `on_restart` — called each time a restart is triggered   (UI: show "restarting").
+    ///
+    /// **Design note**: each restart iteration calls `start()` directly (always spawns
+    /// a fresh Python process) rather than `start_or_attach()`. This is intentional —
+    /// after a connection loss, we assume the previous engine is no longer healthy and
+    /// spawn fresh. Callers that want attach-on-restart behaviour should implement their
+    /// own loop using `start_or_attach()` instead of calling this method.
     pub async fn run_with_recovery(
         self: Arc<Self>,
         port: u16,
