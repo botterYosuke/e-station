@@ -8,7 +8,7 @@ edit_uri: edit/main/docs/
 docs_dir: docs
 site_dir: site
 
-# 公開対象を docs/✅*/spec.md と docs/index.md だけに絞る。
+# 公開対象を docs/✅*/**.md と docs/index.md に絞る（archive は除外）。
 # MkDocs 1.6+ の exclude_docs は gitignore 形式で、! で再包含できる。
 exclude_docs: |
   *.json
@@ -43,11 +43,40 @@ theme:
 
 nav:
   - ホーム: index.md
-  - 実装仕様書:
-      - Python データエンジン: ✅python-data-engine/spec.md
-      - 立花証券 API 統合: ✅tachibana/spec.md
-      - 立花注文機能: ✅order/spec.md
-      - nautilus_trader 統合: ✅nautilus_trader/spec.md
+  - Python データエンジン:
+      - 概要: ✅python-data-engine/README.md
+      - 仕様: ✅python-data-engine/spec.md
+      - 現行アーキテクチャ: ✅python-data-engine/current-architecture.md
+      - 実装計画: ✅python-data-engine/implementation-plan.md
+      - Open Questions: ✅python-data-engine/open-questions.md
+      - ベンチマーク:
+          - Baseline: ✅python-data-engine/benchmarks/baseline.md
+          - Phase 2: ✅python-data-engine/benchmarks/phase-2.md
+          - Phase 6: ✅python-data-engine/benchmarks/phase-6.md
+      - スキーマ:
+          - CHANGELOG: ✅python-data-engine/schemas/CHANGELOG.md
+  - 立花証券 API 統合:
+      - 概要: ✅tachibana/README.md
+      - 仕様: ✅tachibana/spec.md
+      - アーキテクチャ: ✅tachibana/architecture.md
+      - データマッピング: ✅tachibana/data-mapping.md
+      - 実装計画: ✅tachibana/implementation-plan.md
+      - 不変条件テスト: ✅tachibana/invariant-tests.md
+      - Open Questions: ✅tachibana/open-questions.md
+  - 立花注文機能:
+      - 概要: ✅order/README.md
+      - 仕様: ✅order/spec.md
+      - アーキテクチャ: ✅order/architecture.md
+      - 実装計画: ✅order/implementation-plan.md
+      - 不変条件テスト: ✅order/invariant-tests.md
+      - Open Questions: ✅order/open-questions.md
+  - nautilus_trader 統合:
+      - 概要: ✅nautilus_trader/README.md
+      - 仕様: ✅nautilus_trader/spec.md
+      - アーキテクチャ: ✅nautilus_trader/architecture.md
+      - データマッピング: ✅nautilus_trader/data-mapping.md
+      - 実装計画: ✅nautilus_trader/implementation-plan.md
+      - Open Questions: ✅nautilus_trader/open-questions.md
 
 markdown_extensions:
   - admonition
