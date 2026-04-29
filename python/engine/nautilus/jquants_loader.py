@@ -21,6 +21,7 @@ import csv
 import datetime as dt
 import gzip
 import logging
+import os
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -35,7 +36,9 @@ from engine.nautilus.instrument_cache import InstrumentCache
 logger = logging.getLogger(__name__)
 
 _JST = dt.timezone(dt.timedelta(hours=9))
-_DEFAULT_BASE_DIR = Path("S:/j-quants")
+# Evaluated once at import time. Set JQUANTS_DIR *before* importing this module
+# (e.g. as a subprocess env var). Changing os.environ after import has no effect.
+_DEFAULT_BASE_DIR = Path(os.environ.get("JQUANTS_DIR", "S:/j-quants"))
 _DEFAULT_PRICE_PRECISION = 1
 _SIZE_PRECISION = 0
 _DAILY_CLOSE_HOUR = 15

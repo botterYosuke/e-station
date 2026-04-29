@@ -621,6 +621,8 @@ class EngineStartConfig(IpcMessage):
     end_date: str
     initial_cash: str
     granularity: Literal["Trade", "Minute", "Daily"]
+    strategy_file: str | None = None
+    strategy_init_kwargs: dict[str, Any] | None = None
 
 
 class StartEngine(IpcMessage):
@@ -645,7 +647,7 @@ class LoadReplayData(IpcMessage):
     end_date: str
     granularity: Literal["Trade", "Minute", "Daily"]
     strategy_file: str | None = None
-    strategy_init_kwargs: dict | None = None
+    strategy_init_kwargs: dict[str, Any] | None = None
 
 
 class EngineStarted(IpcMessage):

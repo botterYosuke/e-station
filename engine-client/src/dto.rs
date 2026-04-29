@@ -222,8 +222,9 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         strategy_file: Option<String>,
         /// N4.2: optional JSON object of strategy constructor kwargs.
+        /// Array/scalar is rejected at the HTTP boundary before IPC send.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        strategy_init_kwargs: Option<serde_json::Value>,
+        strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     },
 
     // ── N1.11: Replay speed control ───────────────────────────────────────
@@ -535,12 +536,18 @@ pub enum ReplayGranularity {
 /// Engine start config — shape mirrors `python/engine/nautilus/engine_runner.py`
 /// arguments. Decimal-precision fields stay as strings to avoid f64 round-trip loss.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EngineStartConfig {
     pub instrument_id: String,
     pub start_date: String,
     pub end_date: String,
     pub initial_cash: String,
     pub granularity: ReplayGranularity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_file: Option<String>,
+    /// JSON object only — array/scalar rejected at HTTP boundary before IPC send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 // ── Order sub-types (schema 1.3) ──────────────────────────────────────────────

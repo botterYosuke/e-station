@@ -931,6 +931,25 @@
 - リグレッションテスト 2 件追加: `price_to_y_is_finite`（正常系）/ `price_to_y_guards_nan_cell_height`（NaN 入力 → 0.0）
 - テストを `src/chart.rs` 内 `#[cfg(test)]` ブロックに統合（既存のインラインテストと同居）
 
+### レビュー反映 (2026-04-29, ラウンド 1)
+- H-1 ✅: LoadReplayData/ReplayLoadBody.strategy_init_kwargs を Map 型に統一。/api/replay/load で array が通過しないことを replay_load_rejects_array_strategy_init_kwargs で固定
+- H-2 ✅: SCHEMA_MINOR を 5→6 に Rust 側も bump
+- H-3+M-7 ✅: _handle_load_replay_data docstring に「strategy_file は StartEngine 経由」と明記
+- H-4 ✅: _handle_start_engine で EngineStartConfig.model_validate() を適用
+- M-1 ✅: LoadReplayData.strategy_init_kwargs 型注釈を dict[str, Any] に統一
+- M-2 ✅: handle_replay_load/start の .clone() を move に変更
+- M-3 ✅: load_replay_data_strategy_file.rs の docstring を GREEN フェーズに更新
+- M-4 ✅: EngineStartConfig に #[serde(deny_unknown_fields)] 追加
+- M-5 ✅: load_replay_data_serializes に None 省略 assertion 追加
+- M-6 ✅: replay_load_rejects_array_strategy_init_kwargs テスト追加（H-1 と統合）
+
+### レビュー反映 (2026-04-29, ラウンド 2)
+- R2-H-1 ✅: _handle_start_engine の invalid_config エラーパステスト追加
+- R2-M-2 ✅: runner.stop() 例外を log.warning で記録
+- R2-M-3 ✅: EngineStarted イベントに strategy_id 一致ガード追加
+- R2-M-4 ✅: result_holder[0] None 時の log.warning 追加
+- R2-L-3 ✅: load_replay_data_strategy_file.rs docstring を GREEN フェーズに更新
+
 ---
 
 ## 削除リスト（N1 完了時点）

@@ -61,6 +61,45 @@
 | `docs/plan/README.md` Phase 2 仮想売買エンジン | **nautilus の `BacktestEngine` で代替**。自作 Virtual Exchange Engine は破棄 |
 | `docs/plan/README.md` Phase 4a ナラティブ | nautilus `Strategy` フックから既存 HTTP API に書き込む配線のみ追加 |
 
+## ユーザー定義 Strategy（N4 — 実装済み 2026-04-29）
+
+ユーザーが書いた `.py` ファイルを REPLAY エンジンに流す基盤を実装済み。
+
+### API フロー（2 ステップ）
+
+```
+POST /api/replay/load   → データ件数確認のみ（strategy_file は不要）
+POST /api/replay/start  → strategy_file + strategy_init_kwargs を指定してバックテスト開始
+```
+
+`strategy_file` は **`/api/replay/start`** にのみ渡す。`/api/replay/load` は受け付けない。
+
+### 実装ポイント
+
+| 箇所 | 内容 |
+|---|---|
+| `ReplayStartBody` (`src/replay_api.rs`) | `strategy_file`, `strategy_init_kwargs` フィールドを追加。未知フィールドは `deny_unknown_fields` で HTTP 400 |
+| `EngineStartConfig` (`engine-client/src/dto.rs`) | 同フィールドを `Option` で保持。`None` は wire 上省略（`skip_serializing_if`） |
+| `EngineStartConfig` (`python/engine/schemas.py`) | Pydantic モデルで `extra="forbid"` 適用済み。`model_validate()` で検証して `invalid_config` エラーを返す |
+| `strategy_init_kwargs` の型 | `serde_json::Map<String, Value>` — object 以外（配列・スカラー）は HTTP 境界で即拒否 |
+| `_handle_start_engine` (`python/engine/server.py`) | `EngineStartConfig.model_validate()` → `strategy_loader.load_strategy_from_file()` の順で処理 |
+
+### サンプル
+
+```bash
+# 1. データだけ読み込む
+curl -X POST http://127.0.0.1:9876/api/replay/load \
+  -d '{"instrument_id":"7203.TSE","start_date":"2024-01-01","end_date":"2024-12-31","granularity":"Daily"}'
+
+# 2. 戦略を指定してバックテスト開始
+curl -X POST http://127.0.0.1:9876/api/replay/start \
+  -d '{"instrument_id":"7203.TSE","start_date":"2024-01-01","end_date":"2024-12-31","granularity":"Daily","strategy_id":"user-defined","initial_cash":"1000000","strategy_file":"examples/strategies/sma_cross.py","strategy_init_kwargs":{"instrument_id":"7203.TSE","short":5,"long":20,"lot_size":100}}'
+```
+
+詳細は [docs/wiki/backtest.md](../../wiki/backtest.md) を参照。
+
+---
+
 ## REPLAY モード仮想注文の取り込み
 
 `docs/✅order/` で **スコープ外**とした REPLAY モード仮想注文（[wiki UX](../../wiki/orders.md#replay-モード中の動作)）は本計画の **Phase N1** に集約する:

@@ -791,6 +791,37 @@ class TestHGCallSoonThreadsafeUnification:
         assert errors[0]["code"] == "mode_mismatch"
 
 
+class TestStartEngineInvalidConfigExtraFields:
+    """R2-H-1: EngineStartConfig.extra='forbid' が invalid_config エラーパスを発火すること。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_config_field_emits_invalid_config_error(self) -> None:
+        """R2-H-1: config に未知フィールドを含む StartEngine は Error{code='invalid_config'} を emit する。"""
+        server = _make_server(mode="replay")
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-extra-field",
+            "engine": "Backtest",
+            "strategy_id": "extra-field-strategy",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+                "unexpected_field": "evil",  # EngineStartConfig.extra="forbid" で弾かれる
+            },
+        }
+        await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        errors = [e for e in server._outbox if e.get("event") == "Error"]
+        assert len(errors) == 1
+        assert errors[0]["request_id"] == "req-extra-field"
+        assert errors[0]["code"] == "invalid_config"
+        # EngineStarted は発火しない
+        assert not any(e.get("event") == "EngineStarted" for e in server._outbox)
+
+
 class TestStartEngineLowATasksCleanup:
     """LOW-A: initial_cash バリデーション失敗時に _engine_tasks に残骸が残らない。"""
 

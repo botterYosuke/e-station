@@ -2168,6 +2168,10 @@ class DataEngineServer:
 
         M3: mode="live" では replay 系 IPC を受理しない（D8 / spec §3.2 起動時固定）。
         Error{request_id, code="mode_mismatch"} を返して即 return する。
+
+        .. note:: ``strategy_file`` / ``strategy_init_kwargs`` はこのハンドラでは使用しない。
+            戦略ロードは ``StartEngine`` (``EngineStartConfig``) 経由で行う。
+            ``LoadReplayData`` は件数カウントのみ担当する。
         """
         instrument_id = msg.get("instrument_id", "")
         start_date = msg.get("start_date", "")
@@ -2272,12 +2276,13 @@ class DataEngineServer:
         ``EngineStopped`` が抜けるため、except で final_equity="0" の
         EngineStopped を補完送出する (H1)。
         """
-        from engine.schemas import EngineError as EngineErrorModel
+        from pydantic import ValidationError
+        from engine.schemas import EngineError as EngineErrorModel, EngineStartConfig
         from engine.nautilus.engine_runner import NautilusRunner
 
         engine_kind = msg.get("engine", "")
         strategy_id = msg.get("strategy_id", "")
-        config = msg.get("config", {})
+        config_raw = msg.get("config", {})
         request_id = msg.get("request_id")
 
         # MEDIUM-2: request_id が None/空の場合は防御的に早期 return する。
@@ -2360,11 +2365,27 @@ class DataEngineServer:
             await _drain()
             return
 
+        # H-4: EngineStartConfig.model_validate() で extra フィールドや型違いを弾く。
+        # extra="forbid" が機能するのはここだけ（raw dict のままでは機能しない）。
+        try:
+            config_obj = EngineStartConfig.model_validate(config_raw)
+        except ValidationError as exc:
+            _emit(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "invalid_config",
+                    "message": str(exc),
+                }
+            )
+            await _drain()
+            return
+
         # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
         # LOW-A: バリデーション成功後に runner と _engine_tasks を登録することで、
         # parse 失敗時に残骸が _engine_tasks に残らない。
         try:
-            initial_cash = int(config.get("initial_cash", "0"))
+            initial_cash = int(config_obj.initial_cash)
         except (ValueError, TypeError) as exc:
             _emit(
                 {
@@ -2410,15 +2431,15 @@ class DataEngineServer:
         def _run() -> None:
             result_holder[0] = runner.start_backtest_replay(
                 strategy_id=strategy_id,
-                instrument_id=config.get("instrument_id", ""),
-                start_date=config.get("start_date", ""),
-                end_date=config.get("end_date", ""),
-                granularity=config.get("granularity", "Trade"),
+                instrument_id=config_obj.instrument_id,
+                start_date=config_obj.start_date,
+                end_date=config_obj.end_date,
+                granularity=config_obj.granularity,
                 initial_cash=initial_cash,
                 base_dir=base_dir,
                 on_event=_on_event_tracked,
-                strategy_file=config.get("strategy_file"),
-                strategy_init_kwargs=config.get("strategy_init_kwargs"),
+                strategy_file=config_obj.strategy_file,
+                strategy_init_kwargs=config_obj.strategy_init_kwargs,
             )
 
         try:
@@ -2434,6 +2455,11 @@ class DataEngineServer:
                     self._replay_portfolio.on_fill(
                         fill.instrument_id, fill.side, fill.qty, fill.price
                     )
+            else:
+                log.warning(
+                    "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
+                    strategy_id,
+                )
         except asyncio.TimeoutError as exc:
             log.error(
                 "StartEngine timed out: strategy_id=%r",
@@ -2443,8 +2469,8 @@ class DataEngineServer:
             # worker thread はキャンセルできないが stop() シグナルを送ってリソースを解放する。
             try:
                 runner.stop()
-            except Exception:
-                pass
+            except Exception as stop_exc:
+                log.warning("[StartEngine] runner.stop() failed during timeout cleanup: %s", stop_exc)
             # HIGH-1: timeout 後も worker thread は走り続けるため started_marker に依存しない。
             # Rust 側は EngineStarted なしの EngineStopped を no-op として扱う。
             _emit(
