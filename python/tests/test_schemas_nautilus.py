@@ -4,7 +4,7 @@
 - Event  系: EngineStarted / EngineStopped / ReplayDataLoaded /
              PositionOpened / PositionClosed
 - Literal 制約違反 (engine="Bogus" / granularity="Bogus") で ValidationError
-- SCHEMA_MINOR == 5
+- SCHEMA_MINOR == 6
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ def _roundtrip(model_cls, data: dict) -> dict:
 # ── Schema version ──────────────────────────────────────────────────────────
 
 
-def test_schema_minor_is_5_for_nautilus() -> None:
-    # R2 review-fix R1b M-8: SCHEMA_MINOR を 4 → 5 に bump (ReplayDataLoaded.strategy_id Optional)
-    assert s.SCHEMA_MINOR == 5
+def test_schema_minor_is_6_for_nautilus() -> None:
+    # N4: SCHEMA_MINOR を 5 → 6 に bump (LoadReplayData に strategy_file / strategy_init_kwargs 追加)
+    assert s.SCHEMA_MINOR == 6
     assert s.SCHEMA_MAJOR == 2
 
 

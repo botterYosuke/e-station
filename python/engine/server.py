@@ -2417,6 +2417,8 @@ class DataEngineServer:
                 initial_cash=initial_cash,
                 base_dir=base_dir,
                 on_event=_on_event_tracked,
+                strategy_file=config.get("strategy_file"),
+                strategy_init_kwargs=config.get("strategy_init_kwargs"),
             )
 
         try:

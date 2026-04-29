@@ -915,6 +915,22 @@
 - `__init__(short=5, long=20)` を `strategy_init_kwargs` JSON で渡せる ✅
 - 既存テスト（N0〜N3）すべて GREEN のまま ✅（Python 1310 / Rust workspace 全 GREEN）
 
+### N4 後処理 bugfix (2026-04-29)
+
+#### APP_MODE static 追加（D8 レイアウト隔離の確実化）
+
+- `src/main.rs` に `static APP_MODE: OnceLock<AppMode>` を追加
+- `main()` の最初期（logger 初期化より前）に `APP_MODE.set(AppMode::from(cli_args.mode))` でセット
+- `Flowsurface::new()` の `is_replay_mode` 判定を `REPLAY_API_STATE` 参照から `APP_MODE` 参照に変更
+- **修正前の問題**: `REPLAY_API_STATE` は HTTP ランタイム構築後に set されるため、ランタイム構築に失敗した場合 `Flowsurface::new()` 時点で未設定 → `is_replay_mode = false` になり D8 レイアウト隔離が機能しなかった
+- `APP_MODE` 未設定時は `log::warn!` を出して `false`（live）フォールバック
+
+#### `chart.rs` NaN ガード
+
+- `ViewState::price_to_y()` が `cell_height = NaN` のとき lyon パス生成にまで NaN が伝搬してパニックする経路をガード → `0.0` を返すよう修正
+- リグレッションテスト 2 件追加: `price_to_y_is_finite`（正常系）/ `price_to_y_guards_nan_cell_height`（NaN 入力 → 0.0）
+- テストを `src/chart.rs` 内 `#[cfg(test)]` ブロックに統合（既存のインラインテストと同居）
+
 ---
 
 ## 削除リスト（N1 完了時点）

@@ -235,6 +235,8 @@ class NautilusRunner:
         currency: str = "JPY",
         base_dir: Path | str | None = None,
         on_event: Callable[[dict], None] | None = None,
+        strategy_file: str | None = None,
+        strategy_init_kwargs: dict | None = None,
     ) -> ReplayBacktestResult:
         """J-Quants 入力でバックテストを実行する (N1.4)。
 
@@ -362,7 +364,9 @@ class NautilusRunner:
             })
 
             strategy_instance = _make_replay_strategy(
-                strategy_id, nautilus_iid, subscribe_kind, bar_type_str
+                strategy_id, nautilus_iid, subscribe_kind, bar_type_str,
+                strategy_file=strategy_file,
+                strategy_init_kwargs=strategy_init_kwargs,
             )
             engine.add_strategy(strategy_instance)
 
@@ -454,6 +458,8 @@ class NautilusRunner:
         currency: str = "JPY",
         base_dir: Path | str | None = None,
         on_event: Callable[[dict], None] | None = None,
+        strategy_file: str | None = None,
+        strategy_init_kwargs: dict | None = None,
         stop_event: threading.Event | None = None,
     ) -> ReplayBacktestResult:
         """streaming=True 経路で 1 tick ずつ pacing しながら replay する (N1.11)。
@@ -571,7 +577,9 @@ class NautilusRunner:
             })
 
             strategy_instance = _make_replay_strategy(
-                strategy_id, nautilus_iid, subscribe_kind, bar_type_str
+                strategy_id, nautilus_iid, subscribe_kind, bar_type_str,
+                strategy_file=strategy_file,
+                strategy_init_kwargs=strategy_init_kwargs,
             )
             engine.add_strategy(strategy_instance)
 
@@ -748,16 +756,34 @@ class NautilusRunner:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _load_user_strategy(
+    strategy_file: str,
+    strategy_init_kwargs: dict | None,
+):
+    """strategy_file パスからユーザー定義 Strategy をロードして返す。
+
+    StrategyLoadError は呼び出し側で EngineError に変換すること。
+    """
+    from engine.nautilus.strategy_loader import load_strategy_from_file
+
+    return load_strategy_from_file(strategy_file, strategy_init_kwargs or {})
+
+
 def _make_replay_strategy(
     strategy_id: str,
     instrument_id,
     subscribe_kind: str,
     bar_type_str: str | None,
+    strategy_file: str | None = None,
+    strategy_init_kwargs: dict | None = None,
 ):
     """N1.4 replay 用 Strategy ファクトリ。
 
+    strategy_file が指定された場合はユーザー定義 Strategy を優先してロードする。
     granularity に応じた subscribe_kind / bar_type_str を BuyAndHold に渡す。
     """
+    if strategy_file is not None:
+        return _load_user_strategy(strategy_file, strategy_init_kwargs)
     if strategy_id == "buy-and-hold":
         return BuyAndHoldStrategy(
             instrument_id=instrument_id,

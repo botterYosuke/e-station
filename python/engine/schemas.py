@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 5
+SCHEMA_MINOR: int = 6
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +644,8 @@ class LoadReplayData(IpcMessage):
     start_date: str
     end_date: str
     granularity: Literal["Trade", "Minute", "Daily"]
+    strategy_file: str | None = None
+    strategy_init_kwargs: dict | None = None
 
 
 class EngineStarted(IpcMessage):
