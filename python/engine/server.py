@@ -2193,30 +2193,13 @@ class DataEngineServer:
             )
             return
 
-        from engine.nautilus.jquants_loader import (
-            load_daily_bars,
-            load_minute_bars,
-            load_trades,
-        )
+        from engine.nautilus.jquants_loader import check_data_exists
 
         try:
             bars_loaded = 0
             trades_loaded = 0
             kwargs = {"base_dir": base_dir} if base_dir is not None else {}
-            if granularity == "Trade":
-                trades_loaded = sum(
-                    1 for _ in load_trades(instrument_id, start_date, end_date, **kwargs)
-                )
-            elif granularity == "Minute":
-                bars_loaded = sum(
-                    1 for _ in load_minute_bars(instrument_id, start_date, end_date, **kwargs)
-                )
-            elif granularity == "Daily":
-                bars_loaded = sum(
-                    1 for _ in load_daily_bars(instrument_id, start_date, end_date, **kwargs)
-                )
-            else:
-                raise ValueError(f"unknown granularity: {granularity!r}")
+            check_data_exists(instrument_id, start_date, end_date, granularity, **kwargs)
         except Exception as exc:
             log.error(
                 "LoadReplayData failed: instrument_id=%r granularity=%r",

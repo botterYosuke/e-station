@@ -101,7 +101,10 @@ class TestLoadReplayDataDispatch:
 
     @pytest.mark.asyncio
     async def test_load_replay_data_emits_loaded_event(self) -> None:
-        """LoadReplayData → ReplayDataLoaded(outbox)、件数は fixtures と一致。"""
+        """LoadReplayData → ReplayDataLoaded(outbox)。
+
+        ファイル存在確認のみ行うため counts は 0（実際のカウントは StartEngine で行う）。
+        """
         server = _make_server(mode="replay")
         msg = {
             "op": "LoadReplayData",
@@ -115,7 +118,7 @@ class TestLoadReplayDataDispatch:
 
         events = [e for e in server._outbox if e.get("event") == "ReplayDataLoaded"]
         assert len(events) == 1
-        assert events[0]["trades_loaded"] == 4
+        assert events[0]["trades_loaded"] == 0
         assert events[0]["bars_loaded"] == 0
         # M-8 (R1b / schema 2.5): 単独 LoadReplayData では strategy_id=None を送る。
         assert events[0]["strategy_id"] is None

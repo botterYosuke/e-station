@@ -137,6 +137,43 @@ def _warn_short_row_once(state: dict, path: Path, expected: int, actual: int) ->
 
 
 # ---------------------------------------------------------------------------
+# ファイル存在確認（高速プリフライト）
+# ---------------------------------------------------------------------------
+
+_GRANULARITY_PREFIX: dict[str, str] = {
+    "Trade": "equities_trades_",
+    "Minute": "equities_bars_minute_",
+    "Daily": "equities_bars_daily_",
+}
+
+
+def check_data_exists(
+    _instrument_id: str,
+    start_date: str,
+    end_date: str,
+    granularity: str = "Trade",
+    *,
+    base_dir: Path | str = _DEFAULT_BASE_DIR,
+) -> None:
+    """月次 CSV ファイルの存在だけを確認する（行を読まない）。
+
+    ファイルが 1 件でも見つかれば即 return。
+    見つからなければ ``FileNotFoundError`` を raise する。
+    """
+    prefix = _GRANULARITY_PREFIX.get(granularity)
+    if prefix is None:
+        raise ValueError(f"unknown granularity: {granularity!r}")
+    base_dir = Path(base_dir)
+    for yyyymm in _iter_yyyymm(start_date, end_date):
+        if (base_dir / f"{prefix}{yyyymm}.csv.gz").exists():
+            return
+    raise FileNotFoundError(
+        f"no J-Quants {granularity} files found under {base_dir} "
+        f"for period {start_date}..{end_date}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # TradeTick ローダ
 # ---------------------------------------------------------------------------
 

@@ -71,8 +71,10 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 0
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    log "SKIP — python3 not available"
+# Windows では python3 が Store スタブのため python を優先する
+PYTHON_BIN="python"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    log "SKIP — python not available"
     exit 0
 fi
 
@@ -209,8 +211,8 @@ assert_load() {
     fi
 
     local trades_loaded
-    trades_loaded=$(python3 -c \
-        "import json,sys; d=json.load(open('/tmp/s90_load_resp.json')); print(d.get('trades_loaded',0))" \
+    trades_loaded=$(cat /tmp/s90_load_resp.json | "$PYTHON_BIN" -c \
+        "import json,sys; d=json.load(sys.stdin); print(d.get('trades_loaded',0))" \
         2>/dev/null || echo 0)
     [[ "${trades_loaded}" =~ ^[0-9]+$ ]] || trades_loaded=0
 
@@ -232,8 +234,7 @@ start_body=$(printf '{
   "end_date": "%s",
   "granularity": "%s",
   "strategy_id": "%s",
-  "initial_cash": "%s",
-  "strategy_file": "examples/strategies/buy_and_hold.py"
+  "initial_cash": "%s"
 }' \
     "$INSTRUMENT_ID" "$START_DATE" "$END_DATE" "$GRANULARITY" \
     "$STRATEGY_ID" "$INITIAL_CASH")
@@ -259,8 +260,8 @@ if [[ "${start_code}" != "202" && "${start_code}" != "200" ]]; then
 fi
 log "replay started"
 
-strategy_id_val=$(python3 -c \
-    "import json; d=json.load(open('/tmp/s90_start_resp.json')); print(d.get('strategy_id',''))" \
+strategy_id_val=$(cat /tmp/s90_start_resp.json | "$PYTHON_BIN" -c \
+    "import json,sys; d=json.load(sys.stdin); print(d.get('strategy_id',''))" \
     2>/dev/null || echo "")
 if [[ -z "${strategy_id_val}" ]]; then
     log "FAIL — /api/replay/start response missing strategy_id"
@@ -283,8 +284,8 @@ if [[ "${status_code}" != "200" ]]; then
     exit 1
 fi
 
-status_val=$(python3 -c \
-    "import json,sys; d=json.load(open('/tmp/s90_status_resp.json')); print(d.get('status',''))" \
+status_val=$(cat /tmp/s90_status_resp.json | "$PYTHON_BIN" -c \
+    "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" \
     2>/dev/null || echo "")
 
 if [[ "${status_val}" != "ok" ]]; then
