@@ -724,6 +724,12 @@ struct Flowsurface {
     /// Shared market-closed flag for order_api pre-reject (N3.B).
     /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
     order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// N4.3: user-selected strategy `.py` file path. `None` until the user picks
+    /// one via the OS file dialog.  Forwarded to `Command::LoadReplayData.strategy_file`.
+    replay_strategy_file: Option<std::path::PathBuf>,
+    /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
+    /// Cleared by `Message::DismissStrategyLoadError`.
+    strategy_load_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -855,6 +861,11 @@ enum Message {
         ts_event_ms: i64,
         tag: Option<String>,
     },
+    /// N4.3: result of the async OS file dialog for strategy `.py` file selection.
+    /// `Some(path)` when the user picked a file; `None` when they cancelled.
+    StrategyFilePicked(Option<std::path::PathBuf>),
+    /// N4.4: user dismissed the `strategy_load_failed` error banner.
+    DismissStrategyLoadError,
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1169,9 +1180,22 @@ impl Flowsurface {
 
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
 
+        let is_replay_mode = REPLAY_API_STATE
+            .get()
+            .map(|s| s.mode == engine_client::dto::AppMode::Replay)
+            .unwrap_or(false);
+        let layout_manager = if is_replay_mode {
+            log::info!(
+                "replay mode: discarding saved pane layout (D8), starting with fresh layout"
+            );
+            LayoutManager::new()
+        } else {
+            saved_state.layout_manager
+        };
+
         let mut state = Self {
             main_window: window::Window::new(main_window_id),
-            layout_manager: saved_state.layout_manager,
+            layout_manager,
             theme_editor: ThemeEditor::new(saved_state.custom_theme),
             audio_stream,
             sidebar,
@@ -1202,6 +1226,8 @@ impl Flowsurface {
                     );
                     Arc::new(std::sync::atomic::AtomicBool::new(false))
                 }),
+            replay_strategy_file: None,
+            strategy_load_error: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -1999,6 +2025,19 @@ impl Flowsurface {
                             }
                             Task::none()
                         }
+                        // N4.3: open OS file dialog for strategy .py file
+                        Some(dashboard::Event::PickStrategyFile) => {
+                            return Task::perform(
+                                async {
+                                    rfd::AsyncFileDialog::new()
+                                        .add_filter("Python", &["py"])
+                                        .pick_file()
+                                        .await
+                                        .map(|h| h.path().to_owned())
+                                },
+                                Message::StrategyFilePicked,
+                            );
+                        }
                         None => Task::none(),
                     };
 
@@ -2086,12 +2125,25 @@ impl Flowsurface {
                     let main_window = self.main_window.id;
                     self.active_dashboard_mut()
                         .distribute_buying_power_error(main_window, format!("[{code}] {message}"));
+                } else if code == "strategy_load_failed" {
+                    // N4.4: surface the error as a dismissable banner.
+                    self.strategy_load_error = Some(message);
                 } else {
                     log::debug!(
                         "[IpcError] unrouted: request_id={request_id:?}, code={code}, \
                          message={message}"
                     );
                 }
+            }
+            // N4.3: user picked (or cancelled) the strategy file dialog.
+            Message::StrategyFilePicked(path) => {
+                self.replay_strategy_file = path;
+                return Task::none();
+            }
+            // N4.4: user dismissed the strategy load error banner.
+            Message::DismissStrategyLoadError => {
+                self.strategy_load_error = None;
+                return Task::none();
             }
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
             Message::ExecutionMarkerReceived {
@@ -2712,6 +2764,21 @@ impl Flowsurface {
             let mut base = column![header_title];
             if let Some(banner) = banner {
                 base = base.push(container(banner).padding(padding::all(8)));
+            }
+            // N4.4: strategy_load_failed dismissable banner.
+            if let Some(err_msg) = &self.strategy_load_error {
+                let strategy_err_banner = container(
+                    row![
+                        text(format!("Strategy load failed: {err_msg}")),
+                        button("×")
+                            .on_press(Message::DismissStrategyLoadError)
+                            .style(button::danger),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding(padding::all(8));
+                base = base.push(strategy_err_banner);
             }
             base = base.push(
                 match sidebar_pos {

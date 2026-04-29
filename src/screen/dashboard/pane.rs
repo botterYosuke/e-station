@@ -61,6 +61,8 @@ pub enum Effect {
     BuyingPowerAction(panel::buying_power::Action),
     /// N1.11-ui: User pressed a speed button in `ReplayControl` pane.
     SetReplaySpeed(u32),
+    /// N4.3: User pressed the strategy file picker button in `ReplayControl` pane.
+    PickStrategyFile,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -118,6 +120,8 @@ pub enum Event {
     BuyingPowerMsg(panel::buying_power::Message),
     /// N1.11-ui: User pressed a replay speed button (1 | 10 | 100).
     SetReplaySpeed(u32),
+    /// N4.3: User pressed the "Strategy ファイルを選ぶ" button in `ReplayControl`.
+    PickStrategyFile,
 }
 
 pub struct State {
@@ -1253,8 +1257,12 @@ impl State {
                         .padding([4, 10]),
                 ]
                 .spacing(8);
+                // N4.3: strategy file picker button.
+                let strategy_btn = button(text("Strategy ファイルを選ぶ").size(12))
+                    .on_press(Message::PaneEvent(id, Event::PickStrategyFile))
+                    .padding([4, 10]);
                 let base: Element<_> = center(
-                    column![text("再生速度").size(12), speed_buttons,]
+                    column![text("再生速度").size(12), speed_buttons, strategy_btn,]
                         .spacing(8)
                         .align_x(Alignment::Center),
                 )
@@ -1784,6 +1792,10 @@ impl State {
             // N1.11-ui: Relay speed-button press to the dashboard.
             Event::SetReplaySpeed(multiplier) => {
                 return Some(Effect::SetReplaySpeed(multiplier));
+            }
+            // N4.3: Relay strategy file picker button press to the dashboard.
+            Event::PickStrategyFile => {
+                return Some(Effect::PickStrategyFile);
             }
         }
         None

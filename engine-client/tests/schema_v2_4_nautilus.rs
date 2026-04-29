@@ -200,6 +200,8 @@ fn load_replay_data_serializes() {
         start_date: "2024-01-04".to_string(),
         end_date: "2024-01-31".to_string(),
         granularity: ReplayGranularity::Minute,
+        strategy_file: None,
+        strategy_init_kwargs: None,
     };
     let json = serde_json::to_string(&cmd).unwrap();
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();

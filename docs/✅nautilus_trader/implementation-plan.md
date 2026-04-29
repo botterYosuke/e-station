@@ -689,6 +689,31 @@
 - PortfolioView は nautilus Portfolio 内部依存なし — fills の積算のみで cash/equity を計算。nautilus 内部 API の変更に強い
 - REPLAY_API_STATE static は Arc<ReplayApiState> を保持し、Message::ReplayBuyingPower ハンドラから同期的に portfolio キャッシュを更新する
 
+### N1.17 `POST /api/replay/start` — HTTP → StartEngine IPC 橋渡し ✅ 完了 2026-04-29
+
+- [x] ✅ `src/replay_api.rs`: `ReplayStartBody` / `ReplayStartOk` wire 型追加
+- [x] ✅ `src/replay_api.rs`: `ReplayApiState` に `start_timeout: Duration`（デフォルト 30s）追加
+- [x] ✅ `src/replay_api.rs`: `handle_replay_start()` 実装
+      - mode ガード（400 if `mode != Replay`）
+      - フィールド検証（`instrument_id` / `start_date` / `end_date` / `strategy_id` / `initial_cash`）
+      - `Command::StartEngine { engine: Backtest, strategy_id, config: EngineStartConfig { ... } }` 送信
+      - `EngineEvent::EngineStarted` を最大 30s 待機
+      - `EngineEvent::EngineError { strategy_id: Some(sid) }` → 503（`mode_mismatch` → 400）
+      - `EngineEvent::Error { request_id: Some(rid) }` → 503
+      - timeout → 504、disconnect → 502、lagged → 503
+      - 成功時: 202 `{ status: "started", strategy_id, account_id }`
+- [x] ✅ `src/replay_api.rs`: ルータに `("POST", "/api/replay/start")` 追加
+- [x] ✅ `src/replay_api.rs`: テスト 7 件追加（202 成功・live mode 400・無効 JSON 400・空 instrument_id 400・空 strategy_id 400・timeout 504・engine_error 503・コマンド転送確認）
+- [x] ✅ `docs/example/run_buy_and_hold_backtest_with_ui.py`: `/api/replay/load` → `/api/replay/start` に変更。ステップ番号 5 → 6 に拡張
+- [x] ✅ `cargo test --workspace` 全 GREEN（208 件含む）
+- [x] ✅ `uv run pytest python/tests/` GREEN（変更なし・回帰確認）
+
+**知見・Tips（2026-04-29）**:
+- `EngineStarted` は `strategy_id` を echo back するためコマンド内 `strategy_id` との照合不要。どの戦略でも最初に受信した `EngineStarted` を成功として返せる
+- `EngineError` と `Error` の二種類を待つ: `EngineError { strategy_id: Some(sid) }` は戦略レベルのアウトボックスイベント（Python `_handle_start_engine` 例外時）、`Error { request_id: Some(rid) }` はリクエストレベルエラー（`mode_mismatch` 等）
+- `start_timeout` は `load_timeout` と独立して設定可能。テストでは `with_start_timeout(Duration::from_millis(150))` で素早くタイムアウトを確認
+- `spawn_mock_engine_capture` を再利用してコマンド内容（`op`, `engine`, `strategy_id`, `config.*`）を検証するテストパターンが有効
+
 **Exit 条件**:
 - J-Quants `equities_trades_202401.csv.gz` から 1 銘柄をロードし、`BuyAndHold` 戦略でバックテストが完走、`OrderFilled` が IPC 経由で受信できる
 - N1.8 の live/replay smoke が両方緑
@@ -843,6 +868,52 @@
 - `src/api/order_api.rs::tests`: `market_closed_flag_returns_409`, `market_open_flag_does_not_reject_early`, `market_closed_check_fires_before_replay_mode`
 
 **検証**: `cargo test --workspace` 全 GREEN、`cargo clippy -- -D warnings` クリーン、`cargo fmt --check` クリーン。
+
+---
+
+## Phase N4: ユーザー定義 Strategy ロード ✅ 完了 2026-04-29
+
+**前提**: Q2 ★Resolved (2026-04-29)「案 A: ユーザーが Python で書く / サンドボックスなし / 戦略起因事故はユーザー責任」確定。README に「戦略は自己責任」明記済み。
+
+**スコープ外**: サンドボックス・プロセス隔離（Q2 で却下）/ 戦略パラメータ UI フォーム（次フェーズ候補）/ runtime での戦略切替（D8 起動時固定方針）/ ディレクトリスキャン（user 決定: `--strategy-file` のみ）
+
+### N4.1 Strategy ローダ ✅ 完了 2026-04-29
+- [x] ✅ `python/engine/nautilus/strategy_loader.py` 新設（98 行）
+- [x] ✅ `load_strategy_from_file(path, init_kwargs)`: `importlib.util.spec_from_file_location` でロード、`cls.__module__ == module.__name__` で transitive import を除外、1 クラス以外は `StrategyLoadError`
+- [x] ✅ `python/tests/test_strategy_loader.py` 10 件 GREEN（ハッピーパス / 0個 / 複数 / SyntaxError / ImportError / init_kwargs / FileNotFoundError / imported 除外 / 互換 lint warning / warning なし）
+- [x] ✅ `_INCOMPATIBLE_HANDLERS` frozenset で `on_order_book_*` / `on_quote_tick` AST 検出 → `log.warning`（block しない / N4.6 を統合）
+
+### N4.2 IPC schema 拡張 ✅ 完了 2026-04-29
+- [x] ✅ `engine-client/src/dto.rs`: `Command::LoadReplayData` に `strategy_file: Option<String>` / `strategy_init_kwargs: Option<serde_json::Value>` 追加（`#[serde(default, skip_serializing_if = "Option::is_none")]`）
+- [x] ✅ `python/engine/schemas.py`: `LoadReplayData` に同フィールド追加、`SCHEMA_MINOR` 5→6 bump
+- [x] ✅ `python/engine/nautilus/engine_runner.py`: `start_backtest_replay(strategy_file, strategy_init_kwargs)` 追加。`_load_user_strategy()` helper で `StrategyLoadError` → `EngineError{code:"strategy_load_failed"}` 変換
+- [x] ✅ `python/engine/server.py`: `_handle_start_engine` で `config.get("strategy_file")` / `config.get("strategy_init_kwargs")` を `start_backtest_replay()` に渡す配線追加
+- [x] ✅ テスト: Python 1310 passed / Rust workspace 全 GREEN
+
+### N4.3 Rust HTTP + UI ✅ 完了 2026-04-29
+- [x] ✅ `src/replay_api.rs`: `ReplayLoadBody` に `strategy_file: Option<String>` / `strategy_init_kwargs: Option<serde_json::Value>` 追加。`strategy_file: None` ハードコードを `parsed.strategy_file.clone()` に差し替え
+- [x] ✅ `Cargo.toml`: `rfd = "0.15"` 追加（native OS file dialog）
+- [x] ✅ `src/screen/dashboard/pane.rs`: `Effect::PickStrategyFile` / `Event::PickStrategyFile` 追加。`ReplayControl` pane の view に「Strategy ファイルを選ぶ」ボタン追加
+- [x] ✅ `src/screen/dashboard.rs`: `Event::PickStrategyFile` リレー追加
+- [x] ✅ `src/main.rs`: `Flowsurface.replay_strategy_file: Option<PathBuf>` / `Message::StrategyFilePicked` 追加。ボタン押下 → `rfd::AsyncFileDialog(..).pick_file()` → `Message::StrategyFilePicked`。選択パスを `/api/replay/load` body に載せる
+
+### N4.4 StrategyLoadFailed バナー ✅ 完了 2026-04-29
+- [x] ✅ `src/main.rs`: `Flowsurface.strategy_load_error: Option<String>` 追加。`IpcError{code:"strategy_load_failed"}` 受信時に `strategy_load_error = Some(message)` セット。`Message::DismissStrategyLoadError` で `None` に戻す。`view()` に dismissable バナー追加
+
+### N4.5 examples/strategies/ ✅ 完了 2026-04-29
+- [x] ✅ `examples/strategies/buy_and_hold.py` 71 行（最小サンプル、`init_kwargs` 対応）
+- [x] ✅ `examples/strategies/sma_cross.py` 119 行（短期/長期 SMA クロス、`short`/`long`/`lot_size` init_kwargs）
+- [x] ✅ `examples/strategies/README.md` 71 行（使い方・規約・自己責任注記）
+- [x] ✅ numpy/pandas 非依存。`load_strategy_from_file()` で両ファイルのロード検証済み
+
+### N4.6 互換 lint user strategy 適用 ✅ N4.1 に統合完了 2026-04-29
+- [x] ✅ `strategy_loader.py` の `_check_compat()` が N1.8 と同じ `_INCOMPATIBLE_HANDLERS` セットで AST 検査。ロード後に `log.warning` 送出、block しない（自己責任方針）
+
+**Exit 条件（暫定達成）**:
+- `examples/strategies/sma_cross.py` を `strategy_file` 経由でロード可能 ✅
+- 構文エラー → `EngineError{code:"strategy_load_failed"}` → UI バナー ✅
+- `__init__(short=5, long=20)` を `strategy_init_kwargs` JSON で渡せる ✅
+- 既存テスト（N0〜N3）すべて GREEN のまま ✅（Python 1310 / Rust workspace 全 GREEN）
 
 ---
 

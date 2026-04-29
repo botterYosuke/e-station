@@ -24,6 +24,55 @@ use iced::{
 const ZOOM_SENSITIVITY: f32 = 30.0;
 const TEXT_SIZE: f32 = 12.0;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use data::chart::{Basis, ViewConfig};
+    use exchange::adapter::Exchange;
+    use exchange::unit::{Price, PriceStep};
+    use exchange::{Ticker, TickerInfo, Timeframe};
+
+    fn test_view_state(cell_height: f32) -> ViewState {
+        ViewState::new(
+            Basis::Time(Timeframe::M5),
+            PriceStep { units: 100_000_000 },
+            0,
+            TickerInfo::new(
+                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
+                1.0,
+                0.001,
+                None,
+            ),
+            ViewConfig::default(),
+            10.0,
+            cell_height,
+        )
+    }
+
+    /// Normal state: price_to_y must produce a finite value.
+    #[test]
+    fn price_to_y_returns_finite_for_valid_state() {
+        let vs = test_view_state(50.0);
+        let price = Price::from_f32_lossy(30000.0);
+        let y = vs.price_to_y(price);
+        assert!(
+            y.is_finite(),
+            "price_to_y must be finite for valid cell_height"
+        );
+    }
+
+    /// Regression: if cell_height is somehow NaN (corrupted state), price_to_y
+    /// must return 0.0 and not propagate NaN into lyon_path, which would panic.
+    #[test]
+    fn price_to_y_guards_nan_cell_height() {
+        let vs = test_view_state(f32::NAN);
+        let price = Price::from_f32_lossy(30000.0);
+        let y = vs.price_to_y(price);
+        assert_eq!(y, 0.0, "price_to_y must return 0.0 when cell_height is NaN");
+        assert!(y.is_finite(), "NaN must not escape price_to_y");
+    }
+}
+
 #[derive(Default, Debug, Clone, Copy)]
 pub enum Interaction {
     #[default]
@@ -786,7 +835,16 @@ impl ViewState {
     fn price_to_y(&self, price: Price) -> f32 {
         let delta_units = self.base_price_y.units - price.units;
         let ticks = (delta_units as f32) / (self.effective_tick_units() as f32);
-        ticks * self.cell_height
+        let y = ticks * self.cell_height;
+        if !y.is_finite() {
+            log::warn!(
+                "price_to_y produced non-finite value: price={price:?} cell_height={} base_price_y={:?}",
+                self.cell_height,
+                self.base_price_y
+            );
+            return 0.0;
+        }
+        y
     }
 
     fn y_to_price(&self, y: f32) -> Price {
