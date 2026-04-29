@@ -28,6 +28,7 @@ use crate::{
 const BROADCAST_CAPACITY: usize = 512;
 const COMMAND_BUFFER: usize = 256;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_TCP_TIMEOUT: Duration = Duration::from_secs(2);
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct EngineConnection {
@@ -56,6 +57,51 @@ impl EngineConnection {
         // that don't know about modes. Application code (`src/main.rs`) must
         // call `connect_with_mode` once it has parsed `--mode`.
         Self::connect_with_mode(url, token, crate::dto::AppMode::Live).await
+    }
+
+    /// External-probe connect with a 2-second TCP timeout.
+    ///
+    /// Used by `ProcessManager::start_or_attach` to check whether a
+    /// manually-started engine is already listening before spawning a new one.
+    /// The 2-second TCP timeout lets the probe fail fast when no engine is
+    /// running, without blocking the startup sequence for up to `HANDSHAKE_TIMEOUT`.
+    ///
+    /// On success the caller should call `ProcessManager::apply_after_handshake`.
+    /// On any error the caller should fall through to a fresh Python spawn.
+    pub async fn probe(
+        url: &str,
+        token: &str,
+        mode: crate::dto::AppMode,
+    ) -> Result<Self, EngineClientError> {
+        // PROBE_TCP_TIMEOUT caps the TCP connect; HANDSHAKE_TIMEOUT caps the WS
+        // upgrade that follows. A half-open HTTP server on 19876 that accepts TCP
+        // but never completes the upgrade would otherwise block indefinitely.
+        let ws = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            connect_ws_with_tcp_timeout(url, Some(PROBE_TCP_TIMEOUT)),
+        )
+        .await
+        .map_err(|_| EngineClientError::HandshakeTimeout)??;
+
+        let (events_tx, _) = broadcast::channel::<EngineEvent>(BROADCAST_CAPACITY);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_BUFFER);
+
+        let (ws, capabilities) = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            perform_handshake(ws, token, mode, events_tx.clone()),
+        )
+        .await
+        .map_err(|_| EngineClientError::HandshakeTimeout)??;
+
+        let closed = Arc::new(tokio::sync::Notify::new());
+        spawn_io_tasks(ws, cmd_rx, events_tx.clone(), Arc::clone(&closed));
+
+        Ok(Self {
+            sender: cmd_tx,
+            events: events_tx,
+            closed,
+            capabilities: Arc::new(capabilities),
+        })
     }
 
     /// N1.13 / R1b H-E: connect and announce the runtime mode
@@ -155,6 +201,22 @@ impl EngineConnection {
 async fn connect_plain_ws(
     url: &str,
 ) -> Result<FragmentCollector<TokioIo<Upgraded>>, EngineClientError> {
+    connect_ws_with_tcp_timeout(url, None).await
+}
+
+/// Connect to a `ws://` URL, optionally applying a per-TCP-connect timeout.
+///
+/// `tcp_timeout = None`      — no individual TCP timeout (the caller's
+///                             `HANDSHAKE_TIMEOUT` wrapper applies to the whole
+///                             TCP+WS-upgrade sequence).
+/// `tcp_timeout = Some(d)`   — `TcpStream::connect` is wrapped in `timeout(d)`;
+///                             used by `EngineConnection::probe` to fail fast (2 s)
+///                             when no engine is running, without waiting the full
+///                             `HANDSHAKE_TIMEOUT` before falling back to spawn.
+async fn connect_ws_with_tcp_timeout(
+    url: &str,
+    tcp_timeout: Option<Duration>,
+) -> Result<FragmentCollector<TokioIo<Upgraded>>, EngineClientError> {
     let parsed = url::Url::parse(url)
         .map_err(|e| EngineClientError::WebSocket(format!("invalid URL: {e}")))?;
 
@@ -168,13 +230,25 @@ async fn connect_plain_ws(
         .ok_or_else(|| EngineClientError::WebSocket("missing port".to_string()))?;
 
     let addr = format!("{host}:{port}");
-    let tcp = tokio::net::TcpStream::connect(&addr).await.map_err(|e| {
+
+    let map_io = |e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
             EngineClientError::ConnectionRefused
         } else {
             EngineClientError::Io(e)
         }
-    })?;
+    };
+
+    let tcp = if let Some(timeout) = tcp_timeout {
+        tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr))
+            .await
+            .map_err(|_| EngineClientError::HandshakeTimeout)?
+            .map_err(map_io)?
+    } else {
+        tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(map_io)?
+    };
 
     let path = {
         let mut p = parsed.path().to_string();

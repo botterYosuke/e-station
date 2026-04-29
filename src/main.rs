@@ -410,7 +410,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        log::info!("Spawning Python data engine: {cmd:?} on 127.0.0.1:{port}");
+        log::info!("Python data engine: cmd={cmd:?}, managed port=127.0.0.1:{port}");
 
         let manager = Arc::new(engine_client::ProcessManager::with_command(cmd));
         // N1.13: propagate the CLI mode so every handshake (initial + recovery)
@@ -439,8 +439,23 @@ fn main() {
             // expose the live `EngineConnection` to its caller — we need the
             // connection to publish into `ENGINE_CONNECTION`.
             let mut backoff_ms: u64 = 500;
+            let mut initial = true;
             loop {
-                match manager_clone.start(port).await {
+                // Pick a fresh free port for each spawn attempt. If the first
+                // lifecycle attached to an external engine, the startup port may
+                // have been claimed by another process in the meantime.
+                let loop_port = pick_free_port().unwrap_or(port);
+                // Only the first iteration probes 19876 for an existing engine.
+                // Recovery iterations always spawn fresh (see process.rs:516) so
+                // that a managed session cannot silently switch to a different
+                // external engine that appeared on 19876 during downtime.
+                let connect = if initial {
+                    initial = false;
+                    manager_clone.start_or_attach(loop_port).await
+                } else {
+                    manager_clone.start(loop_port).await
+                };
+                match connect {
                     Ok(conn) => {
                         backoff_ms = 500;
                         let conn = Arc::new(conn);
@@ -496,7 +511,7 @@ fn main() {
                         if let Some(tx) = ENGINE_RESTARTING.get() {
                             tx.send(false).ok();
                         }
-                        log::info!("Python data engine ready on {url}");
+                        log::info!("Python data engine ready");
 
                         // The credentials-refresh listener is owned by
                         // ProcessManager::start() — see the continuation

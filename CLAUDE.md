@@ -123,8 +123,8 @@ cargo build --release
 # Python エンジンを手動起動（ポート 19876）
 uv run python -m engine --port 19876 --token dev-token
 
-# エンジンに接続してアプリ起動
-cargo run -- --mode live --data-engine-url ws://127.0.0.1:19876/
+# エンジンに接続してアプリ起動（トークンは環境変数で指定）
+FLOWSURFACE_ENGINE_TOKEN=dev-token cargo run -- --mode live --data-engine-url ws://127.0.0.1:19876/
 
 # Rust フォーマット
 cargo fmt
@@ -153,6 +153,44 @@ VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vsc
 
 新しい起動経路（CI スクリプト・ドキュメント・別の launch.json 等）を追加するときは
 必ず `--mode` を渡すこと。忘れると上記メッセージで即終了する。
+
+### 外部エンジンに接続する際のトークン認証
+
+`--data-engine-url` を指定してアプリを起動する際は、
+**必ず環境変数 `FLOWSURFACE_ENGINE_TOKEN` をエンジンのトークンと一致させる必要がある**。
+
+アプリ側（`src/main.rs:234`）は以下のように環境変数から取得している：
+```rust
+let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
+```
+
+エンジン起動時のトークン：
+```bash
+uv run python -m engine --port 19876 --token dev-token
+```
+
+アプリ起動時に一致するトークンを指定：
+```bash
+FLOWSURFACE_ENGINE_TOKEN=dev-token cargo run -- --mode live --data-engine-url ws://127.0.0.1:19876/
+```
+
+**トークンが一致しない場合、`error: data engine connection failed to initialise` で起動に失敗する。**
+
+#### `--data-engine-url` 未指定時の自動プローブ（start_or_attach）
+
+`--data-engine-url` を指定しなくても、`FLOWSURFACE_ENGINE_TOKEN` を設定して
+`ws://127.0.0.1:19876/` で待ち受け中のエンジンがあれば自動接続する（TCP 2 秒タイムアウト）。
+
+- env 未設定の場合は外部試行を skip して直接 spawn する（無駄な遅延と warn ログを避けるため）
+- env 設定ありで接続できない場合（タイムアウト・token 不一致・SCHEMA_MAJOR 不一致）のみ Rust が新規 spawn する
+- 手動起動エンジンを再利用したい場合は `FLOWSURFACE_ENGINE_TOKEN` を Python の `--token` と一致させること
+
+```bash
+# 手動起動エンジンを再利用する場合
+uv run python -m engine --port 19876 --token dev-token
+FLOWSURFACE_ENGINE_TOKEN=dev-token cargo run -- --mode live
+# → 19876 へ自動プローブ → 成功すれば attach（spawn なし）
+```
 
 ---
 
