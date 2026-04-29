@@ -2381,6 +2381,18 @@ class DataEngineServer:
             await _drain()
             return
 
+        if not config_obj.strategy_file:
+            _emit(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "strategy_file_required",
+                    "message": "strategy_file is required",
+                }
+            )
+            await _drain()
+            return
+
         runner = NautilusRunner()
         # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
         self._engine_tasks[strategy_id] = runner

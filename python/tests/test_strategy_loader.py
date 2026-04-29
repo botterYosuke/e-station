@@ -228,16 +228,35 @@ def test_compatible_handler_no_warning(
 def test_imported_strategy_subclass_is_filtered_out(tmp_path: Path) -> None:
     """A Strategy subclass imported from another module must not be counted."""
     f = tmp_path / "reimport.py"
-    # Imports buy_and_hold's BuyAndHoldStrategy (a Strategy subclass) but
-    # defines its own. Loader must pick only the locally-defined one.
-    f.write_text(
+
+    # Write a helper module that defines an importable Strategy subclass.
+    helper = tmp_path / "helper_strategy.py"
+    helper.write_text(
         textwrap.dedent(
             """
             from nautilus_trader.config import StrategyConfig
             from nautilus_trader.trading.strategy import Strategy
-            from engine.nautilus.strategies.buy_and_hold import (  # noqa: F401
-                BuyAndHoldStrategy,
-            )
+
+
+            class HelperStrategy(Strategy):
+                def __init__(self) -> None:
+                    super().__init__(config=StrategyConfig(strategy_id="helper-001"))
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # The file under test imports HelperStrategy but defines its own LocalOnly.
+    # Loader must pick only the locally-defined one.
+    f.write_text(
+        textwrap.dedent(
+            f"""
+            import sys
+            sys.path.insert(0, {str(tmp_path)!r})
+            from nautilus_trader.config import StrategyConfig
+            from nautilus_trader.trading.strategy import Strategy
+            from helper_strategy import HelperStrategy  # noqa: F401
 
 
             class LocalOnly(Strategy):

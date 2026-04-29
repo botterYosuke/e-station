@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
+REPO_ROOT = Path(__file__).parent.parent.parent
+_STRATEGY_FILE = str(REPO_ROOT / "docs" / "example" / "buy_and_hold.py")
 
 
 @pytest.fixture
@@ -29,6 +31,7 @@ def env(fixtures_dir: Path):
         end_date="2024-01-05",
         initial_cash=1_000_000,
         base_dir=fixtures_dir,
+        strategy_file=_STRATEGY_FILE,
     )
 
 
@@ -212,6 +215,7 @@ class TestBuyAndHoldStrategySmoke:
             end_date="2024-01-05",
             initial_cash=1_000_000,
             base_dir=fixtures_dir,
+            strategy_file=_STRATEGY_FILE,
         )
         env1 = FlowsurfaceEnv(**kwargs)
         env2 = FlowsurfaceEnv(**kwargs)

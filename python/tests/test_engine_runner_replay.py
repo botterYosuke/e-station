@@ -18,6 +18,7 @@ from engine.nautilus.engine_runner import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+_STRATEGY_FILE = str(Path(__file__).parent.parent.parent / "docs" / "example" / "buy_and_hold.py")
 
 
 def _collect_events() -> tuple[list[dict], callable]:
@@ -45,6 +46,7 @@ class TestStartBacktestReplayTrades:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert isinstance(result, ReplayBacktestResult)
         assert result.strategy_id == "buy-and-hold"
@@ -61,6 +63,7 @@ class TestStartBacktestReplayTrades:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.trades_loaded == 4
         assert result.bars_loaded == 0
@@ -79,6 +82,7 @@ class TestStartBacktestReplayTrades:
             initial_cash=1_000_000,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         kinds = [e["event"] for e in events]
         assert kinds == ["EngineStarted", "ReplayDataLoaded", "EngineStopped"]
@@ -101,6 +105,7 @@ class TestStartBacktestReplayTrades:
             initial_cash=1_000_000,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         loaded = next(e for e in events if e["event"] == "ReplayDataLoaded")
         assert loaded["trades_loaded"] == 4
@@ -121,6 +126,7 @@ class TestStartBacktestReplayBars:
             granularity="Minute",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.bars_loaded == 3
         assert result.trades_loaded == 0
@@ -136,6 +142,7 @@ class TestStartBacktestReplayBars:
             granularity="Daily",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.bars_loaded == 2
         assert result.trades_loaded == 0
@@ -179,6 +186,7 @@ class TestStartBacktestReplayEdgeCases:
             initial_cash=1_000_000,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.trades_loaded == 0
         assert result.final_equity == Decimal(1_000_000)
@@ -199,6 +207,7 @@ class TestDeterminism:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         r1 = runner1.start_backtest_replay(**kwargs)
         r2 = runner2.start_backtest_replay(**kwargs)
@@ -221,6 +230,7 @@ class TestHHIpcVenueTag:
             initial_cash=1_000_000,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         started = next(e for e in events if e["event"] == "EngineStarted")
         # H-H: 内部 venue (TSE) ではなく外向け IPC venue tag (replay) を使う
@@ -289,6 +299,7 @@ class TestH1NoDoubleEngineStoppedEmit:
             initial_cash=1_000_000,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         stopped = [e for e in events if e["event"] == "EngineStopped"]
         assert len(stopped) == 1, (
@@ -334,6 +345,7 @@ class TestH1NoDoubleEngineStoppedEmit:
                     initial_cash=1_000_000,
                     base_dir=FIXTURES,
                     on_event=on_event,
+                    strategy_file=_STRATEGY_FILE,
                 )
 
         # H-1: stop_ts_ms != 0 なので except 補完は走らないはず

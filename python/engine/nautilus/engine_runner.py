@@ -57,7 +57,6 @@ from engine.nautilus.jquants_loader import (
     load_minute_bars,
     load_trades,
 )
-from engine.nautilus.strategies.buy_and_hold import BuyAndHoldStrategy
 
 log = logging.getLogger(__name__)
 
@@ -142,12 +141,16 @@ class NautilusRunner:
         klines: list[KlineRow],
         initial_cash: int,
         currency: str = "JPY",
+        strategy_file: str | None = None,
+        strategy_init_kwargs: dict | None = None,
     ) -> BacktestResult:
         """バックテストを実行し結果を返す。
 
         strategy_id: IPC 経由で BacktestResult に返す外部 ID ("buy-and-hold" 等)。
             nautilus 内部の StrategyConfig.strategy_id ("buy-and-hold-001") とは別物。
             N1 の EngineStopped IPC イベントには本パラメータの値を使う。
+
+        strategy_file: ユーザー定義 Strategy ファイルのパス（必須）。
 
         spec.md §3.2: assert config.cache.database is None を内部で検証する。
         """
@@ -185,7 +188,10 @@ class NautilusRunner:
             if bars:
                 engine.add_data(bars)
 
-            strategy_instance = _make_strategy(strategy_id, instrument.id)
+            strategy_instance = _make_replay_strategy(
+                strategy_file=strategy_file,
+                strategy_init_kwargs=strategy_init_kwargs,
+            )
             engine.add_strategy(strategy_instance)
 
             log.info(
@@ -310,10 +316,7 @@ class NautilusRunner:
 
             bars_loaded = 0
             trades_loaded = 0
-            subscribe_kind = "bar"
-            bar_type_str: str | None = None
             if granularity == "Trade":
-                subscribe_kind = "trade"
                 ticks = list(
                     load_trades(
                         instrument_id,
@@ -326,7 +329,6 @@ class NautilusRunner:
                 if ticks:
                     engine.add_data(ticks)
             elif granularity == "Minute":
-                bar_type_str = f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
                 bars = list(
                     load_minute_bars(
                         instrument_id,
@@ -339,7 +341,6 @@ class NautilusRunner:
                 if bars:
                     engine.add_data(bars)
             elif granularity == "Daily":
-                bar_type_str = f"{instrument_id}-1-DAY-LAST-EXTERNAL"
                 bars = list(
                     load_daily_bars(
                         instrument_id,
@@ -364,7 +365,6 @@ class NautilusRunner:
             })
 
             strategy_instance = _make_replay_strategy(
-                strategy_id, nautilus_iid, subscribe_kind, bar_type_str,
                 strategy_file=strategy_file,
                 strategy_init_kwargs=strategy_init_kwargs,
             )
@@ -527,12 +527,9 @@ class NautilusRunner:
             # データロード
             bars_loaded = 0
             trades_loaded = 0
-            subscribe_kind = "bar"
-            bar_type_str: str | None = None
             _base = base_dir if base_dir is not None else Path("S:/j-quants")
 
             if granularity == "Trade":
-                subscribe_kind = "trade"
                 items = list(
                     load_trades(
                         instrument_id,
@@ -543,7 +540,6 @@ class NautilusRunner:
                 )
                 trades_loaded = len(items)
             elif granularity == "Minute":
-                bar_type_str = f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
                 items = list(
                     load_minute_bars(
                         instrument_id,
@@ -554,7 +550,6 @@ class NautilusRunner:
                 )
                 bars_loaded = len(items)
             elif granularity == "Daily":
-                bar_type_str = f"{instrument_id}-1-DAY-LAST-EXTERNAL"
                 items = list(
                     load_daily_bars(
                         instrument_id,
@@ -577,7 +572,6 @@ class NautilusRunner:
             })
 
             strategy_instance = _make_replay_strategy(
-                strategy_id, nautilus_iid, subscribe_kind, bar_type_str,
                 strategy_file=strategy_file,
                 strategy_init_kwargs=strategy_init_kwargs,
             )
@@ -766,45 +760,26 @@ def _load_user_strategy(
     """
     from engine.nautilus.strategy_loader import load_strategy_from_file
 
-    return load_strategy_from_file(strategy_file, strategy_init_kwargs or {})
+    return load_strategy_from_file(Path(strategy_file), strategy_init_kwargs or {})
 
 
 def _make_replay_strategy(
-    strategy_id: str,
-    instrument_id,
-    subscribe_kind: str,
-    bar_type_str: str | None,
     strategy_file: str | None = None,
     strategy_init_kwargs: dict | None = None,
 ):
     """N1.4 replay 用 Strategy ファクトリ。
 
-    strategy_file が指定された場合はユーザー定義 Strategy を優先してロードする。
-    granularity に応じた subscribe_kind / bar_type_str を BuyAndHold に渡す。
+    strategy_file は必須。None または空文字の場合は ValueError を raise する。
+    ユーザーは POST /api/replay/start で strategy_file を明示指定すること。
     """
-    if strategy_file is not None:
-        return _load_user_strategy(strategy_file, strategy_init_kwargs)
-    if strategy_id == "buy-and-hold":
-        return BuyAndHoldStrategy(
-            instrument_id=instrument_id,
-            subscribe_kind=subscribe_kind,
-            bar_type_str=bar_type_str,
+    if not strategy_file:
+        raise ValueError(
+            "strategy_file is required. "
+            "Specify a .py file path via POST /api/replay/start."
         )
-    raise ValueError(
-        f"Unknown strategy_id: {strategy_id!r}. N1.4 supports 'buy-and-hold' only."
-    )
+    return _load_user_strategy(strategy_file, strategy_init_kwargs)
 
 
-def _make_strategy(strategy_id: str, instrument_id):
-    """nautilus Strategy インスタンスを生成して返す。
-
-    strategy_id は外部 IPC 用 ID ("buy-and-hold" 等)。
-    nautilus 内部の StrategyConfig.strategy_id ("buy-and-hold-001") とは別物。
-    N1 の EngineStopped IPC イベントには呼び出し元から渡された strategy_id の値を使う。
-    """
-    if strategy_id == "buy-and-hold":
-        return BuyAndHoldStrategy(instrument_id=instrument_id)
-    raise ValueError(f"Unknown strategy_id: {strategy_id!r}. N0 supports 'buy-and-hold' only.")
 
 
 def _collect_portfolio_fills(

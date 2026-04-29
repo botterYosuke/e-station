@@ -4,11 +4,13 @@
 # Usage (VSCode task):
 #   bash scripts/replay_dev_load.sh <strategy_file>
 #
-# Env overrides:
-#   REPLAY_INSTRUMENT_ID  (default: 1301.TSE)
-#   REPLAY_START_DATE     (default: 2024-01-04)
-#   REPLAY_END_DATE       (default: 2024-01-05)
-#   REPLAY_GRANULARITY    (default: Trade)
+# Required env vars:
+#   REPLAY_INSTRUMENT_ID  — e.g. 1301.TSE
+#   REPLAY_START_DATE     — e.g. 2025-01-06  (YYYY-MM-DD)
+#   REPLAY_END_DATE       — e.g. 2025-03-31  (YYYY-MM-DD)
+#
+# Optional env vars:
+#   REPLAY_GRANULARITY    (default: Daily)
 #   REPLAY_INITIAL_CASH   (default: 1000000)
 #   REPLAY_STRATEGY_ID    (default: user-strategy)
 #   PORT                  (default: 9876)
@@ -17,12 +19,19 @@ set -uo pipefail
 
 STRATEGY_FILE="${1:-}"
 PORT="${PORT:-9876}"
-INSTRUMENT_ID="${REPLAY_INSTRUMENT_ID:-1301.TSE}"
-START_DATE="${REPLAY_START_DATE:-2024-01-04}"
-END_DATE="${REPLAY_END_DATE:-2024-01-05}"
-GRANULARITY="${REPLAY_GRANULARITY:-Trade}"
+INSTRUMENT_ID="${REPLAY_INSTRUMENT_ID:?REPLAY_INSTRUMENT_ID is required (e.g. export REPLAY_INSTRUMENT_ID=1301.TSE)}"
+START_DATE="${REPLAY_START_DATE:?REPLAY_START_DATE is required (e.g. export REPLAY_START_DATE=2025-01-06)}"
+END_DATE="${REPLAY_END_DATE:?REPLAY_END_DATE is required (e.g. export REPLAY_END_DATE=2025-03-31)}"
+GRANULARITY="${REPLAY_GRANULARITY:-Daily}"
 INITIAL_CASH="${REPLAY_INITIAL_CASH:-1000000}"
 STRATEGY_ID="${REPLAY_STRATEGY_ID:-user-strategy}"
+
+if [[ -z "$STRATEGY_FILE" ]]; then
+    echo "[replay-load] ERROR: strategy_file is required"
+    echo "  Usage: bash scripts/replay_dev_load.sh <strategy.py>"
+    echo "  Example: bash scripts/replay_dev_load.sh docs/example/buy_and_hold.py"
+    exit 1
+fi
 
 log() { printf '[replay-load] %s\n' "$*"; }
 
@@ -44,16 +53,13 @@ log "server ready"
 # python でパスを JSON エンコードして Windows パス(バックスラッシュ)を安全に扱う
 load_body=$(python -c "
 import json, sys
-d = {
+print(json.dumps({
     'instrument_id': sys.argv[1],
     'start_date':    sys.argv[2],
     'end_date':      sys.argv[3],
     'granularity':   sys.argv[4],
-}
-if sys.argv[5]:
-    d['strategy_file'] = sys.argv[5]
-print(json.dumps(d))
-" "$INSTRUMENT_ID" "$START_DATE" "$END_DATE" "$GRANULARITY" "$STRATEGY_FILE")
+}))
+" "$INSTRUMENT_ID" "$START_DATE" "$END_DATE" "$GRANULARITY")
 
 log "POST /api/replay/load  strategy_file=${STRATEGY_FILE:-<none>}"
 load_resp=$(curl -sS -w '\n%{http_code}' -X POST \
@@ -71,15 +77,18 @@ log "load OK (HTTP $load_code)"
 # ── Step 3: POST /api/replay/start ───────────────────────────────────────────
 start_body=$(python -c "
 import json, sys
-print(json.dumps({
+d = {
     'instrument_id': sys.argv[1],
     'start_date':    sys.argv[2],
     'end_date':      sys.argv[3],
     'granularity':   sys.argv[4],
     'strategy_id':   sys.argv[5],
     'initial_cash':  sys.argv[6],
-}))
-" "$INSTRUMENT_ID" "$START_DATE" "$END_DATE" "$GRANULARITY" "$STRATEGY_ID" "$INITIAL_CASH")
+}
+if sys.argv[7]:
+    d['strategy_file'] = sys.argv[7]
+print(json.dumps(d))
+" "$INSTRUMENT_ID" "$START_DATE" "$END_DATE" "$GRANULARITY" "$STRATEGY_ID" "$INITIAL_CASH" "$STRATEGY_FILE")
 
 log "POST /api/replay/start"
 start_resp=$(curl -sS -w '\n%{http_code}' -X POST \

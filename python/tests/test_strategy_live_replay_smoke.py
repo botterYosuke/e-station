@@ -20,6 +20,8 @@ from engine.nautilus.data_loader import KlineRow
 from engine.nautilus.engine_runner import NautilusRunner, BacktestResult, ReplayBacktestResult
 
 FIXTURES = Path(__file__).parent / "fixtures"
+REPO_ROOT = Path(__file__).parent.parent.parent
+STRATEGY_FILE = str(REPO_ROOT / "docs" / "example" / "buy_and_hold.py")
 
 # ---------------------------------------------------------------------------
 # ヘルパー
@@ -51,42 +53,44 @@ def _year_klines() -> list[KlineRow]:
 # ---------------------------------------------------------------------------
 
 def test_live_mock_completes_without_exception():
-    """BuyAndHold が live mock (Bar 経路) で例外なく完走すること。"""
+    """ユーザー戦略が live mock (Bar 経路) で例外なく完走すること。"""
     runner = NautilusRunner()
     result = runner.start_backtest(
-        strategy_id="buy-and-hold",
+        strategy_id="user-strategy",
         ticker="1301",
         venue="TSE",
         klines=_year_klines(),
         initial_cash=1_000_000,
+        strategy_file=STRATEGY_FILE,
     )
     assert isinstance(result, BacktestResult)
-    assert result.strategy_id == "buy-and-hold"
+    assert result.strategy_id == "user-strategy"
     assert result.final_equity > 0
 
 
 def test_replay_jquants_trade_completes_without_exception():
-    """BuyAndHold が replay J-Quants Trade 経路で例外なく完走すること。
+    """ユーザー戦略が replay J-Quants Trade 経路で例外なく完走すること。
 
     fixtures/equities_trades_202401.csv.gz を使う。
     """
     runner = NautilusRunner()
     result = runner.start_backtest_replay(
-        strategy_id="buy-and-hold",
+        strategy_id="user-strategy",
         instrument_id="1301.TSE",
         start_date="2024-01-01",
         end_date="2024-01-31",
         granularity="Trade",
         initial_cash=1_000_000,
         base_dir=FIXTURES,
+        strategy_file=STRATEGY_FILE,
     )
     assert isinstance(result, ReplayBacktestResult)
-    assert result.strategy_id == "buy-and-hold"
+    assert result.strategy_id == "user-strategy"
     assert result.final_equity > 0
 
 
 def test_live_mock_and_replay_both_complete():
-    """BuyAndHold が live mock / replay 両方で例外なく完走すること。
+    """ユーザー戦略が live mock / replay 両方で例外なく完走すること。
 
     spec.md §3.5.4: fill_timestamps の非空チェックでポジション生成を確認する。
     (fill が 0 件でも完走は完走とみなす — データ量次第)
@@ -94,23 +98,25 @@ def test_live_mock_and_replay_both_complete():
     # live mock
     live_runner = NautilusRunner()
     live_result = live_runner.start_backtest(
-        strategy_id="buy-and-hold",
+        strategy_id="user-strategy",
         ticker="1301",
         venue="TSE",
         klines=_year_klines(),
         initial_cash=1_000_000,
+        strategy_file=STRATEGY_FILE,
     )
 
     # replay J-Quants
     replay_runner = NautilusRunner()
     replay_result = replay_runner.start_backtest_replay(
-        strategy_id="buy-and-hold",
+        strategy_id="user-strategy",
         instrument_id="1301.TSE",
         start_date="2024-01-01",
         end_date="2024-01-31",
         granularity="Trade",
         initial_cash=1_000_000,
         base_dir=FIXTURES,
+        strategy_file=STRATEGY_FILE,
     )
 
     # 両方完走チェック
@@ -123,17 +129,18 @@ def test_live_mock_and_replay_both_complete():
 
 
 def test_live_mock_fill_timestamps_non_empty():
-    """live mock で BuyAndHold が約定を生成すること（fill_timestamps が非空）。
+    """live mock でユーザー戦略が約定を生成すること（fill_timestamps が非空）。
 
     250 本の Bar データがあれば最初のバーで買いが入るため fill が生じる。
     """
     runner = NautilusRunner()
     result = runner.start_backtest(
-        strategy_id="buy-and-hold",
+        strategy_id="user-strategy",
         ticker="1301",
         venue="TSE",
         klines=_year_klines(),
         initial_cash=1_000_000,
+        strategy_file=STRATEGY_FILE,
     )
     # fill_timestamps が非空であること（少なくとも 1 件の約定がある）
     assert len(result.fill_timestamps) > 0, (
@@ -142,16 +149,17 @@ def test_live_mock_fill_timestamps_non_empty():
 
 
 def test_replay_jquants_daily_bar_completes():
-    """BuyAndHold が replay J-Quants Daily Bar 経路でも完走すること。"""
+    """ユーザー戦略が replay J-Quants Daily Bar 経路でも完走すること。"""
     runner = NautilusRunner()
     result = runner.start_backtest_replay(
-        strategy_id="buy-and-hold",
+        strategy_id="user-strategy",
         instrument_id="1301.TSE",
         start_date="2024-01-01",
         end_date="2024-01-31",
         granularity="Daily",
         initial_cash=1_000_000,
         base_dir=FIXTURES,
+        strategy_file=STRATEGY_FILE,
     )
     assert isinstance(result, ReplayBacktestResult)
     assert result.final_equity > 0
@@ -162,7 +170,7 @@ def test_replay_ipc_events_emitted():
     events: list[dict] = []
     runner = NautilusRunner()
     runner.start_backtest_replay(
-        strategy_id="buy-and-hold",
+        strategy_id="user-strategy",
         instrument_id="1301.TSE",
         start_date="2024-01-01",
         end_date="2024-01-31",
@@ -170,6 +178,7 @@ def test_replay_ipc_events_emitted():
         initial_cash=1_000_000,
         base_dir=FIXTURES,
         on_event=events.append,
+        strategy_file=STRATEGY_FILE,
     )
 
     event_names = [e["event"] for e in events]

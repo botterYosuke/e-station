@@ -732,6 +732,17 @@ async fn handle_replay_start(stream: &mut TcpStream, body: &str, state: &Arc<Rep
         write_error(stream, 400, "Bad Request", "initial_cash is required").await;
         return;
     }
+    match &parsed.strategy_file {
+        None => {
+            write_error(stream, 400, "Bad Request", "strategy_file is required").await;
+            return;
+        }
+        Some(s) if s.is_empty() => {
+            write_error(stream, 400, "Bad Request", "strategy_file is required").await;
+            return;
+        }
+        Some(_) => {}
+    }
 
     // ④ Get engine connection
     let conn_opt = state.engine_rx.borrow().clone();
@@ -835,7 +846,10 @@ async fn handle_replay_start(stream: &mut TcpStream, body: &str, state: &Arc<Rep
             write_response(stream, 202, "Accepted", &body).await;
         }
         Ok(ReplayStartOutcome::EngineError { code, message }) => {
-            let status = if code == "mode_mismatch" { 400 } else { 503 };
+            let status = match code.as_str() {
+                "mode_mismatch" | "strategy_file_required" | "invalid_config" => 400,
+                _ => 503,
+            };
             let status_text = if status == 400 {
                 "Bad Request"
             } else {
@@ -2171,6 +2185,7 @@ mod tests {
             "granularity": "Daily",
             "strategy_id": "buy-and-hold",
             "initial_cash": "1000000",
+            "strategy_file": "docs/example/buy_and_hold.py",
         })
         .to_string()
     }
@@ -2510,5 +2525,62 @@ mod tests {
         let (status, _) = http_request(port, "POST", "/api/replay/start", &body).await;
         assert_eq!(status, 400, "array strategy_init_kwargs should be rejected");
         drop(engine_tx);
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_missing_strategy_file() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let body = serde_json::json!({
+            "instrument_id": "7203.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "granularity": "Daily",
+            "strategy_id": "buy-and-hold",
+            "initial_cash": "1000000",
+        })
+        .to_string();
+        let (status, body_str) = http_request(port, "POST", "/api/replay/start", &body).await;
+        assert_eq!(status, 400, "missing strategy_file must return 400; body={body_str}");
+        let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+        assert!(
+            json["error"].as_str().unwrap_or("").contains("strategy_file"),
+            "error message must mention strategy_file; got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_empty_strategy_file() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let body = serde_json::json!({
+            "instrument_id": "7203.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "granularity": "Daily",
+            "strategy_id": "buy-and-hold",
+            "initial_cash": "1000000",
+            "strategy_file": "",
+        })
+        .to_string();
+        let (status, body_str) = http_request(port, "POST", "/api/replay/start", &body).await;
+        assert_eq!(status, 400, "empty strategy_file must return 400; body={body_str}");
+        let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+        assert!(
+            json["error"].as_str().unwrap_or("").contains("strategy_file"),
+            "error message must mention strategy_file; got: {json}"
+        );
     }
 }

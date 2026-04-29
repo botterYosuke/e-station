@@ -126,23 +126,21 @@ def test_strategy_with_multiple_forbidden_methods_detects_all():
     assert len(violations) == 2
 
 
-def test_buy_and_hold_replay_compat_lint():
-    """BuyAndHold は on_order_book_* / on_quote_tick を持たないこと。
+def test_example_buy_and_hold_replay_compat_lint():
+    """docs/example/buy_and_hold.py は on_order_book_* / on_quote_tick を持たないこと。
 
-    組み込み戦略が live/replay 互換規約（spec.md §3.5.2）を満たすことを保証する。
+    サンプル戦略が live/replay 互換規約（spec.md §3.5.2）を満たすことを保証する。
     """
     source_path = (
         Path(__file__).parents[2]
-        / "python"
-        / "engine"
-        / "nautilus"
-        / "strategies"
+        / "docs"
+        / "example"
         / "buy_and_hold.py"
     )
     source = source_path.read_text(encoding="utf-8")
     violations = check_strategy_replay_compat(source)
     assert violations == [], (
-        f"BuyAndHold strategy must not define forbidden methods: {violations}"
+        f"Example BuyAndHold strategy must not define forbidden methods: {violations}"
     )
 
 
