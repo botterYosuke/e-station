@@ -203,6 +203,10 @@ struct ReplayLoadBody {
     /// `"Minute"` / `"Daily"` 以外は serde が `Err` を返し、呼出側で 400 に
     /// 変換される。手動の `parse_granularity()` ヘルパーは廃止。
     granularity: ReplayGranularity,
+    #[serde(default)]
+    strategy_file: Option<String>,
+    #[serde(default)]
+    strategy_init_kwargs: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -409,8 +413,8 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
         start_date: parsed.start_date.clone(),
         end_date: parsed.end_date.clone(),
         granularity,
-        strategy_file: None,
-        strategy_init_kwargs: None,
+        strategy_file: parsed.strategy_file.clone(),
+        strategy_init_kwargs: parsed.strategy_init_kwargs.clone(),
     };
     if let Err(e) = conn.send(cmd).await {
         write_error(
