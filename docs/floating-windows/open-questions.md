@@ -16,9 +16,9 @@
 
 | Q | テーマ | 決定 Phase | 主要依存 |
 |---|--------|-----------|---------|
-| Q1 | Bevy frontend の配置方式（wgpu 共存性含む） | Phase 2 完了時 / Phase 4 着手前 | 統一前提（schema_version, focus 型） |
-| Q2 | pane 内容の描画責務 | Phase 3 着手前 | Q1 |
-| Q3 | 設定 UI の移植順 | Phase 4 着手前 | Q1, Q2 |
+| Q1 | Bevy frontend の配置方式（wgpu 共存性含む） | Phase 2 完了時 / Phase 4 着手前（= Phase 3 着手は可、Phase 4 不可） | 統一前提（schema_version, focus 型） |
+| Q2 | pane 種別ごとの描画責務（architecture §3.5 の 3 分類で確定） | **Phase 2 完了時 / Phase 3 着手前** | Q1 |
+| Q3 | 設定 UI / 一時 UI の Bevy 化スコープ（**iced 残置を確定**） | Phase 2 完了時 / Phase 3 着手前 | Q1, Q2 |
 | Q4 | popout の内部実装 | Phase 5 着手前 | Q1 |
 | Q5 | 過渡期の同期粒度 | Phase 4 中 | Q1 |
 | Q6 | popout の永続化と Bevy 化スコープ | Phase 5 着手前 | Q1, Q4 |
@@ -43,29 +43,54 @@
 - **決定 Phase**: Phase 2 完了時 / Phase 4 着手前
 - **依存**: 統一前提（schema_version 導入、focus 型抽象化）。Q2〜Q7 はすべて Q1 に依存する。
 
-## Q2. pane 内容の描画責務
+## Q2. pane 種別ごとの描画責務
 
-- **選択肢**:
-  - (a) Bevy UI（`bevy_ui` ベース）に全面寄せる
-  - (b) 2D 描画（chart 本体）と UI（パネル・メニュー）を分離し、UI のみ別レイヤで処理する
-  - (c) 既存の iced ウィジェットを overlay として残す
+architecture §3.5 の 3 分類（`Bevy native` / `host existing renderer` / `keep iced overlay`）に
+各 pane 種別を割り当てて確定する。本 Q は分類のフレームを使い、**抽象論で開いたままに
+しない**。
+
+- **選択肢**（pane 種別ごとに 1 つ選ぶ）:
+  - `Bevy native`: Bevy renderer / scene / pipeline をフル活用
+  - `host existing renderer`: 既存 wgpu / `iced::canvas` 描画を Bevy pane 内に host
+  - `keep iced overlay`: Bevy pane 上に iced overlay として残す（一時 UI のみ）
 - **判定基準**:
-  - Q1 で決定した配置方式の制約（同一 wgpu device を使えるか、layer 合成方法）
-  - chart 描画の現行コスト（`canvas` ベース）と Bevy 移植コストの比較
-  - UI と chart の入力ハンドリングが分離可能か
-- **決定 Phase**: Phase 3 着手前
+  - Q1 で決定した配置方式の制約（同一 wgpu device の可用性）
+  - 各 pane の現行描画コスト（特に Heatmap GPU pipeline `src/widget/chart/heatmap.rs:355`
+    （`OverlayCanvas`） / Kline per-frame `src/chart/kline.rs:49,889`
+    （`impl Chart for KlineChart` / `fn draw`））と Bevy native への再実装コスト
+  - spec §6 機能保持マトリクスを満たせるか
+  - `host existing renderer` 分類は **Q1=(a) 同一 wgpu device 共存前提**。
+    Q1=(b)/(c) なら退避ルート（Bevy native 再実装 or オフスクリーン render→texture）が必要
+  - **iced::canvas は texture 単独書き出し標準 API なし → Kline は host existing renderer
+    不能のリスクがあり Phase 2 spike で実機判定**
+- **暫定割当**（architecture §3.5 と同期）:
+  - Heatmap: `host existing renderer`（GPU pipeline 温存）
+  - Kline: `host existing renderer`（per-frame 描画・crosshair・study 反映を温存）
+    ※ iced::canvas の texture 書き出し可否次第で `Bevy native` 再実装に倒れる可能性あり（Phase 2 spike で確定）
+  - Ladder: `Bevy native` 候補
+  - TAS / Starter: `Bevy native` 候補
+  - 設定 modal / indicator picker / study configurator / 認証 / Tachibana ログイン: `keep iced overlay` 確定
+- **決定 Phase**: **Phase 2 完了時 / Phase 3 着手前**
 - **依存**: Q1
 
-## Q3. 設定 UI の移植順
+## Q3. 設定 UI / 一時 UI の Bevy 化スコープ
+
+本計画では **設定 modal / indicator picker / study configurator / 認証ダイアログ /
+Tachibana ログイン UI / 管理画面は Bevy 化しない**（架構: architecture §2 + §4.1 + INV-INPUT-4）。
+本 Q は「移植順を決める」ではなく「iced 残置の境界を確定する」ことが目的。
+本計画では以下のいずれを取っても、設定 modal / indicator picker / study configurator /
+認証ダイアログ / Tachibana ログイン UI / 管理画面の Bevy 化は **本計画スコープ外**。
+Bevy 化したい場合は **別計画として起票が必要**。
 
 - **選択肢**:
-  - (a) Starter / Heatmap など個別画面から順次移植する
-  - (b) 共通 UI 部品（modal, dropdown, slider 等）を先に整備してから画面ごと移植する
-  - (c) 設定 UI は最後まで iced に残し、chart 部分のみ先行する
+  - (a) 本計画では iced 残置で確定し、別計画起票を待つ（暫定こちら）
+  - (b) chart 部分のみ先行 Bevy 化し、modal / picker は将来別計画で再検討
+  - (c) 全 UI を Bevy 側へ移植（本計画では不採用）
 - **判定基準**:
-  - Q2 の描画責務の決定に伴う UI コンポーネントの再利用可能性
-  - 共通部品の数と複雑度（少なければ (a)、多ければ (b)）
-- **決定 Phase**: Phase 4 着手前
+  - 一時 UI を Bevy 化するインクリメンタルな価値（dashboard 機能要件 F1〜F10 に直接寄与しない）
+  - iced overlay として残しても入力境界契約 INV-INPUT-1〜4 で十分制御できるか
+  - modal / picker の再実装コスト
+- **決定 Phase**: Phase 2 完了時 / Phase 3 着手前（Q2 と同時に確定）
 - **依存**: Q1, Q2
 
 ## Q4. popout の内部実装
@@ -91,8 +116,13 @@
   - (c) 16 ms throttle（毎フレーム最大 1 回反映）
   - (d) イベント毎即 commit（`WindowMoved` ごとに State 更新）
 - **判定基準**:
-  - `WindowMoved` の発火頻度（プラットフォーム差含む）
-  - State 更新に伴う再描画 / 永続化（`saved-state.json` 書き込み）のコスト
+  - `WindowMoved` の発火頻度（プラットフォーム差含む）。
+    数値判定: `WindowMoved` 発火 `> 120 events/s` なら (c) 16ms throttle /
+    `60 ≤ rate ≤ 120` なら (b) 8ms debounce を default（揺れたら (c) に倒す） /
+    `< 60 events/s` なら (d) 即 commit 許容 / 許容 latency ≤ 16ms /
+    計測スクリプト `scripts/measure_window_moved_rate.sh` で実測
+  - State 更新に伴う再描画 / 永続化（`saved-state.json` 書き込み）のコスト。
+    Phase 4 中の判定に saved-state.json の sync write / async write 区別を含める
   - ドラッグ中の視覚的追従性（latency）
 - **決定 Phase**: Phase 4 中（実装と並行して計測）
 - **依存**: Q1
@@ -134,6 +164,7 @@
 - **判定基準**:
   - Phase 1 v1 切り後 6 ヶ月以内のフィールド追加頻度
   - 追加が頻繁なら (a) または (c)、稀であれば (b) を継続
+  - `schema_version > 自分が知る最大値` も破棄して default 起動が前提
 - **決定 Phase**: Phase 6 完了時 / 次計画着手前
 - **依存**: なし
 

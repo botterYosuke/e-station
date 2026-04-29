@@ -14,6 +14,7 @@ description: e-station の実装レビュー用スキル。plan/spec/architectur
 - deferred / non-goal / follow-up を今回の phase に誤って混入させていないか確認する
 - pin test が不足している高リスク箇所を先に挙げる
 - `git diff` だけでなく `git status --short` を見て未追跡ファイルも review 対象に含める
+- 技術刷新系の計画では、現行機能の保持条件と「どこまで置換するか」の境界を先に固定する
 
 ## 最初に読むもの
 
@@ -295,12 +296,48 @@ Rust 統合テストで繰り返し見つかる品質問題を優先確認する
 - SKILL の R1〜RN を網羅できているか（規約 ID をチェックリスト化）
 - 互換不変条件（境界に漏出してはならない用語の集合）が機械検証できるよう lint タスク化されているか
 - config キー名が docs に明示されているか（実装で骨抜きになる最大の温床）
+- UI / frontend 再構成計画では、既存機能の parity 条件が「表示できる」ではなく「主要操作・設定変更・購読 lifecycle・overlay / indicator / sync-all 等の振る舞いまで維持」に上がっているか
 
 ### 観点 D — 追加チェック
 
 - 各テストの観測点（pytest/cargo test ファイル名・実行コマンド）が明記されているか
 - CI ゲート組込（`.github/workflows/`）が明記されているか — テスト存在と CI 組込は別物
 - 不変条件 ID と test 関数名の対応表（`invariant-tests.md` 等）が起票されているか
+- 技術置換系 plan では「placeholder 表示」だけで acceptance を通していないか。現行機能 parity を測る観測点が pane 種別ごとに書かれているか
+
+### 観点 E — 技術置換の境界と責務
+
+特定技術への置換計画（例: `iced` → `Bevy`、独自実装 → 外部基盤）では、「置換する理由がある面」と「既存のままでよい面」を分けて確認する。ここを曖昧にすると、必要以上の全面移植と、逆に置換すべき高頻度描画・入力面の見落としが同時に起きる。
+
+- 新技術が本当に必要な責務を列挙する
+- その技術でなくてよい責務まで計画が飲み込んでいないか確認する
+- 逆に、その技術で先に持つべき高頻度描画 / hit test / input capture / z-order / camera などが後回しになっていないか確認する
+- 現行 UI / modal / 設定画面 / 認証導線まで巻き込む場合、巻き込む理由と段階導入条件が書かれているか確認する
+- open question のまま責務境界を曖昧にして、phase 後半で再分解が必要になる構成になっていないか確認する
+
+特に findings 候補として先に疑う。
+
+- layout 問題の解決を名目に、設定 UI や管理 UI まで新技術へ全面移植する前提になっている
+- placeholder の接続計画はあるが、既存 chart / shader / overlay / indicator の保持戦略が無い
+- 「新 frontend が描画担当」とだけ書かれ、既存 widget / scene / renderer を host するのか native 移植するのかが未確定
+- 入力境界が曖昧で、タイトルバー操作・pane 内 UI・chart pointer capture の責務分離が書かれていない
+
+### 観点 F — 現行機能 parity の棚卸し
+
+大規模 UI 改修の計画レビューでは、文書どうしの整合だけでは足りない。置換対象の現行機能を棚卸しし、計画側に parity 条件として現れているか確認する。特に chart 系 pane は「表示」より「操作」「設定」「イベント注入」「close 時 teardown」が壊れやすい。
+
+- 置換対象 pane / widget の現行機能を実コードから最低 1 回拾う
+- overlay、indicator、study configurator、sync-all、stream 切替、close 時 teardown などの副機能を落としていないか確認する
+- main から pane へ注入される event fanout が、新構成でも届く前提になっているか確認する
+- 機能保持の acceptance が pane 種別ごとに書かれているか確認する
+- lifecycle 契約（購読 cancel、aggregator drop、registry unregister、focus 移譲など）が plan に明文化されているか確認する
+
+pin 不足を疑う例:
+
+- 「既存コンテンツが表示できる」で acceptance が止まっている
+- chart 設定 modal や indicator 並べ替えのような副機能に観測点が無い
+- pane close の teardown 順序が plan では未定義
+- main thread からの marker / signal / stream 更新の配信経路が新設計で不明
 
 ### 計画文書レビューの禁止事項
 
