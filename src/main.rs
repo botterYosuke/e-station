@@ -100,6 +100,12 @@ static REPLAY_API_STATE: std::sync::OnceLock<Arc<replay_api::ReplayApiState>> =
 static ORDER_API_MARKET_CLOSED: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> =
     std::sync::OnceLock::new();
 
+/// Startup mode (`live` or `replay`) captured from `--mode` before any runtime
+/// is created. Allows `Flowsurface::new()` to apply D8 layout isolation without
+/// depending on `REPLAY_API_STATE` (which is only set when the HTTP control API
+/// runtime builds successfully).
+static APP_MODE: std::sync::OnceLock<engine_client::dto::AppMode> = std::sync::OnceLock::new();
+
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
 /// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
 /// here, before the connection is published to `ENGINE_CONNECTION_TX`,
@@ -195,6 +201,12 @@ fn pick_free_port() -> Option<u16> {
 
 fn main() {
     let cli_args = cli::CliArgs::parse();
+
+    // Capture startup mode before any runtime is created so Flowsurface::new()
+    // can enforce D8 regardless of whether the HTTP control-API runtime builds.
+    APP_MODE
+        .set(engine_client::dto::AppMode::from(cli_args.mode))
+        .ok();
 
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -1180,10 +1192,16 @@ impl Flowsurface {
 
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
 
-        let is_replay_mode = REPLAY_API_STATE
+        let is_replay_mode = APP_MODE
             .get()
-            .map(|s| s.mode == engine_client::dto::AppMode::Replay)
-            .unwrap_or(false);
+            .map(|m| *m == engine_client::dto::AppMode::Replay)
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "APP_MODE not set in Flowsurface::new — \
+                     D8 layout isolation inactive, defaulting to live layout"
+                );
+                false
+            });
         let layout_manager = if is_replay_mode {
             log::info!(
                 "replay mode: discarding saved pane layout (D8), starting with fresh layout"

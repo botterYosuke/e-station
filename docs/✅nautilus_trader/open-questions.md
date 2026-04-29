@@ -234,6 +234,26 @@ Parquet キャッシュを有効化したい場合は、立花の session 情報
 
 ---
 
+### Q16. `price_to_y` 戻り値を `Option<f32>` に変更してドローイングパイプライン全体を NaN-safe にする ★Open (2026-04-29 新設)
+
+**背景** (2026-04-29 bug fix レビューで silent-failure-hunter が指摘):
+
+`ViewState::price_to_y()` が NaN `cell_height` を受け取った場合のフォールバックとして `0.0` を返す修正を導入した（`src/chart.rs`）。`log::warn!` でログを出すため完全なサイレント障害ではないが、呼び出し元は「有効な座標 y=0」と「NaN フォールバック y=0」を区別できない。
+
+kline / heatmap / footprint など複数のチャートが `price_to_y` を呼ぶ。全描画要素が y=0 に積み重なる視覚バグが起きうる。
+
+**検討案**:
+- `price_to_y` → `Option<f32>` (`None` = NaN フォールバック)
+- 全呼び出し箇所（`kline.rs`, `heatmap.rs`, `comparison.rs` 等）で `?` または `if let Some` で早期 return
+- フレーム描画を `cell_height.is_finite()` でガードして NaN 状態では描画全体をスキップ
+
+**現状の妥協点**:
+- D8 モード境界修正（2026-04-29）により NaN `cell_height` が発生する根本原因を除去済み
+- `log::warn!` でログが出るため観測可能
+- ドローイングパイプライン全体の変更は広範なリファクタになる → N2 スコープ以降で対処
+
+---
+
 ### その他（実装フェーズで確定）
 
 - バックテスト性能 SLA の具体値（spec.md §3.3 を N1.10 実測で確定）
