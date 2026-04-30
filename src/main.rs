@@ -3071,6 +3071,7 @@ impl Flowsurface {
                         instrument_id,
                         strategy_id,
                         granularity,
+                        ack,
                     } => {
                         // M-2 (R2 review-fix R2): strategy_id を Option<String> として保持。
                         // None = 単独 LoadReplayData 経路、Some(_) = StartEngine 経由 load。
@@ -3095,6 +3096,13 @@ impl Flowsurface {
                                 layout_id: None,
                                 event: msg,
                             });
+                        // `auto_generate_replay_panes` は内部で `set_content_and_streams`
+                        // を同期で呼んで pane に stream を bind する。戻り `Task` には
+                        // pane 内 chart の追加 fetch しか含まれないので、ここで ack して
+                        // /api/replay/load を解放してよい（pane と subscription は確立済み）。
+                        if let Some(ack) = ack {
+                            ack.notify_one();
+                        }
                         return task;
                     }
                     _ => {}

@@ -37,7 +37,7 @@
             "sourceLanguages": [
                 "rust"
             ],
-            "preLaunchTask": "replay: build & watch"
+            "preLaunchTask": "replay: watch & load (active file)"
         }
     ]
 }

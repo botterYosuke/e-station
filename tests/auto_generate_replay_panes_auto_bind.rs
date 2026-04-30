@@ -150,6 +150,49 @@ fn auto_generate_replay_panes_skips_candlestick_for_trade_granularity() {
     );
 }
 
+// ── ack: AutoGenerateReplayPanes carries ack: Option<Arc<Notify>> ─────────────
+//
+// `replay-load-start-race-fix-plan.md`: `/api/replay/load` は AutoGenerateReplayPanes
+// の ack を受け取るまで block する。enum 定義からこのフィールドが消えると race
+// 修正が黙って巻き戻る。
+
+#[test]
+fn control_api_command_auto_generate_has_ack_field() {
+    let src = read_replay_api_src();
+    let start = src
+        .find("AutoGenerateReplayPanes")
+        .expect("AutoGenerateReplayPanes variant not found in replay_api.rs");
+    let after = &src[start..];
+    let end = after.find('}').expect("closing brace not found");
+    let body = &after[..end];
+
+    assert!(
+        body.contains("ack"),
+        "ControlApiCommand::AutoGenerateReplayPanes must carry an `ack` handle so /api/replay/load \
+         can block until pane generation completes (replay-load-start-race-fix-plan.md)."
+    );
+    assert!(
+        body.contains("Notify"),
+        "`ack` must be an Arc<Notify> (oneshot::Sender is not Clone-safe inside ControlApiCommand)."
+    );
+}
+
+#[test]
+fn auto_generate_replay_panes_guards_against_double_pane_generation() {
+    let src = read_dashboard_src();
+    let start = src
+        .find("fn auto_generate_replay_panes")
+        .expect("auto_generate_replay_panes not found in dashboard.rs");
+    let after = &src[start..];
+    let window = &after[..after.len().min(15_000)];
+    assert!(
+        window.contains("replay_pane_registry") || window.contains("is_loaded"),
+        "auto_generate_replay_panes must consult replay_pane_registry / is_loaded so a delayed \
+         AutoGenerateReplayPanes after a 504 does not generate a duplicate pane \
+         (replay-load-start-race-fix-plan.md D7-2)."
+    );
+}
+
 // ── 4c-6: reload path rebinds stream/basis for changed granularity ────────────
 
 #[test]

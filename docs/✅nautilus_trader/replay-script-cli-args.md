@@ -28,10 +28,16 @@ run-replay-debug.sh <strategy_file> <instrument_id> <start_date> <end_date> [gra
 | `$4` end_date | ✅ | `2025-03-31` |
 | `$5` granularity | 任意（既定 `Daily`） | `Daily` / `Minute` / `Trade` |
 
-### 任意パラメータの env var（`REPLAY_INITIAL_CASH`, `REPLAY_STRATEGY_ID`）
+### 任意パラメータの env var
 
 `.env` 自動 source は廃止したため、**親シェルで `export` 済みの env var のみ有効**。
 `.env` に書いても自動では読まれない。設定する場合は明示的に export すること：
+
+| env var | 既定値 | 用途 |
+|---------|--------|------|
+| `REPLAY_INITIAL_CASH` | `1000000` | 初期資金（円） |
+| `REPLAY_STRATEGY_ID`  | `user-strategy` | 戦略 ID |
+| `PORT` | `9876` | replay HTTP サーバ待受ポート（`/api/replay/*` を叩く先） |
 
 ```bash
 export REPLAY_INITIAL_CASH=500000
@@ -41,8 +47,14 @@ bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-0
 ### VSCode からの起動
 
 `.vscode/tasks.json` の `replay: watch & load (active file)` タスクに `inputs` を追加済み。
-`replay - Rust: Debug (CodeLLDB)` 起動時に銘柄・開始日・終了日はプロンプト入力ダイアログ、
-足種はドロップダウンで選択できる。
+`replay - Rust: Debug (CodeLLDB)` 起動時に下記ダイアログ／ドロップダウンで指定する。
+
+| `id` | `type` | `description` | `default` / `options` |
+|------|--------|---------------|----------------------|
+| `replayInstrumentId` | `promptString` | 銘柄コード (例: 1301.TSE) | — |
+| `replayStartDate`    | `promptString` | 開始日 (例: 2025-01-06)   | — |
+| `replayEndDate`      | `promptString` | 終了日 (例: 2025-03-31)   | — |
+| `replayGranularity`  | `pickString`   | 足種                       | options: `Daily` / `Minute` / `Trade`、default: `Daily` |
 
 ## 変更ファイル一覧
 
