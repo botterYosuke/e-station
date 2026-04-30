@@ -24,6 +24,7 @@ from engine.nautilus.replay_speed import (
 
 _JST = timezone(timedelta(hours=9))
 FIXTURES = Path(__file__).parent / "fixtures"
+_STRATEGY_FILE = str(FIXTURES / "test_strategy.py")
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +203,7 @@ class TestStreamingReplayCompletes:
             initial_cash=1_000_000,
             multiplier=100,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert isinstance(result, ReplayBacktestResult)
         assert result.strategy_id == "buy-and-hold"
@@ -227,6 +229,7 @@ class TestStreamingReplayCompletes:
             multiplier=100,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         kinds = [e["event"] for e in events]
         assert "EngineStarted" in kinds
@@ -262,6 +265,7 @@ class TestStreamingReplayCompletes:
             base_dir=FIXTURES,
             on_event=on_event,
             stop_event=stop_event,
+            strategy_file=_STRATEGY_FILE,
         )
         kinds = [e["event"] for e in events]
         # stop_event が set されていても最終的に EngineStopped まで到達
@@ -281,6 +285,7 @@ class TestStreamingReplayDeterminism:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
 
         runner_batch = NautilusRunner()
@@ -308,6 +313,7 @@ class TestStreamingReplayDeterminism:
             initial_cash=1_000_000,
             multiplier=100,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
 
         r1 = NautilusRunner().start_backtest_replay_streaming(**kwargs)
@@ -337,6 +343,7 @@ class TestStreamingReplayDateChangeMarker:
             multiplier=100,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         date_markers = [e for e in events if e.get("event") == "DateChangeMarker"]
         assert len(date_markers) >= 1
@@ -365,6 +372,7 @@ class TestStreamingReplayDateChangeMarker:
             multiplier=100,
             base_dir=FIXTURES,
             on_event=on_event,
+            strategy_file=_STRATEGY_FILE,
         )
         date_markers = [e for e in events if e.get("event") == "DateChangeMarker"]
         assert len(date_markers) >= 1

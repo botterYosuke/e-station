@@ -47,6 +47,7 @@ from typing import Literal
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
 from nautilus_trader.model.currencies import JPY
+from nautilus_trader.model.data import Bar, TradeTick
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.objects import Money
@@ -115,6 +116,28 @@ class ReplayBacktestResult(BacktestResult):
 # OrderFilled の venue タグは外向け wire 表現として "replay" 固定にする (D5)。
 # どちらの空間に属するかを取り違えないよう、外向け venue は必ずこの定数経由で参照する。
 _IPC_VENUE_TAG: str = "replay"
+
+
+def _granularity_to_timeframe(g: str) -> str:
+    """granularity 文字列を IPC timeframe 文字列に変換する。"""
+    mapping = {"Daily": "1d", "Minute": "1m", "Trade": "tick"}
+    if g not in mapping:
+        raise ValueError(f"unknown granularity: {g!r}")
+    return mapping[g]
+
+
+def _aggressor_to_side(side) -> str:
+    """nautilus AggressorSide を IPC side 文字列 ("BUY" / "SELL") に変換する。
+
+    unknown / NO_AGGRESSOR は "BUY" にフォールバック。
+    """
+    name = getattr(side, "name", str(side)).upper()
+    if "BUY" in name:
+        return "BUY"
+    if "SELL" in name:
+        return "SELL"
+    log.debug("[_aggressor_to_side] unrecognized side %r, falling back to BUY", side)
+    return "BUY"
 
 
 class NautilusRunner:
@@ -262,7 +285,7 @@ class NautilusRunner:
             - ``"Daily"``: ``jquants_loader.load_daily_bars(...)``
 
         market data 複製 (Rust UI 向け Trades/KlineUpdate) は N1.4 では no-op。
-        ReplayDataLoaded で件数だけ通知する。N1.11 streaming で実装する。
+        ReplayDataLoaded で件数だけ通知する。N1.11 streaming で実装済み (replay-market-data-emit.md)。
         """
         if currency not in _CURRENCY_MAP:
             raise ValueError(
@@ -583,7 +606,12 @@ class NautilusRunner:
                 strategy_id, instrument_id, trades_loaded, bars_loaded, multiplier,
             )
 
-            # streaming ループ
+            # streaming ループ — IPC emit 用の変数をループ外で事前計算（毎 tick 再計算しない）
+            ipc_venue = _IPC_VENUE_TAG          # "replay"
+            ipc_ticker = symbol                  # "1301"（venue 抜きシンボル）
+            ipc_market = "stock"                 # equity 固定
+            ipc_timeframe = _granularity_to_timeframe(granularity)  # "1d" / "1m" / "tick"
+
             prev_ts_ns: int | None = None
             self._running = True
             try:
@@ -611,28 +639,73 @@ class NautilusRunner:
                             "date": curr_date_str,
                         })
 
-                    # D7 pacing sleep 計算
-                    if prev_ts_ns is not None:
-                        dt_event_sec = (curr_ts_ns - prev_ts_ns) / 1_000_000_000
+                    # D7 pacing sleep 計算（multiplier=0 は「即時」扱い）
+                    if multiplier <= 0 or prev_ts_ns is None:
+                        sleep_sec = 0.0
                     else:
-                        dt_event_sec = 0.0
-
-                    sleep_sec = compute_sleep_sec(
-                        dt_event_sec=dt_event_sec,
-                        multiplier=multiplier,
-                        ts_event_ns=curr_ts_ns,
-                    )
+                        dt_event_sec = (curr_ts_ns - prev_ts_ns) / 1_000_000_000
+                        sleep_sec = compute_sleep_sec(
+                            dt_event_sec=dt_event_sec,
+                            multiplier=multiplier,
+                            ts_event_ns=curr_ts_ns,
+                        )
 
                     # 1 tick 処理
                     engine.add_data([item])
                     engine.run(streaming=True)
                     engine.clear_data()
 
+                    # per-tick emit: engine.run() 完了後・pacing sleep 前に emit する
+                    try:
+                        if isinstance(item, Bar):
+                            emit({
+                                "event": "KlineUpdate",
+                                "venue": ipc_venue,
+                                "ticker": ipc_ticker,
+                                "market": ipc_market,
+                                "timeframe": ipc_timeframe,
+                                "kline": {
+                                    "open_time_ms": item.ts_event // 1_000_000,
+                                    "open": str(item.open),
+                                    "high": str(item.high),
+                                    "low": str(item.low),
+                                    "close": str(item.close),
+                                    "volume": str(item.volume),
+                                    "is_closed": True,
+                                },
+                            })
+                        elif isinstance(item, TradeTick):
+                            emit({
+                                "event": "Trades",
+                                "venue": ipc_venue,
+                                "ticker": ipc_ticker,
+                                "market": ipc_market,
+                                "stream_session_id": account_id,
+                                "trades": [{
+                                    "price": str(item.price),
+                                    "qty": str(item.size),
+                                    "side": _aggressor_to_side(item.aggressor_side),
+                                    "ts_ms": item.ts_event // 1_000_000,
+                                    "is_liquidation": False,
+                                }],
+                            })
+                    except Exception:
+                        log.error(
+                            "[NautilusRunner] per-tick emit failed: strategy=%r",
+                            strategy_id,
+                            exc_info=True,
+                        )
+                        break
+
                     prev_ts_ns = curr_ts_ns
 
-                    # pacing sleep（0.0 のときは sleep しない）
+                    # pacing sleep: stop_event.wait で sleep しつつ中断要求を受け付ける
                     if sleep_sec > 0.0:
-                        time.sleep(sleep_sec)
+                        if stop_event is not None:
+                            if stop_event.wait(timeout=sleep_sec):
+                                break
+                        else:
+                            time.sleep(sleep_sec)
 
             finally:
                 self._running = False

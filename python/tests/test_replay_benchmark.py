@@ -9,9 +9,11 @@ fixtures ベース（小規模）でもベンチマーク構造を確立し、
 import time
 import pytest
 from pathlib import Path
+
 from engine.nautilus.engine_runner import NautilusRunner
 
 FIXTURES = Path(__file__).parent / "fixtures"
+_STRATEGY_FILE = str(FIXTURES / "test_strategy.py")
 SLA_SECONDS = 60.0  # spec.md §3.3
 
 
@@ -32,6 +34,7 @@ class TestReplayBenchmark:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         elapsed = time.perf_counter() - start
         print(f"\n[BENCH] fixtures replay: {elapsed:.3f}s")
@@ -56,6 +59,7 @@ class TestReplayBenchmark:
             end_date="2024-01-31",
             granularity="Trade",
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
         )
         elapsed = time.perf_counter() - start
         # 実測値: 約 137s (2026-04-28 計測)。spec.md §3.3 の目標 60s は未達。

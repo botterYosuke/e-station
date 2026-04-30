@@ -52,6 +52,8 @@ _REQUIRED_ATTRS: dict[str, object] = {
     "_tachibana_p_no_counter": None,
     "_session_holder": None,
     "_engine_tasks": None,
+    "_engine_stop_events": None,  # Task 2: threading.Event レジストリ
+    "_replay_speed_multiplier": 1,  # N1.11: pacing 倍率（デフォルト 1）
     "_replay_portfolio": None,  # N1.16: PortfolioView
     "_replay_strategy_id": None,
     "_cache_dir": None,  # _do_get_order_list_replay が参照
@@ -85,6 +87,8 @@ def _make_server(mode: str = "replay"):
         "_tachibana_p_no_counter": MagicMock(),
         "_session_holder": MagicMock(),
         "_engine_tasks": {},
+        "_engine_stop_events": {},  # Task 2: threading.Event レジストリ
+        "_replay_speed_multiplier": 1,  # N1.11: pacing 倍率
         "_replay_portfolio": PortfolioView(Decimal("1000000")),  # N1.16
         "_replay_strategy_id": "",
         "_cache_dir": Path("/tmp/test-engine-cache"),
@@ -168,6 +172,7 @@ class TestStartEngineDispatch:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
         await server._handle_start_engine(msg, base_dir=FIXTURES)
@@ -197,6 +202,7 @@ class TestStartEngineDispatch:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
         await server._handle_start_engine(msg, base_dir=FIXTURES)
@@ -271,11 +277,12 @@ class TestStartEngineFailureRecovery:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
-        # NautilusRunner.start_backtest_replay を mock して、EngineStarted を on_event 経由で
-        # 送出した後に意図的に raise する
+        # mode='replay' なので start_backtest_replay_streaming を mock する。
+        # EngineStarted を on_event 経由で送出した後に意図的に raise する
         def fake_start(*, on_event, strategy_id, **kw):
             on_event({
                 "event": "EngineStarted",
@@ -286,7 +293,7 @@ class TestStartEngineFailureRecovery:
             raise RuntimeError("synthetic failure for test")
 
         with patch(
-            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay",
+            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay_streaming",
             side_effect=fake_start,
         ):
             await server._handle_start_engine(msg, base_dir=FIXTURES)
@@ -324,14 +331,16 @@ class TestStartEngineFailureRecovery:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
         def fake_start(*, on_event, **kw):
             raise RuntimeError("failure before EngineStarted")
 
+        # mode='replay' なので start_backtest_replay_streaming を mock する。
         with patch(
-            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay",
+            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay_streaming",
             side_effect=fake_start,
         ):
             await server._handle_start_engine(msg, base_dir=FIXTURES)
@@ -361,6 +370,7 @@ class TestStartEngineTimeoutRecovery:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
@@ -392,6 +402,7 @@ class TestStartEngineTimeoutRecovery:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
@@ -429,6 +440,7 @@ class TestStartEngineMissingRequestId:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
@@ -499,6 +511,7 @@ class TestM10UnknownEngineKind:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
         await server._handle_start_engine(msg, base_dir=FIXTURES)
@@ -529,6 +542,7 @@ class TestM14StartEngineRaceGuard:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
         await server._handle_start_engine(msg, base_dir=FIXTURES)
@@ -573,6 +587,7 @@ class TestHGCallSoonThreadsafeUnification:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
@@ -620,6 +635,7 @@ class TestHGCallSoonThreadsafeUnification:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
@@ -707,6 +723,7 @@ class TestHGCallSoonThreadsafeUnification:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
@@ -731,8 +748,9 @@ class TestHGCallSoonThreadsafeUnification:
                 pass
             return original_cs(callback, *args)
 
+        # mode='replay' なので start_backtest_replay_streaming を mock する。
         with patch.object(loop, "call_soon_threadsafe", side_effect=spy), patch(
-            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay",
+            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay_streaming",
             side_effect=fake_start,
         ):
             await server._handle_start_engine(msg, base_dir=FIXTURES)
@@ -774,6 +792,7 @@ class TestHGCallSoonThreadsafeUnification:
                 "end_date": "2024-01-05",
                 "initial_cash": "1000000",
                 "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
             },
         }
 
@@ -853,3 +872,145 @@ class TestStartEngineLowATasksCleanup:
         assert any(e.get("code") == "invalid_config" for e in errors)
         # _engine_tasks に残骸が残っていない (LOW-A)
         assert "bad-cash-strategy" not in server._engine_tasks
+
+
+class TestReplayModeUsesStreamingVersion:
+    """replay モードで StartEngine を受けたとき streaming 版が呼ばれること。"""
+
+    @pytest.mark.asyncio
+    async def test_replay_mode_calls_streaming(self) -> None:
+        """mode='replay' の _handle_start_engine は start_backtest_replay_streaming を呼ぶ。"""
+        server = _make_server(mode="replay")
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-streaming-1",
+            "engine": "Backtest",
+            "strategy_id": "streaming-strategy",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
+            },
+        }
+
+        streaming_called = False
+
+        def fake_streaming(*, on_event, strategy_id, **kw):
+            nonlocal streaming_called
+            streaming_called = True
+            on_event({
+                "event": "EngineStarted",
+                "strategy_id": strategy_id,
+                "account_id": "TEST-ACCOUNT",
+                "ts_event_ms": 1000,
+            })
+            on_event({
+                "event": "EngineStopped",
+                "strategy_id": strategy_id,
+                "final_equity": "1000000",
+                "ts_event_ms": 2000,
+            })
+            from engine.nautilus.engine_runner import ReplayBacktestResult
+            from decimal import Decimal
+            return ReplayBacktestResult(
+                strategy_id=strategy_id,
+                final_equity=Decimal("1000000"),
+                fill_timestamps=[],
+                fill_last_prices=[],
+                portfolio_fills=[],
+                bars_loaded=0,
+                trades_loaded=4,
+                account_id="TEST-ACCOUNT",
+                start_ts_event_ms=1000,
+                stop_ts_event_ms=2000,
+            )
+
+        with patch(
+            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay_streaming",
+            side_effect=fake_streaming,
+        ):
+            await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        assert streaming_called, "mode='replay' で start_backtest_replay_streaming が呼ばれていない"
+        kinds = [e.get("event") for e in server._outbox]
+        assert "EngineStarted" in kinds
+        assert "EngineStopped" in kinds
+
+    @pytest.mark.asyncio
+    async def test_replay_mode_stop_event_is_set_on_stop_engine(self) -> None:
+        """mode='replay' の _handle_stop_engine は stop_event.set() を呼ぶ。"""
+        import threading
+
+        server = _make_server(mode="replay")
+        stop_event = threading.Event()
+        server._engine_stop_events["stop-ev-strategy"] = stop_event
+        from engine.nautilus.engine_runner import NautilusRunner
+        import unittest.mock
+        runner = NautilusRunner()
+        runner.stop = unittest.mock.MagicMock()
+        server._engine_tasks["stop-ev-strategy"] = runner
+
+        await server._handle_stop_engine(
+            {"op": "StopEngine", "strategy_id": "stop-ev-strategy"}
+        )
+
+        assert stop_event.is_set(), "_handle_stop_engine が stop_event.set() を呼んでいない"
+
+    @pytest.mark.asyncio
+    async def test_stop_event_cleaned_up_after_engine_finishes(self) -> None:
+        """_handle_start_engine の finally で _engine_stop_events から strategy_id が消える。"""
+        server = _make_server(mode="replay")
+        msg = {
+            "op": "StartEngine",
+            "request_id": "req-cleanup-1",
+            "engine": "Backtest",
+            "strategy_id": "cleanup-strategy",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
+            },
+        }
+
+        def fake_streaming(*, on_event, strategy_id, **kw):
+            on_event({
+                "event": "EngineStarted",
+                "strategy_id": strategy_id,
+                "account_id": "TEST",
+                "ts_event_ms": 1000,
+            })
+            on_event({
+                "event": "EngineStopped",
+                "strategy_id": strategy_id,
+                "final_equity": "1000000",
+                "ts_event_ms": 2000,
+            })
+            from engine.nautilus.engine_runner import ReplayBacktestResult
+            from decimal import Decimal
+            return ReplayBacktestResult(
+                strategy_id=strategy_id,
+                final_equity=Decimal("1000000"),
+                fill_timestamps=[],
+                fill_last_prices=[],
+                portfolio_fills=[],
+                bars_loaded=0,
+                trades_loaded=0,
+                account_id="TEST",
+                start_ts_event_ms=1000,
+                stop_ts_event_ms=2000,
+            )
+
+        with patch(
+            "engine.nautilus.engine_runner.NautilusRunner.start_backtest_replay_streaming",
+            side_effect=fake_streaming,
+        ):
+            await server._handle_start_engine(msg, base_dir=FIXTURES)
+
+        # finally で _engine_stop_events から cleanup される
+        assert "cleanup-strategy" not in server._engine_stop_events

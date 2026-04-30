@@ -22,6 +22,7 @@ from engine.nautilus.engine_runner import NautilusRunner, BacktestResult, Replay
 FIXTURES = Path(__file__).parent / "fixtures"
 REPO_ROOT = Path(__file__).parent.parent.parent
 STRATEGY_FILE = str(REPO_ROOT / "docs" / "example" / "buy_and_hold.py")
+STRATEGY_INIT_KWARGS_1301 = {"instrument_id": "1301.TSE", "bar_type_str": "1301.TSE-1-DAY-MID-EXTERNAL"}
 
 # ---------------------------------------------------------------------------
 # ヘルパー
@@ -62,6 +63,7 @@ def test_live_mock_completes_without_exception():
         klines=_year_klines(),
         initial_cash=1_000_000,
         strategy_file=STRATEGY_FILE,
+        strategy_init_kwargs=STRATEGY_INIT_KWARGS_1301,
     )
     assert isinstance(result, BacktestResult)
     assert result.strategy_id == "user-strategy"
@@ -83,6 +85,7 @@ def test_replay_jquants_trade_completes_without_exception():
         initial_cash=1_000_000,
         base_dir=FIXTURES,
         strategy_file=STRATEGY_FILE,
+        strategy_init_kwargs=STRATEGY_INIT_KWARGS_1301,
     )
     assert isinstance(result, ReplayBacktestResult)
     assert result.strategy_id == "user-strategy"
@@ -104,6 +107,7 @@ def test_live_mock_and_replay_both_complete():
         klines=_year_klines(),
         initial_cash=1_000_000,
         strategy_file=STRATEGY_FILE,
+        strategy_init_kwargs=STRATEGY_INIT_KWARGS_1301,
     )
 
     # replay J-Quants
@@ -117,6 +121,7 @@ def test_live_mock_and_replay_both_complete():
         initial_cash=1_000_000,
         base_dir=FIXTURES,
         strategy_file=STRATEGY_FILE,
+        strategy_init_kwargs=STRATEGY_INIT_KWARGS_1301,
     )
 
     # 両方完走チェック
@@ -141,6 +146,7 @@ def test_live_mock_fill_timestamps_non_empty():
         klines=_year_klines(),
         initial_cash=1_000_000,
         strategy_file=STRATEGY_FILE,
+        strategy_init_kwargs=STRATEGY_INIT_KWARGS_1301,
     )
     # fill_timestamps が非空であること（少なくとも 1 件の約定がある）
     assert len(result.fill_timestamps) > 0, (
@@ -160,6 +166,7 @@ def test_replay_jquants_daily_bar_completes():
         initial_cash=1_000_000,
         base_dir=FIXTURES,
         strategy_file=STRATEGY_FILE,
+        strategy_init_kwargs=STRATEGY_INIT_KWARGS_1301,
     )
     assert isinstance(result, ReplayBacktestResult)
     assert result.final_equity > 0
@@ -179,6 +186,7 @@ def test_replay_ipc_events_emitted():
         base_dir=FIXTURES,
         on_event=events.append,
         strategy_file=STRATEGY_FILE,
+        strategy_init_kwargs=STRATEGY_INIT_KWARGS_1301,
     )
 
     event_names = [e["event"] for e in events]

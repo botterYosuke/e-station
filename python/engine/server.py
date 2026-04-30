@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import logging
 import os
+import threading
 import time
 import uuid
 from collections import deque
@@ -278,6 +279,12 @@ class DataEngineServer:
         # N1.4: 走行中 NautilusRunner マッピング (strategy_id → runner)。
         # StartEngine で登録、StopEngine から参照、完了時に pop される。
         self._engine_tasks: dict[str, Any] = {}
+        # N1.11: streaming replay 中断用 stop_event レジストリ。
+        # _handle_stop_engine が set()、_handle_start_engine の finally で pop する。
+        self._engine_stop_events: dict[str, Any] = {}
+        # N1.11: streaming replay の pacing 倍率。SetReplaySpeed で変更される。
+        # compute_sleep_sec は multiplier >= 1 を要求するため、デフォルト 1 は安全。
+        self._replay_speed_multiplier: int = 1
 
         # N1.16: REPLAY 仮想ポートフォリオ（CLMZanKaiKanougaku を呼ばない純粋 Python 実装）。
         # LoadReplayData 受信時に initial_cash で reset() する。
@@ -633,10 +640,12 @@ class DataEngineServer:
             # 走行中の BacktestEngine が無い場合は no-op で ack のみ返す。
             multiplier = msg.get("multiplier", 1)
             request_id = msg.get("request_id", "")
-            if hasattr(self, "_replay_speed_multiplier"):
-                self._replay_speed_multiplier = multiplier
-            else:
-                self._replay_speed_multiplier = multiplier
+            if not isinstance(multiplier, int) or multiplier <= 0:
+                log.warning(
+                    "SetReplaySpeed: invalid multiplier=%r, ignored", multiplier
+                )
+                return
+            self._replay_speed_multiplier = multiplier
             log.info(
                 "SetReplaySpeed: multiplier=%d request_id=%s",
                 multiplier,
@@ -2424,18 +2433,37 @@ class DataEngineServer:
         result_holder: list = [None]
 
         def _run() -> None:
-            result_holder[0] = runner.start_backtest_replay(
-                strategy_id=strategy_id,
-                instrument_id=config_obj.instrument_id,
-                start_date=config_obj.start_date,
-                end_date=config_obj.end_date,
-                granularity=config_obj.granularity,
-                initial_cash=initial_cash,
-                base_dir=base_dir,
-                on_event=_on_event_tracked,
-                strategy_file=config_obj.strategy_file,
-                strategy_init_kwargs=config_obj.strategy_init_kwargs,
-            )
+            if self._mode == "replay":
+                stop_event = self._engine_stop_events.setdefault(
+                    strategy_id, threading.Event()
+                )
+                result_holder[0] = runner.start_backtest_replay_streaming(
+                    strategy_id=strategy_id,
+                    instrument_id=config_obj.instrument_id,
+                    start_date=config_obj.start_date,
+                    end_date=config_obj.end_date,
+                    granularity=config_obj.granularity,
+                    initial_cash=initial_cash,
+                    multiplier=getattr(self, "_replay_speed_multiplier", 1),
+                    base_dir=base_dir,
+                    on_event=_on_event_tracked,
+                    strategy_file=config_obj.strategy_file,
+                    strategy_init_kwargs=config_obj.strategy_init_kwargs,
+                    stop_event=stop_event,
+                )
+            else:
+                result_holder[0] = runner.start_backtest_replay(
+                    strategy_id=strategy_id,
+                    instrument_id=config_obj.instrument_id,
+                    start_date=config_obj.start_date,
+                    end_date=config_obj.end_date,
+                    granularity=config_obj.granularity,
+                    initial_cash=initial_cash,
+                    base_dir=base_dir,
+                    on_event=_on_event_tracked,
+                    strategy_file=config_obj.strategy_file,
+                    strategy_init_kwargs=config_obj.strategy_init_kwargs,
+                )
 
         try:
             # H2: timeout=3600s でラップし、TimeoutError を code="timeout" で送出。
@@ -2526,6 +2554,7 @@ class DataEngineServer:
             )
         finally:
             self._engine_tasks.pop(strategy_id, None)
+            self._engine_stop_events.pop(strategy_id, None)
             # M-8 (R2 review-fix R2): 走行終了時に _replay_strategy_id をリセット。
             # 次の GetBuyingPower(replay) は空 strategy_id を返し、UI 側で
             # 「未実行」を識別できるようにする。
@@ -2547,6 +2576,9 @@ class DataEngineServer:
         if runner is None:
             log.info("StopEngine: no running engine for strategy_id=%r", strategy_id)
             return
+        stop_event = self._engine_stop_events.get(strategy_id)
+        if stop_event is not None:
+            stop_event.set()
         try:
             runner.stop()
         except Exception as exc:
