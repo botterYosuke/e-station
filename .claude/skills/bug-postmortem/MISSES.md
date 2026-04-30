@@ -25,6 +25,7 @@
 | IPC イベント → UI 状態の未配線 | IPC イベントを受信して toast を出すだけで、対応する UI コンポーネントの状態（`submitting` フラグ等）をリセットしていない | 1 |
 | 初期化前データ到着 | UI コンポーネントが未初期化（`None`）の状態でデータが到着し、`if let Some(...)` でサイレントに無視される | 1 |
 | エラーハンドラ早期脱出 | エラー arm が `break` するため、一時的な IO エラー（非 UTF-8 バイト等）で pipe reader が停止し、書き手の stdout バッファが詰まる | 1 |
+| モード分岐漏れ | `_handle()` のような接続後フックが `mode` を考慮せず、ライブ専用の処理をリプレイモードでも実行してしまう | 1 |
 
 ---
 
@@ -885,3 +886,56 @@ live/replay 互換ロジックで side を集計する N1 フェーズで false 
    `"buy"` や `"sell"` のデフォルト値で埋めると、集計ロジック（live/replay 互換）で
    false positive になる。side が不明なら `"unknown"` を明示することで、
    集計側がフィルタリングまたは別処理できるようにする。
+
+---
+
+## 2026-04-30 — replay モードで `_startup_tachibana()` が実行され IPC 接続が切断
+
+**見逃しパターン**: モード分岐漏れ（ライブデータ前提 と Mock 置換漏れ の複合）
+
+**不具合の概要**:
+`--mode replay` で起動して `POST /api/replay/start` を呼ぶと HTTP 502 が返る。
+ログに `engine ws read error: Reserved bits are not zero` が出て IPC 接続が切断されている。
+
+**根本原因**:
+`DataEngineServer._handle()` のハンドシェイク後の処理が `mode` に関係なく
+`asyncio.create_task(self._startup_tachibana())` を実行していた。
+
+dev 環境では `DEV_TACHIBANA_*` env var が設定されているため、リプレイモードでも
+Tachibana 自動ログインが成功 → `VenueReady` → `FetchTickerStats("__all__")` IPC
+→ Python が 278 KB の JSON フレームを一括送信 → fastwebsockets が
+「Reserved bits are not zero」エラーで接続を切断 → `/api/replay/start` が 502 になる。
+
+**修正**: `server.py::_handle()` に `if self._mode != "replay":` ガードを追加。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_server_ws_compat.py` | ハンドシェイクで `mode` フィールドを渡しておらず（デフォルト `"live"`）、リプレイモードのシナリオがなかった |
+| `test_server_dispatch.py` | `_startup_tachibana` を mock.patch.object でモックしていたが、テスト自体は `mode="live"` 相当で動作していた |
+| `tests/e2e/smoke.sh` | ライブモードのみを検証しており、リプレイモードでの起動シナリオがない |
+| 全テスト共通 | 「リプレイモード × Tachibana dev 環境変数あり」という組み合わせを明示的にテストしていなかった |
+
+**追加したテスト**:
+- `python/tests/test_server_ws_compat.py::test_tachibana_startup_skipped_in_replay_mode`
+  — `mode="replay"` でハンドシェイクした後、`_startup_tachibana` が呼ばれないことを
+  `patch.object` + `assert_not_called()` で検証。ガードを除去すると FAIL することを実証済み
+
+**リグレッション確認**: ガード（`if self._mode != "replay":`）を削除した状態で FAIL、
+追加した状態で PASS することを実際に確認。
+
+**教訓**:
+
+1. **mode 引数はテストでも明示的に渡す**: `_handshake()` ヘルパーが `mode` を渡さないと
+   デフォルト（`"live"`）になり、リプレイ固有のバグを再現できない。
+   ハンドシェイクを再利用するテストでは `"mode": "replay"` を渡すケースを追加する。
+
+2. **「背景タスクがモードを見ているか」を起動フロー設計時に確認**:
+   `_handle()` のような接続後フックは「全モードで同じことをすべきか」を明示的に問う。
+   `live` 専用の初期化（Tachibana ログイン、取引所 ready チェック等）は `if mode != "replay":` で囲む。
+
+3. **env var の組み合わせが作るシナリオ**: `DEV_TACHIBANA_*` が設定された dev 環境でのみ
+   Tachibana 自動ログインが成功するため、CI（env var なし）では再現しなかった。
+   dev 環境固有の挙動（自動ログイン等）が他モードに影響する可能性を、env var 設定時のシナリオとして
+   テストに含める。

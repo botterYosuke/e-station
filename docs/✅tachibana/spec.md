@@ -19,8 +19,9 @@
   - ティッカーメタデータ（呼値単位・売買単位・銘柄名）— **本線は銘柄マスタ（`CLMIssueMstKabu` + `CLMIssueSizyouMstKabu` + `CLMYobine`）から合成**し、マスタ未掲載や追加情報が必要な場合のみ `CLMMfdsGetIssueDetail` をフォールバックで叩く（F9）。呼値は **per-stock 解決**（`CLMIssueSizyouMstKabu.sYobineTaniNumber` で `CLMYobine` 行を引いて band を選ぶ）であり、全銘柄共通の単一価格帯テーブルは存在しない（data-mapping.md §5）
   - 日足 kline 履歴（`CLMMfdsGetMarketPriceHistory`）
   - 24h ticker stats 相当（`CLMMfdsGetMarketPrice` のスナップショットから派生）
-  - **取引（FD frame）ストリーム**: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）。**T0.1 FD 情報コード明示ゲート（implementation-plan.md L21）の通過が前提**。ゲート未通過のまま B 系縮退を採るなら本項目（trade ストリーム）と次項目（板スナップショット）は MVP から外す
-  - **板スナップショット**: **FD frame 駆動が正**（FD frame ごとに 10 本気配を `DepthSnapshot` 化して配信、data-mapping §4）。`CLMMfdsGetMarketPrice` は (a) ザラ場前後の初回 snapshot、(b) FD WS 12 秒無通信の再接続中フォールバック、(c) `depth_unavailable` セーフティ発動時の polling fallback の **3 ケースに限定**（§3.3 と整合）。**runtime の定期 polling は実装しない**。`DepthDiff` / L2 はサポートしない
+  - **取引（FD frame）ストリーム** *(実装済 2026-04-26、`stream_trades`)*: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）。FD 情報コードは [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー解消記録b3-クローズ) で 2026-04-26 にクローズ済み（旧 T0.1 ゲート / B 系縮退分岐は廃止）
+  - **板スナップショット** *(実装済、`fetch_depth_snapshot` + `stream_depth`)*: **FD frame 駆動が正**（FD frame ごとに 10 本気配を `DepthSnapshot` 化して配信、data-mapping §4）。`CLMMfdsGetMarketPrice` は (a) ザラ場前後の初回 snapshot、(b) FD WS 12 秒無通信の再接続中フォールバック、(c) `depth_unavailable` セーフティ発動時の polling fallback の **3 ケースに限定**（§3.3 と整合）。**runtime の定期 polling は実装しない**。`DepthDiff` / L2 はサポートしない
+  - **未実装**: `stream_kline`（分足 kline は FD 集計が必要、Phase 2 送り）と `fetch_open_interest`（株式に概念なし、`NotImplementedError`）。`fetch_trades`（過去 tick）も同様に未対応
 - **Rust 側の最小変更**:
   - `Venue` / `Exchange` / `MarketKind` 拡張
   - **ログイン関連の画面（フォーム・エラー表示・確認モーダル）は Python が tkinter で独立ウィンドウとして開く**（[architecture.md §7](./architecture.md#7-ログイン画面の-python-駆動f-login1)、F-Login1）。Rust 側に立花のログイン画面コード（フィールド名・ラベル・順序）を書かない
@@ -70,6 +71,7 @@
 ### 3.2 セッション寿命と復旧
 
 - 仮想 URL は **夜間閉局までの 1 日券**。閉局後は電話認証からやり直し（自動化不可）
+- **session freshness 判定は JST 同日基準（24 時間 TTL ではない）**: `tachibana_file_store.py::_is_session_fresh` は `tachibana_session.json` の `saved_at_ms` を JST に変換し、現在 JST 日と同一日でなければ stale と判定する。`saved_at_ms > now_ms` の clock skew（時刻巻き戻り）も stale 扱い。日付跨ぎ後に必ず再ログインが要求される運用と整合する
 - セッション切れ（`p_errno="2"`）検知時:
   - Python 側は `VenueError{venue:"tachibana", code:"session_expired", message, request_id:None}` を発出して全立花購読を停止（旧 `EngineError{code:"tachibana_session_expired"}` 表記は廃止、F1）
   - **バナー文言は Python 側が `message` フィールドに込める**（F-Banner1）。Rust UI は受け取った `message` をそのまま表示するだけで、Rust 側に固定文言を持たない。これにより:
@@ -102,9 +104,9 @@
 
 ## 4. 受け入れ条件（Phase 1 完了の定義）
 
-> **二段階受け入れ（FD ブロッカー条件分岐）**: FD 情報コード（`DV` / `GAP*` / `GBP*` / `GAV*` / `GBV*` / `DPP:T` / `p_date` 等）が T1 着手前に [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー解消記録b3-クローズ) のいずれかで実体解決した場合は **A 系（フル受け入れ）** を満たす。3 案で「Phase 縮退」を選んだ場合のみ **B 系（縮退受け入れ）** に切り替え、本節を改訂してから Phase 1 完了とする。data-mapping §3 注記、implementation-plan T0.1 ゲート、リスク表「FD 情報コード未確定」と整合。
+> **2026-04-26 更新**: FD 情報コード（`DV` / `GAP*` / `GBP*` / `GAV*` / `GBV*` / `DPP:T` / `p_date` 等）は [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー解消記録b3-クローズ) で実体解決済み。**A 系（フル受け入れ）に確定**。旧 B 系（縮退受け入れ）分岐は廃止し、§4 末尾に履歴として残す。
 
-### A 系（フル受け入れ、FD ブロッカー解決済み時）
+### A 系（フル受け入れ、確定運用）
 
 1. デモ環境で `DEV_TACHIBANA_*` 設定 → debug ビルド起動 → `tachibana_account.json` / `tachibana_session.json` 保存 → 再起動でファイルキャッシュ復元、までが手動で確認できる（demo 環境にも夜間閉局があるため、CI demo ジョブは閉局帯（demo の運用時間 = 平日 8:00–18:00 JST 想定、確定値は T2 で実機確認）を避けてスケジュールする）
 2. 任意の主要銘柄（例 `7203` トヨタ）を ticker selector から選び、日足チャート + 直近 trade（FD 由来）+ 10 本気配 snapshot が表示される
@@ -115,8 +117,8 @@
 7. ログとエラー応答に `sUserId` / `sPassword` / `sSecondPassword` / 仮想 URL の生値が現れないことを `tests/secret_redaction.py` で検証
 8. 起動時の session 復元に失敗した場合のみ再ログインが 1 回実行され、購読開始後の `p_errno="2"` では再ログインせず UI を明示エラーに遷移させる
 
-### B 系（縮退受け入れ、FD ブロッカー未解決時のみ適用）
+### B 系（縮退受け入れ）— 廃止（履歴のみ）
 
-A 系の項目 2 / 3 を「日足 chart + ticker stats のみで表示が成立すること」に置換し、trade ストリーム / 10 本気配 / 10 分連続稼働は **Phase 1 完了条件から外す**（Phase 2 で FD コード確定後に復活）。項目 1 / 4 / 5 / 6 / 7 / 8 はそのまま適用。本節を「B 系適用」と書き換える PR が implementation-plan T0.1 ブロッカー解決 PR と紐付き必須。
+FD 情報コード未確定時に備えた縮退受け入れパス（日足 chart + ticker stats のみ）。2026-04-26 にゲート解消したため適用機会なく廃止。本節は意思決定の履歴として残し、新規参照は禁止。
 
 > **T35-U5 E2E 注記**: U5 E2E (`tests/e2e/tachibana_relogin_after_cancel.sh`) は `src/replay_api.rs` 着地まで CI で `exit 77` skip 扱いとし、A 系受け入れ判定からは除外する（HTTP API 着地後に完走、T3.5 Step F 整合）。

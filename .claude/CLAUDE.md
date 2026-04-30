@@ -148,7 +148,7 @@ flowsurface: --mode is required (use 'live' or 'replay'); e.g. `flowsurface --mo
 | `replay` | 録画済みデータの再生（`/replay/*` HTTP API が有効化される） | `cargo run -- --mode replay` |
 
 VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vscode/launch.json) に
-`Rust: Debug (CodeLLDB) - live` / `Rust: Debug (CodeLLDB) - replay` の 2 構成を
+`live - Rust: Debug (CodeLLDB)` / `replay - Rust: Debug (CodeLLDB)` の 2 構成を
 用意してある。デバッグサイドバーの起動構成セレクタから選ぶこと。
 
 新しい起動経路（CI スクリプト・ドキュメント・別の launch.json 等）を追加するときは
@@ -177,7 +177,6 @@ bash scripts/run-replay-debug.sh docs/example/sma_cross.py
 
 | ファイル | 内容 |
 |---------|------|
-| `buy_and_hold.py` | 最初のバーで成行買い → 何もしない |
 | `sma_cross.py` | 短期/長期 SMA クロスでエントリー・クローズ |
 
 #### 必須・任意 env var
@@ -253,7 +252,7 @@ POST /api/replay/start  → StartEngine IPC
 `--data-engine-url` を指定してアプリを起動する際は、
 **必ず環境変数 `FLOWSURFACE_ENGINE_TOKEN` をエンジンのトークンと一致させる必要がある**。
 
-アプリ側（`src/main.rs:234`）は以下のように環境変数から取得している：
+アプリ側（`src/main.rs` の `FLOWSURFACE_ENGINE_TOKEN` 取得箇所）は以下のように環境変数から取得している：
 ```rust
 let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
 ```
@@ -401,9 +400,8 @@ uv run python scripts/smoke_tachibana_login.py
 このリポジトリでコードレビュー・差分レビュー・PR レビューを行うときは、
 必ず `.claude/skills/e-station-review/SKILL.md` のスキルを Skill ツールで起動する。
 
-- スキル一覧上の表示名は `e-station-review`
-- frontmatter の `name:` が `review` なので組み込み `/review` と紛らわしいが、
-  **組み込み `/review` は使わない**
+- スキル一覧上の表示名は `e-station-review`（frontmatter の `name:` も `e-station-review`）
+- 組み込みの `/review` とは別物。**組み込み `/review` は使わない**
 - review-fix-loop のレビュー段でも、サブエージェントに e-station-review スキルを
   使わせること
 

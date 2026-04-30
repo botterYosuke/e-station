@@ -228,7 +228,8 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 | `POST /api/replay/order` | — | — |
 | `GET /api/replay/portfolio` | — | — |
 | `GET /api/replay/state` | — | — |
-| `POST /api/replay/load` | `{instrument_id, start_date, end_date, granularity: "Trade"\|"Minute"\|"Daily", strategy_file?: string, strategy_init_kwargs?: object}` | `Command::LoadReplayData` |
+| `POST /api/replay/load` | `{instrument_id, start_date, end_date, granularity: "Trade"\|"Minute"\|"Daily"}` | `Command::LoadReplayData` |
+| `POST /api/replay/start` | `{instrument_id, start_date, end_date, granularity, strategy_id, initial_cash, strategy_file, strategy_init_kwargs?: object}` | `Command::StartEngine { engine: Backtest, strategy_id, config }` |
 | `POST /api/replay/control` | `{action: "speed", multiplier: 1\|10\|100}` | `Command::SetReplaySpeed { multiplier }` |
 | `POST /api/agent/narrative` | — | — |
 
@@ -236,8 +237,10 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 - `POST /api/replay/order`: nautilus `OrderFactory` で発注 → `BacktestEngine` 即時約定判定。legacy パス。新規実装は `/api/order/submit` を REPLAY モードで使う方を推奨。
 - `GET /api/replay/portfolio`: nautilus `Portfolio` から position / PnL を取得。
 - `GET /api/replay/state`: 既存実装のまま（market data のみ。position / PnL は `/api/replay/portfolio` から）。
-- `POST /api/replay/load`: **N1 で新設、N4 で `strategy_file` / `strategy_init_kwargs` を追加**。J-Quants ファイルを指定して BacktestEngine にロード。`strategy_file` を省略すると組み込み `BuyAndHold` が使われる。**5 件目以降は 400（`MAX_REPLAY_INSTRUMENTS=4`、D9.4）**。
-- `POST /api/replay/control`: **N1 で新設**。**N1 で受理する action は `"speed"` のみ**。`pause` / `seek` を含む他 action は **400 Bad Request**。`play` は提供しない（streaming ループの開始は既存の `StartEngine` に統一）。
+- `POST /api/replay/load`: **N1 で新設**。J-Quants ファイル存在のみ確認し `BacktestEngine` にデータをロードする。**戦略起動を伴わない**（戦略は `/api/replay/start` に分離）。**5 件目以降は 400（`MAX_REPLAY_INSTRUMENTS=4`、D9.4）**。Reload of an already-loaded instrument は許可。
+- `POST /api/replay/start`: **N1.17 で新設**。事前に `/load` 済みの instrument に対し、`strategy_id` / `initial_cash` / `strategy_file`（必須）/ `strategy_init_kwargs` を指定して `Command::StartEngine` を投げる。`EngineStarted` を最大 30 秒待ち、`202 Accepted {status, strategy_id, account_id}` を返す。タイムアウト→504、エンジンエラー→503、切断→502。`strategy_file` 未指定 / 空文字は 400。
+  - `/load` と `/start` の責務分離: `/load` はデータ読込専用で副作用なし、`/start` は backtest streaming ループを開始する。組み込み戦略フォールバックは廃止された。サンプルは [docs/example/](../../example/) (`buy_and_hold.py` / `sma_cross.py`)。
+- `POST /api/replay/control`: **N1 で新設**。**N1 で受理する action は `"speed"` のみ**。`pause` / `seek` を含む他 action は **400 Bad Request**。`play` は提供しない（streaming ループの開始は `/api/replay/start` に統一）。
 - `POST /api/agent/narrative`: **N1 で新設**（H5）。nautilus `Strategy` フックから Python が叩く。
 
 **発注 UI の所在（Q7 決定）**: 発注入力 UI は Python tkinter に統一。iced は監視・表示のみ。
