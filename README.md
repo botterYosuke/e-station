@@ -41,11 +41,11 @@ cargo run -- --mode replay
 ## スクリーンショット
 
 <p align="center">
-  <img src="docs/wiki/assets/flowsurface-panes.png" alt="multi-pane layouts" width="100%" />
+  <img src="https://raw.githubusercontent.com/wiki/botterYosuke/e-station/assets/flowsurface-panes.png" alt="multi-pane layouts" width="100%" />
 </p>
 
 <p align="center">
-  <img src="docs/wiki/assets/heatmap.png" alt="heatmap view" width="100%" />
+  <img src="https://raw.githubusercontent.com/wiki/botterYosuke/e-station/assets/heatmap.png" alt="heatmap view" width="100%" />
 </p>
 
 ## クイックスタート
@@ -103,7 +103,7 @@ curl -X POST http://127.0.0.1:9876/api/replay/load ^
 | 本番 URL への発注 | `TACHIBANA_ALLOW_PROD=1` を明示 |
 | `/api/order/submit` を有効化 | `FLOWSURFACE_ORDER_GUARD_ENABLED=1` を設定 |
 | replay | J-Quants データを配置 |
-| replay 補助スクリプト | `REPLAY_INSTRUMENT_ID` / `REPLAY_START_DATE` / `REPLAY_END_DATE` を設定 |
+| replay 補助スクリプト | `bash scripts/run-replay-debug.sh <strategy.py> <instrument_id> <start_date> <end_date>` |
 
 ひな形は [.env.example](.env.example) を参照してください。
 

@@ -1,47 +1,31 @@
 #!/usr/bin/env bash
 # Dev helper: wait for replay HTTP server, then POST load + start.
 #
-# Usage (VSCode task):
-#   bash scripts/replay_dev_load.sh <strategy_file>
+# Usage:
+#   bash scripts/replay_dev_load.sh <strategy_file> <instrument_id> <start_date> <end_date> [granularity]
 #
-# Required env vars:
-#   REPLAY_INSTRUMENT_ID  — e.g. 1301.TSE
-#   REPLAY_START_DATE     — e.g. 2025-01-06  (YYYY-MM-DD)
-#   REPLAY_END_DATE       — e.g. 2025-03-31  (YYYY-MM-DD)
+# Arguments:
+#   strategy_file  — path to strategy .py file (e.g. docs/example/buy_and_hold.py)
+#   instrument_id  — e.g. 1301.TSE
+#   start_date     — e.g. 2025-01-06  (YYYY-MM-DD)
+#   end_date       — e.g. 2025-03-31  (YYYY-MM-DD)
+#   granularity    — Daily | Minute | Trade  (default: Daily)
 #
 # Optional env vars:
-#   REPLAY_GRANULARITY    (default: Daily)
 #   REPLAY_INITIAL_CASH   (default: 1000000)
 #   REPLAY_STRATEGY_ID    (default: user-strategy)
 #   PORT                  (default: 9876)
 
 set -uo pipefail
 
-# VSCode の preLaunchTask 経由など、シェル環境に env var が無い経路でも動くよう
-# `.env` を自動 source する（run-replay-debug.sh と同じ方式）。
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ -f "$REPO_ROOT/.env" ]]; then
-    set -o allexport
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.env"
-    set +o allexport
-fi
-
-STRATEGY_FILE="${1:-}"
+STRATEGY_FILE="${1:?strategy_file is required (e.g. docs/example/buy_and_hold.py)}"
+INSTRUMENT_ID="${2:?instrument_id is required (e.g. 1301.TSE)}"
+START_DATE="${3:?start_date is required (e.g. 2025-01-06)}"
+END_DATE="${4:?end_date is required (e.g. 2025-03-31)}"
+GRANULARITY="${5:-Daily}"
 PORT="${PORT:-9876}"
-INSTRUMENT_ID="${REPLAY_INSTRUMENT_ID:?REPLAY_INSTRUMENT_ID is required (e.g. export REPLAY_INSTRUMENT_ID=1301.TSE)}"
-START_DATE="${REPLAY_START_DATE:?REPLAY_START_DATE is required (e.g. export REPLAY_START_DATE=2025-01-06)}"
-END_DATE="${REPLAY_END_DATE:?REPLAY_END_DATE is required (e.g. export REPLAY_END_DATE=2025-03-31)}"
-GRANULARITY="${REPLAY_GRANULARITY:-Daily}"
 INITIAL_CASH="${REPLAY_INITIAL_CASH:-1000000}"
 STRATEGY_ID="${REPLAY_STRATEGY_ID:-user-strategy}"
-
-if [[ -z "$STRATEGY_FILE" ]]; then
-    echo "[replay-load] ERROR: strategy_file is required"
-    echo "  Usage: bash scripts/replay_dev_load.sh <strategy.py>"
-    echo "  Example: bash scripts/replay_dev_load.sh docs/example/buy_and_hold.py"
-    exit 1
-fi
 
 log() { printf '[replay-load] %s\n' "$*"; }
 
@@ -71,7 +55,7 @@ print(json.dumps({
 }))
 " "$INSTRUMENT_ID" "$START_DATE" "$END_DATE" "$GRANULARITY")
 
-log "POST /api/replay/load  strategy_file=${STRATEGY_FILE:-<none>}"
+log "POST /api/replay/load  strategy_file=$STRATEGY_FILE"
 load_resp=$(curl -sS -w '\n%{http_code}' -X POST \
     -H 'Content-Type: application/json' \
     --data "$load_body" \

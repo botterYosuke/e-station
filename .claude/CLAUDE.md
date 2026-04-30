@@ -159,11 +159,7 @@ VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vsc
 #### サンプル戦略を流す最小コマンド
 
 ```bash
-REPLAY_INSTRUMENT_ID=1301.TSE \
-REPLAY_START_DATE=2025-01-06 \
-REPLAY_END_DATE=2025-03-31 \
-REPLAY_GRANULARITY=Daily \
-bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py
+bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31
 ```
 
 `run-replay-debug.sh` は以下を一気にやる：
@@ -179,18 +175,27 @@ bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py
 |---------|------|
 | `buy_and_hold.py` | 最初のバーで成行買いし、以降は保有し続ける最小戦略 |
 
-#### 必須・任意 env var
+#### 引数一覧
 
-`run-replay-debug.sh` の先頭で `:?` チェックされるので未設定だと即終了する：
+```
+run-replay-debug.sh <strategy_file> <instrument_id> <start_date> <end_date> [granularity]
+replay_dev_load.sh  <strategy_file> <instrument_id> <start_date> <end_date> [granularity]
+```
 
-| 変数 | 必須 | 例 |
+| 位置 | 必須 | 例 |
 |------|------|-----|
-| `REPLAY_INSTRUMENT_ID` | ✅ | `1301.TSE` |
-| `REPLAY_START_DATE` | ✅ | `2025-01-06` (ISO8601) |
-| `REPLAY_END_DATE` | ✅ | `2025-03-31` (ISO8601) |
-| `REPLAY_GRANULARITY` | 任意（既定 `Daily`） | `Daily` / `Minute` / `Trade` |
-| `REPLAY_INITIAL_CASH` | 任意（既定 `1000000`） | 円単位 |
-| `REPLAY_STRATEGY_ID` | 任意（既定 `user-strategy`） | 任意の識別子 |
+| `$1` strategy_file | ✅ | `docs/example/buy_and_hold.py` |
+| `$2` instrument_id | ✅ | `1301.TSE` |
+| `$3` start_date | ✅ | `2025-01-06` (ISO8601) |
+| `$4` end_date | ✅ | `2025-03-31` (ISO8601) |
+| `$5` granularity | 任意（既定 `Daily`） | `Daily` / `Minute` / `Trade` |
+
+任意パラメータは引き続き env var で上書き可：
+
+| 変数 | 既定値 |
+|------|--------|
+| `REPLAY_INITIAL_CASH` | `1000000`（円） |
+| `REPLAY_STRATEGY_ID` | `user-strategy` |
 
 #### J-Quants データの場所
 
