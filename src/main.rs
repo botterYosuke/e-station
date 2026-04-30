@@ -8,6 +8,7 @@ mod connector;
 mod layout;
 mod logger;
 mod modal;
+mod native_menu;
 mod notify;
 mod replay_api;
 mod screen;
@@ -744,6 +745,9 @@ struct Flowsurface {
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
     /// Cleared by `Message::DismissStrategyLoadError`.
     strategy_load_error: Option<String>,
+    /// Pending destination path for the "Save As" native menu action.
+    /// Set by `NativeSaveAsPath`, consumed by `NativeSaveAsWithSpecs`.
+    pending_save_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -882,6 +886,18 @@ enum Message {
     DismissStrategyLoadError,
     /// Replay engine finished — auto-refresh the order list.
     ReplayFinished,
+    /// Native OS menu bar: HWND / window handle received; attach muda menu.
+    NativeMenuSetup(u64),
+    /// Native OS menu bar: user selected a menu item.
+    NativeMenuAction(native_menu::Action),
+    /// Native OS menu bar — Save As: user picked a destination path.
+    NativeSaveAsPath(Option<std::path::PathBuf>),
+    /// Native OS menu bar — Save As: window specs collected, ready to write.
+    NativeSaveAsWithSpecs(HashMap<window::Id, WindowSpec>),
+    /// Native OS menu bar — Open: JSON string read from the user-picked file.
+    NativeOpenFileApply(String),
+    /// Native OS menu bar — Open: dialog cancelled (user closed the picker).
+    NativeOpenFileCancelled,
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1162,6 +1178,39 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
 /// `Order` sidebar menus rendered the overlay, which made dashboard-pane
 /// `OrderEntry` confirm dialogs silently invisible (debug-honda incident,
 /// 2026-04-30).
+fn status_bar_label(is_replay: bool) -> &'static str {
+    if is_replay { "● REPLAY" } else { "● LIVE" }
+}
+
+fn status_bar_dot_color(is_replay: bool) -> iced::Color {
+    if is_replay {
+        iced::Color::from_rgb(0.9, 0.6, 0.1)
+    } else {
+        iced::Color::from_rgb(0.2, 0.75, 0.3)
+    }
+}
+
+const STATUS_BAR_HEIGHT: u32 = 20;
+const STATUS_BAR_BG: iced::Color = iced::Color::from_rgb(0.08, 0.08, 0.08);
+
+fn status_bar(is_replay: bool) -> Element<'static, Message> {
+    container(
+        text(status_bar_label(is_replay))
+            .size(11)
+            .color(status_bar_dot_color(is_replay)),
+    )
+    .width(iced::Length::Fill)
+    .height(STATUS_BAR_HEIGHT)
+    .align_y(Alignment::Center)
+    .padding(padding::left(8))
+    .style(|_theme| container::Style {
+        background: Some(STATUS_BAR_BG.into()),
+        snap: true,
+        ..Default::default()
+    })
+    .into()
+}
+
 fn apply_confirm_dialog_overlay<'a>(
     content: Element<'a, Message>,
     dialog: Option<&'a screen::ConfirmDialog<Message>>,
@@ -1284,6 +1333,7 @@ impl Flowsurface {
                 }),
             replay_strategy_file: None,
             strategy_load_error: None,
+            pending_save_path: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -1301,11 +1351,14 @@ impl Flowsurface {
                 .id,
         );
         let load_layout = state.load_layout(active_layout_id.unique, main_window_id);
+        let setup_native_menu =
+            iced::window::raw_id::<Message>(main_window_id).map(Message::NativeMenuSetup);
 
         (
             state,
             open_main_window
                 .discard()
+                .chain(setup_native_menu)
                 .chain(load_layout)
                 .chain(launch_sidebar.map(Message::Sidebar)),
         )
@@ -1517,41 +1570,42 @@ impl Flowsurface {
                 };
 
                 // Auto-fetch order list on venue ready if a pane is visible.
-                let auto_fetch_orders = if is_ready
-                    && self.active_dashboard().has_order_list_pane(main_window)
-                {
-                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                        Task::perform(
-                            async move {
-                                conn.send(engine_client::dto::Command::GetOrderList {
-                                    request_id: uuid::Uuid::new_v4().to_string(),
-                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
-                                    filter: engine_client::dto::OrderListFilter {
-                                        status: None,
-                                        instrument_id: None,
-                                        date: None,
-                                    },
-                                })
-                                .await
-                                .map_err(|e| e.to_string())
-                            },
-                            |res| match res {
-                                Ok(()) => Message::OrderToast(Toast::info(
-                                    "注文一覧を取得中...".to_string(),
-                                )),
-                                Err(err) => Message::OrderToast(Toast::error(format!(
-                                    "注文一覧取得失敗: {err}"
-                                ))),
-                            },
-                        )
+                let auto_fetch_orders =
+                    if is_ready && self.active_dashboard().has_order_list_pane(main_window) {
+                        if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                            Task::perform(
+                                async move {
+                                    conn.send(engine_client::dto::Command::GetOrderList {
+                                        request_id: uuid::Uuid::new_v4().to_string(),
+                                        venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                        filter: engine_client::dto::OrderListFilter {
+                                            status: None,
+                                            instrument_id: None,
+                                            date: None,
+                                        },
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                },
+                                |res| match res {
+                                    Ok(()) => Message::OrderToast(Toast::info(
+                                        "注文一覧を取得中...".to_string(),
+                                    )),
+                                    Err(err) => Message::OrderToast(Toast::error(format!(
+                                        "注文一覧取得失敗: {err}"
+                                    ))),
+                                },
+                            )
+                        } else {
+                            Task::none()
+                        }
                     } else {
                         Task::none()
-                    }
-                } else {
-                    Task::none()
-                };
+                    };
 
-                return replay.chain(auto_fetch_buying_power).chain(auto_fetch_orders);
+                return replay
+                    .chain(auto_fetch_buying_power)
+                    .chain(auto_fetch_orders);
             }
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
@@ -2043,9 +2097,7 @@ impl Flowsurface {
                                     if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                         let is_replay = APP_MODE
                                             .get()
-                                            .map(|m| {
-                                                *m == engine_client::dto::AppMode::Replay
-                                            })
+                                            .map(|m| *m == engine_client::dto::AppMode::Replay)
                                             .unwrap_or(false);
                                         let venue = if is_replay {
                                             "replay".to_string()
@@ -2263,10 +2315,129 @@ impl Flowsurface {
                             .await
                             .map_err(|e| e.to_string())
                         },
-                        |_res| Message::OrderToast(Toast::info("注文一覧を更新しました".to_string())),
+                        |_res| {
+                            Message::OrderToast(Toast::info("注文一覧を更新しました".to_string()))
+                        },
                     );
                 }
                 return Task::none();
+            }
+            // ── Native OS menu bar ──────────────────────────────────────────
+            Message::NativeMenuSetup(raw_id) => {
+                let app_mode = APP_MODE
+                    .get()
+                    .copied()
+                    .unwrap_or(engine_client::dto::AppMode::Live);
+                native_menu::attach(raw_id, app_mode);
+                return Task::none();
+            }
+            Message::NativeMenuAction(action) => {
+                use native_menu::Action;
+                match action {
+                    Action::OpenFile => {
+                        return Task::perform(
+                            async {
+                                // Returns None if the dialog was cancelled; Some(Result) otherwise.
+                                let handle = rfd::AsyncFileDialog::new()
+                                    .add_filter("JSON", &["json"])
+                                    .set_title("設定ファイルを開く")
+                                    .pick_file()
+                                    .await?;
+                                let bytes = handle.read().await;
+                                Some(String::from_utf8(bytes).map_err(|e| e.to_string()))
+                            },
+                            |result| match result {
+                                None => Message::NativeOpenFileCancelled,
+                                Some(Ok(json)) => Message::NativeOpenFileApply(json),
+                                Some(Err(e)) => Message::OrderToast(Toast::error(format!(
+                                    "ファイルを読み込めませんでした: {e}"
+                                ))),
+                            },
+                        );
+                    }
+                    Action::SaveAs => {
+                        return Task::perform(
+                            async {
+                                rfd::AsyncFileDialog::new()
+                                    .add_filter("JSON", &["json"])
+                                    .set_file_name("saved-state.json")
+                                    .set_title("名前を付けて保存")
+                                    .save_file()
+                                    .await
+                                    .map(|h| h.path().to_owned())
+                            },
+                            Message::NativeSaveAsPath,
+                        );
+                    }
+                    Action::OpenStrategy => {
+                        return Task::perform(
+                            async {
+                                rfd::AsyncFileDialog::new()
+                                    .add_filter("Python", &["py"])
+                                    .set_title("ストラテジーファイルを開く")
+                                    .pick_file()
+                                    .await
+                                    .map(|h| h.path().to_owned())
+                            },
+                            Message::StrategyFilePicked,
+                        );
+                    }
+                }
+            }
+            Message::NativeSaveAsPath(Some(path)) => {
+                self.pending_save_path = Some(path);
+                let mut active_windows: Vec<window::Id> =
+                    self.active_dashboard().popout.keys().copied().collect();
+                active_windows.push(self.main_window.id);
+                return window::collect_window_specs(
+                    active_windows,
+                    Message::NativeSaveAsWithSpecs,
+                );
+            }
+            Message::NativeSaveAsPath(None) => {
+                return Task::none();
+            }
+            Message::NativeSaveAsWithSpecs(windows) => {
+                let Some(path) = self.pending_save_path.take() else {
+                    return Task::none();
+                };
+                if let Some(json) = self.build_state_json(&windows) {
+                    match std::fs::write(&path, &json) {
+                        Ok(()) => {
+                            log::info!("Saved state to {}", path.display());
+                            self.notifications
+                                .push(Toast::info(format!("保存しました: {}", path.display())));
+                        }
+                        Err(e) => {
+                            log::error!("Failed to write to {}: {e}", path.display());
+                            self.notifications
+                                .push(Toast::error(format!("保存に失敗しました: {e}")));
+                        }
+                    }
+                }
+                return Task::none();
+            }
+            Message::NativeOpenFileCancelled => {
+                return Task::none();
+            }
+            Message::NativeOpenFileApply(json) => {
+                // Validate the JSON parses as a known state before overwriting.
+                match serde_json::from_str::<data::State>(&json) {
+                    Ok(_) => {
+                        if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
+                            log::error!("Failed to write imported state: {e}");
+                            self.notifications
+                                .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
+                            return Task::none();
+                        }
+                        return self.restart();
+                    }
+                    Err(e) => {
+                        self.notifications
+                            .push(Toast::error(format!("無効な設定ファイルです: {e}")));
+                        return Task::none();
+                    }
+                }
             }
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
             Message::ExecutionMarkerReceived {
@@ -2342,12 +2513,12 @@ impl Flowsurface {
                             .map_err(|e| e.to_string())
                     },
                     |res| match res {
-                        Ok(()) => Message::OrderToast(Toast::info(
-                            "注文一覧を取得中...".to_string(),
-                        )),
-                        Err(err) => Message::OrderToast(Toast::error(format!(
-                            "注文一覧取得失敗: {err}"
-                        ))),
+                        Ok(()) => {
+                            Message::OrderToast(Toast::info("注文一覧を取得中...".to_string()))
+                        }
+                        Err(err) => {
+                            Message::OrderToast(Toast::error(format!("注文一覧取得失敗: {err}")))
+                        }
                     },
                 );
 
@@ -2365,9 +2536,9 @@ impl Flowsurface {
                             .map_err(|e| e.to_string())
                         },
                         move |res| match res {
-                            Ok(()) => Message::OrderToast(Toast::info(
-                                "余力情報を取得中...".to_string(),
-                            )),
+                            Ok(()) => {
+                                Message::OrderToast(Toast::info("余力情報を取得中...".to_string()))
+                            }
                             Err(err) => Message::IpcError {
                                 request_id: Some(req_id_for_err),
                                 code: "send_failed".to_string(),
@@ -2986,14 +3157,21 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
+            let is_replay = APP_MODE
+                .get()
+                .map(|&m| m == engine_client::dto::AppMode::Replay)
+                .expect("APP_MODE must be initialised after CLI parsing");
+
             base = base.push(
                 match sidebar_pos {
                     sidebar::Position::Left => row![sidebar_view, dashboard_view,],
                     sidebar::Position::Right => row![dashboard_view, sidebar_view],
                 }
                 .spacing(4)
-                .padding(8),
+                .padding(8)
+                .height(iced::Length::Fill),
             );
+            base = base.push(status_bar(is_replay));
 
             if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
@@ -3090,6 +3268,7 @@ impl Flowsurface {
             hotkeys,
             engine_status,
             Subscription::run(replay_api_stream),
+            native_menu::subscription().map(Message::NativeMenuAction),
         ])
     }
 
@@ -3558,15 +3737,15 @@ impl Flowsurface {
         }
     }
 
-    fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
-        // replay モードでは live 設定を上書きしない
+    /// Build the current application state as a JSON string.
+    /// Returns `None` in replay mode (must not overwrite live settings).
+    fn build_state_json(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> Option<String> {
         if APP_MODE
             .get()
             .map(|m| *m == engine_client::dto::AppMode::Replay)
             .unwrap_or(false)
         {
-            log::info!("replay mode: skipping save_state_to_disk");
-            return;
+            return None;
         }
 
         self.active_dashboard_mut()
@@ -3606,7 +3785,6 @@ impl Flowsurface {
             .map(|(_, spec)| *spec);
 
         let audio_cfg = data::AudioStream::from(&self.audio_stream);
-
         let proxy_cfg_persisted = self.network.proxy_cfg().map(|p| p.without_auth());
 
         let state = data::State::from_parts(
@@ -3624,15 +3802,24 @@ impl Flowsurface {
         );
 
         match serde_json::to_string(&state) {
-            Ok(layout_str) => {
-                let file_name = data::SAVED_STATE_PATH;
-                if let Err(e) = data::write_json_to_file(&layout_str, file_name) {
-                    log::error!("Failed to write layout state to file: {}", e);
-                } else {
-                    log::info!("Persisted state to {file_name}");
-                }
+            Ok(json) => Some(json),
+            Err(e) => {
+                log::error!("Failed to serialize layout: {}", e);
+                None
             }
-            Err(e) => log::error!("Failed to serialize layout: {}", e),
+        }
+    }
+
+    fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
+        if let Some(json) = self.build_state_json(windows) {
+            let file_name = data::SAVED_STATE_PATH;
+            if let Err(e) = data::write_json_to_file(&json, file_name) {
+                log::error!("Failed to write layout state to file: {}", e);
+            } else {
+                log::info!("Persisted state to {file_name}");
+            }
+        } else {
+            log::info!("replay mode: skipping save_state_to_disk");
         }
     }
 
@@ -3651,7 +3838,18 @@ impl Flowsurface {
         let (new_state, init_task) = Flowsurface::new();
         *self = new_state;
 
-        close_windows.chain(init_task)
+        // `engine_status_stream` keeps running from where it was (same subscription
+        // ID in iced 0.14) and will NOT re-emit `EngineConnected`.  If Tachibana
+        // was already ready before the restart, synthesize `VenueEvent::Ready` so
+        // `tachibana_state` is restored — otherwise it would stay `Idle` until the
+        // next engine reconnect.
+        let venue_bootstrap = if cached_venue_is_ready(TACHIBANA_VENUE_NAME) {
+            Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready))
+        } else {
+            Task::none()
+        };
+
+        close_windows.chain(init_task).chain(venue_bootstrap)
     }
 }
 
@@ -3721,6 +3919,299 @@ mod confirm_dialog_overlay_tests {
         assert_eq!(
             count, 1,
             "confirm_dialog_container must be called exactly once (inside apply_confirm_dialog_overlay). Found {count} call sites in production code — likely a regression to per-menu overlay rendering."
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_menu_handler_tests {
+    //! Structural regression guards for the native OS menu bar handlers added in
+    //! 2026-04-30.
+    //!
+    //! Exercising `update()` directly requires a live iced runtime; these tests
+    //! instead use source-string inspection (same pattern as
+    //! `confirm_dialog_overlay_tests`) to verify the handler logic is intact, plus
+    //! pure Rust unit tests for the JSON validation path.
+
+    const MAIN_RS: &str = include_str!("./main.rs");
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Extract the source slice for a single handler arm.
+    ///
+    /// `arm_prefix` must uniquely identify the handler arm — include indentation
+    /// and `=>` so it cannot match message-construction sites (e.g.
+    /// `None => Message::Foo` vs `            Message::Foo =>`).
+    ///
+    /// The slice ends just before the next same-level `Message::` arm or EOF.
+    fn handler_body(arm_prefix: &str) -> &'static str {
+        let start = MAIN_RS
+            .find(arm_prefix)
+            .unwrap_or_else(|| panic!("handler arm not found: {arm_prefix}"));
+        let tail = &MAIN_RS[start..];
+        let end = tail[1..]
+            .find("\n            Message::")
+            .map(|i| i + 1)
+            .unwrap_or(tail.len());
+        &MAIN_RS[start..start + end]
+    }
+
+    // ── Test 2: NativeSaveAsPath(None) ────────────────────────────────────────
+
+    #[test]
+    fn save_as_path_none_does_not_push_toast() {
+        let body = handler_body("            Message::NativeSaveAsPath(None) =>");
+        assert!(
+            !body.contains("notifications.push"),
+            "NativeSaveAsPath(None) must not push any toast (user cancelled the dialog)"
+        );
+    }
+
+    #[test]
+    fn save_as_path_none_returns_task_none() {
+        let body = handler_body("            Message::NativeSaveAsPath(None) =>");
+        assert!(
+            body.contains("Task::none()"),
+            "NativeSaveAsPath(None) must return Task::none()"
+        );
+    }
+
+    // ── Test 3: NativeOpenFileCancelled ───────────────────────────────────────
+
+    #[test]
+    fn open_file_cancelled_does_not_push_toast() {
+        let body = handler_body("            Message::NativeOpenFileCancelled =>");
+        assert!(
+            !body.contains("notifications.push"),
+            "NativeOpenFileCancelled must not push any toast (user cancelled the dialog)"
+        );
+    }
+
+    #[test]
+    fn open_file_cancelled_returns_task_none() {
+        let body = handler_body("            Message::NativeOpenFileCancelled =>");
+        assert!(
+            body.contains("Task::none()"),
+            "NativeOpenFileCancelled must return Task::none()"
+        );
+    }
+
+    // ── Test 4a: NativeOpenFileApply — valid JSON branch ─────────────────────
+
+    #[test]
+    fn open_file_apply_validates_against_data_state() {
+        let body = handler_body("            Message::NativeOpenFileApply(json) =>");
+        assert!(
+            body.contains("serde_json::from_str::<data::State>"),
+            "NativeOpenFileApply must validate the JSON as data::State before overwriting"
+        );
+    }
+
+    #[test]
+    fn open_file_apply_valid_json_calls_write_and_restart() {
+        let body = handler_body("            Message::NativeOpenFileApply(json) =>");
+        assert!(
+            body.contains("data::write_json_to_file"),
+            "NativeOpenFileApply valid JSON branch must call data::write_json_to_file"
+        );
+        assert!(
+            body.contains("self.restart()"),
+            "NativeOpenFileApply valid JSON branch must call self.restart()"
+        );
+    }
+
+    // ── Test 4b: NativeOpenFileApply — invalid JSON branch ───────────────────
+
+    #[test]
+    fn open_file_apply_invalid_json_pushes_error_toast() {
+        let body = handler_body("            Message::NativeOpenFileApply(json) =>");
+        assert!(
+            body.contains("無効な設定ファイルです"),
+            "NativeOpenFileApply invalid JSON branch must push '無効な設定ファイルです' error toast"
+        );
+    }
+
+    #[test]
+    fn open_file_apply_invalid_json_does_not_restart() {
+        // Verify the Err(_) branch returns Task::none() and does NOT call restart.
+        // Locate the Err arm within the handler body.
+        let handler = handler_body("            Message::NativeOpenFileApply(json) =>");
+        let err_arm_start = handler
+            .find("Err(e) =>")
+            .expect("NativeOpenFileApply must have an Err arm for invalid JSON");
+        let err_body = &handler[err_arm_start..];
+        assert!(
+            !err_body.contains("self.restart()"),
+            "NativeOpenFileApply Err branch must NOT call self.restart()"
+        );
+        assert!(
+            err_body.contains("Task::none()"),
+            "NativeOpenFileApply Err branch must return Task::none()"
+        );
+    }
+
+    /// Pure JSON validation unit test — exercises the same `serde_json` call
+    /// used by the handler without needing a live iced runtime.
+    /// `data::State` carries `#[serde(default)]` so `{}` is valid.
+    #[test]
+    fn state_json_validation_accepts_empty_object() {
+        let result = serde_json::from_str::<data::State>("{}");
+        assert!(
+            result.is_ok(),
+            "empty JSON object must parse as default State (all fields have serde defaults)"
+        );
+    }
+
+    #[test]
+    fn state_json_validation_rejects_invalid_json() {
+        let cases = [
+            "not json at all",
+            "{\"layout_manager\": \"wrong_type\"}",
+            "",
+        ];
+        for input in cases {
+            let result = serde_json::from_str::<data::State>(input);
+            assert!(
+                result.is_err(),
+                "'{input}' should fail data::State validation"
+            );
+        }
+    }
+
+    // ── Test 5: build_state_json / save_state_to_disk regression ─────────────
+
+    #[test]
+    fn build_state_json_helper_exists() {
+        assert!(
+            MAIN_RS.contains("fn build_state_json("),
+            "build_state_json helper must exist — it is the shared serialisation path for both Save As and save_state_to_disk"
+        );
+    }
+
+    #[test]
+    fn save_state_to_disk_delegates_to_build_state_json() {
+        let idx = MAIN_RS
+            .find("fn save_state_to_disk(")
+            .expect("save_state_to_disk must exist");
+        let tail = &MAIN_RS[idx..];
+        let end = tail[1..]
+            .find("\n    fn ")
+            .map(|i| i + 1)
+            .unwrap_or(tail.len());
+        let body = &tail[..end];
+        assert!(
+            body.contains("build_state_json("),
+            "save_state_to_disk must delegate to build_state_json — they must stay in sync"
+        );
+    }
+
+    #[test]
+    fn save_as_with_specs_delegates_to_build_state_json() {
+        let body = handler_body("Message::NativeSaveAsWithSpecs(windows)");
+        assert!(
+            body.contains("build_state_json("),
+            "NativeSaveAsWithSpecs handler must call build_state_json — same serialisation path as save_state_to_disk"
+        );
+    }
+
+    // ── Regression: restart() must restore Tachibana venue state ─────────────
+    //
+    // Bug (2026-04-30): `File > 開く...` opening a valid JSON called
+    // `self.restart()` which replaced `*self` with `Flowsurface::new()`.
+    // `new()` initialises `tachibana_state = VenueState::Idle`.
+    // `engine_status_stream` is not restarted by iced (same subscription ID),
+    // so `EngineConnected` is never re-emitted and `tachibana_state` stays
+    // `Idle` permanently — the Tachibana login appeared to be lost.
+    //
+    // Fix: `restart()` synthesizes `VenueEvent::Ready` via
+    // `cached_venue_is_ready` if the venue cache says the login is still
+    // active, restoring the FSM to `Ready` after the new() reset.
+
+    #[test]
+    fn restart_synthesizes_venue_ready_from_cache() {
+        let idx = MAIN_RS.find("fn restart(").expect("restart() must exist");
+        let tail = &MAIN_RS[idx..];
+        let end = tail[1..]
+            .find("\n    fn ")
+            .map(|i| i + 1)
+            .unwrap_or(tail.len());
+        let body = &tail[..end];
+        assert!(
+            body.contains("cached_venue_is_ready"),
+            "restart() must call cached_venue_is_ready — without it, Tachibana \
+             login is permanently lost after 'File > 開く...' (tachibana_state \
+             stays Idle because engine_status_stream is not restarted by iced)"
+        );
+        assert!(
+            body.contains("VenueEvent::Ready"),
+            "restart() must synthesize VenueEvent::Ready when venue cache is hot — \
+             guards the regression where tachibana_state reset to Idle after file open"
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_bar_tests {
+    use super::*;
+
+    #[test]
+    fn t1_status_bar_label_replay() {
+        assert_eq!(status_bar_label(true), "● REPLAY");
+    }
+
+    #[test]
+    fn t2_status_bar_label_live() {
+        assert_eq!(status_bar_label(false), "● LIVE");
+    }
+
+    #[test]
+    fn t3_status_bar_dot_color_replay_is_amber() {
+        let color = status_bar_dot_color(true);
+        assert!(
+            (color.r - 0.9).abs() < f32::EPSILON,
+            "replay red component should be 0.9"
+        );
+        assert!(
+            (color.g - 0.6).abs() < f32::EPSILON,
+            "replay green component should be 0.6"
+        );
+        assert!(
+            (color.b - 0.1).abs() < f32::EPSILON,
+            "replay blue component should be 0.1"
+        );
+    }
+
+    #[test]
+    fn t4_status_bar_dot_color_live_is_green() {
+        let color = status_bar_dot_color(false);
+        assert!(
+            (color.r - 0.2).abs() < f32::EPSILON,
+            "live red component should be 0.2"
+        );
+        assert!(
+            (color.g - 0.75).abs() < f32::EPSILON,
+            "live green component should be 0.75"
+        );
+        assert!(
+            (color.b - 0.3).abs() < f32::EPSILON,
+            "live blue component should be 0.3"
+        );
+    }
+
+    #[test]
+    fn t5_status_bar_constants() {
+        assert_eq!(STATUS_BAR_HEIGHT, 20);
+        assert!(
+            (STATUS_BAR_BG.r - 0.08).abs() < f32::EPSILON,
+            "STATUS_BAR_BG red should be 0.08"
+        );
+        assert!(
+            (STATUS_BAR_BG.g - 0.08).abs() < f32::EPSILON,
+            "STATUS_BAR_BG green should be 0.08"
+        );
+        assert!(
+            (STATUS_BAR_BG.b - 0.08).abs() < f32::EPSILON,
+            "STATUS_BAR_BG blue should be 0.08"
         );
     }
 }

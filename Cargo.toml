@@ -78,6 +78,9 @@ zeroize.workspace = true
 xxhash-rust.workspace = true
 rfd = "0.15"
 
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+muda = { version = "0.15", default-features = false }
+
 [features]
 debug = ["iced/hot"]
 

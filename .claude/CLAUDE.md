@@ -347,11 +347,15 @@ uv run python scripts/smoke_tachibana_login.py
 
 | ファイル | 場所 | 役割 |
 |---------|------|------|
-| `saved-state.json` | `%APPDATA%\flowsurface\saved-state.json` | UI 状態（ペイン構成・ウィンドウサイズ）を起動時に復元する |
+| `saved-state.json` | `%APPDATA%\flowsurface\saved-state.json` | 起動時に「前回の状態」を開く役割。終了時に自動で書き出され、次回起動時に自動で読み込まれる |
 | `tachibana_orders.jsonl` | `~/.cache/flowsurface/engine/tachibana_orders.jsonl` | 発注 WAL。Python が書き、Rust が読む。重複発注防止に使う |
 
 - `saved-state.json` が残っていると前回の UI レイアウトが復元される。
   再現手順を書くときは「初期状態か保存済み状態か」を明記すること
+- 任意パスへの書き出し・読み込みは OS ネイティブメニューの `File > 名前を付けて保存...` /
+  `File > 開く...` 経由で行う（live モードのみ）。`File > 開く...` で読み込んだ JSON は
+  `saved-state.json` に上書き保存され、`self.restart()` で即座に反映される
+  （`src/native_menu.rs` / `docs/✅menu-and-footer/native-menu-bar-impl.md` 参照）
 - `tachibana_orders.jsonl` の WAL パスは `data_path` に依存する。
   パスを変えると別の WAL を参照するため、重複発注防止が効かなくなる。変更しないこと
 
