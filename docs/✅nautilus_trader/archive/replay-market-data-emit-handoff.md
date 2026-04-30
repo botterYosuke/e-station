@@ -18,7 +18,7 @@ CandlestickChart の購読配線** を実装してください。
 
 ## Goal
 
-`bash scripts/run-replay-debug.sh docs/example/sma_cross.py` 実行時に、
+`bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py` 実行時に、
 auto-generated CandlestickChart ペインに `1301.TSE` の Daily ローソクが順次描画され、
 TimeAndSales ペインに `Trades` がストリームされる状態にする。
 
@@ -61,7 +61,7 @@ TimeAndSales ペインに `Trades` がストリームされる状態にする。
 
 ### 4c. 自動生成 CandlestickChart の auto-bind
 
-- `bash scripts/run-replay-debug.sh docs/example/sma_cross.py` を実行し、
+- `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py` を実行し、
   CandlestickChart ペインに `1301.TSE` Daily ローソクが描画される
 - `[replay-load] start OK` 後、Rust ログに `engine ws read error` /
   `kline_stream: lagged` / `falling back to Binance` が **出ない**
@@ -74,7 +74,7 @@ TimeAndSales ペインに `Trades` がストリームされる状態にする。
 ### 全体
 
 - 既存テスト 1323 件（Python）+ 既存 cargo test workspace すべて pass
-- E2E 手動: `bash scripts/run-replay-debug.sh docs/example/sma_cross.py` で
+- E2E 手動: `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py` で
   ローソクが順次表示される（観測：30 秒以上）
 
 ## 実装スキル

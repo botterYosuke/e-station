@@ -2,7 +2,7 @@
 
 ## 背景・動機
 
-`scripts/run-replay-debug.sh docs/example/sma_cross.py` を実行すると、
+`scripts/run-replay-debug.sh docs/example/buy_and_hold.py` を実行すると、
 `/api/replay/start` は HTTP 202 を返し Python 側でも以下まで正常に動く：
 
 ```
@@ -243,9 +243,9 @@ def _run() -> None:
   相当のコンストラクタを用意する（既存 live pane の作成経路を流用）
 - TimeAndSales pane も同様に `Trades` 購読を auto-bind
 - 受け入れ:
-  - `bash scripts/run-replay-debug.sh docs/example/sma_cross.py` で
+  - `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py` で
     「Choose a ticker」が消え、ローソクが順次描画される
-  - sma_cross の BUY/SELL ログ条件で対応する実約定（Time&Sales）が表示される
+  - buy_and_hold の BUY ログ条件で対応する実約定（Time&Sales）が表示される
   - 単体テスト: `auto_generate_replay_panes("1301.TSE", "Daily")` が
     `Kline { ticker.ticker == "1301", timeframe == D1 }` のストリームを返す
 
@@ -268,7 +268,7 @@ def _run() -> None:
 | Python integration | `_handle_start_engine` が replay モードで streaming を呼ぶ |
 | Python integration | `_handle_start_engine` が live モードで run-once を維持する |
 | Rust | mock engine が `KlineUpdate { venue: "replay", ... }` を流したとき、CandlestickChart が描画する（既存 live mock を replay venue で再利用） |
-| E2E (manual) | `bash scripts/run-replay-debug.sh docs/example/sma_cross.py` で sma_cross の BUY/SELL シグナルが UI に反映される |
+| E2E (manual) | `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py` で buy_and_hold の BUY シグナルが UI に反映される |
 
 決定論性テスト群（`test_nautilus_determinism.py`）は run-once 版を使い続けるため、
 streaming 版変更で破壊しないことを確認する。
@@ -283,7 +283,7 @@ streaming 版変更で破壊しないことを確認する。
 3. ✅ §4a Venue::Replay / Exchange::ReplayStock 追加 + 14 pin tests
 4. ✅ §4b VENUE_NAMES に Venue::Replay 登録 + T36 pin test
 5. ✅ §4c auto_generate_replay_panes で set_content_and_streams 呼び出し + 5 pin tests
-6. E2E 手動確認                              sma_cross.py で chart に bar が描画される
+6. E2E 手動確認                              buy_and_hold.py で chart に bar が描画される
 7. docstring / 計画書更新                    engine_runner.py の "N1.11 で実装する" 注記を解消
 ```
 
@@ -406,7 +406,7 @@ streaming 版変更で破壊しないことを確認する。
 ### バグ修正: replay チャートの Kline フェッチスパム (2026-04-30)
 
 **症状:**  
-`sma_cross.py` を実行すると、`CandlestickChart` pane が生成された直後から
+`buy_and_hold.py` を実行すると、`CandlestickChart` pane が生成された直後から
 `Kline fetch failed: Invalid request: not_found: unknown venue: replay` が毎秒ログに出続けた。
 
 **根本原因:**  

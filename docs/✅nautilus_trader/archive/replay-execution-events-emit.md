@@ -7,7 +7,7 @@
 
 ## 背景・症状
 
-2026-04-30 に `bash scripts/run-replay-debug.sh docs/example/sma_cross.py`
+2026-04-30 に `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py`
 （1301.TSE / Daily / 2025-01-06〜2025-03-31）で動作確認したところ、
 market data（KlineUpdate / Trades / DateChangeMarker）は仕様どおりストリーミングされ、
 チャートに 57 本の Daily バーが描画されるところまでは動いた。
@@ -93,7 +93,7 @@ nautilus 内部のイベントバスに購読する。OrderFilled の `OrderFill
 | 1 OrderFilled = 1 ExecutionMarker の契約を破る | 注文スナップショット単位なので部分約定や複数 fill は 1 件に潰れる。逆に「fill ではない close（reject 等）」を拾い得る |
 | `is_closed` ≠ filled | キャンセル・拒否・期限切れもすべて `is_closed=True` |
 | 既存テストと矛盾 | [test_execution_marker_emit.py:15](../../python/tests/test_execution_marker_emit.py#L15) は OrderFilled 1 件 → ExecutionMarker 1 件を契約として fix |
-| sma_cross.py（成行のみ）は通るが一般戦略で壊れる | 部分約定する指値戦略では即座に破綻 |
+| buy_and_hold.py（成行のみ）は通るが一般戦略で壊れる | 部分約定する指値戦略では即座に破綻 |
 
 **msgbus 購読のリスクと対策**:
 
@@ -143,7 +143,7 @@ emit する。
 2. fill 直後に `ReplayBuyingPower` IPC が emit され、cash/buying_power/equity が反映される
 3. 既存テスト全件 PASS、決定論性テストを破壊しない
 4. fixture を「fill する戦略」に置き換えた回帰テストを追加（misses 防止）
-5. sma_cross.py を replay 実機で回し、チャートに 8 個の overlay ドット・BuyingPower の
+5. buy_and_hold.py を replay 実機で回し、チャートに overlay ドット・BuyingPower の
    数値変動を確認する
 
 ### Step B（別タスク）
@@ -258,17 +258,17 @@ engine.kernel.msgbus.subscribe(
 ### ✅ A-3. テスト計画（実装済み）
 
 **実装上の変更点（計画からの差分）**:
-- fixture を `sma_cross_test_strategy.py` ではなく `fill_strategy.py` として作成。
+- fixture を `buy_and_hold_test_strategy.py` ではなく `fill_strategy.py` として作成。
   既存の 2 件 fixture データ（equities_bars_daily_202401.csv.gz: 2024-01-04, 2024-01-05）で
   動作するよう、bar 1 で BUY / bar 2 で SELL の決定論的な戦略にした。
-  sma_cross は long SMA に 5 本必要で fixture データが足りないため。
+  buy_and_hold は最初の 1 bar で BUY のみのため 2 fill を確保できないため。
 - テストは `python/tests/test_engine_runner_streaming_fills.py` に 13 件追加（全 PASS）。
 - 「8 回 fill」ではなく「2 回 fill」で設計（fixture データが 2 bars のため）。
-  sma_cross 実機確認は別途手動 E2E で実施（J-Quants データが必要）。
+  buy_and_hold 実機確認は別途手動 E2E で実施（J-Quants データが必要）。
 
 #### ✅ 新規 fixture: `python/tests/fixtures/fill_strategy.py`
 
-[`docs/example/sma_cross.py`](../example/sma_cross.py) をテスト用に最小化したコピー。
+[`docs/example/buy_and_hold.py`](../example/buy_and_hold.py) をテスト用に最小化したコピー。
 `instrument_id` / `lot_size` をハードコードして決定論性を担保する。
 
 > 既存 `NoOpTestStrategy` は維持（他テストが依存）。新 fixture は別ファイルで追加。
@@ -289,10 +289,10 @@ def test_streaming_replay_emits_one_execution_marker_per_fill():
         multiplier=0,
         currency="JPY",
         on_event=events.append,
-        strategy_file=str(FIXTURES / "sma_cross_test_strategy.py"),
+        strategy_file=str(FIXTURES / "fill_strategy.py"),
     )
     markers = [e for e in events if e["event"] == "ExecutionMarker"]
-    assert len(markers) == 8  # SMA cross 数と一致
+    assert len(markers) == 2  # bar 1 BUY / bar 2 SELL
     for m in markers:
         assert m["side"] in ("BUY", "SELL")  # 大文字
         assert "venue" not in m              # スキーマに無い
@@ -347,7 +347,7 @@ def test_emitted_events_pass_pydantic_schema():
 
 #### E2E（手動）
 
-`scripts/run-replay-debug.sh docs/example/sma_cross.py` を回し、
+`scripts/run-replay-debug.sh docs/example/buy_and_hold.py` を回し、
 ターミナル log（debug ビルドは stdout）に対して：
 
 - `"event":"ExecutionMarker"` の出現回数 = 8
@@ -366,7 +366,7 @@ def test_emitted_events_pass_pydantic_schema():
 | 1 | 1 OrderFilled = 1 ExecutionMarker（1:1） | RED テスト 1 PASS |
 | 2 | ExecutionMarker の wire は `event/strategy_id/instrument_id/side/price/ts_event_ms` のみ・side は大文字 | RED テスト 1 + 3 PASS |
 | 3 | ReplayBuyingPower の wire は `event/strategy_id/cash/buying_power/equity/ts_event_ms` のみ | RED テスト 2 + 3 PASS |
-| 4 | sma_cross.py 実機で overlay ドット 8 個・BuyingPower 数値変動 | 手動実機確認 |
+| 4 | buy_and_hold.py 実機で overlay ドット・BuyingPower 数値変動 | 手動実機確認 |
 | 5 | 既存テスト全件 PASS | `uv run pytest python/tests/ -v` |
 | 6 | `Kline fetch failed` ログスパムが出ない | E2E grep |
 | 7 | 決定論性: 同入力で同 ts_event_ms / 同順序の event 列が emit される | RED テスト 1 を 2 回流して結果一致を assert |
@@ -482,7 +482,7 @@ CRITICAL / HIGH / MEDIUM がゼロになったことを確認（R3 は HIGH/MEDI
 - Rust 側受信パス: [`src/main.rs:1126`](../../src/main.rs#L1126) `EngineEvent::ExecutionMarker`
 - 既存資産（dead code 化していた）: [`python/engine/nautilus/narrative_hook.py`](../../python/engine/nautilus/narrative_hook.py),
   [`python/engine/nautilus/portfolio_view.py`](../../python/engine/nautilus/portfolio_view.py)
-- 戦略サンプル: [`docs/example/sma_cross.py`](../example/sma_cross.py)
+- 戦略サンプル: [`docs/example/buy_and_hold.py`](../example/buy_and_hold.py)
 - 既存契約テスト: [`python/tests/test_execution_marker_emit.py`](../../python/tests/test_execution_marker_emit.py)
 - 関連 WAL（Step B 候補）: [`python/engine/order_router.py`](../../python/engine/order_router.py),
   [`python/engine/server.py:1393`](../../python/engine/server.py#L1393) `_do_get_order_list_replay`

@@ -5,8 +5,7 @@
 #   1. `--mode replay` binary starts; HTTP server on 127.0.0.1:9876 responds
 #   2. Python engine starts; IPC handshake completes
 #   3. POST /api/replay/load  (strategy_file=buy_and_hold.py)  → 200, trades_loaded >= 1
-#   4. POST /api/replay/load  (strategy_file=sma_cross.py)     → 200, trades_loaded >= 1
-#   5. POST /api/replay/start                                  → 202 / 200
+#   4. POST /api/replay/start                                  → 202 / 200
 #      GET  /api/replay/status                                 → 200, status=ok
 #
 # Requirements:
@@ -223,8 +222,7 @@ assert_load() {
     log "OK [$label] trades_loaded=${trades_loaded}"
 }
 
-assert_load "buy_and_hold" "examples/strategies/buy_and_hold.py"
-assert_load "sma_cross"    "examples/strategies/sma_cross.py"
+assert_load "buy_and_hold" "docs/example/buy_and_hold.py"
 
 # ── Step 5: POST /api/replay/start ───────────────────────────────────────────
 

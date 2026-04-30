@@ -163,7 +163,7 @@ REPLAY_INSTRUMENT_ID=1301.TSE \
 REPLAY_START_DATE=2025-01-06 \
 REPLAY_END_DATE=2025-03-31 \
 REPLAY_GRANULARITY=Daily \
-bash scripts/run-replay-debug.sh docs/example/sma_cross.py
+bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py
 ```
 
 `run-replay-debug.sh` は以下を一気にやる：
@@ -177,7 +177,7 @@ bash scripts/run-replay-debug.sh docs/example/sma_cross.py
 
 | ファイル | 内容 |
 |---------|------|
-| `sma_cross.py` | 短期/長期 SMA クロスでエントリー・クローズ |
+| `buy_and_hold.py` | 最初のバーで成行買いし、以降は保有し続ける最小戦略 |
 
 #### 必須・任意 env var
 

@@ -93,7 +93,7 @@ curl -X POST http://127.0.0.1:9876/api/replay/load \
 
 # 2. 戦略を指定してバックテスト開始
 curl -X POST http://127.0.0.1:9876/api/replay/start \
-  -d '{"instrument_id":"7203.TSE","start_date":"2024-01-01","end_date":"2024-12-31","granularity":"Daily","strategy_id":"user-defined","initial_cash":"1000000","strategy_file":"examples/strategies/sma_cross.py","strategy_init_kwargs":{"instrument_id":"7203.TSE","short":5,"long":20,"lot_size":100}}'
+  -d '{"instrument_id":"7203.TSE","start_date":"2024-01-01","end_date":"2024-12-31","granularity":"Daily","strategy_id":"user-defined","initial_cash":"1000000","strategy_file":"docs/example/buy_and_hold.py","strategy_init_kwargs":{"instrument_id":"7203.TSE","lot_size":100}}'
 ```
 
 詳細は [docs/wiki/backtest.md](../../wiki/backtest.md) を参照。

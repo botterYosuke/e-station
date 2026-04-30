@@ -335,6 +335,7 @@ Rust 統合テストで繰り返し見つかる品質問題を優先確認する
 - 互換不変条件（境界に漏出してはならない用語の集合）が機械検証できるよう lint タスク化されているか
 - config キー名が docs に明示されているか（実装で骨抜きになる最大の温床）
 - UI / frontend 再構成計画では、既存機能の parity 条件が「表示できる」ではなく「主要操作・設定変更・購読 lifecycle・overlay / indicator / sync-all 等の振る舞いまで維持」に上がっているか
+- 固定 footer / header / status bar / toolbar を追加する plan では、既存 modal / toast / overlay / bottom sheet の配置基準がその新要素込みでずれないか確認する
 
 ### 観点 D — 追加チェック
 
@@ -369,6 +370,23 @@ Rust 統合テストで繰り返し見つかる品質問題を優先確認する
 - main から pane へ注入される event fanout が、新構成でも届く前提になっているか確認する
 - 機能保持の acceptance が pane 種別ごとに書かれているか確認する
 - lifecycle 契約（購読 cancel、aggregator drop、registry unregister、focus 移譲など）が plan に明文化されているか確認する
+
+### 観点 G — 固定レイアウト追加時の基準面と重なり順
+
+footer / status bar / header のような固定レイアウト追加は見た目の差分が小さくても、既存 overlay の基準面を静かに壊しやすい。計画レビューでも「要素を足せるか」ではなく、「既存 modal / toast / badge / drawer がどの bounds を基準に置かれているか」を先に見る。
+
+- `base.push(...)` の追加先が、そのまま modal / overlay helper に渡される経路か確認する
+- bottom-aligned / top-aligned overlay が新設固定要素ぶん押し出されるか、逆に重なるかを確認する
+- `view_with_modal` / `dashboard_modal` / toast manager のような既存 helper が content 全体 bounds を使うのか、inner layout bounds を使うのか確認する
+- 「overlay が全画面を覆うから大丈夫」と文書で仮定せず、現行実装の opacity・padding・anchor を見て事実確認する
+- popout 非表示や main window 限定の条件だけで安心せず、main 側の overlay 配置が回帰しないかを別観点で確認する
+
+特に findings 候補として先に疑う。
+
+- 固定 footer を `base` に追加した結果、既存の下寄せ modal が footer に重なる
+- status bar 追加後に toast の表示開始位置が footer の内側へ食い込む
+- main window 専用要素の追加で popout は無事でも、main の overlay helper が別 bounds を取って見た目だけ崩れる
+- plan が `Length::Fill` や `padding` の調整だけを述べ、既存 overlay の再配置条件を書いていない
 
 pin 不足を疑う例:
 
