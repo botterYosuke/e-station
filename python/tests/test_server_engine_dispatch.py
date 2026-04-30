@@ -58,6 +58,7 @@ _REQUIRED_ATTRS: dict[str, object] = {
     "_replay_portfolio": None,  # N1.16: PortfolioView
     "_replay_strategy_id": None,
     "_cache_dir": None,  # _do_get_order_list_replay が参照
+    "_replay_streaming_fills": None,  # N1.13: streaming replay 約定蓄積
 }
 
 
@@ -93,6 +94,7 @@ def _make_server(mode: str = "replay"):
         "_replay_portfolio": PortfolioView(Decimal("1000000")),  # N1.16
         "_replay_strategy_id": "",
         "_cache_dir": Path("/tmp/test-engine-cache"),
+        "_replay_streaming_fills": [],  # N1.13: streaming replay 約定蓄積
     }
     # _REQUIRED_ATTRS に列挙された属性をすべて設定する。差分があれば KeyError で
     # 検出する (silent 黙殺防止)。
