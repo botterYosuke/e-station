@@ -103,10 +103,16 @@ class TestStreamingFillsEmitReplayBuyingPower:
     """ReplayBuyingPower の emit 件数・フィールド・残高変動を検証する。"""
 
     def test_emits_buying_power_per_fill(self) -> None:
-        """fill ごとに ReplayBuyingPower が 1 件 emit される。"""
+        """fill + per-bar mark-to-market で ReplayBuyingPower が 3 件 emit される。
+
+        イベント内訳（2-bar fixture: 2024-01-04 BUY / 2024-01-05 SELL）:
+          1. bar 1 BUY fill → ReplayBuyingPower（cash 減少）
+          2. bar 2 open → ポジション保有中に bar が進む → ReplayBuyingPower（equity 更新）
+          3. bar 2 SELL fill → ReplayBuyingPower（cash 増加・ポジションクローズ）
+        """
         events = _run_and_collect()
         bp_events = [e for e in events if e["event"] == "ReplayBuyingPower"]
-        assert len(bp_events) == 2
+        assert len(bp_events) == 3
 
     def test_buying_power_has_exact_schema_fields(self) -> None:
         """ReplayBuyingPower のフィールドが IPC スキーマに完全一致。
@@ -130,12 +136,18 @@ class TestStreamingFillsEmitReplayBuyingPower:
         assert Decimal(bp_events[0]["cash"]) < Decimal("1000000")
 
     def test_buying_power_cash_increases_on_sell(self) -> None:
-        """SELL fill で cash が BUY 後より増加する。"""
+        """SELL fill で cash が BUY 後より増加する。
+
+        bp_events[0]: BUY fill（cash 減少）
+        bp_events[1]: bar2 mark-to-market（cash は不変、equity のみ変動）
+        bp_events[2]: SELL fill（cash 増加）
+        最初と最後を比較して SELL 後の cash が増えていることを確認する。
+        """
         events = _run_and_collect()
         bp_events = [e for e in events if e["event"] == "ReplayBuyingPower"]
-        assert len(bp_events) == 2
+        assert len(bp_events) == 3
         cash_after_buy = Decimal(bp_events[0]["cash"])
-        cash_after_sell = Decimal(bp_events[1]["cash"])
+        cash_after_sell = Decimal(bp_events[-1]["cash"])
         assert cash_after_sell > cash_after_buy
 
     def test_buying_power_strategy_id_matches(self) -> None:
@@ -169,17 +181,24 @@ class TestStreamingFillsEmitReplayBuyingPower:
             )
 
     def test_execution_marker_and_buying_power_share_ts_event_ms(self) -> None:
-        """同一 fill の ExecutionMarker と ReplayBuyingPower が同じ ts_event_ms を持つ。
+        """fill 由来の ExecutionMarker と対応する ReplayBuyingPower が同じ ts_event_ms を持つ。
 
-        両イベントとも OrderFilled.ts_event 由来であることを直接確認する。
+        bar mark-to-market により ReplayBuyingPower は fill より 1 件多いため、
+        各 ExecutionMarker の ts_event_ms に一致する ReplayBuyingPower が
+        少なくとも 1 件存在することを確認する。
         """
         events = _run_and_collect()
         markers = [e for e in events if e["event"] == "ExecutionMarker"]
         bp_events = [e for e in events if e["event"] == "ReplayBuyingPower"]
-        assert len(markers) == len(bp_events) == 2
-        for marker, bp in zip(markers, bp_events):
-            assert marker["ts_event_ms"] == bp["ts_event_ms"], (
-                "ExecutionMarker and ReplayBuyingPower from same fill must share ts_event_ms"
+        assert len(markers) == 2
+        assert len(bp_events) == 3
+        for marker in markers:
+            matching = [
+                e for e in bp_events if e["ts_event_ms"] == marker["ts_event_ms"]
+            ]
+            assert matching, (
+                f"ExecutionMarker ts={marker['ts_event_ms']} に対応する "
+                "ReplayBuyingPower がない — fill と bar MTM は同 ts_event を共有する"
             )
 
 

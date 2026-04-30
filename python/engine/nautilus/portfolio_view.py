@@ -53,6 +53,10 @@ class PortfolioView:
                     del self._positions[instrument_id]
 
     @property
+    def has_open_positions(self) -> bool:
+        return bool(self._positions)
+
+    @property
     def cash(self) -> Decimal:
         return self._cash
 

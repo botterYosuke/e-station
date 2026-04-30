@@ -704,6 +704,42 @@ class NautilusRunner:
                 topic=_fill_topic,
                 handler=_on_order_filled,
             )
+
+            # --- N1.13 Step A: per-bar mark-to-market (Daily / Minute のみ) ------
+            # Trade granularity は TradeTick を使うためバーなし → スキップ。
+            # _on_bar は position が存在するバーごとに ReplayBuyingPower を push する。
+            # これにより保有中に価格が動いても評価額（equity）がリアルタイムに更新される。
+            _GRANULARITY_TO_BAR_PERIOD: dict[str, str] = {
+                "Daily": "DAY",
+                "Minute": "MINUTE",
+            }
+            _bar_period = _GRANULARITY_TO_BAR_PERIOD.get(granularity)
+            _bar_topic: str | None = None
+
+            if _bar_period is not None:
+                _bar_topic = (
+                    f"data.bars.{instrument_id}-1-{_bar_period}-LAST-EXTERNAL"
+                )
+
+                def _on_bar(bar) -> None:  # noqa: PLC0415
+                    instrument_str = str(bar.bar_type.instrument_id)
+                    _last_prices[instrument_str] = Decimal(str(bar.close))
+                    if not _portfolio.has_open_positions:
+                        return  # ポジションなし: equity == cash であり fill event が担う
+                    ts_ms = bar.ts_event // 1_000_000
+                    try:
+                        bp_dict = _portfolio.to_ipc_dict(strategy_id, _last_prices)
+                        bp_dict["ts_event_ms"] = ts_ms
+                        emit(bp_dict)
+                    except Exception:
+                        log.error(
+                            "[NautilusRunner] bar MTM emit failed: strategy=%r instrument=%r",
+                            strategy_id,
+                            instrument_str,
+                            exc_info=True,
+                        )
+
+                engine.kernel.msgbus.subscribe(topic=_bar_topic, handler=_on_bar)
             # ── N1.13 Step A end ──────────────────────────────────────────────────
 
             log.info(
@@ -824,11 +860,22 @@ class NautilusRunner:
                     )
                 except Exception:
                     log.warning(
-                        "[NautilusRunner] msgbus.unsubscribe failed "
+                        "[NautilusRunner] msgbus.unsubscribe fill failed "
                         "(handler may not have been registered due to early failure): "
                         "strategy=%r",
                         strategy_id,
                     )
+                if _bar_topic is not None:
+                    try:
+                        engine.kernel.msgbus.unsubscribe(
+                            topic=_bar_topic,
+                            handler=_on_bar,
+                        )
+                    except Exception:
+                        log.warning(
+                            "[NautilusRunner] msgbus.unsubscribe bar failed: strategy=%r",
+                            strategy_id,
+                        )
 
             log.info(
                 "[NautilusRunner] streaming replay completed: strategy=%r", strategy_id

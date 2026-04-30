@@ -2876,11 +2876,15 @@ impl Flowsurface {
             .into()
         };
 
-        // Apply confirm_dialog overlay regardless of sidebar menu state or
-        // window kind. Without this unified path, dashboard-pane confirm
-        // dialogs (e.g. OrderEntry "発注確認") were silently invisible when
-        // the sidebar menu was closed. See docs/✅order/debug-honda-order-no-response.md.
-        let content = apply_confirm_dialog_overlay(raw_content, self.confirm_dialog.as_ref());
+        // Apply confirm_dialog overlay only on the main window. Popout windows
+        // (dashboard panes detached into separate OS windows) do not host the
+        // OrderEntry confirmation flow and must not receive this overlay, as that
+        // would cause duplicate dialogs across all open windows simultaneously.
+        let content = if id == self.main_window.id {
+            apply_confirm_dialog_overlay(raw_content, self.confirm_dialog.as_ref())
+        } else {
+            raw_content
+        };
 
         let toasted: Element<'_, Message> = toast::Manager::new(
             content,
