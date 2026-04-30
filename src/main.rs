@@ -3405,6 +3405,16 @@ impl Flowsurface {
     }
 
     fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
+        // replay モードでは live 設定を上書きしない
+        if APP_MODE
+            .get()
+            .map(|m| *m == engine_client::dto::AppMode::Replay)
+            .unwrap_or(false)
+        {
+            log::info!("replay mode: skipping save_state_to_disk");
+            return;
+        }
+
         self.active_dashboard_mut()
             .popout
             .iter_mut()
