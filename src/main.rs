@@ -1153,7 +1153,17 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
 
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
-        let saved_state = layout::load_saved_state();
+        let is_replay_mode = APP_MODE
+            .get()
+            .map(|m| *m == engine_client::dto::AppMode::Replay)
+            .unwrap_or(false);
+
+        let saved_state = if is_replay_mode {
+            log::info!("replay mode: skipping load_saved_state (D9-load), using defaults");
+            layout::SavedState::default()
+        } else {
+            layout::load_saved_state()
+        };
 
         // All venues are routed through the Python data engine via IPC.
         // The watch channel is guaranteed to hold `Some(conn)` before iced
@@ -1194,20 +1204,11 @@ impl Flowsurface {
 
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
 
-        let is_replay_mode = APP_MODE
-            .get()
-            .map(|m| *m == engine_client::dto::AppMode::Replay)
-            .unwrap_or_else(|| {
-                log::warn!(
-                    "APP_MODE not set in Flowsurface::new — \
-                     D8 layout isolation inactive, defaulting to live layout"
-                );
-                false
-            });
+        // D8: replay mode starts with an empty layout.
+        // D9-load (implemented above) already sets saved_state to SavedState::default()
+        // in replay mode, so saved_state.layout_manager is already LayoutManager::new().
+        // This branch is kept for documentary clarity of the D8 intent.
         let layout_manager = if is_replay_mode {
-            log::info!(
-                "replay mode: discarding saved pane layout (D8), starting with fresh layout"
-            );
             LayoutManager::new()
         } else {
             saved_state.layout_manager

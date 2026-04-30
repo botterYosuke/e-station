@@ -1008,6 +1008,13 @@ pub enum EngineEvent {
         equity: String,
         ts_event_ms: i64,
     },
+
+    // ── N1.11: streaming replay pacing marker ────────────────────────────────
+    /// Python が営業日跨ぎ時に emit するマーカー（N1.11 D7）。
+    /// Rust 側は現状 ignore してよい（将来の日付ヘッダー表示などに流用可能）。
+    DateChangeMarker {
+        date: String,
+    },
 }
 
 fn default_true() -> bool {
