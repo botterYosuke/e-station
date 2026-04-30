@@ -16,13 +16,15 @@ use flowsurface_engine_client::dto::{
 // ── Schema version guard ────────────────────────────────────────────────────
 
 #[test]
-fn schema_minor_is_5_for_nautilus() {
+fn schema_minor_is_6_for_nautilus() {
     // R2 review-fix R1b M-8: ReplayDataLoaded.strategy_id を Optional に緩和し
     // SCHEMA_MINOR を 4 → 5 に bump。MAJOR は据え置き (互換維持; minor mismatch は WARN のみ)。
+    // レビュー反映 2026-04-29: LoadReplayData/ReplayLoadBody.strategy_init_kwargs を Map 型に
+    // 統一したため SCHEMA_MINOR を 5 → 6 に bump。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        5,
-        "SCHEMA_MINOR must be 5 after M-8 (ReplayDataLoaded.strategy_id Optional)"
+        6,
+        "SCHEMA_MINOR must be 6 after H-1 (strategy_init_kwargs Map unification)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -86,7 +88,7 @@ fn hello_includes_mode_field() {
     // Rust 内部では ``AppMode`` enum を使い、serde rename_all = "lowercase" で wire 互換。
     let cmd = Command::Hello {
         schema_major: 2,
-        schema_minor: 5,
+        schema_minor: 6,
         client_version: "test-0.0.0".to_string(),
         token: "tok".to_string(),
         mode: AppMode::Replay,
@@ -167,6 +169,8 @@ fn start_engine_serializes() {
             end_date: "2024-01-31".to_string(),
             initial_cash: "1000000".to_string(),
             granularity: ReplayGranularity::Trade,
+            strategy_file: None,
+            strategy_init_kwargs: None,
         },
     };
     let json = serde_json::to_string(&cmd).expect("must serialize");
@@ -178,6 +182,38 @@ fn start_engine_serializes() {
     assert_eq!(v["config"]["instrument_id"], "1301.TSE");
     assert_eq!(v["config"]["granularity"], "Trade");
     assert_eq!(v["config"]["initial_cash"], "1000000");
+    assert!(
+        v["config"].get("strategy_file").is_none(),
+        "None は省略される"
+    );
+}
+
+#[test]
+fn start_engine_with_strategy_file_serializes() {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("instrument_id".to_string(), serde_json::json!("1301.TSE"));
+    kwargs.insert("lot_size".to_string(), serde_json::json!(100));
+    let cmd = Command::StartEngine {
+        request_id: "req-sf".to_string(),
+        engine: EngineKind::Backtest,
+        strategy_id: "user-defined".to_string(),
+        config: EngineStartConfig {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "2024-01-04".to_string(),
+            end_date: "2024-03-31".to_string(),
+            initial_cash: "1000000".to_string(),
+            granularity: ReplayGranularity::Daily,
+            strategy_file: Some("examples/strategies/buy_and_hold.py".to_string()),
+            strategy_init_kwargs: Some(kwargs),
+        },
+    };
+    let json = serde_json::to_string(&cmd).expect("must serialize");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["config"]["strategy_file"],
+        "examples/strategies/buy_and_hold.py"
+    );
+    assert_eq!(v["config"]["strategy_init_kwargs"]["lot_size"], 100);
 }
 
 #[test]
@@ -206,6 +242,14 @@ fn load_replay_data_serializes() {
     assert_eq!(v["op"], "LoadReplayData");
     assert_eq!(v["instrument_id"], "1301.TSE");
     assert_eq!(v["granularity"], "Minute");
+    assert!(
+        v.get("strategy_file").is_none(),
+        "strategy_file は LoadReplayData の wire JSON に含まれてはいけない"
+    );
+    assert!(
+        v.get("strategy_init_kwargs").is_none(),
+        "strategy_init_kwargs は LoadReplayData の wire JSON に含まれてはいけない"
+    );
 }
 
 // ── Events ──────────────────────────────────────────────────────────────────

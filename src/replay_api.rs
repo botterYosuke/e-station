@@ -33,7 +33,7 @@ use std::{sync::Arc, time::Duration};
 
 use engine_client::{
     EngineConnection,
-    dto::{Command, EngineEvent, ReplayGranularity},
+    dto::{Command, EngineEvent, EngineKind, EngineStartConfig, ReplayGranularity},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -62,9 +62,14 @@ pub enum ControlApiCommand {
     /// `strategy_id` は `ReplayDataLoaded.strategy_id`（`Option<String>`）を
     /// そのまま伝搬する。単独 `LoadReplayData` 経路では `None`、
     /// `StartEngine` 経由の load では具体値が入る (M-2, R2 review-fix R2)。
+    ///
+    /// `granularity` は `/api/replay/load` body から取得した粒度。
+    /// CandlestickChart pane を生成するか（Daily/Minute）、スキップするか（Trade）
+    /// を dashboard 側で判断するために伝搬する（§4c）。
     AutoGenerateReplayPanes {
         instrument_id: String,
         strategy_id: Option<String>,
+        granularity: engine_client::dto::ReplayGranularity,
     },
 }
 
@@ -106,6 +111,8 @@ pub struct ReplayApiState {
     /// Timeout for `LoadReplayData` → `ReplayDataLoaded`. Default 60 s
     /// (J-Quants 1-month trade tick load target per spec.md §3.3).
     pub load_timeout: Duration,
+    /// Timeout for `StartEngine` → `EngineStarted`. Default 30 s.
+    pub start_timeout: Duration,
     /// Serialise concurrent `/api/replay/load` calls so that
     /// `ReplayDataLoaded` (which has no `request_id` in schema 2.4) cannot
     /// be cross-correlated.
@@ -133,6 +140,7 @@ impl ReplayApiState {
             engine_rx,
             mode: mode.into(),
             load_timeout: Duration::from_secs(60),
+            start_timeout: Duration::from_secs(30),
             load_lock: Mutex::new(()),
             loaded_instruments: Mutex::new(Vec::new()),
             control_tx: Mutex::new(None),
@@ -179,6 +187,13 @@ impl ReplayApiState {
         self.load_timeout = t;
         self
     }
+
+    /// Override the start timeout (test-only).
+    #[cfg(test)]
+    pub fn with_start_timeout(mut self, t: Duration) -> Self {
+        self.start_timeout = t;
+        self
+    }
 }
 
 // ── HTTP wire types (N1.3) ────────────────────────────────────────────────────
@@ -200,6 +215,31 @@ struct ReplayLoadOk {
     status: &'static str,
     bars_loaded: u64,
     trades_loaded: u64,
+}
+
+// ── N1.17: Replay start request body ─────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayStartBody {
+    instrument_id: String,
+    start_date: String,
+    end_date: String,
+    granularity: ReplayGranularity,
+    strategy_id: String,
+    initial_cash: String,
+    #[serde(default)]
+    strategy_file: Option<String>,
+    /// JSON object only — array/scalar は serde_json::Map で弾く。
+    #[serde(default)]
+    strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(serde::Serialize)]
+struct ReplayStartOk {
+    status: &'static str,
+    strategy_id: String,
+    account_id: String,
 }
 
 // ── Internal raw HTTP/1.1 helpers ────────────────────────────────────────────
@@ -354,6 +394,8 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
     // H-D: `granularity` は `ReplayLoadBody` で serde 直受け済み。不正値は
     // ② の `serde_json::from_str` が 400 を返している。
     let granularity = parsed.granularity;
+    // Clone before move into LoadReplayData command — needed for AutoGenerateReplayPanes (§4c).
+    let granularity_for_cmd = granularity.clone();
 
     // ④ Get engine connection (drop the watch::Ref before any await)
     let conn_opt = state.engine_rx.borrow().clone();
@@ -455,6 +497,7 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
                     let cmd = ControlApiCommand::AutoGenerateReplayPanes {
                         instrument_id: parsed.instrument_id.clone(),
                         strategy_id: strategy_id_for_cmd.clone(),
+                        granularity: granularity_for_cmd.clone(),
                     };
                     match tx.try_send(cmd) {
                         Ok(_) => {}
@@ -628,6 +671,231 @@ async fn handle_replay_control(stream: &mut TcpStream, body: &str, state: &Arc<R
     })
     .to_string();
     write_response(stream, 200, "OK", &resp_body).await;
+}
+
+/// `POST /api/replay/start` — N1.17: start a BuyAndHold backtest via `Command::StartEngine`.
+///
+/// Sends `StartEngine { engine: Backtest, ... }` and awaits `EngineEvent::EngineStarted`
+/// (max 30 s). Returns 202 Accepted with `{ status, strategy_id, account_id }` on success.
+/// 504 on timeout, 503 on engine error, 502 on disconnect.
+async fn handle_replay_start(stream: &mut TcpStream, body: &str, state: &Arc<ReplayApiState>) {
+    // ① Reject early on live mode
+    if state.mode != engine_client::dto::AppMode::Replay {
+        write_error(
+            stream,
+            400,
+            "Bad Request",
+            "replay endpoints are only available in --mode replay",
+        )
+        .await;
+        return;
+    }
+
+    // ② Parse body
+    let parsed: ReplayStartBody = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            write_error(stream, 400, "Bad Request", &format!("invalid JSON: {e}")).await;
+            return;
+        }
+    };
+
+    // ③ Validate fields
+    if parsed.instrument_id.is_empty() {
+        write_error(stream, 400, "Bad Request", "instrument_id is required").await;
+        return;
+    }
+    if !is_iso_date(&parsed.start_date) {
+        write_error(
+            stream,
+            400,
+            "Bad Request",
+            "start_date must be ISO-8601 (YYYY-MM-DD)",
+        )
+        .await;
+        return;
+    }
+    if !is_iso_date(&parsed.end_date) {
+        write_error(
+            stream,
+            400,
+            "Bad Request",
+            "end_date must be ISO-8601 (YYYY-MM-DD)",
+        )
+        .await;
+        return;
+    }
+    if parsed.strategy_id.is_empty() {
+        write_error(stream, 400, "Bad Request", "strategy_id is required").await;
+        return;
+    }
+    if parsed.initial_cash.is_empty() {
+        write_error(stream, 400, "Bad Request", "initial_cash is required").await;
+        return;
+    }
+    match &parsed.strategy_file {
+        None => {
+            write_error(stream, 400, "Bad Request", "strategy_file is required").await;
+            return;
+        }
+        Some(s) if s.is_empty() => {
+            write_error(stream, 400, "Bad Request", "strategy_file is required").await;
+            return;
+        }
+        Some(_) => {}
+    }
+
+    // ④ Get engine connection
+    let conn_opt = state.engine_rx.borrow().clone();
+    let conn = match conn_opt {
+        Some(c) => c,
+        None => {
+            write_error(stream, 502, "Bad Gateway", "engine not connected").await;
+            return;
+        }
+    };
+
+    // ⑤ Subscribe BEFORE send so we never miss the event
+    let mut events_rx = conn.subscribe_events();
+
+    // ⑥ Build & send command
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let strategy_id = parsed.strategy_id.clone();
+    let cmd = Command::StartEngine {
+        request_id: request_id.clone(),
+        engine: EngineKind::Backtest,
+        strategy_id: strategy_id.clone(),
+        config: EngineStartConfig {
+            instrument_id: parsed.instrument_id.clone(),
+            start_date: parsed.start_date.clone(),
+            end_date: parsed.end_date.clone(),
+            initial_cash: parsed.initial_cash.clone(),
+            granularity: parsed.granularity,
+            strategy_file: parsed.strategy_file,
+            strategy_init_kwargs: parsed.strategy_init_kwargs,
+        },
+    };
+    if let Err(e) = conn.send(cmd).await {
+        write_error(
+            stream,
+            502,
+            "Bad Gateway",
+            &format!("failed to forward StartEngine to engine: {e}"),
+        )
+        .await;
+        return;
+    }
+
+    // ⑦ Await EngineStarted (or matching error) with timeout
+    let outcome = tokio::time::timeout(state.start_timeout, async {
+        loop {
+            match events_rx.recv().await {
+                Ok(EngineEvent::EngineStarted {
+                    strategy_id: sid,
+                    account_id,
+                    ..
+                }) if sid == strategy_id => {
+                    return ReplayStartOutcome::Ok {
+                        strategy_id: sid,
+                        account_id,
+                    };
+                }
+                Ok(EngineEvent::EngineError {
+                    strategy_id: Some(sid),
+                    code,
+                    message,
+                }) if sid == strategy_id => {
+                    return ReplayStartOutcome::EngineError { code, message };
+                }
+                Ok(EngineEvent::Error {
+                    request_id: Some(rid),
+                    code,
+                    message,
+                }) if rid == request_id => {
+                    return ReplayStartOutcome::EngineError { code, message };
+                }
+                Ok(EngineEvent::ConnectionDropped) => {
+                    return ReplayStartOutcome::Disconnected;
+                }
+                Ok(ev) => {
+                    log::debug!("replay_api: StartEngine wait skipping unrelated event: {ev:?}");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!("replay_api: broadcast lagged by {n}; aborting StartEngine wait");
+                    return ReplayStartOutcome::Lagged { skipped: n };
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return ReplayStartOutcome::Disconnected;
+                }
+            }
+        }
+    })
+    .await;
+
+    match outcome {
+        Ok(ReplayStartOutcome::Ok {
+            strategy_id: started_sid,
+            account_id,
+        }) => {
+            let body = serde_json::to_string(&ReplayStartOk {
+                status: "started",
+                strategy_id: started_sid,
+                account_id,
+            })
+            .unwrap_or_else(|_| r#"{"status":"started"}"#.to_string());
+            write_response(stream, 202, "Accepted", &body).await;
+        }
+        Ok(ReplayStartOutcome::EngineError { code, message }) => {
+            let status = match code.as_str() {
+                "mode_mismatch" | "strategy_file_required" | "invalid_config" => 400,
+                _ => 503,
+            };
+            let status_text = if status == 400 {
+                "Bad Request"
+            } else {
+                "Service Unavailable"
+            };
+            let body =
+                serde_json::json!({ "error": code, "message": message, "code": code }).to_string();
+            write_response(stream, status, status_text, &body).await;
+        }
+        Ok(ReplayStartOutcome::Disconnected) => {
+            write_error(
+                stream,
+                502,
+                "Bad Gateway",
+                "engine connection lost while waiting",
+            )
+            .await;
+        }
+        Ok(ReplayStartOutcome::Lagged { skipped }) => {
+            let body = serde_json::json!({
+                "error": "events lagged",
+                "skipped": skipped,
+            })
+            .to_string();
+            write_response(stream, 503, "Service Unavailable", &body).await;
+        }
+        Err(_timeout) => {
+            write_response(stream, 504, "Gateway Timeout", r#"{"error":"timeout"}"#).await;
+        }
+    }
+}
+
+enum ReplayStartOutcome {
+    Ok {
+        strategy_id: String,
+        account_id: String,
+    },
+    EngineError {
+        code: String,
+        message: String,
+    },
+    Disconnected,
+    Lagged {
+        skipped: u64,
+    },
 }
 
 /// `GET /api/replay/portfolio` — N1.16 live data.
@@ -808,6 +1076,19 @@ async fn handle_request(
         ("POST", "/api/replay/load") => {
             if let Some(rs) = replay_state.as_ref() {
                 handle_replay_load(&mut stream, &req.body, rs).await;
+            } else {
+                write_error(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    "replay API not configured",
+                )
+                .await;
+            }
+        }
+        ("POST", "/api/replay/start") => {
+            if let Some(rs) = replay_state.as_ref() {
+                handle_replay_start(&mut stream, &req.body, rs).await;
             } else {
                 write_error(
                     &mut stream,
@@ -1343,6 +1624,7 @@ mod tests {
                 ControlApiCommand::AutoGenerateReplayPanes {
                     instrument_id,
                     strategy_id,
+                    ..
                 } => {
                     assert_eq!(instrument_id, "1301.TSE");
                     assert_eq!(
@@ -1892,6 +2174,427 @@ mod tests {
         assert_eq!(
             count, 1,
             "loaded_instruments should have 1 entry after reload"
+        );
+    }
+
+    // ── N1.17: /api/replay/start ─────────────────────────────────────────────
+
+    fn default_start_body() -> String {
+        serde_json::json!({
+            "instrument_id": "7203.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "granularity": "Daily",
+            "strategy_id": "buy-and-hold",
+            "initial_cash": "1000000",
+            "strategy_file": "docs/example/buy_and_hold.py",
+        })
+        .to_string()
+    }
+
+    /// Mock engine: handshake, then on `StartEngine` respond with `EngineStarted`.
+    fn spawn_mock_engine_start(
+        listener: TcpListener,
+        account_id: String,
+        silent: bool,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ws.next().await; // Hello
+            ws_send_ready(&mut ws).await;
+
+            let cmd_msg = ws.next().await;
+            let strategy_id: String = if let Some(Ok(m)) = cmd_msg {
+                let text = m.into_text().unwrap();
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                v["strategy_id"].as_str().unwrap_or("").to_string()
+            } else {
+                String::new()
+            };
+
+            if silent {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                return;
+            }
+
+            let evt = serde_json::json!({
+                "event": "EngineStarted",
+                "strategy_id": strategy_id,
+                "account_id": account_id,
+                "ts_event_ms": 1_704_067_200_000_i64,
+            });
+            ws.send(Message::Text(evt.to_string().into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
+    }
+
+    #[tokio::test]
+    async fn replay_start_returns_202_when_engine_starts() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let mock =
+            spawn_mock_engine_start(ws_listener, "replay-REPLAY-BUYANDHO".to_string(), false);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_start_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let (status, body) =
+            http_request(port, "POST", "/api/replay/start", &default_start_body()).await;
+        assert_eq!(status, 202, "expected 202; body={body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "started");
+        assert_eq!(json["strategy_id"], "buy-and-hold");
+        assert_eq!(json["account_id"], "replay-REPLAY-BUYANDHO");
+        drop(engine_tx);
+        mock.await.expect("mock server panicked");
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejected_in_live_mode() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Live,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (status, _) =
+            http_request(port, "POST", "/api/replay/start", &default_start_body()).await;
+        assert_eq!(status, 400, "live mode must reject /api/replay/start");
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_invalid_json() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (status, _) = http_request(port, "POST", "/api/replay/start", "{not json").await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_empty_instrument_id() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let body = serde_json::json!({
+            "instrument_id": "",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "granularity": "Daily",
+            "strategy_id": "buy-and-hold",
+            "initial_cash": "1000000",
+        })
+        .to_string();
+        let (status, _) = http_request(port, "POST", "/api/replay/start", &body).await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_empty_strategy_id() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let body = serde_json::json!({
+            "instrument_id": "7203.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "granularity": "Daily",
+            "strategy_id": "",
+            "initial_cash": "1000000",
+        })
+        .to_string();
+        let (status, _) = http_request(port, "POST", "/api/replay/start", &body).await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn replay_start_returns_504_on_timeout() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let mock = spawn_mock_engine_start(ws_listener, String::new(), true); // silent
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_start_timeout(Duration::from_millis(150)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (status, body) =
+            http_request(port, "POST", "/api/replay/start", &default_start_body()).await;
+        assert_eq!(status, 504, "timeout should map to 504; body={body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"], "timeout");
+        drop(engine_tx);
+        mock.await.expect("mock server panicked");
+    }
+
+    #[tokio::test]
+    async fn replay_start_returns_503_on_engine_error() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        tokio::spawn(async move {
+            let (tcp, _) = ws_listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ws.next().await; // Hello
+            ws_send_ready(&mut ws).await;
+
+            // Receive StartEngine command
+            let cmd_msg = ws.next().await;
+            let strategy_id: String = if let Some(Ok(m)) = cmd_msg {
+                let text = m.into_text().unwrap();
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                v["strategy_id"].as_str().unwrap_or("").to_string()
+            } else {
+                String::new()
+            };
+
+            // Respond with EngineError
+            let evt = serde_json::json!({
+                "event": "EngineError",
+                "code": "strategy_error",
+                "message": "strategy failed to start",
+                "strategy_id": strategy_id,
+            });
+            ws.send(Message::Text(evt.to_string().into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_start_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let (status, body) =
+            http_request(port, "POST", "/api/replay/start", &default_start_body()).await;
+        assert_eq!(status, 503, "engine error should map to 503; body={body}");
+        drop(engine_tx);
+    }
+
+    #[tokio::test]
+    async fn replay_start_forwards_start_engine_command() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let cmd_rx = spawn_mock_engine_capture(ws_listener);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_start_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Fire and forget — mock engine won't reply, so we expect 504 after timeout,
+        // but we can still inspect the captured command before that.
+        tokio::spawn(async move {
+            http_request(port, "POST", "/api/replay/start", &default_start_body()).await
+        });
+
+        let captured = tokio::time::timeout(Duration::from_secs(5), cmd_rx)
+            .await
+            .expect("mock engine capture timed out")
+            .expect("channel closed");
+
+        assert_eq!(captured["op"], "StartEngine");
+        assert_eq!(captured["engine"], "Backtest");
+        assert_eq!(captured["strategy_id"], "buy-and-hold");
+        assert_eq!(captured["config"]["instrument_id"], "7203.TSE");
+        assert_eq!(captured["config"]["granularity"], "Daily");
+        assert_eq!(captured["config"]["initial_cash"], "1000000");
+        drop(engine_tx);
+    }
+
+    #[tokio::test]
+    async fn replay_start_forwards_strategy_file_in_config() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let cmd_rx = spawn_mock_engine_capture(ws_listener);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_start_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let body = serde_json::json!({
+            "instrument_id": "1301.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",
+            "granularity": "Daily",
+            "strategy_id": "user-defined",
+            "initial_cash": "1000000",
+            "strategy_file": "examples/strategies/buy_and_hold.py",
+            "strategy_init_kwargs": {"instrument_id": "1301.TSE", "lot_size": 100},
+        })
+        .to_string();
+
+        tokio::spawn(async move { http_request(port, "POST", "/api/replay/start", &body).await });
+
+        let captured = tokio::time::timeout(Duration::from_secs(5), cmd_rx)
+            .await
+            .expect("mock engine capture timed out")
+            .expect("channel closed");
+
+        assert_eq!(
+            captured["config"]["strategy_file"],
+            "examples/strategies/buy_and_hold.py"
+        );
+        assert_eq!(captured["config"]["strategy_init_kwargs"]["lot_size"], 100);
+        drop(engine_tx);
+    }
+
+    /// H-1: `/api/replay/load` must reject unknown fields such as `strategy_init_kwargs`
+    /// (removed from `ReplayLoadBody`) with HTTP 400 via `deny_unknown_fields`.
+    #[tokio::test]
+    async fn replay_load_rejects_array_strategy_init_kwargs() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let _capture = spawn_mock_engine_capture(ws_listener);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let body = serde_json::json!({
+            "instrument_id": "1301.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",
+            "granularity": "Trade",
+            "strategy_init_kwargs": [1, 2, 3],
+        })
+        .to_string();
+
+        let (status, _) = http_request(port, "POST", "/api/replay/load", &body).await;
+        assert_eq!(
+            status, 400,
+            "array strategy_init_kwargs should be rejected at /api/replay/load"
+        );
+        drop(engine_tx);
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_array_strategy_init_kwargs() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let _capture = spawn_mock_engine_capture(ws_listener);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_start_timeout(Duration::from_secs(5)),
+        );
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let body = serde_json::json!({
+            "instrument_id": "1301.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",
+            "granularity": "Daily",
+            "strategy_id": "user-defined",
+            "initial_cash": "1000000",
+            "strategy_init_kwargs": [1, 2, 3],
+        })
+        .to_string();
+
+        let (status, _) = http_request(port, "POST", "/api/replay/start", &body).await;
+        assert_eq!(status, 400, "array strategy_init_kwargs should be rejected");
+        drop(engine_tx);
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_missing_strategy_file() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let body = serde_json::json!({
+            "instrument_id": "7203.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "granularity": "Daily",
+            "strategy_id": "buy-and-hold",
+            "initial_cash": "1000000",
+        })
+        .to_string();
+        let (status, body_str) = http_request(port, "POST", "/api/replay/start", &body).await;
+        assert_eq!(
+            status, 400,
+            "missing strategy_file must return 400; body={body_str}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("strategy_file"),
+            "error message must mention strategy_file; got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_start_rejects_empty_strategy_file() {
+        let (_engine_tx, engine_rx) = watch::channel::<Option<Arc<EngineConnection>>>(None);
+        let state = Arc::new(ReplayApiState::new(
+            engine_rx,
+            engine_client::dto::AppMode::Replay,
+        ));
+        let port = spawn_test_http_server(state).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let body = serde_json::json!({
+            "instrument_id": "7203.TSE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "granularity": "Daily",
+            "strategy_id": "buy-and-hold",
+            "initial_cash": "1000000",
+            "strategy_file": "",
+        })
+        .to_string();
+        let (status, body_str) = http_request(port, "POST", "/api/replay/start", &body).await;
+        assert_eq!(
+            status, 400,
+            "empty strategy_file must return 400; body={body_str}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("strategy_file"),
+            "error message must mention strategy_file; got: {json}"
         );
     }
 }

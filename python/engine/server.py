@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import logging
 import os
+import threading
 import time
 import uuid
 from collections import deque
@@ -278,6 +279,12 @@ class DataEngineServer:
         # N1.4: 走行中 NautilusRunner マッピング (strategy_id → runner)。
         # StartEngine で登録、StopEngine から参照、完了時に pop される。
         self._engine_tasks: dict[str, Any] = {}
+        # N1.11: streaming replay 中断用 stop_event レジストリ。
+        # _handle_stop_engine が set()、_handle_start_engine の finally で pop する。
+        self._engine_stop_events: dict[str, Any] = {}
+        # N1.11: streaming replay の pacing 倍率。SetReplaySpeed で変更される。
+        # compute_sleep_sec は multiplier >= 1 を要求するため、デフォルト 1 は安全。
+        self._replay_speed_multiplier: int = 1
 
         # N1.16: REPLAY 仮想ポートフォリオ（CLMZanKaiKanougaku を呼ばない純粋 Python 実装）。
         # LoadReplayData 受信時に initial_cash で reset() する。
@@ -633,10 +640,12 @@ class DataEngineServer:
             # 走行中の BacktestEngine が無い場合は no-op で ack のみ返す。
             multiplier = msg.get("multiplier", 1)
             request_id = msg.get("request_id", "")
-            if hasattr(self, "_replay_speed_multiplier"):
-                self._replay_speed_multiplier = multiplier
-            else:
-                self._replay_speed_multiplier = multiplier
+            if not isinstance(multiplier, int) or multiplier <= 0:
+                log.warning(
+                    "SetReplaySpeed: invalid multiplier=%r, ignored", multiplier
+                )
+                return
+            self._replay_speed_multiplier = multiplier
             log.info(
                 "SetReplaySpeed: multiplier=%d request_id=%s",
                 multiplier,
@@ -2168,6 +2177,10 @@ class DataEngineServer:
 
         M3: mode="live" では replay 系 IPC を受理しない（D8 / spec §3.2 起動時固定）。
         Error{request_id, code="mode_mismatch"} を返して即 return する。
+
+        .. note:: ``strategy_file`` / ``strategy_init_kwargs`` はこのハンドラでは使用しない。
+            戦略ロードは ``StartEngine`` (``EngineStartConfig``) 経由で行う。
+            ``LoadReplayData`` は件数カウントのみ担当する。
         """
         instrument_id = msg.get("instrument_id", "")
         start_date = msg.get("start_date", "")
@@ -2189,30 +2202,13 @@ class DataEngineServer:
             )
             return
 
-        from engine.nautilus.jquants_loader import (
-            load_daily_bars,
-            load_minute_bars,
-            load_trades,
-        )
+        from engine.nautilus.jquants_loader import check_data_exists
 
         try:
             bars_loaded = 0
             trades_loaded = 0
             kwargs = {"base_dir": base_dir} if base_dir is not None else {}
-            if granularity == "Trade":
-                trades_loaded = sum(
-                    1 for _ in load_trades(instrument_id, start_date, end_date, **kwargs)
-                )
-            elif granularity == "Minute":
-                bars_loaded = sum(
-                    1 for _ in load_minute_bars(instrument_id, start_date, end_date, **kwargs)
-                )
-            elif granularity == "Daily":
-                bars_loaded = sum(
-                    1 for _ in load_daily_bars(instrument_id, start_date, end_date, **kwargs)
-                )
-            else:
-                raise ValueError(f"unknown granularity: {granularity!r}")
+            check_data_exists(instrument_id, start_date, end_date, granularity, **kwargs)
         except Exception as exc:
             log.error(
                 "LoadReplayData failed: instrument_id=%r granularity=%r",
@@ -2272,12 +2268,13 @@ class DataEngineServer:
         ``EngineStopped`` が抜けるため、except で final_equity="0" の
         EngineStopped を補完送出する (H1)。
         """
-        from engine.schemas import EngineError as EngineErrorModel
+        from pydantic import ValidationError
+        from engine.schemas import EngineError as EngineErrorModel, EngineStartConfig
         from engine.nautilus.engine_runner import NautilusRunner
 
         engine_kind = msg.get("engine", "")
         strategy_id = msg.get("strategy_id", "")
-        config = msg.get("config", {})
+        config_raw = msg.get("config", {})
         request_id = msg.get("request_id")
 
         # MEDIUM-2: request_id が None/空の場合は防御的に早期 return する。
@@ -2360,11 +2357,27 @@ class DataEngineServer:
             await _drain()
             return
 
+        # H-4: EngineStartConfig.model_validate() で extra フィールドや型違いを弾く。
+        # extra="forbid" が機能するのはここだけ（raw dict のままでは機能しない）。
+        try:
+            config_obj = EngineStartConfig.model_validate(config_raw)
+        except ValidationError as exc:
+            _emit(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "invalid_config",
+                    "message": str(exc),
+                }
+            )
+            await _drain()
+            return
+
         # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
         # LOW-A: バリデーション成功後に runner と _engine_tasks を登録することで、
         # parse 失敗時に残骸が _engine_tasks に残らない。
         try:
-            initial_cash = int(config.get("initial_cash", "0"))
+            initial_cash = int(config_obj.initial_cash)
         except (ValueError, TypeError) as exc:
             _emit(
                 {
@@ -2372,6 +2385,18 @@ class DataEngineServer:
                     "request_id": request_id,
                     "code": "invalid_config",
                     "message": f"initial_cash: {exc}",
+                }
+            )
+            await _drain()
+            return
+
+        if not config_obj.strategy_file:
+            _emit(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": "strategy_file_required",
+                    "message": "strategy_file is required",
                 }
             )
             await _drain()
@@ -2408,16 +2433,37 @@ class DataEngineServer:
         result_holder: list = [None]
 
         def _run() -> None:
-            result_holder[0] = runner.start_backtest_replay(
-                strategy_id=strategy_id,
-                instrument_id=config.get("instrument_id", ""),
-                start_date=config.get("start_date", ""),
-                end_date=config.get("end_date", ""),
-                granularity=config.get("granularity", "Trade"),
-                initial_cash=initial_cash,
-                base_dir=base_dir,
-                on_event=_on_event_tracked,
-            )
+            if self._mode == "replay":
+                stop_event = self._engine_stop_events.setdefault(
+                    strategy_id, threading.Event()
+                )
+                result_holder[0] = runner.start_backtest_replay_streaming(
+                    strategy_id=strategy_id,
+                    instrument_id=config_obj.instrument_id,
+                    start_date=config_obj.start_date,
+                    end_date=config_obj.end_date,
+                    granularity=config_obj.granularity,
+                    initial_cash=initial_cash,
+                    get_multiplier=lambda: getattr(self, "_replay_speed_multiplier", 1),
+                    base_dir=base_dir,
+                    on_event=_on_event_tracked,
+                    strategy_file=config_obj.strategy_file,
+                    strategy_init_kwargs=config_obj.strategy_init_kwargs,
+                    stop_event=stop_event,
+                )
+            else:
+                result_holder[0] = runner.start_backtest_replay(
+                    strategy_id=strategy_id,
+                    instrument_id=config_obj.instrument_id,
+                    start_date=config_obj.start_date,
+                    end_date=config_obj.end_date,
+                    granularity=config_obj.granularity,
+                    initial_cash=initial_cash,
+                    base_dir=base_dir,
+                    on_event=_on_event_tracked,
+                    strategy_file=config_obj.strategy_file,
+                    strategy_init_kwargs=config_obj.strategy_init_kwargs,
+                )
 
         try:
             # H2: timeout=3600s でラップし、TimeoutError を code="timeout" で送出。
@@ -2432,6 +2478,11 @@ class DataEngineServer:
                     self._replay_portfolio.on_fill(
                         fill.instrument_id, fill.side, fill.qty, fill.price
                     )
+            else:
+                log.warning(
+                    "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
+                    strategy_id,
+                )
         except asyncio.TimeoutError as exc:
             log.error(
                 "StartEngine timed out: strategy_id=%r",
@@ -2441,8 +2492,8 @@ class DataEngineServer:
             # worker thread はキャンセルできないが stop() シグナルを送ってリソースを解放する。
             try:
                 runner.stop()
-            except Exception:
-                pass
+            except Exception as stop_exc:
+                log.warning("[StartEngine] runner.stop() failed during timeout cleanup: %s", stop_exc)
             # HIGH-1: timeout 後も worker thread は走り続けるため started_marker に依存しない。
             # Rust 側は EngineStarted なしの EngineStopped を no-op として扱う。
             _emit(
@@ -2503,6 +2554,7 @@ class DataEngineServer:
             )
         finally:
             self._engine_tasks.pop(strategy_id, None)
+            self._engine_stop_events.pop(strategy_id, None)
             # M-8 (R2 review-fix R2): 走行終了時に _replay_strategy_id をリセット。
             # 次の GetBuyingPower(replay) は空 strategy_id を返し、UI 側で
             # 「未実行」を識別できるようにする。
@@ -2524,6 +2576,9 @@ class DataEngineServer:
         if runner is None:
             log.info("StopEngine: no running engine for strategy_id=%r", strategy_id)
             return
+        stop_event = self._engine_stop_events.get(strategy_id)
+        if stop_event is not None:
+            stop_event.set()
         try:
             runner.stop()
         except Exception as exc:

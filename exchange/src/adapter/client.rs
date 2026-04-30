@@ -24,6 +24,7 @@ pub struct AdapterHandles {
     okex: Option<Arc<dyn VenueBackend>>,
     mexc: Option<Arc<dyn VenueBackend>>,
     tachibana: Option<Arc<dyn VenueBackend>>,
+    replay: Option<Arc<dyn VenueBackend>>,
 }
 
 impl AdapterHandles {
@@ -38,6 +39,7 @@ impl AdapterHandles {
             Venue::Okex => self.okex = Some(backend),
             Venue::Mexc => self.mexc = Some(backend),
             Venue::Tachibana => self.tachibana = Some(backend),
+            Venue::Replay => self.replay = Some(backend),
         }
     }
 
@@ -56,6 +58,7 @@ impl AdapterHandles {
             Venue::Okex => self.okex.clone(),
             Venue::Mexc => self.mexc.clone(),
             Venue::Tachibana => self.tachibana.clone(),
+            Venue::Replay => self.replay.clone(),
         }
     }
 

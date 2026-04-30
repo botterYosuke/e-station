@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import pytest
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from engine.nautilus.data_loader import KlineRow
 from engine.nautilus.engine_runner import NautilusRunner, BacktestResult
+
+_STRATEGY_FILE = str(Path(__file__).parent / "fixtures" / "test_strategy.py")
 
 
 def _year_klines() -> list[KlineRow]:
@@ -42,6 +45,7 @@ class TestNautilusRunnerSmoke:
             venue="TSE",
             klines=_year_klines(),
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
         )
         assert isinstance(result, BacktestResult)
 
@@ -53,6 +57,7 @@ class TestNautilusRunnerSmoke:
             venue="TSE",
             klines=_year_klines(),
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.final_equity > 0
 
@@ -64,6 +69,7 @@ class TestNautilusRunnerSmoke:
             venue="TSE",
             klines=_year_klines(),
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.strategy_id == "buy-and-hold"
 

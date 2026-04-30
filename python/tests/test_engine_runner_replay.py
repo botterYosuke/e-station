@@ -18,6 +18,7 @@ from engine.nautilus.engine_runner import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+_STRATEGY_FILE = str(FIXTURES / "test_strategy.py")
 
 
 def _collect_events() -> tuple[list[dict], callable]:
@@ -45,6 +46,7 @@ class TestStartBacktestReplayTrades:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert isinstance(result, ReplayBacktestResult)
         assert result.strategy_id == "buy-and-hold"
@@ -61,6 +63,7 @@ class TestStartBacktestReplayTrades:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.trades_loaded == 4
         assert result.bars_loaded == 0
@@ -78,6 +81,7 @@ class TestStartBacktestReplayTrades:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
             on_event=on_event,
         )
         kinds = [e["event"] for e in events]
@@ -100,6 +104,7 @@ class TestStartBacktestReplayTrades:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
             on_event=on_event,
         )
         loaded = next(e for e in events if e["event"] == "ReplayDataLoaded")
@@ -121,6 +126,7 @@ class TestStartBacktestReplayBars:
             granularity="Minute",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.bars_loaded == 3
         assert result.trades_loaded == 0
@@ -136,6 +142,7 @@ class TestStartBacktestReplayBars:
             granularity="Daily",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         assert result.bars_loaded == 2
         assert result.trades_loaded == 0
@@ -158,6 +165,7 @@ class TestStartBacktestReplayEdgeCases:
                 granularity="Trade",
                 initial_cash=1_000_000,
                 base_dir=FIXTURES,
+                strategy_file=_STRATEGY_FILE,
             )
 
     def test_empty_range_still_emits_engine_stopped(self, tmp_path: Path) -> None:
@@ -178,6 +186,7 @@ class TestStartBacktestReplayEdgeCases:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
             on_event=on_event,
         )
         assert result.trades_loaded == 0
@@ -199,6 +208,7 @@ class TestDeterminism:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
         )
         r1 = runner1.start_backtest_replay(**kwargs)
         r2 = runner2.start_backtest_replay(**kwargs)
@@ -220,6 +230,7 @@ class TestHHIpcVenueTag:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
             on_event=on_event,
         )
         started = next(e for e in events if e["event"] == "EngineStarted")
@@ -253,6 +264,7 @@ class TestHCEngineStartedFailureRecovery:
                     granularity="Trade",
                     initial_cash=1_000_000,
                     base_dir=FIXTURES,
+                    strategy_file=_STRATEGY_FILE,
                     on_event=on_event,
                 )
 
@@ -288,6 +300,7 @@ class TestH1NoDoubleEngineStoppedEmit:
             granularity="Trade",
             initial_cash=1_000_000,
             base_dir=FIXTURES,
+            strategy_file=_STRATEGY_FILE,
             on_event=on_event,
         )
         stopped = [e for e in events if e["event"] == "EngineStopped"]
@@ -333,6 +346,7 @@ class TestH1NoDoubleEngineStoppedEmit:
                     granularity="Trade",
                     initial_cash=1_000_000,
                     base_dir=FIXTURES,
+                    strategy_file=_STRATEGY_FILE,
                     on_event=on_event,
                 )
 
@@ -400,3 +414,153 @@ class TestModeValidation:
 
         with pytest.raises(ValueError, match="requires mode='replay'"):
             validate_start_engine("live", "Backtest")
+
+
+class TestHelperFunctions:
+    """_granularity_to_timeframe と _aggressor_to_side の値マッピング。"""
+
+    def test_granularity_to_timeframe_daily(self) -> None:
+        from engine.nautilus.engine_runner import _granularity_to_timeframe
+        assert _granularity_to_timeframe("Daily") == "1d"
+
+    def test_granularity_to_timeframe_minute(self) -> None:
+        from engine.nautilus.engine_runner import _granularity_to_timeframe
+        assert _granularity_to_timeframe("Minute") == "1m"
+
+    def test_granularity_to_timeframe_trade(self) -> None:
+        from engine.nautilus.engine_runner import _granularity_to_timeframe
+        assert _granularity_to_timeframe("Trade") == "tick"
+
+    def test_aggressor_to_side_buyer(self) -> None:
+        from engine.nautilus.engine_runner import _aggressor_to_side
+        class FakeSide:
+            name = "BUYER"
+        assert _aggressor_to_side(FakeSide()) == "BUY"
+
+    def test_aggressor_to_side_seller(self) -> None:
+        from engine.nautilus.engine_runner import _aggressor_to_side
+        class FakeSide:
+            name = "SELLER"
+        assert _aggressor_to_side(FakeSide()) == "SELL"
+
+    def test_aggressor_to_side_no_aggressor_fallback(self) -> None:
+        from engine.nautilus.engine_runner import _aggressor_to_side
+        class FakeSide:
+            name = "NO_AGGRESSOR"
+        assert _aggressor_to_side(FakeSide()) == "BUY"
+
+    def test_granularity_to_timeframe_unknown_raises_value_error(self) -> None:
+        from engine.nautilus.engine_runner import _granularity_to_timeframe
+        with pytest.raises(ValueError, match="unknown granularity"):
+            _granularity_to_timeframe("Unknown")
+
+
+class TestStreamingEmit:
+    """streaming 版が per-tick で KlineUpdate / Trades を emit すること。"""
+
+    FIXTURES = Path(__file__).parent / "fixtures"
+    _STRATEGY_FILE = str(Path(__file__).parent / "fixtures" / "test_strategy.py")
+
+    def test_daily_streaming_emits_kline_update(self) -> None:
+        """Daily 2 件投入 → KlineUpdate が 2 件 emit される。"""
+        events, on_event = _collect_events()
+        runner = NautilusRunner()
+        runner.start_backtest_replay_streaming(
+            strategy_id="stream-test",
+            instrument_id="1301.TSE",
+            start_date="2024-01-04",
+            end_date="2024-01-05",
+            granularity="Daily",
+            initial_cash=1_000_000,
+            multiplier=10_000_000,  # 高倍速でテスト高速化
+            base_dir=self.FIXTURES,
+            on_event=on_event,
+            strategy_file=self._STRATEGY_FILE,
+        )
+        kline_events = [e for e in events if e["event"] == "KlineUpdate"]
+        assert len(kline_events) == 2
+        first = kline_events[0]
+        assert first["venue"] == "replay"
+        assert first["ticker"] == "1301"
+        assert first["market"] == "stock"
+        assert first["timeframe"] == "1d"
+        assert first["kline"]["is_closed"] is True
+        assert isinstance(first["kline"]["open_time_ms"], int)
+
+    def test_trade_streaming_emits_trades_event(self) -> None:
+        """Trade 4 件投入 → Trades が 4 件 emit される。"""
+        events, on_event = _collect_events()
+        runner = NautilusRunner()
+        runner.start_backtest_replay_streaming(
+            strategy_id="stream-test-trade",
+            instrument_id="1301.TSE",
+            start_date="2024-01-04",
+            end_date="2024-01-05",
+            granularity="Trade",
+            initial_cash=1_000_000,
+            multiplier=10_000_000,
+            base_dir=self.FIXTURES,
+            on_event=on_event,
+            strategy_file=self._STRATEGY_FILE,
+        )
+        trade_events = [e for e in events if e["event"] == "Trades"]
+        assert len(trade_events) == 4
+        first = trade_events[0]
+        assert first["venue"] == "replay"
+        assert first["ticker"] == "1301"
+        assert first["market"] == "stock"
+        assert len(first["trades"]) == 1
+        trade = first["trades"][0]
+        assert trade["side"] in ("BUY", "SELL")
+        assert isinstance(trade["ts_ms"], int)
+        assert trade["is_liquidation"] is False
+
+    def test_stop_event_stops_streaming_before_all_ticks(self) -> None:
+        """stop_event が set されると streaming が途中で終了し、全件 emit されないこと。"""
+        import threading
+
+        events: list[dict] = []
+        set_after_first = threading.Event()
+
+        def on_event(evt: dict) -> None:
+            events.append(evt)
+            if evt.get("event") == "KlineUpdate":
+                set_after_first.set()
+
+        runner = NautilusRunner()
+        runner.start_backtest_replay_streaming(
+            strategy_id="stream-test-stop",
+            instrument_id="1301.TSE",
+            start_date="2024-01-04",
+            end_date="2024-01-05",
+            granularity="Daily",
+            initial_cash=1_000_000,
+            multiplier=10_000_000,
+            base_dir=self.FIXTURES,
+            on_event=on_event,
+            strategy_file=self._STRATEGY_FILE,
+            stop_event=set_after_first,
+        )
+        kline_events = [e for e in events if e["event"] == "KlineUpdate"]
+        # Daily fixture に 2 件あるが stop_event で 1 件目後に中断するため < 2 件
+        assert len(kline_events) < 2
+
+    def test_minute_streaming_emits_kline_update(self) -> None:
+        """Minute 3 件投入 → KlineUpdate が 3 件 emit される。"""
+        events, on_event = _collect_events()
+        runner = NautilusRunner()
+        runner.start_backtest_replay_streaming(
+            strategy_id="stream-test-min",
+            instrument_id="1301.TSE",
+            start_date="2024-01-04",
+            end_date="2024-01-05",
+            granularity="Minute",
+            initial_cash=1_000_000,
+            multiplier=10_000_000,
+            base_dir=self.FIXTURES,
+            on_event=on_event,
+            strategy_file=self._STRATEGY_FILE,
+        )
+        kline_events = [e for e in events if e["event"] == "KlineUpdate"]
+        assert len(kline_events) == 3
+        assert kline_events[0]["timeframe"] == "1m"

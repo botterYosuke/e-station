@@ -525,12 +525,18 @@ pub enum ReplayGranularity {
 /// Engine start config — shape mirrors `python/engine/nautilus/engine_runner.py`
 /// arguments. Decimal-precision fields stay as strings to avoid f64 round-trip loss.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EngineStartConfig {
     pub instrument_id: String,
     pub start_date: String,
     pub end_date: String,
     pub initial_cash: String,
     pub granularity: ReplayGranularity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_file: Option<String>,
+    /// JSON object only — array/scalar rejected at HTTP boundary before IPC send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 // ── Order sub-types (schema 1.3) ──────────────────────────────────────────────
@@ -1001,6 +1007,13 @@ pub enum EngineEvent {
         buying_power: String,
         equity: String,
         ts_event_ms: i64,
+    },
+
+    // ── N1.11: streaming replay pacing marker ────────────────────────────────
+    /// Python が営業日跨ぎ時に emit するマーカー（N1.11 D7）。
+    /// Rust 側は現状 ignore してよい（将来の日付ヘッダー表示などに流用可能）。
+    DateChangeMarker {
+        date: String,
     },
 }
 

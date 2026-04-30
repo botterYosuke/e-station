@@ -43,13 +43,13 @@
    - 設定あり → 手順 2 へ
 
 2. **固定ポート 19876 へのプローブ**（TCP 2 秒タイムアウト）
-   - `ws://127.0.0.1:19876/` へ接続試行
-   - 成功（SCHEMA_MAJOR 一致 + HMAC token 検証通過）→ 既存エンジンに attach、spawn をスキップ
-   - 失敗（接続拒否 / タイムアウト / token 不一致 / SCHEMA_MAJOR 不一致）→ 失敗理由を `log::info!` に記録して手順 3 へ
+   - `ws://127.0.0.1:19876/` へ接続試行（`EngineConnection::probe(probe_url, token, mode)` で `mode` も渡す。N1.13 以降、外部エンジンが `--mode replay` で起動している場合は live クライアントの attach を拒否する／逆も真）
+   - 成功（SCHEMA_MAJOR 一致 + HMAC token 検証通過 + mode 一致）→ 既存エンジンに attach、spawn をスキップ
+   - 失敗（接続拒否 / タイムアウト / token 不一致 / SCHEMA_MAJOR 不一致 / mode 不一致）→ 失敗理由を `log::info!` に記録して手順 3 へ
 
 3. **Python spawn**（プローブ失敗時、または env 未設定時）
-   - ランダムポートを選択 → stdin で port / token を Python に渡す
-   - ハンドシェイク実行（Hello → Ready）
+   - ランダムポートを選択 → stdin で port / token / mode を Python に渡す
+   - ハンドシェイク実行（Hello（`mode` 込み）→ Ready）
 
 > **ロックファイル案は不採用。** 当初 [engine-discovery.md](./archive/engine-discovery.md) で検討したが、
 > 固定ポート 19876 プローブ方式（HMAC + SCHEMA_MAJOR 二重検証で必ず弾ける）に変更した。
@@ -93,8 +93,15 @@
 
 | 方向 | 種類 | 例 |
 |---|---|---|
-| Rust → Python | `Hello` / `SetProxy` / `ListTickers` / `GetTickerMetadata` / `Subscribe` / `Unsubscribe` / `FetchKlines` / `FetchTrades` / `FetchOpenInterest` / `FetchTickerStats` / `RequestDepthSnapshot` / `Shutdown` | `{"op":"subscribe","venue":"binance","ticker":"BTCUSDT","stream":"trade"}` |
-| Python → Rust | `Ready` / `EngineError` / `Connected` / `Disconnected` / `Tickers` / `TickerInfo` / `TickerStats` / `Klines` / `KlineUpdate` / `Trades`（バッチ） / `DepthSnapshot` / `DepthDiff` / `DepthGap` / `OpenInterest` / `Error` | `{"event":"trade_batch","venue":"binance","ticker":"BTCUSDT","trades":[{"p":"68000.1","q":"0.012","side":"buy","ts":...}, ...]}` |
+| Rust → Python（コア market data） | `Hello` / `SetProxy` / `ListTickers` / `GetTickerMetadata` / `Subscribe` / `Unsubscribe` / `FetchKlines` / `FetchTrades` / `FetchOpenInterest` / `FetchTickerStats` / `RequestDepthSnapshot` / `Shutdown` | `{"op":"subscribe","venue":"binance","ticker":"BTCUSDT","stream":"trade"}` |
+| Rust → Python（venue 制御 / 発注 / 残高） | `RequestVenueLogin` / `SetSecondPassword` / `ForgetSecondPassword` / `SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` / `GetOrderList` / `GetBuyingPower` | — |
+| Rust → Python（replay / nautilus エンジン） | `StartEngine` / `StopEngine` / `LoadReplayData` / `SetReplaySpeed` | — |
+| Python → Rust（コア market data） | `Ready` / `EngineError` / `Connected` / `Disconnected` / `TickerInfo` / `TickerStats` / `Klines` / `KlineUpdate` / `Trades`（バッチ） / `TradesFetched` / `DepthSnapshot` / `DepthDiff` / `DepthGap` / `OpenInterest` / `Error` | `{"event":"trade_batch","venue":"binance","ticker":"BTCUSDT","trades":[{"p":"68000.1","q":"0.012","side":"buy","ts":...}, ...]}` |
+| Python → Rust（venue ライフサイクル） | `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` / `SecondPasswordRequired` | — |
+| Python → Rust（発注ライフサイクル） | `OrderSubmitted` / `OrderAccepted` / `OrderRejected` / `OrderPendingUpdate` / `OrderPendingCancel` / `OrderFilled` / `OrderCanceled` / `OrderExpired` / `OrderListUpdated` / `BuyingPowerUpdated` | — |
+| Python → Rust（replay / nautilus エンジン） | `EngineStarted` / `EngineStopped` / `ReplayDataLoaded` / `PositionOpened` / `PositionClosed` / `ExecutionMarker` / `StrategySignal` / `ReplayBuyingPower` / `MarketPriceResponse` / `MarketPriceHistoryResponse` | — |
+
+正本は [python/engine/schemas.py](../../python/engine/schemas.py) の pydantic モデル群と [engine-client/src/dto.rs](../../engine-client/src/dto.rs) の Rust DTO（共に `SCHEMA_MAJOR=2 / SCHEMA_MINOR=6`、2026-04-30 時点）。表は分類目的で、追加・削除があれば schemas.py の `class \w+\(IpcMessage\)` 列挙と本表の差分を [`schemas/CHANGELOG.md`](./schemas/CHANGELOG.md) と一緒に更新する。
 
 ※ `exchange::Event` 列挙体の各バリアント（`Connected` / `Disconnected` / `DepthReceived` / `TradesReceived` / `KlineReceived`）と一対一対応する形で Python→Rust イベントを定義する。OI インジケータが継続的に要求する `FetchRange::OpenInterest` も `FetchOpenInterest` コマンド + `OpenInterest` レスポンスで表現する（参考: [`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs) `fetch_open_interest`、[`src/chart/indicator/kline/open_interest.rs`](../../src/chart/indicator/kline/open_interest.rs)）。
 
@@ -167,14 +174,19 @@ session ID の用語と型（混同防止）:
 接続直後の race とバージョン不一致を防ぐため、接続直後は次の順で進む。Rust は `Ready` 受領までマーケットデータ系コマンドを送らない。
 
 1. **Rust → Python: `Hello`**
-   - フィールド: `{schema_major: u16, schema_minor: u16, client_version: str, token: str}`。
+   - フィールド: `{schema_major: u16, schema_minor: u16, client_version: str, token: str, mode: "live" | "replay"}`。
    - `token` は §4.1.1 で渡したランダム接続トークン。Python は不一致なら即切断。
+   - **`mode` (N1.13 追加)**: 起動時に固定する動作モード。`"replay"` のとき Python は `LoadReplayData` / `StartEngine{engine: Backtest}` / `SetReplaySpeed` を受理し、live venue 購読 (`Subscribe` を `replay` venue 等で投げる) は拒否する。旧クライアント互換のため省略時は `"live"` にフォールバック。
 2. **Python → Rust: `Ready` もしくは `EngineError`**
    - `Ready` フィールド: `{schema_major: u16, schema_minor: u16, engine_version: str, engine_session_id: uuid, capabilities: {supported_venues: [...], supports_bulk_trades: bool, supports_depth_binary: bool, ...}}`。
    - **`Ready` 発行前提条件 (Phase 7 追加)**: Python engine は `Ready` を送る前に、全 worker の HTTP クライアント (`httpx.AsyncClient` 等) 初期化を完了しなければならない。これにより `ListTickers` / `FetchTickerStats` / `FetchKlines` 等は `Ready` 受領直後から即時受理可能となる。サーバ実装は `await asyncio.gather(*(w.prepare() for w in workers))` を 20 秒タイムアウトで実行する。タイムアウト時は警告ログを残しつつ `Ready` を送出し、後続 fetch のエラーで個別判断する。
 3. **Rust → Python: `SetProxy`（必要時のみ）**
    - `Ready` 受領後に送る。
-4. **Rust → Python: マーケットデータ系コマンド**（`Subscribe` 等）。
+4. **Python: venue startup login（autonomous、schema 2.x 以降）**
+   - `Hello`/`Ready` 完了後、Python は `tachibana_account.json` / `tachibana_session.json` を起点に **自律的に** Tachibana の startup login を進める。Rust から `SetVenueCredentials` を送って起動を gate する旧モデルは廃止された（[engine-client/src/process.rs](../../engine-client/src/process.rs) の "schema 2.x — autonomous login (no SetVenueCredentials → VenueReady gate)" コメントが正本記述）。
+   - Python は進捗を `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` で逐次通知。Rust UI は受信ステータスをそのまま `VenueState{Idle/LoginInFlight/Ready/Error}` に反映し、`VenueReady` を待ってから既存購読を resubscribe + metadata fetch を再開する。
+   - ユーザーが UI から再ログインを要求した場合のみ Rust は `RequestVenueLogin` を発火する（Python 側内部の自動再ログインは禁止、[tachibana/spec.md §3.2](../✅tachibana/spec.md)）。
+5. **Rust → Python: マーケットデータ系コマンド**（`Subscribe` 等）。
 
 #### 4.5.1 スキーマバージョニング運用
 - **`schema_major`**: 既存フィールドの意味変更・削除、enum バリアントの削除、コマンド/イベント名の変更など互換性を破る変更で bump。不一致は **致命的エラー**としてハンドシェイクを失敗させ、UI にアップグレード誘導バナーを出す。

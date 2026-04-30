@@ -62,7 +62,7 @@ done
 log "starting flowsurface app"
 : > "$RUST_LOG_FILE" 2>/dev/null || true
 FLOWSURFACE_ENGINE_TOKEN="$TOKEN" RUST_LOG=info \
-    "$BINARY" --data-engine-url "ws://127.0.0.1:$PORT" > /dev/null 2>&1 &
+    "$BINARY" --mode live --data-engine-url "ws://127.0.0.1:$PORT/" > /dev/null 2>&1 &
 APP_PID=$!
 
 # Wait for handshake to complete.

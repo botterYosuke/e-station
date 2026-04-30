@@ -100,6 +100,12 @@ static REPLAY_API_STATE: std::sync::OnceLock<Arc<replay_api::ReplayApiState>> =
 static ORDER_API_MARKET_CLOSED: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> =
     std::sync::OnceLock::new();
 
+/// Startup mode (`live` or `replay`) captured from `--mode` before any runtime
+/// is created. Allows `Flowsurface::new()` to apply D8 layout isolation without
+/// depending on `REPLAY_API_STATE` (which is only set when the HTTP control API
+/// runtime builds successfully).
+static APP_MODE: std::sync::OnceLock<engine_client::dto::AppMode> = std::sync::OnceLock::new();
+
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
 /// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
 /// here, before the connection is published to `ENGINE_CONNECTION_TX`,
@@ -180,6 +186,7 @@ const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
     (exchange::adapter::Venue::Okex, "okex"),
     (exchange::adapter::Venue::Mexc, "mexc"),
     (exchange::adapter::Venue::Tachibana, TACHIBANA_VENUE_NAME),
+    (exchange::adapter::Venue::Replay, "replay"),
 ];
 
 /// Bind to 127.0.0.1:0 to ask the OS for a free port, then immediately close
@@ -195,6 +202,12 @@ fn pick_free_port() -> Option<u16> {
 
 fn main() {
     let cli_args = cli::CliArgs::parse();
+
+    // Capture startup mode before any runtime is created so Flowsurface::new()
+    // can enforce D8 regardless of whether the HTTP control-API runtime builds.
+    APP_MODE
+        .set(engine_client::dto::AppMode::from(cli_args.mode))
+        .ok();
 
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -724,6 +737,13 @@ struct Flowsurface {
     /// Shared market-closed flag for order_api pre-reject (N3.B).
     /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
     order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// N4.3: user-selected strategy `.py` file path. `None` until the user picks
+    /// one via the OS file dialog.  Intended for future wiring to `/api/replay/start`
+    /// `strategy_file` field when a UI-triggered replay start is implemented.
+    replay_strategy_file: Option<std::path::PathBuf>,
+    /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
+    /// Cleared by `Message::DismissStrategyLoadError`.
+    strategy_load_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -855,6 +875,11 @@ enum Message {
         ts_event_ms: i64,
         tag: Option<String>,
     },
+    /// N4.3: result of the async OS file dialog for strategy `.py` file selection.
+    /// `Some(path)` when the user picked a file; `None` when they cancelled.
+    StrategyFilePicked(Option<std::path::PathBuf>),
+    /// N4.4: user dismissed the `strategy_load_failed` error banner.
+    DismissStrategyLoadError,
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1128,7 +1153,17 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
 
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
-        let saved_state = layout::load_saved_state();
+        let is_replay_mode = APP_MODE
+            .get()
+            .map(|m| *m == engine_client::dto::AppMode::Replay)
+            .unwrap_or(false);
+
+        let saved_state = if is_replay_mode {
+            log::info!("replay mode: skipping load_saved_state (D9-load), using defaults");
+            layout::SavedState::default()
+        } else {
+            layout::load_saved_state()
+        };
 
         // All venues are routed through the Python data engine via IPC.
         // The watch channel is guaranteed to hold `Some(conn)` before iced
@@ -1169,9 +1204,30 @@ impl Flowsurface {
 
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
 
+        // D8: replay mode starts with a clean layout (single Starter pane).
+        // D9-load (implemented above) already sets saved_state to SavedState::default()
+        // in replay mode, so saved_state.layout_manager is already LayoutManager::new().
+        // The default 5-pane grid from `Dashboard::default()` is replaced with a
+        // single Starter pane so `auto_generate_replay_panes` can populate the
+        // grid cleanly without leaving 5 orphan Starter panes alongside the
+        // auto-generated TimeAndSales / CandlestickChart / OrderList / BuyingPower.
+        let layout_manager = if is_replay_mode {
+            let mut lm = LayoutManager::new();
+            if let Some(layout) = lm.layouts.first_mut() {
+                let (panes, _initial_pane) = iced::widget::pane_grid::State::new(
+                    crate::screen::dashboard::pane::State::default(),
+                );
+                layout.dashboard.panes = panes;
+                layout.dashboard.focus = None;
+            }
+            lm
+        } else {
+            saved_state.layout_manager
+        };
+
         let mut state = Self {
             main_window: window::Window::new(main_window_id),
-            layout_manager: saved_state.layout_manager,
+            layout_manager,
             theme_editor: ThemeEditor::new(saved_state.custom_theme),
             audio_stream,
             sidebar,
@@ -1202,6 +1258,8 @@ impl Flowsurface {
                     );
                     Arc::new(std::sync::atomic::AtomicBool::new(false))
                 }),
+            replay_strategy_file: None,
+            strategy_load_error: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -1999,6 +2057,19 @@ impl Flowsurface {
                             }
                             Task::none()
                         }
+                        // N4.3: open OS file dialog for strategy .py file
+                        Some(dashboard::Event::PickStrategyFile) => {
+                            return Task::perform(
+                                async {
+                                    rfd::AsyncFileDialog::new()
+                                        .add_filter("Python", &["py"])
+                                        .pick_file()
+                                        .await
+                                        .map(|h| h.path().to_owned())
+                                },
+                                Message::StrategyFilePicked,
+                            );
+                        }
                         None => Task::none(),
                     };
 
@@ -2086,12 +2157,25 @@ impl Flowsurface {
                     let main_window = self.main_window.id;
                     self.active_dashboard_mut()
                         .distribute_buying_power_error(main_window, format!("[{code}] {message}"));
+                } else if code == "strategy_load_failed" {
+                    // N4.4: surface the error as a dismissable banner.
+                    self.strategy_load_error = Some(message);
                 } else {
                     log::debug!(
                         "[IpcError] unrouted: request_id={request_id:?}, code={code}, \
                          message={message}"
                     );
                 }
+            }
+            // N4.3: user picked (or cancelled) the strategy file dialog.
+            Message::StrategyFilePicked(path) => {
+                self.replay_strategy_file = path;
+                return Task::none();
+            }
+            // N4.4: user dismissed the strategy load error banner.
+            Message::DismissStrategyLoadError => {
+                self.strategy_load_error = None;
+                return Task::none();
             }
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
             Message::ExecutionMarkerReceived {
@@ -2634,20 +2718,32 @@ impl Flowsurface {
                     ControlApiCommand::AutoGenerateReplayPanes {
                         instrument_id,
                         strategy_id,
+                        granularity,
                     } => {
                         // M-2 (R2 review-fix R2): strategy_id を Option<String> として保持。
                         // None = 単独 LoadReplayData 経路、Some(_) = StartEngine 経由 load。
-                        // 現状 dashboard.auto_generate_replay_panes は strategy_id を要求しないが、
-                        // ログに記録しておくことで N1.14 以降の pane 紐付け実装に流用できる。
                         log::debug!(
                             "AutoGenerateReplayPanes: instrument_id={instrument_id:?} \
-                             strategy_id={strategy_id:?}"
+                             strategy_id={strategy_id:?} granularity={granularity:?}"
                         );
+                        use engine_client::dto::ReplayGranularity;
+                        // Convert granularity to Option<Timeframe>: None = Trade (no bar chart).
+                        let timeframe = match granularity {
+                            ReplayGranularity::Daily => Some(exchange::Timeframe::D1),
+                            ReplayGranularity::Minute => Some(exchange::Timeframe::M1),
+                            ReplayGranularity::Trade => None,
+                        };
                         let main_window_id = self.main_window.id;
                         let dashboard = self.active_dashboard_mut();
                         // N1.14: clear any stale overlay markers before loading new replay data.
                         dashboard.clear_chart_overlays(main_window_id);
-                        dashboard.auto_generate_replay_panes(main_window_id, &instrument_id);
+                        let task = dashboard
+                            .auto_generate_replay_panes(main_window_id, &instrument_id, timeframe)
+                            .map(move |msg| Message::Dashboard {
+                                layout_id: None,
+                                event: msg,
+                            });
+                        return task;
                     }
                     _ => {}
                 }
@@ -2712,6 +2808,21 @@ impl Flowsurface {
             let mut base = column![header_title];
             if let Some(banner) = banner {
                 base = base.push(container(banner).padding(padding::all(8)));
+            }
+            // N4.4: strategy_load_failed dismissable banner.
+            if let Some(err_msg) = &self.strategy_load_error {
+                let strategy_err_banner = container(
+                    row![
+                        text(format!("Strategy load failed: {err_msg}")),
+                        button("×")
+                            .on_press(Message::DismissStrategyLoadError)
+                            .style(button::danger),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding(padding::all(8));
+                base = base.push(strategy_err_banner);
             }
             base = base.push(
                 match sidebar_pos {
@@ -3306,6 +3417,16 @@ impl Flowsurface {
     }
 
     fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
+        // replay モードでは live 設定を上書きしない
+        if APP_MODE
+            .get()
+            .map(|m| *m == engine_client::dto::AppMode::Replay)
+            .unwrap_or(false)
+        {
+            log::info!("replay mode: skipping save_state_to_disk");
+            return;
+        }
+
         self.active_dashboard_mut()
             .popout
             .iter_mut()

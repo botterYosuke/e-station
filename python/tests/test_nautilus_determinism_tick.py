@@ -19,6 +19,8 @@ from engine.nautilus.engine_runner import NautilusRunner, ReplayBacktestResult
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+_STRATEGY_FILE = str(FIXTURES / "test_strategy.py")
+
 _COMMON_KWARGS = dict(
     strategy_id="buy-and-hold",
     instrument_id="1301.TSE",
@@ -27,6 +29,7 @@ _COMMON_KWARGS = dict(
     granularity="Trade",
     initial_cash=1_000_000,
     base_dir=FIXTURES,
+    strategy_file=_STRATEGY_FILE,
 )
 
 

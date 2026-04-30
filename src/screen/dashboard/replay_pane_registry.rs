@@ -95,6 +95,17 @@ impl ReplayPaneRegistry {
             })
             .copied()
     }
+
+    /// Remove a registered pane from the registry without dismissing it.
+    ///
+    /// Used when the pane grid is closed (e.g. Trade granularity reload removes
+    /// the CandlestickChart pane) so a future first-load can recreate it.
+    pub fn remove_registered_pane(&mut self, instrument_id: &str, pane_kind: &'static str) {
+        self.registered.remove(&PaneIdentity {
+            instrument_id: instrument_id.to_string(),
+            pane_kind,
+        });
+    }
 }
 
 impl Default for ReplayPaneRegistry {

@@ -81,6 +81,7 @@ pub fn venue_icon(venue: exchange::adapter::Venue) -> Icon {
         // No bespoke Fontello glyph yet; reuse a neutral chart icon as the
         // Tachibana placeholder until artwork is added.
         exchange::adapter::Venue::Tachibana => Icon::ChartOutline,
+        exchange::adapter::Venue::Replay => Icon::ChartOutline,
     }
 }
 

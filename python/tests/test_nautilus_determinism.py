@@ -13,8 +13,13 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
+from pathlib import Path
+
 from engine.nautilus.data_loader import KlineRow
 from engine.nautilus.engine_runner import NautilusRunner
+
+_STRATEGY_FILE = str(Path(__file__).parent.parent.parent / "docs" / "example" / "buy_and_hold.py")
+_STRATEGY_INIT_KWARGS = {"instrument_id": "7203.TSE", "bar_type_str": "7203.TSE-1-DAY-MID-EXTERNAL"}
 
 
 def _fixed_klines(n: int = 50) -> list[KlineRow]:
@@ -42,19 +47,23 @@ class TestDeterminism:
         klines = _fixed_klines()
         runner1 = NautilusRunner()
         r1 = runner1.start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
         runner2 = NautilusRunner()
         r2 = runner2.start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
         assert r1.final_equity == r2.final_equity, (
             f"Determinism FAILED: {r1.final_equity} != {r2.final_equity}"
@@ -64,19 +73,23 @@ class TestDeterminism:
         klines = _fixed_klines()
         runner1 = NautilusRunner()
         r1 = runner1.start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
         runner2 = NautilusRunner()
         r2 = runner2.start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
         # 偽陽性防止: タイムスタンプが空でないこと
         assert len(r1.fill_timestamps) > 0, "fill_timestamps must not be empty"
@@ -90,11 +103,13 @@ class TestDeterminism:
 
         # 通常実行
         r_normal = NautilusRunner().start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
 
         # wall clock を固定値にモック（time.time / time.monotonic のみ。
@@ -102,11 +117,13 @@ class TestDeterminism:
         with patch("time.time", return_value=0.0), \
              patch("time.monotonic", return_value=0.0):
             r_mocked = NautilusRunner().start_backtest(
-                strategy_id="buy-and-hold",
+                strategy_id="user-strategy",
                 ticker="7203",
                 venue="TSE",
                 klines=klines,
                 initial_cash=1_000_000,
+                strategy_file=_STRATEGY_FILE,
+                strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
             )
 
         assert r_normal.final_equity == r_mocked.final_equity, (
@@ -117,18 +134,22 @@ class TestDeterminism:
         """H-4: 2 回実行で fill_last_prices がビット一致すること。"""
         klines = _fixed_klines()
         r1 = NautilusRunner().start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
         r2 = NautilusRunner().start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
         # 偽陽性防止: fill_last_prices が空でないこと
         assert len(r1.fill_last_prices) > 0, "fill_last_prices must not be empty"
@@ -140,10 +161,12 @@ class TestDeterminism:
         """H-4: buy-and-hold で fill_timestamps が空でないこと（偽陽性防止）。"""
         klines = _fixed_klines()
         result = NautilusRunner().start_backtest(
-            strategy_id="buy-and-hold",
+            strategy_id="user-strategy",
             ticker="7203",
             venue="TSE",
             klines=klines,
             initial_cash=1_000_000,
+            strategy_file=_STRATEGY_FILE,
+            strategy_init_kwargs=_STRATEGY_INIT_KWARGS,
         )
         assert len(result.fill_timestamps) > 0, "fill_timestamps must not be empty"

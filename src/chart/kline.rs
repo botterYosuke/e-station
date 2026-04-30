@@ -35,6 +35,7 @@ pub struct StrategySignalData {
 }
 
 use data::util::abbr_large_numbers;
+use exchange::adapter::Exchange;
 use exchange::unit::{Price, PriceStep, Qty};
 use exchange::{Kline, OpenInterest as OIData, TickerInfo, Trade};
 
@@ -367,6 +368,10 @@ impl KlineChart {
     }
 
     fn fetch_missing_data(&mut self) -> Option<Action> {
+        if self.chart.ticker_info().exchange() == Exchange::ReplayStock {
+            return None;
+        }
+
         match &self.data_source {
             PlotData::TimeBased(timeseries) => {
                 let timeframe_ms = timeseries.interval.to_milliseconds();
@@ -461,6 +466,11 @@ impl KlineChart {
     pub fn reset_request_handler(&mut self) {
         self.request_handler = RequestHandler::default();
         self.fetching_trades = (false, None);
+    }
+
+    pub fn mark_request_failed(&mut self, req_id: uuid::Uuid) {
+        self.request_handler
+            .mark_failed(req_id, "fetch error".to_string());
     }
 
     pub fn raw_trades(&self) -> Vec<Trade> {

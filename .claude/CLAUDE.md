@@ -148,18 +148,111 @@ flowsurface: --mode is required (use 'live' or 'replay'); e.g. `flowsurface --mo
 | `replay` | 録画済みデータの再生（`/replay/*` HTTP API が有効化される） | `cargo run -- --mode replay` |
 
 VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vscode/launch.json) に
-`Rust: Debug (CodeLLDB) - live` / `Rust: Debug (CodeLLDB) - replay` の 2 構成を
+`live - Rust: Debug (CodeLLDB)` / `replay - Rust: Debug (CodeLLDB)` の 2 構成を
 用意してある。デバッグサイドバーの起動構成セレクタから選ぶこと。
 
 新しい起動経路（CI スクリプト・ドキュメント・別の launch.json 等）を追加するときは
 必ず `--mode` を渡すこと。忘れると上記メッセージで即終了する。
+
+### replay モードの使い方
+
+#### サンプル戦略を流す最小コマンド
+
+```bash
+REPLAY_INSTRUMENT_ID=1301.TSE \
+REPLAY_START_DATE=2025-01-06 \
+REPLAY_END_DATE=2025-03-31 \
+REPLAY_GRANULARITY=Daily \
+bash scripts/run-replay-debug.sh docs/example/sma_cross.py
+```
+
+`run-replay-debug.sh` は以下を一気にやる：
+
+1. `cargo build`（debug ビルド）
+2. `replay_dev_load.sh` を background で起動（HTTP ポート 9876 を polling）
+3. `flowsurface --mode replay` を foreground 起動
+4. background スクリプトが `POST /api/replay/load` → `POST /api/replay/start` を順に投げる
+
+サンプル戦略は `docs/example/` 配下：
+
+| ファイル | 内容 |
+|---------|------|
+| `sma_cross.py` | 短期/長期 SMA クロスでエントリー・クローズ |
+
+#### 必須・任意 env var
+
+`run-replay-debug.sh` の先頭で `:?` チェックされるので未設定だと即終了する：
+
+| 変数 | 必須 | 例 |
+|------|------|-----|
+| `REPLAY_INSTRUMENT_ID` | ✅ | `1301.TSE` |
+| `REPLAY_START_DATE` | ✅ | `2025-01-06` (ISO8601) |
+| `REPLAY_END_DATE` | ✅ | `2025-03-31` (ISO8601) |
+| `REPLAY_GRANULARITY` | 任意（既定 `Daily`） | `Daily` / `Minute` / `Trade` |
+| `REPLAY_INITIAL_CASH` | 任意（既定 `1000000`） | 円単位 |
+| `REPLAY_STRATEGY_ID` | 任意（既定 `user-strategy`） | 任意の識別子 |
+
+#### J-Quants データの場所
+
+`S:/j-quants/` 直下に月次 CSV.gz が必要：
+
+- Daily: `equities_bars_daily_YYYYMM.csv.gz`
+- Minute: `equities_bars_minute_YYYYMM.csv.gz`
+- Trade: `equities_trades_YYYYMM.csv.gz`
+
+env var `JQUANTS_DIR` で上書き可（既定 `S:/j-quants`）。
+`POST /api/replay/load` は**ファイル存在確認のみ**で行を読まない。返値の
+`bars_loaded:0` は仕様通り（実際のロード件数ではない）。
+
+#### `saved-state.json` の扱い（D9）
+
+replay モードでは `saved-state.json` を **load も save も行わない**：
+
+- 起動時：常にデフォルト状態（空ペイングリッド）から始まる
+- 終了時：live モードの設定を上書きしない
+
+これにより replay セッションが live のレイアウト・ウィンドウ位置を汚染しない。
+ペインは `ReplayDataLoaded` 受信後に `auto_generate_replay_panes` が
+TimeAndSales / CandlestickChart / OrderList / BuyingPower を自動生成する。
+
+#### IPC イベントの流れ（streaming replay）
+
+```
+POST /api/replay/load   → LoadReplayData IPC
+                        → Python: check_data_exists() （ファイル存在のみ）
+                        → ReplayDataLoaded
+                        → Rust: AutoGenerateReplayPanes コマンド送信
+
+POST /api/replay/start  → StartEngine IPC
+                        → Python: NautilusRunner.start_backtest_replay_streaming()
+                        → EngineStarted
+                        → 1 バー / tick ずつ処理：
+                          - DateChangeMarker（営業日跨ぎ）
+                          - KlineUpdate / Trades（market data 複製）
+                          - ExecutionMarker / StrategySignal（戦略の発注時）
+                          - ReplayBuyingPower（ポートフォリオ更新）
+                        → 全バー処理後 EngineStopped
+```
+
+`replay_speed.py` の `SLEEP_CAP_SEC=0.200` により tick 間隔は最大 200ms に
+キャップされる。Daily バー 60本でも約 12 秒で完走する。
+
+#### よくある落とし穴
+
+- **`Subscribe: unknown venue 'replay'` ログ**：Python は replay を実 venue として
+  登録していないため Subscribe / FetchKlines は拒否される。これは仕様通り。
+  チャート表示は streaming で push される `KlineUpdate` を直接受信して描画する
+- **チャートに初期履歴が無い**：`FetchKlines` は失敗するが streaming で 1 本ずつ
+  bar が増える。replay 開始直後はチャート空、徐々に bar が積まれる
+- **`saved-state.json` を消したら再現するバグ**：D9 で replay は常にこの状態で
+  起動するため、空ペイングリッドからのフローを必ず動作確認すること
 
 ### 外部エンジンに接続する際のトークン認証
 
 `--data-engine-url` を指定してアプリを起動する際は、
 **必ず環境変数 `FLOWSURFACE_ENGINE_TOKEN` をエンジンのトークンと一致させる必要がある**。
 
-アプリ側（`src/main.rs:234`）は以下のように環境変数から取得している：
+アプリ側（`src/main.rs` の `FLOWSURFACE_ENGINE_TOKEN` 取得箇所）は以下のように環境変数から取得している：
 ```rust
 let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
 ```
@@ -307,9 +400,8 @@ uv run python scripts/smoke_tachibana_login.py
 このリポジトリでコードレビュー・差分レビュー・PR レビューを行うときは、
 必ず `.claude/skills/e-station-review/SKILL.md` のスキルを Skill ツールで起動する。
 
-- スキル一覧上の表示名は `e-station-review`
-- frontmatter の `name:` が `review` なので組み込み `/review` と紛らわしいが、
-  **組み込み `/review` は使わない**
+- スキル一覧上の表示名は `e-station-review`（frontmatter の `name:` も `e-station-review`）
+- 組み込みの `/review` とは別物。**組み込み `/review` は使わない**
 - review-fix-loop のレビュー段でも、サブエージェントに e-station-review スキルを
   使わせること
 

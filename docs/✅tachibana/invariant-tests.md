@@ -2,6 +2,8 @@
 
 **目的**: 立花証券アダプター実装の各不変条件 ID（spec.md / SKILL.md / data-mapping.md / open-questions.md 由来）と、それを CI で pin するテスト関数名を 1:1（または 1:n）で対応付ける**単一正本ファイル**。本表が存在しない不変条件 ID は「未対応」と扱い、CI grep ガード `test_invariant_table_covers_all_ids` により**未対応 ID = 0** を収束条件として保証する。
 
+**最終照合 (2026-04-30)**: 実装テスト群（`python/tests/test_tachibana_yobine.py` / `test_tachibana_file_store.py` / `test_tachibana_dev_env_guard.py`、`engine-client/tests/ticker_info_tachibana_mapping.rs` 等）と本表を突合し、CLMYobine tick size 解決（HIGH-D2-1-B1a〜e / B2a/b）、`display_name_ja` / `lot_size` / `quote_currency` 伝播（HIGH-U-9）、session file store JST freshness（F-SC-FreshJST）、dev env release guard（F-DevEnv-Release-Guard）が登録済みであることを確認。差分なし。
+
 **ID prefix 規約**:
 - `F-*`: 本体（Phase 1〜2）の不変条件。
 - `T35-*`: T3.5（再ログイン UX / VenueState FSM）の不変条件。CI grep regex は `(F|T35)-[A-Z0-9-]+` 相当を拾う（下記 CI ガード仕様参照）。

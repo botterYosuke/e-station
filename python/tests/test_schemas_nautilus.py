@@ -4,7 +4,7 @@
 - Event  系: EngineStarted / EngineStopped / ReplayDataLoaded /
              PositionOpened / PositionClosed
 - Literal 制約違反 (engine="Bogus" / granularity="Bogus") で ValidationError
-- SCHEMA_MINOR == 5
+- SCHEMA_MINOR == 6
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ def _roundtrip(model_cls, data: dict) -> dict:
 # ── Schema version ──────────────────────────────────────────────────────────
 
 
-def test_schema_minor_is_5_for_nautilus() -> None:
-    # R2 review-fix R1b M-8: SCHEMA_MINOR を 4 → 5 に bump (ReplayDataLoaded.strategy_id Optional)
-    assert s.SCHEMA_MINOR == 5
+def test_schema_minor_is_6_for_nautilus() -> None:
+    # N4: SCHEMA_MINOR を 5 → 6 に bump (LoadReplayData に strategy_file / strategy_init_kwargs 追加)
+    assert s.SCHEMA_MINOR == 6
     assert s.SCHEMA_MAJOR == 2
 
 
@@ -78,6 +78,42 @@ def test_start_engine_roundtrip() -> None:
     out = _roundtrip(s.StartEngine, data)
     assert out["engine"] == "Backtest"
     assert out["config"]["granularity"] == "Minute"
+
+
+def test_start_engine_with_strategy_file_roundtrip() -> None:
+    data = {
+        "op": "StartEngine",
+        "request_id": "req-sf",
+        "engine": "Backtest",
+        "strategy_id": "user-defined",
+        "config": {
+            "instrument_id": "1301.TSE",
+            "start_date": "2024-01-04",
+            "end_date": "2024-03-31",
+            "initial_cash": "1000000",
+            "granularity": "Daily",
+            "strategy_file": "examples/strategies/buy_and_hold.py",
+            "strategy_init_kwargs": {"instrument_id": "1301.TSE", "lot_size": 100},
+        },
+    }
+    out = _roundtrip(s.StartEngine, data)
+    assert out["config"]["strategy_file"] == "examples/strategies/buy_and_hold.py"
+    assert out["config"]["strategy_init_kwargs"]["lot_size"] == 100
+
+
+def test_engine_start_config_rejects_non_object_strategy_init_kwargs() -> None:
+    for bad_value in [[], "string", 42]:
+        with pytest.raises(ValidationError):
+            s.EngineStartConfig.model_validate(
+                {
+                    "instrument_id": "1301.TSE",
+                    "start_date": "2024-01-04",
+                    "end_date": "2024-03-31",
+                    "initial_cash": "1000000",
+                    "granularity": "Daily",
+                    "strategy_init_kwargs": bad_value,
+                }
+            )
 
 
 def test_start_engine_rejects_unknown_engine_kind() -> None:

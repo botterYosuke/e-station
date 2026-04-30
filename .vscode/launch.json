@@ -21,7 +21,7 @@
             "preLaunchTask": "cargo build"
         },
         {
-            "name": "Rust: Debug (CodeLLDB) - replay",
+            "name": "replay - Rust: Debug (CodeLLDB)",
             "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/target/debug/flowsurface.exe",
@@ -37,7 +37,7 @@
             "sourceLanguages": [
                 "rust"
             ],
-            "preLaunchTask": "cargo build"
+            "preLaunchTask": "replay: build & watch"
         }
     ]
 }

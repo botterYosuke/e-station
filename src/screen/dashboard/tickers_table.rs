@@ -76,6 +76,7 @@ fn available_markets(venue: Venue) -> &'static [MarketKind] {
         // TODO: include after protobuf implementation and Mexc spot markets ready to stream
         Venue::Mexc => &[MarketKind::LinearPerps, MarketKind::InversePerps],
         Venue::Tachibana => &[MarketKind::Stock],
+        Venue::Replay => &[],
     }
 }
 
@@ -962,6 +963,8 @@ impl TickersTable {
                         column![self.exchange_filter_btn(venue), self.tachibana_login_btn(),]
                             .spacing(2),
                     );
+                } else if venue == Venue::Replay {
+                    // Replay panes are auto-generated via /api/replay/start — no sidebar filter UI
                 } else {
                     col = col.push(self.exchange_filter_btn(venue));
                 }

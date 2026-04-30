@@ -118,11 +118,11 @@
 | `POST` | `/api/order/submit` | `{client_order_id, instrument_id, order_side, order_type, quantity, price?, time_in_force, ...}` (§5.1) | 201: `{client_order_id, venue_order_id, status: "ACCEPTED", warning_code?, warning_text?}` / 202: `{status: "SUBMITTED", venue_order_id: null, warning: "order_status_unknown"}`（idempotent replay で unknown） | O0 |
 | `POST` | `/api/order/modify` | `{client_order_id, quantity?, price?, trigger_price?, expire_time?}` または `{venue_order_id, quantity?, price?, trigger_price?, expire_time?}`（他端末注文） | `{client_order_id, status: "PENDING_UPDATE"}` | O1 |
 | `POST` | `/api/order/cancel` | `{client_order_id}` または `{venue_order_id}`（他端末注文。`client_order_id` 不明時のみ） | `{client_order_id, status: "PENDING_CANCEL"}` | O1 |
-| `POST` | `/api/order/cancel-all` | `{instrument_id?, order_side?, confirm: true}`（`confirm: true` は **JSON body 必須**、query param ではない）。**Phase O0 時点ではこのエンドポイントは未実装（501 Not Implemented を返す）** | `{count}` | O1 |
+| `POST` | `/api/order/cancel-all` | `{confirm: true, instrument_id?, order_side?}`（**`confirm: true` は boolean リテラル必須**。文字列 `"true"` / 省略 / `false` は 400 + `reason_code="CONFIRM_REQUIRED"`、query param 不可。order guard 未投入時は 503 + `ORDER_GUARD_NOT_CONFIGURED`。受理時は 202 Accepted を即返却し fire-and-forget で IPC `CancelAllOrders` を送る、[src/api/order_api.rs::cancel_all_orders](../../src/api/order_api.rs)） | 202: `{status: "ACCEPTED"}`（処理結果は `OrderListUpdated` で逐次反映） | O1 |
 | `GET` | `/api/order/list` | クエリ: `status?` / `instrument_id?` / `date?` | `{orders: [...]}` | O1 |
-| `POST` | `/api/order/forget-second-password` | （body 無し） | `{status: "OK"}` | O0 （未実装） |
-| `GET` | `/api/order/positions` | — | 現物・信用建玉 | O3 （未実装） |
-| `GET` | `/api/order/buying-power` | — | 余力 | O3 （未実装。BuyingPowerPanel は UI 実装済み） |
+| `POST` | `/api/order/forget-second-password` | （body 無し） | `{status: "OK"}` | O0（**HTTP ハンドラ未実装** — `src/api/order_api.rs` に対応 route なし。IPC コマンド `ForgetSecondPassword` は schema 上存在するため別経路から呼ばれる想定。HTTP 経由が必要になった時点で実装） |
+| `GET` | `/api/order/positions` | — | 現物・信用建玉 | O3（**HTTP ハンドラ未実装** — Phase O3 で着地予定） |
+| `GET` | `/api/order/buying-power` | — | 余力 | O3（**HTTP ハンドラ未実装** — Phase O3 で着地予定。UI 側 BuyingPowerPanel は IPC `BuyingPowerUpdated` イベントを直接受けているため HTTP API は不要状態） |
 
 **重要**: API は **`client_order_id` を一次キー**として動作する（nautilus 流）。`venue_order_id`（立花 `sOrderNumber`）は応答に含めるが、後続の `/modify` `/cancel` 入力は `client_order_id` で受ける。Rust 側 `OrderSessionState` が双方向写像を保持。WAL 復元で `client_order_id` が不明な「他端末経由の当日注文」のみ `venue_order_id` での `/modify` `/cancel` を受理する（[architecture.md §4.3](./architecture.md#43-起動時復元phase-o0-必須) / [T1.5](./implementation-plan.md#t15-起動時の台帳復元)）。
 
@@ -197,6 +197,9 @@ Python に渡す前に **Rust 側で**早期に弾く:
 | `REPLAY_MODE_ACTIVE` | 503 | `replay_mode == true` の間の全 `/api/order/*`（C-H4、Phase O0 必須） |
 | `RATE_LIMITED` | 429 | 同一 `(instrument_id, side, qty, price)` の N 秒/Y 回連打検知（C-M3） |
 | `MARKET_CLOSED` | 409 | 立花応答 `sResultCode` が時間外 |
+| `ORDER_GUARD_NOT_CONFIGURED` | 503 | `OrderGuardConfig.enabled == false`（運用ガード設定が未投入のまま `/api/order/*` を叩いた）。Rust HTTP 層 (`src/api/order_api.rs`) が最前段で判定 |
+| `QTY_LIMIT_EXCEEDED` | 400 | リクエスト `quantity` が `OrderGuardConfig.max_qty_per_order` を超過 |
+| `YEN_LIMIT_EXCEEDED` | 400 | `LIMIT` / `STOP_LIMIT` で `price * quantity` が `OrderGuardConfig.max_yen_per_order` を超過（`MARKET` / `STOP_MARKET` は対象外） |
 | `INSUFFICIENT_FUNDS` | 409 | Phase O3 余力ガード失敗 |
 | `VENUE_REJECTED` | 422 | 立花応答業務エラー（`p_errno != 0` 等の venue 拒否。`reason_text` に立花コードと文言） |
 | `ORDER_STATUS_UNKNOWN` | 409 | 起動時復元で `venue_order_id = None`（unknown）の注文への cancel / modify 要求。`GET /api/order/list` で確認後に再試行を促す |

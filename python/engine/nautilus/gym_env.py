@@ -135,8 +135,10 @@ class FlowsurfaceEnv(_GYM_BASE):
         end_date: str,
         initial_cash: int = 1_000_000,
         base_dir: Path | str | None = None,
-        strategy_id: str = "buy-and-hold",
+        strategy_id: str = "user-strategy",
         granularity: str = "Trade",
+        strategy_file: str | None = None,
+        strategy_init_kwargs: dict | None = None,
     ) -> None:
         if _GYM_AVAILABLE:
             super().__init__()
@@ -148,6 +150,8 @@ class FlowsurfaceEnv(_GYM_BASE):
         self._base_dir: Path | None = Path(base_dir) if base_dir is not None else None
         self._strategy_id = strategy_id
         self._granularity = granularity
+        self._strategy_file = strategy_file
+        self._strategy_init_kwargs = strategy_init_kwargs
 
         self._observation_space = _make_observation_space()
         self._action_space = _make_action_space()
@@ -199,6 +203,8 @@ class FlowsurfaceEnv(_GYM_BASE):
             initial_cash=self._initial_cash,
             base_dir=base_dir,
             on_event=_on_event,
+            strategy_file=self._strategy_file,
+            strategy_init_kwargs=self._strategy_init_kwargs,
         )
         self._last_result = result
         self._ready = True
