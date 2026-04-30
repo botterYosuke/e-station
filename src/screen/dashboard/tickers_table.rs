@@ -76,6 +76,7 @@ fn available_markets(venue: Venue) -> &'static [MarketKind] {
         // TODO: include after protobuf implementation and Mexc spot markets ready to stream
         Venue::Mexc => &[MarketKind::LinearPerps, MarketKind::InversePerps],
         Venue::Tachibana => &[MarketKind::Stock],
+        Venue::Replay => &[],
     }
 }
 
