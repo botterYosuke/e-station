@@ -62,9 +62,14 @@ pub enum ControlApiCommand {
     /// `strategy_id` は `ReplayDataLoaded.strategy_id`（`Option<String>`）を
     /// そのまま伝搬する。単独 `LoadReplayData` 経路では `None`、
     /// `StartEngine` 経由の load では具体値が入る (M-2, R2 review-fix R2)。
+    ///
+    /// `granularity` は `/api/replay/load` body から取得した粒度。
+    /// CandlestickChart pane を生成するか（Daily/Minute）、スキップするか（Trade）
+    /// を dashboard 側で判断するために伝搬する（§4c）。
     AutoGenerateReplayPanes {
         instrument_id: String,
         strategy_id: Option<String>,
+        granularity: engine_client::dto::ReplayGranularity,
     },
 }
 
@@ -389,6 +394,8 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
     // H-D: `granularity` は `ReplayLoadBody` で serde 直受け済み。不正値は
     // ② の `serde_json::from_str` が 400 を返している。
     let granularity = parsed.granularity;
+    // Clone before move into LoadReplayData command — needed for AutoGenerateReplayPanes (§4c).
+    let granularity_for_cmd = granularity.clone();
 
     // ④ Get engine connection (drop the watch::Ref before any await)
     let conn_opt = state.engine_rx.borrow().clone();
@@ -490,6 +497,7 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
                     let cmd = ControlApiCommand::AutoGenerateReplayPanes {
                         instrument_id: parsed.instrument_id.clone(),
                         strategy_id: strategy_id_for_cmd.clone(),
+                        granularity: granularity_for_cmd.clone(),
                     };
                     match tx.try_send(cmd) {
                         Ok(_) => {}
@@ -1616,6 +1624,7 @@ mod tests {
                 ControlApiCommand::AutoGenerateReplayPanes {
                     instrument_id,
                     strategy_id,
+                    ..
                 } => {
                     assert_eq!(instrument_id, "1301.TSE");
                     assert_eq!(
@@ -2540,10 +2549,16 @@ mod tests {
         })
         .to_string();
         let (status, body_str) = http_request(port, "POST", "/api/replay/start", &body).await;
-        assert_eq!(status, 400, "missing strategy_file must return 400; body={body_str}");
+        assert_eq!(
+            status, 400,
+            "missing strategy_file must return 400; body={body_str}"
+        );
         let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
         assert!(
-            json["error"].as_str().unwrap_or("").contains("strategy_file"),
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("strategy_file"),
             "error message must mention strategy_file; got: {json}"
         );
     }
@@ -2569,10 +2584,16 @@ mod tests {
         })
         .to_string();
         let (status, body_str) = http_request(port, "POST", "/api/replay/start", &body).await;
-        assert_eq!(status, 400, "empty strategy_file must return 400; body={body_str}");
+        assert_eq!(
+            status, 400,
+            "empty strategy_file must return 400; body={body_str}"
+        );
         let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
         assert!(
-            json["error"].as_str().unwrap_or("").contains("strategy_file"),
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("strategy_file"),
             "error message must mention strategy_file; got: {json}"
         );
     }

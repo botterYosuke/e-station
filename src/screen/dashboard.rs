@@ -18,16 +18,17 @@ use crate::{
     widget::toast::Toast,
     window::{self, Window},
 };
+use data::chart::Basis;
 use data::{
     UserTimezone,
     layout::{WindowSpec, pane::ContentKind},
     stream::PersistStreamKind,
 };
 use exchange::{
-    Kline, PushFrequency, StreamPairKind, TickerInfo, Trade,
+    Kline, PushFrequency, StreamPairKind, Ticker, TickerInfo, Timeframe, Trade,
     adapter::{
-        AdapterHandles, MAX_KLINE_STREAMS_PER_STREAM, MAX_TRADE_TICKERS_PER_STREAM, StreamConfig,
-        StreamKind, StreamTicksize, UniqueStreams,
+        AdapterHandles, Exchange, MAX_KLINE_STREAMS_PER_STREAM, MAX_TRADE_TICKERS_PER_STREAM,
+        StreamConfig, StreamKind, StreamTicksize, UniqueStreams,
     },
     depth::Depth,
 };
@@ -865,7 +866,20 @@ impl Dashboard {
     /// Split rule (D9.3):
     /// - 1st instrument: `Axis::Vertical` (side-by-side: Tick left, Candle right)
     /// - 2nd+ instrument: `Axis::Horizontal` (below the focused pane)
-    pub fn auto_generate_replay_panes(&mut self, main_window_id: window::Id, instrument_id: &str) {
+    fn replay_ticker_info(instrument_id: &str) -> TickerInfo {
+        let ticker_str = instrument_id.split('.').next().unwrap_or(instrument_id);
+        let ticker = Ticker::new(ticker_str, Exchange::ReplayStock);
+        TickerInfo::new_stock(ticker, 1.0, 1.0, 100)
+    }
+
+    pub fn auto_generate_replay_panes(
+        &mut self,
+        main_window_id: window::Id,
+        instrument_id: &str,
+        // None = Trade granularity (no bars; skip CandlestickChart).
+        // Some(tf) = Daily (D1) or Minute (M1).
+        timeframe: Option<Timeframe>,
+    ) -> Task<Message> {
         let is_first = !self.replay_pane_registry.is_loaded(instrument_id);
         self.replay_pane_registry.mark_loaded(instrument_id);
 
@@ -905,12 +919,20 @@ impl Dashboard {
                 let (grid_state, initial_pane) = pane_grid::State::new(initial_state);
                 self.panes = grid_state;
                 if time_and_sales_as_root {
-                    self.replay_pane_registry
-                        .register_pane(instrument_id, "TimeAndSales", initial_pane);
+                    self.replay_pane_registry.register_pane(
+                        instrument_id,
+                        "TimeAndSales",
+                        initial_pane,
+                    );
                     log::info!(
                         "replay_api: auto-generated TimeAndSales pane (root) for {instrument_id}"
                     );
                     self.focus = Some((main_window_id, initial_pane));
+                    // §4c: bind Trades stream to root TimeAndSales pane immediately.
+                    if let Some(state) = self.panes.get_mut(initial_pane) {
+                        let ti = Self::replay_ticker_info(instrument_id);
+                        state.set_content_and_streams(vec![ti], ContentKind::TimeAndSales);
+                    }
                 }
                 initial_pane
             }
@@ -949,10 +971,17 @@ impl Dashboard {
                     .register_pane(instrument_id, "TimeAndSales", new_pane);
                 self.focus = Some((main_window_id, new_pane));
                 last_split_pane = new_pane;
+                // §4c: bind Trades stream immediately so IPC events are routed.
+                if let Some(state) = self.panes.get_mut(new_pane) {
+                    let ti = Self::replay_ticker_info(instrument_id);
+                    state.set_content_and_streams(vec![ti], ContentKind::TimeAndSales);
+                }
             }
         }
 
+        // §4c: CandlestickChart は granularity=Trade のとき Bar が無いので生成しない。
         if is_first
+            && timeframe.is_some()
             && self
                 .replay_pane_registry
                 .should_generate(instrument_id, "CandlestickChart")
@@ -968,6 +997,14 @@ impl Dashboard {
                 );
                 self.focus = Some((main_window_id, new_pane));
                 last_split_pane = new_pane;
+                // §4c: bind Kline stream with the replay timeframe.
+                if let Some(tf) = timeframe
+                    && let Some(state) = self.panes.get_mut(new_pane)
+                {
+                    let ti = Self::replay_ticker_info(instrument_id);
+                    state.settings.selected_basis = Some(Basis::Time(tf));
+                    state.set_content_and_streams(vec![ti], ContentKind::CandlestickChart);
+                }
             }
         }
 
@@ -1002,6 +1039,10 @@ impl Dashboard {
                 self.focus = Some((main_window_id, new_pane));
             }
         }
+
+        // §4c: rebuild UniqueStreams so market_subscriptions() picks up the new
+        // replay kline/trade streams on the next iced subscription cycle.
+        self.refresh_streams(main_window_id)
     }
 
     pub fn view<'a>(
