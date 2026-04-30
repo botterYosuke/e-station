@@ -443,6 +443,7 @@ fn execution_marker_deserializes() {
             side,
             price,
             ts_event_ms,
+            ..
         } => {
             assert_eq!(strategy_id, "buy-and-hold-001");
             assert_eq!(instrument_id, "1301.TSE");

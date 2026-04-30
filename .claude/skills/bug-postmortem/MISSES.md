@@ -25,7 +25,11 @@
 | IPC イベント → UI 状態の未配線 | IPC イベントを受信して toast を出すだけで、対応する UI コンポーネントの状態（`submitting` フラグ等）をリセットしていない | 1 |
 | 初期化前データ到着 | UI コンポーネントが未初期化（`None`）の状態でデータが到着し、`if let Some(...)` でサイレントに無視される | 1 |
 | エラーハンドラ早期脱出 | エラー arm が `break` するため、一時的な IO エラー（非 UTF-8 バイト等）で pipe reader が停止し、書き手の stdout バッファが詰まる | 1 |
-| モード分岐漏れ | `_handle()` のような接続後フックが `mode` を考慮せず、ライブ専用の処理をリプレイモードでも実行してしまう | 1 |
+| モード分岐漏れ | `_handle()` のような接続後フックが `mode` を考慮せず、ライブ専用の処理をリプレイモードでも実行してしまう | 2 |
+| view() 分岐別オーバーレイ配線漏れ | `view()` の複数分岐のうち一部にしかモーダルオーバーレイを配線せず、他の分岐で `Some(dialog)` がサイレントに無視される | 1 |
+| テストヘルパー属性ドリフト | prod `__init__` に属性を追加したとき、`__init__` をモックで迂回するテストヘルパーの属性リストを同期していない | 1 |
+| 参照リソース未作成 | テストが参照する fixture / example ファイルが未コミットのまま test コードだけが先に存在する | 1 |
+| Subscription 継続 restart 後状態消失 | `restart()` が `*self = new_state` で状態を全置換するとき、iced が同一 ID のサブスクリプションを継続するため初期化 yield が再発火せず、FSM 状態がリセットされる | 1 |
 
 ---
 
@@ -939,3 +943,420 @@ Tachibana 自動ログインが成功 → `VenueReady` → `FetchTickerStats("__
    Tachibana 自動ログインが成功するため、CI（env var なし）では再現しなかった。
    dev 環境固有の挙動（自動ログイン等）が他モードに影響する可能性を、env var 設定時のシナリオとして
    テストに含める。
+
+**追補（2026-04-30 レビュー指摘）**: 同一根本原因に対する「第 2 経路」の取りこぼしを追加修正:
+
+- `_handle()` の post-handshake 自動起動ガードだけでは不十分で、
+  ユーザー明示の `RequestVenueLogin`（`server.py::_do_request_venue_login`）も replay モードで
+  同じ `_startup_tachibana()` を spawn する経路だった。`replay_api.rs` の
+  `POST /api/sidebar/tachibana/request-login` HTTP 経由で UI / 自動化スクリプトが
+  踏むと、replay でも 278 KB → RSV ビット切断を再現する
+- 修正: `_do_request_venue_login()` 冒頭にも `if self._mode == "replay":` ガードを追加し、
+  `VenueError{code:"mode_mismatch"}` で拒否する
+- 追加テスト: `test_server_engine_dispatch.py::TestRequestVenueLoginModeGuard`
+  （reject in replay + allow in live の対照 2 件）
+- **教訓 4 (新規)**: 「同じ起動関数を呼ぶ経路がコード内に複数あるか」を必ず grep で確認する。
+  `grep -n 'asyncio.create_task(self\._startup_tachibana' python/engine/server.py`
+  のような全 spawn 箇所列挙を bug-fix チェックリストに含める。1 箇所だけ修正して
+  「mode 分岐漏れ」パターンに対応した気になる罠を避ける。
+
+**追補 (2026-04-30, 大型フレーム RSV bit 経路の pin)**:
+
+278 KB → RSV ビット切断の根本（fastwebsockets が permessage-deflate を実装せず
+RSV1=1 フレームを拒否する性質）に対するリグレッションを 2 層で保護:
+
+1. `python/tests/test_server_ws_compat.py::test_large_frame_payload_does_not_set_rsv1`
+   — outbox に 320 KB の合成フレームを直接 inject し、`compression=None` クライアントが
+   ProtocolError なく受信できることを assert（IPC pipeline contract）
+2. `tests/e2e/smoke.sh` に `Reserved bits are not zero` を独立 fail trigger として追加
+   （既存 `engine ws read error` の prefix に依存しないシグネチャ pin）
+
+将来 venue が増えて bulk stats response が 1 MB 級になっても、live モード単体で
+回帰検出できる。
+
+---
+
+## 2026-04-30 — HONDA 注文ボタンを押しても確認ダイアログが画面に出ない
+
+**見逃しパターン**: 「実装済み≠配線済み」の view() 版（分岐別オーバーレイ配線漏れ）
+
+**不具合の概要**:
+`flowsurface --mode live` で HONDA(7267) を OrderEntry パネルで選択し「注文」を押すと、
+`panel.update(SubmitClicked)` は正しく `Action::RequestConfirm` を返し、
+`main.rs::update()` が `self.confirm_dialog = Some(dialog)` をセットするが、
+次フレームの `view()` で確認ダイアログが画面に現れない。WAL にも書き込まれない。
+
+**根本原因**:
+`main.rs::view()` が 2 つのパスを持つ：
+
+```rust
+if let Some(menu) = self.sidebar.active_menu() {
+    self.view_with_modal(base.into(), dashboard, menu)  // confirm_dialog あり
+} else {
+    base.into()  // ← confirm_dialog オーバーレイなし（バグ）
+}
+```
+
+`view_with_modal()` 内の `Settings` / `Network` / `Order` ブランチでのみ
+`confirm_dialog` を `main_dialog_modal` でオーバーレイしており、
+通常ダッシュボード（サイドバーメニュー非アクティブ）の `else` ブランチでは
+オーバーレイ描画が実装されていなかった。
+
+注文フローの `Action::RequestConfirm` → `ConfirmDialog` のセットは完成していたが、
+描画パスの配線が一部分岐にしかなかった（MISSES.md 2026-04-27「実装済み≠配線済み」の view() 版）。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `order_entry.rs::tests` | `panel.update()` → `Action::RequestConfirm` 戻り値のみ検証。`view()` の描画ツリーは範囲外 |
+| `cargo test --workspace` | iced の `Element` ツリー構造を単体テストで検証する標準手段がない |
+| `python/tests/` | Rust の描画層は Python から確認不可 |
+| `tests/e2e/smoke.sh` | 「モーダルが画面に出たか」を grep で検出できない |
+
+**修正**:
+1. `apply_confirm_dialog_overlay<'a>()` フリー関数を追加し `content: Element` + `dialog: Option<&ConfirmDialog>` を受け取って純粋に変換する（`second_password_modal` と同じパターン）
+2. `view()` 内で `raw_content` → `apply_confirm_dialog_overlay` → toast → `second_password_modal` の順で適用（全分岐を単一出口でラップ）
+3. `view_with_modal()` の各ブランチから個別のオーバーレイ呼び出しを除去
+
+**追加したテスト**:
+- `src/main.rs::confirm_dialog_overlay_tests::helper_apply_confirm_dialog_overlay_exists`
+  — `fn apply_confirm_dialog_overlay` がソースに存在することを `include_str!` + `contains` で検証
+- `src/main.rs::confirm_dialog_overlay_tests::view_calls_confirm_dialog_overlay_helper`
+  — `Flowsurface::view()` 本体内で `apply_confirm_dialog_overlay(` を呼ぶことを検証（`\n    fn ` 境界で view ボディを分割）
+- `src/main.rs::confirm_dialog_overlay_tests::view_with_modal_branches_no_longer_redraw_overlay`
+  — production コードで `confirm_dialog_container(` の呼び出し箇所が厳密に 1 箇所であることを検証（test モジュールを `split_once` で除外して自己参照を回避、`expect()` で marker 消失を検出）
+
+**リグレッション確認**:
+- `view()` を元の `else { base.into() }` に戻すと test 2 が FAIL する
+- `view_with_modal()` に per-branch overlay を復元すると test 3 が `count > 1` で FAIL する
+
+**教訓**:
+
+1. **view() 分岐の一部だけにオーバーレイを配線するパターンは将来に向けた爆弾**:
+   `view()` や `view_with_modal()` のような複数分岐を持つ描画関数でモーダルを一部分岐のみに書くと、
+   他の分岐で `state = Some(...)` がサイレントに無視される。
+   新しいモーダル（`second_password_modal` / `confirm_dialog` 等）を追加するときは
+   **単一出口（`view()` の最終段）でラップ**することを設計原則にする。
+
+2. **iced の view() は直接ユニットテストしにくい — ソース文字列テストで代替**:
+   `Element` ツリーの構造を `cargo test` で検証する汎用手段は現時点で存在しない。
+   `include_str!("./main.rs")` + 文字列マッチング・境界分割でオーバーレイの配線を
+   構造的に保護するアプローチが有効。テスト sentinel の `expect()` で marker 消失も検出する。
+
+3. **同じ状態変更 (`Some(dialog)` のセット) を複数パスの描画関数が独立して処理するなら単一責任に統一**:
+   「state を Some にする → どの分岐でも描画」という流れは、描画コードが 1 箇所に集約されているときにのみ保証される。
+   複数分岐が独立してオーバーレイを呼ぶ設計は、新しい分岐の追加時に必ず漏れが出る。
+
+---
+
+## 2026-04-30 — streaming replay の fill IPC emit パスがテスト未検証のまま dead code になっていた
+
+**見逃しパターン**: No-op fixture 戦略 → 発注パス未到達 → IPC emit 経路が dead code
+
+**不具合の概要**:
+`POST /api/replay/start` 後、`ExecutionMarker` / `ReplayBuyingPower` が Rust 側に
+一切届かない。UI の OrderList・BuyingPower ペインが空のままになる。
+
+**根本原因**:
+`NautilusRunner.start_backtest_replay_streaming()` が nautilus の `OrderFilled`
+イベントを購読していなかった。`NarrativeHook._emit_execution_marker()` と
+`PortfolioView` はコード上は存在していたが、streaming バックテスト経路では
+一度も呼ばれていなかった（dead code）。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_engine_runner_replay.py`（全 25 件） | fixture 戦略として `NoOpTestStrategy`（`on_start` も `on_bar` も実装なし）を使用。1 件も発注しないため fill 経路に到達しない |
+| 全 streaming 系テスト共通 | 「発注する戦略」でのシナリオがゼロ。`ExecutionMarker` / `ReplayBuyingPower` が emit されることを assert するテストが存在しなかった |
+| pydantic スキーマテスト | スキーマ型は定義済みだが、実際に emit されるかどうかの integration テストがなかった |
+
+**修正**:
+1. `engine_runner.py::start_backtest_replay_streaming()` で `engine.kernel.msgbus` に
+   `f"events.fills.{instrument_id}"` トピックを subscribe し、`OrderFilled` ごとに
+   `ExecutionMarker` → `ReplayBuyingPower` を `on_event` コールバックに push する
+2. `python/tests/fixtures/fill_strategy.py` — bar 1 で BUY、bar 2 で SELL する
+   決定論的テスト戦略（2-bar fixture データと対応）
+3. `python/tests/test_engine_runner_streaming_fills.py` — 15 件の integration テスト
+   （emit 件数・フィールド完全一致・残高変動・決定論性・pydantic スキーマ検証）
+
+**追加したテスト**:
+- `TestStreamingFillsEmitExecutionMarker` (6 件): 1:1 発火・side 大文字・余分フィールドなし・
+  instrument_id・price が decimal str・ts_event_ms が int
+- `TestStreamingFillsEmitReplayBuyingPower` (7 件): fill ごとに 1 件・スキーマ完全一致・
+  BUY で cash 減少・SELL で cash 増加・strategy_id 一致・2 run で ts_event_ms が同値（決定論性）・
+  ExecutionMarker と ReplayBuyingPower が同じ ts_event_ms を共有
+- `TestMsgbusTopic` (1 件): `f"events.fills.{str}"` と `f"events.fills.{InstrumentId}"` が
+  一致することを pin（nautilus の `InstrumentId.__str__` 形式変更の早期検知）
+- `TestStreamingFillsPassPydanticSchema` (1 件): emit された全イベントが pydantic `model_validate` を通過
+
+**リグレッション確認**: `msgbus.subscribe()` 行を削除した状態で
+`test_emits_one_execution_marker_per_fill` が FAIL（markers == 0）、
+追加した状態で PASS することを実際に確認。
+
+**教訓**:
+
+1. **「発注する fixture 戦略」を常に用意する**: replay / backtest 系テストで
+   「戦略が動いた」ことを検証するためには、実際に発注・約定する fixture 戦略が必要。
+   `NoOpTestStrategy`（発注しない）は「エンジンが起動する」「ストリームが流れる」の
+   テストには有効だが、fill 経路・IPC emit 経路の検証には役立たない。
+   新たな fill 系イベントを実装したら、必ず **発注する戦略** でのシナリオを追加すること。
+
+2. **dead code の温床: 「コードはある」≠「経路が通る」**: `NarrativeHook` や
+   `PortfolioView` のように実装が存在しても、呼び出し経路が繋がっていなければ
+   全て dead code になる。新機能実装後は「このコードへ到達する経路はどこか」を
+   integration テストで必ず確認する。
+
+3. **IPC emit の contract テストは emit されることを assert する**: pydantic スキーマが
+   定義されていても「実際に emit されるか」を保証するテストは別途必要。スキーマ型の
+   定義テストと emit 件数テストは直交する。両方書く。
+
+4. **ts_event はデータ由来にする（`time.time()` ではなく）**: `ReplayBuyingPower.ts_event_ms`
+   を `time.time()` で付与すると、同一入力でも実行タイミングで値が変わる。
+   `OrderFilled.ts_event` （nanosec → `// 1_000_000` で ms）を使えば決定論的になり、
+   テストで「2 回 run して同じ値が出る」ことを assert できる。
+
+---
+
+## 2026-04-30 — 注文確定・起動時に注文一覧・買余力が自動更新されない（UX 改善）
+
+**見逃しパターン**: モード分岐漏れ（モード境界ガードの認識不足）
+
+**不具合の概要**:
+`OrderAccepted` 受信後に注文一覧・買余力の手動「更新」ボタンが必要だった（UX 課題）。
+また起動時（`VenueReady` 受信）に買余力は自動取得されていたが、注文一覧は手動更新が必要だった。
+
+**根本原因**: UX 機能の不足（バグではない）。以下 2 箇所に IPC 自動発行を追加:
+1. `Message::OrderAccepted` ハンドラ: `GetOrderList` + `GetBuyingPower` を自動発行
+2. `Message::VenueReady` ハンドラ: `GetOrderList` を自動発行（`GetBuyingPower` は既存）
+
+**最重要の安全ガード**:
+Python の replay バックテストも `OrderAccepted` を emit するため、`OrderAccepted` ハンドラの
+自動 IPC 発行には `tachibana_state.is_ready()` ガードが必須。このガードを外すと
+replay モードでも `GetOrderList`/`GetBuyingPower` が Tachibana API に向けて送信される。
+
+**なぜユニットテストを追加しなかったか**:
+
+| 理由 | 説明 |
+|------|------|
+| Iced Task 検査不可 | `update()` の戻り値（`Task<Message>` ツリー）を外部から検査する API が存在しない。副作用として何が spawn されたかを単体テストで assert する手段がない |
+| ガードの明確さ | `if !self.tachibana_state.is_ready() { return Task::none(); }` は読んで意図が明確 |
+| E2E で代替可能 | replay モードの smoke テストが「GetOrderList IPC が出ないこと」を間接的に保証する |
+
+**教訓**:
+
+1. **live 専用 IPC 自動発行には必ず `tachibana_state.is_ready()` ガードを書く**:
+   replay バックテストは `OrderAccepted` を含む多くの live 系イベントを emit する。
+   `update()` ハンドラで live 専用 IPC（`GetOrderList`, `GetBuyingPower` 等）を追加するときは、
+   **必ず** `tachibana_state.is_ready()` または `self.mode == AppMode::Live` で早期 return すること。
+
+2. **`has_*_pane()` ガードの設計指針**:
+   - `VenueReady` 起動時の自動取得: ペインが表示中のときのみ発行（`has_order_list_pane()` ガードあり）
+   - `OrderAccepted` 後の自動更新: ペインの有無によらず発行（後からペインを追加しても即反映するため）
+   この非対称性は意図的な設計判断。
+
+3. **Iced の update() 戻り値テスト戦略**:
+   `Task<Message>` の副作用は直接テストできない。代替として:
+   - ソース文字列テスト（`include_str!` + `contains`）で「コードが存在するか」を pin する
+   - E2E ログ確認（debug ビルドで `[ipc] → GetOrderList` が出るか目視）
+   - `tachibana_state.is_ready()` のような「ガードが存在するか」を文字列テストで pin する
+
+4. **pane-added catch-up は別タスク**:
+   `VenueReady` 後に `OrderList` ペインを後から追加した場合の catch-up 経路は今回スコープ外。
+   `BuyingPower` には `main.rs:2761` 付近に pane-added catch-up 経路が存在するが、
+   `OrderList` は起動時 auto-fetch のみ（ペイン追加時は手動「更新」ボタンが引き続き必要）。
+
+---
+
+## 2026-04-30 — streaming replay 注文一覧が常に空（注文なし）
+
+**見逃しパターン**: 同一言語テスト + イベント経路盲点（WAL 前提の実装が streaming には無効）
+
+**不具合の概要**:
+`replay` モードで buy_and_hold.py を実行すると買余力パネルには残高変動が表示されるが、
+注文一覧（OrderList）には「注文なし」と表示され、約定履歴が一切反映されなかった。
+
+**根本原因（3 層）**:
+
+1. **Rust: venue 固定バグ**
+   `Action::RequestOrderList` ハンドラが venue を `"tachibana"` に固定していた。
+   Python の `_do_get_order_list("tachibana")` は replay セッションが存在しないため
+   常に空を返す。`APP_MODE` を参照して replay 時は venue `"replay"` を送るべきだった。
+
+2. **Python: WAL 前提の設計**
+   `_do_get_order_list_replay()` は WAL ファイル `tachibana_orders_replay.jsonl` を読んでいたが、
+   streaming replay の約定は nautilus BacktestEngine の内部で完結するため WAL には書かれない。
+   「約定があれば WAL に記録される」という前提が streaming 経路では成立しない。
+
+3. **Python: auto-refresh トリガー不在**
+   `EngineStopped` イベントが Rust の `Message` に対応していなかった。
+   replay 完了後に自動で `GetOrderList` IPC を送る仕組みがなかった。
+
+**修正内容**:
+- `engine_runner.py`: `ExecutionMarker` emit に `qty` フィールドを追加
+- `server.py`: `_on_event_tracked` closure で `ExecutionMarker` を `_replay_streaming_fills` に蓄積。
+  `EngineStarted` 受信時に `clear()` して前回 fills を除去
+- `server.py`: `_do_get_order_list_replay` で `_replay_streaming_fills` が非空なら WAL を読まずそれを返す
+- `engine-client/src/dto.rs`: `ExecutionMarker` に `qty: Option<String>` を追加（後方互換）
+- `src/main.rs`: `Action::RequestOrderList` で `APP_MODE` 参照、replay 時は venue `"replay"`
+- `src/main.rs`: `Message::ReplayFinished` を追加し `EngineStopped` をマップ。
+  `ReplayFinished` ハンドラで `GetOrderList{venue:"replay"}` を自動発行
+
+**追加したテスト**:
+- `python/tests/test_replay_streaming_order_list.py`（7 テスト）:
+  - `TestStreamingFillsViaGetOrderList`: fills が OrderListUpdated に含まれる
+  - streaming fills が空なら WAL fallback、非空なら WAL を無視
+  - `TestStreamingFillsAccumulatedViaOnEventTracked`: `_on_event_tracked` の蓄積・クリア動作
+- `python/tests/test_engine_runner_streaming_fills.py`: `qty` フィールド追加に伴い
+  `test_execution_marker_has_no_extra_fields` → `test_execution_marker_has_required_fields` +
+  `test_execution_marker_qty_is_positive_decimal_string` に更新
+
+**教訓**:
+
+1. **streaming 約定は WAL に書かれない**:
+   nautilus `BacktestEngine` の内部約定は IPC 経由で submit されていないため WAL に残らない。
+   streaming replay の「注文履歴」は IPC イベント（`ExecutionMarker`）をリアルタイムで蓄積する
+   インメモリリストが唯一の信頼できるソースである。
+   
+2. **replay モードの venue 分岐は漏れやすい**:
+   `GetOrderList` のような IPC コマンドに venue 文字列が入るとき、replay 固有の venue（`"replay"`）
+   への分岐を忘れると live 専用経路に落ちて常に空が返る。
+   `APP_MODE.get()` を参照して replay 時は venue を切り替えること。
+
+3. **EngineStopped を Rust Message に対応させる**:
+   replay 完了後の UI 更新（注文一覧の自動更新など）は `EngineStopped` → `Message::ReplayFinished`
+   のマッピングが必要。新しい replay 後アクションを追加するときはここを起点にすること。
+
+4. **Python-only テストは Rust 側の venue 固定を検出できない**:
+   Python の `_do_get_order_list_replay` をテストしても、Rust が `venue="tachibana"` を送って
+   いることは検出できない。言語境界を跨ぐ integration 確認（ログ目視または E2E）が必要。
+
+---
+
+## 2026-04-30 — テストヘルパー `_make_server()` の属性リストが `__init__` と乖離し AttributeError
+
+**見逃しパターン**: テストヘルパー属性ドリフト（prod `__init__` 追加 → test helper 未同期）
+
+**不具合の概要**:
+`test_server_engine_dispatch.py` の `_make_server()` ヘルパーは `DataEngineServer.__init__`
+をモックで迂回し、属性を `_REQUIRED_ATTRS` + `defaults` から手動で設定する。
+`server.py` に `self._replay_streaming_fills: list[dict] = []` を追加したとき、
+`_REQUIRED_ATTRS` と `defaults` に対応エントリを追加しなかった。
+`fake_streaming` → `_on_event_tracked` → `self._replay_streaming_fills.clear()` を呼ぶと
+`AttributeError: 'DataEngineServer' object has no attribute '_replay_streaming_fills'` で
+4 テストが FAIL した。
+
+**修正内容**:
+- `test_server_engine_dispatch.py`: `_REQUIRED_ATTRS` に `"_replay_streaming_fills": None` を追加
+- 同 `defaults` に `"_replay_streaming_fills": []` を追加
+
+**既存テストが見逃した理由**:
+`__init__` のモック迂回は意図的な設計（M-9 コメントに同期要件を記載）だが、
+`_replay_streaming_fills` は `_on_event_tracked` closure の実行パス上にあり、
+closure を呼ぶテスト追加まで `AttributeError` が露顕しなかった。
+新属性が「テストで実際に使われる経路上にない」ときは沈黙のまま不一致が蓄積する。
+
+**追加したテスト**:
+既存の `test_replay_mode_calls_streaming` が今回の修正リグレッションガードとなる
+（`_replay_streaming_fills` を `_REQUIRED_ATTRS` から外すと即 AttributeError で FAIL）。
+追加テストは不要と判断。
+
+**教訓**:
+- `__init__` をモックで迂回するテストヘルパーを持つクラスに新属性を追加するときは、
+  必ずヘルパー内の属性リスト（`_REQUIRED_ATTRS` 等）を同時に更新すること。
+- M-9 パターン（`_REQUIRED_ATTRS` の集中管理）は「新属性が既存テストの実行パスに乗るまで
+  検出されない」という遅延検出の弱点を持つ。属性を追加したコミット時点で ヘルパーの
+  `_REQUIRED_ATTRS` を diff 確認する習慣を持つこと。
+
+---
+
+## 2026-04-30 — `docs/example/buy_and_hold.py` が存在せず 12 テストが FileNotFoundError
+
+**見逃しパターン**: 参照リソース未作成（test が fixture/example ファイルの存在を前提とするが未コミット）
+
+**不具合の概要**:
+`test_strategy_live_replay_smoke.py`・`test_nautilus_determinism.py`・
+`test_strategy_compat_lint.py` が `docs/example/buy_and_hold.py` を
+`strategy_file` として参照していたが、ファイルが存在しなかった。
+`FileNotFoundError: strategy file not found` で 12 テストが FAIL した。
+
+**修正内容**:
+- `docs/example/buy_and_hold.py` を新規作成（BuyAndHoldStrategy: 最初の bar で成行買い・保有継続）
+
+**既存テストが見逃した理由**:
+テストコードと対応するリソースファイルが同一コミットで追加されなかった。
+テストは先に書かれ（または過去バージョンで存在した後に削除され）、
+ファイルが未作成のまま TEST スイートに残った。
+`pytest` は import エラーではなく実行時 `FileNotFoundError` で落ちるため、
+CI の「コレクション」フェーズでは発見されず個別テスト実行時まで気づかない。
+
+**追加したテスト**:
+`test_strategy_compat_lint.py::test_example_buy_and_hold_replay_compat_lint` が
+存在確認を兼ねたリグレッションガードになっている（ファイルを削除すると FAIL）。
+
+**教訓**:
+- `strategy_file` など外部リソースを参照するテストは、対応ファイルと **同一 PR/コミット** で
+  追加すること。
+- テストが参照するファイルパスを `git grep` で検索し、実ファイルの存在を PR マージ前に確認する。
+- `docs/example/` のような「例示コード」ディレクトリは、テストが参照するファイルが揃っているか
+  定期的に棚卸しする。
+
+---
+
+## 2026-04-30 — `File > 開く...` で立花ログインが解除される
+
+**見逃しパターン**: Subscription 継続 restart 後状態消失（新パターン）
+
+**不具合の概要**:
+`File > 開く...` から有効な JSON ファイルを選択すると `self.restart()` が呼ばれる。
+`restart()` は `Flowsurface::new()` で `*self` を全置換し、`tachibana_state` が
+`VenueState::Idle` にリセットされる。
+
+iced 0.14 は `Subscription::run(engine_status_stream)` を同一関数ポインタ ID で
+管理するため、`restart()` 後もストリームは継続して動作する（再起動しない）。
+ストリームはすでに初期 `yield Message::EngineConnected(conn)` を発行済みで、
+主ループ (`tokio::select!`) で待機中。`EngineConnected` が再発火しないため
+`cached_venue_is_ready` チェックが実行されず、`tachibana_state` は `Idle` のまま固着する。
+
+Python エンジン側はセッションを維持しているため Rust-Python 間で状態不整合が発生。
+ユーザーにはログインバナーが表示され、注文 gate も通過しない状態になる。
+
+**修正**: `restart()` の末尾に `venue_bootstrap` タスクを追加し、
+`cached_venue_is_ready(TACHIBANA_VENUE_NAME)` が true なら
+`Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready))` をチェーンする。
+（`src/main.rs:3840` 付近）
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `native_menu_handler_tests::*` | `NativeOpenFileApply` ハンドラの構造を検証するが、`restart()` の実装内容（`venue_bootstrap` の有無）は対象外 |
+| 他の構造検査テスト群 | `restart()` メソッドを対象にしたテストが一切なかった |
+| iced subscription の挙動テスト | iced 0.14 の subscription 継続動作はユニットテストで再現できない（runtime が必要） |
+
+**追加したテスト**:
+- `src/main.rs::native_menu_handler_tests::restart_synthesizes_venue_ready_from_cache`
+  — `restart()` が `cached_venue_is_ready` を呼び `VenueEvent::Ready` を合成することを
+  ソースインスペクションで検証。修正削除で FAIL → 修正適用で PASS を実確認済み。
+
+**教訓**:
+
+1. **`restart()` の冪等性を守る**:
+   `restart()` が `*self = Flowsurface::new()` で全状態をリセットするとき、
+   iced のサブスクリプションは同一 ID で継続するため「初期化 yield」が再発火しない。
+   `new()` で `Idle` にリセットされる FSM 状態（`tachibana_state` 等）は、
+   `restart()` の末尾で `cached_venue_is_ready` 等のキャッシュを参照して明示的に復元する。
+
+2. **「全置換」する関数は FSM 状態の復元責務を持つ**:
+   `*self = new_state` パターンを使う関数は、
+   「new() で Idle になる状態」と「実際には変わっていない外部状態」の乖離を
+   補正するロジックを必ず含める。外部状態（VENUE_READY_CACHE 等の static）と
+   内部状態（self.tachibana_state）の同期は `new()` 側ではなく呼び出し側の責務。
+
+3. **restart 後に触られる FSM 状態をリストアップする習慣**:
+   `restart()` や「全置換」系操作を実装・レビューするとき、
+   以下を確認する:
+   - `new()` で Idle/None になるが、外部キャッシュ/static には情報が残る状態は何か
+   - それらのうちサブスクリプションの初期化 yield で回復するものはどれか
+   - サブスクリプションが再起動されない（同一 ID 継続）場合、yield が来ないケースを考慮したか

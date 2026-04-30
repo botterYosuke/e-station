@@ -292,6 +292,9 @@ class DataEngineServer:
         from engine.nautilus.portfolio_view import PortfolioView as _PortfolioView
         self._replay_portfolio = _PortfolioView(_Decimal("1000000"))
         self._replay_strategy_id: str = ""
+        # Streaming replay 中に約定した注文を蓄積する（GetOrderList{venue:"replay"} で返す）。
+        # _handle_start_engine の EngineStarted 受信時にリセットされる。
+        self._replay_streaming_fills: list[dict] = []
 
         self._outbox = _Outbox(self._outbox_event.set)
 
@@ -327,8 +330,10 @@ class DataEngineServer:
             await self._handshake(ws)
             # T-SC3: Python self-initiates Tachibana login after handshake.
             # The task runs concurrently with the recv/send loops.
-            startup_task = asyncio.create_task(self._startup_tachibana())
-            self._tachibana_startup_task = startup_task
+            # Skip in replay mode — Tachibana is irrelevant for backtesting.
+            if self._mode != "replay":
+                startup_task = asyncio.create_task(self._startup_tachibana())
+                self._tachibana_startup_task = startup_task
             recv_task = asyncio.create_task(self._recv_loop(ws))
             send_task = asyncio.create_task(self._send_loop(ws))
             done, pending = await asyncio.wait(
@@ -1389,17 +1394,30 @@ class DataEngineServer:
                 })
 
     async def _do_get_order_list_replay(self, msg: dict) -> None:
-        """N1.15: GetOrderList{venue='replay'} — WAL から注文一覧を返す。
+        """N1.15: GetOrderList{venue='replay'} — streaming fills + WAL から注文一覧を返す。
 
-        tachibana_orders_replay.jsonl を読み、phase='submit' のエントリのみを
-        OrderRecordWire 形式の dict に変換して OrderListUpdated として返す。
-        WAL が存在しない場合は空リストを返す。
+        優先順位:
+        1. streaming replay 中に約定した fills（self._replay_streaming_fills）
+        2. WAL（tachibana_orders_replay.jsonl）の submit エントリ
+
+        streaming fills が存在する場合（replay_streaming 経路）は WAL を読まない。
+        どちらも存在しない場合は空リストを返す。
         """
         import json
 
         req_id = msg.get("request_id", "")
-        wal_path = self._cache_dir / "tachibana_orders_replay.jsonl"
 
+        # streaming replay 経路: メモリ蓄積の fills を優先して返す。
+        if self._replay_streaming_fills:
+            self._outbox.append({
+                "event": "OrderListUpdated",
+                "request_id": req_id,
+                "orders": list(self._replay_streaming_fills),
+            })
+            return
+
+        # submit-based replay 経路: WAL から読む。
+        wal_path = self._cache_dir / "tachibana_orders_replay.jsonl"
         orders = []
         try:
             if wal_path.exists():
@@ -2081,6 +2099,21 @@ class DataEngineServer:
         """`RequestVenueLogin` from the Rust UI — drive a fresh login."""
         request_id = msg.get("request_id")
         venue = msg.get("venue")
+        # Reject in replay mode: backtesting must not trigger broker login.
+        # Without this guard a UI button or `/api/sidebar/tachibana/request-login`
+        # HTTP call would still walk the full Tachibana → VenueReady →
+        # bulk stats fetch path that broke replay startup (2026-04-30).
+        if self._mode == "replay":
+            self._emit(
+                {
+                    "event": "VenueError",
+                    "venue": venue or "",
+                    "request_id": request_id,
+                    "code": "mode_mismatch",
+                    "message": "RequestVenueLogin not allowed in replay mode",
+                }
+            )
+            return
         if venue != "tachibana":
             log.warning("RequestVenueLogin: unsupported venue=%r", venue)
             self._emit(
@@ -2427,6 +2460,29 @@ class DataEngineServer:
         def _on_event_tracked(evt: dict) -> None:
             if evt.get("event") == "EngineStarted":
                 started_marker["sent"] = True
+                # EngineStarted 受信時に前回の streaming fills をリセット。
+                self._replay_streaming_fills.clear()
+            elif evt.get("event") == "ExecutionMarker":
+                # streaming replay の約定を in-memory に蓄積（GetOrderList{venue:"replay"} 用）。
+                qty_str = evt.get("qty", "0")
+                ts = evt.get("ts_event_ms", 0)
+                self._replay_streaming_fills.append({
+                    "client_order_id": f"replay-fill-{ts}",
+                    "venue_order_id": "",
+                    "instrument_id": evt.get("instrument_id", ""),
+                    "order_side": evt.get("side", "BUY"),
+                    "order_type": "MARKET",
+                    "quantity": qty_str,
+                    "filled_qty": qty_str,
+                    "leaves_qty": "0",
+                    "price": evt.get("price"),
+                    "trigger_price": None,
+                    "time_in_force": "DAY",
+                    "expire_time_ns": None,
+                    "status": "FILLED",
+                    "ts_event_ms": ts,
+                    "venue": "replay",
+                })
             _on_event(evt)
 
         # C-1: result_holder で ReplayBacktestResult をキャプチャし、fills を portfolio に反映。

@@ -718,6 +718,12 @@ impl Dashboard {
             .any(|(_, _, state)| matches!(state.content, pane::Content::BuyingPower(_)))
     }
 
+    /// Returns `true` if at least one `OrderList` pane exists on any window.
+    pub fn has_order_list_pane(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window)
+            .any(|(_, _, state)| matches!(state.content, pane::Content::OrderList(_)))
+    }
+
     /// Distribute a fresh buying power snapshot to all `BuyingPower` panes.
     pub fn distribute_buying_power(
         &mut self,
@@ -932,20 +938,34 @@ impl Dashboard {
             );
         let found = if is_lone_starter { None } else { found };
 
-        // When the grid is empty and this is the first load, create TimeAndSales
-        // as the root pane (avoids an orphaned blank Starter pane). Track that it
-        // has already been created so the loop below does not duplicate it.
+        // When the grid is empty and this is the first load, create the root pane
+        // appropriate for the granularity (avoids an orphaned blank Starter pane).
+        // - Trade granularity (timeframe.is_none()): TimeAndSales as root (Trades
+        //   IPC stream feeds it).
+        // - Daily/Minute (timeframe.is_some()): CandlestickChart as root. Daily/Minute
+        //   replay never emits the `Trades` IPC event, so a TimeAndSales pane would
+        //   be stuck on "Waiting for data..." forever.
         let mut time_and_sales_as_root = false;
+        let mut candle_as_root = false;
         let base_pane = match found {
             Some(p) => p,
             None => {
                 let initial_state = if is_first
+                    && timeframe.is_none()
                     && self
                         .replay_pane_registry
                         .should_generate(instrument_id, "TimeAndSales")
                 {
                     time_and_sales_as_root = true;
                     pane::State::with_kind(data::layout::pane::ContentKind::TimeAndSales)
+                } else if is_first
+                    && timeframe.is_some()
+                    && self
+                        .replay_pane_registry
+                        .should_generate(instrument_id, "CandlestickChart")
+                {
+                    candle_as_root = true;
+                    pane::State::with_kind(data::layout::pane::ContentKind::CandlestickChart)
                 } else {
                     pane::State::default()
                 };
@@ -965,6 +985,23 @@ impl Dashboard {
                     if let Some(state) = self.panes.get_mut(initial_pane) {
                         let ti = Self::replay_ticker_info(instrument_id);
                         state.set_content_and_streams(vec![ti], ContentKind::TimeAndSales);
+                    }
+                } else if candle_as_root {
+                    self.replay_pane_registry.register_pane(
+                        instrument_id,
+                        "CandlestickChart",
+                        initial_pane,
+                    );
+                    log::info!(
+                        "replay_api: auto-generated CandlestickChart pane (root) for {instrument_id}"
+                    );
+                    self.focus = Some((main_window_id, initial_pane));
+                    if let Some(tf) = timeframe
+                        && let Some(state) = self.panes.get_mut(initial_pane)
+                    {
+                        let ti = Self::replay_ticker_info(instrument_id);
+                        state.settings.selected_basis = Some(Basis::Time(tf));
+                        state.set_content_and_streams(vec![ti], ContentKind::CandlestickChart);
                     }
                 }
                 initial_pane
@@ -998,10 +1035,7 @@ impl Dashboard {
                             state.clear_replay_chart_data();
                             let ti = Self::replay_ticker_info(instrument_id);
                             state.settings.selected_basis = Some(Basis::Time(tf));
-                            state.set_content_and_streams(
-                                vec![ti],
-                                ContentKind::CandlestickChart,
-                            );
+                            state.set_content_and_streams(vec![ti], ContentKind::CandlestickChart);
                         }
                     }
                     None => {
@@ -1021,8 +1055,12 @@ impl Dashboard {
         // N1.14: is_first ガード — reload 時 (同一銘柄の2回目以降) は
         // TimeAndSales / CandlestickChart の重複生成を防ぐ。
         // clear_replay_chart_data() で既存 pane のバッファをクリアする (実装済み)。
+        // TimeAndSales: only auto-generate for Trade granularity. Daily/Minute
+        // replay emits no `Trades` IPC events so the pane would be stuck on
+        // "Waiting for data..." indefinitely.
         if is_first
             && !time_and_sales_as_root
+            && timeframe.is_none()
             && self
                 .replay_pane_registry
                 .should_generate(instrument_id, "TimeAndSales")
@@ -1049,6 +1087,7 @@ impl Dashboard {
         // §4c: CandlestickChart は granularity=Trade のとき Bar が無いので生成しない。
         if is_first
             && timeframe.is_some()
+            && !candle_as_root
             && self
                 .replay_pane_registry
                 .should_generate(instrument_id, "CandlestickChart")

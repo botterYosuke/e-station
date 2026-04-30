@@ -933,7 +933,7 @@
 
 ### N4.5 examples/strategies/ ✅ 完了 2026-04-29
 - [x] ✅ `examples/strategies/buy_and_hold.py` 71 行（最小サンプル、`init_kwargs` 対応）
-- [x] ✅ `examples/strategies/sma_cross.py` 119 行（短期/長期 SMA クロス、`short`/`long`/`lot_size` init_kwargs）
+- [x] ✅ ~~`examples/strategies/sma_cross.py`~~ （削除済み — `docs/example/buy_and_hold.py` に統合 2026-04-30）
 - [x] ✅ `examples/strategies/README.md` 71 行（使い方・規約・自己責任注記）
 - [x] ✅ numpy/pandas 非依存。`load_strategy_from_file()` で両ファイルのロード検証済み
 
@@ -941,7 +941,7 @@
 - [x] ✅ `strategy_loader.py` の `_check_compat()` が N1.8 と同じ `_INCOMPATIBLE_HANDLERS` セットで AST 検査。ロード後に `log.warning` 送出、block しない（自己責任方針）
 
 **Exit 条件（暫定達成）**:
-- `examples/strategies/sma_cross.py` を `strategy_file` 経由でロード可能 ✅
+- `docs/example/buy_and_hold.py` を `strategy_file` 経由でロード可能 ✅
 - 構文エラー → `EngineError{code:"strategy_load_failed"}` → UI バナー ✅
 - `__init__(short=5, long=20)` を `strategy_init_kwargs` JSON で渡せる ✅
 - 既存テスト（N0〜N3）すべて GREEN のまま ✅（Python 1310 / Rust workspace 全 GREEN）

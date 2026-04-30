@@ -108,6 +108,15 @@ check "TickerStats.*parse error"     "$RUST_LOG_FILE" "ticker stats parse errors
 # RSV1 frames from the Python engine reaching fastwebsockets) and similar framing bugs.
 check "engine ws read error"         "$RUST_LOG_FILE" "engine ws protocol error"
 
+# RSV1 / permessage-deflate regression (2026-04-25 + 2026-04-30) — explicit diagnostic
+# string from fastwebsockets when it sees a compressed frame.  Caught above by the
+# generic "engine ws read error", but pinned separately because (a) any future log
+# refactor that rewords the prefix would silently regress, and (b) labels the failure
+# class precisely for triage.  Triggered by either compression negotiation slipping
+# back in, or a single oversized outbox frame interacting badly with Python websockets'
+# send path (root cause of the 278 KB FetchTickerStats incident).
+check "Reserved bits are not zero"   "$RUST_LOG_FILE" "fastwebsockets RSV1 rejection (deflate regression)"
+
 # Pipe read errors — non-UTF-8 bytes (e.g. Shift-JIS from Tachibana API) break the
 # stdout-forwarding loop, fill Python's stdout buffer, and deadlock the asyncio event loop.
 # Fix: engine-client/src/process.rs forward_lines() must continue (not break) on InvalidData.
