@@ -236,8 +236,6 @@ fn load_replay_data_serializes() {
         start_date: "2024-01-04".to_string(),
         end_date: "2024-01-31".to_string(),
         granularity: ReplayGranularity::Minute,
-        strategy_file: None,
-        strategy_init_kwargs: None,
     };
     let json = serde_json::to_string(&cmd).unwrap();
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -246,11 +244,11 @@ fn load_replay_data_serializes() {
     assert_eq!(v["granularity"], "Minute");
     assert!(
         v.get("strategy_file").is_none(),
-        "None は wire JSON に含まれてはいけない"
+        "strategy_file は LoadReplayData の wire JSON に含まれてはいけない"
     );
     assert!(
         v.get("strategy_init_kwargs").is_none(),
-        "None は wire JSON に含まれてはいけない"
+        "strategy_init_kwargs は LoadReplayData の wire JSON に含まれてはいけない"
     );
 }
 

@@ -183,26 +183,77 @@ def _run() -> None:
 
 ---
 
-### 4. Rust 側 — 自動生成 CandlestickChart の購読確認
+### 4. Rust 側 — 自動生成 CandlestickChart の購読配線
 
-auto-generated CandlestickChart ペインが `venue="replay"` の `KlineUpdate` を
-購読しているかを確認する。
-[replay_api.rs:auto-generated CandlestickChart pane for 1301.TSE](../../src/replay_api.rs)
-の生成時点で venue がどう紐づくかを確認し、必要なら：
+#### 調査結果（2026-04-30）
 
-- `replay_pane_registry` 経由で venue="replay" / ticker="1301" / timeframe=ロード時の
-  granularity を pane に bind する
-- chart の data feed が `KlineUpdate { venue: "replay", ticker: "1301", timeframe: "1d" }`
-  を受け取って描画する経路を確認する
+| 項目 | 状態 | 場所 |
+|---|---|---|
+| `KlineUpdate` の venue 文字列 match | ✅ 動く | [backend.rs:174](../../engine-client/src/backend.rs#L174) — `if ev_venue != venue { continue }` は `String` 比較 |
+| `timeframe="1d"` ↔ `Timeframe::D1` | ✅ 既存 | [backend.rs:1071-1090](../../engine-client/src/backend.rs#L1071-L1090) |
+| `ticker.to_string() == "1301"` | ✅ symbol のみで返る | exchange/src/lib.rs |
+| `Venue::Replay` enum バリアント | ❌ **無い** | [adapter.rs:275-283](../../exchange/src/adapter.rs#L275-L283) — Bybit/Binance/Hyperliquid/Okex/Mexc/Tachibana のみ |
+| `Exchange::ReplayStock` バリアント | ❌ **無い** | [adapter.rs:336-353](../../exchange/src/adapter.rs#L336-L353) |
+| `VENUE_NAMES` への replay 登録 | ❌ 無い | [src/main.rs:182-189](../../src/main.rs#L182-L189) |
+| 自動生成 CandlestickChart の購読 bind | ❌ 未実装 | [dashboard.rs:960-972](../../src/screen/dashboard.rs#L960-L972) — `pane::State::with_kind(ContentKind::CandlestickChart)` のみで ticker 未バインド |
 
-実調査が先なので、本ドキュメントでは TODO 箇条書きに留める：
+**現状の挙動**: `venue.parse::<Venue>()` が `"replay"` で失敗 →
+[backend.rs:120](../../engine-client/src/backend.rs#L120) で `Binance` にフォールバック警告。
+さらに自動生成 pane は ticker 未バインドなので「Choose a ticker」状態のまま。
+=> Python が emit した KlineUpdate は **どの購読側にも届かない**。
 
-- [ ] [replay_api.rs](../../src/replay_api.rs) `AutoGenerateReplayPanes` で
-      生成される pane の venue / ticker / timeframe を確認
-- [ ] [src/screen/dashboard.rs](../../src/screen/dashboard.rs) で
-      `KlineUpdate` を受け取って chart に渡す match arm の有無を確認
-- [ ] timeframe = "1d" のキャンドルが描画可能かを確認（既存 live は分・秒足想定）
-- [ ] Time&Sales pane も同様（`Trades` 受信 → 描画経路）
+#### 実装の分解
+
+3 ステップに分ける。各ステップ完了時に `cargo build` + 既存テスト回帰確認を入れる。
+
+##### 4a. 基盤（Venue::Replay / Exchange::ReplayStock の追加）
+
+- `exchange/src/adapter.rs`
+  - `Venue` enum に `Replay` バリアント追加、`ALL` を 7 要素に拡張
+  - `Display` / `FromStr` で `"replay"` ↔ `Venue::Replay`
+  - `Exchange` enum に `ReplayStock` 追加、`ALL` を 16 要素に拡張
+  - `from_venue_and_market` / `market_type` / `venue` / `default_quote_currency` /
+    `supports_kline_timeframe` の各 match に `ReplayStock` / `Venue::Replay` を追加
+    （quote=Jpy、market=Stock、kline は `D1` / `M1` を許可）
+- `src/main.rs:VENUE_NAMES` に `(Venue::Replay, "replay")` を追加
+- 既存の Venue / Exchange 全網羅テスト（grep `Venue::ALL` / `Exchange::ALL`）の更新
+- 受け入れ: `cargo build --workspace` 成功 + `cargo test --workspace` 全 pass
+
+##### 4b. replay モード時の `EngineClientBackend` 登録
+
+- `src/main.rs:1167-1175` の VENUE_NAMES ループは全 venue 用にバックエンドを作るので
+  4a の VENUE_NAMES 拡張で自動的に `Venue::Replay` バックエンドも作られる
+- ただし live モードでも replay バックエンドが作られるので、live 中は dead だが副作用なし
+  （Subscribe は IPC 送信されるだけで、Python 側 mode=live なら拒否される）
+- 受け入れ: replay 起動時のログに `EngineClientBackend (Python IPC)` が VENUE_NAMES 全件で出る
+
+##### 4c. 自動生成 CandlestickChart pane の購読 auto-bind
+
+- `dashboard.auto_generate_replay_panes()` のシグネチャを拡張し、`granularity` も受け取る:
+  `auto_generate_replay_panes(main_window_id, instrument_id, granularity)`
+- `instrument_id="1301.TSE"` から `ticker="1301"` を分解
+- `granularity` から `Timeframe` をマップ:
+  - `"Daily"` → `Timeframe::D1`
+  - `"Minute"` → `Timeframe::M1`
+  - `"Trade"` → CandlestickChart は生成しない（Bar が無いため）
+- `TickerInfo` を `Venue::Replay` + `MarketKind::Stock` で構築
+  （ticker metadata fetch を待たず stub で良い: 立花の lot_size=100 など最小値）
+- `pane::State::with_kind(ContentKind::CandlestickChart)` の代わりに
+  `pane::State::new_with_ticker(ContentKind::CandlestickChart, ticker_info, timeframe)`
+  相当のコンストラクタを用意する（既存 live pane の作成経路を流用）
+- TimeAndSales pane も同様に `Trades` 購読を auto-bind
+- 受け入れ:
+  - `bash scripts/run-replay-debug.sh docs/example/sma_cross.py` で
+    「Choose a ticker」が消え、ローソクが順次描画される
+  - sma_cross の BUY/SELL ログ条件で対応する実約定（Time&Sales）が表示される
+  - 単体テスト: `auto_generate_replay_panes("1301.TSE", "Daily")` が
+    `Kline { ticker.ticker == "1301", timeframe == D1 }` のストリームを返す
+
+#### スコープ外（次フェーズ）
+
+- replay の TickerInfo metadata fetch（lot_size / tick_size の正確値）
+- replay 専用 venue UI フィルタボタン（既存の filter UI に Replay を追加するか別扱いか）
+- 既存 live pane との境界（同一 chart pane で venue を replay ↔ tachibana 切替したときの挙動）
 
 ---
 

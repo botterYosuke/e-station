@@ -218,13 +218,6 @@ pub enum Command {
         start_date: String,
         end_date: String,
         granularity: ReplayGranularity,
-        /// N4.2: optional path to a user-supplied strategy `.py` file.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        strategy_file: Option<String>,
-        /// N4.2: optional JSON object of strategy constructor kwargs.
-        /// Array/scalar is rejected at the HTTP boundary before IPC send.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     },
 
     // ── N1.11: Replay speed control ───────────────────────────────────────
@@ -492,8 +485,6 @@ impl std::fmt::Debug for Command {
                 start_date,
                 end_date,
                 granularity,
-                strategy_file,
-                strategy_init_kwargs,
             } => f
                 .debug_struct("LoadReplayData")
                 .field("request_id", request_id)
@@ -501,8 +492,6 @@ impl std::fmt::Debug for Command {
                 .field("start_date", start_date)
                 .field("end_date", end_date)
                 .field("granularity", granularity)
-                .field("strategy_file", strategy_file)
-                .field("strategy_init_kwargs", strategy_init_kwargs)
                 .finish(),
             Command::SetReplaySpeed {
                 request_id,

@@ -737,7 +737,8 @@ struct Flowsurface {
     /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
     order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
     /// N4.3: user-selected strategy `.py` file path. `None` until the user picks
-    /// one via the OS file dialog.  Forwarded to `Command::LoadReplayData.strategy_file`.
+    /// one via the OS file dialog.  Intended for future wiring to `/api/replay/start`
+    /// `strategy_file` field when a UI-triggered replay start is implemented.
     replay_strategy_file: Option<std::path::PathBuf>,
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
     /// Cleared by `Message::DismissStrategyLoadError`.

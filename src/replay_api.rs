@@ -203,11 +203,6 @@ struct ReplayLoadBody {
     /// `"Minute"` / `"Daily"` 以外は serde が `Err` を返し、呼出側で 400 に
     /// 変換される。手動の `parse_granularity()` ヘルパーは廃止。
     granularity: ReplayGranularity,
-    #[serde(default)]
-    strategy_file: Option<String>,
-    /// JSON object only — array/scalar rejected by serde at HTTP boundary before IPC send.
-    #[serde(default)]
-    strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(serde::Serialize)]
@@ -419,8 +414,6 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
         start_date: parsed.start_date.clone(),
         end_date: parsed.end_date.clone(),
         granularity,
-        strategy_file: parsed.strategy_file,
-        strategy_init_kwargs: parsed.strategy_init_kwargs,
     };
     if let Err(e) = conn.send(cmd).await {
         write_error(
@@ -2466,8 +2459,8 @@ mod tests {
         drop(engine_tx);
     }
 
-    /// H-1 / M-6: `/api/replay/load` must reject non-object `strategy_init_kwargs`
-    /// (e.g. JSON array) with HTTP 400 before the IPC command is forwarded.
+    /// H-1: `/api/replay/load` must reject unknown fields such as `strategy_init_kwargs`
+    /// (removed from `ReplayLoadBody`) with HTTP 400 via `deny_unknown_fields`.
     #[tokio::test]
     async fn replay_load_rejects_array_strategy_init_kwargs() {
         let (ws_listener, ws_addr) = bind_ws_loopback().await;
