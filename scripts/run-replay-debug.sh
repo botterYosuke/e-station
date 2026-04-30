@@ -38,10 +38,10 @@ fi
 # Prepend .venv/Scripts to PATH (same as launch.json env.PATH)
 export PATH="$REPO_ROOT/.venv/Scripts:$PATH"
 
-# Replay parameters — override via env or .env file.
-export REPLAY_INSTRUMENT_ID="${REPLAY_INSTRUMENT_ID:-1301.TSE}"
-export REPLAY_START_DATE="${REPLAY_START_DATE:-2025-01-06}"
-export REPLAY_END_DATE="${REPLAY_END_DATE:-2025-03-31}"
+# Replay parameters — must be set via env or .env file (no hidden defaults).
+: "${REPLAY_INSTRUMENT_ID:?REPLAY_INSTRUMENT_ID is required (e.g. export REPLAY_INSTRUMENT_ID=1301.TSE)}"
+: "${REPLAY_START_DATE:?REPLAY_START_DATE is required (e.g. export REPLAY_START_DATE=2025-01-06)}"
+: "${REPLAY_END_DATE:?REPLAY_END_DATE is required (e.g. export REPLAY_END_DATE=2025-03-31)}"
 export REPLAY_GRANULARITY="${REPLAY_GRANULARITY:-Daily}"
 
 echo "[run-replay-debug] building (debug)..."

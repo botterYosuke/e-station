@@ -2444,7 +2444,7 @@ class DataEngineServer:
                     end_date=config_obj.end_date,
                     granularity=config_obj.granularity,
                     initial_cash=initial_cash,
-                    multiplier=getattr(self, "_replay_speed_multiplier", 1),
+                    get_multiplier=lambda: getattr(self, "_replay_speed_multiplier", 1),
                     base_dir=base_dir,
                     on_event=_on_event_tracked,
                     strategy_file=config_obj.strategy_file,

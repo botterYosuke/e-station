@@ -877,15 +877,43 @@ impl Dashboard {
 
         // Resolve the pane to split: prefer the focused main-window pane,
         // fall back to the last pane in the grid.
-        let base_pane = self
+        // If the grid is empty (starter-pane state), bootstrap it first so
+        // splits can proceed without a blank orphan placeholder.
+        let found = self
             .focus
             .filter(|(w, _)| *w == main_window_id)
             .and_then(|(_, p)| self.panes.get(p).map(|_| p))
             .or_else(|| self.panes.iter().last().map(|(p, _)| *p));
 
-        let Some(base_pane) = base_pane else {
-            log::warn!("replay_api: no pane available to split for {instrument_id}");
-            return;
+        // When the grid is empty and this is the first load, create TimeAndSales
+        // as the root pane (avoids an orphaned blank Starter pane). Track that it
+        // has already been created so the loop below does not duplicate it.
+        let mut time_and_sales_as_root = false;
+        let base_pane = match found {
+            Some(p) => p,
+            None => {
+                let initial_state = if is_first
+                    && self
+                        .replay_pane_registry
+                        .should_generate(instrument_id, "TimeAndSales")
+                {
+                    time_and_sales_as_root = true;
+                    pane::State::with_kind(data::layout::pane::ContentKind::TimeAndSales)
+                } else {
+                    pane::State::default()
+                };
+                let (grid_state, initial_pane) = pane_grid::State::new(initial_state);
+                self.panes = grid_state;
+                if time_and_sales_as_root {
+                    self.replay_pane_registry
+                        .register_pane(instrument_id, "TimeAndSales", initial_pane);
+                    log::info!(
+                        "replay_api: auto-generated TimeAndSales pane (root) for {instrument_id}"
+                    );
+                    self.focus = Some((main_window_id, initial_pane));
+                }
+                initial_pane
+            }
         };
 
         // Note: last_split_pane is updated only when panes.split() succeeds. If
@@ -909,6 +937,7 @@ impl Dashboard {
         // TimeAndSales / CandlestickChart の重複生成を防ぐ。
         // clear_replay_chart_data() で既存 pane のバッファをクリアする (実装済み)。
         if is_first
+            && !time_and_sales_as_root
             && self
                 .replay_pane_registry
                 .should_generate(instrument_id, "TimeAndSales")
