@@ -880,6 +880,8 @@ enum Message {
     StrategyFilePicked(Option<std::path::PathBuf>),
     /// N4.4: user dismissed the `strategy_load_failed` error banner.
     DismissStrategyLoadError,
+    /// Replay engine finished — auto-refresh the order list.
+    ReplayFinished,
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1147,6 +1149,8 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             ts_event_ms,
             tag,
         }),
+        // Replay engine stopped → auto-refresh order list.
+        EngineEvent::EngineStopped { .. } => Some(Message::ReplayFinished),
         _ => None,
     }
 }
@@ -1477,7 +1481,7 @@ impl Flowsurface {
 
                 // Auto-fetch buying power on venue ready if a pane is visible.
                 let main_window = self.main_window.id;
-                let auto_fetch = if is_ready
+                let auto_fetch_buying_power = if is_ready
                     && self.buying_power_request_id.is_none()
                     && self.active_dashboard().has_buying_power_pane(main_window)
                 {
@@ -1512,7 +1516,42 @@ impl Flowsurface {
                     Task::none()
                 };
 
-                return replay.chain(auto_fetch);
+                // Auto-fetch order list on venue ready if a pane is visible.
+                let auto_fetch_orders = if is_ready
+                    && self.active_dashboard().has_order_list_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetOrderList {
+                                    request_id: uuid::Uuid::new_v4().to_string(),
+                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                    filter: engine_client::dto::OrderListFilter {
+                                        status: None,
+                                        instrument_id: None,
+                                        date: None,
+                                    },
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            |res| match res {
+                                Ok(()) => Message::OrderToast(Toast::info(
+                                    "注文一覧を取得中...".to_string(),
+                                )),
+                                Err(err) => Message::OrderToast(Toast::error(format!(
+                                    "注文一覧取得失敗: {err}"
+                                ))),
+                            },
+                        )
+                    } else {
+                        Task::none()
+                    }
+                } else {
+                    Task::none()
+                };
+
+                return replay.chain(auto_fetch_buying_power).chain(auto_fetch_orders);
             }
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
@@ -2002,14 +2041,24 @@ impl Flowsurface {
                             match action {
                                 Action::RequestOrderList => {
                                     if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                        let is_replay = APP_MODE
+                                            .get()
+                                            .map(|m| {
+                                                *m == engine_client::dto::AppMode::Replay
+                                            })
+                                            .unwrap_or(false);
+                                        let venue = if is_replay {
+                                            "replay".to_string()
+                                        } else {
+                                            crate::TACHIBANA_VENUE_NAME.to_string()
+                                        };
                                         return Task::perform(
                                             async move {
                                                 conn.send(
                                                     engine_client::dto::Command::GetOrderList {
                                                         request_id: uuid::Uuid::new_v4()
                                                             .to_string(),
-                                                        venue: crate::TACHIBANA_VENUE_NAME
-                                                            .to_string(),
+                                                        venue,
                                                         filter:
                                                             engine_client::dto::OrderListFilter {
                                                                 status: None,
@@ -2197,6 +2246,28 @@ impl Flowsurface {
                 self.strategy_load_error = None;
                 return Task::none();
             }
+            // Replay engine finished → auto-refresh order list from Python's in-memory fills.
+            Message::ReplayFinished => {
+                if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                    return Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::GetOrderList {
+                                request_id: uuid::Uuid::new_v4().to_string(),
+                                venue: "replay".to_string(),
+                                filter: engine_client::dto::OrderListFilter {
+                                    status: None,
+                                    instrument_id: None,
+                                    date: None,
+                                },
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        |_res| Message::OrderToast(Toast::info("注文一覧を更新しました".to_string())),
+                    );
+                }
+                return Task::none();
+            }
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
             Message::ExecutionMarkerReceived {
                 side,
@@ -2243,6 +2314,72 @@ impl Flowsurface {
                 self.notifications.push(Toast::info(format!(
                     "注文受付: {client_order_id} (venue: {vid})"
                 )));
+
+                // live モード（tachibana ログイン済み）のときのみ自動更新。
+                // replay バックテストも OrderAccepted を emit するため、このガードは必須。
+                if !self.tachibana_state.is_ready() {
+                    return Task::none();
+                }
+
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    return Task::none();
+                };
+
+                let conn_for_orders = conn.clone();
+                let refresh_orders = Task::perform(
+                    async move {
+                        conn_for_orders
+                            .send(engine_client::dto::Command::GetOrderList {
+                                request_id: uuid::Uuid::new_v4().to_string(),
+                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                filter: engine_client::dto::OrderListFilter {
+                                    status: None,
+                                    instrument_id: None,
+                                    date: None,
+                                },
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    |res| match res {
+                        Ok(()) => Message::OrderToast(Toast::info(
+                            "注文一覧を取得中...".to_string(),
+                        )),
+                        Err(err) => Message::OrderToast(Toast::error(format!(
+                            "注文一覧取得失敗: {err}"
+                        ))),
+                    },
+                );
+
+                let refresh_buying_power = if self.buying_power_request_id.is_none() {
+                    let req_id = uuid::Uuid::new_v4().to_string();
+                    self.buying_power_request_id = Some(req_id.clone());
+                    let req_id_for_err = req_id.clone();
+                    Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::GetBuyingPower {
+                                request_id: req_id,
+                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        move |res| match res {
+                            Ok(()) => Message::OrderToast(Toast::info(
+                                "余力情報を取得中...".to_string(),
+                            )),
+                            Err(err) => Message::IpcError {
+                                request_id: Some(req_id_for_err),
+                                code: "send_failed".to_string(),
+                                message: err,
+                            },
+                        },
+                    )
+                } else {
+                    Task::none()
+                };
+
+                return Task::batch([refresh_orders, refresh_buying_power]);
             }
             // Phase U0: OrderRejected — reset submitting flag with reason + toast
             Message::OrderRejected {

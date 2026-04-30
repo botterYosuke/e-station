@@ -25,7 +25,7 @@
 | IPC イベント → UI 状態の未配線 | IPC イベントを受信して toast を出すだけで、対応する UI コンポーネントの状態（`submitting` フラグ等）をリセットしていない | 1 |
 | 初期化前データ到着 | UI コンポーネントが未初期化（`None`）の状態でデータが到着し、`if let Some(...)` でサイレントに無視される | 1 |
 | エラーハンドラ早期脱出 | エラー arm が `break` するため、一時的な IO エラー（非 UTF-8 バイト等）で pipe reader が停止し、書き手の stdout バッファが詰まる | 1 |
-| モード分岐漏れ | `_handle()` のような接続後フックが `mode` を考慮せず、ライブ専用の処理をリプレイモードでも実行してしまう | 1 |
+| モード分岐漏れ | `_handle()` のような接続後フックが `mode` を考慮せず、ライブ専用の処理をリプレイモードでも実行してしまう | 2 |
 | view() 分岐別オーバーレイ配線漏れ | `view()` の複数分岐のうち一部にしかモーダルオーバーレイを配線せず、他の分岐で `Some(dialog)` がサイレントに無視される | 1 |
 
 ---
@@ -1113,3 +1113,118 @@ if let Some(menu) = self.sidebar.active_menu() {
    を `time.time()` で付与すると、同一入力でも実行タイミングで値が変わる。
    `OrderFilled.ts_event` （nanosec → `// 1_000_000` で ms）を使えば決定論的になり、
    テストで「2 回 run して同じ値が出る」ことを assert できる。
+
+---
+
+## 2026-04-30 — 注文確定・起動時に注文一覧・買余力が自動更新されない（UX 改善）
+
+**見逃しパターン**: モード分岐漏れ（モード境界ガードの認識不足）
+
+**不具合の概要**:
+`OrderAccepted` 受信後に注文一覧・買余力の手動「更新」ボタンが必要だった（UX 課題）。
+また起動時（`VenueReady` 受信）に買余力は自動取得されていたが、注文一覧は手動更新が必要だった。
+
+**根本原因**: UX 機能の不足（バグではない）。以下 2 箇所に IPC 自動発行を追加:
+1. `Message::OrderAccepted` ハンドラ: `GetOrderList` + `GetBuyingPower` を自動発行
+2. `Message::VenueReady` ハンドラ: `GetOrderList` を自動発行（`GetBuyingPower` は既存）
+
+**最重要の安全ガード**:
+Python の replay バックテストも `OrderAccepted` を emit するため、`OrderAccepted` ハンドラの
+自動 IPC 発行には `tachibana_state.is_ready()` ガードが必須。このガードを外すと
+replay モードでも `GetOrderList`/`GetBuyingPower` が Tachibana API に向けて送信される。
+
+**なぜユニットテストを追加しなかったか**:
+
+| 理由 | 説明 |
+|------|------|
+| Iced Task 検査不可 | `update()` の戻り値（`Task<Message>` ツリー）を外部から検査する API が存在しない。副作用として何が spawn されたかを単体テストで assert する手段がない |
+| ガードの明確さ | `if !self.tachibana_state.is_ready() { return Task::none(); }` は読んで意図が明確 |
+| E2E で代替可能 | replay モードの smoke テストが「GetOrderList IPC が出ないこと」を間接的に保証する |
+
+**教訓**:
+
+1. **live 専用 IPC 自動発行には必ず `tachibana_state.is_ready()` ガードを書く**:
+   replay バックテストは `OrderAccepted` を含む多くの live 系イベントを emit する。
+   `update()` ハンドラで live 専用 IPC（`GetOrderList`, `GetBuyingPower` 等）を追加するときは、
+   **必ず** `tachibana_state.is_ready()` または `self.mode == AppMode::Live` で早期 return すること。
+
+2. **`has_*_pane()` ガードの設計指針**:
+   - `VenueReady` 起動時の自動取得: ペインが表示中のときのみ発行（`has_order_list_pane()` ガードあり）
+   - `OrderAccepted` 後の自動更新: ペインの有無によらず発行（後からペインを追加しても即反映するため）
+   この非対称性は意図的な設計判断。
+
+3. **Iced の update() 戻り値テスト戦略**:
+   `Task<Message>` の副作用は直接テストできない。代替として:
+   - ソース文字列テスト（`include_str!` + `contains`）で「コードが存在するか」を pin する
+   - E2E ログ確認（debug ビルドで `[ipc] → GetOrderList` が出るか目視）
+   - `tachibana_state.is_ready()` のような「ガードが存在するか」を文字列テストで pin する
+
+4. **pane-added catch-up は別タスク**:
+   `VenueReady` 後に `OrderList` ペインを後から追加した場合の catch-up 経路は今回スコープ外。
+   `BuyingPower` には `main.rs:2761` 付近に pane-added catch-up 経路が存在するが、
+   `OrderList` は起動時 auto-fetch のみ（ペイン追加時は手動「更新」ボタンが引き続き必要）。
+
+---
+
+## 2026-04-30 — streaming replay 注文一覧が常に空（注文なし）
+
+**見逃しパターン**: 同一言語テスト + イベント経路盲点（WAL 前提の実装が streaming には無効）
+
+**不具合の概要**:
+`replay` モードで sma_cross.py を実行すると買余力パネルには残高変動が表示されるが、
+注文一覧（OrderList）には「注文なし」と表示され、約定履歴が一切反映されなかった。
+
+**根本原因（3 層）**:
+
+1. **Rust: venue 固定バグ**
+   `Action::RequestOrderList` ハンドラが venue を `"tachibana"` に固定していた。
+   Python の `_do_get_order_list("tachibana")` は replay セッションが存在しないため
+   常に空を返す。`APP_MODE` を参照して replay 時は venue `"replay"` を送るべきだった。
+
+2. **Python: WAL 前提の設計**
+   `_do_get_order_list_replay()` は WAL ファイル `tachibana_orders_replay.jsonl` を読んでいたが、
+   streaming replay の約定は nautilus BacktestEngine の内部で完結するため WAL には書かれない。
+   「約定があれば WAL に記録される」という前提が streaming 経路では成立しない。
+
+3. **Python: auto-refresh トリガー不在**
+   `EngineStopped` イベントが Rust の `Message` に対応していなかった。
+   replay 完了後に自動で `GetOrderList` IPC を送る仕組みがなかった。
+
+**修正内容**:
+- `engine_runner.py`: `ExecutionMarker` emit に `qty` フィールドを追加
+- `server.py`: `_on_event_tracked` closure で `ExecutionMarker` を `_replay_streaming_fills` に蓄積。
+  `EngineStarted` 受信時に `clear()` して前回 fills を除去
+- `server.py`: `_do_get_order_list_replay` で `_replay_streaming_fills` が非空なら WAL を読まずそれを返す
+- `engine-client/src/dto.rs`: `ExecutionMarker` に `qty: Option<String>` を追加（後方互換）
+- `src/main.rs`: `Action::RequestOrderList` で `APP_MODE` 参照、replay 時は venue `"replay"`
+- `src/main.rs`: `Message::ReplayFinished` を追加し `EngineStopped` をマップ。
+  `ReplayFinished` ハンドラで `GetOrderList{venue:"replay"}` を自動発行
+
+**追加したテスト**:
+- `python/tests/test_replay_streaming_order_list.py`（7 テスト）:
+  - `TestStreamingFillsViaGetOrderList`: fills が OrderListUpdated に含まれる
+  - streaming fills が空なら WAL fallback、非空なら WAL を無視
+  - `TestStreamingFillsAccumulatedViaOnEventTracked`: `_on_event_tracked` の蓄積・クリア動作
+- `python/tests/test_engine_runner_streaming_fills.py`: `qty` フィールド追加に伴い
+  `test_execution_marker_has_no_extra_fields` → `test_execution_marker_has_required_fields` +
+  `test_execution_marker_qty_is_positive_decimal_string` に更新
+
+**教訓**:
+
+1. **streaming 約定は WAL に書かれない**:
+   nautilus `BacktestEngine` の内部約定は IPC 経由で submit されていないため WAL に残らない。
+   streaming replay の「注文履歴」は IPC イベント（`ExecutionMarker`）をリアルタイムで蓄積する
+   インメモリリストが唯一の信頼できるソースである。
+   
+2. **replay モードの venue 分岐は漏れやすい**:
+   `GetOrderList` のような IPC コマンドに venue 文字列が入るとき、replay 固有の venue（`"replay"`）
+   への分岐を忘れると live 専用経路に落ちて常に空が返る。
+   `APP_MODE.get()` を参照して replay 時は venue を切り替えること。
+
+3. **EngineStopped を Rust Message に対応させる**:
+   replay 完了後の UI 更新（注文一覧の自動更新など）は `EngineStopped` → `Message::ReplayFinished`
+   のマッピングが必要。新しい replay 後アクションを追加するときはここを起点にすること。
+
+4. **Python-only テストは Rust 側の venue 固定を検出できない**:
+   Python の `_do_get_order_list_replay` をテストしても、Rust が `venue="tachibana"` を送って
+   いることは検出できない。言語境界を跨ぐ integration 確認（ログ目視または E2E）が必要。

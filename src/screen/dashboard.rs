@@ -718,6 +718,12 @@ impl Dashboard {
             .any(|(_, _, state)| matches!(state.content, pane::Content::BuyingPower(_)))
     }
 
+    /// Returns `true` if at least one `OrderList` pane exists on any window.
+    pub fn has_order_list_pane(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window)
+            .any(|(_, _, state)| matches!(state.content, pane::Content::OrderList(_)))
+    }
+
     /// Distribute a fresh buying power snapshot to all `BuyingPower` panes.
     pub fn distribute_buying_power(
         &mut self,
