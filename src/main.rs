@@ -186,6 +186,7 @@ const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
     (exchange::adapter::Venue::Okex, "okex"),
     (exchange::adapter::Venue::Mexc, "mexc"),
     (exchange::adapter::Venue::Tachibana, TACHIBANA_VENUE_NAME),
+    (exchange::adapter::Venue::Replay, "replay"),
 ];
 
 /// Bind to 127.0.0.1:0 to ask the OS for a free port, then immediately close
@@ -2705,20 +2706,32 @@ impl Flowsurface {
                     ControlApiCommand::AutoGenerateReplayPanes {
                         instrument_id,
                         strategy_id,
+                        granularity,
                     } => {
                         // M-2 (R2 review-fix R2): strategy_id を Option<String> として保持。
                         // None = 単独 LoadReplayData 経路、Some(_) = StartEngine 経由 load。
-                        // 現状 dashboard.auto_generate_replay_panes は strategy_id を要求しないが、
-                        // ログに記録しておくことで N1.14 以降の pane 紐付け実装に流用できる。
                         log::debug!(
                             "AutoGenerateReplayPanes: instrument_id={instrument_id:?} \
-                             strategy_id={strategy_id:?}"
+                             strategy_id={strategy_id:?} granularity={granularity:?}"
                         );
+                        use engine_client::dto::ReplayGranularity;
+                        // Convert granularity to Option<Timeframe>: None = Trade (no bar chart).
+                        let timeframe = match granularity {
+                            ReplayGranularity::Daily => Some(exchange::Timeframe::D1),
+                            ReplayGranularity::Minute => Some(exchange::Timeframe::M1),
+                            ReplayGranularity::Trade => None,
+                        };
                         let main_window_id = self.main_window.id;
                         let dashboard = self.active_dashboard_mut();
                         // N1.14: clear any stale overlay markers before loading new replay data.
                         dashboard.clear_chart_overlays(main_window_id);
-                        dashboard.auto_generate_replay_panes(main_window_id, &instrument_id);
+                        let task = dashboard
+                            .auto_generate_replay_panes(main_window_id, &instrument_id, timeframe)
+                            .map(move |msg| Message::Dashboard {
+                                layout_id: None,
+                                event: msg,
+                            });
+                        return task;
                     }
                     _ => {}
                 }
