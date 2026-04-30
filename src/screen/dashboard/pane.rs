@@ -212,6 +212,20 @@ impl State {
         }
     }
 
+    /// Mark a pending fetch request as failed so the request handler stops
+    /// blocking future fetches with `ReqError::Overlaps`.
+    pub fn mark_fetch_request_failed(&mut self, req_id: uuid::Uuid) {
+        match &mut self.content {
+            Content::Kline { chart: Some(c), .. } => {
+                c.mark_request_failed(req_id);
+            }
+            Content::Comparison(Some(c)) => {
+                c.mark_kline_request_failed(req_id);
+            }
+            _ => {}
+        }
+    }
+
     /// N1.12 / N1.14: Clear all chart overlay markers.
     pub fn clear_overlay_markers(&mut self) {
         if let Content::Kline { chart: Some(c), .. } = &mut self.content {

@@ -48,6 +48,11 @@ pub enum Message {
     ChangePaneStatus(uuid::Uuid, pane::Status),
     SavePopoutSpecs(HashMap<window::Id, WindowSpec>),
     ErrorOccurred(Option<uuid::Uuid>, DashboardError),
+    FetchFailed {
+        pane_id: uuid::Uuid,
+        error: String,
+        req_id: Option<uuid::Uuid>,
+    },
     Notification(Toast),
     DistributeFetchedData {
         layout_id: uuid::Uuid,
@@ -201,6 +206,19 @@ impl Dashboard {
                 for (window_id, new_spec) in specs {
                     if let Some((_, spec)) = self.popout.get_mut(&window_id) {
                         *spec = new_spec;
+                    }
+                }
+            }
+            Message::FetchFailed {
+                pane_id,
+                error,
+                req_id,
+            } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id) {
+                    state.status = pane::Status::Ready;
+                    state.notifications.push(Toast::error(error));
+                    if let Some(rid) = req_id {
+                        state.mark_fetch_request_failed(rid);
                     }
                 }
             }
@@ -903,6 +921,16 @@ impl Dashboard {
             .filter(|(w, _)| *w == main_window_id)
             .and_then(|(_, p)| self.panes.get(p).map(|_| p))
             .or_else(|| self.panes.iter().last().map(|(p, _)| *p));
+
+        // Replay-mode initial state: a single Starter pane (see `Flowsurface::new()`).
+        // Treat it the same as an empty grid so we replace it with the auto-generated
+        // root pane instead of splitting alongside it (which would leave an orphan).
+        let is_lone_starter = self.panes.iter().count() == 1
+            && matches!(
+                self.panes.iter().next().map(|(_, s)| &s.content),
+                Some(pane::Content::Starter),
+            );
+        let found = if is_lone_starter { None } else { found };
 
         // When the grid is empty and this is the first load, create TimeAndSales
         // as the root pane (avoids an orphaned blank Starter pane). Track that it
@@ -1828,9 +1856,15 @@ impl From<fetcher::FetchUpdate> for Message {
                 stream,
                 data,
             },
-            fetcher::FetchUpdate::Error { pane_id, error } => {
-                Message::ErrorOccurred(Some(pane_id), DashboardError::Fetch(error))
-            }
+            fetcher::FetchUpdate::Error {
+                pane_id,
+                error,
+                req_id,
+            } => Message::FetchFailed {
+                pane_id,
+                error,
+                req_id,
+            },
         }
     }
 }

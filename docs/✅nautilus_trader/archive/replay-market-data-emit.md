@@ -403,6 +403,41 @@ streaming 版変更で破壊しないことを確認する。
 
 ---
 
+### バグ修正: replay チャートの Kline フェッチスパム (2026-04-30)
+
+**症状:**  
+`sma_cross.py` を実行すると、`CandlestickChart` pane が生成された直後から
+`Kline fetch failed: Invalid request: not_found: unknown venue: replay` が毎秒ログに出続けた。
+
+**根本原因:**  
+`KlineChart::fetch_missing_data()` は `timeseries.datapoints.is_empty()` のとき
+`let latest = chrono::Utc::now().timestamp_millis() as u64` でフェッチ範囲を計算する。
+`latest` はミリ秒精度で毎フレーム変わるため、`RequestHandler::same_with()` の exact match が
+常に miss → 毎フレーム新しい Pending リクエストが挿入 → 毎秒フェッチタスク起動 →
+Python エンジンが `Subscribe: unknown venue 'replay'` で拒否 → ログスパム。
+
+前フェーズで `FetchUpdate::Error` に `req_id` を持たせ `mark_failed()` を呼ぶ修正を入れたが、
+次の tick では *別のタイムスタンプ* の新しいリクエストが作られるため再発していた。
+
+**修正内容** ([src/chart/kline.rs:371-373](../../src/chart/kline.rs#L371-L373)):  
+```rust
+fn fetch_missing_data(&mut self) -> Option<Action> {
+    if self.chart.ticker_info().exchange() == Exchange::ReplayStock {
+        return None;
+    }
+    // ...
+}
+```
+`Exchange::ReplayStock` のチャートは `fetch_missing_data()` を即リターン。
+replay チャートは `KlineUpdate` ストリーミングで bar を受け取るため歴史フェッチは不要。
+
+**副修正** — 前フェーズで投入済み:
+- `FetchUpdate::Error` に `req_id: Option<Uuid>` を追加
+- `dashboard.rs` に `Message::FetchFailed` バリアントを追加し、失敗した req を `mark_failed()` で解消
+  （live モードでフェッチが失敗したときの pending リクエスト残留を防ぐ汎用修正）
+
+---
+
 ## レビュー反映（review-fix-loop Round 1/2 — 2026-04-30）
 
 ### 指摘・修正一覧

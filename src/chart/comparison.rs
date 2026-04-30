@@ -463,6 +463,12 @@ impl ComparisonChart {
         }
     }
 
+    pub fn mark_kline_request_failed(&mut self, req_id: uuid::Uuid) {
+        for handler in self.request_handler.values_mut() {
+            handler.mark_failed(req_id, "fetch error".to_string());
+        }
+    }
+
     fn streams_for_all(&self) -> Vec<StreamKind> {
         let mut streams = Vec::with_capacity(self.selected_tickers.len());
         for &t in &self.selected_tickers {

@@ -201,6 +201,7 @@ pub enum FetchUpdate {
     Error {
         pane_id: Uuid,
         error: String,
+        req_id: Option<Uuid>,
     },
 }
 
@@ -312,6 +313,7 @@ pub fn request_fetch(
                                 FetchUpdate::Error {
                                     pane_id,
                                     error: err.ui_message(),
+                                    req_id: None,
                                 }
                             }
                         },
@@ -397,6 +399,7 @@ pub fn oi_fetch_task(
                     Err(err) => FetchUpdate::Error {
                         pane_id,
                         error: err,
+                        req_id,
                     },
                 },
             )
@@ -448,6 +451,7 @@ pub fn kline_fetch_task(
                     Err(err) => FetchUpdate::Error {
                         pane_id,
                         error: err,
+                        req_id,
                     },
                 },
             )

@@ -634,6 +634,27 @@
 - `control_tx: Mutex<Option<Sender>>` にすることで `Arc` のまま `spawn()` 内で注入可能
 - `strategy_id_for_cmd` は空文字（ReplayDataLoaded から取得できないため）
 
+### N1.14b REPLAY モードの saved-state.json スキップ（D9-load / D9-save）✅ 完了 2026-04-30
+- ✅ `src/main.rs` `Flowsurface::new()`: replay モード時は `load_saved_state()` を skip し `SavedState::default()` を使用（D9-load）
+- ✅ `src/main.rs` `save_state_to_disk()`: replay モード時は即 return し live の設定を上書きしない（D9-save）
+- ✅ `APP_MODE` static の値（`AppMode::Replay`）で判定
+
+**実装メモ**:
+- `auto_generate_replay_panes` が決定論的に pane を生成するため前回レイアウトを復元する意義がない
+- replay セッション中のウィンドウ位置・テーマ変更が live モードの設定を汚染しない
+- `saved-state.json` が存在しない状態と等価なため再現手順の曖昧さが排除される
+
+**同時対応バグ修正**:
+- `auto_generate_replay_panes()` が空ペイングリッド（Starter Pane 初期状態）で `base_pane = None`
+  となり pane 生成が完全に no-op だった問題を修正
+  → `pane_grid::State::new()` でグリッドをブートストラップし TimeAndSales を root pane として生成
+  → `time_and_sales_as_root` フラグで TimeAndSales の二重生成を防止
+- `engine-client/src/dto.rs` に `EngineEvent::DateChangeMarker { date: String }` を追加
+  → Python が営業日跨ぎで emit する `DateChangeMarker` を Rust が parse できず
+  `"failed to parse engine event: unknown variant 'DateChangeMarker'"` が各営業日境界
+  （Daily 57 本なら最大 57 回）出ていた問題を解消
+  → Rust 側は現状 ignore（`map_engine_event_to_tachibana` の `_ => None` で処理）
+
 ### N1.15 REPLAY 注文一覧 pane（D9.5）✅ 完了 2026-04-29
 - ✅ iced 側 OrderListStore を venue で 2 view（live / replay）に分割
       → `OrderRecordWire` に `venue: String` フィールド追加（serde default="tachibana"）
@@ -1373,6 +1394,28 @@ N1.11 streaming replay の per-tick KlineUpdate/Trades IPC emit 実装後の rev
 
 - **`SetReplaySpeed` が走行中 streaming の速度を変更できない**: `multiplier` が `start_backtest_replay_streaming` 呼び出し時点でスナップショットされるため、実行中の `SetReplaySpeed` は次の StartEngine から有効。ループ内から `self._replay_speed_multiplier` を参照させるには関数シグネチャ変更が必要。N1.x 以降で対応。
 - **Rust 側 venue="replay" ルーティング**: Rust の `Venue` enum / `VENUE_NAMES` に "replay" 未定義、auto-generated ペインのストリームバインドなし。Python emit は正しいが Rust チャートへの表示は別タスクで対応。
+
+---
+
+## バグ修正 (2026-04-30, replay startup empty-pane-grid)
+
+`bash scripts/run-replay-debug.sh` で replay を初回起動したとき画面が Starter Pane から
+変わらないという問題の原因調査・修正。
+
+### 修正項目
+
+| 重大度 | 箇所 | 内容 | 対応 |
+|--------|------|------|------|
+| CRITICAL | `src/screen/dashboard.rs` `auto_generate_replay_panes()` | 空ペイングリッド（`saved-state.json` なし状態）で `base_pane = None` となり pane 生成が完全に no-op | `pane_grid::State::new()` でブートストラップし TimeAndSales を root pane として生成。`time_and_sales_as_root` フラグで二重生成防止 |
+| HIGH | `engine-client/src/dto.rs` `EngineEvent` | `DateChangeMarker` variant が未定義のため Python の営業日跨ぎ emit ごとに `"unknown variant 'DateChangeMarker'"` parse エラーが発生（Daily 57 本 → 最大 57 回） | `DateChangeMarker { date: String }` variant を追加。Rust 側は現状 `map_engine_event_to_tachibana` の `_ => None` で無視 |
+| DESIGN | `src/main.rs` | replay モードでも `saved-state.json` を load/save するため前回 live レイアウトが復元されスターター状態が再現しない | N1.14b（D9-load / D9-save）として `Flowsurface::new()` と `save_state_to_disk()` に replay ガードを追加（ユーザー実装 2026-04-30） |
+
+### 根本原因
+
+`saved-state.json` が存在しない状態 ＝ 空ペイングリッドで `auto_generate_replay_panes()`
+が呼ばれると `base_pane = None` → 関数が return → チャートが一切生成されなかった。
+N1.14b（D9-load）で replay は常にデフォルト状態から起動するようになり、
+同時に空グリッド対応のブートストラップも追加したことで両経路が修正された。
 
 ---
 

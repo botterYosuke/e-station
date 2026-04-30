@@ -17,6 +17,16 @@
 
 set -uo pipefail
 
+# VSCode の preLaunchTask 経由など、シェル環境に env var が無い経路でも動くよう
+# `.env` を自動 source する（run-replay-debug.sh と同じ方式）。
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    set -o allexport
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/.env"
+    set +o allexport
+fi
+
 STRATEGY_FILE="${1:-}"
 PORT="${PORT:-9876}"
 INSTRUMENT_ID="${REPLAY_INSTRUMENT_ID:?REPLAY_INSTRUMENT_ID is required (e.g. export REPLAY_INSTRUMENT_ID=1301.TSE)}"

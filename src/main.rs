@@ -1204,12 +1204,23 @@ impl Flowsurface {
 
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
 
-        // D8: replay mode starts with an empty layout.
+        // D8: replay mode starts with a clean layout (single Starter pane).
         // D9-load (implemented above) already sets saved_state to SavedState::default()
         // in replay mode, so saved_state.layout_manager is already LayoutManager::new().
-        // This branch is kept for documentary clarity of the D8 intent.
+        // The default 5-pane grid from `Dashboard::default()` is replaced with a
+        // single Starter pane so `auto_generate_replay_panes` can populate the
+        // grid cleanly without leaving 5 orphan Starter panes alongside the
+        // auto-generated TimeAndSales / CandlestickChart / OrderList / BuyingPower.
         let layout_manager = if is_replay_mode {
-            LayoutManager::new()
+            let mut lm = LayoutManager::new();
+            if let Some(layout) = lm.layouts.first_mut() {
+                let (panes, _initial_pane) = iced::widget::pane_grid::State::new(
+                    crate::screen::dashboard::pane::State::default(),
+                );
+                layout.dashboard.panes = panes;
+                layout.dashboard.focus = None;
+            }
+            lm
         } else {
             saved_state.layout_manager
         };

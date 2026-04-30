@@ -102,6 +102,11 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
   granularity?)` を管理し重複生成防止。1 銘柄目は横並び 2 分割、2 銘柄目以降はフォーカス
   pane を縦分割。`MAX_REPLAY_INSTRUMENTS = 4` 超過は HTTP 400。手動 close した自動生成
   pane は同セッション中は再生成しない
+- **N1.14b（新設）** REPLAY モードでは `saved-state.json` を**ロードもセーブもしない**
+  （D9-load / D9-save）。理由: (1) 起動毎に `auto_generate_replay_panes` が決定論的に
+  pane を生成するため前回レイアウトを復元する意義がない、(2) replay セッション中の
+  ウィンドウ位置・テーマ変更が live モードの設定を上書きするのを防ぐ。replay は
+  常にデフォルト状態で起動し、終了時に何も書かない使い捨てセッションとして扱う
 - **N1.15（新設）** REPLAY 注文一覧 pane を 1 銘柄目の `/api/replay/load` 成功時に
   自動生成（identity = `(mode=replay, pane_kind=order_list)`、銘柄非依存で 1 つだけ）。
   pane header に `⏪ REPLAY` バナー、`venue="replay"` のイベントのみ反映、live の
