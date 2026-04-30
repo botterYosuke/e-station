@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -151,6 +152,81 @@ class TestLoadReplayDataDispatch:
         assert len(errors) == 1
         assert errors[0]["request_id"] == "req-load-live"
         assert errors[0]["code"] == "mode_mismatch"
+
+
+class TestRequestVenueLoginModeGuard:
+    """RequestVenueLogin must be rejected in replay mode.
+
+    Companion to the post-handshake `_startup_tachibana` guard in `_handle()`.
+    Without this, a UI button or `/api/sidebar/tachibana/request-login` HTTP
+    call in replay mode would still drive a full Tachibana login →
+    VenueReady → bulk stats fetch path that broke replay startup on
+    2026-04-30.
+    """
+
+    @pytest.mark.asyncio
+    async def test_request_venue_login_rejected_in_replay_mode(self) -> None:
+        server = _make_server(mode="replay")
+        server._tachibana_login_inflight = MagicMock()
+        server._tachibana_login_inflight.locked = MagicMock(return_value=False)
+
+        with patch.object(
+            type(server), "_startup_tachibana", new=AsyncMock()
+        ) as mock_startup:
+            await server._do_request_venue_login(
+                {
+                    "op": "RequestVenueLogin",
+                    "request_id": "req-login-replay",
+                    "venue": "tachibana",
+                }
+            )
+
+        assert not mock_startup.called, (
+            "_startup_tachibana must not be invoked from RequestVenueLogin "
+            "while mode='replay'"
+        )
+        errors = [e for e in server._outbox if e.get("event") == "VenueError"]
+        assert len(errors) == 1, f"expected 1 VenueError, got: {server._outbox}"
+        assert errors[0]["request_id"] == "req-login-replay"
+        assert errors[0]["code"] == "mode_mismatch"
+        assert errors[0]["venue"] == "tachibana"
+
+    @pytest.mark.asyncio
+    async def test_request_venue_login_allowed_in_live_mode(self) -> None:
+        """Negative control: in live mode the same call must reach
+        `_startup_tachibana` (no mode_mismatch rejection)."""
+        server = _make_server(mode="live")
+        server._tachibana_login_inflight = MagicMock()
+        server._tachibana_login_inflight.locked = MagicMock(return_value=False)
+        server._tachibana_session = MagicMock()
+        server._cache_dir = MagicMock()
+
+        with patch.object(
+            type(server), "_startup_tachibana", new=AsyncMock()
+        ) as mock_startup, patch(
+            "engine.server.tachibana_clear_session"
+        ):
+            await server._do_request_venue_login(
+                {
+                    "op": "RequestVenueLogin",
+                    "request_id": "req-login-live",
+                    "venue": "tachibana",
+                }
+            )
+            # Allow the create_task() body to schedule.
+            await asyncio.sleep(0)
+
+        assert mock_startup.called, (
+            "_startup_tachibana must be invoked in live mode "
+            "(regression: replay-mode guard erroneously firing in live)"
+        )
+        mode_mismatch_errors = [
+            e for e in server._outbox
+            if e.get("event") == "VenueError" and e.get("code") == "mode_mismatch"
+        ]
+        assert not mode_mismatch_errors, (
+            f"live mode unexpectedly emitted mode_mismatch: {mode_mismatch_errors}"
+        )
 
 
 class TestStartEngineDispatch:

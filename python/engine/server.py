@@ -327,8 +327,10 @@ class DataEngineServer:
             await self._handshake(ws)
             # T-SC3: Python self-initiates Tachibana login after handshake.
             # The task runs concurrently with the recv/send loops.
-            startup_task = asyncio.create_task(self._startup_tachibana())
-            self._tachibana_startup_task = startup_task
+            # Skip in replay mode — Tachibana is irrelevant for backtesting.
+            if self._mode != "replay":
+                startup_task = asyncio.create_task(self._startup_tachibana())
+                self._tachibana_startup_task = startup_task
             recv_task = asyncio.create_task(self._recv_loop(ws))
             send_task = asyncio.create_task(self._send_loop(ws))
             done, pending = await asyncio.wait(
@@ -2081,6 +2083,21 @@ class DataEngineServer:
         """`RequestVenueLogin` from the Rust UI — drive a fresh login."""
         request_id = msg.get("request_id")
         venue = msg.get("venue")
+        # Reject in replay mode: backtesting must not trigger broker login.
+        # Without this guard a UI button or `/api/sidebar/tachibana/request-login`
+        # HTTP call would still walk the full Tachibana → VenueReady →
+        # bulk stats fetch path that broke replay startup (2026-04-30).
+        if self._mode == "replay":
+            self._emit(
+                {
+                    "event": "VenueError",
+                    "venue": venue or "",
+                    "request_id": request_id,
+                    "code": "mode_mismatch",
+                    "message": "RequestVenueLogin not allowed in replay mode",
+                }
+            )
+            return
         if venue != "tachibana":
             log.warning("RequestVenueLogin: unsupported venue=%r", venue)
             self._emit(

@@ -854,7 +854,7 @@ def _load_user_strategy(
     """
     from engine.nautilus.strategy_loader import load_strategy_from_file
 
-    return load_strategy_from_file(Path(strategy_file), strategy_init_kwargs or {})
+    return load_strategy_from_file(Path(strategy_file).resolve(), strategy_init_kwargs or {})
 
 
 def _make_replay_strategy(
