@@ -723,6 +723,7 @@ class ExecutionMarker(IpcMessage):
     instrument_id: str
     side: str  # "BUY" | "SELL"
     price: str  # decimal string
+    qty: str | None = None  # filled quantity as decimal string (added N1.13 Step A+)
     ts_event_ms: int
 
 

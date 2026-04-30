@@ -681,6 +681,7 @@ class NautilusRunner:
                         "instrument_id": instrument_str,
                         "side": side_str,
                         "price": price_str,
+                        "qty": str(qty_dec),
                         "ts_event_ms": ts_ms,
                     })
 

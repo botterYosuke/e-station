@@ -67,13 +67,34 @@ class TestStreamingFillsEmitExecutionMarker:
         assert markers[0]["side"] == "BUY"
         assert markers[1]["side"] == "SELL"
 
-    def test_execution_marker_has_no_extra_fields(self) -> None:
-        """ExecutionMarker に venue / quantity などの余分フィールドがない。"""
+    def test_execution_marker_has_required_fields(self) -> None:
+        """ExecutionMarker に必須フィールドが揃っており、venue など無関係なフィールドがない。"""
         events = _run_and_collect()
         markers = [e for e in events if e["event"] == "ExecutionMarker"]
-        expected_keys = {"event", "strategy_id", "instrument_id", "side", "price", "ts_event_ms"}
+        required_keys = {"event", "strategy_id", "instrument_id", "side", "price", "qty", "ts_event_ms"}
         for m in markers:
-            assert set(m.keys()) == expected_keys, f"unexpected keys: {set(m.keys()) - expected_keys}"
+            assert required_keys.issubset(set(m.keys())), (
+                f"missing keys: {required_keys - set(m.keys())}"
+            )
+            unexpected = set(m.keys()) - required_keys
+            assert not unexpected, (
+                f"unexpected keys: {unexpected}\n"
+                "Fix: remove extra fields from ExecutionMarker emit in engine_runner.py"
+            )
+
+    def test_execution_marker_qty_is_positive_decimal_string(self) -> None:
+        """qty フィールドは正の decimal 文字列（注文数量）。"""
+        from decimal import Decimal
+
+        events = _run_and_collect()
+        markers = [e for e in events if e["event"] == "ExecutionMarker"]
+        for m in markers:
+            assert "qty" in m, (
+                "ExecutionMarker must include 'qty' field — "
+                "required by server.py._on_event_tracked to build GetOrderList replay records"
+            )
+            qty = Decimal(m["qty"])
+            assert qty > 0, f"qty must be positive, got {qty}"
 
     def test_execution_marker_instrument_id(self) -> None:
         """instrument_id フィールドが正しい値。"""

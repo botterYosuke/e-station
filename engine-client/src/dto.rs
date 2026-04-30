@@ -959,6 +959,9 @@ pub enum EngineEvent {
         side: String,
         /// Fill price as decimal string.
         price: String,
+        /// Filled quantity as decimal string.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        qty: Option<String>,
         ts_event_ms: i64,
     },
 
