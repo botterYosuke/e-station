@@ -280,10 +280,11 @@ streaming 版変更で破壊しないことを確認する。
 ```
 1. ✅ python/engine/nautilus/engine_runner.py   per-tick emit 追加 + ヘルパ + unit test
 2. ✅ python/engine/server.py                replay モードで streaming に振り分け + integration test
-3. Rust 側調査（§4 の TODO）                 venue="replay" の購読経路確認
-4. Rust 側修正（必要なら）                   購読経路の追加
-5. E2E 手動確認                              sma_cross.py で chart に bar が描画される
-6. docstring / 計画書更新                    engine_runner.py の "N1.11 で実装する" 注記を解消
+3. ✅ §4a Venue::Replay / Exchange::ReplayStock 追加 + 14 pin tests
+4. ✅ §4b VENUE_NAMES に Venue::Replay 登録 + T36 pin test
+5. ✅ §4c auto_generate_replay_panes で set_content_and_streams 呼び出し + 5 pin tests
+6. E2E 手動確認                              sma_cross.py で chart に bar が描画される
+7. docstring / 計画書更新                    engine_runner.py の "N1.11 で実装する" 注記を解消
 ```
 
 §3（SetReplaySpeed の動的反映）は本タスクのスコープ外、別タスクに切り出す。
@@ -298,7 +299,11 @@ streaming 版変更で破壊しないことを確認する。
 | `python/engine/server.py` | replay モードで streaming 版を呼ぶ振り分け追加 |
 | `python/tests/test_engine_runner_replay.py` | streaming emit 検証テスト追加 |
 | `python/tests/test_server_dispatch.py` | replay→streaming 振り分けテスト追加 |
-| `src/replay_api.rs` 等 | §4 調査結果次第 |
+| `exchange/src/adapter.rs` | ✅ Venue::Replay + Exchange::ReplayStock 追加 |
+| `exchange/src/adapter/client.rs` | ✅ AdapterHandles replay フィールド追加 |
+| `src/main.rs` | ✅ VENUE_NAMES Replay 追加 + ControlApiCommand 4c ハンドラ |
+| `src/replay_api.rs` | ✅ AutoGenerateReplayPanes に granularity フィールド追加 |
+| `src/screen/dashboard.rs` | ✅ auto_generate_replay_panes: set_content_and_streams 呼び出し |
 | `docs/✅nautilus_trader/implementation-plan.md` | N1.11 完了状態を更新 |
 
 ---
