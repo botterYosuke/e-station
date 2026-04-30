@@ -939,3 +939,33 @@ Tachibana 自動ログインが成功 → `VenueReady` → `FetchTickerStats("__
    Tachibana 自動ログインが成功するため、CI（env var なし）では再現しなかった。
    dev 環境固有の挙動（自動ログイン等）が他モードに影響する可能性を、env var 設定時のシナリオとして
    テストに含める。
+
+**追補（2026-04-30 レビュー指摘）**: 同一根本原因に対する「第 2 経路」の取りこぼしを追加修正:
+
+- `_handle()` の post-handshake 自動起動ガードだけでは不十分で、
+  ユーザー明示の `RequestVenueLogin`（`server.py::_do_request_venue_login`）も replay モードで
+  同じ `_startup_tachibana()` を spawn する経路だった。`replay_api.rs` の
+  `POST /api/sidebar/tachibana/request-login` HTTP 経由で UI / 自動化スクリプトが
+  踏むと、replay でも 278 KB → RSV ビット切断を再現する
+- 修正: `_do_request_venue_login()` 冒頭にも `if self._mode == "replay":` ガードを追加し、
+  `VenueError{code:"mode_mismatch"}` で拒否する
+- 追加テスト: `test_server_engine_dispatch.py::TestRequestVenueLoginModeGuard`
+  （reject in replay + allow in live の対照 2 件）
+- **教訓 4 (新規)**: 「同じ起動関数を呼ぶ経路がコード内に複数あるか」を必ず grep で確認する。
+  `grep -n 'asyncio.create_task(self\._startup_tachibana' python/engine/server.py`
+  のような全 spawn 箇所列挙を bug-fix チェックリストに含める。1 箇所だけ修正して
+  「mode 分岐漏れ」パターンに対応した気になる罠を避ける。
+
+**追補 (2026-04-30, 大型フレーム RSV bit 経路の pin)**:
+
+278 KB → RSV ビット切断の根本（fastwebsockets が permessage-deflate を実装せず
+RSV1=1 フレームを拒否する性質）に対するリグレッションを 2 層で保護:
+
+1. `python/tests/test_server_ws_compat.py::test_large_frame_payload_does_not_set_rsv1`
+   — outbox に 320 KB の合成フレームを直接 inject し、`compression=None` クライアントが
+   ProtocolError なく受信できることを assert（IPC pipeline contract）
+2. `tests/e2e/smoke.sh` に `Reserved bits are not zero` を独立 fail trigger として追加
+   （既存 `engine ws read error` の prefix に依存しないシグネチャ pin）
+
+将来 venue が増えて bulk stats response が 1 MB 級になっても、live モード単体で
+回帰検出できる。

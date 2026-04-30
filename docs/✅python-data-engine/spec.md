@@ -176,7 +176,7 @@ session ID の用語と型（混同防止）:
 1. **Rust → Python: `Hello`**
    - フィールド: `{schema_major: u16, schema_minor: u16, client_version: str, token: str, mode: "live" | "replay"}`。
    - `token` は §4.1.1 で渡したランダム接続トークン。Python は不一致なら即切断。
-   - **`mode` (N1.13 追加)**: 起動時に固定する動作モード。`"replay"` のとき Python は `LoadReplayData` / `StartEngine{engine: Backtest}` / `SetReplaySpeed` を受理し、live venue 購読 (`Subscribe` を `replay` venue 等で投げる) は拒否する。旧クライアント互換のため省略時は `"live"` にフォールバック。
+   - **`mode` (N1.13 追加)**: 起動時に固定する動作モード。`"replay"` のとき Python は `LoadReplayData` / `StartEngine{engine: Backtest}` / `SetReplaySpeed` を受理し、live venue 購読 (`Subscribe` を `replay` venue 等で投げる) は拒否する。`RequestVenueLogin` も replay モードでは `VenueError{code:"mode_mismatch"}` で拒否する（バックテストはブローカー接続を要しないため。2026-04-30 追加）。旧クライアント互換のため省略時は `"live"` にフォールバック。
 2. **Python → Rust: `Ready` もしくは `EngineError`**
    - `Ready` フィールド: `{schema_major: u16, schema_minor: u16, engine_version: str, engine_session_id: uuid, capabilities: {supported_venues: [...], supports_bulk_trades: bool, supports_depth_binary: bool, ...}}`。
    - **`Ready` 発行前提条件 (Phase 7 追加)**: Python engine は `Ready` を送る前に、全 worker の HTTP クライアント (`httpx.AsyncClient` 等) 初期化を完了しなければならない。これにより `ListTickers` / `FetchTickerStats` / `FetchKlines` 等は `Ready` 受領直後から即時受理可能となる。サーバ実装は `await asyncio.gather(*(w.prepare() for w in workers))` を 20 秒タイムアウトで実行する。タイムアウト時は警告ログを残しつつ `Ready` を送出し、後続 fetch のエラーで個別判断する。
@@ -184,6 +184,7 @@ session ID の用語と型（混同防止）:
    - `Ready` 受領後に送る。
 4. **Python: venue startup login（autonomous、schema 2.x 以降）**
    - `Hello`/`Ready` 完了後、Python は `tachibana_account.json` / `tachibana_session.json` を起点に **自律的に** Tachibana の startup login を進める。Rust から `SetVenueCredentials` を送って起動を gate する旧モデルは廃止された（[engine-client/src/process.rs](../../engine-client/src/process.rs) の "schema 2.x — autonomous login (no SetVenueCredentials → VenueReady gate)" コメントが正本記述）。
+   - **`mode == "replay"` のときはこのステップを skip する**（2026-04-30 追加）。バックテストは Tachibana 接続を要さず、`Hello.mode` を見て Python 側 (`server.py::_handle()`) が `_startup_tachibana()` の spawn を抑止する。明示の `RequestVenueLogin` も §4.5 step 1 の通り replay モードでは `mode_mismatch` で拒否されるため、replay セッション中に Tachibana ログインフローが起動する経路は存在しない。
    - Python は進捗を `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` で逐次通知。Rust UI は受信ステータスをそのまま `VenueState{Idle/LoginInFlight/Ready/Error}` に反映し、`VenueReady` を待ってから既存購読を resubscribe + metadata fetch を再開する。
    - ユーザーが UI から再ログインを要求した場合のみ Rust は `RequestVenueLogin` を発火する（Python 側内部の自動再ログインは禁止、[tachibana/spec.md §3.2](../✅tachibana/spec.md)）。
 5. **Rust → Python: マーケットデータ系コマンド**（`Subscribe` 等）。
