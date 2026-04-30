@@ -1151,6 +1151,26 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
     }
 }
 
+/// Wrap `content` in a `confirm_dialog` overlay when one is set.
+///
+/// This helper centralises the overlay so the rendering path no longer depends
+/// on which sidebar menu is active. Previously, only `Settings` / `Network` /
+/// `Order` sidebar menus rendered the overlay, which made dashboard-pane
+/// `OrderEntry` confirm dialogs silently invisible (debug-honda incident,
+/// 2026-04-30).
+fn apply_confirm_dialog_overlay<'a>(
+    content: Element<'a, Message>,
+    dialog: Option<&'a screen::ConfirmDialog<Message>>,
+) -> Element<'a, Message> {
+    if let Some(dialog) = dialog {
+        let dialog_content =
+            confirm_dialog_container(dialog.clone(), Message::ToggleDialogModal(None));
+        main_dialog_modal(content, dialog_content, Message::ToggleDialogModal(None))
+    } else {
+        content
+    }
+}
+
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
         let is_replay_mode = APP_MODE
@@ -2753,12 +2773,17 @@ impl Flowsurface {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
+        // Helper invariant guard: this function MUST end up calling
+        // `apply_confirm_dialog_overlay`. The overlay must apply regardless
+        // of `self.sidebar.active_menu()` state (live mode order entry, replay
+        // mode, popout windows). The closing test
+        // `view_calls_confirm_dialog_overlay_helper` enforces this in source.
         let dashboard = self.active_dashboard();
         let sidebar_pos = self.sidebar.position();
 
         let tickers_table = &self.sidebar.tickers_table;
 
-        let content = if id == self.main_window.id {
+        let raw_content = if id == self.main_window.id {
             let sidebar_view = self
                 .sidebar
                 .view(self.audio_stream.volume())
@@ -2850,6 +2875,12 @@ impl Flowsurface {
             .padding(padding::top(style::TITLE_PADDING_TOP))
             .into()
         };
+
+        // Apply confirm_dialog overlay regardless of sidebar menu state or
+        // window kind. Without this unified path, dashboard-pane confirm
+        // dialogs (e.g. OrderEntry "発注確認") were silently invisible when
+        // the sidebar menu was closed. See docs/✅order/debug-honda-order-no-response.md.
+        let content = apply_confirm_dialog_overlay(raw_content, self.confirm_dialog.as_ref());
 
         let toasted: Element<'_, Message> = toast::Manager::new(
             content,
@@ -3206,27 +3237,16 @@ impl Flowsurface {
                     sidebar::Position::Right => (Alignment::End, padding::right(44).bottom(4)),
                 };
 
-                let base_content = dashboard_modal(
+                // confirm_dialog overlay は view() 末尾の apply_confirm_dialog_overlay
+                // で一括適用するため、ここでの個別ラップは不要（重複描画防止）。
+                dashboard_modal(
                     base,
                     settings_modal,
                     Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
                     padding,
                     Alignment::End,
                     align_x,
-                );
-
-                if let Some(dialog) = &self.confirm_dialog {
-                    let dialog_content =
-                        confirm_dialog_container(dialog.clone(), Message::ToggleDialogModal(None));
-
-                    main_dialog_modal(
-                        base_content,
-                        dialog_content,
-                        Message::ToggleDialogModal(None),
-                    )
-                } else {
-                    base_content
-                }
+                )
             }
             sidebar::Menu::Layout => {
                 let main_window = self.main_window.id;
@@ -3381,38 +3401,19 @@ impl Flowsurface {
                     sidebar::Position::Right => (Alignment::End, padding::right(44).bottom(4)),
                 };
 
-                let base_content = dashboard_modal(
+                // confirm_dialog overlay は view() 末尾で一括適用される（重複描画防止）。
+                dashboard_modal(
                     base,
                     self.network.view().map(Message::NetworkManager),
                     Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
                     padding,
                     Alignment::End,
                     align_x,
-                );
-
-                if let Some(dialog) = &self.confirm_dialog {
-                    let dialog_content =
-                        confirm_dialog_container(dialog.clone(), Message::ToggleDialogModal(None));
-
-                    main_dialog_modal(
-                        base_content,
-                        dialog_content,
-                        Message::ToggleDialogModal(None),
-                    )
-                } else {
-                    base_content
-                }
+                )
             }
             // Phase U-pre: Order menu is rendered inline in the sidebar itself.
-            sidebar::Menu::Order => {
-                if let Some(dialog) = &self.confirm_dialog {
-                    let dialog_content =
-                        confirm_dialog_container(dialog.clone(), Message::ToggleDialogModal(None));
-                    main_dialog_modal(base, dialog_content, Message::ToggleDialogModal(None))
-                } else {
-                    base
-                }
-            }
+            // confirm_dialog overlay は view() 末尾で一括適用される（重複描画防止）。
+            sidebar::Menu::Order => base,
         }
     }
 
@@ -3510,5 +3511,75 @@ impl Flowsurface {
         *self = new_state;
 
         close_windows.chain(init_task)
+    }
+}
+
+#[cfg(test)]
+mod confirm_dialog_overlay_tests {
+    //! Regression guard for the 2026-04-30 debug-honda incident.
+    //!
+    //! Before the fix, `Flowsurface::view()` only rendered `confirm_dialog`
+    //! when a sidebar menu was active. Dashboard-pane `OrderEntry` confirm
+    //! dialogs were silently invisible — clicking 注文 set `confirm_dialog =
+    //! Some(...)` but the next frame's view dropped it on the floor.
+    //!
+    //! These tests are deliberately structural (source-string assertions on
+    //! the file itself) because exercising the iced `view()` Element tree
+    //! at unit-test scope would require a heavy harness; the failure mode
+    //! we want to prevent is a refactor that drops the helper call from
+    //! `view()` or removes the helper entirely. Both are catchable here.
+
+    const MAIN_RS: &str = include_str!("./main.rs");
+
+    #[test]
+    fn helper_apply_confirm_dialog_overlay_exists() {
+        assert!(
+            MAIN_RS.contains("fn apply_confirm_dialog_overlay"),
+            "apply_confirm_dialog_overlay helper must exist — it is the single point that wraps content with the confirm_dialog overlay regardless of sidebar menu state"
+        );
+    }
+
+    #[test]
+    fn view_calls_confirm_dialog_overlay_helper() {
+        // Locate the `fn view(` of the Flowsurface application impl and assert
+        // it ends up calling `apply_confirm_dialog_overlay`. Without this call,
+        // dashboard-pane confirm dialogs vanish silently when no sidebar menu
+        // is open.
+        let view_idx = MAIN_RS
+            .find("fn view(&self, id: window::Id) -> Element<'_, Message>")
+            .expect("view function signature must remain stable");
+        let after_view = &MAIN_RS[view_idx..];
+        // Take everything until the next `fn ` definition at the same impl
+        // indent (4 spaces) — close enough to bracket the view body.
+        let body_end = after_view[1..]
+            .find("\n    fn ")
+            .map(|i| i + 1)
+            .unwrap_or(after_view.len());
+        let view_body = &after_view[..body_end];
+        assert!(
+            view_body.contains("apply_confirm_dialog_overlay("),
+            "Flowsurface::view() must call apply_confirm_dialog_overlay so confirm_dialog renders regardless of sidebar menu state"
+        );
+    }
+
+    #[test]
+    fn view_with_modal_branches_no_longer_redraw_overlay() {
+        // After the unification, `view_with_modal` arms must NOT individually
+        // overlay confirm_dialog (would cause double-rendering). The single
+        // overlay site is the helper. Count call sites in the production
+        // portion of `main.rs` (strip the test module to avoid self-counting
+        // the literal string in this very assertion).
+        let test_mod_marker = "mod confirm_dialog_overlay_tests {";
+        let prod_code = MAIN_RS
+            .split_once(test_mod_marker)
+            .map(|(prod, _)| prod)
+            .expect(
+                "test module marker 'mod confirm_dialog_overlay_tests {' must exist in main.rs",
+            );
+        let count = prod_code.matches("confirm_dialog_container(").count();
+        assert_eq!(
+            count, 1,
+            "confirm_dialog_container must be called exactly once (inside apply_confirm_dialog_overlay). Found {count} call sites in production code — likely a regression to per-menu overlay rendering."
+        );
     }
 }
