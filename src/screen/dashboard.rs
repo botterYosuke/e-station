@@ -949,13 +949,43 @@ impl Dashboard {
         let mut last_split_pane = base_pane;
 
         if !is_first {
-            for kind in ["TimeAndSales", "CandlestickChart"] {
-                if let Some(pane) = self
-                    .replay_pane_registry
-                    .get_registered_pane(instrument_id, kind)
-                    && let Some(state) = self.panes.get_mut(pane)
-                {
-                    state.clear_replay_chart_data();
+            // TimeAndSales: always just clear buffered data; Trades stream is reused.
+            if let Some(pane) = self
+                .replay_pane_registry
+                .get_registered_pane(instrument_id, "TimeAndSales")
+                && let Some(state) = self.panes.get_mut(pane)
+            {
+                state.clear_replay_chart_data();
+            }
+
+            // CandlestickChart: rebind stream/basis when granularity changes.
+            if let Some(pane) = self
+                .replay_pane_registry
+                .get_registered_pane(instrument_id, "CandlestickChart")
+            {
+                match timeframe {
+                    Some(tf) => {
+                        // Granularity is D1 or M1 — update basis and rebind.
+                        if let Some(state) = self.panes.get_mut(pane) {
+                            state.clear_replay_chart_data();
+                            let ti = Self::replay_ticker_info(instrument_id);
+                            state.settings.selected_basis = Some(Basis::Time(tf));
+                            state.set_content_and_streams(
+                                vec![ti],
+                                ContentKind::CandlestickChart,
+                            );
+                        }
+                    }
+                    None => {
+                        // Granularity is Trade — no bars to render; close the pane.
+                        self.panes.close(pane);
+                        self.replay_pane_registry
+                            .remove_registered_pane(instrument_id, "CandlestickChart");
+                        log::info!(
+                            "auto_generate_replay_panes: closed CandlestickChart pane \
+                             (granularity=Trade, instrument_id={instrument_id:?})"
+                        );
+                    }
                 }
             }
         }

@@ -149,3 +149,41 @@ fn auto_generate_replay_panes_skips_candlestick_for_trade_granularity() {
          §4c acceptance criterion."
     );
 }
+
+// ── 4c-6: reload path rebinds stream/basis for changed granularity ────────────
+
+#[test]
+fn auto_generate_replay_panes_reload_rebinds_candlestick_stream() {
+    let src = read_dashboard_src();
+
+    let start = src
+        .find("fn auto_generate_replay_panes")
+        .expect("auto_generate_replay_panes not found in dashboard.rs");
+    let after = &src[start..];
+    let window = &after[..after.len().min(15_000)];
+
+    // The reload path (is_first = false) must call set_content_and_streams for
+    // CandlestickChart when timeframe is Some — not just clear_replay_chart_data.
+    assert!(
+        window.contains("set_content_and_streams"),
+        "auto_generate_replay_panes reload path must call set_content_and_streams \
+         to rebind the kline stream when granularity changes (D1↔M1). \
+         §4c-6 acceptance criterion."
+    );
+
+    // The reload path must also close the CandlestickChart pane when switching
+    // to Trade granularity (timeframe = None). Pin that panes.close is present.
+    assert!(
+        window.contains("panes.close") || window.contains("self.panes.close"),
+        "auto_generate_replay_panes reload path must close the CandlestickChart \
+         pane when granularity is Trade (no bars to render). \
+         §4c-6 acceptance criterion."
+    );
+
+    // remove_registered_pane must be called to keep registry in sync after close.
+    assert!(
+        window.contains("remove_registered_pane"),
+        "auto_generate_replay_panes must call remove_registered_pane after closing \
+         CandlestickChart so the registry stays consistent. §4c-6 acceptance criterion."
+    );
+}
