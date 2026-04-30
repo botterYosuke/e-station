@@ -1165,19 +1165,26 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             ts_event_ms,
             tag,
         }),
-        // Replay engine stopped → auto-refresh order list.
-        EngineEvent::EngineStopped { .. } => Some(Message::ReplayFinished),
+        // Replay engine stopped → auto-refresh order list (replay mode only).
+        // In live mode, EngineStopped means engine restart, not replay completion.
+        // unwrap_or(false) is intentional here: this is a runtime event handler called
+        // well after APP_MODE is set; false (live) is the safe fallback so live-mode
+        // engine restarts do not accidentally trigger ReplayFinished.
+        EngineEvent::EngineStopped { .. } => {
+            let is_replay = APP_MODE
+                .get()
+                .map(|&m| m == engine_client::dto::AppMode::Replay)
+                .unwrap_or(false);
+            if is_replay {
+                Some(Message::ReplayFinished)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
 
-/// Wrap `content` in a `confirm_dialog` overlay when one is set.
-///
-/// This helper centralises the overlay so the rendering path no longer depends
-/// on which sidebar menu is active. Previously, only `Settings` / `Network` /
-/// `Order` sidebar menus rendered the overlay, which made dashboard-pane
-/// `OrderEntry` confirm dialogs silently invisible (debug-honda incident,
-/// 2026-04-30).
 fn status_bar_label(is_replay: bool) -> &'static str {
     if is_replay { "● REPLAY" } else { "● LIVE" }
 }
@@ -1193,6 +1200,8 @@ fn status_bar_dot_color(is_replay: bool) -> iced::Color {
 const STATUS_BAR_HEIGHT: u32 = 20;
 const STATUS_BAR_BG: iced::Color = iced::Color::from_rgb(0.08, 0.08, 0.08);
 
+// 'static: no input borrows; all content is &'static str labels and Copy Color constants.
+// '_ cannot be used here because lifetime elision requires at least one input reference.
 fn status_bar(is_replay: bool) -> Element<'static, Message> {
     container(
         text(status_bar_label(is_replay))
@@ -1211,6 +1220,13 @@ fn status_bar(is_replay: bool) -> Element<'static, Message> {
     .into()
 }
 
+/// Wrap `content` in a `confirm_dialog` overlay when one is set.
+///
+/// This helper centralises the overlay so the rendering path no longer depends
+/// on which sidebar menu is active. Previously, only `Settings` / `Network` /
+/// `Order` sidebar menus rendered the overlay, which made dashboard-pane
+/// `OrderEntry` confirm dialogs silently invisible (debug-honda incident,
+/// 2026-04-30).
 fn apply_confirm_dialog_overlay<'a>(
     content: Element<'a, Message>,
     dialog: Option<&'a screen::ConfirmDialog<Message>>,
@@ -1229,7 +1245,7 @@ impl Flowsurface {
         let is_replay_mode = APP_MODE
             .get()
             .map(|m| *m == engine_client::dto::AppMode::Replay)
-            .unwrap_or(false);
+            .expect("APP_MODE must be set before Flowsurface::new");
 
         let saved_state = if is_replay_mode {
             log::info!("replay mode: skipping load_saved_state (D9-load), using defaults");
@@ -2315,8 +2331,16 @@ impl Flowsurface {
                             .await
                             .map_err(|e| e.to_string())
                         },
-                        |_res| {
-                            Message::OrderToast(Toast::info("注文一覧を更新しました".to_string()))
+                        |res| match res {
+                            Ok(()) => Message::OrderToast(Toast::info(
+                                "注文一覧を更新しました".to_string(),
+                            )),
+                            Err(e) => {
+                                log::error!("[ReplayFinished] GetOrderList failed: {e}");
+                                Message::OrderToast(Toast::error(format!(
+                                    "注文一覧の取得に失敗: {e}"
+                                )))
+                            }
                         },
                     );
                 }
@@ -4167,51 +4191,40 @@ mod status_bar_tests {
     #[test]
     fn t3_status_bar_dot_color_replay_is_amber() {
         let color = status_bar_dot_color(true);
-        assert!(
-            (color.r - 0.9).abs() < f32::EPSILON,
-            "replay red component should be 0.9"
-        );
-        assert!(
-            (color.g - 0.6).abs() < f32::EPSILON,
-            "replay green component should be 0.6"
-        );
-        assert!(
-            (color.b - 0.1).abs() < f32::EPSILON,
-            "replay blue component should be 0.1"
-        );
+        let eps = 1e-5_f32;
+        assert!((color.r - 0.9).abs() < eps, "replay red should be 0.9");
+        assert!((color.g - 0.6).abs() < eps, "replay green should be 0.6");
+        assert!((color.b - 0.1).abs() < eps, "replay blue should be 0.1");
     }
 
     #[test]
     fn t4_status_bar_dot_color_live_is_green() {
         let color = status_bar_dot_color(false);
-        assert!(
-            (color.r - 0.2).abs() < f32::EPSILON,
-            "live red component should be 0.2"
-        );
-        assert!(
-            (color.g - 0.75).abs() < f32::EPSILON,
-            "live green component should be 0.75"
-        );
-        assert!(
-            (color.b - 0.3).abs() < f32::EPSILON,
-            "live blue component should be 0.3"
-        );
+        let eps = 1e-5_f32;
+        assert!((color.r - 0.2).abs() < eps, "live red should be 0.2");
+        assert!((color.g - 0.75).abs() < eps, "live green should be 0.75");
+        assert!((color.b - 0.3).abs() < eps, "live blue should be 0.3");
     }
 
     #[test]
     fn t5_status_bar_constants() {
         assert_eq!(STATUS_BAR_HEIGHT, 20);
+        let eps = 1e-5_f32;
         assert!(
-            (STATUS_BAR_BG.r - 0.08).abs() < f32::EPSILON,
-            "STATUS_BAR_BG red should be 0.08"
+            (STATUS_BAR_BG.r - 0.08).abs() < eps,
+            "BG red should be 0.08"
         );
         assert!(
-            (STATUS_BAR_BG.g - 0.08).abs() < f32::EPSILON,
-            "STATUS_BAR_BG green should be 0.08"
+            (STATUS_BAR_BG.g - 0.08).abs() < eps,
+            "BG green should be 0.08"
         );
         assert!(
-            (STATUS_BAR_BG.b - 0.08).abs() < f32::EPSILON,
-            "STATUS_BAR_BG blue should be 0.08"
+            (STATUS_BAR_BG.b - 0.08).abs() < eps,
+            "BG blue should be 0.08"
+        );
+        assert!(
+            (STATUS_BAR_BG.a - 1.0).abs() < eps,
+            "BG alpha should be 1.0"
         );
     }
 }

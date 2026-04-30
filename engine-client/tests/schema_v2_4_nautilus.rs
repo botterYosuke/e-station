@@ -442,14 +442,15 @@ fn execution_marker_deserializes() {
             instrument_id,
             side,
             price,
+            qty,
             ts_event_ms,
-            ..
         } => {
             assert_eq!(strategy_id, "buy-and-hold-001");
             assert_eq!(instrument_id, "1301.TSE");
             assert_eq!(side, "BUY");
             assert_eq!(price, "1500.0");
             assert_eq!(ts_event_ms, 1_700_000_000_010);
+            assert!(qty.is_none(), "qty absent in JSON must deserialize as None");
         }
         other => panic!("expected ExecutionMarker, got {other:?}"),
     }

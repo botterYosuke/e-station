@@ -274,8 +274,60 @@ cargo test --workspace
 ## Tips
 
 - `container::height()` に渡せる整数型は `u32` のみ（`u16` は `Into<Length>` 未実装）
-- `engine-client/tests/schema_v2_4_nautilus.rs` の `ExecutionMarker` パターンに
-  `qty` フィールドが追加された際は `..` を使って exhaust を回避する
+- `engine-client/tests/schema_v2_4_nautilus.rs` の `ExecutionMarker` パターンは
+  `..` を使わず全フィールドを束縛し `qty.is_none()` を assert すること（M-3 知見）
+- float 比較は `f32::EPSILON`（≈1e-7）ではなく `1e-5` を使う（丸め誤差マージン確保）
+- `dashboard_modal` は全面 opaque ではなく背景透過のため、Settings/ThemeEditor/Network
+  メニュー展開中もフッターは隠れず下端に表示される（C2 の「隠れる」は `main_dialog_modal`
+  のみ。仕様書の「opaque overlay が画面全体を覆う」記述は誤記）
+
+---
+
+## レビュー反映（2026-04-30, ラウンド 1）
+
+### 解消した指摘
+
+| ID | サマリ |
+|----|--------|
+| H-1 | `EngineStopped` を live モードでも `ReplayFinished` に変換していた → `APP_MODE` で分岐 |
+| H-2 | `Flowsurface::new()` の `unwrap_or(false)` が D9 安全装置を無音化 → `expect` に変更 |
+| M-1 | doc comment が `status_bar_label` に誤付与 → `apply_confirm_dialog_overlay` 直前へ移動 |
+| M-2 | `status_bar()` の戻り値 `'static` が Round 1 H2 決定違反 → `'_` に変更 |
+| M-3 | `ExecutionMarker` テストで `qty` が `..` で無検査 → 明示束縛 + `assert!(qty.is_none())` |
+| M-4 | T3〜T4 の float 比較が `f32::EPSILON` で不安定 → `1e-5` に変更 |
+| M-5 | T5 が `STATUS_BAR_BG.a` を検証しない → `assert!((.a - 1.0).abs() < eps)` 追加 |
+
+### 設計判断
+
+- `status_bar()` 戻り値を `'_` にしても `'static` 入力のみなので成立する。将来 `&self` 参照を含む拡張時も `'_` の方が柔軟
+- `EngineStopped` ガードは `APP_MODE.get().unwrap_or(false)` を使用（`expect` だとここでの panic が live → replay モード切替で問題になりうるため）
+- C2「opaque overlay」の記述は `dashboard_modal`（背景透過）と `main_dialog_modal`（全面暗転）の違いを区別できていなかった。次回仕様書改訂で修正する
+
+### 残存 LOW（対応不要）
+
+- L: テスト命名（`t1_`〜`t5_` プレフィックス）— 機能に影響なし
+- L: `view_calls_confirm_dialog_overlay_helper` の境界検索が `"\n    fn "` で脆弱 — プリエグジスティング、現状のコード構造で問題なし
+- L: `NativeMenuSetup` / `build_state_json` / `RequestOrderList` の `APP_MODE` `unwrap_or` — プリエグジスティング、別フェーズで一括修正候補
+
+---
+
+## レビュー反映（2026-04-30, ラウンド 2）
+
+### 解消した指摘
+
+| ID | サマリ |
+|----|--------|
+| R2-M-1 | `ReplayFinished` ハンドラで `_res` 握り潰し → `Ok/Err` 分岐 + エラートースト追加 |
+| R2-M-2 | `EngineStopped` アームの `unwrap_or(false)` に理由コメントを追記 |
+
+### 設計判断
+
+- **`status_bar()` の `'static`**: `'_` は入力参照が無いため lifetime elision が機能せずコンパイルエラー（E0106）。`'static` を維持し、理由をコメントで明記した（`'static` は `'_` のサブタイプなので呼び出し元 `view()` での利用に問題なし）
+- **`EngineStopped` の `unwrap_or(false)`**: ランタイムイベントハンドラでの `false`（live 扱い）フォールバックは意図的。`expect` は初期化パス（`Flowsurface::new`）に限定し、ランタイムパスでは安全なフォールバックを許容する設計方針を確定
+
+### 残存 LOW（対応不要）
+
+- L: テスト命名（`t1_`〜`t5_` プレフィックス）— 機能に影響なし
 
 ---
 
