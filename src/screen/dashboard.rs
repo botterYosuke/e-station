@@ -856,6 +856,12 @@ impl Dashboard {
             });
     }
 
+    fn replay_ticker_info(instrument_id: &str) -> TickerInfo {
+        let ticker_str = instrument_id.split('.').next().unwrap_or(instrument_id);
+        let ticker = Ticker::new(ticker_str, Exchange::ReplayStock);
+        TickerInfo::new_stock(ticker, 1.0, 1.0, 100)
+    }
+
     /// N1.14: Auto-generate REPLAY panes for the given instrument.
     ///
     /// Called from `Flowsurface::update()` when
@@ -866,12 +872,6 @@ impl Dashboard {
     /// Split rule (D9.3):
     /// - 1st instrument: `Axis::Vertical` (side-by-side: Tick left, Candle right)
     /// - 2nd+ instrument: `Axis::Horizontal` (below the focused pane)
-    fn replay_ticker_info(instrument_id: &str) -> TickerInfo {
-        let ticker_str = instrument_id.split('.').next().unwrap_or(instrument_id);
-        let ticker = Ticker::new(ticker_str, Exchange::ReplayStock);
-        TickerInfo::new_stock(ticker, 1.0, 1.0, 100)
-    }
-
     pub fn auto_generate_replay_panes(
         &mut self,
         main_window_id: window::Id,
@@ -882,6 +882,11 @@ impl Dashboard {
     ) -> Task<Message> {
         let is_first = !self.replay_pane_registry.is_loaded(instrument_id);
         self.replay_pane_registry.mark_loaded(instrument_id);
+
+        if instrument_id.is_empty() {
+            log::error!("auto_generate_replay_panes: instrument_id is empty — aborting");
+            return Task::none();
+        }
 
         let axis = if is_first {
             pane_grid::Axis::Vertical
@@ -976,6 +981,10 @@ impl Dashboard {
                     let ti = Self::replay_ticker_info(instrument_id);
                     state.set_content_and_streams(vec![ti], ContentKind::TimeAndSales);
                 }
+            } else {
+                log::warn!(
+                    "auto_generate_replay_panes: pane split failed for TimeAndSales (instrument_id={instrument_id:?})"
+                );
             }
         }
 
@@ -1005,6 +1014,10 @@ impl Dashboard {
                     state.settings.selected_basis = Some(Basis::Time(tf));
                     state.set_content_and_streams(vec![ti], ContentKind::CandlestickChart);
                 }
+            } else {
+                log::warn!(
+                    "auto_generate_replay_panes: pane split failed for CandlestickChart (instrument_id={instrument_id:?})"
+                );
             }
         }
 

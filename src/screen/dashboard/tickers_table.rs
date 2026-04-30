@@ -963,6 +963,8 @@ impl TickersTable {
                         column![self.exchange_filter_btn(venue), self.tachibana_login_btn(),]
                             .spacing(2),
                     );
+                } else if venue == Venue::Replay {
+                    // Replay panes are auto-generated via /api/replay/start — no sidebar filter UI
                 } else {
                     col = col.push(self.exchange_filter_btn(venue));
                 }

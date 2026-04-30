@@ -64,7 +64,7 @@ fn auto_generate_replay_panes_calls_set_content_and_streams() {
     let after = &src[start..];
     // The function ends at the outer `}` — find the next `pub fn` or `}` at top level.
     // As a heuristic, grab a generous window covering the function.
-    let window = &after[..after.len().min(4000)];
+    let window = &after[..after.len().min(8000)];
 
     assert!(
         window.contains("set_content_and_streams"),
