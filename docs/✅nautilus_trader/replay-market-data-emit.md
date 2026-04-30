@@ -308,6 +308,48 @@ streaming 版変更で破壊しないことを確認する。
 
 ---
 
+## レビュー反映 (2026-04-30, ラウンド 1)
+
+6 エージェント並列レビュー (rust-reviewer / silent-failure-hunter / iced-architecture-reviewer / type-design-analyzer / ws-compatibility-auditor / general-purpose)。
+
+### 解消した指摘
+
+| ID | 重大度 | 内容 | 修正コミット |
+|----|--------|------|------------|
+| F1 | MEDIUM | `Venue::Replay` が live モードサイドバーフィルタボタンに表示 (Venue::ALL ループ) | 0c21e3e |
+| F2 | MEDIUM | Pin test 4c-2 の 4000 char 窓が CandlestickChart bind をカバーしない可能性 | 0c21e3e |
+| F3 | MEDIUM | `panes.split()` が `None` を返したとき無音スキップ | 0c21e3e |
+| F4 | MEDIUM | 空 `instrument_id` で `Ticker::new("", ReplayStock)` が作られる無音バグ | 0c21e3e |
+| F5 | MEDIUM | doc comment が `replay_ticker_info` に誤付与 (本来は `auto_generate_replay_panes`) | 0c21e3e |
+
+### 偽陽性として棄却した指摘
+
+- silent HIGH-3/4: `set_content_and_streams` は line 521 で `self.streams = Ready` を直接書くため戻り値廃棄は問題なし
+- silent CRITICAL-1: reload 時 `latest_x = 0` は `insert_hist_klines` の fix (MISSES.md 2026-04-27) で解決済み
+- general M-4: `Command::Subscribe` to Python replay is intentional per §4b acceptance criteria
+
+### 設計確認・知見
+
+- `ControlApiCommand::AutoGenerateReplayPanes` は純粋 in-process mpsc — WS IPC 境界を越えない。SCHEMA_MAJOR 変更不要。
+- `Venue::Replay` を `Venue::ALL` に追加すると sidebar loop が全 mode で影響を受ける。今後 enum を拡張するときは sidebar の `for venue in Venue::ALL` ループでの扱いを確認すること。
+
+### ラウンド 2 追加修正 (commit d8a91e9)
+
+| ID | 重大度 | 内容 |
+|----|--------|------|
+| R2-1 | MEDIUM | `mark_loaded("")` が `is_empty()` ガードの前に呼ばれていた (レジストリ汚染) → 順序を入れ替え |
+| R2-2 | MEDIUM | Pin test 4c-2 の 8000-char 窓が CandlestickChart bind をカバーしない可能性 → 4c-2 + 4c-5 を 15_000 に拡大 |
+
+### 残存 LOW (対応不要)
+
+- `refresh_streams()` の戻り型が `Task<Message>` だが常に `Task::none()` を返す (実害なし)
+- `granularity` 欠落 HTTP body に対するピンテストが未追加 (serde が機械的に弾く)
+- `strategy_id` フィールドが `AutoGenerateReplayPanes` ハンドラでログのみ使用
+- `Exchange::ReplayStock.is_perps() == false` のピンテストなし
+- `SerTicker` ラウンドトリップテスト未追加
+
+---
+
 ## Open Questions
 
 - **Q-M1**: `KlineUpdate.market` を Equity replay でどう埋めるか。
