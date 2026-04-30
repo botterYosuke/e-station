@@ -63,8 +63,8 @@ fn auto_generate_replay_panes_calls_set_content_and_streams() {
         .expect("auto_generate_replay_panes not found in dashboard.rs");
     let after = &src[start..];
     // The function ends at the outer `}` — find the next `pub fn` or `}` at top level.
-    // As a heuristic, grab a generous window covering the function.
-    let window = &after[..after.len().min(8000)];
+    // As a heuristic, grab a generous window covering the function (~185 lines ≈ 11 kB).
+    let window = &after[..after.len().min(15_000)];
 
     assert!(
         window.contains("set_content_and_streams"),
@@ -135,7 +135,8 @@ fn auto_generate_replay_panes_skips_candlestick_for_trade_granularity() {
         .find("fn auto_generate_replay_panes")
         .expect("auto_generate_replay_panes not found in dashboard.rs");
     let after = &src[start..];
-    let window = &after[..after.len().min(4000)];
+    // Function is ~185 lines ≈ 11 kB; use 15 kB to cover the whole body.
+    let window = &after[..after.len().min(15_000)];
 
     // The guard can be expressed as `if let Some(tf) = timeframe` or
     // `if granularity != Trade` etc. — we pin the existence of a conditional.

@@ -880,13 +880,13 @@ impl Dashboard {
         // Some(tf) = Daily (D1) or Minute (M1).
         timeframe: Option<Timeframe>,
     ) -> Task<Message> {
-        let is_first = !self.replay_pane_registry.is_loaded(instrument_id);
-        self.replay_pane_registry.mark_loaded(instrument_id);
-
         if instrument_id.is_empty() {
             log::error!("auto_generate_replay_panes: instrument_id is empty — aborting");
             return Task::none();
         }
+
+        let is_first = !self.replay_pane_registry.is_loaded(instrument_id);
+        self.replay_pane_registry.mark_loaded(instrument_id);
 
         let axis = if is_first {
             pane_grid::Axis::Vertical
