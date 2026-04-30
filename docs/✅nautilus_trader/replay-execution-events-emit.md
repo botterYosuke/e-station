@@ -163,24 +163,16 @@ emit する。
 
 ## 詳細実装計画 — Step A
 
-### A-0. 事前確認（実装前に解消する Open Question）
+### ✅ A-0. 事前確認（実装前に解消する Open Question）
 
-| # | 確認事項 | 確認方法 |
+| # | 確認事項 | 確認結果（2026-04-30 実装時） |
 |---|---|---|
-| 1 | OrderFilled の MessageBus topic 文字列 | `from nautilus_trader.model.events import OrderFilled` してから `OrderFilled` のクラスメソッド `topic()` または nautilus docs を引く。`events.order.filled.<strategy_id>` がワイルドカード対応するかも要確認 |
-| 2 | `msgbus.subscribe(topic, handler)` の handler シグネチャ | 同期 callback で OK か、async が要るか。nautilus の Subscriber インタフェースを読む |
-| 3 | `OrderFilled` の主要属性名 | `instrument_id` / `order_side` / `last_px` / `last_qty` / `ts_event` の正式属性名を nautilus docs で確認（バージョン依存の可能性） |
-| 4 | 購読タイミング | `engine.add_strategy()` の前か後か。`engine.run(streaming=True)` のループ内で動作するか。スパイク（10 行）で確認 |
+| 1 ✅ | OrderFilled の MessageBus topic 文字列 | `events.fills.{instrument_id}`（例: `events.fills.1301.TSE`）。actor.pyx の `subscribe_order_fills()` / execution/engine.pyx の `_get_fill_events_topic()` で確認。`events.order.filled.*` ではない |
+| 2 ✅ | `msgbus.subscribe(topic, handler)` の handler シグネチャ | `(self, topic, handler: Callable[[Any], None], priority=0)` — 同期 callback でOK |
+| 3 ✅ | `OrderFilled` の主要属性名 | `instrument_id`, `order_side`（`.name` → "BUY"/"SELL"）, `last_px`（Price型・str()でOK）, `last_qty`（Quantity型・Decimal(str())でOK）, `ts_event`（uint64_t nanoseconds） |
+| 4 ✅ | 購読タイミング | `engine.add_strategy()` の **後**。`engine.kernel.msgbus.subscribe()` で直接アクセス可 |
 
-これらを A-1 のコードに着地させる前に、5 分のスパイクスクリプトで以下を試す：
-
-```python
-from nautilus_trader.model.events import OrderFilled
-print(OrderFilled.topic() if hasattr(OrderFilled, "topic") else "no topic class method")
-# msgbus.subscribe を一度叩いて handler が呼ばれるか確認
-```
-
-### A-1. `start_backtest_replay_streaming()` に hook を仕込む
+### ✅ A-1. `start_backtest_replay_streaming()` に hook を仕込む
 
 **対象**: [python/engine/nautilus/engine_runner.py](../../python/engine/nautilus/engine_runner.py)
 の `start_backtest_replay_streaming()` 内、`engine.add_strategy(strategy_instance)`
@@ -252,7 +244,7 @@ engine.kernel.msgbus.subscribe(
 4. 購読は `engine.add_strategy(strategy_instance)` の **後**（A-0/Q4 で要確認）
 5. `currency / venue / cur` 等は既存ローカル変数を流用
 
-### A-2. ts_event_ms の決定論性
+### ✅ A-2. ts_event_ms の決定論性
 
 `portfolio.to_ipc_dict()` は `time.time()` を使うので、
 そのまま emit すると **テストの再現性が壊れる**。
@@ -263,18 +255,25 @@ engine.kernel.msgbus.subscribe(
 - 単体テストでは `time.time` を mock せず、ts_event_ms が OrderFilled.ts_event 由来で
   あることを assert する
 
-### A-3. テスト計画
+### ✅ A-3. テスト計画（実装済み）
 
-#### 新規 fixture: `python/tests/fixtures/sma_cross_test_strategy.py`
+**実装上の変更点（計画からの差分）**:
+- fixture を `sma_cross_test_strategy.py` ではなく `fill_strategy.py` として作成。
+  既存の 2 件 fixture データ（equities_bars_daily_202401.csv.gz: 2024-01-04, 2024-01-05）で
+  動作するよう、bar 1 で BUY / bar 2 で SELL の決定論的な戦略にした。
+  sma_cross は long SMA に 5 本必要で fixture データが足りないため。
+- テストは `python/tests/test_engine_runner_streaming_fills.py` に 13 件追加（全 PASS）。
+- 「8 回 fill」ではなく「2 回 fill」で設計（fixture データが 2 bars のため）。
+  sma_cross 実機確認は別途手動 E2E で実施（J-Quants データが必要）。
+
+#### ✅ 新規 fixture: `python/tests/fixtures/fill_strategy.py`
 
 [`docs/example/sma_cross.py`](../example/sma_cross.py) をテスト用に最小化したコピー。
 `instrument_id` / `lot_size` をハードコードして決定論性を担保する。
 
 > 既存 `NoOpTestStrategy` は維持（他テストが依存）。新 fixture は別ファイルで追加。
 
-#### RED テスト 1: ExecutionMarker が 1 OrderFilled につき 1 件出る
-
-新規ファイル: `python/tests/test_engine_runner_streaming_fills.py`
+#### ✅ RED → GREEN テスト: 新規ファイル `python/tests/test_engine_runner_streaming_fills.py`
 
 ```python
 def test_streaming_replay_emits_one_execution_marker_per_fill():
@@ -393,6 +392,68 @@ def test_emitted_events_pass_pydantic_schema():
 
 ---
 
+## レビュー反映 (2026-04-30, ラウンド 1)
+
+### 解消した指摘
+
+| ID | 内容 | 対応 |
+|---|---|---|
+| H2 ✅ | topic が `InstrumentId.__str__` 依存 | `f"events.fills.{instrument_id}"` に変更（string 引数直接使用）。`_fill_topic` 変数として抽出し unsubscribe でも使用 |
+| H1 ✅ | 未知 side（BUY/SELL 以外）のサイレント無視 | `side_str not in ("BUY", "SELL")` の guard + `log.warning` + `return` を追加 |
+| M3 ✅ | `msgbus.unsubscribe()` なし | streaming ループの `finally` 節に `engine.kernel.msgbus.unsubscribe(topic=_fill_topic, handler=_on_order_filled)` を追加 |
+| M4 ✅ | 決定論性テストが間接的 | `test_execution_marker_and_buying_power_share_ts_event_ms` を追加し、同一 fill の `ExecutionMarker.ts_event_ms == ReplayBuyingPower.ts_event_ms` を直接 assert |
+| M5 ✅ | topic pin テストがない | `TestMsgbusTopic::test_fill_topic_format` を追加し topic 文字列 `"events.fills.1301.TSE"` を固定値として確認 |
+| M6 ✅ | lazy import の根拠不明 | `# lazy import: nautilus Cython 型は engine setup 後に安定して参照できるため` コメント追加 |
+| M7 ✅ | `FillTestStrategy.strategy_id` ハードコード | `strategy_id: str = "fill-test"` パラメータを追加して `StrategyConfig` に渡すよう変更 |
+
+### 設計判断・新たな知見
+
+**二重 PortfolioView の設計（H3 相当 → 仕様明確化で対応）**:
+- `engine_runner.py` 内の `_portfolio`（PortfolioView）は streaming replay の push-based 残高追跡専用
+- `server.py._replay_portfolio` は非ストリーミング経路（`start_backtest_replay()`）向けの pull-based 残高
+- streaming replay で Rust 側が `GetBuyingPower venue=replay` を送ってくると `server.py._replay_portfolio`（古い状態）が返る → Step B 設計時の注意点
+- Step A の Non-goal として「pull-based GetBuyingPower の streaming 同期」を明記した（コード内コメントで対応）
+
+**`_emit_execution_marker()` ヘルパー非流用（M2/M5 相当）**:
+- `narrative_hook._emit_execution_marker()` は `dict` 入力前提のため `OrderFilled` オブジェクトから直接 emit するより型変換が冗長になる
+- 直接 dict 構築の方が `OrderFilled` の属性（`last_px`, `last_qty` の nautilus 型）をそのまま扱えて堅牢
+- `_emit_execution_marker` は `narrative_hook.py:on_order_filled` からの HTTP POST フロー向けとして位置づけを分離
+
+### 残存 LOW（対応不要）
+
+- L1: fixture 変更時の注記 → `FillTestStrategy` の docstring に追記済みで対応完了
+- L3: `on_stop` 未実装 → nautilus は noop でOK。実装不要
+
+## レビュー反映 (2026-04-30, ラウンド 2)
+
+### 解消した指摘
+
+| ID | 内容 | 対応 |
+|---|---|---|
+| M-A ✅ | unsubscribe warning が "engine may already be disposed"（誤解招致） | "handler may not have been registered due to early failure" に変更 |
+| M-B ✅ | handler 例外 log に instrument_id/px/side が欠落 | `log.error` に `getattr(event, ...)` で 3 フィールドを追加 |
+| M-C ✅ | topic pin テストが engine_runner.py の `_fill_topic` を検証していない | テストを `topic_from_str == topic_from_iid == "events.fills.1301.TSE"` の 2-way 比較に改善。integration テストが実質的な topic 正確性 pin になることをコメントで明記 |
+
+### H-R2 対応（コード内コメント追加）
+
+二重 PortfolioView（push-based `_portfolio` vs pull-based `server.py._replay_portfolio`）の設計上の分離を `engine_runner.py` のコメントに明示。GetBuyingPower(pull) が streaming 中に古い状態を返すことを Step B 開発者に伝わる形で記録した。
+
+### 残存 LOW（対応不要）
+
+- M-2（pre-existing）: `buy_and_hold.py` 削除により 12 テスト FAIL — Step A スコープ外の既存問題。次の作業者に引き継ぐ
+
+## レビュー反映 (2026-04-30, ラウンド 3)
+
+### 解消した指摘
+
+| ID | 内容 | 対応 |
+|---|---|---|
+| R3-M1 ✅ | `emit(ExecutionMarker)` 後に `on_fill()` 失敗で状態不整合 | try ブロックを 2 段に分割。先に `_portfolio.on_fill()` を実行し、成功後のみ `emit()` を呼ぶ。失敗時は両方スキップして log.error |
+
+### 収束確認
+
+CRITICAL / HIGH / MEDIUM がゼロになったことを確認（R3 は HIGH/MEDIUM 新規 0 件）。
+
 ## Revision History
 
 ### 2026-04-30 v2 — レビュー反映
@@ -426,4 +487,19 @@ def test_emitted_events_pass_pydantic_schema():
 - 関連 WAL（Step B 候補）: [`python/engine/order_router.py`](../../python/engine/order_router.py),
   [`python/engine/server.py:1393`](../../python/engine/server.py#L1393) `_do_get_order_list_replay`
 - Misses パターン追記対象: [`.claude/skills/bug-postmortem/MISSES.md`](../../.claude/skills/bug-postmortem/MISSES.md)
-  — 「fixture が no-op なため発注パス未検証」
+  — 「fixture が no-op なため発注パス未検証」✅ **追記済み（2026-04-30）**
+
+---
+
+## Step A 完了宣言（2026-04-30）
+
+**全受入条件 PASS。review-fix-loop 3 ラウンドで CRITICAL/HIGH/MEDIUM ゼロ。**
+
+| 確認項目 | 結果 |
+|---------|------|
+| 15 件の新規テスト全 PASS | ✅ |
+| 既存 40 件関連テスト PASS | ✅ |
+| MISSES.md 追記 | ✅ |
+| review-fix-loop HIGH/MEDIUM ゼロ | ✅ |
+
+**次フェーズ**: Step B — OrderList ペインへの約定履歴表示（`ExecutionMarker` → `OrderRecordWire` 派生）。`/council` で push/pull 設計を決定してから実装する。

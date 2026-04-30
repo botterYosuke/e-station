@@ -620,6 +620,92 @@ class NautilusRunner:
             )
             engine.add_strategy(strategy_instance)
 
+            # ── N1.13 Step A: OrderFilled → ExecutionMarker + ReplayBuyingPower ──
+            # lazy import: nautilus Cython 型は engine setup 後に安定して参照できるため
+            from nautilus_trader.model.events import OrderFilled as _OrderFilled  # noqa: PLC0415
+            from engine.nautilus.portfolio_view import PortfolioView  # noqa: PLC0415
+
+            # NOTE: この _portfolio は streaming push-based 専用。
+            # server.py._replay_portfolio（非ストリーミング経路・pull-based GetBuyingPower 向け）
+            # とは独立したインスタンスのため、streaming 中の GetBuyingPower(pull) は古い状態を返す。
+            # push/pull の同期は Step B で対応すること。
+            _portfolio = PortfolioView(initial_cash=Decimal(initial_cash))
+            _last_prices: dict[str, Decimal] = {}
+            # N1.13 Step A: topic は instrument_id string を直接使う（InstrumentId.__str__ 依存を避ける）
+            _fill_topic = f"events.fills.{instrument_id}"
+
+            def _on_order_filled(event: _OrderFilled) -> None:
+                """nautilus OrderFilled を ExecutionMarker + ReplayBuyingPower に変換して emit する。
+
+                _emit_execution_marker() ヘルパーは dict 入力前提で型変換が冗長になるため、
+                OrderFilled オブジェクトから直接 dict を構築する（意図的な分岐）。
+                この closure は single-instrument を前提とする。複数 instrument 対応時は
+                handler を instrument_id ごとに分離すること（Step B 以降の拡張課題）。
+                """
+                try:
+                    side_str = event.order_side.name  # "BUY" or "SELL" (OrderSide enum name)
+                    if side_str not in ("BUY", "SELL"):
+                        log.warning(
+                            "[NautilusRunner] OrderFilled with unexpected side %r, skipping: strategy=%r",
+                            side_str,
+                            strategy_id,
+                        )
+                        return
+                    instrument_str = str(event.instrument_id)
+                    price_str = str(event.last_px)
+                    qty_dec = Decimal(str(event.last_qty))
+                    ts_ms = event.ts_event // 1_000_000
+
+                    # portfolio 更新を先に行い、失敗した場合は emit しない（状態整合を保つ）
+                    _portfolio.on_fill(instrument_str, side_str, qty_dec, Decimal(price_str))
+                    _last_prices[instrument_str] = Decimal(price_str)
+
+                except Exception:
+                    log.error(
+                        "[NautilusRunner] OrderFilled portfolio update failed: "
+                        "strategy=%r instrument=%r px=%r side=%r",
+                        strategy_id,
+                        getattr(event, "instrument_id", "?"),
+                        getattr(event, "last_px", "?"),
+                        getattr(event, "order_side", "?"),
+                        exc_info=True,
+                    )
+                    return  # emit せずに終了（ExecutionMarker / ReplayBuyingPower 両方スキップ）
+
+                # portfolio 更新成功後に IPC emit（両イベントを一括送出）
+                try:
+                    # ExecutionMarker: 1 OrderFilled = 1 ExecutionMarker（1:1 契約）
+                    emit({
+                        "event": "ExecutionMarker",
+                        "strategy_id": strategy_id,
+                        "instrument_id": instrument_str,
+                        "side": side_str,
+                        "price": price_str,
+                        "ts_event_ms": ts_ms,
+                    })
+
+                    # ReplayBuyingPower: fill 後の残高を push emit する
+                    bp_dict = _portfolio.to_ipc_dict(strategy_id, _last_prices)
+                    bp_dict["ts_event_ms"] = ts_ms  # time.time() を上書きして決定論性を保つ
+                    emit(bp_dict)
+
+                except Exception:
+                    log.error(
+                        "[NautilusRunner] OrderFilled emit failed (portfolio already updated): "
+                        "strategy=%r instrument=%r px=%r side=%r",
+                        strategy_id,
+                        getattr(event, "instrument_id", "?"),
+                        getattr(event, "last_px", "?"),
+                        getattr(event, "order_side", "?"),
+                        exc_info=True,
+                    )
+
+            engine.kernel.msgbus.subscribe(
+                topic=_fill_topic,
+                handler=_on_order_filled,
+            )
+            # ── N1.13 Step A end ──────────────────────────────────────────────────
+
             log.info(
                 "[NautilusRunner] streaming replay starting: strategy=%r instrument=%r "
                 "trades=%d bars=%d multiplier=%d",
@@ -730,6 +816,19 @@ class NautilusRunner:
 
             finally:
                 self._running = False
+                # N1.13: engine.dispose() の前に購読解除（dispose 後に handler closure が残らないよう）
+                try:
+                    engine.kernel.msgbus.unsubscribe(
+                        topic=_fill_topic,
+                        handler=_on_order_filled,
+                    )
+                except Exception:
+                    log.warning(
+                        "[NautilusRunner] msgbus.unsubscribe failed "
+                        "(handler may not have been registered due to early failure): "
+                        "strategy=%r",
+                        strategy_id,
+                    )
 
             log.info(
                 "[NautilusRunner] streaming replay completed: strategy=%r", strategy_id

@@ -26,6 +26,7 @@
 | 初期化前データ到着 | UI コンポーネントが未初期化（`None`）の状態でデータが到着し、`if let Some(...)` でサイレントに無視される | 1 |
 | エラーハンドラ早期脱出 | エラー arm が `break` するため、一時的な IO エラー（非 UTF-8 バイト等）で pipe reader が停止し、書き手の stdout バッファが詰まる | 1 |
 | モード分岐漏れ | `_handle()` のような接続後フックが `mode` を考慮せず、ライブ専用の処理をリプレイモードでも実行してしまう | 1 |
+| view() 分岐別オーバーレイ配線漏れ | `view()` の複数分岐のうち一部にしかモーダルオーバーレイを配線せず、他の分岐で `Some(dialog)` がサイレントに無視される | 1 |
 
 ---
 
@@ -969,3 +970,146 @@ RSV1=1 フレームを拒否する性質）に対するリグレッションを 
 
 将来 venue が増えて bulk stats response が 1 MB 級になっても、live モード単体で
 回帰検出できる。
+
+---
+
+## 2026-04-30 — HONDA 注文ボタンを押しても確認ダイアログが画面に出ない
+
+**見逃しパターン**: 「実装済み≠配線済み」の view() 版（分岐別オーバーレイ配線漏れ）
+
+**不具合の概要**:
+`flowsurface --mode live` で HONDA(7267) を OrderEntry パネルで選択し「注文」を押すと、
+`panel.update(SubmitClicked)` は正しく `Action::RequestConfirm` を返し、
+`main.rs::update()` が `self.confirm_dialog = Some(dialog)` をセットするが、
+次フレームの `view()` で確認ダイアログが画面に現れない。WAL にも書き込まれない。
+
+**根本原因**:
+`main.rs::view()` が 2 つのパスを持つ：
+
+```rust
+if let Some(menu) = self.sidebar.active_menu() {
+    self.view_with_modal(base.into(), dashboard, menu)  // confirm_dialog あり
+} else {
+    base.into()  // ← confirm_dialog オーバーレイなし（バグ）
+}
+```
+
+`view_with_modal()` 内の `Settings` / `Network` / `Order` ブランチでのみ
+`confirm_dialog` を `main_dialog_modal` でオーバーレイしており、
+通常ダッシュボード（サイドバーメニュー非アクティブ）の `else` ブランチでは
+オーバーレイ描画が実装されていなかった。
+
+注文フローの `Action::RequestConfirm` → `ConfirmDialog` のセットは完成していたが、
+描画パスの配線が一部分岐にしかなかった（MISSES.md 2026-04-27「実装済み≠配線済み」の view() 版）。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `order_entry.rs::tests` | `panel.update()` → `Action::RequestConfirm` 戻り値のみ検証。`view()` の描画ツリーは範囲外 |
+| `cargo test --workspace` | iced の `Element` ツリー構造を単体テストで検証する標準手段がない |
+| `python/tests/` | Rust の描画層は Python から確認不可 |
+| `tests/e2e/smoke.sh` | 「モーダルが画面に出たか」を grep で検出できない |
+
+**修正**:
+1. `apply_confirm_dialog_overlay<'a>()` フリー関数を追加し `content: Element` + `dialog: Option<&ConfirmDialog>` を受け取って純粋に変換する（`second_password_modal` と同じパターン）
+2. `view()` 内で `raw_content` → `apply_confirm_dialog_overlay` → toast → `second_password_modal` の順で適用（全分岐を単一出口でラップ）
+3. `view_with_modal()` の各ブランチから個別のオーバーレイ呼び出しを除去
+
+**追加したテスト**:
+- `src/main.rs::confirm_dialog_overlay_tests::helper_apply_confirm_dialog_overlay_exists`
+  — `fn apply_confirm_dialog_overlay` がソースに存在することを `include_str!` + `contains` で検証
+- `src/main.rs::confirm_dialog_overlay_tests::view_calls_confirm_dialog_overlay_helper`
+  — `Flowsurface::view()` 本体内で `apply_confirm_dialog_overlay(` を呼ぶことを検証（`\n    fn ` 境界で view ボディを分割）
+- `src/main.rs::confirm_dialog_overlay_tests::view_with_modal_branches_no_longer_redraw_overlay`
+  — production コードで `confirm_dialog_container(` の呼び出し箇所が厳密に 1 箇所であることを検証（test モジュールを `split_once` で除外して自己参照を回避、`expect()` で marker 消失を検出）
+
+**リグレッション確認**:
+- `view()` を元の `else { base.into() }` に戻すと test 2 が FAIL する
+- `view_with_modal()` に per-branch overlay を復元すると test 3 が `count > 1` で FAIL する
+
+**教訓**:
+
+1. **view() 分岐の一部だけにオーバーレイを配線するパターンは将来に向けた爆弾**:
+   `view()` や `view_with_modal()` のような複数分岐を持つ描画関数でモーダルを一部分岐のみに書くと、
+   他の分岐で `state = Some(...)` がサイレントに無視される。
+   新しいモーダル（`second_password_modal` / `confirm_dialog` 等）を追加するときは
+   **単一出口（`view()` の最終段）でラップ**することを設計原則にする。
+
+2. **iced の view() は直接ユニットテストしにくい — ソース文字列テストで代替**:
+   `Element` ツリーの構造を `cargo test` で検証する汎用手段は現時点で存在しない。
+   `include_str!("./main.rs")` + 文字列マッチング・境界分割でオーバーレイの配線を
+   構造的に保護するアプローチが有効。テスト sentinel の `expect()` で marker 消失も検出する。
+
+3. **同じ状態変更 (`Some(dialog)` のセット) を複数パスの描画関数が独立して処理するなら単一責任に統一**:
+   「state を Some にする → どの分岐でも描画」という流れは、描画コードが 1 箇所に集約されているときにのみ保証される。
+   複数分岐が独立してオーバーレイを呼ぶ設計は、新しい分岐の追加時に必ず漏れが出る。
+
+---
+
+## 2026-04-30 — streaming replay の fill IPC emit パスがテスト未検証のまま dead code になっていた
+
+**見逃しパターン**: No-op fixture 戦略 → 発注パス未到達 → IPC emit 経路が dead code
+
+**不具合の概要**:
+`POST /api/replay/start` 後、`ExecutionMarker` / `ReplayBuyingPower` が Rust 側に
+一切届かない。UI の OrderList・BuyingPower ペインが空のままになる。
+
+**根本原因**:
+`NautilusRunner.start_backtest_replay_streaming()` が nautilus の `OrderFilled`
+イベントを購読していなかった。`NarrativeHook._emit_execution_marker()` と
+`PortfolioView` はコード上は存在していたが、streaming バックテスト経路では
+一度も呼ばれていなかった（dead code）。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_engine_runner_replay.py`（全 25 件） | fixture 戦略として `NoOpTestStrategy`（`on_start` も `on_bar` も実装なし）を使用。1 件も発注しないため fill 経路に到達しない |
+| 全 streaming 系テスト共通 | 「発注する戦略」でのシナリオがゼロ。`ExecutionMarker` / `ReplayBuyingPower` が emit されることを assert するテストが存在しなかった |
+| pydantic スキーマテスト | スキーマ型は定義済みだが、実際に emit されるかどうかの integration テストがなかった |
+
+**修正**:
+1. `engine_runner.py::start_backtest_replay_streaming()` で `engine.kernel.msgbus` に
+   `f"events.fills.{instrument_id}"` トピックを subscribe し、`OrderFilled` ごとに
+   `ExecutionMarker` → `ReplayBuyingPower` を `on_event` コールバックに push する
+2. `python/tests/fixtures/fill_strategy.py` — bar 1 で BUY、bar 2 で SELL する
+   決定論的テスト戦略（2-bar fixture データと対応）
+3. `python/tests/test_engine_runner_streaming_fills.py` — 15 件の integration テスト
+   （emit 件数・フィールド完全一致・残高変動・決定論性・pydantic スキーマ検証）
+
+**追加したテスト**:
+- `TestStreamingFillsEmitExecutionMarker` (6 件): 1:1 発火・side 大文字・余分フィールドなし・
+  instrument_id・price が decimal str・ts_event_ms が int
+- `TestStreamingFillsEmitReplayBuyingPower` (7 件): fill ごとに 1 件・スキーマ完全一致・
+  BUY で cash 減少・SELL で cash 増加・strategy_id 一致・2 run で ts_event_ms が同値（決定論性）・
+  ExecutionMarker と ReplayBuyingPower が同じ ts_event_ms を共有
+- `TestMsgbusTopic` (1 件): `f"events.fills.{str}"` と `f"events.fills.{InstrumentId}"` が
+  一致することを pin（nautilus の `InstrumentId.__str__` 形式変更の早期検知）
+- `TestStreamingFillsPassPydanticSchema` (1 件): emit された全イベントが pydantic `model_validate` を通過
+
+**リグレッション確認**: `msgbus.subscribe()` 行を削除した状態で
+`test_emits_one_execution_marker_per_fill` が FAIL（markers == 0）、
+追加した状態で PASS することを実際に確認。
+
+**教訓**:
+
+1. **「発注する fixture 戦略」を常に用意する**: replay / backtest 系テストで
+   「戦略が動いた」ことを検証するためには、実際に発注・約定する fixture 戦略が必要。
+   `NoOpTestStrategy`（発注しない）は「エンジンが起動する」「ストリームが流れる」の
+   テストには有効だが、fill 経路・IPC emit 経路の検証には役立たない。
+   新たな fill 系イベントを実装したら、必ず **発注する戦略** でのシナリオを追加すること。
+
+2. **dead code の温床: 「コードはある」≠「経路が通る」**: `NarrativeHook` や
+   `PortfolioView` のように実装が存在しても、呼び出し経路が繋がっていなければ
+   全て dead code になる。新機能実装後は「このコードへ到達する経路はどこか」を
+   integration テストで必ず確認する。
+
+3. **IPC emit の contract テストは emit されることを assert する**: pydantic スキーマが
+   定義されていても「実際に emit されるか」を保証するテストは別途必要。スキーマ型の
+   定義テストと emit 件数テストは直交する。両方書く。
+
+4. **ts_event はデータ由来にする（`time.time()` ではなく）**: `ReplayBuyingPower.ts_event_ms`
+   を `time.time()` で付与すると、同一入力でも実行タイミングで値が変わる。
+   `OrderFilled.ts_event` （nanosec → `// 1_000_000` で ms）を使えば決定論的になり、
+   テストで「2 回 run して同じ値が出る」ことを assert できる。
