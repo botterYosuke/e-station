@@ -37,8 +37,10 @@ Phase 1 scope:
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -46,6 +48,75 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+# Keys whose values must never be logged in cleartext: virtual URLs (sUrl*) and
+# session tokens that grant full account access. Used by `_cb_depth` ST logging
+# and by `scripts/diagnose_tachibana_ws.py` (imported as a shared frozenset to
+# guarantee the two stay in sync).
+# `sUrl*` keys come from the login response (see samples/e_api_login_tel).
+_ST_SECRET_KEYS: frozenset[str] = frozenset({
+    "sUrlRequest",
+    "sUrlMaster",
+    "sUrlPrice",
+    "sUrlEvent",
+    "sUrlEventWebSocket",
+    "p_url",
+    "p_event_url",
+    "url_event_ws",
+    "p_session_token",
+})
+
+# `p_errno` values that indicate "no error". The Rust client treats empty
+# string as 正常 too (see SKILL.md R6: "p_errno は空文字列のことがある").
+# `?` is NOT included here — callers historically used it as a sentinel for
+# "key missing" but that masks real failures, so we now distinguish None.
+_ST_OK_ERRNO_CODES: frozenset[str] = frozenset({"0", "00", ""})
+
+# Default sizyou_c (市場コード) used when the master has not been loaded yet or
+# the ticker is not found in CLMIssueSizyouMstKabu.
+_SIZYOU_C_FALLBACK: str = "00"
+
+# Whitelist for dynamically-inserted WebSocket URL parameter values. Tachibana
+# tickers and sizyou_c (market codes) are numeric in practice; we allow ASCII
+# alnum to be conservative for future expansions while still rejecting anything
+# that could break URL structure.
+_WS_PARAM_ALLOWED_RE: re.Pattern[str] = re.compile(r"^[0-9A-Za-z]+$")
+
+# ST→VenueError rate limit window. ST frames can stream rapidly when the
+# session is broken; without a limiter the outbox floods with duplicate
+# VenueErrors. Keyed by `code`, last-emit timestamp tracked per stream_depth call.
+_ST_VENUE_ERROR_RATE_LIMIT_S: float = 30.0
+
+
+def build_ws_url(url_event_ws: str, ticker: str, sizyou_c: str) -> str:
+    """Build the EVENT WebSocket subscription URL — pure function.
+
+    Parameter values are NOT percent-encoded: the official sample
+    (samples/e_api_websocket_receive_tel.py:573-585) appends raw strings.
+    Applying func_replace_urlecnode would turn 'ST,KP,FD' into
+    'ST%2CKP%2CFD' which the server does not recognise.
+
+    Dynamic values (ticker, sizyou_c) are validated against
+    `_WS_PARAM_ALLOWED_RE` (ASCII alnum only) before embedding to prevent
+    URL structure breakage and control-char injection.
+    """
+    for val, name in ((ticker, "ticker"), (sizyou_c, "sizyou_c")):
+        if not _WS_PARAM_ALLOWED_RE.match(val):
+            raise ValueError(
+                f"build_ws_url: {name}={val!r} contains characters outside [0-9A-Za-z]"
+                " — control chars and URL structure chars (&?=) are not allowed"
+            )
+    ws_base = url_event_ws.rstrip("?&")
+    params = "&".join([
+        "p_rid=22",
+        "p_board_no=1000",
+        "p_gyou_no=1",
+        f"p_mkt_code={sizyou_c}",
+        "p_eno=0",
+        "p_evt_cmd=ST,KP,FD",
+        f"p_issue_code={ticker}",
+    ])
+    return f"{ws_base}?{params}"
 
 from .base import ExchangeWorker, OnSsidUpdate
 from .tachibana_auth import TachibanaSession
@@ -65,7 +136,6 @@ from .tachibana_master import (
 from .tachibana_url import (
     PriceUrl,
     build_request_url,
-    func_replace_urlecnode,
 )
 from . import tachibana_ws as _tachibana_ws
 from .tachibana_ws import FdFrameProcessor, TachibanaEventWs
@@ -518,29 +588,23 @@ class TachibanaWorker(ExchangeWorker):
             "is_closed": True,
         }
 
-    def _lookup_sizyou_c(self, ticker: str, *, default: str = "00") -> str:
+    def _lookup_sizyou_c(self, ticker: str) -> str:
         for row in self._master_records.get("CLMIssueSizyouMstKabu", []):
             if str(row.get("sIssueCode", "")) == ticker:
                 sc = str(row.get("sSizyouC", "")).strip()
-                return sc or default
-        return default
+                return sc or _SIZYOU_C_FALLBACK
+        return _SIZYOU_C_FALLBACK
 
     def _build_ws_url(self, ticker: str) -> str:
-        """Build the EVENT WebSocket subscription URL for a ticker."""
-        assert self._session is not None
+        """Instance-level wrapper around the module-level pure function.
+
+        Looks up sizyou_c via the loaded master and delegates URL formatting
+        to `build_ws_url`.
+        """
+        if self._session is None:
+            raise RuntimeError("_build_ws_url called without an active session")
         sizyou_c = self._lookup_sizyou_c(ticker)
-        ws_base = self._session.url_event_ws.rstrip("?&")
-        encode = func_replace_urlecnode
-        params = "&".join([
-            f"p_rid={encode('22')}",
-            f"p_board_no={encode('1000')}",
-            f"p_gyou_no={encode('1')}",
-            f"p_mkt_code={encode(sizyou_c)}",
-            f"p_eno={encode('0')}",
-            f"p_evt_cmd={encode('ST,KP,FD')}",
-            f"p_issue_code={encode(ticker)}",
-        ])
-        return f"{ws_base}?{params}"
+        return build_ws_url(self._session.url_event_ws, ticker, sizyou_c)
 
     # ------------------------------------------------------------------
     # fetch_ticker_stats (CLMMfdsGetMarketPrice)
@@ -837,9 +901,31 @@ class TachibanaWorker(ExchangeWorker):
             })
             return
 
-        ws_url = self._build_ws_url(ticker)
+        try:
+            ws_url = self._build_ws_url(ticker)
+        except ValueError as exc:
+            log.warning("tachibana: stream_depth: invalid ticker=%r: %s", ticker, exc)
+            outbox.append({
+                "event": "VenueError",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "market": market,
+                "code": "invalid_ticker",
+                "message": str(exc),
+            })
+            return
         processor = FdFrameProcessor(row="1")
-        depth_keys_seen: list[bool] = [False]
+        # Renamed from depth_keys_seen for clarity (M-H): the flag tracks
+        # whether at least one FD frame *with bid/ask keys* has been processed.
+        _first_fd_received: list[bool] = [False]
+        # Frame-type counts shared across reconnects so the WARN log on
+        # depth_unavailable can include them (M-C).
+        frame_counts_seen: Counter[str] = Counter()
+        # Per-code last-emit time for ST→VenueError rate limiting (H-C).
+        # Scoped to stream_depth lifetime; cleared on each WS reconnect so that
+        # at least one VenueError is emitted per reconnect attempt (design intent).
+        loop = asyncio.get_event_loop()
+        st_last_emit: dict[str, float] = {}
 
         # Inner stop: set by outer stop_event OR by depth safety watchdog.
         _inner_stop = asyncio.Event()
@@ -850,7 +936,16 @@ class TachibanaWorker(ExchangeWorker):
 
         async def _safety_watchdog() -> None:
             await asyncio.sleep(_tachibana_ws._DEPTH_SAFETY_TIMEOUT_S)
-            if not depth_keys_seen[0]:
+            if not _first_fd_received[0]:
+                log.warning(
+                    "tachibana: stream_depth depth_unavailable ticker=%s — "
+                    "%.0f s 経過しても FD フレーム（気配付き）が届きません。"
+                    " polling fallback に切替えます。"
+                    " frame_counts: FD=%d KP=%d ST=%d other=%d",
+                    ticker, _tachibana_ws._DEPTH_SAFETY_TIMEOUT_S,
+                    frame_counts_seen["FD"], frame_counts_seen["KP"],
+                    frame_counts_seen["ST"], frame_counts_seen["other"],
+                )
                 outbox.append({
                     "event": "VenueError",
                     "venue": "tachibana",
@@ -875,12 +970,21 @@ class TachibanaWorker(ExchangeWorker):
             if on_ssid is not None:
                 on_ssid(ssid)
             processor.reset()
+            # Clear per-reconnect rate-limit state so each new WS connection
+            # can emit at least one VenueError per error code (H-C design intent).
+            st_last_emit.clear()
 
             async def _cb_depth(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
+                # Update shared counts (M-C). Counter handles missing keys as 0.
+                if frame_type in ("FD", "KP", "ST"):
+                    frame_counts_seen[frame_type] += 1
+                else:
+                    frame_counts_seen["other"] += 1
+
                 if frame_type == "FD":
                     _, depth = processor.process(fields, recv_ts_ms)
                     if depth:
-                        depth_keys_seen[0] = True
+                        _first_fd_received[0] = True
                         outbox.append({
                             "event": "DepthSnapshot",
                             "venue": "tachibana",
@@ -892,6 +996,57 @@ class TachibanaWorker(ExchangeWorker):
                             "sequence_id": depth["sequence_id"],
                             "recv_ts_ms": depth["recv_ts_ms"],
                         })
+                elif frame_type == "ST":
+                    # ST = server-side status frame. May carry an error.
+                    # Use None default to distinguish "key missing" from "key=''" (H-B).
+                    p_errno = fields.get("p_errno")
+                    # Mask sUrl* / session-token-bearing keys (H-A); other fields
+                    # (p_errno, p_status, etc.) are safe diagnostic data.
+                    safe_fields = {
+                        k: ("***" if k in _ST_SECRET_KEYS else v) for k, v in fields.items()
+                    }
+                    log.warning(
+                        "tachibana: stream_depth ST frame ticker=%s p_errno=%r — "
+                        "first_fd_received=%s fields=%r",
+                        ticker, p_errno, _first_fd_received[0], safe_fields,
+                    )
+
+                    # Decide error code (H-B).
+                    code: str | None
+                    message: str
+                    if p_errno is None:
+                        code = "st_no_errno"
+                        message = "立花 ST フレームに p_errno キーがありません"
+                    elif p_errno in _ST_OK_ERRNO_CODES:
+                        code = None
+                        message = ""
+                    elif p_errno == "2":
+                        # Virtual URL invalidated → polling fallback.
+                        code = "st_session_expired"
+                        message = "立花仮想 URL が失効しました（p_errno=2）。再ログインが必要です"
+                    else:
+                        code = f"st_errno_{p_errno}"
+                        message = f"立花 ST フレームエラー: p_errno={p_errno}"
+
+                    if code is not None:
+                        # Rate-limit (H-C): one VenueError per code per
+                        # _ST_VENUE_ERROR_RATE_LIMIT_S window.
+                        now = loop.time()
+                        last = st_last_emit.get(code, 0.0)
+                        if now - last >= _ST_VENUE_ERROR_RATE_LIMIT_S:
+                            st_last_emit[code] = now
+                            outbox.append({
+                                "event": "VenueError",
+                                "venue": "tachibana",
+                                "ticker": ticker,
+                                "market": market,
+                                "code": code,
+                                "message": message,
+                            })
+                        # Session expired → drop to polling fallback regardless
+                        # of rate limiting (M-G).
+                        if code == "st_session_expired":
+                            _inner_stop.set()
 
             ws_client = TachibanaEventWs(ws_url, _inner_stop, ticker=ticker, proxy=self._proxy)
             await ws_client.run(_cb_depth)
@@ -900,11 +1055,13 @@ class TachibanaWorker(ExchangeWorker):
             t.cancel()
             try:
                 await t
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                log.exception("tachibana: stream_depth: unexpected error cancelling task")
 
         # depth_unavailable fired → polling fallback (F-M12)
-        if not depth_keys_seen[0] and not stop_event.is_set():
+        if not _first_fd_received[0] and not stop_event.is_set():
             await self._depth_polling_fallback(
                 ticker, market, stream_session_id, outbox, stop_event
             )
@@ -934,6 +1091,20 @@ class TachibanaWorker(ExchangeWorker):
         elapsed = 0.0
         poll_counter = 0
         while not stop_event.is_set() and elapsed < _tachibana_ws._DEPTH_POLL_MAX_S:
+            if self._session is None:
+                log.warning(
+                    "tachibana: _depth_polling_fallback: session expired mid-poll for %s"
+                    " — stopping fallback", ticker
+                )
+                outbox.append({
+                    "event": "VenueError",
+                    "venue": "tachibana",
+                    "ticker": ticker,
+                    "market": market,
+                    "code": "session_expired_during_poll",
+                    "message": "立花セッションがポーリング中に失効しました。再ログインしてください",
+                })
+                return
             try:
                 snapshot = await self.fetch_depth_snapshot(ticker, market)
                 if snapshot.get("bids") or snapshot.get("asks"):

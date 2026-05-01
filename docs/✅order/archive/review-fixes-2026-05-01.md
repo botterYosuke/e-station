@@ -306,7 +306,32 @@ HIGH 1 / MEDIUM 1 / LOW 0
 - `"code"` フィールド: 4 箇所追加確認（unknown_venue / SESSION_NOT_ESTABLISHED / SESSION_EXPIRED / fetch_error）
 - `PositionsUpdated` ハンドラ末尾に `Task::none()` 追加確認
 
-## ラウンド 5（2026-05-01・収束）
+## ラウンド 5（2026-05-01・ユーザーレビュー反映）
+
+### 集計
+HIGH 3 / MEDIUM 0 → 修正済み
+
+### 統一決定（ユーザー指摘）
+
+ユーザーレビューにより以下の 3 件が判明（自動レビューで見落としていた）:
+
+1. **U1 schemas.py モデル追加漏れ（HIGH）**: §4 で `python/engine/schemas.py` を変更ファイルに含めながら、本文では `SCHEMA_MINOR` bump しか書かれていなかった。実コードでは `GetBuyingPower` / `BuyingPowerUpdated` が schemas.py に Pydantic モデルとして登録されている。新たに `GetPositions` / `PositionRecord` / `PositionsUpdated` のモデル追加を §3.1.4 として明記（旧 §3.1.4 は §3.1.5 SCHEMA_MINOR bump にずらす）。
+2. **U2 永続化互換性の説明誤り（HIGH）**: §3.3.3 で「旧バイナリは unknown variant を Starter にフォールバック」と書いていたが、実コード `src/main.rs:2509` の `serde_json::from_str::<data::State>(&json)` は schema 交渉を持たず、unknown variant でエラー失敗する。`#[serde(deny_unknown_fields)]` は variant unknown には影響しない。挙動を「旧バイナリは新 JSON を弾いてデフォルト起動 + saved-state.json を上書きしない」に訂正。マイグレーションスクリプトは追加しないと方針確定。§5.5 のテスト記述も合わせて訂正。
+3. **U3 Error / IpcError 用語混在（HIGH）**: §3.2 の Python 側 wire event は `"event": "Error"`（schemas.py:461 の Python schema 名と一致）。一方 §5.1 のテスト計画では `IpcError` と書かれていた。Rust 内部 enum 名は `IpcError` だが wire 層は `Error`。テスト計画を「wire `"event": "Error"`」に統一し、Rust 側の型名 `IpcError` との対応関係を注記。
+4. **U4 §5.8 節タイトル整合（LOW、ついでに修正）**: 「invariant-tests.md への追記」だが本文は「登録せず Rust コメントにとどめる」と逆方向 → 「invariant-tests.md の扱い」に変更。
+
+### Findings 一覧
+
+| ID | 観点 | 重大度 | 対象節 | 修正概要 |
+|---|---|---|---|---|
+| U1 | IPC | HIGH | §3.1.4 / §4 | schemas.py の Pydantic モデル追加（GetPositions / PositionRecord / PositionsUpdated）を明記 |
+| U2 | 永続化 | HIGH | §3.3.3 / §5.5 | 実コード `serde_json::from_str` の挙動に即して訂正（Starter フォールバックは起きない、旧版は弾いてデフォルト起動） |
+| U3 | テスト整合 | HIGH | §5.1 | wire `"event": "Error"` に統一、Rust 内部名 `IpcError` との対応を注記 |
+| U4 | 節整理 | LOW | §5.8 | タイトルを「invariant-tests.md の扱い」に変更 |
+
+---
+
+## ラウンド 6（2026-05-01・収束）
 
 ### 集計
 HIGH 0 / MEDIUM 0 / LOW 3 → **収束**

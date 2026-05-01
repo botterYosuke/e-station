@@ -16,9 +16,9 @@ WHAT IT PROVES
 
 REQUIREMENTS
 ------------
-- .env に以下を設定:
-    DEV_TACHIBANA_USER_ID=uxf05882
-    DEV_TACHIBANA_PASSWORD=vw20sr9h
+- .env に以下を設定（値は各自の demo 口座の認証情報に置き換える）:
+    DEV_TACHIBANA_USER_ID=...
+    DEV_TACHIBANA_PASSWORD=...
     DEV_TACHIBANA_DEMO=true
 
 USAGE
@@ -51,6 +51,11 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Eagerly import the shared secret-key set so that import failures surface
+# immediately (not silently mid-session) and masked output is guaranteed (M-3).
+sys.path.insert(0, str(REPO_ROOT / "python"))
+from engine.exchanges.tachibana import _ST_SECRET_KEYS  # noqa: E402
+
 
 def _load_env(path: Path) -> None:
     if not path.exists():
@@ -63,8 +68,17 @@ def _load_env(path: Path) -> None:
         os.environ.setdefault(key.strip(), val.strip())
 
 
+def _mask_st_fields(fields: dict) -> dict:
+    """ST フレームの秘密情報（仮想 URL 等）をマスクする。p_errno 等の診断情報は残す。
+
+    マスク対象キーは `engine.exchanges.tachibana._ST_SECRET_KEYS` と完全に共有する
+    （H-A: 二系統が乖離しないように単一定義に統一）。
+    """
+    return {k: ("***" if k in _ST_SECRET_KEYS else v) for k, v in fields.items()}
+
+
 def _mask(d: dict) -> dict:
-    """セッション URL など秘密情報をマスクして表示用 dict を返す。"""
+    """セッション情報やベース URL をマスクする（_mask_st_fields とは別目的）。"""
     return {k: ("***" if k in ("session", "url_event_ws") else v) for k, v in d.items()}
 
 
@@ -88,7 +102,7 @@ def _check(label: str, ok: bool, detail: str = "") -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def main(ticker: str, max_frames: int, timeout_s: float) -> int:
+async def main(ticker: str, max_frames: int, timeout_s: float, args: Any = None) -> int:
     import tempfile
     sys.path.insert(0, str(REPO_ROOT / "python"))
 
@@ -163,6 +177,7 @@ async def main(ticker: str, max_frames: int, timeout_s: float) -> int:
     frame_log: list[dict[str, Any]] = []
     fd_count = 0
     kp_count = 0
+    st_count = 0
     connection_ok = False
 
     # TachibanaEventWs の内部 _recv_loop をトレースするため
@@ -170,9 +185,10 @@ async def main(ticker: str, max_frames: int, timeout_s: float) -> int:
     processor = FdFrameProcessor(row="1")
 
     raw_frames: list[tuple[str, dict]] = []  # (frame_type, fields)
+    st_frames: list[dict] = []  # ST フレームの全フィールド
 
     async def _cb(frame_type: str, fields: dict, ts_ms: int) -> None:
-        nonlocal fd_count, kp_count, connection_ok
+        nonlocal fd_count, kp_count, st_count, connection_ok
         connection_ok = True
         raw_frames.append((frame_type, fields))
 
@@ -188,18 +204,27 @@ async def main(ticker: str, max_frames: int, timeout_s: float) -> int:
                     "asks": depth["asks"][:3],
                     "seq": depth["sequence_id"],
                 })
+        elif frame_type == "ST":
+            st_count += 1
+            st_frames.append(dict(fields))
+            # ST フレームの全フィールドを即時表示（H8/H10 診断用）
+            p_errno = fields.get("p_errno", "?")
+            print(f"  [ST frame #{st_count}] p_errno={p_errno!r} | "
+                  f"fields={_mask_st_fields(fields)}")
 
         total = fd_count + kp_count
         if total >= max_frames:
             stop.set()
 
-    # WS URL にはログインで取得した一時 URL を使う
-    ws_client = TachibanaEventWs(ws_url, stop, ticker=ticker)
+    # WS URL: _build_ws_url で銘柄購読パラメータを含む完全 URL を構築する
+    # (base URL のみでは ST フレームしか来ない)
+    ws_sub_url = worker._build_ws_url(ticker)
+    ws_client = TachibanaEventWs(ws_sub_url, stop, ticker=ticker)
     try:
         await asyncio.wait_for(ws_client.run(_cb), timeout=timeout_s)
     except asyncio.TimeoutError:
-        # タイムアウトは「データが来なかった」場合のみ問題
-        pass
+        log.warning("diagnose: WS observation timed out after %.0f s (fd=%d kp=%d st=%d)",
+                    timeout_s, fd_count, kp_count, st_count)
     except Exception as exc:
         _check("WebSocket 接続", False, str(exc))
 
@@ -234,6 +259,19 @@ async def main(ticker: str, max_frames: int, timeout_s: float) -> int:
         print("  ※ FD フレームなし（市場時間外の可能性あり）")
         print(f"  受信フレーム一覧: {[t for t, _ in raw_frames]}")
 
+    # ST サマリ（H8/H10 診断）
+    if st_frames:
+        print(f"\n  [ST フレームサマリ] {st_count} 件受信")
+        for i, sf in enumerate(st_frames[:3], 1):
+            print(f"    ST[{i}]: {_mask_st_fields(sf)}")
+
+    # --dump-raw: 先頭 N フレームの raw repr を表示
+    dump_n = getattr(args, "dump_raw", 0)
+    if dump_n and dump_n > 0:
+        print(f"\n  [--dump-raw {dump_n}] 先頭 {dump_n} フレームの raw repr:")
+        for i, (ft, fdict) in enumerate(raw_frames[:dump_n], 1):
+            print(f"    frame[{i}] type={ft!r}: {_mask_st_fields(fdict)!r}")
+
     # ── Summary ──────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("SUMMARY")
@@ -253,6 +291,8 @@ if __name__ == "__main__":
     parser.add_argument("--ticker", default="7203", help="銘柄コード (default: 7203)")
     parser.add_argument("--frames", type=int, default=3, help="受信する最大フレーム数 (default: 3)")
     parser.add_argument("--timeout", type=float, default=15.0, help="タイムアウト秒数 (default: 15)")
+    parser.add_argument("--dump-raw", type=int, default=0, metavar="N",
+                        help="先頭 N フレームの raw repr を表示する（ST/FD/KP 全種別）")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -264,4 +304,4 @@ if __name__ == "__main__":
     logging.getLogger("engine.exchanges.tachibana").setLevel(logging.INFO)
 
     _load_env(REPO_ROOT / ".env")
-    sys.exit(asyncio.run(main(args.ticker, args.frames, args.timeout)))
+    sys.exit(asyncio.run(main(args.ticker, args.frames, args.timeout, args)))
