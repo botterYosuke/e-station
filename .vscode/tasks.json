@@ -1,0 +1,83 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "replay: watch & load (active file)",
+            // NOTE: `command: "bash"` だと PowerShell 経由で WSL の bash が呼ばれ
+            // `/bin/bash` 不在で即死するため、Git Bash の絶対パスを指定する。
+            // 他環境で動かす場合はこのパスを Git Bash の bash.exe に書き換える。
+            "type": "process",
+            "command": "${env:LOCALAPPDATA}\\Atlassian\\SourceTree\\git_local\\usr\\bin\\bash.exe",
+            "args": [
+                // -l: login shell → /etc/profile を読んで MSYS の /usr/bin を PATH に通す。
+                // これがないと dirname/tee/curl 等が "command not found" になる。
+                "-l",
+                "${workspaceFolder}/scripts/replay_dev_load.sh",
+                "${relativeFile}",
+                "${input:replayInstrumentId}",
+                "${input:replayStartDate}",
+                "${input:replayEndDate}",
+                "${input:replayGranularity}"
+            ],
+            "dependsOn": ["cargo build"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "replay-load",
+                "pattern": {
+                    "regexp": "\\[replay-load\\] done",
+                    "message": 0
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "\\[replay-load\\] waiting",
+                    "endsPattern": "\\[replay-load\\] done"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        },
+        {
+            "label": "cargo build",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "replayInstrumentId",
+            "type": "promptString",
+            "description": "銘柄コード (例: 1301.TSE)"
+        },
+        {
+            "id": "replayStartDate",
+            "type": "promptString",
+            "description": "開始日 (例: 2025-01-06)"
+        },
+        {
+            "id": "replayEndDate",
+            "type": "promptString",
+            "description": "終了日 (例: 2025-03-31)"
+        },
+        {
+            "id": "replayGranularity",
+            "type": "pickString",
+            "description": "足種",
+            "options": ["Daily", "Minute", "Trade"],
+            "default": "Daily"
+        }
+    ]
+}

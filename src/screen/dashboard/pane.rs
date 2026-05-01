@@ -639,7 +639,10 @@ impl State {
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
-        let mut top_left_buttons = if Content::Starter == self.content {
+        let mut top_left_buttons = if matches!(
+            self.content,
+            Content::Starter | Content::OrderList(_) | Content::BuyingPower(_)
+        ) {
             row![]
         } else {
             row![link_group_button(id, self.link_group, |id| {
