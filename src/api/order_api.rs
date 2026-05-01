@@ -1869,10 +1869,10 @@ mod tests {
                         if line.trim().is_empty() {
                             break;
                         }
-                        if line.to_lowercase().starts_with("content-length:") {
-                            if let Some(v) = line.splitn(2, ':').nth(1) {
-                                content_length = v.trim().parse().unwrap_or(0);
-                            }
+                        if line.to_lowercase().starts_with("content-length:")
+                            && let Some((_, v)) = line.split_once(':')
+                        {
+                            content_length = v.trim().parse().unwrap_or(0);
                         }
                     }
 
@@ -3291,13 +3291,13 @@ mod tests {
         tokio::spawn(async move {
             use futures_util::StreamExt as _;
             use tokio_tungstenite::accept_async;
-            if let Ok((tcp, _)) = ws_listener.accept().await {
-                if let Ok(mut ws) = accept_async(tcp).await {
-                    let _ = ws.next().await; // consume Hello
-                    ws_send_ready(&mut ws).await;
-                    // Hold the connection open so engine_rx stays Some.
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
+            if let Ok((tcp, _)) = ws_listener.accept().await
+                && let Ok(mut ws) = accept_async(tcp).await
+            {
+                let _ = ws.next().await; // consume Hello
+                ws_send_ready(&mut ws).await;
+                // Hold the connection open so engine_rx stays Some.
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
 

@@ -1,3 +1,4 @@
+use exchange::TickerInfo;
 use iced::{
     Alignment, Element, Length,
     widget::{button, column, container, pick_list, row, text, text_input},
@@ -62,6 +63,8 @@ pub struct OrderEntryPanel {
     pub display_label: Option<String>,
     /// Venue identifier (e.g. "tachibana"). Set by `set_instrument`.
     pub venue: Option<String>,
+    /// Full ticker metadata for link_group sync. Always set alongside `instrument_id`.
+    pub ticker_info: Option<TickerInfo>,
     pub side: OrderSide,
     pub quantity: String,
     pub price_kind: PriceKind,
@@ -308,6 +311,15 @@ impl OrderEntryPanel {
         self.display_label = Some(display);
         // Phase O0: Tachibana 専用。将来の多取引所対応時は呼び出し元から venue を渡す。
         self.venue = Some("tachibana".to_string());
+    }
+
+    /// Set instrument from full `TickerInfo` — used by link_group sync.
+    /// Exchange guard (TachibanaStock only) is the caller's responsibility.
+    pub fn set_instrument_from_ticker(&mut self, ti: TickerInfo) {
+        let display = ti.ticker.display_symbol_and_type().0;
+        let id = format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
+        self.set_instrument(id, display);
+        self.ticker_info = Some(ti);
     }
 
     /// Called when the engine connection drops (e.g. restart).
@@ -622,5 +634,43 @@ mod tests {
             panel.last_error.is_none(),
             "再接続後は last_error が None にクリアされるべき"
         );
+    }
+
+    // ── set_instrument_from_ticker がすべてのフィールドを正しくセットすることを確認 ──
+    #[test]
+    fn set_instrument_from_ticker_sets_all_fields() {
+        use exchange::adapter::Exchange;
+        use exchange::{Ticker, TickerInfo};
+
+        let ticker = Ticker::new("7203", Exchange::TachibanaStock);
+        let ti = TickerInfo::new_stock(ticker, 1.0, 100.0, 100);
+
+        let mut panel = OrderEntryPanel::default();
+        panel.set_instrument_from_ticker(ti);
+
+        assert!(panel.instrument_id.is_some(), "instrument_id should be set");
+        assert!(panel.display_label.is_some(), "display_label should be set");
+        assert_eq!(
+            panel.venue,
+            Some("tachibana".to_string()),
+            "venue should be tachibana"
+        );
+        assert!(panel.ticker_info.is_some(), "ticker_info should be set");
+    }
+
+    // ── set_instrument_from_ticker は exchange ガードを行わない（呼び出し側責務）──
+    #[test]
+    fn set_instrument_from_ticker_does_not_guard_exchange() {
+        use exchange::adapter::Exchange;
+        use exchange::{Ticker, TickerInfo};
+
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ti = TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        let mut panel = OrderEntryPanel::default();
+        panel.set_instrument_from_ticker(ti);
+
+        // No exchange guard in set_instrument_from_ticker — caller is responsible
+        assert!(panel.ticker_info.is_some());
     }
 }

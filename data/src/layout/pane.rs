@@ -92,11 +92,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
-    // link_group は将来の銘柄連動（グループ A の銘柄で注文を入れる等）のための
-    // 予約フィールド。現時点では stream_pair() が None を返すため実質未使用。
     OrderEntry {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
+        /// Persisted so `linked_ticker()` works immediately after layout restore.
+        #[serde(deserialize_with = "ok_or_default", default)]
+        ticker_info: Option<TickerInfo>,
     },
     OrderList {
         #[serde(deserialize_with = "ok_or_default", default)]
@@ -402,10 +403,19 @@ mod tests {
 
     #[test]
     fn pane_order_entry_roundtrip() {
-        let pane = Pane::OrderEntry { link_group: None };
+        let pane = Pane::OrderEntry {
+            link_group: None,
+            ticker_info: None,
+        };
         let json = serde_json::to_string(&pane).unwrap();
         let restored: Pane = serde_json::from_str(&json).unwrap();
-        assert!(matches!(restored, Pane::OrderEntry { link_group: None }));
+        assert!(matches!(
+            restored,
+            Pane::OrderEntry {
+                link_group: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -435,7 +445,48 @@ mod tests {
     fn pane_order_entry_missing_link_group_defaults_to_none() {
         let json = r#"{"OrderEntry": {}}"#;
         let pane: Pane = serde_json::from_str(json).unwrap();
-        assert!(matches!(pane, Pane::OrderEntry { link_group: None }));
+        assert!(matches!(
+            pane,
+            Pane::OrderEntry {
+                link_group: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pane_order_entry_ticker_info_roundtrip() {
+        use exchange::adapter::Exchange;
+        use exchange::{Ticker, TickerInfo};
+        let ticker = Ticker::new("7203", Exchange::TachibanaStock);
+        let ti = TickerInfo::new_stock(ticker, 1.0, 100.0, 100);
+        let pane = Pane::OrderEntry {
+            link_group: None,
+            ticker_info: Some(ti),
+        };
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored,
+            Pane::OrderEntry {
+                ticker_info: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pane_order_entry_old_format_without_ticker_info_deserializes_ok() {
+        // Old saved-state.json files have no ticker_info field — must default to None.
+        let json = r#"{"OrderEntry": {"link_group": null}}"#;
+        let pane: Pane = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            pane,
+            Pane::OrderEntry {
+                ticker_info: None,
+                ..
+            }
+        ));
     }
 
     #[test]

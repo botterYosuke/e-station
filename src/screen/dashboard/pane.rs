@@ -239,6 +239,22 @@ impl State {
         settings: Settings,
         link_group: Option<LinkGroup>,
     ) -> Self {
+        // 銘柄概念を持たないペインは link_group を保持できない。旧バージョンで
+        // saved-state.json に保存された Some(N) を新バイナリで復元すると、UI から
+        // トグル不能なゴースト link_group が残り switch_tickers_in_group 経路で
+        // 永続的に warn ログを発生させるため、構築時点で None に正規化する。
+        let link_group = match content {
+            Content::OrderList(_) | Content::BuyingPower(_) => {
+                if link_group.is_some() {
+                    log::debug!(
+                        "normalizing stale link_group on non-ticker pane (kind={:?})",
+                        content.kind()
+                    );
+                }
+                None
+            }
+            _ => link_group,
+        };
         Self {
             content,
             settings,
@@ -254,6 +270,18 @@ impl State {
             StreamKind::Depth { ticker_info, .. } => Some(*ticker_info),
             StreamKind::Trades { ticker_info, .. } => Some(*ticker_info),
         })
+    }
+
+    /// Returns the pane's active ticker — from streams for stream-based panes,
+    /// or from `ticker_info` for `OrderEntry` (which has no streams).
+    pub fn linked_ticker(&self) -> Option<TickerInfo> {
+        if let Some(ti) = self.stream_pair() {
+            return Some(ti);
+        }
+        if let Content::OrderEntry(panel) = &self.content {
+            return panel.ticker_info;
+        }
+        None
     }
 
     pub fn stream_pair_kind(&self) -> Option<StreamPairKind> {
@@ -639,6 +667,9 @@ impl State {
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
+        // 銘柄概念を持たないペイン（Starter / OrderList / BuyingPower）からは
+        // link_group ボタン `[-]` を非表示にする。OrderEntry は銘柄を持つため
+        // else 分岐で表示する（docs/✅order/order-entry-link-group-plan.md タスク 7）。
         let mut top_left_buttons = if matches!(
             self.content,
             Content::Starter | Content::OrderList(_) | Content::BuyingPower(_)
@@ -1757,25 +1788,19 @@ impl State {
                             }
                         }
                         crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti) => {
-                            if let Content::OrderEntry(panel) = &mut self.content {
-                                if ti.ticker.exchange != Exchange::TachibanaStock {
-                                    self.notifications.push(Toast::warn(
-                                        "注文入力パネルは立花証券銘柄のみ対応しています"
-                                            .to_string(),
-                                    ));
-                                    self.modal = None;
-                                    return None;
-                                }
-                                let display = ti.ticker.display_symbol_and_type().0;
-                                let instrument_id =
-                                    format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
-                                panel.set_instrument(instrument_id, display);
+                            if matches!(self.content, Content::OrderEntry(_))
+                                && ti.ticker.exchange != Exchange::TachibanaStock
+                            {
+                                self.notifications.push(Toast::warn(
+                                    "注文入力パネルは立花証券銘柄のみ対応しています".to_string(),
+                                ));
                                 self.modal = None;
                                 return None;
                             }
-                            // Non-OrderEntry panes delegate exchange validation to the
-                            // switch_tickers_in_group call chain; only OrderEntry requires
-                            // a TachibanaStock guard here.
+                            // Broadcast via SwitchTickersInGroup so link_group peers sync.
+                            // For OrderEntry, apply_ticker_to_order_entry is called in
+                            // init_pane / init_focused_pane.
+                            self.modal = None;
                             return Some(Effect::SwitchTickersInGroup(ti));
                         }
                     }
@@ -2786,12 +2811,14 @@ mod tests {
     #[test]
     fn set_content_and_streams_initializes_ladder_when_content_is_none() {
         let ti = tachibana_ticker_info();
-        let mut state = State::default();
-        state.content = Content::Ladder(None);
-        state.streams = ResolvedStream::Ready(vec![
-            ladder_depth_stream(ti),
-            StreamKind::Trades { ticker_info: ti },
-        ]);
+        let mut state = State {
+            content: Content::Ladder(None),
+            streams: ResolvedStream::Ready(vec![
+                ladder_depth_stream(ti),
+                StreamKind::Trades { ticker_info: ti },
+            ]),
+            ..Default::default()
+        };
 
         assert!(
             !state.content.initialized(),
@@ -2813,12 +2840,14 @@ mod tests {
     #[test]
     fn stream_pair_kind_returns_some_when_streams_are_ready() {
         let ti = tachibana_ticker_info();
-        let mut state = State::default();
-        state.content = Content::Ladder(None);
-        state.streams = ResolvedStream::Ready(vec![
-            ladder_depth_stream(ti),
-            StreamKind::Trades { ticker_info: ti },
-        ]);
+        let state = State {
+            content: Content::Ladder(None),
+            streams: ResolvedStream::Ready(vec![
+                ladder_depth_stream(ti),
+                StreamKind::Trades { ticker_info: ti },
+            ]),
+            ..Default::default()
+        };
 
         let kind = state.stream_pair_kind();
         assert!(
@@ -2834,5 +2863,79 @@ mod tests {
         assert!(Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()).initialized());
         assert!(Content::OrderList(panel::orders::OrdersPanel::new()).initialized());
         assert!(Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()).initialized());
+    }
+
+    /// OrderList / BuyingPower は銘柄概念を持たないため link_group を保持してはならない。
+    /// 旧バージョンで saved-state.json に link_group: Some(N) を保存していたユーザーが
+    /// 新バイナリで開いたとき、UI からはトグル不能のため永続的にゴースト link_group が
+    /// 残り、switch_tickers_in_group 経路で warn ログを発生させ続ける silent な
+    /// 劣化を招く。from_config で None に正規化することで根を断つ。
+    #[test]
+    fn from_config_normalizes_link_group_for_order_list() {
+        let state = State::from_config(
+            Content::OrderList(panel::orders::OrdersPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "OrderList は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
+    #[test]
+    fn from_config_normalizes_link_group_for_buying_power() {
+        let state = State::from_config(
+            Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "BuyingPower は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
+    /// OrderEntry は銘柄を持つため link_group をそのまま保持する（正規化対象外）。
+    #[test]
+    fn from_config_preserves_link_group_for_order_entry() {
+        let state = State::from_config(
+            Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(state.link_group, Some(LinkGroup::A));
+    }
+
+    /// view() の `[-]` 非描画分岐に OrderEntry が含まれないことを pin する。
+    /// 計画書 docs/✅order/order-entry-link-group-plan.md でリンクグループ対応予定の
+    /// ペインなので、誤って除外リストに追加されると機能が無効化される。
+    #[test]
+    fn link_group_button_exclusion_excludes_only_non_ticker_panes() {
+        let order_entry = Content::OrderEntry(panel::order_entry::OrderEntryPanel::new());
+        assert!(
+            !matches!(
+                order_entry,
+                Content::Starter | Content::OrderList(_) | Content::BuyingPower(_)
+            ),
+            "OrderEntry は銘柄概念を持つため link_group ボタン除外リストに含めてはならない"
+        );
+
+        for content in [
+            Content::OrderList(panel::orders::OrdersPanel::new()),
+            Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            Content::Starter,
+        ] {
+            assert!(
+                matches!(
+                    content,
+                    Content::Starter | Content::OrderList(_) | Content::BuyingPower(_)
+                ),
+                "銘柄概念を持たないペインは link_group ボタン除外リストに含めるべき"
+            );
+        }
     }
 }

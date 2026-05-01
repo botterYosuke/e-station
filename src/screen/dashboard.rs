@@ -373,24 +373,68 @@ impl Dashboard {
                         return (Task::none(), None);
                     }
 
-                    let maybe_ticker_info = self
+                    // §F: pre-flight guard — reject participation when an OrderEntry pane is
+                    // involved and any non-Tachibana ticker would enter the group.
+                    // Two sub-cases:
+                    //   (a) OrderEntry joining a group whose existing ticker is non-Tachibana
+                    //   (b) Non-Tachibana pane joining a group that already contains an OrderEntry
+                    //       (even if the OrderEntry's ticker_info is still None — it will sync
+                    //       once the non-Tachibana pane propagates its ticker via SwitchTickersInGroup)
+                    let group_ticker = self
                         .iter_all_panes(main_window.id)
                         .filter(|(w, p, _)| !(*w == window && *p == pane))
-                        .find_map(|(_, _, other_state)| {
-                            if other_state.link_group == group {
-                                other_state.stream_pair()
+                        .find_map(|(_, _, s)| {
+                            if s.link_group == group {
+                                s.linked_ticker()
                             } else {
                                 None
                             }
                         });
 
+                    let joining_is_order_entry = self
+                        .get_pane(main_window.id, window, pane)
+                        .map(|s| matches!(s.content, pane::Content::OrderEntry(_)))
+                        .unwrap_or(false);
+
+                    let joining_ticker = self
+                        .get_pane(main_window.id, window, pane)
+                        .and_then(|s| s.linked_ticker());
+
+                    let group_has_order_entry =
+                        self.iter_all_panes(main_window.id).any(|(_, _, s)| {
+                            s.link_group == group
+                                && matches!(s.content, pane::Content::OrderEntry(_))
+                        });
+
+                    let reject = (joining_is_order_entry
+                        && group_ticker
+                            .is_some_and(|ti| ti.ticker.exchange != Exchange::TachibanaStock))
+                        || (group_has_order_entry
+                            && joining_ticker
+                                .is_some_and(|ti| ti.ticker.exchange != Exchange::TachibanaStock));
+
+                    if reject {
+                        return (
+                            Task::done(Message::Notification(Toast::warn(
+                                "注文入力ペインは立花証券銘柄のグループにのみ参加できます"
+                                    .to_string(),
+                            ))),
+                            None,
+                        );
+                    }
+
                     if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
                         state.link_group = group;
                         state.modal = None;
 
-                        if let Some(ticker_info) = maybe_ticker_info
-                            && state.stream_pair() != Some(ticker_info)
+                        if let Some(ticker_info) = group_ticker
+                            && state.linked_ticker() != Some(ticker_info)
                         {
+                            if matches!(state.content, pane::Content::OrderEntry(_)) {
+                                Self::apply_ticker_to_order_entry(state, ticker_info);
+                                return (Task::none(), None);
+                            }
+
                             let pane_id = state.unique_id();
                             let content_kind = state.content.kind();
 
@@ -1254,6 +1298,12 @@ impl Dashboard {
         }
     }
 
+    fn apply_ticker_to_order_entry(state: &mut pane::State, ti: TickerInfo) {
+        if let pane::Content::OrderEntry(panel) = &mut state.content {
+            panel.set_instrument_from_ticker(ti);
+        }
+    }
+
     fn init_pane(
         &mut self,
         handles: &AdapterHandles,
@@ -1264,6 +1314,11 @@ impl Dashboard {
         content_kind: ContentKind,
     ) -> Task<Message> {
         if let Some(state) = self.get_mut_pane(main_window, window, selected_pane) {
+            if matches!(content_kind, ContentKind::OrderEntry) {
+                Self::apply_ticker_to_order_entry(state, ticker_info);
+                return Task::none();
+            }
+
             let pane_id = state.unique_id();
 
             let streams = state.set_content_and_streams(vec![ticker_info], content_kind);
@@ -1304,6 +1359,15 @@ impl Dashboard {
         if let Some((window, selected_pane)) = self.focus
             && let Some(state) = self.get_mut_pane(main_window, window, selected_pane)
         {
+            if matches!(content_kind, ContentKind::OrderEntry) {
+                let previous_ticker = state.linked_ticker();
+                if previous_ticker.is_some() && previous_ticker != Some(ticker_info) {
+                    state.link_group = None;
+                }
+                Self::apply_ticker_to_order_entry(state, ticker_info);
+                return Task::none();
+            }
+
             let previous_ticker = state.stream_pair();
             if previous_ticker.is_some() && previous_ticker != Some(ticker_info) {
                 state.link_group = None;
@@ -1357,8 +1421,13 @@ impl Dashboard {
             let pane_infos: Vec<(window::Id, pane_grid::Pane, ContentKind)> = self
                 .iter_all_panes_mut(main_window)
                 .filter_map(|(window, pane, state)| {
-                    if state.link_group == Some(group) {
-                        Some((window, pane, state.content.kind()))
+                    // 銘柄概念を持たないペインは link_group に巻き込まない。
+                    // pane::State::from_config が正規化して None にするため通常は到達しないが、
+                    // 二重防御として content.kind() でも弾く（M-A 対応）。
+                    let kind = state.content.kind();
+                    let skip = matches!(kind, ContentKind::OrderList | ContentKind::BuyingPower);
+                    if !skip && state.link_group == Some(group) {
+                        Some((window, pane, kind))
                     } else {
                         None
                     }
