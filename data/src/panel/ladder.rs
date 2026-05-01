@@ -80,6 +80,11 @@ impl GroupedDepth {
         }
     }
 
+    pub fn copy_raw(&mut self, levels: &BTreeMap<Price, Qty>) {
+        self.orders.clear();
+        self.orders.clone_from(levels);
+    }
+
     pub fn best_price(&self, side: Side) -> Option<Price> {
         match side {
             Side::Bid => self.orders.last_key_value().map(|(p, _)| *p),

@@ -739,6 +739,7 @@ impl State {
                 | Content::OrderEntry(_)
                 | Content::OrderList(_)
                 | Content::BuyingPower(_)
+                | Content::Positions(_)
         ) && !self.has_stream()
         {
             let content = row![
