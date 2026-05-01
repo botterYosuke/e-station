@@ -1697,7 +1697,7 @@ class DataEngineServer:
                 {
                     "instrument_id": r.instrument_id,
                     "qty": str(r.qty),
-                    "market_value": str(r.market_value),
+                    "market_value": str(r.market_value) if r.market_value is not None else "",
                     "position_type": r.position_type,
                     "tategyoku_id": r.tategyoku_id,
                     "venue": "tachibana",

@@ -2386,10 +2386,12 @@ impl Flowsurface {
                 let Some(conn) = self.engine_connection.as_ref().cloned() else {
                     return Task::none();
                 };
-                if self.positions_request_id.is_none() {
+                let main_window = self.main_window.id;
+                if self.positions_request_id.is_none()
+                    && self.active_dashboard().has_positions_pane(main_window)
+                {
                     let req_id = uuid::Uuid::new_v4().to_string();
                     self.positions_request_id = Some(req_id.clone());
-                    let main_window = self.main_window.id;
                     self.active_dashboard_mut()
                         .distribute_positions_loading(main_window, true);
                     let req_id_for_err = req_id.clone();
@@ -2453,11 +2455,21 @@ impl Flowsurface {
             }
             // Positions: broadcast to all Positions panes
             Message::PositionsUpdated {
-                request_id: _,
+                request_id,
                 venue: _,
                 positions,
                 ts_ms,
             } => {
+                let matches = self.positions_request_id.as_deref()
+                    == Some(request_id.as_str());
+                if !matches {
+                    log::debug!(
+                        "[PositionsUpdated] stale/unrouted: request_id={request_id:?}, \
+                         in-flight={:?}",
+                        self.positions_request_id
+                    );
+                    return Task::none();
+                }
                 self.positions_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
