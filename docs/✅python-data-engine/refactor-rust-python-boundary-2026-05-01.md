@@ -388,6 +388,30 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 | E4 | `apply_diff_levels`（backend.rs:1039-1068）の rounding を削除 | backend.rs |
 | E5 | `Price::is_at_tick(MinTicksize)` を `exchange/src/unit/price.rs` に追加 | price.rs |
 
+### 8.5 Phase E 完了メモ（2026-05-01）
+
+**Q5 決定**: (a) silent（trust）。§2.1「release では no-op で信頼する」の設計方針のまま。
+
+**実施内容:**
+- E5: `Price::is_at_tick(MinTicksize) -> bool` を `exchange/src/unit/price.rs` に追加。
+  ULP ベースの許容差（2 ULP）付きで実装 — `Price::from_f32` が f32 精度損失（101.0 × 10^8 は f32 で正確に表現できない）を持つため、厳密な整除チェックは false negative を起こす。
+- E1: `diff_price_levels` の `round_to_min_tick` を削除し `debug_assert!(price.is_at_tick(...))` に置換
+- E2: `replace_all_with_qty_norm` の qty_norm 適用コードを削除し `debug_assert!(qty_norm.is_none())` に置換
+- E3: `LocalDepthCache::update_with_qty_norm` を `#[deprecated]` 化。内部実装を private `update_inner` に切り出し、`update()` は deprecated を呼ばずに `update_inner` を直接呼ぶ構造に変更
+- E4: `engine-client/src/backend.rs::apply_diff_levels` の `round_to_min_tick` を削除し `debug_assert!` に置換
+- `engine-client/tests/depth_assert.rs` 新規作成: 未正規化価格で debug ビルドが panic することを確認（5 テスト all green）
+
+**落とし穴:**
+- `Price::is_at_tick` を `self.units % unit == 0` の厳密チェックで実装したところ、`Price::from_f32(101.0)` の精度損失（units=10_099_999_744, 期待=10_100_000_000）により false が返され normalised_depth_does_not_panic が失敗。
+  → 2 ULP 許容差を追加: `ulp = (units.unsigned_abs() >> 23).max(1)`, tolerance = 2 * ulp。
+  → 許容差が tick の半分を超える場合（f32 精度が不十分なスケール）は自動的に true を返す。
+
+**検証結果:**
+- `cargo clippy -- -D warnings`: clean
+- `cargo test -p flowsurface-exchange`: 全 green（58 tests）
+- `cargo test -p flowsurface-engine-client`: 全 green（0 failed）
+- `engine-client/tests/depth_assert.rs`: 5 tests all green（panic テスト 4 件 + 正常パス 1 件）
+
 ### 8.2 完了条件
 
 - release ビルドで rounding コードパスがゼロ（`cargo asm` か `cargo expand` で確認）
@@ -522,7 +546,7 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 | Q2 | `venue_caps` を `TickerEntry` 内に持つか別 event か | **✅ 確定: (a) TickerEntry 内（IPC のみ）**。Rust 永続モデルには載せない（§2.4） |
 | Q3 | 旧 `saved-state.json` の TickMultiplier 互換戦略 | **✅ 確定: (a) 起動時 step 再計算（既存挙動）**。`TickMultiplier` は `saved-state.json` から読み込まれ、`min_ticksize` は Python から再受信。`price_step = TickMultiplier × min_ticksize` は TickerInfo 受信後に実行時計算。migration 関数は不要。Phase D 着手前確認済 (2026-05-01) |
 | Q4 | Phase F の SCHEMA_MAJOR bump 単位 | **✅ 確定: (a) Phase F で一度だけ MAJOR +1**。Council 全4声一致。SCHEMA_MINOR はフェーズ完了ごとに上げる（Phase A 完了時も MINOR bump）。A〜E は後方互換維持なので MAJOR bump は意味論的に不正 |
-| Q5 | 未正規化 depth 検出時の release 挙動 | (a) silent（trust） / (b) warn ログ / (c) tracing event |
+| Q5 | 未正規化 depth 検出時の release 挙動 | **✅ 確定: (a) silent（trust）**。§2.1「release では no-op で信頼する」の設計方針のまま。debug_assert! のみ。Phase E 着手前確認済 (2026-05-01) |
 | Q6 | `VenueCapsStore` の共有方式 | **✅ 確定: (b) backend-owned / EngineClient-handle-mediated**。`VenueCapsStore` を `EngineClientBackend` の private sidecar にし、reconnect 時に backend 再構築でリセット。UI には narrow lookup handle のみ公開（`ticker_meta_handle` 類似パターン）。UI render 経路は derived booleans に projection して hot path でのロック回避を推奨。内部は `Arc<RwLock<HashMap<..>>>` でも可だがそれは実装詳細 |
 
 ### 決定タイミング

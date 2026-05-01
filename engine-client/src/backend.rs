@@ -1208,7 +1208,12 @@ fn apply_diff_levels(
             let Ok(q) = level.qty.parse::<f32>() else {
                 continue;
             };
-            let price = Price::from_f32(p).round_to_min_tick(min_ticksize);
+            let price = Price::from_f32(p);
+            debug_assert!(
+                price.is_at_tick(min_ticksize),
+                "price {p} is not at tick {:?}; Python should normalise",
+                min_ticksize,
+            );
             let qty = Qty::from_f32(q);
             if qty.is_zero() {
                 map.remove(&price);

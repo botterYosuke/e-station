@@ -69,16 +69,8 @@ impl std::fmt::Debug for Depth {
 }
 
 impl Depth {
-    fn update_with_qty_norm(
-        &mut self,
-        diff: &DepthPayload,
-        min_ticksize: MinTicksize,
-        qty_norm: Option<QtyNormalization>,
-    ) {
-        Self::diff_price_levels(&mut self.bids, &diff.bids, min_ticksize, qty_norm);
-        Self::diff_price_levels(&mut self.asks, &diff.asks, min_ticksize, qty_norm);
-    }
-
+    // E1/E2: Python normalises price and qty before IPC; Rust is no-op in release,
+    // debug_assert only.
     fn diff_price_levels(
         price_map: &mut BTreeMap<Price, Qty>,
         orders: &[DeOrder],
@@ -86,13 +78,18 @@ impl Depth {
         qty_norm: Option<QtyNormalization>,
     ) {
         orders.iter().for_each(|order| {
-            let normalized_qty = qty_norm
-                .map(|normalizer| normalizer.normalize(order.qty, order.price))
-                .unwrap_or(order.qty);
-
-            let price = Price::from_f32(order.price).round_to_min_tick(min_ticksize);
-            let qty = Qty::from_f32(normalized_qty);
-
+            debug_assert!(
+                qty_norm.is_none(),
+                "qty_norm should be None; Python normalises qty before IPC"
+            );
+            let price = Price::from_f32(order.price);
+            debug_assert!(
+                price.is_at_tick(min_ticksize),
+                "price {} is not at tick {:?}; Python should normalise",
+                order.price,
+                min_ticksize,
+            );
+            let qty = Qty::from_f32(order.qty);
             if qty.is_zero() {
                 price_map.remove(&price);
             } else {
@@ -107,34 +104,43 @@ impl Depth {
         min_ticksize: MinTicksize,
         qty_norm: Option<QtyNormalization>,
     ) {
+        debug_assert!(
+            qty_norm.is_none(),
+            "qty_norm should be None; Python normalises qty before IPC"
+        );
         self.bids = snapshot
             .bids
             .iter()
             .map(|de_order| {
-                let normalized_qty = qty_norm
-                    .map(|normalizer| normalizer.normalize(de_order.qty, de_order.price))
-                    .unwrap_or(de_order.qty);
-
-                (
-                    Price::from_f32(de_order.price).round_to_min_tick(min_ticksize),
-                    Qty::from_f32(normalized_qty),
-                )
+                let price = Price::from_f32(de_order.price);
+                debug_assert!(
+                    price.is_at_tick(min_ticksize),
+                    "bid price {} is not at tick {:?}; Python should normalise",
+                    de_order.price,
+                    min_ticksize,
+                );
+                (price, Qty::from_f32(de_order.qty))
             })
             .collect::<BTreeMap<Price, Qty>>();
         self.asks = snapshot
             .asks
             .iter()
             .map(|de_order| {
-                let normalized_qty = qty_norm
-                    .map(|normalizer| normalizer.normalize(de_order.qty, de_order.price))
-                    .unwrap_or(de_order.qty);
-
-                (
-                    Price::from_f32(de_order.price).round_to_min_tick(min_ticksize),
-                    Qty::from_f32(normalized_qty),
-                )
+                let price = Price::from_f32(de_order.price);
+                debug_assert!(
+                    price.is_at_tick(min_ticksize),
+                    "ask price {} is not at tick {:?}; Python should normalise",
+                    de_order.price,
+                    min_ticksize,
+                );
+                (price, Qty::from_f32(de_order.qty))
             })
             .collect::<BTreeMap<Price, Qty>>();
+    }
+
+    fn apply_diff(&mut self, diff: &DepthPayload, min_ticksize: MinTicksize) {
+        Self::diff_price_levels(&mut self.bids, &diff.bids, min_ticksize, None);
+        Self::diff_price_levels(&mut self.asks, &diff.asks, min_ticksize, None);
     }
 
     pub fn mid_price(&self) -> Option<Price> {
@@ -154,15 +160,35 @@ pub struct LocalDepthCache {
 
 impl LocalDepthCache {
     pub fn update(&mut self, new_depth: DepthUpdate, min_ticksize: MinTicksize) {
-        self.update_with_qty_norm(new_depth, min_ticksize, None);
+        self.update_inner(new_depth, min_ticksize, None);
     }
 
+    /// Deprecated: Python normalises qty before IPC; pass `qty_norm = None` or use `update()`.
+    /// Will be removed in Phase F.
+    #[deprecated(note = "Python normalises qty before IPC; use update() instead")]
     pub fn update_with_qty_norm(
         &mut self,
         new_depth: DepthUpdate,
         min_ticksize: MinTicksize,
         qty_norm: Option<QtyNormalization>,
     ) {
+        self.update_inner(new_depth, min_ticksize, qty_norm);
+    }
+
+    fn update_inner(
+        &mut self,
+        new_depth: DepthUpdate,
+        min_ticksize: MinTicksize,
+        qty_norm: Option<QtyNormalization>,
+    ) {
+        // Hard assert (all builds): callers that pass Some(qty_norm) via the deprecated
+        // update_with_qty_norm API would be silently no-op'd in release, so we make the
+        // breakage explicit rather than silent.
+        assert!(
+            qty_norm.is_none(),
+            "qty_norm is no longer applied; Python normalises qty before IPC. \
+             Use update() instead of the deprecated update_with_qty_norm()."
+        );
         match new_depth {
             DepthUpdate::Snapshot(snapshot) => {
                 self.last_update_id = snapshot.last_update_id;
@@ -176,8 +202,50 @@ impl LocalDepthCache {
                 self.time = diff.time;
 
                 let depth = Arc::make_mut(&mut self.depth);
-                depth.update_with_qty_norm(&diff, min_ticksize, qty_norm);
+                depth.apply_diff(&diff, min_ticksize);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        unit::qty::{QtyNormalization, RawQtyUnit},
+        Exchange, MinTicksize, Ticker, TickerInfo,
+    };
+
+    fn btc_ticker_info() -> TickerInfo {
+        TickerInfo::new(Ticker::new("BTCUSDT", Exchange::BinanceSpot), 0.01, 0.001, None)
+    }
+
+    fn min_tick(power: i8) -> MinTicksize {
+        MinTicksize::new(power)
+    }
+
+    fn normalised_snapshot() -> DepthUpdate {
+        DepthUpdate::Snapshot(DepthPayload {
+            last_update_id: 1,
+            time: 0,
+            bids: vec![DeOrder { price: 100.0, qty: 10.0 }],
+            asks: vec![DeOrder { price: 101.0, qty: 5.0 }],
+        })
+    }
+
+    #[test]
+    #[should_panic(expected = "qty_norm is no longer applied")]
+    fn update_with_some_qty_norm_panics_in_all_builds() {
+        let qty_norm = QtyNormalization::with_raw_qty_unit(false, btc_ticker_info(), RawQtyUnit::Base);
+        let mut cache = LocalDepthCache::default();
+        #[allow(deprecated)]
+        cache.update_with_qty_norm(normalised_snapshot(), min_tick(0), Some(qty_norm));
+    }
+
+    #[test]
+    fn update_with_none_qty_norm_does_not_panic() {
+        let mut cache = LocalDepthCache::default();
+        #[allow(deprecated)]
+        cache.update_with_qty_norm(normalised_snapshot(), min_tick(0), None);
     }
 }

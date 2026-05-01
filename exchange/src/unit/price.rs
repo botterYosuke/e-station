@@ -150,6 +150,30 @@ impl Price {
             .expect("min_tick_units overflowed")
     }
 
+    /// Returns true if this Price is (approximately) an exact multiple of min_ticksize.
+    ///
+    /// Allows up to 2 ULPs of tolerance to compensate for `Price::from_f32` rounding:
+    /// f32 cannot exactly represent every multiple of 10^8, so a price like 101.0
+    /// may be stored as 10_099_999_744 instead of 10_100_000_000.
+    /// The tolerance is always less than half a tick, so genuinely un-normalised
+    /// prices (e.g. 100.3 when min_tick=1.0) are still detected.
+    pub fn is_at_tick(self, min_tick: MinTicksize) -> bool {
+        let unit = Self::min_tick_units(min_tick);
+        if unit <= 1 {
+            return true;
+        }
+        // 1 ULP of self.units ≈ self.units / 2^23
+        let ulp: i64 = ((self.units.unsigned_abs() >> 23) as i64).max(1);
+        let tolerance = 2 * ulp;
+        if tolerance >= unit / 2 {
+            // f32 precision is insufficient to verify tick alignment at this scale;
+            // trust Python's normalisation.
+            return true;
+        }
+        let remainder = self.units.rem_euclid(unit);
+        remainder <= tolerance || remainder >= unit - tolerance
+    }
+
     /// Round this Price to the nearest multiple of the provided min_ticksize
     pub fn round_to_min_tick(self, min_tick: MinTicksize) -> Self {
         let unit = Self::min_tick_units(min_tick);
