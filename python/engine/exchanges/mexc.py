@@ -288,6 +288,7 @@ class MexcWorker(ExchangeWorker):
                     "min_ticksize": min_ticksize,
                     "min_qty": min_qty,
                     "contract_size": None,
+                    "venue_caps": self.venue_caps(),
                 }
             )
         return result
@@ -335,6 +336,7 @@ class MexcWorker(ExchangeWorker):
                     "min_ticksize": price_unit,
                     "min_qty": min_qty,
                     "contract_size": contract_size,
+                    "venue_caps": self.venue_caps(),
                 }
             )
         return result

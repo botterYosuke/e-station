@@ -210,6 +210,9 @@ class HyperliquidWorker(ExchangeWorker):
     # HTTP client lifecycle
     # ------------------------------------------------------------------
 
+    def venue_caps(self) -> dict:
+        return {"client_aggr_depth": False, "supports_spread_display": False, "qty_norm_kind": "contract"}
+
     async def set_proxy(self, url: str | None) -> None:
         self._proxy = url
         if self._client is not None:
@@ -317,6 +320,7 @@ class HyperliquidWorker(ExchangeWorker):
                     "min_ticksize": tick_size,
                     "min_qty": min_qty,
                     "contract_size": None,
+                    "venue_caps": self.venue_caps(),
                 }
             )
         return result
@@ -351,6 +355,7 @@ class HyperliquidWorker(ExchangeWorker):
                     "min_ticksize": tick_size,
                     "min_qty": min_qty,
                     "contract_size": None,
+                    "venue_caps": self.venue_caps(),
                 }
             )
         return result

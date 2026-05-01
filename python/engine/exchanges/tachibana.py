@@ -256,6 +256,9 @@ class TachibanaWorker(ExchangeWorker):
                 log.warning("tachibana: closing httpx client: %s", exc)
             self._client = None
 
+    def venue_caps(self) -> dict:
+        return {"client_aggr_depth": True, "supports_spread_display": True, "qty_norm_kind": "lot"}
+
     def capabilities(self) -> dict:
         """Phase 1 capability ad — daily klines only (HIGH-U-11, plan §T4 L548).
 
@@ -461,6 +464,7 @@ class TachibanaWorker(ExchangeWorker):
                 "quote_currency": _DEFAULT_QUOTE_CURRENCY,
                 "yobine_code": yobine_code,
                 "sizyou_c": str(sizyou.get("sSizyouC", "")),
+                "venue_caps": self.venue_caps(),
             }
             # B5: resolve min_ticksize from CLMYobine table using the
             # conservative no-snapshot-price fallback (finest tick band).

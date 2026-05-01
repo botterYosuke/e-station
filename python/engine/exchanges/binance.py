@@ -357,6 +357,7 @@ class BinanceWorker(ExchangeWorker):
                     "min_ticksize": float(price_filter["tickSize"]),
                     "min_qty": float(lot_filter["minQty"]),
                     "contract_size": sym.get("contractSize"),
+                    "venue_caps": self.venue_caps(),
                 }
             )
 

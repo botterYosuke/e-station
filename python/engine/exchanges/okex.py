@@ -296,6 +296,7 @@ class OkexWorker(ExchangeWorker):
                         "min_ticksize": float(item["tickSz"]),
                         "min_qty": float(item["lotSz"]),
                         "contract_size": None,
+                        "venue_caps": self.venue_caps(),
                     }
                 )
 
@@ -312,6 +313,7 @@ class OkexWorker(ExchangeWorker):
                         "min_ticksize": float(item["tickSz"]),
                         "min_qty": float(item["lotSz"]),
                         "contract_size": float(ct_val) if ct_val is not None else None,
+                        "venue_caps": self.venue_caps(),
                     }
                 )
 
@@ -326,6 +328,7 @@ class OkexWorker(ExchangeWorker):
                         "min_ticksize": float(item["tickSz"]),
                         "min_qty": float(item["lotSz"]),
                         "contract_size": float(ct_val) if ct_val is not None else None,
+                        "venue_caps": self.venue_caps(),
                     }
                 )
 

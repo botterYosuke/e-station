@@ -319,6 +319,7 @@ class BybitWorker(ExchangeWorker):
                     "min_ticksize": float(tick_str),
                     "min_qty": float(min_qty_str),
                     "contract_size": None,
+                    "venue_caps": self.venue_caps(),
                 }
             )
 
