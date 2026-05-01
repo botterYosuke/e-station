@@ -600,3 +600,19 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 未達時の対応:
 - レイテンシ / CPU 不足 → [spec.md §4.3.1](./spec.md#431-depth-チャネルのバイナリ化検討) のバイナリ化を適用。
 - 慢性的な性能差 → [spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定) の案 C（Rust 直結の optional 残置）を再検討。
+
+---
+
+## フェーズ 8 — Python 単独モード化 / Rust HTTP API 廃止（attach mode 採用）
+
+> 詳細計画: [phase-8-python-helper-direct-api.md](./phase-8-python-helper-direct-api.md)
+
+**概要**: HTTP API（ポート 9876）を廃止し、Python `ReplaySession` / `LiveSession` helper class で直接 IPC を駆動するアーキテクチャに移行する。Rust GUI が起動中なら helper は attach mode（WS クライアント）、GUI なしなら in-process mode で `NautilusRunner` を直接呼ぶ。
+
+**サブフェーズ**:
+- Phase 8.0 — 設計確定（attach mode 前提条件の合意形成）
+- Phase 8.1a — Python helper class + CLI（in-process mode 先行）
+- Phase 8.1b — attach mode 実装（B1 multi-client → B2 session ファイル → B3 EngineBusy → B4 AttachClient）
+- Phase 8.1c — GUI replay 起動フォーム
+- Phase 8.2 — GUI 専用 endpoint 最小処置
+- Phase 8.3 — HTTP API 削除 + bash → pytest helper 一括置換
