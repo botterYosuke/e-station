@@ -296,10 +296,11 @@ impl PaneSetup {
         prev_base_ticker: Option<TickerInfo>,
         current_basis: Option<Basis>,
         current_tick_multiplier: Option<TickMultiplier>,
+        // B5 (Phase B): resolved by caller from VenueCapsStore + fallback.
+        is_client_aggr: bool,
     ) -> Self {
         let exchange = base_ticker.ticker.exchange;
 
-        let is_client_aggr = exchange.is_depth_client_aggr();
         let prev_is_client_aggr = prev_base_ticker
             .map(|ti| ti.ticker.exchange.is_depth_client_aggr())
             .unwrap_or(is_client_aggr);
@@ -383,7 +384,11 @@ impl PaneSetup {
             None => base_ticker.min_ticksize.into(),
         };
 
-        let depth_aggr = exchange.stream_ticksize(tick_multiplier, TickMultiplier(50));
+        let depth_aggr = if is_client_aggr {
+            exchange::adapter::StreamTicksize::Client
+        } else {
+            exchange::adapter::StreamTicksize::ServerSide(tick_multiplier.unwrap_or(TickMultiplier(50)))
+        };
 
         let push_freq = match content_kind {
             ContentKind::HeatmapChart if exchange.is_custom_push_freq() => match basis {

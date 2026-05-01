@@ -107,6 +107,15 @@ static ORDER_API_MARKET_CLOSED: std::sync::OnceLock<Arc<std::sync::atomic::Atomi
 /// runtime builds successfully).
 static APP_MODE: std::sync::OnceLock<engine_client::dto::AppMode> = std::sync::OnceLock::new();
 
+/// B4 (Phase B): global shared `VenueCaps` sidecar.
+///
+/// Initialized in `main()` before the Iced runtime starts.
+/// Every `EngineClientBackend` holds an `Arc` clone and writes into it
+/// during `fetch_ticker_metadata`. UI code reads via `try_read()`.
+pub(crate) static VENUE_CAPS_STORE: std::sync::OnceLock<
+    Arc<tokio::sync::RwLock<engine_client::VenueCapsStore>>,
+> = std::sync::OnceLock::new();
+
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
 /// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
 /// here, before the connection is published to `ENGINE_CONNECTION_TX`,
@@ -226,6 +235,14 @@ fn main() {
     let (conn_tx, _conn_rx) =
         tokio::sync::watch::channel::<Option<Arc<engine_client::EngineConnection>>>(None);
     ENGINE_CONNECTION_TX.set(conn_tx).ok();
+
+    // B4 (Phase B): initialize the global VenueCaps sidecar before any
+    // Iced component or backend reads from it.
+    VENUE_CAPS_STORE
+        .set(Arc::new(tokio::sync::RwLock::new(
+            engine_client::VenueCapsStore::new(),
+        )))
+        .ok();
 
     // VenueReady cache shared between both engine modes — see static
     // doc comment on `VENUE_READY_CACHE`.
@@ -1301,6 +1318,11 @@ impl Flowsurface {
         // setup, not `Flowsurface::update()`, so it does not violate
         // T35-H7-NoStaticInUpdate.
         let mut handles = exchange::adapter::AdapterHandles::default();
+        // B4: the global VenueCaps sidecar is set in main() before Iced starts.
+        let venue_caps_store = VENUE_CAPS_STORE
+            .get()
+            .expect("VENUE_CAPS_STORE must be set before Flowsurface::new")
+            .clone();
         let initial_conn: Option<Arc<engine_client::EngineConnection>> = ENGINE_CONNECTION_TX
             .get()
             .and_then(|tx| tx.borrow().clone());
@@ -1309,6 +1331,7 @@ impl Flowsurface {
                 let backend = Arc::new(engine_client::EngineClientBackend::new(
                     Arc::clone(conn),
                     name,
+                    Arc::clone(&venue_caps_store),
                 ));
                 handles.set_backend(venue, backend);
             }
@@ -1728,11 +1751,21 @@ impl Flowsurface {
 
                 // Rebuild backends with the new connection and bump the generation
                 // counter so iced assigns new subscription IDs and restarts streams.
+                // B4: clear stale venue caps before new backends populate the store.
+                if let Some(store) = VENUE_CAPS_STORE.get() {
+                    store.blocking_write().clear();
+                }
                 let mut tachibana_meta_handle = None;
                 for &(venue, name) in VENUE_NAMES {
                     let backend = Arc::new(engine_client::EngineClientBackend::new(
                         Arc::clone(&conn),
                         name,
+                        VENUE_CAPS_STORE
+                            .get()
+                            .map(Arc::clone)
+                            .unwrap_or_else(|| {
+                                Arc::new(tokio::sync::RwLock::new(engine_client::VenueCapsStore::new()))
+                            }),
                     ));
                     // B5: capture the Tachibana meta handle before the backend
                     // is moved into the type-erased `AdapterHandles`. This is

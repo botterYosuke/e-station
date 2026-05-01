@@ -1117,6 +1117,27 @@ pub struct OiPoint {
     pub open_interest: String,
 }
 
+// ── Phase B: VenueCaps (B1) ──────────────────────────────────────────────────
+
+/// Quantity normalisation applied by the venue before displaying depth levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QtyNormKind {
+    None,
+    Contract,
+    Lot,
+}
+
+/// Per-venue capability flags embedded in `TickerEntry` (IPC only).
+/// Not persisted in `TickerInfo` — stored in `VenueCapsStore` sidecar.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct VenueCaps {
+    pub client_aggr_depth: bool,
+    pub supports_spread_display: bool,
+    #[serde(default)]
+    pub qty_norm_kind: Option<QtyNormKind>,
+}
+
 // ── Phase A: typed TickerEntry (A2) ──────────────────────────────────────────
 //
 // `EngineEvent::TickerInfo.tickers` は引き続き `Vec<serde_json::Value>` だが、
@@ -1161,6 +1182,9 @@ pub struct StockTickerEntry {
     pub yobine_code: Option<String>,
     #[serde(default)]
     pub sizyou_c: Option<String>,
+    /// Phase B: optional. Required in Phase F.
+    #[serde(default)]
+    pub venue_caps: Option<VenueCaps>,
 }
 
 /// Typed crypto ticker entry from `EngineEvent::TickerInfo`.
@@ -1173,4 +1197,7 @@ pub struct CryptoTickerEntry {
     pub min_qty: f32,
     #[serde(default)]
     pub contract_size: Option<f32>,
+    /// Phase B: optional. Required in Phase F.
+    #[serde(default)]
+    pub venue_caps: Option<VenueCaps>,
 }

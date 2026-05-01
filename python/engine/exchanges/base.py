@@ -37,6 +37,18 @@ class ExchangeWorker(ABC):
         """
         return None
 
+    def venue_caps(self) -> dict:
+        """Per-venue capability flags for depth display and normalization.
+
+        Subclasses should override to return accurate capabilities.
+        Default: client_aggr_depth=True, supports_spread_display=True, qty_norm_kind="none"
+        """
+        return {
+            "client_aggr_depth": True,
+            "supports_spread_display": True,
+            "qty_norm_kind": "none",
+        }
+
     def capabilities(self) -> dict:
         """Per-venue capability advertisement (B3 / plan §T4 L508-549).
 

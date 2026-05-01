@@ -15,7 +15,7 @@ use exchange::{
 };
 use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
     convert::{depth_levels_to_arc_depth, depth_levels_to_payload},
     depth_tracker::DepthTracker,
     dto::{Command, EngineEvent},
+    venue_caps::VenueCapsStore,
 };
 
 /// Timeout for one-shot fetch requests to the Python engine.
@@ -60,15 +61,25 @@ pub struct EngineClientBackend {
     /// Empty for crypto venues — `parse_tachibana_ticker_dict` is only called
     /// in the `MarketKind::Stock` branch.
     ticker_meta: Arc<Mutex<TickerMetaMap>>,
+    /// B4: Shared `VenueCaps` sidecar — one global instance per app, injected
+    /// at backend construction. Populated by `fetch_ticker_metadata` when
+    /// `TickerEntry` carries a `venue_caps` field. UI callers MUST use
+    /// `try_read()` on the render path (T35-H8 purity).
+    venue_caps_store: Arc<RwLock<VenueCapsStore>>,
 }
 
 impl EngineClientBackend {
-    pub fn new(connection: Arc<EngineConnection>, venue: impl Into<String>) -> Self {
+    pub fn new(
+        connection: Arc<EngineConnection>,
+        venue: impl Into<String>,
+        venue_caps_store: Arc<RwLock<VenueCapsStore>>,
+    ) -> Self {
         Self {
             connection,
             venue: venue.into(),
             depth_tracker: Arc::new(Mutex::new(DepthTracker::new())),
             ticker_meta: Arc::new(Mutex::new(HashMap::new())),
+            venue_caps_store,
         }
     }
 
@@ -99,6 +110,15 @@ impl EngineClientBackend {
     /// risks deadlock by parking a multi-thread worker.
     pub async fn reset_ticker_meta(&self) {
         self.ticker_meta.lock().await.clear();
+    }
+
+    /// B4: Clear all venue caps (called on full engine reconnect via `main.rs`).
+    ///
+    /// The global store is shared; callers should invoke this once after
+    /// all backends have been rebuilt (not per-backend) so partial clears
+    /// do not race with a concurrent `fetch_ticker_metadata` on another venue.
+    pub async fn reset_venue_caps(&self) {
+        self.venue_caps_store.write().await.clear();
     }
 
     fn market_kind_to_ipc(mk: MarketKind) -> String {
@@ -473,6 +493,8 @@ impl VenueBackend for EngineClientBackend {
         // H1-est: Clone Arc before the async block so the inner future does not
         // borrow `self` across await points.
         let ticker_meta = Arc::clone(&self.ticker_meta);
+        // B4: clone the shared caps store handle for capture in the async block.
+        let venue_caps_store = Arc::clone(&self.venue_caps_store);
 
         Box::pin(async move {
             let mut out: TickerMetadataMap = HashMap::new();
@@ -519,6 +541,11 @@ impl VenueBackend for EngineClientBackend {
                                 let mut staged_meta: Vec<(
                                     exchange::Ticker,
                                     crate::tachibana_meta::TickerDisplayMeta,
+                                )> = Vec::new();
+                                // B4: staged venue_caps from typed entries.
+                                let mut staged_caps: Vec<(
+                                    exchange::Ticker,
+                                    crate::dto::VenueCaps,
                                 )> = Vec::new();
                                 // A3: typed-parse counters for observability.
                                 let mut typed_count: usize = 0;
@@ -578,6 +605,10 @@ impl VenueBackend for EngineClientBackend {
                                                     );
                                                 }
                                                 staged_meta.push((ticker, meta));
+                                                // B4: stage venue_caps if present.
+                                                if let Some(caps) = s.venue_caps {
+                                                    staged_caps.push((ticker, caps));
+                                                }
                                                 Some((ticker, Some(info)))
                                             }
                                             Ok(crate::dto::TickerEntry::Crypto(c)) => {
@@ -606,6 +637,10 @@ impl VenueBackend for EngineClientBackend {
                                                     c.min_qty,
                                                     c.contract_size,
                                                 );
+                                                // B4: stage venue_caps if present.
+                                                if let Some(caps) = c.venue_caps {
+                                                    staged_caps.push((ticker, caps));
+                                                }
                                                 Some((ticker, Some(info)))
                                             }
                                             Err(_) => {
@@ -672,12 +707,21 @@ impl VenueBackend for EngineClientBackend {
                                     })
                                     .collect();
                                 log::info!(
-                                    "TickerInfo: typed={typed_count} fallback={fallback_count}"
+                                    "TickerInfo: typed={typed_count} fallback={fallback_count} \
+                                     caps={caps_count}",
+                                    caps_count = staged_caps.len()
                                 );
                                 if !staged_meta.is_empty() {
                                     let mut guard = ticker_meta_for_capture.lock().await;
                                     for (t, m) in staged_meta {
                                         guard.insert(t, m);
+                                    }
+                                }
+                                // B4: upsert venue_caps into the shared store.
+                                if !staged_caps.is_empty() {
+                                    let mut guard = venue_caps_store.write().await;
+                                    for (t, caps) in staged_caps {
+                                        guard.upsert(t, caps);
                                     }
                                 }
                                 return Ok(map);

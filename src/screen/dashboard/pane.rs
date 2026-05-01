@@ -50,6 +50,20 @@ use iced::{
 };
 use std::time::Instant;
 
+/// B5 (Phase B): look up `client_aggr_depth` from the global `VenueCapsStore`
+/// with fallback to `Exchange::is_depth_client_aggr()`.
+///
+/// Always falls back when the store has no entry for `ticker` (e.g. before
+/// `fetch_ticker_metadata` completes). Phase D will remove the fallback once
+/// Python is the guaranteed source of truth.
+fn caps_client_aggr(ticker: &exchange::Ticker) -> bool {
+    crate::VENUE_CAPS_STORE
+        .get()
+        .and_then(|store| store.try_read().ok())
+        .and_then(|g| g.get(ticker).map(|c| c.client_aggr_depth))
+        .unwrap_or_else(|| ticker.exchange.is_depth_client_aggr())
+}
+
 #[derive(Debug, Clone)]
 pub enum Effect {
     RefreshStreams,
@@ -326,6 +340,7 @@ impl State {
             prev_base_ticker,
             self.settings.selected_basis,
             self.settings.tick_multiply,
+            caps_client_aggr(&base_ticker.ticker),
         );
 
         self.settings.selected_basis = derived_plan.basis;
@@ -943,6 +958,8 @@ impl State {
 
                     let exchange = stream_pair.map(|ti| ti.ticker.exchange);
                     let min_ticksize = stream_pair.map(|ti| ti.min_ticksize);
+                    let client_aggr_depth =
+                        stream_pair.map(|ti| caps_client_aggr(&ti.ticker)).unwrap_or(false);
 
                     let modifiers = ticksize_modifier(
                         id,
@@ -952,6 +969,7 @@ impl State {
                         modifier,
                         ModifierKind::Orderbook(basis, tick_multiply),
                         exchange,
+                        client_aggr_depth,
                     );
 
                     top_left_buttons = top_left_buttons.push(modifiers);
@@ -1006,6 +1024,8 @@ impl State {
                         })
                         .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
                     let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
+                    let client_aggr_depth =
+                        ticker_info.as_ref().map(|ti| caps_client_aggr(&ti.ticker)).unwrap_or(false);
 
                     let modifiers = row![
                         basis_modifier(id, basis, modifier, kind),
@@ -1016,7 +1036,8 @@ impl State {
                             tick_multiply,
                             modifier,
                             kind,
-                            exchange
+                            exchange,
+                            client_aggr_depth,
                         ),
                     ]
                     .spacing(4);
@@ -1095,6 +1116,10 @@ impl State {
 
                             let exchange = stream_pair.as_ref().map(|info| info.ticker.exchange);
                             let min_ticksize = stream_pair.map(|ti| ti.min_ticksize);
+                            let client_aggr_depth = stream_pair
+                                .as_ref()
+                                .map(|ti| caps_client_aggr(&ti.ticker))
+                                .unwrap_or(false);
 
                             let modifiers = row![
                                 basis_modifier(id, basis, modifier, kind),
@@ -1105,7 +1130,8 @@ impl State {
                                     tick_multiply,
                                     modifier,
                                     kind,
-                                    exchange
+                                    exchange,
+                                    client_aggr_depth,
                                 ),
                             ]
                             .spacing(4);
@@ -1202,6 +1228,8 @@ impl State {
                         })
                         .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
                     let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
+                    let client_aggr_depth =
+                        ticker_info.as_ref().map(|ti| caps_client_aggr(&ti.ticker)).unwrap_or(false);
 
                     let settings_modal = || {
                         heatmap_shader_cfg_view(
@@ -1233,7 +1261,8 @@ impl State {
                             tick_multiply,
                             modifier,
                             kind,
-                            exchange
+                            exchange,
+                            client_aggr_depth,
                         ),
                     ]
                     .spacing(4);
@@ -1557,7 +1586,7 @@ impl State {
 
                                 let is_client = self
                                     .stream_pair()
-                                    .map(|ti| ti.exchange().is_depth_client_aggr())
+                                    .map(|ti| caps_client_aggr(&ti.ticker))
                                     .unwrap_or(false);
 
                                 if let Some(mut it) = self.streams.ready_iter_mut() {
@@ -1660,10 +1689,9 @@ impl State {
                                                         c.kind,
                                                         data::chart::KlineChartKind::Footprint { .. }
                                                     ) {
-                                                        let depth_aggr = if base_ticker
-                                                            .exchange()
-                                                            .is_depth_client_aggr()
-                                                        {
+                                                        let depth_aggr = if caps_client_aggr(
+                                                            &base_ticker.ticker,
+                                                        ) {
                                                             StreamTicksize::Client
                                                         } else {
                                                             StreamTicksize::ServerSide(
@@ -1693,10 +1721,9 @@ impl State {
                                                     }
                                                 }
                                                 Basis::Tick(_) => {
-                                                    let depth_aggr = if base_ticker
-                                                        .exchange()
-                                                        .is_depth_client_aggr()
-                                                    {
+                                                    let depth_aggr = if caps_client_aggr(
+                                                        &base_ticker.ticker,
+                                                    ) {
                                                         StreamTicksize::Client
                                                     } else {
                                                         StreamTicksize::ServerSide(
@@ -2773,6 +2800,7 @@ fn ticksize_modifier<'a>(
     modifier: Option<modal::stream::Modifier>,
     kind: ModifierKind,
     exchange: Option<exchange::adapter::Exchange>,
+    client_aggr_depth: bool,
 ) -> Element<'a, Message> {
     let modifier_modal =
         Modal::StreamModifier(modal::stream::Modifier::new(kind).with_ticksize_view(
@@ -2780,6 +2808,7 @@ fn ticksize_modifier<'a>(
             min_ticksize,
             multiplier,
             exchange,
+            client_aggr_depth,
         ));
 
     let is_active = modifier.is_some_and(|m| {

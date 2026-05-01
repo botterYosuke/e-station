@@ -12,6 +12,16 @@ use iced::{Alignment, Event, Point, Rectangle, Renderer, Size, Theme, mouse};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+/// B5 (Phase B): look up `supports_spread_display` from the global `VenueCapsStore`
+/// with fallback to `Exchange::is_depth_client_aggr()`.
+fn caps_supports_spread(ticker: &exchange::Ticker) -> bool {
+    crate::VENUE_CAPS_STORE
+        .get()
+        .and_then(|store| store.try_read().ok())
+        .and_then(|g| g.get(ticker).map(|c| c.supports_spread_display))
+        .unwrap_or(false)
+}
+
 const TEXT_SIZE: f32 = 11.0;
 const ROW_HEIGHT: f32 = 16.0;
 // Currently equal to ROW_HEIGHT; kept as a separate constant so a future change
@@ -688,7 +698,7 @@ impl Ladder {
             let top_y = anchor_mid_y + row_top_y(0);
             if top_y < bounds.height && top_y + ROW_HEIGHT > 0.0 {
                 let row = if self.config.show_spread
-                    && self.ticker_info.exchange().is_depth_client_aggr()
+                    && caps_supports_spread(&self.ticker_info.ticker)
                 {
                     DomRow::Spread
                 } else {
