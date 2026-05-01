@@ -2460,8 +2460,7 @@ impl Flowsurface {
                 positions,
                 ts_ms,
             } => {
-                let matches = self.positions_request_id.as_deref()
-                    == Some(request_id.as_str());
+                let matches = self.positions_request_id.as_deref() == Some(request_id.as_str());
                 if !matches {
                     log::debug!(
                         "[PositionsUpdated] stale/unrouted: request_id={request_id:?}, \

@@ -1,0 +1,481 @@
+# Rust ↔ Python 責務分離リファクタ実装計画（案C 採用）
+
+作成日: 2026-05-01
+対象: e-station Rust GUI ↔ Python データエンジン境界
+方針: **案C — Rust 側 depth/price 正規化を完全撤去し、Python 側を「正規化済みデータの単一供給源」とする**
+
+---
+
+## 0. ゴール
+
+1. Rust 側を「描画・UI・ユーザー入力」に純化する
+2. Python 側を「venue 解釈・正規化・capability 宣言」の単一供給源にする
+3. IPC 境界 DTO を typed schema にして「無型 Value 配列」を撤廃する
+4. venue 追加時に Rust 改修が不要な構造にする
+5. Ladder の "alternating zeros" を含む min_ticksize 起因のクラス全体を構造的に撲滅する
+
+**非ゴール**:
+- 描画ロジック自体の変更（`GroupedDepth::regroup_from_raw` の step バケッティングは UI 責務として残す）
+- `TickMultiplier` のユーザー操作 API の変更
+- 純粋値型 (`Price`, `PriceStep`, `Qty`) の API 変更
+
+---
+
+## 1. 現状の問題（要点）
+
+| # | 問題 | 該当 | 種別 |
+|---|------|------|------|
+| P1 | `TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32 = 1.0` を Rust が defaulting | `engine-client/src/tachibana_meta.rs:33` | ドメイン解釈越境 |
+| P2 | `apply_diff_levels` が毎 diff で `round_to_min_tick` 再丸め | `exchange/src/depth.rs:82-102` | 防衛的再正規化 |
+| P3 | `Exchange::is_depth_client_aggr()` が enum マッチで venue 判定 | `exchange/src/adapter.rs:469`（10 箇所超で利用） | venue 知識の Rust 漏出 |
+| P4 | `EngineEvent::TickerInfo.tickers: Vec<Value>` が無型 | `engine-client/src/dto.rs:805-809`, `schemas/events.json` | スキーマ設計欠陥 |
+| P5 | `resolve_min_ticksize_for_issue(snapshot_price=None)` で最細刻みフォールバック | `python/engine/exchanges/tachibana_master.py:200-238` | ドメイン側未完 |
+| P6 | Ladder が raw best bid/ask を `depth.bids.last_key_value()` で再導出 | `src/screen/dashboard/panel/ladder.rs:103-108` | best 値の Rust 再計算 |
+| P7 | `qty_norm`（数量正規化）が Rust 側適用 | `exchange/src/depth.rs:88-91` | 同上 |
+
+これらは 2026-05-01 の "alternating zeros" 1 件で全て同時に表面化している（[fix-min-ticksize-fallback-2026-05-01.md](./fix-min-ticksize-fallback-2026-05-01.md)）。
+
+---
+
+## 2. 完成形アーキテクチャ
+
+### 2.1 IPC 契約（不変条件）
+
+Python が Rust に送る `Depth` / `Trade` / `Kline` / `TickerInfo` は次を満たすことを **Python 側で保証** する:
+
+| データ | 不変条件 |
+|--------|---------|
+| `Depth.bids/asks` の price | `min_ticksize` の整数倍に丸め済み |
+| `Depth.bids/asks` の qty | venue 単位で正規化済み（contract_size × normalize 適用済み） |
+| `Trade.price` | 同上 |
+| `Kline.{o,h,l,c}` | 同上 |
+| `TickerInfo.min_ticksize` | 必須・正値・解決済み（snapshot 価格を踏まえた band 解決） |
+| `VenueCaps`（IPC では `TickerEntry` 内に同梱、Rust 永続モデルには載せない） | 必須・client_aggr_depth / supports_spread_display / qty_norm_kind を含む |
+
+> **設計上の不変条件**: `VenueCaps` は **IPC 境界 DTO `TickerEntry` の一部としてのみ** Python から運ばれる。Rust 内部では `TickerInfo` 本体には**持たせない**（後述 §2.4 参照）。
+
+Rust 側はこの契約を **debug ビルドで `debug_assert!` 検証**、release では no-op で信頼する。
+
+### 2.2 責務マトリクス
+
+| 機能 | Python | Rust |
+|------|--------|------|
+| venue REST/WS 接続 | ✅ | — |
+| 価格 tick 解決（yobine 等） | ✅ | — |
+| 価格 tick 丸め | ✅ | debug_assert のみ |
+| qty normalization | ✅ | debug_assert のみ |
+| best bid/ask 算出 | ✅（必要なら snapshot 内に含めて送る） | キャッシュとしての保持のみ |
+| venue capability 宣言 | ✅ | — |
+| `Depth` 構造保持 | — | ✅（受信キャッシュ） |
+| `regroup_from_raw` step バケッティング | — | ✅（UI ズーム） |
+| `TickMultiplier` ユーザー操作 | — | ✅ |
+| ChaseTracker / Spread 表示 | — | ✅ |
+| Ladder/Chart 描画 | — | ✅ |
+
+### 2.3 IPC スキーマ（typed） — **Phase F 完了後の最終形**
+
+> **注意**: 以下は **Phase F 完了後の到達点**を示す。Phase A〜E 期間中の `venue_caps` は optional（`required` から外す）で運用する。Phase 別のスキーマ差分は §4.1 / §5.1 / §9.1 のタスク表に記載。
+
+`TickerInfo` を venue_kind で discriminated union 化:
+
+```jsonc
+// schemas/events.json
+"TickerInfo": {
+  "type": "object",
+  "required": ["event", "request_id", "venue", "tickers"],
+  "properties": {
+    "tickers": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/TickerEntry" }
+    }
+  }
+},
+"TickerEntry": {
+  "oneOf": [
+    { "$ref": "#/definitions/CryptoTicker" },
+    { "$ref": "#/definitions/StockTicker" }
+  ]
+},
+// Phase F 完了後の最終形: venue_caps が required
+// Phase A〜E 期間中は required から venue_caps を外して optional 運用
+"StockTicker": {
+  "type": "object",
+  "required": ["kind", "symbol", "min_ticksize", "lot_size", "venue_caps"],
+  "properties": {
+    "kind": { "const": "stock" },
+    "symbol": { "type": "string" },
+    "display_symbol": { "type": "string" },
+    "min_ticksize": { "type": "number", "exclusiveMinimum": 0 },
+    "lot_size": { "type": "integer", "exclusiveMinimum": 0 },
+    "venue_caps": { "$ref": "#/definitions/VenueCaps" },
+    "tachibana": { "$ref": "#/definitions/TachibanaMeta" }
+  }
+},
+"VenueCaps": {
+  "type": "object",
+  "required": ["client_aggr_depth", "supports_spread_display"],
+  "properties": {
+    "client_aggr_depth": { "type": "boolean" },
+    "supports_spread_display": { "type": "boolean" },
+    "qty_norm_kind": { "enum": ["none", "contract", "lot"] }
+  }
+}
+```
+
+Rust 側は `EngineEvent::TickerInfo { tickers: Vec<TickerEntry> }` を typed enum で受ける。
+
+### 2.4 Rust 内部での `VenueCaps` 配置（重要）
+
+**`VenueCaps` を `TickerInfo` 本体に追加しない。** 理由:
+
+- [exchange/src/lib.rs:545](../../exchange/src/lib.rs) の `TickerInfo` は `#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]` で**識別子に近い値オブジェクト**として扱われている
+- map key として広く使われており、`Hash`/`Eq` の意味を変えると予測不能な regression を生む
+- 旧 `saved-state.json` 互換は [exchange/tests/ticker_info_state_migration.rs](../../exchange/tests/ticker_info_state_migration.rs) で守られており、フィールド追加は serde 互換にも波及する
+- `venue_caps` は識別子の一部ではなく**ランタイム capability**。型の役割が混ざる
+
+採用する設計:
+
+```rust
+// engine-client または app 層に追加
+pub struct VenueCapsStore {
+    inner: HashMap<Ticker, VenueCaps>,
+}
+
+impl VenueCapsStore {
+    pub fn upsert(&mut self, ticker: Ticker, caps: VenueCaps);
+    pub fn get(&self, ticker: &Ticker) -> Option<&VenueCaps>;
+}
+```
+
+- IPC 受信時に `TickerEntry` から `TickerInfo` と `VenueCaps` を**分離**して別経路で保存
+- UI/ladder/data 各層は `caps_store.get(&ticker)` で参照
+- 永続化対象から完全に除外（起動ごとに Python から再配信される）
+
+**代替案（採用しない）**: `TickerInfo` に `venue_caps: Option<VenueCaps>` を足し、`Hash/PartialEq/Eq` を手書きで「既存フィールドだけ比較」にする案。
+- 等価性が型シグネチャから読み取れない
+- フィールド追加時に毎回 Hash/Eq 手書き更新が必要で事故りやすい
+- serde roundtrip と runtime 等価性が乖離する
+
+---
+
+## 3. フェーズ分割
+
+案C は破壊的変更を含むため、**段階的後方互換 → 一斉切替 → クリーンアップ** で進める。各フェーズは独立に merge 可能。
+
+```
+Phase A: スキーマ硬化（後方互換あり）
+   ↓
+Phase B: capability 配信（optional）
+   ↓
+Phase C: Python 側正規化の一元化
+   ↓
+Phase D: Rust 側 venue 知識の除去
+   ↓
+Phase E: Rust 側正規化の no-op 化（debug_assert のみ）
+   ↓
+Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
+```
+
+各フェーズの完了条件・所要規模・リスクを以下に列挙する。
+
+---
+
+## 4. Phase A — IPC スキーマ硬化（後方互換あり）
+
+### 4.1 タスク
+
+| ID | 内容 | 場所 |
+|----|------|------|
+| A1 | `TickerEntry` discriminated union を schema 定義 | `docs/✅python-data-engine/schemas/events.json` |
+| A2 | Rust `dto.rs` に `TickerEntry` enum を追加（既存 `Vec<Value>` と並行） | `engine-client/src/dto.rs` |
+| A3 | パーサ: 受信時に `TickerEntry::Stock(...)` への parse を試行、失敗時は既存 `Value` 経路に fallback | `engine-client/src/backend.rs:510-575` |
+| A4 | Python: `list_tickers` の出力に `kind` フィールドを必ず付ける | `python/engine/exchanges/tachibana.py:list_tickers` |
+| A5 | スキーマ単体テスト（JSON Schema validator） | `python/tests/test_schemas.py`（新規）|
+
+### 4.2 完了条件
+
+- 既存の Tachibana / Crypto いずれの起動経路でも regression なし
+- Rust 起動ログに `parsed as typed TickerEntry: count=N` が出る
+- typed parse 失敗が出たら warn ログ + 旧経路で動作
+
+### 4.3 リスク
+
+- schema 検証ライブラリ追加（`jsonschema` Python パッケージ）の dep 追加
+- Tachibana 以外の venue（crypto）にも `kind: "crypto"` を付ける必要 → 既存全 adapter の改修
+
+### 4.4 テスト
+
+- `python/tests/test_schemas.py`: JSON Schema validator で events を検証
+- `engine-client/tests/ticker_info_typed.rs`（新規）: typed parse の roundtrip
+- e2e smoke: 起動ログで parsed as typed が確認できる
+
+---
+
+## 5. Phase B — VenueCaps の Python 配信
+
+### 5.1 タスク
+
+| ID | 内容 | 場所 |
+|----|------|------|
+| B1 | `VenueCaps` を `TickerEntry` に optional フィールドとして追加（IPC のみ）| schemas, dto.rs |
+| B2 | Python 側 `venue_caps()` を adapter 基底クラスに追加（abstract）| `python/engine/exchanges/base.py`（新規 or 既存）|
+| B3 | 各 adapter で `client_aggr_depth` / `supports_spread_display` を返す実装 | tachibana.py, hyperliquid.py 他 |
+| B4 | Rust 側に `VenueCapsStore`（sidecar `HashMap<Ticker, VenueCaps>`）を新設。`TickerInfo` 本体には触らない。受信ハンドラで `TickerInfo` と `VenueCaps` を分離保存 | `engine-client/src/venue_caps.rs`（新規）, `engine-client/src/backend.rs` 受信パス |
+| B5 | `is_depth_client_aggr()` 呼び出しを `caps_store.get(&ticker).map(\|c\| c.client_aggr_depth).unwrap_or_else(\|\| ticker.exchange.is_depth_client_aggr())` に置換 | 全 10 箇所（grep 結果参照）|
+| B6 | `VenueCapsStore` を UI/data 層に渡す経路を確保（既存の `EngineClient` ハンドル経由か、`pane.rs` の context に注入）| `src/`, `data/` |
+
+### 5.2 完了条件
+
+- 全 venue が `venue_caps` を送出
+- Rust 側 fallback パス（`unwrap_or_else`）を計測ログで監視し、本番で発火していないことを確認
+- `TickerInfo` の `Hash`/`Eq`/`serde` シグネチャに変更がない（`exchange/tests/ticker_info_state_migration.rs` が無改修で green）
+
+### 5.3 リスク
+
+- Hyperliquid を含む全 adapter の修正を一気にやらないと fallback に依存
+- 既存 `saved-state.json` には影響なし（`VenueCaps` は sidecar、永続化対象外）
+- `VenueCapsStore` の lifetime/共有方法（Arc<RwLock<...>> か channel か）の選択を誤ると UI 描画パスでロック競合 → 設計判断 Q6 として後述
+
+### 5.4 テスト
+
+- `python/tests/test_venue_caps.py`: 各 adapter が `venue_caps` を返す
+- `engine-client/tests/venue_caps_roundtrip.rs`: typed parse + fallback 経路
+
+---
+
+## 6. Phase C — Python 側正規化の一元化
+
+### 6.1 タスク
+
+| ID | 内容 | 場所 |
+|----|------|------|
+| C1 | `python/engine/exchanges/normalize.py`（新規）に `normalize_depth(depth, ticker_info)` / `normalize_trade(...)` / `normalize_kline(...)` を実装 | 新規 |
+| C2 | 各 adapter の depth/trade/kline 送出パスで normalize を必ず通す | tachibana.py 他 |
+| C3 | `tachibana_master.py:resolve_min_ticksize_for_issue` を snapshot 価格ベースで完成（B5 follow-up）| tachibana_master.py |
+| C4 | `list_tickers` を遅延化: 最初の snapshot 価格取得後に再 push（または初回 snapshot にメタ同梱）| tachibana.py |
+| C5 | 数量正規化 (`QtyNormalization`) ロジックを Python へ移管 | crypto adapter 群 |
+
+### 6.2 完了条件
+
+- Python 側ユニットテスト: 任意の生 depth に対し、normalize 後の price が `min_ticksize` の整数倍
+- Python 側ユニットテスト: 任意の生 depth qty に対し、normalize 後の qty が venue 単位整合
+- Tachibana の "alternating zeros" シナリオ（5379 円銘柄 + 5x multiplier）が Python 出力時点で正値
+
+### 6.3 リスク
+
+- Python 側に正規化バグが入ると全 venue が同時に死ぬ → ユニットテストを厚く
+- snapshot 価格取得まで `min_ticksize` が確定しないため list_tickers の挙動が変わる
+  - mitigation: 暫定 best_guess を送り、解決後に `TickerInfo` を再 push（イベントの再送許容）
+  - Rust 側は `TickerInfo` 再受信で `set_tick_size(pending)` 経路を再利用
+
+### 6.4 テスト
+
+- `python/tests/test_normalize_depth.py`: proptest 風に乱数 depth を normalize → assert
+- `python/tests/test_tachibana_ticksize_resolve.py`: 全 yobine band を網羅
+- `tests/e2e/smoke.sh` 拡張: ladder 描画後に「価格列が連続している」HTTP API 検証
+
+---
+
+## 7. Phase D — Rust 側 venue 知識の除去
+
+### 7.1 タスク
+
+| ID | 内容 | 場所 |
+|----|------|------|
+| D1 | `Exchange::is_depth_client_aggr()` を `#[deprecated]` 化、内部実装を `panic!("use VenueCapsStore::get(&ticker)")` に。Phase B で導入した `unwrap_or_else` fallback も全箇所削除 | `exchange/src/adapter.rs:469`, Phase B5 で書き換えた全 10 箇所 |
+| D2 | `TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32` を削除し、`min_ticksize` 欠落は `Result::Err` 化 | `engine-client/src/tachibana_meta.rs:33,137` |
+| D3 | `engine-client/src/backend.rs:526-541` の Tachibana 分岐を `TickerEntry::Stock { tachibana: Some(...) }` の typed match に置換 | backend.rs |
+| D4 | `parse_tachibana_ticker_dict` を `parse_stock_ticker_entry`（venue 非依存）にリネーム+汎用化 | tachibana_meta.rs → stock_meta.rs にリネーム |
+| D5 | `src/screen/dashboard/panel/ladder.rs:858-864` の `is_depth_client_aggr()` を `caps_store.get(&self.ticker_info.ticker).map(\|c\| c.supports_spread_display).unwrap_or(false)` に置換（fallback 値は描画安全な側を選ぶ）| ladder.rs |
+| D6 | `data/src/layout/pane.rs:302-304` の `is_depth_client_aggr()` 呼び出しも `caps_store` 参照に置換。`data` クレートが `VenueCapsStore` 参照を受け取れるよう context API を追加 | data/src/layout/pane.rs, src/ |
+
+### 7.2 完了条件
+
+- `grep -r 'is_depth_client_aggr' src/ data/ exchange/ engine-client/` がゼロ
+- `grep -r 'TACHIBANA_MIN_TICKSIZE_PLACEHOLDER' .` がゼロ
+- `cargo clippy -- -D warnings` clean
+
+### 7.3 リスク
+
+- 既存 `saved-state.json` を読み込んだ際、保存時の TickMultiplier × 旧 min_ticksize から計算された `step` が新 min_ticksize と整合しない可能性
+  - mitigation: 起動時に TickerInfo 受信後 `step = TickMultiplier × min_ticksize` で再計算（既存 path を活用）
+
+### 7.4 テスト
+
+- `engine-client/tests/ticker_info_required_fields.rs`: `min_ticksize` 欠落で Err
+- `data/src/panel/ladder.rs` proptest: 任意の (depth, step) で `regroup_from_raw` 出力 key が `step` の倍数 + qty 保存
+- saved-state migration テスト
+
+---
+
+## 8. Phase E — Rust 側正規化の no-op 化
+
+### 8.1 タスク
+
+| ID | 内容 | 場所 |
+|----|------|------|
+| E1 | `Depth::diff_price_levels` の `round_to_min_tick` を `debug_assert!(price.is_at_tick(min_ticksize))` に置換 | `exchange/src/depth.rs:93` |
+| E2 | `Depth::replace_all_with_qty_norm` の qty_norm 適用を debug_assert に置換 | `exchange/src/depth.rs:88-91` |
+| E3 | `LocalDepthCache::update_with_qty_norm` の `qty_norm` 引数を削除（または `#[deprecated]`）| `exchange/src/depth.rs:160-182` |
+| E4 | `apply_diff_levels`（backend.rs:1039-1068）の rounding を削除 | backend.rs |
+| E5 | `Price::is_at_tick(MinTicksize)` を `exchange/src/unit/price.rs` に追加 | price.rs |
+
+### 8.2 完了条件
+
+- release ビルドで rounding コードパスがゼロ（`cargo asm` か `cargo expand` で確認）
+- debug ビルドで 24h soak し `debug_assert` が一度も発火しない
+
+### 8.3 リスク
+
+- Python 側正規化バグが本番で発覚 → Rust 側で隠蔽されていたものが顕在化
+  - mitigation: Phase E 投入前に Python 側正規化を 1 週間以上 debug ビルドで運用し assert 無発火を確認
+
+### 8.4 テスト
+
+- `exchange/src/depth.rs` の既存テストを「正規化済み入力」前提に書き換え
+- `engine-client/tests/depth_assert.rs`: わざと未正規化 depth を流し debug ビルドで panic することを確認
+
+---
+
+## 9. Phase F — SCHEMA_MAJOR bump とクリーンアップ
+
+### 9.1 タスク
+
+| ID | 内容 | 場所 |
+|----|------|------|
+| F1 | `SCHEMA_MAJOR` を bump（現在値 +1）| `engine-client/src/lib.rs`, `python/engine/schemas.py` |
+| F2 | Phase A の typed parse fallback 経路を削除（`Vec<Value>` 経路撤去） | dto.rs, backend.rs |
+| F3 | `VenueCaps` を IPC `TickerEntry` で required 化（Phase B の optional 撤去）。**`TickerInfo` 本体には依然として持たせない**（sidecar 維持）| dto.rs, schemas |
+| F4 | `Exchange::is_depth_client_aggr()` メソッド本体を削除（`VenueCapsStore` 必須化）| adapter.rs |
+| F5 | `LocalDepthCache::update_with_qty_norm` の deprecated メソッド削除 | depth.rs |
+| F6 | CHANGELOG 更新 | `docs/✅python-data-engine/schemas/CHANGELOG.md` |
+
+### 9.2 完了条件
+
+- 旧スキーマでハンドシェイク不可（SCHEMA_MAJOR mismatch）
+- 全テスト green、e2e smoke 緑
+
+### 9.3 リスク
+
+- 旧 Rust ↔ 新 Python（または逆）の組み合わせがハンドシェイクで切れる
+  - mitigation: SCHEMA_MAJOR bump をリリースノートに明記。`start_or_attach` の自動プローブが MAJOR mismatch で再 spawn する既存挙動でカバー
+
+---
+
+## 10. ロールバック計画
+
+各フェーズが独立 PR として merge されるため、フェーズ単位で revert 可能。
+
+| フェーズ | revert 影響 |
+|---------|------------|
+| A | typed parse 不使用、無型 Value 経路に戻る。実害なし |
+| B | venue_caps 未配信、enum マッチ fallback で動作 |
+| C | **Python 正規化が抜ける → Rust 側の Phase E 前なら救済される**。Phase E 後は revert 不可（Phase E も同時 revert 必須） |
+| D | enum マッチ復活、placeholder 復活 |
+| E | Rust 側 rounding 復活、防衛的に動作 |
+| F | SCHEMA_MAJOR 戻し、旧 fallback 経路復活 |
+
+**重要**: Phase C と E は 1 セット。E を先行投入禁止。C 投入後に soak 期間を置いてから E に進む。
+
+---
+
+## 11. 検証マトリクス
+
+各フェーズ完了時に下記を必ず実行。
+
+| 検証 | A | B | C | D | E | F |
+|------|---|---|---|---|---|---|
+| `cargo test --workspace` | ✅ | ✅ | — | ✅ | ✅ | ✅ |
+| `uv run pytest python/tests/ -v` | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| `bash tests/e2e/smoke.sh`（30s）| ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `OBSERVE_S=120 bash tests/e2e/smoke.sh` | — | — | ✅ | ✅ | ✅ | ✅ |
+| `cargo clippy -- -D warnings` | ✅ | ✅ | — | ✅ | ✅ | ✅ |
+| Tachibana demo で 5379 銘柄の Ladder 視認 | — | — | ✅ | ✅ | ✅ | ✅ |
+| Hyperliquid demo で板表示視認 | — | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `/ipc-schema-check` skill | ✅ | ✅ | — | — | — | ✅ |
+| 24h debug soak（assert 無発火）| — | — | — | — | ✅ | — |
+
+---
+
+## 12. 追加すべきテスト一覧
+
+| ファイル | 種別 | 概要 |
+|---------|------|------|
+| `python/tests/test_schemas.py` | unit | events.json を JSON Schema validator で検証 |
+| `python/tests/test_venue_caps.py` | unit | 全 adapter が venue_caps を返す |
+| `python/tests/test_normalize_depth.py` | property | 任意 depth → normalize → tick 整合 |
+| `python/tests/test_normalize_qty.py` | property | 任意 qty → venue 単位整合 |
+| `python/tests/test_tachibana_ticksize_resolve.py` | parametrized | 全 yobine band を網羅 |
+| `engine-client/tests/ticker_info_typed.rs` | integration | typed roundtrip + fallback |
+| `engine-client/tests/ticker_info_required_fields.rs` | integration | min_ticksize 欠落で Err |
+| `engine-client/tests/venue_caps_roundtrip.rs` | integration | venue_caps 配信経路 |
+| `engine-client/tests/depth_assert.rs` | integration | 未正規化 depth で debug panic |
+| `data/src/panel/ladder.rs` の proptest 追加 | property | regroup_from_raw の不変条件 |
+| `tests/e2e/ladder_continuous.sh` | e2e | HTTP API で Ladder 価格列の連続性検証 |
+
+---
+
+## 13. ドキュメント更新
+
+| 場所 | 内容 |
+|------|------|
+| `docs/✅python-data-engine/spec.md` | 不変条件（§2.1）と責務マトリクス（§2.2）を反映 |
+| `docs/✅python-data-engine/current-architecture.md` | Phase 完了ごとに最新化 |
+| `docs/✅python-data-engine/schemas/CHANGELOG.md` | Phase A, B, F それぞれで version bump 記録 |
+| `.claude/CLAUDE.md` | "Python が depth/trade/kline の正規化を保証する" を追記 |
+| `.claude/skills/bug-postmortem/MISSES.md` | 本リファクタの動機（alternating zeros + IPC 無型）を追加 |
+
+---
+
+## 14. スケジュール感（目安）
+
+| フェーズ | 作業規模 | 推奨期間 |
+|---------|---------|---------|
+| Phase A | 中 | 1〜2 日 |
+| Phase B | 中 | 2〜3 日 |
+| Phase C | 大 | 3〜5 日 + soak 1 週間 |
+| Phase D | 中 | 1〜2 日 |
+| Phase E | 小 | 1 日 + soak 24h |
+| Phase F | 小 | 0.5 日 |
+
+合計実装時間 ~10 営業日 + soak ~1.5 週間。並行実装オーケストレーション（`/parallel-agent-dev`）適用可能箇所:
+
+- Phase A2/A3 と A4 は Rust/Python 別エージェント並列
+- Phase B3 の各 adapter 修正は venue 単位で並列
+- Phase D の各 grep 箇所修正は同一 PR 内で並列
+
+---
+
+## 15. 開いている設計判断（要決定）
+
+| ID | 判断事項 | 候補 |
+|----|---------|------|
+| Q1 | `min_ticksize` 解決前の `TickerInfo` 送出をどうするか | (a) 暫定値で送り後で再 push / (b) 解決まで遅延 / (c) 必須欠落時は Err |
+| Q2 | `venue_caps` を `TickerEntry` 内に持つか別 event か | **(a) TickerEntry 内（IPC のみ）に確定**。Rust 永続モデルには載せない（§2.4） |
+| Q3 | 旧 `saved-state.json` の TickMultiplier 互換戦略 | (a) 起動時 step 再計算（既存挙動） / (b) migration 関数 / (c) リセット |
+| Q4 | Phase F の SCHEMA_MAJOR bump 単位 | (a) 一度に bump / (b) フェーズごとに細かく bump |
+| Q5 | 未正規化 depth 検出時の release 挙動 | (a) silent（trust） / (b) warn ログ / (c) tracing event |
+| Q6 | `VenueCapsStore` の共有方式 | (a) `Arc<RwLock<HashMap<..>>>` / (b) `EngineClient` ハンドル経由の `&self` 参照 / (c) Iced Message で配信し各 pane 内に複製保持 |
+
+### 決定タイミング
+
+| 質問 | 確定期限 | 理由 |
+|------|---------|------|
+| Q1 | **Phase A 着手前** | スキーマ設計（A1）と Python 側送出戦略（A4, C4）に直結 |
+| Q2 | **確定済**（§2.4 / Q2 = a） | — |
+| Q3 | **Phase D 着手前** | saved-state migration の有無を D の段階で決める |
+| Q4 | **Phase A 着手前** | Phase F の単位を見据えて A の互換戦略を決める必要 |
+| Q5 | **Phase E 着手前** | release 挙動は Phase E の debug_assert 設計と一体 |
+| Q6 | **Phase B 着手前** | `VenueCapsStore` は Phase B の実装詳細。Phase A は schema/typed parse のみで Q6 に依存しない |
+
+Q1, Q4 を `/council` で先行確定 → Phase A 着手 → Phase B 着手前に Q6 を `/council` → 以降フェーズごとに残る Q を順次確定、で進められる。
+
+---
+
+## 16. 関連ドキュメント
+
+- [fix-min-ticksize-fallback-2026-05-01.md](./fix-min-ticksize-fallback-2026-05-01.md) — 直近のスパース表示 fix（本リファクタの動機）
+- [spec.md](./spec.md) — IPC 全体仕様
+- [current-architecture.md](./current-architecture.md) — 現状アーキテクチャ
+- [schemas/events.json](./schemas/events.json) — 改修対象スキーマ
+- [open-questions.md](./open-questions.md) — Q1〜Q5 を追記

@@ -377,10 +377,8 @@ impl canvas::Program<Message> for Ladder {
                 }
 
                 if self.config.show_chase_tracker {
-                    let left_gap_mid_x =
-                        cols.sell.1 + (layout.inside_pad_px + COL_PADDING) * 0.5;
-                    let right_gap_mid_x =
-                        cols.buy.0 - (layout.inside_pad_px + COL_PADDING) * 0.5;
+                    let left_gap_mid_x = cols.sell.1 + (layout.inside_pad_px + COL_PADDING) * 0.5;
+                    let right_gap_mid_x = cols.buy.0 - (layout.inside_pad_px + COL_PADDING) * 0.5;
 
                     self.draw_chase_trail(
                         frame,
@@ -549,8 +547,14 @@ impl Ladder {
     const NUMBER_OF_COLUMN_GAPS: f32 = 4.0;
 
     fn price_sample_text_for_book(&self, vb: &VisibleBook) -> String {
-        let a = vb.best_ask.map(|p| self.format_price(p)).unwrap_or_default();
-        let b = vb.best_bid.map(|p| self.format_price(p)).unwrap_or_default();
+        let a = vb
+            .best_ask
+            .map(|p| self.format_price(p))
+            .unwrap_or_default();
+        let b = vb
+            .best_bid
+            .map(|p| self.format_price(p))
+            .unwrap_or_default();
         if a.len() >= b.len() { a } else { b }
     }
 
@@ -935,10 +939,8 @@ impl Ladder {
                     let dy = end_y - start_y;
                     if dy.abs() > pad_to_circle {
                         let line_end_y = end_y - dy.signum() * pad_to_circle;
-                        let line_path = Path::line(
-                            Point::new(pos_x, start_y),
-                            Point::new(pos_x, line_end_y),
-                        );
+                        let line_path =
+                            Path::line(Point::new(pos_x, start_y), Point::new(pos_x, line_end_y));
                         frame.stroke(
                             &line_path,
                             Stroke::default().with_color(color).with_width(stroke_w),
@@ -991,8 +993,12 @@ mod tests {
         let step = default_step();
         let best_bid = Price::from_f32_lossy(1000.0);
         let best_ask = best_bid.add_steps(1, step);
-        ladder.orderbook[Side::Bid.idx()].orders.insert(best_bid, Qty::default());
-        ladder.orderbook[Side::Ask.idx()].orders.insert(best_ask, Qty::default());
+        ladder.orderbook[Side::Bid.idx()]
+            .orders
+            .insert(best_bid, Qty::default());
+        ladder.orderbook[Side::Ask.idx()]
+            .orders
+            .insert(best_ask, Qty::default());
 
         let bounds = iced::Rectangle {
             x: 0.0,
@@ -1229,12 +1235,10 @@ mod tests {
 
         let bid_price = Price::from_f32_lossy(5379.0);
         let ask_price = Price::from_f32_lossy(5380.0);
-        ladder
-            .orderbook[Side::Bid.idx()]
+        ladder.orderbook[Side::Bid.idx()]
             .orders
             .insert(bid_price, Qty::from_f32_lossy(6200.0));
-        ladder
-            .orderbook[Side::Ask.idx()]
+        ladder.orderbook[Side::Ask.idx()]
             .orders
             .insert(ask_price, Qty::from_f32_lossy(2900.0));
 
