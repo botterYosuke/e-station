@@ -288,8 +288,65 @@
         "venue": { "type": "string" },
         "tickers": {
           "type": "array",
-          "items": { "type": "object" }
+          "items": { "$ref": "#/$defs/TickerEntry" }
         }
+      }
+    },
+    "TickerEntry": {
+      "description": "Phase A: discriminated union on 'kind'. Phase F will make venue_caps required.",
+      "oneOf": [
+        { "$ref": "#/$defs/StockTicker" },
+        { "$ref": "#/$defs/CryptoTicker" }
+      ]
+    },
+    "StockTicker": {
+      "type": "object",
+      "required": ["kind", "symbol"],
+      "properties": {
+        "kind": { "const": "stock" },
+        "symbol": { "type": "string" },
+        "display_symbol": { "type": "string" },
+        "display_name_ja": { "type": "string" },
+        "min_ticksize": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Phase A: optional (fallback 1.0 in Rust). Required in Phase D."
+        },
+        "lot_size": { "type": ["integer", "null"] },
+        "min_qty": { "type": ["number", "null"] },
+        "quote_currency": { "type": "string" },
+        "yobine_code": { "type": "string" },
+        "sizyou_c": { "type": "string" },
+        "venue_caps": {
+          "$ref": "#/$defs/VenueCaps",
+          "description": "Phase B: optional. Required in Phase F."
+        }
+      }
+    },
+    "CryptoTicker": {
+      "type": "object",
+      "required": ["kind", "symbol", "min_ticksize", "min_qty"],
+      "properties": {
+        "kind": { "const": "crypto" },
+        "symbol": { "type": "string" },
+        "display_symbol": { "type": "string" },
+        "min_ticksize": { "type": "number", "exclusiveMinimum": 0 },
+        "min_qty": { "type": "number", "exclusiveMinimum": 0 },
+        "contract_size": { "type": "number", "exclusiveMinimum": 0 },
+        "venue_caps": {
+          "$ref": "#/$defs/VenueCaps",
+          "description": "Phase B: optional. Required in Phase F."
+        }
+      }
+    },
+    "VenueCaps": {
+      "description": "Phase B: delivered in TickerEntry IPC only. Not stored in TickerInfo (sidecar VenueCapsStore).",
+      "type": "object",
+      "required": ["client_aggr_depth", "supports_spread_display"],
+      "properties": {
+        "client_aggr_depth": { "type": "boolean" },
+        "supports_spread_display": { "type": "boolean" },
+        "qty_norm_kind": { "enum": ["none", "contract", "lot"] }
       }
     },
     "TickerStats": {

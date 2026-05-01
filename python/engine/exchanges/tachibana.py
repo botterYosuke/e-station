@@ -452,6 +452,7 @@ class TachibanaWorker(ExchangeWorker):
                 lot_size = None
 
             entry: dict[str, Any] = {
+                "kind": "stock",
                 "symbol": code,
                 "display_name_ja": display_name_ja,
                 "display_symbol": display_symbol,

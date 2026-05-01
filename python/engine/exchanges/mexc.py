@@ -283,6 +283,7 @@ class MexcWorker(ExchangeWorker):
             min_ticksize = 10.0 ** (-precision)
             result.append(
                 {
+                    "kind": "crypto",
                     "symbol": item["symbol"],
                     "min_ticksize": min_ticksize,
                     "min_qty": min_qty,
@@ -329,6 +330,7 @@ class MexcWorker(ExchangeWorker):
             self._contract_sizes[symbol] = contract_size
             result.append(
                 {
+                    "kind": "crypto",
                     "symbol": symbol,
                     "min_ticksize": price_unit,
                     "min_qty": min_qty,

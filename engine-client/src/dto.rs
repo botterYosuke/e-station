@@ -1116,3 +1116,61 @@ pub struct OiPoint {
     pub ts_ms: i64,
     pub open_interest: String,
 }
+
+// ── Phase A: typed TickerEntry (A2) ──────────────────────────────────────────
+//
+// `EngineEvent::TickerInfo.tickers` は引き続き `Vec<serde_json::Value>` だが、
+// backend.rs 受信時に各 Value を `TickerEntry` として parse を試みる。
+// Phase F で `Vec<TickerEntry>` に完全移行する。
+
+/// Phase A: typed ticker entry — discriminated on the `kind` field.
+///
+/// `EngineEvent::TickerInfo.tickers` is still `Vec<serde_json::Value>`,
+/// but the backend attempts `serde_json::from_value::<TickerEntry>` for each
+/// element and falls back to the existing `Value` path on failure.
+/// Phase F will replace `Vec<Value>` with `Vec<TickerEntry>`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TickerEntry {
+    Stock(StockTickerEntry),
+    Crypto(CryptoTickerEntry),
+}
+
+/// Typed stock ticker entry from `EngineEvent::TickerInfo`.
+///
+/// `min_ticksize` is optional in Phase A (Rust falls back to
+/// `TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32 = 1.0`).
+/// It becomes required in Phase D once Python guarantees the resolved value.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct StockTickerEntry {
+    pub symbol: String,
+    #[serde(default)]
+    pub display_symbol: Option<String>,
+    #[serde(default)]
+    pub display_name_ja: Option<String>,
+    /// Phase A: optional (Rust fallback 1.0). Phase D: required.
+    #[serde(default)]
+    pub min_ticksize: Option<f32>,
+    #[serde(default)]
+    pub lot_size: Option<u32>,
+    #[serde(default)]
+    pub min_qty: Option<f32>,
+    #[serde(default)]
+    pub quote_currency: Option<String>,
+    #[serde(default)]
+    pub yobine_code: Option<String>,
+    #[serde(default)]
+    pub sizyou_c: Option<String>,
+}
+
+/// Typed crypto ticker entry from `EngineEvent::TickerInfo`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CryptoTickerEntry {
+    pub symbol: String,
+    #[serde(default)]
+    pub display_symbol: Option<String>,
+    pub min_ticksize: f32,
+    pub min_qty: f32,
+    #[serde(default)]
+    pub contract_size: Option<f32>,
+}

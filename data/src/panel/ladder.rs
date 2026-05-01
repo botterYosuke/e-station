@@ -72,6 +72,10 @@ impl GroupedDepth {
         }
     }
 
+    /// Step-rounded depth copy — for grouped (heatmap-style) display where rows are
+    /// bucketed by `step`. Do NOT use for Ladder sparse display; use `copy_raw` instead.
+    /// Calling this for Ladder would produce step-rounded keys that no longer match the
+    /// raw prices stored in `price_offsets`, breaking all price→screen Y lookups.
     pub fn regroup_from_raw(&mut self, levels: &BTreeMap<Price, Qty>, side: Side, step: PriceStep) {
         self.orders.clear();
         for (price, qty) in levels.iter() {
@@ -81,7 +85,6 @@ impl GroupedDepth {
     }
 
     pub fn copy_raw(&mut self, levels: &BTreeMap<Price, Qty>) {
-        self.orders.clear();
         self.orders.clone_from(levels);
     }
 

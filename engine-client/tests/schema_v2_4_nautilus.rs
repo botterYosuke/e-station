@@ -22,10 +22,11 @@ fn schema_minor_is_7_for_positions() {
     // レビュー反映 2026-04-29: LoadReplayData/ReplayLoadBody.strategy_init_kwargs を Map 型に
     // 統一したため SCHEMA_MINOR を 5 → 6 に bump。
     // SCHEMA_MINOR を 6 → 7 に bump（Positions Phase）。
+    // SCHEMA_MINOR を 7 → 8 に bump（Phase A: TickerEntry discriminated union）。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        7,
-        "SCHEMA_MINOR must be 7 after Positions Phase bump"
+        8,
+        "SCHEMA_MINOR must be 8 after Phase A (TickerEntry typed schema)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

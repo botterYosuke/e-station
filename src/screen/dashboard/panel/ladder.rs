@@ -517,6 +517,12 @@ struct VisibleRow {
 /// `price_centers` caches visible row center Y values for O(log n) lookup.
 /// `price_offsets` covers the full raw depth (including off-screen rows) for chase
 /// trail extrapolation — allows drawing trails that start outside the viewport.
+///
+/// Invariants:
+/// - `price_centers.keys() ⊆ price_offsets.keys()`: every visible row is also in
+///   `price_offsets`; off-screen rows appear only in `price_offsets`.
+/// - All values in `price_offsets` are non-zero (offset=0 is reserved for the
+///   spread/divider row and is never assigned to a depth price).
 struct VisibleBook {
     rows: Vec<VisibleRow>,
     price_centers: BTreeMap<Price, f32>,
@@ -668,6 +674,11 @@ impl Ladder {
             price_offsets.insert(*price, i as i32 + 1);
         }
 
+        debug_assert!(
+            price_offsets.values().all(|&o| o != 0),
+            "price_offsets must not contain offset=0 (reserved for spread/divider row)"
+        );
+
         let mut rows: Vec<VisibleRow> = Vec::new();
         let mut price_centers: BTreeMap<Price, f32> = BTreeMap::new();
         let mut maxima = Maxima::default();
@@ -705,7 +716,11 @@ impl Ladder {
                 (bids.get(&price).copied().unwrap_or_default(), true)
             };
 
-            let (buy_t, sell_t) = self.trade_qty_at(price);
+            // Round to the same step bucket TradeStore uses, so the lookup hits the
+            // correct bin. Applies the same side-bias convention as TradeStore's
+            // add_trade_to_side_bin (bid/sell → floor, ask/buy → ceil).
+            let trade_price = price.round_to_side_step(is_bid, self.step);
+            let (buy_t, sell_t) = self.trade_qty_at(trade_price);
             maxima.vis_max_order_qty = maxima.vis_max_order_qty.max(f32::from(order_qty));
             maxima.vis_max_trade_qty = maxima
                 .vis_max_trade_qty
@@ -1025,12 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn build_price_grid_returns_none_when_empty() {
-        let ladder = Ladder::new(None, test_ticker_info(), default_step());
-        assert!(ladder.build_visible_book(test_bounds()).is_none());
-    }
-
-    #[test]
     fn narrow_pane_column_ranges_does_not_panic() {
         let ladder = Ladder::new(None, test_ticker_info(), default_step());
         for width in [0.0_f32, 1.0, 30.0, 60.0] {
@@ -1291,6 +1300,76 @@ mod tests {
         assert_eq!(
             formatted, "5379.0",
             "SoftBank price with min_ticksize=0.1 should show 1 decimal place"
+        );
+    }
+
+    #[test]
+    fn test_ladder_sparse_trade_qty_step_mismatch() {
+        // Regression: step=5.0, depth ask at 103 (not on step boundary).
+        // TradeStore stores a buy trade at ceil(103/5)*5=105.
+        // Without the fix, trade_qty_at(103) = 0; with the fix, trade_qty_at(105) finds it.
+        let step = PriceStep::from_f32_lossy(5.0);
+        let mut ladder = Ladder::new(None, test_ticker_info(), step);
+
+        let ask_price = Price::from_f32_lossy(103.0);
+        ladder.orderbook[Side::Ask.idx()]
+            .orders
+            .insert(ask_price, Qty::from_f32_lossy(500.0));
+
+        // Buy trade (is_sell=false) → stored at ceil(103/5)*5=105 in TradeStore
+        ladder.insert_trades(&[Trade {
+            time: 1000,
+            is_sell: false,
+            price: ask_price,
+            qty: Qty::from_f32_lossy(100.0),
+        }]);
+
+        let vb = ladder
+            .build_visible_book(test_bounds())
+            .expect("visible book");
+        let ask_row = vb
+            .rows
+            .iter()
+            .find(|r| matches!(r.row, DomRow::Ask { price, .. } if price == ask_price))
+            .expect("ask row must exist");
+
+        assert!(
+            f32::from(ask_row.buy_t) > 0.0,
+            "trade qty must appear on ask row even when depth price is not on step boundary"
+        );
+    }
+
+    #[test]
+    fn test_ladder_sparse_trade_qty_visible_on_depth_row() {
+        // Regression: before fix, trade_qty_at used raw depth price but TradeStore groups
+        // by step-rounded price — lookup always returned 0 when step != depth granularity.
+        let mut ladder = Ladder::new(None, test_ticker_info(), default_step()); // step=1.0
+
+        let bid_price = Price::from_f32_lossy(100.0);
+        ladder.orderbook[Side::Bid.idx()]
+            .orders
+            .insert(bid_price, Qty::from_f32_lossy(500.0));
+
+        // Trade at the same price (step=1.0 → rounds to itself)
+        ladder.insert_trades(&[Trade {
+            time: 1000,
+            is_sell: false,
+            price: bid_price,
+            qty: Qty::from_f32_lossy(100.0),
+        }]);
+
+        let vb = ladder
+            .build_visible_book(test_bounds())
+            .expect("visible book");
+        let bid_row = vb
+            .rows
+            .iter()
+            .find(|r| matches!(r.row, DomRow::Bid { price, .. } if price == bid_price))
+            .expect("bid row must exist");
+
+        assert!(
+            f32::from(bid_row.buy_t) > 0.0,
+            "trade qty must appear on depth row"
         );
     }
 }

@@ -186,17 +186,42 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 
 | ID | 内容 | 場所 |
 |----|------|------|
-| A1 | `TickerEntry` discriminated union を schema 定義 | `docs/✅python-data-engine/schemas/events.json` |
-| A2 | Rust `dto.rs` に `TickerEntry` enum を追加（既存 `Vec<Value>` と並行） | `engine-client/src/dto.rs` |
-| A3 | パーサ: 受信時に `TickerEntry::Stock(...)` への parse を試行、失敗時は既存 `Value` 経路に fallback | `engine-client/src/backend.rs:510-575` |
-| A4 | Python: `list_tickers` の出力に `kind` フィールドを必ず付ける | `python/engine/exchanges/tachibana.py:list_tickers` |
-| A5 | スキーマ単体テスト（JSON Schema validator） | `python/tests/test_schemas.py`（新規）|
+| A1 ✅ | `TickerEntry` discriminated union を schema 定義 | `docs/✅python-data-engine/schemas/events.json` |
+| A2 ✅ | Rust `dto.rs` に `TickerEntry` enum を追加（既存 `Vec<Value>` と並行） | `engine-client/src/dto.rs` |
+| A3 ✅ | パーサ: 受信時に `TickerEntry::Stock(...)` への parse を試行、失敗時は既存 `Value` 経路に fallback | `engine-client/src/backend.rs:510-575` |
+| A4 ✅ | Python: `list_tickers` の出力に `kind` フィールドを必ず付ける | `python/engine/exchanges/tachibana.py:list_tickers` |
+| A5 ✅ | スキーマ単体テスト（JSON Schema validator） | `python/tests/test_events_json_schema.py`（新規）|
 
 ### 4.2 完了条件
 
-- 既存の Tachibana / Crypto いずれの起動経路でも regression なし
-- Rust 起動ログに `parsed as typed TickerEntry: count=N` が出る
-- typed parse 失敗が出たら warn ログ + 旧経路で動作
+- 既存の Tachibana / Crypto いずれの起動経路でも regression なし ✅
+- Rust 起動ログに `parsed as typed TickerEntry: count=N` が出る ✅（backend.rs 実装済み）
+- typed parse 失敗が出たら warn ログ + 旧経路で動作 ✅
+
+### 4.5 Phase A 完了メモ（2026-05-01）
+
+**実施内容:**
+- A1: events.json に TickerEntry/StockTicker/CryptoTicker/VenueCaps 定義を追加（$defs）
+- A2: dto.rs に TickerEntry enum（Stock/Crypto）+ StockTickerEntry/CryptoTickerEntry 構造体を追加
+- A3: backend.rs の TickerInfo ハンドラを typed parse 優先 + fallback に更新。ログ: `TickerInfo: typed=N fallback=0`
+- A4: 全 adapter（tachibana/hyperliquid/binance/bybit/mexc/okex）に kind フィールド追加
+- A5: python/tests/test_events_json_schema.py 新規作成（13 テスト all green）
+- SCHEMA_MINOR: 7 → 8（Rust + Python 両方）
+- engine-client/tests/ticker_info_typed.rs 新規（5 テスト all green）
+
+**落とし穴:**
+- Python エージェントが tachibana.py を過剰に削減した（build_ws_url 等を削除）→ git restore で元に戻し `kind` のみ追加
+- 両 worktree の lib.rs 変更（re-export vs SCHEMA_MINOR）は手動でマージが必要だった
+
+**落とし穴 (追記):**
+- Rust エージェントが dto.rs を truncated 版に差し替え、`GetPositions`/`PositionRecordWire`/`PositionsUpdated` を削除 → 手動で 3 箇所復元
+- `schema_v2_4_nautilus.rs::schema_minor_is_7_for_positions` テストの期待値を 7→8 に更新（リグレッションガード）
+- Python エージェントが tachibana.py を過剰に削減（build_ws_url 等削除）→ `git checkout HEAD` で元に戻し `kind: "stock"` のみ追加
+
+**検証結果（修正後）:**
+- `cargo test -p flowsurface-engine-client`: 全スイート green（0 failed / 0 errored）
+- `uv run pytest python/tests/ -q`: 1401 passed（test_tachibana_buying_power は pre-existing WIP 失敗）
+- `ipc-schema-check`: MAJOR=2/2, MINOR=8/8, compression=None → 全 OK
 
 ### 4.3 リスク
 
@@ -450,12 +475,12 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 
 | ID | 判断事項 | 候補 |
 |----|---------|------|
-| Q1 | `min_ticksize` 解決前の `TickerInfo` 送出をどうするか | (a) 暫定値で送り後で再 push / (b) 解決まで遅延 / (c) 必須欠落時は Err |
-| Q2 | `venue_caps` を `TickerEntry` 内に持つか別 event か | **(a) TickerEntry 内（IPC のみ）に確定**。Rust 永続モデルには載せない（§2.4） |
+| Q1 | `min_ticksize` 解決前の `TickerInfo` 送出をどうするか | **✅ 確定: (a) 暫定値で送り後で再 push**。Council 4声3対1。再 push 後の状態遷移テスト必須（競合状態カバレッジ）。Skeptic 指摘：再 push で板初期化後に tick_size だけ変わる整合性を単体テストで固定すること |
+| Q2 | `venue_caps` を `TickerEntry` 内に持つか別 event か | **✅ 確定: (a) TickerEntry 内（IPC のみ）**。Rust 永続モデルには載せない（§2.4） |
 | Q3 | 旧 `saved-state.json` の TickMultiplier 互換戦略 | (a) 起動時 step 再計算（既存挙動） / (b) migration 関数 / (c) リセット |
-| Q4 | Phase F の SCHEMA_MAJOR bump 単位 | (a) 一度に bump / (b) フェーズごとに細かく bump |
+| Q4 | Phase F の SCHEMA_MAJOR bump 単位 | **✅ 確定: (a) Phase F で一度だけ MAJOR +1**。Council 全4声一致。SCHEMA_MINOR はフェーズ完了ごとに上げる（Phase A 完了時も MINOR bump）。A〜E は後方互換維持なので MAJOR bump は意味論的に不正 |
 | Q5 | 未正規化 depth 検出時の release 挙動 | (a) silent（trust） / (b) warn ログ / (c) tracing event |
-| Q6 | `VenueCapsStore` の共有方式 | (a) `Arc<RwLock<HashMap<..>>>` / (b) `EngineClient` ハンドル経由の `&self` 参照 / (c) Iced Message で配信し各 pane 内に複製保持 |
+| Q6 | `VenueCapsStore` の共有方式 | **✅ 確定: (b) backend-owned / EngineClient-handle-mediated**。`VenueCapsStore` を `EngineClientBackend` の private sidecar にし、reconnect 時に backend 再構築でリセット。UI には narrow lookup handle のみ公開（`ticker_meta_handle` 類似パターン）。UI render 経路は derived booleans に projection して hot path でのロック回避を推奨。内部は `Arc<RwLock<HashMap<..>>>` でも可だがそれは実装詳細 |
 
 ### 決定タイミング
 

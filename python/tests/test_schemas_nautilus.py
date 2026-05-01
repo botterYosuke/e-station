@@ -4,7 +4,7 @@
 - Event  系: EngineStarted / EngineStopped / ReplayDataLoaded /
              PositionOpened / PositionClosed
 - Literal 制約違反 (engine="Bogus" / granularity="Bogus") で ValidationError
-- SCHEMA_MINOR == 6
+- SCHEMA_MINOR == 8 (Phase A: kind フィールド追加)
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ def _roundtrip(model_cls, data: dict) -> dict:
 # ── Schema version ──────────────────────────────────────────────────────────
 
 
-def test_schema_minor_is_7_for_positions() -> None:
-    # PP1: SCHEMA_MINOR を 6 → 7 に bump (GetPositions / PositionsUpdated 追加)
-    assert s.SCHEMA_MINOR == 7
+def test_schema_minor_is_8_for_phase_a() -> None:
+    # Phase A: SCHEMA_MINOR を 6 → 8 に bump (kind フィールド追加 + PositionsUpdated 追加)
+    assert s.SCHEMA_MINOR == 8
     assert s.SCHEMA_MAJOR == 2
 
 

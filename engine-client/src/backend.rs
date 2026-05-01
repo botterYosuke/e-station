@@ -520,60 +520,160 @@ impl VenueBackend for EngineClientBackend {
                                     exchange::Ticker,
                                     crate::tachibana_meta::TickerDisplayMeta,
                                 )> = Vec::new();
+                                // A3: typed-parse counters for observability.
+                                let mut typed_count: usize = 0;
+                                let mut fallback_count: usize = 0;
                                 let map: TickerMetadataMap = tickers
                                     .iter()
                                     .filter_map(|t| {
-                                        if market_kind == MarketKind::Stock {
-                                            // B3 HIGH-U-9 + B4: route Tachibana stock dicts
-                                            // through the typed parser and stash the display
-                                            // meta in `self.ticker_meta` so the UI can do
-                                            // Japanese-name incremental search.
-                                            let (ticker, info, meta) =
-                                                crate::tachibana_meta::parse_tachibana_ticker_dict(
-                                                    t, exchange,
-                                                )?;
-                                            if meta.display_name_ja().is_none() {
-                                                log::debug!(
-                                                    "TickerInfo: display_name_ja absent for {ticker}"
+                                        // A3: attempt typed parse for every entry first.
+                                        // On success, use the typed path; on failure, fall
+                                        // back to the existing Value-based path.
+                                        match serde_json::from_value::<crate::dto::TickerEntry>(
+                                            t.clone(),
+                                        ) {
+                                            Ok(crate::dto::TickerEntry::Stock(s)) => {
+                                                typed_count += 1;
+                                                let symbol = &s.symbol;
+                                                if !symbol.is_ascii()
+                                                    || symbol.len() > Ticker::MAX_LEN as usize
+                                                    || symbol.contains('|')
+                                                {
+                                                    return None;
+                                                }
+                                                let display_symbol =
+                                                    s.display_symbol.as_deref().filter(|d| {
+                                                        d.is_ascii()
+                                                            && d.len() <= Ticker::MAX_LEN as usize
+                                                            && !d.contains('|')
+                                                    });
+                                                let ticker = Ticker::new_with_display(
+                                                    symbol,
+                                                    exchange,
+                                                    display_symbol,
                                                 );
+                                                let min_ticksize = s.min_ticksize.unwrap_or(
+                                                    crate::tachibana_meta::TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32,
+                                                );
+                                                let lot_size = s.lot_size.unwrap_or(100);
+                                                let min_qty = s
+                                                    .min_qty
+                                                    .unwrap_or(lot_size as f32);
+                                                let info = TickerInfo::new_stock(
+                                                    ticker,
+                                                    min_ticksize,
+                                                    min_qty,
+                                                    lot_size,
+                                                );
+                                                let meta =
+                                                    crate::tachibana_meta::TickerDisplayMeta {
+                                                        display_name_ja: s.display_name_ja,
+                                                        yobine_code: s.yobine_code,
+                                                        sizyou_c: s.sizyou_c,
+                                                    };
+                                                if meta.display_name_ja().is_none() {
+                                                    log::debug!(
+                                                        "TickerInfo: display_name_ja absent for \
+                                                         {ticker}"
+                                                    );
+                                                }
+                                                staged_meta.push((ticker, meta));
+                                                Some((ticker, Some(info)))
                                             }
-                                            staged_meta.push((ticker, meta));
-                                            return Some((ticker, Some(info)));
+                                            Ok(crate::dto::TickerEntry::Crypto(c)) => {
+                                                typed_count += 1;
+                                                let symbol = &c.symbol;
+                                                if !symbol.is_ascii()
+                                                    || symbol.len() > Ticker::MAX_LEN as usize
+                                                    || symbol.contains('|')
+                                                {
+                                                    return None;
+                                                }
+                                                let display_symbol =
+                                                    c.display_symbol.as_deref().filter(|d| {
+                                                        d.is_ascii()
+                                                            && d.len() <= Ticker::MAX_LEN as usize
+                                                            && !d.contains('|')
+                                                    });
+                                                let ticker = Ticker::new_with_display(
+                                                    symbol,
+                                                    exchange,
+                                                    display_symbol,
+                                                );
+                                                let info = TickerInfo::new(
+                                                    ticker,
+                                                    c.min_ticksize,
+                                                    c.min_qty,
+                                                    c.contract_size,
+                                                );
+                                                Some((ticker, Some(info)))
+                                            }
+                                            Err(_) => {
+                                                // Fallback: existing Value-based parse path.
+                                                // Keeps backward compatibility with Python
+                                                // engines that don't yet send `kind`.
+                                                fallback_count += 1;
+                                                log::warn!(
+                                                    "TickerInfo: typed parse failed, using \
+                                                     Value fallback for entry"
+                                                );
+                                                if market_kind == MarketKind::Stock {
+                                                    // B3 HIGH-U-9 + B4: route Tachibana stock
+                                                    // dicts through the typed parser and stash
+                                                    // the display meta in `self.ticker_meta`.
+                                                    let (ticker, info, meta) =
+                                                        crate::tachibana_meta::parse_tachibana_ticker_dict(
+                                                            t, exchange,
+                                                        )?;
+                                                    if meta.display_name_ja().is_none() {
+                                                        log::debug!(
+                                                            "TickerInfo: display_name_ja absent \
+                                                             for {ticker}"
+                                                        );
+                                                    }
+                                                    staged_meta.push((ticker, meta));
+                                                    return Some((ticker, Some(info)));
+                                                }
+                                                let symbol = t.get("symbol")?.as_str()?;
+                                                if !symbol.is_ascii()
+                                                    || symbol.len() > Ticker::MAX_LEN as usize
+                                                    || symbol.contains('|')
+                                                {
+                                                    return None;
+                                                }
+                                                let display_symbol =
+                                                    t.get("display_symbol").and_then(|v| v.as_str());
+                                                let display_symbol = display_symbol.filter(|d| {
+                                                    d.is_ascii()
+                                                        && d.len() <= Ticker::MAX_LEN as usize
+                                                        && !d.contains('|')
+                                                });
+                                                let min_tick =
+                                                    t.get("min_ticksize")?.as_f64()? as f32;
+                                                let min_qty = t.get("min_qty")?.as_f64()? as f32;
+                                                let contract_size = t
+                                                    .get("contract_size")
+                                                    .and_then(|v| v.as_f64())
+                                                    .map(|v| v as f32);
+                                                let ticker = Ticker::new_with_display(
+                                                    symbol,
+                                                    exchange,
+                                                    display_symbol,
+                                                );
+                                                let info = TickerInfo::new(
+                                                    ticker,
+                                                    min_tick,
+                                                    min_qty,
+                                                    contract_size,
+                                                );
+                                                Some((ticker, Some(info)))
+                                            }
                                         }
-                                        let symbol = t.get("symbol")?.as_str()?;
-                                        if !symbol.is_ascii()
-                                            || symbol.len() > Ticker::MAX_LEN as usize
-                                            || symbol.contains('|')
-                                        {
-                                            return None;
-                                        }
-                                        let display_symbol =
-                                            t.get("display_symbol").and_then(|v| v.as_str());
-                                        let display_symbol = display_symbol.filter(|d| {
-                                            d.is_ascii()
-                                                && d.len() <= Ticker::MAX_LEN as usize
-                                                && !d.contains('|')
-                                        });
-                                        let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
-                                        let min_qty = t.get("min_qty")?.as_f64()? as f32;
-                                        let contract_size = t
-                                            .get("contract_size")
-                                            .and_then(|v| v.as_f64())
-                                            .map(|v| v as f32);
-                                        let ticker = Ticker::new_with_display(
-                                            symbol,
-                                            exchange,
-                                            display_symbol,
-                                        );
-                                        let info = TickerInfo::new(
-                                            ticker,
-                                            min_tick,
-                                            min_qty,
-                                            contract_size,
-                                        );
-                                        Some((ticker, Some(info)))
                                     })
                                     .collect();
+                                log::info!(
+                                    "TickerInfo: typed={typed_count} fallback={fallback_count}"
+                                );
                                 if !staged_meta.is_empty() {
                                     let mut guard = ticker_meta_for_capture.lock().await;
                                     for (t, m) in staged_meta {

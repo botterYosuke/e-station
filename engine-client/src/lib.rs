@@ -20,9 +20,10 @@ pub mod tachibana_meta;
 pub use backend::{EngineClientBackend, TickerMetaMap};
 pub use connection::EngineConnection;
 pub use depth_tracker::DepthTracker;
+pub use dto::{CryptoTickerEntry, StockTickerEntry, TickerEntry};
 pub use error::EngineClientError;
 pub use process::{EngineCommand, ProcessManager, PythonProcess, SubscriptionKey};
 
 /// IPC schema version — must match the Python engine's `SCHEMA_MAJOR`/`SCHEMA_MINOR`.
 pub const SCHEMA_MAJOR: u16 = 2;
-pub const SCHEMA_MINOR: u16 = 7;
+pub const SCHEMA_MINOR: u16 = 8;

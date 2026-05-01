@@ -291,6 +291,7 @@ class OkexWorker(ExchangeWorker):
                     continue
                 result.append(
                     {
+                        "kind": "crypto",
                         "symbol": item["instId"],
                         "min_ticksize": float(item["tickSz"]),
                         "min_qty": float(item["lotSz"]),
@@ -306,6 +307,7 @@ class OkexWorker(ExchangeWorker):
                 ct_val = item.get("ctVal")
                 result.append(
                     {
+                        "kind": "crypto",
                         "symbol": item["instId"],
                         "min_ticksize": float(item["tickSz"]),
                         "min_qty": float(item["lotSz"]),
@@ -319,6 +321,7 @@ class OkexWorker(ExchangeWorker):
                 ct_val = item.get("ctVal")
                 result.append(
                     {
+                        "kind": "crypto",
                         "symbol": item["instId"],
                         "min_ticksize": float(item["tickSz"]),
                         "min_qty": float(item["lotSz"]),

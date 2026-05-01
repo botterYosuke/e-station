@@ -314,6 +314,7 @@ class BybitWorker(ExchangeWorker):
 
             result.append(
                 {
+                    "kind": "crypto",
                     "symbol": item["symbol"],
                     "min_ticksize": float(tick_str),
                     "min_qty": float(min_qty_str),

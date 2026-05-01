@@ -352,6 +352,7 @@ class BinanceWorker(ExchangeWorker):
 
             result.append(
                 {
+                    "kind": "crypto",
                     "symbol": sym["symbol"],
                     "min_ticksize": float(price_filter["tickSize"]),
                     "min_qty": float(lot_filter["minQty"]),

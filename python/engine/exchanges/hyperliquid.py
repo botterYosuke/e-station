@@ -312,6 +312,7 @@ class HyperliquidWorker(ExchangeWorker):
 
             result.append(
                 {
+                    "kind": "crypto",
                     "symbol": asset["name"],
                     "min_ticksize": tick_size,
                     "min_qty": min_qty,
@@ -344,6 +345,7 @@ class HyperliquidWorker(ExchangeWorker):
             display_sym = _create_display_symbol(pair["name"], tokens, token_indices)
             result.append(
                 {
+                    "kind": "crypto",
                     "symbol": pair["name"],
                     "display_symbol": display_sym,
                     "min_ticksize": tick_size,
