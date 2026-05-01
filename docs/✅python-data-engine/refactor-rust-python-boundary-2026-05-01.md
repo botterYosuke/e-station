@@ -274,11 +274,11 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 
 | ID | 内容 | 場所 |
 |----|------|------|
-| C1 | `python/engine/exchanges/normalize.py`（新規）に `normalize_depth(depth, ticker_info)` / `normalize_trade(...)` / `normalize_kline(...)` を実装 | 新規 |
-| C2 | 各 adapter の depth/trade/kline 送出パスで normalize を必ず通す | tachibana.py 他 |
-| C3 | `tachibana_master.py:resolve_min_ticksize_for_issue` を snapshot 価格ベースで完成（B5 follow-up）| tachibana_master.py |
-| C4 | `list_tickers` を遅延化: 最初の snapshot 価格取得後に再 push（または初回 snapshot にメタ同梱）| tachibana.py |
-| C5 | 数量正規化 (`QtyNormalization`) ロジックを Python へ移管 | crypto adapter 群 |
+| C1 ✅ | `python/engine/exchanges/normalize.py`（新規）に `normalize_depth` / `normalize_trade` / `normalize_kline` / `normalize_qty_contract` を実装 | `python/engine/exchanges/normalize.py` |
+| C2 ✅ | tachibana の depth/trade 送出パス全箇所で normalize を適用（market_closed / _cb_depth / _depth_polling_fallback / stream_trades） | `tachibana.py` |
+| C3 ✅ | `resolve_min_ticksize_for_issue` は Phase A 以前から完成。C4 と連携して stream_depth から呼び出し済み | `tachibana_master.py`（変更なし） |
+| C4 ✅ | stream_depth の初回 FD フレームで snapshot price を使って `_ticker_min_ticksize` キャッシュを更新（Python 内部のみ。Rust への TickerInfo 再 push は Phase F で検討） | `tachibana.py` |
+| C5 ✅ | `normalize_qty_contract` を実装・テスト済み。Rust 側でも qty normalization は apply_diff_levels で実行されていないためダブル正規化リスクなし | `normalize.py` |
 
 ### 6.2 完了条件
 
@@ -295,9 +295,28 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 
 ### 6.4 テスト
 
-- `python/tests/test_normalize_depth.py`: proptest 風に乱数 depth を normalize → assert
-- `python/tests/test_tachibana_ticksize_resolve.py`: 全 yobine band を網羅
-- `tests/e2e/smoke.sh` 拡張: ladder 描画後に「価格列が連続している」HTTP API 検証
+- `python/tests/test_normalize_depth.py` ✅: 68 テスト all green（価格正規化・乱数プロパティ・5379円シナリオ）
+- `python/tests/test_normalize_qty.py` ✅: qty 正規化テスト（normalize_qty_contract property test 含む）
+- `python/tests/test_tachibana_ticksize_resolve.py` ✅: 全 yobine band 網羅（5バンド × 境界値 + NTT/Toyota/SoftBank/みずほシナリオ）
+- `tests/e2e/smoke.sh` 拡張: 今後の課題
+
+### 6.5 Phase C 完了メモ（2026-05-01）
+
+**実施内容:**
+- C1: `normalize.py` 新規作成。`normalize_price`（ROUND_HALF_UP でRust挙動に一致）/ `normalize_depth_levels` / `normalize_depth` / `normalize_trade` / `normalize_trades_event` / `normalize_kline` / `normalize_qty_contract` を実装
+- C2: `tachibana.py` に3つのヘルパーメソッドを追加（`_lookup_sizyou_record` / `_update_min_ticksize_from_price` / `_normalize_depth_levels` / `_normalize_trade_price`）。stream_depth の全送出パス（market_closed / _cb_depth / _depth_polling_fallback）と stream_trades に組み込み
+- C3: `resolve_min_ticksize_for_issue` は変更なし（既に完成）
+- C4: stream_depth 初回 FD フレーム時に `_update_min_ticksize_from_price` を呼び出して yobine band を price ベースで再解決し `_ticker_min_ticksize[ticker]` を更新する。Python 内部のみ（Rust TickerInfo 再 push は実装しなかった — Rust TickerInfo ハンドラが request_id 一致待ちのため unsolicited push は無視される。Phase F で対応予定）
+- C5: `normalize_qty_contract` を実装・テスト済み。現在の Rust pipeline（`apply_diff_levels`）は qty normalization を行っていないため、double-normalization リスクなし
+
+**判明した重要な知見:**
+- Rust `apply_diff_levels`（engine-client/src/backend.rs:1183）は qty normalization を行っていない（`Qty::from_f32(q)` 直接）。`exchange/src/depth.rs` の `QtyNormalization` コードは LocalDepthCache 専用で、engine-client pipeline では未使用
+- Rust `depth_levels_to_arc_depth`（DepthSnapshot 処理）は価格の丸め込みも行わない。Phase E で Rust 側を no-op 化した際に snapshot の丸め込みが落ちる — Python 側の C2 追加が重要
+- Rust TickerInfo ハンドラは `rid == request_id` 一致待ちのため、Python から unsolicited push しても無視される。C4 の Rust re-push は IPC 変更なしには実装できない
+
+**落とし穴:**
+- `_cb_depth` クロージャは while ループ内で再定義されるが `self` を capturing しているため、`_ticker_min_ticksize` への書き込みは問題なし（asyncio single-thread）
+- `_first_fd_received` は while ループ外で定義されているため、再接続をまたいだ初回判定が正しく機能する
 
 ---
 

@@ -214,6 +214,9 @@ class TachibanaWorker(ExchangeWorker):
         self._yobine_table: dict[str, list[YobineBand]] = {}
         # JST date the in-memory master was loaded for (HIGH-U-10).
         self._master_loaded_jst_date: str | None = None
+        # C2/C4: per-ticker resolved min_ticksize cache (populated in list_tickers,
+        # updated from first snapshot price in stream_depth).
+        self._ticker_min_ticksize: dict[str, Decimal] = {}
 
         self._cache_dir = Path(cache_dir)
         self._is_demo = bool(is_demo)
@@ -302,6 +305,7 @@ class TachibanaWorker(ExchangeWorker):
         self._master_records = {}
         self._yobine_table = {}
         self._master_loaded_jst_date = None
+        self._ticker_min_ticksize = {}
 
     def _check_jst_rollover(self) -> None:
         """If the JST date has rolled since the in-memory master was loaded,
@@ -474,6 +478,7 @@ class TachibanaWorker(ExchangeWorker):
                 try:
                     tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, None)
                     entry["min_ticksize"] = float(tick)
+                    self._ticker_min_ticksize[code] = tick  # C2: cache for stream_depth
                 except (KeyError, ValueError):
                     pass
             out.append(entry)
@@ -599,6 +604,75 @@ class TachibanaWorker(ExchangeWorker):
                 sc = str(row.get("sSizyouC", "")).strip()
                 return sc or _SIZYOU_C_FALLBACK
         return _SIZYOU_C_FALLBACK
+
+    def _lookup_sizyou_record(self, ticker: str) -> dict | None:
+        """Return the CLMIssueSizyouMstKabu row for ticker, or None if not found."""
+        for row in self._master_records.get("CLMIssueSizyouMstKabu", []):
+            if str(row.get("sIssueCode", "")).strip() == ticker:
+                return row
+        return None
+
+    def _update_min_ticksize_from_price(self, ticker: str, snapshot_price: Decimal) -> None:
+        """C4: Re-resolve min_ticksize using a real market price and update cache.
+
+        Called whenever a real exchange price is available (first depth FD frame,
+        first trade, REST snapshot) so that the correct yobine band replaces the
+        finest-tick startup fallback.
+        """
+        sizyou = self._lookup_sizyou_record(ticker)
+        if sizyou is None or not self._yobine_table:
+            return
+        try:
+            tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, snapshot_price)
+            self._ticker_min_ticksize[ticker] = tick
+        except (KeyError, ValueError):
+            pass
+
+    def _try_update_min_ticksize_from_levels(
+        self,
+        ticker: str,
+        bids: list[dict],
+        asks: list[dict],
+    ) -> None:
+        """C4: Update min_ticksize using the first available price from bids or asks.
+
+        Checks bids first, then asks as fallback so that ask-only snapshots (e.g.
+        during pre-market or thin books) still resolve the correct yobine band.
+        """
+        price_str: str | None = None
+        if bids:
+            price_str = bids[0]["price"]
+        elif asks:
+            price_str = asks[0]["price"]
+        if price_str is None:
+            return
+        try:
+            self._update_min_ticksize_from_price(ticker, Decimal(price_str))
+        except Exception:
+            pass
+
+    def _normalize_depth_levels(
+        self,
+        ticker: str,
+        bids: list[dict],
+        asks: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """C2: Apply price normalization to depth levels using cached min_ticksize."""
+        min_ticksize = self._ticker_min_ticksize.get(ticker)
+        if min_ticksize is None:
+            return bids, asks
+        from .normalize import normalize_depth_levels
+        return normalize_depth_levels(bids, min_ticksize), normalize_depth_levels(asks, min_ticksize)
+
+    def _normalize_trade_price(self, ticker: str, trade: dict) -> dict:
+        """C2: Apply price normalization to a trade dict using cached min_ticksize."""
+        min_ticksize = self._ticker_min_ticksize.get(ticker)
+        if min_ticksize is None or "price" not in trade:
+            return trade
+        from .normalize import normalize_price
+        result = dict(trade)
+        result["price"] = normalize_price(trade["price"], min_ticksize)
+        return result
 
     def _build_ws_url(self, ticker: str) -> str:
         """Instance-level wrapper around the module-level pure function.
@@ -803,6 +877,8 @@ class TachibanaWorker(ExchangeWorker):
         processor = FdFrameProcessor(row="1")
         conn_counter = 0
         _st_stopped: list[bool] = [False]
+        # C4: track first trade so we can resolve the correct yobine band before normalizing.
+        _first_trade_received: list[bool] = [False]
 
         while not stop_event.is_set() and not _st_stopped[0]:
             conn_counter += 1
@@ -815,13 +891,22 @@ class TachibanaWorker(ExchangeWorker):
                 if frame_type == "FD":
                     trade, _ = processor.process(fields, recv_ts_ms)
                     if trade:
+                        # C4: first trade — resolve correct yobine band from actual price
+                        if not _first_trade_received[0] and "price" in trade:
+                            try:
+                                self._update_min_ticksize_from_price(
+                                    ticker, Decimal(trade["price"])
+                                )
+                            except Exception:
+                                pass
+                            _first_trade_received[0] = True
                         outbox.append({
                             "event": "Trades",
                             "venue": "tachibana",
                             "ticker": ticker,
                             "market": market,
                             "stream_session_id": ssid,
-                            "trades": [trade],
+                            "trades": [self._normalize_trade_price(ticker, trade)],  # C2
                         })
                 elif frame_type == "ST":
                     result_code = fields.get("sResultCode", "0")
@@ -862,14 +947,22 @@ class TachibanaWorker(ExchangeWorker):
                             "ticker=%s bids=%d asks=%d",
                             ticker, len(snapshot.get("bids", [])), len(snapshot.get("asks", [])),
                         )
+                        # C4: update min_ticksize from first available price (bids or asks)
+                        snap_bids = snapshot.get("bids", [])
+                        snap_asks = snapshot.get("asks", [])
+                        self._try_update_min_ticksize_from_levels(ticker, snap_bids, snap_asks)
+                        # C2: normalize prices before sending to Rust
+                        norm_bids, norm_asks = self._normalize_depth_levels(
+                            ticker, snap_bids, snap_asks
+                        )
                         outbox.append({
                             "event": "DepthSnapshot",
                             "venue": "tachibana",
                             "ticker": ticker,
                             "market": market,
                             "stream_session_id": f"{stream_session_id}:initial",
-                            "bids": snapshot.get("bids", []),
-                            "asks": snapshot.get("asks", []),
+                            "bids": norm_bids,
+                            "asks": norm_asks,
                             "sequence_id": 0,
                             "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
                         })
@@ -986,15 +1079,24 @@ class TachibanaWorker(ExchangeWorker):
                 if frame_type == "FD":
                     _, depth = processor.process(fields, recv_ts_ms)
                     if depth:
+                        # C4: first FD — update min_ticksize from bids or asks
+                        if not _first_fd_received[0]:
+                            self._try_update_min_ticksize_from_levels(
+                                ticker, depth.get("bids", []), depth.get("asks", [])
+                            )
                         _first_fd_received[0] = True
+                        # C2: normalize prices before sending to Rust
+                        norm_bids, norm_asks = self._normalize_depth_levels(
+                            ticker, depth["bids"], depth["asks"]
+                        )
                         outbox.append({
                             "event": "DepthSnapshot",
                             "venue": "tachibana",
                             "ticker": ticker,
                             "market": market,
                             "stream_session_id": ssid,
-                            "bids": depth["bids"],
-                            "asks": depth["asks"],
+                            "bids": norm_bids,
+                            "asks": norm_asks,
                             "sequence_id": depth["sequence_id"],
                             "recv_ts_ms": depth["recv_ts_ms"],
                         })
@@ -1111,14 +1213,22 @@ class TachibanaWorker(ExchangeWorker):
                 snapshot = await self.fetch_depth_snapshot(ticker, market)
                 if snapshot.get("bids") or snapshot.get("asks"):
                     poll_counter += 1
+                    poll_bids = snapshot.get("bids", [])
+                    poll_asks = snapshot.get("asks", [])
+                    # C4: update min_ticksize from REST snapshot price (fix for degraded sessions)
+                    self._try_update_min_ticksize_from_levels(ticker, poll_bids, poll_asks)
+                    # C2: normalize prices before sending to Rust
+                    norm_bids, norm_asks = self._normalize_depth_levels(
+                        ticker, poll_bids, poll_asks
+                    )
                     outbox.append({
                         "event": "DepthSnapshot",
                         "venue": "tachibana",
                         "ticker": ticker,
                         "market": market,
                         "stream_session_id": f"{stream_session_id}:poll:{poll_counter}",
-                        "bids": snapshot.get("bids", []),
-                        "asks": snapshot.get("asks", []),
+                        "bids": norm_bids,
+                        "asks": norm_asks,
                         "sequence_id": poll_counter,
                         "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
                     })
