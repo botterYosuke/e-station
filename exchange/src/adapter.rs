@@ -466,14 +466,6 @@ impl Exchange {
         }
     }
 
-    #[deprecated(note = "use VenueCapsStore::get(&ticker).map(|c| c.client_aggr_depth) instead")]
-    pub fn is_depth_client_aggr(&self) -> bool {
-        panic!(
-            "is_depth_client_aggr() is removed in Phase D; \
-             use VenueCapsStore::get(&ticker).map(|c| c.client_aggr_depth)"
-        )
-    }
-
     pub fn is_custom_push_freq(&self) -> bool {
         matches!(
             self,

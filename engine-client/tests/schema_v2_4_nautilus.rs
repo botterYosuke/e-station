@@ -30,8 +30,8 @@ fn schema_minor_is_7_for_positions() {
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
-        2,
-        "SCHEMA_MAJOR must remain 2 (architecture.md uses logical 1.x but real code is 2.x)"
+        3,
+        "SCHEMA_MAJOR must be 3 after Phase F (typed-only IPC, VenueCaps required)"
     );
 }
 

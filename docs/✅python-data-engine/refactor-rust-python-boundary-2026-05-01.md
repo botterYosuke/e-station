@@ -442,9 +442,38 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 | F5 | `LocalDepthCache::update_with_qty_norm` の deprecated メソッド削除 | depth.rs |
 | F6 | CHANGELOG 更新 | `docs/✅python-data-engine/schemas/CHANGELOG.md` |
 
+### 9.5 Phase F 完了メモ（2026-05-01）
+
+**実施内容:**
+- F1: `SCHEMA_MAJOR` を 2 → 3 に bump（`engine-client/src/lib.rs`, `python/engine/schemas.py`）
+- F2: `EngineEvent::TickerInfo.tickers` を `Vec<serde_json::Value>` → `Vec<TickerEntry>` に変更（`dto.rs`）。`backend.rs` の fallback 経路（`Err(_)` ブロック・`fallback_count`・Value-based parse）を全削除。`tickers.iter()` → `tickers.into_iter()` に変更し直接 `match` で処理
+- F3: `StockTickerEntry.venue_caps` / `CryptoTickerEntry.venue_caps` を `Option<VenueCaps>` → `VenueCaps`（required）に変更。`#[serde(default)]` 削除。`backend.rs` の `if let Some(caps) = ...` を `staged_caps.push((ticker, entry.venue_caps))` に変更。`events.json` の StockTicker/CryptoTicker `required` に `"venue_caps"` を追加
+- F3+: `StockTickerEntry.min_ticksize` も `Option<f32>` → `f32`（required）に変更（レビュー指摘: Phase F で "typed-only IPC" を名乗るなら min_ticksize の optional 残存は不整合）。`events.json` の `StockTicker.required` に `"min_ticksize"` を追加。`backend.rs` の Option unwrap を直接参照に変更（invalid 値は warn + skip で継続）
+- F4: `Exchange::is_depth_client_aggr()` のメソッド本体（`#[deprecated]` + `panic!`）を `adapter.rs` から削除
+- F5: `LocalDepthCache::update_with_qty_norm()` を `depth.rs` から削除。関連テスト（`update_with_some_qty_norm_panics_in_all_builds`, `update_with_none_qty_norm_does_not_panic`）も削除。`depth_assert.rs` の `deprecated_update_with_qty_norm_none_does_not_panic` も削除
+- F6: `docs/✅python-data-engine/schemas/CHANGELOG.md` に v3.8 エントリを追加
+
+**更新したリグレッションガードテスト:**
+- `schema_v1_3_roundtrip.rs`: `schema_major_is_2` → `schema_major_is_3`（SCHEMA_MAJOR=3 を pin）
+- `schema_v1_4_roundtrip.rs`: `assert_eq!(... 2)` → `const { assert!(... >= 2) }`（schema 1.4 features preserved in 3.x）
+- `schema_v2_4_nautilus.rs`: `SCHEMA_MAJOR == 2` → `SCHEMA_MAJOR == 3`
+- `ticker_info_typed.rs`: venue_caps をテスト JSON に追加 + test 6/7 新規追加（venue_caps 欠落で parse 失敗を確認）
+- `ticker_meta_map_round_trip.rs`: モック TickerInfo に venue_caps を追加
+- `python/tests/test_events_json_schema.py`: サンプルエントリ全件に venue_caps 追加 + `_make_validator` を `$defs` 埋め込み方式に変更（RefResolver URL 二重構築バグ回避）
+- `python/tests/test_schemas_nautilus.py`: `SCHEMA_MAJOR == 2` → `SCHEMA_MAJOR == 3`
+
+**検証結果:**
+- `cargo clippy -- -D warnings`: clean
+- `cargo test --workspace`: 全 green（FAILED 0）
+- `uv run pytest python/tests/`: 1478 passed, 3 skipped（`test_tachibana_buying_power` は pre-existing WIP）
+- `/ipc-schema-check`: MAJOR=3/3, MINOR=8/8, compression=None → 全 OK
+
+**落とし穴:**
+- jsonschema の旧 `RefResolver` は `$id: "flowsurface/ipc/events"`（非絶対 URI）を持つスキーマで `TickerEntry.oneOf → $ref → VenueCaps` チェーンを解決する際に URL を二重構築（`flowsurface/ipc/flowsurface/ipc/events`）する。`venue_caps` が optional のうちは発火しなかったが required 化後に顕在化。修正: `_make_validator` で `$defs` をサブスキーマに直接埋め込む方式に変更
+
 ### 9.2 完了条件
 
-- 旧スキーマでハンドシェイク不可（SCHEMA_MAJOR mismatch）
+- 旧スキーマでハンドシェイク不可（SCHEMA_MAJOR mismatch）✅
 - 全テスト green、e2e smoke 緑
 
 ### 9.3 リスク

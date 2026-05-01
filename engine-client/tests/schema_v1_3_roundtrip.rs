@@ -314,14 +314,14 @@ fn trigger_type_screaming_snake_case() {
     assert_eq!(index, r#""INDEX""#);
 }
 
-/// Schema 2.0: SCHEMA_MAJOR bumped to 2, SCHEMA_MINOR reset to 0.
-/// SetVenueCredentials / VenueCredentialsRefreshed removed; Python autonomous login.
+/// Schema 3.0: SCHEMA_MAJOR bumped to 3 (Phase F).
+/// Vec<Value> fallback removed; VenueCaps required; is_depth_client_aggr() deleted.
 #[test]
-fn schema_major_is_2() {
+fn schema_major_is_3() {
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
-        2,
-        "SCHEMA_MAJOR must be 2 (schema 2.x autonomous-login series), got {}",
+        3,
+        "SCHEMA_MAJOR must be 3 (Phase F: typed-only IPC), got {}",
         flowsurface_engine_client::SCHEMA_MAJOR
     );
 }

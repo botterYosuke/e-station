@@ -42,16 +42,14 @@ def _make_validator(
 ) -> jsonschema.Validator:
     """Return a validator with $defs available for $ref resolution.
 
-    Uses RefResolver which supports JSON Pointer ($ref) based resolution of
-    sub-schemas (e.g. #/$defs/StockTicker). The DeprecationWarning is
-    suppressed here as the referencing library does not yet support this
-    sub-schema use case cleanly.
+    Embeds the root $defs into the schema being validated so that nested
+    $ref chains (e.g. TickerEntry → StockTicker → VenueCaps) resolve
+    correctly without URL-doubling issues from the old RefResolver.
     """
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=DeprecationWarning, module="jsonschema")
-        resolver = jsonschema.RefResolver.from_schema(full_schema)
-    cls = jsonschema.validators.validator_for(full_schema)
-    return cls(schema, resolver=resolver)
+    # Embed $defs at the root of the schema under test so that $ref fragments
+    # like "#/$defs/VenueCaps" resolve relative to this synthetic root.
+    schema_with_defs = {**schema, "$defs": full_schema.get("$defs", {})}
+    return jsonschema.Draft202012Validator(schema_with_defs)
 
 
 # ---------------------------------------------------------------------------
@@ -71,12 +69,16 @@ def test_events_schema_is_valid_json_schema(events_schema: dict[str, Any]) -> No
 
 
 def test_stock_ticker_with_kind_validates(events_schema: dict[str, Any]) -> None:
-    """A minimal StockTicker with kind='stock' and symbol must validate."""
-    instance = {"kind": "stock", "symbol": "7203"}
+    """A minimal StockTicker with all required fields must validate."""
+    instance = {
+        "kind": "stock",
+        "symbol": "7203",
+        "min_ticksize": 1.0,
+        "venue_caps": {"client_aggr_depth": True, "supports_spread_display": False},
+    }
     validator = _make_validator(
         events_schema["$defs"]["StockTicker"], events_schema
     )
-    # Must not raise
     validator.validate(instance)
 
 
@@ -92,6 +94,7 @@ def test_crypto_ticker_with_kind_validates(events_schema: dict[str, Any]) -> Non
         "symbol": "BTCUSDT",
         "min_ticksize": 0.1,
         "min_qty": 0.001,
+        "venue_caps": {"client_aggr_depth": False, "supports_spread_display": False},
     }
     validator = _make_validator(
         events_schema["$defs"]["CryptoTicker"], events_schema
@@ -128,11 +131,13 @@ def test_tachibana_list_tickers_output_has_kind(events_schema: dict[str, Any]) -
         "symbol": "7203",
         "display_name_ja": "トヨタ自動車",
         "display_symbol": "TOYOTA MOTOR",
+        "min_ticksize": 1.0,
         "lot_size": 100,
         "min_qty": 100,
         "quote_currency": "JPY",
         "yobine_code": "7",
         "sizyou_c": "00",
+        "venue_caps": {"client_aggr_depth": True, "supports_spread_display": False},
     }
     assert entry["kind"] == "stock"
     validator = _make_validator(
@@ -145,6 +150,9 @@ def test_tachibana_list_tickers_output_has_kind(events_schema: dict[str, Any]) -
 # A5-6: parametrize — 複数 adapter のサンプル dict が TickerEntry を通る
 # ---------------------------------------------------------------------------
 
+_VENUE_CAPS_STOCK = {"client_aggr_depth": True, "supports_spread_display": False}
+_VENUE_CAPS_CRYPTO = {"client_aggr_depth": False, "supports_spread_display": False}
+
 _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
     (
         "tachibana_stock",
@@ -153,11 +161,13 @@ _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
             "symbol": "7203",
             "display_name_ja": "トヨタ自動車",
             "display_symbol": "TOYOTA",
+            "min_ticksize": 1.0,
             "lot_size": 100,
             "min_qty": 100,
             "quote_currency": "JPY",
             "yobine_code": "7",
             "sizyou_c": "00",
+            "venue_caps": _VENUE_CAPS_STOCK,
         },
     ),
     (
@@ -167,6 +177,7 @@ _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
             "symbol": "BTC",
             "min_ticksize": 0.1,
             "min_qty": 0.001,
+            "venue_caps": _VENUE_CAPS_CRYPTO,
         },
     ),
     (
@@ -177,6 +188,7 @@ _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
             "display_symbol": "BTC/USDC",
             "min_ticksize": 1.0,
             "min_qty": 1.0,
+            "venue_caps": _VENUE_CAPS_CRYPTO,
         },
     ),
     (
@@ -186,6 +198,7 @@ _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
             "symbol": "BTCUSDT",
             "min_ticksize": 0.10,
             "min_qty": 0.001,
+            "venue_caps": _VENUE_CAPS_CRYPTO,
         },
     ),
     (
@@ -195,6 +208,7 @@ _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
             "symbol": "BTCUSDT",
             "min_ticksize": 0.10,
             "min_qty": 0.001,
+            "venue_caps": _VENUE_CAPS_CRYPTO,
         },
     ),
     (
@@ -204,6 +218,7 @@ _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
             "symbol": "BTCUSDT",
             "min_ticksize": 0.01,
             "min_qty": 0.0001,
+            "venue_caps": _VENUE_CAPS_CRYPTO,
         },
     ),
     (
@@ -213,6 +228,7 @@ _VALID_TICKER_ENTRIES: list[tuple[str, dict[str, Any]]] = [
             "symbol": "BTC-USDT",
             "min_ticksize": 0.1,
             "min_qty": 0.00001,
+            "venue_caps": _VENUE_CAPS_CRYPTO,
         },
     ),
 ]

@@ -806,7 +806,7 @@ pub enum EngineEvent {
     TickerInfo {
         request_id: String,
         venue: String,
-        tickers: Vec<serde_json::Value>,
+        tickers: Vec<TickerEntry>,
     },
     TickerStats {
         request_id: String,
@@ -1138,18 +1138,8 @@ pub struct VenueCaps {
     pub qty_norm_kind: Option<QtyNormKind>,
 }
 
-// ── Phase A: typed TickerEntry (A2) ──────────────────────────────────────────
-//
-// `EngineEvent::TickerInfo.tickers` は引き続き `Vec<serde_json::Value>` だが、
-// backend.rs 受信時に各 Value を `TickerEntry` として parse を試みる。
-// Phase F で `Vec<TickerEntry>` に完全移行する。
-
-/// Phase A: typed ticker entry — discriminated on the `kind` field.
-///
-/// `EngineEvent::TickerInfo.tickers` is still `Vec<serde_json::Value>`,
-/// but the backend attempts `serde_json::from_value::<TickerEntry>` for each
-/// element and falls back to the existing `Value` path on failure.
-/// Phase F will replace `Vec<Value>` with `Vec<TickerEntry>`.
+/// Typed ticker entry — discriminated on the `kind` field.
+/// `EngineEvent::TickerInfo.tickers` is `Vec<TickerEntry>` (Phase F).
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TickerEntry {
@@ -1158,9 +1148,7 @@ pub enum TickerEntry {
 }
 
 /// Typed stock ticker entry from `EngineEvent::TickerInfo`.
-///
-/// `min_ticksize` is required in Phase D: Python guarantees the resolved
-/// value (Phase C IPC contract). Absent entries are skipped with a warn log.
+/// Python guarantees `min_ticksize` and `venue_caps` are always present (Phase C/F contract).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct StockTickerEntry {
     pub symbol: String,
@@ -1168,9 +1156,7 @@ pub struct StockTickerEntry {
     pub display_symbol: Option<String>,
     #[serde(default)]
     pub display_name_ja: Option<String>,
-    /// Phase A: optional (Rust fallback 1.0). Phase D: required.
-    #[serde(default)]
-    pub min_ticksize: Option<f32>,
+    pub min_ticksize: f32,
     #[serde(default)]
     pub lot_size: Option<u32>,
     #[serde(default)]
@@ -1181,9 +1167,7 @@ pub struct StockTickerEntry {
     pub yobine_code: Option<String>,
     #[serde(default)]
     pub sizyou_c: Option<String>,
-    /// Phase B: optional. Required in Phase F.
-    #[serde(default)]
-    pub venue_caps: Option<VenueCaps>,
+    pub venue_caps: VenueCaps,
 }
 
 /// Typed crypto ticker entry from `EngineEvent::TickerInfo`.
@@ -1196,7 +1180,5 @@ pub struct CryptoTickerEntry {
     pub min_qty: f32,
     #[serde(default)]
     pub contract_size: Option<f32>,
-    /// Phase B: optional. Required in Phase F.
-    #[serde(default)]
-    pub venue_caps: Option<VenueCaps>,
+    pub venue_caps: VenueCaps,
 }

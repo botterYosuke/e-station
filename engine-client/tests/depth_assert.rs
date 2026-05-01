@@ -39,18 +39,6 @@ fn normalised_depth_does_not_panic() {
     cache.update(snapshot(vec![(100.1, 3.0)], vec![(100.2, 2.0)]), min_tick(-1));
 }
 
-/// `update_with_qty_norm(…, None)` must not panic (None is the only safe value).
-/// The Some(qty_norm) path is tested by exchange crate unit tests, where
-/// `QtyNormalization` is constructable.
-#[test]
-fn deprecated_update_with_qty_norm_none_does_not_panic() {
-    #[allow(deprecated)]
-    {
-        let mut cache = LocalDepthCache::default();
-        cache.update_with_qty_norm(snapshot(vec![(100.0, 10.0)], vec![]), min_tick(0), None);
-    }
-}
-
 #[cfg(debug_assertions)]
 mod debug_panics {
     use super::*;

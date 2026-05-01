@@ -293,7 +293,7 @@
       }
     },
     "TickerEntry": {
-      "description": "Phase A: discriminated union on 'kind'. Phase F will make venue_caps required.",
+      "description": "Discriminated union on 'kind'. venue_caps is required (Phase F).",
       "oneOf": [
         { "$ref": "#/$defs/StockTicker" },
         { "$ref": "#/$defs/CryptoTicker" }
@@ -301,7 +301,7 @@
     },
     "StockTicker": {
       "type": "object",
-      "required": ["kind", "symbol"],
+      "required": ["kind", "symbol", "min_ticksize", "venue_caps"],
       "properties": {
         "kind": { "const": "stock" },
         "symbol": { "type": "string" },
@@ -309,23 +309,19 @@
         "display_name_ja": { "type": "string" },
         "min_ticksize": {
           "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Phase A: optional (fallback 1.0 in Rust). Required in Phase D."
+          "exclusiveMinimum": 0
         },
         "lot_size": { "type": ["integer", "null"] },
         "min_qty": { "type": ["number", "null"] },
         "quote_currency": { "type": "string" },
         "yobine_code": { "type": "string" },
         "sizyou_c": { "type": "string" },
-        "venue_caps": {
-          "$ref": "#/$defs/VenueCaps",
-          "description": "Phase B: optional. Required in Phase F."
-        }
+        "venue_caps": { "$ref": "#/$defs/VenueCaps" }
       }
     },
     "CryptoTicker": {
       "type": "object",
-      "required": ["kind", "symbol", "min_ticksize", "min_qty"],
+      "required": ["kind", "symbol", "min_ticksize", "min_qty", "venue_caps"],
       "properties": {
         "kind": { "const": "crypto" },
         "symbol": { "type": "string" },
@@ -333,14 +329,11 @@
         "min_ticksize": { "type": "number", "exclusiveMinimum": 0 },
         "min_qty": { "type": "number", "exclusiveMinimum": 0 },
         "contract_size": { "type": "number", "exclusiveMinimum": 0 },
-        "venue_caps": {
-          "$ref": "#/$defs/VenueCaps",
-          "description": "Phase B: optional. Required in Phase F."
-        }
+        "venue_caps": { "$ref": "#/$defs/VenueCaps" }
       }
     },
     "VenueCaps": {
-      "description": "Phase B: delivered in TickerEntry IPC only. Not stored in TickerInfo (sidecar VenueCapsStore).",
+      "description": "Delivered in TickerEntry IPC only. Not stored in TickerInfo (sidecar VenueCapsStore).",
       "type": "object",
       "required": ["client_aggr_depth", "supports_spread_display"],
       "properties": {

@@ -78,6 +78,7 @@ async fn spawn_tachibana_mock(listener: TcpListener) {
                 "quote_currency": "JPY",
                 "yobine_code": "103",
                 "sizyou_c": "00",
+                "venue_caps": {"client_aggr_depth": true, "supports_spread_display": false},
             }]
         });
         ws.send(Message::Text(resp.to_string().into()))

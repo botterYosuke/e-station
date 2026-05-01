@@ -542,25 +542,16 @@ impl VenueBackend for EngineClientBackend {
                                     exchange::Ticker,
                                     crate::stock_meta::TickerDisplayMeta,
                                 )> = Vec::new();
-                                // B4: staged venue_caps from typed entries.
+                                // Stage venue_caps from typed entries.
                                 let mut staged_caps: Vec<(
                                     exchange::Ticker,
                                     crate::dto::VenueCaps,
                                 )> = Vec::new();
-                                // A3: typed-parse counters for observability.
-                                let mut typed_count: usize = 0;
-                                let mut fallback_count: usize = 0;
                                 let map: TickerMetadataMap = tickers
-                                    .iter()
-                                    .filter_map(|t| {
-                                        // A3: attempt typed parse for every entry first.
-                                        // On success, use the typed path; on failure, fall
-                                        // back to the existing Value-based path.
-                                        match serde_json::from_value::<crate::dto::TickerEntry>(
-                                            t.clone(),
-                                        ) {
-                                            Ok(crate::dto::TickerEntry::Stock(s)) => {
-                                                typed_count += 1;
+                                    .into_iter()
+                                    .filter_map(|entry| {
+                                        match entry {
+                                            crate::dto::TickerEntry::Stock(s) => {
                                                 let symbol = &s.symbol;
                                                 if !symbol.is_ascii()
                                                     || symbol.len() > Ticker::MAX_LEN as usize
@@ -579,36 +570,28 @@ impl VenueBackend for EngineClientBackend {
                                                     exchange,
                                                     display_symbol,
                                                 );
-                                                // D2: Python guarantees min_ticksize is
-                                                // always present and resolved (Phase C
-                                                // IPC contract). Skip on missing/invalid.
-                                                let Some(min_ticksize) = s
-                                                    .min_ticksize
-                                                    .filter(|&v| v.is_finite() && v > 0.0)
-                                                else {
+                                                let min_ticksize = s.min_ticksize;
+                                                if !min_ticksize.is_finite() || min_ticksize <= 0.0 {
                                                     log::warn!(
-                                                        "TickerInfo: min_ticksize absent/invalid \
-                                                         for {}, skipping",
+                                                        "TickerInfo: min_ticksize invalid \
+                                                         ({min_ticksize}) for {}, skipping",
                                                         s.symbol
                                                     );
                                                     return None;
-                                                };
+                                                }
                                                 let lot_size = s.lot_size.unwrap_or(100);
-                                                let min_qty = s
-                                                    .min_qty
-                                                    .unwrap_or(lot_size as f32);
+                                                let min_qty = s.min_qty.unwrap_or(lot_size as f32);
                                                 let info = TickerInfo::new_stock(
                                                     ticker,
                                                     min_ticksize,
                                                     min_qty,
                                                     lot_size,
                                                 );
-                                                let meta =
-                                                    crate::stock_meta::TickerDisplayMeta {
-                                                        display_name_ja: s.display_name_ja,
-                                                        yobine_code: s.yobine_code,
-                                                        sizyou_c: s.sizyou_c,
-                                                    };
+                                                let meta = crate::stock_meta::TickerDisplayMeta {
+                                                    display_name_ja: s.display_name_ja,
+                                                    yobine_code: s.yobine_code,
+                                                    sizyou_c: s.sizyou_c,
+                                                };
                                                 if meta.display_name_ja().is_none() {
                                                     log::debug!(
                                                         "TickerInfo: display_name_ja absent for \
@@ -616,14 +599,10 @@ impl VenueBackend for EngineClientBackend {
                                                     );
                                                 }
                                                 staged_meta.push((ticker, meta));
-                                                // B4: stage venue_caps if present.
-                                                if let Some(caps) = s.venue_caps {
-                                                    staged_caps.push((ticker, caps));
-                                                }
+                                                staged_caps.push((ticker, s.venue_caps));
                                                 Some((ticker, Some(info)))
                                             }
-                                            Ok(crate::dto::TickerEntry::Crypto(c)) => {
-                                                typed_count += 1;
+                                            crate::dto::TickerEntry::Crypto(c) => {
                                                 let symbol = &c.symbol;
                                                 if !symbol.is_ascii()
                                                     || symbol.len() > Ticker::MAX_LEN as usize
@@ -648,78 +627,15 @@ impl VenueBackend for EngineClientBackend {
                                                     c.min_qty,
                                                     c.contract_size,
                                                 );
-                                                // B4: stage venue_caps if present.
-                                                if let Some(caps) = c.venue_caps {
-                                                    staged_caps.push((ticker, caps));
-                                                }
-                                                Some((ticker, Some(info)))
-                                            }
-                                            Err(_) => {
-                                                // Fallback: existing Value-based parse path.
-                                                // Keeps backward compatibility with Python
-                                                // engines that don't yet send `kind`.
-                                                fallback_count += 1;
-                                                log::warn!(
-                                                    "TickerInfo: typed parse failed, using \
-                                                     Value fallback for entry"
-                                                );
-                                                if market_kind == MarketKind::Stock {
-                                                    // B3 HIGH-U-9 + B4: route stock dicts
-                                                    // through the typed parser and stash
-                                                    // the display meta in `self.ticker_meta`.
-                                                    let (ticker, info, meta) =
-                                                        crate::stock_meta::parse_stock_ticker_entry(
-                                                            t, exchange,
-                                                        )?;
-                                                    if meta.display_name_ja().is_none() {
-                                                        log::debug!(
-                                                            "TickerInfo: display_name_ja absent \
-                                                             for {ticker}"
-                                                        );
-                                                    }
-                                                    staged_meta.push((ticker, meta));
-                                                    return Some((ticker, Some(info)));
-                                                }
-                                                let symbol = t.get("symbol")?.as_str()?;
-                                                if !symbol.is_ascii()
-                                                    || symbol.len() > Ticker::MAX_LEN as usize
-                                                    || symbol.contains('|')
-                                                {
-                                                    return None;
-                                                }
-                                                let display_symbol =
-                                                    t.get("display_symbol").and_then(|v| v.as_str());
-                                                let display_symbol = display_symbol.filter(|d| {
-                                                    d.is_ascii()
-                                                        && d.len() <= Ticker::MAX_LEN as usize
-                                                        && !d.contains('|')
-                                                });
-                                                let min_tick =
-                                                    t.get("min_ticksize")?.as_f64()? as f32;
-                                                let min_qty = t.get("min_qty")?.as_f64()? as f32;
-                                                let contract_size = t
-                                                    .get("contract_size")
-                                                    .and_then(|v| v.as_f64())
-                                                    .map(|v| v as f32);
-                                                let ticker = Ticker::new_with_display(
-                                                    symbol,
-                                                    exchange,
-                                                    display_symbol,
-                                                );
-                                                let info = TickerInfo::new(
-                                                    ticker,
-                                                    min_tick,
-                                                    min_qty,
-                                                    contract_size,
-                                                );
+                                                staged_caps.push((ticker, c.venue_caps));
                                                 Some((ticker, Some(info)))
                                             }
                                         }
                                     })
                                     .collect();
                                 log::info!(
-                                    "TickerInfo: typed={typed_count} fallback={fallback_count} \
-                                     caps={caps_count}",
+                                    "TickerInfo: count={count} caps={caps_count}",
+                                    count = map.len(),
                                     caps_count = staged_caps.len()
                                 );
                                 if !staged_meta.is_empty() {

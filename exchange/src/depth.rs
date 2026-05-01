@@ -163,18 +163,6 @@ impl LocalDepthCache {
         self.update_inner(new_depth, min_ticksize, None);
     }
 
-    /// Deprecated: Python normalises qty before IPC; pass `qty_norm = None` or use `update()`.
-    /// Will be removed in Phase F.
-    #[deprecated(note = "Python normalises qty before IPC; use update() instead")]
-    pub fn update_with_qty_norm(
-        &mut self,
-        new_depth: DepthUpdate,
-        min_ticksize: MinTicksize,
-        qty_norm: Option<QtyNormalization>,
-    ) {
-        self.update_inner(new_depth, min_ticksize, qty_norm);
-    }
-
     fn update_inner(
         &mut self,
         new_depth: DepthUpdate,
@@ -233,19 +221,4 @@ mod tests {
         })
     }
 
-    #[test]
-    #[should_panic(expected = "qty_norm is no longer applied")]
-    fn update_with_some_qty_norm_panics_in_all_builds() {
-        let qty_norm = QtyNormalization::with_raw_qty_unit(false, btc_ticker_info(), RawQtyUnit::Base);
-        let mut cache = LocalDepthCache::default();
-        #[allow(deprecated)]
-        cache.update_with_qty_norm(normalised_snapshot(), min_tick(0), Some(qty_norm));
-    }
-
-    #[test]
-    fn update_with_none_qty_norm_does_not_panic() {
-        let mut cache = LocalDepthCache::default();
-        #[allow(deprecated)]
-        cache.update_with_qty_norm(normalised_snapshot(), min_tick(0), None);
-    }
 }
