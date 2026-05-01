@@ -1130,7 +1130,7 @@ impl TickersTable {
             // starts-with check.
             if row.exchange.venue() == Venue::Tachibana {
                 let meta_opt = tachibana_meta.as_deref().and_then(|m| m.get(&row.ticker));
-                if engine_client::tachibana_meta::matches_tachibana_filter(
+                if engine_client::stock_meta::matches_tachibana_filter(
                     &row.ticker,
                     meta_opt,
                     search_upper,
@@ -2637,8 +2637,7 @@ mod tests {
             "lot_size": 100,
             "min_ticksize": 1.0,
         });
-        let (ticker, _, meta) =
-            parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
+        let (ticker, _, meta) = parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
 
         // Populate the meta map.
         let mut meta_map = TickerMetaMap::default();

@@ -551,8 +551,8 @@ impl Modifier {
                         .push(text("Tick size multiplier").size(13))
                         .push(rule::horizontal(1).style(style::split_ruler));
 
-                    let allows_custom_tsizes = self.client_aggr_depth
-                        || matches!(kind, ModifierKind::Footprint(_, _));
+                    let allows_custom_tsizes =
+                        self.client_aggr_depth || matches!(kind, ModifierKind::Footprint(_, _));
 
                     let allowed_tm = if allows_custom_tsizes {
                         exchange::TickMultiplier::ALL.to_vec()

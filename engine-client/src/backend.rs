@@ -58,8 +58,8 @@ pub struct EngineClientBackend {
     depth_tracker: Arc<Mutex<DepthTracker>>,
     /// B4: Tachibana display metadata captured during `fetch_ticker_metadata`
     /// so the ticker selector can do incremental search by `display_name_ja`.
-    /// Empty for crypto venues — `parse_tachibana_ticker_dict` is only called
-    /// in the `MarketKind::Stock` branch.
+    /// Empty for crypto venues — `stock_meta` parsing is only invoked in the
+    /// `MarketKind::Stock` branch.
     ticker_meta: Arc<Mutex<TickerMetaMap>>,
     /// B4: Shared `VenueCaps` sidecar — one global instance per app, injected
     /// at backend construction. Populated by `fetch_ticker_metadata` when
@@ -549,87 +549,85 @@ impl VenueBackend for EngineClientBackend {
                                 )> = Vec::new();
                                 let map: TickerMetadataMap = tickers
                                     .into_iter()
-                                    .filter_map(|entry| {
-                                        match entry {
-                                            crate::dto::TickerEntry::Stock(s) => {
-                                                let symbol = &s.symbol;
-                                                if !symbol.is_ascii()
-                                                    || symbol.len() > Ticker::MAX_LEN as usize
-                                                    || symbol.contains('|')
-                                                {
-                                                    return None;
-                                                }
-                                                let display_symbol =
-                                                    s.display_symbol.as_deref().filter(|d| {
-                                                        d.is_ascii()
-                                                            && d.len() <= Ticker::MAX_LEN as usize
-                                                            && !d.contains('|')
-                                                    });
-                                                let ticker = Ticker::new_with_display(
-                                                    symbol,
-                                                    exchange,
-                                                    display_symbol,
-                                                );
-                                                let min_ticksize = s.min_ticksize;
-                                                if !min_ticksize.is_finite() || min_ticksize <= 0.0 {
-                                                    log::warn!(
-                                                        "TickerInfo: min_ticksize invalid \
+                                    .filter_map(|entry| match entry {
+                                        crate::dto::TickerEntry::Stock(s) => {
+                                            let symbol = &s.symbol;
+                                            if !symbol.is_ascii()
+                                                || symbol.len() > Ticker::MAX_LEN as usize
+                                                || symbol.contains('|')
+                                            {
+                                                return None;
+                                            }
+                                            let display_symbol =
+                                                s.display_symbol.as_deref().filter(|d| {
+                                                    d.is_ascii()
+                                                        && d.len() <= Ticker::MAX_LEN as usize
+                                                        && !d.contains('|')
+                                                });
+                                            let ticker = Ticker::new_with_display(
+                                                symbol,
+                                                exchange,
+                                                display_symbol,
+                                            );
+                                            let min_ticksize = s.min_ticksize;
+                                            if !min_ticksize.is_finite() || min_ticksize <= 0.0 {
+                                                log::warn!(
+                                                    "TickerInfo: min_ticksize invalid \
                                                          ({min_ticksize}) for {}, skipping",
-                                                        s.symbol
-                                                    );
-                                                    return None;
-                                                }
-                                                let lot_size = s.lot_size.unwrap_or(100);
-                                                let min_qty = s.min_qty.unwrap_or(lot_size as f32);
-                                                let info = TickerInfo::new_stock(
-                                                    ticker,
-                                                    min_ticksize,
-                                                    min_qty,
-                                                    lot_size,
+                                                    s.symbol
                                                 );
-                                                let meta = crate::stock_meta::TickerDisplayMeta {
-                                                    display_name_ja: s.display_name_ja,
-                                                    yobine_code: s.yobine_code,
-                                                    sizyou_c: s.sizyou_c,
-                                                };
-                                                if meta.display_name_ja().is_none() {
-                                                    log::debug!(
-                                                        "TickerInfo: display_name_ja absent for \
+                                                return None;
+                                            }
+                                            let lot_size = s.lot_size.unwrap_or(100);
+                                            let min_qty = s.min_qty.unwrap_or(lot_size as f32);
+                                            let info = TickerInfo::new_stock(
+                                                ticker,
+                                                min_ticksize,
+                                                min_qty,
+                                                lot_size,
+                                            );
+                                            let meta = crate::stock_meta::TickerDisplayMeta {
+                                                display_name_ja: s.display_name_ja,
+                                                yobine_code: s.yobine_code,
+                                                sizyou_c: s.sizyou_c,
+                                            };
+                                            if meta.display_name_ja().is_none() {
+                                                log::debug!(
+                                                    "TickerInfo: display_name_ja absent for \
                                                          {ticker}"
-                                                    );
-                                                }
-                                                staged_meta.push((ticker, meta));
-                                                staged_caps.push((ticker, s.venue_caps));
-                                                Some((ticker, Some(info)))
-                                            }
-                                            crate::dto::TickerEntry::Crypto(c) => {
-                                                let symbol = &c.symbol;
-                                                if !symbol.is_ascii()
-                                                    || symbol.len() > Ticker::MAX_LEN as usize
-                                                    || symbol.contains('|')
-                                                {
-                                                    return None;
-                                                }
-                                                let display_symbol =
-                                                    c.display_symbol.as_deref().filter(|d| {
-                                                        d.is_ascii()
-                                                            && d.len() <= Ticker::MAX_LEN as usize
-                                                            && !d.contains('|')
-                                                    });
-                                                let ticker = Ticker::new_with_display(
-                                                    symbol,
-                                                    exchange,
-                                                    display_symbol,
                                                 );
-                                                let info = TickerInfo::new(
-                                                    ticker,
-                                                    c.min_ticksize,
-                                                    c.min_qty,
-                                                    c.contract_size,
-                                                );
-                                                staged_caps.push((ticker, c.venue_caps));
-                                                Some((ticker, Some(info)))
                                             }
+                                            staged_meta.push((ticker, meta));
+                                            staged_caps.push((ticker, s.venue_caps));
+                                            Some((ticker, Some(info)))
+                                        }
+                                        crate::dto::TickerEntry::Crypto(c) => {
+                                            let symbol = &c.symbol;
+                                            if !symbol.is_ascii()
+                                                || symbol.len() > Ticker::MAX_LEN as usize
+                                                || symbol.contains('|')
+                                            {
+                                                return None;
+                                            }
+                                            let display_symbol =
+                                                c.display_symbol.as_deref().filter(|d| {
+                                                    d.is_ascii()
+                                                        && d.len() <= Ticker::MAX_LEN as usize
+                                                        && !d.contains('|')
+                                                });
+                                            let ticker = Ticker::new_with_display(
+                                                symbol,
+                                                exchange,
+                                                display_symbol,
+                                            );
+                                            let info = TickerInfo::new(
+                                                ticker,
+                                                c.min_ticksize,
+                                                c.min_qty,
+                                                c.contract_size,
+                                            );
+                                            staged_caps.push((ticker, c.venue_caps));
+                                            Some((ticker, Some(info)))
                                         }
                                     })
                                     .collect();

@@ -12,7 +12,7 @@ import httpx
 import orjson
 import websockets
 
-from engine.exchanges.base import ExchangeWorker, OnSsidUpdate
+from engine.exchanges.base import ExchangeWorker, OnSsidUpdate, is_valid_ticker_entry
 from engine.limiter import TokenBucket
 
 log = logging.getLogger(__name__)
@@ -313,16 +313,16 @@ class HyperliquidWorker(ExchangeWorker):
             tick_size = _compute_tick_size(price, sz_decimals)
             min_qty = 10.0 ** (-sz_decimals) if sz_decimals > 0 else 1.0
 
-            result.append(
-                {
-                    "kind": "crypto",
-                    "symbol": asset["name"],
-                    "min_ticksize": tick_size,
-                    "min_qty": min_qty,
-                    "contract_size": None,
-                    "venue_caps": self.venue_caps(),
-                }
-            )
+            entry = {
+                "kind": "crypto",
+                "symbol": asset["name"],
+                "min_ticksize": tick_size,
+                "min_qty": min_qty,
+                "contract_size": None,
+                "venue_caps": self.venue_caps(),
+            }
+            if is_valid_ticker_entry(entry, venue="hyperliquid"):
+                result.append(entry)
         return result
 
     async def _list_tickers_spot(self) -> list[dict]:
@@ -347,17 +347,17 @@ class HyperliquidWorker(ExchangeWorker):
             min_qty = 10.0 ** (-sz_decimals) if sz_decimals > 0 else 1.0
 
             display_sym = _create_display_symbol(pair["name"], tokens, token_indices)
-            result.append(
-                {
-                    "kind": "crypto",
-                    "symbol": pair["name"],
-                    "display_symbol": display_sym,
-                    "min_ticksize": tick_size,
-                    "min_qty": min_qty,
-                    "contract_size": None,
-                    "venue_caps": self.venue_caps(),
-                }
-            )
+            entry = {
+                "kind": "crypto",
+                "symbol": pair["name"],
+                "display_symbol": display_sym,
+                "min_ticksize": tick_size,
+                "min_qty": min_qty,
+                "contract_size": None,
+                "venue_caps": self.venue_caps(),
+            }
+            if is_valid_ticker_entry(entry, venue="hyperliquid"):
+                result.append(entry)
         return result
 
     # ------------------------------------------------------------------

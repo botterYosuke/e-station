@@ -1761,12 +1761,11 @@ impl Flowsurface {
                     let backend = Arc::new(engine_client::EngineClientBackend::new(
                         Arc::clone(&conn),
                         name,
-                        VENUE_CAPS_STORE
-                            .get()
-                            .map(Arc::clone)
-                            .unwrap_or_else(|| {
-                                Arc::new(tokio::sync::RwLock::new(engine_client::VenueCapsStore::new()))
-                            }),
+                        VENUE_CAPS_STORE.get().map(Arc::clone).unwrap_or_else(|| {
+                            Arc::new(tokio::sync::RwLock::new(
+                                engine_client::VenueCapsStore::new(),
+                            ))
+                        }),
                     ));
                     // B5: capture the Tachibana meta handle before the backend
                     // is moved into the type-erased `AdapterHandles`. This is

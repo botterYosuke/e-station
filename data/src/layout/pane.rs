@@ -383,7 +383,9 @@ impl PaneSetup {
         let depth_aggr = if is_client_aggr {
             exchange::adapter::StreamTicksize::Client
         } else {
-            exchange::adapter::StreamTicksize::ServerSide(tick_multiplier.unwrap_or(TickMultiplier(50)))
+            exchange::adapter::StreamTicksize::ServerSide(
+                tick_multiplier.unwrap_or(TickMultiplier(50)),
+            )
         };
 
         let push_freq = match content_kind {

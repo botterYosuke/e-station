@@ -53,8 +53,7 @@ fn test_tachibana_ticker_info_carries_yobine_code() {
         "min_ticksize": 1.0,
         "yobine_code": "103",
     });
-    let (_ticker, _info, meta) =
-        parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
+    let (_ticker, _info, meta) = parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
     assert_eq!(meta.yobine_code(), Some("103"));
 }
 
@@ -67,8 +66,7 @@ fn test_parse_stock_ticker_uses_min_ticksize_from_dict() {
         "yobine_code": "103",
         "min_ticksize": 0.1_f64,
     });
-    let (_ticker, info, _meta) =
-        parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
+    let (_ticker, info, _meta) = parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
     assert!(
         (info.min_ticksize.as_f32() - 0.1).abs() < 1e-6,
         "min_ticksize should be 0.1 from dict, got {}",

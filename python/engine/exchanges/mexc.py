@@ -11,7 +11,7 @@ import httpx
 import orjson
 import websockets
 
-from engine.exchanges.base import ExchangeWorker, OnSsidUpdate
+from engine.exchanges.base import ExchangeWorker, OnSsidUpdate, is_valid_ticker_entry
 from engine.limiter import TokenBucket
 
 log = logging.getLogger(__name__)
@@ -281,16 +281,16 @@ class MexcWorker(ExchangeWorker):
             min_qty = float(item.get("baseSizePrecision", 0))
             precision = int(item.get("quoteAssetPrecision", 2))
             min_ticksize = 10.0 ** (-precision)
-            result.append(
-                {
-                    "kind": "crypto",
-                    "symbol": item["symbol"],
-                    "min_ticksize": min_ticksize,
-                    "min_qty": min_qty,
-                    "contract_size": None,
-                    "venue_caps": self.venue_caps(),
-                }
-            )
+            entry = {
+                "kind": "crypto",
+                "symbol": item["symbol"],
+                "min_ticksize": min_ticksize,
+                "min_qty": min_qty,
+                "contract_size": None,
+                "venue_caps": self.venue_caps(),
+            }
+            if is_valid_ticker_entry(entry, venue="mexc"):
+                result.append(entry)
         return result
 
     async def _populate_contract_sizes(self) -> None:
@@ -328,17 +328,17 @@ class MexcWorker(ExchangeWorker):
             min_qty = min_vol * contract_size
 
             symbol = item["symbol"]
-            self._contract_sizes[symbol] = contract_size
-            result.append(
-                {
-                    "kind": "crypto",
-                    "symbol": symbol,
-                    "min_ticksize": price_unit,
-                    "min_qty": min_qty,
-                    "contract_size": contract_size,
-                    "venue_caps": self.venue_caps(),
-                }
-            )
+            entry = {
+                "kind": "crypto",
+                "symbol": symbol,
+                "min_ticksize": price_unit,
+                "min_qty": min_qty,
+                "contract_size": contract_size,
+                "venue_caps": self.venue_caps(),
+            }
+            if is_valid_ticker_entry(entry, venue="mexc"):
+                self._contract_sizes[symbol] = contract_size
+                result.append(entry)
         return result
 
     # ------------------------------------------------------------------

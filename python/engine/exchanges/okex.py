@@ -11,7 +11,7 @@ import httpx
 import orjson
 import websockets
 
-from engine.exchanges.base import ExchangeWorker, OnSsidUpdate
+from engine.exchanges.base import ExchangeWorker, OnSsidUpdate, is_valid_ticker_entry
 from engine.limiter import TokenBucket
 
 log = logging.getLogger(__name__)
@@ -286,19 +286,18 @@ class OkexWorker(ExchangeWorker):
             if item.get("state", "") != "live":
                 continue
 
+            entry: dict | None = None
             if market == "spot":
                 if item.get("quoteCcy", "") != "USDT":
                     continue
-                result.append(
-                    {
-                        "kind": "crypto",
-                        "symbol": item["instId"],
-                        "min_ticksize": float(item["tickSz"]),
-                        "min_qty": float(item["lotSz"]),
-                        "contract_size": None,
-                        "venue_caps": self.venue_caps(),
-                    }
-                )
+                entry = {
+                    "kind": "crypto",
+                    "symbol": item["instId"],
+                    "min_ticksize": float(item["tickSz"]),
+                    "min_qty": float(item["lotSz"]),
+                    "contract_size": None,
+                    "venue_caps": self.venue_caps(),
+                }
 
             elif market == "linear_perp":
                 if item.get("ctType") != "linear":
@@ -306,31 +305,30 @@ class OkexWorker(ExchangeWorker):
                 if item.get("settleCcy") != "USDT":
                     continue
                 ct_val = item.get("ctVal")
-                result.append(
-                    {
-                        "kind": "crypto",
-                        "symbol": item["instId"],
-                        "min_ticksize": float(item["tickSz"]),
-                        "min_qty": float(item["lotSz"]),
-                        "contract_size": float(ct_val) if ct_val is not None else None,
-                        "venue_caps": self.venue_caps(),
-                    }
-                )
+                entry = {
+                    "kind": "crypto",
+                    "symbol": item["instId"],
+                    "min_ticksize": float(item["tickSz"]),
+                    "min_qty": float(item["lotSz"]),
+                    "contract_size": float(ct_val) if ct_val is not None else None,
+                    "venue_caps": self.venue_caps(),
+                }
 
             elif market == "inverse_perp":
                 if item.get("ctType") != "inverse":
                     continue
                 ct_val = item.get("ctVal")
-                result.append(
-                    {
-                        "kind": "crypto",
-                        "symbol": item["instId"],
-                        "min_ticksize": float(item["tickSz"]),
-                        "min_qty": float(item["lotSz"]),
-                        "contract_size": float(ct_val) if ct_val is not None else None,
-                        "venue_caps": self.venue_caps(),
-                    }
-                )
+                entry = {
+                    "kind": "crypto",
+                    "symbol": item["instId"],
+                    "min_ticksize": float(item["tickSz"]),
+                    "min_qty": float(item["lotSz"]),
+                    "contract_size": float(ct_val) if ct_val is not None else None,
+                    "venue_caps": self.venue_caps(),
+                }
+
+            if entry is not None and is_valid_ticker_entry(entry, venue="okex"):
+                result.append(entry)
 
         return result
 

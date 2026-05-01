@@ -695,13 +695,12 @@ impl Ladder {
         {
             let top_y = anchor_mid_y + row_top_y(0);
             if top_y < bounds.height && top_y + ROW_HEIGHT > 0.0 {
-                let row = if self.config.show_spread
-                    && caps_supports_spread(&self.ticker_info.ticker)
-                {
-                    DomRow::Spread
-                } else {
-                    DomRow::CenterDivider
-                };
+                let row =
+                    if self.config.show_spread && caps_supports_spread(&self.ticker_info.ticker) {
+                        DomRow::Spread
+                    } else {
+                        DomRow::CenterDivider
+                    };
                 rows.push(VisibleRow {
                     row,
                     y: top_y,

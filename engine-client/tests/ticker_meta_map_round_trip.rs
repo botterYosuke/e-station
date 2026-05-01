@@ -103,7 +103,13 @@ async fn ticker_meta_handle_empty_then_populated_then_reset() {
     let conn = EngineConnection::connect(&url, "round-trip-token")
         .await
         .expect("handshake should succeed");
-    let backend = EngineClientBackend::new(Arc::new(conn), "tachibana", std::sync::Arc::new(tokio::sync::RwLock::new(flowsurface_engine_client::VenueCapsStore::new())));
+    let backend = EngineClientBackend::new(
+        Arc::new(conn),
+        "tachibana",
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            flowsurface_engine_client::VenueCapsStore::new(),
+        )),
+    );
 
     // (1) Fresh backend: handle exposes an empty map.
     let handle = backend.ticker_meta_handle();

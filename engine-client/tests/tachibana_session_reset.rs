@@ -150,7 +150,13 @@ async fn new_session_id_resets_gap_detector_and_accepts_diffs() {
     let url = format!("ws://{addr}");
     let conn = Arc::new(EngineConnection::connect(&url, token).await.unwrap());
 
-    let backend = EngineClientBackend::new(conn, "tachibana", std::sync::Arc::new(tokio::sync::RwLock::new(flowsurface_engine_client::VenueCapsStore::new())));
+    let backend = EngineClientBackend::new(
+        conn,
+        "tachibana",
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            flowsurface_engine_client::VenueCapsStore::new(),
+        )),
+    );
     let ticker = Ticker::new("7203", Exchange::TachibanaStock);
     let ticker_info = TickerInfo::new(ticker, 1.0, 1.0, None);
 

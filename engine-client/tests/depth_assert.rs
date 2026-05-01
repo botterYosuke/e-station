@@ -14,8 +14,14 @@ fn snapshot(bids: Vec<(f32, f32)>, asks: Vec<(f32, f32)>) -> DepthUpdate {
     DepthUpdate::Snapshot(DepthPayload {
         last_update_id: 1,
         time: 0,
-        bids: bids.into_iter().map(|(p, q)| DeOrder { price: p, qty: q }).collect(),
-        asks: asks.into_iter().map(|(p, q)| DeOrder { price: p, qty: q }).collect(),
+        bids: bids
+            .into_iter()
+            .map(|(p, q)| DeOrder { price: p, qty: q })
+            .collect(),
+        asks: asks
+            .into_iter()
+            .map(|(p, q)| DeOrder { price: p, qty: q })
+            .collect(),
     })
 }
 
@@ -23,8 +29,14 @@ fn diff(bids: Vec<(f32, f32)>, asks: Vec<(f32, f32)>) -> DepthUpdate {
     DepthUpdate::Diff(DepthPayload {
         last_update_id: 2,
         time: 0,
-        bids: bids.into_iter().map(|(p, q)| DeOrder { price: p, qty: q }).collect(),
-        asks: asks.into_iter().map(|(p, q)| DeOrder { price: p, qty: q }).collect(),
+        bids: bids
+            .into_iter()
+            .map(|(p, q)| DeOrder { price: p, qty: q })
+            .collect(),
+        asks: asks
+            .into_iter()
+            .map(|(p, q)| DeOrder { price: p, qty: q })
+            .collect(),
     })
 }
 
@@ -33,10 +45,16 @@ fn diff(bids: Vec<(f32, f32)>, asks: Vec<(f32, f32)>) -> DepthUpdate {
 fn normalised_depth_does_not_panic() {
     let mut cache = LocalDepthCache::default();
     // min_ticksize = 1.0 (power=0), prices are whole numbers — OK
-    cache.update(snapshot(vec![(100.0, 10.0)], vec![(101.0, 5.0)]), min_tick(0));
+    cache.update(
+        snapshot(vec![(100.0, 10.0)], vec![(101.0, 5.0)]),
+        min_tick(0),
+    );
     cache.update(diff(vec![(100.0, 8.0)], vec![]), min_tick(0));
     // min_ticksize = 0.1 (power=-1), prices are multiples of 0.1 — OK
-    cache.update(snapshot(vec![(100.1, 3.0)], vec![(100.2, 2.0)]), min_tick(-1));
+    cache.update(
+        snapshot(vec![(100.1, 3.0)], vec![(100.2, 2.0)]),
+        min_tick(-1),
+    );
 }
 
 #[cfg(debug_assertions)]
@@ -71,5 +89,4 @@ mod debug_panics {
         let mut cache = LocalDepthCache::default();
         cache.update(diff(vec![], vec![(100.7, 3.0)]), min_tick(0));
     }
-
 }

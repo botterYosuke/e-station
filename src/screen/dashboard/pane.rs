@@ -51,11 +51,26 @@ use iced::{
 use std::time::Instant;
 
 fn caps_client_aggr(ticker: &exchange::Ticker) -> bool {
-    crate::VENUE_CAPS_STORE
-        .get()
-        .and_then(|store| store.try_read().ok())
-        .and_then(|g| g.get(ticker).map(|c| c.client_aggr_depth))
-        .unwrap_or(true)
+    // Phase B (Q6): VenueCapsStore is owned by the engine backend behind an
+    // Arc<RwLock>. We must NOT call blocking_read() from this synchronous UI
+    // hot path — iced's event loop would stall under writer contention. Use
+    // try_read and fall back to `true` (the safer default for the most-used
+    // venue Tachibana). A WARN log surfaces the lock-contention race (Phase F
+    // post-audit MEDIUM-1) so a Hyperliquid misclassification can be diagnosed
+    // post-mortem instead of being silently transient.
+    let Some(store) = crate::VENUE_CAPS_STORE.get() else {
+        return true;
+    };
+    match store.try_read() {
+        Ok(g) => g.get(ticker).map(|c| c.client_aggr_depth).unwrap_or(true),
+        Err(_) => {
+            log::warn!(
+                "caps_client_aggr: VenueCapsStore read lock contended for {ticker} \
+                 — falling back to true (may misclassify non-aggregated venues briefly)"
+            );
+            true
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -956,8 +971,9 @@ impl State {
 
                     let exchange = stream_pair.map(|ti| ti.ticker.exchange);
                     let min_ticksize = stream_pair.map(|ti| ti.min_ticksize);
-                    let client_aggr_depth =
-                        stream_pair.map(|ti| caps_client_aggr(&ti.ticker)).unwrap_or(false);
+                    let client_aggr_depth = stream_pair
+                        .map(|ti| caps_client_aggr(&ti.ticker))
+                        .unwrap_or(false);
 
                     let modifiers = ticksize_modifier(
                         id,
@@ -1022,8 +1038,10 @@ impl State {
                         })
                         .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
                     let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
-                    let client_aggr_depth =
-                        ticker_info.as_ref().map(|ti| caps_client_aggr(&ti.ticker)).unwrap_or(false);
+                    let client_aggr_depth = ticker_info
+                        .as_ref()
+                        .map(|ti| caps_client_aggr(&ti.ticker))
+                        .unwrap_or(false);
 
                     let modifiers = row![
                         basis_modifier(id, basis, modifier, kind),
@@ -1226,8 +1244,10 @@ impl State {
                         })
                         .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
                     let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
-                    let client_aggr_depth =
-                        ticker_info.as_ref().map(|ti| caps_client_aggr(&ti.ticker)).unwrap_or(false);
+                    let client_aggr_depth = ticker_info
+                        .as_ref()
+                        .map(|ti| caps_client_aggr(&ti.ticker))
+                        .unwrap_or(false);
 
                     let settings_modal = || {
                         heatmap_shader_cfg_view(
@@ -1719,17 +1739,16 @@ impl State {
                                                     }
                                                 }
                                                 Basis::Tick(_) => {
-                                                    let depth_aggr = if caps_client_aggr(
-                                                        &base_ticker.ticker,
-                                                    ) {
-                                                        StreamTicksize::Client
-                                                    } else {
-                                                        StreamTicksize::ServerSide(
-                                                            self.settings
-                                                                .tick_multiply
-                                                                .unwrap_or(TickMultiplier(1)),
-                                                        )
-                                                    };
+                                                    let depth_aggr =
+                                                        if caps_client_aggr(&base_ticker.ticker) {
+                                                            StreamTicksize::Client
+                                                        } else {
+                                                            StreamTicksize::ServerSide(
+                                                                self.settings
+                                                                    .tick_multiply
+                                                                    .unwrap_or(TickMultiplier(1)),
+                                                            )
+                                                        };
 
                                                     self.streams = ResolvedStream::Ready(vec![
                                                         StreamKind::Depth {
