@@ -466,13 +466,6 @@ impl Exchange {
         }
     }
 
-    pub fn is_depth_client_aggr(&self) -> bool {
-        !matches!(
-            self,
-            Exchange::HyperliquidLinear | Exchange::HyperliquidSpot
-        )
-    }
-
     pub fn is_custom_push_freq(&self) -> bool {
         matches!(
             self,
@@ -533,10 +526,11 @@ impl Exchange {
 
     pub fn stream_ticksize(
         &self,
+        is_client_aggr: bool,
         multiplier: Option<TickMultiplier>,
         server_fallback: TickMultiplier,
     ) -> StreamTicksize {
-        if self.is_depth_client_aggr() {
+        if is_client_aggr {
             StreamTicksize::Client
         } else {
             StreamTicksize::ServerSide(multiplier.unwrap_or(server_fallback))

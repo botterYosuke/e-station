@@ -1536,7 +1536,7 @@ class PositionRecord:
 
     instrument_id: str       # "<sIssueCode>.TSE"
     qty: int                 # 保有数量
-    market_value: int = 0   # 評価額（円）
+    market_value: Optional[int] = None  # 評価額（円）; None = 取引時間外等で不明
     position_type: str = "cash"  # "cash" | "margin_credit" | "margin_general"
     tategyoku_id: Optional[str] = None  # 建玉 ID（信用建玉のみ）
 
@@ -1758,14 +1758,14 @@ async def fetch_positions(
 
     cash_list = deserialize_tachibana_list(data.get("aGenbutuKabuList", ""))
     for rec in cash_list:
-        issue_code = rec.get("sIssueCode", "")
-        qty_str = rec.get("sGenbutuZanSuu", "0") or "0"
-        val_str = rec.get("sGenbutuZanKingaku", "0") or "0"
+        issue_code = rec.get("sUriOrderIssueCode", "")
+        qty_str = rec.get("sUriOrderZanKabuSuryou", "0") or "0"
+        val_str = rec.get("sUriOrderGaisanHyoukagaku") or ""
         results.append(
             PositionRecord(
                 instrument_id=f"{issue_code}.TSE",
                 qty=int(qty_str),
-                market_value=int(val_str),
+                market_value=int(val_str) if val_str else None,
                 position_type="cash",
             )
         )
@@ -1790,15 +1790,17 @@ async def fetch_positions(
     if err is not None:
         raise err
 
-    margin_list = deserialize_tachibana_list(data.get("aTategyokuList", ""))
+    margin_list = deserialize_tachibana_list(data.get("aShinyouTategyokuList", ""))
     for rec in margin_list:
-        issue_code = rec.get("sIssueCode", "")
-        qty_str = rec.get("sTategyokuZanSuu", "0") or "0"
-        tategyoku_id = rec.get("sTategyokuNumber")
+        issue_code = rec.get("sOrderIssueCode", "")
+        qty_str = rec.get("sOrderTategyokuSuryou", "0") or "0"
+        tategyoku_id = rec.get("sOrderTategyokuNumber")
+        market_value_str = rec.get("sTategyokuDaikin") or ""
         results.append(
             PositionRecord(
                 instrument_id=f"{issue_code}.TSE",
                 qty=int(qty_str),
+                market_value=int(market_value_str) if market_value_str else None,
                 position_type="margin_credit",
                 tategyoku_id=tategyoku_id,
             )

@@ -129,7 +129,13 @@ async fn depth_gap_triggers_snapshot_request_without_closing_stream() {
     let url = format!("ws://{addr}");
     let conn = Arc::new(EngineConnection::connect(&url, token).await.unwrap());
 
-    let backend = EngineClientBackend::new(conn, "binance");
+    let backend = EngineClientBackend::new(
+        conn,
+        "binance",
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            flowsurface_engine_client::VenueCapsStore::new(),
+        )),
+    );
     let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
     let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
 

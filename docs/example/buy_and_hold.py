@@ -5,11 +5,7 @@ numpy / pandas は使わず、追加依存は不要です。
 
 起動:
 
-    REPLAY_INSTRUMENT_ID=1301.TSE \\
-    REPLAY_GRANULARITY=Daily \\
-    REPLAY_START_DATE=2025-01-06 \\
-    REPLAY_END_DATE=2025-03-31 \\
-    bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py
+    bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31
 
 strategy_init_kwargs で初期化パラメータを上書きできます:
 

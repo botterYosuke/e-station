@@ -34,7 +34,8 @@
     { "$ref": "#/$defs/OrderCanceled" },
     { "$ref": "#/$defs/OrderExpired" },
     { "$ref": "#/$defs/OrderListUpdated" },
-    { "$ref": "#/$defs/BuyingPowerUpdated" }
+    { "$ref": "#/$defs/BuyingPowerUpdated" },
+    { "$ref": "#/$defs/PositionsUpdated" }
   ],
   "$defs": {
     "RequestId": {
@@ -287,8 +288,58 @@
         "venue": { "type": "string" },
         "tickers": {
           "type": "array",
-          "items": { "type": "object" }
+          "items": { "$ref": "#/$defs/TickerEntry" }
         }
+      }
+    },
+    "TickerEntry": {
+      "description": "Discriminated union on 'kind'. venue_caps is required (Phase F).",
+      "oneOf": [
+        { "$ref": "#/$defs/StockTicker" },
+        { "$ref": "#/$defs/CryptoTicker" }
+      ]
+    },
+    "StockTicker": {
+      "type": "object",
+      "required": ["kind", "symbol", "min_ticksize", "venue_caps"],
+      "properties": {
+        "kind": { "const": "stock" },
+        "symbol": { "type": "string" },
+        "display_symbol": { "type": "string" },
+        "display_name_ja": { "type": "string" },
+        "min_ticksize": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "lot_size": { "type": ["integer", "null"] },
+        "min_qty": { "type": ["number", "null"] },
+        "quote_currency": { "type": "string" },
+        "yobine_code": { "type": "string" },
+        "sizyou_c": { "type": "string" },
+        "venue_caps": { "$ref": "#/$defs/VenueCaps" }
+      }
+    },
+    "CryptoTicker": {
+      "type": "object",
+      "required": ["kind", "symbol", "min_ticksize", "min_qty", "venue_caps"],
+      "properties": {
+        "kind": { "const": "crypto" },
+        "symbol": { "type": "string" },
+        "display_symbol": { "type": "string" },
+        "min_ticksize": { "type": "number", "exclusiveMinimum": 0 },
+        "min_qty": { "type": "number", "exclusiveMinimum": 0 },
+        "contract_size": { "type": "number", "exclusiveMinimum": 0 },
+        "venue_caps": { "$ref": "#/$defs/VenueCaps" }
+      }
+    },
+    "VenueCaps": {
+      "description": "Delivered in TickerEntry IPC only. Not stored in TickerInfo (sidecar VenueCapsStore).",
+      "type": "object",
+      "required": ["client_aggr_depth", "supports_spread_display"],
+      "properties": {
+        "client_aggr_depth": { "type": "boolean" },
+        "supports_spread_display": { "type": "boolean" },
+        "qty_norm_kind": { "enum": ["none", "contract", "lot"] }
       }
     },
     "TickerStats": {
@@ -549,6 +600,39 @@
         "cash_available": { "type": "integer" },
         "cash_shortfall": { "type": "integer", "minimum": 0 },
         "credit_available": { "type": "integer" },
+        "ts_ms": { "type": "integer" }
+      }
+    },
+    "PositionRecordWire": {
+      "description": "Single position entry (cash or margin) in PositionsUpdated. Schema MINOR=7.",
+      "type": "object",
+      "required": ["instrument_id", "qty", "market_value", "position_type", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "instrument_id": { "type": "string" },
+        "qty": { "type": "string" },
+        "market_value": { "type": "string" },
+        "position_type": {
+          "type": "string",
+          "enum": ["cash", "margin_credit", "margin_general"]
+        },
+        "tategyoku_id": { "type": ["string", "null"] },
+        "venue": { "type": "string", "const": "tachibana" }
+      }
+    },
+    "PositionsUpdated": {
+      "description": "Response to GetPositions. Contains current positions held at the venue. Schema MINOR=7.",
+      "type": "object",
+      "required": ["event", "request_id", "venue", "positions", "ts_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "PositionsUpdated" },
+        "request_id": { "type": "string" },
+        "venue": { "type": "string" },
+        "positions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PositionRecordWire" }
+        },
         "ts_ms": { "type": "integer" }
       }
     }

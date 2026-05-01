@@ -2,7 +2,6 @@
 ///
 /// `OrdersPanel` は iced GUI 依存のため直接インスタンス化が困難。
 /// ソースコード検査で不変条件をピンする（他の structural-pin テストと同方式）。
-
 fn read_orders_panel_source() -> String {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),

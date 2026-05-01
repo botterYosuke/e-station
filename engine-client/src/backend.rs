@@ -15,7 +15,7 @@ use exchange::{
 };
 use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
     convert::{depth_levels_to_arc_depth, depth_levels_to_payload},
     depth_tracker::DepthTracker,
     dto::{Command, EngineEvent},
+    venue_caps::VenueCapsStore,
 };
 
 /// Timeout for one-shot fetch requests to the Python engine.
@@ -40,7 +41,7 @@ const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// in `TickersTable`. UI callers **must** use `try_lock()` on the rendering
 /// path (T35-H8 purity): `lock().await` is forbidden in `view()` /
 /// `filtered_rows`. External callers go through `ticker_meta_handle()`.
-pub type TickerMetaMap = HashMap<exchange::Ticker, crate::tachibana_meta::TickerDisplayMeta>;
+pub type TickerMetaMap = HashMap<exchange::Ticker, crate::stock_meta::TickerDisplayMeta>;
 
 /// Venue-scoped backend for the Python data engine.
 ///
@@ -57,18 +58,28 @@ pub struct EngineClientBackend {
     depth_tracker: Arc<Mutex<DepthTracker>>,
     /// B4: Tachibana display metadata captured during `fetch_ticker_metadata`
     /// so the ticker selector can do incremental search by `display_name_ja`.
-    /// Empty for crypto venues — `parse_tachibana_ticker_dict` is only called
-    /// in the `MarketKind::Stock` branch.
+    /// Empty for crypto venues — `stock_meta` parsing is only invoked in the
+    /// `MarketKind::Stock` branch.
     ticker_meta: Arc<Mutex<TickerMetaMap>>,
+    /// B4: Shared `VenueCaps` sidecar — one global instance per app, injected
+    /// at backend construction. Populated by `fetch_ticker_metadata` when
+    /// `TickerEntry` carries a `venue_caps` field. UI callers MUST use
+    /// `try_read()` on the render path (T35-H8 purity).
+    venue_caps_store: Arc<RwLock<VenueCapsStore>>,
 }
 
 impl EngineClientBackend {
-    pub fn new(connection: Arc<EngineConnection>, venue: impl Into<String>) -> Self {
+    pub fn new(
+        connection: Arc<EngineConnection>,
+        venue: impl Into<String>,
+        venue_caps_store: Arc<RwLock<VenueCapsStore>>,
+    ) -> Self {
         Self {
             connection,
             venue: venue.into(),
             depth_tracker: Arc::new(Mutex::new(DepthTracker::new())),
             ticker_meta: Arc::new(Mutex::new(HashMap::new())),
+            venue_caps_store,
         }
     }
 
@@ -99,6 +110,15 @@ impl EngineClientBackend {
     /// risks deadlock by parking a multi-thread worker.
     pub async fn reset_ticker_meta(&self) {
         self.ticker_meta.lock().await.clear();
+    }
+
+    /// B4: Clear all venue caps (called on full engine reconnect via `main.rs`).
+    ///
+    /// The global store is shared; callers should invoke this once after
+    /// all backends have been rebuilt (not per-backend) so partial clears
+    /// do not race with a concurrent `fetch_ticker_metadata` on another venue.
+    pub async fn reset_venue_caps(&self) {
+        self.venue_caps_store.write().await.clear();
     }
 
     fn market_kind_to_ipc(mk: MarketKind) -> String {
@@ -473,6 +493,8 @@ impl VenueBackend for EngineClientBackend {
         // H1-est: Clone Arc before the async block so the inner future does not
         // borrow `self` across await points.
         let ticker_meta = Arc::clone(&self.ticker_meta);
+        // B4: clone the shared caps store handle for capture in the async block.
+        let venue_caps_store = Arc::clone(&self.venue_caps_store);
 
         Box::pin(async move {
             let mut out: TickerMetadataMap = HashMap::new();
@@ -518,66 +540,113 @@ impl VenueBackend for EngineClientBackend {
                                 // loop completes.
                                 let mut staged_meta: Vec<(
                                     exchange::Ticker,
-                                    crate::tachibana_meta::TickerDisplayMeta,
+                                    crate::stock_meta::TickerDisplayMeta,
+                                )> = Vec::new();
+                                // Stage venue_caps from typed entries.
+                                let mut staged_caps: Vec<(
+                                    exchange::Ticker,
+                                    crate::dto::VenueCaps,
                                 )> = Vec::new();
                                 let map: TickerMetadataMap = tickers
-                                    .iter()
-                                    .filter_map(|t| {
-                                        if market_kind == MarketKind::Stock {
-                                            // B3 HIGH-U-9 + B4: route Tachibana stock dicts
-                                            // through the typed parser and stash the display
-                                            // meta in `self.ticker_meta` so the UI can do
-                                            // Japanese-name incremental search.
-                                            let (ticker, info, meta) =
-                                                crate::tachibana_meta::parse_tachibana_ticker_dict(
-                                                    t, exchange,
-                                                )?;
+                                    .into_iter()
+                                    .filter_map(|entry| match entry {
+                                        crate::dto::TickerEntry::Stock(s) => {
+                                            let symbol = &s.symbol;
+                                            if !symbol.is_ascii()
+                                                || symbol.len() > Ticker::MAX_LEN as usize
+                                                || symbol.contains('|')
+                                            {
+                                                return None;
+                                            }
+                                            let display_symbol =
+                                                s.display_symbol.as_deref().filter(|d| {
+                                                    d.is_ascii()
+                                                        && d.len() <= Ticker::MAX_LEN as usize
+                                                        && !d.contains('|')
+                                                });
+                                            let ticker = Ticker::new_with_display(
+                                                symbol,
+                                                exchange,
+                                                display_symbol,
+                                            );
+                                            let min_ticksize = s.min_ticksize;
+                                            if !min_ticksize.is_finite() || min_ticksize <= 0.0 {
+                                                log::warn!(
+                                                    "TickerInfo: min_ticksize invalid \
+                                                         ({min_ticksize}) for {}, skipping",
+                                                    s.symbol
+                                                );
+                                                return None;
+                                            }
+                                            let lot_size = s.lot_size.unwrap_or(100);
+                                            let min_qty = s.min_qty.unwrap_or(lot_size as f32);
+                                            let info = TickerInfo::new_stock(
+                                                ticker,
+                                                min_ticksize,
+                                                min_qty,
+                                                lot_size,
+                                            );
+                                            let meta = crate::stock_meta::TickerDisplayMeta {
+                                                display_name_ja: s.display_name_ja,
+                                                yobine_code: s.yobine_code,
+                                                sizyou_c: s.sizyou_c,
+                                            };
                                             if meta.display_name_ja().is_none() {
                                                 log::debug!(
-                                                    "TickerInfo: display_name_ja absent for {ticker}"
+                                                    "TickerInfo: display_name_ja absent for \
+                                                         {ticker}"
                                                 );
                                             }
                                             staged_meta.push((ticker, meta));
-                                            return Some((ticker, Some(info)));
+                                            staged_caps.push((ticker, s.venue_caps));
+                                            Some((ticker, Some(info)))
                                         }
-                                        let symbol = t.get("symbol")?.as_str()?;
-                                        if !symbol.is_ascii()
-                                            || symbol.len() > Ticker::MAX_LEN as usize
-                                            || symbol.contains('|')
-                                        {
-                                            return None;
+                                        crate::dto::TickerEntry::Crypto(c) => {
+                                            let symbol = &c.symbol;
+                                            if !symbol.is_ascii()
+                                                || symbol.len() > Ticker::MAX_LEN as usize
+                                                || symbol.contains('|')
+                                            {
+                                                return None;
+                                            }
+                                            let display_symbol =
+                                                c.display_symbol.as_deref().filter(|d| {
+                                                    d.is_ascii()
+                                                        && d.len() <= Ticker::MAX_LEN as usize
+                                                        && !d.contains('|')
+                                                });
+                                            let ticker = Ticker::new_with_display(
+                                                symbol,
+                                                exchange,
+                                                display_symbol,
+                                            );
+                                            let info = TickerInfo::new(
+                                                ticker,
+                                                c.min_ticksize,
+                                                c.min_qty,
+                                                c.contract_size,
+                                            );
+                                            staged_caps.push((ticker, c.venue_caps));
+                                            Some((ticker, Some(info)))
                                         }
-                                        let display_symbol =
-                                            t.get("display_symbol").and_then(|v| v.as_str());
-                                        let display_symbol = display_symbol.filter(|d| {
-                                            d.is_ascii()
-                                                && d.len() <= Ticker::MAX_LEN as usize
-                                                && !d.contains('|')
-                                        });
-                                        let min_tick = t.get("min_ticksize")?.as_f64()? as f32;
-                                        let min_qty = t.get("min_qty")?.as_f64()? as f32;
-                                        let contract_size = t
-                                            .get("contract_size")
-                                            .and_then(|v| v.as_f64())
-                                            .map(|v| v as f32);
-                                        let ticker = Ticker::new_with_display(
-                                            symbol,
-                                            exchange,
-                                            display_symbol,
-                                        );
-                                        let info = TickerInfo::new(
-                                            ticker,
-                                            min_tick,
-                                            min_qty,
-                                            contract_size,
-                                        );
-                                        Some((ticker, Some(info)))
                                     })
                                     .collect();
+                                log::info!(
+                                    "TickerInfo: count={count} caps={caps_count}",
+                                    count = map.len(),
+                                    caps_count = staged_caps.len()
+                                );
                                 if !staged_meta.is_empty() {
                                     let mut guard = ticker_meta_for_capture.lock().await;
                                     for (t, m) in staged_meta {
                                         guard.insert(t, m);
+                                    }
+                                }
+                                // B4: upsert venue_caps into the shared store.
+                                if !staged_caps.is_empty() {
+                                    let mut guard = venue_caps_store.write().await;
+                                    for (t, caps) in staged_caps {
+                                        guard.upsert(t, caps);
                                     }
                                 }
                                 return Ok(map);
@@ -1053,7 +1122,12 @@ fn apply_diff_levels(
             let Ok(q) = level.qty.parse::<f32>() else {
                 continue;
             };
-            let price = Price::from_f32(p).round_to_min_tick(min_ticksize);
+            let price = Price::from_f32(p);
+            debug_assert!(
+                price.is_at_tick(min_ticksize),
+                "price {p} is not at tick {:?}; Python should normalise",
+                min_ticksize,
+            );
             let qty = Qty::from_f32(q);
             if qty.is_zero() {
                 map.remove(&price);

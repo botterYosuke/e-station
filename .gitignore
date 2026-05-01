@@ -1,6 +1,5 @@
 .DS_Store
 /target
-/.vscode
 *.log__pycache__/
 *.pyc
 *.pyo

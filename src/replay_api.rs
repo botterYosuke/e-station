@@ -38,7 +38,7 @@ use engine_client::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc, watch},
+    sync::{Mutex, Notify, mpsc, watch},
 };
 
 use crate::api::agent_api::AgentApiState;
@@ -70,6 +70,11 @@ pub enum ControlApiCommand {
         instrument_id: String,
         strategy_id: Option<String>,
         granularity: engine_client::dto::ReplayGranularity,
+        /// pane 生成完了を `/api/replay/load` ハンドラに通知するための one-shot ack。
+        /// `None` のときは ack 不要（将来用の互換余地。現状の emitter は 1 箇所のみで
+        /// 常に `Some(_)` を発行する）。`oneshot::Sender<()>` は `Clone` 非実装で
+        /// `ControlApiCommand` の `Clone` 制約に乗らないため `Arc<Notify>` を使う。
+        ack: Option<Arc<Notify>>,
     },
 }
 
@@ -113,6 +118,10 @@ pub struct ReplayApiState {
     pub load_timeout: Duration,
     /// Timeout for `StartEngine` → `EngineStarted`. Default 30 s.
     pub start_timeout: Duration,
+    /// `/api/replay/load` が `AutoGenerateReplayPanes` の ack を待つ最大時間。
+    /// release 既定 10 s / debug 既定 30 s（CodeLLDB attach で実測 17 s 観測のため）。
+    /// env var `REPLAY_PANE_READY_TIMEOUT_S` で上書き可能。
+    pub pane_ready_timeout: Duration,
     /// Serialise concurrent `/api/replay/load` calls so that
     /// `ReplayDataLoaded` (which has no `request_id` in schema 2.4) cannot
     /// be cross-correlated.
@@ -131,6 +140,20 @@ pub struct ReplayApiState {
 /// Maximum number of distinct instruments that can be loaded in one replay session.
 pub const MAX_REPLAY_INSTRUMENTS: usize = 4;
 
+/// Default pane-ready timeout for `/api/replay/load` ack wait.
+///
+/// debug ビルド: 30 s（CodeLLDB attach で 17 s 程度の遅延を観測）。
+/// release ビルド: 10 s。
+/// env var `REPLAY_PANE_READY_TIMEOUT_S` が `u64` として parse できれば優先する。
+fn default_pane_ready_timeout() -> Duration {
+    let default_s: u64 = if cfg!(debug_assertions) { 30 } else { 10 };
+    let secs = std::env::var("REPLAY_PANE_READY_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(default_s);
+    Duration::from_secs(secs)
+}
+
 impl ReplayApiState {
     pub fn new(
         engine_rx: watch::Receiver<Option<Arc<EngineConnection>>>,
@@ -141,6 +164,7 @@ impl ReplayApiState {
             mode: mode.into(),
             load_timeout: Duration::from_secs(60),
             start_timeout: Duration::from_secs(30),
+            pane_ready_timeout: default_pane_ready_timeout(),
             load_lock: Mutex::new(()),
             loaded_instruments: Mutex::new(Vec::new()),
             control_tx: Mutex::new(None),
@@ -192,6 +216,13 @@ impl ReplayApiState {
     #[cfg(test)]
     pub fn with_start_timeout(mut self, t: Duration) -> Self {
         self.start_timeout = t;
+        self
+    }
+
+    /// Override the pane-ready timeout (test-only).
+    #[cfg(test)]
+    pub fn with_pane_ready_timeout(mut self, t: Duration) -> Self {
+        self.pane_ready_timeout = t;
         self
     }
 }
@@ -491,34 +522,87 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
                     instruments.push(parsed.instrument_id.clone());
                 }
             }
-            {
+            // /api/replay/load の API 契約: 200 = engine load 成功 + UI pane 生成完了。
+            // AutoGenerateReplayPanes を ack 付きで送り、Iced 側で pane が生成されるまで
+            // blocking する。これにより呼出側は 200 を見て即 /start を投げてよい。
+            let ack = Arc::new(Notify::new());
+            // notified() を notify_one() より前に作り、permit 取りこぼしを避ける。
+            let notified = Arc::clone(&ack);
+            let wait = notified.notified();
+            tokio::pin!(wait);
+
+            let send_outcome: SendAckOutcome = {
                 let tx_guard = state.control_tx.lock().await;
                 if let Some(tx) = tx_guard.as_ref() {
                     let cmd = ControlApiCommand::AutoGenerateReplayPanes {
                         instrument_id: parsed.instrument_id.clone(),
                         strategy_id: strategy_id_for_cmd.clone(),
                         granularity: granularity_for_cmd.clone(),
+                        ack: Some(Arc::clone(&ack)),
                     };
-                    match tx.try_send(cmd) {
-                        Ok(_) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            log::warn!(
-                                "replay_api: AutoGenerateReplayPanes channel full, dropping"
-                            );
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            log::error!("replay_api: AutoGenerateReplayPanes channel closed");
+                    match tx.send(cmd).await {
+                        Ok(()) => SendAckOutcome::Sent,
+                        Err(e) => {
+                            log::error!("replay_api: AutoGenerateReplayPanes channel closed: {e}");
+                            SendAckOutcome::ChannelClosed
                         }
                     }
+                } else {
+                    // テストモード等で control_tx 未設定 → ack 待ちはスキップする。
+                    SendAckOutcome::NoSender
+                }
+            };
+
+            match send_outcome {
+                SendAckOutcome::ChannelClosed => {
+                    write_error(
+                        stream,
+                        503,
+                        "Service Unavailable",
+                        "ui control channel unavailable",
+                    )
+                    .await;
+                    return;
+                }
+                SendAckOutcome::NoSender => {
+                    let body = serde_json::to_string(&ReplayLoadOk {
+                        status: "ok",
+                        bars_loaded,
+                        trades_loaded,
+                    })
+                    .unwrap_or_else(|_| r#"{"status":"ok"}"#.to_string());
+                    write_response(stream, 200, "OK", &body).await;
+                    return;
+                }
+                SendAckOutcome::Sent => {}
+            }
+
+            match tokio::time::timeout(state.pane_ready_timeout, wait).await {
+                Ok(()) => {
+                    let body = serde_json::to_string(&ReplayLoadOk {
+                        status: "ok",
+                        bars_loaded,
+                        trades_loaded,
+                    })
+                    .unwrap_or_else(|_| r#"{"status":"ok"}"#.to_string());
+                    write_response(stream, 200, "OK", &body).await;
+                }
+                Err(_) => {
+                    log::warn!(
+                        "replay_api: AutoGenerateReplayPanes ack timed out after {:?} \
+                         (engine load succeeded; UI did not finish pane generation)",
+                        state.pane_ready_timeout
+                    );
+                    let body = serde_json::json!({
+                        "error": "pane_ready_timeout",
+                        "message":
+                            "engine load succeeded but UI did not finish pane generation in time",
+                        "retryable": false,
+                    })
+                    .to_string();
+                    write_response(stream, 504, "Gateway Timeout", &body).await;
                 }
             }
-            let body = serde_json::to_string(&ReplayLoadOk {
-                status: "ok",
-                bars_loaded,
-                trades_loaded,
-            })
-            .unwrap_or_else(|_| r#"{"status":"ok"}"#.to_string());
-            write_response(stream, 200, "OK", &body).await;
         }
         Ok(ReplayLoadOutcome::EngineError { code, message }) => {
             // mode_mismatch is a client error (wrong startup mode), all others
@@ -555,6 +639,16 @@ async fn handle_replay_load(stream: &mut TcpStream, body: &str, state: &Arc<Repl
             write_response(stream, 504, "Gateway Timeout", r#"{"error":"timeout"}"#).await;
         }
     }
+}
+
+/// `/api/replay/load` で `AutoGenerateReplayPanes` を送る際の内部状態。
+enum SendAckOutcome {
+    /// 送信成功。caller は ack を await する。
+    Sent,
+    /// `control_tx` 未設定（テストモード）。ack 待ちをスキップして 200 を返す。
+    NoSender,
+    /// dashboard subscription が drop 済み。503 を返す。
+    ChannelClosed,
 }
 
 enum ReplayLoadOutcome {
@@ -1612,10 +1706,10 @@ mod tests {
             let port = spawn_test_http_server(Arc::clone(&state)).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
 
-            let (status, _) =
-                http_request(port, "POST", "/api/replay/load", &default_load_body()).await;
-            assert_eq!(status, 200);
-
+            // /load は AutoGenerateReplayPanes の ack を待つので、別タスクで発行する。
+            let req = tokio::spawn(async move {
+                http_request(port, "POST", "/api/replay/load", &default_load_body()).await
+            });
             let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
                 .await
                 .expect("AutoGenerateReplayPanes timeout")
@@ -1624,6 +1718,7 @@ mod tests {
                 ControlApiCommand::AutoGenerateReplayPanes {
                     instrument_id,
                     strategy_id,
+                    ack,
                     ..
                 } => {
                     assert_eq!(instrument_id, "1301.TSE");
@@ -1631,9 +1726,12 @@ mod tests {
                         strategy_id, None,
                         "null strategy_id should propagate as None"
                     );
+                    ack.expect("ack handle").notify_one();
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
+            let (status, _) = req.await.expect("/load task panicked");
+            assert_eq!(status, 200);
             drop(engine_tx);
             mock_a.await.expect("mock server (Case A) panicked");
         }
@@ -1660,20 +1758,24 @@ mod tests {
             let port = spawn_test_http_server(Arc::clone(&state)).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
 
-            let (status, _) =
-                http_request(port, "POST", "/api/replay/load", &default_load_body()).await;
-            assert_eq!(status, 200);
-
+            let req = tokio::spawn(async move {
+                http_request(port, "POST", "/api/replay/load", &default_load_body()).await
+            });
             let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
                 .await
                 .expect("AutoGenerateReplayPanes timeout")
                 .expect("channel closed");
             match cmd {
-                ControlApiCommand::AutoGenerateReplayPanes { strategy_id, .. } => {
+                ControlApiCommand::AutoGenerateReplayPanes {
+                    strategy_id, ack, ..
+                } => {
                     assert_eq!(strategy_id.as_deref(), Some("strat-001"));
+                    ack.expect("ack handle").notify_one();
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
+            let (status, _) = req.await.expect("/load task panicked");
+            assert_eq!(status, 200);
             drop(engine_tx);
             mock_b.await.expect("mock server (Case B) panicked");
         }
@@ -2175,6 +2277,247 @@ mod tests {
             count, 1,
             "loaded_instruments should have 1 entry after reload"
         );
+    }
+
+    // ── pane-ready ack race fix (replay-load-start-race-fix-plan.md) ────────
+
+    /// Pin: `/api/replay/load` は `AutoGenerateReplayPanes` の ack を受け取る前に
+    /// 200 を返してはならない。
+    #[tokio::test]
+    async fn replay_load_blocks_until_pane_ack() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let mock = spawn_mock_engine_load(ws_listener, 0, 1234, None, false);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5))
+                .with_pane_ready_timeout(Duration::from_secs(5)),
+        );
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ControlApiCommand>(8);
+        state.set_control_tx(cmd_tx).await;
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let req = tokio::spawn(async move {
+            http_request(port, "POST", "/api/replay/load", &default_load_body()).await
+        });
+
+        let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .expect("AutoGenerateReplayPanes timeout")
+            .expect("channel closed");
+
+        // ack 前は /load 側はまだ完了していない（しばらく待っても finish しないこと）。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !req.is_finished(),
+            "/load must block until ack is signalled"
+        );
+
+        let ack = match cmd {
+            ControlApiCommand::AutoGenerateReplayPanes { ack, .. } => ack.expect("ack handle"),
+            other => panic!("unexpected command: {other:?}"),
+        };
+        ack.notify_one();
+
+        let (status, _body) = tokio::time::timeout(Duration::from_secs(2), req)
+            .await
+            .expect("/load did not return after ack")
+            .expect("/load task panicked");
+        assert_eq!(status, 200);
+        drop(engine_tx);
+        mock.await.expect("mock server panicked");
+    }
+
+    /// Pin: `notify_one()` が呼ばれない場合、`pane_ready_timeout` 経過後に
+    /// 504 + body `{"error":"pane_ready_timeout","retryable":false}` を返す。
+    #[tokio::test]
+    async fn replay_load_returns_504_when_pane_ack_times_out() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let mock = spawn_mock_engine_load(ws_listener, 0, 1234, None, false);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5))
+                .with_pane_ready_timeout(Duration::from_millis(200)),
+        );
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ControlApiCommand>(8);
+        state.set_control_tx(cmd_tx).await;
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // mock dashboard: command を受け取るが ack しない
+        let drainer = tokio::spawn(async move {
+            let _ = cmd_rx.recv().await;
+            // ack を意図的に呼ばずに drop
+        });
+
+        let (status, body) =
+            http_request(port, "POST", "/api/replay/load", &default_load_body()).await;
+        assert_eq!(status, 504, "expected 504 on pane ack timeout; body={body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"], "pane_ready_timeout");
+        assert_eq!(json["retryable"], false);
+
+        drop(engine_tx);
+        drainer.await.unwrap();
+        mock.await.expect("mock server panicked");
+    }
+
+    /// Pin: `control_tx` の receiver を drop すると `send().await` が `SendError` を返し、
+    /// `/load` は 503 + `ui control channel unavailable` を返す。
+    #[tokio::test]
+    async fn replay_load_returns_503_when_control_channel_closed() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        let mock = spawn_mock_engine_load(ws_listener, 0, 1234, None, false);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5))
+                .with_pane_ready_timeout(Duration::from_secs(2)),
+        );
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ControlApiCommand>(1);
+        state.set_control_tx(cmd_tx).await;
+        // receiver を drop → 以後の send は SendError
+        drop(cmd_rx);
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let (status, body) =
+            http_request(port, "POST", "/api/replay/load", &default_load_body()).await;
+        assert_eq!(status, 503, "expected 503; body={body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"], "ui control channel unavailable");
+
+        drop(engine_tx);
+        mock.await.expect("mock server panicked");
+    }
+
+    /// Pin (D7-1): 504 を返したあとでも、同 instrument の再 `/load` は idempotent に
+    /// 200 を返す。`loaded_instruments` の重複登録もないこと。
+    #[tokio::test]
+    async fn replay_load_504_does_not_block_subsequent_load() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        // 2 回連続で ReplayDataLoaded を返す mock。
+        spawn_mock_engine_multi_load(ws_listener, 2);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5))
+                .with_pane_ready_timeout(Duration::from_millis(200)),
+        );
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ControlApiCommand>(8);
+        state.set_control_tx(cmd_tx).await;
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // 1 回目: ack を意図的に呼ばないので 504。
+        let (status1, body1) =
+            http_request(port, "POST", "/api/replay/load", &load_body_for("1301.TSE")).await;
+        // 1 回目に enqueue された AutoGenerateReplayPanes をひとまず drain（ack せず）。
+        let _ = tokio::time::timeout(Duration::from_secs(1), cmd_rx.recv())
+            .await
+            .expect("first AutoGenerateReplayPanes not received")
+            .expect("channel closed");
+        assert_eq!(
+            status1, 504,
+            "first load should hit pane_ready_timeout; body={body1}"
+        );
+        // engine 側 load は成功しているので loaded_instruments には登録済み。
+        assert_eq!(
+            state.loaded_instruments.lock().await.len(),
+            1,
+            "loaded_instruments should already contain the instrument after 504"
+        );
+
+        // 2 回目: ack を返して 200 を確認。
+        let req2 = tokio::spawn(async move {
+            http_request(port, "POST", "/api/replay/load", &load_body_for("1301.TSE")).await
+        });
+        let cmd2 = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .expect("second AutoGenerateReplayPanes timeout")
+            .expect("channel closed");
+        if let ControlApiCommand::AutoGenerateReplayPanes { ack, .. } = cmd2 {
+            ack.expect("ack handle").notify_one();
+        } else {
+            panic!("unexpected command: {cmd2:?}");
+        }
+        let (status2, body2) = req2.await.expect("/load task panicked");
+        assert_eq!(status2, 200, "second load should succeed; body={body2}");
+        // loaded_instruments の重複登録がないこと。
+        assert_eq!(state.loaded_instruments.lock().await.len(), 1);
+
+        drop(engine_tx);
+    }
+
+    /// Pin (D7-2): 504 後に遅延 ack が処理されたあとで `/load` をもう一度投げると、
+    /// `AutoGenerateReplayPanes` が再発行される。enum に `ack: Option<Arc<Notify>>`
+    /// が乗っていることをここで構造的に固定する（dashboard 側の二重 pane 抑止は
+    /// `tests/auto_generate_replay_panes_auto_bind.rs` でソース上 pin する）。
+    #[tokio::test]
+    async fn auto_generate_replay_panes_skips_pane_when_ack_already_loaded() {
+        let (ws_listener, ws_addr) = bind_ws_loopback().await;
+        spawn_mock_engine_multi_load(ws_listener, 2);
+        let conn = connect_engine(ws_addr).await;
+        let (engine_tx, engine_rx) = watch::channel(Some(conn));
+        let state = Arc::new(
+            ReplayApiState::new(engine_rx, engine_client::dto::AppMode::Replay)
+                .with_load_timeout(Duration::from_secs(5))
+                .with_pane_ready_timeout(Duration::from_secs(2)),
+        );
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ControlApiCommand>(8);
+        state.set_control_tx(cmd_tx).await;
+        let port = spawn_test_http_server(Arc::clone(&state)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // 1 回目 /load
+        let req1 = tokio::spawn(async move {
+            http_request(port, "POST", "/api/replay/load", &load_body_for("1301.TSE")).await
+        });
+        let cmd1 = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .expect("first cmd timeout")
+            .expect("channel closed");
+        match cmd1 {
+            ControlApiCommand::AutoGenerateReplayPanes {
+                ref instrument_id,
+                ref ack,
+                ..
+            } => {
+                assert_eq!(instrument_id, "1301.TSE");
+                ack.as_ref().expect("ack handle").notify_one();
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let (s1, _) = req1.await.expect("req1 panic");
+        assert_eq!(s1, 200);
+
+        // 2 回目 /load — 同 instrument の AutoGenerateReplayPanes が再発行されること。
+        let req2 = tokio::spawn(async move {
+            http_request(port, "POST", "/api/replay/load", &load_body_for("1301.TSE")).await
+        });
+        let cmd2 = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .expect("second cmd timeout")
+            .expect("channel closed");
+        match cmd2 {
+            ControlApiCommand::AutoGenerateReplayPanes {
+                instrument_id, ack, ..
+            } => {
+                assert_eq!(instrument_id, "1301.TSE");
+                ack.expect("ack handle").notify_one();
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let (s2, _) = req2.await.expect("req2 panic");
+        assert_eq!(s2, 200);
+
+        drop(engine_tx);
     }
 
     // ── N1.17: /api/replay/start ─────────────────────────────────────────────

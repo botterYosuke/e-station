@@ -10,8 +10,10 @@ Phase 1 scope:
   ``fetch_ticker_stats`` race at startup.
 * `list_tickers` joins ``CLMIssueMstKabu`` (display names) with
   ``CLMIssueSizyouMstKabu`` (per-market lot size + ``sYobineTaniNumber``)
-  and emits one dict per (issue, market) pair. ``min_ticksize`` is left
-  unresolved here in Phase 1 — see the design-decision note below.
+  and emits one dict per (issue, market) pair. Phase F made
+  ``min_ticksize`` required in the IPC contract — entries whose yobine
+  code cannot be resolved are SKIPPED here (logged at WARNING), so that
+  Rust serde never sees a malformed ``Vec<TickerEntry>``.
 * `fetch_klines` rejects any ``timeframe`` other than the wire literal
   ``"1d"`` (HIGH-U-11) and routes to ``CLMMfdsGetMarketPriceHistory`` via
   the ``sUrlPrice`` virtual URL.
@@ -20,25 +22,24 @@ Phase 1 scope:
 * trade / depth / kline streams and ``fetch_open_interest`` are deferred
   to T5 and raise ``NotImplementedError`` so the ABC contract still holds.
 
-`min_ticksize` resolution (B2 design decision — plan §T4 L537):
+`min_ticksize` resolution (Phase D / Phase F):
 
   data-mapping.md §5 (A) requires a single fixed tick value at
-  TickerInfo construction time. Since the master endpoints used here
-  (``CLMIssueSizyouMstKabu``) do not carry a snapshot price, this
-  implementation defers the lookup to Rust by always emitting
-  ``yobine_code`` on the ticker dict (the resolved-tick map is built
-  Rust-side from the same ``CLMYobine`` payload — wired by B3
-  HIGH-U-9). When a snapshot price *is* in hand we cap at
-  ``sKizunPrice_1`` of the relevant ``CLMYobine`` row as a conservative
-  fallback. This keeps Phase 1 minimal and avoids a double tick-table
-  copy at the IPC boundary.
+  TickerInfo construction time. Phase D made Python the **single source
+  of truth** for venue-specific normalization (Rust no longer holds a
+  CLMYobine table). At ``list_tickers`` time we resolve the conservative
+  no-snapshot tick (``bands[0].yobine_tanka``); ``stream_depth``'s first
+  FD frame later refines the cached value via
+  ``_update_min_ticksize_from_price`` once a real price is observed.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -47,7 +48,76 @@ from typing import Any
 
 import httpx
 
-from .base import ExchangeWorker, OnSsidUpdate
+# Keys whose values must never be logged in cleartext: virtual URLs (sUrl*) and
+# session tokens that grant full account access. Used by `_cb_depth` ST logging
+# and by `scripts/diagnose_tachibana_ws.py` (imported as a shared frozenset to
+# guarantee the two stay in sync).
+# `sUrl*` keys come from the login response (see samples/e_api_login_tel).
+_ST_SECRET_KEYS: frozenset[str] = frozenset({
+    "sUrlRequest",
+    "sUrlMaster",
+    "sUrlPrice",
+    "sUrlEvent",
+    "sUrlEventWebSocket",
+    "p_url",
+    "p_event_url",
+    "url_event_ws",
+    "p_session_token",
+})
+
+# `p_errno` values that indicate "no error". The Rust client treats empty
+# string as 正常 too (see SKILL.md R6: "p_errno は空文字列のことがある").
+# `?` is NOT included here — callers historically used it as a sentinel for
+# "key missing" but that masks real failures, so we now distinguish None.
+_ST_OK_ERRNO_CODES: frozenset[str] = frozenset({"0", "00", ""})
+
+# Default sizyou_c (市場コード) used when the master has not been loaded yet or
+# the ticker is not found in CLMIssueSizyouMstKabu.
+_SIZYOU_C_FALLBACK: str = "00"
+
+# Whitelist for dynamically-inserted WebSocket URL parameter values. Tachibana
+# tickers and sizyou_c (market codes) are numeric in practice; we allow ASCII
+# alnum to be conservative for future expansions while still rejecting anything
+# that could break URL structure.
+_WS_PARAM_ALLOWED_RE: re.Pattern[str] = re.compile(r"^[0-9A-Za-z]+$")
+
+# ST→VenueError rate limit window. ST frames can stream rapidly when the
+# session is broken; without a limiter the outbox floods with duplicate
+# VenueErrors. Keyed by `code`, last-emit timestamp tracked per stream_depth call.
+_ST_VENUE_ERROR_RATE_LIMIT_S: float = 30.0
+
+
+def build_ws_url(url_event_ws: str, ticker: str, sizyou_c: str) -> str:
+    """Build the EVENT WebSocket subscription URL — pure function.
+
+    Parameter values are NOT percent-encoded: the official sample
+    (samples/e_api_websocket_receive_tel.py:573-585) appends raw strings.
+    Applying func_replace_urlecnode would turn 'ST,KP,FD' into
+    'ST%2CKP%2CFD' which the server does not recognise.
+
+    Dynamic values (ticker, sizyou_c) are validated against
+    `_WS_PARAM_ALLOWED_RE` (ASCII alnum only) before embedding to prevent
+    URL structure breakage and control-char injection.
+    """
+    for val, name in ((ticker, "ticker"), (sizyou_c, "sizyou_c")):
+        if not _WS_PARAM_ALLOWED_RE.match(val):
+            raise ValueError(
+                f"build_ws_url: {name}={val!r} contains characters outside [0-9A-Za-z]"
+                " — control chars and URL structure chars (&?=) are not allowed"
+            )
+    ws_base = url_event_ws.rstrip("?&")
+    params = "&".join([
+        "p_rid=22",
+        "p_board_no=1000",
+        "p_gyou_no=1",
+        f"p_mkt_code={sizyou_c}",
+        "p_eno=0",
+        "p_evt_cmd=ST,KP,FD",
+        f"p_issue_code={ticker}",
+    ])
+    return f"{ws_base}?{params}"
+
+from .base import ExchangeWorker, OnSsidUpdate, is_valid_ticker_entry
 from .tachibana_auth import TachibanaSession
 from .tachibana_codec import decode_response_body
 from .tachibana_helpers import (
@@ -65,7 +135,6 @@ from .tachibana_master import (
 from .tachibana_url import (
     PriceUrl,
     build_request_url,
-    func_replace_urlecnode,
 )
 from . import tachibana_ws as _tachibana_ws
 from .tachibana_ws import FdFrameProcessor, TachibanaEventWs
@@ -144,6 +213,9 @@ class TachibanaWorker(ExchangeWorker):
         self._yobine_table: dict[str, list[YobineBand]] = {}
         # JST date the in-memory master was loaded for (HIGH-U-10).
         self._master_loaded_jst_date: str | None = None
+        # C2/C4: per-ticker resolved min_ticksize cache (populated in list_tickers,
+        # updated from first snapshot price in stream_depth).
+        self._ticker_min_ticksize: dict[str, Decimal] = {}
 
         self._cache_dir = Path(cache_dir)
         self._is_demo = bool(is_demo)
@@ -185,6 +257,9 @@ class TachibanaWorker(ExchangeWorker):
             except Exception as exc:  # pragma: no cover — defensive
                 log.warning("tachibana: closing httpx client: %s", exc)
             self._client = None
+
+    def venue_caps(self) -> dict:
+        return {"client_aggr_depth": True, "supports_spread_display": True, "qty_norm_kind": "lot"}
 
     def capabilities(self) -> dict:
         """Phase 1 capability ad — daily klines only (HIGH-U-11, plan §T4 L548).
@@ -229,6 +304,7 @@ class TachibanaWorker(ExchangeWorker):
         self._master_records = {}
         self._yobine_table = {}
         self._master_loaded_jst_date = None
+        self._ticker_min_ticksize = {}
 
     def _check_jst_rollover(self) -> None:
         """If the JST date has rolled since the in-memory master was loaded,
@@ -382,6 +458,7 @@ class TachibanaWorker(ExchangeWorker):
                 lot_size = None
 
             entry: dict[str, Any] = {
+                "kind": "stock",
                 "symbol": code,
                 "display_name_ja": display_name_ja,
                 "display_symbol": display_symbol,
@@ -390,17 +467,34 @@ class TachibanaWorker(ExchangeWorker):
                 "quote_currency": _DEFAULT_QUOTE_CURRENCY,
                 "yobine_code": yobine_code,
                 "sizyou_c": str(sizyou.get("sSizyouC", "")),
+                "venue_caps": self.venue_caps(),
             }
-            # B5: resolve min_ticksize from CLMYobine table using the
-            # conservative no-snapshot-price fallback (finest tick band).
-            # KeyError means CLMYobine data is missing for this yobine_code;
-            # Rust will then fall back to TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32.
-            if self._yobine_table:
-                try:
-                    tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, None)
-                    entry["min_ticksize"] = float(tick)
-                except (KeyError, ValueError):
-                    pass
+            # Phase F contract (refactor-rust-python-boundary-2026-05-01.md §2.1):
+            # min_ticksize is required in StockTicker. Rust serde fails the entire
+            # Vec<TickerEntry> deserialization if any element lacks it. So if we
+            # cannot resolve a tick size — yobine_table empty (master not yet
+            # populated) or yobine_code missing (master integrity error) — we
+            # SKIP the entry rather than emit an invalid IPC payload.
+            if not self._yobine_table:
+                log.warning(
+                    "tachibana list_tickers: skipping %s — yobine_table empty",
+                    code,
+                )
+                continue
+            try:
+                tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, None)
+            except (KeyError, ValueError) as exc:
+                log.warning(
+                    "tachibana list_tickers: skipping %s — yobine_code %r unresolved (%s)",
+                    code,
+                    yobine_code,
+                    exc,
+                )
+                continue
+            entry["min_ticksize"] = float(tick)
+            if not is_valid_ticker_entry(entry, venue="tachibana"):
+                continue
+            self._ticker_min_ticksize[code] = tick  # C2: cache for stream_depth
             out.append(entry)
         return out
 
@@ -518,29 +612,92 @@ class TachibanaWorker(ExchangeWorker):
             "is_closed": True,
         }
 
-    def _lookup_sizyou_c(self, ticker: str, *, default: str = "00") -> str:
+    def _lookup_sizyou_c(self, ticker: str) -> str:
         for row in self._master_records.get("CLMIssueSizyouMstKabu", []):
             if str(row.get("sIssueCode", "")) == ticker:
                 sc = str(row.get("sSizyouC", "")).strip()
-                return sc or default
-        return default
+                return sc or _SIZYOU_C_FALLBACK
+        return _SIZYOU_C_FALLBACK
+
+    def _lookup_sizyou_record(self, ticker: str) -> dict | None:
+        """Return the CLMIssueSizyouMstKabu row for ticker, or None if not found."""
+        for row in self._master_records.get("CLMIssueSizyouMstKabu", []):
+            if str(row.get("sIssueCode", "")).strip() == ticker:
+                return row
+        return None
+
+    def _update_min_ticksize_from_price(self, ticker: str, snapshot_price: Decimal) -> None:
+        """C4: Re-resolve min_ticksize using a real market price and update cache.
+
+        Called whenever a real exchange price is available (first depth FD frame,
+        first trade, REST snapshot) so that the correct yobine band replaces the
+        finest-tick startup fallback.
+        """
+        sizyou = self._lookup_sizyou_record(ticker)
+        if sizyou is None or not self._yobine_table:
+            return
+        try:
+            tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, snapshot_price)
+            self._ticker_min_ticksize[ticker] = tick
+        except (KeyError, ValueError):
+            pass
+
+    def _try_update_min_ticksize_from_levels(
+        self,
+        ticker: str,
+        bids: list[dict],
+        asks: list[dict],
+    ) -> None:
+        """C4: Update min_ticksize using the first available price from bids or asks.
+
+        Checks bids first, then asks as fallback so that ask-only snapshots (e.g.
+        during pre-market or thin books) still resolve the correct yobine band.
+        """
+        price_str: str | None = None
+        if bids:
+            price_str = bids[0]["price"]
+        elif asks:
+            price_str = asks[0]["price"]
+        if price_str is None:
+            return
+        try:
+            self._update_min_ticksize_from_price(ticker, Decimal(price_str))
+        except Exception:
+            pass
+
+    def _normalize_depth_levels(
+        self,
+        ticker: str,
+        bids: list[dict],
+        asks: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """C2: Apply price normalization to depth levels using cached min_ticksize."""
+        min_ticksize = self._ticker_min_ticksize.get(ticker)
+        if min_ticksize is None:
+            return bids, asks
+        from .normalize import normalize_depth_levels
+        return normalize_depth_levels(bids, min_ticksize), normalize_depth_levels(asks, min_ticksize)
+
+    def _normalize_trade_price(self, ticker: str, trade: dict) -> dict:
+        """C2: Apply price normalization to a trade dict using cached min_ticksize."""
+        min_ticksize = self._ticker_min_ticksize.get(ticker)
+        if min_ticksize is None or "price" not in trade:
+            return trade
+        from .normalize import normalize_price
+        result = dict(trade)
+        result["price"] = normalize_price(trade["price"], min_ticksize)
+        return result
 
     def _build_ws_url(self, ticker: str) -> str:
-        """Build the EVENT WebSocket subscription URL for a ticker."""
-        assert self._session is not None
+        """Instance-level wrapper around the module-level pure function.
+
+        Looks up sizyou_c via the loaded master and delegates URL formatting
+        to `build_ws_url`.
+        """
+        if self._session is None:
+            raise RuntimeError("_build_ws_url called without an active session")
         sizyou_c = self._lookup_sizyou_c(ticker)
-        ws_base = self._session.url_event_ws.rstrip("?&")
-        encode = func_replace_urlecnode
-        params = "&".join([
-            f"p_rid={encode('22')}",
-            f"p_board_no={encode('1000')}",
-            f"p_gyou_no={encode('1')}",
-            f"p_mkt_code={encode(sizyou_c)}",
-            f"p_eno={encode('0')}",
-            f"p_evt_cmd={encode('ST,KP,FD')}",
-            f"p_issue_code={encode(ticker)}",
-        ])
-        return f"{ws_base}?{params}"
+        return build_ws_url(self._session.url_event_ws, ticker, sizyou_c)
 
     # ------------------------------------------------------------------
     # fetch_ticker_stats (CLMMfdsGetMarketPrice)
@@ -734,6 +891,8 @@ class TachibanaWorker(ExchangeWorker):
         processor = FdFrameProcessor(row="1")
         conn_counter = 0
         _st_stopped: list[bool] = [False]
+        # C4: track first trade so we can resolve the correct yobine band before normalizing.
+        _first_trade_received: list[bool] = [False]
 
         while not stop_event.is_set() and not _st_stopped[0]:
             conn_counter += 1
@@ -746,13 +905,22 @@ class TachibanaWorker(ExchangeWorker):
                 if frame_type == "FD":
                     trade, _ = processor.process(fields, recv_ts_ms)
                     if trade:
+                        # C4: first trade — resolve correct yobine band from actual price
+                        if not _first_trade_received[0] and "price" in trade:
+                            try:
+                                self._update_min_ticksize_from_price(
+                                    ticker, Decimal(trade["price"])
+                                )
+                            except Exception:
+                                pass
+                            _first_trade_received[0] = True
                         outbox.append({
                             "event": "Trades",
                             "venue": "tachibana",
                             "ticker": ticker,
                             "market": market,
                             "stream_session_id": ssid,
-                            "trades": [trade],
+                            "trades": [self._normalize_trade_price(ticker, trade)],  # C2
                         })
                 elif frame_type == "ST":
                     result_code = fields.get("sResultCode", "0")
@@ -793,14 +961,22 @@ class TachibanaWorker(ExchangeWorker):
                             "ticker=%s bids=%d asks=%d",
                             ticker, len(snapshot.get("bids", [])), len(snapshot.get("asks", [])),
                         )
+                        # C4: update min_ticksize from first available price (bids or asks)
+                        snap_bids = snapshot.get("bids", [])
+                        snap_asks = snapshot.get("asks", [])
+                        self._try_update_min_ticksize_from_levels(ticker, snap_bids, snap_asks)
+                        # C2: normalize prices before sending to Rust
+                        norm_bids, norm_asks = self._normalize_depth_levels(
+                            ticker, snap_bids, snap_asks
+                        )
                         outbox.append({
                             "event": "DepthSnapshot",
                             "venue": "tachibana",
                             "ticker": ticker,
                             "market": market,
                             "stream_session_id": f"{stream_session_id}:initial",
-                            "bids": snapshot.get("bids", []),
-                            "asks": snapshot.get("asks", []),
+                            "bids": norm_bids,
+                            "asks": norm_asks,
                             "sequence_id": 0,
                             "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
                         })
@@ -837,9 +1013,31 @@ class TachibanaWorker(ExchangeWorker):
             })
             return
 
-        ws_url = self._build_ws_url(ticker)
+        try:
+            ws_url = self._build_ws_url(ticker)
+        except ValueError as exc:
+            log.warning("tachibana: stream_depth: invalid ticker=%r: %s", ticker, exc)
+            outbox.append({
+                "event": "VenueError",
+                "venue": "tachibana",
+                "ticker": ticker,
+                "market": market,
+                "code": "invalid_ticker",
+                "message": str(exc),
+            })
+            return
         processor = FdFrameProcessor(row="1")
-        depth_keys_seen: list[bool] = [False]
+        # Renamed from depth_keys_seen for clarity (M-H): the flag tracks
+        # whether at least one FD frame *with bid/ask keys* has been processed.
+        _first_fd_received: list[bool] = [False]
+        # Frame-type counts shared across reconnects so the WARN log on
+        # depth_unavailable can include them (M-C).
+        frame_counts_seen: Counter[str] = Counter()
+        # Per-code last-emit time for ST→VenueError rate limiting (H-C).
+        # Scoped to stream_depth lifetime; cleared on each WS reconnect so that
+        # at least one VenueError is emitted per reconnect attempt (design intent).
+        loop = asyncio.get_event_loop()
+        st_last_emit: dict[str, float] = {}
 
         # Inner stop: set by outer stop_event OR by depth safety watchdog.
         _inner_stop = asyncio.Event()
@@ -850,7 +1048,16 @@ class TachibanaWorker(ExchangeWorker):
 
         async def _safety_watchdog() -> None:
             await asyncio.sleep(_tachibana_ws._DEPTH_SAFETY_TIMEOUT_S)
-            if not depth_keys_seen[0]:
+            if not _first_fd_received[0]:
+                log.warning(
+                    "tachibana: stream_depth depth_unavailable ticker=%s — "
+                    "%.0f s 経過しても FD フレーム（気配付き）が届きません。"
+                    " polling fallback に切替えます。"
+                    " frame_counts: FD=%d KP=%d ST=%d other=%d",
+                    ticker, _tachibana_ws._DEPTH_SAFETY_TIMEOUT_S,
+                    frame_counts_seen["FD"], frame_counts_seen["KP"],
+                    frame_counts_seen["ST"], frame_counts_seen["other"],
+                )
                 outbox.append({
                     "event": "VenueError",
                     "venue": "tachibana",
@@ -877,34 +1084,102 @@ class TachibanaWorker(ExchangeWorker):
             processor.reset()
 
             async def _cb_depth(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
+                # Update shared counts (M-C). Counter handles missing keys as 0.
+                if frame_type in ("FD", "KP", "ST"):
+                    frame_counts_seen[frame_type] += 1
+                else:
+                    frame_counts_seen["other"] += 1
+
                 if frame_type == "FD":
                     _, depth = processor.process(fields, recv_ts_ms)
                     if depth:
-                        depth_keys_seen[0] = True
+                        # C4: first FD — update min_ticksize from bids or asks
+                        if not _first_fd_received[0]:
+                            self._try_update_min_ticksize_from_levels(
+                                ticker, depth.get("bids", []), depth.get("asks", [])
+                            )
+                        _first_fd_received[0] = True
+                        # C2: normalize prices before sending to Rust
+                        norm_bids, norm_asks = self._normalize_depth_levels(
+                            ticker, depth["bids"], depth["asks"]
+                        )
                         outbox.append({
                             "event": "DepthSnapshot",
                             "venue": "tachibana",
                             "ticker": ticker,
                             "market": market,
                             "stream_session_id": ssid,
-                            "bids": depth["bids"],
-                            "asks": depth["asks"],
+                            "bids": norm_bids,
+                            "asks": norm_asks,
                             "sequence_id": depth["sequence_id"],
                             "recv_ts_ms": depth["recv_ts_ms"],
                         })
+                elif frame_type == "ST":
+                    # ST = server-side status frame. May carry an error.
+                    # Use None default to distinguish "key missing" from "key=''" (H-B).
+                    p_errno = fields.get("p_errno")
+                    # Mask sUrl* / session-token-bearing keys (H-A); other fields
+                    # (p_errno, p_status, etc.) are safe diagnostic data.
+                    safe_fields = {
+                        k: ("***" if k in _ST_SECRET_KEYS else v) for k, v in fields.items()
+                    }
+                    log.warning(
+                        "tachibana: stream_depth ST frame ticker=%s p_errno=%r — "
+                        "first_fd_received=%s fields=%r",
+                        ticker, p_errno, _first_fd_received[0], safe_fields,
+                    )
+
+                    # Decide error code (H-B).
+                    code: str | None
+                    message: str
+                    if p_errno is None:
+                        code = "st_no_errno"
+                        message = "立花 ST フレームに p_errno キーがありません"
+                    elif p_errno in _ST_OK_ERRNO_CODES:
+                        code = None
+                        message = ""
+                    elif p_errno == "2":
+                        # Virtual URL invalidated → polling fallback.
+                        code = "st_session_expired"
+                        message = "立花仮想 URL が失効しました（p_errno=2）。再ログインが必要です"
+                    else:
+                        code = f"st_errno_{p_errno}"
+                        message = f"立花 ST フレームエラー: p_errno={p_errno}"
+
+                    if code is not None:
+                        # Rate-limit (H-C): one VenueError per code per
+                        # _ST_VENUE_ERROR_RATE_LIMIT_S window.
+                        now = loop.time()
+                        last = st_last_emit.get(code, 0.0)
+                        if now - last >= _ST_VENUE_ERROR_RATE_LIMIT_S:
+                            st_last_emit[code] = now
+                            outbox.append({
+                                "event": "VenueError",
+                                "venue": "tachibana",
+                                "ticker": ticker,
+                                "market": market,
+                                "code": code,
+                                "message": message,
+                            })
+                        # Session expired → drop to polling fallback regardless
+                        # of rate limiting (M-G).
+                        if code == "st_session_expired":
+                            _inner_stop.set()
 
             ws_client = TachibanaEventWs(ws_url, _inner_stop, ticker=ticker, proxy=self._proxy)
-            await ws_client.run(_cb_depth)
+            await ws_client.run(_cb_depth, on_connect=st_last_emit.clear)
 
         for t in (safety_task, sync_task):
             t.cancel()
             try:
                 await t
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                log.exception("tachibana: stream_depth: unexpected error cancelling task")
 
         # depth_unavailable fired → polling fallback (F-M12)
-        if not depth_keys_seen[0] and not stop_event.is_set():
+        if not _first_fd_received[0] and not stop_event.is_set():
             await self._depth_polling_fallback(
                 ticker, market, stream_session_id, outbox, stop_event
             )
@@ -934,18 +1209,40 @@ class TachibanaWorker(ExchangeWorker):
         elapsed = 0.0
         poll_counter = 0
         while not stop_event.is_set() and elapsed < _tachibana_ws._DEPTH_POLL_MAX_S:
+            if self._session is None:
+                log.warning(
+                    "tachibana: _depth_polling_fallback: session expired mid-poll for %s"
+                    " — stopping fallback", ticker
+                )
+                outbox.append({
+                    "event": "VenueError",
+                    "venue": "tachibana",
+                    "ticker": ticker,
+                    "market": market,
+                    "code": "session_expired_during_poll",
+                    "message": "立花セッションがポーリング中に失効しました。再ログインしてください",
+                })
+                return
             try:
                 snapshot = await self.fetch_depth_snapshot(ticker, market)
                 if snapshot.get("bids") or snapshot.get("asks"):
                     poll_counter += 1
+                    poll_bids = snapshot.get("bids", [])
+                    poll_asks = snapshot.get("asks", [])
+                    # C4: update min_ticksize from REST snapshot price (fix for degraded sessions)
+                    self._try_update_min_ticksize_from_levels(ticker, poll_bids, poll_asks)
+                    # C2: normalize prices before sending to Rust
+                    norm_bids, norm_asks = self._normalize_depth_levels(
+                        ticker, poll_bids, poll_asks
+                    )
                     outbox.append({
                         "event": "DepthSnapshot",
                         "venue": "tachibana",
                         "ticker": ticker,
                         "market": market,
                         "stream_session_id": f"{stream_session_id}:poll:{poll_counter}",
-                        "bids": snapshot.get("bids", []),
-                        "asks": snapshot.get("asks", []),
+                        "bids": norm_bids,
+                        "asks": norm_asks,
                         "sequence_id": poll_counter,
                         "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
                     })

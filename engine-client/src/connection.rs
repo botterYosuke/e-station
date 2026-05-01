@@ -429,7 +429,15 @@ fn spawn_io_tasks(
                                     }
                                 }
                                 Err(e) => {
-                                    log::warn!("failed to parse engine event: {e} — frame: {text}");
+                                    // Phase F made the IPC strictly typed: a single malformed
+                                    // entry kills the whole frame (e.g. one bad TickerEntry =
+                                    // every ticker for that venue silently dropped). Escalate
+                                    // to error so smoke-test scanners catch it and operators
+                                    // see it before users do. See refactor plan §17.1.
+                                    log::error!(
+                                        "failed to parse engine event (frame DROPPED): {e} \
+                                         — frame: {text}"
+                                    );
                                 }
                             }
                         }

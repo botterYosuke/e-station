@@ -279,7 +279,11 @@ impl Sidebar {
             .on_press(Message::OrderPanelRequested(ContentKind::BuyingPower))
             .style(|theme, status| crate::style::button::transparent(theme, status, false));
 
-        column![entry_btn, list_btn, power_btn].spacing(4)
+        let positions_btn = iced::widget::button(iced::widget::text("保有銘柄").size(13))
+            .on_press(Message::OrderPanelRequested(ContentKind::Positions))
+            .style(|theme, status| crate::style::button::transparent(theme, status, false));
+
+        column![entry_btn, list_btn, power_btn, positions_btn].spacing(4)
     }
 
     pub fn hide_tickers_table(&mut self) -> bool {

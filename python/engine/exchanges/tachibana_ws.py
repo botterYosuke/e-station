@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -287,6 +288,9 @@ _DEPTH_SAFETY_TIMEOUT_S: float = 30.0
 _DEPTH_POLL_INTERVAL_S: float = 10.0
 _DEPTH_POLL_MAX_S: float = 300.0
 
+# Interval between frame-count stat log lines (§6 O1). Module-level so tests can patch.
+_FRAME_STATS_INTERVAL_S: float = 25.0
+
 
 class TachibanaEventWs:
     """Async iterator that yields parsed FD-frame field dicts.
@@ -334,9 +338,15 @@ class TachibanaEventWs:
     async def run(
         self,
         callback: Any,
+        *,
+        on_connect: Any | None = None,
     ) -> None:
         """Drive the WS loop, calling ``callback(frame_type, fields, recv_ts_ms)``
         for each received frame.  Returns when ``stop_event`` is set.
+
+        ``on_connect`` is an optional zero-argument callable invoked at the start
+        of each connection attempt (before the handshake), including reconnects.
+        Use it to reset per-connection state (e.g. rate-limit dicts).
         """
         if not _HAS_WEBSOCKETS:
             raise RuntimeError(
@@ -345,6 +355,8 @@ class TachibanaEventWs:
         backoff_idx = 0
         while not self._stop.is_set():
             self._conn_count += 1
+            if on_connect is not None:
+                on_connect()
             try:
                 await self._connect_once(callback)
                 backoff_idx = 0
@@ -371,11 +383,18 @@ class TachibanaEventWs:
         if self._proxy is not None:
             connect_kwargs["proxy"] = self._proxy
         async with websockets.connect(self._url, **connect_kwargs) as ws:
-            log.debug("tachibana ws: connected to %s (conn #%d)", self._ticker, self._conn_count)
+            log.info(
+                "tachibana ws: connected ticker=%s conn=#%d",
+                self._ticker, self._conn_count,
+            )
 
             loop = asyncio.get_event_loop()
             last_frame_t: list[float] = [loop.time()]
             dead_event = asyncio.Event()
+            # Frame counters for observability (§6 O1). Counter() avoids
+            # KeyError for unknown evt_cmd values (M-I).
+            _frame_counts: Counter[str] = Counter()
+            _last_stats_t: list[float] = [loop.time()]
 
             async def _recv_loop() -> None:
                 async for raw in ws:
@@ -392,12 +411,41 @@ class TachibanaEventWs:
 
                     evt_cmd = fields.get("p_cmd", "")
                     if evt_cmd == "KP":
+                        _frame_counts["KP"] += 1
                         log.debug("tachibana ws: KP recv %s", self._ticker)
                         await callback("KP", fields, recv_ts_ms)
                     elif evt_cmd == "FD":
+                        _frame_counts["FD"] += 1
                         await callback("FD", fields, recv_ts_ms)
                     elif evt_cmd == "ST":
+                        _frame_counts["ST"] += 1
+                        p_errno = fields.get("p_errno", "?")
+                        log.warning(
+                            "tachibana ws: ST frame ticker=%s p_errno=%s (total ST=%d)",
+                            self._ticker, p_errno, _frame_counts["ST"],
+                        )
                         await callback("ST", fields, recv_ts_ms)
+                    else:
+                        _frame_counts["other"] += 1
+                        # TODO: EC, SS, US handling — see SKILL.md §EVENT/WebSocket
+                        log.debug(
+                            "tachibana ws: unknown evt_cmd=%r ticker=%s",
+                            evt_cmd, self._ticker,
+                        )
+
+                    # 定期的にフレーム種別カウントをログ出力 (§6 O1).
+                    # Counts are cumulative for the lifetime of this connection.
+                    now = loop.time()
+                    if now - _last_stats_t[0] >= _FRAME_STATS_INTERVAL_S:
+                        _last_stats_t[0] = now
+                        log.info(
+                            "tachibana ws: frame stats ticker=%s "
+                            "FD=%d KP=%d ST=%d other=%d (conn #%d cumulative)",
+                            self._ticker,
+                            _frame_counts["FD"], _frame_counts["KP"],
+                            _frame_counts["ST"], _frame_counts["other"],
+                            self._conn_count,
+                        )
 
                     if self._stop.is_set():
                         return
@@ -410,8 +458,11 @@ class TachibanaEventWs:
                     elapsed = loop.time() - last_frame_t[0]
                     if elapsed >= _DEAD_FRAME_TIMEOUT_S:
                         log.warning(
-                            "tachibana ws: %s dead-frame timeout (%.1f s); reconnecting",
+                            "tachibana ws: %s dead-frame timeout (%.1f s); reconnecting. "
+                            "Frame counts: FD=%d KP=%d ST=%d other=%d",
                             self._ticker, elapsed,
+                            _frame_counts["FD"], _frame_counts["KP"],
+                            _frame_counts["ST"], _frame_counts["other"],
                         )
                         dead_event.set()
                         return
@@ -439,6 +490,21 @@ class TachibanaEventWs:
                 exc = recv_task.exception()
                 if exc is not None:
                     raise exc
+
+
+# --- Timeout invariants (H-G) ---
+# Dead-frame must fire before depth-safety, otherwise the WS would be torn down
+# only after VenueError has already been emitted. Frame stats interval must not
+# exceed depth-safety, otherwise the first stats log would only appear *after*
+# the safety watchdog has already declared depth_unavailable.
+assert _DEAD_FRAME_TIMEOUT_S < _DEPTH_SAFETY_TIMEOUT_S, (
+    "_DEAD_FRAME_TIMEOUT_S must be < _DEPTH_SAFETY_TIMEOUT_S "
+    f"(got {_DEAD_FRAME_TIMEOUT_S} vs {_DEPTH_SAFETY_TIMEOUT_S})"
+)
+assert _FRAME_STATS_INTERVAL_S < _DEPTH_SAFETY_TIMEOUT_S, (
+    "_FRAME_STATS_INTERVAL_S must be < _DEPTH_SAFETY_TIMEOUT_S "
+    f"(got {_FRAME_STATS_INTERVAL_S} vs {_DEPTH_SAFETY_TIMEOUT_S})"
+)
 
 
 __all__ = [

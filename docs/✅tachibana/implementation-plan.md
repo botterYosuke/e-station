@@ -344,7 +344,7 @@
 > - ✅ **M-IO ラウンド 5 (`_read_stdin_payload` `OSError` ガード)**: `tachibana_login_dialog._read_stdin_payload` の `sys.stdin.readline()` を `try/except OSError` で包み、Windows 切り離されコンソール / Linux pty tear-down 時に `_emit_result({"status":"cancelled"})` + `sys.exit(2)` で構造化終了。unhandled traceback による親側分類不能を回避。`test_tachibana_login_dialog_modes.py::test_oserror_on_stdin_exits_non_zero` で pin。
 >
 > Group D — テスト hardening (secrets ユニーク化):
-> - ✅ **テストの secrets ユニーク化**: `test_tachibana_login_unexpected_error.py` の `password = "p"` / `user_id = "u"` を `_UNIQUE_PASSWORD = "secret-password-UNIQUE-12345"` / `_UNIQUE_USER_ID = "user-id-UNIQUE-67890"` に変更。event repr / log record 全体に対して `assert UNIQUE not in ...` の形でチェックすることで、たまたま `"p"` が message に含まれて偽陽性にならない / 真陽性が確実に検出されるよう改善。`test_tachibana_startup_supervisor.py` は既に `uxf05882` / `vw20sr9h` / `SESSION_TOKEN_SHOULD_NOT_LEAK` の十分にユニークな sentinel 群を使用済み（再変更不要）。`test_tachibana_login_helper_broken_pipe.py` は creds を扱わないため対象外。
+> - ✅ **テストの secrets ユニーク化**: `test_tachibana_login_unexpected_error.py` の `password = "p"` / `user_id = "u"` を `_UNIQUE_PASSWORD = "secret-password-UNIQUE-12345"` / `_UNIQUE_USER_ID = "user-id-UNIQUE-67890"` に変更。event repr / log record 全体に対して `assert UNIQUE not in ...` の形でチェックすることで、たまたま `"p"` が message に含まれて偽陽性にならない / 真陽性が確実に検出されるよう改善。`test_tachibana_startup_supervisor.py` は既に `SESSION_TOKEN_SHOULD_NOT_LEAK` の十分にユニークな sentinel 群を使用済み（再変更不要）。`test_tachibana_login_helper_broken_pipe.py` は creds を扱わないため対象外。
 >
 > **レビュー反映 (2026-04-25, ラウンド 6)**:
 >
@@ -459,7 +459,7 @@
 > - ✅ **M-R8-5 (MEDIUM-1 ガード AST 化)**: `python/tests/test_tachibana_login_unexpected_error.py` の `_ast_has_fallback_binding(src)` ヘルパーを新設し、`ast.parse(textwrap.dedent(src))` で `Assign` / `AnnAssign` / `NamedExpr`（walrus）ノードを走査、`Tuple` / `List` / `Starred` 内の `Name` ターゲットを再帰展開して `fallback_` プレフィックスを検出。旧正規表現の (1) tuple unpack / (2) walrus / (3) 値なし annotated assign の 3 種 false-negative を構造的に排除。pin: `test_request_venue_login_source_has_no_unscrubbed_fallback_locals`（既存）+ メタテスト `test_ast_fallback_detector_catches_tuple_unpack_walrus_and_annotated_forms`（4 種ポジ + 1 種ネガを assert）
 >
 > Group C — LOW:
-> - ✅ **L-R8-1 (sentinel 統一)**: `data/tests/tachibana_keyring_roundtrip.rs` の `uxf05882` / `vw20sr9h` を `TEST_SENTINEL_USER_5e8a1f3c` / `TEST_SENTINEL_PWD_9b2d7e4a` に置換、定数 + コメントで Python supervisor sentinel 命名と統一。`.env` 値（uxNNNNNN 形式 8 字英数）と被らない高エントロピー文字列で偽陰性を排除。既存 7 件 round-trip pass を確認
+> - ✅ **L-R8-1 (sentinel 統一)**: `data/tests/tachibana_keyring_roundtrip.rs` の 値 を `TEST_SENTINEL_USER_5e8a1f3c` / `TEST_SENTINEL_PWD_9b2d7e4a` に置換、定数 + コメントで Python supervisor sentinel 命名と統一。`.env` 値（uxNNNNNN 形式 8 字英数）と被らない高エントロピー文字列で偽陰性を排除。既存 7 件 round-trip pass を確認
 > - ✅ **L-R8-2 (`VenueLoginCancelled` 後着のログ補完)**: `engine-client/src/process.rs` の cancel arm で `pending.remove(rid)` が `None` を返した場合（VenueReady 解決後に cancel が到着）に `log::debug!("VenueLoginCancelled arrived after VenueReady for {rid}; ignoring")` を追加。デバッグ容易性向上、挙動は不変
 >
 > **設計判断・Tips (ラウンド 8)**:

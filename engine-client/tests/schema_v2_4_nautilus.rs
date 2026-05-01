@@ -16,20 +16,22 @@ use flowsurface_engine_client::dto::{
 // ── Schema version guard ────────────────────────────────────────────────────
 
 #[test]
-fn schema_minor_is_6_for_nautilus() {
+fn schema_minor_is_7_for_positions() {
     // R2 review-fix R1b M-8: ReplayDataLoaded.strategy_id を Optional に緩和し
     // SCHEMA_MINOR を 4 → 5 に bump。MAJOR は据え置き (互換維持; minor mismatch は WARN のみ)。
     // レビュー反映 2026-04-29: LoadReplayData/ReplayLoadBody.strategy_init_kwargs を Map 型に
     // 統一したため SCHEMA_MINOR を 5 → 6 に bump。
+    // SCHEMA_MINOR を 6 → 7 に bump（Positions Phase）。
+    // SCHEMA_MINOR を 7 → 8 に bump（Phase A: TickerEntry discriminated union）。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        6,
-        "SCHEMA_MINOR must be 6 after H-1 (strategy_init_kwargs Map unification)"
+        8,
+        "SCHEMA_MINOR must be 8 after Phase A (TickerEntry typed schema)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
-        2,
-        "SCHEMA_MAJOR must remain 2 (architecture.md uses logical 1.x but real code is 2.x)"
+        3,
+        "SCHEMA_MAJOR must be 3 after Phase F (typed-only IPC, VenueCaps required)"
     );
 }
 
@@ -88,7 +90,7 @@ fn hello_includes_mode_field() {
     // Rust 内部では ``AppMode`` enum を使い、serde rename_all = "lowercase" で wire 互換。
     let cmd = Command::Hello {
         schema_major: 2,
-        schema_minor: 6,
+        schema_minor: 7,
         client_version: "test-0.0.0".to_string(),
         token: "tok".to_string(),
         mode: AppMode::Replay,
@@ -442,14 +444,15 @@ fn execution_marker_deserializes() {
             instrument_id,
             side,
             price,
+            qty,
             ts_event_ms,
-            ..
         } => {
             assert_eq!(strategy_id, "buy-and-hold-001");
             assert_eq!(instrument_id, "1301.TSE");
             assert_eq!(side, "BUY");
             assert_eq!(price, "1500.0");
             assert_eq!(ts_event_ms, 1_700_000_000_010);
+            assert!(qty.is_none(), "qty absent in JSON must deserialize as None");
         }
         other => panic!("expected ExecutionMarker, got {other:?}"),
     }

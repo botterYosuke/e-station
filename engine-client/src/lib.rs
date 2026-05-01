@@ -15,14 +15,17 @@ pub mod dto;
 pub mod error;
 pub mod order_session_state;
 pub mod process;
-pub mod tachibana_meta;
+pub mod stock_meta;
+pub mod venue_caps;
 
 pub use backend::{EngineClientBackend, TickerMetaMap};
 pub use connection::EngineConnection;
 pub use depth_tracker::DepthTracker;
+pub use dto::{CryptoTickerEntry, QtyNormKind, StockTickerEntry, TickerEntry, VenueCaps};
 pub use error::EngineClientError;
 pub use process::{EngineCommand, ProcessManager, PythonProcess, SubscriptionKey};
+pub use venue_caps::VenueCapsStore;
 
 /// IPC schema version — must match the Python engine's `SCHEMA_MAJOR`/`SCHEMA_MINOR`.
-pub const SCHEMA_MAJOR: u16 = 2;
-pub const SCHEMA_MINOR: u16 = 6;
+pub const SCHEMA_MAJOR: u16 = 3;
+pub const SCHEMA_MINOR: u16 = 8;

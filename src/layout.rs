@@ -180,13 +180,17 @@ impl From<&pane::State> for data::Pane {
                     link_group: pane.link_group,
                 }
             }
-            pane::Content::OrderEntry(_) => data::Pane::OrderEntry {
+            pane::Content::OrderEntry(panel) => data::Pane::OrderEntry {
                 link_group: pane.link_group,
+                ticker_info: panel.ticker_info,
             },
             pane::Content::OrderList(_) => data::Pane::OrderList {
                 link_group: pane.link_group,
             },
             pane::Content::BuyingPower(_) => data::Pane::BuyingPower {
+                link_group: pane.link_group,
+            },
+            pane::Content::Positions(_) => data::Pane::Positions {
                 link_group: pane.link_group,
             },
             // N1.11: ReplayControl の永続化スキーマは未設定。Starter にフォールバックして
@@ -322,12 +326,21 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             ))
         }
         // OrderEntry/OrderList/BuyingPower require no streams and are always initialized.
-        data::Pane::OrderEntry { link_group } => Configuration::Pane(pane::State::from_config(
-            pane::Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()),
-            vec![],
-            data::layout::pane::Settings::default(),
+        data::Pane::OrderEntry {
             link_group,
-        )),
+            ticker_info,
+        } => {
+            let mut order_entry = panel::order_entry::OrderEntryPanel::new();
+            if let Some(ti) = ticker_info {
+                order_entry.set_instrument_from_ticker(ti);
+            }
+            Configuration::Pane(pane::State::from_config(
+                pane::Content::OrderEntry(order_entry),
+                vec![],
+                data::layout::pane::Settings::default(),
+                link_group,
+            ))
+        }
         data::Pane::OrderList { link_group } => Configuration::Pane(pane::State::from_config(
             pane::Content::OrderList(panel::orders::OrdersPanel::new()),
             vec![],
@@ -336,6 +349,12 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
         )),
         data::Pane::BuyingPower { link_group } => Configuration::Pane(pane::State::from_config(
             pane::Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            vec![],
+            data::layout::pane::Settings::default(),
+            link_group,
+        )),
+        data::Pane::Positions { link_group } => Configuration::Pane(pane::State::from_config(
+            pane::Content::Positions(panel::positions::PositionsPanel::new()),
             vec![],
             data::layout::pane::Settings::default(),
             link_group,

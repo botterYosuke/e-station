@@ -11,7 +11,12 @@ import httpx
 import orjson
 import websockets
 
-from engine.exchanges.base import ExchangeWorker, OnSsidUpdate, WsNativeResyncTriggered
+from engine.exchanges.base import (
+    ExchangeWorker,
+    OnSsidUpdate,
+    WsNativeResyncTriggered,
+    is_valid_ticker_entry,
+)
 from engine.limiter import TokenBucket
 
 log = logging.getLogger(__name__)
@@ -312,14 +317,16 @@ class BybitWorker(ExchangeWorker):
             if min_qty_str is None or tick_str is None:
                 continue
 
-            result.append(
-                {
-                    "symbol": item["symbol"],
-                    "min_ticksize": float(tick_str),
-                    "min_qty": float(min_qty_str),
-                    "contract_size": None,
-                }
-            )
+            entry = {
+                "kind": "crypto",
+                "symbol": item["symbol"],
+                "min_ticksize": float(tick_str),
+                "min_qty": float(min_qty_str),
+                "contract_size": None,
+                "venue_caps": self.venue_caps(),
+            }
+            if is_valid_ticker_entry(entry, venue="bybit"):
+                result.append(entry)
 
         return result
 

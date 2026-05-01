@@ -44,6 +44,7 @@ extraPaths = ["python"]
 [dependency-groups]
 dev = [
     "freezegun>=1.5.5",
+    "jsonschema>=4.26.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "pytest-httpx>=0.36.2",

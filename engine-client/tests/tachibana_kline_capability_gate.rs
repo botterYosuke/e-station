@@ -73,7 +73,13 @@ async fn test_restored_pane_with_non_d1_timeframe_does_not_crash() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let url = format!("ws://{addr}");
     let conn = Arc::new(EngineConnection::connect(&url, token).await.unwrap());
-    let backend = EngineClientBackend::new(conn, "tachibana");
+    let backend = EngineClientBackend::new(
+        conn,
+        "tachibana",
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            flowsurface_engine_client::VenueCapsStore::new(),
+        )),
+    );
 
     // Construct a stock TickerInfo and request a 5m kline (simulating a
     // restored pane with a stale non-"1d" timeframe).

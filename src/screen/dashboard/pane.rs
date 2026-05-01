@@ -50,6 +50,29 @@ use iced::{
 };
 use std::time::Instant;
 
+fn caps_client_aggr(ticker: &exchange::Ticker) -> bool {
+    // Phase B (Q6): VenueCapsStore is owned by the engine backend behind an
+    // Arc<RwLock>. We must NOT call blocking_read() from this synchronous UI
+    // hot path — iced's event loop would stall under writer contention. Use
+    // try_read and fall back to `true` (the safer default for the most-used
+    // venue Tachibana). A WARN log surfaces the lock-contention race (Phase F
+    // post-audit MEDIUM-1) so a Hyperliquid misclassification can be diagnosed
+    // post-mortem instead of being silently transient.
+    let Some(store) = crate::VENUE_CAPS_STORE.get() else {
+        return true;
+    };
+    match store.try_read() {
+        Ok(g) => g.get(ticker).map(|c| c.client_aggr_depth).unwrap_or(true),
+        Err(_) => {
+            log::warn!(
+                "caps_client_aggr: VenueCapsStore read lock contended for {ticker} \
+                 — falling back to true (may misclassify non-aggregated venues briefly)"
+            );
+            true
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Effect {
     RefreshStreams,
@@ -59,6 +82,7 @@ pub enum Effect {
     OrderEntryAction(panel::order_entry::Action),
     OrderListAction(panel::orders::Action),
     BuyingPowerAction(panel::buying_power::Action),
+    PositionsAction(panel::positions::Action),
     /// N1.11-ui: User pressed a speed button in `ReplayControl` pane.
     SetReplaySpeed(u32),
     /// N4.3: User pressed the strategy file picker button in `ReplayControl` pane.
@@ -118,6 +142,7 @@ pub enum Event {
     OrderEntryMsg(panel::order_entry::Message),
     OrderListMsg(panel::orders::Message),
     BuyingPowerMsg(panel::buying_power::Message),
+    PositionsMsg(panel::positions::Message),
     /// N1.11-ui: User pressed a replay speed button (1 | 10 | 100).
     SetReplaySpeed(u32),
     /// N4.3: User pressed the "Strategy ファイルを選ぶ" button in `ReplayControl`.
@@ -239,6 +264,25 @@ impl State {
         settings: Settings,
         link_group: Option<LinkGroup>,
     ) -> Self {
+        // 銘柄概念を持たないペインは link_group を保持できない。旧バージョンで
+        // saved-state.json に保存された Some(N) を新バイナリで復元すると、UI から
+        // トグル不能なゴースト link_group が残り switch_tickers_in_group 経路で
+        // 永続的に warn ログを発生させるため、構築時点で None に正規化する。
+        let link_group = match content {
+            Content::Starter
+            | Content::OrderList(_)
+            | Content::BuyingPower(_)
+            | Content::Positions(_) => {
+                if link_group.is_some() {
+                    log::debug!(
+                        "normalizing stale link_group on non-ticker pane (kind={:?})",
+                        content.kind()
+                    );
+                }
+                None
+            }
+            _ => link_group,
+        };
         Self {
             content,
             settings,
@@ -254,6 +298,18 @@ impl State {
             StreamKind::Depth { ticker_info, .. } => Some(*ticker_info),
             StreamKind::Trades { ticker_info, .. } => Some(*ticker_info),
         })
+    }
+
+    /// Returns the pane's active ticker — from streams for stream-based panes,
+    /// or from `ticker_info` for `OrderEntry` (which has no streams).
+    pub fn linked_ticker(&self) -> Option<TickerInfo> {
+        if let Some(ti) = self.stream_pair() {
+            return Some(ti);
+        }
+        if let Content::OrderEntry(panel) = &self.content {
+            return panel.ticker_info;
+        }
+        None
     }
 
     pub fn stream_pair_kind(&self) -> Option<StreamPairKind> {
@@ -286,13 +342,18 @@ impl State {
 
         let base_ticker = tickers[0];
         let prev_base_ticker = self.stream_pair();
+        let is_client_aggr = caps_client_aggr(&base_ticker.ticker);
+        let prev_is_client_aggr = prev_base_ticker
+            .map(|ti| caps_client_aggr(&ti.ticker))
+            .unwrap_or(is_client_aggr);
 
         let derived_plan = PaneSetup::new(
             kind,
             base_ticker,
-            prev_base_ticker,
             self.settings.selected_basis,
             self.settings.tick_multiply,
+            is_client_aggr,
+            prev_is_client_aggr,
         );
 
         self.settings.selected_basis = derived_plan.basis;
@@ -365,7 +426,7 @@ impl State {
                         let depth_aggr = derived_plan
                             .ticker_info
                             .exchange()
-                            .stream_ticksize(None, TickMultiplier(50));
+                            .stream_ticksize(is_client_aggr, None, TickMultiplier(50));
                         let temp = PaneSetup {
                             depth_aggr,
                             ..derived_plan
@@ -515,6 +576,7 @@ impl State {
                 | ContentKind::OrderEntry
                 | ContentKind::OrderList
                 | ContentKind::BuyingPower
+                | ContentKind::Positions
                 // N1.11: ReplayControl は ticker ストリーム不要のコントロール pane
                 | ContentKind::ReplayControl => {
                     debug_assert!(
@@ -639,7 +701,16 @@ impl State {
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
-        let mut top_left_buttons = if Content::Starter == self.content {
+        // 銘柄概念を持たないペイン（Starter / OrderList / BuyingPower）からは
+        // link_group ボタン `[-]` を非表示にする。OrderEntry は銘柄を持つため
+        // else 分岐で表示する（docs/✅order/order-entry-link-group-plan.md タスク 7）。
+        let mut top_left_buttons = if matches!(
+            self.content,
+            Content::Starter
+                | Content::OrderList(_)
+                | Content::BuyingPower(_)
+                | Content::Positions(_)
+        ) {
             row![]
         } else {
             row![link_group_button(id, self.link_group, |id| {
@@ -696,6 +767,7 @@ impl State {
                 | Content::OrderEntry(_)
                 | Content::OrderList(_)
                 | Content::BuyingPower(_)
+                | Content::Positions(_)
         ) && !self.has_stream()
         {
             let content = row![
@@ -727,6 +799,7 @@ impl State {
             Content::OrderEntry(_) => Some("注文入力"),
             Content::OrderList(_) => Some("注文一覧"),
             Content::BuyingPower(_) => Some("買余力"),
+            Content::Positions(_) => Some("保有銘柄"),
             Content::Starter
             | Content::Heatmap { .. }
             | Content::ShaderHeatmap { .. }
@@ -898,6 +971,9 @@ impl State {
 
                     let exchange = stream_pair.map(|ti| ti.ticker.exchange);
                     let min_ticksize = stream_pair.map(|ti| ti.min_ticksize);
+                    let client_aggr_depth = stream_pair
+                        .map(|ti| caps_client_aggr(&ti.ticker))
+                        .unwrap_or(false);
 
                     let modifiers = ticksize_modifier(
                         id,
@@ -907,6 +983,7 @@ impl State {
                         modifier,
                         ModifierKind::Orderbook(basis, tick_multiply),
                         exchange,
+                        client_aggr_depth,
                     );
 
                     top_left_buttons = top_left_buttons.push(modifiers);
@@ -961,6 +1038,10 @@ impl State {
                         })
                         .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
                     let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
+                    let client_aggr_depth = ticker_info
+                        .as_ref()
+                        .map(|ti| caps_client_aggr(&ti.ticker))
+                        .unwrap_or(false);
 
                     let modifiers = row![
                         basis_modifier(id, basis, modifier, kind),
@@ -971,7 +1052,8 @@ impl State {
                             tick_multiply,
                             modifier,
                             kind,
-                            exchange
+                            exchange,
+                            client_aggr_depth,
                         ),
                     ]
                     .spacing(4);
@@ -1050,6 +1132,10 @@ impl State {
 
                             let exchange = stream_pair.as_ref().map(|info| info.ticker.exchange);
                             let min_ticksize = stream_pair.map(|ti| ti.min_ticksize);
+                            let client_aggr_depth = stream_pair
+                                .as_ref()
+                                .map(|ti| caps_client_aggr(&ti.ticker))
+                                .unwrap_or(false);
 
                             let modifiers = row![
                                 basis_modifier(id, basis, modifier, kind),
@@ -1060,7 +1146,8 @@ impl State {
                                     tick_multiply,
                                     modifier,
                                     kind,
-                                    exchange
+                                    exchange,
+                                    client_aggr_depth,
                                 ),
                             ]
                             .spacing(4);
@@ -1157,6 +1244,10 @@ impl State {
                         })
                         .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
                     let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
+                    let client_aggr_depth = ticker_info
+                        .as_ref()
+                        .map(|ti| caps_client_aggr(&ti.ticker))
+                        .unwrap_or(false);
 
                     let settings_modal = || {
                         heatmap_shader_cfg_view(
@@ -1188,7 +1279,8 @@ impl State {
                             tick_multiply,
                             modifier,
                             kind,
-                            exchange
+                            exchange,
+                            client_aggr_depth,
                         ),
                     ]
                     .spacing(4);
@@ -1247,6 +1339,19 @@ impl State {
             Content::BuyingPower(panel) => {
                 let base = panel::buying_power::view(panel)
                     .map(move |msg| Message::PaneEvent(id, Event::BuyingPowerMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::Positions(panel) => {
+                let base = panel::positions::view(panel)
+                    .map(move |msg| Message::PaneEvent(id, Event::PositionsMsg(msg)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1499,7 +1604,7 @@ impl State {
 
                                 let is_client = self
                                     .stream_pair()
-                                    .map(|ti| ti.exchange().is_depth_client_aggr())
+                                    .map(|ti| caps_client_aggr(&ti.ticker))
                                     .unwrap_or(false);
 
                                 if let Some(mut it) = self.streams.ready_iter_mut() {
@@ -1602,10 +1707,9 @@ impl State {
                                                         c.kind,
                                                         data::chart::KlineChartKind::Footprint { .. }
                                                     ) {
-                                                        let depth_aggr = if base_ticker
-                                                            .exchange()
-                                                            .is_depth_client_aggr()
-                                                        {
+                                                        let depth_aggr = if caps_client_aggr(
+                                                            &base_ticker.ticker,
+                                                        ) {
                                                             StreamTicksize::Client
                                                         } else {
                                                             StreamTicksize::ServerSide(
@@ -1635,18 +1739,16 @@ impl State {
                                                     }
                                                 }
                                                 Basis::Tick(_) => {
-                                                    let depth_aggr = if base_ticker
-                                                        .exchange()
-                                                        .is_depth_client_aggr()
-                                                    {
-                                                        StreamTicksize::Client
-                                                    } else {
-                                                        StreamTicksize::ServerSide(
-                                                            self.settings
-                                                                .tick_multiply
-                                                                .unwrap_or(TickMultiplier(1)),
-                                                        )
-                                                    };
+                                                    let depth_aggr =
+                                                        if caps_client_aggr(&base_ticker.ticker) {
+                                                            StreamTicksize::Client
+                                                        } else {
+                                                            StreamTicksize::ServerSide(
+                                                                self.settings
+                                                                    .tick_multiply
+                                                                    .unwrap_or(TickMultiplier(1)),
+                                                            )
+                                                        };
 
                                                     self.streams = ResolvedStream::Ready(vec![
                                                         StreamKind::Depth {
@@ -1754,25 +1856,19 @@ impl State {
                             }
                         }
                         crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti) => {
-                            if let Content::OrderEntry(panel) = &mut self.content {
-                                if ti.ticker.exchange != Exchange::TachibanaStock {
-                                    self.notifications.push(Toast::warn(
-                                        "注文入力パネルは立花証券銘柄のみ対応しています"
-                                            .to_string(),
-                                    ));
-                                    self.modal = None;
-                                    return None;
-                                }
-                                let display = ti.ticker.display_symbol_and_type().0;
-                                let instrument_id =
-                                    format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
-                                panel.set_instrument(instrument_id, display);
+                            if matches!(self.content, Content::OrderEntry(_))
+                                && ti.ticker.exchange != Exchange::TachibanaStock
+                            {
+                                self.notifications.push(Toast::warn(
+                                    "注文入力パネルは立花証券銘柄のみ対応しています".to_string(),
+                                ));
                                 self.modal = None;
                                 return None;
                             }
-                            // Non-OrderEntry panes delegate exchange validation to the
-                            // switch_tickers_in_group call chain; only OrderEntry requires
-                            // a TachibanaStock guard here.
+                            // Broadcast via SwitchTickersInGroup so link_group peers sync.
+                            // For OrderEntry, apply_ticker_to_order_entry is called in
+                            // init_pane / init_focused_pane.
+                            self.modal = None;
                             return Some(Effect::SwitchTickersInGroup(ti));
                         }
                     }
@@ -1801,6 +1897,13 @@ impl State {
                     && let Some(action) = panel::buying_power::update(panel, msg)
                 {
                     return Some(Effect::BuyingPowerAction(action));
+                }
+            }
+            Event::PositionsMsg(msg) => {
+                if let Content::Positions(panel) = &mut self.content
+                    && let Some(action) = panel::positions::update(panel, msg)
+                {
+                    return Some(Effect::PositionsAction(action));
                 }
             }
             // N1.11-ui: Relay speed-button press to the dashboard.
@@ -2053,6 +2156,7 @@ impl State {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
             Content::Comparison(chart) => chart
                 .as_mut()
@@ -2086,6 +2190,7 @@ impl State {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
         }
     }
@@ -2178,6 +2283,8 @@ pub enum Content {
     OrderList(panel::orders::OrdersPanel),
     /// Buying Power panel (U3)
     BuyingPower(BuyingPowerPanel),
+    /// Positions panel (PP3) — 保有銘柄ペイン。
+    Positions(panel::positions::PositionsPanel),
     /// N1.11: Replay speed control pane skeleton.
     /// TODO(N1.11-ui): 実際の UI 描画は N1.11 UI フェーズで実装する。
     ReplayControl,
@@ -2389,6 +2496,7 @@ impl Content {
             ContentKind::OrderEntry => Content::OrderEntry(OrderEntryPanel::new()),
             ContentKind::OrderList => Content::OrderList(panel::orders::OrdersPanel::new()),
             ContentKind::BuyingPower => Content::BuyingPower(BuyingPowerPanel::new()),
+            ContentKind::Positions => Content::Positions(panel::positions::PositionsPanel::new()),
             // N1.11: skeleton のみ — 実際の UI は TODO(N1.11-ui)
             ContentKind::ReplayControl => Content::ReplayControl,
         }
@@ -2405,6 +2513,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
         }
@@ -2486,6 +2595,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -2533,6 +2643,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
         }
     }
@@ -2598,6 +2709,7 @@ impl Content {
             Content::OrderEntry(_) => ContentKind::OrderEntry,
             Content::OrderList(_) => ContentKind::OrderList,
             Content::BuyingPower(_) => ContentKind::BuyingPower,
+            Content::Positions(_) => ContentKind::Positions,
             Content::ReplayControl => ContentKind::ReplayControl,
         }
     }
@@ -2624,6 +2736,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             // N1.11: ReplayControl は常に initialized（表示するコンテンツが固定）
             | Content::ReplayControl => true,
         }
@@ -2648,6 +2761,7 @@ impl PartialEq for Content {
                 | (Content::OrderEntry(_), Content::OrderEntry(_))
                 | (Content::OrderList(_), Content::OrderList(_))
                 | (Content::BuyingPower(_), Content::BuyingPower(_))
+                | (Content::Positions(_), Content::Positions(_))
                 | (Content::ReplayControl, Content::ReplayControl)
         )
     }
@@ -2703,6 +2817,7 @@ fn ticksize_modifier<'a>(
     modifier: Option<modal::stream::Modifier>,
     kind: ModifierKind,
     exchange: Option<exchange::adapter::Exchange>,
+    client_aggr_depth: bool,
 ) -> Element<'a, Message> {
     let modifier_modal =
         Modal::StreamModifier(modal::stream::Modifier::new(kind).with_ticksize_view(
@@ -2710,6 +2825,7 @@ fn ticksize_modifier<'a>(
             min_ticksize,
             multiplier,
             exchange,
+            client_aggr_depth,
         ));
 
     let is_active = modifier.is_some_and(|m| {
@@ -2783,12 +2899,14 @@ mod tests {
     #[test]
     fn set_content_and_streams_initializes_ladder_when_content_is_none() {
         let ti = tachibana_ticker_info();
-        let mut state = State::default();
-        state.content = Content::Ladder(None);
-        state.streams = ResolvedStream::Ready(vec![
-            ladder_depth_stream(ti),
-            StreamKind::Trades { ticker_info: ti },
-        ]);
+        let mut state = State {
+            content: Content::Ladder(None),
+            streams: ResolvedStream::Ready(vec![
+                ladder_depth_stream(ti),
+                StreamKind::Trades { ticker_info: ti },
+            ]),
+            ..Default::default()
+        };
 
         assert!(
             !state.content.initialized(),
@@ -2810,12 +2928,14 @@ mod tests {
     #[test]
     fn stream_pair_kind_returns_some_when_streams_are_ready() {
         let ti = tachibana_ticker_info();
-        let mut state = State::default();
-        state.content = Content::Ladder(None);
-        state.streams = ResolvedStream::Ready(vec![
-            ladder_depth_stream(ti),
-            StreamKind::Trades { ticker_info: ti },
-        ]);
+        let state = State {
+            content: Content::Ladder(None),
+            streams: ResolvedStream::Ready(vec![
+                ladder_depth_stream(ti),
+                StreamKind::Trades { ticker_info: ti },
+            ]),
+            ..Default::default()
+        };
 
         let kind = state.stream_pair_kind();
         assert!(
@@ -2831,5 +2951,116 @@ mod tests {
         assert!(Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()).initialized());
         assert!(Content::OrderList(panel::orders::OrdersPanel::new()).initialized());
         assert!(Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()).initialized());
+        assert!(Content::Positions(panel::positions::PositionsPanel::new()).initialized());
+    }
+
+    /// Starter / OrderList / BuyingPower は銘柄概念を持たないため
+    /// link_group を保持してはならない。
+    /// 旧バージョンで saved-state.json に link_group: Some(N) を保存していたユーザーが
+    /// 新バイナリで開いたとき、UI からはトグル不能のため永続的にゴースト link_group が
+    /// 残り、switch_tickers_in_group 経路で warn ログを発生させ続ける silent な
+    /// 劣化を招く。from_config で None に正規化することで根を断つ。
+    #[test]
+    fn from_config_normalizes_link_group_for_order_list() {
+        let state = State::from_config(
+            Content::OrderList(panel::orders::OrdersPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "OrderList は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
+    #[test]
+    fn from_config_normalizes_link_group_for_buying_power() {
+        let state = State::from_config(
+            Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "BuyingPower は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
+    #[test]
+    fn from_config_normalizes_link_group_for_starter() {
+        let state = State::from_config(
+            Content::Starter,
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "Starter は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
+    #[test]
+    fn from_config_normalizes_link_group_for_positions() {
+        let state = State::from_config(
+            Content::Positions(panel::positions::PositionsPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "Positions は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
+    /// OrderEntry は銘柄を持つため link_group をそのまま保持する（正規化対象外）。
+    #[test]
+    fn from_config_preserves_link_group_for_order_entry() {
+        let state = State::from_config(
+            Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(state.link_group, Some(LinkGroup::A));
+    }
+
+    /// view() の `[-]` 非描画分岐に OrderEntry が含まれないことを pin する。
+    /// 計画書 docs/✅order/order-entry-link-group-plan.md でリンクグループ対応予定の
+    /// ペインなので、誤って除外リストに追加されると機能が無効化される。
+    #[test]
+    fn link_group_button_exclusion_excludes_only_non_ticker_panes() {
+        let order_entry = Content::OrderEntry(panel::order_entry::OrderEntryPanel::new());
+        assert!(
+            !matches!(
+                order_entry,
+                Content::Starter
+                    | Content::OrderList(_)
+                    | Content::BuyingPower(_)
+                    | Content::Positions(_)
+            ),
+            "OrderEntry は銘柄概念を持つため link_group ボタン除外リストに含めてはならない"
+        );
+
+        for content in [
+            Content::OrderList(panel::orders::OrdersPanel::new()),
+            Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            Content::Positions(panel::positions::PositionsPanel::new()),
+            Content::Starter,
+        ] {
+            assert!(
+                matches!(
+                    content,
+                    Content::Starter
+                        | Content::OrderList(_)
+                        | Content::BuyingPower(_)
+                        | Content::Positions(_)
+                ),
+                "銘柄概念を持たないペインは link_group ボタン除外リストに含めるべき"
+            );
+        }
     }
 }

@@ -1,5 +1,5 @@
-//! B3 HIGH-U-9: `EngineEvent::TickerInfo` → `TickerInfo` + `TickerDisplayMeta`
-//! mapping for Tachibana stock dicts.
+//! Phase D: `EngineEvent::TickerInfo` → `TickerInfo` + `TickerDisplayMeta`
+//! mapping for stock dicts via `parse_stock_ticker_entry`.
 //!
 //! These tests exercise the parser directly (the IPC framing layer is
 //! covered by `dto_conversion.rs` / `schema_v1_2_roundtrip.rs`). The
@@ -12,10 +12,11 @@
 //!    construction — `normalize_after_load()` is **not** called on the
 //!    IPC receive path (T0.2 L82 / HIGH-U-13).
 //! 4. `yobine_code` is captured for the Rust-side `min_ticksize`
-//!    resolution path planned for B5.
+//!    resolution path.
+//! 5. (Phase D) `min_ticksize` absent → `None` (no placeholder fallback).
 
 use exchange::{QuoteCurrency, adapter::Exchange};
-use flowsurface_engine_client::tachibana_meta::parse_tachibana_ticker_dict;
+use flowsurface_engine_client::stock_meta::parse_stock_ticker_entry;
 use serde_json::json;
 
 #[test]
@@ -26,11 +27,12 @@ fn test_tachibana_ticker_info_carries_display_name_ja_and_lot_size() {
         "display_symbol": "TOYOTA",
         "lot_size": 100,
         "min_qty": 100,
+        "min_ticksize": 1.0,
         "quote_currency": "JPY",
         "yobine_code": "103",
         "sizyou_c": "00",
     });
-    let (_ticker, info, meta) = parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock)
+    let (_ticker, info, meta) = parse_stock_ticker_entry(&dict, Exchange::TachibanaStock)
         .expect("valid stock dict must parse");
 
     // (1) display_name_ja in side-channel meta.
@@ -48,26 +50,23 @@ fn test_tachibana_ticker_info_carries_yobine_code() {
     let dict = json!({
         "symbol": "7203",
         "lot_size": 100,
+        "min_ticksize": 1.0,
         "yobine_code": "103",
     });
-    let (_ticker, _info, meta) =
-        parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
+    let (_ticker, _info, meta) = parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
     assert_eq!(meta.yobine_code(), Some("103"));
 }
 
 #[test]
-fn test_parse_tachibana_ticker_uses_min_ticksize_from_dict() {
-    // B5: when Python sends `min_ticksize` in the IPC dict, Rust must use
-    // it instead of TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32 (1.0).
-    // Use 0.1 (a valid Power10 value: 10^-1) to distinguish from the 1.0 placeholder.
+fn test_parse_stock_ticker_uses_min_ticksize_from_dict() {
+    // Use 0.1 (a valid Power10 value: 10^-1) to verify the exact value passes through.
     let dict = json!({
         "symbol": "7203",
         "lot_size": 100,
         "yobine_code": "103",
         "min_ticksize": 0.1_f64,
     });
-    let (_ticker, info, _meta) =
-        parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
+    let (_ticker, info, _meta) = parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
     assert!(
         (info.min_ticksize.as_f32() - 0.1).abs() < 1e-6,
         "min_ticksize should be 0.1 from dict, got {}",
@@ -76,17 +75,14 @@ fn test_parse_tachibana_ticker_uses_min_ticksize_from_dict() {
 }
 
 #[test]
-fn test_parse_tachibana_ticker_falls_back_to_placeholder_when_min_ticksize_absent() {
-    // B5: when `min_ticksize` is absent from the dict, the placeholder is used.
-    use flowsurface_engine_client::tachibana_meta::TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32;
+fn test_parse_stock_ticker_returns_none_when_min_ticksize_absent() {
+    // Phase D: Python guarantees min_ticksize; absent means malformed entry → skip.
     let dict = json!({
         "symbol": "7203",
         "lot_size": 100,
     });
-    let (_ticker, info, _meta) =
-        parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
     assert!(
-        (info.min_ticksize.as_f32() - TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32).abs() < 1e-6,
-        "absent min_ticksize should fall back to placeholder"
+        parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).is_none(),
+        "absent min_ticksize must return None (Phase D IPC contract)"
     );
 }

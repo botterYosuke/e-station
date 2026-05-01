@@ -148,6 +148,8 @@ pub struct Modifier {
     price_step: Option<PriceStep>,
     min_ticksize: Option<MinTicksize>,
     exchange: Option<Exchange>,
+    #[serde(default)]
+    client_aggr_depth: bool,
 }
 
 impl Modifier {
@@ -161,6 +163,7 @@ impl Modifier {
             price_step: None,
             min_ticksize: None,
             exchange: None,
+            client_aggr_depth: false,
         }
     }
 
@@ -175,6 +178,7 @@ impl Modifier {
         min_ticksize: Option<MinTicksize>,
         multiplier: TickMultiplier,
         exchange: Option<Exchange>,
+        client_aggr_depth: bool,
     ) -> Self {
         self.view_mode = ViewMode::TicksizeSelection {
             raw_input_buf: if multiplier.is_custom() {
@@ -192,6 +196,7 @@ impl Modifier {
         self.price_step = Some(price_step);
         self.min_ticksize = min_ticksize;
         self.exchange = exchange;
+        self.client_aggr_depth = client_aggr_depth;
         self
     }
 
@@ -531,7 +536,7 @@ impl Modifier {
                 parsed_input,
                 is_input_valid,
             } => {
-                let Some(exchange) = self.exchange else {
+                if self.exchange.is_none() {
                     return container(text("Exchange information is not available"))
                         .padding(16)
                         .style(style::chart_modal)
@@ -546,8 +551,8 @@ impl Modifier {
                         .push(text("Tick size multiplier").size(13))
                         .push(rule::horizontal(1).style(style::split_ruler));
 
-                    let allows_custom_tsizes = exchange.is_depth_client_aggr()
-                        || matches!(kind, ModifierKind::Footprint(_, _));
+                    let allows_custom_tsizes =
+                        self.client_aggr_depth || matches!(kind, ModifierKind::Footprint(_, _));
 
                     let allowed_tm = if allows_custom_tsizes {
                         exchange::TickMultiplier::ALL.to_vec()

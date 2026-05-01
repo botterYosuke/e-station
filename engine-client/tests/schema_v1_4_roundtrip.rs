@@ -16,14 +16,15 @@ const RID: &str = "req-v1.4-001";
 
 // ── Schema version guard ────────────────────────────────────────────────────
 
-// Schema 2.x contains schema 1.4 variants (order lifecycle events).
+// Schema 2.x/3.x contains schema 1.4 variants (order lifecycle events).
 #[test]
 fn schema_major_is_at_least_2() {
-    assert_eq!(
-        flowsurface_engine_client::SCHEMA_MAJOR,
-        2,
-        "SCHEMA_MAJOR must be 2 for schema 2.x (1.4 order variants). Update this test when bumping major."
-    );
+    const {
+        assert!(
+            flowsurface_engine_client::SCHEMA_MAJOR >= 2,
+            "SCHEMA_MAJOR must be >= 2 (schema 1.4 order variants)"
+        )
+    };
 }
 
 // ── ModifyOrder serialize ─────────────────────────────────────────────────────

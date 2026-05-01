@@ -232,6 +232,38 @@ async def test_submit_order_japanese_error_message_survives_shift_jis_roundtrip(
 
 
 @pytest.mark.asyncio
+async def test_submit_order_sell_returns_venue_order_id():
+    """正常系 (SELL): order_side=SELL + cash_margin=cash で sOrderNumber が返ること（Phase O3 リグレッションガード）。"""
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.content = _make_mock_response(order_number="ORD-SELL-001")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    sell_envelope = NautilusOrderEnvelope(
+        client_order_id="cid-sell-001",
+        instrument_id="7203.T/TSE",
+        order_side="SELL",
+        order_type="MARKET",
+        quantity="100",
+        time_in_force="DAY",
+        post_only=False,
+        reduce_only=False,
+        tags=["cash_margin=cash"],
+    )
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await submit_order(_session(), "password", sell_envelope)
+
+    assert isinstance(result, SubmitOrderResult)
+    assert result.venue_order_id == "ORD-SELL-001"
+    assert result.client_order_id == "cid-sell-001"
+
+
+@pytest.mark.asyncio
 async def test_submit_order_p_errno_japanese_message_survives_shift_jis_roundtrip():
     """p_errno エラー時の日本語メッセージも Shift-JIS ラウンドトリップで化けないこと。"""
     import json as _json

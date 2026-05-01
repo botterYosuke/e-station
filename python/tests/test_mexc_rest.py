@@ -228,6 +228,52 @@ async def test_list_tickers_linear_perp_excludes_inactive(worker, httpx_mock: HT
     assert "ETH_USDT" not in symbols
 
 
+@pytest.mark.asyncio
+async def test_list_tickers_linear_perp_skips_zero_price_unit(
+    worker, httpx_mock: HTTPXMock,
+):
+    """Phase F invariant: min_ticksize must be strictly positive.
+
+    MEXC `/detail` may omit `priceUnit` for some contracts, in which case
+    `float(item.get("priceUnit", 0))` returns 0. Phase F made `min_ticksize`
+    required & `exclusiveMinimum: 0` in the IPC schema; Rust serde tolerates
+    0 (no `> 0` guard), so the only safety net is for the adapter to skip
+    such entries before they reach the wire."""
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_contract_detail(
+            _contract_item("BTC_USDT", price_unit=0.5),
+            _contract_item("BAD_USDT", price_unit=0.0),
+        ),
+    )
+    result = await worker.list_tickers("linear_perp")
+    symbols = [r["symbol"] for r in result]
+    assert "BTC_USDT" in symbols
+    assert "BAD_USDT" not in symbols, (
+        "entry with price_unit=0 must be skipped to satisfy Phase F invariant"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_linear_perp_skips_zero_min_vol(
+    worker, httpx_mock: HTTPXMock,
+):
+    """Phase F invariant: min_qty must be strictly positive."""
+    httpx_mock.add_response(
+        url=f"{_REST_V1}/detail",
+        json=_contract_detail(
+            _contract_item("BTC_USDT", min_vol=1.0),
+            _contract_item("BAD_USDT", min_vol=0.0),
+        ),
+    )
+    result = await worker.list_tickers("linear_perp")
+    symbols = [r["symbol"] for r in result]
+    assert "BTC_USDT" in symbols
+    assert "BAD_USDT" not in symbols, (
+        "entry with min_vol=0 must be skipped to satisfy Phase F invariant"
+    )
+
+
 # ---------------------------------------------------------------------------
 # fetch_klines — spot
 # ---------------------------------------------------------------------------

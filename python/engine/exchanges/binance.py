@@ -19,7 +19,7 @@ import httpx
 import orjson
 import websockets
 
-from engine.exchanges.base import ExchangeWorker, OnSsidUpdate
+from engine.exchanges.base import ExchangeWorker, OnSsidUpdate, is_valid_ticker_entry
 from engine.limiter import BinanceLimiter
 
 log = logging.getLogger(__name__)
@@ -350,14 +350,16 @@ class BinanceWorker(ExchangeWorker):
             if price_filter is None or lot_filter is None:
                 continue
 
-            result.append(
-                {
-                    "symbol": sym["symbol"],
-                    "min_ticksize": float(price_filter["tickSize"]),
-                    "min_qty": float(lot_filter["minQty"]),
-                    "contract_size": sym.get("contractSize"),
-                }
-            )
+            entry = {
+                "kind": "crypto",
+                "symbol": sym["symbol"],
+                "min_ticksize": float(price_filter["tickSize"]),
+                "min_qty": float(lot_filter["minQty"]),
+                "contract_size": sym.get("contractSize"),
+                "venue_caps": self.venue_caps(),
+            }
+            if is_valid_ticker_entry(entry, venue="binance"):
+                result.append(entry)
 
         return result
 

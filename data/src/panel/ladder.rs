@@ -72,12 +72,20 @@ impl GroupedDepth {
         }
     }
 
+    /// Step-rounded depth copy — for grouped (heatmap-style) display where rows are
+    /// bucketed by `step`. Do NOT use for Ladder sparse display; use `copy_raw` instead.
+    /// Calling this for Ladder would produce step-rounded keys that no longer match the
+    /// raw prices stored in `price_offsets`, breaking all price→screen Y lookups.
     pub fn regroup_from_raw(&mut self, levels: &BTreeMap<Price, Qty>, side: Side, step: PriceStep) {
         self.orders.clear();
         for (price, qty) in levels.iter() {
             let grouped_price = price.round_to_side_step(side.is_bid(), step);
             *self.orders.entry(grouped_price).or_default() += *qty;
         }
+    }
+
+    pub fn copy_raw(&mut self, levels: &BTreeMap<Price, Qty>) {
+        self.orders.clone_from(levels);
     }
 
     pub fn best_price(&self, side: Side) -> Option<Price> {
@@ -411,6 +419,68 @@ impl ChaseTracker {
                 Some((start, end, alpha))
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::unit::price::{Price, PriceStep};
+    use exchange::unit::qty::Qty;
+    use proptest::prelude::*;
+
+    /// Construct a `Price` from a positive integer representing the raw integer
+    /// value (i.e. Price::from_f32(v as f32) equivalent via the integer path).
+    fn price(v: u32) -> Price {
+        Price::from_f32(v as f32)
+    }
+
+    fn qty(v: u32) -> Qty {
+        Qty::from_f32(v as f32)
+    }
+
+    fn price_step(v: u32) -> PriceStep {
+        PriceStep::from_f32(v as f32)
+    }
+
+    proptest! {
+        /// After `regroup_from_raw`, every key in `orders` must be a multiple
+        /// of `step` (rounded toward the correct side). The total qty is
+        /// conserved (sum of input == sum of output).
+        #[test]
+        fn regroup_from_raw_keys_are_step_multiples(
+            step_raw in 1u32..=10u32,
+            // Prices start at step_raw so bid-rounding always yields a positive key.
+            prices in prop::collection::btree_set(10u32..=1000, 1..=20),
+        ) {
+            let step = price_step(step_raw);
+            let levels: BTreeMap<Price, Qty> = prices
+                .iter()
+                .map(|&p| (price(p + step_raw), qty(1)))
+                .collect();
+            let total_in = levels.len() as f32;
+
+            let mut group = GroupedDepth::new();
+            group.regroup_from_raw(&levels, Side::Bid, step);
+
+            // Every grouped key must be a multiple of step.
+            let step_f32 = step_raw as f32;
+            for (grouped_price, _) in &group.orders {
+                let p = grouped_price.to_f32();
+                let rem = (p / step_f32).round() * step_f32 - p;
+                prop_assert!(
+                    rem.abs() < 1e-3,
+                    "grouped price {p} is not a multiple of step {step_f32}"
+                );
+            }
+
+            // Total qty must be conserved.
+            let total_out: f32 = group.orders.values().map(|q| q.to_f32_lossy()).sum();
+            prop_assert!(
+                (total_out - total_in).abs() < 1e-2,
+                "qty not conserved: in={total_in} out={total_out}"
+            );
         }
     }
 }

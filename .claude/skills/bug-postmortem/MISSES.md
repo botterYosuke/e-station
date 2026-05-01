@@ -30,6 +30,8 @@
 | テストヘルパー属性ドリフト | prod `__init__` に属性を追加したとき、`__init__` をモックで迂回するテストヘルパーの属性リストを同期していない | 1 |
 | 参照リソース未作成 | テストが参照する fixture / example ファイルが未コミットのまま test コードだけが先に存在する | 1 |
 | Subscription 継続 restart 後状態消失 | `restart()` が `*self = new_state` で状態を全置換するとき、iced が同一 ID のサブスクリプションを継続するため初期化 yield が再発火せず、FSM 状態がリセットされる | 1 |
+| バックエンド段階解禁 UI 追従漏れ | バックエンドが Phase を上げて新機能（SELL 等）を解禁済みなのに、Rust UI の `view()` が旧 Phase のコメント・disabled 設定のまま取り残され、ユーザーが操作できない | 1 |
+| URL エンコード関数の適用範囲誤り | REQUEST URL 用のエンコード関数を WebSocket URL パラメータにも適用してしまい、サーバが期待する生区切り文字（カンマ等）が `%2C` に変換されてサーバがパラメータを誤解釈する | 1 |
 
 ---
 
@@ -1360,3 +1362,141 @@ Python エンジン側はセッションを維持しているため Rust-Python 
    - `new()` で Idle/None になるが、外部キャッシュ/static には情報が残る状態は何か
    - それらのうちサブスクリプションの初期化 yield で回復するものはどれか
    - サブスクリプションが再起動されない（同一 ID 継続）場合、yield が来ないケースを考慮したか
+
+---
+
+## 2026-05-01 — バックエンド段階解禁 UI 追従漏れ（「売り」ボタン Phase O0 残骸）
+
+**見逃しパターン**: バックエンド段階解禁 UI 追従漏れ（新パターン）
+
+**根本原因**:
+Python エンジン側は Phase O3 のコミット（`74791de`）で `_ALLOWED_ORDER_SIDE = {"BUY", "SELL"}` として
+SELL を解禁済みだったが、Rust UI 側 `src/screen/dashboard/panel/order_entry.rs` の `view()` が
+「Phase O0: SELL は disabled」という旧コメントとともに `sell_btn` に `.on_press()` を設定しないまま
+取り残されていた。iced の `button` は `on_press` 未設定だと disabled 扱いになるため、
+SELL ボタンが押せない状態が継続していた。
+
+モデル層（`update()` / `build_submit_action()` / `OrderSide::Sell` enum）は正常に SELL を扱える状態だったため、
+既存テスト `order_side_sell_produces_sell_in_action`（`panel.side = Sell` を直接初期化）は
+修正前後ともに PASS していた。これが「モデルは動く、UI だけ disabled」という状態を隠蔽した。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `order_side_sell_produces_sell_in_action` | `panel.side = OrderSide::Sell` を直接初期化してから `ConfirmSubmit` を投げるため、`Message::SideChanged(Sell)` という入口が塞がれていても PASS する |
+| `cargo test --workspace` 全体 | iced の `button.on_press` は private フィールドのため、単体テストで `.on_press` の有無を assert する手段がない |
+| Python tests | Rust の view 層は Python から確認不可 |
+
+**iced API 制約の記録**:
+`button` ウィジェットの `.on_press` 欠落は Rust ユニットテストでは検出不可能。
+view の `.on_press` 欠落リグレッションは **手動受け入れ確認（§4.3）** を最終防衛線とする。
+
+**追加したテスト**:
+- `src/screen/dashboard/panel/order_entry.rs::tests::sell_side_submit_clicked_emits_request_confirm_with_sell`
+  — `Message::SubmitClicked` で `RequestConfirm(Sell)` が返ること（model 経路）
+- `src/screen/dashboard/panel/order_entry.rs::tests::sell_side_toggle_then_confirm_emits_sell_order`
+  — `Message::SideChanged(Sell)` 後に `ConfirmSubmit` で `SubmitOrder(Sell)` が返ること（Message 経路）
+- `python/tests/test_tachibana_submit_order.py::test_submit_order_sell_returns_venue_order_id`
+  — `order_side="SELL"` で `submit_order()` が正常に `venue_order_id` を返すこと（バックエンド既解禁の pin）
+
+**検証ノート**:
+Rust テスト 2 件は「model 経路が修正前でも GREEN」（計画書記載通り）。
+Python SELL テストも `_ALLOWED_ORDER_SIDE = {"BUY", "SELL"}` が既解禁のため修正前でも PASS。
+「バックエンドは動く、UI だけが disabled」という根本原因と整合する。
+修正前 FAIL / 修正後 PASS の確認対象は view の `.on_press` だが、これは自動テスト不可のため
+手動受け入れ確認（デモ口座での実機確認）をマージ必須ゲートとしている。
+
+**教訓**:
+
+1. **Phase コメントは「解禁忘れ」を招く**: 「Phase O0: SELL は disabled」のような
+   段階実装コメントは、その Phase を上げるコミット時に **同名ボタン全件 grep** で
+   `on_press` 有無を確認する。`grep -n "sell_btn\|buy_btn\|on_press" src/screen/...` を
+   Phase 昇格コミットのチェックリストに含める。
+
+2. **バックエンド段階解禁コミット時に UI を同時確認する**: Python 側で
+   `_ALLOWED_ORDER_SIDE` や permission guard を変更するコミットでは、
+   対応する Rust UI の `on_press` / disabled 条件が解禁されているかをセットで確認する。
+   「Python だけ解禁、UI は旧フェーズのまま」の状態が発生しやすい。
+
+3. **「直接初期化」テストは「Message 経路」を保護しない**: テストが `panel.side = Sell`
+   で state を直接セットする場合、`Message::SideChanged(Sell)` という UI 入口が
+   塞がれていても PASS する。UI から操作できる経路（Message を通じた状態遷移）を
+   保護するテストを別途追加する。
+
+---
+
+## 2026-05-01 — 立花 WS FD フレーム不配信（URL エンコード関数の適用範囲誤り）
+
+**見逃しパターン**: URL エンコード関数の適用範囲誤り（新パターン）
+
+**不具合の概要**:
+立花 Ladder の更新頻度が異常に遅い（体感 10 秒間隔）。原因は EVENT WebSocket の
+FD（板情報）フレームが届かず、30 秒後に REST polling fallback に落ちていた。
+
+`_build_ws_url` が `func_replace_urlecnode` を全パラメータ値に適用していたため、
+`p_evt_cmd=ST,KP,FD` が `p_evt_cmd=ST%2CKP%2CFD` になっていた。立花サーバは
+`%2C` をカンマとして解釈せず、FD 購読を認識しなかった。
+
+また `diagnose_tachibana_ws.py` 自体もベース URL（購読パラメータなし）で接続していたため、
+診断スクリプトの結果（ST フレームのみ）が根本原因を隠蔽していた。
+
+**修正**:
+- `python/engine/exchanges/tachibana.py:_build_ws_url` から `func_replace_urlecnode` を削除し、
+  公式サンプル（`e_api_websocket_receive_tel.py:573-585`）と同様に生値を結合する
+- `scripts/diagnose_tachibana_ws.py` の WS URL を `worker._build_ws_url(ticker)` に修正
+- ST フレーム全フィールドダンプ・`--dump-raw N` オプションを診断スクリプトに追加
+- `_cb_depth` で ST フレームを受信した際に p_errno が非ゼロなら `VenueError` を outbox に送る（F-C）
+- `tachibana_ws.py:_connect_once` に 30 秒ごとのフレームカウントログを追加（§6 O1）
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_tachibana_ws_fd_depth_recv.py` | `websockets.serve` で立てたローカルサーバに接続するため、URL パラメータを一切検証しない。モックサーバはどんな URL でも接続を受け入れる |
+| `test_tachibana_depth_safety.py` | 同上。接続後の FD/KP フレームの挙動をテストするが、接続に使った URL の正しさは検証しない |
+| `test_tachibana_url.py::test_build_event_url_keyvalue_form` | `build_event_url`（別関数）のテストが `%2C` を正しいとして assert している。これが「エンコードが正しい」という誤った安心感を与えていた |
+| `scripts/diagnose_tachibana_ws.py` | 診断スクリプト自体がベース URL で接続していたため、購読リクエストが発生せず、ST フレームしか来ない状態が「FD なし」を示していたが原因の特定に至らなかった |
+
+**根本原因の構造**:
+`func_replace_urlecnode` は REQUEST URL 用（JSON ボディ全体をエンコード）として設計されたが、
+WebSocket URL パラメータ構築にも誤って適用された。公式サンプルが REQUEST 用関数を
+WebSocket URL に使っていないことに気づくには、サンプルコードと実装コードを文字列レベルで
+diff する必要があった。既存テストはすべてモックサーバへの接続で完結するため、この差異を
+観測できなかった。
+
+**追加したテスト**:
+- `python/tests/test_tachibana_ws_url.py` (新設、8 テスト):
+  - `test_build_ws_url_evt_cmd_has_raw_commas` — p_evt_cmd が生カンマ 'ST,KP,FD' であることを assert
+  - `test_build_ws_url_parameter_order` — パラメータ順序が公式サンプルと一致することを assert
+  - `test_build_ws_url_fixed_params` — 固定値（p_rid=22 等）が正しいことを assert
+  - その他 5 テスト（銘柄コード、マスタコード、ベース URL 、二重 ? 等）
+- `python/tests/test_tachibana_depth_safety.py` (拡張、3 テスト):
+  - `test_st_frame_with_nonzero_errno_emits_venue_error` — ST フレームで p_errno 非ゼロ → VenueError
+  - `test_st_frame_with_zero_errno_does_not_emit_venue_error` — p_errno=0 では VenueError を出さない
+  - `test_depth_unavailable_emits_warn_log` — depth_unavailable 発火時に WARN ログが出る
+
+**検証**:
+- 修正前: `test_build_ws_url_evt_cmd_has_raw_commas` FAIL（`ST%2CKP%2CFD` が返る）
+- 修正後: 全 13 テスト PASS
+- `uv run pytest python/tests/ -v`: 1362 passed, 2 skipped
+- `cargo clippy -- -D warnings`: clean
+
+**教訓**:
+
+1. **URL 構築関数を新設・流用したとき、サンプルコードと文字列 diff する**: 立花のような
+   カスタム API では、URL パラメータのエンコード方式が REST と WebSocket で異なることがある。
+   新しい URL 構築ロジックを書く際は `python/engine/exchanges/tachibana_url.py` の
+   どの関数を使うかを公式サンプルの実装と照合すること。
+
+2. **WebSocket URL 構築関数は「パラメータ出力の単体テスト」を必ず持つ**: モックサーバは
+   URL パラメータを検証しない。`_build_ws_url` のような関数は、生成する URL 文字列を
+   assert するユニットテストをセットで持つべき。`__new__` でミニマルモックを作って
+   セッション URL を注入するパターン（`test_tachibana_ws_url.py` の `_make_worker`）で
+   asyncio なしでテスト可能。
+
+3. **診断スクリプトがプロダクションコードと同じパスを通るか毎回確認する**: 今回の
+   `diagnose_tachibana_ws.py` は `session.url_event_ws`（ベース URL）を使っていたが、
+   プロダクションは `_build_ws_url`（購読パラメータ付き）を使っていた。診断スクリプトが
+   「常に ST フレームしか来ない」という誤った情報を出していたため、初動調査が遅延した。
+   診断スクリプトは prod と同じコードパスを使うこと。

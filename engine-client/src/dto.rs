@@ -198,6 +198,13 @@ pub enum Command {
         venue: String,
     },
 
+    // ── Positions Phase (schema 2.7) ───────────────────────────────────────────
+    /// Fetch current positions (cash + margin) from the venue.
+    GetPositions {
+        request_id: String,
+        venue: String,
+    },
+
     // ── nautilus_trader 統合 (schema 2.4 / N1.1) ──────────────────────────
     /// Start a nautilus engine (Backtest or Live) for the given strategy.
     StartEngine {
@@ -459,6 +466,11 @@ impl std::fmt::Debug for Command {
                 .field("request_id", request_id)
                 .field("venue", venue)
                 .finish(),
+            Command::GetPositions { request_id, venue } => f
+                .debug_struct("GetPositions")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .finish(),
             Command::StartEngine {
                 request_id,
                 engine,
@@ -591,6 +603,24 @@ pub struct OrderListFilter {
 
 fn default_order_record_venue() -> String {
     "tachibana".to_string()
+}
+
+/// Wire representation of a single position entry (cash or margin).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PositionRecordWire {
+    /// nautilus 形式の銘柄 ID（例 "7203.TSE"）
+    pub instrument_id: String,
+    /// 保有数量（株、整数文字列）
+    pub qty: String,
+    /// 評価額（円、整数文字列）。"" のとき不明
+    pub market_value: String,
+    /// "cash" | "margin_credit" | "margin_general"
+    pub position_type: String,
+    /// 信用建玉番号（margin_credit のみ Some）
+    pub tategyoku_id: Option<String>,
+    /// venue 名（"tachibana" 固定）
+    pub venue: String,
 }
 
 /// Wire representation of a single order record in `OrderListUpdated`.
@@ -776,7 +806,7 @@ pub enum EngineEvent {
     TickerInfo {
         request_id: String,
         venue: String,
-        tickers: Vec<serde_json::Value>,
+        tickers: Vec<TickerEntry>,
     },
     TickerStats {
         request_id: String,
@@ -1001,6 +1031,16 @@ pub enum EngineEvent {
         ts_ms: i64,
     },
 
+    // ── Positions Phase (schema 2.7) ───────────────────────────────────────────
+    /// Response to `GetPositions`. Contains current positions held at the venue.
+    PositionsUpdated {
+        request_id: String,
+        venue: String,
+        positions: Vec<PositionRecordWire>,
+        /// 取得時刻 Unix ミリ秒
+        ts_ms: i64,
+    },
+
     // ── N1.16: REPLAY 仮想買付余力 ────────────────────────────────────────────
     /// REPLAY モードの仮想買付余力（portfolio_view.py が送出）。
     /// cash / buying_power / equity はすべて decimal 文字列（float 丸め防止）。
@@ -1075,4 +1115,70 @@ pub struct DepthLevel {
 pub struct OiPoint {
     pub ts_ms: i64,
     pub open_interest: String,
+}
+
+// ── Phase B: VenueCaps (B1) ──────────────────────────────────────────────────
+
+/// Quantity normalisation applied by the venue before displaying depth levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QtyNormKind {
+    None,
+    Contract,
+    Lot,
+}
+
+/// Per-venue capability flags embedded in `TickerEntry` (IPC only).
+/// Not persisted in `TickerInfo` — stored in `VenueCapsStore` sidecar.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct VenueCaps {
+    pub client_aggr_depth: bool,
+    pub supports_spread_display: bool,
+    #[serde(default)]
+    pub qty_norm_kind: Option<QtyNormKind>,
+}
+
+/// Typed ticker entry — discriminated on the `kind` field.
+/// `EngineEvent::TickerInfo.tickers` is `Vec<TickerEntry>` (Phase F).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TickerEntry {
+    Stock(StockTickerEntry),
+    Crypto(CryptoTickerEntry),
+}
+
+/// Typed stock ticker entry from `EngineEvent::TickerInfo`.
+/// Python guarantees `min_ticksize` and `venue_caps` are always present (Phase C/F contract).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct StockTickerEntry {
+    pub symbol: String,
+    #[serde(default)]
+    pub display_symbol: Option<String>,
+    #[serde(default)]
+    pub display_name_ja: Option<String>,
+    pub min_ticksize: f32,
+    #[serde(default)]
+    pub lot_size: Option<u32>,
+    #[serde(default)]
+    pub min_qty: Option<f32>,
+    #[serde(default)]
+    pub quote_currency: Option<String>,
+    #[serde(default)]
+    pub yobine_code: Option<String>,
+    #[serde(default)]
+    pub sizyou_c: Option<String>,
+    pub venue_caps: VenueCaps,
+}
+
+/// Typed crypto ticker entry from `EngineEvent::TickerInfo`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CryptoTickerEntry {
+    pub symbol: String,
+    #[serde(default)]
+    pub display_symbol: Option<String>,
+    pub min_ticksize: f32,
+    pub min_qty: f32,
+    #[serde(default)]
+    pub contract_size: Option<f32>,
+    pub venue_caps: VenueCaps,
 }

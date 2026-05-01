@@ -92,17 +92,22 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
-    // link_group は将来の銘柄連動（グループ A の銘柄で注文を入れる等）のための
-    // 予約フィールド。現時点では stream_pair() が None を返すため実質未使用。
     OrderEntry {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
+        /// Persisted so `linked_ticker()` works immediately after layout restore.
+        #[serde(deserialize_with = "ok_or_default", default)]
+        ticker_info: Option<TickerInfo>,
     },
     OrderList {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
     BuyingPower {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
+    Positions {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
@@ -228,6 +233,7 @@ pub enum ContentKind {
     OrderEntry,
     OrderList,
     BuyingPower,
+    Positions,
     /// N1.11: Replay speed control pane skeleton.
     /// TODO(N1.11-ui): 実際の UI 描画は N1.11 UI フェーズで実装する。
     /// 現在は PaneKind enum への variant 追加のみ（iced コントロールバー pane skeleton）。
@@ -235,7 +241,7 @@ pub enum ContentKind {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 12] = [
+    pub const ALL: [ContentKind; 13] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -247,6 +253,7 @@ impl ContentKind {
         ContentKind::OrderEntry,
         ContentKind::OrderList,
         ContentKind::BuyingPower,
+        ContentKind::Positions,
         ContentKind::ReplayControl,
     ];
 }
@@ -265,6 +272,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::OrderEntry => "注文入力",
             ContentKind::OrderList => "注文一覧",
             ContentKind::BuyingPower => "買余力",
+            ContentKind::Positions => "保有銘柄",
             ContentKind::ReplayControl => "リプレイ速度",
         };
         write!(f, "{s}")
@@ -285,16 +293,13 @@ impl PaneSetup {
     pub fn new(
         content_kind: ContentKind,
         base_ticker: TickerInfo,
-        prev_base_ticker: Option<TickerInfo>,
         current_basis: Option<Basis>,
         current_tick_multiplier: Option<TickMultiplier>,
+        // D1/D6: resolved by caller from VenueCapsStore (no Exchange fallback).
+        is_client_aggr: bool,
+        prev_is_client_aggr: bool,
     ) -> Self {
         let exchange = base_ticker.ticker.exchange;
-
-        let is_client_aggr = exchange.is_depth_client_aggr();
-        let prev_is_client_aggr = prev_base_ticker
-            .map(|ti| ti.ticker.exchange.is_depth_client_aggr())
-            .unwrap_or(is_client_aggr);
 
         let basis = match content_kind {
                 ContentKind::HeatmapChart => {
@@ -337,6 +342,7 @@ impl PaneSetup {
                 | ContentKind::OrderEntry
                 | ContentKind::OrderList
                 | ContentKind::BuyingPower
+                | ContentKind::Positions
                 // N1.11: ReplayControl は ticker stream を必要としない
                 | ContentKind::ReplayControl => None,
             };
@@ -364,6 +370,7 @@ impl PaneSetup {
             | ContentKind::OrderEntry
             | ContentKind::OrderList
             | ContentKind::BuyingPower
+            | ContentKind::Positions
             // N1.11: ReplayControl は tick multiplier 不要
             | ContentKind::ReplayControl => current_tick_multiplier,
         };
@@ -373,7 +380,13 @@ impl PaneSetup {
             None => base_ticker.min_ticksize.into(),
         };
 
-        let depth_aggr = exchange.stream_ticksize(tick_multiplier, TickMultiplier(50));
+        let depth_aggr = if is_client_aggr {
+            exchange::adapter::StreamTicksize::Client
+        } else {
+            exchange::adapter::StreamTicksize::ServerSide(
+                tick_multiplier.unwrap_or(TickMultiplier(50)),
+            )
+        };
 
         let push_freq = match content_kind {
             ContentKind::HeatmapChart if exchange.is_custom_push_freq() => match basis {
@@ -402,10 +415,19 @@ mod tests {
 
     #[test]
     fn pane_order_entry_roundtrip() {
-        let pane = Pane::OrderEntry { link_group: None };
+        let pane = Pane::OrderEntry {
+            link_group: None,
+            ticker_info: None,
+        };
         let json = serde_json::to_string(&pane).unwrap();
         let restored: Pane = serde_json::from_str(&json).unwrap();
-        assert!(matches!(restored, Pane::OrderEntry { link_group: None }));
+        assert!(matches!(
+            restored,
+            Pane::OrderEntry {
+                link_group: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -435,7 +457,48 @@ mod tests {
     fn pane_order_entry_missing_link_group_defaults_to_none() {
         let json = r#"{"OrderEntry": {}}"#;
         let pane: Pane = serde_json::from_str(json).unwrap();
-        assert!(matches!(pane, Pane::OrderEntry { link_group: None }));
+        assert!(matches!(
+            pane,
+            Pane::OrderEntry {
+                link_group: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pane_order_entry_ticker_info_roundtrip() {
+        use exchange::adapter::Exchange;
+        use exchange::{Ticker, TickerInfo};
+        let ticker = Ticker::new("7203", Exchange::TachibanaStock);
+        let ti = TickerInfo::new_stock(ticker, 1.0, 100.0, 100);
+        let pane = Pane::OrderEntry {
+            link_group: None,
+            ticker_info: Some(ti),
+        };
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored,
+            Pane::OrderEntry {
+                ticker_info: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pane_order_entry_old_format_without_ticker_info_deserializes_ok() {
+        // Old saved-state.json files have no ticker_info field — must default to None.
+        let json = r#"{"OrderEntry": {"link_group": null}}"#;
+        let pane: Pane = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            pane,
+            Pane::OrderEntry {
+                ticker_info: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -443,5 +506,51 @@ mod tests {
         let json = r#"{"Ladder":{"stream_type":[],"settings":{},"link_group":null}}"#;
         let pane: Pane = serde_json::from_str(json).unwrap();
         assert!(matches!(pane, Pane::Ladder { .. }));
+    }
+
+    #[test]
+    fn pane_positions_roundtrip() {
+        let pane = Pane::Positions { link_group: None };
+        let json = serde_json::to_string(&pane).unwrap();
+        let pane2: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(pane2, Pane::Positions { link_group: None }));
+    }
+
+    #[test]
+    fn content_kind_positions_display() {
+        assert_eq!(ContentKind::Positions.to_string(), "保有銘柄");
+    }
+
+    #[test]
+    fn content_kind_all_contains_positions() {
+        assert!(ContentKind::ALL.contains(&ContentKind::Positions));
+        assert_eq!(ContentKind::ALL.len(), 13);
+    }
+
+    #[test]
+    fn pane_positions_forward_compat_from_old_json() {
+        // 旧版 JSON（Positions バリアント無し）は問題なくロードできる
+        let json = r#"{"Starter":{"link_group":null}}"#;
+        let pane: Pane = serde_json::from_str(json).unwrap();
+        assert!(matches!(pane, Pane::Starter { .. }));
+    }
+
+    #[test]
+    fn pane_positions_rollback_compat() {
+        // 新版 JSON に Positions が含まれているとき、Positions を知らない型でデシリアライズすると失敗する
+        // （§3.3.3 の挙動確定テスト）
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        enum OldPane {
+            Starter { link_group: Option<LinkGroup> },
+            OrderList { link_group: Option<LinkGroup> },
+            BuyingPower { link_group: Option<LinkGroup> },
+        }
+        let json = r#"{"Positions":{"link_group":null}}"#;
+        let result: Result<OldPane, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "旧版バイナリは Positions を知らないためエラーになる"
+        );
     }
 }

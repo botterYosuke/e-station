@@ -86,6 +86,7 @@ debug = ["iced/hot"]
 
 [dev-dependencies]
 futures = "0.3"
+regex = "1.11.1"
 syn = { version = "2", features = ["full", "visit"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }

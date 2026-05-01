@@ -3,11 +3,55 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 OnSsidUpdate = Callable[[str], None]
+
+_log = logging.getLogger(__name__)
+
+
+def is_valid_ticker_entry(entry: dict[str, Any], *, venue: str) -> bool:
+    """Validate Phase F invariants on a `TickerEntry` before it enters the IPC.
+
+    Phase F made `min_ticksize` and `min_qty` required + `exclusiveMinimum: 0`
+    in the JSON schema. Rust `StockTickerEntry` / `CryptoTickerEntry` deserialize
+    them as plain `f32` with no `> 0` guard, so a single bad numeric value (e.g.
+    a zero default from a venue API field omission) silently survives parse and
+    later breaks downstream consumers (price-step bucketing, qty stepping).
+    Worse, since Phase F also made `min_ticksize` required, an entry that lacks
+    it altogether causes the entire `Vec<TickerEntry>` deserialization to fail
+    on the Rust side, dropping every ticker for that venue with only a single
+    `log::warn!` line.
+
+    Returns True if `entry` may be emitted; False if it must be skipped.
+    Logs a WARNING on rejection so the silent-loss mode is observable.
+    """
+    symbol = entry.get("symbol", "<missing>")
+    min_ticksize = entry.get("min_ticksize")
+    if min_ticksize is None or not (isinstance(min_ticksize, (int, float))) or min_ticksize <= 0:
+        _log.warning(
+            "%s list_tickers: skipping %s — invalid min_ticksize=%r",
+            venue,
+            symbol,
+            min_ticksize,
+        )
+        return False
+    min_qty = entry.get("min_qty")
+    if min_qty is not None and (
+        not isinstance(min_qty, (int, float)) or min_qty <= 0
+    ):
+        _log.warning(
+            "%s list_tickers: skipping %s — invalid min_qty=%r",
+            venue,
+            symbol,
+            min_qty,
+        )
+        return False
+    return True
 
 
 class WsNativeResyncTriggered(Exception):
@@ -36,6 +80,18 @@ class ExchangeWorker(ABC):
         nothing to warm up (e.g. test stubs).
         """
         return None
+
+    def venue_caps(self) -> dict:
+        """Per-venue capability flags for depth display and normalization.
+
+        Subclasses should override to return accurate capabilities.
+        Default: client_aggr_depth=True, supports_spread_display=True, qty_norm_kind="none"
+        """
+        return {
+            "client_aggr_depth": True,
+            "supports_spread_display": True,
+            "qty_norm_kind": "none",
+        }
 
     def capabilities(self) -> dict:
         """Per-venue capability advertisement (B3 / plan §T4 L508-549).

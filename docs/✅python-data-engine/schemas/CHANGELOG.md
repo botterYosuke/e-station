@@ -1,5 +1,28 @@
 # IPC Schema Changelog
 
+## v3.8 (2026-05-01) — Phase F: typed-only IPC + VenueCaps required (breaking)
+
+- **major bump 2→3**: backward-incompatible cleanups committed in Phase F.
+  Old `SCHEMA_MAJOR=2` clients will be rejected at handshake.
+  - **`tickers: Vec<TickerEntry>`**: `EngineEvent::TickerInfo.tickers` field
+    changed from `Vec<serde_json::Value>` to `Vec<TickerEntry>`. The
+    Phase A fallback path (value-based parse on `kind`-less payloads) is
+    removed. Python **must** always send `kind` on every ticker entry.
+  - **`venue_caps` required**: `StockTicker.venue_caps` and
+    `CryptoTicker.venue_caps` are now required (previously optional since
+    Phase B). Python must always include `venue_caps` with at least
+    `client_aggr_depth` and `supports_spread_display`.
+  - **`Exchange::is_depth_client_aggr()` deleted**: method removed from
+    `exchange/src/adapter.rs`. All callers must use
+    `VenueCapsStore::get(&ticker).map(|c| c.client_aggr_depth)`.
+  - **`LocalDepthCache::update_with_qty_norm()` deleted**: deprecated API
+    removed from `exchange/src/depth.rs`. Use `update()` instead.
+- `events.json`: `StockTicker.required` and `CryptoTicker.required` now
+  include `"venue_caps"`. Phase-note descriptions removed.
+- SCHEMA_MINOR stays at 8 (no new fields added in Phase F).
+
+
+
 Schema versioning follows the policy in [spec.md §4.5.1](../spec.md#451-スキーマバージョニング運用).
 
 - **major** bump: breaking changes (field removal, rename, enum variant removal)

@@ -1,3 +1,4 @@
+use exchange::TickerInfo;
 use iced::{
     Alignment, Element, Length,
     widget::{button, column, container, pick_list, row, text, text_input},
@@ -62,6 +63,8 @@ pub struct OrderEntryPanel {
     pub display_label: Option<String>,
     /// Venue identifier (e.g. "tachibana"). Set by `set_instrument`.
     pub venue: Option<String>,
+    /// Full ticker metadata for link_group sync. Always set alongside `instrument_id`.
+    pub ticker_info: Option<TickerInfo>,
     pub side: OrderSide,
     pub quantity: String,
     pub price_kind: PriceKind,
@@ -210,13 +213,15 @@ impl OrderEntryPanel {
 
         let side_row = {
             let is_buy = self.side == OrderSide::Buy;
+            let is_sell = self.side == OrderSide::Sell;
+
             let buy_btn = button(text("買い").size(13))
                 .on_press(Message::SideChanged(OrderSide::Buy))
                 .style(move |theme, status| crate::style::button::confirm(theme, status, is_buy));
 
-            // Phase O0: SELL は disabled
             let sell_btn = button(text("売り").size(13))
-                .style(|theme, status| crate::style::button::cancel(theme, status, false));
+                .on_press(Message::SideChanged(OrderSide::Sell))
+                .style(move |theme, status| crate::style::button::cancel(theme, status, is_sell));
 
             row![buy_btn, sell_btn].spacing(4)
         };
@@ -308,6 +313,15 @@ impl OrderEntryPanel {
         self.display_label = Some(display);
         // Phase O0: Tachibana 専用。将来の多取引所対応時は呼び出し元から venue を渡す。
         self.venue = Some("tachibana".to_string());
+    }
+
+    /// Set instrument from full `TickerInfo` — used by link_group sync.
+    /// Exchange guard (TachibanaStock only) is the caller's responsibility.
+    pub fn set_instrument_from_ticker(&mut self, ti: TickerInfo) {
+        let display = ti.ticker.display_symbol_and_type().0;
+        let id = format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
+        self.set_instrument(id, display);
+        self.ticker_info = Some(ti);
     }
 
     /// Called when the engine connection drops (e.g. restart).
@@ -621,6 +635,105 @@ mod tests {
         assert!(
             panel.last_error.is_none(),
             "再接続後は last_error が None にクリアされるべき"
+        );
+    }
+
+    // ── set_instrument_from_ticker がすべてのフィールドを正しくセットすることを確認 ──
+    #[test]
+    fn set_instrument_from_ticker_sets_all_fields() {
+        use exchange::adapter::Exchange;
+        use exchange::{Ticker, TickerInfo};
+
+        let ticker = Ticker::new("7203", Exchange::TachibanaStock);
+        let ti = TickerInfo::new_stock(ticker, 1.0, 100.0, 100);
+
+        let mut panel = OrderEntryPanel::default();
+        panel.set_instrument_from_ticker(ti);
+
+        assert!(panel.instrument_id.is_some(), "instrument_id should be set");
+        assert!(panel.display_label.is_some(), "display_label should be set");
+        assert_eq!(
+            panel.venue,
+            Some("tachibana".to_string()),
+            "venue should be tachibana"
+        );
+        assert!(panel.ticker_info.is_some(), "ticker_info should be set");
+    }
+
+    // ── set_instrument_from_ticker は exchange ガードを行わない（呼び出し側責務）──
+    #[test]
+    fn set_instrument_from_ticker_does_not_guard_exchange() {
+        use exchange::adapter::Exchange;
+        use exchange::{Ticker, TickerInfo};
+
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ti = TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        let mut panel = OrderEntryPanel::default();
+        panel.set_instrument_from_ticker(ti);
+
+        // No exchange guard in set_instrument_from_ticker — caller is responsible
+        assert!(panel.ticker_info.is_some());
+    }
+
+    // ── Phase O3 リグレッション①: SubmitClicked → RequestConfirm に Sell が伝わること ──
+    //
+    // 確認ダイアログ側だけ壊れたとき（order_side が Buy のまま渡される等）を検出する。
+    // view の .on_press 欠落は検出できないが、build_request_confirm_action() の
+    // order_side 変換が Sell を正しく返すことを保護する。
+    #[test]
+    fn sell_side_submit_clicked_emits_request_confirm_with_sell() {
+        let mut panel = OrderEntryPanel {
+            quantity: "100".into(),
+            instrument_id: Some("7203.TSE".into()),
+            side: OrderSide::Sell,
+            ..Default::default()
+        };
+
+        let action = panel.update(Message::SubmitClicked);
+        assert!(
+            matches!(
+                action,
+                Some(Action::RequestConfirm {
+                    order_side: engine_client::dto::OrderSide::Sell,
+                    ..
+                })
+            ),
+            "SubmitClicked は RequestConfirm(Sell) を返すべき: {action:?}"
+        );
+        assert!(!panel.submitting);
+    }
+
+    // ── Phase O3 リグレッション②: SideChanged(Sell) → ConfirmSubmit → SubmitOrder ──
+    //
+    // 過去に「Phase O0: SELL は disabled」コメントが残っていたため
+    // view 側で Sell の .on_press() が抜け、UI から SELL 注文が出せない
+    // バグが発生した（2026-05-01）。Python 側 _ALLOWED_ORDER_SIDE は
+    // {BUY, SELL} なのに UI だけが O0 状態に取り残されていた。
+    //
+    // Message 経路で side を切替えてから注文が最終的に Sell で送られることを保護する。
+    #[test]
+    fn sell_side_toggle_then_confirm_emits_sell_order() {
+        let mut panel = OrderEntryPanel {
+            quantity: "100".into(),
+            instrument_id: Some("7203.TSE".into()),
+            venue: Some("tachibana".into()),
+            ..Default::default()
+        };
+
+        panel.update(Message::SideChanged(OrderSide::Sell));
+        assert_eq!(panel.side, OrderSide::Sell, "側が Sell に切り替わるべき");
+
+        let action = panel.update(Message::ConfirmSubmit);
+        assert!(
+            matches!(
+                action,
+                Some(Action::SubmitOrder {
+                    order_side: engine_client::dto::OrderSide::Sell,
+                    ..
+                })
+            ),
+            "Sell 側の SubmitOrder が組み立てられるべき: {action:?}"
         );
     }
 }
