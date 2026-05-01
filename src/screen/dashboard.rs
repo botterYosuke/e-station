@@ -870,6 +870,49 @@ impl Dashboard {
             });
     }
 
+    /// Returns `true` if at least one `Positions` pane exists on any window.
+    pub fn has_positions_pane(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window)
+            .any(|(_, _, state)| matches!(state.content, pane::Content::Positions(_)))
+    }
+
+    /// Distribute a fresh positions snapshot to all `Positions` panes.
+    pub fn distribute_positions(
+        &mut self,
+        main_window: window::Id,
+        positions: Vec<engine_client::dto::PositionRecordWire>,
+        ts_ms: i64,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::Positions(panel) = &mut state.content
+                    && !panel.is_replay()
+                {
+                    panel.set_positions(positions.clone(), ts_ms);
+                }
+            });
+    }
+
+    /// Propagate a positions fetch error to all `Positions` panes.
+    pub fn distribute_positions_error(&mut self, main_window: window::Id, message: String) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::Positions(panel) = &mut state.content {
+                    panel.set_error(message.clone());
+                }
+            });
+    }
+
+    /// Set the loading flag on all `Positions` panes.
+    pub fn distribute_positions_loading(&mut self, main_window: window::Id, loading: bool) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::Positions(panel) = &mut state.content {
+                    panel.set_loading(loading);
+                }
+            });
+    }
+
     /// Set the loading flag on all `OrderList` panes.
     pub fn distribute_order_list_loading(&mut self, main_window: window::Id, loading: bool) {
         self.iter_all_panes_mut(main_window)
@@ -1461,7 +1504,10 @@ impl Dashboard {
                     let kind = state.content.kind();
                     let skip = matches!(
                         kind,
-                        ContentKind::Starter | ContentKind::OrderList | ContentKind::BuyingPower
+                        ContentKind::Starter
+                            | ContentKind::OrderList
+                            | ContentKind::BuyingPower
+                            | ContentKind::Positions
                     );
                     if !skip && state.link_group == Some(group) {
                         Some((window, pane, kind))

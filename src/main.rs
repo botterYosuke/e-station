@@ -738,6 +738,9 @@ struct Flowsurface {
     /// `GetOrderList` IPC 送信時に記録した request_id。
     /// `OrderListUpdated` または `IpcError` 受信時にクリアする。重複送信抑止に使う。
     order_list_request_id: Option<String>,
+    /// `GetPositions` IPC 送信時に記録した request_id。
+    /// `PositionsUpdated` または `IpcError` 受信時にクリアする。重複送信抑止に使う。
+    positions_request_id: Option<String>,
     /// Shared market-closed flag for order_api pre-reject (N3.B).
     /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
     order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
@@ -827,6 +830,26 @@ enum Message {
     /// 注: 現状 BuyingPower の Err 経路は全て IpcError にルーティングされるため
     /// Err arm には到達しない。IpcError が request_id 照合で loading を解除する。
     BuyingPowerSendCompleted(Result<(), String>),
+    /// `PositionsUpdated` IPC event — distribute to all Positions panes.
+    PositionsUpdated {
+        /// IPC routing field; not used by the UI (broadcasts to all Positions panes).
+        #[allow(dead_code)]
+        request_id: String,
+        /// IPC routing field; not used by the UI.
+        #[allow(dead_code)]
+        venue: String,
+        positions: Vec<engine_client::dto::PositionRecordWire>,
+        ts_ms: i64,
+    },
+    /// `GetPositions` IPC 送信完了（Ok）/ 送信失敗（Err）。
+    PositionsSendCompleted(Result<(), String>),
+    /// EC 約定通知（OrderFilled）— positions auto-refresh を含む。
+    OrderFilled {
+        client_order_id: String,
+        last_qty: String,
+        last_price: String,
+        leaves_qty: String,
+    },
     /// Python エンジンが第二暗証番号を要求した。request_id は `SetSecondPassword` に使う。
     SecondPasswordRequired(String),
     /// 第二暗証番号 modal を閉じ、`ForgetSecondPassword` を IPC 送信する。
@@ -1073,16 +1096,12 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             last_price,
             leaves_qty,
             ..
-        } => {
-            let body = if leaves_qty == "0" {
-                format!("約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（全約定）")
-            } else {
-                format!(
-                    "約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（残 {leaves_qty} 株）"
-                )
-            };
-            Some(Message::OrderToast(Toast::info(body)))
-        }
+        } => Some(Message::OrderFilled {
+            client_order_id,
+            last_qty,
+            last_price,
+            leaves_qty,
+        }),
         EngineEvent::OrderCanceled {
             client_order_id, ..
         } => Some(Message::OrderToast(Toast::info(format!(
@@ -1115,6 +1134,18 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             reason: format!("[{reason_code}] {reason_text}"),
         }),
         EngineEvent::OrderListUpdated { orders, .. } => Some(Message::OrderListUpdated(orders)),
+        EngineEvent::PositionsUpdated {
+            request_id,
+            venue,
+            positions,
+            ts_ms,
+            ..
+        } => Some(Message::PositionsUpdated {
+            request_id,
+            venue,
+            positions,
+            ts_ms,
+        }),
         EngineEvent::BuyingPowerUpdated {
             cash_available,
             cash_shortfall,
@@ -1344,6 +1375,7 @@ impl Flowsurface {
             second_password_modal: None,
             buying_power_request_id: None,
             order_list_request_id: None,
+            positions_request_id: None,
             // N3.B: reuse the flag that was published to ORDER_API_MARKET_CLOSED
             // by main(). Falls back to a fresh flag (e.g. in tests / hot-reload).
             order_api_market_closed: ORDER_API_MARKET_CLOSED
@@ -1403,11 +1435,13 @@ impl Flowsurface {
                     // in "updating" state forever if the engine never comes back.
                     self.buying_power_request_id = None;
                     self.order_list_request_id = None;
+                    self.positions_request_id = None;
                     self.layout_manager
                         .iter_dashboards_mut()
                         .for_each(|dashboard| {
                             dashboard.distribute_buying_power_loading(main_window, false);
                             dashboard.distribute_order_list_loading(main_window, false);
+                            dashboard.distribute_positions_loading(main_window, false);
                             dashboard.notify_engine_disconnected(main_window);
                         });
                 }
@@ -1634,9 +1668,46 @@ impl Flowsurface {
                     Task::none()
                 };
 
+                // Auto-fetch positions on venue ready if a pane is visible.
+                let auto_fetch_positions = if is_ready
+                    && self.positions_request_id.is_none()
+                    && self.active_dashboard().has_positions_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        let req_id = uuid::Uuid::new_v4().to_string();
+                        self.positions_request_id = Some(req_id.clone());
+                        self.active_dashboard_mut()
+                            .distribute_positions_loading(main_window, true);
+                        let req_id_for_err = req_id.clone();
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetPositions {
+                                    request_id: req_id,
+                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            move |res| match res {
+                                Ok(()) => Message::PositionsSendCompleted(Ok(())),
+                                Err(err) => Message::IpcError {
+                                    request_id: Some(req_id_for_err),
+                                    code: "send_failed".to_string(),
+                                    message: err,
+                                },
+                            },
+                        )
+                    } else {
+                        Task::none()
+                    }
+                } else {
+                    Task::none()
+                };
+
                 return replay
                     .chain(auto_fetch_buying_power)
-                    .chain(auto_fetch_orders);
+                    .chain(auto_fetch_orders)
+                    .chain(auto_fetch_positions);
             }
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
@@ -1647,10 +1718,13 @@ impl Flowsurface {
                 let main_window = self.main_window.id;
                 self.buying_power_request_id = None;
                 self.order_list_request_id = None;
+                self.positions_request_id = None;
                 self.active_dashboard_mut()
                     .distribute_buying_power_loading(main_window, false);
                 self.active_dashboard_mut()
                     .distribute_order_list_loading(main_window, false);
+                self.active_dashboard_mut()
+                    .distribute_positions_loading(main_window, false);
 
                 // Rebuild backends with the new connection and bump the generation
                 // counter so iced assigns new subscription IDs and restarts streams.
@@ -2196,9 +2270,41 @@ impl Flowsurface {
                                 }
                             }
                         }
-                        Some(dashboard::Event::PositionsAction(_action)) => {
-                            // PP4: full IPC wiring deferred to PP4.
-                            // PP1 stub: ignore the action to keep the codebase compiling.
+                        Some(dashboard::Event::PositionsAction(
+                            crate::screen::dashboard::panel::positions::Action::RequestPositions,
+                        )) => {
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                if self.positions_request_id.is_none() {
+                                    let req_id = uuid::Uuid::new_v4().to_string();
+                                    self.positions_request_id = Some(req_id.clone());
+                                    let main_window = self.main_window.id;
+                                    self.active_dashboard_mut()
+                                        .distribute_positions_loading(main_window, true);
+                                    let req_id_for_err = req_id.clone();
+                                    return Task::perform(
+                                        async move {
+                                            conn.send(engine_client::dto::Command::GetPositions {
+                                                request_id: req_id,
+                                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                            })
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                        },
+                                        move |res| match res {
+                                            Ok(()) => Message::PositionsSendCompleted(Ok(())),
+                                            Err(err) => Message::IpcError {
+                                                request_id: Some(req_id_for_err),
+                                                code: "send_failed".to_string(),
+                                                message: err,
+                                            },
+                                        },
+                                    );
+                                }
+                            } else {
+                                return Task::done(Message::OrderToast(Toast::error(
+                                    "エンジン未接続: 保有銘柄を取得できません".to_string(),
+                                )));
+                            }
                             Task::none()
                         }
                         // N1.11-ui: relay speed button press to IPC
@@ -2257,6 +2363,56 @@ impl Flowsurface {
             Message::OrderToast(toast) => {
                 self.notifications.push(toast);
             }
+            // OrderFilled — toast + positions auto-refresh
+            Message::OrderFilled {
+                client_order_id,
+                last_qty,
+                last_price,
+                leaves_qty,
+            } => {
+                let body = if leaves_qty == "0" {
+                    format!("約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（全約定）")
+                } else {
+                    format!(
+                        "約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（残 {leaves_qty} 株）"
+                    )
+                };
+                self.notifications.push(Toast::info(body));
+
+                // live モード（tachibana ログイン済み）のときのみ positions 自動更新。
+                if !self.tachibana_state.is_ready() {
+                    return Task::none();
+                }
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    return Task::none();
+                };
+                if self.positions_request_id.is_none() {
+                    let req_id = uuid::Uuid::new_v4().to_string();
+                    self.positions_request_id = Some(req_id.clone());
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut()
+                        .distribute_positions_loading(main_window, true);
+                    let req_id_for_err = req_id.clone();
+                    return Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::GetPositions {
+                                request_id: req_id,
+                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        move |res| match res {
+                            Ok(()) => Message::PositionsSendCompleted(Ok(())),
+                            Err(err) => Message::IpcError {
+                                request_id: Some(req_id_for_err),
+                                code: "send_failed".to_string(),
+                                message: err,
+                            },
+                        },
+                    );
+                }
+            }
             // Phase U1: distribute fresh order list to all OrderList panes
             Message::OrderListUpdated(orders) => {
                 self.order_list_request_id = None;
@@ -2285,6 +2441,27 @@ impl Flowsurface {
                     .distribute_buying_power_error(main_window, err.clone());
                 self.notifications
                     .push(Toast::error(format!("余力情報取得失敗: {err}")));
+            }
+            Message::PositionsSendCompleted(Ok(())) => {
+                // 送信成功: PositionsUpdated 受信を待つだけ
+            }
+            Message::PositionsSendCompleted(Err(err)) => {
+                self.positions_request_id = None;
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .distribute_positions_error(main_window, err.clone());
+            }
+            // Positions: broadcast to all Positions panes
+            Message::PositionsUpdated {
+                request_id: _,
+                venue: _,
+                positions,
+                ts_ms,
+            } => {
+                self.positions_request_id = None;
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .distribute_positions(main_window, positions, ts_ms);
             }
             // Phase U3: broadcast to all BuyingPower panes; silently no-ops if no pane exists
             Message::BuyingPowerUpdated {
@@ -2349,6 +2526,11 @@ impl Flowsurface {
                     .as_deref()
                     .zip(request_id.as_deref())
                     .is_some_and(|(ol, err)| ol == err);
+                let matches_positions = self
+                    .positions_request_id
+                    .as_deref()
+                    .zip(request_id.as_deref())
+                    .is_some_and(|(p, err)| p == err);
                 if matches_buying_power {
                     self.buying_power_request_id = None;
                     let main_window = self.main_window.id;
@@ -2359,6 +2541,11 @@ impl Flowsurface {
                     let main_window = self.main_window.id;
                     self.active_dashboard_mut()
                         .distribute_order_list_error(main_window, format!("[{code}] {message}"));
+                } else if matches_positions {
+                    self.positions_request_id = None;
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut()
+                        .distribute_positions_error(main_window, format!("[{code}] {message}"));
                 } else if code == "strategy_load_failed" {
                     // N4.4: surface the error as a dismissable banner.
                     self.strategy_load_error = Some(message);
@@ -3093,6 +3280,47 @@ impl Flowsurface {
                             } else {
                                 log::warn!(
                                     "[BuyingPower auto-fetch] tachibana is ready but \
+                                     engine_connection is None"
+                                );
+                            }
+                        }
+
+                        if pane_added
+                            && kind == ContentKind::Positions
+                            && self.tachibana_state.is_ready()
+                            && self.positions_request_id.is_none()
+                        {
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let req_id = uuid::Uuid::new_v4().to_string();
+                                self.positions_request_id = Some(req_id.clone());
+                                let main_window = self.main_window.id;
+                                self.active_dashboard_mut()
+                                    .distribute_positions_loading(main_window, true);
+                                let req_id_for_err = req_id.clone();
+                                return Task::batch(vec![
+                                    task.map(Message::Sidebar),
+                                    Task::perform(
+                                        async move {
+                                            conn.send(engine_client::dto::Command::GetPositions {
+                                                request_id: req_id,
+                                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                            })
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                        },
+                                        move |res| match res {
+                                            Ok(()) => Message::PositionsSendCompleted(Ok(())),
+                                            Err(err) => Message::IpcError {
+                                                request_id: Some(req_id_for_err),
+                                                code: "send_failed".to_string(),
+                                                message: err,
+                                            },
+                                        },
+                                    ),
+                                ]);
+                            } else {
+                                log::warn!(
+                                    "[Positions auto-fetch] tachibana is ready but \
                                      engine_connection is None"
                                 );
                             }

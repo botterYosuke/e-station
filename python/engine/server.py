@@ -1636,7 +1636,7 @@ class DataEngineServer:
     async def _do_get_positions(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
-        if venue not in self._workers:
+        if venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
@@ -1667,6 +1667,15 @@ class DataEngineServer:
                 "request_id": req_id,
                 "code": "SESSION_EXPIRED",
                 "message": "Session expired; please re-login",
+            })
+            return
+        except TachibanaError as e:
+            log.error("[get_positions] %s", e)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "fetch_error",
+                "message": str(e),
             })
             return
         except Exception:

@@ -2716,6 +2716,7 @@ impl PartialEq for Content {
                 | (Content::OrderEntry(_), Content::OrderEntry(_))
                 | (Content::OrderList(_), Content::OrderList(_))
                 | (Content::BuyingPower(_), Content::BuyingPower(_))
+                | (Content::Positions(_), Content::Positions(_))
                 | (Content::ReplayControl, Content::ReplayControl)
         )
     }
@@ -2903,6 +2904,7 @@ mod tests {
         assert!(Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()).initialized());
         assert!(Content::OrderList(panel::orders::OrdersPanel::new()).initialized());
         assert!(Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()).initialized());
+        assert!(Content::Positions(panel::positions::PositionsPanel::new()).initialized());
     }
 
     /// Starter / OrderList / BuyingPower は銘柄概念を持たないため
@@ -2953,6 +2955,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_config_normalizes_link_group_for_positions() {
+        let state = State::from_config(
+            Content::Positions(panel::positions::PositionsPanel::new()),
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "Positions は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
     /// OrderEntry は銘柄を持つため link_group をそのまま保持する（正規化対象外）。
     #[test]
     fn from_config_preserves_link_group_for_order_entry() {
@@ -2974,7 +2990,10 @@ mod tests {
         assert!(
             !matches!(
                 order_entry,
-                Content::Starter | Content::OrderList(_) | Content::BuyingPower(_)
+                Content::Starter
+                    | Content::OrderList(_)
+                    | Content::BuyingPower(_)
+                    | Content::Positions(_)
             ),
             "OrderEntry は銘柄概念を持つため link_group ボタン除外リストに含めてはならない"
         );
@@ -2982,12 +3001,16 @@ mod tests {
         for content in [
             Content::OrderList(panel::orders::OrdersPanel::new()),
             Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            Content::Positions(panel::positions::PositionsPanel::new()),
             Content::Starter,
         ] {
             assert!(
                 matches!(
                     content,
-                    Content::Starter | Content::OrderList(_) | Content::BuyingPower(_)
+                    Content::Starter
+                        | Content::OrderList(_)
+                        | Content::BuyingPower(_)
+                        | Content::Positions(_)
                 ),
                 "銘柄概念を持たないペインは link_group ボタン除外リストに含めるべき"
             );

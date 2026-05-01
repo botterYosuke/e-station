@@ -2,8 +2,6 @@
 //!
 //! Displays current cash + margin positions held at the venue.
 //! Refresh button fires `GetPositions` IPC; `PositionsUpdated` populates the table.
-//!
-//! NOTE(PP1): This is a minimal stub. Full view implementation is in PP3.
 
 use engine_client::dto::PositionRecordWire;
 use iced::{
@@ -18,7 +16,7 @@ use iced::{
 pub struct PositionsPanel {
     positions: Vec<PositionRecordWire>,
     /// True when this panel is shown in REPLAY mode (banner + no live IPC).
-    pub is_replay: bool,
+    is_replay: bool,
     /// Loading badge ("⟳ 更新中…") flag.
     loading: bool,
     /// Error message from latest fetch.
@@ -61,6 +59,10 @@ impl PositionsPanel {
         self.loading = false;
     }
 
+    pub fn is_replay(&self) -> bool {
+        self.is_replay
+    }
+
     pub fn position_count(&self) -> usize {
         self.positions.len()
     }
@@ -86,7 +88,7 @@ pub enum Action {
 pub fn update(panel: &mut PositionsPanel, msg: Message) -> Option<Action> {
     match msg {
         // REPLAY pane では IPC を発行しない（OrdersPanel と整合）
-        Message::RefreshClicked if panel.is_replay => None,
+        Message::RefreshClicked if panel.is_replay() => None,
         Message::RefreshClicked => Some(Action::RequestPositions),
     }
 }
@@ -106,6 +108,12 @@ pub fn view(panel: &PositionsPanel) -> Element<'_, Message> {
         row![refresh_btn].spacing(4).padding([4, 8])
     };
 
+    if panel.is_replay() {
+        return column![header, center(text("⏪ REPLAY — 保有銘柄なし").size(13)),]
+            .height(iced::Length::Fill)
+            .into();
+    }
+
     if let Some(ref err) = panel.last_error {
         return column![
             header,
@@ -117,12 +125,6 @@ pub fn view(panel: &PositionsPanel) -> Element<'_, Message> {
         ]
         .height(iced::Length::Fill)
         .into();
-    }
-
-    if panel.is_replay {
-        return column![header, center(text("⏪ REPLAY — 保有銘柄なし").size(13)),]
-            .height(iced::Length::Fill)
-            .into();
     }
 
     if panel.positions.is_empty() {
@@ -194,7 +196,6 @@ fn format_number(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_client::dto::PositionRecordWire;
 
     fn make_wire(instrument_id: &str, qty: i64, market_value: i64) -> PositionRecordWire {
         PositionRecordWire {

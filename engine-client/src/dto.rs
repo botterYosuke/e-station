@@ -607,6 +607,7 @@ fn default_order_record_venue() -> String {
 
 /// Wire representation of a single position entry (cash or margin).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PositionRecordWire {
     /// nautilus 形式の銘柄 ID（例 "7203.TSE"）
     pub instrument_id: String,

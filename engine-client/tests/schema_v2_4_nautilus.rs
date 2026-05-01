@@ -16,15 +16,16 @@ use flowsurface_engine_client::dto::{
 // ── Schema version guard ────────────────────────────────────────────────────
 
 #[test]
-fn schema_minor_is_6_for_nautilus() {
+fn schema_minor_is_7_for_positions() {
     // R2 review-fix R1b M-8: ReplayDataLoaded.strategy_id を Optional に緩和し
     // SCHEMA_MINOR を 4 → 5 に bump。MAJOR は据え置き (互換維持; minor mismatch は WARN のみ)。
     // レビュー反映 2026-04-29: LoadReplayData/ReplayLoadBody.strategy_init_kwargs を Map 型に
     // 統一したため SCHEMA_MINOR を 5 → 6 に bump。
+    // SCHEMA_MINOR を 6 → 7 に bump（Positions Phase）。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        6,
-        "SCHEMA_MINOR must be 6 after H-1 (strategy_init_kwargs Map unification)"
+        7,
+        "SCHEMA_MINOR must be 7 after Positions Phase bump"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -88,7 +89,7 @@ fn hello_includes_mode_field() {
     // Rust 内部では ``AppMode`` enum を使い、serde rename_all = "lowercase" で wire 互換。
     let cmd = Command::Hello {
         schema_major: 2,
-        schema_minor: 6,
+        schema_minor: 7,
         client_version: "test-0.0.0".to_string(),
         token: "tok".to_string(),
         mode: AppMode::Replay,
