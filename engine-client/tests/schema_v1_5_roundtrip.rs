@@ -19,10 +19,7 @@ const TID: &str = "EDA-001";
 // Schema 2.x contains schema 1.5 variants (order events).
 #[test]
 fn schema_major_is_at_least_2_for_order_events() {
-    assert!(
-        flowsurface_engine_client::SCHEMA_MAJOR >= 2,
-        "SCHEMA_MAJOR must be >= 2 (schema 1.5 order events included in schema 2.x)"
-    );
+    const { assert!(flowsurface_engine_client::SCHEMA_MAJOR >= 2, "SCHEMA_MAJOR must be >= 2 (schema 1.5 order events included in schema 2.x)") };
 }
 
 // ── OrderFilled (全約定: leaves_qty == "0") ───────────────────────────────────

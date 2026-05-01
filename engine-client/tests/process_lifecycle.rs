@@ -2,11 +2,11 @@
 ///
 /// These tests use an in-process mock WS server (tokio-tungstenite) so no
 /// real Python engine is required.
-use flowsurface_engine_client::{ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR, SubscriptionKey};
+use flowsurface_engine_client::{ProcessManager, SCHEMA_MAJOR, SCHEMA_MINOR};
 
 use futures_util::{SinkExt, StreamExt};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, sync::Notify, sync::mpsc};
+use tokio::{net::TcpListener, sync::Notify};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 // ── helpers ───────────────────────────────────────────────────────────────────

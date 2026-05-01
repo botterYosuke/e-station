@@ -241,11 +241,9 @@ fn test_wal_restore_unknown_conflict_on_different_key() {
 fn test_wal_restore_skips_request_key_zero() {
     // request_key=0 の submit 行
     let zero_key_line = format!(
-        "{}\n",
-        format!(
-            r#"{{"phase":"submit","ts":{ts},"client_order_id":"cid-key-zero","request_key":0,"instrument_id":"7203.TSE","order_side":"BUY","order_type":"MARKET","quantity":"100"}}"#,
-            ts = today_ts_ms(),
-        )
+        r#"{{"phase":"submit","ts":{ts},"client_order_id":"cid-key-zero","request_key":0,"instrument_id":"7203.TSE","order_side":"BUY","order_type":"MARKET","quantity":"100"}}
+"#,
+        ts = today_ts_ms(),
     );
     let f = write_wal(&[zero_key_line]);
 
