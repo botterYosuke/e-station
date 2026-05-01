@@ -190,6 +190,9 @@ impl From<&pane::State> for data::Pane {
             pane::Content::BuyingPower(_) => data::Pane::BuyingPower {
                 link_group: pane.link_group,
             },
+            pane::Content::Positions(_) => data::Pane::Positions {
+                link_group: pane.link_group,
+            },
             // N1.11: ReplayControl の永続化スキーマは未設定。Starter にフォールバックして
             // saved-state.json に無害な値を書く。TODO(N1.11-ui): 専用 Pane variant を追加。
             pane::Content::ReplayControl => data::Pane::Starter {
@@ -346,6 +349,12 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
         )),
         data::Pane::BuyingPower { link_group } => Configuration::Pane(pane::State::from_config(
             pane::Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            vec![],
+            data::layout::pane::Settings::default(),
+            link_group,
+        )),
+        data::Pane::Positions { link_group } => Configuration::Pane(pane::State::from_config(
+            pane::Content::Positions(panel::positions::PositionsPanel::new()),
             vec![],
             data::layout::pane::Settings::default(),
             link_group,

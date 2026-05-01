@@ -198,6 +198,13 @@ pub enum Command {
         venue: String,
     },
 
+    // ── Positions Phase (schema 2.7) ───────────────────────────────────────────
+    /// Fetch current positions (cash + margin) from the venue.
+    GetPositions {
+        request_id: String,
+        venue: String,
+    },
+
     // ── nautilus_trader 統合 (schema 2.4 / N1.1) ──────────────────────────
     /// Start a nautilus engine (Backtest or Live) for the given strategy.
     StartEngine {
@@ -459,6 +466,11 @@ impl std::fmt::Debug for Command {
                 .field("request_id", request_id)
                 .field("venue", venue)
                 .finish(),
+            Command::GetPositions { request_id, venue } => f
+                .debug_struct("GetPositions")
+                .field("request_id", request_id)
+                .field("venue", venue)
+                .finish(),
             Command::StartEngine {
                 request_id,
                 engine,
@@ -591,6 +603,23 @@ pub struct OrderListFilter {
 
 fn default_order_record_venue() -> String {
     "tachibana".to_string()
+}
+
+/// Wire representation of a single position entry (cash or margin).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PositionRecordWire {
+    /// nautilus 形式の銘柄 ID（例 "7203.TSE"）
+    pub instrument_id: String,
+    /// 保有数量（株、整数文字列）
+    pub qty: String,
+    /// 評価額（円、整数文字列）。"" のとき不明
+    pub market_value: String,
+    /// "cash" | "margin_credit" | "margin_general"
+    pub position_type: String,
+    /// 信用建玉番号（margin_credit のみ Some）
+    pub tategyoku_id: Option<String>,
+    /// venue 名（"tachibana" 固定）
+    pub venue: String,
 }
 
 /// Wire representation of a single order record in `OrderListUpdated`.
@@ -997,6 +1026,16 @@ pub enum EngineEvent {
         cash_shortfall: i64,
         /// 信用新規可能額（円）
         credit_available: i64,
+        /// 取得時刻 Unix ミリ秒
+        ts_ms: i64,
+    },
+
+    // ── Positions Phase (schema 2.7) ───────────────────────────────────────────
+    /// Response to `GetPositions`. Contains current positions held at the venue.
+    PositionsUpdated {
+        request_id: String,
+        venue: String,
+        positions: Vec<PositionRecordWire>,
         /// 取得時刻 Unix ミリ秒
         ts_ms: i64,
     },

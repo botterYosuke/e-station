@@ -1795,10 +1795,12 @@ async def fetch_positions(
         issue_code = rec.get("sIssueCode", "")
         qty_str = rec.get("sTategyokuZanSuu", "0") or "0"
         tategyoku_id = rec.get("sTategyokuNumber")
+        market_value_str = rec.get("sTategyokuZanKingaku") or "0"
         results.append(
             PositionRecord(
                 instrument_id=f"{issue_code}.TSE",
                 qty=int(qty_str),
+                market_value=int(market_value_str),
                 position_type="margin_credit",
                 tategyoku_id=tategyoku_id,
             )

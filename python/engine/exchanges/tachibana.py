@@ -970,9 +970,6 @@ class TachibanaWorker(ExchangeWorker):
             if on_ssid is not None:
                 on_ssid(ssid)
             processor.reset()
-            # Clear per-reconnect rate-limit state so each new WS connection
-            # can emit at least one VenueError per error code (H-C design intent).
-            st_last_emit.clear()
 
             async def _cb_depth(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
                 # Update shared counts (M-C). Counter handles missing keys as 0.
@@ -1049,7 +1046,7 @@ class TachibanaWorker(ExchangeWorker):
                             _inner_stop.set()
 
             ws_client = TachibanaEventWs(ws_url, _inner_stop, ticker=ticker, proxy=self._proxy)
-            await ws_client.run(_cb_depth)
+            await ws_client.run(_cb_depth, on_connect=st_last_emit.clear)
 
         for t in (safety_task, sync_task):
             t.cancel()

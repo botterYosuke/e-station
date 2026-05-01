@@ -59,6 +59,7 @@ from engine.exchanges.tachibana_orders import (
     fetch_order_list as tachibana_fetch_order_list,
     fetch_buying_power as tachibana_fetch_buying_power,
     fetch_credit_buying_power as tachibana_fetch_credit_buying_power,
+    fetch_positions as tachibana_fetch_positions,
 )
 from engine.schemas import OrderListFilter as SchemaOrderListFilter, OrderModifyChange as SchemaOrderModifyChange
 from engine.schemas import (
@@ -619,6 +620,11 @@ class DataEngineServer:
         elif op == "GetBuyingPower":
             self._spawn_fetch(
                 self._do_get_buying_power(msg), msg.get("request_id")
+            )
+
+        elif op == "GetPositions":
+            self._spawn_fetch(
+                self._do_get_positions(msg), msg.get("request_id")
             )
 
         elif op == "StartEngine":
@@ -1626,6 +1632,71 @@ class DataEngineServer:
             strategy_id=self._replay_strategy_id,
         )
         self._outbox.append(ipc_dict)
+
+    async def _do_get_positions(self, msg: dict) -> None:
+        req_id = msg.get("request_id", "")
+        venue = msg.get("venue", "")
+        if venue not in self._workers:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "unknown_venue",
+                "message": f"GetPositions: unknown venue {venue!r}",
+            })
+            return
+
+        if self._tachibana_session is None:
+            log.warning("_do_get_positions: tachibana session not established (request_id=%s)", req_id)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_NOT_ESTABLISHED",
+                "message": "GetPositions: tachibana session not established",
+            })
+            return
+
+        try:
+            records = await tachibana_fetch_positions(
+                session=self._tachibana_session,
+                p_no_counter=self._tachibana_p_no_counter,
+            )
+        except SessionExpiredError:
+            self._session_holder.clear()
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "SESSION_EXPIRED",
+                "message": "Session expired; please re-login",
+            })
+            return
+        except Exception:
+            log.exception("_do_get_positions: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching positions",
+            })
+            return
+
+        ts_ms = int(time.time() * 1000)
+        self._outbox.append({
+            "event": "PositionsUpdated",
+            "request_id": req_id,
+            "venue": venue,
+            "positions": [
+                {
+                    "instrument_id": r.instrument_id,
+                    "qty": str(r.qty),
+                    "market_value": str(r.market_value),
+                    "position_type": r.position_type,
+                    "tategyoku_id": r.tategyoku_id,
+                    "venue": "tachibana",
+                }
+                for r in records
+            ],
+            "ts_ms": ts_ms,
+        })
 
     # ------------------------------------------------------------------
     # Fetch operation helpers (each is an async coroutine producing one event)

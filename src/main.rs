@@ -2196,6 +2196,11 @@ impl Flowsurface {
                                 }
                             }
                         }
+                        Some(dashboard::Event::PositionsAction(_action)) => {
+                            // PP4: full IPC wiring deferred to PP4.
+                            // PP1 stub: ignore the action to keep the codebase compiling.
+                            Task::none()
+                        }
                         // N1.11-ui: relay speed button press to IPC
                         Some(dashboard::Event::ReplaySpeedAction(multiplier)) => {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {

@@ -598,6 +598,150 @@ async def test_st_venue_error_rate_limited(
 
 
 # ---------------------------------------------------------------------------
+# H2-1: invalid ticker → VenueError + stream_depth terminates cleanly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_depth_invalid_ticker_emits_venue_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不正 ticker（制御文字含む）は VenueError{code:invalid_ticker} を積んで即座に終了する（H2-1）。
+
+    stream_depth が asyncio.wait_for タイムアウトを超えずに完走することも保証する。
+    """
+    monkeypatch.setattr(_ws_mod, "_DEPTH_SAFETY_TIMEOUT_S", 1.0)
+    stop = asyncio.Event()
+    worker = _make_worker(tmp_path)
+    # session が必要（session=None だと no_session で返る前に到達しない）
+    from engine.exchanges.tachibana_url import EventUrl, MasterUrl, PriceUrl, RequestUrl
+    worker._session = TachibanaSession(
+        url_request=RequestUrl("https://example.test/request/"),
+        url_master=MasterUrl("https://example.test/master/"),
+        url_price=PriceUrl("https://example.test/price/"),
+        url_event=EventUrl("https://example.test/event/"),
+        url_event_ws="ws://127.0.0.1:9/event/",  # unreachable but not used
+        zyoutoeki_kazei_c="",
+    )
+    outbox: list[dict] = []
+    with patch("engine.exchanges.tachibana_ws.is_market_open", return_value=True):
+        await asyncio.wait_for(
+            worker.stream_depth("7203\x01", "stock", "session-invalid", outbox, stop),
+            timeout=2.0,
+        )
+    invalid = [e for e in outbox if e.get("code") == "invalid_ticker"]
+    assert invalid, f"Expected VenueError{{code:invalid_ticker}}; got outbox={outbox}"
+
+
+# ---------------------------------------------------------------------------
+# H-2: ST rate-limit clears on each WS reconnect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_st_rate_limit_resets_on_reconnect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ST→VenueError rate-limit は WS 再接続ごとにリセットされる（H-2）。
+
+    1 接続目で st_errno_99 → VenueError 1 件（rate-limit window 内なので以降は抑制）。
+    2 接続目（再接続）でも st_errno_99 → VenueError がもう 1 件出ること。
+    合計 2 件以上 + 各接続で少なくとも 1 件が保証される。
+    """
+    # Safety timeout = 3.0 s; dead-frame timeout = 0.25 s.
+    # dead-frame fires first (0.25 s < 0.30 s handler close), ensuring a clean
+    # reconnect backoff path and reducing flakiness on slow CI hosts.
+    monkeypatch.setattr(_ws_mod, "_DEPTH_SAFETY_TIMEOUT_S", 3.0)
+    monkeypatch.setattr(_ws_mod, "_DEAD_FRAME_TIMEOUT_S", 0.25)
+    monkeypatch.setattr(_ws_mod, "_DEPTH_POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(_ws_mod, "_DEPTH_POLL_MAX_S", 0.1)
+    import engine.exchanges.tachibana as _tachi
+
+    monkeypatch.setattr(_tachi, "_ST_VENUE_ERROR_RATE_LIMIT_S", 999.0)
+
+    stop = asyncio.Event()
+    conn_count = [0]
+
+    async def _handler(ws: websockets.server.WebSocketServerProtocol) -> None:
+        conn_count[0] += 1
+        await ws.send(_st_frame(p_errno="99"))
+        # Close after dead-frame window (0.30 s > _DEAD_FRAME_TIMEOUT_S=0.25 s).
+        await asyncio.sleep(0.30)
+        await ws.close()
+
+    async with websockets.serve(_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        worker = _make_worker(tmp_path)
+        worker._session = _fake_session(port)
+        outbox: list[dict] = []
+        mock_snap = AsyncMock(return_value={})
+        worker.fetch_depth_snapshot = mock_snap  # type: ignore[method-assign]
+
+        with patch("engine.exchanges.tachibana_ws.is_market_open", return_value=True):
+            await asyncio.wait_for(
+                worker.stream_depth("7203", "stock", "session-reconnect-rl", outbox, stop),
+                timeout=6.0,
+            )
+
+    st99 = [e for e in outbox if e.get("event") == "VenueError" and e.get("code") == "st_errno_99"]
+    assert conn_count[0] >= 2, f"Expected at least 2 WS connections; got {conn_count[0]}"
+    assert len(st99) >= 2, (
+        f"Expected at least 2 VenueErrors (one per reconnect); got {len(st99)}: {st99}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# H-1: polling fallback stops immediately when session expires mid-poll
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_polling_fallback_emits_venue_error_on_session_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ポーリング fallback 中にセッションが None になると VenueError を積んで即座に停止する（H-1）。"""
+    monkeypatch.setattr(_ws_mod, "_DEPTH_SAFETY_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(_ws_mod, "_DEPTH_POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(_ws_mod, "_DEPTH_POLL_MAX_S", 5.0)
+
+    stop = asyncio.Event()
+
+    async def _handler(ws: websockets.server.WebSocketServerProtocol) -> None:
+        await asyncio.sleep(0.5)
+        await ws.close()
+
+    async with websockets.serve(_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        worker = _make_worker(tmp_path)
+        worker._session = _fake_session(port)
+        outbox: list[dict] = []
+
+        poll_calls = [0]
+
+        async def _mock_fetch(_ticker, _market):
+            poll_calls[0] += 1
+            if poll_calls[0] >= 2:
+                # Simulate session expiry after first poll.
+                worker._session = None
+            return {}
+
+        worker.fetch_depth_snapshot = _mock_fetch  # type: ignore[method-assign]
+
+        with patch("engine.exchanges.tachibana_ws.is_market_open", return_value=True):
+            await asyncio.wait_for(
+                worker.stream_depth("7203", "stock", "session-expiry", outbox, stop),
+                timeout=5.0,
+            )
+
+    expired = [
+        e for e in outbox
+        if e.get("event") == "VenueError" and e.get("code") == "session_expired_during_poll"
+    ]
+    assert expired, f"Expected VenueError{{code:session_expired_during_poll}}; got {outbox}"
+    assert poll_calls[0] >= 2, f"Expected at least 2 poll calls before detection; got {poll_calls[0]}"
+
+
+# ---------------------------------------------------------------------------
 # §7.1 リグレッションガード — polling interval (F-B deferred)
 # ---------------------------------------------------------------------------
 

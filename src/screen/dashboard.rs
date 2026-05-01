@@ -104,6 +104,7 @@ pub enum Event {
     OrderEntryAction(super::dashboard::panel::order_entry::Action),
     OrderListAction(super::dashboard::panel::orders::Action),
     BuyingPowerAction(super::dashboard::panel::buying_power::Action),
+    PositionsAction(super::dashboard::panel::positions::Action),
     /// N1.11-ui: User pressed a speed button in a `ReplayControl` pane.
     ReplaySpeedAction(u32),
     /// N4.3: User pressed the strategy file picker button in a `ReplayControl` pane.
@@ -515,6 +516,9 @@ impl Dashboard {
                             }
                             pane::Effect::BuyingPowerAction(action) => {
                                 return (Task::none(), Some(Event::BuyingPowerAction(action)));
+                            }
+                            pane::Effect::PositionsAction(action) => {
+                                return (Task::none(), Some(Event::PositionsAction(action)));
                             }
                             // N1.11-ui: relay speed button press to main.rs
                             pane::Effect::SetReplaySpeed(multiplier) => {

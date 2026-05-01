@@ -59,6 +59,7 @@ pub enum Effect {
     OrderEntryAction(panel::order_entry::Action),
     OrderListAction(panel::orders::Action),
     BuyingPowerAction(panel::buying_power::Action),
+    PositionsAction(panel::positions::Action),
     /// N1.11-ui: User pressed a speed button in `ReplayControl` pane.
     SetReplaySpeed(u32),
     /// N4.3: User pressed the strategy file picker button in `ReplayControl` pane.
@@ -118,6 +119,7 @@ pub enum Event {
     OrderEntryMsg(panel::order_entry::Message),
     OrderListMsg(panel::orders::Message),
     BuyingPowerMsg(panel::buying_power::Message),
+    PositionsMsg(panel::positions::Message),
     /// N1.11-ui: User pressed a replay speed button (1 | 10 | 100).
     SetReplaySpeed(u32),
     /// N4.3: User pressed the "Strategy ファイルを選ぶ" button in `ReplayControl`.
@@ -244,7 +246,10 @@ impl State {
         // トグル不能なゴースト link_group が残り switch_tickers_in_group 経路で
         // 永続的に warn ログを発生させるため、構築時点で None に正規化する。
         let link_group = match content {
-            Content::Starter | Content::OrderList(_) | Content::BuyingPower(_) => {
+            Content::Starter
+            | Content::OrderList(_)
+            | Content::BuyingPower(_)
+            | Content::Positions(_) => {
                 if link_group.is_some() {
                     log::debug!(
                         "normalizing stale link_group on non-ticker pane (kind={:?})",
@@ -543,6 +548,7 @@ impl State {
                 | ContentKind::OrderEntry
                 | ContentKind::OrderList
                 | ContentKind::BuyingPower
+                | ContentKind::Positions
                 // N1.11: ReplayControl は ticker ストリーム不要のコントロール pane
                 | ContentKind::ReplayControl => {
                     debug_assert!(
@@ -672,7 +678,10 @@ impl State {
         // else 分岐で表示する（docs/✅order/order-entry-link-group-plan.md タスク 7）。
         let mut top_left_buttons = if matches!(
             self.content,
-            Content::Starter | Content::OrderList(_) | Content::BuyingPower(_)
+            Content::Starter
+                | Content::OrderList(_)
+                | Content::BuyingPower(_)
+                | Content::Positions(_)
         ) {
             row![]
         } else {
@@ -761,6 +770,7 @@ impl State {
             Content::OrderEntry(_) => Some("注文入力"),
             Content::OrderList(_) => Some("注文一覧"),
             Content::BuyingPower(_) => Some("買余力"),
+            Content::Positions(_) => Some("保有銘柄"),
             Content::Starter
             | Content::Heatmap { .. }
             | Content::ShaderHeatmap { .. }
@@ -1281,6 +1291,19 @@ impl State {
             Content::BuyingPower(panel) => {
                 let base = panel::buying_power::view(panel)
                     .map(move |msg| Message::PaneEvent(id, Event::BuyingPowerMsg(msg)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::Positions(panel) => {
+                let base = panel::positions::view(panel)
+                    .map(move |msg| Message::PaneEvent(id, Event::PositionsMsg(msg)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1831,6 +1854,13 @@ impl State {
                     return Some(Effect::BuyingPowerAction(action));
                 }
             }
+            Event::PositionsMsg(msg) => {
+                if let Content::Positions(panel) = &mut self.content
+                    && let Some(action) = panel::positions::update(panel, msg)
+                {
+                    return Some(Effect::PositionsAction(action));
+                }
+            }
             // N1.11-ui: Relay speed-button press to the dashboard.
             Event::SetReplaySpeed(multiplier) => {
                 return Some(Effect::SetReplaySpeed(multiplier));
@@ -2081,6 +2111,7 @@ impl State {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
             Content::Comparison(chart) => chart
                 .as_mut()
@@ -2114,6 +2145,7 @@ impl State {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
         }
     }
@@ -2206,6 +2238,8 @@ pub enum Content {
     OrderList(panel::orders::OrdersPanel),
     /// Buying Power panel (U3)
     BuyingPower(BuyingPowerPanel),
+    /// Positions panel (PP3) — 保有銘柄ペイン。
+    Positions(panel::positions::PositionsPanel),
     /// N1.11: Replay speed control pane skeleton.
     /// TODO(N1.11-ui): 実際の UI 描画は N1.11 UI フェーズで実装する。
     ReplayControl,
@@ -2417,6 +2451,7 @@ impl Content {
             ContentKind::OrderEntry => Content::OrderEntry(OrderEntryPanel::new()),
             ContentKind::OrderList => Content::OrderList(panel::orders::OrdersPanel::new()),
             ContentKind::BuyingPower => Content::BuyingPower(BuyingPowerPanel::new()),
+            ContentKind::Positions => Content::Positions(panel::positions::PositionsPanel::new()),
             // N1.11: skeleton のみ — 実際の UI は TODO(N1.11-ui)
             ContentKind::ReplayControl => Content::ReplayControl,
         }
@@ -2433,6 +2468,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
         }
@@ -2514,6 +2550,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -2561,6 +2598,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             | Content::ReplayControl => None,
         }
     }
@@ -2626,6 +2664,7 @@ impl Content {
             Content::OrderEntry(_) => ContentKind::OrderEntry,
             Content::OrderList(_) => ContentKind::OrderList,
             Content::BuyingPower(_) => ContentKind::BuyingPower,
+            Content::Positions(_) => ContentKind::Positions,
             Content::ReplayControl => ContentKind::ReplayControl,
         }
     }
@@ -2652,6 +2691,7 @@ impl Content {
             | Content::OrderEntry(_)
             | Content::OrderList(_)
             | Content::BuyingPower(_)
+            | Content::Positions(_)
             // N1.11: ReplayControl は常に initialized（表示するコンテンツが固定）
             | Content::ReplayControl => true,
         }

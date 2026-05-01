@@ -25,7 +25,8 @@
     { "$ref": "#/$defs/CancelOrder" },
     { "$ref": "#/$defs/CancelAllOrders" },
     { "$ref": "#/$defs/GetOrderList" },
-    { "$ref": "#/$defs/GetBuyingPower" }
+    { "$ref": "#/$defs/GetBuyingPower" },
+    { "$ref": "#/$defs/GetPositions" }
   ],
   "$defs": {
     "RequestId": {
@@ -300,6 +301,17 @@
       "additionalProperties": false,
       "properties": {
         "op": { "const": "GetBuyingPower" },
+        "request_id": { "$ref": "#/$defs/RequestId" },
+        "venue": { "type": "string" }
+      }
+    },
+    "GetPositions": {
+      "description": "Fetch current positions (cash + margin) from the venue. Added in schema MINOR=7.",
+      "type": "object",
+      "required": ["op", "request_id", "venue"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "GetPositions" },
         "request_id": { "$ref": "#/$defs/RequestId" },
         "venue": { "type": "string" }
       }

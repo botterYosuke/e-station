@@ -119,7 +119,53 @@ PositionsUpdated {
 },
 ```
 
-#### 3.1.4 SCHEMA_MINOR bump
+#### 3.1.4 Python `schemas.py` Pydantic モデル追加
+
+Rust DTO だけでなく、Python 側 IPC 契約も `python/engine/schemas.py` に Pydantic
+モデルとして登録する（既存 `GetBuyingPower` = `schemas.py:270` /
+`BuyingPowerUpdated` = `schemas.py:769` と対称）。
+
+```python
+# Command 側（Rust → Python）
+# schemas.py:270 GetBuyingPower の直後に追加
+class GetPositions(IpcMessage):
+    op: Literal["GetPositions"] = "GetPositions"
+    request_id: str
+    venue: str
+
+
+# Event 側（Python → Rust）
+# schemas.py:769 BuyingPowerUpdated の直後に追加
+class PositionRecord(IpcMessage):
+    """Single position entry in PositionsUpdated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instrument_id: str
+    qty: str  # 整数文字列
+    market_value: str  # 整数文字列、"0" は ¥0 表示
+    position_type: Literal["cash", "margin_credit", "margin_general"]
+    tategyoku_id: str | None = None
+    venue: Literal["tachibana"]
+
+
+class PositionsUpdated(IpcMessage):
+    """Response to GetPositions. Contains current positions held at the venue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["PositionsUpdated"] = "PositionsUpdated"
+    request_id: str
+    venue: str
+    positions: list[PositionRecord]
+    ts_ms: int
+```
+
+`_dispatch` の `_DISPATCH_TABLE`（または相当のルーティング）にも `"GetPositions"`
+キーを追加し、`GetPositions.model_validate(payload)` で型検証してから
+`_do_get_positions` に渡す。
+
+#### 3.1.5 SCHEMA_MINOR bump
 
 - `engine-client/src/lib.rs` の `SCHEMA_MINOR` を +1
 - `python/engine/schemas.py` の `SCHEMA_MINOR` を +1
@@ -234,16 +280,34 @@ ContentKind::Positions => "保有銘柄",
 
 #### 3.3.3 永続化互換性
 
-既存 `saved-state.json` には `Positions` バリアントは含まれていない。
-新バリアントの追加は serde の forward-compatible default で吸収する（既存 JSON は影響を受けない）。
-旧バージョンが `Positions` を含む新 JSON を読むと unknown variant エラーが出るが、
-`SCHEMA_MINOR` bump 経由でロールバック非互換を表現する（Major bump はしない）。
+**前提（実コード調査 2026-05-01）**: `saved-state.json` の読み込みは
+`serde_json::from_str::<data::State>(&json)` の単純デシリアライズで、schema 交渉や
+バージョン別フォールバック処理は持っていない（`src/main.rs:2509`
+`Message::NativeOpenFileApply` ハンドラ。起動時の自動ロードも同経路）。
 
-調査済み（2026-05-01）: `data/src/layout/pane.rs` の `Pane` / `ContentKind` enum には
-`#[serde(deny_unknown_fields)]` が付いていない。旧バイナリ（`Positions` variant 未定義）が
-新 JSON を読んだ場合、unknown variant を無視して Starter にフォールバックする。
-`saved-state.json` のロールバックは機能的には可能だが表示が崩れる
-（`Positions` ペインが Starter に置き換わる）。
+**前進方向（新版が旧 JSON を読む）**:
+- 既存 `saved-state.json` には `Positions` バリアントは含まれていない
+- 既存 JSON は新版で問題なくロード可能（追加バリアント・追加フィールドは新版が無視せず処理する）
+
+**後退方向（旧版が新 JSON を読む = ロールバック）**:
+- 旧版バイナリは `Pane::Positions` バリアントを知らない
+- `serde_json::from_str` は untagged でない adjacently-tagged enum で
+  unknown variant に出会うと **エラーで失敗する**
+- 失敗するとアプリは「無効な設定ファイルです」Toast を出して `restart()` を呼ばず、
+  既存 `saved-state.json` を上書きしない（自動ロードでも同じ。デフォルト状態で起動）
+- `data/src/layout/pane.rs` の `Pane` / `ContentKind` enum には
+  `#[serde(deny_unknown_fields)]` は付いていないが、これはフィールドレベルの設定で
+  enum variant unknown には影響しない
+- **Starter フォールバックは発生しない**（過去ラウンドで誤って書いた説明を訂正）
+
+**運用上の方針（本計画で確定）**:
+- `SCHEMA_MAJOR` は据え置く（追加変更のため）
+- `SCHEMA_MINOR` を +1 する（変更があったことを記録するのみ。互換性チェックには使わない。
+  IPC ハンドシェイクは MAJOR 一致のみ要求 = `engine-client/src/lib.rs` のロジック準拠）
+- ロールバック時は「旧版が新 JSON を弾いてデフォルト起動 → ユーザーが
+  別の `saved-state.json` を選び直すか初期状態でやり直し」となる
+- マイグレーションスクリプトは追加しない（ロールバックは想定運用ではない）
+- 計画書に `Positions` 追加の影響範囲としてロールバック非互換を明記する
 
 ### 3.4 Rust UI: `PositionsPanel` を新設
 
@@ -598,7 +662,7 @@ Content::Starter | Content::OrderList(_) | Content::BuyingPower(_) | Content::Po
 |---|---|
 | [engine-client/src/dto.rs](../../engine-client/src/dto.rs) | `PositionRecordWire` 型 + `Command::GetPositions` + `Event::PositionsUpdated` |
 | [engine-client/src/lib.rs](../../engine-client/src/lib.rs) | `SCHEMA_MINOR` を +1 |
-| [python/engine/schemas.py](../../python/engine/schemas.py) | `SCHEMA_MINOR` を +1 |
+| [python/engine/schemas.py](../../python/engine/schemas.py) | `GetPositions` / `PositionRecord` / `PositionsUpdated` Pydantic モデル追加（既存 `GetBuyingPower` / `BuyingPowerUpdated` と対称、§3.1.4）+ `SCHEMA_MINOR` を +1 |
 | [docs/✅python-data-engine/schemas/commands.json](../✅python-data-engine/schemas/commands.json) | `GetPositions` を追加 |
 | [docs/✅python-data-engine/schemas/events.json](../✅python-data-engine/schemas/events.json) | `PositionsUpdated` を追加 |
 | [python/engine/server.py](../../python/engine/server.py) | `GetPositions` ディスパッチ → `fetch_positions` 呼出 → `PositionsUpdated` 送出 |
@@ -624,9 +688,12 @@ Content::Starter | Content::OrderList(_) | Content::BuyingPower(_) | Content::Po
 
 - `GetPositions` 送信 → `fetch_positions` モック → `PositionsUpdated` イベント送出を確認
   （cash のみ / margin のみ / 混在 / 空配列 の 4 ケース）
-- `tachibana_session` 未確立で `IpcError` を返すこと
-- `SessionExpiredError` を発生させたとき `IpcError` を返すこと（`IpcError` レスポンスに `reason_code` フィールドが存在しない（または `None`）ことをアサートする。reason_code は付与しない）
-- venue が `"tachibana"` 以外（例 "binance"）で `IpcError` を返すこと
+- `tachibana_session` 未確立で wire `"event": "Error"` を返すこと（`code: "SESSION_NOT_ESTABLISHED"`）
+- `SessionExpiredError` を発生させたとき wire `"event": "Error"` を返すこと（`code: "SESSION_EXPIRED"`、`reason_code` は付与しない）
+- venue が `"tachibana"` 以外（例 "binance"）で wire `"event": "Error"` を返すこと（`code: "unknown_venue"`）
+
+> 用語: Python が outbox に積む wire event 名は `Error`（`schemas.py:461` 既定）。
+> Rust の `engine-client` 側は `Event::IpcError` バリアントとしてデシリアライズする（型名のみ異なる、wire は `Error`）。テストでは Python wire 名 `Error` でアサートする。
 - `market_value` が `0` の `PositionRecord` で `"0"` に変換されること（`int` デフォルト 0 は `"0"` として送出）
 - `sTategyokuZanKingaku = "2134500"` の信用建玉が `market_value = 2134500` → wire `"2134500"` として正しく変換されること（R2-H5 実装タスク完了後に追加）
 
@@ -683,8 +750,10 @@ Content::Starter | Content::OrderList(_) | Content::BuyingPower(_) | Content::Po
 
 - 既存 `saved-state.json`（`Positions` バリアント無し）が問題なく読み込める
 - `Pane::Positions { link_group: None }` が JSON ラウンドトリップで保持される
-- 旧版 JSON で `Pane::Positions` を読もうとしたときの挙動確認（unknown variant
-  はエラーで明示的に弾く / serde の default で吸収するか、いずれか実装方針に合わせる）
+- 旧版 JSON（`Pane::Positions` を含まない）が新版で問題なくロードされること（前進互換）
+- 新版 JSON（`Pane::Positions` を含む）を旧版バイナリ相当でデシリアライズすると
+  `serde_json::Error` で失敗すること（§3.3.3 の挙動確定。Starter フォールバックは起きない）。
+  旧版は失敗時にデフォルト状態で起動するため `saved-state.json` を上書きしない
 
 ### 5.6 画面目視チェック（debug ビルド）
 
@@ -709,7 +778,7 @@ FLOWSURFACE_ENGINE_TOKEN=dev-token cargo run -- --mode live --data-engine-url ws
 `inline-loading-indicator-plan.md` §5.3 と同じ方針で、新規禁止文字列があれば
 `tests/regression_*.rs` に追加する（本計画では新規導入なし）。
 
-### 5.8 invariant-tests.md への追記
+### 5.8 invariant-tests.md の扱い
 
 - I-Position-1（新設）:
   「`OrderFilled` 受信後、`positions_request_id.is_none()` のとき最大 1 回の
@@ -817,8 +886,8 @@ README / wiki に表示方法を記載する（別 PR で対応）。
 
 | Phase | 内容 | 完了条件 |
 |---|---|---|
-| **PP1** | IPC スキーマ追加 + Python ディスパッチ + ラウンドトリップテスト | `python/tests/test_tachibana_positions_dispatch.py` パス + Rust ラウンドトリップテストパス |
-| **PP2** | レイアウト型 (`Pane::Positions` / `ContentKind::Positions`) + 永続化互換テスト | `cargo test -p data` パス + serde ラウンドトリップ通過 |
+| **PP1** ✅ | IPC スキーマ追加 + Python ディスパッチ + ラウンドトリップテスト | `python/tests/test_tachibana_positions_dispatch.py` パス + Rust ラウンドトリップテストパス |
+| **PP2** ✅ | レイアウト型 (`Pane::Positions` / `ContentKind::Positions`) + 永続化互換テスト | `cargo test -p data` パス + serde ラウンドトリップ通過 |
 | **PP3** | `PositionsPanel` 新設 + `pane.rs` 全 match 拡張 | `cargo test -p flowsurface --lib panel::positions` パス + コンパイル成功 |
 | **PP4** | sidebar ボタン + main.rs 配線（venue ready / OpenOrderPanel / Refresh / OrderFilled） | デモ環境で約定 → 自動更新確認 |
 | **PP5** | 信用建玉表示 / 評価額空文字フォールバック / 目視確認 | 信用銘柄を持つアカウントで目視確認 |

@@ -338,9 +338,15 @@ class TachibanaEventWs:
     async def run(
         self,
         callback: Any,
+        *,
+        on_connect: Any | None = None,
     ) -> None:
         """Drive the WS loop, calling ``callback(frame_type, fields, recv_ts_ms)``
         for each received frame.  Returns when ``stop_event`` is set.
+
+        ``on_connect`` is an optional zero-argument callable invoked at the start
+        of each connection attempt (before the handshake), including reconnects.
+        Use it to reset per-connection state (e.g. rate-limit dicts).
         """
         if not _HAS_WEBSOCKETS:
             raise RuntimeError(
@@ -349,6 +355,8 @@ class TachibanaEventWs:
         backoff_idx = 0
         while not self._stop.is_set():
             self._conn_count += 1
+            if on_connect is not None:
+                on_connect()
             try:
                 await self._connect_once(callback)
                 backoff_idx = 0

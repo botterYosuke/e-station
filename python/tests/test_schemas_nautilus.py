@@ -24,9 +24,9 @@ def _roundtrip(model_cls, data: dict) -> dict:
 # ── Schema version ──────────────────────────────────────────────────────────
 
 
-def test_schema_minor_is_6_for_nautilus() -> None:
-    # N4: SCHEMA_MINOR を 5 → 6 に bump (LoadReplayData に strategy_file / strategy_init_kwargs 追加)
-    assert s.SCHEMA_MINOR == 6
+def test_schema_minor_is_7_for_positions() -> None:
+    # PP1: SCHEMA_MINOR を 6 → 7 に bump (GetPositions / PositionsUpdated 追加)
+    assert s.SCHEMA_MINOR == 7
     assert s.SCHEMA_MAJOR == 2
 
 

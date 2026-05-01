@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_MINOR: int = 6
+SCHEMA_MINOR: int = 7
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +269,14 @@ class GetOrderList(IpcMessage):
 
 class GetBuyingPower(IpcMessage):
     op: Literal["GetBuyingPower"] = "GetBuyingPower"
+    request_id: str
+    venue: str
+
+
+# ── Positions Phase (schema 2.7) ────────────────────────────────────────────
+
+class GetPositions(IpcMessage):
+    op: Literal["GetPositions"] = "GetPositions"
     request_id: str
     venue: str
 
@@ -778,6 +786,34 @@ class BuyingPowerUpdated(IpcMessage):
     cash_shortfall: int  # 現物余力不足額（円、0 は不足なし）
     credit_available: int  # 信用新規可能額（円）
     ts_ms: int  # 取得時刻 Unix ミリ秒
+
+
+# ── Positions Phase (schema 2.7) ────────────────────────────────────────────
+
+
+class PositionRecord(IpcMessage):
+    """Single position entry in PositionsUpdated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instrument_id: str
+    qty: str  # 整数文字列
+    market_value: str  # 整数文字列、"0" は ¥0 表示
+    position_type: Literal["cash", "margin_credit", "margin_general"]
+    tategyoku_id: str | None = None
+    venue: Literal["tachibana"]
+
+
+class PositionsUpdated(IpcMessage):
+    """Response to GetPositions. Contains current positions held at the venue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["PositionsUpdated"] = "PositionsUpdated"
+    request_id: str
+    venue: str
+    positions: list[PositionRecord]
+    ts_ms: int
 
 
 # ---------------------------------------------------------------------------
