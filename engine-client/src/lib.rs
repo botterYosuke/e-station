@@ -15,6 +15,7 @@ pub mod dto;
 pub mod error;
 pub mod order_session_state;
 pub mod process;
+pub mod stock_meta;
 pub mod tachibana_meta;
 pub mod venue_caps;
 

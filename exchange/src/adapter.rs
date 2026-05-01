@@ -466,10 +466,11 @@ impl Exchange {
         }
     }
 
+    #[deprecated(note = "use VenueCapsStore::get(&ticker).map(|c| c.client_aggr_depth) instead")]
     pub fn is_depth_client_aggr(&self) -> bool {
-        !matches!(
-            self,
-            Exchange::HyperliquidLinear | Exchange::HyperliquidSpot
+        panic!(
+            "is_depth_client_aggr() is removed in Phase D; \
+             use VenueCapsStore::get(&ticker).map(|c| c.client_aggr_depth)"
         )
     }
 
@@ -533,10 +534,11 @@ impl Exchange {
 
     pub fn stream_ticksize(
         &self,
+        is_client_aggr: bool,
         multiplier: Option<TickMultiplier>,
         server_fallback: TickMultiplier,
     ) -> StreamTicksize {
-        if self.is_depth_client_aggr() {
+        if is_client_aggr {
             StreamTicksize::Client
         } else {
             StreamTicksize::ServerSide(multiplier.unwrap_or(server_fallback))

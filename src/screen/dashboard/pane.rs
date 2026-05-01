@@ -50,18 +50,12 @@ use iced::{
 };
 use std::time::Instant;
 
-/// B5 (Phase B): look up `client_aggr_depth` from the global `VenueCapsStore`
-/// with fallback to `Exchange::is_depth_client_aggr()`.
-///
-/// Always falls back when the store has no entry for `ticker` (e.g. before
-/// `fetch_ticker_metadata` completes). Phase D will remove the fallback once
-/// Python is the guaranteed source of truth.
 fn caps_client_aggr(ticker: &exchange::Ticker) -> bool {
     crate::VENUE_CAPS_STORE
         .get()
         .and_then(|store| store.try_read().ok())
         .and_then(|g| g.get(ticker).map(|c| c.client_aggr_depth))
-        .unwrap_or_else(|| ticker.exchange.is_depth_client_aggr())
+        .unwrap_or(true)
 }
 
 #[derive(Debug, Clone)]
@@ -333,14 +327,18 @@ impl State {
 
         let base_ticker = tickers[0];
         let prev_base_ticker = self.stream_pair();
+        let is_client_aggr = caps_client_aggr(&base_ticker.ticker);
+        let prev_is_client_aggr = prev_base_ticker
+            .map(|ti| caps_client_aggr(&ti.ticker))
+            .unwrap_or(is_client_aggr);
 
         let derived_plan = PaneSetup::new(
             kind,
             base_ticker,
-            prev_base_ticker,
             self.settings.selected_basis,
             self.settings.tick_multiply,
-            caps_client_aggr(&base_ticker.ticker),
+            is_client_aggr,
+            prev_is_client_aggr,
         );
 
         self.settings.selected_basis = derived_plan.basis;
@@ -413,7 +411,7 @@ impl State {
                         let depth_aggr = derived_plan
                             .ticker_info
                             .exchange()
-                            .stream_ticksize(None, TickMultiplier(50));
+                            .stream_ticksize(is_client_aggr, None, TickMultiplier(50));
                         let temp = PaneSetup {
                             depth_aggr,
                             ..derived_plan

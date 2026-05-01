@@ -1159,9 +1159,8 @@ pub enum TickerEntry {
 
 /// Typed stock ticker entry from `EngineEvent::TickerInfo`.
 ///
-/// `min_ticksize` is optional in Phase A (Rust falls back to
-/// `TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32 = 1.0`).
-/// It becomes required in Phase D once Python guarantees the resolved value.
+/// `min_ticksize` is required in Phase D: Python guarantees the resolved
+/// value (Phase C IPC contract). Absent entries are skipped with a warn log.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct StockTickerEntry {
     pub symbol: String,

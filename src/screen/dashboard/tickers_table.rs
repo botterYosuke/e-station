@@ -2627,7 +2627,7 @@ mod tests {
     /// side-channel, and must exclude it when no handle is wired.
     #[tokio::test]
     async fn japanese_name_query_matches_via_meta_handle() {
-        use engine_client::{TickerMetaMap, tachibana_meta::parse_tachibana_ticker_dict};
+        use engine_client::{TickerMetaMap, stock_meta::parse_stock_ticker_entry};
         use exchange::adapter::Exchange;
 
         let dict = serde_json::json!({
@@ -2635,9 +2635,10 @@ mod tests {
             "display_name_ja": "トヨタ自動車",
             "display_symbol": "TOYOTA",
             "lot_size": 100,
+            "min_ticksize": 1.0,
         });
         let (ticker, _, meta) =
-            parse_tachibana_ticker_dict(&dict, Exchange::TachibanaStock).unwrap();
+            parse_stock_ticker_entry(&dict, Exchange::TachibanaStock).unwrap();
 
         // Populate the meta map.
         let mut meta_map = TickerMetaMap::default();

@@ -293,17 +293,13 @@ impl PaneSetup {
     pub fn new(
         content_kind: ContentKind,
         base_ticker: TickerInfo,
-        prev_base_ticker: Option<TickerInfo>,
         current_basis: Option<Basis>,
         current_tick_multiplier: Option<TickMultiplier>,
-        // B5 (Phase B): resolved by caller from VenueCapsStore + fallback.
+        // D1/D6: resolved by caller from VenueCapsStore (no Exchange fallback).
         is_client_aggr: bool,
+        prev_is_client_aggr: bool,
     ) -> Self {
         let exchange = base_ticker.ticker.exchange;
-
-        let prev_is_client_aggr = prev_base_ticker
-            .map(|ti| ti.ticker.exchange.is_depth_client_aggr())
-            .unwrap_or(is_client_aggr);
 
         let basis = match content_kind {
                 ContentKind::HeatmapChart => {

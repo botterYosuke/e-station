@@ -62,16 +62,19 @@ async fn spawn_tachibana_mock(listener: TcpListener) {
         let request_id = parsed["request_id"].as_str().unwrap().to_owned();
 
         // TickerInfo response with one Tachibana dict.
+        // Phase D: min_ticksize is required; absent entries are skipped.
         let resp = serde_json::json!({
             "event": "TickerInfo",
             "request_id": request_id,
             "venue": "tachibana",
             "tickers": [{
+                "kind": "stock",
                 "symbol": "7203",
                 "display_symbol": "TOYOTA",
                 "display_name_ja": "トヨタ自動車",
                 "lot_size": 100,
                 "min_qty": 100,
+                "min_ticksize": 1.0,
                 "quote_currency": "JPY",
                 "yobine_code": "103",
                 "sizyou_c": "00",

@@ -12,8 +12,6 @@ use iced::{Alignment, Event, Point, Rectangle, Renderer, Size, Theme, mouse};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-/// B5 (Phase B): look up `supports_spread_display` from the global `VenueCapsStore`
-/// with fallback to `Exchange::is_depth_client_aggr()`.
 fn caps_supports_spread(ticker: &exchange::Ticker) -> bool {
     crate::VENUE_CAPS_STORE
         .get()

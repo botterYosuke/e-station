@@ -41,7 +41,7 @@ const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// in `TickersTable`. UI callers **must** use `try_lock()` on the rendering
 /// path (T35-H8 purity): `lock().await` is forbidden in `view()` /
 /// `filtered_rows`. External callers go through `ticker_meta_handle()`.
-pub type TickerMetaMap = HashMap<exchange::Ticker, crate::tachibana_meta::TickerDisplayMeta>;
+pub type TickerMetaMap = HashMap<exchange::Ticker, crate::stock_meta::TickerDisplayMeta>;
 
 /// Venue-scoped backend for the Python data engine.
 ///
@@ -540,7 +540,7 @@ impl VenueBackend for EngineClientBackend {
                                 // loop completes.
                                 let mut staged_meta: Vec<(
                                     exchange::Ticker,
-                                    crate::tachibana_meta::TickerDisplayMeta,
+                                    crate::stock_meta::TickerDisplayMeta,
                                 )> = Vec::new();
                                 // B4: staged venue_caps from typed entries.
                                 let mut staged_caps: Vec<(
@@ -579,9 +579,20 @@ impl VenueBackend for EngineClientBackend {
                                                     exchange,
                                                     display_symbol,
                                                 );
-                                                let min_ticksize = s.min_ticksize.unwrap_or(
-                                                    crate::tachibana_meta::TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32,
-                                                );
+                                                // D2: Python guarantees min_ticksize is
+                                                // always present and resolved (Phase C
+                                                // IPC contract). Skip on missing/invalid.
+                                                let Some(min_ticksize) = s
+                                                    .min_ticksize
+                                                    .filter(|&v| v.is_finite() && v > 0.0)
+                                                else {
+                                                    log::warn!(
+                                                        "TickerInfo: min_ticksize absent/invalid \
+                                                         for {}, skipping",
+                                                        s.symbol
+                                                    );
+                                                    return None;
+                                                };
                                                 let lot_size = s.lot_size.unwrap_or(100);
                                                 let min_qty = s
                                                     .min_qty
@@ -593,7 +604,7 @@ impl VenueBackend for EngineClientBackend {
                                                     lot_size,
                                                 );
                                                 let meta =
-                                                    crate::tachibana_meta::TickerDisplayMeta {
+                                                    crate::stock_meta::TickerDisplayMeta {
                                                         display_name_ja: s.display_name_ja,
                                                         yobine_code: s.yobine_code,
                                                         sizyou_c: s.sizyou_c,
@@ -653,11 +664,11 @@ impl VenueBackend for EngineClientBackend {
                                                      Value fallback for entry"
                                                 );
                                                 if market_kind == MarketKind::Stock {
-                                                    // B3 HIGH-U-9 + B4: route Tachibana stock
-                                                    // dicts through the typed parser and stash
+                                                    // B3 HIGH-U-9 + B4: route stock dicts
+                                                    // through the typed parser and stash
                                                     // the display meta in `self.ticker_meta`.
                                                     let (ticker, info, meta) =
-                                                        crate::tachibana_meta::parse_tachibana_ticker_dict(
+                                                        crate::stock_meta::parse_stock_ticker_entry(
                                                             t, exchange,
                                                         )?;
                                                     if meta.display_name_ja().is_none() {

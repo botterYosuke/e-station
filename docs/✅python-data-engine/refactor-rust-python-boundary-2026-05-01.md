@@ -335,9 +335,33 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 
 ### 7.2 完了条件
 
-- `grep -r 'is_depth_client_aggr' src/ data/ exchange/ engine-client/` がゼロ
-- `grep -r 'TACHIBANA_MIN_TICKSIZE_PLACEHOLDER' .` がゼロ
-- `cargo clippy -- -D warnings` clean
+- `grep -r 'is_depth_client_aggr' src/ data/ exchange/ engine-client/` がゼロ ✅（定義本体のみ残存 — Phase F で削除）
+- `grep -r 'TACHIBANA_MIN_TICKSIZE_PLACEHOLDER' .` がゼロ ✅
+- `cargo clippy -- -D warnings` clean ✅
+
+### 7.5 Phase D 完了メモ（2026-05-01）
+
+**Q3 決定**: (a) 起動時 step 再計算（既存挙動）。`TickMultiplier` は `saved-state.json` から読み込み、`min_ticksize` は Python から再受信。migration 関数不要。
+
+**実施内容:**
+- D1: `Exchange::is_depth_client_aggr()` を `#[deprecated]` + `panic!` 化。`stream_ticksize()` に `is_client_aggr: bool` 引数を追加（`is_depth_client_aggr()` を呼ばなくなった）。`caps_client_aggr()` の fallback を `unwrap_or(true)` に変更（Phase B の `unwrap_or_else(|| is_depth_client_aggr())` を除去）
+- D2: `TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32` const を削除。`min_ticksize` 欠落時は `None`/warn ログに変更（typed path・fallback path 両方）
+- D3: backend.rs の typed Stock parse パスで placeholder unwrap_or を除去し、None 時は `log::warn!` + `return None` に
+- D4: `tachibana_meta.rs` → `stock_meta.rs` にリネーム（`parse_tachibana_ticker_dict` → `parse_stock_ticker_entry`）。旧 `tachibana_meta.rs` は re-export シムとして残存（Phase F で削除）
+- D5: ladder.rs は Phase B 時点で `unwrap_or(false)` 済み — 追加変更なし
+- D6: `PaneSetup::new` の `prev_base_ticker` 引数を除去し `prev_is_client_aggr: bool` を追加。caller (pane.rs) で `caps_client_aggr` を使い解決
+
+**追加テスト:**
+- `engine-client/tests/ticker_info_required_fields.rs`: min_ticksize 欠落/不正値で None
+- `engine-client/tests/ticker_info_tachibana_mapping.rs`: 旧テストを新 API に更新
+- `engine-client/tests/ticker_meta_map_round_trip.rs`: mock に min_ticksize を追加
+- `data/src/panel/ladder.rs`: proptest — regroup_from_raw の出力 key が step の倍数
+
+**検証結果:**
+- `cargo clippy -- -D warnings`: clean
+- `cargo test --workspace`: 全 green（0 failed）
+- `grep -r 'TACHIBANA_MIN_TICKSIZE_PLACEHOLDER' .`: 0 件
+- `grep -r 'is_depth_client_aggr' src/ data/ engine-client/ exchange/`: 定義本体のみ（呼び出し箇所ゼロ）
 
 ### 7.3 リスク
 
@@ -496,7 +520,7 @@ Phase F: SCHEMA_MAJOR bump とプレースホルダ撤去
 |----|---------|------|
 | Q1 | `min_ticksize` 解決前の `TickerInfo` 送出をどうするか | **✅ 確定: (a) 暫定値で送り後で再 push**。Council 4声3対1。再 push 後の状態遷移テスト必須（競合状態カバレッジ）。Skeptic 指摘：再 push で板初期化後に tick_size だけ変わる整合性を単体テストで固定すること |
 | Q2 | `venue_caps` を `TickerEntry` 内に持つか別 event か | **✅ 確定: (a) TickerEntry 内（IPC のみ）**。Rust 永続モデルには載せない（§2.4） |
-| Q3 | 旧 `saved-state.json` の TickMultiplier 互換戦略 | (a) 起動時 step 再計算（既存挙動） / (b) migration 関数 / (c) リセット |
+| Q3 | 旧 `saved-state.json` の TickMultiplier 互換戦略 | **✅ 確定: (a) 起動時 step 再計算（既存挙動）**。`TickMultiplier` は `saved-state.json` から読み込まれ、`min_ticksize` は Python から再受信。`price_step = TickMultiplier × min_ticksize` は TickerInfo 受信後に実行時計算。migration 関数は不要。Phase D 着手前確認済 (2026-05-01) |
 | Q4 | Phase F の SCHEMA_MAJOR bump 単位 | **✅ 確定: (a) Phase F で一度だけ MAJOR +1**。Council 全4声一致。SCHEMA_MINOR はフェーズ完了ごとに上げる（Phase A 完了時も MINOR bump）。A〜E は後方互換維持なので MAJOR bump は意味論的に不正 |
 | Q5 | 未正規化 depth 検出時の release 挙動 | (a) silent（trust） / (b) warn ログ / (c) tracing event |
 | Q6 | `VenueCapsStore` の共有方式 | **✅ 確定: (b) backend-owned / EngineClient-handle-mediated**。`VenueCapsStore` を `EngineClientBackend` の private sidecar にし、reconnect 時に backend 再構築でリセット。UI には narrow lookup handle のみ公開（`ticker_meta_handle` 類似パターン）。UI render 経路は derived booleans に projection して hot path でのロック回避を推奨。内部は `Arc<RwLock<HashMap<..>>>` でも可だがそれは実装詳細 |

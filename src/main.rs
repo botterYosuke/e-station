@@ -1751,10 +1751,11 @@ impl Flowsurface {
 
                 // Rebuild backends with the new connection and bump the generation
                 // counter so iced assigns new subscription IDs and restarts streams.
-                // B4: clear stale venue caps before new backends populate the store.
-                if let Some(store) = VENUE_CAPS_STORE.get() {
-                    store.blocking_write().clear();
-                }
+                // D1: do NOT clear VENUE_CAPS_STORE here — old values remain as the
+                // authoritative source during the reconnect window until
+                // fetch_ticker_metadata upserts fresh entries. Clearing creates an
+                // empty-store window where caps_client_aggr() falls back to the wrong
+                // default (Hyperliquid would be misclassified as client-aggregated).
                 let mut tachibana_meta_handle = None;
                 for &(venue, name) in VENUE_NAMES {
                     let backend = Arc::new(engine_client::EngineClientBackend::new(
