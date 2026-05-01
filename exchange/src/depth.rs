@@ -169,13 +169,14 @@ impl LocalDepthCache {
         min_ticksize: MinTicksize,
         qty_norm: Option<QtyNormalization>,
     ) {
-        // Hard assert (all builds): callers that pass Some(qty_norm) via the deprecated
-        // update_with_qty_norm API would be silently no-op'd in release, so we make the
-        // breakage explicit rather than silent.
+        // Phase E/F: Python normalises qty before IPC; Rust must not re-apply
+        // qty_norm. The parameter is retained for symmetry with the helper
+        // signatures below but every code path now passes None. A non-None
+        // value indicates a regression to the old "Rust normalises" pipeline
+        // and we abort loudly rather than silently emit wrong sizes.
         assert!(
             qty_norm.is_none(),
-            "qty_norm is no longer applied; Python normalises qty before IPC. \
-             Use update() instead of the deprecated update_with_qty_norm()."
+            "qty_norm is no longer applied; Python normalises qty before IPC."
         );
         match new_depth {
             DepthUpdate::Snapshot(snapshot) => {
@@ -200,12 +201,17 @@ impl LocalDepthCache {
 mod tests {
     use super::*;
     use crate::{
-        unit::qty::{QtyNormalization, RawQtyUnit},
         Exchange, MinTicksize, Ticker, TickerInfo,
+        unit::qty::{QtyNormalization, RawQtyUnit},
     };
 
     fn btc_ticker_info() -> TickerInfo {
-        TickerInfo::new(Ticker::new("BTCUSDT", Exchange::BinanceSpot), 0.01, 0.001, None)
+        TickerInfo::new(
+            Ticker::new("BTCUSDT", Exchange::BinanceSpot),
+            0.01,
+            0.001,
+            None,
+        )
     }
 
     fn min_tick(power: i8) -> MinTicksize {
@@ -216,9 +222,14 @@ mod tests {
         DepthUpdate::Snapshot(DepthPayload {
             last_update_id: 1,
             time: 0,
-            bids: vec![DeOrder { price: 100.0, qty: 10.0 }],
-            asks: vec![DeOrder { price: 101.0, qty: 5.0 }],
+            bids: vec![DeOrder {
+                price: 100.0,
+                qty: 10.0,
+            }],
+            asks: vec![DeOrder {
+                price: 101.0,
+                qty: 5.0,
+            }],
         })
     }
-
 }

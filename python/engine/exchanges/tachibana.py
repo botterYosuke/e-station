@@ -10,8 +10,10 @@ Phase 1 scope:
   ``fetch_ticker_stats`` race at startup.
 * `list_tickers` joins ``CLMIssueMstKabu`` (display names) with
   ``CLMIssueSizyouMstKabu`` (per-market lot size + ``sYobineTaniNumber``)
-  and emits one dict per (issue, market) pair. ``min_ticksize`` is left
-  unresolved here in Phase 1 — see the design-decision note below.
+  and emits one dict per (issue, market) pair. Phase F made
+  ``min_ticksize`` required in the IPC contract — entries whose yobine
+  code cannot be resolved are SKIPPED here (logged at WARNING), so that
+  Rust serde never sees a malformed ``Vec<TickerEntry>``.
 * `fetch_klines` rejects any ``timeframe`` other than the wire literal
   ``"1d"`` (HIGH-U-11) and routes to ``CLMMfdsGetMarketPriceHistory`` via
   the ``sUrlPrice`` virtual URL.
@@ -20,18 +22,15 @@ Phase 1 scope:
 * trade / depth / kline streams and ``fetch_open_interest`` are deferred
   to T5 and raise ``NotImplementedError`` so the ABC contract still holds.
 
-`min_ticksize` resolution (B2 design decision — plan §T4 L537):
+`min_ticksize` resolution (Phase D / Phase F):
 
   data-mapping.md §5 (A) requires a single fixed tick value at
-  TickerInfo construction time. Since the master endpoints used here
-  (``CLMIssueSizyouMstKabu``) do not carry a snapshot price, this
-  implementation defers the lookup to Rust by always emitting
-  ``yobine_code`` on the ticker dict (the resolved-tick map is built
-  Rust-side from the same ``CLMYobine`` payload — wired by B3
-  HIGH-U-9). When a snapshot price *is* in hand we cap at
-  ``sKizunPrice_1`` of the relevant ``CLMYobine`` row as a conservative
-  fallback. This keeps Phase 1 minimal and avoids a double tick-table
-  copy at the IPC boundary.
+  TickerInfo construction time. Phase D made Python the **single source
+  of truth** for venue-specific normalization (Rust no longer holds a
+  CLMYobine table). At ``list_tickers`` time we resolve the conservative
+  no-snapshot tick (``bands[0].yobine_tanka``); ``stream_depth``'s first
+  FD frame later refines the cached value via
+  ``_update_min_ticksize_from_price`` once a real price is observed.
 """
 
 from __future__ import annotations
@@ -118,7 +117,7 @@ def build_ws_url(url_event_ws: str, ticker: str, sizyou_c: str) -> str:
     ])
     return f"{ws_base}?{params}"
 
-from .base import ExchangeWorker, OnSsidUpdate
+from .base import ExchangeWorker, OnSsidUpdate, is_valid_ticker_entry
 from .tachibana_auth import TachibanaSession
 from .tachibana_codec import decode_response_body
 from .tachibana_helpers import (
@@ -470,17 +469,32 @@ class TachibanaWorker(ExchangeWorker):
                 "sizyou_c": str(sizyou.get("sSizyouC", "")),
                 "venue_caps": self.venue_caps(),
             }
-            # B5: resolve min_ticksize from CLMYobine table using the
-            # conservative no-snapshot-price fallback (finest tick band).
-            # KeyError means CLMYobine data is missing for this yobine_code;
-            # Rust will then fall back to TACHIBANA_MIN_TICKSIZE_PLACEHOLDER_F32.
-            if self._yobine_table:
-                try:
-                    tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, None)
-                    entry["min_ticksize"] = float(tick)
-                    self._ticker_min_ticksize[code] = tick  # C2: cache for stream_depth
-                except (KeyError, ValueError):
-                    pass
+            # Phase F contract (refactor-rust-python-boundary-2026-05-01.md §2.1):
+            # min_ticksize is required in StockTicker. Rust serde fails the entire
+            # Vec<TickerEntry> deserialization if any element lacks it. So if we
+            # cannot resolve a tick size — yobine_table empty (master not yet
+            # populated) or yobine_code missing (master integrity error) — we
+            # SKIP the entry rather than emit an invalid IPC payload.
+            if not self._yobine_table:
+                log.warning(
+                    "tachibana list_tickers: skipping %s — yobine_table empty",
+                    code,
+                )
+                continue
+            try:
+                tick = resolve_min_ticksize_for_issue(sizyou, self._yobine_table, None)
+            except (KeyError, ValueError) as exc:
+                log.warning(
+                    "tachibana list_tickers: skipping %s — yobine_code %r unresolved (%s)",
+                    code,
+                    yobine_code,
+                    exc,
+                )
+                continue
+            entry["min_ticksize"] = float(tick)
+            if not is_valid_ticker_entry(entry, venue="tachibana"):
+                continue
+            self._ticker_min_ticksize[code] = tick  # C2: cache for stream_depth
             out.append(entry)
         return out
 

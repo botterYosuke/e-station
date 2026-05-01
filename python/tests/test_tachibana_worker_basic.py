@@ -26,6 +26,10 @@ def _fake_session() -> TachibanaSession:
 
 
 def _make_master(worker: TachibanaWorker) -> None:
+    from decimal import Decimal
+
+    from engine.exchanges.tachibana_master import YobineBand
+
     worker._master_records = {
         "CLMIssueMstKabu": [
             {"sIssueCode": "7203", "sIssueName": "トヨタ自動車", "sIssueNameEizi": "TOYOTA MOTOR"},
@@ -46,7 +50,19 @@ def _make_master(worker: TachibanaWorker) -> None:
             },
         ],
     }
-    worker._yobine_table = {}
+    # Populate a minimal yobine_table covering yobine_code "1" so list_tickers
+    # can resolve min_ticksize. Phase F made min_ticksize required in the IPC
+    # contract; tests that assert any ticker is emitted must arrange for a
+    # resolvable yobine_table (or override it explicitly).
+    worker._yobine_table = {
+        "1": [
+            YobineBand(
+                kizun_price=Decimal("999999999"),
+                yobine_tanka=Decimal("1"),
+                decimals=0,
+            ),
+        ]
+    }
 
 
 def _stubbed(tmp_path: Path) -> TachibanaWorker:
@@ -192,16 +208,84 @@ async def test_list_tickers_includes_min_ticksize_when_yobine_table_present(tmp_
 
 
 @pytest.mark.asyncio
-async def test_list_tickers_omits_min_ticksize_when_yobine_table_empty(tmp_path: Path):
-    """B5: min_ticksize must be absent (not crash) when yobine_table has no matching code."""
+async def test_list_tickers_skips_entries_when_yobine_table_empty(tmp_path: Path):
+    """Phase F: every emitted entry MUST carry min_ticksize.
+
+    When the yobine_table is empty (master integrity error or pre-load race),
+    list_tickers must SKIP affected entries rather than emit incomplete ones.
+    Phase F made min_ticksize required in the IPC contract — silently appended
+    entries without it would fail Rust serde for the entire Vec<TickerEntry>
+    and lose all tickers in that batch (silent failure)."""
+    from engine.exchanges.tachibana import current_jst_yyyymmdd
+
     worker = _stubbed(tmp_path)
-    # empty yobine_table — no codes available
-    worker._yobine_table = {}
+    # Pre-load master records (without populating yobine_table) so that
+    # list_tickers does not re-download via _make_master.
+    _make_master(worker)
+    worker._yobine_table = {}  # explicitly empty
+    worker._master_loaded_jst_date = current_jst_yyyymmdd()
+    worker._master_loaded.set()
     tickers = await worker.list_tickers("stock")
-    for t in tickers:
-        # Key may be absent but must never be 0.0 or negative
-        if "min_ticksize" in t:
-            assert t["min_ticksize"] > 0
+    assert tickers == [], (
+        "all entries must be skipped when yobine_table is empty, but got "
+        f"{tickers!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_tickers_skips_entry_when_yobine_code_unknown(tmp_path: Path):
+    """Phase F: if a sizyou row's yobine_code is missing from yobine_table
+    (master integrity error), the entry must be dropped, not appended without
+    min_ticksize."""
+    from decimal import Decimal
+
+    from engine.exchanges.tachibana import current_jst_yyyymmdd
+    from engine.exchanges.tachibana_master import YobineBand
+
+    worker = TachibanaWorker(cache_dir=tmp_path, is_demo=True)
+    # Master with two sizyou rows: one references yobine_code "1" (present),
+    # one references "999" (missing from yobine_table).
+    worker._master_records = {
+        "CLMIssueMstKabu": [
+            {"sIssueCode": "7203", "sIssueName": "トヨタ", "sIssueNameEizi": "TOYOTA"},
+            {"sIssueCode": "9999", "sIssueName": "幽霊銘柄", "sIssueNameEizi": "GHOST"},
+        ],
+        "CLMIssueSizyouMstKabu": [
+            {
+                "sIssueCode": "7203",
+                "sSizyouC": "00",
+                "sBaibaiTaniNumber": "100",
+                "sYobineTaniNumber": "1",
+            },
+            {
+                "sIssueCode": "9999",
+                "sSizyouC": "00",
+                "sBaibaiTaniNumber": "100",
+                "sYobineTaniNumber": "999",  # not in yobine_table
+            },
+        ],
+    }
+    worker._yobine_table = {
+        "1": [
+            YobineBand(
+                kizun_price=Decimal("999999999"),
+                yobine_tanka=Decimal("1"),
+                decimals=0,
+            ),
+        ]
+    }
+    worker._master_loaded_jst_date = current_jst_yyyymmdd()
+    worker._master_loaded.set()
+    tickers = await worker.list_tickers("stock")
+    by_symbol = {t["symbol"]: t for t in tickers}
+    # Resolvable entry survives.
+    assert "7203" in by_symbol
+    assert by_symbol["7203"]["min_ticksize"] > 0
+    # Unresolvable entry is dropped (must not appear without min_ticksize).
+    assert "9999" not in by_symbol, (
+        "entry with unknown yobine_code must be skipped, "
+        f"but found: {by_symbol.get('9999')}"
+    )
 
 
 # ---------------------------------------------------------------------------
