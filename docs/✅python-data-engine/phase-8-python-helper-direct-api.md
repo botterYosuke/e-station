@@ -411,7 +411,7 @@ class ReplaySession:
     # ---- runtime control ----
     def set_speed(self, multiplier: int) -> None:
         """旧 POST /api/replay/control 相当。
-        attach mode: Command::SetSpeed を送信
+        attach mode: Command::SetReplaySpeed を送信
         in-process mode: 内部の get_multiplier closure を更新
         """
 
@@ -487,6 +487,8 @@ class _AttachClient:
         `EngineStopped` event を受信したらジェネレータを終了する（`return`）。
         `stop()` 呼び出し後に `EngineStopped` が到達するまでの間は event を通常通り
         yield し続ける（`EngineStopped` が終端信号）。
+        attach mode で WS close / read error / handshake loss が起きた場合は
+        `ConnectionError` を raise し、`EngineStopped` を待たずに即終了する。
         """
 
     def close(self) -> None: ...
@@ -505,6 +507,7 @@ class _AttachClient:
 - session ファイルは `pid` が dead なら stale として無視（PID 再利用ヒット率は十分低いが、将来 hash 値併記等の追加防御を検討）
 - `_AttachClient` は `replay_session.py` 内 private クラスとし、外部 import は許さない（`__all__ = ["ReplaySession", "LiveSession"]` で制御）
 - engine から `EngineBusy` event を受信した場合は `BusyError` 例外に変換して投げる
+- attach 中に engine / GUI 側が落ちて WS が閉じた場合は `ConnectionError` として surfacing し、helper の `status` は `"errored"` に遷移する
 - token はログ（DEBUG を含む）・例外メッセージに一切出力しない（CLAUDE.md の「Token 認証」セクション参照）。handshake() の内部実装で token を文字列比較やフォーマット文字列に含めないこと。
 
 ### 4.2.1 session ファイルのパス解決（Rust ↔ Python の対応）
@@ -550,7 +553,7 @@ def _resolve_session_file_path() -> Path:
 
 **Phase 8.1 必須スコープ**：旧 `/api/sidebar/tachibana/request-login` 経路を helper で代替する。Order 系 E2E 7 本が依存しているため、`LiveSession.login()` を Phase 8.1 で先行実装する。
 
-`LiveSession` も `ReplaySession` と同じ mode auto-detect ロジックで動く。GUI 起動済みなら attach mode、そうでなければ in-process mode。
+`LiveSession` も `ReplaySession` と同じ mode auto-detect ロジックで動く。GUI 起動済みなら attach mode、そうでなければ in-process mode。attach 解決順も **明示引数 → session ファイル → fallback** を再利用し、`attach_endpoint` の既定値は固定 URL ではなく `None` とする。
 
 ```python
 class LiveSession:
@@ -568,7 +571,7 @@ class LiveSession:
         *,
         venue: Literal["tachibana"],
         demo: bool = True,
-        attach_endpoint: str = "ws://127.0.0.1:19876/",
+        attach_endpoint: str | None = None,
         attach_timeout_s: float = 2.0,
         force_mode: Literal["auto", "attach", "inprocess"] = "auto",
     ) -> None: ...
@@ -583,13 +586,15 @@ class LiveSession:
     def login(
         self,
         *,
-        user_id: str | None = None,    # 既定: $DEV_TACHIBANA_USER_ID
-        password: str | None = None,   # 既定: $DEV_TACHIBANA_PASSWORD
+        user_id: str | None = None,    # in-process 既定: $DEV_TACHIBANA_USER_ID
+        password: str | None = None,   # in-process 既定: $DEV_TACHIBANA_PASSWORD
     ) -> None:
         """旧 POST /api/sidebar/tachibana/request-login 相当。
-        env 経由 cred で立花へログインし session を確立する。
-        attach mode: 既存スキーマ Command::RequestVenueLogin を再利用して送信
-        in-process mode: tachibana adapter を直接 import して driving
+        in-process mode: 引数または env 経由 cred で立花へログインし session を確立する。
+        attach mode: 既存スキーマ Command::RequestVenueLogin を再利用して送信する。
+        attach mode では wire に user_id/password を流せないため、明示引数が渡された場合は
+        `ValueError` を raise し、「GUI/engine 側に保存済みまたは dev 用の credential を使う経路のみ
+        サポート」と明示する。
         """
 
     # ---- Phase 8.3 で追加 ----
@@ -721,10 +726,10 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
   - `LoadReplayData` 受理 → `Replay::Idle` のみ許可
   - `StartEngine`（replay）受理 → `Replay::Loaded` のみ許可
   - `StopEngine`（replay）受理 → `Replay::Running` のみ許可
-  - `SubmitReplayOrder`（旧 `/api/replay/order` 相当）受理 → **`Replay::Running` のみ許可**（Q10 決定）
-  - `SetSpeed` 受理 → `Replay::Running` のみ許可
+  - `SubmitOrder`（`venue=="replay"`、旧 `/api/replay/order` 相当）受理 → **`Replay::Running` のみ許可**（Q10 決定）
+  - `SetReplaySpeed` 受理 → `Replay::Running` のみ許可
 - [ ] **live 系 Command の state guard**：
-  - `SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAll` 受理 → **`Live::Connected` のみ許可**（Q10 決定）
+  - `SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` 受理 → **`Live::Connected` のみ許可**（Q10 決定）
   - `RequestVenueLogin` 受理 → `Live::Disconnected` のみ許可
 - [ ] `python/engine/schemas.py` に `EngineBusy { current_state: str, attempted_command: str, reason: str }` event を追加（schema_minor bump、B1 と同じ bump にまとめてよい）
 - [ ] `_AttachClient`（後述）で `EngineBusy` 受信 → `BusyError` 例外に変換
@@ -732,15 +737,16 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 - [ ] テスト：
   - [ ] `python/tests/test_engine_busy_reject.py`（`Loaded` 中の `LoadReplayData` が `EngineBusy` で reject）
   - [ ] `python/tests/test_engine_busy_running.py`（`Running` 中の二度目 `StartEngine` が reject）
-  - [ ] `python/tests/test_engine_busy_replay_order_idle.py`（`Idle` で `SubmitReplayOrder` 投げると reject）
+  - [ ] `python/tests/test_engine_busy_replay_order_idle.py`（`Idle` で `SubmitOrder{venue="replay"}` を投げると reject）
   - [ ] `python/tests/test_engine_busy_live_order_disconnected.py`（未ログインで `SubmitOrder` 投げると reject）
   - [ ] `python/tests/test_engine_busy_login_already_connected.py`（既にログイン済みで再 `RequestVenueLogin` 投げると reject）
+  - [ ] `cargo test --workspace gui_engine_busy_notification` 相当の GUI 側回帰テスト、または `cargo run -- --mode replay` + 未ログイン発注操作で `EngineBusy` 文言がダイアログ / トーストに出ることを確認する manual smoke 手順を `docs/wiki/replay.md` に記載
 
 ##### B4. `_AttachClient` 本体実装
 
 - [ ] `_AttachClient` を `replay_session.py` に追加：
   - [ ] `websockets` クライアント接続 + Hello/Ready handshake
-  - [ ] `Command::LoadReplayData` / `StartEngine` / `SetSpeed` / `StopEngine` の send 実装
+  - [ ] `Command::LoadReplayData` / `StartEngine` / `SetReplaySpeed` / `StopEngine` の send 実装
   - [ ] event stream の receive と `on_event` への転送
   - [ ] `EngineBusy` 受信を `BusyError` に翻訳
   - [ ] `compression=None` を強制
@@ -792,7 +798,7 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 **完了条件**:
 
 - `uv run python -m engine.replay_session run ...` 1 コマンドで GUI なしの backtest が完走し、event stream が stdout に流れる（in-process mode）
-- `cargo run -- --mode replay` 起動済みの状態で `uv run python -m engine.replay_session run ...` を別プロセス起動すると、**GUI のチャートにペインが生成され bar が積まれる**（attach mode）
+- `cargo run -- --mode replay` 起動済みの状態で `uv run python -m engine.replay_session run ...` を別プロセス起動すると、**GUI のチャートにペインが生成され bar が積まれる**（attach mode）。この項目は retained smoke (`tests/e2e/s55_mode_startup_smoke.sh` / `tests/e2e/smoke.sh`) または release 前 manual smoke で観測する
 - engine.server が 2 client 同時接続を保持し、event を両者に fanout する（B1 完了）
 - engine 起動時に `engine-session.json` が生成され、helper がこのファイル経由で token / port を解決できる（B2 完了）
 - `Loaded` 中に二度目の `LoadReplayData` を投げると `EngineBusy` が返る（B3 完了）
@@ -859,19 +865,21 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 | `python/tests/test_replay_session_attach_session_file.py` | session ファイル経由で endpoint / token を解決する | attach |
 | `python/tests/test_replay_session_attach_fallback.py` | engine 不在時に in-process に fallback する | both |
 | `python/tests/test_replay_session_attach_token_mismatch.py` | token 不一致 → ConnectionRefusedError → in-process にフォールバック（`force_mode="auto"` 時）/ 例外伝播（`force_mode="attach"` 時）を assert | attach |
+| `python/tests/test_replay_session_attach_disconnect.py` | attach 中に WS が切れたら `ConnectionError` を raise し、`status == "errored"` に遷移する | attach |
 | `python/tests/test_replay_session_attach_busy.py` | attach 中に二度 load を投げると `BusyError` | attach |
 | `python/tests/test_replay_session_double_enter.py` | `with` 内で `__enter__` を再度呼ぶと RuntimeError | in-process |
 | `python/tests/test_replay_session_missing_strategy.py` | 存在しない strategy_file 指定で FileNotFoundError | in-process |
 | `python/tests/test_replay_session_attach_gui_chart.py` | engine + 模擬 GUI client + helper の三者で event が両 client に届く（**穴 1 リグレッション保護**）。模擬 GUI client は Python `websockets` クライアントで実装する（Rust engine-client は不要）。`python -m engine` サーバーを subprocess で起動し、mock `NautilusRunner` で固定 event を emit する（J-Quants データ不要）。模擬 client はサーバーに接続して event を受信するだけのシンプルな実装で足りる。 | attach |
+| `python/tests/test_replay_attach_manual_smoke.md` | `cargo run -- --mode replay` + `uv run python -m engine.replay_session run ...` で GUI pane 生成と bar 蓄積を人手確認する手順。release 前 smoke の観測点（pane 生成、bar 増加、EngineBusy 通知）を固定する。 | manual |
 | `python/tests/test_server_multi_client.py` | engine.server が 2 client を同時保持・event fanout。Rust client が接続中に helper が join/離脱しても Rust の接続が維持される（reconnect ロジックに影響しない）ことを assert するケースを含む。 | engine |
 | `python/tests/test_server_max_connections.py` | `MAX_CONNECTIONS` 超過で reject | engine |
-| `python/tests/test_server_connection_count_event.py` | `ClientConnected` / `Disconnected` の broadcast | engine |
+| `python/tests/test_server_connection_count_event.py` | `ClientConnected` / `ClientDisconnected` の broadcast | engine |
 | `python/tests/test_engine_session_file.py` | engine 起動 → session ファイル生成 → engine 停止 → ファイル削除 | engine |
 | `python/tests/test_session_file_stale_pid.py` | dead pid のファイルを helper が無視 | helper |
 | `python/tests/test_session_file_atomic_write.py` | 部分書き込みファイルが残らない | engine |
 | `python/tests/test_engine_busy_reject.py` | `Loaded` 中の `LoadReplayData` が `EngineBusy` で reject | engine |
 | `python/tests/test_engine_busy_running.py` | `Running` 中の Command reject | engine |
-| `python/tests/test_live_session_login.py` | demo 立花への login smoke（DEV_TACHIBANA_* env 必須） | in-process |
+| `python/tests/test_live_session_login.py` | demo 立花への login smoke（DEV_TACHIBANA_* env 必須）。attach mode で `user_id/password` 明示指定時は `ValueError` になるケースも含む。 | both |
 
 ### 6.2 Phase 8.3 の移行ガイドライン
 
@@ -891,6 +899,7 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 - CI コマンド: `uv run pytest python/tests/ -v -m "not live"`
 - `pyproject.toml` の `[tool.pytest.ini_options]` に `markers = ["live: requires live exchange or data"]` を追加する（Phase 8.1a のタスクに含める）
 - Rust テストの CI: `cargo test -p flowsurface-engine-client` は外部依存なしで全件通るようにする（session file テストは tmp ディレクトリを使用）
+- retained smoke の `tests/e2e/s55_mode_startup_smoke.sh` / `tests/e2e/smoke.sh` は毎 PR 必須には載せず、**scheduled CI または release 前 manual smoke** として別ジョブ化する。最低でも `cargo build --release` 後に `bash tests/e2e/s55_mode_startup_smoke.sh` と `bash tests/e2e/smoke.sh` を実行し、30 秒観測ログを保存する
 
 ---
 
@@ -928,7 +937,7 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 | Q7 | attach mode の WS フレームに permessage-deflate を許すか？ | **不可**。`compression=None` 強制（[MISSES.md] 2026-04-25 の RSV1 互換性問題と同根。Python ⇄ Python でも同じルールを保つ） |
 | ~~Q8~~ | ~~session ファイルのパス・名前~~ | **決定**: `data::data_path(Some("engine-session.json"))` に書く（`saved-state.json` と同居）。Rust 側 [data/src/lib.rs:134-145](../../data/src/lib.rs#L134-L145) を真実源とし、Python helper は `platformdirs.user_data_dir("flowsurface", appauthor=False)` で同じパスに解決する。`FLOWSURFACE_DATA_PATH` env override も両側で尊重。詳細は §4.2.1 |
 | Q9 | `MAX_CONNECTIONS` の初期値は 4 で十分か？ | 想定: GUI 1 + helper 1 + デバッグ余裕 2 で 4。実運用で不足が出れば bump（compile-time const ではなく env var で override 可能にしておくか別途検討） |
-| ~~Q10~~ | ~~engine state 機械の遷移を helper の `submit_order()` も guard すべきか？~~ | **決定**: guard 対象に含める。**replay state（`Idle/Loaded/Running/Stopping`）と live state（`Disconnected/Connecting/Connected`）の 2 つの直交する state 機械** を engine が持ち、`SubmitReplayOrder` は `Replay::Running` のみ、`SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAll` は `Live::Connected` のみで受理する。Phase 8.1b B3 に詳細列挙 |
+| ~~Q10~~ | ~~engine state 機械の遷移を helper の `submit_order()` も guard すべきか？~~ | **決定**: guard 対象に含める。**replay state（`Idle/Loaded/Running/Stopping`）と live state（`Disconnected/Connecting/Connected`）の 2 つの直交する state 機械** を engine が持ち、`SubmitOrder{venue="replay"}` は `Replay::Running` のみ、`SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` は `Live::Connected` のみで受理する。Phase 8.1b B3 に詳細列挙 |
 | ~~Q11~~ | ~~engine が GUI 1 client しか接続していない時に session ファイルを書く判断~~ | **決定**: 常に書く（helper が後から繋ぐ可能性があるため）。GUI が multi-instance 起動した場合の競合は spawn port が衝突するので前段で防がれる想定 |
 
 ---
@@ -973,4 +982,4 @@ Phase 8 シリーズ完了時点で：
 | 2026-05-01 | GUI replay 起動 UX を A 案（メニューフォーム）に確定：§3.2 起動経路対応表を明確化 / §3.4 を新設して `File > Replay を開始...` フォームの UX フローを記述 / Phase 8.1 を 8.1a（Python helper）と 8.1b（GUI フォーム）に分割 / Phase 8.1 完了条件に GUI フォーム経由の動作を追加 / Q3b（フォームのデフォルト値方針）を未決事項に追加 |
 | 2026-05-01 | **helper の attach client mode を採用**：§0.1 を「helper は server を bind しないが client として attach する」に書き換え / §1.4 で Rust `start_or_attach` との対称性を明記 / §3.1 全体図を 2-mode 対応に書き直し / §3.2 起動経路に「外部スクリプトから GUI を駆動」を追加 / §3.3 を attach mode 込みに更新 / §4.1 `ReplaySession` に mode auto-detect / `attach_endpoint` / `force_mode` を追加 / §4.2 で private `_AttachClient` を新設 / §4.3 `LiveSession` も同様に拡張 / §4.4 CLI に `--mode` オプション追加 / Phase 8.1 を 8.1a（in-process）/ 8.1b（attach）/ 8.1c（GUI フォーム）の 3 段階に分割 / R6（probe timeout）/ R7（同時操作 EngineBusy）/ R8（attach レイテンシ）/ R9（schema drift）を新設 / Q4 を attach mode 採用で再クローズ / Q6（OrderGuard）/ Q7（compression）を新設 / DoD #3 に attach mode 動作確認を追加 |
 | 2026-05-01 | **attach mode 成立条件 B1〜B3 の実装スコープを明示**（レビューで指摘された 3 つの穴を反映）：§0.1.2 を新設して engine 側変更の必須性を明記 / §1.5 を新設して現状 engine の制約と Phase 8.1b で解消する範囲を整理 / §4.1 の `__enter__` で token 解決を「明示引数 → session ファイル → fallback」の優先順位に再定義 / §4.2 の token 取得経路を session ファイル対応に書き換え + `EngineBusy` 翻訳を追加 / Phase 8.1b を B1（multi-client broadcast）/ B2（session ファイル token 共有）/ B3（EngineBusy state guard）/ B4（`_AttachClient` 本体）の 4 段階に再分割し各段階の作業項目を詳細化 / Phase 8.1c に attach インジケータの作業項目を追加 / Phase 8.1 完了条件に B1〜B3 完了 + spec.md §5.3 更新を追加 / §6.1 テストに multi-client / session-file / busy 系列計 8 ファイルを追加（attach_gui_chart は穴 1 のリグレッション保護として明記）/ R10（multi-client regression）/ R11（PID 再利用）/ R12（atomic write）/ R13（reconnect protocol）を新設 / Q8（session ファイルパス）/ Q9（MAX_CONNECTIONS）/ Q10（state guard 範囲）/ Q11（session ファイル書き込み判断）を新設 / DoD #4 と #9 を追加 |
-| 2026-05-01 | **Q8 / Q10 / Q11 を決定**：§4.2.1 を新設して session ファイルのパス解決を Rust ↔ Python の対応関係として詳述（`data::data_path(Some("engine-session.json"))` を真実源、helper は `platformdirs.user_data_dir("flowsurface", appauthor=False)` で再現、OS 別実体パスを表で明示）/ §0.1.2 B2 で書き込み主体を「Rust（engine-client）」に確定 / Phase 8.1b B2 を Rust 側 `EngineSessionFile::write_atomic` 実装 + `Drop` で削除 + crash 時 stale 削除 + Rust 側テスト 2 本 + `pyproject.toml` に `platformdirs` 依存追加に書き換え / Python 側テストを `test_session_file_resolve.py` / `test_session_file_stale_pid.py` / `test_session_file_env_override.py` に再構成 / Phase 8.1b B3（EngineBusy）を **2 つの直交する state 機械（Replay と Live）** に拡張：`SubmitReplayOrder` を `Replay::Running` のみ、`SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAll` を `Live::Connected` のみ、`RequestVenueLogin` を `Live::Disconnected` のみで受理 / B3 テストを 5 本に拡充（idle replay order / disconnected live order / login already connected を追加）/ B3 に GUI 側 Rust の発注時エラーハンドリング項目を追加 / Q8 / Q10 / Q11 をクローズ済みに格上げ |
+| 2026-05-01 | **Q8 / Q10 / Q11 を決定**：§4.2.1 を新設して session ファイルのパス解決を Rust ↔ Python の対応関係として詳述（`data::data_path(Some("engine-session.json"))` を真実源、helper は `platformdirs.user_data_dir("flowsurface", appauthor=False)` で再現、OS 別実体パスを表で明示）/ §0.1.2 B2 で書き込み主体を「Rust（engine-client）」に確定 / Phase 8.1b B2 を Rust 側 `EngineSessionFile::write_atomic` 実装 + `Drop` で削除 + crash 時 stale 削除 + Rust 側テスト 2 本 + `pyproject.toml` に `platformdirs` 依存追加に書き換え / Python 側テストを `test_session_file_resolve.py` / `test_session_file_stale_pid.py` / `test_session_file_env_override.py` に再構成 / Phase 8.1b B3（EngineBusy）を **2 つの直交する state 機械（Replay と Live）** に拡張：`SubmitOrder{venue="replay"}` を `Replay::Running` のみ、`SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` を `Live::Connected` のみ、`RequestVenueLogin` を `Live::Disconnected` のみで受理 / B3 テストを 5 本に拡充（idle replay order / disconnected live order / login already connected を追加）/ B3 に GUI 側 Rust の発注時エラーハンドリング項目を追加 / Q8 / Q10 / Q11 をクローズ済みに格上げ |

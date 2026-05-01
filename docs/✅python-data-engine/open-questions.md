@@ -9,8 +9,8 @@
    - (b) ユーザーに Python 3.x のインストールを要求し `uv` で依存管理
    - (c) ハイブリッド（dev は b、リリースは a）
 
-2. **Python プロセスのライフサイクル**
-   - Rust が常に spawn / 監視 / kill するか、ユーザーが別途起動するスタンドアロン運用も公式サポートするか。
+2. ~~**Python プロセスのライフサイクル**~~
+   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は [phase-8-python-helper-direct-api.md §0.1](./phase-8-python-helper-direct-api.md)。
 
 ## B. IPC
 
@@ -59,11 +59,7 @@
 11. **keyring の他用途**
     - プロキシ資格情報以外に `keyring` crate を使っている機能が無いか。無ければフェーズ 5 で依存削除候補、ある場合は Rust 側に残す。着手前に要 grep 確認。
 
-12. **E2E テスト自動化の運用方針** (Phase 7 T3 で発生)
-    - 現状は [`tests/e2e/smoke.sh`](../../../tests/e2e/smoke.sh) を手動 / CI step で実行する素朴な bash スクリプト。手動 GUI シナリオ（チャート描画・kill -9 復旧・ストリーム持続）はまだ人手。
-    - 選択肢:
-      - (a) bash + ログ grep のまま育てる（現状）。CI 統合は GitHub Actions 上で `cargo build --release && bash tests/e2e/smoke.sh` を流すだけ。venue API への live 依存があるためスケジュール run 限定。
-      - (b) Rust 側に `cargo xtask e2e` を新設し、ProcessManager + EngineConnection を直接駆動して assertion を Rust で書く。GUI に触れない範囲で十分なカバレッジが取れる。
-      - (c) `.claude/skills/agent-experience-verification` のように HTTP API を flowsurface に追加してエージェント駆動 E2E を可能にする。GUI シナリオまでカバーできるが、HTTP API のメンテコストが発生。
-    - 決定タイミング: Phase 8 着手前。短期的には (a) を継続。
-    - 影響箇所: [`tests/e2e/`](../../../tests/e2e/), [`phase-7-ui-regression-remediation.md`](./phase-7-ui-regression-remediation.md) の T3 セクション。
+12. ~~**E2E テスト自動化の運用方針**~~ (Phase 7 T3 で発生)
+    - **決定済み（Phase 8 着手前, 2026-05-01）**: HTTP 依存の bash E2E は pytest helper ベースへ置換し、`s55_mode_startup_smoke.sh` と `smoke.sh` だけを GUI/起動監視用の smoke として残す。
+    - 残す 2 本は毎 PR の必須ゲートではなく、**scheduled CI または release 前 manual smoke** として扱う。
+    - 詳細は [phase-8-python-helper-direct-api.md §2.2](./phase-8-python-helper-direct-api.md) と [§6.4](./phase-8-python-helper-direct-api.md) を参照。

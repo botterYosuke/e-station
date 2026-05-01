@@ -1,7 +1,13 @@
-# 現状アーキテクチャ調査
+# 2026-04-24 時点アーキテクチャスナップショット
 
 調査日: 2026-04-24
 対象: e-station (Flowsurface v0.8.7)
+
+> この文書は **2026-04-24 時点の調査スナップショット**。
+> Phase 1〜7 の実装完了後は現状とズレるため、Phase 8 を検討するときの最新 baseline は
+> [implementation-plan.md](./implementation-plan.md) の完了済みフェーズ、
+> [phase-8-python-helper-direct-api.md](./phase-8-python-helper-direct-api.md) の §1〜§2、
+> および [spec.md](./spec.md) の現行 IPC 仕様を参照すること。
 
 ## 全体構成
 
@@ -10,7 +16,7 @@ e-station/
 ├── src/                  # メインバイナリ (Iced GUI)
 ├── exchange/             # 取引所アダプタ crate (REST/WS)
 ├── data/                 # チャート集計・設定 crate
-├── python/               # 空（拡張用）
+├── python/               # 当時は未使用（現在は engine 実装あり）
 ├── scripts/              # OS別ビルドスクリプト
 ├── assets/               # フォント・効果音 (WAV)
 └── docs/                 # ドキュメント（本計画含む）
@@ -68,9 +74,11 @@ IPC 計画で取りこぼしがないよう一覧化する（Python 移管の初
 - [`exchange/src/adapter/venue_backend.rs`](../../exchange/src/adapter/venue_backend.rs): `VenueBackend` trait、`NativeBackend` enum、`TickerMetadataMap` / `TickerStatsMap` 型エイリアス。
 - [`exchange/tests/venue_backend.rs`](../../exchange/tests/venue_backend.rs): trait 抽象化の統合テスト。
 
-## Python 側の現状
+## Python 側の現状（2026-04-24 時点）
 - `python/` は **空ディレクトリ**。Cargo にも `pyo3` 等の Python 連携依存は **無し**。
 - 既存の subprocess・IPC・HTTP ローカルサーバ等の Rust↔Python 接続コードは存在しない。
+
+> 注: この記述は **当時の状態**。現在は `python/engine/`、`engine-client/`、Rust↔Python WS IPC が実装済み。
 
 ## 主要依存
 - UI: `iced`, `iced_wgpu`, `palette`, `rodio`

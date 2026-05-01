@@ -6,10 +6,11 @@
 
 ## 目次
 
-- [`current-architecture.md`](./current-architecture.md) — 現状調査結果
+- [`current-architecture.md`](./current-architecture.md) — 2026-04-24 時点の調査スナップショット
 - [`spec.md`](./spec.md) — 新仕様（責務分割・IPC・データモデル）
 - [`implementation-plan.md`](./implementation-plan.md) — 段階的な実装計画
 - [`open-questions.md`](./open-questions.md) — 未決事項・要相談事項
+- [`phase-8-python-helper-direct-api.md`](./phase-8-python-helper-direct-api.md) — Phase 8: Python helper class 直呼び + Rust HTTP API 廃止計画
 
 ## フェーズ進捗サマリ
 
@@ -24,6 +25,7 @@
 | 5 | Rust から取引所コード削除 | ✅ 完了 (2026-04-25) |
 | 6 | 配布・運用整備 | 進行中 |
 | 7 | UI リグレッション修復・E2E 検証の明文化 | ✅ 完了 (2026-04-25) — T1.3 後半 / T4.c (Windows cold-start) / T4.d (AppImage/Flatpak 判断) すべてクローズ。macOS/Linux cold-start CI 計測のみ別 PR で追加予定 → [`phase-7-ui-regression-remediation.md`](./phase-7-ui-regression-remediation.md) |
+| 8 | Python helper class 直呼び / attach mode / Rust HTTP API 廃止 | 設計中 — [`phase-8-python-helper-direct-api.md`](./phase-8-python-helper-direct-api.md) |
 
 ---
 
@@ -85,7 +87,7 @@
 6. **起動ハンドシェイク**: `Hello`（schema_version / session_id / token）→ `Ready`（capabilities）→ `SetProxy` → マーケットデータ系コマンド、の順を固定。`Connected` と `Ready` の意味を分ける。→ [spec.md §4.5](./spec.md#45-起動ハンドシェイク)
 
 ### C. セキュリティ
-7. **ローカル IPC のアクセス制御**: loopback 専用バインド、ランダム接続トークン（stdin で受け渡し）、単一クライアント制限。CLI 引数でのポート・トークン受け渡しは不採用。→ [spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御)
+7. **ローカル IPC のアクセス制御**: loopback 専用バインド、ランダム接続トークン（stdin で受け渡し）を維持する。接続モデルは Phase 7 までは単一クライアント制限、Phase 8 attach mode では multi-client broadcast に更新予定。→ [spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御), [phase-8-python-helper-direct-api.md §0.1.2](./phase-8-python-helper-direct-api.md)
 8. **プロキシ資格情報の扱い**: keyring → Rust 保持 → `Ready` 受領後の IPC `SetProxy` で Python に渡す（CLI 引数・環境変数は基本採用しない）。→ [spec.md §5.4](./spec.md#54-プロキシ資格情報の受け渡し)
 
 ### D. 性能・射程（3 回目レビュー追加）
