@@ -18,6 +18,10 @@ pub struct OrdersPanel {
     orders: Vec<OrderRecordWire>,
     /// True when this panel shows REPLAY orders (shows "⏪ REPLAY" banner).
     pub is_replay: bool,
+    /// IPC リクエスト送信中フラグ。ペイン内に「↻ 更新中…」を表示する。
+    loading: bool,
+    /// 直近のフェッチエラーメッセージ。
+    last_error: Option<String>,
 }
 
 impl OrdersPanel {
@@ -30,12 +34,30 @@ impl OrdersPanel {
         Self {
             orders: vec![],
             is_replay: true,
+            ..Self::default()
         }
     }
 
     /// Update the order list from an `OrderListUpdated` IPC event.
     pub fn set_orders(&mut self, orders: Vec<OrderRecordWire>) {
         self.orders = orders;
+        self.last_error = None;
+        self.loading = false;
+    }
+
+    /// エラー状態にする（loading も解除する — setter 一元化）。
+    pub fn set_error(&mut self, message: String) {
+        self.last_error = Some(message);
+        self.loading = false;
+    }
+
+    /// IPC リクエスト送信中フラグを設定する。
+    /// `true` にすると stale error をクリアしてペイン内ローディングバッジを表示する。
+    pub fn set_loading(&mut self, loading: bool) {
+        if loading {
+            self.last_error = None;
+        }
+        self.loading = loading;
     }
 
     /// Returns the number of orders currently held.
@@ -110,12 +132,40 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
         .padding([2, 8]);
 
     let header = if panel.is_replay {
-        row![text("⏪ REPLAY").size(11), refresh_btn]
+        if panel.loading {
+            row![
+                text("⏪ REPLAY").size(11),
+                refresh_btn,
+                text("↻ 更新中…").size(11)
+            ]
+            .spacing(4)
+            .padding([4, 8])
+        } else {
+            row![text("⏪ REPLAY").size(11), refresh_btn]
+                .spacing(4)
+                .padding([4, 8])
+        }
+    } else if panel.loading {
+        row![refresh_btn, text("↻ 更新中…").size(11)]
             .spacing(4)
             .padding([4, 8])
     } else {
         row![refresh_btn].spacing(4).padding([4, 8])
     };
+
+    if let Some(ref err) = panel.last_error {
+        return column![
+            header,
+            center(
+                column![
+                    text("注文一覧取得エラー").size(13),
+                    text(err.as_str()).size(11),
+                ]
+                .spacing(4)
+            )
+        ]
+        .into();
+    }
 
     if panel.is_empty() {
         return column![header, center(text("注文なし").size(14))].into();
@@ -180,6 +230,49 @@ impl OrderSideStr for engine_client::dto::OrderSide {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── inline loading indicator tests ────────────────────────────────────
+
+    #[test]
+    fn set_loading_true_then_set_orders_clears_loading() {
+        let mut panel = OrdersPanel::new();
+        panel.set_loading(true);
+        panel.set_orders(vec![]);
+        assert!(!panel.loading);
+    }
+
+    #[test]
+    fn set_loading_true_then_set_error_clears_loading() {
+        let mut panel = OrdersPanel::new();
+        panel.set_loading(true);
+        panel.set_error("fetch failed".to_string());
+        assert!(!panel.loading);
+        assert!(panel.last_error.is_some());
+    }
+
+    #[test]
+    fn set_error_then_set_loading_true_clears_stale_error() {
+        let mut panel = OrdersPanel::new();
+        panel.set_error("previous error".to_string());
+        panel.set_loading(true);
+        assert!(
+            panel.last_error.is_none(),
+            "set_loading(true) must clear stale error"
+        );
+        assert!(panel.loading);
+    }
+
+    #[test]
+    fn set_error_then_set_orders_clears_stale_error() {
+        let mut panel = OrdersPanel::new();
+        panel.set_error("previous error".to_string());
+        panel.set_orders(vec![]);
+        assert!(
+            panel.last_error.is_none(),
+            "set_orders must clear stale error"
+        );
+        assert!(!panel.loading);
+    }
 
     #[test]
     fn order_count_starts_at_zero() {

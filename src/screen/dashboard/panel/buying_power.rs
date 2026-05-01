@@ -31,6 +31,8 @@ pub struct BuyingPowerPanel {
     last_updated_ms: Option<i64>,
     /// エラーメッセージ（API 呼び出し失敗時）
     error: Option<String>,
+    /// IPC リクエスト送信中フラグ。ペイン内に「↻ 更新中…」を表示する。
+    loading: bool,
 }
 
 impl BuyingPowerPanel {
@@ -46,7 +48,16 @@ impl BuyingPowerPanel {
         }
     }
 
-    /// REPLAY ポートフォリオデータを更新する。
+    /// IPC リクエスト送信中フラグを設定する。
+    /// `true` にすると stale error をクリアしてペイン内ローディングバッジを表示する。
+    pub fn set_loading(&mut self, loading: bool) {
+        if loading {
+            self.error = None;
+        }
+        self.loading = loading;
+    }
+
+    /// REPLAY ポートフォリオデータを更新する（streaming push — loading は false に落とす）。
     pub fn set_replay_portfolio(
         &mut self,
         cash: String,
@@ -58,6 +69,7 @@ impl BuyingPowerPanel {
         self.replay_equity = Some(equity);
         self.last_updated_ms = Some(ts_ms);
         self.error = None;
+        self.loading = false;
     }
 
     /// 現物余力データを更新する。
@@ -66,6 +78,7 @@ impl BuyingPowerPanel {
         self.cash_shortfall = Some(shortfall);
         self.last_updated_ms = Some(ts_ms);
         self.error = None;
+        self.loading = false;
     }
 
     /// 信用余力データを更新する。
@@ -73,11 +86,13 @@ impl BuyingPowerPanel {
         self.credit_available = Some(available);
         self.last_updated_ms = Some(ts_ms);
         self.error = None;
+        self.loading = false;
     }
 
-    /// エラー状態にする。
+    /// エラー状態にする（loading も解除する — setter 一元化）。
     pub fn set_error(&mut self, message: String) {
         self.error = Some(message);
+        self.loading = false;
     }
 
     /// 余力不足かどうか。
@@ -122,7 +137,7 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
         .into();
     }
 
-    // REPLAY モード: 仮想ポートフォリオ表示
+    // REPLAY モード: 仮想ポートフォリオ表示（loading バッジなし — streaming push のみ）
     if panel.is_replay {
         let banner = text("⏪ REPLAY").size(10);
         let cash_row = match &panel.replay_cash {
@@ -169,7 +184,15 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
     let refresh_btn =
         iced::widget::button(text("更新").size(11)).on_press(Message::RefreshRequested);
 
-    let content = column![cash_row, credit_row, refresh_btn].spacing(6);
+    let header: Element<_> = if panel.loading {
+        row![text("余力").size(12), text("↻ 更新中…").size(11)]
+            .spacing(8)
+            .into()
+    } else {
+        text("余力").size(12).into()
+    };
+
+    let content = column![header, cash_row, credit_row, refresh_btn].spacing(6);
 
     container(content).padding(8).into()
 }
@@ -259,6 +282,80 @@ pub struct GtdForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── inline loading indicator tests ────────────────────────────────────
+
+    #[test]
+    fn set_loading_true_sets_loading() {
+        let mut panel = BuyingPowerPanel::new();
+        panel.set_loading(true);
+        assert!(panel.loading);
+    }
+
+    #[test]
+    fn set_loading_true_clears_stale_error() {
+        let mut panel = BuyingPowerPanel::new();
+        panel.set_error("previous error".to_string());
+        panel.set_loading(true);
+        assert!(
+            panel.error.is_none(),
+            "set_loading(true) must clear stale error"
+        );
+        assert!(panel.loading);
+    }
+
+    #[test]
+    fn set_loading_true_then_set_cash_buying_power_clears_loading() {
+        let mut panel = BuyingPowerPanel::new();
+        panel.set_loading(true);
+        panel.set_cash_buying_power(500_000, 0, 0);
+        assert!(!panel.loading);
+    }
+
+    #[test]
+    fn set_loading_true_then_set_credit_buying_power_clears_loading() {
+        let mut panel = BuyingPowerPanel::new();
+        panel.set_loading(true);
+        panel.set_credit_buying_power(300_000, 0);
+        assert!(!panel.loading);
+    }
+
+    #[test]
+    fn set_loading_true_then_set_replay_portfolio_clears_loading() {
+        let mut panel = BuyingPowerPanel::new_replay();
+        panel.set_loading(true);
+        panel.set_replay_portfolio(
+            "980000".to_string(),
+            "980000".to_string(),
+            "990000".to_string(),
+            0,
+        );
+        assert!(!panel.loading);
+    }
+
+    #[test]
+    fn set_loading_true_then_set_error_clears_loading() {
+        let mut panel = BuyingPowerPanel::new();
+        panel.set_loading(true);
+        panel.set_error("fetch failed".to_string());
+        assert!(!panel.loading);
+        assert!(panel.error.is_some());
+    }
+
+    /// D4: streaming push (set_replay_portfolio) does not set loading=true.
+    /// Start with loading=false; calling set_replay_portfolio keeps it false.
+    #[test]
+    fn streaming_push_does_not_set_loading_true() {
+        let mut panel = BuyingPowerPanel::new_replay();
+        assert!(!panel.loading);
+        panel.set_replay_portfolio(
+            "980000".to_string(),
+            "980000".to_string(),
+            "990000".to_string(),
+            0,
+        );
+        assert!(!panel.loading, "streaming push must not activate loading");
+    }
 
     #[test]
     fn refresh_requested_returns_action() {

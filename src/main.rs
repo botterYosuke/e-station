@@ -735,6 +735,9 @@ struct Flowsurface {
     /// `GetBuyingPower` IPC 送信時に記録した request_id。
     /// `BuyingPowerUpdated` または `IpcError` 受信時にクリアする。
     buying_power_request_id: Option<String>,
+    /// `GetOrderList` IPC 送信時に記録した request_id。
+    /// `OrderListUpdated` または `IpcError` 受信時にクリアする。重複送信抑止に使う。
+    order_list_request_id: Option<String>,
     /// Shared market-closed flag for order_api pre-reject (N3.B).
     /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
     order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
@@ -818,6 +821,12 @@ enum Message {
     OrderToast(Toast),
     /// `GetOrderList` IPC レスポンス — 全 OrderList ペインに配信する（Phase U1）。
     OrderListUpdated(Vec<engine_client::dto::OrderRecordWire>),
+    /// `GetOrderList` IPC 送信完了（Ok）/ 送信失敗（Err）。
+    OrderListSendCompleted(Result<(), String>),
+    /// `GetBuyingPower` IPC 送信完了（Ok）/ 送信失敗（Err）。
+    /// 注: 現状 BuyingPower の Err 経路は全て IpcError にルーティングされるため
+    /// Err arm には到達しない。IpcError が request_id 照合で loading を解除する。
+    BuyingPowerSendCompleted(Result<(), String>),
     /// Python エンジンが第二暗証番号を要求した。request_id は `SetSecondPassword` に使う。
     SecondPasswordRequired(String),
     /// 第二暗証番号 modal を閉じ、`ForgetSecondPassword` を IPC 送信する。
@@ -1334,6 +1343,7 @@ impl Flowsurface {
             tachibana_state: VenueState::Idle,
             second_password_modal: None,
             buying_power_request_id: None,
+            order_list_request_id: None,
             // N3.B: reuse the flag that was published to ORDER_API_MARKET_CLOSED
             // by main(). Falls back to a fresh flag (e.g. in tests / hot-reload).
             order_api_market_closed: ORDER_API_MARKET_CLOSED
@@ -1389,9 +1399,15 @@ impl Flowsurface {
                         "データエンジン再起動中 — チャートは復旧後に自動更新されます".to_string(),
                     ));
                     let main_window = self.main_window.id;
+                    // [R03] Clear in-flight loading on disconnect so panes don't stay
+                    // in "updating" state forever if the engine never comes back.
+                    self.buying_power_request_id = None;
+                    self.order_list_request_id = None;
                     self.layout_manager
                         .iter_dashboards_mut()
                         .for_each(|dashboard| {
+                            dashboard.distribute_buying_power_loading(main_window, false);
+                            dashboard.distribute_order_list_loading(main_window, false);
                             dashboard.notify_engine_disconnected(main_window);
                         });
                 }
@@ -1557,6 +1573,8 @@ impl Flowsurface {
                     if let Some(conn) = self.engine_connection.as_ref().cloned() {
                         let req_id = uuid::Uuid::new_v4().to_string();
                         self.buying_power_request_id = Some(req_id.clone());
+                        self.active_dashboard_mut()
+                            .distribute_buying_power_loading(main_window, true);
                         let req_id_for_err = req_id.clone();
                         Task::perform(
                             async move {
@@ -1568,9 +1586,7 @@ impl Flowsurface {
                                 .map_err(|e| e.to_string())
                             },
                             move |res| match res {
-                                Ok(()) => Message::OrderToast(Toast::info(
-                                    "余力情報を取得中...".to_string(),
-                                )),
+                                Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
                                 Err(err) => Message::IpcError {
                                     request_id: Some(req_id_for_err),
                                     code: "send_failed".to_string(),
@@ -1586,38 +1602,37 @@ impl Flowsurface {
                 };
 
                 // Auto-fetch order list on venue ready if a pane is visible.
-                let auto_fetch_orders =
-                    if is_ready && self.active_dashboard().has_order_list_pane(main_window) {
-                        if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                            Task::perform(
-                                async move {
-                                    conn.send(engine_client::dto::Command::GetOrderList {
-                                        request_id: uuid::Uuid::new_v4().to_string(),
-                                        venue: crate::TACHIBANA_VENUE_NAME.to_string(),
-                                        filter: engine_client::dto::OrderListFilter {
-                                            status: None,
-                                            instrument_id: None,
-                                            date: None,
-                                        },
-                                    })
-                                    .await
-                                    .map_err(|e| e.to_string())
-                                },
-                                |res| match res {
-                                    Ok(()) => Message::OrderToast(Toast::info(
-                                        "注文一覧を取得中...".to_string(),
-                                    )),
-                                    Err(err) => Message::OrderToast(Toast::error(format!(
-                                        "注文一覧取得失敗: {err}"
-                                    ))),
-                                },
-                            )
-                        } else {
-                            Task::none()
-                        }
+                let auto_fetch_orders = if is_ready
+                    && self.order_list_request_id.is_none()
+                    && self.active_dashboard().has_order_list_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        let req_id = uuid::Uuid::new_v4().to_string();
+                        self.order_list_request_id = Some(req_id.clone());
+                        self.active_dashboard_mut()
+                            .distribute_order_list_loading(main_window, true);
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetOrderList {
+                                    request_id: req_id,
+                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                    filter: engine_client::dto::OrderListFilter {
+                                        status: None,
+                                        instrument_id: None,
+                                        date: None,
+                                    },
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            Message::OrderListSendCompleted,
+                        )
                     } else {
                         Task::none()
-                    };
+                    }
+                } else {
+                    Task::none()
+                };
 
                 return replay
                     .chain(auto_fetch_buying_power)
@@ -1626,9 +1641,16 @@ impl Flowsurface {
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
                 self.engine_connection = Some(Arc::clone(&conn));
-                // In-flight buying-power requests are lost on reconnect; reset to
-                // avoid blocking future auto-fetches via the is_none() guard.
+                // In-flight requests are lost on reconnect; reset to avoid blocking
+                // future auto-fetches via the is_none() guard. Also clear loading
+                // so panes don't stay in "updating" state forever.
+                let main_window = self.main_window.id;
                 self.buying_power_request_id = None;
+                self.order_list_request_id = None;
+                self.active_dashboard_mut()
+                    .distribute_buying_power_loading(main_window, false);
+                self.active_dashboard_mut()
+                    .distribute_order_list_loading(main_window, false);
 
                 // Rebuild backends with the new connection and bump the generation
                 // counter so iced assigns new subscription IDs and restarts streams.
@@ -2079,6 +2101,9 @@ impl Flowsurface {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                 let req_id = uuid::Uuid::new_v4().to_string();
                                 self.buying_power_request_id = Some(req_id.clone());
+                                let main_window = self.main_window.id;
+                                self.active_dashboard_mut()
+                                    .distribute_buying_power_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
                                 return Task::perform(
                                     async move {
@@ -2090,9 +2115,7 @@ impl Flowsurface {
                                         .map_err(|e| e.to_string())
                                     },
                                     move |res| match res {
-                                        Ok(()) => Message::OrderToast(Toast::info(
-                                            "余力情報を取得中...".to_string(),
-                                        )),
+                                        Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
                                         Err(err) => Message::IpcError {
                                             request_id: Some(req_id_for_err),
                                             code: "send_failed".to_string(),
@@ -2101,7 +2124,7 @@ impl Flowsurface {
                                     },
                                 );
                             }
-                            // J-4: エンジン未接続時はユーザーに通知する
+                            // J-4: エンジン未接続時はユーザーに通知する（loading は立てない）
                             Task::done(Message::OrderToast(Toast::error(
                                 "エンジン未接続: 余力情報を取得できません".to_string(),
                             )))
@@ -2110,6 +2133,10 @@ impl Flowsurface {
                             use crate::screen::dashboard::panel::orders::Action;
                             match action {
                                 Action::RequestOrderList => {
+                                    // Guard: skip if a request is already in-flight.
+                                    if self.order_list_request_id.is_some() {
+                                        return Task::none();
+                                    }
                                     if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                         let is_replay = APP_MODE
                                             .get()
@@ -2120,12 +2147,16 @@ impl Flowsurface {
                                         } else {
                                             crate::TACHIBANA_VENUE_NAME.to_string()
                                         };
+                                        let req_id = uuid::Uuid::new_v4().to_string();
+                                        self.order_list_request_id = Some(req_id.clone());
+                                        let main_window = self.main_window.id;
+                                        self.active_dashboard_mut()
+                                            .distribute_order_list_loading(main_window, true);
                                         return Task::perform(
                                             async move {
                                                 conn.send(
                                                     engine_client::dto::Command::GetOrderList {
-                                                        request_id: uuid::Uuid::new_v4()
-                                                            .to_string(),
+                                                        request_id: req_id,
                                                         venue,
                                                         filter:
                                                             engine_client::dto::OrderListFilter {
@@ -2138,17 +2169,13 @@ impl Flowsurface {
                                                 .await
                                                 .map_err(|e| e.to_string())
                                             },
-                                            |res| match res {
-                                                Ok(()) => Message::OrderToast(Toast::info(
-                                                    "注文一覧を取得中...".to_string(),
-                                                )),
-                                                Err(err) => Message::OrderToast(Toast::error(
-                                                    format!("注文一覧取得失敗: {err}"),
-                                                )),
-                                            },
+                                            Message::OrderListSendCompleted,
                                         );
                                     }
-                                    Task::none()
+                                    // エンジン未接続時はユーザーに通知する（loading は立てない）
+                                    Task::done(Message::OrderToast(Toast::error(
+                                        "エンジン未接続: 注文一覧を取得できません".to_string(),
+                                    )))
                                 }
                                 Action::CancelOrder {
                                     client_order_id,
@@ -2227,9 +2254,32 @@ impl Flowsurface {
             }
             // Phase U1: distribute fresh order list to all OrderList panes
             Message::OrderListUpdated(orders) => {
+                self.order_list_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
                     .distribute_order_list(main_window, orders);
+            }
+            Message::OrderListSendCompleted(Ok(())) => {
+                // 送信成功: OrderListUpdated 受信を待つだけ
+            }
+            Message::OrderListSendCompleted(Err(err)) => {
+                self.order_list_request_id = None;
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .distribute_order_list_error(main_window, err.clone());
+                self.notifications
+                    .push(Toast::error(format!("注文一覧取得失敗: {err}")));
+            }
+            Message::BuyingPowerSendCompleted(Ok(())) => {
+                // 送信成功: BuyingPowerUpdated 受信を待つだけ
+            }
+            Message::BuyingPowerSendCompleted(Err(err)) => {
+                self.buying_power_request_id = None;
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .distribute_buying_power_error(main_window, err.clone());
+                self.notifications
+                    .push(Toast::error(format!("余力情報取得失敗: {err}")));
             }
             // Phase U3: broadcast to all BuyingPower panes; silently no-ops if no pane exists
             Message::BuyingPowerUpdated {
@@ -2278,22 +2328,32 @@ impl Flowsurface {
                     );
                 }
             }
-            // Phase U3: IpcError → route to BuyingPower panel if request_id matches
+            // Phase U3: IpcError → route to BuyingPower / OrderList panel if request_id matches
             Message::IpcError {
                 request_id,
                 code,
                 message,
             } => {
-                let is_buying_power = self
+                let matches_buying_power = self
                     .buying_power_request_id
                     .as_deref()
                     .zip(request_id.as_deref())
                     .is_some_and(|(bp, err)| bp == err);
-                if is_buying_power {
+                let matches_order_list = self
+                    .order_list_request_id
+                    .as_deref()
+                    .zip(request_id.as_deref())
+                    .is_some_and(|(ol, err)| ol == err);
+                if matches_buying_power {
                     self.buying_power_request_id = None;
                     let main_window = self.main_window.id;
                     self.active_dashboard_mut()
                         .distribute_buying_power_error(main_window, format!("[{code}] {message}"));
+                } else if matches_order_list {
+                    self.order_list_request_id = None;
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut()
+                        .distribute_order_list_error(main_window, format!("[{code}] {message}"));
                 } else if code == "strategy_load_failed" {
                     // N4.4: surface the error as a dismissable banner.
                     self.strategy_load_error = Some(message);
@@ -2520,35 +2580,40 @@ impl Flowsurface {
                     return Task::none();
                 };
 
-                let conn_for_orders = conn.clone();
-                let refresh_orders = Task::perform(
-                    async move {
-                        conn_for_orders
-                            .send(engine_client::dto::Command::GetOrderList {
-                                request_id: uuid::Uuid::new_v4().to_string(),
-                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
-                                filter: engine_client::dto::OrderListFilter {
-                                    status: None,
-                                    instrument_id: None,
-                                    date: None,
-                                },
-                            })
-                            .await
-                            .map_err(|e| e.to_string())
-                    },
-                    |res| match res {
-                        Ok(()) => {
-                            Message::OrderToast(Toast::info("注文一覧を取得中...".to_string()))
-                        }
-                        Err(err) => {
-                            Message::OrderToast(Toast::error(format!("注文一覧取得失敗: {err}")))
-                        }
-                    },
-                );
+                let refresh_orders = if self.order_list_request_id.is_none() {
+                    let req_id = uuid::Uuid::new_v4().to_string();
+                    self.order_list_request_id = Some(req_id.clone());
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut()
+                        .distribute_order_list_loading(main_window, true);
+                    let conn_for_orders = conn.clone();
+                    Task::perform(
+                        async move {
+                            conn_for_orders
+                                .send(engine_client::dto::Command::GetOrderList {
+                                    request_id: req_id,
+                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                    filter: engine_client::dto::OrderListFilter {
+                                        status: None,
+                                        instrument_id: None,
+                                        date: None,
+                                    },
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
+                        Message::OrderListSendCompleted,
+                    )
+                } else {
+                    Task::none()
+                };
 
                 let refresh_buying_power = if self.buying_power_request_id.is_none() {
                     let req_id = uuid::Uuid::new_v4().to_string();
                     self.buying_power_request_id = Some(req_id.clone());
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut()
+                        .distribute_buying_power_loading(main_window, true);
                     let req_id_for_err = req_id.clone();
                     Task::perform(
                         async move {
@@ -2560,9 +2625,7 @@ impl Flowsurface {
                             .map_err(|e| e.to_string())
                         },
                         move |res| match res {
-                            Ok(()) => {
-                                Message::OrderToast(Toast::info("余力情報を取得中...".to_string()))
-                            }
+                            Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
                             Err(err) => Message::IpcError {
                                 request_id: Some(req_id_for_err),
                                 code: "send_failed".to_string(),
@@ -2997,6 +3060,9 @@ impl Flowsurface {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                 let req_id = uuid::Uuid::new_v4().to_string();
                                 self.buying_power_request_id = Some(req_id.clone());
+                                let main_window = self.main_window.id;
+                                self.active_dashboard_mut()
+                                    .distribute_buying_power_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
                                 return Task::batch(vec![
                                     task.map(Message::Sidebar),
@@ -3010,9 +3076,7 @@ impl Flowsurface {
                                             .map_err(|e| e.to_string())
                                         },
                                         move |res| match res {
-                                            Ok(()) => Message::OrderToast(Toast::info(
-                                                "余力情報を取得中...".to_string(),
-                                            )),
+                                            Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
                                             Err(err) => Message::IpcError {
                                                 request_id: Some(req_id_for_err),
                                                 code: "send_failed".to_string(),

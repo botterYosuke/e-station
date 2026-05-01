@@ -856,6 +856,36 @@ impl Dashboard {
             });
     }
 
+    /// Set the loading flag on all `BuyingPower` panes.
+    pub fn distribute_buying_power_loading(&mut self, main_window: window::Id, loading: bool) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::BuyingPower(panel) = &mut state.content {
+                    panel.set_loading(loading);
+                }
+            });
+    }
+
+    /// Set the loading flag on all `OrderList` panes.
+    pub fn distribute_order_list_loading(&mut self, main_window: window::Id, loading: bool) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::OrderList(panel) = &mut state.content {
+                    panel.set_loading(loading);
+                }
+            });
+    }
+
+    /// Propagate an order-list fetch error to all `OrderList` panes.
+    pub fn distribute_order_list_error(&mut self, main_window: window::Id, message: String) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::OrderList(panel) = &mut state.content {
+                    panel.set_error(message.clone());
+                }
+            });
+    }
+
     /// Reset the `submitting` flag on every `OrderEntry` pane whose
     /// `pending_request_id` matches `client_order_id`.
     pub fn notify_order_accepted(&mut self, main_window: window::Id, client_order_id: &str) {
