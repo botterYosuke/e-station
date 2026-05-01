@@ -213,13 +213,15 @@ impl OrderEntryPanel {
 
         let side_row = {
             let is_buy = self.side == OrderSide::Buy;
+            let is_sell = self.side == OrderSide::Sell;
+
             let buy_btn = button(text("買い").size(13))
                 .on_press(Message::SideChanged(OrderSide::Buy))
                 .style(move |theme, status| crate::style::button::confirm(theme, status, is_buy));
 
-            // Phase O0: SELL は disabled
             let sell_btn = button(text("売り").size(13))
-                .style(|theme, status| crate::style::button::cancel(theme, status, false));
+                .on_press(Message::SideChanged(OrderSide::Sell))
+                .style(move |theme, status| crate::style::button::cancel(theme, status, is_sell));
 
             row![buy_btn, sell_btn].spacing(4)
         };
@@ -672,5 +674,66 @@ mod tests {
 
         // No exchange guard in set_instrument_from_ticker — caller is responsible
         assert!(panel.ticker_info.is_some());
+    }
+
+    // ── Phase O3 リグレッション①: SubmitClicked → RequestConfirm に Sell が伝わること ──
+    //
+    // 確認ダイアログ側だけ壊れたとき（order_side が Buy のまま渡される等）を検出する。
+    // view の .on_press 欠落は検出できないが、build_request_confirm_action() の
+    // order_side 変換が Sell を正しく返すことを保護する。
+    #[test]
+    fn sell_side_submit_clicked_emits_request_confirm_with_sell() {
+        let mut panel = OrderEntryPanel {
+            quantity: "100".into(),
+            instrument_id: Some("7203.TSE".into()),
+            side: OrderSide::Sell,
+            ..Default::default()
+        };
+
+        let action = panel.update(Message::SubmitClicked);
+        assert!(
+            matches!(
+                action,
+                Some(Action::RequestConfirm {
+                    order_side: engine_client::dto::OrderSide::Sell,
+                    ..
+                })
+            ),
+            "SubmitClicked は RequestConfirm(Sell) を返すべき: {action:?}"
+        );
+        assert!(!panel.submitting);
+    }
+
+    // ── Phase O3 リグレッション②: SideChanged(Sell) → ConfirmSubmit → SubmitOrder ──
+    //
+    // 過去に「Phase O0: SELL は disabled」コメントが残っていたため
+    // view 側で Sell の .on_press() が抜け、UI から SELL 注文が出せない
+    // バグが発生した（2026-05-01）。Python 側 _ALLOWED_ORDER_SIDE は
+    // {BUY, SELL} なのに UI だけが O0 状態に取り残されていた。
+    //
+    // Message 経路で side を切替えてから注文が最終的に Sell で送られることを保護する。
+    #[test]
+    fn sell_side_toggle_then_confirm_emits_sell_order() {
+        let mut panel = OrderEntryPanel {
+            quantity: "100".into(),
+            instrument_id: Some("7203.TSE".into()),
+            venue: Some("tachibana".into()),
+            ..Default::default()
+        };
+
+        panel.update(Message::SideChanged(OrderSide::Sell));
+        assert_eq!(panel.side, OrderSide::Sell, "側が Sell に切り替わるべき");
+
+        let action = panel.update(Message::ConfirmSubmit);
+        assert!(
+            matches!(
+                action,
+                Some(Action::SubmitOrder {
+                    order_side: engine_client::dto::OrderSide::Sell,
+                    ..
+                })
+            ),
+            "Sell 側の SubmitOrder が組み立てられるべき: {action:?}"
+        );
     }
 }

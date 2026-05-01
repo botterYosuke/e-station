@@ -30,6 +30,7 @@
 | テストヘルパー属性ドリフト | prod `__init__` に属性を追加したとき、`__init__` をモックで迂回するテストヘルパーの属性リストを同期していない | 1 |
 | 参照リソース未作成 | テストが参照する fixture / example ファイルが未コミットのまま test コードだけが先に存在する | 1 |
 | Subscription 継続 restart 後状態消失 | `restart()` が `*self = new_state` で状態を全置換するとき、iced が同一 ID のサブスクリプションを継続するため初期化 yield が再発火せず、FSM 状態がリセットされる | 1 |
+| バックエンド段階解禁 UI 追従漏れ | バックエンドが Phase を上げて新機能（SELL 等）を解禁済みなのに、Rust UI の `view()` が旧 Phase のコメント・disabled 設定のまま取り残され、ユーザーが操作できない | 1 |
 
 ---
 
@@ -1360,3 +1361,64 @@ Python エンジン側はセッションを維持しているため Rust-Python 
    - `new()` で Idle/None になるが、外部キャッシュ/static には情報が残る状態は何か
    - それらのうちサブスクリプションの初期化 yield で回復するものはどれか
    - サブスクリプションが再起動されない（同一 ID 継続）場合、yield が来ないケースを考慮したか
+
+---
+
+## 2026-05-01 — バックエンド段階解禁 UI 追従漏れ（「売り」ボタン Phase O0 残骸）
+
+**見逃しパターン**: バックエンド段階解禁 UI 追従漏れ（新パターン）
+
+**根本原因**:
+Python エンジン側は Phase O3 のコミット（`74791de`）で `_ALLOWED_ORDER_SIDE = {"BUY", "SELL"}` として
+SELL を解禁済みだったが、Rust UI 側 `src/screen/dashboard/panel/order_entry.rs` の `view()` が
+「Phase O0: SELL は disabled」という旧コメントとともに `sell_btn` に `.on_press()` を設定しないまま
+取り残されていた。iced の `button` は `on_press` 未設定だと disabled 扱いになるため、
+SELL ボタンが押せない状態が継続していた。
+
+モデル層（`update()` / `build_submit_action()` / `OrderSide::Sell` enum）は正常に SELL を扱える状態だったため、
+既存テスト `order_side_sell_produces_sell_in_action`（`panel.side = Sell` を直接初期化）は
+修正前後ともに PASS していた。これが「モデルは動く、UI だけ disabled」という状態を隠蔽した。
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `order_side_sell_produces_sell_in_action` | `panel.side = OrderSide::Sell` を直接初期化してから `ConfirmSubmit` を投げるため、`Message::SideChanged(Sell)` という入口が塞がれていても PASS する |
+| `cargo test --workspace` 全体 | iced の `button.on_press` は private フィールドのため、単体テストで `.on_press` の有無を assert する手段がない |
+| Python tests | Rust の view 層は Python から確認不可 |
+
+**iced API 制約の記録**:
+`button` ウィジェットの `.on_press` 欠落は Rust ユニットテストでは検出不可能。
+view の `.on_press` 欠落リグレッションは **手動受け入れ確認（§4.3）** を最終防衛線とする。
+
+**追加したテスト**:
+- `src/screen/dashboard/panel/order_entry.rs::tests::sell_side_submit_clicked_emits_request_confirm_with_sell`
+  — `Message::SubmitClicked` で `RequestConfirm(Sell)` が返ること（model 経路）
+- `src/screen/dashboard/panel/order_entry.rs::tests::sell_side_toggle_then_confirm_emits_sell_order`
+  — `Message::SideChanged(Sell)` 後に `ConfirmSubmit` で `SubmitOrder(Sell)` が返ること（Message 経路）
+- `python/tests/test_tachibana_submit_order.py::test_submit_order_sell_returns_venue_order_id`
+  — `order_side="SELL"` で `submit_order()` が正常に `venue_order_id` を返すこと（バックエンド既解禁の pin）
+
+**検証ノート**:
+Rust テスト 2 件は「model 経路が修正前でも GREEN」（計画書記載通り）。
+Python SELL テストも `_ALLOWED_ORDER_SIDE = {"BUY", "SELL"}` が既解禁のため修正前でも PASS。
+「バックエンドは動く、UI だけが disabled」という根本原因と整合する。
+修正前 FAIL / 修正後 PASS の確認対象は view の `.on_press` だが、これは自動テスト不可のため
+手動受け入れ確認（デモ口座での実機確認）をマージ必須ゲートとしている。
+
+**教訓**:
+
+1. **Phase コメントは「解禁忘れ」を招く**: 「Phase O0: SELL は disabled」のような
+   段階実装コメントは、その Phase を上げるコミット時に **同名ボタン全件 grep** で
+   `on_press` 有無を確認する。`grep -n "sell_btn\|buy_btn\|on_press" src/screen/...` を
+   Phase 昇格コミットのチェックリストに含める。
+
+2. **バックエンド段階解禁コミット時に UI を同時確認する**: Python 側で
+   `_ALLOWED_ORDER_SIDE` や permission guard を変更するコミットでは、
+   対応する Rust UI の `on_press` / disabled 条件が解禁されているかをセットで確認する。
+   「Python だけ解禁、UI は旧フェーズのまま」の状態が発生しやすい。
+
+3. **「直接初期化」テストは「Message 経路」を保護しない**: テストが `panel.side = Sell`
+   で state を直接セットする場合、`Message::SideChanged(Sell)` という UI 入口が
+   塞がれていても PASS する。UI から操作できる経路（Message を通じた状態遷移）を
+   保護するテストを別途追加する。

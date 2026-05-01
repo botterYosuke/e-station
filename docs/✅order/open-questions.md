@@ -119,6 +119,28 @@
 
 ---
 
+### Q12. MarginCreditRepay/MarginGeneralRepay + Sell 時の `sTatebiType` デフォルト挙動（未確認）
+
+**背景（2026-05-01 起票）**: Phase O3 で `sell_btn` に `.on_press` を追加した際、
+`cash_margin` に `MarginCreditRepay` / `MarginGeneralRepay` を選んで「売り」を実行した場合、
+`tachibana_orders.py` が `sTatebiType` をどのデフォルト値で立花 API へ送信するか未確認。
+
+現行実装では `sTatebiType="*"`（一括返済）が既定値として送られる可能性がある。
+意図せず一括返済が実行されるリスクがある。
+
+**選択肢**:
+
+| 案 | 概要 |
+|---|---|
+| **A** | `sTatebiType` の挙動を `tachibana_orders.py` で確認し、仕様として `architecture.md` に明記する |
+| **B** | UI 側で `MarginCreditRepay` / `MarginGeneralRepay` + Sell の組み合わせ時に警告ダイアログを出す |
+| **C** | Phase O3 スコープ外として、信用返済 UI 専用の計画（implementation-plan.md T3.x）で扱う |
+
+**現時点のデフォルト**: 案 C で先送り。信用返済 UI の専用フェーズ着手前に案 A の調査を行う。
+現物売り（`cash_margin=cash`）のユースケースには影響しない。
+
+---
+
 ## 着手後に決めれば良い事項
 
 - 監査ログのローテーション戦略（日次 / サイズベース / 圧縮）
