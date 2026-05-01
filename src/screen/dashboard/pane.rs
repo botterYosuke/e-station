@@ -244,7 +244,7 @@ impl State {
         // トグル不能なゴースト link_group が残り switch_tickers_in_group 経路で
         // 永続的に warn ログを発生させるため、構築時点で None に正規化する。
         let link_group = match content {
-            Content::OrderList(_) | Content::BuyingPower(_) => {
+            Content::Starter | Content::OrderList(_) | Content::BuyingPower(_) => {
                 if link_group.is_some() {
                     log::debug!(
                         "normalizing stale link_group on non-ticker pane (kind={:?})",
@@ -2865,7 +2865,8 @@ mod tests {
         assert!(Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()).initialized());
     }
 
-    /// OrderList / BuyingPower は銘柄概念を持たないため link_group を保持してはならない。
+    /// Starter / OrderList / BuyingPower は銘柄概念を持たないため
+    /// link_group を保持してはならない。
     /// 旧バージョンで saved-state.json に link_group: Some(N) を保存していたユーザーが
     /// 新バイナリで開いたとき、UI からはトグル不能のため永続的にゴースト link_group が
     /// 残り、switch_tickers_in_group 経路で warn ログを発生させ続ける silent な
@@ -2895,6 +2896,20 @@ mod tests {
         assert_eq!(
             state.link_group, None,
             "BuyingPower は link_group を持てないため from_config で None に正規化すべき"
+        );
+    }
+
+    #[test]
+    fn from_config_normalizes_link_group_for_starter() {
+        let state = State::from_config(
+            Content::Starter,
+            vec![],
+            Settings::default(),
+            Some(LinkGroup::A),
+        );
+        assert_eq!(
+            state.link_group, None,
+            "Starter は link_group を持てないため from_config で None に正規化すべき"
         );
     }
 

@@ -1425,7 +1425,10 @@ impl Dashboard {
                     // pane::State::from_config が正規化して None にするため通常は到達しないが、
                     // 二重防御として content.kind() でも弾く（M-A 対応）。
                     let kind = state.content.kind();
-                    let skip = matches!(kind, ContentKind::OrderList | ContentKind::BuyingPower);
+                    let skip = matches!(
+                        kind,
+                        ContentKind::Starter | ContentKind::OrderList | ContentKind::BuyingPower
+                    );
                     if !skip && state.link_group == Some(group) {
                         Some((window, pane, kind))
                     } else {
