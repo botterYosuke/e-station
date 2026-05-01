@@ -219,7 +219,7 @@ SELL 注文の `tachibana_orders.jsonl` WAL 記録はバックエンド既存実
 - 信用返済（`margin_credit_repay` / `margin_general_repay`）の建玉個別指定 UI
   → 別計画（implementation-plan.md T3.x で別途）
 - 保有銘柄一覧の表示
-  → [positions-in-orders-panel-plan.md](./positions-in-orders-panel-plan.md) で対応中
+  → [add-positions-pane-plan.md](./add-positions-pane-plan.md) で対応中
 - 「売り」発注時の保有数量バリデーション（売り過ぎ防止）
   → 立花 API 側 `sResultCode` で reject される設計（[spec.md §6](./spec.md) のエラーマッピングに従う）。UI 側で先読みチェックは行わない
 

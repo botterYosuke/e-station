@@ -140,10 +140,10 @@ HIGH 0 / MEDIUM 0 / LOW 2 → **収束**
 
 ---
 
-# review-fixes 2026-05-01 — positions-in-orders-panel-plan.md
+# review-fixes 2026-05-01 — add-positions-pane-plan.md
 
 `/review-fix-loop`（PlanLoop）の実行ログ。対象は計画書
-`docs/✅order/positions-in-orders-panel-plan.md`（保有銘柄専用ペイン新設）。
+`docs/✅order/add-positions-pane-plan.md`（保有銘柄専用ペイン新設）。
 
 ## ラウンド 1（2026-05-01）
 
@@ -244,6 +244,97 @@ HIGH 8 / MEDIUM 11 / LOW 7
 | R2-L5 | テスト | LOW | §5.8 | 不変条件テスト文言が `is_none()` / `is_some()` 逆転 |
 | R2-L6 | アーキテクチャ | LOW | §3.7.3 | stale な PositionsUpdated の request_id 不一致時（None に戻さない）を §3.7.3 に明記 |
 | R2-L7 | テスト | LOW | §5.4 | schemas JSON ファイルの実在確認が未実施 |
+
+## ラウンド 3（2026-05-01）
+
+### 集計
+HIGH 4 / MEDIUM 8 / LOW 3
+
+### 統一決定（Round 3）
+
+1. **R3-UD1 auto-fetch トリガー訂正**: §3.7.1 の「`Message::EngineConnected` venue ready 後」を「`Message::TachibanaVenueEvent(VenueEvent::Ready)` ハンドラ内（`src/main.rs:1529–1635` 周辺）」に訂正。`EngineConnected` はリセット専用で auto-fetch しない。
+2. **R3-UD2 invariant-tests.md 方針確定**: `test_invariant_tests_doc.py` は `spec.md §6` との照合を行わない（内部整合チェックのみ）。§5.8 の「spec.md §6 追記が必要」という記述を削除。I-Position-1 / I-Position-2 は `invariant-tests.md` には登録せず、Rust ユニットテスト内コメントにとどめる方針を採用。
+3. **R3-UD3 PositionsUpdated request_id ガード修正**: §3.7.3 の `Event::PositionsUpdated` 擬似コードを修正。request_id 不一致時は `distribute_positions` を呼ばず early return（`positions_request_id` も `None` に戻さない）。§5.4 のテストアサーションを「ミスマッチ時 `positions_request_id.is_some()` が維持されること」に確定。
+4. **R3-UD4 Python `"type"` → `"event"` キー修正**: §3.2 の `_do_get_positions` 擬似コードで `"type": "PositionsUpdated"` を `"event": "PositionsUpdated"` に修正（既存 `GetBuyingPower` ハンドラのレスポンスキー名と対称）。
+5. **R3-UD5 notify_engine_disconnected 記述整理**: §3.7.2 の記述を「`EngineRestarting(true)` ブロック内で positions_request_id = None + distribute_positions_loading(false) を追加する。`notify_engine_disconnected` 関数自体の実装は変更しない（現行は OrderEntry 向けのみ）」に訂正。§5.2 統合テスト「`notify_engine_disconnected` 後 loading == false」を「`EngineRestarting(true)` ハンドラ後 loading == false」に訂正。
+6. **R3-UD6 §5.6 replay 目視確認追加**: §5.6 チェックリストに「`--mode replay` 起動 → サイドバーから「保有銘柄」ペインを開く → 空表示固定（「⏪ REPLAY」バナーまたは「保有なし」表示）であることを確認。「更新」ボタンが IPC を発行しないことをログで確認」を追加。
+7. **R3-UD7 IpcError ハンドラ追記**: §3.7.3 に `Event::IpcError` ケースのコード例を追記。`positions_request_id = None` + `distribute_positions_error(...)` を実施する。
+8. **R3-UD8 SessionExpiredError session_holder.clear**: §3.2 の `_do_get_positions` 擬似コードの `SessionExpiredError` ハンドラに `self._session_holder.clear()` 呼び出しを追加。
+9. **R3-UD9 sTategyokuZanKingaku 取得テスト**: §5.1 の Python テスト計画に「`sTategyokuZanKingaku = "2134500"` の信用建玉で `market_value = 2134500` → wire `"2134500"` になること」のテストケースを追加。
+10. **R3-UD10 変更ファイル追加**: §4 変更ファイル一覧に `python/engine/exchanges/tachibana_orders.py`（`sTategyokuZanKingaku` 取得追加）を追記。
+
+### Findings 一覧
+
+| ID | 観点 | 重大度 | 対象節 | 修正概要 |
+|---|---|---|---|---|
+| R3-H1 | 経路特定 | HIGH | §3.7.1 | auto-fetch トリガーが `EngineConnected` → `TachibanaVenueEvent(Ready)` に訂正 |
+| R3-H2 | テスト | HIGH | §5.8 | `test_invariant_tests_doc.py` 根拠誤り + invariant-tests.md ポリシー矛盾 → Rust ユニットテスト内コメント方針に変更 |
+| R3-H3 | アーキテクチャ | HIGH | §3.7.3 / §5.4 | `PositionsUpdated` で request_id 不一致でも distribute してしまう → early return に修正 |
+| R3-H4 | 実装詳細 | HIGH | §3.2 | Python pseudocode で `"type"` キー → `"event"` キーに修正 |
+| R3-M1 | 経路特定 | MEDIUM | §3.7.2 / §5.2 | `notify_engine_disconnected` vs `EngineRestarting(true)` 記述整合 + テスト記述訂正 |
+| R3-M2 | テスト | MEDIUM | §5.6 | replay PositionsPanel 目視確認が未記載 → 追加 |
+| R3-M3 | アーキテクチャ | MEDIUM | §3.7.3 | `IpcError` ハンドラのコード例欠落 → 追記 |
+| R3-M4 | Python | MEDIUM | §3.2 | `SessionExpiredError` で `session_holder.clear()` 未呼び出し → 追加 |
+| R3-M5 | テスト | MEDIUM | §5.4 | request_id ミスマッチ時アサート未確定 → `positions_request_id.is_some()` 維持に確定 |
+| R3-M6 | テスト | MEDIUM | §5.1 | `sTategyokuZanKingaku` 取得後テストケース欠落 → 追加 |
+| R3-M7 | 実装詳細 | MEDIUM | §4 | `tachibana_orders.py` が変更ファイル一覧未記載 → 追記 |
+| R3-M8 | 実装詳細 | MEDIUM | §3.1.4 / §4 | schemas JSON 更新ステップが §3.1.4 に記載あるが §4 に対応行なし |
+| R3-L1 | アーキテクチャ | LOW | §3.7.4 | OpenOrderPanel(Positions) 発行時の IpcError 経路カバレッジが不明示 |
+| R3-L2 | テスト | LOW | §5.4 | warn ログ出力の有無を §5.4 に明記 |
+| R3-L3 | 実装詳細 | LOW | §5.9 | CI 収集確認手段が具体的でない |
+
+## ラウンド 4（2026-05-01）
+
+### 集計
+HIGH 1 / MEDIUM 1 / LOW 0
+
+### 統一決定（Round 4）
+
+1. **R4-UD1 `"code"` フィールド追加**: §3.2 `_do_get_positions` 擬似コードの全 4 エラーパス（venue 不一致 / session 未確立 / SessionExpiredError / TachibanaError）に `"code"` フィールドを追加。Rust `Event::Error` の `code: String` 非 Optional に対応。値は `"unknown_venue"` / `"SESSION_NOT_ESTABLISHED"` / `"SESSION_EXPIRED"` / `"fetch_error"`。
+2. **R4-UD2 PositionsUpdated 戻り値補完**: §3.7.3 の `Event::PositionsUpdated` ハンドラ成功パスに `Task::none()` の戻り値行を追記（他ハンドラとの一貫性確保）。
+
+### Findings 一覧
+
+| ID | 観点 | 重大度 | 対象節 | 修正概要 |
+|---|---|---|---|---|
+| P4-H1 | 実装詳細 | HIGH | §3.2 | `"code"` フィールド欠落で Rust デシリアライズ失敗 → 全 4 エラーパスに `"code"` 追加 |
+| R4-M1 | 経路特定 | MEDIUM | §3.7.3 | `PositionsUpdated` 成功パスに `Task::none()` 戻り値が省略 → 追記 |
+| R4-I1 | 情報 | INFO | §3.2 | `fetch_positions(p_no_counter=...)` 引数名が既存シグネチャ（`tachibana_orders.py:1710`）と一致するか実装フェーズで突き合わせ必要 |
+
+### 機械検証（Step 4）
+
+- `"code"` フィールド: 4 箇所追加確認（unknown_venue / SESSION_NOT_ESTABLISHED / SESSION_EXPIRED / fetch_error）
+- `PositionsUpdated` ハンドラ末尾に `Task::none()` 追加確認
+
+## ラウンド 5（2026-05-01・収束）
+
+### 集計
+HIGH 0 / MEDIUM 0 / LOW 3 → **収束**
+
+### 残 LOW（対応不要、記録のみ）
+
+| ID | 対象節 | 内容 |
+|---|---|---|
+| R5-L1 | §5.5 | "unknown variant はエラーで明示的に弾く / serde の default で吸収する" 二択表記が §3.3.3 確定済み「Starter フォールバック」と非整合。文章整理のみ |
+| R5-L2 | §5.8 | 節タイトル「invariant-tests.md への追記」と本文「登録せず Rust ユニットテスト内コメントにとどめる」が逆方向。タイトル整理推奨 |
+| R5-L3 | §3.2 / §3.7.3 | Python wire 名 `Error` と Rust enum 名 `IpcError` の用語混在。動作上問題なし、用語統一推奨 |
+
+```
+全ラウンド数: 5
+修正した Finding 総数: HIGH 13 / MEDIUM 28 / LOW 7
+残存 LOW（対応不要）: 3 件
+
+主要な反映成果:
+- IPC: GetPositions / PositionsUpdated / PositionRecordWire 新設、SCHEMA_MINOR bump
+- Python: _spawn_fetch + _do_get_positions + _outbox.append パターン、code/event キー、session_holder.clear、sTategyokuZanKingaku 取得
+- Rust iced: PositionsPanel (loading/last_error/set_error/stale-error クリア)、5 経路 loading 解除（Setter / SendCompleted Err / IpcError / EngineConnected / EngineRestarting(true)）、has_positions_pane() ヘルパー
+- 経路特定: TachibanaVenueEvent(Ready) auto-fetch、OrderToast ハンドラ内 OrderFilled 経由 GetPositions、replay モードガード、request_id 不一致 early return
+- 後方互換性: deny_unknown_fields 未付与確認・Starter フォールバック挙動を確定
+- テスト: ContentKind::ALL[13] 不変条件、信用建玉 sTategyokuZanKingaku 変換、replay PositionsPanel 目視確認、5 経路ライフサイクル統合テスト
+- ドキュメント: invariant-tests.md は spec.md §6 に紐付かないため Rust ユニットテスト内コメントにとどめる方針確定
+
+ログ: docs/✅order/archive/review-fixes-2026-05-01.md
+```
 
 ---
 
