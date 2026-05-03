@@ -735,6 +735,57 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 - ✅ `Loaded` 中に二度目の `LoadReplayData` を投げると `EngineBusy` が返る（B3 完了）
 - ✅ `cargo run -- --mode replay` で起動した GUI から `File > Replay を開始...` のフォーム経由で backtest が完走する
 
+## レビュー反映 (2026-05-03, ラウンド 1 - Group 1)
+
+### 解消した指摘
+- C1: multi-client server.py の disconnect cleanup を per-connection / server-lifecycle に分離（`if not self._connections:` ガード追加 → Tachibana startup task / EVENT loop / startup latch / venue stream の cancel は最後の 1 接続が抜けたときのみ実行）
+- C6/H16: `ReplaySession._status` を `_ReplayStatus` Enum 化、`STOPPING` 状態追加（attach mode の `stop()` で `RUNNING → STOPPING` 遷移）
+- C7/M2: `EngineSession` に `started_at: DateTime<Utc>` フィールド追加 + `serde_json` 化 + `token` を `pub(crate)` + `Debug` を手動実装で `[REDACTED]` 出力
+- H1: `cargo fmt --check` 緑復帰（flowsurface クレートに `cargo fmt -p flowsurface` 適用）
+- H4: Rust `SCHEMA_MINOR` を 8 → 9 に bump し Python と同期。`python/tests/test_schemas_nautilus.py` に Rust ↔ Python 整合チェックを追加
+- H13: `_extract_event_kind(evt)` ヘルパで `event` / `type` 両キーを許容。in-process / attach 両経路で `ReplayBuyingPower` 判定が一貫する
+- H15: `server.py` `_check_replay_state` / `_check_live_state` の `getattr` フォールバックを削除し `__init__` 必須に
+- H17: `LiveSession.force_mode='attach'` を `NotImplementedError("LiveSession attach mode is Phase 8.3 scope")` に変更（silent fallback 廃止）
+
+### 設計判断
+- `_replay_state` / `_live_state` は `__init__` で必ず初期化、レガシーテストは `__new__` ではなく `__init__` を呼ぶ（または explicit に属性をセットする）。`test_engine_busy_reject.py` / `test_server_engine_dispatch.py` 等は既に対応済み
+- `ReplaySession._status` の `status` プロパティは互換維持のため `Literal[str]` を返す（`enum.value` 経由）。stopping 状態を Literal に追加
+- `EngineSession::new(...)` コンストラクタを公開して `started_at = Utc::now()` を確実に埋める。`token` は `pub(crate)` のため crate 外からはコンストラクタ経由でしか作れない
+
+### 持ち越し（Group 2 以降）
+- attach mode 動作修正（C4/C5/H5/H6/H7/H8/H12/H14）
+- Rust crash recovery + Drop（C3/H2/H3）
+- LiveSession.login 実装、必須テスト追加（C2/H11）、ドキュメント整合（H9/H10/M6/M7）
+
+## レビュー反映 (2026-05-03, ラウンド 1 - Group 2)
+
+### 解消した指摘
+- C4: `_AttachClient.close()` を冪等化、`_send_queue.put(None)` の Future を `result(timeout=2.0)` で待つ、warn ログ追加
+- C5: `_recv_loop` の例外を `websockets.ConnectionClosed`（info: code/reason）/ その他（warn: 例外型名）で分けてログ出力
+- H5: handshake 中に `EngineError{code=auth_failed}` を検知して `ConnectionRefusedError("attach handshake: token mismatch")` を専用 raise。`__enter__` の `force_mode='auto'` では error レベルで surface し inprocess に fallback、`force_mode='attach'` では raise
+- H6: `events()` を `queue.get(timeout=1.0)` ループに変更し `_closed_event.is_set()` で即 `ConnectionError("WS connection closed")` を raise（最大 60s hang 解消）
+- H7: `_probe_engine` dead code を完全削除
+- H8: `_send_loop` を `ws.send` ごとに try/except でラップし、`ConnectionClosed` は info、その他例外は error ログを出して該当 client の send_loop を return（他 client への波及を断つ）
+- H12: `_AttachClient.wait_for` 内で `event == "EngineBusy"` を `BusyError` に翻訳
+- H14: `handshake()` を try/except でラップし、失敗時に `self.close()` を呼んで thread/loop をリークさせない（close 冪等性に依存）
+
+### 設計判断
+- `close()` の Future timeout は 2.0s 固定（thread.join の 5.0s タイムアウトと合わせて最大 7s で確実に終了）
+- token mismatch の判定は EngineError の `code` フィールド（または message）に "auth" を含むかで識別。token 文字列自体は exception/log に出さない
+- recv_loop の WS 切断ログは `code=` / `reason=` を出す（token を含まないので安全）
+
+### テスト追加
+- `test_replay_session_attach.py`:
+  - `test_attach_client_close_is_idempotent` (C4)
+  - `test_attach_client_recv_loop_logs_on_close` (C5)
+  - `test_attach_token_mismatch_logs_error_and_falls_back` / `test_attach_token_mismatch_raises_when_force_attach` (H5)
+  - `test_attach_client_events_terminates_on_ws_close` (H6)
+  - `test_probe_engine_removed` (H7)
+  - `test_attach_wait_for_translates_engine_busy_to_busy_error` (H12)
+  - `test_attach_handshake_failure_cleans_up_thread` (H14)
+- `test_server_multi_client.py`:
+  - `test_send_loop_survives_send_failure` (H8)
+
 ### Phase 8.2 — E2E bash スクリプト削除 ✅ 完了 (2026-05-03)
 
 > 削除を基本方針。`smoke.sh` のみ起動監視用として維持。
@@ -763,6 +814,158 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 - ✅ **release build で** ポート 9876 を listen するプロセスが存在しない
 - ✅ `cargo build --release` が成功する
 - ✅ `cargo test --workspace` 全 PASS
+
+---
+
+## レビュー反映 (2026-05-03, ラウンド 1 - Group 4)
+
+### 解消した指摘
+
+- **C2（部分）**: `python/tests/test_no_http_listener.py` を新規追加。
+  `socket.bind(("127.0.0.1", 9876))` の成功で「Phase 8.3 で削除した HTTP API
+  モジュール（`src/replay_api.rs` / `src/api/*.rs`）が復活していない」ことを
+  CI で常時検証する deterministic リグレッションガード。
+- **M-1 (type)**: `EngineBusy.current_state` / `attempted_command` を
+  `str` から `Literal[...]` に格上げ（`python/engine/schemas.py`）。
+  許容値: `current_state` は ReplayState（IDLE / LOADED / RUNNING / STOPPING）
+  + LiveState（DISCONNECTED / CONNECTING / CONNECTED）の合計 7 値。
+  `attempted_command` は実際に server.py で発火する 9 値
+  （LoadReplayData / StartEngine / StopEngine / SetReplaySpeed / SubmitOrder /
+  ModifyOrder / CancelOrder / CancelAllOrders / RequestVenueLogin）。
+  pydantic が wire mismatch を build 前に検出する。
+- **M-3 (rust)**: `engine-client/src/session_file.rs` の `write_atomic` /
+  `delete` シグネチャを `&PathBuf` → `&Path` に修正。`Path::with_extension` を
+  使うので auto-deref は元から効いていたが、API 表面で `&Path` を取るのが
+  Rust 標準の慣習。
+- **M-5 (silent)**: `write_atomic` の chmod 失敗 / rename 失敗時に `.tmp`
+  ファイルが残らないよう cleanup を追加。
+
+### 検証結果
+
+- `cargo check --workspace` ✅
+- `cargo clippy --workspace -- -D warnings` ✅
+- `cargo fmt --check` ✅
+- `cargo test --workspace` ✅（session_file 9 PASS / 全 workspace 0 failed）
+- `uv run pytest python/tests/ -m "not live"` → **1546 passed, 3 skipped**
+  （Group 3 の 1545 → +1, `test_no_http_listener.py` 増加）
+
+### 持ち越し（次フェーズで対応予定）
+
+本ラウンドで RED→GREEN→REFACTOR の TDD 規律を維持するため
+以下を意図的に分離した。各々独立タスクとして再着手する：
+
+- **C2 残**: `test_replay_session_attach_gui_chart.py` / `test_session_file_atomic_write.py`
+  / `test_engine_session_file.py` / `test_replay_session_attach_session_file.py`
+  / `test_replay_session_attach_disconnect.py` / `test_replay_session_attach_manual_smoke.md`
+  — subprocess + WS 多重 client の race condition を含むため、専用のラウンドで
+  fixture / timeout / port allocation 設計を含めて TDD で着手する。
+  Group 3 までで基本機能カバレッジ（attach handshake / fallback / token mismatch
+  / busy / session 解決）は確保済み。残るのは「穴 1 リグレッション保護」と
+  ファイルライフサイクルの edge case。
+- **H11 (LiveSession.login 本実装)**: `tachibana_startup_login` 等の既存内部 API
+  の wire 経路特定 + attach mode の `RequestVenueLogin` ↔ `VenueReady`/`VenueError`
+  待ち合わせの実装が必要。Phase 8.1 の一部だが本ラウンドのスコープを超えるため
+  分離。現在は `NotImplementedError` で fail-fast、誤動作の risk なし。
+- **H10 補足**: spec.md §5.3 は既に Phase 8 attach 註記が入っているため、
+  per-connection 文脈の全面書き直しは Phase 8.1c 終盤での仕上げ作業として残す。
+- **M-* 残**: `_AttachClient._send_loop` の polling 削除（M-11）、CLI BusyError
+  専用メッセージ（M-1 silent）、MAX_CONNECTIONS reject 時の EngineError 通知（M-2 silent）、
+  `LiveSession.attach_endpoint` パラメータ追加（M-8）、`_read_session_file`
+  の TypedDict 化（M-3 type）、その他多数。それぞれ独立して影響範囲が狭く、
+  個別 TDD 単位でラウンド分割した方が品質が高くなる。
+
+---
+
+## レビュー反映 (2026-05-03, ラウンド 1 - Group 4a)
+
+### 解消した指摘
+
+- **H11 (LiveSession.login 本実装)**: `python/engine/replay_session.py` の
+  `LiveSession.login()` を `NotImplementedError` スタブから本実装に置き換え。
+  in-process 経路で既存の Tachibana 内部ログイン API
+  （`engine.exchanges.tachibana_auth.login`）を `_tachibana_login_call` として
+  モジュールレベルで再 export し、`asyncio.run` で同期ラップする実装。
+  cred 解決順は「明示引数 → `DEV_TACHIBANA_USER_ID`/`DEV_TACHIBANA_PASSWORD` env」、
+  両方欠落時は `ValueError`。`demo` flag は `__init__` の値をそのまま `is_demo`
+  として伝播。`PNoCounter` を毎回新規生成して R4 monotonic 契約を満たす。
+  既存 event loop 内（notebook 等）からの呼び出しに備え、`asyncio.run` が
+  `RuntimeError` を上げた場合は別 thread の executor 経由で再実行する fallback
+  も実装。`is_logged_in` プロパティを公開。attach mode 経路は `__enter__` 時点で
+  `NotImplementedError` のため通常到達しないが、防御的に `NotImplementedError`
+  を返す。
+
+### 追加 / 変更したテスト
+
+`python/tests/test_live_session_login.py` を 4 → 9 ケースに拡張：
+
+- 既存ガード（force_mode 系 3 ケース）はそのまま維持。
+- `test_login_in_inprocess_raises_not_implemented`（旧 NotImplementedError 期待）を
+  本実装後の挙動セットに置き換え。
+- 新規 6 ケース：
+  - `test_login_inprocess_with_explicit_credentials_calls_internal_api` — 引数で渡した
+    user_id / password が内部 API に伝播することを `monkeypatch.setattr` 経由で assert。
+  - `test_login_inprocess_with_env_credentials` — env 経由で cred を解決する経路。
+  - `test_login_missing_credentials_raises_value_error` — 引数も env も無い場合の
+    `ValueError("missing credentials")` と「内部 API が呼ばれないこと」を確認。
+  - `test_login_internal_api_failure_propagates` — 内部 API の例外がそのまま
+    伝播することを確認（`(BoomError, RuntimeError)` のいずれかを許容）。
+  - `test_login_demo_flag_passed_to_internal_api` — `LiveSession(demo=False)` が
+    内部 API へ `is_demo=False` で伝わる。
+  - `test_login_marks_session_as_logged_in` — login 成功後に `is_logged_in=True`。
+
+token / password はテスト fixture も含めて `uuid.uuid4().hex[:8]` ベースの
+ダミー文字列を使用し、`.env` の実 cred を読まないことを契約として固定。
+
+### 検証結果
+
+- `uv run pytest python/tests/test_live_session_login.py -v` → **9 passed**
+- `uv run pytest python/tests/ -m "not live"` → **1551 passed, 3 skipped**
+  （Group 4 の 1546 → +5: ケース 9 件中 1 件は既存差し替え、8 件 - 既存 3 件 = 5 件純増）
+
+### 持ち越し（次フェーズで対応予定）
+
+- **attach mode の `RequestVenueLogin` ↔ `VenueReady`/`VenueError` 待ち合わせ**：
+  attach mode は `__enter__` 時点で `NotImplementedError`（Phase 8.3 スコープ）の
+  ため、login の attach 分岐は最小実装（`NotImplementedError`）に留めた。
+  attach mode 解禁時に IPC wire の dispatch + waiter を追加する。
+- **実 demo smoke**：`@pytest.mark.live` 付きの実 HTTP smoke は `.env` に
+  `DEV_TACHIBANA_*` がある環境でのみ回す任意テスト枠として残置。本ラウンドでは
+  unit-level mock のみで内部 API 伝播を検証した。
+
+---
+
+## レビュー反映 (2026-05-03, ラウンド 1 - Group 3)
+
+### 解消した指摘
+
+- **C3**: `EngineSession::reap_stale(path)` を `engine-client/src/session_file.rs` に
+  追加。pid liveness チェックは `sysinfo` クレート（cross-platform）で実装。
+  `ProcessManager::start()` 冒頭で呼び、dead-pid / 破損 JSON のセッションファイル残骸を
+  spawn 直前に掃除する。tests: `reap_stale_removes_dead_pid_file` /
+  `reap_stale_keeps_live_pid_file` / `reap_stale_removes_corrupt_json` /
+  `reap_stale_missing_file_is_noop` (`engine-client/tests/session_file.rs`).
+- **H2**: `PythonProcess::Drop` 内のセッションファイル削除を撤去。
+  restart loop 中に session file が一時的に消える窓を解消。後続クリーンアップは
+  C3 の `reap_stale` が担う。clean shutdown 時の orphan は次回起動時に reap される。
+- **H3**: `serial_test = "3"`（既存 dev-dep）を使い `data::tests::data_path_env_override_*`
+  に `#[serial(env_data_path)]` 属性を付与。`unsafe std::env::set_var` が並列実行で
+  起こす UB を排除。`cargo test -p flowsurface-data` 全 PASS.
+- **Pre-existing 11 件**: `_replay_state` / `_live_state` 未初期化 AttributeError を解消。
+  `__new__` ベース fixture（`test_strategy_file_required.py` /
+  `test_forget_second_password_conflict.py` / `test_server_session_holder_order.py`）に
+  `engine.server.{LiveState, ReplayState}` を import して明示初期化。
+  `test_invariant_tests_doc.py` は Phase 8 で削除された `src/api/order_api.rs` を
+  参照していた C-H4 / C-M3 / C-M5 の status を `⏹️ Phase 8 廃止` に変更し
+  `_is_completed` 判定から外した（行は履歴として残置）。
+
+### 検証結果
+
+- `cargo check --workspace` ✅
+- `cargo clippy --workspace -- -D warnings` ✅
+- `cargo fmt --check` ✅
+- `cargo test -p flowsurface-engine-client` ✅（session_file 9 PASS 含む）
+- `cargo test -p flowsurface-data` ✅
+- `uv run pytest python/tests/ -m "not live"` → **1545 passed, 3 skipped**
 
 ---
 
@@ -901,4 +1104,6 @@ Phase 8 シリーズ完了時点で（**全項目達成済み 2026-05-03**）：
 | 2026-05-01 | **helper の attach client mode を採用**：§0.1 を「helper は server を bind しないが client として attach する」に書き換え / §1.4 で Rust `start_or_attach` との対称性を明記 / §3.1 全体図を 2-mode 対応に書き直し / §3.2 起動経路に「外部スクリプトから GUI を駆動」を追加 / §3.3 を attach mode 込みに更新 / §4.1 `ReplaySession` に mode auto-detect / `attach_endpoint` / `force_mode` を追加 / §4.2 で private `_AttachClient` を新設 / §4.3 `LiveSession` も同様に拡張 / §4.4 CLI に `--mode` オプション追加 / Phase 8.1 を 8.1a（in-process）/ 8.1b（attach）/ 8.1c（GUI フォーム）の 3 段階に分割 / R6（probe timeout）/ R7（同時操作 EngineBusy）/ R8（attach レイテンシ）/ R9（schema drift）を新設 / Q4 を attach mode 採用で再クローズ / Q6（OrderGuard）/ Q7（compression）を新設 / DoD #3 に attach mode 動作確認を追加 |
 | 2026-05-01 | **attach mode 成立条件 B1〜B3 の実装スコープを明示**（レビューで指摘された 3 つの穴を反映）：§0.1.2 を新設して engine 側変更の必須性を明記 / §1.5 を新設して現状 engine の制約と Phase 8.1b で解消する範囲を整理 / §4.1 の `__enter__` で token 解決を「明示引数 → session ファイル → fallback」の優先順位に再定義 / §4.2 の token 取得経路を session ファイル対応に書き換え + `EngineBusy` 翻訳を追加 / Phase 8.1b を B1（multi-client broadcast）/ B2（session ファイル token 共有）/ B3（EngineBusy state guard）/ B4（`_AttachClient` 本体）の 4 段階に再分割し各段階の作業項目を詳細化 / Phase 8.1c に attach インジケータの作業項目を追加 / Phase 8.1 完了条件に B1〜B3 完了 + spec.md §5.3 更新を追加 / §6.1 テストに multi-client / session-file / busy 系列計 8 ファイルを追加（attach_gui_chart は穴 1 のリグレッション保護として明記）/ R10（multi-client regression）/ R11（PID 再利用）/ R12（atomic write）/ R13（reconnect protocol）を新設 / Q8（session ファイルパス）/ Q9（MAX_CONNECTIONS）/ Q10（state guard 範囲）/ Q11（session ファイル書き込み判断）を新設 / DoD #4 と #9 を追加 |
 | 2026-05-01 | **Q8 / Q10 / Q11 を決定**：§4.2.1 を新設して session ファイルのパス解決を Rust ↔ Python の対応関係として詳述（`data::data_path(Some("engine-session.json"))` を真実源、helper は `platformdirs.user_data_dir("flowsurface", appauthor=False)` で再現、OS 別実体パスを表で明示）/ §0.1.2 B2 で書き込み主体を「Rust（engine-client）」に確定 / Phase 8.1b B2 を Rust 側 `EngineSessionFile::write_atomic` 実装 + `Drop` で削除 + crash 時 stale 削除 + Rust 側テスト 2 本 + `pyproject.toml` に `platformdirs` 依存追加に書き換え / Python 側テストを `test_session_file_resolve.py` / `test_session_file_stale_pid.py` / `test_session_file_env_override.py` に再構成 / Phase 8.1b B3（EngineBusy）を **2 つの直交する state 機械（Replay と Live）** に拡張：`SubmitOrder{venue="replay"}` を `Replay::Running` のみ、`SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` を `Live::Connected` のみ、`RequestVenueLogin` を `Live::Disconnected` のみで受理 / B3 テストを 5 本に拡充（idle replay order / disconnected live order / login already connected を追加）/ B3 に GUI 側 Rust の発注時エラーハンドリング項目を追加 / Q8 / Q10 / Q11 をクローズ済みに格上げ |
+| 2026-05-03 | **Group 4b 解消**（レビュー指摘の MEDIUM 一括処理）：M-2 (rust) `validate()` に `start_date > end_date` チェック追加 + RED 単体テスト / M-5 (rust) `validate()` の戻り値タプルを `ValidatedForm` 構造体に置き換え（caller も追従、Action::Submit はそのまま）/ M-4 (type) `engine-client/src/process.rs` で `proc.pid()` が `None` のときセッションファイル書き込み skip + `engine-client/tests/session_file.rs::pid_zero_session_file_is_immediately_reaped` 追加 / M-3 (type) `_read_session_file` 戻り値を `SessionFileData` TypedDict 化 / M-5 (type) `assert self._client is not None` を `if ... raise RuntimeError` に置換（load / run の 2 箇所）/ M-1 (silent) CLI に `except BusyError` 分岐を追加（exit code 2 + 専用メッセージ）/ M-2 (silent) `server.py` MAX_CONNECTIONS reject で close 前に `EngineError(code="max_connections")` を送信 / M-6 (silent) `_resolve_endpoint_and_token` の `force_mode='attach' but FLOWSURFACE_ENGINE_TOKEN env var is not set` 詳細メッセージ化 / M-8 (general) `LiveSession.__init__` に `attach_endpoint` / `attach_timeout_s` 引数追加（実装は Phase 8.3 まで `NotImplementedError`）/ M-10 (general) session ファイル読み取り時 `started_at` を `log.info` に出力（token は出さない）/ M-11 (general) `_send_loop` の `asyncio.wait_for(timeout=1.0)` を削除（sentinel 経路のみで終了）/ L-1 (general) `_ForceMode = Literal["auto","inprocess","attach"]` に統一 / L-2 (general) `_AttachClient` の handshake 成功 / 失敗を info / error で出力（token は出さない）/ 新規テスト: `python/tests/test_replay_session_attach_resolution.py`（6 件）+ `test_replay_session_cli_busy.py`（2 件）+ `test_server_multi_client.py::test_max_connections_reject` を新仕様に更新 + `engine-client/tests/session_file.rs::pid_zero_session_file_is_immediately_reaped` + `src/modal/replay_form.rs::tests::validation_fails_when_start_after_end`。M-3 (silent) `_handle_start_engine` の `EngineStarted` 未送出時 `EngineStopped` 補完は既存 `started_marker` ガードと意図的に直交するため**保留**（フリップ範囲が広く 1551 緑を破壊するリスクが高い）。CRITICAL の C2 残テスト 6 ファイル（`test_replay_session_attach_gui_chart` ほか）は subprocess engine spawn + 模擬 GUI WS client + Tachibana startup 抑止 + `LoadReplayData` mock fanout を必要とし、Group 4b の純ロジック修正バッチからは独立した工数（数時間 + Windows でのプロセス制御 flaky 性）を要するため、別ラウンドへ持ち越し（STOP+REPORT 済み）。最終結果: cargo test 589 passed / pytest 1559 passed (+8 新規) / 3 skipped (live) / clippy clean / fmt clean。 |
 | 2026-05-03 | **Phase 8 全サブフェーズ実装完了**：Phase 8.1a（`python/engine/replay_session.py` 新規作成。`ReplaySession`/`LiveSession`/`_AttachClient` 三者を単一ファイルに実装。CLI `python -m engine.replay_session run` 対応）/ Phase 8.1b（`python/engine/server.py` を `_Broadcaster` multi-client fanout + `ReplayState`/`LiveState` state machine + `EngineBusy` guard + `MAX_CONNECTIONS=4` に更新。`engine-client/src/session_file.rs` `EngineSession` 新規作成。`python/engine/schemas.py` `SCHEMA_MINOR` 8→9, `ClientConnected`/`ClientDisconnected`/`EngineBusy` 追加。`data/src/lib.rs` `FLOWSURFACE_DATA_PATH` env override バグ修正）/ Phase 8.1c（`src/modal/replay_form.rs` `ReplayFormModal` 新規作成。`src/native_menu.rs` に "Replay を開始..." メニュー追加）/ Phase 8.2（`scripts/replay_dev_load.sh` 削除。`tests/e2e/` から s56〜s83, s90, tachibana_* 11 ファイル削除。`scripts/run-replay-debug.sh` に DEPRECATED コメント追記）/ Phase 8.3（`src/replay_api.rs` / `src/api/` 全削除。`src/main.rs` から HTTP runtime ブロック・ControlApi Message 等を全削除）/ §0.1.2 B1〜B3 対応状況を「実装済み」に更新 / §8 DoD を「全達成済み」に更新 / §9 関連ドキュメントを削除済みファイル・新規成果物に更新 |
+| 2026-05-03 | **C2 残テスト 6 件実装完了**（前ラウンドで持ち越された CRITICAL 項目）：`python/tests/test_replay_session_attach_gui_chart.py`（穴1リグレッション保護：DataEngineServer + 模擬 GUI WS client + `_AttachClient` の三者 broadcast テスト 3 件）/ `python/tests/test_session_file_atomic_write.py`（`.tmp → rename` atomic write：途中ファイルは読めないことを assert する 4 件）/ `python/tests/test_engine_session_file.py`（session ファイルライフサイクル：pid alive → data / pid dead → None の 3 件）/ `python/tests/test_replay_session_attach_session_file.py`（session ファイル経由の endpoint/token 解決 → attach mode 遷移 3 件）/ `python/tests/test_replay_session_attach_disconnect.py`（WS 切断時 `ConnectionError` + `status=="errored"` 遷移 3 件）/ `python/tests/test_replay_session_attach_manual_smoke.md`（GUI pane 生成・bar 蓄積の人手確認手順書）。最終結果: pytest 1575 passed / 3 skipped（+16 新規）/ cargo check clean。**技術的知見**：(1) `ClientConnected(count=1)` の到着タイミング — サーバーは `Ready` 送出後に `ClientConnected` を broadcast するため、helper の handshake ループは `count=1` を捕捉できず `_recv_queue` に積まれる。`count>=2` を探すにはキューを手動でドレインする必要がある；(2) Windows の `asyncio` 多重起動 — 複数スレッドで `asyncio.run()` を呼ぶと ProactorEventLoop 競合で `EOFError` が発生する。`DataEngineServer` と模擬 GUI クライアントを同一 event loop で動かし `asyncio.run_coroutine_threadsafe()` で注入するパターンで回避；(3) `loop.stop()` 禁止 — `loop.call_soon_threadsafe(loop.stop)` はサスペンド中の `await` を `RuntimeError` で落とす。`asyncio.Event` の `wait()` ＋ `call_soon_threadsafe(stop_event.set)` パターンに置き換えること。 |
