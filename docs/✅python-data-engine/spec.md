@@ -85,7 +85,7 @@
 - **ランダム接続トークン（必須）**: Rust が起動ごとに 32 byte のトークンを生成し、stdin 経由で Python に渡す。WebSocket 接続時に `Sec-WebSocket-Protocol` もしくは最初のメッセージ（`Hello`、§4.5 参照）で提示させ、一致しなければ即切断。
 - **接続モデル**:
   - **Phase 7 まで**: Python サーバは既にクライアントが接続中なら新規接続を即拒否。`ready` 状態遷移後は追加接続を受けない。
-  - **Phase 8 attach mode 更新**: [phase-8-python-helper-direct-api.md §0.1.2](./phase-8-python-helper-direct-api.md) の B1 完了後は、token / `SCHEMA_MAJOR` 一致 client の multi-client broadcast を許可する。loopback 専用・token 必須の前提は維持。
+  - **Phase 8 attach mode 更新**: [python-helper-direct-api.md §0.1.2](./python-helper-direct-api.md) の B1 完了後は、token / `SCHEMA_MAJOR` 一致 client の multi-client broadcast を許可する。loopback 専用・token 必須の前提は維持。
 - **loopback 専用**: `127.0.0.1` / `::1` 以外からの接続は listen しない／accept しない。
 - **ポート秘匿（固定ポート 19876 プローブを許容）**: 通常、ポート番号は Rust→Python 間の stdin だけで受け渡し、環境変数やコマンドライン引数には書き出さない。ただし既存エンジン自動検出目的に限り、固定ポート `127.0.0.1:19876` へのプローブを許容する（§3.1 参照）。ロックファイル案（`engine-discovery.md`）は不採用。プローブの安全性は HMAC token 検証 + `SCHEMA_MAJOR` 一致確認で担保する（別プロセスが 19876 を占有していてもハンドシェイクで必ず弾かれる）。
 
@@ -201,7 +201,7 @@ session ID の用語と型（混同防止）:
 Python プロセスは生きているが Rust が単独でクラッシュ / デバッガで落とされた場合、Python 側に半死の古い接続が残り、新しい Rust が接続できない事故が起こる。これを避けるため:
 
 - **Phase 7 まで**: Python サーバは `Hello` 受領時に **トークンが一致すれば既存接続を強制切断して新規を受け入れる**。
-- **Phase 8 attach mode 更新後**: 既存接続の全面置換ではなく、multi-client broadcast を維持したまま dead connection だけを刈り取る。詳細は [phase-8-python-helper-direct-api.md §0.1.2](./phase-8-python-helper-direct-api.md) の B1 / B3 と [§8](./phase-8-python-helper-direct-api.md) の DoD を source of truth とする。
+- **Phase 8 attach mode 更新後**: 既存接続の全面置換ではなく、multi-client broadcast を維持したまま dead connection だけを刈り取る。詳細は [python-helper-direct-api.md §0.1.2](./python-helper-direct-api.md) の B1 / B3 と [§8](./python-helper-direct-api.md) の DoD を source of truth とする。
 - 加えて WebSocket の ping/pong を実施する（`ping_interval=15` 秒、`ping_timeout=30` 秒）。Ping 送信後 30 秒以内に Pong がなければ接続を破棄（KP 2 回欠損相当）。
 - 強制切断時は古い側に `Error{reason: "superseded"}` を送って閉じる。
 

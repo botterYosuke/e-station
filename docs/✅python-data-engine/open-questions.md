@@ -10,7 +10,7 @@
    - (c) ハイブリッド（dev は b、リリースは a）
 
 2. ~~**Python プロセスのライフサイクル**~~
-   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は [phase-8-python-helper-direct-api.md §0.1](./phase-8-python-helper-direct-api.md)。
+   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は [python-helper-direct-api.md §0.1](./python-helper-direct-api.md)。
 
 ## B. IPC
 
@@ -62,4 +62,4 @@
 12. ~~**E2E テスト自動化の運用方針**~~ (Phase 7 T3 で発生)
     - **決定済み（Phase 8 着手前, 2026-05-01）**: HTTP 依存の bash E2E は pytest helper ベースへ置換し、`s55_mode_startup_smoke.sh` と `smoke.sh` だけを GUI/起動監視用の smoke として残す。
     - 残す 2 本は毎 PR の必須ゲートではなく、**scheduled CI または release 前 manual smoke** として扱う。
-    - 詳細は [phase-8-python-helper-direct-api.md §2.2](./phase-8-python-helper-direct-api.md) と [§6.4](./phase-8-python-helper-direct-api.md) を参照。
+    - 詳細は [python-helper-direct-api.md §2.2](./python-helper-direct-api.md) と [§6.4](./python-helper-direct-api.md) を参照。

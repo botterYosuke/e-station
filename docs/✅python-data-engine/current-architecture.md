@@ -6,7 +6,7 @@
 > この文書は **2026-04-24 時点の調査スナップショット**。
 > Phase 1〜7 の実装完了後は現状とズレるため、Phase 8 を検討するときの最新 baseline は
 > [implementation-plan.md](./implementation-plan.md) の完了済みフェーズ、
-> [phase-8-python-helper-direct-api.md](./phase-8-python-helper-direct-api.md) の §1〜§2、
+> [python-helper-direct-api.md](./python-helper-direct-api.md) の §1〜§2、
 > および [spec.md](./spec.md) の現行 IPC 仕様を参照すること。
 
 ## 全体構成

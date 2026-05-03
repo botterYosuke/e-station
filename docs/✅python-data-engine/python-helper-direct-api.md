@@ -638,7 +638,7 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 
 - [ ] §0.1 の前提条件（helper は server を bind しない / attach mode 採用 / NautilusRunner 二重起動禁止 / 協調動作非サポート）を README または CLAUDE.md に追記
 - [ ] [open-questions.md](./open-questions.md) の Q2（Python プロセスのライフサイクル管理）項目をクローズ済みに更新（attach mode で「外部 helper から GUI engine を駆動する」が可能になった旨を明記）
-- [ ] `implementation-plan.md` 末尾に「## フェーズ 8（→ phase-8-python-helper-direct-api.md 参照）」スタブ節を追加する
+- [ ] `implementation-plan.md` 末尾に「## フェーズ 8（→ python-helper-direct-api.md 参照）」スタブ節を追加する
 - [ ] examples で書く buy_and_hold の callback 形 1 本を最終確認
 
 **完了条件**: helper API 形（contextmanager + callback + mode auto-detect）が確定し、Phase 8.1 着手の障害がない。
@@ -962,7 +962,7 @@ Phase 8 シリーズ完了時点で：
 
 - [spec.md](./spec.md) — Rust ↔ Python 境界仕様
 - [archive/refactor-rust-python-boundary-2026-05-01.md](./archive/refactor-rust-python-boundary-2026-05-01.md) — depth/price 正規化の責務移動（別案件）
-- [implementation-plan.md](./implementation-plan.md) — フェーズ 0〜7 の実装計画（Phase 8.0 タスクとして「`implementation-plan.md` 末尾に「## フェーズ 8（→ phase-8-python-helper-direct-api.md 参照）」スタブ節を追加する」を含める）
+- [implementation-plan.md](./implementation-plan.md) — フェーズ 0〜7 の実装計画（Phase 8.0 タスクとして「`implementation-plan.md` 末尾に「## フェーズ 8（→ python-helper-direct-api.md 参照）」スタブ節を追加する」を含める）
 - [src/replay_api.rs](../../src/replay_api.rs) — 廃止対象 (2,943 L)
 - [src/api/order_api.rs](../../src/api/order_api.rs) — 廃止対象 (3,490 L)
 - [src/api/agent_api.rs](../../src/api/agent_api.rs) — 廃止対象 (323 L)
