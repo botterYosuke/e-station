@@ -2,6 +2,8 @@
 
 > 管理ポリシー: `spec.md §6` の不変条件が増減したら本表を同時に更新すること。
 > CI: `python/tests/test_invariant_tests_doc.py` で本ファイルの存在と不変条件 ID の網羅を assert する。
+>
+> **Phase 8（2026-05-03 完了）注記**: 表中の `src/api/order_api.rs` は Phase 8 で削除済み。Rust 側ガード（C-H4 / C-M3 / C-M5 等）は HTTP path 専用の防壁だったため Phase 8 で消滅した（GUI 発注は元から HTTP を経由しないため挙動変更なし）。これらのテストはリポジトリ履歴上の「旧 HTTP path レビュー時の記録」として残置。replay モード reject は engine state machine の `EngineBusy` event に置き換わっている。
 
 | 不変条件 ID | 説明 | テストファイル | 関数名 | ステータス |
 |---|---|---|---|---|

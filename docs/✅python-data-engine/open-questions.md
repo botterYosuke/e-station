@@ -60,6 +60,14 @@
     - プロキシ資格情報以外に `keyring` crate を使っている機能が無いか。無ければフェーズ 5 で依存削除候補、ある場合は Rust 側に残す。着手前に要 grep 確認。
 
 12. ~~**E2E テスト自動化の運用方針**~~ (Phase 7 T3 で発生)
-    - **決定済み（Phase 8 着手前, 2026-05-01）**: HTTP 依存の bash E2E は pytest helper ベースへ置換し、`s55_mode_startup_smoke.sh` と `smoke.sh` だけを GUI/起動監視用の smoke として残す。
-    - 残す 2 本は毎 PR の必須ゲートではなく、**scheduled CI または release 前 manual smoke** として扱う。
-    - 詳細は [python-helper-direct-api.md §2.2](./python-helper-direct-api.md) と [§6.4](./python-helper-direct-api.md) を参照。
+    - **決定済み・実施済み（Phase 8.2 完了, 2026-05-03）**: HTTP 依存の bash E2E（s56〜s83, s90, tachibana_* 11 ファイル）を削除。`smoke.sh` のみ起動監視用として維持。
+    - `scripts/replay_dev_load.sh` 削除済み。`scripts/run-replay-debug.sh` は DEPRECATED コメントを追記済み（HTTP API ポート 9876 依存のため機能しない）。
+    - 新たな E2E は `pytest + python -m engine.replay_session run` で代替。詳細は [python-helper-direct-api.md](./python-helper-direct-api.md)。
+
+13. ~~**Phase 8 helper API 設計の未決 Q (Q2/Q3b/Q8/Q10/Q11)**~~
+    - **すべて決定済み・実装済み（Phase 8 完了, 2026-05-03）**:
+      - Q2 (Python プロセス LCM): attach mode / in-process mode を自動判定して解決済み
+      - Q3b (GUI フォームのデフォルト値記憶): Phase 8.1c でフォーム実装、記憶方針は前回値保持なし（シンプル設計）
+      - Q8 (session ファイルパス): `data::data_path("engine-session.json")` を Rust が書き、Python が `platformdirs` で同パスを解決。実装済み（`engine-client/src/session_file.rs`, `python/engine/replay_session.py`）
+      - Q10 (state guard 範囲): `ReplayState`/`LiveState` 2 つの直交 state machine で実装済み
+      - Q11 (session ファイル書き込み判断): 常に書く（handshake 成立後に atomic write）。実装済み

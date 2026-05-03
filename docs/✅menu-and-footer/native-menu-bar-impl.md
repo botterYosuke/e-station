@@ -12,8 +12,14 @@
 
 - **OS ネイティブのメニューバー**（タイトルバー直下に表示される Win32 / macOS 標準メニュー）をメインウィンドウに追加する
 - **live モード**: `File > 開く...` / `File > 名前を付けて保存...`
-- **replay モード**: `File > ストラテジーを開く...`
+- **replay モード**: `File > Replay を開始...`（Phase 8 で `ストラテジーを開く...` から統合）
 - いずれのモードにも `File > 終了` を配置する
+
+> **Phase 8 更新（python-helper-direct-api、2026-05）**: 旧 `File > ストラテジーを開く...`
+> は廃止し、`File > Replay を開始...` フォーム（instrument / start / end / granularity /
+> strategy_file / initial_cash 入力）に統合した。本記録の以下の節は元の実装時点の挙動を
+> 残しているが、現行 UI ではフォームから一括投入する形に置き換わっている
+> （`src/modal/replay_form.rs` 参照）。
 
 ### 非要件（スコープ外）
 

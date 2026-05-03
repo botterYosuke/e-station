@@ -23,9 +23,13 @@
 | 3 | 残り取引所 Python 移植 | ✅ 完了 (2026-04-24) |
 | 4 | ヒストリカルデータ bulk download 移植 | ✅ 完了 (2026-04-24) |
 | 5 | Rust から取引所コード削除 | ✅ 完了 (2026-04-25) |
-| 6 | 配布・運用整備 | 進行中 |
-| 7 | UI リグレッション修復・E2E 検証の明文化 | ✅ 完了 (2026-04-25) — T1.3 後半 / T4.c (Windows cold-start) / T4.d (AppImage/Flatpak 判断) すべてクローズ。macOS/Linux cold-start CI 計測のみ別 PR で追加予定 → [`phase-7-ui-regression-remediation.md`](./phase-7-ui-regression-remediation.md) |
-| 8 | Python helper class 直呼び / attach mode / Rust HTTP API 廃止 | 設計中 — [`python-helper-direct-api.md`](./python-helper-direct-api.md) |
+| 6 | 配布・運用整備 | ✅ 完了 (2026-04-25) |
+| 7 | UI リグレッション修復・E2E 検証の明文化 | ✅ 完了 (2026-04-25) — [`phase-7-ui-regression-remediation.md`](./archive/phase-7-ui-regression-remediation.md) |
+| 8.1a | Python helper class + CLI (in-process mode) | ✅ 完了 (2026-05-03) |
+| 8.1b | attach mode: multi-client / session file / EngineBusy | ✅ 完了 (2026-05-03) |
+| 8.1c | GUI replay 起動フォーム | ✅ 完了 (2026-05-03) |
+| 8.2 | E2E bash スクリプト削除 / 廃止 | ✅ 完了 (2026-05-03) |
+| 8.3 | Rust HTTP API（ポート 9876）完全削除 | ✅ 完了 (2026-05-03) |
 
 ---
 

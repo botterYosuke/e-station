@@ -1,5 +1,13 @@
 # 立花証券統合: 仕様
 
+> **Phase 8（2026-05-03 完了）注記**: 本仕様内に記載されている再ログイン HTTP path（`/api/sidebar/tachibana/request-login` 等）は Rust HTTP API 廃止（Phase 8）で消滅した。現在の正規ルート:
+> - **GUI**: `Message::RequestTachibanaLogin` → `Command::RequestVenueLogin` を IPC（ポート 19876）に直接送信。サイドバー / バナーボタン経路は変更なし
+> - **スクリプト・E2E**: 新設 Python helper `engine.live_session.LiveSession.login(user_id, password, is_demo, second_password=None)` を呼ぶ（内部で同じ IPC コマンドを発行）
+> - **U5 E2E**（`tests/e2e/tachibana_relogin_after_cancel.sh`）: HTTP 依存だったため Phase 8 で pytest 版へ移行
+> - `/api/test/tachibana/cancel-helper` / `/api/test/tachibana/delete-session` は debug build からも削除（テスト用ヘルパは pytest fixture 経由に統一）
+>
+> 本仕様文書のうち `/api/sidebar/*` / `/api/test/*` を参照する箇所は **Phase 8 以前の旧設計**として残置。
+
 ## 1. ゴール
 
 本アプリの venue として立花証券 e支店 API を追加し、**日本株のチャート閲覧体験を既存暗号資産 venue と同じ UI で提供する**。Phase 1 はリードオンリー（閲覧のみ）。
@@ -122,4 +130,4 @@
 
 FD 情報コード未確定時に備えた縮退受け入れパス（日足 chart + ticker stats のみ）。2026-04-26 にゲート解消したため適用機会なく廃止。本節は意思決定の履歴として残し、新規参照は禁止。
 
-> **T35-U5 E2E 注記**: U5 E2E (`tests/e2e/tachibana_relogin_after_cancel.sh`) は `src/replay_api.rs` 着地まで CI で `exit 77` skip 扱いとし、A 系受け入れ判定からは除外する（HTTP API 着地後に完走、T3.5 Step F 整合）。
+> **T35-U5 E2E 注記**: U5 E2E (`tests/e2e/tachibana_relogin_after_cancel.sh`) は当初 `src/replay_api.rs` 着地待ちで CI 上 skip 扱い (`exit 77`) としていた。**Phase 8（2026-05-03）で HTTP API ごと廃止**されたため、本 E2E は pytest + `LiveSession.login()` ベースに移行した（A 系受け入れ判定の対象は IPC 経由の再ログインフローに更新）。

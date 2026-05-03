@@ -73,8 +73,9 @@ Match the failure to a known pattern before changing anything.
 **Rust / flowsurface 固有の環境チェック:**
 
 ```bash
-# HTTP API が起動しているか確認（e2e-mock ビルド時のみ起動）
-curl -s http://localhost:9876/health 2>/dev/null || echo "API not running"
+# Python engine WS IPC が起動しているか確認（GUI 起動時のみ）
+# 注: Phase 8.3 で HTTP API（旧 :9876）は廃止。WS IPC :19876 のみ残存
+powershell -c "Test-NetConnection -ComputerName 127.0.0.1 -Port 19876 -InformationLevel Quiet" 2>/dev/null || echo "engine WS not running"
 
 # ビルド状態確認（コンパイルエラーの有無）
 cargo check 2>&1 | tail -5

@@ -4,10 +4,18 @@
 対象: e-station (Flowsurface v0.8.7)
 
 > この文書は **2026-04-24 時点の調査スナップショット**。
-> Phase 1〜7 の実装完了後は現状とズレるため、Phase 8 を検討するときの最新 baseline は
-> [implementation-plan.md](./implementation-plan.md) の完了済みフェーズ、
-> [python-helper-direct-api.md](./python-helper-direct-api.md) の §1〜§2、
-> および [spec.md](./spec.md) の現行 IPC 仕様を参照すること。
+> Phase 1〜8 の実装完了後（2026-05-03）は現状と大きくズレている。最新の構成は以下を参照：
+> - [implementation-plan.md](./implementation-plan.md) — Phase 0〜8 の完了状態
+> - [python-helper-direct-api.md](./python-helper-direct-api.md) — Phase 8 実装詳細（✅ 完了）
+> - [spec.md](./spec.md) — 現行 IPC 仕様
+>
+> **主な変更点（Phase 5〜8）**:
+> - `exchange/` crate から全取引所コード削除済み（Phase 5）
+> - `src/replay_api.rs` / `src/api/` ディレクトリ（HTTP API port 9876）削除済み（Phase 8.3）
+> - `python/engine/replay_session.py` 新規追加（`ReplaySession` / `LiveSession` / `_AttachClient`）（Phase 8.1）
+> - `engine-client/src/session_file.rs` 新規追加（Phase 8.1b）
+> - `python/engine/server.py` が multi-client broadcast / state machine 対応（Phase 8.1b）
+> - `SCHEMA_MINOR` = 9（`ClientConnected` / `ClientDisconnected` / `EngineBusy` イベント追加）
 
 ## 全体構成
 
@@ -78,7 +86,11 @@ IPC 計画で取りこぼしがないよう一覧化する（Python 移管の初
 - `python/` は **空ディレクトリ**。Cargo にも `pyo3` 等の Python 連携依存は **無し**。
 - 既存の subprocess・IPC・HTTP ローカルサーバ等の Rust↔Python 接続コードは存在しない。
 
-> 注: この記述は **当時の状態**。現在は `python/engine/`、`engine-client/`、Rust↔Python WS IPC が実装済み。
+> 注: この記述は **当時の状態**。2026-05-03 時点では以下が実装済み：
+> - `python/engine/` — WS IPC サーバー、5 取引所ワーカー、NautilusRunner、replay/live セッション helper
+> - `engine-client/` — Rust WS クライアント crate（handshake / process 管理 / session_file）
+> - Rust↔Python WS IPC（SCHEMA_MAJOR=3, SCHEMA_MINOR=9）が本番稼働中
+> - HTTP API（ポート 9876）は廃止済み。新規ルートは `python -m engine.replay_session run`
 
 ## 主要依存
 - UI: `iced`, `iced_wgpu`, `palette`, `rodio`

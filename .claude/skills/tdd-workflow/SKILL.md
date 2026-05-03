@@ -356,11 +356,13 @@ cargo watch -x "test -p flowsurface-exchange"
 
 ## E2E テスト
 
-GUI・エンドツーエンドのテストは **e2e-test スキル**を使用すること。
-このスキルは HTTP API 経由でアプリを操作する。
+GUI・エンドツーエンドのテストは **e2e-testing スキル**を使用すること。
+このスキルは Python helper（`ReplaySession` / `LiveSession`）+ pytest で
+WS IPC（:19876）に attach してアプリを操作する。HTTP API（旧 :9876）は
+Phase 8.3 で廃止された。
 
 ```
-/e2e-test  # e2e-test スキルを起動
+/e2e-testing  # e2e-testing スキルを起動
 ```
 
 ---

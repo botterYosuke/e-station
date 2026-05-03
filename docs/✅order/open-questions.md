@@ -59,13 +59,15 @@
 - **採用した根拠**: `.claude/skills/tachibana/samples/e_api_event_receive_tel.py`（行 534–568）に EC フレーム仕様（`^A`/`^B`/`^C` デリミタ、p_evt_cmd 値一覧、EC=注文約定通知）が Python コメントで完全に記載されており、Phase O2 実装（`tachibana_event.py._parse_ec_frame`）はこれを根拠として完了済み
 - 実 frame キャプチャ（デモ環境接続が可能になった際）は任意で追加可能だが、実装に必須ではない
 
-### Q6. 発注 HTTP API の認証 ✅ 確定（2026-04-25）
+### Q6. 発注 HTTP API の認証 ✅ 確定（2026-04-25）→ Phase 8 で論点消滅
 
 **決定**: **Phase O0 は既存トークンガード踏襲。Phase O1 完了後に再評価**。
 
 - 既存 `/api/replay/*` と同じ Bearer token（localhost-only バインドを維持）
 - 追加 confirmation token は見送り（localhost-only の前提下では攻撃面が限定的）
 - O1 完了後: 訂正・取消まで実装した時点でセキュリティ要件を再確認し、必要なら変更
+
+**Phase 8（2026-05-03 完了）追記**: HTTP API 全廃により本論点は消滅。現在の認証は IPC（ポート 19876）の HMAC token 認証のみ（Python helper の attach mode は `engine-session.json` から token を共有）。
 
 ### Q7. flowsurface 側の冪等性マップ実装の写し方 ✅ 確定（2026-04-25）
 
@@ -103,19 +105,11 @@
 
 ---
 
-### Q11. 発注 E2E における第二暗証番号のヘッドレス注入方法（未決定）
+### Q11. 発注 E2E における第二暗証番号のヘッドレス注入方法 ✅ Phase 8 で実質的に解決
 
-**背景**: `.env` にデモクレデンシャルが揃い（2026-04-28 確認）、ログイン E2E (`tests/e2e/tachibana_demo_login.sh`) は実行可能。しかし発注 E2E は第二暗証番号が必要で、現在は iced modal 経由でしか入力できない設計（Q1 案 D）のためヘッドレス実行できない。
+**背景**: `.env` にデモクレデンシャルが揃い（2026-04-28 確認）、ログイン E2E は実行可能。発注 E2E は第二暗証番号が必要だが、Phase 8 で新設した Python helper `engine.live_session.LiveSession.login()` で `second_password` を引数として渡せるため、案 A 相当（pytest + Python helper による直接 IPC 駆動）が正規ルートとなった。
 
-**選択肢**:
-
-| 案 | 概要 | メリット | デメリット |
-|---|---|---|---|
-| **A** | 専用スクリプトが Python エンジンに直接 WebSocket 接続し `SetSecondPassword` + `SubmitOrder` を送信 | GUI 不要・CI 化可能 | エンジン直結なので Rust HTTP 層をスキップ |
-| **B** | `DEV_TACHIBANA_SECOND_PASSWORD=xxx` env を Python 側 dev fast path として追加（ログインの `FLOWSURFACE_DEV_TACHIBANA_LOGIN_ALLOWED=1` と同じ思想） | フルスタック E2E が CI 化可能 | env に第二暗証番号が残る（開発用途限定でも管理コスト） |
-| **C** | E2E スクリプトは Rust アプリ＋GUI を起動し、第二暗証番号は人手で modal に入力してから curl で発注 | 変更ゼロ | 自動化不可・手動操作が必要 |
-
-**現時点のデフォルト**: 案 C（手動 GUI）で先に動作確認し、CI 自動化が必要になった時点で案 A または B を選択する。
+**現状（Phase 8 以降）**: pytest + `LiveSession` 経由でフルスタック E2E がヘッドレス実行可能。旧 `tests/e2e/*.sh`（bash + curl）は Python helper 移行で更新済み（implementation-plan.md の T0.8 / T1.6 該当行参照）。env `DEV_TACHIBANA_SECOND_PASSWORD` も実装済み（T0.8 で追加）。
 
 ---
 

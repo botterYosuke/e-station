@@ -33,7 +33,11 @@
 | モード | メニュー項目 |
 |--------|------------|
 | live | `File > 開く...` / `File > 名前を付けて保存...` / `File > 終了` |
-| replay | `File > ストラテジーを開く...` / `File > 終了` |
+| replay | `File > Replay を開始...` / `File > 終了` |
+
+> **Phase 8 更新（python-helper-direct-api）**: 旧 `File > ストラテジーを開く...` は廃止し、
+> `File > Replay を開始...` フォーム（instrument / start / end / granularity / strategy_file /
+> initial_cash 入力）に統合された（[python-helper-direct-api.md §5 Phase 8](../✅python-data-engine/python-helper-direct-api.md)）。
 
 - `File > 開く...`: 任意の `.json` を選択してレイアウトを即座に反映（バリデーション付き）
 - `File > 名前を付けて保存...`: 現在のレイアウトを任意のパスへ書き出し

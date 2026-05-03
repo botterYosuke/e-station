@@ -55,7 +55,9 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 [docs/✅order/](../✅order/) からの引き取り:
 
-- `POST /api/order/submit` `/api/order/modify` `/api/order/cancel` を REPLAY モード時に `SimulatedExchange` 経由にルーティング
+- 仮想注文 submit/modify/cancel を REPLAY モード時に `SimulatedExchange` 経由にルーティング
+  （Phase 7 までは `POST /api/order/{submit,modify,cancel}` HTTP、Phase 8 以降は
+  `engine.replay_session.ReplaySession.submit_order()` 等の Python helper / GUI 内部経路）
 - `python/engine/order_router.py` 新設で live / replay を分岐:
   - live → `tachibana_orders.submit_order(...)` → 立花 HTTP
   - replay → `BacktestExecutionEngine.process_order(...)` → SimulatedExchange
@@ -69,11 +71,15 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 - 監査ログ WAL は `tachibana_orders_replay.jsonl` に分離
 - `client_order_id` の名前空間も live / replay で分離
 
-#### 2.2.4 既存 HTTP API の差し替え
+#### 2.2.4 既存 HTTP API の差し替え（Phase 8 で全廃止）
 
-- 既存 `/api/replay/order` `/api/replay/portfolio` を nautilus `BacktestEngine` 経由で実装（API 契約は変えない）
-- 既存 `FlowsurfaceEnv`（Gymnasium）は HTTP 越しなのでそのまま動く
-- `POST /api/agent/narrative` を新設（H5）
+- N1 当時は `/api/replay/order` / `/api/replay/portfolio` 等を nautilus `BacktestEngine` 経由で実装（HTTP API 9876）
+- **Phase 8（python-helper-direct-api）で Rust 側 HTTP API（ポート 9876）は全廃止**。
+  `src/replay_api.rs` / `src/api/order_api.rs` / `src/api/agent_api.rs` を削除し、
+  すべての制御経路は Python helper（`engine.replay_session.ReplaySession` /
+  `engine.live_session.LiveSession`）か GUI 内部経路に集約した
+- 既存 `FlowsurfaceEnv`（Gymnasium）は Python helper を直接呼ぶ形に置き換え
+- ナラティブ書き込みは `POST /api/agent/narrative` を廃止し、Python 内 narrative store に直接記録する
 
 #### 2.2.5 N1.11〜N1.16 追加スコープ（2026-04-28 確定、UI 役割境界の確定に伴う）
 
@@ -91,6 +97,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
   を追加。iced 側 chart pane に execution layer / signal layer の 2 レイヤーを重ねる。
   `signal_kind` の wire 表現（enum vs `kind: String`）は [Q13](./open-questions.md#q13)
   で確定するまで暫定 enum 実装、後方互換性を破らない
+- **N1.11（補足・Phase 8）** 速度制御の入口は `POST /api/replay/control` から `ReplaySession.set_speed()` Python helper に置き換え。IPC `Command::SetReplaySpeed` 自体は維持
 - **N1.13（新設）** 起動時モード固定の CLI 引数 `--mode {live|replay}` を追加（必須・
   デフォルトなし、D8 起動時固定の踏襲、デフォルトなし）。Hello に mode を載せて
   Python 側 NautilusRunner に渡し、mode と `StartEngine.engine` の不一致は `ValueError`
@@ -219,19 +226,27 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 ## 4. 公開 API（不変条件）
 
-`POST /api/order/*` は [docs/✅order/](../✅order/) で定義済み。本計画 N1/N2 でも **API 契約・冪等性規約・reason_code 体系を変更しない**。N1 では REPLAY モード時のみ Python ディスパッチャが SimulatedExchange に流す。
+> **Phase 8 更新（python-helper-direct-api、2026-05）**: 本節で N1 当時に定義した
+> Rust 側 HTTP API（ポート 9876、`/api/replay/*` / `/api/order/*` / `/api/agent/*`）は
+> すべて廃止された（[python-helper-direct-api.md](../✅python-data-engine/python-helper-direct-api.md) §3）。
+> 制御経路は Python helper（`engine.replay_session.ReplaySession` /
+> `engine.live_session.LiveSession`）に集約され、IPC `Command::*` / `EngineEvent::*`
+> 自体は維持される（GUI ↔ engine の WebSocket、ポート 19876）。
+> 以下の表は historical reference として残す。
 
-リプレイ・ナラティブ系の API:
+`POST /api/order/*` は [docs/✅order/](../✅order/) で定義済み。本計画 N1/N2 でも **IPC 契約・冪等性規約・reason_code 体系を変更しない**。N1 では REPLAY モード時のみ Python ディスパッチャが SimulatedExchange に流す。
 
-| エンドポイント | body | IPC 写像 |
+リプレイ・ナラティブ系の API（Phase 7 まで）と Phase 8 以降の代替:
+
+| エンドポイント (Phase 7 まで) | Phase 8 以降の代替 | IPC 写像（不変） |
 |---|---|---|
-| `POST /api/replay/order` | — | — |
-| `GET /api/replay/portfolio` | — | — |
-| `GET /api/replay/state` | — | — |
-| `POST /api/replay/load` | `{instrument_id, start_date, end_date, granularity: "Trade"\|"Minute"\|"Daily"}` | `Command::LoadReplayData` |
-| `POST /api/replay/start` | `{instrument_id, start_date, end_date, granularity, strategy_id, initial_cash, strategy_file, strategy_init_kwargs?: object}` | `Command::StartEngine { engine: Backtest, strategy_id, config }` |
-| `POST /api/replay/control` | `{action: "speed", multiplier: 1\|10\|100}` | `Command::SetReplaySpeed { multiplier }` |
-| `POST /api/agent/narrative` | — | — |
+| `POST /api/replay/order` | `ReplaySession.submit_order()` | `Command::SubmitOrder` (venue=replay) |
+| `GET /api/replay/portfolio` | `ReplaySession.portfolio` | — |
+| `GET /api/replay/state` | `ReplaySession.status` | — |
+| `POST /api/replay/load` (`{instrument_id, start_date, end_date, granularity}`) | `ReplaySession.load(...)` | `Command::LoadReplayData` |
+| `POST /api/replay/start` (`{... strategy_file, strategy_init_kwargs?}`) | `ReplaySession.run(...)` | `Command::StartEngine { engine: Backtest, strategy_id, config }` |
+| `POST /api/replay/control` (`{action: "speed", multiplier}`) | `ReplaySession.set_speed(multiplier)` | `Command::SetReplaySpeed { multiplier }` |
+| `POST /api/agent/narrative` | Python 内 narrative store に直接書き込み | — |
 
 注記:
 - `POST /api/replay/order`: nautilus `OrderFactory` で発注 → `BacktestEngine` 即時約定判定。legacy パス。新規実装は `/api/order/submit` を REPLAY モードで使う方を推奨。
@@ -243,7 +258,9 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 - `POST /api/replay/control`: **N1 で新設**。**N1 で受理する action は `"speed"` のみ**。`pause` / `seek` を含む他 action は **400 Bad Request**。`play` は提供しない（streaming ループの開始は `/api/replay/start` に統一）。
 - `POST /api/agent/narrative`: **N1 で新設**（H5）。nautilus `Strategy` フックから Python が叩く。
 
-**発注 UI の所在（Q7 決定）**: 発注入力 UI は Python tkinter に統一。iced は監視・表示のみ。
+**発注 UI の所在（Q7 決定、Phase 8 で更新）**: 発注入力 UI は GUI 側ネイティブ
+（`File > Replay を開始...` フォーム / 手動発注 modal）と Python helper（pytest 等の
+プログラマティック経路）に統一。iced は監視・表示のみで、Python tkinter 別 UI は実装しない。
 
 ## 5. 依存方針（確定版、2026-04-26）
 

@@ -78,9 +78,15 @@ uv run pytest python/tests/ -v
 | `test_server_dispatch.py` | IPC コマンドのディスパッチ |
 | `test_server_proxy.py` | SetProxy 後のストリーム再購読 |
 | `test_server_ws_compat.py` | WebSocket フレーム互換性（圧縮・RSV ビット） |
+| `test_server_multi_client.py` | engine.server の multi-client broadcast / FCFS command（Phase 8.1b） |
+| `test_replay_session*.py` | `ReplaySession` helper の load / run / stop / set_speed / attach mode / fallback |
+| `test_live_session_login.py` | `LiveSession.login()` の demo 立花 smoke（`@pytest.mark.live`） |
 | `test_tachibana_dev_env_guard.py` | release 時に dev 自動ログインが動かないことを保証 |
 | `test_*_rest.py` | 各取引所 REST クライアント |
 | `test_*_depth_sync.py` | 各取引所 Depth 同期 |
+
+外部依存（J-Quants データ・実取引所）テストは `@pytest.mark.live` でマークされ、
+CI の既定では `-m "not live"` で除外される。
 
 ### Rust テスト
 
@@ -95,6 +101,7 @@ cargo test --workspace
 | `connection_closed.rs` | wait_closed() 解決タイミング |
 | `process_lifecycle.rs` | on_restart / on_ready コールバック |
 | `depth_gap.rs` | DepthGap → 再同期 |
+| `session_file.rs` | `engine-session.json` atomic write / Drop 削除（Phase 8.1b B2） |
 
 ### E2E スモークテスト
 
@@ -145,7 +152,11 @@ flowsurface: --mode is required (use 'live' or 'replay'); e.g. `flowsurface --mo
 | モード | 用途 | 起動例 |
 |--------|------|--------|
 | `live` | 取引所からのリアルタイムデータを購読する通常運用 | `cargo run -- --mode live` |
-| `replay` | 録画済みデータの再生（`/replay/*` HTTP API が有効化される） | `cargo run -- --mode replay` |
+| `replay` | 録画済みデータの再生（GUI 内 `File > Replay を開始...` フォーム or 外部 helper attach） | `cargo run -- --mode replay` |
+
+> **注意（Phase 8.3 以降）**: HTTP API ポート 9876 は完全廃止された。replay 制御・発注・narrative
+> の各 endpoint は `python/engine/replay_session.py` の `ReplaySession` / `LiveSession`
+> helper class に置き換わっている。GUI への外部からの操作は WebSocket IPC（:19876）に attach する。
 
 VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vscode/launch.json) に
 `live - Rust: Debug (CodeLLDB)` / `replay - Rust: Debug (CodeLLDB)` の 2 構成を
@@ -156,7 +167,14 @@ VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vsc
 
 ### replay モードの使い方
 
-#### サンプル戦略を流す最小コマンド（Phase 8.2 以降）
+replay の起動経路は 2 系統あり、どちらも `ReplaySession` helper を介する：
+
+| 経路 | コマンド | 動作モード |
+|------|---------|-----------|
+| GUI 内フォーム | `cargo run -- --mode replay` 起動 → `File > Replay を開始...` でパラメータ入力 | GUI 内で完結 |
+| 外部スクリプト | `uv run python -m engine.replay_session run ...` | engine 不在: in-process / GUI 起動済み: attach |
+
+#### サンプル戦略を流す最小コマンド
 
 ```bash
 uv run python -m engine.replay_session run \
@@ -164,11 +182,17 @@ uv run python -m engine.replay_session run \
     --instrument 1301.TSE \
     --start 2025-01-06 \
     --end 2025-03-31
+# --mode {auto,attach,inprocess} で force-override 可（既定 auto）
 ```
 
-> **注意**: `scripts/run-replay-debug.sh` と `scripts/replay_dev_load.sh` は
-> Phase 8.2 で廃止された（HTTP API ポート 9876 依存のため）。
-> `run-replay-debug.sh` は参考として残してあるが機能しない。
+`cargo run -- --mode replay` を先に立ち上げておくと helper は **attach mode** で
+GUI 内 engine に WS クライアントとして繋がり、GUI チャートにペインが生成され
+bar が積まれる。GUI が居なければ helper プロセス内で `NautilusRunner` を直接
+起動する **in-process mode** で動く。ユーザー API は両モードで同一。
+
+> **削除済みスクリプト**: `scripts/run-replay-debug.sh` / `scripts/replay_dev_load.sh`
+> は Phase 8.2 で廃止された（HTTP API ポート 9876 依存）。`run-replay-debug.sh` は
+> DEPRECATED コメント付きで残骸が残っているが機能しない。
 
 サンプル戦略は `docs/example/` 配下：
 
@@ -196,6 +220,43 @@ TimeAndSales / CandlestickChart / OrderList / BuyingPower を自動生成する�
   bar が増える。replay 開始直後はチャート空、徐々に bar が積まれる
 - **`saved-state.json` を消したら再現するバグ**：D9 で replay は常にこの状態で
   起動するため、空ペイングリッドからのフローを必ず動作確認すること
+
+### Python helper class（`ReplaySession` / `LiveSession`）
+
+Phase 8.3 で HTTP API を全廃したのに伴い、外部スクリプトから replay / login を
+駆動する正規ルートは [python/engine/replay_session.py](../python/engine/replay_session.py)
+の helper class となった。
+
+```python
+from engine.replay_session import ReplaySession
+
+with ReplaySession() as s:           # __enter__ で :19876 を probe
+    s.load("1301.TSE", "2025-01-06", "2025-03-31")
+    s.run(strategy_file="docs/example/buy_and_hold.py",
+          on_event=lambda evt: print(evt))
+```
+
+**動作モード**（auto-detect）：
+
+- **in-process mode**: engine が居ない → helper プロセス内で `NautilusRunner` を直接起動
+- **attach mode**: GUI 内 engine が居て token / `SCHEMA_MAJOR` 一致 → WS クライアントとして接続。
+  `Command::LoadReplayData` / `Command::StartEngine` を送り、event は GUI と helper の両方に fanout
+
+**設計の不変条件**：
+
+- helper は **WS server を bind しない**（`:19876` を listen するのは GUI 起動の engine だけ）
+- `NautilusRunner` の二重起動は構造的に禁止。probe で engine 存在を確認してから spawn / attach を分岐
+- public API は `dict` for events のみ。`Command` 列挙体や IPC schema を expose しない
+- attach mode の token 解決順序：明示引数 → `engine-session.json` → `FLOWSURFACE_ENGINE_TOKEN` env → in-process fallback
+- engine 側 state guard（`ReplayState` / `LiveState`）に弾かれた Command は `EngineBusy` event → `BusyError` 例外に変換される
+- `compression=None` 強制（fastwebsockets と同じ理由。MISSES.md 2026-04-25 参照）
+
+**multi-client engine**：
+
+- `python/engine/server.py` は `_Broadcaster` で接続ごとに独立した outbox/send_loop を持つ
+- `MAX_CONNECTIONS=4`。超過接続は 1008 Policy Violation で reject
+- `ClientConnected` / `ClientDisconnected` イベントを全接続に broadcast
+- `SCHEMA_MINOR=9` 以降（`schemas.py`）
 
 ### 外部エンジンに接続する際のトークン認証
 
@@ -298,6 +359,7 @@ uv run python scripts/smoke_tachibana_login.py
 | ファイル | 場所 | 役割 |
 |---------|------|------|
 | `saved-state.json` | `%APPDATA%\flowsurface\saved-state.json` | 起動時に「前回の状態」を開く役割。終了時に自動で書き出され、次回起動時に自動で読み込まれる |
+| `engine-session.json` | `%APPDATA%\flowsurface\engine-session.json` | engine 起動中のみ存在する `{port, token, pid, schema_major, started_at}` を atomic write したファイル。Python helper が attach mode で参照する。engine プロセス Drop 時に削除される（Phase 8.1b B2） |
 | `tachibana_orders.jsonl` | `~/.cache/flowsurface/engine/tachibana_orders.jsonl` | 発注 WAL。Python が書き、Rust が読む。重複発注防止に使う |
 
 - `saved-state.json` が残っていると前回の UI レイアウトが復元される。

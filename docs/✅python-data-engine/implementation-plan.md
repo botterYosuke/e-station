@@ -606,13 +606,30 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 ## フェーズ 8 — Python 単独モード化 / Rust HTTP API 廃止（attach mode 採用）
 
 > 詳細計画: [python-helper-direct-api.md](./python-helper-direct-api.md)
+> **✅ 完了 (2026-05-03)**
 
 **概要**: HTTP API（ポート 9876）を廃止し、Python `ReplaySession` / `LiveSession` helper class で直接 IPC を駆動するアーキテクチャに移行する。Rust GUI が起動中なら helper は attach mode（WS クライアント）、GUI なしなら in-process mode で `NautilusRunner` を直接呼ぶ。
 
-**サブフェーズ**:
-- Phase 8.0 — 設計確定（attach mode 前提条件の合意形成）
-- Phase 8.1a — Python helper class + CLI（in-process mode 先行）
-- Phase 8.1b — attach mode 実装（B1 multi-client → B2 session ファイル → B3 EngineBusy → B4 AttachClient）
-- Phase 8.1c — GUI replay 起動フォーム
-- Phase 8.2 — GUI 専用 endpoint 最小処置
-- Phase 8.3 — HTTP API 削除 + bash → pytest helper 一括置換
+**サブフェーズ（全完了）**:
+- Phase 8.0 — 設計確定（attach mode 前提条件の合意形成）✅
+- Phase 8.1a — Python helper class + CLI（in-process mode 先行）✅ (2026-05-03)
+- Phase 8.1b — attach mode 実装（B1 multi-client → B2 session ファイル → B3 EngineBusy → B4 AttachClient）✅ (2026-05-03)
+- Phase 8.1c — GUI replay 起動フォーム ✅ (2026-05-03)
+- Phase 8.2 — E2E bash スクリプト削除（s56〜s83, s90, tachibana_* 11 ファイル削除） ✅ (2026-05-03)
+- Phase 8.3 — HTTP API 削除（src/replay_api.rs, src/api/ ディレクトリ全削除） ✅ (2026-05-03)
+
+**主要成果物**:
+- `python/engine/replay_session.py`: `ReplaySession` + `LiveSession` + `_AttachClient`（1 ファイル構成）
+- `engine-client/src/session_file.rs`: `EngineSession` atomic write / delete
+- `src/modal/replay_form.rs`: `ReplayFormModal` GUI フォーム
+- `python/engine/server.py`: `_Broadcaster` multi-client fanout / `ReplayState` + `LiveState` state machine / `MAX_CONNECTIONS=4`
+- `python/engine/schemas.py`: `SCHEMA_MINOR` 9, `ClientConnected` / `ClientDisconnected` / `EngineBusy` イベント追加
+
+**使い方（Phase 8 以降の正規 CLI）**:
+```bash
+uv run python -m engine.replay_session run \
+    --strategy docs/example/buy_and_hold.py \
+    --instrument 1301.TSE \
+    --start 2025-01-06 \
+    --end 2025-03-31
+```

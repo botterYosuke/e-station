@@ -1,5 +1,11 @@
 # 立花注文機能: 仕様
 
+> **Phase 8（2026-05-03 完了）以降の経路**: Rust 側 HTTP API `/api/order/*`（ポート 9876）は完全廃止された。本仕様内に残る `POST /api/order/submit` 等の表記は **Phase 8 で廃止された旧 HTTP path 仕様**として読むこと。現在の正規ルートは以下の 2 経路に集約されている:
+> - **GUI（iced）**: `Action::SubmitOrder` → `Command::SubmitOrder` を IPC（WebSocket、ポート 19876）に直接送信。HTTP を経由しない（元から `/api/order/*` は経由していなかった）
+> - **スクリプト・E2E テスト**: 新設 Python helper `engine.live_session.LiveSession`（`login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`）を呼び出し、内部で同じ IPC コマンドを発行
+>
+> 旧 HTTP path 専用の防壁（`OrderGuardConfig` の rate limit / qty/yen cap、`/api/order/cancel-all` の `confirm: true` boolean 強制など）は HTTP 廃止と同時に消滅した。GUI 発注は元から HTTP を経由していなかったため挙動変更なし。reason_code 体系（§5.2）と nautilus 互換要件（§6）は IPC 経路でも引き続き有効。
+
 ## 1. ゴール
 
 1. **新規注文**: 現物・信用（制度／一般、新規／返済）の買・売を成行・指値・逆指値で発注できる
@@ -17,7 +23,7 @@
   - `data::config::tachibana::TachibanaCredentials.second_password` は **常に `None` のまま**（keyring に書かない。[architecture.md §5](./architecture.md#5-第二暗証番号の取扱い) Q1 確定）
   - 収集は iced modal（tkinter ではない）で発注時のみ。Python メモリ保持を有効化
 - 新規注文 API: `CLMKabuNewOrder`（現物のみ・成行のみ・買のみ・東証 `00`）
-- HTTP API `POST /api/order/submit` を Rust 側に新設
+- ~~HTTP API `POST /api/order/submit` を Rust 側に新設~~（Phase 8 で廃止。代わりに `Command::SubmitOrder` を IPC で発行する経路に統一）
 - 結果は同期的に Python から戻す（`venue_order_id`（= 立花 `sOrderNumber`）を含む）
 - 約定通知購読は **本フェーズでは行わない**（注文一覧ポーリングで状態確認）
 
@@ -25,11 +31,11 @@
 
 - `CLMKabuCorrectOrder` / `CLMKabuCancelOrder` / `CLMKabuCancelOrderAll`
 - `CLMOrderList` / `CLMOrderListDetail` で注文台帳取得
-- HTTP API:
-  - `POST /api/order/modify`（nautilus 用語に統一。立花の "correct" 用語は Python `_compose_request_payload` 内に閉じる）
-  - `POST /api/order/cancel`
-  - `POST /api/order/cancel-all`
-  - `GET /api/order/list`（フィルタ: `status` / `issue_code` / `date`）
+- ~~HTTP API~~（Phase 8 で全廃。下記は IPC `Command` / Python helper メソッドに置き換わった）:
+  - `Command::ModifyOrder` / `LiveSession.modify_order()`（nautilus 用語に統一。立花の "correct" 用語は Python `_compose_request_payload` 内に閉じる）
+  - `Command::CancelOrder` / `LiveSession.cancel_order()`
+  - `Command::CancelAllOrders` / `LiveSession.cancel_all()`
+  - `Command::GetOrderList`（フィルタ: `status` / `issue_code` / `date`）
 - UI: 注文一覧パネル（Rust iced 側、新設 or 既存 dashboard 拡張）
 
 ### 2.3 Phase O2 — EVENT EC 約定通知の購読と UI 反映
@@ -84,21 +90,21 @@
 - 仮想 URL マスク規約（C-H1）:
   - 立花の仮想 URL（`sUrlRequest` / `sUrlEvent` / `sUrlEventWebSocket`）と `p_no` クエリは **WAL / 構造化ログ / `reason_text` / 監査ログに一切出さない**。**host のみ出力可**。
   - 出力前に `tachibana_codec.mask_virtual_url()` を必ず通す（SKILL.md R3 #4・R10）。
-- HTTP API の認証: 既存 `/api/replay/*` と同じトークン方式（[`src/api/`](../../../src/api/) の既存ガード）。**localhost-only バインドを維持**
+- ~~HTTP API の認証: 既存 `/api/replay/*` と同じトークン方式（[`src/api/`](../../../src/api/) の既存ガード）。**localhost-only バインドを維持**~~（Phase 8 で HTTP 全廃に伴い該当なし。現在は IPC（ポート 19876）の HMAC token 認証のみ。Python helper の attach mode は `engine-session.json` から token を共有する）
 
 ### 3.2 安全装置（誤発注防止）
 
 - **デモ環境強制**: `TACHIBANA_ALLOW_PROD=1` 未設定なら本番 URL に発注リクエストを送らない（Python URL builder で reject）
-- **REPLAY ガード**（C-H4、Phase O0 必須）: `replay_mode == true` のとき、**全 `/api/order/*` エンドポイントは 503 + `reason_code="REPLAY_MODE_ACTIVE"`** を返す。Rust HTTP 層の最前段で判定し、Python へ到達させない。
-- **連打抑止 / rate limit**（C-M3）: 同一 `(instrument_id, order_side, quantity, price)` の組合せが N 秒以内（config 化、デフォルト 3 秒）に Y 回（デフォルト 2 回）以上送られたら、**429 + `reason_code="RATE_LIMITED"`** を返す。
-- **数量・金額上限**: 起動 config で 1 注文最大株数 / 最大金額を必ず指定。未指定なら `/api/order/submit` を 503 で reject（明示 opt-in）
+- **REPLAY ガード**（C-H4、Phase O0 必須）: replay モード稼働中（`ReplayState != Idle` 等）の発注は engine 側 state machine が `EngineBusy` event で reject する（Phase 8.1b で実装）。旧 `/api/order/*` 503 + `reason_code="REPLAY_MODE_ACTIVE"` の HTTP 層ガードは HTTP 廃止と同時に消滅。GUI 発注経路（`Command::SubmitOrder` の IPC 直送）は元から HTTP を経由しない
+- **連打抑止 / rate limit**（C-M3）: ~~同一 `(instrument_id, order_side, quantity, price)` の組合せが N 秒以内（config 化、デフォルト 3 秒）に Y 回（デフォルト 2 回）以上送られたら、**429 + `reason_code="RATE_LIMITED"`** を返す~~（Phase 8 で HTTP 廃止に伴い消滅。`OrderGuardConfig` は HTTP path 専用の防壁だった。GUI 発注は元から HTTP を経由しないため挙動変更なし。Python helper / IPC 経路では現時点で rate limit 実装なし、ユーザー責任）
+- **数量・金額上限**: ~~起動 config で 1 注文最大株数 / 最大金額を必ず指定。未指定なら `/api/order/submit` を 503 で reject（明示 opt-in）~~（同上、`OrderGuardConfig` は Phase 8 で削除済み）
 - **発注確認モーダル**（UI 側、Phase O1）: 成行発注時は明示的な確認ダイアログを出す
 - **発注ログ**: `data_path()/tachibana_orders.jsonl` に append（人間監査用、第二暗証番号は除外）
-- **冪等性キー必須**: HTTP API 経由の `/api/order/submit` は `client_order_id` を必須にし、再送時は同じ `venue_order_id`（= 立花 `sOrderNumber`）を返す（flowsurface `agent_session_state.rs` パターン）
+- **冪等性キー必須**: IPC `Command::SubmitOrder`（および `LiveSession.submit_order()`）は `client_order_id` を必須にし、再送時は同じ `venue_order_id`（= 立花 `sOrderNumber`）を返す（flowsurface `agent_session_state.rs` パターン）。Phase 8 以前は HTTP path にも同制約があったが、現在は IPC 経路と Python WAL の双方で担保
 
 ### 3.3 信頼性
 
-- **session 切れ即停止伝播**（C-M5）: `p_errno=2` 検知時、`OrderSessionState` を `frozen` に遷移する。以降の全 `/api/order/*` は **503 + `reason_code="SESSION_EXPIRED"`** で即時拒否する。in-flight な発注はすべて `OrderRejected{reason_code="SESSION_EXPIRED"}` で完了させ、WAL に `session_expired` 行を必ず書く（再送・再ログイン後の整合確認に必須）。バナー表示も併発する（Phase 1 の経路を流用）。
+- **session 切れ即停止伝播**（C-M5）: `p_errno=2` 検知時、`OrderSessionState` を `frozen` に遷移する。以降の発注 IPC コマンドはすべて `Event::OrderRejected{reason_code="SESSION_EXPIRED"}` で即時拒否する。in-flight な発注も同様に reject、WAL に `session_expired` 行を必ず書く（再送・再ログイン後の整合確認に必須）。バナー表示も併発する（Phase 1 の経路を流用）。~~旧 HTTP path の 503 即時応答~~ は Phase 8 で消滅。
 - 約定通知の重複検知: **`(venue_order_id, trade_id)` タプル**で seen-set を持つ（C-H3。`trade_id` ＝ 立花 `p_eda_no` だが、`p_eda_no` は注文番号またぎで衝突しうるため必ず venue_order_id と組で比較）
 - ネットワーク切断中の発注は **待たずに reject**（タイムアウトで詰まると誤発注の温床）
 
@@ -109,9 +115,13 @@
 - `tachibana_orders.jsonl` の各行に `client_order_id` / `venue_order_id`（= 立花 `sOrderNumber`） / `result_code`（= 立花 `sResultCode`） / `warning_code`（= 立花 `sWarningCode`）を入れる
 - **仮想 URL マスク厳守**（C-H1）: `tachibana_orders.jsonl` / 構造化ログ / `reason_text` / 監査ログには `sUrlRequest` / `sUrlEvent` / `sUrlEventWebSocket` および `p_no` クエリを出さない（host のみ）。`tachibana_codec.mask_virtual_url()` を必ず通す。SKILL.md R3 #4・R10 を参照。
 
-## 4. 公開 API（HTTP）
+## 4. 公開 API（旧 HTTP / 現 IPC + Python helper）
 
-すべて localhost のみ。既存トークンガードに乗る。
+> **Phase 8（2026-05-03 完了）**: 下表の HTTP メソッド/パス列は **廃止された旧仕様**として残す。現在の正規ルートは:
+> - GUI: `Command::SubmitOrder` 等を IPC で直接送信（HTTP は元から経由していない）
+> - スクリプト: `engine.live_session.LiveSession`（attach mode で GUI 内 engine に WS client として接続、または in-process mode で engine を spawn）の `login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`
+>
+> request body / response の field shape は IPC `SubmitOrderRequest` / `Event::Order*` の DTO（`engine-client/src/dto.rs` / `python/engine/schemas.py`）を正本とする。下表の HTTP status / reason_code 体系は IPC 経路では適用されず、reject は `Event::OrderRejected{reason_code, reason_text}` で表現される。
 
 | メソッド | パス | リクエスト | レスポンス | フェーズ |
 |---|---|---|---|---|
@@ -126,13 +136,15 @@
 
 **重要**: API は **`client_order_id` を一次キー**として動作する（nautilus 流）。`venue_order_id`（立花 `sOrderNumber`）は応答に含めるが、後続の `/modify` `/cancel` 入力は `client_order_id` で受ける。Rust 側 `OrderSessionState` が双方向写像を保持。WAL 復元で `client_order_id` が不明な「他端末経由の当日注文」のみ `venue_order_id` での `/modify` `/cancel` を受理する（[architecture.md §4.3](./architecture.md#43-起動時復元phase-o0-必須) / [T1.5](./implementation-plan.md#t15-起動時の台帳復元)）。
 
-**`client_order_id` 発行元（Q2 確定: 2026-04-25）**: クライアント側で UUID v4 を生成して送る（flowsurface 流・案 A）。Rust 側は受け取った値を idempotency key として使い、独自に採番しない。iced 側発注フォームは送信時に `Uuid::new_v4()` を生成する。HTTP 直叩きユーザーは送信側責務。
+**`client_order_id` 発行元（Q2 確定: 2026-04-25）**: クライアント側で UUID v4 を生成して送る（flowsurface 流・案 A）。Rust 側は受け取った値を idempotency key として使い、独自に採番しない。iced 側発注フォームは送信時に `Uuid::new_v4()` を生成する。Python helper（`LiveSession.submit_order(...)`）の caller も同様に UUID v4 を渡す（helper 自身は採番しない、ユーザー責任）。
 
 JSON Schema は [`docs/✅python-data-engine/schemas/`](../✅python-data-engine/schemas/) に追加（schema 1.3）。
 
-## 5. 入力バリデーション（Rust HTTP 層）
+## 5. 入力バリデーション（Rust IPC 層）
 
-Python に渡す前に **Rust 側で**早期に弾く:
+> **Phase 8 注記**: 旧 Rust HTTP 層（`src/api/order_api.rs`）が担っていた早期バリデーションは、HTTP 廃止後 IPC ハンドラ側のスキーマ検証（serde `deny_unknown_fields` + Python 側 pydantic `SubmitOrderRequest`）に移管されている。GUI 発注は `engine-client/src/dto.rs::SubmitOrderRequest` を直接組み立てて送るため、validation は serde + pydantic で担保。Python helper 経路も同じ DTO を経由する。下記の入力規約は引き続き有効:
+
+Python に渡す前に **Rust 側 IPC ハンドラ / pydantic バリデータで**早期に弾く:
 
 - `client_order_id`: 任意の文字列（UUID v4 推奨）。nautilus `ClientOrderId` 制約に合わせ **長さ 1〜36、ASCII printable のみ**[^cid-source]
 - `instrument_id`: `<symbol>.<venue>` 形式。**Phase O0〜O2 は東証（`TSE`）のみ受理**（例 `7203.TSE`）。大証(OSE)・名証(NSE)等への `sSizyouC` 写像は O3 以降で対応（[open-questions.md Q9](./open-questions.md) として追跡）
@@ -143,10 +155,10 @@ Python に渡す前に **Rust 側で**早期に弾く:
 - `time_in_force`: `"DAY"` / `"GTD"` / `"AT_THE_OPEN"` / `"AT_THE_CLOSE"` の 4 種のみ受理。nautilus 列挙の `GTC` / `IOC` / `FOK` は立花が直接対応しないため **HTTP 層で 400 reject**（[architecture.md §10.2](./architecture.md#102-timeinforce-写像)）。Python 写像は `AT_THE_OPEN` → `sCondition=2`、`AT_THE_CLOSE` → `4`、`tags=["close_strategy=funari"]` 併用で `6`（不成）、それ以外は `0`
 - `expire_time`: ISO8601、`time_in_force=GTD` のとき必須。Python 側で `sOrderExpireDay` (YYYYMMDD JST) に変換、10 営業日上限を Python 側で検証
 - `trigger_price`: `order_type ∈ {STOP_MARKET, STOP_LIMIT}` のとき必須。立花 `sGyakusasiZyouken` に写像
-- `tags`: Rust HTTP 層では各要素が `key=value` 形式（ASCII printable、`=` を 1 つ含む）であることのみ検証し 400 reject。内容（未知タグ・組合せ）の検証は Python 側 `_compose_request_payload` 内責務
+- `tags`: Rust IPC 層では各要素が `key=value` 形式（ASCII printable、`=` を 1 つ含む）であることのみ検証し 400 reject。内容（未知タグ・組合せ）の検証は Python 側 `_compose_request_payload` 内責務
 - 上限（数量・金額）チェックは Python 側で master + 起動 config から
 
-**`venue_order_id` による modify/cancel（Phase O1 での他端末注文対応）**: 起動時 WAL 復元で `client_order_id` が不明な注文（他端末・他アプリ経由の当日注文）に対しては、`POST /api/order/modify` と `POST /api/order/cancel` で `venue_order_id` を直接受け入れる。この場合 `client_order_id` は応答に含まれない（`null`）。`client_order_id` と `venue_order_id` が同時に指定された場合は `client_order_id` を優先する。
+**`venue_order_id` による modify/cancel（Phase O1 での他端末注文対応）**: 起動時 WAL 復元で `client_order_id` が不明な注文（他端末・他アプリ経由の当日注文）に対しては、`Command::ModifyOrder` / `Command::CancelOrder`（および `LiveSession.modify_order()` / `cancel_order()`）で `venue_order_id` を直接受け入れる。この場合 `client_order_id` は応答に含まれない（`null`）。`client_order_id` と `venue_order_id` が同時に指定された場合は `client_order_id` を優先する。
 
 ## 5.1 nautilus 互換のリクエストシェイプ
 
@@ -183,9 +195,11 @@ Python に渡す前に **Rust 側で**早期に弾く:
 
 ## 5.2 reason_code 体系（観測性）
 
-`OrderRejected{reason_code, reason_text}` の `reason_code` は以下の固定文字列のみ。**SCREAMING_SNAKE_CASE（ASCII 大文字 + 数字 + `_`）規約を厳守**する（A-H2）:
+`OrderRejected{reason_code, reason_text}` の `reason_code` は以下の固定文字列のみ。**SCREAMING_SNAKE_CASE（ASCII 大文字 + 数字 + `_`）規約を厳守**する（A-H2）。
 
-| reason_code | HTTP ステータス | 発生条件 |
+> **Phase 8 注記**: 「HTTP ステータス」列は **Phase 8 で廃止された旧 HTTP path の応答仕様**。現在の正規ルート（IPC + Python helper）では reason_code が `Event::OrderRejected` イベントの field としてのみ意味を持つ。HTTP 列は履歴情報として残置。`REPLAY_MODE_ACTIVE` / `RATE_LIMITED` / `ORDER_GUARD_NOT_CONFIGURED` / `QTY_LIMIT_EXCEEDED` / `YEN_LIMIT_EXCEEDED` は HTTP path 専用ガードに紐付いていた reason_code で、Phase 8 以降は IPC 経路で発火しない（`OrderGuardConfig` ごと削除済み。replay モードは engine 側 state machine の `EngineBusy` event で代替）。
+
+| reason_code | HTTP ステータス（旧） | 発生条件 |
 |---|---|---|
 | `VALIDATION_ERROR` | 400 | Rust HTTP 層のスキーマ違反（不正 UUID, 数量負, instrument_id 形式違反） |
 | `UNSUPPORTED_IN_PHASE_O0` | 400 | Phase O0 で許可されない `order_type` / `time_in_force` / `tags`（脚注 [^o0-unsupported] 参照） |
@@ -197,7 +211,7 @@ Python に渡す前に **Rust 側で**早期に弾く:
 | `REPLAY_MODE_ACTIVE` | 503 | `replay_mode == true` の間の全 `/api/order/*`（C-H4、Phase O0 必須） |
 | `RATE_LIMITED` | 429 | 同一 `(instrument_id, side, qty, price)` の N 秒/Y 回連打検知（C-M3） |
 | `MARKET_CLOSED` | 409 | 立花応答 `sResultCode` が時間外 |
-| `ORDER_GUARD_NOT_CONFIGURED` | 503 | `OrderGuardConfig.enabled == false`（運用ガード設定が未投入のまま `/api/order/*` を叩いた）。Rust HTTP 層 (`src/api/order_api.rs`) が最前段で判定 |
+| `ORDER_GUARD_NOT_CONFIGURED` | 503 | ~~`OrderGuardConfig.enabled == false`（運用ガード設定が未投入のまま `/api/order/*` を叩いた）。Rust HTTP 層 (`src/api/order_api.rs`) が最前段で判定~~（Phase 8 で `OrderGuardConfig` ごと削除。GUI 発注は元から HTTP を経由しないため挙動変更なし） |
 | `QTY_LIMIT_EXCEEDED` | 400 | リクエスト `quantity` が `OrderGuardConfig.max_qty_per_order` を超過 |
 | `YEN_LIMIT_EXCEEDED` | 400 | `LIMIT` / `STOP_LIMIT` で `price * quantity` が `OrderGuardConfig.max_yen_per_order` を超過（`MARKET` / `STOP_MARKET` は対象外） |
 | `INSUFFICIENT_FUNDS` | 409 | Phase O3 余力ガード失敗 |

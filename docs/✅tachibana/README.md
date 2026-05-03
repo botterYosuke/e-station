@@ -3,6 +3,8 @@
 このディレクトリは、**立花証券 e支店 API（v4r8）を本アプリの取引所（venue）として追加する**ための計画一式である。
 親計画は [docs/✅python-data-engine/spec.md](../✅python-data-engine/spec.md)（Rust ビュアー + Python データエンジン）。本計画はその上に「日本株（authenticated venue）」を載せるための差分仕様。
 
+> **Phase 8（2026-05-03 完了）注記**: Rust 側 HTTP API（`/api/sidebar/tachibana/*` / `/api/test/tachibana/*` 等を含むポート 9876 全体）は完全廃止された。再ログイン経路は IPC `Command::RequestVenueLogin` が引き続き正規ルートで、UI 発火（sidebar ボタン）は変更なし。スクリプト・E2E からの再ログインは新設 Python helper `engine.live_session.LiveSession.login()` を使う。`/api/test/tachibana/cancel-helper` / `/api/test/tachibana/delete-session` は debug build からも削除済み。本計画文書中で `/api/sidebar/*` / `/api/test/*` を参照している箇所は **Phase 8 以前の旧 HTTP path 仕様**として読み、現在の実体は IPC + Python helper である点に注意。
+
 ## 文書構成
 
 | ファイル | 役割 |

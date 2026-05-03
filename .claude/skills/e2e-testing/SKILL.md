@@ -1,467 +1,256 @@
 ---
 name: e2e-testing
-description: e-station E2E テストパターン。HTTP API（ポート 9876）経由でアプリを操作し bash スクリプトで検証する。Playwright は使用しない。
+description: e-station E2E テストパターン。Python helper（`ReplaySession` / `LiveSession`）+ pytest でアプリを操作する。HTTP API（旧 9876）と Playwright は使用しない。
 origin: ECC (customized for e-station)
 ---
 
-# E2E Testing — e-station (Rust + Iced GUI)
+# E2E Testing — e-station (Rust + Iced GUI / Python data engine)
 
-e-station は GUI アプリ（Iced フレームワーク）のため、Playwright / ブラウザは使用しない。
-テストは **TCP :9876 の HTTP API** 経由でアプリを操作し、bash スクリプト + node で JSON を検証する。
+e-station は Rust GUI + Python データエンジン構成。Phase 8.3（2026-05-03）で
+Rust 側 HTTP control API（旧ポート 9876）は完全廃止された。
+
+E2E は **WebSocket IPC（:19876）** に attach する Python helper class を使う。
+pytest からは `engine.replay_session.ReplaySession` / `LiveSession` を直接 import する。
+Playwright / ブラウザは GUI が Iced のため使用しない。
 
 ---
 
 ## アーキテクチャ
 
 ```
-テストスクリプト (bash + curl + node)
-    ↓ HTTP/JSON  (port 9876)
-src/replay_api.rs  — TCP リスナー
-    ↓ mpsc::Sender<Message>
-src/main.rs       — Iced アプリ メッセージハンドラ
-    ↓ oneshot チャネル
-JSON レスポンス → curl → テストスクリプト
+pytest / notebook / examples
+    ↓ import
+engine.replay_session.ReplaySession / LiveSession
+    ↓ __enter__ で :19876 を probe
+┌────────────────────┬────────────────────┐
+│ in-process mode    │ attach mode        │
+│ (engine 不在)      │ (GUI 起動済み)     │
+│                    │                    │
+│ NautilusRunner を  │ _AttachClient で   │
+│ helper 内で直接    │ WS :19876 に接続   │
+│ 起動               │ Command を送信     │
+└────────────────────┴────────────────────┘
+                          ↓ event は GUI / helper 両方に fanout
+                       Iced GUI チャート
 ```
 
-**ビルドフラグ**: debug ビルド（`cargo build`）で Tachibana セッション削除エンドポイントが有効になる。
+ポイント：
+
+- helper は **WS server を bind しない**。`:19876` を listen するのは GUI 起動 engine だけ
+- public API は `dict` for events のみ。`Command` 列挙体や IPC schema を expose しない
+- attach mode の token 解決順序：明示引数 → `engine-session.json` → `FLOWSURFACE_ENGINE_TOKEN` env → in-process fallback
+
+> **削除済み**: HTTP API（`/api/replay/*` / `/api/order/*` / `/api/agent/*` / `/api/sidebar/*` /
+> `/api/pane/*` / `/api/app/*`）と関連 bash + curl テストは Phase 8.3 で全廃された。
+> 既存の `scripts/run-replay-debug.sh` / `scripts/replay_dev_load.sh` も廃止（残骸が残っているが機能しない）。
 
 ---
 
 ## テストファイル構成
 
 ```
-flowsurface/
-├── docs/e2e_scripts/      # 実装済みシナリオスクリプト
-│   ├── common_helpers.sh       # 共通ヘルパー（jqn, pass, fail, start_app 等）
-│   ├── s1_basic_lifecycle.sh   # リプレイ基本ライフサイクル（廃止 → tests/s1_basic_lifecycle.py）
-│   ├── s2_persistence.sh       # saved-state 永続化テスト
-│   ├── s3_autoplay.sh          # fixture 自動 play
-│   ├── s4_multi_pane_binance.sh
-│   ├── s6_mixed_timeframes.sh
-│   ├── s8_error_boundary.sh
-│   ├── s9_speed_step.sh
-│   └── s10_range_end.sh
-├── tests/
-│   └── e2e_replay_api.sh       # CI 向け統合スクリプト
-└── .claude/skills/e2e-test/    # スキル文書（シナリオ・フィクスチャ定義）
-    ├── SKILL.md
-    ├── api-reference.md
-    ├── fixtures.md
-    └── scenarios.md
+e-station/
+├── tests/e2e/                          # 維持される少数の bash smoke
+│   ├── smoke.sh                        # 30s 観測（GUI プロセス起動・観測）
+│   └── s55_mode_startup_smoke.sh       # --mode 必須化の dry-run smoke
+├── python/tests/                       # pytest（メインの E2E）
+│   ├── test_replay_session*.py         # ReplaySession helper
+│   ├── test_live_session_login.py      # LiveSession.login() smoke（@pytest.mark.live）
+│   ├── test_server_multi_client.py     # multi-client broadcast / FCFS
+│   ├── test_engine_busy_reject.py      # state guard
+│   └── ...
+└── engine-client/tests/                # Rust 側 IPC クライアント統合テスト
+    ├── handshake.rs
+    ├── session_file.rs                 # engine-session.json atomic write / Drop 削除
+    └── ...
 ```
 
 ---
 
-## ビルド・起動
+## ReplaySession を使った pytest パターン
 
-```bash
-# リリースビルド
-cargo build --release
+### in-process mode（GUI 不要・最も典型的）
 
-EXE="./target/release/flowsurface.exe"
-API="http://localhost:9876"
+```python
+import pytest
+from engine.replay_session import ReplaySession
+
+def test_buy_and_hold_runs_to_completion(tmp_path):
+    events: list[dict] = []
+    with ReplaySession() as s:
+        assert s.mode == "inprocess"   # engine が居なければ in-process
+        s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
+        s.run(
+            strategy_file="docs/example/buy_and_hold.py",
+            on_event=events.append,
+            initial_cash=1_000_000,
+        )
+
+    # 終了状態の検証
+    assert s.status == "stopped"
+    assert any(e.get("type") == "ReplayBuyingPower" for e in events)
+    assert s.portfolio is not None
+```
+
+### attach mode（GUI 起動中の helper 並走）
+
+```python
+def test_helper_attaches_to_running_gui():
+    # GUI 側で `cargo run -- --mode replay` 起動済み
+    # 同じ engine-session.json / FLOWSURFACE_ENGINE_TOKEN を共有する
+    with ReplaySession(force_mode="attach") as s:
+        assert s.mode == "attach"
+        s.load("1301.TSE", "2025-01-06", "2025-03-31")
+        # event は GUI チャートと pytest 両方に流れる
+        s.run(strategy_file="docs/example/buy_and_hold.py", on_event=lambda e: None)
+```
+
+### 速度変更・中断
+
+```python
+import threading
+
+def test_speed_change_and_stop():
+    received = []
+    with ReplaySession() as s:
+        s.load("1301.TSE", "2025-01-06", "2025-03-31")
+
+        def stopper():
+            time.sleep(0.5)
+            s.set_speed(10)
+            time.sleep(0.5)
+            s.stop()
+
+        threading.Thread(target=stopper, daemon=True).start()
+        s.run(strategy_file="strategy.py", on_event=received.append)
+    assert s.status in ("stopped", "errored")
+```
+
+### EngineBusy（state guard）の検証
+
+```python
+from engine.replay_session import BusyError
+
+def test_load_during_running_raises_busy():
+    with ReplaySession() as s:
+        s.load("1301.TSE", "2025-01-06", "2025-03-31")
+        # … run() 中に外から load を投げると BusyError
 ```
 
 ---
 
-## 共通ヘルパー
+## LiveSession を使ったパターン（立花ログイン）
 
-```bash
-# jq の代わりに node で JSON パース（Windows 環境向け）
-jqn() {
-  node -e "
-    const d = JSON.parse(process.argv[1]);
-    const v = $2;
-    console.log(v === null || v === undefined ? 'null' : v);
-  " "$1"
-}
+`LiveSession.login()` は HTTP `/api/sidebar/tachibana/request-login` の置き換え。
+`@pytest.mark.live` で marker を付けて CI 既定では除外する。
 
-# テスト集計
-PASS=0; FAIL=0
-pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL + 1)); }
+```python
+@pytest.mark.live
+def test_tachibana_demo_login(monkeypatch):
+    monkeypatch.setenv("DEV_TACHIBANA_USER_ID", os.environ["TEST_USER_ID"])
+    monkeypatch.setenv("DEV_TACHIBANA_PASSWORD", os.environ["TEST_PASSWORD"])
+    monkeypatch.setenv("DEV_TACHIBANA_DEMO", "true")
 
-# アプリ起動（ログは C:/tmp/e2e_debug.log）
-start_app() {
-  mkdir -p C:/tmp
-  "$EXE" 2>C:/tmp/e2e_debug.log &
-  APP_PID=$!
-  echo "  app PID=$APP_PID, waiting for API..."
-  for i in $(seq 1 30); do
-    sleep 1
-    curl -sf "$API/api/replay/status" >/dev/null 2>&1 && break
-    [ $i -eq 30 ] && { echo "FATAL: API did not start"; exit 1; }
-  done
-  echo "  API ready"
-}
-
-# アプリ終了
-stop_app() {
-  taskkill //f //im flowsurface.exe >/dev/null 2>&1 || true
-  sleep 2
-}
-
-# API 呼び出しラッパー
-api_get()  { curl -sf "$API$1"; }
-api_post() { curl -sf -X POST -H "Content-Type: application/json" -d "${2:-{}}" "$API$1"; }
+    with LiveSession(venue="tachibana", demo=True) as s:
+        s.login()              # 立花 demo にログイン
+        # 後続: order 系（Phase 8.1 後半で実装予定）
 ```
+
+> Phase 8.1a 時点では `LiveSession.login()` / order 系は in-process スタブ。
+> Phase 8.1 後半で本実装される予定。
 
 ---
 
-## API エンドポイント早見表
+## token / engine-session の取り扱い
 
-### Replay 制御
+attach mode テストでは GUI 起動 engine から token を継承する必要がある。
 
-| メソッド | パス | Body | 用途 |
-|---------|------|------|------|
-| `GET`  | `/api/replay/status`   | —  | 現在状態の JSON 取得 |
-| `POST` | `/api/replay/toggle`   | —  | Live ↔ Replay 切替 |
-| `POST` | `/api/replay/play`     | `{"start":"YYYY-MM-DD HH:MM","end":"YYYY-MM-DD HH:MM"}` | 再生開始 |
-| `POST` | `/api/replay/pause`    | —  | 一時停止 |
-| `POST` | `/api/replay/resume`   | —  | 再開 |
-| `POST` | `/api/replay/step-forward`  | — | 最小 timeframe 分前進（Paused 時のみ） |
-| `POST` | `/api/replay/step-backward` | — | 前の kline 時刻へジャンプ（Paused 時のみ） |
-| `POST` | `/api/replay/speed`    | —  | 速度サイクル（1x→2x→5x→10x→1x） |
+| 経路 | 解決順位 |
+|------|---------|
+| 明示引数 | `ReplaySession(attach_endpoint="ws://127.0.0.1:19876/")` + env |
+| session ファイル | `%APPDATA%\flowsurface\engine-session.json` の `{port, token, pid, schema_major}` |
+| env | `FLOWSURFACE_ENGINE_TOKEN` |
 
-### ペイン管理
+helper は順に試して、いずれも取れなければ in-process にフォールバックする。
 
-| メソッド | パス | Body | 用途 |
-|---------|------|------|------|
-| `GET`  | `/api/pane/list`         | — | ペイン一覧（streams_ready フィールド含む） |
-| `POST` | `/api/pane/split`        | `{"pane_id":"<uuid>","axis":"Vertical\|Horizontal"}` | 分割 |
-| `POST` | `/api/pane/close`        | `{"pane_id":"<uuid>"}` | 削除 |
-| `POST` | `/api/pane/set-ticker`   | `{"pane_id":"<uuid>","ticker":"BinanceLinear:BTCUSDT"}` | ティッカー変更 |
-| `POST` | `/api/pane/set-timeframe`| `{"pane_id":"<uuid>","timeframe":"M1\|M5\|H1\|D1"}` | タイムフレーム変更 |
-| `POST` | `/api/sidebar/select-ticker` | `{"pane_id":"<uuid>","ticker":"...","kind":null}` | サイドバー選択 |
-
-### アプリ・その他
-
-| メソッド | パス | 用途 |
-|---------|------|------|
-| `POST` | `/api/app/save`       | 状態をディスクに保存（saved-state.json） |
-| `POST` | `/api/app/screenshot` | デスクトップ全体を C:/tmp/screenshot.png に保存 |
-| `GET`  | `/api/notification/list` | Toast 通知一覧 |
-| `GET`  | `/api/auth/tachibana/status` | Tachibana セッション有無 |
-
-### デバッグビルド専用エンドポイント（`cargo build` debug ビルドのみ）
-
-| メソッド | パス | 用途 |
-|---------|------|------|
-| `POST` | `/api/test/tachibana/delete-persisted-session` | keyring セッション削除 |
+`engine-session.json` は engine プロセスが `Drop` 時に削除する（`engine-client/src/session_file.rs`）。
+**手動でこのファイルを書き換えないこと**。
 
 ---
 
-## ReplayStatus レスポンス形式
+## 維持される bash smoke
 
-```json
-// Live モード
-{"mode":"Live","range_start":"","range_end":""}
-
-// Replay モード（再生前）
-{"mode":"Replay","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}
-
-// Replay モード（再生中）
-{
-  "mode":         "Replay",
-  "status":       "Playing|Paused|Loading",
-  "current_time": 1775869740288,
-  "speed":        "1x|2x|5x|10x",
-  "start_time":   1775869740000,
-  "end_time":     1775912940000,
-  "range_start":  "2026-04-11 01:09",
-  "range_end":    "2026-04-11 13:09"
-}
-```
-
----
-
-## テストパターン
-
-### 基本テストの骨格
+WS IPC ハンドシェイク／プロセス起動の dry-run は依然 bash で運用：
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(dirname "$0")/common_helpers.sh"
+# 30 秒観測（デフォルト）
+bash tests/e2e/smoke.sh
 
-echo "=== シナリオ名 ==="
-stop_app
-start_app
+# 2 分観測
+OBSERVE_S=120 bash tests/e2e/smoke.sh
 
-# --- テスト本体 ---
-STATUS=$(api_get /api/replay/status)
-MODE=$(jqn "$STATUS" 'd.mode')
-
-if [ "$MODE" = "Live" ]; then
-  pass "初期モードは Live"
-else
-  fail "初期モードは Live であるべき" "got: $MODE"
-fi
-
-stop_app
-echo "--- $PASS passed, $FAIL failed ---"
-[ $FAIL -eq 0 ]
+# --mode 必須化の dry-run
+bash tests/e2e/s55_mode_startup_smoke.sh
 ```
 
-### Replay ライフサイクルパターン
-
-```bash
-# 1. Replay モードへ切替
-api_post /api/replay/toggle
-
-# 2. 再生開始（UTC 時刻を使う）
-START=$(date -u -d "2 hours ago" +"%Y-%m-%d %H:%M")
-END=$(date -u -d "1 hour ago" +"%Y-%m-%d %H:%M")
-api_post /api/replay/play "{\"start\":\"$START\",\"end\":\"$END\"}"
-
-# 3. Playing になるまでポーリング（最大 30 秒）
-wait_for_status() {
-  local expected="$1" max="${2:-30}"
-  for i in $(seq 1 $max); do
-    sleep 1
-    STATUS=$(api_get /api/replay/status)
-    GOT=$(jqn "$STATUS" 'd.status // "none"')
-    [ "$GOT" = "$expected" ] && return 0
-  done
-  fail "status=$expected を待ったがタイムアウト" "last=$GOT"
-  return 1
-}
-
-wait_for_status "Playing"
-
-# 4. 現在時刻が進んでいることを確認
-T1=$(jqn "$(api_get /api/replay/status)" 'd.current_time')
-sleep 3
-T2=$(jqn "$(api_get /api/replay/status)" 'd.current_time')
-[ "$T2" -gt "$T1" ] && pass "current_time が前進" || fail "current_time が停止" "$T1 → $T2"
-```
-
-### ステップ実行パターン
-
-```bash
-# Paused 状態での StepForward / StepBackward
-api_post /api/replay/pause
-sleep 1
-
-T_BEFORE=$(jqn "$(api_get /api/replay/status)" 'd.current_time')
-api_post /api/replay/step-forward
-sleep 1
-T_AFTER=$(jqn "$(api_get /api/replay/status)" 'd.current_time')
-
-[ "$T_AFTER" -gt "$T_BEFORE" ] \
-  && pass "StepForward: current_time が増加" \
-  || fail "StepForward: current_time が変化しない" "$T_BEFORE → $T_AFTER"
-```
-
-### ペイン操作パターン
-
-```bash
-# ペイン一覧取得 → 最初のペイン ID を取得
-PANES=$(api_get /api/pane/list)
-PANE_ID=$(node -e "const p=JSON.parse(process.argv[1]); console.log(p[0].id);" "$PANES")
-
-# ティッカー変更
-api_post /api/pane/set-ticker "{\"pane_id\":\"$PANE_ID\",\"ticker\":\"BinanceLinear:ETHUSDT\"}"
-
-# ストリームが Ready になるまで待機
-wait_for_streams_ready() {
-  local pane_id="$1" max="${2:-30}"
-  for i in $(seq 1 $max); do
-    sleep 1
-    PANES=$(api_get /api/pane/list)
-    READY=$(node -e "
-      const ps = JSON.parse(process.argv[1]);
-      const p = ps.find(x => x.id === '$pane_id');
-      console.log(p && p.streams_ready ? 'true' : 'false');
-    " "$PANES")
-    [ "$READY" = "true" ] && return 0
-  done
-  fail "streams_ready を待ったがタイムアウト" "pane=$pane_id"
-  return 1
-}
-
-wait_for_streams_ready "$PANE_ID"
-```
-
----
-
-## Auto-play フィクスチャパターン
-
-`saved-state.json` に replay 設定を埋め込んで起動することで、アプリ起動時に自動 Play が走る：
-
-```bash
-# フィクスチャ作成（Binance, M1, 過去 2h）
-START=$(date -u -d "2 hours ago" +"%Y-%m-%d %H:00")
-END=$(date -u -d "30 minutes ago" +"%Y-%m-%d %H:00")
-
-cat > "$APPDATA/flowsurface/saved-state.json" <<EOF
-{
-  "layout": { "panes": [{"kind":"KlineChart","ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}] },
-  "replay": { "mode": "replay", "range_start": "$START", "range_end": "$END" }
-}
-EOF
-
-# アプリ起動後、自動で Playing になるまで待機
-start_app
-wait_for_status "Playing" 60
-```
-
-**Auto-play の制約**:
-- Binance: 通常数秒で Playing に遷移
-- Tachibana（セッション有り）: master download 後に Playing（最大 120s）
-- Tachibana（セッション無し）: auto-play は延期され `info` toast が出る
-
----
-
-## タイミング・待機パターン
-
-```bash
-# BAD: 固定 sleep でタイミングに依存
-sleep 5
-check_status
-
-# GOOD: ポーリングで条件待機
-poll_until() {
-  local condition="$1" max="${2:-30}" interval="${3:-1}"
-  for i in $(seq 1 $max); do
-    sleep "$interval"
-    eval "$condition" && return 0
-  done
-  return 1
-}
-
-# 例: status が Paused になるまで最大 15 秒待つ
-poll_until '[ "$(jqn "$(api_get /api/replay/status)" '"'"'d.status // "none"'"'"')" = "Paused" ]' 15
-```
-
----
-
-## テスト日時の注意
-
-- **Binance**: 過去 24〜48 時間以内のデータのみ取得可能
-- 未来の日時を指定すると EventStore が空になり StepForward が no-op になる
-- 日時は **UTC** で指定する（アプリ内部も UTC）
-
-```bash
-# UTC の現在時刻確認
-date -u +"%Y-%m-%d %H:%M"
-
-# 2 時間前〜1 時間前のレンジ（推奨）
-START=$(date -u -d "2 hours ago" +"%Y-%m-%d %H:%M")
-END=$(date -u -d "1 hour ago" +"%Y-%m-%d %H:%M")
-```
-
----
-
-## ステップ幅（step_size_ms）の仕様
-
-StepForward / StepBackward のステップ幅はアクティブなペインの **最小 timeframe** に依存する：
-
-| アクティブな timeframe | step_size_ms |
-|----------------------|-------------|
-| M1（または M1+その他） | 60,000 ms（1 分） |
-| M5 のみ | 300,000 ms（5 分） |
-| H1 のみ | 3,600,000 ms（1 時間） |
-| D1 のみ | 86,400,000 ms（1 日） |
+`smoke.sh` は次を検査する：
+- 15 秒以内にハンドシェイク完了
+- `engine ws read error` が出ない（圧縮設定の MISSES 再発防止）
+- 観測ウィンドウ中の再接続が 2 回以下
+- DepthGap・parse error・snapshot fetch failed が出ない
 
 ---
 
 ## テスト実行コマンド
 
 ```bash
-# 単体シナリオ実行
-uv run tests/s1_basic_lifecycle.py          # GUI モード
-IS_HEADLESS=true uv run tests/s1_basic_lifecycle.py  # headless モード
+# Python 側 E2E（live マーカー除く）
+uv run pytest python/tests/ -v
 
-# 全シナリオ実行（CI 向け）
-bash tests/e2e_replay_api.sh
+# live マーカーも実行（実 venue 接続あり）
+uv run pytest python/tests/ -v -m live
 
-# デバッグログ確認
-cat C:/tmp/e2e_debug.log
+# 単一テスト
+uv run pytest python/tests/test_replay_session_attach.py -v
 
-# スクリーンショット取得
-curl -sf -X POST http://localhost:9876/api/app/screenshot
-# → C:/tmp/screenshot.png に保存される
+# Rust 側 IPC クライアント統合
+cargo test -p flowsurface-engine-client
+
+# bash smoke
+bash tests/e2e/smoke.sh
 ```
 
 ---
 
 ## よくある問題と対処
 
-### API が応答しない
-```bash
-# ポート確認
-netstat -an | grep 9876
+### `:19876` に何も居ない（in-process にフォールバックされる）
 
-# プロセス確認
-tasklist | grep flowsurface
+`force_mode="attach"` を指定していない限り、`__enter__` は warn ログを出して
+in-process mode に切り替える。CLAUDE.md の「外部エンジンに接続する際のトークン認証」
+を確認すること。
 
-# ログ確認
-cat C:/tmp/e2e_debug.log | tail -50
-```
+### `ConnectionRefusedError` が attach mode で出る
 
-### current_time が変化しない
-- EventStore が空（未来の日時を指定していないか確認）
-- ステータスが `Loading` のまま（データ取得中 → 待機が必要）
-- ステータスが `Paused` のまま（`resume` か `step-forward` が必要）
+token 不一致 / `SCHEMA_MAJOR` 不一致 / handshake timeout のいずれか。
+- engine 起動時の `--token` と `FLOWSURFACE_ENGINE_TOKEN` が一致しているか確認
+- `engine-client/src/lib.rs` と `python/engine/schemas.py` の `SCHEMA_MAJOR` が一致しているか確認
 
-### ペインの streams_ready が false のまま
-- Tachibana の場合はセッションが必要（`inject-session` を先に実行）
-- ネットワークエラーはデバッグログで確認
+### 接続 4 つ越え（`MAX_CONNECTIONS=4`）
 
-### taskkill が失敗する
-```bash
-# フォースキル（プロセスが残っている場合）
-taskkill //f //im flowsurface.exe 2>/dev/null || true
-sleep 3  # ポート解放待ち
-```
+5 本目の helper を立てると `1008 Policy Violation` で reject される。
+不要な helper プロセスを終了する。
 
-### 既存 GUI アプリとのポート衝突（最重要）
+### GUI チャートに pane が出ない（attach mode 時）
 
-**症状**: テストが「前提条件未達」や「pane count が想定と違う」で失敗する。
-`env._start_process()` は起動後すぐに `:9876/api/replay/status` の応答を待つが、
-既存アプリが先に応答するため、新プロセスではなく**汚染済みの既存アプリ**に対してテストが走る。
+`saved-state.json` は replay モードで読み書きされない（D9）。
+`ReplayDataLoaded` 受信後に `auto_generate_replay_panes` が pane を作るので、
+empty pane grid から始まる前提でテストを書くこと。
 
-**確認方法**:
-```bash
-curl -s http://localhost:9876/api/replay/status
-# → 応答が返れば既存アプリが起動中
-```
+### NautilusRunner 二重起動（構造的に禁止）
 
-**対処**: E2E テストを実行する前に必ず既存プロセスを終了する。
-ただし**ユーザーが GUI を開いている可能性があるため、終了前に確認を取ること**。
-
-```bash
-# 既存プロセスの確認
-tasklist | grep flowsurface
-
-# 終了（確認を得てから実行）
-taskkill //f //im flowsurface.exe 2>/dev/null || true
-sleep 3  # ポート解放待ち
-
-# その後テスト実行（各テストが自前でプロセスを管理する）
-PYTHONIOENCODING=utf-8 uv run tests/s36_sidebar_order_pane.py
-```
-
-**headless モードの制限**: `IS_HEADLESS=true` で実行しても既存アプリがポートを握っていれば同じ問題が起きる。
-また headless モードでは sidebar API（`/api/sidebar/open-order-pane` 等）が 501 を返すため、
-GUI 専用テスト（s36 等）は headless では実行できない。
-
-**GUI モードで複数テストを連続実行する場合の注意**:
-s33 など前のテストがペインを追加すると pane count が汚染される。
-各テストは `backup_state()` / `restore_state()` + `env._start_process()` / `env.close()` で
-プロセスごとクリーンアップする設計なので、テスト間でプロセスを共有しないこと。
-
----
-
-## 新しいシナリオの追加手順
-
-1. `docs/e2e_scripts/common_helpers.sh` を `source` する
-2. `stop_app` → `start_app`（またはフィクスチャ起動）
-3. `api_get` / `api_post` で操作
-4. `jqn` で JSON をパース → `pass` / `fail` で結果記録
-5. `stop_app` でクリーンアップ
-6. `[ $FAIL -eq 0 ]` でスクリプト終了コードをテスト結果に連動
+helper は `:19876` を probe してから spawn / attach を分岐する。probe をスキップする
+独自実装は書かないこと。
 
 ---
 
@@ -473,29 +262,36 @@ name: E2E Tests
 on: [push, pull_request]
 
 jobs:
-  e2e:
+  pytest:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --release
-      - name: Run E2E tests
-        run: bash tests/e2e_replay_api.sh
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-logs
-          path: C:/tmp/e2e_debug.log
+      - uses: astral-sh/setup-uv@v3
+      - name: Run pytest (excluding live)
+        run: uv run pytest python/tests/ -v -m "not live"
+      - name: Run Rust IPC tests
+        run: cargo test -p flowsurface-engine-client
+      - name: Run smoke
+        run: bash tests/e2e/smoke.sh
 ```
+
+---
+
+## 新シナリオ追加手順
+
+1. `python/tests/` 配下に `test_*.py` を追加
+2. `with ReplaySession() as s:` または `with LiveSession(...) as s:` で開始
+3. `on_event` callback で event を受けて assert を書く
+4. 実 venue 依存なら `@pytest.mark.live` を付ける
+5. `s.status` / `s.portfolio` / `s.mode` プロパティで状態を検証
+6. 必要なら attach mode テストを別途追加（GUI 起動 fixture）
 
 ---
 
 ## Success Metrics
 
-- 全シナリオスクリプトが `exit 0` で終了する
-- `FAIL: 0` が出力される
-- デバッグログにパニック・スタックトレースがない
-- `current_time` が実際に前進している（数値比較で確認）
-- 永続化テスト: アプリ再起動後に状態が復元されている
+- pytest が緑（live マーカー除く）
+- `engine-session.json` が test 終了後に残らない（engine Drop で削除）
+- `cargo test -p flowsurface-engine-client` が緑
+- `tests/e2e/smoke.sh` が観測ウィンドウ中に再接続 2 回以下で完走

@@ -1,5 +1,10 @@
 # 立花証券統合: アーキテクチャ
 
+> **Phase 8（2026-05-03 完了）注記**: Rust 側 HTTP API（ポート 9876）は完全廃止された。本書中で `/api/sidebar/tachibana/request-login` / `/api/test/tachibana/cancel-helper` / `/api/test/tachibana/delete-session` を参照している場合は **Phase 8 以前の旧仕様**として読むこと。再ログイン経路の現在の正体:
+> - **GUI**: `Message::RequestTachibanaLogin` → `Command::RequestVenueLogin` を IPC（ポート 19876）で直送（変更なし）
+> - **スクリプト・E2E**: 新設 Python helper `engine.live_session.LiveSession.login(user_id, password, is_demo, second_password=None)` 経由
+> - `/api/test/tachibana/*` は debug build からも削除済み
+
 ## 1. 配置原則
 
 [docs/✅python-data-engine/spec.md](../✅python-data-engine/spec.md) §2 の責務分割を踏襲:

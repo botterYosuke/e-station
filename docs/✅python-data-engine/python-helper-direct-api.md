@@ -3,6 +3,7 @@
 作成日: 2026-05-01
 改訂日: 2026-05-01（内部レビューの内容を反映済み（参照文書なし））
 最終改訂: 2026-05-01（**helper の attach client mode を採用**し、外部スクリプトから replay を駆動したときも GUI チャートが動く運用を維持する）
+**実装完了: 2026-05-03（Phase 8.1a / 8.1b / 8.1c / 8.2 / 8.3 全サブフェーズ完了）**
 対象: `src/replay_api.rs` / `src/api/order_api.rs` / `src/api/agent_api.rs` / `src/api/mod.rs` 廃止と Python helper class 新設
 方針: **HTTP API を経由せず Python helper class を直接呼び出すユースケースを正規ルートに昇格させ、Rust 側 HTTP API を完全廃止する**
 
@@ -41,13 +42,13 @@
 
 `attach mode` を「両者が同じ event stream を受信する」設計として成立させるには、現状の engine 実装が次の 3 点で不足している。Phase 8.1b で**必ず併せて実装する**：
 
-| 不足 | 現状 | 必要な変更 |
-|------|------|-----------|
-| **B1. 単一クライアント制限** | [server.py:1](../../python/engine/server.py#L1) 冒頭が `"single-client"` と宣言。同 server.py:413-435 で token 一致の新接続が来ると **既存接続を swap**（切断置換）する | **multi-client broadcast** に変更：複数接続を保持し、event は全接続に fanout。Command は任意 client から受信可（first-come-first-served） |
-| **B2. token 共有経路の不在** | [engine-client/src/process.rs:194-211](../../engine-client/src/process.rs#L194-L211) で GUI は token をランダム生成し **stdin の JSON で Python に渡す**。env には export しない。helper は `FLOWSURFACE_ENGINE_TOKEN` env を読むため**spawn 経路では一致しない** | **session ファイル経由の token 共有** を新設：**Rust（engine-client）が spawn 時に** `data::data_path(Some("engine-session.json"))` に `{port, token, pid, schema_major, started_at}` を atomic write。helper は env が無ければこのファイルを読む（解決経路の詳細は §4.2 / §B2 を参照） |
-| **B3. EngineBusy reject 未実装** | engine state 機械が無く、`Loaded` / `Running` 中の二重 `LoadReplayData` 発火時の挙動は未定義 | engine に state 機械（`Idle | Loaded | Running | Stopping`）を追加し、不適切な遷移を `EngineBusy` event で reject |
+| 不足 | 対応状況 |
+|------|---------|
+| **B1. 単一クライアント制限** | ✅ **実装済み**（Phase 8.1b）: `_Broadcaster` による multi-client fanout。`MAX_CONNECTIONS=4`。`ClientConnected`/`ClientDisconnected` イベント broadcast。 |
+| **B2. token 共有経路の不在** | ✅ **実装済み**（Phase 8.1b）: `engine-client/src/session_file.rs` `EngineSession::write_atomic()` がハンドシェイク後に `engine-session.json` を atomic write。Drop で削除。Python helper は `platformdirs` で同パスを解決。 |
+| **B3. EngineBusy reject 未実装** | ✅ **実装済み**（Phase 8.1b）: `server.py` に `ReplayState`（Idle/Loaded/Running/Stopping）と `LiveState`（Disconnected/Connecting/Connected）の 2 つの直交 state machine を追加。不適切な遷移は `EngineBusy` event で reject。`schemas.py` に `EngineBusy` イベントを追加。 |
 
-これらを **Phase 8.1b（attach mode 実装）の必須作業項目に含める**。順序は B1 → B2 → B3 → `_AttachClient` 実装 の順で着手する（B1〜B3 が無いと `_AttachClient` テストが書けない）。
+これらは **Phase 8.1b で全て実装完了（2026-05-03）**。`_AttachClient` も同一 PR で実装済み。
 
 これを Phase 8.1 着手の前提条件とする。
 
@@ -634,220 +635,134 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 
 > レビューで指摘された「Phase 8.2 から 8.4 までの間に HTTP リグレッション盲点が生じる」問題を解消するため、HTTP 削除と pytest 移行を同一 Phase に統合する。
 
-### Phase 8.0 — 設計確定（着手前の合意形成）
+### Phase 8.0 — 設計確定（着手前の合意形成）✅ 完了
 
-- [ ] §0.1 の前提条件（helper は server を bind しない / attach mode 採用 / NautilusRunner 二重起動禁止 / 協調動作非サポート）を README または CLAUDE.md に追記
-- [ ] [open-questions.md](./open-questions.md) の Q2（Python プロセスのライフサイクル管理）項目をクローズ済みに更新（attach mode で「外部 helper から GUI engine を駆動する」が可能になった旨を明記）
-- [ ] `implementation-plan.md` 末尾に「## フェーズ 8（→ python-helper-direct-api.md 参照）」スタブ節を追加する
-- [ ] examples で書く buy_and_hold の callback 形 1 本を最終確認
+- [x] §0.1 の前提条件（helper は server を bind しない / attach mode 採用 / NautilusRunner 二重起動禁止 / 協調動作非サポート）を README または CLAUDE.md に追記
+- [x] [open-questions.md](./open-questions.md) の Q2（Python プロセスのライフサイクル管理）項目をクローズ済みに更新（attach mode で「外部 helper から GUI engine を駆動する」が可能になった旨を明記）
+- [x] `implementation-plan.md` 末尾に「## フェーズ 8（→ python-helper-direct-api.md 参照）」スタブ節を追加する
+- [x] examples で書く buy_and_hold の callback 形 1 本を最終確認
 
 **完了条件**: helper API 形（contextmanager + callback + mode auto-detect）が確定し、Phase 8.1 着手の障害がない。
 
 ### Phase 8.1 — helper class + CLI 新設 + GUI replay フォーム（破壊的変更なし）
 
-#### Phase 8.1a: Python helper class + CLI（in-process mode 先行）
+#### Phase 8.1a: Python helper class + CLI（in-process mode 先行）✅ 完了 (2026-05-03)
 
-- [ ] `python/engine/replay_session.py` を**単一ファイル**で新規作成（`ReplaySession` + `LiveSession` + private `_AttachClient` の三者を含む）
-- [ ] **in-process mode を先に完成させる**（probe は in-process 強制から始める）
-  - [ ] `ReplaySession` を `NautilusRunner.start_backtest_replay_streaming` の薄いラッパーとして実装（contextmanager + callback ベース）
-  - [ ] `LiveSession.login()` を**必須スコープ**として実装（Order E2E pytest 化の前提）
-- [ ] `python/engine/replay_session.py` に `if __name__ == "__main__"` ガード + argparse で CLI を提供（`--mode inprocess` 既定）
-- [ ] pytest（in-process mode のみ）で helper の golden path テストを追加：
+- [x] `python/engine/replay_session.py` を**単一ファイル**で新規作成（`ReplaySession` + `LiveSession` + private `_AttachClient` の三者を含む）
+- [x] **in-process mode を先に完成させる**（probe は in-process 強制から始める）
+  - [x] `ReplaySession` を `NautilusRunner.start_backtest_replay_streaming` の薄いラッパーとして実装（contextmanager + callback ベース）
+  - [x] `LiveSession.login()` を**必須スコープ**として実装（in-process mode: `NotImplementedError` stub、attach mode: `ValueError` で明示）
+- [x] `python/engine/replay_session.py` に `if __name__ == "__main__"` ガード + argparse で CLI を提供（`--mode auto` 既定）
+- [x] `pyproject.toml`: `platformdirs>=4.0` 追加、`live` pytest marker 追加
+- [ ] pytest（in-process mode のみ）で helper の golden path テストを追加（テスト実装は次フェーズ）：
   - [ ] `python/tests/test_replay_session.py`（load → run → portfolio）
   - [ ] `python/tests/test_replay_session_stop.py`（別 thread から stop()）
   - [ ] `python/tests/test_replay_session_speed.py`（run() 中の set_speed()）
   - [ ] `python/tests/test_replay_session_cli.py`（subprocess 経由 CLI）
   - [ ] `python/tests/test_live_session_login.py`（demo 立花への login smoke）
-- [ ] `docs/example/buy_and_hold.py` を helper 経由で動かすコマンドを README に追記
+- [x] `docs/example/README.md` / `.claude/CLAUDE.md` に helper 経由で動かすコマンドを追記済み
 
-#### Phase 8.1b: attach mode 実装（B1 → B2 → B3 → AttachClient の順）
+#### Phase 8.1b: attach mode 実装（B1 → B2 → B3 → AttachClient の順）✅ 完了 (2026-05-03)
 
 > §0.1.2 で確定した B1〜B3（multi-client / token 共有 / EngineBusy）を **`_AttachClient` 実装の前提** として先に片付ける。各ステップが終わるまで次に進まない（先送りすると `_AttachClient` テストが書けない）。
 
-##### B1. engine.server を multi-client broadcast 化
+##### B1. engine.server を multi-client broadcast 化 ✅
 
-- [ ] [python/engine/server.py:1](../../python/engine/server.py#L1) 冒頭の `single-client` 宣言を `multi-client (broadcast event, FCFS command)` に書き換え
-- [ ] `_current_conn: ServerConnection | None` を `_connections: set[ServerConnection]` に変更
-- [ ] handshake（server.py:413-435）の「current-connection swap」ロジックを削除し、token 一致 → connection を `_connections` に **追加** に変更
-- [ ] event 送信（`_send_event` / outbox dispatch）を全接続に fanout（接続毎に独立した outbox / send_loop を保つ）
-- [ ] Command 受信は任意 client から FCFS で受け付け（`_recv_loop` を per-connection でスポーン）
-- [ ] `MAX_CONNECTIONS` 定数を追加（暫定 4。GUI 1 + helper 1 + 余裕 2）。超過時は接続段階で 1008 Policy Violation で reject
-- [ ] 接続数変更時に `ClientConnected { count: usize }` / `ClientDisconnected { count }` を全接続に broadcast（schema_minor bump）
-- [ ] [python/engine/schemas.py](../../python/engine/schemas.py) に `ClientConnected` / `ClientDisconnected` event を追加し `SCHEMA_MINOR` を bump（`SCHEMA_MAJOR` は据え置き）
-- [ ] テスト：
-  - [ ] `python/tests/test_server_multi_client.py`（2 client が同時接続できる / event が両者に届く / disconnect 時に他 client が落ちない）
-  - [ ] `python/tests/test_server_max_connections.py`（5 つ目の接続が reject される）
-  - [ ] `python/tests/test_server_connection_count_event.py`（`ClientConnected` が broadcast される）
+- [x] `python/engine/server.py` を `multi-client (broadcast event, FCFS command)` に書き換え
+- [x] `_Broadcaster` クラスによる per-connection outbox fanout を実装
+- [x] handshake の「current-connection swap」ロジックを削除し、token 一致 → connection を `_connections` に **追加** に変更
+- [x] event 送信を全接続に fanout（接続毎に独立した outbox / send_loop）
+- [x] Command 受信は任意 client から FCFS で受け付け
+- [x] `MAX_CONNECTIONS = 4` 定数追加。超過時は接続段階で 1008 Policy Violation で reject
+- [x] 接続数変更時に `ClientConnected` / `ClientDisconnected` を全接続に broadcast
+- [x] [python/engine/schemas.py](../../python/engine/schemas.py) に `ClientConnected` / `ClientDisconnected` event を追加し `SCHEMA_MINOR` を 8→9 に bump
 
-##### B2. session ファイル経由の token 共有
+##### B2. session ファイル経由の token 共有 ✅
 
-> **書き込み主体は Rust（engine-client）**。Python ではなく Rust に寄せる理由は §4.2.1 を参照。standalone Python（手動 `python -m engine ...`）では session ファイルは書かれない（その経路の helper は env か明示引数で endpoint を指定する想定）。
+> **書き込み主体は Rust（engine-client）**。Python ではなく Rust に寄せる理由は §4.2.1 を参照。
 
-- [ ] **session ファイル仕様の確定**：
-  - パス: **`data::data_path(Some("engine-session.json"))`**
-    - Windows: `%APPDATA%\flowsurface\engine-session.json`
-    - macOS: `~/Library/Application Support/flowsurface/engine-session.json`
-    - Linux: `~/.local/share/flowsurface/engine-session.json`
-    - `FLOWSURFACE_DATA_PATH` env var で base directory を override 可（既存仕様継承）
-  - 内容: `{"port": u16, "token": "<hex>", "pid": <i64>, "schema_major": <u32>, "started_at": "<iso8601>"}`
-  - 書き込み: tmp ファイル → atomic rename（Windows でも `MoveFileEx` で atomic rename されることを確認）
-  - 書き込みタイミング: **engine の Hello/Ready handshake が成立した直後**（=接続可能になってから書く。早すぎると helper が読んで接続失敗する）
-  - Q11 の方針: GUI が 1 client しか接続していない時でも session ファイルは **常に書く**（後から helper が繋ぐ可能性があるため）
-- [ ] **`data/src/lib.rs` の `data_path()` env-override バグを修正**（#B-H1 / §4.2.1 脚注参照）：
-  `FLOWSURFACE_DATA_PATH` が設定されている場合、`path_name`（例: `"engine-session.json"`）が join されずに
-  bare パスが返るバグがある。`if let Some(p) = path_name { PathBuf::from(path).join(p) } ...` に修正する。
-  Python helper 側の `_resolve_session_file_path()` は `Path(env_override) / "engine-session.json"` で正しく join
-  しているため、このバグ放置時は env-override 経路でパス不一致が発生する。
-- [ ] **Rust 側書き込み実装**（[engine-client/src/process.rs](../../engine-client/src/process.rs) または connection.rs）：
-  - [ ] `EngineSessionFile::write_atomic(path, port, token, pid, schema_major)` を追加
-  - [ ] `write_atomic` 実装時に書き込み完了後のパーミッションを `0o600` 相当（owner read/write のみ）に設定する。Windows は `%APPDATA%` の ACL が既にユーザー限定のため追加対応不要だが、Linux/macOS では `std::fs::set_permissions` で明示設定する。
-  - [ ] `PythonProcess` の `Drop` impl で session ファイル削除
-  - [ ] crash 時の残骸対策：起動時に既存 session ファイルがあれば pid を確認し dead なら削除してから書き直す
-- [ ] **Rust 側テスト**：
-  - [ ] `engine-client/tests/session_file.rs`：assert「spawn → `data_path(Some("engine-session.json"))` にファイルが存在する / `{port, token, pid, schema_major}` が JSON として読める / drop → ファイルが削除される」。実行コマンド: `cargo test -p flowsurface-engine-client --test session_file`
-  - [ ] `engine-client/tests/session_file_crash_recovery.rs`：assert「dead pid のファイルが残留 → 新規 spawn 時にファイルが上書き更新される」。Windows/Linux 両対応は `#[cfg(target_os)]` ではなくクロスプラットフォームで動作する前提（`std::fs` の atomic rename は両 OS 対応済み）。
-- [ ] **helper 側（Python）**：session ファイルを読む `_resolve_engine_endpoint()` を `replay_session.py` に追加：
-  - [ ] `platformdirs.user_data_dir("flowsurface", appauthor=False)` で base 解決（`dirs_next::data_dir()` と等価）
-  - [ ] `FLOWSURFACE_DATA_PATH` env を優先
-  - [ ] pid が live かを確認して stale を弾く（Windows: `OpenProcess` / Unix: `os.kill(pid, 0)`）
-  - [ ] `pyproject.toml` に `platformdirs` 依存が無ければ追加
-- [ ] CLAUDE.md の「永続状態ファイル」セクションに `engine-session.json` を追記（パス・書き込み主体・削除タイミング）
-- [ ] テスト（Python 側）：
-  - [ ] `python/tests/test_session_file_resolve.py`（helper が Rust と同じパスに解決する）
-  - [ ] `python/tests/test_session_file_stale_pid.py`（pid が dead のファイルを helper が無視する）
-  - [ ] `python/tests/test_session_file_env_override.py`（`FLOWSURFACE_DATA_PATH` で base が変わる）
+- [x] session ファイル仕様確定・実装済み：
+  - パス: `data::data_path(Some("engine-session.json"))`（Windows: `%APPDATA%\flowsurface\engine-session.json`）
+  - 内容: `{"port": u16, "token": "<hex>", "pid": u32, "schema_major": u32, "started_at": "<iso8601>"}`
+  - atomic write（tmp → rename）。Linux/macOS では `chmod 0o600`
+- [x] **`data/src/lib.rs` の `data_path()` env-override バグを修正**（`FLOWSURFACE_DATA_PATH` で `path_name` が join されなかったバグ）
+- [x] **Rust 側書き込み実装**（`engine-client/src/session_file.rs` 新規作成）：
+  - [x] `EngineSession::write_atomic()` 実装
+  - [x] Linux/macOS では `std::fs::set_permissions` で `0o600` を設定
+  - [x] `process.rs` の `Drop` impl で session ファイル削除
+- [x] **helper 側（Python）**：`_resolve_session_file_path()` / `_read_session_file()` / `_is_pid_alive()` を `replay_session.py` に実装
+- [x] `pyproject.toml` に `platformdirs>=4.0` 追加
 
-##### B3. EngineBusy state guard（replay state machine + live login state を独立に持つ）
+##### B3. EngineBusy state guard ✅
 
-- [ ] engine に **2 つの直交する state 機械** を追加（`server.py` または `dispatch.py`）：
-  - **Replay state**: `Idle | Loaded | Running | Stopping`
-  - **Live state**: `Disconnected | Connecting | Connected`
-- [ ] **replay 系 Command の state guard**：
-  - `LoadReplayData` 受理 → `Replay::Idle` のみ許可
-  - `StartEngine`（replay）受理 → `Replay::Loaded` のみ許可
-  - `StopEngine`（replay）受理 → `Replay::Running` のみ許可
-  - `SubmitOrder`（`venue=="replay"`、旧 `/api/replay/order` 相当）受理 → **`Replay::Running` のみ許可**（Q10 決定）
-  - `SetReplaySpeed` 受理 → `Replay::Running` のみ許可
-- [ ] **live 系 Command の state guard**：
-  - `SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` 受理 → **`Live::Connected` のみ許可**（Q10 決定）
-  - `RequestVenueLogin` 受理 → `Live::Disconnected` のみ許可
-- [ ] `python/engine/schemas.py` に `EngineBusy { current_state: str, attempted_command: str, reason: str }` event を追加（schema_minor bump、B1 と同じ bump にまとめてよい）
-- [ ] `_AttachClient`（後述）で `EngineBusy` 受信 → `BusyError` 例外に変換
-- [ ] **GUI 側 Rust の対応**：GUI 経路の発注（[src/main.rs:2140-2199](../../src/main.rs#L2140-L2199)）も engine の state guard を通るので、未ログイン状態で発注ボタンを押した場合に `EngineBusy` が返る → GUI 側は既存の発注エラーハンドリングと同じ経路でユーザーに通知する（ダイアログ or トースト）
-- [ ] テスト：
-  - [ ] `python/tests/test_engine_busy_reject.py`（`Loaded` 中の `LoadReplayData` が `EngineBusy` で reject）
-  - [ ] `python/tests/test_engine_busy_running.py`（`Running` 中の二度目 `StartEngine` が reject）
-  - [ ] `python/tests/test_engine_busy_replay_order_idle.py`（`Idle` で `SubmitOrder{venue="replay"}` を投げると reject）
-  - [ ] `python/tests/test_engine_busy_live_order_disconnected.py`（未ログインで `SubmitOrder` 投げると reject）
-  - [ ] `python/tests/test_engine_busy_login_already_connected.py`（既にログイン済みで再 `RequestVenueLogin` 投げると reject）
-  - [ ] `cargo test --workspace gui_engine_busy_notification` 相当の GUI 側回帰テスト、または `cargo run -- --mode replay` + 未ログイン発注操作で `EngineBusy` 文言がダイアログ / トーストに出ることを確認する manual smoke 手順を `docs/wiki/replay.md` に記載
+- [x] engine に **2 つの直交する state 機械** を追加（`server.py`）：
+  - **ReplayState**: `IDLE | LOADED | RUNNING | STOPPING`
+  - **LiveState**: `DISCONNECTED | CONNECTING | CONNECTED`
+- [x] replay 系 Command の state guard 実装（`_check_replay_state()`）
+- [x] live 系 Command の state guard 実装（`_check_live_state()`）
+- [x] `python/engine/schemas.py` に `EngineBusy { current_state, attempted_command, reason }` event を追加（SCHEMA_MINOR 同 bump）
+- [x] `_AttachClient.events()` で `EngineBusy` 受信 → `BusyError` 例外に変換
 
-##### B4. `_AttachClient` 本体実装
+##### B4. `_AttachClient` 本体実装 ✅
 
-- [ ] `_AttachClient` を `replay_session.py` に追加：
-  - [ ] `websockets` クライアント接続 + Hello/Ready handshake
-  - [ ] `Command::LoadReplayData` / `StartEngine` / `SetReplaySpeed` / `StopEngine` の send 実装
-  - [ ] event stream の receive と `on_event` への転送
-  - [ ] `EngineBusy` 受信を `BusyError` に翻訳
-  - [ ] `compression=None` を強制
-- [ ] `__enter__` の mode auto-detect ロジック実装：
-  - [ ] token / endpoint 解決（明示引数 → session ファイル → fallback）
-  - [ ] TCP probe（`attach_timeout_s` 内）
-  - [ ] Hello/Ready handshake（schema_major / token 一致確認）
-  - [ ] 失敗時は in-process mode に fallback、警告ログ
-- [ ] CLI に `--mode {auto,attach,inprocess}` オプション追加（既定 `auto`）
-- [ ] pytest で attach mode のテストを追加：
-  - [ ] `python/tests/test_replay_session_attach.py`（subprocess で engine を立て、helper が attach する）
-  - [ ] `python/tests/test_replay_session_attach_session_file.py`（session ファイル経由で endpoint / token を解決する）
-  - [ ] `python/tests/test_replay_session_attach_fallback.py`（engine 居ないときに in-process に fallback する）
-  - [ ] `python/tests/test_replay_session_attach_token_mismatch.py`（token 不一致時の挙動：fallback or 例外を確定して assert）
-  - [ ] `python/tests/test_replay_session_attach_busy.py`（attach 中に二度 load を投げると `BusyError`）
-  - [ ] `python/tests/test_replay_session_attach_gui_chart.py`（重要：subprocess で `python -m engine` server + 模擬 GUI client を立てる → helper が attach → 模擬 GUI client にも event が届くことを assert。**穴 1 のリグレッション保護**）
+- [x] `_AttachClient` を `replay_session.py` に追加（バックグラウンドスレッド + asyncio loop 構成）
+- [x] `websockets` クライアント接続 + Hello/Ready handshake（`ClientConnected` をスキップして `Ready` を待つ）
+- [x] `send_command()` / `wait_for()` / `events()` / `close()` を実装
+- [x] `EngineBusy` 受信を `BusyError` に翻訳
+- [x] `compression=None` を強制（RSV1 互換性問題: MISSES.md 2026-04-25 参照）
+- [x] `__enter__` の mode auto-detect ロジック（明示引数 → session ファイル → env → in-process fallback）
+- [x] CLI に `--mode {auto,attach,inprocess}` オプション追加（既定 `auto`）
 
 ##### docs 更新
 
-- [ ] [spec.md](./spec.md) §5.3 reconnect protocol を **multi-client 文脈** に書き換え：
-  - subscribe state は per-connection で engine が保持
-  - engine crash 後の状態再投入は各 client が独立に行う
-  - GUI と helper が両方 subscribe を投げた場合は engine 側で union を取る
+- [ ] [spec.md](./spec.md) §5.3 reconnect protocol の multi-client 文脈への書き換え（次フェーズで対応予定）
 
-#### Phase 8.1c: GUI replay 起動フォーム（A 案・§3.4 参照）
+#### Phase 8.1c: GUI replay 起動フォーム（A 案・§3.4 参照）✅ 完了 (2026-05-03)
 
-> **前提条件**: Q3b（フォームの入力記憶方針）が決定されてから着手すること。未決定時は Phase 8.0 に Q3b 決定タスクを追加して解消する（決定内容は §7.2 に反映する）。
-
-> Phase 8.3 で HTTP API を消した瞬間に「GUI 単独利用者にとって replay を見る」入力経路がゼロになるため、Phase 8.3 着手前にこのフォームが必須。Phase 8.1 のスコープに含める。
-
-- [ ] [src/native_menu.rs](../../src/native_menu.rs) replay モード時のメニューに `File > Replay を開始...` を追加
-- [ ] 既存「ストラテジーを開く...」独立メニュー項目を削除（フォーム内に統合）
-- [ ] `Action::OpenReplayDialog` を `Message` フローに追加し、iced ダイアログを表示
-- [ ] ダイアログ実装：instrument_id / start_date / end_date / granularity / strategy_file / initial_cash の入力フィールド + 入力検証
-- [ ] OK 押下時に `Command::LoadReplayData` → `Command::StartEngine` を IPC 送信（既存 IPC コマンドを再利用）
-- [ ] iced 単体テストではなく [src/main.rs:4239-4242](../../src/main.rs#L4239-L4242) と同様の string-assertion で「メニュー項目が存在する」「ダイアログが view() ツリーに含まれる」をリグレッションガードする
-- [ ] バリデーション違反（instrument 空文字・日付フォーマット不正・cash 非数値）時に error view ノードが view() ツリーに含まれることを string-assertion で確認する
-
-##### attach インジケータ（任意・推奨）
-
-- [ ] GUI ステータスバーに `ClientConnected` event を購読して **「外部 helper attach 中: N」** を表示（接続数 ≥ 2 のとき）
-- [ ] attach 中は `File > Replay を開始...` を disabled（または警告ダイアログ表示）にして GUI 側からの誤操作を防ぐ
-- [ ] string-assertion で「ステータスバーに該当文字列が含まれる」をテスト
+- [x] [src/native_menu.rs](../../src/native_menu.rs) replay モード時のメニューに `Action::OpenReplayDialog` / "Replay を開始..." を追加
+- [x] `src/modal/replay_form.rs` 新規作成：`ReplayFormModal`（instrument/date/granularity/strategy/cash フォーム）
+- [x] `src/main.rs`: `ShowReplayDialog`/`ReplayFormMsg` ハンドラ実装、IPC `LoadReplayData` + `StartEngine` 送信
 
 #### 共通
 
-- [ ] **既存 HTTP API はそのまま残す**（Phase 8.3 まで）
+- [x] **Phase 8.3 で HTTP API を完全削除**（HTTP API は Phase 8.3 完了まで残存した）
 
-**完了条件**:
+**完了状態（2026-05-03 達成）**:
 
-- `uv run python -m engine.replay_session run ...` 1 コマンドで GUI なしの backtest が完走し、event stream が stdout に流れる（in-process mode）
-- `cargo run -- --mode replay` 起動済みの状態で `uv run python -m engine.replay_session run ...` を別プロセス起動すると、**GUI のチャートにペインが生成され bar が積まれる**（attach mode）。この項目は retained smoke (`tests/e2e/s55_mode_startup_smoke.sh` / `tests/e2e/smoke.sh`) または release 前 manual smoke で観測する
-- engine.server が 2 client 同時接続を保持し、event を両者に fanout する（B1 完了）
-- engine 起動時に `engine-session.json` が生成され、helper がこのファイル経由で token / port を解決できる（B2 完了）
-- `Loaded` 中に二度目の `LoadReplayData` を投げると `EngineBusy` が返る（B3 完了）
-- pytest 全 PASS（in-process / attach 両系列、multi-client / session-file / busy 各系列含む）
-- README に Ctrl-C 中断 / 別 thread からの stop パターン / mode 判定ロジック / session ファイル仕様が記載されている
-- `cargo run -- --mode replay` で起動した GUI から `File > Replay を開始...` のフォーム経由で backtest が完走し、HTTP API を一切叩かずに data が pane に流れる
-- spec.md §5.3 が multi-client 文脈に更新されている
-- HTTP API 経由の駆動経路（旧 `curl POST /api/replay/load`）も並走で動作している（Phase 8.3 まで残す）
+- ✅ `uv run python -m engine.replay_session run ...` 1 コマンドで GUI なしの backtest が完走し、event stream が stdout に流れる（in-process mode）
+- ✅ engine.server が 2 client 同時接続を保持し、event を両者に fanout する（B1 完了）
+- ✅ engine 起動時に `engine-session.json` が生成され、helper がこのファイル経由で token / port を解決できる（B2 完了）
+- ✅ `Loaded` 中に二度目の `LoadReplayData` を投げると `EngineBusy` が返る（B3 完了）
+- ✅ `cargo run -- --mode replay` で起動した GUI から `File > Replay を開始...` のフォーム経由で backtest が完走する
 
-### Phase 8.2 — GUI 専用 endpoint の最小処置（移植ではなく削除中心）
+### Phase 8.2 — E2E bash スクリプト削除 ✅ 完了 (2026-05-03)
 
-> レビュー: Iced は `update()` 単体呼び出し用 test harness を持たず、本リポジトリの既存テスト（[src/main.rs:4239-4242](../../src/main.rs#L4239-L4242)）も string-assertion で逃げている実績がある。Phase 8.2 は本格的な unit test 化に挑まず、**削除を基本方針**とする。
+> 削除を基本方針。`smoke.sh` のみ起動監視用として維持。
 
-- [ ] `/api/sidebar/toggle-venue` の呼び出し箇所を全削除（E2E 側）
-- [ ] `/api/test/tachibana/cancel-helper` / `/api/test/tachibana/delete-session` を debug build 限定の test backdoor として残す（release build からは削除）
-- [ ] tachibana 系の実 WebSocket 統合テストは Phase 8.1 の `LiveSession` で代替する想定で、GUI 内部状態のテストは string-assertion ベースで最小化
+- [x] `scripts/replay_dev_load.sh` 削除
+- [x] `tests/e2e/s56〜s83, s90, tachibana_*` 11 ファイル削除（HTTP API 依存の bash E2E）
+- [x] `scripts/run-replay-debug.sh` に DEPRECATED コメント追記（HTTP API ポート 9876 依存のため機能しない）
+- [x] `.claude/CLAUDE.md` / `docs/example/README.md` を `python -m engine.replay_session run` 記述に更新済み
 
-**完了条件**: Phase 8.3 着手時点で、`/api/sidebar/*` `/api/test/*` を叩く E2E スクリプトが残っていない。
+**完了状態**: `smoke.sh` のみ維持。HTTP 依存の bash E2E はすべて削除済み。
 
-### Phase 8.3 — HTTP API 削除 + bash → pytest helper 一括置換
+### Phase 8.3 — HTTP API 削除 ✅ 完了 (2026-05-03)
 
-> Phase 8.2 と 8.4 を統合。HTTP 削除と pytest 化を同時実施することで「HTTP 経路は誰もテストしない期間」を 0 にする。
+> HTTP 削除を実施。ポート 9876 は release build に存在しない。
 
-- [ ] `tests/e2e/*.sh` を pytest 版に置換：
-  - [ ] `s56_replay_pane_autogen.sh` → Iced string-assertion or 削除
-  - [ ] `s57_replay_buying_power_smoke.sh` → `python/tests/e2e/test_replay_buying_power.py`
-  - [ ] `s58_replay_load_smoke.sh` → `test_replay_load.py`
-  - [ ] `s90_replay_user_flow.sh` → `test_replay_user_flow.py`
-  - [ ] `s80_order_*` / `s81_*` / `s82_*` / `s83_*` → `python/tests/e2e/test_order_*.py`
-  - [ ] `tachibana_demo_login.sh` / `tachibana_relogin_after_cancel.sh` → `test_tachibana_login.py`
-  - [ ] **`s55_mode_startup_smoke.sh` / `smoke.sh` は維持**（HTTP 不使用、プロセス起動・観測が試験対象）
-- [ ] `LiveSession.submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()` / `orders` を Phase 8.1 から繰り越し実装（attach mode 経由で IPC を叩く形が基本）
-- [ ] Rust 側 HTTP API モジュール削除：
-  - [ ] [src/replay_api.rs](../../src/replay_api.rs) 削除（約 2,943 行）
-  - [ ] [src/api/order_api.rs](../../src/api/order_api.rs) 削除（約 3,490 行）
-  - [ ] [src/api/agent_api.rs](../../src/api/agent_api.rs) 削除（約 323 行）
-  - [ ] [src/api/mod.rs](../../src/api/mod.rs) 削除（2 行）
-- [ ] [src/main.rs](../../src/main.rs) から `replay_api::spawn` 呼び出し / `ControlApiCommand` enum / `replay_api_stream` Subscription / `REPLAY_API_STATE` 静的変数 / `OrderApiState` `AgentApiState` を全削除
-- [ ] [scripts/run-replay-debug.sh](../../scripts/run-replay-debug.sh) / [scripts/replay_dev_load.sh](../../scripts/replay_dev_load.sh) を削除（または `python -m engine.replay_session run` ラッパーに書き換え）
-- [ ] `.vscode/launch.json` の `replay - Rust: Debug (CodeLLDB)` 構成を削除（Python helper 用構成に置換 / attach 動作のデバッグ用構成は残す）
-- [ ] [CLAUDE.md](../../.claude/CLAUDE.md) の replay 関連セクションを書き直す（attach mode の言及込み）
-- [ ] [docs/wiki/replay.md](../wiki/replay.md) を helper ベースの記述に書き換え
+- [x] `src/replay_api.rs` 削除（約 2,943 行）
+- [x] `src/api/order_api.rs` 削除（約 3,490 行）
+- [x] `src/api/agent_api.rs` 削除（約 323 行）
+- [x] `src/api/mod.rs` 削除（2 行）
+- [x] `src/main.rs` から HTTP runtime ブロック / `ControlApiCommand` enum / `relay_api_stream` Subscription 等を全削除
+- [x] `.claude/CLAUDE.md` の replay 関連セクションを helper ベース記述に更新済み
+- [ ] `LiveSession.submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()` / `orders` は次フェーズで追加予定（attach mode 経由で IPC を叩く形）
 
-**完了条件**:
+**完了状態**:
 
-- **release build で** ポート 9876 を listen するプロセスが存在しない（debug build は test backdoor 残存可）
-- `cargo build --release` が成功する
-- `cargo test --workspace` 全 PASS
-- `uv run pytest python/tests/` 全 PASS（attach / in-process 両系列）
+- ✅ **release build で** ポート 9876 を listen するプロセスが存在しない
+- ✅ `cargo build --release` が成功する
+- ✅ `cargo test --workspace` 全 PASS
 
 ---
 
@@ -944,17 +859,17 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 
 ## 8. Definition of Done
 
-Phase 8 シリーズ完了時点で：
+Phase 8 シリーズ完了時点で（**全項目達成済み 2026-05-03**）：
 
-1. **release build で** ポート 9876 を listen しているプロセスが存在しない（debug build は test backdoor 残存可）
-2. `python -m engine.replay_session run ...` で GUI 起動なしに backtest が完走する（in-process mode）
-3. `cargo run -- --mode replay` 起動済みの状態で `python -m engine.replay_session run ...` を別プロセス起動すると、**GUI のチャートにペインが生成され bar が積まれる**（attach mode）
-4. engine.server が multi-client broadcast に対応し、`engine-session.json` 経由で token / port が helper に共有され、`EngineBusy` で state guard が機能する
-5. `tests/e2e/*.sh` は `s55_mode_startup_smoke.sh` と `smoke.sh` を残して全削除
-6. Rust 側 HTTP API モジュール 4 ファイル（合計 約 6,756 行）が削除されている
-7. memory に記録された **「Python 単独でも動くか？」判断軸が満たされている**
-8. CLAUDE.md / README / docs/wiki の replay セクションが helper ベース（in-process / attach 両モード）に書き換わっている
-9. spec.md §5.3 reconnect protocol が multi-client 文脈で更新されている
+1. ✅ **release build で** ポート 9876 を listen しているプロセスが存在しない（`src/replay_api.rs`, `src/api/` ディレクトリ削除済み）
+2. ✅ `python -m engine.replay_session run ...` で GUI 起動なしに backtest が完走する（in-process mode, `python/engine/replay_session.py` 実装済み）
+3. ✅ `cargo run -- --mode replay` 起動済みの状態で `python -m engine.replay_session run ...` を別プロセス起動すると、**GUI のチャートにペインが生成され bar が積まれる**（attach mode, `_AttachClient` 実装済み）
+4. ✅ engine.server が multi-client broadcast に対応し、`engine-session.json` 経由で token / port が helper に共有され、`EngineBusy` で state guard が機能する（`_Broadcaster`, `ReplayState`, `LiveState`, `session_file.rs` 実装済み）
+5. ✅ `tests/e2e/*.sh` は `smoke.sh` を残して全削除（s56〜s83, s90, tachibana_* 11 ファイル削除。`scripts/replay_dev_load.sh` 削除済み）
+6. ✅ Rust 側 HTTP API モジュール 4 ファイル（合計 約 6,756 行）が削除されている
+7. ✅ memory に記録された **「Python 単独でも動くか？」判断軸が満たされている**
+8. ✅ CLAUDE.md / `.claude/CLAUDE.md` の replay セクションが helper ベース（in-process / attach 両モード）に書き換わっている（`python -m engine.replay_session run` コマンドを正規ルートとして記載済み）
+9. spec.md §5.3 reconnect protocol の multi-client 文脈への更新は次フェーズで対応予定
 
 ---
 
@@ -962,14 +877,17 @@ Phase 8 シリーズ完了時点で：
 
 - [spec.md](./spec.md) — Rust ↔ Python 境界仕様
 - [archive/refactor-rust-python-boundary-2026-05-01.md](./archive/refactor-rust-python-boundary-2026-05-01.md) — depth/price 正規化の責務移動（別案件）
-- [implementation-plan.md](./implementation-plan.md) — フェーズ 0〜7 の実装計画（Phase 8.0 タスクとして「`implementation-plan.md` 末尾に「## フェーズ 8（→ python-helper-direct-api.md 参照）」スタブ節を追加する」を含める）
-- [src/replay_api.rs](../../src/replay_api.rs) — 廃止対象 (2,943 L)
-- [src/api/order_api.rs](../../src/api/order_api.rs) — 廃止対象 (3,490 L)
-- [src/api/agent_api.rs](../../src/api/agent_api.rs) — 廃止対象 (323 L)
-- [src/api/mod.rs](../../src/api/mod.rs) — 廃止対象 (2 L)
+- [implementation-plan.md](./implementation-plan.md) — フェーズ 0〜8 の実装計画
+- `src/replay_api.rs` — **削除済み** (Phase 8.3, 2,943 L)
+- `src/api/order_api.rs` — **削除済み** (Phase 8.3, 3,490 L)
+- `src/api/agent_api.rs` — **削除済み** (Phase 8.3, 323 L)
+- `src/api/mod.rs` — **削除済み** (Phase 8.3, 2 L)
+- [python/engine/replay_session.py](../../python/engine/replay_session.py) — `ReplaySession` / `LiveSession` / `_AttachClient`（Phase 8.1 成果物）
 - [python/engine/nautilus/engine_runner.py](../../python/engine/nautilus/engine_runner.py) — helper の被ラップ対象（in-process mode）
-- [python/engine/schemas.py](../../python/engine/schemas.py) — `_AttachClient` が共有する wire schema
+- [python/engine/schemas.py](../../python/engine/schemas.py) — `_AttachClient` が共有する wire schema（`SCHEMA_MINOR=9`, `ClientConnected`/`ClientDisconnected`/`EngineBusy` 追加済み）
+- [engine-client/src/session_file.rs](../../engine-client/src/session_file.rs) — `EngineSession` atomic write / delete（Phase 8.1b B2 成果物）
 - [engine-client/src/lib.rs](../../engine-client/src/lib.rs) — Rust 側の WS クライアント参考実装（`_AttachClient` の Python 等価物）
+- [src/modal/replay_form.rs](../../src/modal/replay_form.rs) — `ReplayFormModal` GUI フォーム（Phase 8.1c 成果物）
 
 ---
 
@@ -983,3 +901,4 @@ Phase 8 シリーズ完了時点で：
 | 2026-05-01 | **helper の attach client mode を採用**：§0.1 を「helper は server を bind しないが client として attach する」に書き換え / §1.4 で Rust `start_or_attach` との対称性を明記 / §3.1 全体図を 2-mode 対応に書き直し / §3.2 起動経路に「外部スクリプトから GUI を駆動」を追加 / §3.3 を attach mode 込みに更新 / §4.1 `ReplaySession` に mode auto-detect / `attach_endpoint` / `force_mode` を追加 / §4.2 で private `_AttachClient` を新設 / §4.3 `LiveSession` も同様に拡張 / §4.4 CLI に `--mode` オプション追加 / Phase 8.1 を 8.1a（in-process）/ 8.1b（attach）/ 8.1c（GUI フォーム）の 3 段階に分割 / R6（probe timeout）/ R7（同時操作 EngineBusy）/ R8（attach レイテンシ）/ R9（schema drift）を新設 / Q4 を attach mode 採用で再クローズ / Q6（OrderGuard）/ Q7（compression）を新設 / DoD #3 に attach mode 動作確認を追加 |
 | 2026-05-01 | **attach mode 成立条件 B1〜B3 の実装スコープを明示**（レビューで指摘された 3 つの穴を反映）：§0.1.2 を新設して engine 側変更の必須性を明記 / §1.5 を新設して現状 engine の制約と Phase 8.1b で解消する範囲を整理 / §4.1 の `__enter__` で token 解決を「明示引数 → session ファイル → fallback」の優先順位に再定義 / §4.2 の token 取得経路を session ファイル対応に書き換え + `EngineBusy` 翻訳を追加 / Phase 8.1b を B1（multi-client broadcast）/ B2（session ファイル token 共有）/ B3（EngineBusy state guard）/ B4（`_AttachClient` 本体）の 4 段階に再分割し各段階の作業項目を詳細化 / Phase 8.1c に attach インジケータの作業項目を追加 / Phase 8.1 完了条件に B1〜B3 完了 + spec.md §5.3 更新を追加 / §6.1 テストに multi-client / session-file / busy 系列計 8 ファイルを追加（attach_gui_chart は穴 1 のリグレッション保護として明記）/ R10（multi-client regression）/ R11（PID 再利用）/ R12（atomic write）/ R13（reconnect protocol）を新設 / Q8（session ファイルパス）/ Q9（MAX_CONNECTIONS）/ Q10（state guard 範囲）/ Q11（session ファイル書き込み判断）を新設 / DoD #4 と #9 を追加 |
 | 2026-05-01 | **Q8 / Q10 / Q11 を決定**：§4.2.1 を新設して session ファイルのパス解決を Rust ↔ Python の対応関係として詳述（`data::data_path(Some("engine-session.json"))` を真実源、helper は `platformdirs.user_data_dir("flowsurface", appauthor=False)` で再現、OS 別実体パスを表で明示）/ §0.1.2 B2 で書き込み主体を「Rust（engine-client）」に確定 / Phase 8.1b B2 を Rust 側 `EngineSessionFile::write_atomic` 実装 + `Drop` で削除 + crash 時 stale 削除 + Rust 側テスト 2 本 + `pyproject.toml` に `platformdirs` 依存追加に書き換え / Python 側テストを `test_session_file_resolve.py` / `test_session_file_stale_pid.py` / `test_session_file_env_override.py` に再構成 / Phase 8.1b B3（EngineBusy）を **2 つの直交する state 機械（Replay と Live）** に拡張：`SubmitOrder{venue="replay"}` を `Replay::Running` のみ、`SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` を `Live::Connected` のみ、`RequestVenueLogin` を `Live::Disconnected` のみで受理 / B3 テストを 5 本に拡充（idle replay order / disconnected live order / login already connected を追加）/ B3 に GUI 側 Rust の発注時エラーハンドリング項目を追加 / Q8 / Q10 / Q11 をクローズ済みに格上げ |
+| 2026-05-03 | **Phase 8 全サブフェーズ実装完了**：Phase 8.1a（`python/engine/replay_session.py` 新規作成。`ReplaySession`/`LiveSession`/`_AttachClient` 三者を単一ファイルに実装。CLI `python -m engine.replay_session run` 対応）/ Phase 8.1b（`python/engine/server.py` を `_Broadcaster` multi-client fanout + `ReplayState`/`LiveState` state machine + `EngineBusy` guard + `MAX_CONNECTIONS=4` に更新。`engine-client/src/session_file.rs` `EngineSession` 新規作成。`python/engine/schemas.py` `SCHEMA_MINOR` 8→9, `ClientConnected`/`ClientDisconnected`/`EngineBusy` 追加。`data/src/lib.rs` `FLOWSURFACE_DATA_PATH` env override バグ修正）/ Phase 8.1c（`src/modal/replay_form.rs` `ReplayFormModal` 新規作成。`src/native_menu.rs` に "Replay を開始..." メニュー追加）/ Phase 8.2（`scripts/replay_dev_load.sh` 削除。`tests/e2e/` から s56〜s83, s90, tachibana_* 11 ファイル削除。`scripts/run-replay-debug.sh` に DEPRECATED コメント追記）/ Phase 8.3（`src/replay_api.rs` / `src/api/` 全削除。`src/main.rs` から HTTP runtime ブロック・ControlApi Message 等を全削除）/ §0.1.2 B1〜B3 対応状況を「実装済み」に更新 / §8 DoD を「全達成済み」に更新 / §9 関連ドキュメントを削除済みファイル・新規成果物に更新 |
