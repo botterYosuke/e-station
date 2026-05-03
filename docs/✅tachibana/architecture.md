@@ -158,7 +158,7 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 | ファイル | 変更内容 |
 | :--- | :--- |
 | [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) | `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 追加。`FromStr` / `Display` / `ALL` 配列更新、および `MarketKind` を網羅する既存 match の修正 |
-| [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::RequestVenueLogin` / `EngineEvent::VenueReady` / `EngineEvent::VenueLoginStarted` / `EngineEvent::VenueLoginCancelled` / `EngineEvent::VenueError` 追加。`SCHEMA_MAJOR = 2`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更のため major を bump） |
+| [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::RequestVenueLogin` / `EngineEvent::VenueReady` / `EngineEvent::VenueLoginStarted` / `EngineEvent::VenueLoginCancelled` / `EngineEvent::VenueError` 追加。`SCHEMA_MAJOR = 3`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更のため major を bump し、その後の追加変更でさらに bump して現在 3） |
 | [engine-client/src/process.rs](../../../engine-client/src/process.rs) | `apply_after_handshake_with_timeout` から `SetVenueCredentials` 送信ステップを削除。`VenueReady` を venue 文字列 `"tachibana"` で待つ方式に変更。`credentials_by_venue` 保持フィールドを削除 |
 | [src/main.rs](../../../src/main.rs) | keyring 復元・`SetVenueCredentials` 投入コードを削除。Python が自律起動するため Rust の関与不要 |
 | Rust UI（`src/screen/`） | **ログイン画面コードを追加しない**。Python ヘルパー spawn 中は「ログインダイアログを別ウィンドウで表示中」のステータスバナーだけ出す（汎用 string、立花知識なし） |
@@ -362,7 +362,7 @@ pub enum Command {
 - Rust が creds / session を保持・送信することはない
 - Python は handshake 後に自律的に `startup_login` を実行し、結果を `VenueReady` または `VenueError` で返す
 - ユーザーが再ログインを要求した場合は `Command::RequestVenueLogin` のみを使う。Python はこれを受けてセッションをクリアし `startup_login` を再実行する
-- `SCHEMA_MAJOR = 2`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更）
+- `SCHEMA_MAJOR = 3`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更のため major bump、その後の追加変更でさらに bump して現在 3）
 
 #### 7.5.1 Rust UI bridge（DTO ↔ Iced Message ↔ FSM ↔ view）
 

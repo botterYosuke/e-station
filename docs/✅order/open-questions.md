@@ -107,7 +107,7 @@
 
 ### Q11. 発注 E2E における第二暗証番号のヘッドレス注入方法 ✅ Phase 8 で実質的に解決
 
-**背景**: `.env` にデモクレデンシャルが揃い（2026-04-28 確認）、ログイン E2E は実行可能。発注 E2E は第二暗証番号が必要だが、Phase 8 で新設した Python helper `engine.live_session.LiveSession.login()` で `second_password` を引数として渡せるため、案 A 相当（pytest + Python helper による直接 IPC 駆動）が正規ルートとなった。
+**背景**: `.env` にデモクレデンシャルが揃い（2026-04-28 確認）、ログイン E2E は実行可能。発注 E2E は第二暗証番号が必要だが、Phase 8 で新設した Python helper `engine.replay_session.LiveSession.login()` で `second_password` を引数として渡せるため、案 A 相当（pytest + Python helper による直接 IPC 駆動）が正規ルートとなった。
 
 **現状（Phase 8 以降）**: pytest + `LiveSession` 経由でフルスタック E2E がヘッドレス実行可能。旧 `tests/e2e/*.sh`（bash + curl）は Python helper 移行で更新済み（implementation-plan.md の T0.8 / T1.6 該当行参照）。env `DEV_TACHIBANA_SECOND_PASSWORD` も実装済み（T0.8 で追加）。
 

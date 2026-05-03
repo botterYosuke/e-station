@@ -421,3 +421,18 @@ uv run python scripts/smoke_tachibana_login.py
 - review-fix-loop のレビュー段でも、サブエージェントに e-station-review スキルを
   使わせること
 
+---
+
+## ストラテジー開発時のスキル指定
+
+`examples/` 配下のユーザー戦略コードを書くとき・W&B で実験を記録するときは、
+必ず `/wandb` スキルを Skill ツールで起動する。
+
+```
+/wandb
+```
+
+- ナラティブ記録・マルチエージェント比較・Sweep のパターンが定義されている
+- **コア非汚染ルール**（`import wandb` は `examples/wandb/` のみ）もここで確認する
+- 詳細: `.claude/skills/wandb/SKILL.md` / `docs/plan/wandb-vision.md`
+

@@ -86,7 +86,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 詳細は [./archive/replay-ui-role-revision-2026-04-28.md](./archive/replay-ui-role-revision-2026-04-28.md) を参照。
 
 - **N1.11（新設）** Replay 再生 speed コントロール（streaming=True 経路）+ IPC
-  `Command::SetReplaySpeed` を schema 1.4 に追加。`add_data([item]) → run(streaming=True)
+  `Command::SetReplaySpeed` を追加。`add_data([item]) → run(streaming=True)
   → clear_data()` を 1 件ずつ回し、ループ間に
   `sleep_sec = min(max(dt_event_sec, MIN_TICK_DT_SEC) / multiplier, SLEEP_CAP_SEC)`
   （`MIN_TICK_DT_SEC=0.001`、`SLEEP_CAP_SEC=0.200`）で sleep。前場-後場・引け後・営業日
@@ -120,7 +120,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
   注文一覧を汚染しない。`/api/order/list?venue=replay` を新設、`tachibana_orders_replay.jsonl`
   WAL と整合
 - **N1.16（新設）** REPLAY 買付余力表示。新規 IPC `EngineEvent::ReplayBuyingPower
-  { strategy_id, cash, buying_power, equity, ts_event_ms }` を schema 1.4 に追加。
+  { strategy_id, cash, buying_power, equity, ts_event_ms }` を追加。
   `python/engine/nautilus/portfolio_view.py` を新設し nautilus `Portfolio.account_for_venue(SIM)`
   から 1 秒間隔 + 約定即時のハイブリッドで snapshot 送出。N1 は **現物のみ**
   （`buying_power = cash`）。`order_router.py` に **REPLAY モード時は立花

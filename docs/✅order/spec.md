@@ -2,7 +2,7 @@
 
 > **Phase 8（2026-05-03 完了）以降の経路**: Rust 側 HTTP API `/api/order/*`（ポート 9876）は完全廃止された。本仕様内に残る `POST /api/order/submit` 等の表記は **Phase 8 で廃止された旧 HTTP path 仕様**として読むこと。現在の正規ルートは以下の 2 経路に集約されている:
 > - **GUI（iced）**: `Action::SubmitOrder` → `Command::SubmitOrder` を IPC（WebSocket、ポート 19876）に直接送信。HTTP を経由しない（元から `/api/order/*` は経由していなかった）
-> - **スクリプト・E2E テスト**: 新設 Python helper `engine.live_session.LiveSession`（`login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`）を呼び出し、内部で同じ IPC コマンドを発行
+> - **スクリプト・E2E テスト**: 新設 Python helper `engine.replay_session.LiveSession`（`login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`）を呼び出し、内部で同じ IPC コマンドを発行
 >
 > 旧 HTTP path 専用の防壁（`OrderGuardConfig` の rate limit / qty/yen cap、`/api/order/cancel-all` の `confirm: true` boolean 強制など）は HTTP 廃止と同時に消滅した。GUI 発注は元から HTTP を経由していなかったため挙動変更なし。reason_code 体系（§5.2）と nautilus 互換要件（§6）は IPC 経路でも引き続き有効。
 
@@ -119,7 +119,7 @@
 
 > **Phase 8（2026-05-03 完了）**: 下表の HTTP メソッド/パス列は **廃止された旧仕様**として残す。現在の正規ルートは:
 > - GUI: `Command::SubmitOrder` 等を IPC で直接送信（HTTP は元から経由していない）
-> - スクリプト: `engine.live_session.LiveSession`（attach mode で GUI 内 engine に WS client として接続、または in-process mode で engine を spawn）の `login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`
+> - スクリプト: `engine.replay_session.LiveSession`（attach mode で GUI 内 engine に WS client として接続、または in-process mode で engine を spawn）の `login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`
 >
 > request body / response の field shape は IPC `SubmitOrderRequest` / `Event::Order*` の DTO（`engine-client/src/dto.rs` / `python/engine/schemas.py`）を正本とする。下表の HTTP status / reason_code 体系は IPC 経路では適用されず、reject は `Event::OrderRejected{reason_code, reason_text}` で表現される。
 

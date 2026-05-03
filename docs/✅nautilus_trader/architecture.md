@@ -16,7 +16,7 @@
 │  ├─ exchange/ (暗号資産 adapter) ← データ取得用に役割を絞る  │
 │  └─ engine-client/              ← Python ワーカーへの IPC  │
 └────────────────┬────────────────────────────────────────┘
-                 │ WebSocket IPC (port 19876, schema 2.x)
+                 │ WebSocket IPC (port 19876, schema 3.x)
 ┌────────────────▼────────────────────────────────────────┐
 │ Python (engine プロセス)                                  │
 │                                                          │
@@ -69,10 +69,10 @@
 
 ## 2. プロセス起動とハンドシェイク
 
-既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。本計画は **schema 1.4**。
+既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。現在の実装は **SCHEMA_MAJOR=3, SCHEMA_MINOR=9**（`python/engine/schemas.py`）。
 
-1. Rust → Python: `Hello { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
-2. Python → Rust: `Ready { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
+1. Rust → Python: `Hello { schema_major: 3, schema_minor: 9, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
+2. Python → Rust: `Ready { schema_major: 3, schema_minor: 9, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
 3. Rust → Python: `SetVenueCredentials`（既存）
 4. Rust → Python: `Command::StartEngine { engine, ... }`（§3 参照）
    - `engine: Backtest` + `Hello.mode="replay"` → `BacktestEngine` 起動 + J-Quants ロード（`/api/replay/load` → §4）
@@ -80,7 +80,7 @@
 
 ## 3. 新規 IPC メッセージ
 
-[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（schema 1.4）。**`SubmitOrder` / `Order*` 系は order/ schema 1.3 で定義済み**。本計画で追加するのは backtest engine ライフサイクル、replay データロード、speed 制御、overlay、REPLAY 買付余力:
+[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（N1 実装分、schema 3.9 時点）。**`SubmitOrder` / `Order*` 系は定義済み**。本計画で追加したのは backtest engine ライフサイクル、replay データロード、speed 制御、overlay、REPLAY 買付余力:
 
 ```rust
 pub enum Command {
@@ -109,7 +109,7 @@ pub enum EngineEvent {
     EngineStarted { strategy_id: String, account_id: String, ts_event_ms: i64 },
     EngineStopped { strategy_id: String, final_equity: String, ts_event_ms: i64 },
     ReplayDataLoaded {               // ⭐ N1 新設
-        strategy_id: String,
+        strategy_id: Option<String>, // None = 単独 LoadReplayData（戦略未起動）
         bars_loaded: u64,
         trades_loaded: u64,
         ts_event_ms: i64,
@@ -122,9 +122,8 @@ pub enum EngineEvent {
         instrument_id: String,
         side: OrderSide,             // Buy | Sell
         price: String,               // 文字列精度規約
-        qty: String,
+        qty: Option<String>,         // 約定数量（文字列精度規約）
         ts_event_ms: i64,
-        client_order_id: String,
     },
     // ⭐ N1 新設: Strategy.emit_signal(...) による明示送出（D6）
     StrategySignal {
@@ -137,7 +136,7 @@ pub enum EngineEvent {
         tag: Option<String>,         // Annotate 時の任意ラベル
         note: Option<String>,
     },
-    // ⭐ N1 新設: REPLAY 買付余力（D9.6、schema 1.4）
+    // ⭐ N1 新設: REPLAY 買付余力（D9.6）
     ReplayBuyingPower {
         strategy_id: String,
         cash: String,                // 文字列精度規約

@@ -8,7 +8,7 @@
 
 **本計画は live モードのみを対象**とする。REPLAY モード仮想注文 UX は本計画スコープ外で、[nautilus_trader 統合 Phase N1](../✅nautilus_trader/README.md) で扱う。REPLAY モード時の発注は engine 側で `EngineBusy` event として reject される（spec.md §3.2）。
 
-> **Phase 8（2026-05-03 完了）以降の経路**: Rust 側 HTTP API（ポート 9876）は完全廃止された。GUI 発注はもともと `Command::SubmitOrder` を IPC（ポート 19876）に直接送る経路で動作しており、HTTP API には依存していなかったため無傷。スクリプト・テストからの発注は新設の **Python helper class `engine.live_session.LiveSession`**（`login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`）を経由する。本ドキュメント中の `/api/order/*` 関連の記述は **Phase 8 で廃止された旧 HTTP path 仕様**として読み、現在の実体は IPC 直接経路 + Python helper である点に注意。
+> **Phase 8（2026-05-03 完了）以降の経路**: Rust 側 HTTP API（ポート 9876）は完全廃止された。GUI 発注はもともと `Command::SubmitOrder` を IPC（ポート 19876）に直接送る経路で動作しており、HTTP API には依存していなかったため無傷。スクリプト・テストからの発注は新設の **Python helper class `engine.replay_session.LiveSession`**（`login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`）を経由する。本ドキュメント中の `/api/order/*` 関連の記述は **Phase 8 で廃止された旧 HTTP path 仕様**として読み、現在の実体は IPC 直接経路 + Python helper である点に注意。
 
 ## なぜ別 plan ディレクトリか
 

@@ -2,7 +2,7 @@
 
 > **Phase 8（2026-05-03 完了）以降の経路**: Rust 側 HTTP API `/api/order/*`（ポート 9876）は完全廃止。`src/api/order_api.rs`（3,490 行）と `OrderGuardConfig` も削除済み。本ドキュメント中で `Rust src/api/order_api.rs` / `POST /api/order/*` / `OrderGuardConfig` を参照している箇所は **Phase 8 以前の旧設計**として読むこと。現在の正規ルート:
 > - **GUI**: `Action::SubmitOrder` → `engine_client::dto::SubmitOrderRequest` を直接組んで `Command::SubmitOrder` を IPC（WebSocket、ポート 19876）に送信。`src/main.rs` 内で完結し HTTP を経由しない（元から経由していなかった）
-> - **スクリプト・E2E**: `engine.live_session.LiveSession`（in-process / attach mode 自動判定）の `login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`。内部で同じ IPC コマンドを発行
+> - **スクリプト・E2E**: `engine.replay_session.LiveSession`（in-process / attach mode 自動判定）の `login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`。内部で同じ IPC コマンドを発行
 > - **冪等性マップ**: `engine-client/src/order_session_state.rs::OrderSessionState` は **Rust IPC ハンドラ層** に残存（HTTP 廃止に伴う移管）。`client_order_id ↔ venue_order_id` の lookup 責務は変更なし
 > - **WAL**: Python `tachibana_orders.jsonl` も変更なし。`OrderSessionState::load_from_wal()` を Rust 起動時に呼ぶ経路も維持
 
@@ -33,7 +33,7 @@
 ユーザー UI（iced）/ Python helper（LiveSession）
    │ Action::SubmitOrder / LiveSession.submit_order(...)
    ▼
-GUI: src/main.rs / Python helper: engine.live_session
+GUI: src/main.rs / Python helper: engine.replay_session
    │ ① 入力検証（UUID, 銘柄コード形式, qty>0 …）— pydantic + serde deny_unknown_fields
    │ ② OrderSessionState.try_insert(client_order_id, request_key)
    │      （2 引数。venue_order_id は OrderAccepted 受信後に update_venue_order_id() で後着する）
@@ -240,10 +240,13 @@ pub enum Command {
         request_id: String,
         venue: String,
         client_order_id: String,
+        /// 他端末注文など caller が直接 venue_order_id を知っている場合のみ Some で渡す。
+        /// None の場合は Rust IPC ハンドラが OrderSessionState から lookup する。
+        venue_order_id: Option<String>,
         change: OrderModifyChange,      // qty / price / trigger / expire を Option で
     },
     // Rust は OrderSessionState で client_order_id → venue_order_id を lookup してから Python に渡す（§2.3）
-    // venue_order_id が None（unknown）の場合は HTTP 404 reject し Python へ送らない
+    // venue_order_id が None（unknown）の場合は IPC で ORDER_STATUS_UNKNOWN を返し Python へ送らない
     CancelOrder  { request_id: String, venue: String, client_order_id: String, venue_order_id: String },
     CancelAllOrders {
         request_id: String,
@@ -315,7 +318,7 @@ pub enum Event {
     // 既存 ...
     // nautilus の OrderEvent タクソノミーに合わせる
     OrderSubmitted   { client_order_id: String, ts_event_ms: i64 },
-    OrderAccepted    { client_order_id: String, venue_order_id: String, ts_event_ms: i64 },
+    OrderAccepted    { client_order_id: String, venue_order_id: Option<String>, ts_event_ms: i64 },
     OrderRejected    { client_order_id: String, reason_code: String, reason_text: String, ts_event_ms: i64 },
     OrderPendingUpdate { client_order_id: String, ts_event_ms: i64 },
     OrderPendingCancel { client_order_id: String, ts_event_ms: i64 },
@@ -386,8 +389,12 @@ pub struct AgentOrderRecord {
 
 pub enum PlaceOrderOutcome {
     Created { client_order_id: ClientOrderId },
-    IdempotentReplay { venue_order_id: String },
-    Conflict { existing_venue_order_id: String },
+    /// venue_order_id は Python 応答受領前（unknown 状態）では None になりうる。
+    IdempotentReplay { venue_order_id: Option<String> },
+    /// 同一 client_order_id で body が異なる再送 — 409 Conflict。
+    Conflict { existing_venue_order_id: Option<String> },
+    /// p_errno=2 受領後の frozen 状態。以降の発注は即時 SESSION_EXPIRED で reject。
+    SessionFrozen,
 }
 
 pub struct OrderSessionState {
@@ -408,8 +415,9 @@ flowsurface との差分:
 | `order_id` | `venue_order_id` | nautilus タクソノミー準拠（venue 採番 ID と明示） |
 | `key`（u64 ハッシュ） | `request_key`（u64 ハッシュ） | flowsurface の `key` だけだと意味が曖昧なため改名 |
 | （状態フィールド無し） | `status: NautilusOrderStatus`（追加） | flowsurface は単一段階だが本計画は SUBMITTED→ACCEPTED→… の状態遷移を持つ |
-| `PlaceOrderOutcome::IdempotentReplay { order_id }` | `PlaceOrderOutcome::IdempotentReplay { venue_order_id }` | 上記 `order_id` リネームに追従 |
-| `PlaceOrderOutcome::Conflict { existing_order_id }` | `PlaceOrderOutcome::Conflict { existing_venue_order_id }` | 同 |
+| `PlaceOrderOutcome::IdempotentReplay { order_id }` | `PlaceOrderOutcome::IdempotentReplay { venue_order_id: Option<String> }` | `order_id` → `venue_order_id` rename。Python 応答受領前は `None`（unknown 状態）のため `Option` |
+| `PlaceOrderOutcome::Conflict { existing_order_id }` | `PlaceOrderOutcome::Conflict { existing_venue_order_id: Option<String> }` | 同。`Option` で unknown 状態も表現 |
+| （移植元に無し） | `PlaceOrderOutcome::SessionFrozen` | `p_errno=2` 受領後の frozen 状態。以降の全発注を即時 `SESSION_EXPIRED` で reject |
 
 **B-L2 OrderSubmitted 即時発火の根拠**: `OrderSubmitted` を HTTP 送信前に発火する設計は **flowsurface 移植ではなく nautilus タクソノミー準拠の新規追加**。flowsurface `place_or_replay` は単一段階（受付 = 結果確定）だが、本計画は nautilus の `SUBMITTED → ACCEPTED → FILLED` の段階遷移に合わせて `OrderSubmitted` を即時発火する。
 
