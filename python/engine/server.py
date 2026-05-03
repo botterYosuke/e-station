@@ -149,9 +149,21 @@ class _Broadcaster:
         self._queues.pop(ws, None)
 
     def append(self, item: dict) -> None:
-        """Enqueue item to every connected client's queue (fanout)."""
-        for q in self._queues.values():
-            q.put_nowait(item)
+        """Enqueue item to every connected client's queue (fanout).
+
+        H-SF2: 1クライアントのキューが満杯でも後続クライアントへの broadcast を
+        継続する。QueueFull は WARNING でログし、イベントを破棄する（drop）。
+        """
+        for ws, q in list(self._queues.items()):
+            try:
+                q.put_nowait(item)
+            except asyncio.QueueFull:
+                log.warning(
+                    "[_Broadcaster] outbox full for client, dropping event %s",
+                    item.get("event", "?"),
+                )
+            except Exception as exc:
+                log.warning("[_Broadcaster] put_nowait failed: %s", exc)
         # Also write to compat deque so unit tests that read _q still work.
         self._q.append(item)
 
@@ -510,8 +522,25 @@ class DataEngineServer:
             await ws.close()
             raise ValueError("auth_failed")
 
-        # N1.13: capture mode from Hello so dispatch policies (mode helper) can read it.
-        self._mode = msg.mode
+        # N1.13 / M-TA6: capture mode from Hello.
+        # 最初の Hello のみ _mode を設定する。以降の接続で mode が異なる場合は
+        # EngineError で reject して接続を閉じる。
+        if self._mode == "live" and not self._connections:
+            # 接続がまだない（最初の handshake）場合は mode を設定する。
+            # 注: _handle で handshake() 後に add_conn されるので、handshake 時点では
+            # _connections は空（まだ追加されていない）。
+            self._mode = msg.mode
+        elif msg.mode != self._mode:
+            await ws.send(
+                orjson.dumps(
+                    EngineError(
+                        code="mode_mismatch",
+                        message=f"Engine is in {self._mode!r} mode, cannot attach as {msg.mode!r}",
+                    ).model_dump()
+                ).decode()
+            )
+            await ws.close(1008, "mode mismatch")
+            raise ValueError(f"mode_mismatch: engine={self._mode!r}, client={msg.mode!r}")
 
         if msg.schema_major != SCHEMA_MAJOR:
             await ws.send(
@@ -2396,8 +2425,15 @@ class DataEngineServer:
             )
             return
 
-        # B3: RequestVenueLogin は Live::DISCONNECTED 状態のみ受理する。
-        # inflight Lock チェックより先に state guard を置く。
+        # H-TA1: CONNECTING 中の RequestVenueLogin は「ログイン中」として VenueLoginStarted を返す。
+        # CONNECTED の場合は EngineBusy を返す。DISCONNECTED のみ新規ログイン開始。
+        if self._live_state == LiveState.CONNECTING:
+            log.info("RequestVenueLogin: login already in-progress (CONNECTING), re-emitting VenueLoginStarted")
+            self._emit({"event": "VenueLoginStarted", "venue": "tachibana", "request_id": request_id})
+            return
+
+        # B3: RequestVenueLogin は Live::DISCONNECTED または CONNECTING 状態のみ受理する。
+        # CONNECTED（既にログイン済み）の場合は EngineBusy を返す。
         if not self._check_live_state("RequestVenueLogin", LiveState.DISCONNECTED):
             return
 

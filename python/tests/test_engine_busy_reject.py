@@ -272,8 +272,9 @@ class TestLiveStateBusy:
         assert busy[0]["current_state"] == "CONNECTED"
 
     @pytest.mark.asyncio
-    async def test_login_busy_when_connecting(self) -> None:
-        """Connecting 中の RequestVenueLogin が EngineBusy を返す。"""
+    async def test_login_connecting_returns_venue_login_started(self) -> None:
+        """H-TA1: CONNECTING 中の RequestVenueLogin は EngineBusy でなく
+        VenueLoginStarted を返すこと（ログイン中を通知する仕様）。"""
         from engine.server import LiveState
 
         server = _make_server(mode="live")
@@ -288,10 +289,13 @@ class TestLiveStateBusy:
         }
         await server._do_request_venue_login(msg)
 
-        busy = _busy_events(server)
-        assert len(busy) == 1, f"Expected 1 EngineBusy, got {busy}"
-        assert busy[0]["attempted_command"] == "RequestVenueLogin"
-        assert busy[0]["current_state"] == "CONNECTING"
+        # EngineBusy でなく VenueLoginStarted が返ること
+        all_events = list(server._outbox)
+        busy = [e for e in all_events if e.get("event") == "EngineBusy"]
+        started = [e for e in all_events if e.get("event") == "VenueLoginStarted"]
+        assert len(busy) == 0, f"EngineBusy should not be emitted for CONNECTING; got {busy}"
+        assert len(started) == 1, f"Expected 1 VenueLoginStarted, got {started}"
+        assert started[0]["request_id"] == "req-login-2"
 
 
 # ---------------------------------------------------------------------------

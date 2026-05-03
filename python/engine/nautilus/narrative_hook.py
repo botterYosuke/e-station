@@ -1,66 +1,64 @@
-"""N1.6 / N1.12: narrative_hook — OrderFilled → POST /api/agent/narrative
-                               + OrderFilled → ExecutionMarker IPC.
+"""N1.12: narrative_hook — OrderFilled → ExecutionMarker IPC.
 
-Strategy の on_event(event) から呼ぶ mixin または関数。
-IPC EngineEvent::OrderFilled 受領時に:
-  1. HTTP で narrative store に記録する（N1.6 機能）
-  2. ExecutionMarker IPC イベントを outbox 経由で Rust UI に送出する（N1.12 機能）
-
-HTTP エンドポイント: POST http://localhost:9876/api/agent/narrative
+注: N1.6（POST /api/agent/narrative）は Phase 8.3 で廃止。
+HTTP API（ポート 9876）が削除されたため narrative store への HTTP 記録は機能しない。
+現在は N1.12 の ExecutionMarker IPC のみを提供する。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import Callable
 from typing import Any
 
-import httpx
-
 log = logging.getLogger(__name__)
-
-_NARRATIVE_PATH = "/api/agent/narrative"
 
 
 class NarrativeHook:
-    """OrderFilled イベントを narrative store に HTTP POST し、
-    ExecutionMarker IPC を outbox に積むフック（N1.6 + N1.12）。
+    """N1.12: narrative_hook — OrderFilled → ExecutionMarker IPC.
 
     Strategy の ``on_event`` から呼ぶか、スタンドアローン関数として使う。
+
+    注: N1.6（POST /api/agent/narrative）は Phase 8.3 で廃止。
+    HTTP API（ポート 9876）が削除されたため narrative store への HTTP 記録は機能しない。
+    現在は N1.12 の ExecutionMarker IPC のみを提供する。
 
     Parameters
     ----------
     strategy_id:
         記録に埋め込む戦略 ID（例: ``"buy-and-hold"``）。
     endpoint:
-        narrative API のベース URL。デフォルト ``http://localhost:9876``。
+        **Deprecated**: Phase 8.3 で HTTP API が廃止されたため、このパラメータは
+        無視される。後方互換性のため残しているが、指定すると WARNING が出る。
     on_event:
         N1.12: ExecutionMarker IPC を outbox に積む callback。
         ``on_event(event_dict: dict) -> None`` のシグネチャ。
-        ``None`` の場合は ExecutionMarker は送出されない（N1.6 互換モード）。
+        ``None`` の場合は ExecutionMarker は送出されない。
     """
 
     def __init__(
         self,
         strategy_id: str,
-        endpoint: str = "http://localhost:9876",
+        endpoint: str | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._strategy_id = strategy_id
-        self._endpoint = endpoint.rstrip("/")
         self._on_event = on_event
+        if endpoint is not None:
+            log.warning(
+                "NarrativeHook: 'endpoint' パラメータは Phase 8.3 で廃止されました。"
+                "HTTP API（ポート 9876）は削除済みのため、このパラメータは無視されます。"
+            )
 
     # ── Async API ──────────────────────────────────────────────────────────────
 
     async def on_order_filled(self, order_filled_event: dict) -> None:
         """OrderFilled イベントを処理する。
 
-        1. narrative store に HTTP POST する。
-        2. ExecutionMarker IPC を outbox 経由で送出する（``on_event`` が設定されている場合）。
+        N1.12: ExecutionMarker IPC を outbox 経由で送出する（``on_event`` が設定されている場合）。
 
-        エラーは握り潰さず log.warning で記録（メイン戦略ループを止めない）。
+        注: N1.6 の HTTP POST は Phase 8.3 で廃止。HTTP 呼び出しは行わない。
 
         Parameters
         ----------
@@ -68,21 +66,7 @@ class NarrativeHook:
             OrderFilled イベントの dict 表現。``instrument_id`` ``side``
             ``price`` (または ``last_price``) ``ts_event_ms`` を含むことを期待する。
         """
-        # ① narrative store への HTTP POST（N1.6）
-        payload = _build_payload(self._strategy_id, order_filled_event)
-        url = self._endpoint + _NARRATIVE_PATH
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(url, json=payload, timeout=5.0)
-                resp.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "narrative_hook: POST %s failed — %s",
-                url,
-                exc,
-            )
-
-        # ② ExecutionMarker IPC 送出（N1.12）
+        # N1.12: ExecutionMarker IPC 送出
         if self._on_event is not None:
             _emit_execution_marker(
                 self._strategy_id,
@@ -99,6 +83,7 @@ class NarrativeHook:
         などで適切に呼ぶこと。このメソッド自体は新しいイベントループを
         ``asyncio.run()`` で生成して実行する。
         """
+        import asyncio
         try:
             asyncio.run(self.on_order_filled(order_filled_event))
         except Exception as exc:  # noqa: BLE001
@@ -106,19 +91,6 @@ class NarrativeHook:
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
-
-
-def _build_payload(strategy_id: str, event: dict) -> dict:
-    """OrderFilled event dict から POST body を構築する。"""
-    return {
-        "strategy_id": strategy_id,
-        "event_type": "OrderFilled",
-        "instrument_id": event.get("instrument_id", ""),
-        "linked_order_id": event.get("linked_order_id", ""),
-        "outcome": event.get("outcome", ""),
-        "timestamp_ms": event.get("timestamp_ms", 0),
-        "extra": event.get("extra", {}),
-    }
 
 
 def _emit_execution_marker(

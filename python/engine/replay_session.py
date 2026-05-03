@@ -145,6 +145,11 @@ def _read_session_file() -> SessionFileData | None:
     if not isinstance(data, dict):
         return None
 
+    # M-SF3: token フィールドが存在しないか空の場合は invalid として None を返す。
+    if "token" not in data or not data["token"]:
+        log.debug("[_read_session_file] no token field, ignoring session file")
+        return None
+
     # pid が生存しているか確認
     pid = data.get("pid")
     if pid is not None and not _is_pid_alive(int(pid)):
@@ -160,6 +165,10 @@ def _read_session_file() -> SessionFileData | None:
 
 class BusyError(Exception):
     """エンジンが別操作中のときに raise される例外。"""
+
+
+class _TokenMismatchError(ConnectionRefusedError):
+    """token mismatch による接続拒否を示す専用例外（M-SF1）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -201,9 +210,9 @@ class _AttachClient:
             # handshake 完了 or エラーを待つ
             self._ready.wait(timeout=self._timeout_s + 2.0)
             if self._handshake_err is not None:
-                # H5: token mismatch を区別したエラーは原因をそのまま伝播する。
+                # H5 / M-SF1: token mismatch を専用例外型で区別する（文字列依存を排除）。
                 err = self._handshake_err
-                if isinstance(err, ConnectionRefusedError) and "token mismatch" in str(err):
+                if isinstance(err, _TokenMismatchError):
                     raise err
                 raise ConnectionRefusedError("attach handshake failed") from err
             if not self._handshake_ok:
@@ -263,7 +272,7 @@ class _AttachClient:
                         # message は EngineError の構造に依存。token は raise しない。
                         code = msg.get("code") or msg.get("message", "")
                         if isinstance(code, str) and "auth" in code.lower():
-                            raise ConnectionRefusedError(
+                            raise _TokenMismatchError(
                                 "attach handshake: token mismatch"
                             )
                         raise ConnectionRefusedError("handshake rejected")
@@ -297,7 +306,18 @@ class _AttachClient:
                     type(exc).__name__,
                 )
                 self._handshake_err = exc
-            self._ready.set()
+                self._ready.set()
+            else:
+                # C-1: ハンドシェイク後の例外: ログを出してエラーを recv_queue に通知する。
+                # これにより events() が最大60秒ハングすることを防ぐ。
+                log.warning(
+                    "[_AttachClient] post-handshake error (endpoint=%s): %s: %s",
+                    self._endpoint, type(exc).__name__, exc,
+                )
+                try:
+                    self._recv_queue.put_nowait({"__error__": "ws_closed"})
+                except Exception:
+                    pass
 
     async def _recv_loop(self, ws) -> None:
         import websockets
@@ -487,6 +507,8 @@ class ReplaySession:
         self._multiplier: int = 1
         self._entered: bool = False
         self._client: _AttachClient | None = None
+        # C-2: run() が呼ばれたときの strategy_id を保存して stop() で StopEngine に使う。
+        self._strategy_id: str = ""
 
     # ------------------------------------------------------------------
     # Context manager
@@ -531,8 +553,8 @@ class ReplaySession:
                 log.info("ReplaySession: attach mode (endpoint=%s)", endpoint)
                 return self
             except ConnectionRefusedError as exc:
-                # H5: token mismatch は user 操作ミスとして surface する（error レベル）。
-                if "token mismatch" in str(exc):
+                # H5 / M-SF1: token mismatch は専用例外型で区別する（文字列依存を排除）。
+                if isinstance(exc, _TokenMismatchError):
                     log.error(
                         "ReplaySession: attach failed (token mismatch?), "
                         "falling back to inprocess"
@@ -551,13 +573,14 @@ class ReplaySession:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        # stop_event をセットして run() を安全に終了させる
-        self._stop_event.set()
+        # C-2: stop() を経由することで attach mode の StopEngine 送信と
+        # in-process の stop_event セットを統一して行う。
+        self.stop()
         if self._client is not None:
             try:
                 self._client.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("[ReplaySession.__exit__] client.close() failed: %s", exc)
         return False
 
     # ------------------------------------------------------------------
@@ -571,9 +594,13 @@ class ReplaySession:
         return self._mode
 
     @property
-    def status(self) -> Literal["idle", "loaded", "running", "stopping", "stopped", "errored"]:
-        # 互換維持: 外部からは文字列で返す（Enum.value は Literal 値）。
-        return self._status.value  # type: ignore[return-value]
+    def status(self) -> Literal["idle", "loaded", "running", "stopped", "errored"]:
+        # H-GP1: STOPPING は遷移中であり engine はまだ動いているため "running" にマップする。
+        # 計画書 §4.1 の Literal 仕様に準拠。
+        s = self._status
+        if s is _ReplayStatus.STOPPING:
+            return "running"
+        return s.value  # type: ignore[return-value]
 
     @property
     def portfolio(self) -> dict | None:
@@ -688,6 +715,8 @@ class ReplaySession:
         if self._mode == "attach":
             from engine.schemas import StartEngine, EngineStartConfig
             import uuid
+            # C-2: strategy_id を保存して stop() で StopEngine コマンドに使えるようにする。
+            self._strategy_id = strategy_id
             params = self._load_params or {}
             cmd = StartEngine(
                 request_id=str(uuid.uuid4()),
@@ -761,19 +790,46 @@ class ReplaySession:
             raise
 
     def set_speed(self, multiplier: int) -> None:
-        """再生速度倍率を変更する（走行中も即時反映）。"""
-        self._multiplier = multiplier
+        """再生速度倍率を変更する（走行中も即時反映）。
+
+        H-SF1: attach mode では SetReplaySpeed コマンドを engine に送信する。
+        in-process mode では self._multiplier を更新するだけで runner が参照する。
+        """
+        self._multiplier = multiplier  # in-process 用
+        if self._mode == "attach" and self._client is not None:
+            import uuid as _uuid
+            from engine.schemas import SetReplaySpeed
+            cmd = SetReplaySpeed(
+                request_id=str(_uuid.uuid4()),
+                multiplier=multiplier,
+            )
+            try:
+                self._client.send_command(cmd.model_dump())
+            except Exception as exc:
+                log.warning("[ReplaySession.set_speed] SetReplaySpeed send failed: %s", exc)
 
     def stop(self) -> None:
         """実行中の replay を停止する。
 
-        attach mode 走行中: ``STOPPING`` に遷移し、EngineStopped 受信で
-        ``STOPPED`` に進む（events() ループ側で実施）。
+        attach mode 走行中: ``STOPPING`` に遷移し StopEngine を engine に送信する。
+        EngineStopped 受信で events() ループが ``STOPPED`` に進む。
         in-process: ``stop_event`` をセットして runner を抜ける。
         """
-        # H16: attach mode の running → stopping 遷移を可視化する。
-        if self._status is _ReplayStatus.RUNNING and self._mode == "attach":
-            self._status = _ReplayStatus.STOPPING
+        # R2-H1: StopEngine コマンドは RUNNING 状態のときのみ送信する。
+        # ERRORED / LOADED / IDLE 状態では送信しない（engine が受け付けないため無意味）。
+        if self._mode == "attach" and self._client is not None:
+            if self._status is _ReplayStatus.RUNNING:
+                self._status = _ReplayStatus.STOPPING
+                import uuid as _uuid
+                from engine.schemas import StopEngine
+                cmd = StopEngine(
+                    request_id=str(_uuid.uuid4()),
+                    strategy_id=self._strategy_id,
+                )
+                try:
+                    self._client.send_command(cmd.model_dump())
+                except Exception as exc:
+                    log.warning("[ReplaySession.stop] StopEngine send failed: %s", exc)
         self._stop_event.set()
 
     def submit_order(
@@ -931,7 +987,14 @@ class LiveSession:
         """
         # attach mode は __enter__ 時点で NotImplementedError になっているため
         # 通常はここに来ないが、防御的に明示的なエラーを返す。
+        # M-GP4: attach mode + credentials は ValueError（計画書 §4.3 準拠）。
         if self._mode == "attach":
+            if user_id is not None or password is not None:
+                raise ValueError(
+                    "attach mode では user_id/password をワイヤー経由で送れません。"
+                    "GUI/engine 側の保存済み credential か dev 用の credential を使ってください。"
+                )
+            # credentials なし attach mode は Phase 8.3 未実装
             raise NotImplementedError(
                 "LiveSession.login() in attach mode is Phase 8.3 scope"
             )

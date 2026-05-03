@@ -214,10 +214,10 @@ impl PythonProcess {
         }
 
         if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(forward_lines(stdout, log::Level::Info));
+            let _stdout_fwd = tokio::spawn(forward_lines(stdout, log::Level::Info));
         }
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(forward_lines(stderr, log::Level::Warn));
+            let _stderr_fwd = tokio::spawn(forward_lines(stderr, log::Level::Warn));
         }
 
         Ok(Self { child, port, token })

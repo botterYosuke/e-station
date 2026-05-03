@@ -1058,6 +1058,27 @@ pub enum EngineEvent {
     DateChangeMarker {
         date: String,
     },
+
+    // ── Phase 8.1b: Multi-client connection lifecycle events ─────────────────
+    /// Engine state machine が現在の state で受け付けられない Command を
+    /// 受信したときに emit する（B3 state guard）。
+    /// `current_state` / `attempted_command` / `reason` は `schemas.py`
+    /// `EngineBusy` の wire 形式に対応する。
+    EngineBusy {
+        current_state: String,
+        attempted_command: String,
+        reason: String,
+    },
+    /// 新規クライアントが engine WebSocket に接続したことを全 client に broadcast する。
+    /// `count` は接続中のクライアント総数（接続後）。
+    ClientConnected {
+        count: u32,
+    },
+    /// クライアントが engine WebSocket から切断したことを全 client に broadcast する。
+    /// `count` は接続中のクライアント総数（切断後）。
+    ClientDisconnected {
+        count: u32,
+    },
 }
 
 fn default_true() -> bool {

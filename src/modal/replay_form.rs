@@ -85,18 +85,27 @@ pub struct ValidatedForm {
     pub initial_cash: u64,
 }
 
-/// `YYYY-MM-DD` 形式の簡易チェック。
+/// `YYYY-MM-DD` 形式（10 文字・ゼロ埋め 2 桁月日）かつ実在する日付かを検証する。
+///
+/// - 構文チェック: 長さ 10・`-` 区切り・4+2+2 桁の数字
+/// - 意味チェック: `chrono::NaiveDate::parse_from_str` で存在する日付か確認
+///   → "9999-99-99" や "2025-02-30" を弾く
 fn is_valid_date(s: &str) -> bool {
-    // 形式: YYYY-MM-DD (10 chars)
+    // 構文チェック: YYYY-MM-DD (10 文字, ゼロ埋め)
     if s.len() != 10 {
         return false;
     }
     let bytes = s.as_bytes();
-    bytes[4] == b'-'
+    if !(bytes[4] == b'-'
         && bytes[7] == b'-'
         && bytes[..4].iter().all(u8::is_ascii_digit)
         && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit))
+    {
+        return false;
+    }
+    // 意味チェック: 実在する日付か確認
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
 
 impl ReplayFormModal {
@@ -372,5 +381,30 @@ mod tests {
         assert!(!is_valid_date("not-a-date"));
         assert!(!is_valid_date("20250106"));
         assert!(!is_valid_date("2025-1-6"));
+    }
+
+    #[test]
+    fn is_valid_date_rejects_impossible_dates() {
+        // M-RS2: 形式は正しいが存在しない日付を弾く。
+        assert!(
+            !is_valid_date("9999-99-99"),
+            "9999-99-99 should be rejected"
+        );
+        assert!(
+            !is_valid_date("2025-02-30"),
+            "2025-02-30 should be rejected"
+        );
+        assert!(
+            !is_valid_date("2025-13-01"),
+            "2025-13-01 should be rejected"
+        );
+        assert!(
+            !is_valid_date("2025-00-01"),
+            "2025-00-01 should be rejected"
+        );
+        assert!(
+            !is_valid_date("2025-01-00"),
+            "2025-01-00 should be rejected"
+        );
     }
 }

@@ -1102,6 +1102,25 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
                 None
             }
         }
+        // Phase 8: EngineBusy → GUI ユーザーへの warn toast
+        // Python engine が state guard で Command を拒否したときに emit される。
+        EngineEvent::EngineBusy {
+            attempted_command,
+            reason,
+            ..
+        } => Some(Message::OrderToast(Toast::warn(format!(
+            "操作を受け付けられませんでした: {attempted_command} — {reason}"
+        )))),
+        // Phase 8.1b: multi-client 接続ライフサイクルイベント
+        // GUI 側では表示不要なため debug ログのみ出力して None を返す。
+        EngineEvent::ClientConnected { count } => {
+            log::debug!("engine: client connected (total={count})");
+            None
+        }
+        EngineEvent::ClientDisconnected { count } => {
+            log::debug!("engine: client disconnected (total={count})");
+            None
+        }
         _ => None,
     }
 }
