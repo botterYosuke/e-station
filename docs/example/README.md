@@ -21,41 +21,19 @@ e-station の戦略は **ユーザー自身が書いた Python コードを同�
 
 ## 起動
 
-`scripts/run-replay-debug.sh` に戦略ファイル・銘柄コード・期間を引数で渡します。
-
 ```bash
-bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31
+uv run python -m engine.replay_session run \
+    --strategy docs/example/buy_and_hold.py \
+    --instrument 1301.TSE \
+    --start 2025-01-06 \
+    --end 2025-03-31
 ```
-
-スクリプトは次を自動で行います。
-
-1. `cargo build`（debug ビルド）
-2. `flowsurface --mode replay` を起動
-3. バックグラウンドで `POST /api/replay/load` → `POST /api/replay/start` を送信
 
 GUI 側は `ReplayDataLoaded` を受信すると **TimeAndSales・CandlestickChart・
 OrderList・BuyingPower の 4 ペインを自動生成**します。
 
-### 引数一覧
-
-```
-run-replay-debug.sh <strategy_file> <instrument_id> <start_date> <end_date> [granularity]
-```
-
-| 位置 | 必須 | 例 | 説明 |
-|------|:---:|-----|------|
-| `$1` strategy_file | ✅ | `docs/example/buy_and_hold.py` | 戦略ファイルパス |
-| `$2` instrument_id | ✅ | `1301.TSE` | 銘柄コード |
-| `$3` start_date | ✅ | `2025-01-06` | 開始日（ISO8601） |
-| `$4` end_date | ✅ | `2025-03-31` | 終了日（ISO8601） |
-| `$5` granularity | | `Daily`（既定）/ `Minute` / `Trade` | 足種 |
-
-任意の追加パラメータはシェルの env var で指定します（`.env` の自動読み込みはしません）：
-
-| 環境変数 | 既定値 | 説明 |
-|---------|--------|------|
-| `REPLAY_INITIAL_CASH` | `1000000` | 初期資金（円） |
-| `REPLAY_STRATEGY_ID` | `user-strategy` | 戦略 ID |
+> **注意**: `scripts/run-replay-debug.sh` と `scripts/replay_dev_load.sh` は
+> Phase 8.2 で廃止されました（HTTP API ポート 9876 依存のため）。
 
 ## buy_and_hold.py の動作
 
@@ -75,7 +53,7 @@ run-replay-debug.sh <strategy_file> <instrument_id> <start_date> <end_date> [gra
 `strategy_init_kwargs` に JSON を指定すると、コンストラクタの引数を上書きできます。
 
 ```bash
-# HTTP body を直接 curl で渡す例（replay_dev_load.sh 経由でなく手動確認したいとき）
+# HTTP body を直接 curl で渡す例（手動確認したいとき）
 curl -sS -X POST http://127.0.0.1:9876/api/replay/start \
   -H 'Content-Type: application/json' \
   -d '{

@@ -133,7 +133,11 @@ pub fn open_url(url: &str) -> Result<(), InternalError> {
 
 pub fn data_path(path_name: Option<&str>) -> PathBuf {
     if let Ok(path) = std::env::var("FLOWSURFACE_DATA_PATH") {
-        PathBuf::from(path)
+        if let Some(path_name) = path_name {
+            PathBuf::from(path).join(path_name)
+        } else {
+            PathBuf::from(path)
+        }
     } else {
         let data_dir = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
         if let Some(path_name) = path_name {
@@ -195,6 +199,41 @@ fn cleanup_directory(data_path: &PathBuf) -> usize {
     }
 
     deleted_files.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_path_env_override_joins_path_name() {
+        let tmp = std::env::temp_dir().join("flowsurface-test-override-a");
+        let tmp_str = tmp.to_str().unwrap();
+        // SAFETY: test-only env mutation; run with --test-threads=1 if parallel tests race.
+        unsafe {
+            std::env::set_var("FLOWSURFACE_DATA_PATH", tmp_str);
+        }
+        let result = data_path(Some("engine-session.json"));
+        unsafe {
+            std::env::remove_var("FLOWSURFACE_DATA_PATH");
+        }
+        assert_eq!(result, tmp.join("engine-session.json"));
+    }
+
+    #[test]
+    fn data_path_env_override_no_path_name() {
+        let tmp = std::env::temp_dir().join("flowsurface-test-override-b");
+        let tmp_str = tmp.to_str().unwrap();
+        // SAFETY: test-only env mutation; run with --test-threads=1 if parallel tests race.
+        unsafe {
+            std::env::set_var("FLOWSURFACE_DATA_PATH", tmp_str);
+        }
+        let result = data_path(None);
+        unsafe {
+            std::env::remove_var("FLOWSURFACE_DATA_PATH");
+        }
+        assert_eq!(result, tmp);
+    }
 }
 
 pub fn cleanup_old_market_data() -> usize {

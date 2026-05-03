@@ -15,6 +15,7 @@ pub mod dto;
 pub mod error;
 pub mod order_session_state;
 pub mod process;
+pub mod session_file;
 pub mod stock_meta;
 pub mod venue_caps;
 

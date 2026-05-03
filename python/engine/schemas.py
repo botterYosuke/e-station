@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 8
+SCHEMA_MINOR: int = 9
 
 
 # ---------------------------------------------------------------------------
@@ -814,6 +814,32 @@ class PositionsUpdated(IpcMessage):
     venue: str
     positions: list[PositionRecord]
     ts_ms: int
+
+
+# ── Phase 8.1b: Multi-client connection lifecycle events ────────────────────
+
+
+class ClientConnected(IpcMessage):
+    event: Literal["ClientConnected"] = "ClientConnected"
+    count: int
+
+
+class ClientDisconnected(IpcMessage):
+    event: Literal["ClientDisconnected"] = "ClientDisconnected"
+    count: int
+
+
+class EngineBusy(IpcMessage):
+    """Engine state machine rejected a command because the current state does not allow it.
+
+    B3: emitted when a command arrives in the wrong state (e.g. LoadReplayData while
+    already Loaded, StartEngine while Idle, SubmitOrder while Disconnected).
+    """
+
+    event: Literal["EngineBusy"] = "EngineBusy"
+    current_state: str
+    attempted_command: str
+    reason: str
 
 
 # ---------------------------------------------------------------------------

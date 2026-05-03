@@ -59,6 +59,9 @@ _REQUIRED_ATTRS: dict[str, object] = {
     "_replay_strategy_id": None,
     "_cache_dir": None,  # _do_get_order_list_replay が参照
     "_replay_streaming_fills": None,  # N1.13: streaming replay 約定蓄積
+    # B3: state machine attributes
+    "_replay_state": None,
+    "_live_state": None,
 }
 
 
@@ -81,6 +84,7 @@ def _make_server(mode: str = "replay"):
     from decimal import Decimal
     from engine.nautilus.portfolio_view import PortfolioView
     from pathlib import Path
+    from engine.server import ReplayState, LiveState
     defaults: dict[str, object] = {
         "_outbox": _ListOutbox(),  # H5: duck-type スタブ
         "_mode": mode,
@@ -95,6 +99,9 @@ def _make_server(mode: str = "replay"):
         "_replay_strategy_id": "",
         "_cache_dir": Path("/tmp/test-engine-cache"),
         "_replay_streaming_fills": [],  # N1.13: streaming replay 約定蓄積
+        # B3: state machine — LOADED は StartEngine/StopEngine が有効な状態
+        "_replay_state": ReplayState.LOADED,
+        "_live_state": LiveState.CONNECTED,
     }
     # _REQUIRED_ATTRS に列挙された属性をすべて設定する。差分があれば KeyError で
     # 検出する (silent 黙殺防止)。
@@ -112,7 +119,10 @@ class TestLoadReplayDataDispatch:
 
         ファイル存在確認のみ行うため counts は 0（実際のカウントは StartEngine で行う）。
         """
+        from engine.server import ReplayState
         server = _make_server(mode="replay")
+        # B3: LoadReplayData は IDLE 状態から呼ぶ必要がある。
+        server._replay_state = ReplayState.IDLE
         msg = {
             "op": "LoadReplayData",
             "request_id": "req-load-1",
@@ -197,7 +207,10 @@ class TestRequestVenueLoginModeGuard:
     async def test_request_venue_login_allowed_in_live_mode(self) -> None:
         """Negative control: in live mode the same call must reach
         `_startup_tachibana` (no mode_mismatch rejection)."""
+        from engine.server import LiveState
         server = _make_server(mode="live")
+        # B3: RequestVenueLogin は DISCONNECTED 状態のみ受理する。
+        server._live_state = LiveState.DISCONNECTED
         server._tachibana_login_inflight = MagicMock()
         server._tachibana_login_inflight.locked = MagicMock(return_value=False)
         server._tachibana_session = MagicMock()
@@ -302,7 +315,10 @@ class TestStopEngineDispatch:
     @pytest.mark.asyncio
     async def test_stop_engine_no_running_task_is_safe(self) -> None:
         """走行中タスクが無い状態で StopEngine を受けても raise しない。"""
+        from engine.server import ReplayState
         server = _make_server(mode="replay")
+        # B3: StopEngine は RUNNING 状態から呼ぶ。走行中タスクなしでも安全なことを確認。
+        server._replay_state = ReplayState.RUNNING
         msg = {
             "op": "StopEngine",
             "request_id": "req-stop-1",
@@ -317,8 +333,11 @@ class TestStopEngineDispatch:
         import unittest.mock
 
         from engine.nautilus.engine_runner import NautilusRunner
+        from engine.server import ReplayState
 
         server = _make_server(mode="replay")
+        # B3: StopEngine は RUNNING 状態から呼ぶ。
+        server._replay_state = ReplayState.RUNNING
         runner = NautilusRunner()
         # 走行中フラグを立てて _engine が dispose されないことを確認
         runner._running = True
@@ -533,7 +552,10 @@ class TestM7ReplayVenueSubmitOrderRejected:
 
     @pytest.mark.asyncio
     async def test_replay_venue_submit_order_rejected_with_replay_not_implemented(self, tmp_path) -> None:
+        from engine.server import ReplayState
         server = _make_server(mode="replay")
+        # B3: replay SubmitOrder は RUNNING 状態から呼ぶ。
+        server._replay_state = ReplayState.RUNNING
         server._cache_dir = tmp_path
         # _do_submit_order_inner が参照するカウンタ
         server._submit_order_inflight_count = 0
@@ -1021,8 +1043,11 @@ class TestReplayModeUsesStreamingVersion:
     async def test_replay_mode_stop_event_is_set_on_stop_engine(self) -> None:
         """mode='replay' の _handle_stop_engine は stop_event.set() を呼ぶ。"""
         import threading
+        from engine.server import ReplayState
 
         server = _make_server(mode="replay")
+        # B3: StopEngine は RUNNING 状態から呼ぶ。
+        server._replay_state = ReplayState.RUNNING
         stop_event = threading.Event()
         server._engine_stop_events["stop-ev-strategy"] = stop_event
         from engine.nautilus.engine_runner import NautilusRunner

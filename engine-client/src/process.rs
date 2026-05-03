@@ -3,7 +3,7 @@
 /// `PythonProcess` spawns the Python engine and communicates its `{port, token}`
 /// via stdin as a JSON line.  `ProcessManager` wraps it with exponential-backoff
 /// restart logic and re-applies subscriptions after each recovery.
-use crate::{connection::EngineConnection, error::EngineClientError};
+use crate::{connection::EngineConnection, error::EngineClientError, session_file::EngineSession};
 
 use std::{
     collections::HashSet,
@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Child, sync::Mutex};
+
+use data::data_path;
 
 const DEFAULT_PROBE_URL: &str = "ws://127.0.0.1:19876/";
 
@@ -232,6 +234,22 @@ impl PythonProcess {
     pub fn token(&self) -> &str {
         &self.token
     }
+
+    /// PID of the spawned child process, if available.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+}
+
+impl Drop for PythonProcess {
+    fn drop(&mut self) {
+        EngineSession::delete(&session_path());
+    }
+}
+
+/// Canonical path for the engine session file.
+pub fn session_path() -> std::path::PathBuf {
+    data_path(Some("engine-session.json"))
 }
 
 // ── SubscriptionKey ───────────────────────────────────────────────────────────
@@ -488,6 +506,19 @@ impl ProcessManager {
                 }
             }
         };
+
+        // Write engine-session.json now that the handshake is complete.
+        // Python helper reads this to obtain the token and port when attaching
+        // to a GUI-spawned engine. Token is NOT included in log output.
+        let session = EngineSession {
+            port: proc.port(),
+            token: proc.token().to_string(),
+            pid: proc.pid().unwrap_or(0),
+            schema_major: u32::from(crate::SCHEMA_MAJOR),
+        };
+        if let Err(e) = session.write_atomic(&session_path()) {
+            log::warn!("failed to write engine-session.json: {e}");
+        }
 
         self.apply_after_handshake(&connection).await;
 

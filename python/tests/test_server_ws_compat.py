@@ -83,6 +83,10 @@ async def _handshake(port: int, token: str, **connect_kwargs) -> websockets.Clie
     raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
     msg = orjson.loads(raw)
     assert msg["event"] == "Ready", f"Expected Ready, got: {msg}"
+    # Drain the ClientConnected broadcast that follows Ready in multi-client mode.
+    raw2 = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg2 = orjson.loads(raw2)
+    assert msg2["event"] == "ClientConnected", f"Expected ClientConnected, got: {msg2}"
     return ws
 
 

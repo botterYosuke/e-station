@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Equivalent to the "replay - Rust: Debug (CodeLLDB)" VSCode launch configuration.
+# DEPRECATED (Phase 8.2): このスクリプトは HTTP API（ポート 9876）に依存する
+# replay_dev_load.sh を起動していたが、そのスクリプトは削除された。
+# 代替: uv run python -m engine.replay_session run を使用すること。
+#
+# 旧: Equivalent to the "replay - Rust: Debug (CodeLLDB)" VSCode launch configuration.
 # Builds flowsurface in debug mode, then runs replay_dev_load.sh in the background
 # (equivalent to "replay: watch & load (active file)" task), then starts the exe.
 #
@@ -27,11 +31,9 @@ export PATH="$REPO_ROOT/.venv/Scripts:$PATH"
 echo "[run-replay-debug] building (debug)..."
 cargo build --manifest-path "$REPO_ROOT/Cargo.toml"
 
-# Start replay_dev_load.sh in background (= "replay: watch & load (active file)" task).
-# It polls the HTTP server and POSTs load + start once the exe is ready.
-echo "[run-replay-debug] starting replay_dev_load.sh in background..."
-bash "$REPO_ROOT/scripts/replay_dev_load.sh" \
-    "$STRATEGY_FILE" "$INSTRUMENT_ID" "$START_DATE" "$END_DATE" "$GRANULARITY" &
+# NOTE: replay_dev_load.sh は Phase 8.2 で削除済み。
+# HTTP API（ポート 9876）経由でのロード・スタートは行わない。
+# 代替: uv run python -m engine.replay_session run を使用すること。
 
 echo "[run-replay-debug] starting flowsurface --mode replay"
 exec "$REPO_ROOT/target/debug/flowsurface.exe" --mode replay

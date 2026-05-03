@@ -156,58 +156,25 @@ VSCode から CodeLLDB でデバッグする場合は [.vscode/launch.json](.vsc
 
 ### replay モードの使い方
 
-#### サンプル戦略を流す最小コマンド
+#### サンプル戦略を流す最小コマンド（Phase 8.2 以降）
 
 ```bash
-bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31
+uv run python -m engine.replay_session run \
+    --strategy docs/example/buy_and_hold.py \
+    --instrument 1301.TSE \
+    --start 2025-01-06 \
+    --end 2025-03-31
 ```
 
-`run-replay-debug.sh` は以下を一気にやる：
-
-1. `cargo build`（debug ビルド）
-2. `replay_dev_load.sh` を background で起動（HTTP ポート 9876 を polling）
-3. `flowsurface --mode replay` を foreground 起動
-4. background スクリプトが `POST /api/replay/load` → `POST /api/replay/start` を順に投げる
+> **注意**: `scripts/run-replay-debug.sh` と `scripts/replay_dev_load.sh` は
+> Phase 8.2 で廃止された（HTTP API ポート 9876 依存のため）。
+> `run-replay-debug.sh` は参考として残してあるが機能しない。
 
 サンプル戦略は `docs/example/` 配下：
 
 | ファイル | 内容 |
 |---------|------|
 | `buy_and_hold.py` | 最初のバーで成行買いし、以降は保有し続ける最小戦略 |
-
-#### 引数一覧
-
-```
-run-replay-debug.sh <strategy_file> <instrument_id> <start_date> <end_date> [granularity]
-replay_dev_load.sh  <strategy_file> <instrument_id> <start_date> <end_date> [granularity]
-```
-
-| 位置 | 必須 | 例 |
-|------|------|-----|
-| `$1` strategy_file | ✅ | `docs/example/buy_and_hold.py` |
-| `$2` instrument_id | ✅ | `1301.TSE` |
-| `$3` start_date | ✅ | `2025-01-06` (ISO8601) |
-| `$4` end_date | ✅ | `2025-03-31` (ISO8601) |
-| `$5` granularity | 任意（既定 `Daily`） | `Daily` / `Minute` / `Trade` |
-
-任意パラメータは引き続き env var で上書き可：
-
-| 変数 | 既定値 |
-|------|--------|
-| `REPLAY_INITIAL_CASH` | `1000000`（円） |
-| `REPLAY_STRATEGY_ID` | `user-strategy` |
-
-#### J-Quants データの場所
-
-`S:/j-quants/` 直下に月次 CSV.gz が必要：
-
-- Daily: `equities_bars_daily_YYYYMM.csv.gz`
-- Minute: `equities_bars_minute_YYYYMM.csv.gz`
-- Trade: `equities_trades_YYYYMM.csv.gz`
-
-env var `JQUANTS_DIR` で上書き可（既定 `S:/j-quants`）。
-`POST /api/replay/load` は**ファイル存在確認のみ**で行を読まない。返値の
-`bars_loaded:0` は仕様通り（実際のロード件数ではない）。
 
 #### `saved-state.json` の扱い（D9）
 
@@ -220,30 +187,6 @@ replay モードでは `saved-state.json` を **load も save も行わない**�
 ペインは `ReplayDataLoaded` 受信後に `auto_generate_replay_panes` が
 TimeAndSales / CandlestickChart / OrderList / BuyingPower を自動生成する。
 
-#### IPC イベントの流れ（streaming replay）
-
-```
-POST /api/replay/load   → LoadReplayData IPC
-                        → Python: check_data_exists() （ファイル存在のみ）
-                        → ReplayDataLoaded
-                        → Rust: AutoGenerateReplayPanes コマンド送信（ack 付き）
-                        → Iced: pane 生成 + stream bind 完了で ack.notify_one()
-                        → 200 OK = pane ready まで含む（pane_ready_timeout で 504）
-
-POST /api/replay/start  → StartEngine IPC
-                        → Python: NautilusRunner.start_backtest_replay_streaming()
-                        → EngineStarted
-                        → 1 バー / tick ずつ処理：
-                          - DateChangeMarker（営業日跨ぎ）
-                          - KlineUpdate / Trades（market data 複製）
-                          - ExecutionMarker / StrategySignal（戦略の発注時）
-                          - ReplayBuyingPower（ポートフォリオ更新）
-                        → 全バー処理後 EngineStopped
-```
-
-`replay_speed.py` の `SLEEP_CAP_SEC=0.200` により tick 間隔は最大 200ms に
-キャップされる。Daily バー 60本でも約 12 秒で完走する。
-
 #### よくある落とし穴
 
 - **`Subscribe: unknown venue 'replay'` ログ**：Python は replay を実 venue として
@@ -253,11 +196,6 @@ POST /api/replay/start  → StartEngine IPC
   bar が増える。replay 開始直後はチャート空、徐々に bar が積まれる
 - **`saved-state.json` を消したら再現するバグ**：D9 で replay は常にこの状態で
   起動するため、空ペイングリッドからのフローを必ず動作確認すること
-- **`/load` 後に sleep を入れる必要はない**：`/api/replay/load` は pane 生成
-  完了まで blocking で 200 を返すので、`replay_dev_load.sh` で `/start` を投げる
-  前に sleep する必要はない。debug+lldb で重い場合は `REPLAY_PANE_READY_TIMEOUT_S`
-  で ack 待機を延長できる（既定 debug 30 s / release 10 s）。詳細は
-  `docs/✅nautilus_trader/replay-launch-empty-pane-issue.md` 第五原因参照
 
 ### 外部エンジンに接続する際のトークン認証
 

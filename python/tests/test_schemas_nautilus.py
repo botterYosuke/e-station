@@ -24,10 +24,11 @@ def _roundtrip(model_cls, data: dict) -> dict:
 # ── Schema version ──────────────────────────────────────────────────────────
 
 
-def test_schema_minor_is_8_for_phase_a() -> None:
+def test_schema_minor_is_9_for_phase_b1() -> None:
     # Phase A: SCHEMA_MINOR を 6 → 8 に bump (kind フィールド追加 + PositionsUpdated 追加)
     # Phase F: SCHEMA_MAJOR を 2 → 3 に bump (typed-only IPC, VenueCaps required)
-    assert s.SCHEMA_MINOR == 8
+    # Phase 8.1b B1: SCHEMA_MINOR を 8 → 9 に bump (multi-client broadcast, ClientConnected/Disconnected)
+    assert s.SCHEMA_MINOR == 9
     assert s.SCHEMA_MAJOR == 3
 
 

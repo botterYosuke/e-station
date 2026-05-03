@@ -31,6 +31,10 @@ async def _connect_and_handshake(port: int, token: str) -> websockets.ClientConn
     raw = await ws.recv()
     msg = orjson.loads(raw)
     assert msg["event"] == "Ready", f"Expected Ready, got: {msg}"
+    # Drain the ClientConnected broadcast that follows Ready in multi-client mode.
+    raw2 = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg2 = orjson.loads(raw2)
+    assert msg2["event"] == "ClientConnected", f"Expected ClientConnected, got: {msg2}"
     return ws
 
 
@@ -58,7 +62,7 @@ async def _wait_for_port(port: int, timeout: float = 2.0) -> None:
 @pytest.fixture
 async def running_server(unused_tcp_port):
     """Start DataEngineServer on a random port, yield (port, token, mock_worker), then stop."""
-    from engine.server import DataEngineServer
+    from engine.server import DataEngineServer, LiveState
 
     token = "test-token-abc123"
     mock_worker = _make_mock_worker()
@@ -67,6 +71,8 @@ async def running_server(unused_tcp_port):
     with patch("engine.server.BinanceWorker", return_value=mock_worker), \
          patch.object(DataEngineServer, "_startup_tachibana", noop_startup):
         server = DataEngineServer(port=unused_tcp_port, token=token)
+        # B3: 統合テストはセッション確立済みを前提とするため CONNECTED にする。
+        server._live_state = LiveState.CONNECTED
         task = asyncio.create_task(server.serve())
 
         await _wait_for_port(unused_tcp_port)

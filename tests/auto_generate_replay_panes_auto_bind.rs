@@ -24,32 +24,6 @@ fn read_dashboard_src() -> String {
     .expect("read src/screen/dashboard.rs")
 }
 
-fn read_replay_api_src() -> String {
-    std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/replay_api.rs"))
-        .expect("read src/replay_api.rs")
-}
-
-// ── 4c-1: ControlApiCommand carries granularity ───────────────────────────────
-
-#[test]
-fn control_api_command_auto_generate_has_granularity_field() {
-    let src = read_replay_api_src();
-
-    // Find the AutoGenerateReplayPanes variant body
-    let start = src
-        .find("AutoGenerateReplayPanes")
-        .expect("AutoGenerateReplayPanes variant not found in replay_api.rs");
-    let after = &src[start..];
-    let end = after.find('}').expect("closing brace not found");
-    let body = &after[..end];
-
-    assert!(
-        body.contains("granularity"),
-        "ControlApiCommand::AutoGenerateReplayPanes must have a `granularity` field \
-         so the pane builder can select D1 vs M1 vs no-CandlestickChart. \
-         §4c acceptance criterion."
-    );
-}
 
 // ── 4c-2: auto_generate_replay_panes calls set_content_and_streams ────────────
 
@@ -147,33 +121,6 @@ fn auto_generate_replay_panes_skips_candlestick_for_trade_granularity() {
         "auto_generate_replay_panes must conditionally skip CandlestickChart \
          generation when granularity is Trade (no bars to render). \
          §4c acceptance criterion."
-    );
-}
-
-// ── ack: AutoGenerateReplayPanes carries ack: Option<Arc<Notify>> ─────────────
-//
-// `replay-load-start-race-fix-plan.md`: `/api/replay/load` は AutoGenerateReplayPanes
-// の ack を受け取るまで block する。enum 定義からこのフィールドが消えると race
-// 修正が黙って巻き戻る。
-
-#[test]
-fn control_api_command_auto_generate_has_ack_field() {
-    let src = read_replay_api_src();
-    let start = src
-        .find("AutoGenerateReplayPanes")
-        .expect("AutoGenerateReplayPanes variant not found in replay_api.rs");
-    let after = &src[start..];
-    let end = after.find('}').expect("closing brace not found");
-    let body = &after[..end];
-
-    assert!(
-        body.contains("ack"),
-        "ControlApiCommand::AutoGenerateReplayPanes must carry an `ack` handle so /api/replay/load \
-         can block until pane generation completes (replay-load-start-race-fix-plan.md)."
-    );
-    assert!(
-        body.contains("Notify"),
-        "`ack` must be an Arc<Notify> (oneshot::Sender is not Clone-safe inside ControlApiCommand)."
     );
 }
 

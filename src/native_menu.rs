@@ -6,10 +6,11 @@ pub enum Action {
     OpenFile,
     SaveAs,
     OpenStrategy,
+    OpenReplayDialog,
 }
 
 /// Returns which menu actions are present for a given app mode.
-/// `(has_open_file, has_save_as, has_open_strategy)`
+/// `(has_open_file, has_save_as, has_open_replay_dialog)`
 #[cfg(test)]
 pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool) {
     match app_mode {
@@ -47,6 +48,7 @@ mod platform {
         open_file: Option<MenuId>,
         save_as: Option<MenuId>,
         open_strategy: Option<MenuId>,
+        open_replay_dialog: Option<MenuId>,
     }
 
     // `Mutex<Option<_>>` (not `OnceLock`) so that `attach()` called again after
@@ -80,30 +82,39 @@ mod platform {
                 (Some(open_id), Some(save_id), None)
             }
             AppMode::Replay => {
-                let strategy_item = MenuItem::new("ストラテジーを開く...", true, None);
+                let replay_item = MenuItem::new("Replay を開始...", true, None);
                 let sep = PredefinedMenuItem::separator();
                 let quit_item = PredefinedMenuItem::quit(Some("終了"));
 
-                let strategy_id = strategy_item.id().clone();
+                let replay_id = replay_item.id().clone();
 
                 file.append_items(&[
-                    &strategy_item as &dyn IsMenuItem,
+                    &replay_item as &dyn IsMenuItem,
                     &sep as &dyn IsMenuItem,
                     &quit_item as &dyn IsMenuItem,
                 ])
                 .ok();
 
-                (None, None, Some(strategy_id))
+                (None, None, Some(replay_id))
             }
         };
 
         menu.append(&file).ok();
 
+        // In Replay mode the "Replay を開始..." item maps to OpenReplayDialog.
+        // open_strategy holds the MenuId from the attach arms above (Replay path
+        // returns `Some(replay_id)` as the third element).
+        let open_replay_dialog = if matches!(app_mode, AppMode::Replay) {
+            open_strategy.clone()
+        } else {
+            None
+        };
         if let Ok(mut guard) = MENU_IDS.lock() {
             *guard = Some(MenuIds {
                 open_file,
                 save_as,
-                open_strategy,
+                open_strategy: None,
+                open_replay_dialog,
             });
         }
 
@@ -140,6 +151,12 @@ mod platform {
                             Some(Action::SaveAs)
                         } else if ids.open_strategy.as_ref().is_some_and(|id| *id == event.id) {
                             Some(Action::OpenStrategy)
+                        } else if ids
+                            .open_replay_dialog
+                            .as_ref()
+                            .is_some_and(|id| *id == event.id)
+                        {
+                            Some(Action::OpenReplayDialog)
                         } else {
                             None
                         }
@@ -167,6 +184,7 @@ mod platform {
                     open_file: None,
                     save_as: None,
                     open_strategy: None,
+                    open_replay_dialog: None,
                 });
             }
             {
@@ -177,6 +195,7 @@ mod platform {
                     open_file: None,
                     save_as: None,
                     open_strategy: None,
+                    open_replay_dialog: None,
                 });
                 assert!(guard.is_some(), "second attach must overwrite successfully");
                 // Leave clean for other tests
@@ -213,24 +232,29 @@ mod tests {
         assert_ne!(Action::OpenFile, Action::SaveAs);
         assert_ne!(Action::OpenFile, Action::OpenStrategy);
         assert_ne!(Action::SaveAs, Action::OpenStrategy);
+        assert_ne!(Action::OpenFile, Action::OpenReplayDialog);
+        assert_ne!(Action::OpenStrategy, Action::OpenReplayDialog);
     }
 
     #[test]
     fn live_mode_provides_open_file_and_save_as() {
-        let (open_file, save_as, open_strategy) = actions_for_mode(AppMode::Live);
+        let (open_file, save_as, open_replay_dialog) = actions_for_mode(AppMode::Live);
         assert!(open_file, "live mode must have Open File action");
         assert!(save_as, "live mode must have Save As action");
         assert!(
-            !open_strategy,
-            "live mode must NOT have Open Strategy action"
+            !open_replay_dialog,
+            "live mode must NOT have Open Replay Dialog action"
         );
     }
 
     #[test]
-    fn replay_mode_provides_open_strategy_only() {
-        let (open_file, save_as, open_strategy) = actions_for_mode(AppMode::Replay);
+    fn replay_mode_provides_open_replay_dialog_only() {
+        let (open_file, save_as, open_replay_dialog) = actions_for_mode(AppMode::Replay);
         assert!(!open_file, "replay mode must NOT have Open File action");
         assert!(!save_as, "replay mode must NOT have Save As action");
-        assert!(open_strategy, "replay mode must have Open Strategy action");
+        assert!(
+            open_replay_dialog,
+            "replay mode must have Open Replay Dialog action"
+        );
     }
 }

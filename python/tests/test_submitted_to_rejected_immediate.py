@@ -48,6 +48,9 @@ def _make_server():
         patch("engine.server.TachibanaWorker", return_value=MagicMock(prepare=AsyncMock(), capabilities=MagicMock(return_value={}))),
     ):
         srv = DataEngineServer(port=19999, token="test-token", wal_path=Path("/tmp/test_wal.jsonl"))
+    # B3: 統合テストはセッション確立済みを前提とするため CONNECTED にする。
+    from engine.server import LiveState
+    srv._live_state = LiveState.CONNECTED
     return srv
 
 

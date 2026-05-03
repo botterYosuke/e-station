@@ -13,6 +13,7 @@ dependencies = [
     "orjson>=3.9",
     "httpx>=0.27",
     "nautilus-trader>=1.211,<2.0",
+    "platformdirs>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,7 @@ pythonpath = ["python"]
 testpaths = ["python/tests"]
 markers = [
     "demo_tachibana: requires real Tachibana demo account credentials (DEV_TACHIBANA_USER_ID / DEV_TACHIBANA_PASSWORD)",
+    "live: requires live exchange or J-Quants data",
 ]
 
 [tool.pyright]
