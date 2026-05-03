@@ -405,6 +405,17 @@ class DataEngineServer:
     async def _handle(self, ws: ServerConnection) -> None:
         # Reject connections exceeding the limit before handshake.
         if self._outbox.count() >= MAX_CONNECTIONS:
+            # M-2 (silent): close する前に EngineError を送って、
+            # クライアント側で「server full」を分かるようにする（token は含まない）。
+            try:
+                import orjson
+                from engine.schemas import EngineError as _EngineError
+                err_payload = _EngineError(
+                    code="max_connections", message="server full"
+                ).model_dump()
+                await ws.send(orjson.dumps(err_payload).decode())
+            except Exception:
+                pass
             try:
                 await ws.close(1008, "max connections exceeded")
             except Exception:
@@ -458,26 +469,32 @@ class DataEngineServer:
             count = self._outbox.count()
             self._outbox.append(ClientDisconnected(count=count).model_dump())
 
-            task_to_cancel = self._tachibana_startup_task
-            if task_to_cancel is not None and not task_to_cancel.done():
-                task_to_cancel.cancel()
-                try:
-                    await task_to_cancel
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._tachibana_startup_task = None
-            # Phase O2: EVENT ループも停止する
-            if self._event_task is not None and not self._event_task.done():
-                self._event_task.cancel()
-                try:
-                    await self._event_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._event_task = None
-            # Reset startup latch so the next reconnect can call
-            # validate_session_on_startup again without the L6 guard firing.
-            self._tachibana_startup_latch = StartupLatch()
-            await self._cancel_all_streams()
+            # C1 (Phase 8.1b R10 / B1): Server-lifecycle resources — Tachibana
+            # startup task, EVENT loop, login latch, and stream subscriptions —
+            # are shared across all clients. Tearing them down on every
+            # per-connection finally block was killing live state for the OTHER
+            # connected clients. Only cleanup when the LAST client disconnects.
+            if not self._connections:
+                task_to_cancel = self._tachibana_startup_task
+                if task_to_cancel is not None and not task_to_cancel.done():
+                    task_to_cancel.cancel()
+                    try:
+                        await task_to_cancel
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self._tachibana_startup_task = None
+                # Phase O2: EVENT ループも停止する
+                if self._event_task is not None and not self._event_task.done():
+                    self._event_task.cancel()
+                    try:
+                        await self._event_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self._event_task = None
+                # Reset startup latch so the next reconnect can call
+                # validate_session_on_startup again without the L6 guard firing.
+                self._tachibana_startup_latch = StartupLatch()
+                await self._cancel_all_streams()
 
     async def _handshake(self, ws: ServerConnection) -> None:
         raw = await ws.recv()
@@ -582,16 +599,34 @@ class DataEngineServer:
     # ------------------------------------------------------------------
 
     async def _send_loop(self, ws: ServerConnection, q: asyncio.Queue) -> None:
+        # H8: ws.send が ConnectionClosed / その他で raise したときに send_loop が
+        # 全 client 道連れになるのを防ぐ。送信失敗時はこの client 用 loop を
+        # 抜けるだけ（呼び出し元の handler の finally で接続クリーンアップが走る）。
+        import websockets as _ws_pkg
         while True:
             try:
                 event = q.get_nowait()
-                await ws.send(orjson.dumps(event).decode())
+                try:
+                    await ws.send(orjson.dumps(event).decode())
+                except _ws_pkg.ConnectionClosed:
+                    log.info("send_loop: client closed cleanly")
+                    return
+                except Exception as exc:
+                    log.error("send_loop: send failed: %s", type(exc).__name__)
+                    return
             except asyncio.QueueEmpty:
                 if self._shutdown_event.is_set():
                     break
                 try:
                     event = await asyncio.wait_for(q.get(), timeout=1.0)
-                    await ws.send(orjson.dumps(event).decode())
+                    try:
+                        await ws.send(orjson.dumps(event).decode())
+                    except _ws_pkg.ConnectionClosed:
+                        log.info("send_loop: client closed cleanly")
+                        return
+                    except Exception as exc:
+                        log.error("send_loop: send failed: %s", type(exc).__name__)
+                        return
                 except asyncio.TimeoutError:
                     pass
 
@@ -2118,12 +2153,13 @@ class DataEngineServer:
     def _check_replay_state(self, command: str, required: ReplayState) -> bool:
         """Return True if _replay_state == required; otherwise broadcast EngineBusy and return False.
 
-        Uses getattr with LOADED as default so legacy tests that construct DataEngineServer
-        via __new__ without calling __init__ (and therefore lack _replay_state) still
-        work: missing attribute = LOADED (allows StartEngine/StopEngine, the most
-        common command-flow in existing tests).
+        H15: assumes ``_replay_state`` is initialised in ``__init__`` (default
+        ``ReplayState.IDLE``). Tests that bypass ``__init__`` via ``__new__``
+        must explicitly assign ``_replay_state`` before calling guarded
+        handlers — there is no longer a silent fallback that hid initialisation
+        bugs.
         """
-        current = getattr(self, "_replay_state", ReplayState.LOADED)
+        current = self._replay_state
         if current != required:
             self._outbox.append(
                 EngineBusy(
@@ -2138,11 +2174,11 @@ class DataEngineServer:
     def _check_live_state(self, command: str, required: LiveState) -> bool:
         """Return True if _live_state == required; otherwise broadcast EngineBusy and return False.
 
-        Uses getattr with CONNECTED as default so legacy tests that construct DataEngineServer
-        via __new__ without calling __init__ (and therefore lack _live_state) still
-        work: missing attribute = CONNECTED (session-established default for legacy tests).
+        H15: assumes ``_live_state`` is initialised in ``__init__`` (default
+        ``LiveState.DISCONNECTED``). Tests bypassing ``__init__`` must assign
+        ``_live_state`` explicitly — no silent default that masks bugs.
         """
-        current = getattr(self, "_live_state", LiveState.CONNECTED)
+        current = self._live_state
         if current != required:
             self._outbox.append(
                 EngineBusy(

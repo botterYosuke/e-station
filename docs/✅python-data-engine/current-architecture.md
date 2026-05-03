@@ -6,7 +6,7 @@
 > この文書は **2026-04-24 時点の調査スナップショット**。
 > Phase 1〜8 の実装完了後（2026-05-03）は現状と大きくズレている。最新の構成は以下を参照：
 > - [implementation-plan.md](./implementation-plan.md) — Phase 0〜8 の完了状態
-> - [python-helper-direct-api.md](./python-helper-direct-api.md) — Phase 8 実装詳細（✅ 完了）
+> - [python-helper-direct-api.md](./archive/python-helper-direct-api.md) — Phase 8 実装詳細（✅ 完了）
 > - [spec.md](./spec.md) — 現行 IPC 仕様
 >
 > **主な変更点（Phase 5〜8）**:

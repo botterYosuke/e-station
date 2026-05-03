@@ -74,6 +74,17 @@ pub enum Action {
     Cancel,
 }
 
+/// M-5 (rust): `validate()` の戻り値を構造体化することで位置引数の取り違えを防ぐ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedForm {
+    pub instrument_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub granularity: Granularity,
+    pub strategy_file: std::path::PathBuf,
+    pub initial_cash: u64,
+}
+
 /// `YYYY-MM-DD` 形式の簡易チェック。
 fn is_valid_date(s: &str) -> bool {
     // 形式: YYYY-MM-DD (10 chars)
@@ -81,25 +92,15 @@ fn is_valid_date(s: &str) -> bool {
         return false;
     }
     let bytes = s.as_bytes();
-    bytes[4] == b'-' && bytes[7] == b'-' && bytes[..4].iter().all(u8::is_ascii_digit)
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
         && bytes[5..7].iter().all(u8::is_ascii_digit)
         && bytes[8..10].iter().all(u8::is_ascii_digit)
 }
 
 impl ReplayFormModal {
-    fn validate(
-        &self,
-    ) -> Result<
-        (
-            String,
-            String,
-            String,
-            Granularity,
-            std::path::PathBuf,
-            u64,
-        ),
-        String,
-    > {
+    fn validate(&self) -> Result<ValidatedForm, String> {
         let instrument_id = self.instrument_id.trim().to_string();
         if instrument_id.is_empty() {
             return Err("銘柄コードを入力してください".to_string());
@@ -111,6 +112,11 @@ impl ReplayFormModal {
         let end_date = self.end_date.trim().to_string();
         if !is_valid_date(&end_date) {
             return Err("終了日の形式が正しくありません (例: 2025-03-31)".to_string());
+        }
+        // M-2 (rust): start_date > end_date を検出（ISO8601 YYYY-MM-DD は
+        // 文字列比較で順序が保たれるため lexicographic 比較で十分）。
+        if start_date > end_date {
+            return Err("開始日は終了日より前にしてください".to_string());
         }
         let granularity = self
             .granularity
@@ -125,14 +131,14 @@ impl ReplayFormModal {
             .trim()
             .parse::<u64>()
             .map_err(|_| "初期資金は正の整数で入力してください".to_string())?;
-        Ok((
+        Ok(ValidatedForm {
             instrument_id,
             start_date,
             end_date,
             granularity,
             strategy_file,
             initial_cash,
-        ))
+        })
     }
 
     pub fn update(&mut self, message: Message) -> Option<Action> {
@@ -162,26 +168,31 @@ impl ReplayFormModal {
                 self.initial_cash = v;
                 None
             }
-            Message::Submit => {
-                match self.validate() {
-                    Ok((instrument_id, start_date, end_date, granularity, strategy_file, initial_cash)) => {
-                        self.validation_error = None;
-                        self.submitting = true;
-                        Some(Action::Submit {
-                            instrument_id,
-                            start_date,
-                            end_date,
-                            granularity,
-                            strategy_file,
-                            initial_cash,
-                        })
-                    }
-                    Err(e) => {
-                        self.validation_error = Some(e);
-                        None
-                    }
+            Message::Submit => match self.validate() {
+                Ok(ValidatedForm {
+                    instrument_id,
+                    start_date,
+                    end_date,
+                    granularity,
+                    strategy_file,
+                    initial_cash,
+                }) => {
+                    self.validation_error = None;
+                    self.submitting = true;
+                    Some(Action::Submit {
+                        instrument_id,
+                        start_date,
+                        end_date,
+                        granularity,
+                        strategy_file,
+                        initial_cash,
+                    })
                 }
-            }
+                Err(e) => {
+                    self.validation_error = Some(e);
+                    None
+                }
+            },
             Message::Cancel => Some(Action::Cancel),
         }
     }
@@ -220,11 +231,7 @@ impl ReplayFormModal {
                 Message::GranularityChanged,
             ),
             text("戦略ファイル").size(12),
-            row![
-                text_input("(未選択)", &strategy_label),
-                pick_btn
-            ]
-            .spacing(4),
+            row![text_input("(未選択)", &strategy_label), pick_btn].spacing(4),
             text("初期資金 (円)").size(12),
             text_input("1000000", &self.initial_cash).on_input(Message::InitialCashChanged),
         ]
@@ -260,11 +267,12 @@ mod tests {
             form.validation_error.is_some(),
             "validation_error should be set on empty instrument"
         );
-        assert!(form
-            .validation_error
-            .as_ref()
-            .unwrap()
-            .contains("銘柄コード"));
+        assert!(
+            form.validation_error
+                .as_ref()
+                .unwrap()
+                .contains("銘柄コード")
+        );
     }
 
     #[test]
@@ -275,11 +283,7 @@ mod tests {
         let action = form.update(Message::Submit);
         assert!(action.is_none());
         assert!(form.validation_error.is_some());
-        assert!(form
-            .validation_error
-            .as_ref()
-            .unwrap()
-            .contains("開始日"));
+        assert!(form.validation_error.as_ref().unwrap().contains("開始日"));
     }
 
     #[test]
@@ -306,11 +310,27 @@ mod tests {
         let action = form.update(Message::Submit);
         assert!(action.is_none());
         assert!(form.validation_error.is_some());
-        assert!(form
-            .validation_error
-            .as_ref()
-            .unwrap()
-            .contains("初期資金"));
+        assert!(form.validation_error.as_ref().unwrap().contains("初期資金"));
+    }
+
+    #[test]
+    fn validation_fails_when_start_after_end() {
+        // M-2 (rust): 開始日 > 終了日 を検出する。
+        let mut form = ReplayFormModal::default();
+        form.instrument_id = "1301.TSE".to_string();
+        form.start_date = "2025-03-31".to_string();
+        form.end_date = "2025-01-06".to_string();
+        form.granularity = Some(Granularity::Daily);
+        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
+        form.initial_cash = "1000000".to_string();
+        let action = form.update(Message::Submit);
+        assert!(action.is_none());
+        assert!(form.validation_error.is_some());
+        let msg = form.validation_error.as_ref().unwrap();
+        assert!(
+            msg.contains("開始日") && msg.contains("終了日"),
+            "expected both 開始日 and 終了日 in error, got: {msg}"
+        );
     }
 
     #[test]

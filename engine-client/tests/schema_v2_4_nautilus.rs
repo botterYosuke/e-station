@@ -23,10 +23,12 @@ fn schema_minor_is_7_for_positions() {
     // 統一したため SCHEMA_MINOR を 5 → 6 に bump。
     // SCHEMA_MINOR を 6 → 7 に bump（Positions Phase）。
     // SCHEMA_MINOR を 7 → 8 に bump（Phase A: TickerEntry discriminated union）。
+    // Phase 8.1b B1 / H4: SCHEMA_MINOR を 8 → 9 に bump（multi-client broadcast,
+    // ClientConnected/ClientDisconnected events）。Python 側 schemas.py と同期。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        8,
-        "SCHEMA_MINOR must be 8 after Phase A (TickerEntry typed schema)"
+        9,
+        "SCHEMA_MINOR must be 9 after Phase 8.1b B1 (multi-client broadcast)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

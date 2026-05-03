@@ -345,5 +345,4 @@ mod tests {
                 .is_login_in_flight()
         );
     }
-
 }

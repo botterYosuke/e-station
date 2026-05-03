@@ -3,32 +3,60 @@
 /// Python helper reads this file to obtain the `token` and `port` that the
 /// Rust supervisor generated when spawning the engine. The file lives at
 /// `data_path("engine-session.json")` (Windows: `%APPDATA%\flowsurface\`).
-use std::path::PathBuf;
+use std::fmt;
+use std::path::Path;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Snapshot of the engine session written to disk after a successful handshake.
+///
+/// The `token` field is `pub(crate)` to discourage external code from
+/// reading or logging the secret. `Debug` is implemented manually so that
+/// accidental `dbg!()` / `{:?}` calls never leak the token value.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct EngineSession {
     pub port: u16,
-    /// Raw token bytes (hex-encoded). Never log this value.
-    pub token: String,
+    /// Raw token bytes (hex-encoded). Never log this value — `Debug` redacts it.
+    pub(crate) token: String,
     pub pid: u32,
     pub schema_major: u32,
+    /// ISO-8601 UTC timestamp captured at write time. Helps the Python helper
+    /// detect stale session files when the supervisor PID was reused.
+    pub started_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for EngineSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EngineSession")
+            .field("port", &self.port)
+            .field("token", &"[REDACTED]")
+            .field("pid", &self.pid)
+            .field("schema_major", &self.schema_major)
+            .field("started_at", &self.started_at)
+            .finish()
+    }
 }
 
 impl EngineSession {
+    /// Create a new session with `started_at = now()`.
+    pub fn new(port: u16, token: String, pid: u32, schema_major: u32) -> Self {
+        Self {
+            port,
+            token,
+            pid,
+            schema_major,
+            started_at: Utc::now(),
+        }
+    }
+
     /// Write session data to `path` atomically via a `.tmp` rename.
     ///
     /// Creates parent directories if they do not exist.
     /// On Unix, the tmp file is chmod'd to 0o600 before the rename.
-    pub fn write_atomic(&self, path: &PathBuf) -> std::io::Result<()> {
-        let started_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
-        // Build JSON manually to avoid pulling in an extra serde derive just
-        // for a one-shot write. The fields are all primitive types so escaping
-        // is not a concern.
-        let json = format!(
-            r#"{{"port":{},"token":"{}","pid":{},"schema_major":{},"started_at":"{}"}}"#,
-            self.port, self.token, self.pid, self.schema_major, started_at
-        );
+    pub fn write_atomic(&self, path: &Path) -> std::io::Result<()> {
+        let json = serde_json::to_string(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         // Ensure parent directory exists.
         if let Some(parent) = path.parent() {
@@ -43,15 +71,76 @@ impl EngineSession {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+            if let Err(e) =
+                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+            {
+                // M-5 (silent): rename していない tmp を残さない。
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
         }
 
-        std::fs::rename(&tmp_path, path)?;
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            // M-5 (silent): rename 失敗時に .tmp を残さない。
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
         Ok(())
     }
 
     /// Remove the session file, ignoring errors (file may already be gone).
-    pub fn delete(path: &PathBuf) {
+    pub fn delete(path: &Path) {
         let _ = std::fs::remove_file(path);
     }
+
+    /// C3: remove a stale session file left behind by a crashed engine.
+    ///
+    /// Behaviour:
+    /// - Missing file → no-op.
+    /// - Unreadable / invalid JSON → delete (it's corrupt residue).
+    /// - Valid JSON whose `pid` is not live → delete.
+    /// - Valid JSON whose `pid` is live → keep (the live engine owns it; the
+    ///   subsequent atomic write from the new spawn will overwrite anyway, but
+    ///   we don't want to introduce a window where the live engine's session
+    ///   appears to be missing).
+    ///
+    /// Called from the spawn path before launching a fresh Python engine so
+    /// orphaned files from a previous crash don't fool the helper into
+    /// attaching to a dead pid.
+    pub fn reap_stale(path: &Path) {
+        if !path.exists() {
+            return;
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => {
+                // Unreadable — treat as corrupt and remove.
+                let _ = std::fs::remove_file(path);
+                return;
+            }
+        };
+        let parsed: Result<EngineSession, _> = serde_json::from_slice(&bytes);
+        let Ok(session) = parsed else {
+            // Corrupt JSON: drop it.
+            let _ = std::fs::remove_file(path);
+            return;
+        };
+        if !pid_is_live(session.pid) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// True iff a process with `pid` currently exists on the system.
+/// `pid == 0` is treated as not-live (sentinel from when `Child::id()` returned None).
+fn pid_is_live(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    let target = Pid::from_u32(pid);
+    // sysinfo 0.32: refresh just the targeted pid; do not prune others.
+    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), false);
+    sys.process(target).is_some()
 }

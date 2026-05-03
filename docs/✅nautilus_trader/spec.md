@@ -228,7 +228,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 > **Phase 8 更新（python-helper-direct-api、2026-05）**: 本節で N1 当時に定義した
 > Rust 側 HTTP API（ポート 9876、`/api/replay/*` / `/api/order/*` / `/api/agent/*`）は
-> すべて廃止された（[python-helper-direct-api.md](../✅python-data-engine/python-helper-direct-api.md) §3）。
+> すべて廃止された（[python-helper-direct-api.md](../✅python-data-engine/archive/python-helper-direct-api.md) §3）。
 > 制御経路は Python helper（`engine.replay_session.ReplaySession` /
 > `engine.live_session.LiveSession`）に集約され、IPC `Command::*` / `EngineEvent::*`
 > 自体は維持される（GUI ↔ engine の WebSocket、ポート 19876）。

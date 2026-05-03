@@ -605,7 +605,7 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 
 ## フェーズ 8 — Python 単独モード化 / Rust HTTP API 廃止（attach mode 採用）
 
-> 詳細計画: [python-helper-direct-api.md](./python-helper-direct-api.md)
+> 詳細計画: [python-helper-direct-api.md](./archive/python-helper-direct-api.md)
 > **✅ 完了 (2026-05-03)**
 
 **概要**: HTTP API（ポート 9876）を廃止し、Python `ReplaySession` / `LiveSession` helper class で直接 IPC を駆動するアーキテクチャに移行する。Rust GUI が起動中なら helper は attach mode（WS クライアント）、GUI なしなら in-process mode で `NautilusRunner` を直接呼ぶ。

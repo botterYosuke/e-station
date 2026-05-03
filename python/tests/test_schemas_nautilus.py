@@ -32,6 +32,34 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     assert s.SCHEMA_MAJOR == 3
 
 
+def test_rust_schema_constants_match_python() -> None:
+    """H4: Rust engine-client/src/lib.rs の SCHEMA_MAJOR/MINOR が Python 側と一致すること。
+
+    両方を同期し忘れると ハンドシェイクのログ警告 + minor 機能差異が出る。
+    """
+    import re
+    from pathlib import Path
+
+    rust_lib = Path(__file__).parent.parent.parent / "engine-client" / "src" / "lib.rs"
+    text = rust_lib.read_text(encoding="utf-8")
+
+    major_match = re.search(r"pub const SCHEMA_MAJOR\s*:\s*u16\s*=\s*(\d+)", text)
+    minor_match = re.search(r"pub const SCHEMA_MINOR\s*:\s*u16\s*=\s*(\d+)", text)
+
+    assert major_match, "SCHEMA_MAJOR not found in engine-client/src/lib.rs"
+    assert minor_match, "SCHEMA_MINOR not found in engine-client/src/lib.rs"
+
+    rust_major = int(major_match.group(1))
+    rust_minor = int(minor_match.group(1))
+
+    assert rust_major == s.SCHEMA_MAJOR, (
+        f"SCHEMA_MAJOR drift: Rust={rust_major} Python={s.SCHEMA_MAJOR}"
+    )
+    assert rust_minor == s.SCHEMA_MINOR, (
+        f"SCHEMA_MINOR drift: Rust={rust_minor} Python={s.SCHEMA_MINOR}"
+    )
+
+
 # ── Sub-models ──────────────────────────────────────────────────────────────
 
 

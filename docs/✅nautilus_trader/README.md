@@ -69,7 +69,7 @@
 
 旧 `POST /api/replay/load` → `POST /api/replay/start` の HTTP 2 ステップは廃止し、
 **Python helper `engine.replay_session.ReplaySession`** に集約した
-（[python-helper-direct-api.md](../✅python-data-engine/python-helper-direct-api.md)）。
+（[python-helper-direct-api.md](../✅python-data-engine/archive/python-helper-direct-api.md)）。
 
 | 用途 | 旧 (Phase 7 まで) | 新 (Phase 8 以降) |
 |---|---|---|
@@ -114,7 +114,7 @@ with ReplaySession() as s:
 ```
 
 詳細は [docs/wiki/backtest.md](../../wiki/backtest.md) と
-[python-helper-direct-api.md](../✅python-data-engine/python-helper-direct-api.md) を参照。
+[python-helper-direct-api.md](../✅python-data-engine/archive/python-helper-direct-api.md) を参照。
 
 ---
 

@@ -2547,7 +2547,11 @@ impl Flowsurface {
                             .await
                             .map(|h| h.path().to_owned())
                     },
-                    |path| Message::ReplayFormMsg(modal::replay_form::Message::StrategyFilePicked(path)),
+                    |path| {
+                        Message::ReplayFormMsg(modal::replay_form::Message::StrategyFilePicked(
+                            path,
+                        ))
+                    },
                 );
             }
             Message::ReplayFormMsg(msg) => {

@@ -205,11 +205,18 @@ fn cleanup_directory(data_path: &PathBuf) -> usize {
 mod tests {
     use super::*;
 
+    // H3: env var mutation is process-global. `serial_test::serial`
+    // serialises these tests with each other so unsafe `set_var` /
+    // `remove_var` calls cannot interleave under default `cargo test`
+    // threading (which would be UB). Any future test that touches
+    // `FLOWSURFACE_DATA_PATH` must also be `#[serial(env_data_path)]`.
     #[test]
+    #[serial_test::serial(env_data_path)]
     fn data_path_env_override_joins_path_name() {
         let tmp = std::env::temp_dir().join("flowsurface-test-override-a");
         let tmp_str = tmp.to_str().unwrap();
-        // SAFETY: test-only env mutation; run with --test-threads=1 if parallel tests race.
+        // SAFETY: test-only env mutation; serialised via #[serial] so it
+        // cannot race with other tests that read/write the same var.
         unsafe {
             std::env::set_var("FLOWSURFACE_DATA_PATH", tmp_str);
         }
@@ -221,10 +228,12 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env_data_path)]
     fn data_path_env_override_no_path_name() {
         let tmp = std::env::temp_dir().join("flowsurface-test-override-b");
         let tmp_str = tmp.to_str().unwrap();
-        // SAFETY: test-only env mutation; run with --test-threads=1 if parallel tests race.
+        // SAFETY: test-only env mutation; serialised via #[serial] so it
+        // cannot race with other tests that read/write the same var.
         unsafe {
             std::env::set_var("FLOWSURFACE_DATA_PATH", tmp_str);
         }

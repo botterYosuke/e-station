@@ -11,9 +11,7 @@ from __future__ import annotations
 import json
 import os
 import socket
-import sys
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -298,3 +296,400 @@ def test_attach_mode_with_mock_server():
                 assert s.mode == "attach"
 
     loop.call_soon_threadsafe(loop.stop)
+
+
+# ---------------------------------------------------------------------------
+# H13: portfolio updates in attach mode must accept {event: ReplayBuyingPower}
+# ---------------------------------------------------------------------------
+
+
+def test_attach_mode_portfolio_updated_via_event_key(tmp_path):
+    """H13: attach 経路の WS は ``{"event": "ReplayBuyingPower", ...}`` を返す。
+    in-process 経路の ``{"type": ...}`` と区別なく portfolio が更新されること。
+    """
+    from engine.replay_session import ReplaySession, _ReplayStatus
+
+    strat = tmp_path / "strategy.py"
+    strat.write_text("# dummy\n")
+
+    class _FakeClient:
+        def __init__(self):
+            self.sent = []
+
+        def send_command(self, cmd):
+            self.sent.append(cmd)
+
+        def wait_for(self, *_args, **_kwargs):
+            return {"event": "ReplayDataLoaded"}
+
+        def events(self):
+            yield {
+                "event": "ReplayBuyingPower",
+                "cash": 950000,
+                "equity": 1050000,
+            }
+            yield {"event": "EngineStopped"}
+
+        def close(self):
+            pass
+
+    s = ReplaySession(force_mode="auto")
+    s._entered = True
+    s._mode = "attach"
+    s._client = _FakeClient()
+    s._status = _ReplayStatus.IDLE
+    s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
+    received = []
+    s.run(strategy_file=str(strat), on_event=received.append)
+    assert s.portfolio is not None
+    assert s.portfolio.get("cash") == 950000
+    assert s.portfolio.get("equity") == 1050000
+    # EngineStopped で抜ける → STOPPED
+    assert s.status == "stopped"
+
+
+# ---------------------------------------------------------------------------
+# Group 2 — attach mode 動作修正のテスト
+# ---------------------------------------------------------------------------
+
+
+def _spawn_handshake_server(handler):
+    """Helper: spawn a websockets server thread with handler. Returns (port, loop, thread, stop)."""
+    import asyncio as _asyncio
+    import threading as _threading
+
+    import websockets
+
+    server_ready = _threading.Event()
+    chosen_port: list[int] = []
+    server_holder: list = []
+
+    async def _run_server():
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        chosen_port.append(port)
+        server = await websockets.serve(handler, "127.0.0.1", port, compression=None)
+        server_holder.append(server)
+        server_ready.set()
+        try:
+            await server.wait_closed()
+        except Exception:
+            pass
+
+    loop = _asyncio.new_event_loop()
+    thread = _threading.Thread(
+        target=lambda: loop.run_until_complete(_run_server()), daemon=True
+    )
+    thread.start()
+    server_ready.wait(timeout=5.0)
+
+    def _stop():
+        # server.close() を呼ぶと wait_closed() が解決し _run_server が return → loop が
+        # 自然に止まる。loop.stop() を別途呼ぶと "Event loop stopped before Future
+        # completed" 警告が出るので避ける。
+        if server_holder:
+            loop.call_soon_threadsafe(server_holder[0].close)
+        # thread が終わるのを少し待つ（テスト終了時の警告を抑える）
+        thread.join(timeout=2.0)
+
+    return chosen_port[0], loop, thread, _stop
+
+
+def _ready_handler():
+    """Returns an async handler that completes Hello/Ready and stays open."""
+    import orjson
+    from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+
+    async def _handler(ws):
+        _ = await ws.recv()  # Hello
+        ready = {
+            "event": "Ready",
+            "schema_major": SCHEMA_MAJOR,
+            "schema_minor": SCHEMA_MINOR,
+            "engine_version": "test",
+            "engine_session_id": "00000000-0000-0000-0000-000000000000",
+            "capabilities": {},
+        }
+        await ws.send(orjson.dumps(ready).decode())
+        try:
+            async for _msg in ws:
+                pass
+        except Exception:
+            pass
+
+    return _handler
+
+
+# ---------------------------------------------------------------------------
+# C4: close() idempotent / no exception on double-call
+# ---------------------------------------------------------------------------
+
+
+def test_attach_client_close_is_idempotent():
+    """C4: _AttachClient.close() を二度呼んでも例外が出ず thread が死ぬこと。"""
+    from engine.replay_session import _AttachClient
+
+    port, loop, thread, stop = _spawn_handshake_server(_ready_handler())
+    try:
+        client = _AttachClient(f"ws://127.0.0.1:{port}/", "tok", 3.0)
+        client.handshake()
+
+        # 1 度目: 正常終了して thread 死ぬ
+        client.close()
+        assert client._thread is not None
+        assert not client._thread.is_alive(), "thread should have terminated after close()"
+
+        # 2 度目: 例外を投げないこと
+        client.close()  # no raise
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# C5: recv_loop logs WS closure
+# ---------------------------------------------------------------------------
+
+
+def test_attach_client_recv_loop_logs_on_close(caplog):
+    """C5: WS が server 側から閉じられたとき recv_loop が情報レベルでログを出すこと。"""
+    import logging
+    import time as _time
+
+    from engine.replay_session import _AttachClient
+
+    import orjson
+    from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+
+    async def _handler(ws):
+        _ = await ws.recv()
+        ready = {
+            "event": "Ready",
+            "schema_major": SCHEMA_MAJOR,
+            "schema_minor": SCHEMA_MINOR,
+            "engine_version": "test",
+            "engine_session_id": "00000000-0000-0000-0000-000000000000",
+            "capabilities": {},
+        }
+        await ws.send(orjson.dumps(ready).decode())
+        # すぐ close する
+        await ws.close()
+
+    port, loop, thread, stop = _spawn_handshake_server(_handler)
+    try:
+        # caplog で root logger ごと INFO まで拾う（recv_loop はワーカースレッドで動く）。
+        caplog.set_level(logging.INFO)
+        client = _AttachClient(f"ws://127.0.0.1:{port}/", "tok", 3.0)
+        client.handshake()
+        # closed を検知するまで少し待つ
+        for _ in range(30):
+            if client._closed_event.is_set():
+                break
+            _time.sleep(0.1)
+        client.close()
+
+        # ログに WS closed か recv_loop terminated が出ていること
+        msgs = [rec.message for rec in caplog.records]
+        assert any(
+            "WS closed" in m or "recv_loop terminated" in m for m in msgs
+        ), f"expected close log; got: {msgs}"
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# H5: token mismatch surfaced at error level + raise on force=attach
+# ---------------------------------------------------------------------------
+
+
+def test_attach_token_mismatch_logs_error_and_falls_back(caplog):
+    """H5: token mismatch を auto mode で検出すると error レベルで surface し inprocess に fallback する。"""
+    import logging
+
+    import orjson
+
+    async def _handler(ws):
+        _ = await ws.recv()
+        # auth_failed を返す
+        err = {"event": "EngineError", "code": "auth_failed", "message": "token mismatch"}
+        await ws.send(orjson.dumps(err).decode())
+        await ws.close()
+
+    port, loop, thread, stop = _spawn_handshake_server(_handler)
+    try:
+        with caplog.at_level(logging.ERROR, logger="engine.replay_session"):
+            with patch.dict(os.environ, {"FLOWSURFACE_ENGINE_TOKEN": "wrong-token"}):
+                with patch("engine.replay_session._read_session_file", return_value=None):
+                    with ReplaySession(
+                        force_mode="auto",
+                        attach_endpoint=f"ws://127.0.0.1:{port}/",
+                        attach_timeout_s=2.0,
+                    ) as s:
+                        # auto → fallback → inprocess
+                        assert s.mode == "inprocess"
+
+        # error log に "token mismatch" を含む行があること
+        assert any(
+            rec.levelno >= logging.ERROR and "token mismatch" in rec.message
+            for rec in caplog.records
+        ), f"expected error-level token mismatch log; got: {[(r.levelname, r.message) for r in caplog.records]}"
+    finally:
+        stop()
+
+
+def test_attach_token_mismatch_raises_when_force_attach():
+    """H5: force_mode='attach' のとき token mismatch は raise する。"""
+    import orjson
+
+    async def _handler(ws):
+        _ = await ws.recv()
+        err = {"event": "EngineError", "code": "auth_failed", "message": "token mismatch"}
+        await ws.send(orjson.dumps(err).decode())
+        await ws.close()
+
+    port, loop, thread, stop = _spawn_handshake_server(_handler)
+    try:
+        with patch.dict(os.environ, {"FLOWSURFACE_ENGINE_TOKEN": "wrong-token"}):
+            with patch("engine.replay_session._read_session_file", return_value=None):
+                with pytest.raises(ConnectionRefusedError, match="token mismatch"):
+                    with ReplaySession(
+                        force_mode="attach",
+                        attach_endpoint=f"ws://127.0.0.1:{port}/",
+                        attach_timeout_s=2.0,
+                    ):
+                        pass
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# H6: events() returns promptly when WS closes
+# ---------------------------------------------------------------------------
+
+
+def test_attach_client_events_terminates_on_ws_close():
+    """H6: WS が hard-close したら events() は 60 秒待たずに ConnectionError を raise する。"""
+    import time as _time
+
+    from engine.replay_session import _AttachClient
+
+    import orjson
+    from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+
+    async def _handler(ws):
+        _ = await ws.recv()
+        ready = {
+            "event": "Ready",
+            "schema_major": SCHEMA_MAJOR,
+            "schema_minor": SCHEMA_MINOR,
+            "engine_version": "test",
+            "engine_session_id": "00000000-0000-0000-0000-000000000000",
+            "capabilities": {},
+        }
+        await ws.send(orjson.dumps(ready).decode())
+        # しばらくしてから close
+        import asyncio as _aio
+        await _aio.sleep(0.2)
+        await ws.close()
+
+    port, loop, thread, stop = _spawn_handshake_server(_handler)
+    try:
+        client = _AttachClient(f"ws://127.0.0.1:{port}/", "tok", 3.0)
+        client.handshake()
+
+        start = _time.monotonic()
+        with pytest.raises(ConnectionError):
+            for _evt in client.events():
+                pass
+        elapsed = _time.monotonic() - start
+        assert elapsed < 5.0, f"events() should terminate quickly, took {elapsed}s"
+        client.close()
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# H7: _probe_engine removed
+# ---------------------------------------------------------------------------
+
+
+def test_probe_engine_removed():
+    """H7: _probe_engine は削除済み。dead code は残っていないこと。"""
+    import engine.replay_session as mod
+
+    assert not hasattr(mod, "_probe_engine"), "_probe_engine should be removed"
+
+
+# ---------------------------------------------------------------------------
+# H12: wait_for translates EngineBusy to BusyError
+# ---------------------------------------------------------------------------
+
+
+def test_attach_wait_for_translates_engine_busy_to_busy_error():
+    """H12: wait_for() 中に EngineBusy が来たら BusyError に翻訳されること。"""
+    from engine.replay_session import _AttachClient, BusyError
+
+    import orjson
+    from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+
+    async def _handler(ws):
+        _ = await ws.recv()
+        ready = {
+            "event": "Ready",
+            "schema_major": SCHEMA_MAJOR,
+            "schema_minor": SCHEMA_MINOR,
+            "engine_version": "test",
+            "engine_session_id": "00000000-0000-0000-0000-000000000000",
+            "capabilities": {},
+        }
+        await ws.send(orjson.dumps(ready).decode())
+        # 何か command を受け取ったら EngineBusy を返す
+        try:
+            _cmd = await ws.recv()
+            busy = {
+                "event": "EngineBusy",
+                "current_state": "Loaded",
+                "attempted_command": "LoadReplayData",
+                "reason": "already loaded",
+            }
+            await ws.send(orjson.dumps(busy).decode())
+            async for _msg in ws:
+                pass
+        except Exception:
+            pass
+
+    port, loop, thread, stop = _spawn_handshake_server(_handler)
+    try:
+        client = _AttachClient(f"ws://127.0.0.1:{port}/", "tok", 3.0)
+        client.handshake()
+        # ダミー command を送信
+        client.send_command({"op": "LoadReplayData"})
+        with pytest.raises(BusyError):
+            client.wait_for("ReplayDataLoaded", timeout_s=3.0)
+        client.close()
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# H14: handshake() failure cleans up thread
+# ---------------------------------------------------------------------------
+
+
+def test_attach_handshake_failure_cleans_up_thread():
+    """H14: handshake() が失敗したら thread / loop はリークしないこと。"""
+    from engine.replay_session import _AttachClient
+
+    # 使われていないポートを見つけてすぐ閉じる → connect 失敗
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        free_port = sock.getsockname()[1]
+
+    client = _AttachClient(f"ws://127.0.0.1:{free_port}/", "tok", 0.5)
+    with pytest.raises(ConnectionRefusedError):
+        client.handshake()
+
+    # handshake() の try/finally で close() が呼ばれているはず
+    assert client._thread is not None
+    # close() で join 済み
+    assert not client._thread.is_alive(), "thread should have terminated after handshake() failure"

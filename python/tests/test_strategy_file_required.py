@@ -47,12 +47,18 @@ def _make_server():
     """テスト用の最小 EngineServer を生成して返す。"""
     from engine.server import DataEngineServer
 
+    from engine.server import LiveState, ReplayState
+
     server = DataEngineServer.__new__(DataEngineServer)
     server._mode = "replay"
     server._outbox = MagicMock()
     server._outbox.append = MagicMock()
     server._engine_tasks = {}
     server._replay_strategy_id = None
+    # H15: state machine attrs are init'd in __init__; tests that bypass
+    # __init__ via __new__ must assign them explicitly.
+    server._replay_state = ReplayState.LOADED
+    server._live_state = LiveState.DISCONNECTED
     return server
 
 

@@ -189,7 +189,12 @@ async def test_max_connections_reject(running_server):
             compression=None,
         )
         try:
-            # The server should close immediately with 1008.
+            # M-2 (silent): server now sends an EngineError(code="max_connections")
+            # frame before closing with 1008. Drain that frame first; the next recv
+            # must raise ConnectionClosedError(1008).
+            first = await ws_extra.recv()
+            payload = orjson.loads(first)
+            assert payload.get("code") == "max_connections", payload
             with pytest.raises(websockets.exceptions.ConnectionClosedError) as exc_info:
                 await ws_extra.recv()
             assert exc_info.value.rcvd.code == 1008
@@ -232,6 +237,114 @@ async def test_client_connected_event_broadcast(running_server):
     finally:
         await ws1.close()
         await ws2.close()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_does_not_kill_server_lifecycle_for_other_clients(running_server):
+    """C1: When ws2 disconnects while ws1 is still connected, the server must
+    NOT cancel server-lifecycle resources (Tachibana startup task, EVENT loop,
+    startup latch, venue streams). These are shared across all clients;
+    cleaning them up on every per-connection finally block destroyed live
+    state for the surviving client. Only the last disconnect should clean up.
+    """
+    from unittest.mock import patch
+    from engine.server import DataEngineServer
+
+    port, token = running_server
+    ws1 = await _connect_client(port, token)
+    ws2 = await _connect_client(port, token)
+
+    # Drain to a known state.
+    await _drain_until(
+        ws1,
+        lambda m: m.get("event") == "ClientConnected" and m.get("count") == 2,
+        timeout=3.0,
+    )
+
+    # Reach into the live server instance via the connection set. The
+    # `running_server` fixture builds a fresh DataEngineServer per test;
+    # we discover it through the module-level registry by scanning for
+    # the asyncio task. Simpler: capture the server via a class hook.
+    # Instead, install spies on the server methods we care about *before*
+    # disconnecting ws2, then verify they were NOT called.
+    # We look up the server via the only running asyncio task that is
+    # serving the port.
+    # Simpler approach: spy on _cancel_all_streams at the class level.
+    cancel_all_called: list[bool] = []
+    real_cancel = DataEngineServer._cancel_all_streams
+
+    async def spy_cancel(self):
+        cancel_all_called.append(True)
+        return await real_cancel(self)
+
+    try:
+        with patch.object(DataEngineServer, "_cancel_all_streams", spy_cancel):
+            # Disconnect ws2; ws1 still connected → cleanup must NOT run.
+            await ws2.close()
+
+            # Wait for ws1 to observe the ClientDisconnected so we know the
+            # finally block has executed.
+            msg = await _drain_until(
+                ws1,
+                lambda m: m.get("event") == "ClientDisconnected",
+                timeout=3.0,
+            )
+            assert msg["count"] == 1
+
+            # ws1 still functional.
+            await ws1.send(
+                orjson.dumps({"op": "Ping", "request_id": "rA"}).decode()
+            )
+            pong = await _drain_until(
+                ws1, lambda m: m.get("event") == "Pong", timeout=3.0
+            )
+            assert pong["request_id"] == "rA"
+
+            # The critical assertion: server-lifecycle cleanup did NOT run
+            # while ws1 was still connected.
+            assert not cancel_all_called, (
+                "_cancel_all_streams was called on per-connection disconnect "
+                "even though another client was still connected"
+            )
+    finally:
+        await ws1.close()
+
+
+@pytest.mark.asyncio
+async def test_send_loop_survives_send_failure(running_server):
+    """H8: ws.send が ConnectionClosed を raise しても他 client の send_loop は継続する。"""
+    port, token = running_server
+    ws1 = await _connect_client(port, token)
+    ws2 = await _connect_client(port, token)
+
+    try:
+        # ws1 が両 client が接続済みであることを観測する
+        await _drain_until(
+            ws1,
+            lambda m: m.get("event") == "ClientConnected" and m.get("count") == 2,
+            timeout=3.0,
+        )
+
+        # ws2 を強制的に切断（abort）— サーバー側 send が失敗するシナリオ
+        # close() でクライアントを止め、サーバー側 send が次に走ったとき
+        # ConnectionClosed を踏むようにする。
+        await ws2.close()
+
+        # ws1 へ broadcast (ClientDisconnected) が届くこと
+        await _drain_until(
+            ws1,
+            lambda m: m.get("event") == "ClientDisconnected",
+            timeout=3.0,
+        )
+
+        # ws1 はまだ機能すること（Ping/Pong）
+        await ws1.send(orjson.dumps({"op": "Ping", "request_id": "h8"}).decode())
+        pong = await _drain_until(
+            ws1, lambda m: m.get("event") == "Pong", timeout=3.0
+        )
+        assert pong["request_id"] == "h8"
+    finally:
+        await ws1.close()
 
 
 @pytest.mark.asyncio

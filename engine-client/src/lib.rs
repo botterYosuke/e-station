@@ -29,4 +29,4 @@ pub use venue_caps::VenueCapsStore;
 
 /// IPC schema version — must match the Python engine's `SCHEMA_MAJOR`/`SCHEMA_MINOR`.
 pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 8;
+pub const SCHEMA_MINOR: u16 = 9;

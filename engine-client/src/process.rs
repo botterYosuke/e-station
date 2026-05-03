@@ -241,11 +241,24 @@ impl PythonProcess {
     }
 }
 
-impl Drop for PythonProcess {
-    fn drop(&mut self) {
-        EngineSession::delete(&session_path());
-    }
-}
+// H2: `PythonProcess` no longer deletes the session file in `Drop`.
+//
+// Previously the Drop impl unconditionally removed `engine-session.json`.
+// During `run_with_recovery`, when the previous `PythonProcess` is dropped
+// (engine connection lost) the file would briefly disappear before the next
+// `start()` re-spawned and wrote a fresh session. External Python helpers
+// that probed `engine-session.json` during that window saw the file as
+// missing and fell back to in-process mode incorrectly.
+//
+// Safest path: rely on `EngineSession::reap_stale(...)` (called at the
+// next spawn) to clean up files left behind by a crashed engine. On clean
+// app shutdown the file is left on disk; the next launch will reap it
+// because the recorded pid is no longer live.
+//
+// Trade-off: a stale `engine-session.json` survives between sessions on
+// orderly exit. Helpers that connect with the recorded token would fail
+// the WS handshake (no engine listening) and fall back, which is the
+// existing fallback path. See planning doc §5「レビュー反映 Group 3」H2.
 
 /// Canonical path for the engine session file.
 pub fn session_path() -> std::path::PathBuf {
@@ -477,6 +490,12 @@ impl ProcessManager {
     /// 2. SetProxy       — if a proxy URL is stored
     /// 3. Subscribe      — re-send all active subscriptions
     pub async fn start(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
+        // C3: clear orphaned engine-session.json from a previous crash before
+        // spawning a fresh Python engine. Files whose recorded pid is still
+        // live are kept (the live engine owns them); dead-pid / corrupt files
+        // are removed so the helper does not attach to a stale token.
+        EngineSession::reap_stale(&session_path());
+
         let mut proc = PythonProcess::spawn_with(&self.command, port).await?;
 
         let url = format!("ws://127.0.0.1:{port}");
@@ -510,14 +529,27 @@ impl ProcessManager {
         // Write engine-session.json now that the handshake is complete.
         // Python helper reads this to obtain the token and port when attaching
         // to a GUI-spawned engine. Token is NOT included in log output.
-        let session = EngineSession {
-            port: proc.port(),
-            token: proc.token().to_string(),
-            pid: proc.pid().unwrap_or(0),
-            schema_major: u32::from(crate::SCHEMA_MAJOR),
-        };
-        if let Err(e) = session.write_atomic(&session_path()) {
-            log::warn!("failed to write engine-session.json: {e}");
+        // M-4 (type): pid が `None` のときは session を書かない。pid=0 を書くと
+        // `pid_is_live` が即 false 判定して reap_stale が直ちに削除してしまうため、
+        // 書く意味が無い。helper 側も `_is_pid_alive(0)` が false で stale 扱いにする。
+        match proc.pid() {
+            Some(pid) => {
+                let session = EngineSession::new(
+                    proc.port(),
+                    proc.token().to_string(),
+                    pid,
+                    u32::from(crate::SCHEMA_MAJOR),
+                );
+                if let Err(e) = session.write_atomic(&session_path()) {
+                    log::warn!("failed to write engine-session.json: {e}");
+                }
+            }
+            None => {
+                log::warn!(
+                    "engine pid unavailable; skipping engine-session.json write \
+                     (helper attach mode will fall back to env var)"
+                );
+            }
         }
 
         self.apply_after_handshake(&connection).await;

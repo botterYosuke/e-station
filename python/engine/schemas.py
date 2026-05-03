@@ -837,8 +837,29 @@ class EngineBusy(IpcMessage):
     """
 
     event: Literal["EngineBusy"] = "EngineBusy"
-    current_state: str
-    attempted_command: str
+    # M-1 (type): replay state / live state を tagged union で表現する。
+    # Replay states: IDLE / LOADED / RUNNING / STOPPING
+    # Live states:   DISCONNECTED / CONNECTING / CONNECTED
+    current_state: Literal[
+        "IDLE",
+        "LOADED",
+        "RUNNING",
+        "STOPPING",
+        "DISCONNECTED",
+        "CONNECTING",
+        "CONNECTED",
+    ]
+    attempted_command: Literal[
+        "LoadReplayData",
+        "StartEngine",
+        "StopEngine",
+        "SetReplaySpeed",
+        "SubmitOrder",
+        "ModifyOrder",
+        "CancelOrder",
+        "CancelAllOrders",
+        "RequestVenueLogin",
+    ]
     reason: str
 
 

@@ -2,7 +2,7 @@
 
 > **Phase 8 更新（python-helper-direct-api、2026-05）**: 本計画 N1〜N4 で参照する
 > Rust 側 HTTP API（ポート 9876、`/api/replay/*` / `/api/order/*` / `/api/agent/*` 等）は
-> Phase 8 で全廃止された（[python-helper-direct-api.md](../✅python-data-engine/python-helper-direct-api.md) §3）。
+> Phase 8 で全廃止された（[python-helper-direct-api.md](../✅python-data-engine/archive/python-helper-direct-api.md) §3）。
 > 制御経路は Python helper（`engine.replay_session.ReplaySession` /
 > `engine.live_session.LiveSession`）と GUI 内部経路に集約され、IPC `Command::*` /
 > `EngineEvent::*` 自体は維持される（GUI ↔ engine の WebSocket、ポート 19876）。

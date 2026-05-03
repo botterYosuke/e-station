@@ -24,7 +24,6 @@ fn read_dashboard_src() -> String {
     .expect("read src/screen/dashboard.rs")
 }
 
-
 // ── 4c-2: auto_generate_replay_panes calls set_content_and_streams ────────────
 
 #[test]

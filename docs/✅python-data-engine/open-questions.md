@@ -10,7 +10,7 @@
    - (c) ハイブリッド（dev は b、リリースは a）
 
 2. ~~**Python プロセスのライフサイクル**~~
-   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は [python-helper-direct-api.md §0.1](./python-helper-direct-api.md)。
+   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は [python-helper-direct-api.md §0.1](./archive/python-helper-direct-api.md)。
 
 ## B. IPC
 
@@ -62,7 +62,7 @@
 12. ~~**E2E テスト自動化の運用方針**~~ (Phase 7 T3 で発生)
     - **決定済み・実施済み（Phase 8.2 完了, 2026-05-03）**: HTTP 依存の bash E2E（s56〜s83, s90, tachibana_* 11 ファイル）を削除。`smoke.sh` のみ起動監視用として維持。
     - `scripts/replay_dev_load.sh` 削除済み。`scripts/run-replay-debug.sh` は DEPRECATED コメントを追記済み（HTTP API ポート 9876 依存のため機能しない）。
-    - 新たな E2E は `pytest + python -m engine.replay_session run` で代替。詳細は [python-helper-direct-api.md](./python-helper-direct-api.md)。
+    - 新たな E2E は `pytest + python -m engine.replay_session run` で代替。詳細は [python-helper-direct-api.md](./archive/python-helper-direct-api.md)。
 
 13. ~~**Phase 8 helper API 設計の未決 Q (Q2/Q3b/Q8/Q10/Q11)**~~
     - **すべて決定済み・実装済み（Phase 8 完了, 2026-05-03）**:
