@@ -4301,7 +4301,13 @@ impl Flowsurface {
             Message::SwitchModeWithSpecs { target, windows } => {
                 use engine_client::dto::AppMode;
                 // If mode switch guard was released (e.g. stale message), ignore.
+                // L2: log at debug level so stale window-spec callbacks are
+                // observable without spamming the user log.
                 if self.mode_switch_state.is_none() {
+                    log::debug!(
+                        "[F7] SwitchModeWithSpecs ignored: mode_switch_state is None \
+                         (likely stale window-spec callback after dialog dismiss)"
+                    );
                     return Task::none();
                 }
                 if app_mode() == AppMode::Live && self.is_dirty(&windows) {

@@ -484,6 +484,18 @@ mod platform {
         });
     }
 
+    /// Win/Mac muda event-stream subscription.
+    ///
+    /// Polls the muda `MenuEvent` receiver every 16 ms and translates each
+    /// menu/accelerator event into the matching `Action`. Per-action notes:
+    ///
+    /// - **`Action::SwitchMode(_)`**: muda accelerators fire independently of
+    ///   menu enabled state, so this stream additionally checks
+    ///   `crate::MODE_SWITCHING` and suppresses dispatch while a switch is in
+    ///   progress (H2 / 統一決定 64). The Linux equivalent of this guard
+    ///   lives in `linux_keyboard_subscription` (`src/menu_bar_state.rs`).
+    /// - **All other actions** are dispatched verbatim — the receiver layer
+    ///   (`Flowsurface::update`) is responsible for any per-action gating.
     pub fn event_stream() -> impl iced::futures::Stream<Item = Action> + Send + 'static {
         async_stream::stream! {
             let receiver = MenuEvent::receiver();

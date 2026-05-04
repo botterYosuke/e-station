@@ -298,3 +298,63 @@ cat ~/AppData/Roaming/flowsurface/flowsurface-current.log | grep "mode switch"
 | R4 | `src/main.rs` `SaveAndSwitchMode` ハンドラ | `SwitchModeWithSpecs` に re-route → `is_dirty` 再チェックで保存前なので true → 無限ダイアログループ | `SwitchModeSaveComplete` メッセージを新設して直接保存+restart |
 
 修正後: `cargo test --workspace` 全緑 / `cargo clippy -- -D warnings` クリーン
+
+---
+
+## レビュー反映 (2026-05-05, ラウンド 2)
+
+`/review-fix-loop` ラウンド 2 で検出された 16 件（M3 は先行コミット済み）を
+Path A で TDD 修正した。
+
+### Phase 1: 型基盤
+
+| Finding | 修正内容 | 主な変更箇所 |
+|---------|---------|------------|
+| **M1** | `ModeSwitchError::SubmitInFlight` バリアントを追加（W&B submit 進行中の SwitchMode 拒否を型レベルで表現） | `src/main.rs` enum 定義 / `tests/mode_switch_blocks_during_submit.rs::mode_switch_error_has_submit_in_flight_variant` |
+| **L1** | `ModeSwitchError::ConfirmCancelled` バリアントを追加（F4 confirm cancel を型レベルで表現） | `src/main.rs` enum 定義 / `tests/mode_switch_panic_recovery.rs::mode_switch_error_has_confirm_cancelled_variant` |
+| **M13** | `pending_mode_switch` + `_mode_switch_guard` ペアを `mode_switch_state: Option<(AppMode, ModeSwitchGuard)>` に統合。31 サイト網羅更新でペア drift（target だけ消えて guard が永遠に true）を構造的に不可能にする。`SaveAndSwitchMode` のみ guard を温存するため `as_ref()` で読み取り、他は `take()` で guard ごと消費 | `src/main.rs` struct field + 17 サイトの read/write 経路 / 既存 18 件のテストをフィールド名追従更新 |
+
+### Phase 2: HIGH
+
+| Finding | 修正内容 | 主な変更箇所 |
+|---------|---------|------------|
+| **H1** | `DiscardAndSwitchMode` / `SaveAndSwitchMode` の stale early-return 経路で guard を構造的に解放（M13 の `take()` 統合により実現） | `src/main.rs` 該当ハンドラ / `tests/mode_switch_timeout_abort.rs::discard_switch_mode_stale_releases_guard` `save_switch_mode_stale_releases_guard` |
+| **H2** | `src/native_menu.rs` Win/Mac `event_stream()` で `Action::SwitchMode(_)` 発火前に `MODE_SWITCHING.load()` を確認し、`true` のとき `log::debug!` を出して `continue` する。muda accelerator はメニュー disable と独立に発火するため、Linux 側 `linux_keyboard_subscription` と同等の保護を入れる（統一決定 64） | `src/native_menu.rs::event_stream` / `tests/mode_switch_accelerator_disabled.rs::win_mac_event_stream_checks_mode_switching` |
+| **H3** | `_handle_force_stop_replay` 完了時に `_replay_state = ReplayState.IDLE` を設定。STOPPING 残留で後続 `LoadReplayData` / `StartEngine` が永遠に弾かれるバグを修正 | `python/engine/server.py::_handle_force_stop_replay` / `python/tests/test_server_engine_dispatch.py::test_force_stop_replay_resets_state_to_idle` |
+| **H4** | live モードでの `StopReplay` 受信時、`mode_mismatch` `EngineError` を呼び出し元のみに unicast する（broadcast すると他クライアントが偽 error 表示する）。`_send_unicast` helper を新設 | `python/engine/server.py::_send_unicast` `_handle_stop_replay` / `python/tests/test_server_engine_dispatch.py::TestStopReplayUnicast` |
+
+### Phase 3: MEDIUM 観測性 / 仕様整合
+
+| Finding | 修正内容 | 主な変更箇所 |
+|---------|---------|------------|
+| **M2 (軽量版)** | thread-local `LOCK_ORDER_INDEX` + `lock_order_acquire(name)` helper を導入。`MODE_SWITCHING(0) → SUBMIT_IN_FLIGHT(1) → APP_MODE(2) → CURRENT_PATH(3)` の固定順序を `debug_assert!` で保護し、release では `tracing::warn!` にフォールバック（統一決定 R6-82）。`Action::SwitchMode` と `restart_with_mode` で helper を呼ぶ | `src/main.rs::lock_order_acquire` `LOCK_ORDER_INDEX` / `src/main.rs::lock_order_tests` (#[should_panic] 含む 3 件) / `tests/wandb_modeswitch_lock_order.rs` 構造ガード 4 件 |
+| **M4** | `Message::ModeSwitchStopTimeout` 入口に `log::warn!("[F7] StopReplay timed out — sending ForceStopReplay fallback")`、`ModeSwitchForceStopTimeout` 入口に `log::warn!("[F7] ForceStopReplay also timed out — aborting mode switch")` を追加 | `src/main.rs` 該当ハンドラ / `tests/mode_switch_timeout_abort.rs::stop_timeout_emits_warn_log` `force_stop_timeout_emits_warn_log` |
+| **M5** | 保存失敗時に `Toast::error` に加えて modal `ConfirmDialog` も表示（toast の auto-dismiss で失敗が見落とされない） | `src/main.rs::SwitchModeSaveComplete` ハンドラ |
+
+### Phase 4: MEDIUM Python WAL / IPC 契約
+
+| Finding | 修正内容 | 主な変更箇所 |
+|---------|---------|------------|
+| **M6** | `wal_in_flight.py` IO エラー時 `log.warning`、Rust `has_wal_in_flight_orders` も `log::warn!` 出力。silent fallback で診断不能だった経路を観測可能化 | 両ファイル + `tests/mode_switch_in_flight_order.rs::wal_fn_logs_io_error` / `python/tests/test_wal_in_flight_detection.py::TestIoErrorLogging` |
+| **M8** | `TERMINAL_STATUSES = frozenset({filled, cancelled, rejected})` 定数を導入し、その補集合で in-flight 判定する（`submitted` / `partial` 列挙ではなく）。未知ステータスは保守的に in-flight 扱い | `python/engine/wal_in_flight.py` + Rust 同等更新 / `python/tests/test_wal_in_flight_detection.py::TestUnknownStatus` / `tests/mode_switch_in_flight_order.rs::wal_fn_excludes_terminal_statuses` |
+| **M9** | `wal_in_flight.py` を `_iter_lines_reverse(path, chunk_size)` で末尾から chunk 単位で逆順読み出しに切り替え。改行バイト境界で安全に分割し、長い行（chunk_size 超）でも正しく動作する。大きな WAL でも先頭を全読みしないメモリ効率版 | `python/engine/wal_in_flight.py::_iter_lines_reverse` / `TestLargeWal::test_large_wal_does_not_load_full_file` / `TestLargeWal::test_iter_lines_reverse_handles_chunk_boundary` |
+| **M10** | `_handle_stop_replay` / `_handle_force_stop_replay` の `request_id` 空文字 fallback を排除。None or "" なら `EngineError(code="malformed_json")` を unicast 返却で早期 return | `python/engine/server.py` 両ハンドラ / `test_stop_replay_missing_request_id_emits_error` `test_force_stop_replay_missing_request_id_emits_error` |
+| **M11** | `tachibana_orders.py` writer は `client_order_id` のみ書き出すため、`wal_in_flight.py` / Rust `has_wal_in_flight_orders` の `order_id` フィールド名 fallback を削除。テストの `TestClientOrderId` クラスも削除（単一フィールド名で fallback 不要） | 両言語 wal 検知 + `python/tests/test_wal_in_flight_detection.py` 既存 12 fixture を `client_order_id` 名に追従 |
+| **M12** | `_handle_stop_replay` / `_handle_force_stop_replay` の `ws=None` 既定値を排除し必須引数化。テスト 13 件で `ws=None` を明示する | `python/engine/server.py` シグネチャ / `python/tests/test_server_engine_dispatch.py` の全コール更新 |
+
+### Phase 5: 残 LOW + 計画書
+
+| Finding | 修正内容 | 主な変更箇所 |
+|---------|---------|------------|
+| **L2** | stale `SwitchModeWithSpecs` の `mode_switch_state.is_none()` 早期 return で `log::debug!` を追加（観測性） | `src/main.rs::SwitchModeWithSpecs` ハンドラ |
+| **L3** | Win/Mac `event_stream()` の役割と H2 ガードの存在を doc コメントで明記（読み手が `MODE_SWITCHING.load()` の意図をすぐ理解できるように） | `src/native_menu.rs::event_stream` ドックコメント |
+| **M7** | 計画書ファイル名整合更新は本ブロック追記で完了 | 本ファイル末尾 |
+
+### コミット履歴
+
+```text
+e1a8c79 feat(F7): ModeSwitchError 拡張と mode_switch_state tuple 統合 (M1/L1/M13)
+d9ac83b fix(F7): HIGH 4 件（stale guard / Win-Mac MODE_SWITCHING / ForceStop IDLE / live unicast）
+71f17bd feat(F7): MEDIUM 観測性 + WAL 契約強化 (M2/M6/M8/M9/M10/M11/M12)
+(本コミット): feat(F7): LOW 観測性とラウンド 2 計画書反映
+```
