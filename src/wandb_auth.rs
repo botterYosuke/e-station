@@ -138,46 +138,53 @@ pub async fn list_run_buffer_entries(run_buffer_dir: &std::path::Path) -> Vec<Ru
                 continue;
             }
         };
-        // Best-effort parse — accept unknown / missing fields by deserializing
-        // to a Value first so a single malformed meta.json doesn't drop the row.
-        let v: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(err) => {
+        let dir_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let entry = match parse_meta_loose(&content, &dir_name) {
+            Some(e) => e,
+            None => {
                 log::warn!(
-                    "list_run_buffer_entries: parse {} failed: {err}",
+                    "list_run_buffer_entries: parse {} failed",
                     meta_path.display()
                 );
                 continue;
             }
         };
-        let run_id = v
-            .get("run_id")
-            .and_then(|x| x.as_str())
-            .unwrap_or_else(|| path.file_name().and_then(|s| s.to_str()).unwrap_or("?"))
-            .to_string();
-        let status = v
-            .get("status")
-            .and_then(|x| x.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let started_at = v
-            .get("started_at")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        let strategy_file = v
-            .get("strategy_file")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string());
-        rows.push(RunBufferEntry {
-            run_id,
-            status,
-            started_at,
-            strategy_file,
-        });
+        rows.push(entry);
     }
     rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     rows
+}
+
+/// 履歴モーダル専用の緩い meta.json パーサー。`run_id` / `status` が欠けた
+/// 古い・部分破損・手修正済みの run-buffer も「壊れ気味でも表示する」方針で
+/// `RunBufferEntry` に変換する（F9 リグレッション対策）。
+///
+/// - `run_id` 欠落 → ディレクトリ名にフォールバック
+/// - `status` 欠落 → `"unknown"`
+/// - JSON 自体がパース不能なときのみ `None`
+fn parse_meta_loose(content: &str, dir_name: &str) -> Option<RunBufferEntry> {
+    #[derive(Deserialize)]
+    struct MetaLoose {
+        #[serde(default)]
+        run_id: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        started_at: Option<String>,
+        #[serde(default)]
+        strategy_file: Option<String>,
+    }
+    let m: MetaLoose = serde_json::from_str(content).ok()?;
+    Some(RunBufferEntry {
+        run_id: m.run_id.unwrap_or_else(|| dir_name.to_string()),
+        status: m.status.unwrap_or_else(|| "unknown".to_string()),
+        started_at: m.started_at.unwrap_or_default(),
+        strategy_file: m.strategy_file,
+    })
 }
 
 /// `<run-buffer>/<run-id>/meta.json` の型付き表現（M13, R1 Phase 3-C）。
@@ -192,6 +199,9 @@ struct MetaJson {
     status: String,
     #[serde(default)]
     started_at: Option<String>,
+    /// 履歴 UI 用。古い meta.json では存在しないため Option。
+    #[serde(default)]
+    strategy_file: Option<String>,
 }
 
 impl RunBufferIndex {
@@ -350,5 +360,97 @@ impl RunBufferIndex {
             latest_completed,
             total,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn parse_meta_loose_falls_back_when_run_id_missing() {
+        let json = r#"{"status": "completed", "started_at": "2026-01-01T00:00:00Z"}"#;
+        let entry = parse_meta_loose(json, "dir-abc").expect("parse should succeed");
+        assert_eq!(entry.run_id, "dir-abc");
+        assert_eq!(entry.status, "completed");
+    }
+
+    #[test]
+    fn parse_meta_loose_falls_back_when_status_missing() {
+        let json = r#"{"run_id": "abc", "started_at": "2026-01-01T00:00:00Z"}"#;
+        let entry = parse_meta_loose(json, "dir-abc").expect("parse should succeed");
+        assert_eq!(entry.run_id, "abc");
+        assert_eq!(entry.status, "unknown");
+    }
+
+    #[test]
+    fn parse_meta_loose_falls_back_when_both_missing() {
+        let json = r#"{"started_at": "2026-01-01T00:00:00Z"}"#;
+        let entry = parse_meta_loose(json, "dir-xyz").expect("parse should succeed");
+        assert_eq!(entry.run_id, "dir-xyz");
+        assert_eq!(entry.status, "unknown");
+        assert_eq!(entry.started_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn parse_meta_loose_returns_none_on_invalid_json() {
+        assert!(parse_meta_loose("}{not json", "dir").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_run_buffer_entries_includes_partially_broken_meta() {
+        let root = std::env::temp_dir().join(format!(
+            "flowsurface-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let _guard = TempDirGuard(root.clone());
+        let root = root.as_path();
+
+        // run-1: 完全な meta.json
+        let r1 = root.join("run-1");
+        tokio::fs::create_dir(&r1).await.unwrap();
+        tokio::fs::write(
+            r1.join("meta.json"),
+            r#"{"run_id":"run-1","status":"completed","started_at":"2026-03-01T00:00:00Z"}"#,
+        )
+        .await
+        .unwrap();
+
+        // run-2: run_id 欠落 → ディレクトリ名フォールバックで表示されるべき
+        let r2 = root.join("run-2");
+        tokio::fs::create_dir(&r2).await.unwrap();
+        tokio::fs::write(
+            r2.join("meta.json"),
+            r#"{"status":"running","started_at":"2026-03-02T00:00:00Z"}"#,
+        )
+        .await
+        .unwrap();
+
+        // run-3: status 欠落 → "unknown" で表示されるべき
+        let r3 = root.join("run-3");
+        tokio::fs::create_dir(&r3).await.unwrap();
+        tokio::fs::write(
+            r3.join("meta.json"),
+            r#"{"run_id":"run-3","started_at":"2026-03-03T00:00:00Z"}"#,
+        )
+        .await
+        .unwrap();
+
+        let rows = list_run_buffer_entries(root).await;
+        let by_id: std::collections::HashMap<_, _> =
+            rows.iter().map(|r| (r.run_id.clone(), r.clone())).collect();
+
+        assert_eq!(rows.len(), 3, "all three entries should appear: {rows:?}");
+        assert_eq!(by_id["run-1"].status, "completed");
+        assert_eq!(by_id["run-2"].status, "running");
+        assert_eq!(by_id["run-3"].status, "unknown");
     }
 }
