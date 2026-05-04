@@ -247,19 +247,35 @@ fn set_app_mode(mode: engine_client::dto::AppMode) {
     }
 }
 
-/// F7: check if tachibana_orders.jsonl has any in-flight (submitted/partial) orders.
-/// Reads the WAL tail-first (reverse scan), same algorithm as python/engine/wal_in_flight.py.
-/// Returns true if any order has latest status "submitted" or "partial".
+/// F7: check if tachibana_orders.jsonl has any in-flight orders.
+///
+/// Reads the WAL tail-first (reverse scan), same algorithm and wire schema as
+/// `python/engine/wal_in_flight.py`. The writer (`python/engine/exchanges/tachibana_orders.py::_audit_log_*`)
+/// emits records of the form `{"phase": "submit"|"accepted"|"rejected", "client_order_id": "...", ...}`.
+///
+/// Phase semantics:
+/// - `rejected` → terminal (not in-flight)
+/// - `submit` / `accepted` / unknown → in-flight (conservative)
+///
+/// **CONTRACT**: this function MUST stay in sync with `wal_in_flight.detect_in_flight_orders`.
+/// The contract is pinned by `python/tests/test_wal_in_flight_detection.py::TestWalContract`
+/// and `tests/wal_writer_reader_contract.rs`.
 ///
 /// Uses `engine_client::process::engine_cache_dir()` — the same path Rust sends to Python
 /// via the stdin payload — so both sides always agree on the WAL location.
 fn has_wal_in_flight_orders() -> bool {
     let wal_path = engine_client::process::engine_cache_dir().join("tachibana_orders.jsonl");
+    has_wal_in_flight_orders_at(&wal_path)
+}
+
+/// Internal pure helper for [`has_wal_in_flight_orders`] — takes the WAL path
+/// directly so integration tests can exercise it without touching the global cache dir.
+fn has_wal_in_flight_orders_at(wal_path: &std::path::Path) -> bool {
     // M6: surface IO errors via log::warn! (the previous `let Ok(...) else { return false; }`
     // silently treated unreadable WAL as "no in-flight orders", which masked operational
     // problems). Treat IO failure as conservative `false` (do not block the mode switch
     // if the file cannot be read), but log so the user can investigate.
-    let content = match std::fs::read_to_string(&wal_path) {
+    let content = match std::fs::read_to_string(wal_path) {
         Ok(c) => c,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
         Err(err) => {
@@ -271,7 +287,7 @@ fn has_wal_in_flight_orders() -> bool {
             return false;
         }
     };
-    let mut latest_status: std::collections::HashMap<String, String> =
+    let mut latest_phase: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for line in content.lines().rev() {
         let line = line.trim();
@@ -281,24 +297,22 @@ fn has_wal_in_flight_orders() -> bool {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        // M11: writer (`tachibana_orders.py`) emits `client_order_id` only.
+        // Writer schema (`tachibana_orders.py`): `phase` + `client_order_id`.
         let order_id = record
             .get("client_order_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let status = record
-            .get("status")
+        let phase = record
+            .get("phase")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        if let (Some(oid), Some(st)) = (order_id, status) {
-            latest_status.entry(oid).or_insert(st);
+        if let (Some(oid), Some(ph)) = (order_id, phase) {
+            latest_phase.entry(oid).or_insert(ph);
         }
     }
-    // M8: in-flight = NOT in the terminal set. Unknown statuses are
-    // conservatively treated as in-flight.
-    latest_status
-        .values()
-        .any(|st| !matches!(st.as_str(), "filled" | "cancelled" | "rejected"))
+    // Terminal phase = `rejected`. Anything else (submit / accepted / unknown)
+    // is conservatively treated as in-flight.
+    latest_phase.values().any(|ph| ph.as_str() != "rejected")
 }
 
 /// F9d streaming events emitted by [`submit_wandb_run_stream`].

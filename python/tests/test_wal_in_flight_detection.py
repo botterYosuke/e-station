@@ -1,7 +1,11 @@
 """WAL in-flight 検知のユニットテスト（P7 受け入れ基準 12）。
 
 detect_in_flight_orders() が tachibana_orders.jsonl を tail から逆順スキャンし、
-最新 status が "submitted" / "partial" の order_id を正しく返すことを検証する。
+最新 phase が ``rejected`` でない client_order_id を返すことを検証する。
+
+writer schema (`tachibana_orders.py`) は ``phase`` キーを使う:
+    submit / accepted → in-flight
+    rejected → terminal（in-flight ではない）
 """
 from __future__ import annotations
 
@@ -17,25 +21,25 @@ import pytest
 
 
 def _write_wal(path: Path, records: list[dict]) -> None:
-    """JSONL 形式で WAL ファイルを書き出す。"""
+    """JSONL 形式で WAL ファイルを書き出す（末尾改行あり、writer 互換）。"""
     lines = [json.dumps(r) for r in records]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
-# fixture 1: 部分約定→全約定（in-flight なし）
+# fixture 1: submit → accepted → rejected （終端：in-flight ではない）
 # ---------------------------------------------------------------------------
 
 
-class TestFilledOrder:
-    """A1: submitted → partial → filled の順で記録された注文は in-flight 扱いしない。"""
+class TestRejectedOrder:
+    """A1: submit → accepted → rejected の順で記録された注文は in-flight 扱いしない。"""
 
-    def test_filled_order_is_not_in_flight(self, tmp_path: Path) -> None:
+    def test_rejected_order_is_not_in_flight(self, tmp_path: Path) -> None:
         wal = tmp_path / "tachibana_orders.jsonl"
         _write_wal(wal, [
-            {"client_order_id": "A1", "status": "submitted"},
-            {"client_order_id": "A1", "status": "partial"},
-            {"client_order_id": "A1", "status": "filled"},
+            {"client_order_id": "A1", "phase": "submit"},
+            {"client_order_id": "A1", "phase": "accepted"},
+            {"client_order_id": "A1", "phase": "rejected"},
         ])
 
         from engine.wal_in_flight import detect_in_flight_orders
@@ -45,17 +49,17 @@ class TestFilledOrder:
 
 
 # ---------------------------------------------------------------------------
-# fixture 2: プロセスクラッシュで submitted のまま残留（in-flight あり）
+# fixture 2: プロセスクラッシュで submit のまま残留（in-flight あり）
 # ---------------------------------------------------------------------------
 
 
-class TestCrashedSubmittedOrder:
-    """A2: プロセスクラッシュで submitted 状態のまま残留した注文は in-flight とみなす。"""
+class TestCrashedSubmitOrder:
+    """A2: プロセスクラッシュで submit 行のまま残留した注文は in-flight とみなす。"""
 
-    def test_submitted_order_is_in_flight(self, tmp_path: Path) -> None:
+    def test_submit_order_is_in_flight(self, tmp_path: Path) -> None:
         wal = tmp_path / "tachibana_orders.jsonl"
         _write_wal(wal, [
-            {"client_order_id": "A2", "status": "submitted"},
+            {"client_order_id": "A2", "phase": "submit"},
         ])
 
         from engine.wal_in_flight import detect_in_flight_orders
@@ -65,19 +69,19 @@ class TestCrashedSubmittedOrder:
 
 
 # ---------------------------------------------------------------------------
-# fixture 3: 複数注文（一部 filled、一部 submitted）
+# fixture 3: 複数注文（一部 rejected、一部 submit）
 # ---------------------------------------------------------------------------
 
 
 class TestMixedOrders:
-    """A3 は submitted（in-flight）、A4 は filled（in-flight ではない）。"""
+    """A3 は submit（in-flight）、A4 は rejected（in-flight ではない）。"""
 
-    def test_only_submitted_is_in_flight(self, tmp_path: Path) -> None:
+    def test_only_pending_is_in_flight(self, tmp_path: Path) -> None:
         wal = tmp_path / "tachibana_orders.jsonl"
         _write_wal(wal, [
-            {"client_order_id": "A3", "status": "submitted"},
-            {"client_order_id": "A4", "status": "submitted"},
-            {"client_order_id": "A4", "status": "filled"},
+            {"client_order_id": "A3", "phase": "submit"},
+            {"client_order_id": "A4", "phase": "submit"},
+            {"client_order_id": "A4", "phase": "rejected"},
         ])
 
         from engine.wal_in_flight import detect_in_flight_orders
@@ -113,17 +117,22 @@ class TestFileNotFound:
 
 
 # ---------------------------------------------------------------------------
-# fixture 5: partial（部分約定）のまま残留 → in-flight あり
+# fixture 5: accepted （venue 受領済みの未約定）も in-flight 扱い
 # ---------------------------------------------------------------------------
 
 
-class TestPartialOrder:
-    """A5: partial 状態のまま残留した注文は in-flight とみなす。"""
+class TestAcceptedOrder:
+    """A5: venue 受領済み（accepted）の注文は in-flight 扱い。
 
-    def test_partial_order_is_in_flight(self, tmp_path: Path) -> None:
+    accepted は venue が受け取ったが約定通知（fill）はまだ。
+    モード切替時に再送・キャンセルが必要な状態なので、安全側で in-flight と判定する。
+    """
+
+    def test_accepted_order_is_in_flight(self, tmp_path: Path) -> None:
         wal = tmp_path / "tachibana_orders.jsonl"
         _write_wal(wal, [
-            {"client_order_id": "A5", "status": "partial"},
+            {"client_order_id": "A5", "phase": "submit"},
+            {"client_order_id": "A5", "phase": "accepted"},
         ])
 
         from engine.wal_in_flight import detect_in_flight_orders
@@ -144,26 +153,23 @@ class TestTruncatedLine:
         wal = tmp_path / "tachibana_orders.jsonl"
         # 最後の行を不完全な JSON にする
         content = (
-            '{"client_order_id": "A6", "status": "submitted"}\n'
-            '{"client_order_id": "A6", "status": "filled"}\n'
-            '{"client_order_id": "A7", "status": "submitted"}\n'
-            '{"client_order_id": "A7", "sta'  # truncated
+            '{"client_order_id": "A6", "phase": "submit"}\n'
+            '{"client_order_id": "A6", "phase": "rejected"}\n'
+            '{"client_order_id": "A7", "phase": "submit"}\n'
+            '{"client_order_id": "A7", "pha'  # truncated
         )
         wal.write_text(content, encoding="utf-8")
 
         from engine.wal_in_flight import detect_in_flight_orders
         result = detect_in_flight_orders(wal)
 
-        # A6 は filled（in-flight ではない）、A7 の truncated 行はスキップされ
-        # 有効な submitted 行のみ判定される
         assert "A6" not in result, f"A6 should not be in-flight, got {result!r}"
-        # A7 の truncated 行はスキップされる→ A7 の有効な "submitted" 行が最新
         assert "A7" in result, f"A7 should be in-flight (truncated line skipped), got {result!r}"
 
     def test_completely_truncated_file(self, tmp_path: Path) -> None:
         """ファイルが truncated 行のみの場合も空を返すこと。"""
         wal = tmp_path / "tachibana_orders.jsonl"
-        wal.write_text('{"client_order_id": "A8", "sta', encoding="utf-8")
+        wal.write_text('{"client_order_id": "A8", "pha', encoding="utf-8")
 
         from engine.wal_in_flight import detect_in_flight_orders
         result = detect_in_flight_orders(wal)
@@ -172,54 +178,47 @@ class TestTruncatedLine:
 
 
 # ---------------------------------------------------------------------------
-# (M11) 旧 `TestClientOrderId` クラスは削除した。writer 側 `tachibana_orders.py`
-# は `client_order_id` のみを書き出すため fallback / 別フィールド名サポートは
-# 不要となった。
+# 終端 phase（rejected）は in-flight ではない
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# 追加: 既知の完結ステータス（cancelled / rejected）は in-flight ではない
-# ---------------------------------------------------------------------------
+class TestTerminalPhases:
+    """rejected で完結した注文は in-flight ではない。"""
 
-
-class TestCompleteStatuses:
-    """filled / cancelled / rejected で完結した注文は in-flight ではない。"""
-
-    @pytest.mark.parametrize("status", ["filled", "cancelled", "rejected"])
-    def test_completed_statuses_not_in_flight(self, tmp_path: Path, status: str) -> None:
+    @pytest.mark.parametrize("phase", ["rejected"])
+    def test_terminal_phases_not_in_flight(self, tmp_path: Path, phase: str) -> None:
         wal = tmp_path / "tachibana_orders.jsonl"
         _write_wal(wal, [
-            {"client_order_id": f"B-{status}", "status": status},
+            {"client_order_id": f"B-{phase}", "phase": phase},
         ])
 
         from engine.wal_in_flight import detect_in_flight_orders
         result = detect_in_flight_orders(wal)
 
         assert result == frozenset(), (
-            f"status={status!r} should not be in-flight, got {result!r}"
+            f"phase={phase!r} should not be in-flight, got {result!r}"
         )
 
 
 # ---------------------------------------------------------------------------
-# M8: 未知ステータスは in-flight として扱う（保守的判定）
+# M8: 未知 phase は in-flight として扱う（保守的判定）
 # ---------------------------------------------------------------------------
 
 
-class TestUnknownStatus:
-    """M8: 終端ステータス集合に含まれない未知ステータスは in-flight 扱い。"""
+class TestUnknownPhase:
+    """終端 phase 集合に含まれない未知 phase は in-flight 扱い。"""
 
-    def test_unknown_status_treated_as_in_flight(self, tmp_path: Path) -> None:
+    def test_unknown_phase_treated_as_in_flight(self, tmp_path: Path) -> None:
         wal = tmp_path / "tachibana_orders.jsonl"
         _write_wal(wal, [
-            {"client_order_id": "U1", "status": "future_unseen_status"},
+            {"client_order_id": "U1", "phase": "future_unseen_phase"},
         ])
 
         from engine.wal_in_flight import detect_in_flight_orders
         result = detect_in_flight_orders(wal)
 
         assert result == frozenset({"U1"}), (
-            f"Unknown status must be conservatively treated as in-flight (M8); got {result!r}"
+            f"Unknown phase must be conservatively treated as in-flight; got {result!r}"
         )
 
 
@@ -236,9 +235,8 @@ class TestIoErrorLogging:
     ) -> None:
         import logging
         wal = tmp_path / "tachibana_orders.jsonl"
-        _write_wal(wal, [{"client_order_id": "X", "status": "submitted"}])
+        _write_wal(wal, [{"client_order_id": "X", "phase": "submit"}])
 
-        # Force the reverse-iterator to raise OSError mid-scan.
         from engine import wal_in_flight as mod
 
         def _broken(*_args, **_kwargs):
@@ -266,31 +264,23 @@ class TestIoErrorLogging:
 
 
 class TestLargeWal:
-    """M9: 末尾だけスキャンするので、大きな WAL でも先頭を読み込まない。
-
-    `_iter_lines_reverse` の chunk_size を強制的に小さくし、ファイルを
-    先頭 → 末尾の順に走査していないことを確認する（読み出しオフセットが
-    末尾から逆順であることを観測）。
-    """
+    """M9: 末尾だけスキャンするので、大きな WAL でも先頭を読み込まない。"""
 
     def test_large_wal_does_not_load_full_file(self, tmp_path: Path) -> None:
         wal = tmp_path / "tachibana_orders.jsonl"
-        # 200 件の filled 注文 + 末尾に 1 件 submitted を置く。
         records = [
-            {"client_order_id": f"FILLED-{i}", "status": "filled"}
+            {"client_order_id": f"REJ-{i}", "phase": "rejected"}
             for i in range(200)
         ]
-        records.append({"client_order_id": "TAIL", "status": "submitted"})
+        records.append({"client_order_id": "TAIL", "phase": "submit"})
         _write_wal(wal, records)
 
-        # 末尾の 1 件 (TAIL) のみ in-flight であること。
         from engine.wal_in_flight import detect_in_flight_orders
         result = detect_in_flight_orders(wal)
         assert result == frozenset({"TAIL"}), (
-            f"Tail submitted entry must be detected; got {result!r}"
+            f"Tail submit entry must be detected; got {result!r}"
         )
 
-        # _iter_lines_reverse が末尾から走査していること（最終行から yield する）。
         from engine.wal_in_flight import _iter_lines_reverse
         first_yielded = next(_iter_lines_reverse(wal, chunk_size=128))
         assert "TAIL" in first_yielded, (
@@ -300,16 +290,202 @@ class TestLargeWal:
     def test_iter_lines_reverse_handles_chunk_boundary(self, tmp_path: Path) -> None:
         """chunk_size より長い行があっても改行バイト境界で正しく分割する。"""
         wal = tmp_path / "tachibana_orders.jsonl"
-        # 各行 200 byte 程度になるよう padding を入れる。
         long_records = [
-            {"client_order_id": f"L-{i}", "status": "submitted", "padding": "x" * 200}
+            {"client_order_id": f"L-{i}", "phase": "submit", "padding": "x" * 200}
             for i in range(5)
         ]
         _write_wal(wal, long_records)
 
         from engine.wal_in_flight import detect_in_flight_orders
         result = detect_in_flight_orders(wal)
-        # All 5 are submitted → all in-flight.
         assert result == frozenset({f"L-{i}" for i in range(5)}), (
             f"Long-line WAL must be parsed correctly across chunk boundaries; got {result!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# H3: chunk boundary 強化テスト — 複数 chunk_size で総当たり parametrize
+# ---------------------------------------------------------------------------
+
+
+class TestChunkBoundaryParametrized:
+    """H3: chunk_size を細かく振って境界バグを総当たりで pin する。
+
+    各 chunk_size で同じファイルをスキャンしても結果が常に正しい行集合に
+    なることを assert する。ファイル末尾 ``\\n`` あり / なし両方を試す。
+    """
+
+    @staticmethod
+    def _records_for(n: int) -> list[dict]:
+        return [
+            {"client_order_id": f"R-{i}", "phase": "submit"} for i in range(n)
+        ]
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 10, 13, 50, 8192])
+    @pytest.mark.parametrize("with_trailing_newline", [True, False])
+    def test_5_short_lines(
+        self,
+        tmp_path: Path,
+        chunk_size: int,
+        with_trailing_newline: bool,
+    ) -> None:
+        from engine.wal_in_flight import _iter_lines_reverse
+
+        wal = tmp_path / "tachibana_orders.jsonl"
+        records = self._records_for(5)
+        text = "\n".join(json.dumps(r) for r in records)
+        if with_trailing_newline:
+            text += "\n"
+        wal.write_text(text, encoding="utf-8")
+
+        yielded = list(_iter_lines_reverse(wal, chunk_size=chunk_size))
+        # 5 行とも入っているはず（順は逆順）。
+        assert len(yielded) == 5, (
+            f"chunk_size={chunk_size} trailing_nl={with_trailing_newline}: "
+            f"expected 5 lines, got {len(yielded)}: {yielded!r}"
+        )
+        # 末尾行 (R-4) が最初に yield される
+        assert "R-4" in yielded[0]
+        assert "R-0" in yielded[-1]
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 10, 50, 199, 200, 201])
+    def test_single_long_line_200_bytes(
+        self, tmp_path: Path, chunk_size: int
+    ) -> None:
+        """単一の長い行（chunk_size より大きい場合がある）が正しく読まれること。"""
+        from engine.wal_in_flight import _iter_lines_reverse
+
+        wal = tmp_path / "tachibana_orders.jsonl"
+        record = {"client_order_id": "LONG", "phase": "submit", "pad": "y" * 150}
+        text = json.dumps(record) + "\n"
+        wal.write_text(text, encoding="utf-8")
+
+        yielded = list(_iter_lines_reverse(wal, chunk_size=chunk_size))
+        assert len(yielded) == 1, (
+            f"chunk_size={chunk_size}: expected 1 line, got {yielded!r}"
+        )
+        assert "LONG" in yielded[0]
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 7, 13, 100, 8192])
+    def test_file_larger_than_default_chunk(
+        self, tmp_path: Path, chunk_size: int
+    ) -> None:
+        """8192 byte を超えるファイルでも全行 yield されること。"""
+        from engine.wal_in_flight import _iter_lines_reverse, detect_in_flight_orders
+
+        wal = tmp_path / "tachibana_orders.jsonl"
+        records = [
+            {"client_order_id": f"BIG-{i}", "phase": "submit", "pad": "z" * 100}
+            for i in range(100)  # ~ 12 KB
+        ]
+        _write_wal(wal, records)
+
+        yielded = list(_iter_lines_reverse(wal, chunk_size=chunk_size))
+        assert len(yielded) == 100, (
+            f"chunk_size={chunk_size}: expected 100 lines, got {len(yielded)}"
+        )
+
+        result = detect_in_flight_orders(wal)
+        assert result == frozenset({f"BIG-{i}" for i in range(100)})
+
+
+# ---------------------------------------------------------------------------
+# C1 / M-2: writer 経由の言語境界 contract test
+# ---------------------------------------------------------------------------
+
+
+class TestWalContract:
+    """writer (`tachibana_orders.py`) を直接呼んで生成した WAL を、
+    reader (`wal_in_flight.detect_in_flight_orders`) が正しく検知することを pin する。
+
+    これにより writer が ``phase`` キーを変えたら本テストが先に落ちる。
+    """
+
+    def test_uses_real_writer_schema_submit_only(self, tmp_path: Path) -> None:
+        """writer の `_audit_log_submit` だけ呼んだ後の WAL は in-flight 扱いになる。"""
+        from engine.exchanges.tachibana_orders import _audit_log_submit
+        from engine.wal_in_flight import detect_in_flight_orders
+
+        wal = tmp_path / "tachibana_orders.jsonl"
+        with wal.open("a", encoding="utf-8") as f:
+            _audit_log_submit(
+                f,
+                client_order_id="CID-CONTRACT-1",
+                request_key=12345,
+                instrument_id="1301.TSE",
+                order_side="buy",
+                order_type="market",
+                quantity="100",
+            )
+
+        result = detect_in_flight_orders(wal)
+        assert "CID-CONTRACT-1" in result, (
+            "writer の `_audit_log_submit` で書いた行は in-flight として検知される必要がある。"
+            f"got {result!r}"
+        )
+
+    def test_uses_real_writer_schema_submit_then_rejected(self, tmp_path: Path) -> None:
+        """submit → rejected を writer 経由で書いたら terminal 扱いになる。"""
+        from engine.exchanges.tachibana_orders import (
+            _audit_log_rejected,
+            _audit_log_submit,
+        )
+        from engine.wal_in_flight import detect_in_flight_orders
+
+        wal = tmp_path / "tachibana_orders.jsonl"
+        with wal.open("a", encoding="utf-8") as f:
+            _audit_log_submit(
+                f,
+                client_order_id="CID-CONTRACT-2",
+                request_key=12346,
+                instrument_id="1301.TSE",
+                order_side="buy",
+                order_type="market",
+                quantity="100",
+            )
+            _audit_log_rejected(
+                f,
+                client_order_id="CID-CONTRACT-2",
+                reason_code="E001",
+                reason_text="venue rejected",
+            )
+
+        result = detect_in_flight_orders(wal)
+        assert "CID-CONTRACT-2" not in result, (
+            "rejected で完結した注文は in-flight 扱いされない必要がある。"
+            f"got {result!r}"
+        )
+
+    def test_uses_real_writer_schema_submit_then_accepted(self, tmp_path: Path) -> None:
+        """submit → accepted は in-flight 扱い（venue 受領済みの未約定）。"""
+        from engine.exchanges.tachibana_orders import (
+            _audit_log_accepted,
+            _audit_log_submit,
+        )
+        from engine.wal_in_flight import detect_in_flight_orders
+
+        wal = tmp_path / "tachibana_orders.jsonl"
+        with wal.open("a", encoding="utf-8") as f:
+            _audit_log_submit(
+                f,
+                client_order_id="CID-CONTRACT-3",
+                request_key=12347,
+                instrument_id="1301.TSE",
+                order_side="buy",
+                order_type="market",
+                quantity="100",
+            )
+            _audit_log_accepted(
+                f,
+                client_order_id="CID-CONTRACT-3",
+                venue_order_id="VENUE-99",
+                p_no=1,
+                warning_code=None,
+                warning_text=None,
+            )
+
+        result = detect_in_flight_orders(wal)
+        assert "CID-CONTRACT-3" in result, (
+            "accepted（venue 受領済み・未約定）は in-flight 扱いされる必要がある。"
+            f"got {result!r}"
         )

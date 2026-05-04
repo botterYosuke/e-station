@@ -1,15 +1,33 @@
 """WAL in-flight 検知ユーティリティ（F7 モード切替安全装置）。
 
-tachibana_orders.jsonl を tail から逆順スキャンし、
-最新 status が "submitted" または "partial" の order_id 集合を返す。
+tachibana_orders.jsonl を tail から逆順スキャンし、未完了（in-flight）な
+``client_order_id`` 集合を返す。
+
+Writer schema (`tachibana_orders.py:_audit_log_*`)
+--------------------------------------------------
+レコードは ``phase`` キーで状態を表現する::
+
+    {"phase": "submit",   "client_order_id": "...", ...}  # HTTP 送信直前 (fsync)
+    {"phase": "accepted", "client_order_id": "...", ...}  # venue 受領済み
+    {"phase": "rejected", "client_order_id": "...", ...}  # venue 拒否
+
+**重要**: ``phase`` は writer/reader 両方で wire schema として共有されている。
+writer (`python/engine/exchanges/tachibana_orders.py`) のキー名・値を変更したら、
+本モジュール ``TERMINAL_PHASES`` と Rust 側 ``has_wal_in_flight_orders``
+(`src/main.rs`) を同時に更新すること。両者の言語境界 contract は
+``python/tests/test_wal_in_flight_detection.py::TestWalContract`` および
+``tests/wal_writer_reader_contract.rs`` で pin されている。
+
+判定ロジック
+------------
+- ``phase == "rejected"``: terminal（in-flight ではない）
+- ``phase == "submit"``  : in-flight（HTTP 送信したが応答未着 = クラッシュ残留含む）
+- ``phase == "accepted"``: in-flight（venue 受領済みの未約定。安全側で再送阻止）
+- 未知 ``phase``        : in-flight 扱い（保守的）
 
 M6: IO エラー時は warning ログを出して空集合を返す。
-M8: 終端ステータス集合（filled / cancelled / rejected）の補集合で
-    in-flight を判定する。未知ステータスは保守的に in-flight 扱い。
 M9: 大きな WAL でメモリ使用量を抑えるため、ファイル末尾から chunk 単位で
     逆順読み出しを行う（改行バイト境界で分割）。
-M11: writer (`tachibana_orders.py`) は ``client_order_id`` のみを書き出す
-     ため、``order_id`` フィールド名 fallback は不要となり削除した。
 """
 from __future__ import annotations
 
@@ -21,9 +39,9 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# M8: 終端ステータス集合。これら以外のステータス（submitted / partial /
-# 未知ステータス）はすべて in-flight として扱う（保守的判定）。
-TERMINAL_STATUSES: frozenset[str] = frozenset({"filled", "cancelled", "rejected"})
+# 終端 phase 集合（writer の `_audit_log_rejected` のみ）。
+# `submit` / `accepted` / 未知 phase は in-flight 扱い（保守的判定）。
+TERMINAL_PHASES: frozenset[str] = frozenset({"rejected"})
 
 
 def _iter_lines_reverse(path: Path, chunk_size: int = 8192):
@@ -78,11 +96,13 @@ def _iter_lines_reverse(path: Path, chunk_size: int = 8192):
 
 
 def detect_in_flight_orders(path: Path | str) -> frozenset[str]:
-    """WAL を逆順スキャンして in-flight な order_id 集合を返す。
+    """WAL を逆順スキャンして in-flight な client_order_id 集合を返す。
+
+    最新 phase が ``rejected`` でない client_order_id を in-flight とみなす。
+    ``submit`` / ``accepted`` / 未知 phase はすべて in-flight 扱い。
 
     Returns:
-        最新 status が ``filled`` / ``cancelled`` / ``rejected`` のどれでもない
-        order_id の frozenset（M8: 未知ステータスも in-flight 扱い）。
+        in-flight な ``client_order_id`` の frozenset。
         ファイルが存在しない・読めない場合は空の frozenset を返す。
     """
     path = Path(path)
@@ -101,12 +121,10 @@ def detect_in_flight_orders(path: Path | str) -> frozenset[str]:
             except json.JSONDecodeError:
                 # Truncated trailing line — skip but keep scanning.
                 continue
-            # M11: writer (`tachibana_orders.py`) は ``client_order_id`` のみ書き出す。
-            # Legacy ``order_id`` fallback は writer 側で発生しないため削除。
             order_id = record.get("client_order_id")
-            status = record.get("status")
-            if order_id and status and order_id not in seen:
-                seen[order_id] = status
+            phase = record.get("phase")
+            if order_id and phase and order_id not in seen:
+                seen[order_id] = phase
     except (OSError, io.UnsupportedOperation) as exc:
         # M6: IO エラーは保守的に「未約定なし」と判断するが、観測のため
         # warning ログを出力する（無音 fallback だと診断できないため）。
@@ -118,5 +136,5 @@ def detect_in_flight_orders(path: Path | str) -> frozenset[str]:
         )
         return frozenset()
 
-    # M8: 終端集合の補集合で in-flight を判定。未知ステータスも in-flight 扱い。
-    return frozenset(oid for oid, st in seen.items() if st not in TERMINAL_STATUSES)
+    # 終端 phase（rejected）以外はすべて in-flight 扱い。未知 phase も同様。
+    return frozenset(oid for oid, ph in seen.items() if ph not in TERMINAL_PHASES)

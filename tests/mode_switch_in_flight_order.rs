@@ -33,23 +33,30 @@ fn wal_fn_reads_tachibana_orders_jsonl_path() {
 }
 
 #[test]
-fn wal_fn_excludes_terminal_statuses() {
-    // M8: rather than enumerating in-flight statuses ("submitted" / "partial"),
-    // the implementation now uses the complement of the terminal set
-    // (filled / cancelled / rejected). Unknown statuses are conservatively
-    // treated as in-flight.
+fn wal_fn_uses_phase_key_and_rejected_terminal() {
+    // C1: writer (`tachibana_orders.py::_audit_log_*`) uses the `phase` key with
+    // values `submit` / `accepted` / `rejected`. The reader must read `phase`
+    // (not `status`) and treat only `rejected` as terminal — `submit` and
+    // `accepted` (and any unknown value) are conservatively in-flight.
     let idx = MAIN_RS
-        .find("fn has_wal_in_flight_orders(")
-        .expect("has_wal_in_flight_orders must exist");
+        .find("fn has_wal_in_flight_orders_at(")
+        .expect("has_wal_in_flight_orders_at must exist");
     let body = &MAIN_RS[idx..];
-    let end = body[1..].find("\n\n").map(|i| i + 1).unwrap_or(body.len());
+    // Cap at the next top-level `fn ` to delimit the function body.
+    let end = body[1..].find("\nfn ").map(|i| i + 1).unwrap_or(body.len());
     let fn_body = &body[..end];
     assert!(
-        fn_body.contains("\"filled\"")
-            && fn_body.contains("\"cancelled\"")
-            && fn_body.contains("\"rejected\""),
-        "has_wal_in_flight_orders must enumerate the terminal status set \
-         (filled / cancelled / rejected) and treat the complement as in-flight (M8)"
+        fn_body.contains("\"phase\""),
+        "has_wal_in_flight_orders_at must read the `phase` key, not `status` (C1)"
+    );
+    assert!(
+        fn_body.contains("\"rejected\""),
+        "has_wal_in_flight_orders_at must treat `rejected` as the terminal phase (C1)"
+    );
+    assert!(
+        !fn_body.contains("\"filled\"") && !fn_body.contains("\"cancelled\""),
+        "after C1 fix: `filled`/`cancelled` are NOT writer phase values; reader \
+         must not enumerate them"
     );
 }
 
@@ -58,13 +65,13 @@ fn wal_fn_logs_io_error() {
     // M6: IO errors must be surfaced via log::warn! instead of being silently
     // treated as "no in-flight orders".
     let idx = MAIN_RS
-        .find("fn has_wal_in_flight_orders(")
-        .expect("has_wal_in_flight_orders must exist");
+        .find("fn has_wal_in_flight_orders_at(")
+        .expect("has_wal_in_flight_orders_at must exist");
     let body = &MAIN_RS[idx..];
-    let end = body[1..].find("\n\n").map(|i| i + 1).unwrap_or(body.len());
+    let end = body[1..].find("\nfn ").map(|i| i + 1).unwrap_or(body.len());
     let fn_body = &body[..end];
     assert!(
         fn_body.contains("log::warn!"),
-        "has_wal_in_flight_orders must log::warn! on IO errors (M6)"
+        "has_wal_in_flight_orders_at must log::warn! on IO errors (M6)"
     );
 }
