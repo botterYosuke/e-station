@@ -6,6 +6,7 @@ mod cli;
 mod connector;
 mod layout;
 mod logger;
+mod mask_secrets;
 #[cfg(target_os = "linux")]
 mod menu;
 #[cfg(target_os = "linux")]
@@ -17,6 +18,7 @@ mod screen;
 mod style;
 mod venue_state;
 mod version;
+mod wandb_auth;
 mod widget;
 #[cfg(target_os = "linux")]
 mod widget_menu_bar;
@@ -383,6 +385,22 @@ fn pick_free_port() -> Option<u16> {
 }
 
 fn main() {
+    // Register panic hook first — must be before any runtime or logger setup
+    // so that panics with API key payloads are masked before reaching stderr.
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<non-string panic payload>");
+        let masked = crate::mask_secrets::mask_secrets(msg);
+        eprintln!("[PANIC] {}", masked.as_str());
+        if let Some(loc) = info.location() {
+            eprintln!("  at {}:{}", loc.file(), loc.line());
+        }
+    }));
+
     let cli_args = cli::CliArgs::parse();
 
     // Capture startup mode before any runtime is created so Flowsurface::new()

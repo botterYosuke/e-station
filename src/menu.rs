@@ -1,5 +1,7 @@
 use engine_client::dto::AppMode;
 
+use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
+
 /// Unified menu action enum for cross-platform dispatch.
 ///
 /// `native_menu::Action` covers Win/Mac muda items. This enum is the
@@ -42,14 +44,18 @@ pub struct MenuEntry {
     pub checked: Option<bool>,
 }
 
-/// W&B authentication state — drives Tools submenu composition.
+/// W&B authentication state — legacy enum; kept for backward compatibility.
+/// New code uses `WandbAuthState` from `crate::wandb_auth` (R7-86).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthState {
     SignedIn,
     SignedOut,
 }
 
-/// Local run-buffer state — drives Tools submenu composition.
+/// Local run-buffer state — legacy enum; kept for backward compatibility.
+/// New code uses `RunBufferIndex` from `crate::wandb_auth` (R7-86).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferState {
     HasRuns,
@@ -68,26 +74,81 @@ pub fn actions_for_mode(mode: &AppMode) -> Vec<Action> {
     }
 }
 
-/// Returns the ordered Tools submenu actions given the current W&B
-/// authentication and run-buffer state (DoD-10 / R3-66/69).
-pub fn tools_actions_for_state(auth_state: AuthState, buffer_state: BufferState) -> Vec<Action> {
-    use AuthState::*;
-    use BufferState::*;
-    match (auth_state, buffer_state) {
-        (SignedOut, Empty) => vec![Action::SignInWandb],
-        (SignedOut, HasRuns) => vec![
-            Action::SignInWandb,
-            Action::OpenSubmissionLog,
-            Action::ClearRunBuffer,
-        ],
-        (SignedIn, Empty) => vec![Action::SignOutWandb],
-        (SignedIn, HasRuns) => vec![
-            Action::SubmitToWandb,
-            Action::OpenSubmissionLog,
-            Action::ClearRunBuffer,
-            Action::SignOutWandb,
-        ],
-    }
+/// Returns the ordered Tools submenu entries given the current W&B
+/// authentication and run-buffer state (DoD-10 / R3-66/69 / R7-86).
+///
+/// Invariants:
+/// - `SignInWandb` and `SignOutWandb` are mutually exclusive: exactly one is enabled.
+/// - `OpenSubmissionLog` is always present in the returned Vec.
+/// - `tooltip` is `None` when `enabled=true`, `Some(reason)` when `enabled=false`.
+pub fn tools_actions_for_state(
+    auth: &WandbAuthState,
+    buf: &RunBufferIndex,
+) -> Vec<MenuEntry> {
+    let has_runs = buf.latest_completed.is_some();
+
+    vec![
+        // SignInWandb — enabled only when not authenticated
+        MenuEntry {
+            action: Action::SignInWandb,
+            enabled: !auth.authenticated,
+            tooltip: if auth.authenticated {
+                Some("ログイン済みです".to_string())
+            } else {
+                None
+            },
+            checked: None,
+        },
+        // SignOutWandb — enabled only when authenticated
+        MenuEntry {
+            action: Action::SignOutWandb,
+            enabled: auth.authenticated,
+            tooltip: if !auth.authenticated {
+                Some("ログインしていません".to_string())
+            } else {
+                None
+            },
+            checked: None,
+        },
+        // SubmitToWandb — enabled only when authenticated AND has completed runs
+        MenuEntry {
+            action: Action::SubmitToWandb,
+            enabled: auth.authenticated && has_runs,
+            tooltip: if !auth.authenticated {
+                Some("W&B にログインしてください".to_string())
+            } else if !has_runs {
+                Some(
+                    "送信可能な run がありません（最初に replay を実行してください）"
+                        .to_string(),
+                )
+            } else {
+                None
+            },
+            checked: None,
+        },
+        // OpenSubmissionLog — always present; enabled only when has_runs
+        MenuEntry {
+            action: Action::OpenSubmissionLog,
+            enabled: has_runs,
+            tooltip: if !has_runs {
+                Some("送信履歴がまだありません".to_string())
+            } else {
+                None
+            },
+            checked: None,
+        },
+        // ClearRunBuffer — enabled only when has_runs
+        MenuEntry {
+            action: Action::ClearRunBuffer,
+            enabled: has_runs,
+            tooltip: if !has_runs {
+                Some("削除できるバッファがありません".to_string())
+            } else {
+                None
+            },
+            checked: None,
+        },
+    ]
 }
 
 /// Returns the `モード（Mode）▼` submenu entries with exclusive check marks
@@ -151,47 +212,205 @@ mod tests {
         }
     }
 
-    // ── tools_actions_for_state ────────────────────────────────────────────
+    // ── tools_actions_for_state (R7-86: Vec<MenuEntry>) ──────────────────
+
+    fn make_auth(authenticated: bool) -> WandbAuthState {
+        WandbAuthState {
+            authenticated,
+            method: if authenticated {
+                "netrc".to_string()
+            } else {
+                "none".to_string()
+            },
+            username: None,
+            error: None,
+        }
+    }
+
+    fn make_buf(has_runs: bool) -> RunBufferIndex {
+        if has_runs {
+            RunBufferIndex {
+                latest_completed: Some("run-1".to_string()),
+                total: 1,
+            }
+        } else {
+            RunBufferIndex::empty()
+        }
+    }
+
+    fn find_entry(entries: &[MenuEntry], action: &Action) -> Option<MenuEntry> {
+        entries.iter().find(|e| &e.action == action).cloned()
+    }
 
     #[test]
-    fn signed_out_empty_offers_signin_only() {
+    fn auth_ok_buffer_has_runs_submit_enabled() {
+        let entries = tools_actions_for_state(&make_auth(true), &make_buf(true));
+        assert_eq!(entries.len(), 5);
+
+        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
+        assert!(submit.enabled);
+        assert_eq!(submit.tooltip, None);
+
+        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
+        assert!(!sign_in.enabled);
+        assert_eq!(sign_in.tooltip, Some("ログイン済みです".to_string()));
+
+        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
+        assert!(sign_out.enabled);
+        assert_eq!(sign_out.tooltip, None);
+
+        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
+        assert!(log.enabled);
+        assert_eq!(log.tooltip, None);
+
+        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
+        assert!(clear.enabled);
+        assert_eq!(clear.tooltip, None);
+    }
+
+    #[test]
+    fn auth_ok_buffer_empty_submit_disabled() {
+        let entries = tools_actions_for_state(&make_auth(true), &make_buf(false));
+        assert_eq!(entries.len(), 5);
+
+        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
+        assert!(!submit.enabled);
         assert_eq!(
-            tools_actions_for_state(AuthState::SignedOut, BufferState::Empty),
-            vec![Action::SignInWandb],
+            submit.tooltip,
+            Some(
+                "送信可能な run がありません（最初に replay を実行してください）".to_string()
+            )
+        );
+
+        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
+        assert!(!sign_in.enabled);
+
+        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
+        assert!(sign_out.enabled);
+
+        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
+        assert!(!log.enabled);
+        assert_eq!(log.tooltip, Some("送信履歴がまだありません".to_string()));
+
+        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
+        assert!(!clear.enabled);
+        assert_eq!(
+            clear.tooltip,
+            Some("削除できるバッファがありません".to_string())
         );
     }
 
     #[test]
-    fn signed_out_has_runs_offers_signin_and_buffer_ops() {
+    fn auth_none_buffer_has_runs_submit_disabled_login_prompt() {
+        let entries = tools_actions_for_state(&make_auth(false), &make_buf(true));
+        assert_eq!(entries.len(), 5);
+
+        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
+        assert!(!submit.enabled);
         assert_eq!(
-            tools_actions_for_state(AuthState::SignedOut, BufferState::HasRuns),
-            vec![
-                Action::SignInWandb,
-                Action::OpenSubmissionLog,
-                Action::ClearRunBuffer,
-            ],
+            submit.tooltip,
+            Some("W&B にログインしてください".to_string())
         );
+
+        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
+        assert!(sign_in.enabled);
+        assert_eq!(sign_in.tooltip, None);
+
+        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
+        assert!(!sign_out.enabled);
+        assert_eq!(sign_out.tooltip, Some("ログインしていません".to_string()));
+
+        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
+        assert!(log.enabled);
+
+        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
+        assert!(clear.enabled);
     }
 
     #[test]
-    fn signed_in_empty_offers_signout_only() {
+    fn auth_none_buffer_empty_all_disabled_appropriately() {
+        let entries = tools_actions_for_state(&make_auth(false), &make_buf(false));
+        assert_eq!(entries.len(), 5);
+
+        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
+        assert!(!submit.enabled);
         assert_eq!(
-            tools_actions_for_state(AuthState::SignedIn, BufferState::Empty),
-            vec![Action::SignOutWandb],
+            submit.tooltip,
+            Some("W&B にログインしてください".to_string())
         );
+
+        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
+        assert!(sign_in.enabled);
+
+        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
+        assert!(!sign_out.enabled);
+
+        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
+        assert!(!log.enabled);
+
+        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
+        assert!(!clear.enabled);
     }
 
     #[test]
-    fn signed_in_has_runs_offers_full_submission_flow() {
-        assert_eq!(
-            tools_actions_for_state(AuthState::SignedIn, BufferState::HasRuns),
-            vec![
-                Action::SubmitToWandb,
-                Action::OpenSubmissionLog,
-                Action::ClearRunBuffer,
-                Action::SignOutWandb,
-            ],
-        );
+    fn signin_signout_mutually_exclusive_all_combinations() {
+        for authenticated in [true, false] {
+            for has_runs in [true, false] {
+                let entries =
+                    tools_actions_for_state(&make_auth(authenticated), &make_buf(has_runs));
+                let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
+                let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
+                assert_ne!(
+                    sign_in.enabled,
+                    sign_out.enabled,
+                    "SignInWandb and SignOutWandb must be mutually exclusive \
+                     (auth={authenticated}, has_runs={has_runs})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn open_submission_log_always_present_all_combinations() {
+        for authenticated in [true, false] {
+            for has_runs in [true, false] {
+                let entries =
+                    tools_actions_for_state(&make_auth(authenticated), &make_buf(has_runs));
+                assert!(
+                    find_entry(&entries, &Action::OpenSubmissionLog).is_some(),
+                    "OpenSubmissionLog must always be present \
+                     (auth={authenticated}, has_runs={has_runs})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_true_always_has_none_tooltip() {
+        for authenticated in [true, false] {
+            for has_runs in [true, false] {
+                let entries =
+                    tools_actions_for_state(&make_auth(authenticated), &make_buf(has_runs));
+                for entry in &entries {
+                    if entry.enabled {
+                        assert_eq!(
+                            entry.tooltip,
+                            None,
+                            "enabled entry {:?} must have tooltip=None \
+                             (auth={authenticated}, has_runs={has_runs})",
+                            entry.action
+                        );
+                    } else {
+                        assert!(
+                            entry.tooltip.is_some(),
+                            "disabled entry {:?} must have tooltip=Some(...) \
+                             (auth={authenticated}, has_runs={has_runs})",
+                            entry.action
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // ── mode_menu_items ────────────────────────────────────────────────────

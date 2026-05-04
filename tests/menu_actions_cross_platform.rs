@@ -12,7 +12,10 @@
 
 fn read_menu() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/menu.rs");
-    std::fs::read_to_string(path).expect("failed to read src/menu.rs — run this after creating the file")
+    // Normalise CRLF so boundary searches work cross-platform.
+    std::fs::read_to_string(path)
+        .expect("failed to read src/menu.rs — run this after creating the file")
+        .replace("\r\n", "\n")
 }
 
 // ── DoD-7: live mode actions ───────────────────────────────────────────────
@@ -149,11 +152,10 @@ fn actions_for_mode_body_excludes_submit_to_wandb() {
     let start = src
         .find("pub fn actions_for_mode")
         .expect("actions_for_mode must exist");
-    // Find the closing brace at function level (simple heuristic: next top-level `pub fn`)
+    // Stop at the first blank line after the function (excludes the doc comment of the
+    // next pub fn which may legitimately mention tool-action names).
     let after = &src[start..];
-    let end = after
-        .find("\npub fn ")
-        .unwrap_or(after.len());
+    let end = after.find("\n\n").unwrap_or(after.len());
     let body = &after[..end];
 
     assert!(

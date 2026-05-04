@@ -293,7 +293,8 @@ class DataEngineServer:
         # arg. The TachibanaWorker is the only worker that uses it (master
         # cache path) so a None here would crash worker construction below.
         if cache_dir is None:
-            cache_dir = Path.home() / ".cache" / "flowsurface" / "engine"
+            _env_cache = os.environ.get("FLOWSURFACE_CACHE_DIR")
+            cache_dir = Path(_env_cache) if _env_cache else Path.home() / ".cache" / "flowsurface" / "engine"
         self._cache_dir = Path(cache_dir)
         if config_dir is None:
             config_dir = Path.home() / ".config" / "flowsurface" / "engine"
