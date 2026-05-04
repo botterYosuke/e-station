@@ -9,13 +9,18 @@
 > - [python-helper-direct-api.md](./archive/python-helper-direct-api.md) — Phase 8 実装詳細（✅ 完了）
 > - [spec.md](./spec.md) — 現行 IPC 仕様
 >
-> **主な変更点（Phase 5〜8）**:
+> **主な変更点（Phase 5〜8 + R1〜R4 レビュー反映）**:
 > - `exchange/` crate から全取引所コード削除済み（Phase 5）
 > - `src/replay_api.rs` / `src/api/` ディレクトリ（HTTP API port 9876）削除済み（Phase 8.3）
 > - `python/engine/replay_session.py` 新規追加（`ReplaySession` / `LiveSession` / `_AttachClient`）（Phase 8.1）
 > - `engine-client/src/session_file.rs` 新規追加（Phase 8.1b）
 > - `python/engine/server.py` が multi-client broadcast / state machine 対応（Phase 8.1b）
-> - `SCHEMA_MINOR` = 9（`ClientConnected` / `ClientDisconnected` / `EngineBusy` イベント追加）
+> - `SCHEMA_MAJOR=3` / `SCHEMA_MINOR=9`（`ClientConnected` / `ClientDisconnected` / `EngineBusy` イベント追加）
+> - **2026-05-04 R1〜R4 review-fix-loop 完了**（commit `cb9207f`）:
+>   - 型基盤強化: `AppMode` / `AttemptedCommand` / `ReplayStateName | LiveStateName` / `AUTH_FAILED_CODE` Literal/定数共有 + Rust 側 `PositionType` / `OrderStatus` / `CurrentEngineState` / `AttemptedCommand` enum 化
+>   - LiveSession attach mode 本実装（旧 NotImplementedError 廃止、`RequestVenueLogin` ↔ `VenueReady`/`VenueError` wire 待ち合わせ）
+>   - silent failure 除去（handshake 15s timeout / EngineBusy unicast + `request_id` フィルタ / 全断時 state リセット / EngineStopped 補完 + 二重送出ガード / sticky error）
+>   - Rust 健全化（`#[doc(hidden)] pub` を `engine-client` の `testing` feature gate / `pid_is_live` retry / `spawn_venue_ready_bridge` 単一化）
 
 ## 全体構成
 

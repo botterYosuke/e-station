@@ -105,8 +105,8 @@ impl EngineConnection {
     }
 
     /// N1.13 / R1b H-E: connect and announce the runtime mode
-    /// (`AppMode::Live` | `AppMode::Replay`). Python uses this to gate
-    /// `/api/replay/*` and reject `StartEngine.engine` mismatches early.
+    /// (`AppMode::Live` | `AppMode::Replay`). Python uses this to gate replay
+    /// commands and reject `StartEngine.engine` mismatches early.
     pub async fn connect_with_mode(
         url: &str,
         token: &str,

@@ -152,6 +152,8 @@ live と replay では意味が異なります。
 - **ユーザー向け**: [GitHub Wiki](https://github.com/botterYosuke/e-station/wiki)
 - **開発者向け**: [MkDocs サイト](https://botteryosuke.github.io/e-station/)
 
+未実装計画の補足: メニューラベル（W&B 系を含む）の英日表記統一は [docs/✅menu-and-footer/fix-save-menu.md#menu-labels](docs/✅menu-and-footer/fix-save-menu.md#menu-labels) を参照してください。
+
 ユーザー向けの入口:
 
 - [Getting Started](docs/wiki/getting-started.md)

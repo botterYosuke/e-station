@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
-
 import pytest
 
 from engine.nautilus.narrative_hook import NarrativeHook, _emit_execution_marker
@@ -67,7 +65,6 @@ async def test_order_filled_emits_execution_marker():
     collected: list[dict] = []
     hook = NarrativeHook(
         strategy_id="strat-001",
-        endpoint="http://localhost:9999",
         on_event=collected.append,
     )
 
@@ -81,12 +78,7 @@ async def test_order_filled_emits_execution_marker():
         "timestamp_ms": 1_700_000_000_000,
     }
 
-    # HTTP POST は mock して実際には打たない
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        mock_resp = AsyncMock()
-        mock_resp.raise_for_status = lambda: None
-        mock_post.return_value = mock_resp
-        await hook.on_order_filled(order_filled_event)
+    await hook.on_order_filled(order_filled_event)
 
     assert len(collected) == 1
     marker = collected[0]
@@ -98,21 +90,11 @@ async def test_order_filled_emits_execution_marker():
 
 
 @pytest.mark.asyncio
-async def test_execution_marker_not_emitted_without_order_filled():
-    """on_event が None の場合は ExecutionMarker が出ない（N1.6 互換モード）。"""
-    # on_event=None で NarrativeHook を作成（N1.6 互換）
-    hook = NarrativeHook(strategy_id="strat-001", endpoint="http://localhost:9999")
-
-    # HTTP POST は mock
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        mock_resp = AsyncMock()
-        mock_resp.raise_for_status = lambda: None
-        mock_post.return_value = mock_resp
-        # on_order_filled を呼んでも on_event が None なので ExecutionMarker は出ない
-        await hook.on_order_filled({"instrument_id": "1301.TSE", "side": "BUY"})
-
-    # on_event が設定されていないので呼ばれることはない — エラーも発生しない
-    # (このテストは例外が発生しないことを確認するだけでよい)
+async def test_execution_marker_not_emitted_without_on_event():
+    """on_event が None の場合は ExecutionMarker が出ない。"""
+    hook = NarrativeHook(strategy_id="strat-001")
+    # on_order_filled を呼んでも on_event が None なので ExecutionMarker は出ない
+    await hook.on_order_filled({"instrument_id": "1301.TSE", "side": "BUY"})
 
 
 @pytest.mark.asyncio
@@ -121,7 +103,6 @@ async def test_execution_marker_emitted_once_per_order_filled():
     collected: list[dict] = []
     hook = NarrativeHook(
         strategy_id="strat-001",
-        endpoint="http://localhost:9999",
         on_event=collected.append,
     )
 
@@ -132,12 +113,8 @@ async def test_execution_marker_emitted_once_per_order_filled():
         "ts_event_ms": 1_700_000_000_000,
     }
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        mock_resp = AsyncMock()
-        mock_resp.raise_for_status = lambda: None
-        mock_post.return_value = mock_resp
-        await hook.on_order_filled(event)
-        await hook.on_order_filled(event)
+    await hook.on_order_filled(event)
+    await hook.on_order_filled(event)
 
     execution_markers = [e for e in collected if e["event"] == "ExecutionMarker"]
     assert len(execution_markers) == 2  # 2 回呼べば 2 件
@@ -152,7 +129,6 @@ async def test_execution_marker_not_emitted_for_other_events():
     collected: list[dict] = []
     hook = NarrativeHook(
         strategy_id="strat-001",
-        endpoint="http://localhost:9999",
         on_event=collected.append,
     )
 

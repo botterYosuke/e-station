@@ -19,7 +19,8 @@
 - [`P5-scenario-in-strategy.md`](./P5-scenario-in-strategy.md) — Strategy ファイル内 SCENARIO 辞書による再現条件埋め込み
 - [`P7-mode-switch-menu.md`](./P7-mode-switch-menu.md) — live ⇄ replay モード切替メニューと engine restart
 - [`P8-widget-menu-bar-linux.md`](./P8-widget-menu-bar-linux.md) — Linux 向け iced widget メニューバー（GTK 非依存）
-- [`review-fixes-2026-05-04.md`](./review-fixes-2026-05-04.md) — 上記 4 計画書の review-fix-loop R1 ログ・統一決定・Findings 一覧
+- [`P9-wandb-submit-menu.md`](./P9-wandb-submit-menu.md) — W&B Submit メニュー・wandb run lifecycle・PII scrubber
+- [`review-fixes-2026-05-04.md`](./archive/review-fixes-2026-05-04.md) — 上記 4 計画書の review-fix-loop R1 ログ・統一決定・Findings 一覧
 
 ---
 

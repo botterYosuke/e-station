@@ -50,6 +50,33 @@ src/
 - ショートカット表記（`Ctrl+O` など）はラベル右側に淡色で併記。
   実 bind は本計画 [Q4](#q4) の Linux iced kbd 経路で同一 `Action` enum を発火する
 
+### `MenuEntry` 構造体（統一決定 R7-86）
+
+Tools / Mode サブメニューは `enabled` / `tooltip` / `checked`（排他チェック）の
+表現が必要なため、純関数の戻り値を `Vec<Action>` から `Vec<MenuEntry>` へ拡張する：
+
+```rust
+// src/menu.rs
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuEntry {
+    pub action: Action,
+    pub enabled: bool,
+    pub tooltip: Option<String>,
+    /// Mode メニュー等の排他チェック表示用。`Some(true)` = 現在選択中、
+    /// `Some(false)` = 候補だが未選択、`None` = チェック非表示（File 等の通常項目）。
+    pub checked: Option<bool>,
+}
+```
+
+**適用範囲**：
+
+- `tools_actions_for_state(auth_state, buffer_state) -> Vec<MenuEntry>`
+- `menu_items_tools(auth_state, buffer_state) -> Vec<MenuEntry>`
+- `mode_menu_items(current_mode) -> Vec<MenuEntry>`（Linux 自前メニューの Mode サブメニュー）
+
+**不変条件 R7-88**：`actions_for_mode(mode) -> Vec<Action>`（File メニュー用 cross-platform
+契約）はシグネチャ不変で維持する。これは P8 DoD-11 / R3-66/69 / R6-83 整合のため触らない。
+
 ### `main.rs` 側の統合
 
 - `Flowsurface::view()` で `cfg(target_os = "linux")` の場合のみメインウィンドウの
@@ -119,7 +146,7 @@ pub struct State {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopMenu { File, Mode }
+pub enum TopMenu { File, Mode, Tools }
 
 #[derive(Debug, Clone)]
 pub enum BarMessage {
@@ -148,6 +175,44 @@ pub fn menu_items(mode: &AppMode) -> Vec<Action> {
             Action::ReplayStart, Action::ReplayStop, Action::Quit,
         ],
     }
+}
+
+/// `auth_state` / `buffer_state` に応じた Tools サブメニュー項目を返す（テスト対象）。
+///
+/// 統一決定 R3-66/69 により、Tools サブメニューは File/Mode と独立した責務として
+/// `tools_actions_for_state` 純関数で扱う（`actions_for_mode` には混ぜない）。
+/// 統一決定 R7-86/87 により、戻り値は `Vec<MenuEntry>` に拡張され、UX の
+/// `disable + tooltip` / `グレー表示` / `ログイン/ログアウト 相互 disable` を表現できる。
+///
+/// - `auth_state`: W&B 認証状態（`SignedIn` / `SignedOut`）
+/// - `buffer_state`: Run buffer 状態（`HasRuns` / `Empty`）
+pub fn menu_items_tools(
+    auth_state: AuthState,
+    buffer_state: BufferState,
+) -> Vec<MenuEntry> {
+    tools_actions_for_state(auth_state, buffer_state)
+}
+
+/// Linux 自前メニューバーの `モード（Mode）▼` サブメニュー項目を返す（テスト対象）。
+///
+/// 統一決定 R7-87 により、Live/Replay を **排他チェック**（`checked: Some(true|false)`）
+/// で表示し、選択で `Action::SwitchAppMode(Live|Replay)` を dispatch する。
+/// P7 が前提する Linux Mode メニューの仕様欠落（R7-3）を補う。
+pub fn mode_menu_items(current_mode: &AppMode) -> Vec<MenuEntry> {
+    vec![
+        MenuEntry {
+            action: Action::SwitchAppMode(AppMode::Live),
+            enabled: true,
+            tooltip: None,
+            checked: Some(matches!(current_mode, AppMode::Live)),
+        },
+        MenuEntry {
+            action: Action::SwitchAppMode(AppMode::Replay),
+            enabled: true,
+            tooltip: None,
+            checked: Some(matches!(current_mode, AppMode::Replay)),
+        },
+    ]
 }
 ```
 
@@ -182,24 +247,28 @@ pub fn update(state: State, msg: BarMessage) -> State {
 ```
 
 これにより [`tests/widget_menu_bar_state.rs`](#widget-menu-bar-state-tests) で
-**3 契約（Esc / focus-lost / 外側クリック）× 開状態 3 ケース（File 開・Mode 開・閉）**
-の遷移を assert できる。GUI レイヤ（overlay 描画・実際のキーイベント配線）は
+**3 契約（Esc / focus-lost / 外側クリック）× 開状態 4 ケース（File 開・Mode 開・Tools 開・閉）**
+の遷移を assert できる（統一決定 R3-66 により `TopMenu::Tools` を追加し test matrix を
+3×3 → 4×4 に拡張）。GUI レイヤ（overlay 描画・実際のキーイベント配線）は
 [受け入れ基準](#acceptance) DoD-2〜DoD-4 の手動スモークで補完する。
 
 <a id="widget-menu-bar-state-tests"></a>
-**`tests/widget_menu_bar_state.rs` 対応表（3 契約 × 3 開状態）**：
+**`tests/widget_menu_bar_state.rs` 対応表（3 契約 × 4 開状態）**：
 
-| # | 開状態 (`state.open`) | 入力（`BarMessage`） | 期待後状態 (`state.open`) | 観測契約 |
-|---|----------------------|---------------------|-------------------------|---------|
-| 1 | `Some(File)` | `Dismiss`（Esc 由来） | `None` | Esc / File 開 |
-| 2 | `Some(Mode)` | `Dismiss`（Esc 由来） | `None` | Esc / Mode 開 |
-| 3 | `None`       | `Dismiss`（Esc 由来） | `None` | Esc / 閉（冪等） |
-| 4 | `Some(File)` | `Dismiss`（focus-lost 由来） | `None` | focus-lost / File 開 |
-| 5 | `Some(Mode)` | `Dismiss`（focus-lost 由来） | `None` | focus-lost / Mode 開 |
-| 6 | `None`       | `Dismiss`（focus-lost 由来） | `None` | focus-lost / 閉（冪等） |
-| 7 | `Some(File)` | `Dismiss`（外側クリック由来） | `None` | 外側クリック / File 開 |
-| 8 | `Some(Mode)` | `Dismiss`（外側クリック由来） | `None` | 外側クリック / Mode 開 |
-| 9 | `None`       | `Dismiss`（外側クリック由来） | `None` | 外側クリック / 閉（冪等） |
+| #  | 開状態 (`state.open`) | 入力（`BarMessage`） | 期待後状態 (`state.open`) | 観測契約 |
+|----|----------------------|---------------------|-------------------------|---------|
+| 1  | `Some(File)`  | `Dismiss`（Esc 由来） | `None` | Esc / File 開 |
+| 2  | `Some(Mode)`  | `Dismiss`（Esc 由来） | `None` | Esc / Mode 開 |
+| 3  | `Some(Tools)` | `Dismiss`（Esc 由来） | `None` | Esc / Tools 開 |
+| 4  | `None`        | `Dismiss`（Esc 由来） | `None` | Esc / 閉（冪等） |
+| 5  | `Some(File)`  | `Dismiss`（focus-lost 由来） | `None` | focus-lost / File 開 |
+| 6  | `Some(Mode)`  | `Dismiss`（focus-lost 由来） | `None` | focus-lost / Mode 開 |
+| 7  | `Some(Tools)` | `Dismiss`（focus-lost 由来） | `None` | focus-lost / Tools 開 |
+| 8  | `None`        | `Dismiss`（focus-lost 由来） | `None` | focus-lost / 閉（冪等） |
+| 9  | `Some(File)`  | `Dismiss`（外側クリック由来） | `None` | 外側クリック / File 開 |
+| 10 | `Some(Mode)`  | `Dismiss`（外側クリック由来） | `None` | 外側クリック / Mode 開 |
+| 11 | `Some(Tools)` | `Dismiss`（外側クリック由来） | `None` | 外側クリック / Tools 開 |
+| 12 | `None`        | `Dismiss`（外側クリック由来） | `None` | 外側クリック / 閉（冪等） |
 
 > 注: `BarMessage::Dismiss` 自身は dismiss 理由を保持しない（純関数 `update` は遷移先のみで決定論的）。
 > 「理由」は呼び出し側（Subscription / overlay）でログ出力（DoD-2〜4 の `dismiss reason=...`）に
@@ -258,6 +327,11 @@ OS の見た目に従うため、Linux のみ「アプリのテーマに沿っ�
 | DoD-7 | Win/Mac/Linux で同一 `Action` を発火する cross-platform テストが green | `cargo test --test menu_actions_cross_platform` |
 | DoD-8 | Wayland / X11 両方でスモーク完走 | [スモーク手順](#smoke) 参照 |
 | DoD-9 | muda アクセラレータと Linux iced kbd の重複登録が compile-time で起こらない | `cargo build --target x86_64-unknown-linux-gnu` warn-free |
+| DoD-10 | `Tools ▼` メニューに W&B / Run buffer 関連項目（`SubmitToWandb` / `SignInWandb` / `SignOutWandb` / `OpenSubmissionLog` / `ClearRunBuffer`）が `auth_state` × `buffer_state` に応じて並ぶ | `cargo test --test tools_actions_for_state`（統一決定 R3-66/69） |
+| DoD-11 | `actions_for_mode(Live)` / `actions_for_mode(Replay)` の期待値は **File/Mode メニュー由来のみ**で、Tools サブメニュー Action は混入しない | `cargo test --test menu_actions_cross_platform`（責務分離リグレッションガード） |
+| DoD-12 | `widget_menu_bar_state.rs` の test matrix が `TopMenu::Tools` を含む 3×4=12 ケースで全 green | `cargo test --test widget_menu_bar_state` |
+| DoD-13 | Linux で `モード（Mode）▼` を開くと `ライブ（Live）` / `リプレイ（Replay）` が排他チェック付きで並ぶ（現在モードに `✓` 表示） | `cargo test --test mode_menu_items`（統一決定 R7-87） |
+| DoD-14 | Linux Mode サブメニューの `ライブ（Live）` 行クリックで `Action::SwitchAppMode(AppMode::Live)` が dispatch される（Replay 行も同様） | `cargo test --test mode_menu_items` + 目視 |
 
 <a id="testing"></a>
 ## テスト方針
@@ -293,6 +367,13 @@ mod tests {
 
 `actions_for_mode` を共通モジュール（`src/menu.rs`）に置き、OS 非依存にする。
 
+> **責務分離（統一決定 R3-66/69）**: `actions_for_mode` の期待値は **File/Mode メニュー由来の
+> Action のみ**で構成する。Tools サブメニュー（`SubmitToWandb` / `SignInWandb` /
+> `SignOutWandb` / `OpenSubmissionLog` / `ClearRunBuffer`）は `app_mode` ではなく
+> `auth_state` × `buffer_state` に依存するため、別純関数 `tools_actions_for_state` で
+> 扱い、別ファイル [`tests/tools_actions_for_state.rs`](#tools-actions-tests) で検証する。
+> `actions_for_mode` 側に Tools Action を混入させない（リグレッションガードとして DoD-11）。
+
 ```rust
 // tests/menu_actions_cross_platform.rs
 use flowsurface::menu::{actions_for_mode, Action};
@@ -315,10 +396,146 @@ fn replay_actions_are_identical_across_os() {
         vec![Action::ReplayStart, Action::ReplayStop, Action::Quit],
     );
 }
+
+/// Tools サブメニュー Action が `actions_for_mode` に混入していないことを保証する
+/// リグレッションガード（責務分離・DoD-11）。
+#[test]
+fn actions_for_mode_excludes_tools_submenu_actions() {
+    use flowsurface::menu::Action::*;
+    for mode in [AppMode::Live, AppMode::Replay] {
+        let got = actions_for_mode(&mode);
+        for tools_only in [
+            SubmitToWandb, SignInWandb, SignOutWandb, OpenSubmissionLog, ClearRunBuffer,
+        ] {
+            assert!(
+                !got.contains(&tools_only),
+                "Tools action {:?} must not appear in actions_for_mode({:?})",
+                tools_only, mode,
+            );
+        }
+    }
+}
 ```
 
 このテストは Win/Mac/Linux いずれの CI runner でも `cargo test --test menu_actions_cross_platform`
 で実行され、OS 間で `Action` 集合が一致することを保証する。
+
+<a id="tools-actions-tests"></a>
+### Tools サブメニューユニットテスト（`tests/tools_actions_for_state.rs`）
+
+統一決定 R3-66/69 により Tools サブメニューは `auth_state` × `buffer_state` を受け取る
+別純関数 `tools_actions_for_state(auth_state, buffer_state)` で実装し、本ファイルで
+4 状態（2×2 マトリクス）の期待値を assert する。
+
+**期待値テーブル**：
+
+| # | `auth_state` | `buffer_state` | 期待 `Action` 集合 |
+|---|--------------|----------------|---------------------|
+| 1 | `SignedOut` | `Empty`   | `[SignInWandb]` |
+| 2 | `SignedOut` | `HasRuns` | `[SignInWandb, OpenSubmissionLog, ClearRunBuffer]` |
+| 3 | `SignedIn`  | `Empty`   | `[SignOutWandb]` |
+| 4 | `SignedIn`  | `HasRuns` | `[SubmitToWandb, OpenSubmissionLog, ClearRunBuffer, SignOutWandb]` |
+
+```rust
+// tests/tools_actions_for_state.rs
+use flowsurface::menu::{tools_actions_for_state, Action, AuthState, BufferState};
+
+#[test]
+fn signed_out_empty_offers_signin_only() {
+    let got = tools_actions_for_state(AuthState::SignedOut, BufferState::Empty);
+    assert_eq!(got, vec![Action::SignInWandb]);
+}
+
+#[test]
+fn signed_out_has_runs_offers_signin_and_buffer_ops() {
+    let got = tools_actions_for_state(AuthState::SignedOut, BufferState::HasRuns);
+    assert_eq!(
+        got,
+        vec![Action::SignInWandb, Action::OpenSubmissionLog, Action::ClearRunBuffer],
+    );
+}
+
+#[test]
+fn signed_in_empty_offers_signout_only() {
+    let got = tools_actions_for_state(AuthState::SignedIn, BufferState::Empty);
+    assert_eq!(got, vec![Action::SignOutWandb]);
+}
+
+#[test]
+fn signed_in_has_runs_offers_full_submission_flow() {
+    let got = tools_actions_for_state(AuthState::SignedIn, BufferState::HasRuns);
+    assert_eq!(
+        got,
+        vec![
+            Action::SubmitToWandb,
+            Action::OpenSubmissionLog,
+            Action::ClearRunBuffer,
+            Action::SignOutWandb,
+        ],
+    );
+}
+```
+
+このテストも OS 非依存で、`cargo test --test tools_actions_for_state` で全 OS で green になる。
+
+<a id="mode-menu-items-tests"></a>
+### Mode サブメニューユニットテスト（`tests/mode_menu_items.rs`）
+
+統一決定 R7-87 により、Linux 自前メニューの `モード（Mode）▼` サブメニューは
+`mode_menu_items(current_mode) -> Vec<MenuEntry>` で実装し、本ファイルで
+**現在モードに対する排他チェック表示**と **Action dispatch** を assert する。
+
+**期待値テーブル**：
+
+| # | `current_mode` | 期待 `Vec<MenuEntry>`（順序固定） |
+|---|----------------|---------------------------------|
+| 1 | `Live`   | `[ {SwitchAppMode(Live), enabled, checked=Some(true)}, {SwitchAppMode(Replay), enabled, checked=Some(false)} ]` |
+| 2 | `Replay` | `[ {SwitchAppMode(Live), enabled, checked=Some(false)}, {SwitchAppMode(Replay), enabled, checked=Some(true)} ]` |
+
+```rust
+// tests/mode_menu_items.rs
+use flowsurface::menu::{mode_menu_items, Action, MenuEntry};
+use flowsurface::AppMode;
+
+#[test]
+fn live_mode_marks_live_checked_replay_unchecked() {
+    let got = mode_menu_items(&AppMode::Live);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
+    assert_eq!(got[0].checked, Some(true));
+    assert!(got[0].enabled);
+    assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
+    assert_eq!(got[1].checked, Some(false));
+    assert!(got[1].enabled);
+}
+
+#[test]
+fn replay_mode_marks_replay_checked_live_unchecked() {
+    let got = mode_menu_items(&AppMode::Replay);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
+    assert_eq!(got[0].checked, Some(false));
+    assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
+    assert_eq!(got[1].checked, Some(true));
+}
+
+/// クリックで dispatch される Action が `SwitchAppMode(target)` であることを保証する
+/// リグレッションガード（DoD-14）。
+#[test]
+fn each_entry_dispatches_switch_app_mode_action() {
+    for current in [AppMode::Live, AppMode::Replay] {
+        for entry in mode_menu_items(&current) {
+            match entry.action {
+                Action::SwitchAppMode(_) => {}
+                other => panic!("expected SwitchAppMode, got {:?}", other),
+            }
+        }
+    }
+}
+```
+
+このテストも OS 非依存で、`cargo test --test mode_menu_items` で全 OS で green になる
+（Linux 限定 rendering とは独立した純関数仕様のため）。
 
 <a id="smoke"></a>
 ### Wayland / X11 両環境スモーク手順

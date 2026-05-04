@@ -594,8 +594,8 @@ struct Flowsurface {
     /// `PositionsUpdated` または `IpcError` 受信時にクリアする。重複送信抑止に使う。
     positions_request_id: Option<String>,
     /// N4.3: user-selected strategy `.py` file path. `None` until the user picks
-    /// one via the OS file dialog.  Intended for future wiring to `/api/replay/start`
-    /// `strategy_file` field when a UI-triggered replay start is implemented.
+    /// one via the OS file dialog. Consumed by the Replay 起動フォーム modal as the
+    /// `strategy_file` field on `Command::StartEngine`.
     replay_strategy_file: Option<std::path::PathBuf>,
     /// Phase 8.1c: Replay 起動フォーム modal。`File > Replay を開始...` で Some に、
     /// Submit / Cancel で None に戻る。

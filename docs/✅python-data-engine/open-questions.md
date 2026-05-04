@@ -23,10 +23,10 @@
 
 ## C. 機能スコープ
 
-5. **WS 直結のオプション残置（計画射程に直結、フェーズ 2 完了時に最終確定）**
-   - フェーズ 5 で完全に Rust 側取引所コードを消す前提だったが、[spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定) で案 A（撤去） / 案 B（恒久残置） / 案 C（optional feature）を列挙。
-   - 暫定は **案 A**。フェーズ 2 のレイテンシ計測結果で最終確定する。
-   - **Phase 0.5 で `VenueBackend` trait を実装済み**。trait は `NativeBackend`（既存 Rust 直結）と将来の `EngineClientBackend`（Python IPC）の両方を実装できる設計になっており、案 A でも C でも対応可能。最終決定はフェーズ 2 計測後。
+5. ~~**WS 直結のオプション残置**~~
+   - **決定済み・実施済み（Phase 5 完了, 2026-04-25）**: 案 A（撤去）を採用。`exchange/src/adapter/hub/` を全削除し、`reqwest` / `fastwebsockets` / `tokio-rustls` / `tokio-socks` / `sonic-rs` 等の native 依存も `exchange/Cargo.toml` から除去済み。
+   - `--data-engine-url` フラグは Phase 5 で必須化、Phase 6 で `--engine-cmd` によるオーバーライドへ進化。Phase 8 で固定ポート 19876 自動 attach + spawn フォールバックに到達（[spec.md §3.1](./spec.md#31-起動フロー外部エンジン自動-attach--spawn-フォールバック)）。
+   - 案 C（optional feature）の復活余地は理論上残るが、現時点で要望なし。
 
 6. **マルチプロセス構成**
    - フェーズ 1 は asyncio 単一プロセスで確定（[spec.md §6.1](./spec.md#61-プロセスモデルフェーズ-1-時点)）。
@@ -56,8 +56,8 @@
 
 ## F. 雑多な確認
 
-11. **keyring の他用途**
-    - プロキシ資格情報以外に `keyring` crate を使っている機能が無いか。無ければフェーズ 5 で依存削除候補、ある場合は Rust 側に残す。着手前に要 grep 確認。
+11. ~~**keyring の他用途**~~
+    - **決定済み・実施済み（Phase 5 完了, 2026-04-25）**: プロキシ資格情報の Rust 側保持のみで利用継続。Phase 5 では `exchange/` 配下から `keyring` 依存を除去するスコープではなく、`src/` 側で `Proxy` 設定を保持するパターンを維持した。Python 側は `SetProxy` IPC 経由で受け渡し（spec.md §5.4）。
 
 12. ~~**E2E テスト自動化の運用方針**~~ (Phase 7 T3 で発生)
     - **決定済み・実施済み（Phase 8.2 完了, 2026-05-03）**: HTTP 依存の bash E2E（s56〜s83, s90, tachibana_* 11 ファイル）を削除。`smoke.sh` のみ起動監視用として維持。

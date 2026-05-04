@@ -349,6 +349,59 @@ def test_attach_mode_portfolio_updated_via_event_key(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# MEDIUM (2026-05-04): send_command 失敗時に status が "running" のまま残らない
+# ---------------------------------------------------------------------------
+
+
+def test_attach_run_send_command_failure_rolls_back_status(tmp_path):
+    """attach.run() 中に send_command() が raise した場合、
+
+    status は "errored" に遷移し、attach client の current_request_id は
+    クリアされて次の run/load が前 run の Error と誤マッチしないこと。
+    """
+    from engine.replay_session import ReplaySession, _ReplayStatus
+
+    strat = tmp_path / "strategy.py"
+    strat.write_text("# dummy\n")
+
+    class _FailingClient:
+        def __init__(self):
+            self.current_request_id = "should-be-cleared"
+            self.fail = False
+
+        def send_command(self, _cmd):
+            if self.fail:
+                raise ConnectionError("ws gone")
+
+        def wait_for(self, *_args, **_kwargs):
+            return {"event": "ReplayDataLoaded"}
+
+        def set_current_request_id(self, rid):
+            self.current_request_id = rid
+
+        def events(self):
+            yield from ()
+
+        def close(self):
+            pass
+
+    s = ReplaySession(force_mode="auto")
+    s._entered = True
+    s._mode = "attach"
+    client = _FailingClient()
+    s._client = client
+    s._status = _ReplayStatus.IDLE
+    s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
+    client.fail = True  # run() の StartEngine 送信だけ失敗させる
+
+    with pytest.raises(ConnectionError):
+        s.run(strategy_file=str(strat), on_event=lambda _e: None)
+
+    assert s.status == "errored"
+    assert client.current_request_id is None
+
+
+# ---------------------------------------------------------------------------
 # Group 2 — attach mode 動作修正のテスト
 # ---------------------------------------------------------------------------
 

@@ -87,13 +87,27 @@ class MyStrategy(Strategy):
 
 1. replay モード起動中に `開く…（Open）` で `.py` を選択
 2. Rust → Python に `Command::LoadStrategyScenario { path }` を送る（新 IPC コマンド）
-3. Python 側で **`ast.parse(source)` してトップレベル `Assign` を走査**、`targets[0].id == "SCENARIO"` の `value` を **`ast.literal_eval` で評価**（任意コード実行を起こさない read-only 抽出）。
+3. Python 側で **`ast.parse(source)` してトップレベル `Assign` または `AnnAssign` を走査**、`Assign` は `targets[0].id == "SCENARIO"`、`AnnAssign` は `target.id == "SCENARIO"` を拾い、その `value` を **`ast.literal_eval` で評価**（任意コード実行を起こさない read-only 抽出）。これにより `SCENARIO: Scenario = {...}`（注釈付き代入、計画書の推奨形式）と `SCENARIO = {...}`（注釈なし）の両形式を許可する。`AnnAssign.value` が `None`（例: `SCENARIO: Scenario` のようにアノテーションのみの宣言）の場合は **SCENARIO 不在として扱う**（`None` を返す）。
    `ast.literal_eval` は dict literal **のみ** を受理する。**dict unpacking（`{**other}`）・dict comprehension（`{k: v for ...}`）・関数呼び出しを含む dict は silent fail せず明示エラー** とし、エラー文言は次に統一する：
    `「dict literal 以外（unpacking {**...} / comprehension / 関数呼び出しを含む dict）は SCENARIO として読めません。リテラルの dict だけを使ってください」`
 4. importlib による実行はここでは **行わない**（Run 押下時にのみ `engine.replay_session.run()` 経由で実行）
 5. 結果を `Event::StrategyScenarioLoaded { scenario: Option<Scenario> }` で返す
 6. Rust 側で `ReplayFormModal` のフィールドを prefill（None なら空のまま）
 7. `Flowsurface.current_path = Some(path)`（F3 と統合）
+
+### `Scenario` TypedDict + runtime validator
+
+`python/engine/schemas.py`（または `python/engine/scenario.py`）に `Scenario` TypedDict を定義するのに加え、
+**runtime 検証関数 `engine.scenario.validate(d: dict) -> None` を必須実装する**。TypedDict は静的型ヒントに過ぎず
+実行時には dict の形状を検証しないため、`importlib.reload()` だけでは型違反（例: `instrument` に int を渡す等）
+を検知できず rollback 経路が発火しない（R6-2 false-green）。`validate()` は次のように振る舞う：
+
+- 必須キー（`schema_version` / `instrument` / `start` / `end` / `granularity` / `initial_cash`）の欠落で `TypeError`（または `ScenarioValidationError`）を raise
+- 各キーの値の型が `Scenario` 定義と一致しない場合（例: `instrument` が `str` でない、`initial_cash` が `int` でない等）も同上の例外を raise
+- 余剰キーの扱いは strict（未知キーがあれば raise）
+- 例外メッセージには違反キー名と期待型を含める
+
+GUI 経路（F6a）の read-only prefill / CLI 経路（F6b）/ 書き戻し後の再ロード検証（F6c）すべてが `validate()` を共通利用する。
 
 ### IPC スキーマ拡張
 
@@ -117,6 +131,9 @@ class MyStrategy(Strategy):
 ### DoD（F6a）
 
 - テスト: `python/tests/test_scenario_load.py`
+  - `test_reads_annotated_assign`: `SCENARIO: Scenario = {...}`（`AnnAssign` 形、計画書推奨形式）を読めることを assert
+  - `test_reads_plain_assign`: `SCENARIO = {...}`（`Assign` 形、注釈なし）を読めることを assert
+  - `test_treats_annotation_only_as_absent`: `SCENARIO: Scenario`（`AnnAssign.value is None`、アノテーションのみの宣言）は **SCENARIO 不在として扱う**ことを assert（`None` を返し、エラーにはしない）
   - `test_rejects_dict_unpacking`: `SCENARIO = {**other_dict, "instrument": "..."}` を読んで上記統一エラー文言で reject
   - `test_rejects_dict_comprehension`: `SCENARIO = {k: v for k, v in [...]}` を読んで上記統一エラー文言で reject
   - **`test_read_only_no_side_effect`（read-only regression guard）**:
@@ -169,9 +186,9 @@ GUI / CLI 両経路から呼ぶ。
 ### `libcst` による置換アルゴリズム
 
 1. `cst.parse_module(source)` で CST を取得
-2. トップレベルの `Assign` ノードを走査し、`targets[0].value == "SCENARIO"` を探す
-3. 見つかったら：そのノードの `value`（dict literal）を新 SCENARIO で差し替え
-4. 見つからなかったら：最後の `Import` / `ImportFrom` の直後に `SCENARIO = {...}` を挿入
+2. トップレベルの `Assign` および `AnnAssign` ノードを走査し、`SCENARIO` を target に持つノード（`Assign` の `targets[0].value == "SCENARIO"` または `AnnAssign` の `target.value == "SCENARIO"`）を探す
+3. 見つかったら：そのノードの `value`（dict literal）を新 SCENARIO で差し替える。元が `AnnAssign`（注釈付き）であれば **アノテーション（`: Scenario`）を保持したまま value のみ差し替える**。元が `Assign`（注釈なし）であればそのまま `Assign` 形式を維持する。`AnnAssign.value is None`（アノテーションのみ宣言）にヒットした場合は同 `AnnAssign` の `value` を新 SCENARIO で埋める
+4. 見つからなかったら：最後の `Import` / `ImportFrom` の直後に `SCENARIO = {...}` を `Assign` 形式で挿入する（既存の `Scenario` import が無い可能性に配慮し、注釈なし形式を採用）
 5. `module.code` で文字列化して書き出し
 
 ### 安全装置（atomic write + 世代付きバックアップ）
@@ -196,42 +213,52 @@ GUI / CLI 両経路から呼ぶ。
 - ディスクフル等で write が失敗した場合、上記 cleanup 規則に従い tempfile / `.bak` を削除のうえエラーダイアログで通知
 - **保存エラーコード列挙**（`Event::StrategyScenarioSaved { ok: false, error: ... }` の `error` 値）：
   `"permission_denied"` / `"parent_missing"` / `"disk_full"` / `"path_guard_violation"` / `"rename_failed"` / `"tempfile_failed"` のみ
-- 書き戻し後に `importlib` で再ロード検証
-  - import エラー → 直近の `.bak.<UTC秒>` から rollback → エラーダイアログ
+- 書き戻し後に **二段の検証** を必ず実行する（R6-81 統一決定）：
+  1. **import 検証**：`importlib` で書き戻し済みファイルを再ロードし `SyntaxError` / `ImportError` 等が出ないことを確認
+  2. **runtime 形状検証**：再ロードしたモジュールの `SCENARIO` を `engine.scenario.validate(scenario_dict)` に渡し、
+     TypedDict 形状（キー存在・値型）が runtime に一致することを確認（TypedDict は静的型のみで実行時検証無しのため必須）
+  - **import エラー OR `validate()` 失敗のいずれか** → 直近の `.bak.<UTC秒>` から rollback → エラーダイアログ
   - **rollback 後 byte-diff assert**（テスト DoD）：書き戻し前のオリジナルと rollback 後のファイルが byte 単位で完全一致することを確認
 - `SCENARIO` 以外のコード・コメント・空白・docstring は触れないこと（`libcst` の不変条件）
 
 ### path ガード（`Command::SaveStrategyScenario` 不変条件）
 
-Python 側 `engine.scenario.write_back(path, scenario)` は次の 3 条件すべてを満たさない限り `ValueError` で拒否する：
+Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, current_path: Optional[Path], loaded_path: Optional[Path])` は次の 3 条件すべてを満たさない限り `ValueError`（`error="path_guard_violation"`）で拒否する：
 
 1. `path` の拡張子が **`.py` のみ**（`.json` / `.bak` / 拡張子なしは拒否）
-2. `path` が **直前の `Command::LoadStrategyScenario` で渡された path と一致** する（FCFS 不変条件）。
-   multi-client engine（max 4）で他クライアントが間に別の Load を挟んだ場合は拒否。
-   **Load 履歴が None の場合の分岐**: `current_path == None` かつ Save As 経路フラグ
-   （`Command::SaveStrategyScenario { save_as: true, .. }`）が立っているときに**限り**許可する。
-   それ以外（current_path に値があるのに Load 履歴が無い等）は拒否
+2. `path` が **保存経路ごとの分岐ルール** を満たすこと（FCFS 不変条件 + Save As 派生許可）。詳細は次表：
+
+   | 経路 | `save_as` | `current_path` | `loaded_path`（直前 Load の path） | 許可条件 |
+   |------|-----------|---------------|---------------------------------|---------|
+   | **Save（上書き保存）** | `false` | `Some(p)` | `Some(p)` | `path == loaded_path == current_path` のときのみ許可 |
+   | **Save As（新規 .py 保存）** | `true` | `None` | `None` | Load 履歴なし新規保存。任意の `.py` `path` を許可（条件 3 に従う） |
+   | **Save As（派生保存）** | `true` | `Some(loaded_path)` | `Some(loaded_path)` | `path != loaded_path` のときに許可（**Load 済みファイルから派生した別 path への保存**を許す）。`path == loaded_path` の場合は Save 経路に倒す |
+
+   multi-client engine（max 4）で他クライアントが間に別の Load を挟んだ場合、`loaded_path` は最後の `LoadStrategyScenario` の path に更新されるため、Save 経路では拒否される（FCFS 違反）。Save As 派生経路は新規 `path` への書き出しのため FCFS の影響を受けない。
 3. `path` が **永続状態ファイルのディレクトリ配下に書き込もうとしていない**こと。
    具体的には `engine-session.json` / `saved-state.json` / `tachibana_orders.jsonl` の
    親ディレクトリ（`%APPDATA%\flowsurface\` および `~/.cache/flowsurface/engine/`）への
-   書き込みを禁止（パストラバーサル / 任意ファイル上書き対策）
+   書き込みを禁止（パストラバーサル / 任意ファイル上書き対策）。**この条件は Save / Save As のいずれの経路でも不変**で、save_as フラグでバイパス不可。
 
-これらは `python/tests/test_scenario_path_guard.py` で網羅し、multi-client での FCFS 違反テストも含める。
+これらは `python/tests/test_scenario_path_guard.py` で網羅し、multi-client での FCFS 違反テスト・Save As 派生 path 許可テストも含める。
 
 ### GUI 統合
 
-- `上書き保存（Save）`：`current_path`（`.py`）の `SCENARIO` を更新
-- `名前を付けて保存…（Save As）`：現在の戦略 `.py` をコピーし、コピー先の `SCENARIO` を新値で書き出す（戦略コードはそのまま）
+- `上書き保存（Save）`：`save_as=false` で `Command::SaveStrategyScenario` を送出。`path == current_path == loaded_path` のときのみ Python 側 path guard を通過し、`current_path`（`.py`）の `SCENARIO` を更新
+- `名前を付けて保存…（Save As）`：`save_as=true` で `Command::SaveStrategyScenario { path, scenario, save_as: true }` を送出。次の 2 通りいずれかで通過する：
+  - **新規保存**: `current_path == None`（Load 履歴なし）かつ任意の新規 `.py` `path` を選択
+  - **派生保存**: `current_path == Some(loaded_path)` かつ `path != loaded_path`（Load 済みファイルを別名 `.py` にコピー的保存。元ファイルは変更されない）
 - live モードでは従来通り `saved-state.json` を保存（`current_path` の拡張子で分岐）
 
 ### Save As のモード依存モデル
 
-| モード | `名前を付けて保存…（Save As）` の対象 | ファイルフィルタ |
-|--------|--------------------------------------|----------------|
-| replay | 現在の戦略 `.py` をコピーし、コピー先の **SCENARIO 辞書を atomic 書き戻し**（戦略コード本体は変更なし） | `*.py` |
-| live   | `saved-state.json` 互換の JSON を任意パスへ保存 | `*.json` |
+| モード | `save_as` フラグ | `current_path` の状態 | `名前を付けて保存…（Save As）` の対象 | ファイルフィルタ |
+|--------|-----------------|---------------------|--------------------------------------|----------------|
+| replay（新規保存経路） | `true` | `None`（Load 履歴なし） | 新規 `.py` を作成。戦略コードは現在エディタ上のもの、SCENARIO は GUI 入力値 | `*.py` |
+| replay（派生保存経路） | `true` | `Some(loaded_path)` かつ `path != loaded_path` | 直前 Load した `.py` の戦略コードをそのままコピーし、コピー先の **SCENARIO 辞書のみ atomic 書き戻し** | `*.py` |
+| live   | `true` | -                   | `saved-state.json` 互換の JSON を任意パスへ保存 | `*.json` |
 
-モード別の挙動詳細は [./fix-save-menu.md](./fix-save-menu.md) のモード別挙動表と整合させる。
+派生経路で `path == loaded_path` を選んだ場合は path guard を通らないため、`Save`（上書き保存）に倒す UI 側の事前チェックを入れる（OS ダイアログで Load 元と同じ path が選ばれたら `save_as=false` で送る）。モード別の挙動詳細は [./fix-save-menu.md](./fix-save-menu.md) のモード別挙動表と整合させる。
 
 ### ファイルフィルタ
 
@@ -247,7 +274,13 @@ Python 側 `engine.scenario.write_back(path, scenario)` は次の 3 条件すべ
 ### DoD（F6c）
 
 - テスト: `python/tests/test_scenario_writeback.py` / `python/tests/test_scenario_path_guard.py`
-- 期待ログ: `INFO scenario.writeback path=... bak=... bytes=...` / 失敗時 `ERROR scenario.writeback rollback bak=...`
+  - 必須ケース（R6-81 統一決定）：
+    - `test_writeback_rollback_on_validate_failure`：**validate 失敗 → rollback → byte-diff 0**
+    - `test_writeback_rollback_on_import_error`：**import エラー → rollback → byte-diff 0**
+- 期待ログ:
+  - 成功時：`INFO scenario.writeback path=... bak=... bytes=...`
+  - validate 失敗時：`ERROR scenario.writeback rollback reason=validate_failed bak=...`
+  - import エラー時：`ERROR scenario.writeback rollback reason=import_error bak=...`
 - 観測コマンド: `uv run pytest python/tests/test_scenario_writeback.py python/tests/test_scenario_path_guard.py -v`
 
 ---
@@ -265,10 +298,16 @@ Python 側 `engine.scenario.write_back(path, scenario)` は次の 3 条件すべ
 - `python/tests/test_scenario_writeback.py`
   - 既存 `SCENARIO` の差替で他のコード・コメント・空白が完全保持される（diff 比較）
   - `SCENARIO` 不在 `.py` への新規挿入が import 直後に入る
-  - 書き戻し後 `importlib` 再ロードで構文エラーが出ない
-  - **rollback fixture**: `SCENARIO = {"instrument": 1, ...}`（int を入れて TypedDict 検証 fail）を新値として
-    渡し、`importlib` 再ロード時に型検証を fail させる経路を発火 → `.bak.<UTC秒>` から rollback
-    → **rollback 後にオリジナルと byte-diff が 0** であることを assert
+  - 書き戻し後 `importlib` 再ロードで構文エラーが出ない、かつ `engine.scenario.validate()` が成功する
+  - **rollback fixture（validate 失敗経路）** `test_writeback_rollback_on_validate_failure`:
+    `SCENARIO = {"instrument": 1, ...}`（`str` 期待のキーに int を入れた dict literal）を新値として渡す。
+    `importlib.reload()` 自体は dict literal の型違反では例外を出さない（TypedDict は静的型のみ）ため、
+    再ロード後の `engine.scenario.validate(scenario_dict)` で `TypeError`（または `ScenarioValidationError`）が
+    raise される → `.bak.<UTC秒>` から rollback → **rollback 後にオリジナルと byte-diff が 0** であることを assert
+  - **rollback fixture（import エラー経路）** `test_writeback_rollback_on_import_error`:
+    構文を崩した dict literal（例: `SCENARIO = {"instrument": "1301.TSE",,}` の余剰カンマ等、libcst 通過後に
+    `SyntaxError` を起こす細工 fixture）で書き戻し → `importlib` 再ロードで `SyntaxError` →
+    `.bak.<UTC秒>` から rollback → **rollback 後にオリジナルと byte-diff が 0** であることを assert
   - atomic 書き込み: 途中で `os.replace` を mock fail させたとき target ファイルが破損しない
   - `.bak.<UTC秒>` 既存上書き禁止（同秒の重複保存で連番 suffix）
 - `python/tests/test_scenario_path_guard.py`
@@ -278,6 +317,11 @@ Python 側 `engine.scenario.write_back(path, scenario)` は次の 3 条件すべ
   - multi-client（4 接続）で別クライアントが Load を挟んだ場合の FCFS 拒否
   - **`test_save_without_prior_load`**: Load 履歴 None の状態で `save_as=true` フラグが立っていれば許可、
     Load 履歴 None かつ `save_as=false`（= 通常の上書き Save）なら `error="path_guard_violation"` で拒否
+  - **`test_save_as_with_prior_load_to_new_path`**: `current_path == Some(loaded_path)` かつ `save_as=true` かつ
+    保存先 `path != loaded_path` のとき許可されることを assert（**Load 済みファイルから派生した別 path への保存**経路）。
+    元の `loaded_path` のファイルは変更されないことも byte-diff で確認。
+    同じ条件で `path == loaded_path` のときは `save_as=false`（Save 経路）に倒すべきで、`save_as=true` のままだと
+    UI 層で事前にリダイレクトされる旨をコメントで明示
 
 ### Rust
 

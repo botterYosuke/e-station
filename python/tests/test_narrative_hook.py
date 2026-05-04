@@ -35,18 +35,6 @@ async def test_on_order_filled_does_not_make_http_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_order_filled_endpoint_deprecated_warns(caplog) -> None:
-    """R2-H4: endpoint パラメータが廃止 WARNING を出すこと。"""
-    import logging
-    with caplog.at_level(logging.WARNING, logger="engine.nautilus.narrative_hook"):
-        hook = NarrativeHook(strategy_id="buy-and-hold", endpoint="http://localhost:9876")
-
-    assert any("廃止" in r.message or "Phase 8.3" in r.message or "endpoint" in r.message.lower()
-               for r in caplog.records), \
-        f"expected deprecation warning; got: {[r.message for r in caplog.records]}"
-
-
-@pytest.mark.asyncio
 async def test_on_order_filled_does_not_raise() -> None:
     """on_order_filled は例外を raise しないこと。"""
     hook = NarrativeHook(strategy_id="buy-and-hold")

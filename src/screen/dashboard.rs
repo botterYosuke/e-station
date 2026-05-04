@@ -1009,9 +1009,8 @@ impl Dashboard {
 
     /// N1.14: Auto-generate REPLAY panes for the given instrument.
     ///
-    /// Called from `Flowsurface::update()` when
-    /// `ControlApiCommand::AutoGenerateReplayPanes` is received.  Uses
-    /// `ReplayPaneRegistry` to decide whether each pane kind should be created
+    /// Called from `Flowsurface::update()` when `ReplayDataLoaded` is received.
+    /// Uses `ReplayPaneRegistry` to decide whether each pane kind should be created
     /// (skipped if user has manually dismissed it).
     ///
     /// Split rule (D9.3):

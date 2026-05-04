@@ -617,6 +617,10 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 - Phase 8.1c — GUI replay 起動フォーム ✅ (2026-05-03)
 - Phase 8.2 — E2E bash スクリプト削除（s56〜s83, s90, tachibana_* 11 ファイル削除） ✅ (2026-05-03)
 - Phase 8.3 — HTTP API 削除（src/replay_api.rs, src/api/ ディレクトリ全削除） ✅ (2026-05-03)
+- Phase 8 R1〜R4 — review-fix-loop 全件解消 ✅ (2026-05-04, commit `cb9207f`)
+  - **CRITICAL 7 / HIGH 13 / MEDIUM 22** を 4 ラウンドで収束（pytest 1598 → 1691, +93 件）
+  - 主要成果: 型基盤確立（`AppMode` / `AttemptedCommand` / `ReplayStateName | LiveStateName` / `AUTH_FAILED_CODE` / Rust enum 化）/ **LiveSession attach mode 本実装**（NotImplementedError 撤廃、`RequestVenueLogin` ↔ `VenueReady`/`VenueError` wire 待ち合わせ）/ silent failure 除去（handshake 15s timeout / EngineBusy unicast + `request_id` フィルタ / 全断時 state リセット / EngineStopped 補完 + 二重送出ガード / sticky error / narrative_hook thread fallback）/ Rust 健全化（`#[doc(hidden)] pub` を testing feature gate / `pid_is_live` retry / `spawn_venue_ready_bridge` 単一化）/ test_review_fixes.py 898 行を機能別 10 ファイルに分割
+  - 詳細: [`python-helper-direct-api.md` 末尾「レビュー反映」ブロック群](./archive/python-helper-direct-api.md)
 
 **主要成果物**:
 - `python/engine/replay_session.py`: `ReplaySession` + `LiveSession` + `_AttachClient`（1 ファイル構成）

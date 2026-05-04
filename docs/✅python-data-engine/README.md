@@ -30,6 +30,7 @@
 | 8.1c | GUI replay 起動フォーム | ✅ 完了 (2026-05-03) |
 | 8.2 | E2E bash スクリプト削除 / 廃止 | ✅ 完了 (2026-05-03) |
 | 8.3 | Rust HTTP API（ポート 9876）完全削除 | ✅ 完了 (2026-05-03) |
+| 8 R1〜R4 | review-fix-loop（型基盤 / silent failure / LiveSession attach 本実装 / state guard / EngineBusy unicast 等。CRITICAL 7 / HIGH 13 / MEDIUM 22 を全件解消） | ✅ 完了 (2026-05-04) — [`python-helper-direct-api.md` 末尾レビュー反映ブロック群](./archive/python-helper-direct-api.md) |
 
 ---
 
@@ -101,8 +102,8 @@
 12. **Rust 直結モード長期方針**: 暫定撤去（案 A）。フェーズ 2 の計測結果で案 C（optional feature）に戻す余地を残す。→ [spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定)
 13. **スキーマバージョニング運用**: major / minor を分け、minor 差は警告のみで接続継続。→ [spec.md §4.5.1](./spec.md#451-スキーマバージョニング運用)
 
-### 残る要決定（実装前に合意したい）
-- **[Q5](./open-questions.md) Rust 直結残置の長期方針**（案 A/B/C）
-- **[Q7](./open-questions.md) スキーマ生成方針**（JSON Schema + quicktype / schemars + datamodel-code-generator / proto）
-- **[Q9](./open-questions.md) 非機能要件の合格ラインの数値合意**（§9 の提案値でよいか）
-- **[Q10](./open-questions.md) depth バイナリ化の判断条件と実装着手タイミング**
+### 残る要決定（参考。Phase 5/8 完了で大半は事実上クローズ）
+- ~~**[Q5](./open-questions.md) Rust 直結残置の長期方針**~~ → 案 A（撤去）で確定（Phase 5 で `exchange/` から全 native コード削除済み）
+- **[Q7](./open-questions.md) スキーマ生成方針** — 現状は手書き（Python pydantic + Rust serde）で運用中。drift は SCHEMA_MINOR ガード + cross-language テスト（`test_schemas_nautilus.py` 等）で防いでいる。自動生成は未着手
+- **[Q9](./open-questions.md) 非機能要件の合格ラインの数値合意** — 計測未実施。実運用で問題が顕在化していないため放置
+- **[Q10](./open-questions.md) depth バイナリ化の判断条件** — 現状 JSON のままで実用上支障なし。再評価は性能課題発生時

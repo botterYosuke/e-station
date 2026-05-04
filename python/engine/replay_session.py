@@ -918,7 +918,6 @@ class ReplaySession:
                     strategy_init_kwargs=strategy_init_kwargs,
                 ),
             )
-            self._status = _ReplayStatus.RUNNING
             # M-5 (type): assert は -O で消えるため明示的に raise する。
             if self._client is None:
                 raise RuntimeError("attach client not initialized")
@@ -926,9 +925,19 @@ class ReplaySession:
             # 自分の StartEngine request_id を attach client に登録する。
             # fake client の後方互換のため getattr で defensive に呼ぶ。
             _setter = getattr(self._client, "set_current_request_id", None)
+            # MEDIUM (2026-05-04): RUNNING 遷移と send_command を同一 try で囲む。
+            # 送信失敗時に status=RUNNING / current_request_id を残したまま
+            # 抜けると status() が偽陽性を返すため、ここで巻き戻す。
+            self._status = _ReplayStatus.RUNNING
             if callable(_setter):
                 _setter(run_request_id)
-            self._client.send_command(cmd.model_dump())
+            try:
+                self._client.send_command(cmd.model_dump())
+            except Exception:
+                self._status = _ReplayStatus.ERRORED
+                if callable(_setter):
+                    _setter(None)
+                raise
             try:
                 for evt in self._client.events():
                     # H13: attach 経路でも portfolio を更新する。

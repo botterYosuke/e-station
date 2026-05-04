@@ -14,9 +14,11 @@
 
 | プレフィックス | 意味 | 例 |
 |----------------|------|-----|
-| **F\*** | 本計画書（fix-save-menu.md）の実装フェーズ番号 | F1, F2, ..., F8 |
+| **F\*** | 本計画書（fix-save-menu.md）の実装フェーズ番号 | F1, F2, ..., F9 |
 | **P\*** | 関連問題番号（このドキュメント内で識別する課題） | P1, P5, P7, P8 |
 | **Phase 8.x** | 既存の `python-helper-direct-api` 系列のフェーズ番号（**別系列**） | Phase 8.1b, Phase 8.3 |
+
+> **F\* 番号空間の補足**: F\* は ✅menu-and-footer/ 配下計画書共通の実装フェーズ番号空間（fix-save-menu/P5/P7/P8/P9 にまたがって付番される）。
 
 各 P 計画書（`P5-scenario-in-strategy.md` / `P7-mode-switch-menu.md` /
 `P8-widget-menu-bar-linux.md`）からは F\* 参照で揃える。
@@ -29,9 +31,11 @@
 - `spec.md` は 0 byte の空ファイルなのでアンカー参照を貼らない。代替先は
   `./native-menu-bar-impl.md` / `./footer-impl.md` の対応節
 
+<a id="menu-labels"></a>
 ### メニューラベル表記の統一
 
-本文・テスト・コミットメッセージで以下の **日本語（英名）** 形式に揃える：
+本文・テスト・コミットメッセージで以下の **日本語（英名）** 形式に揃える。
+P9・README からは `#menu-labels` で参照する。
 
 | 統一表記 | 用途 |
 |----------|------|
@@ -40,6 +44,14 @@
 | `名前を付けて保存…（Save As）` | File メニュー: 新規パスへ書き出し |
 | `Replay を開始…` | Replay 制御メニュー |
 | `Replay を停止` | Replay 制御メニュー |
+| `ツール（Tools）` | W&B 系メニューの親ラベル（P9） |
+| `送信履歴を開く（Open Submission Log）` | W&B メニュー（P9）: 過去の submission ログ閲覧 |
+| `バッファを削除…（Clear Run Buffer）` | W&B メニュー（P9）: ローカル run buffer 削除 |
+| `W&B にログイン…（Sign in to W&B）` | W&B メニュー（P9）: W&B 認証 |
+| `W&B からログアウト（Sign out of W&B）` | W&B メニュー（P9）: W&B からサインアウト |
+| `W&B に登録…（Submit to W&B）` | W&B メニュー（P9）: 現在の run を W&B に submit |
+
+> 三点リーダはすべて U+2026（`…`）を使用する（ASCII `...` は不可）。
 
 ---
 
@@ -147,6 +159,8 @@ class MyStrategy(Strategy):
     ...
 ```
 
+> **形式の許容範囲**: 上記サンプルは AnnAssign 形（`SCENARIO: Scenario = {...}`）だが、抽出側は素の Assign 形（`SCENARIO = {...}`）も同等に許容する。詳細は [P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) §F6a 参照。
+
 **読み込み経路**:
 
 - GUI: `開く…（Open）` で `.py` を選ぶと **`ast.parse + ast.literal_eval`** で
@@ -184,8 +198,8 @@ GUI で `ReplayFormModal` のフィールドを変更してから保存すると
   元ファイルが破壊されないようにする）
 - 元ファイルを `.bak.<UTC秒>` 形式（例: `buy_and_hold.py.bak.1714800000`）で
   **世代付きバックアップ**として残す（1 世代固定ではなく、UTC 秒で複数世代が積もる）
-- `SCENARIO` ブロックが見つからない .py には **書き戻しを拒否**（誤って戦略外の .py を
-  上書きしない）
+- **`上書き保存（Save）` 経路では `SCENARIO` 不在の .py への書き戻しを拒否**（`current_path` が指す .py が戦略外だった場合に誤って上書きしない）。
+  **`名前を付けて保存…（Save As）` 経路では許容**し、新規 `SCENARIO` ブロックを `.py` 冒頭の import 直後に挿入する（L214-217 / P5 §確定方針 と整合）
 - 書き戻し後に `importlib` で再ロード検証し、import エラーになる場合は rollback
 - **path ガード**（`SaveStrategyScenario` ハンドラで強制）:
   - 拡張子 `.py` 必須
@@ -194,6 +208,16 @@ GUI で `ReplayFormModal` のフィールドを変更してから保存すると
     `~/.cache/flowsurface/engine/`）への書き込みは禁止
     （`saved-state.json` / `engine-session.json` / `tachibana_orders.jsonl` を
     誤って .py 書き戻しで踏み潰さない）
+
+**Save / Save As の path guard 分岐（R7-85 確定方針）**:
+
+`SaveStrategyScenario` ハンドラの path ガードは `上書き保存（Save）` と
+`名前を付けて保存…（Save As）` で分岐する。**Save** は直前の `LoadStrategyScenario`
+で読み込んだ path と**同一 path** にのみ書き戻すことを要求する（誤上書き防止）。
+**Save As** は Load 済み元 path とは**異なる派生 path** への書き出しを許可する
+（コピー先を新規に決められるのが Save As の本質のため）。両経路とも `.py` 拡張子必須・
+永続状態ディレクトリ書き込み禁止の二条件は共通で課す。詳細は
+[P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) §path ガード を参照。
 
 **論点（実装前に確定）**:
 
@@ -223,6 +247,7 @@ GUI で `ReplayFormModal` のフィールドを変更してから保存すると
 - W&B web UI なら run 一覧で sharpe / pnl を sort して比較が完結する
 
 旧計画書 `P5-replay-persistence-layer.md` は廃案。実体ファイルは存在しない（リンクは付けない）。
+（[P9-wandb-submit-menu.md](./P9-wandb-submit-menu.md) も参照）
 
 ### P6. ドキュメントが現行実装と部分的に乖離
 
@@ -267,7 +292,7 @@ F4（dirty 確認）/ F7（モード切替）/ F6（SCENARIO 書き戻し）の�
 |---------|-----------|-----------------|
 | `saved-state.json` | 起動時 load / 終了時 save / live モードのみ | F3 の `current_path` と独立。`現在開いているドキュメント = 任意パス` の概念を導入しても、自動保存先としての `saved-state.json` は変更しない |
 | `engine-session.json` | engine プロセス起動中のみ存在（atomic write）/ Drop 時削除 | F7 のモード切替で engine プロセスを **再起動** する（Drop で `engine-session.json` を削除 → bootstrap で再生成）。詳細フローは [P7-mode-switch-menu.md](./P7-mode-switch-menu.md) §切替時の挙動 参照。F6 の SCENARIO 書き戻し path ガードで誤上書きを防ぐ |
-| `tachibana_orders.jsonl` | live モードでの発注 WAL（Python が write / Rust が read） | モード切替で **path・内容を書き換えない**（重複発注防止が壊れる）。F7 の SwitchMode ハンドラは live → replay 切替直前に未約定有無を **read-only で参照** することのみ許容（P7 4 軸 matrix 参照）。書き込みは行わない |
+| `tachibana_orders.jsonl` | live モードでの発注 WAL（Python が write / Rust が read） | モード切替で **path・内容を書き換えない**（重複発注防止が壊れる）。F7 の SwitchMode ハンドラは live → replay 切替直前に未約定有無を **read-only で参照** することのみ許容（P7 5 軸 matrix 参照）。書き込みは行わない |
 
 **不変条件**:
 これらのファイルは F6 の SCENARIO 書き戻し path ガード（拡張子 `.py` 必須 +
@@ -290,6 +315,7 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 | <a id="f6"></a> **F6** | P5 | SCENARIO 定数仕様の実装（[P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) 参照） | L | F3 |
 | <a id="f7"></a> **F7** | P7 | `Mode` メニュー新設（[P7-mode-switch-menu.md](./P7-mode-switch-menu.md) 参照） | M | F4（confirm 共有） |
 | <a id="f8"></a> **F8** | P8 | Linux 向け iced 自前メニューバー（[P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) 参照） | L | なし（独立） |
+| <a id="f9"></a> **F9** | P9 | W&B Submit メニュー — 詳細は [P9-wandb-submit-menu.md](./P9-wandb-submit-menu.md) | — | — |
 
 ### 並行実装可能性
 
@@ -338,6 +364,7 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
   - 名前: `static CURRENT_PATH: std::sync::Mutex<Option<PathBuf>>`
   - 配置: `src/main.rs`（`APP_MODE` と同形式の static）
   - lock 戦略: poison 時は `into_inner()` でリカバリして書き戻す
+  - deadlock 検出は `parking_lot::deadlock::check_deadlock()` に頼らず（`std::sync::Mutex` に効かないため）、Mutex helper による tracing 取得順記録 + `debug_assert!` 違反時 panic で行う（**統一決定 R6-82**。詳細は [./P7-mode-switch-menu.md#acceptance](./P7-mode-switch-menu.md#acceptance) 受け入れ基準 14 / `tests/wandb_modeswitch_lock_order.rs`）
 - `上書き保存（Save）` メニュー項目追加（live モード時のみ enable）
 - `開く…（Open）` 成功時 / `名前を付けて保存…（Save As）` 成功時 / GUI 起動時の
   `--saved-state` 指定時に `CURRENT_PATH` をセット
@@ -350,6 +377,9 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
   - `current_path` が `None` のとき：従来通り `saved-state.json` のみ。
   - **fallback ではなく常時両方書く**ことで「Save 後にクラッシュしても任意パス側だけ
     最新で saved-state は古い」というスキューを排除する
+  - **「両方書く」の対象は明示 Save / Save As のみ**（R3 統一決定）。
+    自動保存 hook は `CURRENT_PATH` を参照せず、常に `saved-state.json` のみへ書く。
+    詳細は F4 の「自動保存の path 契約」を参照
 - **テストファイル**: `tests/current_path_persists_across_restart.rs`
 - **DoD assert**:
   - 「Open `foo.json` → 編集 → Ctrl+S」で `foo.json` に書き戻り、同時に
@@ -374,6 +404,13 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
     - 明示 Save / Save As 直後に更新
     - **live の自動保存 hook も同じパスを通す**（自動保存後 `last_saved_bytes` 更新）。
       これにより「自動保存直後に Quit したのに confirm が出る」偽陽性を防ぐ
+  - **自動保存の path 契約（R3 統一決定）**:
+    **自動保存は CURRENT_PATH へ書き込まない**。自動保存先は常に
+    `%APPDATA%\flowsurface\saved-state.json` のみ。`last_saved_bytes` は
+    `build_state_json()` の出力 = saved-state.json 書き出し直前のバイト列に固定する
+    （CURRENT_PATH へ書いたバイト列ではない）。これにより F3 の「明示 Save は両方書く」
+    と「自動保存は saved-state.json のみ」の二系統が衝突せず、dirty 判定の基準も
+    `build_state_json()` の単一出力で一意に確定する。
 - Open / Quit / SwitchMode 経路で dirty かつ live モード時に
   `confirm_dialog_overlay` を表示（既存実装流用）
 - 「保存して続行」「破棄して続行」「キャンセル」の 3 択
@@ -387,6 +424,10 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 
   ログ出力先: debug ビルド → ターミナル stdout / release →
   `~/AppData/Roaming/flowsurface/flowsurface-current.log`
+
+  **ログレベル契約（R3 統一決定）**: `PathGuardViolation` のみ ERROR レベル + `BUG:` 接頭辞
+  （バグ検出シグナル）。`Cancelled` / `IoError` は **WARN** レベル止まり（ERROR を出さない）。
+  この区別は `tests/save_error_classification.rs` のケース 6 で保護する。
 - F7（mode-switch-menu）の confirm 共通化ポイントとして再利用可能な API に切り出す
 - **テストファイル**: `tests/dirty_detection.rs` / `tests/save_error_classification.rs`
 - **DoD assert**:
@@ -399,9 +440,14 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
   - **ケース 5（stable_serialization / BC-11）**: 同一 state を 100 回 `build_state_json()`
     で serialize → **全 100 回の bytes が一致**することを assert（HashMap への構造的退行を防ぐ）
   - **ケース 6（save_error_classification）**:
-    - `Cancelled`: rfd cancel → モード切替中断・エラーダイアログ無し・ERROR ログ無し
+    - `Cancelled`: rfd cancel → モード切替中断・エラーダイアログ無し・ERROR ログ無し（WARN レベル相当）
     - `IoError(PermissionDenied)`: WARN ログ出力・ERROR ログ無し
-    - `PathGuardViolation`: ERROR ログ `BUG: path guard violation path=... reason=...` が出る
+    - `PathGuardViolation`: **ERROR レベルのみ** `BUG: path guard violation path=... reason=...` が出る
+      （他の分類は WARN まで）
+  - **ケース 7（auto_save_does_not_touch_current_path / R3 統一決定）**:
+    `CURRENT_PATH = Some(任意パス)` の状態で自動保存 hook を起動 → 任意パス側のファイルは
+    **書き換えられない**（mtime / 内容ともに変化しない）。`saved-state.json` のみ更新され、
+    `last_saved_bytes` は `build_state_json()` の出力と一致する
 - **観測コマンド**: `cargo test --test dirty_detection` / `cargo test --test save_error_classification`
 
 #### <a id="f5-dod"></a> F5（P4: アプリ層の上書き確認）
@@ -528,3 +574,4 @@ F2 のテスト `accelerator_bind::no_double_dispatch` で保護する。
 | [P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) | F6: SCENARIO 定数仕様 |
 | [P7-mode-switch-menu.md](./P7-mode-switch-menu.md) | F7: モード切替メニュー仕様 |
 | [P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) | F8: Linux 向け自前メニューバー仕様 |
+| [P9-wandb-submit-menu.md](./P9-wandb-submit-menu.md) | F9: W&B submit メニュー仕様（送信履歴・バッファ削除・Sign in/out・Submit） |

@@ -230,7 +230,6 @@ pub enum Command {
     // ── N1.11: Replay speed control ───────────────────────────────────────
     /// Set the replay playback speed multiplier.
     /// `multiplier` is a positive integer: 1 = real-time, 10 = 10x speed, etc.
-    /// Sent via `POST /api/replay/control` with `{"action":"speed","multiplier":N}`.
     SetReplaySpeed {
         request_id: String,
         multiplier: u32,
@@ -1083,11 +1082,11 @@ pub enum EngineEvent {
     /// Replay data load completed. Counters help the UI display progress.
     ///
     /// M-8 (R1b / schema 2.5): `strategy_id` was tightened from `String` to
-    /// `Option<String>` because the standalone `LoadReplayData` IPC (used by
-    /// `/api/replay/load` before any strategy is started) has no meaningful
-    /// strategy id. Old senders that omit the field deserialise as `None`
-    /// thanks to `#[serde(default)]`. The in-engine `start_backtest_replay`
-    /// path still emits a concrete strategy id (`Some(...)`).
+    /// `Option<String>` because a standalone `LoadReplayData` IPC issued before
+    /// any strategy is started has no meaningful strategy id. Old senders that
+    /// omit the field deserialise as `None` thanks to `#[serde(default)]`. The
+    /// in-engine `start_backtest_replay` path still emits a concrete strategy
+    /// id (`Some(...)`).
     ReplayDataLoaded {
         #[serde(default)]
         strategy_id: Option<String>,

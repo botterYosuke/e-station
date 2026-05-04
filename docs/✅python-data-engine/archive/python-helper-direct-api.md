@@ -1441,3 +1441,42 @@ Phase 1 の型基盤 + Phase 2 の server 振る舞い修正を踏まえ、`pyth
 
 - LOW-R2-1〜3 / LOW-R3 系の計画書記載精度修正は次フェーズで一括対応。
 - `_check_replay_state` / `_check_live_state` の callsite への `request_id` 段階的注入はラウンド 2 から継続持ち越し。
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 4 収束確認 / Round 4 sanity)
+
+### 背景
+
+ラウンド 3 修正後の最終サニティとして、review-fix-loop の収束条件
+（CRITICAL/HIGH/MEDIUM = 0）を満たしているかを実コマンドで再確認した。
+新たな実装修正は不要で、残件は warning / 記載精度の LOW 相当のみ。
+
+### 収束確認
+
+- ✅ **新規 CRITICAL/HIGH/MEDIUM なし**: `python/engine/replay_session.py` /
+  `python/engine/server.py` / `python/engine/nautilus/narrative_hook.py` /
+  `python/engine/schemas.py` / `engine-client/src/dto.rs` を再確認し、
+  ラウンド 2・3 で修正した request_id フィルタ、attach login、EngineBusy 互換、
+  runner finally の race 回避に新たな破綻は見つからなかった。
+- ✅ **最終検証コマンド再実行**: `cargo fmt --check` / `cargo check --workspace` /
+  `cargo clippy --workspace -- -D warnings` / `cargo test --workspace` /
+  `uv run pytest python/tests/ -m "not live" -q` を再実行し、全て成功。
+- ✅ **Python テスト総数維持**: `uv run pytest python/tests/ -m "not live" -q`
+  は **1691 passed, 3 skipped** を維持。
+
+### LOW メモ
+
+- `pytest` 実行時に 9 warning が出るが、内容は `AsyncMock` / テスト用 event loop 停止 /
+  unawaited coroutine 検知など **テストハーネス由来** が中心で、今回の
+  実装スコープに対する MEDIUM 以上の挙動不良は再現しなかった。
+- `cargo test --workspace` 中の warning も `exchange` crate の test-only unused code
+  に限られ、本フェーズの helper direct API 実装とは独立。
+
+### 検証結果
+
+- `cargo fmt --check`: 全緑
+- `cargo check --workspace`: 全緑
+- `cargo clippy --workspace -- -D warnings`: 全緑
+- `cargo test --workspace`: 全テスト pass
+- `uv run pytest python/tests/ -m "not live" -q`: **1691 passed, 3 skipped, 9 warnings**
