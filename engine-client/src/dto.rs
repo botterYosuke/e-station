@@ -605,6 +605,27 @@ fn default_order_record_venue() -> String {
     "tachibana".to_string()
 }
 
+/// 建玉種別。Python `schemas.PositionRecord.position_type` の Literal と一致させる。
+/// H-Type1: 旧 `String` 表現を enum に格上げ。未知値はデシリアライズ失敗。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PositionType {
+    Cash,
+    MarginCredit,
+    MarginGeneral,
+}
+
+impl PositionType {
+    /// UI 表示やログ用の wire 形 (`snake_case`)。
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            PositionType::Cash => "cash",
+            PositionType::MarginCredit => "margin_credit",
+            PositionType::MarginGeneral => "margin_general",
+        }
+    }
+}
+
 /// Wire representation of a single position entry (cash or margin).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -615,8 +636,8 @@ pub struct PositionRecordWire {
     pub qty: String,
     /// 評価額（円、整数文字列）。"" のとき不明
     pub market_value: String,
-    /// "cash" | "margin_credit" | "margin_general"
-    pub position_type: String,
+    /// 建玉種別 (`cash` | `margin_credit` | `margin_general`)。
+    pub position_type: PositionType,
     /// 信用建玉番号（margin_credit のみ Some）
     pub tategyoku_id: Option<String>,
     /// venue 名（"tachibana" 固定）
@@ -641,7 +662,9 @@ pub struct OrderRecordWire {
     pub trigger_price: Option<String>,
     pub time_in_force: TimeInForce,
     pub expire_time_ns: Option<i64>,
-    pub status: String,
+    /// Order lifecycle status. Mirrors Python
+    /// `tachibana_orders._STATUS_TEXT_MAP` outputs and replay streaming fills.
+    pub status: OrderStatus,
     pub ts_event_ms: i64,
     /// Venue that owns this order: "tachibana" for live orders, "replay" for REPLAY WAL orders.
     /// Defaults to "tachibana" for backwards-compatibility.
@@ -687,6 +710,120 @@ pub enum TriggerType {
     Last,
     BidAsk,
     Index,
+}
+
+/// Order lifecycle status. M-Type3: 旧 `String` を enum 化。
+/// 値は Python `tachibana_orders._STATUS_TEXT_MAP` と replay streaming fills
+/// (`status="FILLED"`) の出力集合と一致する。未知値はデシリアライズ失敗。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderStatus {
+    Submitted,
+    Accepted,
+    Filled,
+    PendingCancel,
+    Canceled,
+    Expired,
+    Rejected,
+}
+
+impl OrderStatus {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            OrderStatus::Submitted => "SUBMITTED",
+            OrderStatus::Accepted => "ACCEPTED",
+            OrderStatus::Filled => "FILLED",
+            OrderStatus::PendingCancel => "PENDING_CANCEL",
+            OrderStatus::Canceled => "CANCELED",
+            OrderStatus::Expired => "EXPIRED",
+            OrderStatus::Rejected => "REJECTED",
+        }
+    }
+}
+
+impl std::fmt::Display for OrderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
+
+/// Engine state machine の wire 名 (Python `schemas.CurrentEngineState` と一致)。
+/// M-Type4: `EngineBusy.current_state` を `String` から enum に格上げ。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CurrentEngineState {
+    // Replay states
+    Idle,
+    Loaded,
+    Running,
+    Stopping,
+    // Live states
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+/// State guard で reject された command 名 (Python `schemas.AttemptedCommand` と一致)。
+/// M-Type4: `EngineBusy.attempted_command` を `String` から enum に格上げ。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AttemptedCommand {
+    LoadReplayData,
+    StartEngine,
+    StopEngine,
+    SetReplaySpeed,
+    SubmitOrder,
+    ModifyOrder,
+    CancelOrder,
+    CancelAllOrders,
+    RequestVenueLogin,
+    GetBuyingPower,
+    GetPositions,
+    GetOrderList,
+}
+
+impl AttemptedCommand {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            AttemptedCommand::LoadReplayData => "LoadReplayData",
+            AttemptedCommand::StartEngine => "StartEngine",
+            AttemptedCommand::StopEngine => "StopEngine",
+            AttemptedCommand::SetReplaySpeed => "SetReplaySpeed",
+            AttemptedCommand::SubmitOrder => "SubmitOrder",
+            AttemptedCommand::ModifyOrder => "ModifyOrder",
+            AttemptedCommand::CancelOrder => "CancelOrder",
+            AttemptedCommand::CancelAllOrders => "CancelAllOrders",
+            AttemptedCommand::RequestVenueLogin => "RequestVenueLogin",
+            AttemptedCommand::GetBuyingPower => "GetBuyingPower",
+            AttemptedCommand::GetPositions => "GetPositions",
+            AttemptedCommand::GetOrderList => "GetOrderList",
+        }
+    }
+}
+
+impl std::fmt::Display for AttemptedCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
+
+impl CurrentEngineState {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            CurrentEngineState::Idle => "IDLE",
+            CurrentEngineState::Loaded => "LOADED",
+            CurrentEngineState::Running => "RUNNING",
+            CurrentEngineState::Stopping => "STOPPING",
+            CurrentEngineState::Disconnected => "DISCONNECTED",
+            CurrentEngineState::Connecting => "CONNECTING",
+            CurrentEngineState::Connected => "CONNECTED",
+        }
+    }
+}
+
+impl std::fmt::Display for CurrentEngineState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
 }
 
 // ── Events (Python → Rust) ────────────────────────────────────────────────────
@@ -1065,9 +1202,15 @@ pub enum EngineEvent {
     /// `current_state` / `attempted_command` / `reason` は `schemas.py`
     /// `EngineBusy` の wire 形式に対応する。
     EngineBusy {
-        current_state: String,
-        attempted_command: String,
+        current_state: CurrentEngineState,
+        attempted_command: AttemptedCommand,
         reason: String,
+        /// MEDIUM-R2-6: violation を起こした command の `request_id`。Optional
+        /// で `schemas.py` の後方互換 (旧 minor バージョン送信元) を保つ。
+        /// helper 側 `wait_for()` / `events()` で「自分宛の reject」と
+        /// 「broadcast / 別 client 由来」を区別するために使う。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// 新規クライアントが engine WebSocket に接続したことを全 client に broadcast する。
     /// `count` は接続中のクライアント総数（接続後）。

@@ -27,6 +27,11 @@ class _ListOutbox:
     def append(self, item: object) -> None:
         self._q.append(item)
 
+    def send_to(self, ws: object, item: object) -> None:
+        # M-GP8 (Phase 8 R1 / Phase 2): unicast 経路。テスト stub では observability
+        # のため compat deque へ append するだけ。
+        self._q.append(item)
+
     def popleft(self) -> object:
         return self._q.popleft()
 

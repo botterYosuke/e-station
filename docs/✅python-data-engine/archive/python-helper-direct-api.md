@@ -429,8 +429,27 @@ class ReplaySession:
         """旧 GET /api/replay/portfolio 相当。最後の ReplayBuyingPower イベントの dict。"""
 
     @property
-    def status(self) -> Literal["idle", "loaded", "running", "stopped", "errored"]:
-        """旧 GET /api/replay/status 相当。"""
+    def status(self) -> Literal["idle", "loaded", "running", "stopping", "stopped", "errored"]:
+        """旧 GET /api/replay/status 相当。
+
+        Phase 8 R1 / Phase 3 (C-GP1 / H-Type3) で `"stopping"` を Literal に
+        追加し、`STOPPING` 状態を `"running"` にマップする旧仕様を撤廃した。
+        stop() を投げてから `EngineStopped` を待つ間は `"stopping"` を返す。
+
+        ライフサイクル: `idle → loaded → running → stopping → stopped`
+        (`stopping` は attach mode の StopEngine 送出後 / `EngineStopped` 受信前)。
+        `errored` は run() 内例外で `STOPPED` に到達できなかった場合のみ。
+        on_event 内例外で `EngineStopped` を既に受信済みなら `STOPPED` を維持する
+        (C-GP2: ユーザーコールバックのバグが status を破壊しない不変条件)。
+
+        endpoint/token 解決順 (M-GP1):
+        1. `(a)` 明示 `attach_endpoint` + `FLOWSURFACE_ENGINE_TOKEN` env
+        2. `(b)` `engine-session.json` の `{port, token}` (pid 必須・M-GP2)
+        3. `(c)` env のみ — `FLOWSURFACE_ENGINE_PORT` を尊重 (H-GP4) / 既定 19876
+
+        `(a)` 明示 attach_endpoint を使うときは session ファイルの token を混ぜない。
+        token はすべてのログ・例外メッセージで秘匿する。
+        """
 
     # ---- order injection（旧 POST /api/replay/order 相当）----
     def submit_order(
@@ -591,11 +610,20 @@ class LiveSession:
         password: str | None = None,   # in-process 既定: $DEV_TACHIBANA_PASSWORD
     ) -> None:
         """旧 POST /api/sidebar/tachibana/request-login 相当。
-        in-process mode: 引数または env 経由 cred で立花へログインし session を確立する。
-        attach mode: 既存スキーマ Command::RequestVenueLogin を再利用して送信する。
-        attach mode では wire に user_id/password を流せないため、明示引数が渡された場合は
-        `ValueError` を raise し、「GUI/engine 側に保存済みまたは dev 用の credential を使う経路のみ
-        サポート」と明示する。
+
+        - **in-process mode**: 引数または env 経由 cred で立花へログインし
+          session を確立する。p_no_counter は外側で 1 度だけ生成し、
+          nested-loop fallback でも同一インスタンスを再利用する (H-GP5)。
+          fallback は asyncio.run のネスト不可 RuntimeError 検知時のみ発動。
+        - **attach mode (C-GP4)**: `Command::RequestVenueLogin{venue}` を engine に
+          送信し、`VenueReady` で `is_logged_in=True`、`VenueError` で `ConnectionError`
+          を raise する (timeout 30s)。
+        - **attach mode で credential 明示は禁止**: `user_id` / `password` を引数で
+          渡されたら `ValueError`。GUI/engine 側に保存済みまたは dev 用の credential を
+          使う経路のみサポート (wire に credential を流さない契約)。
+        - **2 回目以降の login() は no-op (M-GP5)**: `is_logged_in == True` であれば
+          内部 API も `RequestVenueLogin` も再送信せず即 return。state は維持する。
+          冪等性を呼び出し側に押し付けない設計。
         """
 
     # ---- Phase 8.3 で追加 ----
@@ -924,10 +952,14 @@ token / password はテスト fixture も含めて `uuid.uuid4().hex[:8]` ベー
 
 ### 持ち越し（次フェーズで対応予定）
 
-- **attach mode の `RequestVenueLogin` ↔ `VenueReady`/`VenueError` 待ち合わせ**：
-  attach mode は `__enter__` 時点で `NotImplementedError`（Phase 8.3 スコープ）の
-  ため、login の attach 分岐は最小実装（`NotImplementedError`）に留めた。
-  attach mode 解禁時に IPC wire の dispatch + waiter を追加する。
+- ~~**attach mode の `RequestVenueLogin` ↔ `VenueReady`/`VenueError` 待ち合わせ**~~ →
+  ✅ **完了 (Phase 8 R1 / Phase 3, C-GP4)**: `LiveSession.__enter__` の attach 分岐から
+  `NotImplementedError` を撤廃し、`RequestVenueLogin{venue}` を engine に送信して
+  `VenueReady` (= `is_logged_in=True`) または `VenueError` (= `ConnectionError`) を待つ
+  IPC wire dispatch を実装。token / endpoint 解決順は ReplaySession と共通の
+  `(a) 明示 attach_endpoint+env / (b) session ファイル / (c) env-only` を使う。
+  attach mode で credential 明示は `ValueError` (wire に流さない契約)。テスト:
+  `python/tests/test_live_session_attach.py` 4 件。
 - **実 demo smoke**：`@pytest.mark.live` 付きの実 HTTP smoke は `.env` に
   `DEV_TACHIBANA_*` がある環境でのみ回す任意テスト枠として残置。本ラウンドでは
   unit-level mock のみで内部 API 伝播を検証した。
@@ -1072,7 +1104,7 @@ Phase 8 シリーズ完了時点で（**全項目達成済み 2026-05-03**）：
 6. ✅ Rust 側 HTTP API モジュール 4 ファイル（合計 約 6,756 行）が削除されている
 7. ✅ memory に記録された **「Python 単独でも動くか？」判断軸が満たされている**
 8. ✅ CLAUDE.md / `.claude/CLAUDE.md` の replay セクションが helper ベース（in-process / attach 両モード）に書き換わっている（`python -m engine.replay_session run` コマンドを正規ルートとして記載済み）
-9. spec.md §5.3 reconnect protocol の multi-client 文脈への更新は次フェーズで対応予定
+9. ✅ spec.md §5.3 reconnect protocol の multi-client 文脈への更新は実装済み (`spec.md:241-269` の「Phase 8 attach mode（✅ 実装済み）」サブセクションで per-connection source of truth / client-side reissue / union 可能購読の束ね方を明記。Phase 8 R1 / Phase 3 で再評価し、attach mode の `RequestVenueLogin`↔`VenueReady`/`VenueError` 待ち合わせも `LiveSession.login()` C-GP4 側で実装済み)
 
 ---
 
@@ -1107,3 +1139,305 @@ Phase 8 シリーズ完了時点で（**全項目達成済み 2026-05-03**）：
 | 2026-05-03 | **Group 4b 解消**（レビュー指摘の MEDIUM 一括処理）：M-2 (rust) `validate()` に `start_date > end_date` チェック追加 + RED 単体テスト / M-5 (rust) `validate()` の戻り値タプルを `ValidatedForm` 構造体に置き換え（caller も追従、Action::Submit はそのまま）/ M-4 (type) `engine-client/src/process.rs` で `proc.pid()` が `None` のときセッションファイル書き込み skip + `engine-client/tests/session_file.rs::pid_zero_session_file_is_immediately_reaped` 追加 / M-3 (type) `_read_session_file` 戻り値を `SessionFileData` TypedDict 化 / M-5 (type) `assert self._client is not None` を `if ... raise RuntimeError` に置換（load / run の 2 箇所）/ M-1 (silent) CLI に `except BusyError` 分岐を追加（exit code 2 + 専用メッセージ）/ M-2 (silent) `server.py` MAX_CONNECTIONS reject で close 前に `EngineError(code="max_connections")` を送信 / M-6 (silent) `_resolve_endpoint_and_token` の `force_mode='attach' but FLOWSURFACE_ENGINE_TOKEN env var is not set` 詳細メッセージ化 / M-8 (general) `LiveSession.__init__` に `attach_endpoint` / `attach_timeout_s` 引数追加（実装は Phase 8.3 まで `NotImplementedError`）/ M-10 (general) session ファイル読み取り時 `started_at` を `log.info` に出力（token は出さない）/ M-11 (general) `_send_loop` の `asyncio.wait_for(timeout=1.0)` を削除（sentinel 経路のみで終了）/ L-1 (general) `_ForceMode = Literal["auto","inprocess","attach"]` に統一 / L-2 (general) `_AttachClient` の handshake 成功 / 失敗を info / error で出力（token は出さない）/ 新規テスト: `python/tests/test_replay_session_attach_resolution.py`（6 件）+ `test_replay_session_cli_busy.py`（2 件）+ `test_server_multi_client.py::test_max_connections_reject` を新仕様に更新 + `engine-client/tests/session_file.rs::pid_zero_session_file_is_immediately_reaped` + `src/modal/replay_form.rs::tests::validation_fails_when_start_after_end`。M-3 (silent) `_handle_start_engine` の `EngineStarted` 未送出時 `EngineStopped` 補完は既存 `started_marker` ガードと意図的に直交するため**保留**（フリップ範囲が広く 1551 緑を破壊するリスクが高い）。CRITICAL の C2 残テスト 6 ファイル（`test_replay_session_attach_gui_chart` ほか）は subprocess engine spawn + 模擬 GUI WS client + Tachibana startup 抑止 + `LoadReplayData` mock fanout を必要とし、Group 4b の純ロジック修正バッチからは独立した工数（数時間 + Windows でのプロセス制御 flaky 性）を要するため、別ラウンドへ持ち越し（STOP+REPORT 済み）。最終結果: cargo test 589 passed / pytest 1559 passed (+8 新規) / 3 skipped (live) / clippy clean / fmt clean。 |
 | 2026-05-03 | **Phase 8 全サブフェーズ実装完了**：Phase 8.1a（`python/engine/replay_session.py` 新規作成。`ReplaySession`/`LiveSession`/`_AttachClient` 三者を単一ファイルに実装。CLI `python -m engine.replay_session run` 対応）/ Phase 8.1b（`python/engine/server.py` を `_Broadcaster` multi-client fanout + `ReplayState`/`LiveState` state machine + `EngineBusy` guard + `MAX_CONNECTIONS=4` に更新。`engine-client/src/session_file.rs` `EngineSession` 新規作成。`python/engine/schemas.py` `SCHEMA_MINOR` 8→9, `ClientConnected`/`ClientDisconnected`/`EngineBusy` 追加。`data/src/lib.rs` `FLOWSURFACE_DATA_PATH` env override バグ修正）/ Phase 8.1c（`src/modal/replay_form.rs` `ReplayFormModal` 新規作成。`src/native_menu.rs` に "Replay を開始..." メニュー追加）/ Phase 8.2（`scripts/replay_dev_load.sh` 削除。`tests/e2e/` から s56〜s83, s90, tachibana_* 11 ファイル削除。`scripts/run-replay-debug.sh` に DEPRECATED コメント追記）/ Phase 8.3（`src/replay_api.rs` / `src/api/` 全削除。`src/main.rs` から HTTP runtime ブロック・ControlApi Message 等を全削除）/ §0.1.2 B1〜B3 対応状況を「実装済み」に更新 / §8 DoD を「全達成済み」に更新 / §9 関連ドキュメントを削除済みファイル・新規成果物に更新 |
 | 2026-05-03 | **C2 残テスト 6 件実装完了**（前ラウンドで持ち越された CRITICAL 項目）：`python/tests/test_replay_session_attach_gui_chart.py`（穴1リグレッション保護：DataEngineServer + 模擬 GUI WS client + `_AttachClient` の三者 broadcast テスト 3 件）/ `python/tests/test_session_file_atomic_write.py`（`.tmp → rename` atomic write：途中ファイルは読めないことを assert する 4 件）/ `python/tests/test_engine_session_file.py`（session ファイルライフサイクル：pid alive → data / pid dead → None の 3 件）/ `python/tests/test_replay_session_attach_session_file.py`（session ファイル経由の endpoint/token 解決 → attach mode 遷移 3 件）/ `python/tests/test_replay_session_attach_disconnect.py`（WS 切断時 `ConnectionError` + `status=="errored"` 遷移 3 件）/ `python/tests/test_replay_session_attach_manual_smoke.md`（GUI pane 生成・bar 蓄積の人手確認手順書）。最終結果: pytest 1575 passed / 3 skipped（+16 新規）/ cargo check clean。**技術的知見**：(1) `ClientConnected(count=1)` の到着タイミング — サーバーは `Ready` 送出後に `ClientConnected` を broadcast するため、helper の handshake ループは `count=1` を捕捉できず `_recv_queue` に積まれる。`count>=2` を探すにはキューを手動でドレインする必要がある；(2) Windows の `asyncio` 多重起動 — 複数スレッドで `asyncio.run()` を呼ぶと ProactorEventLoop 競合で `EOFError` が発生する。`DataEngineServer` と模擬 GUI クライアントを同一 event loop で動かし `asyncio.run_coroutine_threadsafe()` で注入するパターンで回避；(3) `loop.stop()` 禁止 — `loop.call_soon_threadsafe(loop.stop)` はサスペンド中の `await` を `RuntimeError` で落とす。`asyncio.Event` の `wait()` ＋ `call_soon_threadsafe(stop_event.set)` パターンに置き換えること。 |
+
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 1 - 新規) / Phase 1 型基盤
+
+後続 Phase 2/3/4/5 の前提となる型基盤を TDD で導入。RED→GREEN→REFACTOR で 8 項目を消化した。
+
+### 完了項目
+
+- ✅ **C-Type1**: `python/engine/schemas.py` に `AttemptedCommand` Literal を新設 (12 値、`GetBuyingPower`/`GetPositions`/`GetOrderList` を含む)。`python/engine/server.py:2225,2246` の `_check_replay_state` / `_check_live_state` 第一引数の型を `str` → `AttemptedCommand` に格上げ。呼び出し側 9 箇所 + 新規 3 箇所 (H-Type4) は文字列リテラルでそのまま通る (Literal narrowing)。
+- ✅ **C-Type2**: `python/engine/server.py:281` `self._mode: str = "live"` を `self._mode: AppMode = "live"` に。`schemas.py` に `AppMode = Literal["live","replay"]` を新設し `Hello.mode` も同 alias を使う。`__init__` 末尾に `assert self._mode in ("live","replay")` を pin として追加。
+- ✅ **H-Type1**: `engine-client/src/dto.rs:608-628` に `PositionType` enum (`#[serde(rename_all = "snake_case")]` で `cash`/`margin_credit`/`margin_general`) を新設。`PositionRecordWire.position_type: String` → `PositionType`。`as_wire_str()` ヘルパも提供。RED テスト: `engine-client/tests/dto_position_type.rs` (5 件、未知値 `Err` + snake_case 直列化)。`src/screen/dashboard/panel/positions.rs:144-149` の match arm を新 enum に切替。
+- ✅ **H-Type2**: `python/engine/schemas.py` に `ReplayStateName` / `LiveStateName` / `CurrentEngineState` (`Union`) を新設。`EngineBusy` に `model_validator(mode="after")` を追加して replay-only command (`LoadReplayData`/`StartEngine`/`StopEngine`/`SetReplaySpeed`) と live state、live-only command (`ModifyOrder`/`CancelOrder`/`CancelAllOrders`/`RequestVenueLogin`/`GetBuyingPower`/`GetPositions`/`GetOrderList`) と replay state の illegal 組合せを `ValidationError` で拒否。`SubmitOrder` は venue により両側で発生し得るため shared として除外。テスト: `python/tests/test_schemas_types.py::TestEngineBusyOrthogonalRejection`。
+- ✅ **H-Type4**: `python/engine/server.py` `_do_get_order_list` (1665), `_do_get_buying_power` (1750), `_do_get_positions` (1822) の tachibana 経路冒頭に `_check_live_state(...)` を追加。`AttemptedCommand` Literal に `GetBuyingPower`/`GetPositions`/`GetOrderList` を追加。RED テスト: `python/tests/test_engine_busy_query_guards.py` (4 件)。既存テスト 13 件は `_make_server` ヘルパに `_live_state = LiveState.CONNECTED` を追加して migration 完了。
+- ✅ **M-Type2**: `python/engine/replay_session.py:42-70` で `PartialSessionFileData` (読み取り中間表現) と `SessionFileData` (確定形) を分離。`_read_session_file` (134) で `token` 必須 + `port: int > 0` 必須をランタイム検証してから narrow。
+- ✅ **M-Type3**: Python `OrderListFilter.status` を `Optional[Literal["SUBMITTED","ACCEPTED","FILLED","PENDING_CANCEL","CANCELED","EXPIRED","REJECTED"]]` に限定 (値リストは `tachibana_orders.py:_STATUS_TEXT_MAP` の出力集合と一致)。Rust `engine-client/src/dto.rs` に `OrderStatus` enum を新設 (SCREAMING_SNAKE_CASE)。`OrderRecordWire.status: String` → `OrderStatus`。`Display` impl 提供。
+- ✅ **M-Type4**: Rust `engine-client/src/dto.rs` に `CurrentEngineState` (SCREAMING_SNAKE_CASE) と `AttemptedCommand` (PascalCase wire = Python と同) enum を新設。`EngineEvent::EngineBusy { current_state: String, attempted_command: String }` → enum 化。未知値はデシリアライズ失敗。RED テスト: `engine-client/tests/dto_engine_busy_enums.rs` (5 件)。
+
+### 後続 Phase が import すべきシンボル (配置)
+
+#### Python (`engine.schemas`)
+
+```python
+from engine.schemas import (
+    AppMode,                # Literal["live", "replay"]
+    AttemptedCommand,       # Literal[12 values]
+    ReplayStateName,        # Literal["IDLE","LOADED","RUNNING","STOPPING"]
+    LiveStateName,          # Literal["DISCONNECTED","CONNECTING","CONNECTED"]
+    CurrentEngineState,     # Union[ReplayStateName, LiveStateName]
+    ReplayOnlyCommand,      # Literal["LoadReplayData","StartEngine","StopEngine","SetReplaySpeed"]
+    LiveOnlyCommand,        # Literal[6 values inc. GetBuyingPower/GetPositions/GetOrderList]
+    SharedCommand,          # Literal["SubmitOrder"]
+    AUTH_FAILED_CODE,       # str = "auth_failed"
+)
+```
+
+#### Rust (`flowsurface_engine_client::dto`)
+
+- `AppMode` (既存)
+- `PositionType` (新規, `Cash`/`MarginCredit`/`MarginGeneral`)
+- `OrderStatus` (新規, SCREAMING_SNAKE_CASE 7 値)
+- `CurrentEngineState` (新規)
+- `AttemptedCommand` (新規 12 値)
+
+### 検証コマンド結果
+
+| コマンド | 結果 |
+|---------|------|
+| `cargo check --workspace` | ok |
+| `cargo clippy --workspace -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `cargo test --workspace` | 全テストグループ ok / 失敗 0 |
+| `uv run pytest python/tests/ -m "not live" -q` | 1635 passed / 3 skipped (baseline 1598 から +37, 退行なし) |
+
+### 設計判断
+
+- **EngineBusy 直交制約 (H-Type2)** は `model_validator(mode="after")` の (b) 案を採用。Rust 側 `EngineEvent::EngineBusy` は 1 variant に保ち discriminator を増やさない (ABI と attach mode protocol を壊さない)。直交制約は Python 側だけで強制し、Rust デシリアライザは未知値検出のみを担当する。
+- **`SubmitOrder` を shared command** として例外扱いした (server.py の二経路: 980 行 replay venue + 1040 行 live venue)。replay-only / live-only に押し込むと既存挙動に矛盾するため。
+- **`SessionFileData` (M-Type2)** は TypedDict 1 種類で `total=False` のまま、必須性はランタイム validator で担保する。Python 3.10 互換維持。`Required[...]` を使うと 3.11+ になる。
+- **OrderListFilter.status (M-Type3)** の値リストは `tachibana_orders.py:_STATUS_TEXT_MAP` から取得 (SUBMITTED/ACCEPTED/FILLED/PENDING_CANCEL/CANCELED/EXPIRED/REJECTED)。`"OPEN"` は Python では未使用 (test fixture のみ) のため `OrderStatus::Accepted` に置換した (`src/screen/dashboard/panel/orders.rs` の test 4 箇所)。
+- **`AttemptedCommand` の 12 値** は schemas.py / server.py / dto.rs / engine-client tests で完全一致。Phase 2 以降が新コマンドを追加する場合は **3 ファイル同時更新** が必須 (CI 緑が壊れることで自動検知)。
+
+### 持ち越し
+
+- `_mode: AppMode` の代入チェックは現状 `assert` 一箇所のみ。本格的な mypy/pyright CI gating は別 Phase で導入を推奨。
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 1 - 新規) / Phase 2 server 振る舞い
+
+Phase 1 で確立した型基盤の上に、`python/engine/server.py` の振る舞い 7 項目を TDD（RED→GREEN→REFACTOR）で修正した。RED テストはすべて新規ファイル `python/tests/test_server_phase2_review_fixes.py` (8 件) に集約。
+
+### 完了項目
+
+- ✅ **WS-MED1**: handshake() タイムアウト導入。`server.py` 上部に module 定数 `_HANDSHAKE_TIMEOUT_S: float = 15.0` を新設し、`_handshake()` 先頭の `await ws.recv()` を `asyncio.wait_for(ws.recv(), timeout=_HANDSHAKE_TIMEOUT_S)` に置換。タイムアウト時は `ws.close(1002, "handshake timeout")` 後に `ValueError("handshake_timeout")` raise。RED テスト: `test_handshake_timeout_closes_connection`（`monkeypatch` で 0.5s に短縮し、Hello を送らない接続が close code 1002 で切断されることを assert）。
+- ✅ **WS-MED2 + L-WS-INFO**: auth_failed / schema_mismatch reject の close code を `1008` Policy Violation に統一。`_handshake()` の `ws.close()` を `ws.close(1008, "auth failed")` / `ws.close(1008, "schema mismatch")` に変更。RED テスト: `test_auth_failed_uses_close_code_1008` / `test_schema_mismatch_uses_close_code_1008`。
+- ✅ **WS-MED3 / H-GP1**: `AUTH_FAILED_CODE` 定数共有。`engine.schemas` から `AUTH_FAILED_CODE` を import し、`_handshake()` の `EngineError(code="auth_failed", ...)` および後続 `raise ValueError("auth_failed")` を `code=AUTH_FAILED_CODE` / `raise ValueError(AUTH_FAILED_CODE)` に置換。RED テスト: `test_auth_failed_code_is_imported_from_schemas`（`inspect.getsource` でソース内に bare `"auth_failed"` リテラルが残っていないことを pin）。
+- ✅ **Silent-M1**: EngineStopped 補完送出。`_handle_start_engine` の `except Exception` ブロックの `if started_marker["sent"]:` ガードを撤廃し、エラー経路でも常に `EngineStopped` を broadcast する。`started_marker = {"sent": False}` 自体も使われなくなったため削除し、`_on_event_tracked` 内の `started_marker["sent"] = True` 行も削除（`_replay_streaming_fills.clear()` は維持）。Rust 側は EngineStarted なしの EngineStopped を no-op として扱う前提（TimeoutError 経路と同じ契約）。RED テスト: `test_engine_stopped_emitted_when_runner_raises_before_started`（`NautilusRunner.start_backtest_replay_streaming` を `RuntimeError` で raise させ、outbox に `EngineStopped` + `Error{engine_run_failed}` が必ず流れることを assert）。**既存テスト** `test_failure_before_engine_started_does_not_emit_stopped` は旧仕様を pinning していたため、`test_failure_before_engine_started_emits_stopped` に名称・assertion 反転して新仕様（Silent-M1）を pin する形に書き換えた。
+- ✅ **Silent-M2**: orjson decode エラーで接続切断しない。`_recv_loop` の `msg = orjson.loads(raw)` を `try/except orjson.JSONDecodeError` で囲み、当該接続の outbox に `Error{code:"malformed_json"}` を unicast (`_outbox.send_to`) して `continue`（loop 維持）。旧実装は async-for から例外が伝播し、handler の finally で接続をサイレント切断していた。RED テスト: `test_malformed_json_keeps_connection_alive`（不正 JSON フレーム送信 → Error event 受信 + 後続の `Ping` が `Pong` で返ることを assert）。
+- ✅ **M-GP8**: EngineBusy を当該接続のみに送信。`_Broadcaster` に `send_to(ws, item)` を新設し、`ws` が登録済みなら当該キューにだけ put、未登録なら compat deque (`self._q`) のみへ append（テスト経路の互換性維持）。`_check_replay_state` / `_check_live_state` のシグネチャに `ws: ServerConnection | None = None` keyword-only 引数を追加し、`ws` が渡されたら `send_to`、None なら旧来の `append`（broadcast）にフォールバック。`_dispatch` から各 handler (`_do_submit_order` / `_do_modify_order` / `_do_cancel_order` / `_do_cancel_all_orders` / `_do_get_order_list` / `_do_get_buying_power` / `_do_get_positions` / `_do_request_venue_login` / `_handle_load_replay_data` / `_handle_start_engine` / `_handle_stop_engine`) を呼ぶ箇所すべてに `ws=ws` を伝播。SetReplaySpeed は `_dispatch` 内インラインなので直接 `ws=ws` を渡す。RED テスト: `test_engine_busy_is_unicast_to_offending_connection`（2 client 並列接続で client A が `SetReplaySpeed` を IDLE 状態で送信 → A は `EngineBusy` を受信、B は受信しないことを 0.5s ウィンドウで assert）。`ClientConnected` / `ClientDisconnected` / `Error` 等の broadcast は `append` のままで影響なし。
+- ✅ **H-GP7**: send_loop shutdown ドレイン。`_send_loop` を helper `_send_one` に抽出した上で、`shutdown_event.is_set()` を観測したらループを抜ける前に `q.get_nowait()` ループで queue を完全ドレインしてから return するように書き換え。旧実装は QueueEmpty → shutdown チェックの順だったため、shutdown 直前に append された最終 event が drop される race があった。RED テスト: `test_send_loop_drains_pending_events_on_shutdown`（接続済 client の outbox に sentinel `EngineStopped` を append してから `server.shutdown()` を呼び、close 前に sentinel が必ず到着することを assert）。
+
+### 既存テストの追従修正
+
+- `python/tests/test_engine_busy_reject.py::_ListOutbox` / `python/tests/test_engine_busy_query_guards.py::_ListOutbox` / `python/tests/test_server_engine_dispatch.py::_ListOutbox`: M-GP8 で `_Broadcaster` に追加した `send_to(ws, item)` メソッドを 3 つの test stub にも追加（duck-type 互換を維持。実装は `self._q.append(item)`）。
+- `python/tests/test_server_engine_dispatch.py::test_failure_before_engine_started_does_not_emit_stopped`: Silent-M1 で挙動を反転したため、テストを `test_failure_before_engine_started_emits_stopped` に名称ごと書き換え、`assert "EngineStopped" in kinds` に反転。順序 (`Stopped → Error`) と `final_equity == "0"` も追加で pin。
+
+### 検証コマンド結果
+
+| コマンド | 結果 |
+|---------|------|
+| `cargo check --workspace` | ok |
+| `cargo clippy --workspace -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `cargo test --workspace` | 全テストグループ ok / 失敗 0 |
+| `uv run pytest python/tests/ -m "not live" -q` | **1643 passed** / 3 skipped (Phase 1 baseline 1635 から +8 新規, 退行なし) |
+
+### 設計判断
+
+- **`_HANDSHAKE_TIMEOUT_S` を module 定数化**: テストから `monkeypatch.setattr(server_mod, "_HANDSHAKE_TIMEOUT_S", 0.5)` で短縮できるようにする狙い。インスタンス属性化も検討したが、サーバごとに変える需要は無く、グローバル定数の方が pin として明示的。
+- **`send_to(ws, item)` の未登録 ws fallback**: テストで `MagicMock()` を ws として渡すケースが多い (`_make_server` が `_outbox` を `_ListOutbox` スタブに差し替えるパターン)。本番 `_Broadcaster` では未登録 ws は compat deque (`self._q`) にのみ append し warning ログを残さない（テスト中の正常経路のため）。3 つのテスト stub には `send_to(ws, item)` メソッドを追加して duck-type 互換を維持。
+- **`_check_replay_state` / `_check_live_state` の `ws` 引数を keyword-only**: 呼び出し箇所は 12 箇所あり、positional だと既存テストの引数順序を破壊する。keyword-only + default `None` で破壊しない移行を実現。
+- **Silent-M1 の旧テスト書き換え**: 旧テスト `test_failure_before_engine_started_does_not_emit_stopped` が「補完しない」を assert していた以上、これを修正せず残すと矛盾する。新仕様 (Silent-M1) を pin する `test_failure_before_engine_started_emits_stopped` に名称ごと反転して上書き、旧 docstring の「未 Start 状態では補完しない」コメントも全削除。
+- **`_send_loop` の `wait_for(timeout=1.0)` 維持**: 計画書末尾「2026-05-03 改訂履歴」には M-11 で「`wait_for` を削除」と記載があるが、実装上は wakeup イベントが無いと shutdown チェックがブロックされる構造のため timeout=1.0 polling が必要。これは別 Phase で `_outbox_event` ベースの sentinel-shutdown 経路に再設計するべき項目だが、本ラウンドのスコープ外（H-GP7 は drain 漏れの修正のみ）。
+- **EngineBusy unicast の broadcast との直交性**: `ClientConnected` / `ClientDisconnected` は引き続き `append`（broadcast）。`Error{request_id}`（`_send_error` 経由）も従来どおり `append`。`malformed_json` Error と `EngineBusy` だけが `send_to` 経路を使う新規挙動。
+
+### 持ち越し
+
+- `_send_loop` の `wait_for(timeout=1.0)` を削除し sentinel/event ベースの shutdown シグナルに書き換える計画書記載の M-11 改修は別 Phase へ。本ラウンドの H-GP7 では drain 漏れだけを解消した。
+- Rust 側の close code 1008 受信時のクライアント側分岐（auth_failed と schema_mismatch を区別する error toast 文言）は Phase 3（`_AttachClient` 側）でカバーする予定。Phase 2 はサーバ側の wire 契約だけを修正した。
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 1 - 新規) / Phase 3 helper 振る舞い + attach login
+
+Phase 1 の型基盤 + Phase 2 の server 振る舞い修正を踏まえ、`python/engine/replay_session.py` の helper 振る舞いと `LiveSession` attach mode 本実装を TDD（RED→GREEN→REFACTOR）で消化した。RED テストは新規 2 ファイル `python/tests/test_replay_session_phase3_review_fixes.py`（23 件）と `python/tests/test_live_session_attach.py`（4 件）に集約。
+
+### 完了項目
+
+- ✅ **C-GP1 / H-Type3**: `ReplaySession.status` の戻り型 `Literal` を `["idle","loaded","running","stopping","stopped","errored"]` の 6 値に拡張。`_ReplayStatus.STOPPING` を `"running"` にマップする旧仕様を撤廃し、`.value` をそのまま返す。`# type: ignore` 削除。RED テスト: `test_status_returns_stopping_during_transition` / `test_status_literal_includes_all_six_states`。既存テスト `test_review_fixes.py::test_status_stopping_returns_running` を新仕様に追従し `test_status_stopping_returns_stopping` にリネーム。
+- ✅ **C-GP2**: attach mode `run()` の events() ループで `_extract_event_kind(evt) == "EngineStopped"` を観測した時点で先に `_status = STOPPED` をセットし、その後で `on_event(evt)` を呼ぶ。`except Exception` ブロックでは `_status is STOPPED` ならそのまま維持し、未到達のときだけ `ERRORED` にする。これにより on_event 内例外が STOPPED を ERRORED に上書きしない不変条件を確立。RED テスト: `test_engine_stopped_marks_status_before_on_event`。
+- ✅ **WS-MED3 / H-GP1 (helper 側)**: `_AttachClient._async_main` の handshake reject 判定を `"auth" in code.lower()` から `code == AUTH_FAILED_CODE` の完全一致に厳格化。`from engine.schemas import AUTH_FAILED_CODE` を追加。RED テスト: `test_auth_failed_code_only_for_exact_match` (code=`authentication_error` は `_TokenMismatchError` にしない) / `test_auth_failed_code_exact_match_raises_token_mismatch` (`auth_failed` のみ翻訳)。
+- ✅ **H-GP2**: `_AttachClient.handshake()` 失敗時 cleanup を強化。`close()` は元から `_thread.join(5.0)` 済みだが、その後 `self._thread.is_alive()` を再確認し残存していたら明示的に warning を出す。RED テスト: `test_handshake_failure_joins_thread`。
+- ✅ **H-GP4**: `_resolve_endpoint_and_token` の env-only 経路で `FLOWSURFACE_ENGINE_PORT` env を尊重するよう拡張 (未設定時は `19876`)。整数解釈失敗時は warning + 既定値。RED テスト: `test_resolve_endpoint_respects_engine_port_env` / `test_resolve_endpoint_default_port_when_env_unset`。
+- ✅ **H-GP8**: post-handshake 例外時の sticky error。`_AttachClient._run_loop` の finally で `_closed_event.set()` が呼ばれる構造は元から正しいが、events() / wait_for() 側で connection lost を即 `ConnectionError` 化する経路を Silent-M3 と統合。RED テスト: `test_post_handshake_failure_sticks_closed_event`。
+- ✅ **H-GP5**: `LiveSession.login()` の nested-loop fallback 経路で `_PNoCounter()` を再生成していた bug を修正。最初に作った `p_no_counter` インスタンスを fallback の `_runner` 内 closure からも参照することで、構築 1 回のみに統一。RED テスト: `test_login_nested_loop_fallback_reuses_pno_counter` / `test_login_pno_counter_constructed_once`。
+- ✅ **H-Silent4**: `narrative_hook.on_order_filled_sync` を asyncio.run RuntimeError 時の thread fallback 付きに書き換え。旧 `except Exception` で warning 出して silently drop していた経路を撤廃。最終失敗時は `log.error`。コルーチンの leak も `coro.close()` で明示的に防ぐ。RED テスト: `test_narrative_hook_sync_falls_back_when_loop_running` (asyncio loop 中から呼出 → ExecutionMarker emit)。
+- ✅ **Silent-M3**: `_AttachClient.events()` と `wait_for()` で `event == "Error"` を受信したら即 `ConnectionError` raise。60s ハングを防ぐ。RED テスト: `test_wait_for_raises_immediately_on_error_event` / `test_events_raises_immediately_on_error_event`。
+- ✅ **M-GP3**: `_AttachClient.wait_for()` の finally で pending を re-queue する経路を、エラー終了 (BusyError / ConnectionError / TimeoutError) では破棄するよう変更。`requeue_pending` フラグを正常終了時のみ True にして finally で分岐。RED テスト: `test_wait_for_busy_does_not_requeue_pending` (EngineBusy 発生時に保留 ReplayBuyingPower が再 yield されないことを assert)。
+- ✅ **M-GP1**: `_resolve_endpoint_and_token` の docstring を計画書 §4.1 と同一の解決順 `(a) 明示 attach_endpoint+env / (b) session ファイル / (c) env-only` に明記。`(a)` で session ファイルの token を混ぜないことも明示。計画書 §4.1 status プロパティ周辺に同じ解決順を追記。RED テスト: `test_resolve_priority_a_explicit_argument_wins` / `test_resolve_priority_b_session_file` / `test_resolve_priority_c_env_only` / `test_resolve_priority_no_match_returns_none` の 4 件。
+- ✅ **M-GP2**: `_read_session_file` で `pid` フィールドが欠損 (キー無し) または `None` の session ファイルを invalid として `None` を返すよう厳格化。`pid is None` early-return を追加。RED テスト: `test_session_file_missing_pid_returns_none` / `test_session_file_null_pid_returns_none`。
+- ✅ **M-GP5**: `LiveSession.login()` の冒頭で `if self._logged_in: return` を追加し、2 回目以降の login() を no-op 化。内部 API も attach mode の `RequestVenueLogin` も再送信せず、既存セッションを維持する。計画書 §4.3 docstring と本体 docstring の両方に明記。RED テスト: `test_login_second_call_is_noop`。既存テスト `test_login_marks_session_as_logged_in` は元々 1 回呼出後の `is_logged_in` のみ assert する形のため再書き換え不要。
+- ✅ **L-GP2**: CLI argparse の `--mode choices` を `["auto","inprocess","attach"]` ハードコードから `list(typing.get_args(_ForceMode))` に変更。`_ForceMode = Literal[...]` を 1 箇所変えれば CLI が自動追従する DRY 不変条件。RED テスト: `test_cli_mode_choices_match_force_mode_alias` (ソース文字列に `choices=list(typing.get_args(_ForceMode))` または `_ForceMode.__args__` のいずれかが含まれることを regex で pin)。
+- ✅ **C-GP4 (最大スコープ)**: `LiveSession.__enter__` の attach 分岐から `NotImplementedError` を撤廃し本実装。`_resolve_endpoint_and_token` を ReplaySession と同一形式で新設、attach mode 確立後に `_login_attach()` を新規メソッドとして実装。`Command::RequestVenueLogin{request_id, venue}` を engine に送信し、`_AttachClient._recv_queue` を直接 poll して `VenueReady` (= `is_logged_in=True`) または `VenueError` (= `ConnectionError` raise) を 30s timeout で待ち合わせる。token / endpoint 解決順は ReplaySession と共通。attach mode で `user_id`/`password` 明示は `ValueError`。`__exit__` で `_client.close()` を呼ぶ責務も追加。RED テスト (新規ファイル `test_live_session_attach.py`): `test_attach_login_sends_request_venue_login` / `test_attach_login_blocks_explicit_credentials` / `test_attach_login_returns_true_on_venue_ready` / `test_attach_login_raises_on_venue_error` の 4 件。`__init__` に `self._client: _AttachClient | None = None` を追加し inprocess パスでも `__exit__` が AttributeError を出さないようにした。
+
+### 計画書・spec.md 反映
+
+- §4.1 `ReplaySession.status` の docstring を 6 値 Literal + ライフサイクル + endpoint/token 解決順 (M-GP1) を含む形に拡張。
+- §4.3 `LiveSession.login()` の docstring を in-process / attach / 2nd-call no-op の 3 経路に拡張 (C-GP4 + M-GP5)。
+- §7.2 持ち越し「attach mode の `RequestVenueLogin` ↔ `VenueReady`/`VenueError` 待ち合わせ」を ✅ 完了に変更し、参照テストファイル名を併記。
+- §8 DoD #9 (`spec.md §5.3` reconnect protocol multi-client 文脈) を ✅ 完了に格上げ。spec.md §5.3 の「次フェーズで対応予定」表記を撤去し、Phase 8 R1 / Phase 3 で再評価済みである旨を明記。
+
+### 既存テストの追従修正
+
+- `test_review_fixes.py::test_status_stopping_returns_running` → `test_status_stopping_returns_stopping` (新仕様: `_ReplayStatus.STOPPING` の `.value == "stopping"` を返す)。
+- `test_live_session_login.py::test_attach_force_mode_raises_not_implemented` → `test_attach_force_mode_raises_when_no_engine` (C-GP4 で attach mode が本実装になったため、token/endpoint が無いケースの `ConnectionRefusedError` を pin する形に書き換え)。
+
+### 検証コマンド結果
+
+| コマンド | 結果 |
+|---------|------|
+| `cargo check --workspace` | ok |
+| `cargo clippy --workspace -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `cargo test --workspace` | 全テストグループ ok / 失敗 0 |
+| `uv run pytest python/tests/ -m "not live" -q` | **1670 passed** / 3 skipped (Phase 2 baseline 1643 から +27 新規, 退行なし) |
+
+### 設計判断
+
+- **`status == "stopping"` を別状態として表に出す**: 旧実装は STOPPING を `"running"` にマップしていたが、観測上 stop 投入後の遷移期間は走行中とは区別したいケースがある (E2E テスト・GUI ステータスバー)。Literal 拡張のコストは小さく、外部コードが旧 5 値しか想定していない場合は pyright が新規ケース漏れを検知できる。これに伴い計画書 §4.1 の status docstring を「6 値」に書き換え。
+- **`_login_attach()` で `_recv_queue` を直接 poll する**: `_AttachClient.wait_for()` は単一 event 名しか待てない (`VenueReady` か `VenueError` の or を表現できない) ため、login の attach 経路だけは raw queue を直接 poll する。30s timeout は長時間ログインダイアログが GUI 側に出ているケースも想定。`request_id` 一致チェックで他 client 由来の VenueReady を取り違えない。
+- **`AUTH_FAILED_CODE` 完全一致**: `"auth" in code.lower()` の曖昧マッチは `authentication_error` 等の偽陽性を生む。完全一致にすることで Phase 1 で導入した `AUTH_FAILED_CODE = "auth_failed"` 定数を真実源として運用できる。`_TokenMismatchError` への翻訳は token mismatch を意味するため、code 文字列を契約として固定するのは妥当。
+- **`pid` 必須化 (M-GP2)**: Rust 側 `EngineSession` は spawn 時に pid を必ず書き込むため、pid 不在 = 旧フォーマット / 破損 / テスト漏れ。invalid 扱いで fallback させる方が安全 (PID=0 / `None` のまま attach を試みると別プロセスに当たるリスク)。既存の M-Type2 (port / token 必須) と同じ扱い。
+- **`p_no_counter` 再利用 (H-GP5)**: 旧実装は fallback 内で `_PNoCounter()` を新規生成していたため、最初に作った counter が捨てられていた。仕様としては「session 中で連番を維持する」のが正しいので、外側で 1 度だけ作って fallback の closure からも参照する形に統一。テスト不可避なため `_PNoCounter` を monkeypatch で wrap して構築回数を pin。
+- **`narrative_hook` thread fallback (H-Silent4)**: `LiveSession.login` と同じパターンで、asyncio.run のネスト不可 RuntimeError を捕えて `concurrent.futures.ThreadPoolExecutor` で別 thread から実行する。旧コードは `except Exception` でログを出して silently drop しており、ExecutionMarker 損失の温床だった。失敗時は `log.error` (warning ではなく) で出すことで監視ログから検出できるようにする。
+- **`wait_for` の pending drop (M-GP3)**: BusyError / ConnectionError 経路では pending を再 queue しない。理由: state guard で reject されたコマンドの pending event は呼び出し側が「失敗したコマンドの副作用」として認識すべきもので、後続の events() ループに混ぜると重複 yield や順序破壊の原因になる。正常終了 (待機 event 一致) のみ pending を戻す。`requeue_pending` flag をフラグ管理することで finally の意図を明示。
+
+### 持ち越し
+
+- 実 demo smoke (`@pytest.mark.live`) は本ラウンドのスコープ外。attach mode の `RequestVenueLogin`/`VenueReady` wire 経路は mock engine WS server で十分カバーしているが、実 GUI engine + 立花 demo 環境での E2E は次フェーズに持ち越し。
+- `_send_loop` の sentinel-only 化と `wait_for(timeout=1.0)` 削除は Phase 2 の H-GP7 持ち越し項目で、Phase 3 のスコープ外 (helper 側の振る舞いには影響しないため)。
+- Rust 側 close code 1008 受信時の error toast 文言分岐 (Phase 2 持ち越し) は Phase 4 (Rust) で別エージェントが対応中。
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 1 - 新規) / Phase 5 test 分割
+
+### 背景
+
+`python/tests/test_review_fixes.py` (898 行 / 22 tests) が C-1 / C-2 / H-SF1 / H-SF2 / H-GP1 / H-TA1 / M-TA6 / M-SF1 / M-SF3 / M-RS3-PY / M-GP4 / R2-H1 / R2-H2 / R2-H4 など複数機能 ID の保護テストを横断的に詰め込んでおり、ファイル名から「何を保護しているか」が読み取れない状態だった。レビュー指摘 C-GP3 に従い、機能 ID 単位で 10 ファイルに物理分割する。
+
+### 分割マッピング (旧 test → 新 file)
+
+| 旧 test 名 | 新ファイル |
+|-----------|-----------|
+| `test_attach_client_post_handshake_disconnect_terminates_events_quickly` | `test_attach_disconnect_behaviour.py` |
+| `test_attach_client_post_handshake_disconnect_logs` | `test_attach_disconnect_behaviour.py` |
+| `test_stop_attach_sends_stop_engine_command` | `test_attach_stop_command.py` |
+| `test_stop_transitions_to_stopped_after_engine_stopped` | `test_attach_stop_command.py` |
+| `test_stop_not_running_does_not_send_stop_engine` | `test_attach_stop_command.py` |
+| `test_stop_loaded_does_not_send_stop_engine` | `test_attach_stop_command.py` |
+| `test_set_speed_attach_sends_set_replay_speed` | `test_set_speed_dispatch.py` |
+| `test_set_speed_inprocess_updates_multiplier` | `test_set_speed_dispatch.py` |
+| `test_broadcaster_append_continues_on_queue_full` | `test_broadcaster_queue_full.py` |
+| `test_broadcaster_append_logs_on_queue_full` | `test_broadcaster_queue_full.py` |
+| `test_status_stopping_returns_stopping` | `test_status_property.py` |
+| `test_status_literals_are_correct` | `test_status_property.py` |
+| `test_request_venue_login_connecting_returns_venue_login_started` | `test_request_venue_login_state.py` |
+| `test_handle_hello_mode_mismatch_rejects_second_client` | `test_hello_mode_mismatch.py` |
+| `test_handle_hello_mode_mismatch_with_real_server` | `test_hello_mode_mismatch.py` |
+| `test_token_mismatch_error_class_exists` | `test_session_file_invalid_token.py` |
+| `test_token_mismatch_uses_typed_error_not_string_check` | `test_session_file_invalid_token.py` |
+| `test_read_session_file_no_token_returns_none` | `test_session_file_invalid_token.py` |
+| `test_read_session_file_empty_token_returns_none` | `test_session_file_invalid_token.py` |
+| `test_narrative_hook_no_http_call` | `test_narrative_hook_no_http.py` |
+| `test_live_session_login_attach_mode_raises_value_error_when_credentials_passed` | `test_live_session_login_attach_guard.py` |
+| `test_live_session_login_attach_mode_only_user_id_raises_value_error` | `test_live_session_login_attach_guard.py` |
+
+### 設計判断
+
+- **共有 fixture を `conftest.py` に切り出さず各ファイルに複製**: `_spawn_server` / `_make_ready_msg` ヘルパーは attach disconnect / session file invalid token 系の 2 ファイルでしか使われない。`conftest.py` 経由で global 化すると pytest collection の影響範囲が広がる (他の 50+ 既存ファイルと衝突リスク) ため、必要なファイルにだけ local copy する方針を採用。
+- **テスト本体は無改変**: 物理分割が目的。assertion / fixture セットアップ / mock 構造は一切変更していない。Phase 3 で `test_status_stopping_returns_running` → `test_status_stopping_returns_stopping` に rename 済みの test もそのまま継承。
+- **旧ファイル `test_review_fixes.py` は削除**: 22 件すべて新ファイルに移植したことを `pytest --collect-only` で確認した上で削除。
+
+### 検証結果
+
+- `pytest --collect-only`: 新 10 ファイルから 22 tests collected (旧と完全一致)
+- `uv run pytest python/tests/ -m "not live" -q`: **1670 passed, 3 skipped** (ベースライン維持)
+- `cargo fmt --check` / `cargo check --workspace` / `cargo clippy --workspace -- -D warnings` / `cargo test --workspace`: 全緑 (test 分割は Rust に影響なし)
+
+### 持ち越し
+
+- なし。物理分割のみで完結。
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 2 反映 / Round 2 silent-failure 修正)
+
+### 背景
+
+ラウンド 2 のレビューで multi-client 環境下の silent-failure と 30s ハング 8 件が
+洗い出された。CRITICAL 1 / HIGH 3 / MEDIUM 4 を TDD で修正する。
+
+### 反映項目
+
+- ✅ **CRITICAL-R2-1**: `python/engine/replay_session.py:_login_attach()` (1374-1424) で `VenueError` 受信判定を拡張。`request_id == self._login_request_id` (unicast) **または** `request_id is None` (broadcast 経路) のいずれかで raise。`Error{request_id 一致}` も raise。`_login_request_id` を `LiveSession.__init__` で初期化 (1097-1099)。RED テスト: `python/tests/test_phase8_round2_review_fixes.py::test_login_attach_handles_broadcast_venue_error` (broadcast `VenueError{request_id=None}` で 5s 以内 raise を保証)。
+- ✅ **HIGH-R2-2**: `python/engine/server.py:_do_request_venue_login()` (2530-2566) で replay-mode reject / unsupported-venue reject の両 `VenueError` を `_emit` (broadcast) から `send_to(ws, ...)` (unicast) に変更。`ws is None` の旧経路は broadcast にフォールバック (テスト互換)。RED テスト: `test_request_venue_login_mode_mismatch_is_unicast` (multi-client 接続で client A の `RequestVenueLogin` 由来 `VenueError` が client B に **届かない** ことを assert)。
+- ✅ **HIGH-R2-3**: `python/engine/replay_session.py:_AttachClient.events() / wait_for()` (561-636 / 471-548) で `Error` event を `request_id` でフィルタ。`_current_request_id` 一致 or broadcast (`None`) のみ raise、別 client 由来は無視して継続。`set_current_request_id()` setter (243-249) を追加し `ReplaySession.load() / run()` (810-820 / 868-873) で発行した request_id を伝播。fake client 後方互換のため `getattr` で defensive 呼び出し。RED テスト: `test_events_ignores_error_from_other_request_id` / `test_events_raises_on_own_request_id_error` / `test_events_raises_on_broadcast_error` / `test_wait_for_ignores_other_request_id_error`。
+- ✅ **HIGH-R2-4**: `python/engine/server.py:_handle()` finally ブロック (548-558) で「全接続切断時」に `_replay_state = ReplayState.IDLE` / `_live_state = LiveState.DISCONNECTED` / `_replay_streaming_fills.clear()` をリセット。再接続後の `LoadReplayData` が IDLE state guard を通る不変条件を保証。RED テスト: `test_full_disconnect_resets_replay_state`。
+- ✅ **MEDIUM-R2-5**: `python/engine/nautilus/narrative_hook.py:on_order_filled_sync()` (79-141) の thread fallback で `inner_exc` を `log.error` した後 silent return せず **raise** する。戻り値型を `bool` に変更 (成功時 `True`、現実装は失敗時 `raise`)。RED テスト: `test_narrative_hook_thread_fallback_propagates_exception` (asyncio.run + ThreadPoolExecutor を patch して TimeoutError を上流に伝播することを assert) / `test_narrative_hook_returns_true_on_success`。
+- ✅ **MEDIUM-R2-6**: `python/engine/schemas.py:EngineBusy` に `request_id: str | None = None` を Optional 追加 (920-925)。`_check_replay_state()` / `_check_live_state()` (2316-2380) に `request_id` kwarg を追加して payload に伝播 (callsite は段階的に拡張可能)。`engine-client/src/dto.rs:EngineEvent::EngineBusy` (1213-1214) に `request_id: Option<String>` (`#[serde(default, skip_serializing_if)]`) を追加し旧 wire と後方互換。`_AttachClient.events()` / `wait_for()` で `EngineBusy.request_id` 不一致なら無視。RED テスト Python: `test_events_ignores_engine_busy_from_other_request_id` / `test_events_raises_busy_on_own_engine_busy` / `test_engine_busy_schema_accepts_request_id`。RED テスト Rust: `engine-client/tests/engine_busy_event.rs::engine_busy_with_request_id_deserializes` / `engine_busy_without_request_id_is_none`。
+- ✅ **MEDIUM-R2-7**: `python/engine/replay_session.py:LiveSession.login()` (1287-1305) で 2回目以降の login() に対し credential 変更を検知。`_credential_fingerprint(user_id, password, demo)` (218-231) を SHA-256 hex digest で実装し平文比較を回避。同一 fingerprint なら no-op、異なれば `RuntimeError("LiveSession credentials cannot change after login; create a new LiveSession instance instead")`。RED テスト: `test_second_login_with_changed_credentials_raises`。
+- ✅ **MEDIUM-R2-8**: `python/engine/server.py:_handle_start_engine()` (2962-2975) に `engine_stopped_emitted: list[bool] = [False]` フラグを導入。`_on_event_tracked` で `EngineStopped` を観測したら True に。timeout / except 補完送出パス (3034-3045 / 3079-3094) で `if not engine_stopped_emitted[0]` ガードを追加し二重送出防止。RED テスト: `test_engine_stopped_emitted_only_once_on_runner_failure` (runner mock が EngineStopped emit 後に raise してもアウトボックスに EngineStopped が **1 回のみ**)。
+
+### 設計判断
+
+- **broadcast `VenueError` を unicast 化する**: M-GP8 (Phase 2) で `_check_replay_state` / `_check_live_state` の `EngineBusy` を unicast 化したのと同じ方針。helper が attach した瞬間に別 helper の RequestVenueLogin reject イベントを誤受信して `_login_attach` が誤 raise するのを防ぐため。`ws is None` 経路は legacy テスト互換でフォールバック維持。
+- **`request_id` フィルタを events()/wait_for() の両方に**: `events()` は run() の event ストリーム、`wait_for()` は load() の同期待ち。どちらも別 client 由来イベントを「自分宛」と誤認するリスクがある。フィルタロジックを共通化 (state は `_current_request_id` で共有) し、両方の経路で同じ動作を保証する。
+- **`getattr(client, 'set_current_request_id', None)` 防御呼び出し**: 既存の Phase 3 単体テスト 6+ 件で fake client クラスを直接定義しており、新メソッドを各 fake に追加すると変更箇所が散らばる。`_AttachClient` 本体のみが新 API を実装し、それ以外は黙ってスキップする方針で後方互換を維持。
+- **EngineBusy.request_id を Optional + Rust skip_serializing_if**: 既存の serialize 形式 (request_id 未送出) を破壊しない。Python 側も `default=None` で旧 helper と互換。`schemas.py` の `SCHEMA_MINOR` bump は不要 (Optional フィールド追加は wire-compatible 拡張)。
+- **credential fingerprint は SHA-256**: 平文 user_id/password を session 内に保持すると監査ログ漏洩・debug snapshot 漏洩のリスクが高い。固定 salt 不要 (timing attack の対象は token 比較のみ、credential 変更検知は識別性さえあれば十分) なので素の SHA-256 で識別子化する。`_credential_fingerprint(None, None, demo)` は `\x00` セパレータで識別性を担保。
+- **EngineStopped 二重送出抑制を flag だけで実装**: `_on_event_tracked` 内で同期的に flag を立てるため race condition 無し (`_on_event_tracked` は worker thread から呼ばれるが list[bool] への代入は GIL 下で atomic)。except / timeout の補完送出パスは main asyncio loop 上で実行されるので、flag 観測時点で worker thread の emit は済んでいる (worker thread が raise してから to_thread が return するため順序保証)。
+
+### 検証結果
+
+- `cargo fmt --check`: 全緑 (Rust 編集箇所は dto.rs / engine_busy_event.rs のみ、両方 rustfmt 準拠)
+- `cargo check --workspace`: 全緑
+- `cargo clippy --workspace -- -D warnings`: 全緑
+- `cargo test --workspace`: 全テスト pass (engine_busy_event 8 件 = 旧 6 + 新 2)
+- `uv run pytest python/tests/ -m "not live" -q`: **1684 passed, 3 skipped** (ベースライン 1670 + 新規 14 件)
+
+### 持ち越し
+
+- LOW-R2-1〜3 (計画書記載精度) は今回スコープ外。次フェーズで「DoD #9 の文言分節化 / §8 注記追加 / 改訂履歴 line 1140 の M-11 訂正」をまとめてやる。
+- 実 demo smoke (`@pytest.mark.live`) は本ラウンドのスコープ外 (mock engine + multi-client integration test で十分カバー)。
+- `_check_replay_state` / `_check_live_state` の callsite に `request_id` を順次注入する作業は段階的拡張として持ち越し (本ラウンドではシグネチャ追加と `_AttachClient` 側のフィルタロジックまでで完結。既存 callsite は `request_id=None` がデフォルトで素通り)。
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 3 反映 / Round 3 silent-failure 修正)
+
+### 背景
+
+ラウンド 3 のレビューで「ラウンド 2 修正に潜む silent-failure / race / 過剰拒否」が
+洗い出された。MEDIUM 2 / LOW 2 を TDD で修正する。
+
+### 反映項目
+
+- ✅ **MEDIUM-R3-1**: `python/engine/replay_session.py:LiveSession.login()` (1305-1318) で credential 変更検知の条件を `user_id is not None or password is not None` から `user_id is not None and password is not None` に変更。「両方明示渡し時のみ」厳格チェックに限定する。env / 既存値からの解決経路（片方だけ明示 or 全部 None）では caller の意図を「変更したい」と判別できないため過剰拒否を避ける。RED テスト: `python/tests/test_phase8_round3_review_fixes.py::test_second_login_with_same_explicit_user_id_but_password_via_env_is_noop`（env 解決済みで `login(user_id=env_user, password=None)` が誤 RuntimeError を出さない）。リグレッションガード `test_second_login_with_changed_credentials_still_raises`（両方明示で変更時 RuntimeError は維持）。
+- ✅ **MEDIUM-R3-2**: `python/engine/server.py:_handle_start_engine()` finally (3120-3134) で `_replay_state = ReplayState.IDLE` リセットを **現在の state が `RUNNING` / `STOPPING` のときのみ** に条件付け。「全断 → `_handle()` finally で IDLE → 再接続 → `LoadReplayData` で LOADED → 古い runner の to_thread 完了 → finally が LOADED を IDLE に上書き → 新セッションの `StartEngine` が EngineBusy で reject」race を回避する。RED テスト: `test_old_runner_finally_does_not_clobber_reconnected_loaded_state`（`_replay_state = LOADED` セット → finally 経路相当ロジック実行 → LOADED 維持を assert）。リグレッションガード `test_handle_start_engine_finally_resets_running_state_to_idle`（通常終了 RUNNING→IDLE は維持）。
+- ✅ **LOW-R3-3**: credential テスト追加。`test_second_login_with_user_id_only_explicit_no_op`（env 解決済みで `login(user_id=env_user, password=None)` / `login(user_id=None, password=env_pw)` の両方が no-op であることを assert）。MEDIUM-R3-1 修正で自然に GREEN。
+- ✅ **LOW-R3-4**: `python/engine/replay_session.py:ReplaySession.run()` attach mode events ループ (931-963) に `try / except / finally` の `finally` を追加し、`set_current_request_id(None)` をクリア処理として実行。次の load() / run() / 別 client の Error が前 run の request_id にマッチして誤発火するのを防ぐ。RED テスト: `test_run_resets_current_request_id_on_normal_exit` / `test_run_resets_current_request_id_on_exception`（正常終了・例外終了の両方で fake client の `_current_request_id` が None に戻ることを assert）。
+
+### 設計判断
+
+- **「両方明示時のみ厳格チェック」案の採用理由**: 当初案は「保存 fingerprint 計算と同じ resolve ロジックを通す」だったが、これだと「初回 user-A／env-pw → 2回目 `login(user_id=user-A, password=None)` でチェック側だけ env-pw が反映されない／されると caller の意図と乖離」など分岐がブレる。「両方明示」シグナルは caller が明確に「変更したい／確認したい」と表明している唯一のケースなので、ここだけ強制する設計が最も予測可能。片方だけ明示は「他はそのまま使いたい」という意図と解釈し no-op で受ける。
+- **finally 条件を `RUNNING / STOPPING` に限定**: `_handle_start_engine` の finally は「自分の to_thread 終了に責任のある状態」を IDLE に戻すべきで、すでに別経路で進んだ状態（LOADED = 別セッションの load 完了）を破壊してはならない。`STOPPING` も含めるのは StopEngine 経路で先に `STOPPING` に遷移してから to_thread 終了を待つため。`IDLE` / `LOADED` は触らない。
+- **run() の finally で setter を `getattr` 防御**: HIGH-R2-3 と同じ理由（既存 fake client が `set_current_request_id` を実装していない可能性）。
+
+### 検証結果
+
+- `cargo fmt --check`: 全緑（Rust 編集なし）
+- `cargo check --workspace`: 全緑
+- `cargo clippy --workspace -- -D warnings`: 全緑
+- `cargo test --workspace`: 全テスト pass
+- `uv run pytest python/tests/ -m "not live" -q`: **1691 passed, 3 skipped** (ベースライン 1684 + 新規 7 件)
+
+### 持ち越し
+
+- LOW-R2-1〜3 / LOW-R3 系の計画書記載精度修正は次フェーズで一括対応。
+- `_check_replay_state` / `_check_live_state` の callsite への `request_id` 段階的注入はラウンド 2 から継続持ち越し。

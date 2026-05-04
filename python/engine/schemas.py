@@ -2,15 +2,76 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union, get_args
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
 SCHEMA_MINOR: int = 9
+
+# ---------------------------------------------------------------------------
+# Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
+# IPC layer, server state machine guards, and helper-class translation.
+# ---------------------------------------------------------------------------
+
+# AppMode: 起動時固定モード (`Hello.mode` と `DataEngineServer._mode` の共有)
+AppMode = Literal["live", "replay"]
+
+# ReplayStateName / LiveStateName: 直交する 2 つの state machine の wire 名前。
+# server.py の `ReplayState` / `LiveState` Enum の `.name` と一致させる。
+ReplayStateName = Literal["IDLE", "LOADED", "RUNNING", "STOPPING"]
+LiveStateName = Literal["DISCONNECTED", "CONNECTING", "CONNECTED"]
+
+# CurrentEngineState: EngineBusy.current_state の wire 形 (どちらかの state)
+CurrentEngineState = Union[ReplayStateName, LiveStateName]
+
+# Replay-only / Live-only コマンドの分類 (EngineBusy 直交制約に使用)
+ReplayOnlyCommand = Literal[
+    "LoadReplayData",
+    "StartEngine",
+    "StopEngine",
+    "SetReplaySpeed",
+]
+LiveOnlyCommand = Literal[
+    "ModifyOrder",
+    "CancelOrder",
+    "CancelAllOrders",
+    "RequestVenueLogin",
+    "GetBuyingPower",
+    "GetPositions",
+    "GetOrderList",
+]
+# SubmitOrder は venue により replay/live の両方で発生し得る (server.py 980, 1040)。
+SharedCommand = Literal["SubmitOrder"]
+
+# AttemptedCommand: EngineBusy.attempted_command の wire 形。
+# server.py `_check_replay_state` / `_check_live_state` の `command:` 引数も同じ alias を使う。
+AttemptedCommand = Literal[
+    "LoadReplayData",
+    "StartEngine",
+    "StopEngine",
+    "SetReplaySpeed",
+    "SubmitOrder",
+    "ModifyOrder",
+    "CancelOrder",
+    "CancelAllOrders",
+    "RequestVenueLogin",
+    "GetBuyingPower",
+    "GetPositions",
+    "GetOrderList",
+]
+
+# AUTH_FAILED_CODE: 認証失敗時の EngineError.code (Phase 2 以降が import 可能)
+AUTH_FAILED_CODE: str = "auth_failed"
+
+# 内部: EngineBusy validator が使う set
+_REPLAY_STATES: frozenset[str] = frozenset(get_args(ReplayStateName))
+_LIVE_STATES: frozenset[str] = frozenset(get_args(LiveStateName))
+_REPLAY_ONLY_COMMANDS: frozenset[str] = frozenset(get_args(ReplayOnlyCommand))
+_LIVE_ONLY_COMMANDS: frozenset[str] = frozenset(get_args(LiveOnlyCommand))
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +96,7 @@ class Hello(IpcMessage):
     token: str
     # N1.13: 起動時固定 mode (`"live"` | `"replay"`).
     # 旧クライアント互換のため省略時は "live" にフォールバック。
-    mode: Literal["live", "replay"] = "live"
+    mode: AppMode = "live"
 
 
 class SetProxy(IpcMessage):
@@ -220,7 +281,19 @@ class OrderListFilter(IpcMessage):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: str | None = None
+    # M-Type3: 既知の OrderStatus (tachibana_orders._STATUS_TEXT_MAP の出力値) のみ許可。
+    # docs: see python/engine/exchanges/tachibana_orders.py `_STATUS_TEXT_MAP`.
+    status: Optional[
+        Literal[
+            "SUBMITTED",
+            "ACCEPTED",
+            "FILLED",
+            "PENDING_CANCEL",
+            "CANCELED",
+            "EXPIRED",
+            "REJECTED",
+        ]
+    ] = None
     instrument_id: str | None = None
     date: str | None = None
 
@@ -840,27 +913,34 @@ class EngineBusy(IpcMessage):
     # M-1 (type): replay state / live state を tagged union で表現する。
     # Replay states: IDLE / LOADED / RUNNING / STOPPING
     # Live states:   DISCONNECTED / CONNECTING / CONNECTED
-    current_state: Literal[
-        "IDLE",
-        "LOADED",
-        "RUNNING",
-        "STOPPING",
-        "DISCONNECTED",
-        "CONNECTING",
-        "CONNECTED",
-    ]
-    attempted_command: Literal[
-        "LoadReplayData",
-        "StartEngine",
-        "StopEngine",
-        "SetReplaySpeed",
-        "SubmitOrder",
-        "ModifyOrder",
-        "CancelOrder",
-        "CancelAllOrders",
-        "RequestVenueLogin",
-    ]
+    # H-Type2: state と command の直交性を `model_validator` (mode='after') で
+    # 強制する。Replay-only state に Live-only command (例: STOPPING /
+    # RequestVenueLogin) を載せると ValidationError。
+    current_state: CurrentEngineState
+    attempted_command: AttemptedCommand
     reason: str
+    # MEDIUM-R2-6: violation を起こした command の request_id。Optional で
+    # 既存メッセージとの後方互換を保つ。helper 側の `wait_for()` /
+    # `events()` はこの値で「自分宛の reject」と「broadcast / 別 client 由来」を
+    # 区別する。
+    request_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_state_command_orthogonal(self) -> "EngineBusy":
+        # SubmitOrder は replay/live どちらの state でも有効 (venue により分岐)。
+        cmd = self.attempted_command
+        state = self.current_state
+        if cmd in _REPLAY_ONLY_COMMANDS and state in _LIVE_STATES:
+            raise ValueError(
+                f"EngineBusy: replay-only command {cmd!r} cannot be paired with "
+                f"live state {state!r}"
+            )
+        if cmd in _LIVE_ONLY_COMMANDS and state in _REPLAY_STATES:
+            raise ValueError(
+                f"EngineBusy: live-only command {cmd!r} cannot be paired with "
+                f"replay state {state!r}"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

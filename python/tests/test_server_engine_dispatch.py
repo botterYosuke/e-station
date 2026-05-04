@@ -28,6 +28,10 @@ class _ListOutbox:
     def append(self, item: object) -> None:
         self._q.append(item)
 
+    def send_to(self, ws: object, item: object) -> None:
+        # M-GP8 (Phase 8 R1 / Phase 2): unicast 経路の test stub。
+        self._q.append(item)
+
     def popleft(self) -> object:
         return self._q.popleft()
 
@@ -414,8 +418,13 @@ class TestStartEngineFailureRecovery:
         assert any(e.get("request_id") == "req-fail-1" for e in err_events)
 
     @pytest.mark.asyncio
-    async def test_failure_before_engine_started_does_not_emit_stopped(self) -> None:
-        """EngineStarted 未送出のうちに失敗した場合は EngineStopped を補完しない。"""
+    async def test_failure_before_engine_started_emits_stopped(self) -> None:
+        """Silent-M1 (Phase 8 R1 / Phase 2): EngineStarted 未送出のうちに runner が
+        失敗した場合でも、Rust 側 state machine が stuck しないように EngineStopped
+        を必ず補完送出する。旧実装は started_marker でガードして補完を抑制していたが、
+        silent failure を生むため撤廃した。Rust 側は EngineStarted なしの
+        EngineStopped を no-op として扱う前提（TimeoutError 経路と同じ契約）。
+        """
         server = _make_server(mode="replay")
         msg = {
             "op": "StartEngine",
@@ -444,8 +453,13 @@ class TestStartEngineFailureRecovery:
 
         kinds = [e.get("event") for e in server._outbox]
         assert "EngineStarted" not in kinds
-        assert "EngineStopped" not in kinds  # 未 Start 状態では補完しない
+        assert "EngineStopped" in kinds  # Silent-M1: 未 Start でも常に補完
         assert "EngineError" in kinds
+        # 順序: Stopped → Error (Started なし)
+        assert kinds.index("EngineStopped") < kinds.index("EngineError")
+        stopped = next(e for e in server._outbox if e.get("event") == "EngineStopped")
+        assert stopped["final_equity"] == "0"
+        assert stopped["strategy_id"] == "buy-and-hold"
 
 
 class TestStartEngineTimeoutRecovery:

@@ -140,6 +140,10 @@ impl ReplayFormModal {
             .trim()
             .parse::<u64>()
             .map_err(|_| "初期資金は正の整数で入力してください".to_string())?;
+        // M-Rust4: 0 は受け付けない（戦略が必ず資金不足で空回りするため事故予防）。
+        if initial_cash == 0 {
+            return Err("初期資金は 1 以上にしてください".to_string());
+        }
         Ok(ValidatedForm {
             instrument_id,
             start_date,
@@ -320,6 +324,28 @@ mod tests {
         assert!(action.is_none());
         assert!(form.validation_error.is_some());
         assert!(form.validation_error.as_ref().unwrap().contains("初期資金"));
+    }
+
+    #[test]
+    fn validation_fails_zero_cash() {
+        // M-Rust4: parse は通るが 0 は事故予防のため弾く。
+        let mut form = ReplayFormModal::default();
+        form.instrument_id = "1301.TSE".to_string();
+        form.start_date = "2025-01-06".to_string();
+        form.end_date = "2025-03-31".to_string();
+        form.granularity = Some(Granularity::Daily);
+        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
+        form.initial_cash = "0".to_string();
+        let action = form.update(Message::Submit);
+        assert!(action.is_none());
+        let msg = form
+            .validation_error
+            .as_ref()
+            .expect("zero initial_cash must produce a validation error");
+        assert!(
+            msg.contains("初期資金"),
+            "expected 初期資金 in error, got: {msg}"
+        );
     }
 
     #[test]

@@ -98,12 +98,26 @@ pub(crate) static VENUE_CAPS_STORE: std::sync::OnceLock<
 /// starting up. The task self-terminates when the broadcast channel
 /// closes (i.e. when the connection drops).
 fn spawn_venue_ready_bridge(rt: &tokio::runtime::Runtime, conn: &engine_client::EngineConnection) {
+    spawn_venue_ready_bridge_on(rt.handle(), conn);
+}
+
+/// Same as [`spawn_venue_ready_bridge`] but accepts an explicit
+/// [`tokio::runtime::Handle`]. Used from already-async contexts (the
+/// reconnect loop in external mode, and the recovery loop in managed mode)
+/// where only a `Handle` is available — both call sites used to inline
+/// duplicate copies of the bridge body. H-Rust3: single source of truth
+/// for the `VenueReady`/`VenueError`/`VenueLoginStarted`/`VenueLoginCancelled`
+/// invalidation rules.
+fn spawn_venue_ready_bridge_on(
+    handle: &tokio::runtime::Handle,
+    conn: &engine_client::EngineConnection,
+) {
     let cache = match VENUE_READY_CACHE.get() {
         Some(cache) => Arc::clone(cache),
         None => return,
     };
     let mut event_rx = conn.subscribe_events();
-    rt.spawn(async move {
+    handle.spawn(async move {
         use engine_client::dto::EngineEvent;
         use tokio::sync::broadcast::error::RecvError;
         loop {
@@ -316,52 +330,14 @@ fn main() {
                                     if let Some(cache) = VENUE_READY_CACHE.get() {
                                         cache.lock().await.clear();
                                     }
-                                    // Re-spawn the bridge against the
-                                    // fresh connection — the previous
-                                    // bridge's recv loop has already
-                                    // exited via RecvError::Closed.
-                                    let rt_handle = tokio::runtime::Handle::current();
-                                    let bridge_cache = VENUE_READY_CACHE.get().cloned();
-                                    if let Some(cache) = bridge_cache {
-                                        let mut event_rx = new_conn.subscribe_events();
-                                        rt_handle.spawn(async move {
-                                            use engine_client::dto::EngineEvent;
-                                            use tokio::sync::broadcast::error::RecvError;
-                                            loop {
-                                                match event_rx.recv().await {
-                                                    Ok(EngineEvent::VenueReady {
-                                                        venue, ..
-                                                    }) => {
-                                                        cache.lock().await.insert(venue);
-                                                    }
-                                                    Ok(EngineEvent::VenueError {
-                                                        venue, ..
-                                                    }) => {
-                                                        cache.lock().await.remove(&venue);
-                                                    }
-                                                    Ok(EngineEvent::VenueLoginStarted {
-                                                        venue,
-                                                        ..
-                                                    }) => {
-                                                        cache.lock().await.remove(&venue);
-                                                    }
-                                                    Ok(EngineEvent::VenueLoginCancelled {
-                                                        venue,
-                                                        ..
-                                                    }) => {
-                                                        cache.lock().await.remove(&venue);
-                                                    }
-                                                    Ok(_) => {}
-                                                    Err(RecvError::Lagged(n)) => {
-                                                        log::warn!(
-                                                            "venue_ready_bridge lagged, dropped {n}"
-                                                        );
-                                                    }
-                                                    Err(RecvError::Closed) => break,
-                                                }
-                                            }
-                                        });
-                                    }
+                                    // H-Rust3: re-spawn the bridge against the
+                                    // fresh connection via the shared helper —
+                                    // the previous bridge's recv loop has
+                                    // already exited via RecvError::Closed.
+                                    spawn_venue_ready_bridge_on(
+                                        &tokio::runtime::Handle::current(),
+                                        &new_conn,
+                                    );
                                     if let Some(tx) = ENGINE_CONNECTION_TX.get() {
                                         tx.send(Some(Arc::clone(&new_conn))).ok();
                                     }
@@ -480,36 +456,9 @@ fn main() {
                         // publishing it to the watch channel — bridges
                         // any window between iced's subscription and
                         // the engine's first venue lifecycle emit.
-                        // Reviewer 2026-04-26 R3 (HIGH-2).
-                        let bridge_cache = VENUE_READY_CACHE.get().cloned();
-                        if let Some(cache) = bridge_cache {
-                            let mut event_rx = conn.subscribe_events();
-                            tokio::spawn(async move {
-                                use engine_client::dto::EngineEvent;
-                                use tokio::sync::broadcast::error::RecvError;
-                                loop {
-                                    match event_rx.recv().await {
-                                        Ok(EngineEvent::VenueReady { venue, .. }) => {
-                                            cache.lock().await.insert(venue);
-                                        }
-                                        Ok(EngineEvent::VenueError { venue, .. }) => {
-                                            cache.lock().await.remove(&venue);
-                                        }
-                                        Ok(EngineEvent::VenueLoginStarted { venue, .. }) => {
-                                            cache.lock().await.remove(&venue);
-                                        }
-                                        Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
-                                            cache.lock().await.remove(&venue);
-                                        }
-                                        Ok(_) => {}
-                                        Err(RecvError::Lagged(n)) => {
-                                            log::warn!("venue_ready_bridge lagged, dropped {n}");
-                                        }
-                                        Err(RecvError::Closed) => break,
-                                    }
-                                }
-                            });
-                        }
+                        // Reviewer 2026-04-26 R3 (HIGH-2). H-Rust3:
+                        // shared helper instead of an inlined copy.
+                        spawn_venue_ready_bridge_on(&tokio::runtime::Handle::current(), &conn);
 
                         if let Some(tx) = ENGINE_CONNECTION_TX.get() {
                             tx.send(Some(Arc::clone(&conn))).ok();
@@ -1121,6 +1070,10 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             log::debug!("engine: client disconnected (total={count})");
             None
         }
+        // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
+        // ここに一致 arm を加えるか、`None`（このマップは Tachibana 関連
+        // イベントだけを `Message` に変換する責務であり、新バリアントは
+        // 別経路で処理される）が正しいことを確認すること。
         _ => None,
     }
 }

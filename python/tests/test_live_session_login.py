@@ -23,11 +23,16 @@ from engine.replay_session import LiveSession
 # ---------------------------------------------------------------------------
 
 
-def test_attach_force_mode_raises_not_implemented() -> None:
-    """force_mode='attach' を渡された LiveSession は __enter__ で
-    NotImplementedError を raise しなければならない。"""
+def test_attach_force_mode_raises_when_no_engine(monkeypatch) -> None:
+    """C-GP4 (Phase 8 R1 / Phase 3): force_mode='attach' は本実装済み。
+    engine が居なければ ConnectionRefusedError で fail する (token も無い場合)。
+
+    旧仕様 (NotImplementedError) は撤廃。token 解決経路がすべて欠落している
+    ケースの fail-fast を pin する。
+    """
+    monkeypatch.delenv("FLOWSURFACE_ENGINE_TOKEN", raising=False)
     session = LiveSession(venue="tachibana", demo=True, force_mode="attach")
-    with pytest.raises(NotImplementedError, match="Phase 8.3"):
+    with pytest.raises(ConnectionRefusedError):
         with session:
             pass
 

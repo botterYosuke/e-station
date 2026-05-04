@@ -36,9 +36,21 @@ http-body-util = "0.1.2"
 hyper = { version = "1", default-features = false, features = ["http1", "client"] }
 hyper-util = { version = "0.1.10", default-features = false }
 
+[features]
+# Phase 8 review-fix-loop R1 / Phase 4 H-Rust2:
+# Gate test-only public seams (`apply_after_handshake_with_timeout` /
+# `try_attach_or_spawn`) behind a non-default feature so release artefacts
+# never expose them. Integration tests in `engine-client/tests/*` enable
+# this via the self-dev-dependency below.
+testing = []
+
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 tempfile = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# H-Rust2: enable the `testing` feature for integration tests in `tests/`
+# so the gated seams (`apply_after_handshake_with_timeout` /
+# `try_attach_or_spawn`) are visible to them but stay hidden in release.
+flowsurface-engine-client = { path = ".", features = ["testing"] }

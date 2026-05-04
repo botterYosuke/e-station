@@ -213,6 +213,10 @@ async def test_venue_to_client_populated_from_order_list() -> None:
         ts_event_ms: int = 1700000000000
 
     srv = _make_server()
+    # H-Type4: live state guard を pass させるため CONNECTED に固定する。
+    from engine.server import LiveState
+
+    srv._live_state = LiveState.CONNECTED
     records = [
         _FakeRecord(client_order_id="C010", venue_order_id="V010"),
         _FakeRecord(client_order_id="C011", venue_order_id="V011"),

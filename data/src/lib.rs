@@ -214,7 +214,9 @@ mod tests {
     #[serial_test::serial(env_data_path)]
     fn data_path_env_override_joins_path_name() {
         let tmp = std::env::temp_dir().join("flowsurface-test-override-a");
-        let tmp_str = tmp.to_str().unwrap();
+        let tmp_str = tmp
+            .to_str()
+            .expect("test temp dir must be UTF-8 (set TMPDIR to ASCII path)");
         // SAFETY: test-only env mutation; serialised via #[serial] so it
         // cannot race with other tests that read/write the same var.
         unsafe {
@@ -231,7 +233,9 @@ mod tests {
     #[serial_test::serial(env_data_path)]
     fn data_path_env_override_no_path_name() {
         let tmp = std::env::temp_dir().join("flowsurface-test-override-b");
-        let tmp_str = tmp.to_str().unwrap();
+        let tmp_str = tmp
+            .to_str()
+            .expect("test temp dir must be UTF-8 (set TMPDIR to ASCII path)");
         // SAFETY: test-only env mutation; serialised via #[serial] so it
         // cannot race with other tests that read/write the same var.
         unsafe {

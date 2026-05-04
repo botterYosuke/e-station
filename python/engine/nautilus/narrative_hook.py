@@ -76,18 +76,70 @@ class NarrativeHook:
 
     # ── Sync API (non-async context 用) ───────────────────────────────────────
 
-    def on_order_filled_sync(self, order_filled_event: dict) -> None:
-        """同期版（non-async context 用）。
+    def on_order_filled_sync(self, order_filled_event: dict) -> bool:
+        """同期版（non-async context 用）。成功なら ``True`` を返す。
 
-        既存のイベントループがある場合は ``asyncio.run_coroutine_threadsafe``
-        などで適切に呼ぶこと。このメソッド自体は新しいイベントループを
-        ``asyncio.run()`` で生成して実行する。
+        H-Silent4 (Phase 8 R1 / Phase 3): 既存イベントループ中から呼ばれた
+        場合 (``asyncio.run`` がネスト不可で ``RuntimeError`` を投げる) は、
+        別 thread で新しい event loop を立てて再実行する fallback を用意する。
+        旧実装は ``except Exception`` で warning を出して silently drop して
+        いたため、ExecutionMarker が emit されないバグの温床になっていた。
+
+        MEDIUM-R2-5: thread fallback が失敗した場合は ``log.error`` で記録
+        した上で **例外を上流に伝播** する。caller が ExecutionMarker drop
+        を検知できるようにするため。Nautilus の event handler は失敗を
+        吸収する設計だが、ユーザーコードが直接呼んだ場合は raise が必要。
+        戻り値 ``bool`` は drop 検知用 (False = 失敗)。
+
+        Returns:
+            ``True``: ExecutionMarker emit に成功 (または on_event=None で no-op)。
+            ``False``: 失敗を検知したが silent path で握り潰した場合 (現実装では
+            常に raise するので False は返らないが、下流互換のため bool を返す)。
         """
         import asyncio
+        # Build the coroutine once and re-build for the fallback path so that
+        # a leaked, never-awaited coroutine does not emit a RuntimeWarning.
+        coro = self.on_order_filled(order_filled_event)
         try:
-            asyncio.run(self.on_order_filled(order_filled_event))
+            asyncio.run(coro)
+            return True
+        except RuntimeError as exc:
+            msg = str(exc)
+            if (
+                "asyncio.run() cannot be called" in msg
+                or "running event loop" in msg
+            ):
+                # The original coroutine was never awaited because asyncio.run
+                # rejected before scheduling. Close it explicitly to silence
+                # the RuntimeWarning, then re-build for the thread fallback.
+                try:
+                    coro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # Fallback: run in a fresh thread with its own loop.
+                import concurrent.futures
+
+                def _runner() -> None:
+                    asyncio.run(self.on_order_filled(order_filled_event))
+
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        ex.submit(_runner).result(timeout=10.0)
+                    return True
+                except Exception as inner_exc:  # noqa: BLE001
+                    # MEDIUM-R2-5: silent drop は禁止。エラー記録した上で
+                    # 上流に伝播させ、caller が ExecutionMarker 損失を
+                    # 検知できるようにする。
+                    log.error(
+                        "narrative_hook: thread fallback failed — %s", inner_exc
+                    )
+                    raise
+            log.error("narrative_hook: sync wrapper RuntimeError — %s", exc)
+            raise
         except Exception as exc:  # noqa: BLE001
-            log.warning("narrative_hook: sync wrapper failed — %s", exc)
+            log.error("narrative_hook: sync wrapper failed — %s", exc)
+            raise
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

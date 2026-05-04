@@ -243,7 +243,7 @@ Python プロセスは生きているが Rust が単独でクラッシュ / デ�
 Python の異常終了・再起動は「必ず起こる」前提で、Rust 側で状態を再構築できるようにする。
 
 - **Phase 7 まで / managed GUI mode**: Rust は自身を **source of truth** として以下を保持し、新プロセスに投入する。
-- **Phase 8 attach mode（✅ 実装済み 2026-05-03）**: source of truth は connection 単位に分かれる。GUI 由来の購読 / fetch / login intent は Rust が保持し、helper 由来の replay / login intent は helper 側が保持して engine 再接続後に再送する。engine 側は「各 client が自分の intent を再投入する」前提で per-connection 状態を受け直し、union 可能な購読だけを束ねる。spec.md §5.3 の per-connection 文脈への全面書き直しは次フェーズで対応予定。
+- **Phase 8 attach mode（✅ 実装済み 2026-05-03 / R1 Phase 3 で再評価 2026-05-04）**: source of truth は connection 単位に分かれる。GUI 由来の購読 / fetch / login intent は Rust が保持し、helper 由来の replay / login intent は helper 側が保持して engine 再接続後に再送する。engine 側は「各 client が自分の intent を再投入する」前提で per-connection 状態を受け直し、union 可能な購読だけを束ねる。下の「Phase 8 attach mode 補足」で per-connection 文脈の挙動を明記する。
 
 Rust が保持する状態（managed GUI mode の source of truth）は:
 

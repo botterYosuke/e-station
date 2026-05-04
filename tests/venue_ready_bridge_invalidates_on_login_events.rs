@@ -13,6 +13,12 @@
 //! test) because the bridge runs inside a `tokio::spawn` future on a
 //! dedicated runtime; the load-bearing property is "all four
 //! lifecycle event arms are present in every bridge body".
+//!
+//! H-Rust3 (2026-05-04): the previous external-mode reconnect /
+//! managed-mode inline copies have been collapsed into the single
+//! helper `spawn_venue_ready_bridge_on`. We now require **at least one**
+//! bridge body and that it contain all four arms; further duplications
+//! are still tolerated.
 
 const REQUIRED_ARMS: &[&str] = &[
     "EngineEvent::VenueReady",
@@ -42,9 +48,9 @@ fn every_venue_ready_bridge_handles_all_four_lifecycle_events() {
         search_from = absolute + needle.len();
     }
     assert!(
-        bodies.len() >= 3,
-        "expected at least 3 venue-ready bridge bodies in main.rs \
-         (helper + external-mode reconnect inline + managed-mode inline), \
+        !bodies.is_empty(),
+        "expected at least 1 venue-ready bridge body in main.rs \
+         (single helper `spawn_venue_ready_bridge_on` post H-Rust3), \
          found {}",
         bodies.len()
     );

@@ -133,14 +133,56 @@ impl EngineSession {
 
 /// True iff a process with `pid` currently exists on the system.
 /// `pid == 0` is treated as not-live (sentinel from when `Child::id()` returned None).
+///
+/// Stability: on Windows the sysinfo snapshot occasionally misses a freshly
+/// targeted pid in the first refresh due to internal caching/timing in
+/// `NtQuerySystemInformation`. We perform up to 3 refreshes (50 ms apart)
+/// before reporting "not live" so the ambient flake in
+/// `reap_stale_keeps_live_pid_file` cannot turn a live engine pid into
+/// a "stale" verdict and cause the live engine-session.json to be
+/// deleted out from under a running engine.
 fn pid_is_live(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
     use sysinfo::{Pid, ProcessesToUpdate, System};
-    let mut sys = System::new();
     let target = Pid::from_u32(pid);
-    // sysinfo 0.32: refresh just the targeted pid; do not prune others.
-    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), false);
-    sys.process(target).is_some()
+    let mut sys = System::new();
+    for attempt in 0..3 {
+        // sysinfo 0.32: refresh just the targeted pid; do not prune others.
+        sys.refresh_processes(ProcessesToUpdate::Some(&[target]), false);
+        if sys.process(target).is_some() {
+            return true;
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stability guard for `pid_is_live`: the calling process is, by definition,
+    /// live. Calling `pid_is_live(std::process::id())` 10 times in a row must
+    /// yield `true` every time. If sysinfo's snapshot occasionally misses the
+    /// pid (Windows flake) the retry loop inside `pid_is_live` must absorb it.
+    #[test]
+    fn pid_is_live_for_self_is_stable() {
+        let me = std::process::id();
+        for i in 0..10 {
+            assert!(
+                pid_is_live(me),
+                "pid_is_live(self) returned false on iteration {i} — \
+                 retry loop is not absorbing sysinfo flake"
+            );
+        }
+    }
+
+    #[test]
+    fn pid_is_live_zero_is_not_live() {
+        assert!(!pid_is_live(0));
+    }
 }

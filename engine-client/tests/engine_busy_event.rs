@@ -4,7 +4,7 @@
 //! Python `schemas.py` の wire 形式（`event` タグ付き JSON）から
 //! `EngineEvent` に正しく変換できることを確認する。
 
-use flowsurface_engine_client::dto::EngineEvent;
+use flowsurface_engine_client::dto::{AttemptedCommand, CurrentEngineState, EngineEvent};
 
 // ── EngineBusy ───────────────────────────────────────────────────────────────
 
@@ -22,11 +22,55 @@ fn engine_busy_deserializes_correctly() {
             current_state,
             attempted_command,
             reason,
+            request_id,
         } => {
-            assert_eq!(current_state, "RUNNING");
-            assert_eq!(attempted_command, "LoadReplayData");
+            assert_eq!(current_state, CurrentEngineState::Running);
+            assert_eq!(attempted_command, AttemptedCommand::LoadReplayData);
             assert_eq!(reason, "already running");
+            // MEDIUM-R2-6: 旧 wire (`request_id` フィールド未送出) は
+            // `Option<String>` の `None` にデシリアライズされる (後方互換)。
+            assert!(
+                request_id.is_none(),
+                "old wire format should deserialize as None"
+            );
         }
+        other => panic!("expected EngineBusy, got {other:?}"),
+    }
+}
+
+#[test]
+fn engine_busy_with_request_id_deserializes() {
+    // MEDIUM-R2-6: Python schemas.py に追加された Optional `request_id` を
+    // Rust 側でも受領できることを保証する。helper attach client が
+    // 「自分の Command への reject」を識別するために使うフィールド。
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "RUNNING",
+        "attempted_command": "LoadReplayData",
+        "reason": "wrong state",
+        "request_id": "rid-abc-123"
+    }"#;
+    let evt: EngineEvent = serde_json::from_str(json).expect("should deserialize");
+    match evt {
+        EngineEvent::EngineBusy { request_id, .. } => {
+            assert_eq!(request_id.as_deref(), Some("rid-abc-123"));
+        }
+        other => panic!("expected EngineBusy, got {other:?}"),
+    }
+}
+
+#[test]
+fn engine_busy_without_request_id_is_none() {
+    // MEDIUM-R2-6: 旧 wire (request_id 未送出) は `None` にデシリアライズされる。
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "RUNNING",
+        "attempted_command": "LoadReplayData",
+        "reason": "wrong state"
+    }"#;
+    let evt: EngineEvent = serde_json::from_str(json).expect("should deserialize");
+    match evt {
+        EngineEvent::EngineBusy { request_id, .. } => assert!(request_id.is_none()),
         other => panic!("expected EngineBusy, got {other:?}"),
     }
 }

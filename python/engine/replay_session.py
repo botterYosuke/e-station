@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Literal, TypedDict
 
 from engine.nautilus.engine_runner import NautilusRunner  # noqa: F401 (re-exported for patch)
+from engine.schemas import AUTH_FAILED_CODE
 
 # H11: LiveSession.login() で使う Tachibana 内部ログイン API を
 # モジュールレベルで再 export しておくことで、テストから monkeypatch で
@@ -38,10 +39,32 @@ _ForceMode = Literal["auto", "inprocess", "attach"]
 
 
 # M-3 (type): _read_session_file の戻り値型を TypedDict で明示する。
-# total=False で部分書き込み・後方互換ファイルを許容する。
-class SessionFileData(TypedDict, total=False):
+# M-Type2: 必須 (port/token) と任意 (pid/schema_major/started_at) を分離する。
+# 読み取り中間表現は ``PartialSessionFileData`` (total=False)、最終的に
+# 必須フィールド検証が通ったものは ``SessionFileData`` (total=True) として返す。
+class PartialSessionFileData(TypedDict, total=False):
+    """読み取り中間表現 — JSON にどのフィールドが入っているか不明な段階。"""
+
     port: int
     token: str
+    pid: int
+    schema_major: int
+    started_at: str
+
+
+class SessionFileData(TypedDict, total=False):
+    """確定済み形 — token/port は必須、その他はオプショナル。
+
+    Note: TypedDict は単一クラス内で必須/任意を分離できないため、
+    必須性は ``_read_session_file`` のランタイム検証で担保する。
+    型チェッカ向けには ``Required[...]`` を使ってもよいが、Python 3.10
+    互換維持のため `total=False` のまま runtime guard を真実源とする。
+    """
+
+    # 必須 (runtime で _read_session_file が validate)
+    port: int
+    token: str
+    # オプショナル
     pid: int
     schema_major: int
     started_at: str
@@ -134,6 +157,8 @@ def _read_session_file() -> SessionFileData | None:
 
     M-3 (type): 戻り値は ``SessionFileData`` TypedDict 形状を満たす dict、
     または stale/invalid なら ``None``。
+    M-Type2: 必須フィールド ``token`` と ``port`` をランタイムで検証してから
+    narrow した ``SessionFileData`` 型として返す。
     """
     path = _resolve_session_file_path()
     try:
@@ -145,22 +170,56 @@ def _read_session_file() -> SessionFileData | None:
     if not isinstance(data, dict):
         return None
 
+    partial: PartialSessionFileData = data  # type: ignore[assignment]
+
     # M-SF3: token フィールドが存在しないか空の場合は invalid として None を返す。
-    if "token" not in data or not data["token"]:
+    token = partial.get("token")
+    if not token:
         log.debug("[_read_session_file] no token field, ignoring session file")
         return None
 
-    # pid が生存しているか確認
-    pid = data.get("pid")
-    if pid is not None and not _is_pid_alive(int(pid)):
+    # M-Type2: port も必須。欠損・非 int は invalid 扱い。
+    port = partial.get("port")
+    if not isinstance(port, int) or port <= 0:
+        log.debug(
+            "[_read_session_file] missing/invalid port=%r, ignoring session file", port
+        )
         return None
 
-    return data  # type: ignore[return-value]
+    # M-GP2 (Phase 8 R1 / Phase 3): pid フィールドが欠損 (キー無し) または
+    # ``None`` の session ファイルは invalid 扱いで None を返す。理由:
+    # Rust 側 ``EngineSession`` は spawn 時に必ず pid を書き込む契約のため、
+    # pid 不在 = ファイル破損 / 旧フォーマット / テスト漏れ のいずれか。
+    # 安全側に倒して fallback させる。
+    pid = partial.get("pid")
+    if pid is None:
+        log.debug("[_read_session_file] missing pid field, ignoring session file")
+        return None
+    if not _is_pid_alive(int(pid)):
+        return None
+
+    return partial  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
 # BusyError
 # ---------------------------------------------------------------------------
+
+
+def _credential_fingerprint(
+    user_id: str | None, password: str | None, demo: bool
+) -> str:
+    """MEDIUM-R2-7: credential を平文で保持しないための fingerprint。
+
+    SHA-256 をかけた hex digest を返す。`None` は空文字列として扱う。
+    値そのものは外に出さない (RuntimeError メッセージにも fingerprint だけ
+    含めない方針 — 比較にのみ使う)。
+    """
+    import hashlib
+    payload = (
+        f"{user_id or ''}\x00{password or ''}\x00{'1' if demo else '0'}"
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class BusyError(Exception):
@@ -197,6 +256,18 @@ class _AttachClient:
         self._handshake_ok: bool = False
         self._handshake_err: Exception | None = None
         self._thread: threading.Thread | None = None
+        # HIGH-R2-3: events() / wait_for() で「自分宛の Error」を識別する
+        # ための request_id。caller (run()) が StartEngine 発行時にセット。
+        # None のときは broadcast 扱い (request_id=None の Error) のみ raise。
+        self._current_request_id: str | None = None
+
+    def set_current_request_id(self, request_id: str | None) -> None:
+        """events()/wait_for() の Error フィルタに使う request_id を設定する。
+
+        HIGH-R2-3: 自分が発行した request_id 一致 or broadcast (None) のみ raise。
+        他 client 由来の Error (request_id 不一致) は無視して継続する。
+        """
+        self._current_request_id = request_id
 
     def handshake(self) -> None:
         """バックグラウンドスレッドで asyncio loop を起動し handshake を実行する。
@@ -218,11 +289,21 @@ class _AttachClient:
             if not self._handshake_ok:
                 raise ConnectionRefusedError("attach handshake timeout")
         except BaseException:
-            # H14: 失敗時は thread/loop をリークさせない。
+            # H14 / H-GP2 (Phase 8 R1 / Phase 3): 失敗時は thread/loop を
+            # リークさせない。close() で sentinel を投入し thread を join
+            # するが、5s 以内に終わらなければ warning を残し RuntimeError
+            # でも上位に伝播させない (元の例外を優先)。close() 自体は冪等。
             try:
                 self.close()
             except Exception as exc:  # noqa: BLE001
                 log.warning("handshake cleanup close() failed: %s", exc)
+            # close() が thread.join(5.0) 済み。残存していたら明示的に
+            # warn する (リーク検知)。
+            if self._thread is not None and self._thread.is_alive():
+                log.warning(
+                    "handshake cleanup: attach thread did not terminate "
+                    "within 5s — possible loop deadlock"
+                )
             raise
 
     def _run_loop(self) -> None:
@@ -268,10 +349,13 @@ class _AttachClient:
                             raise ConnectionRefusedError("schema_major mismatch")
                         break
                     if event in ("Error", "EngineError"):
-                        # H5: token mismatch / auth_failed を専用エラーとして区別する。
-                        # message は EngineError の構造に依存。token は raise しない。
-                        code = msg.get("code") or msg.get("message", "")
-                        if isinstance(code, str) and "auth" in code.lower():
+                        # WS-MED3 / H-GP1 (Phase 8 R1 / Phase 3): token mismatch
+                        # は code が `AUTH_FAILED_CODE` と完全一致するときのみ
+                        # `_TokenMismatchError` に翻訳する。旧実装は
+                        # `"auth" in code.lower()` という曖昧マッチで
+                        # `authentication_error` 等もヒットしていた。
+                        code = msg.get("code")
+                        if isinstance(code, str) and code == AUTH_FAILED_CODE:
                             raise _TokenMismatchError(
                                 "attach handshake: token mismatch"
                             )
@@ -364,9 +448,19 @@ class _AttachClient:
         ).result(timeout=5.0)
 
     def wait_for(self, event_type: str, timeout_s: float | None = None) -> dict:
-        """指定 event type の event を待つ。他の event は再 queue に積む。"""
+        """指定 event type の event を待つ。他の event は再 queue に積む。
+
+        Silent-M3 / M-GP3 (Phase 8 R1 / Phase 3): エラー終了パスでは pending を
+        破棄する。具体的には ``Error`` event / ``EngineBusy`` で raise する場合、
+        既に取り出した pending event は queue に戻さず捨てる
+        (`events()` から後続呼び出ししたときに重複表示しない不変条件)。
+        正常終了パス (待機 event 一致) でのみ pending を put_nowait で戻す。
+        """
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         pending: list[dict] = []
+        # M-GP3: requeue するか drop するかを抜けるパスごとに切り替えるフラグ。
+        # True = 戻す (待機 event を見つけた正常終了)、False = 破棄 (エラー)。
+        requeue_pending = False
         try:
             while True:
                 remaining = None if deadline is None else deadline - time.monotonic()
@@ -378,23 +472,68 @@ class _AttachClient:
                     raise TimeoutError(f"wait_for({event_type!r}) timed out")
 
                 if msg.get("event") == event_type:
+                    requeue_pending = True
                     return msg
                 if "__error__" in msg:
                     raise ConnectionError("WS connection closed during wait_for")
-                # H12: state guard で reject されたら BusyError に翻訳する。
+                # Silent-M3 / HIGH-R2-3: engine からの Error event を
+                # 自分宛 (request_id 一致 or broadcast) のときだけ raise する。
+                # 別 client 由来の Error は pending に積まず無視して続行。
+                if msg.get("event") == "Error":
+                    evt_rid = msg.get("request_id")
+                    if (
+                        self._current_request_id is not None
+                        and evt_rid is not None
+                        and evt_rid != self._current_request_id
+                    ):
+                        log.debug(
+                            "[_AttachClient.wait_for] ignoring Error from another "
+                            "request_id=%r (current=%r)",
+                            evt_rid,
+                            self._current_request_id,
+                        )
+                        continue
+                    raise ConnectionError(
+                        f"engine returned Error: code={msg.get('code')!r} "
+                        f"message={msg.get('message')!r}"
+                    )
+                # H12 / MEDIUM-R2-6: state guard で reject されたら BusyError に翻訳する。
+                # broadcast EngineBusy (request_id 不一致) は自分と無関係なので無視。
                 if msg.get("event") == "EngineBusy":
+                    evt_rid = msg.get("request_id")
+                    if (
+                        self._current_request_id is not None
+                        and evt_rid is not None
+                        and evt_rid != self._current_request_id
+                    ):
+                        log.debug(
+                            "[_AttachClient.wait_for] ignoring EngineBusy from another "
+                            "request_id=%r (current=%r)",
+                            evt_rid,
+                            self._current_request_id,
+                        )
+                        continue
                     raise BusyError(
                         f"EngineBusy: state={msg.get('current_state')!r} "
                         f"cmd={msg.get('attempted_command')!r}"
                     )
                 pending.append(msg)
         finally:
-            # 保留 event を再 queue に戻す
-            for m in pending:
-                self._recv_queue.put_nowait(m)
+            # 正常終了 (待機 event 一致) のみ pending を re-queue する。
+            # error path (BusyError / ConnectionError / TimeoutError) では
+            # pending を破棄する (M-GP3)。
+            if requeue_pending:
+                for m in pending:
+                    self._recv_queue.put_nowait(m)
 
     def events(self):
-        """event stream を yield するジェネレータ。EngineStopped で終了。"""
+        """event stream を yield するジェネレータ。EngineStopped で終了。
+
+        Silent-M3 (Phase 8 R1 / Phase 3): engine から ``Error`` event を
+        受信したら ``ConnectionError`` を即 raise する。旧実装は Error を
+        通常 event として yield していたため、ユーザーが気付かないまま
+        次の event を待ち続けて 60s ハングするケースがあった。
+        """
         while True:
             try:
                 msg = self._recv_queue.get(timeout=1.0)
@@ -412,9 +551,46 @@ class _AttachClient:
                 return
 
             if msg.get("event") == "EngineBusy":
+                # MEDIUM-R2-6: broadcast EngineBusy (別 client 起因 / request_id
+                # 不一致) は自分の操作と無関係なので無視する。
+                evt_rid = msg.get("request_id")
+                if (
+                    self._current_request_id is not None
+                    and evt_rid is not None
+                    and evt_rid != self._current_request_id
+                ):
+                    log.debug(
+                        "[_AttachClient.events] ignoring EngineBusy from another "
+                        "request_id=%r (current=%r)",
+                        evt_rid,
+                        self._current_request_id,
+                    )
+                    continue
                 raise BusyError(
                     f"EngineBusy: state={msg.get('current_state')!r} "
                     f"cmd={msg.get('attempted_command')!r}"
+                )
+
+            # Silent-M3 / HIGH-R2-3: engine が返す Error event は
+            # 自分宛のもの (request_id 一致 or broadcast) のときだけ raise する。
+            # 別 client が起こした Error (request_id 不一致) は無視して続行。
+            if msg.get("event") == "Error":
+                evt_rid = msg.get("request_id")
+                if (
+                    self._current_request_id is not None
+                    and evt_rid is not None
+                    and evt_rid != self._current_request_id
+                ):
+                    log.debug(
+                        "[_AttachClient.events] ignoring Error from another "
+                        "request_id=%r (current=%r)",
+                        evt_rid,
+                        self._current_request_id,
+                    )
+                    continue
+                raise ConnectionError(
+                    f"engine returned Error: code={msg.get('code')!r} "
+                    f"message={msg.get('message')!r}"
                 )
 
             yield msg
@@ -594,13 +770,14 @@ class ReplaySession:
         return self._mode
 
     @property
-    def status(self) -> Literal["idle", "loaded", "running", "stopped", "errored"]:
-        # H-GP1: STOPPING は遷移中であり engine はまだ動いているため "running" にマップする。
-        # 計画書 §4.1 の Literal 仕様に準拠。
-        s = self._status
-        if s is _ReplayStatus.STOPPING:
-            return "running"
-        return s.value  # type: ignore[return-value]
+    def status(
+        self,
+    ) -> Literal["idle", "loaded", "running", "stopping", "stopped", "errored"]:
+        # H-Type3 / C-GP1 (Phase 8 R1 / Phase 3): STOPPING は固有の状態として
+        # 公開する。旧実装は "running" にマップしていたが、観測上 stop() 中の
+        # フェーズと走行中を区別したいケースがあるため、Literal を 6 値に拡張。
+        # 計画書 §4.1 の status プロパティ仕様。
+        return self._status.value
 
     @property
     def portfolio(self) -> dict | None:
@@ -637,8 +814,9 @@ class ReplaySession:
         if self._mode == "attach":
             from engine.schemas import LoadReplayData
             import uuid
+            req_id = str(uuid.uuid4())
             cmd = LoadReplayData(
-                request_id=str(uuid.uuid4()),
+                request_id=req_id,
                 instrument_id=instrument_id,
                 start_date=start_date,
                 end_date=end_date,
@@ -648,6 +826,13 @@ class ReplaySession:
             # 明示的に RuntimeError として raise する。
             if self._client is None:
                 raise RuntimeError("attach client not initialized")
+            # HIGH-R2-3: 自分の request_id を attach client に伝え、
+            # 他 client 由来の Error / EngineBusy を無視できるようにする。
+            # 既存テストの fake client (`set_current_request_id` 未実装) と
+            # 後方互換を保つため getattr で defensive に呼ぶ。
+            _setter = getattr(self._client, "set_current_request_id", None)
+            if callable(_setter):
+                _setter(req_id)
             self._client.send_command(cmd.model_dump())
             # ReplayDataLoaded を待つ（timeout 60s）
             self._client.wait_for("ReplayDataLoaded", timeout_s=60.0)
@@ -718,8 +903,9 @@ class ReplaySession:
             # C-2: strategy_id を保存して stop() で StopEngine コマンドに使えるようにする。
             self._strategy_id = strategy_id
             params = self._load_params or {}
+            run_request_id = str(uuid.uuid4())
             cmd = StartEngine(
-                request_id=str(uuid.uuid4()),
+                request_id=run_request_id,
                 engine="Backtest",
                 strategy_id=strategy_id,
                 config=EngineStartConfig(
@@ -736,18 +922,45 @@ class ReplaySession:
             # M-5 (type): assert は -O で消えるため明示的に raise する。
             if self._client is None:
                 raise RuntimeError("attach client not initialized")
+            # HIGH-R2-3: events() が他 client 由来の Error を無視するため、
+            # 自分の StartEngine request_id を attach client に登録する。
+            # fake client の後方互換のため getattr で defensive に呼ぶ。
+            _setter = getattr(self._client, "set_current_request_id", None)
+            if callable(_setter):
+                _setter(run_request_id)
             self._client.send_command(cmd.model_dump())
             try:
                 for evt in self._client.events():
                     # H13: attach 経路でも portfolio を更新する。
                     # event/type のどちらでも判定できるよう統一ヘルパ経由。
-                    if _extract_event_kind(evt) == "ReplayBuyingPower":
+                    kind = _extract_event_kind(evt)
+                    if kind == "ReplayBuyingPower":
                         self._portfolio = evt
+                    # C-GP2 (Phase 8 R1 / Phase 3): EngineStopped を観測したら
+                    # on_event 呼出 *前* に STOPPED へ遷移する。on_event 内で
+                    # 例外が出ても status が ERRORED に上書きされず STOPPED の
+                    # まま残ることを保証する (ユーザーコールバックのバグが
+                    # ライフサイクル状態を破壊しない不変条件)。
+                    if kind == "EngineStopped":
+                        self._status = _ReplayStatus.STOPPED
                     on_event(evt)
-                self._status = _ReplayStatus.STOPPED
+                # ループが正常終了した場合、events() は EngineStopped で
+                # return しているため _status は既に STOPPED。冪等更新。
+                if self._status is not _ReplayStatus.STOPPED:
+                    self._status = _ReplayStatus.STOPPED
             except Exception:
-                self._status = _ReplayStatus.ERRORED
+                # C-GP2: 既に STOPPED に遷移済みなら維持する (on_event 内 raise
+                # が STOPPED を ERRORED に上書きしないようにする)。
+                if self._status is not _ReplayStatus.STOPPED:
+                    self._status = _ReplayStatus.ERRORED
                 raise
+            finally:
+                # LOW-R3-4: run() 退出時に attach client の current_request_id を
+                # クリアする。次の load()/run() / 別 client の Error が前 run の
+                # request_id にマッチして誤発火するのを防ぐ。
+                _setter_finally = getattr(self._client, "set_current_request_id", None)
+                if callable(_setter_finally):
+                    _setter_finally(None)
             return
 
         # in-process
@@ -862,13 +1075,36 @@ class ReplaySession:
         return None
 
     def _resolve_endpoint_and_token(self) -> tuple[str | None, str | None]:
-        """endpoint と token を (明示引数 → session ファイル → env) の順で解決する。"""
-        # 1. 明示引数
+        """endpoint と token を解決する。
+
+        M-GP1 (Phase 8 R1 / Phase 3): 解決順序を計画書 §4.1 に明記する。
+        優先順は次の通り:
+
+        1. **(a) 明示 attach_endpoint + env**
+           ``__init__(attach_endpoint=...)`` が指定されている場合は
+           その endpoint と ``FLOWSURFACE_ENGINE_TOKEN`` env の組み合わせ
+           を使う。**session ファイルの token は混ぜない** (明示引数を
+           受け入れた以上、ユーザーが env で token 管理する契約)。
+        2. **(b) session ファイル**
+           ``engine-session.json`` から ``{port, token}`` を読み取る。
+           pid が dead だったり token / port が欠損していれば invalid
+           として skip する (M-GP2)。
+        3. **(c) env-only**
+           ``FLOWSURFACE_ENGINE_TOKEN`` が設定されていて (1)(2) が
+           当てはまらない場合、``FLOWSURFACE_ENGINE_PORT`` env を尊重
+           しつつ既定 ``19876`` を使う (H-GP4)。
+
+        いずれにも当てはまらなければ ``(None, None)`` を返し、
+        ``__enter__`` 側で in-process フォールバックする。
+
+        token はログ・例外メッセージに出力しない (CLAUDE.md「Token 認証」)。
+        """
+        # (a) 明示 attach_endpoint
         if self._attach_endpoint is not None:
             token = os.environ.get("FLOWSURFACE_ENGINE_TOKEN")
             return (self._attach_endpoint, token)
 
-        # 2. session ファイル
+        # (b) session ファイル
         session = _read_session_file()
         if session is not None:
             port = session.get("port", 19876)
@@ -883,10 +1119,19 @@ class ReplaySession:
                 )
             return (f"ws://127.0.0.1:{port}/", token)
 
-        # 3. env のみ
+        # (c) env-only — H-GP4: FLOWSURFACE_ENGINE_PORT を尊重する。
         token = os.environ.get("FLOWSURFACE_ENGINE_TOKEN")
         if token:
-            return ("ws://127.0.0.1:19876/", token)
+            port_env = os.environ.get("FLOWSURFACE_ENGINE_PORT")
+            try:
+                port = int(port_env) if port_env else 19876
+            except ValueError:
+                log.warning(
+                    "FLOWSURFACE_ENGINE_PORT=%r is not an integer; using default 19876",
+                    port_env,
+                )
+                port = 19876
+            return (f"ws://127.0.0.1:{port}/", token)
 
         return (None, None)
 
@@ -925,6 +1170,14 @@ class LiveSession:
         # H11: login() 状態。in-process 経路で内部 API が成功すると True に遷移。
         self._logged_in: bool = False
         self._session: object | None = None
+        # C-GP4: attach mode 用の WS クライアント。inprocess では None のまま。
+        self._client: _AttachClient | None = None
+        # CRITICAL-R2-1: 直近の RequestVenueLogin 用 request_id (broadcast 経路の
+        # VenueError と別 client 由来の event を区別するために保存)。
+        self._login_request_id: str | None = None
+        # MEDIUM-R2-7: 初回 login() で使った credential のハッシュ (検知用に
+        # 平文ではなく SHA-256 で保管)。2回目以降 credential 変更を検知する。
+        self._login_cred_fingerprint: str | None = None
 
     # ------------------------------------------------------------------
     # Context manager
@@ -934,19 +1187,80 @@ class LiveSession:
         if self._entered:
             raise RuntimeError("LiveSession は既に with ブロックに入っています。再利用不可。")
         self._entered = True
-        # H17: Phase 8.1a スコープでは attach mode は未実装。
-        # silent fallback だと「動いているように見えて実は inprocess」になり
-        # ユーザー側のデバッグが困難になるため、明示的に NotImplementedError を出す。
+
+        # C-GP4 (Phase 8 R1 / Phase 3): attach mode 本実装。
+        # ReplaySession と同じ token / endpoint 解決順序を共有する。
         if self._force_mode == "attach":
-            raise NotImplementedError(
-                "LiveSession attach mode is Phase 8.3 scope; not yet implemented"
-            )
-        # Phase 8.1a: always inprocess (auto / inprocess どちらも inprocess に倒す)
+            endpoint, token = self._resolve_endpoint_and_token()
+            if endpoint is None or token is None:
+                if self._attach_endpoint is not None and token is None:
+                    raise ConnectionRefusedError(
+                        "force_mode='attach' but FLOWSURFACE_ENGINE_TOKEN env var is not set"
+                    )
+                raise ConnectionRefusedError(
+                    "force_mode='attach' but no engine-session.json / FLOWSURFACE_ENGINE_TOKEN found"
+                )
+            client = _AttachClient(endpoint, token, self._attach_timeout_s)
+            client.handshake()
+            self._client = client
+            self._mode = "attach"
+            return self
+
+        if self._force_mode == "auto":
+            # auto: probe → attach mode → fallback to inprocess
+            endpoint, token = self._resolve_endpoint_and_token()
+            if endpoint is not None and token is not None:
+                try:
+                    client = _AttachClient(endpoint, token, self._attach_timeout_s)
+                    client.handshake()
+                    self._client = client
+                    self._mode = "attach"
+                    log.info("LiveSession: attach mode (endpoint=%s)", endpoint)
+                    return self
+                except Exception as exc:
+                    log.warning(
+                        "LiveSession: attach probe failed, falling back to inprocess: %s",
+                        type(exc).__name__,
+                    )
+
+        # force_mode == "inprocess" or auto-fallback
         self._mode = "inprocess"
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[LiveSession.__exit__] client.close() failed: %s", exc)
         return False
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_endpoint_and_token(self) -> tuple[str | None, str | None]:
+        """ReplaySession と同じ解決ルール (M-GP1)。"""
+        if self._attach_endpoint is not None:
+            token = os.environ.get("FLOWSURFACE_ENGINE_TOKEN")
+            return (self._attach_endpoint, token)
+
+        session = _read_session_file()
+        if session is not None:
+            port = session.get("port", 19876)
+            token = session.get("token")
+            return (f"ws://127.0.0.1:{port}/", token)
+
+        token = os.environ.get("FLOWSURFACE_ENGINE_TOKEN")
+        if token:
+            port_env = os.environ.get("FLOWSURFACE_ENGINE_PORT")
+            try:
+                port = int(port_env) if port_env else 19876
+            except ValueError:
+                port = 19876
+            return (f"ws://127.0.0.1:{port}/", token)
+
+        return (None, None)
 
     # ------------------------------------------------------------------
     # Properties
@@ -968,36 +1282,58 @@ class LiveSession:
     # ------------------------------------------------------------------
 
     def login(self, *, user_id: str | None = None, password: str | None = None) -> None:
-        """ログインする（H11: in-process 経路の本実装）。
+        """ログインする。
 
-        引数で渡された ``user_id`` / ``password`` を最優先し、無ければ
-        ``DEV_TACHIBANA_USER_ID`` / ``DEV_TACHIBANA_PASSWORD`` から解決する。
-        どちらも欠けている場合は ``ValueError``。
+        - in-process mode: 引数または ``DEV_TACHIBANA_*`` env から credential を
+          解決して内部 Tachibana login API を直接叩く。
+        - attach mode (C-GP4): credential を wire 経由で送らない。明示引数を
+          渡されたら ``ValueError``。credential 無しなら engine に
+          ``RequestVenueLogin`` を送り ``VenueReady`` / ``VenueError`` を待つ。
+        - **M-GP5**: 既に ``is_logged_in == True`` なら無条件で no-op で return。
+          (内部 API も engine への RequestVenueLogin も再送信しない)。
 
         ``demo`` flag は ``__init__`` の値をそのまま内部 API に伝播する。
 
         Args:
-            user_id: ユーザー ID。明示しない場合は env から解決。
-            password: パスワード。明示しない場合は env から解決。
+            user_id: ユーザー ID。明示しない場合は env から解決 (in-process のみ)。
+            password: パスワード。明示しない場合は env から解決 (in-process のみ)。
 
         Raises:
-            ValueError: cred が引数でも env でも解決できない場合 / attach mode の場合。
-            NotImplementedError: attach mode（Phase 8.3 まで未実装）。
-            Exception: 内部 Tachibana login API が raise した例外（そのまま伝播）。
+            ValueError: cred が引数でも env でも解決できない場合 (in-process)、
+                または attach mode で credential を明示渡しされた場合。
+            ConnectionError: attach mode で engine から ``VenueError`` が返った場合
+                (code/message を含む)。
+            Exception: 内部 Tachibana login API が raise した例外 (そのまま伝播)。
         """
-        # attach mode は __enter__ 時点で NotImplementedError になっているため
-        # 通常はここに来ないが、防御的に明示的なエラーを返す。
-        # M-GP4: attach mode + credentials は ValueError（計画書 §4.3 準拠）。
+        # MEDIUM-R2-7 / MEDIUM-R3-1: 2回目以降の login() は credential 変更を検知する。
+        # ただし「両方とも明示渡し」のときだけ厳格チェックする。
+        # 片方だけ明示 / 全部 None の場合は env / 既存値からの解決経路を尊重し、
+        # caller の意図を「変更したい」と判別できないため過剰拒否を避ける。
+        # `LiveSession` は immutable credential 前提 (変更したい場合は新 instance)。
+        # 平文比較は監査ログ漏洩リスクがあるため SHA-256 fingerprint で比較する。
+        if self._logged_in:
+            if user_id is not None and password is not None:
+                fp_now = _credential_fingerprint(user_id, password, self._demo)
+                if (
+                    self._login_cred_fingerprint is not None
+                    and fp_now != self._login_cred_fingerprint
+                ):
+                    raise RuntimeError(
+                        "LiveSession credentials cannot change after login; "
+                        "create a new LiveSession instance instead"
+                    )
+            log.debug("LiveSession.login: already logged in — no-op")
+            return
+
+        # C-GP4: attach mode は engine に RequestVenueLogin を送って待つ。
         if self._mode == "attach":
             if user_id is not None or password is not None:
                 raise ValueError(
                     "attach mode では user_id/password をワイヤー経由で送れません。"
                     "GUI/engine 側の保存済み credential か dev 用の credential を使ってください。"
                 )
-            # credentials なし attach mode は Phase 8.3 未実装
-            raise NotImplementedError(
-                "LiveSession.login() in attach mode is Phase 8.3 scope"
-            )
+            self._login_attach()
+            return
 
         resolved_user_id = user_id if user_id is not None else os.environ.get(
             "DEV_TACHIBANA_USER_ID"
@@ -1014,31 +1350,40 @@ class LiveSession:
         # 内部 API は async — 既存の event loop と競合しないよう asyncio.run で
         # 同期ラップする。helper 直接 API は同期インターフェースを契約として
         # 提供するため、ここで sync ↔ async 境界を吸収する。
+        # H-GP5 (Phase 8 R1 / Phase 3): p_no_counter は外側で 1 度だけ生成し、
+        # nested-loop fallback でも同一インスタンスを再利用する (旧実装は
+        # fallback 内で ``_PNoCounter()`` を再生成しており、最初に作った
+        # counter が捨てられていた)。
         p_no_counter = _PNoCounter()
         # 注意: ``_tachibana_login_call`` はモジュールレベルで再 export して
         # いるため、テストは ``engine.replay_session._tachibana_login_call`` を
         # monkeypatch して引数伝播を検証できる。
-        login_coro = _tachibana_login_call(
-            resolved_user_id,
-            resolved_password,
-            is_demo=self._demo,
-            p_no_counter=p_no_counter,
-        )
         try:
-            session = asyncio.run(login_coro)
+            session = asyncio.run(
+                _tachibana_login_call(
+                    resolved_user_id,
+                    resolved_password,
+                    is_demo=self._demo,
+                    p_no_counter=p_no_counter,
+                )
+            )
         except RuntimeError as exc:
             # asyncio.run はネスト不可。既に loop が走っている文脈
             # （例: notebook）では新しい thread で実行する fallback を用意する。
-            if "asyncio.run() cannot be called" in str(exc) or "running event loop" in str(exc):
+            if (
+                "asyncio.run() cannot be called" in str(exc)
+                or "running event loop" in str(exc)
+            ):
                 import concurrent.futures
 
                 def _runner() -> object:
+                    # H-GP5: 同一 p_no_counter インスタンスを再利用する。
                     return asyncio.run(
                         _tachibana_login_call(
                             resolved_user_id,
                             resolved_password,
                             is_demo=self._demo,
-                            p_no_counter=_PNoCounter(),
+                            p_no_counter=p_no_counter,
                         )
                     )
 
@@ -1049,6 +1394,87 @@ class LiveSession:
 
         self._session = session
         self._logged_in = True
+        # MEDIUM-R2-7: 後続の login() で credential 変更を検知できるように
+        # 解決済み credential の fingerprint を保存する (平文では保持しない)。
+        self._login_cred_fingerprint = _credential_fingerprint(
+            resolved_user_id, resolved_password, self._demo
+        )
+
+    def _login_attach(self) -> None:
+        """C-GP4: attach mode の login flow.
+
+        engine に ``RequestVenueLogin{venue=self._venue}`` を送り、
+        ``VenueReady`` で成功 / ``VenueError`` で失敗を判定する。
+        token は wire に出さない (`_AttachClient` がヘッドのみで管理)。
+        """
+        import uuid as _uuid
+        from engine.schemas import RequestVenueLogin
+
+        if self._client is None:
+            raise RuntimeError("attach client not initialized")
+
+        request_id = str(_uuid.uuid4())
+        # CRITICAL-R2-1: 自分が発行した request_id を保存しておく。VenueError の
+        # broadcast 経路 (request_id=None) と、別 client 由来のイベントを区別する。
+        self._login_request_id = request_id
+        cmd = RequestVenueLogin(request_id=request_id, venue=self._venue)
+        self._client.send_command(cmd.model_dump())
+
+        # VenueReady と VenueError どちらかを待つ。``wait_for`` は単一 event 名
+        # しか待てないため、recv_queue を直接 poll して両方を捕捉する。
+        deadline = time.monotonic() + 30.0
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"LiveSession.login: VenueReady/VenueError timed out (venue={self._venue!r})"
+                )
+            try:
+                got = self._client._recv_queue.get(timeout=min(remaining, 1.0))
+            except queue.Empty:
+                if self._client._closed_event.is_set():
+                    raise ConnectionError(
+                        "LiveSession.login: engine WS closed before response"
+                    )
+                continue
+
+            if "__error__" in got:
+                raise ConnectionError("LiveSession.login: engine WS connection lost")
+
+            event = got.get("event")
+            evt_request_id = got.get("request_id")
+            if event == "VenueReady" and evt_request_id == request_id:
+                self._logged_in = True
+                self._session = got
+                return
+            # CRITICAL-R2-1 (silent-failure): VenueError を捕捉する条件を拡張する。
+            # 旧実装は ``request_id == request_id`` の完全一致のみ raise していたため、
+            # broadcast 経路で ``request_id is None`` の VenueError が来ても無視され、
+            # _login_attach が 30 秒 timeout までハングしていた。
+            # 以下の **いずれか** を満たす場合に raise する:
+            #   (a) VenueError かつ request_id 一致 (unicast 応答)
+            #   (b) VenueError かつ request_id is None (broadcast 経路)
+            #   (c) Error イベント かつ request_id 一致 (engine の generic Error)
+            if event == "VenueError" and (
+                evt_request_id == request_id or evt_request_id is None
+            ):
+                code = got.get("code", "venue_error")
+                message = got.get("message", "")
+                raise ConnectionError(
+                    f"LiveSession.login: VenueError code={code!r} message={message!r}"
+                )
+            if event == "Error" and evt_request_id == request_id:
+                code = got.get("code", "error")
+                message = got.get("message", "")
+                raise ConnectionError(
+                    f"LiveSession.login: Error code={code!r} message={message!r}"
+                )
+            if event == "EngineBusy":
+                raise BusyError(
+                    f"EngineBusy: state={got.get('current_state')!r} "
+                    f"cmd={got.get('attempted_command')!r}"
+                )
+            # 他 event (VenueLoginStarted / 他 client 由来の Error 等) は無視して続行。
 
 
 # ---------------------------------------------------------------------------
@@ -1069,8 +1495,12 @@ if __name__ == "__main__":
     run_p.add_argument("--end", required=True, help="終了日 (ISO8601)")
     run_p.add_argument("--granularity", default="Daily", choices=["Trade", "Minute", "Daily"])
     run_p.add_argument("--initial-cash", type=int, default=1_000_000)
+    # L-GP2 (Phase 8 R1 / Phase 3): choices を _ForceMode Literal から派生させる
+    # ことで DRY 違反を解消する。`_ForceMode` を 1 箇所変更すれば argparse 側も
+    # 追従する不変条件。
+    import typing as _typing
     run_p.add_argument(
-        "--mode", choices=["auto", "inprocess", "attach"], default="auto"
+        "--mode", choices=list(_typing.get_args(_ForceMode)), default="auto"
     )
 
     args = parser.parse_args()

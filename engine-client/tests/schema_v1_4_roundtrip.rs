@@ -7,7 +7,7 @@
 
 use flowsurface_engine_client::dto::{
     Command, EngineEvent, OrderListFilter, OrderModifyChange, OrderRecordWire, OrderSide,
-    OrderType, TimeInForce,
+    OrderStatus, OrderType, TimeInForce,
 };
 
 const CID: &str = "4f5e6d7c-8b9a-0c1d-2e3f-4a5b6c7d8e9f";
@@ -188,7 +188,7 @@ fn order_list_updated_with_one_record_deserializes() {
             assert_eq!(orders[0].venue_order_id, "ORD-001");
             assert_eq!(orders[0].client_order_id, Some("cid-001".to_string()));
             assert_eq!(orders[0].quantity, "100");
-            assert_eq!(orders[0].status, "SUBMITTED");
+            assert_eq!(orders[0].status, OrderStatus::Submitted);
             // venue キーなし JSON → serde default "tachibana" が適用されることを pin
             assert_eq!(
                 orders[0].venue, "tachibana",
@@ -264,7 +264,7 @@ fn order_record_wire_roundtrip() {
         trigger_price: None,
         time_in_force: TimeInForce::Day,
         expire_time_ns: None,
-        status: "ACCEPTED".to_string(),
+        status: OrderStatus::Accepted,
         ts_event_ms: 1_745_640_000_000,
         venue: "tachibana".to_string(),
     };

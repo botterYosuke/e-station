@@ -213,6 +213,12 @@ impl PythonProcess {
             stdin.shutdown().await?;
         }
 
+        // M-Rust3: stdout/stderr forwarding tasks are intentionally detached.
+        // The `JoinHandle`s are dropped because:
+        //   * the tasks complete naturally on EOF when the child exits, and
+        //   * `kill_on_drop(true)` (set above) handles process cleanup if the
+        //     `PythonProcess` is dropped before the child exits.
+        // Therefore there is no leak path even though we never `await` them.
         if let Some(stdout) = child.stdout.take() {
             let _stdout_fwd = tokio::spawn(forward_lines(stdout, log::Level::Info));
         }
@@ -363,7 +369,7 @@ impl ProcessManager {
     /// 2. SetProxy (when configured).
     /// 3. Re-send saved subscriptions.
     pub async fn apply_after_handshake(&self, connection: &EngineConnection) {
-        self.apply_after_handshake_with_timeout(connection, Duration::from_secs(60))
+        self.apply_after_handshake_inner(connection, Duration::from_secs(60))
             .await;
     }
 
@@ -371,8 +377,24 @@ impl ProcessManager {
     /// timeout parameter for test compatibility. The timeout is unused in
     /// schema 2.x (no VenueReady wait loop), but the parameter is kept so
     /// existing integration test call sites compile without modification.
+    ///
+    /// H-Rust2: gated behind `cfg(test)` (in-crate tests) or the
+    /// `testing` cargo feature (integration tests in `tests/*`). Release
+    /// builds (no `testing` feature) never expose this seam — production
+    /// callers go through [`Self::apply_after_handshake`] which calls the
+    /// always-private `apply_after_handshake_inner`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn apply_after_handshake_with_timeout(
+        &self,
+        connection: &EngineConnection,
+        venue_ready_timeout: Duration,
+    ) {
+        self.apply_after_handshake_inner(connection, venue_ready_timeout)
+            .await;
+    }
+
+    async fn apply_after_handshake_inner(
         &self,
         connection: &EngineConnection,
         _venue_ready_timeout: Duration,
@@ -443,15 +465,30 @@ impl ProcessManager {
     /// The attach/spawn policy lives entirely here so `src/main.rs` stays thin.
     pub async fn start_or_attach(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
         let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
-        self.try_attach_or_spawn(port, DEFAULT_PROBE_URL, &token)
+        self.try_attach_or_spawn_inner(port, DEFAULT_PROBE_URL, &token)
             .await
     }
 
     /// Testable seam for `start_or_attach`: accepts an explicit probe URL and
     /// token so integration tests can inject a mock server without touching
     /// global env vars or relying on a fixed port 19876.
+    ///
+    /// H-Rust2: gated behind `cfg(test)` (in-crate tests) or the `testing`
+    /// cargo feature. Release builds never expose this seam — production
+    /// callers go through [`Self::start_or_attach`] which uses the
+    /// always-private `try_attach_or_spawn_inner`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn try_attach_or_spawn(
+        &self,
+        port: u16,
+        probe_url: &str,
+        token: &str,
+    ) -> Result<EngineConnection, EngineClientError> {
+        self.try_attach_or_spawn_inner(port, probe_url, token).await
+    }
+
+    async fn try_attach_or_spawn_inner(
         &self,
         port: u16,
         probe_url: &str,
