@@ -533,3 +533,87 @@ def test_write_back_refuses_run_buffer_path(tmp_path: Path) -> None:
                 save_as=True,
                 loaded_path=None,
             )
+
+
+# ---------------------------------------------------------------------------
+# M1 (レビュー反映 2026-05-04 ラウンド1): _dict_to_cst_expr 未対応値型 → TypeError
+# ---------------------------------------------------------------------------
+
+
+def test_writeback_rejects_unsupported_value_type(tmp_path: Path) -> None:
+    """_dict_to_cst_expr が str / int / bool 以外の値を受けたら TypeError。
+    対象ファイルは変更されないこと。
+    """
+    source = """\
+        SCENARIO = {
+            "schema_version": 1,
+            "instrument": "1301.TSE",
+            "start": "2025-01-06",
+            "end": "2025-03-31",
+            "granularity": "1m",
+            "initial_cash": 1_000_000,
+        }
+        """
+    path = _write_py(tmp_path, "strategy.py", source)
+    original_bytes = path.read_bytes()
+
+    # instrument に None を渡す（非サポート型）
+    bad_scenario = {
+        "schema_version": 1,
+        "instrument": None,
+        "start": "2025-01-06",
+        "end": "2025-03-31",
+        "granularity": "1m",
+        "initial_cash": 1_000_000,
+    }
+
+    with pytest.raises(TypeError):
+        _do_write_back(path, bad_scenario, save_as=True)
+
+    # ファイルは変更されていないこと
+    assert path.read_bytes() == original_bytes
+
+
+# ---------------------------------------------------------------------------
+# H1 (レビュー反映 2026-05-04 ラウンド1): SaveErrorCode Literal の 9 値内
+# ---------------------------------------------------------------------------
+
+
+def test_saved_error_is_known_literal() -> None:
+    """server から StrategyScenarioSaved.error として返り得る値が
+    SaveErrorCode Literal の 9 値内であること。pydantic field validation で
+    未知値はそもそも StrategyScenarioSaved を構築できない。
+    """
+    from typing import get_args
+
+    from engine.schemas import SaveErrorCode, StrategyScenarioSaved
+
+    known_values = set(get_args(SaveErrorCode))
+    expected = {
+        "permission_denied",
+        "parent_missing",
+        "disk_full",
+        "path_guard_violation",
+        "rename_failed",
+        "tempfile_failed",
+        "missing_scenario_field",
+        "validate_failed",
+        "syntax_error",
+    }
+    assert known_values == expected, (
+        f"SaveErrorCode の Literal 値が想定と異なる: {known_values} vs {expected}"
+    )
+
+    # 各 9 値で StrategyScenarioSaved を構築できる
+    for code in expected:
+        evt = StrategyScenarioSaved(
+            request_id="r", path="/p", ok=False, error=code  # type: ignore[arg-type]
+        )
+        assert evt.error == code
+
+    # 未知値は ValidationError
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        StrategyScenarioSaved(
+            request_id="r", path="/p", ok=False, error="unknown_code"  # type: ignore[arg-type]
+        )
