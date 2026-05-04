@@ -339,6 +339,34 @@ def test_writeback_rollback_on_import_error(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# test 8a: Save As 新規ファイルで検証失敗時にファイルが削除される（Fix 2）
+# ---------------------------------------------------------------------------
+
+
+def test_writeback_rollback_new_file_removed_on_failure(tmp_path: Path) -> None:
+    """Save As で存在しなかった新規ファイルに書き込み後、検証が失敗したとき
+    そのファイルが残らないこと（.bak がない場合の rollback 漏れを防ぐ）。"""
+    new_file = tmp_path / "new_strategy.py"
+    assert not new_file.exists(), "前提: ファイルは存在しない"
+
+    invalid_scenario = {
+        "schema_version": 1,
+        "instrument": 9999,  # int → validate() が ScenarioValidationError
+        "start": "2025-01-06",
+        "end": "2025-03-31",
+        "granularity": "Daily",
+        "initial_cash": 1_000_000,
+    }
+
+    with pytest.raises(ScenarioValidationError):
+        write_back(new_file, invalid_scenario, save_as=True, current_path=None, loaded_path=None)
+
+    assert not new_file.exists(), (
+        "Save As 新規ファイルで検証失敗後、ファイルが残っている（rollback 漏れ）"
+    )
+
+
+# ---------------------------------------------------------------------------
 # test 8: 他のコード・コメント・docstring・空行が完全に保持される
 # ---------------------------------------------------------------------------
 

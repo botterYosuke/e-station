@@ -113,6 +113,43 @@ def test_treats_annotation_only_as_absent(tmp_path: Path) -> None:
     )
 
 
+def test_annotation_only_then_plain_assign(tmp_path: Path) -> None:
+    """`SCENARIO: Scenario` の後に `SCENARIO = {...}` がある場合、後者を返すこと。
+
+    annotation-only で早期 return してしまうと後続の Assign を見落とす（Fix 3）。
+    """
+    f = _write(
+        tmp_path,
+        "ann_then_assign.py",
+        """\
+        from typing import TypedDict
+
+        class Scenario(TypedDict):
+            schema_version: int
+            instrument: str
+            start: str
+            end: str
+            granularity: str
+            initial_cash: int
+
+        SCENARIO: Scenario
+        SCENARIO = {
+            "schema_version": 1,
+            "instrument": "1301.TSE",
+            "start": "2025-01-06",
+            "end": "2025-03-31",
+            "granularity": "Daily",
+            "initial_cash": 1_000_000,
+        }
+        """,
+    )
+    result = extract(f)
+    assert result is not None, (
+        "annotation-only の後に Assign がある場合、extract() は dict を返すべき"
+    )
+    assert result["instrument"] == "1301.TSE"
+
+
 def test_rejects_dict_unpacking(tmp_path: Path) -> None:
     """`SCENARIO = {{**other_dict, "instrument": "..."}}` → ValueError（"dict literal 以外" を含む）。"""
     f = _write(

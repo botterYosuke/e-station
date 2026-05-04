@@ -16,7 +16,6 @@ Public API:
 from __future__ import annotations
 
 import ast
-import importlib.util
 import logging
 import os
 import shutil
@@ -123,7 +122,7 @@ def extract(path: Path) -> Optional[dict]:  # type: ignore[type-arg]
 
     ast.parse + ast.literal_eval のみ使用。import は一切発火しない。
     AnnAssign 形（`SCENARIO: Scenario = {...}`）と Assign 形（`SCENARIO = {...}`）の両方を許容。
-    AnnAssign.value が None（注釈のみ宣言）は SCENARIO 不在として扱う（None を返す）。
+    AnnAssign.value が None（注釈のみ宣言）はスキャンを継続する（後続の Assign を見つけるため）。
 
     Returns:
         SCENARIO dict が見つかった場合はその dict、見つからない場合は None。
@@ -151,9 +150,10 @@ def extract(path: Path) -> Optional[dict]:  # type: ignore[type-arg]
             # SCENARIO: Scenario = {...}  または  SCENARIO: Scenario
             if isinstance(node.target, ast.Name) and node.target.id == "SCENARIO":
                 if node.value is None:
-                    # SCENARIO: Scenario（注釈のみ宣言）→ 不在として扱う
-                    log.info("scenario.load path=%s annotation_only (absent)", path)
-                    return None
+                    # SCENARIO: Scenario（注釈のみ宣言）→ スキャンを継続する
+                    # 後続に SCENARIO = {...} が存在する可能性があるため return しない
+                    log.debug("scenario.load path=%s annotation_only_decl (continue scanning)", path)
+                    continue
                 scenario_value = node.value
 
         if scenario_value is not None:
@@ -376,23 +376,17 @@ def _check_path_guard(
 
 
 def _verify_writeback(path: Path, _scenario: dict) -> None:  # type: ignore[type-arg]
-    """書き戻し後の 2 段検証: (1) importlib で SyntaxError / ImportError をキャッチ、
-    (2) validate() で SCENARIO の形状を確認する。"""
-    import uuid
-    module_name = f"_scenario_verify_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot create module spec for {path}")
+    """書き戻し後の検証: ast.parse + extract() + validate() のみ使用。
 
-    module = importlib.util.module_from_spec(spec)
-    # sys.modules に登録しない（stale キャッシュ汚染を防ぐ）
-    spec.loader.exec_module(module)  # type: ignore[union-attr]
-
-    scenario_dict = getattr(module, "SCENARIO", None)
-    if scenario_dict is None:
+    importlib.exec_module は戦略ファイルの全 top-level コードを実行するため、
+    未インストール依存（nautilus_trader 等）で ImportError が発生したり、
+    import-time の副作用が走ったりする。
+    extract() + validate() なら ast.parse のみで副作用ゼロ。
+    """
+    extracted = extract(path)
+    if extracted is None:
         raise ScenarioValidationError("SCENARIO not found in written file")
-
-    validate(scenario_dict)
+    validate(extracted)
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +545,9 @@ def write_back(
                         "scenario.writeback rollback_failed path=%s bak=%s: %s (original: %s)",
                         path, bak_path, rb_exc, exc,
                     )
+            else:
+                # Save As 新規ファイル：.bak なし → 書き戻したファイルを削除する
+                _safe_unlink(path)
             raise
 
         log.info(
