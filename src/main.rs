@@ -109,6 +109,53 @@ fn set_app_mode(mode: engine_client::dto::AppMode) {
     }
 }
 
+/// F7: check if tachibana_orders.jsonl has any in-flight (submitted/partial) orders.
+/// Reads the WAL tail-first (reverse scan), same algorithm as python/engine/wal_in_flight.py.
+/// Returns true if any order has latest status "submitted" or "partial".
+fn has_wal_in_flight_orders() -> bool {
+    let wal_path = match std::env::var("HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("USERPROFILE").ok().map(std::path::PathBuf::from))
+    {
+        Some(home) => home
+            .join(".cache")
+            .join("flowsurface")
+            .join("engine")
+            .join("tachibana_orders.jsonl"),
+        None => return false,
+    };
+    let Ok(content) = std::fs::read_to_string(&wal_path) else {
+        return false;
+    };
+    let mut latest_status: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for line in content.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let order_id = record
+            .get("order_id")
+            .or_else(|| record.get("client_order_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let status = record
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let (Some(oid), Some(st)) = (order_id, status) {
+            latest_status.entry(oid).or_insert(st);
+        }
+    }
+    latest_status
+        .values()
+        .any(|st| st == "submitted" || st == "partial")
+}
+
 /// F7/T2: RAII guard for the mode-switch critical section.
 /// Call `try_acquire()` at the top of `restart_with_mode()`; the flag is
 /// automatically cleared when the guard is dropped — including panic unwinds.
@@ -740,6 +787,11 @@ struct Flowsurface {
     /// Held until the user confirms "Discard and open" / "Save and open" or cancels the dialog.
     /// Includes the window specs captured at dialog-show time so SaveAndOpenFile can build state JSON.
     pending_open_file: Option<(String, std::path::PathBuf, HashMap<window::Id, WindowSpec>)>,
+    /// F7: mode-switch target while waiting for ReplayStopped or user confirm.
+    pending_mode_switch: Option<engine_client::dto::AppMode>,
+    /// F7: holds the MODE_SWITCHING guard alive until restart_with_mode() completes.
+    /// Dropped automatically when `*self = new_state` runs in restart().
+    _mode_switch_guard: Option<ModeSwitchGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -941,6 +993,31 @@ enum Message {
     DiscardAndOpenFile,
     /// F4: dirty-check confirm — user chose "保存して開く" (save and open file).
     SaveAndOpenFile,
+    /// F7: dirty-check confirm (live→replay) — user chose "破棄してモード切替".
+    DiscardAndSwitchMode,
+    /// F7: dirty-check confirm (live→replay) — user chose "保存してモード切替".
+    SaveAndSwitchMode,
+    /// F7: window specs collected for live→replay switch; proceed with dirty check.
+    SwitchModeWithSpecs {
+        target: engine_client::dto::AppMode,
+        windows: HashMap<window::Id, WindowSpec>,
+    },
+    /// F7: `EngineEvent::ReplayStopped` received — proceed with restart_with_mode.
+    ModeSwitchStopAcked,
+    /// F7: 5-second StopReplay timeout — send ForceStopReplay fallback.
+    ModeSwitchStopTimeout,
+    /// F7: 2-second ForceStopReplay timeout — give up and show error.
+    ModeSwitchForceStopTimeout,
+    /// F7: window specs collected after "保存してモード切替" confirm; save then restart.
+    /// Routes through a dedicated message (not SwitchModeWithSpecs) to bypass the
+    /// dirty check — the user already confirmed, and re-checking would loop.
+    SwitchModeSaveComplete {
+        target: engine_client::dto::AppMode,
+        windows: HashMap<window::Id, WindowSpec>,
+    },
+    /// Internal: genuinely does nothing in update(). Used to discard async Task
+    /// completion events where the result is irrelevant (fire-and-forget IPC sends).
+    Noop,
     /// F5: Save As overwrite confirm — user confirmed overwriting the existing file.
     /// Carries the path directly to avoid the `pending_save_path` shared slot.
     ConfirmSaveAsOverwrite {
@@ -1243,6 +1320,8 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             log::debug!("engine: client disconnected (total={count})");
             None
         }
+        // F7: ReplayStopped — mode-switch pending confirmation
+        EngineEvent::ReplayStopped { .. } => Some(Message::ModeSwitchStopAcked),
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（このマップは Tachibana 関連
         // イベントだけを `Message` に変換する責務であり、新バリアントは
@@ -1429,6 +1508,8 @@ impl Flowsurface {
             last_saved_bytes: None,
             pending_exit_windows: None,
             pending_open_file: None,
+            pending_mode_switch: None,
+            _mode_switch_guard: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -2077,6 +2158,10 @@ impl Flowsurface {
                     self.confirm_dialog = None;
                     self.pending_open_file = None;
                     self.pending_exit_windows = None;
+                    // F7: release mode-switch guard so the next SwitchMode attempt is not
+                    // permanently blocked after the user dismisses the dirty-confirm dialog.
+                    self.pending_mode_switch = None;
+                    self._mode_switch_guard = None;
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
                 } else {
@@ -2837,9 +2922,83 @@ impl Flowsurface {
                             Message::ExitRequested,
                         );
                     }
-                    Action::SwitchMode(_) => {
-                        // F7 stub — mode-switch handling not yet implemented
-                        return Task::none();
+                    Action::SwitchMode(target) => {
+                        use engine_client::dto::AppMode;
+                        let current = app_mode();
+                        // Same mode — no-op (menu item should be disabled, but be defensive)
+                        if current == target {
+                            return Task::none();
+                        }
+                        // Prevent re-entry: if already switching, no-op
+                        let Some(guard) = ModeSwitchGuard::try_acquire() else {
+                            return Task::none();
+                        };
+                        self._mode_switch_guard = Some(guard);
+
+                        match (current, target) {
+                            (AppMode::Live, AppMode::Replay) => {
+                                // WAL in-flight check: reject if there are unconfirmed orders
+                                if has_wal_in_flight_orders() {
+                                    self._mode_switch_guard = None;
+                                    let dialog = screen::ConfirmDialog::new(
+                                        "未約定の注文があります。\nモードを切り替えることができません。"
+                                            .to_string(),
+                                        Box::new(Message::ToggleDialogModal(None)),
+                                    )
+                                    .with_confirm_btn_text("閉じる".to_string());
+                                    self.confirm_dialog = Some(dialog);
+                                    return Task::none();
+                                }
+                                // Collect window specs for dirty check
+                                let mut active_windows: Vec<window::Id> =
+                                    self.active_dashboard().popout.keys().copied().collect();
+                                active_windows.push(self.main_window.id);
+                                return window::collect_window_specs(
+                                    active_windows,
+                                    move |windows| Message::SwitchModeWithSpecs {
+                                        target: AppMode::Replay,
+                                        windows,
+                                    },
+                                );
+                            }
+                            (AppMode::Replay, AppMode::Live) => {
+                                // Send StopReplay then wait for ReplayStopped (with timeout)
+                                self.pending_mode_switch = Some(AppMode::Live);
+                                if let Some(conn) = self.engine_connection.clone() {
+                                    let request_id = uuid::Uuid::new_v4().to_string();
+                                    // Send StopReplay (fire and forget — ack comes via event stream)
+                                    let send_task = Task::perform(
+                                        async move {
+                                            let _ = conn
+                                                .send(engine_client::dto::Command::StopReplay {
+                                                    request_id,
+                                                })
+                                                .await;
+                                        },
+                                        |_| Message::Noop, // fire-and-forget; ack comes via event stream
+                                    );
+                                    // 5-second timeout
+                                    let timeout_task = Task::perform(
+                                        async {
+                                            tokio::time::sleep(
+                                                std::time::Duration::from_secs(5),
+                                            )
+                                            .await;
+                                        },
+                                        |_| Message::ModeSwitchStopTimeout,
+                                    );
+                                    return Task::batch([send_task, timeout_task]);
+                                } else {
+                                    // No engine connection — just restart directly
+                                    self.pending_mode_switch = None;
+                                    return self.restart_with_mode(AppMode::Live);
+                                }
+                            }
+                            _ => {
+                                self._mode_switch_guard = None;
+                                return Task::none();
+                            }
+                        }
                     }
                 }
             }
@@ -3245,6 +3404,117 @@ impl Flowsurface {
                 }
                 return self.restart();
             }
+            // F7: SwitchModeWithSpecs — window specs collected, perform dirty check for live→replay
+            Message::SwitchModeWithSpecs { target, windows } => {
+                use engine_client::dto::AppMode;
+                // If mode switch guard was released (e.g. stale message), ignore.
+                if self._mode_switch_guard.is_none() {
+                    return Task::none();
+                }
+                if app_mode() == AppMode::Live && self.is_dirty(&windows) {
+                    self.pending_mode_switch = Some(target);
+                    let dialog = screen::ConfirmDialog::new(
+                        "未保存の変更があります。".to_string(),
+                        Box::new(Message::DiscardAndSwitchMode),
+                    )
+                    .with_confirm_btn_text("破棄してモード切替".to_string())
+                    .with_save_action(
+                        Message::SaveAndSwitchMode,
+                        "保存してモード切替".to_string(),
+                    );
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+                // Not dirty: save then restart
+                self.save_state_to_disk(&windows);
+                return self.restart_with_mode(target);
+            }
+            // F7: user chose "破棄してモード切替"
+            Message::DiscardAndSwitchMode => {
+                self.confirm_dialog = None;
+                let Some(target) = self.pending_mode_switch.take() else {
+                    return Task::none();
+                };
+                return self.restart_with_mode(target);
+            }
+            // F7: user chose "保存してモード切替" — collect window specs for save, then restart
+            Message::SaveAndSwitchMode => {
+                self.confirm_dialog = None;
+                let Some(target) = self.pending_mode_switch.take() else {
+                    return Task::none();
+                };
+                // Collect current window specs for a proper save.
+                // IMPORTANT: must NOT re-route through SwitchModeWithSpecs here because that
+                // path re-checks is_dirty() — since we haven't saved yet it would still be true,
+                // causing an infinite dialog loop. Route through SwitchModeSaveComplete instead
+                // to unconditionally save and restart (F7 review fix 2026-05-04).
+                let mut active_windows: Vec<window::Id> =
+                    self.active_dashboard().popout.keys().copied().collect();
+                active_windows.push(self.main_window.id);
+                return window::collect_window_specs(active_windows, move |windows| {
+                    Message::SwitchModeSaveComplete { target, windows }
+                });
+            }
+            // F7: window specs collected for the "保存してモード切替" path — save then restart.
+            Message::SwitchModeSaveComplete { target, windows } => {
+                self.save_state_to_disk(&windows);
+                return self.restart_with_mode(target);
+            }
+            // F7: ReplayStopped event received — proceed with restart_with_mode
+            Message::ModeSwitchStopAcked => {
+                let Some(target) = self.pending_mode_switch.take() else {
+                    // Stale event (e.g. timeout already handled it) — ignore
+                    return Task::none();
+                };
+                return self.restart_with_mode(target);
+            }
+            // F7: 5-second StopReplay timeout — send ForceStopReplay fallback
+            Message::ModeSwitchStopTimeout => {
+                if self.pending_mode_switch.is_none() {
+                    // Already handled (ReplayStopped arrived before timeout) — ignore
+                    return Task::none();
+                };
+                if let Some(conn) = self.engine_connection.clone() {
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    let force_task = Task::perform(
+                        async move {
+                            let _ = conn
+                                .send(engine_client::dto::Command::ForceStopReplay { request_id })
+                                .await;
+                        },
+                        |_| Message::Noop, // fire-and-forget; ack comes via event stream
+                    );
+                    let timeout_task = Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        },
+                        |_| Message::ModeSwitchForceStopTimeout,
+                    );
+                    return Task::batch([force_task, timeout_task]);
+                } else {
+                    // No connection — release guard and give up
+                    self.pending_mode_switch = None;
+                    self._mode_switch_guard = None;
+                    return Task::none();
+                }
+            }
+            // F7: ForceStopReplay also timed out — release guard and show error
+            Message::ModeSwitchForceStopTimeout => {
+                if self.pending_mode_switch.take().is_none() {
+                    // Already handled (ReplayStopped arrived before timeout) — ignore
+                    return Task::none();
+                }
+                self._mode_switch_guard = None;
+                let dialog = screen::ConfirmDialog::new(
+                    "モード切替に失敗しました。\nエンジンが応答しません。".to_string(),
+                    Box::new(Message::ToggleDialogModal(None)),
+                )
+                .with_confirm_btn_text("閉じる".to_string());
+                self.confirm_dialog = Some(dialog);
+                return Task::none();
+            }
+            // F7: true no-op — used to discard fire-and-forget Task completions.
+            Message::Noop => return Task::none(),
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
             Message::ExecutionMarkerReceived {
                 side,
@@ -3535,6 +3805,11 @@ impl Flowsurface {
                 if dialog.is_none() {
                     self.pending_open_file = None;
                     self.pending_exit_windows = None;
+                    // F7: release mode-switch guard when the dirty-confirm dialog is
+                    // dismissed via backdrop click (ToggleDialogModal(None)), so the
+                    // next SwitchMode attempt is not permanently blocked.
+                    self.pending_mode_switch = None;
+                    self._mode_switch_guard = None;
                 }
                 self.confirm_dialog = dialog;
             }
@@ -4678,6 +4953,14 @@ impl Flowsurface {
         self.build_state_json(windows)
             .map(|json| json.into_bytes() != saved)
             .unwrap_or(false) // replay mode: build_state_json returns None → treat as clean (replay never saves)
+    }
+
+    /// F7: set APP_MODE to `mode` then restart. The `_mode_switch_guard` in `self`
+    /// is automatically dropped when `*self = new_state` runs inside `restart()`,
+    /// which resets `MODE_SWITCHING` to false.
+    fn restart_with_mode(&mut self, mode: engine_client::dto::AppMode) -> Task<Message> {
+        set_app_mode(mode);
+        self.restart()
     }
 
     fn restart(&mut self) -> Task<Message> {

@@ -461,3 +461,44 @@ def test_new_file_created(tmp_path: Path) -> None:
     # bak ファイルは作成されないこと（新規ファイルなので）
     bak_files = list(tmp_path.glob("new_strategy.py.bak.*"))
     assert len(bak_files) == 0, f"新規ファイルなのに bak が生成された: {bak_files}"
+
+
+# ---------------------------------------------------------------------------
+# test 10: annotation-only 宣言 + 後続 Assign を持つファイルへの write_back
+# ---------------------------------------------------------------------------
+
+
+def test_replaces_scenario_when_annotation_only_precedes_assign(tmp_path: Path) -> None:
+    """`SCENARIO: Scenario` の後に `SCENARIO = {...}` があるファイルで
+    write_back() が Assign を正しく置き換え、新値が反映されること。"""
+    source = """\
+        from typing import TypedDict
+
+        class Scenario(TypedDict):
+            schema_version: int
+            instrument: str
+            start: str
+            end: str
+            granularity: str
+            initial_cash: int
+
+        SCENARIO: Scenario
+        SCENARIO = {
+            "schema_version": 1,
+            "instrument": "1301.TSE",
+            "start": "2025-01-06",
+            "end": "2025-03-31",
+            "granularity": "Daily",
+            "initial_cash": 1_000_000,
+        }
+        """
+    path = _write_py(tmp_path, "ann_assign.py", source)
+
+    new_scenario = dict(VALID_SCENARIO_2)
+    _do_write_back(path, new_scenario, save_as=True)
+
+    result_text = path.read_text(encoding="utf-8")
+    assert "7203.TSE" in result_text, "新しい instrument 値が書き込まれていない"
+    # TypedDict 定義・注釈宣言・クラスは保持される
+    assert "class Scenario(TypedDict):" in result_text
+    assert "SCENARIO: Scenario" in result_text

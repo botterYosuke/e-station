@@ -3,7 +3,7 @@
 
 **作成日**: 2026-05-04
 **作成者**: Claude Opus 4.7（botterYosuke）
-**ステータス**: 未着手・実装計画
+**ステータス**: 部分完了（Agent A: T1/T2/T3 Rust コアインフラ ✅ / Agent B: Python WAL + StopReplay ハンドラ ✅ / Agent C: `Action::SwitchMode` 完全実装 ✅）
 **起点課題**: [fix-save-menu.md](./fix-save-menu.md) P7（モード切替メニュー導線がない）
 **前提**: [./P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md)（Linux で `モード（Mode）` メニューを表示するには iced 自前メニューバーが必要）
 **関連 F\***: [fix-save-menu.md](./fix-save-menu.md) F4（未保存変更 confirm）/ F7（本書 = `モード（Mode）` メニュー新設）
@@ -80,6 +80,8 @@ engine プロセスは **モード切替時に常に再起動** する（live en
 - ハンドラは `Message::SwitchAppMode(AppMode)` で受けて `restart_with_mode(mode)` を呼ぶ
 - アクセラレータは **muda 正規ルート** を使う（`MenuItem::new(label, true, Some(accelerator))`）。iced の `keyboard::on_key` 経由のフォールバックは `cfg(target_os="linux")` 限定 にとどめ、Win/Mac での二重発火を防ぐ
 
+✅ **T3 完了 (Agent A, 2026-05-04)**: `Action::SwitchMode(AppMode)` 追加、`MenuIds` に `switch_live`/`switch_replay` 追加、`attach()` に `CheckMenuItem` ベースの「モード（Mode）」サブメニューを追加、`event_stream()` で変換。`actions_for_mode()` を 6-tuple に拡張。`linux_keyboard_subscription()` に `MODE_SWITCHING` チェック（統一決定 64）追加。`tests/accelerator_bind.rs` に T3 用テスト 5 件追加。
+
 ---
 
 <a id="design-questions"></a>
@@ -111,6 +113,8 @@ engine プロセスは **モード切替時に常に再起動** する（live en
 
 **Mutex poisoning 戦略**: `lock().unwrap_or_else(|e| e.into_inner())` で poison から復旧する（panic 中の partial write は許容）。`OnceLock` から `Mutex` への移行で API が変わるため、ユーティリティ `app_mode()` / `set_app_mode(mode)` を導入し読み書き経路を 1 箇所に集約する。
 
+✅ **T1 完了 (Agent A, 2026-05-04)**: `APP_MODE` を `OnceLock` → `Mutex<Option<AppMode>>` に移行。`app_mode()` / `set_app_mode()` ユーティリティ追加。全 `APP_MODE.get()...` 参照を `app_mode()` に一括置換。
+
 <a id="q3"></a>
 ### Q3. 再入禁止と連打防止
 
@@ -137,6 +141,8 @@ impl Drop for ModeSwitchGuard {
 ```
 
 `restart_with_mode(mode)` の冒頭で `let _guard = ModeSwitchGuard::try_acquire().ok_or(ModeSwitchError::AlreadySwitching)?;` を呼び、関数スコープ内で生きている間だけ true、抜ける（成功 / `?` 早期 return / panic unwind）と必ず false へ戻る。
+
+✅ **T2 完了 (Agent A, 2026-05-04)**: `MODE_SWITCHING: AtomicBool`・`ModeSwitchGuard`・`ModeSwitchError` を `src/main.rs` に実装。`pub` 可視性で統合テストからも参照可能。`tests/mode_switch_panic_recovery.rs`・`tests/mode_switch_reentry.rs` を新規作成（ソースインスペクション方式）。
 
 - 取得失敗時（`AlreadySwitching`）はメニュークリックを no-op にする
 - メニュー側でも `モード（Mode）` サブメニュー全体を `MODE_SWITCHING == true` の間は disable
@@ -213,7 +219,9 @@ replay 実行中（`ReplayState::Running`）に live へ切り替えると、eng
 
 | ファイル | 期待 | 観測ポイント |
 |---------|------|------------|
-| `python/tests/test_wal_in_flight_detection.py` | `tachibana_orders.jsonl` の tail 逆順スキャンで in-flight 判定が正しく行われること（[統一決定 34](#q4)）。fixture 2 種：(1) 部分約定→全約定（`partial` の後 `filled`）→ in-flight=空、(2) プロセスクラッシュで `submitted` のみ残留 → in-flight=該当 order_id を含む | `detect_in_flight_orders(path)` の戻り値の集合比較 |
+| ✅ `python/tests/test_wal_in_flight_detection.py` | `tachibana_orders.jsonl` の tail 逆順スキャンで in-flight 判定が正しく行われること（[統一決定 34](#q4)）。fixture 6 種：(1) 部分約定→全約定（`partial` の後 `filled`）→ in-flight=空、(2) プロセスクラッシュで `submitted` のみ残留 → in-flight=該当 order_id を含む、(3) 複数注文混在、(4) ファイル不在、(5) partial 残留、(6) 末尾 truncated 行スキップ | `detect_in_flight_orders(path)` の戻り値の集合比較 |
+| ✅ `python/tests/test_server_engine_dispatch.py::TestStopReplayDispatch` | `StopReplay` IPC が RUNNING 状態のみ受理され ReplayStopped を broadcast すること。IDLE / STOPPED では EngineBusy を返し、live モードでは mode_mismatch EngineError を返すこと | `_handle_stop_replay` ハンドラの outbox 内容検査 |
+| ✅ `python/tests/test_server_engine_dispatch.py::TestForceStopReplayDispatch` | `ForceStopReplay` IPC が state guard なしで全ランナーを強制停止し ReplayStopped を broadcast すること | `_handle_force_stop_replay` ハンドラの outbox 内容検査 |
 
 ### E2E（bash + uv）
 
@@ -235,3 +243,58 @@ OBSERVE_S=60 bash tests/e2e/smoke.sh
 ls -la "$APPDATA/flowsurface/engine-session.json"   # 切替直後に新しい mtime
 cat ~/AppData/Roaming/flowsurface/flowsurface-current.log | grep "mode switch"
 ```
+
+---
+
+<a id="agent-b-progress"></a>
+## Agent B 完了記録（2026-05-04）
+
+### 実装ファイル
+
+| ファイル | 内容 |
+|---------|------|
+| ✅ `python/engine/wal_in_flight.py` | P1: WAL in-flight 検知ユーティリティ。`detect_in_flight_orders(path)` が tail から逆順スキャンして submitted/partial な order_id の frozenset を返す。読み取り専用。 |
+| ✅ `python/engine/server.py` | P2: `_dispatch()` に `StopReplay` / `ForceStopReplay` ブランチ追加。`_handle_stop_replay()` / `_handle_force_stop_replay()` メソッド追加。 |
+| ✅ `python/tests/test_wal_in_flight_detection.py` | P3: WAL in-flight 検知の 12 テストケース（6 fixture + 追加 4 ケース）。全緑確認済み。 |
+| ✅ `python/tests/test_server_engine_dispatch.py` | P2 テスト: TestStopReplayDispatch（8 テスト）+ TestForceStopReplayDispatch（5 テスト）追加。全緑確認済み。 |
+
+---
+
+<a id="agent-c-progress"></a>
+## Agent C 完了記録（2026-05-04）
+
+### 実装ファイル
+
+| ファイル | 内容 |
+|---------|------|
+| ✅ `src/main.rs` | Step 2: `Flowsurface` 構造体に `pending_mode_switch` / `_mode_switch_guard` フィールド追加。`Message` enum に F7 バリアント 7 件（`DiscardAndSwitchMode` / `SaveAndSwitchMode` / `SwitchModeWithSpecs` / `ModeSwitchStopAcked` / `ModeSwitchStopTimeout` / `ModeSwitchForceStopTimeout`）追加。`has_wal_in_flight_orders()` 関数追加。`EngineEvent::ReplayStopped` arm を `map_engine_event_to_tachibana` に追加。`restart_with_mode()` メソッド追加。`Action::SwitchMode` スタブを完全実装に置き換え。F7 Message ハンドラ 6 件追加。 |
+| ✅ `tests/mode_switch_restart.rs` | T4: `restart_with_mode` 構造テスト 4 件。全緑確認済み。 |
+| ✅ `tests/mode_switch_in_flight_order.rs` | T5: WAL in-flight 検知 構造テスト 4 件。全緑確認済み。 |
+| ✅ `tests/mode_switch_accelerator_disabled.rs` | T6: accelerator 経路 MODE_SWITCHING チェック構造テスト 3 件。全緑確認済み。 |
+
+### 設計判断
+
+1. **WAL パス解決**: `dirs_next` クレートは `Cargo.toml` に直接依存していないため、`HOME` / `USERPROFILE` 環境変数で代替した。Windows では `USERPROFILE` が `C:\Users\{user}` を指す。
+2. **dummy message 選択**: Agent C は `Message::ReplayFinished` を仮の dummy に使ったが、レビューで問題が発覚（FindingR1）。`Message::Noop` を新設してレビュー修正で差し替え済み。
+3. **`SaveAndSwitchMode` の window 収集**: Agent C は `SwitchModeWithSpecs` に re-route する方式を採用したが、`is_dirty` の再チェックで無限ループが発生するバグが発覚（FindingR4）。`Message::SwitchModeSaveComplete` を新設して専用の保存+再起動パスとした。
+
+### 設計判断
+
+1. **live モードでの StopReplay**: `StopReplay` は `ReplayOnlyCommand` に分類されるため `EngineBusy` と live state を組み合わせると pydantic ValidationError になる。そのため live モードでの受信は `EngineError{code=mode_mismatch}` で返す（EngineBusy ではない）。
+2. **ForceStopReplay の state guard なし**: 設計通り state guard を持たない。STOPPING・IDLE・LOADED 状態でも強制実行し、全ランナーを停止して ReplayStopped を broadcast する。
+3. **ReplayStopped の final_equity**: 停止が完了する前（runner の EngineStopped を待たずに）送出するため `None` を設定する。runner の最終 equity は EngineStopped で別途届く。
+
+---
+
+## Review-fix 完了記録（2026-05-04）
+
+`/review-fix-loop` 実行によるレビュー後、以下 HIGH バグを修正した。
+
+| Finding | 場所 | 問題 | 修正 |
+|---------|------|------|------|
+| R1 | `src/main.rs` StopReplay/ForceStopReplay send_task | `Message::ReplayFinished` を dummy に使用 → spurious `GetOrderList` IPC 発火 | `Message::Noop` を新設して差し替え |
+| R2 | `src/main.rs` `GoBack` ハンドラ | `pending_mode_switch` / `_mode_switch_guard` を未クリア → Escape で dirty-confirm 閉じると `MODE_SWITCHING` が永続 true になるバグ | 両フィールドを `None` にクリア |
+| R3 | `src/main.rs` `ToggleDialogModal(None)` ハンドラ | 同上 → backdrop クリックで dirty-confirm 閉じた場合も `MODE_SWITCHING` が永続 true | 両フィールドを `None` にクリア |
+| R4 | `src/main.rs` `SaveAndSwitchMode` ハンドラ | `SwitchModeWithSpecs` に re-route → `is_dirty` 再チェックで保存前なので true → 無限ダイアログループ | `SwitchModeSaveComplete` メッセージを新設して直接保存+restart |
+
+修正後: `cargo test --workspace` 全緑 / `cargo clippy -- -D warnings` クリーン

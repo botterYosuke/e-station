@@ -27,10 +27,12 @@ fn schema_minor_is_7_for_positions() {
     // ClientConnected/ClientDisconnected events）。Python 側 schemas.py と同期。
     // F6: SCHEMA_MINOR を 9 → 10 に bump（SCENARIO 定数 IPC: LoadStrategyScenario /
     // SaveStrategyScenario コマンドと StrategyScenarioLoaded / StrategyScenarioSaved イベント）。
+    // F7: SCHEMA_MINOR を 10 → 11 に bump（StopReplay / ForceStopReplay コマンドと
+    // ReplayStopped イベント追加）。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        10,
-        "SCHEMA_MINOR must be 10 after F6 (SCENARIO 定数 IPC)"
+        11,
+        "SCHEMA_MINOR must be 11 after F7 (StopReplay / ForceStopReplay / ReplayStopped IPC)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

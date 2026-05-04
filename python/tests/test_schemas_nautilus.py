@@ -29,7 +29,8 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # Phase F: SCHEMA_MAJOR を 2 → 3 に bump (typed-only IPC, VenueCaps required)
     # Phase 8.1b B1: SCHEMA_MINOR を 8 → 9 に bump (multi-client broadcast, ClientConnected/Disconnected)
     # F6: SCHEMA_MINOR を 9 → 10 に bump (LoadStrategyScenario / SaveStrategyScenario / 応答イベント追加)
-    assert s.SCHEMA_MINOR == 10
+    # F7: SCHEMA_MINOR を 10 → 11 に bump (StopReplay / ForceStopReplay / ReplayStopped 追加)
+    assert s.SCHEMA_MINOR == 11
     assert s.SCHEMA_MAJOR == 3
 
 

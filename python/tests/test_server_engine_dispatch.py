@@ -1131,3 +1131,242 @@ class TestReplayModeUsesStreamingVersion:
 
         # finally で _engine_stop_events から cleanup される
         assert "cleanup-strategy" not in server._engine_stop_events
+
+
+# ---------------------------------------------------------------------------
+# F7: StopReplay / ForceStopReplay ハンドラのテスト
+# ---------------------------------------------------------------------------
+
+
+class TestStopReplayDispatch:
+    """StopReplay IPC ハンドラのテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_emits_replay_stopped_when_running(self) -> None:
+        """RUNNING 状態で StopReplay を受信すると ReplayStopped が broadcast される。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+
+        mock_runner = MagicMock()
+        server._engine_tasks = {"sid-1": mock_runner}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-1"
+
+        msg = {"op": "StopReplay", "request_id": "req-stop-1"}
+        await server._handle_stop_replay(msg)
+
+        # ReplayStopped が outbox に入っていること
+        events = [e for e in server._outbox if e.get("event") == "ReplayStopped"]
+        assert len(events) == 1, f"Expected 1 ReplayStopped, got {list(server._outbox)}"
+        assert events[0]["request_id"] == "req-stop-1"
+        # final_equity は None（停止前）
+        assert events[0]["final_equity"] is None
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_calls_runner_stop(self) -> None:
+        """StopReplay 受信時に active な runner の stop() が呼ばれること。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+
+        mock_runner = MagicMock()
+        server._engine_tasks = {"sid-2": mock_runner}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-2"
+
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-stop-2"})
+
+        mock_runner.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_transitions_to_stopping(self) -> None:
+        """StopReplay 受信後に _replay_state が STOPPING になること。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+
+        mock_runner = MagicMock()
+        server._engine_tasks = {"sid-3": mock_runner}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-3"
+
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-stop-3"})
+
+        assert server._replay_state == ReplayState.STOPPING
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_rejected_when_idle(self) -> None:
+        """IDLE 状態で StopReplay を受信すると EngineBusy が返され、状態は変化しない。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.IDLE
+
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-idle"})
+
+        busy_events = [e for e in server._outbox if e.get("event") == "EngineBusy"]
+        assert len(busy_events) == 1, f"Expected 1 EngineBusy, got {list(server._outbox)}"
+        assert busy_events[0]["attempted_command"] == "StopReplay"
+        # 状態は IDLE のまま
+        assert server._replay_state == ReplayState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_rejected_in_live_mode(self) -> None:
+        """live モードで StopReplay を受信すると mode_mismatch EngineError が返される。
+
+        StopReplay は replay-only command であり、live state と EngineBusy の組み合わせは
+        pydantic バリデーションエラーになるため、EngineError{code=mode_mismatch} を返す。
+        """
+        from engine.server import LiveState
+        server = _make_server(mode="live")
+        server._live_state = LiveState.CONNECTED
+
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-live"})
+
+        # EngineError{code=mode_mismatch} が返る
+        error_events = [e for e in server._outbox if e.get("event") == "EngineError"]
+        assert len(error_events) == 1, f"Expected 1 EngineError, got {list(server._outbox)}"
+        assert error_events[0]["code"] == "mode_mismatch"
+        # EngineBusy は返さない
+        busy_events = [e for e in server._outbox if e.get("event") == "EngineBusy"]
+        assert len(busy_events) == 0
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_clears_strategy_id(self) -> None:
+        """StopReplay 後に _replay_strategy_id がクリアされること。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+        server._engine_tasks = {"sid-4": MagicMock()}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-4"
+
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-clear"})
+
+        assert server._replay_strategy_id == ""
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_sets_stop_event(self) -> None:
+        """StopReplay 受信時に _engine_stop_events の Event が set() されること。"""
+        import threading
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+
+        stop_event = threading.Event()
+        mock_runner = MagicMock()
+        server._engine_tasks = {"sid-5": mock_runner}
+        server._engine_stop_events = {"sid-5": stop_event}
+        server._replay_strategy_id = "sid-5"
+
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-event"})
+
+        assert stop_event.is_set(), "stop_event should be set after StopReplay"
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_no_active_runner(self) -> None:
+        """active な runner がない場合でも ReplayStopped を broadcast すること。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+        server._engine_tasks = {}  # ランナーなし
+        server._engine_stop_events = {}
+        server._replay_strategy_id = ""
+
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-norunner"})
+
+        events = [e for e in server._outbox if e.get("event") == "ReplayStopped"]
+        assert len(events) == 1, f"Expected 1 ReplayStopped, got {list(server._outbox)}"
+
+
+class TestForceStopReplayDispatch:
+    """ForceStopReplay IPC ハンドラのテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_force_stop_replay_emits_replay_stopped(self) -> None:
+        """ForceStopReplay は state に関わらず ReplayStopped を broadcast する。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        # STOPPING 状態でも強制実行できること
+        server._replay_state = ReplayState.STOPPING
+
+        mock_runner = MagicMock()
+        server._engine_tasks = {"sid-f1": mock_runner}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-f1"
+
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-1"})
+
+        events = [e for e in server._outbox if e.get("event") == "ReplayStopped"]
+        assert len(events) == 1, f"Expected 1 ReplayStopped, got {list(server._outbox)}"
+        assert events[0]["request_id"] == "req-force-1"
+
+    @pytest.mark.asyncio
+    async def test_force_stop_replay_calls_all_runners(self) -> None:
+        """ForceStopReplay は全ランナーの stop() を呼ぶこと。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+
+        mock_runner1 = MagicMock()
+        mock_runner2 = MagicMock()
+        server._engine_tasks = {"sid-f2a": mock_runner1, "sid-f2b": mock_runner2}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-f2a"
+
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-2"})
+
+        mock_runner1.stop.assert_called_once()
+        mock_runner2.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_force_stop_replay_when_idle(self) -> None:
+        """IDLE 状態でも ForceStopReplay は実行でき（state guard なし）、ReplayStopped を返す。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.IDLE
+        server._engine_tasks = {}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = ""
+
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-idle"})
+
+        # EngineBusy は返さない
+        busy_events = [e for e in server._outbox if e.get("event") == "EngineBusy"]
+        assert len(busy_events) == 0, f"ForceStopReplay must not emit EngineBusy, got {busy_events}"
+        # ReplayStopped は返す
+        events = [e for e in server._outbox if e.get("event") == "ReplayStopped"]
+        assert len(events) == 1
+
+    @pytest.mark.asyncio
+    async def test_force_stop_replay_clears_strategy_id(self) -> None:
+        """ForceStopReplay 後に _replay_strategy_id がクリアされること。"""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+        server._engine_tasks = {"sid-f3": MagicMock()}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-f3"
+
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-3"})
+
+        assert server._replay_strategy_id == ""
+
+    @pytest.mark.asyncio
+    async def test_force_stop_replay_sets_stop_events(self) -> None:
+        """ForceStopReplay は _engine_stop_events の全 Event を set() すること。"""
+        import threading
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+
+        stop_event1 = threading.Event()
+        stop_event2 = threading.Event()
+        server._engine_tasks = {"sid-f4a": MagicMock(), "sid-f4b": MagicMock()}
+        server._engine_stop_events = {"sid-f4a": stop_event1, "sid-f4b": stop_event2}
+        server._replay_strategy_id = "sid-f4a"
+
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-4"})
+
+        assert stop_event1.is_set(), "stop_event1 should be set"
+        assert stop_event2.is_set(), "stop_event2 should be set"

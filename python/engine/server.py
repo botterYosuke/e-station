@@ -879,6 +879,18 @@ class DataEngineServer:
                 self._handle_stop_engine(msg, ws=ws), msg.get("request_id")
             )
 
+        elif op == "StopReplay":
+            # F7: replay セッションを graceful に停止する（replay モード限定）。
+            self._spawn_fetch(
+                self._handle_stop_replay(msg, ws=ws), msg.get("request_id")
+            )
+
+        elif op == "ForceStopReplay":
+            # F7: replay セッションを強制停止する（タイムアウト fallback）。
+            self._spawn_fetch(
+                self._handle_force_stop_replay(msg, ws=ws), msg.get("request_id")
+            )
+
         elif op == "LoadReplayData":
             # N1.4: J-Quants データを事前ロードして件数だけ通知する。
             # StartEngine が config に同等情報を持つので、本コマンドは事前確認用途。
@@ -3270,6 +3282,107 @@ class DataEngineServer:
         # GetBuyingPower(replay) も「未実行」として扱う。
         if self._mode == "replay" and self._replay_strategy_id == strategy_id:
             self._replay_strategy_id = ""
+
+    async def _handle_stop_replay(
+        self, msg: dict, *, ws: ServerConnection | None = None
+    ) -> None:
+        """StopReplay IPC: replay セッションを graceful に停止する（F7）。
+
+        replay モードかつ RUNNING 状態のみ受理する。
+        内部で active な strategy_id を解決して runner を停止し、
+        完了後に ReplayStopped を全クライアントに broadcast する。
+        """
+        from engine.schemas import ReplayStopped as ReplayStoppedModel
+
+        request_id: str = msg.get("request_id", "")
+
+        # replay モードでのみ有効（live モードで受信した場合は mode_mismatch Error を返す）
+        if self._mode != "replay":
+            log.info("StopReplay: ignored in mode=%r", self._mode)
+            self._outbox.append(
+                EngineError(
+                    code="mode_mismatch",
+                    message="StopReplay is only valid in replay mode",
+                    strategy_id=None,
+                ).model_dump()
+            )
+            return
+
+        # RUNNING 状態のみ受理（STOPPING / IDLE / LOADED は EngineBusy）
+        if not self._check_replay_state("StopReplay", ReplayState.RUNNING, ws=ws, request_id=request_id):
+            return
+
+        # RUNNING → STOPPING へ遷移
+        self._replay_state = ReplayState.STOPPING
+
+        # active な strategy_id を取得（先頭 1 件）
+        strategy_ids = list(self._engine_tasks.keys())
+        strategy_id = strategy_ids[0] if strategy_ids else ""
+
+        if strategy_id:
+            stop_event = self._engine_stop_events.get(strategy_id)
+            if stop_event is not None:
+                stop_event.set()
+            runner = self._engine_tasks.get(strategy_id)
+            if runner is not None:
+                try:
+                    runner.stop()
+                except Exception as exc:
+                    log.warning("StopReplay: runner.stop() raised: %s", exc)
+            # strategy_id をクリア（GetBuyingPower(replay) が「未実行」として扱われるよう）
+            if self._replay_strategy_id == strategy_id:
+                self._replay_strategy_id = ""
+        else:
+            log.info("StopReplay: no active runner found, emitting ReplayStopped immediately")
+
+        # ReplayStopped を全クライアントに broadcast
+        self._outbox.append(
+            ReplayStoppedModel(
+                request_id=request_id,
+                final_equity=None,
+            ).model_dump()
+        )
+        log.info("StopReplay: broadcast ReplayStopped(request_id=%r)", request_id)
+
+    async def _handle_force_stop_replay(
+        self, msg: dict, *, ws: ServerConnection | None = None
+    ) -> None:
+        """ForceStopReplay IPC: replay セッションを強制停止する（F7 タイムアウト fallback）。
+
+        _replay_state に関わらず強制実行する（state guard を使わない）。
+        active な全ランナーを強制停止し、ReplayStopped を broadcast する。
+        """
+        from engine.schemas import ReplayStopped as ReplayStoppedModel
+
+        request_id: str = msg.get("request_id", "")
+
+        log.info(
+            "ForceStopReplay: force-stopping all runners (state=%r, request_id=%r)",
+            self._replay_state.name if hasattr(self._replay_state, "name") else self._replay_state,
+            request_id,
+        )
+
+        # 全ランナーを強制停止
+        for sid, runner in list(self._engine_tasks.items()):
+            stop_event = self._engine_stop_events.get(sid)
+            if stop_event is not None:
+                stop_event.set()
+            try:
+                runner.stop()
+            except Exception as exc:
+                log.warning("ForceStopReplay: runner.stop() for %r raised: %s", sid, exc)
+
+        # strategy_id をクリア
+        self._replay_strategy_id = ""
+
+        # ReplayStopped を全クライアントに broadcast
+        self._outbox.append(
+            ReplayStoppedModel(
+                request_id=request_id,
+                final_equity=None,
+            ).model_dump()
+        )
+        log.info("ForceStopReplay: broadcast ReplayStopped(request_id=%r)", request_id)
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):

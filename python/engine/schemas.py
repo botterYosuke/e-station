@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 10
+SCHEMA_MINOR: int = 11
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -34,6 +34,8 @@ ReplayOnlyCommand = Literal[
     "StartEngine",
     "StopEngine",
     "SetReplaySpeed",
+    "StopReplay",
+    "ForceStopReplay",
 ]
 LiveOnlyCommand = Literal[
     "ModifyOrder",
@@ -54,6 +56,8 @@ AttemptedCommand = Literal[
     "StartEngine",
     "StopEngine",
     "SetReplaySpeed",
+    "StopReplay",
+    "ForceStopReplay",
     "SubmitOrder",
     "ModifyOrder",
     "CancelOrder",
@@ -941,6 +945,44 @@ class EngineBusy(IpcMessage):
                 f"replay state {state!r}"
             )
         return self
+
+
+# ── F7: モード切替 (schema 3.11) ─────────────────────────────────────────────
+
+
+class StopReplay(IpcMessage):
+    """active な replay セッションを graceful に停止するよう要求する（F7 モード切替）。
+
+    Python は内部で active な strategy_id を解決して StopEngine 相当の処理を行う。
+    停止完了後に `ReplayStopped` を emit する。
+    replay が実行中でない場合は `EngineBusy` を返す。
+    """
+
+    op: Literal["StopReplay"] = "StopReplay"
+    request_id: str
+
+
+class ForceStopReplay(IpcMessage):
+    """StopReplay が 5 秒タイムアウトした後の強制停止フォールバック（F7）。
+
+    Python は runner thread を即座に停止する（可能であれば SIGKILL 相当）。
+    停止完了後に `ReplayStopped` を emit する。
+    """
+
+    op: Literal["ForceStopReplay"] = "ForceStopReplay"
+    request_id: str
+
+
+class ReplayStopped(IpcMessage):
+    """StopReplay または ForceStopReplay が replay セッションを停止したときに emit する（F7）。
+
+    final_equity は停止時点の equity 残高（decimal 文字列）。
+    セッションが正常完了する前に停止された場合は None。
+    """
+
+    event: Literal["ReplayStopped"] = "ReplayStopped"
+    request_id: str
+    final_equity: str | None = None
 
 
 # ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────

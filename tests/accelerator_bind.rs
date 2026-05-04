@@ -167,3 +167,56 @@ fn action_quit_variant_exists() {
         "Action enum must contain a Quit variant"
     );
 }
+
+// ── F7/T3: Action::SwitchMode exists ─────────────────────────────────────────
+
+#[test]
+fn action_switch_mode_variant_exists() {
+    let src = read_native_menu();
+    assert!(
+        src.contains("SwitchMode(AppMode)"),
+        "Action enum must contain a SwitchMode(AppMode) variant"
+    );
+}
+
+#[test]
+fn mode_submenu_label_present() {
+    let src = read_native_menu();
+    assert!(
+        src.contains("モード（Mode）"),
+        "attach() must create a mode submenu with Japanese label"
+    );
+}
+
+#[test]
+fn mode_submenu_has_live_and_replay_items() {
+    let src = read_native_menu();
+    assert!(
+        src.contains("ライブ（Live）"),
+        "mode submenu must have a live item"
+    );
+    assert!(
+        src.contains("リプレイ（Replay）"),
+        "mode submenu must have a replay item"
+    );
+}
+
+#[test]
+fn actions_for_mode_returns_six_tuple() {
+    // Structural check: actions_for_mode must now return a 6-tuple.
+    let src = read_native_menu();
+    assert!(
+        src.contains("(bool, bool, bool, bool, bool, bool)"),
+        "actions_for_mode must return a 6-tuple after adding switch_live / switch_replay"
+    );
+}
+
+#[test]
+fn linux_mode_switching_suppressed_during_mode_switch() {
+    let src = read_native_menu();
+    // The linux handler must check MODE_SWITCHING before dispatching SwitchMode.
+    assert!(
+        src.contains("MODE_SWITCHING.load(Ordering::Acquire)"),
+        "Linux keyboard handler must check MODE_SWITCHING.load() before dispatching SwitchMode (統一決定 64)"
+    );
+}
