@@ -8,9 +8,13 @@ Public API:
     validate(d: dict) -> None
         Scenario TypedDict 形状を runtime 検証。失敗時は ScenarioValidationError を raise。
 
-    write_back(path, scenario, *, save_as, current_path, loaded_path) -> None
+    write_back(path, scenario, *, save_as, loaded_path) -> None
         libcst で SCENARIO ブロックを atomic 書き戻し。
         tempfile + os.replace() による atomic write、世代付き .bak、2段検証 + rollback。
+
+レビュー反映 (2026-05-04 ラウンド1, 方針 B):
+    `current_path` 引数は本モジュールから削除。loaded_path 一軸の FCFS 不変条件
+    のみを保証する（current_path は GUI 側責務）。
 """
 
 from __future__ import annotations
@@ -134,6 +138,8 @@ def extract(path: Path) -> Optional[dict]:  # type: ignore[type-arg]
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
 
+    found_result: Optional[dict] = None  # type: ignore[type-arg]
+
     for node in ast.iter_child_nodes(tree):
         scenario_value: Optional[ast.expr] = None
 
@@ -178,10 +184,16 @@ def extract(path: Path) -> Optional[dict]:  # type: ignore[type-arg]
             if not isinstance(result, dict):
                 raise ValueError(_NON_LITERAL_ERROR)
 
-            log.info("scenario.load path=%s keys=%d", path, len(result))
-            return result
+            # M5 (レビュー反映 2026-05-04 ラウンド1): 多重 SCENARIO 定義は明示エラー
+            if found_result is not None:
+                raise ScenarioValidationError(
+                    "multiple SCENARIO assignments are not supported"
+                )
+            found_result = result
 
-    return None
+    if found_result is not None:
+        log.info("scenario.load path=%s keys=%d", path, len(found_result))
+    return found_result
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +202,12 @@ def extract(path: Path) -> Optional[dict]:  # type: ignore[type-arg]
 
 
 def _dict_to_cst_expr(d: dict) -> cst.BaseExpression:  # type: ignore[type-arg]
-    """Python dict を libcst Dict ノードに変換する（str / int / bool 対応）。"""
+    """Python dict を libcst Dict ノードに変換する（str / int / bool 対応）。
+
+    M1 (レビュー反映 2026-05-04 ラウンド1): str / int / bool 以外の値型は明示的に
+    `TypeError` で reject する（暗黙の `repr()` フォールバックは Scenario の値型
+    contract を破る危険があるため削除）。
+    """
     elements: list[cst.DictElement] = []
     items = list(d.items())
 
@@ -202,7 +219,9 @@ def _dict_to_cst_expr(d: dict) -> cst.BaseExpression:  # type: ignore[type-arg]
         elif isinstance(v, str):
             v_node = cst.SimpleString(repr(v))
         else:
-            v_node = cst.SimpleString(repr(v))
+            raise TypeError(
+                f"unsupported scenario value type: {type(v).__name__} for key {k!r}"
+            )
 
         is_last = i == len(items) - 1
         comma: cst.BaseParenthesizableWhitespace | cst.MaybeSentinel
@@ -234,6 +253,14 @@ class _ScenarioReplacer(cst.CSTTransformer):
         original_node: cst.SimpleStatementLine,
         updated_node: cst.SimpleStatementLine,
     ) -> cst.BaseStatement:
+        # M5 整合 (レビュー反映 2026-05-04 ラウンド1): 既に置換済みの場合は
+        # 2 つ目以降の SCENARIO ノードに触らない。これにより
+        # `SCENARIO: Scenario` (AnnAssign annotation-only) + `SCENARIO = {...}`
+        # の両方を持つファイルでも、最初の AnnAssign のみ value 化され、
+        # 重複した SCENARIO 定義が生まれない（extract() の多重定義 reject と整合）。
+        if self.replaced:
+            return updated_node
+
         for stmt in updated_node.body:
             if isinstance(stmt, cst.Assign):
                 for target in stmt.targets:
@@ -323,7 +350,6 @@ def _check_path_guard(
     path: Path,
     *,
     save_as: bool,
-    current_path: Optional[Path],
     loaded_path: Optional[Path],
 ) -> None:
     """path ガードを検証する。違反時は ValueError("path_guard_violation: ...") を raise。
@@ -335,8 +361,15 @@ def _check_path_guard(
     Save（save_as=False）追加条件:
         2. loaded_path が Some(p) かつ path.resolve() == loaded_path.resolve()
 
-    Save As（save_as=True）:
-        2 の制限なし（任意の新規 .py path を許可）
+    Save As（save_as=True）追加条件:
+        2'. loaded_path が Some(p) のとき path.resolve() != loaded_path.resolve()
+            （path == loaded_path の場合は Save 経路 `save_as=False` に倒すべき。
+            UI 層で事前リダイレクトされる想定だが server-side でも防御する。
+            H3 / レビュー反映 2026-05-04 ラウンド1）
+        2''. loaded_path=None の場合は任意の新規 .py path を許可
+
+    レビュー反映 (2026-05-04 ラウンド1, 方針 B): `current_path` 引数は削除。
+    GUI 側責務として loaded_path 一軸の FCFS のみを保証する。
     """
     # 条件 1: 拡張子 .py 必須
     if path.suffix != ".py":
@@ -373,15 +406,29 @@ def _check_path_guard(
                 f"path_guard_violation: Save path must match loaded_path"
                 f" (path={path!r}, loaded_path={loaded_path!r})"
             )
+    else:
+        # 条件 2': Save As 経路で loaded_path がある場合、path == loaded_path は拒否
+        # （UI 層で Save 経路に倒すべき。H3 / レビュー反映 2026-05-04 ラウンド1）
+        if loaded_path is not None and path_resolved == loaded_path.resolve():
+            raise ValueError(
+                f"path_guard_violation: Save As with path == loaded_path is forbidden"
+                f"; use Save (save_as=False) instead"
+                f" (path={path!r}, loaded_path={loaded_path!r})"
+            )
 
 
 def _verify_writeback(path: Path, _scenario: dict) -> None:  # type: ignore[type-arg]
-    """書き戻し後の検証: ast.parse + extract() + validate() のみ使用。
+    """書き戻し後の二段検証: ast.parse + extract（構文）+ validate（形状）。
 
-    importlib.exec_module は戦略ファイルの全 top-level コードを実行するため、
-    未インストール依存（nautilus_trader 等）で ImportError が発生したり、
-    import-time の副作用が走ったりする。
-    extract() + validate() なら ast.parse のみで副作用ゼロ。
+    レビュー反映 (2026-05-04 ラウンド1, M6):
+        importlib による import 検証は採用しない。`nautilus_trader` 等の
+        サードパーティ依存が読み込めない環境で誤検知するため要件から除外。
+        構文エラーは extract() が raise する SyntaxError として検出され、
+        形状違反は validate() が raise する ScenarioValidationError として検出される。
+
+    Raises:
+        SyntaxError: 書き戻したファイルが構文的に invalid な場合（extract 内 ast.parse）。
+        ScenarioValidationError: SCENARIO 不在 または validate() が失敗した場合。
     """
     extracted = extract(path)
     if extracted is None:
@@ -399,7 +446,6 @@ def write_back(
     scenario: dict,  # type: ignore[type-arg]
     *,
     save_as: bool,
-    current_path: Optional[Path],
     loaded_path: Optional[Path],
 ) -> None:
     """SCENARIO ブロックを path の .py に書き戻す。
@@ -411,7 +457,7 @@ def write_back(
         4. バックアップ（.bak.<UTC秒>）
         5. write + fsync
         6. os.replace（atomic）
-        7. 2 段検証（import エラー → rollback / validate 失敗 → rollback）
+        7. 二段検証（構文エラー → rollback / validate 失敗 → rollback）
 
     各ステップ失敗時の cleanup:
         (1) tempfile 失敗 → cleanup なし
@@ -420,22 +466,23 @@ def write_back(
         (5) os.replace 失敗 → tempfile 削除（.bak は残す）
         (7) 検証失敗 → .bak から rollback
 
+    レビュー反映 (2026-05-04 ラウンド1, 方針 B):
+        `current_path` 引数は削除（GUI 側責務）。loaded_path 一軸の FCFS のみ保証。
+
     Args:
         path: 書き戻し先 .py
         scenario: 書き戻す Scenario dict（validate 済み推奨）
         save_as: True = Save As 経路, False = Save（上書き保存）経路
-        current_path: GUI の current_path（None = Load 履歴なし）
         loaded_path: 直前 LoadStrategyScenario で読み込んだ path（None = Load 履歴なし）
 
     Raises:
         ValueError: path ガード違反（"path_guard_violation: ..."）
         ScenarioValidationError: 書き戻し後の validate 失敗（rollback 済み）
-        SyntaxError / ImportError: 書き戻し後の import 検証失敗（rollback 済み）
+        SyntaxError: 書き戻したファイルが構文的に invalid（rollback 済み）
+        TypeError: scenario の値型が str/int/bool 以外（M1）
         OSError: ディスク IO エラー
     """
-    _check_path_guard(
-        path, save_as=save_as, current_path=current_path, loaded_path=loaded_path
-    )
+    _check_path_guard(path, save_as=save_as, loaded_path=loaded_path)
 
     if path.exists():
         source = path.read_text(encoding="utf-8")
@@ -510,8 +557,9 @@ def write_back(
         finally:
             try:
                 os.close(fd)
-            except OSError:
-                pass
+            except OSError as exc:
+                # M16 (レビュー反映 2026-05-04 ラウンド1): fd.close() 失敗は黙殺せず WARN
+                log.warning("scenario.writeback: fd.close() failed: %s", exc)
             tmp_fd = None
 
         # Step 5: atomic replace
@@ -524,17 +572,18 @@ def write_back(
             tmp_path = None
             raise
 
-        # Step 6: 2 段検証
+        # Step 6: 二段検証（構文 + 形状）
         try:
             _verify_writeback(path, scenario)
         except Exception as exc:
-            reason = (
-                "import_error"
-                if isinstance(exc, (SyntaxError, ImportError))
-                else "validate_failed"
-            )
+            # M6 (レビュー反映 2026-05-04 ラウンド1): rollback reason は
+            # syntax_error / validate_failed の二択。importlib 検証は要件外。
+            reason = "syntax_error" if isinstance(exc, SyntaxError) else "validate_failed"
             log.error(
-                "scenario.writeback rollback reason=%s bak=%s", reason, bak_path
+                "scenario.writeback rollback reason=%s path=%s bak=%s",
+                reason,
+                path,
+                bak_path,
             )
             # rollback
             if bak_path is not None and bak_path.exists():
@@ -561,8 +610,9 @@ def write_back(
         if tmp_fd is not None:
             try:
                 os.close(tmp_fd)
-            except OSError:
-                pass
+            except OSError as exc:
+                # M16: 黙殺せず WARN
+                log.warning("scenario.writeback: tmp_fd.close() failed: %s", exc)
         if tmp_path is not None:
             _safe_unlink(tmp_path)
 

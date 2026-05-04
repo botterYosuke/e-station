@@ -71,6 +71,22 @@ AttemptedCommand = Literal[
 # AUTH_FAILED_CODE: 認証失敗時の EngineError.code (Phase 2 以降が import 可能)
 AUTH_FAILED_CODE: str = "auth_failed"
 
+# SaveErrorCode (F6 / レビュー反映 2026-05-04 ラウンド1 / H1):
+# `StrategyScenarioSaved.error` の wire 形を Literal で固定する。これら 9 値以外は
+# pydantic validation で reject される。server.py 側の例外→error コード変換は
+# `_do_save_strategy_scenario` の責務。
+SaveErrorCode = Literal[
+    "permission_denied",
+    "parent_missing",
+    "disk_full",
+    "path_guard_violation",
+    "rename_failed",
+    "tempfile_failed",
+    "missing_scenario_field",
+    "validate_failed",
+    "syntax_error",
+]
+
 # 内部: EngineBusy validator が使う set
 _REPLAY_STATES: frozenset[str] = frozenset(get_args(ReplayStateName))
 _LIVE_STATES: frozenset[str] = frozenset(get_args(LiveStateName))
@@ -1043,7 +1059,9 @@ class StrategyScenarioSaved(IpcMessage):
     request_id: str
     path: str
     ok: bool
-    error: str | None = None  # "path_guard_violation" / "disk_full" / "permission_denied" 等
+    # H1 (レビュー反映 2026-05-04 ラウンド1): `error` は SaveErrorCode Literal の
+    # 9 値に固定。未知値は pydantic validation で reject される。
+    error: SaveErrorCode | None = None
 
 
 # ---------------------------------------------------------------------------

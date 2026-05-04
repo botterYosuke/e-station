@@ -35,14 +35,15 @@ def _guard(
     path: Path,
     *,
     save_as: bool = True,
-    current_path: Optional[Path] = None,
     loaded_path: Optional[Path] = None,
 ) -> None:
-    """_check_path_guard のデフォルト引数付きラッパー。"""
+    """_check_path_guard のデフォルト引数付きラッパー。
+
+    レビュー反映 (2026-05-04 ラウンド1, 方針 B): `current_path` 引数は削除済み。
+    """
     _check_path_guard(
         path,
         save_as=save_as,
-        current_path=current_path,
         loaded_path=loaded_path,
     )
 

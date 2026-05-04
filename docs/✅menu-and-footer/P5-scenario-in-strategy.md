@@ -115,8 +115,8 @@ GUI 経路（F6a）の read-only prefill / CLI 経路（F6b）/ 書き戻し後�
 - `engine-client/src/dto.rs` に対応する Rust 側 struct
 - `SCHEMA_MINOR` をインクリメント（`SCHEMA_MAJOR` は据置）
 - **DoD（SCHEMA_MAJOR/MINOR 区別 assert）**: `/ipc-schema-check` を実行し major 一致・minor 同期を確認。
-  `engine-client/tests/scenario_roundtrip.rs` に **`assert_eq!(SCHEMA_MAJOR, 1)` と `assert!(SCHEMA_MINOR >= N)` の両方を明示**
-  （N = 本変更で確定する値）してリグレッションガードを追加する。
+  `engine-client/tests/scenario_roundtrip.rs` に **`assert_eq!(SCHEMA_MAJOR, 3)` と `assert!(SCHEMA_MINOR >= 11)` の両方を明示**
+  （N=11 は F7 まで適用された SCHEMA_MINOR の現在値。F6 単体では 10 に bump されたが F7 で 11 に上がっている）してリグレッションガードを追加する。
   さらに **「minor 不一致でも接続は成立する」** ことを `python/tests/test_schema_minor_compat.py` で保護する
   （SCHEMA_MAJOR のみ不一致時にハンドシェイク失敗、SCHEMA_MINOR 差異は WARN ログで通過）。
 
@@ -212,27 +212,34 @@ GUI / CLI 両経路から呼ぶ。
   **既存 `.bak.<UTC秒>` の上書きは禁止**（同じ秒に二回保存した場合は連番 suffix `-1`, `-2` を付与）
 - ディスクフル等で write が失敗した場合、上記 cleanup 規則に従い tempfile / `.bak` を削除のうえエラーダイアログで通知
 - **保存エラーコード列挙**（`Event::StrategyScenarioSaved { ok: false, error: ... }` の `error` 値）：
-  `"permission_denied"` / `"parent_missing"` / `"disk_full"` / `"path_guard_violation"` / `"rename_failed"` / `"tempfile_failed"` のみ
-- 書き戻し後に **二段の検証** を必ず実行する（R6-81 統一決定）：
-  1. **import 検証**：`importlib` で書き戻し済みファイルを再ロードし `SyntaxError` / `ImportError` 等が出ないことを確認
-  2. **runtime 形状検証**：再ロードしたモジュールの `SCENARIO` を `engine.scenario.validate(scenario_dict)` に渡し、
+  `"permission_denied"` / `"parent_missing"` / `"disk_full"` / `"path_guard_violation"` / `"rename_failed"` / `"tempfile_failed"` /
+  `"missing_scenario_field"` / `"validate_failed"` / `"syntax_error"` のみ。
+  `schemas.py` 側で `SaveErrorCode = Literal[...]` として固定し、未知値は pydantic validation で reject される
+- 書き戻し後に **二段の検証** を必ず実行する（レビュー反映 2026-05-04 ラウンド1）：
+  1. **構文検証**：`ast.parse(written_source)` + `engine.scenario.extract(written_path)` で書き戻したファイルが
+     構文的に valid な Python であり SCENARIO が再抽出できることを確認（副作用ゼロ）
+  2. **形状検証**：`engine.scenario.validate(extracted_scenario)` で
      TypedDict 形状（キー存在・値型）が runtime に一致することを確認（TypedDict は静的型のみで実行時検証無しのため必須）
-  - **import エラー OR `validate()` 失敗のいずれか** → 直近の `.bak.<UTC秒>` から rollback → エラーダイアログ
+  - **構文エラー（`SyntaxError`）OR `validate()` 失敗（`ScenarioValidationError`）のいずれか** → 直近の `.bak.<UTC秒>` から rollback → エラーダイアログ
   - **rollback 後 byte-diff assert**（テスト DoD）：書き戻し前のオリジナルと rollback 後のファイルが byte 単位で完全一致することを確認
+  - **importlib による import 検証は採用しない**：`nautilus_trader` 等のサードパーティ依存が読み込めない環境
+    （CI runner 等）で誤検知するため、要件から除外する（レビュー反映 2026-05-04 ラウンド1）
 - `SCENARIO` 以外のコード・コメント・空白・docstring は触れないこと（`libcst` の不変条件）
 
 ### path ガード（`Command::SaveStrategyScenario` 不変条件）
 
-Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, current_path: Optional[Path], loaded_path: Optional[Path])` は次の 3 条件すべてを満たさない限り `ValueError`（`error="path_guard_violation"`）で拒否する：
+Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, loaded_path: Optional[Path])` は次の 3 条件すべてを満たさない限り `ValueError`（`error="path_guard_violation"`）で拒否する：
+
+> **レビュー反映 2026-05-04 ラウンド1 (方針 B)**: `current_path` は GUI 側の責務であり、Python の path guard は `loaded_path` 一軸の FCFS 不変条件のみを保証する。`current_path` は本表から削除した（`_check_path_guard` シグネチャからも削除）。
 
 1. `path` の拡張子が **`.py` のみ**（`.json` / `.bak` / 拡張子なしは拒否）
 2. `path` が **保存経路ごとの分岐ルール** を満たすこと（FCFS 不変条件 + Save As 派生許可）。詳細は次表：
 
-   | 経路 | `save_as` | `current_path` | `loaded_path`（直前 Load の path） | 許可条件 |
-   |------|-----------|---------------|---------------------------------|---------|
-   | **Save（上書き保存）** | `false` | `Some(p)` | `Some(p)` | `path == loaded_path == current_path` のときのみ許可 |
-   | **Save As（新規 .py 保存）** | `true` | `None` | `None` | Load 履歴なし新規保存。任意の `.py` `path` を許可（条件 3 に従う） |
-   | **Save As（派生保存）** | `true` | `Some(loaded_path)` | `Some(loaded_path)` | `path != loaded_path` のときに許可（**Load 済みファイルから派生した別 path への保存**を許す）。`path == loaded_path` の場合は Save 経路に倒す |
+   | 経路 | `save_as` | `loaded_path`（直前 Load の path） | 許可条件 |
+   |------|-----------|---------------------------------|---------|
+   | **Save（上書き保存）** | `false` | `Some(p)` | `path == loaded_path` のときのみ許可 |
+   | **Save As（新規 .py 保存）** | `true` | `None` | Load 履歴なし新規保存。任意の `.py` `path` を許可（条件 3 に従う） |
+   | **Save As（派生保存）** | `true` | `Some(loaded_path)` | `path != loaded_path` のときに許可（**Load 済みファイルから派生した別 path への保存**を許す）。`path == loaded_path` の場合は server-side で reject（Save 経路 `save_as=false` に倒すべき。UI 層の責務） |
 
    multi-client engine（max 4）で他クライアントが間に別の Load を挟んだ場合、`loaded_path` は最後の `LoadStrategyScenario` の path に更新されるため、Save 経路では拒否される（FCFS 違反）。Save As 派生経路は新規 `path` への書き出しのため FCFS の影響を受けない。
 3. `path` が **永続状態ファイルのディレクトリ配下に書き込もうとしていない**こと。
@@ -280,7 +287,7 @@ Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, current
 - 期待ログ:
   - 成功時：`INFO scenario.writeback path=... bak=... bytes=...`
   - validate 失敗時：`ERROR scenario.writeback rollback reason=validate_failed bak=...`
-  - import エラー時：`ERROR scenario.writeback rollback reason=import_error bak=...`
+  - 構文エラー時：`ERROR scenario.writeback rollback reason=syntax_error bak=...`
 - 観測コマンド: `uv run pytest python/tests/test_scenario_writeback.py python/tests/test_scenario_path_guard.py -v`
 
 ---
@@ -392,3 +399,43 @@ Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, current
 | [./fix-save-menu.md](./fix-save-menu.md) | F* 系列の親計画書（モード別挙動表・凡例） |
 | [./P7-mode-switch-menu.md](./P7-mode-switch-menu.md) | モード切替時の Save As 挙動 |
 | [./P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) | Linux 自前メニューバー（widget menu bar）でのファイルフィルタ |
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 1)
+
+F6 実装に対する e-station-review レビュー指摘 22 件（HIGH 5 / MEDIUM 17）の反映記録。
+方針 B（計画書を実装に寄せる）採用。
+
+**HIGH 解消項目**:
+
+- **H1**: `SaveErrorCode = Literal[...]` を `schemas.py` に追加し、`StrategyScenarioSaved.error` を Literal に固定。9 値（`permission_denied` / `parent_missing` / `disk_full` / `path_guard_violation` / `rename_failed` / `tempfile_failed` / `missing_scenario_field` / `validate_failed` / `syntax_error`）以外は pydantic validation error
+- **H2**: `_check_path_guard` / `write_back` から未使用の `current_path` 引数を削除（方針 B、loaded_path 一軸の FCFS）。GUI 側責務として注記
+- **H3**: `save_as=true` かつ `path == loaded_path` を server-side で reject（UI 層の事前チェックに頼らず Python 側でも防御）
+- **H4**: `scenario_roundtrip.rs:13` の `assert!(SCHEMA_MINOR >= 10)` を `>= 11` に更新（F7 後の現在値と一致）
+- **H5**: `python/tests/test_schema_minor_compat.py` を新設し、SCHEMA_MAJOR 一致下での SCHEMA_MINOR 差異許容を回帰ガード
+
+**MEDIUM 解消項目**:
+
+- **M1**: `_dict_to_cst_expr` 未対応値型を `TypeError` で raise（暗黙の `repr()` フォールバック削除）
+- **M2**: path_guard tests に `test_save_as_with_prior_load_to_new_path` / `test_rejects_save_as_when_path_equals_loaded_path` / `test_multi_client_fcfs_after_other_client_load` を追加
+- **M3**: `msg["scenario"]` が None / 欠落のとき `error="missing_scenario_field"` を返す
+- **M4**: `_do_load_strategy_scenario` の失敗ログを `WARN scenario.load failed reason=... path=...` 形式に統一
+- **M5**: `_do_save_strategy_scenario` の rollback ログを `log.error("scenario.writeback rollback reason=... path=...")` に格上げ。`extract()` 多重 SCENARIO 定義は `ScenarioValidationError` で reject
+- **M6**: `_verify_writeback` を「ast.parse + extract（構文検証）+ validate（形状検証）」の二段に変更。importlib による import 検証は要件から除外（依存読み込み環境制約のため）。rollback reason は `syntax_error` または `validate_failed` の二択
+- **M7**: `Command::SaveStrategyScenario` の `Debug` 実装に `scenario` / `loaded_path` を追加
+- **M8**: server.py の `msg.get("save_as", True)` を `False` に統一（dto.rs `#[serde(default)]` = false と整合）
+- **M10**: `SCENARIO.schema_version == 1` の strict validation は v2 移行時に別計画で緩和（`fix-save-menu.md` §非スコープへ追記）
+- **M11**: server.py 入口で `scenario_mod.validate(scenario_dict)` を試行し、失敗なら `error="validate_failed"` で即時 reject
+- **M12**: `scenario_roundtrip.rs` の `assert_eq!(SCHEMA_MAJOR, 3)` メッセージを汎化
+- **M13**: `engine-client/src/lib.rs` の F6/F7 SCHEMA_MINOR コメントを時系列順（F6=10 → F7=11）に整理
+- **M16**: `os.close(fd)` 例外を `log.warning` に格上げ（黙殺しない）
+- **M17**: `_resolve_cli_params` 内の `import sys` 重複をモジュール先頭に集約
+
+**追加テスト**:
+
+- `python/tests/test_schema_minor_compat.py`（新規、H5）
+- `python/tests/test_scenario_path_guard.py`：`test_save_as_with_prior_load_to_new_path` / `test_rejects_save_as_when_path_equals_loaded_path` / `test_multi_client_fcfs_after_other_client_load`
+- `python/tests/test_scenario_writeback.py`：`test_writeback_rejects_unsupported_value_type` / `test_saved_error_is_known_literal`
+- `python/tests/test_scenario_load.py`：`test_extract_rejects_multiple_scenario_assignments` / `test_load_failed_log_format`
+- `engine-client/tests/scenario_roundtrip.rs`：`save_with_loaded_path_none_round_trips` / `saved_with_ok_true_and_error_some_is_inconsistent`

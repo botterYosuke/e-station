@@ -57,15 +57,16 @@ def _do_write_back(
     scenario: dict,
     *,
     save_as: bool = True,
-    current_path: Optional[Path] = None,
     loaded_path: Optional[Path] = None,
 ) -> None:
-    """write_back() のデフォルト引数付きラッパー。"""
+    """write_back() のデフォルト引数付きラッパー。
+
+    レビュー反映 (2026-05-04 ラウンド1, 方針 B): `current_path` 引数は削除済み。
+    """
     write_back(
         path,
         scenario,
         save_as=save_as,
-        current_path=current_path,
         loaded_path=loaded_path,
     )
 
@@ -359,7 +360,7 @@ def test_writeback_rollback_new_file_removed_on_failure(tmp_path: Path) -> None:
     }
 
     with pytest.raises(ScenarioValidationError):
-        write_back(new_file, invalid_scenario, save_as=True, current_path=None, loaded_path=None)
+        write_back(new_file, invalid_scenario, save_as=True, loaded_path=None)
 
     assert not new_file.exists(), (
         "Save As 新規ファイルで検証失敗後、ファイルが残っている（rollback 漏れ）"
@@ -530,6 +531,5 @@ def test_write_back_refuses_run_buffer_path(tmp_path: Path) -> None:
                 strategy_py,
                 VALID_SCENARIO,
                 save_as=True,
-                current_path=None,
                 loaded_path=None,
             )
