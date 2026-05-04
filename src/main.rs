@@ -202,19 +202,32 @@ fn has_wal_in_flight_orders() -> bool {
 async fn submit_wandb_run(
     run_buffer_dir: std::path::PathBuf,
     script: std::path::PathBuf,
+    project: String,
+    run_name: String,
+    tags: String,
 ) -> Result<String, WandbSubmitError> {
     use tokio::process::Command;
 
-    let output = Command::new("uv")
-        .args([
-            "run",
-            "--with",
-            "wandb",
-            "python",
-            script.to_str().unwrap_or("examples/wandb/submit_run.py"),
-            "--run-buffer",
-            run_buffer_dir.to_str().unwrap_or(""),
-        ])
+    let mut cmd = Command::new("uv");
+    cmd.args([
+        "run",
+        "--with",
+        "wandb",
+        "python",
+        script.to_str().unwrap_or("examples/wandb/submit_run.py"),
+        "--run-buffer",
+        run_buffer_dir.to_str().unwrap_or(""),
+    ]);
+    if !project.is_empty() {
+        cmd.args(["--project", &project]);
+    }
+    if !run_name.is_empty() {
+        cmd.args(["--run-name", &run_name]);
+    }
+    if !tags.is_empty() {
+        cmd.args(["--tags", &tags]);
+    }
+    let output = cmd
         .output()
         .await
         .map_err(|e| WandbSubmitError::ProcessFailed(format!("spawn failed: {e}")))?;
@@ -959,6 +972,8 @@ struct Flowsurface {
     run_buffer: wandb_auth::RunBufferIndex,
     /// F9c: W&B サインインモーダル。SignInWandb で Some に、Cancel / ログイン完了で None。
     wandb_signin_modal: Option<modal::wandb_signin::WandbSignInModal>,
+    /// F9c: W&B 送信モーダル。SubmitToWandb で Some に、Cancel / 送信完了で None。
+    wandb_submit_modal: Option<modal::wandb_submit::WandbSubmitModal>,
 }
 
 #[derive(Debug, Clone)]
@@ -1219,6 +1234,8 @@ enum Message {
     /// F9d: `examples/wandb/check_auth.py` subprocess の完了通知。
     /// `WandbAuthState` を受け取ってメニュー状態を更新する。
     WandbAuthRefreshed(wandb_auth::WandbAuthState),
+    /// F9c: W&B 送信モーダル内部メッセージ。
+    WandbSubmitMsg(modal::wandb_submit::Message),
     /// F9c: W&B サインインモーダル内部メッセージ。
     WandbSignInMsg(modal::wandb_signin::Message),
     /// F9c: `wandb login --relogin` subprocess の完了通知。
@@ -1722,6 +1739,7 @@ impl Flowsurface {
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
             run_buffer: wandb_auth::RunBufferIndex::empty(),
             wandb_signin_modal: None,
+            wandb_submit_modal: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -2409,10 +2427,7 @@ impl Flowsurface {
                                 Box::new(Message::DiscardAndOpenFile),
                             )
                             .with_confirm_btn_text("破棄して開く".to_string())
-                            .with_save_action(
-                                Message::SaveAndOpenFile,
-                                "保存して開く".to_string(),
-                            ),
+                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string()),
                         );
                         return Task::none();
                     }
@@ -3102,7 +3117,13 @@ impl Flowsurface {
                     }
                     BarMessage::Dismiss => {
                         log::debug!(
-                            "widget_menu_bar: dismiss reason=focus_lost_or_outside_click open={:?}",
+                            "widget_menu_bar: dismiss reason=outside_click open={:?}",
+                            self.menu_bar.open
+                        );
+                    }
+                    BarMessage::DismissFocusLost => {
+                        log::debug!(
+                            "widget_menu_bar: dismiss reason=focus_lost open={:?}",
                             self.menu_bar.open
                         );
                     }
@@ -3214,7 +3235,8 @@ impl Flowsurface {
                     Action::SubmitToWandb => {
                         // ガード 1: 既に送信中なら no-op
                         if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
-                            self.notifications.push(Toast::info("送信中です...".to_string()));
+                            self.notifications
+                                .push(Toast::info("送信中です...".to_string()));
                             return Task::none();
                         }
                         // ガード 2: 未認証なら no-op
@@ -3230,19 +3252,22 @@ impl Flowsurface {
                             return Task::none();
                         };
 
-                        SUBMIT_IN_FLIGHT.store(true, std::sync::atomic::Ordering::Release);
-
-                        // run-buffer/<run_id> のパスを解決（data::data_path と同じ規則）
-                        let run_buffer_dir = data::data_path(Some("run-buffer")).join(&run_id);
-                        // submit_run.py のパスを解決（実行時の cwd = プロジェクトルート前提）
-                        let script = std::path::PathBuf::from("examples/wandb/submit_run.py");
-
-                        return Task::perform(
-                            async move {
-                                submit_wandb_run(run_buffer_dir, script).await
-                            },
-                            Message::WandbSubmitResult,
-                        );
+                        // F9c: モーダルを表示してユーザーに project / run_name / tags を
+                        // 確認・編集させてから送信する（P9 spec「メニュー押下 → WandbSubmitModal 表示」）
+                        if self.wandb_submit_modal.is_none() {
+                            let auth_display = match self.wandb_auth.method.as_str() {
+                                "env" => modal::wandb_submit::AuthDisplayState::Env,
+                                "netrc" => modal::wandb_submit::AuthDisplayState::Netrc,
+                                _ => modal::wandb_submit::AuthDisplayState::NotSet,
+                            };
+                            self.wandb_submit_modal =
+                                Some(modal::wandb_submit::WandbSubmitModal::new(
+                                    &run_id,
+                                    run_id.split('-').nth(1).unwrap_or("strategy"),
+                                    auth_display,
+                                ));
+                        }
+                        return Task::none();
                     }
                     Action::SignInWandb => {
                         if self.wandb_signin_modal.is_none() {
@@ -3282,10 +3307,7 @@ impl Flowsurface {
                         if self.confirm_dialog.is_none() {
                             let base = data::data_path(Some("run-buffer"));
                             let dialog = screen::ConfirmDialog::new(
-                                format!(
-                                    "run-buffer を削除しますか？\nパス: {}",
-                                    base.display()
-                                ),
+                                format!("run-buffer を削除しますか？\nパス: {}", base.display()),
                                 Box::new(Message::ClearRunBufferConfirmed),
                             )
                             .with_confirm_btn_text("削除".to_string());
@@ -3660,10 +3682,7 @@ impl Flowsurface {
                                 Box::new(Message::DiscardAndOpenFile),
                             )
                             .with_confirm_btn_text("破棄して開く".to_string())
-                            .with_save_action(
-                                Message::SaveAndOpenFile,
-                                "保存して開く".to_string(),
-                            );
+                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
                             self.confirm_dialog = Some(dialog);
                         }
                     }
@@ -4290,10 +4309,7 @@ impl Flowsurface {
                                 Box::new(Message::DiscardAndOpenFile),
                             )
                             .with_confirm_btn_text("破棄して開く".to_string())
-                            .with_save_action(
-                                Message::SaveAndOpenFile,
-                                "保存して開く".to_string(),
-                            ),
+                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string()),
                         );
                         return Task::none();
                     }
@@ -4663,43 +4679,55 @@ impl Flowsurface {
                 match result {
                     Ok(url) => {
                         log::info!("W&B submit succeeded: {url}");
-                        self.notifications
-                            .push(Toast::info(format!("W&B に送信しました: {url}")));
+                        // モーダルが開いていれば Done を通知して URL を表示する
+                        if let Some(modal) = self.wandb_submit_modal.as_mut() {
+                            let url_opt = if url.is_empty() {
+                                None
+                            } else {
+                                Some(url.clone())
+                            };
+                            modal.update(modal::wandb_submit::Message::Done(url_opt));
+                        } else {
+                            self.notifications
+                                .push(Toast::info(format!("W&B に送信しました: {url}")));
+                        }
                         // run-buffer スキャンを更新する
                         let base = data::data_path(Some("run-buffer"));
                         self.run_buffer = wandb_auth::RunBufferIndex::scan(&base);
                     }
-                    Err(WandbSubmitError::AuthFailed) => {
-                        log::warn!("W&B submit failed: auth error");
-                        self.notifications.push(Toast::error(
-                            "W&B 認証エラー: 再ログインしてください".to_string(),
-                        ));
-                    }
-                    Err(WandbSubmitError::RateLimit) => {
-                        log::warn!("W&B submit failed: rate limit");
-                        self.notifications
-                            .push(Toast::error("W&B 送信失敗: レートリミット超過".to_string()));
-                    }
-                    Err(WandbSubmitError::Network) => {
-                        log::warn!("W&B submit failed: network error");
-                        self.notifications
-                            .push(Toast::error("W&B 送信失敗: ネットワークエラー".to_string()));
-                    }
-                    Err(WandbSubmitError::ServerError) => {
-                        log::warn!("W&B submit failed: server error");
-                        self.notifications
-                            .push(Toast::error("W&B 送信失敗: サーバーエラー".to_string()));
-                    }
-                    Err(WandbSubmitError::Partial) => {
-                        log::warn!("W&B submit failed: partial");
-                        self.notifications
-                            .push(Toast::warn("W&B 送信: 部分的な失敗（run buffer を確認してください）".to_string()));
-                    }
-                    Err(WandbSubmitError::ProcessFailed(msg)) => {
-                        log::warn!("W&B submit failed: {msg}");
-                        self.notifications.push(Toast::error(format!(
-                            "W&B 送信失敗: {msg}"
-                        )));
+                    Err(ref e) => {
+                        let msg = match e {
+                            WandbSubmitError::AuthFailed => {
+                                log::warn!("W&B submit failed: auth error");
+                                "W&B 認証エラー: 再ログインしてください".to_string()
+                            }
+                            WandbSubmitError::RateLimit => {
+                                log::warn!("W&B submit failed: rate limit");
+                                "W&B 送信失敗: レートリミット超過".to_string()
+                            }
+                            WandbSubmitError::Network => {
+                                log::warn!("W&B submit failed: network error");
+                                "W&B 送信失敗: ネットワークエラー".to_string()
+                            }
+                            WandbSubmitError::ServerError => {
+                                log::warn!("W&B submit failed: server error");
+                                "W&B 送信失敗: サーバーエラー".to_string()
+                            }
+                            WandbSubmitError::Partial => {
+                                log::warn!("W&B submit failed: partial");
+                                "W&B 送信: 部分的な失敗（run buffer を確認してください）"
+                                    .to_string()
+                            }
+                            WandbSubmitError::ProcessFailed(m) => {
+                                log::warn!("W&B submit failed: {m}");
+                                format!("W&B 送信失敗: {m}")
+                            }
+                        };
+                        if let Some(modal) = self.wandb_submit_modal.as_mut() {
+                            modal.update(modal::wandb_submit::Message::Failed(msg, -1));
+                        } else {
+                            self.notifications.push(Toast::error(msg));
+                        }
                     }
                 }
                 return Task::none();
@@ -4707,6 +4735,57 @@ impl Flowsurface {
             // F9d: W&B check_auth subprocess 完了 — wandb_auth を更新する
             Message::WandbAuthRefreshed(state) => {
                 self.wandb_auth = state;
+                return Task::none();
+            }
+            // F9c: 送信モーダル内部メッセージ
+            Message::WandbSubmitMsg(msg) => {
+                if let Some(modal) = self.wandb_submit_modal.as_mut() {
+                    match modal.update(msg) {
+                        Some(modal::wandb_submit::Action::Cancel) => {
+                            self.wandb_submit_modal = None;
+                        }
+                        Some(modal::wandb_submit::Action::Submit {
+                            project,
+                            run_name,
+                            tags,
+                        }) => {
+                            // ガード: 再入禁止
+                            if SUBMIT_IN_FLIGHT
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    std::sync::atomic::Ordering::AcqRel,
+                                    std::sync::atomic::Ordering::Acquire,
+                                )
+                                .is_err()
+                            {
+                                return Task::none();
+                            }
+                            let run_id = self.run_buffer.latest_completed.clone();
+                            let run_buffer_dir = run_id
+                                .map(|id| data::data_path(Some("run-buffer")).join(id))
+                                .unwrap_or_default();
+                            let script = std::path::PathBuf::from("examples/wandb/submit_run.py");
+                            return Task::perform(
+                                async move {
+                                    submit_wandb_run(
+                                        run_buffer_dir,
+                                        script,
+                                        project,
+                                        run_name,
+                                        tags,
+                                    )
+                                    .await
+                                },
+                                Message::WandbSubmitResult,
+                            );
+                        }
+                        Some(modal::wandb_submit::Action::OpenUrl(url)) => {
+                            let _ = webbrowser::open(&url);
+                        }
+                        None => {}
+                    }
+                }
                 return Task::none();
             }
             // F9c: サインインモーダル内部メッセージ
@@ -4755,10 +4834,7 @@ impl Flowsurface {
             // F9c: ログアウト確認ダイアログで確認 → 実際の subprocess を起動
             Message::WandbLogoutConfirmed => {
                 self.confirm_dialog = None;
-                return Task::perform(
-                    async { wandb_logout().await },
-                    Message::WandbLogoutResult,
-                );
+                return Task::perform(async { wandb_logout().await }, Message::WandbLogoutResult);
             }
             // F9c: wandb logout subprocess の完了通知
             Message::WandbLogoutResult(result) => {
@@ -4964,15 +5040,26 @@ impl Flowsurface {
             after_second_password
         };
 
+        let after_wandb_submit = if let Some(submit) = &self.wandb_submit_modal {
+            let submit_view = submit.view().map(Message::WandbSubmitMsg);
+            main_dialog_modal(
+                after_replay_form,
+                submit_view,
+                Message::WandbSubmitMsg(modal::wandb_submit::Message::Cancel),
+            )
+        } else {
+            after_replay_form
+        };
+
         if let Some(signin) = &self.wandb_signin_modal {
             let signin_view = signin.view().map(Message::WandbSignInMsg);
             main_dialog_modal(
-                after_replay_form,
+                after_wandb_submit,
                 signin_view,
                 Message::WandbSignInMsg(modal::wandb_signin::Message::Cancel),
             )
         } else {
-            after_replay_form
+            after_wandb_submit
         }
     }
 
@@ -5020,7 +5107,9 @@ impl Flowsurface {
         let linux_menu_bar_dismiss =
             iced::event::listen_with(|event, _status, _window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => {
-                    Some(Message::MenuBar(crate::menu_bar_state::BarMessage::Dismiss))
+                    Some(Message::MenuBar(
+                        crate::menu_bar_state::BarMessage::DismissFocusLost,
+                    ))
                 }
                 _ => None,
             });

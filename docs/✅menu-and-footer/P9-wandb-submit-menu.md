@@ -746,9 +746,9 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
 |-------|------|------|------|
 | **✅F9a** | RunBuffer Python 側書き出し（`replay_session.py` の event loop に tee） | M | F6（SCENARIO 抽出が無いと meta.json の scenario 欄が埋まらない） |
 | **✅F9b** | `examples/wandb/submit_run.py` 実装 + 単体スモーク | M | F9a |
-| **F9c** | `ツール（Tools）` メニュー追加（muda + Linux 自前）+ `WandbSubmitModal` UI + `WandbSignInModal`（ログイン / ログアウト / netrc 委譲）+ key マスキング | L | F9a / F2 |
-| **F9d** | Rust subprocess 起動 + stdout tail + URL パース | S | F9c |
-| **F9e** | `送信履歴を開く` / `バッファを削除…` の補助 UI | S | F9c |
+| **✅F9c** | `ツール（Tools）` メニュー追加（muda + Linux 自前）+ `WandbSubmitModal` UI + `WandbSignInModal`（ログイン / ログアウト / netrc 委譲）+ key マスキング | L | F9a / F2 |
+| **✅F9d** | Rust subprocess 起動 + stdout tail + URL パース | S | F9c |
+| **✅F9e** | `送信履歴を開く` / `バッファを削除…` の補助 UI | S | F9c |
 
 並列消化（`/parallel-agent-dev`）：F9a / F9b / F9c は依存が浅いため、F6 完了後に
 3 並列で着手できる。F9d は F9c 後、F9e は F9c / F9d 後。
@@ -815,7 +815,7 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
   `examples-wandb` job を追加し `uv run --with wandb pytest examples/wandb/tests/`
   を CI 上で常時実行する。
 
-### F9c: メニュー / モーダル / 認証
+### ✅F9c: メニュー / モーダル / 認証
 
 #### ✅ F9c-menu 完了（2026-05-04）— native_menu.rs Tools submenu 配線 + main.rs スタブハンドラ
 
@@ -963,7 +963,27 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
   - `cargo test --test wandb_reentrancy`
   - `uv run --with wandb pytest examples/wandb/tests/test_check_auth.py -v`
 
-### F9d: subprocess 起動
+#### ✅ F9c-modal 完了（2026-05-04）— WandbSubmitModal main.rs 配線
+
+**実装内容**:
+- `src/modal/wandb_signin.rs` — WandbSignInModal（API キー入力・マスク表示・stdin pipe 送信）
+- `src/modal/wandb_submit.rs` — WandbSubmitModal（project / run_name / tags / notes 入力・submit_in_flight ガード）
+- `src/wandb_submit_proc.rs` — build_submit_command / parse_url_from_output（F9d subprocess ユーティリティ）
+- `src/main.rs` — `wandb_submit_modal` フィールド追加・`WandbSubmitMsg` Message 追加・`Action::SubmitToWandb` でモーダル表示に変更・`submit_wandb_run()` に project/run_name/tags 引数追加・`WandbSubmitResult` ハンドラでモーダル Done/Failed 更新・view() にモーダルオーバーレイ追加
+
+**新規テストファイル**:
+- `tests/wandb_signin_flow.rs` — 8 ケース（ログイン / ログアウト / argv に key なし）
+- `tests/wandb_submit_subprocess.rs` — 11 ケース（subprocess 構造・URL パース・モーダル構造）
+- `tests/wandb_reentrancy.rs` — 7 ケース（submit_in_flight ガード）
+- `tests/wandb_modeswitch_lock_order.rs` — 4 ケース（R3-58 ロック順序）
+- `tests/wandb_submission_log_ui.rs` — 5 ケース（F9e UI 確認）
+
+**テスト結果**:
+- `cargo test --workspace` — 全件 OK（FAILED 0）
+- `cargo clippy -- -D warnings` — 警告なし
+- `cargo fmt --check` — 差分なし
+
+### ✅F9d: subprocess 起動（2026-05-04 完了）
 
 - **テストファイル**: `tests/wandb_submit_subprocess.rs`
   （`submit_run.py` をダミースクリプトに置換した dry-run テスト）
@@ -975,7 +995,7 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
   - **API key が Rust 側ログに出ないことを assert**（ログ捕捉テスト）
 - **観測コマンド**: `cargo test --test wandb_submit_subprocess`
 
-### F9e: 履歴 UI / バッファ削除
+### ✅F9e: 履歴 UI / バッファ削除（2026-05-04 完了）
 
 - **テストファイル**: `tests/wandb_submission_log_ui.rs`
 - **assert**:
