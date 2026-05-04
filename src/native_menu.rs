@@ -541,6 +541,20 @@ mod platform {
                         }
                     };
                     if let Some(a) = action {
+                        // H2 / 統一決定 64: muda accelerators on Win/Mac fire
+                        // independently of menu enabled state. Suppress
+                        // SwitchMode dispatch while a switch is already in
+                        // progress to avoid re-entrant restart attempts.
+                        if matches!(a, Action::SwitchMode(_))
+                            && crate::MODE_SWITCHING
+                                .load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            log::debug!(
+                                "[native_menu] SwitchMode dispatch suppressed: \
+                                 MODE_SWITCHING is true (Win/Mac event_stream)"
+                            );
+                            continue;
+                        }
                         yield a;
                     }
                 }

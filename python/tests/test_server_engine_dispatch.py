@@ -1154,7 +1154,7 @@ class TestStopReplayDispatch:
         server._replay_strategy_id = "sid-1"
 
         msg = {"op": "StopReplay", "request_id": "req-stop-1"}
-        await server._handle_stop_replay(msg)
+        await server._handle_stop_replay(msg, ws=None)
 
         # ReplayStopped が outbox に入っていること
         events = [e for e in server._outbox if e.get("event") == "ReplayStopped"]
@@ -1175,7 +1175,7 @@ class TestStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = "sid-2"
 
-        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-stop-2"})
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-stop-2"}, ws=None)
 
         mock_runner.stop.assert_called_once()
 
@@ -1191,7 +1191,7 @@ class TestStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = "sid-3"
 
-        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-stop-3"})
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-stop-3"}, ws=None)
 
         assert server._replay_state == ReplayState.STOPPING
 
@@ -1202,7 +1202,7 @@ class TestStopReplayDispatch:
         server = _make_server(mode="replay")
         server._replay_state = ReplayState.IDLE
 
-        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-idle"})
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-idle"}, ws=None)
 
         busy_events = [e for e in server._outbox if e.get("event") == "EngineBusy"]
         assert len(busy_events) == 1, f"Expected 1 EngineBusy, got {list(server._outbox)}"
@@ -1221,7 +1221,7 @@ class TestStopReplayDispatch:
         server = _make_server(mode="live")
         server._live_state = LiveState.CONNECTED
 
-        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-live"})
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-live"}, ws=None)
 
         # EngineError{code=mode_mismatch} が返る
         error_events = [e for e in server._outbox if e.get("event") == "EngineError"]
@@ -1241,7 +1241,7 @@ class TestStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = "sid-4"
 
-        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-clear"})
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-clear"}, ws=None)
 
         assert server._replay_strategy_id == ""
 
@@ -1259,7 +1259,7 @@ class TestStopReplayDispatch:
         server._engine_stop_events = {"sid-5": stop_event}
         server._replay_strategy_id = "sid-5"
 
-        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-event"})
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-event"}, ws=None)
 
         assert stop_event.is_set(), "stop_event should be set after StopReplay"
 
@@ -1273,7 +1273,7 @@ class TestStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = ""
 
-        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-norunner"})
+        await server._handle_stop_replay({"op": "StopReplay", "request_id": "req-norunner"}, ws=None)
 
         events = [e for e in server._outbox if e.get("event") == "ReplayStopped"]
         assert len(events) == 1, f"Expected 1 ReplayStopped, got {list(server._outbox)}"
@@ -1295,7 +1295,7 @@ class TestForceStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = "sid-f1"
 
-        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-1"})
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-1"}, ws=None)
 
         events = [e for e in server._outbox if e.get("event") == "ReplayStopped"]
         assert len(events) == 1, f"Expected 1 ReplayStopped, got {list(server._outbox)}"
@@ -1314,7 +1314,7 @@ class TestForceStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = "sid-f2a"
 
-        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-2"})
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-2"}, ws=None)
 
         mock_runner1.stop.assert_called_once()
         mock_runner2.stop.assert_called_once()
@@ -1329,7 +1329,7 @@ class TestForceStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = ""
 
-        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-idle"})
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-idle"}, ws=None)
 
         # EngineBusy は返さない
         busy_events = [e for e in server._outbox if e.get("event") == "EngineBusy"]
@@ -1348,7 +1348,7 @@ class TestForceStopReplayDispatch:
         server._engine_stop_events = {}
         server._replay_strategy_id = "sid-f3"
 
-        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-3"})
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-3"}, ws=None)
 
         assert server._replay_strategy_id == ""
 
@@ -1366,7 +1366,118 @@ class TestForceStopReplayDispatch:
         server._engine_stop_events = {"sid-f4a": stop_event1, "sid-f4b": stop_event2}
         server._replay_strategy_id = "sid-f4a"
 
-        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-4"})
+        await server._handle_force_stop_replay({"op": "ForceStopReplay", "request_id": "req-force-4"}, ws=None)
 
         assert stop_event1.is_set(), "stop_event1 should be set"
         assert stop_event2.is_set(), "stop_event2 should be set"
+
+    @pytest.mark.asyncio
+    async def test_force_stop_replay_resets_state_to_idle(self) -> None:
+        """H3: ForceStopReplay must reset _replay_state to IDLE so a subsequent
+        LoadReplayData / StartEngine is not blocked by stuck STOPPING state.
+        """
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.STOPPING
+
+        mock_runner = MagicMock()
+        server._engine_tasks = {"sid-h3": mock_runner}
+        server._engine_stop_events = {}
+        server._replay_strategy_id = "sid-h3"
+
+        await server._handle_force_stop_replay(
+            {"op": "ForceStopReplay", "request_id": "req-h3"}, ws=None
+        )
+
+        assert server._replay_state == ReplayState.IDLE, (
+            "ForceStopReplay must reset _replay_state to IDLE; got "
+            f"{server._replay_state!r}"
+        )
+
+
+class TestStopReplayUnicast:
+    """H4 / M10 / M12: error responses must unicast to the caller, not broadcast."""
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_rejected_in_live_mode_unicasts_to_caller(self) -> None:
+        """H4: live モードでの mode_mismatch error は呼び出し元のみに unicast する。
+
+        We assert the unicast contract by spying on `_outbox.send_to` and
+        verifying it was called with the originating ws plus an EngineError
+        payload (instead of the broadcast `append` path).
+        """
+        from unittest.mock import MagicMock
+        from engine.server import LiveState
+        server = _make_server(mode="live")
+        server._live_state = LiveState.CONNECTED
+
+        fake_ws = MagicMock(name="caller_ws")
+        # Spy on send_to to capture (ws, payload) pairs.
+        send_to_calls: list[tuple[object, dict]] = []
+        original_send_to = server._outbox.send_to
+
+        def _spy(ws_arg, payload):  # type: ignore[no-untyped-def]
+            send_to_calls.append((ws_arg, payload))
+            return original_send_to(ws_arg, payload)
+
+        server._outbox.send_to = _spy  # type: ignore[assignment]
+        # Ensure `append` is NOT used for the error (broadcast path).
+        broadcast_calls: list[dict] = []
+        original_append = server._outbox.append
+
+        def _spy_append(item):  # type: ignore[no-untyped-def]
+            broadcast_calls.append(item)
+            return original_append(item)
+
+        server._outbox.append = _spy_append  # type: ignore[assignment]
+
+        await server._handle_stop_replay(
+            {"op": "StopReplay", "request_id": "req-h4"}, ws=fake_ws
+        )
+
+        # Unicast error must go through send_to with the caller's ws.
+        unicast_errors = [
+            (w, p) for (w, p) in send_to_calls
+            if isinstance(p, dict) and p.get("event") == "EngineError"
+            and p.get("code") == "mode_mismatch"
+        ]
+        assert unicast_errors, (
+            f"Expected a unicast mode_mismatch EngineError via send_to(ws, ...); "
+            f"got send_to_calls={send_to_calls}, broadcast_calls={broadcast_calls}"
+        )
+        # The unicast must target the caller's ws.
+        assert all(w is fake_ws for (w, _) in unicast_errors), (
+            "mode_mismatch EngineError must be unicast to the caller's ws (H4)"
+        )
+        # No broadcast (append) of the error payload.
+        assert not any(
+            isinstance(p, dict) and p.get("code") == "mode_mismatch"
+            for p in broadcast_calls
+        ), "mode_mismatch must NOT be broadcast via append() (H4)"
+
+    @pytest.mark.asyncio
+    async def test_stop_replay_missing_request_id_emits_error(self) -> None:
+        """M10: StopReplay with empty/missing request_id is rejected with malformed_json."""
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.RUNNING
+
+        # Empty request_id
+        await server._handle_stop_replay({"op": "StopReplay"}, ws=None)
+        errors = [e for e in server._outbox if e.get("event") == "EngineError"]
+        assert any(e.get("code") == "malformed_json" for e in errors), (
+            f"Expected malformed_json EngineError for missing request_id; got {list(server._outbox)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_force_stop_replay_missing_request_id_emits_error(self) -> None:
+        """M10: ForceStopReplay with empty/missing request_id is rejected with malformed_json."""
+        server = _make_server(mode="replay")
+
+        await server._handle_force_stop_replay(
+            {"op": "ForceStopReplay", "request_id": ""}, ws=None
+        )
+        errors = [e for e in server._outbox if e.get("event") == "EngineError"]
+        assert any(e.get("code") == "malformed_json" for e in errors), (
+            f"Expected malformed_json EngineError for empty request_id; got {list(server._outbox)}"
+        )

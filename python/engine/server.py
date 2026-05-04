@@ -2500,6 +2500,26 @@ class DataEngineServer:
             self._outbox.append(ev)
 
     # ------------------------------------------------------------------
+    # F7: unicast helper — used by _handle_stop_replay / _handle_force_stop_replay
+    # for malformed_json / mode_mismatch errors that must go ONLY to the caller.
+    # ------------------------------------------------------------------
+
+    async def _send_unicast(
+        self, ws: ServerConnection, payload: dict
+    ) -> None:
+        """Send `payload` only to `ws`. Used when an error response is
+        per-connection (e.g. mode_mismatch / malformed_json) and must not
+        leak to other clients. Mirrors the convention used by
+        ``_check_replay_state`` (`_outbox.send_to(ws, payload)`) but exposed
+        as an awaitable helper for handlers that already use ``async`` IO.
+        """
+        # `_outbox.send_to` is sync (queues the payload to the per-connection
+        # send loop). This wrapper exists for symmetry with future direct-send
+        # paths and to make `await self._send_unicast(...)` read naturally
+        # alongside other awaited handler operations.
+        self._outbox.send_to(ws, payload)
+
+    # ------------------------------------------------------------------
     # B3: State machine guard helpers
     # ------------------------------------------------------------------
 
@@ -3404,27 +3424,47 @@ class DataEngineServer:
             self._replay_strategy_id = ""
 
     async def _handle_stop_replay(
-        self, msg: dict, *, ws: ServerConnection | None = None
+        self, msg: dict, *, ws: ServerConnection
     ) -> None:
         """StopReplay IPC: replay セッションを graceful に停止する（F7）。
 
         replay モードかつ RUNNING 状態のみ受理する。
         内部で active な strategy_id を解決して runner を停止し、
         完了後に ReplayStopped を全クライアントに broadcast する。
+
+        M12: ws is mandatory — error responses (mode_mismatch / malformed_json)
+             must unicast to the originating caller, not broadcast.
         """
         from engine.schemas import ReplayStopped as ReplayStoppedModel
 
-        request_id: str = msg.get("request_id", "")
+        # M10: reject malformed messages with no/empty request_id by unicasting
+        # an EngineError back to the caller. Empty-string fallback was masking
+        # client bugs and producing replies with request_id="".
+        request_id_raw = msg.get("request_id")
+        if not isinstance(request_id_raw, str) or not request_id_raw:
+            await self._send_unicast(
+                ws,
+                EngineError(
+                    code="malformed_json",
+                    message="StopReplay requires a non-empty request_id",
+                    strategy_id=None,
+                ).model_dump(),
+            )
+            return
+        request_id: str = request_id_raw
 
         # replay モードでのみ有効（live モードで受信した場合は mode_mismatch Error を返す）
+        # H4: live モードでの mode_mismatch error は呼び出し元のみに unicast する
+        # （broadcast すると他のクライアントが偽の error 表示をする）。
         if self._mode != "replay":
             log.info("StopReplay: ignored in mode=%r", self._mode)
-            self._outbox.append(
+            await self._send_unicast(
+                ws,
                 EngineError(
                     code="mode_mismatch",
                     message="StopReplay is only valid in replay mode",
                     strategy_id=None,
-                ).model_dump()
+                ).model_dump(),
             )
             return
 
@@ -3465,16 +3505,33 @@ class DataEngineServer:
         log.info("StopReplay: broadcast ReplayStopped(request_id=%r)", request_id)
 
     async def _handle_force_stop_replay(
-        self, msg: dict, *, ws: ServerConnection | None = None
+        self, msg: dict, *, ws: ServerConnection
     ) -> None:
         """ForceStopReplay IPC: replay セッションを強制停止する（F7 タイムアウト fallback）。
 
         _replay_state に関わらず強制実行する（state guard を使わない）。
         active な全ランナーを強制停止し、ReplayStopped を broadcast する。
+
+        H3: 完了時に _replay_state を IDLE に戻し、後続の LoadReplayData /
+            StartEngine が STOPPING 残留で弾かれないようにする。
+        M10: request_id 空 / 非 str はクライアントバグなので malformed_json で reject する。
+        M12: ws is mandatory — error responses must unicast to the caller.
         """
         from engine.schemas import ReplayStopped as ReplayStoppedModel
 
-        request_id: str = msg.get("request_id", "")
+        # M10: validate request_id and unicast malformed error.
+        request_id_raw = msg.get("request_id")
+        if not isinstance(request_id_raw, str) or not request_id_raw:
+            await self._send_unicast(
+                ws,
+                EngineError(
+                    code="malformed_json",
+                    message="ForceStopReplay requires a non-empty request_id",
+                    strategy_id=None,
+                ).model_dump(),
+            )
+            return
+        request_id: str = request_id_raw
 
         log.info(
             "ForceStopReplay: force-stopping all runners (state=%r, request_id=%r)",
@@ -3503,6 +3560,10 @@ class DataEngineServer:
             ).model_dump()
         )
         log.info("ForceStopReplay: broadcast ReplayStopped(request_id=%r)", request_id)
+
+        # H3: state を IDLE にリセット — STOPPING 残留で次の LoadReplayData /
+        # StartEngine が永遠に弾かれることを防ぐ。
+        self._replay_state = ReplayState.IDLE
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):

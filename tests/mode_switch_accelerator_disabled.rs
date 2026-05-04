@@ -38,3 +38,26 @@ fn mode_switch_state_holds_guard() {
         "mode_switch_state must hold ModeSwitchGuard via tuple; pair drift is impossible by construction (M13)"
     );
 }
+
+#[test]
+fn win_mac_event_stream_checks_mode_switching() {
+    // H2 / 統一決定 64: muda accelerators on Win/Mac fire independently of
+    // menu enabled state. The event_stream must suppress SwitchMode dispatch
+    // while MODE_SWITCHING is true.
+    const NATIVE: &str = include_str!("../src/native_menu.rs");
+    let pos = NATIVE
+        .find("pub fn event_stream()")
+        .expect("event_stream() must exist in src/native_menu.rs");
+    // Window: scan the function body for the guard. 4000 bytes is enough.
+    let end = (pos + 4000).min(NATIVE.len());
+    // Walk back to char boundary
+    let mut safe_end = end;
+    while !NATIVE.is_char_boundary(safe_end) {
+        safe_end -= 1;
+    }
+    let body = &NATIVE[pos..safe_end];
+    assert!(
+        body.contains("Action::SwitchMode(_)") && body.contains("MODE_SWITCHING"),
+        "event_stream must suppress SwitchMode dispatch when MODE_SWITCHING is true (H2)"
+    );
+}
