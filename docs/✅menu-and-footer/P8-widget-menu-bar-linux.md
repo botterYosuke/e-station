@@ -55,7 +55,11 @@ src/
 ### `MenuEntry` 構造体（統一決定 R7-86）
 
 Tools / Mode サブメニューは `enabled` / `tooltip` / `checked`（排他チェック）の
-表現が必要なため、純関数の戻り値を `Vec<Action>` から `Vec<MenuEntry>` へ拡張する：
+表現が必要なため、純関数の戻り値を `Vec<Action>` から `Vec<MenuEntry>` へ拡張する。
+
+> **H6 / F8 R1 整合**: 計画書当初は `tooltip: Option<String>` を想定していたが、
+> 実装は全ての tooltip がコンパイル時定数のため `Option<&'static str>` に着地している
+> （無駄な heap 割り当てを避けるため）。シグネチャの最終形は実装側を正とする。
 
 ```rust
 // src/menu.rs
@@ -63,18 +67,20 @@ Tools / Mode サブメニューは `enabled` / `tooltip` / `checked`（排他チ
 pub struct MenuEntry {
     pub action: Action,
     pub enabled: bool,
-    pub tooltip: Option<String>,
+    pub tooltip: Option<&'static str>,
     /// Mode メニュー等の排他チェック表示用。`Some(true)` = 現在選択中、
     /// `Some(false)` = 候補だが未選択、`None` = チェック非表示（File 等の通常項目）。
     pub checked: Option<bool>,
 }
 ```
 
-**適用範囲**：
+**適用範囲**（実装シグネチャ）：
 
-- `tools_actions_for_state(auth_state, buffer_state) -> Vec<MenuEntry>`
-- `menu_items_tools(auth_state, buffer_state) -> Vec<MenuEntry>`
-- `mode_menu_items(current_mode) -> Vec<MenuEntry>`（Linux 自前メニューの Mode サブメニュー）
+- `tools_actions_for_state(auth: &WandbAuthState, buf: &RunBufferIndex) -> Vec<MenuEntry>`
+  （統一決定 R7-86 で `(AuthState, BufferState)` から差し替え。enum 自体は
+  `#[allow(dead_code)]` で保持 — P9 §852 / `tests/tools_actions_for_state.rs` 整合）
+- `mode_menu_items(current_mode: &AppMode) -> Vec<MenuEntry>`（Linux 自前メニューの
+  Mode サブメニュー）
 
 **不変条件 R7-88**：`actions_for_mode(mode) -> Vec<Action>`（File メニュー用 cross-platform
 契約）はシグネチャ不変で維持する。これは P8 DoD-11 / R3-66/69 / R6-83 整合のため触らない。
@@ -154,7 +160,22 @@ pub enum TopMenu { File, Mode, Tools }
 pub enum BarMessage {
     Toggle(TopMenu),     // ボタン押下
     Pick(Action),        // ドロップダウン項目選択 → Message::NativeMenuAction(Action) へ写像
-    Dismiss,             // Esc / focus-lost / 外側クリック
+    Dismiss,             // Esc / 外側クリック
+    DismissFocusLost,    // window Unfocused（log で reason を区別するため Dismiss と分離）
+    // 注（F8 R2 / H3'）: 過去 F8 R1 で検討された `BarMoved(u32)` は採用しない。
+    // iced 0.14 の `mouse_area::on_move` は **widget ローカル座標**
+    // （`cursor.position_in(layout.bounds())`）を渡してくるため、これを
+    // `with_dropdown_overlay` の `top_offset`（window 絶対 Y を期待）に
+    // 流すと category mismatch によりバー上辺で silent failure する。
+    // 本実装ではメニューバーが常に window 先頭行であることを利用して
+    // `top_offset` を `BAR_HEIGHT` 定数に固定し、cursor 追従の anchor 機構自体を持たない。
+    //
+    // **不変条件（F8 R3 / LOW）**: `top_offset = BAR_HEIGHT` が成立するのは
+    // `main.rs` の `view()` 構成で widget menu bar より上に**実効高さ 0** の
+    // ウィジェット（`header_title` 等）しか置かない場合に限る。将来 menu bar
+    // の上に高さを持つウィジェット（バナー・ヘッダーバー等）を追加した場合は、
+    // `top_offset` 計算を window 絶対 Y に切り替える必要がある（`iced::event::listen_with`
+    // 経由で `Event::Mouse(CursorMoved)` を購読）。
 }
 
 /// メニューバー全体の view。`Column` 先頭に挿入する。
@@ -179,20 +200,30 @@ pub fn menu_items(mode: &AppMode) -> Vec<Action> {
     }
 }
 
-/// `auth_state` / `buffer_state` に応じた Tools サブメニュー項目を返す（テスト対象）。
+/// `auth` / `buf` に応じた Tools サブメニュー項目を返す（テスト対象）。
 ///
 /// 統一決定 R3-66/69 により、Tools サブメニューは File/Mode と独立した責務として
 /// `tools_actions_for_state` 純関数で扱う（`actions_for_mode` には混ぜない）。
-/// 統一決定 R7-86/87 により、戻り値は `Vec<MenuEntry>` に拡張され、UX の
-/// `disable + tooltip` / `グレー表示` / `ログイン/ログアウト 相互 disable` を表現できる。
+/// 統一決定 R7-86/87 により、引数は **`&WandbAuthState` / `&RunBufferIndex`** に
+/// 統一され、戻り値は常に 5 要素の `Vec<MenuEntry>`（`SignInWandb` / `SignOutWandb` /
+/// `SubmitToWandb` / `OpenSubmissionLog` / `ClearRunBuffer` を `enabled` フラグで
+/// 制御する）に拡張される。これにより UX の `disable + tooltip` / `グレー表示` /
+/// `ログイン/ログアウト 相互 disable` を表現できる。
 ///
-/// - `auth_state`: W&B 認証状態（`SignedIn` / `SignedOut`）
-/// - `buffer_state`: Run buffer 状態（`HasRuns` / `Empty`）
-pub fn menu_items_tools(
-    auth_state: AuthState,
-    buffer_state: BufferState,
+/// - `auth`: W&B 認証状態（`WandbAuthState` 構造体 — Python `check_auth.py` の
+///   stdout JSON を deserialize したもの）
+/// - `buf`: Run buffer の索引（`RunBufferIndex` — `latest_completed` と `total` を持つ）
+///
+/// 旧スケッチの `menu_items_tools` ラッパは F9c 着地時に廃止された（H6 / F8 R1 で
+/// 計画書を実装に追従）。`AuthState` / `BufferState` enum は
+/// `tests/tools_actions_for_state.rs` の構造インスペクションで参照されているため
+/// `src/menu.rs` 内に `#[allow(dead_code)]` で保持される（P9 §852）。
+pub fn tools_actions_for_state(
+    auth: &WandbAuthState,
+    buf: &RunBufferIndex,
 ) -> Vec<MenuEntry> {
-    tools_actions_for_state(auth_state, buffer_state)
+    // 5 要素 × enabled / tooltip 計算は src/menu.rs を参照
+    todo!()
 }
 
 /// Linux 自前メニューバーの `モード（Mode）▼` サブメニュー項目を返す（テスト対象）。
@@ -201,16 +232,19 @@ pub fn menu_items_tools(
 /// で表示し、選択で `Action::SwitchAppMode(Live|Replay)` を dispatch する。
 /// P7 が前提する Linux Mode メニューの仕様欠落（R7-3）を補う。
 pub fn mode_menu_items(current_mode: &AppMode) -> Vec<MenuEntry> {
+    // H4 / F8 R1: 現在モードは disabled — 同じモードへ切り替える操作は無意味なので
+    // `enabled: !matches!(...)` でグレーアウトさせる。`tests/mode_menu_items.rs::
+    // mode_menu_items_disables_current_live_entry` がこの不変条件を保護する。
     vec![
         MenuEntry {
             action: Action::SwitchAppMode(AppMode::Live),
-            enabled: true,
+            enabled: !matches!(current_mode, AppMode::Live),
             tooltip: None,
             checked: Some(matches!(current_mode, AppMode::Live)),
         },
         MenuEntry {
             action: Action::SwitchAppMode(AppMode::Replay),
-            enabled: true,
+            enabled: !matches!(current_mode, AppMode::Replay),
             tooltip: None,
             checked: Some(matches!(current_mode, AppMode::Replay)),
         },
@@ -324,16 +358,16 @@ OS の見た目に従うため、Linux のみ「アプリのテーマに沿っ�
 | DoD-2 | `Esc` 押下でドロップダウンが閉じる | 目視 + `RUST_LOG=debug`：`widget_menu_bar: dismiss reason=esc` |
 | DoD-3 | ウィンドウ focus-lost でドロップダウンが閉じる | 別アプリへ alt-tab／ログ：`dismiss reason=focus_lost` |
 | DoD-4 | 外側クリックでドロップダウンが閉じる | 目視／ログ：`dismiss reason=outside_click` |
-| ✅ DoD-5 | live モードで `開く…（Open）` / `上書き保存（Save）` / `名前を付けて保存…（Save As）` / 終了が並ぶ | `widget_menu_bar::menu_items` ユニットテストで集合一致 |
-| ✅ DoD-6 | replay モードで `Replay を開始…` / `Replay を停止` / 終了が並ぶ | 同上 |
+| ✅ DoD-5 | live モードで `開く…（Open）` / `上書き保存（Save）` / `名前を付けて保存…（Save As）` / 終了が並ぶ | `cargo test --test menu_actions_cross_platform` → **15 passed**（旧 `widget_menu_bar::menu_items` wrapper は F8 R2 / M-A で削除。`actions_for_mode(&AppMode::Live)` を直接検証） |
+| ✅ DoD-6 | replay モードで `Replay を開始…` / `Replay を停止` / 終了が並ぶ | 同上（`actions_for_mode(&AppMode::Replay)` を検証） |
 | ✅ DoD-7 | Win/Mac/Linux で同一 `Action` を発火する cross-platform テストが green | `cargo test --test menu_actions_cross_platform` → **15 passed** |
 | DoD-8 | Wayland / X11 両方でスモーク完走 | [スモーク手順](#smoke) 参照 |
 | DoD-9 | muda アクセラレータと Linux iced kbd の重複登録が compile-time で起こらない | `cargo build --target x86_64-unknown-linux-gnu` warn-free |
-| ✅ DoD-10 | `Tools ▼` メニューに W&B / Run buffer 関連項目（`SubmitToWandb` / `SignInWandb` / `SignOutWandb` / `OpenSubmissionLog` / `ClearRunBuffer`）が `auth_state` × `buffer_state` に応じて並ぶ | `cargo test --test tools_actions_for_state` → **10 passed** |
-| ✅ DoD-11 | `actions_for_mode(Live)` / `actions_for_mode(Replay)` の期待値は **File/Mode メニュー由来のみ**で、Tools サブメニュー Action は混入しない | `cargo test --test menu_actions_cross_platform` → **GREEN** |
-| ✅ DoD-12 | `widget_menu_bar_state.rs` の test matrix が `TopMenu::Tools` を含む 3×4=12 ケースで全 green | `cargo test --test widget_menu_bar_state` → **11 passed** |
-| ✅ DoD-13 | Linux で `モード（Mode）▼` を開くと `ライブ（Live）` / `リプレイ（Replay）` が排他チェック付きで並ぶ（現在モードに `✓` 表示） | `cargo test --test mode_menu_items` → **10 passed** |
-| ✅ DoD-14 | Linux Mode サブメニューの `ライブ（Live）` 行クリックで `Action::SwitchAppMode(AppMode::Live)` が dispatch される（Replay 行も同様） | `cargo test --test mode_menu_items` → **GREEN** |
+| ✅ DoD-10 | `Tools ▼` メニューに W&B / Run buffer 関連項目（`SubmitToWandb` / `SignInWandb` / `SignOutWandb` / `OpenSubmissionLog` / `ClearRunBuffer`）が `auth_state` × `buffer_state` に応じて並ぶ | `cargo test --test tools_actions_for_state` → **13 passed**（M10 / F8 R1 で実測値に更新） |
+| ✅ DoD-11 | `actions_for_mode(Live)` / `actions_for_mode(Replay)` の期待値は **File/Mode メニュー由来のみ**で、Tools サブメニュー Action は混入しない | `cargo test --test menu_actions_cross_platform` → **15 passed**（M10 / F8 R1 で実測値に更新） |
+| ✅ DoD-12 | `widget_menu_bar_state.rs` の test matrix が `TopMenu::Tools` を含む 3×4=12 ケースで全 green | `cargo test --test widget_menu_bar_state` → **17 passed**（M10 / F8 R1 で実測値に更新） |
+| ✅ DoD-13 | Linux で `モード（Mode）▼` を開くと `ライブ（Live）` / `リプレイ（Replay）` が排他チェック付きで並ぶ（現在モードに `✓` 表示） | `cargo test --test mode_menu_items` → **11 passed**（M10 / F8 R1 で実測値に更新） |
+| ✅ DoD-14 | Linux Mode サブメニューの `ライブ（Live）` 行クリックで `Action::SwitchAppMode(AppMode::Live)` が dispatch される（Replay 行も同様） | `cargo test --test mode_menu_items` → **GREEN**（11 passed のうち `mode_menu_items_dispatches_switch_app_mode` を含む） |
 
 <a id="testing"></a>
 ## テスト方針
@@ -425,60 +459,95 @@ fn actions_for_mode_excludes_tools_submenu_actions() {
 <a id="tools-actions-tests"></a>
 ### Tools サブメニューユニットテスト（`tests/tools_actions_for_state.rs`）
 
-統一決定 R3-66/69 により Tools サブメニューは `auth_state` × `buffer_state` を受け取る
-別純関数 `tools_actions_for_state(auth_state, buffer_state)` で実装し、本ファイルで
-4 状態（2×2 マトリクス）の期待値を assert する。
+統一決定 R3-66/69 により Tools サブメニューは独立した責務として扱い、統一決定 R7-86 により
+`tools_actions_for_state(auth: &WandbAuthState, buf: &RunBufferIndex) -> Vec<MenuEntry>`
+というシグネチャで実装する（H6 / F8 R1 で計画書を実装に追従させた）。本ファイルでは
+4 状態（2×2 マトリクス）×5 項目（5 種の `MenuEntry`）の `enabled` フラグを assert する。
 
-**期待値テーブル**：
+> **H6 / F8 R1**: 旧計画書スケッチでは `(AuthState, BufferState) -> Vec<Action>` と
+> 表現していたが、これは P9 で `&WandbAuthState` / `&RunBufferIndex` への移行が決まった
+> R7-86 と乖離していた。`AuthState` / `BufferState` enum 自体は **削除せず**
+> `#[allow(dead_code)]` で `src/menu.rs` に保持する（P9 §852 の決定および
+> `tests/tools_actions_for_state.rs` のソースインスペクションテスト
+> `auth_state_enum_exists` / `buffer_state_enum_exists` を尊重）。
 
-| # | `auth_state` | `buffer_state` | 期待 `Action` 集合 |
-|---|--------------|----------------|---------------------|
-| 1 | `SignedOut` | `Empty`   | `[SignInWandb]` |
-| 2 | `SignedOut` | `HasRuns` | `[SignInWandb, OpenSubmissionLog, ClearRunBuffer]` |
-| 3 | `SignedIn`  | `Empty`   | `[SignOutWandb]` |
-| 4 | `SignedIn`  | `HasRuns` | `[SubmitToWandb, OpenSubmissionLog, ClearRunBuffer, SignOutWandb]` |
+**実装シグネチャ**：
 
 ```rust
-// tests/tools_actions_for_state.rs
-use flowsurface::menu::{tools_actions_for_state, Action, AuthState, BufferState};
-
-#[test]
-fn signed_out_empty_offers_signin_only() {
-    let got = tools_actions_for_state(AuthState::SignedOut, BufferState::Empty);
-    assert_eq!(got, vec![Action::SignInWandb]);
-}
-
-#[test]
-fn signed_out_has_runs_offers_signin_and_buffer_ops() {
-    let got = tools_actions_for_state(AuthState::SignedOut, BufferState::HasRuns);
-    assert_eq!(
-        got,
-        vec![Action::SignInWandb, Action::OpenSubmissionLog, Action::ClearRunBuffer],
-    );
-}
-
-#[test]
-fn signed_in_empty_offers_signout_only() {
-    let got = tools_actions_for_state(AuthState::SignedIn, BufferState::Empty);
-    assert_eq!(got, vec![Action::SignOutWandb]);
-}
-
-#[test]
-fn signed_in_has_runs_offers_full_submission_flow() {
-    let got = tools_actions_for_state(AuthState::SignedIn, BufferState::HasRuns);
-    assert_eq!(
-        got,
-        vec![
-            Action::SubmitToWandb,
-            Action::OpenSubmissionLog,
-            Action::ClearRunBuffer,
-            Action::SignOutWandb,
-        ],
-    );
-}
+// src/menu.rs
+pub fn tools_actions_for_state(
+    auth: &WandbAuthState,
+    buf: &RunBufferIndex,
+) -> Vec<MenuEntry>
 ```
 
-このテストも OS 非依存で、`cargo test --test tools_actions_for_state` で全 OS で green になる。
+**期待値テーブル**（戻り値は常に 5 要素 `Vec<MenuEntry>`、順序固定）：
+
+| # | `auth.authenticated` | `buf.latest_completed` | `buf.total` | SignInWandb | SignOutWandb | SubmitToWandb | OpenSubmissionLog | ClearRunBuffer |
+|---|----------------------|------------------------|-------------|-------------|--------------|---------------|-------------------|----------------|
+| 1 | `false` | `None`         | `0` | enabled=true  | enabled=false | enabled=false | enabled=false | enabled=false |
+| 2 | `false` | `Some(_)`      | `1` | enabled=true  | enabled=false | enabled=false | enabled=true  | enabled=true  |
+| 3 | `true`  | `None`         | `0` | enabled=false | enabled=true  | enabled=false | enabled=false | enabled=false |
+| 4 | `true`  | `Some(_)`      | `1` | enabled=false | enabled=true  | enabled=true  | enabled=true  | enabled=true  |
+
+不変条件：
+- 各行の `tooltip` は `enabled=false` のとき `Some("...")`、`enabled=true` のとき `None`
+  （`enabled_true_always_has_none_tooltip` で保護）
+- `SignInWandb` と `SignOutWandb` の `enabled` は常に相互排他
+  （`signin_signout_mutually_exclusive_all_combinations` で保護）
+- `OpenSubmissionLog` は常に 5 要素中に存在する
+  （`open_submission_log_always_present_all_combinations` で保護）
+- `OpenSubmissionLog` / `ClearRunBuffer` は `buf.total > 0` で `enabled=true` になる
+  （`latest_completed.is_some()` を要求しない / `open_log_and_clear_enabled_when_only_aborted_runs`）
+
+```rust
+// src/menu.rs (内部 unit test, 5 項目 × 4 組合せをカバー)
+#[test]
+fn auth_ok_buffer_has_runs_submit_enabled() {
+    let entries = tools_actions_for_state(&make_auth(true), &make_buf(true));
+    assert_eq!(entries.len(), 5);
+
+    let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
+    assert!(submit.enabled);
+    assert_eq!(submit.tooltip, None);
+
+    let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
+    assert!(!sign_in.enabled);
+    assert_eq!(sign_in.tooltip, Some("ログイン済みです"));
+
+    let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
+    assert!(sign_out.enabled);
+
+    let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
+    assert!(log.enabled);
+
+    let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
+    assert!(clear.enabled);
+}
+
+#[test]
+fn auth_ok_buffer_empty_submit_disabled() {
+    let entries = tools_actions_for_state(&make_auth(true), &make_buf(false));
+    let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
+    assert!(!submit.enabled);
+    assert_eq!(
+        submit.tooltip,
+        Some("送信可能な run がありません（最初に replay を実行してください）"),
+    );
+    /* ... 残り 4 項目も同様 ... */
+}
+
+#[test]
+fn auth_none_buffer_has_runs_submit_disabled_login_prompt() { /* SignIn=true, Submit=false */ }
+
+#[test]
+fn auth_none_buffer_empty_all_disabled_appropriately() { /* 唯一 SignIn のみ enabled */ }
+```
+
+`tests/tools_actions_for_state.rs` 側はバイナリクレート制約のためソースインスペクション方式を
+採用し、シグネチャ（`WandbAuthState` / `RunBufferIndex` / `Vec<MenuEntry>` への参照）と
+不変条件のドキュメンテーションコメントの存在を assert する（[実装知見](#implementation-notes) 参照）。
+`cargo test --test tools_actions_for_state` で全 OS で green になる（M10 実測 13 passed）。
 
 <a id="mode-menu-items-tests"></a>
 ### Mode サブメニューユニットテスト（`tests/mode_menu_items.rs`）
@@ -487,28 +556,29 @@ fn signed_in_has_runs_offers_full_submission_flow() {
 `mode_menu_items(current_mode) -> Vec<MenuEntry>` で実装し、本ファイルで
 **現在モードに対する排他チェック表示**と **Action dispatch** を assert する。
 
-**期待値テーブル**：
+**期待値テーブル**（H4 / F8 R1: 現在モードは `enabled=false`）：
 
 | # | `current_mode` | 期待 `Vec<MenuEntry>`（順序固定） |
 |---|----------------|---------------------------------|
-| 1 | `Live`   | `[ {SwitchAppMode(Live), enabled, checked=Some(true)}, {SwitchAppMode(Replay), enabled, checked=Some(false)} ]` |
-| 2 | `Replay` | `[ {SwitchAppMode(Live), enabled, checked=Some(false)}, {SwitchAppMode(Replay), enabled, checked=Some(true)} ]` |
+| 1 | `Live`   | `[ {SwitchAppMode(Live), enabled=false, checked=Some(true)}, {SwitchAppMode(Replay), enabled=true, checked=Some(false)} ]` |
+| 2 | `Replay` | `[ {SwitchAppMode(Live), enabled=true, checked=Some(false)}, {SwitchAppMode(Replay), enabled=false, checked=Some(true)} ]` |
 
 ```rust
 // tests/mode_menu_items.rs
 use flowsurface::menu::{mode_menu_items, Action, MenuEntry};
 use flowsurface::AppMode;
 
+// H4 / F8 R1: 現在モードは disabled — `assert!(!got[0].enabled)` を期待する。
 #[test]
 fn live_mode_marks_live_checked_replay_unchecked() {
     let got = mode_menu_items(&AppMode::Live);
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
     assert_eq!(got[0].checked, Some(true));
-    assert!(got[0].enabled);
+    assert!(!got[0].enabled, "current mode (Live) must be disabled");
     assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
     assert_eq!(got[1].checked, Some(false));
-    assert!(got[1].enabled);
+    assert!(got[1].enabled, "non-current mode (Replay) must be enabled");
 }
 
 #[test]
@@ -517,8 +587,10 @@ fn replay_mode_marks_replay_checked_live_unchecked() {
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
     assert_eq!(got[0].checked, Some(false));
+    assert!(got[0].enabled, "non-current mode (Live) must be enabled");
     assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
     assert_eq!(got[1].checked, Some(true));
+    assert!(!got[1].enabled, "current mode (Replay) must be disabled");
 }
 
 /// クリックで dispatch される Action が `SwitchAppMode(target)` であることを保証する

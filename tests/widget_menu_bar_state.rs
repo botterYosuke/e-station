@@ -44,9 +44,14 @@ fn state_struct_exists() {
         src.contains("pub open: Option<TopMenu>"),
         "State must have `pub open: Option<TopMenu>` field"
     );
+    // F8 R2 / H3': the `anchor_y` mechanism was removed because
+    // `mouse_area::on_move` returns widget-local coordinates (0..BAR_HEIGHT),
+    // which is incompatible with the window-absolute Y semantics expected by
+    // `with_dropdown_overlay`'s `top_offset`. The dropdown anchor is now the
+    // constant `BAR_HEIGHT`.
     assert!(
-        src.contains("anchor_y"),
-        "State must have `anchor_y` field for dynamic dropdown positioning (HIGH: fixed-pixel fix)"
+        !src.contains("anchor_y"),
+        "State must NOT have `anchor_y` field (F8 R2 H3': mechanism abolished — widget-local vs window-absolute coordinate mismatch)"
     );
 }
 
@@ -85,9 +90,67 @@ fn bar_message_enum_has_toggle_pick_dismiss() {
         src.contains("DismissFocusLost"),
         "BarMessage must have DismissFocusLost variant separate from Dismiss (DoD-3 log distinction)"
     );
+    // F8 R2 / H3': `BarMoved(u32)` was removed alongside `anchor_y`. The
+    // dropdown anchor is now the constant `BAR_HEIGHT` in `with_dropdown_overlay`.
     assert!(
-        src.contains("BarMoved("),
-        "BarMessage must have BarMoved(u32) variant for dynamic dropdown positioning (HIGH: fixed-pixel fix)"
+        !src.contains("BarMoved("),
+        "BarMessage must NOT have BarMoved(...) variant (F8 R2 H3': mechanism abolished)"
+    );
+}
+
+// F8 R2 / H3': verify `with_dropdown_overlay` anchors the dropdown at the
+// constant `BAR_HEIGHT` rather than reading a per-cursor `anchor_y` value.
+#[test]
+fn with_dropdown_overlay_uses_bar_height_constant_for_top_offset() {
+    let src = read_widget_menu_bar();
+    let fn_start = src
+        .find("pub fn with_dropdown_overlay")
+        .expect("with_dropdown_overlay must exist");
+    let fn_body = &src[fn_start..];
+    // Bound the search to the function body (next top-level pub fn).
+    let fn_end = fn_body[1..]
+        .find("\npub fn ")
+        .map(|i| i + 1)
+        .unwrap_or(fn_body.len());
+    let body = &fn_body[..fn_end];
+    assert!(
+        !body.contains("anchor_y"),
+        "with_dropdown_overlay must not reference `anchor_y` (F8 R2 H3': mechanism abolished)"
+    );
+    assert!(
+        body.contains("let top_offset = BAR_HEIGHT"),
+        "with_dropdown_overlay must anchor at the BAR_HEIGHT constant (F8 R2 H3': `let top_offset = BAR_HEIGHT;`)"
+    );
+}
+
+// F8 R2 / M-B: the `Message::MenuBar(bar_msg)` handler in main.rs must
+// exhaustively match every `BarMessage` variant rather than absorbing them in
+// a wildcard arm. With `BarMoved` removed, the only remaining unlogged variant
+// is `Pick(_)`, which must be named explicitly so that future BarMessage
+// additions trigger a compile error.
+#[test]
+fn main_menu_bar_handler_match_is_exhaustive_without_wildcard() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let src = std::fs::read_to_string(path).expect("failed to read src/main.rs");
+    let handler_start = src
+        .find("Message::MenuBar(bar_msg) =>")
+        .expect("MenuBar handler must exist");
+    let after = &src[handler_start..];
+    // The handler ends at the next top-level `Message::` arm.
+    let end = after[1..]
+        .find("\n            Message::")
+        .map(|i| i + 1)
+        .unwrap_or(after.len());
+    let body = &after[..end];
+    // The exhaustive match logs Pick explicitly (or via Pick(_) => {}).
+    assert!(
+        body.contains("BarMessage::Pick(_) => {}") || body.contains("BarMessage::Pick(_) =>"),
+        "MenuBar handler must explicitly match BarMessage::Pick(_) (F8 R2 M-B: no wildcard `_ => {{}}`)"
+    );
+    // Forbid the wildcard arm — its only purpose was to absorb BarMoved/Pick.
+    assert!(
+        !body.contains("_ => {}"),
+        "MenuBar handler must NOT use a wildcard `_ => {{}}` arm (F8 R2 M-B: exhaustive matching)"
     );
 }
 
@@ -107,13 +170,14 @@ fn dismiss_focus_lost_closes_menu() {
         "update() must handle BarMessage::DismissFocusLost (DoD-3: focus-lost dismiss)"
     );
     // It must appear alongside Dismiss so both share the open: None outcome.
+    // Accept either `=> State { open: None }` (single-expression arm) or
+    // `=> { State { open: None } }` (block arm — rustfmt's preferred shape
+    // after the `anchor_y` field was removed in F8 R2).
     let dismiss_arm = body
         .find("BarMessage::Dismiss")
         .expect("Dismiss arm must exist");
     let after_dismiss = &body[dismiss_arm..];
-    let arm_end = after_dismiss
-        .find("=> State")
-        .expect("arm must end with => State");
+    let arm_end = after_dismiss.find("=>").expect("arm must contain `=>`");
     let arm_pattern = &after_dismiss[..arm_end];
     assert!(
         arm_pattern.contains("DismissFocusLost"),
@@ -212,16 +276,22 @@ fn pick_always_closes_menu() {
 
 // ── widget_menu_bar module: menu_items, view, overlay, conversion ──────────
 
+// F8 R2 / M-A: the `menu_items` / `mode_items` wrappers in widget_menu_bar.rs
+// were pure delegation shims (`menu_items(mode) -> actions_for_mode(mode)` and
+// `mode_items(current) -> mode_menu_items(current)`) with zero external
+// callers after H2 added `pub use` of the underlying functions. They have
+// been removed; widget_menu_bar.rs now just re-imports the canonical
+// `menu::{actions_for_mode, mode_menu_items}` directly.
 #[test]
-fn menu_items_function_delegates_to_menu_module() {
+fn widget_menu_bar_does_not_define_redundant_wrappers() {
     let src = read_widget_menu_bar();
     assert!(
-        src.contains("pub fn menu_items"),
-        "widget_menu_bar.rs must export `pub fn menu_items`"
+        !src.contains("pub fn menu_items"),
+        "widget_menu_bar.rs must NOT define wrapper `pub fn menu_items` (F8 R2 M-A: redundant delegation removed; use menu::actions_for_mode directly)"
     );
     assert!(
-        src.contains("actions_for_mode"),
-        "menu_items must delegate to menu::actions_for_mode for cross-platform consistency"
+        !src.contains("pub fn mode_items"),
+        "widget_menu_bar.rs must NOT define wrapper `pub fn mode_items` (F8 R2 M-A: redundant delegation removed; use menu::mode_menu_items directly)"
     );
 }
 

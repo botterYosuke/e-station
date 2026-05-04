@@ -49,6 +49,15 @@ fn tools_fn_with_doc(src: &str) -> String {
     let open_brace = after_fn.find('{').unwrap_or(0);
     let after_brace = &after_fn[open_brace..];
 
+    // TODO(F8-fragile / M9): naive brace counting. This walker treats every
+    // `{` / `}` byte the same regardless of whether it lives inside a string
+    // literal, char literal, raw string, or `//`/`/* */` comment. The current
+    // `tools_actions_for_state` body happens to contain none of those, so the
+    // walk terminates at the correct closing brace — but a future edit that
+    // introduces e.g. `let s = "}";` or `// closes the }` will silently shift
+    // the slice and start matching against the next sibling function. If that
+    // happens, switch to a real lexer (e.g. `proc-macro2::TokenStream` or
+    // `syn::parse_str::<syn::ItemFn>`) instead of byte-level brace counting.
     // Count braces to find the closing brace of the function.
     let mut depth = 0usize;
     let mut end_of_fn = after_brace.len();

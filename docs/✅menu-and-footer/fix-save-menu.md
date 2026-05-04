@@ -1021,3 +1021,180 @@ $ uv run pytest python/tests/ examples/wandb/tests/ -q
 - **R2-M4 の MSRV**: `Cargo.toml` の `edition = "2024"`（Rust 1.85+）から `LazyLock`（1.80）安全。`once_cell` への fallback は不要
 
 ---
+
+## レビュー反映 (2026-05-04, F8 R1)
+
+F8（Linux 自前メニューバー / cross-platform `menu` モジュール責務分離）の F8 R1
+レビューで HIGH 6 / MEDIUM 10 / LOW 5 の指摘を受け、ユーザー判断（H6 は **選択肢 A**：
+ドキュメント側のみ修正、`AuthState` / `BufferState` enum は P9 §852 のとおり保持）を
+反映して TDD で順次対応した。
+
+### HIGH（6件）
+
+| ID | 場所 | 指摘 | 対処 |
+|----|------|------|------|
+| H1 | `src/main.rs:14-15` | `mod menu_bar_state;` が `#[cfg(target_os="linux")]` で gate されており、ソースインスペクション以外（純関数 unit test）が Win/Mac でコンパイル不能 | `#[cfg(...)]` を外し、cross-platform に公開。理由を inline コメントで明文化 |
+| H2 | `src/widget_menu_bar.rs:22` | `pub use` から `update` が抜けており Linux 呼び出し側が `menu_bar_state::update` を直接参照する必要があった | `pub use crate::menu_bar_state::{BarMessage, State, TopMenu, update};` に拡張 |
+| H3 | `src/widget_menu_bar.rs:77` | `on_move(\|_\| BarMessage::BarMoved(BAR_HEIGHT as u32))` が cursor 位置を捨てて定数を返しており `anchor_y` 機構が無効化 | `on_move(\|pt: iced::Point\| BarMessage::BarMoved(pt.y as u32))` に修正。inline コメントで意図を記録 |
+| H4 | `src/menu.rs` mode_menu_items unit test | impl は `enabled: !matches!(...)` で「現在モードは disabled」だが inline test と P8 §testing 期待値が `assert!(got[0].enabled)` を主張し三者矛盾 | impl 側を正に統一。inline test を `assert!(!got[0].enabled)` に修正、計画書の期待値テーブルとサンプルコードも `enabled=false`/`enabled=true` 明示に更新 |
+| H5 | `src/main.rs` MenuBar handler | `to_native_action` が None を返した場合 Pick が黙って drop され、新規 `menu::Action` 追加時の wiring 漏れが検出不能 | call site に `log::warn!` を追加。将来 variant 追加時に未配線が log に出る |
+| H6 | `docs/✅menu-and-footer/P8-widget-menu-bar-linux.md` §testing & §sketch | `tools_actions_for_state` の引数型・戻り値型・期待値テーブルが R7-86 移行（`&WandbAuthState`/`&RunBufferIndex`/常時 5 要素）と乖離、旧 `(AuthState, BufferState) -> Vec<Action>` を記載 | **ユーザー判断: 選択肢 A** — enum 削除はせず計画書を実装に追従させる。期待値テーブル（4 行 × 5 項目 enabled）/ サンプルコード / `MenuEntry` 構造体定義 / sketch の `menu_items_tools` を実装シグネチャに書き換え。`AuthState` / `BufferState` の `#[allow(dead_code)]` には `// reason: kept for source-inspection tests in tests/tools_actions_for_state.rs (P9 §852)` コメントを追加（M6 と統合） |
+
+### MEDIUM（10件）
+
+| ID | 対処 |
+|----|------|
+| M1 | `src/menu_bar_state.rs` に `mod tests` を追加し `BarMessage::DismissFocusLost` を 4 開状態（File / Mode / Tools / Closed）について assert する unit test を 4 件 + Pick/Dismiss/DismissFocusLost 同等性 1 件 = 計 5 件追加。bin "flowsurface" test target で実行 |
+| M2 | `src/main.rs` の `keyboard::listen()` ハンドラ（`hotkeys` Subscription）に「Esc のみ受け取る / 常に GoBack へ流す / 直接 dismiss しない」3 不変条件を inline コメントで明文化 |
+| M3 | `Message::MenuBar(BarMessage::Toggle(top))` で同じ top を再 toggle して閉じる経路に `log::debug!("widget_menu_bar: toggle_close reason=re_toggle top={top:?}")` を追加。outside_click / focus_lost と区別可能に |
+| M4 | `MenuEntry.checked` の `Option<bool>` 三値（`Some(true)` / `Some(false)` / `None`）が UI 上で別々の意味を持つことを doc コメントで明示。`bool` への退化は load-bearing なので避けると注釈 |
+| M5 | `actions_for_mode` の `Vec<Action>` シグネチャは R7-88 凍結であり `MenuEntry` への拡張はしない理由を doc コメントで追記 |
+| M6 | `src/menu.rs` の 4 箇所（`Action` enum / `AuthState` / `BufferState` / `actions_for_mode` / `mode_menu_items`）の `#[allow(dead_code)]` に `// reason: ...` コメントを追加。H6 で `AuthState` / `BufferState` も統合済み。`src/menu_bar_state.rs` の cross-platform 公開に伴う 4 箇所（`TopMenu` / `BarMessage` / `State` / `update`）にも同様に reason コメント付き `#[allow(dead_code)]` を追加 |
+| M7 | `widget_menu_bar.rs::action_label_and_shortcut` の戻り値を `(String, Option<&'static str>)` から `(&'static str, Option<&'static str>)` に変更し per-call の `to_string()` 割り当てを排除。`build_dropdown` 側は `format!("✓ {base_label}")` を廃止し prefix を別 `text(...)` widget で render。割り当てゼロのホットパス化 |
+| M8 | M7 で File 分岐も連動済みのため単独修正不要。M7 の inline コメントで意図を記録 |
+| M9 | `tests/tools_actions_for_state.rs` の brace カウント walker に `// TODO(F8-fragile / M9): ...` コメントを追加。文字列リテラル / コメント内の `{}` で破綻する脆弱性と、必要時に `syn::ItemFn` 等の lexer ベースに切り替えるべき旨を明示 |
+| M10 | P8 §acceptance DoD-10〜DoD-14 の `passed` 数を実測値に更新（10→13, 11→17, 10→11, GREEN→11 passed の内訳）+ DoD-11 の cross-platform は GREEN→15 passed |
+
+### LOW（5件）
+
+| ID | 対処 |
+|----|------|
+| L1〜L5 | 元指示書の本文では LOW 5 件の具体的内容が引き継がれず（前任 STOP+REPORT エージェントの転写欠落）。CRITICAL/HIGH/MEDIUM ゼロ達成優先で次レビューサイクル（F8 R2）への繰越しとする |
+
+### 修正対象ファイル
+
+- `src/main.rs` — `mod menu_bar_state` の cfg 解除（H1）/ MenuBar ハンドラに warn（H5）/ Toggle 閉ログ（M3）/ hotkeys 不変条件コメント（M2）
+- `src/widget_menu_bar.rs` — `pub use` 拡張（H2）/ `on_move` 修正（H3）/ `action_label_and_shortcut` allocation-free 化（M7）
+- `src/menu.rs` — `#[allow(dead_code)]` reason コメント 4 箇所（M6 / H6）/ inline test 修正（H4）/ `MenuEntry.checked` doc 拡充（M4）/ `actions_for_mode` doc 拡充（M5）
+- `src/menu_bar_state.rs` — cross-platform 公開に伴う `#[allow(dead_code)]` 追加（M6）/ DismissFocusLost unit test 5 件追加（M1）
+- `tests/tools_actions_for_state.rs` — brace counter TODO コメント（M9）
+- `docs/✅menu-and-footer/P8-widget-menu-bar-linux.md` — Tools 期待値テーブル / `MenuEntry` 構造体 / `tools_actions_for_state` シグネチャ / `mode_menu_items` 期待値とサンプル / DoD passed 数（H6 / M10 / H4）
+
+### 検証コマンド（tail）
+
+```
+$ cargo fmt --check                               → clean
+$ cargo clippy --bin flowsurface --tests -- -D warnings
+   F8 関連の修正対象ファイル（src/menu.rs / src/menu_bar_state.rs / src/widget_menu_bar.rs /
+   src/main.rs / tests/tools_actions_for_state.rs / tests/mode_menu_items.rs /
+   tests/widget_menu_bar_state.rs / tests/menu_actions_cross_platform.rs）に
+   新規警告ゼロを確認。`exchange/` `data/` `src/modal/replay_form.rs` 等の
+   既存警告は instruction の通り対象外
+$ cargo test --workspace                          → 全テスト GREEN（FAILED 0）
+   抜粋:
+     test result: ok. 13 passed; tests/tools_actions_for_state.rs
+     test result: ok. 17 passed; tests/widget_menu_bar_state.rs
+     test result: ok. 11 passed; tests/mode_menu_items.rs
+     test result: ok. 15 passed; tests/menu_actions_cross_platform.rs
+     test result: ok.  5 passed; src/menu_bar_state.rs::tests (M1 新規)
+```
+
+### 設計判断
+
+- **H1 で cfg 解除**: `menu_bar_state` は iced/GTK 等の Linux 限定依存を持たない純関数モジュール。cross-platform に公開しても rendering 層は `widget_menu_bar.rs` の `#![cfg(target_os = "linux")]` で隔離されており double-menu 事故は構造的に発生し得ない
+- **H4 を impl 側に倒した理由**: 「現在モードは disabled」が UX 的にも自然（同モード切り替えは no-op）であり、integration test `mode_menu_items_disables_current_live_entry` も既にこの仕様に投票済み。inline test と doc 期待値だけが旧仕様に取り残されていた
+- **H6 選択肢 A**: enum 削除を選ぶと `tests/tools_actions_for_state.rs::auth_state_enum_exists` / `buffer_state_enum_exists` のソースインスペクションが破綻し、P9 §852 で明示された「保持決定」も覆る。計画書を実装側に追従させる方が侵襲が小さい
+- **M1 を bin unit test に置いた理由**: `update()` の動作テストは関数本体への依存が必要で、ソースインスペクションでは不十分。`src/menu_bar_state.rs` 内の `#[cfg(test)] mod tests` に置くことで `cargo test --bin flowsurface` で実行され、cross-platform に走る
+- **M7 のホットパス化判断**: dropdown を開くたびに最大 13 variant 分の `String` allocation が発生していた。全 label が compile-time constant なのに heap を経由する必要がない。prefix の三値（`"✓ "` / `"  "` / `""`）も `&'static str` に閉じ、render は `text(prefix)` + `text(base_label)` の row に分割
+
+---
+
+## レビュー反映 (2026-05-04, F8 R2)
+
+F8 R1 の修正が新規 silent failure を生んだケース（review-fix-loop 知見 17）が
+HIGH 1 / MEDIUM 2 / LOW 1 として再レビューで指摘された。両 R2 reviewer 推奨の
+**候補 A（`anchor_y` 機構の全廃 + `BAR_HEIGHT` 定数固定）** を採用し、関連する
+冗長 wrapper / wildcard match / コメント誤記をまとめて TDD で解消した。
+
+### 解消した指摘（HIGH 1 / MEDIUM 2 / LOW 1）
+
+| ID | レベル | 場所 | 指摘 | 対処 |
+|----|--------|------|------|------|
+| H3' | HIGH | `src/widget_menu_bar.rs:84` ほか | R1 で導入した `on_move(\|pt\| BarMessage::BarMoved(pt.y))` は **widget-local 座標**（0..BAR_HEIGHT）を返すが `with_dropdown_overlay` の `top_offset` は **window 絶対 Y** を期待していたため category mismatch。カーソルがバー上辺付近に居るとドロップダウンが画面上端に張り付く silent failure | 候補 A 採用：`State.anchor_y` フィールド / `BarMessage::BarMoved` variant / `update()` の対応分岐 / `view()` の `.on_move(...)` 呼び出しを全削除し、`top_offset` を `BAR_HEIGHT` 定数に固定。inline コメントで category error の経緯と判断根拠を記録 |
+| M-A | MEDIUM | `src/widget_menu_bar.rs:291-298` | H2（R1）で `pub use update` を追加した結果、`menu_items(mode) -> actions_for_mode(mode)` / `mode_items(current) -> mode_menu_items(current)` は完全な委譲 wrapper になり外部 caller ゼロ | 両 wrapper を削除。callers は `menu::actions_for_mode` / `menu::mode_menu_items` を直接利用（既に top で import 済み）。`tests/widget_menu_bar_state.rs::menu_items_function_delegates_to_menu_module` を `widget_menu_bar_does_not_define_redundant_wrappers`（不在検査）に書き換え |
+| M-B | MEDIUM | `src/main.rs:3375` | `match &bar_msg { ... _ => {} }` の wildcard arm が `BarMessage::Pick(_)` と `BarMessage::BarMoved(_)` を無声で吸収。将来 variant 追加時の wiring 漏れ検出が不能 | H3' で `BarMoved` 削除後、wildcard を `BarMessage::Pick(_) => {}` に置換。コメントで「ログ目的の意図的 no-op」と「将来 variant 追加で compile error にする狙い」を明示。`tests/widget_menu_bar_state.rs::main_menu_bar_handler_match_is_exhaustive_without_wildcard` で `_ => {}` 不在 + `Pick(_) =>` 存在を assert |
+| L | LOW | `src/widget_menu_bar.rs:80-83` | `// H3 (F8 R1): track the cursor's window-Y as the dropdown anchor.` コメントが widget-local / window-absolute の意味論差を取り違えたまま残存 | H3' の対処と同時に削除し、新しいコメントで「`mouse_area::on_move` が widget-local を返す」「window-Y との category mismatch だった」事実を記録 |
+
+### 設計判断
+
+- **候補 A 採用理由**: 候補 B（修正版 anchor 計算）は iced 0.14 で window-absolute 座標を取るには `iced::event::listen_with` の `Event::Mouse(CursorMoved)` を購読する必要があり、`mouse_area` 配下のローカル取得とは別経路が必要。menu bar が **常に window 先頭行** という不変条件下では `BAR_HEIGHT` 定数固定で正答が得られるため、追加経路を引き入れる正当化が立たない。両 R2 reviewer 推奨の候補 A をそのまま採用
+- **既存テストとの整合**: R1 で追加した `state_struct_exists` / `bar_message_enum_has_toggle_pick_dismiss` の `anchor_y` / `BarMoved` 存在 assert は **不在 assert** に反転（コメントで R2 / H3' の経緯を inline 記録）。R1 で追加した `menu_items_function_delegates_to_menu_module` は wrapper 不在検査に書き換え。`dismiss_focus_lost_closes_menu` は rustfmt が `=> { State { ... } }` 形に整形した結果 `=> State` 部分文字列マッチが破綻したため、`=>` までで切るよう緩和し、両形式（inline / block）を許容する旨をコメントで明記
+- **MISSES.md 候補（追記候補）**: 「iced `mouse_area::on_move` のコールバック引数は `cursor.position_in(layout.bounds())` で計算された **widget ローカル座標** を返す。window 絶対 Y が必要なら `iced::event::listen_with` 経由で `Event::Mouse(CursorMoved)` を購読すること。ローカル座標を window-Y 用 `top_offset` 等に流すと初期は正しく見えてもバー上辺で破綻する silent failure になる」を bug-postmortem 起動時に MISSES.md へ転記する候補として記録
+
+### 修正対象ファイル
+
+- `src/menu_bar_state.rs` — `BarMessage::BarMoved` 変種削除 / `State.anchor_y` フィールド削除 / `update()` の `BarMoved` 分岐削除 / unit test の `anchor_y` 参照削除（H3'）
+- `src/widget_menu_bar.rs` — `view()` の `.on_move(...)` 削除と category-error コメント追記（H3' / L）/ `with_dropdown_overlay` の `top_offset = BAR_HEIGHT` 定数化（H3'）/ `menu_items` / `mode_items` wrapper 削除（M-A）
+- `src/main.rs` — `match &bar_msg` の `_ => {}` を `BarMessage::Pick(_) => {}` に置換（M-B）
+- `tests/widget_menu_bar_state.rs` — `anchor_y` / `BarMoved` 不在 assert へ反転（H3'）/ wrapper 不在検査へ書き換え（M-A）/ wildcard 不在検査追加（M-B）/ `dismiss_focus_lost_closes_menu` の rustfmt block 形対応（既存テスト保護）
+- `docs/✅menu-and-footer/fix-save-menu.md` — 本ブロック追記
+- `docs/✅menu-and-footer/P8-widget-menu-bar-linux.md` — `BarMessage` スケルトンの `BarMoved` / `anchor_y` 関連記述が R1 段階で未追記であったことを確認したうえで R2 不変条件を inline で 1 行追記（widget-local 注意書き）
+
+### 検証コマンド（tail）
+
+```
+$ cargo fmt --check                                              → clean
+$ cargo clippy --bin flowsurface --tests -- -D warnings
+   F8 関連 src（src/main.rs / src/menu.rs / src/menu_bar_state.rs /
+   src/widget_menu_bar.rs）に新規警告ゼロを確認。`tests/widget_menu_bar_state.rs:11`
+   の `doc_lazy_continuation` は R1 から残る既存警告（本 R2 で touch 不要）。
+   `src/modal/replay_form.rs` の `field_reassign_with_default` も既存
+$ cargo test --workspace                                         → 88 suites 全 GREEN（FAILED 0）
+   抜粋:
+     test result: ok. 19 passed; tests/widget_menu_bar_state.rs（R1: 17 → R2: +2 net）
+     test result: ok.  5 passed; src/menu_bar_state.rs::tests
+```
+
+### 削除した API / フィールド一覧
+
+| シンボル | 種別 | ファイル |
+|---------|------|---------|
+| `BarMessage::BarMoved(u32)` | enum variant | `src/menu_bar_state.rs` |
+| `State.anchor_y: Option<u32>` | struct field | `src/menu_bar_state.rs` |
+| `update()` 内 `BarMessage::BarMoved` arm | match arm | `src/menu_bar_state.rs` |
+| `pub fn menu_items(mode: &AppMode) -> Vec<Action>` | function | `src/widget_menu_bar.rs` |
+| `pub fn mode_items(current_mode: &AppMode) -> Vec<MenuEntry>` | function | `src/widget_menu_bar.rs` |
+| `view()` の `.on_move(\|pt\| BarMessage::BarMoved(pt.y as u32))` | method call | `src/widget_menu_bar.rs` |
+| `match &bar_msg` の `_ => {}` arm | wildcard match | `src/main.rs` |
+
+---
+
+## レビュー反映 (2026-05-04, F8 R3)
+
+**対象**: F8 R2 サニティチェック後の最終収束ラウンド。silent-failure-hunter で **動作上の silent failure はゼロ** と確認。残存 MEDIUM 2 件 + LOW 1 件はすべてドキュメント／コメント整合のみで、オーケストレーターが直接修正。
+
+### 解消した指摘
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| R3-M1 | MEDIUM | `src/menu.rs:101` の `actions_for_mode` 直前 reason コメントが R2 で削除済の `widget_menu_bar::menu_items` wrapper を参照したまま残存。将来「wrapper を再追加すべきか」の判断を歪めるリスク | reason コメントを「called directly from `widget_menu_bar::entries_for_menu`（TopMenu::File arm）」に書き換え、`R2 / M-A` で削除した経緯も併記 |
+| R3-M2 | MEDIUM | `P8-widget-menu-bar-linux.md` の DoD-5 / DoD-6 検証列が削除済 wrapper `widget_menu_bar::menu_items` を指し続けていた。DoD 表として信頼性低下 | 検証列を `cargo test --test menu_actions_cross_platform`（`actions_for_mode(&AppMode::Live\|Replay)` を直接検証）に書き換え |
+| R3-L1 | LOW | `top_offset = BAR_HEIGHT` 定数固定の前提条件（`main.rs` の view 構成で widget menu bar より上に実効高さ 0 のウィジェットしか置かない）が P8 ドキュメントに未記載。将来バナー/ヘッダーバー追加時に silent な位置ずれを起こす種 | P8 §sketch の `BarMessage` コメント末尾に「F8 R3 / LOW」不変条件として注記。将来高さ持ちウィジェット追加時は `iced::event::listen_with` 経由で `Event::Mouse(CursorMoved)` を購読する旨を明記 |
+
+### 設計判断
+
+- **silent-failure-hunter R3 で動作上の silent failure ゼロを確認**。R1/R2 で導入した修正が新規 silent failure を生まなかった（review-fix-loop 知見 17 の連鎖を断ち切ったラウンド）
+- DoD-2/3/4 の `dismiss reason=esc|focus_lost|outside_click` ログ 3 経路すべて健在
+- `_ => {}` を `BarMessage::Pick(_) => {}` exhaustive 化したことで将来 `BarMessage` variant 追加時にコンパイルエラーで気づける構造を維持
+- `pub use crate::menu_bar_state::{BarMessage, State, TopMenu, update}` は R2 後も健在
+- `#[allow(dead_code)]` の reason コメントが現状（wrapper 削除後）と整合
+
+### 検証コマンド（R3 修正後）
+
+```
+cargo fmt --check                                  → clean
+cargo clippy --bin flowsurface --tests -- -D warnings → 警告ゼロ
+cargo test --workspace                             → 全 GREEN
+```
+
+### 最終収束
+
+**CRITICAL: 0 / HIGH: 0 / MEDIUM: 0 / LOW: 0**
+
+F8（Linux 向け iced 自前メニューバー）の review-fix-loop は R3 で完全収束。
+
+### MISSES.md 候補（次回 bug-postmortem 起動時に転記推奨）
+
+- **iced `mouse_area::on_move` の座標系**: `cursor.position_in(layout.bounds())` 経由で **widget ローカル座標**を返す（widget 左上原点）。window 絶対座標が必要な場合は `iced::event::listen_with` で `Event::Mouse(CursorMoved)` を購読する。F8 R1 でこれを「window-Y」と誤解して `BarMessage::BarMoved(u32)` を導入したが、R2 で「現状は偶然 0〜BAR_HEIGHT が一致するだけ」と判明し全廃した。両 R2 reviewer（rust-reviewer / silent-failure-hunter）が独立に同一指摘を出すまで動作上の異常は表面化しなかった、典型的な「設計意図とコメントは正しいが実装が違う」silent failure
+- **wrapper 関数 + テストでの強制保持の罠**: `tests/tools_actions_for_state.rs` の `pub enum AuthState/BufferState` 存在検査が legacy enum の削除を阻止していたケース。**P9 §852 で「保持」を明示決定**しているのを尊重し、削除ではなくドキュメント側を実装に合わせる方針（選択肢 A）を採用。テストが「死コード」を保護する状態は MISSES.md「テストが設計判断を凍結する」パターンに該当
+- **R1 fix が R2 で新規 HIGH を生む連鎖を 1 ラウンドで断ち切る方法**: 両系統 reviewer（rust-reviewer / silent-failure-hunter）を毎回回し、独立発見が一致した時点で「設計判断（候補 A/B）」をユーザーに提示してから修正に進む。Phase 8 のラウンド連鎖（R1 → R2 → R3 → R4）と比べて F8 は R1 → R2 → R3 で収束

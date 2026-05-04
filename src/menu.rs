@@ -11,7 +11,14 @@ use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 /// **Invariant R7-88**: `actions_for_mode` returns only File/Mode actions.
 /// Tools submenu actions live exclusively in `tools_actions_for_state`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // File/Replay/Quit/SwitchAppMode variants are consumed by the Linux widget menu bar (mod is cross-platform).
+// reason: variants File/Replay/Quit/SwitchAppMode are consumed by the Linux
+// widget menu bar (`src/widget_menu_bar.rs`). The `mod menu` itself is
+// cross-platform — exposed on every OS so `tests/menu_actions_cross_platform.rs`
+// and the source-inspection tests in `tests/tools_actions_for_state.rs` can
+// compile and assert against the source. Variants therefore look "unused" on
+// Win/Mac at the `cargo check` level even though they are reached at runtime
+// on Linux. (M6 / F8 R1)
+#[allow(dead_code)]
 pub enum Action {
     // ── File menu (live mode) ──────────────────────────────────────────────
     Open,
@@ -39,14 +46,26 @@ pub struct MenuEntry {
     pub action: Action,
     pub enabled: bool,
     pub tooltip: Option<&'static str>,
-    /// Exclusive check mark for Mode submenu:
-    /// `Some(true)` = currently selected, `Some(false)` = available but not
-    /// selected, `None` = no check display (normal File-style items).
+    /// Exclusive check mark for Mode submenu — kept as `Option<bool>` (M4 / F8 R1):
+    /// - `Some(true)` → currently-selected mode (renders `✓` prefix).
+    /// - `Some(false)` → candidate but not selected (renders alignment padding
+    ///   so all items in a checkable group line up).
+    /// - `None` → item has no check column (normal File / Tools items).
+    ///
+    /// The third state is *load-bearing*: collapsing to `bool` would force every
+    /// File / Tools entry to claim a check column and would render an extra
+    /// `  ` indent on items that should sit flush with their button label.
+    /// Keep as `Option<bool>` until a real need to widen it appears.
     pub checked: Option<bool>,
 }
 
 /// W&B authentication state — legacy enum; kept for backward compatibility.
 /// New code uses `WandbAuthState` from `crate::wandb_auth` (R7-86).
+// reason: kept for source-inspection tests in tests/tools_actions_for_state.rs
+// (P9 §852). The integration test asserts `pub enum AuthState` / `SignedIn` /
+// `SignedOut` literals are present in `src/menu.rs`, so removing the enum
+// would break the F8 R1 user-decided "Option A" approach (enum retention,
+// docs-only correction). (H6 / M6 / F8 R1)
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthState {
@@ -56,6 +75,8 @@ pub enum AuthState {
 
 /// Local run-buffer state — legacy enum; kept for backward compatibility.
 /// New code uses `RunBufferIndex` from `crate::wandb_auth` (R7-86).
+// reason: kept for source-inspection tests in tests/tools_actions_for_state.rs
+// (P9 §852). See `AuthState` above for the same rationale. (H6 / M6 / F8 R1)
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferState {
@@ -68,7 +89,22 @@ pub enum BufferState {
 /// **Invariant R7-88 / DoD-11**: This function contains ONLY File/Quit
 /// actions. Tools submenu actions must NOT appear here; they belong in
 /// `tools_actions_for_state`.
-#[allow(dead_code)] // used by Linux widget menu bar; cross-platform `mod menu` exposes it for native_menu Tools enable.
+///
+/// **Frozen signature (R7-88, M5 / F8 R1)**: the return type stays
+/// `Vec<Action>` (not `Vec<MenuEntry>`). File items have no enabled/tooltip/
+/// checked state distinct from "always enabled, no tooltip, no check", so the
+/// richer `MenuEntry` adds nothing here while breaking the cross-platform
+/// `tests/menu_actions_cross_platform.rs` contract that pins this signature.
+/// Touching the return type re-opens the responsibility-split decision frozen
+/// by R3-66 / R3-69 / R6-83 / R7-88; do not change without re-running those
+/// reviews.
+// reason: called directly from `widget_menu_bar::entries_for_menu` (TopMenu::File arm)
+// and by the cross-platform `tests/menu_actions_cross_platform.rs`. The
+// `widget_menu_bar::menu_items` wrapper that R1 introduced was removed in
+// R2 / M-A. Cross-OS callers reach this via source-inspection tests, so it
+// appears unused to `cargo check` on Win/Mac despite being part of the public
+// menu contract. (M6 / F8 R1 / R2 / R3)
+#[allow(dead_code)]
 pub fn actions_for_mode(mode: &AppMode) -> Vec<Action> {
     match mode {
         AppMode::Live => vec![Action::Open, Action::Save, Action::SaveAs, Action::Quit],
@@ -153,7 +189,12 @@ pub fn tools_actions_for_state(auth: &WandbAuthState, buf: &RunBufferIndex) -> V
 
 /// Returns the `モード（Mode）▼` submenu entries with exclusive check marks
 /// showing the currently active mode (DoD-13/14 / R7-87).
-#[allow(dead_code)] // used by Linux widget menu bar; mod is cross-platform for H5.
+// reason: invoked by the Linux widget menu bar
+// (`widget_menu_bar::with_dropdown_overlay` for the `モード（Mode）▼` button)
+// and by `tests/mode_menu_items.rs` source-inspection tests. The `mod menu`
+// itself is cross-platform (H1) so the function appears unused to Win/Mac
+// `cargo check` while still being part of the contract. (M6 / F8 R1)
+#[allow(dead_code)]
 pub fn mode_menu_items(current_mode: &AppMode) -> Vec<MenuEntry> {
     vec![
         MenuEntry {
@@ -443,6 +484,14 @@ mod tests {
     // platform `mod menu` (H5) green. Phase 3-C / future P8 follow-up
     // can re-evaluate the semantic and unify across platforms.
 
+    // H4 (F8 R1): the impl uses `enabled: !matches!(current_mode, ...)` so the
+    // currently-active mode entry is **disabled** (you can't switch to the mode
+    // you're already in). The inline test below previously asserted both rows
+    // were `enabled` for both modes, contradicting the impl and the integration
+    // test `tests/mode_menu_items.rs::mode_menu_items_disables_current_live_entry`
+    // which forbids the unconditional-true literal in the function body.
+    // Resolve the three-way contradiction in favour of the impl ("current
+    // mode is disabled").
     #[cfg(target_os = "linux")]
     #[test]
     fn live_mode_marks_live_checked_replay_unchecked() {
@@ -450,10 +499,10 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
         assert_eq!(got[0].checked, Some(true));
-        assert!(got[0].enabled);
+        assert!(!got[0].enabled, "current mode (Live) must be disabled");
         assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
         assert_eq!(got[1].checked, Some(false));
-        assert!(got[1].enabled);
+        assert!(got[1].enabled, "non-current mode (Replay) must be enabled");
     }
 
     #[cfg(target_os = "linux")]
@@ -463,8 +512,10 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
         assert_eq!(got[0].checked, Some(false));
+        assert!(got[0].enabled, "non-current mode (Live) must be enabled");
         assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
         assert_eq!(got[1].checked, Some(true));
+        assert!(!got[1].enabled, "current mode (Replay) must be disabled");
     }
 
     #[cfg(target_os = "linux")]

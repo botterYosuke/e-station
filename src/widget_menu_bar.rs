@@ -19,7 +19,10 @@ use iced::{Element, Length};
 
 use crate::Message;
 use crate::menu::{Action, MenuEntry, actions_for_mode, mode_menu_items, tools_actions_for_state};
-pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
+// H2 (F8 R1): re-export the pure `update` function so Linux callers can drive
+// the bar via a single facade (`widget_menu_bar::update`) without reaching into
+// the underlying `menu_bar_state` module.
+pub use crate::menu_bar_state::{BarMessage, State, TopMenu, update};
 use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 
 /// Fixed width for each top-level menu button.  The dropdown's horizontal
@@ -69,12 +72,20 @@ pub fn view<'a>(state: &'a State, _mode: &'a AppMode) -> Element<'a, BarMessage>
     ]
     .spacing(2);
 
+    // F8 R2 / H3': no `.on_move` handler. The previous `BarMoved(y)` design
+    // (added in F8 R1 to anchor the dropdown dynamically) was a category error:
+    // `mouse_area::on_move` calls back with `cursor.position_in(layout.bounds())`
+    // — i.e. **widget-local** coordinates in the range `0..BAR_HEIGHT` — but
+    // `with_dropdown_overlay`'s `top_offset` is interpreted as a **window-Y**
+    // offset. Feeding widget-local Y into a window-Y slot drove the dropdown
+    // up to the window top whenever the cursor sat near y=0 of the bar, which
+    // is precisely the common case. The mechanism is abolished; the dropdown
+    // is anchored at the constant `BAR_HEIGHT` in `with_dropdown_overlay`.
     mouse_area(
         container(bar_row)
             .height(Length::Fixed(BAR_HEIGHT))
             .width(Length::Fill),
     )
-    .on_move(|_| BarMessage::BarMoved(BAR_HEIGHT as u32))
     .into()
 }
 
@@ -111,10 +122,10 @@ pub fn with_dropdown_overlay<'a>(
         TopMenu::Tools => 2.0 * step,
     };
 
-    // Vertical offset: bar's bottom edge = BAR_HEIGHT (bar is always at y=0 in
-    // iced's window-content coordinate space).  anchor_y is populated after the
-    // first hover; fall back to BAR_HEIGHT before that.
-    let top_offset = state.anchor_y.map(|y| y as f32).unwrap_or(BAR_HEIGHT);
+    // Vertical offset: bar's bottom edge = BAR_HEIGHT (bar is always at y=0
+    // in iced's window-content coordinate space). F8 R2 / H3': constant
+    // anchor — see the rationale on `view()`'s removed `.on_move` handler.
+    let top_offset = BAR_HEIGHT;
 
     let entries = entries_for_menu(open_top, mode, wandb_auth, run_buf);
     let items = build_dropdown(entries);
@@ -188,20 +199,26 @@ fn build_dropdown<'a>(entries: Vec<MenuEntry>) -> Vec<Element<'a, Message>> {
             } = entry;
 
             let (base_label, shortcut) = action_label_and_shortcut(&action);
-            let label = match checked {
-                Some(true) => format!("✓ {base_label}"),
-                Some(false) => format!("  {base_label}"),
-                None => base_label,
+            // M7 (F8 R1): no per-entry allocation. The check prefix is one of
+            // three fixed `&'static str`s rendered as its own `text(...)` so the
+            // base label remains a borrowed static. This keeps `build_dropdown`
+            // allocation-free aside from the `Vec` that already aggregates the
+            // resulting elements.
+            let prefix: &'static str = match checked {
+                Some(true) => "✓ ",
+                Some(false) => "  ",
+                None => "",
             };
 
             let content: Element<'a, Message> = match shortcut {
                 Some(sc) => row![
-                    text(label),
+                    text(prefix),
+                    text(base_label),
                     Space::new(Length::Fill, Length::Shrink),
                     text(sc),
                 ]
                 .into(),
-                None => text(label).into(),
+                None => row![text(prefix), text(base_label)].into(),
             };
 
             let msg = Message::MenuBar(BarMessage::Pick(action));
@@ -227,24 +244,28 @@ fn build_dropdown<'a>(entries: Vec<MenuEntry>) -> Vec<Element<'a, Message>> {
 
 /// Returns the human-readable label and optional keyboard shortcut for a menu action.
 /// The shortcut is rendered separately (right-aligned) rather than embedded in the label.
-fn action_label_and_shortcut(action: &Action) -> (String, Option<&'static str>) {
+///
+/// M7 (F8 R1): both label and shortcut are `&'static str` — the build_dropdown
+/// hot path runs every time a dropdown opens, so allocating a fresh `String`
+/// per entry just to copy the same constant text was wasted work. The check
+/// prefix (`✓ ` / `  ` / `""`) is the only piece that varies, and we render it
+/// with a separate `text(...)` widget below instead of formatting it into the
+/// label.
+fn action_label_and_shortcut(action: &Action) -> (&'static str, Option<&'static str>) {
     match action {
-        Action::Open => ("ファイルを開く...（Open）".to_string(), Some("Ctrl+O")),
-        Action::Save => ("上書き保存（Save）".to_string(), Some("Ctrl+S")),
-        Action::SaveAs => (
-            "名前を付けて保存...（Save As）".to_string(),
-            Some("Ctrl+Shift+S"),
-        ),
-        Action::ReplayStart => ("リプレイを開始...（Replay Start）".to_string(), None),
-        Action::ReplayStop => ("リプレイを停止（Replay Stop）".to_string(), None),
-        Action::Quit => ("終了（Quit）".to_string(), Some("Ctrl+Q")),
-        Action::SwitchAppMode(AppMode::Live) => ("ライブ（Live）".to_string(), None),
-        Action::SwitchAppMode(AppMode::Replay) => ("リプレイ（Replay）".to_string(), None),
-        Action::SubmitToWandb => ("W&B に送信（Submit）".to_string(), None),
-        Action::SignInWandb => ("W&B にログイン（Sign In）".to_string(), None),
-        Action::SignOutWandb => ("W&B からログアウト（Sign Out）".to_string(), None),
-        Action::OpenSubmissionLog => ("送信ログを開く（Submission Log）".to_string(), None),
-        Action::ClearRunBuffer => ("バッファをクリア（Clear Buffer）".to_string(), None),
+        Action::Open => ("ファイルを開く...（Open）", Some("Ctrl+O")),
+        Action::Save => ("上書き保存（Save）", Some("Ctrl+S")),
+        Action::SaveAs => ("名前を付けて保存...（Save As）", Some("Ctrl+Shift+S")),
+        Action::ReplayStart => ("リプレイを開始...（Replay Start）", None),
+        Action::ReplayStop => ("リプレイを停止（Replay Stop）", None),
+        Action::Quit => ("終了（Quit）", Some("Ctrl+Q")),
+        Action::SwitchAppMode(AppMode::Live) => ("ライブ（Live）", None),
+        Action::SwitchAppMode(AppMode::Replay) => ("リプレイ（Replay）", None),
+        Action::SubmitToWandb => ("W&B に送信（Submit）", None),
+        Action::SignInWandb => ("W&B にログイン（Sign In）", None),
+        Action::SignOutWandb => ("W&B からログアウト（Sign Out）", None),
+        Action::OpenSubmissionLog => ("送信ログを開く（Submission Log）", None),
+        Action::ClearRunBuffer => ("バッファをクリア（Clear Buffer）", None),
     }
 }
 
@@ -270,12 +291,8 @@ pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Ac
     }
 }
 
-/// Returns the ordered File menu actions for `mode`.
-pub fn menu_items(mode: &AppMode) -> Vec<Action> {
-    actions_for_mode(mode)
-}
-
-/// Returns the `モード（Mode）▼` submenu entries with exclusive check marks.
-pub fn mode_items(current_mode: &AppMode) -> Vec<MenuEntry> {
-    mode_menu_items(current_mode)
-}
+// F8 R2 / M-A: the `menu_items` / `mode_items` wrappers were removed because
+// they were pure delegation shims over `menu::actions_for_mode` /
+// `menu::mode_menu_items` with zero external callers after H2 (F8 R1) added
+// `pub use` for the underlying functions. Callers should use those module-
+// level functions directly (already imported at the top of this file).

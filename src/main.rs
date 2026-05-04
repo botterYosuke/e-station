@@ -11,7 +11,12 @@ mod mask_secrets;
 // both the Linux widget menu bar and the cross-platform `native_menu::attach`
 // Tools enable/disable computation (H5). Cross-platform.
 mod menu;
-#[cfg(target_os = "linux")]
+// H1 (F8 R1): `menu_bar_state` houses the pure `update()` state machine for the
+// Linux widget menu bar. The module itself is platform-independent — it has no
+// iced widget or GTK dependencies — so we expose it on every OS so that the
+// state-transition contract tests in `tests/widget_menu_bar_state.rs` can
+// compile and inspect the source on Windows / macOS as well as Linux. Only the
+// rendering layer (`widget_menu_bar`) is Linux-gated.
 mod menu_bar_state;
 mod modal;
 mod native_menu;
@@ -3328,13 +3333,32 @@ impl Flowsurface {
             Message::MenuBar(bar_msg) => {
                 use crate::menu_bar_state::{self, BarMessage};
                 let native = if let BarMessage::Pick(ref action) = bar_msg {
-                    crate::widget_menu_bar::to_native_action(action)
+                    let mapped = crate::widget_menu_bar::to_native_action(action);
+                    if mapped.is_none() {
+                        // H5 (F8 R1): a Pick whose `Action` does not map to a
+                        // `native_menu::Action` is silently dropped. That can
+                        // only happen if a new `menu::Action` variant is added
+                        // without extending `to_native_action` — surface it as
+                        // a warning so the missing wiring is obvious in logs.
+                        log::warn!(
+                            "widget_menu_bar: to_native_action returned None for {action:?} \
+                             — Pick will be dropped (missing native_menu::Action mapping)"
+                        );
+                    }
+                    mapped
                 } else {
                     None
                 };
                 match &bar_msg {
                     BarMessage::Toggle(top) if self.menu_bar.open != Some(*top) => {
                         log::debug!("widget_menu_bar: open={top:?}");
+                    }
+                    // M3 (F8 R1): re-toggling the same top-level menu closes
+                    // it. Surface this as its own log line so transcript
+                    // analysis can tell "user opened then re-clicked the same
+                    // button" apart from outside-click / focus-lost dismissals.
+                    BarMessage::Toggle(top) => {
+                        log::debug!("widget_menu_bar: toggle_close reason=re_toggle top={top:?}");
                     }
                     BarMessage::Dismiss => {
                         log::debug!(
@@ -3348,7 +3372,13 @@ impl Flowsurface {
                             self.menu_bar.open
                         );
                     }
-                    _ => {}
+                    // F8 R2 / M-B: exhaustive match. `Pick(_)` is the only
+                    // remaining variant after `BarMoved` was abolished — the
+                    // `to_native_action` mapping above already handles its
+                    // dispatch, so this arm is a deliberate no-op for logging.
+                    // Keeping the match exhaustive (no wildcard) means future
+                    // `BarMessage` additions surface as compile errors.
+                    BarMessage::Pick(_) => {}
                 }
                 self.menu_bar = menu_bar_state::update(self.menu_bar.clone(), bar_msg);
                 if let Some(native_action) = native {
@@ -5556,6 +5586,19 @@ impl Flowsurface {
 
         let tick = iced::window::frames().map(Message::Tick);
 
+        // M2 (F8 R1): invariants for the global hotkey subscription —
+        //   1. Only `Esc` is listened for here. All other accelerators
+        //      (`Ctrl+O`, `Ctrl+S`, ...) flow through `native_menu::subscription`
+        //      on Win/Mac and through the iced kbd path on Linux (P8 Q4).
+        //   2. `Esc` always routes to `Message::GoBack`. The GoBack handler is
+        //      responsible for the cascade: dismiss any open Linux menu-bar
+        //      dropdown, close modals, etc. Adding more keys here without that
+        //      handler will silently fail.
+        //   3. The subscription must never close the menu directly — keeping
+        //      the menu's `BarMessage::Dismiss` dispatch funnelled through
+        //      `Message::GoBack` ensures a single dismissal path that the
+        //      tests in `tests/widget_menu_bar_state.rs` can pin
+        //      (`esc_dismiss_is_wired_in_go_back_handler`).
         let hotkeys = keyboard::listen().filter_map(|event| {
             let keyboard::Event::KeyPressed { key, .. } = event else {
                 return None;
