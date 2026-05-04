@@ -557,13 +557,16 @@ impl std::fmt::Debug for Command {
             Command::SaveStrategyScenario {
                 request_id,
                 path,
+                scenario,
                 save_as,
-                ..
+                loaded_path,
             } => f
                 .debug_struct("SaveStrategyScenario")
                 .field("request_id", request_id)
                 .field("path", path)
+                .field("scenario", scenario)
                 .field("save_as", save_as)
+                .field("loaded_path", loaded_path)
                 .finish(),
             Command::StopReplay { request_id } => f
                 .debug_struct("StopReplay")
