@@ -78,12 +78,7 @@ fn confirm_save_as_overwrite_message_exists() {
 #[test]
 fn confirm_save_as_overwrite_handler_proceeds_with_save() {
     let src = read_main();
-    let prefix = "Message::ConfirmSaveAsOverwrite";
-    let _start = src
-        .find(prefix)
-        .expect("ConfirmSaveAsOverwrite handler must exist");
-    // Find handler arm (skipping the enum definition occurrence)
-    // Look for the handler in update() by finding the => pattern
+    // Find handler arm in update() by finding the => pattern
     let handler_prefix = "            Message::ConfirmSaveAsOverwrite =>";
     let hstart = src
         .find(handler_prefix)

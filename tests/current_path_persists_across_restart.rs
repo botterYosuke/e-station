@@ -41,22 +41,48 @@ fn current_path_uses_mutex_option_pathbuf() {
 
 #[test]
 fn current_path_uses_into_inner_for_poison_recovery() {
+    // M-7: verify each CURRENT_PATH.lock() call site individually rather than
+    // doing a global count comparison (which could pass due to unrelated into_inner() calls).
+    //
+    // Strategy: for each occurrence of "CURRENT_PATH.lock()", extract the surrounding
+    // context (up to 8 lines after the lock call) and assert into_inner() appears there.
     let src = read_main();
-    // Every CURRENT_PATH.lock() call site must handle poison via into_inner().
-    let occurrences = src.matches("CURRENT_PATH.lock()").count();
-    let recoveries = src
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .filter(|l| l.contains("into_inner()"))
-        .count();
+
+    let mut lock_sites: Vec<usize> = vec![];
+    let mut search_start = 0;
+    while let Some(pos) = src[search_start..].find("CURRENT_PATH.lock()") {
+        lock_sites.push(search_start + pos);
+        search_start += pos + 1;
+    }
+
     assert!(
-        occurrences > 0,
+        !lock_sites.is_empty(),
         "CURRENT_PATH.lock() must be called at least once"
     );
-    assert!(
-        recoveries >= occurrences,
-        "every CURRENT_PATH.lock() call must have a corresponding into_inner() poison recovery"
-    );
+
+    for site in &lock_sites {
+        // Look at up to 400 characters after the lock() call to find into_inner().
+        // This covers the match arm without crossing into unrelated code.
+        let context_end = (*site + 400).min(src.len());
+        let context = &src[*site..context_end];
+
+        // Skip lines that are comments (the lock() may appear in a comment in the test
+        // file itself, but in main.rs all lock() calls are active code).
+        let is_comment_line = src[src[..*site].rfind('\n').unwrap_or(0)..]
+            .lines()
+            .next()
+            .map(|l| l.trim_start().starts_with("//"))
+            .unwrap_or(false);
+        if is_comment_line {
+            continue;
+        }
+
+        assert!(
+            context.contains("into_inner()"),
+            "CURRENT_PATH.lock() at offset {} must have a nearby into_inner() poison recovery (M-7)",
+            site
+        );
+    }
 }
 
 // ── NativeOpenFilePendingCheck sets CURRENT_PATH ─────────────────────────────

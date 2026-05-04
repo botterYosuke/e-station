@@ -65,14 +65,18 @@ fn io_error_emits_warn_not_error() {
     );
 
     // The canonical pattern: log::warn! appears in the IoError arm.
+    // M-6: use next SaveError:: occurrence (without .min(500) hard limit)
+    // to avoid silently truncating the arm body check.
     let io_arm_start = src
         .find("SaveError::IoError")
         .expect("SaveError::IoError arm must exist");
     let io_tail = &src[io_arm_start..];
+    // Find the end of this arm by locating the next SaveError:: in the remaining text.
+    // Fall back to the end of the log_save_error function if no next variant follows.
     let io_arm_end = io_tail[1..]
         .find("SaveError::")
         .map(|i| i + 1)
-        .unwrap_or(io_tail.len().min(500));
+        .unwrap_or(io_tail.len());
     let io_arm = &io_tail[..io_arm_end];
 
     assert!(
@@ -94,10 +98,12 @@ fn cancelled_does_not_emit_error_or_warn_log() {
         .find("SaveError::Cancelled")
         .expect("SaveError::Cancelled must be handled explicitly (BC-5)");
     let cancelled_tail = &src[cancelled_start..];
+    // M-10: search for next SaveError:: without hard char limit to avoid
+    // order-dependent truncation of the arm body.
     let cancelled_end = cancelled_tail[1..]
         .find("SaveError::")
         .map(|i| i + 1)
-        .unwrap_or(cancelled_tail.len().min(300));
+        .unwrap_or(cancelled_tail.len());
     let cancelled_arm = &cancelled_tail[..cancelled_end];
 
     assert!(
@@ -134,5 +140,31 @@ fn save_as_with_specs_io_error_uses_warn() {
     assert!(
         !body.contains("log::error!(\"Failed to write"),
         "NativeSaveAsWithSpecs I/O error must use log::warn! not log::error! (BC-5 IoError reclassification)"
+    );
+}
+
+// ── M-5: save_state_to_disk must not use log::error! ─────────────────────────
+
+#[test]
+fn save_state_to_disk_does_not_use_log_error() {
+    // M-5: save_state_to_disk's I/O error path must use log_save_error (WARN level),
+    // not log::error! directly.  log::error! inside save_state_to_disk would violate
+    // the BC-5 log-level contract (IoError → WARN, not ERROR).
+    let src = read_main();
+
+    let fn_start = src
+        .find("fn save_state_to_disk(")
+        .expect("save_state_to_disk must exist in main.rs");
+    let tail = &src[fn_start..];
+    // Extract the function body up to the next top-level function definition.
+    let end = tail[1..]
+        .find("\n    fn ")
+        .map(|i| i + 1)
+        .unwrap_or(tail.len());
+    let body = &tail[..end];
+
+    assert!(
+        !body.contains("log::error!"),
+        "save_state_to_disk must NOT use log::error! — I/O write failure is IoError (WARN), not a bug (BC-5 / M-5)"
     );
 }

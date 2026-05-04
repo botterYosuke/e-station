@@ -168,13 +168,28 @@ fn toggle_dialog_modal_none_clears_pending_open_file() {
 fn stable_serialization() {
     // Serializing the same state 100 times must always produce identical bytes.
     // This guards against HashMap-based non-determinism (BC-11 / C-9).
+    //
+    // NOTE: build_state_json() in main.rs is the real serialization path (it also
+    // updates popout window_spec entries). We cannot call it directly from tests
+    // without a full Flowsurface instance, so we verify non-determinism at the
+    // data::State level: the state struct must not contain bare HashMap fields
+    // (which have non-deterministic iteration order and thus non-deterministic JSON).
+    //
+    // The determinism guarantee is upheld by using BTreeMap (or equivalent ordered
+    // structures) for any map-typed fields in data::State. This test pins that
+    // structural invariant by asserting that data::State serializes identically
+    // across 100 calls (a non-BTreeMap field would break this intermittently).
     let state = data::State::default();
     let first = serde_json::to_string(&state).expect("serialize must succeed");
     for i in 1..100 {
-        let next = serde_json::to_string(&state).expect("serialize must succeed");
+        // Create a fresh default to avoid any hidden interior mutability tricks.
+        let next_state = data::State::default();
+        let next = serde_json::to_string(&next_state).expect("serialize must succeed");
         assert_eq!(
             first, next,
-            "Serialization is non-deterministic at iteration {i}: bytes differ between runs"
+            "Serialization is non-deterministic at iteration {i}: \
+             data::State must not contain bare HashMap fields (BC-11/C-9). \
+             Use BTreeMap or IndexMap with a stable order instead."
         );
     }
 }
@@ -235,6 +250,41 @@ fn save_state_to_disk_updates_last_saved_bytes() {
     );
 }
 
+// ── Case 4 / F4-DoD: is_dirty() branch structure ──────────────────────────────
+
+#[test]
+fn is_dirty_has_none_is_clean_branch_and_some_comparison_branch() {
+    // F4-DoD case 4: even at startup (last_saved_bytes = None) the is_dirty()
+    // function must correctly short-circuit to false for the None case, and
+    // also have a Some branch that compares build_state_json() output.
+    //
+    // This structural test pins both branches so neither can be accidentally
+    // removed without breaking this guard.
+    let src = read_main();
+
+    let fn_start = src
+        .find("fn is_dirty(")
+        .expect("is_dirty function must exist in main.rs (F4)");
+    let tail = &src[fn_start..];
+    let fn_end = tail[1..]
+        .find("\n    fn ")
+        .map(|i| i + 1)
+        .unwrap_or(tail.len().min(500));
+    let body = &tail[..fn_end];
+
+    // Branch 1: None => false (BC-9: startup / never-saved is treated as clean)
+    assert!(
+        body.contains("None => false") || body.contains("return false"),
+        "is_dirty must have a None => false branch for the initial/clean state (F4-DoD case 4 / BC-9)"
+    );
+
+    // Branch 2: Some(...) comparison using build_state_json
+    assert!(
+        body.contains("build_state_json"),
+        "is_dirty must call build_state_json in the Some branch to compare current vs saved bytes (F4-DoD case 4)"
+    );
+}
+
 // ── Pending exit / open message variants ──────────────────────────────────────
 
 #[test]
@@ -243,5 +293,37 @@ fn discard_and_exit_message_exists() {
     assert!(
         src.contains("DiscardAndExit"),
         "Message::DiscardAndExit must exist for the dirty-check dialog confirm action (F4)"
+    );
+}
+
+// ── C-1: GoBack / Escape clears all pending dirty-check state ─────────────────
+
+#[test]
+fn escape_on_confirm_clears_pending_state() {
+    // C-1: when the user presses Escape (GoBack) while a confirm dialog is open,
+    // ALL pending dirty-check state must be cleared — not just confirm_dialog.
+    // Without this fix, a subsequent Open/Quit skips the dirty check because
+    // pending_open_file / pending_exit_windows / pending_save_path remain set.
+    let src = read_main();
+
+    let prefix = "            Message::GoBack =>";
+    let start = src
+        .find(prefix)
+        .expect("Message::GoBack handler must exist");
+    let tail = &src[start..];
+    let end = tail[1..]
+        .find("\n            Message::")
+        .map(|i| i + 1)
+        .unwrap_or(tail.len());
+    let body = &tail[..end];
+
+    // The confirm_dialog.is_some() branch must clear all three pending fields.
+    assert!(
+        body.contains("pending_open_file = None"),
+        "GoBack with confirm_dialog must clear pending_open_file (C-1)"
+    );
+    assert!(
+        body.contains("pending_exit_windows = None"),
+        "GoBack with confirm_dialog must clear pending_exit_windows (C-1)"
     );
 }

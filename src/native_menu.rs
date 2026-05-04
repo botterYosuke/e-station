@@ -152,14 +152,16 @@ mod platform {
                 let save_id = save_item.id().clone();
                 let save_as_id = save_as_item.id().clone();
 
-                file.append_items(&[
+                if let Err(e) = file.append_items(&[
                     &open_item as &dyn IsMenuItem,
                     &save_item as &dyn IsMenuItem,
                     &save_as_item as &dyn IsMenuItem,
                     &sep as &dyn IsMenuItem,
                     &quit_menu_item as &dyn IsMenuItem,
-                ])
-                .ok();
+                ]) {
+                    log::error!("[native_menu] append_items failed: {e:?}");
+                    return;
+                }
 
                 (Some(open_id), Some(save_id), Some(save_as_id), None)
             }
@@ -168,18 +170,23 @@ mod platform {
 
                 let replay_id = replay_item.id().clone();
 
-                file.append_items(&[
+                if let Err(e) = file.append_items(&[
                     &replay_item as &dyn IsMenuItem,
                     &sep as &dyn IsMenuItem,
                     &quit_menu_item as &dyn IsMenuItem,
-                ])
-                .ok();
+                ]) {
+                    log::error!("[native_menu] append_items failed: {e:?}");
+                    return;
+                }
 
                 (None, None, None, Some(replay_id))
             }
         };
 
-        menu.append(&file).ok();
+        if let Err(e) = menu.append(&file) {
+            log::error!("[native_menu] menu.append failed: {e:?}");
+            return;
+        }
 
         match MENU_IDS.lock() {
             Ok(mut guard) => {
@@ -212,7 +219,15 @@ mod platform {
         {
             // SAFETY: raw_id is the valid HWND of the main window, alive for
             // the duration of the application.
-            unsafe { menu_ref.init_for_hwnd(raw_id as isize).ok() };
+            if let Err(e) = unsafe { menu_ref.init_for_hwnd(raw_id as isize) } {
+                log::error!("[native_menu] init_for_hwnd failed: {e:?}");
+                // Clear MENU_IDS so event_stream does not treat menu actions as reachable
+                // when the HMENU is not actually attached to the window.
+                match MENU_IDS.lock() {
+                    Ok(mut guard) => *guard = None,
+                    Err(poisoned) => *poisoned.into_inner() = None,
+                }
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -221,8 +236,8 @@ mod platform {
 
     pub fn event_stream() -> impl iced::futures::Stream<Item = Action> + Send + 'static {
         async_stream::stream! {
+            let receiver = MenuEvent::receiver();
             loop {
-                let receiver = MenuEvent::receiver();
                 while let Ok(event) = receiver.try_recv() {
                     let action = {
                         let guard = match MENU_IDS.lock() {

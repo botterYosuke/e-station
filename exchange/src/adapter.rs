@@ -338,7 +338,9 @@ impl FromStr for Venue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum, PartialOrd, Ord,
+)]
 pub enum Exchange {
     BinanceLinear,
     BinanceInverse,

@@ -104,7 +104,11 @@ pub(crate) static VENUE_CAPS_STORE: std::sync::OnceLock<
 /// - `IoError`            → WARN (operational OS failure)
 /// - `PathGuardViolation` → ERROR + "BUG:" prefix (should never happen)
 #[derive(Debug)]
-#[allow(dead_code)] // Cancelled / PathGuardViolation reserved for F6 path-guard expansion
+#[allow(dead_code)]
+// TODO(F6): remove #[allow(dead_code)] after Cancelled and PathGuardViolation are wired up.
+// Currently Cancelled is NOT called — save-as cancel is handled by NativeSaveAsPath(None) early return.
+// Note: save_error_classification.rs tests verify dead_code variants (Cancelled, PathGuardViolation)
+// to ensure log-level contracts are structurally pinned even before call sites are added.
 enum SaveError {
     /// User dismissed the OS save dialog — not an error.
     Cancelled,
@@ -112,7 +116,7 @@ enum SaveError {
     IoError(std::io::ErrorKind),
     /// Path guard check failed (`.py`-extension or persistent-state-dir rule).
     /// This is a programming error, not an operational failure.
-    PathGuardViolation,
+    PathGuardViolation { reason: &'static str },
 }
 
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
@@ -140,9 +144,9 @@ fn log_save_error(err: &SaveError, path: &std::path::Path) {
         SaveError::IoError(kind) => {
             log::warn!("Save failed kind={kind:?} path={}", path.display());
         }
-        SaveError::PathGuardViolation => {
+        SaveError::PathGuardViolation { reason } => {
             log::error!(
-                "BUG: path guard violation path={} reason=PathGuardViolation",
+                "BUG: path guard violation path={} reason={reason}",
                 path.display()
             );
         }
@@ -1845,7 +1849,15 @@ impl Flowsurface {
             }
             Message::DiscardAndExit => {
                 self.confirm_dialog = None;
-                let windows = self.pending_exit_windows.take().unwrap_or_default();
+                let windows = match self.pending_exit_windows.take() {
+                    Some(w) => w,
+                    None => {
+                        log::warn!(
+                            "[DiscardAndExit] pending_exit_windows is None — window positions not captured"
+                        );
+                        Default::default()
+                    }
+                };
                 self.save_state_to_disk(&windows);
                 return iced::exit();
             }
@@ -1873,6 +1885,9 @@ impl Flowsurface {
 
                 if self.confirm_dialog.is_some() {
                     self.confirm_dialog = None;
+                    self.pending_save_path = None;
+                    self.pending_open_file = None;
+                    self.pending_exit_windows = None;
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
                 } else {
@@ -2732,6 +2747,9 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::NativeSaveAsPath(Some(path)) => {
+                if self.confirm_dialog.is_some() {
+                    return Task::none();
+                }
                 // F5: if the target file already exists, ask the user to confirm overwrite.
                 if path.exists() {
                     self.pending_save_path = Some(path.clone());
@@ -2757,6 +2775,12 @@ impl Flowsurface {
                 );
             }
             Message::ConfirmSaveAsOverwrite => {
+                // M-3: guard against arriving without an open dialog (race condition).
+                // Mirrors the confirm_dialog.is_none() pattern used in NativeOpenFilePendingCheck
+                // and ExitRequested to prevent double-processing.
+                if self.confirm_dialog.is_none() {
+                    return Task::none();
+                }
                 self.confirm_dialog = None;
                 // pending_save_path was set in NativeSaveAsPath; proceed to collect specs.
                 let mut active_windows: Vec<window::Id> =
@@ -2774,15 +2798,19 @@ impl Flowsurface {
                 let Some(path) = self.pending_save_path.take() else {
                     return Task::none();
                 };
+                // H-5: build JSON once and reuse for both the user path and saved-state.json,
+                // avoiding a second build_state_json call inside save_state_to_disk.
                 if let Some(json) = self.build_state_json(&windows) {
                     match std::fs::write(&path, json.as_bytes()) {
                         Ok(()) => {
+                            // A-7 / R2-M1: update dirty baseline immediately after the user-path
+                            // write succeeds so that is_dirty() returns false even if the
+                            // subsequent write_json_to_saved_state_disk call fails.
+                            self.last_saved_bytes = Some(json.as_bytes().to_vec());
                             // A-3: explicit Save / Save As writes to both the user
                             // path and saved-state.json so neither lags behind.
-                            self.save_state_to_disk(&windows);
-                            // A-7: save_state_to_disk already updates last_saved_bytes;
-                            // the line below is intentionally removed to avoid a double
-                            // update with a stale clone of `json` (M3 fix).
+                            // H-5: reuse the already-built json — no second build_state_json call.
+                            self.write_json_to_saved_state_disk(&json);
                             // Record as current document
                             match CURRENT_PATH.lock() {
                                 Ok(mut guard) => *guard = Some(path.clone()),
@@ -2858,7 +2886,8 @@ impl Flowsurface {
                     return Task::none();
                 }
                 if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
-                    log::error!("Failed to write imported state: {e}");
+                    // BC-5: write failure is an OS-level I/O error → WARN level.
+                    log::warn!("Failed to write imported state: {e}");
                     self.notifications
                         .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
                     return Task::none();
@@ -2875,7 +2904,8 @@ impl Flowsurface {
                     return Task::none();
                 };
                 if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
-                    log::error!("Failed to write imported state: {e}");
+                    // BC-5: write failure is an OS-level I/O error → WARN level.
+                    log::warn!("Failed to write imported state: {e}");
                     self.notifications
                         .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
                     return Task::none();
@@ -3176,6 +3206,7 @@ impl Flowsurface {
                 if dialog.is_none() {
                     self.pending_open_file = None;
                     self.pending_exit_windows = None;
+                    self.pending_save_path = None;
                 }
                 self.confirm_dialog = dialog;
             }
@@ -3734,10 +3765,9 @@ impl Flowsurface {
             // SAFETY: APP_MODE is initialised in main() before iced starts;
             // if it were unset the process would have already exited due to --mode validation.
             native_menu::subscription(
-                APP_MODE
+                *APP_MODE
                     .get()
-                    .copied()
-                    .unwrap_or(engine_client::dto::AppMode::Live),
+                    .expect("APP_MODE must be set before iced starts"),
             )
             .map(Message::NativeMenuAction),
         ])
@@ -4210,6 +4240,10 @@ impl Flowsurface {
 
     /// Build the current application state as a JSON string.
     /// Returns `None` in replay mode (must not overwrite live settings).
+    // REVIEW: build_state_json modifies state — split needed
+    // This method updates popout window_spec entries and calls sidebar.sync_tickers_table_settings(),
+    // which are side effects beyond serialization. Separating them requires threading window specs
+    // through callers, which is a larger refactor deferred to a future phase.
     fn build_state_json(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> Option<String> {
         if APP_MODE
             .get()
@@ -4281,17 +4315,28 @@ impl Flowsurface {
         }
     }
 
+    /// H-5: write a pre-built JSON string to saved-state.json and update
+    /// `last_saved_bytes`. Called by `save_state_to_disk` and by
+    /// `NativeSaveAsWithSpecs` (which builds the JSON once and reuses it).
+    fn write_json_to_saved_state_disk(&mut self, json: &str) {
+        let file_name = data::SAVED_STATE_PATH;
+        if let Err(e) = data::write_json_to_file(json, file_name) {
+            // BC-5: auto-save write failure is an OS-level I/O error → WARN level.
+            log_save_error(
+                &SaveError::IoError(e.kind()),
+                std::path::Path::new(file_name),
+            );
+        } else {
+            // A-7: update dirty baseline so auto-save clears the dirty flag.
+            // R3: only saved-state.json is written here — CURRENT_PATH is NOT touched.
+            self.last_saved_bytes = Some(json.as_bytes().to_vec());
+            log::info!("Persisted state to {file_name}");
+        }
+    }
+
     fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
         if let Some(json) = self.build_state_json(windows) {
-            let file_name = data::SAVED_STATE_PATH;
-            if let Err(e) = data::write_json_to_file(&json, file_name) {
-                log::error!("Failed to write layout state to file: {}", e);
-            } else {
-                // A-7: update dirty baseline so auto-save clears the dirty flag.
-                // R3: only saved-state.json is written here — CURRENT_PATH is NOT touched.
-                self.last_saved_bytes = Some(json.into_bytes());
-                log::info!("Persisted state to {file_name}");
-            }
+            self.write_json_to_saved_state_disk(&json);
         } else {
             log::info!("replay mode: skipping save_state_to_disk");
         }
@@ -4301,13 +4346,17 @@ impl Flowsurface {
     ///
     /// BC-9: `last_saved_bytes = None` (initial / never-saved) is treated as clean
     /// so the user is not prompted on Quit before any change is made.
+    ///
+    /// NOTE: &mut self is required because build_state_json calls active_dashboard_mut()
+    /// to sync popout window specs. This is a side effect of a read-like operation.
+    /// Future: refactor build_state_json to take window specs as argument (&self).
     fn is_dirty(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> bool {
         let Some(saved) = self.last_saved_bytes.clone() else {
             return false; // None => false: initial state is clean (BC-9)
         };
         self.build_state_json(windows)
             .map(|json| json.into_bytes() != saved)
-            .unwrap_or(false)
+            .unwrap_or(false) // replay mode: build_state_json returns None → treat as clean (replay never saves)
     }
 
     fn restart(&mut self) -> Task<Message> {

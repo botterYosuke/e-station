@@ -61,9 +61,12 @@ fn accelerator_ctrl_s_present_in_muda_items() {
 #[test]
 fn linux_ctrl_s_dispatches_save() {
     let src = read_native_menu();
+    // M-8: use a delimiter-bounded pattern to avoid matching "Action::SaveAs".
+    // "Some(Action::Save)" is unique to the Ctrl+S arm; "Action::SaveAs" yields
+    // "Some(Action::SaveAs)" which does NOT contain "Some(Action::Save)".
     assert!(
-        src.contains("Action::Save"),
-        "Linux handler must yield Action::Save for Ctrl+S"
+        src.contains("Some(Action::Save)"),
+        "Linux handler must yield Action::Save (not Action::SaveAs) for Ctrl+S"
     );
 }
 

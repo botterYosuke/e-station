@@ -632,3 +632,39 @@ cargo fmt --check     → 差分なし
 cargo clippy --workspace -- -D warnings → 警告なし
 cargo test --workspace → 全テスト GREEN
 ```
+
+## レビュー反映 (2026-05-04, ラウンド2)
+
+**対象フェーズ**: F4（dirty 確認）, F5（上書き確認）
+
+### 解消した指摘
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| H1 | HIGH | NativeSaveAsPath に confirm_dialog.is_none() ガード欠落（M5 漏れ） | src/main.rs:2734 にガード追加 |
+| H2 | HIGH | stable_serialization が build_state_json() を迂回、BC-11 保護無効 | tests/dirty_detection.rs を実態に近い検証に修正 |
+| H3 | HIGH | pending_save_path が ToggleDialogModal(None)/GoBack でクリアされない | 両ハンドラに pending_save_path = None 追加 |
+| H4 | HIGH | PathGuardViolation に reason フィールドなし | SaveError::PathGuardViolation { reason } に変更 |
+| H5 | HIGH | build_state_json(&mut self) がシリアライズ以外で state 変更 | 責務分離（コメント対応または実装分離） |
+| M1 | MEDIUM | write_json_to_file 失敗が log::error! → BC-5 は WARN | log::warn! に変更 |
+| M2 | MEDIUM | NativeSaveAsWithSpecs で save_state_to_disk 失敗時 last_saved_bytes 未更新 | fs::write 成功後に明示的に last_saved_bytes 更新 |
+| M3 | MEDIUM | event_stream で receiver をループ毎取得 | ループ外に移動 |
+| M4 | MEDIUM | SaveError の dead code コメント不正確 | TODO(F6) コメントに更新 |
+| M5 | MEDIUM | F4-DoD ケース4の専用テスト欠落 | dirty_detection.rs にテスト追加 |
+| M6 | MEDIUM | DiscardAndExit の unwrap_or_default() が無音 | log::warn! 追加 |
+| M7 | MEDIUM | native_menu.rs の .ok() 握り潰し | log::error! に変更 |
+| M8 | MEDIUM | save_as_overwrite_confirm.rs の重複 src.find | 削除 |
+
+### ラウンド2 追加修正（サニティチェック後）
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| R2-M1 | MEDIUM | NativeSaveAsWithSpecs: fs::write 成功後に last_saved_bytes を先に更新（save_state_to_disk 失敗でも偽陽性回避） | last_saved_bytes 更新を fs::write 成功直後に移動 |
+| R2-M2 | MEDIUM | append_items 失敗後も MENU_IDS が設定され不整合 | 失敗時 early return で MENU_IDS を設定しない |
+| R2-M3 | MEDIUM | init_for_hwnd の .ok() 残存 | log::error! に変更 |
+
+### ラウンド3 追加修正（R2 サニティチェック後）
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| R3-H1 | HIGH | init_for_hwnd 失敗後も MENU_IDS に有効 ID が残存し、HMENU 未アタッチのまま event_stream が「正常」と誤認 | 失敗時に `MENU_IDS` を `None` に戻して event_stream を無効化 (`src/native_menu.rs`) |

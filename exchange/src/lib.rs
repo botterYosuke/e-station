@@ -181,7 +181,7 @@ impl fmt::Display for InvalidTimeframe {
 impl std::error::Error for InvalidTimeframe {}
 
 /// Serializable version of `(Exchange, Ticker)` tuples that is used for keys in maps
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SerTicker {
     pub exchange: Exchange,
     pub ticker: Ticker,
@@ -285,6 +285,22 @@ impl PartialEq for Ticker {
 }
 
 impl Eq for Ticker {}
+
+impl PartialOrd for Ticker {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Ticker {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare by exchange first, then by ticker bytes (ASCII, fixed-width).
+        // Consistent with the PartialEq impl which compares the same two fields.
+        self.exchange
+            .cmp(&other.exchange)
+            .then_with(|| self.bytes.cmp(&other.bytes))
+    }
+}
 
 impl std::hash::Hash for Ticker {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

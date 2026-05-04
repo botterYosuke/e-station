@@ -59,11 +59,11 @@
 
 ```
 native_menu
-├── pub enum Action { OpenFile, SaveAs, OpenStrategy }
+├── pub enum Action { OpenFile, Save, SaveAs, OpenReplayDialog, Quit }
 ├── pub fn attach(raw_id: u64, app_mode: AppMode)   ← Windows/macOS で muda 初期化
-├── pub fn subscription() -> Subscription<Action>    ← 16ms ポーリング
+├── pub fn subscription(app_mode: AppMode) -> iced::Subscription<Action>    ← 16ms ポーリング
 └── mod platform (cfg: windows or macos)
-    ├── static MENU_IDS: OnceLock<MenuIds>
+    ├── static MENU_IDS: Mutex<Option<MenuIds>>
     ├── fn attach(...)  ← Menu 構築 + init_for_hwnd / init_for_nsapp
     └── fn event_stream() -> impl Stream  ← MenuEvent::receiver() をポーリング
 ```
@@ -306,10 +306,10 @@ cargo test --bin flowsurface               # 234 テスト全体
 | 2 | `File > 開く...` → 任意の `.json` を選択 | live | アプリがリスタートし設定が反映される | ✅ `open_file_apply_valid_json_calls_write_and_restart` |
 | 3 | `File > 開く...` → 壊れた JSON ファイルを選択 | live | エラー toast が出てアプリは継続 | ✅ `open_file_apply_invalid_json_pushes_error_toast`, `open_file_apply_invalid_json_does_not_restart` |
 | 4 | `File > 名前を付けて保存...` → パスを選択 | live | 選択したパスに `saved-state.json` が書き出される | ✅ `save_as_with_specs_delegates_to_build_state_json` |
-| 5 | `File > ストラテジーを開く...` → `.py` ファイルを選択 | replay | `replay_strategy_file` にパスがセットされる | — (rfd dialog) |
+| 5 | `File > Replay を開始...` → フォームで条件入力 | replay | `ReplayFormModal` が開きフォームに入力できる | — (runtime) |
 | 6 | `File > 終了` | どちらも | アプリが終了する（OS ネイティブ Quit 動作） | — (OS API) |
 | 7 | popout ウィンドウにメニューバーが表示されない | live | popout ウィンドウに File メニューなし | — (runtime) |
-| 8 | replay モードで `File > 開く...` が表示されない | replay | メニューに「ストラテジーを開く...」のみ | ✅ `replay_mode_provides_open_strategy_only` |
+| 8 | replay モードで `File > 開く...` / `上書き保存` が表示されない | replay | メニューに「Replay を開始...」のみ | ✅ `replay_mode_provides_open_replay_dialog_only` |
 
 ### 既存テストへの影響
 
