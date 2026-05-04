@@ -84,3 +84,83 @@ fn submit_in_flight_guard_in_submit_handler() {
         "Action::SubmitToWandb handler must reference SUBMIT_IN_FLIGHT guard"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M2 (lightweight): lock-order helper exists and reverse-order panics in debug
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lock_order_acquire_helper_exists() {
+    let src = read_main_rs();
+    assert!(
+        src.contains("pub fn lock_order_acquire"),
+        "main.rs must define lock_order_acquire helper for M2 lightweight order check"
+    );
+    assert!(
+        src.contains("LOCK_ORDER_INDEX"),
+        "main.rs must define LOCK_ORDER_INDEX thread-local for M2"
+    );
+}
+
+#[test]
+fn switch_mode_handler_records_mode_switching_lock() {
+    let src = read_main_rs();
+    let pos = src
+        .find("Action::SwitchMode(target)")
+        .expect("Action::SwitchMode handler must exist");
+    let end = (pos + 4000).min(src.len());
+    let mut safe = end;
+    while !src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let body = &src[pos..safe];
+    assert!(
+        body.contains("lock_order_acquire(\"MODE_SWITCHING\")"),
+        "Action::SwitchMode must record MODE_SWITCHING via lock_order_acquire (M2)"
+    );
+}
+
+#[test]
+fn restart_with_mode_records_app_mode_lock() {
+    let src = read_main_rs();
+    let pos = src
+        .find("fn restart_with_mode(")
+        .expect("restart_with_mode must exist");
+    let end = (pos + 600).min(src.len());
+    let mut safe = end;
+    while !src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let body = &src[pos..safe];
+    assert!(
+        body.contains("lock_order_acquire(\"APP_MODE\")"),
+        "restart_with_mode must record APP_MODE via lock_order_acquire (M2)"
+    );
+}
+
+#[test]
+fn reverse_order_acquisition_panics_in_debug_via_source_inspection() {
+    // flowsurface is a binary crate (no lib.rs), so integration tests cannot
+    // reference `lock_order_acquire` directly. The actual `#[should_panic]`
+    // runtime test lives in `src/main.rs` `mod lock_order_tests`. Here we
+    // structurally verify the invariant is encoded with `debug_assert!` and
+    // a release-build `tracing::warn!`.
+    let src = read_main_rs();
+    let pos = src
+        .find("pub fn lock_order_acquire")
+        .expect("lock_order_acquire helper must exist");
+    let end = (pos + 2000).min(src.len());
+    let mut safe = end;
+    while !src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let body = &src[pos..safe];
+    assert!(
+        body.contains("debug_assert!"),
+        "lock_order_acquire must use debug_assert! to panic on violation in debug builds (M2)"
+    );
+    assert!(
+        body.contains("tracing::warn!"),
+        "lock_order_acquire must log tracing::warn! on violation in release builds (統一決定 R6-82)"
+    );
+}

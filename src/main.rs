@@ -114,6 +114,79 @@ pub static MODE_SWITCHING: std::sync::atomic::AtomicBool =
 pub static SUBMIT_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// F7 / M2 (lightweight lock-order guard): track the highest-index lock
+// acquired on the current thread so reverse-order acquisitions are caught
+// in debug builds. The fixed order is:
+//   0: MODE_SWITCHING
+//   1: SUBMIT_IN_FLIGHT
+//   2: APP_MODE
+//   3: CURRENT_PATH
+// Helper `lock_order_acquire(name)` is called at known acquisition points
+// (`restart_with_mode` / `Action::SwitchMode`). Release builds only log a
+// `tracing::warn!` so production safety is preserved (統一決定 R6-82).
+thread_local! {
+    static LOCK_ORDER_INDEX: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn _lock_order_index_for(name: &str) -> Option<usize> {
+    match name {
+        "MODE_SWITCHING" => Some(0),
+        "SUBMIT_IN_FLIGHT" => Some(1),
+        "APP_MODE" => Some(2),
+        "CURRENT_PATH" => Some(3),
+        _ => None,
+    }
+}
+
+/// Record acquisition of a named lock on the current thread, asserting that
+/// the fixed acquisition order is preserved. In debug builds violations
+/// `debug_assert!`-panic; in release builds a `tracing::warn!` is emitted
+/// and the call returns without panicking (統一決定 R6-82).
+///
+/// This is a lightweight bookkeeping helper — it does NOT actually acquire
+/// the underlying mutex/atomic. Callers must invoke this immediately after
+/// (or before, with the matching `lock_order_release`) the real acquisition.
+pub fn lock_order_acquire(name: &'static str) {
+    let Some(next) = _lock_order_index_for(name) else {
+        return;
+    };
+    LOCK_ORDER_INDEX.with(|cell| {
+        let prev = cell.get();
+        if let Some(p) = prev {
+            // Equal index is allowed (re-entrant probe of the same lock).
+            // Strictly greater means violation (e.g. acquiring APP_MODE then MODE_SWITCHING).
+            debug_assert!(
+                p <= next,
+                "lock-order violation: tried to acquire {name} (index {next}) \
+                 while already holding index {p}. Fixed order: \
+                 MODE_SWITCHING(0) → SUBMIT_IN_FLIGHT(1) → APP_MODE(2) → CURRENT_PATH(3) \
+                 (統一決定 58 / R6-82)"
+            );
+            #[cfg(not(debug_assertions))]
+            if p > next {
+                tracing::warn!(
+                    target: "lock_order",
+                    "lock-order violation: tried to acquire {name} (index {next}) \
+                     while already holding index {p}",
+                );
+            }
+        }
+        // Record the highest index seen so subsequent acquisitions are checked.
+        let new_max = match prev {
+            Some(p) if p > next => p,
+            _ => next,
+        };
+        cell.set(Some(new_max));
+    });
+}
+
+/// Reset the per-thread lock-order tracker. Call when all known locks for a
+/// critical section have been released (e.g. at the bottom of `restart_with_mode`).
+pub fn lock_order_reset() {
+    LOCK_ORDER_INDEX.with(|cell| cell.set(None));
+}
+
 /// Phase 3-A C2: handle to the in-flight `submit_run.py` child process.
 ///
 /// `submit_wandb_run` stores the spawned `Child` here so that the W&B Cancel
@@ -182,8 +255,21 @@ fn set_app_mode(mode: engine_client::dto::AppMode) {
 /// via the stdin payload — so both sides always agree on the WAL location.
 fn has_wal_in_flight_orders() -> bool {
     let wal_path = engine_client::process::engine_cache_dir().join("tachibana_orders.jsonl");
-    let Ok(content) = std::fs::read_to_string(&wal_path) else {
-        return false;
+    // M6: surface IO errors via log::warn! (the previous `let Ok(...) else { return false; }`
+    // silently treated unreadable WAL as "no in-flight orders", which masked operational
+    // problems). Treat IO failure as conservative `false` (do not block the mode switch
+    // if the file cannot be read), but log so the user can investigate.
+    let content = match std::fs::read_to_string(&wal_path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(err) => {
+            log::warn!(
+                "[F7/WAL] failed to read {}: {}; treating as no in-flight orders",
+                wal_path.display(),
+                err
+            );
+            return false;
+        }
     };
     let mut latest_status: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -195,9 +281,9 @@ fn has_wal_in_flight_orders() -> bool {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        // M11: writer (`tachibana_orders.py`) emits `client_order_id` only.
         let order_id = record
-            .get("order_id")
-            .or_else(|| record.get("client_order_id"))
+            .get("client_order_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let status = record
@@ -208,9 +294,11 @@ fn has_wal_in_flight_orders() -> bool {
             latest_status.entry(oid).or_insert(st);
         }
     }
+    // M8: in-flight = NOT in the terminal set. Unknown statuses are
+    // conservatively treated as in-flight.
     latest_status
         .values()
-        .any(|st| st == "submitted" || st == "partial")
+        .any(|st| !matches!(st.as_str(), "filled" | "cancelled" | "rejected"))
 }
 
 /// F9d streaming events emitted by [`submit_wandb_run_stream`].
@@ -3608,6 +3696,10 @@ impl Flowsurface {
                         let Some(guard) = ModeSwitchGuard::try_acquire() else {
                             return Task::none();
                         };
+                        // M2 (lightweight): record MODE_SWITCHING acquisition so
+                        // any subsequent SUBMIT_IN_FLIGHT / APP_MODE / CURRENT_PATH
+                        // acquisitions on this thread can be order-checked.
+                        lock_order_acquire("MODE_SWITCHING");
                         self.mode_switch_state = Some((target, guard));
 
                         // Axis-5: reject if a W&B submit is in progress (統一決定 61, 68)
@@ -6253,8 +6345,17 @@ impl Flowsurface {
     /// when `*self = new_state` runs inside `restart()`, which resets
     /// `MODE_SWITCHING` to false.
     fn restart_with_mode(&mut self, mode: engine_client::dto::AppMode) -> Task<Message> {
+        // M2 (lightweight): set_app_mode acquires APP_MODE; record it for the
+        // lock-order checker. MODE_SWITCHING was already recorded at the entry
+        // to Action::SwitchMode.
+        lock_order_acquire("APP_MODE");
         set_app_mode(mode);
-        self.restart()
+        let task = self.restart();
+        // restart() replaces *self; the per-thread lock-order tracker now
+        // pertains to a stale critical section. Reset it so the next switch
+        // starts from a clean slate.
+        lock_order_reset();
+        task
     }
 
     fn restart(&mut self) -> Task<Message> {
@@ -6824,5 +6925,39 @@ mod status_bar_tests {
             (STATUS_BAR_BG.a - 1.0).abs() < eps,
             "BG alpha should be 1.0"
         );
+    }
+}
+
+#[cfg(test)]
+mod lock_order_tests {
+    use super::*;
+
+    #[test]
+    fn lock_order_acquire_in_correct_order_does_not_panic() {
+        lock_order_reset();
+        lock_order_acquire("MODE_SWITCHING");
+        lock_order_acquire("SUBMIT_IN_FLIGHT");
+        lock_order_acquire("APP_MODE");
+        lock_order_acquire("CURRENT_PATH");
+        lock_order_reset();
+    }
+
+    #[test]
+    fn lock_order_acquire_skipping_levels_is_allowed() {
+        // Skipping intermediate levels (e.g. MODE_SWITCHING then APP_MODE
+        // without acquiring SUBMIT_IN_FLIGHT) is fine — the order is a
+        // partial order.
+        lock_order_reset();
+        lock_order_acquire("MODE_SWITCHING");
+        lock_order_acquire("APP_MODE");
+        lock_order_reset();
+    }
+
+    #[test]
+    #[should_panic(expected = "lock-order violation")]
+    fn lock_order_reverse_acquisition_panics_in_debug() {
+        lock_order_reset();
+        lock_order_acquire("APP_MODE");
+        lock_order_acquire("MODE_SWITCHING");
     }
 }
