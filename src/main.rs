@@ -3697,9 +3697,14 @@ impl Flowsurface {
             // 出ていない正規ルート）。`current_path` は両ケース（scenario
             // None / Some）でセットする。
             Message::StrategyScenarioLoadedEvent { path, scenario } => {
-                if let Ok(mut guard) = CURRENT_PATH.lock() {
-                    *guard = Some(path.clone());
-                }
+                // M-7: poison recovery via `into_inner()` so a prior panic does
+                // not silently drop the new path.
+                let mut guard = match CURRENT_PATH.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                *guard = Some(path.clone());
+                drop(guard);
                 let form = self
                     .replay_form_modal
                     .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
