@@ -17,8 +17,11 @@ from pii_scrub import (
     FILLS_ALLOWED_KEYS,
     NARRATIVE_ALLOWED_KEYS,
     assert_no_forbidden_keys,
-    scrub,
+    pii_scrub,
 )
+
+# Backwards-compat alias for legacy tests in this file.
+scrub = pii_scrub
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +107,9 @@ def test_fills_allowed_keys_content():
 
 
 def test_equity_allowed_keys_content():
-    spec_minimum = frozenset(["ts", "equity", "cash", "position", "pnl"])
+    # H1: unified allow-list (engine canonical). pnl was intentionally removed
+    # from EQUITY (computed downstream from equity/cash deltas, not transmitted).
+    spec_minimum = frozenset(["ts", "equity", "cash", "position"])
     assert spec_minimum.issubset(EQUITY_ALLOWED_KEYS), (
         f"EQUITY_ALLOWED_KEYS is missing required keys: {spec_minimum - EQUITY_ALLOWED_KEYS}"
     )

@@ -10,13 +10,16 @@ fn mask_secrets_test(line: &str) -> String {
 
     static KEY_PATTERN: OnceLock<Regex> = OnceLock::new();
     static HEX_PATTERN: OnceLock<Regex> = OnceLock::new();
+    static BEARER_PATTERN: OnceLock<Regex> = OnceLock::new();
 
     let key_re = KEY_PATTERN
         .get_or_init(|| Regex::new(r"(?i)(wandb[_-]?api[_-]?key)\s*[=:]\s*\S+").unwrap());
     let hex_re = HEX_PATTERN.get_or_init(|| Regex::new(r"[0-9a-fA-F]{40,}").unwrap());
+    let bearer_re = BEARER_PATTERN.get_or_init(|| Regex::new(r"(?i)(bearer)(\s+)\S+").unwrap());
 
     let masked = key_re.replace_all(line, "$1=***");
     let masked = hex_re.replace_all(&masked, "***");
+    let masked = bearer_re.replace_all(&masked, "$1$2***");
     masked.into_owned()
 }
 
@@ -95,6 +98,27 @@ fn case_insensitive_wandb_key_pattern() {
         "case-insensitive match must mask key"
     );
     assert!(masked.contains("***"));
+}
+
+/// C3 (R1 Phase 1): Bearer / bearer pattern を mask する。
+/// 統一決定 44: subprocess stdout は WANDB_API_KEY / 40桁hex に加え
+/// Authorization: Bearer 形式も全出口で mask されなければならない。
+#[test]
+fn test_mask_secrets_bearer_token_masked() {
+    let masked = mask_secrets_test("Authorization: Bearer abc123");
+    assert_eq!(
+        masked, "Authorization: Bearer ***",
+        "Bearer <token> must be masked, got: {masked}"
+    );
+}
+
+#[test]
+fn test_mask_secrets_bearer_lowercase_masked() {
+    let masked = mask_secrets_test("authorization: bearer xyz789");
+    assert_eq!(
+        masked, "authorization: bearer ***",
+        "lowercase bearer must also be masked, got: {masked}"
+    );
 }
 
 // ── mask_secrets.rs ソース確認テスト ─────────────────────────────────────────

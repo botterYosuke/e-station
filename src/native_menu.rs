@@ -1,6 +1,8 @@
 use engine_client::dto::AppMode;
 use iced::Subscription;
 
+use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     OpenFile,
@@ -42,12 +44,32 @@ pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool, bool, bo
 
 /// Attach the OS-native menu bar to the main window.
 /// On Linux this is a no-op (iced sidebar covers the same ground).
-pub fn attach(raw_id: u64, app_mode: AppMode) {
+///
+/// `auth` and `buffer` are forwarded to `tools_actions_for_state` so the
+/// Tools submenu items respect the W&B authentication / run-buffer state
+/// at attach time (H5). After attach, call `refresh_tools_enable()` whenever
+/// the auth or buffer state changes so the menu items pick up the new state.
+pub fn attach(raw_id: u64, app_mode: AppMode, auth: &WandbAuthState, buffer: &RunBufferIndex) {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
-    platform::attach(raw_id, app_mode);
+    platform::attach(raw_id, app_mode, auth, buffer);
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let _ = (raw_id, app_mode);
+    let _ = (raw_id, app_mode, auth, buffer);
+}
+
+/// Recompute the Tools submenu enable/disable state from the current
+/// `WandbAuthState` and `RunBufferIndex` and apply it to the live muda
+/// `MenuItem`s (H5 follow-up).
+///
+/// Must be called from the iced runtime thread (the same thread that called
+/// `attach()`), because muda `MenuItem` handles are stored in a `thread_local!`.
+/// On Linux this is a no-op.
+pub fn refresh_tools_enable(auth: &WandbAuthState, buffer: &RunBufferIndex) {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    platform::refresh_tools_enable(auth, buffer);
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let _ = (auth, buffer);
 }
 
 /// `app_mode` is forwarded to the Linux keyboard subscription so it can
@@ -115,12 +137,41 @@ fn linux_keyboard_subscription(app_mode: AppMode) -> Subscription<Action> {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod platform {
     use super::Action;
+    use crate::menu::{Action as MenuAction, tools_actions_for_state};
+    use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
     use engine_client::dto::AppMode;
     use muda::{
         CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
         accelerator::{Accelerator, Code, Modifiers},
     };
+    use std::cell::RefCell;
     use std::sync::Mutex;
+
+    // Live `MenuItem` handles for the Tools submenu so that we can call
+    // `set_enabled()` after auth / buffer state changes.
+    // `thread_local!` because muda items are `!Send` (`Rc<RefCell<...>>`).
+    // They are only ever touched from the iced runtime thread.
+    thread_local! {
+        static TOOLS_ITEMS: RefCell<Option<ToolsItems>> = const { RefCell::new(None) };
+    }
+
+    struct ToolsItems {
+        submit_to_wandb: MenuItem,
+        sign_in_wandb: MenuItem,
+        sign_out_wandb: MenuItem,
+        open_submission_log: MenuItem,
+        clear_run_buffer: MenuItem,
+    }
+
+    /// Read `MenuEntry.enabled` for a given action from
+    /// `tools_actions_for_state(...)` output.
+    fn entry_enabled(entries: &[crate::menu::MenuEntry], action: MenuAction) -> bool {
+        entries
+            .iter()
+            .find(|e| e.action == action)
+            .map(|e| e.enabled)
+            .unwrap_or(false)
+    }
 
     struct MenuIds {
         open_file: Option<MenuId>,
@@ -148,7 +199,7 @@ mod platform {
     // would silently do nothing.
     static MENU_IDS: Mutex<Option<MenuIds>> = Mutex::new(None);
 
-    pub fn attach(raw_id: u64, app_mode: AppMode) {
+    pub fn attach(raw_id: u64, app_mode: AppMode, auth: &WandbAuthState, buffer: &RunBufferIndex) {
         let menu = Menu::new();
         let file = Submenu::new("File", true);
 
@@ -275,20 +326,39 @@ mod platform {
         }
 
         // F9c: ツール（Tools）サブメニュー
+        // H5: enable/disable は `tools_actions_for_state(auth, buffer)` の戻り値の
+        // MenuEntry.enabled から取る。固定 `true` を指定しないこと。
+        let tools_entries = tools_actions_for_state(auth, buffer);
         let tools_submenu = Submenu::new("ツール（Tools）", true);
         let submit_item = MenuItem::new(
             "W&B に送信\u{2026}",
-            true,
+            entry_enabled(&tools_entries, MenuAction::SubmitToWandb),
             Some(Accelerator::new(
                 Some(Modifiers::CONTROL | Modifiers::SHIFT),
                 Code::KeyW,
             )),
         );
-        let sign_in_item = MenuItem::new("W&B にサインイン", true, None);
-        let sign_out_item = MenuItem::new("W&B からサインアウト", true, None);
+        let sign_in_item = MenuItem::new(
+            "W&B にサインイン",
+            entry_enabled(&tools_entries, MenuAction::SignInWandb),
+            None,
+        );
+        let sign_out_item = MenuItem::new(
+            "W&B からサインアウト",
+            entry_enabled(&tools_entries, MenuAction::SignOutWandb),
+            None,
+        );
         let tools_sep = PredefinedMenuItem::separator();
-        let submission_log_item = MenuItem::new("送信ログを開く", true, None);
-        let clear_buffer_item = MenuItem::new("バッファを消去", true, None);
+        let submission_log_item = MenuItem::new(
+            "送信ログを開く",
+            entry_enabled(&tools_entries, MenuAction::OpenSubmissionLog),
+            None,
+        );
+        let clear_buffer_item = MenuItem::new(
+            "バッファを消去",
+            entry_enabled(&tools_entries, MenuAction::ClearRunBuffer),
+            None,
+        );
 
         let submit_to_wandb_id = submit_item.id().clone();
         let sign_in_wandb_id = sign_in_item.id().clone();
@@ -312,6 +382,18 @@ mod platform {
             log::error!("[native_menu] menu.append tools_submenu failed: {e:?}");
             return;
         }
+
+        // H5: live MenuItem ハンドルを thread_local に保持して、
+        // `refresh_tools_enable()` で後から set_enabled できるようにする。
+        TOOLS_ITEMS.with(|cell| {
+            *cell.borrow_mut() = Some(ToolsItems {
+                submit_to_wandb: submit_item.clone(),
+                sign_in_wandb: sign_in_item.clone(),
+                sign_out_wandb: sign_out_item.clone(),
+                open_submission_log: submission_log_item.clone(),
+                clear_run_buffer: clear_buffer_item.clone(),
+            });
+        });
 
         match MENU_IDS.lock() {
             Ok(mut guard) => {
@@ -371,6 +453,35 @@ mod platform {
 
         #[cfg(target_os = "macos")]
         menu_ref.init_for_nsapp();
+    }
+
+    /// H5: Apply the latest `tools_actions_for_state` result to the live
+    /// muda Tools `MenuItem`s. Must be called from the same thread that
+    /// originally invoked `attach()` (the iced runtime thread).
+    pub fn refresh_tools_enable(auth: &WandbAuthState, buffer: &RunBufferIndex) {
+        let entries = tools_actions_for_state(auth, buffer);
+        TOOLS_ITEMS.with(|cell| {
+            let guard = cell.borrow();
+            let Some(items) = guard.as_ref() else {
+                // attach() not yet called on this thread — nothing to do.
+                return;
+            };
+            items
+                .submit_to_wandb
+                .set_enabled(entry_enabled(&entries, MenuAction::SubmitToWandb));
+            items
+                .sign_in_wandb
+                .set_enabled(entry_enabled(&entries, MenuAction::SignInWandb));
+            items
+                .sign_out_wandb
+                .set_enabled(entry_enabled(&entries, MenuAction::SignOutWandb));
+            items
+                .open_submission_log
+                .set_enabled(entry_enabled(&entries, MenuAction::OpenSubmissionLog));
+            items
+                .clear_run_buffer
+                .set_enabled(entry_enabled(&entries, MenuAction::ClearRunBuffer));
+        });
     }
 
     pub fn event_stream() -> impl iced::futures::Stream<Item = Action> + Send + 'static {

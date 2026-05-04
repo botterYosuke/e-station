@@ -10,53 +10,9 @@
 //! only one subprocess can run at a time.
 #![allow(dead_code)]
 
-// ---------------------------------------------------------------------------
-// Inline masking helper (mirrors src/mask_secrets.rs)
-// ---------------------------------------------------------------------------
-
-/// Apply secret masking to a raw log line before storing it in the UI.
-fn mask_secrets(line: &str) -> String {
-    let mut out = line.to_string();
-
-    if let Some(pos) = out.find("WANDB_API_KEY=") {
-        let start = pos + "WANDB_API_KEY=".len();
-        let end = out[start..]
-            .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == '\'')
-            .map(|p| start + p)
-            .unwrap_or(out.len());
-        if start < end {
-            out.replace_range(start..end, "***");
-        }
-    }
-
-    if let Some(pos) = out.find("api_key=") {
-        let start = pos + "api_key=".len();
-        let end = out[start..]
-            .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == '\'')
-            .map(|p| start + p)
-            .unwrap_or(out.len());
-        if start < end {
-            out.replace_range(start..end, "***");
-        }
-    }
-
-    for prefix in &["Bearer ", "bearer "] {
-        if let Some(pos) = out.find(prefix) {
-            let start = pos + prefix.len();
-            let end = out[start..]
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
-                .map(|p| start + p)
-                .unwrap_or(out.len());
-            if start < end {
-                out.replace_range(start..end, "***");
-            }
-        }
-    }
-
-    out
-}
-
-// ---------------------------------------------------------------------------
+// マスキングは crate::mask_secrets に集約（C3, R1 Phase 1）。raw String を直接
+// log_lines に格納する経路は型レベルで禁止する。
+use crate::mask_secrets::{MaskedLine, mask_secrets};
 
 use iced::{
     Element, Length, Theme,
@@ -92,6 +48,26 @@ impl AuthDisplayState {
     }
 }
 
+/// M5 (R1 Phase 1): `WandbAuthState` から `AuthDisplayState` への一元化変換。
+/// 二重管理を解消し、modal は `WandbAuthState` を受け取って `From` で変換する。
+///
+/// 変換規則：
+/// - `authenticated == false` → `NotSet`（method 値に関わらず）
+/// - それ以外は `method` に従う（Env / Netrc / None→NotSet）
+impl From<&crate::wandb_auth::WandbAuthState> for AuthDisplayState {
+    fn from(state: &crate::wandb_auth::WandbAuthState) -> Self {
+        use crate::wandb_auth::AuthMethod;
+        if !state.authenticated {
+            return Self::NotSet;
+        }
+        match state.method {
+            AuthMethod::Env => Self::Env,
+            AuthMethod::Netrc => Self::Netrc,
+            AuthMethod::None => Self::NotSet,
+        }
+    }
+}
+
 /// Messages handled by [`WandbSubmitModal::update`].
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -107,6 +83,8 @@ pub enum Message {
     Done(Option<String>),
     /// Subprocess exited with non-zero code.
     Failed(String, i32),
+    /// User clicked the result URL — request the parent to open it (H6).
+    OpenUrl(String),
 }
 
 /// Actions that the parent should react to.
@@ -117,6 +95,9 @@ pub enum Action {
         project: String,
         run_name: String,
         tags: String,
+        /// M6: free-form user notes forwarded to `wandb.init(notes=...)`.
+        /// May be empty.
+        notes: String,
     },
     Cancel,
     /// User clicked the URL link — open in a browser.
@@ -139,7 +120,8 @@ pub struct WandbSubmitModal {
     /// Current W&B authentication status (no key value).
     pub auth_status: AuthDisplayState,
     /// Stdout tail from the running subprocess (mask_secrets applied).
-    pub log_lines: Vec<String>,
+    /// `MaskedLine` newtype によって raw String 格納が型レベルで禁止される（C3）。
+    pub log_lines: Vec<MaskedLine>,
     /// URL returned by a successful submission.
     pub result_url: Option<String>,
     /// Error message from a failed submission.
@@ -199,6 +181,7 @@ impl WandbSubmitModal {
                     project: self.project.clone(),
                     run_name: self.run_name.clone(),
                     tags: self.tags.clone(),
+                    notes: self.notes.clone(),
                 });
             }
             Message::Cancel => {
@@ -219,6 +202,11 @@ impl WandbSubmitModal {
             Message::Failed(stderr, _exit_code) => {
                 self.submitting = false;
                 self.error = Some(stderr);
+            }
+            Message::OpenUrl(url) => {
+                // H6: 送信完了 URL を外部ブラウザで開く要求を親に伝播する。
+                // モーダル内部状態（submitting / result_url）は変更しない。
+                return Some(Action::OpenUrl(url));
             }
         }
         None
@@ -313,8 +301,10 @@ impl WandbSubmitModal {
         // Result URL
         let result_area: Option<Element<'_, Message>> = if let Some(url) = &self.result_url {
             let url_text = text(url.as_str()).size(12);
-            let open_btn = button(text("ブラウザで開く").size(12))
-                .on_press(Message::Done(self.result_url.clone()));
+            // H6: 「ブラウザで開く」は専用 Message::OpenUrl を経由して
+            // Action::OpenUrl にマップする。Message::Done の再利用は禁止。
+            let open_btn =
+                button(text("ブラウザで開く").size(12)).on_press(Message::OpenUrl(url.clone()));
             Some(
                 column![text("送信完了").size(13), url_text, open_btn,]
                     .spacing(4)
@@ -422,7 +412,7 @@ mod tests {
             "WANDB_API_KEY=supersecret token".to_string(),
         ));
         assert!(!modal.log_lines.is_empty());
-        assert!(!modal.log_lines[0].contains("supersecret"));
+        assert!(!modal.log_lines[0].as_str().contains("supersecret"));
     }
 
     #[test]
@@ -441,6 +431,28 @@ mod tests {
         assert!(matches!(action, Some(Action::Cancel)));
     }
 
+    /// H6: Message::OpenUrl は Action::OpenUrl にマップされ、内部状態
+    /// （submitting / result_url）を変更しない。Message::Done を再利用
+    /// していた旧実装の不変条件違反を防ぐ回帰ガード。
+    #[test]
+    fn open_url_returns_action_without_mutating_state() {
+        let mut modal = default_modal();
+        // 完了状態を再現
+        modal.submitting = false;
+        modal.result_url = Some("https://wandb.ai/run/abc".to_string());
+        let action = modal.update(Message::OpenUrl("https://wandb.ai/run/abc".to_string()));
+        match action {
+            Some(Action::OpenUrl(url)) => assert_eq!(url, "https://wandb.ai/run/abc"),
+            other => panic!("expected Action::OpenUrl, got {other:?}"),
+        }
+        // 内部状態は変更されない
+        assert!(!modal.submitting);
+        assert_eq!(
+            modal.result_url.as_deref(),
+            Some("https://wandb.ai/run/abc")
+        );
+    }
+
     #[test]
     fn auth_display_state_not_set_label() {
         assert_eq!(AuthDisplayState::NotSet.label(), "未設定");
@@ -450,5 +462,43 @@ mod tests {
     fn auth_not_set_blocks_submit_capability() {
         let modal = WandbSubmitModal::new("run", "strat", AuthDisplayState::NotSet);
         assert!(!modal.auth_status.is_authenticated());
+    }
+
+    // ── M5: From<&WandbAuthState> for AuthDisplayState ──────────────────────
+
+    use crate::wandb_auth::{AuthMethod, WandbAuthState};
+
+    fn auth(authenticated: bool, method: AuthMethod) -> WandbAuthState {
+        WandbAuthState {
+            authenticated,
+            method,
+            username: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn from_wandb_auth_state_maps_env() {
+        let s = auth(true, AuthMethod::Env);
+        assert_eq!(AuthDisplayState::from(&s), AuthDisplayState::Env);
+    }
+
+    #[test]
+    fn from_wandb_auth_state_with_credstore_variant() {
+        let s = auth(true, AuthMethod::Netrc);
+        assert_eq!(AuthDisplayState::from(&s), AuthDisplayState::Netrc);
+    }
+
+    #[test]
+    fn from_wandb_auth_state_maps_none_to_not_set() {
+        let s = auth(true, AuthMethod::None);
+        assert_eq!(AuthDisplayState::from(&s), AuthDisplayState::NotSet);
+    }
+
+    #[test]
+    fn from_wandb_auth_state_unauthenticated_maps_to_not_set() {
+        // M5 不変条件: authenticated=false なら method に関わらず NotSet
+        let s = auth(false, AuthMethod::Env);
+        assert_eq!(AuthDisplayState::from(&s), AuthDisplayState::NotSet);
     }
 }

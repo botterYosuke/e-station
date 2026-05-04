@@ -10,85 +10,31 @@
 //! Callers MUST NOT spawn a second subprocess while one is already running.
 //! The `WandbSubmitModal.submitting` flag (see `src/modal/wandb_submit.rs`)
 //! serves as the `submit_in_flight` guard that enforces this invariant.
-#![allow(dead_code)]
+//!
+//! # Dead-code policy (M2, R1 Phase 3-C)
+//!
+//! `build_submit_command` / `SubmitRunArgs` / `parse_url_from_output` are
+//! currently exercised only by source-inspection tests in
+//! `tests/wandb_submit_subprocess.rs` and by the in-file unit tests below.
+//! They are retained here because Phase 3-B is scheduled to extend
+//! `build_submit_command` with a `--notes` argument and migrate
+//! `submit_wandb_run` (`src/main.rs`) onto this builder. Until that
+//! migration lands, these items are flagged with a per-item
+//! `#[allow(dead_code)]` rather than a module-wide `#![allow(dead_code)]`
+//! so future regressions in *new* helpers surface immediately.
 
-// ---------------------------------------------------------------------------
-// Inline masking types (mirrors src/mask_secrets.rs for standalone use)
-// ---------------------------------------------------------------------------
-
-/// A stdout line that has been processed by `mask_secrets()`.
-///
-/// The newtype prevents raw (possibly secret-containing) strings from reaching
-/// the UI or log without going through the masking step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaskedLine(String);
-
-impl MaskedLine {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl std::fmt::Display for MaskedLine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// Apply secret masking to a raw stdout line.
-///
-/// Masks `WANDB_API_KEY=<value>`, `api_key=<value>`, and
-/// `Bearer <token>` / `bearer <token>` patterns.
-pub fn mask_secrets(line: &str) -> MaskedLine {
-    let mut out = line.to_string();
-
-    // WANDB_API_KEY=<value>
-    if let Some(pos) = out.find("WANDB_API_KEY=") {
-        let start = pos + "WANDB_API_KEY=".len();
-        let end = out[start..]
-            .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == '\'')
-            .map(|p| start + p)
-            .unwrap_or(out.len());
-        if start < end {
-            out.replace_range(start..end, "***");
-        }
-    }
-
-    // api_key=<value>
-    if let Some(pos) = out.find("api_key=") {
-        let start = pos + "api_key=".len();
-        let end = out[start..]
-            .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == '\'')
-            .map(|p| start + p)
-            .unwrap_or(out.len());
-        if start < end {
-            out.replace_range(start..end, "***");
-        }
-    }
-
-    // Bearer / bearer
-    for prefix in &["Bearer ", "bearer "] {
-        if let Some(pos) = out.find(prefix) {
-            let start = pos + prefix.len();
-            let end = out[start..]
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
-                .map(|p| start + p)
-                .unwrap_or(out.len());
-            if start < end {
-                out.replace_range(start..end, "***");
-            }
-        }
-    }
-
-    MaskedLine(out)
-}
+// MaskedLine / mask_secrets は src/mask_secrets.rs に集約（C3, R1 Phase 1）。
+// ここで再定義せず単一定義を再エクスポートする。
+#[allow(unused_imports)]
+pub use crate::mask_secrets::{MaskedLine, mask_secrets};
 
 // ---------------------------------------------------------------------------
 
 /// Parameters forwarded to `submit_run.py`.
+///
+/// Used by [`build_submit_command`]. Currently only exercised by in-file
+/// unit tests; Phase 3-B will migrate `submit_wandb_run` onto this builder.
+#[allow(dead_code)]
 pub struct SubmitRunArgs {
     /// Path to `examples/wandb/submit_run.py`.
     pub script_path: std::path::PathBuf,
@@ -100,18 +46,9 @@ pub struct SubmitRunArgs {
     pub run_name: String,
     /// Comma-separated tags (e.g. `"replay,buy_and_hold"`).
     pub tags: String,
-}
-
-/// An event produced by the running `submit_run.py` subprocess.
-#[derive(Debug, Clone)]
-pub enum SubmitEvent {
-    /// One stdout line, already processed by `mask_secrets()`.
-    Line(MaskedLine),
-    /// Process exited with code 0.  `url` is parsed from the last
-    /// `"URL: <url>"` line if present.
-    Done { url: Option<String> },
-    /// Process exited with a non-zero exit code.
-    Failed { stderr: String, exit_code: i32 },
+    /// M6: free-form notes forwarded to `wandb.init(notes=...)`. Empty
+    /// string suppresses the `--notes` argv entry.
+    pub notes: String,
 }
 
 /// Build the `std::process::Command` that runs `submit_run.py`.
@@ -120,6 +57,7 @@ pub enum SubmitEvent {
 /// - The subprocess environment is **never cleared** — it inherits the full
 ///   environment so that `WANDB_API_KEY` is passed automatically.
 /// - `WANDB_API_KEY` is **never** passed as a command-line argument.
+#[allow(dead_code)]
 pub fn build_submit_command(args: &SubmitRunArgs) -> std::process::Command {
     let mut cmd = std::process::Command::new("uv");
     cmd.args(["run", "--with", "wandb", "python"]);
@@ -128,6 +66,9 @@ pub fn build_submit_command(args: &SubmitRunArgs) -> std::process::Command {
     cmd.arg("--project").arg(&args.project);
     cmd.arg("--run-name").arg(&args.run_name);
     cmd.arg("--tags").arg(&args.tags);
+    if !args.notes.is_empty() {
+        cmd.arg("--notes").arg(&args.notes);
+    }
     // stdout/stderr are captured by the caller for streaming.
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -137,70 +78,12 @@ pub fn build_submit_command(args: &SubmitRunArgs) -> std::process::Command {
 /// Parse the W&B run URL from the last `"URL: <url>"` line in `lines`.
 ///
 /// Returns `None` when no such line exists.
+#[allow(dead_code)]
 pub fn parse_url_from_output(lines: &[&str]) -> Option<String> {
     lines
         .iter()
         .rev()
         .find_map(|line| line.strip_prefix("URL: ").map(|u| u.trim().to_string()))
-}
-
-/// Run the submit subprocess synchronously and collect all [`SubmitEvent`]s.
-///
-/// This blocking helper is intended for use in tests and one-shot scripts.
-/// In the GUI the caller should spawn this on a background thread.
-pub fn run_submit_blocking(args: &SubmitRunArgs) -> Vec<SubmitEvent> {
-    use std::io::{BufRead, BufReader};
-
-    let mut cmd = build_submit_command(args);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return vec![SubmitEvent::Failed {
-                stderr: e.to_string(),
-                exit_code: -1,
-            }];
-        }
-    };
-
-    let stdout = child.stdout.take().expect("stdout must be piped");
-    let mut events: Vec<SubmitEvent> = Vec::new();
-    let mut all_lines: Vec<String> = Vec::new();
-
-    for raw in BufReader::new(stdout).lines() {
-        match raw {
-            Ok(line) => {
-                let masked = mask_secrets(&line);
-                all_lines.push(line);
-                events.push(SubmitEvent::Line(masked));
-            }
-            Err(_) => break,
-        }
-    }
-
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => {
-            return {
-                events.push(SubmitEvent::Failed {
-                    stderr: e.to_string(),
-                    exit_code: -1,
-                });
-                events
-            };
-        }
-    };
-
-    if output.status.success() {
-        let refs: Vec<&str> = all_lines.iter().map(String::as_str).collect();
-        let url = parse_url_from_output(&refs);
-        events.push(SubmitEvent::Done { url });
-    } else {
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        events.push(SubmitEvent::Failed { stderr, exit_code });
-    }
-
-    events
 }
 
 #[cfg(test)]
@@ -250,6 +133,7 @@ mod tests {
             project: "test-project".to_string(),
             run_name: "test-run".to_string(),
             tags: "tag1,tag2".to_string(),
+            notes: String::new(),
         };
         let cmd = build_submit_command(&args);
         // Command::get_program() returns the executable name
@@ -264,6 +148,7 @@ mod tests {
             project: "my-project".to_string(),
             run_name: "my-run".to_string(),
             tags: "".to_string(),
+            notes: String::new(),
         };
         let cmd = build_submit_command(&args);
         let argv: Vec<_> = cmd.get_args().collect();
@@ -273,5 +158,46 @@ mod tests {
         assert!(argv_str.contains(&"my-project"));
         assert!(argv_str.contains(&"--run-name"));
         assert!(argv_str.contains(&"my-run"));
+    }
+
+    /// M6: notes が `--notes <value>` として argv に含まれること。
+    #[test]
+    fn build_command_includes_notes_when_set() {
+        let args = SubmitRunArgs {
+            script_path: std::path::PathBuf::from("examples/wandb/submit_run.py"),
+            run_buffer_dir: std::path::PathBuf::from("/tmp/runs"),
+            project: "p".to_string(),
+            run_name: "r".to_string(),
+            tags: String::new(),
+            notes: "experiment v2".to_string(),
+        };
+        let cmd = build_submit_command(&args);
+        let argv: Vec<_> = cmd.get_args().collect();
+        let argv_str: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap_or("")).collect();
+        assert!(argv_str.contains(&"--notes"), "argv must contain --notes");
+        assert!(
+            argv_str.contains(&"experiment v2"),
+            "argv must contain the notes value"
+        );
+    }
+
+    /// M6: notes が空のとき `--notes` は argv に出さない（cli の余計な引数を抑制）。
+    #[test]
+    fn build_command_omits_notes_when_empty() {
+        let args = SubmitRunArgs {
+            script_path: std::path::PathBuf::from("examples/wandb/submit_run.py"),
+            run_buffer_dir: std::path::PathBuf::from("/tmp/runs"),
+            project: "p".to_string(),
+            run_name: "r".to_string(),
+            tags: String::new(),
+            notes: String::new(),
+        };
+        let cmd = build_submit_command(&args);
+        let argv: Vec<_> = cmd.get_args().collect();
+        let argv_str: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap_or("")).collect();
+        assert!(
+            !argv_str.contains(&"--notes"),
+            "argv must NOT contain --notes when notes is empty"
+        );
     }
 }

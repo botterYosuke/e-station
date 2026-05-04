@@ -110,6 +110,54 @@ fn error_field_is_option_string() {
     );
 }
 
+/// M8: `wandb_login` の stdin write が握り潰されず Result で伝播されること。
+///
+/// 旧コード `let _ = stdin.write_all(...)` は pipe broken など OS-level I/O
+/// 失敗を黙殺し、原因不明のログイン失敗の温床になっていた。
+#[test]
+fn wandb_login_returns_error_on_stdin_write_failure() {
+    let main_src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let main_src = std::fs::read_to_string(main_src_path)
+        .unwrap_or_else(|e| panic!("cannot read src/main.rs: {e}"));
+
+    // wandb_login 関数の本体を抽出
+    let fn_idx = main_src
+        .find("async fn wandb_login")
+        .expect("wandb_login function must exist in src/main.rs");
+    // 次の async fn / pub fn / 末尾までを切り出す
+    let after = &main_src[fn_idx..];
+    let end = after[1..]
+        .find("\nasync fn ")
+        .or_else(|| after[1..].find("\npub fn "))
+        .or_else(|| after[1..].find("\nfn "))
+        .map(|i| i + 1)
+        .unwrap_or(after.len());
+    let body = &after[..end];
+
+    // 旧パターン（黙殺）が消えていること（コメント行は除外）
+    let has_silent_ignore = body
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//") && !t.starts_with("///")
+        })
+        .any(|l| l.contains("let _ = stdin.write_all"));
+    assert!(
+        !has_silent_ignore,
+        "M8: wandb_login must not silently ignore stdin write errors \
+         (`let _ = stdin.write_all(...)` is forbidden)"
+    );
+    // 新パターン（`?` 伝播 or .map_err(...) ?）が存在すること
+    assert!(
+        body.contains("stdin.write_all") && body.contains("?"),
+        "M8: wandb_login must propagate stdin write errors via `?`"
+    );
+    assert!(
+        body.contains("stdin write failed") || body.contains("stdin not piped"),
+        "M8: wandb_login must produce an explicit stdin error message"
+    );
+}
+
 /// テスト 8: `view` が `Element` を返すシグネチャを持つこと。
 #[test]
 fn view_returns_element() {

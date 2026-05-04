@@ -256,11 +256,11 @@ fn view_function_returns_bar_message_element() {
     );
     // The empty strip to the right of the buttons must fire Dismiss so DoD-4
     // holds for the full bar width, not just the three button areas (MEDIUM: empty bar strip).
-    let view_start = src.find("pub fn view<'a>").expect("view function must exist");
+    let view_start = src
+        .find("pub fn view<'a>")
+        .expect("view function must exist");
     let view_body = &src[view_start..];
-    let view_end = view_body
-        .find("\npub fn ")
-        .unwrap_or(view_body.len());
+    let view_end = view_body.find("\npub fn ").unwrap_or(view_body.len());
     let vb = &view_body[..view_end];
     assert!(
         vb.contains("BarMessage::Dismiss"),

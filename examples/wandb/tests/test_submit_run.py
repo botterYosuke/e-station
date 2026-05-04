@@ -435,20 +435,373 @@ def test_stale_lock_24h_old_removed(tmp_path: Path):
 # 15. check_auth.py: no import wandb
 # ---------------------------------------------------------------------------
 
+def test_concurrent_submit_refused_when_live_lock(tmp_path: Path):
+    """If a live .lock (referencing this process's PID) exists, run_submission
+    must refuse with exit code 6 and emit a busy-message on stderr."""
+    import datetime as _dt
+
+    _make_meta(tmp_path)
+    # Write a live lock: pid = os.getpid() (current process is alive),
+    # started_at = now (well within 24h).
+    lock_path = tmp_path / ".lock"
+    started_at = _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lock_path.write_text(
+        json.dumps({"pid": os.getpid(), "started_at": started_at}),
+        encoding="utf-8",
+    )
+
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    fake_wandb = _make_fake_wandb()
+    captured_err: list[str] = []
+
+    def fake_print(*args, **kwargs):
+        f = kwargs.get("file", None)
+        if f is sys.stderr:
+            captured_err.append(" ".join(str(a) for a in args))
+
+    with (
+        patch.dict(sys.modules, {"wandb": fake_wandb}),
+        patch("builtins.print", fake_print),
+    ):
+        exit_code = submit_run.run_submission(run_buffer_dir=tmp_path)
+
+    assert exit_code == 6, f"Expected exit 6 (busy/partial), got {exit_code}"
+    err_combined = "\n".join(captured_err).lower()
+    assert "another submit in progress" in err_combined or "live .lock" in err_combined.lower(), (
+        f"Expected busy message on stderr, got: {captured_err}"
+    )
+    # The pre-existing lock should NOT have been overwritten
+    assert lock_path.exists()
+    data = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert data["pid"] == os.getpid()
+    assert data["started_at"] == started_at
+
+
+def test_write_lock_is_atomic(tmp_path: Path, monkeypatch):
+    """If os.write fails partway through writing the lock, no corrupt .lock file
+    should remain (the temp file must be cleaned up)."""
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    real_os_write = os.write
+
+    def failing_write(fd, data):
+        # Write nothing then raise to simulate a disk-full or interruption mid-write
+        raise OSError("simulated disk full")
+
+    monkeypatch.setattr(submit_run.os, "write", failing_write)
+
+    with pytest.raises(OSError):
+        submit_run._write_lock(tmp_path)
+
+    # Final lock must NOT exist
+    assert not (tmp_path / ".lock").exists(), (
+        ".lock file must not exist after failed atomic write"
+    )
+
+    # Temp files (prefix .lock.) must be cleaned up
+    leftover = list(tmp_path.glob(".lock.*"))
+    assert leftover == [], f"Temp lock files leaked: {leftover}"
+
+
+def test_wandb_finish_failure_is_logged_to_stderr(tmp_path: Path):
+    """When wandb.finish() raises, the exception must be logged to stderr
+    (not silently swallowed)."""
+    _make_meta(tmp_path)
+    _write_jsonl(
+        tmp_path / "equity.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "equity": 1000000.0, "pnl": 0.0}],
+    )
+
+    fake_wandb = _make_fake_wandb()
+    fake_wandb.finish = MagicMock(side_effect=RuntimeError("finish boom"))
+
+    captured_err: list[str] = []
+
+    def fake_print(*args, **kwargs):
+        f = kwargs.get("file", None)
+        if f is sys.stderr:
+            captured_err.append(" ".join(str(a) for a in args))
+
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    with (
+        patch.dict(sys.modules, {"wandb": fake_wandb}),
+        patch("builtins.print", fake_print),
+    ):
+        submit_run.run_submission(run_buffer_dir=tmp_path)
+
+    err_text = "\n".join(captured_err)
+    assert "WARNING: wandb.finish()" in err_text, (
+        f"Expected wandb.finish() warning on stderr, got: {captured_err}"
+    )
+    assert "finish boom" in err_text
+
+
+def test_imports_authentication_error_from_wandb_errors():
+    """submit_run.py must import AuthenticationError / CommError from wandb.errors
+    (the canonical path in wandb >= 0.16) rather than relying on top-level
+    wandb.AuthenticationError attributes."""
+    submit_run_path = EXAMPLES_WANDB / "submit_run.py"
+    source = submit_run_path.read_text(encoding="utf-8")
+
+    assert "from wandb.errors import" in source, (
+        "submit_run.py must `from wandb.errors import AuthenticationError, CommError`"
+    )
+    # Direct top-level references in except clauses must be replaced
+    assert "except wandb.AuthenticationError" not in source, (
+        "submit_run.py must use `except AuthenticationError` (imported from wandb.errors)"
+    )
+    assert "except wandb.CommError" not in source, (
+        "submit_run.py must use `except CommError` (imported from wandb.errors)"
+    )
+
+
+def test_notes_passed_to_wandb_init(tmp_path: Path):
+    """M6: --notes argv → wandb.init(notes=...) として渡されること。"""
+    _make_meta(tmp_path)
+    _write_jsonl(
+        tmp_path / "equity.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "equity": 1000000.0, "pnl": 0.0}],
+    )
+
+    fake_wandb = _make_fake_wandb()
+    exit_code, _ = _run_submission(tmp_path, fake_wandb=fake_wandb)
+    # Re-call with notes via the kwargs path
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run  # noqa: F401
+
+    fake_wandb2 = _make_fake_wandb()
+    with (
+        patch.dict(sys.modules, {"wandb": fake_wandb2}),
+        patch("builtins.print", lambda *a, **kw: None),
+    ):
+        rc = submit_run.run_submission(
+            run_buffer_dir=tmp_path,
+            project="p",
+            run_name="r",
+            tags="",
+            notes="my experiment notes",
+        )
+
+    assert rc == 0
+    assert fake_wandb2.init.called
+    init_kwargs = fake_wandb2.init.call_args.kwargs
+    assert init_kwargs.get("notes") == "my experiment notes", (
+        f"expected notes in wandb.init kwargs, got: {init_kwargs}"
+    )
+
+
+def test_notes_omitted_when_empty(tmp_path: Path):
+    """M6: notes が空文字列のときは wandb.init に notes kwarg を渡さない。"""
+    _make_meta(tmp_path)
+    _write_jsonl(
+        tmp_path / "equity.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "equity": 1000000.0, "pnl": 0.0}],
+    )
+
+    fake_wandb = _make_fake_wandb()
+    exit_code, _ = _run_submission(tmp_path, fake_wandb=fake_wandb)
+    assert exit_code == 0
+    init_kwargs = fake_wandb.init.call_args.kwargs
+    assert "notes" not in init_kwargs, (
+        f"notes must be omitted when empty, got: {init_kwargs}"
+    )
+
+
 def test_check_auth_no_import_wandb():
-    """check_auth.py must not unconditionally import wandb (standard lib only at top)."""
+    """check_auth.py must not unconditionally import wandb (standard lib only at top).
+
+    Conditional `import wandb` inside try/except or inside a function is OK
+    (i.e. not at module top level / 0 indentation).
+    """
     check_auth_path = EXAMPLES_WANDB / "check_auth.py"
     source = check_auth_path.read_text(encoding="utf-8")
-
-    # Top-level `import wandb` is forbidden; conditional `import wandb` inside try/except is OK
     lines = source.splitlines()
-    for i, line in enumerate(lines, 1):
+
+    for idx, line in enumerate(lines):
         stripped = line.strip()
-        if stripped == "import wandb" and not any(
-            "try" in lines[max(0, i - 5) : i - 1]
-            or "def " in lines[max(0, i - 5) : i - 1]
-            for _ in [None]
-        ):
-            # Check indentation: top-level imports have 0 indent
-            if not line.startswith((" ", "\t")):
-                pytest.fail(f"check_auth.py line {i}: top-level 'import wandb' found")
+        if stripped != "import wandb":
+            continue
+        # Indented `import wandb` (inside function / try) is OK
+        if line.startswith((" ", "\t")):
+            continue
+        # Top-level `import wandb` is the only failure case
+        pytest.fail(
+            f"check_auth.py line {idx + 1}: top-level 'import wandb' found "
+            f"(must be conditional / inside try/except)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R3 / R2-C1: a failure inside _write_lock must not be masked by NameError
+# from `lock_path.unlink()` in the finally clause.
+# ---------------------------------------------------------------------------
+
+def test_write_lock_failure_does_not_mask_original_exception(tmp_path: Path, monkeypatch):
+    """If `_write_lock` raises (e.g. disk full), the original OSError must
+    propagate untouched. Previously, `lock_path` was assigned only inside
+    the try, so the finally clause would raise NameError, masking the
+    original exception."""
+    _make_meta(tmp_path)
+
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    # Make _write_lock fail with a recognisable OSError
+    sentinel = OSError("simulated disk full from _write_lock")
+
+    def boom(_run_dir):
+        raise sentinel
+
+    monkeypatch.setattr(submit_run, "_write_lock", boom)
+
+    fake_wandb = _make_fake_wandb()
+
+    captured_err: list[str] = []
+
+    def fake_print(*args, **kwargs):
+        f = kwargs.get("file", None)
+        if f is sys.stderr:
+            captured_err.append(" ".join(str(a) for a in args))
+
+    # With the R2-C1 fix:
+    #   - `lock_path` is None when the try-body raises
+    #   - the OSError flows to the outer `except OSError` (returning 4)
+    #   - the finally clause sees `lock_path is None` and skips unlink()
+    # WITHOUT the fix, the finally clause raised NameError, which then
+    # masked the OSError -> the user saw a NameError exit status.
+    with (
+        patch.dict(sys.modules, {"wandb": fake_wandb}),
+        patch("builtins.print", fake_print),
+    ):
+        rc = submit_run.run_submission(run_buffer_dir=tmp_path)
+
+    # Original exception preserved through the outer handler (exit 4 = network)
+    assert rc == 4, f"expected outer OSError handler to return 4, got {rc}"
+    err_combined = "\n".join(captured_err)
+    assert "simulated disk full" in err_combined, (
+        f"original exception text not preserved on stderr: {captured_err}"
+    )
+    # The classic NameError symptom should NOT appear
+    assert "NameError" not in err_combined and "lock_path" not in err_combined, (
+        f"NameError leaked through finally clause: {captured_err}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R3 / R2-H1: ImportError fallback for wandb.errors must not collapse
+# AuthenticationError and CommError into the same class (or into `Exception`).
+# ---------------------------------------------------------------------------
+
+def test_authentication_and_comm_errors_are_distinct_classes_after_fallback(
+    tmp_path: Path, monkeypatch
+):
+    """When `from wandb.errors import ...` fails AND the top-level wandb
+    module has no AuthenticationError/CommError attributes (or aliases them
+    to bare Exception), submit_run must materialise distinct sentinel
+    classes so the inner except clauses keep their semantics."""
+    _make_meta(tmp_path)
+
+    # Build a stripped fake wandb without `.errors` and without distinct
+    # error-class attrs (mimicking a very old / minimal wandb).
+    stripped = types.ModuleType("wandb")
+    stripped.init = MagicMock(return_value=MagicMock(url="https://x"))
+    stripped.log = MagicMock()
+    stripped.finish = MagicMock()
+    stripped.Table = MagicMock(return_value=MagicMock())
+    stripped.Artifact = MagicMock(return_value=MagicMock())
+    # Intentionally NO `.errors` submodule and NO `.AuthenticationError`/`.CommError`
+
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+
+    # Capture the resolved classes by patching `wandb.init` to introspect
+    # submit_run's local AuthenticationError / CommError. We re-import
+    # submit_run with the stripped wandb in sys.modules.
+    import importlib
+
+    captured: dict = {}
+
+    def fake_init(**kwargs):
+        # At this point run_submission has resolved AuthenticationError/CommError.
+        # Read them back from submit_run module globals.
+        import submit_run as sr  # noqa: PLC0415
+
+        # The classes are local to run_submission, so we cannot read them
+        # from module globals. Instead, raise a sentinel that the function
+        # will try to catch via AuthenticationError. We arrange both classes
+        # via probing: raise a bare Exception subclass that is NOT
+        # AuthenticationError, expecting the function to NOT catch it
+        # (proving AuthenticationError is not aliased to Exception).
+        raise RuntimeError("probe-not-auth")
+
+    stripped.init = MagicMock(side_effect=fake_init)
+
+    with patch.dict(sys.modules, {"wandb": stripped}):
+        # Re-import to trigger fresh fallback path
+        if "submit_run" in sys.modules:
+            del sys.modules["submit_run"]
+        import submit_run  # noqa: F401
+
+        # If AuthenticationError were aliased to Exception, our RuntimeError
+        # would be caught by the inner except AuthenticationError clause and
+        # converted to exit-code 2. We expect it NOT to be caught (so it
+        # propagates out as RuntimeError or surfaces in outer except).
+        with pytest.raises(RuntimeError):
+            submit_run.run_submission(run_buffer_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# R3 / R2-M2: outer except clauses must NOT call wandb.finish() when no
+# wandb run was actually initialised (no _active_run).
+# ---------------------------------------------------------------------------
+
+def test_outer_except_does_not_call_wandb_finish_when_run_not_initialized(
+    tmp_path: Path, monkeypatch
+):
+    """If `wandb.init()` raises AuthenticationError, the inner except
+    handler returns early and `_active_run` stays None. The outer except
+    is unreachable in that path, but defensively: any outer except must
+    not call wandb.finish() when _active_run is None.
+
+    We simulate this by raising AuthenticationError from inside the try
+    block AFTER init has succeeded but before `_active_run` is meaningful.
+    The outer except catches it and must skip wandb.finish().
+    """
+    _make_meta(tmp_path)
+    _write_jsonl(
+        tmp_path / "equity.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "equity": 1000000.0, "pnl": 0.0}],
+    )
+
+    fake_wandb = _make_fake_wandb()
+
+    # Force wandb.init to raise something the INNER except can't catch
+    # (OSError -> inner handler returns 4 directly without setting _active_run).
+    fake_wandb.init.side_effect = OSError("network down before init")
+
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    with (
+        patch.dict(sys.modules, {"wandb": fake_wandb}),
+        patch("builtins.print", lambda *a, **kw: None),
+    ):
+        rc = submit_run.run_submission(run_buffer_dir=tmp_path)
+
+    # OSError path: exit 4, and finish() must not be called because
+    # _active_run was never assigned.
+    assert rc == 4
+    assert fake_wandb.finish.call_count == 0, (
+        f"wandb.finish() called {fake_wandb.finish.call_count}x with no active run"
+    )

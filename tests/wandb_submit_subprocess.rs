@@ -162,6 +162,81 @@ fn auth_display_not_set_label_present() {
 // Test 8: log_lines use masking
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// M6: notes field is propagated from modal to subprocess argv
+// ---------------------------------------------------------------------------
+
+#[test]
+fn submit_command_includes_notes_when_set() {
+    // build_submit_command must accept a `notes` field on SubmitRunArgs and
+    // forward it as `--notes <value>` to the subprocess argv.
+    let source = read_source("wandb_submit_proc.rs");
+    assert!(
+        source.contains("notes"),
+        "wandb_submit_proc.rs SubmitRunArgs must declare a `notes` field (M6)"
+    );
+    assert!(
+        source.contains("--notes"),
+        "build_submit_command must forward `--notes` to argv (M6)"
+    );
+}
+
+#[test]
+fn submit_action_carries_notes_field() {
+    // The `Action::Submit` variant emitted by `WandbSubmitModal::update`
+    // must carry a `notes: String` field so the user input is not silently
+    // dropped (M6).
+    let source = read_source("modal/wandb_submit.rs");
+    // crude grep for `notes` inside the Action::Submit variant.
+    let action_idx = source
+        .find("Action::Submit")
+        .or_else(|| source.find("pub enum Action"))
+        .expect("Action enum must exist in modal/wandb_submit.rs");
+    let after = &source[action_idx..];
+    // Look at next ~600 chars for the Submit variant body.
+    let window = &after[..after.len().min(600)];
+    assert!(
+        window.contains("notes"),
+        "Action::Submit must carry a `notes` field — currently dropped (M6). Source window: {window}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H8: 非UTF-8 path silent fallback の禁止
+// ---------------------------------------------------------------------------
+
+#[test]
+fn submit_run_returns_error_on_non_utf8_path() {
+    // Source inspection: `submit_wandb_run` (in src/main.rs) must NOT use
+    // `.unwrap_or("")` or `.unwrap_or("examples/...")` for path string
+    // conversion. Non-UTF-8 paths must yield `WandbSubmitError::ProcessFailed`
+    // with a clear message instead of silently submitting with empty argv.
+    let main_src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .expect("cannot read src/main.rs");
+
+    // The old patterns must be gone.
+    assert!(
+        !main_src.contains(".to_str().unwrap_or(\"\")"),
+        "H8: src/main.rs must not use `.to_str().unwrap_or(\"\")` (silent fallback)"
+    );
+    assert!(
+        !main_src.contains(".to_str().unwrap_or(\"examples/wandb/submit_run.py\")"),
+        "H8: src/main.rs must not silently fallback to a hardcoded script path"
+    );
+
+    // The new error path must exist.
+    assert!(
+        main_src.contains("non-UTF-8"),
+        "H8: src/main.rs must produce a non-UTF-8 error message"
+    );
+    assert!(
+        main_src.contains("WandbSubmitError::ProcessFailed"),
+        "H8: src/main.rs must raise WandbSubmitError::ProcessFailed for path errors"
+    );
+}
+
 #[test]
 fn log_lines_use_masking() {
     let source = read_source("modal/wandb_submit.rs");

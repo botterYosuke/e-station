@@ -259,3 +259,69 @@ def test_viewer_lookup_timeout_falls_back_gracefully():
     assert result["method"] == "netrc"
     assert result["username"] is None
     assert result["error"] == "viewer_lookup_timeout"
+
+
+# ---------------------------------------------------------------------------
+# 9. wandb.AuthenticationError -> authenticated=false (no fail-open)  (H4)
+# ---------------------------------------------------------------------------
+
+def test_invalid_key_returns_unauthenticated():
+    """If wandb.Api(...).viewer raises AuthenticationError (invalid key in netrc),
+    check_auth must NOT fail-open. It must return authenticated=false,
+    method='none', error='invalid_key'."""
+    import netrc as netrc_module
+
+    # Build a fake wandb that defines AuthenticationError under wandb.errors
+    fake_wandb = types.ModuleType("wandb")
+    fake_errors = types.ModuleType("wandb.errors")
+
+    class AuthenticationError(Exception):
+        pass
+
+    class CommError(Exception):
+        pass
+
+    fake_errors.AuthenticationError = AuthenticationError
+    fake_errors.CommError = CommError
+    fake_wandb.errors = fake_errors
+    # Also expose top-level alias (older wandb versions)
+    fake_wandb.AuthenticationError = AuthenticationError
+    fake_wandb.CommError = CommError
+
+    fake_api_inst = MagicMock()
+    # Accessing .viewer raises AuthenticationError
+    type(fake_api_inst).viewer = property(
+        lambda self: (_ for _ in ()).throw(AuthenticationError("invalid api key"))
+    )
+    fake_wandb.Api = MagicMock(return_value=fake_api_inst)
+
+    captured_lines: list[str] = []
+
+    def fake_print(*args, **kwargs):
+        f = kwargs.get("file", None)
+        if f is None or f is sys.stdout:
+            captured_lines.append(" ".join(str(a) for a in args))
+
+    fake_netrc_obj = MagicMock()
+    fake_netrc_obj.authenticators = lambda host: ("bob", None, "bad-pass") if host == "api.wandb.ai" else None
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.dict(sys.modules, {"wandb": fake_wandb, "wandb.errors": fake_errors}),
+        patch.object(netrc_module, "netrc", return_value=fake_netrc_obj),
+        patch("builtins.print", fake_print),
+    ):
+        if "check_auth" in sys.modules:
+            del sys.modules["check_auth"]
+        import check_auth
+        importlib.reload(check_auth)
+        try:
+            check_auth.main()
+        except SystemExit as exc:
+            assert exc.code in (0, None)
+
+    assert len(captured_lines) >= 1
+    result = json.loads(captured_lines[0])
+    assert result["authenticated"] is False, f"fail-open detected: {result}"
+    assert result["method"] == "none"
+    assert result["error"] == "invalid_key"

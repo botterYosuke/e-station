@@ -51,13 +51,38 @@ def main() -> None:
             return
 
         if auth is not None:
-            # Resolve username via wandb API; fall back gracefully on timeout
+            # Resolve username via wandb API; fall back gracefully on timeout.
+            # AuthenticationError (invalid key) MUST NOT fail-open.
             try:
                 import wandb  # noqa: PLC0415
-                viewer = wandb.Api(timeout=5).viewer
-                username = getattr(viewer, "username", None)
-                err = None
-            except Exception:
+                # Resolve AuthenticationError class. Prefer wandb.errors.* (>= 0.16);
+                # fall back to top-level attribute or a sentinel that is never raised.
+                try:
+                    from wandb.errors import AuthenticationError as _AuthErr  # noqa: PLC0415
+                except ImportError:
+                    _AuthErr = getattr(wandb, "AuthenticationError", None)
+                    if _AuthErr is None:
+                        # Sentinel class that is never raised so the except below is harmless
+                        class _AuthErr(Exception):  # type: ignore[no-redef]
+                            pass
+                try:
+                    viewer = wandb.Api(timeout=5).viewer
+                    username = getattr(viewer, "username", None)
+                    err = None
+                except _AuthErr:
+                    # Invalid API key -> fail-closed
+                    print(json.dumps({
+                        "authenticated": False,
+                        "method": "none",
+                        "username": None,
+                        "error": "invalid_key",
+                    }))
+                    return
+                except Exception:
+                    username = None
+                    err = "viewer_lookup_timeout"
+            except ImportError:
+                # wandb itself missing -> best-effort: still report netrc auth
                 username = None
                 err = "viewer_lookup_timeout"
 

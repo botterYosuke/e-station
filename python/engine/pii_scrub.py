@@ -1,30 +1,70 @@
-"""engine.pii_scrub -- PII allow-list scrubber."""
+"""engine.pii_scrub -- PII allow-list scrubber.
+
+This is the canonical (engine-side) source for PII allow-list constants.
+The examples-side copy at examples/wandb/pii_scrub.py MUST keep the same
+constant values; consistency is asserted by
+python/tests/test_run_buffer_writer.py::test_pii_allowlist_consistency_engine_and_examples.
+
+Contract (unified with examples/wandb/pii_scrub.py, M12):
+
+    pii_scrub(event_dict: dict, allowed_keys: frozenset) -> dict
+
+    - Returns a new dict containing only keys in *allowed_keys*.
+    - The "event" / "type" dispatch keys are always dropped from the result
+      (they are not data, just routing fields).
+    - If any key in FORBIDDEN_KEYS is present in the input, the offending
+      keys are stripped (the event is NOT dropped) and a WARNING is logged
+      so that developers can trace upstream leaks. This avoids silently
+      losing real Nautilus Fill events that legitimately carry order_id.
+"""
 from __future__ import annotations
-from typing import Optional
+
+import logging
+
+log = logging.getLogger(__name__)
 
 FILLS_ALLOWED_KEYS: frozenset = frozenset({
-    "symbol", "side", "qty", "price", "ts", "ts_event_ms", "pnl", "instrument_id",
+    "symbol", "side", "qty", "price", "ts", "pnl", "instrument_id",
 })
 EQUITY_ALLOWED_KEYS: frozenset = frozenset({
-    "ts", "ts_event_ms", "equity", "cash", "buying_power", "position", "pnl", "strategy_id",
+    "ts", "equity", "cash", "position", "buying_power", "strategy_id",
 })
 NARRATIVE_ALLOWED_KEYS: frozenset = frozenset({
-    "ts", "ts_event_ms", "message", "tags", "signal_kind", "side", "price",
+    "ts", "message", "tags", "signal_kind", "side", "price",
     "tag", "note", "instrument_id", "strategy_id",
 })
 FORBIDDEN_KEYS: frozenset = frozenset({
     "account_id", "token", "raw", "raw_data", "payload",
-    "venue_order_id", "client_order_id", "order_id",
+    "venue_order_id", "client_order_id",
     "venue_token", "credential", "password", "user_id",
     "session_id", "secret",
 })
 
-def pii_scrub(event_dict: dict, allowed_keys: frozenset) -> Optional[dict]:
-    """Return scrubbed dict, or None if forbidden keys are present."""
+
+def pii_scrub(event_dict: dict, allowed_keys: frozenset) -> dict:
+    """Return scrubbed dict containing only *allowed_keys* (and never forbidden keys).
+
+    If any key from FORBIDDEN_KEYS is present in *event_dict*, those keys are
+    stripped and a WARNING is logged so developers can trace upstream leaks.
+    The event itself is NOT dropped: this lets legitimate Nautilus Fill events
+    (which always include an order_id-style field upstream) reach the JSONL
+    files after being filtered through the allow-list.
+
+    Returns:
+        dict: filtered copy. Empty dict if *event_dict* is not a dict.
+    """
     if not isinstance(event_dict, dict):
-        return None
-    for key in FORBIDDEN_KEYS:
-        if key in event_dict:
-            return None
-    result = {k: v for k, v in event_dict.items() if k in allowed_keys and k != "event"}
-    return result
+        return {}
+
+    forbidden_present = [k for k in FORBIDDEN_KEYS if k in event_dict]
+    if forbidden_present:
+        log.warning(
+            "pii_scrub: forbidden keys detected and stripped: %s",
+            sorted(forbidden_present),
+        )
+
+    return {
+        k: v
+        for k, v in event_dict.items()
+        if k in allowed_keys and k not in FORBIDDEN_KEYS and k != "event"
+    }

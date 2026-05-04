@@ -27,6 +27,7 @@ import json
 import os
 import signal
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -45,7 +46,7 @@ from pii_scrub import (  # noqa: E402
     FILLS_ALLOWED_KEYS,
     NARRATIVE_ALLOWED_KEYS,
     assert_no_forbidden_keys,
-    scrub,
+    pii_scrub,
 )
 
 # ---------------------------------------------------------------------------
@@ -139,14 +140,45 @@ def remove_stale_lock(run_dir: Path) -> None:
         pass
 
 
+def _lock_is_live(run_dir: Path) -> bool:
+    """Return True if a .lock file exists AND references a live process started < 24h ago.
+
+    Call this AFTER `remove_stale_lock`; any remaining .lock is considered live.
+    """
+    lock_path = run_dir / ".lock"
+    return lock_path.exists()
+
+
 def _write_lock(run_dir: Path) -> Path:
-    """Write a .lock file and return its path."""
+    """Atomically write a .lock file and return its path.
+
+    Uses tempfile.mkstemp + os.replace so a partial write cannot leave a
+    corrupt .lock file behind (mirrors `_write_meta_atomic` pattern).
+    """
     lock_path = run_dir / ".lock"
     lock_data = {
         "pid": os.getpid(),
         "started_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    lock_path.write_text(json.dumps(lock_data), encoding="utf-8")
+    payload = json.dumps(lock_data).encode("utf-8")
+
+    # Create tempfile in the same directory so os.replace is atomic on Windows
+    fd, tmp_path = tempfile.mkstemp(prefix=".lock.", dir=str(run_dir))
+    tmp_path_obj = Path(tmp_path)
+    try:
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, lock_path)
+    except Exception:
+        # Cleanup the temp file on failure so it does not masquerade as a lock
+        try:
+            if tmp_path_obj.exists():
+                tmp_path_obj.unlink()
+        except OSError:
+            pass
+        raise
     return lock_path
 
 
@@ -160,6 +192,7 @@ def run_submission(
     project: str = "flowsurface-strategies",
     run_name: str = "",
     tags: str = "",
+    notes: str = "",
 ) -> int:
     """
     Read a completed run-buffer directory and upload it to W&B.
@@ -211,27 +244,68 @@ def run_submission(
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
 
     # ------------------------------------------------------------------
-    # 3. Write lock
+    # 3. Reap any stale lock; refuse if a live submit is in progress (H3)
     # ------------------------------------------------------------------
-    lock_path = _write_lock(run_buffer_dir)
+    remove_stale_lock(run_buffer_dir)
+    if _lock_is_live(run_buffer_dir):
+        print(
+            "ERROR: another submit in progress for this run-buffer (live .lock present)",
+            file=sys.stderr,
+        )
+        return 6
+
+    # ------------------------------------------------------------------
+    # 4. Import wandb (injected via `uv run --with wandb`) and resolve
+    #    canonical exception classes from wandb.errors (H9).
+    # ------------------------------------------------------------------
+    try:
+        import wandb  # noqa: PLC0415
+    except ImportError as exc:
+        print(f"ERROR: wandb is not installed: {exc}", file=sys.stderr)
+        return 4
 
     try:
-        # ------------------------------------------------------------------
-        # 4. Import wandb (injected via `uv run --with wandb`)
-        # ------------------------------------------------------------------
-        try:
-            import wandb  # noqa: PLC0415
-        except ImportError as exc:
-            print(f"ERROR: wandb is not installed: {exc}", file=sys.stderr)
-            return 4
+        from wandb.errors import (  # noqa: PLC0415
+            AuthenticationError,
+            CommError,
+        )
+    except ImportError:
+        # R2-H1: fall back through (top-level wandb attrs) → distinct sentinels.
+        # We must NOT default both classes to `Exception`; that would make the
+        # inner `except AuthenticationError` swallow every error and lose the
+        # error-class distinction the exit-code mapping relies on.
+        _AuthErr = getattr(wandb, "AuthenticationError", None)
+        _CommErr = getattr(wandb, "CommError", None)
+        if (
+            _AuthErr is None
+            or _CommErr is None
+            or _AuthErr is _CommErr
+            or _AuthErr is Exception
+            or _CommErr is Exception
+        ):
+            AuthenticationError = type("_AuthErrSentinel", (Exception,), {})
+            CommError = type("_CommErrSentinel", (Exception,), {})
+        else:
+            AuthenticationError = _AuthErr
+            CommError = _CommErr
 
+    # ------------------------------------------------------------------
+    # 5. Write lock atomically
+    # ------------------------------------------------------------------
+    # R2-C1: declare lock_path before the try so the finally clause can
+    # safely reference it even if `_write_lock` itself raises (otherwise
+    # the original exception is masked by NameError on `lock_path.unlink`).
+    lock_path: Optional[Path] = None
+
+    try:
+        lock_path = _write_lock(run_buffer_dir)
         # ------------------------------------------------------------------
-        # 5. Install SIGTERM handler
+        # 6. Install SIGTERM handler
         # ------------------------------------------------------------------
         install_sigterm_handler()
 
         # ------------------------------------------------------------------
-        # 6. Initialise wandb run
+        # 7. Initialise wandb run
         # ------------------------------------------------------------------
         config = dict(scenario)
         config["run_id"] = run_id
@@ -242,17 +316,20 @@ def run_submission(
         config["finished_at"] = meta.get("finished_at", "")
 
         try:
-            run = wandb.init(
+            init_kwargs: dict = dict(
                 project=project,
                 name=run_name,
                 tags=tag_list if tag_list else None,
                 config=config,
             )
+            if notes:
+                init_kwargs["notes"] = notes
+            run = wandb.init(**init_kwargs)
             _active_run = run
-        except wandb.AuthenticationError as exc:
+        except AuthenticationError as exc:
             print(f"ERROR: auth: {exc}", file=sys.stderr)
             return 2
-        except wandb.CommError as exc:
+        except CommError as exc:
             msg = str(exc)
             if "429" in msg:
                 print(f"ERROR: rate limit: {exc}", file=sys.stderr)
@@ -280,7 +357,7 @@ def run_submission(
                         evt = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    clean = scrub(evt, EQUITY_ALLOWED_KEYS)
+                    clean = pii_scrub(evt, EQUITY_ALLOWED_KEYS)
                     try:
                         assert_no_forbidden_keys(clean, EQUITY_ALLOWED_KEYS)
                     except ValueError as exc:
@@ -305,7 +382,7 @@ def run_submission(
                             evt = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        clean = scrub(evt, FILLS_ALLOWED_KEYS)
+                        clean = pii_scrub(evt, FILLS_ALLOWED_KEYS)
                         try:
                             assert_no_forbidden_keys(clean, FILLS_ALLOWED_KEYS)
                         except ValueError as exc:
@@ -329,7 +406,7 @@ def run_submission(
                         evt = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    clean = scrub(evt, NARRATIVE_ALLOWED_KEYS)
+                    clean = pii_scrub(evt, NARRATIVE_ALLOWED_KEYS)
                     try:
                         assert_no_forbidden_keys(clean, NARRATIVE_ALLOWED_KEYS)
                     except ValueError as exc:
@@ -345,33 +422,36 @@ def run_submission(
                 wandb.log({"narrative": table})
 
         # ------------------------------------------------------------------
-        # 10. Finish
+        # 11. Finish (M7: log finish() failures to stderr instead of swallowing)
         # ------------------------------------------------------------------
         try:
             wandb.finish()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"WARNING: wandb.finish() failed: {exc}", file=sys.stderr)
 
         url = getattr(run, "url", None) or ""
         print(f"URL: {url}")
         return 0
 
-    except wandb.AuthenticationError as exc:
+    except AuthenticationError as exc:
         print(f"ERROR: auth: {exc}", file=sys.stderr)
-        try:
-            import wandb as _w  # noqa: PLC0415
-            _w.finish(exit_code=2, quiet=True)
-        except Exception:
-            pass
+        # R2-M2: only call wandb.finish() if a run was actually initialised;
+        # otherwise wandb has no internal state to flush and the call would
+        # spuriously emit warnings (and may itself raise on uninitialised SDK).
+        if _active_run is not None:
+            try:
+                wandb.finish(exit_code=2, quiet=True)
+            except Exception as fexc:
+                print(f"WARNING: wandb.finish() failed: {fexc}", file=sys.stderr)
         return 2
 
-    except wandb.CommError as exc:
+    except CommError as exc:
         msg = str(exc)
-        try:
-            import wandb as _w  # noqa: PLC0415
-            _w.finish(exit_code=1, quiet=True)
-        except Exception:
-            pass
+        if _active_run is not None:
+            try:
+                wandb.finish(exit_code=1, quiet=True)
+            except Exception as fexc:
+                print(f"WARNING: wandb.finish() failed: {fexc}", file=sys.stderr)
         if "429" in msg:
             print(f"ERROR: rate limit: {exc}", file=sys.stderr)
             return 3
@@ -383,20 +463,23 @@ def run_submission(
 
     except OSError as exc:
         print(f"ERROR: network error: {exc}", file=sys.stderr)
-        try:
-            import wandb as _w  # noqa: PLC0415
-            _w.finish(exit_code=1, quiet=True)
-        except Exception:
-            pass
+        if _active_run is not None:
+            try:
+                wandb.finish(exit_code=1, quiet=True)
+            except Exception as fexc:
+                print(f"WARNING: wandb.finish() failed: {fexc}", file=sys.stderr)
         return 4
 
     finally:
         _active_run = None
-        # Remove lock file
-        try:
-            lock_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        # Remove lock file (R2-C1: guard against `_write_lock` failure where
+        # `lock_path` is still None; otherwise NameError-equivalent would
+        # mask the original exception that aborted the try-block).
+        if lock_path is not None:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +511,11 @@ def main() -> None:
         default="",
         help="Comma-separated list of tags to attach to the W&B run",
     )
+    parser.add_argument(
+        "--notes",
+        default="",
+        help="Free-form notes forwarded to wandb.init(notes=...) (M6).",
+    )
     args = parser.parse_args()
 
     exit_code = run_submission(
@@ -435,6 +523,7 @@ def main() -> None:
         project=args.project,
         run_name=args.run_name,
         tags=args.tags,
+        notes=args.notes,
     )
     sys.exit(exit_code)
 

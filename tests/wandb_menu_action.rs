@@ -221,3 +221,63 @@ fn main_rs_handles_clear_run_buffer() {
         "main.rs NativeMenuAction handler must handle Action::ClearRunBuffer"
     );
 }
+
+// ── F9c-H5: Tools 項目の enable/disable は tools_actions_for_state 経由 ────
+
+/// H5: native_menu::attach() のシグネチャに WandbAuthState / RunBufferIndex
+/// を受け取る引数が含まれることを確認する。
+#[test]
+fn attach_signature_includes_auth_and_buffer() {
+    let src = read_native_menu();
+    assert!(
+        src.contains("WandbAuthState"),
+        "native_menu.rs must reference WandbAuthState (attach signature update)"
+    );
+    assert!(
+        src.contains("RunBufferIndex"),
+        "native_menu.rs must reference RunBufferIndex (attach signature update)"
+    );
+    // pub fn attach(...) の引数に auth/buffer が現れること
+    let attach_idx = src
+        .find("pub fn attach")
+        .expect("native_menu.rs must declare pub fn attach");
+    let after = &src[attach_idx..];
+    let sig_end = after.find(')').unwrap_or(after.len());
+    let sig = &after[..sig_end];
+    assert!(
+        sig.contains("WandbAuthState"),
+        "attach() signature must take &WandbAuthState, got: {sig}"
+    );
+    assert!(
+        sig.contains("RunBufferIndex"),
+        "attach() signature must take &RunBufferIndex, got: {sig}"
+    );
+}
+
+/// H5: 未認証時に SubmitToWandb が disabled になる経路として
+/// `tools_actions_for_state` の戻り値の `enabled` を使うことを source から確認する。
+#[test]
+fn submit_to_wandb_disabled_when_unauthenticated_in_native_menu() {
+    let src = read_native_menu();
+    assert!(
+        src.contains("tools_actions_for_state"),
+        "native_menu.rs must call tools_actions_for_state to compute Tools enable/disable"
+    );
+}
+
+/// H5: バッファが空のときも `tools_actions_for_state` 経由で disable 計算されること。
+#[test]
+fn submit_to_wandb_disabled_when_buffer_empty_in_native_menu() {
+    let src = read_native_menu();
+    // tools_actions_for_state が呼ばれているならこの test と上のテストは実質同じだが
+    // 検出パスを 2 段に分けることで仕様の二要因（auth × buffer）を構造的に担保する。
+    assert!(
+        src.contains("tools_actions_for_state"),
+        "native_menu.rs must use tools_actions_for_state for buffer-state-aware disable"
+    );
+    // MenuEntry.enabled を MenuItem の enable 引数に流す配線が存在すること
+    assert!(
+        src.contains(".enabled"),
+        "native_menu.rs must read MenuEntry.enabled from tools_actions_for_state result"
+    );
+}

@@ -208,11 +208,26 @@ fn has_wal_in_flight_orders() -> bool {
         .any(|st| st == "submitted" || st == "partial")
 }
 
+/// F9d streaming events emitted by [`submit_wandb_run_stream`].
+///
+/// `Line` carries one raw stdout/stderr line from the subprocess (already
+/// UTF-8). The modal applies `mask_secrets()` before storing it. `Final`
+/// carries the terminal result (success URL or `WandbSubmitError`).
+#[derive(Debug, Clone)]
+pub enum WandbStreamEvent {
+    Line(String),
+    Final(Result<String, WandbSubmitError>),
+}
+
 /// F9d: `examples/wandb/submit_run.py` を subprocess で起動し、結果を返す。
 ///
 /// 起動コマンド: `uv run --with wandb python examples/wandb/submit_run.py --run-buffer <path>`
-/// exit code 0: 最終 stdout 行 `URL: <url>` を返す。
+/// exit code 0: stdout の `URL: <url>` 行を返す。
 /// 非ゼロ exit code: `WandbSubmitError` に変換して返す。
+///
+/// 実行中の stdout / stderr 行は `log_tx` 経由でリアルタイムに流す。Cancel 経路は
+/// `SUBMIT_CHILD` を介して `kill()` を呼ぶ。`try_wait()` ポーリングで Mutex を
+/// 長期保持しないため、kill が常に確実に届く。
 async fn submit_wandb_run(
     run_buffer_dir: std::path::PathBuf,
     script: std::path::PathBuf,
@@ -220,12 +235,12 @@ async fn submit_wandb_run(
     run_name: String,
     tags: String,
     notes: String,
+    log_tx: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<String, WandbSubmitError> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
     // H8: 非UTF-8 path で空文字列に silent fallback せず、明示的にエラーを返す。
-    // 旧コードは `unwrap_or("")` で run-buffer を `""` に潰し submit_run.py を
-    // run-buffer なしで起動する silent failure を起こしていた。
     let script_str = script.to_str().ok_or_else(|| {
         WandbSubmitError::ProcessFailed(format!(
             "path contains non-UTF-8 characters: {}",
@@ -258,60 +273,129 @@ async fn submit_wandb_run(
     if !tags.is_empty() {
         cmd.args(["--tags", &tags]);
     }
-    // M6: notes を `--notes` で渡す。空文字列のときは省略する。
+    // M6: notes を `--notes` で渡す。
     if !notes.is_empty() {
         cmd.args(["--notes", &notes]);
     }
     // Phase 3-A C2: spawn explicitly so the Child handle can be stored in
-    // SUBMIT_CHILD. The Cancel path takes the handle out and calls kill()
-    // to terminate the subprocess. Pipe stdout/stderr so wait_with_output()
-    // collects the captured streams the same way `.output()` did.
+    // SUBMIT_CHILD for the Cancel path.
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| WandbSubmitError::ProcessFailed(format!("spawn failed: {e}")))?;
+
+    // Stream stdout / stderr line-by-line via dedicated reader tasks.
+    // Take the pipes BEFORE moving the Child into SUBMIT_CHILD.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     {
         let mut slot = SUBMIT_CHILD.lock().await;
         *slot = Some(child);
     }
-    // Take the child back out so that wait_with_output() consumes it. The
-    // Cancel path may have already taken the slot in the interim and killed
-    // the process; in that case wait_with_output simply observes the exit
-    // status of the killed child.
-    let child = {
+
+    let log_tx_out = log_tx.clone();
+    let stdout_handle = tokio::spawn(async move {
+        let mut url: Option<String> = None;
+        if let Some(stdout) = stdout {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(rest) = line.strip_prefix("URL: ") {
+                    url = Some(rest.to_string());
+                }
+                let _ = log_tx_out.send(line);
+            }
+        }
+        url
+    });
+    let log_tx_err = log_tx.clone();
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(stderr) = stderr {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = log_tx_err.send(line);
+            }
+        }
+    });
+    drop(log_tx);
+
+    // Poll try_wait() in a tight loop so the SUBMIT_CHILD lock is held only
+    // for the duration of one syscall. The Cancel path needs the lock to
+    // call `kill()` and would be starved out if we held it across a blocking
+    // `wait()`.
+    let exit_status = loop {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let mut slot = SUBMIT_CHILD.lock().await;
-        match slot.take() {
-            Some(c) => c,
-            None => {
-                // Cancel reached the slot first and consumed it. Surface as a
-                // generic ProcessFailed so the caller's idempotent reset
-                // (SUBMIT_IN_FLIGHT.store(false) in WandbSubmitResult) runs.
-                return Err(WandbSubmitError::ProcessFailed(
-                    "cancelled before completion".to_string(),
-                ));
+        let Some(c) = slot.as_mut() else {
+            // Cancel reached the slot first and is killing the process.
+            break None;
+        };
+        match c.try_wait() {
+            Ok(Some(status)) => {
+                let _ = slot.take();
+                break Some(status);
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                let _ = slot.take();
+                return Err(WandbSubmitError::ProcessFailed(format!(
+                    "wait failed: {e}"
+                )));
             }
         }
     };
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| WandbSubmitError::ProcessFailed(format!("wait failed: {e}")))?;
 
-    if output.status.success() {
-        // 最終 stdout 行から URL を抽出する
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let url = stdout
-            .lines()
-            .rev()
-            .find(|l| l.starts_with("URL: "))
-            .map(|l| l.trim_start_matches("URL: ").to_string())
-            .unwrap_or_default();
-        Ok(url)
-    } else {
-        let code = output.status.code().unwrap_or(-1);
-        Err(exit_code_to_error(code))
+    // Drain readers — they exit once the subprocess closes its pipes.
+    let url = stdout_handle.await.ok().flatten();
+    let _ = stderr_handle.await;
+
+    match exit_status {
+        Some(status) if status.success() => Ok(url.unwrap_or_default()),
+        Some(status) => Err(exit_code_to_error(status.code().unwrap_or(-1))),
+        None => Err(WandbSubmitError::ProcessFailed(
+            "cancelled before completion".to_string(),
+        )),
     }
+}
+
+/// Wraps [`submit_wandb_run`] as a stream of [`WandbStreamEvent`] values so
+/// `iced::Task::run` can dispatch live `LogLine` updates AND a final
+/// completion event in one Task.
+fn submit_wandb_run_stream(
+    run_buffer_dir: std::path::PathBuf,
+    script: std::path::PathBuf,
+    project: String,
+    run_name: String,
+    tags: String,
+    notes: String,
+) -> impl iced::futures::Stream<Item = WandbStreamEvent> + Send + 'static {
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<WandbStreamEvent>();
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let event_tx_for_lines = event_tx.clone();
+    tokio::spawn(async move {
+        while let Some(line) = log_rx.recv().await {
+            let _ = event_tx_for_lines.send(WandbStreamEvent::Line(line));
+        }
+    });
+
+    tokio::spawn(async move {
+        let result = submit_wandb_run(
+            run_buffer_dir,
+            script,
+            project,
+            run_name,
+            tags,
+            notes,
+            log_tx,
+        )
+        .await;
+        let _ = event_tx.send(WandbStreamEvent::Final(result));
+    });
+
+    iced::futures::stream::unfold(event_rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
 }
 
 /// `wandb login --relogin` を stdin pipe 経由で API キーを渡して実行する。
@@ -1052,6 +1136,9 @@ struct Flowsurface {
     wandb_signin_modal: Option<modal::wandb_signin::WandbSignInModal>,
     /// F9c: W&B 送信モーダル。SubmitToWandb で Some に、Cancel / 送信完了で None。
     wandb_submit_modal: Option<modal::wandb_submit::WandbSubmitModal>,
+    /// F9e: W&B 送信履歴モーダル。OpenSubmissionLog で run-buffer/ をスキャンして開く。
+    wandb_submission_log_modal:
+        Option<modal::wandb_submission_log::WandbSubmissionLogModal>,
 }
 
 #[derive(Debug, Clone)]
@@ -1316,6 +1403,10 @@ enum Message {
     WandbSubmitMsg(modal::wandb_submit::Message),
     /// F9c: W&B サインインモーダル内部メッセージ。
     WandbSignInMsg(modal::wandb_signin::Message),
+    /// F9e: W&B 送信履歴モーダル内部メッセージ。
+    WandbSubmissionLogMsg(modal::wandb_submission_log::Message),
+    /// F9e: `list_run_buffer_entries` 完了通知。Vec を受け取って履歴モーダルを開く。
+    WandbSubmissionLogScanned(Vec<wandb_auth::RunBufferEntry>),
     /// F9c: `wandb login --relogin` subprocess の完了通知。
     WandbLoginResult(Result<(), String>),
     /// F9c: ログアウト確認ダイアログで「ログアウト」が押された。
@@ -1827,6 +1918,7 @@ impl Flowsurface {
             run_buffer: wandb_auth::RunBufferIndex::empty(),
             wandb_signin_modal: None,
             wandb_submit_modal: None,
+            wandb_submission_log_modal: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -3397,15 +3489,17 @@ impl Flowsurface {
                         return Task::none();
                     }
                     Action::OpenSubmissionLog => {
-                        // F9e V1 / M3: 最新 run-buffer の内容を async でスキャンしてトーストで表示。
-                        // iced update loop をブロックしないよう Task::perform 経由で scan_async を呼ぶ。
+                        // F9e: run-buffer/ 配下の全 run を async でスキャンして
+                        // 履歴モーダルに渡す。iced update loop をブロックしない
+                        // よう Task::perform 経由で list_run_buffer_entries を
+                        // 呼ぶ。受信側は Message::WandbSubmissionLogScanned。
+                        if self.wandb_submission_log_modal.is_some() {
+                            return Task::none();
+                        }
                         let base = data::data_path(Some("run-buffer"));
                         return Task::perform(
-                            async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
-                            |index| Message::RunBufferIndexScanned {
-                                index,
-                                show_toast: true,
-                            },
+                            async move { wandb_auth::list_run_buffer_entries(&base).await },
+                            Message::WandbSubmissionLogScanned,
                         );
                     }
                     Action::ClearRunBuffer => {
@@ -4937,20 +5031,27 @@ impl Flowsurface {
                                 .map(|id| data::data_path(Some("run-buffer")).join(id))
                                 .unwrap_or_default();
                             let script = std::path::PathBuf::from("examples/wandb/submit_run.py");
-                            return Task::perform(
-                                async move {
-                                    submit_wandb_run(
-                                        run_buffer_dir,
-                                        script,
-                                        project,
-                                        run_name,
-                                        tags,
-                                        notes,
-                                    )
-                                    .await
-                                },
-                                Message::WandbSubmitResult,
+                            // F9d: stream stdout/stderr lines as LogLine
+                            // updates so the modal tail is populated while
+                            // the subprocess is still running, instead of
+                            // appearing only on completion. The terminal
+                            // event is dispatched as Message::WandbSubmitResult.
+                            let stream = submit_wandb_run_stream(
+                                run_buffer_dir,
+                                script,
+                                project,
+                                run_name,
+                                tags,
+                                notes,
                             );
+                            return Task::run(stream, |evt| match evt {
+                                WandbStreamEvent::Line(line) => Message::WandbSubmitMsg(
+                                    modal::wandb_submit::Message::LogLine(line),
+                                ),
+                                WandbStreamEvent::Final(result) => {
+                                    Message::WandbSubmitResult(result)
+                                }
+                            });
                         }
                         Some(modal::wandb_submit::Action::OpenUrl(url)) => {
                             let _ = webbrowser::open(&url);
@@ -4975,6 +5076,25 @@ impl Flowsurface {
                                 async move { wandb_login(api_key).await },
                                 Message::WandbLoginResult,
                             );
+                        }
+                        None => {}
+                    }
+                }
+                return Task::none();
+            }
+            // F9e: list_run_buffer_entries の完了 — 履歴モーダルを開く
+            Message::WandbSubmissionLogScanned(entries) => {
+                self.wandb_submission_log_modal = Some(
+                    modal::wandb_submission_log::WandbSubmissionLogModal::new(entries),
+                );
+                return Task::none();
+            }
+            // F9e: 履歴モーダル内部メッセージ
+            Message::WandbSubmissionLogMsg(msg) => {
+                if let Some(modal) = self.wandb_submission_log_modal.as_mut() {
+                    match modal.update(msg) {
+                        Some(modal::wandb_submission_log::Action::Close) => {
+                            self.wandb_submission_log_modal = None;
                         }
                         None => {}
                     }
@@ -5265,7 +5385,7 @@ impl Flowsurface {
             after_replay_form
         };
 
-        if id == self.main_window.id {
+        let after_signin = if id == self.main_window.id {
             if let Some(signin) = &self.wandb_signin_modal {
                 let signin_view = signin.view().map(Message::WandbSignInMsg);
                 main_dialog_modal(
@@ -5278,6 +5398,23 @@ impl Flowsurface {
             }
         } else {
             after_wandb_submit
+        };
+
+        if id == self.main_window.id {
+            if let Some(log) = &self.wandb_submission_log_modal {
+                let log_view = log.view().map(Message::WandbSubmissionLogMsg);
+                main_dialog_modal(
+                    after_signin,
+                    log_view,
+                    Message::WandbSubmissionLogMsg(
+                        modal::wandb_submission_log::Message::Close,
+                    ),
+                )
+            } else {
+                after_signin
+            }
+        } else {
+            after_signin
         }
     }
 

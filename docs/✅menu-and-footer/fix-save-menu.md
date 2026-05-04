@@ -488,8 +488,23 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 
 - 詳細は [P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) を参照
 - **テストファイル**: `python/tests/test_scenario_load.py` / `python/tests/test_scenario_writeback.py` /
-  `python/tests/test_scenario_path_guard.py` / `python/tests/test_scenario_cli.py`
-- **観測コマンド**: `uv run pytest python/tests/test_scenario_*.py -v`
+  `python/tests/test_scenario_path_guard.py` / `python/tests/test_scenario_cli.py` /
+  `python/tests/test_schema_minor_compat.py`
+- **観測コマンド**: `uv run pytest python/tests/test_scenario_*.py python/tests/test_schema_minor_compat.py -v`
+
+##### レビュー反映 (2026-05-04, ラウンド 1)
+
+F6 実装に対する e-station-review レビュー指摘 22 件（HIGH 5 / MEDIUM 17）を方針 B
+（計画書を実装に寄せる）で反映。詳細は
+[P5-scenario-in-strategy.md §レビュー反映 (2026-05-04, ラウンド 1)](./P5-scenario-in-strategy.md#レビュー反映-2026-05-04-ラウンド-1) を参照。
+
+主な変更点：
+
+- `_check_path_guard` / `write_back` から `current_path` 引数を削除（loaded_path 一軸の FCFS 不変条件に簡素化）
+- `_verify_writeback` を「ast.parse + extract（構文）+ validate（形状）」の二段に変更（importlib import 検証は除外）
+- `SaveErrorCode = Literal[...]` を `schemas.py` に追加（9 値固定）
+- `save_as=true` かつ `path == loaded_path` を server-side で reject
+- SCHEMA_MINOR は F7 後 `>= 11` を保持。`scenario_roundtrip.rs` に明示。`test_schema_minor_compat.py` で minor 差異許容を回帰ガード
 
 #### <a id="f7-dod"></a> F7（P7: モード切替メニュー）
 
@@ -575,6 +590,7 @@ F2 のテスト `accelerator_bind::no_double_dispatch` で保護する。
   （SCENARIO 書き戻しの `.bak.<UTC秒>` は別系統）
 - **複数ドキュメント同時編集（MDI）** — アプリは単一 layout を扱う前提
 - **テキストエディタ的な Edit メニュー（Cut / Copy / Paste）** — テキスト編集領域がない
+- **`SCENARIO.schema_version == 1` の strict validation の緩和** — v1 のみ受理する現状の挙動を維持し、v2 移行時に別計画で緩和する（M10 / 2026-05-04 ラウンド1 反映）
 
 ---
 

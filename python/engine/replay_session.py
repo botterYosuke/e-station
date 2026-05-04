@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import queue
+import sys
 import threading
 import time
 from enum import Enum
@@ -127,7 +128,6 @@ def _resolve_session_file_path() -> Path:
 
 def _is_pid_alive(pid: int) -> bool:
     """プロセスが生存しているか確認する（Unix/Windows 両対応）。"""
-    import sys
     if sys.platform == "win32":
         import ctypes
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -1583,7 +1583,6 @@ def _resolve_cli_params(
         try:
             scenario = _extract_scenario(Path(strategy_path))
         except (SyntaxError, ValueError) as exc:
-            import sys
             log.error(
                 "scenario.cli: SCENARIO in %s has invalid syntax: %s",
                 strategy_path, exc,
@@ -1622,7 +1621,6 @@ def _resolve_cli_params(
     missing = [f for f, v in [("instrument", instrument), ("start", start), ("end", end)] if v is None]
     if missing:
         log.error("scenario.cli: required args missing: %s (provide via CLI or SCENARIO in .py)", missing)
-        import sys
         print(
             f"error: missing required args: {missing}. "
             "Provide via --instrument/--start/--end or add SCENARIO dict to the strategy .py",
@@ -1641,7 +1639,6 @@ def _resolve_cli_params(
 
 if __name__ == "__main__":
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(prog="python -m engine.replay_session")
     sub = parser.add_subparsers(dest="cmd")

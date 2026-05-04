@@ -1,53 +1,77 @@
 """PII scrubber for W&B submit -- examples/wandb side independent copy.
 
-This module is intentionally independent from python/engine/ (no cross-import).
-submit_run.py uses this for upload-time sanity checks (F9b).
+This module is intentionally independent from python/engine/ (no cross-import,
+because examples/ runs under `uv run --with wandb` and must be importable
+without depending on the engine package layout).
 
-NOTE: The engine-side RunBuffer writer (python/engine/run_buffer.py, F9a scope)
-has its own pii_scrub module. This file is the examples-side copy that focuses
-solely on the upload-time guard contract.
+The CONSTANTS and FUNCTION CONTRACT must match python/engine/pii_scrub.py
+exactly. Consistency between the two copies is asserted by
+python/tests/test_run_buffer_writer.py::test_pii_allowlist_consistency_engine_and_examples.
 
-Allow-lists (unified decision 47):
-    fills.jsonl    : symbol, side, qty, price, ts, pnl
-    equity.jsonl   : ts, equity, cash, position, pnl
-    narrative.jsonl: ts, message, tags
+Contract (unified with engine, M12):
 
-    Additional alias keys (ts_event_ms, buying_power, etc.) are included for
-    compatibility with IPC field names used by the engine.
+    pii_scrub(event_dict: dict, allowed_keys: frozenset) -> dict
+
+    - Returns a new dict containing only keys in *allowed_keys*.
+    - The "event" / "type" dispatch keys are dropped from the result.
+    - If any key in FORBIDDEN_KEYS is present in input, those keys are stripped
+      and a WARNING is logged. The event is NOT dropped.
 
 Usage:
-    from pii_scrub import scrub, assert_no_forbidden_keys, FILLS_ALLOWED_KEYS
+    from pii_scrub import pii_scrub, assert_no_forbidden_keys, FILLS_ALLOWED_KEYS
 
-    # Strip any key not in the allow-list:
-    clean = scrub(event_dict, FILLS_ALLOWED_KEYS)
-
-    # Abort upload if any forbidden key is present (double-guard):
-    assert_no_forbidden_keys(clean, FILLS_ALLOWED_KEYS)
+    clean = pii_scrub(event_dict, FILLS_ALLOWED_KEYS)
+    assert_no_forbidden_keys(clean, FILLS_ALLOWED_KEYS)  # double-guard
 """
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# Upload-time allow-list constants
+# Allow-list constants -- MUST match python/engine/pii_scrub.py
 # ---------------------------------------------------------------------------
 
-FILLS_ALLOWED_KEYS: frozenset[str] = frozenset(
-    ["symbol", "side", "qty", "price", "ts", "ts_event_ms", "pnl"]
-)
-EQUITY_ALLOWED_KEYS: frozenset[str] = frozenset(
-    ["ts", "ts_event_ms", "equity", "cash", "buying_power", "position", "pnl", "strategy_id"]
-)
-NARRATIVE_ALLOWED_KEYS: frozenset[str] = frozenset(
-    ["ts", "ts_event_ms", "message", "tags", "signal_kind", "side", "price", "tag", "note"]
-)
+FILLS_ALLOWED_KEYS: frozenset = frozenset({
+    "symbol", "side", "qty", "price", "ts", "pnl", "instrument_id",
+})
+EQUITY_ALLOWED_KEYS: frozenset = frozenset({
+    "ts", "equity", "cash", "position", "buying_power", "strategy_id",
+})
+NARRATIVE_ALLOWED_KEYS: frozenset = frozenset({
+    "ts", "message", "tags", "signal_kind", "side", "price",
+    "tag", "note", "instrument_id", "strategy_id",
+})
+FORBIDDEN_KEYS: frozenset = frozenset({
+    "account_id", "token", "raw", "raw_data", "payload",
+    "venue_order_id", "client_order_id",
+    "venue_token", "credential", "password", "user_id",
+    "session_id", "secret",
+})
 
 
-def scrub(event_dict: dict, allowed_keys: frozenset) -> dict:
-    """Return a copy of *event_dict* containing only keys in *allowed_keys*.
+def pii_scrub(event_dict: dict, allowed_keys: frozenset) -> dict:
+    """Return scrubbed dict containing only *allowed_keys* (and never forbidden keys).
 
-    Any key not present in *allowed_keys* is silently dropped.
-    Call this before writing to JSONL or uploading to W&B.
+    If any FORBIDDEN_KEYS member is present, those keys are stripped and a
+    WARNING is logged. The event itself is NOT dropped.
     """
-    return {k: v for k, v in event_dict.items() if k in allowed_keys}
+    if not isinstance(event_dict, dict):
+        return {}
+
+    forbidden_present = [k for k in FORBIDDEN_KEYS if k in event_dict]
+    if forbidden_present:
+        log.warning(
+            "pii_scrub: forbidden keys detected and stripped: %s",
+            sorted(forbidden_present),
+        )
+
+    return {
+        k: v
+        for k, v in event_dict.items()
+        if k in allowed_keys and k not in FORBIDDEN_KEYS and k != "event"
+    }
 
 
 def assert_no_forbidden_keys(event_dict: dict, allowed_keys: frozenset) -> None:
