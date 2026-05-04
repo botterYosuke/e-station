@@ -273,7 +273,14 @@ class _ScenarioReplacer(cst.CSTTransformer):
                         return updated_node.with_changes(body=[new_stmt])
 
             elif isinstance(stmt, cst.AnnAssign):
-                if isinstance(stmt.target, cst.Name) and stmt.target.value == "SCENARIO":
+                # AnnAssign annotation-only (value is None) は触らない。
+                # 後続の `SCENARIO = {...}` Assign を置換対象とする
+                # （test_replaces_scenario_when_annotation_only_precedes_assign 整合）。
+                if (
+                    isinstance(stmt.target, cst.Name)
+                    and stmt.target.value == "SCENARIO"
+                    and stmt.value is not None
+                ):
                     new_stmt = stmt.with_changes(value=self._new_value)
                     self.replaced = True
                     return updated_node.with_changes(body=[new_stmt])

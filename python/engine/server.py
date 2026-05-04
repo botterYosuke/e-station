@@ -2020,6 +2020,9 @@ class DataEngineServer:
         - SCENARIO が存在する → StrategyScenarioLoaded(scenario=<dict>)
         - SCENARIO が不在（extract が None を返す）→ StrategyScenarioLoaded(scenario=None)
         - ファイルが存在しない / 構文エラー 等 → StrategyScenarioLoadFailed
+
+        M4 (レビュー反映 2026-05-04 ラウンド1): 失敗時のログ形式を
+        `WARN scenario.load failed reason=... path=...` に統一。
         """
         from engine import scenario as scenario_mod
 
@@ -2034,7 +2037,7 @@ class DataEngineServer:
                 "scenario": scenario,
             })
         except Exception as exc:
-            log.warning("LoadStrategyScenario failed path=%r: %s", path_str, exc)
+            log.warning("scenario.load failed reason=%s path=%r", exc, path_str)
             self._outbox.append({
                 "event": "StrategyScenarioLoadFailed",
                 "request_id": request_id,
@@ -2046,37 +2049,113 @@ class DataEngineServer:
         """SaveStrategyScenario: .py の SCENARIO ブロックを libcst で atomic 書き戻す。
 
         - 成功 → StrategyScenarioSaved(ok=True, error=None)
-        - 失敗（path ガード違反 / 検証失敗 / IO エラー等）→ StrategyScenarioSaved(ok=False, error=str(exc))
+        - 失敗（path ガード違反 / 検証失敗 / IO エラー等）
+          → StrategyScenarioSaved(ok=False, error=<SaveErrorCode Literal>)
+
+        レビュー反映 (2026-05-04 ラウンド1):
+            - H1: error は SaveErrorCode Literal の 9 値のいずれかに固定
+            - H2: write_back に current_path は渡さない（loaded_path 一軸）
+            - M3: msg["scenario"] が None / 欠落で error="missing_scenario_field"
+            - M5: rollback は ERROR ログ（reason=syntax_error|validate_failed）
+            - M8: save_as のデフォルトを False に統一（dto.rs と整合）
+            - M11: 入口で validate(scenario_dict) を試行 → 失敗で validate_failed
         """
+        import errno as _errno
+
         from engine import scenario as scenario_mod
 
         request_id = msg.get("request_id", "")
         path_str = msg.get("path", "")
+
+        def _emit(ok: bool, error: str | None) -> None:
+            self._outbox.append({
+                "event": "StrategyScenarioSaved",
+                "request_id": request_id,
+                "path": path_str,
+                "ok": ok,
+                "error": error,
+            })
+
+        # M3: scenario フィールド必須チェック
+        scenario_dict = msg.get("scenario")
+        if scenario_dict is None:
+            log.warning(
+                "scenario.writeback rejected reason=missing_scenario_field path=%r",
+                path_str,
+            )
+            _emit(False, "missing_scenario_field")
+            return
+
+        # M11: 入口での形状検証（早期 reject で IO 副作用を防ぐ）
         try:
-            loaded_path_str = msg.get("loaded_path")
+            scenario_mod.validate(scenario_dict)
+        except scenario_mod.ScenarioValidationError as exc:
+            log.warning(
+                "scenario.writeback rejected reason=validate_failed path=%r: %s",
+                path_str, exc,
+            )
+            _emit(False, "validate_failed")
+            return
+
+        loaded_path_str = msg.get("loaded_path")
+        # M8: save_as のデフォルトは False（dto.rs `#[serde(default)]` と整合）
+        save_as = msg.get("save_as", False)
+
+        try:
             scenario_mod.write_back(
                 Path(path_str),
-                msg["scenario"],
-                save_as=msg.get("save_as", True),
-                current_path=None,
+                scenario_dict,
+                save_as=save_as,
                 loaded_path=Path(loaded_path_str) if loaded_path_str else None,
             )
-            self._outbox.append({
-                "event": "StrategyScenarioSaved",
-                "request_id": request_id,
-                "path": path_str,
-                "ok": True,
-                "error": None,
-            })
+            _emit(True, None)
+            return
+        except ValueError as exc:
+            # path guard violation は ValueError("path_guard_violation: ...")
+            msg_str = str(exc)
+            if msg_str.startswith("path_guard_violation"):
+                error_code = "path_guard_violation"
+            else:
+                error_code = "validate_failed"
+            log.error(
+                "scenario.writeback rollback reason=%s path=%r: %s",
+                error_code, path_str, exc,
+            )
+            _emit(False, error_code)
+        except scenario_mod.ScenarioValidationError as exc:
+            log.error(
+                "scenario.writeback rollback reason=validate_failed path=%r: %s",
+                path_str, exc,
+            )
+            _emit(False, "validate_failed")
+        except SyntaxError as exc:
+            log.error(
+                "scenario.writeback rollback reason=syntax_error path=%r: %s",
+                path_str, exc,
+            )
+            _emit(False, "syntax_error")
+        except OSError as exc:
+            err = getattr(exc, "errno", None)
+            if err == _errno.ENOSPC:
+                error_code = "disk_full"
+            elif err in (_errno.EACCES, _errno.EPERM):
+                error_code = "permission_denied"
+            elif err == _errno.ENOENT:
+                error_code = "parent_missing"
+            else:
+                error_code = "rename_failed"
+            log.error(
+                "scenario.writeback rollback reason=%s path=%r errno=%s: %s",
+                error_code, path_str, err, exc,
+            )
+            _emit(False, error_code)
         except Exception as exc:
-            log.warning("SaveStrategyScenario failed path=%r: %s", path_str, exc)
-            self._outbox.append({
-                "event": "StrategyScenarioSaved",
-                "request_id": request_id,
-                "path": path_str,
-                "ok": False,
-                "error": str(exc),
-            })
+            # 未知例外はリグレッションを抑えるため validate_failed にフォールバック
+            log.error(
+                "scenario.writeback rollback reason=validate_failed path=%r: %s (%s)",
+                path_str, exc, type(exc).__name__,
+            )
+            _emit(False, "validate_failed")
 
     # ------------------------------------------------------------------
     # Fetch operation helpers (each is an async coroutine producing one event)
