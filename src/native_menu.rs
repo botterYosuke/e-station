@@ -8,15 +8,24 @@ pub enum Action {
     SaveAs,
     OpenReplayDialog,
     Quit,
+    /// F7/T3: switch to the given app mode (menu item clicked).
+    SwitchMode(AppMode),
 }
 
 /// Returns which menu actions are present for a given app mode.
-/// `(has_open_file, has_save, has_save_as, has_open_replay_dialog)`
+///
+/// Tuple: `(has_open_file, has_save, has_save_as, has_open_replay_dialog,
+///          has_switch_live, has_switch_replay)`
+///
+/// `has_switch_live`   = `true` when we are currently in Replay mode (clicking
+///                       it switches to Live).
+/// `has_switch_replay` = `true` when we are currently in Live mode (clicking
+///                       it switches to Replay).
 #[cfg(test)]
-pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool, bool) {
+pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool, bool, bool, bool) {
     match app_mode {
-        AppMode::Live => (true, true, true, false),
-        AppMode::Replay => (false, false, false, true),
+        AppMode::Live => (true, true, true, false, false, true),
+        AppMode::Replay => (false, false, false, true, true, false),
     }
 }
 
@@ -57,8 +66,10 @@ pub fn subscription(app_mode: AppMode) -> Subscription<Action> {
 // same Message::NativeMenuAction(Action) path is used on all platforms.
 // Live-only shortcuts (OpenFile / Save / SaveAs) are gated on app_mode to
 // avoid JSON dialogs appearing during a replay session (HIGH-1 fix).
+// SwitchMode dispatch is suppressed while MODE_SWITCHING is true (統一決定 64).
 #[cfg(target_os = "linux")]
 fn linux_keyboard_subscription(app_mode: AppMode) -> Subscription<Action> {
+    use std::sync::atomic::Ordering;
     iced::keyboard::on_key_press(move |key, modifiers| {
         let ctrl = modifiers.control();
         let shift = modifiers.shift();
@@ -71,6 +82,16 @@ fn linux_keyboard_subscription(app_mode: AppMode) -> Subscription<Action> {
             iced::keyboard::Key::Character("s") if ctrl && shift && is_live => Some(Action::SaveAs),
             // Ctrl+Q quits regardless of mode.
             iced::keyboard::Key::Character("q") if ctrl && !shift => Some(Action::Quit),
+            // Ctrl+M: switch mode (Live↔Replay).
+            // Suppressed while a mode-switch is already in progress (統一決定 64).
+            iced::keyboard::Key::Character("m") if ctrl && !shift => {
+                if crate::MODE_SWITCHING.load(Ordering::Acquire) {
+                    None
+                } else {
+                    let target = if is_live { AppMode::Replay } else { AppMode::Live };
+                    Some(Action::SwitchMode(target))
+                }
+            }
             _ => None,
         }
     })
@@ -81,7 +102,7 @@ mod platform {
     use super::Action;
     use engine_client::dto::AppMode;
     use muda::{
-        IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+        CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
         accelerator::{Accelerator, Code, Modifiers},
     };
     use std::sync::Mutex;
@@ -94,6 +115,10 @@ mod platform {
         /// Windows only: Ctrl+Q quit MenuItem.
         /// macOS uses PredefinedMenuItem::quit whose Cmd+Q is OS-handled.
         quit: Option<MenuId>,
+        /// F7/T3: "ライブ（Live）" CheckMenuItem inside the Mode submenu.
+        switch_live: Option<MenuId>,
+        /// F7/T3: "リプレイ（Replay）" CheckMenuItem inside the Mode submenu.
+        switch_replay: Option<MenuId>,
     }
 
     // `Mutex<Option<_>>` (not `OnceLock`) so that `attach()` called again after
@@ -188,6 +213,30 @@ mod platform {
             return;
         }
 
+        // F7/T3: モード（Mode）サブメニュー
+        // Two CheckMenuItems — the current mode is checked and disabled;
+        // the other mode is unchecked and enabled.
+        let mode_submenu = Submenu::new("モード（Mode）", true);
+        let is_live = app_mode == AppMode::Live;
+        let live_check = CheckMenuItem::new("ライブ（Live）", !is_live, is_live, None::<Accelerator>);
+        let replay_check =
+            CheckMenuItem::new("リプレイ（Replay）", is_live, !is_live, None::<Accelerator>);
+        let switch_live_id = live_check.id().clone();
+        let switch_replay_id = replay_check.id().clone();
+
+        if let Err(e) = mode_submenu.append_items(&[
+            &live_check as &dyn IsMenuItem,
+            &replay_check as &dyn IsMenuItem,
+        ]) {
+            log::error!("[native_menu] mode_submenu.append_items failed: {e:?}");
+            return;
+        }
+
+        if let Err(e) = menu.append(&mode_submenu) {
+            log::error!("[native_menu] menu.append mode_submenu failed: {e:?}");
+            return;
+        }
+
         match MENU_IDS.lock() {
             Ok(mut guard) => {
                 *guard = Some(MenuIds {
@@ -196,6 +245,8 @@ mod platform {
                     save_as,
                     open_replay_dialog,
                     quit: quit_id,
+                    switch_live: Some(switch_live_id),
+                    switch_replay: Some(switch_replay_id),
                 });
             }
             Err(poisoned) => {
@@ -206,6 +257,8 @@ mod platform {
                     save_as,
                     open_replay_dialog,
                     quit: quit_id,
+                    switch_live: Some(switch_live_id),
+                    switch_replay: Some(switch_replay_id),
                 });
             }
         }
@@ -264,6 +317,18 @@ mod platform {
                             Some(Action::OpenReplayDialog)
                         } else if ids.quit.as_ref().is_some_and(|id| *id == event.id) {
                             Some(Action::Quit)
+                        } else if ids
+                            .switch_live
+                            .as_ref()
+                            .is_some_and(|id| *id == event.id)
+                        {
+                            Some(Action::SwitchMode(AppMode::Live))
+                        } else if ids
+                            .switch_replay
+                            .as_ref()
+                            .is_some_and(|id| *id == event.id)
+                        {
+                            Some(Action::SwitchMode(AppMode::Replay))
                         } else {
                             None
                         }
@@ -281,31 +346,31 @@ mod platform {
     mod tests {
         use super::*;
 
+        fn empty_menu_ids() -> MenuIds {
+            MenuIds {
+                open_file: None,
+                save: None,
+                save_as: None,
+                open_replay_dialog: None,
+                quit: None,
+                switch_live: None,
+                switch_replay: None,
+            }
+        }
+
         #[test]
         fn menu_ids_mutex_allows_overwrite_on_reattach() {
             // OnceLock would silently ignore a second attach after restart.
             // Mutex<Option<_>> lets the new IDs overwrite the old ones.
             {
                 let mut guard = MENU_IDS.lock().unwrap();
-                *guard = Some(MenuIds {
-                    open_file: None,
-                    save: None,
-                    save_as: None,
-                    open_replay_dialog: None,
-                    quit: None,
-                });
+                *guard = Some(empty_menu_ids());
             }
             {
                 let mut guard = MENU_IDS.lock().unwrap();
                 assert!(guard.is_some(), "first attach should set menu IDs");
                 // Simulate re-attach after Flowsurface::restart()
-                *guard = Some(MenuIds {
-                    open_file: None,
-                    save: None,
-                    save_as: None,
-                    open_replay_dialog: None,
-                    quit: None,
-                });
+                *guard = Some(empty_menu_ids());
                 assert!(guard.is_some(), "second attach must overwrite successfully");
                 // Leave clean for other tests
                 *guard = None;
@@ -321,6 +386,8 @@ mod platform {
                 let _ = ids.save.as_ref();
                 let _ = ids.save_as.as_ref();
                 let _ = ids.quit.as_ref();
+                let _ = ids.switch_live.as_ref();
+                let _ = ids.switch_replay.as_ref();
             }
         }
     }
@@ -343,11 +410,18 @@ mod tests {
         assert_ne!(Action::SaveAs, Action::OpenReplayDialog);
         assert_ne!(Action::SaveAs, Action::Quit);
         assert_ne!(Action::OpenReplayDialog, Action::Quit);
+        // SwitchMode variants
+        assert_ne!(
+            Action::SwitchMode(AppMode::Live),
+            Action::SwitchMode(AppMode::Replay)
+        );
+        assert_ne!(Action::OpenFile, Action::SwitchMode(AppMode::Live));
     }
 
     #[test]
     fn live_mode_provides_open_file_save_and_save_as() {
-        let (open_file, save, save_as, open_replay_dialog) = actions_for_mode(AppMode::Live);
+        let (open_file, save, save_as, open_replay_dialog, switch_live, switch_replay) =
+            actions_for_mode(AppMode::Live);
         assert!(open_file, "live mode must have Open File action");
         assert!(save, "live mode must have Save action");
         assert!(save_as, "live mode must have Save As action");
@@ -355,17 +429,34 @@ mod tests {
             !open_replay_dialog,
             "live mode must NOT have Open Replay Dialog action"
         );
+        assert!(
+            !switch_live,
+            "live mode must NOT offer switch-to-live (already live)"
+        );
+        assert!(
+            switch_replay,
+            "live mode must offer switch-to-replay action"
+        );
     }
 
     #[test]
     fn replay_mode_provides_open_replay_dialog_only() {
-        let (open_file, save, save_as, open_replay_dialog) = actions_for_mode(AppMode::Replay);
+        let (open_file, save, save_as, open_replay_dialog, switch_live, switch_replay) =
+            actions_for_mode(AppMode::Replay);
         assert!(!open_file, "replay mode must NOT have Open File action");
         assert!(!save, "replay mode must NOT have Save action");
         assert!(!save_as, "replay mode must NOT have Save As action");
         assert!(
             open_replay_dialog,
             "replay mode must have Open Replay Dialog action"
+        );
+        assert!(
+            switch_live,
+            "replay mode must offer switch-to-live action"
+        );
+        assert!(
+            !switch_replay,
+            "replay mode must NOT offer switch-to-replay (already replay)"
         );
     }
 }

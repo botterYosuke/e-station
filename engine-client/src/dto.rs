@@ -235,6 +235,21 @@ pub enum Command {
         multiplier: u32,
     },
 
+    // ── F7: モード切替 (schema 3.11) ─────────────────────────────────────────────
+    /// Gracefully stop the active replay session (F7 mode-switch).
+    /// Python resolves the active strategy_id internally (no need for caller to know it).
+    /// Python emits `ReplayStopped` (or `EngineBusy` if not running) in response.
+    StopReplay {
+        request_id: String,
+    },
+
+    /// Forceful replay stop fallback (F7: used after StopReplay 5s timeout).
+    /// Python must stop immediately (e.g. SIGKILL the runner thread).
+    /// Python emits `ReplayStopped` on success or `EngineBusy` if still busy.
+    ForceStopReplay {
+        request_id: String,
+    },
+
     // ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
     /// 戦略 .py から SCENARIO 定数を安全抽出するよう Python に要求する（F6a）。
     /// Python 側は ast.parse + ast.literal_eval のみ使用（副作用ゼロ）。
@@ -549,6 +564,14 @@ impl std::fmt::Debug for Command {
                 .field("request_id", request_id)
                 .field("path", path)
                 .field("save_as", save_as)
+                .finish(),
+            Command::StopReplay { request_id } => f
+                .debug_struct("StopReplay")
+                .field("request_id", request_id)
+                .finish(),
+            Command::ForceStopReplay { request_id } => f
+                .debug_struct("ForceStopReplay")
+                .field("request_id", request_id)
                 .finish(),
         }
     }
@@ -1231,6 +1254,16 @@ pub enum EngineEvent {
     /// Rust 側は現状 ignore してよい（将来の日付ヘッダー表示などに流用可能）。
     DateChangeMarker {
         date: String,
+    },
+
+    // ── F7: モード切替 (schema 3.11) ─────────────────────────────────────────────
+    /// Emitted after `StopReplay` or `ForceStopReplay` successfully stops the
+    /// active replay session. `final_equity` is a decimal-string or None if the
+    /// session ended without a completed strategy run.
+    ReplayStopped {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_equity: Option<String>,
     },
 
     // ── Phase 8.1b: Multi-client connection lifecycle events ─────────────────

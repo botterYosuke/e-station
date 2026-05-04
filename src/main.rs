@@ -79,8 +79,74 @@ static VENUE_READY_CACHE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 /// Startup mode (`live` or `replay`) captured from `--mode` before any runtime
-/// is created.
-static APP_MODE: std::sync::OnceLock<engine_client::dto::AppMode> = std::sync::OnceLock::new();
+/// is created.  Changed from OnceLock to Mutex<Option<_>> so that
+/// `set_app_mode()` can overwrite the value during mode-switch restarts (F7/T1).
+/// Lock-acquisition order: MODE_SWITCHING → APP_MODE → CURRENT_PATH (統一決定 58).
+static APP_MODE: std::sync::Mutex<Option<engine_client::dto::AppMode>> =
+    std::sync::Mutex::new(None);
+
+/// F7/T2: set to `true` while a mode-switch restart is in progress.
+/// `ModeSwitchGuard` RAII wrapper ensures the flag is reset even on panic.
+/// (P7 統一決定 33 / 受け入れ基準 9, 11)
+pub static MODE_SWITCHING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Returns the current app mode.  Falls back to `Live` when the static has not
+/// yet been initialised (unreachable in normal operation).
+fn app_mode() -> engine_client::dto::AppMode {
+    APP_MODE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or(engine_client::dto::AppMode::Live)
+}
+
+/// Overwrites the current app mode.  Poison recovery is applied so that a
+/// panic inside a previous lock holder does not permanently break the value.
+fn set_app_mode(mode: engine_client::dto::AppMode) {
+    match APP_MODE.lock() {
+        Ok(mut g) => *g = Some(mode),
+        Err(e) => *e.into_inner() = Some(mode),
+    }
+}
+
+/// F7/T2: RAII guard for the mode-switch critical section.
+/// Call `try_acquire()` at the top of `restart_with_mode()`; the flag is
+/// automatically cleared when the guard is dropped — including panic unwinds.
+pub struct ModeSwitchGuard;
+
+impl ModeSwitchGuard {
+    /// Returns `Some` if the flag was successfully acquired (i.e. no switch is
+    /// currently in progress), `None` if a switch is already running.
+    pub fn try_acquire() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        MODE_SWITCHING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| ModeSwitchGuard)
+    }
+}
+
+impl Drop for ModeSwitchGuard {
+    fn drop(&mut self) {
+        MODE_SWITCHING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// F7/T2: errors that can abort a mode-switch operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModeSwitchError {
+    /// Another mode-switch is already in progress.
+    AlreadySwitching,
+    /// Live mode has in-flight (unconfirmed) orders — switching to replay
+    /// would break WAL integrity.
+    InFlightOrder,
+    /// The engine reported a busy state.
+    EngineBusy(String),
+    /// The live state could not be flushed to disk.
+    SaveFailed,
+    /// The replay engine did not stop in time and force-stop also failed.
+    StopFailed,
+}
 
 /// F3: tracks the file path most recently opened or explicitly saved-as.
 /// `None` until the user first uses Open or Save As.
@@ -261,9 +327,7 @@ fn main() {
 
     // Capture startup mode before any runtime is created so Flowsurface::new()
     // can enforce D8 regardless of whether the HTTP control-API runtime builds.
-    APP_MODE
-        .set(engine_client::dto::AppMode::from(cli_args.mode))
-        .ok();
+    set_app_mode(engine_client::dto::AppMode::from(cli_args.mode));
 
     // F3 DoD: if --saved-state was given, record it for Flowsurface::new().
     if let Some(p) = cli_args.initial_state_path {
@@ -1153,10 +1217,7 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
         // well after APP_MODE is set; false (live) is the safe fallback so live-mode
         // engine restarts do not accidentally trigger ReplayFinished.
         EngineEvent::EngineStopped { .. } => {
-            let is_replay = APP_MODE
-                .get()
-                .map(|&m| m == engine_client::dto::AppMode::Replay)
-                .unwrap_or(false);
+            let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
             if is_replay {
                 Some(Message::ReplayFinished)
             } else {
@@ -1247,10 +1308,7 @@ fn apply_confirm_dialog_overlay<'a>(
 
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
-        let is_replay_mode = APP_MODE
-            .get()
-            .map(|m| *m == engine_client::dto::AppMode::Replay)
-            .expect("APP_MODE must be set before Flowsurface::new");
+        let is_replay_mode = app_mode() == engine_client::dto::AppMode::Replay;
 
         let saved_state = if is_replay_mode {
             log::info!("replay mode: skipping load_saved_state (D9-load), using defaults");
@@ -1911,10 +1969,7 @@ impl Flowsurface {
                 }
                 // F4: check dirty before exiting (live mode only).
                 // Replay mode never writes state, so skip the check there.
-                let is_live = APP_MODE
-                    .get()
-                    .map(|m| *m == engine_client::dto::AppMode::Live)
-                    .unwrap_or(true);
+                let is_live = app_mode() == engine_client::dto::AppMode::Live;
                 if is_live && self.is_dirty(&windows) {
                     // Store window specs so Discard/SaveAndExit can proceed later.
                     self.pending_exit_windows = Some(windows);
@@ -1947,10 +2002,43 @@ impl Flowsurface {
                 // BC-5: if save fails, abort the exit and show an error (do not discard data).
                 self.confirm_dialog = None;
                 let windows = self.pending_exit_windows.take().unwrap_or_default();
-                if self.save_state_to_disk(&windows) {
+
+                let Some(json) = self.build_state_json(&windows) else {
+                    // replay mode has no state to save
+                    return iced::exit();
+                };
+
+                // If a named document is open, write to it first (primary save target).
+                let current_path = match CURRENT_PATH.lock() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                if let Some(p) = &current_path
+                    && let Err(e) = std::fs::write(p, json.as_bytes())
+                {
+                    log_save_error(&SaveError::IoError(e.kind()), p);
+                    self.notifications
+                        .push(Toast::error("保存に失敗しました。再試行してください。".to_string()));
+                    self.pending_exit_windows = Some(windows);
+                    let dialog = screen::ConfirmDialog::new(
+                        "未保存の変更があります。".to_string(),
+                        Box::new(Message::DiscardAndExit),
+                    )
+                    .with_confirm_btn_text("破棄して終了".to_string())
+                    .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+
+                // Also write to saved-state.json (auto-restore slot) and update last_saved_bytes.
+                // If CURRENT_PATH was successfully written, a saved-state.json failure is non-fatal
+                // (data is safe in the named doc). If there is no CURRENT_PATH, saved-state.json
+                // is the only copy — abort on failure.
+                let saved_ok = self.write_json_to_saved_state_disk(&json);
+                if current_path.is_some() || saved_ok {
                     return iced::exit();
                 }
-                // Save failed: notify user and restore the dialog so they can retry or discard.
+
                 self.notifications
                     .push(Toast::error("保存に失敗しました。再試行してください。".to_string()));
                 self.pending_exit_windows = Some(windows);
@@ -2272,10 +2360,8 @@ impl Flowsurface {
                                         return Task::none();
                                     }
                                     if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                                        let is_replay = APP_MODE
-                                            .get()
-                                            .map(|m| *m == engine_client::dto::AppMode::Replay)
-                                            .unwrap_or(false);
+                                        let is_replay =
+                                            app_mode() == engine_client::dto::AppMode::Replay;
                                         let venue = if is_replay {
                                             "replay".to_string()
                                         } else {
@@ -2657,11 +2743,7 @@ impl Flowsurface {
             }
             // ── Native OS menu bar ──────────────────────────────────────────
             Message::NativeMenuSetup(raw_id) => {
-                let app_mode = APP_MODE
-                    .get()
-                    .copied()
-                    .unwrap_or(engine_client::dto::AppMode::Live);
-                native_menu::attach(raw_id, app_mode);
+                native_menu::attach(raw_id, app_mode());
                 return Task::none();
             }
             Message::NativeMenuAction(action) => {
@@ -2754,6 +2836,10 @@ impl Flowsurface {
                             active_windows,
                             Message::ExitRequested,
                         );
+                    }
+                    Action::SwitchMode(_) => {
+                        // F7 stub — mode-switch handling not yet implemented
+                        return Task::none();
                     }
                 }
             }
@@ -2898,6 +2984,18 @@ impl Flowsurface {
                 });
             }
             Message::NativeSaveAsPath(None) => {
+                // Save As dialog cancelled. If a "save-then-open" flow was in progress
+                // (SaveAndOpenFile triggered this when CURRENT_PATH was None), restore the
+                // confirm dialog so the user can choose Discard or retry Save.
+                if self.pending_open_file.is_some() {
+                    let dialog = screen::ConfirmDialog::new(
+                        "未保存の変更があります。".to_string(),
+                        Box::new(Message::DiscardAndOpenFile),
+                    )
+                    .with_confirm_btn_text("破棄して開く".to_string())
+                    .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
+                    self.confirm_dialog = Some(dialog);
+                }
                 return Task::none();
             }
             Message::NativeSaveAsWithSpecs { path, windows } => {
@@ -2965,6 +3063,26 @@ impl Flowsurface {
                             "保存しました: {}",
                             user_path.display()
                         )));
+                        // If SaveAndOpenFile triggered this save (CURRENT_PATH=None path),
+                        // complete the open now that the current state is safely written.
+                        if let Some((pending_json, pending_path, _windows)) =
+                            self.pending_open_file.take()
+                        {
+                            if let Err(e) =
+                                data::write_json_to_file(&pending_json, data::SAVED_STATE_PATH)
+                            {
+                                log::warn!("Failed to write imported state: {e}");
+                                self.notifications.push(Toast::error(format!(
+                                    "ファイルの適用に失敗しました: {e}"
+                                )));
+                                return Task::none();
+                            }
+                            match CURRENT_PATH.lock() {
+                                Ok(mut guard) => *guard = Some(pending_path),
+                                Err(poisoned) => *poisoned.into_inner() = Some(pending_path),
+                            }
+                            return self.restart();
+                        }
                     }
                     Some(kind) => {
                         // BC-5: classify as IoError → WARN level.
@@ -3059,9 +3177,8 @@ impl Flowsurface {
                 return self.restart();
             }
             Message::SaveAndOpenFile => {
-                // User chose "保存して開く" — save named document first (if CURRENT_PATH is set),
-                // then load the new file. This preserves the user's named document on disk.
-                // BC-5: if saving to CURRENT_PATH fails, abort the open and restore the dialog.
+                // User chose "保存して開く" — save the current document first, then load the new
+                // file. BC-5: if any save step fails, abort and restore the dialog.
                 self.confirm_dialog = None;
                 let Some((json, new_path, windows)) = self.pending_open_file.take() else {
                     return Task::none();
@@ -3070,12 +3187,12 @@ impl Flowsurface {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                if let Some(p) = current_path {
+                if let Some(p) = &current_path {
                     match self.build_state_json(&windows) {
                         Some(current_json) => {
-                            if let Err(e) = std::fs::write(&p, current_json.as_bytes()) {
+                            if let Err(e) = std::fs::write(p, current_json.as_bytes()) {
                                 // BC-5: abort open; named doc save failed.
-                                log_save_error(&SaveError::IoError(e.kind()), &p);
+                                log_save_error(&SaveError::IoError(e.kind()), p);
                                 self.notifications.push(Toast::error(
                                     "保存に失敗しました。再試行してください。".to_string(),
                                 ));
@@ -3092,9 +3209,29 @@ impl Flowsurface {
                                 self.confirm_dialog = Some(dialog);
                                 return Task::none();
                             }
+                            // MEDIUM fix: update dirty baseline so a subsequent Quit/Open after a
+                            // failed saved-state.json write does not re-trigger a spurious dialog.
+                            self.last_saved_bytes = Some(current_json.into_bytes());
                         }
                         None => { /* replay mode — no JSON to save, proceed with open */ }
                     }
+                } else {
+                    // No named document: open Save As dialog so the user can name the current
+                    // state. Keep pending_open_file; NativeSaveComplete will pick it up and
+                    // complete the open after the user-chosen path is written.
+                    self.pending_open_file = Some((json, new_path, windows));
+                    return Task::perform(
+                        async {
+                            rfd::AsyncFileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .set_file_name("saved-state.json")
+                                .set_title("現在の設定を保存")
+                                .save_file()
+                                .await
+                                .map(|handle| handle.path().to_owned())
+                        },
+                        Message::NativeSaveAsPath,
+                    );
                 }
                 if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
                     log::warn!("Failed to write imported state: {e}");
@@ -3832,10 +3969,7 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
-            let is_replay = APP_MODE
-                .get()
-                .map(|&m| m == engine_client::dto::AppMode::Replay)
-                .expect("APP_MODE must be initialised after CLI parsing");
+            let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
 
             base = base.push(
                 match sidebar_pos {
@@ -3953,14 +4087,7 @@ impl Flowsurface {
             tick,
             hotkeys,
             engine_status,
-            // SAFETY: APP_MODE is initialised in main() before iced starts;
-            // if it were unset the process would have already exited due to --mode validation.
-            native_menu::subscription(
-                *APP_MODE
-                    .get()
-                    .expect("APP_MODE must be set before iced starts"),
-            )
-            .map(Message::NativeMenuAction),
+            native_menu::subscription(app_mode()).map(Message::NativeMenuAction),
         ])
     }
 
@@ -4436,11 +4563,7 @@ impl Flowsurface {
     // which are side effects beyond serialization. Separating them requires threading window specs
     // through callers, which is a larger refactor deferred to a future phase.
     fn build_state_json(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> Option<String> {
-        if APP_MODE
-            .get()
-            .map(|m| *m == engine_client::dto::AppMode::Replay)
-            .unwrap_or(false)
-        {
+        if app_mode() == engine_client::dto::AppMode::Replay {
             return None;
         }
 
@@ -4874,11 +4997,12 @@ mod native_menu_handler_tests {
     fn save_and_exit_checks_result_before_exiting() {
         let body = handler_body("            Message::SaveAndExit =>");
         // BC-5: save result must be checked; iced::exit() must NOT be called unconditionally.
-        // The impl wraps the call as `if self.save_state_to_disk(...)` so the result
-        // is the condition — verify this pattern is present.
+        // The impl uses write_json_to_saved_state_disk() and checks its bool return,
+        // or guards on CURRENT_PATH write success — verify the pattern is present.
         assert!(
-            body.contains("if self.save_state_to_disk("),
-            "SaveAndExit must guard iced::exit() behind `if self.save_state_to_disk(...)` — \
+            body.contains("write_json_to_saved_state_disk(")
+                || body.contains("if self.save_state_to_disk("),
+            "SaveAndExit must call write_json_to_saved_state_disk (or save_state_to_disk) — \
              BC-5: IoError must abort the quit, not silently discard data"
         );
         assert!(
@@ -4936,29 +5060,28 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_pending_check_guards_existing_dialog() {
-        // Use the marker comment unique to this handler's guard to locate the body.
-        // The 12-space prefix search would find inner closure constructions via substring
-        // matching (e.g. 20-space lines contain the 12-space pattern), so we anchor on the
-        // guard comment instead which is unambiguous.
+        // Use the guard comment (unique to this handler) as the primary anchor.
+        // Avoids relying on multi-line or single-line arm formatting which can change
+        // with rustfmt runs and makes the find() pattern fragile.
         let guard_marker =
-            "// HIGH fix: another dialog is already visible — silently drop this request";
-        // Find the guard inside the handler region.
-        let handler_start = MAIN_RS
-            .find("            Message::NativeOpenFilePendingCheck {\n                json,")
-            .expect("NativeOpenFilePendingCheck handler arm not found (expected field `json,` on next line)");
-        let region_end = MAIN_RS[handler_start..]
+            "// HIGH fix: another dialog is already visible \u{2014} silently drop this request";
+        let marker_pos = MAIN_RS
+            .find(guard_marker)
+            .expect("NativeOpenFilePendingCheck must contain the HIGH-fix dialog guard comment");
+        // Scan backward to the handler arm.
+        let arm_pos = MAIN_RS[..marker_pos]
+            .rfind("Message::NativeOpenFilePendingCheck")
+            .expect("guard marker must be inside NativeOpenFilePendingCheck handler");
+        // Extract until the next top-level handler arm.
+        let tail = &MAIN_RS[arm_pos..];
+        let region_end = tail
             .find("\n            Message::")
-            .map(|i| handler_start + i)
-            .unwrap_or(MAIN_RS.len());
-        let body = &MAIN_RS[handler_start..region_end];
-        assert!(
-            body.contains(guard_marker),
-            "NativeOpenFilePendingCheck must contain the HIGH-fix dialog guard comment — \
-             HIGH: overlapping dialogs allow bypassing F4 dirty protection"
-        );
+            .unwrap_or(tail.len());
+        let body = &tail[..region_end];
         assert!(
             body.contains("confirm_dialog.is_some()"),
-            "NativeOpenFilePendingCheck guard must check confirm_dialog.is_some()"
+            "NativeOpenFilePendingCheck guard must check confirm_dialog.is_some() — \
+             HIGH: overlapping dialogs allow bypassing F4 dirty protection"
         );
         let guard_pos = body.find("confirm_dialog.is_some()").unwrap();
         let dirty_pos = body.find("is_dirty(").unwrap();
