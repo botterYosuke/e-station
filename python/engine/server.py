@@ -2504,19 +2504,16 @@ class DataEngineServer:
     # for malformed_json / mode_mismatch errors that must go ONLY to the caller.
     # ------------------------------------------------------------------
 
-    async def _send_unicast(
-        self, ws: ServerConnection, payload: dict
-    ) -> None:
+    def _send_unicast(self, ws: ServerConnection, payload: dict) -> None:
         """Send `payload` only to `ws`. Used when an error response is
         per-connection (e.g. mode_mismatch / malformed_json) and must not
         leak to other clients. Mirrors the convention used by
-        ``_check_replay_state`` (`_outbox.send_to(ws, payload)`) but exposed
-        as an awaitable helper for handlers that already use ``async`` IO.
+        ``_check_replay_state`` (`_outbox.send_to(ws, payload)``).
+
+        M-silent4: this helper is sync (the underlying `_outbox.send_to` is
+        sync — it merely queues into the per-connection send-loop). Callers
+        should NOT `await` the return; it returns `None`.
         """
-        # `_outbox.send_to` is sync (queues the payload to the per-connection
-        # send loop). This wrapper exists for symmetry with future direct-send
-        # paths and to make `await self._send_unicast(...)` read naturally
-        # alongside other awaited handler operations.
         self._outbox.send_to(ws, payload)
 
     # ------------------------------------------------------------------
@@ -3435,6 +3432,11 @@ class DataEngineServer:
         M12: ws is mandatory — error responses (mode_mismatch / malformed_json)
              must unicast to the originating caller, not broadcast.
         """
+        # M-1: ws is structurally mandatory for unicast error replies. A None
+        # ws would silently fall through to broadcast in `_send_unicast`,
+        # which violates the M10/M12 contract. Fail loud at the boundary.
+        assert ws is not None, "ws is mandatory for unicast error responses"
+
         from engine.schemas import ReplayStopped as ReplayStoppedModel
 
         # M10: reject malformed messages with no/empty request_id by unicasting
@@ -3442,7 +3444,7 @@ class DataEngineServer:
         # client bugs and producing replies with request_id="".
         request_id_raw = msg.get("request_id")
         if not isinstance(request_id_raw, str) or not request_id_raw:
-            await self._send_unicast(
+            self._send_unicast(
                 ws,
                 EngineError(
                     code="malformed_json",
@@ -3458,7 +3460,7 @@ class DataEngineServer:
         # （broadcast すると他のクライアントが偽の error 表示をする）。
         if self._mode != "replay":
             log.info("StopReplay: ignored in mode=%r", self._mode)
-            await self._send_unicast(
+            self._send_unicast(
                 ws,
                 EngineError(
                     code="mode_mismatch",
@@ -3495,6 +3497,12 @@ class DataEngineServer:
         else:
             log.info("StopReplay: no active runner found, emitting ReplayStopped immediately")
 
+        # H2: state を IDLE に戻してから broadcast する（_handle_force_stop_replay
+        # の M-5 と同じ順序）。STOPPING のまま broadcast すると、ReplayStopped を
+        # 受け取ったクライアントが直後に LoadReplayData / StartEngine を投げても
+        # state guard で弾かれる race を防ぐ。
+        self._replay_state = ReplayState.IDLE
+
         # ReplayStopped を全クライアントに broadcast
         self._outbox.append(
             ReplayStoppedModel(
@@ -3517,12 +3525,15 @@ class DataEngineServer:
         M10: request_id 空 / 非 str はクライアントバグなので malformed_json で reject する。
         M12: ws is mandatory — error responses must unicast to the caller.
         """
+        # M-1: ws is structurally mandatory for unicast error replies.
+        assert ws is not None, "ws is mandatory for unicast error responses"
+
         from engine.schemas import ReplayStopped as ReplayStoppedModel
 
         # M10: validate request_id and unicast malformed error.
         request_id_raw = msg.get("request_id")
         if not isinstance(request_id_raw, str) or not request_id_raw:
-            await self._send_unicast(
+            self._send_unicast(
                 ws,
                 EngineError(
                     code="malformed_json",
@@ -3552,6 +3563,15 @@ class DataEngineServer:
         # strategy_id をクリア
         self._replay_strategy_id = ""
 
+        # M-5: state を IDLE に戻してから ReplayStopped を broadcast する。
+        # H3 (旧コード) では broadcast の後に state リセットしていたが、
+        # ReplayStopped を受け取ったクライアントが直後に LoadReplayData /
+        # StartEngine を投げると、まだ STOPPING 残留状態で受信されて state
+        # guard に弾かれる race があった。reset → broadcast の順序にする
+        # ことで「ReplayStopped を受信した時点で IDLE が確定している」という
+        # 不変条件を保証する。
+        self._replay_state = ReplayState.IDLE
+
         # ReplayStopped を全クライアントに broadcast
         self._outbox.append(
             ReplayStoppedModel(
@@ -3560,10 +3580,6 @@ class DataEngineServer:
             ).model_dump()
         )
         log.info("ForceStopReplay: broadcast ReplayStopped(request_id=%r)", request_id)
-
-        # H3: state を IDLE にリセット — STOPPING 残留で次の LoadReplayData /
-        # StartEngine が永遠に弾かれることを防ぐ。
-        self._replay_state = ReplayState.IDLE
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):

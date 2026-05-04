@@ -595,6 +595,13 @@ impl ModeSwitchGuard {
 impl Drop for ModeSwitchGuard {
     fn drop(&mut self) {
         MODE_SWITCHING.store(false, std::sync::atomic::Ordering::Release);
+        // H1: RAII reset of the per-thread lock-order tracker. Without this,
+        // early-return paths from the mode-switch state machine that drop the
+        // guard (e.g. `mode_switch_state = None`) would leave the
+        // `LOCK_ORDER_INDEX` thread-local at its highest acquired index,
+        // and subsequent unrelated lock acquisitions on the same thread
+        // would spuriously trip the lock-order debug_assert.
+        lock_order_reset();
     }
 }
 
@@ -6979,5 +6986,56 @@ mod lock_order_tests {
         lock_order_reset();
         lock_order_acquire("APP_MODE");
         lock_order_acquire("MODE_SWITCHING");
+    }
+
+    /// H1: dropping a `ModeSwitchGuard` must reset the per-thread
+    /// `LOCK_ORDER_INDEX` so subsequent unrelated acquisitions on the same
+    /// thread are not falsely flagged as reverse-order.
+    #[test]
+    fn mode_switch_guard_drop_resets_lock_order_index() {
+        lock_order_reset();
+        {
+            let _guard = ModeSwitchGuard::try_acquire().expect("first acquisition must succeed");
+            lock_order_acquire("MODE_SWITCHING");
+            lock_order_acquire("APP_MODE");
+            // index is now 2 (APP_MODE) on this thread.
+            LOCK_ORDER_INDEX.with(|cell| {
+                assert!(
+                    cell.get().is_some(),
+                    "LOCK_ORDER_INDEX must be set after lock_order_acquire"
+                );
+            });
+            // _guard is dropped here.
+        }
+        LOCK_ORDER_INDEX.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                None,
+                "ModeSwitchGuard::drop must call lock_order_reset (H1)"
+            );
+        });
+    }
+
+    /// M-rust5: `ModeSwitchGuard::try_acquire` must return `None` when called
+    /// while another guard is still alive, and `Some` again after it drops.
+    #[test]
+    fn mode_switch_guard_try_acquire_is_exclusive_and_recoverable() {
+        // Reset just in case a prior test on this thread left the flag set
+        // (in panicking-test contexts the Drop still runs, so this is mostly
+        // belt-and-suspenders).
+        MODE_SWITCHING.store(false, std::sync::atomic::Ordering::Release);
+
+        let first = ModeSwitchGuard::try_acquire().expect("first try_acquire must return Some");
+        let second = ModeSwitchGuard::try_acquire();
+        assert!(
+            second.is_none(),
+            "second try_acquire must return None while first guard is alive"
+        );
+        drop(first);
+        let third = ModeSwitchGuard::try_acquire();
+        assert!(
+            third.is_some(),
+            "try_acquire must return Some again after the previous guard is dropped"
+        );
     }
 }
