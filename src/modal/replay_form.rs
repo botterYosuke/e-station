@@ -154,6 +154,54 @@ impl ReplayFormModal {
         })
     }
 
+    /// F6a: Prefill form fields from a SCENARIO JSON object that Python
+    /// extracted from a strategy `.py`. Missing or wrongly-typed keys leave the
+    /// existing field untouched. `validation_error` is cleared on any successful
+    /// touch so the previous error banner does not linger after a fresh Load.
+    ///
+    /// `path` is recorded as the picked strategy file so Submit can carry it
+    /// through to `Command::StartEngine`.
+    pub fn prefill_from_scenario(
+        &mut self,
+        path: std::path::PathBuf,
+        scenario: &serde_json::Value,
+    ) {
+        self.strategy_file = Some(path);
+        let Some(obj) = scenario.as_object() else {
+            self.validation_error = None;
+            return;
+        };
+        if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
+            self.instrument_id = s.to_string();
+        }
+        if let Some(s) = obj.get("start").and_then(|v| v.as_str()) {
+            self.start_date = s.to_string();
+        }
+        if let Some(s) = obj.get("end").and_then(|v| v.as_str()) {
+            self.end_date = s.to_string();
+        }
+        if let Some(s) = obj.get("granularity").and_then(|v| v.as_str()) {
+            // SCENARIO の Literal は schemas.py で "Trade"/"Minute"/"Daily" に固定。
+            // 未知文字列は触らない（既存 granularity を保持）。
+            match s {
+                "Daily" => self.granularity = Some(Granularity::Daily),
+                "Minute" => self.granularity = Some(Granularity::Minute),
+                "Trade" => self.granularity = Some(Granularity::Trade),
+                _ => {}
+            }
+        }
+        if let Some(n) = obj.get("initial_cash").and_then(|v| v.as_u64()) {
+            self.initial_cash = n.to_string();
+        }
+        self.validation_error = None;
+    }
+
+    /// F6a: SCENARIO 不在の `.py` を Load した場合のフォールバック。
+    /// フィールドはそのまま、`strategy_file` だけセットする。
+    pub fn set_strategy_file_only(&mut self, path: std::path::PathBuf) {
+        self.strategy_file = Some(path);
+    }
+
     pub fn update(&mut self, message: Message) -> Option<Action> {
         match message {
             Message::InstrumentChanged(v) => {
@@ -407,6 +455,92 @@ mod tests {
         assert!(!is_valid_date("not-a-date"));
         assert!(!is_valid_date("20250106"));
         assert!(!is_valid_date("2025-1-6"));
+    }
+
+    #[test]
+    fn prefill_from_scenario_populates_all_fields() {
+        let mut form = ReplayFormModal::default();
+        let scenario = serde_json::json!({
+            "schema_version": 1,
+            "instrument": "1301.TSE",
+            "start": "2025-01-06",
+            "end": "2025-03-31",
+            "granularity": "Daily",
+            "initial_cash": 1_000_000_u64,
+        });
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/s.py"), &scenario);
+        assert_eq!(form.instrument_id, "1301.TSE");
+        assert_eq!(form.start_date, "2025-01-06");
+        assert_eq!(form.end_date, "2025-03-31");
+        assert_eq!(form.granularity, Some(Granularity::Daily));
+        assert_eq!(form.initial_cash, "1000000");
+        assert_eq!(
+            form.strategy_file,
+            Some(std::path::PathBuf::from("/tmp/s.py"))
+        );
+        assert!(form.validation_error.is_none());
+    }
+
+    #[test]
+    fn prefill_from_scenario_clears_validation_error() {
+        let mut form = ReplayFormModal::default();
+        form.validation_error = Some("dangling".to_string());
+        let scenario = serde_json::json!({
+            "instrument": "7203.TSE",
+            "granularity": "Minute",
+        });
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        assert!(form.validation_error.is_none());
+        assert_eq!(form.granularity, Some(Granularity::Minute));
+    }
+
+    #[test]
+    fn prefill_from_scenario_unknown_granularity_preserves_existing() {
+        let mut form = ReplayFormModal::default();
+        form.granularity = Some(Granularity::Trade);
+        let scenario = serde_json::json!({"granularity": "weekly"});
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        assert_eq!(form.granularity, Some(Granularity::Trade));
+    }
+
+    #[test]
+    fn prefill_from_scenario_partial_keeps_other_fields() {
+        let mut form = ReplayFormModal::default();
+        form.instrument_id = "OLD".to_string();
+        form.start_date = "2024-01-01".to_string();
+        form.end_date = "2024-02-01".to_string();
+        form.initial_cash = "500".to_string();
+        let scenario = serde_json::json!({"instrument": "NEW"});
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        assert_eq!(form.instrument_id, "NEW");
+        assert_eq!(form.start_date, "2024-01-01");
+        assert_eq!(form.end_date, "2024-02-01");
+        assert_eq!(form.initial_cash, "500");
+    }
+
+    #[test]
+    fn prefill_from_scenario_non_object_only_sets_path() {
+        let mut form = ReplayFormModal::default();
+        form.instrument_id = "KEEP".to_string();
+        let scenario = serde_json::json!(null);
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        assert_eq!(form.instrument_id, "KEEP");
+        assert_eq!(
+            form.strategy_file,
+            Some(std::path::PathBuf::from("/tmp/x.py"))
+        );
+    }
+
+    #[test]
+    fn set_strategy_file_only_sets_path_and_keeps_fields() {
+        let mut form = ReplayFormModal::default();
+        form.instrument_id = "KEEP".to_string();
+        form.set_strategy_file_only(std::path::PathBuf::from("/tmp/y.py"));
+        assert_eq!(form.instrument_id, "KEEP");
+        assert_eq!(
+            form.strategy_file,
+            Some(std::path::PathBuf::from("/tmp/y.py"))
+        );
     }
 
     #[test]

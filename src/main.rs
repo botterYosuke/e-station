@@ -1329,6 +1329,23 @@ enum Message {
         path: std::path::PathBuf,
         windows: HashMap<window::Id, WindowSpec>,
     },
+    /// F6a: replay モードの `File > 開く...` で `.py` が選択されたときの結果。
+    /// `Some(path)` なら `Command::LoadStrategyScenario` を engine に送信し、
+    /// `None`（cancel）なら何もしない。
+    NativeOpenStrategyPicked(Option<std::path::PathBuf>),
+    /// F6a: `Event::StrategyScenarioLoaded` 受信時。`scenario` が `Some` なら
+    /// `ReplayFormModal` を prefill し、`None`（SCENARIO 不在）なら strategy_file
+    /// だけセットしてフォームは空のままにする。`current_path` は両ケースで更新。
+    StrategyScenarioLoadedEvent {
+        path: std::path::PathBuf,
+        scenario: Option<serde_json::Value>,
+    },
+    /// F6a: `Event::StrategyScenarioLoadFailed` 受信時。エラートーストを出し、
+    /// `current_path` はセットしない。
+    StrategyScenarioLoadFailedEvent {
+        path: std::path::PathBuf,
+        reason: String,
+    },
     /// Phase 8.1c: `File > Replay を開始...` メニューで表示。
     ShowReplayDialog,
     /// Phase 8.1c: Replay 起動フォーム modal の内部メッセージ。
@@ -1721,6 +1738,20 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
         }
         // F7: ReplayStopped — mode-switch pending confirmation
         EngineEvent::ReplayStopped { .. } => Some(Message::ModeSwitchStopAcked),
+        // F6a: SCENARIO 抽出結果 → ReplayFormModal prefill
+        EngineEvent::StrategyScenarioLoaded {
+            path, scenario, ..
+        } => Some(Message::StrategyScenarioLoadedEvent {
+            path: std::path::PathBuf::from(path),
+            scenario,
+        }),
+        // F6a: SCENARIO 抽出失敗 → エラートースト
+        EngineEvent::StrategyScenarioLoadFailed { path, reason, .. } => {
+            Some(Message::StrategyScenarioLoadFailedEvent {
+                path: std::path::PathBuf::from(path),
+                reason,
+            })
+        }
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（このマップは Tachibana 関連
         // イベントだけを `Message` に変換する責務であり、新バリアントは
@@ -3334,6 +3365,22 @@ impl Flowsurface {
                 use native_menu::Action;
                 match action {
                     Action::OpenFile => {
+                        // F6a: replay モードでは `.py` 戦略ファイルを開いて
+                        // SCENARIO を Python 側で抽出する。live モードは従来通り
+                        // `saved-state.json` を読む。
+                        if app_mode() == engine_client::dto::AppMode::Replay {
+                            return Task::perform(
+                                async {
+                                    rfd::AsyncFileDialog::new()
+                                        .add_filter("Python", &["py"])
+                                        .set_title("戦略ファイルを開く")
+                                        .pick_file()
+                                        .await
+                                        .map(|h| h.path().to_owned())
+                                },
+                                Message::NativeOpenStrategyPicked,
+                            );
+                        }
                         return Task::perform(
                             async {
                                 // Returns None if cancelled; Some((json_result, path)) otherwise.
@@ -3608,6 +3655,70 @@ impl Flowsurface {
                         }
                     }
                 }
+            }
+            // F6a: replay モードで `.py` を Open dialog で選択した結果を受け取り、
+            // engine に `Command::LoadStrategyScenario` を発行する。
+            Message::NativeOpenStrategyPicked(picked) => {
+                let Some(path) = picked else {
+                    return Task::none();
+                };
+                // モードガード: live で誤って `.py` が選ばれても無視する。
+                if app_mode() != engine_client::dto::AppMode::Replay {
+                    log::warn!("NativeOpenStrategyPicked received outside replay mode — dropping");
+                    return Task::none();
+                }
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    self.notifications.push(Toast::error(
+                        "engine に接続されていないため SCENARIO を読み込めません".to_string(),
+                    ));
+                    return Task::none();
+                };
+                let path_str = path.to_string_lossy().into_owned();
+                return Task::perform(
+                    async move {
+                        let request_id = uuid::Uuid::new_v4().to_string();
+                        conn.send(engine_client::dto::Command::LoadStrategyScenario {
+                            request_id,
+                            path: path_str,
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                    },
+                    |res| match res {
+                        Ok(()) => Message::Noop,
+                        Err(err) => Message::OrderToast(Toast::error(format!(
+                            "戦略ファイルの読み込み要求に失敗しました: {err}"
+                        ))),
+                    },
+                );
+            }
+            // F6a: SCENARIO 抽出成功 → ReplayFormModal を prefill。modal が
+            // 開いていなければ新規生成する（GUI で `Open` 直後はまだ modal が
+            // 出ていない正規ルート）。`current_path` は両ケース（scenario
+            // None / Some）でセットする。
+            Message::StrategyScenarioLoadedEvent { path, scenario } => {
+                if let Ok(mut guard) = CURRENT_PATH.lock() {
+                    *guard = Some(path.clone());
+                }
+                let form = self
+                    .replay_form_modal
+                    .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
+                match scenario {
+                    Some(value) => form.prefill_from_scenario(path, &value),
+                    None => form.set_strategy_file_only(path),
+                }
+                return Task::none();
+            }
+            // F6a: SCENARIO 抽出失敗 → トースト表示。`current_path` は更新しない。
+            Message::StrategyScenarioLoadFailedEvent { path, reason } => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                self.notifications.push(Toast::error(format!(
+                    "{name} を読み込めませんでした: {reason}"
+                )));
+                return Task::none();
             }
             // Phase 8.1c: Replay 起動フォームを開く
             Message::ShowReplayDialog => {
@@ -6513,6 +6624,76 @@ mod native_menu_handler_tests {
             body.contains("VenueEvent::Ready"),
             "restart() must synthesize VenueEvent::Ready when venue cache is hot — \
              guards the regression where tachibana_state reset to Idle after file open"
+        );
+    }
+
+    // ── F6a: SCENARIO Open / prefill 配線 ────────────────────────────────────
+
+    #[test]
+    fn open_file_replay_mode_uses_py_filter() {
+        let body = handler_body("                    Action::OpenFile =>");
+        assert!(
+            body.contains("AppMode::Replay"),
+            "Action::OpenFile must branch on AppMode::Replay for `.py` filter"
+        );
+        assert!(
+            body.contains(".add_filter(\"Python\", &[\"py\"])"),
+            "Action::OpenFile replay branch must register the `.py` file filter"
+        );
+        assert!(
+            body.contains("Message::NativeOpenStrategyPicked"),
+            "Action::OpenFile replay branch must dispatch NativeOpenStrategyPicked \
+             after the OS file dialog returns"
+        );
+    }
+
+    #[test]
+    fn open_strategy_picked_some_sends_load_strategy_scenario() {
+        let body = handler_body("            Message::NativeOpenStrategyPicked(picked) =>");
+        assert!(
+            body.contains("AppMode::Replay"),
+            "NativeOpenStrategyPicked must guard on replay mode (live must drop the .py)"
+        );
+        assert!(
+            body.contains("Command::LoadStrategyScenario"),
+            "NativeOpenStrategyPicked(Some) must send Command::LoadStrategyScenario"
+        );
+    }
+
+    #[test]
+    fn strategy_scenario_loaded_event_prefills_modal() {
+        let body =
+            handler_body("            Message::StrategyScenarioLoadedEvent { path, scenario } =>");
+        assert!(
+            body.contains("prefill_from_scenario"),
+            "StrategyScenarioLoadedEvent must call prefill_from_scenario when scenario is Some"
+        );
+        assert!(
+            body.contains("set_strategy_file_only"),
+            "StrategyScenarioLoadedEvent must fall back to set_strategy_file_only when scenario is None"
+        );
+        assert!(
+            body.contains("CURRENT_PATH"),
+            "StrategyScenarioLoadedEvent must update CURRENT_PATH (F3 integration)"
+        );
+    }
+
+    #[test]
+    fn strategy_scenario_load_failed_event_pushes_toast_only() {
+        let body = handler_body(
+            "            Message::StrategyScenarioLoadFailedEvent { path, reason } =>",
+        );
+        assert!(
+            body.contains("notifications.push"),
+            "StrategyScenarioLoadFailedEvent must surface the error via a toast"
+        );
+        assert!(
+            !body.contains("CURRENT_PATH"),
+            "StrategyScenarioLoadFailedEvent must NOT update CURRENT_PATH on failure"
+        );
+        assert!(
+            !body.contains("prefill_from_scenario"),
+            "StrategyScenarioLoadFailedEvent must NOT prefill the modal on failure"
         );
     }
 }
