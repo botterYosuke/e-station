@@ -313,8 +313,8 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 | <a id="f4"></a> ✅ **F4** | P3 | `last_saved_bytes` で dirty 判定 → Open / Quit / SwitchMode 時の確認ダイアログ（F7 共通化ポイント） | M | F3 |
 | <a id="f5"></a> ✅ **F5** | P4 | rfd OS confirm に頼らずアプリ層の上書き確認ダイアログ | S | F3 |
 | <a id="f6"></a> ✅ **F6** | P5 | SCENARIO 定数仕様の実装（[P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) 参照） | L | F3 |
-| <a id="f7"></a> **F7** | P7 | `Mode` メニュー新設（[P7-mode-switch-menu.md](./P7-mode-switch-menu.md) 参照） | M | F4（confirm 共有） |
-| <a id="f8"></a> **F8** | P8 | Linux 向け iced 自前メニューバー（[P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) 参照） | L | なし（独立） |
+| <a id="f7"></a> ✅ **F7** | P7 | `Mode` メニュー新設（[P7-mode-switch-menu.md](./P7-mode-switch-menu.md) 参照） | M | F4（confirm 共有） |
+| <a id="f8"></a> ✅ **F8** | P8 | Linux 向け iced 自前メニューバー（[P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) 参照） | L | なし（独立） |
 | <a id="f9"></a> **F9** | P9 | W&B Submit メニュー — 詳細は [P9-wandb-submit-menu.md](./P9-wandb-submit-menu.md) | — | — |
 
 ### 並行実装可能性

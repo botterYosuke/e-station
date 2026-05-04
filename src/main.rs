@@ -6,6 +6,10 @@ mod cli;
 mod connector;
 mod layout;
 mod logger;
+#[cfg(target_os = "linux")]
+mod menu;
+#[cfg(target_os = "linux")]
+mod menu_bar_state;
 mod modal;
 mod native_menu;
 mod notify;
@@ -14,6 +18,8 @@ mod style;
 mod venue_state;
 mod version;
 mod widget;
+#[cfg(target_os = "linux")]
+mod widget_menu_bar;
 mod window;
 
 use data::config::theme::default_theme;

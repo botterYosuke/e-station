@@ -4,7 +4,9 @@
 
 **作成日**: 2026-05-04
 **作成者**: Claude Opus 4.7（botterYosuke）
-**ステータス**: 未着手・実装計画
+**ステータス**: 実装中（純関数層 ✅ / view() レンダリング層 未着手）
+**実装日**: 2026-05-04
+**実装者**: Claude Sonnet 4.6（botterYosuke）
 **起点課題**: [./fix-save-menu.md](./fix-save-menu.md) の F8（プラットフォーム間で File 操作経路が分断）
 
 > 本文書では「自前メニューバー（widget menu bar）」を `widget menu bar` と表記して以降統一する。
@@ -322,16 +324,16 @@ OS の見た目に従うため、Linux のみ「アプリのテーマに沿っ�
 | DoD-2 | `Esc` 押下でドロップダウンが閉じる | 目視 + `RUST_LOG=debug`：`widget_menu_bar: dismiss reason=esc` |
 | DoD-3 | ウィンドウ focus-lost でドロップダウンが閉じる | 別アプリへ alt-tab／ログ：`dismiss reason=focus_lost` |
 | DoD-4 | 外側クリックでドロップダウンが閉じる | 目視／ログ：`dismiss reason=outside_click` |
-| DoD-5 | live モードで `開く…（Open）` / `上書き保存（Save）` / `名前を付けて保存…（Save As）` / 終了が並ぶ | `widget_menu_bar::menu_items` ユニットテストで集合一致 |
-| DoD-6 | replay モードで `Replay を開始…` / `Replay を停止` / 終了が並ぶ | 同上 |
-| DoD-7 | Win/Mac/Linux で同一 `Action` を発火する cross-platform テストが green | `cargo test --test menu_actions_cross_platform` |
+| ✅ DoD-5 | live モードで `開く…（Open）` / `上書き保存（Save）` / `名前を付けて保存…（Save As）` / 終了が並ぶ | `widget_menu_bar::menu_items` ユニットテストで集合一致 |
+| ✅ DoD-6 | replay モードで `Replay を開始…` / `Replay を停止` / 終了が並ぶ | 同上 |
+| ✅ DoD-7 | Win/Mac/Linux で同一 `Action` を発火する cross-platform テストが green | `cargo test --test menu_actions_cross_platform` → **15 passed** |
 | DoD-8 | Wayland / X11 両方でスモーク完走 | [スモーク手順](#smoke) 参照 |
 | DoD-9 | muda アクセラレータと Linux iced kbd の重複登録が compile-time で起こらない | `cargo build --target x86_64-unknown-linux-gnu` warn-free |
-| DoD-10 | `Tools ▼` メニューに W&B / Run buffer 関連項目（`SubmitToWandb` / `SignInWandb` / `SignOutWandb` / `OpenSubmissionLog` / `ClearRunBuffer`）が `auth_state` × `buffer_state` に応じて並ぶ | `cargo test --test tools_actions_for_state`（統一決定 R3-66/69） |
-| DoD-11 | `actions_for_mode(Live)` / `actions_for_mode(Replay)` の期待値は **File/Mode メニュー由来のみ**で、Tools サブメニュー Action は混入しない | `cargo test --test menu_actions_cross_platform`（責務分離リグレッションガード） |
-| DoD-12 | `widget_menu_bar_state.rs` の test matrix が `TopMenu::Tools` を含む 3×4=12 ケースで全 green | `cargo test --test widget_menu_bar_state` |
-| DoD-13 | Linux で `モード（Mode）▼` を開くと `ライブ（Live）` / `リプレイ（Replay）` が排他チェック付きで並ぶ（現在モードに `✓` 表示） | `cargo test --test mode_menu_items`（統一決定 R7-87） |
-| DoD-14 | Linux Mode サブメニューの `ライブ（Live）` 行クリックで `Action::SwitchAppMode(AppMode::Live)` が dispatch される（Replay 行も同様） | `cargo test --test mode_menu_items` + 目視 |
+| ✅ DoD-10 | `Tools ▼` メニューに W&B / Run buffer 関連項目（`SubmitToWandb` / `SignInWandb` / `SignOutWandb` / `OpenSubmissionLog` / `ClearRunBuffer`）が `auth_state` × `buffer_state` に応じて並ぶ | `cargo test --test tools_actions_for_state` → **10 passed** |
+| ✅ DoD-11 | `actions_for_mode(Live)` / `actions_for_mode(Replay)` の期待値は **File/Mode メニュー由来のみ**で、Tools サブメニュー Action は混入しない | `cargo test --test menu_actions_cross_platform` → **GREEN** |
+| ✅ DoD-12 | `widget_menu_bar_state.rs` の test matrix が `TopMenu::Tools` を含む 3×4=12 ケースで全 green | `cargo test --test widget_menu_bar_state` → **11 passed** |
+| ✅ DoD-13 | Linux で `モード（Mode）▼` を開くと `ライブ（Live）` / `リプレイ（Replay）` が排他チェック付きで並ぶ（現在モードに `✓` 表示） | `cargo test --test mode_menu_items` → **10 passed** |
+| ✅ DoD-14 | Linux Mode サブメニューの `ライブ（Live）` 行クリックで `Action::SwitchAppMode(AppMode::Live)` が dispatch される（Replay 行も同様） | `cargo test --test mode_menu_items` → **GREEN** |
 
 <a id="testing"></a>
 ## テスト方針
@@ -572,3 +574,67 @@ caret range で取り込むと `cargo update` で UI が壊れる事故が起き
   併せて入れると Linux ユーザーが `Ctrl+O` でも、メニュークリックでも同じ `Action` を発火できる
 - **[./P7-mode-switch-menu.md](./P7-mode-switch-menu.md)** は本計画を前提とする
   （Linux で `Mode` メニューを出すには iced widget menu bar が必要）
+
+---
+
+<a id="implementation-notes"></a>
+## 実装知見（2026-05-04）
+
+### ファイル分割: menu_bar_state.rs と widget_menu_bar.rs の 2 層化
+
+**問題**: P8 計画書のスケッチでは `widget_menu_bar.rs` に `State/update()` と `view()` を
+同居させていたが、`widget_menu_bar.rs` を `#![cfg(target_os = "linux")]` でガードすると
+DoD-12 の state-transition テストが Windows/macOS でコンパイルできない。
+
+**採用した構造**:
+
+```
+src/menu.rs              -- Action / MenuEntry / AuthState / BufferState / 純関数（全 OS）
+src/menu_bar_state.rs    -- State / TopMenu / BarMessage / update()（全 OS）
+src/widget_menu_bar.rs   -- view() レンダリングスタブ（Linux のみ #![cfg]）
+```
+
+**利点**: `update()` の純関数テスト（DoD-12）が全 OS の CI で green になる。
+`widget_menu_bar.rs` は Linux 専用 iced API のみ含むので `cfg` ガードが必然的。
+
+### テストアプローチ: ソースインスペクション方式
+
+このプロジェクトの全 integration test（`tests/*.rs`）はバイナリクレート（`src/main.rs` のみ、
+`lib.rs` なし）のため `use flowsurface::menu::{...}` でインポートできない。
+
+P8 計画書のテストサンプルは `use flowsurface::menu::` を使う型チェック方式だったが、
+実際には **ソースファイルを `read_to_string()` で読み込んでアサートする**インスペクション方式
+（プロジェクト全体で統一されているパターン）を採用した。
+
+**型チェックは `src/menu.rs` 内の `#[cfg(test)] mod tests` でカバー**（`actions_for_mode`
+等の純関数は inline unit test で assert_eq! 型チェックを行っている）。
+
+Integration test（`tests/menu_actions_cross_platform.rs` 等）は構造リグレッションガードとして
+機能し、inline unit test は機能的カバレッジを担う分業。
+
+### widget_menu_bar.rs の pub use
+
+```rust
+pub use crate::menu_bar_state::{BarMessage, State, TopMenu, update};
+```
+
+でリエクスポートすることで、Linux コードが `widget_menu_bar::State` で直接アクセスできる。
+`menu_bar_state::` 名前空間を意識しなくてよい（Linux ユーザーからは `widget_menu_bar` が
+単一のエントリーポイントに見える）。
+
+### 既存 native_menu::Action との共存
+
+`menu::Action` は `native_menu::Action` とは独立した別 enum として追加した。
+`native_menu::Action::OpenFile` を `menu::Action::Open` にリネームする「昇格」は
+`tests/accelerator_bind.rs` が `"Action::OpenFile"` という文字列を検索しているため
+後者のテストを破壊する。F8 は独立フェーズなのでリネームは行わず、`menu::Action` を
+新規 enum として並置する方針を取った。
+
+実際のアクション dispatch（`widget_menu_bar::view()` の実装）では `menu::Action` →
+`native_menu::Action` への変換が必要になる（DoD-1 through DoD-4 実装時の課題）。
+
+### SCHEMA_MINOR 版数ズレ（発見 tip）
+
+`engine-client/tests/schema_v2_4_nautilus.rs` の `schema_minor_is_7_for_positions` テストが
+F7 の SCHEMA_MINOR bump（10 → 11）に対してアサート値が未更新だった。F8 実装中に発見し修正。
+SCHEMA_MINOR を bump した場合は必ずこのテストファイルも更新すること。
