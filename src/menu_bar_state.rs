@@ -15,8 +15,11 @@ pub enum BarMessage {
     Toggle(TopMenu),
     /// User clicked a menu item — dispatch the action and close the dropdown.
     Pick(Action),
-    /// Close all menus (Esc key / focus-lost / outside click).
+    /// Close all menus: Esc key or outside click (bar empty space / below bar area).
     Dismiss,
+    /// Close all menus: window lost focus (`Window::Unfocused`).
+    /// Kept separate from `Dismiss` so call sites can log the distinct reason.
+    DismissFocusLost,
     /// Cursor moved over the button row at absolute window-Y `y` (pixels).
     /// Used to anchor the dropdown position dynamically instead of fixed offsets.
     BarMoved(u32),
@@ -37,11 +40,12 @@ pub struct State {
 /// testable on all platforms.
 ///
 /// Invariants:
-/// 1. `Dismiss` → `open: None` (Esc / focus-lost / outside-click)
-/// 2. `Pick(_)` → `open: None` (item selected, close dropdown)
-/// 3. `Toggle(top)` when `open == Some(top)` → `open: None` (close same)
-/// 4. `Toggle(top)` when `open != Some(top)` → `open: Some(top)` (open)
-/// 5. `BarMoved(y)` → update `anchor_y` only (open unchanged)
+/// 1. `Dismiss` → `open: None` (Esc / outside-click)
+/// 2. `DismissFocusLost` → `open: None` (window Unfocused)
+/// 3. `Pick(_)` → `open: None` (item selected, close dropdown)
+/// 4. `Toggle(top)` when `open == Some(top)` → `open: None` (close same)
+/// 5. `Toggle(top)` when `open != Some(top)` → `open: Some(top)` (open)
+/// 6. `BarMoved(y)` → update `anchor_y` only (open unchanged)
 pub fn update(state: State, msg: BarMessage) -> State {
     match msg {
         BarMessage::Toggle(top) => State {
@@ -52,7 +56,7 @@ pub fn update(state: State, msg: BarMessage) -> State {
             },
             anchor_y: state.anchor_y,
         },
-        BarMessage::Pick(_) | BarMessage::Dismiss => State {
+        BarMessage::Pick(_) | BarMessage::Dismiss | BarMessage::DismissFocusLost => State {
             open: None,
             anchor_y: state.anchor_y,
         },

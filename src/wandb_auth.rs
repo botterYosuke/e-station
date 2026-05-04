@@ -4,6 +4,48 @@
 
 use serde::Deserialize;
 
+/// `examples/wandb/check_auth.py` を subprocess で起動し、stdout JSON を
+/// `WandbAuthState` にデシリアライズして返す。
+///
+/// 起動コマンド: `uv run --with wandb python examples/wandb/check_auth.py`
+/// 失敗時（spawn 失敗・JSON 不正・timeout）は `WandbAuthState::unauthenticated()` を返す（fail-closed）。
+pub async fn refresh_wandb_auth() -> WandbAuthState {
+    use tokio::process::Command;
+
+    let output = Command::new("uv")
+        .args([
+            "run",
+            "--with",
+            "wandb",
+            "python",
+            "examples/wandb/check_auth.py",
+        ])
+        .output()
+        .await;
+
+    let output = match output {
+        Ok(o) => o,
+        Err(err) => {
+            log::warn!("refresh_wandb_auth: failed to spawn check_auth.py: {err}");
+            return WandbAuthState::unauthenticated();
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // stdout の最初の非空行を JSON としてパース
+    let line = stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+
+    match serde_json::from_str::<WandbAuthState>(line) {
+        Ok(state) => state,
+        Err(err) => {
+            log::warn!(
+                "refresh_wandb_auth: failed to parse JSON from check_auth.py: {err} (line={line:?})"
+            );
+            WandbAuthState::unauthenticated()
+        }
+    }
+}
+
 /// Python `examples/wandb/check_auth.py` が stdout に返す JSON の構造体。
 /// Rust 側は判定ロジックを持たず、この struct を受け取ってメニュー状態に流すだけ。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

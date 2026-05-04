@@ -75,6 +75,48 @@ fn confirm_save_as_overwrite_message_exists() {
     );
 }
 
+/// Regression pin for the SaveAndOpenFile → Save As → NativeSaveComplete(error) path.
+///
+/// When Save As fails (CURRENT_PATH=None path), `pending_open_file` is still set but
+/// `confirm_dialog` has been cleared. Without restoring the dialog the next Open skips
+/// the F4 dirty-check (the condition is `is_dirty() && pending_open_file.is_none()`).
+#[test]
+fn native_save_complete_error_restores_confirm_dialog_when_pending_open_file_set() {
+    let src = read_main();
+
+    // Locate the NativeSaveComplete error arm (Some(kind) branch).
+    let arm_prefix = "                    Some(kind) => {";
+    let start = src
+        .find(arm_prefix)
+        .expect("NativeSaveComplete Some(kind) arm must exist");
+    let tail = &src[start..];
+    // Grab enough context — the arm ends before the next top-level match arm.
+    let end = tail
+        .find("\n                    None =>")
+        .or_else(|| tail.find("\n                }"))
+        .unwrap_or(tail.len().min(2000));
+    let body = &tail[..end];
+
+    assert!(
+        body.contains("pending_open_file.is_some()"),
+        "NativeSaveComplete error branch must check pending_open_file.is_some() \
+         to detect an in-flight SaveAndOpenFile flow"
+    );
+    assert!(
+        body.contains("confirm_dialog = Some("),
+        "NativeSaveComplete error branch must restore confirm_dialog when \
+         pending_open_file is set, otherwise the next Open bypasses F4"
+    );
+    assert!(
+        body.contains("DiscardAndOpenFile"),
+        "restored confirm dialog must wire the Discard action to DiscardAndOpenFile"
+    );
+    assert!(
+        body.contains("SaveAndOpenFile"),
+        "restored confirm dialog must wire the Save action to SaveAndOpenFile"
+    );
+}
+
 #[test]
 fn confirm_save_as_overwrite_handler_proceeds_with_save() {
     let src = read_main();

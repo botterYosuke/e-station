@@ -15,27 +15,32 @@ use engine_client::dto::AppMode;
 use iced::widget::{
     Space, button, column, container, mouse_area, opaque, row, stack, text, tooltip,
 };
-use iced::{Element, Length, Point};
+use iced::{Element, Length};
 
-pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
 use crate::Message;
 use crate::menu::{Action, MenuEntry, actions_for_mode, mode_menu_items, tools_actions_for_state};
+pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
 use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 
 /// Fixed width for each top-level menu button.  The dropdown's horizontal
 /// position is derived from this value, so there are no magic pixel offsets.
 const BTN_WIDTH: f32 = 155.0;
 
-/// Fallback vertical offset (px) used before the user first hovers over the
-/// bar.  Once the cursor visits the bar, `State::anchor_y` replaces this.
-const ANCHOR_Y_FALLBACK: f32 = 50.0;
+/// Height of the button row in logical pixels.  Setting this explicitly on the
+/// bar container makes the value authoritative: `with_dropdown_overlay` anchors
+/// the dropdown at exactly `BAR_HEIGHT` regardless of where inside the bar the
+/// cursor last rested.
+const BAR_HEIGHT: f32 = 32.0;
 
 /// Returns the menu button row (`File ▼` / `Mode ▼` / `Tools ▼`).
 ///
 /// Each button has an explicit fixed width so the horizontal dropdown positions
-/// can be computed exactly from `BTN_WIDTH + spacing`.  A `mouse_area` wrapper
-/// tracks the cursor's absolute window-Y on each move and emits `BarMoved(y)`,
-/// letting `with_dropdown_overlay` anchor the dropdown without fixed offsets.
+/// can be computed exactly from `BTN_WIDTH + spacing`.  The bar itself is
+/// wrapped in a `container` with an explicit `BAR_HEIGHT` so the overlay anchor
+/// is always the bar's bottom edge, not the cursor's position within the bar.
+///
+/// A `mouse_area` fills the space to the right of the three buttons and fires
+/// `BarMessage::Dismiss` on press, satisfying DoD-4 for the full bar width.
 ///
 /// The caller must `.map(Message::MenuBar)` before pushing into the column.
 pub fn view<'a>(state: &'a State, _mode: &'a AppMode) -> Element<'a, BarMessage> {
@@ -51,25 +56,35 @@ pub fn view<'a>(state: &'a State, _mode: &'a AppMode) -> Element<'a, BarMessage>
             })
     };
 
+    // Rightmost fill-space: clicking the empty bar strip (right of Tools) fires
+    // Dismiss so DoD-4 holds across the full bar width.
+    let empty_strip =
+        mouse_area(Space::new(Length::Fill, Length::Fill)).on_press(BarMessage::Dismiss);
+
     let bar_row = row![
         mk("ファイル（File）▼", TopMenu::File),
         mk("モード（Mode）▼", TopMenu::Mode),
         mk("ツール（Tools）▼", TopMenu::Tools),
+        empty_strip,
     ]
     .spacing(2);
 
-    mouse_area(bar_row)
-        .on_move(|pt: Point| BarMessage::BarMoved(pt.y as u32))
-        .into()
+    mouse_area(
+        container(bar_row)
+            .height(Length::Fixed(BAR_HEIGHT))
+            .width(Length::Fill),
+    )
+    .on_move(|_| BarMessage::BarMoved(BAR_HEIGHT as u32))
+    .into()
 }
 
 /// Wraps the full window `base` in a dropdown overlay when a top-level menu is open.
 ///
 /// Layer structure in `stack!`:
 /// - Layer 0 (`base`): full window content including the menu bar button row.
-/// - Layer 1 (overlay): a `column![Space(anchor_y), opaque(mouse_area(dismiss_area))]`.
-///   The leading `Space` height equals the cursor's last known absolute window-Y,
-///   so the dropdown appears just below the bar regardless of HiDPI scale or font size.
+/// - Layer 1 (overlay): a `column![Space(BAR_HEIGHT), opaque(mouse_area(dismiss_area))]`.
+///   The leading `Space` height equals `BAR_HEIGHT` (the bar's bottom edge in window-Y),
+///   so the dropdown always starts immediately below the bar regardless of cursor position.
 ///   The `Space` is NOT opaque, so pointer events in the button-row band
 ///   pass through to layer 0's buttons (allowing toggle / switch / close via the same button).
 ///   Below the spacer, `opaque(mouse_area(...))` catches outside clicks and fires `Dismiss`.
@@ -91,14 +106,15 @@ pub fn with_dropdown_overlay<'a>(
     // Horizontal offset derived from fixed button widths — adapts if BTN_WIDTH changes.
     let step = BTN_WIDTH + 2.0; // 2.0 = row spacing
     let left_offset = match open_top {
-        TopMenu::File  => 0.0,
-        TopMenu::Mode  => step,
+        TopMenu::File => 0.0,
+        TopMenu::Mode => step,
         TopMenu::Tools => 2.0 * step,
     };
 
-    // Vertical offset: cursor's absolute Y when last over the bar.  Adapts to
-    // HiDPI scaling and header-height changes without hard-coded magic numbers.
-    let top_offset = state.anchor_y.map(|y| y as f32).unwrap_or(ANCHOR_Y_FALLBACK);
+    // Vertical offset: bar's bottom edge = BAR_HEIGHT (bar is always at y=0 in
+    // iced's window-content coordinate space).  anchor_y is populated after the
+    // first hover; fall back to BAR_HEIGHT before that.
+    let top_offset = state.anchor_y.map(|y| y as f32).unwrap_or(BAR_HEIGHT);
 
     let entries = entries_for_menu(open_top, mode, wandb_auth, run_buf);
     let items = build_dropdown(entries);
@@ -112,12 +128,10 @@ pub fn with_dropdown_overlay<'a>(
     // `opaque(dropdown_panel)` absorbs clicks so they don't bubble to mouse_area.
     let dismiss_area = opaque(
         mouse_area(
-            container(
-                row![
-                    Space::new(Length::Fixed(left_offset), Length::Shrink),
-                    dropdown_panel,
-                ],
-            )
+            container(row![
+                Space::new(Length::Fixed(left_offset), Length::Shrink),
+                dropdown_panel,
+            ])
             .width(Length::Fill)
             .height(Length::Fill),
         )

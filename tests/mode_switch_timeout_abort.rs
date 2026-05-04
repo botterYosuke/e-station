@@ -148,7 +148,12 @@ fn stop_replay_send_routes_err_to_send_failed() {
     let src = read_main();
     // Use dto::Command::StopReplay to avoid matching AttemptedCommand::StopReplay.
     assert!(
-        safe_contains_near(&src, "dto::Command::StopReplay", "ModeSwitchSendFailed", 500),
+        safe_contains_near(
+            &src,
+            "dto::Command::StopReplay",
+            "ModeSwitchSendFailed",
+            500
+        ),
         "StopReplay send task must route Err(_) to Message::ModeSwitchSendFailed"
     );
 }
@@ -158,7 +163,12 @@ fn force_stop_replay_send_routes_err_to_send_failed() {
     let src = read_main();
     // Use dto::Command::ForceStopReplay to avoid matching AttemptedCommand::ForceStopReplay.
     assert!(
-        safe_contains_near(&src, "dto::Command::ForceStopReplay", "ModeSwitchSendFailed", 500),
+        safe_contains_near(
+            &src,
+            "dto::Command::ForceStopReplay",
+            "ModeSwitchSendFailed",
+            500
+        ),
         "ForceStopReplay send task must route Err(_) to Message::ModeSwitchSendFailed"
     );
 }

@@ -78,12 +78,46 @@ fn bar_message_enum_has_toggle_pick_dismiss() {
         "BarMessage must have Pick(...) variant"
     );
     assert!(
-        src.contains("Dismiss"),
-        "BarMessage must have Dismiss variant"
+        src.contains("    Dismiss,"),
+        "BarMessage must have Dismiss variant (outside click / Esc)"
+    );
+    assert!(
+        src.contains("DismissFocusLost"),
+        "BarMessage must have DismissFocusLost variant separate from Dismiss (DoD-3 log distinction)"
     );
     assert!(
         src.contains("BarMoved("),
         "BarMessage must have BarMoved(u32) variant for dynamic dropdown positioning (HIGH: fixed-pixel fix)"
+    );
+}
+
+#[test]
+fn dismiss_focus_lost_closes_menu() {
+    let src = read_menu_bar_state();
+    let fn_start = src
+        .find("pub fn update(state: State, msg: BarMessage) -> State")
+        .expect("update function must exist");
+    let fn_body = &src[fn_start..];
+    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
+    let body = &fn_body[..fn_end];
+
+    // DismissFocusLost must be in the same arm as Dismiss (both → open: None).
+    assert!(
+        body.contains("DismissFocusLost"),
+        "update() must handle BarMessage::DismissFocusLost (DoD-3: focus-lost dismiss)"
+    );
+    // It must appear alongside Dismiss so both share the open: None outcome.
+    let dismiss_arm = body
+        .find("BarMessage::Dismiss")
+        .expect("Dismiss arm must exist");
+    let after_dismiss = &body[dismiss_arm..];
+    let arm_end = after_dismiss
+        .find("=> State")
+        .expect("arm must end with => State");
+    let arm_pattern = &after_dismiss[..arm_end];
+    assert!(
+        arm_pattern.contains("DismissFocusLost"),
+        "DismissFocusLost must be in the same match arm as Dismiss (both → open: None)"
     );
 }
 
@@ -220,6 +254,22 @@ fn view_function_returns_bar_message_element() {
         src.contains("TopMenu::Tools"),
         "view() must reference TopMenu::Tools for the Tools ▼ button"
     );
+    // The empty strip to the right of the buttons must fire Dismiss so DoD-4
+    // holds for the full bar width, not just the three button areas (MEDIUM: empty bar strip).
+    let view_start = src.find("pub fn view<'a>").expect("view function must exist");
+    let view_body = &src[view_start..];
+    let view_end = view_body
+        .find("\npub fn ")
+        .unwrap_or(view_body.len());
+    let vb = &view_body[..view_end];
+    assert!(
+        vb.contains("BarMessage::Dismiss"),
+        "view() must emit BarMessage::Dismiss for the empty bar strip right of Tools (DoD-4)"
+    );
+    assert!(
+        vb.contains("Length::Fill") || vb.contains("Fill"),
+        "view() must have a fill-width element covering the empty bar strip (DoD-4)"
+    );
 }
 
 #[test]
@@ -242,9 +292,9 @@ fn with_dropdown_overlay_function_exists() {
     // The overlay column must start with a plain Space (click-through for buttons),
     // followed by the dismiss area. Pattern: `let overlay = column![Space::new(...), dismiss_area]`.
     // Find the overlay column declaration and verify Space comes before the dismiss element.
-    let overlay_col_start = src
-        .find("let overlay = column!")
-        .expect("overlay must be built as `let overlay = column![...]` for button-row click-through");
+    let overlay_col_start = src.find("let overlay = column!").expect(
+        "overlay must be built as `let overlay = column![...]` for button-row click-through",
+    );
     let after_col = &src[overlay_col_start..];
     let col_end = after_col.find("];").unwrap_or(after_col.len());
     let col_body = &after_col[..col_end];
@@ -315,9 +365,7 @@ fn esc_dismiss_is_wired_in_go_back_handler() {
         .find("Message::GoBack =>")
         .expect("Message::GoBack handler must exist in main.rs");
     let after = &src[go_back_start..];
-    let end = after
-        .find("\n            Message::")
-        .unwrap_or(after.len());
+    let end = after.find("\n            Message::").unwrap_or(after.len());
     let body = &after[..end];
     assert!(
         body.contains("menu_bar") && body.contains("BarMessage::Dismiss"),
@@ -332,6 +380,12 @@ fn focus_lost_dismiss_subscription_exists() {
     assert!(
         src.contains("window::Event::Unfocused") || src.contains("iced::window::Event::Unfocused"),
         "subscription() must handle window Unfocused event to dismiss the Linux menu bar (DoD-3 focus-lost)"
+    );
+    // The Unfocused arm must emit DismissFocusLost — not the generic Dismiss —
+    // so focus-lost and outside-click can be told apart in logs (LOW: log distinction).
+    assert!(
+        src.contains("DismissFocusLost"),
+        "Unfocused subscription must emit BarMessage::DismissFocusLost, not generic Dismiss (DoD-3 log)"
     );
 }
 
