@@ -7,7 +7,9 @@ mod connector;
 mod layout;
 mod logger;
 mod mask_secrets;
-#[cfg(target_os = "linux")]
+// `menu` exposes `tools_actions_for_state`, `MenuEntry`, and `Action` used by
+// both the Linux widget menu bar and the cross-platform `native_menu::attach`
+// Tools enable/disable computation (H5). Cross-platform.
 mod menu;
 #[cfg(target_os = "linux")]
 mod menu_bar_state;
@@ -107,6 +109,18 @@ pub static MODE_SWITCHING: std::sync::atomic::AtomicBool =
 pub static SUBMIT_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Phase 3-A C2: handle to the in-flight `submit_run.py` child process.
+///
+/// `submit_wandb_run` stores the spawned `Child` here so that the W&B Cancel
+/// path (`modal::wandb_submit::Action::Cancel`) can reach in and kill the
+/// subprocess. On Windows `Child::kill()` is effectively `TerminateProcess`
+/// (immediate kill — no SIGTERM/grace-period semantics). On Unix tokio's
+/// `Child::kill` also issues SIGKILL, so the 5 second grace period documented
+/// in 統一決定 46 is best-effort and only meaningful if the kernel itself
+/// takes time to reap the process.
+pub static SUBMIT_CHILD: tokio::sync::Mutex<Option<tokio::process::Child>> =
+    tokio::sync::Mutex::const_new(None);
+
 /// F9d: W&B 送信エラーの種類。`examples/wandb/submit_run.py` の exit code に対応する。
 #[derive(Debug, Clone)]
 pub enum WandbSubmitError {
@@ -205,8 +219,25 @@ async fn submit_wandb_run(
     project: String,
     run_name: String,
     tags: String,
+    notes: String,
 ) -> Result<String, WandbSubmitError> {
     use tokio::process::Command;
+
+    // H8: 非UTF-8 path で空文字列に silent fallback せず、明示的にエラーを返す。
+    // 旧コードは `unwrap_or("")` で run-buffer を `""` に潰し submit_run.py を
+    // run-buffer なしで起動する silent failure を起こしていた。
+    let script_str = script.to_str().ok_or_else(|| {
+        WandbSubmitError::ProcessFailed(format!(
+            "path contains non-UTF-8 characters: {}",
+            script.display()
+        ))
+    })?;
+    let run_buffer_str = run_buffer_dir.to_str().ok_or_else(|| {
+        WandbSubmitError::ProcessFailed(format!(
+            "path contains non-UTF-8 characters: {}",
+            run_buffer_dir.display()
+        ))
+    })?;
 
     let mut cmd = Command::new("uv");
     cmd.args([
@@ -214,9 +245,9 @@ async fn submit_wandb_run(
         "--with",
         "wandb",
         "python",
-        script.to_str().unwrap_or("examples/wandb/submit_run.py"),
+        script_str,
         "--run-buffer",
-        run_buffer_dir.to_str().unwrap_or(""),
+        run_buffer_str,
     ]);
     if !project.is_empty() {
         cmd.args(["--project", &project]);
@@ -227,10 +258,45 @@ async fn submit_wandb_run(
     if !tags.is_empty() {
         cmd.args(["--tags", &tags]);
     }
-    let output = cmd
-        .output()
-        .await
+    // M6: notes を `--notes` で渡す。空文字列のときは省略する。
+    if !notes.is_empty() {
+        cmd.args(["--notes", &notes]);
+    }
+    // Phase 3-A C2: spawn explicitly so the Child handle can be stored in
+    // SUBMIT_CHILD. The Cancel path takes the handle out and calls kill()
+    // to terminate the subprocess. Pipe stdout/stderr so wait_with_output()
+    // collects the captured streams the same way `.output()` did.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = cmd
+        .spawn()
         .map_err(|e| WandbSubmitError::ProcessFailed(format!("spawn failed: {e}")))?;
+    {
+        let mut slot = SUBMIT_CHILD.lock().await;
+        *slot = Some(child);
+    }
+    // Take the child back out so that wait_with_output() consumes it. The
+    // Cancel path may have already taken the slot in the interim and killed
+    // the process; in that case wait_with_output simply observes the exit
+    // status of the killed child.
+    let child = {
+        let mut slot = SUBMIT_CHILD.lock().await;
+        match slot.take() {
+            Some(c) => c,
+            None => {
+                // Cancel reached the slot first and consumed it. Surface as a
+                // generic ProcessFailed so the caller's idempotent reset
+                // (SUBMIT_IN_FLIGHT.store(false) in WandbSubmitResult) runs.
+                return Err(WandbSubmitError::ProcessFailed(
+                    "cancelled before completion".to_string(),
+                ));
+            }
+        }
+    };
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| WandbSubmitError::ProcessFailed(format!("wait failed: {e}")))?;
 
     if output.status.success() {
         // 最終 stdout 行から URL を抽出する
@@ -262,10 +328,22 @@ async fn wandb_login(api_key: String) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("spawn failed: {e}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(api_key.as_bytes()).await;
-        let _ = stdin.write_all(b"\n").await;
-    }
+    // M8: stdin write の失敗を握り潰さず Result で伝播する。
+    // 旧コードは `let _ = stdin.write_all(...).await` で pipe broken 等の
+    // OS-level I/O 失敗を黙殺していたため、原因不明のログイン失敗の温床だった。
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "stdin not piped".to_string())?;
+    stdin
+        .write_all(api_key.as_bytes())
+        .await
+        .map_err(|e| format!("stdin write failed: {e}"))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|e| format!("stdin write failed: {e}"))?;
+    drop(stdin);
 
     let output = child
         .wait_with_output()
@@ -1246,6 +1324,15 @@ enum Message {
     WandbLogoutResult(Result<(), String>),
     /// F9e: バッファ削除確認後の実行。
     ClearRunBufferConfirmed,
+    /// M3 (R1 Phase 3-C): `RunBufferIndex::scan_async` の完了通知。
+    /// 結果でメニュー有効化判定 (`run_buffer`) を更新し、トースト表示も行う。
+    RunBufferIndexScanned {
+        index: wandb_auth::RunBufferIndex,
+        /// `OpenSubmissionLog` 経由ならトーストを出す。`true` のとき `notifications` に push する。
+        show_toast: bool,
+    },
+    /// M3 (R1 Phase 3-C): `tokio::fs::remove_dir_all` の完了通知。
+    RunBufferCleared(Result<(), String>),
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -2324,7 +2411,15 @@ impl Flowsurface {
                 // User chose "保存して終了" — save then exit.
                 // BC-5: if save fails, abort the exit and show an error (do not discard data).
                 self.confirm_dialog = None;
-                let windows = self.pending_exit_windows.take().unwrap_or_default();
+                // F-M1 (R6): require a prior ExitRequested dirty check. `unwrap_or_default()`
+                // here would silently turn `None` into an empty HashMap and corrupt the saved
+                // layout. Log a warning and abort instead.
+                let Some(windows) = self.pending_exit_windows.take() else {
+                    log::warn!(
+                        "[SaveAndExit] pending_exit_windows is None — SaveAndExit dispatched without prior ExitRequested dirty check"
+                    );
+                    return Task::none();
+                };
 
                 let Some(json) = self.build_state_json(&windows) else {
                     // replay mode has no state to save
@@ -2336,22 +2431,28 @@ impl Flowsurface {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                if let Some(p) = &current_path
-                    && let Err(e) = std::fs::write(p, json.as_bytes())
-                {
-                    log_save_error(&SaveError::IoError(e.kind()), p);
-                    self.notifications.push(Toast::error(
-                        "保存に失敗しました。再試行してください。".to_string(),
-                    ));
-                    self.pending_exit_windows = Some(windows);
-                    let dialog = screen::ConfirmDialog::new(
-                        "未保存の変更があります。".to_string(),
-                        Box::new(Message::DiscardAndExit),
-                    )
-                    .with_confirm_btn_text("破棄して終了".to_string())
-                    .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
-                    self.confirm_dialog = Some(dialog);
-                    return Task::none();
+                if let Some(p) = &current_path {
+                    if let Err(e) = std::fs::write(p, json.as_bytes()) {
+                        log_save_error(&SaveError::IoError(e.kind()), p);
+                        self.notifications.push(Toast::error(
+                            "保存に失敗しました。再試行してください。".to_string(),
+                        ));
+                        self.pending_exit_windows = Some(windows);
+                        let dialog = screen::ConfirmDialog::new(
+                            "未保存の変更があります。".to_string(),
+                            Box::new(Message::DiscardAndExit),
+                        )
+                        .with_confirm_btn_text("破棄して終了".to_string())
+                        .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                        self.confirm_dialog = Some(dialog);
+                        return Task::none();
+                    }
+                    // F-H1 (R6 / A-7): the named-doc write succeeded — update the dirty
+                    // baseline immediately. Without this, a subsequent saved-state.json
+                    // failure still triggers `iced::exit()` (current_path.is_some() branch)
+                    // but leaves `last_saved_bytes` stale, violating the
+                    // "明示 Save 直後に last_saved_bytes 更新" contract.
+                    self.last_saved_bytes = Some(json.as_bytes().to_vec());
                 }
 
                 // Also write to saved-state.json (auto-restore slot) and update last_saved_bytes.
@@ -3137,7 +3238,7 @@ impl Flowsurface {
             }
             // ── Native OS menu bar ──────────────────────────────────────────
             Message::NativeMenuSetup(raw_id) => {
-                native_menu::attach(raw_id, app_mode());
+                native_menu::attach(raw_id, app_mode(), &self.wandb_auth, &self.run_buffer);
                 return Task::none();
             }
             Message::NativeMenuAction(action) => {
@@ -3169,6 +3270,12 @@ impl Flowsurface {
                         );
                     }
                     Action::Save => {
+                        // F-M2 (R6): suppress when a confirm_dialog is already on screen.
+                        // Otherwise Ctrl+S during a dirty/overwrite confirm spawns a second
+                        // rfd save_file() dialog, multi-launching the OS picker.
+                        if self.confirm_dialog.is_some() {
+                            return Task::none();
+                        }
                         // If a current path is known, write to it directly.
                         // Otherwise fall back to the Save As dialog.
                         let path = match CURRENT_PATH.lock() {
@@ -3202,6 +3309,10 @@ impl Flowsurface {
                         }
                     }
                     Action::SaveAs => {
+                        // F-M2 (R6): see Action::Save — same dialog re-entrancy guard.
+                        if self.confirm_dialog.is_some() {
+                            return Task::none();
+                        }
                         return Task::perform(
                             async {
                                 rfd::AsyncFileDialog::new()
@@ -3255,11 +3366,8 @@ impl Flowsurface {
                         // F9c: モーダルを表示してユーザーに project / run_name / tags を
                         // 確認・編集させてから送信する（P9 spec「メニュー押下 → WandbSubmitModal 表示」）
                         if self.wandb_submit_modal.is_none() {
-                            let auth_display = match self.wandb_auth.method.as_str() {
-                                "env" => modal::wandb_submit::AuthDisplayState::Env,
-                                "netrc" => modal::wandb_submit::AuthDisplayState::Netrc,
-                                _ => modal::wandb_submit::AuthDisplayState::NotSet,
-                            };
+                            let auth_display =
+                                modal::wandb_submit::AuthDisplayState::from(&self.wandb_auth);
                             self.wandb_submit_modal =
                                 Some(modal::wandb_submit::WandbSubmitModal::new(
                                     &run_id,
@@ -3289,19 +3397,16 @@ impl Flowsurface {
                         return Task::none();
                     }
                     Action::OpenSubmissionLog => {
-                        // F9e V1: 最新 run-buffer の内容をトーストで表示
+                        // F9e V1 / M3: 最新 run-buffer の内容を async でスキャンしてトーストで表示。
+                        // iced update loop をブロックしないよう Task::perform 経由で scan_async を呼ぶ。
                         let base = data::data_path(Some("run-buffer"));
-                        let idx = wandb_auth::RunBufferIndex::scan(&base);
-                        if let Some(ref latest) = idx.latest_completed {
-                            self.notifications.push(Toast::info(format!(
-                                "最新 run: {latest} (completed runs: {})",
-                                idx.total
-                            )));
-                        } else {
-                            self.notifications
-                                .push(Toast::info("送信履歴がまだありません".to_string()));
-                        }
-                        return Task::none();
+                        return Task::perform(
+                            async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
+                            |index| Message::RunBufferIndexScanned {
+                                index,
+                                show_toast: true,
+                            },
+                        );
                     }
                     Action::ClearRunBuffer => {
                         if self.confirm_dialog.is_none() {
@@ -3829,17 +3934,32 @@ impl Flowsurface {
                         Message::NativeSaveAsPath,
                     );
                 }
-                if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
-                    log::warn!("Failed to write imported state: {e}");
-                    self.notifications
-                        .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
-                    return Task::none();
-                }
-                match CURRENT_PATH.lock() {
-                    Ok(mut guard) => *guard = Some(new_path),
-                    Err(poisoned) => *poisoned.into_inner() = Some(new_path),
-                }
-                return self.restart();
+                // R2-M1 (revert of R6 F-M4): saved-state.json is the file that
+                // `Flowsurface::new()` reads on restart. If this mirror write fails
+                // we MUST NOT update CURRENT_PATH and MUST NOT restart() — doing so
+                // would reload the OLD saved-state.json while CURRENT_PATH points to
+                // the NEW file, so the next Ctrl+S would silently overwrite the new
+                // file with the old layout. Abort cleanly with warn + toast and let
+                // the user retry from the menu.
+                return match data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
+                    Ok(()) => {
+                        match CURRENT_PATH.lock() {
+                            Ok(mut guard) => *guard = Some(new_path),
+                            Err(poisoned) => *poisoned.into_inner() = Some(new_path),
+                        }
+                        self.restart()
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[SaveAndOpenFile] failed to write saved-state.json after named-doc save: {e} — aborting open to keep CURRENT_PATH consistent"
+                        );
+                        self.notifications.push(Toast::error(
+                            "saved-state.json への書き込みに失敗しました。開く処理を中止します。"
+                                .to_string(),
+                        ));
+                        Task::none()
+                    }
+                };
             }
             // F7: SwitchModeWithSpecs — window specs collected, perform dirty check for live→replay
             Message::SwitchModeWithSpecs { target, windows } => {
@@ -4691,9 +4811,19 @@ impl Flowsurface {
                             self.notifications
                                 .push(Toast::info(format!("W&B に送信しました: {url}")));
                         }
-                        // run-buffer スキャンを更新する
+                        // R2-H2 / M3: run-buffer スキャンを async で行い iced
+                        // update スレッドをブロックしない。完了通知は
+                        // Message::RunBufferIndexScanned ハンドラ側で
+                        // refresh_tools_enable を実行するため戻り値の Task に
+                        // 統合する。
                         let base = data::data_path(Some("run-buffer"));
-                        self.run_buffer = wandb_auth::RunBufferIndex::scan(&base);
+                        return Task::perform(
+                            async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
+                            |index| Message::RunBufferIndexScanned {
+                                index,
+                                show_toast: false,
+                            },
+                        );
                     }
                     Err(ref e) => {
                         let msg = match e {
@@ -4735,6 +4865,8 @@ impl Flowsurface {
             // F9d: W&B check_auth subprocess 完了 — wandb_auth を更新する
             Message::WandbAuthRefreshed(state) => {
                 self.wandb_auth = state;
+                // H5: ネイティブメニュー Tools 項目の enable/disable を再計算
+                native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
                 return Task::none();
             }
             // F9c: 送信モーダル内部メッセージ
@@ -4742,13 +4874,52 @@ impl Flowsurface {
                 if let Some(modal) = self.wandb_submit_modal.as_mut() {
                     match modal.update(msg) {
                         Some(modal::wandb_submit::Action::Cancel) => {
+                            // Phase 3-A C2: dismiss the modal AND release the
+                            // submit_in_flight reentrancy guard. If a subprocess
+                            // is currently running, take its handle out of
+                            // SUBMIT_CHILD and kill it. On Windows this is an
+                            // immediate TerminateProcess; on Unix tokio's
+                            // Child::kill also issues SIGKILL, so the 5 second
+                            // grace period documented in 統一決定 46 is
+                            // best-effort and depends on kernel reaping.
+                            // R2-M3: SUBMIT_IN_FLIGHT のリセットは kill が
+                            // 完了した「後」に行う。先にリセットすると、
+                            // kill 完了前に新しい Submit が再入できてしまい
+                            // 同じ run-buffer に対して 2 つの subprocess が
+                            // 競合する窓ができる。kill().await 完了後に store
+                            // することで、新しい Submit は古い subprocess の
+                            // 終焉を必ず観測する。idempotent reset (重複 store
+                            // is safe; cf. submit_in_flight_is_idempotent_on_double_release)
                             self.wandb_submit_modal = None;
+                            return Task::perform(
+                                async {
+                                    let mut slot = SUBMIT_CHILD.lock().await;
+                                    if let Some(mut child) = slot.take() {
+                                        let _ = child.kill().await;
+                                    }
+                                    SUBMIT_IN_FLIGHT
+                                        .store(false, std::sync::atomic::Ordering::Release);
+                                },
+                                |()| Message::Tick(std::time::Instant::now()),
+                            )
+                            .discard();
                         }
                         Some(modal::wandb_submit::Action::Submit {
                             project,
                             run_name,
                             tags,
+                            notes,
                         }) => {
+                            // R2-M1: latest_completed が無い状態で Submit が
+                            // 走るのは仕様上ありえないが、防御的に no-op する。
+                            // SUBMIT_IN_FLIGHT を立てる前に弾くことで「送信中」
+                            // 状態に入って永久ロックされる事故を防ぐ。
+                            if self.run_buffer.latest_completed.is_none() {
+                                log::warn!(
+                                    "[wandb] Submit dispatched with no completed run; ignoring"
+                                );
+                                return Task::none();
+                            }
                             // ガード: 再入禁止
                             if SUBMIT_IN_FLIGHT
                                 .compare_exchange(
@@ -4774,6 +4945,7 @@ impl Flowsurface {
                                         project,
                                         run_name,
                                         tags,
+                                        notes,
                                     )
                                     .await
                                 },
@@ -4855,23 +5027,56 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
-            // F9e: バッファ削除確認後
+            // F9e: バッファ削除確認後 — M3: tokio::fs で async 削除する。
             Message::ClearRunBufferConfirmed => {
                 self.confirm_dialog = None;
                 let base = data::data_path(Some("run-buffer"));
-                if base.exists() {
-                    match std::fs::remove_dir_all(&base) {
-                        Ok(()) => {
-                            self.run_buffer = wandb_auth::RunBufferIndex::empty();
-                            self.notifications
-                                .push(Toast::info("run-buffer を削除しました".to_string()));
+                return Task::perform(
+                    async move {
+                        match tokio::fs::metadata(&base).await {
+                            Ok(_) => tokio::fs::remove_dir_all(&base)
+                                .await
+                                .map_err(|e| e.to_string()),
+                            // 元から存在しない場合は成功扱い（冪等）。
+                            Err(_) => Ok(()),
                         }
-                        Err(e) => {
-                            self.notifications
-                                .push(Toast::error(format!("削除失敗: {e}")));
-                        }
+                    },
+                    Message::RunBufferCleared,
+                );
+            }
+            // M3: tokio::fs::remove_dir_all の完了通知。
+            Message::RunBufferCleared(result) => {
+                match result {
+                    Ok(()) => {
+                        self.run_buffer = wandb_auth::RunBufferIndex::empty();
+                        // H5: Tools 項目 enable/disable を再計算
+                        native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
+                        self.notifications
+                            .push(Toast::info("run-buffer を削除しました".to_string()));
+                    }
+                    Err(e) => {
+                        self.notifications
+                            .push(Toast::error(format!("削除失敗: {e}")));
                     }
                 }
+                return Task::none();
+            }
+            // M3: scan_async の完了通知。run_buffer 更新 + （任意で）トースト表示。
+            Message::RunBufferIndexScanned { index, show_toast } => {
+                if show_toast {
+                    if let Some(ref latest) = index.latest_completed {
+                        self.notifications.push(Toast::info(format!(
+                            "最新 run: {latest} (completed runs: {})",
+                            index.total
+                        )));
+                    } else {
+                        self.notifications
+                            .push(Toast::info("送信履歴がまだありません".to_string()));
+                    }
+                }
+                self.run_buffer = index;
+                // H5: Tools 項目 enable/disable を再計算
+                native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
                 return Task::none();
             }
         }
@@ -5040,24 +5245,37 @@ impl Flowsurface {
             after_second_password
         };
 
-        let after_wandb_submit = if let Some(submit) = &self.wandb_submit_modal {
-            let submit_view = submit.view().map(Message::WandbSubmitMsg);
-            main_dialog_modal(
-                after_replay_form,
-                submit_view,
-                Message::WandbSubmitMsg(modal::wandb_submit::Message::Cancel),
-            )
+        // Phase 3-A H7: W&B submit / signin modals must only render on the
+        // main window. Popout windows (detached panes) host neither modal
+        // and would otherwise duplicate the dialog across every open window.
+        // The confirm_dialog overlay above (`id == self.main_window.id`)
+        // already follows this pattern; mirror it here so the symmetry holds.
+        let after_wandb_submit = if id == self.main_window.id {
+            if let Some(submit) = &self.wandb_submit_modal {
+                let submit_view = submit.view().map(Message::WandbSubmitMsg);
+                main_dialog_modal(
+                    after_replay_form,
+                    submit_view,
+                    Message::WandbSubmitMsg(modal::wandb_submit::Message::Cancel),
+                )
+            } else {
+                after_replay_form
+            }
         } else {
             after_replay_form
         };
 
-        if let Some(signin) = &self.wandb_signin_modal {
-            let signin_view = signin.view().map(Message::WandbSignInMsg);
-            main_dialog_modal(
-                after_wandb_submit,
-                signin_view,
-                Message::WandbSignInMsg(modal::wandb_signin::Message::Cancel),
-            )
+        if id == self.main_window.id {
+            if let Some(signin) = &self.wandb_signin_modal {
+                let signin_view = signin.view().map(Message::WandbSignInMsg);
+                main_dialog_modal(
+                    after_wandb_submit,
+                    signin_view,
+                    Message::WandbSignInMsg(modal::wandb_signin::Message::Cancel),
+                )
+            } else {
+                after_wandb_submit
+            }
         } else {
             after_wandb_submit
         }
@@ -5106,11 +5324,9 @@ impl Flowsurface {
         #[cfg(target_os = "linux")]
         let linux_menu_bar_dismiss =
             iced::event::listen_with(|event, _status, _window| match event {
-                iced::Event::Window(iced::window::Event::Unfocused) => {
-                    Some(Message::MenuBar(
-                        crate::menu_bar_state::BarMessage::DismissFocusLost,
-                    ))
-                }
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::MenuBar(
+                    crate::menu_bar_state::BarMessage::DismissFocusLost,
+                )),
                 _ => None,
             });
 

@@ -453,4 +453,15 @@ fn escape_on_confirm_clears_pending_state() {
         body.contains("pending_exit_windows = None"),
         "GoBack with confirm_dialog must clear pending_exit_windows (C-1)"
     );
+    // F-M3 (R6): the unified clear must also reset the F7 mode-switch pending state.
+    // Plan invariant 10 (L796): GoBack performs a one-shot clear of all pending fields
+    // so a subsequent SwitchMode is not orphaned.
+    assert!(
+        body.contains("pending_mode_switch = None"),
+        "GoBack with confirm_dialog must clear pending_mode_switch (F7 orphan prevention)"
+    );
+    assert!(
+        body.contains("_mode_switch_guard = None"),
+        "GoBack with confirm_dialog must clear _mode_switch_guard (F7 orphan prevention)"
+    );
 }

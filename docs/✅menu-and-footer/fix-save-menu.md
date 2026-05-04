@@ -769,3 +769,225 @@ cargo fmt --check        → OK
 cargo clippy --workspace -- -D warnings  → OK
 cargo test --workspace   → 全テスト GREEN
 ```
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド5サニティ)
+
+**対象フェーズ**: F1+F2+F3（F4〜F9 積み上げ後の不変条件再検証）
+
+並列レビュアー: `rust-reviewer` + `silent-failure-hunter` の 2 体。
+
+### 結果
+
+CRITICAL: 0 / HIGH: 0 / **F1+F2+F3 の不変条件は全 10 項目で収束維持**。
+
+検証した不変条件:
+
+1. CURRENT_PATH poison リカバリ（全 7 箇所で `into_inner()` パターン維持）
+2. accelerator 二重発火回避（`linux_keyboard_subscription` が `cfg(target_os="linux")` 限定 + `app_mode` ガード）
+3. Quit → ExitRequested 経由（`window::collect_window_specs` 経由で dirty チェック・保存フローを通過）
+4. build_state_json 決定論性（`State` は `Vec<Layout>` + フラット構造、HashMap/FxHashMap 退行なし）
+5. last_saved_bytes 更新規則（明示 Save / 自動保存 hook で同パスを通す）
+6. pending_save_path 削除（U-H1 で削除されたフィールドが F4〜F9 で復活していない）
+7. MENU_IDS poison / init_for_hwnd 失敗時の `None` リセット
+8. `--saved-state` 非 UTF-8 ガード（`to_str() == None` で `log::error!` + default fallback）
+9. confirm_dialog ガード（pending state を立てる前に `confirm_dialog.is_none()` を要求）
+10. GoBack の pending 一括クリア（`pending_open_file` / `pending_exit_windows` / `pending_mode_switch` / `_mode_switch_guard`）
+
+### 副次的に発見された F9 経路の指摘（F1+F2+F3 スコープ外）
+
+| ID | path:line | 重要度 | 内容 |
+|----|-----------|--------|------|
+| R5-M1 | `src/main.rs:4866` | MEDIUM | `ClearRunBufferConfirmed` の `remove_dir_all` 失敗アームに `log::warn!` 抜け（BC-5 ログレベル契約違反）。リリースビルドで削除失敗が `flowsurface-current.log` に残らない |
+| R5-M2 | `src/main.rs:4832`, `4856` | MEDIUM | `WandbLogoutConfirmed` / `ClearRunBufferConfirmed` が `confirm_dialog = None` するが `pending_exit_windows` / `pending_open_file` / `pending_mode_switch` をクリアしない。`confirm_dialog.is_none()` ガードで現時点は実害なしだが、将来そのガードを緩めた場合の orphan リスク |
+| R5-L1 | `src/main.rs:266` | LOW | `wandb_login` の `stdin.write_all` を `let _` で握り潰し。下流で `Err` 変換されるため silent failure としては成立せず、デバッグ情報のみ消失 |
+
+これらは F9 セクション側で対処予定（または F9 のレビュー反映ブロックへ繰越）。F1+F2+F3 のスコープには影響しない。
+
+### 検証コマンド
+
+両並列レビュアーの事前検証で:
+
+```
+cargo check --workspace                  → PASS
+cargo clippy --workspace -- -D warnings  → 警告なし
+cargo fmt --check                        → 差分なし
+cargo test --workspace                   → 全 234+ テスト PASS
+```
+
+**最終状態**: F1+F2+F3 は R4 で確立した収束を R5 サニティでも維持。F4〜F9 の積み上げによる退行なし。
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド6 — F4+F5 単独ループ)
+
+**対象フェーズ**: F4（dirty 確認）, F5（上書き確認）
+
+並列レビュアー: `rust-reviewer` + `silent-failure-hunter`（5 件指摘 / HIGH 1 + MEDIUM 4）。
+
+### 解消した指摘
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| F-H1 | HIGH | `Message::SaveAndExit` で CURRENT_PATH への `std::fs::write` 成功直後に `last_saved_bytes` を更新していなかった。後続の `write_json_to_saved_state_disk` が失敗しても `current_path.is_some() \|\| saved_ok` で `iced::exit()` するため、A-7「明示 Save 直後に `last_saved_bytes` 更新」契約に反していた | 名前付きドキュメント書き込み成功直後に `self.last_saved_bytes = Some(json.as_bytes().to_vec());` を追加（`src/main.rs` SaveAndExit アーム）。`tests/save_error_classification.rs::save_and_exit_updates_last_saved_bytes_on_current_path_write` で固定 |
+| F-M1 | MEDIUM | `let windows = self.pending_exit_windows.take().unwrap_or_default();` が `None` を空 HashMap に化けさせ、`build_state_json` が空ウィンドウ配置のまま保存して silent corruption を起こす | `let-else` パターンに変更し、`None` 時は `log::warn!("[SaveAndExit] pending_exit_windows is None — SaveAndExit dispatched without prior ExitRequested dirty check");` を出力した上で `return Task::none();`（`src/main.rs` SaveAndExit アーム）。`tests/save_error_classification.rs::save_and_exit_logs_warn_when_pending_exit_windows_is_none` で固定 |
+| F-M2 | MEDIUM | `Action::Save` / `Action::SaveAs` ハンドラに `confirm_dialog.is_none()` ガードがなく、confirm dialog 表示中に Ctrl+S / Ctrl+Shift+S を押すと rfd の `save_file()` ダイアログが多重起動する隙があった | 両アーム冒頭に `if self.confirm_dialog.is_some() { return Task::none(); }` を追加（`src/main.rs`）。`tests/save_error_classification.rs::action_save_and_save_as_guard_against_existing_dialog` で固定 |
+| F-M3 | MEDIUM | `tests/dirty_detection.rs::escape_on_confirm_clears_pending_state` が `pending_open_file` / `pending_exit_windows` のクリアのみ検査し、F7 経路の `pending_mode_switch` / `_mode_switch_guard` クリア不変条件（計画書 L796 不変条件 10）を pin していなかった | 同テストに `pending_mode_switch = None` と `_mode_switch_guard = None` の assert を追加（`tests/dirty_detection.rs`）。コード側は既に対応済みのためテスト追加のみ |
+| F-M4 | MEDIUM | `Message::SaveAndOpenFile` で CURRENT_PATH=Some(p) かつ `std::fs::write(p, json)` 成功 → `data::write_json_to_file(&json, SAVED_STATE_PATH)` 失敗時、`pending_open_file` は `.take()` 済みで `return Task::none()` → open 中止 + confirm dialog も復元されず retry 不能だった | (a) 案を採用：saved-state.json 失敗を非 fatal として open 続行。`return Task::none()` を撤去し、warn ログ + toast 通知の後 `restart()` で open を続行する（`NativeSaveComplete` の非 fatal パスと整合）。toast メッセージも「saved-state.json への書き込みに失敗しましたが、開く処理は続行します」に更新（`src/main.rs` SaveAndOpenFile アーム）。`tests/save_error_classification.rs::save_and_open_file_continues_when_saved_state_write_fails` で固定 |
+
+### 検証結果
+
+```
+cargo fmt --check                            → 差分なし
+cargo clippy --workspace -- -D warnings      → 警告なし
+cargo test --test dirty_detection            → 16 passed; 0 failed
+cargo test --test save_error_classification  → 12 passed; 0 failed
+cargo test --test save_as_overwrite_confirm  →  5 passed; 0 failed
+cargo build                                  → 成功
+```
+
+> **注記**: `cargo test --workspace` は F9 範囲の `meta_json_struct_defined_in_wandb_auth_rs`
+> が pre-existing で FAIL する。これは F4/F5 ループ範囲外であり、本ラウンドで触れていない
+> （オーケストレーターと事前合意済み）。F4/F5 関連の上記 3 テストファイルは全て GREEN。
+
+**最終状態**: F-H1 / F-M1〜F-M4 を全て解消。F4 + F5 不変条件は本ラウンドで再収束。
+
+### R2 追加修正（サニティチェック後）
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| R2-M1 | MEDIUM | F-M4 fix が saved-state.json 書き込み失敗時も `CURRENT_PATH = new_path` 更新 + `restart()` を実行 → 旧 saved-state.json をロードしつつ CURRENT_PATH は新ファイルを指す不整合 → 次の Ctrl+S が旧レイアウトで新ファイルを上書きする silent corruption | Err 時は abort（CURRENT_PATH 更新と restart() をスキップ。warn + toast のみ）。Ok 時のみ CURRENT_PATH 更新 + restart() に分岐 (`src/main.rs` SaveAndOpenFile, R1 で追加したテストをリネーム) |
+
+R1 の F-M4「saved-state.json 失敗を非 fatal 化（restart で open 続行）」は **revert**。理由：restart() 経路では新 layout を渡す手段がないため、結果として user 期待（new_path の内容で開く）と実際の挙動（旧 saved-state がロード）が乖離する。saved-state.json 書き込み失敗は I/O 異常時のみ起きるレアケースのため abort + toast retry 通知が妥当。
+
+R2 検証:
+
+```
+cargo fmt --check                            → 差分なし
+cargo clippy --workspace -- -D warnings      → 警告なし
+cargo test --test dirty_detection            → 16 passed; 0 failed
+cargo test --test save_error_classification  → 12 passed; 0 failed
+cargo test --test save_as_overwrite_confirm  →  5 passed; 0 failed
+cargo build                                  → 成功
+```
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド5) — F9（W&B Submit メニュー）
+
+**対象フェーズ**: F9a / F9b / F9c / F9d / F9e（W&B Submit メニュー全体）
+**進め方**: review-fix-loop R1 → 6 並列レビュアー（rust-reviewer / silent-failure-hunter / iced-architecture-reviewer / type-design-analyzer / ws-compatibility-auditor / general-purpose）→ 集約 CRITICAL 3 / HIGH 9 / MEDIUM 15 / LOW 6 → `/parallel-agent-dev` で 4 phase × 並列消化
+
+### 解消した CRITICAL（3件）
+
+| ID | 内容 | 対処 |
+|----|------|------|
+| C1 | `python/engine/run_buffer.py` に `atexit` / SIGTERM handler が**完全未実装**（計画書 F9a-DoD で「✅完了」と記録されていたが実装欠落）。engine 異常終了時に `aborted` 書き出しが効かず、`submit_run.py` が GUI 起動より先に走ると常に reject | `RunBuffer.__init__` で `atexit.register` ＋ Posix `signal.signal(SIGTERM, ...)` を登録。module-level `_ACTIVE_BUFFERS: WeakSet` で複数 buffer に対応。previous handler を chain。`finish()`/`abort()` 完了時に deregister。`_best_effort_write_aborted` フォールバック追加。Posix の SIGTERM テスト（subprocess + `os.kill`）と atexit テスト 2 件追加 |
+| C2 | `SUBMIT_IN_FLIGHT` が `Action::Cancel` 経路でリセットされない → 送信中キャンセルで永久ロック。subprocess kill も未実装（P9 §送信モーダル UI 仕様違反） | `SUBMIT_CHILD: tokio::sync::Mutex<Option<tokio::process::Child>>` global を追加し `submit_wandb_run` を spawn 化（`Child` を slot 経由で wait）。`Action::Cancel` で `SUBMIT_IN_FLIGHT.store(false, Release)` 即時実行 + `SUBMIT_CHILD.lock().take().kill()`。Cancel/完走の race を「slot を先に take した側が勝つ」二段構えで吸収（idempotent reset） |
+| C3 | `MaskedLine` newtype が骨抜き — `src/modal/wandb_submit.rs` と `src/wandb_submit_proc.rs` で `mask_secrets`/`MaskedLine` 二重定義。`log_lines: Vec<String>` で raw 格納。統一決定 44「全出口で MaskedLine 通過」型強制が完全迂回 | `src/mask_secrets.rs` を単一定義に統一。Bearer/bearer パターン (`(?i)(bearer)(\s+)\S+`) を追加し `wandb_submit_proc.rs` の独自実装を削除。`modal/wandb_submit.rs::log_lines` を **`Vec<MaskedLine>`** に変更し raw String 格納をコンパイルレベルで禁止。`MaskedLine` に `Display`/`AsRef<str>` 追加で view 互換 |
+
+### 解消した HIGH（9件）
+
+| ID | 内容 | 対処 |
+|----|------|------|
+| H1 | `python/engine/pii_scrub.py` と `examples/wandb/pii_scrub.py` の allow-list 完全乖離（`instrument_id` 等で `assert_no_forbidden_keys` が ValueError → exit 6） | engine 側を正本として両ファイル完全一致化。`pii_scrub` 関数名・シグネチャ・契約を統一（M12 と統合）。CI lint テスト `test_pii_allowlist_consistency_engine_and_examples` / `test_engine_and_examples_pii_scrub_have_same_signature` で対称差ゼロを永続保護 |
+| H2 | forbidden key 検出時に event 全体を `None` で skip → `order_id` を持つ Nautilus Fill が常に空 | `pii_scrub()` を **strip + WARN ログ** 契約に変更（None 廃止）。`order_id` を `FORBIDDEN_KEYS` から削除（venue 由来でない内部 ID。allow-list 外として自動的に剥がれる）。`run_buffer._write_*` の `if scrubbed is None` を `if not scrubbed:`（空 dict skip）に追従。`test_real_nautilus_fill_event_is_written` 追加 |
+| H3 | `submit_run.py` の `.lock` 書き込みが非 atomic。`run_submission` 開始時に `remove_stale_lock` 呼出無しで競合検出不能 | `_write_lock` を `tempfile.mkstemp + os.replace` で atomic 化。`run_submission` 冒頭で `remove_stale_lock` → 残存 lock があれば exit 6 + stderr "another submit in progress"。`test_concurrent_submit_refused_when_live_lock` / `test_write_lock_is_atomic` 追加 |
+| H4 | `check_auth.py` で無効 key（`AuthenticationError`）も `except Exception` で fail-open → `authenticated=true` を返す | `wandb.errors.AuthenticationError` を**個別 catch** して `authenticated=false, method="none", error="invalid_key"` を返す（fail-closed）。`CommError` は従来の `viewer_lookup_timeout` 維持。`test_invalid_key_returns_unauthenticated` 追加 |
+| H5 | `native_menu.rs` の Tools 項目が `MenuItem::new(label, true, accel)` で固定 enable → `tools_actions_for_state` 結果無視。**未認証でも submit 押せる** | `attach()` シグネチャに `&WandbAuthState, &RunBufferIndex` 追加。muda の MenuItem ハンドルを `thread_local!` で保持し、`refresh_tools_enable(&auth, &buffer)` で `set_enabled()` を後追い。`Message::WandbAuthRefreshed` / `RunBufferCleared` / `RunBufferIndexScanned` / submit 成功後の 4 経路で refresh 配線。`mod menu` を Linux 限定から cross-platform に昇格 |
+| H6 | `WandbSubmitModal` の「ブラウザで開く」ボタンが `Message::Done(...)` を再送 → Done ハンドラが二重実行（`Action::OpenUrl` 定義済みなのに未使用） | `Message::OpenUrl(String)` 新設。view を `on_press(Message::OpenUrl(url))` に変更。`update()` で `Message::OpenUrl(url) => Some(Action::OpenUrl(url))`（state 不変） |
+| H7 | W&B モーダル / sign-in モーダル overlay が `id == main_window` 分岐の外で構築 → popout ウィンドウにも描画される（confirm_dialog は main 限定なのに非対称） | `after_wandb_submit` / `after_signin` を `if id == self.main_window.id { ... } else { after_replay_form }` でラップ。confirm_dialog と同じガードに揃える |
+| H8 | `submit_wandb_run` の `script.to_str().unwrap_or("...")` / `run_buffer_dir.to_str().unwrap_or("")` で非 UTF-8 path silent fallback | `WandbSubmitError::ProcessFailed("path contains non-UTF-8 characters: ...")` に置換し `?` で伝播 |
+| H9 | `submit_run.py` の `wandb.AuthenticationError` / `CommError` 直接参照が wandb >=0.16 の正規パス `wandb.errors.*` と乖離 → alias 削除で `AttributeError` リスク | `from wandb.errors import AuthenticationError, CommError` を試行 → ImportError 時は top-level alias → 無ければ `Exception` の三段 fallback |
+
+### 解消した MEDIUM（15件）
+
+| ID | 内容 | 対処 |
+|----|------|------|
+| M1 | cargo fmt 差分 | Phase 4 で `cargo fmt` 適用済み |
+| M2 | `src/wandb_submit_proc.rs` 全体に `#![allow(dead_code)]`、production フローから未使用 | module 属性削除、`run_submit_blocking` / `SubmitEvent` 削除、`build_submit_command` は `--notes` 配線で活用するため per-item allow_dead で保持。dead-code policy を rustdoc 化 |
+| M3 | `RunBufferIndex::scan` / `remove_dir_all` を iced 同期 update から呼出 | `scan_async` 追加（tokio::fs ベース）。`Action::OpenSubmissionLog` / `Message::ClearRunBufferConfirmed` を `Task::perform` 化。`Message::RunBufferIndexScanned { index, show_toast }` / `RunBufferCleared(Result)` 追加 |
+| M4 | `WandbAuthState.method: String` で型保証なし | `pub enum AuthMethod { Env, Netrc, None }` に変更（`#[serde(rename_all = "snake_case")]`）。未知値は serde reject（fail-closed） |
+| M5 | `AuthDisplayState` と `WandbAuthState.method` の二重管理 | `impl From<&WandbAuthState> for AuthDisplayState` で一元化。`main.rs` の手書き match を置換 |
+| M6 | `WandbSubmitModal.notes` 入力欄があるのに `Action::Submit` に含まれず捨てられる | `Action::Submit { ..., notes: String }` 追加、`build_submit_command --notes` 配線、`submit_run.py` の `--notes` argparse + `wandb.init(notes=...)`（空文字列で kwarg 省略）|
+| M7 | `submit_run.py` の `wandb.finish()` 例外を `pass` で握り潰し | 4 箇所を `print(f"WARNING: wandb.finish() failed: {exc}", file=sys.stderr)` に変更 |
+| M8 | `wandb_login` の `let _ = stdin.write_all(...)` 黙殺 | `?` 伝播 (`stdin not piped` / `stdin write failed: {e}`) |
+| M9 | `_flush_and_fsync_all_jsonl` の fsync 失敗を warn のみで `completed` に書き換え（BC3-5 違反） | fsync 失敗で `OSError` raise → `finish()` が catch して `abort()` fallthrough → `status="aborted"` |
+| M10 | `check_auth.py` に Python 側 7 秒 hard timeout 無し（計画書 F9b-DoD と乖離） | **計画書を訂正**: Python 側 hard timeout は POSIX `signal.alarm` 限定で Windows 非対称になるため不採用。`wandb.Api(timeout=5)` のみ維持し、F9b-DoD の "7 秒以内" は Rust subprocess wrapper の `tokio::time::timeout` で保護する方針に |
+| M11 | Windows `os.replace` race（読み中の PermissionError で破綻） | `_write_meta_atomic` の `os.replace` を 50ms × 3 retry でラップ。3 回失敗で raise |
+| M12 | `engine/pii_scrub.pii_scrub` と `examples/wandb/pii_scrub.scrub` でシグネチャ・契約乖離 | examples 側を `scrub` → `pii_scrub` rename。シグネチャ・挙動完全統一（H1 と統合実施） |
+| M13 | `RunBufferIndex::scan` が `serde_json::Value` 動的解析 | `struct MetaJson { run_id, status, started_at }` 追加し `serde_json::from_str::<MetaJson>` で型付き化。`#[serde(deny_unknown_fields)]` は付けず forward-compat 維持 |
+| M14 | `MenuEntry.tooltip: Option<String>` が計画書の `Option<&'static str>` と乖離 | `Option<&'static str>` に変更、リテラル渡しでアロケーション削減 |
+| M15 | `test_check_auth_no_import_wandb` の `"try" in lines[max(0, i-5):i-1]` がリスト要素一致になっている bug | `any(("try" in line or "def " in line) for line in prev)` 形式に修正、手動 mutation で検出可能性を確認 |
+
+### 残 LOW（6件、対処不要と判断）
+
+L1〜L6: `RunId` newtype、`WandbAuthState` フィールド可視性、`flatten()` 無音 skip、429/500 substring match、`wandb.Table.columns` 順序非決定論、README forbidden keys 一覧。発生頻度極低 or 機能影響なしのため次フェーズ判断とする。
+
+### Phase 構成と所要
+
+| Phase | 内容 | エージェント | 結果 |
+|-------|------|-------------|------|
+| Phase 1 | 型基盤統合（C3 / M4 / M5 / M14） | 単一 general-purpose（直列） | 88 test binaries pass |
+| Phase 2 | Python 不変条件（C1+M9+M11 / H1+H2+M12 / H3+H4+H9+M7+M10+M15） | 3 並列 | pytest 1801 pass |
+| Phase 3 | Rust UI/配線（C2+H6+H7 / H5+H8+M6+M8 / M2+M3+M13） | 3 並列。P3-C は Phase 3-B 完了待ちで一時 STOP+REPORT、最終 1 件 false-positive テスト修正で収束 | cargo test workspace pass |
+| Phase 4 | 計画書反映 + 全体検証 | オーケストレーター | fmt/clippy/test/pytest 全緑 |
+
+### 最終検証
+
+```
+$ cargo fmt --check        → OK
+$ cargo clippy --workspace -- -D warnings  → OK
+$ cargo test --workspace   → 全テスト GREEN（247+ test binaries）
+$ uv run pytest python/tests/ examples/wandb/tests/ -q
+   1840 passed, 4 skipped, 8 warnings
+```
+
+### 設計判断・新たな知見
+
+- **`MaskedLine` の Bearer pattern**: `(?i)(bearer)(\s+)\S+` → `$1$2***` で大文字小文字を保存
+- **SIGTERM handler は module-level**: `signal.signal()` がプロセス全体で 1 つの handler しか持てないため、`WeakSet` で active RunBuffer 集合を管理し handler 1 つで全 buffer に broadcast。previous handler を chain
+- **Cancel と完走の race**: `SUBMIT_CHILD.lock().take()` を「先取りした側が勝つ」二段構えで吸収（`SUBMIT_IN_FLIGHT.store(false)` の重複は idempotent）
+- **Windows の grace period 不在**: `Child::kill()` は実質 `TerminateProcess`、tokio の Unix `kill()` も SIGKILL のため 5 秒 grace は kernel reap までの best-effort 程度。本格的な SIGTERM→SIGKILL 二段は `nix::sys::signal::kill` 直叩きが必要（次フェーズ判断）
+- **muda MenuItem は `!Send`**: `thread_local!` で iced runtime thread に閉じ込める方式。`init_for_hwnd` は再呼び出し不可なため rebuild ではなく `set_enabled()` で更新
+- **PII allow-list 二重メンテ防止**: Windows symlink 不可のため両ファイル物理コピー維持、import-and-compare の lint テストで対称性強制
+- **`FORBIDDEN_KEYS` の縮約**: `order_id` は venue 由来でない Nautilus 内部 ID のため除外。allow-list で自然に剥がれる。FORBIDDEN は「絶対漏らしてはいけない credential / venue raw payload」のみに絞る
+- **`MetaJson` forward-compat**: `#[serde(deny_unknown_fields)]` を付けない。Python 側がフィールド追加で先行することを許容
+- **次回 MISSES.md 追記候補**:
+  1. **「✅ 完了」と記録されていた DoD 項目で実装が欠落していた**（C1 SIGTERM handler）。レビュアーは「✅」を見たら自動信用せず、ソース grep で対応コードの存在を確認するパターン
+  2. **PII allow-list の二系統メンテ**: 同じ意味の定数を 2 ファイルにコピーする設計は将来必ず乖離する。物理コピー + lint テストで保護
+  3. **Newtype の骨抜き**: `MaskedLine` のような型強制 newtype を導入したら、同一名の独自 `String` ラッパを別ファイルで定義していないか grep で確認するレビュー観点
+
+### R2 サニティ後の追加修正（R3）
+
+ラウンド5 の F9 完了後に実施した R2 サニティチェックで CRITICAL 1 / HIGH 2 / MEDIUM 4 の 7 件を新たに発見し、TDD で順次解消した。
+
+| ID | 重大度 | 内容 | 対処 |
+|----|--------|------|------|
+| R2-C1 | CRITICAL | `examples/wandb/submit_run.py` の `lock_path = _write_lock(...)` が try ブロック外。`_write_lock` 失敗時に finally の `lock_path.unlink()` が NameError を起こし元例外を隠蔽 | `lock_path: Optional[Path] = None` を try 外で宣言 → 代入を try 内へ移動 → finally で `if lock_path is not None:` ガード。`test_write_lock_failure_does_not_mask_original_exception` で OSError 伝播・NameError 不発を確認 |
+| R2-H1 | HIGH | `wandb.errors` import 失敗時の fallback `getattr(wandb, "AuthenticationError", Exception)` で両クラスが `Exception` に潰れ、内側 except が全例外吸収 → exit-code マッピング崩壊 | 別 sentinel クラス (`type("_AuthErrSentinel", (Exception,), {})` / `_CommErrSentinel`) を生成して識別性を維持。両クラスが None / 同一 / `Exception` のいずれでも分離。`test_authentication_and_comm_errors_are_distinct_classes_after_fallback` で `RuntimeError` が AuthenticationError として捕捉されないことを確認 |
+| R2-H2 | HIGH | `Message::WandbSubmitResult(Ok)` ハンドラが同期 `RunBufferIndex::scan(&base)` を呼び iced update スレッドをブロック。M3 で `OpenSubmissionLog` だけ async 化されており非対称 | `scan_async` を `Task::perform` で発行 → `Message::RunBufferIndexScanned { index, show_toast: false }` 経由で `refresh_tools_enable` まで自動連鎖。`wandb_submit_result_uses_async_scan` ソースインスペクションテストで同期 scan の不在を保護 |
+| R2-M1 | MEDIUM | `Action::Submit` ハンドラが `latest_completed.is_none()` を未チェックで CAS 取得 → run buffer 不在でも SUBMIT_IN_FLIGHT が立ち、永久ロックの可能性 | CAS の前段に `if self.run_buffer.latest_completed.is_none() { warn; return Task::none(); }` を追加。`submit_action_no_op_when_latest_completed_is_none` でガードが CAS より前に位置することを順序検査 |
+| R2-M2 | MEDIUM | `run_submission` の outer `except` 群が `_active_run` 未確認のまま `wandb.finish()` を呼び、未初期化 SDK で警告を量産 | 各 outer except 内 `wandb.finish()` を `if _active_run is not None:` でガード（auth / comm / OS の 3 経路）。`test_outer_except_does_not_call_wandb_finish_when_run_not_initialized` で `wandb.finish.call_count == 0` を確認 |
+| R2-M3 | MEDIUM | Cancel 経路で `SUBMIT_IN_FLIGHT.store(false)` が `kill().await` の「前」に実行 → kill 完了前に新 Submit が再入できる窓 | `store(false)` を `kill().await` 直後・同一 async block 内に移動。`SUBMIT_IN_FLIGHT` の重複 store は idempotent (既存 `submit_in_flight_is_idempotent_on_double_release` で保護)。`cancel_releases_submit_in_flight_after_kill_completes` で字句順序 `kill().await` < `SUBMIT_IN_FLIGHT.store(false)` を assert |
+| R2-M4 | MEDIUM | `src/mask_secrets.rs` の `OnceLock<Regex>` + `Regex::new(...).unwrap()` パターン。expect メッセージ無し | `std::sync::LazyLock`（Rust 1.80+ / Edition 2024）に置換。`expect("... is a valid regex literal")` で panic 文言を明示。既存 `wandb_key_masking.rs` テストで動作確認 |
+
+#### R3 検証コマンド
+
+```
+$ cargo fmt --check                               → clean
+$ cargo clippy --workspace -- -D warnings         → clean
+$ cargo test --workspace                          → 全テスト GREEN
+$ uv run pytest python/tests/ examples/wandb/tests/ -q
+   1843 passed, 4 skipped, 8 warnings
+```
+
+#### R3 設計判断
+
+- **R2-H1 sentinel 戦略**: `Exception` 直接代入を避けるためダミーサブクラスを動的生成し、識別性を保ちつつ `try/except AuthenticationError` の構文を温存。古い wandb（< 0.16）でも安全側に倒れる
+- **R2-H2 の Task 統合**: `Message::RunBufferIndexScanned` ハンドラ内で `refresh_tools_enable` を呼んでいるため、Submit 成功時の Task::perform 戻り値が `RunBufferIndexScanned` で完結する。`Task::batch` での合成は不要
+- **R2-M3 の race window**: `kill().await` 中に新 Submit を CAS で受け付けると同一 run-buffer に対して 2 プロセスが競合し `tachibana_orders.jsonl` 等で二重書き込みを引き起こすリスクがあった。kill 完了後の store でタイムウィンドウを構造的に閉鎖
+- **R2-M4 の MSRV**: `Cargo.toml` の `edition = "2024"`（Rust 1.85+）から `LazyLock`（1.80）安全。`once_cell` への fallback は不要
+
+---
