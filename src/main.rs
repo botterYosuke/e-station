@@ -106,6 +106,36 @@ pub static MODE_SWITCHING: std::sync::atomic::AtomicBool =
 pub static SUBMIT_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// F9d: W&B 送信エラーの種類。`examples/wandb/submit_run.py` の exit code に対応する。
+#[derive(Debug, Clone)]
+pub enum WandbSubmitError {
+    /// exit code 2: W&B 未認証
+    AuthFailed,
+    /// exit code 3: Rate limit (429)
+    RateLimit,
+    /// exit code 4: ネットワークエラー
+    Network,
+    /// exit code 5: サーバーエラー (5xx)
+    ServerError,
+    /// exit code 6: 部分的成功 / meta.json status != "completed"
+    Partial,
+    /// 予期しない exit code または spawn 失敗
+    ProcessFailed(String),
+}
+
+/// `submit_run.py` の exit code を `WandbSubmitError` に変換する。
+/// exit code 0 は成功なので呼ばれない。
+fn exit_code_to_error(code: i32) -> WandbSubmitError {
+    match code {
+        2 => WandbSubmitError::AuthFailed,
+        3 => WandbSubmitError::RateLimit,
+        4 => WandbSubmitError::Network,
+        5 => WandbSubmitError::ServerError,
+        6 => WandbSubmitError::Partial,
+        other => WandbSubmitError::ProcessFailed(format!("unexpected exit code: {other}")),
+    }
+}
+
 /// Returns the current app mode.  Falls back to `Live` when the static has not
 /// yet been initialised (unreachable in normal operation).
 fn app_mode() -> engine_client::dto::AppMode {
@@ -161,6 +191,47 @@ fn has_wal_in_flight_orders() -> bool {
     latest_status
         .values()
         .any(|st| st == "submitted" || st == "partial")
+}
+
+/// F9d: `examples/wandb/submit_run.py` を subprocess で起動し、結果を返す。
+///
+/// 起動コマンド: `uv run --with wandb python examples/wandb/submit_run.py --run-buffer <path>`
+/// exit code 0: 最終 stdout 行 `URL: <url>` を返す。
+/// 非ゼロ exit code: `WandbSubmitError` に変換して返す。
+async fn submit_wandb_run(
+    run_buffer_dir: std::path::PathBuf,
+    script: std::path::PathBuf,
+) -> Result<String, WandbSubmitError> {
+    use tokio::process::Command;
+
+    let output = Command::new("uv")
+        .args([
+            "run",
+            "--with",
+            "wandb",
+            "python",
+            script.to_str().unwrap_or("examples/wandb/submit_run.py"),
+            "--run-buffer",
+            run_buffer_dir.to_str().unwrap_or(""),
+        ])
+        .output()
+        .await
+        .map_err(|e| WandbSubmitError::ProcessFailed(format!("spawn failed: {e}")))?;
+
+    if output.status.success() {
+        // 最終 stdout 行から URL を抽出する
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let url = stdout
+            .lines()
+            .rev()
+            .find(|l| l.starts_with("URL: "))
+            .map(|l| l.trim_start_matches("URL: ").to_string())
+            .unwrap_or_default();
+        Ok(url)
+    } else {
+        let code = output.status.code().unwrap_or(-1);
+        Err(exit_code_to_error(code))
+    }
 }
 
 /// F7/T2: RAII guard for the mode-switch critical section.
@@ -1045,6 +1116,8 @@ enum Message {
     ModeSwitchStopTimeout,
     /// F7: 2-second ForceStopReplay timeout — give up and show error.
     ModeSwitchForceStopTimeout,
+    /// F7: StopReplay or ForceStopReplay send() returned Err — connection is broken; abort immediately.
+    ModeSwitchSendFailed,
     /// F7: window specs collected after "保存してモード切替" confirm; save then restart.
     /// Routes through a dedicated message (not SwitchModeWithSpecs) to bypass the
     /// dirty check — the user already confirmed, and re-checking would loop.
@@ -1077,6 +1150,12 @@ enum Message {
         /// `false` means the named doc is saved but next startup will auto-restore old state.
         saved_state_ok: bool,
     },
+    /// F9d: `examples/wandb/submit_run.py` subprocess の完了通知。
+    /// `Ok(url)` = 成功 + W&B run URL。`Err(e)` = 送信失敗の理由。
+    WandbSubmitResult(Result<String, WandbSubmitError>),
+    /// F9d: `examples/wandb/check_auth.py` subprocess の完了通知。
+    /// `WandbAuthState` を受け取ってメニュー状態を更新する。
+    WandbAuthRefreshed(wandb_auth::WandbAuthState),
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1346,16 +1425,18 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
         }
         // Phase 8: EngineBusy → GUI ユーザーへの warn toast
         // Python engine が state guard で Command を拒否したときに emit される。
-        // F7: StopReplay / ForceStopReplay の EngineBusy は mode-switch 中断として扱う。
+        // F7: StopReplay / ForceStopReplay の EngineBusy のみ mode-switch 中断として扱う
+        //     (replay→live 専用)。live→replay の EngineBusy 行は別経路で対処する。
         EngineEvent::EngineBusy {
             attempted_command,
             reason,
             ..
         } => {
-            // If a mode switch is in progress (either direction), any EngineBusy aborts it.
-            // MODE_SWITCHING covers live→replay (guard held while collecting specs / showing
-            // dirty-confirm) as well as replay→live (guard held while waiting for ReplayStopped).
-            if MODE_SWITCHING.load(std::sync::atomic::Ordering::Acquire) {
+            use engine_client::dto::AttemptedCommand;
+            if matches!(
+                attempted_command,
+                AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay
+            ) {
                 Some(Message::ModeSwitchEngineBusy(reason))
             } else {
                 Some(Message::OrderToast(Toast::warn(format!(
@@ -1605,6 +1686,17 @@ impl Flowsurface {
             window::collect_window_specs(baseline_ids, Message::SetDirtyBaseline)
         };
 
+        // F9d: 起動時に check_auth.py を一度だけ非同期実行して wandb_auth を初期化する
+        let init_wandb_auth = Task::perform(
+            wandb_auth::refresh_wandb_auth(),
+            Message::WandbAuthRefreshed,
+        );
+        // F9d: 起動時に run-buffer/ をスキャンして run_buffer を初期化する
+        {
+            let base = data::data_path(Some("run-buffer"));
+            state.run_buffer = wandb_auth::RunBufferIndex::scan(&base);
+        }
+
         (
             state,
             open_main_window
@@ -1612,7 +1704,8 @@ impl Flowsurface {
                 .chain(setup_native_menu)
                 .chain(load_layout)
                 .chain(launch_sidebar.map(Message::Sidebar))
-                .chain(set_baseline),
+                .chain(set_baseline)
+                .chain(init_wandb_auth),
         )
     }
 
@@ -2212,6 +2305,15 @@ impl Flowsurface {
             }
             Message::GoBack => {
                 let main_window = self.main_window.id;
+
+                #[cfg(target_os = "linux")]
+                if self.menu_bar.open.is_some() {
+                    self.menu_bar = crate::menu_bar_state::update(
+                        self.menu_bar.clone(),
+                        crate::menu_bar_state::BarMessage::Dismiss,
+                    );
+                    return Task::none();
+                }
 
                 if self.confirm_dialog.is_some() {
                     self.confirm_dialog = None;
@@ -2996,12 +3098,39 @@ impl Flowsurface {
                             Message::ExitRequested,
                         );
                     }
-                    // ── F9c: Tools / W&B submenu stubs (F9d/F9e で実装) ───────────────
+                    // ── F9c: Tools / W&B submenu ──────────────────────────────────────
                     Action::SubmitToWandb => {
-                        // F9d で実装: subprocess launch (submit_run.py)
-                        // stub: log only
-                        log::info!("SubmitToWandb: stub (F9d)");
-                        return Task::none();
+                        // ガード 1: 既に送信中なら no-op
+                        if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+                            self.notifications.push(Toast::info("送信中です...".to_string()));
+                            return Task::none();
+                        }
+                        // ガード 2: 未認証なら no-op
+                        if !self.wandb_auth.authenticated {
+                            self.notifications
+                                .push(Toast::warn("W&B にログインしてください".to_string()));
+                            return Task::none();
+                        }
+                        // ガード 3: completed run がなければ no-op
+                        let Some(run_id) = self.run_buffer.latest_completed.clone() else {
+                            self.notifications
+                                .push(Toast::warn("送信可能な run がありません".to_string()));
+                            return Task::none();
+                        };
+
+                        SUBMIT_IN_FLIGHT.store(true, std::sync::atomic::Ordering::Release);
+
+                        // run-buffer/<run_id> のパスを解決（data::data_path と同じ規則）
+                        let run_buffer_dir = data::data_path(Some("run-buffer")).join(&run_id);
+                        // submit_run.py のパスを解決（実行時の cwd = プロジェクトルート前提）
+                        let script = std::path::PathBuf::from("examples/wandb/submit_run.py");
+
+                        return Task::perform(
+                            async move {
+                                submit_wandb_run(run_buffer_dir, script).await
+                            },
+                            Message::WandbSubmitResult,
+                        );
                     }
                     Action::SignInWandb => {
                         // F9d で実装: W&B サインインダイアログ
@@ -3084,16 +3213,19 @@ impl Flowsurface {
                                 self.pending_mode_switch = Some(AppMode::Live);
                                 if let Some(conn) = self.engine_connection.clone() {
                                     let request_id = uuid::Uuid::new_v4().to_string();
-                                    // Send StopReplay (fire and forget — ack comes via event stream)
+                                    // Send StopReplay. If send fails immediately (broken socket),
+                                    // abort without waiting for the 5-second timeout.
                                     let send_task = Task::perform(
                                         async move {
-                                            let _ = conn
-                                                .send(engine_client::dto::Command::StopReplay {
-                                                    request_id,
-                                                })
-                                                .await;
+                                            conn.send(engine_client::dto::Command::StopReplay {
+                                                request_id,
+                                            })
+                                            .await
                                         },
-                                        |_| Message::Noop, // fire-and-forget; ack comes via event stream
+                                        |result| match result {
+                                            Ok(()) => Message::Noop,
+                                            Err(_) => Message::ModeSwitchSendFailed,
+                                        },
                                     );
                                     // 5-second timeout
                                     let timeout_task = Task::perform(
@@ -3616,11 +3748,13 @@ impl Flowsurface {
                     let request_id = uuid::Uuid::new_v4().to_string();
                     let force_task = Task::perform(
                         async move {
-                            let _ = conn
-                                .send(engine_client::dto::Command::ForceStopReplay { request_id })
-                                .await;
+                            conn.send(engine_client::dto::Command::ForceStopReplay { request_id })
+                                .await
                         },
-                        |_| Message::Noop, // fire-and-forget; ack comes via event stream
+                        |result| match result {
+                            Ok(()) => Message::Noop,
+                            Err(_) => Message::ModeSwitchSendFailed,
+                        },
                     );
                     let timeout_task = Task::perform(
                         async {
@@ -3655,6 +3789,21 @@ impl Flowsurface {
                 )
                 .with_confirm_btn_text("閉じる".to_string());
                 self.confirm_dialog = Some(dialog);
+                return Task::none();
+            }
+            // F7: send() returned Err — socket is broken; abort mode switch immediately without
+            // waiting for the 5-second (StopReplay) or 2-second (ForceStopReplay) timeout.
+            // Stale timeout messages that fire later are ignored because pending_mode_switch is None.
+            Message::ModeSwitchSendFailed => {
+                if self.pending_mode_switch.take().is_some() {
+                    self._mode_switch_guard = None;
+                    let dialog = screen::ConfirmDialog::new(
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                }
                 return Task::none();
             }
             // F7: EngineBusy for StopReplay/ForceStopReplay — abort mode switch immediately.
@@ -4328,6 +4477,58 @@ impl Flowsurface {
                     Message::RestartRequested(Some(windows))
                 });
             }
+            // F9d: W&B submit subprocess 完了
+            Message::WandbSubmitResult(result) => {
+                SUBMIT_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+                match result {
+                    Ok(url) => {
+                        log::info!("W&B submit succeeded: {url}");
+                        self.notifications
+                            .push(Toast::info(format!("W&B に送信しました: {url}")));
+                        // run-buffer スキャンを更新する
+                        let base = data::data_path(Some("run-buffer"));
+                        self.run_buffer = wandb_auth::RunBufferIndex::scan(&base);
+                    }
+                    Err(WandbSubmitError::AuthFailed) => {
+                        log::warn!("W&B submit failed: auth error");
+                        self.notifications.push(Toast::error(
+                            "W&B 認証エラー: 再ログインしてください".to_string(),
+                        ));
+                    }
+                    Err(WandbSubmitError::RateLimit) => {
+                        log::warn!("W&B submit failed: rate limit");
+                        self.notifications
+                            .push(Toast::error("W&B 送信失敗: レートリミット超過".to_string()));
+                    }
+                    Err(WandbSubmitError::Network) => {
+                        log::warn!("W&B submit failed: network error");
+                        self.notifications
+                            .push(Toast::error("W&B 送信失敗: ネットワークエラー".to_string()));
+                    }
+                    Err(WandbSubmitError::ServerError) => {
+                        log::warn!("W&B submit failed: server error");
+                        self.notifications
+                            .push(Toast::error("W&B 送信失敗: サーバーエラー".to_string()));
+                    }
+                    Err(WandbSubmitError::Partial) => {
+                        log::warn!("W&B submit failed: partial");
+                        self.notifications
+                            .push(Toast::warn("W&B 送信: 部分的な失敗（run buffer を確認してください）".to_string()));
+                    }
+                    Err(WandbSubmitError::ProcessFailed(msg)) => {
+                        log::warn!("W&B submit failed: {msg}");
+                        self.notifications.push(Toast::error(format!(
+                            "W&B 送信失敗: {msg}"
+                        )));
+                    }
+                }
+                return Task::none();
+            }
+            // F9d: W&B check_auth subprocess 完了 — wandb_auth を更新する
+            Message::WandbAuthRefreshed(state) => {
+                self.wandb_auth = state;
+                return Task::none();
+            }
         }
         Task::none()
     }
@@ -4535,6 +4736,15 @@ impl Flowsurface {
         // Watch the engine-restarting flag and emit EngineRestarting messages.
         let engine_status = Subscription::run(engine_status_stream);
 
+        #[cfg(target_os = "linux")]
+        let linux_menu_bar_dismiss =
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Window(iced::window::Event::Unfocused) => {
+                    Some(Message::MenuBar(crate::menu_bar_state::BarMessage::Dismiss))
+                }
+                _ => None,
+            });
+
         Subscription::batch(vec![
             exchange_streams,
             sidebar,
@@ -4543,6 +4753,8 @@ impl Flowsurface {
             hotkeys,
             engine_status,
             native_menu::subscription(app_mode()).map(Message::NativeMenuAction),
+            #[cfg(target_os = "linux")]
+            linux_menu_bar_dismiss,
         ])
     }
 
