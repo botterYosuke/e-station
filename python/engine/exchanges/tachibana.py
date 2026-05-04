@@ -255,9 +255,20 @@ class TachibanaWorker(ExchangeWorker):
                     asyncio.get_event_loop().create_task(hub.aclose())
                 except RuntimeError:
                     # 走っているイベントループが無い同期文脈ではタスク生成不可。
-                    # その場合は subscribers をクリアして stop_event だけ立てる。
+                    # subscribers をクリアして stop_event を立て、on_close も発火する
+                    # (review-fix Y7: aclose() と同じ semantics を保つ)。
+                    close_cbs = list(hub._on_close_cbs.values())
                     hub._subscribers.clear()
+                    hub._on_connect_cbs.clear()
+                    hub._on_close_cbs.clear()
                     hub._stop_event.set()
+                    for cb in close_cbs:
+                        try:
+                            cb()
+                        except Exception:
+                            log.exception(
+                                "tachibana set_session: on_close raised during sync fallback"
+                            )
         self._session = session
 
     def set_credentials_demo_flag(self, is_demo: bool) -> None:
@@ -980,8 +991,14 @@ class TachibanaWorker(ExchangeWorker):
 
         # Bug Y: hub に subscribe → 自分用の _inner_stop を待つ → unsubscribe。
         # depth と同じ hub を共有するので broker への WS 接続は 1 本だけ。
+        # on_close=_inner_stop.set: session swap などで hub が外部から閉じられた
+        # ときに _inner_stop を解放して coroutine を終了させる (review-fix Y7)。
         hub = self._get_or_create_hub(ticker, ws_url)
-        await hub.subscribe("trades", _cb_trades, on_connect=_on_connect_trades)
+        await hub.subscribe(
+            "trades", _cb_trades,
+            on_connect=_on_connect_trades,
+            on_close=_inner_stop.set,
+        )
         try:
             await _inner_stop.wait()
         finally:
@@ -1233,8 +1250,14 @@ class TachibanaWorker(ExchangeWorker):
 
         # Bug Y: hub に subscribe → 自分用の _inner_stop を待つ → unsubscribe。
         # reconnect は hub 内部で処理されるため、ここに while ループは無い。
+        # on_close=_inner_stop.set: session swap などで hub が外部から閉じられた
+        # ときに _inner_stop を解放して coroutine を終了させる (review-fix Y7)。
         hub = self._get_or_create_hub(ticker, ws_url)
-        await hub.subscribe("depth", _cb_depth, on_connect=_on_connect_depth)
+        await hub.subscribe(
+            "depth", _cb_depth,
+            on_connect=_on_connect_depth,
+            on_close=_inner_stop.set,
+        )
         try:
             await _inner_stop.wait()
         finally:

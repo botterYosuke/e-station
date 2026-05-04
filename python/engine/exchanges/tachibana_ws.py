@@ -540,6 +540,11 @@ class TickerEventWsHub:
         self._subscribers: dict[str, Any] = {}
         # 各 subscriber 個別の on_connect (WS 再接続毎に呼ばれる zero-arg callable)。
         self._on_connect_cbs: dict[str, Any] = {}
+        # 各 subscriber 個別の on_close (aclose で hub が強制終了するときに呼ばれる
+        # zero-arg callable)。subscriber 自身による unsubscribe では呼ばない。
+        # session swap で stream coroutine の `_inner_stop` を解放するために使う
+        # (review-fix 2026-05-04 Y7)。
+        self._on_close_cbs: dict[str, Any] = {}
         self._stop_event: asyncio.Event = asyncio.Event()
         self._runner_task: asyncio.Task | None = None
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -549,7 +554,9 @@ class TickerEventWsHub:
         return len(self._subscribers)
 
     async def subscribe(
-        self, key: str, callback: Any, *, on_connect: Any | None = None,
+        self, key: str, callback: Any, *,
+        on_connect: Any | None = None,
+        on_close: Any | None = None,
     ) -> None:
         """``callback(frame_type, fields, recv_ts_ms)`` を登録する。
 
@@ -557,6 +564,10 @@ class TickerEventWsHub:
         最初の subscriber 登録時に WS タスクを起動する。
         ``on_connect`` は zero-arg callable で、WS の (再)接続毎に呼ばれる。
         rate-limiter のリセットや per-connection state の初期化に使う。
+        ``on_close`` は zero-arg callable で、:meth:`aclose` による強制終了時に
+        呼ばれる (subscriber 自身の :meth:`unsubscribe` では呼ばれない)。
+        session swap などで外部から hub が閉じられたとき、subscriber 側の
+        待機ループ (``_inner_stop.wait()`` 等) を解放するために使う。
         """
         async with self._lock:
             if key in self._subscribers:
@@ -568,6 +579,8 @@ class TickerEventWsHub:
             self._subscribers[key] = callback
             if on_connect is not None:
                 self._on_connect_cbs[key] = on_connect
+            if on_close is not None:
+                self._on_close_cbs[key] = on_close
             if self._runner_task is None or self._runner_task.done():
                 self._stop_event = asyncio.Event()
                 self._runner_task = asyncio.create_task(self._run())
@@ -575,20 +588,38 @@ class TickerEventWsHub:
     async def unsubscribe(self, key: str) -> None:
         """``key`` の subscriber を外す。最後の 1 つが外れたら WS タスクを停止する。
 
-        存在しない key は no-op。
+        存在しない key は no-op。on_close は呼ばない (自発的な離脱のため)。
         """
         async with self._lock:
             self._subscribers.pop(key, None)
             self._on_connect_cbs.pop(key, None)
+            self._on_close_cbs.pop(key, None)
             if not self._subscribers and self._runner_task is not None:
                 self._stop_event.set()
 
     async def aclose(self) -> None:
-        """全 subscriber を破棄して WS タスクを止める (session swap などで使う)。"""
+        """全 subscriber を破棄して WS タスクを止める (session swap などで使う)。
+
+        破棄前に各 subscriber の ``on_close`` を呼んで、subscriber 側の待機を
+        解放する。on_close の例外は他 subscriber を巻き込まない (log のみ)。
+        """
         async with self._lock:
+            close_cbs = list(self._on_close_cbs.items())
             self._subscribers.clear()
+            self._on_connect_cbs.clear()
+            self._on_close_cbs.clear()
             self._stop_event.set()
             task = self._runner_task
+        # ロック外で on_close を呼ぶ (subscriber 側の処理が hub を再帰的に
+        # 触っても deadlock しないように)。
+        for key, cb in close_cbs:
+            try:
+                cb()
+            except Exception:
+                log.exception(
+                    "TickerEventWsHub[%s]: on_close for %r raised",
+                    self._ticker, key,
+                )
         if task is not None and not task.done():
             try:
                 await asyncio.wait_for(task, timeout=2.0)

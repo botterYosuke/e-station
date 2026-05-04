@@ -426,3 +426,121 @@ async def test_concurrent_depth_and_trades_single_connection(
             await asyncio.wait_for(t, timeout=2.0)
         except asyncio.TimeoutError:
             t.cancel()
+
+
+@pytest.mark.asyncio
+async def test_aclose_invokes_subscribers_on_close_callback(patch_event_ws):
+    """Y7 (review-fix 2026-05-04): hub.aclose() で subscriber の on_close が呼ばれる。
+
+    レビュアー指摘: set_session(None) で hub は閉じるが stream_depth /
+    stream_trades の `_inner_stop.wait()` は解放されず stream coroutine が
+    生き残る。hub close を購読側に伝える on_close フックが必要。
+    """
+    from engine.exchanges.tachibana_ws import TickerEventWsHub
+
+    hub = TickerEventWsHub("wss://example/", ticker="7203")
+    closed_a = asyncio.Event()
+    closed_b = asyncio.Event()
+
+    async def _cb(_ft, _fields, _ts):
+        pass
+
+    await hub.subscribe("a", _cb, on_close=closed_a.set)
+    await hub.subscribe("b", _cb, on_close=closed_b.set)
+
+    await hub.aclose()
+    # on_close は aclose 内で呼ばれているので即 set されているはず
+    assert closed_a.is_set(), "subscriber 'a' の on_close が呼ばれていない"
+    assert closed_b.is_set(), "subscriber 'b' の on_close が呼ばれていない"
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_does_not_invoke_on_close(patch_event_ws):
+    """Y7: 自発的 unsubscribe では on_close を呼ばない (force-close との区別)。
+
+    on_close は「外部から強制的に hub が閉じられた」シグナル。subscriber が
+    自分で unsubscribe する場合は呼ばない (二重発火防止)。
+    """
+    from engine.exchanges.tachibana_ws import TickerEventWsHub
+
+    hub = TickerEventWsHub("wss://example/", ticker="7203")
+    closed = asyncio.Event()
+
+    async def _cb(_ft, _fields, _ts):
+        pass
+
+    await hub.subscribe("a", _cb, on_close=closed.set)
+    await hub.unsubscribe("a")
+    await asyncio.sleep(0)
+    assert not closed.is_set(), "自発的 unsubscribe では on_close を呼んではいけない"
+
+
+@pytest.mark.asyncio
+async def test_set_session_none_terminates_stream_coroutines(
+    patch_event_ws, tmp_path, monkeypatch,
+):
+    """Y7 本丸: set_session(None) 後に stream_depth / stream_trades coroutine が終了する。
+
+    レビュアー指摘の本体検証。session swap で hub close → on_close →
+    各 stream の _inner_stop.set() → _inner_stop.wait() 解放 → coroutine 終了。
+    server 側 `_streams` 管理は task 完了で自動 cleanup される。
+    """
+    from engine.exchanges.tachibana import TachibanaWorker
+    from engine.exchanges.tachibana_auth import TachibanaSession
+    from engine.exchanges.tachibana_url import EventUrl, MasterUrl, PriceUrl, RequestUrl
+
+    worker = TachibanaWorker(cache_dir=tmp_path, is_demo=True)
+    session = TachibanaSession(
+        url_request=RequestUrl("https://demo-kabuka.e-shiten.jp/e_api_v4r8/request/X/"),
+        url_master=MasterUrl("https://demo-kabuka.e-shiten.jp/e_api_v4r8/master/X/"),
+        url_price=PriceUrl("https://demo-kabuka.e-shiten.jp/e_api_v4r8/price/X/"),
+        url_event=EventUrl("https://demo-kabuka.e-shiten.jp/e_api_v4r8/event/X/"),
+        url_event_ws="wss://demo-kabuka.e-shiten.jp/e_api_v4r8/event_ws/X/",
+        zyoutoeki_kazei_c="",
+        expires_at_ms=None,
+    )
+    worker.set_session(session)
+    monkeypatch.setattr(
+        "engine.exchanges.tachibana_ws.is_market_open", lambda _now: True
+    )
+    monkeypatch.setattr(worker, "_lookup_sizyou_c", lambda _ticker: "00")
+
+    outbox: list[dict] = []
+    stop_event = asyncio.Event()
+    depth_task = asyncio.create_task(
+        worker.stream_depth("7203", "stock", "ssid-d", outbox, stop_event)
+    )
+    trades_task = asyncio.create_task(
+        worker.stream_trades("7203", "stock", "ssid-t", outbox, stop_event)
+    )
+
+    # 両 stream が hub に subscribe するまで待つ
+    for _ in range(50):
+        await asyncio.sleep(0.001)
+        if depth_task.done() and depth_task.exception() is not None:
+            raise AssertionError(f"stream_depth raised: {depth_task.exception()}")
+        if trades_task.done() and trades_task.exception() is not None:
+            raise AssertionError(f"stream_trades raised: {trades_task.exception()}")
+        hub = worker._ticker_hubs.get("7203")
+        if hub is not None and hub.subscriber_count >= 2:
+            break
+
+    # session swap (再ログイン直前の挙動)
+    worker.set_session(None)
+
+    # stream coroutine が 2 秒以内に終了すること
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(depth_task, trades_task), timeout=2.0
+        )
+    except asyncio.TimeoutError:
+        depth_task.cancel()
+        trades_task.cancel()
+        raise AssertionError(
+            f"set_session(None) 後も stream coroutine が終了しない: "
+            f"depth.done={depth_task.done()} trades.done={trades_task.done()}"
+        )
+
+    assert depth_task.done() and not depth_task.cancelled()
+    assert trades_task.done() and not trades_task.cancelled()
+    assert worker._ticker_hubs == {}, "set_session(None) で _ticker_hubs はクリアされる"
