@@ -819,6 +819,12 @@ struct Flowsurface {
     /// Only compiled on Linux; Win/macOS use the muda OS-native menu.
     #[cfg(target_os = "linux")]
     menu_bar: crate::menu_bar_state::State,
+    /// P9: W&B authentication state. Populated when Python check_auth subprocess responds.
+    /// Drives Tools submenu enabled/disabled state on all platforms.
+    wandb_auth: wandb_auth::WandbAuthState,
+    /// P9: local run-buffer index. Populated by run-buffer directory scan.
+    /// Drives "Submit to W&B" enabled state (needs at least one completed run).
+    run_buffer: wandb_auth::RunBufferIndex,
 }
 
 #[derive(Debug, Clone)]
@@ -1346,11 +1352,10 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
             reason,
             ..
         } => {
-            use engine_client::dto::AttemptedCommand;
-            if matches!(
-                attempted_command,
-                AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay
-            ) {
+            // If a mode switch is in progress (either direction), any EngineBusy aborts it.
+            // MODE_SWITCHING covers live→replay (guard held while collecting specs / showing
+            // dirty-confirm) as well as replay→live (guard held while waiting for ReplayStopped).
+            if MODE_SWITCHING.load(std::sync::atomic::Ordering::Acquire) {
                 Some(Message::ModeSwitchEngineBusy(reason))
             } else {
                 Some(Message::OrderToast(Toast::warn(format!(
@@ -1560,6 +1565,8 @@ impl Flowsurface {
             _mode_switch_guard: None,
             #[cfg(target_os = "linux")]
             menu_bar: crate::menu_bar_state::State::default(),
+            wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
+            run_buffer: wandb_auth::RunBufferIndex::empty(),
         };
 
         if let Some(err) = audio_init_err {
@@ -4431,8 +4438,8 @@ impl Flowsurface {
                 view_result,
                 &self.menu_bar,
                 &app_mode(),
-                &crate::wandb_auth::WandbAuthState::unauthenticated(),
-                &crate::wandb_auth::RunBufferIndex::empty(),
+                &self.wandb_auth,
+                &self.run_buffer,
             );
             view_result
         } else {
