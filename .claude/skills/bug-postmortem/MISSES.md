@@ -1698,3 +1698,52 @@ URL は実際には失効しておらず、再ログインしても再発する�
    パターンは、6 軸 (refcount / fanout / 例外隔離 / lifecycle / session swap /
    integration) でテストを揃える**: 今回の 10 テストは将来の類似マルチプレクサ
    (e.g. binance 等の複数チャンネル束ね WS) のテンプレートとして再利用可能。
+
+### 追補 Y7 (2026-05-04 同日レビュアー再指摘)
+
+**見逃しパターン**: 「外部リソース close → コンシューマ wait の解放経路欠落」（新パターン）
+
+**追加で発覚した不具合**:
+`set_session(None)` が hub を閉じても、`stream_depth` / `stream_trades` coroutine は
+自前の `_inner_stop.wait()` を待ち続け、stream task がリーク。server 側の `_streams`
+管理からも消えず、再ログイン後の再 subscribe が「Already subscribed」扱いで失敗する
+複合バグ。Bug Y 修正時にコンシューマ側の解放経路を作り忘れた。
+
+**修正**:
+- `tachibana_ws.py`: `subscribe(..., on_close=...)` 追加、`aclose()` で各 subscriber の
+  on_close をロック外で発火（再帰 deadlock 回避）。`unsubscribe()` は呼ばない (二重発火防止)
+- `tachibana.py`: stream_depth / stream_trades の hub.subscribe に
+  `on_close=_inner_stop.set` を渡す。`set_session` の sync fallback も on_close を発火
+- 追加テスト: `test_aclose_invokes_subscribers_on_close_callback` /
+  `test_unsubscribe_does_not_invoke_on_close` /
+  **`test_set_session_none_terminates_stream_coroutines`** (本丸)
+
+**なぜ初回の Bug Y 修正で見逃したか**:
+TickerEventWsHub の単体テスト 10 件はすべて「hub の内部状態 (subscribers/refcount/WS instances)」を assert していた。
+**「コンシューマの待機 (`_inner_stop.wait()`) が hub close で解放されるか」は hub の
+契約には含まれず、stream coroutine の側にも「hub が閉じたら抜ける」という
+保証がなかった**。マルチプレクサのテストとして 6 軸 (refcount / fanout / 例外隔離 /
+lifecycle / session swap / integration) を揃えたつもりが、**「session swap の伝播先で
+コンシューマが片付くか」という end-to-end ライフサイクルの 7 軸目が漏れていた**。
+
+**追補される教訓**:
+
+7. **「外部リソース close を購読側に伝える経路」をマルチプレクサ設計の必須要素にする**:
+   refcounted broker connection を作るとき、`aclose()` が単に WS を切るだけでは不十分。
+   購読側 coroutine が `_inner_stop` 等の自前イベントで待機している場合、close を購読側に
+   propagate する callback (今回の `on_close`) を最初から設計に含めること。
+   テストとしては「外部から hub を強制終了したとき、購読 coroutine が timeout 内に
+   終了すること」を必ず加える。
+
+8. **「自発的離脱 (unsubscribe)」と「強制終了 (aclose)」のシグナルを区別する**:
+   両方を同じパスで処理すると二重発火やループが起こる。今回は on_close を
+   aclose のみで呼び unsubscribe では呼ばないことで分離した。マルチプレクサを
+   設計するときは「callee-initiated cleanup」と「caller-initiated cleanup」の
+   区別を明示する。
+
+9. **マルチプレクサの単体テスト + 統合テスト + ライフサイクル伝播テスト の 3 階層**:
+   単体 (hub の状態遷移) と統合 (stream_depth が hub 経由で 1 接続に集約される) を
+   テストしても、**「session swap で hub close → stream coroutine 終了 → server registry
+   自動 cleanup」というクロスレイヤーのライフサイクル伝播**は別軸の検証が必要。
+   コンシューマがブロッキング待機する設計は、外部からの強制終了経路を必ず
+   end-to-end でテストすること。
