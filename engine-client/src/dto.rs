@@ -831,6 +831,10 @@ pub enum AttemptedCommand {
     StartEngine,
     StopEngine,
     SetReplaySpeed,
+    /// F7: StopReplay graceful stop (schema 3.11)
+    StopReplay,
+    /// F7: ForceStopReplay fallback (schema 3.11)
+    ForceStopReplay,
     SubmitOrder,
     ModifyOrder,
     CancelOrder,
@@ -848,6 +852,8 @@ impl AttemptedCommand {
             AttemptedCommand::StartEngine => "StartEngine",
             AttemptedCommand::StopEngine => "StopEngine",
             AttemptedCommand::SetReplaySpeed => "SetReplaySpeed",
+            AttemptedCommand::StopReplay => "StopReplay",
+            AttemptedCommand::ForceStopReplay => "ForceStopReplay",
             AttemptedCommand::SubmitOrder => "SubmitOrder",
             AttemptedCommand::ModifyOrder => "ModifyOrder",
             AttemptedCommand::CancelOrder => "CancelOrder",

@@ -1015,6 +1015,9 @@ enum Message {
         target: engine_client::dto::AppMode,
         windows: HashMap<window::Id, WindowSpec>,
     },
+    /// F7: engine returned `EngineBusy` for a `StopReplay` or `ForceStopReplay` command
+    /// while a mode switch is pending. Aborts the switch and shows an error dialog.
+    ModeSwitchEngineBusy(String),
     /// Internal: genuinely does nothing in update(). Used to discard async Task
     /// completion events where the result is irrelevant (fire-and-forget IPC sends).
     Noop,
@@ -1033,6 +1036,9 @@ enum Message {
         json_bytes: Vec<u8>,
         /// `None` = success, `Some(kind)` = I/O error on the user-specified path.
         error_kind: Option<std::io::ErrorKind>,
+        /// `true` if saved-state.json was written successfully (auto-restore slot).
+        /// `false` means the named doc is saved but next startup will auto-restore old state.
+        saved_state_ok: bool,
     },
 }
 
@@ -1303,13 +1309,24 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
         }
         // Phase 8: EngineBusy → GUI ユーザーへの warn toast
         // Python engine が state guard で Command を拒否したときに emit される。
+        // F7: StopReplay / ForceStopReplay の EngineBusy は mode-switch 中断として扱う。
         EngineEvent::EngineBusy {
             attempted_command,
             reason,
             ..
-        } => Some(Message::OrderToast(Toast::warn(format!(
-            "操作を受け付けられませんでした: {attempted_command} — {reason}"
-        )))),
+        } => {
+            use engine_client::dto::AttemptedCommand;
+            if matches!(
+                attempted_command,
+                AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay
+            ) {
+                Some(Message::ModeSwitchEngineBusy(reason))
+            } else {
+                Some(Message::OrderToast(Toast::warn(format!(
+                    "操作を受け付けられませんでした: {attempted_command} — {reason}"
+                ))))
+            }
+        }
         // Phase 8.1b: multi-client 接続ライフサイクルイベント
         // GUI 側では表示不要なため debug ログのみ出力して None を返す。
         EngineEvent::ClientConnected { count } => {
@@ -3176,29 +3193,31 @@ impl Flowsurface {
                 return Task::perform(
                     async move {
                         // A-3: write to user-specified path first; only on success
-                        // also write saved-state.json (best-effort).
-                        let error_kind = match tokio::fs::write(&user_path, &json_bytes).await {
+                        // also write saved-state.json (keep auto-restore slot in sync).
+                        match tokio::fs::write(&user_path, &json_bytes).await {
                             Ok(()) => {
-                                // saved-state.json write is best-effort — failure is
-                                // logged at WARN but does not affect the user-path result.
-                                if let Err(e) =
-                                    tokio::fs::write(saved_state_path, &json_bytes).await
-                                {
-                                    log::warn!(
-                                        "[NativeSaveComplete] failed to write \
-                                             saved-state.json: {e}"
-                                    );
-                                }
-                                None
+                                let saved_state_ok =
+                                    tokio::fs::write(saved_state_path, &json_bytes)
+                                        .await
+                                        .map_err(|e| {
+                                            log::warn!(
+                                                "[NativeSaveComplete] failed to write \
+                                                 saved-state.json: {e}"
+                                            );
+                                        })
+                                        .is_ok();
+                                (user_path, json_bytes, None, saved_state_ok)
                             }
-                            Err(e) => Some(e.kind()),
-                        };
-                        (user_path, json_bytes, error_kind)
+                            Err(e) => (user_path, json_bytes, Some(e.kind()), false),
+                        }
                     },
-                    |(user_path, json_bytes, error_kind)| Message::NativeSaveComplete {
-                        user_path,
-                        json_bytes,
-                        error_kind,
+                    |(user_path, json_bytes, error_kind, saved_state_ok)| {
+                        Message::NativeSaveComplete {
+                            user_path,
+                            json_bytes,
+                            error_kind,
+                            saved_state_ok,
+                        }
                     },
                 );
             }
@@ -3207,6 +3226,7 @@ impl Flowsurface {
                 user_path,
                 json_bytes,
                 error_kind,
+                saved_state_ok,
             } => {
                 match error_kind {
                     None => {
@@ -3222,6 +3242,15 @@ impl Flowsurface {
                             "保存しました: {}",
                             user_path.display()
                         )));
+                        // Notify if auto-restore slot (saved-state.json) failed — the named doc
+                        // is safe, but next startup will restore from an older state.
+                        if !saved_state_ok {
+                            self.notifications.push(Toast::error(
+                                "自動復元スロット (saved-state.json) の更新に失敗しました。\
+                                 次回起動時の復元が古い状態になる可能性があります。"
+                                    .to_string(),
+                            ));
+                        }
                         // If SaveAndOpenFile triggered this save (CURRENT_PATH=None path),
                         // complete the open now that the current state is safely written.
                         if let Some((pending_json, pending_path, _windows)) =
@@ -3425,8 +3454,14 @@ impl Flowsurface {
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
-                // Not dirty: save then restart
-                self.save_state_to_disk(&windows);
+                // Not dirty: save then restart. Abort if save fails (plan: 保存失敗 → 切替中止).
+                if !self.save_state_to_disk(&windows) {
+                    self._mode_switch_guard = None;
+                    self.notifications.push(Toast::error(
+                        "保存に失敗しました。モード切替を中止します。".to_string(),
+                    ));
+                    return Task::none();
+                }
                 return self.restart_with_mode(target);
             }
             // F7: user chose "破棄してモード切替"
@@ -3457,7 +3492,14 @@ impl Flowsurface {
             }
             // F7: window specs collected for the "保存してモード切替" path — save then restart.
             Message::SwitchModeSaveComplete { target, windows } => {
-                self.save_state_to_disk(&windows);
+                // Abort if save fails (plan: 保存失敗 → 切替中止).
+                if !self.save_state_to_disk(&windows) {
+                    self._mode_switch_guard = None;
+                    self.notifications.push(Toast::error(
+                        "保存に失敗しました。モード切替を中止します。".to_string(),
+                    ));
+                    return Task::none();
+                }
                 return self.restart_with_mode(target);
             }
             // F7: ReplayStopped event received — proceed with restart_with_mode
@@ -3511,6 +3553,27 @@ impl Flowsurface {
                 )
                 .with_confirm_btn_text("閉じる".to_string());
                 self.confirm_dialog = Some(dialog);
+                return Task::none();
+            }
+            // F7: EngineBusy for StopReplay/ForceStopReplay — abort mode switch immediately.
+            // This handles the 5-axis matrix row "replay→live, EngineBusy" without waiting
+            // for the 5s timeout. The stale ModeSwitchStopTimeout fires later but is ignored
+            // because pending_mode_switch will be None at that point.
+            Message::ModeSwitchEngineBusy(reason) => {
+                if self.pending_mode_switch.take().is_some() {
+                    self._mode_switch_guard = None;
+                    let dialog = screen::ConfirmDialog::new(
+                        format!("モード切替を中止しました。\nエンジンがビジー状態です: {reason}"),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                } else {
+                    // No pending switch — fall back to warn toast
+                    self.notifications.push(Toast::warn(format!(
+                        "操作を受け付けられませんでした: {reason}"
+                    )));
+                }
                 return Task::none();
             }
             // F7: true no-op — used to discard fire-and-forget Task completions.

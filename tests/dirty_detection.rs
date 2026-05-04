@@ -326,6 +326,86 @@ fn is_dirty_has_none_is_clean_branch_and_some_comparison_branch() {
     );
 }
 
+// ── MEDIUM-2 / BC-11: build_state_json uses ordered structures ────────────────
+
+#[test]
+fn build_state_json_uses_vec_for_layouts_not_hashmap() {
+    // BC-11 / MEDIUM-2: build_state_json() must produce deterministic JSON.
+    // The risk is that someone replaces Vec<Layout> or Dashboard::popout with a
+    // HashMap/FxHashMap field, which would make serialization order
+    // non-deterministic across runs.
+    //
+    // Strategy: source-inspect the two structures that build_state_json() writes:
+    //   1. data::Layouts::layouts  — must be Vec<Layout>, not HashMap
+    //   2. data::Dashboard::popout — must be Vec<…>,      not HashMap
+    //
+    // We also verify that build_state_json itself builds ser_layouts as a Vec
+    // (not by inserting into a map).
+
+    // ── 1. data::Layouts::layouts must be Vec<Layout> ─────────────────────────
+    let layouts_src = include_str!("../data/src/config/state.rs");
+    let layouts_struct_pos = layouts_src
+        .find("pub struct Layouts")
+        .expect("data::Layouts must exist in data/src/config/state.rs (BC-11)");
+    let tail = &layouts_src[layouts_struct_pos..];
+    let end = tail.find('}').expect("Layouts struct must have closing brace") + 1;
+    let struct_body = &tail[..end];
+
+    assert!(
+        struct_body.contains("Vec<Layout>"),
+        "data::Layouts::layouts must be Vec<Layout> for deterministic serialization (BC-11). \
+         Got struct body: {struct_body}"
+    );
+    assert!(
+        !struct_body.contains("HashMap") && !struct_body.contains("FxHashMap"),
+        "data::Layouts must not use HashMap/FxHashMap — non-deterministic JSON order (BC-11)"
+    );
+
+    // ── 2. data::Dashboard::popout must be Vec<…> ─────────────────────────────
+    let dashboard_src = include_str!("../data/src/layout/dashboard.rs");
+    let dashboard_struct_pos = dashboard_src
+        .find("pub struct Dashboard")
+        .expect("data::Dashboard must exist in data/src/layout/dashboard.rs (BC-11)");
+    let tail = &dashboard_src[dashboard_struct_pos..];
+    let end = tail.find('}').expect("Dashboard struct must have closing brace") + 1;
+    let struct_body = &tail[..end];
+
+    assert!(
+        struct_body.contains("pub popout: Vec<"),
+        "data::Dashboard::popout must be Vec<…> for deterministic serialization (BC-11). \
+         Got struct body: {struct_body}"
+    );
+    assert!(
+        !struct_body.contains("HashMap") && !struct_body.contains("FxHashMap"),
+        "data::Dashboard must not use HashMap/FxHashMap — non-deterministic JSON order (BC-11)"
+    );
+
+    // ── 3. build_state_json builds ser_layouts as a Vec push loop ─────────────
+    let main_src = read_main();
+    let fn_start = main_src
+        .find("fn build_state_json(")
+        .expect("build_state_json must exist in main.rs (BC-11)");
+    let tail = &main_src[fn_start..];
+    let end = tail[1..]
+        .find("\n    fn ")
+        .map(|i| i + 1)
+        .unwrap_or(tail.len());
+    let fn_body = &tail[..end];
+
+    assert!(
+        fn_body.contains("vec![]") || fn_body.contains("Vec::new()"),
+        "build_state_json must initialize ser_layouts as a Vec (BC-11)"
+    );
+    assert!(
+        fn_body.contains(".push("),
+        "build_state_json must append layouts with .push() into a Vec (BC-11)"
+    );
+    assert!(
+        !fn_body.contains("HashMap::new()") && !fn_body.contains("FxHashMap"),
+        "build_state_json must not build a HashMap for layouts (BC-11)"
+    );
+}
+
 // ── Pending exit / open message variants ──────────────────────────────────────
 
 #[test]
