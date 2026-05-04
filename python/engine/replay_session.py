@@ -897,6 +897,32 @@ class ReplaySession:
         if not Path(strategy_file).exists():
             raise FileNotFoundError(f"strategy_file が見つかりません: {strategy_file!r}")
 
+        # F9a: RunBuffer tee — replay イベントを JSONL ファイルに記録する。
+        # strategy_file / instrument が取れない場合は None のまま graceful skip。
+        self._last_run_buffer = None
+        try:
+            from engine.run_buffer import RunBuffer, make_run_id, get_run_buffer_base_dir
+            _params = self._load_params or {}
+            _instrument = _params.get("instrument_id", "unknown")
+            _run_id = make_run_id(strategy_file, _instrument)
+            _scenario = {
+                "instrument": _instrument,
+                "start": _params.get("start_date", ""),
+                "end": _params.get("end_date", ""),
+                "granularity": _params.get("granularity", ""),
+                "initial_cash": initial_cash,
+            } if _params else None
+            _run_buffer: RunBuffer | None = RunBuffer(
+                run_id=_run_id,
+                strategy_file=strategy_file,
+                scenario=_scenario,
+                base_dir=get_run_buffer_base_dir(),
+            )
+            self._last_run_buffer = _run_buffer
+        except Exception as _rb_exc:
+            log.warning("RunBuffer init failed, continuing without buffer: %s", _rb_exc)
+            _run_buffer = None
+
         if self._mode == "attach":
             from engine.schemas import StartEngine, EngineStartConfig
             import uuid
@@ -945,6 +971,12 @@ class ReplaySession:
                     kind = _extract_event_kind(evt)
                     if kind == "ReplayBuyingPower":
                         self._portfolio = evt
+                    # F9a: RunBuffer tee (attach mode)
+                    if _run_buffer is not None:
+                        try:
+                            _run_buffer.write_event(evt)
+                        except Exception as _rb_err:
+                            log.warning("RunBuffer.write_event failed: %s", _rb_err)
                     # C-GP2 (Phase 8 R1 / Phase 3): EngineStopped を観測したら
                     # on_event 呼出 *前* に STOPPED へ遷移する。on_event 内で
                     # 例外が出ても status が ERRORED に上書きされず STOPPED の
@@ -957,11 +989,23 @@ class ReplaySession:
                 # return しているため _status は既に STOPPED。冪等更新。
                 if self._status is not _ReplayStatus.STOPPED:
                     self._status = _ReplayStatus.STOPPED
+                # F9a: 正常完了時に RunBuffer を finish する。
+                if _run_buffer is not None:
+                    try:
+                        _run_buffer.finish()
+                    except Exception as _rb_err:
+                        log.warning("RunBuffer.finish failed: %s", _rb_err)
             except Exception:
                 # C-GP2: 既に STOPPED に遷移済みなら維持する (on_event 内 raise
                 # が STOPPED を ERRORED に上書きしないようにする)。
                 if self._status is not _ReplayStatus.STOPPED:
                     self._status = _ReplayStatus.ERRORED
+                # F9a: 例外時は abort する。
+                if _run_buffer is not None:
+                    try:
+                        _run_buffer.abort()
+                    except Exception:
+                        pass
                 raise
             finally:
                 # LOW-R3-4: run() 退出時に attach client の current_request_id を
@@ -983,6 +1027,12 @@ class ReplaySession:
             # H13: in-process / attach のキー名差異を吸収する。
             if _extract_event_kind(evt) == "ReplayBuyingPower":
                 self._portfolio = evt
+            # F9a: RunBuffer tee (in-process mode)
+            if _run_buffer is not None:
+                try:
+                    _run_buffer.write_event(evt)
+                except Exception as _rb_err:
+                    log.warning("RunBuffer.write_event failed: %s", _rb_err)
             on_event(evt)
 
         runner = NautilusRunner()
@@ -1007,8 +1057,20 @@ class ReplaySession:
                 stop_event=self._stop_event,
             )
             self._status = _ReplayStatus.STOPPED
+            # F9a: 正常完了時に RunBuffer を finish する。
+            if _run_buffer is not None:
+                try:
+                    _run_buffer.finish()
+                except Exception as _rb_err:
+                    log.warning("RunBuffer.finish failed: %s", _rb_err)
         except Exception:
             self._status = _ReplayStatus.ERRORED
+            # F9a: 例外時は abort する。
+            if _run_buffer is not None:
+                try:
+                    _run_buffer.abort()
+                except Exception:
+                    pass
             raise
 
     def set_speed(self, multiplier: int) -> None:

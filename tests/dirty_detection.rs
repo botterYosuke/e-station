@@ -348,7 +348,10 @@ fn build_state_json_uses_vec_for_layouts_not_hashmap() {
         .find("pub struct Layouts")
         .expect("data::Layouts must exist in data/src/config/state.rs (BC-11)");
     let tail = &layouts_src[layouts_struct_pos..];
-    let end = tail.find('}').expect("Layouts struct must have closing brace") + 1;
+    let end = tail
+        .find('}')
+        .expect("Layouts struct must have closing brace")
+        + 1;
     let struct_body = &tail[..end];
 
     assert!(
@@ -367,7 +370,10 @@ fn build_state_json_uses_vec_for_layouts_not_hashmap() {
         .find("pub struct Dashboard")
         .expect("data::Dashboard must exist in data/src/layout/dashboard.rs (BC-11)");
     let tail = &dashboard_src[dashboard_struct_pos..];
-    let end = tail.find('}').expect("Dashboard struct must have closing brace") + 1;
+    let end = tail
+        .find('}')
+        .expect("Dashboard struct must have closing brace")
+        + 1;
     let struct_body = &tail[..end];
 
     assert!(

@@ -744,8 +744,8 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
 
 | Phase | 内容 | 規模 | 依存 |
 |-------|------|------|------|
-| **F9a** | RunBuffer Python 側書き出し（`replay_session.py` の event loop に tee） | M | F6（SCENARIO 抽出が無いと meta.json の scenario 欄が埋まらない） |
-| **F9b** | `examples/wandb/submit_run.py` 実装 + 単体スモーク | M | F9a |
+| **✅F9a** | RunBuffer Python 側書き出し（`replay_session.py` の event loop に tee） | M | F6（SCENARIO 抽出が無いと meta.json の scenario 欄が埋まらない） |
+| **✅F9b** | `examples/wandb/submit_run.py` 実装 + 単体スモーク | M | F9a |
 | **F9c** | `ツール（Tools）` メニュー追加（muda + Linux 自前）+ `WandbSubmitModal` UI + `WandbSignInModal`（ログイン / ログアウト / netrc 委譲）+ key マスキング | L | F9a / F2 |
 | **F9d** | Rust subprocess 起動 + stdout tail + URL パース | S | F9c |
 | **F9e** | `送信履歴を開く` / `バッファを削除…` の補助 UI | S | F9c |
@@ -758,7 +758,21 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
 <a id="dod"></a>
 ## DoD（完了条件）
 
-### F9a: RunBuffer 書き出し
+### ✅F9a: RunBuffer 書き出し（2026-05-04 完了）
+
+**実装ファイル**:
+- `python/engine/run_buffer.py` — RunBuffer クラス（write_event / finish / abort / sweep_old_runs）
+- `python/engine/pii_scrub.py` — PII allow-list スクラバー（FILLS/EQUITY/NARRATIVE_ALLOWED_KEYS / FORBIDDEN_KEYS / pii_scrub()）
+- `python/engine/replay_session.py` — RunBuffer tee 統合（run() の event loop に tee、line 900-1012）
+- `python/tests/test_run_buffer_writer.py` — 8 テストケース
+- `python/tests/test_scenario_writeback.py` — test_write_back_refuses_run_buffer_path 追加
+
+**設計判断**:
+- PII 禁止キー検出 → event 丸ごと skip（None 返却）。許可外キーは strip のみ
+- `FORBIDDEN_KEYS` に `venue_order_id`, `client_order_id`, `raw_data`, `payload` 等を含む
+- `finish()` = jsonl flush+fsync → meta.json atomic rewrite の順序契約（BC3-5）
+- `sweep_old_runs()` = running & no .lock → aborted に正規化（統一決定 50）
+- `run_buffer.py` は `import wandb` 禁止（コア非汚染ルール準拠）
 
 - **テストファイル**: `python/tests/test_run_buffer_writer.py`
 - **assert**:
@@ -778,7 +792,7 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
     禁止 key が現れない）
 - **観測コマンド**: `uv run pytest python/tests/test_run_buffer_writer.py -v`
 
-### F9b: submit_run.py
+### ✅F9b: submit_run.py（2026-05-04 完了）
 
 - **テストファイル**: `examples/wandb/tests/test_submit_run.py`
   （`wandb.init` を `monkeypatch` でモック化。`examples/wandb/tests/` 配下は
@@ -802,6 +816,49 @@ Rust 側に判定ロジックが混入しないことを保証するため、以
   を CI 上で常時実行する。
 
 ### F9c: メニュー / モーダル / 認証
+
+#### ✅ F9c-menu 完了（2026-05-04）— native_menu.rs Tools submenu 配線 + main.rs スタブハンドラ
+
+**実装内容**:
+- `src/native_menu.rs` — `Action` enum に `SubmitToWandb` / `SignInWandb` / `SignOutWandb` / `OpenSubmissionLog` / `ClearRunBuffer` を追加。`MenuIds` struct に 5 フィールド追加。`attach()` に `ツール（Tools）` サブメニューを追加（`Ctrl+Shift+W` アクセラレータ付き）。`event_stream()` に 5 アクションのマッピングを追加
+- `src/main.rs` — `NativeMenuAction` ハンドラに 5 アクションのスタブハンドラを追加（`log::info!` + `Task::none()` のみ。F9d/F9e で実装）
+- `tests/wandb_menu_action.rs` — ソースインスペクション方式の 22 テストケース（全通過）
+
+**テスト結果**:
+- `cargo test --test wandb_menu_action` — 22 passed
+- `cargo test --workspace` — FAILED 0
+- `cargo clippy -- -D warnings` — 警告なし
+- `cargo fmt --check` — 差分なし
+
+#### ✅ F9c-base 完了（2026-05-04）— Rust 型レイヤーのアップグレードと W&B 認証・マスキング基盤
+
+**実装ファイル（新設）**:
+- `src/wandb_auth.rs` — `WandbAuthState`（Python stdout JSON を受け取るデータ運搬 struct）/ `RunBufferIndex`（run-buffer/ スキャン）
+- `src/mask_secrets.rs` — `MaskedLine` newtype + `mask_secrets()` 関数（WANDB_API_KEY / 40桁 hex を `***` に置換）
+
+**変更ファイル**:
+- `src/menu.rs` — `tools_actions_for_state` を `Vec<Action>` → `Vec<MenuEntry>` に変更（R7-86）。引数を `(&WandbAuthState, &RunBufferIndex)` に変更。内部テストを 4 組合せ × 5 項目の `MenuEntry` 検証に書き換え。`AuthState`/`BufferState` は `#[allow(dead_code)]` で保持
+- `src/main.rs` — `mod mask_secrets`・`mod wandb_auth` 追加。`fn main()` 冒頭に panic hook 登録（mask_secrets で 40 桁 hex をマスク）
+- `Cargo.toml` — `regex` を本体依存に追加、`proptest = "1"` / `walkdir = "2"` を dev-dependencies に追加
+- `tests/tools_actions_for_state.rs` — R7-86 対応の新しい構造インスペクションテストに全面書き換え
+
+**新規テストファイル**:
+- `tests/wandb_auth_state.rs` — WandbAuthState JSON deserialize テスト（11 ケース）+ ソースインスペクション
+- `tests/wandb_key_masking.rs` — mask_secrets 基本動作・proptest（16 ケース）+ grep ガード（no_wandb_api_key_literal / no_api_wandb_ai / no_netrc / no_key_field）+ panic hook 確認
+
+**設計判断**:
+- `WandbAuthState` を `src/wandb_auth.rs` に置いた理由: メニュー計算ロジック（menu.rs）と型定義を分離し、将来の配線コード（subprocess spawn / cache）も同じモジュールに集約できるようにするため
+- `tools_actions_for_state` の引数型選択: `&WandbAuthState` / `&RunBufferIndex` に統一（R7-86 決定）。コピーコストを避けるため参照渡し
+- `AuthState`/`BufferState` は削除せず `#[allow(dead_code)]` で保持: ソースインスペクションテスト（tools_actions_for_state.rs）が文字列として検出しているため
+- `MaskedLine` newtype 強制: raw String を UI/ログに渡す経路をコンパイルエラーで防ぐ設計。bin-only crate のため外部テストは独立実装で検証
+
+**テスト結果**:
+- `cargo test --test wandb_auth_state` — 11 passed
+- `cargo test --test wandb_key_masking` — 16 passed（proptest 含む）
+- `cargo test --test tools_actions_for_state` — 13 passed
+- `cargo test --workspace` — 全件 OK（FAILED 0）
+- `cargo clippy -- -D warnings` — 警告なし
+- `cargo fmt --check` — 差分なし
 
 - **テストファイル**:
   - `tests/wandb_menu_action.rs`（メニュー有効化 / アクセラレータ / 二重発火回避）

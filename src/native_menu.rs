@@ -10,6 +10,17 @@ pub enum Action {
     Quit,
     /// F7/T3: switch to the given app mode (menu item clicked).
     SwitchMode(AppMode),
+    // ── Tools / W&B submenu ────────────────────────────────────────────────
+    /// F9c: W&B に送信（Submit to W&B）
+    SubmitToWandb,
+    /// F9c: W&B にサインイン（Sign In to W&B）
+    SignInWandb,
+    /// F9c: W&B からサインアウト（Sign Out from W&B）
+    SignOutWandb,
+    /// F9c: 送信ログを開く（Open Submission Log）
+    OpenSubmissionLog,
+    /// F9c: バッファを消去（Clear Run Buffer）
+    ClearRunBuffer,
 }
 
 /// Returns which menu actions are present for a given app mode.
@@ -88,7 +99,11 @@ fn linux_keyboard_subscription(app_mode: AppMode) -> Subscription<Action> {
                 if crate::MODE_SWITCHING.load(Ordering::Acquire) {
                     None
                 } else {
-                    let target = if is_live { AppMode::Replay } else { AppMode::Live };
+                    let target = if is_live {
+                        AppMode::Replay
+                    } else {
+                        AppMode::Live
+                    };
                     Some(Action::SwitchMode(target))
                 }
             }
@@ -119,6 +134,12 @@ mod platform {
         switch_live: Option<MenuId>,
         /// F7/T3: "リプレイ（Replay）" CheckMenuItem inside the Mode submenu.
         switch_replay: Option<MenuId>,
+        // ── F9c: Tools / W&B submenu ─────────────────────────────────────
+        submit_to_wandb: MenuId,
+        sign_in_wandb: MenuId,
+        sign_out_wandb: MenuId,
+        open_submission_log: MenuId,
+        clear_run_buffer: MenuId,
     }
 
     // `Mutex<Option<_>>` (not `OnceLock`) so that `attach()` called again after
@@ -253,6 +274,45 @@ mod platform {
             return;
         }
 
+        // F9c: ツール（Tools）サブメニュー
+        let tools_submenu = Submenu::new("ツール（Tools）", true);
+        let submit_item = MenuItem::new(
+            "W&B に送信\u{2026}",
+            true,
+            Some(Accelerator::new(
+                Some(Modifiers::CONTROL | Modifiers::SHIFT),
+                Code::KeyW,
+            )),
+        );
+        let sign_in_item = MenuItem::new("W&B にサインイン", true, None);
+        let sign_out_item = MenuItem::new("W&B からサインアウト", true, None);
+        let tools_sep = PredefinedMenuItem::separator();
+        let submission_log_item = MenuItem::new("送信ログを開く", true, None);
+        let clear_buffer_item = MenuItem::new("バッファを消去", true, None);
+
+        let submit_to_wandb_id = submit_item.id().clone();
+        let sign_in_wandb_id = sign_in_item.id().clone();
+        let sign_out_wandb_id = sign_out_item.id().clone();
+        let open_submission_log_id = submission_log_item.id().clone();
+        let clear_run_buffer_id = clear_buffer_item.id().clone();
+
+        if let Err(e) = tools_submenu.append_items(&[
+            &submit_item as &dyn IsMenuItem,
+            &sign_in_item as &dyn IsMenuItem,
+            &sign_out_item as &dyn IsMenuItem,
+            &tools_sep as &dyn IsMenuItem,
+            &submission_log_item as &dyn IsMenuItem,
+            &clear_buffer_item as &dyn IsMenuItem,
+        ]) {
+            log::error!("[native_menu] tools_submenu.append_items failed: {e:?}");
+            return;
+        }
+
+        if let Err(e) = menu.append(&tools_submenu) {
+            log::error!("[native_menu] menu.append tools_submenu failed: {e:?}");
+            return;
+        }
+
         match MENU_IDS.lock() {
             Ok(mut guard) => {
                 *guard = Some(MenuIds {
@@ -263,6 +323,11 @@ mod platform {
                     quit: quit_id,
                     switch_live: Some(switch_live_id),
                     switch_replay: Some(switch_replay_id),
+                    submit_to_wandb: submit_to_wandb_id,
+                    sign_in_wandb: sign_in_wandb_id,
+                    sign_out_wandb: sign_out_wandb_id,
+                    open_submission_log: open_submission_log_id,
+                    clear_run_buffer: clear_run_buffer_id,
                 });
             }
             Err(poisoned) => {
@@ -275,6 +340,11 @@ mod platform {
                     quit: quit_id,
                     switch_live: Some(switch_live_id),
                     switch_replay: Some(switch_replay_id),
+                    submit_to_wandb: submit_to_wandb_id,
+                    sign_in_wandb: sign_in_wandb_id,
+                    sign_out_wandb: sign_out_wandb_id,
+                    open_submission_log: open_submission_log_id,
+                    clear_run_buffer: clear_run_buffer_id,
                 });
             }
         }
@@ -345,6 +415,16 @@ mod platform {
                             .is_some_and(|id| *id == event.id)
                         {
                             Some(Action::SwitchMode(AppMode::Replay))
+                        } else if ids.submit_to_wandb == event.id {
+                            Some(Action::SubmitToWandb)
+                        } else if ids.sign_in_wandb == event.id {
+                            Some(Action::SignInWandb)
+                        } else if ids.sign_out_wandb == event.id {
+                            Some(Action::SignOutWandb)
+                        } else if ids.open_submission_log == event.id {
+                            Some(Action::OpenSubmissionLog)
+                        } else if ids.clear_run_buffer == event.id {
+                            Some(Action::ClearRunBuffer)
                         } else {
                             None
                         }
@@ -371,6 +451,11 @@ mod platform {
                 quit: None,
                 switch_live: None,
                 switch_replay: None,
+                submit_to_wandb: MenuId::new("submit_to_wandb"),
+                sign_in_wandb: MenuId::new("sign_in_wandb"),
+                sign_out_wandb: MenuId::new("sign_out_wandb"),
+                open_submission_log: MenuId::new("open_submission_log"),
+                clear_run_buffer: MenuId::new("clear_run_buffer"),
             }
         }
 
@@ -466,10 +551,7 @@ mod tests {
             open_replay_dialog,
             "replay mode must have Open Replay Dialog action"
         );
-        assert!(
-            switch_live,
-            "replay mode must offer switch-to-live action"
-        );
+        assert!(switch_live, "replay mode must offer switch-to-live action");
         assert!(
             !switch_replay,
             "replay mode must NOT offer switch-to-replay (already replay)"

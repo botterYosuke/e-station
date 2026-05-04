@@ -9,10 +9,7 @@ fn linux_keyboard_subscription_checks_mode_switching() {
         .find("fn linux_keyboard_subscription")
         .expect("linux_keyboard_subscription must exist in native_menu.rs");
     let body = &NATIVE_MENU_RS[idx..];
-    let end = body[1..]
-        .find("\nfn ")
-        .map(|i| i + 1)
-        .unwrap_or(body.len());
+    let end = body[1..].find("\nfn ").map(|i| i + 1).unwrap_or(body.len());
     let fn_body = &body[..end];
     assert!(
         fn_body.contains("MODE_SWITCHING"),

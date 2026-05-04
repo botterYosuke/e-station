@@ -2989,6 +2989,33 @@ impl Flowsurface {
                             Message::ExitRequested,
                         );
                     }
+                    // ── F9c: Tools / W&B submenu stubs (F9d/F9e で実装) ───────────────
+                    Action::SubmitToWandb => {
+                        // F9d で実装: subprocess launch (submit_run.py)
+                        // stub: log only
+                        log::info!("SubmitToWandb: stub (F9d)");
+                        return Task::none();
+                    }
+                    Action::SignInWandb => {
+                        // F9d で実装: W&B サインインダイアログ
+                        log::info!("SignInWandb: stub (F9d)");
+                        return Task::none();
+                    }
+                    Action::SignOutWandb => {
+                        // F9d で実装: netrc / env var 削除
+                        log::info!("SignOutWandb: stub (F9d)");
+                        return Task::none();
+                    }
+                    Action::OpenSubmissionLog => {
+                        // F9e で実装: 送信ログ UI
+                        log::info!("OpenSubmissionLog: stub (F9e)");
+                        return Task::none();
+                    }
+                    Action::ClearRunBuffer => {
+                        // F9e で実装: バッファ削除
+                        log::info!("ClearRunBuffer: stub (F9e)");
+                        return Task::none();
+                    }
                     Action::SwitchMode(target) => {
                         use engine_client::dto::AppMode;
                         // Guard: don't start a mode switch if another dialog is already showing
@@ -4360,8 +4387,7 @@ impl Flowsurface {
             #[cfg(target_os = "linux")]
             {
                 let menu_bar_view =
-                    crate::widget_menu_bar::view(&self.menu_bar, &app_mode())
-                        .map(Message::MenuBar);
+                    crate::widget_menu_bar::view(&self.menu_bar, &app_mode()).map(Message::MenuBar);
                 base = base.push(menu_bar_view);
             }
             if let Some(banner) = banner {
@@ -4395,11 +4421,20 @@ impl Flowsurface {
             );
             base = base.push(status_bar(is_replay));
 
-            if let Some(menu) = self.sidebar.active_menu() {
+            let view_result = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
             } else {
                 base.into()
-            }
+            };
+            #[cfg(target_os = "linux")]
+            let view_result = crate::widget_menu_bar::with_dropdown_overlay(
+                view_result,
+                &self.menu_bar,
+                &app_mode(),
+                &crate::wandb_auth::WandbAuthState::unauthenticated(),
+                &crate::wandb_auth::RunBufferIndex::empty(),
+            );
+            view_result
         } else {
             container(
                 dashboard

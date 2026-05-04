@@ -65,9 +65,18 @@ fn bar_message_enum_has_toggle_pick_dismiss() {
         src.contains("pub enum BarMessage"),
         "menu_bar_state.rs must define `pub enum BarMessage`"
     );
-    assert!(src.contains("Toggle(TopMenu)"), "BarMessage must have Toggle(TopMenu) variant");
-    assert!(src.contains("Pick("), "BarMessage must have Pick(...) variant");
-    assert!(src.contains("Dismiss"), "BarMessage must have Dismiss variant");
+    assert!(
+        src.contains("Toggle(TopMenu)"),
+        "BarMessage must have Toggle(TopMenu) variant"
+    );
+    assert!(
+        src.contains("Pick("),
+        "BarMessage must have Pick(...) variant"
+    );
+    assert!(
+        src.contains("Dismiss"),
+        "BarMessage must have Dismiss variant"
+    );
 }
 
 #[test]
@@ -89,9 +98,7 @@ fn dismiss_always_yields_open_none() {
         .find("pub fn update(state: State, msg: BarMessage) -> State")
         .expect("update function must exist");
     let fn_body = &src[fn_start..];
-    let fn_end = fn_body
-        .find("\npub fn ")
-        .unwrap_or(fn_body.len());
+    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
     let body = &fn_body[..fn_end];
 
     // The Dismiss arm must set open: None. Accept either combined or separate arm.
@@ -161,7 +168,7 @@ fn pick_always_closes_menu() {
     );
 }
 
-// ── widget_menu_bar module: menu_items and view ────────────────────────────
+// ── widget_menu_bar module: menu_items, view, overlay, conversion ──────────
 
 #[test]
 fn menu_items_function_delegates_to_menu_module() {
@@ -170,7 +177,6 @@ fn menu_items_function_delegates_to_menu_module() {
         src.contains("pub fn menu_items"),
         "widget_menu_bar.rs must export `pub fn menu_items`"
     );
-    // Must call into the menu module (actions_for_mode or menu::actions_for_mode).
     assert!(
         src.contains("actions_for_mode"),
         "menu_items must delegate to menu::actions_for_mode for cross-platform consistency"
@@ -178,11 +184,71 @@ fn menu_items_function_delegates_to_menu_module() {
 }
 
 #[test]
-fn view_function_exists_as_linux_stub() {
+fn view_function_returns_bar_message_element() {
     let src = read_widget_menu_bar();
     assert!(
         src.contains("pub fn view"),
         "widget_menu_bar.rs must export `pub fn view`"
+    );
+    // view() must return Element<'_, BarMessage> so main.rs can .map(Message::MenuBar)
+    assert!(
+        src.contains("Element<'a, BarMessage>") || src.contains("-> Element<'_, BarMessage>"),
+        "view() must return Element<'a, BarMessage> (not Message) for .map(Message::MenuBar) in main.rs"
+    );
+    // Must emit Toggle messages and include all three top-level menu variants
+    assert!(
+        src.contains("BarMessage::Toggle"),
+        "view() must emit BarMessage::Toggle for top-level button presses"
+    );
+    assert!(
+        src.contains("TopMenu::File"),
+        "view() must reference TopMenu::File for the File ▼ button"
+    );
+    assert!(
+        src.contains("TopMenu::Mode"),
+        "view() must reference TopMenu::Mode for the Mode ▼ button"
+    );
+    assert!(
+        src.contains("TopMenu::Tools"),
+        "view() must reference TopMenu::Tools for the Tools ▼ button"
+    );
+}
+
+#[test]
+fn with_dropdown_overlay_function_exists() {
+    let src = read_widget_menu_bar();
+    assert!(
+        src.contains("pub fn with_dropdown_overlay"),
+        "widget_menu_bar.rs must export `pub fn with_dropdown_overlay` for overlay rendering"
+    );
+    // Must use stack! for layering base + overlay
+    assert!(
+        src.contains("stack!["),
+        "with_dropdown_overlay must use stack! to layer base content and dropdown overlay"
+    );
+    // Must dismiss on outside click via mouse_area
+    assert!(
+        src.contains("BarMessage::Dismiss"),
+        "with_dropdown_overlay must send BarMessage::Dismiss on outside click via mouse_area"
+    );
+}
+
+#[test]
+fn to_native_action_function_exists() {
+    let src = read_widget_menu_bar();
+    assert!(
+        src.contains("pub(crate) fn to_native_action") || src.contains("pub fn to_native_action"),
+        "widget_menu_bar.rs must export `to_native_action` for menu::Action → native_menu::Action conversion"
+    );
+    // Must handle Open → OpenFile
+    assert!(
+        src.contains("N::OpenFile") || src.contains("native_menu::Action::OpenFile"),
+        "to_native_action must map Action::Open to native_menu::Action::OpenFile"
+    );
+    // ReplayStop has no native equivalent — must return None
+    assert!(
+        src.contains("Action::ReplayStop"),
+        "to_native_action must explicitly handle Action::ReplayStop (returns None — no muda equivalent)"
     );
 }
 

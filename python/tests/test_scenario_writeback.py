@@ -502,3 +502,34 @@ def test_replaces_scenario_when_annotation_only_precedes_assign(tmp_path: Path) 
     # TypedDict 定義・注釈宣言・クラスは保持される
     assert "class Scenario(TypedDict):" in result_text
     assert "SCENARIO: Scenario" in result_text
+
+
+# ---------------------------------------------------------------------------
+# F9a: run-buffer/ 配下への書き戻し禁止（path ガード横断保護）
+# ---------------------------------------------------------------------------
+
+
+def test_write_back_refuses_run_buffer_path(tmp_path: Path) -> None:
+    """run-buffer/ 配下の .py への書き戻しは永続状態ディレクトリ書き込み禁止ガードで拒否される。"""
+    import os
+
+    # 永続状態ディレクトリ（%APPDATA%\flowsurface\）配下の run-buffer/ を模倣する。
+    fake_appdata = tmp_path / "AppData" / "Roaming"
+    run_buffer_dir = fake_appdata / "flowsurface" / "run-buffer" / "1714800123-buy_and_hold-1301_TSE"
+    run_buffer_dir.mkdir(parents=True, exist_ok=True)
+    strategy_py = run_buffer_dir / "strategy.py"
+    strategy_py.write_text(
+        "SCENARIO = {'schema_version': 1, 'instrument': '1301.TSE', "
+        "'start': '2025-01-06', 'end': '2025-03-31', 'granularity': '1m', 'initial_cash': 1000000}\n",
+        encoding="utf-8",
+    )
+
+    with patch.dict(os.environ, {"APPDATA": str(fake_appdata)}):
+        with pytest.raises(ValueError, match="path_guard_violation"):
+            write_back(
+                strategy_py,
+                VALID_SCENARIO,
+                save_as=True,
+                current_path=None,
+                loaded_path=None,
+            )

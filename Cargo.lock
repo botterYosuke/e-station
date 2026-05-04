@@ -1342,6 +1342,7 @@ dependencies = [
  "muda",
  "num-traits",
  "palette",
+ "proptest",
  "rand 0.9.2",
  "regex",
  "rfd",
@@ -1355,6 +1356,7 @@ dependencies = [
  "tokio-tungstenite",
  "url",
  "uuid",
+ "walkdir",
  "xxhash-rust",
  "zeroize",
 ]

@@ -37,7 +37,11 @@ pub struct State {
 pub fn update(state: State, msg: BarMessage) -> State {
     match msg {
         BarMessage::Toggle(top) => State {
-            open: if state.open == Some(top) { None } else { Some(top) },
+            open: if state.open == Some(top) {
+                None
+            } else {
+                Some(top)
+            },
         },
         BarMessage::Pick(_) | BarMessage::Dismiss => State { open: None },
     }

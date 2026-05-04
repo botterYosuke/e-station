@@ -152,12 +152,36 @@ const BACKOFF_MAX_MS: u64 = 30_000;
 /// release binary can never enable Python's env fast path even if the
 /// surrounding shell has the dev variables set (R10 / architecture
 /// §2.1.1 / H-2).
+/// Returns the engine cache directory that **both** the Rust WAL guard and the
+/// Python server should use.  Checking the same path is the single source of
+/// truth for the live→replay in-flight order guard.
+///
+/// Priority:
+/// 1. `FLOWSURFACE_CACHE_DIR` env var — explicit override.
+/// 2. `HOME` / `USERPROFILE` — platform default (`~/.cache/flowsurface/engine`).
+pub fn engine_cache_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("FLOWSURFACE_CACHE_DIR") {
+        return PathBuf::from(d);
+    }
+    let home = std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".cache").join("flowsurface").join("engine")
+}
+
 pub fn build_stdin_payload(port: u16, token: &str) -> Result<String, EngineClientError> {
     let dev_tachibana_login_allowed = cfg!(debug_assertions);
+    // Send the resolved cache_dir so Python uses exactly the same path as Rust.
+    // Python's __main__.py passes cfg["cache_dir"] to Server(); when present it
+    // takes priority over Python's own default, keeping WAL paths in sync.
+    let cache_dir = engine_cache_dir().to_string_lossy().into_owned();
     let payload = serde_json::json!({
         "port": port,
         "token": token,
         "dev_tachibana_login_allowed": dev_tachibana_login_allowed,
+        "cache_dir": cache_dir,
     });
     let mut s = serde_json::to_string(&payload)?;
     s.push('\n');

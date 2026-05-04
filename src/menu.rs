@@ -81,10 +81,7 @@ pub fn actions_for_mode(mode: &AppMode) -> Vec<Action> {
 /// - `SignInWandb` and `SignOutWandb` are mutually exclusive: exactly one is enabled.
 /// - `OpenSubmissionLog` is always present in the returned Vec.
 /// - `tooltip` is `None` when `enabled=true`, `Some(reason)` when `enabled=false`.
-pub fn tools_actions_for_state(
-    auth: &WandbAuthState,
-    buf: &RunBufferIndex,
-) -> Vec<MenuEntry> {
+pub fn tools_actions_for_state(auth: &WandbAuthState, buf: &RunBufferIndex) -> Vec<MenuEntry> {
     let has_runs = buf.latest_completed.is_some();
 
     vec![
@@ -117,10 +114,7 @@ pub fn tools_actions_for_state(
             tooltip: if !auth.authenticated {
                 Some("W&B にログインしてください".to_string())
             } else if !has_runs {
-                Some(
-                    "送信可能な run がありません（最初に replay を実行してください）"
-                        .to_string(),
-                )
+                Some("送信可能な run がありません（最初に replay を実行してください）".to_string())
             } else {
                 None
             },
@@ -277,9 +271,7 @@ mod tests {
         assert!(!submit.enabled);
         assert_eq!(
             submit.tooltip,
-            Some(
-                "送信可能な run がありません（最初に replay を実行してください）".to_string()
-            )
+            Some("送信可能な run がありません（最初に replay を実行してください）".to_string())
         );
 
         let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
@@ -361,8 +353,7 @@ mod tests {
                 let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
                 let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
                 assert_ne!(
-                    sign_in.enabled,
-                    sign_out.enabled,
+                    sign_in.enabled, sign_out.enabled,
                     "SignInWandb and SignOutWandb must be mutually exclusive \
                      (auth={authenticated}, has_runs={has_runs})"
                 );
@@ -394,8 +385,7 @@ mod tests {
                 for entry in &entries {
                     if entry.enabled {
                         assert_eq!(
-                            entry.tooltip,
-                            None,
+                            entry.tooltip, None,
                             "enabled entry {:?} must have tooltip=None \
                              (auth={authenticated}, has_runs={has_runs})",
                             entry.action
