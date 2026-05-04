@@ -96,13 +96,13 @@ pub fn mode_menu_items(current_mode: &AppMode) -> Vec<MenuEntry> {
     vec![
         MenuEntry {
             action: Action::SwitchAppMode(AppMode::Live),
-            enabled: true,
+            enabled: !matches!(current_mode, AppMode::Live),
             tooltip: None,
             checked: Some(matches!(current_mode, AppMode::Live)),
         },
         MenuEntry {
             action: Action::SwitchAppMode(AppMode::Replay),
-            enabled: true,
+            enabled: !matches!(current_mode, AppMode::Replay),
             tooltip: None,
             checked: Some(matches!(current_mode, AppMode::Replay)),
         },

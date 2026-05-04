@@ -130,6 +130,29 @@ fn mode_menu_items_uses_matches_macro_for_checked() {
     );
 }
 
+// ── DoD-3 regression: current mode must be disabled (F7 review finding Low-3) ─
+
+#[test]
+fn mode_menu_items_disables_current_live_entry() {
+    let src = read_menu();
+    let fn_start = src
+        .find("pub fn mode_menu_items")
+        .expect("mode_menu_items must exist");
+    let fn_body = &src[fn_start..];
+    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
+    let body = &fn_body[..fn_end];
+
+    // enabled must be the negation of the current-mode check (not unconditionally true)
+    assert!(
+        !body.contains("enabled: true"),
+        "mode_menu_items must not use `enabled: true`; current mode entry must be disabled"
+    );
+    assert!(
+        body.contains("!matches!"),
+        "mode_menu_items must use `enabled: !matches!(...)` to disable the current mode entry"
+    );
+}
+
 // ── Mode submenu returns exactly 2 entries ─────────────────────────────────
 
 #[test]

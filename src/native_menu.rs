@@ -216,11 +216,27 @@ mod platform {
         // F7/T3: モード（Mode）サブメニュー
         // Two CheckMenuItems — the current mode is checked and disabled;
         // the other mode is unchecked and enabled.
+        // Ctrl+M accelerator goes on the enabled (switchable) item so Win/Mac
+        // match the Linux keyboard handler (統一決定 64).
         let mode_submenu = Submenu::new("モード（Mode）", true);
         let is_live = app_mode == AppMode::Live;
-        let live_check = CheckMenuItem::new("ライブ（Live）", !is_live, is_live, None::<Accelerator>);
-        let replay_check =
-            CheckMenuItem::new("リプレイ（Replay）", is_live, !is_live, None::<Accelerator>);
+        let ctrl_m = Accelerator::new(Some(Modifiers::CONTROL), Code::KeyM);
+        let live_check = CheckMenuItem::new(
+            "ライブ（Live）",
+            !is_live,
+            is_live,
+            if !is_live { Some(ctrl_m) } else { None },
+        );
+        let replay_check = CheckMenuItem::new(
+            "リプレイ（Replay）",
+            is_live,
+            !is_live,
+            if is_live {
+                Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyM))
+            } else {
+                None
+            },
+        );
         let switch_live_id = live_check.id().clone();
         let switch_replay_id = replay_check.id().clone();
 

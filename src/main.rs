@@ -87,7 +87,7 @@ static VENUE_READY_CACHE: std::sync::OnceLock<
 /// Startup mode (`live` or `replay`) captured from `--mode` before any runtime
 /// is created.  Changed from OnceLock to Mutex<Option<_>> so that
 /// `set_app_mode()` can overwrite the value during mode-switch restarts (F7/T1).
-/// Lock-acquisition order: MODE_SWITCHING → APP_MODE → CURRENT_PATH (統一決定 58).
+/// Lock-acquisition order: MODE_SWITCHING → SUBMIT_IN_FLIGHT → APP_MODE → CURRENT_PATH (統一決定 58).
 static APP_MODE: std::sync::Mutex<Option<engine_client::dto::AppMode>> =
     std::sync::Mutex::new(None);
 
@@ -95,6 +95,13 @@ static APP_MODE: std::sync::Mutex<Option<engine_client::dto::AppMode>> =
 /// `ModeSwitchGuard` RAII wrapper ensures the flag is reset even on panic.
 /// (P7 統一決定 33 / 受け入れ基準 9, 11)
 pub static MODE_SWITCHING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// P9 W&B run buffer: set to `true` while an active submit is in progress.
+/// SwitchMode is rejected when this is true (5-axis matrix axis-5 / 統一決定 61, 68).
+/// P9 will set/clear this around submission; F7 only reads it.
+/// Lock-acquisition order: MODE_SWITCHING → SUBMIT_IN_FLIGHT → APP_MODE → CURRENT_PATH
+pub static SUBMIT_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Returns the current app mode.  Falls back to `Live` when the static has not
@@ -2957,6 +2964,19 @@ impl Flowsurface {
                             return Task::none();
                         };
                         self._mode_switch_guard = Some(guard);
+
+                        // Axis-5: reject if a W&B submit is in progress (統一決定 61, 68)
+                        if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+                            self._mode_switch_guard = None;
+                            let dialog = screen::ConfirmDialog::new(
+                                "W&B 送信中です。\n送信が完了してからモードを切り替えてください。"
+                                    .to_string(),
+                                Box::new(Message::ToggleDialogModal(None)),
+                            )
+                            .with_confirm_btn_text("閉じる".to_string());
+                            self.confirm_dialog = Some(dialog);
+                            return Task::none();
+                        }
 
                         match (current, target) {
                             (AppMode::Live, AppMode::Replay) => {
