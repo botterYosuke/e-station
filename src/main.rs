@@ -338,9 +338,7 @@ async fn submit_wandb_run(
             Ok(None) => continue,
             Err(e) => {
                 let _ = slot.take();
-                return Err(WandbSubmitError::ProcessFailed(format!(
-                    "wait failed: {e}"
-                )));
+                return Err(WandbSubmitError::ProcessFailed(format!("wait failed: {e}")));
             }
         }
     };
@@ -1137,8 +1135,7 @@ struct Flowsurface {
     /// F9c: W&B 送信モーダル。SubmitToWandb で Some に、Cancel / 送信完了で None。
     wandb_submit_modal: Option<modal::wandb_submit::WandbSubmitModal>,
     /// F9e: W&B 送信履歴モーダル。OpenSubmissionLog で run-buffer/ をスキャンして開く。
-    wandb_submission_log_modal:
-        Option<modal::wandb_submission_log::WandbSubmissionLogModal>,
+    wandb_submission_log_modal: Option<modal::wandb_submission_log::WandbSubmissionLogModal>,
 }
 
 #[derive(Debug, Clone)]
@@ -5406,9 +5403,7 @@ impl Flowsurface {
                 main_dialog_modal(
                     after_signin,
                     log_view,
-                    Message::WandbSubmissionLogMsg(
-                        modal::wandb_submission_log::Message::Close,
-                    ),
+                    Message::WandbSubmissionLogMsg(modal::wandb_submission_log::Message::Close),
                 )
             } else {
                 after_signin

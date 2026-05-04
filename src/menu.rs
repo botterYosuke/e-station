@@ -355,15 +355,24 @@ mod tests {
         let entries = tools_actions_for_state(&make_auth(true), &buf);
 
         let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
-        assert!(log.enabled, "OpenSubmissionLog must be enabled when buffer has entries");
+        assert!(
+            log.enabled,
+            "OpenSubmissionLog must be enabled when buffer has entries"
+        );
         assert_eq!(log.tooltip, None);
 
         let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
-        assert!(clear.enabled, "ClearRunBuffer must be enabled when buffer has entries");
+        assert!(
+            clear.enabled,
+            "ClearRunBuffer must be enabled when buffer has entries"
+        );
         assert_eq!(clear.tooltip, None);
 
         let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
-        assert!(!submit.enabled, "SubmitToWandb must remain disabled without completed runs");
+        assert!(
+            !submit.enabled,
+            "SubmitToWandb must remain disabled without completed runs"
+        );
     }
 
     #[test]

@@ -153,9 +153,7 @@ pub async fn list_run_buffer_entries(run_buffer_dir: &std::path::Path) -> Vec<Ru
         let run_id = v
             .get("run_id")
             .and_then(|x| x.as_str())
-            .unwrap_or_else(|| {
-                path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
-            })
+            .unwrap_or_else(|| path.file_name().and_then(|s| s.to_str()).unwrap_or("?"))
             .to_string();
         let status = v
             .get("status")
