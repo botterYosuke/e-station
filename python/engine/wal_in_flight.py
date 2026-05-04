@@ -11,12 +11,22 @@ Writer schema (`tachibana_orders.py:_audit_log_*`)
     {"phase": "accepted", "client_order_id": "...", ...}  # venue 受領済み
     {"phase": "rejected", "client_order_id": "...", ...}  # venue 拒否
 
-**重要**: ``phase`` は writer/reader 両方で wire schema として共有されている。
-writer (`python/engine/exchanges/tachibana_orders.py`) のキー名・値を変更したら、
-本モジュール ``TERMINAL_PHASES`` と Rust 側 ``has_wal_in_flight_orders``
-(`src/main.rs`) を同時に更新すること。両者の言語境界 contract は
-``python/tests/test_wal_in_flight_detection.py::TestWalContract`` および
-``tests/wal_writer_reader_contract.rs`` で pin されている。
+**WARNING (L5)**: ``phase`` および ``client_order_id`` は writer/reader 両方で
+wire schema として共有されている。
+writer (`python/engine/exchanges/tachibana_orders.py::_audit_log_*`) で
+- ``phase`` キーの名前 / 値 (``"submit"``/``"accepted"``/``"rejected"``)
+- ``client_order_id`` キーの名前
+のいずれかを変更したら、必ず以下の 3 箇所を同時に更新すること:
+
+1. 本モジュール ``TERMINAL_PHASES`` 定数（リーダー側ロジック）
+2. Rust 側 ``has_wal_in_flight_orders_at`` (`src/main.rs`)
+3. ``python/tests/test_wal_in_flight_detection.py::TestWalContract`` /
+   ``tests/wal_writer_reader_contract.rs::rust_reader_uses_phase_field_*``
+
+writer 経由の contract test を **必ず先に書き換え** writer + reader 両方の
+変更が一致することを確認する（言語境界バグの典型 — F7 ラウンド 3 の C1）。
+これを怠ると、in-flight 検知が常に false negative となり live→replay 切替時
+の WAL 安全装置が空転する。
 
 判定ロジック
 ------------

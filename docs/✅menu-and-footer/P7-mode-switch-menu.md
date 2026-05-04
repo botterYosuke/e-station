@@ -278,7 +278,7 @@ cat ~/AppData/Roaming/flowsurface/flowsurface-current.log | grep "mode switch"
 2. **dummy message 選択**: Agent C は `Message::ReplayFinished` を仮の dummy に使ったが、レビューで問題が発覚（FindingR1）。`Message::Noop` を新設してレビュー修正で差し替え済み。
 3. **`SaveAndSwitchMode` の window 収集**: Agent C は `SwitchModeWithSpecs` に re-route する方式を採用したが、`is_dirty` の再チェックで無限ループが発生するバグが発覚（FindingR4）。`Message::SwitchModeSaveComplete` を新設して専用の保存+再起動パスとした。
 
-### 設計判断
+### 追加の設計判断（review-fix-loop で発覚）
 
 1. **live モードでの StopReplay**: `StopReplay` は `ReplayOnlyCommand` に分類されるため `EngineBusy` と live state を組み合わせると pydantic ValidationError になる。そのため live モードでの受信は `EngineError{code=mode_mismatch}` で返す（EngineBusy ではない）。
 2. **ForceStopReplay の state guard なし**: 設計通り state guard を持たない。STOPPING・IDLE・LOADED 状態でも強制実行し、全ランナーを停止して ReplayStopped を broadcast する。
@@ -356,5 +356,60 @@ Path A で TDD 修正した。
 e1a8c79 feat(F7): ModeSwitchError 拡張と mode_switch_state tuple 統合 (M1/L1/M13)
 d9ac83b fix(F7): HIGH 4 件（stale guard / Win-Mac MODE_SWITCHING / ForceStop IDLE / live unicast）
 71f17bd feat(F7): MEDIUM 観測性 + WAL 契約強化 (M2/M6/M8/M9/M10/M11/M12)
-(本コミット): feat(F7): LOW 観測性とラウンド 2 計画書反映
+d255df5 feat(F7): LOW 観測性とラウンド 2 計画書反映 (L2/L3/M7)
+```
+
+---
+
+## レビュー反映 (2026-05-05, ラウンド 3)
+
+`/review-fix-loop` ラウンド 3 で検出された **CRITICAL 1 + HIGH 4 + MEDIUM 10 + LOW 5 = 20 件** を
+Path A（全件）の TDD で解消した。Phase 1/2/3/4+5 の 4 コミットに分割。
+
+### 解消した指摘
+
+| ID | 重要度 | 場所 | 内容 | 修正 |
+|----|--------|------|------|------|
+| **C1** | CRITICAL | `wal_in_flight.py` + `tachibana_orders.py` | writer は `phase`（`submit`/`accepted`/`rejected`）を書いていたが reader は `status` を読んでいたため、in-flight 検知が常に false negative。live→replay 切替時の WAL 安全装置が空転 | reader を `phase` に書き換え、終端 phase = `rejected` のみ。`submit`/`accepted`/未知 は in-flight 扱い。writer 経由 contract test を Python と Rust 両言語に追加 |
+| **H1** | HIGH | `src/main.rs::ModeSwitchGuard::drop` | 早期 return で guard が drop される際 `LOCK_ORDER_INDEX` が高位に残る | `Drop::drop` で `lock_order_reset()` を呼ぶ RAII 化。`mode_switch_guard_drop_resets_lock_order_index` で pin |
+| **H2** | HIGH | `_handle_stop_replay` 末尾 | broadcast 後に state リセットがなく STOPPING 残留 race | `_replay_state = IDLE` を broadcast の **前** に追加。`test_stop_replay_state_idle_before_broadcast` で順序を pin |
+| **H3** | HIGH | `_iter_lines_reverse` chunk boundary | parametrize テストが 2 ケースしかなかった | chunk_size 11 通り × trailing_nl 2 通り × ファイルサイズ 3 種で総当たり |
+| **H4** | HIGH | M10/M12 unicast テスト 13 件 | `ws=None` で unicast/broadcast の区別が pin できていなかった | `_ListOutbox` を `(ws, payload)` タプル記録に拡張、テスト 13 件を `ws=MagicMock()` 化、両ハンドラ冒頭に `assert ws is not None` 追加 |
+| **M-1** | MEDIUM | 両ハンドラ冒頭 | `ws=None` silent fallback 防止 | `assert ws is not None` を追加。`test_handle_*_rejects_none_ws` で AssertionError を pin |
+| **M-2** | MEDIUM | writer ↔ reader contract | C1 の根本原因テスト不在 | C1 と統合 — Python `TestWalContract` 3 件 + Rust contract test 3 件 |
+| **M-3** | MEDIUM | `lock_order_acquire` 観測性 | E2E test 経路が薄い | helper 内で `log::info!(target: "lock_order", ...)` を必ず emit する軽量版 |
+| **M-4** | MEDIUM | M5 modal + toast 二重表示 | save 失敗時に表示面が分散 | Toast を撤去し modal のみで通知 |
+| **M-5** | MEDIUM | `_handle_force_stop_replay` の state リセット | broadcast の後で IDLE にしていた | reset → broadcast の順序に変更。`test_force_stop_replay_state_idle_before_broadcast` で hook 時点 state を assert |
+| **M-rust1** | MEDIUM | `lock_order_tests` setup | 既存テストはすべて reset 済み（OK） | 新規追加テストも reset 後に開始 |
+| **M-rust2** | MEDIUM | `SwitchModeWithSpecs` save 失敗 | `SwitchModeSaveComplete` と非対称で modal なし | modal alert を追加し M5 と対称化 |
+| **M-rust3** | MEDIUM | `ToggleDialogModal(None)` の `mode_switch_state = None` | mode-switch 以外でも reset していた | 副作用が起きないこと（解放は Guard::drop 経由）を明示するコメント追加 |
+| **M-rust4** | MEDIUM | F9d unbounded channel | スコープ外（F9 系は触らない指示）でスキップ | — |
+| **M-rust5** | MEDIUM | `ModeSwitchGuard::try_acquire` runtime test | 不在 | `mode_switch_guard_try_acquire_is_exclusive_and_recoverable` を追加 |
+| **M-silent4** | MEDIUM | `_send_unicast` が無駄に async | sync で書ける | `async def` → `def` 化、caller 3 箇所から `await` を除去 |
+| **L1-rust** | LOW | `_lock_order_index_for` rename | leading underscore は不要 | `lock_order_index_for` に変更 |
+| **L2-rust** | LOW | `ModeSwitchError::ConfirmCancelled` 未配線 | dead variant | `#[allow(dead_code)]` + 将来配線方針の docstring |
+| **L3-general** | LOW | M10 エラーメッセージ | code ベース判定で十分 | 既存実装で OK |
+| **L4-general** | LOW | 「### 設計判断」見出し重複 | 同一見出し 2 連続 | 後者を「### 追加の設計判断（review-fix-loop で発覚）」にリネーム |
+| **L5-silent** | LOW | `wal_in_flight.py` docstring | writer schema 変更時の更新ガイドが弱い | WARNING 追記、3 箇所同時更新の注意、writer 経由 contract test を先に書く方針 |
+
+### 設計判断 / 新たな知見
+
+- **WAL writer/reader contract は言語境界で別々に管理されるため、writer 経由 fixture を必ず追加する**。同一言語 mock のみだと writer の wire schema 変更で reader が silent regression する。F7 ラウンド 3 の C1 は writer (`phase`) と reader (`status`) のキー食い違いを fixture テスト（reader 単独）の hard-coded fixture が隠蔽していた典型例。`MISSES.md` の「同一言語テスト」見逃しパターンに該当。
+- **`ModeSwitchGuard::drop` の RAII 範囲は `MODE_SWITCHING` atomic だけでは不十分**。`LOCK_ORDER_INDEX` thread-local も同時に reset すべき。RAII オブジェクトが管理する状態は「全部」明示すること。
+- **state machine の reset は broadcast の前**。`ReplayStopped` を受け取ったクライアントが「state は既に IDLE」前提で次の Command を投げる race を防ぐため、reset → broadcast の順序を invariants として pin。
+- **assert は contract のドキュメンテーション**。`assert ws is not None, "ws is mandatory ..."` は型では表現できない不変条件を実行時に明示できる。サイレントに broadcast にフォールバックされるよりは AssertionError で停止する方が診断しやすい。
+
+### 次回 MISSES.md 追記候補
+
+- writer/reader wire schema の言語境界 contract test の徹底化（writer 経由 fixture を必ず 1 件以上追加する規約）
+- RAII オブジェクトが thread-local / global state を持つ場合、Drop で全部 reset することの強制（コードレビュー時の checklist 化）
+- async helper を sync で書ける場合は sync を選好する（無駄な await を caller に強要しないため）
+
+### コミット履歴（ラウンド 3）
+
+```text
+17acacf fix(F7): C1 — WAL writer/reader schema 不整合を修正し contract test を追加する
+fec2764 fix(F7): HIGH 4 件（lock_order RAII / StopReplay state / chunk boundary / unicast pin）
+4e3b330 fix(F7): MEDIUM 10 件（dialog 対称化 / lock-order tracing / state race / runtime test）
+(本コミット): fix(F7): LOW + ラウンド 3 計画書反映
 ```

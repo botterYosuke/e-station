@@ -123,7 +123,7 @@ pub static SUBMIT_IN_FLIGHT: std::sync::atomic::AtomicBool =
 //   3: CURRENT_PATH
 // Helper `lock_order_acquire(name)` is called at known acquisition points
 // (`restart_with_mode` / `Action::SwitchMode`). Release builds only log a
-// `tracing::warn!` so production safety is preserved (統一決定 R6-82).
+// `log::warn!` so production safety is preserved (統一決定 R6-82).
 thread_local! {
     static LOCK_ORDER_INDEX: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
@@ -141,7 +141,7 @@ fn lock_order_index_for(name: &str) -> Option<usize> {
 
 /// Record acquisition of a named lock on the current thread, asserting that
 /// the fixed acquisition order is preserved. In debug builds violations
-/// `debug_assert!`-panic; in release builds a `tracing::warn!` is emitted
+/// `debug_assert!`-panic; in release builds a `log::warn!` is emitted
 /// and the call returns without panicking (統一決定 R6-82).
 ///
 /// This is a lightweight bookkeeping helper — it does NOT actually acquire
@@ -156,8 +156,8 @@ pub fn lock_order_acquire(name: &'static str) {
     // actual fixed order is enforced by the `debug_assert!` below; this event
     // is purely observational. We use `log` (not `tracing`) because flowsurface
     // does not yet depend on `tracing` at the workspace root — switching is a
-    // separate refactor (see `tracing::warn!` cfg-gated below for the existing
-    // dependency surface).
+    // separate refactor (see `log::warn!` cfg-gated below for the existing
+    // dependency surface; F9 R1-C1 reverted a stray `tracing::warn!` here).
     log::info!(
         target: "lock_order",
         "lock_order_acquire lock={name} index={next}",
@@ -176,7 +176,7 @@ pub fn lock_order_acquire(name: &'static str) {
             );
             #[cfg(not(debug_assertions))]
             if p > next {
-                tracing::warn!(
+                log::warn!(
                     target: "lock_order",
                     "lock-order violation: tried to acquire {name} (index {next}) \
                      while already holding index {p}",
