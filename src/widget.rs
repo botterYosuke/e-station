@@ -76,8 +76,10 @@ pub fn confirm_dialog_container<'a, Message: 'a + Clone>(
         let cancel = button(text("Cancel"))
             .style(|theme, status| style::button::transparent(theme, status, false))
             .on_press(on_cancel);
-        let confirm =
-            button(text(on_confirm_msg.unwrap_or_else(|| "Confirm".to_string()))).on_press(on_confirm);
+        let confirm = button(text(
+            on_confirm_msg.unwrap_or_else(|| "Confirm".to_string()),
+        ))
+        .on_press(on_confirm);
         if let Some(save_action) = on_save {
             let save = button(text(on_save_msg.unwrap_or_else(|| "Save".to_string())))
                 .on_press(save_action);

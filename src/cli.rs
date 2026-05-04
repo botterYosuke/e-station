@@ -41,6 +41,9 @@ pub struct CliArgs {
     pub engine_cmd: Option<PathBuf>,
     /// N1.13: 起動時固定モード。`--mode {live|replay}` で必須。
     pub mode: Mode,
+    /// F3 DoD: `--saved-state <PATH>` — 起動時に読み込む設定ファイルのパス。
+    /// 省略時は `saved-state.json`（デフォルト）を使用する。live モードのみ有効。
+    pub initial_state_path: Option<PathBuf>,
 }
 
 impl Default for CliArgs {
@@ -49,6 +52,7 @@ impl Default for CliArgs {
             data_engine_url: None,
             engine_cmd: None,
             mode: Mode::Live,
+            initial_state_path: None,
         }
     }
 }
@@ -65,6 +69,7 @@ impl CliArgs {
         let mut data_engine_url: Option<Url> = None;
         let mut engine_cmd: Option<PathBuf> = None;
         let mut mode: Option<Mode> = None;
+        let mut initial_state_path: Option<PathBuf> = None;
         let mut iter = args.skip(1); // skip executable name
 
         while let Some(arg) = iter.next() {
@@ -88,6 +93,13 @@ impl CliArgs {
                     .next()
                     .ok_or_else(|| "--engine-cmd requires a value".to_string())?;
                 engine_cmd = Some(PathBuf::from(raw));
+                continue;
+            }
+            if arg == "--saved-state" {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| "--saved-state requires a path".to_string())?;
+                initial_state_path = Some(PathBuf::from(raw));
                 continue;
             }
             if arg == "--data-engine-url" {
@@ -124,6 +136,7 @@ impl CliArgs {
             data_engine_url,
             engine_cmd,
             mode,
+            initial_state_path,
         })
     }
 }
@@ -289,5 +302,36 @@ mod tests {
     fn rejects_non_loopback_ipv4() {
         let result = CliArgs::parse_from(args(&["--data-engine-url", "ws://192.168.1.1:8765"]));
         assert!(result.is_err(), "LAN address should be rejected");
+    }
+
+    // ── F3 DoD: --saved-state parsing ─────────────────────────────────────────
+
+    #[test]
+    fn saved_state_parses_path() {
+        let cli =
+            CliArgs::parse_from(args_with_live(&["--saved-state", "/tmp/my-layout.json"])).unwrap();
+        let p = cli
+            .initial_state_path
+            .expect("--saved-state must set initial_state_path");
+        assert_eq!(p, PathBuf::from("/tmp/my-layout.json"));
+    }
+
+    #[test]
+    fn saved_state_missing_value_returns_error() {
+        let result = CliArgs::parse_from(args(&["--mode", "live", "--saved-state"]));
+        assert!(result.is_err(), "--saved-state without a value must error");
+        assert!(
+            result.unwrap_err().contains("requires a path"),
+            "error message must mention 'requires a path'"
+        );
+    }
+
+    #[test]
+    fn saved_state_absent_yields_none() {
+        let cli = CliArgs::parse_from(args_with_live(&[])).unwrap();
+        assert!(
+            cli.initial_state_path.is_none(),
+            "initial_state_path must be None when --saved-state is not given"
+        );
     }
 }

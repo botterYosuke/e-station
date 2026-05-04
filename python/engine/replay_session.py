@@ -20,7 +20,7 @@ import threading
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Callable, Literal, Optional, TypedDict
 
 from engine.nautilus.engine_runner import NautilusRunner  # noqa: F401 (re-exported for patch)
 from engine.schemas import AUTH_FAILED_CODE
@@ -1487,6 +1487,93 @@ class LiveSession:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# F6b: CLI SCENARIO フォールバック解決
+# ---------------------------------------------------------------------------
+
+
+def _resolve_cli_params(
+    *,
+    strategy_path: str,
+    cli_instrument: Optional[str],
+    cli_start: Optional[str],
+    cli_end: Optional[str],
+    cli_granularity: Optional[str],
+    cli_initial_cash: Optional[int],
+) -> tuple[str, str, str, str, int]:
+    """CLI 引数と戦略 .py の SCENARIO を統合して replay パラメータを確定する。
+
+    優先順位: CLI 引数 > SCENARIO 定数。
+    引数欠落 + SCENARIO 欠落のとき、必須フィールド（instrument/start/end）がなければ SystemExit。
+
+    Returns:
+        (instrument, start, end, granularity, initial_cash)
+    """
+    from engine.scenario import extract as _extract_scenario
+
+    scenario: dict | None = None
+
+    # 省略されている引数がある場合のみ SCENARIO を読む
+    needs_scenario = any(
+        v is None for v in [cli_instrument, cli_start, cli_end, cli_granularity, cli_initial_cash]
+    )
+    if needs_scenario:
+        try:
+            scenario = _extract_scenario(Path(strategy_path))
+        except (SyntaxError, ValueError) as exc:
+            import sys
+            log.error(
+                "scenario.cli: SCENARIO in %s has invalid syntax: %s",
+                strategy_path, exc,
+            )
+            print(
+                f"error: SCENARIO in {strategy_path!r} has invalid syntax: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except Exception as exc:
+            log.warning(
+                "scenario.cli: failed to read SCENARIO from %s: %s",
+                strategy_path, exc,
+            )
+            scenario = None
+
+    def _resolve(field: str, cli_val, default=None):
+        if cli_val is not None:
+            if scenario is not None and field in scenario and scenario[field] != cli_val:
+                log.info(
+                    "scenario.cli source=cli: %s CLI=%r overrides SCENARIO=%r",
+                    field, cli_val, scenario[field],
+                )
+            return cli_val
+        if scenario is not None and scenario.get(field) is not None:
+            log.info("scenario.cli source=file: using SCENARIO.%s=%r", field, scenario[field])
+            return scenario[field]
+        return default
+
+    instrument = _resolve("instrument", cli_instrument)
+    start = _resolve("start", cli_start)
+    end = _resolve("end", cli_end)
+    granularity = _resolve("granularity", cli_granularity, default="Daily")
+    initial_cash = _resolve("initial_cash", cli_initial_cash, default=1_000_000)
+
+    missing = [f for f, v in [("instrument", instrument), ("start", start), ("end", end)] if v is None]
+    if missing:
+        log.error("scenario.cli: required args missing: %s (provide via CLI or SCENARIO in .py)", missing)
+        import sys
+        print(
+            f"error: missing required args: {missing}. "
+            "Provide via --instrument/--start/--end or add SCENARIO dict to the strategy .py",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    log.info("scenario.cli source=merged instrument=%r start=%r end=%r granularity=%r initial_cash=%r",
+             instrument, start, end, granularity, initial_cash)
+    return instrument, start, end, granularity, initial_cash
+
+
+# ---------------------------------------------------------------------------
 # CLI エントリポイント
 # ---------------------------------------------------------------------------
 
@@ -1499,11 +1586,13 @@ if __name__ == "__main__":
 
     run_p = sub.add_parser("run", help="replay を実行する")
     run_p.add_argument("--strategy", required=True, help="戦略ファイルパス")
-    run_p.add_argument("--instrument", required=True, help="銘柄 ID (例: 1301.TSE)")
-    run_p.add_argument("--start", required=True, help="開始日 (ISO8601)")
-    run_p.add_argument("--end", required=True, help="終了日 (ISO8601)")
-    run_p.add_argument("--granularity", default="Daily", choices=["Trade", "Minute", "Daily"])
-    run_p.add_argument("--initial-cash", type=int, default=1_000_000)
+    # F6b: --instrument / --start / --end / --granularity / --initial-cash は optional。
+    # 省略時は戦略 .py の SCENARIO 定数をフォールバック値として使う。CLI 引数優先。
+    run_p.add_argument("--instrument", default=None, help="銘柄 ID (例: 1301.TSE)")
+    run_p.add_argument("--start", default=None, help="開始日 (ISO8601)")
+    run_p.add_argument("--end", default=None, help="終了日 (ISO8601)")
+    run_p.add_argument("--granularity", default=None, choices=["Trade", "Minute", "Daily", None])
+    run_p.add_argument("--initial-cash", type=int, default=None)
     # L-GP2 (Phase 8 R1 / Phase 3): choices を _ForceMode Literal から派生させる
     # ことで DRY 違反を解消する。`_ForceMode` を 1 箇所変更すれば argparse 側も
     # 追従する不変条件。
@@ -1516,12 +1605,21 @@ if __name__ == "__main__":
 
     if args.cmd == "run":
         try:
+            # F6b: SCENARIO フォールバック解決
+            instrument, start, end, granularity, initial_cash = _resolve_cli_params(
+                strategy_path=args.strategy,
+                cli_instrument=args.instrument,
+                cli_start=args.start,
+                cli_end=args.end,
+                cli_granularity=args.granularity,
+                cli_initial_cash=args.initial_cash,
+            )
             with ReplaySession(force_mode=args.mode) as s:
-                s.load(args.instrument, args.start, args.end, args.granularity)
+                s.load(instrument, start, end, granularity)
                 s.run(
                     strategy_file=args.strategy,
                     on_event=lambda evt: print(json.dumps(evt, ensure_ascii=False)),
-                    initial_cash=args.initial_cash,
+                    initial_cash=initial_cash,
                 )
         except FileNotFoundError as exc:
             print(f"error: {exc}", file=sys.stderr)

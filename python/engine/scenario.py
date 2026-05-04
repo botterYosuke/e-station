@@ -1,0 +1,579 @@
+"""engine.scenario — SCENARIO 定数の読み込み・検証・書き戻しユーティリティ。
+
+Public API:
+    extract(path: Path) -> Optional[dict]
+        .py から SCENARIO 定数を ast.parse + ast.literal_eval で安全抽出。
+        import は発火しない（副作用ゼロ）。
+
+    validate(d: dict) -> None
+        Scenario TypedDict 形状を runtime 検証。失敗時は ScenarioValidationError を raise。
+
+    write_back(path, scenario, *, save_as, current_path, loaded_path) -> None
+        libcst で SCENARIO ブロックを atomic 書き戻し。
+        tempfile + os.replace() による atomic write、世代付き .bak、2段検証 + rollback。
+"""
+
+from __future__ import annotations
+
+import ast
+import importlib.util
+import logging
+import os
+import shutil
+import tempfile
+import time
+import typing
+from pathlib import Path
+from typing import Optional, TypedDict
+
+import libcst as cst
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION: int = 1
+
+_NON_LITERAL_ERROR = (
+    "dict literal 以外（unpacking {**...} / comprehension / 関数呼び出しを含む dict）は "
+    "SCENARIO として読めません。リテラルの dict だけを使ってください"
+)
+
+
+class Scenario(TypedDict):
+    schema_version: int
+    instrument: str
+    start: str
+    end: str
+    granularity: str
+    initial_cash: int
+
+
+# Scenario TypedDict から自動生成（3点管理廃止）
+_EXPECTED_TYPES: dict[str, type] = typing.get_type_hints(Scenario)
+REQUIRED_KEYS: frozenset[str] = frozenset(_EXPECTED_TYPES.keys())
+
+
+class ScenarioValidationError(Exception):
+    """SCENARIO 辞書の形状違反（必須キー欠落・型違反・余剰キー）。"""
+
+
+# ---------------------------------------------------------------------------
+# 永続状態ディレクトリ（path guard で書き込みを禁止する対象）
+# ---------------------------------------------------------------------------
+
+
+def _get_persistent_dirs() -> list[Path]:
+    """OS ごとの永続状態ファイルディレクトリを返す。"""
+    dirs: list[Path] = []
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        dirs.append(Path(appdata) / "flowsurface")
+    dirs.append(Path.home() / ".cache" / "flowsurface" / "engine")
+    return dirs
+
+
+# ---------------------------------------------------------------------------
+# validate
+# ---------------------------------------------------------------------------
+
+
+def validate(d: dict) -> None:  # type: ignore[type-arg]
+    """Scenario TypedDict の runtime 検証。失敗時は ScenarioValidationError を raise。
+
+    - 必須キー欠落 → ScenarioValidationError
+    - 余剰キー → ScenarioValidationError
+    - 型違反（bool は int のサブクラスだが int として認めない） → ScenarioValidationError
+    """
+    if not isinstance(d, dict):
+        raise ScenarioValidationError(f"SCENARIO must be a dict, got {type(d).__name__}")
+
+    missing = REQUIRED_KEYS - d.keys()
+    if missing:
+        raise ScenarioValidationError(f"SCENARIO missing required keys: {sorted(missing)}")
+
+    extra = d.keys() - REQUIRED_KEYS
+    if extra:
+        raise ScenarioValidationError(f"SCENARIO has unknown keys: {sorted(extra)}")
+
+    for key, expected_type in _EXPECTED_TYPES.items():
+        val = d[key]
+        # bool は Python では int のサブクラス。schema では bool を許可しない
+        if isinstance(val, bool) and expected_type is int:
+            raise ScenarioValidationError(
+                f"SCENARIO[{key!r}] must be int, got bool"
+            )
+        if not isinstance(val, expected_type):
+            raise ScenarioValidationError(
+                f"SCENARIO[{key!r}] must be {expected_type.__name__}, got {type(val).__name__}"
+            )
+
+    # schema_version 値チェック（型チェック通過後）
+    if d.get("schema_version") != SCHEMA_VERSION:
+        raise ScenarioValidationError(
+            f"SCENARIO schema_version must be {SCHEMA_VERSION}, got {d.get('schema_version')!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# extract
+# ---------------------------------------------------------------------------
+
+
+def extract(path: Path) -> Optional[dict]:  # type: ignore[type-arg]
+    """path の .py から SCENARIO 定数を安全抽出する。
+
+    ast.parse + ast.literal_eval のみ使用。import は一切発火しない。
+    AnnAssign 形（`SCENARIO: Scenario = {...}`）と Assign 形（`SCENARIO = {...}`）の両方を許容。
+    AnnAssign.value が None（注釈のみ宣言）は SCENARIO 不在として扱う（None を返す）。
+
+    Returns:
+        SCENARIO dict が見つかった場合はその dict、見つからない場合は None。
+
+    Raises:
+        SyntaxError: path が構文エラーの .py の場合。
+        ValueError: SCENARIO の値がリテラル dict でない場合（unpacking / comprehension / 関数呼び出し）。
+    """
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+
+    for node in ast.iter_child_nodes(tree):
+        scenario_value: Optional[ast.expr] = None
+
+        if isinstance(node, ast.Assign):
+            # SCENARIO = {...}
+            if (
+                len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "SCENARIO"
+            ):
+                scenario_value = node.value
+
+        elif isinstance(node, ast.AnnAssign):
+            # SCENARIO: Scenario = {...}  または  SCENARIO: Scenario
+            if isinstance(node.target, ast.Name) and node.target.id == "SCENARIO":
+                if node.value is None:
+                    # SCENARIO: Scenario（注釈のみ宣言）→ 不在として扱う
+                    log.info("scenario.load path=%s annotation_only (absent)", path)
+                    return None
+                scenario_value = node.value
+
+        if scenario_value is not None:
+            # dict comprehension は拒否
+            if isinstance(scenario_value, ast.DictComp):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            # plain dict literal 以外は拒否
+            if not isinstance(scenario_value, ast.Dict):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            # dict unpacking（**other_dict → key が None）は拒否
+            if any(k is None for k in scenario_value.keys):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            # safe 評価（任意コード実行なし）
+            try:
+                result = ast.literal_eval(scenario_value)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(_NON_LITERAL_ERROR) from exc
+
+            if not isinstance(result, dict):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            log.info("scenario.load path=%s keys=%d", path, len(result))
+            return result
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# libcst utilities（write_back 専用）
+# ---------------------------------------------------------------------------
+
+
+def _dict_to_cst_expr(d: dict) -> cst.BaseExpression:  # type: ignore[type-arg]
+    """Python dict を libcst Dict ノードに変換する（str / int / bool 対応）。"""
+    elements: list[cst.DictElement] = []
+    items = list(d.items())
+
+    for i, (k, v) in enumerate(items):
+        if isinstance(v, bool):
+            v_node: cst.BaseExpression = cst.Name("True" if v else "False")
+        elif isinstance(v, int):
+            v_node = cst.Integer(str(v))
+        elif isinstance(v, str):
+            v_node = cst.SimpleString(repr(v))
+        else:
+            v_node = cst.SimpleString(repr(v))
+
+        is_last = i == len(items) - 1
+        comma: cst.BaseParenthesizableWhitespace | cst.MaybeSentinel
+        if is_last:
+            comma = cst.MaybeSentinel.DEFAULT
+        else:
+            comma = cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
+
+        elements.append(
+            cst.DictElement(
+                key=cst.SimpleString(repr(k)),
+                value=v_node,
+                comma=comma,
+            )
+        )
+
+    return cst.Dict(elements=elements)
+
+
+class _ScenarioReplacer(cst.CSTTransformer):
+    """既存の SCENARIO Assign/AnnAssign を新しい dict 値に差し替える。"""
+
+    def __init__(self, new_value: cst.BaseExpression) -> None:
+        self._new_value = new_value
+        self.replaced: bool = False
+
+    def leave_SimpleStatementLine(  # type: ignore[override]
+        self,
+        original_node: cst.SimpleStatementLine,
+        updated_node: cst.SimpleStatementLine,
+    ) -> cst.BaseStatement:
+        for stmt in updated_node.body:
+            if isinstance(stmt, cst.Assign):
+                for target in stmt.targets:
+                    if (
+                        isinstance(target.target, cst.Name)
+                        and target.target.value == "SCENARIO"
+                    ):
+                        new_stmt = stmt.with_changes(value=self._new_value)
+                        self.replaced = True
+                        return updated_node.with_changes(body=[new_stmt])
+
+            elif isinstance(stmt, cst.AnnAssign):
+                if isinstance(stmt.target, cst.Name) and stmt.target.value == "SCENARIO":
+                    new_stmt = stmt.with_changes(value=self._new_value)
+                    self.replaced = True
+                    return updated_node.with_changes(body=[new_stmt])
+
+        return updated_node
+
+
+def _insert_scenario_after_imports(
+    module: cst.Module, new_value: cst.BaseExpression
+) -> str:
+    """SCENARIO が存在しない .py の場合、最後の import 直後に SCENARIO = {...} を挿入する。"""
+    last_import_idx = -1
+    for i, node in enumerate(module.body):
+        if isinstance(node, cst.SimpleStatementLine):
+            for stmt in node.body:
+                if isinstance(stmt, (cst.Import, cst.ImportFrom)):
+                    last_import_idx = i
+
+    scenario_stmt = cst.SimpleStatementLine(
+        body=[
+            cst.Assign(
+                targets=[
+                    cst.AssignTarget(
+                        target=cst.Name("SCENARIO"),
+                    )
+                ],
+                value=new_value,
+            )
+        ],
+        leading_lines=[cst.EmptyLine(), cst.EmptyLine()],
+    )
+
+    new_body = list(module.body)
+    insert_pos = last_import_idx + 1  # 0 if no import (insert at top)
+    new_body.insert(insert_pos, scenario_stmt)
+    return module.with_changes(body=new_body).code
+
+
+def _replace_or_insert_scenario(source: str, scenario: dict) -> str:  # type: ignore[type-arg]
+    """libcst で SCENARIO ブロックを置換または挿入する。コメント・空白は完全保持。"""
+    new_value = _dict_to_cst_expr(scenario)
+    module = cst.parse_module(source)
+
+    replacer = _ScenarioReplacer(new_value)
+    new_module = module.visit(replacer)
+
+    if replacer.replaced:
+        return new_module.code
+
+    # SCENARIO が存在しない場合は import 直後に挿入
+    return _insert_scenario_after_imports(new_module, new_value)
+
+
+# ---------------------------------------------------------------------------
+# write_back 補助関数
+# ---------------------------------------------------------------------------
+
+
+def _make_bak_path(path: Path) -> Path:
+    """世代付きバックアップパスを生成する。同秒重複時は -1, -2 ... suffix を付与する。"""
+    utc_sec = int(time.time())
+    bak = path.parent / f"{path.name}.bak.{utc_sec}"
+    if not bak.exists():
+        return bak
+    idx = 1
+    while True:
+        bak = path.parent / f"{path.name}.bak.{utc_sec}-{idx}"
+        if not bak.exists():
+            return bak
+        idx += 1
+
+
+def _check_path_guard(
+    path: Path,
+    *,
+    save_as: bool,
+    current_path: Optional[Path],
+    loaded_path: Optional[Path],
+) -> None:
+    """path ガードを検証する。違反時は ValueError("path_guard_violation: ...") を raise。
+
+    不変条件（Save / Save As 共通）:
+        1. path の拡張子が .py のみ
+        3. path が永続状態ディレクトリ配下でない
+
+    Save（save_as=False）追加条件:
+        2. loaded_path が Some(p) かつ path.resolve() == loaded_path.resolve()
+
+    Save As（save_as=True）:
+        2 の制限なし（任意の新規 .py path を許可）
+    """
+    # 条件 1: 拡張子 .py 必須
+    if path.suffix != ".py":
+        raise ValueError(
+            f"path_guard_violation: path must have .py extension, got {path.suffix!r}"
+        )
+
+    # 条件 3: 永続状態ディレクトリへの書き込み禁止（save_as でバイパス不可）
+    path_resolved = path.resolve()
+    for persistent_dir in _get_persistent_dirs():
+        try:
+            persistent_dir_resolved = persistent_dir.resolve()
+        except OSError:
+            continue
+        try:
+            path_resolved.relative_to(persistent_dir_resolved)
+        except ValueError:
+            pass  # 配下でない → OK
+        else:
+            # relative_to が成功した = persistent_dir 配下 → 禁止
+            raise ValueError(
+                f"path_guard_violation: writing to persistent state directory is forbidden: {path}"
+            )
+
+    # 条件 2: Save 経路は loaded_path と一致必須
+    if not save_as:
+        if loaded_path is None:
+            raise ValueError(
+                "path_guard_violation: Save requires a prior LoadStrategyScenario"
+                " (loaded_path is None)"
+            )
+        if path_resolved != loaded_path.resolve():
+            raise ValueError(
+                f"path_guard_violation: Save path must match loaded_path"
+                f" (path={path!r}, loaded_path={loaded_path!r})"
+            )
+
+
+def _verify_writeback(path: Path, _scenario: dict) -> None:  # type: ignore[type-arg]
+    """書き戻し後の 2 段検証: (1) importlib で SyntaxError / ImportError をキャッチ、
+    (2) validate() で SCENARIO の形状を確認する。"""
+    import uuid
+    module_name = f"_scenario_verify_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot create module spec for {path}")
+
+    module = importlib.util.module_from_spec(spec)
+    # sys.modules に登録しない（stale キャッシュ汚染を防ぐ）
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+
+    scenario_dict = getattr(module, "SCENARIO", None)
+    if scenario_dict is None:
+        raise ScenarioValidationError("SCENARIO not found in written file")
+
+    validate(scenario_dict)
+
+
+# ---------------------------------------------------------------------------
+# write_back（公開 API）
+# ---------------------------------------------------------------------------
+
+
+def write_back(
+    path: Path,
+    scenario: dict,  # type: ignore[type-arg]
+    *,
+    save_as: bool,
+    current_path: Optional[Path],
+    loaded_path: Optional[Path],
+) -> None:
+    """SCENARIO ブロックを path の .py に書き戻す。
+
+    実行順序:
+        1. path ガード検証（違反 → ValueError で即 abort）
+        2. libcst で source を変換（SCENARIO を置換または挿入）
+        3. tempfile 取得
+        4. バックアップ（.bak.<UTC秒>）
+        5. write + fsync
+        6. os.replace（atomic）
+        7. 2 段検証（import エラー → rollback / validate 失敗 → rollback）
+
+    各ステップ失敗時の cleanup:
+        (1) tempfile 失敗 → cleanup なし
+        (2) backup 失敗 → tempfile 削除
+        (3)/(4) write/fsync 失敗 → tempfile + .bak を削除
+        (5) os.replace 失敗 → tempfile 削除（.bak は残す）
+        (7) 検証失敗 → .bak から rollback
+
+    Args:
+        path: 書き戻し先 .py
+        scenario: 書き戻す Scenario dict（validate 済み推奨）
+        save_as: True = Save As 経路, False = Save（上書き保存）経路
+        current_path: GUI の current_path（None = Load 履歴なし）
+        loaded_path: 直前 LoadStrategyScenario で読み込んだ path（None = Load 履歴なし）
+
+    Raises:
+        ValueError: path ガード違反（"path_guard_violation: ..."）
+        ScenarioValidationError: 書き戻し後の validate 失敗（rollback 済み）
+        SyntaxError / ImportError: 書き戻し後の import 検証失敗（rollback 済み）
+        OSError: ディスク IO エラー
+    """
+    _check_path_guard(
+        path, save_as=save_as, current_path=current_path, loaded_path=loaded_path
+    )
+
+    if path.exists():
+        source = path.read_text(encoding="utf-8")
+        new_source = _replace_or_insert_scenario(source, scenario)
+    else:
+        # 新規ファイル（Save As 新規保存経路）
+        new_value = _dict_to_cst_expr(scenario)
+        new_source = cst.parse_module("").with_changes(
+            body=[
+                cst.SimpleStatementLine(
+                    body=[
+                        cst.Assign(
+                            targets=[
+                                cst.AssignTarget(
+                                    target=cst.Name("SCENARIO"),
+                                )
+                            ],
+                            value=new_value,
+                        )
+                    ]
+                )
+            ]
+        ).code
+
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    bak_path = _make_bak_path(path) if path.exists() else None
+
+    tmp_fd: Optional[int] = None
+    tmp_path: Optional[Path] = None
+
+    try:
+        # Step 1: tempfile 取得
+        try:
+            fd, tmp_path_str = tempfile.mkstemp(dir=parent, suffix=".tmp")
+            tmp_fd = fd
+            tmp_path = Path(tmp_path_str)
+        except OSError as exc:
+            log.error("scenario.writeback tempfile_failed: %s", exc)
+            raise
+
+        # Step 2: バックアップ（既存ファイルがある場合のみ）
+        if bak_path is not None:
+            try:
+                shutil.copy2(path, bak_path)
+            except OSError as exc:
+                log.error("scenario.writeback backup_failed: %s", exc)
+                _safe_unlink(tmp_path)
+                tmp_path = None
+                raise
+
+        # Step 3: write
+        encoded = new_source.encode("utf-8")
+        try:
+            os.write(fd, encoded)
+        except OSError as exc:
+            log.error("scenario.writeback write_failed: %s", exc)
+            _safe_unlink(tmp_path)
+            tmp_path = None
+            _safe_unlink(bak_path)
+            raise
+
+        # Step 4: fsync + close
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            log.error("scenario.writeback fsync_failed: %s", exc)
+            _safe_unlink(tmp_path)
+            tmp_path = None
+            _safe_unlink(bak_path)
+            raise
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            tmp_fd = None
+
+        # Step 5: atomic replace
+        try:
+            os.replace(tmp_path, path)
+            tmp_path = None  # 移動成功 → 削除不要
+        except OSError as exc:
+            log.error("scenario.writeback rename_failed: %s", exc)
+            _safe_unlink(tmp_path)
+            tmp_path = None
+            raise
+
+        # Step 6: 2 段検証
+        try:
+            _verify_writeback(path, scenario)
+        except Exception as exc:
+            reason = (
+                "import_error"
+                if isinstance(exc, (SyntaxError, ImportError))
+                else "validate_failed"
+            )
+            log.error(
+                "scenario.writeback rollback reason=%s bak=%s", reason, bak_path
+            )
+            # rollback
+            if bak_path is not None and bak_path.exists():
+                try:
+                    shutil.copy2(bak_path, path)
+                except OSError as rb_exc:
+                    log.error(
+                        "scenario.writeback rollback_failed path=%s bak=%s: %s (original: %s)",
+                        path, bak_path, rb_exc, exc,
+                    )
+            raise
+
+        log.info(
+            "scenario.writeback path=%s bak=%s bytes=%d",
+            path,
+            bak_path,
+            len(encoded),
+        )
+
+    finally:
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            _safe_unlink(tmp_path)
+
+
+def _safe_unlink(p: Optional[Path]) -> None:
+    if p is None:
+        return
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass

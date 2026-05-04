@@ -908,6 +908,18 @@ class DataEngineServer:
             # 走行中の streaming runner は self._replay_speed_multiplier を読むことで
             # 次の tick から新しい速度を使う。
 
+        elif op == "LoadStrategyScenario":
+            # F6: SCENARIO 定数の安全抽出（ast.parse のみ・import なし）。
+            self._spawn_fetch(
+                self._do_load_strategy_scenario(msg), msg.get("request_id")
+            )
+
+        elif op == "SaveStrategyScenario":
+            # F6: SCENARIO ブロックの libcst atomic 書き戻し。
+            self._spawn_fetch(
+                self._do_save_strategy_scenario(msg), msg.get("request_id")
+            )
+
         else:
             log.warning("Unhandled op=%s", op)
             await self._send_error(
@@ -1984,6 +1996,74 @@ class DataEngineServer:
             ],
             "ts_ms": ts_ms,
         })
+
+    # ------------------------------------------------------------------
+    # F6: SCENARIO 定数 load / save ハンドラ
+    # ------------------------------------------------------------------
+
+    async def _do_load_strategy_scenario(self, msg: dict) -> None:
+        """LoadStrategyScenario: .py から SCENARIO 定数を ast.literal_eval で安全抽出する。
+
+        - SCENARIO が存在する → StrategyScenarioLoaded(scenario=<dict>)
+        - SCENARIO が不在（extract が None を返す）→ StrategyScenarioLoaded(scenario=None)
+        - ファイルが存在しない / 構文エラー 等 → StrategyScenarioLoadFailed
+        """
+        from engine import scenario as scenario_mod
+
+        request_id = msg.get("request_id", "")
+        path_str = msg.get("path", "")
+        try:
+            scenario = scenario_mod.extract(Path(path_str))
+            self._outbox.append({
+                "event": "StrategyScenarioLoaded",
+                "request_id": request_id,
+                "path": path_str,
+                "scenario": scenario,
+            })
+        except Exception as exc:
+            log.warning("LoadStrategyScenario failed path=%r: %s", path_str, exc)
+            self._outbox.append({
+                "event": "StrategyScenarioLoadFailed",
+                "request_id": request_id,
+                "path": path_str,
+                "reason": str(exc),
+            })
+
+    async def _do_save_strategy_scenario(self, msg: dict) -> None:
+        """SaveStrategyScenario: .py の SCENARIO ブロックを libcst で atomic 書き戻す。
+
+        - 成功 → StrategyScenarioSaved(ok=True, error=None)
+        - 失敗（path ガード違反 / 検証失敗 / IO エラー等）→ StrategyScenarioSaved(ok=False, error=str(exc))
+        """
+        from engine import scenario as scenario_mod
+
+        request_id = msg.get("request_id", "")
+        path_str = msg.get("path", "")
+        try:
+            loaded_path_str = msg.get("loaded_path")
+            scenario_mod.write_back(
+                Path(path_str),
+                msg["scenario"],
+                save_as=msg.get("save_as", True),
+                current_path=None,
+                loaded_path=Path(loaded_path_str) if loaded_path_str else None,
+            )
+            self._outbox.append({
+                "event": "StrategyScenarioSaved",
+                "request_id": request_id,
+                "path": path_str,
+                "ok": True,
+                "error": None,
+            })
+        except Exception as exc:
+            log.warning("SaveStrategyScenario failed path=%r: %s", path_str, exc)
+            self._outbox.append({
+                "event": "StrategyScenarioSaved",
+                "request_id": request_id,
+                "path": path_str,
+                "ok": False,
+                "error": str(exc),
+            })
 
     # ------------------------------------------------------------------
     # Fetch operation helpers (each is an async coroutine producing one event)

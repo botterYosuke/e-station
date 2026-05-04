@@ -150,10 +150,13 @@ fn save_as_with_specs_sets_current_path() {
     let src = read_main();
 
     // NativeSaveAsWithSpecs must dispatch NativeSaveComplete (via Task::perform).
-    let arm_prefix = "Message::NativeSaveAsWithSpecs(windows)";
+    // Use a newline-prefixed, 12-space-indented prefix so the enum definition
+    // (which also starts with "Message::NativeSaveAsWithSpecs {") is skipped.
+    let arm_needle = "\n            Message::NativeSaveAsWithSpecs {";
     let start = src
-        .find(arm_prefix)
-        .expect("NativeSaveAsWithSpecs handler must exist");
+        .find(arm_needle)
+        .map(|i| i + 1) // skip leading '\n'
+        .expect("NativeSaveAsWithSpecs handler arm must exist at 12-space indent");
     let tail = &src[start..];
     let end = tail[1..]
         .find("\n            Message::")
@@ -194,10 +197,12 @@ fn save_as_with_specs_sets_current_path() {
 #[test]
 fn save_as_with_specs_double_writes_a3() {
     let src = read_main();
-    let arm_prefix = "Message::NativeSaveAsWithSpecs(windows)";
+    // Use newline-prefixed prefix to skip the enum definition and find the match arm.
+    let arm_needle = "\n            Message::NativeSaveAsWithSpecs {";
     let start = src
-        .find(arm_prefix)
-        .expect("NativeSaveAsWithSpecs handler must exist");
+        .find(arm_needle)
+        .map(|i| i + 1) // skip leading '\n'
+        .expect("NativeSaveAsWithSpecs handler arm must exist at 12-space indent");
     let tail = &src[start..];
     let end = tail[1..]
         .find("\n            Message::")

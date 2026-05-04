@@ -78,8 +78,9 @@ fn confirm_save_as_overwrite_message_exists() {
 #[test]
 fn confirm_save_as_overwrite_handler_proceeds_with_save() {
     let src = read_main();
-    // Find handler arm in update() by finding the => pattern
-    let handler_prefix = "            Message::ConfirmSaveAsOverwrite =>";
+    // Find handler arm in update() by finding the => pattern.
+    // The variant now carries a path field: ConfirmSaveAsOverwrite { path }.
+    let handler_prefix = "            Message::ConfirmSaveAsOverwrite {";
     let hstart = src
         .find(handler_prefix)
         .expect("ConfirmSaveAsOverwrite handler arm must exist in update()");

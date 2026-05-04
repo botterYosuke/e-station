@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 9
+SCHEMA_MINOR: int = 10
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -941,6 +941,67 @@ class EngineBusy(IpcMessage):
                 f"replay state {state!r}"
             )
         return self
+
+
+# ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
+
+
+class LoadStrategyScenario(IpcMessage):
+    """戦略 .py から SCENARIO 定数を ast.literal_eval で安全抽出するよう Python に要求する。
+
+    replay モードの `開く…（Open）` で .py を選択したときに Rust が送出する。
+    Python 側は importlib を使わず ast.parse + ast.literal_eval のみで抽出する（副作用ゼロ）。
+    """
+
+    op: Literal["LoadStrategyScenario"] = "LoadStrategyScenario"
+    request_id: str
+    path: str  # 戦略 .py の絶対パス
+
+
+class SaveStrategyScenario(IpcMessage):
+    """戦略 .py の SCENARIO ブロックを libcst で atomic 書き戻すよう Python に要求する。
+
+    save_as=False: 上書き保存（path == loaded_path が必須）
+    save_as=True:  新規/派生保存（任意の .py path）
+    """
+
+    op: Literal["SaveStrategyScenario"] = "SaveStrategyScenario"
+    request_id: str
+    path: str           # 書き戻し先 .py の絶対パス
+    scenario: dict      # 書き戻す Scenario dict
+    save_as: bool = False
+    loaded_path: str | None = None  # 直前 LoadStrategyScenario の path（path guard 用）
+
+
+class StrategyScenarioLoaded(IpcMessage):
+    """LoadStrategyScenario の応答。SCENARIO が見つかった場合は scenario を返す。
+
+    scenario=None は SCENARIO 不在（prefill なし）を示す。
+    """
+
+    event: Literal["StrategyScenarioLoaded"] = "StrategyScenarioLoaded"
+    request_id: str
+    path: str                      # 読み込んだ .py の絶対パス
+    scenario: dict | None = None   # SCENARIO dict, または不在時 None
+
+
+class StrategyScenarioLoadFailed(IpcMessage):
+    """LoadStrategyScenario 失敗時の応答（構文エラー / リテラル以外の dict）。"""
+
+    event: Literal["StrategyScenarioLoadFailed"] = "StrategyScenarioLoadFailed"
+    request_id: str
+    path: str
+    reason: str  # エラー文言
+
+
+class StrategyScenarioSaved(IpcMessage):
+    """SaveStrategyScenario の応答。"""
+
+    event: Literal["StrategyScenarioSaved"] = "StrategyScenarioSaved"
+    request_id: str
+    path: str
+    ok: bool
+    error: str | None = None  # "path_guard_violation" / "disk_full" / "permission_denied" 等
 
 
 # ---------------------------------------------------------------------------

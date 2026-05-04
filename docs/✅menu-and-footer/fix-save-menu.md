@@ -661,11 +661,16 @@ cargo test --workspace → 全テスト GREEN
 | L-1 | LOW | `Cancelled` の `#[allow(dead_code)]` に TODO コメント追記 |
 | L-4 | LOW | `is_dirty` の `unwrap_or(false)` に replay モードの根拠コメント追加 |
 
-### 未実施（STOP+REPORT）
+| H-3 | HIGH | `NativeSaveAsWithSpecs` を `Task::perform` + `tokio::fs::write` で非同期化 → `Message::NativeSaveComplete` バリアント新設（`Cargo.toml` に `tokio/fs` feature 追加） |
 
-| ID | 重要度 | 理由 |
-|----|--------|------|
-| H-3 | HIGH | update() 内ブロッキング I/O → Task::perform 変換。`dirty_detection.rs` の `save_as_with_specs_double_writes_a3` テストが `std::fs::write` の存在を assert しており、async 化すると既存テストが破綻する。また `SaveComplete` メッセージ追加により `save_state_to_disk` の呼び出しチェーンが大幅変更になり、H-5 の `write_json_to_saved_state_disk` helper と設計を整合させる必要がある。単一ラウンドの scope を超えるため STOP+REPORT。 |
+### R2/R3 追加修正（R1 サニティチェック後）
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| R2-1 | MEDIUM | GoBack で `pending_save_path` 未クリア（Save As ダイアログ中 Escape 後に古いパスが残留） | `GoBack` ハンドラの `pending_save_path = None` が実装済みであることを確認（修正不要） |
+| R2-2 | MEDIUM | `ConfirmSaveAsOverwrite` の early return が `pending_save_path` を残留 | early return 前に `pending_save_path = None` を追加 |
+| R2-3 | MEDIUM | `is_dirty` の `last_saved_bytes.clone()` が不要な可能性 | `build_state_json(&mut self)` が `&mut self` を要求するため `as_deref()` 不可 → 理由コメントを追記 |
+| R3 | — | サニティチェック → MEDIUM 以上ゼロ確認（**収束**） | — |
 
 ### 追加したテスト
 
@@ -678,9 +683,9 @@ cargo test --workspace → 全テスト GREEN
 ### 検証結果
 
 ```
-cargo fmt --check     → 差分なし
-cargo clippy --workspace -- -D warnings → 警告なし
-cargo test --workspace → 全テスト GREEN（新規テスト 3 件含む）
+cargo fmt --check                        → 差分なし
+cargo clippy --workspace -- -D warnings  → 警告なし
+cargo test --workspace                   → 全テスト GREEN（新規テスト含む）
 ```
 
 ## レビュー反映 (2026-05-04, ラウンド2)

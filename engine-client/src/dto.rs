@@ -234,6 +234,28 @@ pub enum Command {
         request_id: String,
         multiplier: u32,
     },
+
+    // ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
+    /// 戦略 .py から SCENARIO 定数を安全抽出するよう Python に要求する（F6a）。
+    /// Python 側は ast.parse + ast.literal_eval のみ使用（副作用ゼロ）。
+    LoadStrategyScenario {
+        request_id: String,
+        path: String,
+    },
+
+    /// 戦略 .py の SCENARIO ブロックを libcst で atomic 書き戻すよう Python に要求する（F6c）。
+    /// save_as=false = 上書き保存（path == loaded_path 必須）
+    /// save_as=true  = 新規/派生保存（任意の .py path）
+    SaveStrategyScenario {
+        request_id: String,
+        path: String,
+        /// 書き戻す Scenario dict（JSON object）。
+        scenario: serde_json::Value,
+        #[serde(default)]
+        save_as: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loaded_path: Option<String>,
+    },
 }
 
 /// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
@@ -511,6 +533,22 @@ impl std::fmt::Debug for Command {
                 .debug_struct("SetReplaySpeed")
                 .field("request_id", request_id)
                 .field("multiplier", multiplier)
+                .finish(),
+            Command::LoadStrategyScenario { request_id, path } => f
+                .debug_struct("LoadStrategyScenario")
+                .field("request_id", request_id)
+                .field("path", path)
+                .finish(),
+            Command::SaveStrategyScenario {
+                request_id,
+                path,
+                save_as,
+                ..
+            } => f
+                .debug_struct("SaveStrategyScenario")
+                .field("request_id", request_id)
+                .field("path", path)
+                .field("save_as", save_as)
                 .finish(),
         }
     }
@@ -1216,6 +1254,32 @@ pub enum EngineEvent {
     ClientConnected {
         count: u32,
     },
+    // ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
+    /// LoadStrategyScenario の応答。scenario=None は SCENARIO 不在を示す。
+    StrategyScenarioLoaded {
+        request_id: String,
+        path: String,
+        /// SCENARIO dict、または SCENARIO 不在時 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scenario: Option<serde_json::Value>,
+    },
+
+    /// LoadStrategyScenario 失敗時の応答（構文エラー / リテラル以外の dict）。
+    StrategyScenarioLoadFailed {
+        request_id: String,
+        path: String,
+        reason: String,
+    },
+
+    /// SaveStrategyScenario の応答。
+    StrategyScenarioSaved {
+        request_id: String,
+        path: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
     /// クライアントが engine WebSocket から切断したことを全 client に broadcast する。
     /// `count` は接続中のクライアント総数（切断後）。
     ClientDisconnected {

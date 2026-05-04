@@ -1257,7 +1257,13 @@ impl Flowsurface {
             layout::SavedState::default()
         } else if let Some(p) = INITIAL_STATE_PATH.get() {
             // F3 DoD: --saved-state was given; load from that path and prime CURRENT_PATH.
-            let path_str = p.to_str().unwrap_or(data::SAVED_STATE_PATH);
+            let Some(path_str) = p.to_str() else {
+                log::error!(
+                    "--saved-state path contains non-UTF-8 characters; \
+                     falling back to default layout. Path: {p:?}"
+                );
+                layout::SavedState::default()
+            };
             log::info!("--saved-state: loading from {path_str}");
             let state = layout::load_saved_state_from(path_str);
             // Prime CURRENT_PATH so Ctrl+S writes back to the same file.
@@ -2674,13 +2680,12 @@ impl Flowsurface {
                             let mut active_windows: Vec<window::Id> =
                                 self.active_dashboard().popout.keys().copied().collect();
                             active_windows.push(self.main_window.id);
-                            return window::collect_window_specs(
-                                active_windows,
-                                move |windows| Message::NativeSaveAsWithSpecs {
+                            return window::collect_window_specs(active_windows, move |windows| {
+                                Message::NativeSaveAsWithSpecs {
                                     path: p.clone(),
                                     windows,
-                                },
-                            );
+                                }
+                            });
                         } else {
                             return Task::perform(
                                 async {
@@ -2843,7 +2848,10 @@ impl Flowsurface {
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
                 return window::collect_window_specs(active_windows, move |windows| {
-                    Message::NativeSaveAsWithSpecs { path: path.clone(), windows }
+                    Message::NativeSaveAsWithSpecs {
+                        path: path.clone(),
+                        windows,
+                    }
                 });
             }
             Message::ConfirmSaveAsOverwrite { path } => {
@@ -2859,7 +2867,10 @@ impl Flowsurface {
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
                 return window::collect_window_specs(active_windows, move |windows| {
-                    Message::NativeSaveAsWithSpecs { path: path.clone(), windows }
+                    Message::NativeSaveAsWithSpecs {
+                        path: path.clone(),
+                        windows,
+                    }
                 });
             }
             Message::NativeSaveAsPath(None) => {

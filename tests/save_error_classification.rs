@@ -124,7 +124,7 @@ fn save_as_with_specs_io_error_uses_warn() {
     // failures as WARN (IoError category).
     let src = read_main();
 
-    let arm_prefix = "            Message::NativeSaveAsWithSpecs(windows) =>";
+    let arm_prefix = "            Message::NativeSaveAsWithSpecs {";
     let start = src
         .find(arm_prefix)
         .expect("NativeSaveAsWithSpecs handler must exist");

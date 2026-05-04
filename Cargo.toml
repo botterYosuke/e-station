@@ -72,7 +72,7 @@ iced_wgpu = "0.14.0"
 exchange.workspace = true
 data.workspace = true
 engine-client.workspace = true
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "fs"] }
 async-stream = "0.3"
 zeroize.workspace = true
 xxhash-rust.workspace = true
