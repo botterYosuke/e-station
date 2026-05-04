@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
+import sys
+
 from engine.scenario import (
     _check_path_guard,
     write_back,
@@ -170,8 +172,11 @@ def test_save_without_prior_load(tmp_path: Path) -> None:
 
 
 def test_save_as_with_prior_load_to_new_path(tmp_path: Path) -> None:
-    """save_as=True かつ loaded_path != path（派生保存）→ 許可。
-    元 loaded_path のファイルは byte-diff 0 で不変であることも確認する。
+    """save_as=True かつ loaded_path != path（派生保存）→ 許可、かつ write_back 実走で
+    loaded ファイルが byte-diff 0 で不変、new_path に新 SCENARIO が書き込まれる。
+
+    M-R2-3 (ラウンド2): 自明な _check_path_guard 単体検証から、write_back を通る
+    end-to-end の派生保存テストに拡張した。
     """
     loaded = tmp_path / "loaded_strategy.py"
     loaded_text = (
@@ -183,13 +188,28 @@ def test_save_as_with_prior_load_to_new_path(tmp_path: Path) -> None:
     loaded_bytes_before = loaded.read_bytes()
 
     new_path = tmp_path / "derived_strategy.py"
-    # path != loaded_path で save_as=True → 許可
-    _guard(new_path, save_as=True, loaded_path=loaded)
+    assert not new_path.exists()
 
-    # 元ファイルは触れていないこと（_check_path_guard は IO しない）
+    new_scenario = {
+        "schema_version": 1,
+        "instrument": "7203.TSE",
+        "start": "2025-04-01",
+        "end": "2025-06-30",
+        "granularity": "5m",
+        "initial_cash": 500_000,
+    }
+
+    write_back(new_path, new_scenario, save_as=True, loaded_path=loaded)
+
+    # loaded は byte-diff 0 で不変
     assert loaded.read_bytes() == loaded_bytes_before, (
-        "_check_path_guard が元 loaded_path ファイルを変更してはならない"
+        "派生保存は loaded ファイルを変更してはならない"
     )
+    # new_path に新 SCENARIO が書き込まれている
+    assert new_path.exists()
+    written = new_path.read_text(encoding="utf-8")
+    assert "7203.TSE" in written
+    assert "1301.TSE" not in written
 
 
 def test_rejects_save_as_when_path_equals_loaded_path(tmp_path: Path) -> None:
@@ -205,11 +225,15 @@ def test_rejects_save_as_when_path_equals_loaded_path(tmp_path: Path) -> None:
     assert "Save As" in str(exc.value) or "loaded_path" in str(exc.value)
 
 
-def test_multi_client_fcfs_after_other_client_load(tmp_path: Path) -> None:
-    """multi-client 環境で別クライアントが Load を挟むと、loaded_path は
-    最後の LoadStrategyScenario の path に更新される。
-    Save 経路（save_as=False）は新 loaded_path を期待する → 古い path での
-    Save は拒否される（FCFS 違反）。
+def test_path_guard_rejects_save_when_loaded_path_changed(tmp_path: Path) -> None:
+    """同言語版・path_guard 単体テスト: 別クライアントが Load を挟んだ後の
+    FCFS 違反を `_check_path_guard` だけで検証する。
+
+    M-R2-4 (ラウンド2): 旧名 `test_multi_client_fcfs_after_other_client_load` を
+    rename。本テストは server を起動しない単言語テストであり、
+    real multi-client serialization は別途 `python/tests/test_server_multi_client.py`
+    または future integration test で検証する（次フェーズで実 multi-client
+    integration test の追加を検討する）。
     """
     client_a_path = tmp_path / "strategy_a.py"
     client_b_path = tmp_path / "strategy_b.py"
@@ -223,3 +247,59 @@ def test_multi_client_fcfs_after_other_client_load(tmp_path: Path) -> None:
     with pytest.raises(ValueError) as exc:
         _guard(client_a_path, save_as=False, loaded_path=client_b_path)
     assert "path_guard_violation" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# M-R4-1 リグレッションガード: HOME / APPDATA がいずれも解決できない環境でも
+# suffix-based fallback で永続ディレクトリ書き込みを拒否する
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_cache_flowsurface_engine_path_when_home_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Path.home()` が `RuntimeError` を raise し APPDATA も未設定の環境では
+    `_get_persistent_dirs()` は空リストを返すが、`_check_path_guard` は
+    suffix-based fallback で `.cache/flowsurface/engine/x.py` への書き込みを
+    `path_guard_violation` で reject する (M-R4-1)。
+    """
+    from engine import scenario as scenario_mod
+
+    def _no_home(cls: type) -> Path:
+        raise RuntimeError("no home in this environment")
+
+    monkeypatch.setattr(Path, "home", classmethod(_no_home))  # type: ignore[arg-type]
+    monkeypatch.delenv("APPDATA", raising=False)
+
+    # 前提: 絶対パス由来の永続 dir リストは空
+    assert scenario_mod._get_persistent_dirs() == []
+
+    forbidden = tmp_path / ".cache" / "flowsurface" / "engine" / "x.py"
+    forbidden.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError, match="path_guard_violation"):
+        scenario_mod._check_path_guard(forbidden, save_as=True, loaded_path=None)
+
+
+def test_rejects_appdata_flowsurface_path_when_home_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HOME 不明 + APPDATA 未設定でも `<anywhere>/flowsurface/x.py`
+    （Windows %APPDATA% suffix 相当）への書き込みは suffix-based fallback で
+    reject される (M-R4-1)。
+    """
+    from engine import scenario as scenario_mod
+
+    def _no_home(cls: type) -> Path:
+        raise RuntimeError("no home in this environment")
+
+    monkeypatch.setattr(Path, "home", classmethod(_no_home))  # type: ignore[arg-type]
+    monkeypatch.delenv("APPDATA", raising=False)
+
+    assert scenario_mod._get_persistent_dirs() == []
+
+    forbidden = tmp_path / "flowsurface" / "x.py"
+    forbidden.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError, match="path_guard_violation"):
+        scenario_mod._check_path_guard(forbidden, save_as=True, loaded_path=None)

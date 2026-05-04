@@ -314,7 +314,10 @@ class DataEngineServer:
         # C-Type2: AppMode Literal で illegal 文字列代入を静的に防ぐ。
         self._mode: AppMode = "live"
         # 防衛: 不正値の代入をルートで検出するための pin (mypy/pyright で漏れた場合の保険)。
-        assert self._mode in ("live", "replay")
+        # L-R4-1 (ラウンド4): `python -O` で assert は無効化されるため if/raise に統一。
+        # `_emit` invariant (M-R3-2) と同じ方針。
+        if self._mode not in ("live", "replay"):
+            raise RuntimeError(f"DataEngineServer: invalid mode {self._mode!r}")
 
         # Tachibana p_no counter MUST be constructed before the worker dict
         # so the worker shares the same monotonic counter as
@@ -2025,25 +2028,29 @@ class DataEngineServer:
         `WARN scenario.load failed reason=... path=...` に統一。
         """
         from engine import scenario as scenario_mod
+        from engine.schemas import StrategyScenarioLoaded, StrategyScenarioLoadFailed
 
         request_id = msg.get("request_id", "")
         path_str = msg.get("path", "")
         try:
             scenario = scenario_mod.extract(Path(path_str))
-            self._outbox.append({
-                "event": "StrategyScenarioLoaded",
-                "request_id": request_id,
-                "path": path_str,
-                "scenario": scenario,
-            })
+            # H-R2-1 (ラウンド2): 送信パイプラインを model_dump 経由に統一。
+            self._outbox.append(
+                StrategyScenarioLoaded(
+                    request_id=request_id,
+                    path=path_str,
+                    scenario=scenario,
+                ).model_dump(exclude_none=False)
+            )
         except Exception as exc:
             log.warning("scenario.load failed reason=%s path=%r", exc, path_str)
-            self._outbox.append({
-                "event": "StrategyScenarioLoadFailed",
-                "request_id": request_id,
-                "path": path_str,
-                "reason": str(exc),
-            })
+            self._outbox.append(
+                StrategyScenarioLoadFailed(
+                    request_id=request_id,
+                    path=path_str,
+                    reason=str(exc),
+                ).model_dump(exclude_none=False)
+            )
 
     async def _do_save_strategy_scenario(self, msg: dict) -> None:
         """SaveStrategyScenario: .py の SCENARIO ブロックを libcst で atomic 書き戻す。
@@ -2053,28 +2060,55 @@ class DataEngineServer:
           → StrategyScenarioSaved(ok=False, error=<SaveErrorCode Literal>)
 
         レビュー反映 (2026-05-04 ラウンド1):
-            - H1: error は SaveErrorCode Literal の 9 値のいずれかに固定
+            - H1: error は SaveErrorCode Literal に固定
             - H2: write_back に current_path は渡さない（loaded_path 一軸）
             - M3: msg["scenario"] が None / 欠落で error="missing_scenario_field"
             - M5: rollback は ERROR ログ（reason=syntax_error|validate_failed）
             - M8: save_as のデフォルトを False に統一（dto.rs と整合）
             - M11: 入口で validate(scenario_dict) を試行 → 失敗で validate_failed
+
+        レビュー反映 (2026-05-04 ラウンド2):
+            - H-R2-1: `_emit` を `StrategyScenarioSaved(...).model_dump()` 経由に統一。
+              未知 error コードは pydantic ValidationError で構築段階に検出する。
+            - H-R2-2: `tempfile_failed` を SaveErrorCode から削除（dead code）。
+              `tempfile.mkstemp` 失敗は errno に応じて parent_missing / disk_full /
+              permission_denied のいずれかに吸収される。
+            - H-R2-3: `OSError.winerror` (Windows) を `permission_denied` にマップ。
+              errno が None でも winerror が分類できればそちらを優先する。
         """
         import errno as _errno
+        from typing import Optional, get_args
 
         from engine import scenario as scenario_mod
+        from engine.schemas import SaveErrorCode, StrategyScenarioSaved
+
+        _KNOWN_SAVE_ERROR_CODES = frozenset(get_args(SaveErrorCode))
 
         request_id = msg.get("request_id", "")
         path_str = msg.get("path", "")
 
-        def _emit(ok: bool, error: str | None) -> None:
-            self._outbox.append({
-                "event": "StrategyScenarioSaved",
-                "request_id": request_id,
-                "path": path_str,
-                "ok": ok,
-                "error": error,
-            })
+        def _emit(ok: bool, error: Optional[str]) -> None:
+            # M-R3-2 (ラウンド3): assert ではなく ValueError で内部不変条件を強制。
+            # `python -O` 最適化で assert は無効化されるため、本番でも保護を効かせる。
+            # L-R2-1: ok / error の不整合を構築前にガード（pydantic 自身は
+            # ok=True かつ error!=None の組合せを reject しないため明示チェック）。
+            if ok and error is not None:
+                raise ValueError(
+                    f"_emit invariant: ok=True must imply error is None (got {error!r})"
+                )
+            # H-R2-1: 未知 error コードは StrategyScenarioSaved 構築時の
+            # pydantic ValidationError で reject される。念押しのガードもここで行う。
+            if error is not None and error not in _KNOWN_SAVE_ERROR_CODES:
+                raise ValueError(
+                    f"_emit invariant: unknown SaveErrorCode {error!r}"
+                )
+            evt = StrategyScenarioSaved(
+                request_id=request_id,
+                path=path_str,
+                ok=ok,
+                error=error,  # type: ignore[arg-type]
+            )
+            self._outbox.append(evt.model_dump(exclude_none=False))
 
         # M3: scenario フィールド必須チェック
         scenario_dict = msg.get("scenario")
@@ -2136,17 +2170,23 @@ class DataEngineServer:
             _emit(False, "syntax_error")
         except OSError as exc:
             err = getattr(exc, "errno", None)
+            winerr = getattr(exc, "winerror", None)
+            # H-R2-3 (ラウンド2): Windows の winerror を permission_denied にマップする。
+            # ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32) は errno に
+            # 表れない経路があるため、errno が None でも winerror で分類する。
             if err == _errno.ENOSPC:
                 error_code = "disk_full"
             elif err in (_errno.EACCES, _errno.EPERM):
                 error_code = "permission_denied"
             elif err == _errno.ENOENT:
                 error_code = "parent_missing"
+            elif winerr in (5, 32):
+                error_code = "permission_denied"
             else:
                 error_code = "rename_failed"
             log.error(
-                "scenario.writeback rollback reason=%s path=%r errno=%s: %s",
-                error_code, path_str, err, exc,
+                "scenario.writeback rollback reason=%s path=%r errno=%s winerror=%s: %s",
+                error_code, path_str, err, winerr, exc,
             )
             _emit(False, error_code)
         except Exception as exc:

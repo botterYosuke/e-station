@@ -71,17 +71,20 @@ AttemptedCommand = Literal[
 # AUTH_FAILED_CODE: 認証失敗時の EngineError.code (Phase 2 以降が import 可能)
 AUTH_FAILED_CODE: str = "auth_failed"
 
-# SaveErrorCode (F6 / レビュー反映 2026-05-04 ラウンド1 / H1):
-# `StrategyScenarioSaved.error` の wire 形を Literal で固定する。これら 9 値以外は
+# SaveErrorCode (F6 / レビュー反映 2026-05-04 ラウンド1 / H1, ラウンド2 / H-R2-2):
+# `StrategyScenarioSaved.error` の wire 形を Literal で固定する。これら 8 値以外は
 # pydantic validation で reject される。server.py 側の例外→error コード変換は
 # `_do_save_strategy_scenario` の責務。
+#
+# ラウンド2 で `tempfile_failed` を削除（dead code: `tempfile.mkstemp` 失敗は
+# OSError errno に応じて parent_missing / disk_full / permission_denied のいずれかに
+# 吸収される。専用コードは server.py の例外マッピングから到達しない）。
 SaveErrorCode = Literal[
     "permission_denied",
     "parent_missing",
     "disk_full",
     "path_guard_violation",
     "rename_failed",
-    "tempfile_failed",
     "missing_scenario_field",
     "validate_failed",
     "syntax_error",

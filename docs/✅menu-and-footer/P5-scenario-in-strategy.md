@@ -202,7 +202,9 @@ GUI / CLI 両経路から呼ぶ。
   5. **`os.replace(tmp, target)`** で atomic に置換
 
 - 各ステップ失敗時の cleanup 責任は呼び出し元（`engine.scenario.write_back`）が必ず負う：
-  - **(1) tempfile 取得失敗** → cleanup なし。`error="tempfile_failed"` を返す
+  - **(1) tempfile 取得失敗** → cleanup なし。errno に応じて `error="parent_missing"` /
+    `"disk_full"` / `"permission_denied"` のいずれかを返す（ラウンド2 / H-R2-2 で
+    専用 `tempfile_failed` コードは廃止し、OSError errno マッピングに吸収した）
   - **(2) backup 失敗** → 取得済み tempfile を削除。`error="permission_denied"` または `"parent_missing"` を返す
   - **(3) write 失敗** → tempfile を削除し、作成済み `.bak.<UTC秒>` を削除。`error="disk_full"` または `"permission_denied"` を返す
   - **(4) fsync 失敗** → tempfile を削除し、作成済み `.bak.<UTC秒>` を削除。`error="disk_full"` を返す
@@ -212,8 +214,10 @@ GUI / CLI 両経路から呼ぶ。
   **既存 `.bak.<UTC秒>` の上書きは禁止**（同じ秒に二回保存した場合は連番 suffix `-1`, `-2` を付与）
 - ディスクフル等で write が失敗した場合、上記 cleanup 規則に従い tempfile / `.bak` を削除のうえエラーダイアログで通知
 - **保存エラーコード列挙**（`Event::StrategyScenarioSaved { ok: false, error: ... }` の `error` 値）：
-  `"permission_denied"` / `"parent_missing"` / `"disk_full"` / `"path_guard_violation"` / `"rename_failed"` / `"tempfile_failed"` /
-  `"missing_scenario_field"` / `"validate_failed"` / `"syntax_error"` のみ。
+  `"permission_denied"` / `"parent_missing"` / `"disk_full"` / `"path_guard_violation"` /
+  `"rename_failed"` / `"missing_scenario_field"` / `"validate_failed"` / `"syntax_error"` の
+  **8 値のみ**（ラウンド2 / H-R2-2 で `"tempfile_failed"` を削除し、`tempfile.mkstemp` 失敗は
+  errno に応じて `parent_missing` / `disk_full` / `permission_denied` のいずれかに吸収する）。
   `schemas.py` 側で `SaveErrorCode = Literal[...]` として固定し、未知値は pydantic validation で reject される
 - 書き戻し後に **二段の検証** を必ず実行する（レビュー反映 2026-05-04 ラウンド1）：
   1. **構文検証**：`ast.parse(written_source)` + `engine.scenario.extract(written_path)` で書き戻したファイルが
@@ -409,7 +413,7 @@ F6 実装に対する e-station-review レビュー指摘 22 件（HIGH 5 / MEDI
 
 **HIGH 解消項目**:
 
-- **H1**: `SaveErrorCode = Literal[...]` を `schemas.py` に追加し、`StrategyScenarioSaved.error` を Literal に固定。9 値（`permission_denied` / `parent_missing` / `disk_full` / `path_guard_violation` / `rename_failed` / `tempfile_failed` / `missing_scenario_field` / `validate_failed` / `syntax_error`）以外は pydantic validation error
+- **H1**: `SaveErrorCode = Literal[...]` を `schemas.py` に追加し、`StrategyScenarioSaved.error` を Literal に固定。8 値（`permission_denied` / `parent_missing` / `disk_full` / `path_guard_violation` / `rename_failed` / `missing_scenario_field` / `validate_failed` / `syntax_error`）以外は pydantic validation error（`tempfile_failed` は R2 で削除。詳細は §レビュー反映 (2026-05-04, ラウンド 2) 参照）
 - **H2**: `_check_path_guard` / `write_back` から未使用の `current_path` 引数を削除（方針 B、loaded_path 一軸の FCFS）。GUI 側責務として注記
 - **H3**: `save_as=true` かつ `path == loaded_path` を server-side で reject（UI 層の事前チェックに頼らず Python 側でも防御）
 - **H4**: `scenario_roundtrip.rs:13` の `assert!(SCHEMA_MINOR >= 10)` を `>= 11` に更新（F7 後の現在値と一致）
@@ -439,3 +443,220 @@ F6 実装に対する e-station-review レビュー指摘 22 件（HIGH 5 / MEDI
 - `python/tests/test_scenario_writeback.py`：`test_writeback_rejects_unsupported_value_type` / `test_saved_error_is_known_literal`
 - `python/tests/test_scenario_load.py`：`test_extract_rejects_multiple_scenario_assignments` / `test_load_failed_log_format`
 - `engine-client/tests/scenario_roundtrip.rs`：`save_with_loaded_path_none_round_trips` / `saved_with_ok_true_and_error_some_is_inconsistent`
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 2)
+
+F6 ラウンド 2 e-station-review レビュー指摘 9 件（HIGH 3 / MEDIUM 6）の解消記録。
+LOW 4 件は本ラウンドでは見送り（理由を末尾に記載）。
+
+**HIGH 解消項目**:
+
+- **H-R2-1 (送信パイプラインの model_dump 統一)**:
+  `server.py::_do_save_strategy_scenario` の `_emit` を `StrategyScenarioSaved(...).model_dump()`
+  経由に変更。未知 `error` 値は pydantic ValidationError で構築段階に検出される。
+  `_emit` 入口に `assert error is None or error in get_args(SaveErrorCode)` および
+  `assert not (ok and error is not None)` のダブルチェックを追加（L-R2-1 を吸収）。
+  `_do_load_strategy_scenario` の `StrategyScenarioLoaded` / `StrategyScenarioLoadFailed`
+  も同様に model_dump 経由に統一した。
+- **H-R2-2 (`tempfile_failed` 削除 / dead code 解消)**:
+  `SaveErrorCode = Literal[...]` から `"tempfile_failed"` を除外（残り 8 値）。
+  `tempfile.mkstemp` 失敗は OSError errno に応じて
+  `parent_missing` / `disk_full` / `permission_denied` のいずれかに吸収する。
+  `scenario.py` 内の `tempfile_failed` 文字列リテラルログも中立な
+  `"tempfile creation failed (errno=%s)"` に変更。
+- **H-R2-3 (`OSError.winerror` → `permission_denied`)**:
+  `_do_save_strategy_scenario` の OSError 分岐に `winerror in (5, 32)`
+  （ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION）→ `"permission_denied"` を追加。
+  errno が None でも winerror が分類できればそちらを優先する。
+
+**MEDIUM 解消項目**:
+
+- **M-R2-1 (BaseException 系も rollback)**:
+  `write_back` Step 6 を `except Exception` から `except BaseException` に変更。
+  `KeyboardInterrupt` / `SystemExit` を含む BaseException 系も rollback 後に再送出する
+  ことで握り潰しを防ぐ。`finally` ブロックの cleanup は引き続き走る。
+- **M-R2-2 (`scenario.py` ログを debug に揃え二重出力解消)**:
+  `os.replace` 失敗・backup / write / fsync / rollback 等の OSError ログを
+  `log.error` から `log.debug` に格下げ。`server.py` レイヤ
+  (`_do_save_strategy_scenario`) を ERROR の単一 SoT として統一する。
+- **M-R2-3 (`test_save_as_with_prior_load_to_new_path` を write_back まで拡張)**:
+  自明な `_check_path_guard` byte-diff 0 テストを廃し、`write_back(new_path, ...)` を実走。
+  `loaded_path` のファイルが byte 単位で不変、`new_path` に新 SCENARIO が
+  正しく書き込まれることを assert する end-to-end テストに変更した。
+- **M-R2-4 (multi-client 同言語テストの rename + 説明)**:
+  `test_multi_client_fcfs_after_other_client_load` を
+  `test_path_guard_rejects_save_when_loaded_path_changed` に rename。docstring に
+  「単言語版・path_guard 単体テスト」「real multi-client serialization は
+  `python/tests/test_server_multi_client.py` または future integration test で検証」を明記。
+  実 server を起動する multi-client integration test の追加は **次フェーズで検討**
+  （本ラウンドでは軽量化判断で見送り）。
+- **M-R2-5 (path guard に macOS 永続ディレクトリを追加)**:
+  `_get_persistent_dirs()` に `sys.platform == "darwin"` 分岐を追加し、
+  `~/Library/Application Support/flowsurface` を path guard 対象に含めた。
+  `test_rejects_persistent_macos_dir`（`@pytest.mark.skipif(sys.platform != "darwin")`）で
+  リグレッションガードする。
+- **M-R2-6 (`test_writeback_rollback_on_validate_failure` を本来経路に修正)**:
+  `_verify_writeback` を `monkeypatch` で `ScenarioValidationError` raise に差し替える方式へ
+  変更。仮に server.py 入口の `validate()` が write_back に到達しないように働いた場合でも、
+  `write_back` 内部の rollback 経路（`.bak` から path への restore）が実行され
+  byte-diff 0 で一致することを直接 assert する。
+
+**追加・変更されたテスト**:
+
+- `python/tests/test_scenario_writeback.py`:
+  - 既存 `test_writeback_rollback_on_validate_failure` を monkeypatch 方式に書き換え（M-R2-6）
+  - 既存 `test_saved_error_is_known_literal` を 8 値版に更新 + `tempfile_failed` 削除済みの
+    ValidationError も assert（H-R2-2 + H-R2-1 の wire payload 検証）
+  - 新規 `test_emit_rejects_unknown_error_code`（H-R2-1 リグレッションガード）
+  - 新規 `test_oserror_winerror_maps_to_permission_denied`（H-R2-3 リグレッションガード）
+  - 新規 `test_rollback_on_recursion_error`（M-R2-1 リグレッションガード）
+  - 新規 `test_rejects_persistent_macos_dir`（M-R2-5 / `skipif` で macOS 限定）
+- `python/tests/test_scenario_path_guard.py`:
+  - `test_save_as_with_prior_load_to_new_path` を write_back 実走版に拡張（M-R2-3）
+  - `test_multi_client_fcfs_after_other_client_load` を
+    `test_path_guard_rejects_save_when_loaded_path_changed` に rename + docstring 追記（M-R2-4）
+
+**LOW 見送り項目（理由）**:
+
+- **L-R2-1 (`_emit` の ok/error 不整合 assert)**:
+  H-R2-1 の `_emit` 入口 `assert not (ok and error is not None)` で吸収済み。独立タスクとしては不要。
+- **L-R2-2 (TypeError → validate_failed フォールバック明文化)**:
+  `_do_save_strategy_scenario` の汎用 `except Exception` 節で未知例外は
+  `validate_failed` に集約し、ログには `type(exc).__name__` を残す現挙動を本ラウンド計画書に
+  明文化するに留め、実装変更は不要。
+- **L-R2-3 (caplog propagation)**: 現状 pass しており修正不要。
+- **L-R2-4 (`resolve()` OSError 握りつぶし)**: 実害低、修正不要。
+
+**送信パイプラインの不変条件（ラウンド2 確定）**:
+
+- `StrategyScenarioSaved` / `StrategyScenarioLoaded` / `StrategyScenarioLoadFailed` は
+  すべて `model_dump(exclude_none=False)` 経由で `_outbox` に push する
+- `error` 値は `SaveErrorCode` Literal の 8 値のみ。未知値は pydantic ValidationError で
+  構築段階に検出される
+- `scenario.py` レイヤのログは debug、`server.py` レイヤが ERROR の単一 SoT
+- BaseException 系も rollback 対象（KeyboardInterrupt / SystemExit を握り潰さない）
+- `_get_persistent_dirs()` は `%APPDATA%\flowsurface` / `~/Library/Application Support/flowsurface` /
+  `~/.cache/flowsurface/engine` の 3 OS をカバー
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 3)
+
+F6 ラウンド 3 e-station-review レビュー指摘 6 件（MEDIUM 3 / LOW 3）の解消記録。
+これにより F6 review-fix-loop は CRITICAL / HIGH / MEDIUM すべてゼロで収束した。
+
+**MEDIUM 解消項目**:
+
+- **M-R3-1 (`Path.home()` を try/except RuntimeError でガード)**:
+  `_get_persistent_dirs()` の `Path.home()` 呼び出しを try/except で囲み、
+  HOME / USERPROFILE が解決できない環境でも `RuntimeError` を伝播させない。
+  APPDATA だけが取れる環境ではそれだけを返し、何も取れなければ空リストを返す
+  （graceful degradation）。リグレッションガード:
+  `test_get_persistent_dirs_without_home`。
+- **M-R3-2 (`_emit` の不変条件を `assert` ではなく `ValueError` で強制)**:
+  `server.py::_do_save_strategy_scenario` 内 `_emit` クロージャの 2 つの assert
+  （ok=True かつ error 付き / 未知 SaveErrorCode）を `if not <cond>: raise ValueError(...)`
+  に変更。`python -O` 最適化で assert は無効化されるため、本番でも内部不変条件
+  を強制する。リグレッションガード: `test_emit_invariants_raise_value_error_not_assert`
+  （pydantic schema-level reject は別テスト `test_emit_rejects_unknown_error_code` が担当）。
+- **M-R3-3 (`test_rollback_on_recursion_error` を `KeyboardInterrupt` 系に差し替え)**:
+  `RecursionError` は `Exception` のサブクラスなので旧実装の `except Exception` でも
+  捕捉できており BaseException 拡張の差異を証明できなかった。
+  `KeyboardInterrupt`（`BaseException` 直系で `Exception` 派生でない）を inject する
+  `test_rollback_on_keyboard_interrupt` に差し替え、真の境界条件を検証する。
+
+**LOW 解消項目**:
+
+- **L-R3-1 (`test_emit_rejects_unknown_error_code` docstring 整理)**:
+  pydantic schema-level rejection を確認するテストであることを docstring に明記し、
+  `_emit` クロージャ経路の不変条件は M-R3-2 修正で `ValueError` として強制される
+  （別テスト `test_emit_invariants_raise_value_error_not_assert` 参照）と注記。
+  両テストが送信パイプラインの 2 層を分担してカバーする構図にした。
+- **L-R3-2 (計画書 L416 周辺の "9 値" stale 表記を "8 値" に修正)**:
+  `tempfile_failed` を含む 9 値の旧表記を 8 値に更新。
+  「（`tempfile_failed` は R2 で削除。詳細は §レビュー反映 (2026-05-04, ラウンド 2) 参照）」
+  と注記し、ラウンド 2 の H-R2-2 と整合させた。
+- **L-R3-3 (`test_rejects_persistent_macos_dir` を non-darwin CI でも回帰検知できる版に変更)**:
+  旧 `@pytest.mark.skipif(sys.platform != "darwin")` だと Windows / Linux CI では
+  スキップされて回帰検知できなかった。`monkeypatch.setattr(scenario.sys, "platform", "darwin")`
+  と `Path.home()` 固定で cross-platform で常に実行する
+  `test_rejects_persistent_macos_dir_on_darwin_platform` に rename / 拡張した。
+
+**追加・変更されたテスト**:
+
+- `python/tests/test_scenario_writeback.py`:
+  - 新規 `test_get_persistent_dirs_without_home`（M-R3-1 リグレッションガード）
+  - 新規 `test_emit_invariants_raise_value_error_not_assert`（M-R3-2 リグレッションガード）
+  - 既存 `test_rollback_on_recursion_error` を `test_rollback_on_keyboard_interrupt` に
+    差し替え（M-R3-3、`Exception` 派生でなく `BaseException` 直系を inject）
+  - 既存 `test_emit_rejects_unknown_error_code` の docstring 整理（L-R3-1）
+  - 既存 `test_rejects_persistent_macos_dir` を
+    `test_rejects_persistent_macos_dir_on_darwin_platform` に rename / cross-platform 化（L-R3-3）
+
+**追加された不変条件（ラウンド3 確定）**:
+
+- `_emit` の内部不変条件は `assert` ではなく `ValueError` で強制する
+  （`-O` 最適化耐性 / 本番でも保護）
+- `_get_persistent_dirs()` は `Path.home()` 不明時に graceful degradation する
+  （APPDATA があればそれだけ返し、なければ空リスト。例外を伝播させない）
+- BaseException 系の rollback テストは `KeyboardInterrupt` で行う
+  （`Exception` 派生では旧実装の差異を証明できない）
+- macOS 永続ディレクトリ拒否テストは `sys.platform` を偽装し cross-platform で常に実行する
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド 4)
+
+F6 ラウンド 4 e-station-review レビュー指摘 3 件（MEDIUM 1 / LOW 2）の解消記録。
+これにより F6 review-fix-loop は **CRITICAL / HIGH / MEDIUM すべてゼロで収束達成**。
+
+**MEDIUM 解消項目**:
+
+- **M-R4-1 (`_get_persistent_dirs()` 空リスト時の path guard 消失をふさぐ)**:
+  ラウンド 3 の `try/except RuntimeError` 修正により `Path.home()` 失敗 + APPDATA
+  未設定の環境では `_get_persistent_dirs()` が空リストを返し、`_check_path_guard`
+  の永続ディレクトリチェックループが 0 回になり、`<anywhere>/.cache/flowsurface/engine/x.py`
+  などが path guard を通過してしまっていた。`_PERSISTENT_DIR_SUFFIXES`
+  （`flowsurface` / `Library/Application Support/flowsurface` / `.cache/flowsurface/engine`）
+  と `_path_under_persistent_suffix()` を追加し、suffix-based fallback で
+  `path_guard_violation` を発火させる。
+  **採用方針**: 「絶対パス由来のリストが空のときのみ fallback を発火」する保守的設計。
+  通常環境で `<legitimate>/flowsurface/foo.py` 等を誤検知しないようにする。
+  リグレッションガード:
+  - `test_rejects_cache_flowsurface_engine_path_when_home_unresolved`
+  - `test_rejects_appdata_flowsurface_path_when_home_unresolved`
+
+**LOW 解消項目**:
+
+- **L-R4-1 (`server.py:317` の assert 残留 → if/raise に統一)**:
+  `_mode in ("live", "replay")` の防衛 assert を `if not <cond>: raise RuntimeError(...)`
+  に変更。`_emit` (M-R3-2) と同じ `python -O` 耐性方針に合わせ、不変条件を本番でも
+  強制する。回帰テストはコンストラクタ即時の不変条件確認なので追加せず（過剰なため）。
+- **L-R4-2 (`test_emit_invariants_raise_value_error_not_assert` の実行ベース化) — 保留**:
+  `_emit` クロージャは coroutine 内で生成され、外部から直接 invoke できない構造
+  （`__closure__` 経由で取り出しても自由変数 `request_id` / `path_str` の bind が
+  必要で、in-process で再構築すると元の関数本体と等価ではなくなる）。現行テストは
+  (a) `_emit` と同一ロジックを `frozenset(get_args(SaveErrorCode))` で再構築した
+  `_emit_replica` で振る舞い検証 + (b) `inspect.getsource` でソース上の `raise ValueError`
+  / `_emit invariant` 文字列を assert する **ハイブリッド形式**で実装済み。
+  純粋な実行ベース化は次フェーズで integration test を整備した際に再検討する
+  （現行ハイブリッド形式は `python -O` 下でも (a) のリプリカ実行が成立するため
+  実質的なリグレッションガードとして機能する）。
+
+**追加・変更されたテスト**:
+
+- `python/tests/test_scenario_path_guard.py`:
+  - 新規 `test_rejects_cache_flowsurface_engine_path_when_home_unresolved`（M-R4-1）
+  - 新規 `test_rejects_appdata_flowsurface_path_when_home_unresolved`（M-R4-1）
+
+**追加された不変条件（ラウンド4 確定）**:
+
+- 永続ディレクトリ検出は **(1) 絶対パス完全一致 + (2) suffix-based fallback** の二軸で行う。
+  fallback は (1) が空リスト（HOME/APPDATA いずれも解決できない環境）のときのみ発火し、
+  通常環境での誤検知を抑える
+- `DataEngineServer._mode` の不変条件も `assert` ではなく `RuntimeError` で強制する
+  （`-O` 最適化耐性。`_emit` invariant と同じ方針）
+
+**結果**: F6 review-fix-loop **収束達成**（CRITICAL / HIGH / MEDIUM すべてゼロ）。

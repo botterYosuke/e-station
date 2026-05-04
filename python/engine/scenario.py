@@ -23,6 +23,7 @@ import ast
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import time
 import typing
@@ -65,13 +66,64 @@ class ScenarioValidationError(Exception):
 
 
 def _get_persistent_dirs() -> list[Path]:
-    """OS ごとの永続状態ファイルディレクトリを返す。"""
+    """OS ごとの永続状態ファイルディレクトリを返す。
+
+    M-R2-5 (ラウンド2): macOS の `~/Library/Application Support/flowsurface` も
+    含めることで、Linux/Windows と同等の path guard カバレッジを揃える。
+
+    M-R3-1 (ラウンド3): `Path.home()` は HOME / USERPROFILE が解決できない環境で
+    `RuntimeError` を raise するため、try/except で graceful degradation する。
+    APPDATA だけが取れる環境ではそれだけを返し、何も取れなければ空リストを返す。
+
+    呼び出し元は本リスト（絶対パス完全一致）に加えて、
+    `_path_under_persistent_suffix` (suffix-based fallback) も併用すること。
+    両者が併用されることで、HOME / APPDATA がいずれも解決できない環境でも
+    path guard が消失しない（M-R4-1 ラウンド4）。
+    """
     dirs: list[Path] = []
     appdata = os.environ.get("APPDATA", "")
     if appdata:
         dirs.append(Path(appdata) / "flowsurface")
-    dirs.append(Path.home() / ".cache" / "flowsurface" / "engine")
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return dirs
+    if sys.platform == "darwin":
+        dirs.append(home / "Library" / "Application Support" / "flowsurface")
+    dirs.append(home / ".cache" / "flowsurface" / "engine")
     return dirs
+
+
+# M-R4-1 (ラウンド4): HOME / APPDATA がいずれも解決できない環境でも path guard が
+# 消失しないようにするための suffix-based fallback。`_get_persistent_dirs()` が
+# 空リストを返したときのみ発火し、誤検知を抑える。
+_PERSISTENT_DIR_SUFFIXES: tuple[Path, ...] = (
+    Path("flowsurface"),                                          # %APPDATA%/flowsurface
+    Path("Library") / "Application Support" / "flowsurface",      # macOS
+    Path(".cache") / "flowsurface" / "engine",                    # Linux
+)
+
+
+def _path_under_persistent_suffix(target: Path) -> bool:
+    """target のいずれかの連続部分列が `_PERSISTENT_DIR_SUFFIXES` と一致するか判定。
+
+    HOME / APPDATA がいずれも解決できない環境向けの保守的 fallback。
+    `<anywhere>/.cache/flowsurface/engine/x.py` や `<anywhere>/flowsurface/x.py` の
+    ような典型的な永続ディレクトリレイアウトを発見次第 True を返す。
+    """
+    try:
+        resolved = target.resolve(strict=False)
+    except OSError:
+        resolved = target
+    parts = resolved.parts
+    for suffix in _PERSISTENT_DIR_SUFFIXES:
+        suffix_parts = suffix.parts
+        if len(parts) < len(suffix_parts):
+            continue
+        for i in range(len(parts) - len(suffix_parts) + 1):
+            if parts[i:i + len(suffix_parts)] == suffix_parts:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +437,13 @@ def _check_path_guard(
         )
 
     # 条件 3: 永続状態ディレクトリへの書き込み禁止（save_as でバイパス不可）
+    # 二軸の検査:
+    #   (1) 絶対パス完全一致（HOME/APPDATA が解決できる通常環境向け）
+    #   (2) suffix-based fallback（HOME/APPDATA がいずれも解決できない環境で
+    #       path guard が消失しないよう保守的に発火 / M-R4-1 ラウンド4）
     path_resolved = path.resolve()
-    for persistent_dir in _get_persistent_dirs():
+    persistent_dirs = _get_persistent_dirs()
+    for persistent_dir in persistent_dirs:
         try:
             persistent_dir_resolved = persistent_dir.resolve()
         except OSError:
@@ -400,6 +457,13 @@ def _check_path_guard(
             raise ValueError(
                 f"path_guard_violation: writing to persistent state directory is forbidden: {path}"
             )
+
+    # M-R4-1 (ラウンド4): 絶対パス検査が空リストだった（HOME/APPDATA いずれも
+    # 解決不能）場合のみ suffix-based fallback を発火させ、誤検知を最小化する。
+    if not persistent_dirs and _path_under_persistent_suffix(path):
+        raise ValueError(
+            f"path_guard_violation: writing under persistent-dir suffix is forbidden: {path}"
+        )
 
     # 条件 2: Save 経路は loaded_path と一致必須
     if not save_as:
@@ -528,7 +592,13 @@ def write_back(
             tmp_fd = fd
             tmp_path = Path(tmp_path_str)
         except OSError as exc:
-            log.error("scenario.writeback tempfile_failed: %s", exc)
+            # ラウンド2 / H-R2-2: tempfile_failed コードは廃止。errno に応じて
+            # parent_missing / disk_full / permission_denied として server.py が分類する。
+            # ここは debug にとどめ ERROR 単一 SoT を server.py に集約する（M-R2-2）。
+            log.debug(
+                "scenario.writeback: tempfile creation failed (errno=%s): %s",
+                getattr(exc, "errno", None), exc,
+            )
             raise
 
         # Step 2: バックアップ（既存ファイルがある場合のみ）
@@ -536,7 +606,8 @@ def write_back(
             try:
                 shutil.copy2(path, bak_path)
             except OSError as exc:
-                log.error("scenario.writeback backup_failed: %s", exc)
+                # M-R2-2: server.py が ERROR の単一 SoT。scenario.py 層は debug。
+                log.debug("scenario.writeback: backup failed: %s", exc)
                 _safe_unlink(tmp_path)
                 tmp_path = None
                 raise
@@ -546,7 +617,8 @@ def write_back(
         try:
             os.write(fd, encoded)
         except OSError as exc:
-            log.error("scenario.writeback write_failed: %s", exc)
+            # M-R2-2: server.py が ERROR の単一 SoT。scenario.py 層は debug。
+            log.debug("scenario.writeback: write failed: %s", exc)
             _safe_unlink(tmp_path)
             tmp_path = None
             _safe_unlink(bak_path)
@@ -556,7 +628,8 @@ def write_back(
         try:
             os.fsync(fd)
         except OSError as exc:
-            log.error("scenario.writeback fsync_failed: %s", exc)
+            # M-R2-2: server.py が ERROR の単一 SoT。scenario.py 層は debug。
+            log.debug("scenario.writeback: fsync failed: %s", exc)
             _safe_unlink(tmp_path)
             tmp_path = None
             _safe_unlink(bak_path)
@@ -574,19 +647,24 @@ def write_back(
             os.replace(tmp_path, path)
             tmp_path = None  # 移動成功 → 削除不要
         except OSError as exc:
-            log.error("scenario.writeback rename_failed: %s", exc)
+            # M-R2-2: server.py が ERROR の単一 SoT。scenario.py 層は debug。
+            log.debug("scenario.writeback: rename failed: %s", exc)
             _safe_unlink(tmp_path)
             tmp_path = None
             raise
 
         # Step 6: 二段検証（構文 + 形状）
+        # M-R2-1 (ラウンド2): BaseException 系（RecursionError / MemoryError 等）も
+        # rollback 対象に含める。KeyboardInterrupt / SystemExit は raise で再送出する
+        # ことで上位に伝播する（握り潰さない）。
         try:
             _verify_writeback(path, scenario)
-        except Exception as exc:
+        except BaseException as exc:
             # M6 (レビュー反映 2026-05-04 ラウンド1): rollback reason は
             # syntax_error / validate_failed の二択。importlib 検証は要件外。
             reason = "syntax_error" if isinstance(exc, SyntaxError) else "validate_failed"
-            log.error(
+            # M-R2-2: server.py が ERROR の単一 SoT。scenario.py 層は debug。
+            log.debug(
                 "scenario.writeback rollback reason=%s path=%s bak=%s",
                 reason,
                 path,
