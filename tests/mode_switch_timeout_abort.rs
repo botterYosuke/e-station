@@ -278,3 +278,38 @@ fn force_stop_timeout_emits_warn_log() {
         "ModeSwitchForceStopTimeout must log::warn! on entry for ops observability (M4)"
     );
 }
+
+// ── M-rust2: SwitchModeWithSpecs save-fail shows modal dialog ─────────────
+
+#[test]
+fn switch_mode_with_specs_save_fail_shows_dialog() {
+    // M-rust2: parity with `SwitchModeSaveComplete` (M5). The non-dirty path
+    // (`SwitchModeWithSpecs` after save_state_to_disk failure) must surface a
+    // modal `ConfirmDialog::new` alert, not just a Toast — toasts auto-dismiss
+    // and the user can miss the abort cause.
+    let src = read_main();
+    let body = handler_body(&src, "SwitchModeWithSpecs { target, windows }");
+    assert!(
+        body.contains("save_state_to_disk"),
+        "handler must call save_state_to_disk to detect failure"
+    );
+    assert!(
+        body.contains("ConfirmDialog::new"),
+        "save-fail path must surface a modal ConfirmDialog (M-rust2 parity with M5)"
+    );
+    assert!(
+        body.contains("self.confirm_dialog = Some"),
+        "save-fail path must assign self.confirm_dialog (M-rust2)"
+    );
+}
+
+#[test]
+fn switch_mode_save_complete_save_fail_shows_dialog() {
+    // M5 (existing) — also pinned here so review-fix-loop can scan one file.
+    let src = read_main();
+    let body = handler_body(&src, "SwitchModeSaveComplete { target, windows }");
+    assert!(
+        body.contains("save_state_to_disk") && body.contains("ConfirmDialog::new"),
+        "SwitchModeSaveComplete save-fail path must surface a modal alert (M5)"
+    );
+}

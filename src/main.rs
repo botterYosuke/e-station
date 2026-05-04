@@ -129,7 +129,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-fn _lock_order_index_for(name: &str) -> Option<usize> {
+fn lock_order_index_for(name: &str) -> Option<usize> {
     match name {
         "MODE_SWITCHING" => Some(0),
         "SUBMIT_IN_FLIGHT" => Some(1),
@@ -148,9 +148,20 @@ fn _lock_order_index_for(name: &str) -> Option<usize> {
 /// the underlying mutex/atomic. Callers must invoke this immediately after
 /// (or before, with the matching `lock_order_release`) the real acquisition.
 pub fn lock_order_acquire(name: &'static str) {
-    let Some(next) = _lock_order_index_for(name) else {
+    let Some(next) = lock_order_index_for(name) else {
         return;
     };
+    // M-3 / L1: emit a structured `log::info!` so log-subscriber based
+    // integration tests can verify the per-thread acquisition order. The
+    // actual fixed order is enforced by the `debug_assert!` below; this event
+    // is purely observational. We use `log` (not `tracing`) because flowsurface
+    // does not yet depend on `tracing` at the workspace root — switching is a
+    // separate refactor (see `tracing::warn!` cfg-gated below for the existing
+    // dependency surface).
+    log::info!(
+        target: "lock_order",
+        "lock_order_acquire lock={name} index={next}",
+    );
     LOCK_ORDER_INDEX.with(|cell| {
         let prev = cell.get();
         if let Some(p) = prev {
@@ -623,6 +634,14 @@ pub enum ModeSwitchError {
     /// (5-axis matrix axis-5 / 統一決定 61, 68).
     SubmitInFlight,
     /// User cancelled the unsaved-changes confirm dialog (F4).
+    ///
+    /// L2-rust: not yet emitted on a concrete code path — `GoBack` and
+    /// `ToggleDialogModal(None)` currently dismiss the mode-switch dialog
+    /// without producing this typed error. The variant is preserved so future
+    /// review-fix-loop iterations can route the dirty-confirm cancel path
+    /// through the typed error channel (e.g. for a single Toast/log call site)
+    /// without breaking exhaustive-match callers.
+    #[allow(dead_code)]
     ConfirmCancelled,
 }
 
@@ -4349,9 +4368,17 @@ impl Flowsurface {
                 // Not dirty: save then restart. Abort if save fails (plan: 保存失敗 → 切替中止).
                 if !self.save_state_to_disk(&windows) {
                     self.mode_switch_state = None;
-                    self.notifications.push(Toast::error(
-                        "保存に失敗しました。モード切替を中止します。".to_string(),
-                    ));
+                    // M-rust2 / M-4: surface a modal alert (parity with
+                    // `SwitchModeSaveComplete`). Modal is the *only* notification
+                    // surface — no Toast — to avoid the M-4 "2 surfaces saying
+                    // overlapping things" problem.
+                    let dialog = screen::ConfirmDialog::new(
+                        "保存に失敗したためモード切替を中止しました。\nディスクの空き容量・権限を確認してください。"
+                            .to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
                 return self.restart_with_mode(target);
@@ -4395,11 +4422,10 @@ impl Flowsurface {
                 // Abort if save fails (plan: 保存失敗 → 切替中止).
                 if !self.save_state_to_disk(&windows) {
                     self.mode_switch_state = None;
-                    self.notifications.push(Toast::error(
-                        "保存に失敗しました。モード切替を中止します。".to_string(),
-                    ));
-                    // M5: also surface a modal alert so the failure is not missed
-                    // when toasts auto-dismiss.
+                    // M-4: modal を唯一の通知面にする。以前は Toast + Modal の二重表示
+                    // にしていたが、Toast が自動消滅したあとも Modal が残るため、
+                    // ユーザーが原因を読む面が一つに絞られた方が明確であり、
+                    // Toast 側の残留テキストとも齟齬がない。
                     let dialog = screen::ConfirmDialog::new(
                         "保存に失敗したためモード切替を中止しました。\nディスクの空き容量・権限を確認してください。"
                             .to_string(),
@@ -4820,6 +4846,16 @@ impl Flowsurface {
                     // F7: release mode-switch guard when the dirty-confirm dialog is
                     // dismissed via backdrop click (ToggleDialogModal(None)), so the
                     // next SwitchMode attempt is not permanently blocked.
+                    //
+                    // M-rust3: this reset is unconditional — `ToggleDialogModal(None)`
+                    // also fires for non-mode-switch dialogs (e.g. save-as overwrite,
+                    // wandb confirm). When `mode_switch_state` is already `None` the
+                    // assignment is idempotent. The `ModeSwitchGuard::drop` Drop impl
+                    // is what actually releases the cross-thread `MODE_SWITCHING`
+                    // atomic and runs `lock_order_reset()` (H1), so dismissing an
+                    // unrelated dialog cannot accidentally release the guard of an
+                    // active mode-switch — it would only do so if the active
+                    // mode-switch's own dialog is being closed.
                     self.mode_switch_state = None;
                 }
                 self.confirm_dialog = dialog;
