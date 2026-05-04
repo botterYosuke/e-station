@@ -660,3 +660,73 @@ F6 ラウンド 4 e-station-review レビュー指摘 3 件（MEDIUM 1 / LOW 2�
   （`-O` 最適化耐性。`_emit` invariant と同じ方針）
 
 **結果**: F6 review-fix-loop **収束達成**（CRITICAL / HIGH / MEDIUM すべてゼロ）。
+
+---
+
+## F6a 後半 GUI 配線完了 (2026-05-04)
+
+ラウンド 1〜4 で確定した DTO / Python ハンドラに対応する **Rust GUI 配線** を実装し、
+F6a の最終 DoD（replay モードの `File > 開く...` から `.py` 選択 → SCENARIO prefill）を満たした。
+
+**実装内容**:
+
+- `src/main.rs::Action::OpenFile` を `app_mode()` で分岐:
+  - replay モード → `.py` ファイルフィルタで OS ダイアログを開き、結果を
+    `Message::NativeOpenStrategyPicked(Option<PathBuf>)` に流す
+  - live モード → 従来通り `saved-state.json`（`.json` フィルタ）
+- `Message::NativeOpenStrategyPicked(Some(path))` ハンドラ:
+  - `app_mode() == Replay` を改めてガード（live で誤って `.py` が選ばれても drop）
+  - `Command::LoadStrategyScenario { request_id, path }` を engine へ送信
+- engine event を `map_engine_event_to_tachibana()` 経由で Message に変換:
+  - `EngineEvent::StrategyScenarioLoaded` → `Message::StrategyScenarioLoadedEvent`
+  - `EngineEvent::StrategyScenarioLoadFailed` → `Message::StrategyScenarioLoadFailedEvent`
+- `Message::StrategyScenarioLoadedEvent`:
+  - `CURRENT_PATH` を更新（M-7 poison recovery: `into_inner()` フォールバック）
+  - `replay_form_modal` を `get_or_insert_with(default)` し、scenario が `Some` なら
+    `prefill_from_scenario(path, &value)`、`None` なら `set_strategy_file_only(path)`
+- `Message::StrategyScenarioLoadFailedEvent`:
+  - エラートーストを push、`CURRENT_PATH` は更新しない（仕様）
+- `ReplayFormModal::prefill_from_scenario()` / `set_strategy_file_only()` を新設
+  - granularity の Literal（`Trade` / `Minute` / `Daily`）→ `Granularity` enum マッピング
+  - 未知 granularity は既存値を保持（破壊的に上書きしない）
+  - 部分的な scenario（一部キーのみ）でも他フィールドは触らない
+  - `validation_error` は prefill 成功時にクリア（古いエラーバナー残留防止）
+
+**追加リグレッションテスト**（合計 10 件、すべてパス）:
+
+`src/modal/replay_form.rs`:
+
+- `prefill_from_scenario_populates_all_fields`
+- `prefill_from_scenario_clears_validation_error`
+- `prefill_from_scenario_unknown_granularity_preserves_existing`
+- `prefill_from_scenario_partial_keeps_other_fields`
+- `prefill_from_scenario_non_object_only_sets_path`
+- `set_strategy_file_only_sets_path_and_keeps_fields`
+
+`src/main.rs::native_menu_handler_tests`（include_str! ソース検査ベース）:
+
+- `open_file_replay_mode_uses_py_filter` — replay 分岐 + `.py` フィルタ + `NativeOpenStrategyPicked` dispatch
+- `open_strategy_picked_some_sends_load_strategy_scenario` — モードガード + `Command::LoadStrategyScenario`
+- `strategy_scenario_loaded_event_prefills_modal` — `prefill_from_scenario` / `set_strategy_file_only` / `CURRENT_PATH` 更新
+- `strategy_scenario_load_failed_event_pushes_toast_only` — トースト発火 + `CURRENT_PATH` 不変 + prefill 不発火
+
+**観測コマンド**:
+
+```bash
+cargo test --bin flowsurface modal::replay_form
+cargo test --bin flowsurface native_menu_handler_tests
+cargo test --workspace --no-fail-fast
+uv run pytest python/tests/ -m "not live"
+```
+
+**検証結果**:
+
+- Rust workspace 全テスト緑（既存 + 新規 10 件）
+- Python テスト 1819 件緑（退行なし）
+- `cargo clippy -- -D warnings` 緑
+- `cargo fmt` クリーン
+
+**持ち越し（P8 へ）**:
+
+- Linux 自前メニューバー（widget menu bar）で `.py` フィルタが OS ネイティブと同等の UX を出せるか
+  （P8-widget-menu-bar-linux.md でカバー予定）

@@ -473,8 +473,22 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 
 **意図的に次フェーズ以降へ持ち越した項目**:
 
-- `ReplayFormModal` への `StrategyScenarioLoaded` 受信時 prefill（Rust GUI 実装、F6a 後半）
-- `native_menu.rs` の replay モードでのファイルフィルタ `.py` 切り替え（F6a 後半）
+- ✅ `ReplayFormModal` への `StrategyScenarioLoaded` 受信時 prefill（Rust GUI 実装、F6a 後半 — 2026-05-04 完了）
+- ✅ replay モードの `File > 開く...` で `.py` ファイルフィルタへ切り替え（F6a 後半 — 2026-05-04 完了）
+- Linux 自前メニューバー（widget menu bar）での `.py` フィルタ UX 検証（P8 別計画）
+
+**F6a 後半（2026-05-04 完了）**:
+
+- `src/main.rs::Action::OpenFile` を `app_mode()` で分岐し、replay モードでは `.py` ファイルフィルタの OS ダイアログを開く（live モードは従来の `.json` 経路のまま）
+- 新規 Message: `NativeOpenStrategyPicked(Option<PathBuf>)` / `StrategyScenarioLoadedEvent { path, scenario }` / `StrategyScenarioLoadFailedEvent { path, reason }`
+- engine の `EngineEvent::StrategyScenarioLoaded` / `StrategyScenarioLoadFailed` を `map_engine_event_to_tachibana()` で対応 Message へ変換
+- `ReplayFormModal::prefill_from_scenario()` / `set_strategy_file_only()` を新設。granularity Literal（`Trade` / `Minute` / `Daily`）は `Granularity` enum へマッピング、未知値は既存値を保持
+- 失敗時は `current_path` を更新せず toast でエラー表示。SCENARIO 不在の `.py` は `strategy_file` だけセットしてフィールド空のまま（仕様通り）
+- live モードガード: `NativeOpenStrategyPicked` ハンドラは `app_mode() != Replay` のときに warn ログを出して drop する
+- M-7 poison recovery: `CURRENT_PATH.lock()` を `into_inner()` 経由でフォールバック
+- リグレッションガードテスト（合計 11 件追加）:
+  - `src/modal/replay_form.rs` 内: `prefill_from_scenario_populates_all_fields` / `prefill_from_scenario_clears_validation_error` / `prefill_from_scenario_unknown_granularity_preserves_existing` / `prefill_from_scenario_partial_keeps_other_fields` / `prefill_from_scenario_non_object_only_sets_path` / `set_strategy_file_only_sets_path_and_keeps_fields`
+  - `src/main.rs::native_menu_handler_tests` に `open_file_replay_mode_uses_py_filter` / `open_strategy_picked_some_sends_load_strategy_scenario` / `strategy_scenario_loaded_event_prefills_modal` / `strategy_scenario_load_failed_event_pushes_toast_only`
 
 **モード別挙動表（A-4）**:
 
