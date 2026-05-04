@@ -87,14 +87,17 @@ async def test_subscribe_inside_market_hours_does_not_emit_market_closed(tmp_pat
     outbox: list[dict] = []
     stop = asyncio.Event()
 
-    # Patch TachibanaEventWs.run to return immediately (simulates WS close)
+    # Patch TachibanaEventWs.run to return immediately (simulates WS close).
+    # Bug Y refactor (2026-05-04): stream_trades は TickerEventWsHub 経由になり、
+    # `tachibana_ws.TachibanaEventWs` を hub の `_run` から呼ぶ。patch path を
+    # 直接インポート元に変更する。
     async def _fake_run(cb):  # noqa: ANN001
         stop.set()
 
     with (
         patch("engine.exchanges.tachibana_ws.is_market_open", return_value=True),
         patch(
-            "engine.exchanges.tachibana.TachibanaEventWs.run",
+            "engine.exchanges.tachibana_ws.TachibanaEventWs.run",
             new_callable=lambda: lambda *a, **kw: _fake_run(a[1]),
         ),
     ):
