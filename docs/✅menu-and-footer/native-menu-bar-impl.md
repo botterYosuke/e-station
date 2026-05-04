@@ -133,25 +133,42 @@ fn new()
       → menu_ref.init_for_hwnd(hwnd)  ← Win32 SetMenu
 ```
 
-### File > 開く...（live モードのみ）
+### File > 開く…（Open）（live モードのみ）
 
 ```
-NativeMenuAction(OpenFile)
-  → rfd::AsyncFileDialog::pick_file() (Python フィルタ除く)
-  → ファイル読み込み → String
-  → NativeOpenFileApply(json)
+NativeMenuAction(OpenFile)                          Ctrl+O
+  → rfd::AsyncFileDialog::pick_file() (.json フィルタのみ)
+  → ファイル読み込み → (json: String, path: PathBuf)
+  → NativeOpenFileApply { json, path }
       → serde_json::from_str::<data::State>(&json) でバリデーション
-        ✓ OK: data::write_json_to_file(json, SAVED_STATE_PATH) → self.restart()
+        ✓ OK: data::write_json_to_file(json, SAVED_STATE_PATH)
+               CURRENT_PATH = Some(path)
+               self.restart()
         ✗ Err: Toast::error("無効な設定ファイルです: {e}")
 ```
 
 `self.restart()` は `Flowsurface::new()` を呼び `load_saved_state()` が上書き済みの
 `saved-state.json` を読み直すため、新しい設定が即座に反映される。
+`CURRENT_PATH` は `static Mutex<Option<PathBuf>>` のため `restart()` を経由しても保持される。
 
-### File > 名前を付けて保存...（live モードのみ）
+### File > 上書き保存（Save）（live モードのみ）
 
 ```
-NativeMenuAction(SaveAs)
+NativeMenuAction(Save)                              Ctrl+S
+  ├─ CURRENT_PATH が Some(p) → pending_save_path = p
+  │    → window::collect_window_specs(...)
+  │    → NativeSaveAsWithSpecs(windows)
+  │        → std::fs::write(p, json)          ← 任意パスへ書く
+  │        → save_state_to_disk(windows)      ← saved-state.json にも書く (A-3)
+  │        → CURRENT_PATH = Some(p)
+  │        → Toast::info("保存しました: {p}")
+  └─ CURRENT_PATH が None → Save As ダイアログへフォールバック
+```
+
+### File > 名前を付けて保存…（Save As）（live モードのみ）
+
+```
+NativeMenuAction(SaveAs)                            Ctrl+Shift+S
   → rfd::AsyncFileDialog::save_file()
   → NativeSaveAsPath(Some(path))
       → self.pending_save_path = Some(path)
@@ -160,23 +177,25 @@ NativeMenuAction(SaveAs)
       → self.pending_save_path.take()
       → self.build_state_json(&windows)
       → std::fs::write(path, json)
+      → save_state_to_disk(windows)       ← saved-state.json にも書く (A-3)
+      → CURRENT_PATH = Some(path)
       → Toast::info("保存しました: {path}")
 ```
 
 2 メッセージに分割しているのは、ウィンドウの位置・サイズ収集が非同期タスクであるため。  
 `pending_save_path` フィールドで保存先パスを橋渡しする。
 
-### File > ストラテジーを開く...（replay モードのみ）
+### File > Replay を開始…（replay モードのみ）
 
 ```
-NativeMenuAction(OpenStrategy)
-  → rfd::AsyncFileDialog::pick_file() (.py フィルタ)
-  → Message::StrategyFilePicked(path)
-      → self.replay_strategy_file = path  (既存ハンドラ)
+NativeMenuAction(OpenReplayDialog)
+  → Message::ShowReplayDialog
+      → self.replay_form_modal = Some(ReplayFormModal::default())
 ```
 
-既存の `PickStrategyFile` フローと全く同じ `StrategyFilePicked` メッセージを使う。
-メニューバーとサイドバーどちらからでも同じ結果になる。
+`ReplayFormModal`（`src/modal/replay_form.rs`）が instrument / start / end /
+granularity / strategy_file / initial_cash の各フィールドを持つフォームを表示する。
+Submit 押下で `Command::LoadReplayData` → `Command::StartEngine` を engine に送信する。
 
 ---
 

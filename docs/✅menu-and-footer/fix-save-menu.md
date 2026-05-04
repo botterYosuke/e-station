@@ -310,8 +310,8 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 | <a id="f1"></a> **F1** | P6 | `native-menu-bar-impl.md` の旧 `OpenStrategy` 記述削除・`.py` フィルタ説明の正規化 | XS（doc only） | なし |
 | <a id="f2"></a> **F2** | P2 | `Ctrl+O` / `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Q` の muda accelerator + iced `keyboard::on_key`（Linux 限定） | S | なし |
 | <a id="f3"></a> **F3** | P1 | `Flowsurface.current_path` 相当を static で導入。`上書き保存（Save）` メニュー追加 | M | F2 と統合推奨 |
-| <a id="f4"></a> **F4** | P3 | `last_saved_bytes` で dirty 判定 → Open / Quit / SwitchMode 時の確認ダイアログ（F7 共通化ポイント） | M | F3 |
-| <a id="f5"></a> **F5** | P4 | rfd OS confirm に頼らずアプリ層の上書き確認ダイアログ | S | F3 |
+| <a id="f4"></a> ✅ **F4** | P3 | `last_saved_bytes` で dirty 判定 → Open / Quit / SwitchMode 時の確認ダイアログ（F7 共通化ポイント） | M | F3 |
+| <a id="f5"></a> ✅ **F5** | P4 | rfd OS confirm に頼らずアプリ層の上書き確認ダイアログ | S | F3 |
 | <a id="f6"></a> **F6** | P5 | SCENARIO 定数仕様の実装（[P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) 参照） | L | F3 |
 | <a id="f7"></a> **F7** | P7 | `Mode` メニュー新設（[P7-mode-switch-menu.md](./P7-mode-switch-menu.md) 参照） | M | F4（confirm 共有） |
 | <a id="f8"></a> **F8** | P8 | Linux 向け iced 自前メニューバー（[P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) 参照） | L | なし（独立） |
@@ -574,4 +574,61 @@ F2 のテスト `accelerator_bind::no_double_dispatch` で保護する。
 | [P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) | F6: SCENARIO 定数仕様 |
 | [P7-mode-switch-menu.md](./P7-mode-switch-menu.md) | F7: モード切替メニュー仕様 |
 | [P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) | F8: Linux 向け自前メニューバー仕様 |
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド1)
+
+**対象フェーズ**: F1（doc 整理）, F2（アクセラレータ）, F3（CURRENT_PATH + Save）
+
+### 発見された指摘と対処
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| HIGH-1 | HIGH | Linux replay モードで live 専用ショートカット（Open/Save/SaveAs）が動作してしまう | `linux_keyboard_subscription(app_mode: AppMode)` に引数を追加し、`is_live` ガードで OpenFile/Save/SaveAs を抑制。`subscription()` の API も `app_mode: AppMode` を受け取るよう変更 |
+| HIGH-2 | HIGH | Ctrl+Q（終了）が未実装 | `Action::Quit` バリアントを追加。Windows: `Code::KeyQ` の `MenuItem`（MenuIds に記録）。macOS: `PredefinedMenuItem::quit`（OS 処理, ID 追跡不要）。Linux: `Character("q")` + ctrl。main.rs に `Action::Quit => iced::window::close(self.main_window.id)` ハンドラ追加 |
+| MEDIUM-1 | MEDIUM | リグレッションテストが欠如 | `tests/accelerator_bind.rs`（12 テスト）と `tests/current_path_persists_across_restart.rs`（7 テスト）を新規作成。ソースインスペクション方式で GUI ランタイム不要 |
+
+### 検証結果
+
+```
+cargo test --workspace → 全テスト GREEN（新規 19 テスト含む）
+```
+
+**残 LOW 指摘**: なし
+
+**次フェーズ**: F4（dirty 検知 + 破棄確認ダイアログ）
 | [P9-wandb-submit-menu.md](./P9-wandb-submit-menu.md) | F9: W&B submit メニュー仕様（送信履歴・バッファ削除・Sign in/out・Submit） |
+
+---
+
+## レビュー反映 (2026-05-04, ラウンド2)
+
+**対象フェーズ**: F2（アクセラレータ）, F3（CURRENT_PATH + Save）, F4（dirty 確認）
+
+### 解消した指摘
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| H1 | HIGH | `event_stream()` 内 `MENU_IDS.lock()` poison 時に `break` していたため、外側 `loop` が継続しすべてのメニュー操作が無音で無視されていた | `Err(_) => break` を `Err(poisoned) => poisoned.into_inner()` のリカバリに変更。`CURRENT_PATH` と同パターンで処理を継続 (`src/native_menu.rs`) |
+| H2 | HIGH | `Action::Quit` が `iced::window::close()` を直接呼び出しており、`ExitRequested` 経路（dirty チェック・保存）を迂回していた | `window::collect_window_specs(active_windows, Message::ExitRequested)` 経由に変更し、既存の dirty チェック・保存フローを再利用 (`src/main.rs`) |
+| LOW-2 | LOW | `attach()` 内 `MENU_IDS.lock()` が `if let Ok(...)` で poison 時を無音無視していた | `match` に変えて `Err(poisoned) => *poisoned.into_inner() = Some(...)` でリカバリ (`src/native_menu.rs`) |
+| M1 | MEDIUM | `current_path_uses_into_inner_for_poison_recovery` テストの `into_inner()` カウントにコメント行が含まれ、誤差が生じていた | `.lines().filter(|l| !l.trim_start().starts_with("//")).filter(|l| l.contains("into_inner()"))` でコメント行を除外。また `NativeOpenFilePendingCheck` のマッチアームが `cargo fmt` で複数行に展開されてテストが壊れていたため、`\n            Message::NativeOpenFilePendingCheck {` プレフィックスで先頭一致検索に変更 (`tests/current_path_persists_across_restart.rs`, `tests/dirty_detection.rs`) |
+| M2 | MEDIUM | `NativeSaveAsWithSpecs` で `build_state_json` が `None` を返した場合の `else` ブランチが存在しなかった | `else { log::warn!("[NativeSaveAsWithSpecs] build_state_json returned None ...") }` を追加 (`src/main.rs`) |
+| M3 | MEDIUM | `NativeSaveAsWithSpecs` の成功パスで `save_state_to_disk` 呼び出し後に `self.last_saved_bytes = Some(json.into_bytes())` が重複更新していた | `save_state_to_disk` 内部でも `last_saved_bytes` を更新しているため、後続の重複代入を削除してコメントで明示 (`src/main.rs`) |
+| M4 | MEDIUM | `subscription()` 内 `APP_MODE.get().unwrap_or(...)` の安全性根拠コメントが欠如していた | `// SAFETY: APP_MODE is initialised in main() before iced starts; ...` コメントを追加 (`src/main.rs`) |
+| M5 | MEDIUM | `ExitRequested` と `NativeOpenFilePendingCheck` で dirty チェックが `confirm_dialog` の存在チェックなしに実施されるため、先着 intent が orphan 化するリスクがあった | 両箇所に `&& self.confirm_dialog.is_none()` ガードを追加 (`src/main.rs`) |
+
+### 持ち越し
+
+| ID | 内容 | 理由 |
+|----|------|------|
+| H3 | macOS Cmd+Q の F4 dirty チェック bypass | F4 は実装済みだが、macOS の `NSApplicationDelegate applicationShouldTerminate:` フックを `muda` / `iced` 側に設けないと Cmd+Q が OS により直接処理され dirty チェックを迂回する。F4（dirty-check 実装）完了後に `NSApplicationDelegate` フックが必要になる点を既知制約として記録。F4 の DoD には含めない |
+
+### 検証結果
+
+```
+cargo fmt --check     → 差分なし
+cargo clippy --workspace -- -D warnings → 警告なし
+cargo test --workspace → 全テスト GREEN
+```
