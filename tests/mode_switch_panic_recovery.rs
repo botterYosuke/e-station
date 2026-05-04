@@ -64,3 +64,17 @@ fn mode_switching_static_is_atomic_bool() {
         "MODE_SWITCHING must initialise to false"
     );
 }
+
+#[test]
+fn mode_switch_error_has_confirm_cancelled_variant() {
+    let src = read_main();
+    let pos = src
+        .find("pub enum ModeSwitchError")
+        .expect("ModeSwitchError enum must exist");
+    let end = pos + src[pos..].find('}').expect("enum body must close");
+    let body = &src[pos..=end];
+    assert!(
+        body.contains("ConfirmCancelled"),
+        "ModeSwitchError must declare a `ConfirmCancelled` variant (L1) for F4 confirm cancel"
+    );
+}

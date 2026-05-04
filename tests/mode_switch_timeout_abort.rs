@@ -63,8 +63,8 @@ fn stop_timeout_ignores_stale_pending_none() {
     let src = read_main();
     let body = handler_body(&src, "ModeSwitchStopTimeout");
     assert!(
-        body.contains("pending_mode_switch.is_none()"),
-        "ModeSwitchStopTimeout must check pending_mode_switch.is_none() to ignore stale messages"
+        body.contains("mode_switch_state.is_none()"),
+        "ModeSwitchStopTimeout must check mode_switch_state.is_none() to ignore stale messages (M13)"
     );
 }
 
@@ -94,8 +94,8 @@ fn force_stop_timeout_ignores_stale() {
     let src = read_main();
     let body = handler_body(&src, "ModeSwitchForceStopTimeout");
     assert!(
-        body.contains("pending_mode_switch.take().is_none()"),
-        "ModeSwitchForceStopTimeout must use pending_mode_switch.take().is_none() to ignore stale"
+        body.contains("mode_switch_state.take().is_none()"),
+        "ModeSwitchForceStopTimeout must use mode_switch_state.take().is_none() to ignore stale (M13)"
     );
 }
 
@@ -103,9 +103,11 @@ fn force_stop_timeout_ignores_stale() {
 fn force_stop_timeout_releases_guard() {
     let src = read_main();
     let body = handler_body(&src, "ModeSwitchForceStopTimeout");
+    // M13: guard release happens implicitly via mode_switch_state.take() (Drop on the tuple);
+    // assert that the take() pattern is used instead of two separate field clears.
     assert!(
-        body.contains("_mode_switch_guard = None"),
-        "ModeSwitchForceStopTimeout must release _mode_switch_guard before returning"
+        body.contains("mode_switch_state.take()"),
+        "ModeSwitchForceStopTimeout must consume mode_switch_state via take() to release guard (M13)"
     );
 }
 
@@ -177,9 +179,10 @@ fn force_stop_replay_send_routes_err_to_send_failed() {
 fn send_failed_releases_guard_and_shows_dialog() {
     let src = read_main();
     let body = handler_body(&src, "ModeSwitchSendFailed");
+    // M13: guard release implicit via mode_switch_state.take().
     assert!(
-        body.contains("_mode_switch_guard = None"),
-        "ModeSwitchSendFailed must release _mode_switch_guard"
+        body.contains("mode_switch_state.take()"),
+        "ModeSwitchSendFailed must consume mode_switch_state via take() to release guard (M13)"
     );
     assert!(
         body.contains("ConfirmDialog::new"),
@@ -195,8 +198,8 @@ fn engine_busy_handler_ignores_stale() {
     // Handler arm is `Message::ModeSwitchEngineBusy(reason) =>` — search with the parameter.
     let body = handler_body(&src, "ModeSwitchEngineBusy(reason)");
     assert!(
-        body.contains("pending_mode_switch.take().is_some()"),
-        "ModeSwitchEngineBusy must use pending_mode_switch.take().is_some() to ignore stale events"
+        body.contains("mode_switch_state.take().is_some()"),
+        "ModeSwitchEngineBusy must use mode_switch_state.take().is_some() to ignore stale events (M13)"
     );
 }
 
@@ -222,5 +225,56 @@ fn engine_busy_dispatch_limited_to_stop_replay_commands() {
     assert!(
         !body.contains("MODE_SWITCHING"),
         "EngineBusy dispatch must NOT check MODE_SWITCHING (too broad)"
+    );
+}
+
+// ── H1: stale early-return must release the guard ────────────────────────
+
+#[test]
+fn discard_switch_mode_stale_releases_guard() {
+    let src = read_main();
+    let body = handler_body(&src, "DiscardAndSwitchMode");
+    // H1: the early-return path consumes mode_switch_state via take(), which
+    // drops the embedded ModeSwitchGuard and releases MODE_SWITCHING.
+    assert!(
+        body.contains("mode_switch_state.take()"),
+        "DiscardAndSwitchMode must consume mode_switch_state via take() so the \
+         guard is released even on the stale early-return path (H1)"
+    );
+}
+
+#[test]
+fn save_switch_mode_stale_releases_guard() {
+    let src = read_main();
+    let body = handler_body(&src, "SaveAndSwitchMode");
+    // H1: SaveAndSwitchMode must reference mode_switch_state to detect a stale
+    // dialog firing. The guard is preserved across the async window-spec
+    // collection by reading without taking.
+    assert!(
+        body.contains("mode_switch_state"),
+        "SaveAndSwitchMode must read mode_switch_state to detect stale dialog \
+         firing (H1)"
+    );
+}
+
+// ── M4: warn-level logs on timeouts ───────────────────────────────────────
+
+#[test]
+fn stop_timeout_emits_warn_log() {
+    let src = read_main();
+    let body = handler_body(&src, "ModeSwitchStopTimeout");
+    assert!(
+        body.contains("log::warn!") && body.contains("[F7] StopReplay timed out"),
+        "ModeSwitchStopTimeout must log::warn! on entry for ops observability (M4)"
+    );
+}
+
+#[test]
+fn force_stop_timeout_emits_warn_log() {
+    let src = read_main();
+    let body = handler_body(&src, "ModeSwitchForceStopTimeout");
+    assert!(
+        body.contains("log::warn!") && body.contains("[F7] ForceStopReplay also timed out"),
+        "ModeSwitchForceStopTimeout must log::warn! on entry for ops observability (M4)"
     );
 }

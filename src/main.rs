@@ -510,6 +510,11 @@ pub enum ModeSwitchError {
     SaveFailed,
     /// The replay engine did not stop in time and force-stop also failed.
     StopFailed,
+    /// An active W&B submit (`SUBMIT_IN_FLIGHT == true`) blocks the switch
+    /// (5-axis matrix axis-5 / 統一決定 61, 68).
+    SubmitInFlight,
+    /// User cancelled the unsaved-changes confirm dialog (F4).
+    ConfirmCancelled,
 }
 
 /// F3: tracks the file path most recently opened or explicitly saved-as.
@@ -1120,11 +1125,13 @@ struct Flowsurface {
     /// Held until the user confirms "Discard and open" / "Save and open" or cancels the dialog.
     /// Includes the window specs captured at dialog-show time so SaveAndOpenFile can build state JSON.
     pending_open_file: Option<(String, std::path::PathBuf, HashMap<window::Id, WindowSpec>)>,
-    /// F7: mode-switch target while waiting for ReplayStopped or user confirm.
-    pending_mode_switch: Option<engine_client::dto::AppMode>,
-    /// F7: holds the MODE_SWITCHING guard alive until restart_with_mode() completes.
-    /// Dropped automatically when `*self = new_state` runs in restart().
-    _mode_switch_guard: Option<ModeSwitchGuard>,
+    /// F7 (M13): unified mode-switch state. `Some((target, guard))` while a
+    /// mode-switch restart is pending; `None` when idle. Replaces the previous
+    /// pair `pending_mode_switch` + `_mode_switch_guard` so the two cannot
+    /// drift out of sync (RAII: dropping the tuple clears both atomically).
+    /// The leading `_` on the field name silences the unused-field lint for
+    /// the guard half (it is held purely for its Drop side-effect).
+    mode_switch_state: Option<(engine_client::dto::AppMode, ModeSwitchGuard)>,
     /// F8: Linux widget menu bar open/close state (DoD-12).
     /// Only compiled on Linux; Win/macOS use the muda OS-native menu.
     #[cfg(target_os = "linux")]
@@ -1943,8 +1950,7 @@ impl Flowsurface {
             last_saved_bytes: None,
             pending_exit_windows: None,
             pending_open_file: None,
-            pending_mode_switch: None,
-            _mode_switch_guard: None,
+            mode_switch_state: None,
             #[cfg(target_os = "linux")]
             menu_bar: crate::menu_bar_state::State::default(),
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
@@ -2662,8 +2668,7 @@ impl Flowsurface {
                     self.pending_exit_windows = None;
                     // F7: release mode-switch guard so the next SwitchMode attempt is not
                     // permanently blocked after the user dismisses the dirty-confirm dialog.
-                    self.pending_mode_switch = None;
-                    self._mode_switch_guard = None;
+                    self.mode_switch_state = None;
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
                 } else {
@@ -3603,11 +3608,11 @@ impl Flowsurface {
                         let Some(guard) = ModeSwitchGuard::try_acquire() else {
                             return Task::none();
                         };
-                        self._mode_switch_guard = Some(guard);
+                        self.mode_switch_state = Some((target, guard));
 
                         // Axis-5: reject if a W&B submit is in progress (統一決定 61, 68)
                         if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
-                            self._mode_switch_guard = None;
+                            self.mode_switch_state = None;
                             let dialog = screen::ConfirmDialog::new(
                                 "W&B 送信中です。\n送信が完了してからモードを切り替えてください。"
                                     .to_string(),
@@ -3622,7 +3627,7 @@ impl Flowsurface {
                             (AppMode::Live, AppMode::Replay) => {
                                 // WAL in-flight check: reject if there are unconfirmed orders
                                 if has_wal_in_flight_orders() {
-                                    self._mode_switch_guard = None;
+                                    self.mode_switch_state = None;
                                     let dialog = screen::ConfirmDialog::new(
                                         "未約定の注文があります。\nモードを切り替えることができません。"
                                             .to_string(),
@@ -3645,8 +3650,9 @@ impl Flowsurface {
                                 );
                             }
                             (AppMode::Replay, AppMode::Live) => {
-                                // Send StopReplay then wait for ReplayStopped (with timeout)
-                                self.pending_mode_switch = Some(AppMode::Live);
+                                // Send StopReplay then wait for ReplayStopped (with timeout).
+                                // M13: mode_switch_state was already populated above with
+                                // target == AppMode::Live, so no separate pending field write.
                                 if let Some(conn) = self.engine_connection.clone() {
                                     let request_id = uuid::Uuid::new_v4().to_string();
                                     // Send StopReplay. If send fails immediately (broken socket),
@@ -3673,13 +3679,14 @@ impl Flowsurface {
                                     );
                                     return Task::batch([send_task, timeout_task]);
                                 } else {
-                                    // No engine connection — just restart directly
-                                    self.pending_mode_switch = None;
+                                    // No engine connection — just restart directly.
+                                    // mode_switch_state stays Some until restart_with_mode runs;
+                                    // restart_with_mode replaces *self, dropping the guard.
                                     return self.restart_with_mode(AppMode::Live);
                                 }
                             }
                             _ => {
-                                self._mode_switch_guard = None;
+                                self.mode_switch_state = None;
                                 return Task::none();
                             }
                         }
@@ -4202,11 +4209,15 @@ impl Flowsurface {
             Message::SwitchModeWithSpecs { target, windows } => {
                 use engine_client::dto::AppMode;
                 // If mode switch guard was released (e.g. stale message), ignore.
-                if self._mode_switch_guard.is_none() {
+                if self.mode_switch_state.is_none() {
                     return Task::none();
                 }
                 if app_mode() == AppMode::Live && self.is_dirty(&windows) {
-                    self.pending_mode_switch = Some(target);
+                    // Update pending target (mode_switch_state target half is rewritten;
+                    // guard half is preserved by reusing the existing guard).
+                    if let Some((t, _g)) = self.mode_switch_state.as_mut() {
+                        *t = target;
+                    }
                     let dialog = screen::ConfirmDialog::new(
                         "未保存の変更があります。".to_string(),
                         Box::new(Message::DiscardAndSwitchMode),
@@ -4218,7 +4229,7 @@ impl Flowsurface {
                 }
                 // Not dirty: save then restart. Abort if save fails (plan: 保存失敗 → 切替中止).
                 if !self.save_state_to_disk(&windows) {
-                    self._mode_switch_guard = None;
+                    self.mode_switch_state = None;
                     self.notifications.push(Toast::error(
                         "保存に失敗しました。モード切替を中止します。".to_string(),
                     ));
@@ -4229,7 +4240,9 @@ impl Flowsurface {
             // F7: user chose "破棄してモード切替"
             Message::DiscardAndSwitchMode => {
                 self.confirm_dialog = None;
-                let Some(target) = self.pending_mode_switch.take() else {
+                // H1: stale early-return must release the guard so the next
+                // SwitchMode is not permanently blocked.
+                let Some((target, _guard)) = self.mode_switch_state.take() else {
                     return Task::none();
                 };
                 return self.restart_with_mode(target);
@@ -4237,8 +4250,14 @@ impl Flowsurface {
             // F7: user chose "保存してモード切替" — collect window specs for save, then restart
             Message::SaveAndSwitchMode => {
                 self.confirm_dialog = None;
-                let Some(target) = self.pending_mode_switch.take() else {
-                    return Task::none();
+                // H1: stale early-return — mode_switch_state must be Some here,
+                // otherwise the dialog firing was a stale message; release nothing
+                // (there is nothing to release) and return.
+                // Note: do NOT take() the guard yet; it must outlive
+                // collect_window_specs and the SwitchModeSaveComplete dispatch.
+                let target = match self.mode_switch_state.as_ref() {
+                    Some((t, _)) => *t,
+                    None => return Task::none(),
                 };
                 // Collect current window specs for a proper save.
                 // IMPORTANT: must NOT re-route through SwitchModeWithSpecs here because that
@@ -4256,17 +4275,26 @@ impl Flowsurface {
             Message::SwitchModeSaveComplete { target, windows } => {
                 // Abort if save fails (plan: 保存失敗 → 切替中止).
                 if !self.save_state_to_disk(&windows) {
-                    self._mode_switch_guard = None;
+                    self.mode_switch_state = None;
                     self.notifications.push(Toast::error(
                         "保存に失敗しました。モード切替を中止します。".to_string(),
                     ));
+                    // M5: also surface a modal alert so the failure is not missed
+                    // when toasts auto-dismiss.
+                    let dialog = screen::ConfirmDialog::new(
+                        "保存に失敗したためモード切替を中止しました。\nディスクの空き容量・権限を確認してください。"
+                            .to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
                 return self.restart_with_mode(target);
             }
             // F7: ReplayStopped event received — proceed with restart_with_mode
             Message::ModeSwitchStopAcked => {
-                let Some(target) = self.pending_mode_switch.take() else {
+                let Some((target, _guard)) = self.mode_switch_state.take() else {
                     // Stale event (e.g. timeout already handled it) — ignore
                     return Task::none();
                 };
@@ -4274,7 +4302,8 @@ impl Flowsurface {
             }
             // F7: 5-second StopReplay timeout — send ForceStopReplay fallback
             Message::ModeSwitchStopTimeout => {
-                if self.pending_mode_switch.is_none() {
+                log::warn!("[F7] StopReplay timed out — sending ForceStopReplay fallback");
+                if self.mode_switch_state.is_none() {
                     // Already handled (ReplayStopped arrived before timeout) — ignore
                     return Task::none();
                 };
@@ -4299,8 +4328,7 @@ impl Flowsurface {
                     return Task::batch([force_task, timeout_task]);
                 } else {
                     // No connection — release guard and show error dialog
-                    self.pending_mode_switch = None;
-                    self._mode_switch_guard = None;
+                    self.mode_switch_state = None;
                     let dialog = screen::ConfirmDialog::new(
                         "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
@@ -4312,11 +4340,11 @@ impl Flowsurface {
             }
             // F7: ForceStopReplay also timed out — release guard and show error
             Message::ModeSwitchForceStopTimeout => {
-                if self.pending_mode_switch.take().is_none() {
+                log::warn!("[F7] ForceStopReplay also timed out — aborting mode switch");
+                if self.mode_switch_state.take().is_none() {
                     // Already handled (ReplayStopped arrived before timeout) — ignore
                     return Task::none();
                 }
-                self._mode_switch_guard = None;
                 let dialog = screen::ConfirmDialog::new(
                     "モード切替に失敗しました。\nエンジンが応答しません。".to_string(),
                     Box::new(Message::ToggleDialogModal(None)),
@@ -4327,10 +4355,9 @@ impl Flowsurface {
             }
             // F7: send() returned Err — socket is broken; abort mode switch immediately without
             // waiting for the 5-second (StopReplay) or 2-second (ForceStopReplay) timeout.
-            // Stale timeout messages that fire later are ignored because pending_mode_switch is None.
+            // Stale timeout messages that fire later are ignored because mode_switch_state is None.
             Message::ModeSwitchSendFailed => {
-                if self.pending_mode_switch.take().is_some() {
-                    self._mode_switch_guard = None;
+                if self.mode_switch_state.take().is_some() {
                     let dialog = screen::ConfirmDialog::new(
                         "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
@@ -4343,10 +4370,9 @@ impl Flowsurface {
             // F7: EngineBusy for StopReplay/ForceStopReplay — abort mode switch immediately.
             // This handles the 5-axis matrix row "replay→live, EngineBusy" without waiting
             // for the 5s timeout. The stale ModeSwitchStopTimeout fires later but is ignored
-            // because pending_mode_switch will be None at that point.
+            // because mode_switch_state will be None at that point.
             Message::ModeSwitchEngineBusy(reason) => {
-                if self.pending_mode_switch.take().is_some() {
-                    self._mode_switch_guard = None;
+                if self.mode_switch_state.take().is_some() {
                     let dialog = screen::ConfirmDialog::new(
                         format!("モード切替を中止しました。\nエンジンがビジー状態です: {reason}"),
                         Box::new(Message::ToggleDialogModal(None)),
@@ -4675,8 +4701,7 @@ impl Flowsurface {
                     // F7: release mode-switch guard when the dirty-confirm dialog is
                     // dismissed via backdrop click (ToggleDialogModal(None)), so the
                     // next SwitchMode attempt is not permanently blocked.
-                    self.pending_mode_switch = None;
-                    self._mode_switch_guard = None;
+                    self.mode_switch_state = None;
                 }
                 self.confirm_dialog = dialog;
             }
@@ -6223,9 +6248,10 @@ impl Flowsurface {
             .unwrap_or(false) // replay mode: build_state_json returns None → treat as clean (replay never saves)
     }
 
-    /// F7: set APP_MODE to `mode` then restart. The `_mode_switch_guard` in `self`
-    /// is automatically dropped when `*self = new_state` runs inside `restart()`,
-    /// which resets `MODE_SWITCHING` to false.
+    /// F7: set APP_MODE to `mode` then restart. The `mode_switch_state` tuple
+    /// (containing the `ModeSwitchGuard`) in `self` is automatically dropped
+    /// when `*self = new_state` runs inside `restart()`, which resets
+    /// `MODE_SWITCHING` to false.
     fn restart_with_mode(&mut self, mode: engine_client::dto::AppMode) -> Task<Message> {
         set_app_mode(mode);
         self.restart()

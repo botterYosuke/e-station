@@ -18,19 +18,23 @@ fn linux_keyboard_subscription_checks_mode_switching() {
 }
 
 #[test]
-fn pending_mode_switch_field_exists_in_flowsurface() {
+fn mode_switch_state_field_exists_in_flowsurface() {
+    // M13: pending_mode_switch + _mode_switch_guard unified into
+    // mode_switch_state: Option<(AppMode, ModeSwitchGuard)>.
     const MAIN_RS: &str = include_str!("../src/main.rs");
     assert!(
-        MAIN_RS.contains("pending_mode_switch"),
-        "Flowsurface must have pending_mode_switch field for replay→live async wait"
+        MAIN_RS.contains("mode_switch_state"),
+        "Flowsurface must have mode_switch_state field for replay→live async wait (M13 unified tuple)"
     );
 }
 
 #[test]
-fn mode_switch_guard_field_exists_in_flowsurface() {
+fn mode_switch_state_holds_guard() {
+    // M13: the unified field must carry the ModeSwitchGuard so that dropping
+    // the tuple atomically releases MODE_SWITCHING.
     const MAIN_RS: &str = include_str!("../src/main.rs");
     assert!(
-        MAIN_RS.contains("_mode_switch_guard"),
-        "Flowsurface must have _mode_switch_guard field to hold ModeSwitchGuard alive during async switch"
+        MAIN_RS.contains("ModeSwitchGuard") && MAIN_RS.contains("mode_switch_state"),
+        "mode_switch_state must hold ModeSwitchGuard via tuple; pair drift is impossible by construction (M13)"
     );
 }

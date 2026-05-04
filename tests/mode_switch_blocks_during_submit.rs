@@ -59,7 +59,7 @@ fn submit_in_flight_check_precedes_wal_check() {
     let handler_start = src
         .find("Action::SwitchMode(target)")
         .expect("Action::SwitchMode handler must exist");
-    let handler_body = safe_slice(&src[handler_start..], 2000);
+    let handler_body = safe_slice(&src[handler_start..], 4000);
 
     let submit_pos = handler_body
         .find("SUBMIT_IN_FLIGHT")
@@ -71,6 +71,23 @@ fn submit_in_flight_check_precedes_wal_check() {
         submit_pos < wal_pos,
         "SUBMIT_IN_FLIGHT check must appear before WAL in-flight check \
          (lock order: MODE_SWITCHING → SUBMIT_IN_FLIGHT → APP_MODE → CURRENT_PATH)"
+    );
+}
+
+#[test]
+fn mode_switch_error_has_submit_in_flight_variant() {
+    let src = read_main();
+    assert!(
+        src.contains("SubmitInFlight"),
+        "ModeSwitchError must declare a `SubmitInFlight` variant (M1 / 統一決定 68)"
+    );
+    let pos = src
+        .find("pub enum ModeSwitchError")
+        .expect("ModeSwitchError enum must exist");
+    let body = safe_slice(&src[pos..], 1000);
+    assert!(
+        body.contains("SubmitInFlight"),
+        "SubmitInFlight must be a variant of ModeSwitchError, not stringly-typed"
     );
 }
 
