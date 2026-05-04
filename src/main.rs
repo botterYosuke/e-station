@@ -127,19 +127,11 @@ fn set_app_mode(mode: engine_client::dto::AppMode) {
 /// F7: check if tachibana_orders.jsonl has any in-flight (submitted/partial) orders.
 /// Reads the WAL tail-first (reverse scan), same algorithm as python/engine/wal_in_flight.py.
 /// Returns true if any order has latest status "submitted" or "partial".
+///
+/// Uses `engine_client::process::engine_cache_dir()` — the same path Rust sends to Python
+/// via the stdin payload — so both sides always agree on the WAL location.
 fn has_wal_in_flight_orders() -> bool {
-    let wal_path = match std::env::var("HOME")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var("USERPROFILE").ok().map(std::path::PathBuf::from))
-    {
-        Some(home) => home
-            .join(".cache")
-            .join("flowsurface")
-            .join("engine")
-            .join("tachibana_orders.jsonl"),
-        None => return false,
-    };
+    let wal_path = engine_client::process::engine_cache_dir().join("tachibana_orders.jsonl");
     let Ok(content) = std::fs::read_to_string(&wal_path) else {
         return false;
     };
@@ -823,6 +815,10 @@ struct Flowsurface {
     /// F7: holds the MODE_SWITCHING guard alive until restart_with_mode() completes.
     /// Dropped automatically when `*self = new_state` runs in restart().
     _mode_switch_guard: Option<ModeSwitchGuard>,
+    /// F8: Linux widget menu bar open/close state (DoD-12).
+    /// Only compiled on Linux; Win/macOS use the muda OS-native menu.
+    #[cfg(target_os = "linux")]
+    menu_bar: crate::menu_bar_state::State,
 }
 
 #[derive(Debug, Clone)]
@@ -989,6 +985,10 @@ enum Message {
     NativeMenuSetup(u64),
     /// Native OS menu bar: user selected a menu item.
     NativeMenuAction(native_menu::Action),
+    /// F8: Linux widget menu bar message (toggle/pick/dismiss).
+    /// On Win/macOS this variant is never constructed; muda drives NativeMenuAction instead.
+    #[cfg(target_os = "linux")]
+    MenuBar(crate::menu_bar_state::BarMessage),
     /// Native OS menu bar — Save As: user picked a destination path.
     NativeSaveAsPath(Option<std::path::PathBuf>),
     /// Native OS menu bar — Save As: window specs collected, ready to write.
@@ -1558,6 +1558,8 @@ impl Flowsurface {
             pending_open_file: None,
             pending_mode_switch: None,
             _mode_switch_guard: None,
+            #[cfg(target_os = "linux")]
+            menu_bar: crate::menu_bar_state::State::default(),
         };
 
         if let Some(err) = audio_init_err {
@@ -2146,8 +2148,9 @@ impl Flowsurface {
                     && let Err(e) = std::fs::write(p, json.as_bytes())
                 {
                     log_save_error(&SaveError::IoError(e.kind()), p);
-                    self.notifications
-                        .push(Toast::error("保存に失敗しました。再試行してください。".to_string()));
+                    self.notifications.push(Toast::error(
+                        "保存に失敗しました。再試行してください。".to_string(),
+                    ));
                     self.pending_exit_windows = Some(windows);
                     let dialog = screen::ConfirmDialog::new(
                         "未保存の変更があります。".to_string(),
@@ -2168,8 +2171,9 @@ impl Flowsurface {
                     return iced::exit();
                 }
 
-                self.notifications
-                    .push(Toast::error("保存に失敗しました。再試行してください。".to_string()));
+                self.notifications.push(Toast::error(
+                    "保存に失敗しました。再試行してください。".to_string(),
+                ));
                 self.pending_exit_windows = Some(windows);
                 let dialog = screen::ConfirmDialog::new(
                     "未保存の変更があります。".to_string(),
@@ -2874,6 +2878,21 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
+            // ── Linux widget menu bar ──────────────────────────────────────
+            #[cfg(target_os = "linux")]
+            Message::MenuBar(bar_msg) => {
+                use crate::menu_bar_state;
+                let native = if let menu_bar_state::BarMessage::Pick(ref action) = bar_msg {
+                    crate::widget_menu_bar::to_native_action(action)
+                } else {
+                    None
+                };
+                self.menu_bar = menu_bar_state::update(self.menu_bar.clone(), bar_msg);
+                if let Some(native_action) = native {
+                    return Task::done(Message::NativeMenuAction(native_action));
+                }
+                return Task::none();
+            }
             // ── Native OS menu bar ──────────────────────────────────────────
             Message::NativeMenuSetup(raw_id) => {
                 native_menu::attach(raw_id, app_mode());
@@ -2972,6 +2991,10 @@ impl Flowsurface {
                     }
                     Action::SwitchMode(target) => {
                         use engine_client::dto::AppMode;
+                        // Guard: don't start a mode switch if another dialog is already showing
+                        if self.confirm_dialog.is_some() {
+                            return Task::none();
+                        }
                         let current = app_mode();
                         // Same mode — no-op (menu item should be disabled, but be defensive)
                         if current == target {
@@ -3041,10 +3064,8 @@ impl Flowsurface {
                                     // 5-second timeout
                                     let timeout_task = Task::perform(
                                         async {
-                                            tokio::time::sleep(
-                                                std::time::Duration::from_secs(5),
-                                            )
-                                            .await;
+                                            tokio::time::sleep(std::time::Duration::from_secs(5))
+                                                .await;
                                         },
                                         |_| Message::ModeSwitchStopTimeout,
                                     );
@@ -3491,10 +3512,7 @@ impl Flowsurface {
                         Box::new(Message::DiscardAndSwitchMode),
                     )
                     .with_confirm_btn_text("破棄してモード切替".to_string())
-                    .with_save_action(
-                        Message::SaveAndSwitchMode,
-                        "保存してモード切替".to_string(),
-                    );
+                    .with_save_action(Message::SaveAndSwitchMode, "保存してモード切替".to_string());
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
@@ -3578,9 +3596,15 @@ impl Flowsurface {
                     );
                     return Task::batch([force_task, timeout_task]);
                 } else {
-                    // No connection — release guard and give up
+                    // No connection — release guard and show error dialog
                     self.pending_mode_switch = None;
                     self._mode_switch_guard = None;
+                    let dialog = screen::ConfirmDialog::new(
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
             }
@@ -4333,6 +4357,13 @@ impl Flowsurface {
             });
 
             let mut base = column![header_title];
+            #[cfg(target_os = "linux")]
+            {
+                let menu_bar_view =
+                    crate::widget_menu_bar::view(&self.menu_bar, &app_mode())
+                        .map(Message::MenuBar);
+                base = base.push(menu_bar_view);
+            }
             if let Some(banner) = banner {
                 base = base.push(container(banner).padding(padding::all(8)));
             }
@@ -5464,9 +5495,7 @@ mod native_menu_handler_tests {
             .expect("guard marker must be inside NativeOpenFilePendingCheck handler");
         // Extract until the next top-level handler arm.
         let tail = &MAIN_RS[arm_pos..];
-        let region_end = tail
-            .find("\n            Message::")
-            .unwrap_or(tail.len());
+        let region_end = tail.find("\n            Message::").unwrap_or(tail.len());
         let body = &tail[..region_end];
         assert!(
             body.contains("confirm_dialog.is_some()"),
