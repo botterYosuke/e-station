@@ -74,6 +74,7 @@ def _make_server(mode: str = "replay"):
     # B3: state machine variables
     server._replay_state = ReplayState.IDLE
     server._live_state = LiveState.DISCONNECTED
+    server._event_task = None
     return server
 
 
@@ -255,14 +256,28 @@ class TestLiveStateBusy:
         assert busy[0]["current_state"] == "DISCONNECTED"
 
     @pytest.mark.asyncio
-    async def test_login_busy_when_connected(self) -> None:
-        """Connected 中の RequestVenueLogin が EngineBusy を返す。"""
+    async def test_login_from_connected_triggers_relogin(self, monkeypatch) -> None:
+        """CONNECTED 中の RequestVenueLogin は EngineBusy ではなく
+        「明示的な再ログイン」として CONNECTING へ遷移する (2026-05-04)。
+
+        Rust 側 FSM (`venue_state.rs`) が Ready からの再ログインを許可する
+        ため、Python 側もそれに合わせる。
+        """
         from engine.server import LiveState
 
         server = _make_server(mode="live")
         server._live_state = LiveState.CONNECTED
         server._tachibana_login_inflight = asyncio.Lock()
         server._config_dir = Path("/tmp/test-config")
+        server._tachibana_session = object()
+
+        async def _fake_startup(request_id=None):  # noqa: ARG001
+            return None
+
+        monkeypatch.setattr(server, "_startup_tachibana", _fake_startup)
+        monkeypatch.setattr(
+            "engine.server.tachibana_clear_session", lambda _cache_dir: None
+        )
 
         msg = {
             "op": "RequestVenueLogin",
@@ -272,9 +287,9 @@ class TestLiveStateBusy:
         await server._do_request_venue_login(msg)
 
         busy = _busy_events(server)
-        assert len(busy) == 1, f"Expected 1 EngineBusy, got {busy}"
-        assert busy[0]["attempted_command"] == "RequestVenueLogin"
-        assert busy[0]["current_state"] == "CONNECTED"
+        assert len(busy) == 0, f"再ログインで EngineBusy を返してはならない: {busy}"
+        assert server._live_state == LiveState.CONNECTING
+        assert server._tachibana_session is None
 
     @pytest.mark.asyncio
     async def test_login_connecting_returns_venue_login_started(self) -> None:
@@ -339,20 +354,27 @@ class TestReplayStateHappyPath:
         from engine.server import LiveState
 
         server = _make_server(mode="live")
-        server._live_state = LiveState.CONNECTED
-
-        # CONNECTED 状態では DISCONNECTED が必要な RequestVenueLogin が reject される
-        server._tachibana_login_inflight = asyncio.Lock()
-        server._config_dir = Path("/tmp/test-config")
+        # DISCONNECTED 状態では CONNECTED が必要な SubmitOrder が reject される
+        assert server._live_state == LiveState.DISCONNECTED
 
         msg = {
-            "op": "RequestVenueLogin",
+            "op": "SubmitOrder",
             "request_id": "req-state-check",
             "venue": "tachibana",
+            "order": {
+                "client_order_id": "cid-state-001",
+                "instrument_id": "6758.TSE",
+                "order_side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "10",
+                "time_in_force": "DAY",
+                "post_only": False,
+                "reduce_only": False,
+            },
         }
-        await server._do_request_venue_login(msg)
+        await server._do_submit_order_inner(msg)
 
         busy = _busy_events(server)
         assert len(busy) == 1
-        assert "CONNECTED" in busy[0]["current_state"]
-        assert "DISCONNECTED" in busy[0]["reason"]
+        assert "DISCONNECTED" in busy[0]["current_state"]
+        assert "CONNECTED" in busy[0]["reason"]

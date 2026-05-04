@@ -2579,14 +2579,32 @@ class DataEngineServer:
             return
 
         # H-TA1: CONNECTING 中の RequestVenueLogin は「ログイン中」として VenueLoginStarted を返す。
-        # CONNECTED の場合は EngineBusy を返す。DISCONNECTED のみ新規ログイン開始。
         if self._live_state == LiveState.CONNECTING:
             log.info("RequestVenueLogin: login already in-progress (CONNECTING), re-emitting VenueLoginStarted")
             self._emit({"event": "VenueLoginStarted", "venue": "tachibana", "request_id": request_id})
             return
 
-        # B3: RequestVenueLogin は Live::DISCONNECTED または CONNECTING 状態のみ受理する。
-        # CONNECTED（既にログイン済み）の場合は EngineBusy を返す。
+        # CONNECTED 中の RequestVenueLogin は「ユーザーが明示的に再ログイン要求」とみなして
+        # 既存セッションをクリアし DISCONNECTED に戻してから通常フローへ進む。
+        # Rust 側 FSM (`venue_state.rs::try_claim_login_in_flight_succeeds_from_ready`) が
+        # Ready からの再ログインを許可しているため、ここで弾くと UI と齟齬が出る (2026-05-04)。
+        #
+        # Bug X (docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md):
+        # 旧 EVENT WS ループ (`_event_task`) もここで cancel する。新ログインが
+        # 失敗・キャンセルされると `_startup_tachibana` の終端 (2454-2455) を
+        # 通らず、旧セッション URL から EC 約定通知を受け続けるゴースト状態が
+        # 残るため。新ログイン成功時は `_startup_tachibana` が新タスクを建て
+        # 直すので await は不要。
+        if self._live_state == LiveState.CONNECTED:
+            log.info(
+                "RequestVenueLogin: re-login requested while CONNECTED — "
+                "clearing session and cancelling old EVENT loop"
+            )
+            self._live_state = LiveState.DISCONNECTED
+            if self._event_task is not None and not self._event_task.done():
+                self._event_task.cancel()
+
+        # B3: 上記の救済を経た上で DISCONNECTED であることを保証する。
         if not self._check_live_state("RequestVenueLogin", LiveState.DISCONNECTED, ws=ws):
             return
 
