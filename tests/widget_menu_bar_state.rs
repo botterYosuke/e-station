@@ -44,6 +44,10 @@ fn state_struct_exists() {
         src.contains("pub open: Option<TopMenu>"),
         "State must have `pub open: Option<TopMenu>` field"
     );
+    assert!(
+        src.contains("anchor_y"),
+        "State must have `anchor_y` field for dynamic dropdown positioning (HIGH: fixed-pixel fix)"
+    );
 }
 
 #[test]
@@ -76,6 +80,10 @@ fn bar_message_enum_has_toggle_pick_dismiss() {
     assert!(
         src.contains("Dismiss"),
         "BarMessage must have Dismiss variant"
+    );
+    assert!(
+        src.contains("BarMoved("),
+        "BarMessage must have BarMoved(u32) variant for dynamic dropdown positioning (HIGH: fixed-pixel fix)"
     );
 }
 
@@ -231,6 +239,46 @@ fn with_dropdown_overlay_function_exists() {
         src.contains("BarMessage::Dismiss"),
         "with_dropdown_overlay must send BarMessage::Dismiss on outside click via mouse_area"
     );
+    // The overlay column must start with a plain Space (click-through for buttons),
+    // followed by the dismiss area. Pattern: `let overlay = column![Space::new(...), dismiss_area]`.
+    // Find the overlay column declaration and verify Space comes before the dismiss element.
+    let overlay_col_start = src
+        .find("let overlay = column!")
+        .expect("overlay must be built as `let overlay = column![...]` for button-row click-through");
+    let after_col = &src[overlay_col_start..];
+    let col_end = after_col.find("];").unwrap_or(after_col.len());
+    let col_body = &after_col[..col_end];
+    let space_pos = col_body
+        .find("Space::new")
+        .expect("overlay column must start with Space::new (button-row click-through area)");
+    let dismiss_pos = col_body
+        .find("dismiss_area")
+        .expect("overlay column must contain dismiss_area after the Space");
+    assert!(
+        space_pos < dismiss_pos,
+        "Space::new must appear BEFORE dismiss_area in the overlay column — \
+         the spacer lets button-row clicks pass through to base layer (HIGH: click-through)"
+    );
+}
+
+#[test]
+fn dropdown_disabled_items_use_tooltip() {
+    let src = read_widget_menu_bar();
+    // Disabled items must be wrapped with tooltip() so the reason is visible on hover
+    assert!(
+        src.contains("tooltip(") || src.contains("iced::widget::tooltip("),
+        "build_dropdown must wrap disabled items with tooltip() to show the reason (MEDIUM: tooltip visibility)"
+    );
+    // The tooltip must use the entry's tooltip text (tip or tip_text)
+    assert!(
+        src.contains("tip_text") || src.contains("tip"),
+        "tooltip must be populated from MenuEntry::tooltip — not hardcoded"
+    );
+    // Tooltip must only apply to DISABLED items (not enabled ones)
+    assert!(
+        src.contains("!enabled") || src.contains("if !enabled"),
+        "tooltip wrapper must only apply when the item is disabled"
+    );
 }
 
 #[test]
@@ -245,10 +293,45 @@ fn to_native_action_function_exists() {
         src.contains("N::OpenFile") || src.contains("native_menu::Action::OpenFile"),
         "to_native_action must map Action::Open to native_menu::Action::OpenFile"
     );
-    // ReplayStop has no native equivalent — must return None
+    // ReplayStop must NOT return None — it maps to SwitchMode(Live) so the item is functional
     assert!(
         src.contains("Action::ReplayStop"),
-        "to_native_action must explicitly handle Action::ReplayStop (returns None — no muda equivalent)"
+        "to_native_action must explicitly handle Action::ReplayStop"
+    );
+    assert!(
+        !src.contains("Action::ReplayStop => None"),
+        "Action::ReplayStop must NOT return None — dead menu items are HIGH severity (maps to SwitchMode(Live))"
+    );
+}
+
+#[test]
+fn esc_dismiss_is_wired_in_go_back_handler() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let src = std::fs::read_to_string(path)
+        .expect("failed to read src/main.rs")
+        .replace("\r\n", "\n");
+    // The GoBack handler must dismiss the Linux menu bar (cfg-gated)
+    let go_back_start = src
+        .find("Message::GoBack =>")
+        .expect("Message::GoBack handler must exist in main.rs");
+    let after = &src[go_back_start..];
+    let end = after
+        .find("\n            Message::")
+        .unwrap_or(after.len());
+    let body = &after[..end];
+    assert!(
+        body.contains("menu_bar") && body.contains("BarMessage::Dismiss"),
+        "GoBack handler must dismiss self.menu_bar via BarMessage::Dismiss on Linux (Esc key dismiss — DoD-2)"
+    );
+}
+
+#[test]
+fn focus_lost_dismiss_subscription_exists() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let src = std::fs::read_to_string(path).expect("failed to read src/main.rs");
+    assert!(
+        src.contains("window::Event::Unfocused") || src.contains("iced::window::Event::Unfocused"),
+        "subscription() must handle window Unfocused event to dismiss the Linux menu bar (DoD-3 focus-lost)"
     );
 }
 

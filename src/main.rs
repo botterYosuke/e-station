@@ -19,6 +19,7 @@ mod style;
 mod venue_state;
 mod version;
 mod wandb_auth;
+mod wandb_submit_proc;
 mod widget;
 #[cfg(target_os = "linux")]
 mod widget_menu_bar;
@@ -231,6 +232,66 @@ async fn submit_wandb_run(
     } else {
         let code = output.status.code().unwrap_or(-1);
         Err(exit_code_to_error(code))
+    }
+}
+
+/// `wandb login --relogin` を stdin pipe 経由で API キーを渡して実行する。
+/// argv に API キーを渡さない（プロセスリスト・シェル履歴への漏洩防止）。
+async fn wandb_login(api_key: String) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::process::Command;
+
+    let mut child = Command::new("uv")
+        .args(["run", "--with", "wandb", "wandb", "login", "--relogin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn failed: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(api_key.as_bytes()).await;
+        let _ = stdin.write_all(b"\n").await;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("wait failed: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() {
+            format!("exit code {:?}", output.status.code())
+        } else {
+            stderr
+        })
+    }
+}
+
+/// `wandb logout` を実行して netrc エントリを削除する。
+async fn wandb_logout() -> Result<(), String> {
+    use tokio::process::Command;
+
+    let output = Command::new("uv")
+        .args(["run", "--with", "wandb", "wandb", "logout"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("spawn failed: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() {
+            format!("exit code {:?}", output.status.code())
+        } else {
+            stderr
+        })
     }
 }
 
@@ -896,6 +957,8 @@ struct Flowsurface {
     /// P9: local run-buffer index. Populated by run-buffer directory scan.
     /// Drives "Submit to W&B" enabled state (needs at least one completed run).
     run_buffer: wandb_auth::RunBufferIndex,
+    /// F9c: W&B サインインモーダル。SignInWandb で Some に、Cancel / ログイン完了で None。
+    wandb_signin_modal: Option<modal::wandb_signin::WandbSignInModal>,
 }
 
 #[derive(Debug, Clone)]
@@ -1156,6 +1219,16 @@ enum Message {
     /// F9d: `examples/wandb/check_auth.py` subprocess の完了通知。
     /// `WandbAuthState` を受け取ってメニュー状態を更新する。
     WandbAuthRefreshed(wandb_auth::WandbAuthState),
+    /// F9c: W&B サインインモーダル内部メッセージ。
+    WandbSignInMsg(modal::wandb_signin::Message),
+    /// F9c: `wandb login --relogin` subprocess の完了通知。
+    WandbLoginResult(Result<(), String>),
+    /// F9c: ログアウト確認ダイアログで「ログアウト」が押された。
+    WandbLogoutConfirmed,
+    /// F9c: `wandb logout` subprocess の完了通知。
+    WandbLogoutResult(Result<(), String>),
+    /// F9e: バッファ削除確認後の実行。
+    ClearRunBufferConfirmed,
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1648,6 +1721,7 @@ impl Flowsurface {
             menu_bar: crate::menu_bar_state::State::default(),
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
             run_buffer: wandb_auth::RunBufferIndex::empty(),
+            wandb_signin_modal: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -2308,6 +2382,10 @@ impl Flowsurface {
 
                 #[cfg(target_os = "linux")]
                 if self.menu_bar.open.is_some() {
+                    log::debug!(
+                        "widget_menu_bar: dismiss reason=esc open={:?}",
+                        self.menu_bar.open
+                    );
                     self.menu_bar = crate::menu_bar_state::update(
                         self.menu_bar.clone(),
                         crate::menu_bar_state::BarMessage::Dismiss,
@@ -2316,6 +2394,28 @@ impl Flowsurface {
                 }
 
                 if self.confirm_dialog.is_some() {
+                    // F5/M: if we're dismissing the overwrite confirm during a save-then-open
+                    // flow, restore the dirty-confirm so the user can retry or discard instead
+                    // of silently losing the pending open target.
+                    if self
+                        .confirm_dialog
+                        .as_ref()
+                        .is_some_and(|d| d.on_save.is_none())
+                        && self.pending_open_file.is_some()
+                    {
+                        self.confirm_dialog = Some(
+                            screen::ConfirmDialog::new(
+                                "未保存の変更があります。".to_string(),
+                                Box::new(Message::DiscardAndOpenFile),
+                            )
+                            .with_confirm_btn_text("破棄して開く".to_string())
+                            .with_save_action(
+                                Message::SaveAndOpenFile,
+                                "保存して開く".to_string(),
+                            ),
+                        );
+                        return Task::none();
+                    }
                     self.confirm_dialog = None;
                     self.pending_open_file = None;
                     self.pending_exit_windows = None;
@@ -2990,12 +3090,24 @@ impl Flowsurface {
             // ── Linux widget menu bar ──────────────────────────────────────
             #[cfg(target_os = "linux")]
             Message::MenuBar(bar_msg) => {
-                use crate::menu_bar_state;
-                let native = if let menu_bar_state::BarMessage::Pick(ref action) = bar_msg {
+                use crate::menu_bar_state::{self, BarMessage};
+                let native = if let BarMessage::Pick(ref action) = bar_msg {
                     crate::widget_menu_bar::to_native_action(action)
                 } else {
                     None
                 };
+                match &bar_msg {
+                    BarMessage::Toggle(top) if self.menu_bar.open != Some(*top) => {
+                        log::debug!("widget_menu_bar: open={top:?}");
+                    }
+                    BarMessage::Dismiss => {
+                        log::debug!(
+                            "widget_menu_bar: dismiss reason=focus_lost_or_outside_click open={:?}",
+                            self.menu_bar.open
+                        );
+                    }
+                    _ => {}
+                }
                 self.menu_bar = menu_bar_state::update(self.menu_bar.clone(), bar_msg);
                 if let Some(native_action) = native {
                     return Task::done(Message::NativeMenuAction(native_action));
@@ -3133,23 +3245,52 @@ impl Flowsurface {
                         );
                     }
                     Action::SignInWandb => {
-                        // F9d で実装: W&B サインインダイアログ
-                        log::info!("SignInWandb: stub (F9d)");
+                        if self.wandb_signin_modal.is_none() {
+                            self.wandb_signin_modal =
+                                Some(modal::wandb_signin::WandbSignInModal::new());
+                        }
                         return Task::none();
                     }
                     Action::SignOutWandb => {
-                        // F9d で実装: netrc / env var 削除
-                        log::info!("SignOutWandb: stub (F9d)");
+                        if self.confirm_dialog.is_none() {
+                            let dialog = screen::ConfirmDialog::new(
+                                "W&B からログアウトします。\nnetrc のエントリが削除されます。"
+                                    .to_string(),
+                                Box::new(Message::WandbLogoutConfirmed),
+                            )
+                            .with_confirm_btn_text("ログアウト".to_string());
+                            self.confirm_dialog = Some(dialog);
+                        }
                         return Task::none();
                     }
                     Action::OpenSubmissionLog => {
-                        // F9e で実装: 送信ログ UI
-                        log::info!("OpenSubmissionLog: stub (F9e)");
+                        // F9e V1: 最新 run-buffer の内容をトーストで表示
+                        let base = data::data_path(Some("run-buffer"));
+                        let idx = wandb_auth::RunBufferIndex::scan(&base);
+                        if let Some(ref latest) = idx.latest_completed {
+                            self.notifications.push(Toast::info(format!(
+                                "最新 run: {latest} (completed runs: {})",
+                                idx.total
+                            )));
+                        } else {
+                            self.notifications
+                                .push(Toast::info("送信履歴がまだありません".to_string()));
+                        }
                         return Task::none();
                     }
                     Action::ClearRunBuffer => {
-                        // F9e で実装: バッファ削除
-                        log::info!("ClearRunBuffer: stub (F9e)");
+                        if self.confirm_dialog.is_none() {
+                            let base = data::data_path(Some("run-buffer"));
+                            let dialog = screen::ConfirmDialog::new(
+                                format!(
+                                    "run-buffer を削除しますか？\nパス: {}",
+                                    base.display()
+                                ),
+                                Box::new(Message::ClearRunBufferConfirmed),
+                            )
+                            .with_confirm_btn_text("削除".to_string());
+                            self.confirm_dialog = Some(dialog);
+                        }
                         return Task::none();
                     }
                     Action::SwitchMode(target) => {
@@ -3508,6 +3649,23 @@ impl Flowsurface {
                         log_save_error(&SaveError::IoError(kind), &user_path);
                         self.notifications
                             .push(Toast::error("保存に失敗しました".to_string()));
+                        // If SaveAndOpenFile triggered this save (CURRENT_PATH=None path),
+                        // pending_open_file is still set but confirm_dialog is None.
+                        // Restore the dialog so the user can retry or discard; without this
+                        // the next Open skips F4 because pending_open_file.is_some() blocks
+                        // the dirty-check condition at NativeOpenFilePendingCheck.
+                        if self.pending_open_file.is_some() {
+                            let dialog = screen::ConfirmDialog::new(
+                                "未保存の変更があります。".to_string(),
+                                Box::new(Message::DiscardAndOpenFile),
+                            )
+                            .with_confirm_btn_text("破棄して開く".to_string())
+                            .with_save_action(
+                                Message::SaveAndOpenFile,
+                                "保存して開く".to_string(),
+                            );
+                            self.confirm_dialog = Some(dialog);
+                        }
                     }
                 }
                 return Task::none();
@@ -4117,6 +4275,28 @@ impl Flowsurface {
                 // Fix: when dismissing (None), clear any parked dirty-check state so
                 // a subsequent Open does not skip the confirm dialog (Issue 2 fix).
                 if dialog.is_none() {
+                    // F5/M: if we're dismissing the overwrite confirm during a save-then-open
+                    // flow, restore the dirty-confirm so the user can retry or discard instead
+                    // of silently losing the pending open target.
+                    if self
+                        .confirm_dialog
+                        .as_ref()
+                        .is_some_and(|d| d.on_save.is_none())
+                        && self.pending_open_file.is_some()
+                    {
+                        self.confirm_dialog = Some(
+                            screen::ConfirmDialog::new(
+                                "未保存の変更があります。".to_string(),
+                                Box::new(Message::DiscardAndOpenFile),
+                            )
+                            .with_confirm_btn_text("破棄して開く".to_string())
+                            .with_save_action(
+                                Message::SaveAndOpenFile,
+                                "保存して開く".to_string(),
+                            ),
+                        );
+                        return Task::none();
+                    }
                     self.pending_open_file = None;
                     self.pending_exit_windows = None;
                     // F7: release mode-switch guard when the dirty-confirm dialog is
@@ -4529,6 +4709,95 @@ impl Flowsurface {
                 self.wandb_auth = state;
                 return Task::none();
             }
+            // F9c: サインインモーダル内部メッセージ
+            Message::WandbSignInMsg(msg) => {
+                if let Some(modal) = self.wandb_signin_modal.as_mut() {
+                    match modal.update(msg) {
+                        Some(modal::wandb_signin::Action::Cancel) => {
+                            self.wandb_signin_modal = None;
+                        }
+                        Some(modal::wandb_signin::Action::OpenBrowserForKey) => {
+                            let _ = webbrowser::open("https://wandb.ai/authorize");
+                        }
+                        Some(modal::wandb_signin::Action::Login { api_key }) => {
+                            return Task::perform(
+                                async move { wandb_login(api_key).await },
+                                Message::WandbLoginResult,
+                            );
+                        }
+                        None => {}
+                    }
+                }
+                return Task::none();
+            }
+            // F9c: wandb login 完了
+            Message::WandbLoginResult(result) => {
+                if let Some(modal) = self.wandb_signin_modal.as_mut() {
+                    match result {
+                        Ok(()) => {
+                            self.wandb_signin_modal = None;
+                            self.notifications
+                                .push(Toast::info("W&B にログインしました".to_string()));
+                            // auth キャッシュを invalidate して再取得
+                            return Task::perform(
+                                wandb_auth::refresh_wandb_auth(),
+                                Message::WandbAuthRefreshed,
+                            );
+                        }
+                        Err(err) => {
+                            modal.submitting = false;
+                            modal.error = Some(format!("ログイン失敗: {err}"));
+                        }
+                    }
+                }
+                return Task::none();
+            }
+            // F9c: ログアウト確認ダイアログで確認 → 実際の subprocess を起動
+            Message::WandbLogoutConfirmed => {
+                self.confirm_dialog = None;
+                return Task::perform(
+                    async { wandb_logout().await },
+                    Message::WandbLogoutResult,
+                );
+            }
+            // F9c: wandb logout subprocess の完了通知
+            Message::WandbLogoutResult(result) => {
+                match result {
+                    Ok(()) => {
+                        self.notifications
+                            .push(Toast::info("W&B からログアウトしました".to_string()));
+                        return Task::perform(
+                            wandb_auth::refresh_wandb_auth(),
+                            Message::WandbAuthRefreshed,
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!("W&B logout failed: {err}");
+                        self.notifications
+                            .push(Toast::error(format!("W&B ログアウト失敗: {err}")));
+                    }
+                }
+                return Task::none();
+            }
+            // F9e: バッファ削除確認後
+            Message::ClearRunBufferConfirmed => {
+                self.confirm_dialog = None;
+                let base = data::data_path(Some("run-buffer"));
+                if base.exists() {
+                    match std::fs::remove_dir_all(&base) {
+                        Ok(()) => {
+                            self.run_buffer = wandb_auth::RunBufferIndex::empty();
+                            self.notifications
+                                .push(Toast::info("run-buffer を削除しました".to_string()));
+                        }
+                        Err(e) => {
+                            self.notifications
+                                .push(Toast::error(format!("削除失敗: {e}")));
+                        }
+                    }
+                }
+                return Task::none();
+            }
         }
         Task::none()
     }
@@ -4684,7 +4953,7 @@ impl Flowsurface {
             toasted
         };
 
-        if let Some(form) = &self.replay_form_modal {
+        let after_replay_form = if let Some(form) = &self.replay_form_modal {
             let form_view = form.view().map(Message::ReplayFormMsg);
             main_dialog_modal(
                 after_second_password,
@@ -4693,6 +4962,17 @@ impl Flowsurface {
             )
         } else {
             after_second_password
+        };
+
+        if let Some(signin) = &self.wandb_signin_modal {
+            let signin_view = signin.view().map(Message::WandbSignInMsg);
+            main_dialog_modal(
+                after_replay_form,
+                signin_view,
+                Message::WandbSignInMsg(modal::wandb_signin::Message::Cancel),
+            )
+        } else {
+            after_replay_form
         }
     }
 
