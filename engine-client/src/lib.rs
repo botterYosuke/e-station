@@ -28,5 +28,9 @@ pub use process::{EngineCommand, ProcessManager, PythonProcess, SubscriptionKey}
 pub use venue_caps::VenueCapsStore;
 
 /// IPC schema version — must match the Python engine's `SCHEMA_MAJOR`/`SCHEMA_MINOR`.
+///
+/// SCHEMA_MINOR 履歴（時系列順、M13 レビュー反映 2026-05-04 ラウンド1）:
+///   - 10: F6 SCENARIO 定数 IPC（LoadStrategyScenario / SaveStrategyScenario / 関連 events）
+///   - 11: F7 モード切替 (StopReplay / ForceStopReplay / ReplayStopped)
 pub const SCHEMA_MAJOR: u16 = 3;
 pub const SCHEMA_MINOR: u16 = 11;
