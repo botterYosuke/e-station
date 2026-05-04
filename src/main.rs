@@ -88,6 +88,11 @@ static APP_MODE: std::sync::OnceLock<engine_client::dto::AppMode> = std::sync::O
 /// Poison recovery: callers use `into_inner()` to avoid propagating panics.
 static CURRENT_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
+/// F3 DoD: `--saved-state <PATH>` — path supplied on the command line.
+/// Set once in `main()` before the Iced runtime starts; read by
+/// `Flowsurface::new()` to both select the JSON to load and prime `CURRENT_PATH`.
+static INITIAL_STATE_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 /// B4 (Phase B): global shared `VenueCaps` sidecar.
 ///
 /// Initialized in `main()` before the Iced runtime starts.
@@ -259,6 +264,11 @@ fn main() {
     APP_MODE
         .set(engine_client::dto::AppMode::from(cli_args.mode))
         .ok();
+
+    // F3 DoD: if --saved-state was given, record it for Flowsurface::new().
+    if let Some(p) = cli_args.initial_state_path {
+        INITIAL_STATE_PATH.set(p).ok();
+    }
 
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -655,9 +665,6 @@ struct Flowsurface {
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
     /// Cleared by `Message::DismissStrategyLoadError`.
     strategy_load_error: Option<String>,
-    /// Pending destination path for the "Save As" native menu action.
-    /// Set by `NativeSaveAsPath`, consumed by `NativeSaveAsWithSpecs`.
-    pending_save_path: Option<std::path::PathBuf>,
     /// F4: Byte snapshot of the last explicit save (Save/SaveAs) or auto-save.
     /// `None` = initial clean state (BC-9: treated as not dirty).
     /// Updated by `save_state_to_disk` and `NativeSaveAsWithSpecs` success path (A-7).
@@ -666,8 +673,9 @@ struct Flowsurface {
     /// Held until the user confirms "Discard and exit" or cancels the dialog.
     pending_exit_windows: Option<HashMap<window::Id, WindowSpec>>,
     /// F4: (json, path) captured when `NativeOpenFileApply` fires while dirty.
-    /// Held until the user confirms "Discard and open" or cancels the dialog.
-    pending_open_file: Option<(String, std::path::PathBuf)>,
+    /// Held until the user confirms "Discard and open" / "Save and open" or cancels the dialog.
+    /// Includes the window specs captured at dialog-show time so SaveAndOpenFile can build state JSON.
+    pending_open_file: Option<(String, std::path::PathBuf, HashMap<window::Id, WindowSpec>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -837,7 +845,11 @@ enum Message {
     /// Native OS menu bar — Save As: user picked a destination path.
     NativeSaveAsPath(Option<std::path::PathBuf>),
     /// Native OS menu bar — Save As: window specs collected, ready to write.
-    NativeSaveAsWithSpecs(HashMap<window::Id, WindowSpec>),
+    /// Carries the destination path directly so no shared slot is needed.
+    NativeSaveAsWithSpecs {
+        path: std::path::PathBuf,
+        windows: HashMap<window::Id, WindowSpec>,
+    },
     /// Native OS menu bar — Open: JSON content and the source path of the picked file.
     NativeOpenFileApply {
         json: String,
@@ -859,10 +871,17 @@ enum Message {
     ReplayFormMsg(modal::replay_form::Message),
     /// F4: dirty-check confirm — user chose "破棄して終了" (discard and exit).
     DiscardAndExit,
+    /// F4: dirty-check confirm — user chose "保存して終了" (save and exit).
+    SaveAndExit,
     /// F4: dirty-check confirm — user chose "破棄して開く" (discard and open file).
     DiscardAndOpenFile,
+    /// F4: dirty-check confirm — user chose "保存して開く" (save and open file).
+    SaveAndOpenFile,
     /// F5: Save As overwrite confirm — user confirmed overwriting the existing file.
-    ConfirmSaveAsOverwrite,
+    /// Carries the path directly to avoid the `pending_save_path` shared slot.
+    ConfirmSaveAsOverwrite {
+        path: std::path::PathBuf,
+    },
     /// H-3: async file save completion — fired by `Task::perform` in the
     /// `NativeSaveAsWithSpecs` handler once the tokio async writes finish.
     /// `error_kind = None` means both writes succeeded; `Some(kind)` means the
@@ -1236,6 +1255,17 @@ impl Flowsurface {
         let saved_state = if is_replay_mode {
             log::info!("replay mode: skipping load_saved_state (D9-load), using defaults");
             layout::SavedState::default()
+        } else if let Some(p) = INITIAL_STATE_PATH.get() {
+            // F3 DoD: --saved-state was given; load from that path and prime CURRENT_PATH.
+            let path_str = p.to_str().unwrap_or(data::SAVED_STATE_PATH);
+            log::info!("--saved-state: loading from {path_str}");
+            let state = layout::load_saved_state_from(path_str);
+            // Prime CURRENT_PATH so Ctrl+S writes back to the same file.
+            match CURRENT_PATH.lock() {
+                Ok(mut guard) => *guard = Some(p.clone()),
+                Err(poisoned) => *poisoned.into_inner() = Some(p.clone()),
+            }
+            state
         } else {
             layout::load_saved_state()
         };
@@ -1331,7 +1361,6 @@ impl Flowsurface {
             replay_strategy_file: None,
             replay_form_modal: None,
             strategy_load_error: None,
-            pending_save_path: None,
             last_saved_bytes: None,
             pending_exit_windows: None,
             pending_open_file: None,
@@ -1356,11 +1385,21 @@ impl Flowsurface {
             iced::window::raw_id::<Message>(main_window_id).map(Message::NativeMenuSetup);
         // F4 BC-9 fix: after startup collect window specs and set the dirty baseline so that
         // edits made before the first explicit Save are detected as dirty (ケース 3/4).
+        // All active windows (main + any popouts restored by load_layout) are included so
+        // that the baseline matches the full serialised state and avoids false-dirty on quit
+        // when popouts are present (MEDIUM fix).
         // Skipped in replay mode — dirty tracking is live-only.
         let set_baseline = if is_replay_mode {
             Task::none()
         } else {
-            window::collect_window_specs(vec![main_window_id], Message::SetDirtyBaseline)
+            let mut baseline_ids = state
+                .active_dashboard()
+                .popout
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            baseline_ids.push(main_window_id);
+            window::collect_window_specs(baseline_ids, Message::SetDirtyBaseline)
         };
 
         (
@@ -1865,13 +1904,14 @@ impl Flowsurface {
                     .map(|m| *m == engine_client::dto::AppMode::Live)
                     .unwrap_or(true);
                 if is_live && self.is_dirty(&windows) && self.confirm_dialog.is_none() {
-                    // Store window specs so DiscardAndExit can proceed later.
+                    // Store window specs so Discard/SaveAndExit can proceed later.
                     self.pending_exit_windows = Some(windows);
                     let dialog = screen::ConfirmDialog::new(
-                        "未保存の変更があります。\n変更を破棄して終了しますか？".to_string(),
+                        "未保存の変更があります。".to_string(),
                         Box::new(Message::DiscardAndExit),
                     )
-                    .with_confirm_btn_text("破棄して終了".to_string());
+                    .with_confirm_btn_text("破棄して終了".to_string())
+                    .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
@@ -1883,6 +1923,14 @@ impl Flowsurface {
                 // so the next launch restores the state from before the discarded edits.
                 self.confirm_dialog = None;
                 self.pending_exit_windows = None;
+                return iced::exit();
+            }
+            Message::SaveAndExit => {
+                // User chose "保存して終了" — save to auto-save path (same as a clean exit)
+                // then exit. The named document (CURRENT_PATH) is also updated if set.
+                self.confirm_dialog = None;
+                let windows = self.pending_exit_windows.take().unwrap_or_default();
+                self.save_state_to_disk(&windows);
                 return iced::exit();
             }
             Message::RestartRequested(Some(windows)) => {
@@ -1909,7 +1957,6 @@ impl Flowsurface {
 
                 if self.confirm_dialog.is_some() {
                     self.confirm_dialog = None;
-                    self.pending_save_path = None;
                     self.pending_open_file = None;
                     self.pending_exit_windows = None;
                 } else if self.sidebar.active_menu().is_some() {
@@ -2623,13 +2670,16 @@ impl Flowsurface {
                             Err(poisoned) => poisoned.into_inner().clone(),
                         };
                         if let Some(p) = path {
-                            self.pending_save_path = Some(p);
+                            // Capture path in the closure — no shared slot needed.
                             let mut active_windows: Vec<window::Id> =
                                 self.active_dashboard().popout.keys().copied().collect();
                             active_windows.push(self.main_window.id);
                             return window::collect_window_specs(
                                 active_windows,
-                                Message::NativeSaveAsWithSpecs,
+                                move |windows| Message::NativeSaveAsWithSpecs {
+                                    path: p.clone(),
+                                    windows,
+                                },
                             );
                         } else {
                             return Task::perform(
@@ -2776,29 +2826,27 @@ impl Flowsurface {
                 }
                 // F5: if the target file already exists, ask the user to confirm overwrite.
                 if path.exists() {
-                    self.pending_save_path = Some(path.clone());
                     let file_name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.display().to_string());
                     let dialog = screen::ConfirmDialog::new(
                         format!("「{file_name}」はすでに存在します。上書きしますか？"),
-                        Box::new(Message::ConfirmSaveAsOverwrite),
+                        // Carry path in the message so no shared slot is needed.
+                        Box::new(Message::ConfirmSaveAsOverwrite { path }),
                     )
                     .with_confirm_btn_text("上書き保存".to_string());
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
-                self.pending_save_path = Some(path);
                 let mut active_windows: Vec<window::Id> =
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
-                return window::collect_window_specs(
-                    active_windows,
-                    Message::NativeSaveAsWithSpecs,
-                );
+                return window::collect_window_specs(active_windows, move |windows| {
+                    Message::NativeSaveAsWithSpecs { path: path.clone(), windows }
+                });
             }
-            Message::ConfirmSaveAsOverwrite => {
+            Message::ConfirmSaveAsOverwrite { path } => {
                 // M-3: guard against arriving without an open dialog (race condition).
                 // Mirrors the confirm_dialog.is_none() pattern used in NativeOpenFilePendingCheck
                 // and ExitRequested to prevent double-processing.
@@ -2806,22 +2854,18 @@ impl Flowsurface {
                     return Task::none();
                 }
                 self.confirm_dialog = None;
-                // pending_save_path was set in NativeSaveAsPath; proceed to collect specs.
+                // Proceed to collect specs with the path carried in the message.
                 let mut active_windows: Vec<window::Id> =
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
-                return window::collect_window_specs(
-                    active_windows,
-                    Message::NativeSaveAsWithSpecs,
-                );
+                return window::collect_window_specs(active_windows, move |windows| {
+                    Message::NativeSaveAsWithSpecs { path: path.clone(), windows }
+                });
             }
             Message::NativeSaveAsPath(None) => {
                 return Task::none();
             }
-            Message::NativeSaveAsWithSpecs(windows) => {
-                let Some(path) = self.pending_save_path.take() else {
-                    return Task::none();
-                };
+            Message::NativeSaveAsWithSpecs { path, windows } => {
                 // H-5: build JSON once and reuse for both the user path and saved-state.json,
                 // avoiding a second build_state_json call inside save_state_to_disk.
                 let Some(json) = self.build_state_json(&windows) else {
@@ -2935,13 +2979,14 @@ impl Flowsurface {
                     && self.pending_open_file.is_none()
                     && self.confirm_dialog.is_none()
                 {
-                    self.pending_open_file = Some((json, path));
+                    // Store windows so SaveAndOpenFile can build state JSON for the named doc.
+                    self.pending_open_file = Some((json, path, windows));
                     let dialog = screen::ConfirmDialog::new(
-                        "未保存の変更があります。\n変更を破棄してファイルを開きますか？"
-                            .to_string(),
+                        "未保存の変更があります。".to_string(),
                         Box::new(Message::DiscardAndOpenFile),
                     )
-                    .with_confirm_btn_text("破棄して開く".to_string());
+                    .with_confirm_btn_text("破棄して開く".to_string())
+                    .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
@@ -2960,11 +3005,44 @@ impl Flowsurface {
             }
             Message::DiscardAndOpenFile => {
                 self.confirm_dialog = None;
-                let Some((json, path)) = self.pending_open_file.take() else {
+                let Some((json, path, _windows)) = self.pending_open_file.take() else {
                     return Task::none();
                 };
                 if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
                     // BC-5: write failure is an OS-level I/O error → WARN level.
+                    log::warn!("Failed to write imported state: {e}");
+                    self.notifications
+                        .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
+                    return Task::none();
+                }
+                match CURRENT_PATH.lock() {
+                    Ok(mut guard) => *guard = Some(path),
+                    Err(poisoned) => *poisoned.into_inner() = Some(path),
+                }
+                return self.restart();
+            }
+            Message::SaveAndOpenFile => {
+                // User chose "保存して開く" — save named document first (if CURRENT_PATH is set),
+                // then load the new file. This preserves the user's named document on disk.
+                self.confirm_dialog = None;
+                let Some((json, path, windows)) = self.pending_open_file.take() else {
+                    return Task::none();
+                };
+                let current_path = match CURRENT_PATH.lock() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                if let (Some(current_json), Some(p)) =
+                    (self.build_state_json(&windows), current_path)
+                {
+                    let _ = std::fs::write(&p, current_json.as_bytes()).map_err(|e| {
+                        log::warn!(
+                            "[SaveAndOpenFile] failed to write named doc to {}: {e}",
+                            p.display()
+                        );
+                    });
+                }
+                if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
                     log::warn!("Failed to write imported state: {e}");
                     self.notifications
                         .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
@@ -3266,7 +3344,6 @@ impl Flowsurface {
                 if dialog.is_none() {
                     self.pending_open_file = None;
                     self.pending_exit_windows = None;
-                    self.pending_save_path = None;
                 }
                 self.confirm_dialog = dialog;
             }
@@ -4411,6 +4488,8 @@ impl Flowsurface {
     /// to sync popout window specs. This is a side effect of a read-like operation.
     /// Future: refactor build_state_json to take window specs as argument (&self).
     fn is_dirty(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> bool {
+        // clone() is intentional: build_state_json requires &mut self (popout window spec sync),
+        // so we cannot hold a &[u8] borrow into last_saved_bytes across the mutable call.
         let Some(saved) = self.last_saved_bytes.clone() else {
             return false; // None => false: initial state is clean (BC-9)
         };
@@ -4715,7 +4794,11 @@ mod native_menu_handler_tests {
 
     #[test]
     fn save_as_with_specs_delegates_to_build_state_json() {
-        let body = handler_body("Message::NativeSaveAsWithSpecs(windows)");
+        // Use the indented match-arm prefix so the enum definition is skipped.
+        // Match the handler arm exactly (including field names + `=>`) so inner
+        // closure constructions like `Message::NativeSaveAsWithSpecs { path: path.clone(), ... }`
+        // do not produce a false match.
+        let body = handler_body("            Message::NativeSaveAsWithSpecs { path, windows } =>");
         assert!(
             body.contains("build_state_json("),
             "NativeSaveAsWithSpecs handler must call build_state_json — same serialisation path as save_state_to_disk"
