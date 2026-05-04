@@ -715,6 +715,9 @@ enum Message {
     WindowEvent(window::Event),
     ExitRequested(HashMap<window::Id, WindowSpec>),
     RestartRequested(Option<HashMap<window::Id, WindowSpec>>),
+    /// F4: After startup/restart, collect window specs then set last_saved_bytes baseline
+    /// so edits made before the first explicit Save can be detected as dirty (BC-9 fix).
+    SetDirtyBaseline(HashMap<window::Id, WindowSpec>),
     GoBack,
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
@@ -860,6 +863,17 @@ enum Message {
     DiscardAndOpenFile,
     /// F5: Save As overwrite confirm — user confirmed overwriting the existing file.
     ConfirmSaveAsOverwrite,
+    /// H-3: async file save completion — fired by `Task::perform` in the
+    /// `NativeSaveAsWithSpecs` handler once the tokio async writes finish.
+    /// `error_kind = None` means both writes succeeded; `Some(kind)` means the
+    /// user-path write failed (saved-state.json write failure is best-effort and
+    /// only emits a WARN log).
+    NativeSaveComplete {
+        user_path: std::path::PathBuf,
+        json_bytes: Vec<u8>,
+        /// `None` = success, `Some(kind)` = I/O error on the user-specified path.
+        error_kind: Option<std::io::ErrorKind>,
+    },
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1340,6 +1354,14 @@ impl Flowsurface {
         let load_layout = state.load_layout(active_layout_id.unique, main_window_id);
         let setup_native_menu =
             iced::window::raw_id::<Message>(main_window_id).map(Message::NativeMenuSetup);
+        // F4 BC-9 fix: after startup collect window specs and set the dirty baseline so that
+        // edits made before the first explicit Save are detected as dirty (ケース 3/4).
+        // Skipped in replay mode — dirty tracking is live-only.
+        let set_baseline = if is_replay_mode {
+            Task::none()
+        } else {
+            window::collect_window_specs(vec![main_window_id], Message::SetDirtyBaseline)
+        };
 
         (
             state,
@@ -1347,7 +1369,8 @@ impl Flowsurface {
                 .discard()
                 .chain(setup_native_menu)
                 .chain(load_layout)
-                .chain(launch_sidebar.map(Message::Sidebar)),
+                .chain(launch_sidebar.map(Message::Sidebar))
+                .chain(set_baseline),
         )
     }
 
@@ -1826,6 +1849,14 @@ impl Flowsurface {
                     return window::collect_window_specs(active_windows, Message::ExitRequested);
                 }
             },
+            // F4 BC-9 fix: set dirty baseline after startup so edits before the first
+            // explicit Save are detected as dirty (ケース 3/4).
+            Message::SetDirtyBaseline(windows) => {
+                if let Some(json) = self.build_state_json(&windows) {
+                    self.last_saved_bytes = Some(json.into_bytes());
+                }
+                return Task::none();
+            }
             Message::ExitRequested(windows) => {
                 // F4: check dirty before exiting (live mode only).
                 // Replay mode never writes state, so skip the check there.
@@ -1848,17 +1879,10 @@ impl Flowsurface {
                 return iced::exit();
             }
             Message::DiscardAndExit => {
+                // User chose "破棄して終了" — do NOT save. saved-state.json stays as-is
+                // so the next launch restores the state from before the discarded edits.
                 self.confirm_dialog = None;
-                let windows = match self.pending_exit_windows.take() {
-                    Some(w) => w,
-                    None => {
-                        log::warn!(
-                            "[DiscardAndExit] pending_exit_windows is None — window positions not captured"
-                        );
-                        Default::default()
-                    }
-                };
-                self.save_state_to_disk(&windows);
+                self.pending_exit_windows = None;
                 return iced::exit();
             }
             Message::RestartRequested(Some(windows)) => {
@@ -2800,39 +2824,75 @@ impl Flowsurface {
                 };
                 // H-5: build JSON once and reuse for both the user path and saved-state.json,
                 // avoiding a second build_state_json call inside save_state_to_disk.
-                if let Some(json) = self.build_state_json(&windows) {
-                    match std::fs::write(&path, json.as_bytes()) {
-                        Ok(()) => {
-                            // A-7 / R2-M1: update dirty baseline immediately after the user-path
-                            // write succeeds so that is_dirty() returns false even if the
-                            // subsequent write_json_to_saved_state_disk call fails.
-                            self.last_saved_bytes = Some(json.as_bytes().to_vec());
-                            // A-3: explicit Save / Save As writes to both the user
-                            // path and saved-state.json so neither lags behind.
-                            // H-5: reuse the already-built json — no second build_state_json call.
-                            self.write_json_to_saved_state_disk(&json);
-                            // Record as current document
-                            match CURRENT_PATH.lock() {
-                                Ok(mut guard) => *guard = Some(path.clone()),
-                                Err(poisoned) => *poisoned.into_inner() = Some(path.clone()),
-                            }
-                            log::info!("Saved state to {}", path.display());
-                            self.notifications
-                                .push(Toast::info(format!("保存しました: {}", path.display())));
-                        }
-                        Err(e) => {
-                            // BC-5: classify as IoError → WARN level.
-                            log_save_error(&SaveError::IoError(e.kind()), &path);
-                            self.notifications
-                                .push(Toast::error(format!("保存に失敗しました: {e}")));
-                        }
-                    }
-                } else {
+                let Some(json) = self.build_state_json(&windows) else {
                     log::warn!(
                         "[NativeSaveAsWithSpecs] build_state_json returned None \
                          (replay mode or APP_MODE uninitialised) — skipping write to {}",
                         path.display()
                     );
+                    return Task::none();
+                };
+                // H-3: offload both blocking writes to a tokio async task so the
+                // iced update loop is never blocked by disk I/O.
+                let json_bytes = json.into_bytes();
+                let user_path = path.clone();
+                let saved_state_path = data::SAVED_STATE_PATH;
+                return Task::perform(
+                    async move {
+                        // A-3: write to user-specified path first; only on success
+                        // also write saved-state.json (best-effort).
+                        let error_kind = match tokio::fs::write(&user_path, &json_bytes).await {
+                            Ok(()) => {
+                                // saved-state.json write is best-effort — failure is
+                                // logged at WARN but does not affect the user-path result.
+                                if let Err(e) =
+                                    tokio::fs::write(saved_state_path, &json_bytes).await
+                                {
+                                    log::warn!(
+                                        "[NativeSaveComplete] failed to write \
+                                             saved-state.json: {e}"
+                                    );
+                                }
+                                None
+                            }
+                            Err(e) => Some(e.kind()),
+                        };
+                        (user_path, json_bytes, error_kind)
+                    },
+                    |(user_path, json_bytes, error_kind)| Message::NativeSaveComplete {
+                        user_path,
+                        json_bytes,
+                        error_kind,
+                    },
+                );
+            }
+            // H-3: completion handler for the async NativeSaveAsWithSpecs Task::perform.
+            Message::NativeSaveComplete {
+                user_path,
+                json_bytes,
+                error_kind,
+            } => {
+                match error_kind {
+                    None => {
+                        // A-7: update dirty baseline so is_dirty() returns false.
+                        self.last_saved_bytes = Some(json_bytes);
+                        // Record as current document.
+                        match CURRENT_PATH.lock() {
+                            Ok(mut guard) => *guard = Some(user_path.clone()),
+                            Err(poisoned) => *poisoned.into_inner() = Some(user_path.clone()),
+                        }
+                        log::info!("Saved state to {}", user_path.display());
+                        self.notifications.push(Toast::info(format!(
+                            "保存しました: {}",
+                            user_path.display()
+                        )));
+                    }
+                    Some(kind) => {
+                        // BC-5: classify as IoError → WARN level.
+                        log_save_error(&SaveError::IoError(kind), &user_path);
+                        self.notifications
+                            .push(Toast::error("保存に失敗しました".to_string()));
+                    }
                 }
                 return Task::none();
             }

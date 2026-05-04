@@ -633,6 +633,56 @@ cargo clippy --workspace -- -D warnings → 警告なし
 cargo test --workspace → 全テスト GREEN
 ```
 
+---
+
+## レビュー反映 (2026-05-04, ラウンド3)
+
+**対象フェーズ**: F2/F3/F4/F5（review-fix-loop R1 修正）
+
+### 解消した指摘
+
+| ID | 重要度 | 内容 |
+|----|--------|------|
+| C-1 | CRITICAL | GoBack で `pending_open_file` / `pending_exit_windows` をクリアしない → dirty チェック永続スキップ |
+| H-1 | HIGH | `NativeOpenFilePendingCheck` / `DiscardAndOpenFile` で `log::error!` → `log::warn!` に修正（BC-5 準拠）|
+| H-2 | HIGH | `save_state_to_disk` で `log::error!` → `log_save_error(&SaveError::IoError(...))` に変更（BC-5） |
+| H-4 | HIGH | `AudioStream::streams: FxHashMap` → `BTreeMap` に変更（SerTicker/Exchange/Ticker に Ord 実装追加）|
+| H-5 | HIGH | `build_state_json` が2回実行される → `write_json_to_saved_state_disk` helper を新設し `NativeSaveAsWithSpecs` で再利用 |
+| M-1 | MEDIUM | `is_dirty` の `&mut self` 副作用についてコメント追加 |
+| M-2 | MEDIUM | `native-menu-bar-impl.md` の旧 `OpenStrategy` 記述を現行 (`OpenReplayDialog`) に更新、`OnceLock` → `Mutex<Option<_>>` 修正 |
+| M-3 | MEDIUM | `ConfirmSaveAsOverwrite` に `confirm_dialog.is_none()` ガード追加（ダイアログ未表示時の誤実行防止） |
+| M-4 | MEDIUM | `APP_MODE.get().unwrap_or(...)` → `.expect("APP_MODE must be set before iced starts")` |
+| M-5 | MEDIUM | `save_error_classification.rs` に `save_state_to_disk_does_not_use_log_error` テスト追加 |
+| M-6 | MEDIUM | `io_error_emits_warn_not_error` の 500 文字ハードリミット除去 |
+| M-7 | MEDIUM | `current_path_uses_into_inner_for_poison_recovery` テストを各呼び出し箇所別個別確認方式に変更 |
+| M-8 | MEDIUM | `linux_ctrl_s_dispatches_save` を `Some(Action::Save)` パターンで検索（`Action::SaveAs` 誤マッチ防止） |
+| M-9 | MEDIUM | `DiscardAndExit` の `pending_exit_windows` が None の場合に `log::warn!` 出力（既に実装済みを確認） |
+| M-10 | MEDIUM | `cancelled_does_not_emit_error_or_warn_log` の 300 文字ハードリミット除去 |
+| L-1 | LOW | `Cancelled` の `#[allow(dead_code)]` に TODO コメント追記 |
+| L-4 | LOW | `is_dirty` の `unwrap_or(false)` に replay モードの根拠コメント追加 |
+
+### 未実施（STOP+REPORT）
+
+| ID | 重要度 | 理由 |
+|----|--------|------|
+| H-3 | HIGH | update() 内ブロッキング I/O → Task::perform 変換。`dirty_detection.rs` の `save_as_with_specs_double_writes_a3` テストが `std::fs::write` の存在を assert しており、async 化すると既存テストが破綻する。また `SaveComplete` メッセージ追加により `save_state_to_disk` の呼び出しチェーンが大幅変更になり、H-5 の `write_json_to_saved_state_disk` helper と設計を整合させる必要がある。単一ラウンドの scope を超えるため STOP+REPORT。 |
+
+### 追加したテスト
+
+| テスト | ファイル | 目的 |
+|--------|----------|------|
+| `escape_on_confirm_clears_pending_state` | `dirty_detection.rs` | C-1: GoBack が pending_open_file / pending_exit_windows をクリアすることを確認 |
+| `stable_serialization_with_audio_streams` | `dirty_detection.rs` | H-4: AudioStream の BTreeMap 化で決定論的シリアライズを確認 |
+| `save_state_to_disk_does_not_use_log_error` | `save_error_classification.rs` | M-5: save_state_to_disk が log::error! を使わないことを確認 |
+
+### 検証結果
+
+```
+cargo fmt --check     → 差分なし
+cargo clippy --workspace -- -D warnings → 警告なし
+cargo test --workspace → 全テスト GREEN（新規テスト 3 件含む）
+```
+
 ## レビュー反映 (2026-05-04, ラウンド2)
 
 **対象フェーズ**: F4（dirty 確認）, F5（上書き確認）

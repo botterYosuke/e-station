@@ -194,6 +194,47 @@ fn stable_serialization() {
     }
 }
 
+// ── H-4: AudioStream::streams uses BTreeMap for deterministic serialization ────
+
+#[test]
+fn stable_serialization_with_audio_streams() {
+    // H-4: data::AudioStream::streams must be a BTreeMap (or equivalent ordered map)
+    // so that serialization order is deterministic even when streams are populated.
+    // FxHashMap would produce different key orderings across runs / compilations.
+    use data::audio::{AudioStream, StreamCfg, Threshold};
+    use exchange::SerTicker;
+    use exchange::adapter::Exchange;
+
+    let ticker_a = SerTicker::new(Exchange::BinanceLinear, "BTCUSDT");
+    let ticker_b = SerTicker::new(Exchange::BinanceLinear, "ETHUSDT");
+
+    let mut audio = AudioStream::default();
+    audio.streams.insert(
+        ticker_a,
+        StreamCfg {
+            enabled: true,
+            threshold: Threshold::Count(5),
+        },
+    );
+    audio.streams.insert(
+        ticker_b,
+        StreamCfg {
+            enabled: false,
+            threshold: Threshold::Qty(1.5),
+        },
+    );
+
+    let first = serde_json::to_string(&audio).expect("serialize must succeed");
+    for i in 1..50 {
+        let next = serde_json::to_string(&audio).expect("serialize must succeed");
+        assert_eq!(
+            first, next,
+            "AudioStream serialization is non-deterministic at iteration {i} — \
+             streams field must use BTreeMap not FxHashMap (H-4)"
+        );
+    }
+}
+
 // ── Case 6: SaveError enum ─────────────────────────────────────────────────────
 // (Full log-level assertions are in tests/save_error_classification.rs)
 

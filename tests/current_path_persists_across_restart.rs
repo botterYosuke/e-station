@@ -61,9 +61,15 @@ fn current_path_uses_into_inner_for_poison_recovery() {
     );
 
     for site in &lock_sites {
-        // Look at up to 400 characters after the lock() call to find into_inner().
+        // Look at up to 400 bytes after the lock() call to find into_inner().
         // This covers the match arm without crossing into unrelated code.
-        let context_end = (*site + 400).min(src.len());
+        // Walk back from the raw end to the nearest valid char boundary to avoid
+        // panics when multibyte chars (e.g. Japanese toast text) straddle the limit.
+        let raw_end = (*site + 400).min(src.len());
+        let context_end = (0..=raw_end)
+            .rev()
+            .find(|&i| src.is_char_boundary(i))
+            .unwrap_or(raw_end);
         let context = &src[*site..context_end];
 
         // Skip lines that are comments (the lock() may appear in a comment in the test
@@ -135,11 +141,15 @@ fn open_file_apply_sets_current_path() {
     );
 }
 
-// ── NativeSaveAsWithSpecs updates CURRENT_PATH (A-3) ─────────────────────────
+// ── NativeSaveComplete updates CURRENT_PATH (A-3 / H-3) ─────────────────────
+// H-3: CURRENT_PATH is now updated in the async completion handler
+// NativeSaveComplete, not inline in NativeSaveAsWithSpecs.
 
 #[test]
 fn save_as_with_specs_sets_current_path() {
     let src = read_main();
+
+    // NativeSaveAsWithSpecs must dispatch NativeSaveComplete (via Task::perform).
     let arm_prefix = "Message::NativeSaveAsWithSpecs(windows)";
     let start = src
         .find(arm_prefix)
@@ -152,12 +162,34 @@ fn save_as_with_specs_sets_current_path() {
     let body = &tail[..end];
 
     assert!(
-        body.contains("CURRENT_PATH"),
-        "NativeSaveAsWithSpecs must update CURRENT_PATH after a successful write"
+        body.contains("NativeSaveComplete"),
+        "NativeSaveAsWithSpecs must dispatch NativeSaveComplete via Task::perform (H-3)"
+    );
+
+    // NativeSaveComplete is where CURRENT_PATH is actually written.
+    // Search for the match arm at 12-space indentation (not the Task::perform
+    // construction site at deeper indentation).
+    let complete_needle = "\n            Message::NativeSaveComplete {";
+    let complete_start = src
+        .find(complete_needle)
+        .map(|i| i + 1) // skip the leading '\n'
+        .expect("NativeSaveComplete handler arm must exist at 12-space indent");
+    let complete_tail = &src[complete_start..];
+    let complete_end = complete_tail[1..]
+        .find("\n            Message::")
+        .map(|i| i + 1)
+        .unwrap_or(complete_tail.len());
+    let complete_body = &complete_tail[..complete_end];
+
+    assert!(
+        complete_body.contains("CURRENT_PATH"),
+        "NativeSaveComplete must update CURRENT_PATH after a successful write (H-3)"
     );
 }
 
-// ── A-3: explicit Save / Save As writes to both paths ─────────────────────────
+// ── A-3 / H-3: async Save As writes to both paths ────────────────────────────
+// H-3: blocking std::fs::write replaced by tokio::fs::write inside Task::perform.
+// Both the user path and saved-state.json are written inside the async closure.
 
 #[test]
 fn save_as_with_specs_double_writes_a3() {
@@ -173,13 +205,21 @@ fn save_as_with_specs_double_writes_a3() {
         .unwrap_or(tail.len());
     let body = &tail[..end];
 
+    // H-3: async write via tokio::fs::write (not blocking std::fs::write).
     assert!(
-        body.contains("std::fs::write"),
-        "NativeSaveAsWithSpecs must write to the user-specified path (explicit Save/Save As)"
+        body.contains("tokio::fs::write"),
+        "NativeSaveAsWithSpecs must use tokio::fs::write for async I/O (H-3)"
     );
+    // A-3: saved-state.json is also written (best-effort) inside the async closure.
+    // The path constant `data::SAVED_STATE_PATH` must appear in the body.
     assert!(
-        body.contains("save_state_to_disk"),
-        "NativeSaveAsWithSpecs must also call save_state_to_disk (A-3: both paths)"
+        body.contains("data::SAVED_STATE_PATH"),
+        "NativeSaveAsWithSpecs must write saved-state.json via data::SAVED_STATE_PATH (A-3)"
+    );
+    // H-3: the Task::perform must dispatch NativeSaveComplete on completion.
+    assert!(
+        body.contains("NativeSaveComplete"),
+        "NativeSaveAsWithSpecs must dispatch NativeSaveComplete via Task::perform (H-3)"
     );
 }
 
