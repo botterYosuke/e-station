@@ -312,7 +312,7 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 | <a id="f3"></a> **F3** | P1 | `Flowsurface.current_path` 相当を static で導入。`上書き保存（Save）` メニュー追加 | M | F2 と統合推奨 |
 | <a id="f4"></a> ✅ **F4** | P3 | `last_saved_bytes` で dirty 判定 → Open / Quit / SwitchMode 時の確認ダイアログ（F7 共通化ポイント） | M | F3 |
 | <a id="f5"></a> ✅ **F5** | P4 | rfd OS confirm に頼らずアプリ層の上書き確認ダイアログ | S | F3 |
-| <a id="f6"></a> **F6** | P5 | SCENARIO 定数仕様の実装（[P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) 参照） | L | F3 |
+| <a id="f6"></a> ✅ **F6** | P5 | SCENARIO 定数仕様の実装（[P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) 参照） | L | F3 |
 | <a id="f7"></a> **F7** | P7 | `Mode` メニュー新設（[P7-mode-switch-menu.md](./P7-mode-switch-menu.md) 参照） | M | F4（confirm 共有） |
 | <a id="f8"></a> **F8** | P8 | Linux 向け iced 自前メニューバー（[P8-widget-menu-bar-linux.md](./P8-widget-menu-bar-linux.md) 参照） | L | なし（独立） |
 | <a id="f9"></a> **F9** | P9 | W&B Submit メニュー — 詳細は [P9-wandb-submit-menu.md](./P9-wandb-submit-menu.md) | — | — |
@@ -459,9 +459,24 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 - **テスト方針**: 既存ファイル存在パスの分岐を unit テストで覆う
 - **観測コマンド**: `cargo test save_as_overwrite_confirm`
 
-#### <a id="f6-dod"></a> F6（P5: SCENARIO 定数）
+#### <a id="f6-dod"></a> ✅ F6（P5: SCENARIO 定数）— 実装完了（2026-05-04）
 
-- **モード別挙動表（A-4）**:
+**実装済みコンポーネント**:
+
+- `python/engine/scenario.py` — `extract()` / `validate()` / `write_back()` 実装（libcst CST 置換、atomic write、.bak、path guard）
+- `python/engine/replay_session.py` — `_resolve_cli_params()` による CLI SCENARIO フォールバック（F6b）
+- `python/engine/server.py` — `_dispatch()` に `LoadStrategyScenario` / `SaveStrategyScenario` の IPC ハンドラ追加
+- `python/engine/schemas.py` — `LoadStrategyScenario` / `SaveStrategyScenario` コマンド、`StrategyScenarioLoaded` / `StrategyScenarioLoadFailed` / `StrategyScenarioSaved` イベント（SCHEMA_MINOR=10）
+- `engine-client/src/dto.rs` — 対応 Command / Event バリアント
+- `docs/example/buy_and_hold.py` — `SCENARIO` 定数追加
+- テスト: `test_scenario_load.py` / `test_scenario_writeback.py` / `test_scenario_path_guard.py` / `test_scenario_cli.py` / `engine-client/tests/scenario_roundtrip.rs`
+
+**意図的に次フェーズ以降へ持ち越した項目**:
+
+- `ReplayFormModal` への `StrategyScenarioLoaded` 受信時 prefill（Rust GUI 実装、F6a 後半）
+- `native_menu.rs` の replay モードでのファイルフィルタ `.py` 切り替え（F6a 後半）
+
+**モード別挙動表（A-4）**:
 
   | モード | `開く…（Open）` 対象 | `名前を付けて保存…（Save As）` 対象 | ファイルフィルタ |
   |--------|----------------------|--------------------------------------|------------------|
@@ -469,11 +484,11 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
   | replay | 戦略 `.py`（`SCENARIO` 抽出） | 戦略 `.py` のコピー先で `SCENARIO` のみ書き換え | `.py` |
 
   `Save As` メニューラベルは両モードで `名前を付けて保存…（Save As）` 共通だが、
-  対象モデルとフィルタはモードに依存する。
+  対象モデルとフィルタはモードに依存する（GUI 側は次フェーズ）。
 
 - 詳細は [P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) を参照
-- **テストファイル**: `python/tests/test_scenario_extract.py` /
-  `python/tests/test_scenario_writeback.py`
+- **テストファイル**: `python/tests/test_scenario_load.py` / `python/tests/test_scenario_writeback.py` /
+  `python/tests/test_scenario_path_guard.py` / `python/tests/test_scenario_cli.py`
 - **観測コマンド**: `uv run pytest python/tests/test_scenario_*.py -v`
 
 #### <a id="f7-dod"></a> F7（P7: モード切替メニュー）
@@ -723,3 +738,34 @@ cargo test --workspace                   → 全テスト GREEN（新規テス�
 | ID | 重要度 | 内容 | 対処 |
 |----|--------|------|------|
 | R3-H1 | HIGH | init_for_hwnd 失敗後も MENU_IDS に有効 ID が残存し、HMENU 未アタッチのまま event_stream が「正常」と誤認 | 失敗時に `MENU_IDS` を `None` に戻して event_stream を無効化 (`src/native_menu.rs`) |
+
+---
+
+## ユーザー追加指摘・追加修正 (2026-05-04, ラウンド4)
+
+### ユーザー指摘（レビューループ収束後）
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| U-H1 | HIGH | `pending_save_path` が 1 本の共有スロット→非同期保存フロー重複時に保存先すり替わりの競合 | `pending_save_path` フィールドを削除。`NativeSaveAsWithSpecs { path, windows }` / `ConfirmSaveAsOverwrite { path }` にパスを直接埋め込む。クロージャでキャプチャ。 |
+| U-M1 | MEDIUM | F3 DoD「`--saved-state` 起動時の `CURRENT_PATH` 初期化」が未実装 | `src/cli.rs` に `--saved-state <PATH>` 追加、`INITIAL_STATE_PATH: OnceLock<PathBuf>` static 追加、`Flowsurface::new()` で読み込み・`CURRENT_PATH` 初期化 |
+
+### R4 サニティチェック（silent-failure-hunter）
+
+U-H1 / U-M1 修正後に追加実施。
+
+| ID | 重要度 | 内容 | 対処 |
+|----|--------|------|------|
+| R4-M1 | MEDIUM | `--saved-state` に非 UTF-8 パスが渡された場合、`unwrap_or(data::SAVED_STATE_PATH)` でデフォルトパスの内容を読み込むが `CURRENT_PATH` には非 UTF-8 パスがセットされ読み書き先が不整合 | `to_str()` が `None` の場合は `log::error!` を出力し `SavedState::default()` を返す（`CURRENT_PATH` はセットしない） |
+| R4-L1 | LOW | `ConfirmSaveAsOverwrite` ガード発動時（Escape と同一フレーム）に保存が黙って中断 | 発生頻度極低 + ユーザーが Escape 押下の場合と区別不要のため対処しない |
+| R4-L2 | LOW | `GoBack` ハンドラで `pending_save_path` 参照の残留確認 | フィールド自体が削除済みで残留なし。確認のみ |
+
+**最終状態**: CRITICAL/HIGH/MEDIUM ゼロ。LOW 2 件（R4-L1, R4-L2）は対処不要と判断。収束。
+
+### 最終検証コマンド
+
+```
+cargo fmt --check        → OK
+cargo clippy --workspace -- -D warnings  → OK
+cargo test --workspace   → 全テスト GREEN
+```

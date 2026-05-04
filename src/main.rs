@@ -1257,21 +1257,22 @@ impl Flowsurface {
             layout::SavedState::default()
         } else if let Some(p) = INITIAL_STATE_PATH.get() {
             // F3 DoD: --saved-state was given; load from that path and prime CURRENT_PATH.
-            let Some(path_str) = p.to_str() else {
+            if let Some(path_str) = p.to_str() {
+                log::info!("--saved-state: loading from {path_str}");
+                let state = layout::load_saved_state_from(path_str);
+                // Prime CURRENT_PATH so Ctrl+S writes back to the same file.
+                match CURRENT_PATH.lock() {
+                    Ok(mut guard) => *guard = Some(p.clone()),
+                    Err(poisoned) => *poisoned.into_inner() = Some(p.clone()),
+                }
+                state
+            } else {
                 log::error!(
                     "--saved-state path contains non-UTF-8 characters; \
                      falling back to default layout. Path: {p:?}"
                 );
                 layout::SavedState::default()
-            };
-            log::info!("--saved-state: loading from {path_str}");
-            let state = layout::load_saved_state_from(path_str);
-            // Prime CURRENT_PATH so Ctrl+S writes back to the same file.
-            match CURRENT_PATH.lock() {
-                Ok(mut guard) => *guard = Some(p.clone()),
-                Err(poisoned) => *poisoned.into_inner() = Some(p.clone()),
             }
-            state
         } else {
             layout::load_saved_state()
         };
@@ -1903,13 +1904,18 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::ExitRequested(windows) => {
+                // HIGH fix: another dialog is already visible — ignore this close request
+                // until the user resolves it. Prevents F4 bypass via overlapping dialogs.
+                if self.confirm_dialog.is_some() {
+                    return Task::none();
+                }
                 // F4: check dirty before exiting (live mode only).
                 // Replay mode never writes state, so skip the check there.
                 let is_live = APP_MODE
                     .get()
                     .map(|m| *m == engine_client::dto::AppMode::Live)
                     .unwrap_or(true);
-                if is_live && self.is_dirty(&windows) && self.confirm_dialog.is_none() {
+                if is_live && self.is_dirty(&windows) {
                     // Store window specs so Discard/SaveAndExit can proceed later.
                     self.pending_exit_windows = Some(windows);
                     let dialog = screen::ConfirmDialog::new(
@@ -1921,7 +1927,12 @@ impl Flowsurface {
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
-                self.save_state_to_disk(&windows);
+                // Clean exit: auto-save. Failure is shown as a toast but does NOT
+                // abort exit — the user explicitly asked to quit.
+                if !self.save_state_to_disk(&windows) {
+                    self.notifications
+                        .push(Toast::error("自動保存に失敗しました".to_string()));
+                }
                 return iced::exit();
             }
             Message::DiscardAndExit => {
@@ -1932,12 +1943,25 @@ impl Flowsurface {
                 return iced::exit();
             }
             Message::SaveAndExit => {
-                // User chose "保存して終了" — save to auto-save path (same as a clean exit)
-                // then exit. The named document (CURRENT_PATH) is also updated if set.
+                // User chose "保存して終了" — save then exit.
+                // BC-5: if save fails, abort the exit and show an error (do not discard data).
                 self.confirm_dialog = None;
                 let windows = self.pending_exit_windows.take().unwrap_or_default();
-                self.save_state_to_disk(&windows);
-                return iced::exit();
+                if self.save_state_to_disk(&windows) {
+                    return iced::exit();
+                }
+                // Save failed: notify user and restore the dialog so they can retry or discard.
+                self.notifications
+                    .push(Toast::error("保存に失敗しました。再試行してください。".to_string()));
+                self.pending_exit_windows = Some(windows);
+                let dialog = screen::ConfirmDialog::new(
+                    "未保存の変更があります。".to_string(),
+                    Box::new(Message::DiscardAndExit),
+                )
+                .with_confirm_btn_text("破棄して終了".to_string())
+                .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                self.confirm_dialog = Some(dialog);
+                return Task::none();
             }
             Message::RestartRequested(Some(windows)) => {
                 self.save_state_to_disk(&windows);
@@ -2985,11 +3009,13 @@ impl Flowsurface {
                 path,
                 windows,
             } => {
+                // HIGH fix: another dialog is already visible — silently drop this request
+                // to prevent F4 bypass via overlapping dialogs.
+                if self.confirm_dialog.is_some() {
+                    return Task::none();
+                }
                 // F4: dirty check with real window specs (avoids false positives from empty HashMap).
-                if self.is_dirty(&windows)
-                    && self.pending_open_file.is_none()
-                    && self.confirm_dialog.is_none()
-                {
+                if self.is_dirty(&windows) && self.pending_open_file.is_none() {
                     // Store windows so SaveAndOpenFile can build state JSON for the named doc.
                     self.pending_open_file = Some((json, path, windows));
                     let dialog = screen::ConfirmDialog::new(
@@ -3035,23 +3061,40 @@ impl Flowsurface {
             Message::SaveAndOpenFile => {
                 // User chose "保存して開く" — save named document first (if CURRENT_PATH is set),
                 // then load the new file. This preserves the user's named document on disk.
+                // BC-5: if saving to CURRENT_PATH fails, abort the open and restore the dialog.
                 self.confirm_dialog = None;
-                let Some((json, path, windows)) = self.pending_open_file.take() else {
+                let Some((json, new_path, windows)) = self.pending_open_file.take() else {
                     return Task::none();
                 };
                 let current_path = match CURRENT_PATH.lock() {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                if let (Some(current_json), Some(p)) =
-                    (self.build_state_json(&windows), current_path)
-                {
-                    let _ = std::fs::write(&p, current_json.as_bytes()).map_err(|e| {
-                        log::warn!(
-                            "[SaveAndOpenFile] failed to write named doc to {}: {e}",
-                            p.display()
-                        );
-                    });
+                if let Some(p) = current_path {
+                    match self.build_state_json(&windows) {
+                        Some(current_json) => {
+                            if let Err(e) = std::fs::write(&p, current_json.as_bytes()) {
+                                // BC-5: abort open; named doc save failed.
+                                log_save_error(&SaveError::IoError(e.kind()), &p);
+                                self.notifications.push(Toast::error(
+                                    "保存に失敗しました。再試行してください。".to_string(),
+                                ));
+                                self.pending_open_file = Some((json, new_path, windows));
+                                let dialog = screen::ConfirmDialog::new(
+                                    "未保存の変更があります。".to_string(),
+                                    Box::new(Message::DiscardAndOpenFile),
+                                )
+                                .with_confirm_btn_text("破棄して開く".to_string())
+                                .with_save_action(
+                                    Message::SaveAndOpenFile,
+                                    "保存して開く".to_string(),
+                                );
+                                self.confirm_dialog = Some(dialog);
+                                return Task::none();
+                            }
+                        }
+                        None => { /* replay mode — no JSON to save, proceed with open */ }
+                    }
                 }
                 if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
                     log::warn!("Failed to write imported state: {e}");
@@ -3060,8 +3103,8 @@ impl Flowsurface {
                     return Task::none();
                 }
                 match CURRENT_PATH.lock() {
-                    Ok(mut guard) => *guard = Some(path),
-                    Err(poisoned) => *poisoned.into_inner() = Some(path),
+                    Ok(mut guard) => *guard = Some(new_path),
+                    Err(poisoned) => *poisoned.into_inner() = Some(new_path),
                 }
                 return self.restart();
             }
@@ -4466,7 +4509,8 @@ impl Flowsurface {
     /// H-5: write a pre-built JSON string to saved-state.json and update
     /// `last_saved_bytes`. Called by `save_state_to_disk` and by
     /// `NativeSaveAsWithSpecs` (which builds the JSON once and reuses it).
-    fn write_json_to_saved_state_disk(&mut self, json: &str) {
+    /// Returns `true` on success, `false` on I/O error (already logged at WARN).
+    fn write_json_to_saved_state_disk(&mut self, json: &str) -> bool {
         let file_name = data::SAVED_STATE_PATH;
         if let Err(e) = data::write_json_to_file(json, file_name) {
             // BC-5: auto-save write failure is an OS-level I/O error → WARN level.
@@ -4474,19 +4518,23 @@ impl Flowsurface {
                 &SaveError::IoError(e.kind()),
                 std::path::Path::new(file_name),
             );
+            false
         } else {
             // A-7: update dirty baseline so auto-save clears the dirty flag.
             // R3: only saved-state.json is written here — CURRENT_PATH is NOT touched.
             self.last_saved_bytes = Some(json.as_bytes().to_vec());
             log::info!("Persisted state to {file_name}");
+            true
         }
     }
 
-    fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
+    /// Returns `true` if state was serialised and written; `false` on I/O error.
+    fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> bool {
         if let Some(json) = self.build_state_json(windows) {
-            self.write_json_to_saved_state_disk(&json);
+            self.write_json_to_saved_state_disk(&json)
         } else {
             log::info!("replay mode: skipping save_state_to_disk");
+            true // replay mode skip is not a failure
         }
     }
 
@@ -4813,6 +4861,110 @@ mod native_menu_handler_tests {
         assert!(
             body.contains("build_state_json("),
             "NativeSaveAsWithSpecs handler must call build_state_json — same serialisation path as save_state_to_disk"
+        );
+    }
+
+    // ── CRITICAL: save failure must abort SaveAndExit / SaveAndOpenFile ─────────
+    //
+    // BC-5 contract: an IoError during an explicit "Save and continue" must abort
+    // the operation (Quit / Open) and show an error, not silently discard data.
+    // These source-inspection tests verify the control-flow shape without a runtime.
+
+    #[test]
+    fn save_and_exit_checks_result_before_exiting() {
+        let body = handler_body("            Message::SaveAndExit =>");
+        // BC-5: save result must be checked; iced::exit() must NOT be called unconditionally.
+        // The impl wraps the call as `if self.save_state_to_disk(...)` so the result
+        // is the condition — verify this pattern is present.
+        assert!(
+            body.contains("if self.save_state_to_disk("),
+            "SaveAndExit must guard iced::exit() behind `if self.save_state_to_disk(...)` — \
+             BC-5: IoError must abort the quit, not silently discard data"
+        );
+        assert!(
+            body.contains("iced::exit()"),
+            "SaveAndExit must call iced::exit() on success"
+        );
+        // Restore-dialog path must also exist (for when save fails).
+        assert!(
+            body.contains("pending_exit_windows = Some("),
+            "SaveAndExit must restore pending_exit_windows on save failure so the dialog can be retried"
+        );
+    }
+
+    #[test]
+    fn save_and_open_file_aborts_on_named_doc_write_failure() {
+        let body = handler_body("            Message::SaveAndOpenFile =>");
+        // Handler must write to named doc and handle failure.
+        assert!(
+            body.contains("std::fs::write("),
+            "SaveAndOpenFile must attempt to write to CURRENT_PATH"
+        );
+        // On write error it must NOT fall through to restart() — must return early.
+        assert!(
+            body.contains("return Task::none()"),
+            "SaveAndOpenFile must return Task::none() on write failure (BC-5 abort)"
+        );
+        // Dialog must be restored so user can retry or discard.
+        assert!(
+            body.contains("pending_open_file = Some("),
+            "SaveAndOpenFile must restore pending_open_file on named-doc write failure"
+        );
+    }
+
+    // ── HIGH: dialog overlap must not bypass F4 protection ───────────────────
+    //
+    // When another confirm_dialog is already open, ExitRequested / NativeOpenFilePendingCheck
+    // must bail out early instead of falling through to save + exit / write + restart.
+
+    #[test]
+    fn exit_requested_guards_existing_dialog() {
+        let body = handler_body("            Message::ExitRequested(windows) =>");
+        assert!(
+            body.contains("confirm_dialog.is_some()"),
+            "ExitRequested must guard against an existing confirm dialog — \
+             HIGH: overlapping dialogs allow bypassing F4 dirty protection"
+        );
+        // Guard must appear before the dirty check so it fires first.
+        let guard_pos = body.find("confirm_dialog.is_some()").unwrap();
+        let dirty_pos = body.find("is_dirty(").unwrap();
+        assert!(
+            guard_pos < dirty_pos,
+            "confirm_dialog guard must come before is_dirty() in ExitRequested"
+        );
+    }
+
+    #[test]
+    fn open_file_pending_check_guards_existing_dialog() {
+        // Use the marker comment unique to this handler's guard to locate the body.
+        // The 12-space prefix search would find inner closure constructions via substring
+        // matching (e.g. 20-space lines contain the 12-space pattern), so we anchor on the
+        // guard comment instead which is unambiguous.
+        let guard_marker =
+            "// HIGH fix: another dialog is already visible — silently drop this request";
+        // Find the guard inside the handler region.
+        let handler_start = MAIN_RS
+            .find("            Message::NativeOpenFilePendingCheck {\n                json,")
+            .expect("NativeOpenFilePendingCheck handler arm not found (expected field `json,` on next line)");
+        let region_end = MAIN_RS[handler_start..]
+            .find("\n            Message::")
+            .map(|i| handler_start + i)
+            .unwrap_or(MAIN_RS.len());
+        let body = &MAIN_RS[handler_start..region_end];
+        assert!(
+            body.contains(guard_marker),
+            "NativeOpenFilePendingCheck must contain the HIGH-fix dialog guard comment — \
+             HIGH: overlapping dialogs allow bypassing F4 dirty protection"
+        );
+        assert!(
+            body.contains("confirm_dialog.is_some()"),
+            "NativeOpenFilePendingCheck guard must check confirm_dialog.is_some()"
+        );
+        let guard_pos = body.find("confirm_dialog.is_some()").unwrap();
+        let dirty_pos = body.find("is_dirty(").unwrap();
+        assert!(
+            guard_pos < dirty_pos,
+            "confirm_dialog guard must come before is_dirty() in NativeOpenFilePendingCheck"
         );
     }
 

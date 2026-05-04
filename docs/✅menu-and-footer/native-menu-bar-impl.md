@@ -336,6 +336,80 @@ cargo test --workspace
 
 ---
 
+## F6: SCENARIO 定数 — 実装記録（2026-05-04）
+
+### 実装済みコンポーネント
+
+| ファイル | 役割 |
+|---------|------|
+| `python/engine/scenario.py` | `extract()` / `validate()` / `write_back()` 本体 |
+| `python/engine/replay_session.py` | `_resolve_cli_params()` CLI フォールバック（F6b） |
+| `python/engine/server.py` | `_dispatch()` に LoadStrategyScenario / SaveStrategyScenario ハンドラ |
+| `python/engine/schemas.py` | IPC コマンド / イベント定義（SCHEMA_MINOR=10） |
+| `engine-client/src/dto.rs` | Rust 側 Command / Event バリアント |
+| `docs/example/buy_and_hold.py` | SCENARIO 定数サンプル |
+
+### 設計上の知見・落とし穴
+
+**1. `_EXPECTED_TYPES` の3点管理は `typing.get_type_hints()` で解消できる**
+
+TypedDict の `__annotations__` を `typing.get_type_hints(Scenario)` で取得すると `{field: type}` の dict になる。`_EXPECTED_TYPES` と `REQUIRED_KEYS` をここから自動生成すれば、フィールド追加時に更新箇所が TypedDict 定義1か所だけになる。
+
+**2. `importlib.util.spec_from_file_location()` の `sys.modules` 汚染に注意**
+
+同一モジュール名で複数回呼ぶと2回目以降が stale キャッシュを参照する。`write_back()` の `_verify_writeback()` では `uuid.uuid4().hex` をモジュール名に埋め込んでユニーク化し、`sys.modules` への登録を回避する。
+
+**3. libcst の CSTTransformer は AnnAssign / Assign の両形式を別途ハンドルする必要がある**
+
+`SCENARIO: Scenario = {...}` は `AnnAssign`、`SCENARIO = {...}` は `Assign`。`visit_AnnAssign` と `visit_Assign` を別々に実装しないと片方を見落とす。
+
+**4. `_check_path_guard()` で `path.relative_to()` の ValueError と path_guard の ValueError を混ぜない**
+
+```python
+# NG: 文字列マッチで区別するのはフラジャイル
+try:
+    path.relative_to(persistent_dir)
+    raise ValueError("path_guard_violation: ...")
+except ValueError as exc:
+    if "path_guard_violation" in str(exc): raise
+
+# OK: try/except/else で分離
+try:
+    path.relative_to(persistent_dir)
+except ValueError:
+    pass  # 配下でない → OK
+else:
+    raise ValueError("path_guard_violation: ...")
+```
+
+**5. SCENARIO の `granularity` 値フォーマットは CLI choices と異なる場合がある**
+
+`buy_and_hold.py` のサンプルでは `"granularity": "Daily"` を使用する（CLI choices: `"Trade"/"Minute"/"Daily"`）。`"1m"` のような時間足形式は validate() を通過するが、`EngineStartConfig` でエラーになる。サンプルファイルは必ず CLI choices と一致した値を使うこと。
+
+**6. ロールバック中の例外で元例外が隠れる**
+
+```python
+# NG: shutil.copy2 が OSError を throw すると元の exc が隠れる
+except Exception as exc:
+    shutil.copy2(bak_path, path)
+    raise
+
+# OK: rollback を try/except で包む
+except Exception as exc:
+    try:
+        shutil.copy2(bak_path, path)
+    except OSError as rb_exc:
+        log.error("rollback_failed: %s (original: %s)", rb_exc, exc)
+    raise
+```
+
+### 次フェーズ（未実装）
+
+- `ReplayFormModal` への `StrategyScenarioLoaded` 受信時 prefill（Rust GUI 実装）
+- `native_menu.rs` の replay モードでのファイルフィルタ `.py` 切り替え
+
+---
+
 ## 関連ファイル早見表
 
 | ファイル | 役割 |
