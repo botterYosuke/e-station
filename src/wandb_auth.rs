@@ -406,10 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_run_buffer_entries_includes_partially_broken_meta() {
-        let root = std::env::temp_dir().join(format!(
-            "flowsurface-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("flowsurface-test-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
         let _guard = TempDirGuard(root.clone());
         let root = root.as_path();
