@@ -357,3 +357,79 @@ def test_reads_buy_and_hold_example() -> None:
 
     # validate も通過すること
     validate(result)
+
+
+# ---------------------------------------------------------------------------
+# M5 (レビュー反映 2026-05-04 ラウンド1): 多重 SCENARIO 定義は明示エラー
+# ---------------------------------------------------------------------------
+
+
+def test_extract_rejects_multiple_scenario_assignments(tmp_path: Path) -> None:
+    """2 つ目の `SCENARIO = {...}` がある .py を渡すと ScenarioValidationError。"""
+    f = _write(
+        tmp_path,
+        "multi.py",
+        """\
+        SCENARIO = {
+            "schema_version": 1,
+            "instrument": "1301.TSE",
+            "start": "2025-01-06",
+            "end": "2025-03-31",
+            "granularity": "1m",
+            "initial_cash": 1_000_000,
+        }
+
+        SCENARIO = {
+            "schema_version": 1,
+            "instrument": "7203.TSE",
+            "start": "2025-04-01",
+            "end": "2025-06-30",
+            "granularity": "5m",
+            "initial_cash": 500_000,
+        }
+        """,
+    )
+    with pytest.raises(ScenarioValidationError) as exc:
+        extract(f)
+    assert "multiple" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# M4 (レビュー反映 2026-05-04 ラウンド1): _do_load_strategy_scenario 失敗ログ形式
+# ---------------------------------------------------------------------------
+
+
+def test_load_failed_log_format(tmp_path: Path, caplog) -> None:
+    """server._do_load_strategy_scenario が失敗時に
+    `scenario.load failed reason=... path=...` 形式の WARN ログを出すこと。
+    """
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from engine.server import DataEngineServer
+
+    # ファイルが存在しないパスで Load 失敗を誘発する
+    bogus_path = str(tmp_path / "does_not_exist.py")
+
+    mock_worker = MagicMock()
+    mock_worker.prepare = AsyncMock(return_value=None)
+
+    with patch("engine.server.BinanceWorker", return_value=mock_worker), \
+         patch("engine.server.BybitWorker", return_value=mock_worker), \
+         patch("engine.server.HyperliquidWorker", return_value=mock_worker), \
+         patch("engine.server.MexcWorker", return_value=mock_worker), \
+         patch("engine.server.OkexWorker", return_value=mock_worker):
+
+        server = DataEngineServer(port=0, token="t")
+        msg = {"request_id": "r1", "path": bogus_path}
+        with caplog.at_level(logging.WARNING, logger="engine.server"):
+            asyncio.run(server._do_load_strategy_scenario(msg))
+
+    # ログ本文に "scenario.load failed reason=" を含む WARN レコードがあること
+    found = [r for r in caplog.records if "scenario.load failed reason=" in r.getMessage()]
+    assert found, (
+        f"`scenario.load failed reason=` を含む WARN ログが出ていない:\n"
+        f"records: {[r.getMessage() for r in caplog.records]}"
+    )
+
