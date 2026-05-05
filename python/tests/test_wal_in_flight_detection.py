@@ -394,6 +394,79 @@ class TestChunkBoundaryParametrized:
 # ---------------------------------------------------------------------------
 
 
+class TestTodayCutoff:
+    """C2: JST 当日 0:00 より古い ``ts`` のレコードは terminal 扱い。
+
+    立花 API は accepted までしか同期で返さず、約定/取消は EVENT 経由なので
+    writer は終端 phase を書けない。前日以前の `accepted` 残骸は venue 側で
+    必ず確定済み — `today_start_ms` でフィルタして false-positive を防ぐ。
+    """
+
+    TODAY_MS = 1_777_550_000_000  # 任意の "今日" 基準（テスト用固定値）
+    YESTERDAY_MS = TODAY_MS - 60_000  # 1 分前（前日 23:59 と同じ扱い）
+    TODAY_LATER_MS = TODAY_MS + 3_600_000  # 1 時間後
+
+    def test_today_accepted_is_in_flight(self, tmp_path: Path) -> None:
+        wal = tmp_path / "tachibana_orders.jsonl"
+        _write_wal(wal, [
+            {"client_order_id": "T1", "phase": "accepted", "ts": self.TODAY_LATER_MS},
+        ])
+
+        from engine.wal_in_flight import detect_in_flight_orders
+        result = detect_in_flight_orders(wal, today_start_ms=self.TODAY_MS)
+        assert result == frozenset({"T1"})
+
+    def test_yesterday_accepted_is_terminal(self, tmp_path: Path) -> None:
+        wal = tmp_path / "tachibana_orders.jsonl"
+        _write_wal(wal, [
+            {"client_order_id": "T2", "phase": "accepted", "ts": self.YESTERDAY_MS},
+        ])
+
+        from engine.wal_in_flight import detect_in_flight_orders
+        result = detect_in_flight_orders(wal, today_start_ms=self.TODAY_MS)
+        assert result == frozenset(), (
+            "前日以前の accepted は venue 側で確定済みなので terminal 扱いされる必要がある"
+        )
+
+    def test_today_submit_plus_yesterday_accepted(self, tmp_path: Path) -> None:
+        wal = tmp_path / "tachibana_orders.jsonl"
+        _write_wal(wal, [
+            {"client_order_id": "T3a", "phase": "accepted", "ts": self.YESTERDAY_MS},
+            {"client_order_id": "T3b", "phase": "submit", "ts": self.TODAY_LATER_MS},
+        ])
+
+        from engine.wal_in_flight import detect_in_flight_orders
+        result = detect_in_flight_orders(wal, today_start_ms=self.TODAY_MS)
+        assert result == frozenset({"T3b"}), (
+            "前日 accepted は除外、当日 submit のみ in-flight"
+        )
+
+    def test_legacy_e2e_residue_seventeen_yesterday(self, tmp_path: Path) -> None:
+        """実環境再現 — 前日以前の `e2e-*` 残骸 17 件は in-flight にしない。"""
+        records = [
+            {"client_order_id": f"e2e-{i}", "phase": "accepted", "ts": self.YESTERDAY_MS}
+            for i in range(17)
+        ]
+        wal = tmp_path / "tachibana_orders.jsonl"
+        _write_wal(wal, records)
+
+        from engine.wal_in_flight import detect_in_flight_orders
+        result = detect_in_flight_orders(wal, today_start_ms=self.TODAY_MS)
+        assert result == frozenset()
+
+    def test_today_submit_then_rejected(self, tmp_path: Path) -> None:
+        """既存動作の再確認 — 当日 submit→rejected は terminal 扱い。"""
+        wal = tmp_path / "tachibana_orders.jsonl"
+        _write_wal(wal, [
+            {"client_order_id": "T5", "phase": "submit", "ts": self.TODAY_LATER_MS},
+            {"client_order_id": "T5", "phase": "rejected", "ts": self.TODAY_LATER_MS + 1},
+        ])
+
+        from engine.wal_in_flight import detect_in_flight_orders
+        result = detect_in_flight_orders(wal, today_start_ms=self.TODAY_MS)
+        assert result == frozenset()
+
+
 class TestWalContract:
     """writer (`tachibana_orders.py`) を直接呼んで生成した WAL を、
     reader (`wal_in_flight.detect_in_flight_orders`) が正しく検知することを pin する。

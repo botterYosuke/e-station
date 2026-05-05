@@ -270,12 +270,30 @@ fn set_app_mode(mode: engine_client::dto::AppMode) {
 /// via the stdin payload — so both sides always agree on the WAL location.
 fn has_wal_in_flight_orders() -> bool {
     let wal_path = engine_client::process::engine_cache_dir().join("tachibana_orders.jsonl");
-    has_wal_in_flight_orders_at(&wal_path)
+    has_wal_in_flight_orders_at(&wal_path, jst_today_midnight_ms())
+}
+
+/// JST 当日 0:00 を epoch_ms で返す。WAL `ts` フィールド（epoch_ms）と比較して
+/// 「前営業日以前」のレコードを terminal 扱いにするためのカットオフ。
+fn jst_today_midnight_ms() -> i64 {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    let jst = FixedOffset::east_opt(9 * 3600).expect("9h offset is valid");
+    let now_jst = Utc::now().with_timezone(&jst);
+    let today = now_jst.date_naive();
+    jst.from_local_datetime(&today.and_hms_opt(0, 0, 0).expect("00:00:00 is valid"))
+        .single()
+        .expect("JST midnight is unambiguous")
+        .timestamp_millis()
 }
 
 /// Internal pure helper for [`has_wal_in_flight_orders`] — takes the WAL path
 /// directly so integration tests can exercise it without touching the global cache dir.
-fn has_wal_in_flight_orders_at(wal_path: &std::path::Path) -> bool {
+///
+/// `today_start_ms` は JST 当日 0:00 (epoch_ms)。これより古い `ts` のレコードは
+/// 「前営業日以前」として terminal 扱いし `latest_phase` に積まない。立花の通常
+/// 注文は当日限り有効で、前日以前の `accepted` は venue 側で必ず確定しているため、
+/// WAL に終端 phase が書かれない非同期約定/取消イベントを補正する（C2 修正）。
+fn has_wal_in_flight_orders_at(wal_path: &std::path::Path, today_start_ms: i64) -> bool {
     // M6: surface IO errors via log::warn! (the previous `let Ok(...) else { return false; }`
     // silently treated unreadable WAL as "no in-flight orders", which masked operational
     // problems). Treat IO failure as conservative `false` (do not block the mode switch
@@ -302,22 +320,136 @@ fn has_wal_in_flight_orders_at(wal_path: &std::path::Path) -> bool {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        // C2: 前日以前のレコードは terminal 扱い。立花 API は accepted までしか同期で
+        // 返さず、約定 (filled) / 取消 (canceled) は EVENT 経由なので writer は終端
+        // phase を書けない。前日以前の `accepted` は venue 側で確定済みと安全に断定できる。
+        let ts = record.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        if ts < today_start_ms {
+            continue;
+        }
         // Writer schema (`tachibana_orders.py`): `phase` + `client_order_id`.
-        let order_id = record
-            .get("client_order_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let phase = record
-            .get("phase")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let order_id = record.get("client_order_id").and_then(|v| v.as_str());
+        let phase = record.get("phase").and_then(|v| v.as_str());
         if let (Some(oid), Some(ph)) = (order_id, phase) {
-            latest_phase.entry(oid).or_insert(ph);
+            latest_phase
+                .entry(oid.to_string())
+                .or_insert_with(|| ph.to_string());
         }
     }
     // Terminal phase = `rejected`. Anything else (submit / accepted / unknown)
     // is conservatively treated as in-flight.
     latest_phase.values().any(|ph| ph.as_str() != "rejected")
+}
+
+#[cfg(test)]
+mod wal_today_cutoff_tests {
+    //! C2: JST 当日 0:00 より古い `ts` のレコードは terminal 扱い。
+    //! 立花の通常注文は当日限り — 前日以前の `accepted` は venue 側で必ず確定済み。
+
+    use super::has_wal_in_flight_orders_at;
+
+    const TODAY_MS: i64 = 1_777_550_000_000;
+    const YESTERDAY_MS: i64 = TODAY_MS - 60_000;
+
+    fn write_wal(dir: &std::path::Path, lines: &[&str]) -> std::path::PathBuf {
+        let path = dir.join("tachibana_orders.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn today_accepted_is_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[r#"{"client_order_id":"T1","phase":"accepted","ts":1777553600000}"#],
+        );
+        assert!(has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn yesterday_accepted_is_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[r#"{"client_order_id":"T2","phase":"accepted","ts":1777549940000}"#],
+        );
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn today_submit_with_yesterday_accepted_is_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[
+                r#"{"client_order_id":"T3a","phase":"accepted","ts":1777549940000}"#,
+                r#"{"client_order_id":"T3b","phase":"submit","ts":1777553600000}"#,
+            ],
+        );
+        assert!(has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn legacy_e2e_residue_yesterday_is_not_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lines: Vec<String> = (0..17)
+            .map(|i| {
+                format!(
+                    r#"{{"client_order_id":"e2e-{}","phase":"accepted","ts":{}}}"#,
+                    i, YESTERDAY_MS
+                )
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let wal = write_wal(tmp.path(), &refs);
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn today_submit_then_rejected_is_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[
+                r#"{"client_order_id":"T5","phase":"submit","ts":1777553600000}"#,
+                r#"{"client_order_id":"T5","phase":"rejected","ts":1777553600001}"#,
+            ],
+        );
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn missing_file_returns_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = tmp.path().join("nonexistent.jsonl");
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn record_without_ts_is_kept_for_backwards_compat() {
+        // Older WAL writers may have omitted `ts`. Treat missing/non-numeric as
+        // ts=0 so the record is filtered as ancient (terminal). This matches the
+        // safer default — old logs without ts cannot be reliably "today".
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[r#"{"client_order_id":"NO_TS","phase":"submit"}"#],
+        );
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    // Sanity check: the helper computing JST midnight returns a positive epoch
+    // close to "now" (i.e. within the past day or so).
+    #[test]
+    fn jst_today_midnight_is_recent() {
+        use super::jst_today_midnight_ms;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let today = jst_today_midnight_ms();
+        assert!(today > 0);
+        assert!(today <= now_ms);
+        assert!(now_ms - today < 36 * 3600 * 1000); // within 36h window
+    }
 }
 
 /// F9d streaming events emitted by [`submit_wandb_run_stream`].

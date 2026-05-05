@@ -41,6 +41,7 @@ M9: 大きな WAL でメモリ使用量を抑えるため、ファイル末尾�
 """
 from __future__ import annotations
 
+import datetime as _dt
 import io
 import json
 import logging
@@ -52,6 +53,23 @@ log = logging.getLogger(__name__)
 # 終端 phase 集合（writer の `_audit_log_rejected` のみ）。
 # `submit` / `accepted` / 未知 phase は in-flight 扱い（保守的判定）。
 TERMINAL_PHASES: frozenset[str] = frozenset({"rejected"})
+
+# JST (UTC+9) 固定オフセット — 立花の取引日境界。
+_JST = _dt.timezone(_dt.timedelta(hours=9))
+
+
+def jst_today_midnight_ms() -> int:
+    """JST 当日 0:00 を epoch_ms で返す。
+
+    立花の通常注文は当日限り有効。WAL `ts` (epoch_ms) がこれより古い `accepted`
+    レコードは、venue 側で必ず約定/取消が確定済みなので terminal 扱いできる。
+    Rust 側 `src/main.rs::jst_today_midnight_ms` と挙動を合わせる（C2）。
+    """
+    now_jst = _dt.datetime.now(tz=_JST)
+    midnight = _dt.datetime(
+        now_jst.year, now_jst.month, now_jst.day, tzinfo=_JST
+    )
+    return int(midnight.timestamp() * 1000)
 
 
 def _iter_lines_reverse(path: Path, chunk_size: int = 8192):
@@ -105,11 +123,21 @@ def _iter_lines_reverse(path: Path, chunk_size: int = 8192):
                 return
 
 
-def detect_in_flight_orders(path: Path | str) -> frozenset[str]:
+def detect_in_flight_orders(
+    path: Path | str,
+    today_start_ms: int | None = None,
+) -> frozenset[str]:
     """WAL を逆順スキャンして in-flight な client_order_id 集合を返す。
 
     最新 phase が ``rejected`` でない client_order_id を in-flight とみなす。
     ``submit`` / ``accepted`` / 未知 phase はすべて in-flight 扱い。
+
+    C2: ``today_start_ms`` (JST 当日 0:00 epoch_ms) より古い ``ts`` のレコードは
+    terminal 扱いで無視する。立花 API は accepted までしか同期で返さず、約定/取消
+    は EVENT 経由で writer は終端 phase を書けないため、前日以前の ``accepted``
+    残骸が永久に in-flight 判定されてしまうのを防ぐ。``None`` を渡すと
+    :func:`jst_today_midnight_ms` を使って当日カットオフを自動計算する。テストで
+    決定論的に動かす場合は明示的に整数を渡す。
 
     Returns:
         in-flight な ``client_order_id`` の frozenset。
@@ -118,6 +146,9 @@ def detect_in_flight_orders(path: Path | str) -> frozenset[str]:
     path = Path(path)
     if not path.exists():
         return frozenset()
+
+    if today_start_ms is None:
+        today_start_ms = jst_today_midnight_ms()
 
     seen: dict[str, str] = {}
     try:
@@ -130,6 +161,10 @@ def detect_in_flight_orders(path: Path | str) -> frozenset[str]:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 # Truncated trailing line — skip but keep scanning.
+                continue
+            # C2: 前日以前は terminal 扱い（venue 側で必ず確定している）。
+            ts = record.get("ts")
+            if isinstance(ts, (int, float)) and int(ts) < today_start_ms:
                 continue
             order_id = record.get("client_order_id")
             phase = record.get("phase")
