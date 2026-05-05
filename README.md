@@ -13,7 +13,7 @@
 - **live と replay を同じ思想で使える**: 実運用と検証を、似た UI と似た判断フローで往復できます
 - **レイアウト資産が作れる**: 複数ペイン、リンクグループ、ポップアウトで「自分の観測面」を育てられます
 - **ローカル完結で軽い**: Rust UI + Python engine の構成で、重い SaaS 依存を避けています
-- **自動化しやすい**: REPLAY や注文まわりは localhost の HTTP API から操作できます
+- **自動化しやすい**: REPLAY や注文まわりは Python strategy から直接操作できます
 
 ## こんな人向け
 
@@ -76,15 +76,7 @@ cargo run -- --mode live
 cargo run -- --mode replay
 ```
 
-その後、別ターミナルからデータをロードします。
-
-```bash
-curl -X POST http://127.0.0.1:9876/api/replay/load ^
-  -H "Content-Type: application/json" ^
-  -d "{\"instrument_id\":\"7203.TSE\",\"start_date\":\"2024-01-01\",\"end_date\":\"2024-03-31\",\"granularity\":\"Daily\"}"
-```
-
-読み込み成功後は、対象銘柄の `Kline Chart` と `Time & Sales`、セッション共通の `Order List (REPLAY)` と `Buying Power (REPLAY)` が自動生成されます。
+起動後は `ReplayControl` ペインで銘柄・期間を設定してデータをロードします。読み込み成功後は対象銘柄の `Kline Chart` と `Time & Sales`、セッション共通の `Order List (REPLAY)` と `Buying Power (REPLAY)` が自動生成されます。
 
 ## セットアップ前チェックリスト
 
@@ -96,7 +88,6 @@ curl -X POST http://127.0.0.1:9876/api/replay/load ^
 | 本番 URL への発注 | `TACHIBANA_ALLOW_PROD=1` を明示 |
 | `/api/order/submit` を有効化 | `FLOWSURFACE_ORDER_GUARD_ENABLED=1` を設定 |
 | replay | J-Quants データを配置 |
-| replay 補助スクリプト | `bash scripts/run-replay-debug.sh <strategy.py> <instrument_id> <start_date> <end_date>` |
 
 ひな形は [.env.example](.env.example) を参照してください。
 
@@ -109,17 +100,15 @@ curl -X POST http://127.0.0.1:9876/api/replay/load ^
 | **Workspace** | 複数ペイン、リンクグループ、ポップアウトで作業面を構築 |
 | **Execution** | live では国内株の注文導線、replay では仮想注文 |
 | **Verification** | 過去データロード、再生、速度変更、振り返り、戦略検証 |
-| **Automation** | localhost HTTP API から replay / order / portfolio を操作 |
+| **Automation** | Python strategy から replay / order / portfolio を操作 |
 
 ## REPLAY と戦略
 
 REPLAY は単なるチャート再生ではなく、**NautilusTrader ベースの再生エンジン**と UI をつないだ検証モードです。
 
-- データ投入は `/api/replay/load`
-- 速度変更は `/api/replay/control`
-- 戦略起動は `/api/replay/start`
-- `strategy_file` は **現行実装では必須**です
-- `ReplayControl` ペインから `1x / 10x / 100x` を切り替えられます
+- `ReplayControl` ペインでデータロード・再生開始・速度変更 (`1x / 10x / 100x`) を操作します
+- 戦略ファイルの指定は **現行実装では必須**です
+- WebSocket IPC 経由でコマンドが Python エンジンに送られます (`LoadReplayData` / `SetReplaySpeed` / `StartEngine`)
 
 ユーザー定義 strategy の最小サンプルは [docs/example/test_strategy_daily.py](docs/example/test_strategy_daily.py) と [docs/example/README.md](docs/example/README.md) にあります。
 
@@ -132,7 +121,7 @@ live と replay では意味が異なります。
 | **live** | 立花証券 e支店に対する実注文 |
 | **replay** | 検証用の仮想注文 |
 
-replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます。安全ガードの詳細は [docs/✅order/spec.md](docs/✅order/spec.md) と [docs/✅tachibana/spec.md](docs/✅tachibana/spec.md) を参照してください。
+replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます。安全ガードの詳細は [docs/✅order/spec.md](https://botteryosuke.github.io/e-station/%E2%9C%85order/) と [docs/✅tachibana/spec.md](https://botteryosuke.github.io/e-station/%E2%9C%85tachibana/) を参照してください。
 
 ## ドキュメントの読み分け
 
@@ -141,22 +130,9 @@ replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付
 - **ユーザー向け**: [GitHub Wiki](https://github.com/botterYosuke/e-station/wiki)
 - **開発者向け**: [MkDocs サイト](https://botteryosuke.github.io/e-station/)
 
-未実装計画の補足: メニューラベル（W&B 系を含む）の英日表記統一は [docs/✅menu-and-footer/fix-save-menu.md#menu-labels](docs/✅menu-and-footer/fix-save-menu.md#menu-labels) を参照してください。
-
-ユーザー向けの入口:
-
-- [Getting Started](docs/wiki/getting-started.md)
-- [Modes & Venues](docs/wiki/modes-and-venues.md)
-- [Charts](docs/wiki/charts.md)
-- [Replay](docs/wiki/replay.md)
-- [Backtest](docs/wiki/backtest.md)
-- [Orders](docs/wiki/orders.md)
-- [Settings](docs/wiki/settings.md)
-- [Troubleshooting](docs/wiki/troubleshooting.md)
-
 ## アーキテクチャ概要
 
-Rust / Iced（UI）+ Python engine（市場データ・NautilusTrader・立花証券）の 2 プロセス構成で、IPC WebSocket で連携します。詳細は [AGENTS.md](AGENTS.md) と [docs/✅python-data-engine/](docs/✅python-data-engine/) を参照してください。
+Rust / Iced（UI）+ Python engine（市場データ・NautilusTrader・立花証券）の 2 プロセス構成で、IPC WebSocket で連携します。詳細は [AGENTS.md](AGENTS.md) と [docs/✅python-data-engine/](https://botteryosuke.github.io/e-station/%E2%9C%85python-data-engine) を参照してください。
 
 ## 安全に関する注意
 
