@@ -411,5 +411,56 @@ Path A（全件）の TDD で解消した。Phase 1/2/3/4+5 の 4 コミット�
 17acacf fix(F7): C1 — WAL writer/reader schema 不整合を修正し contract test を追加する
 fec2764 fix(F7): HIGH 4 件（lock_order RAII / StopReplay state / chunk boundary / unicast pin）
 4e3b330 fix(F7): MEDIUM 10 件（dialog 対称化 / lock-order tracing / state race / runtime test）
-(本コミット): fix(F7): LOW + ラウンド 3 計画書反映
+e15ea84 fix(F7): LOW + ラウンド 3 計画書反映 (L1-rust/L2-rust/L4/L5/M-3 軽量版)
+```
+
+---
+
+## レビュー反映 (2026-05-05, ラウンド 4 サニティ)
+
+`/review-fix-loop` ラウンド 4 サニティ（silent-failure-hunter / rust-reviewer / general-purpose 3 並列）の結果、
+**CRITICAL 0 / HIGH 0 / MEDIUM 7 / LOW 4** で **HIGH 以上ゼロ収束**を確認した。
+F7 はラウンド 4 で着地（着地判定）。MEDIUM 7 件 + LOW 4 件は実害のない観測性・テスト網羅・
+コメント整合の指摘であり、**次イテレーション繰越**として本ブロックに明示する。
+
+### 検証コマンド全件緑
+
+```text
+cargo fmt --check               → exit 0
+cargo check --workspace         → Finished `dev` profile
+cargo clippy --workspace -- -D warnings → Finished `dev` profile
+cargo test --workspace          → all green（F7 commits だけで通過）
+uv run pytest python/tests/test_wal_in_flight_detection.py
+                                 python/tests/test_server_engine_dispatch.py
+                                → 94 passed
+```
+
+### 次イテレーション繰越（MEDIUM 7 件）
+
+| ID | 場所 | 内容 | 理由 / 期限 / 代替策 |
+|----|------|------|----------------------|
+| R4-M1 | `src/main.rs:161-164` | `lock_order_acquire` の `log::info!` が production ホットパスでログ汚染するリスク | 観測性のみ。`#[cfg(debug_assertions)]` ラップ or `log::debug!` 格下げで対処。**期限**: 次フェーズ着手時に併合 |
+| R4-M2 | `src/main.rs:6418-6425` ↔ `:606-617` | `restart_with_mode` 末尾の `lock_order_reset()` 明示呼び出しと `ModeSwitchGuard::Drop` の reset が二重実行（冪等で副作用なし） | 正確性影響なし。Drop に完全委譲して明示 reset 削除、または「冪等」コメント追記 |
+| R4-M3 | `python/tests/test_wal_in_flight_detection.py:311-389` | `TestChunkBoundaryParametrized` 31 ケースが ASCII のみで multi-byte UTF-8 文字（例 "日本株"）の chunk 境界分断ケース欠落 | `\n` バイト境界分割により実害は出ないが、リグレッション網羅性として補強推奨 |
+| R4-M4 | `python/tests/test_engine_busy_query_guards.py:24-26` / `test_engine_busy_reject.py:30-33` | R3 で `_ListOutbox.send_to` に `unicast_calls` 記録を追加したが他テストファイルの同種 stub に波及せず → broadcast/unicast 取り違え silent 検知不可 | `tests/fixtures/outbox_stub.py` に共通化推奨 |
+| R4-M5 | `tests/wal_writer_reader_contract.rs:38,72` | writer 経由 contract test 2 件が `#[ignore]` で CI 除外。Rust reader が wire schema を変えても CI で検知不可 | CI yaml の修正が必要。**代替策**: `cargo test -- --include-ignored` を `uv-available` ジョブで実行 or PR template に手動実行を明記。**期限**: CI 整備フェーズで対処 |
+| R4-M6 | `src/main.rs:644-645` (`ModeSwitchError::ConfirmCancelled`) | `#[allow(dead_code)]` の TODO docstring が action-oriented でなく配線先（`GoBack` / `ToggleDialogModal(None)`）が明示されていない | コメント `// TODO(F7-Rx): wire from GoBack/ToggleDialogModal(None)` 形式へ |
+| R4-M7 | `python/tests/test_server_engine_dispatch.py:1197-1219` | `test_stop_replay_resets_state_to_idle` docstring に H2 順序契約の `test_*_state_idle_before_broadcast` への相互参照リンク欠落 | docstring に相互参照を追記 |
+
+### 次イテレーション繰越（LOW 4 件）
+
+- L1 (rust): `tests/wandb_modeswitch_lock_order.rs::mode_switch_guard_drop_resets_lock_order_index` の `// _guard is dropped here.` コメント位置補正
+- L2 (rust): `has_wal_in_flight_orders` の rustdoc link 形式 (`[`fn_name`]`) 確認
+- L3 (rust + silent 重複): `wal_writer_reader_contract.rs` の `uv` ヘルパーと source-inspection テストの mod 分離
+- L4 (general): writer 経由 test に未知 `phase` ケースを meta-test として追加（`_AUDIT_LOG_PHASES` 定数 vs `TERMINAL_PHASES` の集合関係 assert）
+
+### 次回 MISSES.md 追記候補
+
+- **CI における `#[ignore]` テストの取り扱い**: contract test を `#[ignore]` にすると CI で除外され、本来検知すべき言語境界 regression が見逃される。`#[ignore]` を使う場合は CI 側で `--include-ignored` ジョブを必ず併設するルールの徹底
+- **テスト stub の同期管理**: 複数テストファイルが同じ shape の stub（例: `_ListOutbox`）を持つとき、片方を改修するともう片方が drift する。共通 fixture 化の徹底
+
+### コミット履歴（ラウンド 4）
+
+```text
+(本コミット): docs(F7): ラウンド 4 サニティ着地と繰越明記
 ```
