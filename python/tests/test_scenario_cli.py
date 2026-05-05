@@ -234,10 +234,10 @@ def test_granularity_only_omitted_uses_scenario(tmp_path: Path) -> None:
 
 
 def test_reads_buy_and_hold_scenario(tmp_path: Path) -> None:
-    """docs/example/buy_and_hold.py の SCENARIO が CLI フォールバックで使える。"""
-    buy_and_hold = Path(__file__).parent.parent.parent / "docs" / "example" / "buy_and_hold.py"
+    """docs/example/test_strategy_daily.py の SCENARIO が CLI フォールバックで使える。"""
+    buy_and_hold = Path(__file__).parent.parent.parent / "docs" / "example" / "test_strategy_daily.py"
     if not buy_and_hold.exists():
-        pytest.skip("docs/example/buy_and_hold.py not found")
+        pytest.skip("docs/example/test_strategy_daily.py not found")
 
     instrument, start, end, *_ = _resolve_cli_params(
         strategy_path=str(buy_and_hold),

@@ -81,7 +81,7 @@ def test_buy_and_hold_runs_to_completion(tmp_path):
         assert s.mode == "inprocess"   # engine が居なければ in-process
         s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
         s.run(
-            strategy_file="docs/example/buy_and_hold.py",
+            strategy_file="docs/example/test_strategy_daily.py",
             on_event=events.append,
             initial_cash=1_000_000,
         )
@@ -94,6 +94,26 @@ def test_buy_and_hold_runs_to_completion(tmp_path):
 
 ### attach mode（GUI 起動中の helper 並走）
 
+GUI を立ち上げてから helper を attach する手順（手動デモ・人手確認）：
+
+```bash
+# ターミナル1: GUI を replay モードで起動。engine-session.json が
+#   %APPDATA%\flowsurface\ に書かれるまで待つ（通常 5〜15s）。
+cargo run -- --mode replay
+
+# ターミナル2: helper を attach mode で走らせる。
+uv run python -m engine.replay_session run \
+    --strategy docs/example/test_strategy_daily.py \
+    --instrument 1301.TSE --start 2025-01-06 --end 2025-03-31 \
+    --mode auto
+```
+
+完全な観測点リスト（pane 自動生成・bar 蓄積・EngineBusy・session ファイル
+の Drop 削除）は [python/tests/test_replay_session_attach_manual_smoke.md](../../../python/tests/test_replay_session_attach_manual_smoke.md) にある。
+ユーザー向けの解説は [docs/wiki/backtest.md](../../../docs/wiki/backtest.md)。
+
+pytest から attach mode を使う例：
+
 ```python
 def test_helper_attaches_to_running_gui():
     # GUI 側で `cargo run -- --mode replay` 起動済み
@@ -104,6 +124,9 @@ def test_helper_attaches_to_running_gui():
         # event は GUI チャートと pytest 両方に流れる
         s.run(strategy_file="docs/example/buy_and_hold.py", on_event=lambda e: None)
 ```
+
+> stderr に `Subscribe: unknown venue 'replay'` が出るのは仕様（[AGENTS.md](../../../AGENTS.md) §replay 参照）。
+> Rust 側の Subscribe は Python が拒否するが、bar は streaming `KlineUpdate` で届く。
 
 ### 速度変更・中断
 

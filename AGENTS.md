@@ -178,7 +178,7 @@ replay の起動経路は 2 系統あり、どちらも `ReplaySession` helper �
 
 ```bash
 uv run python -m engine.replay_session run \
-    --strategy docs/example/buy_and_hold.py \
+    --strategy docs/example/test_strategy_daily.py \
     --instrument 1301.TSE \
     --start 2025-01-06 \
     --end 2025-03-31
@@ -198,7 +198,9 @@ bar が積まれる。GUI が居なければ helper プロセス内で `Nautilus
 
 | ファイル | 内容 |
 |---------|------|
-| `buy_and_hold.py` | 最初のバーで成行買いし、以降は保有し続ける最小戦略 |
+| `test_strategy_daily.py` | 最初のバーで成行買いし、以降は保有し続ける最小戦略（Daily 足） |
+| `test_strategy_minute.py` | 同上の Minute 足バリエーション |
+| `test_strategy_trade.py` | 同上の Trade（歩み値）バリエーション |
 
 #### `saved-state.json` の扱い（D9）
 
@@ -232,7 +234,7 @@ from engine.replay_session import ReplaySession
 
 with ReplaySession() as s:           # __enter__ で :19876 を probe
     s.load("1301.TSE", "2025-01-06", "2025-03-31")
-    s.run(strategy_file="docs/example/buy_and_hold.py",
+    s.run(strategy_file="docs/example/test_strategy_daily.py",
           on_event=lambda evt: print(evt))
 ```
 

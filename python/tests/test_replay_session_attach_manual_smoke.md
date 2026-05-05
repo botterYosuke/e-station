@@ -3,6 +3,10 @@
 Phase 8.1b: `cargo run -- --mode replay` + `uv run python -m engine.replay_session run ...` による
 GUI pane 生成・bar 蓄積を人手で確認する手順。CI では自動実行できない GUI 視覚確認の観測点を固定する。
 
+> ユーザー向けの解説（戦略の書き方・パラメータの意味・経路 A/B の比較）は
+> [docs/wiki/backtest.md](../../docs/wiki/backtest.md) にある。
+> このファイルは attach mode 動作の **観測点チェックリスト** に特化している。
+
 ---
 
 ## 前提条件

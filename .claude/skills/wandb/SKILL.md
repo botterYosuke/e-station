@@ -379,4 +379,6 @@ wandb sync ./wandb/run-<timestamp>-<run-id>/
 | [docs/plan/wandb-vision.md](../../../docs/plan/wandb-vision.md) | 完成図とアーキテクチャ全体像 |
 | [examples/wandb/](../../../examples/wandb/) | 実装レシピ置き場 |
 | [python/engine/replay_session.py](../../../python/engine/replay_session.py) | バックテスト駆動の正規ルート |
-| [docs/example/buy_and_hold.py](../../../docs/example/buy_and_hold.py) | 最小戦略サンプル |
+| [docs/example/test_strategy_daily.py](../../../docs/example/test_strategy_daily.py) | 最小戦略サンプル（Daily 足）|
+| [docs/example/test_strategy_minute.py](../../../docs/example/test_strategy_minute.py) | 最小戦略サンプル（Minute 足）|
+| [docs/example/test_strategy_trade.py](../../../docs/example/test_strategy_trade.py) | 最小戦略サンプル（Trade）|

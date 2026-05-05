@@ -3,13 +3,24 @@
 最初のバーで成行買いし、その後は保有し続ける最小戦略。
 numpy / pandas は使わず、追加依存は不要です。
 
-起動:
+起動（headless / in-process）:
 
-    bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31
+    uv run python -m engine.replay_session run \
+        --strategy docs/example/buy_and_hold.py \
+        --instrument 1301.TSE --start 2025-01-06 --end 2025-03-31 \
+        --mode inprocess
 
-strategy_init_kwargs で初期化パラメータを上書きできます:
+GUI 付きで attach する場合は別ターミナルで先に `cargo run -- --mode replay`
+を起動してから上記コマンドを `--mode auto`（または `attach`）で実行する。
+詳しい手順は docs/wiki/backtest.md を参照。
 
-    {"instrument_id": "1301.TSE", "lot_size": 100}
+strategy_init_kwargs で初期化パラメータを上書きする場合は Python から呼ぶ:
+
+    from engine.replay_session import ReplaySession
+    with ReplaySession() as s:
+        s.load("1301.TSE", "2025-01-06", "2025-03-31")
+        s.run(strategy_file="docs/example/buy_and_hold.py",
+              strategy_init_kwargs={"lot_size": 200})
 
 注意:
     - サンドボックスはありません。バグによる誤発注はユーザー責任です

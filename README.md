@@ -128,7 +128,7 @@ REPLAY は単なるチャート再生ではなく、**NautilusTrader ベース�
 - `strategy_file` は **現行実装では必須**です
 - `ReplayControl` ペインから `1x / 10x / 100x` を切り替えられます
 
-ユーザー定義 strategy の最小サンプルは [docs/example/buy_and_hold.py](docs/example/buy_and_hold.py) と [docs/example/README.md](docs/example/README.md) にあります。
+ユーザー定義 strategy の最小サンプルは [docs/example/test_strategy_daily.py](docs/example/test_strategy_daily.py) と [docs/example/README.md](docs/example/README.md) にあります。
 
 ## 注文まわり
 
