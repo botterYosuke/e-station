@@ -1422,6 +1422,12 @@ struct Flowsurface {
     /// The leading `_` on the field name silences the unused-field lint for
     /// the guard half (it is held purely for its Drop side-effect).
     mode_switch_state: Option<(engine_client::dto::AppMode, ModeSwitchGuard)>,
+    /// True between a `ModeSwitchEngineBusy` abort and the user acknowledging
+    /// the abort dialog (`ToggleDialogModal(None)`). Prevents the footer badge
+    /// from re-enabling immediately after a failed mode-switch while the engine
+    /// is still settling. Cleared unconditionally on dialog dismiss (idempotent
+    /// when already false, identical to the mode_switch_state = None reset).
+    engine_busy: bool,
     /// True while a replay is currently loaded/running. Drives the
     /// "リプレイ停止（Replay Stop）" menu item's enabled state — the item is
     /// only clickable while a replay is actually playing. Set true on
@@ -2172,7 +2178,22 @@ fn status_bar(state: crate::menu::ModeToggleState) -> Element<'static, Message> 
 
     let badge = button(text(label).size(11).color(color))
         .padding(padding::left(8).right(8))
-        .style(button::text);
+        .style(move |_theme, status| {
+            use iced::widget::button::{Status, Style};
+            Style {
+                background: if state.enabled {
+                    match status {
+                        Status::Hovered | Status::Pressed => Some(iced::Background::Color(
+                            iced::Color::from_rgba(1.0, 1.0, 1.0, 0.06),
+                        )),
+                        _ => None,
+                    }
+                } else {
+                    None
+                },
+                ..Style::default()
+            }
+        });
 
     let badge_el: Element<'static, Message> = if state.enabled {
         // Route through the same BarMessage::Pick → to_native_action → NativeMenuAction
@@ -2346,6 +2367,7 @@ impl Flowsurface {
             pending_exit_windows: None,
             pending_open_file: None,
             mode_switch_state: None,
+            engine_busy: false,
             replay_running: false,
             replay_stop_only_pending: false,
             menu_bar: crate::menu_bar_state::State::default(),
@@ -4256,7 +4278,7 @@ impl Flowsurface {
                             self.replay_form_modal = None;
                         }
                         Some(modal::replay_form::Action::Submit {
-                            instrument_id,
+                            instrument_ids,
                             start_date,
                             end_date,
                             granularity,
@@ -4268,13 +4290,14 @@ impl Flowsurface {
                                 let strategy_file_str =
                                     strategy_file.to_string_lossy().into_owned();
                                 let gran_dto = granularity.to_dto();
+                                let first_id = instrument_ids[0].clone();
                                 return Task::perform(
                                     async move {
                                         let load_req_id = uuid::Uuid::new_v4().to_string();
                                         conn.send(engine_client::dto::Command::LoadReplayData {
                                             request_id: load_req_id,
-                                            instrument_id: instrument_id.clone(),
-                                            instrument_ids: None,
+                                            instrument_id: first_id.clone(),
+                                            instrument_ids: Some(instrument_ids.clone()),
                                             start_date: start_date.clone(),
                                             end_date: end_date.clone(),
                                             granularity: gran_dto.clone(),
@@ -4287,8 +4310,8 @@ impl Flowsurface {
                                             engine: engine_client::dto::EngineKind::Backtest,
                                             strategy_id: "user-strategy".to_string(),
                                             config: engine_client::dto::EngineStartConfig {
-                                                instrument_id,
-                                                instrument_ids: None,
+                                                instrument_id: first_id,
+                                                instrument_ids: Some(instrument_ids),
                                                 start_date,
                                                 end_date,
                                                 initial_cash: initial_cash.to_string(),
@@ -4971,6 +4994,7 @@ impl Flowsurface {
             // F7: ForceStopReplay EngineBusy — genuine failure; abort the flow.
             // Shared between mode-switch and stop-only paths.
             Message::ModeSwitchEngineBusy(reason) => {
+                self.engine_busy = true;
                 let was_mode_switch = self.mode_switch_state.take().is_some();
                 let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
                 if was_mode_switch || was_stop_only {
@@ -5318,6 +5342,7 @@ impl Flowsurface {
                     // active mode-switch — it would only do so if the active
                     // mode-switch's own dialog is being closed.
                     self.mode_switch_state = None;
+                    self.engine_busy = false;
                 }
                 self.confirm_dialog = dialog;
             }
@@ -6111,7 +6136,7 @@ impl Flowsurface {
             );
             let mode_toggle = crate::menu::mode_toggle_state(
                 current_mode,
-                false,
+                self.engine_busy,
                 SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire),
                 self.mode_switch_state.is_some(),
             );

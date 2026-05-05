@@ -525,21 +525,29 @@ mod tests {
     }
 
     #[test]
-    fn tt3_submit_in_flight_takes_priority_over_engine_busy() {
-        let s = mode_toggle_state(AppMode::Replay, true, true, false);
+    fn tt3_submit_in_flight_beats_engine_busy() {
+        // submit_in_flight has higher priority than engine_busy
+        let s = mode_toggle_state(AppMode::Live, true, true, false);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("W&B 送信中は切替できません"));
     }
 
     #[test]
     fn tt4_mode_switch_in_progress_is_highest_priority() {
-        let s = mode_toggle_state(AppMode::Live, true, true, true);
+        let s = mode_toggle_state(AppMode::Replay, false, true, true);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
     }
 
     #[test]
-    fn tt4b_mode_switch_in_progress_alone_disables() {
+    fn tt4b_mode_switch_alone_disables() {
+        let s = mode_toggle_state(AppMode::Live, false, false, true);
+        assert!(!s.enabled);
+        assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
+    }
+
+    #[test]
+    fn tt4c_replay_mode_also_disabled_when_switching() {
         let s = mode_toggle_state(AppMode::Replay, false, false, true);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));

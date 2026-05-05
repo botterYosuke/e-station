@@ -31,7 +31,7 @@ const DEFAULT_PROBE_URL: &str = "ws://127.0.0.1:19876/";
 pub enum EngineCommand {
     /// A standalone executable (PyInstaller / Nuitka output).
     Bundled(PathBuf),
-    /// `python -m engine` — used when no bundled binary is found.
+    /// `python -m engine` — used when no bundled binary is found (dev installs).
     System { program: String, args: Vec<String> },
 }
 

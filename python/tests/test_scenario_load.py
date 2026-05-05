@@ -337,7 +337,7 @@ def test_validate_wrong_schema_version() -> None:
 def test_reads_buy_and_hold_example() -> None:
     """`examples/test_strategy_daily.py`（実際のファイル）から SCENARIO を読めること。"""
     repo_root = Path(__file__).parent.parent.parent
-    buy_and_hold = repo_root / "docs" / "example" / "test_strategy_daily.py"
+    buy_and_hold = repo_root / "examples" / "test_strategy_daily.py"
 
     assert buy_and_hold.exists(), (
         f"test_strategy_daily.py が見つからない: {buy_and_hold}\n"

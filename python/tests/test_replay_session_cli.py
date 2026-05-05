@@ -5,8 +5,12 @@ J-Quants データは不要（FileNotFoundError を出すことを確認する�
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+
+# 子プロセスの stdout/stderr を UTF-8 で統一する（Windows の cp932 デフォルトを上書き）
+_CHILD_ENV = {**os.environ, "PYTHONUTF8": "1"}
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess:
@@ -17,8 +21,10 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess:
             "engine.replay_session",
             *args,
         ],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        env=_CHILD_ENV,
     )
 
 
@@ -34,7 +40,7 @@ def test_cli_run_nonexistent_data_exits_nonzero():
     assert result.returncode != 0
 
 
-def test_cli_run_nonexistent_strategy_exits_nonzero(tmp_path, monkeypatch):
+def test_cli_run_nonexistent_strategy_exits_nonzero(tmp_path):
     """データが存在しても strategy_file が無ければ非 0 終了する。
 
     check_data_exists をパスする環境がない可能性があるため、
@@ -61,4 +67,7 @@ def test_cli_help_exits_zero():
     """--help は 0 終了する。"""
     result = _run_cli("--help")
     assert result.returncode == 0
-    assert "replay_session" in result.stdout or "replay" in result.stdout.lower()
+    stdout = result.stdout or ""
+    assert "replay_session" in stdout or "replay" in stdout.lower(), (
+        f"Expected help text in stdout, got: {stdout!r} (stderr={result.stderr!r})"
+    )

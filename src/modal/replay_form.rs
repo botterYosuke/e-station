@@ -62,7 +62,7 @@ pub enum Message {
 
 pub enum Action {
     Submit {
-        instrument_id: String,
+        instrument_ids: Vec<String>,
         start_date: String,
         end_date: String,
         granularity: Granularity,
@@ -76,7 +76,7 @@ pub enum Action {
 /// M-5 (rust): `validate()` の戻り値を構造体化することで位置引数の取り違えを防ぐ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedForm {
-    pub instrument_id: String,
+    pub instrument_ids: Vec<String>,
     pub start_date: String,
     pub end_date: String,
     pub granularity: Granularity,
@@ -109,8 +109,16 @@ fn is_valid_date(s: &str) -> bool {
 
 impl ReplayFormModal {
     fn validate(&self) -> Result<ValidatedForm, String> {
-        let instrument_id = self.instrument_id.trim().to_string();
-        if instrument_id.is_empty() {
+        let raw = self.instrument_id.trim();
+        if raw.is_empty() {
+            return Err("銘柄コードを入力してください".to_string());
+        }
+        let instrument_ids: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if instrument_ids.is_empty() {
             return Err("銘柄コードを入力してください".to_string());
         }
         let start_date = self.start_date.trim().to_string();
@@ -144,7 +152,7 @@ impl ReplayFormModal {
             return Err("初期資金は 1 以上にしてください".to_string());
         }
         Ok(ValidatedForm {
-            instrument_id,
+            instrument_ids,
             start_date,
             end_date,
             granularity,
@@ -170,8 +178,16 @@ impl ReplayFormModal {
             self.validation_error = None;
             return;
         };
+        // v1: instrument (単一銘柄)
         if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
             self.instrument_id = s.to_string();
+        }
+        // v2: instruments (複数銘柄リスト) — カンマ区切りで結合して入力欄に表示
+        if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
+            let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+            if !ids.is_empty() {
+                self.instrument_id = ids.join(", ");
+            }
         }
         if let Some(s) = obj.get("start").and_then(|v| v.as_str()) {
             self.start_date = s.to_string();
@@ -226,7 +242,7 @@ impl ReplayFormModal {
             }
             Message::Submit => match self.validate() {
                 Ok(ValidatedForm {
-                    instrument_id,
+                    instrument_ids,
                     start_date,
                     end_date,
                     granularity,
@@ -236,7 +252,7 @@ impl ReplayFormModal {
                     self.validation_error = None;
                     self.submitting = true;
                     Some(Action::Submit {
-                        instrument_id,
+                        instrument_ids,
                         start_date,
                         end_date,
                         granularity,
@@ -274,7 +290,7 @@ impl ReplayFormModal {
 
         let mut col = column![
             text("Replay を開始").size(18),
-            text("銘柄コード (例: 1301.TSE)").size(12),
+            text("銘柄コード (例: 1301.TSE, 7203.TSE)").size(12),
             text_input("1301.TSE", &self.instrument_id).on_input(Message::InstrumentChanged),
             text("開始日 (例: 2025-01-06)").size(12),
             text_input("2025-01-06", &self.start_date).on_input(Message::StartDateChanged),
@@ -433,6 +449,25 @@ mod tests {
     }
 
     #[test]
+    fn validation_succeeds_with_multiple_instruments() {
+        let mut form = ReplayFormModal::default();
+        form.instrument_id = "1301.TSE, 7203.TSE, 6758.TSE".to_string();
+        form.start_date = "2025-01-06".to_string();
+        form.end_date = "2025-01-10".to_string();
+        form.granularity = Some(Granularity::Minute);
+        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
+        form.initial_cash = "10000000".to_string();
+        let action = form.update(Message::Submit);
+        match action {
+            Some(Action::Submit { instrument_ids, .. }) => {
+                assert_eq!(instrument_ids, vec!["1301.TSE", "7203.TSE", "6758.TSE"]);
+            }
+            _ => panic!("expected Submit action"),
+        }
+        assert!(form.validation_error.is_none());
+    }
+
+    #[test]
     fn cancel_returns_cancel_action() {
         let mut form = ReplayFormModal::default();
         let action = form.update(Message::Cancel);
@@ -477,6 +512,26 @@ mod tests {
             form.strategy_file,
             Some(std::path::PathBuf::from("/tmp/s.py"))
         );
+        assert!(form.validation_error.is_none());
+    }
+
+    #[test]
+    fn prefill_from_scenario_v2_joins_instruments_with_comma() {
+        let mut form = ReplayFormModal::default();
+        let scenario = serde_json::json!({
+            "schema_version": 2,
+            "instruments": ["1301.TSE", "7203.TSE", "6758.TSE"],
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 10_000_000_u64,
+        });
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/multi.py"), &scenario);
+        assert_eq!(form.instrument_id, "1301.TSE, 7203.TSE, 6758.TSE");
+        assert_eq!(form.start_date, "2025-01-06");
+        assert_eq!(form.end_date, "2025-01-10");
+        assert_eq!(form.granularity, Some(Granularity::Minute));
+        assert_eq!(form.initial_cash, "10000000");
         assert!(form.validation_error.is_none());
     }
 
