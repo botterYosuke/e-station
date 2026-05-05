@@ -16,7 +16,7 @@ use iced::widget::{
 use iced::{Element, Length};
 
 use crate::Message;
-use crate::menu::{Action, MenuEntry, actions_for_mode, mode_menu_items, tools_actions_for_state};
+use crate::menu::{Action, MenuEntry, actions_for_mode, tools_actions_for_state};
 pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
 use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 
@@ -30,14 +30,14 @@ const BTN_WIDTH: f32 = 155.0;
 /// cursor last rested.
 const BAR_HEIGHT: f32 = 32.0;
 
-/// Returns the menu button row (`File ▼` / `Mode ▼` / `Tools ▼`).
+/// Returns the menu button row (`File ▼` / `Tools ▼`).
 ///
 /// Each button has an explicit fixed width so the horizontal dropdown positions
 /// can be computed exactly from `BTN_WIDTH + spacing`.  The bar itself is
 /// wrapped in a `container` with an explicit `BAR_HEIGHT` so the overlay anchor
 /// is always the bar's bottom edge, not the cursor's position within the bar.
 ///
-/// A `mouse_area` fills the space to the right of the three buttons and fires
+/// A `mouse_area` fills the space to the right of the two buttons and fires
 /// `BarMessage::Dismiss` on press, satisfying DoD-4 for the full bar width.
 ///
 /// The caller must `.map(Message::MenuBar)` before pushing into the column.
@@ -61,7 +61,6 @@ pub fn view<'a>(state: &'a State, _mode: AppMode) -> Element<'a, BarMessage> {
 
     let bar_row = row![
         mk("ファイル（File）▼", TopMenu::File),
-        mk("モード（Mode）▼", TopMenu::Mode),
         mk("ツール（Tools）▼", TopMenu::Tools),
         empty_strip,
     ]
@@ -104,6 +103,7 @@ pub fn with_dropdown_overlay<'a>(
     mode: AppMode,
     wandb_auth: &'a WandbAuthState,
     run_buf: &'a RunBufferIndex,
+    replay_running: bool,
 ) -> Element<'a, Message> {
     let Some(open_top) = state.open else {
         return base;
@@ -113,8 +113,7 @@ pub fn with_dropdown_overlay<'a>(
     let step = BTN_WIDTH + 2.0; // 2.0 = row spacing
     let left_offset = match open_top {
         TopMenu::File => 0.0,
-        TopMenu::Mode => step,
-        TopMenu::Tools => 2.0 * step,
+        TopMenu::Tools => step,
     };
 
     // Vertical offset: bar's bottom edge = BAR_HEIGHT (bar is always at y=0
@@ -122,7 +121,7 @@ pub fn with_dropdown_overlay<'a>(
     // anchor — see the rationale on `view()`'s removed `.on_move` handler.
     let top_offset = BAR_HEIGHT;
 
-    let entries = entries_for_menu(open_top, &mode, wandb_auth, run_buf);
+    let entries = entries_for_menu(open_top, &mode, wandb_auth, run_buf, replay_running);
     let items = build_dropdown(entries);
     let dropdown_panel = opaque(
         container(column(items))
@@ -135,7 +134,9 @@ pub fn with_dropdown_overlay<'a>(
     let dismiss_area = opaque(
         mouse_area(
             container(row![
-                Space::new().width(Length::Fixed(left_offset)).height(Length::Shrink),
+                Space::new()
+                    .width(Length::Fixed(left_offset))
+                    .height(Length::Shrink),
                 dropdown_panel,
             ])
             .width(Length::Fill)
@@ -147,7 +148,9 @@ pub fn with_dropdown_overlay<'a>(
     // The leading Space is NOT wrapped in opaque/mouse_area, so pointer events
     // in the button-row band fall through to layer 0 (base) buttons.
     let overlay = column![
-        Space::new().width(Length::Fill).height(Length::Fixed(top_offset)),
+        Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(top_offset)),
         dismiss_area,
     ];
 
@@ -160,18 +163,28 @@ fn entries_for_menu(
     mode: &AppMode,
     wandb_auth: &WandbAuthState,
     run_buf: &RunBufferIndex,
+    replay_running: bool,
 ) -> Vec<MenuEntry> {
     match top {
         TopMenu::File => actions_for_mode(mode)
             .into_iter()
-            .map(|action| MenuEntry {
-                action,
-                enabled: true,
-                tooltip: None,
-                checked: None,
+            .map(|action| {
+                // "リプレイ停止" is only clickable while a replay is actually
+                // running; everything else in the File menu is unconditional.
+                let (enabled, tooltip) = match action {
+                    Action::ReplayStop if !replay_running => {
+                        (false, Some("リプレイは実行されていません"))
+                    }
+                    _ => (true, None),
+                };
+                MenuEntry {
+                    action,
+                    enabled,
+                    tooltip,
+                    checked: None,
+                }
             })
             .collect(),
-        TopMenu::Mode => mode_menu_items(mode),
         TopMenu::Tools => tools_actions_for_state(wandb_auth, run_buf),
     }
 }
@@ -272,8 +285,9 @@ fn action_label_and_shortcut(action: &Action) -> (&'static str, Option<&'static 
 
 /// Maps `menu::Action` to the equivalent `native_menu::Action`, if one exists.
 ///
-/// `ReplayStop` maps to `SwitchMode(Live)` — stopping replay on Linux goes through
-/// the same mode-switch flow as on Win/Mac (F7 guard + StopReplay command).
+/// `ReplayStop` maps to `StopReplay` — stops the running replay without
+/// switching app mode. The dashboard stays in Replay mode and the engine
+/// transitions to IDLE (a new replay can then be started via `ReplayStart`).
 pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Action> {
     use crate::native_menu::Action as N;
     match action {
@@ -281,7 +295,7 @@ pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Ac
         Action::Save => Some(N::Save),
         Action::SaveAs => Some(N::SaveAs),
         Action::ReplayStart => Some(N::OpenReplayDialog),
-        Action::ReplayStop => Some(N::SwitchMode(AppMode::Live)),
+        Action::ReplayStop => Some(N::StopReplay),
         Action::Quit => Some(N::Quit),
         Action::SwitchAppMode(mode) => Some(N::SwitchMode(*mode)),
         Action::SubmitToWandb => Some(N::SubmitToWandb),
@@ -293,7 +307,6 @@ pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Ac
 }
 
 // F8 R2 / M-A: the `menu_items` / `mode_items` wrappers were removed because
-// they were pure delegation shims over `menu::actions_for_mode` /
-// `menu::mode_menu_items` with zero external callers after H2 (F8 R1) added
-// `pub use` for the underlying functions. Callers should use those module-
-// level functions directly (already imported at the top of this file).
+// they were pure delegation shims over `menu::actions_for_mode` with zero
+// external callers after H2 (F8 R1). The Mode menu itself was subsequently
+// removed and replaced by the footer toggle (mode-toggle-redesign).

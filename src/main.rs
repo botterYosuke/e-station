@@ -270,12 +270,30 @@ fn set_app_mode(mode: engine_client::dto::AppMode) {
 /// via the stdin payload — so both sides always agree on the WAL location.
 fn has_wal_in_flight_orders() -> bool {
     let wal_path = engine_client::process::engine_cache_dir().join("tachibana_orders.jsonl");
-    has_wal_in_flight_orders_at(&wal_path)
+    has_wal_in_flight_orders_at(&wal_path, jst_today_midnight_ms())
+}
+
+/// JST 当日 0:00 を epoch_ms で返す。WAL `ts` フィールド（epoch_ms）と比較して
+/// 「前営業日以前」のレコードを terminal 扱いにするためのカットオフ。
+fn jst_today_midnight_ms() -> i64 {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    let jst = FixedOffset::east_opt(9 * 3600).expect("9h offset is valid");
+    let now_jst = Utc::now().with_timezone(&jst);
+    let today = now_jst.date_naive();
+    jst.from_local_datetime(&today.and_hms_opt(0, 0, 0).expect("00:00:00 is valid"))
+        .single()
+        .expect("JST midnight is unambiguous")
+        .timestamp_millis()
 }
 
 /// Internal pure helper for [`has_wal_in_flight_orders`] — takes the WAL path
 /// directly so integration tests can exercise it without touching the global cache dir.
-fn has_wal_in_flight_orders_at(wal_path: &std::path::Path) -> bool {
+///
+/// `today_start_ms` は JST 当日 0:00 (epoch_ms)。これより古い `ts` のレコードは
+/// 「前営業日以前」として terminal 扱いし `latest_phase` に積まない。立花の通常
+/// 注文は当日限り有効で、前日以前の `accepted` は venue 側で必ず確定しているため、
+/// WAL に終端 phase が書かれない非同期約定/取消イベントを補正する（C2 修正）。
+fn has_wal_in_flight_orders_at(wal_path: &std::path::Path, today_start_ms: i64) -> bool {
     // M6: surface IO errors via log::warn! (the previous `let Ok(...) else { return false; }`
     // silently treated unreadable WAL as "no in-flight orders", which masked operational
     // problems). Treat IO failure as conservative `false` (do not block the mode switch
@@ -302,22 +320,136 @@ fn has_wal_in_flight_orders_at(wal_path: &std::path::Path) -> bool {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        // C2: 前日以前のレコードは terminal 扱い。立花 API は accepted までしか同期で
+        // 返さず、約定 (filled) / 取消 (canceled) は EVENT 経由なので writer は終端
+        // phase を書けない。前日以前の `accepted` は venue 側で確定済みと安全に断定できる。
+        let ts = record.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        if ts < today_start_ms {
+            continue;
+        }
         // Writer schema (`tachibana_orders.py`): `phase` + `client_order_id`.
-        let order_id = record
-            .get("client_order_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let phase = record
-            .get("phase")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let order_id = record.get("client_order_id").and_then(|v| v.as_str());
+        let phase = record.get("phase").and_then(|v| v.as_str());
         if let (Some(oid), Some(ph)) = (order_id, phase) {
-            latest_phase.entry(oid).or_insert(ph);
+            latest_phase
+                .entry(oid.to_string())
+                .or_insert_with(|| ph.to_string());
         }
     }
     // Terminal phase = `rejected`. Anything else (submit / accepted / unknown)
     // is conservatively treated as in-flight.
     latest_phase.values().any(|ph| ph.as_str() != "rejected")
+}
+
+#[cfg(test)]
+mod wal_today_cutoff_tests {
+    //! C2: JST 当日 0:00 より古い `ts` のレコードは terminal 扱い。
+    //! 立花の通常注文は当日限り — 前日以前の `accepted` は venue 側で必ず確定済み。
+
+    use super::has_wal_in_flight_orders_at;
+
+    const TODAY_MS: i64 = 1_777_550_000_000;
+    const YESTERDAY_MS: i64 = TODAY_MS - 60_000;
+
+    fn write_wal(dir: &std::path::Path, lines: &[&str]) -> std::path::PathBuf {
+        let path = dir.join("tachibana_orders.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn today_accepted_is_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[r#"{"client_order_id":"T1","phase":"accepted","ts":1777553600000}"#],
+        );
+        assert!(has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn yesterday_accepted_is_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[r#"{"client_order_id":"T2","phase":"accepted","ts":1777549940000}"#],
+        );
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn today_submit_with_yesterday_accepted_is_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[
+                r#"{"client_order_id":"T3a","phase":"accepted","ts":1777549940000}"#,
+                r#"{"client_order_id":"T3b","phase":"submit","ts":1777553600000}"#,
+            ],
+        );
+        assert!(has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn legacy_e2e_residue_yesterday_is_not_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lines: Vec<String> = (0..17)
+            .map(|i| {
+                format!(
+                    r#"{{"client_order_id":"e2e-{}","phase":"accepted","ts":{}}}"#,
+                    i, YESTERDAY_MS
+                )
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let wal = write_wal(tmp.path(), &refs);
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn today_submit_then_rejected_is_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[
+                r#"{"client_order_id":"T5","phase":"submit","ts":1777553600000}"#,
+                r#"{"client_order_id":"T5","phase":"rejected","ts":1777553600001}"#,
+            ],
+        );
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn missing_file_returns_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = tmp.path().join("nonexistent.jsonl");
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    #[test]
+    fn record_without_ts_is_kept_for_backwards_compat() {
+        // Older WAL writers may have omitted `ts`. Treat missing/non-numeric as
+        // ts=0 so the record is filtered as ancient (terminal). This matches the
+        // safer default — old logs without ts cannot be reliably "today".
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = write_wal(
+            tmp.path(),
+            &[r#"{"client_order_id":"NO_TS","phase":"submit"}"#],
+        );
+        assert!(!has_wal_in_flight_orders_at(&wal, TODAY_MS));
+    }
+
+    // Sanity check: the helper computing JST midnight returns a positive epoch
+    // close to "now" (i.e. within the past day or so).
+    #[test]
+    fn jst_today_midnight_is_recent() {
+        use super::jst_today_midnight_ms;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let today = jst_today_midnight_ms();
+        assert!(today > 0);
+        assert!(today <= now_ms);
+        assert!(now_ms - today < 36 * 3600 * 1000); // within 36h window
+    }
 }
 
 /// F9d streaming events emitted by [`submit_wandb_run_stream`].
@@ -1290,6 +1422,23 @@ struct Flowsurface {
     /// The leading `_` on the field name silences the unused-field lint for
     /// the guard half (it is held purely for its Drop side-effect).
     mode_switch_state: Option<(engine_client::dto::AppMode, ModeSwitchGuard)>,
+    /// True between a `ModeSwitchEngineBusy` abort and the user acknowledging
+    /// the abort dialog (`ToggleDialogModal(None)`). Prevents the footer badge
+    /// from re-enabling immediately after a failed mode-switch while the engine
+    /// is still settling. Cleared unconditionally on dialog dismiss (idempotent
+    /// when already false, identical to the mode_switch_state = None reset).
+    engine_busy: bool,
+    /// True while a replay is currently loaded/running. Drives the
+    /// "リプレイ停止（Replay Stop）" menu item's enabled state — the item is
+    /// only clickable while a replay is actually playing. Set true on
+    /// `EngineEvent::ReplayDataLoaded`; reset on `ReplayFinished` /
+    /// `ReplayStopped` (both stop-only and mode-switch paths).
+    replay_running: bool,
+    /// True between `Message::StopReplayOnly` dispatch and the corresponding
+    /// `ReplayStopped` ack / final timeout. Distinguishes the stop-only flow
+    /// from the F7 mode-switch flow inside the shared `ModeSwitch*` message
+    /// handlers (which now serve both flows).
+    replay_stop_only_pending: bool,
     /// Widget menu bar open/close state (all platforms).
     menu_bar: crate::menu_bar_state::State,
     /// P9: W&B authentication state. Populated when Python check_auth subprocess responds.
@@ -1568,6 +1717,11 @@ enum Message {
     ModeSwitchStopBusy,
     /// F7: engine returned `EngineBusy` for `ForceStopReplay` — genuine failure; abort.
     ModeSwitchEngineBusy(String),
+    /// User clicked "リプレイ停止（Replay Stop）" — stop the running replay without
+    /// switching app mode. Sends `Command::StopReplay`; the subsequent ack /
+    /// timeout / EngineBusy events are routed through the shared `ModeSwitch*`
+    /// handlers, distinguished by `replay_stop_only_pending`.
+    StopReplayOnly,
     /// Internal: genuinely does nothing in update(). Used to discard async Task
     /// completion events where the result is irrelevant (fire-and-forget IPC sends).
     Noop,
@@ -1973,8 +2127,13 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
     }
 }
 
-fn status_bar_label(is_replay: bool) -> &'static str {
-    if is_replay { "● REPLAY" } else { "● LIVE" }
+fn status_bar_label(is_replay: bool, enabled: bool) -> &'static str {
+    match (is_replay, enabled) {
+        (false, true) => "● LIVE",
+        (true, true) => "● REPLAY",
+        (false, false) => "● LIVE …",
+        (true, false) => "● REPLAY …",
+    }
 }
 
 fn status_bar_dot_color(is_replay: bool) -> iced::Color {
@@ -1988,24 +2147,79 @@ fn status_bar_dot_color(is_replay: bool) -> iced::Color {
 const STATUS_BAR_HEIGHT: u32 = 20;
 const STATUS_BAR_BG: iced::Color = iced::Color::from_rgb(0.08, 0.08, 0.08);
 
-// 'static: no input borrows; all content is &'static str labels and Copy Color constants.
-// '_ cannot be used here because lifetime elision requires at least one input reference.
-fn status_bar(is_replay: bool) -> Element<'static, Message> {
-    container(
-        text(status_bar_label(is_replay))
-            .size(11)
-            .color(status_bar_dot_color(is_replay)),
-    )
-    .width(iced::Length::Fill)
-    .height(STATUS_BAR_HEIGHT)
-    .align_y(Alignment::Center)
-    .padding(padding::left(8))
-    .style(|_theme| container::Style {
-        background: Some(STATUS_BAR_BG.into()),
-        snap: true,
-        ..Default::default()
-    })
-    .into()
+// 'static: ModeToggleState contains only AppMode (Copy) and &'static str / bool —
+// no lifetime-bearing references. The button message and tooltip content are also
+// 'static, so the returned Element<'static, Message> bound is satisfied.
+fn status_bar(state: crate::menu::ModeToggleState) -> Element<'static, Message> {
+    use engine_client::dto::AppMode;
+
+    let is_replay = state.current == AppMode::Replay;
+    let label = status_bar_label(is_replay, state.enabled);
+    let base_color = status_bar_dot_color(is_replay);
+    let color = if state.enabled {
+        base_color
+    } else {
+        iced::Color::from_rgb(base_color.r * 0.5, base_color.g * 0.5, base_color.b * 0.5)
+    };
+
+    let target = match state.current {
+        AppMode::Live => AppMode::Replay,
+        AppMode::Replay => AppMode::Live,
+    };
+
+    let tip: Option<&'static str> = if state.enabled {
+        Some(match state.current {
+            AppMode::Live => "クリックで Replay に切替",
+            AppMode::Replay => "クリックで Live に切替",
+        })
+    } else {
+        state.disabled_reason
+    };
+
+    let badge = button(text(label).size(11).color(color))
+        .padding(padding::left(8).right(8))
+        .style(move |_theme, status| {
+            use iced::widget::button::{Status, Style};
+            Style {
+                background: if state.enabled {
+                    match status {
+                        Status::Hovered | Status::Pressed => Some(iced::Background::Color(
+                            iced::Color::from_rgba(1.0, 1.0, 1.0, 0.06),
+                        )),
+                        _ => None,
+                    }
+                } else {
+                    None
+                },
+                ..Style::default()
+            }
+        });
+
+    let badge_el: Element<'static, Message> = if state.enabled {
+        // Route through the same BarMessage::Pick → to_native_action → NativeMenuAction
+        // path as the widget menu bar, so the Action::SwitchMode handler's guard
+        // invariants (SUBMIT_IN_FLIGHT, dirty check, etc.) are preserved.
+        badge
+            .on_press(Message::MenuBar(crate::menu_bar_state::BarMessage::Pick(
+                crate::menu::Action::SwitchAppMode(target),
+            )))
+            .into()
+    } else {
+        badge.into()
+    };
+
+    let content = tooltip(badge_el, tip, TooltipPosition::Top);
+
+    container(content)
+        .width(iced::Length::Fill)
+        .height(STATUS_BAR_HEIGHT)
+        .align_y(Alignment::Center)
+        .style(|_| container::Style {
+            background: Some(STATUS_BAR_BG.into()),
+            snap: true,
+            ..Default::default()
+        })
+        .into()
 }
 
 /// Wrap `content` in a `confirm_dialog` overlay when one is set.
@@ -2153,6 +2367,9 @@ impl Flowsurface {
             pending_exit_windows: None,
             pending_open_file: None,
             mode_switch_state: None,
+            engine_busy: false,
+            replay_running: false,
+            replay_stop_only_pending: false,
             menu_bar: crate::menu_bar_state::State::default(),
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
             run_buffer: wandb_auth::RunBufferIndex::empty(),
@@ -3539,6 +3756,7 @@ impl Flowsurface {
                     Some(engine_client::dto::ReplayGranularity::Trade) | None => None,
                 };
                 let main_window_id = self.main_window.id;
+                self.replay_running = true;
                 log::info!(
                     "ReplayDataLoaded: auto-generating replay panes for \
                      instrument_id={instrument_id:?} timeframe={timeframe:?}"
@@ -3553,6 +3771,7 @@ impl Flowsurface {
             }
             // Replay engine finished → auto-refresh order list from Python's in-memory fills.
             Message::ReplayFinished => {
+                self.replay_running = false;
                 if let Some(conn) = self.engine_connection.as_ref().cloned() {
                     return Task::perform(
                         async move {
@@ -3748,6 +3967,9 @@ impl Flowsurface {
                     }
                     Action::OpenReplayDialog => {
                         return Task::done(Message::ShowReplayDialog);
+                    }
+                    Action::StopReplay => {
+                        return Task::done(Message::StopReplayOnly);
                     }
                     Action::Quit => {
                         let active_windows: Vec<window::Id> = self
@@ -4056,7 +4278,7 @@ impl Flowsurface {
                             self.replay_form_modal = None;
                         }
                         Some(modal::replay_form::Action::Submit {
-                            instrument_id,
+                            instrument_ids,
                             start_date,
                             end_date,
                             granularity,
@@ -4068,13 +4290,14 @@ impl Flowsurface {
                                 let strategy_file_str =
                                     strategy_file.to_string_lossy().into_owned();
                                 let gran_dto = granularity.to_dto();
+                                let first_id = instrument_ids[0].clone();
                                 return Task::perform(
                                     async move {
                                         let load_req_id = uuid::Uuid::new_v4().to_string();
                                         conn.send(engine_client::dto::Command::LoadReplayData {
                                             request_id: load_req_id,
-                                            instrument_id: instrument_id.clone(),
-                                            instrument_ids: None,
+                                            instrument_id: first_id.clone(),
+                                            instrument_ids: Some(instrument_ids.clone()),
                                             start_date: start_date.clone(),
                                             end_date: end_date.clone(),
                                             granularity: gran_dto.clone(),
@@ -4087,8 +4310,8 @@ impl Flowsurface {
                                             engine: engine_client::dto::EngineKind::Backtest,
                                             strategy_id: "user-strategy".to_string(),
                                             config: engine_client::dto::EngineStartConfig {
-                                                instrument_id,
-                                                instrument_ids: None,
+                                                instrument_id: first_id,
+                                                instrument_ids: Some(instrument_ids),
                                                 start_date,
                                                 end_date,
                                                 initial_cash: initial_cash.to_string(),
@@ -4571,21 +4794,70 @@ impl Flowsurface {
                 }
                 return self.restart_with_mode(target);
             }
-            // F7: ReplayStopped event received — proceed with restart_with_mode
-            Message::ModeSwitchStopAcked => {
-                let Some((target, _guard)) = self.mode_switch_state.take() else {
-                    // Stale event (e.g. timeout already handled it) — ignore
+            // User clicked "リプレイ停止" — stop replay without changing app mode.
+            // Sends StopReplay (with the same 5s timeout as the F7 mode-switch flow);
+            // the ack / timeout / EngineBusy events are routed through the shared
+            // `ModeSwitch*` handlers, distinguished by `replay_stop_only_pending`.
+            Message::StopReplayOnly => {
+                if self.replay_stop_only_pending || self.mode_switch_state.is_some() {
+                    return Task::none();
+                }
+                if !self.replay_running {
+                    return Task::none();
+                }
+                let Some(conn) = self.engine_connection.clone() else {
+                    let dialog = screen::ConfirmDialog::new(
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                            .to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
                     return Task::none();
                 };
-                return self.restart_with_mode(target);
+                self.replay_stop_only_pending = true;
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let send_task = Task::perform(
+                    async move {
+                        conn.send(engine_client::dto::Command::StopReplay { request_id })
+                            .await
+                    },
+                    |result| match result {
+                        Ok(()) => Message::Noop,
+                        Err(_) => Message::ModeSwitchSendFailed,
+                    },
+                );
+                let timeout_task = Task::perform(
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    },
+                    |_| Message::ModeSwitchStopTimeout,
+                );
+                return Task::batch([send_task, timeout_task]);
+            }
+            // F7: ReplayStopped event received — proceed with restart_with_mode
+            // (also handles the stop-only flow: drops the pending flag and emits
+            // a confirmation toast without restarting the dashboard).
+            Message::ModeSwitchStopAcked => {
+                self.replay_running = false;
+                if let Some((target, _guard)) = self.mode_switch_state.take() {
+                    self.replay_stop_only_pending = false;
+                    return self.restart_with_mode(target);
+                }
+                if std::mem::take(&mut self.replay_stop_only_pending) {
+                    self.notifications
+                        .push(Toast::info("リプレイを停止しました".to_string()));
+                }
+                return Task::none();
             }
             // F7: 5-second StopReplay timeout — send ForceStopReplay fallback
+            // Shared between mode-switch and stop-only flows.
             Message::ModeSwitchStopTimeout => {
                 log::warn!("[F7] StopReplay timed out — sending ForceStopReplay fallback");
-                if self.mode_switch_state.is_none() {
+                if self.mode_switch_state.is_none() && !self.replay_stop_only_pending {
                     // Already handled (ReplayStopped arrived before timeout) — ignore
                     return Task::none();
-                };
+                }
                 if let Some(conn) = self.engine_connection.clone() {
                     let request_id = uuid::Uuid::new_v4().to_string();
                     let force_task = Task::perform(
@@ -4606,10 +4878,18 @@ impl Flowsurface {
                     );
                     return Task::batch([force_task, timeout_task]);
                 } else {
-                    // No connection — release guard and show error dialog
-                    self.mode_switch_state = None;
+                    // No connection — release guard / pending flag and show error dialog
+                    let was_mode_switch = self.mode_switch_state.take().is_some();
+                    let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                    let body = if was_mode_switch {
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。"
+                    } else if was_stop_only {
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                    } else {
+                        return Task::none();
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        body.to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -4618,14 +4898,21 @@ impl Flowsurface {
                 }
             }
             // F7: ForceStopReplay also timed out — release guard and show error
+            // Shared between mode-switch and stop-only flows.
             Message::ModeSwitchForceStopTimeout => {
-                log::warn!("[F7] ForceStopReplay also timed out — aborting mode switch");
-                if self.mode_switch_state.take().is_none() {
-                    // Already handled (ReplayStopped arrived before timeout) — ignore
+                log::warn!("[F7] ForceStopReplay also timed out — aborting");
+                let stale = self.mode_switch_state.take().is_none();
+                let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                if stale && !was_stop_only {
                     return Task::none();
                 }
+                let body = if !stale {
+                    "モード切替に失敗しました。\nエンジンが応答しません。"
+                } else {
+                    "リプレイ停止に失敗しました。\nエンジンが応答しません。"
+                };
                 let dialog = screen::ConfirmDialog::new(
-                    "モード切替に失敗しました。\nエンジンが応答しません。".to_string(),
+                    body.to_string(),
                     Box::new(Message::ToggleDialogModal(None)),
                 )
                 .with_confirm_btn_text("閉じる".to_string());
@@ -4634,11 +4921,19 @@ impl Flowsurface {
             }
             // F7: send() returned Err — socket is broken; abort mode switch immediately without
             // waiting for the 5-second (StopReplay) or 2-second (ForceStopReplay) timeout.
-            // Stale timeout messages that fire later are ignored because mode_switch_state is None.
+            // Stale timeout messages that fire later are ignored because the pending
+            // state will be cleared by then.
             Message::ModeSwitchSendFailed => {
-                if self.mode_switch_state.take().is_some() {
+                let was_mode_switch = self.mode_switch_state.take().is_some();
+                let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                if was_mode_switch || was_stop_only {
+                    let body = if was_mode_switch {
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。"
+                    } else {
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        body.to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -4649,12 +4944,13 @@ impl Flowsurface {
             // F7: StopReplay EngineBusy — engine is IDLE (no replay loaded).
             // Skip the remaining 5s wait and send ForceStopReplay immediately.
             // ForceStopReplay has no state guard on the Python side and always responds
-            // with ReplayStopped, so the mode switch can complete normally.
-            // If the stale ModeSwitchStopTimeout fires later, mode_switch_state will
-            // already be None (cleared by ModeSwitchStopAcked) and is safely ignored.
+            // with ReplayStopped, so the flow can complete normally. Shared between
+            // mode-switch and stop-only paths.
             Message::ModeSwitchStopBusy => {
-                log::warn!("[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately");
-                if self.mode_switch_state.is_none() {
+                log::warn!(
+                    "[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately"
+                );
+                if self.mode_switch_state.is_none() && !self.replay_stop_only_pending {
                     return Task::none();
                 }
                 if let Some(conn) = self.engine_connection.clone() {
@@ -4677,9 +4973,17 @@ impl Flowsurface {
                     );
                     return Task::batch([force_task, timeout_task]);
                 } else {
-                    self.mode_switch_state = None;
+                    let was_mode_switch = self.mode_switch_state.take().is_some();
+                    let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                    let body = if was_mode_switch {
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。"
+                    } else if was_stop_only {
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                    } else {
+                        return Task::none();
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        body.to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -4687,13 +4991,20 @@ impl Flowsurface {
                     return Task::none();
                 }
             }
-            // F7: ForceStopReplay EngineBusy — genuine failure; abort mode switch.
-            // The stale ModeSwitchStopTimeout (if still pending) fires later but is
-            // ignored because mode_switch_state will be None at that point.
+            // F7: ForceStopReplay EngineBusy — genuine failure; abort the flow.
+            // Shared between mode-switch and stop-only paths.
             Message::ModeSwitchEngineBusy(reason) => {
-                if self.mode_switch_state.take().is_some() {
+                self.engine_busy = true;
+                let was_mode_switch = self.mode_switch_state.take().is_some();
+                let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                if was_mode_switch || was_stop_only {
+                    let body = if was_mode_switch {
+                        format!("モード切替を中止しました。\nエンジンがビジー状態です: {reason}")
+                    } else {
+                        format!("リプレイ停止を中止しました。\nエンジンがビジー状態です: {reason}")
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        format!("モード切替を中止しました。\nエンジンがビジー状態です: {reason}"),
+                        body,
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -5031,6 +5342,7 @@ impl Flowsurface {
                     // active mode-switch — it would only do so if the active
                     // mode-switch's own dialog is being closed.
                     self.mode_switch_state = None;
+                    self.engine_busy = false;
                 }
                 self.confirm_dialog = dialog;
             }
@@ -5791,8 +6103,8 @@ impl Flowsurface {
             let current_mode = app_mode();
             let mut base = column![header_title];
             {
-                let menu_bar_view =
-                    crate::widget_menu_bar::view(&self.menu_bar, current_mode).map(Message::MenuBar);
+                let menu_bar_view = crate::widget_menu_bar::view(&self.menu_bar, current_mode)
+                    .map(Message::MenuBar);
                 base = base.push(menu_bar_view);
             }
             if let Some(banner) = banner {
@@ -5813,8 +6125,6 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
-            let is_replay = current_mode == engine_client::dto::AppMode::Replay;
-
             base = base.push(
                 match sidebar_pos {
                     sidebar::Position::Left => row![sidebar_view, dashboard_view,],
@@ -5824,7 +6134,13 @@ impl Flowsurface {
                 .padding(8)
                 .height(iced::Length::Fill),
             );
-            base = base.push(status_bar(is_replay));
+            let mode_toggle = crate::menu::mode_toggle_state(
+                current_mode,
+                self.engine_busy,
+                SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire),
+                self.mode_switch_state.is_some(),
+            );
+            base = base.push(status_bar(mode_toggle));
 
             let view_result = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
@@ -5837,6 +6153,7 @@ impl Flowsurface {
                 current_mode,
                 &self.wandb_auth,
                 &self.run_buffer,
+                self.replay_running,
             )
         } else {
             container(
@@ -7162,9 +7479,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn strategy_scenario_load_failed_event_pushes_toast_only() {
-        let body = handler_body(
-            "            Message::StrategyScenarioLoadFailedEvent {",
-        );
+        let body = handler_body("            Message::StrategyScenarioLoadFailedEvent {");
         assert!(
             body.contains("notifications.push"),
             "StrategyScenarioLoadFailedEvent must surface the error via a toast"
@@ -7185,13 +7500,23 @@ mod status_bar_tests {
     use super::*;
 
     #[test]
-    fn t1_status_bar_label_replay() {
-        assert_eq!(status_bar_label(true), "● REPLAY");
+    fn t1_status_bar_label_replay_enabled() {
+        assert_eq!(status_bar_label(true, true), "● REPLAY");
     }
 
     #[test]
-    fn t2_status_bar_label_live() {
-        assert_eq!(status_bar_label(false), "● LIVE");
+    fn t1b_status_bar_label_replay_disabled() {
+        assert_eq!(status_bar_label(true, false), "● REPLAY …");
+    }
+
+    #[test]
+    fn t2_status_bar_label_live_enabled() {
+        assert_eq!(status_bar_label(false, true), "● LIVE");
+    }
+
+    #[test]
+    fn t2b_status_bar_label_live_disabled() {
+        assert_eq!(status_bar_label(false, false), "● LIVE …");
     }
 
     #[test]
@@ -7411,7 +7736,11 @@ mod app_mode_roundtrip_tests {
     #[test]
     fn app_mode_returns_live_after_switch_from_replay() {
         set_app_mode(AppMode::Replay);
-        assert_eq!(app_mode(), AppMode::Replay, "pre-condition: must start in Replay");
+        assert_eq!(
+            app_mode(),
+            AppMode::Replay,
+            "pre-condition: must start in Replay"
+        );
         // Simulate what restart_with_mode(Live) does to APP_MODE.
         set_app_mode(AppMode::Live);
         assert_eq!(

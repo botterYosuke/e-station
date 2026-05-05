@@ -61,6 +61,27 @@ fn wal_fn_uses_phase_key_and_rejected_terminal() {
 }
 
 #[test]
+fn wal_fn_takes_today_cutoff_param() {
+    // C2: has_wal_in_flight_orders_at must accept a today_start_ms (i64) parameter
+    // so old `accepted` records (yesterday or earlier) are treated as terminal.
+    // Caller passes JST 当日 0:00 via jst_today_midnight_ms.
+    assert!(
+        MAIN_RS.contains(
+            "fn has_wal_in_flight_orders_at(wal_path: &std::path::Path, today_start_ms: i64)"
+        ),
+        "has_wal_in_flight_orders_at must accept today_start_ms: i64 (C2 fix)"
+    );
+    assert!(
+        MAIN_RS.contains("fn jst_today_midnight_ms()"),
+        "jst_today_midnight_ms helper must exist for the live caller (C2)"
+    );
+    assert!(
+        MAIN_RS.contains("has_wal_in_flight_orders_at(&wal_path, jst_today_midnight_ms())"),
+        "has_wal_in_flight_orders must pass JST today midnight to the helper (C2)"
+    );
+}
+
+#[test]
 fn wal_fn_logs_io_error() {
     // M6: IO errors must be surfaced via log::warn! instead of being silently
     // treated as "no in-flight orders".

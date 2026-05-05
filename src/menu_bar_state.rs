@@ -8,7 +8,6 @@ use crate::menu::Action;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopMenu {
     File,
-    Mode,
     Tools,
 }
 
@@ -95,15 +94,6 @@ mod tests {
     fn dismiss_focus_lost_closes_when_file_open() {
         let s = State {
             open: Some(TopMenu::File),
-        };
-        let next = update(s, BarMessage::DismissFocusLost);
-        assert_eq!(next.open, None);
-    }
-
-    #[test]
-    fn dismiss_focus_lost_closes_when_mode_open() {
-        let s = State {
-            open: Some(TopMenu::Mode),
         };
         let next = update(s, BarMessage::DismissFocusLost);
         assert_eq!(next.open, None);

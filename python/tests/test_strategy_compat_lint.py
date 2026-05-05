@@ -133,8 +133,7 @@ def test_example_buy_and_hold_replay_compat_lint():
     """
     source_path = (
         Path(__file__).parents[2]
-        / "docs"
-        / "example"
+        / "examples"
         / "test_strategy_daily.py"
     )
     source = source_path.read_text(encoding="utf-8")

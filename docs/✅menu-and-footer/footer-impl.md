@@ -15,12 +15,15 @@
 ### 含むもの
 
 - メインウィンドウのフッターバー（高さ固定、幅 Fill）
-- `LIVE` / `REPLAY` モードバッジ（色付きラベル）
+- `● LIVE` / `● REPLAY` モードバッジ — クリックでモードをトグルする `button`
+- バッジの disabled 状態（切替中 / `engine_busy` / `submit_in_flight` 時）と
+  ツールチップ（操作可能時は切替先案内、抑制中は抑制理由）
 - popout ウィンドウにはフッターを**表示しない**
 
 ### 含まないもの
 
-- フッターへのインタラクション（クリックによる画面遷移など）
+- dirty によるバッジ disable（dirty はクリック後の confirm dialog に委ねる）
+- 右クリックによるミニメニュー（将来フェーズ）
 - 接続状態・タイムゾーン・バージョン表示（将来フェーズ）
 - 設定・テーマによるフッター非表示トグル
 - テーマシステム連携（現フェーズは固定色。将来 `style::*` 関数経由に移行）
@@ -35,7 +38,7 @@
 │          │                                               │
 │          │                                               │
 ├──────────┴───────────────────────────────────────────────┤
-│  ● LIVE                                                   │ ← ステータスバー
+│  ● LIVE  ← クリックでトグル                               │ ← ステータスバー
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -44,10 +47,15 @@
 | 高さ | 20 px（固定） |
 | 背景色 | `Color::from_rgb(0.08, 0.08, 0.08)`（既存テーマより少し暗め） |
 | バッジ位置 | 左端（padding left 8 px） |
-| バッジ文字 | `● LIVE` / `● REPLAY`（● はドット文字 U+25CF） |
-| LIVE 色 | `Color::from_rgb(0.2, 0.75, 0.3)`（緑） |
-| REPLAY 色 | `Color::from_rgb(0.9, 0.6, 0.1)`（アンバー） |
+| バッジ文字（操作可能） | `● LIVE` / `● REPLAY`（● はドット文字 U+25CF） |
+| バッジ文字（抑制中） | `● LIVE …` / `● REPLAY …` |
+| LIVE 色（操作可能） | `Color::from_rgb(0.2, 0.75, 0.3)`（緑） |
+| REPLAY 色（操作可能） | `Color::from_rgb(0.9, 0.6, 0.1)`（アンバー） |
+| 抑制中の色 | 各色を 50 % 減光 |
 | フォントサイズ | 11 px |
+| カーソル（操作可能） | pointer |
+| カーソル（抑制中） | default |
+| ツールチップ | 操作可能: 切替先案内 / 抑制中: 抑制理由 |
 
 ---
 
@@ -96,7 +104,8 @@ inset 調整は将来フェーズに繰り越す（§未決事項参照）。
 
 | ファイル | 変更内容 |
 |---------|---------|
-| `src/main.rs` | `fn view()` に footer 追加、`is_replay` 判定、helper 関数 3 つ追加 |
+| `src/main.rs` | `status_bar(ModeToggleState)` に変更（`button` + `tooltip` ベース）/ `view()` から `mode_toggle_state(...)` を組み立てて渡す |
+| `src/menu.rs` | `ModeToggleState` / `mode_toggle_state(...)` を追加、`mode_menu_items` を削除 |
 
 ### `fn view()` の変更点
 
@@ -117,9 +126,16 @@ base = base.push(
     }
     .spacing(4)
     .padding(8)
-    .height(Length::Fill),  // ← 追加: 残余領域を埋めて footer を下端に固定
+    .height(Length::Fill),
 );
-base = base.push(status_bar(is_replay));  // ← 追加: base の内側に footer
+// ModeToggleState を組み立てて status_bar へ渡す
+let toggle_state = mode_toggle_state(
+    current_mode,
+    self.engine_busy,
+    self.submit_in_flight,
+    self._mode_switch_guard.is_some(),
+);
+base = base.push(status_bar(toggle_state));  // button + tooltip ベースのトグル
 
 if let Some(menu) = self.sidebar.active_menu() {
     self.view_with_modal(base.into(), dashboard, menu)
@@ -137,55 +153,57 @@ if let Some(menu) = self.sidebar.active_menu() {
 
 ### `status_bar` 要素の実装
 
+`is_replay: bool` ベースから `ModeToggleState` ベースに変更。
+詳細シグネチャは [`mode-toggle-redesign.md §status_bar の新シグネチャ`](./mode-toggle-redesign.md#status_bar-の新シグネチャ案) 参照。
+
 ```rust
-fn status_bar_label(is_replay: bool) -> &'static str {
-    if is_replay { "● REPLAY" } else { "● LIVE" }
-}
-
-fn status_bar_dot_color(is_replay: bool) -> Color {
-    if is_replay {
-        Color::from_rgb(0.9, 0.6, 0.1)
-    } else {
-        Color::from_rgb(0.2, 0.75, 0.3)
-    }
-}
-
-const STATUS_BAR_HEIGHT: u16 = 20;
+const STATUS_BAR_HEIGHT: u32 = 20;
 const STATUS_BAR_BG: Color = Color::from_rgb(0.08, 0.08, 0.08);
 
-fn status_bar(is_replay: bool) -> Element<'static, Message> {
-    container(
-        text(status_bar_label(is_replay))
-            .size(11)
-            .color(status_bar_dot_color(is_replay)),
-    )
-    .width(Length::Fill)
-    .height(STATUS_BAR_HEIGHT)
-    .align_y(Alignment::Center)
-    .padding(padding::left(8))
-    .style(|_theme| container::Style {
-        background: Some(STATUS_BAR_BG.into()),
-        snap: true,
-        ..Default::default()
-    })
-    .into()
+fn status_bar<'a>(state: ModeToggleState) -> Element<'a, Message> {
+    // button + tooltip ベース。on_press を付けないと iced が disabled 扱いにする
+    let label = match (state.current, state.enabled) {
+        (AppMode::Live, true)    => "● LIVE",
+        (AppMode::Replay, true)  => "● REPLAY",
+        (AppMode::Live, false)   => "● LIVE …",
+        (AppMode::Replay, false) => "● REPLAY …",
+    };
+    let dot_color = mode_dot_color(state.current, state.enabled);
+    let target = match state.current {
+        AppMode::Live => AppMode::Replay,
+        AppMode::Replay => AppMode::Live,
+    };
+    let badge = button(text(label).size(11).color(dot_color))
+        .padding(padding::left(8).right(8))
+        .style(footer_button_style(state.enabled));
+    let badge = if state.enabled {
+        badge.on_press(Message::NativeMenuAction(Action::SwitchAppMode(target)))
+    } else {
+        badge
+    };
+    container(tooltip(badge, footer_tooltip_text(&state), tooltip::Position::Top))
+        .width(Length::Fill)
+        .height(STATUS_BAR_HEIGHT)
+        .align_y(Alignment::Center)
+        .style(|_| container::Style {
+            background: Some(STATUS_BAR_BG.into()),
+            snap: true,
+            ..Default::default()
+        })
+        .into()
 }
 ```
 
-### `is_replay` の取得
+> **`'static` → `'a` への変更理由**: `ModeToggleState` を引数に受け取るため
+> lifetime を付ける必要がある（R2 設計判断の延長）。tooltip 文字列は `String`
+> を保持できるよう `'a` で統一。
 
-`APP_MODE` static は `--mode` CLI パース後に必ず set される（CLAUDE.md
-「起動モード」節の不変条件）。footer は最も静かに壊れる UI 面なので、
-**フォールバックではなく `expect` で初期化順序のリグレッションを即検知**する：
+### `current_mode` / ガード状態の取得
 
-```rust
-let is_replay = APP_MODE
-    .get()
-    .map(|&m| m == engine_client::dto::AppMode::Replay)
-    .expect("APP_MODE must be initialised after CLI parsing");
-```
-
-`unwrap_or(false)` は採用しない（LIVE 表示への silent fallback で実害が大きい）。
+`mode_toggle_state(...)` は `APP_MODE.get().expect(...)` で現モードを取得し、
+`self.engine_busy` / `self.submit_in_flight` / `self._mode_switch_guard.is_some()` を
+組み合わせて `ModeToggleState` を生成する。`expect` は初期化パスのみ、
+ランタイムの `EngineStopped` ハンドラは `unwrap_or` を使う（R2 設計判断を継承）。
 
 ---
 
@@ -193,14 +211,25 @@ let is_replay = APP_MODE
 
 ### 自動テスト
 
+#### フッター表示（既存 → 維持）
+
 | ID | ケース | 種別 | ファイル |
 |----|--------|------|---------|
-| T1 | `status_bar_label(true)` == `"● REPLAY"` | unit | `src/main.rs` `#[cfg(test)] mod tests` |
-| T2 | `status_bar_label(false)` == `"● LIVE"` | unit | 同上 |
-| T3 | `status_bar_dot_color(true)` がアンバー値を返す | unit | 同上 |
-| T4 | `status_bar_dot_color(false)` が緑値を返す | unit | 同上 |
-| T5 | `STATUS_BAR_HEIGHT == 20` および `STATUS_BAR_BG` が定数として存在 | unit | 同上 |
-| T6 | `status_bar(is_replay)` の戻り値型が `Element<'static, Message>` | コンパイル時保証 | 同上 |
+| T5 | `STATUS_BAR_HEIGHT == 20` および `STATUS_BAR_BG` が定数として存在 | unit | `src/main.rs` `#[cfg(test)]` |
+
+> T1〜T4（`status_bar_label` / `status_bar_dot_color`）は `ModeToggleState` ベース
+> への変更に伴い、TT1〜TT4 に置き換える。
+
+#### フッタートグル（追加）
+
+| ID | ケース | 種別 | ファイル |
+|----|--------|------|---------|
+| TT1 | `mode_toggle_state(Live, busy=false, submit=false, switching=false).enabled == true` | unit | `src/menu.rs` |
+| TT2 | `engine_busy=true` で `enabled=false`、`disabled_reason` が `Engine がビジーです` | unit | 同上 |
+| TT3 | `submit_in_flight=true` は `engine_busy` より優先される | unit | 同上 |
+| TT4 | `mode_switch_in_progress=true` は最優先 | unit | 同上 |
+| TT5 | フッタークリック相当の Message で `Action::SwitchAppMode(!current)` が dispatch | integration | `tests/` |
+| TT6 | dirty 時クリック → `SaveAndSwitchMode` confirm dialog が出る | integration | `tests/` |
 
 > **テスト粒度の方針**: `iced` の `Element` は内部状態を持つツリーであり、
 > 高さ・padding・背景色を runtime に取り出して assert する API は無い。
@@ -221,15 +250,20 @@ let is_replay = APP_MODE
 
 | ID | ケース | コマンド |
 |----|--------|---------|
-| V1 | `--mode live` 起動 → 緑の `● LIVE` が表示される | `cargo run -- --mode live` |
-| V2 | `--mode replay` 起動 → アンバーの `● REPLAY` が表示される | `cargo run -- --mode replay` |
+| V1 | `--mode live` 起動 → 緑の `● LIVE` が表示 / hover で pointer カーソル / クリックで replay に切替 | `cargo run -- --mode live` |
+| V2 | `--mode replay` 起動 → アンバーの `● REPLAY` / クリックで live に切替 | `cargo run -- --mode replay` |
 | V3 | popout ウィンドウにはフッターが表示されない | dashboard pane を popout に切り出して確認 |
 | V4 | バナー表示時にフッターが消えない（下端に維持） | Tachibana Error 状態を再現 |
 | V5 | strategy_load_error バナー表示時もフッターが消えない | 不正な戦略ファイルで replay 起動 |
 | V6 | ウィンドウリサイズ時にフッターが常に最下部に固定される | 手動リサイズ |
-| V7 | **Settings menu を開くとフッターが overlay の下に隠れる**（C2 の意図的動作確認） | sidebar の Settings を開く |
-| V8 | **Theme menu / Network menu でも V7 と同じ挙動** | 各メニュー操作 |
+| V7 | Settings menu を開くとフッターが overlay の下に隠れる（C2 の意図的動作） | sidebar の Settings を開く |
+| V8 | Theme menu / Network menu でも V7 と同じ挙動 | 各メニュー操作 |
 | V9 | toast 表示中に footer と toast が重なるかを観察（重なっても許容） | 通知を発生させる |
+| VT3 | 切替中はバッジが減光し再クリックしても無反応 | — |
+| VT4 | W&B submit 中はバッジが減光しツールチップに理由が出る | — |
+| VT5 | dirty 状態でクリック → save/discard/cancel ダイアログが出る | — |
+| VT7 | メニューバーに `モード（Mode）` ボタンが表示されない | — |
+| VT8 | `Ctrl+M` で同じ切替が起こる | — |
 
 ### CI ゲート
 
@@ -343,3 +377,5 @@ cargo test --workspace
 | フッター高さのスケーリング | 低 | HiDPI 環境で 20 px が小さすぎる場合 |
 | テーマシステム連携 | 低 | 現フェーズは固定色。将来 `style::*` 関数経由に移行 |
 | モーダル展開中もフッターを見せる設計 | 低 | 現状は overlay に隠れる（C2）。要望が出たら overlay 側に窓を空けるか、外側合成＋下寄せモーダルの再配置で対応 |
+| 右クリックによるミニメニュー（live / replay を明示選択） | 低 | トグル性を補完したい場合。詳細は [`mode-toggle-redesign.md §未決事項`](./mode-toggle-redesign.md#未決事項) |
+| disabled 時のスピナー表示 | 低 | `…` サフィックスの代わり。iced の animation 機構と相談 |

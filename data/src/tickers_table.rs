@@ -21,7 +21,12 @@ impl Default for Settings {
             favorited_tickers: vec![],
             show_favorites: false,
             selected_sort_option: SortOptions::VolumeDesc,
-            selected_exchanges: Venue::ALL.to_vec(),
+            // 立花証券 fork では Tachibana のみが取扱い対象。Venue::ALL を入れると
+            // crypto venue / Replay 疑似 venue の metadata fetch が無条件に発火し、
+            // replay モード切替直後に「No adapter handle configured」トーストが
+            // 6 件並ぶ不具合になる（ENGINE_CONNECTION_TX が一時 None になる窓と
+            // SavedState::default 経路の合わせ技）。
+            selected_exchanges: vec![Venue::Tachibana],
             selected_markets: MarketKind::ALL.into_iter().collect(),
         }
     }
@@ -31,12 +36,19 @@ impl Settings {
     /// Add any `MarketKind` variants that are missing from `selected_markets`.
     /// Called after deserializing saved-state so old states saved before a new
     /// variant (e.g. `Stock`) was added still show the new markets.
+    ///
+    /// Also drops unsupported venues from `selected_exchanges`. flowsurface fork
+    /// は Tachibana のみ対応のため、旧 saved-state に残る Bybit/Binance/
+    /// Hyperliquid/OKX/MEXC/Replay は除外する（`No adapter handle configured`
+    /// トースト再発防止）。
     pub fn migrate(&mut self) {
         for kind in MarketKind::ALL {
             if !self.selected_markets.contains(&kind) {
                 self.selected_markets.push(kind);
             }
         }
+        self.selected_exchanges
+            .retain(|venue| matches!(venue, Venue::Tachibana));
     }
 }
 
@@ -312,5 +324,53 @@ mod tests {
                 "migrate() must add MarketKind::{kind:?} when starting from an empty list"
             );
         }
+    }
+
+    #[test]
+    fn default_selected_exchanges_is_tachibana_only() {
+        let settings = Settings::default();
+        assert_eq!(
+            settings.selected_exchanges,
+            vec![Venue::Tachibana],
+            "立花 fork のデフォルトは Tachibana のみ。Venue::ALL に戻すと replay \
+             切替時に `No adapter handle configured` トーストが再発する"
+        );
+    }
+
+    #[test]
+    fn migrate_drops_unsupported_venues_from_selected_exchanges() {
+        // 旧 saved-state の Venue::ALL がそのまま残っている状況を再現する。
+        let mut settings = Settings {
+            selected_exchanges: Venue::ALL.to_vec(),
+            ..Settings::default()
+        };
+        settings.migrate();
+        assert_eq!(
+            settings.selected_exchanges,
+            vec![Venue::Tachibana],
+            "migrate() は Tachibana 以外の venue を選択から外さなければならない"
+        );
+    }
+
+    #[test]
+    fn migrate_preserves_tachibana_when_already_only() {
+        let mut settings = Settings::default();
+        settings.migrate();
+        assert_eq!(settings.selected_exchanges, vec![Venue::Tachibana]);
+    }
+
+    #[test]
+    fn migrate_preserves_empty_selected_exchanges() {
+        // ユーザーが手動で全選択を外しているケース。migrate が勝手に
+        // Tachibana を足し直すと意図に反するので、空のまま残すこと。
+        let mut settings = Settings {
+            selected_exchanges: vec![],
+            ..Settings::default()
+        };
+        settings.migrate();
+        assert!(
+            settings.selected_exchanges.is_empty(),
+            "ユーザーが空にした選択は migrate で復活させない"
+        );
     }
 }

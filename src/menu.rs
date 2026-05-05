@@ -187,29 +187,61 @@ pub fn tools_actions_for_state(auth: &WandbAuthState, buf: &RunBufferIndex) -> V
     ]
 }
 
-/// Returns the `モード（Mode）▼` submenu entries with exclusive check marks
-/// showing the currently active mode (DoD-13/14 / R7-87).
-// reason: invoked by the Linux widget menu bar
-// (`widget_menu_bar::with_dropdown_overlay` for the `モード（Mode）▼` button)
-// and by `tests/mode_menu_items.rs` source-inspection tests. The `mod menu`
-// itself is cross-platform (H1) so the function appears unused to Win/Mac
-// `cargo check` while still being part of the contract. (M6 / F8 R1)
-#[allow(dead_code)]
-pub fn mode_menu_items(current_mode: &AppMode) -> Vec<MenuEntry> {
-    vec![
-        MenuEntry {
-            action: Action::SwitchAppMode(AppMode::Live),
-            enabled: !matches!(current_mode, AppMode::Live),
-            tooltip: None,
-            checked: Some(matches!(current_mode, AppMode::Live)),
-        },
-        MenuEntry {
-            action: Action::SwitchAppMode(AppMode::Replay),
-            enabled: !matches!(current_mode, AppMode::Replay),
-            tooltip: None,
-            checked: Some(matches!(current_mode, AppMode::Replay)),
-        },
-    ]
+/// State of the footer mode-toggle badge.
+///
+/// Computed by `mode_toggle_state` and passed to `status_bar` in `main.rs`.
+/// `dirty` is NOT a field here — dirty state routes through the existing
+/// `SaveAndSwitchMode` confirm dialog, so dirty is never a *disabled* reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeToggleState {
+    pub current: AppMode,
+    pub enabled: bool,
+    /// Human-readable reason shown in the tooltip when `enabled == false`.
+    pub disabled_reason: Option<&'static str>,
+}
+
+/// Computes the footer mode-toggle badge state.
+///
+/// Priority (highest first):
+/// 1. `mode_switch_in_progress` → disabled, reason: `"Engine を再起動中…"`
+/// 2. `submit_in_flight` → disabled, reason: `"W&B 送信中は切替できません"`
+/// 3. `engine_busy` → disabled, reason: `"Engine がビジーです"`
+/// 4. otherwise → enabled
+///
+/// `dirty` is intentionally **not** a parameter — dirty state means "prompt
+/// the user before switching", not "prevent switching altogether".
+pub fn mode_toggle_state(
+    current: AppMode,
+    engine_busy: bool,
+    submit_in_flight: bool,
+    mode_switch_in_progress: bool,
+) -> ModeToggleState {
+    if mode_switch_in_progress {
+        return ModeToggleState {
+            current,
+            enabled: false,
+            disabled_reason: Some("Engine を再起動中…"),
+        };
+    }
+    if submit_in_flight {
+        return ModeToggleState {
+            current,
+            enabled: false,
+            disabled_reason: Some("W&B 送信中は切替できません"),
+        };
+    }
+    if engine_busy {
+        return ModeToggleState {
+            current,
+            enabled: false,
+            disabled_reason: Some("Engine がビジーです"),
+        };
+    }
+    ModeToggleState {
+        current,
+        enabled: true,
+        disabled_reason: None,
+    }
 }
 
 #[cfg(test)]
@@ -475,61 +507,49 @@ mod tests {
         }
     }
 
-    // ── mode_menu_items ────────────────────────────────────────────────────
-    //
-    // Note: these tests pin the *current* mode_menu_items behaviour as
-    // consumed by the Linux widget menu bar (P8). Pre-existing test/impl
-    // inconsistency means `enabled` and `checked` semantics are coupled
-    // to the Linux UI; we leave them gated to Linux to keep the cross-
-    // platform `mod menu` (H5) green. Phase 3-C / future P8 follow-up
-    // can re-evaluate the semantic and unify across platforms.
+    // ── mode_toggle_state (TT1-TT4) ──────────────────────────────────────
 
-    // H4 (F8 R1): the impl uses `enabled: !matches!(current_mode, ...)` so the
-    // currently-active mode entry is **disabled** (you can't switch to the mode
-    // you're already in). The inline test below previously asserted both rows
-    // were `enabled` for both modes, contradicting the impl and the integration
-    // test `tests/mode_menu_items.rs::mode_menu_items_disables_current_live_entry`
-    // which forbids the unconditional-true literal in the function body.
-    // Resolve the three-way contradiction in favour of the impl ("current
-    // mode is disabled").
-    #[cfg(target_os = "linux")]
     #[test]
-    fn live_mode_marks_live_checked_replay_unchecked() {
-        let got = mode_menu_items(&AppMode::Live);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
-        assert_eq!(got[0].checked, Some(true));
-        assert!(!got[0].enabled, "current mode (Live) must be disabled");
-        assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
-        assert_eq!(got[1].checked, Some(false));
-        assert!(got[1].enabled, "non-current mode (Replay) must be enabled");
+    fn tt1_all_false_yields_enabled() {
+        let s = mode_toggle_state(AppMode::Live, false, false, false);
+        assert!(s.enabled);
+        assert_eq!(s.disabled_reason, None);
+        assert_eq!(s.current, AppMode::Live);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn replay_mode_marks_replay_checked_live_unchecked() {
-        let got = mode_menu_items(&AppMode::Replay);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].action, Action::SwitchAppMode(AppMode::Live));
-        assert_eq!(got[0].checked, Some(false));
-        assert!(got[0].enabled, "non-current mode (Live) must be enabled");
-        assert_eq!(got[1].action, Action::SwitchAppMode(AppMode::Replay));
-        assert_eq!(got[1].checked, Some(true));
-        assert!(!got[1].enabled, "current mode (Replay) must be disabled");
+    fn tt2_engine_busy_disables_with_reason() {
+        let s = mode_toggle_state(AppMode::Live, true, false, false);
+        assert!(!s.enabled);
+        assert_eq!(s.disabled_reason, Some("Engine がビジーです"));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn mode_menu_entries_all_dispatch_switch_app_mode() {
-        for current in [AppMode::Live, AppMode::Replay] {
-            for entry in mode_menu_items(&current) {
-                match entry.action {
-                    Action::SwitchAppMode(_) => {}
-                    ref other => {
-                        panic!("expected SwitchAppMode, got {other:?} — DoD-14");
-                    }
-                }
-            }
-        }
+    fn tt3_submit_in_flight_beats_engine_busy() {
+        // submit_in_flight has higher priority than engine_busy
+        let s = mode_toggle_state(AppMode::Live, true, true, false);
+        assert!(!s.enabled);
+        assert_eq!(s.disabled_reason, Some("W&B 送信中は切替できません"));
+    }
+
+    #[test]
+    fn tt4_mode_switch_in_progress_is_highest_priority() {
+        let s = mode_toggle_state(AppMode::Replay, false, true, true);
+        assert!(!s.enabled);
+        assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
+    }
+
+    #[test]
+    fn tt4b_mode_switch_alone_disables() {
+        let s = mode_toggle_state(AppMode::Live, false, false, true);
+        assert!(!s.enabled);
+        assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
+    }
+
+    #[test]
+    fn tt4c_replay_mode_also_disabled_when_switching() {
+        let s = mode_toggle_state(AppMode::Replay, false, false, true);
+        assert!(!s.enabled);
+        assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
     }
 }

@@ -14,14 +14,12 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import pytest
-
 from engine.nautilus.data_loader import KlineRow
 from engine.nautilus.engine_runner import NautilusRunner, BacktestResult, ReplayBacktestResult
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REPO_ROOT = Path(__file__).parent.parent.parent
-STRATEGY_FILE = str(REPO_ROOT / "docs" / "example" / "test_strategy_daily.py")
+STRATEGY_FILE = str(REPO_ROOT / "examples" / "test_strategy_daily.py")
 STRATEGY_INIT_KWARGS_1301 = {"instrument_id": "1301.TSE", "bar_type_str": "1301.TSE-1-DAY-MID-EXTERNAL"}
 
 # ---------------------------------------------------------------------------

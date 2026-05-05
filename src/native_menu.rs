@@ -9,6 +9,9 @@ pub enum Action {
     Save,
     SaveAs,
     OpenReplayDialog,
+    /// Stop the currently running replay without switching app mode.
+    /// (Replay モードに留まり、エンジンだけ IDLE に落とす)
+    StopReplay,
     Quit,
     /// F7/T3: switch to the given app mode (menu item clicked).
     SwitchMode(AppMode),
@@ -51,13 +54,7 @@ pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool, bool, bo
 /// - `sign_out_wandb`      → `Action::SignOutWandb`
 /// - `open_submission_log` → `Action::OpenSubmissionLog`
 /// - `clear_run_buffer`    → `Action::ClearRunBuffer`
-pub fn attach(
-    _raw_id: u64,
-    _app_mode: AppMode,
-    _auth: &WandbAuthState,
-    _buffer: &RunBufferIndex,
-) {
-}
+pub fn attach(_raw_id: u64, _app_mode: AppMode, _auth: &WandbAuthState, _buffer: &RunBufferIndex) {}
 
 /// Refresh Tools submenu enable/disable state (no-op on unified system).
 /// Tools enable/disable is now computed by `menu_bar_state` and rendered by the widget.
