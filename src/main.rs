@@ -672,7 +672,13 @@ async fn wandb_login(api_key: String) -> Result<(), String> {
     use tokio::process::Command;
 
     let mut child = Command::new("uv")
-        .args(["run", "--with", "wandb", "wandb", "login", "--relogin"])
+        .args([
+            "run",
+            "--with",
+            "wandb",
+            "python",
+            "examples/wandb/do_login.py",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -708,6 +714,20 @@ async fn wandb_login(api_key: String) -> Result<(), String> {
         }
     };
 
+    // do_login.py prints {"ok": true} or {"ok": false, "error": "..."} to stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+        if val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(());
+        }
+        let err = val
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(err.to_string());
+    }
+    // Fallback: no JSON — surface stderr or exit code.
     if output.status.success() {
         Ok(())
     } else {
