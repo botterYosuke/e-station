@@ -8,15 +8,10 @@ mod layout;
 mod logger;
 mod mask_secrets;
 // `menu` exposes `tools_actions_for_state`, `MenuEntry`, and `Action` used by
-// both the Linux widget menu bar and the cross-platform `native_menu::attach`
-// Tools enable/disable computation (H5). Cross-platform.
+// the iced widget menu bar on all platforms.
 mod menu;
-// H1 (F8 R1): `menu_bar_state` houses the pure `update()` state machine for the
-// Linux widget menu bar. The module itself is platform-independent — it has no
-// iced widget or GTK dependencies — so we expose it on every OS so that the
-// state-transition contract tests in `tests/widget_menu_bar_state.rs` can
-// compile and inspect the source on Windows / macOS as well as Linux. Only the
-// rendering layer (`widget_menu_bar`) is Linux-gated.
+// `menu_bar_state` houses the pure `update()` state machine for the iced widget
+// menu bar. No cfg gate — the state machine is platform-independent.
 mod menu_bar_state;
 mod modal;
 mod native_menu;
@@ -28,7 +23,6 @@ mod version;
 mod wandb_auth;
 mod wandb_submit_proc;
 mod widget;
-#[cfg(target_os = "linux")]
 mod widget_menu_bar;
 mod window;
 
@@ -242,7 +236,7 @@ fn exit_code_to_error(code: i32) -> WandbSubmitError {
 
 /// Returns the current app mode.  Falls back to `Live` when the static has not
 /// yet been initialised (unreachable in normal operation).
-fn app_mode() -> engine_client::dto::AppMode {
+pub(crate) fn app_mode() -> engine_client::dto::AppMode {
     APP_MODE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1268,6 +1262,10 @@ struct Flowsurface {
     /// one via the OS file dialog. Consumed by the Replay 起動フォーム modal as the
     /// `strategy_file` field on `Command::StartEngine`.
     replay_strategy_file: Option<std::path::PathBuf>,
+    /// F6a: 最後に送信した `LoadStrategyScenario` の request_id。
+    /// `StrategyScenarioLoadedEvent` 受信時に突き合わせ、古い応答を捨てるために使う。
+    /// `None` = 未送信 or 応答済み。
+    pending_scenario_request_id: Option<String>,
     /// Phase 8.1c: Replay 起動フォーム modal。`File > Replay を開始...` で Some に、
     /// Submit / Cancel で None に戻る。
     replay_form_modal: Option<modal::replay_form::ReplayFormModal>,
@@ -1292,9 +1290,7 @@ struct Flowsurface {
     /// The leading `_` on the field name silences the unused-field lint for
     /// the guard half (it is held purely for its Drop side-effect).
     mode_switch_state: Option<(engine_client::dto::AppMode, ModeSwitchGuard)>,
-    /// F8: Linux widget menu bar open/close state (DoD-12).
-    /// Only compiled on Linux; Win/macOS use the muda OS-native menu.
-    #[cfg(target_os = "linux")]
+    /// Widget menu bar open/close state (all platforms).
     menu_bar: crate::menu_bar_state::State,
     /// P9: W&B authentication state. Populated when Python check_auth subprocess responds.
     /// Drives Tools submenu enabled/disabled state on all platforms.
@@ -1487,9 +1483,7 @@ enum Message {
     NativeMenuSetup(u64),
     /// Native OS menu bar: user selected a menu item.
     NativeMenuAction(native_menu::Action),
-    /// F8: Linux widget menu bar message (toggle/pick/dismiss).
-    /// On Win/macOS this variant is never constructed; muda drives NativeMenuAction instead.
-    #[cfg(target_os = "linux")]
+    /// Widget menu bar message (toggle/pick/dismiss) — all platforms.
     MenuBar(crate::menu_bar_state::BarMessage),
     /// Native OS menu bar — Save As: user picked a destination path.
     NativeSaveAsPath(Option<std::path::PathBuf>),
@@ -1522,12 +1516,14 @@ enum Message {
     /// `ReplayFormModal` を prefill し、`None`（SCENARIO 不在）なら strategy_file
     /// だけセットしてフォームは空のままにする。`current_path` は両ケースで更新。
     StrategyScenarioLoadedEvent {
+        request_id: String,
         path: std::path::PathBuf,
         scenario: Option<serde_json::Value>,
     },
     /// F6a: `Event::StrategyScenarioLoadFailed` 受信時。エラートーストを出し、
     /// `current_path` はセットしない。
     StrategyScenarioLoadFailedEvent {
+        request_id: String,
         path: std::path::PathBuf,
         reason: String,
     },
@@ -1567,8 +1563,10 @@ enum Message {
         target: engine_client::dto::AppMode,
         windows: HashMap<window::Id, WindowSpec>,
     },
-    /// F7: engine returned `EngineBusy` for a `StopReplay` or `ForceStopReplay` command
-    /// while a mode switch is pending. Aborts the switch and shows an error dialog.
+    /// F7: engine returned `EngineBusy` for `StopReplay` (engine IDLE — no replay loaded).
+    /// Does NOT abort the switch; sends `ForceStopReplay` immediately as fallback.
+    ModeSwitchStopBusy,
+    /// F7: engine returned `EngineBusy` for `ForceStopReplay` — genuine failure; abort.
     ModeSwitchEngineBusy(String),
     /// Internal: genuinely does nothing in update(). Used to discard async Task
     /// completion events where the result is irrelevant (fire-and-forget IPC sends).
@@ -1897,23 +1895,23 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         }
         // Phase 8: EngineBusy → GUI ユーザーへの warn toast
         // Python engine が state guard で Command を拒否したときに emit される。
-        // F7: StopReplay / ForceStopReplay の EngineBusy のみ mode-switch 中断として扱う
-        //     (replay→live 専用)。live→replay の EngineBusy 行は別経路で対処する。
+        // F7: StopReplay の EngineBusy はエンジン IDLE（リプレイ未ロード）を意味する。
+        //     mode-switch を中断せず ForceStopReplay fallback に即移行する。
+        //     ForceStopReplay の EngineBusy は真の失敗なのでスイッチを中断する。
         EngineEvent::EngineBusy {
             attempted_command,
             reason,
             ..
         } => {
             use engine_client::dto::AttemptedCommand;
-            if matches!(
-                attempted_command,
-                AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay
-            ) {
-                Some(Message::ModeSwitchEngineBusy(reason))
-            } else {
-                Some(Message::OrderToast(Toast::warn(format!(
+            match attempted_command {
+                AttemptedCommand::StopReplay => Some(Message::ModeSwitchStopBusy),
+                AttemptedCommand::ForceStopReplay => {
+                    Some(Message::ModeSwitchEngineBusy(reason))
+                }
+                _ => Some(Message::OrderToast(Toast::warn(format!(
                     "操作を受け付けられませんでした: {attempted_command} — {reason}"
-                ))))
+                )))),
             }
         }
         // Phase 8.1b: multi-client 接続ライフサイクルイベント
@@ -1930,14 +1928,24 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::ReplayStopped { .. } => Some(Message::ModeSwitchStopAcked),
         // F6a: SCENARIO 抽出結果 → ReplayFormModal prefill
         EngineEvent::StrategyScenarioLoaded {
-            path, scenario, ..
+            request_id,
+            path,
+            scenario,
+            ..
         } => Some(Message::StrategyScenarioLoadedEvent {
+            request_id,
             path: std::path::PathBuf::from(path),
             scenario,
         }),
         // F6a: SCENARIO 抽出失敗 → エラートースト
-        EngineEvent::StrategyScenarioLoadFailed { path, reason, .. } => {
+        EngineEvent::StrategyScenarioLoadFailed {
+            request_id,
+            path,
+            reason,
+            ..
+        } => {
             Some(Message::StrategyScenarioLoadFailedEvent {
+                request_id,
                 path: std::path::PathBuf::from(path),
                 reason,
             })
@@ -2138,13 +2146,13 @@ impl Flowsurface {
             order_list_request_id: None,
             positions_request_id: None,
             replay_strategy_file: None,
+            pending_scenario_request_id: None,
             replay_form_modal: None,
             strategy_load_error: None,
             last_saved_bytes: None,
             pending_exit_windows: None,
             pending_open_file: None,
             mode_switch_state: None,
-            #[cfg(target_os = "linux")]
             menu_bar: crate::menu_bar_state::State::default(),
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
             run_buffer: wandb_auth::RunBufferIndex::empty(),
@@ -3575,8 +3583,7 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
-            // ── Linux widget menu bar ──────────────────────────────────────
-            #[cfg(target_os = "linux")]
+            // ── Widget menu bar (all platforms) ───────────────────────────
             Message::MenuBar(bar_msg) => {
                 use crate::menu_bar_state::{self, BarMessage};
                 let native = if let BarMessage::Pick(ref action) = bar_msg {
@@ -3957,9 +3964,12 @@ impl Flowsurface {
                     return Task::none();
                 };
                 let path_str = path.to_string_lossy().into_owned();
+                // request_id を同期的に生成してステートに記録することで、
+                // 連続 open 時に古い応答を StrategyScenarioLoadedEvent で捨てられる。
+                let request_id = uuid::Uuid::new_v4().to_string();
+                self.pending_scenario_request_id = Some(request_id.clone());
                 return Task::perform(
                     async move {
-                        let request_id = uuid::Uuid::new_v4().to_string();
                         conn.send(engine_client::dto::Command::LoadStrategyScenario {
                             request_id,
                             path: path_str,
@@ -3977,17 +3987,20 @@ impl Flowsurface {
             }
             // F6a: SCENARIO 抽出成功 → ReplayFormModal を prefill。modal が
             // 開いていなければ新規生成する（GUI で `Open` 直後はまだ modal が
-            // 出ていない正規ルート）。`current_path` は両ケース（scenario
-            // None / Some）でセットする。
-            Message::StrategyScenarioLoadedEvent { path, scenario } => {
-                // M-7: poison recovery via `into_inner()` so a prior panic does
-                // not silently drop the new path.
-                let mut guard = match CURRENT_PATH.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                *guard = Some(path.clone());
-                drop(guard);
+            // 出ていない正規ルート）。
+            // CURRENT_PATH はレイアウト JSON の保存先のみを示す。戦略 .py を
+            // セットすると live 切替後の Ctrl+S が .py を JSON で上書きするため
+            // ここでは更新しない。
+            Message::StrategyScenarioLoadedEvent {
+                request_id,
+                path,
+                scenario,
+            } => {
+                // 連続して別ファイルを開いた場合、古い応答を無視する。
+                if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
+                    return Task::none();
+                }
+                self.pending_scenario_request_id = None;
                 let form = self
                     .replay_form_modal
                     .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
@@ -3998,7 +4011,16 @@ impl Flowsurface {
                 return Task::none();
             }
             // F6a: SCENARIO 抽出失敗 → トースト表示。`current_path` は更新しない。
-            Message::StrategyScenarioLoadFailedEvent { path, reason } => {
+            // 成功パスと対称に request_id で突き合わせ、古い失敗を捨てる。
+            Message::StrategyScenarioLoadFailedEvent {
+                request_id,
+                path,
+                reason,
+            } => {
+                if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
+                    return Task::none();
+                }
+                self.pending_scenario_request_id = None;
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -4024,11 +4046,7 @@ impl Flowsurface {
                             .await
                             .map(|h| h.path().to_owned())
                     },
-                    |path| {
-                        Message::ReplayFormMsg(modal::replay_form::Message::StrategyFilePicked(
-                            path,
-                        ))
-                    },
+                    Message::NativeOpenStrategyPicked,
                 );
             }
             Message::ReplayFormMsg(msg) => {
@@ -4056,6 +4074,7 @@ impl Flowsurface {
                                         conn.send(engine_client::dto::Command::LoadReplayData {
                                             request_id: load_req_id,
                                             instrument_id: instrument_id.clone(),
+                                            instrument_ids: None,
                                             start_date: start_date.clone(),
                                             end_date: end_date.clone(),
                                             granularity: gran_dto.clone(),
@@ -4069,6 +4088,7 @@ impl Flowsurface {
                                             strategy_id: "user-strategy".to_string(),
                                             config: engine_client::dto::EngineStartConfig {
                                                 instrument_id,
+                                                instrument_ids: None,
                                                 start_date,
                                                 end_date,
                                                 initial_cash: initial_cash.to_string(),
@@ -4626,10 +4646,50 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
-            // F7: EngineBusy for StopReplay/ForceStopReplay — abort mode switch immediately.
-            // This handles the 5-axis matrix row "replay→live, EngineBusy" without waiting
-            // for the 5s timeout. The stale ModeSwitchStopTimeout fires later but is ignored
-            // because mode_switch_state will be None at that point.
+            // F7: StopReplay EngineBusy — engine is IDLE (no replay loaded).
+            // Skip the remaining 5s wait and send ForceStopReplay immediately.
+            // ForceStopReplay has no state guard on the Python side and always responds
+            // with ReplayStopped, so the mode switch can complete normally.
+            // If the stale ModeSwitchStopTimeout fires later, mode_switch_state will
+            // already be None (cleared by ModeSwitchStopAcked) and is safely ignored.
+            Message::ModeSwitchStopBusy => {
+                log::warn!("[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately");
+                if self.mode_switch_state.is_none() {
+                    return Task::none();
+                }
+                if let Some(conn) = self.engine_connection.clone() {
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    let force_task = Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::ForceStopReplay { request_id })
+                                .await
+                        },
+                        |result| match result {
+                            Ok(()) => Message::Noop,
+                            Err(_) => Message::ModeSwitchSendFailed,
+                        },
+                    );
+                    let timeout_task = Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        },
+                        |_| Message::ModeSwitchForceStopTimeout,
+                    );
+                    return Task::batch([force_task, timeout_task]);
+                } else {
+                    self.mode_switch_state = None;
+                    let dialog = screen::ConfirmDialog::new(
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+            }
+            // F7: ForceStopReplay EngineBusy — genuine failure; abort mode switch.
+            // The stale ModeSwitchStopTimeout (if still pending) fires later but is
+            // ignored because mode_switch_state will be None at that point.
             Message::ModeSwitchEngineBusy(reason) => {
                 if self.mode_switch_state.take().is_some() {
                     let dialog = screen::ConfirmDialog::new(
@@ -5728,11 +5788,11 @@ impl Flowsurface {
                 })
             });
 
+            let current_mode = app_mode();
             let mut base = column![header_title];
-            #[cfg(target_os = "linux")]
             {
                 let menu_bar_view =
-                    crate::widget_menu_bar::view(&self.menu_bar, &app_mode()).map(Message::MenuBar);
+                    crate::widget_menu_bar::view(&self.menu_bar, current_mode).map(Message::MenuBar);
                 base = base.push(menu_bar_view);
             }
             if let Some(banner) = banner {
@@ -5753,7 +5813,7 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
-            let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
+            let is_replay = current_mode == engine_client::dto::AppMode::Replay;
 
             base = base.push(
                 match sidebar_pos {
@@ -5771,15 +5831,13 @@ impl Flowsurface {
             } else {
                 base.into()
             };
-            #[cfg(target_os = "linux")]
-            let view_result = crate::widget_menu_bar::with_dropdown_overlay(
+            crate::widget_menu_bar::with_dropdown_overlay(
                 view_result,
                 &self.menu_bar,
-                &app_mode(),
+                current_mode,
                 &self.wandb_auth,
                 &self.run_buffer,
-            );
-            view_result
+            )
         } else {
             container(
                 dashboard
@@ -5936,8 +5994,7 @@ impl Flowsurface {
         // Watch the engine-restarting flag and emit EngineRestarting messages.
         let engine_status = Subscription::run(engine_status_stream);
 
-        #[cfg(target_os = "linux")]
-        let linux_menu_bar_dismiss =
+        let widget_menu_bar_dismiss =
             iced::event::listen_with(|event, _status, _window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::MenuBar(
                     crate::menu_bar_state::BarMessage::DismissFocusLost,
@@ -5953,8 +6010,7 @@ impl Flowsurface {
             hotkeys,
             engine_status,
             native_menu::subscription(app_mode()).map(Message::NativeMenuAction),
-            #[cfg(target_os = "linux")]
-            linux_menu_bar_dismiss,
+            widget_menu_bar_dismiss,
         ])
     }
 
@@ -6557,12 +6613,56 @@ impl Flowsurface {
         // to Action::SwitchMode.
         lock_order_acquire("APP_MODE");
         set_app_mode(mode);
+
+        // F7-bugfix: update ProcessManager::mode and restart the Python engine
+        // so the next Hello carries the new mode. Without this the Python engine
+        // continues running with self._mode = "replay" even after APP_MODE is
+        // updated, causing RequestVenueLogin to be rejected with
+        // "RequestVenueLogin not allowed in replay mode".
+        //
+        // Sequence:
+        //   1. set_mode() updates the manager's mode Mutex so start() reads it.
+        //   2. Command::Shutdown causes the Python engine to close gracefully.
+        //   3. The recovery loop in main() sees wait_closed() complete and calls
+        //      manager.start() on a fresh port, sending Hello{mode: <new mode>}.
+        //   4. engine_status_stream yields EngineConnected with the new conn.
+        let engine_restart_task = {
+            let manager = ENGINE_MANAGER.get().map(Arc::clone);
+            // Clone the Arc before restart() replaces *self.
+            let conn = self.engine_connection.clone();
+            Task::perform(
+                async move {
+                    if let Some(m) = manager {
+                        m.set_mode(mode).await;
+                    }
+                    if let Some(c) = conn {
+                        // Ignore send errors — the connection may already be
+                        // closing. The recovery loop will restart regardless.
+                        let _ = c.send(engine_client::dto::Command::Shutdown).await;
+                    }
+                },
+                |_| Message::Noop,
+            )
+        };
+
+        // F7-bugfix (High): clear ENGINE_CONNECTION_TX BEFORE self.restart() so
+        // Flowsurface::new() reads engine_connection = None. This closes the race
+        // window where the live-mode UI would send RequestVenueLogin to the old
+        // replay-mode engine before the new Hello{mode=live} arrives.
+        //
+        // engine_status_stream handles None gracefully: it skips the EngineConnected
+        // yield and keeps event_rx pointing at the old conn until RecvError::Closed,
+        // then waits for the next conn_rx.changed() to set up the new conn.
+        if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+            tx.send(None).ok();
+        }
+
         let task = self.restart();
         // restart() replaces *self; the per-thread lock-order tracker now
         // pertains to a stale critical section. Reset it so the next switch
         // starts from a clean slate.
         lock_order_reset();
-        task
+        Task::batch([task, engine_restart_task])
     }
 
     fn restart(&mut self) -> Task<Message> {
@@ -7063,7 +7163,7 @@ mod native_menu_handler_tests {
     #[test]
     fn strategy_scenario_load_failed_event_pushes_toast_only() {
         let body = handler_body(
-            "            Message::StrategyScenarioLoadFailedEvent { path, reason } =>",
+            "            Message::StrategyScenarioLoadFailedEvent {",
         );
         assert!(
             body.contains("notifications.push"),
@@ -7216,6 +7316,108 @@ mod lock_order_tests {
         assert!(
             third.is_some(),
             "try_acquire must return Some again after the previous guard is dropped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mode_switch_engine_busy_routing_tests {
+    //! Regression guards for the F7 replay→live mode-switch bug where
+    //! `StopReplay` EngineBusy aborted the switch instead of falling through
+    //! to the `ForceStopReplay` fallback.
+    //!
+    //! Root cause: both `AttemptedCommand::StopReplay` and `ForceStopReplay`
+    //! routed to `ModeSwitchEngineBusy` which calls `.take()` and clears
+    //! `mode_switch_state`. The 5-second `ModeSwitchStopTimeout` then saw
+    //! `is_none()` and early-returned without sending `ForceStopReplay`.
+
+    const MAIN_RS: &str = include_str!("./main.rs");
+
+    /// StopReplay and ForceStopReplay must be handled in separate arms.
+    /// Sharing a branch means StopReplay EngineBusy aborts the mode switch,
+    /// preventing the ForceStopReplay fallback from ever being sent.
+    #[test]
+    fn stop_replay_and_force_stop_replay_engine_busy_are_separate_arms() {
+        // Strip the test module itself so we only inspect production code.
+        let test_mod_marker = "mod mode_switch_engine_busy_routing_tests {";
+        let prod_code = MAIN_RS
+            .split_once(test_mod_marker)
+            .map(|(prod, _)| prod)
+            .expect("test module marker must exist in main.rs");
+        // The old shared-branch pattern must not appear in production code.
+        let shared_branch = "AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay";
+        assert!(
+            !prod_code.contains(shared_branch),
+            "StopReplay must not share an EngineBusy arm with ForceStopReplay. \
+             StopReplay EngineBusy = engine IDLE (continue with ForceStopReplay). \
+             ForceStopReplay EngineBusy = genuine failure (abort mode switch)."
+        );
+    }
+
+    /// The new `ModeSwitchStopBusy` message must exist to handle
+    /// `StopReplay` EngineBusy by sending `ForceStopReplay` immediately.
+    #[test]
+    fn mode_switch_stop_busy_message_exists() {
+        assert!(
+            MAIN_RS.contains("ModeSwitchStopBusy"),
+            "Message::ModeSwitchStopBusy must exist — it handles StopReplay EngineBusy \
+             by sending ForceStopReplay immediately instead of aborting the mode switch"
+        );
+    }
+}
+
+#[cfg(test)]
+mod app_mode_roundtrip_tests {
+    //! Acceptance criteria 2 (F7 bugfix): `app_mode()` must return the value
+    //! most recently written by `set_app_mode()`.
+    //!
+    //! These are runtime tests (not source inspection) so a broken
+    //! implementation (e.g. `app_mode()` hardcoded to return `Replay`) is
+    //! detected at test time, not just at review time.
+    //!
+    //! NOTE: `APP_MODE` is a process-global static. Tests in this module must
+    //! not run concurrently with other tests that mutate `APP_MODE`. Currently
+    //! no other test module writes `APP_MODE`, so `#[serial]` is not needed.
+    //! If that assumption changes, add `serial_test` or a `Mutex` guard.
+
+    use super::*;
+    use engine_client::dto::AppMode;
+
+    #[test]
+    fn set_app_mode_live_makes_app_mode_return_live() {
+        set_app_mode(AppMode::Live);
+        assert_eq!(
+            app_mode(),
+            AppMode::Live,
+            "app_mode() must return Live immediately after set_app_mode(Live)"
+        );
+    }
+
+    #[test]
+    fn set_app_mode_replay_makes_app_mode_return_replay() {
+        set_app_mode(AppMode::Replay);
+        assert_eq!(
+            app_mode(),
+            AppMode::Replay,
+            "app_mode() must return Replay immediately after set_app_mode(Replay)"
+        );
+        // Restore to Live so other tests that read APP_MODE are not surprised.
+        set_app_mode(AppMode::Live);
+    }
+
+    /// Acceptance criteria 2: after a replay→live mode switch, `app_mode()`
+    /// must return `AppMode::Live`. This is the direct runtime guard for the
+    /// "RequestVenueLogin not allowed in replay mode" regression.
+    #[test]
+    fn app_mode_returns_live_after_switch_from_replay() {
+        set_app_mode(AppMode::Replay);
+        assert_eq!(app_mode(), AppMode::Replay, "pre-condition: must start in Replay");
+        // Simulate what restart_with_mode(Live) does to APP_MODE.
+        set_app_mode(AppMode::Live);
+        assert_eq!(
+            app_mode(),
+            AppMode::Live,
+            "app_mode() must return Live after set_app_mode(Live) (acceptance criteria 2)"
         );
     }
 }

@@ -155,7 +155,7 @@ trap 'rc=$?; echo "[replay-load] done (exit=$rc)"; exit $rc' EXIT
 
 ## `${relativeFile}` について
 
-当初は `${relativeFile}` が `.vscode/launch.json` を指し、`strategy_file` に誤ったパスが渡っているのではないかと疑った。しかし今回の再現では、アクティブファイルは `docs/example/buy_and_hold.py` であり、この仮説は今回の真因ではなかった。
+当初は `${relativeFile}` が `.vscode/launch.json` を指し、`strategy_file` に誤ったパスが渡っているのではないかと疑った。しかし今回の再現では、アクティブファイルは `examples/buy_and_hold.py` であり、この仮説は今回の真因ではなかった。
 
 ただし、`${relativeFile}` を strategy file に流用している構造自体は依然として脆い。将来、戦略ファイル以外を開いた状態で F5 すると、今度は別の失敗を起こす可能性がある。
 

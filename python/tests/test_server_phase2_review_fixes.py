@@ -308,7 +308,7 @@ async def test_engine_stopped_emitted_when_runner_raises_before_started(running_
                             "end_date": "2025-01-07",
                             "initial_cash": "1000000",
                             "granularity": "Daily",
-                            "strategy_file": "docs/example/test_strategy_daily.py",
+                            "strategy_file": "examples/test_strategy_daily.py",
                         },
                     }
                 ).decode()

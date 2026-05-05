@@ -22,7 +22,7 @@ run-replay-debug.sh <strategy_file> <instrument_id> <start_date> <end_date> [gra
 
 | 位置 | 必須 | 例 |
 |------|------|-----|
-| `$1` strategy_file | ✅ | `docs/example/buy_and_hold.py` |
+| `$1` strategy_file | ✅ | `examples/buy_and_hold.py` |
 | `$2` instrument_id | ✅ | `1301.TSE` |
 | `$3` start_date | ✅ | `2025-01-06` |
 | `$4` end_date | ✅ | `2025-03-31` |
@@ -41,7 +41,7 @@ run-replay-debug.sh <strategy_file> <instrument_id> <start_date> <end_date> [gra
 
 ```bash
 export REPLAY_INITIAL_CASH=500000
-bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31
+bash scripts/run-replay-debug.sh examples/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31
 ```
 
 ### VSCode からの起動
@@ -65,7 +65,7 @@ bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-0
 | `.vscode/tasks.json` | `inputs` セクション追加済み（銘柄・開始日・終了日・足種） |
 | `.claude/CLAUDE.md` | 最小コマンド例と引数一覧を更新 |
 | `README.md` | replay 補助スクリプト行を CLI 引数形式に更新 |
-| `docs/example/README.md` | 起動セクションと引数一覧を更新、`.env` 言及を削除 |
-| `docs/example/buy_and_hold.py` | docstring の起動例を更新 |
+| `examples/README.md` | 起動セクションと引数一覧を更新、`.env` 言及を削除 |
+| `examples/buy_and_hold.py` | docstring の起動例を更新 |
 | `docs/wiki/getting-started.md` | replay スクリプト行を更新 |
 | `.env.example` | `REPLAY_*` セクションを削除 |

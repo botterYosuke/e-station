@@ -1,19 +1,19 @@
-/// F7/T6: structural test — linux keyboard accelerator path checks MODE_SWITCHING.
+/// F7/T6: structural test — keyboard accelerator path checks MODE_SWITCHING.
 const NATIVE_MENU_RS: &str = include_str!("../src/native_menu.rs");
 
 #[test]
-fn linux_keyboard_subscription_checks_mode_switching() {
-    // Agent A already added MODE_SWITCHING check in linux_keyboard_subscription().
-    // This test guards against regression.
+fn widget_keyboard_subscription_checks_mode_switching() {
+    // This test guards against regression — MODE_SWITCHING must be checked
+    // inside widget_keyboard_subscription before dispatching SwitchMode.
     let idx = NATIVE_MENU_RS
-        .find("fn linux_keyboard_subscription")
-        .expect("linux_keyboard_subscription must exist in native_menu.rs");
+        .find("fn widget_keyboard_subscription")
+        .expect("widget_keyboard_subscription must exist in native_menu.rs");
     let body = &NATIVE_MENU_RS[idx..];
     let end = body[1..].find("\nfn ").map(|i| i + 1).unwrap_or(body.len());
     let fn_body = &body[..end];
     assert!(
         fn_body.contains("MODE_SWITCHING"),
-        "linux_keyboard_subscription must check MODE_SWITCHING to suppress dispatch during mode switch (統一決定 64)"
+        "widget_keyboard_subscription must check MODE_SWITCHING to suppress dispatch during mode switch (統一決定 64)"
     );
 }
 
@@ -40,24 +40,22 @@ fn mode_switch_state_holds_guard() {
 }
 
 #[test]
-fn win_mac_event_stream_checks_mode_switching() {
-    // H2 / 統一決定 64: muda accelerators on Win/Mac fire independently of
-    // menu enabled state. The event_stream must suppress SwitchMode dispatch
-    // while MODE_SWITCHING is true.
-    const NATIVE: &str = include_str!("../src/native_menu.rs");
-    let pos = NATIVE
-        .find("pub fn event_stream()")
-        .expect("event_stream() must exist in src/native_menu.rs");
-    // Window: scan the function body for the guard. 4000 bytes is enough.
-    let end = (pos + 4000).min(NATIVE.len());
-    // Walk back to char boundary
+fn keyboard_subscription_checks_mode_switching() {
+    // H2 / 統一決定 64: keyboard accelerators fire independently of menu enabled
+    // state. The subscription must suppress SwitchMode dispatch while
+    // MODE_SWITCHING is true. Applies to the unified widget_keyboard_subscription
+    // which runs on all platforms (muda removed).
+    let pos = NATIVE_MENU_RS
+        .find("fn widget_keyboard_subscription")
+        .expect("widget_keyboard_subscription must exist in src/native_menu.rs");
+    let end = (pos + 4000).min(NATIVE_MENU_RS.len());
     let mut safe_end = end;
-    while !NATIVE.is_char_boundary(safe_end) {
+    while !NATIVE_MENU_RS.is_char_boundary(safe_end) {
         safe_end -= 1;
     }
-    let body = &NATIVE[pos..safe_end];
+    let body = &NATIVE_MENU_RS[pos..safe_end];
     assert!(
-        body.contains("Action::SwitchMode(_)") && body.contains("MODE_SWITCHING"),
-        "event_stream must suppress SwitchMode dispatch when MODE_SWITCHING is true (H2)"
+        body.contains("SwitchMode") && body.contains("MODE_SWITCHING"),
+        "widget_keyboard_subscription must suppress SwitchMode dispatch when MODE_SWITCHING is true (H2)"
     );
 }

@@ -75,8 +75,8 @@
 |---------|------|
 | `src/menu.rs` | `Action::SwitchAppMode(AppMode)` / `MenuEntry` / `mode_menu_items` |
 | `src/main.rs` | `SwitchMode` ハンドラ群（`SaveAndSwitchMode` / `DiscardAndSwitchMode`） / engine 再起動 / `_mode_switch_guard` |
-| `src/native_menu.rs` | muda の Mode サブメニュー構築（Win/macOS） |
-| `src/widget_menu_bar.rs` | iced widget の Mode サブメニュー（Linux） |
+| `src/native_menu.rs` | `Action` enum / `widget_keyboard_subscription`（Ctrl/Cmd+M） |
+| `src/widget_menu_bar.rs` | iced widget の Mode サブメニュー（全 OS） |
 
 ---
 

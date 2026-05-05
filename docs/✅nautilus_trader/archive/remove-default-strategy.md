@@ -221,8 +221,8 @@ fallback を先に消すと dev helper の入口配線が追随せず即壊れ�
 
 ## 注意
 
-- `docs/example/buy_and_hold.py` はユーザー向けサンプルとして残す
-  （`strategy_file=docs/example/buy_and_hold.py` と明示指定すれば使える）
+- `examples/buy_and_hold.py` はユーザー向けサンプルとして残す
+  （`strategy_file=examples/buy_and_hold.py` と明示指定すれば使える）
 
 ---
 

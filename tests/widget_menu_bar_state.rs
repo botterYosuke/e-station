@@ -460,11 +460,10 @@ fn focus_lost_dismiss_subscription_exists() {
 }
 
 #[test]
-fn file_is_linux_only() {
+fn file_has_no_linux_cfg_gate() {
     let src = read_widget_menu_bar();
     assert!(
-        src.contains("#![cfg(target_os = \"linux\")]")
-            || src.contains("#[cfg(target_os = \"linux\")]"),
-        "widget_menu_bar.rs must be gated with cfg(target_os = \"linux\") to avoid Win/Mac double-menu"
+        !src.contains("#![cfg(target_os = \"linux\")]"),
+        "widget_menu_bar.rs must NOT be linux-only — it is now cross-platform (all OS)"
     );
 }

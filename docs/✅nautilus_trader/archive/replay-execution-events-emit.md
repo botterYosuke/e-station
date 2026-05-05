@@ -7,7 +7,7 @@
 
 ## 背景・症状
 
-2026-04-30 に `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py`
+2026-04-30 に `bash scripts/run-replay-debug.sh examples/buy_and_hold.py`
 （1301.TSE / Daily / 2025-01-06〜2025-03-31）で動作確認したところ、
 market data（KlineUpdate / Trades / DateChangeMarker）は仕様どおりストリーミングされ、
 チャートに 57 本の Daily バーが描画されるところまでは動いた。
@@ -268,7 +268,7 @@ engine.kernel.msgbus.subscribe(
 
 #### ✅ 新規 fixture: `python/tests/fixtures/fill_strategy.py`
 
-[`docs/example/buy_and_hold.py`](../example/buy_and_hold.py) をテスト用に最小化したコピー。
+[`examples/buy_and_hold.py`](../example/buy_and_hold.py) をテスト用に最小化したコピー。
 `instrument_id` / `lot_size` をハードコードして決定論性を担保する。
 
 > 既存 `NoOpTestStrategy` は維持（他テストが依存）。新 fixture は別ファイルで追加。
@@ -347,7 +347,7 @@ def test_emitted_events_pass_pydantic_schema():
 
 #### E2E（手動）
 
-`scripts/run-replay-debug.sh docs/example/buy_and_hold.py` を回し、
+`scripts/run-replay-debug.sh examples/buy_and_hold.py` を回し、
 ターミナル log（debug ビルドは stdout）に対して：
 
 - `"event":"ExecutionMarker"` の出現回数 = 8
@@ -482,7 +482,7 @@ CRITICAL / HIGH / MEDIUM がゼロになったことを確認（R3 は HIGH/MEDI
 - Rust 側受信パス: [`src/main.rs:1126`](../../src/main.rs#L1126) `EngineEvent::ExecutionMarker`
 - 既存資産（dead code 化していた）: [`python/engine/nautilus/narrative_hook.py`](../../python/engine/nautilus/narrative_hook.py),
   [`python/engine/nautilus/portfolio_view.py`](../../python/engine/nautilus/portfolio_view.py)
-- 戦略サンプル: [`docs/example/buy_and_hold.py`](../example/buy_and_hold.py)
+- 戦略サンプル: [`examples/buy_and_hold.py`](../example/buy_and_hold.py)
 - 既存契約テスト: [`python/tests/test_execution_marker_emit.py`](../../python/tests/test_execution_marker_emit.py)
 - 関連 WAL（Step B 候補）: [`python/engine/order_router.py`](../../python/engine/order_router.py),
   [`python/engine/server.py:1393`](../../python/engine/server.py#L1393) `_do_get_order_list_replay`

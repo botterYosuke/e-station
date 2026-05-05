@@ -151,11 +151,11 @@ GUI 経路（F6a）の read-only prefill / CLI 経路（F6b）/ 書き戻し後�
 
 ```bash
 # SCENARIO を使う（引数省略）
-uv run python -m engine.replay_session run --strategy docs/example/buy_and_hold.py
+uv run python -m engine.replay_session run --strategy examples/buy_and_hold.py
 
 # CLI 引数で上書き
 uv run python -m engine.replay_session run \
-    --strategy docs/example/buy_and_hold.py \
+    --strategy examples/buy_and_hold.py \
     --instrument 7203.TSE \
     --start 2025-04-01 --end 2025-04-30
 ```
@@ -344,12 +344,12 @@ Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, loaded_
 
 ### サンプル戦略の更新
 
-- `docs/example/buy_and_hold.py` に `SCENARIO` 辞書を追加（仕様の生きた例として）
+- `examples/buy_and_hold.py` に `SCENARIO` 辞書を追加（仕様の生きた例として）
 - **影響範囲調査タスク**（F6c のサブ DoD）: 以下のコマンドで影響箇所を grep し、本書または PR description に結果を記載する：
 
   ```bash
   grep -rn "buy_and_hold" python/tests/ docs/ scripts/ --include="*.py" --include="*.md"
-  grep -rn "docs/example" python/tests/ engine-client/tests/ --include="*.py" --include="*.rs"
+  grep -rn "examples" python/tests/ engine-client/tests/ --include="*.py" --include="*.rs"
   ```
 
   既知の影響先候補: `python/tests/test_replay_session*.py`（fixture が `buy_and_hold.py` を参照していれば SCENARIO 追加でも互換が保たれることを確認）。
@@ -360,7 +360,7 @@ Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, loaded_
 
 - 既存の `.py` 戦略には影響なし（`SCENARIO` 不在は許容）
 - ユーザーが `名前を付けて保存…（Save As）` を一度実行すると `SCENARIO` が自動挿入される
-- `docs/example/buy_and_hold.py` は本フェーズで `SCENARIO` 付きに更新
+- `examples/buy_and_hold.py` は本フェーズで `SCENARIO` 付きに更新
 
 ---
 
@@ -394,7 +394,7 @@ Python 側 `engine.scenario.write_back(path, scenario, *, save_as: bool, loaded_
 
 | ファイル | 役割 |
 |---------|------|
-| [../../docs/example/buy_and_hold.py](../../docs/example/buy_and_hold.py) | サンプル戦略（`SCENARIO` 付与対象） |
+| [../../examples/buy_and_hold.py](../../examples/buy_and_hold.py) | サンプル戦略（`SCENARIO` 付与対象） |
 | [../../python/engine/replay_session.py](../../python/engine/replay_session.py) | F6b CLI 経路 |
 | [../../python/engine/schemas.py](../../python/engine/schemas.py) | `Scenario` TypedDict + IPC スキーマ拡張 |
 | [../../engine-client/src/dto.rs](../../engine-client/src/dto.rs) | Rust 側 IPC 構造体 |

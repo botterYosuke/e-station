@@ -32,7 +32,9 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # F7: SCHEMA_MINOR を 10 → 11 に bump (StopReplay / ForceStopReplay / ReplayStopped 追加)
     # schema 3.12: SCHEMA_MINOR を 11 → 12 に bump
     # (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)
-    assert s.SCHEMA_MINOR == 12
+    # schema 3.13: SCHEMA_MINOR を 12 → 13 に bump
+    # (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: list[str] | None 追加)
+    assert s.SCHEMA_MINOR == 13
     assert s.SCHEMA_MAJOR == 3
 
 

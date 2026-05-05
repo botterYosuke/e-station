@@ -8,13 +8,13 @@
 起動（headless / in-process）:
 
     uv run python -m engine.replay_session run \
-        --strategy docs/example/buy_and_hold_trade.py \
+        --strategy examples/buy_and_hold_trade.py \
         --instrument 1301.TSE --start 2025-01-06 --end 2025-01-06 \
         --granularity Trade --mode inprocess
 
 GUI 付きで attach する場合は別ターミナルで先に `cargo run -- --mode replay`
 を起動してから上記コマンドを `--mode auto`（または `attach`）で実行する。
-詳しい手順は docs/wiki/backtest.md / docs/example/README.md を参照。
+詳しい手順は docs/wiki/backtest.md / examples/README.md を参照。
 
 注意:
     - サンドボックスはありません。バグによる誤発注はユーザー責任です

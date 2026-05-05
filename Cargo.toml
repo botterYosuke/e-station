@@ -80,9 +80,6 @@ rfd = "0.15"
 regex.workspace = true
 webbrowser = "1"
 
-[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
-muda = { version = "0.15", default-features = false }
-
 [features]
 debug = ["iced/hot"]
 

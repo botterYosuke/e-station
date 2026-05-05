@@ -178,7 +178,7 @@ replay の起動経路は 2 系統あり、どちらも `ReplaySession` helper �
 
 ```bash
 uv run python -m engine.replay_session run \
-    --strategy docs/example/test_strategy_daily.py \
+    --strategy examples/test_strategy_daily.py \
     --instrument 1301.TSE \
     --start 2025-01-06 \
     --end 2025-03-31
@@ -194,7 +194,7 @@ bar が積まれる。GUI が居なければ helper プロセス内で `Nautilus
 > は Phase 8.2 で廃止された（HTTP API ポート 9876 依存）。`run-replay-debug.sh` は
 > DEPRECATED コメント付きで残骸が残っているが機能しない。
 
-サンプル戦略は `docs/example/` 配下：
+サンプル戦略は `examples/` 配下：
 
 | ファイル | 内容 |
 |---------|------|
@@ -234,7 +234,7 @@ from engine.replay_session import ReplaySession
 
 with ReplaySession() as s:           # __enter__ で :19876 を probe
     s.load("1301.TSE", "2025-01-06", "2025-03-31")
-    s.run(strategy_file="docs/example/test_strategy_daily.py",
+    s.run(strategy_file="examples/test_strategy_daily.py",
           on_event=lambda evt: print(evt))
 ```
 

@@ -318,14 +318,15 @@ def test_validate_valid_dict_passes() -> None:
 
 
 def test_validate_wrong_schema_version() -> None:
-    """schema_version が SCHEMA_VERSION(=1) 以外 → ScenarioValidationError（Fix 8）。"""
+    """v1 形式の dict で schema_version だけ 2 に変えると ScenarioValidationError（Fix 8）。
+
+    schema_version=2 は v2 バリデーションに dispatch されるため、
+    v1 キー（instrument）は余剰キーとなり v2 必須キー（instruments）が不在エラーになる。
+    """
     d = dict(_VALID_SCENARIO)
     d["schema_version"] = 2
-    with pytest.raises(ScenarioValidationError) as exc:
+    with pytest.raises(ScenarioValidationError):
         validate(d)
-    assert "schema_version" in str(exc.value), (
-        f"エラー文言に 'schema_version' が含まれていない: {exc.value}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +335,7 @@ def test_validate_wrong_schema_version() -> None:
 
 
 def test_reads_buy_and_hold_example() -> None:
-    """`docs/example/test_strategy_daily.py`（実際のファイル）から SCENARIO を読めること。"""
+    """`examples/test_strategy_daily.py`（実際のファイル）から SCENARIO を読めること。"""
     repo_root = Path(__file__).parent.parent.parent
     buy_and_hold = repo_root / "docs" / "example" / "test_strategy_daily.py"
 

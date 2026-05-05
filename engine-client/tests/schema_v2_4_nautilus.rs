@@ -31,10 +31,12 @@ fn schema_minor_is_7_for_positions() {
     // ReplayStopped イベント追加）。
     // schema 3.12: SCHEMA_MINOR を 11 → 12 に bump
     // (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)。
+    // schema 3.13: SCHEMA_MINOR を 12 → 13 に bump
+    // (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: Vec<String> 追加)。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        12,
-        "SCHEMA_MINOR must be 12 after schema 3.12 (ReplayDataLoaded.instrument_id / granularity)"
+        13,
+        "SCHEMA_MINOR must be 13 after schema 3.13 (instrument_ids multi-instrument support)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -175,6 +177,7 @@ fn start_engine_serializes() {
         strategy_id: "strat-001".to_string(),
         config: EngineStartConfig {
             instrument_id: "1301.TSE".to_string(),
+            instrument_ids: None,
             start_date: "2024-01-04".to_string(),
             end_date: "2024-01-31".to_string(),
             initial_cash: "1000000".to_string(),
@@ -209,6 +212,7 @@ fn start_engine_with_strategy_file_serializes() {
         strategy_id: "user-defined".to_string(),
         config: EngineStartConfig {
             instrument_id: "1301.TSE".to_string(),
+            instrument_ids: None,
             start_date: "2024-01-04".to_string(),
             end_date: "2024-03-31".to_string(),
             initial_cash: "1000000".to_string(),
@@ -243,6 +247,7 @@ fn load_replay_data_serializes() {
     let cmd = Command::LoadReplayData {
         request_id: "req-3".to_string(),
         instrument_id: "1301.TSE".to_string(),
+        instrument_ids: None,
         start_date: "2024-01-04".to_string(),
         end_date: "2024-01-31".to_string(),
         granularity: ReplayGranularity::Minute,
@@ -327,6 +332,7 @@ fn replay_data_loaded_deserializes() {
             trades_loaded,
             ts_event_ms,
             instrument_id,
+            instrument_ids: _,
             granularity,
         } => {
             // M-8: Option<String> へ。strategy_id 文字列付きは Some(...) で来る。

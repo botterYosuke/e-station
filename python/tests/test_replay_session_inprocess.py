@@ -71,7 +71,7 @@ def test_load_calls_check_data_exists():
     """load() が check_data_exists を呼ぶこと。"""
     with patch("engine.replay_session.ReplaySession._resolve_base_dir", return_value=None), \
          patch("engine.nautilus.jquants_loader.check_data_exists") as mock_check:
-        with ReplaySession() as s:
+        with ReplaySession(force_mode="inprocess") as s:
             s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
 
     mock_check.assert_called_once_with(
@@ -89,7 +89,7 @@ def test_load_raises_file_not_found():
         "engine.nautilus.jquants_loader.check_data_exists",
         side_effect=FileNotFoundError("no files"),
     ):
-        with ReplaySession() as s:
+        with ReplaySession(force_mode="inprocess") as s:
             with pytest.raises(FileNotFoundError):
                 s.load("NONEXISTENT.TSE", "2025-01-01", "2025-01-31", "Daily")
 
@@ -105,7 +105,7 @@ def test_run_calls_runner(tmp_strategy):
 
     with patch("engine.nautilus.jquants_loader.check_data_exists"), \
          patch("engine.replay_session.NautilusRunner", return_value=mock_runner):
-        with ReplaySession() as s:
+        with ReplaySession(force_mode="inprocess") as s:
             s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
             s.run(
                 strategy_file=tmp_strategy,
@@ -123,7 +123,7 @@ def test_run_calls_runner(tmp_strategy):
 def test_strategy_file_not_found():
     """存在しない strategy_file で FileNotFoundError が raise される。"""
     with patch("engine.nautilus.jquants_loader.check_data_exists"):
-        with ReplaySession() as s:
+        with ReplaySession(force_mode="inprocess") as s:
             s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
             with pytest.raises(FileNotFoundError):
                 s.run(
@@ -159,7 +159,7 @@ def test_stop_from_thread(tmp_strategy):
 
     with patch("engine.nautilus.jquants_loader.check_data_exists"), \
          patch("engine.replay_session.NautilusRunner", return_value=mock_runner):
-        with ReplaySession() as s:
+        with ReplaySession(force_mode="inprocess") as s:
             s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
             t = threading.Thread(target=run_in_thread, args=(s,))
             t.start()
@@ -185,7 +185,7 @@ def test_status_transitions(tmp_strategy):
 
     with patch("engine.nautilus.jquants_loader.check_data_exists"), \
          patch("engine.replay_session.NautilusRunner", return_value=mock_runner):
-        with ReplaySession() as s:
+        with ReplaySession(force_mode="inprocess") as s:
             assert s.status == "idle"
             s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
             assert s.status == "loaded"
@@ -199,7 +199,7 @@ def test_status_transitions(tmp_strategy):
 
 def test_double_enter_raises():
     """同一インスタンスを二度 with に入れると RuntimeError。"""
-    s = ReplaySession()
+    s = ReplaySession(force_mode="inprocess")
     with s:
         pass
     with pytest.raises(RuntimeError):
@@ -222,7 +222,7 @@ def test_portfolio_updated(tmp_strategy):
 
     with patch("engine.nautilus.jquants_loader.check_data_exists"), \
          patch("engine.replay_session.NautilusRunner", return_value=mock_runner):
-        with ReplaySession() as s:
+        with ReplaySession(force_mode="inprocess") as s:
             s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
             s.run(strategy_file=tmp_strategy, on_event=lambda _: None)
             assert s.portfolio == buying_power_event

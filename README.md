@@ -110,7 +110,7 @@ REPLAY は単なるチャート再生ではなく、**NautilusTrader ベース�
 - 戦略ファイルの指定は **現行実装では必須**です
 - WebSocket IPC 経由でコマンドが Python エンジンに送られます (`LoadReplayData` / `SetReplaySpeed` / `StartEngine`)
 
-ユーザー定義 strategy の最小サンプルは [docs/example/test_strategy_daily.py](docs/example/test_strategy_daily.py) と [docs/example/README.md](docs/example/README.md) にあります。
+ユーザー定義 strategy の最小サンプルは [examples/test_strategy_daily.py](examples/test_strategy_daily.py) と [examples/README.md](examples/README.md) にあります。
 
 ## 注文まわり
 

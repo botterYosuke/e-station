@@ -27,7 +27,7 @@ e-station の戦略は **ユーザー自身が書いた Python コードを同�
 
 ```bash
 uv run python -m engine.replay_session run \
-    --strategy docs/example/test_strategy_daily.py \
+    --strategy examples/test_strategy_daily.py \
     --instrument 1301.TSE \
     --start 2025-01-06 \
     --end 2025-03-31 \
@@ -46,7 +46,7 @@ cargo run -- --mode replay
 
 ```bash
 uv run python -m engine.replay_session run \
-    --strategy docs/example/test_strategy_daily.py \
+    --strategy examples/test_strategy_daily.py \
     --instrument 1301.TSE \
     --start 2025-01-06 \
     --end 2025-03-31 \
@@ -88,7 +88,7 @@ from engine.replay_session import ReplaySession
 with ReplaySession() as s:
     s.load("1301.TSE", "2025-01-06", "2025-03-31")
     s.run(
-        strategy_file="docs/example/test_strategy_daily.py",
+        strategy_file="examples/test_strategy_daily.py",
         strategy_init_kwargs={"lot_size": 200},
         initial_cash=1_000_000,
     )
@@ -130,7 +130,7 @@ strategy_init_kwargs={"bar_type_str": "1301.TSE-1-MINUTE-LAST-EXTERNAL"}
 uv run python -c "
 from pathlib import Path
 from engine.nautilus.strategy_loader import load_strategy_from_file
-s = load_strategy_from_file(Path('docs/example/test_strategy_daily.py'), {'instrument_id': '1301.TSE'})
+s = load_strategy_from_file(Path('examples/test_strategy_daily.py'), {'instrument_id': '1301.TSE'})
 print(type(s).__name__)
 "
 ```

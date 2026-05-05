@@ -379,7 +379,7 @@ def test_login_nested_loop_fallback_reuses_pno_counter(monkeypatch):
 
     user_id = f"user-{uuid.uuid4().hex[:8]}"
     password = f"pw-{uuid.uuid4().hex[:8]}"
-    with LiveSession(venue="tachibana", demo=True) as s:
+    with LiveSession(venue="tachibana", demo=True, force_mode="inprocess") as s:
         s.login(user_id=user_id, password=password)
 
     # _fake_login was only called once (the fallback)
@@ -428,7 +428,7 @@ def test_login_pno_counter_constructed_once(monkeypatch):
 
     user_id = f"user-{uuid.uuid4().hex[:8]}"
     password = f"pw-{uuid.uuid4().hex[:8]}"
-    with LiveSession(venue="tachibana", demo=True) as s:
+    with LiveSession(venue="tachibana", demo=True, force_mode="inprocess") as s:
         s.login(user_id=user_id, password=password)
 
     assert construct_count["n"] == 1, (
@@ -680,7 +680,7 @@ def test_login_second_call_is_noop(monkeypatch):
 
     user_id = f"user-{uuid.uuid4().hex[:8]}"
     password = f"pw-{uuid.uuid4().hex[:8]}"
-    with LiveSession(venue="tachibana", demo=True) as s:
+    with LiveSession(venue="tachibana", demo=True, force_mode="inprocess") as s:
         s.login(user_id=user_id, password=password)
         s.login(user_id=user_id, password=password)
         s.login()

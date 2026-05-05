@@ -794,7 +794,7 @@ class ReplaySession:
 
     def load(
         self,
-        instrument_id: str,
+        instrument_id: str | list[str],
         start_date: str,
         end_date: str,
         granularity: str = "Daily",
@@ -802,7 +802,7 @@ class ReplaySession:
         """J-Quants ファイルの存在を確認し、load パラメータを保存する。
 
         Args:
-            instrument_id: 例 ``"1301.TSE"``
+            instrument_id: 例 ``"1301.TSE"`` または ``["1301.TSE", "7203.TSE"]``
             start_date: ISO8601 文字列 ``"2025-01-06"``
             end_date: ISO8601 文字列 ``"2025-03-31"``
             granularity: ``"Trade"`` | ``"Minute"`` | ``"Daily"``
@@ -820,9 +820,12 @@ class ReplaySession:
             from engine.schemas import LoadReplayData
             import uuid
             req_id = str(uuid.uuid4())
+            _single_id = instrument_id[0] if isinstance(instrument_id, list) else instrument_id
+            _instrument_ids = instrument_id if isinstance(instrument_id, list) else None
             cmd = LoadReplayData(
                 request_id=req_id,
-                instrument_id=instrument_id,
+                instrument_id=_single_id,
+                instrument_ids=_instrument_ids,
                 start_date=start_date,
                 end_date=end_date,
                 granularity=granularity,
@@ -841,12 +844,21 @@ class ReplaySession:
             self._client.send_command(cmd.model_dump())
             # ReplayDataLoaded を待つ（timeout 60s）
             self._client.wait_for("ReplayDataLoaded", timeout_s=60.0)
-            self._load_params = {
-                "instrument_id": instrument_id,
-                "start_date": start_date,
-                "end_date": end_date,
-                "granularity": granularity,
-            }
+            if isinstance(instrument_id, list):
+                self._load_params = {
+                    "instrument_id": instrument_id[0],  # 後方互換
+                    "instrument_ids": instrument_id,    # 複数銘柄
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "granularity": granularity,
+                }
+            else:
+                self._load_params = {
+                    "instrument_id": instrument_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "granularity": granularity,
+                }
             self._status = _ReplayStatus.LOADED
             return
 
@@ -858,14 +870,24 @@ class ReplaySession:
         if base_dir is not None:
             kwargs["base_dir"] = base_dir
 
-        check_data_exists(instrument_id, start_date, end_date, granularity, **kwargs)
-
-        self._load_params = {
-            "instrument_id": instrument_id,
-            "start_date": start_date,
-            "end_date": end_date,
-            "granularity": granularity,
-        }
+        if isinstance(instrument_id, list):
+            for _iid in instrument_id:
+                check_data_exists(_iid, start_date, end_date, granularity, **kwargs)
+            self._load_params = {
+                "instrument_id": instrument_id[0],  # 後方互換
+                "instrument_ids": instrument_id,    # 複数銘柄
+                "start_date": start_date,
+                "end_date": end_date,
+                "granularity": granularity,
+            }
+        else:
+            check_data_exists(instrument_id, start_date, end_date, granularity, **kwargs)
+            self._load_params = {
+                "instrument_id": instrument_id,
+                "start_date": start_date,
+                "end_date": end_date,
+                "granularity": granularity,
+            }
         self._status = _ReplayStatus.LOADED
 
     def run(
@@ -908,15 +930,28 @@ class ReplaySession:
         try:
             from engine.run_buffer import RunBuffer, make_run_id, get_run_buffer_base_dir
             _params = self._load_params or {}
-            _instrument = _params.get("instrument_id", "unknown")
+            _instrument_ids = _params.get("instrument_ids")
+            _instrument = _instrument_ids[0] if _instrument_ids else _params.get("instrument_id", "unknown")
             _run_id = make_run_id(strategy_file, _instrument)
-            _scenario = {
-                "instrument": _instrument,
-                "start": _params.get("start_date", ""),
-                "end": _params.get("end_date", ""),
-                "granularity": _params.get("granularity", ""),
-                "initial_cash": initial_cash,
-            } if _params else None
+            if _params:
+                if _instrument_ids:
+                    _scenario = {
+                        "instruments": _instrument_ids,
+                        "start": _params.get("start_date", ""),
+                        "end": _params.get("end_date", ""),
+                        "granularity": _params.get("granularity", ""),
+                        "initial_cash": initial_cash,
+                    }
+                else:
+                    _scenario = {
+                        "instrument": _instrument,
+                        "start": _params.get("start_date", ""),
+                        "end": _params.get("end_date", ""),
+                        "granularity": _params.get("granularity", ""),
+                        "initial_cash": initial_cash,
+                    }
+            else:
+                _scenario = None
             _run_buffer: RunBuffer | None = RunBuffer(
                 run_id=_run_id,
                 strategy_file=strategy_file,
@@ -935,12 +970,14 @@ class ReplaySession:
             self._strategy_id = strategy_id
             params = self._load_params or {}
             run_request_id = str(uuid.uuid4())
+            _iids = params.get("instrument_ids")
             cmd = StartEngine(
                 request_id=run_request_id,
                 engine="Backtest",
                 strategy_id=strategy_id,
                 config=EngineStartConfig(
                     instrument_id=params["instrument_id"],
+                    instrument_ids=_iids,
                     start_date=params["start_date"],
                     end_date=params["end_date"],
                     initial_cash=str(initial_cash),
@@ -1045,9 +1082,11 @@ class ReplaySession:
         base_dir = self._resolve_base_dir()
 
         try:
+            _iids = params.get("instrument_ids")
             runner.start_backtest_replay_streaming(
                 strategy_id=strategy_id,
                 instrument_id=params["instrument_id"],
+                instrument_ids=_iids,
                 start_date=params["start_date"],
                 end_date=params["end_date"],
                 granularity=params["granularity"],
@@ -1562,12 +1601,12 @@ class LiveSession:
 def _resolve_cli_params(
     *,
     strategy_path: str,
-    cli_instrument: Optional[str],
+    cli_instrument: Optional[list[str]],  # nargs='+' で list が来る
     cli_start: Optional[str],
     cli_end: Optional[str],
     cli_granularity: Optional[str],
     cli_initial_cash: Optional[int],
-) -> tuple[str, str, str, str, int]:
+) -> tuple[str | list[str], str, str, str, int]:
     """CLI 引数と戦略 .py の SCENARIO を統合して replay パラメータを確定する。
 
     優先順位: CLI 引数 > SCENARIO 定数。
@@ -1575,6 +1614,7 @@ def _resolve_cli_params(
 
     Returns:
         (instrument, start, end, granularity, initial_cash)
+        instrument は str (単一) または list[str] (複数)
     """
     from engine.scenario import extract as _extract_scenario
 
@@ -1617,13 +1657,32 @@ def _resolve_cli_params(
             return scenario[field]
         return default
 
-    instrument = _resolve("instrument", cli_instrument)
+    # instrument は nargs='+' で list[str] | None になる。
+    # v2 SCENARIO には "instruments" (list)、v1 には "instrument" (str) がある。
+    if cli_instrument is not None:
+        # CLI 指定: 複数ならリスト、1要素なら str に正規化
+        instrument: str | list[str] | None = cli_instrument if len(cli_instrument) > 1 else cli_instrument[0]
+    elif scenario is not None and scenario.get("instruments") is not None:
+        # v2 SCENARIO から複数銘柄取得
+        instrument = scenario["instruments"]
+    elif scenario is not None and scenario.get("instrument") is not None:
+        # v1 SCENARIO から単一銘柄取得
+        instrument = scenario["instrument"]
+    else:
+        instrument = None
+
     start = _resolve("start", cli_start)
     end = _resolve("end", cli_end)
     granularity = _resolve("granularity", cli_granularity, default="Daily")
     initial_cash = _resolve("initial_cash", cli_initial_cash, default=1_000_000)
 
-    missing = [f for f, v in [("instrument", instrument), ("start", start), ("end", end)] if v is None]
+    missing = []
+    if instrument is None:
+        missing.append("instrument")
+    if start is None:
+        missing.append("start")
+    if end is None:
+        missing.append("end")
     if missing:
         log.error("scenario.cli: required args missing: %s (provide via CLI or SCENARIO in .py)", missing)
         print(
@@ -1652,7 +1711,13 @@ if __name__ == "__main__":
     run_p.add_argument("--strategy", required=True, help="戦略ファイルパス")
     # F6b: --instrument / --start / --end / --granularity / --initial-cash は optional。
     # 省略時は戦略 .py の SCENARIO 定数をフォールバック値として使う。CLI 引数優先。
-    run_p.add_argument("--instrument", default=None, help="銘柄 ID (例: 1301.TSE)")
+    run_p.add_argument(
+        "--instrument",
+        nargs="+",
+        default=None,
+        metavar="INSTRUMENT_ID",
+        help="銘柄 ID（複数指定可、例: --instrument 1301.TSE 7203.TSE）",
+    )
     run_p.add_argument("--start", default=None, help="開始日 (ISO8601)")
     run_p.add_argument("--end", default=None, help="終了日 (ISO8601)")
     run_p.add_argument("--granularity", default=None, choices=["Trade", "Minute", "Daily", None])

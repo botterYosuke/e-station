@@ -261,6 +261,7 @@ class NautilusRunner:
         *,
         strategy_id: str,
         instrument_id: str,
+        instrument_ids: list[str] | None = None,
         start_date: str,
         end_date: str,
         granularity: Literal["Trade", "Minute", "Daily"],
@@ -300,10 +301,18 @@ class NautilusRunner:
         cur = _CURRENCY_MAP[currency]
         emit = on_event if on_event is not None else (lambda _evt: None)
 
+        # instrument_ids が None なら instrument_id からシングル銘柄リストを作る
+        _iids: list[str] = instrument_ids if instrument_ids is not None else [instrument_id]
+
         # InstrumentId のフォーマットを起動前に検証 (ValueError は呼出側に伝搬)
-        nautilus_iid = InstrumentId.from_str(instrument_id)
-        symbol = nautilus_iid.symbol.value
-        venue = nautilus_iid.venue.value
+        # venue が全銘柄で一致することを検証
+        _venues = [InstrumentId.from_str(iid).venue.value for iid in _iids]
+        if len(set(_venues)) > 1:
+            raise ValueError(
+                f"All instruments must share the same venue. Got: {dict(zip(_iids, _venues))}"
+            )
+        venue = _venues[0]
+
         safe_id = strategy_id.replace("-", "").replace("_", "")[:8].upper() or "REPLAY"
         cfg = BacktestEngineConfig(
             trader_id=f"REPLAY-{safe_id}",
@@ -340,49 +349,33 @@ class NautilusRunner:
             )
 
             from engine.nautilus.instrument_factory import make_equity_instrument
-            instrument = make_equity_instrument(symbol, venue)
-            engine.add_instrument(instrument)
+            for iid in _iids:
+                _sym = InstrumentId.from_str(iid).symbol.value
+                _inst = make_equity_instrument(_sym, venue)
+                engine.add_instrument(_inst)
 
             bars_loaded = 0
             trades_loaded = 0
-            if granularity == "Trade":
-                ticks = list(
-                    load_trades(
-                        instrument_id,
-                        start_date,
-                        end_date,
-                        base_dir=base_dir if base_dir is not None else Path("S:/j-quants"),
-                    )
-                )
-                trades_loaded = len(ticks)
-                if ticks:
-                    engine.add_data(ticks)
-            elif granularity == "Minute":
-                bars = list(
-                    load_minute_bars(
-                        instrument_id,
-                        start_date,
-                        end_date,
-                        base_dir=base_dir if base_dir is not None else Path("S:/j-quants"),
-                    )
-                )
-                bars_loaded = len(bars)
-                if bars:
-                    engine.add_data(bars)
-            elif granularity == "Daily":
-                bars = list(
-                    load_daily_bars(
-                        instrument_id,
-                        start_date,
-                        end_date,
-                        base_dir=base_dir if base_dir is not None else Path("S:/j-quants"),
-                    )
-                )
-                bars_loaded = len(bars)
-                if bars:
-                    engine.add_data(bars)
-            else:
-                raise ValueError(f"unknown granularity: {granularity!r}")
+            _base = base_dir if base_dir is not None else Path("S:/j-quants")
+
+            for _iid in _iids:
+                if granularity == "Trade":
+                    ticks = list(load_trades(_iid, start_date, end_date, base_dir=_base))
+                    trades_loaded += len(ticks)
+                    if ticks:
+                        engine.add_data(ticks)
+                elif granularity == "Minute":
+                    bars = list(load_minute_bars(_iid, start_date, end_date, base_dir=_base))
+                    bars_loaded += len(bars)
+                    if bars:
+                        engine.add_data(bars)
+                elif granularity == "Daily":
+                    bars = list(load_daily_bars(_iid, start_date, end_date, base_dir=_base))
+                    bars_loaded += len(bars)
+                    if bars:
+                        engine.add_data(bars)
+                else:
+                    raise ValueError(f"unknown granularity: {granularity!r}")
 
             loaded_ts_ms = int(time.time() * 1000)
             emit({
@@ -392,6 +385,7 @@ class NautilusRunner:
                 "trades_loaded": trades_loaded,
                 # schema 3.12: GUI helper-attach 経路の auto_generate_replay_panes 用。
                 "instrument_id": instrument_id,
+                "instrument_ids": _iids,
                 "granularity": granularity,
                 "ts_event_ms": loaded_ts_ms,
             })
@@ -482,6 +476,7 @@ class NautilusRunner:
         *,
         strategy_id: str,
         instrument_id: str,
+        instrument_ids: list[str] | None = None,
         start_date: str,
         end_date: str,
         granularity: Literal["Trade", "Minute", "Daily"],
@@ -532,10 +527,20 @@ class NautilusRunner:
         cur = _CURRENCY_MAP[currency]
         emit = on_event if on_event is not None else (lambda _evt: None)
 
+        # instrument_ids が None なら instrument_id からシングル銘柄リストを作る
+        _iids: list[str] = instrument_ids if instrument_ids is not None else [instrument_id]
+
         # InstrumentId のフォーマットを起動前に検証 (ValueError は呼出側に伝搬)
-        nautilus_iid = InstrumentId.from_str(instrument_id)
-        symbol = nautilus_iid.symbol.value
-        venue = nautilus_iid.venue.value
+        # venue が全銘柄で一致することを検証
+        _venues = [InstrumentId.from_str(iid).venue.value for iid in _iids]
+        if len(set(_venues)) > 1:
+            raise ValueError(
+                f"All instruments must share the same venue. Got: {dict(zip(_iids, _venues))}"
+            )
+        venue = _venues[0]
+        # streaming emit 用: 単一銘柄後方互換の ipc_ticker は _iids[0] のシンボルから取得
+        symbol = InstrumentId.from_str(_iids[0]).symbol.value
+
         safe_id = strategy_id.replace("-", "").replace("_", "")[:8].upper() or "REPLAY"
         cfg = BacktestEngineConfig(
             trader_id=f"REPLAY-{safe_id}",
@@ -567,46 +572,36 @@ class NautilusRunner:
             )
 
             from engine.nautilus.instrument_factory import make_equity_instrument
-            instrument = make_equity_instrument(symbol, venue)
-            engine.add_instrument(instrument)
+            for iid in _iids:
+                _sym = InstrumentId.from_str(iid).symbol.value
+                _inst = make_equity_instrument(_sym, venue)
+                engine.add_instrument(_inst)
 
             # データロード
             bars_loaded = 0
             trades_loaded = 0
             _base = base_dir if base_dir is not None else Path("S:/j-quants")
+            items: list = []
 
-            if granularity == "Trade":
-                items = list(
-                    load_trades(
-                        instrument_id,
-                        start_date,
-                        end_date,
-                        base_dir=_base,
-                    )
-                )
-                trades_loaded = len(items)
-            elif granularity == "Minute":
-                items = list(
-                    load_minute_bars(
-                        instrument_id,
-                        start_date,
-                        end_date,
-                        base_dir=_base,
-                    )
-                )
-                bars_loaded = len(items)
-            elif granularity == "Daily":
-                items = list(
-                    load_daily_bars(
-                        instrument_id,
-                        start_date,
-                        end_date,
-                        base_dir=_base,
-                    )
-                )
-                bars_loaded = len(items)
-            else:
-                raise ValueError(f"unknown granularity: {granularity!r}")
+            for _iid in _iids:
+                if granularity == "Trade":
+                    _ticks = list(load_trades(_iid, start_date, end_date, base_dir=_base))
+                    trades_loaded += len(_ticks)
+                    items.extend(_ticks)
+                elif granularity == "Minute":
+                    _bars = list(load_minute_bars(_iid, start_date, end_date, base_dir=_base))
+                    bars_loaded += len(_bars)
+                    items.extend(_bars)
+                elif granularity == "Daily":
+                    _bars = list(load_daily_bars(_iid, start_date, end_date, base_dir=_base))
+                    bars_loaded += len(_bars)
+                    items.extend(_bars)
+                else:
+                    raise ValueError(f"unknown granularity: {granularity!r}")
+
+            # 複数銘柄のデータを時系列順にソート（ts_event で昇順）
+            if len(_iids) > 1:
+                items.sort(key=lambda x: x.ts_event)
 
             loaded_ts_ms = int(time.time() * 1000)
             emit({
@@ -616,6 +611,7 @@ class NautilusRunner:
                 "trades_loaded": trades_loaded,
                 # schema 3.12: GUI helper-attach 経路の auto_generate_replay_panes 用。
                 "instrument_id": instrument_id,
+                "instrument_ids": _iids,
                 "granularity": granularity,
                 "ts_event_ms": loaded_ts_ms,
             })
@@ -637,80 +633,86 @@ class NautilusRunner:
             # push/pull の同期は Step B で対応すること。
             _portfolio = PortfolioView(initial_cash=Decimal(initial_cash))
             _last_prices: dict[str, Decimal] = {}
-            # N1.13 Step A: topic は instrument_id string を直接使う（InstrumentId.__str__ 依存を避ける）
-            _fill_topic = f"events.fills.{instrument_id}"
 
-            def _on_order_filled(event: _OrderFilled) -> None:
-                """nautilus OrderFilled を ExecutionMarker + ReplayBuyingPower に変換して emit する。
+            def _make_fill_handler(iid_str: str):
+                """銘柄ごとに独立した OrderFilled handler closure を生成する。"""
+                def _on_order_filled(event: _OrderFilled) -> None:
+                    """nautilus OrderFilled を ExecutionMarker + ReplayBuyingPower に変換して emit する。
 
-                _emit_execution_marker() ヘルパーは dict 入力前提で型変換が冗長になるため、
-                OrderFilled オブジェクトから直接 dict を構築する（意図的な分岐）。
-                この closure は single-instrument を前提とする。複数 instrument 対応時は
-                handler を instrument_id ごとに分離すること（Step B 以降の拡張課題）。
-                """
-                try:
-                    side_str = event.order_side.name  # "BUY" or "SELL" (OrderSide enum name)
-                    if side_str not in ("BUY", "SELL"):
-                        log.warning(
-                            "[NautilusRunner] OrderFilled with unexpected side %r, skipping: strategy=%r",
-                            side_str,
+                    _emit_execution_marker() ヘルパーは dict 入力前提で型変換が冗長になるため、
+                    OrderFilled オブジェクトから直接 dict を構築する（意図的な分岐）。
+                    """
+                    try:
+                        side_str = event.order_side.name  # "BUY" or "SELL" (OrderSide enum name)
+                        if side_str not in ("BUY", "SELL"):
+                            log.warning(
+                                "[NautilusRunner] OrderFilled with unexpected side %r, skipping: strategy=%r",
+                                side_str,
+                                strategy_id,
+                            )
+                            return
+                        instrument_str = str(event.instrument_id)
+                        price_str = str(event.last_px)
+                        qty_dec = Decimal(str(event.last_qty))
+                        ts_ms = event.ts_event // 1_000_000
+
+                        # portfolio 更新を先に行い、失敗した場合は emit しない（状態整合を保つ）
+                        _portfolio.on_fill(instrument_str, side_str, qty_dec, Decimal(price_str))
+                        _last_prices[instrument_str] = Decimal(price_str)
+
+                    except Exception:
+                        log.error(
+                            "[NautilusRunner] OrderFilled portfolio update failed: "
+                            "strategy=%r instrument=%r px=%r side=%r",
                             strategy_id,
+                            getattr(event, "instrument_id", "?"),
+                            getattr(event, "last_px", "?"),
+                            getattr(event, "order_side", "?"),
+                            exc_info=True,
                         )
-                        return
-                    instrument_str = str(event.instrument_id)
-                    price_str = str(event.last_px)
-                    qty_dec = Decimal(str(event.last_qty))
-                    ts_ms = event.ts_event // 1_000_000
+                        return  # emit せずに終了（ExecutionMarker / ReplayBuyingPower 両方スキップ）
 
-                    # portfolio 更新を先に行い、失敗した場合は emit しない（状態整合を保つ）
-                    _portfolio.on_fill(instrument_str, side_str, qty_dec, Decimal(price_str))
-                    _last_prices[instrument_str] = Decimal(price_str)
+                    # portfolio 更新成功後に IPC emit（両イベントを一括送出）
+                    try:
+                        # ExecutionMarker: 1 OrderFilled = 1 ExecutionMarker（1:1 契約）
+                        emit({
+                            "event": "ExecutionMarker",
+                            "strategy_id": strategy_id,
+                            "instrument_id": instrument_str,
+                            "side": side_str,
+                            "price": price_str,
+                            "qty": str(qty_dec),
+                            "ts_event_ms": ts_ms,
+                        })
 
-                except Exception:
-                    log.error(
-                        "[NautilusRunner] OrderFilled portfolio update failed: "
-                        "strategy=%r instrument=%r px=%r side=%r",
-                        strategy_id,
-                        getattr(event, "instrument_id", "?"),
-                        getattr(event, "last_px", "?"),
-                        getattr(event, "order_side", "?"),
-                        exc_info=True,
-                    )
-                    return  # emit せずに終了（ExecutionMarker / ReplayBuyingPower 両方スキップ）
+                        # ReplayBuyingPower: fill 後の残高を push emit する
+                        bp_dict = _portfolio.to_ipc_dict(strategy_id, _last_prices)
+                        bp_dict["ts_event_ms"] = ts_ms  # time.time() を上書きして決定論性を保つ
+                        emit(bp_dict)
 
-                # portfolio 更新成功後に IPC emit（両イベントを一括送出）
-                try:
-                    # ExecutionMarker: 1 OrderFilled = 1 ExecutionMarker（1:1 契約）
-                    emit({
-                        "event": "ExecutionMarker",
-                        "strategy_id": strategy_id,
-                        "instrument_id": instrument_str,
-                        "side": side_str,
-                        "price": price_str,
-                        "qty": str(qty_dec),
-                        "ts_event_ms": ts_ms,
-                    })
+                    except Exception:
+                        log.error(
+                            "[NautilusRunner] OrderFilled emit failed (portfolio already updated): "
+                            "strategy=%r instrument=%r px=%r side=%r",
+                            strategy_id,
+                            getattr(event, "instrument_id", "?"),
+                            getattr(event, "last_px", "?"),
+                            getattr(event, "order_side", "?"),
+                            exc_info=True,
+                        )
+                return _on_order_filled
 
-                    # ReplayBuyingPower: fill 後の残高を push emit する
-                    bp_dict = _portfolio.to_ipc_dict(strategy_id, _last_prices)
-                    bp_dict["ts_event_ms"] = ts_ms  # time.time() を上書きして決定論性を保つ
-                    emit(bp_dict)
-
-                except Exception:
-                    log.error(
-                        "[NautilusRunner] OrderFilled emit failed (portfolio already updated): "
-                        "strategy=%r instrument=%r px=%r side=%r",
-                        strategy_id,
-                        getattr(event, "instrument_id", "?"),
-                        getattr(event, "last_px", "?"),
-                        getattr(event, "order_side", "?"),
-                        exc_info=True,
-                    )
-
-            engine.kernel.msgbus.subscribe(
-                topic=_fill_topic,
-                handler=_on_order_filled,
-            )
+            # N1.13 Step A: topic は instrument_id string を直接使う（InstrumentId.__str__ 依存を避ける）
+            # 各銘柄ごとに handler を登録する
+            _fill_handlers: dict[str, object] = {}
+            for _iid_str in _iids:
+                _fill_topic = f"events.fills.{_iid_str}"
+                _handler = _make_fill_handler(_iid_str)
+                _fill_handlers[_iid_str] = _handler
+                engine.kernel.msgbus.subscribe(
+                    topic=_fill_topic,
+                    handler=_handler,
+                )
 
             # --- N1.13 Step A: per-bar mark-to-market (Daily / Minute のみ) ------
             # Trade granularity は TradeTick を使うためバーなし → スキップ。
@@ -721,13 +723,10 @@ class NautilusRunner:
                 "Minute": "MINUTE",
             }
             _bar_period = _GRANULARITY_TO_BAR_PERIOD.get(granularity)
-            _bar_topic: str | None = None
+            # 複数銘柄: topic → handler のマッピング
+            _bar_handlers: dict[str, object] = {}
 
             if _bar_period is not None:
-                _bar_topic = (
-                    f"data.bars.{instrument_id}-1-{_bar_period}-LAST-EXTERNAL"
-                )
-
                 def _on_bar(bar) -> None:  # noqa: PLC0415
                     instrument_str = str(bar.bar_type.instrument_id)
                     _last_prices[instrument_str] = Decimal(str(bar.close))
@@ -746,7 +745,10 @@ class NautilusRunner:
                             exc_info=True,
                         )
 
-                engine.kernel.msgbus.subscribe(topic=_bar_topic, handler=_on_bar)
+                for _iid_str in _iids:
+                    _bar_topic = f"data.bars.{_iid_str}-1-{_bar_period}-LAST-EXTERNAL"
+                    _bar_handlers[_bar_topic] = _on_bar
+                    engine.kernel.msgbus.subscribe(topic=_bar_topic, handler=_on_bar)
             # ── N1.13 Step A end ──────────────────────────────────────────────────
 
             log.info(
@@ -757,7 +759,11 @@ class NautilusRunner:
 
             # streaming ループ — IPC emit 用の変数をループ外で事前計算（毎 tick 再計算しない）
             ipc_venue = _IPC_VENUE_TAG          # "replay"
-            ipc_ticker = symbol                  # "1301"（venue 抜きシンボル）
+            # 複数銘柄対応: シンボルは item ごとに取得するため事前マップを構築
+            # 単一銘柄の場合は symbol（_iids[0] のシンボル）をデフォルトとして使う
+            _iid_to_symbol: dict[str, str] = {
+                iid: InstrumentId.from_str(iid).symbol.value for iid in _iids
+            }
             ipc_market = "stock"                 # equity 固定
             ipc_timeframe = _granularity_to_timeframe(granularity)  # "1d" / "1m" / "tick"
 
@@ -808,10 +814,12 @@ class NautilusRunner:
                     # per-tick emit: engine.run() 完了後・pacing sleep 前に emit する
                     try:
                         if isinstance(item, Bar):
+                            _item_iid_str = str(item.bar_type.instrument_id)
+                            _item_ticker = _iid_to_symbol.get(_item_iid_str, symbol)
                             emit({
                                 "event": "KlineUpdate",
                                 "venue": ipc_venue,
-                                "ticker": ipc_ticker,
+                                "ticker": _item_ticker,
                                 "market": ipc_market,
                                 "timeframe": ipc_timeframe,
                                 "kline": {
@@ -825,10 +833,12 @@ class NautilusRunner:
                                 },
                             })
                         elif isinstance(item, TradeTick):
+                            _item_iid_str = str(item.instrument_id)
+                            _item_ticker = _iid_to_symbol.get(_item_iid_str, symbol)
                             emit({
                                 "event": "Trades",
                                 "venue": ipc_venue,
-                                "ticker": ipc_ticker,
+                                "ticker": _item_ticker,
                                 "market": ipc_market,
                                 "stream_session_id": account_id,
                                 "trades": [{
@@ -860,28 +870,33 @@ class NautilusRunner:
             finally:
                 self._running = False
                 # N1.13: engine.dispose() の前に購読解除（dispose 後に handler closure が残らないよう）
-                try:
-                    engine.kernel.msgbus.unsubscribe(
-                        topic=_fill_topic,
-                        handler=_on_order_filled,
-                    )
-                except Exception:
-                    log.warning(
-                        "[NautilusRunner] msgbus.unsubscribe fill failed "
-                        "(handler may not have been registered due to early failure): "
-                        "strategy=%r",
-                        strategy_id,
-                    )
-                if _bar_topic is not None:
+                # fill handlers: 銘柄ごとに登録したものをすべて解除
+                for _iid_str, _handler in _fill_handlers.items():
                     try:
                         engine.kernel.msgbus.unsubscribe(
-                            topic=_bar_topic,
-                            handler=_on_bar,
+                            topic=f"events.fills.{_iid_str}",
+                            handler=_handler,
                         )
                     except Exception:
                         log.warning(
-                            "[NautilusRunner] msgbus.unsubscribe bar failed: strategy=%r",
+                            "[NautilusRunner] msgbus.unsubscribe fill failed "
+                            "(handler may not have been registered due to early failure): "
+                            "strategy=%r instrument=%r",
                             strategy_id,
+                            _iid_str,
+                        )
+                # bar handlers: 銘柄ごとに登録したものをすべて解除
+                for _btopic, _bhandler in _bar_handlers.items():
+                    try:
+                        engine.kernel.msgbus.unsubscribe(
+                            topic=_btopic,
+                            handler=_bhandler,
+                        )
+                    except Exception:
+                        log.warning(
+                            "[NautilusRunner] msgbus.unsubscribe bar failed: strategy=%r topic=%r",
+                            strategy_id,
+                            _btopic,
                         )
 
             log.info(

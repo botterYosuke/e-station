@@ -326,7 +326,7 @@ class ReplaySession:
     使い方:
         with ReplaySession() as s:
             s.load("1301.TSE", "2025-01-06", "2025-03-31")
-            s.run(strategy_file="docs/example/buy_and_hold.py",
+            s.run(strategy_file="examples/buy_and_hold.py",
                   on_event=lambda evt: print(evt))
     """
 
@@ -639,7 +639,7 @@ class LiveSession:
 
 ```bash
 uv run python -m engine.replay_session run \
-    --strategy docs/example/buy_and_hold.py \
+    --strategy examples/buy_and_hold.py \
     --instrument 1301.TSE \
     --start 2025-01-06 \
     --end 2025-03-31 \
@@ -688,7 +688,7 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
   - [ ] `python/tests/test_replay_session_speed.py`（run() 中の set_speed()）
   - [ ] `python/tests/test_replay_session_cli.py`（subprocess 経由 CLI）
   - [ ] `python/tests/test_live_session_login.py`（demo 立花への login smoke）
-- [x] `docs/example/README.md` / `.claude/CLAUDE.md` に helper 経由で動かすコマンドを追記済み
+- [x] `examples/README.md` / `.claude/CLAUDE.md` に helper 経由で動かすコマンドを追記済み
 
 #### Phase 8.1b: attach mode 実装（B1 → B2 → B3 → AttachClient の順）✅ 完了 (2026-05-03)
 
@@ -821,7 +821,7 @@ CLI には `--mode {auto,attach,inprocess}` オプションを提供して force
 - [x] `scripts/replay_dev_load.sh` 削除
 - [x] `tests/e2e/s56〜s83, s90, tachibana_*` 11 ファイル削除（HTTP API 依存の bash E2E）
 - [x] `scripts/run-replay-debug.sh` に DEPRECATED コメント追記（HTTP API ポート 9876 依存のため機能しない）
-- [x] `.claude/CLAUDE.md` / `docs/example/README.md` を `python -m engine.replay_session run` 記述に更新済み
+- [x] `.claude/CLAUDE.md` / `examples/README.md` を `python -m engine.replay_session run` 記述に更新済み
 
 **完了状態**: `smoke.sh` のみ維持。HTTP 依存の bash E2E はすべて削除済み。
 

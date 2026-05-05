@@ -94,7 +94,7 @@ attach mode で `LoadReplayData` + `StartEngine` を投入すると、
 [`Dashboard::auto_generate_replay_panes`](../../src/screen/dashboard.rs#L1019) が一度も呼ばれない。
 
 [CLAUDE.md:211](../../.claude/CLAUDE.md#L211)・
-[docs/example/README.md](../example/README.md) には
+[examples/README.md](../example/README.md) には
 「`ReplayDataLoaded` 受信後に `auto_generate_replay_panes` が
 TimeAndSales / CandlestickChart / OrderList / BuyingPower を自動生成する」と
 明記されているが、実装が追従していない。
@@ -254,7 +254,7 @@ rm -f "$APPDATA/flowsurface/engine-session.json"
 cargo run -- --mode replay &
 # engine-session.json が生成されるまで待機
 uv run python -m engine.replay_session run \
-    --strategy docs/example/buy_and_hold.py \
+    --strategy examples/buy_and_hold.py \
     --instrument 1301.TSE \
     --start 2025-01-06 --end 2025-03-31 \
     --mode attach

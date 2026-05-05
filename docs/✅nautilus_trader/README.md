@@ -94,7 +94,7 @@
 ```bash
 # CLI: backtest を回すだけ（GUI 不要、in-process mode）
 uv run python -m engine.replay_session run \
-    --strategy docs/example/buy_and_hold.py \
+    --strategy examples/buy_and_hold.py \
     --instrument 7203.TSE \
     --start 2024-01-01 \
     --end 2024-12-31 \
@@ -108,7 +108,7 @@ from engine.replay_session import ReplaySession
 
 with ReplaySession() as s:
     s.load(instrument="7203.TSE", start="2024-01-01", end="2024-12-31", granularity="Daily")
-    s.run(strategy_file="docs/example/buy_and_hold.py",
+    s.run(strategy_file="examples/buy_and_hold.py",
           strategy_init_kwargs={"instrument_id": "7203.TSE", "lot_size": 100},
           initial_cash="1000000")
 ```

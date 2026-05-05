@@ -276,7 +276,7 @@ log "POST /api/replay/start"
 
 `tests/e2e/smoke.sh` 相当の **replay E2E スクリプト** を新設するかは別チケット。本修正の収束確認では、最低限以下の手動検証チェックリストを `replay_dev_load.sh` 実行ログに残す：
 
-- F5 (CodeLLDB アタッチ debug 起動) で `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31` を実行
+- F5 (CodeLLDB アタッチ debug 起動) で `bash scripts/run-replay-debug.sh examples/buy_and_hold.py 1301.TSE 2025-01-06 2025-03-31` を実行
 - chart pane に bars が描画される
 - BuyingPower pane に値が入る（`仮想余力`/`評価額` が `---` のままにならない）
 - 注文一覧に buy_and_hold の最初のバーでの 1 回買いが反映される

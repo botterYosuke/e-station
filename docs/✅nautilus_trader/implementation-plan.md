@@ -746,7 +746,7 @@
       - 成功時: 202 `{ status: "started", strategy_id, account_id }`
 - [x] ✅ `src/replay_api.rs`: ルータに `("POST", "/api/replay/start")` 追加
 - [x] ✅ `src/replay_api.rs`: テスト 7 件追加（202 成功・live mode 400・無効 JSON 400・空 instrument_id 400・空 strategy_id 400・timeout 504・engine_error 503・コマンド転送確認）
-- [x] ✅ `docs/example/run_buy_and_hold_backtest_with_ui.py`: `/api/replay/load` → `/api/replay/start` に変更。ステップ番号 5 → 6 に拡張
+- [x] ✅ `examples/run_buy_and_hold_backtest_with_ui.py`: `/api/replay/load` → `/api/replay/start` に変更。ステップ番号 5 → 6 に拡張
 - [x] ✅ `cargo test --workspace` 全 GREEN（208 件含む）
 - [x] ✅ `uv run pytest python/tests/` GREEN（変更なし・回帰確認）
 
@@ -944,7 +944,7 @@
 
 ### N4.5 examples/strategies/ ✅ 完了 2026-04-29
 - [x] ✅ `examples/strategies/buy_and_hold.py` 71 行（最小サンプル、`init_kwargs` 対応）
-- [x] ✅ ~~`examples/strategies/sma_cross.py`~~ （削除済み — `docs/example/buy_and_hold.py` に統合 2026-04-30）
+- [x] ✅ ~~`examples/strategies/sma_cross.py`~~ （削除済み — `examples/buy_and_hold.py` に統合 2026-04-30）
 - [x] ✅ `examples/strategies/README.md` 71 行（使い方・規約・自己責任注記）
 - [x] ✅ numpy/pandas 非依存。`load_strategy_from_file()` で両ファイルのロード検証済み
 
@@ -952,7 +952,7 @@
 - [x] ✅ `strategy_loader.py` の `_check_compat()` が N1.8 と同じ `_INCOMPATIBLE_HANDLERS` セットで AST 検査。ロード後に `log.warning` 送出、block しない（自己責任方針）
 
 **Exit 条件（暫定達成）**:
-- `docs/example/buy_and_hold.py` を `strategy_file` 経由でロード可能 ✅
+- `examples/buy_and_hold.py` を `strategy_file` 経由でロード可能 ✅
 - 構文エラー → `EngineError{code:"strategy_load_failed"}` → UI バナー ✅
 - `__init__(short=5, long=20)` を `strategy_init_kwargs` JSON で渡せる ✅
 - 既存テスト（N0〜N3）すべて GREEN のまま ✅（Python 1310 / Rust workspace 全 GREEN）

@@ -2,7 +2,7 @@
 
 ## 背景・動機
 
-`scripts/run-replay-debug.sh docs/example/buy_and_hold.py` を実行すると、
+`scripts/run-replay-debug.sh examples/buy_and_hold.py` を実行すると、
 `/api/replay/start` は HTTP 202 を返し Python 側でも以下まで正常に動く：
 
 ```
@@ -243,7 +243,7 @@ def _run() -> None:
   相当のコンストラクタを用意する（既存 live pane の作成経路を流用）
 - TimeAndSales pane も同様に `Trades` 購読を auto-bind
 - 受け入れ:
-  - `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py` で
+  - `bash scripts/run-replay-debug.sh examples/buy_and_hold.py` で
     「Choose a ticker」が消え、ローソクが順次描画される
   - buy_and_hold の BUY ログ条件で対応する実約定（Time&Sales）が表示される
   - 単体テスト: `auto_generate_replay_panes("1301.TSE", "Daily")` が
@@ -268,7 +268,7 @@ def _run() -> None:
 | Python integration | `_handle_start_engine` が replay モードで streaming を呼ぶ |
 | Python integration | `_handle_start_engine` が live モードで run-once を維持する |
 | Rust | mock engine が `KlineUpdate { venue: "replay", ... }` を流したとき、CandlestickChart が描画する（既存 live mock を replay venue で再利用） |
-| E2E (manual) | `bash scripts/run-replay-debug.sh docs/example/buy_and_hold.py` で buy_and_hold の BUY シグナルが UI に反映される |
+| E2E (manual) | `bash scripts/run-replay-debug.sh examples/buy_and_hold.py` で buy_and_hold の BUY シグナルが UI に反映される |
 
 決定論性テスト群（`test_nautilus_determinism.py`）は run-once 版を使い続けるため、
 streaming 版変更で破壊しないことを確認する。

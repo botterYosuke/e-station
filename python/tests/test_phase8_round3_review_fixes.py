@@ -48,7 +48,7 @@ def test_second_login_with_same_explicit_user_id_but_password_via_env_is_noop(
     monkeypatch.setenv("DEV_TACHIBANA_USER_ID", "env-user")
     monkeypatch.setenv("DEV_TACHIBANA_PASSWORD", "env-pw")
 
-    with LiveSession(venue="tachibana", demo=True) as s:
+    with LiveSession(venue="tachibana", demo=True, force_mode="inprocess") as s:
         # 初回: env 解決
         s.login()
         # 2回目: user_id だけ明示 (env と同じ値) → no-op (RuntimeError 出ない)
@@ -61,7 +61,7 @@ def test_second_login_with_user_id_only_explicit_no_op(monkeypatch, _patched_log
     monkeypatch.setenv("DEV_TACHIBANA_USER_ID", "env-user")
     monkeypatch.setenv("DEV_TACHIBANA_PASSWORD", "env-pw")
 
-    with LiveSession(venue="tachibana", demo=True) as s:
+    with LiveSession(venue="tachibana", demo=True, force_mode="inprocess") as s:
         s.login(user_id="env-user", password="env-pw")
         # 部分明示 (user_id だけ) → no-op
         s.login(user_id="env-user", password=None)
@@ -75,7 +75,7 @@ def test_second_login_with_changed_credentials_still_raises(monkeypatch, _patche
     monkeypatch.delenv("DEV_TACHIBANA_USER_ID", raising=False)
     monkeypatch.delenv("DEV_TACHIBANA_PASSWORD", raising=False)
 
-    with LiveSession(venue="tachibana", demo=True) as s:
+    with LiveSession(venue="tachibana", demo=True, force_mode="inprocess") as s:
         s.login(user_id="user-A", password="pw-A")
         with pytest.raises(RuntimeError, match="credentials cannot change"):
             s.login(user_id="user-B", password="pw-B")

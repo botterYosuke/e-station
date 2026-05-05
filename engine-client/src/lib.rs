@@ -33,5 +33,6 @@ pub use venue_caps::VenueCapsStore;
 ///   - 10: F6 SCENARIO 定数 IPC（LoadStrategyScenario / SaveStrategyScenario / 関連 events）
 ///   - 11: F7 モード切替 (StopReplay / ForceStopReplay / ReplayStopped)
 ///   - 12: ReplayDataLoaded.instrument_id / granularity を追加（auto_generate_replay_panes 復活用）
+///   - 13: Python 側 bump に追従
 pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 12;
+pub const SCHEMA_MINOR: u16 = 13;
