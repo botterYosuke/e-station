@@ -66,7 +66,9 @@ fn wal_fn_takes_today_cutoff_param() {
     // so old `accepted` records (yesterday or earlier) are treated as terminal.
     // Caller passes JST 当日 0:00 via jst_today_midnight_ms.
     assert!(
-        MAIN_RS.contains("fn has_wal_in_flight_orders_at(wal_path: &std::path::Path, today_start_ms: i64)"),
+        MAIN_RS.contains(
+            "fn has_wal_in_flight_orders_at(wal_path: &std::path::Path, today_start_ms: i64)"
+        ),
         "has_wal_in_flight_orders_at must accept today_start_ms: i64 (C2 fix)"
     );
     assert!(

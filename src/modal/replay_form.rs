@@ -305,7 +305,11 @@ impl ReplayFormModal {
 
         col = col.push(buttons);
 
-        container(col).padding(16).into()
+        container(col)
+            .max_width(420)
+            .padding(24)
+            .style(crate::style::dashboard_modal)
+            .into()
     }
 }
 

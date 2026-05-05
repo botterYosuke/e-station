@@ -130,11 +130,9 @@ fn restart_with_mode_clears_engine_connection_before_restart() {
         .unwrap_or(body.len());
     let fn_body = &body[..end];
 
-    let conn_tx_idx = fn_body
-        .find("ENGINE_CONNECTION_TX")
-        .expect(
-            "restart_with_mode must reference ENGINE_CONNECTION_TX to clear the engine connection"
-        );
+    let conn_tx_idx = fn_body.find("ENGINE_CONNECTION_TX").expect(
+        "restart_with_mode must reference ENGINE_CONNECTION_TX to clear the engine connection",
+    );
     let restart_idx = fn_body
         .find("self.restart()")
         .expect("restart_with_mode must call self.restart()");

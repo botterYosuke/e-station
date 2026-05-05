@@ -16,7 +16,7 @@ use iced::widget::{
 use iced::{Element, Length};
 
 use crate::Message;
-use crate::menu::{Action, MenuEntry, actions_for_mode, mode_menu_items, tools_actions_for_state};
+use crate::menu::{Action, MenuEntry, actions_for_mode, tools_actions_for_state};
 pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
 use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 
@@ -30,14 +30,14 @@ const BTN_WIDTH: f32 = 155.0;
 /// cursor last rested.
 const BAR_HEIGHT: f32 = 32.0;
 
-/// Returns the menu button row (`File ▼` / `Mode ▼` / `Tools ▼`).
+/// Returns the menu button row (`File ▼` / `Tools ▼`).
 ///
 /// Each button has an explicit fixed width so the horizontal dropdown positions
 /// can be computed exactly from `BTN_WIDTH + spacing`.  The bar itself is
 /// wrapped in a `container` with an explicit `BAR_HEIGHT` so the overlay anchor
 /// is always the bar's bottom edge, not the cursor's position within the bar.
 ///
-/// A `mouse_area` fills the space to the right of the three buttons and fires
+/// A `mouse_area` fills the space to the right of the two buttons and fires
 /// `BarMessage::Dismiss` on press, satisfying DoD-4 for the full bar width.
 ///
 /// The caller must `.map(Message::MenuBar)` before pushing into the column.
@@ -61,7 +61,6 @@ pub fn view<'a>(state: &'a State, _mode: AppMode) -> Element<'a, BarMessage> {
 
     let bar_row = row![
         mk("ファイル（File）▼", TopMenu::File),
-        mk("モード（Mode）▼", TopMenu::Mode),
         mk("ツール（Tools）▼", TopMenu::Tools),
         empty_strip,
     ]
@@ -114,8 +113,7 @@ pub fn with_dropdown_overlay<'a>(
     let step = BTN_WIDTH + 2.0; // 2.0 = row spacing
     let left_offset = match open_top {
         TopMenu::File => 0.0,
-        TopMenu::Mode => step,
-        TopMenu::Tools => 2.0 * step,
+        TopMenu::Tools => step,
     };
 
     // Vertical offset: bar's bottom edge = BAR_HEIGHT (bar is always at y=0
@@ -136,7 +134,9 @@ pub fn with_dropdown_overlay<'a>(
     let dismiss_area = opaque(
         mouse_area(
             container(row![
-                Space::new().width(Length::Fixed(left_offset)).height(Length::Shrink),
+                Space::new()
+                    .width(Length::Fixed(left_offset))
+                    .height(Length::Shrink),
                 dropdown_panel,
             ])
             .width(Length::Fill)
@@ -148,7 +148,9 @@ pub fn with_dropdown_overlay<'a>(
     // The leading Space is NOT wrapped in opaque/mouse_area, so pointer events
     // in the button-row band fall through to layer 0 (base) buttons.
     let overlay = column![
-        Space::new().width(Length::Fill).height(Length::Fixed(top_offset)),
+        Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(top_offset)),
         dismiss_area,
     ];
 
@@ -183,7 +185,6 @@ fn entries_for_menu(
                 }
             })
             .collect(),
-        TopMenu::Mode => mode_menu_items(mode),
         TopMenu::Tools => tools_actions_for_state(wandb_auth, run_buf),
     }
 }
@@ -306,7 +307,6 @@ pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Ac
 }
 
 // F8 R2 / M-A: the `menu_items` / `mode_items` wrappers were removed because
-// they were pure delegation shims over `menu::actions_for_mode` /
-// `menu::mode_menu_items` with zero external callers after H2 (F8 R1) added
-// `pub use` for the underlying functions. Callers should use those module-
-// level functions directly (already imported at the top of this file).
+// they were pure delegation shims over `menu::actions_for_mode` with zero
+// external callers after H2 (F8 R1). The Mode menu itself was subsequently
+// removed and replaced by the footer toggle (mode-toggle-redesign).

@@ -17,7 +17,8 @@
 - [`widget-menu-bar-impl.md`](./widget-menu-bar-impl.md) — **メニューバー実装の主要仕様**（iced widget、全 OS 統一）
 - [`footer-impl.md`](./footer-impl.md) — ステータスバー（フッター）の要件・設計・テスト
 - [`save-menu-impl.md`](./save-menu-impl.md) — File メニュー / Save 実装（Open / Save / Save As / dirty 判定 / `CURRENT_PATH` / replay 戦略 `.py` `SCENARIO` 経路）
-- [`mode-switch-impl.md`](./mode-switch-impl.md) — `モード（Mode）` サブメニューによる live ⇄ replay 切替・engine 再起動・5 軸 matrix
+- [`mode-switch-impl.md`](./mode-switch-impl.md) — フッタートグルによる live ⇄ replay 切替・engine 再起動・5 軸 matrix（`モード（Mode）` トップレベルメニューは廃止）
+- [`mode-toggle-redesign.md`](./mode-toggle-redesign.md) — UI 改修計画（メニュー → フッタートグル移行の設計判断・実装ステップ・テスト方針）
 - [`wandb-submit-impl.md`](./wandb-submit-impl.md) — Tools サブメニューによる W&B Submit / Sign in / Sign out / RunBuffer / submit subprocess
 - [`native-menu-bar-impl.md`](./native-menu-bar-impl.md) — **(歴史)** muda 時代の実装記録（2026-04-30）。muda 廃止後は archive 扱い
 
@@ -34,15 +35,20 @@
 
 詳細: [`save-menu-impl.md`](./save-menu-impl.md)
 
-### モード（Mode）サブメニュー
+### フッタートグル（モード切替）
 
-| ラベル | 状態 |
-|--------|------|
-| `ライブ（Live）` | 現在 live なら `✓` |
-| `リプレイ（Replay）` | 現在 replay なら `✓` |
+`モード（Mode）` トップレベルメニューは廃止。ステータスバーのバッジ自体が
+クリック可能なトグルになった（詳細: [`mode-switch-impl.md`](./mode-switch-impl.md)）。
 
-切替時は engine プロセスを再起動。dirty チェック / in-flight order / W&B submit
-in-flight の 3 種類のガードで安全に遷移する。詳細: [`mode-switch-impl.md`](./mode-switch-impl.md)
+| 状態 | 表示 | 色 | 動作 |
+|------|------|----|------|
+| live（操作可能） | `● LIVE` | 緑 `(0.2, 0.75, 0.3)` | クリックで replay に切替 |
+| replay（操作可能） | `● REPLAY` | アンバー `(0.9, 0.6, 0.1)` | クリックで live に切替 |
+| 切替中 / 抑制中 | `● LIVE …` / `● REPLAY …` | 既存色を 50 % 減光 | クリック無効 |
+
+- `Ctrl/Cmd+M` アクセラレータ（キーボード導線）は維持
+- dirty 時はクリック後に save/discard confirm dialog へ遷移（disable はしない）
+- 抑制理由優先順位: `mode_switch_in_progress` > `submit_in_flight` > `engine_busy`
 
 ### Tools サブメニュー（W&B 連携）
 
@@ -83,8 +89,9 @@ muda 廃止後は **OS 別分岐は最小化**。実質的な OS 別動作は ke
 | ショートカット表示 | `Ctrl+O` 等 | `Cmd+O` 等 | `Ctrl+O` 等 |
 
 不変条件: dispatch 経路は **`Message::NativeMenuAction(Action)` の単一系統**に
-正規化される。menu 項目の集合計算（`actions_for_mode` / `mode_menu_items` /
-`tools_actions_for_state`）は `src/menu.rs` に集約され、全 OS で同じ集合を返す。
+正規化される。menu 項目の集合計算（`actions_for_mode` / `tools_actions_for_state`）
+および フッタートグルの enable 計算（`mode_toggle_state`）は `src/menu.rs` に集約され、
+全 OS で同じ集合を返す。（`mode_menu_items` は廃止済み）
 
 ---
 
@@ -92,8 +99,8 @@ muda 廃止後は **OS 別分岐は最小化**。実質的な OS 別動作は ke
 
 | ファイル | 役割 |
 |---------|------|
-| `src/menu.rs` | `Action` enum / `MenuEntry` / 項目集合の cross-platform 計算 |
-| `src/menu_bar_state.rs` | widget bar 用の `TopMenu` / `BarMessage` / `update`（全 OS） |
+| `src/menu.rs` | `Action` enum / `MenuEntry` / 項目集合の cross-platform 計算 / `ModeToggleState` / `mode_toggle_state` |
+| `src/menu_bar_state.rs` | widget bar 用の `TopMenu`（`File` / `Tools` 2 本立て） / `BarMessage` / `update`（全 OS） |
 | `src/native_menu.rs` | `Action` enum / `widget_keyboard_subscription`（全 OS、accelerator 経路のみ） |
 | `src/widget_menu_bar.rs` | iced widget bar / dropdown overlay（全 OS） |
 | `src/main.rs` | `NativeMenu*` ハンドラ群・`build_state_json` / `is_dirty` / `CURRENT_PATH` / `_mode_switch_guard` / footer 合成 |

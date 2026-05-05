@@ -4,11 +4,11 @@
 //! correct `update()` pure function logic as specified in
 //! `docs/✅menu-and-footer/P8-widget-menu-bar-linux.md` (DoD-12 / R2-39).
 //!
-//! The plan specifies a 3-contract × 4-open-state = 12 case matrix:
+//! The plan specifies a 3-contract × 3-open-state = 9 case matrix:
 //! - Contract 1: Esc (→ Dismiss)
 //! - Contract 2: focus-lost (→ Dismiss)
 //! - Contract 3: outside click (→ Dismiss)
-//! × {File open, Mode open, Tools open, Closed}
+//! × {File open, Tools open, Closed}
 //!
 //! All 12 cases share the same `Dismiss → open: None` transition in the
 //! pure `update()` function. The "dismiss reason" distinction is handled
@@ -56,15 +56,18 @@ fn state_struct_exists() {
 }
 
 #[test]
-fn top_menu_enum_has_file_mode_tools() {
+fn top_menu_enum_has_file_and_tools() {
     let src = read_menu_bar_state();
     assert!(
         src.contains("pub enum TopMenu"),
         "menu_bar_state.rs must define `pub enum TopMenu`"
     );
     assert!(src.contains("File"), "TopMenu must have File variant");
-    assert!(src.contains("Mode"), "TopMenu must have Mode variant");
     assert!(src.contains("Tools"), "TopMenu must have Tools variant");
+    assert!(
+        !src.contains("    Mode,"),
+        "TopMenu must NOT have Mode variant — Mode menu is replaced by footer toggle"
+    );
 }
 
 #[test]
@@ -277,21 +280,22 @@ fn pick_always_closes_menu() {
 // ── widget_menu_bar module: menu_items, view, overlay, conversion ──────────
 
 // F8 R2 / M-A: the `menu_items` / `mode_items` wrappers in widget_menu_bar.rs
-// were pure delegation shims (`menu_items(mode) -> actions_for_mode(mode)` and
-// `mode_items(current) -> mode_menu_items(current)`) with zero external
-// callers after H2 added `pub use` of the underlying functions. They have
-// been removed; widget_menu_bar.rs now just re-imports the canonical
-// `menu::{actions_for_mode, mode_menu_items}` directly.
+// were pure delegation shims removed in F8 R2. Mode menu itself was then
+// removed and replaced with the footer toggle in the mode-toggle-redesign.
 #[test]
 fn widget_menu_bar_does_not_define_redundant_wrappers() {
     let src = read_widget_menu_bar();
     assert!(
         !src.contains("pub fn menu_items"),
-        "widget_menu_bar.rs must NOT define wrapper `pub fn menu_items` (F8 R2 M-A: redundant delegation removed; use menu::actions_for_mode directly)"
+        "widget_menu_bar.rs must NOT define wrapper `pub fn menu_items` (F8 R2 M-A: redundant delegation removed)"
     );
     assert!(
         !src.contains("pub fn mode_items"),
-        "widget_menu_bar.rs must NOT define wrapper `pub fn mode_items` (F8 R2 M-A: redundant delegation removed; use menu::mode_menu_items directly)"
+        "widget_menu_bar.rs must NOT define wrapper `pub fn mode_items` (F8 R2 M-A: redundant delegation removed)"
+    );
+    assert!(
+        !src.contains("mode_menu_items"),
+        "widget_menu_bar.rs must NOT reference `mode_menu_items` — Mode menu removed; use footer toggle"
     );
 }
 
@@ -307,7 +311,7 @@ fn view_function_returns_bar_message_element() {
         src.contains("Element<'a, BarMessage>") || src.contains("-> Element<'_, BarMessage>"),
         "view() must return Element<'a, BarMessage> (not Message) for .map(Message::MenuBar) in main.rs"
     );
-    // Must emit Toggle messages and include all three top-level menu variants
+    // Must emit Toggle messages and include both top-level menu variants
     assert!(
         src.contains("BarMessage::Toggle"),
         "view() must emit BarMessage::Toggle for top-level button presses"
@@ -317,12 +321,12 @@ fn view_function_returns_bar_message_element() {
         "view() must reference TopMenu::File for the File ▼ button"
     );
     assert!(
-        src.contains("TopMenu::Mode"),
-        "view() must reference TopMenu::Mode for the Mode ▼ button"
-    );
-    assert!(
         src.contains("TopMenu::Tools"),
         "view() must reference TopMenu::Tools for the Tools ▼ button"
+    );
+    assert!(
+        !src.contains("TopMenu::Mode"),
+        "view() must NOT reference TopMenu::Mode — Mode menu is replaced by footer toggle"
     );
     // The empty strip to the right of the buttons must fire Dismiss so DoD-4
     // holds for the full bar width, not just the three button areas (MEDIUM: empty bar strip).

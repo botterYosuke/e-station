@@ -156,7 +156,10 @@ fn subscription_signature_present() {
 #[test]
 fn action_quit_variant_exists() {
     let src = read_native_menu();
-    assert!(src.contains("Quit,"), "Action enum must contain a Quit variant");
+    assert!(
+        src.contains("Quit,"),
+        "Action enum must contain a Quit variant"
+    );
 }
 
 // ── F7/T3: Action::SwitchMode exists ─────────────────────────────────────────

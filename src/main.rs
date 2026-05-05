@@ -2121,8 +2121,13 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
     }
 }
 
-fn status_bar_label(is_replay: bool) -> &'static str {
-    if is_replay { "● REPLAY" } else { "● LIVE" }
+fn status_bar_label(is_replay: bool, enabled: bool) -> &'static str {
+    match (is_replay, enabled) {
+        (false, true) => "● LIVE",
+        (true, true) => "● REPLAY",
+        (false, false) => "● LIVE …",
+        (true, false) => "● REPLAY …",
+    }
 }
 
 fn status_bar_dot_color(is_replay: bool) -> iced::Color {
@@ -2136,24 +2141,64 @@ fn status_bar_dot_color(is_replay: bool) -> iced::Color {
 const STATUS_BAR_HEIGHT: u32 = 20;
 const STATUS_BAR_BG: iced::Color = iced::Color::from_rgb(0.08, 0.08, 0.08);
 
-// 'static: no input borrows; all content is &'static str labels and Copy Color constants.
-// '_ cannot be used here because lifetime elision requires at least one input reference.
-fn status_bar(is_replay: bool) -> Element<'static, Message> {
-    container(
-        text(status_bar_label(is_replay))
-            .size(11)
-            .color(status_bar_dot_color(is_replay)),
-    )
-    .width(iced::Length::Fill)
-    .height(STATUS_BAR_HEIGHT)
-    .align_y(Alignment::Center)
-    .padding(padding::left(8))
-    .style(|_theme| container::Style {
-        background: Some(STATUS_BAR_BG.into()),
-        snap: true,
-        ..Default::default()
-    })
-    .into()
+// 'static: ModeToggleState contains only AppMode (Copy) and &'static str / bool —
+// no lifetime-bearing references. The button message and tooltip content are also
+// 'static, so the returned Element<'static, Message> bound is satisfied.
+fn status_bar(state: crate::menu::ModeToggleState) -> Element<'static, Message> {
+    use engine_client::dto::AppMode;
+
+    let is_replay = state.current == AppMode::Replay;
+    let label = status_bar_label(is_replay, state.enabled);
+    let base_color = status_bar_dot_color(is_replay);
+    let color = if state.enabled {
+        base_color
+    } else {
+        iced::Color::from_rgb(base_color.r * 0.5, base_color.g * 0.5, base_color.b * 0.5)
+    };
+
+    let target = match state.current {
+        AppMode::Live => AppMode::Replay,
+        AppMode::Replay => AppMode::Live,
+    };
+
+    let tip: Option<&'static str> = if state.enabled {
+        Some(match state.current {
+            AppMode::Live => "クリックで Replay に切替",
+            AppMode::Replay => "クリックで Live に切替",
+        })
+    } else {
+        state.disabled_reason
+    };
+
+    let badge = button(text(label).size(11).color(color))
+        .padding(padding::left(8).right(8))
+        .style(button::text);
+
+    let badge_el: Element<'static, Message> = if state.enabled {
+        // Route through the same BarMessage::Pick → to_native_action → NativeMenuAction
+        // path as the widget menu bar, so the Action::SwitchMode handler's guard
+        // invariants (SUBMIT_IN_FLIGHT, dirty check, etc.) are preserved.
+        badge
+            .on_press(Message::MenuBar(crate::menu_bar_state::BarMessage::Pick(
+                crate::menu::Action::SwitchAppMode(target),
+            )))
+            .into()
+    } else {
+        badge.into()
+    };
+
+    let content = tooltip(badge_el, tip, TooltipPosition::Top);
+
+    container(content)
+        .width(iced::Length::Fill)
+        .height(STATUS_BAR_HEIGHT)
+        .align_y(Alignment::Center)
+        .style(|_| container::Style {
+            background: Some(STATUS_BAR_BG.into()),
+            snap: true,
+            ..Default::default()
+        })
+        .into()
 }
 
 /// Wrap `content` in a `confirm_dialog` overlay when one is set.
@@ -4879,7 +4924,9 @@ impl Flowsurface {
             // with ReplayStopped, so the flow can complete normally. Shared between
             // mode-switch and stop-only paths.
             Message::ModeSwitchStopBusy => {
-                log::warn!("[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately");
+                log::warn!(
+                    "[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately"
+                );
                 if self.mode_switch_state.is_none() && !self.replay_stop_only_pending {
                     return Task::none();
                 }
@@ -6031,8 +6078,8 @@ impl Flowsurface {
             let current_mode = app_mode();
             let mut base = column![header_title];
             {
-                let menu_bar_view =
-                    crate::widget_menu_bar::view(&self.menu_bar, current_mode).map(Message::MenuBar);
+                let menu_bar_view = crate::widget_menu_bar::view(&self.menu_bar, current_mode)
+                    .map(Message::MenuBar);
                 base = base.push(menu_bar_view);
             }
             if let Some(banner) = banner {
@@ -6053,8 +6100,6 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
-            let is_replay = current_mode == engine_client::dto::AppMode::Replay;
-
             base = base.push(
                 match sidebar_pos {
                     sidebar::Position::Left => row![sidebar_view, dashboard_view,],
@@ -6064,7 +6109,13 @@ impl Flowsurface {
                 .padding(8)
                 .height(iced::Length::Fill),
             );
-            base = base.push(status_bar(is_replay));
+            let mode_toggle = crate::menu::mode_toggle_state(
+                current_mode,
+                false,
+                SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire),
+                self.mode_switch_state.is_some(),
+            );
+            base = base.push(status_bar(mode_toggle));
 
             let view_result = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
@@ -7403,9 +7454,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn strategy_scenario_load_failed_event_pushes_toast_only() {
-        let body = handler_body(
-            "            Message::StrategyScenarioLoadFailedEvent {",
-        );
+        let body = handler_body("            Message::StrategyScenarioLoadFailedEvent {");
         assert!(
             body.contains("notifications.push"),
             "StrategyScenarioLoadFailedEvent must surface the error via a toast"
@@ -7426,13 +7475,23 @@ mod status_bar_tests {
     use super::*;
 
     #[test]
-    fn t1_status_bar_label_replay() {
-        assert_eq!(status_bar_label(true), "● REPLAY");
+    fn t1_status_bar_label_replay_enabled() {
+        assert_eq!(status_bar_label(true, true), "● REPLAY");
     }
 
     #[test]
-    fn t2_status_bar_label_live() {
-        assert_eq!(status_bar_label(false), "● LIVE");
+    fn t1b_status_bar_label_replay_disabled() {
+        assert_eq!(status_bar_label(true, false), "● REPLAY …");
+    }
+
+    #[test]
+    fn t2_status_bar_label_live_enabled() {
+        assert_eq!(status_bar_label(false, true), "● LIVE");
+    }
+
+    #[test]
+    fn t2b_status_bar_label_live_disabled() {
+        assert_eq!(status_bar_label(false, false), "● LIVE …");
     }
 
     #[test]
@@ -7652,7 +7711,11 @@ mod app_mode_roundtrip_tests {
     #[test]
     fn app_mode_returns_live_after_switch_from_replay() {
         set_app_mode(AppMode::Replay);
-        assert_eq!(app_mode(), AppMode::Replay, "pre-condition: must start in Replay");
+        assert_eq!(
+            app_mode(),
+            AppMode::Replay,
+            "pre-condition: must start in Replay"
+        );
         // Simulate what restart_with_mode(Live) does to APP_MODE.
         set_app_mode(AppMode::Live);
         assert_eq!(
