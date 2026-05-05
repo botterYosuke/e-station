@@ -121,7 +121,12 @@ def _resolve_session_file_path() -> Path:
     if env_override := os.environ.get("FLOWSURFACE_DATA_PATH"):
         return Path(env_override) / "engine-session.json"
     import platformdirs
-    base = platformdirs.user_data_dir("flowsurface", appauthor=False)
+    # Rust 側 ``data/src/lib.rs::data_path`` は ``dirs_next::data_dir()`` を呼び、
+    # Windows では ``%APPDATA%`` (Roaming) を返す。``platformdirs.user_data_dir`` は
+    # 既定で Local を返すため、``roaming=True`` を渡して Rust と一致させる
+    # (macOS/Linux では引数は no-op)。これを忘れると helper が GUI が書いた
+    # ``engine-session.json`` を見つけられず attach mode で即終了する。
+    base = platformdirs.user_data_dir("flowsurface", appauthor=False, roaming=True)
     return Path(base) / "engine-session.json"
 
 
