@@ -1,6 +1,5 @@
 use engine_client::dto::AppMode;
 use iced::Subscription;
-use std::sync::atomic::Ordering;
 
 use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 
@@ -75,55 +74,71 @@ pub fn subscription(app_mode: AppMode) -> Subscription<Action> {
 /// Unified keyboard subscription for all platforms (Windows / macOS / Linux).
 /// Replaces the old muda-based Win/Mac and iced-based Linux implementations.
 ///
+/// Match against `physical_key` (`Code::KeyO` etc.) rather than the produced
+/// character so accelerators are layout-independent and survive IME state /
+/// non-Latin keyboard layouts. The Cmd (logo) modifier is accepted only on
+/// macOS — on Windows/Linux `logo()` is the Super/Win key, which must NOT
+/// trigger app shortcuts (it conflicts with WM-level bindings).
+///
 /// Live-only shortcuts (OpenFile / Save / SaveAs) are gated on app_mode to avoid
 /// JSON dialogs during replay (HIGH-1 fix).
 /// SwitchMode dispatch is suppressed while MODE_SWITCHING is true (統一決定 64).
 fn widget_keyboard_subscription(app_mode: AppMode) -> Subscription<Action> {
     use iced::keyboard::Event as KbEvent;
+    use iced::keyboard::key::{Code, Physical};
+    use std::sync::atomic::Ordering;
 
     let is_live = app_mode == AppMode::Live;
     iced::keyboard::listen()
         .with(is_live)
         .filter_map(|(is_live, event): (bool, KbEvent)| {
-            if let KbEvent::KeyPressed { key, modifiers, .. } = event {
-                let ctrl_or_cmd = modifiers.control() || modifiers.logo();
-                let shift = modifiers.shift();
+            let KbEvent::KeyPressed {
+                physical_key,
+                modifiers,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            // macOS: Cmd (logo) is the standard primary modifier — accept it.
+            // Win/Linux: logo() is Super/Win key — DO NOT accept (WM conflict).
+            #[cfg(target_os = "macos")]
+            let ctrl_or_cmd = modifiers.control() || modifiers.logo();
+            #[cfg(not(target_os = "macos"))]
+            let ctrl_or_cmd = modifiers.control();
+            let shift = modifiers.shift();
 
-                return match key.as_ref() {
-                    // Ctrl+O / Cmd+O (macOS): open file (live only)
-                    iced::keyboard::Key::Character("o") if ctrl_or_cmd && !shift && is_live => {
-                        Some(Action::OpenFile)
-                    }
-                    // Ctrl+S / Cmd+S (macOS): save (live only)
-                    iced::keyboard::Key::Character("s") if ctrl_or_cmd && !shift && is_live => {
-                        Some(Action::Save)
-                    }
-                    // Ctrl+Shift+S / Cmd+Shift+S (macOS): save as (live only)
-                    iced::keyboard::Key::Character("s") if ctrl_or_cmd && shift && is_live => {
-                        Some(Action::SaveAs)
-                    }
-                    // Ctrl+Q / Cmd+Q (macOS): quit (both modes)
-                    iced::keyboard::Key::Character("q") if ctrl_or_cmd && !shift => {
-                        Some(Action::Quit)
-                    }
-                    // Ctrl+M / Cmd+M (macOS): switch mode (Live ↔ Replay)
-                    // Suppressed while a mode-switch is already in progress (統一決定 64)
-                    iced::keyboard::Key::Character("m") if ctrl_or_cmd && !shift => {
-                        if crate::MODE_SWITCHING.load(Ordering::Acquire) {
-                            None
+            match physical_key {
+                // Ctrl+O / Cmd+O (macOS): open file (live only)
+                Physical::Code(Code::KeyO) if ctrl_or_cmd && !shift && is_live => {
+                    Some(Action::OpenFile)
+                }
+                // Ctrl+S / Cmd+S (macOS): save (live only)
+                Physical::Code(Code::KeyS) if ctrl_or_cmd && !shift && is_live => {
+                    Some(Action::Save)
+                }
+                // Ctrl+Shift+S / Cmd+Shift+S (macOS): save as (live only)
+                Physical::Code(Code::KeyS) if ctrl_or_cmd && shift && is_live => {
+                    Some(Action::SaveAs)
+                }
+                // Ctrl+Q / Cmd+Q (macOS): quit (both modes)
+                Physical::Code(Code::KeyQ) if ctrl_or_cmd && !shift => Some(Action::Quit),
+                // Ctrl+M / Cmd+M (macOS): switch mode (Live ↔ Replay)
+                // Suppressed while a mode-switch is already in progress (統一決定 64)
+                Physical::Code(Code::KeyM) if ctrl_or_cmd && !shift => {
+                    if crate::MODE_SWITCHING.load(Ordering::Acquire) {
+                        None
+                    } else {
+                        let target = if is_live {
+                            AppMode::Replay
                         } else {
-                            let target = if is_live {
-                                AppMode::Replay
-                            } else {
-                                AppMode::Live
-                            };
-                            Some(Action::SwitchMode(target))
-                        }
+                            AppMode::Live
+                        };
+                        Some(Action::SwitchMode(target))
                     }
-                    _ => None,
-                };
+                }
+                _ => None,
             }
-            None
         })
 }
 

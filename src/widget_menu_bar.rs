@@ -1,15 +1,13 @@
-#![cfg(target_os = "linux")]
-//! Linux-only iced widget menu bar.
+//! Cross-platform iced widget menu bar (all OS).
 //!
-//! On Windows / macOS the OS-native muda menu bar is used (`native_menu.rs`).
-//! On Linux, muda does not have GTK support, so this module provides an
-//! equivalent in-window menu bar built from iced widgets.
+//! Replaces the former muda OS-native menu on Windows and macOS, matching the
+//! existing Linux implementation. All platforms share a single code path.
 //!
-//! **Architecture** (P8-widget-menu-bar-linux.md):
+//! **Architecture** (widget-menu-bar-impl.md):
 //! - State transitions live in `menu_bar_state::{State, update}` (no cfg gate).
 //! - This module owns `view()` (button row) and `with_dropdown_overlay()` (overlay).
 //! - Actions dispatch via `Message::NativeMenuAction(native_menu::Action)` through
-//!   `to_native_action()` — same handler path as Win/Mac.
+//!   `to_native_action()` — single handler path on all platforms.
 
 use engine_client::dto::AppMode;
 use iced::widget::{
@@ -19,10 +17,7 @@ use iced::{Element, Length};
 
 use crate::Message;
 use crate::menu::{Action, MenuEntry, actions_for_mode, mode_menu_items, tools_actions_for_state};
-// H2 (F8 R1): re-export the pure `update` function so Linux callers can drive
-// the bar via a single facade (`widget_menu_bar::update`) without reaching into
-// the underlying `menu_bar_state` module.
-pub use crate::menu_bar_state::{BarMessage, State, TopMenu, update};
+pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
 use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 
 /// Fixed width for each top-level menu button.  The dropdown's horizontal
@@ -46,10 +41,10 @@ const BAR_HEIGHT: f32 = 32.0;
 /// `BarMessage::Dismiss` on press, satisfying DoD-4 for the full bar width.
 ///
 /// The caller must `.map(Message::MenuBar)` before pushing into the column.
-pub fn view<'a>(state: &'a State, _mode: &'a AppMode) -> Element<'a, BarMessage> {
+pub fn view<'a>(state: &'a State, _mode: AppMode) -> Element<'a, BarMessage> {
     let mk = |label: &str, top: TopMenu| {
         let active = state.open == Some(top);
-        button(text(label))
+        button(text(label.to_owned()))
             .on_press(BarMessage::Toggle(top))
             .width(Length::Fixed(BTN_WIDTH))
             .style(if active {
@@ -61,8 +56,8 @@ pub fn view<'a>(state: &'a State, _mode: &'a AppMode) -> Element<'a, BarMessage>
 
     // Rightmost fill-space: clicking the empty bar strip (right of Tools) fires
     // Dismiss so DoD-4 holds across the full bar width.
-    let empty_strip =
-        mouse_area(Space::new(Length::Fill, Length::Fill)).on_press(BarMessage::Dismiss);
+    let empty_strip = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+        .on_press(BarMessage::Dismiss);
 
     let bar_row = row![
         mk("ファイル（File）▼", TopMenu::File),
@@ -106,7 +101,7 @@ pub fn view<'a>(state: &'a State, _mode: &'a AppMode) -> Element<'a, BarMessage>
 pub fn with_dropdown_overlay<'a>(
     base: Element<'a, Message>,
     state: &'a State,
-    mode: &'a AppMode,
+    mode: AppMode,
     wandb_auth: &'a WandbAuthState,
     run_buf: &'a RunBufferIndex,
 ) -> Element<'a, Message> {
@@ -127,7 +122,7 @@ pub fn with_dropdown_overlay<'a>(
     // anchor — see the rationale on `view()`'s removed `.on_move` handler.
     let top_offset = BAR_HEIGHT;
 
-    let entries = entries_for_menu(open_top, mode, wandb_auth, run_buf);
+    let entries = entries_for_menu(open_top, &mode, wandb_auth, run_buf);
     let items = build_dropdown(entries);
     let dropdown_panel = opaque(
         container(column(items))
@@ -140,7 +135,7 @@ pub fn with_dropdown_overlay<'a>(
     let dismiss_area = opaque(
         mouse_area(
             container(row![
-                Space::new(Length::Fixed(left_offset), Length::Shrink),
+                Space::new().width(Length::Fixed(left_offset)).height(Length::Shrink),
                 dropdown_panel,
             ])
             .width(Length::Fill)
@@ -152,7 +147,7 @@ pub fn with_dropdown_overlay<'a>(
     // The leading Space is NOT wrapped in opaque/mouse_area, so pointer events
     // in the button-row band fall through to layer 0 (base) buttons.
     let overlay = column![
-        Space::new(Length::Fill, Length::Fixed(top_offset)),
+        Space::new().width(Length::Fill).height(Length::Fixed(top_offset)),
         dismiss_area,
     ];
 
@@ -214,7 +209,7 @@ fn build_dropdown<'a>(entries: Vec<MenuEntry>) -> Vec<Element<'a, Message>> {
                 Some(sc) => row![
                     text(prefix),
                     text(base_label),
-                    Space::new(Length::Fill, Length::Shrink),
+                    Space::new().width(Length::Fill).height(Length::Shrink),
                     text(sc),
                 ]
                 .into(),
@@ -252,13 +247,19 @@ fn build_dropdown<'a>(entries: Vec<MenuEntry>) -> Vec<Element<'a, Message>> {
 /// with a separate `text(...)` widget below instead of formatting it into the
 /// label.
 fn action_label_and_shortcut(action: &Action) -> (&'static str, Option<&'static str>) {
+    // On macOS the primary modifier is Cmd; on Win/Linux it is Ctrl.
+    #[cfg(target_os = "macos")]
+    let (o, s, ss, q) = ("Cmd+O", "Cmd+S", "Cmd+Shift+S", "Cmd+Q");
+    #[cfg(not(target_os = "macos"))]
+    let (o, s, ss, q) = ("Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+Q");
+
     match action {
-        Action::Open => ("ファイルを開く...（Open）", Some("Ctrl+O")),
-        Action::Save => ("上書き保存（Save）", Some("Ctrl+S")),
-        Action::SaveAs => ("名前を付けて保存...（Save As）", Some("Ctrl+Shift+S")),
+        Action::Open => ("ファイルを開く...（Open）", Some(o)),
+        Action::Save => ("上書き保存（Save）", Some(s)),
+        Action::SaveAs => ("名前を付けて保存...（Save As）", Some(ss)),
         Action::ReplayStart => ("リプレイを開始...（Replay Start）", None),
         Action::ReplayStop => ("リプレイを停止（Replay Stop）", None),
-        Action::Quit => ("終了（Quit）", Some("Ctrl+Q")),
+        Action::Quit => ("終了（Quit）", Some(q)),
         Action::SwitchAppMode(AppMode::Live) => ("ライブ（Live）", None),
         Action::SwitchAppMode(AppMode::Replay) => ("リプレイ（Replay）", None),
         Action::SubmitToWandb => ("W&B に送信（Submit）", None),

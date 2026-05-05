@@ -8,15 +8,10 @@ mod layout;
 mod logger;
 mod mask_secrets;
 // `menu` exposes `tools_actions_for_state`, `MenuEntry`, and `Action` used by
-// both the Linux widget menu bar and the cross-platform `native_menu::attach`
-// Tools enable/disable computation (H5). Cross-platform.
+// the iced widget menu bar on all platforms.
 mod menu;
-// H1 (F8 R1): `menu_bar_state` houses the pure `update()` state machine for the
-// Linux widget menu bar. The module itself is platform-independent — it has no
-// iced widget or GTK dependencies — so we expose it on every OS so that the
-// state-transition contract tests in `tests/widget_menu_bar_state.rs` can
-// compile and inspect the source on Windows / macOS as well as Linux. Only the
-// rendering layer (`widget_menu_bar`) is Linux-gated.
+// `menu_bar_state` houses the pure `update()` state machine for the iced widget
+// menu bar. No cfg gate — the state machine is platform-independent.
 mod menu_bar_state;
 mod modal;
 mod native_menu;
@@ -28,7 +23,6 @@ mod version;
 mod wandb_auth;
 mod wandb_submit_proc;
 mod widget;
-#[cfg(target_os = "linux")]
 mod widget_menu_bar;
 mod window;
 
@@ -242,7 +236,7 @@ fn exit_code_to_error(code: i32) -> WandbSubmitError {
 
 /// Returns the current app mode.  Falls back to `Live` when the static has not
 /// yet been initialised (unreachable in normal operation).
-fn app_mode() -> engine_client::dto::AppMode {
+pub(crate) fn app_mode() -> engine_client::dto::AppMode {
     APP_MODE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1296,9 +1290,7 @@ struct Flowsurface {
     /// The leading `_` on the field name silences the unused-field lint for
     /// the guard half (it is held purely for its Drop side-effect).
     mode_switch_state: Option<(engine_client::dto::AppMode, ModeSwitchGuard)>,
-    /// F8: Linux widget menu bar open/close state (DoD-12).
-    /// Only compiled on Linux; Win/macOS use the muda OS-native menu.
-    #[cfg(target_os = "linux")]
+    /// Widget menu bar open/close state (all platforms).
     menu_bar: crate::menu_bar_state::State,
     /// P9: W&B authentication state. Populated when Python check_auth subprocess responds.
     /// Drives Tools submenu enabled/disabled state on all platforms.
@@ -1491,9 +1483,7 @@ enum Message {
     NativeMenuSetup(u64),
     /// Native OS menu bar: user selected a menu item.
     NativeMenuAction(native_menu::Action),
-    /// F8: Linux widget menu bar message (toggle/pick/dismiss).
-    /// On Win/macOS this variant is never constructed; muda drives NativeMenuAction instead.
-    #[cfg(target_os = "linux")]
+    /// Widget menu bar message (toggle/pick/dismiss) — all platforms.
     MenuBar(crate::menu_bar_state::BarMessage),
     /// Native OS menu bar — Save As: user picked a destination path.
     NativeSaveAsPath(Option<std::path::PathBuf>),
@@ -2163,7 +2153,6 @@ impl Flowsurface {
             pending_exit_windows: None,
             pending_open_file: None,
             mode_switch_state: None,
-            #[cfg(target_os = "linux")]
             menu_bar: crate::menu_bar_state::State::default(),
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
             run_buffer: wandb_auth::RunBufferIndex::empty(),
@@ -3594,8 +3583,7 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
-            // ── Linux widget menu bar ──────────────────────────────────────
-            #[cfg(target_os = "linux")]
+            // ── Widget menu bar (all platforms) ───────────────────────────
             Message::MenuBar(bar_msg) => {
                 use crate::menu_bar_state::{self, BarMessage};
                 let native = if let BarMessage::Pick(ref action) = bar_msg {
@@ -5800,11 +5788,11 @@ impl Flowsurface {
                 })
             });
 
+            let current_mode = app_mode();
             let mut base = column![header_title];
-            #[cfg(target_os = "linux")]
             {
                 let menu_bar_view =
-                    crate::widget_menu_bar::view(&self.menu_bar, &app_mode()).map(Message::MenuBar);
+                    crate::widget_menu_bar::view(&self.menu_bar, current_mode).map(Message::MenuBar);
                 base = base.push(menu_bar_view);
             }
             if let Some(banner) = banner {
@@ -5825,7 +5813,7 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
-            let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
+            let is_replay = current_mode == engine_client::dto::AppMode::Replay;
 
             base = base.push(
                 match sidebar_pos {
@@ -5843,15 +5831,13 @@ impl Flowsurface {
             } else {
                 base.into()
             };
-            #[cfg(target_os = "linux")]
-            let view_result = crate::widget_menu_bar::with_dropdown_overlay(
+            crate::widget_menu_bar::with_dropdown_overlay(
                 view_result,
                 &self.menu_bar,
-                &app_mode(),
+                current_mode,
                 &self.wandb_auth,
                 &self.run_buffer,
-            );
-            view_result
+            )
         } else {
             container(
                 dashboard
@@ -6008,8 +5994,7 @@ impl Flowsurface {
         // Watch the engine-restarting flag and emit EngineRestarting messages.
         let engine_status = Subscription::run(engine_status_stream);
 
-        #[cfg(target_os = "linux")]
-        let linux_menu_bar_dismiss =
+        let widget_menu_bar_dismiss =
             iced::event::listen_with(|event, _status, _window| match event {
                 iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::MenuBar(
                     crate::menu_bar_state::BarMessage::DismissFocusLost,
@@ -6025,8 +6010,7 @@ impl Flowsurface {
             hotkeys,
             engine_status,
             native_menu::subscription(app_mode()).map(Message::NativeMenuAction),
-            #[cfg(target_os = "linux")]
-            linux_menu_bar_dismiss,
+            widget_menu_bar_dismiss,
         ])
     }
 
@@ -6644,7 +6628,7 @@ impl Flowsurface {
         //   4. engine_status_stream yields EngineConnected with the new conn.
         let engine_restart_task = {
             let manager = ENGINE_MANAGER.get().map(Arc::clone);
-            // Clone the Arc before self.restart() replaces *self.
+            // Clone the Arc before restart() replaces *self.
             let conn = self.engine_connection.clone();
             Task::perform(
                 async move {
