@@ -22,6 +22,8 @@ import pytest
 def _make_server(holder: MagicMock, session: MagicMock) -> object:
     from engine.server import DataEngineServer as EngineServer
 
+    from engine.server import LiveState, ReplayState
+
     srv = EngineServer.__new__(EngineServer)
     srv._session_holder = holder
     srv._tachibana_session = session
@@ -31,6 +33,11 @@ def _make_server(holder: MagicMock, session: MagicMock) -> object:
     srv._workers = {"tachibana": MagicMock()}
     srv._submit_order_inflight_count = 0
     srv._venue_to_client = {}
+    # H15: tests bypassing __init__ via __new__ must explicitly assign
+    # state machine attrs. SubmitOrder live-path requires CONNECTED.
+    srv._mode = "live"
+    srv._live_state = LiveState.CONNECTED
+    srv._replay_state = ReplayState.IDLE
     return srv
 
 

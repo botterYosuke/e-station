@@ -2,6 +2,8 @@
 
 **目的**: 立花証券アダプター実装の各不変条件 ID（spec.md / SKILL.md / data-mapping.md / open-questions.md 由来）と、それを CI で pin するテスト関数名を 1:1（または 1:n）で対応付ける**単一正本ファイル**。本表が存在しない不変条件 ID は「未対応」と扱い、CI grep ガード `test_invariant_table_covers_all_ids` により**未対応 ID = 0** を収束条件として保証する。
 
+> **Phase 8（2026-05-03 完了）注記**: 表中の `T35-U5-RelogE2E`（旧 `tests/e2e/tachibana_relogin_after_cancel.sh`、HTTP API 経由）は Phase 8 で pytest + `engine.live_session.LiveSession.login()` ベースに移行した。`src/replay_api.rs` 着地待ちスキップゲートは HTTP 廃止により消滅。pin テストの実体はそれぞれ pytest 版へ移植済み。
+
 **最終照合 (2026-04-30)**: 実装テスト群（`python/tests/test_tachibana_yobine.py` / `test_tachibana_file_store.py` / `test_tachibana_dev_env_guard.py`、`engine-client/tests/ticker_info_tachibana_mapping.rs` 等）と本表を突合し、CLMYobine tick size 解決（HIGH-D2-1-B1a〜e / B2a/b）、`display_name_ja` / `lot_size` / `quote_currency` 伝播（HIGH-U-9）、session file store JST freshness（F-SC-FreshJST）、dev env release guard（F-DevEnv-Release-Guard）が登録済みであることを確認。差分なし。
 
 **ID prefix 規約**:
@@ -55,11 +57,11 @@
 | SKILL R8 | SKILL.md R8（マスタファイル運用） | `python/tests/test_tachibana_yobine.py::test_clm_yobine_decoder_collects_20_bands` | `uv run pytest python/tests/test_tachibana_yobine.py -v` | T4 | R8 |
 | SKILL R9 | SKILL.md R9（URL エンコード規約） | `python/tests/test_tachibana_urlencode.py::test_replace_urlecnode_empty` | `uv run pytest python/tests/test_tachibana_urlencode.py -v` | T5 | R9 |
 | SKILL R10 | SKILL.md R10（仮想 URL 秘匿） | `data/tests/tachibana_log_redaction.rs::test_runtime_logs_do_not_contain_credentials_or_virtual_urls` | `cargo test -p flowsurface-data --tests -- test_runtime_logs_do_not_contain_credentials_or_virtual_urls` | T3 | R10 |
-| F-Process-Restart | architecture.md §7.4 / spec.md §3.1 | `engine-client/tests/process_lifecycle.rs::test_credentials_resent_in_order_after_restart` | `cargo test -p flowsurface-engine-client --test process_lifecycle` | T3 | — |
+| F-Process-Restart | architecture.md §7.4 / spec.md §3.1 | `engine-client/tests/process_lifecycle.rs::run_with_recovery_calls_on_restart_after_connection_loss` | `cargo test -p flowsurface-engine-client --test process_lifecycle` | T3 | — |
 | F-Process-VenueReadyGate | architecture.md §8.3 | `engine-client/tests/process_venue_ready_gate.rs`（全関数） | `cargo test -p flowsurface-engine-client --test process_venue_ready_gate` | T3 | — |
 | F-Process-VenueReadyTimeout | architecture.md §8.3 | `engine-client/tests/process_venue_ready_timeout_marks_failed.rs`（全関数） | `cargo test -p flowsurface-engine-client --test process_venue_ready_timeout_marks_failed` | T3 | — |
-| F-Process-CredsRefreshHook | architecture.md §8.3 | `engine-client/tests/process_creds_refresh_hook.rs`（全関数） | `cargo test -p flowsurface-engine-client --test process_creds_refresh_hook` | T3 | — |
-| F-Process-CredsRefreshSingleton | architecture.md §8.3 | `engine-client/tests/process_creds_refresh_listener_singleton.rs`（全関数） | `cargo test -p flowsurface-engine-client --test process_creds_refresh_listener_singleton` | T3 | — |
+| ~~F-Process-CredsRefreshHook~~ | ~~architecture.md §8.3~~ | **削除済み** — `VenueCredentialsRefreshed` イベント廃止に伴い `engine-client/tests/process_creds_refresh_hook.rs` ごと削除（architecture.md §8.3 参照） | — | T3 | — |
+| ~~F-Process-CredsRefreshSingleton~~ | ~~architecture.md §8.3~~ | **削除済み** — `VenueCredentialsRefreshed` イベント廃止に伴い `engine-client/tests/process_creds_refresh_listener_singleton.rs` ごと削除（architecture.md §8.3 参照） | — | T3 | — |
 | F-Process-VenueLoginCancelled | architecture.md §8.3 | `engine-client/tests/process_venue_login_cancelled.rs`（全関数） | `cargo test -p flowsurface-engine-client --test process_venue_login_cancelled` | T3 | — |
 | F-Process-SessionRestoreFailed | architecture.md §8.3 | `engine-client/tests/process_venue_error_session_restore_failed.rs`（全関数） | `cargo test -p flowsurface-engine-client --test process_venue_error_session_restore_failed` | T3 | — |
 | HIGH-U-9 | implementation-plan.md T4（Rust 側 `TickerInfo` 受信マッピング配線、Q16） | `engine-client/tests/ticker_info_tachibana_mapping.rs::test_tachibana_ticker_info_carries_display_name_ja_and_lot_size` | `cargo test -p flowsurface-engine-client --test ticker_info_tachibana_mapping` | T4 | R8 |

@@ -1,7 +1,26 @@
-# 現状アーキテクチャ調査
+# 2026-04-24 時点アーキテクチャスナップショット
 
 調査日: 2026-04-24
 対象: e-station (Flowsurface v0.8.7)
+
+> この文書は **2026-04-24 時点の調査スナップショット**。
+> Phase 1〜8 の実装完了後（2026-05-03）は現状と大きくズレている。最新の構成は以下を参照：
+> - [implementation-plan.md](./implementation-plan.md) — Phase 0〜8 の完了状態
+> - [python-helper-direct-api.md](./archive/python-helper-direct-api.md) — Phase 8 実装詳細（✅ 完了）
+> - [spec.md](./spec.md) — 現行 IPC 仕様
+>
+> **主な変更点（Phase 5〜8 + R1〜R4 レビュー反映）**:
+> - `exchange/` crate から全取引所コード削除済み（Phase 5）
+> - `src/replay_api.rs` / `src/api/` ディレクトリ（HTTP API port 9876）削除済み（Phase 8.3）
+> - `python/engine/replay_session.py` 新規追加（`ReplaySession` / `LiveSession` / `_AttachClient`）（Phase 8.1）
+> - `engine-client/src/session_file.rs` 新規追加（Phase 8.1b）
+> - `python/engine/server.py` が multi-client broadcast / state machine 対応（Phase 8.1b）
+> - `SCHEMA_MAJOR=3` / `SCHEMA_MINOR=9`（`ClientConnected` / `ClientDisconnected` / `EngineBusy` イベント追加）
+> - **2026-05-04 R1〜R4 review-fix-loop 完了**（commit `cb9207f`）:
+>   - 型基盤強化: `AppMode` / `AttemptedCommand` / `ReplayStateName | LiveStateName` / `AUTH_FAILED_CODE` Literal/定数共有 + Rust 側 `PositionType` / `OrderStatus` / `CurrentEngineState` / `AttemptedCommand` enum 化
+>   - LiveSession attach mode 本実装（旧 NotImplementedError 廃止、`RequestVenueLogin` ↔ `VenueReady`/`VenueError` wire 待ち合わせ）
+>   - silent failure 除去（handshake 15s timeout / EngineBusy unicast + `request_id` フィルタ / 全断時 state リセット / EngineStopped 補完 + 二重送出ガード / sticky error）
+>   - Rust 健全化（`#[doc(hidden)] pub` を `engine-client` の `testing` feature gate / `pid_is_live` retry / `spawn_venue_ready_bridge` 単一化）
 
 ## 全体構成
 
@@ -10,7 +29,7 @@ e-station/
 ├── src/                  # メインバイナリ (Iced GUI)
 ├── exchange/             # 取引所アダプタ crate (REST/WS)
 ├── data/                 # チャート集計・設定 crate
-├── python/               # 空（拡張用）
+├── python/               # 当時は未使用（現在は engine 実装あり）
 ├── scripts/              # OS別ビルドスクリプト
 ├── assets/               # フォント・効果音 (WAV)
 └── docs/                 # ドキュメント（本計画含む）
@@ -68,9 +87,15 @@ IPC 計画で取りこぼしがないよう一覧化する（Python 移管の初
 - [`exchange/src/adapter/venue_backend.rs`](../../exchange/src/adapter/venue_backend.rs): `VenueBackend` trait、`NativeBackend` enum、`TickerMetadataMap` / `TickerStatsMap` 型エイリアス。
 - [`exchange/tests/venue_backend.rs`](../../exchange/tests/venue_backend.rs): trait 抽象化の統合テスト。
 
-## Python 側の現状
+## Python 側の現状（2026-04-24 時点）
 - `python/` は **空ディレクトリ**。Cargo にも `pyo3` 等の Python 連携依存は **無し**。
 - 既存の subprocess・IPC・HTTP ローカルサーバ等の Rust↔Python 接続コードは存在しない。
+
+> 注: この記述は **当時の状態**。2026-05-03 時点では以下が実装済み：
+> - `python/engine/` — WS IPC サーバー、5 取引所ワーカー、NautilusRunner、replay/live セッション helper
+> - `engine-client/` — Rust WS クライアント crate（handshake / process 管理 / session_file）
+> - Rust↔Python WS IPC（SCHEMA_MAJOR=3, SCHEMA_MINOR=9）が本番稼働中
+> - HTTP API（ポート 9876）は廃止済み。新規ルートは `python -m engine.replay_session run`
 
 ## 主要依存
 - UI: `iced`, `iced_wgpu`, `palette`, `rodio`

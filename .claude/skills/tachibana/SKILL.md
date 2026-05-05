@@ -148,37 +148,28 @@ INFO -- Tachibana session validated successfully, restoring
 
 ### S4. GUI バイナリは `--ticker` / `--timeframe` を**読まない**
 
-clap CLI は `src/headless.rs` にしか実装されていない。GUI バイナリに `--ticker BinanceLinear:BTCUSDT --timeframe M1` を渡しても**無視**され、保存済みダッシュボード設定が復元される。GUI の初期ペインを特定 ticker に向けたい場合は起動後に HTTP API で差し替える:
+clap CLI は `src/headless.rs` にしか実装されていない。GUI バイナリに `--ticker BinanceLinear:BTCUSDT --timeframe M1` を渡しても**無視**され、保存済みダッシュボード設定が復元される。
+
+> **Phase 8.3 で HTTP API は廃止された**。起動後の pane 差し替えは GUI 内のサイドバー UI から手動で行う。
+> 自動化したい場合は `saved-state.json` を起動前に書き換えるか、Python helper 経由で WS IPC（:19876）に attach する。
+
+### S5. ポート衝突（19876）に気をつける
+
+flowsurface engine WS server は `:19876` を bind する。複数起動した場合、後発の engine は bind に失敗する。`FLOWSURFACE_ENGINE_TOKEN` を設定していると `start_or_attach` で既存 engine に attach する経路に入るため、**意図せず別プロセスの engine を駆動**しているケースが起きる。事前に既存プロセスを確認すること:
 
 ```bash
-curl -s http://127.0.0.1:9876/api/pane/list   # pane_id を確認
-curl -s -X POST http://127.0.0.1:9876/api/pane/set-ticker \
-  -H 'Content-Type: application/json' \
-  -d '{"pane_id":"<uuid>","ticker":"BinanceLinear:BTCUSDT"}'
-curl -s -X POST http://127.0.0.1:9876/api/pane/set-timeframe \
-  -H 'Content-Type: application/json' \
-  -d '{"pane_id":"<uuid>","timeframe":"M1"}'
-```
-
-metadata fetch が完了するまで `{"error":"ticker info not loaded yet: ... (wait for metadata fetch)"}` が返る。リトライ（2〜5 秒間隔）で回避する。
-
-### S5. ポート衝突（9876）に気をつける
-
-flowsurface を複数起動すると後発の HTTP API server は `os error 10048` で bind に失敗し、**サイレントに API 無しで動き続ける**（GUI は表示されるので気付きにくい）。必ず事前に既存プロセスを落とす:
-
-```bash
-netstat -ano | grep 9876        # LISTENING の PID を確認
+netstat -ano | grep 19876        # LISTENING の PID を確認
 taskkill //PID <pid> //F
 ```
 
-「curl は返るのに挙動が違う」と感じたら、まず `netstat` で port 9876 を持っているプロセスが今起動したほうかを確認する。
+> 旧 HTTP API の :9876 ポートは Phase 8.3 で完全廃止された（参照すべき箇所はもう無い）。
 
 ### S6. 起動時ログで拾うべきサイン
 
 | ログ | 意味 | 対処 |
 | :--- | :--- | :--- |
 | `Attempting to restore tachibana session from file cache` → `Session file loaded, validating...` → `validated successfully` | 正常（ファイルキャッシュ復元） | そのまま利用可 |
-| `Failed to bind replay API server on 127.0.0.1:9876: os error 10048` | ポート衝突（S5） | 既存プロセスを kill |
+| `engine WS bind failed on 127.0.0.1:19876: os error 10048` | ポート衝突（S5） | 既存プロセスを kill / `start_or_attach` で attach させる |
 | `Tachibana daily history fetch failed: API エラー: code=6, message=引数（p_no:[N] <= 前要求.p_no:[N+1]）エラー` | 起動時の p_no 競合（R4）。セッション復元と並行で走る history fetch が逆転するケースがある | 機能影響は軽微だが、`next_p_no()` の呼び出しパスを見直す価値あり（既知の軽微バグ） |
 | `Unsupported ticker: 'Binance Linear': "币安人生USDT"` 等 | metadata 取得中の無害な警告 | 無視してよい |
 

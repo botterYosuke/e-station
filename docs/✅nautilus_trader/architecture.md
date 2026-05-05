@@ -2,15 +2,21 @@
 
 ## 1. 配置原則
 
+> **Phase 8 更新（python-helper-direct-api、2026-05）**: Rust 側 HTTP API（ポート 9876、
+> `/api/replay/*` / `/api/order/*` / `/api/agent/*` 等）は全廃止し、`src/replay_api.rs` /
+> `src/api/order_api.rs` / `src/api/agent_api.rs` を削除した。外部制御経路は
+> Python helper（`engine.replay_session.ReplaySession` / `engine.live_session.LiveSession`）
+> に集約。GUI ↔ engine 間の WebSocket IPC（ポート 19876）は維持する。
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │ Rust (flowsurface 本体, iced)                            │
-│  ├─ HTTP API (port 9876)        ← 不変条件（外向き契約）  │
+│  ├─ (旧 HTTP API port 9876 — Phase 8 で廃止)             │
 │  ├─ EventStore                  ← Klines/Trades 履歴の真実 │
 │  ├─ exchange/ (暗号資産 adapter) ← データ取得用に役割を絞る  │
 │  └─ engine-client/              ← Python ワーカーへの IPC  │
 └────────────────┬────────────────────────────────────────┘
-                 │ IPC (stdin/stdout JSON, schema 1.4)
+                 │ WebSocket IPC (port 19876, schema 3.x)
 ┌────────────────▼────────────────────────────────────────┐
 │ Python (engine プロセス)                                  │
 │                                                          │
@@ -44,7 +50,7 @@
 
 | 責務 | 所在 | 備考 |
 | :--- | :--- | :--- |
-| HTTP API のレスポンス組立 | **Rust** | 既存 `replay_api.rs` を維持 |
+| HTTP API のレスポンス組立 | **廃止 (Phase 8)** | `replay_api.rs` / `order_api.rs` / `agent_api.rs` 削除済み。Python helper で代替 |
 | 履歴データの正本（Klines） | **Rust `EventStore`** | nautilus にコピー注入 |
 | **過去歩み値・分足の正本（J-Quants）** | **`S:\j-quants\` 直読み** | `python/engine/nautilus/jquants_loader.py` がストリーム読込 |
 | バックテスト実行（replay） | **Python `nautilus.BacktestEngine`** | Rust から「リプレイ開始」コマンドを受けて起動 |
@@ -52,9 +58,9 @@
 | ライブ発注の送信 | **Python `LiveExecutionClient`** | venue ごとに 1 実装 |
 | **ライブ歩み値配信** | **Python `LiveDataClient`（N2 で新設）** | 立花 FD frame → `TradeTick` |
 | 立花の認証・session 管理 | **Python（既存 Phase 1 コード）** | 重複実装しない |
-| ナラティブの記録 | **Python `narrative_hook.py`** | nautilus `Strategy.on_event` から `/api/agent/narrative` を叩く |
+| ナラティブの記録 | **Python `narrative_hook.py`** | nautilus `Strategy.on_event` から Python 内 narrative store に直接書き込み（Phase 8 で `/api/agent/narrative` 経路は廃止） |
 | keyring 永続化 | **Rust `data::config`** | 既存どおり |
-| **REPLAY pane の自動生成と identity 管理** | **Rust UI（iced）** | chart pane は `(mode, instrument_id, pane_kind, granularity?)`、order list / buying power pane は `(mode, pane_kind)` で identity を取り、`/api/replay/load` 成功イベントを契機に生成判定を行う |
+| **REPLAY pane の自動生成と identity 管理** | **Rust UI（iced）** | chart pane は `(mode, instrument_id, pane_kind, granularity?)`、order list / buying power pane は `(mode, pane_kind)` で identity を取り、`ReplayDataLoaded` IPC 受信を契機に生成判定を行う（Phase 8 以降 — それ以前は `/api/replay/load` HTTP 成功） |
 | **REPLAY 注文一覧 view** | **Rust UI（iced）** | `OrderListStore` を venue で 2 view に分割。REPLAY view は `venue="replay"` のイベントのみ反映、バナー付き |
 | **REPLAY 買付余力 view** | **Rust UI（iced）** | `BuyingPowerStore` を venue で 2 view に分割。REPLAY view は `EngineEvent::ReplayBuyingPower` のみ反映、`CLMZanKaiKanougaku` を一切参照しない |
 | **REPLAY portfolio snapshot** | **Python `python/engine/nautilus/portfolio_view.py`（新設）** | nautilus `Portfolio` から `cash` / `equity` / `mark_to_market` を 1 秒間隔で算出 |
@@ -63,10 +69,10 @@
 
 ## 2. プロセス起動とハンドシェイク
 
-既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。本計画は **schema 1.4**。
+既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。現在の実装は **SCHEMA_MAJOR=3, SCHEMA_MINOR=9**（`python/engine/schemas.py`）。
 
-1. Rust → Python: `Hello { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
-2. Python → Rust: `Ready { schema_major: 1, schema_minor: 4, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
+1. Rust → Python: `Hello { schema_major: 3, schema_minor: 9, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
+2. Python → Rust: `Ready { schema_major: 3, schema_minor: 9, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
 3. Rust → Python: `SetVenueCredentials`（既存）
 4. Rust → Python: `Command::StartEngine { engine, ... }`（§3 参照）
    - `engine: Backtest` + `Hello.mode="replay"` → `BacktestEngine` 起動 + J-Quants ロード（`/api/replay/load` → §4）
@@ -74,7 +80,7 @@
 
 ## 3. 新規 IPC メッセージ
 
-[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（schema 1.4）。**`SubmitOrder` / `Order*` 系は order/ schema 1.3 で定義済み**。本計画で追加するのは backtest engine ライフサイクル、replay データロード、speed 制御、overlay、REPLAY 買付余力:
+[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（N1 実装分、schema 3.9 時点）。**`SubmitOrder` / `Order*` 系は定義済み**。本計画で追加したのは backtest engine ライフサイクル、replay データロード、speed 制御、overlay、REPLAY 買付余力:
 
 ```rust
 pub enum Command {
@@ -103,7 +109,7 @@ pub enum EngineEvent {
     EngineStarted { strategy_id: String, account_id: String, ts_event_ms: i64 },
     EngineStopped { strategy_id: String, final_equity: String, ts_event_ms: i64 },
     ReplayDataLoaded {               // ⭐ N1 新設
-        strategy_id: String,
+        strategy_id: Option<String>, // None = 単独 LoadReplayData（戦略未起動）
         bars_loaded: u64,
         trades_loaded: u64,
         ts_event_ms: i64,
@@ -116,9 +122,8 @@ pub enum EngineEvent {
         instrument_id: String,
         side: OrderSide,             // Buy | Sell
         price: String,               // 文字列精度規約
-        qty: String,
+        qty: Option<String>,         // 約定数量（文字列精度規約）
         ts_event_ms: i64,
-        client_order_id: String,
     },
     // ⭐ N1 新設: Strategy.emit_signal(...) による明示送出（D6）
     StrategySignal {
@@ -131,7 +136,7 @@ pub enum EngineEvent {
         tag: Option<String>,         // Annotate 時の任意ラベル
         note: Option<String>,
     },
-    // ⭐ N1 新設: REPLAY 買付余力（D9.6、schema 1.4）
+    // ⭐ N1 新設: REPLAY 買付余力（D9.6）
     ReplayBuyingPower {
         strategy_id: String,
         cash: String,                // 文字列精度規約
@@ -156,13 +161,16 @@ pub enum EngineEvent {
 
 ## 4. データフロー（replay モード）
 
-**`/api/replay/load` 成功 → Rust UI が Tick + Candlestick + 注文一覧 + 買付余力 の 4 種 pane を自動生成（identity 重複なら skip）**
+**`ReplayDataLoaded` IPC 受信 → Rust UI が Tick + Candlestick + 注文一覧 + 買付余力 の 4 種 pane を自動生成（identity 重複なら skip）**
 **→ それぞれが対応する IPC（`Trades` / `KlineUpdate` / `Order*` / `ReplayBuyingPower`）を venue=replay で購読する**
 （chart pane の identity = `(mode=replay, instrument_id, pane_kind, granularity?)`、注文一覧 / 買付余力は `(mode=replay, pane_kind)`、D9 参照）
 
+> Phase 8 以降のロード起動経路は `ReplaySession.load(...)` Python helper、または GUI の
+> `File > Replay を開始...` フォーム経由（旧 `POST /api/replay/load` HTTP は廃止）。
+
 ```
-Rust HTTP /api/replay/load
-   │ POST {instrument_id: "1301.TSE", start_date, end_date, granularity: "trade"}
+ReplaySession.load(instrument="1301.TSE", start, end, granularity="trade")
+   │   (helper 内部で WS attach mode または in-process spawn)
    ▼
 engine_client.send(Command::LoadReplayData { ... })
    ▼
@@ -182,9 +190,9 @@ nautilus SimulatedExchange
    │ TradeTick の価格・サイズで約定判定（板なしなので last-trade-fill モデル）
    ▼
 Strategy.on_event(OrderFilled)
-   │ narrative_hook.record(Outcome) ──→ HTTP /api/agent/narrative
+   │ narrative_hook.record(Outcome) ──→ Python 内 narrative store（旧 HTTP /api/agent/narrative は廃止）
    ▼
-Event::OrderFilled → IPC → Rust → HTTP レスポンス
+Event::OrderFilled → IPC → Rust UI / Python helper（`ReplaySession.events()`）
    │
    ├─ OrderFilled → ExecutionMarker → iced execution layer
    └─ Strategy.emit_signal → StrategySignal → iced signal layer
@@ -193,6 +201,11 @@ Event::OrderFilled → IPC → Rust → HTTP レスポンス
 **replay モードの約定判定**: 板履歴がないため、`SimulatedExchange` の matching engine は **直近 TradeTick の last_price ベース**で fill する。指値は `last_price <= limit_price`（買い）/ `>= limit_price`（売り）で fill する単純モデル。これは現実の板状況より楽観的だが、戦略の方向性検証には十分（[spec.md §3.5.3](./spec.md#353-既知のlivereplay差分) で利用者に明示）。
 
 **REPLAY 中は立花 `CLMZanKaiKanougaku` HTTP 呼び出しを `order_router.py` で skip する**（D9.6 の誤参照防止コードガード）。
+
+> **Phase 8 補足**: Rust 側 `/api/replay/*` HTTP API は廃止された。`ReplaySession.load()` /
+> `run()` / `submit_order()` 等の Python helper が直接 `Command::LoadReplayData` /
+> `Command::StartEngine` / `Command::SubmitOrder` を engine に送る（in-process は inproc
+> dispatcher、attach mode は WS client 経由）。
 
 ## 5. データフロー（live モード・立花）
 

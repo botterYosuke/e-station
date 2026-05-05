@@ -42,6 +42,10 @@ async def _connect(port: int, token: str) -> websockets.ClientConnection:
     )
     raw = await ws.recv()
     assert orjson.loads(raw)["event"] == "Ready"
+    # Drain the ClientConnected broadcast that follows Ready in multi-client mode.
+    raw2 = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg2 = orjson.loads(raw2)
+    assert msg2["event"] == "ClientConnected", f"Expected ClientConnected, got: {msg2}"
     return ws
 
 
@@ -97,6 +101,9 @@ async def server(unused_tcp_port):
         patch("engine.server.TachibanaWorker", return_value=mock_tachibana),
     ):
         srv = DataEngineServer(port=unused_tcp_port, token=token)
+        # B3: 統合テストはセッション確立済みを前提とするため CONNECTED にする。
+        from engine.server import LiveState
+        srv._live_state = LiveState.CONNECTED
         task = asyncio.create_task(srv.serve())
         await asyncio.sleep(0.05)
         yield unused_tcp_port, token, srv, mock_tachibana

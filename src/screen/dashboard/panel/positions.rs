@@ -141,11 +141,11 @@ pub fn view(panel: &PositionsPanel) -> Element<'_, Message> {
 }
 
 fn position_row(p: &PositionRecordWire) -> Element<'_, Message> {
-    let type_label = match p.position_type.as_str() {
-        "cash" => "現物",
-        "margin_credit" => "信用(信用)",
-        "margin_general" => "信用(一般)",
-        other => other,
+    use engine_client::dto::PositionType;
+    let type_label = match p.position_type {
+        PositionType::Cash => "現物",
+        PositionType::MarginCredit => "信用(信用)",
+        PositionType::MarginGeneral => "信用(一般)",
     };
 
     let qty_display = p
@@ -202,7 +202,7 @@ mod tests {
             instrument_id: instrument_id.to_string(),
             qty: qty.to_string(),
             market_value: market_value.to_string(),
-            position_type: "cash".to_string(),
+            position_type: engine_client::dto::PositionType::Cash,
             tategyoku_id: None,
             venue: "tachibana".to_string(),
         }

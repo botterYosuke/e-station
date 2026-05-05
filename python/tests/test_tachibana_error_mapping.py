@@ -87,6 +87,10 @@ async def _connect(port: int, token: str) -> websockets.ClientConnection:
     raw = await ws.recv()
     msg = orjson.loads(raw)
     assert msg["event"] == "Ready"
+    # Drain the ClientConnected broadcast that follows Ready in multi-client mode.
+    raw2 = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg2 = orjson.loads(raw2)
+    assert msg2["event"] == "ClientConnected", f"Expected ClientConnected, got: {msg2}"
     return ws
 
 

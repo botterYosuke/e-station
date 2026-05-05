@@ -1500,3 +1500,250 @@ diff する必要があった。既存テストはすべてモックサーバへ
    プロダクションは `_build_ws_url`（購読パラメータ付き）を使っていた。診断スクリプトが
    「常に ST フレームしか来ない」という誤った情報を出していたため、初動調査が遅延した。
    診断スクリプトは prod と同じコードパスを使うこと。
+
+---
+
+## 2026-05-04 — 再ログイン分岐で旧 `_event_task` が残るゴーストループ（Bug X）
+
+**見逃しパターン**: 先行パターン再現漏れ（同一クラス内の既存パターンを新分岐で繰り返し損ねる、新パターン）
+
+**不具合の概要**:
+`docs/✅python-data-engine/archive/python-helper-direct-api.md` フェーズで
+`LiveState.CONNECTED` 中の `RequestVenueLogin` を「明示的な再ログイン要求」として
+受理するよう変更した際、`_live_state` を `DISCONNECTED` に戻すコードは書いたが
+**旧 `_event_task` (EVENT WS 受信ループ) を cancel し忘れた**。
+
+新ログインが**成功**すれば `_startup_tachibana` の終端で旧タスクが cancel されるので
+表面化しないが、新ログインが**失敗・キャンセル**された場合は `_live_state` は
+`DISCONNECTED` だが旧 `_event_task` だけが残り、旧セッション URL から EC 約定通知を
+受け続けるゴースト状態になる。
+
+実機症状は未報告。レビュアー指摘で初めて発覚した。
+
+**修正**:
+- `python/engine/server.py:2588-2606` — CONNECTED 救済分岐に
+  `if self._event_task is not None and not self._event_task.done(): self._event_task.cancel()` を追加
+- `python/tests/test_request_venue_login_state.py` — `test_relogin_from_connected_cancels_old_event_task` 追加
+- `python/tests/test_engine_busy_reject.py:77` — `_make_server` の属性リストに `_event_task = None` を補完
+- `python/tests/test_request_venue_login_state.py` — 既存テストにも `srv._event_task = None` を補完
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_request_venue_login_state.py::test_request_venue_login_connected_triggers_relogin` | 直前 (同セッション) に追加したテスト。session クリアと CONNECTING 遷移は assert するが、`_event_task` ライフサイクルは検証せず、`srv._event_task = None` で setup していたため旧タスク残存問題を観測不能 |
+| `test_engine_busy_reject.py::TestLiveStateBusy` | EngineBusy 関連のみ検証。再ログイン経路の副作用は対象外 |
+| `test_server_engine_dispatch.py::TestStartEngineTimeoutRecovery` | `_startup_tachibana` 経路の `_event_task` 取り扱いはカバーするが、CONNECTED → DISCONNECTED 救済分岐は新規追加のため未カバー |
+
+**根本原因の構造**:
+`_startup_tachibana` 内には `if self._event_task is not None and not self._event_task.done(): self._event_task.cancel()` という**既に正しいパターン**が存在していた
+([server.py:2454-2455](../../python/engine/server.py#L2454-L2455))。
+CONNECTED 救済分岐を新設したとき、`_live_state = DISCONNECTED` への巻き戻しは正しく
+書いたが、**「同じクラス内で既に確立されているライフサイクル管理パターン」を新分岐で
+再現することに気づかなかった**。
+
+これは「先行パターン再現漏れ」と呼ぶべき新パターン。コード自体に既に正しい例が
+あるため、grep で見つけられる類似パターンを新分岐で必ず確認すれば防げる。
+
+**追加したテスト**:
+- `python/tests/test_request_venue_login_state.py::test_relogin_from_connected_cancels_old_event_task`
+  - 旧 `_event_task` を `asyncio.create_task(_old_event_loop())` で仕込み、
+    `_do_request_venue_login` 呼出後に `CancelledError` が伝播することを assert
+  - 修正前: FAIL (`cancelled.is_set() == False`、旧タスクが生き続ける)
+  - 修正後: PASS
+
+**検証**:
+- `uv run pytest python/tests/test_request_venue_login_state.py -v` → 3 passed
+- `uv run pytest python/tests/ -m "not live" -q` → 1705 passed, 3 skipped
+
+**教訓**:
+
+1. **state 遷移分岐を新設するときは、同じクラス内の関連分岐を grep して
+   ライフサイクル管理パターンを必ず再現する**。今回は `_startup_tachibana` 内の
+   `_event_task` cancel パターンを CONNECTED 救済分岐で再現しなかった。
+   新分岐を書いたら `git grep -n "_event_task\\|_startup_tachibana"` で
+   既存の取り扱いを必ず確認すること。
+
+2. **「state 変数の更新だけ書いて、それに紐付く副作用 task の cancel/restart を
+   忘れる」パターンは典型的な見逃し**。今後 `_live_state` / `_replay_state` 等の
+   state 遷移を伴う分岐を新設するときは、その state に紐付く background task
+   (`_event_task`, `_tachibana_startup_task`, `_engine_tasks` など) のライフサイクルを
+   必ず一緒に整理すること。
+
+3. **「テストヘルパー属性ドリフト」が再発した** (2026-04-30 同パターン)。
+   `_make_server` ヘルパーが prod の `__init__` から乖離する問題は、
+   prod 側で参照する属性をテスト側で defensive に `None` 初期化しておくか、
+   `_REQUIRED_ATTRS` パターンに統一する必要がある。新属性を読むコードを
+   追加したコミットで `_make_server` を更新すること。
+
+4. **TDD ヘルパーの `__new__` 経由インスタンス化は、prod コードが新属性を
+   読むようになると即座に AttributeError で止まる**。これは「異常検出」として
+   機能するのでむしろ望ましい。production code が `getattr(self, "_xxx", None)`
+   で defensive に書くと、テストが prod の attribute drift を検出できなくなる
+   ので避けること。
+
+5. **レビュアー指摘で初めて発覚した不具合は postmortem 価値が特に高い**。
+   実機症状が出ない (新ログインが成功する限り無害) → 自動テストで捕まえないと
+   半永久的に残る。今回のテスト追加は将来の "再ログイン失敗時に EC が漏れる"
+   不具合を防ぐ。
+
+---
+
+## 2026-05-04 — 同一 ticker への depth+trades 並行 EVENT WS で立花が p_errno=2 で蹴る（Bug Y）
+
+**見逃しパターン**: broker 側多重接続制約の未検証（新パターン）+ Mock 置換漏れ（複合）
+
+**不具合の概要**:
+debug ビルドで起動するたび「立花仮想URLが失効しました（p_errno=2）。再ログインが必要です」
+バナーが起動直後に表示される。実機ログ解析で原因判明：
+
+`stream_depth(7203)` と `stream_trades(7203)` が**それぞれ独立に** `TachibanaEventWs` を
+生成し、同じ broker URL `wss://.../event_ws/<sess>/?p_issue_code=7203&p_evt_cmd=ST,KP,FD`
+に並行接続していた。立花 EVENT WS は `(session, p_issue_code)` 単位で 1 接続のみ
+許容するため、broker が後発を `p_errno=2 'session inactive.'` で蹴る。
+コード側はこれを「URL 失効」と誤解釈してバナー表示していた。
+
+URL は実際には失効しておらず、再ログインしても再発する誤誘導。
+
+**修正**:
+- `python/engine/exchanges/tachibana_ws.py` — `TickerEventWsHub` クラス新設
+  (per-ticker WS マルチプレクサ、subscribe/unsubscribe/refcount/aclose/on_connect fanout/例外隔離)
+- `python/engine/exchanges/tachibana.py` —
+  - `_ticker_hubs: dict[str, TickerEventWsHub]` 追加、`_get_or_create_hub` ヘルパー
+  - `set_session(...)` に hub 全廃止フック (旧 session URL に紐付く hub をリーク防止)
+  - `stream_depth` / `stream_trades` を hub.subscribe 経由に書き換え
+  - 旧コードの outer `while not stop: connect, ws.run, reconnect` ループは削除
+    (reconnect は hub 内部の TachibanaEventWs.run が処理する)
+  - `TachibanaEventWs` 直接インポートを削除
+
+**なぜ既存テストで発見できなかったか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_tachibana_ws_fd_depth_recv.py` | `websockets.serve` でローカルモックサーバを立てるが、モックは並行接続を全部受け入れる。立花の「同一 URL に 2 接続目を蹴る」挙動を再現していない |
+| `test_tachibana_depth_safety.py` | 同上。depth_unavailable / VenueError emission の単体検証で stream_depth と stream_trades の競合は対象外 |
+| `test_tachibana_holiday_fallback.py` | 単独 stream の market_closed 挙動のみ検証 |
+| `test_tachibana_normalize_integration.py` | 正規化ロジックの統合。並行 stream は対象外 |
+
+**根本原因の構造**:
+1. **立花 broker の暗黙的接続多重制約** が spec.md / architecture.md にも記載されていなかった。
+   公式マニュアルに明文化されておらず、実機で初めて露呈する仕様
+2. **stream_depth と stream_trades が独立して `TachibanaEventWs` を生成する設計** は
+   tachibana_ws.py のコメントにも「stream_trades and stream_depth open separate WS connections
+   for the same ticker」と明記されており、設計上 OK と認識されていた。実は NG
+3. **モックサーバベースのテストでは検出不可能**: ローカル `websockets.serve` は接続多重制約を
+   持たないので、並行接続テストを書いても素通りする。broker 側挙動を模倣する fake_broker が
+   必要
+
+**追加したテスト** (`python/tests/test_tachibana_ticker_ws_hub.py`、新規 10 件):
+
+| 名称 | 検証内容 |
+|------|---------|
+| `test_two_subscribers_share_one_ws` | 同 hub に 2 subscribe で WS インスタンス = 1 (Y1) |
+| `test_duplicate_subscribe_key_is_ignored` | 同 key の二重 subscribe は no-op (Y1) |
+| `test_unsubscribe_unknown_key_is_noop` | 存在しない key の unsubscribe は no-op (Y1) |
+| `test_frame_fanout_to_all_subscribers` | KP/FD/ST が全 subscriber に同じ順で配られる (Y2) |
+| `test_subscriber_exception_does_not_break_others` | 1 subscriber の例外で他が止まらない (Y2) |
+| `test_unsubscribe_last_closes_ws` | refcount=0 で stop_event.set() → runner_task 完了 (Y3) |
+| `test_resubscribe_after_close_starts_new_ws` | aclose 後の再 subscribe で新 WS が起動 (Y3) |
+| `test_set_session_drops_all_hubs` | session swap で全 hub aclose → `_ticker_hubs` 空 (Y4) |
+| `test_stream_depth_uses_hub_not_direct_ws` | stream_depth が hub 経由で WS=1 (Y5) |
+| `test_concurrent_depth_and_trades_single_connection` | **本丸**: depth+trades 並行で WS=1 (Y6) |
+
+加えて以下を更新:
+- `python/tests/test_tachibana_holiday_fallback.py` — patch path を
+  `engine.exchanges.tachibana.TachibanaEventWs.run` →
+  `engine.exchanges.tachibana_ws.TachibanaEventWs.run` に修正 (refactor で直接インポートが消えたため)
+
+**検証**:
+- Y6 修正前: FAIL (`instances=2`、stream_depth と stream_trades が個別 WS)
+- Y6 修正後: PASS (`instances=1`)
+- `uv run pytest python/tests/ -m "not live" -q` → 1705 passed, 3 skipped
+- 実機: 起動時の「立花仮想URLが失効しました」バナー消失を目視確認
+  (ただし 2026-05-04 は祝日のため `is_market_open()=False` で stream_*が早期 return →
+   ハブ経由 WS は張られず、Y6 単体テストでマルチプレクサ動作を保証)
+
+**教訓**:
+
+1. **外部 broker / API の「明文化されていない接続多重制約」を疑う**: 公式マニュアルに
+   書かれていなくても、broker が暗黙にセッション/エンドポイント単位で接続数を
+   制限していることがある。新しいストリーミング購読を実装するときは「同一 URL に
+   N 本繋いだら何が起こるか」を実機で確認する習慣を持つこと。
+
+2. **「複数のサブシステムが同じ外部リソースを取り合う」設計は、設計時点で
+   競合検証テストを必須にする**: 今回の `stream_depth` と `stream_trades` のように
+   独立して生成される WS 接続は、設計コメントに「independent WS for the same ticker」と
+   書かれていても疑え。`TachibanaEventWs` のインスタンス数を assert する単体テストを
+   置くべきだった。
+
+3. **モックサーバが broker 側制約を再現していないことを明示する**: テストで
+   `websockets.serve` を使う時点で「broker の接続数制限・rate limit・session 単位の
+   排他制御」は再現されない。テストファイル冒頭にこの限界を明示し、
+   制約検証は別途 broker-fake or 実機テストに委ねること。
+
+4. **誤誘導するエラーメッセージは "症状" ではなく "シグナル" として扱う**: 今回
+   `p_err='session inactive.'` は「セッション切れ」ではなく「重複セッション検出」を
+   意味していた。p_errno のような broker コードを「失効」と機械的に翻訳せず、
+   `p_err` テキストの意味を都度立花マニュアルで確認すること。
+   今後 `p_err='session inactive.'` を観測したら「重複接続バグの可能性」を疑う。
+
+5. **大規模 refactor で `TachibanaEventWs` のような直接インポートを消したら、
+   既存テストの patch path を grep で確認**: 今回の `test_tachibana_holiday_fallback.py`
+   が `engine.exchanges.tachibana.TachibanaEventWs.run` を patch しており、
+   import 削除で AttributeError → リグレッション。refactor 時は
+   `git grep "engine.exchanges.tachibana.TachibanaEventWs"` で patch path を
+   全件確認する。
+
+6. **TickerEventWsHub のような「複数 subscriber + 単一外部接続」のマルチプレクサ
+   パターンは、6 軸 (refcount / fanout / 例外隔離 / lifecycle / session swap /
+   integration) でテストを揃える**: 今回の 10 テストは将来の類似マルチプレクサ
+   (e.g. binance 等の複数チャンネル束ね WS) のテンプレートとして再利用可能。
+
+### 追補 Y7 (2026-05-04 同日レビュアー再指摘)
+
+**見逃しパターン**: 「外部リソース close → コンシューマ wait の解放経路欠落」（新パターン）
+
+**追加で発覚した不具合**:
+`set_session(None)` が hub を閉じても、`stream_depth` / `stream_trades` coroutine は
+自前の `_inner_stop.wait()` を待ち続け、stream task がリーク。server 側の `_streams`
+管理からも消えず、再ログイン後の再 subscribe が「Already subscribed」扱いで失敗する
+複合バグ。Bug Y 修正時にコンシューマ側の解放経路を作り忘れた。
+
+**修正**:
+- `tachibana_ws.py`: `subscribe(..., on_close=...)` 追加、`aclose()` で各 subscriber の
+  on_close をロック外で発火（再帰 deadlock 回避）。`unsubscribe()` は呼ばない (二重発火防止)
+- `tachibana.py`: stream_depth / stream_trades の hub.subscribe に
+  `on_close=_inner_stop.set` を渡す。`set_session` の sync fallback も on_close を発火
+- 追加テスト: `test_aclose_invokes_subscribers_on_close_callback` /
+  `test_unsubscribe_does_not_invoke_on_close` /
+  **`test_set_session_none_terminates_stream_coroutines`** (本丸)
+
+**なぜ初回の Bug Y 修正で見逃したか**:
+TickerEventWsHub の単体テスト 10 件はすべて「hub の内部状態 (subscribers/refcount/WS instances)」を assert していた。
+**「コンシューマの待機 (`_inner_stop.wait()`) が hub close で解放されるか」は hub の
+契約には含まれず、stream coroutine の側にも「hub が閉じたら抜ける」という
+保証がなかった**。マルチプレクサのテストとして 6 軸 (refcount / fanout / 例外隔離 /
+lifecycle / session swap / integration) を揃えたつもりが、**「session swap の伝播先で
+コンシューマが片付くか」という end-to-end ライフサイクルの 7 軸目が漏れていた**。
+
+**追補される教訓**:
+
+7. **「外部リソース close を購読側に伝える経路」をマルチプレクサ設計の必須要素にする**:
+   refcounted broker connection を作るとき、`aclose()` が単に WS を切るだけでは不十分。
+   購読側 coroutine が `_inner_stop` 等の自前イベントで待機している場合、close を購読側に
+   propagate する callback (今回の `on_close`) を最初から設計に含めること。
+   テストとしては「外部から hub を強制終了したとき、購読 coroutine が timeout 内に
+   終了すること」を必ず加える。
+
+8. **「自発的離脱 (unsubscribe)」と「強制終了 (aclose)」のシグナルを区別する**:
+   両方を同じパスで処理すると二重発火やループが起こる。今回は on_close を
+   aclose のみで呼び unsubscribe では呼ばないことで分離した。マルチプレクサを
+   設計するときは「callee-initiated cleanup」と「caller-initiated cleanup」の
+   区別を明示する。
+
+9. **マルチプレクサの単体テスト + 統合テスト + ライフサイクル伝播テスト の 3 階層**:
+   単体 (hub の状態遷移) と統合 (stream_depth が hub 経由で 1 接続に集約される) を
+   テストしても、**「session swap で hub close → stream coroutine 終了 → server registry
+   自動 cleanup」というクロスレイヤーのライフサイクル伝播**は別軸の検証が必要。
+   コンシューマがブロッキング待機する設計は、外部からの強制終了経路を必ず
+   end-to-end でテストすること。

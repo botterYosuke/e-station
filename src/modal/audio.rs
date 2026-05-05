@@ -9,7 +9,6 @@ use exchange::Trade;
 use iced::widget::{button, column, container, row, text};
 use iced::widget::{checkbox, slider, space};
 use iced::{Element, padding};
-use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 const HARD_THRESHOLD: usize = 4;
@@ -411,7 +410,8 @@ impl AudioStream {
 
 impl From<&AudioStream> for data::AudioStream {
     fn from(audio_stream: &AudioStream) -> Self {
-        let mut streams = FxHashMap::default();
+        // H-4: use BTreeMap so serialization order is deterministic (stable_serialization / BC-11).
+        let mut streams = std::collections::BTreeMap::new();
 
         for ticker_map in audio_stream.streams.values() {
             for (&ticker, cfg) in ticker_map {

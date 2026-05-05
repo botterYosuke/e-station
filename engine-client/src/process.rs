@@ -3,7 +3,7 @@
 /// `PythonProcess` spawns the Python engine and communicates its `{port, token}`
 /// via stdin as a JSON line.  `ProcessManager` wraps it with exponential-backoff
 /// restart logic and re-applies subscriptions after each recovery.
-use crate::{connection::EngineConnection, error::EngineClientError};
+use crate::{connection::EngineConnection, error::EngineClientError, session_file::EngineSession};
 
 use std::{
     collections::HashSet,
@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Child, sync::Mutex};
+
+use data::data_path;
 
 const DEFAULT_PROBE_URL: &str = "ws://127.0.0.1:19876/";
 
@@ -150,12 +152,36 @@ const BACKOFF_MAX_MS: u64 = 30_000;
 /// release binary can never enable Python's env fast path even if the
 /// surrounding shell has the dev variables set (R10 / architecture
 /// §2.1.1 / H-2).
+/// Returns the engine cache directory that **both** the Rust WAL guard and the
+/// Python server should use.  Checking the same path is the single source of
+/// truth for the live→replay in-flight order guard.
+///
+/// Priority:
+/// 1. `FLOWSURFACE_CACHE_DIR` env var — explicit override.
+/// 2. `HOME` / `USERPROFILE` — platform default (`~/.cache/flowsurface/engine`).
+pub fn engine_cache_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("FLOWSURFACE_CACHE_DIR") {
+        return PathBuf::from(d);
+    }
+    let home = std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".cache").join("flowsurface").join("engine")
+}
+
 pub fn build_stdin_payload(port: u16, token: &str) -> Result<String, EngineClientError> {
     let dev_tachibana_login_allowed = cfg!(debug_assertions);
+    // Send the resolved cache_dir so Python uses exactly the same path as Rust.
+    // Python's __main__.py passes cfg["cache_dir"] to Server(); when present it
+    // takes priority over Python's own default, keeping WAL paths in sync.
+    let cache_dir = engine_cache_dir().to_string_lossy().into_owned();
     let payload = serde_json::json!({
         "port": port,
         "token": token,
         "dev_tachibana_login_allowed": dev_tachibana_login_allowed,
+        "cache_dir": cache_dir,
     });
     let mut s = serde_json::to_string(&payload)?;
     s.push('\n');
@@ -211,11 +237,17 @@ impl PythonProcess {
             stdin.shutdown().await?;
         }
 
+        // M-Rust3: stdout/stderr forwarding tasks are intentionally detached.
+        // The `JoinHandle`s are dropped because:
+        //   * the tasks complete naturally on EOF when the child exits, and
+        //   * `kill_on_drop(true)` (set above) handles process cleanup if the
+        //     `PythonProcess` is dropped before the child exits.
+        // Therefore there is no leak path even though we never `await` them.
         if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(forward_lines(stdout, log::Level::Info));
+            let _stdout_fwd = tokio::spawn(forward_lines(stdout, log::Level::Info));
         }
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(forward_lines(stderr, log::Level::Warn));
+            let _stderr_fwd = tokio::spawn(forward_lines(stderr, log::Level::Warn));
         }
 
         Ok(Self { child, port, token })
@@ -232,6 +264,35 @@ impl PythonProcess {
     pub fn token(&self) -> &str {
         &self.token
     }
+
+    /// PID of the spawned child process, if available.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+}
+
+// H2: `PythonProcess` no longer deletes the session file in `Drop`.
+//
+// Previously the Drop impl unconditionally removed `engine-session.json`.
+// During `run_with_recovery`, when the previous `PythonProcess` is dropped
+// (engine connection lost) the file would briefly disappear before the next
+// `start()` re-spawned and wrote a fresh session. External Python helpers
+// that probed `engine-session.json` during that window saw the file as
+// missing and fell back to in-process mode incorrectly.
+//
+// Safest path: rely on `EngineSession::reap_stale(...)` (called at the
+// next spawn) to clean up files left behind by a crashed engine. On clean
+// app shutdown the file is left on disk; the next launch will reap it
+// because the recorded pid is no longer live.
+//
+// Trade-off: a stale `engine-session.json` survives between sessions on
+// orderly exit. Helpers that connect with the recorded token would fail
+// the WS handshake (no engine listening) and fall back, which is the
+// existing fallback path. See planning doc §5「レビュー反映 Group 3」H2.
+
+/// Canonical path for the engine session file.
+pub fn session_path() -> std::path::PathBuf {
+    data_path(Some("engine-session.json"))
 }
 
 // ── SubscriptionKey ───────────────────────────────────────────────────────────
@@ -332,7 +393,7 @@ impl ProcessManager {
     /// 2. SetProxy (when configured).
     /// 3. Re-send saved subscriptions.
     pub async fn apply_after_handshake(&self, connection: &EngineConnection) {
-        self.apply_after_handshake_with_timeout(connection, Duration::from_secs(60))
+        self.apply_after_handshake_inner(connection, Duration::from_secs(60))
             .await;
     }
 
@@ -340,8 +401,24 @@ impl ProcessManager {
     /// timeout parameter for test compatibility. The timeout is unused in
     /// schema 2.x (no VenueReady wait loop), but the parameter is kept so
     /// existing integration test call sites compile without modification.
+    ///
+    /// H-Rust2: gated behind `cfg(test)` (in-crate tests) or the
+    /// `testing` cargo feature (integration tests in `tests/*`). Release
+    /// builds (no `testing` feature) never expose this seam — production
+    /// callers go through [`Self::apply_after_handshake`] which calls the
+    /// always-private `apply_after_handshake_inner`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn apply_after_handshake_with_timeout(
+        &self,
+        connection: &EngineConnection,
+        venue_ready_timeout: Duration,
+    ) {
+        self.apply_after_handshake_inner(connection, venue_ready_timeout)
+            .await;
+    }
+
+    async fn apply_after_handshake_inner(
         &self,
         connection: &EngineConnection,
         _venue_ready_timeout: Duration,
@@ -412,15 +489,30 @@ impl ProcessManager {
     /// The attach/spawn policy lives entirely here so `src/main.rs` stays thin.
     pub async fn start_or_attach(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
         let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
-        self.try_attach_or_spawn(port, DEFAULT_PROBE_URL, &token)
+        self.try_attach_or_spawn_inner(port, DEFAULT_PROBE_URL, &token)
             .await
     }
 
     /// Testable seam for `start_or_attach`: accepts an explicit probe URL and
     /// token so integration tests can inject a mock server without touching
     /// global env vars or relying on a fixed port 19876.
+    ///
+    /// H-Rust2: gated behind `cfg(test)` (in-crate tests) or the `testing`
+    /// cargo feature. Release builds never expose this seam — production
+    /// callers go through [`Self::start_or_attach`] which uses the
+    /// always-private `try_attach_or_spawn_inner`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn try_attach_or_spawn(
+        &self,
+        port: u16,
+        probe_url: &str,
+        token: &str,
+    ) -> Result<EngineConnection, EngineClientError> {
+        self.try_attach_or_spawn_inner(port, probe_url, token).await
+    }
+
+    async fn try_attach_or_spawn_inner(
         &self,
         port: u16,
         probe_url: &str,
@@ -459,6 +551,12 @@ impl ProcessManager {
     /// 2. SetProxy       — if a proxy URL is stored
     /// 3. Subscribe      — re-send all active subscriptions
     pub async fn start(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
+        // C3: clear orphaned engine-session.json from a previous crash before
+        // spawning a fresh Python engine. Files whose recorded pid is still
+        // live are kept (the live engine owns them); dead-pid / corrupt files
+        // are removed so the helper does not attach to a stale token.
+        EngineSession::reap_stale(&session_path());
+
         let mut proc = PythonProcess::spawn_with(&self.command, port).await?;
 
         let url = format!("ws://127.0.0.1:{port}");
@@ -488,6 +586,32 @@ impl ProcessManager {
                 }
             }
         };
+
+        // Write engine-session.json now that the handshake is complete.
+        // Python helper reads this to obtain the token and port when attaching
+        // to a GUI-spawned engine. Token is NOT included in log output.
+        // M-4 (type): pid が `None` のときは session を書かない。pid=0 を書くと
+        // `pid_is_live` が即 false 判定して reap_stale が直ちに削除してしまうため、
+        // 書く意味が無い。helper 側も `_is_pid_alive(0)` が false で stale 扱いにする。
+        match proc.pid() {
+            Some(pid) => {
+                let session = EngineSession::new(
+                    proc.port(),
+                    proc.token().to_string(),
+                    pid,
+                    u32::from(crate::SCHEMA_MAJOR),
+                );
+                if let Err(e) = session.write_atomic(&session_path()) {
+                    log::warn!("failed to write engine-session.json: {e}");
+                }
+            }
+            None => {
+                log::warn!(
+                    "engine pid unavailable; skipping engine-session.json write \
+                     (helper attach mode will fall back to env var)"
+                );
+            }
+        }
 
         self.apply_after_handshake(&connection).await;
 

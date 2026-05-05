@@ -19,7 +19,7 @@ import pytest
 
 def _make_server():
     """テスト用に DataEngineServer を最小限の設定で構築する。"""
-    from engine.server import DataEngineServer
+    from engine.server import DataEngineServer, LiveState, ReplayState
 
     server = DataEngineServer.__new__(DataEngineServer)
     # 必要最低限の属性を手動設定
@@ -35,6 +35,9 @@ def _make_server():
     server._session_holder.get_password.return_value = "dummy_password"
     server._tachibana_session = MagicMock()
     server._tachibana_p_no_counter = MagicMock()
+    # B3: state machine attributes — セッション確立済みを模倣
+    server._live_state = LiveState.CONNECTED
+    server._replay_state = ReplayState.IDLE
     return server
 
 

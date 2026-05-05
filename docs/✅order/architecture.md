@@ -1,14 +1,20 @@
 # 立花注文機能: アーキテクチャ
 
+> **Phase 8（2026-05-03 完了）以降の経路**: Rust 側 HTTP API `/api/order/*`（ポート 9876）は完全廃止。`src/api/order_api.rs`（3,490 行）と `OrderGuardConfig` も削除済み。本ドキュメント中で `Rust src/api/order_api.rs` / `POST /api/order/*` / `OrderGuardConfig` を参照している箇所は **Phase 8 以前の旧設計**として読むこと。現在の正規ルート:
+> - **GUI**: `Action::SubmitOrder` → `engine_client::dto::SubmitOrderRequest` を直接組んで `Command::SubmitOrder` を IPC（WebSocket、ポート 19876）に送信。`src/main.rs` 内で完結し HTTP を経由しない（元から経由していなかった）
+> - **スクリプト・E2E**: `engine.replay_session.LiveSession`（in-process / attach mode 自動判定）の `login()` / `submit_order()` / `modify_order()` / `cancel_order()` / `cancel_all()`。内部で同じ IPC コマンドを発行
+> - **冪等性マップ**: `engine-client/src/order_session_state.rs::OrderSessionState` は **Rust IPC ハンドラ層** に残存（HTTP 廃止に伴う移管）。`client_order_id ↔ venue_order_id` の lookup 責務は変更なし
+> - **WAL**: Python `tachibana_orders.jsonl` も変更なし。`OrderSessionState::load_from_wal()` を Rust 起動時に呼ぶ経路も維持
+
 ## 1. 配置原則
 
 [docs/✅tachibana/architecture.md §1](../✅tachibana/architecture.md) の Python 集約方針を踏襲。発注経路の追加責務は以下:
 
 | 責務 | 所在 |
 |---|---|
-| HTTP API `/api/order/*` のレスポンス組立 | **Rust** `src/api/order_api.rs`（新設） |
-| 入力スキーマバリデーション | **Rust** 同上 |
-| 冪等性マップ（`client_order_id → venue_order_id`、注釈: venue_order_id = 立花 `sOrderNumber`） | **Rust** `src/api/order_session_state.rs`（新設、flowsurface `agent_session_state.rs` を移植） |
+| ~~HTTP API `/api/order/*` のレスポンス組立~~ | ~~**Rust** `src/api/order_api.rs`~~（Phase 8 で全廃。IPC 直送に移行） |
+| 入力スキーマバリデーション | **Rust IPC ハンドラ + Python pydantic**（`engine-client/src/dto.rs::SubmitOrderRequest` の serde `deny_unknown_fields` + `python/engine/schemas.py` の `SubmitOrderRequest`） |
+| 冪等性マップ（`client_order_id → venue_order_id`、注釈: venue_order_id = 立花 `sOrderNumber`） | **Rust** `engine-client/src/order_session_state.rs`（flowsurface `agent_session_state.rs` を移植。Phase 8 で `src/api/` から `engine-client/src/` 配下に集約） |
 | 立花リクエスト本体（`CLMKabuNewOrder` 等の組立・送信・パース） | **Python** `python/engine/exchanges/tachibana_orders.py`（新設） |
 | 第二暗証番号の保持 | **Python メモリ + Rust keyring**（Phase 1 の credentials 経路に追加） |
 | 第二暗証番号の入力 UI | **Python tkinter ヘルパー** subprocess（Phase 1 のログイン UI と同一機構を再利用） |
@@ -21,17 +27,19 @@
 
 ### 2.1 発注（同期）
 
+> **Phase 8 注記**: 旧フロー図中の「`POST /api/order/submit` → Rust `src/api/order_api.rs`」段は **Phase 8 で削除**。現在は GUI（`src/main.rs` の `Action::SubmitOrder` ハンドラ）または Python helper（`LiveSession.submit_order()`）が直接 ③ 段の `engine_client.send(Command::SubmitOrder ...)` を発行する。冪等性チェック（`OrderSessionState.try_insert`）は IPC ハンドラ側に移管（`engine-client/src/order_session_state.rs`）。
+
 ```
-ユーザー UI / curl
-   │ POST /api/order/submit
+ユーザー UI（iced）/ Python helper（LiveSession）
+   │ Action::SubmitOrder / LiveSession.submit_order(...)
    ▼
-Rust src/api/order_api.rs
-   │ ① 入力検証（UUID, 銘柄コード形式, qty>0 …）
+GUI: src/main.rs / Python helper: engine.replay_session
+   │ ① 入力検証（UUID, 銘柄コード形式, qty>0 …）— pydantic + serde deny_unknown_fields
    │ ② OrderSessionState.try_insert(client_order_id, request_key)
    │      （2 引数。venue_order_id は OrderAccepted 受信後に update_venue_order_id() で後着する）
    │      ├─ Created { client_order_id } → 続行
-   │      ├─ IdempotentReplay { venue_order_id } → 既存 venue_order_id で 200 を即返却
-   │      └─ Conflict  → 409
+   │      ├─ IdempotentReplay { venue_order_id } → 既存 venue_order_id を即返却
+   │      └─ Conflict  → エラー
    │ ③ engine_client.send(Command::SubmitOrder { request_id, payload })
    ▼
 Python python/engine/server.py
@@ -58,7 +66,7 @@ Python tachibana_orders.py
 Rust 受信
    │ ⑨ Event::OrderAccepted を待機していた send 側に解決
    │ ⑩ OrderSessionState.update_venue_order_id(client_order_id, venue_order_id) で埋める
-   │ ⑪ HTTP 200 を返却
+   │ ⑪ caller（GUI または Python helper）に応答を返却
 ```
 
 **H-2 SecondPasswordRequired ポリシー（確定）**:
@@ -71,21 +79,19 @@ Python
    │ → Event::SecondPasswordRequired { request_id } を IPC 送信
    │ → ハンドラを return（OrderRejected は送らない）
    ▼
-Rust order_api.rs
-   │ OrderWaitResult::SecondPasswordRequired → HTTP 401
-   │   { "reason_code": "SECOND_PASSWORD_REQUIRED" }
-   ▼
-Rust main.rs（IPC イベント購読経路）
-   │ EngineEvent::SecondPasswordRequired { request_id } → modal 表示
+Rust src/main.rs（IPC イベント購読経路）
+   │ EngineEvent::SecondPasswordRequired { request_id } → iced modal 表示
    ▼
 ユーザー入力
    │ → Command::SetSecondPassword { value } を IPC 送信
    ▼
-HTTP 呼び出し側
-   │ 401 受信後、同一 client_order_id で POST /api/order/submit を再送
+発注 caller（GUI または Python helper）
+   │ SecondPasswordRequired を受けたら、同一 client_order_id で SubmitOrder を再送
    │ OrderSessionState の try_insert が IdempotentReplay をガード
    │ → 2 回目は second_password 設定済みのため正常に処理される
 ```
+
+> **Phase 8 注記**: 旧 HTTP path では `/api/order/submit` が HTTP 401 + `{"reason_code":"SECOND_PASSWORD_REQUIRED"}` を返していたが、HTTP 廃止後は `Event::SecondPasswordRequired` を直接 caller が受け取る経路に統一。Python helper（`LiveSession`）は内部で `SecondPasswordRequired` イベントを listen し、ユーザー側コールバック（または `login()` 時に渡された `second_password`）で値を供給する。
 
 **不変条件**:
 - Python は SecondPasswordRequired を送った後 OrderRejected を送らない（Rust の OrderWaitResult が SecondPasswordRequired になり HTTP 401 で終了するため）
@@ -112,14 +118,14 @@ Rust 受信
    │ UI 通知 + 注文一覧パネルの再描画
 ```
 
-**発注タイムアウト**: `engine_client.send(SubmitOrder)` → `OrderAccepted / OrderRejected` 待ちには **`tokio::time::timeout(Duration::from_secs(30), ...)`** を掛ける。タイムアウト時は HTTP 504 + `reason_code="INTERNAL_ERROR"` を返し、Python 側の応答を待つ接続を破棄する。WAL には `submit` 行が残るため、再起動後の `IdempotentReplay` で unknown 状態として扱われる。**タイムアウト後に Python 側で受領した `sOrderNumber`** は WAL の `accepted` 行のみ書き込み（IPC 送信先の Rust は接続破棄済みなのでイベントは届かない）、Rust は次回起動時の WAL 復元で `client_order_id ↔ venue_order_id` を同期する。
+**発注タイムアウト**: `engine_client.send(SubmitOrder)` → `OrderAccepted / OrderRejected` 待ちには **`tokio::time::timeout(Duration::from_secs(30), ...)`** を掛ける。タイムアウト時は caller に `INTERNAL_ERROR` を返し、Python 側の応答を待つ接続を破棄する（旧 HTTP 504 はもはや発生しない）。WAL には `submit` 行が残るため、再起動後の `IdempotentReplay` で unknown 状態として扱われる。**タイムアウト後に Python 側で受領した `sOrderNumber`** は WAL の `accepted` 行のみ書き込み（IPC 送信先の Rust は接続破棄済みなのでイベントは届かない）、Rust は次回起動時の WAL 復元で `client_order_id ↔ venue_order_id` を同期する。
 
 同様に `ModifyOrder` / `CancelOrder` にも 30 秒タイムアウトを適用する。
 
 **C-M1 `p_no` 連続性ルール**: `PNoCounter.next()` は **Unix 秒（×1000 ではない）** を初期値とする Python `int` カウンタ（asyncio 単一スレッドで lock 不要）。プロセス再起動時も wall-clock を初期値に取るため、再起動またぎでも `p_no` が必ず単調増加することが保証される（同一プロセス内では `+= 1` のみ）。実装は `python/engine/exchanges/tachibana_helpers.PNoCounter` として閉じる。
 
 **C-M5 session 切れ伝播**: Python が `p_errno=2` を検知した場合、即座に `OrderSessionState` を `frozen` 状態へ遷移させる。以降:
-- 全 `/api/order/*` は HTTP 503 を返す（`reason_code="SESSION_EXPIRED"`）
+- 全発注 IPC コマンドは `Event::OrderRejected{reason_code="SESSION_EXPIRED"}` で即時 reject（旧 HTTP 503 は Phase 8 で消滅）
 - in-flight な `SubmitOrder` / `ModifyOrder` / `CancelOrder` / `CancelAllOrders` / `GetOrderList` は `OrderRejected { reason_code: "SESSION_EXPIRED" }` で完了させる
 - WAL に `{"phase":"session_expired", ...}` 行を必ず書く（再起動時の状況復元用）
 - `frozen` 解除は再ログイン成功イベント (`VenueCredentialsRefreshed`) 受領時のみ
@@ -128,15 +134,15 @@ Rust 受信
 
 ### 2.3 取消フロー（Phase O1）
 
-立花の `CLMKabuCancelOrder` は `sOrderNumber`（`venue_order_id`）が必須だが、HTTP API は `client_order_id` を一次キーとする。そのため Rust 層で lookup してから Python に渡す。
+立花の `CLMKabuCancelOrder` は `sOrderNumber`（`venue_order_id`）が必須だが、IPC API は `client_order_id` を一次キーとする。そのため Rust IPC ハンドラ層で lookup してから Python に渡す。
 
 ```
-ユーザー UI / curl
-   │ POST /api/order/cancel { client_order_id }
+ユーザー UI（iced） / Python helper（LiveSession.cancel_order）
+   │ Command::CancelOrder { client_order_id }
    ▼
-Rust src/api/order_api.rs
+Rust IPC ハンドラ（engine-client + src/main.rs）
    │ ① OrderSessionState.get_venue_order_id(client_order_id)
-   │      → None（unknown）: 404 / IdempotentReplay ルールに準じる
+   │      → None（unknown）: ORDER_STATUS_UNKNOWN reject
    │      → Some(venue_order_id): 続行
    │ ② engine_client.send(Command::CancelOrder { client_order_id, venue_order_id })
    ▼
@@ -144,26 +150,26 @@ Python tachibana_orders.cancel_order(session, second_password, client_order_id, 
    │ CLMKabuCancelOrder に sOrderNumber を載せて送信
    ▼
 Rust 受信
-   │ Event::OrderPendingCancel → OrderSessionState 更新 → HTTP 200
+   │ Event::OrderPendingCancel → OrderSessionState 更新 → caller に通知
 ```
 
-**`venue_order_id` が unknown の場合**: `OrderSessionState` に `venue_order_id = None`（起動時復元の unknown 状態）の `client_order_id` へのキャンセル要求は **404 + `reason_code="ORDER_STATUS_UNKNOWN"`** で reject する。クライアントは `GET /api/order/list` で確認してから再試行すること。
+> **Phase 8 注記**: 旧フローの `POST /api/order/cancel` → `Rust src/api/order_api.rs` → HTTP 200 は廃止。caller への応答は `Event::OrderPendingCancel` / `OrderCanceled` の IPC イベント受信で代替する。
+
+**`venue_order_id` が unknown の場合**: `OrderSessionState` に `venue_order_id = None`（起動時復元の unknown 状態）の `client_order_id` へのキャンセル要求は `Event::OrderRejected{reason_code="ORDER_STATUS_UNKNOWN"}` で reject する。クライアントは `Command::GetOrderList` で確認してから再試行すること。
 
 ### 2.4 第二暗証番号 forget フロー（Phase O0）
 
 ```
-ユーザー（UI ボタン or curl）
-   │ POST /api/order/forget-second-password
-   ▼
-Rust src/api/order_api.rs
-   │ engine_client.send(Command::ForgetSecondPassword)
+ユーザー（UI ボタン or LiveSession の forget API）
+   │ Command::ForgetSecondPassword を IPC 送信
    ▼
 Python python/engine/server.py
    │ tachibana_auth.TachibanaSessionHolder（T0.4 新設）.second_password = None
    ▼
-Rust 受信
-   │ HTTP 200 { "status": "OK" }
+caller に完了通知
 ```
+
+> **Phase 8 注記**: 旧 `POST /api/order/forget-second-password` HTTP path は廃止。IPC `Command::ForgetSecondPassword` を直接送る経路に統一。
 
 `SetSecondPassword` フロー（第二暗証番号入力 modal から）:
 
@@ -183,7 +189,7 @@ Rust 受信
 
 **C-2: ForgetSecondPassword ↔ in-flight SubmitOrder 競合ポリシー（確定 2026-04-28）**:
 
-`POST /api/order/forget-second-password` と in-flight な `SubmitOrder` が同時に発生した場合の動作を以下のように規定する。
+`Command::ForgetSecondPassword`（旧 `POST /api/order/forget-second-password`）と in-flight な `SubmitOrder` が同時に発生した場合の動作を以下のように規定する。
 
 - **ポリシー**: `ForgetSecondPassword` は **即時適用**する（in-flight SubmitOrder の完了を待たない）。
 - **根拠**: Python asyncio は単一スレッドであるため、`ForgetSecondPassword` の処理は必ず `await` ポイント間に割り込む。`_do_submit_order` は `second_password` を `self._session_holder.get_password()` でローカル変数に取得済みのため、その後に holder をクリアしても in-flight SubmitOrder には影響しない。
@@ -234,10 +240,13 @@ pub enum Command {
         request_id: String,
         venue: String,
         client_order_id: String,
+        /// 他端末注文など caller が直接 venue_order_id を知っている場合のみ Some で渡す。
+        /// None の場合は Rust IPC ハンドラが OrderSessionState から lookup する。
+        venue_order_id: Option<String>,
         change: OrderModifyChange,      // qty / price / trigger / expire を Option で
     },
     // Rust は OrderSessionState で client_order_id → venue_order_id を lookup してから Python に渡す（§2.3）
-    // venue_order_id が None（unknown）の場合は HTTP 404 reject し Python へ送らない
+    // venue_order_id が None（unknown）の場合は IPC で ORDER_STATUS_UNKNOWN を返し Python へ送らない
     CancelOrder  { request_id: String, venue: String, client_order_id: String, venue_order_id: String },
     CancelAllOrders {
         request_id: String,
@@ -309,7 +318,7 @@ pub enum Event {
     // 既存 ...
     // nautilus の OrderEvent タクソノミーに合わせる
     OrderSubmitted   { client_order_id: String, ts_event_ms: i64 },
-    OrderAccepted    { client_order_id: String, venue_order_id: String, ts_event_ms: i64 },
+    OrderAccepted    { client_order_id: String, venue_order_id: Option<String>, ts_event_ms: i64 },
     OrderRejected    { client_order_id: String, reason_code: String, reason_text: String, ts_event_ms: i64 },
     OrderPendingUpdate { client_order_id: String, ts_event_ms: i64 },
     OrderPendingCancel { client_order_id: String, ts_event_ms: i64 },
@@ -360,7 +369,9 @@ pub struct OrderRecordWire {
 
 ## 4. 冪等性（flowsurface `agent_session_state.rs` の移植）
 
-`src/api/order_session_state.rs`（新設）:
+> **Phase 8 注記**: 当初は `src/api/order_session_state.rs` に新設予定だったが、HTTP API 廃止に合わせて **`engine-client/src/order_session_state.rs`** に着地している（Rust IPC ハンドラ層）。型構造・API は当初設計どおり。
+
+`engine-client/src/order_session_state.rs`:
 
 ```rust
 pub struct ClientOrderId(pub String);
@@ -378,8 +389,12 @@ pub struct AgentOrderRecord {
 
 pub enum PlaceOrderOutcome {
     Created { client_order_id: ClientOrderId },
-    IdempotentReplay { venue_order_id: String },
-    Conflict { existing_venue_order_id: String },
+    /// venue_order_id は Python 応答受領前（unknown 状態）では None になりうる。
+    IdempotentReplay { venue_order_id: Option<String> },
+    /// 同一 client_order_id で body が異なる再送 — 409 Conflict。
+    Conflict { existing_venue_order_id: Option<String> },
+    /// p_errno=2 受領後の frozen 状態。以降の発注は即時 SESSION_EXPIRED で reject。
+    SessionFrozen,
 }
 
 pub struct OrderSessionState {
@@ -400,8 +415,9 @@ flowsurface との差分:
 | `order_id` | `venue_order_id` | nautilus タクソノミー準拠（venue 採番 ID と明示） |
 | `key`（u64 ハッシュ） | `request_key`（u64 ハッシュ） | flowsurface の `key` だけだと意味が曖昧なため改名 |
 | （状態フィールド無し） | `status: NautilusOrderStatus`（追加） | flowsurface は単一段階だが本計画は SUBMITTED→ACCEPTED→… の状態遷移を持つ |
-| `PlaceOrderOutcome::IdempotentReplay { order_id }` | `PlaceOrderOutcome::IdempotentReplay { venue_order_id }` | 上記 `order_id` リネームに追従 |
-| `PlaceOrderOutcome::Conflict { existing_order_id }` | `PlaceOrderOutcome::Conflict { existing_venue_order_id }` | 同 |
+| `PlaceOrderOutcome::IdempotentReplay { order_id }` | `PlaceOrderOutcome::IdempotentReplay { venue_order_id: Option<String> }` | `order_id` → `venue_order_id` rename。Python 応答受領前は `None`（unknown 状態）のため `Option` |
+| `PlaceOrderOutcome::Conflict { existing_order_id }` | `PlaceOrderOutcome::Conflict { existing_venue_order_id: Option<String> }` | 同。`Option` で unknown 状態も表現 |
+| （移植元に無し） | `PlaceOrderOutcome::SessionFrozen` | `p_errno=2` 受領後の frozen 状態。以降の全発注を即時 `SESSION_EXPIRED` で reject |
 
 **B-L2 OrderSubmitted 即時発火の根拠**: `OrderSubmitted` を HTTP 送信前に発火する設計は **flowsurface 移植ではなく nautilus タクソノミー準拠の新規追加**。flowsurface `place_or_replay` は単一段階（受付 = 結果確定）だが、本計画は nautilus の `SUBMITTED → ACCEPTED → FILLED` の段階遷移に合わせて `OrderSubmitted` を即時発火する。
 
@@ -649,8 +665,8 @@ env:
 | `tachibana_orders.cancel_all_orders()` | `tachibana::cancel_all_orders()` | flowsurface 旧シンボル `submit_new_order` 等は本計画では使用しない |
 | `tachibana_orders._compose_request_payload()` | `tachibana::serialize_order_request()` | `p_no` / `p_sd_date` / `sCLMID` 後付け |
 | 本計画 `PlaceOrderOutcome::Created { client_order_id }` | flowsurface `PlaceOrderOutcome::Created { order_id }` | **意味反転ではなく rename**: 両者とも事前採番 UUID を返す。フィールド名の差（`order_id` → `client_order_id` への rename）であり、venue 採番値は本計画では `update_venue_order_id` で後着する |
-| `src/api/order_session_state.rs::OrderSessionState` | `flowsurface/src/api/agent_session_state.rs::AgentSessionState`（移植元） | **Rust → Rust の移植**（Python ではない） |
-| `src/api/order_session_state.rs::PlaceOrderOutcome` | `flowsurface/src/api/agent_session_state.rs::PlaceOrderOutcome`（移植元） | 同 |
+| `engine-client/src/order_session_state.rs::OrderSessionState` | `flowsurface/src/api/agent_session_state.rs::AgentSessionState`（移植元） | **Rust → Rust の移植**（Python ではない）。Phase 8 で `src/api/` から `engine-client/src/` に移管 |
+| `engine-client/src/order_session_state.rs::PlaceOrderOutcome` | `flowsurface/src/api/agent_session_state.rs::PlaceOrderOutcome`（移植元） | 同 |
 | `OrderSessionState::try_insert(client_order_id, request_key)` | `AgentSessionState::place_or_replay(...)` | **2 引数化**: venue_order_id は後着するため引数に含めない。`update_venue_order_id()` で OrderAccepted 受信後に埋める |
 
 **B-M3 `TachibanaWireOrderRequest.__repr__` のマスク対象**: **`second_password` のみマスク**（flowsurface `NewOrderRequest` の `Debug` 手実装と同等）。`user_id` / `password` は注文 wire（`CLMKabuNewOrder` 等）には載らないため、注文 wire 型のマスク対象には含めない。`user_id` / `password` のログ漏洩防止は別経路（認証 wire 型 `TachibanaCredentialsWire` / ログイン関連 helper）で対処する。
@@ -790,7 +806,7 @@ N2 で行う作業:
 1. `pyproject.toml` に `nautilus_trader` 依存を追加
 2. `python/engine/nautilus/clients/tachibana.py` を新設し `nautilus_trader.live.execution_client.LiveExecutionClient` を継承
 3. `LiveExecutionClient.submit_order(command)` の中身は `tachibana_orders.submit_order(...)` を呼ぶだけ
-4. 本計画の Rust 側 HTTP API `/api/order/*` は **そのまま残す**（手動発注・curl 経路は維持）。nautilus 戦略経由の発注は HTTP を経由せず、`LiveExecutionEngine` から直接 Python ワーカーに入る
-5. `OrderSessionState`（Rust 冪等性マップ）は nautilus 経由フローでは不要だが、HTTP API 経路では引き続き使う（撤去しない）
+4. ~~本計画の Rust 側 HTTP API `/api/order/*` は **そのまま残す**（手動発注・curl 経路は維持）~~（Phase 8 で HTTP API は全廃済み。手動発注経路は Python helper `LiveSession` に統一）。nautilus 戦略経由の発注は `LiveExecutionEngine` から直接 Python ワーカーに入る
+5. `OrderSessionState`（Rust 冪等性マップ）は nautilus 経由フローでは不要だが、IPC 経路（GUI / Python helper）では引き続き使う（撤去しない）
 
 つまり **N2 は新規ファイルを足すだけで、既存の本計画コードを書き換えない**ことが目標。本計画の Phase O0–O3 のレビューチェックリストに「nautilus 移行時に書き換えが発生しないか」を毎回入れる。

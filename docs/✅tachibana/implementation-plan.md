@@ -1,5 +1,7 @@
 # 立花証券統合: 実装計画
 
+> **Phase 8（2026-05-03 完了）注記**: Phase 1（読み取り基盤）は完了済み。Phase 8 で Rust HTTP API（ポート 9876）が全廃され、再ログイン経路は IPC `Command::RequestVenueLogin`（GUI）または Python helper `LiveSession.login()`（スクリプト・E2E）に統一された。本計画内で言及されている `tests/e2e/tachibana_relogin_after_cancel.sh` の HTTP API skip ゲート（T35-U5）は Phase 8 で pytest 移行により消滅、`scripts/run-replay-debug.sh` / `scripts/replay_dev_load.sh`（HTTP 9876 依存）は廃止された。
+
 親計画 [docs/✅python-data-engine/implementation-plan.md](../✅python-data-engine/implementation-plan.md) のフェーズ 6 完了後、または並行で着手する追加トラックとして位置づける。
 
 > **不変条件 ID ↔ test 関数名対応は [`docs/✅tachibana/invariant-tests.md`](./invariant-tests.md) を正本とする**（本ファイル内の各章で言及される不変条件 ID の test 紐付けは同表を参照）。

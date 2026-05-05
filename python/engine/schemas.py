@@ -2,15 +2,99 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union, get_args
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 8
+SCHEMA_MINOR: int = 12
+
+# ---------------------------------------------------------------------------
+# Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
+# IPC layer, server state machine guards, and helper-class translation.
+# ---------------------------------------------------------------------------
+
+# AppMode: 起動時固定モード (`Hello.mode` と `DataEngineServer._mode` の共有)
+AppMode = Literal["live", "replay"]
+
+# ReplayStateName / LiveStateName: 直交する 2 つの state machine の wire 名前。
+# server.py の `ReplayState` / `LiveState` Enum の `.name` と一致させる。
+ReplayStateName = Literal["IDLE", "LOADED", "RUNNING", "STOPPING"]
+LiveStateName = Literal["DISCONNECTED", "CONNECTING", "CONNECTED"]
+
+# CurrentEngineState: EngineBusy.current_state の wire 形 (どちらかの state)
+CurrentEngineState = Union[ReplayStateName, LiveStateName]
+
+# Replay-only / Live-only コマンドの分類 (EngineBusy 直交制約に使用)
+ReplayOnlyCommand = Literal[
+    "LoadReplayData",
+    "StartEngine",
+    "StopEngine",
+    "SetReplaySpeed",
+    "StopReplay",
+    "ForceStopReplay",
+]
+LiveOnlyCommand = Literal[
+    "ModifyOrder",
+    "CancelOrder",
+    "CancelAllOrders",
+    "RequestVenueLogin",
+    "GetBuyingPower",
+    "GetPositions",
+    "GetOrderList",
+]
+# SubmitOrder は venue により replay/live の両方で発生し得る (server.py 980, 1040)。
+SharedCommand = Literal["SubmitOrder"]
+
+# AttemptedCommand: EngineBusy.attempted_command の wire 形。
+# server.py `_check_replay_state` / `_check_live_state` の `command:` 引数も同じ alias を使う。
+AttemptedCommand = Literal[
+    "LoadReplayData",
+    "StartEngine",
+    "StopEngine",
+    "SetReplaySpeed",
+    "StopReplay",
+    "ForceStopReplay",
+    "SubmitOrder",
+    "ModifyOrder",
+    "CancelOrder",
+    "CancelAllOrders",
+    "RequestVenueLogin",
+    "GetBuyingPower",
+    "GetPositions",
+    "GetOrderList",
+]
+
+# AUTH_FAILED_CODE: 認証失敗時の EngineError.code (Phase 2 以降が import 可能)
+AUTH_FAILED_CODE: str = "auth_failed"
+
+# SaveErrorCode (F6 / レビュー反映 2026-05-04 ラウンド1 / H1, ラウンド2 / H-R2-2):
+# `StrategyScenarioSaved.error` の wire 形を Literal で固定する。これら 8 値以外は
+# pydantic validation で reject される。server.py 側の例外→error コード変換は
+# `_do_save_strategy_scenario` の責務。
+#
+# ラウンド2 で `tempfile_failed` を削除（dead code: `tempfile.mkstemp` 失敗は
+# OSError errno に応じて parent_missing / disk_full / permission_denied のいずれかに
+# 吸収される。専用コードは server.py の例外マッピングから到達しない）。
+SaveErrorCode = Literal[
+    "permission_denied",
+    "parent_missing",
+    "disk_full",
+    "path_guard_violation",
+    "rename_failed",
+    "missing_scenario_field",
+    "validate_failed",
+    "syntax_error",
+]
+
+# 内部: EngineBusy validator が使う set
+_REPLAY_STATES: frozenset[str] = frozenset(get_args(ReplayStateName))
+_LIVE_STATES: frozenset[str] = frozenset(get_args(LiveStateName))
+_REPLAY_ONLY_COMMANDS: frozenset[str] = frozenset(get_args(ReplayOnlyCommand))
+_LIVE_ONLY_COMMANDS: frozenset[str] = frozenset(get_args(LiveOnlyCommand))
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +119,7 @@ class Hello(IpcMessage):
     token: str
     # N1.13: 起動時固定 mode (`"live"` | `"replay"`).
     # 旧クライアント互換のため省略時は "live" にフォールバック。
-    mode: Literal["live", "replay"] = "live"
+    mode: AppMode = "live"
 
 
 class SetProxy(IpcMessage):
@@ -220,7 +304,19 @@ class OrderListFilter(IpcMessage):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: str | None = None
+    # M-Type3: 既知の OrderStatus (tachibana_orders._STATUS_TEXT_MAP の出力値) のみ許可。
+    # docs: see python/engine/exchanges/tachibana_orders.py `_STATUS_TEXT_MAP`.
+    status: Optional[
+        Literal[
+            "SUBMITTED",
+            "ACCEPTED",
+            "FILLED",
+            "PENDING_CANCEL",
+            "CANCELED",
+            "EXPIRED",
+            "REJECTED",
+        ]
+    ] = None
     instrument_id: str | None = None
     date: str | None = None
 
@@ -677,6 +773,11 @@ class ReplayDataLoaded(IpcMessage):
     strategy_id: str | None = None
     bars_loaded: int
     trades_loaded: int
+    # schema 3.12: GUI が helper attach mode で `auto_generate_replay_panes` を
+    # 呼べるよう、replay 対象の instrument_id と bar 粒度を同梱する。
+    # 旧 GUI (minor<12) は serde(default) で安全に無視される。
+    instrument_id: str | None = None
+    granularity: Literal["Trade", "Minute", "Daily"] | None = None
     ts_event_ms: int
 
 
@@ -814,6 +915,161 @@ class PositionsUpdated(IpcMessage):
     venue: str
     positions: list[PositionRecord]
     ts_ms: int
+
+
+# ── Phase 8.1b: Multi-client connection lifecycle events ────────────────────
+
+
+class ClientConnected(IpcMessage):
+    event: Literal["ClientConnected"] = "ClientConnected"
+    count: int
+
+
+class ClientDisconnected(IpcMessage):
+    event: Literal["ClientDisconnected"] = "ClientDisconnected"
+    count: int
+
+
+class EngineBusy(IpcMessage):
+    """Engine state machine rejected a command because the current state does not allow it.
+
+    B3: emitted when a command arrives in the wrong state (e.g. LoadReplayData while
+    already Loaded, StartEngine while Idle, SubmitOrder while Disconnected).
+    """
+
+    event: Literal["EngineBusy"] = "EngineBusy"
+    # M-1 (type): replay state / live state を tagged union で表現する。
+    # Replay states: IDLE / LOADED / RUNNING / STOPPING
+    # Live states:   DISCONNECTED / CONNECTING / CONNECTED
+    # H-Type2: state と command の直交性を `model_validator` (mode='after') で
+    # 強制する。Replay-only state に Live-only command (例: STOPPING /
+    # RequestVenueLogin) を載せると ValidationError。
+    current_state: CurrentEngineState
+    attempted_command: AttemptedCommand
+    reason: str
+    # MEDIUM-R2-6: violation を起こした command の request_id。Optional で
+    # 既存メッセージとの後方互換を保つ。helper 側の `wait_for()` /
+    # `events()` はこの値で「自分宛の reject」と「broadcast / 別 client 由来」を
+    # 区別する。
+    request_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_state_command_orthogonal(self) -> "EngineBusy":
+        # SubmitOrder は replay/live どちらの state でも有効 (venue により分岐)。
+        cmd = self.attempted_command
+        state = self.current_state
+        if cmd in _REPLAY_ONLY_COMMANDS and state in _LIVE_STATES:
+            raise ValueError(
+                f"EngineBusy: replay-only command {cmd!r} cannot be paired with "
+                f"live state {state!r}"
+            )
+        if cmd in _LIVE_ONLY_COMMANDS and state in _REPLAY_STATES:
+            raise ValueError(
+                f"EngineBusy: live-only command {cmd!r} cannot be paired with "
+                f"replay state {state!r}"
+            )
+        return self
+
+
+# ── F7: モード切替 (schema 3.11) ─────────────────────────────────────────────
+
+
+class StopReplay(IpcMessage):
+    """active な replay セッションを graceful に停止するよう要求する（F7 モード切替）。
+
+    Python は内部で active な strategy_id を解決して StopEngine 相当の処理を行う。
+    停止完了後に `ReplayStopped` を emit する。
+    replay が実行中でない場合は `EngineBusy` を返す。
+    """
+
+    op: Literal["StopReplay"] = "StopReplay"
+    request_id: str
+
+
+class ForceStopReplay(IpcMessage):
+    """StopReplay が 5 秒タイムアウトした後の強制停止フォールバック（F7）。
+
+    Python は runner thread を即座に停止する（可能であれば SIGKILL 相当）。
+    停止完了後に `ReplayStopped` を emit する。
+    """
+
+    op: Literal["ForceStopReplay"] = "ForceStopReplay"
+    request_id: str
+
+
+class ReplayStopped(IpcMessage):
+    """StopReplay または ForceStopReplay が replay セッションを停止したときに emit する（F7）。
+
+    final_equity は停止時点の equity 残高（decimal 文字列）。
+    セッションが正常完了する前に停止された場合は None。
+    """
+
+    event: Literal["ReplayStopped"] = "ReplayStopped"
+    request_id: str
+    final_equity: str | None = None
+
+
+# ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
+
+
+class LoadStrategyScenario(IpcMessage):
+    """戦略 .py から SCENARIO 定数を ast.literal_eval で安全抽出するよう Python に要求する。
+
+    replay モードの `開く…（Open）` で .py を選択したときに Rust が送出する。
+    Python 側は importlib を使わず ast.parse + ast.literal_eval のみで抽出する（副作用ゼロ）。
+    """
+
+    op: Literal["LoadStrategyScenario"] = "LoadStrategyScenario"
+    request_id: str
+    path: str  # 戦略 .py の絶対パス
+
+
+class SaveStrategyScenario(IpcMessage):
+    """戦略 .py の SCENARIO ブロックを libcst で atomic 書き戻すよう Python に要求する。
+
+    save_as=False: 上書き保存（path == loaded_path が必須）
+    save_as=True:  新規/派生保存（任意の .py path）
+    """
+
+    op: Literal["SaveStrategyScenario"] = "SaveStrategyScenario"
+    request_id: str
+    path: str           # 書き戻し先 .py の絶対パス
+    scenario: dict      # 書き戻す Scenario dict
+    save_as: bool = False
+    loaded_path: str | None = None  # 直前 LoadStrategyScenario の path（path guard 用）
+
+
+class StrategyScenarioLoaded(IpcMessage):
+    """LoadStrategyScenario の応答。SCENARIO が見つかった場合は scenario を返す。
+
+    scenario=None は SCENARIO 不在（prefill なし）を示す。
+    """
+
+    event: Literal["StrategyScenarioLoaded"] = "StrategyScenarioLoaded"
+    request_id: str
+    path: str                      # 読み込んだ .py の絶対パス
+    scenario: dict | None = None   # SCENARIO dict, または不在時 None
+
+
+class StrategyScenarioLoadFailed(IpcMessage):
+    """LoadStrategyScenario 失敗時の応答（構文エラー / リテラル以外の dict）。"""
+
+    event: Literal["StrategyScenarioLoadFailed"] = "StrategyScenarioLoadFailed"
+    request_id: str
+    path: str
+    reason: str  # エラー文言
+
+
+class StrategyScenarioSaved(IpcMessage):
+    """SaveStrategyScenario の応答。"""
+
+    event: Literal["StrategyScenarioSaved"] = "StrategyScenarioSaved"
+    request_id: str
+    path: str
+    ok: bool
+    # H1 (レビュー反映 2026-05-04 ラウンド1): `error` は SaveErrorCode Literal の
+    # 9 値に固定。未知値は pydantic validation で reject される。
+    error: SaveErrorCode | None = None
 
 
 # ---------------------------------------------------------------------------

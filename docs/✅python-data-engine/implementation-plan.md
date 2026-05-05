@@ -600,3 +600,40 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 未達時の対応:
 - レイテンシ / CPU 不足 → [spec.md §4.3.1](./spec.md#431-depth-チャネルのバイナリ化検討) のバイナリ化を適用。
 - 慢性的な性能差 → [spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定) の案 C（Rust 直結の optional 残置）を再検討。
+
+---
+
+## フェーズ 8 — Python 単独モード化 / Rust HTTP API 廃止（attach mode 採用）
+
+> 詳細計画: [python-helper-direct-api.md](./archive/python-helper-direct-api.md)
+> **✅ 完了 (2026-05-03)**
+
+**概要**: HTTP API（ポート 9876）を廃止し、Python `ReplaySession` / `LiveSession` helper class で直接 IPC を駆動するアーキテクチャに移行する。Rust GUI が起動中なら helper は attach mode（WS クライアント）、GUI なしなら in-process mode で `NautilusRunner` を直接呼ぶ。
+
+**サブフェーズ（全完了）**:
+- Phase 8.0 — 設計確定（attach mode 前提条件の合意形成）✅
+- Phase 8.1a — Python helper class + CLI（in-process mode 先行）✅ (2026-05-03)
+- Phase 8.1b — attach mode 実装（B1 multi-client → B2 session ファイル → B3 EngineBusy → B4 AttachClient）✅ (2026-05-03)
+- Phase 8.1c — GUI replay 起動フォーム ✅ (2026-05-03)
+- Phase 8.2 — E2E bash スクリプト削除（s56〜s83, s90, tachibana_* 11 ファイル削除） ✅ (2026-05-03)
+- Phase 8.3 — HTTP API 削除（src/replay_api.rs, src/api/ ディレクトリ全削除） ✅ (2026-05-03)
+- Phase 8 R1〜R4 — review-fix-loop 全件解消 ✅ (2026-05-04, commit `cb9207f`)
+  - **CRITICAL 7 / HIGH 13 / MEDIUM 22** を 4 ラウンドで収束（pytest 1598 → 1691, +93 件）
+  - 主要成果: 型基盤確立（`AppMode` / `AttemptedCommand` / `ReplayStateName | LiveStateName` / `AUTH_FAILED_CODE` / Rust enum 化）/ **LiveSession attach mode 本実装**（NotImplementedError 撤廃、`RequestVenueLogin` ↔ `VenueReady`/`VenueError` wire 待ち合わせ）/ silent failure 除去（handshake 15s timeout / EngineBusy unicast + `request_id` フィルタ / 全断時 state リセット / EngineStopped 補完 + 二重送出ガード / sticky error / narrative_hook thread fallback）/ Rust 健全化（`#[doc(hidden)] pub` を testing feature gate / `pid_is_live` retry / `spawn_venue_ready_bridge` 単一化）/ test_review_fixes.py 898 行を機能別 10 ファイルに分割
+  - 詳細: [`python-helper-direct-api.md` 末尾「レビュー反映」ブロック群](./archive/python-helper-direct-api.md)
+
+**主要成果物**:
+- `python/engine/replay_session.py`: `ReplaySession` + `LiveSession` + `_AttachClient`（1 ファイル構成）
+- `engine-client/src/session_file.rs`: `EngineSession` atomic write / delete
+- `src/modal/replay_form.rs`: `ReplayFormModal` GUI フォーム
+- `python/engine/server.py`: `_Broadcaster` multi-client fanout / `ReplayState` + `LiveState` state machine / `MAX_CONNECTIONS=4`
+- `python/engine/schemas.py`: `SCHEMA_MINOR` 9, `ClientConnected` / `ClientDisconnected` / `EngineBusy` イベント追加
+
+**使い方（Phase 8 以降の正規 CLI）**:
+```bash
+uv run python -m engine.replay_session run \
+    --strategy docs/example/buy_and_hold.py \
+    --instrument 1301.TSE \
+    --start 2025-01-06 \
+    --end 2025-03-31
+```

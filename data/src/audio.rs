@@ -1,8 +1,8 @@
 use crate::util::ok_or_default;
 use exchange::SerTicker;
 
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub enum Threshold {
@@ -38,7 +38,7 @@ impl Default for StreamCfg {
 #[serde(default)]
 pub struct AudioStream {
     #[serde(deserialize_with = "ok_or_default")]
-    pub streams: FxHashMap<SerTicker, StreamCfg>,
+    pub streams: BTreeMap<SerTicker, StreamCfg>,
     #[serde(deserialize_with = "ok_or_default")]
     pub volume: Option<f32>,
 }

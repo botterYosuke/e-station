@@ -27,7 +27,7 @@ origin: ECC (flowsurface カスタマイズ版)
 - iced の `Task` vs `Command` の移行タイミング
 - 取引所アダプタを共通 trait で抽象化する vs 個別実装のまま維持する
 - リプレイエンジンをリファクタリングして今リリースする vs 機能追加を優先する
-- E2E テストを HTTP API 経由に統一する vs ユニットテストで代替する
+- E2E テストを Python helper（`ReplaySession`）経由に統一する vs ユニットテストで代替する
 
 ## 使わない場面
 

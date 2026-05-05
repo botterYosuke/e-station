@@ -1,21 +1,35 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod api;
 mod audio;
 mod chart;
 mod cli;
 mod connector;
 mod layout;
 mod logger;
+mod mask_secrets;
+// `menu` exposes `tools_actions_for_state`, `MenuEntry`, and `Action` used by
+// both the Linux widget menu bar and the cross-platform `native_menu::attach`
+// Tools enable/disable computation (H5). Cross-platform.
+mod menu;
+// H1 (F8 R1): `menu_bar_state` houses the pure `update()` state machine for the
+// Linux widget menu bar. The module itself is platform-independent — it has no
+// iced widget or GTK dependencies — so we expose it on every OS so that the
+// state-transition contract tests in `tests/widget_menu_bar_state.rs` can
+// compile and inspect the source on Windows / macOS as well as Linux. Only the
+// rendering layer (`widget_menu_bar`) is Linux-gated.
+mod menu_bar_state;
 mod modal;
 mod native_menu;
 mod notify;
-mod replay_api;
 mod screen;
 mod style;
 mod venue_state;
 mod version;
+mod wandb_auth;
+mod wandb_submit_proc;
 mod widget;
+#[cfg(target_os = "linux")]
+mod widget_menu_bar;
 mod window;
 
 use data::config::theme::default_theme;
@@ -80,32 +94,599 @@ static VENUE_READY_CACHE: std::sync::OnceLock<
     Arc<tokio::sync::Mutex<rustc_hash::FxHashSet<String>>>,
 > = std::sync::OnceLock::new();
 
-/// Receiver end of the HTTP control API channel (port 9876).  Set once in
-/// `main()` after `replay_api::spawn` runs.  `replay_api_stream` takes
-/// ownership of the inner `Receiver` via `Option::take()` on first poll;
-/// subsequent calls (Iced subscription identity is stable so there is only
-/// one) see `None` and return immediately — no panic, no double-receive.
-static CONTROL_API_RX: std::sync::OnceLock<
-    std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<replay_api::ControlApiCommand>>>,
-> = std::sync::OnceLock::new();
-
-/// Shared REPLAY API state — used in `Message::ReplayBuyingPower` to cache the
-/// portfolio snapshot for `GET /api/replay/portfolio` without a tokio await.
-static REPLAY_API_STATE: std::sync::OnceLock<Arc<replay_api::ReplayApiState>> =
-    std::sync::OnceLock::new();
-
-/// Shared market-closed flag (N3.B). Set in `main()` after creating the
-/// `OrderApiState`, then read from `Flowsurface::new()` so that
-/// `Message::TachibanaVenueEvent` can store it in `self.order_api_market_closed`
-/// and update it atomically.
-static ORDER_API_MARKET_CLOSED: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> =
-    std::sync::OnceLock::new();
-
 /// Startup mode (`live` or `replay`) captured from `--mode` before any runtime
-/// is created. Allows `Flowsurface::new()` to apply D8 layout isolation without
-/// depending on `REPLAY_API_STATE` (which is only set when the HTTP control API
-/// runtime builds successfully).
-static APP_MODE: std::sync::OnceLock<engine_client::dto::AppMode> = std::sync::OnceLock::new();
+/// is created.  Changed from OnceLock to Mutex<Option<_>> so that
+/// `set_app_mode()` can overwrite the value during mode-switch restarts (F7/T1).
+/// Lock-acquisition order: MODE_SWITCHING → SUBMIT_IN_FLIGHT → APP_MODE → CURRENT_PATH (統一決定 58).
+static APP_MODE: std::sync::Mutex<Option<engine_client::dto::AppMode>> =
+    std::sync::Mutex::new(None);
+
+/// F7/T2: set to `true` while a mode-switch restart is in progress.
+/// `ModeSwitchGuard` RAII wrapper ensures the flag is reset even on panic.
+/// (P7 統一決定 33 / 受け入れ基準 9, 11)
+pub static MODE_SWITCHING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// P9 W&B run buffer: set to `true` while an active submit is in progress.
+/// SwitchMode is rejected when this is true (5-axis matrix axis-5 / 統一決定 61, 68).
+/// P9 will set/clear this around submission; F7 only reads it.
+/// Lock-acquisition order: MODE_SWITCHING → SUBMIT_IN_FLIGHT → APP_MODE → CURRENT_PATH
+pub static SUBMIT_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// F7 / M2 (lightweight lock-order guard): track the highest-index lock
+// acquired on the current thread so reverse-order acquisitions are caught
+// in debug builds. The fixed order is:
+//   0: MODE_SWITCHING
+//   1: SUBMIT_IN_FLIGHT
+//   2: APP_MODE
+//   3: CURRENT_PATH
+// Helper `lock_order_acquire(name)` is called at known acquisition points
+// (`restart_with_mode` / `Action::SwitchMode`). Release builds only log a
+// `log::warn!` so production safety is preserved (統一決定 R6-82).
+thread_local! {
+    static LOCK_ORDER_INDEX: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn lock_order_index_for(name: &str) -> Option<usize> {
+    match name {
+        "MODE_SWITCHING" => Some(0),
+        "SUBMIT_IN_FLIGHT" => Some(1),
+        "APP_MODE" => Some(2),
+        "CURRENT_PATH" => Some(3),
+        _ => None,
+    }
+}
+
+/// Record acquisition of a named lock on the current thread, asserting that
+/// the fixed acquisition order is preserved. In debug builds violations
+/// `debug_assert!`-panic; in release builds a `log::warn!` is emitted
+/// and the call returns without panicking (統一決定 R6-82).
+///
+/// This is a lightweight bookkeeping helper — it does NOT actually acquire
+/// the underlying mutex/atomic. Callers must invoke this immediately after
+/// (or before, with the matching `lock_order_release`) the real acquisition.
+pub fn lock_order_acquire(name: &'static str) {
+    let Some(next) = lock_order_index_for(name) else {
+        return;
+    };
+    // M-3 / L1: emit a structured `log::info!` so log-subscriber based
+    // integration tests can verify the per-thread acquisition order. The
+    // actual fixed order is enforced by the `debug_assert!` below; this event
+    // is purely observational. We use `log` (not `tracing`) because flowsurface
+    // does not yet depend on `tracing` at the workspace root — switching is a
+    // separate refactor (see `log::warn!` cfg-gated below for the existing
+    // dependency surface; F9 R1-C1 reverted a stray `tracing::warn!` here).
+    log::info!(
+        target: "lock_order",
+        "lock_order_acquire lock={name} index={next}",
+    );
+    LOCK_ORDER_INDEX.with(|cell| {
+        let prev = cell.get();
+        if let Some(p) = prev {
+            // Equal index is allowed (re-entrant probe of the same lock).
+            // Strictly greater means violation (e.g. acquiring APP_MODE then MODE_SWITCHING).
+            debug_assert!(
+                p <= next,
+                "lock-order violation: tried to acquire {name} (index {next}) \
+                 while already holding index {p}. Fixed order: \
+                 MODE_SWITCHING(0) → SUBMIT_IN_FLIGHT(1) → APP_MODE(2) → CURRENT_PATH(3) \
+                 (統一決定 58 / R6-82)"
+            );
+            #[cfg(not(debug_assertions))]
+            if p > next {
+                log::warn!(
+                    target: "lock_order",
+                    "lock-order violation: tried to acquire {name} (index {next}) \
+                     while already holding index {p}",
+                );
+            }
+        }
+        // Record the highest index seen so subsequent acquisitions are checked.
+        let new_max = match prev {
+            Some(p) if p > next => p,
+            _ => next,
+        };
+        cell.set(Some(new_max));
+    });
+}
+
+/// Reset the per-thread lock-order tracker. Call when all known locks for a
+/// critical section have been released (e.g. at the bottom of `restart_with_mode`).
+pub fn lock_order_reset() {
+    LOCK_ORDER_INDEX.with(|cell| cell.set(None));
+}
+
+/// Phase 3-A C2: handle to the in-flight `submit_run.py` child process.
+///
+/// `submit_wandb_run` stores the spawned `Child` here so that the W&B Cancel
+/// path (`modal::wandb_submit::Action::Cancel`) can reach in and kill the
+/// subprocess. On Windows `Child::kill()` is effectively `TerminateProcess`
+/// (immediate kill — no SIGTERM/grace-period semantics). On Unix tokio's
+/// `Child::kill` also issues SIGKILL, so the 5 second grace period documented
+/// in 統一決定 46 is best-effort and only meaningful if the kernel itself
+/// takes time to reap the process.
+pub static SUBMIT_CHILD: tokio::sync::Mutex<Option<tokio::process::Child>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// F9d: W&B 送信エラーの種類。`examples/wandb/submit_run.py` の exit code に対応する。
+#[derive(Debug, Clone)]
+pub enum WandbSubmitError {
+    /// exit code 2: W&B 未認証
+    AuthFailed,
+    /// exit code 3: Rate limit (429)
+    RateLimit,
+    /// exit code 4: ネットワークエラー
+    Network,
+    /// exit code 5: サーバーエラー (5xx)
+    ServerError,
+    /// exit code 6: 部分的成功 / meta.json status != "completed"
+    Partial,
+    /// 予期しない exit code または spawn 失敗
+    ProcessFailed(String),
+}
+
+/// `submit_run.py` の exit code を `WandbSubmitError` に変換する。
+/// exit code 0 は成功なので呼ばれない。
+fn exit_code_to_error(code: i32) -> WandbSubmitError {
+    match code {
+        2 => WandbSubmitError::AuthFailed,
+        3 => WandbSubmitError::RateLimit,
+        4 => WandbSubmitError::Network,
+        5 => WandbSubmitError::ServerError,
+        6 => WandbSubmitError::Partial,
+        other => WandbSubmitError::ProcessFailed(format!("unexpected exit code: {other}")),
+    }
+}
+
+/// Returns the current app mode.  Falls back to `Live` when the static has not
+/// yet been initialised (unreachable in normal operation).
+fn app_mode() -> engine_client::dto::AppMode {
+    APP_MODE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or(engine_client::dto::AppMode::Live)
+}
+
+/// Overwrites the current app mode.  Poison recovery is applied so that a
+/// panic inside a previous lock holder does not permanently break the value.
+fn set_app_mode(mode: engine_client::dto::AppMode) {
+    match APP_MODE.lock() {
+        Ok(mut g) => *g = Some(mode),
+        Err(e) => *e.into_inner() = Some(mode),
+    }
+}
+
+/// F7: check if tachibana_orders.jsonl has any in-flight orders.
+///
+/// Reads the WAL tail-first (reverse scan), same algorithm and wire schema as
+/// `python/engine/wal_in_flight.py`. The writer (`python/engine/exchanges/tachibana_orders.py::_audit_log_*`)
+/// emits records of the form `{"phase": "submit"|"accepted"|"rejected", "client_order_id": "...", ...}`.
+///
+/// Phase semantics:
+/// - `rejected` → terminal (not in-flight)
+/// - `submit` / `accepted` / unknown → in-flight (conservative)
+///
+/// **CONTRACT**: this function MUST stay in sync with `wal_in_flight.detect_in_flight_orders`.
+/// The contract is pinned by `python/tests/test_wal_in_flight_detection.py::TestWalContract`
+/// and `tests/wal_writer_reader_contract.rs`.
+///
+/// Uses `engine_client::process::engine_cache_dir()` — the same path Rust sends to Python
+/// via the stdin payload — so both sides always agree on the WAL location.
+fn has_wal_in_flight_orders() -> bool {
+    let wal_path = engine_client::process::engine_cache_dir().join("tachibana_orders.jsonl");
+    has_wal_in_flight_orders_at(&wal_path)
+}
+
+/// Internal pure helper for [`has_wal_in_flight_orders`] — takes the WAL path
+/// directly so integration tests can exercise it without touching the global cache dir.
+fn has_wal_in_flight_orders_at(wal_path: &std::path::Path) -> bool {
+    // M6: surface IO errors via log::warn! (the previous `let Ok(...) else { return false; }`
+    // silently treated unreadable WAL as "no in-flight orders", which masked operational
+    // problems). Treat IO failure as conservative `false` (do not block the mode switch
+    // if the file cannot be read), but log so the user can investigate.
+    let content = match std::fs::read_to_string(wal_path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(err) => {
+            log::warn!(
+                "[F7/WAL] failed to read {}: {}; treating as no in-flight orders",
+                wal_path.display(),
+                err
+            );
+            return false;
+        }
+    };
+    let mut latest_phase: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for line in content.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        // Writer schema (`tachibana_orders.py`): `phase` + `client_order_id`.
+        let order_id = record
+            .get("client_order_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let phase = record
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let (Some(oid), Some(ph)) = (order_id, phase) {
+            latest_phase.entry(oid).or_insert(ph);
+        }
+    }
+    // Terminal phase = `rejected`. Anything else (submit / accepted / unknown)
+    // is conservatively treated as in-flight.
+    latest_phase.values().any(|ph| ph.as_str() != "rejected")
+}
+
+/// F9d streaming events emitted by [`submit_wandb_run_stream`].
+///
+/// `Line` carries one raw stdout/stderr line from the subprocess (already
+/// UTF-8). The modal applies `mask_secrets()` before storing it. `Final`
+/// carries the terminal result (success URL or `WandbSubmitError`).
+#[derive(Debug, Clone)]
+pub enum WandbStreamEvent {
+    Line(String),
+    Final(Result<String, WandbSubmitError>),
+}
+
+/// F9d: `examples/wandb/submit_run.py` を subprocess で起動し、結果を返す。
+///
+/// 起動コマンド: `uv run --with wandb python examples/wandb/submit_run.py --run-buffer <path>`
+/// exit code 0: stdout の `URL: <url>` 行を返す。
+/// 非ゼロ exit code: `WandbSubmitError` に変換して返す。
+///
+/// 実行中の stdout / stderr 行は `log_tx` 経由でリアルタイムに流す。Cancel 経路は
+/// `SUBMIT_CHILD` を介して `kill()` を呼ぶ。`try_wait()` ポーリングで Mutex を
+/// 長期保持しないため、kill が常に確実に届く。
+async fn submit_wandb_run(
+    run_buffer_dir: std::path::PathBuf,
+    script: std::path::PathBuf,
+    project: String,
+    run_name: String,
+    tags: String,
+    notes: String,
+    log_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<String, WandbSubmitError> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    // H8: 非UTF-8 path で空文字列に silent fallback せず、明示的にエラーを返す。
+    let script_str = script.to_str().ok_or_else(|| {
+        WandbSubmitError::ProcessFailed(format!(
+            "path contains non-UTF-8 characters: {}",
+            script.display()
+        ))
+    })?;
+    let run_buffer_str = run_buffer_dir.to_str().ok_or_else(|| {
+        WandbSubmitError::ProcessFailed(format!(
+            "path contains non-UTF-8 characters: {}",
+            run_buffer_dir.display()
+        ))
+    })?;
+
+    let mut cmd = Command::new("uv");
+    cmd.args([
+        "run",
+        "--with",
+        "wandb",
+        "python",
+        script_str,
+        "--run-buffer",
+        run_buffer_str,
+    ]);
+    if !project.is_empty() {
+        cmd.args(["--project", &project]);
+    }
+    if !run_name.is_empty() {
+        cmd.args(["--run-name", &run_name]);
+    }
+    if !tags.is_empty() {
+        cmd.args(["--tags", &tags]);
+    }
+    // M6: notes を `--notes` で渡す。
+    if !notes.is_empty() {
+        cmd.args(["--notes", &notes]);
+    }
+    // Phase 3-A C2: spawn explicitly so the Child handle can be stored in
+    // SUBMIT_CHILD for the Cancel path.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| WandbSubmitError::ProcessFailed(format!("spawn failed: {e}")))?;
+
+    // Stream stdout / stderr line-by-line via dedicated reader tasks.
+    // Take the pipes BEFORE moving the Child into SUBMIT_CHILD.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    {
+        let mut slot = SUBMIT_CHILD.lock().await;
+        *slot = Some(child);
+    }
+
+    let log_tx_out = log_tx.clone();
+    let stdout_handle = tokio::spawn(async move {
+        let mut url: Option<String> = None;
+        if let Some(stdout) = stdout {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(rest) = line.strip_prefix("URL: ") {
+                    url = Some(rest.to_string());
+                }
+                // F9 R2-M3: when the receiver is dropped (modal closed) the
+                // send fails — exit early instead of looping forever and
+                // continuing to read stdout into a dead channel.
+                if log_tx_out.send(line).is_err() {
+                    break;
+                }
+            }
+        }
+        url
+    });
+    let log_tx_err = log_tx.clone();
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(stderr) = stderr {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // F9 R2-M3: same as stdout reader — abort when receiver is
+                // gone to release the BufReader / pipe handle promptly.
+                if log_tx_err.send(line).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    drop(log_tx);
+
+    // Poll try_wait() in a tight loop so the SUBMIT_CHILD lock is held only
+    // for the duration of one syscall. The Cancel path needs the lock to
+    // call `kill()` and would be starved out if we held it across a blocking
+    // `wait()`.
+    let exit_status = loop {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let mut slot = SUBMIT_CHILD.lock().await;
+        let Some(c) = slot.as_mut() else {
+            // Cancel reached the slot first and is killing the process.
+            break None;
+        };
+        match c.try_wait() {
+            Ok(Some(status)) => {
+                let _ = slot.take();
+                break Some(status);
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                let _ = slot.take();
+                return Err(WandbSubmitError::ProcessFailed(format!("wait failed: {e}")));
+            }
+        }
+    };
+
+    // Drain readers — they exit once the subprocess closes its pipes.
+    let url = stdout_handle.await.ok().flatten();
+    let _ = stderr_handle.await;
+
+    match exit_status {
+        Some(status) if status.success() => Ok(url.unwrap_or_default()),
+        Some(status) => Err(exit_code_to_error(status.code().unwrap_or(-1))),
+        None => Err(WandbSubmitError::ProcessFailed(
+            "cancelled before completion".to_string(),
+        )),
+    }
+}
+
+/// Wraps [`submit_wandb_run`] as a stream of [`WandbStreamEvent`] values so
+/// `iced::Task::run` can dispatch live `LogLine` updates AND a final
+/// completion event in one Task.
+fn submit_wandb_run_stream(
+    run_buffer_dir: std::path::PathBuf,
+    script: std::path::PathBuf,
+    project: String,
+    run_name: String,
+    tags: String,
+    notes: String,
+) -> impl iced::futures::Stream<Item = WandbStreamEvent> + Send + 'static {
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<WandbStreamEvent>();
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let event_tx_for_lines = event_tx.clone();
+    tokio::spawn(async move {
+        while let Some(line) = log_rx.recv().await {
+            // F9 R1-M2: log channel failures (receiver dropped) instead of
+            // silently `let _ = ...`. Helps surface dropped log lines when
+            // the submit modal is dismissed mid-stream.
+            if let Err(err) = event_tx_for_lines.send(WandbStreamEvent::Line(line)) {
+                log::warn!("[wandb] dropping submit log line; receiver gone: {err}");
+                break;
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let result = submit_wandb_run(
+            run_buffer_dir,
+            script,
+            project,
+            run_name,
+            tags,
+            notes,
+            log_tx,
+        )
+        .await;
+        // F9 R1-M2: ditto for the terminal Final event.
+        if let Err(err) = event_tx.send(WandbStreamEvent::Final(result)) {
+            log::warn!("[wandb] dropping submit Final event; receiver gone: {err}");
+        }
+    });
+
+    iced::futures::stream::unfold(event_rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
+/// `wandb login --relogin` を stdin pipe 経由で API キーを渡して実行する。
+/// argv に API キーを渡さない（プロセスリスト・シェル履歴への漏洩防止）。
+///
+/// F9 R3-M2: hard timeout 30s + kill_on_drop(true)。wandb login は対話プロンプト
+/// (環境変数チェック・netrc 書き込み・ターミナル機能 probe) で時間がかかるため
+/// refresh_wandb_auth の 7s より長い 30s を割り当てる。timeout が elapse した
+/// 場合は spawn future が drop され、`kill_on_drop(true)` により child プロセスに
+/// SIGKILL が送られて GUI が永久ブロックしない。
+async fn wandb_login(api_key: String) -> Result<(), String> {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::process::Command;
+
+    let mut child = Command::new("uv")
+        .args(["run", "--with", "wandb", "wandb", "login", "--relogin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("spawn failed: {e}"))?;
+
+    // M8: stdin write の失敗を握り潰さず Result で伝播する。
+    // 旧コードは `let _ = stdin.write_all(...).await` で pipe broken 等の
+    // OS-level I/O 失敗を黙殺していたため、原因不明のログイン失敗の温床だった。
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "stdin not piped".to_string())?;
+    stdin
+        .write_all(api_key.as_bytes())
+        .await
+        .map_err(|e| format!("stdin write failed: {e}"))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|e| format!("stdin write failed: {e}"))?;
+    drop(stdin);
+
+    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(format!("wait failed: {e}")),
+        Err(_elapsed) => {
+            // timeout — `kill_on_drop(true)` ensures the child is killed when
+            // `child` is dropped at the end of this scope.
+            return Err("wandb login timed out after 30s".to_string());
+        }
+    };
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() {
+            format!("exit code {:?}", output.status.code())
+        } else {
+            stderr
+        })
+    }
+}
+
+/// `wandb logout` を実行して netrc エントリを削除する。
+async fn wandb_logout() -> Result<(), String> {
+    use tokio::process::Command;
+
+    let output = Command::new("uv")
+        .args(["run", "--with", "wandb", "wandb", "logout"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("spawn failed: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() {
+            format!("exit code {:?}", output.status.code())
+        } else {
+            stderr
+        })
+    }
+}
+
+/// F7/T2: RAII guard for the mode-switch critical section.
+/// Call `try_acquire()` at the top of `restart_with_mode()`; the flag is
+/// automatically cleared when the guard is dropped — including panic unwinds.
+pub struct ModeSwitchGuard;
+
+impl ModeSwitchGuard {
+    /// Returns `Some` if the flag was successfully acquired (i.e. no switch is
+    /// currently in progress), `None` if a switch is already running.
+    pub fn try_acquire() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        MODE_SWITCHING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| ModeSwitchGuard)
+    }
+}
+
+impl Drop for ModeSwitchGuard {
+    fn drop(&mut self) {
+        MODE_SWITCHING.store(false, std::sync::atomic::Ordering::Release);
+        // H1: RAII reset of the per-thread lock-order tracker. Without this,
+        // early-return paths from the mode-switch state machine that drop the
+        // guard (e.g. `mode_switch_state = None`) would leave the
+        // `LOCK_ORDER_INDEX` thread-local at its highest acquired index,
+        // and subsequent unrelated lock acquisitions on the same thread
+        // would spuriously trip the lock-order debug_assert.
+        lock_order_reset();
+    }
+}
+
+/// F7/T2: errors that can abort a mode-switch operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModeSwitchError {
+    /// Another mode-switch is already in progress.
+    AlreadySwitching,
+    /// Live mode has in-flight (unconfirmed) orders — switching to replay
+    /// would break WAL integrity.
+    InFlightOrder,
+    /// The engine reported a busy state.
+    EngineBusy(String),
+    /// The live state could not be flushed to disk.
+    SaveFailed,
+    /// The replay engine did not stop in time and force-stop also failed.
+    StopFailed,
+    /// An active W&B submit (`SUBMIT_IN_FLIGHT == true`) blocks the switch
+    /// (5-axis matrix axis-5 / 統一決定 61, 68).
+    SubmitInFlight,
+    /// User cancelled the unsaved-changes confirm dialog (F4).
+    ///
+    /// L2-rust: not yet emitted on a concrete code path — `GoBack` and
+    /// `ToggleDialogModal(None)` currently dismiss the mode-switch dialog
+    /// without producing this typed error. The variant is preserved so future
+    /// review-fix-loop iterations can route the dirty-confirm cancel path
+    /// through the typed error channel (e.g. for a single Toast/log call site)
+    /// without breaking exhaustive-match callers.
+    #[allow(dead_code)]
+    ConfirmCancelled,
+}
+
+/// F3: tracks the file path most recently opened or explicitly saved-as.
+/// `None` until the user first uses Open or Save As.
+/// Persists across `Flowsurface::restart()` because it is a static.
+/// Poison recovery: callers use `into_inner()` to avoid propagating panics.
+static CURRENT_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// F3 DoD: `--saved-state <PATH>` — path supplied on the command line.
+/// Set once in `main()` before the Iced runtime starts; read by
+/// `Flowsurface::new()` to both select the JSON to load and prime `CURRENT_PATH`.
+static INITIAL_STATE_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// B4 (Phase B): global shared `VenueCaps` sidecar.
 ///
@@ -116,6 +697,28 @@ pub(crate) static VENUE_CAPS_STORE: std::sync::OnceLock<
     Arc<tokio::sync::RwLock<engine_client::VenueCapsStore>>,
 > = std::sync::OnceLock::new();
 
+/// F4/BC-5: save failure classification.
+///
+/// Log-level contract:
+/// - `Cancelled`          → INFO (user intent; no error signal)
+/// - `IoError`            → WARN (operational OS failure)
+/// - `PathGuardViolation` → ERROR + "BUG:" prefix (should never happen)
+#[derive(Debug)]
+#[allow(dead_code)]
+// TODO(F6): remove #[allow(dead_code)] after Cancelled and PathGuardViolation are wired up.
+// Currently Cancelled is NOT called — save-as cancel is handled by NativeSaveAsPath(None) early return.
+// Note: save_error_classification.rs tests verify dead_code variants (Cancelled, PathGuardViolation)
+// to ensure log-level contracts are structurally pinned even before call sites are added.
+enum SaveError {
+    /// User dismissed the OS save dialog — not an error.
+    Cancelled,
+    /// OS-level I/O failure (disk full, permission denied, etc.).
+    IoError(std::io::ErrorKind),
+    /// Path guard check failed (`.py`-extension or persistent-state-dir rule).
+    /// This is a programming error, not an operational failure.
+    PathGuardViolation { reason: &'static str },
+}
+
 /// Spawn a long-lived bridge that mirrors the connection's broadcast
 /// venue lifecycle events into [`VENUE_READY_CACHE`]. Subscribing
 /// here, before the connection is published to `ENGINE_CONNECTION_TX`,
@@ -123,12 +726,50 @@ pub(crate) static VENUE_CAPS_STORE: std::sync::OnceLock<
 /// starting up. The task self-terminates when the broadcast channel
 /// closes (i.e. when the connection drops).
 fn spawn_venue_ready_bridge(rt: &tokio::runtime::Runtime, conn: &engine_client::EngineConnection) {
+    spawn_venue_ready_bridge_on(rt.handle(), conn);
+}
+
+/// F4/BC-5: log a save failure at the appropriate level.
+///
+/// | Variant              | Level | Notes                              |
+/// |----------------------|-------|------------------------------------|
+/// | `Cancelled`          | INFO  | user intent — no alert needed      |
+/// | `IoError`            | WARN  | OS-level failure, not a bug        |
+/// | `PathGuardViolation` | ERROR | programming error — "BUG:" prefix  |
+fn log_save_error(err: &SaveError, path: &std::path::Path) {
+    match err {
+        SaveError::Cancelled => {
+            log::info!("Save As cancelled path={}", path.display());
+        }
+        SaveError::IoError(kind) => {
+            log::warn!("Save failed kind={kind:?} path={}", path.display());
+        }
+        SaveError::PathGuardViolation { reason } => {
+            log::error!(
+                "BUG: path guard violation path={} reason={reason}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Same as [`spawn_venue_ready_bridge`] but accepts an explicit
+/// [`tokio::runtime::Handle`]. Used from already-async contexts (the
+/// reconnect loop in external mode, and the recovery loop in managed mode)
+/// where only a `Handle` is available — both call sites used to inline
+/// duplicate copies of the bridge body. H-Rust3: single source of truth
+/// for the `VenueReady`/`VenueError`/`VenueLoginStarted`/`VenueLoginCancelled`
+/// invalidation rules.
+fn spawn_venue_ready_bridge_on(
+    handle: &tokio::runtime::Handle,
+    conn: &engine_client::EngineConnection,
+) {
     let cache = match VENUE_READY_CACHE.get() {
         Some(cache) => Arc::clone(cache),
         None => return,
     };
     let mut event_rx = conn.subscribe_events();
-    rt.spawn(async move {
+    handle.spawn(async move {
         use engine_client::dto::EngineEvent;
         use tokio::sync::broadcast::error::RecvError;
         loop {
@@ -211,13 +852,32 @@ fn pick_free_port() -> Option<u16> {
 }
 
 fn main() {
+    // Register panic hook first — must be before any runtime or logger setup
+    // so that panics with API key payloads are masked before reaching stderr.
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<non-string panic payload>");
+        let masked = crate::mask_secrets::mask_secrets(msg);
+        eprintln!("[PANIC] {}", masked.as_str());
+        if let Some(loc) = info.location() {
+            eprintln!("  at {}:{}", loc.file(), loc.line());
+        }
+    }));
+
     let cli_args = cli::CliArgs::parse();
 
     // Capture startup mode before any runtime is created so Flowsurface::new()
     // can enforce D8 regardless of whether the HTTP control-API runtime builds.
-    APP_MODE
-        .set(engine_client::dto::AppMode::from(cli_args.mode))
-        .ok();
+    set_app_mode(engine_client::dto::AppMode::from(cli_args.mode));
+
+    // F3 DoD: if --saved-state was given, record it for Flowsurface::new().
+    if let Some(p) = cli_args.initial_state_path {
+        INITIAL_STATE_PATH.set(p).ok();
+    }
 
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -341,52 +1001,14 @@ fn main() {
                                     if let Some(cache) = VENUE_READY_CACHE.get() {
                                         cache.lock().await.clear();
                                     }
-                                    // Re-spawn the bridge against the
-                                    // fresh connection — the previous
-                                    // bridge's recv loop has already
-                                    // exited via RecvError::Closed.
-                                    let rt_handle = tokio::runtime::Handle::current();
-                                    let bridge_cache = VENUE_READY_CACHE.get().cloned();
-                                    if let Some(cache) = bridge_cache {
-                                        let mut event_rx = new_conn.subscribe_events();
-                                        rt_handle.spawn(async move {
-                                            use engine_client::dto::EngineEvent;
-                                            use tokio::sync::broadcast::error::RecvError;
-                                            loop {
-                                                match event_rx.recv().await {
-                                                    Ok(EngineEvent::VenueReady {
-                                                        venue, ..
-                                                    }) => {
-                                                        cache.lock().await.insert(venue);
-                                                    }
-                                                    Ok(EngineEvent::VenueError {
-                                                        venue, ..
-                                                    }) => {
-                                                        cache.lock().await.remove(&venue);
-                                                    }
-                                                    Ok(EngineEvent::VenueLoginStarted {
-                                                        venue,
-                                                        ..
-                                                    }) => {
-                                                        cache.lock().await.remove(&venue);
-                                                    }
-                                                    Ok(EngineEvent::VenueLoginCancelled {
-                                                        venue,
-                                                        ..
-                                                    }) => {
-                                                        cache.lock().await.remove(&venue);
-                                                    }
-                                                    Ok(_) => {}
-                                                    Err(RecvError::Lagged(n)) => {
-                                                        log::warn!(
-                                                            "venue_ready_bridge lagged, dropped {n}"
-                                                        );
-                                                    }
-                                                    Err(RecvError::Closed) => break,
-                                                }
-                                            }
-                                        });
-                                    }
+                                    // H-Rust3: re-spawn the bridge against the
+                                    // fresh connection via the shared helper —
+                                    // the previous bridge's recv loop has
+                                    // already exited via RecvError::Closed.
+                                    spawn_venue_ready_bridge_on(
+                                        &tokio::runtime::Handle::current(),
+                                        &new_conn,
+                                    );
                                     if let Some(tx) = ENGINE_CONNECTION_TX.get() {
                                         tx.send(Some(Arc::clone(&new_conn))).ok();
                                     }
@@ -505,36 +1127,9 @@ fn main() {
                         // publishing it to the watch channel — bridges
                         // any window between iced's subscription and
                         // the engine's first venue lifecycle emit.
-                        // Reviewer 2026-04-26 R3 (HIGH-2).
-                        let bridge_cache = VENUE_READY_CACHE.get().cloned();
-                        if let Some(cache) = bridge_cache {
-                            let mut event_rx = conn.subscribe_events();
-                            tokio::spawn(async move {
-                                use engine_client::dto::EngineEvent;
-                                use tokio::sync::broadcast::error::RecvError;
-                                loop {
-                                    match event_rx.recv().await {
-                                        Ok(EngineEvent::VenueReady { venue, .. }) => {
-                                            cache.lock().await.insert(venue);
-                                        }
-                                        Ok(EngineEvent::VenueError { venue, .. }) => {
-                                            cache.lock().await.remove(&venue);
-                                        }
-                                        Ok(EngineEvent::VenueLoginStarted { venue, .. }) => {
-                                            cache.lock().await.remove(&venue);
-                                        }
-                                        Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
-                                            cache.lock().await.remove(&venue);
-                                        }
-                                        Ok(_) => {}
-                                        Err(RecvError::Lagged(n)) => {
-                                            log::warn!("venue_ready_bridge lagged, dropped {n}");
-                                        }
-                                        Err(RecvError::Closed) => break,
-                                    }
-                                }
-                            });
-                        }
+                        // Reviewer 2026-04-26 R3 (HIGH-2). H-Rust3:
+                        // shared helper instead of an inlined copy.
+                        spawn_venue_ready_bridge_on(&tokio::runtime::Handle::current(), &conn);
 
                         if let Some(tx) = ENGINE_CONNECTION_TX.get() {
                             tx.send(Some(Arc::clone(&conn))).ok();
@@ -611,95 +1206,6 @@ fn main() {
 
     std::thread::spawn(data::cleanup_old_market_data);
 
-    // HTTP control API for E2E tests (T35-U5-RelogE2E, T7).
-    // Runs on a dedicated tokio runtime so it stays alive even when the engine
-    // runtime shuts down. Port 9876 conflicts are logged but non-fatal.
-    {
-        let api_rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .thread_name("control-api")
-            .build()
-            .inspect_err(|e| log::error!("replay_api: failed to build runtime — {e}"))
-            .ok();
-        if let Some(rt) = api_rt {
-            let order_api_state = {
-                use std::sync::atomic::AtomicBool;
-                use tokio::sync::Mutex;
-                // A-9 (H-2): 起動時に WAL から当日分を復元する。
-                // WAL ファイルが存在しない場合は空 map で初期化される（初回起動 / 昨日以前のみ）。
-                let wal_path = data::data_path(Some("tachibana_orders.jsonl"));
-                let session = Arc::new(Mutex::new(
-                    engine_client::order_session_state::OrderSessionState::load_from_wal(&wal_path),
-                ));
-                let engine_rx = ENGINE_CONNECTION_TX
-                    .get()
-                    .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
-                    .subscribe();
-                // N1.13 / N1.3: REPLAY モードフラグは CLI `--mode` から伝搬する。
-                // is_replay_mode=true のとき /api/order/submit は 503 で reject され、
-                // 発注は /api/replay/order に流れる。
-                let is_replay_mode = Arc::new(AtomicBool::new(cli_args.mode == cli::Mode::Replay));
-                // FLOWSURFACE_ORDER_GUARD_ENABLED=1 で発注 API を有効化する（明示 opt-in）。
-                // 未設定時はデフォルトの enabled=false のまま 503 で reject（誤発注防止）。
-                let guard_config =
-                    if std::env::var("FLOWSURFACE_ORDER_GUARD_ENABLED").as_deref() == Ok("1") {
-                        api::order_api::OrderGuardConfig::enabled_no_limits()
-                    } else {
-                        api::order_api::OrderGuardConfig::default()
-                    };
-                // N3.B: create shared market-closed flag and publish to static
-                // so Flowsurface::new() can clone it for TachibanaVenueEvent syncing.
-                let market_closed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                if ORDER_API_MARKET_CLOSED
-                    .set(Arc::clone(&market_closed_flag))
-                    .is_err()
-                {
-                    log::warn!(
-                        "ORDER_API_MARKET_CLOSED already initialized \
-                         — flag sharing may be broken"
-                    );
-                }
-                Arc::new(
-                    api::order_api::OrderApiState::new(session, engine_rx, is_replay_mode)
-                        .with_guard_config(guard_config)
-                        .with_market_closed_flag(market_closed_flag),
-                )
-            };
-            // N1.3: ReplayApiState は engine_rx + mode を保持して
-            // /api/replay/{load,order,portfolio} を駆動する。
-            let replay_api_state = {
-                let engine_rx = ENGINE_CONNECTION_TX
-                    .get()
-                    .expect("ENGINE_CONNECTION_TX must be set before replay_api::spawn")
-                    .subscribe();
-                Arc::new(replay_api::ReplayApiState::new(
-                    engine_rx,
-                    // R1b H-E: cli::Mode → AppMode を境界で写す。
-                    engine_client::dto::AppMode::from(cli_args.mode),
-                ))
-            };
-            // N1.16: cache Arc for Message::ReplayBuyingPower handler.
-            if REPLAY_API_STATE.set(Arc::clone(&replay_api_state)).is_err() {
-                log::warn!("replay_api: REPLAY_API_STATE already initialized");
-            }
-            // N1.6: AgentApiState はインメモリ narrative ストア。
-            let agent_api_state = Arc::new(api::agent_api::AgentApiState::new());
-            if let Some(rx) = replay_api::spawn(
-                rt.handle(),
-                Some(order_api_state),
-                Some(replay_api_state),
-                Some(agent_api_state),
-            ) {
-                CONTROL_API_RX.set(std::sync::Mutex::new(Some(rx))).ok();
-            }
-            std::thread::Builder::new()
-                .name("control-api-rt".into())
-                .spawn(move || rt.block_on(std::future::pending::<()>()))
-                .inspect_err(|e| log::error!("replay_api: failed to spawn runtime thread — {e}"))
-                .ok();
-        }
-    }
-
     let _ = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
         .settings(iced::Settings {
             antialiasing: true,
@@ -758,19 +1264,50 @@ struct Flowsurface {
     /// `GetPositions` IPC 送信時に記録した request_id。
     /// `PositionsUpdated` または `IpcError` 受信時にクリアする。重複送信抑止に使う。
     positions_request_id: Option<String>,
-    /// Shared market-closed flag for order_api pre-reject (N3.B).
-    /// Synced from `tachibana_state` on every `TachibanaVenueEvent`.
-    order_api_market_closed: Arc<std::sync::atomic::AtomicBool>,
     /// N4.3: user-selected strategy `.py` file path. `None` until the user picks
-    /// one via the OS file dialog.  Intended for future wiring to `/api/replay/start`
-    /// `strategy_file` field when a UI-triggered replay start is implemented.
+    /// one via the OS file dialog. Consumed by the Replay 起動フォーム modal as the
+    /// `strategy_file` field on `Command::StartEngine`.
     replay_strategy_file: Option<std::path::PathBuf>,
+    /// Phase 8.1c: Replay 起動フォーム modal。`File > Replay を開始...` で Some に、
+    /// Submit / Cancel で None に戻る。
+    replay_form_modal: Option<modal::replay_form::ReplayFormModal>,
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
     /// Cleared by `Message::DismissStrategyLoadError`.
     strategy_load_error: Option<String>,
-    /// Pending destination path for the "Save As" native menu action.
-    /// Set by `NativeSaveAsPath`, consumed by `NativeSaveAsWithSpecs`.
-    pending_save_path: Option<std::path::PathBuf>,
+    /// F4: Byte snapshot of the last explicit save (Save/SaveAs) or auto-save.
+    /// `None` = initial clean state (BC-9: treated as not dirty).
+    /// Updated by `save_state_to_disk` and `NativeSaveAsWithSpecs` success path (A-7).
+    last_saved_bytes: Option<Vec<u8>>,
+    /// F4: Window specs captured at the point `ExitRequested` fires while dirty.
+    /// Held until the user confirms "Discard and exit" or cancels the dialog.
+    pending_exit_windows: Option<HashMap<window::Id, WindowSpec>>,
+    /// F4: (json, path) captured when `NativeOpenFileApply` fires while dirty.
+    /// Held until the user confirms "Discard and open" / "Save and open" or cancels the dialog.
+    /// Includes the window specs captured at dialog-show time so SaveAndOpenFile can build state JSON.
+    pending_open_file: Option<(String, std::path::PathBuf, HashMap<window::Id, WindowSpec>)>,
+    /// F7 (M13): unified mode-switch state. `Some((target, guard))` while a
+    /// mode-switch restart is pending; `None` when idle. Replaces the previous
+    /// pair `pending_mode_switch` + `_mode_switch_guard` so the two cannot
+    /// drift out of sync (RAII: dropping the tuple clears both atomically).
+    /// The leading `_` on the field name silences the unused-field lint for
+    /// the guard half (it is held purely for its Drop side-effect).
+    mode_switch_state: Option<(engine_client::dto::AppMode, ModeSwitchGuard)>,
+    /// F8: Linux widget menu bar open/close state (DoD-12).
+    /// Only compiled on Linux; Win/macOS use the muda OS-native menu.
+    #[cfg(target_os = "linux")]
+    menu_bar: crate::menu_bar_state::State,
+    /// P9: W&B authentication state. Populated when Python check_auth subprocess responds.
+    /// Drives Tools submenu enabled/disabled state on all platforms.
+    wandb_auth: wandb_auth::WandbAuthState,
+    /// P9: local run-buffer index. Populated by run-buffer directory scan.
+    /// Drives "Submit to W&B" enabled state (needs at least one completed run).
+    run_buffer: wandb_auth::RunBufferIndex,
+    /// F9c: W&B サインインモーダル。SignInWandb で Some に、Cancel / ログイン完了で None。
+    wandb_signin_modal: Option<modal::wandb_signin::WandbSignInModal>,
+    /// F9c: W&B 送信モーダル。SubmitToWandb で Some に、Cancel / 送信完了で None。
+    wandb_submit_modal: Option<modal::wandb_submit::WandbSubmitModal>,
+    /// F9e: W&B 送信履歴モーダル。OpenSubmissionLog で run-buffer/ をスキャンして開く。
+    wandb_submission_log_modal: Option<modal::wandb_submission_log::WandbSubmissionLogModal>,
 }
 
 #[derive(Debug, Clone)]
@@ -818,6 +1355,9 @@ enum Message {
     WindowEvent(window::Event),
     ExitRequested(HashMap<window::Id, WindowSpec>),
     RestartRequested(Option<HashMap<window::Id, WindowSpec>>),
+    /// F4: After startup/restart, collect window specs then set last_saved_bytes baseline
+    /// so edits made before the first explicit Save can be detected as dirty (BC-9 fix).
+    SetDirtyBaseline(HashMap<window::Id, WindowSpec>),
     GoBack,
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
@@ -832,10 +1372,6 @@ enum Message {
     NetworkManager(modal::network_manager::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
-    /// Forwarded from the HTTP control API (port 9876). Used by E2E tests to
-    /// drive venue login / cancellation without a GUI. (T35-U5-RelogE2E / T7)
-    #[allow(dead_code)]
-    ControlApi(replay_api::ControlApiCommand),
     /// EC 約定通知（Phase O2 T2.4）。`OrderFilled` / `OrderCanceled` /
     /// `OrderExpired` を受信したときに toast を surface する。
     OrderToast(Toast),
@@ -902,7 +1438,6 @@ enum Message {
     },
     /// N1.16: `EngineEvent::ReplayBuyingPower` — REPLAY 仮想ポートフォリオ更新。
     ReplayBuyingPower {
-        strategy_id: String,
         cash: String,
         buying_power: String,
         equity: String,
@@ -935,18 +1470,159 @@ enum Message {
     DismissStrategyLoadError,
     /// Replay engine finished — auto-refresh the order list.
     ReplayFinished,
+    /// schema 3.12: `EngineEvent::ReplayDataLoaded` — replay 用ペインを
+    /// 自動生成する。GUI 内フォーム経由でも helper attach mode でも
+    /// 同じ経路を通る。`instrument_id` / `granularity` は schema 3.12 で
+    /// 追加された optional フィールドで、旧 engine（minor<12）からは
+    /// `None` で届く（その場合 `update()` 側で防御的に弾く）。
+    ReplayDataLoaded {
+        instrument_id: Option<String>,
+        granularity: Option<engine_client::dto::ReplayGranularity>,
+        #[allow(dead_code)]
+        bars_loaded: u64,
+        #[allow(dead_code)]
+        trades_loaded: u64,
+    },
     /// Native OS menu bar: HWND / window handle received; attach muda menu.
     NativeMenuSetup(u64),
     /// Native OS menu bar: user selected a menu item.
     NativeMenuAction(native_menu::Action),
+    /// F8: Linux widget menu bar message (toggle/pick/dismiss).
+    /// On Win/macOS this variant is never constructed; muda drives NativeMenuAction instead.
+    #[cfg(target_os = "linux")]
+    MenuBar(crate::menu_bar_state::BarMessage),
     /// Native OS menu bar — Save As: user picked a destination path.
     NativeSaveAsPath(Option<std::path::PathBuf>),
     /// Native OS menu bar — Save As: window specs collected, ready to write.
-    NativeSaveAsWithSpecs(HashMap<window::Id, WindowSpec>),
-    /// Native OS menu bar — Open: JSON string read from the user-picked file.
-    NativeOpenFileApply(String),
+    /// Carries the destination path directly so no shared slot is needed.
+    NativeSaveAsWithSpecs {
+        path: std::path::PathBuf,
+        windows: HashMap<window::Id, WindowSpec>,
+    },
+    /// Native OS menu bar — Open: JSON content and the source path of the picked file.
+    NativeOpenFileApply {
+        json: String,
+        path: std::path::PathBuf,
+    },
     /// Native OS menu bar — Open: dialog cancelled (user closed the picker).
     NativeOpenFileCancelled,
+    /// F4: two-step open — window specs collected, ready for dirty comparison.
+    /// `NativeOpenFileApply` validates JSON then dispatches here so the dirty
+    /// check can compare against bytes that include current window positions.
+    NativeOpenFilePendingCheck {
+        json: String,
+        path: std::path::PathBuf,
+        windows: HashMap<window::Id, WindowSpec>,
+    },
+    /// F6a: replay モードの `File > 開く...` で `.py` が選択されたときの結果。
+    /// `Some(path)` なら `Command::LoadStrategyScenario` を engine に送信し、
+    /// `None`（cancel）なら何もしない。
+    NativeOpenStrategyPicked(Option<std::path::PathBuf>),
+    /// F6a: `Event::StrategyScenarioLoaded` 受信時。`scenario` が `Some` なら
+    /// `ReplayFormModal` を prefill し、`None`（SCENARIO 不在）なら strategy_file
+    /// だけセットしてフォームは空のままにする。`current_path` は両ケースで更新。
+    StrategyScenarioLoadedEvent {
+        path: std::path::PathBuf,
+        scenario: Option<serde_json::Value>,
+    },
+    /// F6a: `Event::StrategyScenarioLoadFailed` 受信時。エラートーストを出し、
+    /// `current_path` はセットしない。
+    StrategyScenarioLoadFailedEvent {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+    /// Phase 8.1c: `File > Replay を開始...` メニューで表示。
+    ShowReplayDialog,
+    /// Phase 8.1c: Replay 起動フォーム modal の内部メッセージ。
+    ReplayFormMsg(modal::replay_form::Message),
+    /// F4: dirty-check confirm — user chose "破棄して終了" (discard and exit).
+    DiscardAndExit,
+    /// F4: dirty-check confirm — user chose "保存して終了" (save and exit).
+    SaveAndExit,
+    /// F4: dirty-check confirm — user chose "破棄して開く" (discard and open file).
+    DiscardAndOpenFile,
+    /// F4: dirty-check confirm — user chose "保存して開く" (save and open file).
+    SaveAndOpenFile,
+    /// F7: dirty-check confirm (live→replay) — user chose "破棄してモード切替".
+    DiscardAndSwitchMode,
+    /// F7: dirty-check confirm (live→replay) — user chose "保存してモード切替".
+    SaveAndSwitchMode,
+    /// F7: window specs collected for live→replay switch; proceed with dirty check.
+    SwitchModeWithSpecs {
+        target: engine_client::dto::AppMode,
+        windows: HashMap<window::Id, WindowSpec>,
+    },
+    /// F7: `EngineEvent::ReplayStopped` received — proceed with restart_with_mode.
+    ModeSwitchStopAcked,
+    /// F7: 5-second StopReplay timeout — send ForceStopReplay fallback.
+    ModeSwitchStopTimeout,
+    /// F7: 2-second ForceStopReplay timeout — give up and show error.
+    ModeSwitchForceStopTimeout,
+    /// F7: StopReplay or ForceStopReplay send() returned Err — connection is broken; abort immediately.
+    ModeSwitchSendFailed,
+    /// F7: window specs collected after "保存してモード切替" confirm; save then restart.
+    /// Routes through a dedicated message (not SwitchModeWithSpecs) to bypass the
+    /// dirty check — the user already confirmed, and re-checking would loop.
+    SwitchModeSaveComplete {
+        target: engine_client::dto::AppMode,
+        windows: HashMap<window::Id, WindowSpec>,
+    },
+    /// F7: engine returned `EngineBusy` for a `StopReplay` or `ForceStopReplay` command
+    /// while a mode switch is pending. Aborts the switch and shows an error dialog.
+    ModeSwitchEngineBusy(String),
+    /// Internal: genuinely does nothing in update(). Used to discard async Task
+    /// completion events where the result is irrelevant (fire-and-forget IPC sends).
+    Noop,
+    /// F5: Save As overwrite confirm — user confirmed overwriting the existing file.
+    /// Carries the path directly to avoid the `pending_save_path` shared slot.
+    ConfirmSaveAsOverwrite {
+        path: std::path::PathBuf,
+    },
+    /// H-3: async file save completion — fired by `Task::perform` in the
+    /// `NativeSaveAsWithSpecs` handler once the tokio async writes finish.
+    /// `error_kind = None` means both writes succeeded; `Some(kind)` means the
+    /// user-path write failed (saved-state.json write failure is best-effort and
+    /// only emits a WARN log).
+    NativeSaveComplete {
+        user_path: std::path::PathBuf,
+        json_bytes: Vec<u8>,
+        /// `None` = success, `Some(kind)` = I/O error on the user-specified path.
+        error_kind: Option<std::io::ErrorKind>,
+        /// `true` if saved-state.json was written successfully (auto-restore slot).
+        /// `false` means the named doc is saved but next startup will auto-restore old state.
+        saved_state_ok: bool,
+    },
+    /// F9d: `examples/wandb/submit_run.py` subprocess の完了通知。
+    /// `Ok(url)` = 成功 + W&B run URL。`Err(e)` = 送信失敗の理由。
+    WandbSubmitResult(Result<String, WandbSubmitError>),
+    /// F9d: `examples/wandb/check_auth.py` subprocess の完了通知。
+    /// `WandbAuthState` を受け取ってメニュー状態を更新する。
+    WandbAuthRefreshed(wandb_auth::WandbAuthState),
+    /// F9c: W&B 送信モーダル内部メッセージ。
+    WandbSubmitMsg(modal::wandb_submit::Message),
+    /// F9c: W&B サインインモーダル内部メッセージ。
+    WandbSignInMsg(modal::wandb_signin::Message),
+    /// F9e: W&B 送信履歴モーダル内部メッセージ。
+    WandbSubmissionLogMsg(modal::wandb_submission_log::Message),
+    /// F9e: `list_run_buffer_entries` 完了通知。Vec を受け取って履歴モーダルを開く。
+    WandbSubmissionLogScanned(Vec<wandb_auth::RunBufferEntry>),
+    /// F9c: `wandb login --relogin` subprocess の完了通知。
+    WandbLoginResult(Result<(), String>),
+    /// F9c: ログアウト確認ダイアログで「ログアウト」が押された。
+    WandbLogoutConfirmed,
+    /// F9c: `wandb logout` subprocess の完了通知。
+    WandbLogoutResult(Result<(), String>),
+    /// F9e: バッファ削除確認後の実行。
+    ClearRunBufferConfirmed,
+    /// M3 (R1 Phase 3-C): `RunBufferIndex::scan_async` の完了通知。
+    /// 結果でメニュー有効化判定 (`run_buffer`) を更新し、トースト表示も行う。
+    RunBufferIndexScanned {
+        index: wandb_auth::RunBufferIndex,
+        /// `OpenSubmissionLog` 経由ならトーストを出す。`true` のとき `notifications` に push する。
+        show_toast: bool,
+    },
+    /// M3 (R1 Phase 3-C): `tokio::fs::remove_dir_all` の完了通知。
+    RunBufferCleared(Result<(), String>),
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1031,7 +1707,7 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                     use tokio::sync::broadcast::error::RecvError;
                     match event {
                         Some(Ok(ev)) => {
-                            if let Some(msg) = map_engine_event_to_tachibana(ev) {
+                            if let Some(msg) = map_engine_event_to_message(ev) {
                                 yield msg;
                             }
                         }
@@ -1057,31 +1733,16 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
     }
 }
 
-/// Bridge the HTTP control API channel into the Iced message loop.
+/// Translate a low-level `EngineEvent` into a `Message` for the GUI's update loop.
 ///
-/// Takes ownership of the `mpsc::Receiver` stored in [`CONTROL_API_RX`] on
-/// first call (via `Option::take`).  Iced's `Subscription::run` identity is
-/// derived from the function pointer so this subscription is only created once
-/// per app lifetime — the `take()` on subsequent construction attempts (which
-/// don't happen in practice) would safely return `None` and exit the stream.
-fn replay_api_stream() -> impl iced::futures::Stream<Item = Message> + Send + 'static {
-    let rx_opt = CONTROL_API_RX
-        .get()
-        .and_then(|m| m.lock().ok())
-        .and_then(|mut g| g.take());
-    async_stream::stream! {
-        let Some(mut rx) = rx_opt else { return; };
-        while let Some(cmd) = rx.recv().await {
-            yield Message::ControlApi(cmd);
-        }
-    }
-}
-
-/// Translate a low-level `EngineEvent` into a `Message::TachibanaVenueEvent`
-/// when it concerns the Tachibana venue lifecycle, otherwise `None`.
-/// Other venues are funnelled through their existing exchange-event
-/// path and don't need state-machine treatment.
-fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<Message> {
+/// Despite the historical name (`map_engine_event_to_tachibana`), this function
+/// is the **single dispatch point** for every `EngineEvent` flowing into the
+/// app — Tachibana venue lifecycle, REPLAY portfolio updates, execution markers,
+/// strategy signals, replay completion, etc. New `EngineEvent` variants must
+/// add an arm here or be deliberately routed elsewhere; otherwise they fall
+/// into the trailing `_ => None` and are silently dropped (the bug class fixed
+/// by [docs/✅python-data-engine/replay-pane-auto-generate-fix.md]).
+pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -> Option<Message> {
     use engine_client::dto::EngineEvent;
     match ev {
         EngineEvent::VenueReady { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
@@ -1177,13 +1838,12 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
         }),
         // N1.16: REPLAY 仮想ポートフォリオ更新イベント
         EngineEvent::ReplayBuyingPower {
-            strategy_id,
             cash,
             buying_power,
             equity,
             ts_event_ms,
+            ..
         } => Some(Message::ReplayBuyingPower {
-            strategy_id,
             cash,
             buying_power,
             equity,
@@ -1228,16 +1888,79 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
         // well after APP_MODE is set; false (live) is the safe fallback so live-mode
         // engine restarts do not accidentally trigger ReplayFinished.
         EngineEvent::EngineStopped { .. } => {
-            let is_replay = APP_MODE
-                .get()
-                .map(|&m| m == engine_client::dto::AppMode::Replay)
-                .unwrap_or(false);
+            let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
             if is_replay {
                 Some(Message::ReplayFinished)
             } else {
                 None
             }
         }
+        // Phase 8: EngineBusy → GUI ユーザーへの warn toast
+        // Python engine が state guard で Command を拒否したときに emit される。
+        // F7: StopReplay / ForceStopReplay の EngineBusy のみ mode-switch 中断として扱う
+        //     (replay→live 専用)。live→replay の EngineBusy 行は別経路で対処する。
+        EngineEvent::EngineBusy {
+            attempted_command,
+            reason,
+            ..
+        } => {
+            use engine_client::dto::AttemptedCommand;
+            if matches!(
+                attempted_command,
+                AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay
+            ) {
+                Some(Message::ModeSwitchEngineBusy(reason))
+            } else {
+                Some(Message::OrderToast(Toast::warn(format!(
+                    "操作を受け付けられませんでした: {attempted_command} — {reason}"
+                ))))
+            }
+        }
+        // Phase 8.1b: multi-client 接続ライフサイクルイベント
+        // GUI 側では表示不要なため debug ログのみ出力して None を返す。
+        EngineEvent::ClientConnected { count } => {
+            log::debug!("engine: client connected (total={count})");
+            None
+        }
+        EngineEvent::ClientDisconnected { count } => {
+            log::debug!("engine: client disconnected (total={count})");
+            None
+        }
+        // F7: ReplayStopped — mode-switch pending confirmation
+        EngineEvent::ReplayStopped { .. } => Some(Message::ModeSwitchStopAcked),
+        // F6a: SCENARIO 抽出結果 → ReplayFormModal prefill
+        EngineEvent::StrategyScenarioLoaded {
+            path, scenario, ..
+        } => Some(Message::StrategyScenarioLoadedEvent {
+            path: std::path::PathBuf::from(path),
+            scenario,
+        }),
+        // F6a: SCENARIO 抽出失敗 → エラートースト
+        EngineEvent::StrategyScenarioLoadFailed { path, reason, .. } => {
+            Some(Message::StrategyScenarioLoadFailedEvent {
+                path: std::path::PathBuf::from(path),
+                reason,
+            })
+        }
+        // schema 3.12: replay 自動ペイン生成。GUI 内フォーム経由でも
+        // helper attach mode でも同じ経路を通すため、ここで一律変換する。
+        EngineEvent::ReplayDataLoaded {
+            instrument_id,
+            granularity,
+            bars_loaded,
+            trades_loaded,
+            ..
+        } => Some(Message::ReplayDataLoaded {
+            instrument_id,
+            granularity,
+            bars_loaded,
+            trades_loaded,
+        }),
+        // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
+        // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
+        // 正しいことを確認すること。`_ => None` で握り潰すと
+        // `ReplayDataLoaded` のように UI 機能が丸ごと欠落する事故を
+        // 再発させる（schema 3.12 の見逃しクラス）。
         _ => None,
     }
 }
@@ -1299,14 +2022,29 @@ fn apply_confirm_dialog_overlay<'a>(
 
 impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
-        let is_replay_mode = APP_MODE
-            .get()
-            .map(|m| *m == engine_client::dto::AppMode::Replay)
-            .expect("APP_MODE must be set before Flowsurface::new");
+        let is_replay_mode = app_mode() == engine_client::dto::AppMode::Replay;
 
         let saved_state = if is_replay_mode {
             log::info!("replay mode: skipping load_saved_state (D9-load), using defaults");
             layout::SavedState::default()
+        } else if let Some(p) = INITIAL_STATE_PATH.get() {
+            // F3 DoD: --saved-state was given; load from that path and prime CURRENT_PATH.
+            if let Some(path_str) = p.to_str() {
+                log::info!("--saved-state: loading from {path_str}");
+                let state = layout::load_saved_state_from(path_str);
+                // Prime CURRENT_PATH so Ctrl+S writes back to the same file.
+                match CURRENT_PATH.lock() {
+                    Ok(mut guard) => *guard = Some(p.clone()),
+                    Err(poisoned) => *poisoned.into_inner() = Some(p.clone()),
+                }
+                state
+            } else {
+                log::error!(
+                    "--saved-state path contains non-UTF-8 characters; \
+                     falling back to default layout. Path: {p:?}"
+                );
+                layout::SavedState::default()
+            }
         } else {
             layout::load_saved_state()
         };
@@ -1399,22 +2137,20 @@ impl Flowsurface {
             buying_power_request_id: None,
             order_list_request_id: None,
             positions_request_id: None,
-            // N3.B: reuse the flag that was published to ORDER_API_MARKET_CLOSED
-            // by main(). Falls back to a fresh flag (e.g. in tests / hot-reload).
-            order_api_market_closed: ORDER_API_MARKET_CLOSED
-                .get()
-                .map(Arc::clone)
-                .unwrap_or_else(|| {
-                    // Control API disabled (api_rt = None) — no HTTP handler will read this flag.
-                    log::debug!(
-                        "ORDER_API_MARKET_CLOSED not set; using standalone flag \
-                         (control API disabled)"
-                    );
-                    Arc::new(std::sync::atomic::AtomicBool::new(false))
-                }),
             replay_strategy_file: None,
+            replay_form_modal: None,
             strategy_load_error: None,
-            pending_save_path: None,
+            last_saved_bytes: None,
+            pending_exit_windows: None,
+            pending_open_file: None,
+            mode_switch_state: None,
+            #[cfg(target_os = "linux")]
+            menu_bar: crate::menu_bar_state::State::default(),
+            wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
+            run_buffer: wandb_auth::RunBufferIndex::empty(),
+            wandb_signin_modal: None,
+            wandb_submit_modal: None,
+            wandb_submission_log_modal: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -1434,6 +2170,46 @@ impl Flowsurface {
         let load_layout = state.load_layout(active_layout_id.unique, main_window_id);
         let setup_native_menu =
             iced::window::raw_id::<Message>(main_window_id).map(Message::NativeMenuSetup);
+        // F4 BC-9 fix: after startup collect window specs and set the dirty baseline so that
+        // edits made before the first explicit Save are detected as dirty (ケース 3/4).
+        // All active windows (main + any popouts restored by load_layout) are included so
+        // that the baseline matches the full serialised state and avoids false-dirty on quit
+        // when popouts are present (MEDIUM fix).
+        // Skipped in replay mode — dirty tracking is live-only.
+        let set_baseline = if is_replay_mode {
+            Task::none()
+        } else {
+            let mut baseline_ids = state
+                .active_dashboard()
+                .popout
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            baseline_ids.push(main_window_id);
+            window::collect_window_specs(baseline_ids, Message::SetDirtyBaseline)
+        };
+
+        // F9d: 起動時に check_auth.py を一度だけ非同期実行して wandb_auth を初期化する
+        let init_wandb_auth = Task::perform(
+            wandb_auth::refresh_wandb_auth(),
+            Message::WandbAuthRefreshed,
+        );
+        // F9 R2-M5: 起動時 run-buffer/ scan を async 化し、startup の同期 I/O を
+        // 排除する。`new()` から sync `RunBufferIndex::scan` を呼ばず、empty で
+        // 初期化したのち `Task::perform(scan_async, RunBufferIndexScanned)` を
+        // チェーンする。完了通知は通常経路（Message::RunBufferIndexScanned）
+        // で `refresh_tools_enable` まで自動で流れる。
+        state.run_buffer = wandb_auth::RunBufferIndex::empty();
+        let init_run_buffer = {
+            let base = data::data_path(Some("run-buffer"));
+            Task::perform(
+                async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
+                |index| Message::RunBufferIndexScanned {
+                    index,
+                    show_toast: false,
+                },
+            )
+        };
 
         (
             state,
@@ -1441,7 +2217,10 @@ impl Flowsurface {
                 .discard()
                 .chain(setup_native_menu)
                 .chain(load_layout)
-                .chain(launch_sidebar.map(Message::Sidebar)),
+                .chain(launch_sidebar.map(Message::Sidebar))
+                .chain(set_baseline)
+                .chain(init_wandb_auth)
+                .chain(init_run_buffer),
         )
     }
 
@@ -1481,14 +2260,6 @@ impl Flowsurface {
                 let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
                     .next(VenueEvent::Dismissed);
                 self.tachibana_state = next;
-                // H2 fix: sync the AtomicBool after dismiss so the order API
-                // pre-reject guard does not remain true after the banner is
-                // closed. Without this store() the flag stays `true` and
-                // SubmitOrder returns 409 MARKET_CLOSED indefinitely.
-                self.order_api_market_closed.store(
-                    self.tachibana_state.is_market_closed(),
-                    std::sync::atomic::Ordering::Release,
-                );
             }
             Message::RequestTachibanaLogin(trigger) => {
                 // Duplicate-press suppression: claim the LoginInFlight
@@ -1596,12 +2367,6 @@ impl Flowsurface {
                 let next = old_state.next(event);
                 let is_ready = next.is_ready();
                 self.tachibana_state = next;
-
-                // N3.B: sync market-closed state to order_api pre-reject flag.
-                self.order_api_market_closed.store(
-                    self.tachibana_state.is_market_closed(),
-                    std::sync::atomic::Ordering::Release,
-                );
 
                 // Bump only when the session *newly* becomes available from a
                 // state that required a login round-trip (LoginInFlight) or a
@@ -1934,9 +2699,119 @@ impl Flowsurface {
                     return window::collect_window_specs(active_windows, Message::ExitRequested);
                 }
             },
+            // F4 BC-9 fix: set dirty baseline after startup so edits before the first
+            // explicit Save are detected as dirty (ケース 3/4).
+            Message::SetDirtyBaseline(windows) => {
+                if let Some(json) = self.build_state_json(&windows) {
+                    self.last_saved_bytes = Some(json.into_bytes());
+                }
+                return Task::none();
+            }
             Message::ExitRequested(windows) => {
-                self.save_state_to_disk(&windows);
+                // HIGH fix: another dialog is already visible — ignore this close request
+                // until the user resolves it. Prevents F4 bypass via overlapping dialogs.
+                if self.confirm_dialog.is_some() {
+                    return Task::none();
+                }
+                // F4: check dirty before exiting (live mode only).
+                // Replay mode never writes state, so skip the check there.
+                let is_live = app_mode() == engine_client::dto::AppMode::Live;
+                if is_live && self.is_dirty(&windows) {
+                    // Store window specs so Discard/SaveAndExit can proceed later.
+                    self.pending_exit_windows = Some(windows);
+                    let dialog = screen::ConfirmDialog::new(
+                        "未保存の変更があります。".to_string(),
+                        Box::new(Message::DiscardAndExit),
+                    )
+                    .with_confirm_btn_text("破棄して終了".to_string())
+                    .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+                // Clean exit: auto-save. Failure is shown as a toast but does NOT
+                // abort exit — the user explicitly asked to quit.
+                if !self.save_state_to_disk(&windows) {
+                    self.notifications
+                        .push(Toast::error("自動保存に失敗しました".to_string()));
+                }
                 return iced::exit();
+            }
+            Message::DiscardAndExit => {
+                // User chose "破棄して終了" — do NOT save. saved-state.json stays as-is
+                // so the next launch restores the state from before the discarded edits.
+                self.confirm_dialog = None;
+                self.pending_exit_windows = None;
+                return iced::exit();
+            }
+            Message::SaveAndExit => {
+                // User chose "保存して終了" — save then exit.
+                // BC-5: if save fails, abort the exit and show an error (do not discard data).
+                self.confirm_dialog = None;
+                // F-M1 (R6): require a prior ExitRequested dirty check. `unwrap_or_default()`
+                // here would silently turn `None` into an empty HashMap and corrupt the saved
+                // layout. Log a warning and abort instead.
+                let Some(windows) = self.pending_exit_windows.take() else {
+                    log::warn!(
+                        "[SaveAndExit] pending_exit_windows is None — SaveAndExit dispatched without prior ExitRequested dirty check"
+                    );
+                    return Task::none();
+                };
+
+                let Some(json) = self.build_state_json(&windows) else {
+                    // replay mode has no state to save
+                    return iced::exit();
+                };
+
+                // If a named document is open, write to it first (primary save target).
+                let current_path = match CURRENT_PATH.lock() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                if let Some(p) = &current_path {
+                    if let Err(e) = std::fs::write(p, json.as_bytes()) {
+                        log_save_error(&SaveError::IoError(e.kind()), p);
+                        self.notifications.push(Toast::error(
+                            "保存に失敗しました。再試行してください。".to_string(),
+                        ));
+                        self.pending_exit_windows = Some(windows);
+                        let dialog = screen::ConfirmDialog::new(
+                            "未保存の変更があります。".to_string(),
+                            Box::new(Message::DiscardAndExit),
+                        )
+                        .with_confirm_btn_text("破棄して終了".to_string())
+                        .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                        self.confirm_dialog = Some(dialog);
+                        return Task::none();
+                    }
+                    // F-H1 (R6 / A-7): the named-doc write succeeded — update the dirty
+                    // baseline immediately. Without this, a subsequent saved-state.json
+                    // failure still triggers `iced::exit()` (current_path.is_some() branch)
+                    // but leaves `last_saved_bytes` stale, violating the
+                    // "明示 Save 直後に last_saved_bytes 更新" contract.
+                    self.last_saved_bytes = Some(json.as_bytes().to_vec());
+                }
+
+                // Also write to saved-state.json (auto-restore slot) and update last_saved_bytes.
+                // If CURRENT_PATH was successfully written, a saved-state.json failure is non-fatal
+                // (data is safe in the named doc). If there is no CURRENT_PATH, saved-state.json
+                // is the only copy — abort on failure.
+                let saved_ok = self.write_json_to_saved_state_disk(&json);
+                if current_path.is_some() || saved_ok {
+                    return iced::exit();
+                }
+
+                self.notifications.push(Toast::error(
+                    "保存に失敗しました。再試行してください。".to_string(),
+                ));
+                self.pending_exit_windows = Some(windows);
+                let dialog = screen::ConfirmDialog::new(
+                    "未保存の変更があります。".to_string(),
+                    Box::new(Message::DiscardAndExit),
+                )
+                .with_confirm_btn_text("破棄して終了".to_string())
+                .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                self.confirm_dialog = Some(dialog);
+                return Task::none();
             }
             Message::RestartRequested(Some(windows)) => {
                 self.save_state_to_disk(&windows);
@@ -1960,8 +2835,45 @@ impl Flowsurface {
             Message::GoBack => {
                 let main_window = self.main_window.id;
 
+                #[cfg(target_os = "linux")]
+                if self.menu_bar.open.is_some() {
+                    log::debug!(
+                        "widget_menu_bar: dismiss reason=esc open={:?}",
+                        self.menu_bar.open
+                    );
+                    self.menu_bar = crate::menu_bar_state::update(
+                        self.menu_bar.clone(),
+                        crate::menu_bar_state::BarMessage::Dismiss,
+                    );
+                    return Task::none();
+                }
+
                 if self.confirm_dialog.is_some() {
+                    // F5/M: if we're dismissing the overwrite confirm during a save-then-open
+                    // flow, restore the dirty-confirm so the user can retry or discard instead
+                    // of silently losing the pending open target.
+                    if self
+                        .confirm_dialog
+                        .as_ref()
+                        .is_some_and(|d| d.on_save.is_none())
+                        && self.pending_open_file.is_some()
+                    {
+                        self.confirm_dialog = Some(
+                            screen::ConfirmDialog::new(
+                                "未保存の変更があります。".to_string(),
+                                Box::new(Message::DiscardAndOpenFile),
+                            )
+                            .with_confirm_btn_text("破棄して開く".to_string())
+                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string()),
+                        );
+                        return Task::none();
+                    }
                     self.confirm_dialog = None;
+                    self.pending_open_file = None;
+                    self.pending_exit_windows = None;
+                    // F7: release mode-switch guard so the next SwitchMode attempt is not
+                    // permanently blocked after the user dismisses the dirty-confirm dialog.
+                    self.mode_switch_state = None;
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
                 } else {
@@ -2245,10 +3157,8 @@ impl Flowsurface {
                                         return Task::none();
                                     }
                                     if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                                        let is_replay = APP_MODE
-                                            .get()
-                                            .map(|m| *m == engine_client::dto::AppMode::Replay)
-                                            .unwrap_or(false);
+                                        let is_replay =
+                                            app_mode() == engine_client::dto::AppMode::Replay;
                                         let venue = if is_replay {
                                             "replay".to_string()
                                         } else {
@@ -2524,9 +3434,8 @@ impl Flowsurface {
                     ts_ms,
                 );
             }
-            // N1.16: REPLAY 仮想ポートフォリオ更新 — dashboard に配布 + HTTP キャッシュ更新
+            // N1.16: REPLAY 仮想ポートフォリオ更新 — dashboard に配布
             Message::ReplayBuyingPower {
-                strategy_id,
                 cash,
                 buying_power,
                 equity,
@@ -2535,24 +3444,11 @@ impl Flowsurface {
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut().distribute_replay_buying_power(
                     main_window,
-                    cash.clone(),
-                    buying_power.clone(),
-                    equity.clone(),
+                    cash,
+                    buying_power,
+                    equity,
                     ts_event_ms,
                 );
-                if let Some(state) = REPLAY_API_STATE.get() {
-                    state.update_replay_portfolio(
-                        strategy_id,
-                        cash,
-                        buying_power,
-                        equity,
-                        ts_event_ms,
-                    );
-                } else {
-                    log::warn!(
-                        "replay_api: REPLAY_API_STATE not initialized, skipping portfolio update"
-                    );
-                }
             }
             // Phase U3: IpcError → route to BuyingPower / OrderList panel if request_id matches
             Message::IpcError {
@@ -2610,6 +3506,43 @@ impl Flowsurface {
                 self.strategy_load_error = None;
                 return Task::none();
             }
+            // schema 3.12: replay 用ペイン自動生成。GUI 内フォーム経由でも
+            // helper attach mode でも同じ経路を通す。
+            Message::ReplayDataLoaded {
+                instrument_id,
+                granularity,
+                ..
+            } => {
+                let Some(instrument_id) = instrument_id.filter(|s| !s.is_empty()) else {
+                    log::error!(
+                        "ReplayDataLoaded: instrument_id missing — auto pane generation \
+                         skipped. (Old engine schema_minor<12 or schema bug.)"
+                    );
+                    return Task::none();
+                };
+                let timeframe = match granularity {
+                    Some(engine_client::dto::ReplayGranularity::Daily) => {
+                        Some(exchange::Timeframe::D1)
+                    }
+                    Some(engine_client::dto::ReplayGranularity::Minute) => {
+                        Some(exchange::Timeframe::M1)
+                    }
+                    // Trade tick：bar 無しなので CandlestickChart はスキップ。
+                    Some(engine_client::dto::ReplayGranularity::Trade) | None => None,
+                };
+                let main_window_id = self.main_window.id;
+                log::info!(
+                    "ReplayDataLoaded: auto-generating replay panes for \
+                     instrument_id={instrument_id:?} timeframe={timeframe:?}"
+                );
+                return self
+                    .active_dashboard_mut()
+                    .auto_generate_replay_panes(main_window_id, &instrument_id, timeframe)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    });
+            }
             // Replay engine finished → auto-refresh order list from Python's in-memory fills.
             Message::ReplayFinished => {
                 if let Some(conn) = self.engine_connection.as_ref().cloned() {
@@ -2642,46 +3575,163 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
+            // ── Linux widget menu bar ──────────────────────────────────────
+            #[cfg(target_os = "linux")]
+            Message::MenuBar(bar_msg) => {
+                use crate::menu_bar_state::{self, BarMessage};
+                let native = if let BarMessage::Pick(ref action) = bar_msg {
+                    let mapped = crate::widget_menu_bar::to_native_action(action);
+                    if mapped.is_none() {
+                        // H5 (F8 R1): a Pick whose `Action` does not map to a
+                        // `native_menu::Action` is silently dropped. That can
+                        // only happen if a new `menu::Action` variant is added
+                        // without extending `to_native_action` — surface it as
+                        // a warning so the missing wiring is obvious in logs.
+                        log::warn!(
+                            "widget_menu_bar: to_native_action returned None for {action:?} \
+                             — Pick will be dropped (missing native_menu::Action mapping)"
+                        );
+                    }
+                    mapped
+                } else {
+                    None
+                };
+                match &bar_msg {
+                    BarMessage::Toggle(top) if self.menu_bar.open != Some(*top) => {
+                        log::debug!("widget_menu_bar: open={top:?}");
+                    }
+                    // M3 (F8 R1): re-toggling the same top-level menu closes
+                    // it. Surface this as its own log line so transcript
+                    // analysis can tell "user opened then re-clicked the same
+                    // button" apart from outside-click / focus-lost dismissals.
+                    BarMessage::Toggle(top) => {
+                        log::debug!("widget_menu_bar: toggle_close reason=re_toggle top={top:?}");
+                    }
+                    BarMessage::Dismiss => {
+                        log::debug!(
+                            "widget_menu_bar: dismiss reason=outside_click open={:?}",
+                            self.menu_bar.open
+                        );
+                    }
+                    BarMessage::DismissFocusLost => {
+                        log::debug!(
+                            "widget_menu_bar: dismiss reason=focus_lost open={:?}",
+                            self.menu_bar.open
+                        );
+                    }
+                    // F8 R2 / M-B: exhaustive match. `Pick(_)` is the only
+                    // remaining variant after `BarMoved` was abolished — the
+                    // `to_native_action` mapping above already handles its
+                    // dispatch, so this arm is a deliberate no-op for logging.
+                    // Keeping the match exhaustive (no wildcard) means future
+                    // `BarMessage` additions surface as compile errors.
+                    BarMessage::Pick(_) => {}
+                }
+                self.menu_bar = menu_bar_state::update(self.menu_bar.clone(), bar_msg);
+                if let Some(native_action) = native {
+                    return Task::done(Message::NativeMenuAction(native_action));
+                }
+                return Task::none();
+            }
             // ── Native OS menu bar ──────────────────────────────────────────
             Message::NativeMenuSetup(raw_id) => {
-                let app_mode = APP_MODE
-                    .get()
-                    .copied()
-                    .unwrap_or(engine_client::dto::AppMode::Live);
-                native_menu::attach(raw_id, app_mode);
+                native_menu::attach(raw_id, app_mode(), &self.wandb_auth, &self.run_buffer);
                 return Task::none();
             }
             Message::NativeMenuAction(action) => {
                 use native_menu::Action;
                 match action {
                     Action::OpenFile => {
+                        // F6a: replay モードでは `.py` 戦略ファイルを開いて
+                        // SCENARIO を Python 側で抽出する。live モードは従来通り
+                        // `saved-state.json` を読む。
+                        if app_mode() == engine_client::dto::AppMode::Replay {
+                            return Task::perform(
+                                async {
+                                    rfd::AsyncFileDialog::new()
+                                        .add_filter("Python", &["py"])
+                                        .set_title("戦略ファイルを開く")
+                                        .pick_file()
+                                        .await
+                                        .map(|h| h.path().to_owned())
+                                },
+                                Message::NativeOpenStrategyPicked,
+                            );
+                        }
                         return Task::perform(
                             async {
-                                // Returns None if the dialog was cancelled; Some(Result) otherwise.
+                                // Returns None if cancelled; Some((json_result, path)) otherwise.
                                 let handle = rfd::AsyncFileDialog::new()
                                     .add_filter("JSON", &["json"])
                                     .set_title("設定ファイルを開く")
                                     .pick_file()
                                     .await?;
+                                let path = handle.path().to_owned();
                                 let bytes = handle.read().await;
-                                Some(String::from_utf8(bytes).map_err(|e| e.to_string()))
+                                let result = String::from_utf8(bytes).map_err(|e| e.to_string());
+                                Some((result, path))
                             },
                             |result| match result {
                                 None => Message::NativeOpenFileCancelled,
-                                Some(Ok(json)) => Message::NativeOpenFileApply(json),
-                                Some(Err(e)) => Message::OrderToast(Toast::error(format!(
+                                Some((Ok(json), path)) => {
+                                    Message::NativeOpenFileApply { json, path }
+                                }
+                                Some((Err(e), _)) => Message::OrderToast(Toast::error(format!(
                                     "ファイルを読み込めませんでした: {e}"
                                 ))),
                             },
                         );
                     }
+                    Action::Save => {
+                        // F-M2 (R6): suppress when a confirm_dialog is already on screen.
+                        // Otherwise Ctrl+S during a dirty/overwrite confirm spawns a second
+                        // rfd save_file() dialog, multi-launching the OS picker.
+                        if self.confirm_dialog.is_some() {
+                            return Task::none();
+                        }
+                        // If a current path is known, write to it directly.
+                        // Otherwise fall back to the Save As dialog.
+                        let path = match CURRENT_PATH.lock() {
+                            Ok(guard) => guard.clone(),
+                            Err(poisoned) => poisoned.into_inner().clone(),
+                        };
+                        if let Some(p) = path {
+                            // Capture path in the closure — no shared slot needed.
+                            let mut active_windows: Vec<window::Id> =
+                                self.active_dashboard().popout.keys().copied().collect();
+                            active_windows.push(self.main_window.id);
+                            return window::collect_window_specs(active_windows, move |windows| {
+                                Message::NativeSaveAsWithSpecs {
+                                    path: p.clone(),
+                                    windows,
+                                }
+                            });
+                        } else {
+                            return Task::perform(
+                                async {
+                                    rfd::AsyncFileDialog::new()
+                                        .add_filter("JSON", &["json"])
+                                        .set_file_name("saved-state.json")
+                                        .set_title("保存先を選択")
+                                        .save_file()
+                                        .await
+                                        .map(|h| h.path().to_owned())
+                                },
+                                Message::NativeSaveAsPath,
+                            );
+                        }
+                    }
                     Action::SaveAs => {
+                        // F-M2 (R6): see Action::Save — same dialog re-entrancy guard.
+                        if self.confirm_dialog.is_some() {
+                            return Task::none();
+                        }
                         return Task::perform(
                             async {
                                 rfd::AsyncFileDialog::new()
                                     .add_filter("JSON", &["json"])
                                     .set_file_name("saved-state.json")
-                                    .set_title("名前を付けて保存")
+                                    .set_title("名前を付けて保存\u{2026}（Save As）")
                                     .save_file()
                                     .await
                                     .map(|h| h.path().to_owned())
@@ -2689,49 +3739,546 @@ impl Flowsurface {
                             Message::NativeSaveAsPath,
                         );
                     }
-                    Action::OpenStrategy => {
-                        return Task::perform(
-                            async {
-                                rfd::AsyncFileDialog::new()
-                                    .add_filter("Python", &["py"])
-                                    .set_title("ストラテジーファイルを開く")
-                                    .pick_file()
-                                    .await
-                                    .map(|h| h.path().to_owned())
-                            },
-                            Message::StrategyFilePicked,
+                    Action::OpenReplayDialog => {
+                        return Task::done(Message::ShowReplayDialog);
+                    }
+                    Action::Quit => {
+                        let active_windows: Vec<window::Id> = self
+                            .active_dashboard()
+                            .popout
+                            .keys()
+                            .copied()
+                            .chain(std::iter::once(self.main_window.id))
+                            .collect();
+                        return window::collect_window_specs(
+                            active_windows,
+                            Message::ExitRequested,
                         );
+                    }
+                    // ── F9c: Tools / W&B submenu ──────────────────────────────────────
+                    Action::SubmitToWandb => {
+                        // ガード 1: 既に送信中なら no-op
+                        if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+                            self.notifications
+                                .push(Toast::info("送信中です...".to_string()));
+                            return Task::none();
+                        }
+                        // ガード 2: 未認証なら no-op
+                        if !self.wandb_auth.authenticated {
+                            self.notifications
+                                .push(Toast::warn("W&B にログインしてください".to_string()));
+                            return Task::none();
+                        }
+                        // ガード 3: completed run がなければ no-op
+                        let Some(run_id) = self.run_buffer.latest_completed.clone() else {
+                            self.notifications
+                                .push(Toast::warn("送信可能な run がありません".to_string()));
+                            return Task::none();
+                        };
+
+                        // F9c: モーダルを表示してユーザーに project / run_name / tags を
+                        // 確認・編集させてから送信する（P9 spec「メニュー押下 → WandbSubmitModal 表示」）
+                        if self.wandb_submit_modal.is_none() {
+                            let auth_display =
+                                modal::wandb_submit::AuthDisplayState::from(&self.wandb_auth);
+                            self.wandb_submit_modal =
+                                Some(modal::wandb_submit::WandbSubmitModal::new(
+                                    &run_id,
+                                    run_id.split('-').nth(1).unwrap_or("strategy"),
+                                    auth_display,
+                                ));
+                        }
+                        return Task::none();
+                    }
+                    Action::SignInWandb => {
+                        if self.wandb_signin_modal.is_none() {
+                            self.wandb_signin_modal =
+                                Some(modal::wandb_signin::WandbSignInModal::new());
+                        }
+                        return Task::none();
+                    }
+                    Action::SignOutWandb => {
+                        if self.confirm_dialog.is_none() {
+                            let dialog = screen::ConfirmDialog::new(
+                                "W&B からログアウトします。\nnetrc のエントリが削除されます。"
+                                    .to_string(),
+                                Box::new(Message::WandbLogoutConfirmed),
+                            )
+                            .with_confirm_btn_text("ログアウト".to_string());
+                            self.confirm_dialog = Some(dialog);
+                        }
+                        return Task::none();
+                    }
+                    Action::OpenSubmissionLog => {
+                        // F9e: run-buffer/ 配下の全 run を async でスキャンして
+                        // 履歴モーダルに渡す。iced update loop をブロックしない
+                        // よう Task::perform 経由で list_run_buffer_entries を
+                        // 呼ぶ。受信側は Message::WandbSubmissionLogScanned。
+                        if self.wandb_submission_log_modal.is_some() {
+                            return Task::none();
+                        }
+                        let base = data::data_path(Some("run-buffer"));
+                        return Task::perform(
+                            async move { wandb_auth::list_run_buffer_entries(&base).await },
+                            Message::WandbSubmissionLogScanned,
+                        );
+                    }
+                    Action::ClearRunBuffer => {
+                        if self.confirm_dialog.is_none() {
+                            let base = data::data_path(Some("run-buffer"));
+                            let dialog = screen::ConfirmDialog::new(
+                                format!("run-buffer を削除しますか？\nパス: {}", base.display()),
+                                Box::new(Message::ClearRunBufferConfirmed),
+                            )
+                            .with_confirm_btn_text("削除".to_string());
+                            self.confirm_dialog = Some(dialog);
+                        }
+                        return Task::none();
+                    }
+                    Action::SwitchMode(target) => {
+                        use engine_client::dto::AppMode;
+                        // Guard: don't start a mode switch if another dialog is already showing
+                        if self.confirm_dialog.is_some() {
+                            return Task::none();
+                        }
+                        let current = app_mode();
+                        // Same mode — no-op (menu item should be disabled, but be defensive)
+                        if current == target {
+                            return Task::none();
+                        }
+                        // Prevent re-entry: if already switching, no-op
+                        let Some(guard) = ModeSwitchGuard::try_acquire() else {
+                            return Task::none();
+                        };
+                        // M2 (lightweight): record MODE_SWITCHING acquisition so
+                        // any subsequent SUBMIT_IN_FLIGHT / APP_MODE / CURRENT_PATH
+                        // acquisitions on this thread can be order-checked.
+                        lock_order_acquire("MODE_SWITCHING");
+                        self.mode_switch_state = Some((target, guard));
+
+                        // Axis-5: reject if a W&B submit is in progress (統一決定 61, 68)
+                        if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+                            self.mode_switch_state = None;
+                            let dialog = screen::ConfirmDialog::new(
+                                "W&B 送信中です。\n送信が完了してからモードを切り替えてください。"
+                                    .to_string(),
+                                Box::new(Message::ToggleDialogModal(None)),
+                            )
+                            .with_confirm_btn_text("閉じる".to_string());
+                            self.confirm_dialog = Some(dialog);
+                            return Task::none();
+                        }
+
+                        match (current, target) {
+                            (AppMode::Live, AppMode::Replay) => {
+                                // WAL in-flight check: reject if there are unconfirmed orders
+                                if has_wal_in_flight_orders() {
+                                    self.mode_switch_state = None;
+                                    let dialog = screen::ConfirmDialog::new(
+                                        "未約定の注文があります。\nモードを切り替えることができません。"
+                                            .to_string(),
+                                        Box::new(Message::ToggleDialogModal(None)),
+                                    )
+                                    .with_confirm_btn_text("閉じる".to_string());
+                                    self.confirm_dialog = Some(dialog);
+                                    return Task::none();
+                                }
+                                // Collect window specs for dirty check
+                                let mut active_windows: Vec<window::Id> =
+                                    self.active_dashboard().popout.keys().copied().collect();
+                                active_windows.push(self.main_window.id);
+                                return window::collect_window_specs(
+                                    active_windows,
+                                    move |windows| Message::SwitchModeWithSpecs {
+                                        target: AppMode::Replay,
+                                        windows,
+                                    },
+                                );
+                            }
+                            (AppMode::Replay, AppMode::Live) => {
+                                // Send StopReplay then wait for ReplayStopped (with timeout).
+                                // M13: mode_switch_state was already populated above with
+                                // target == AppMode::Live, so no separate pending field write.
+                                if let Some(conn) = self.engine_connection.clone() {
+                                    let request_id = uuid::Uuid::new_v4().to_string();
+                                    // Send StopReplay. If send fails immediately (broken socket),
+                                    // abort without waiting for the 5-second timeout.
+                                    let send_task = Task::perform(
+                                        async move {
+                                            conn.send(engine_client::dto::Command::StopReplay {
+                                                request_id,
+                                            })
+                                            .await
+                                        },
+                                        |result| match result {
+                                            Ok(()) => Message::Noop,
+                                            Err(_) => Message::ModeSwitchSendFailed,
+                                        },
+                                    );
+                                    // 5-second timeout
+                                    let timeout_task = Task::perform(
+                                        async {
+                                            tokio::time::sleep(std::time::Duration::from_secs(5))
+                                                .await;
+                                        },
+                                        |_| Message::ModeSwitchStopTimeout,
+                                    );
+                                    return Task::batch([send_task, timeout_task]);
+                                } else {
+                                    // No engine connection — just restart directly.
+                                    // mode_switch_state stays Some until restart_with_mode runs;
+                                    // restart_with_mode replaces *self, dropping the guard.
+                                    return self.restart_with_mode(AppMode::Live);
+                                }
+                            }
+                            _ => {
+                                self.mode_switch_state = None;
+                                return Task::none();
+                            }
+                        }
                     }
                 }
             }
+            // F6a: replay モードで `.py` を Open dialog で選択した結果を受け取り、
+            // engine に `Command::LoadStrategyScenario` を発行する。
+            Message::NativeOpenStrategyPicked(picked) => {
+                let Some(path) = picked else {
+                    return Task::none();
+                };
+                // モードガード: live で誤って `.py` が選ばれても無視する。
+                if app_mode() != engine_client::dto::AppMode::Replay {
+                    log::warn!("NativeOpenStrategyPicked received outside replay mode — dropping");
+                    return Task::none();
+                }
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    self.notifications.push(Toast::error(
+                        "engine に接続されていないため SCENARIO を読み込めません".to_string(),
+                    ));
+                    return Task::none();
+                };
+                let path_str = path.to_string_lossy().into_owned();
+                return Task::perform(
+                    async move {
+                        let request_id = uuid::Uuid::new_v4().to_string();
+                        conn.send(engine_client::dto::Command::LoadStrategyScenario {
+                            request_id,
+                            path: path_str,
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                    },
+                    |res| match res {
+                        Ok(()) => Message::Noop,
+                        Err(err) => Message::OrderToast(Toast::error(format!(
+                            "戦略ファイルの読み込み要求に失敗しました: {err}"
+                        ))),
+                    },
+                );
+            }
+            // F6a: SCENARIO 抽出成功 → ReplayFormModal を prefill。modal が
+            // 開いていなければ新規生成する（GUI で `Open` 直後はまだ modal が
+            // 出ていない正規ルート）。`current_path` は両ケース（scenario
+            // None / Some）でセットする。
+            Message::StrategyScenarioLoadedEvent { path, scenario } => {
+                // M-7: poison recovery via `into_inner()` so a prior panic does
+                // not silently drop the new path.
+                let mut guard = match CURRENT_PATH.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                *guard = Some(path.clone());
+                drop(guard);
+                let form = self
+                    .replay_form_modal
+                    .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
+                match scenario {
+                    Some(value) => form.prefill_from_scenario(path, &value),
+                    None => form.set_strategy_file_only(path),
+                }
+                return Task::none();
+            }
+            // F6a: SCENARIO 抽出失敗 → トースト表示。`current_path` は更新しない。
+            Message::StrategyScenarioLoadFailedEvent { path, reason } => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                self.notifications.push(Toast::error(format!(
+                    "{name} を読み込めませんでした: {reason}"
+                )));
+                return Task::none();
+            }
+            // Phase 8.1c: Replay 起動フォームを開く
+            Message::ShowReplayDialog => {
+                self.replay_form_modal = Some(modal::replay_form::ReplayFormModal::default());
+                return Task::none();
+            }
+            // Phase 8.1c: Replay フォーム内部メッセージの処理
+            Message::ReplayFormMsg(modal::replay_form::Message::PickStrategyFile) => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("Python", &["py"])
+                            .set_title("戦略ファイルを選択")
+                            .pick_file()
+                            .await
+                            .map(|h| h.path().to_owned())
+                    },
+                    |path| {
+                        Message::ReplayFormMsg(modal::replay_form::Message::StrategyFilePicked(
+                            path,
+                        ))
+                    },
+                );
+            }
+            Message::ReplayFormMsg(msg) => {
+                if let Some(form) = self.replay_form_modal.as_mut() {
+                    match form.update(msg) {
+                        Some(modal::replay_form::Action::Cancel) => {
+                            self.replay_form_modal = None;
+                        }
+                        Some(modal::replay_form::Action::Submit {
+                            instrument_id,
+                            start_date,
+                            end_date,
+                            granularity,
+                            strategy_file,
+                            initial_cash,
+                        }) => {
+                            self.replay_form_modal = None;
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let strategy_file_str =
+                                    strategy_file.to_string_lossy().into_owned();
+                                let gran_dto = granularity.to_dto();
+                                return Task::perform(
+                                    async move {
+                                        let load_req_id = uuid::Uuid::new_v4().to_string();
+                                        conn.send(engine_client::dto::Command::LoadReplayData {
+                                            request_id: load_req_id,
+                                            instrument_id: instrument_id.clone(),
+                                            start_date: start_date.clone(),
+                                            end_date: end_date.clone(),
+                                            granularity: gran_dto.clone(),
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())?;
+                                        let start_req_id = uuid::Uuid::new_v4().to_string();
+                                        conn.send(engine_client::dto::Command::StartEngine {
+                                            request_id: start_req_id,
+                                            engine: engine_client::dto::EngineKind::Backtest,
+                                            strategy_id: "user-strategy".to_string(),
+                                            config: engine_client::dto::EngineStartConfig {
+                                                instrument_id,
+                                                start_date,
+                                                end_date,
+                                                initial_cash: initial_cash.to_string(),
+                                                granularity: gran_dto,
+                                                strategy_file: Some(strategy_file_str),
+                                                strategy_init_kwargs: None,
+                                            },
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())?;
+                                        Ok::<(), String>(())
+                                    },
+                                    |res| match res {
+                                        Ok(()) => Message::OrderToast(Toast::info(
+                                            "Replay を開始しました".to_string(),
+                                        )),
+                                        Err(e) => Message::OrderToast(Toast::error(format!(
+                                            "Replay 起動失敗: {e}"
+                                        ))),
+                                    },
+                                );
+                            }
+                        }
+                        Some(modal::replay_form::Action::PickStrategyFile) => {
+                            // PickStrategyFile は上の専用アームで処理される
+                        }
+                        None => {}
+                    }
+                }
+                return Task::none();
+            }
             Message::NativeSaveAsPath(Some(path)) => {
-                self.pending_save_path = Some(path);
+                if self.confirm_dialog.is_some() {
+                    return Task::none();
+                }
+                // F5: if the target file already exists, ask the user to confirm overwrite.
+                if path.exists() {
+                    let file_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    let dialog = screen::ConfirmDialog::new(
+                        format!("「{file_name}」はすでに存在します。上書きしますか？"),
+                        // Carry path in the message so no shared slot is needed.
+                        Box::new(Message::ConfirmSaveAsOverwrite { path }),
+                    )
+                    .with_confirm_btn_text("上書き保存".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
                 let mut active_windows: Vec<window::Id> =
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
-                return window::collect_window_specs(
-                    active_windows,
-                    Message::NativeSaveAsWithSpecs,
-                );
+                return window::collect_window_specs(active_windows, move |windows| {
+                    Message::NativeSaveAsWithSpecs {
+                        path: path.clone(),
+                        windows,
+                    }
+                });
+            }
+            Message::ConfirmSaveAsOverwrite { path } => {
+                // M-3: guard against arriving without an open dialog (race condition).
+                // Mirrors the confirm_dialog.is_none() pattern used in NativeOpenFilePendingCheck
+                // and ExitRequested to prevent double-processing.
+                if self.confirm_dialog.is_none() {
+                    return Task::none();
+                }
+                self.confirm_dialog = None;
+                // Proceed to collect specs with the path carried in the message.
+                let mut active_windows: Vec<window::Id> =
+                    self.active_dashboard().popout.keys().copied().collect();
+                active_windows.push(self.main_window.id);
+                return window::collect_window_specs(active_windows, move |windows| {
+                    Message::NativeSaveAsWithSpecs {
+                        path: path.clone(),
+                        windows,
+                    }
+                });
             }
             Message::NativeSaveAsPath(None) => {
+                // Save As dialog cancelled. If a "save-then-open" flow was in progress
+                // (SaveAndOpenFile triggered this when CURRENT_PATH was None), restore the
+                // confirm dialog so the user can choose Discard or retry Save.
+                if self.pending_open_file.is_some() {
+                    let dialog = screen::ConfirmDialog::new(
+                        "未保存の変更があります。".to_string(),
+                        Box::new(Message::DiscardAndOpenFile),
+                    )
+                    .with_confirm_btn_text("破棄して開く".to_string())
+                    .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
+                    self.confirm_dialog = Some(dialog);
+                }
                 return Task::none();
             }
-            Message::NativeSaveAsWithSpecs(windows) => {
-                let Some(path) = self.pending_save_path.take() else {
+            Message::NativeSaveAsWithSpecs { path, windows } => {
+                // H-5: build JSON once and reuse for both the user path and saved-state.json,
+                // avoiding a second build_state_json call inside save_state_to_disk.
+                let Some(json) = self.build_state_json(&windows) else {
+                    log::warn!(
+                        "[NativeSaveAsWithSpecs] build_state_json returned None \
+                         (replay mode or APP_MODE uninitialised) — skipping write to {}",
+                        path.display()
+                    );
                     return Task::none();
                 };
-                if let Some(json) = self.build_state_json(&windows) {
-                    match std::fs::write(&path, &json) {
-                        Ok(()) => {
-                            log::info!("Saved state to {}", path.display());
-                            self.notifications
-                                .push(Toast::info(format!("保存しました: {}", path.display())));
+                // H-3: offload both blocking writes to a tokio async task so the
+                // iced update loop is never blocked by disk I/O.
+                let json_bytes = json.into_bytes();
+                let user_path = path.clone();
+                let saved_state_path = data::SAVED_STATE_PATH;
+                return Task::perform(
+                    async move {
+                        // A-3: write to user-specified path first; only on success
+                        // also write saved-state.json (keep auto-restore slot in sync).
+                        match tokio::fs::write(&user_path, &json_bytes).await {
+                            Ok(()) => {
+                                let saved_state_ok =
+                                    tokio::fs::write(saved_state_path, &json_bytes)
+                                        .await
+                                        .map_err(|e| {
+                                            log::warn!(
+                                                "[NativeSaveComplete] failed to write \
+                                                 saved-state.json: {e}"
+                                            );
+                                        })
+                                        .is_ok();
+                                (user_path, json_bytes, None, saved_state_ok)
+                            }
+                            Err(e) => (user_path, json_bytes, Some(e.kind()), false),
                         }
-                        Err(e) => {
-                            log::error!("Failed to write to {}: {e}", path.display());
-                            self.notifications
-                                .push(Toast::error(format!("保存に失敗しました: {e}")));
+                    },
+                    |(user_path, json_bytes, error_kind, saved_state_ok)| {
+                        Message::NativeSaveComplete {
+                            user_path,
+                            json_bytes,
+                            error_kind,
+                            saved_state_ok,
+                        }
+                    },
+                );
+            }
+            // H-3: completion handler for the async NativeSaveAsWithSpecs Task::perform.
+            Message::NativeSaveComplete {
+                user_path,
+                json_bytes,
+                error_kind,
+                saved_state_ok,
+            } => {
+                match error_kind {
+                    None => {
+                        // A-7: update dirty baseline so is_dirty() returns false.
+                        self.last_saved_bytes = Some(json_bytes);
+                        // Record as current document.
+                        match CURRENT_PATH.lock() {
+                            Ok(mut guard) => *guard = Some(user_path.clone()),
+                            Err(poisoned) => *poisoned.into_inner() = Some(user_path.clone()),
+                        }
+                        log::info!("Saved state to {}", user_path.display());
+                        self.notifications.push(Toast::info(format!(
+                            "保存しました: {}",
+                            user_path.display()
+                        )));
+                        // Notify if auto-restore slot (saved-state.json) failed — the named doc
+                        // is safe, but next startup will restore from an older state.
+                        if !saved_state_ok {
+                            self.notifications.push(Toast::error(
+                                "自動復元スロット (saved-state.json) の更新に失敗しました。\
+                                 次回起動時の復元が古い状態になる可能性があります。"
+                                    .to_string(),
+                            ));
+                        }
+                        // If SaveAndOpenFile triggered this save (CURRENT_PATH=None path),
+                        // complete the open now that the current state is safely written.
+                        if let Some((pending_json, pending_path, _windows)) =
+                            self.pending_open_file.take()
+                        {
+                            if let Err(e) =
+                                data::write_json_to_file(&pending_json, data::SAVED_STATE_PATH)
+                            {
+                                log::warn!("Failed to write imported state: {e}");
+                                self.notifications.push(Toast::error(format!(
+                                    "ファイルの適用に失敗しました: {e}"
+                                )));
+                                return Task::none();
+                            }
+                            match CURRENT_PATH.lock() {
+                                Ok(mut guard) => *guard = Some(pending_path),
+                                Err(poisoned) => *poisoned.into_inner() = Some(pending_path),
+                            }
+                            return self.restart();
+                        }
+                    }
+                    Some(kind) => {
+                        // BC-5: classify as IoError → WARN level.
+                        log_save_error(&SaveError::IoError(kind), &user_path);
+                        self.notifications
+                            .push(Toast::error("保存に失敗しました".to_string()));
+                        // If SaveAndOpenFile triggered this save (CURRENT_PATH=None path),
+                        // pending_open_file is still set but confirm_dialog is None.
+                        // Restore the dialog so the user can retry or discard; without this
+                        // the next Open skips F4 because pending_open_file.is_some() blocks
+                        // the dirty-check condition at NativeOpenFilePendingCheck.
+                        if self.pending_open_file.is_some() {
+                            let dialog = screen::ConfirmDialog::new(
+                                "未保存の変更があります。".to_string(),
+                                Box::new(Message::DiscardAndOpenFile),
+                            )
+                            .with_confirm_btn_text("破棄して開く".to_string())
+                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
+                            self.confirm_dialog = Some(dialog);
                         }
                     }
                 }
@@ -2740,17 +4287,24 @@ impl Flowsurface {
             Message::NativeOpenFileCancelled => {
                 return Task::none();
             }
-            Message::NativeOpenFileApply(json) => {
-                // Validate the JSON parses as a known state before overwriting.
+            Message::NativeOpenFileApply { json, path } => {
+                // Validate the JSON first; reject bad files early before any state change.
                 match serde_json::from_str::<data::State>(&json) {
                     Ok(_) => {
-                        if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
-                            log::error!("Failed to write imported state: {e}");
-                            self.notifications
-                                .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
-                            return Task::none();
-                        }
-                        return self.restart();
+                        // F4 fix: collect real window specs before the dirty check so that
+                        // last_saved_bytes (which includes window positions) compares correctly.
+                        // An empty HashMap would produce main_window_spec=None, always appearing
+                        // dirty even immediately after a save.
+                        let mut active_windows: Vec<window::Id> =
+                            self.active_dashboard().popout.keys().copied().collect();
+                        active_windows.push(self.main_window.id);
+                        return window::collect_window_specs(active_windows, move |windows| {
+                            Message::NativeOpenFilePendingCheck {
+                                json: json.clone(),
+                                path: path.clone(),
+                                windows,
+                            }
+                        });
                     }
                     Err(e) => {
                         self.notifications
@@ -2759,6 +4313,341 @@ impl Flowsurface {
                     }
                 }
             }
+            Message::NativeOpenFilePendingCheck {
+                json,
+                path,
+                windows,
+            } => {
+                // HIGH fix: another dialog is already visible — silently drop this request
+                // to prevent F4 bypass via overlapping dialogs.
+                if self.confirm_dialog.is_some() {
+                    return Task::none();
+                }
+                // F4: dirty check with real window specs (avoids false positives from empty HashMap).
+                if self.is_dirty(&windows) && self.pending_open_file.is_none() {
+                    // Store windows so SaveAndOpenFile can build state JSON for the named doc.
+                    self.pending_open_file = Some((json, path, windows));
+                    let dialog = screen::ConfirmDialog::new(
+                        "未保存の変更があります。".to_string(),
+                        Box::new(Message::DiscardAndOpenFile),
+                    )
+                    .with_confirm_btn_text("破棄して開く".to_string())
+                    .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+                if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
+                    // BC-5: write failure is an OS-level I/O error → WARN level.
+                    log::warn!("Failed to write imported state: {e}");
+                    self.notifications
+                        .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
+                    return Task::none();
+                }
+                match CURRENT_PATH.lock() {
+                    Ok(mut guard) => *guard = Some(path),
+                    Err(poisoned) => *poisoned.into_inner() = Some(path),
+                }
+                return self.restart();
+            }
+            Message::DiscardAndOpenFile => {
+                self.confirm_dialog = None;
+                let Some((json, path, _windows)) = self.pending_open_file.take() else {
+                    return Task::none();
+                };
+                if let Err(e) = data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
+                    // BC-5: write failure is an OS-level I/O error → WARN level.
+                    log::warn!("Failed to write imported state: {e}");
+                    self.notifications
+                        .push(Toast::error(format!("ファイルの適用に失敗しました: {e}")));
+                    return Task::none();
+                }
+                match CURRENT_PATH.lock() {
+                    Ok(mut guard) => *guard = Some(path),
+                    Err(poisoned) => *poisoned.into_inner() = Some(path),
+                }
+                return self.restart();
+            }
+            Message::SaveAndOpenFile => {
+                // User chose "保存して開く" — save the current document first, then load the new
+                // file. BC-5: if any save step fails, abort and restore the dialog.
+                self.confirm_dialog = None;
+                let Some((json, new_path, windows)) = self.pending_open_file.take() else {
+                    return Task::none();
+                };
+                let current_path = match CURRENT_PATH.lock() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                if let Some(p) = &current_path {
+                    match self.build_state_json(&windows) {
+                        Some(current_json) => {
+                            if let Err(e) = std::fs::write(p, current_json.as_bytes()) {
+                                // BC-5: abort open; named doc save failed.
+                                log_save_error(&SaveError::IoError(e.kind()), p);
+                                self.notifications.push(Toast::error(
+                                    "保存に失敗しました。再試行してください。".to_string(),
+                                ));
+                                self.pending_open_file = Some((json, new_path, windows));
+                                let dialog = screen::ConfirmDialog::new(
+                                    "未保存の変更があります。".to_string(),
+                                    Box::new(Message::DiscardAndOpenFile),
+                                )
+                                .with_confirm_btn_text("破棄して開く".to_string())
+                                .with_save_action(
+                                    Message::SaveAndOpenFile,
+                                    "保存して開く".to_string(),
+                                );
+                                self.confirm_dialog = Some(dialog);
+                                return Task::none();
+                            }
+                            // MEDIUM fix: update dirty baseline so a subsequent Quit/Open after a
+                            // failed saved-state.json write does not re-trigger a spurious dialog.
+                            self.last_saved_bytes = Some(current_json.into_bytes());
+                        }
+                        None => { /* replay mode — no JSON to save, proceed with open */ }
+                    }
+                } else {
+                    // No named document: open Save As dialog so the user can name the current
+                    // state. Keep pending_open_file; NativeSaveComplete will pick it up and
+                    // complete the open after the user-chosen path is written.
+                    self.pending_open_file = Some((json, new_path, windows));
+                    return Task::perform(
+                        async {
+                            rfd::AsyncFileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .set_file_name("saved-state.json")
+                                .set_title("現在の設定を保存")
+                                .save_file()
+                                .await
+                                .map(|handle| handle.path().to_owned())
+                        },
+                        Message::NativeSaveAsPath,
+                    );
+                }
+                // R2-M1 (revert of R6 F-M4): saved-state.json is the file that
+                // `Flowsurface::new()` reads on restart. If this mirror write fails
+                // we MUST NOT update CURRENT_PATH and MUST NOT restart() — doing so
+                // would reload the OLD saved-state.json while CURRENT_PATH points to
+                // the NEW file, so the next Ctrl+S would silently overwrite the new
+                // file with the old layout. Abort cleanly with warn + toast and let
+                // the user retry from the menu.
+                return match data::write_json_to_file(&json, data::SAVED_STATE_PATH) {
+                    Ok(()) => {
+                        match CURRENT_PATH.lock() {
+                            Ok(mut guard) => *guard = Some(new_path),
+                            Err(poisoned) => *poisoned.into_inner() = Some(new_path),
+                        }
+                        self.restart()
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[SaveAndOpenFile] failed to write saved-state.json after named-doc save: {e} — aborting open to keep CURRENT_PATH consistent"
+                        );
+                        self.notifications.push(Toast::error(
+                            "saved-state.json への書き込みに失敗しました。開く処理を中止します。"
+                                .to_string(),
+                        ));
+                        Task::none()
+                    }
+                };
+            }
+            // F7: SwitchModeWithSpecs — window specs collected, perform dirty check for live→replay
+            Message::SwitchModeWithSpecs { target, windows } => {
+                use engine_client::dto::AppMode;
+                // If mode switch guard was released (e.g. stale message), ignore.
+                // L2: log at debug level so stale window-spec callbacks are
+                // observable without spamming the user log.
+                if self.mode_switch_state.is_none() {
+                    log::debug!(
+                        "[F7] SwitchModeWithSpecs ignored: mode_switch_state is None \
+                         (likely stale window-spec callback after dialog dismiss)"
+                    );
+                    return Task::none();
+                }
+                if app_mode() == AppMode::Live && self.is_dirty(&windows) {
+                    // Update pending target (mode_switch_state target half is rewritten;
+                    // guard half is preserved by reusing the existing guard).
+                    if let Some((t, _g)) = self.mode_switch_state.as_mut() {
+                        *t = target;
+                    }
+                    let dialog = screen::ConfirmDialog::new(
+                        "未保存の変更があります。".to_string(),
+                        Box::new(Message::DiscardAndSwitchMode),
+                    )
+                    .with_confirm_btn_text("破棄してモード切替".to_string())
+                    .with_save_action(Message::SaveAndSwitchMode, "保存してモード切替".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+                // Not dirty: save then restart. Abort if save fails (plan: 保存失敗 → 切替中止).
+                if !self.save_state_to_disk(&windows) {
+                    self.mode_switch_state = None;
+                    // M-rust2 / M-4: surface a modal alert (parity with
+                    // `SwitchModeSaveComplete`). Modal is the *only* notification
+                    // surface — no Toast — to avoid the M-4 "2 surfaces saying
+                    // overlapping things" problem.
+                    let dialog = screen::ConfirmDialog::new(
+                        "保存に失敗したためモード切替を中止しました。\nディスクの空き容量・権限を確認してください。"
+                            .to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+                return self.restart_with_mode(target);
+            }
+            // F7: user chose "破棄してモード切替"
+            Message::DiscardAndSwitchMode => {
+                self.confirm_dialog = None;
+                // H1: stale early-return must release the guard so the next
+                // SwitchMode is not permanently blocked.
+                let Some((target, _guard)) = self.mode_switch_state.take() else {
+                    return Task::none();
+                };
+                return self.restart_with_mode(target);
+            }
+            // F7: user chose "保存してモード切替" — collect window specs for save, then restart
+            Message::SaveAndSwitchMode => {
+                self.confirm_dialog = None;
+                // H1: stale early-return — mode_switch_state must be Some here,
+                // otherwise the dialog firing was a stale message; release nothing
+                // (there is nothing to release) and return.
+                // Note: do NOT take() the guard yet; it must outlive
+                // collect_window_specs and the SwitchModeSaveComplete dispatch.
+                let target = match self.mode_switch_state.as_ref() {
+                    Some((t, _)) => *t,
+                    None => return Task::none(),
+                };
+                // Collect current window specs for a proper save.
+                // IMPORTANT: must NOT re-route through SwitchModeWithSpecs here because that
+                // path re-checks is_dirty() — since we haven't saved yet it would still be true,
+                // causing an infinite dialog loop. Route through SwitchModeSaveComplete instead
+                // to unconditionally save and restart (F7 review fix 2026-05-04).
+                let mut active_windows: Vec<window::Id> =
+                    self.active_dashboard().popout.keys().copied().collect();
+                active_windows.push(self.main_window.id);
+                return window::collect_window_specs(active_windows, move |windows| {
+                    Message::SwitchModeSaveComplete { target, windows }
+                });
+            }
+            // F7: window specs collected for the "保存してモード切替" path — save then restart.
+            Message::SwitchModeSaveComplete { target, windows } => {
+                // Abort if save fails (plan: 保存失敗 → 切替中止).
+                if !self.save_state_to_disk(&windows) {
+                    self.mode_switch_state = None;
+                    // M-4: modal を唯一の通知面にする。以前は Toast + Modal の二重表示
+                    // にしていたが、Toast が自動消滅したあとも Modal が残るため、
+                    // ユーザーが原因を読む面が一つに絞られた方が明確であり、
+                    // Toast 側の残留テキストとも齟齬がない。
+                    let dialog = screen::ConfirmDialog::new(
+                        "保存に失敗したためモード切替を中止しました。\nディスクの空き容量・権限を確認してください。"
+                            .to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+                return self.restart_with_mode(target);
+            }
+            // F7: ReplayStopped event received — proceed with restart_with_mode
+            Message::ModeSwitchStopAcked => {
+                let Some((target, _guard)) = self.mode_switch_state.take() else {
+                    // Stale event (e.g. timeout already handled it) — ignore
+                    return Task::none();
+                };
+                return self.restart_with_mode(target);
+            }
+            // F7: 5-second StopReplay timeout — send ForceStopReplay fallback
+            Message::ModeSwitchStopTimeout => {
+                log::warn!("[F7] StopReplay timed out — sending ForceStopReplay fallback");
+                if self.mode_switch_state.is_none() {
+                    // Already handled (ReplayStopped arrived before timeout) — ignore
+                    return Task::none();
+                };
+                if let Some(conn) = self.engine_connection.clone() {
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    let force_task = Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::ForceStopReplay { request_id })
+                                .await
+                        },
+                        |result| match result {
+                            Ok(()) => Message::Noop,
+                            Err(_) => Message::ModeSwitchSendFailed,
+                        },
+                    );
+                    let timeout_task = Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        },
+                        |_| Message::ModeSwitchForceStopTimeout,
+                    );
+                    return Task::batch([force_task, timeout_task]);
+                } else {
+                    // No connection — release guard and show error dialog
+                    self.mode_switch_state = None;
+                    let dialog = screen::ConfirmDialog::new(
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+            }
+            // F7: ForceStopReplay also timed out — release guard and show error
+            Message::ModeSwitchForceStopTimeout => {
+                log::warn!("[F7] ForceStopReplay also timed out — aborting mode switch");
+                if self.mode_switch_state.take().is_none() {
+                    // Already handled (ReplayStopped arrived before timeout) — ignore
+                    return Task::none();
+                }
+                let dialog = screen::ConfirmDialog::new(
+                    "モード切替に失敗しました。\nエンジンが応答しません。".to_string(),
+                    Box::new(Message::ToggleDialogModal(None)),
+                )
+                .with_confirm_btn_text("閉じる".to_string());
+                self.confirm_dialog = Some(dialog);
+                return Task::none();
+            }
+            // F7: send() returned Err — socket is broken; abort mode switch immediately without
+            // waiting for the 5-second (StopReplay) or 2-second (ForceStopReplay) timeout.
+            // Stale timeout messages that fire later are ignored because mode_switch_state is None.
+            Message::ModeSwitchSendFailed => {
+                if self.mode_switch_state.take().is_some() {
+                    let dialog = screen::ConfirmDialog::new(
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                }
+                return Task::none();
+            }
+            // F7: EngineBusy for StopReplay/ForceStopReplay — abort mode switch immediately.
+            // This handles the 5-axis matrix row "replay→live, EngineBusy" without waiting
+            // for the 5s timeout. The stale ModeSwitchStopTimeout fires later but is ignored
+            // because mode_switch_state will be None at that point.
+            Message::ModeSwitchEngineBusy(reason) => {
+                if self.mode_switch_state.take().is_some() {
+                    let dialog = screen::ConfirmDialog::new(
+                        format!("モード切替を中止しました。\nエンジンがビジー状態です: {reason}"),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                } else {
+                    // No pending switch — fall back to warn toast
+                    self.notifications.push(Toast::warn(format!(
+                        "操作を受け付けられませんでした: {reason}"
+                    )));
+                }
+                return Task::none();
+            }
+            // F7: true no-op — used to discard fire-and-forget Task completions.
+            Message::Noop => return Task::none(),
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
             Message::ExecutionMarkerReceived {
                 side,
@@ -3044,6 +4933,45 @@ impl Flowsurface {
                 }
             }
             Message::ToggleDialogModal(dialog) => {
+                // Fix: when dismissing (None), clear any parked dirty-check state so
+                // a subsequent Open does not skip the confirm dialog (Issue 2 fix).
+                if dialog.is_none() {
+                    // F5/M: if we're dismissing the overwrite confirm during a save-then-open
+                    // flow, restore the dirty-confirm so the user can retry or discard instead
+                    // of silently losing the pending open target.
+                    if self
+                        .confirm_dialog
+                        .as_ref()
+                        .is_some_and(|d| d.on_save.is_none())
+                        && self.pending_open_file.is_some()
+                    {
+                        self.confirm_dialog = Some(
+                            screen::ConfirmDialog::new(
+                                "未保存の変更があります。".to_string(),
+                                Box::new(Message::DiscardAndOpenFile),
+                            )
+                            .with_confirm_btn_text("破棄して開く".to_string())
+                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string()),
+                        );
+                        return Task::none();
+                    }
+                    self.pending_open_file = None;
+                    self.pending_exit_windows = None;
+                    // F7: release mode-switch guard when the dirty-confirm dialog is
+                    // dismissed via backdrop click (ToggleDialogModal(None)), so the
+                    // next SwitchMode attempt is not permanently blocked.
+                    //
+                    // M-rust3: this reset is unconditional — `ToggleDialogModal(None)`
+                    // also fires for non-mode-switch dialogs (e.g. save-as overwrite,
+                    // wandb confirm). When `mode_switch_state` is already `None` the
+                    // assignment is idempotent. The `ModeSwitchGuard::drop` Drop impl
+                    // is what actually releases the cross-thread `MODE_SWITCHING`
+                    // atomic and runs `lock_order_reset()` (H1), so dismissing an
+                    // unrelated dialog cannot accidentally release the guard of an
+                    // active mode-switch — it would only do so if the active
+                    // mode-switch's own dialog is being closed.
+                    self.mode_switch_state = None;
+                }
                 self.confirm_dialog = dialog;
             }
             Message::Layouts(message) => {
@@ -3396,58 +5324,347 @@ impl Flowsurface {
                     Message::RestartRequested(Some(windows))
                 });
             }
-            Message::ControlApi(cmd) => {
-                use replay_api::ControlApiCommand;
-                log::debug!("control-api command received: {cmd:?}");
-                match cmd {
-                    ControlApiCommand::RequestVenueLogin { venue }
-                        if venue == TACHIBANA_VENUE_NAME =>
-                    {
-                        return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Manual));
-                    }
-                    ControlApiCommand::ToggleVenue { venue } if venue == TACHIBANA_VENUE_NAME => {
-                        return iced::Task::done(Message::RequestTachibanaLogin(Trigger::Auto));
-                    }
-                    ControlApiCommand::AutoGenerateReplayPanes {
-                        instrument_id,
-                        strategy_id,
-                        granularity,
-                        ack,
-                    } => {
-                        // M-2 (R2 review-fix R2): strategy_id を Option<String> として保持。
-                        // None = 単独 LoadReplayData 経路、Some(_) = StartEngine 経由 load。
-                        log::debug!(
-                            "AutoGenerateReplayPanes: instrument_id={instrument_id:?} \
-                             strategy_id={strategy_id:?} granularity={granularity:?}"
-                        );
-                        use engine_client::dto::ReplayGranularity;
-                        // Convert granularity to Option<Timeframe>: None = Trade (no bar chart).
-                        let timeframe = match granularity {
-                            ReplayGranularity::Daily => Some(exchange::Timeframe::D1),
-                            ReplayGranularity::Minute => Some(exchange::Timeframe::M1),
-                            ReplayGranularity::Trade => None,
-                        };
-                        let main_window_id = self.main_window.id;
-                        let dashboard = self.active_dashboard_mut();
-                        // N1.14: clear any stale overlay markers before loading new replay data.
-                        dashboard.clear_chart_overlays(main_window_id);
-                        let task = dashboard
-                            .auto_generate_replay_panes(main_window_id, &instrument_id, timeframe)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            });
-                        // `auto_generate_replay_panes` は内部で `set_content_and_streams`
-                        // を同期で呼んで pane に stream を bind する。戻り `Task` には
-                        // pane 内 chart の追加 fetch しか含まれないので、ここで ack して
-                        // /api/replay/load を解放してよい（pane と subscription は確立済み）。
-                        if let Some(ack) = ack {
-                            ack.notify_one();
+            // F9d: W&B submit subprocess 完了
+            Message::WandbSubmitResult(result) => {
+                SUBMIT_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+                match result {
+                    Ok(url) => {
+                        log::info!("W&B submit succeeded: {url}");
+                        // モーダルが開いていれば Done を通知して URL を表示する
+                        if let Some(modal) = self.wandb_submit_modal.as_mut() {
+                            let url_opt = if url.is_empty() {
+                                None
+                            } else {
+                                Some(url.clone())
+                            };
+                            modal.update(modal::wandb_submit::Message::Done(url_opt));
+                        } else {
+                            self.notifications
+                                .push(Toast::info(format!("W&B に送信しました: {url}")));
                         }
-                        return task;
+                        // R2-H2 / M3: run-buffer スキャンを async で行い iced
+                        // update スレッドをブロックしない。完了通知は
+                        // Message::RunBufferIndexScanned ハンドラ側で
+                        // refresh_tools_enable を実行するため戻り値の Task に
+                        // 統合する。
+                        let base = data::data_path(Some("run-buffer"));
+                        return Task::perform(
+                            async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
+                            |index| Message::RunBufferIndexScanned {
+                                index,
+                                show_toast: false,
+                            },
+                        );
                     }
-                    _ => {}
+                    Err(ref e) => {
+                        let msg = match e {
+                            WandbSubmitError::AuthFailed => {
+                                log::warn!("W&B submit failed: auth error");
+                                "W&B 認証エラー: 再ログインしてください".to_string()
+                            }
+                            WandbSubmitError::RateLimit => {
+                                log::warn!("W&B submit failed: rate limit");
+                                "W&B 送信失敗: レートリミット超過".to_string()
+                            }
+                            WandbSubmitError::Network => {
+                                log::warn!("W&B submit failed: network error");
+                                "W&B 送信失敗: ネットワークエラー".to_string()
+                            }
+                            WandbSubmitError::ServerError => {
+                                log::warn!("W&B submit failed: server error");
+                                "W&B 送信失敗: サーバーエラー".to_string()
+                            }
+                            WandbSubmitError::Partial => {
+                                log::warn!("W&B submit failed: partial");
+                                "W&B 送信: 部分的な失敗（run buffer を確認してください）"
+                                    .to_string()
+                            }
+                            WandbSubmitError::ProcessFailed(m) => {
+                                log::warn!("W&B submit failed: {m}");
+                                format!("W&B 送信失敗: {m}")
+                            }
+                        };
+                        if let Some(modal) = self.wandb_submit_modal.as_mut() {
+                            modal.update(modal::wandb_submit::Message::Failed(msg, -1));
+                        } else {
+                            self.notifications.push(Toast::error(msg));
+                        }
+                    }
                 }
+                return Task::none();
+            }
+            // F9d: W&B check_auth subprocess 完了 — wandb_auth を更新する
+            Message::WandbAuthRefreshed(state) => {
+                self.wandb_auth = state;
+                // H5: ネイティブメニュー Tools 項目の enable/disable を再計算
+                native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
+                return Task::none();
+            }
+            // F9c: 送信モーダル内部メッセージ
+            Message::WandbSubmitMsg(msg) => {
+                if let Some(modal) = self.wandb_submit_modal.as_mut() {
+                    match modal.update(msg) {
+                        Some(modal::wandb_submit::Action::Cancel) => {
+                            // Phase 3-A C2: dismiss the modal AND release the
+                            // submit_in_flight reentrancy guard. If a subprocess
+                            // is currently running, take its handle out of
+                            // SUBMIT_CHILD and kill it. On Windows this is an
+                            // immediate TerminateProcess; on Unix tokio's
+                            // Child::kill also issues SIGKILL, so the 5 second
+                            // grace period documented in 統一決定 46 is
+                            // best-effort and depends on kernel reaping.
+                            // R2-M3: SUBMIT_IN_FLIGHT のリセットは kill が
+                            // 完了した「後」に行う。先にリセットすると、
+                            // kill 完了前に新しい Submit が再入できてしまい
+                            // 同じ run-buffer に対して 2 つの subprocess が
+                            // 競合する窓ができる。kill().await 完了後に store
+                            // することで、新しい Submit は古い subprocess の
+                            // 終焉を必ず観測する。idempotent reset (重複 store
+                            // is safe; cf. submit_in_flight_is_idempotent_on_double_release)
+                            self.wandb_submit_modal = None;
+                            // F9 R1-H10: removed `.discard()` so the trailing
+                            // `Message::Tick` is actually delivered to the
+                            // runtime. Discarding silently broke the Elm-style
+                            // contract that any non-`Task::none()` returns
+                            // a Message; `Tick` is harmless (just advances the
+                            // dashboard one frame) and makes the wiring
+                            // legible.
+                            return Task::perform(
+                                async {
+                                    let mut slot = SUBMIT_CHILD.lock().await;
+                                    if let Some(mut child) = slot.take() {
+                                        let _ = child.kill().await;
+                                    }
+                                    SUBMIT_IN_FLIGHT
+                                        .store(false, std::sync::atomic::Ordering::Release);
+                                },
+                                |()| Message::Tick(std::time::Instant::now()),
+                            );
+                        }
+                        Some(modal::wandb_submit::Action::Submit {
+                            project,
+                            run_name,
+                            tags,
+                            notes,
+                        }) => {
+                            // R2-M1: latest_completed が無い状態で Submit が
+                            // 走るのは仕様上ありえないが、防御的に no-op する。
+                            // SUBMIT_IN_FLIGHT を立てる前に弾くことで「送信中」
+                            // 状態に入って永久ロックされる事故を防ぐ。
+                            if self.run_buffer.latest_completed.is_none() {
+                                log::warn!(
+                                    "[wandb] Submit dispatched with no completed run; ignoring"
+                                );
+                                return Task::none();
+                            }
+                            // ガード: 再入禁止
+                            if SUBMIT_IN_FLIGHT
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    std::sync::atomic::Ordering::AcqRel,
+                                    std::sync::atomic::Ordering::Acquire,
+                                )
+                                .is_err()
+                            {
+                                return Task::none();
+                            }
+                            let run_id = self.run_buffer.latest_completed.clone();
+                            let run_buffer_dir = run_id
+                                .map(|id| data::data_path(Some("run-buffer")).join(id))
+                                .unwrap_or_default();
+                            let script = std::path::PathBuf::from("examples/wandb/submit_run.py");
+                            // F9d: stream stdout/stderr lines as LogLine
+                            // updates so the modal tail is populated while
+                            // the subprocess is still running, instead of
+                            // appearing only on completion. The terminal
+                            // event is dispatched as Message::WandbSubmitResult.
+                            let stream = submit_wandb_run_stream(
+                                run_buffer_dir,
+                                script,
+                                project,
+                                run_name,
+                                tags,
+                                notes,
+                            );
+                            return Task::run(stream, |evt| match evt {
+                                WandbStreamEvent::Line(line) => Message::WandbSubmitMsg(
+                                    modal::wandb_submit::Message::LogLine(line),
+                                ),
+                                WandbStreamEvent::Final(result) => {
+                                    Message::WandbSubmitResult(result)
+                                }
+                            });
+                        }
+                        Some(modal::wandb_submit::Action::OpenUrl(url)) => {
+                            let _ = webbrowser::open(&url);
+                        }
+                        None => {}
+                    }
+                }
+                return Task::none();
+            }
+            // F9c: サインインモーダル内部メッセージ
+            Message::WandbSignInMsg(msg) => {
+                if let Some(modal) = self.wandb_signin_modal.as_mut() {
+                    match modal.update(msg) {
+                        Some(modal::wandb_signin::Action::Cancel) => {
+                            self.wandb_signin_modal = None;
+                        }
+                        Some(modal::wandb_signin::Action::OpenBrowserForKey) => {
+                            let _ = webbrowser::open("https://wandb.ai/authorize");
+                        }
+                        Some(modal::wandb_signin::Action::Login { api_key }) => {
+                            return Task::perform(
+                                async move { wandb_login(api_key).await },
+                                Message::WandbLoginResult,
+                            );
+                        }
+                        None => {}
+                    }
+                }
+                return Task::none();
+            }
+            // F9e: list_run_buffer_entries の完了 — 履歴モーダルを開く
+            Message::WandbSubmissionLogScanned(entries) => {
+                self.wandb_submission_log_modal = Some(
+                    modal::wandb_submission_log::WandbSubmissionLogModal::new(entries),
+                );
+                return Task::none();
+            }
+            // F9e: 履歴モーダル内部メッセージ
+            Message::WandbSubmissionLogMsg(msg) => {
+                if let Some(modal) = self.wandb_submission_log_modal.as_mut() {
+                    match modal.update(msg) {
+                        Some(modal::wandb_submission_log::Action::Close) => {
+                            self.wandb_submission_log_modal = None;
+                        }
+                        None => {}
+                    }
+                }
+                return Task::none();
+            }
+            // F9c: wandb login 完了
+            // F9 R2-H1: handle Ok(()) regardless of whether the modal is still
+            // present. If the user cancels the modal mid-login, `wandb_signin_modal`
+            // becomes None — but credentials may already have been persisted by
+            // the subprocess (Python side), so the auth refresh must still be
+            // issued. Previously the entire arm was guarded by `if let
+            // Some(modal)`, silently dropping the refresh on cancel-then-success
+            // and leaving the UI as "未認証".
+            Message::WandbLoginResult(result) => match result {
+                Ok(()) => {
+                    self.wandb_signin_modal = None;
+                    self.notifications
+                        .push(Toast::info("W&B にログインしました".to_string()));
+                    // auth キャッシュを invalidate して再取得
+                    return Task::perform(
+                        wandb_auth::refresh_wandb_auth(),
+                        Message::WandbAuthRefreshed,
+                    );
+                }
+                Err(err) => {
+                    if let Some(modal) = self.wandb_signin_modal.as_mut() {
+                        // F9 R1-M4: route failure via Message::LoginFailed
+                        // so the modal owns its own state mutations.
+                        // F9 R3-M1: do NOT discard `update()`'s Option<Action>
+                        // with `let _ = ...`. The LoginFailed contract is to
+                        // return None (see modal/wandb_signin.rs unit test
+                        // `login_failed_update_returns_none_always`), but if a
+                        // future refactor changes that contract we want a
+                        // visible warning rather than a silent action drop.
+                        match modal.update(modal::wandb_signin::Message::LoginFailed(format!(
+                            "ログイン失敗: {err}"
+                        ))) {
+                            None => {}
+                            Some(_action) => {
+                                log::warn!(
+                                    "[wandb_signin] unexpected Action returned from \
+                                     Message::LoginFailed; the contract is to return None. \
+                                     The Action is being dropped — investigate the modal \
+                                     update() refactor that changed this."
+                                );
+                            }
+                        }
+                    }
+                    return Task::none();
+                }
+            },
+            // F9c: ログアウト確認ダイアログで確認 → 実際の subprocess を起動
+            Message::WandbLogoutConfirmed => {
+                self.confirm_dialog = None;
+                return Task::perform(async { wandb_logout().await }, Message::WandbLogoutResult);
+            }
+            // F9c: wandb logout subprocess の完了通知
+            Message::WandbLogoutResult(result) => {
+                match result {
+                    Ok(()) => {
+                        self.notifications
+                            .push(Toast::info("W&B からログアウトしました".to_string()));
+                        return Task::perform(
+                            wandb_auth::refresh_wandb_auth(),
+                            Message::WandbAuthRefreshed,
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!("W&B logout failed: {err}");
+                        self.notifications
+                            .push(Toast::error(format!("W&B ログアウト失敗: {err}")));
+                    }
+                }
+                return Task::none();
+            }
+            // F9e: バッファ削除確認後 — M3: tokio::fs で async 削除する。
+            Message::ClearRunBufferConfirmed => {
+                self.confirm_dialog = None;
+                let base = data::data_path(Some("run-buffer"));
+                return Task::perform(
+                    async move {
+                        match tokio::fs::metadata(&base).await {
+                            Ok(_) => tokio::fs::remove_dir_all(&base)
+                                .await
+                                .map_err(|e| e.to_string()),
+                            // 元から存在しない場合は成功扱い（冪等）。
+                            Err(_) => Ok(()),
+                        }
+                    },
+                    Message::RunBufferCleared,
+                );
+            }
+            // M3: tokio::fs::remove_dir_all の完了通知。
+            Message::RunBufferCleared(result) => {
+                match result {
+                    Ok(()) => {
+                        self.run_buffer = wandb_auth::RunBufferIndex::empty();
+                        // H5: Tools 項目 enable/disable を再計算
+                        native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
+                        self.notifications
+                            .push(Toast::info("run-buffer を削除しました".to_string()));
+                    }
+                    Err(e) => {
+                        self.notifications
+                            .push(Toast::error(format!("削除失敗: {e}")));
+                    }
+                }
+                return Task::none();
+            }
+            // M3: scan_async の完了通知。run_buffer 更新 + （任意で）トースト表示。
+            Message::RunBufferIndexScanned { index, show_toast } => {
+                if show_toast {
+                    if let Some(ref latest) = index.latest_completed {
+                        self.notifications.push(Toast::info(format!(
+                            "最新 run: {latest} (completed runs: {})",
+                            index.total
+                        )));
+                    } else {
+                        self.notifications
+                            .push(Toast::info("送信履歴がまだありません".to_string()));
+                    }
+                }
+                self.run_buffer = index;
+                // H5: Tools 項目 enable/disable を再計算
+                native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
+                return Task::none();
             }
         }
         Task::none()
@@ -3512,6 +5729,12 @@ impl Flowsurface {
             });
 
             let mut base = column![header_title];
+            #[cfg(target_os = "linux")]
+            {
+                let menu_bar_view =
+                    crate::widget_menu_bar::view(&self.menu_bar, &app_mode()).map(Message::MenuBar);
+                base = base.push(menu_bar_view);
+            }
             if let Some(banner) = banner {
                 base = base.push(container(banner).padding(padding::all(8)));
             }
@@ -3530,10 +5753,7 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
-            let is_replay = APP_MODE
-                .get()
-                .map(|&m| m == engine_client::dto::AppMode::Replay)
-                .expect("APP_MODE must be initialised after CLI parsing");
+            let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
 
             base = base.push(
                 match sidebar_pos {
@@ -3546,11 +5766,20 @@ impl Flowsurface {
             );
             base = base.push(status_bar(is_replay));
 
-            if let Some(menu) = self.sidebar.active_menu() {
+            let view_result = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
             } else {
                 base.into()
-            }
+            };
+            #[cfg(target_os = "linux")]
+            let view_result = crate::widget_menu_bar::with_dropdown_overlay(
+                view_result,
+                &self.menu_bar,
+                &app_mode(),
+                &self.wandb_auth,
+                &self.run_buffer,
+            );
+            view_result
         } else {
             container(
                 dashboard
@@ -3585,11 +5814,72 @@ impl Flowsurface {
         )
         .into();
 
-        if let Some(modal) = &self.second_password_modal {
+        let after_second_password = if let Some(modal) = &self.second_password_modal {
             let modal_view = modal.view().map(Message::SecondPasswordModalMsg);
             main_dialog_modal(toasted, modal_view, Message::DismissSecondPasswordModal)
         } else {
             toasted
+        };
+
+        let after_replay_form = if let Some(form) = &self.replay_form_modal {
+            let form_view = form.view().map(Message::ReplayFormMsg);
+            main_dialog_modal(
+                after_second_password,
+                form_view,
+                Message::ReplayFormMsg(modal::replay_form::Message::Cancel),
+            )
+        } else {
+            after_second_password
+        };
+
+        // Phase 3-A H7: W&B submit / signin modals must only render on the
+        // main window. Popout windows (detached panes) host neither modal
+        // and would otherwise duplicate the dialog across every open window.
+        // The confirm_dialog overlay above (`id == self.main_window.id`)
+        // already follows this pattern; mirror it here so the symmetry holds.
+        let after_wandb_submit = if id == self.main_window.id {
+            if let Some(submit) = &self.wandb_submit_modal {
+                let submit_view = submit.view().map(Message::WandbSubmitMsg);
+                main_dialog_modal(
+                    after_replay_form,
+                    submit_view,
+                    Message::WandbSubmitMsg(modal::wandb_submit::Message::Cancel),
+                )
+            } else {
+                after_replay_form
+            }
+        } else {
+            after_replay_form
+        };
+
+        let after_signin = if id == self.main_window.id {
+            if let Some(signin) = &self.wandb_signin_modal {
+                let signin_view = signin.view().map(Message::WandbSignInMsg);
+                main_dialog_modal(
+                    after_wandb_submit,
+                    signin_view,
+                    Message::WandbSignInMsg(modal::wandb_signin::Message::Cancel),
+                )
+            } else {
+                after_wandb_submit
+            }
+        } else {
+            after_wandb_submit
+        };
+
+        if id == self.main_window.id {
+            if let Some(log) = &self.wandb_submission_log_modal {
+                let log_view = log.view().map(Message::WandbSubmissionLogMsg);
+                main_dialog_modal(
+                    after_signin,
+                    log_view,
+                    Message::WandbSubmissionLogMsg(modal::wandb_submission_log::Message::Close),
+                )
+            } else {
+                after_signin
+            }
+        } else {
+            after_signin
         }
     }
 
@@ -3620,6 +5910,19 @@ impl Flowsurface {
 
         let tick = iced::window::frames().map(Message::Tick);
 
+        // M2 (F8 R1): invariants for the global hotkey subscription —
+        //   1. Only `Esc` is listened for here. All other accelerators
+        //      (`Ctrl+O`, `Ctrl+S`, ...) flow through `native_menu::subscription`
+        //      on Win/Mac and through the iced kbd path on Linux (P8 Q4).
+        //   2. `Esc` always routes to `Message::GoBack`. The GoBack handler is
+        //      responsible for the cascade: dismiss any open Linux menu-bar
+        //      dropdown, close modals, etc. Adding more keys here without that
+        //      handler will silently fail.
+        //   3. The subscription must never close the menu directly — keeping
+        //      the menu's `BarMessage::Dismiss` dispatch funnelled through
+        //      `Message::GoBack` ensures a single dismissal path that the
+        //      tests in `tests/widget_menu_bar_state.rs` can pin
+        //      (`esc_dismiss_is_wired_in_go_back_handler`).
         let hotkeys = keyboard::listen().filter_map(|event| {
             let keyboard::Event::KeyPressed { key, .. } = event else {
                 return None;
@@ -3633,6 +5936,15 @@ impl Flowsurface {
         // Watch the engine-restarting flag and emit EngineRestarting messages.
         let engine_status = Subscription::run(engine_status_stream);
 
+        #[cfg(target_os = "linux")]
+        let linux_menu_bar_dismiss =
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::MenuBar(
+                    crate::menu_bar_state::BarMessage::DismissFocusLost,
+                )),
+                _ => None,
+            });
+
         Subscription::batch(vec![
             exchange_streams,
             sidebar,
@@ -3640,8 +5952,9 @@ impl Flowsurface {
             tick,
             hotkeys,
             engine_status,
-            Subscription::run(replay_api_stream),
-            native_menu::subscription().map(Message::NativeMenuAction),
+            native_menu::subscription(app_mode()).map(Message::NativeMenuAction),
+            #[cfg(target_os = "linux")]
+            linux_menu_bar_dismiss,
         ])
     }
 
@@ -4112,12 +6425,12 @@ impl Flowsurface {
 
     /// Build the current application state as a JSON string.
     /// Returns `None` in replay mode (must not overwrite live settings).
+    // REVIEW: build_state_json modifies state — split needed
+    // This method updates popout window_spec entries and calls sidebar.sync_tickers_table_settings(),
+    // which are side effects beyond serialization. Separating them requires threading window specs
+    // through callers, which is a larger refactor deferred to a future phase.
     fn build_state_json(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> Option<String> {
-        if APP_MODE
-            .get()
-            .map(|m| *m == engine_client::dto::AppMode::Replay)
-            .unwrap_or(false)
-        {
+        if app_mode() == engine_client::dto::AppMode::Replay {
             return None;
         }
 
@@ -4183,17 +6496,73 @@ impl Flowsurface {
         }
     }
 
-    fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
+    /// H-5: write a pre-built JSON string to saved-state.json and update
+    /// `last_saved_bytes`. Called by `save_state_to_disk` and by
+    /// `NativeSaveAsWithSpecs` (which builds the JSON once and reuses it).
+    /// Returns `true` on success, `false` on I/O error (already logged at WARN).
+    fn write_json_to_saved_state_disk(&mut self, json: &str) -> bool {
+        let file_name = data::SAVED_STATE_PATH;
+        if let Err(e) = data::write_json_to_file(json, file_name) {
+            // BC-5: auto-save write failure is an OS-level I/O error → WARN level.
+            log_save_error(
+                &SaveError::IoError(e.kind()),
+                std::path::Path::new(file_name),
+            );
+            false
+        } else {
+            // A-7: update dirty baseline so auto-save clears the dirty flag.
+            // R3: only saved-state.json is written here — CURRENT_PATH is NOT touched.
+            self.last_saved_bytes = Some(json.as_bytes().to_vec());
+            log::info!("Persisted state to {file_name}");
+            true
+        }
+    }
+
+    /// Returns `true` if state was serialised and written; `false` on I/O error.
+    fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> bool {
         if let Some(json) = self.build_state_json(windows) {
-            let file_name = data::SAVED_STATE_PATH;
-            if let Err(e) = data::write_json_to_file(&json, file_name) {
-                log::error!("Failed to write layout state to file: {}", e);
-            } else {
-                log::info!("Persisted state to {file_name}");
-            }
+            self.write_json_to_saved_state_disk(&json)
         } else {
             log::info!("replay mode: skipping save_state_to_disk");
+            true // replay mode skip is not a failure
         }
+    }
+
+    /// F4: Returns true when the current state differs from the last save baseline.
+    ///
+    /// BC-9: `last_saved_bytes = None` (initial / never-saved) is treated as clean
+    /// so the user is not prompted on Quit before any change is made.
+    ///
+    /// NOTE: &mut self is required because build_state_json calls active_dashboard_mut()
+    /// to sync popout window specs. This is a side effect of a read-like operation.
+    /// Future: refactor build_state_json to take window specs as argument (&self).
+    fn is_dirty(&mut self, windows: &HashMap<window::Id, WindowSpec>) -> bool {
+        // clone() is intentional: build_state_json requires &mut self (popout window spec sync),
+        // so we cannot hold a &[u8] borrow into last_saved_bytes across the mutable call.
+        let Some(saved) = self.last_saved_bytes.clone() else {
+            return false; // None => false: initial state is clean (BC-9)
+        };
+        self.build_state_json(windows)
+            .map(|json| json.into_bytes() != saved)
+            .unwrap_or(false) // replay mode: build_state_json returns None → treat as clean (replay never saves)
+    }
+
+    /// F7: set APP_MODE to `mode` then restart. The `mode_switch_state` tuple
+    /// (containing the `ModeSwitchGuard`) in `self` is automatically dropped
+    /// when `*self = new_state` runs inside `restart()`, which resets
+    /// `MODE_SWITCHING` to false.
+    fn restart_with_mode(&mut self, mode: engine_client::dto::AppMode) -> Task<Message> {
+        // M2 (lightweight): set_app_mode acquires APP_MODE; record it for the
+        // lock-order checker. MODE_SWITCHING was already recorded at the entry
+        // to Action::SwitchMode.
+        lock_order_acquire("APP_MODE");
+        set_app_mode(mode);
+        let task = self.restart();
+        // restart() replaces *self; the per-thread lock-order tracker now
+        // pertains to a stale critical section. Reset it so the next switch
+        // starts from a clean slate.
+        lock_order_reset();
+        task
     }
 
     fn restart(&mut self) -> Task<Message> {
@@ -4373,7 +6742,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_apply_validates_against_data_state() {
-        let body = handler_body("            Message::NativeOpenFileApply(json) =>");
+        let body = handler_body("            Message::NativeOpenFileApply { json, path } =>");
         assert!(
             body.contains("serde_json::from_str::<data::State>"),
             "NativeOpenFileApply must validate the JSON as data::State before overwriting"
@@ -4382,14 +6751,26 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_apply_valid_json_calls_write_and_restart() {
-        let body = handler_body("            Message::NativeOpenFileApply(json) =>");
+        // F4 fix: NativeOpenFileApply no longer calls write/restart directly.
+        // It collects window specs and dispatches NativeOpenFilePendingCheck so
+        // the dirty comparison uses real window data (avoiding false positives).
+        // write_json_to_file + restart now live in NativeOpenFilePendingCheck.
+        let apply_body = handler_body("            Message::NativeOpenFileApply { json, path } =>");
         assert!(
-            body.contains("data::write_json_to_file"),
-            "NativeOpenFileApply valid JSON branch must call data::write_json_to_file"
+            apply_body.contains("NativeOpenFilePendingCheck"),
+            "NativeOpenFileApply valid JSON branch must dispatch NativeOpenFilePendingCheck (F4 two-step fix)"
+        );
+
+        let check_body = handler_body(
+            "            Message::NativeOpenFilePendingCheck { json, path, windows } =>",
         );
         assert!(
-            body.contains("self.restart()"),
-            "NativeOpenFileApply valid JSON branch must call self.restart()"
+            check_body.contains("data::write_json_to_file"),
+            "NativeOpenFilePendingCheck must call data::write_json_to_file"
+        );
+        assert!(
+            check_body.contains("self.restart()"),
+            "NativeOpenFilePendingCheck must call self.restart()"
         );
     }
 
@@ -4397,7 +6778,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_apply_invalid_json_pushes_error_toast() {
-        let body = handler_body("            Message::NativeOpenFileApply(json) =>");
+        let body = handler_body("            Message::NativeOpenFileApply { json, path } =>");
         assert!(
             body.contains("無効な設定ファイルです"),
             "NativeOpenFileApply invalid JSON branch must push '無効な設定ファイルです' error toast"
@@ -4408,7 +6789,7 @@ mod native_menu_handler_tests {
     fn open_file_apply_invalid_json_does_not_restart() {
         // Verify the Err(_) branch returns Task::none() and does NOT call restart.
         // Locate the Err arm within the handler body.
-        let handler = handler_body("            Message::NativeOpenFileApply(json) =>");
+        let handler = handler_body("            Message::NativeOpenFileApply { json, path } =>");
         let err_arm_start = handler
             .find("Err(e) =>")
             .expect("NativeOpenFileApply must have an Err arm for invalid JSON");
@@ -4480,10 +6861,116 @@ mod native_menu_handler_tests {
 
     #[test]
     fn save_as_with_specs_delegates_to_build_state_json() {
-        let body = handler_body("Message::NativeSaveAsWithSpecs(windows)");
+        // Use the indented match-arm prefix so the enum definition is skipped.
+        // Match the handler arm exactly (including field names + `=>`) so inner
+        // closure constructions like `Message::NativeSaveAsWithSpecs { path: path.clone(), ... }`
+        // do not produce a false match.
+        let body = handler_body("            Message::NativeSaveAsWithSpecs { path, windows } =>");
         assert!(
             body.contains("build_state_json("),
             "NativeSaveAsWithSpecs handler must call build_state_json — same serialisation path as save_state_to_disk"
+        );
+    }
+
+    // ── CRITICAL: save failure must abort SaveAndExit / SaveAndOpenFile ─────────
+    //
+    // BC-5 contract: an IoError during an explicit "Save and continue" must abort
+    // the operation (Quit / Open) and show an error, not silently discard data.
+    // These source-inspection tests verify the control-flow shape without a runtime.
+
+    #[test]
+    fn save_and_exit_checks_result_before_exiting() {
+        let body = handler_body("            Message::SaveAndExit =>");
+        // BC-5: save result must be checked; iced::exit() must NOT be called unconditionally.
+        // The impl uses write_json_to_saved_state_disk() and checks its bool return,
+        // or guards on CURRENT_PATH write success — verify the pattern is present.
+        assert!(
+            body.contains("write_json_to_saved_state_disk(")
+                || body.contains("if self.save_state_to_disk("),
+            "SaveAndExit must call write_json_to_saved_state_disk (or save_state_to_disk) — \
+             BC-5: IoError must abort the quit, not silently discard data"
+        );
+        assert!(
+            body.contains("iced::exit()"),
+            "SaveAndExit must call iced::exit() on success"
+        );
+        // Restore-dialog path must also exist (for when save fails).
+        assert!(
+            body.contains("pending_exit_windows = Some("),
+            "SaveAndExit must restore pending_exit_windows on save failure so the dialog can be retried"
+        );
+    }
+
+    #[test]
+    fn save_and_open_file_aborts_on_named_doc_write_failure() {
+        let body = handler_body("            Message::SaveAndOpenFile =>");
+        // Handler must write to named doc and handle failure.
+        assert!(
+            body.contains("std::fs::write("),
+            "SaveAndOpenFile must attempt to write to CURRENT_PATH"
+        );
+        // On write error it must NOT fall through to restart() — must return early.
+        assert!(
+            body.contains("return Task::none()"),
+            "SaveAndOpenFile must return Task::none() on write failure (BC-5 abort)"
+        );
+        // Dialog must be restored so user can retry or discard.
+        assert!(
+            body.contains("pending_open_file = Some("),
+            "SaveAndOpenFile must restore pending_open_file on named-doc write failure"
+        );
+    }
+
+    // ── HIGH: dialog overlap must not bypass F4 protection ───────────────────
+    //
+    // When another confirm_dialog is already open, ExitRequested / NativeOpenFilePendingCheck
+    // must bail out early instead of falling through to save + exit / write + restart.
+
+    #[test]
+    fn exit_requested_guards_existing_dialog() {
+        let body = handler_body("            Message::ExitRequested(windows) =>");
+        assert!(
+            body.contains("confirm_dialog.is_some()"),
+            "ExitRequested must guard against an existing confirm dialog — \
+             HIGH: overlapping dialogs allow bypassing F4 dirty protection"
+        );
+        // Guard must appear before the dirty check so it fires first.
+        let guard_pos = body.find("confirm_dialog.is_some()").unwrap();
+        let dirty_pos = body.find("is_dirty(").unwrap();
+        assert!(
+            guard_pos < dirty_pos,
+            "confirm_dialog guard must come before is_dirty() in ExitRequested"
+        );
+    }
+
+    #[test]
+    fn open_file_pending_check_guards_existing_dialog() {
+        // Use the guard comment (unique to this handler) as the primary anchor.
+        // Avoids relying on multi-line or single-line arm formatting which can change
+        // with rustfmt runs and makes the find() pattern fragile.
+        let guard_marker =
+            "// HIGH fix: another dialog is already visible \u{2014} silently drop this request";
+        let marker_pos = MAIN_RS
+            .find(guard_marker)
+            .expect("NativeOpenFilePendingCheck must contain the HIGH-fix dialog guard comment");
+        // Scan backward to the handler arm.
+        let arm_pos = MAIN_RS[..marker_pos]
+            .rfind("Message::NativeOpenFilePendingCheck")
+            .expect("guard marker must be inside NativeOpenFilePendingCheck handler");
+        // Extract until the next top-level handler arm.
+        let tail = &MAIN_RS[arm_pos..];
+        let region_end = tail.find("\n            Message::").unwrap_or(tail.len());
+        let body = &tail[..region_end];
+        assert!(
+            body.contains("confirm_dialog.is_some()"),
+            "NativeOpenFilePendingCheck guard must check confirm_dialog.is_some() — \
+             HIGH: overlapping dialogs allow bypassing F4 dirty protection"
+        );
+        let guard_pos = body.find("confirm_dialog.is_some()").unwrap();
+        let dirty_pos = body.find("is_dirty(").unwrap();
+        assert!(
+            guard_pos < dirty_pos,
+            "confirm_dialog guard must come before is_dirty() in NativeOpenFilePendingCheck"
         );
     }
 
@@ -4519,6 +7006,76 @@ mod native_menu_handler_tests {
             body.contains("VenueEvent::Ready"),
             "restart() must synthesize VenueEvent::Ready when venue cache is hot — \
              guards the regression where tachibana_state reset to Idle after file open"
+        );
+    }
+
+    // ── F6a: SCENARIO Open / prefill 配線 ────────────────────────────────────
+
+    #[test]
+    fn open_file_replay_mode_uses_py_filter() {
+        let body = handler_body("                    Action::OpenFile =>");
+        assert!(
+            body.contains("AppMode::Replay"),
+            "Action::OpenFile must branch on AppMode::Replay for `.py` filter"
+        );
+        assert!(
+            body.contains(".add_filter(\"Python\", &[\"py\"])"),
+            "Action::OpenFile replay branch must register the `.py` file filter"
+        );
+        assert!(
+            body.contains("Message::NativeOpenStrategyPicked"),
+            "Action::OpenFile replay branch must dispatch NativeOpenStrategyPicked \
+             after the OS file dialog returns"
+        );
+    }
+
+    #[test]
+    fn open_strategy_picked_some_sends_load_strategy_scenario() {
+        let body = handler_body("            Message::NativeOpenStrategyPicked(picked) =>");
+        assert!(
+            body.contains("AppMode::Replay"),
+            "NativeOpenStrategyPicked must guard on replay mode (live must drop the .py)"
+        );
+        assert!(
+            body.contains("Command::LoadStrategyScenario"),
+            "NativeOpenStrategyPicked(Some) must send Command::LoadStrategyScenario"
+        );
+    }
+
+    #[test]
+    fn strategy_scenario_loaded_event_prefills_modal() {
+        let body =
+            handler_body("            Message::StrategyScenarioLoadedEvent { path, scenario } =>");
+        assert!(
+            body.contains("prefill_from_scenario"),
+            "StrategyScenarioLoadedEvent must call prefill_from_scenario when scenario is Some"
+        );
+        assert!(
+            body.contains("set_strategy_file_only"),
+            "StrategyScenarioLoadedEvent must fall back to set_strategy_file_only when scenario is None"
+        );
+        assert!(
+            body.contains("CURRENT_PATH"),
+            "StrategyScenarioLoadedEvent must update CURRENT_PATH (F3 integration)"
+        );
+    }
+
+    #[test]
+    fn strategy_scenario_load_failed_event_pushes_toast_only() {
+        let body = handler_body(
+            "            Message::StrategyScenarioLoadFailedEvent { path, reason } =>",
+        );
+        assert!(
+            body.contains("notifications.push"),
+            "StrategyScenarioLoadFailedEvent must surface the error via a toast"
+        );
+        assert!(
+            !body.contains("CURRENT_PATH"),
+            "StrategyScenarioLoadFailedEvent must NOT update CURRENT_PATH on failure"
+        );
+        assert!(
+            !body.contains("prefill_from_scenario"),
+            "StrategyScenarioLoadFailedEvent must NOT prefill the modal on failure"
         );
     }
 }
@@ -4574,6 +7131,91 @@ mod status_bar_tests {
         assert!(
             (STATUS_BAR_BG.a - 1.0).abs() < eps,
             "BG alpha should be 1.0"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lock_order_tests {
+    use super::*;
+
+    #[test]
+    fn lock_order_acquire_in_correct_order_does_not_panic() {
+        lock_order_reset();
+        lock_order_acquire("MODE_SWITCHING");
+        lock_order_acquire("SUBMIT_IN_FLIGHT");
+        lock_order_acquire("APP_MODE");
+        lock_order_acquire("CURRENT_PATH");
+        lock_order_reset();
+    }
+
+    #[test]
+    fn lock_order_acquire_skipping_levels_is_allowed() {
+        // Skipping intermediate levels (e.g. MODE_SWITCHING then APP_MODE
+        // without acquiring SUBMIT_IN_FLIGHT) is fine — the order is a
+        // partial order.
+        lock_order_reset();
+        lock_order_acquire("MODE_SWITCHING");
+        lock_order_acquire("APP_MODE");
+        lock_order_reset();
+    }
+
+    #[test]
+    #[should_panic(expected = "lock-order violation")]
+    fn lock_order_reverse_acquisition_panics_in_debug() {
+        lock_order_reset();
+        lock_order_acquire("APP_MODE");
+        lock_order_acquire("MODE_SWITCHING");
+    }
+
+    /// H1: dropping a `ModeSwitchGuard` must reset the per-thread
+    /// `LOCK_ORDER_INDEX` so subsequent unrelated acquisitions on the same
+    /// thread are not falsely flagged as reverse-order.
+    #[test]
+    fn mode_switch_guard_drop_resets_lock_order_index() {
+        lock_order_reset();
+        {
+            let _guard = ModeSwitchGuard::try_acquire().expect("first acquisition must succeed");
+            lock_order_acquire("MODE_SWITCHING");
+            lock_order_acquire("APP_MODE");
+            // index is now 2 (APP_MODE) on this thread.
+            LOCK_ORDER_INDEX.with(|cell| {
+                assert!(
+                    cell.get().is_some(),
+                    "LOCK_ORDER_INDEX must be set after lock_order_acquire"
+                );
+            });
+            // _guard is dropped here.
+        }
+        LOCK_ORDER_INDEX.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                None,
+                "ModeSwitchGuard::drop must call lock_order_reset (H1)"
+            );
+        });
+    }
+
+    /// M-rust5: `ModeSwitchGuard::try_acquire` must return `None` when called
+    /// while another guard is still alive, and `Some` again after it drops.
+    #[test]
+    fn mode_switch_guard_try_acquire_is_exclusive_and_recoverable() {
+        // Reset just in case a prior test on this thread left the flag set
+        // (in panicking-test contexts the Drop still runs, so this is mostly
+        // belt-and-suspenders).
+        MODE_SWITCHING.store(false, std::sync::atomic::Ordering::Release);
+
+        let first = ModeSwitchGuard::try_acquire().expect("first try_acquire must return Some");
+        let second = ModeSwitchGuard::try_acquire();
+        assert!(
+            second.is_none(),
+            "second try_acquire must return None while first guard is alive"
+        );
+        drop(first);
+        let third = ModeSwitchGuard::try_acquire();
+        assert!(
+            third.is_some(),
+            "try_acquire must return Some again after the previous guard is dropped"
         );
     }
 }

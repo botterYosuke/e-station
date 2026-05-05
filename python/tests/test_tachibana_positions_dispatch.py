@@ -12,9 +12,12 @@ from engine.exchanges.tachibana_helpers import SessionExpiredError
 # ---------------------------------------------------------------------------
 
 
-def _make_server(session=None):
-    """Create a minimal DataEngineServer with mocked dependencies."""
-    from engine.server import DataEngineServer
+def _make_server(session=None, *, live_state=None):
+    """Create a minimal DataEngineServer with mocked dependencies.
+
+    H-Type4: 既定では Live::CONNECTED 状態にする (state guard を pass させる)。
+    """
+    from engine.server import DataEngineServer, LiveState
 
     with patch.object(DataEngineServer, "__init__", lambda self, **_: None):
         server = DataEngineServer()
@@ -24,6 +27,7 @@ def _make_server(session=None):
     server._tachibana_session = session
     server._tachibana_p_no_counter = MagicMock()
     server._session_holder = MagicMock()
+    server._live_state = live_state if live_state is not None else LiveState.CONNECTED
     return server
 
 

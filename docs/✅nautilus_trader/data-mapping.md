@@ -281,7 +281,9 @@ S:\j-quants\
 
 ### 8.2 期間選択ロジック
 
-`POST /api/replay/load { start_date, end_date }` を受けたら:
+`Command::LoadReplayData { start_date, end_date, ... }` IPC を受けたら（Phase 8 以降は
+`ReplaySession.load(...)` Python helper か GUI フォーム経由で発行される。Phase 7 までは
+`POST /api/replay/load` HTTP）:
 
 | granularity | 開く必要のあるファイル |
 |---|---|

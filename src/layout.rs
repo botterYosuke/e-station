@@ -362,8 +362,11 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
     }
 }
 
-pub fn load_saved_state() -> SavedState {
-    match data::read_from_file(data::SAVED_STATE_PATH) {
+/// Load saved state from an explicit file path.
+/// `path` is a `&str` to match the `data::read_from_file` API and avoid
+/// an extra allocation on the hot boot path.
+pub fn load_saved_state_from(path: &str) -> SavedState {
+    match data::read_from_file(path) {
         Ok(state) => {
             let mut de_layouts = vec![];
 
@@ -454,4 +457,10 @@ pub fn load_saved_state() -> SavedState {
             SavedState::default()
         }
     }
+}
+
+/// Load saved state from the default path (`data::SAVED_STATE_PATH`).
+/// Thin wrapper around [`load_saved_state_from`] for backward compatibility.
+pub fn load_saved_state() -> SavedState {
+    load_saved_state_from(data::SAVED_STATE_PATH)
 }

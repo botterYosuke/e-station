@@ -19,10 +19,15 @@ import pytest
 
 
 def _make_server(tmp_path: Path):
-    """Return a DataEngineServer instance wired to tmp_path as cache_dir."""
+    """Return a DataEngineServer instance wired to tmp_path as cache_dir.
+
+    H-Type4: live (tachibana) 経路は state guard が CONNECTED を要求する。
+    venue='replay' のテストには影響しないが、tachibana ブランチのテストの
+    ために CONNECTED 固定で返す。
+    """
     from unittest.mock import AsyncMock
 
-    from engine.server import DataEngineServer
+    from engine.server import DataEngineServer, LiveState
 
     with patch("engine.server.BinanceWorker", return_value=MagicMock()), patch.object(
         DataEngineServer, "_startup_tachibana", AsyncMock(return_value=None)
@@ -32,6 +37,7 @@ def _make_server(tmp_path: Path):
             token="test-token",
             cache_dir=tmp_path,
         )
+    server._live_state = LiveState.CONNECTED
     return server
 
 

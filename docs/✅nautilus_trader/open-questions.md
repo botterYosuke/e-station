@@ -74,9 +74,9 @@ N3 で nautilus 側に `HyperliquidExecutionClient` 等を実装する作業は�
 
 **決定: 案 B（Python tkinter に発注 UI、iced は監視・表示のみ）**
 
-**根拠**: Python 単独モード方針（memory: `project_python_only_mode.md`）と一貫する。iced から `POST /api/order/submit` を叩く必要はない。
+**根拠**: Python 単独モード方針（memory: `project_python_only_mode.md`）と一貫する。iced から HTTP API を叩く必要はない。
 
-- `POST /api/order/submit` 等の HTTP API は Rust 側で受けてもよいが、**発注入力 UI は Python tkinter に統一**
+- Phase 8 で Rust 側 HTTP API（`POST /api/order/submit` 等）はすべて廃止。発注経路は Python helper（`engine.live_session.LiveSession`）か GUI 内部経路に統一
 - iced は Portfolio/PnL/Chart 等の監視・表示のみを担う
 - spec.md §4 の公開 API 表は Rust HTTP API 経路（iced から叩かれる前提）を残してよいが、「iced UI から直接呼ぶ想定」を「Python 発注 UI または監視ツールから呼ぶ想定」に修正する
 

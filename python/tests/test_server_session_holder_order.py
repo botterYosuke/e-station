@@ -268,6 +268,8 @@ def _make_server(holder: MagicMock, session: MagicMock) -> object:
     """EngineServer を最小構成で組み立てる。"""
     from engine.server import DataEngineServer as EngineServer
 
+    from engine.server import LiveState, ReplayState
+
     srv = EngineServer.__new__(EngineServer)
     srv._session_holder = holder
     srv._tachibana_session = session
@@ -280,4 +282,9 @@ def _make_server(holder: MagicMock, session: MagicMock) -> object:
     srv._submit_order_inflight_count = 0
     # Phase O2: venue_order_id → client_order_id 逆引きマップ
     srv._venue_to_client = {}
+    # H15: tests bypassing __init__ via __new__ must explicitly assign
+    # state machine attrs. Order live-path requires LiveState.CONNECTED.
+    srv._mode = "live"
+    srv._live_state = LiveState.CONNECTED
+    srv._replay_state = ReplayState.IDLE
     return srv

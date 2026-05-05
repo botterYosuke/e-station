@@ -67,20 +67,32 @@ pub fn confirm_dialog_container<'a, Message: 'a + Clone>(
     let dialog = confirm_dialog.message;
     let on_confirm = *confirm_dialog.on_confirm;
     let on_confirm_msg = confirm_dialog.on_confirm_btn_text;
+    let on_save = confirm_dialog.on_save.map(|b| *b);
+    let on_save_msg = confirm_dialog.on_save_btn_text;
+
+    // 3-button layout when a save action is provided: [Cancel] [Discard] [Save]
+    // Save is the rightmost primary button; Discard is a secondary destructive option.
+    let buttons: iced::widget::Row<'a, Message> = {
+        let cancel = button(text("Cancel"))
+            .style(|theme, status| style::button::transparent(theme, status, false))
+            .on_press(on_cancel);
+        let confirm = button(text(
+            on_confirm_msg.unwrap_or_else(|| "Confirm".to_string()),
+        ))
+        .on_press(on_confirm);
+        if let Some(save_action) = on_save {
+            let save = button(text(on_save_msg.unwrap_or_else(|| "Save".to_string())))
+                .on_press(save_action);
+            row![cancel, confirm, save].spacing(8)
+        } else {
+            row![cancel, confirm].spacing(8)
+        }
+    };
 
     container(
-        column![
-            text(dialog).size(14),
-            row![
-                button(text("Cancel"))
-                    .style(|theme, status| style::button::transparent(theme, status, false))
-                    .on_press(on_cancel),
-                button(text(on_confirm_msg.unwrap_or("Confirm".to_string()))).on_press(on_confirm),
-            ]
-            .spacing(8),
-        ]
-        .align_x(Alignment::Center)
-        .spacing(16),
+        column![text(dialog).size(14), buttons]
+            .align_x(Alignment::Center)
+            .spacing(16),
     )
     .padding(24)
     .style(style::dashboard_modal)

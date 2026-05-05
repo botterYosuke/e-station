@@ -6,10 +6,11 @@
 
 ## 目次
 
-- [`current-architecture.md`](./current-architecture.md) — 現状調査結果
+- [`current-architecture.md`](./current-architecture.md) — 2026-04-24 時点の調査スナップショット
 - [`spec.md`](./spec.md) — 新仕様（責務分割・IPC・データモデル）
 - [`implementation-plan.md`](./implementation-plan.md) — 段階的な実装計画
 - [`open-questions.md`](./open-questions.md) — 未決事項・要相談事項
+- [`python-helper-direct-api.md`](./archive/python-helper-direct-api.md) — Phase 8: Python helper class 直呼び + Rust HTTP API 廃止計画
 
 ## フェーズ進捗サマリ
 
@@ -22,8 +23,14 @@
 | 3 | 残り取引所 Python 移植 | ✅ 完了 (2026-04-24) |
 | 4 | ヒストリカルデータ bulk download 移植 | ✅ 完了 (2026-04-24) |
 | 5 | Rust から取引所コード削除 | ✅ 完了 (2026-04-25) |
-| 6 | 配布・運用整備 | 進行中 |
-| 7 | UI リグレッション修復・E2E 検証の明文化 | ✅ 完了 (2026-04-25) — T1.3 後半 / T4.c (Windows cold-start) / T4.d (AppImage/Flatpak 判断) すべてクローズ。macOS/Linux cold-start CI 計測のみ別 PR で追加予定 → [`phase-7-ui-regression-remediation.md`](./phase-7-ui-regression-remediation.md) |
+| 6 | 配布・運用整備 | ✅ 完了 (2026-04-25) |
+| 7 | UI リグレッション修復・E2E 検証の明文化 | ✅ 完了 (2026-04-25) — [`phase-7-ui-regression-remediation.md`](./archive/phase-7-ui-regression-remediation.md) |
+| 8.1a | Python helper class + CLI (in-process mode) | ✅ 完了 (2026-05-03) |
+| 8.1b | attach mode: multi-client / session file / EngineBusy | ✅ 完了 (2026-05-03) |
+| 8.1c | GUI replay 起動フォーム | ✅ 完了 (2026-05-03) |
+| 8.2 | E2E bash スクリプト削除 / 廃止 | ✅ 完了 (2026-05-03) |
+| 8.3 | Rust HTTP API（ポート 9876）完全削除 | ✅ 完了 (2026-05-03) |
+| 8 R1〜R4 | review-fix-loop（型基盤 / silent failure / LiveSession attach 本実装 / state guard / EngineBusy unicast 等。CRITICAL 7 / HIGH 13 / MEDIUM 22 を全件解消） | ✅ 完了 (2026-05-04) — [`python-helper-direct-api.md` 末尾レビュー反映ブロック群](./archive/python-helper-direct-api.md) |
 
 ---
 
@@ -85,7 +92,7 @@
 6. **起動ハンドシェイク**: `Hello`（schema_version / session_id / token）→ `Ready`（capabilities）→ `SetProxy` → マーケットデータ系コマンド、の順を固定。`Connected` と `Ready` の意味を分ける。→ [spec.md §4.5](./spec.md#45-起動ハンドシェイク)
 
 ### C. セキュリティ
-7. **ローカル IPC のアクセス制御**: loopback 専用バインド、ランダム接続トークン（stdin で受け渡し）、単一クライアント制限。CLI 引数でのポート・トークン受け渡しは不採用。→ [spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御)
+7. **ローカル IPC のアクセス制御**: loopback 専用バインド、ランダム接続トークン（stdin で受け渡し）を維持する。接続モデルは Phase 7 までは単一クライアント制限、Phase 8 attach mode では multi-client broadcast に更新予定。→ [spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御), [python-helper-direct-api.md §0.1.2](./archive/python-helper-direct-api.md)
 8. **プロキシ資格情報の扱い**: keyring → Rust 保持 → `Ready` 受領後の IPC `SetProxy` で Python に渡す（CLI 引数・環境変数は基本採用しない）。→ [spec.md §5.4](./spec.md#54-プロキシ資格情報の受け渡し)
 
 ### D. 性能・射程（3 回目レビュー追加）
@@ -95,8 +102,8 @@
 12. **Rust 直結モード長期方針**: 暫定撤去（案 A）。フェーズ 2 の計測結果で案 C（optional feature）に戻す余地を残す。→ [spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定)
 13. **スキーマバージョニング運用**: major / minor を分け、minor 差は警告のみで接続継続。→ [spec.md §4.5.1](./spec.md#451-スキーマバージョニング運用)
 
-### 残る要決定（実装前に合意したい）
-- **[Q5](./open-questions.md) Rust 直結残置の長期方針**（案 A/B/C）
-- **[Q7](./open-questions.md) スキーマ生成方針**（JSON Schema + quicktype / schemars + datamodel-code-generator / proto）
-- **[Q9](./open-questions.md) 非機能要件の合格ラインの数値合意**（§9 の提案値でよいか）
-- **[Q10](./open-questions.md) depth バイナリ化の判断条件と実装着手タイミング**
+### 残る要決定（参考。Phase 5/8 完了で大半は事実上クローズ）
+- ~~**[Q5](./open-questions.md) Rust 直結残置の長期方針**~~ → 案 A（撤去）で確定（Phase 5 で `exchange/` から全 native コード削除済み）
+- **[Q7](./open-questions.md) スキーマ生成方針** — 現状は手書き（Python pydantic + Rust serde）で運用中。drift は SCHEMA_MINOR ガード + cross-language テスト（`test_schemas_nautilus.py` 等）で防いでいる。自動生成は未着手
+- **[Q9](./open-questions.md) 非機能要件の合格ラインの数値合意** — 計測未実施。実運用で問題が顕在化していないため放置
+- **[Q10](./open-questions.md) depth バイナリ化の判断条件** — 現状 JSON のままで実用上支障なし。再評価は性能課題発生時

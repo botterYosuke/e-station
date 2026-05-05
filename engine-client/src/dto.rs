@@ -230,10 +230,46 @@ pub enum Command {
     // ── N1.11: Replay speed control ───────────────────────────────────────
     /// Set the replay playback speed multiplier.
     /// `multiplier` is a positive integer: 1 = real-time, 10 = 10x speed, etc.
-    /// Sent via `POST /api/replay/control` with `{"action":"speed","multiplier":N}`.
     SetReplaySpeed {
         request_id: String,
         multiplier: u32,
+    },
+
+    // ── F7: モード切替 (schema 3.11) ─────────────────────────────────────────────
+    /// Gracefully stop the active replay session (F7 mode-switch).
+    /// Python resolves the active strategy_id internally (no need for caller to know it).
+    /// Python emits `ReplayStopped` (or `EngineBusy` if not running) in response.
+    StopReplay {
+        request_id: String,
+    },
+
+    /// Forceful replay stop fallback (F7: used after StopReplay 5s timeout).
+    /// Python must stop immediately (e.g. SIGKILL the runner thread).
+    /// Python emits `ReplayStopped` on success or `EngineBusy` if still busy.
+    ForceStopReplay {
+        request_id: String,
+    },
+
+    // ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
+    /// 戦略 .py から SCENARIO 定数を安全抽出するよう Python に要求する（F6a）。
+    /// Python 側は ast.parse + ast.literal_eval のみ使用（副作用ゼロ）。
+    LoadStrategyScenario {
+        request_id: String,
+        path: String,
+    },
+
+    /// 戦略 .py の SCENARIO ブロックを libcst で atomic 書き戻すよう Python に要求する（F6c）。
+    /// save_as=false = 上書き保存（path == loaded_path 必須）
+    /// save_as=true  = 新規/派生保存（任意の .py path）
+    SaveStrategyScenario {
+        request_id: String,
+        path: String,
+        /// 書き戻す Scenario dict（JSON object）。
+        scenario: serde_json::Value,
+        #[serde(default)]
+        save_as: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loaded_path: Option<String>,
     },
 }
 
@@ -513,6 +549,33 @@ impl std::fmt::Debug for Command {
                 .field("request_id", request_id)
                 .field("multiplier", multiplier)
                 .finish(),
+            Command::LoadStrategyScenario { request_id, path } => f
+                .debug_struct("LoadStrategyScenario")
+                .field("request_id", request_id)
+                .field("path", path)
+                .finish(),
+            Command::SaveStrategyScenario {
+                request_id,
+                path,
+                scenario,
+                save_as,
+                loaded_path,
+            } => f
+                .debug_struct("SaveStrategyScenario")
+                .field("request_id", request_id)
+                .field("path", path)
+                .field("scenario", scenario)
+                .field("save_as", save_as)
+                .field("loaded_path", loaded_path)
+                .finish(),
+            Command::StopReplay { request_id } => f
+                .debug_struct("StopReplay")
+                .field("request_id", request_id)
+                .finish(),
+            Command::ForceStopReplay { request_id } => f
+                .debug_struct("ForceStopReplay")
+                .field("request_id", request_id)
+                .finish(),
         }
     }
 }
@@ -605,6 +668,27 @@ fn default_order_record_venue() -> String {
     "tachibana".to_string()
 }
 
+/// 建玉種別。Python `schemas.PositionRecord.position_type` の Literal と一致させる。
+/// H-Type1: 旧 `String` 表現を enum に格上げ。未知値はデシリアライズ失敗。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PositionType {
+    Cash,
+    MarginCredit,
+    MarginGeneral,
+}
+
+impl PositionType {
+    /// UI 表示やログ用の wire 形 (`snake_case`)。
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            PositionType::Cash => "cash",
+            PositionType::MarginCredit => "margin_credit",
+            PositionType::MarginGeneral => "margin_general",
+        }
+    }
+}
+
 /// Wire representation of a single position entry (cash or margin).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -615,8 +699,8 @@ pub struct PositionRecordWire {
     pub qty: String,
     /// 評価額（円、整数文字列）。"" のとき不明
     pub market_value: String,
-    /// "cash" | "margin_credit" | "margin_general"
-    pub position_type: String,
+    /// 建玉種別 (`cash` | `margin_credit` | `margin_general`)。
+    pub position_type: PositionType,
     /// 信用建玉番号（margin_credit のみ Some）
     pub tategyoku_id: Option<String>,
     /// venue 名（"tachibana" 固定）
@@ -641,7 +725,9 @@ pub struct OrderRecordWire {
     pub trigger_price: Option<String>,
     pub time_in_force: TimeInForce,
     pub expire_time_ns: Option<i64>,
-    pub status: String,
+    /// Order lifecycle status. Mirrors Python
+    /// `tachibana_orders._STATUS_TEXT_MAP` outputs and replay streaming fills.
+    pub status: OrderStatus,
     pub ts_event_ms: i64,
     /// Venue that owns this order: "tachibana" for live orders, "replay" for REPLAY WAL orders.
     /// Defaults to "tachibana" for backwards-compatibility.
@@ -687,6 +773,126 @@ pub enum TriggerType {
     Last,
     BidAsk,
     Index,
+}
+
+/// Order lifecycle status. M-Type3: 旧 `String` を enum 化。
+/// 値は Python `tachibana_orders._STATUS_TEXT_MAP` と replay streaming fills
+/// (`status="FILLED"`) の出力集合と一致する。未知値はデシリアライズ失敗。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderStatus {
+    Submitted,
+    Accepted,
+    Filled,
+    PendingCancel,
+    Canceled,
+    Expired,
+    Rejected,
+}
+
+impl OrderStatus {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            OrderStatus::Submitted => "SUBMITTED",
+            OrderStatus::Accepted => "ACCEPTED",
+            OrderStatus::Filled => "FILLED",
+            OrderStatus::PendingCancel => "PENDING_CANCEL",
+            OrderStatus::Canceled => "CANCELED",
+            OrderStatus::Expired => "EXPIRED",
+            OrderStatus::Rejected => "REJECTED",
+        }
+    }
+}
+
+impl std::fmt::Display for OrderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
+
+/// Engine state machine の wire 名 (Python `schemas.CurrentEngineState` と一致)。
+/// M-Type4: `EngineBusy.current_state` を `String` から enum に格上げ。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CurrentEngineState {
+    // Replay states
+    Idle,
+    Loaded,
+    Running,
+    Stopping,
+    // Live states
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+/// State guard で reject された command 名 (Python `schemas.AttemptedCommand` と一致)。
+/// M-Type4: `EngineBusy.attempted_command` を `String` から enum に格上げ。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AttemptedCommand {
+    LoadReplayData,
+    StartEngine,
+    StopEngine,
+    SetReplaySpeed,
+    /// F7: StopReplay graceful stop (schema 3.11)
+    StopReplay,
+    /// F7: ForceStopReplay fallback (schema 3.11)
+    ForceStopReplay,
+    SubmitOrder,
+    ModifyOrder,
+    CancelOrder,
+    CancelAllOrders,
+    RequestVenueLogin,
+    GetBuyingPower,
+    GetPositions,
+    GetOrderList,
+}
+
+impl AttemptedCommand {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            AttemptedCommand::LoadReplayData => "LoadReplayData",
+            AttemptedCommand::StartEngine => "StartEngine",
+            AttemptedCommand::StopEngine => "StopEngine",
+            AttemptedCommand::SetReplaySpeed => "SetReplaySpeed",
+            AttemptedCommand::StopReplay => "StopReplay",
+            AttemptedCommand::ForceStopReplay => "ForceStopReplay",
+            AttemptedCommand::SubmitOrder => "SubmitOrder",
+            AttemptedCommand::ModifyOrder => "ModifyOrder",
+            AttemptedCommand::CancelOrder => "CancelOrder",
+            AttemptedCommand::CancelAllOrders => "CancelAllOrders",
+            AttemptedCommand::RequestVenueLogin => "RequestVenueLogin",
+            AttemptedCommand::GetBuyingPower => "GetBuyingPower",
+            AttemptedCommand::GetPositions => "GetPositions",
+            AttemptedCommand::GetOrderList => "GetOrderList",
+        }
+    }
+}
+
+impl std::fmt::Display for AttemptedCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
+
+impl CurrentEngineState {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            CurrentEngineState::Idle => "IDLE",
+            CurrentEngineState::Loaded => "LOADED",
+            CurrentEngineState::Running => "RUNNING",
+            CurrentEngineState::Stopping => "STOPPING",
+            CurrentEngineState::Disconnected => "DISCONNECTED",
+            CurrentEngineState::Connecting => "CONNECTING",
+            CurrentEngineState::Connected => "CONNECTED",
+        }
+    }
+}
+
+impl std::fmt::Display for CurrentEngineState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
 }
 
 // ── Events (Python → Rust) ────────────────────────────────────────────────────
@@ -946,16 +1152,25 @@ pub enum EngineEvent {
     /// Replay data load completed. Counters help the UI display progress.
     ///
     /// M-8 (R1b / schema 2.5): `strategy_id` was tightened from `String` to
-    /// `Option<String>` because the standalone `LoadReplayData` IPC (used by
-    /// `/api/replay/load` before any strategy is started) has no meaningful
-    /// strategy id. Old senders that omit the field deserialise as `None`
-    /// thanks to `#[serde(default)]`. The in-engine `start_backtest_replay`
-    /// path still emits a concrete strategy id (`Some(...)`).
+    /// `Option<String>` because a standalone `LoadReplayData` IPC issued before
+    /// any strategy is started has no meaningful strategy id. Old senders that
+    /// omit the field deserialise as `None` thanks to `#[serde(default)]`. The
+    /// in-engine `start_backtest_replay` path still emits a concrete strategy
+    /// id (`Some(...)`).
     ReplayDataLoaded {
         #[serde(default)]
         strategy_id: Option<String>,
         bars_loaded: u64,
         trades_loaded: u64,
+        /// schema 3.12: replay 対象の instrument_id。helper attach mode で
+        /// GUI が `auto_generate_replay_panes` を呼ぶために必要。
+        /// 旧 engine（minor<12）からは `None` で deserialise される。
+        #[serde(default)]
+        instrument_id: Option<String>,
+        /// schema 3.12: bar 粒度。`Trade` のときは bar 無しなので
+        /// CandlestickChart はスキップする。
+        #[serde(default)]
+        granularity: Option<ReplayGranularity>,
         ts_event_ms: i64,
     },
     /// nautilus Position opened (transition flat → long/short).
@@ -1057,6 +1272,69 @@ pub enum EngineEvent {
     /// Rust 側は現状 ignore してよい（将来の日付ヘッダー表示などに流用可能）。
     DateChangeMarker {
         date: String,
+    },
+
+    // ── F7: モード切替 (schema 3.11) ─────────────────────────────────────────────
+    /// Emitted after `StopReplay` or `ForceStopReplay` successfully stops the
+    /// active replay session. `final_equity` is a decimal-string or None if the
+    /// session ended without a completed strategy run.
+    ReplayStopped {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_equity: Option<String>,
+    },
+
+    // ── Phase 8.1b: Multi-client connection lifecycle events ─────────────────
+    /// Engine state machine が現在の state で受け付けられない Command を
+    /// 受信したときに emit する（B3 state guard）。
+    /// `current_state` / `attempted_command` / `reason` は `schemas.py`
+    /// `EngineBusy` の wire 形式に対応する。
+    EngineBusy {
+        current_state: CurrentEngineState,
+        attempted_command: AttemptedCommand,
+        reason: String,
+        /// MEDIUM-R2-6: violation を起こした command の `request_id`。Optional
+        /// で `schemas.py` の後方互換 (旧 minor バージョン送信元) を保つ。
+        /// helper 側 `wait_for()` / `events()` で「自分宛の reject」と
+        /// 「broadcast / 別 client 由来」を区別するために使う。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// 新規クライアントが engine WebSocket に接続したことを全 client に broadcast する。
+    /// `count` は接続中のクライアント総数（接続後）。
+    ClientConnected {
+        count: u32,
+    },
+    // ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
+    /// LoadStrategyScenario の応答。scenario=None は SCENARIO 不在を示す。
+    StrategyScenarioLoaded {
+        request_id: String,
+        path: String,
+        /// SCENARIO dict、または SCENARIO 不在時 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scenario: Option<serde_json::Value>,
+    },
+
+    /// LoadStrategyScenario 失敗時の応答（構文エラー / リテラル以外の dict）。
+    StrategyScenarioLoadFailed {
+        request_id: String,
+        path: String,
+        reason: String,
+    },
+
+    /// SaveStrategyScenario の応答。
+    StrategyScenarioSaved {
+        request_id: String,
+        path: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
+    /// クライアントが engine WebSocket から切断したことを全 client に broadcast する。
+    /// `count` は接続中のクライアント総数（切断後）。
+    ClientDisconnected {
+        count: u32,
     },
 }
 

@@ -6,7 +6,7 @@
 //! - `PositionRecordWire.market_value` の空文字許容
 //! - `SCHEMA_MINOR` が 7 以上であることのアサート
 
-use flowsurface_engine_client::dto::{Command, EngineEvent, PositionRecordWire};
+use flowsurface_engine_client::dto::{Command, EngineEvent, PositionRecordWire, PositionType};
 
 // ── Schema version guard ────────────────────────────────────────────────────
 
@@ -103,7 +103,7 @@ fn positions_updated_roundtrip_cash_and_margin() {
             assert_eq!(cash.instrument_id, "7203.TSE");
             assert_eq!(cash.qty, "100");
             assert_eq!(cash.market_value, "345600");
-            assert_eq!(cash.position_type, "cash");
+            assert_eq!(cash.position_type, PositionType::Cash);
             assert_eq!(cash.tategyoku_id, None);
             assert_eq!(cash.venue, "tachibana");
 
@@ -111,7 +111,7 @@ fn positions_updated_roundtrip_cash_and_margin() {
             assert_eq!(margin.instrument_id, "9984.TSE");
             assert_eq!(margin.qty, "50");
             assert_eq!(margin.market_value, "2134500");
-            assert_eq!(margin.position_type, "margin_credit");
+            assert_eq!(margin.position_type, PositionType::MarginCredit);
             assert_eq!(margin.tategyoku_id, Some("T-12345".to_string()));
         }
         other => panic!("expected PositionsUpdated, got {:?}", other),
@@ -217,7 +217,7 @@ fn position_record_wire_roundtrip() {
         instrument_id: "7203.TSE".to_string(),
         qty: "100".to_string(),
         market_value: "345600".to_string(),
-        position_type: "cash".to_string(),
+        position_type: PositionType::Cash,
         tategyoku_id: None,
         venue: "tachibana".to_string(),
     };

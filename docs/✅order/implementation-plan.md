@@ -1,5 +1,7 @@
 # 立花注文機能: 実装計画
 
+> **Phase 8（2026-05-03 完了）注記**: 本計画の Phase O0〜O3 は完了済み。Phase 8 で Rust 側 HTTP API（`src/api/order_api.rs` / `src/replay_api.rs` / `src/api/agent_api.rs` / `src/api/mod.rs` 合計約 6,756 行）を全廃し、Python helper class（`engine.replay_session.LiveSession` / `engine.replay_session.ReplaySession`）を新設。本計画内の T0.5（Rust HTTP API `/api/order/submit`）/ T1.3（`/api/order/modify` 等）/ T0.6（`OrderGuardConfig`）の成果物は Phase 8 で削除済み。E2E テスト（旧 `s80_*.sh` / `s81_*.sh` 等の bash + curl）は pytest + `LiveSession` に移植済み。GUI 発注は元から HTTP を経由していなかったため `Action::SubmitOrder` → `Command::SubmitOrder` IPC 直送経路で無傷。
+
 **前提条件（着手ブロッカー）**: 立花 Phase 1（[docs/✅tachibana/implementation-plan.md](../✅tachibana/implementation-plan.md)）の T2（認証実装）以降が完了していること。ログイン経路は `tachibana_login_flow.py` + `tachibana_auth.py` で構成される（`tachibana_login.py` は存在しない）。
 
 **現状確認（2026-04-25）**: `python/engine/exchanges/` に既存の tachibana 系ファイル:

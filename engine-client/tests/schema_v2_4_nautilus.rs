@@ -23,10 +23,18 @@ fn schema_minor_is_7_for_positions() {
     // 統一したため SCHEMA_MINOR を 5 → 6 に bump。
     // SCHEMA_MINOR を 6 → 7 に bump（Positions Phase）。
     // SCHEMA_MINOR を 7 → 8 に bump（Phase A: TickerEntry discriminated union）。
+    // Phase 8.1b B1 / H4: SCHEMA_MINOR を 8 → 9 に bump（multi-client broadcast,
+    // ClientConnected/ClientDisconnected events）。Python 側 schemas.py と同期。
+    // F6: SCHEMA_MINOR を 9 → 10 に bump（SCENARIO 定数 IPC: LoadStrategyScenario /
+    // SaveStrategyScenario コマンドと StrategyScenarioLoaded / StrategyScenarioSaved イベント）。
+    // F7: SCHEMA_MINOR を 10 → 11 に bump（StopReplay / ForceStopReplay コマンドと
+    // ReplayStopped イベント追加）。
+    // schema 3.12: SCHEMA_MINOR を 11 → 12 に bump
+    // (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        8,
-        "SCHEMA_MINOR must be 8 after Phase A (TickerEntry typed schema)"
+        12,
+        "SCHEMA_MINOR must be 12 after schema 3.12 (ReplayDataLoaded.instrument_id / granularity)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -318,12 +326,18 @@ fn replay_data_loaded_deserializes() {
             bars_loaded,
             trades_loaded,
             ts_event_ms,
+            instrument_id,
+            granularity,
         } => {
             // M-8: Option<String> へ。strategy_id 文字列付きは Some(...) で来る。
             assert_eq!(strategy_id.as_deref(), Some("strat-001"));
             assert_eq!(bars_loaded, 1234);
             assert_eq!(trades_loaded, 56789);
             assert_eq!(ts_event_ms, 1_700_000_000_002);
+            // schema 3.12: 旧 fixture には instrument_id / granularity が無いので None。
+            // 新 fixture では Some(...) で送出される。
+            assert!(instrument_id.is_none());
+            assert!(granularity.is_none());
         }
         other => panic!("expected ReplayDataLoaded, got {other:?}"),
     }

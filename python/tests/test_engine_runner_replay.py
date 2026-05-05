@@ -110,6 +110,10 @@ class TestStartBacktestReplayTrades:
         loaded = next(e for e in events if e["event"] == "ReplayDataLoaded")
         assert loaded["trades_loaded"] == 4
         assert loaded["bars_loaded"] == 0
+        # schema 3.12: instrument_id / granularity を同梱して GUI helper-attach
+        # 経路で auto_generate_replay_panes を呼べるようにする (replay-pane-auto-generate-fix)
+        assert loaded["instrument_id"] == "1301.TSE"
+        assert loaded["granularity"] == "Trade"
 
 
 class TestStartBacktestReplayBars:

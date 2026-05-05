@@ -247,6 +247,67 @@ R6 まで `.env` の dev creds と `test_tachibana_startup_supervisor.py` の漏
 
 `cargo fmt --all` は workspace 全体に走るため、フェーズと関係ない `exchange/` や `src/screen/dashboard/tickers_table.rs` まで diff が出る。コミット時に「これは fmt 由来か機能変更由来か」を `git diff --stat` で先に確認、無関係 fmt は同 PR に含めるか別 PR に分けるかを判断。
 
+### 12. `isolation: "worktree"` がフィーチャーブランチで base 不整合を起こす
+
+Phase 8 R1 の parallel-agent-dev で `Agent({ isolation: "worktree" })` を使うと、worktree が **現在のフィーチャーブランチ HEAD ではなく `main` (またはデフォルトブランチ) から作られる**ケースがあった（R1 で Phase 3/4 が同時に STOP+REPORT）。Phase 8 で新設した `python/engine/replay_session.py` や `engine-client/src/session_file.rs` が worktree に存在せず、エージェントが「対象ファイルが無い → 推測で再実装するのは事故」と正しく判断して停止した。
+
+**対策**: フィーチャーブランチ作業中は **`isolation: "worktree"` を使わずメインリポジトリで直接作業させる**。並行性は「ファイル単位で担当を分ける」で確保し、計画書のような共有ファイルだけ orchestrator が最後に集約する。worktree を使う場合は agent prompt 冒頭で `git branch --show-current` と特定ファイルの存在チェックを必須化し、不一致なら STOP+REPORT。
+
+### 13. 単一エージェント batch の限界（10 項目 + 大型機能 1 で STOP+REPORT）
+
+Phase 8 R1 で CRITICAL 6 / HIGH 10 / MEDIUM 16 + 大型 LiveSession attach 本実装 + 898 行テスト分割 + 計画書追記 を **1 体の `general-purpose` に投げたら着手前に STOP+REPORT** された。理由は「単一会話で TDD 厳守 + 全検証緑で時間予算が読めない」「中途半端で `✅ 達成` と書くのは MISSES.md 記録対象の典型パターン」と subagent が正しく判断した。
+
+**閾値の経験則**:
+- 〜10 項目 + 軽い機能 → 単一 `general-purpose` で OK
+- 10〜30 項目 → 依存順 batch（型基盤 → server → helper → Rust → test）に明示分割しても単一 agent でいける場合あり
+- **30 項目超 / 大型新機能含む → `/parallel-agent-dev` 必須**。Phase 1 (foundation) → Phase 2 → Phase 3/4 並列 → Phase 5 のような multi-stage で組む
+
+subagent に「困ったら STOP+REPORT」を明示しているなら、過剰スコープの自己防衛も信頼できる。orchestrator は STOP+REPORT を受けたら案 A/B/C をユーザーに提示する。
+
+### 14. 計画書末尾「レビュー反映」ブロックの並行更新競合
+
+Phase 3 (Python) と Phase 4 (Rust) を並行実行する際、両者が同じ `python-helper-direct-api.md` 末尾の「レビュー反映」ブロックに追記しようとすると競合する。
+
+**対策**: 並行する agent のうち **1 つだけ計画書の追記責任を持たせ、他は完了報告に「計画書追記用差分サマリ」を箇条書きで返す**。orchestrator が最後に集約してまとめる。Phase 8 R1 では Phase 3 が計画書を更新、Phase 4 は差分サマリを report の末尾に明示する形で衝突回避できた。
+
+### 15. multi-client 化時の broadcast → unicast 化漏れ（fanout ガード）
+
+Phase 8.1b で `_Broadcaster` を導入したあと、R2 で「`_do_request_venue_login` の早期 reject (`mode_mismatch` / `unsupported_venue`) が `self._emit`（broadcast）のまま」と発見された。`EngineBusy` を unicast 化する R1 修正は `_check_*_state` 経由の reject のみカバーしており、handler 内での明示的な VenueError 送出は別経路で broadcast に取り残されていた。
+
+**reviewer 観点**: multi-client 機構（broadcast / fanout）を導入する PR では「**当該 client への応答**」と「**全 client への通知**」を機械的に分類し、応答系（`*Error`、`EngineBusy`、reject 通知）は **すべて unicast (`send_to(ws, ...)`)** で送れているかをファイル全体で検査する。`grep -n "self._emit\|self._outbox.append" python/engine/server.py` で全送信経路を列挙して目検する。
+
+### 16. illegal state 組合せを Literal の直交 union + model_validator で弾く
+
+R1 で `EngineBusy.current_state` を Replay/Live フラットな 7 値 Literal で定義したところ、`(STOPPING, RequestVenueLogin)` のような Replay/Live 跨ぎの illegal な組合せが Pydantic を通過する設計欠陥が発覚。R1 修正で:
+
+```python
+ReplayStateName = Literal["IDLE","LOADED","RUNNING","STOPPING"]
+LiveStateName = Literal["DISCONNECTED","CONNECTING","CONNECTED"]
+CurrentEngineState = ReplayStateName | LiveStateName
+
+# EngineBusy に @model_validator(mode="after") で
+# (current_state ∈ ReplayStateName) ↔ (attempted_command ∈ ReplayOnlyCommand ∪ SharedCommand)
+# (current_state ∈ LiveStateName) ↔ (attempted_command ∈ LiveOnlyCommand ∪ SharedCommand)
+# を強制
+```
+
+の構造に変更。**Literal を直交軸ごとに分け model_validator で組合せ整合性を強制**するパターンは state machine が複数並走する system で再利用価値が高い。Rust 側にも `CurrentEngineState` enum + `AttemptedCommand` enum を追加し、`#[serde(deny_unknown_fields)]` ではなく enum 完全一致デシリアライズで未知値を弾く。
+
+### 17. fix 自体が silent failure を生む（定量的傾向）
+
+Phase 8 R1〜R4 で「ラウンド N の fix が ラウンド N+1 で新規 silent failure として発見される」連鎖が定量的に確認できた:
+
+| ラウンド | 新規 silent failure 発見 | 前ラウンド fix 由来 |
+|---|---|---|
+| R1 (初回レビュー) | 32 件 | (実装由来) |
+| R2 サニティ | 8 件 (CRITICAL 1 / HIGH 3 / MEDIUM 4) | R1 fix 由来が大半 |
+| R3 サニティ | 4 件 (MEDIUM 2 / LOW 2) | R2 fix 由来が大半 |
+| R4 サニティ | 0 件（**収束**） | — |
+
+R2 で見つかった 8 件のうち、CRITICAL `_login_attach()` の `request_id` フィルタは「R1 の Silent-M3 (Error 即 raise) を attach login にも適用したら broadcast `request_id=None` の VenueError を取りこぼす」という連鎖。R3 で見つかった「credential fingerprint 誤 RuntimeError」は「R2 の MEDIUM-R2-7（demo flag 切替検知）を fingerprint 比較で実装したら env-resolved と explicit 渡しで fp が一致しない」という連鎖。
+
+**毎ラウンド `silent-failure-hunter` を必ず投入**し、特に「前ラウンドで導入した新変数・新フィールド・新 if 分岐」をピンポイントで検査する prompt にすると効率的。
+
 ## 適用例
 
 ### 立花 T3 フェーズ R6-R9（実測）
@@ -263,6 +324,30 @@ R6 まで `.env` の dev creds と `test_tachibana_startup_supervisor.py` の漏
 総所要: レビュー 13 並列起動 + 修正 3 ラウンド。新規統合テスト 5 件追加。Phase 2/O1 繰越 2 件のみ明示。
 
 **学んだこと**: 「(b) 全件指示」でも subagent は独断繰越する → R6 で 9 件取りこぼし → R6.5 として強制修正バッチを別途投入。**初回プロンプトに「降格禁止」明記で R7 以降は再発なし**。
+
+### Phase 8 Python helper R1-R4（実測, 2026-05-04）
+
+Python helper direct API（`ReplaySession` / `LiveSession` / `_AttachClient`）の review-fix-loop。Rust + Python、48 ファイル変更、+5549/-1261 行:
+
+| ラウンド | 投入レビュアー | CRITICAL | HIGH | MEDIUM | LOW | 修正後の検証 |
+|---|---|---|---|---|---|---|
+| R1 初回 | 5 並列（rust / silent / type / ws-compat / general） | 6 | 10 | 16 | 10+ | (修正前) |
+| R1 修正 | parallel-agent-dev: Phase 1 (型基盤) → Phase 2 (server) → Phase 3/4 並列 (helper / Rust) → Phase 5 (test 分割) | — | — | — | — | 4cmd 緑 / pytest 1598 → 1670 (+72) |
+| R2 サニティ | 2 並列（silent-failure + general-purpose plan crosscheck） | 1 | 3 | 4 | 3 | — |
+| R2 修正 | 単一 general-purpose（8 項目 batch） | — | — | — | — | 4cmd 緑 / pytest 1684 (+14) |
+| R3 サニティ | silent-failure 単独 | 0 | 0 | 2 | 2 | — |
+| R3 修正 | 単一 general-purpose（4 項目 batch） | — | — | — | — | 4cmd 緑 / pytest 1691 (+7) |
+| R4 サニティ | silent-failure 単独 | 0 | 0 | 0 | 1 | **収束** |
+
+総所要: レビュー 5+2+1+1=9 並列起動 + 修正 4 ラウンド。新規テスト +93 件（test_review_fixes.py 898 行を機能別 10 ファイルに分割。新規 phase8_round2 / round3 / phase3_review_fixes 等）。LOW のみ残存 (5 件)、HIGH 以上は全て収束。
+
+**学んだこと**:
+
+1. **R1 が大型（30 件超 + 大型新機能）の場合、単一 general-purpose は STOP+REPORT する** → `/parallel-agent-dev` で依存順分割が必須。Phase 1（型基盤）が後続全てに波及するため最初に確定 → 検証 → 並列展開。
+2. **`isolation: "worktree"` がフィーチャーブランチ作業で base 不整合を起こす** → 並行性は worktree でなく「ファイル単位の担当分け」で確保する。Phase 8 では Phase 3 (Python) と Phase 4 (Rust) はメインリポジトリで直接並行できた。
+3. **R1 32 件 → R2 8 件 → R3 4 件 → R4 0 件** の収束カーブが従来知見（25-30 → 10-15 → 5-7 → 0）の上限に近い。大規模 fix では半減ペースが標準。
+4. **C-GP4 のような大型新機能（LiveSession attach 本実装）も review-fix-loop 内で完遂可能** だった。「Phase 9 持ち越し」の安易な降格を案 A〜C でユーザーに判断させた点が分岐点。
+5. **broadcast → unicast の漏れ** が R1 で M-GP8 として 1 箇所修正されたが、R2 で `_do_request_venue_login` の早期 reject に同種漏れが残っていた。**multi-client 移行 PR は全送信経路の grep 走査を観点に明記**。
 
 ## 汎用呼び出しテンプレート
 

@@ -12,8 +12,14 @@
 
 - **OS ネイティブのメニューバー**（タイトルバー直下に表示される Win32 / macOS 標準メニュー）をメインウィンドウに追加する
 - **live モード**: `File > 開く...` / `File > 名前を付けて保存...`
-- **replay モード**: `File > ストラテジーを開く...`
+- **replay モード**: `File > Replay を開始...`（Phase 8 で `ストラテジーを開く...` から統合）
 - いずれのモードにも `File > 終了` を配置する
+
+> **Phase 8 更新（python-helper-direct-api、2026-05）**: 旧 `File > ストラテジーを開く...`
+> は廃止し、`File > Replay を開始...` フォーム（instrument / start / end / granularity /
+> strategy_file / initial_cash 入力）に統合した。本記録の以下の節は元の実装時点の挙動を
+> 残しているが、現行 UI ではフォームから一括投入する形に置き換わっている
+> （`src/modal/replay_form.rs` 参照）。
 
 ### 非要件（スコープ外）
 
@@ -53,11 +59,11 @@
 
 ```
 native_menu
-├── pub enum Action { OpenFile, SaveAs, OpenStrategy }
+├── pub enum Action { OpenFile, Save, SaveAs, OpenReplayDialog, Quit }
 ├── pub fn attach(raw_id: u64, app_mode: AppMode)   ← Windows/macOS で muda 初期化
-├── pub fn subscription() -> Subscription<Action>    ← 16ms ポーリング
+├── pub fn subscription(app_mode: AppMode) -> iced::Subscription<Action>    ← 16ms ポーリング
 └── mod platform (cfg: windows or macos)
-    ├── static MENU_IDS: OnceLock<MenuIds>
+    ├── static MENU_IDS: Mutex<Option<MenuIds>>
     ├── fn attach(...)  ← Menu 構築 + init_for_hwnd / init_for_nsapp
     └── fn event_stream() -> impl Stream  ← MenuEvent::receiver() をポーリング
 ```
@@ -127,25 +133,42 @@ fn new()
       → menu_ref.init_for_hwnd(hwnd)  ← Win32 SetMenu
 ```
 
-### File > 開く...（live モードのみ）
+### File > 開く…（Open）（live モードのみ）
 
 ```
-NativeMenuAction(OpenFile)
-  → rfd::AsyncFileDialog::pick_file() (Python フィルタ除く)
-  → ファイル読み込み → String
-  → NativeOpenFileApply(json)
+NativeMenuAction(OpenFile)                          Ctrl+O
+  → rfd::AsyncFileDialog::pick_file() (.json フィルタのみ)
+  → ファイル読み込み → (json: String, path: PathBuf)
+  → NativeOpenFileApply { json, path }
       → serde_json::from_str::<data::State>(&json) でバリデーション
-        ✓ OK: data::write_json_to_file(json, SAVED_STATE_PATH) → self.restart()
+        ✓ OK: data::write_json_to_file(json, SAVED_STATE_PATH)
+               CURRENT_PATH = Some(path)
+               self.restart()
         ✗ Err: Toast::error("無効な設定ファイルです: {e}")
 ```
 
 `self.restart()` は `Flowsurface::new()` を呼び `load_saved_state()` が上書き済みの
 `saved-state.json` を読み直すため、新しい設定が即座に反映される。
+`CURRENT_PATH` は `static Mutex<Option<PathBuf>>` のため `restart()` を経由しても保持される。
 
-### File > 名前を付けて保存...（live モードのみ）
+### File > 上書き保存（Save）（live モードのみ）
 
 ```
-NativeMenuAction(SaveAs)
+NativeMenuAction(Save)                              Ctrl+S
+  ├─ CURRENT_PATH が Some(p) → pending_save_path = p
+  │    → window::collect_window_specs(...)
+  │    → NativeSaveAsWithSpecs(windows)
+  │        → std::fs::write(p, json)          ← 任意パスへ書く
+  │        → save_state_to_disk(windows)      ← saved-state.json にも書く (A-3)
+  │        → CURRENT_PATH = Some(p)
+  │        → Toast::info("保存しました: {p}")
+  └─ CURRENT_PATH が None → Save As ダイアログへフォールバック
+```
+
+### File > 名前を付けて保存…（Save As）（live モードのみ）
+
+```
+NativeMenuAction(SaveAs)                            Ctrl+Shift+S
   → rfd::AsyncFileDialog::save_file()
   → NativeSaveAsPath(Some(path))
       → self.pending_save_path = Some(path)
@@ -154,23 +177,25 @@ NativeMenuAction(SaveAs)
       → self.pending_save_path.take()
       → self.build_state_json(&windows)
       → std::fs::write(path, json)
+      → save_state_to_disk(windows)       ← saved-state.json にも書く (A-3)
+      → CURRENT_PATH = Some(path)
       → Toast::info("保存しました: {path}")
 ```
 
 2 メッセージに分割しているのは、ウィンドウの位置・サイズ収集が非同期タスクであるため。  
 `pending_save_path` フィールドで保存先パスを橋渡しする。
 
-### File > ストラテジーを開く...（replay モードのみ）
+### File > Replay を開始…（replay モードのみ）
 
 ```
-NativeMenuAction(OpenStrategy)
-  → rfd::AsyncFileDialog::pick_file() (.py フィルタ)
-  → Message::StrategyFilePicked(path)
-      → self.replay_strategy_file = path  (既存ハンドラ)
+NativeMenuAction(OpenReplayDialog)
+  → Message::ShowReplayDialog
+      → self.replay_form_modal = Some(ReplayFormModal::default())
 ```
 
-既存の `PickStrategyFile` フローと全く同じ `StrategyFilePicked` メッセージを使う。
-メニューバーとサイドバーどちらからでも同じ結果になる。
+`ReplayFormModal`（`src/modal/replay_form.rs`）が instrument / start / end /
+granularity / strategy_file / initial_cash の各フィールドを持つフォームを表示する。
+Submit 押下で `Command::LoadReplayData` → `Command::StartEngine` を engine に送信する。
 
 ---
 
@@ -281,10 +306,10 @@ cargo test --bin flowsurface               # 234 テスト全体
 | 2 | `File > 開く...` → 任意の `.json` を選択 | live | アプリがリスタートし設定が反映される | ✅ `open_file_apply_valid_json_calls_write_and_restart` |
 | 3 | `File > 開く...` → 壊れた JSON ファイルを選択 | live | エラー toast が出てアプリは継続 | ✅ `open_file_apply_invalid_json_pushes_error_toast`, `open_file_apply_invalid_json_does_not_restart` |
 | 4 | `File > 名前を付けて保存...` → パスを選択 | live | 選択したパスに `saved-state.json` が書き出される | ✅ `save_as_with_specs_delegates_to_build_state_json` |
-| 5 | `File > ストラテジーを開く...` → `.py` ファイルを選択 | replay | `replay_strategy_file` にパスがセットされる | — (rfd dialog) |
+| 5 | `File > Replay を開始...` → フォームで条件入力 | replay | `ReplayFormModal` が開きフォームに入力できる | — (runtime) |
 | 6 | `File > 終了` | どちらも | アプリが終了する（OS ネイティブ Quit 動作） | — (OS API) |
 | 7 | popout ウィンドウにメニューバーが表示されない | live | popout ウィンドウに File メニューなし | — (runtime) |
-| 8 | replay モードで `File > 開く...` が表示されない | replay | メニューに「ストラテジーを開く...」のみ | ✅ `replay_mode_provides_open_strategy_only` |
+| 8 | replay モードで `File > 開く...` / `上書き保存` が表示されない | replay | メニューに「Replay を開始...」のみ | ✅ `replay_mode_provides_open_replay_dialog_only` |
 
 ### 既存テストへの影響
 
@@ -308,6 +333,80 @@ cargo test --workspace
 | "開く" のホットリロード | 現状は `self.restart()` で再起動。レイアウトのみホットスワップする方法もある | 中 |
 | "保存" の上書き確認ダイアログ | 既存ファイルを上書きする際に rfd の save_file は OS 側で確認するが、動作確認が必要 | 低 |
 | replay モードでの "名前を付けて保存..." | replay セッション中は live 設定を汚染しないよう保存を禁止中。replay 独自のスナップショット保存は別途設計が必要 | 中 |
+
+---
+
+## F6: SCENARIO 定数 — 実装記録（2026-05-04）
+
+### 実装済みコンポーネント
+
+| ファイル | 役割 |
+|---------|------|
+| `python/engine/scenario.py` | `extract()` / `validate()` / `write_back()` 本体 |
+| `python/engine/replay_session.py` | `_resolve_cli_params()` CLI フォールバック（F6b） |
+| `python/engine/server.py` | `_dispatch()` に LoadStrategyScenario / SaveStrategyScenario ハンドラ |
+| `python/engine/schemas.py` | IPC コマンド / イベント定義（SCHEMA_MINOR=10） |
+| `engine-client/src/dto.rs` | Rust 側 Command / Event バリアント |
+| `docs/example/buy_and_hold.py` | SCENARIO 定数サンプル |
+
+### 設計上の知見・落とし穴
+
+**1. `_EXPECTED_TYPES` の3点管理は `typing.get_type_hints()` で解消できる**
+
+TypedDict の `__annotations__` を `typing.get_type_hints(Scenario)` で取得すると `{field: type}` の dict になる。`_EXPECTED_TYPES` と `REQUIRED_KEYS` をここから自動生成すれば、フィールド追加時に更新箇所が TypedDict 定義1か所だけになる。
+
+**2. `importlib.util.spec_from_file_location()` の `sys.modules` 汚染に注意**
+
+同一モジュール名で複数回呼ぶと2回目以降が stale キャッシュを参照する。`write_back()` の `_verify_writeback()` では `uuid.uuid4().hex` をモジュール名に埋め込んでユニーク化し、`sys.modules` への登録を回避する。
+
+**3. libcst の CSTTransformer は AnnAssign / Assign の両形式を別途ハンドルする必要がある**
+
+`SCENARIO: Scenario = {...}` は `AnnAssign`、`SCENARIO = {...}` は `Assign`。`visit_AnnAssign` と `visit_Assign` を別々に実装しないと片方を見落とす。
+
+**4. `_check_path_guard()` で `path.relative_to()` の ValueError と path_guard の ValueError を混ぜない**
+
+```python
+# NG: 文字列マッチで区別するのはフラジャイル
+try:
+    path.relative_to(persistent_dir)
+    raise ValueError("path_guard_violation: ...")
+except ValueError as exc:
+    if "path_guard_violation" in str(exc): raise
+
+# OK: try/except/else で分離
+try:
+    path.relative_to(persistent_dir)
+except ValueError:
+    pass  # 配下でない → OK
+else:
+    raise ValueError("path_guard_violation: ...")
+```
+
+**5. SCENARIO の `granularity` 値フォーマットは CLI choices と異なる場合がある**
+
+`buy_and_hold.py` のサンプルでは `"granularity": "Daily"` を使用する（CLI choices: `"Trade"/"Minute"/"Daily"`）。`"1m"` のような時間足形式は validate() を通過するが、`EngineStartConfig` でエラーになる。サンプルファイルは必ず CLI choices と一致した値を使うこと。
+
+**6. ロールバック中の例外で元例外が隠れる**
+
+```python
+# NG: shutil.copy2 が OSError を throw すると元の exc が隠れる
+except Exception as exc:
+    shutil.copy2(bak_path, path)
+    raise
+
+# OK: rollback を try/except で包む
+except Exception as exc:
+    try:
+        shutil.copy2(bak_path, path)
+    except OSError as rb_exc:
+        log.error("rollback_failed: %s (original: %s)", rb_exc, exc)
+    raise
+```
+
+### 次フェーズ（未実装）
+
+- `ReplayFormModal` への `StrategyScenarioLoaded` 受信時 prefill（Rust GUI 実装）
+- `native_menu.rs` の replay モードでのファイルフィルタ `.py` 切り替え
 
 ---
 

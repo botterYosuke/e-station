@@ -1,5 +1,16 @@
 # nautilus_trader 統合: 実装計画
 
+> **Phase 8 更新（python-helper-direct-api、2026-05）**: 本計画 N1〜N4 で参照する
+> Rust 側 HTTP API（ポート 9876、`/api/replay/*` / `/api/order/*` / `/api/agent/*` 等）は
+> Phase 8 で全廃止された（[python-helper-direct-api.md](../✅python-data-engine/archive/python-helper-direct-api.md) §3）。
+> 制御経路は Python helper（`engine.replay_session.ReplaySession` /
+> `engine.live_session.LiveSession`）と GUI 内部経路に集約され、IPC `Command::*` /
+> `EngineEvent::*` 自体は維持される（GUI ↔ engine の WebSocket、ポート 19876）。
+> 以下の N1.x 各タスクで `replay_api.rs` / `order_api.rs` / `agent_api.rs` への記述は
+> 当時の実装記録であり、現在は当該ファイルが削除されている点に注意。
+> `scripts/run-replay-debug.sh` / `scripts/replay_dev_load.sh` も HTTP 9876 依存のため
+> Phase 8 で機能停止している。
+
 ## マイルストーン一覧
 
 | Phase | ゴール | 依存 |
@@ -166,7 +177,7 @@
 **状況**: dto.rs / schemas.py / lib.rs / server.py / `engine-client/tests/schema_v2_4_nautilus.rs` (12 件) / `python/tests/test_schemas_nautilus.py` (15 件) を追加・更新。`schema_v2_1_roundtrip.rs` は schema が前進したため削除。`cargo test --workspace` 全緑、`uv run pytest python/tests/` 986 passed / 2 skipped。`cargo clippy --workspace -- -D warnings` / `cargo fmt --check` も clean。
 
 **新たな知見**:
-- architecture.md は schema を 1.4 と書いていたが、実コードは N0 までに 2.x 系に bump 済みだった。**ドキュメントの version 表記は「論理 / 仕様番号」、実コードは「累積 minor 番号」と乖離しがち** — 本タスクでは実コードを正とし `SCHEMA_MAJOR=2`, `SCHEMA_MINOR=4` を採用。architecture.md の更新は別タスクで分離。
+- architecture.md は schema を 1.4 と書いていたが、実コードは N0 までに 2.x 系に bump 済みだった。**ドキュメントの version 表記は「論理 / 仕様番号」、実コードは「累積 minor 番号」と乖離しがち** — 本タスクでは実コードを正とし `SCHEMA_MAJOR=2`, `SCHEMA_MINOR=4` を採用。その後のフェーズでさらに bump が進み、現在は `SCHEMA_MAJOR=3`, `SCHEMA_MINOR=9`（`python/engine/schemas.py` 参照）。architecture.md のスキーマバージョン表記はその後のフェーズで更新済み。
 - pydantic v2 の `Literal["Trade", "Minute", "Daily"]` は orjson roundtrip でそのまま enum-string になる。Rust 側 `enum ReplayGranularity { Trade, Minute, Daily }` は serde default で PascalCase → `"Trade"` などになり、Python と wire 表現が一致するのが偶然便利。
 - `Hello` に新フィールド (`mode`) を追加するときは `connect()` シグネチャ変更で全テストが破綻する。**old API を `connect()` に残し、`connect_with_mode()` を新設** することで pre-N1.13 テストの書き換えを最小化できる（後方互換ラッパパターン）。
 
@@ -1401,6 +1412,11 @@ N1.11 streaming replay の per-tick KlineUpdate/Trades IPC emit 実装後の rev
 
 `bash scripts/run-replay-debug.sh` で replay を初回起動したとき画面が Starter Pane から
 変わらないという問題の原因調査・修正。
+
+> **Phase 8 補足（2026-05）**: `scripts/run-replay-debug.sh` は HTTP API（ポート 9876）
+> 経由でデータ投入していたため、Phase 8 の HTTP API 全廃止に伴い機能停止。replay 起動の
+> 標準経路は `uv run python -m engine.replay_session run --strategy ... --instrument ...`
+> または GUI の `File > Replay を開始...` フォームに移行した。本セクションは経緯記録として残す。
 
 ### 修正項目
 

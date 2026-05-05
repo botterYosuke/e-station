@@ -1009,9 +1009,8 @@ impl Dashboard {
 
     /// N1.14: Auto-generate REPLAY panes for the given instrument.
     ///
-    /// Called from `Flowsurface::update()` when
-    /// `ControlApiCommand::AutoGenerateReplayPanes` is received.  Uses
-    /// `ReplayPaneRegistry` to decide whether each pane kind should be created
+    /// Called from `Flowsurface::update()` when `ReplayDataLoaded` is received.
+    /// Uses `ReplayPaneRegistry` to decide whether each pane kind should be created
     /// (skipped if user has manually dismissed it).
     ///
     /// Split rule (D9.3):
@@ -1099,7 +1098,7 @@ impl Dashboard {
                         initial_pane,
                     );
                     log::info!(
-                        "replay_api: auto-generated TimeAndSales pane (root) for {instrument_id}"
+                        "replay: auto-generated TimeAndSales pane (root) for {instrument_id}"
                     );
                     self.focus = Some((main_window_id, initial_pane));
                     // §4c: bind Trades stream to root TimeAndSales pane immediately.
@@ -1114,7 +1113,7 @@ impl Dashboard {
                         initial_pane,
                     );
                     log::info!(
-                        "replay_api: auto-generated CandlestickChart pane (root) for {instrument_id}"
+                        "replay: auto-generated CandlestickChart pane (root) for {instrument_id}"
                     );
                     self.focus = Some((main_window_id, initial_pane));
                     if let Some(tf) = timeframe
@@ -1188,7 +1187,7 @@ impl Dashboard {
         {
             let new_state = pane::State::with_kind(data::layout::pane::ContentKind::TimeAndSales);
             if let Some((new_pane, _)) = self.panes.split(axis, last_split_pane, new_state) {
-                log::info!("replay_api: auto-generated TimeAndSales pane for {instrument_id}");
+                log::info!("replay: auto-generated TimeAndSales pane for {instrument_id}");
                 self.replay_pane_registry
                     .register_pane(instrument_id, "TimeAndSales", new_pane);
                 self.focus = Some((main_window_id, new_pane));
@@ -1216,7 +1215,7 @@ impl Dashboard {
             let new_state =
                 pane::State::with_kind(data::layout::pane::ContentKind::CandlestickChart);
             if let Some((new_pane, _)) = self.panes.split(axis, last_split_pane, new_state) {
-                log::info!("replay_api: auto-generated CandlestickChart pane for {instrument_id}");
+                log::info!("replay: auto-generated CandlestickChart pane for {instrument_id}");
                 self.replay_pane_registry.register_pane(
                     instrument_id,
                     "CandlestickChart",
@@ -1250,7 +1249,7 @@ impl Dashboard {
                 self.panes
                     .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
             {
-                log::info!("replay_api: auto-generated REPLAY OrderList pane");
+                log::info!("replay: auto-generated REPLAY OrderList pane");
                 self.focus = Some((main_window_id, new_pane));
                 last_split_pane = new_pane;
             }
@@ -1266,7 +1265,7 @@ impl Dashboard {
                 self.panes
                     .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
             {
-                log::info!("replay_api: auto-generated REPLAY BuyingPower pane");
+                log::info!("replay: auto-generated REPLAY BuyingPower pane");
                 self.focus = Some((main_window_id, new_pane));
             }
         }

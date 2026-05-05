@@ -65,25 +65,6 @@ impl VenueState {
         matches!(self, VenueState::LoginInFlight)
     }
 
-    /// Returns `true` when the venue is in a `market_closed` error state.
-    ///
-    /// Used by the order API pre-reject guard (N3.B): the HTTP handler checks
-    /// this flag before forwarding a `SubmitOrder` to the engine so that the
-    /// "market closed" 409 is returned immediately without a round-trip.
-    ///
-    /// H1 fix: reads the dedicated `market_closed` field rather than comparing
-    /// `VenueErrorClass` values, which cannot distinguish `market_closed` from
-    /// other `(Warning, Dismiss)` codes such as `depth_unavailable`.
-    pub fn is_market_closed(&self) -> bool {
-        matches!(
-            self,
-            VenueState::Error {
-                market_closed: true,
-                ..
-            }
-        )
-    }
-
     /// Atomically claim the `LoginInFlight` slot. Returns `true` and
     /// advances `self` to `LoginInFlight` when no login was already in
     /// flight; returns `false` and leaves `self` unchanged otherwise.
@@ -346,59 +327,6 @@ mod tests {
         assert!(!s.is_login_in_flight() && !matches!(s, VenueState::Error { .. }));
     }
 
-    // ── is_market_closed() tests (N3.B) ──────────────────────────────────────
-
-    #[test]
-    fn is_market_closed_returns_true_for_market_closed_error() {
-        let class = classify_venue_error("market_closed");
-        let s = VenueState::Error {
-            class,
-            message: "市場クローズ中".to_string(),
-            market_closed: true,
-        };
-        assert!(s.is_market_closed());
-    }
-
-    #[test]
-    fn is_market_closed_returns_false_for_ready() {
-        assert!(!VenueState::Ready.is_market_closed());
-    }
-
-    #[test]
-    fn is_market_closed_returns_false_for_idle() {
-        assert!(!VenueState::Idle.is_market_closed());
-    }
-
-    #[test]
-    fn is_market_closed_returns_false_for_login_in_flight() {
-        assert!(!VenueState::LoginInFlight.is_market_closed());
-    }
-
-    #[test]
-    fn is_market_closed_returns_false_for_other_errors() {
-        let class = classify_venue_error("session_expired");
-        let s = VenueState::Error {
-            class,
-            message: "session expired".to_string(),
-            market_closed: false,
-        };
-        assert!(!s.is_market_closed());
-    }
-
-    // H1 / M5: depth_unavailable shares (Warning, Dismiss) with market_closed;
-    // is_market_closed() must return false.
-    #[test]
-    fn is_market_closed_returns_false_for_depth_unavailable() {
-        use engine_client::error::classify_venue_error;
-        let class = classify_venue_error("depth_unavailable");
-        let s = VenueState::Error {
-            class,
-            message: "depth unavailable".to_string(),
-            market_closed: false,
-        };
-        assert!(!s.is_market_closed());
-    }
-
     #[test]
     fn dismissed_is_noop_for_non_error_states() {
         // A stray Dismiss while Idle / Ready / LoginInFlight must not
@@ -415,50 +343,6 @@ mod tests {
             VenueState::LoginInFlight
                 .next(VenueEvent::Dismissed)
                 .is_login_in_flight()
-        );
-    }
-
-    // ── R2-M1: DismissTachibanaBanner → AtomicBool clear (H2 fix) ────────────
-
-    #[test]
-    fn dismissed_from_market_closed_error_makes_is_market_closed_false() {
-        // Error{market_closed: true} → Dismissed → Idle, is_market_closed() = false
-        // H2 fix: DismissTachibanaBanner ハンドラが store(is_market_closed()) を呼ぶ
-        // ため、この遷移後は must_not_be_market_closed となる
-        let class = classify_venue_error("market_closed");
-        let s = VenueState::Error {
-            class,
-            message: "市場クローズ中".to_string(),
-            market_closed: true,
-        };
-        assert!(
-            s.is_market_closed(),
-            "precondition: should start as market_closed"
-        );
-        let next = s.next(VenueEvent::Dismissed);
-        assert_eq!(next, VenueState::Idle);
-        assert!(
-            !next.is_market_closed(),
-            "after dismiss, is_market_closed must be false"
-        );
-    }
-
-    #[test]
-    fn login_started_from_market_closed_error_makes_is_market_closed_false() {
-        // Error{market_closed: true} → LoginStarted → LoginInFlight, is_market_closed() = false
-        // ReLogin パスでもフラグが解除されることを保証する
-        let class = classify_venue_error("market_closed");
-        let s = VenueState::Error {
-            class,
-            message: "市場クローズ中".to_string(),
-            market_closed: true,
-        };
-        assert!(s.is_market_closed(), "precondition");
-        let next = s.next(VenueEvent::LoginStarted);
-        assert!(next.is_login_in_flight());
-        assert!(
-            !next.is_market_closed(),
-            "LoginInFlight is not market_closed"
         );
     }
 }

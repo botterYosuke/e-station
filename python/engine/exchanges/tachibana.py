@@ -137,7 +137,7 @@ from .tachibana_url import (
     build_request_url,
 )
 from . import tachibana_ws as _tachibana_ws
-from .tachibana_ws import FdFrameProcessor, TachibanaEventWs
+from .tachibana_ws import FdFrameProcessor, TickerEventWsHub
 
 log = logging.getLogger(__name__)
 
@@ -228,16 +228,47 @@ class TachibanaWorker(ExchangeWorker):
         self._proxy: str | None = None
         self._client: httpx.AsyncClient | None = None
 
+        # Bug Y (docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md):
+        # ticker 毎の EVENT WS マルチプレクサ。stream_depth と stream_trades が
+        # 同 ticker に並行接続して broker から p_errno=2 を蹴られる事故の防止。
+        self._ticker_hubs: dict[str, TickerEventWsHub] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle / HTTP
     # ------------------------------------------------------------------
 
-    def set_session(self, session: TachibanaSession) -> None:
+    def set_session(self, session: TachibanaSession | None) -> None:
         """Inject the post-login `TachibanaSession`.
 
         Called by ``server.py`` via ``_apply_tachibana_session`` after
         ``startup_login`` / ``RequestVenueLogin`` login success.
+
+        Bug Y: 既存の :class:`TickerEventWsHub` は旧 session の ``url_event_ws``
+        に紐付いているため、session swap (``None`` 経由 or 別 session) のたびに
+        全 hub を畳む。aclose は fire-and-forget で発火する。
         """
+        if self._ticker_hubs:
+            old_hubs = list(self._ticker_hubs.values())
+            self._ticker_hubs = {}
+            for hub in old_hubs:
+                try:
+                    asyncio.get_event_loop().create_task(hub.aclose())
+                except RuntimeError:
+                    # 走っているイベントループが無い同期文脈ではタスク生成不可。
+                    # subscribers をクリアして stop_event を立て、on_close も発火する
+                    # (review-fix Y7: aclose() と同じ semantics を保つ)。
+                    close_cbs = list(hub._on_close_cbs.values())
+                    hub._subscribers.clear()
+                    hub._on_connect_cbs.clear()
+                    hub._on_close_cbs.clear()
+                    hub._stop_event.set()
+                    for cb in close_cbs:
+                        try:
+                            cb()
+                        except Exception:
+                            log.exception(
+                                "tachibana set_session: on_close raised during sync fallback"
+                            )
         self._session = session
 
     def set_credentials_demo_flag(self, is_demo: bool) -> None:
@@ -699,6 +730,19 @@ class TachibanaWorker(ExchangeWorker):
         sizyou_c = self._lookup_sizyou_c(ticker)
         return build_ws_url(self._session.url_event_ws, ticker, sizyou_c)
 
+    def _get_or_create_hub(self, ticker: str, ws_url: str) -> TickerEventWsHub:
+        """ticker 単位の :class:`TickerEventWsHub` を取得 (なければ作る)。
+
+        Bug Y: 同一 ticker への depth + trades 並行接続を防ぐため、ticker 単位で
+        ただ 1 本の EVENT WS を共有する。session swap (set_session) のたびに
+        全 hub は廃棄されるので、ここでの単純なキャッシュで安全。
+        """
+        hub = self._ticker_hubs.get(ticker)
+        if hub is None:
+            hub = TickerEventWsHub(ws_url, ticker=ticker, proxy=self._proxy)
+            self._ticker_hubs[ticker] = hub
+        return hub
+
     # ------------------------------------------------------------------
     # fetch_ticker_stats (CLMMfdsGetMarketPrice)
     # ------------------------------------------------------------------
@@ -891,53 +935,79 @@ class TachibanaWorker(ExchangeWorker):
         processor = FdFrameProcessor(row="1")
         conn_counter = 0
         _st_stopped: list[bool] = [False]
-        # C4: track first trade so we can resolve the correct yobine band before normalizing.
         _first_trade_received: list[bool] = [False]
+        ssid_holder = [f"{stream_session_id}:1"]
+        # subscriber-local stop event: ST 'market closed' で trades だけ降りる用
+        _inner_stop = asyncio.Event()
 
-        while not stop_event.is_set() and not _st_stopped[0]:
+        async def _sync_outer() -> None:
+            await stop_event.wait()
+            _inner_stop.set()
+
+        sync_task = asyncio.create_task(_sync_outer())
+
+        def _on_connect_trades() -> None:
+            nonlocal conn_counter
             conn_counter += 1
-            ssid = f"{stream_session_id}:{conn_counter}"
+            ssid_holder[0] = f"{stream_session_id}:{conn_counter}"
             if on_ssid is not None:
-                on_ssid(ssid)
+                on_ssid(ssid_holder[0])
             processor.reset()
 
-            async def _cb(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
-                if frame_type == "FD":
-                    trade, _ = processor.process(fields, recv_ts_ms)
-                    if trade:
-                        # C4: first trade — resolve correct yobine band from actual price
-                        if not _first_trade_received[0] and "price" in trade:
-                            try:
-                                self._update_min_ticksize_from_price(
-                                    ticker, Decimal(trade["price"])
-                                )
-                            except Exception:
-                                pass
-                            _first_trade_received[0] = True
-                        outbox.append({
-                            "event": "Trades",
-                            "venue": "tachibana",
-                            "ticker": ticker,
-                            "market": market,
-                            "stream_session_id": ssid,
-                            "trades": [self._normalize_trade_price(ticker, trade)],  # C2
-                        })
-                elif frame_type == "ST":
-                    result_code = fields.get("sResultCode", "0")
-                    if result_code != "0":
-                        _st_stopped[0] = True
-                        outbox.append({
-                            "event": "Disconnected",
-                            "venue": "tachibana",
-                            "ticker": ticker,
-                            "stream": "trade",
-                            "market": market,
-                            "reason": "market_closed",
-                        })
-                        stop_event.set()
+        async def _cb_trades(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
+            if frame_type == "FD":
+                trade, _ = processor.process(fields, recv_ts_ms)
+                if trade:
+                    # C4: first trade — resolve correct yobine band from actual price
+                    if not _first_trade_received[0] and "price" in trade:
+                        try:
+                            self._update_min_ticksize_from_price(
+                                ticker, Decimal(trade["price"])
+                            )
+                        except Exception:
+                            pass
+                        _first_trade_received[0] = True
+                    outbox.append({
+                        "event": "Trades",
+                        "venue": "tachibana",
+                        "ticker": ticker,
+                        "market": market,
+                        "stream_session_id": ssid_holder[0],
+                        "trades": [self._normalize_trade_price(ticker, trade)],  # C2
+                    })
+            elif frame_type == "ST":
+                result_code = fields.get("sResultCode", "0")
+                if result_code != "0":
+                    _st_stopped[0] = True
+                    outbox.append({
+                        "event": "Disconnected",
+                        "venue": "tachibana",
+                        "ticker": ticker,
+                        "stream": "trade",
+                        "market": market,
+                        "reason": "market_closed",
+                    })
+                    _inner_stop.set()
 
-            ws_client = TachibanaEventWs(ws_url, stop_event, ticker=ticker, proxy=self._proxy)
-            await ws_client.run(_cb)
+        # Bug Y: hub に subscribe → 自分用の _inner_stop を待つ → unsubscribe。
+        # depth と同じ hub を共有するので broker への WS 接続は 1 本だけ。
+        # on_close=_inner_stop.set: session swap などで hub が外部から閉じられた
+        # ときに _inner_stop を解放して coroutine を終了させる (review-fix Y7)。
+        hub = self._get_or_create_hub(ticker, ws_url)
+        await hub.subscribe(
+            "trades", _cb_trades,
+            on_connect=_on_connect_trades,
+            on_close=_inner_stop.set,
+        )
+        try:
+            await _inner_stop.wait()
+        finally:
+            await hub.unsubscribe("trades")
+            sync_task.cancel()
+            try:
+                await sync_task
+            except asyncio.CancelledError:
+                pass
 
     async def stream_depth(
         self,
@@ -1075,99 +1145,123 @@ class TachibanaWorker(ExchangeWorker):
         sync_task = asyncio.create_task(_sync_outer())
         safety_task = asyncio.create_task(_safety_watchdog())
 
+        # Bug Y: 旧コードは ticker 毎の WS を depth/trades 個別に張っており、
+        # broker から p_errno=2 'session inactive.' で蹴られた。
+        # 新コードは TickerEventWsHub に subscribe し、WS 接続は hub が 1 本だけ
+        # 持つ。reconnect は hub 内部の TachibanaEventWs.run が処理するため、
+        # 旧コードの outer reconnect-loop は削除。conn_counter / ssid は hub の
+        # on_connect から bump する。
         conn_counter = 0
-        while not _inner_stop.is_set():
+        ssid_holder = [f"{stream_session_id}:1"]
+
+        def _on_connect_depth() -> None:
+            nonlocal conn_counter
             conn_counter += 1
-            ssid = f"{stream_session_id}:{conn_counter}"
+            ssid_holder[0] = f"{stream_session_id}:{conn_counter}"
             if on_ssid is not None:
-                on_ssid(ssid)
+                on_ssid(ssid_holder[0])
             processor.reset()
+            # H-C rate limiter は再接続毎にリセットして 1 件は必ず emit する
+            st_last_emit.clear()
 
-            async def _cb_depth(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
-                # Update shared counts (M-C). Counter handles missing keys as 0.
-                if frame_type in ("FD", "KP", "ST"):
-                    frame_counts_seen[frame_type] += 1
-                else:
-                    frame_counts_seen["other"] += 1
+        async def _cb_depth(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
+            ssid = ssid_holder[0]
+            # Update shared counts (M-C). Counter handles missing keys as 0.
+            if frame_type in ("FD", "KP", "ST"):
+                frame_counts_seen[frame_type] += 1
+            else:
+                frame_counts_seen["other"] += 1
 
-                if frame_type == "FD":
-                    _, depth = processor.process(fields, recv_ts_ms)
-                    if depth:
-                        # C4: first FD — update min_ticksize from bids or asks
-                        if not _first_fd_received[0]:
-                            self._try_update_min_ticksize_from_levels(
-                                ticker, depth.get("bids", []), depth.get("asks", [])
-                            )
-                        _first_fd_received[0] = True
-                        # C2: normalize prices before sending to Rust
-                        norm_bids, norm_asks = self._normalize_depth_levels(
-                            ticker, depth["bids"], depth["asks"]
+            if frame_type == "FD":
+                _, depth = processor.process(fields, recv_ts_ms)
+                if depth:
+                    # C4: first FD — update min_ticksize from bids or asks
+                    if not _first_fd_received[0]:
+                        self._try_update_min_ticksize_from_levels(
+                            ticker, depth.get("bids", []), depth.get("asks", [])
                         )
+                    _first_fd_received[0] = True
+                    # C2: normalize prices before sending to Rust
+                    norm_bids, norm_asks = self._normalize_depth_levels(
+                        ticker, depth["bids"], depth["asks"]
+                    )
+                    outbox.append({
+                        "event": "DepthSnapshot",
+                        "venue": "tachibana",
+                        "ticker": ticker,
+                        "market": market,
+                        "stream_session_id": ssid,
+                        "bids": norm_bids,
+                        "asks": norm_asks,
+                        "sequence_id": depth["sequence_id"],
+                        "recv_ts_ms": depth["recv_ts_ms"],
+                    })
+            elif frame_type == "ST":
+                # ST = server-side status frame. May carry an error.
+                # Use None default to distinguish "key missing" from "key=''" (H-B).
+                p_errno = fields.get("p_errno")
+                # Mask sUrl* / session-token-bearing keys (H-A); other fields
+                # (p_errno, p_status, etc.) are safe diagnostic data.
+                safe_fields = {
+                    k: ("***" if k in _ST_SECRET_KEYS else v) for k, v in fields.items()
+                }
+                log.warning(
+                    "tachibana: stream_depth ST frame ticker=%s p_errno=%r — "
+                    "first_fd_received=%s fields=%r",
+                    ticker, p_errno, _first_fd_received[0], safe_fields,
+                )
+
+                # Decide error code (H-B).
+                code: str | None
+                message: str
+                if p_errno is None:
+                    code = "st_no_errno"
+                    message = "立花 ST フレームに p_errno キーがありません"
+                elif p_errno in _ST_OK_ERRNO_CODES:
+                    code = None
+                    message = ""
+                elif p_errno == "2":
+                    # Virtual URL invalidated → polling fallback.
+                    code = "st_session_expired"
+                    message = "立花仮想 URL が失効しました（p_errno=2）。再ログインが必要です"
+                else:
+                    code = f"st_errno_{p_errno}"
+                    message = f"立花 ST フレームエラー: p_errno={p_errno}"
+
+                if code is not None:
+                    # Rate-limit (H-C): one VenueError per code per
+                    # _ST_VENUE_ERROR_RATE_LIMIT_S window.
+                    now = loop.time()
+                    last = st_last_emit.get(code, 0.0)
+                    if now - last >= _ST_VENUE_ERROR_RATE_LIMIT_S:
+                        st_last_emit[code] = now
                         outbox.append({
-                            "event": "DepthSnapshot",
+                            "event": "VenueError",
                             "venue": "tachibana",
                             "ticker": ticker,
                             "market": market,
-                            "stream_session_id": ssid,
-                            "bids": norm_bids,
-                            "asks": norm_asks,
-                            "sequence_id": depth["sequence_id"],
-                            "recv_ts_ms": depth["recv_ts_ms"],
+                            "code": code,
+                            "message": message,
                         })
-                elif frame_type == "ST":
-                    # ST = server-side status frame. May carry an error.
-                    # Use None default to distinguish "key missing" from "key=''" (H-B).
-                    p_errno = fields.get("p_errno")
-                    # Mask sUrl* / session-token-bearing keys (H-A); other fields
-                    # (p_errno, p_status, etc.) are safe diagnostic data.
-                    safe_fields = {
-                        k: ("***" if k in _ST_SECRET_KEYS else v) for k, v in fields.items()
-                    }
-                    log.warning(
-                        "tachibana: stream_depth ST frame ticker=%s p_errno=%r — "
-                        "first_fd_received=%s fields=%r",
-                        ticker, p_errno, _first_fd_received[0], safe_fields,
-                    )
+                    # Session expired → drop to polling fallback regardless
+                    # of rate limiting (M-G).
+                    if code == "st_session_expired":
+                        _inner_stop.set()
 
-                    # Decide error code (H-B).
-                    code: str | None
-                    message: str
-                    if p_errno is None:
-                        code = "st_no_errno"
-                        message = "立花 ST フレームに p_errno キーがありません"
-                    elif p_errno in _ST_OK_ERRNO_CODES:
-                        code = None
-                        message = ""
-                    elif p_errno == "2":
-                        # Virtual URL invalidated → polling fallback.
-                        code = "st_session_expired"
-                        message = "立花仮想 URL が失効しました（p_errno=2）。再ログインが必要です"
-                    else:
-                        code = f"st_errno_{p_errno}"
-                        message = f"立花 ST フレームエラー: p_errno={p_errno}"
-
-                    if code is not None:
-                        # Rate-limit (H-C): one VenueError per code per
-                        # _ST_VENUE_ERROR_RATE_LIMIT_S window.
-                        now = loop.time()
-                        last = st_last_emit.get(code, 0.0)
-                        if now - last >= _ST_VENUE_ERROR_RATE_LIMIT_S:
-                            st_last_emit[code] = now
-                            outbox.append({
-                                "event": "VenueError",
-                                "venue": "tachibana",
-                                "ticker": ticker,
-                                "market": market,
-                                "code": code,
-                                "message": message,
-                            })
-                        # Session expired → drop to polling fallback regardless
-                        # of rate limiting (M-G).
-                        if code == "st_session_expired":
-                            _inner_stop.set()
-
-            ws_client = TachibanaEventWs(ws_url, _inner_stop, ticker=ticker, proxy=self._proxy)
-            await ws_client.run(_cb_depth, on_connect=st_last_emit.clear)
+        # Bug Y: hub に subscribe → 自分用の _inner_stop を待つ → unsubscribe。
+        # reconnect は hub 内部で処理されるため、ここに while ループは無い。
+        # on_close=_inner_stop.set: session swap などで hub が外部から閉じられた
+        # ときに _inner_stop を解放して coroutine を終了させる (review-fix Y7)。
+        hub = self._get_or_create_hub(ticker, ws_url)
+        await hub.subscribe(
+            "depth", _cb_depth,
+            on_connect=_on_connect_depth,
+            on_close=_inner_stop.set,
+        )
+        try:
+            await _inner_stop.wait()
+        finally:
+            await hub.unsubscribe("depth")
 
         for t in (safety_task, sync_task):
             t.cancel()

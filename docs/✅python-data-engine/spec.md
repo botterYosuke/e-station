@@ -83,7 +83,9 @@
 同一マシン上の別プロセスから loopback に接続されると、認証なしで `SetProxy` 等の制御面が叩かれてしまうため、WebSocket+JSON 案を採るなら最低限以下を満たす:
 
 - **ランダム接続トークン（必須）**: Rust が起動ごとに 32 byte のトークンを生成し、stdin 経由で Python に渡す。WebSocket 接続時に `Sec-WebSocket-Protocol` もしくは最初のメッセージ（`Hello`、§4.5 参照）で提示させ、一致しなければ即切断。
-- **単一クライアント制限**: Python サーバは既にクライアントが接続中なら新規接続を即拒否。`ready` 状態遷移後は追加接続を受けない。
+- **接続モデル**:
+  - **Phase 7 まで**: Python サーバは既にクライアントが接続中なら新規接続を即拒否。`ready` 状態遷移後は追加接続を受けない。
+  - **Phase 8 attach mode（✅ 実装済み 2026-05-03）**: `_Broadcaster` による multi-client broadcast を実装。token / `SCHEMA_MAJOR` 一致 client は最大 `MAX_CONNECTIONS=4` まで同時接続可能。loopback 専用・token 必須の前提は維持。`ClientConnected`/`ClientDisconnected` イベントを全接続に broadcast する。
 - **loopback 専用**: `127.0.0.1` / `::1` 以外からの接続は listen しない／accept しない。
 - **ポート秘匿（固定ポート 19876 プローブを許容）**: 通常、ポート番号は Rust→Python 間の stdin だけで受け渡し、環境変数やコマンドライン引数には書き出さない。ただし既存エンジン自動検出目的に限り、固定ポート `127.0.0.1:19876` へのプローブを許容する（§3.1 参照）。ロックファイル案（`engine-discovery.md`）は不採用。プローブの安全性は HMAC token 検証 + `SCHEMA_MAJOR` 一致確認で担保する（別プロセスが 19876 を占有していてもハンドシェイクで必ず弾かれる）。
 
@@ -100,8 +102,9 @@
 | Python → Rust（venue ライフサイクル） | `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` / `SecondPasswordRequired` | — |
 | Python → Rust（発注ライフサイクル） | `OrderSubmitted` / `OrderAccepted` / `OrderRejected` / `OrderPendingUpdate` / `OrderPendingCancel` / `OrderFilled` / `OrderCanceled` / `OrderExpired` / `OrderListUpdated` / `BuyingPowerUpdated` | — |
 | Python → Rust（replay / nautilus エンジン） | `EngineStarted` / `EngineStopped` / `ReplayDataLoaded` / `PositionOpened` / `PositionClosed` / `ExecutionMarker` / `StrategySignal` / `ReplayBuyingPower` / `MarketPriceResponse` / `MarketPriceHistoryResponse` | — |
+| Python → Rust（multi-client lifecycle, Phase 8.1b 以降） | `ClientConnected{count}` / `ClientDisconnected{count}` / `EngineBusy{current_state, attempted_command, reason, request_id?}` | — |
 
-正本は [python/engine/schemas.py](../../python/engine/schemas.py) の pydantic モデル群と [engine-client/src/dto.rs](../../engine-client/src/dto.rs) の Rust DTO（共に `SCHEMA_MAJOR=2 / SCHEMA_MINOR=6`、2026-04-30 時点）。表は分類目的で、追加・削除があれば schemas.py の `class \w+\(IpcMessage\)` 列挙と本表の差分を [`schemas/CHANGELOG.md`](./schemas/CHANGELOG.md) と一緒に更新する。
+正本は [python/engine/schemas.py](../../python/engine/schemas.py) の pydantic モデル群と [engine-client/src/dto.rs](../../engine-client/src/dto.rs) の Rust DTO（共に `SCHEMA_MAJOR=3 / SCHEMA_MINOR=9`、2026-05-04 時点。Phase 8.1b で `ClientConnected` / `ClientDisconnected` / `EngineBusy` を追加、R1〜R4 レビュー反映で `EngineBusy.request_id` / `EngineBusy.current_state` の `ReplayStateName | LiveStateName` 直交 union model_validator / `AUTH_FAILED_CODE` 共有定数 / `AttemptedCommand` Literal を追加）。表は分類目的で、追加・削除があれば schemas.py の `class \w+\(IpcMessage\)` 列挙と本表の差分を [`schemas/CHANGELOG.md`](./schemas/CHANGELOG.md) と一緒に更新する。
 
 ※ `exchange::Event` 列挙体の各バリアント（`Connected` / `Disconnected` / `DepthReceived` / `TradesReceived` / `KlineReceived`）と一対一対応する形で Python→Rust イベントを定義する。OI インジケータが継続的に要求する `FetchRange::OpenInterest` も `FetchOpenInterest` コマンド + `OpenInterest` レスポンスで表現する（参考: [`exchange/src/adapter/client.rs`](../../exchange/src/adapter/client.rs) `fetch_open_interest`、[`src/chart/indicator/kline/open_interest.rs`](../../src/chart/indicator/kline/open_interest.rs)）。
 
@@ -196,9 +199,10 @@ session ID の用語と型（混同防止）:
 - 計画ツリー配下の [`docs/schemas/CHANGELOG.md`](./schemas/) に major/minor 変更履歴を記録する。
 
 #### 4.5.2 既存接続の置換（半死接続対策）
-Python プロセスは生きているが Rust が単独でクラッシュ / デバッガで落とされた場合、Python 側に半死の古い接続が残り、新しい Rust が単一クライアント制限で拒否される事故が起こる。これを避けるため:
+Python プロセスは生きているが Rust が単独でクラッシュ / デバッガで落とされた場合、Python 側に半死の古い接続が残り、新しい Rust が接続できない事故が起こる。これを避けるため:
 
-- Python サーバは `Hello` 受領時に **トークンが一致すれば既存接続を強制切断して新規を受け入れる**（トークンは Rust プロセス固有なので、別の攻撃接続が勝手に引き継ぐことはない）。
+- **Phase 7 まで**: Python サーバは `Hello` 受領時に **トークンが一致すれば既存接続を強制切断して新規を受け入れる**。
+- **Phase 8 attach mode（✅ 実装済み 2026-05-03）**: 既存接続の全面置換ではなく、multi-client broadcast を維持したまま dead connection だけを刈り取る。`MAX_CONNECTIONS=4` 超過時のみ 1008 Policy Violation で reject。
 - 加えて WebSocket の ping/pong を実施する（`ping_interval=15` 秒、`ping_timeout=30` 秒）。Ping 送信後 30 秒以内に Pong がなければ接続を破棄（KP 2 回欠損相当）。
 - 強制切断時は古い側に `Error{reason: "superseded"}` を送って閉じる。
 
@@ -237,7 +241,12 @@ Python プロセスは生きているが Rust が単独でクラッシュ / デ�
 
 ### 5.3 Python プロセス復旧プロトコル
 
-Python の異常終了・再起動は「必ず起こる」前提で、Rust 側で状態を再構築できるようにする。Rust は自身を **source of truth** として以下を保持し、新プロセスに投入する:
+Python の異常終了・再起動は「必ず起こる」前提で、Rust 側で状態を再構築できるようにする。
+
+- **Phase 7 まで / managed GUI mode**: Rust は自身を **source of truth** として以下を保持し、新プロセスに投入する。
+- **Phase 8 attach mode（✅ 実装済み 2026-05-03 / R1 Phase 3 で再評価 2026-05-04）**: source of truth は connection 単位に分かれる。GUI 由来の購読 / fetch / login intent は Rust が保持し、helper 由来の replay / login intent は helper 側が保持して engine 再接続後に再送する。engine 側は「各 client が自分の intent を再投入する」前提で per-connection 状態を受け直し、union 可能な購読だけを束ねる。下の「Phase 8 attach mode 補足」で per-connection 文脈の挙動を明記する。
+
+Rust が保持する状態（managed GUI mode の source of truth）は:
 
 - アクティブな購読セット `Set<(Venue, Ticker, StreamKind, TickMultiplier?, PushFrequency)>`
 - 進行中フェッチ要求 `Map<RequestId, FetchCommand>`（`FetchKlines` 等、応答待ち）
@@ -252,6 +261,13 @@ Python の異常終了・再起動は「必ず起こる」前提で、Rust 側�
 4. 指数バックオフで spawn（上限 N 回、超えたら UI にエラーバナー）。
 5. 起動ハンドシェイク（§4.5）→ `SetProxy` → 保持していた購読を全て再送。
 6. UI は `Ready` で通知された新しい `engine_session_id` に切り替わったことで、depth は snapshot 受信まで「同期中」表示、trade/kline 履歴は再受信で埋め直す。
+
+**Phase 8 attach mode 補足**:
+
+1. engine 再起動後、GUI client は Rust 側 source of truth を使って managed 購読を再投入する。
+2. attach 済み helper client は `ConnectionError` を受け取った時点で自分の replay / login intent を失効扱いにし、必要なら caller が新しい `ReplaySession` / `LiveSession` を作って再投入する。
+3. engine 側は「helper の古い intent をサーバ側で保持して自動 replay する」責務を持たない。multi-client では **client-side reissue** を原則とする。
+4. union 可能な購読（market data など）は per-connection で再送された後に engine 側で束ねるが、非共有 intent（replay 実行、ログイン要求、発注）は送信元 client の責務として扱う。
 
 **UI への影響**:
 - `EngineRestarting` 中は各 pane に「データエンジン再起動中」のステータスを出す（チャートを消さず、最後の状態をグレーアウトで維持）。

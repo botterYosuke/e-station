@@ -9,8 +9,8 @@
    - (b) ユーザーに Python 3.x のインストールを要求し `uv` で依存管理
    - (c) ハイブリッド（dev は b、リリースは a）
 
-2. **Python プロセスのライフサイクル**
-   - Rust が常に spawn / 監視 / kill するか、ユーザーが別途起動するスタンドアロン運用も公式サポートするか。
+2. ~~**Python プロセスのライフサイクル**~~
+   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は [python-helper-direct-api.md §0.1](./archive/python-helper-direct-api.md)。
 
 ## B. IPC
 
@@ -23,10 +23,10 @@
 
 ## C. 機能スコープ
 
-5. **WS 直結のオプション残置（計画射程に直結、フェーズ 2 完了時に最終確定）**
-   - フェーズ 5 で完全に Rust 側取引所コードを消す前提だったが、[spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定) で案 A（撤去） / 案 B（恒久残置） / 案 C（optional feature）を列挙。
-   - 暫定は **案 A**。フェーズ 2 のレイテンシ計測結果で最終確定する。
-   - **Phase 0.5 で `VenueBackend` trait を実装済み**。trait は `NativeBackend`（既存 Rust 直結）と将来の `EngineClientBackend`（Python IPC）の両方を実装できる設計になっており、案 A でも C でも対応可能。最終決定はフェーズ 2 計測後。
+5. ~~**WS 直結のオプション残置**~~
+   - **決定済み・実施済み（Phase 5 完了, 2026-04-25）**: 案 A（撤去）を採用。`exchange/src/adapter/hub/` を全削除し、`reqwest` / `fastwebsockets` / `tokio-rustls` / `tokio-socks` / `sonic-rs` 等の native 依存も `exchange/Cargo.toml` から除去済み。
+   - `--data-engine-url` フラグは Phase 5 で必須化、Phase 6 で `--engine-cmd` によるオーバーライドへ進化。Phase 8 で固定ポート 19876 自動 attach + spawn フォールバックに到達（[spec.md §3.1](./spec.md#31-起動フロー外部エンジン自動-attach--spawn-フォールバック)）。
+   - 案 C（optional feature）の復活余地は理論上残るが、現時点で要望なし。
 
 6. **マルチプロセス構成**
    - フェーズ 1 は asyncio 単一プロセスで確定（[spec.md §6.1](./spec.md#61-プロセスモデルフェーズ-1-時点)）。
@@ -56,14 +56,18 @@
 
 ## F. 雑多な確認
 
-11. **keyring の他用途**
-    - プロキシ資格情報以外に `keyring` crate を使っている機能が無いか。無ければフェーズ 5 で依存削除候補、ある場合は Rust 側に残す。着手前に要 grep 確認。
+11. ~~**keyring の他用途**~~
+    - **決定済み・実施済み（Phase 5 完了, 2026-04-25）**: プロキシ資格情報の Rust 側保持のみで利用継続。Phase 5 では `exchange/` 配下から `keyring` 依存を除去するスコープではなく、`src/` 側で `Proxy` 設定を保持するパターンを維持した。Python 側は `SetProxy` IPC 経由で受け渡し（spec.md §5.4）。
 
-12. **E2E テスト自動化の運用方針** (Phase 7 T3 で発生)
-    - 現状は [`tests/e2e/smoke.sh`](../../../tests/e2e/smoke.sh) を手動 / CI step で実行する素朴な bash スクリプト。手動 GUI シナリオ（チャート描画・kill -9 復旧・ストリーム持続）はまだ人手。
-    - 選択肢:
-      - (a) bash + ログ grep のまま育てる（現状）。CI 統合は GitHub Actions 上で `cargo build --release && bash tests/e2e/smoke.sh` を流すだけ。venue API への live 依存があるためスケジュール run 限定。
-      - (b) Rust 側に `cargo xtask e2e` を新設し、ProcessManager + EngineConnection を直接駆動して assertion を Rust で書く。GUI に触れない範囲で十分なカバレッジが取れる。
-      - (c) `.claude/skills/agent-experience-verification` のように HTTP API を flowsurface に追加してエージェント駆動 E2E を可能にする。GUI シナリオまでカバーできるが、HTTP API のメンテコストが発生。
-    - 決定タイミング: Phase 8 着手前。短期的には (a) を継続。
-    - 影響箇所: [`tests/e2e/`](../../../tests/e2e/), [`phase-7-ui-regression-remediation.md`](./phase-7-ui-regression-remediation.md) の T3 セクション。
+12. ~~**E2E テスト自動化の運用方針**~~ (Phase 7 T3 で発生)
+    - **決定済み・実施済み（Phase 8.2 完了, 2026-05-03）**: HTTP 依存の bash E2E（s56〜s83, s90, tachibana_* 11 ファイル）を削除。`smoke.sh` のみ起動監視用として維持。
+    - `scripts/replay_dev_load.sh` 削除済み。`scripts/run-replay-debug.sh` は DEPRECATED コメントを追記済み（HTTP API ポート 9876 依存のため機能しない）。
+    - 新たな E2E は `pytest + python -m engine.replay_session run` で代替。詳細は [python-helper-direct-api.md](./archive/python-helper-direct-api.md)。
+
+13. ~~**Phase 8 helper API 設計の未決 Q (Q2/Q3b/Q8/Q10/Q11)**~~
+    - **すべて決定済み・実装済み（Phase 8 完了, 2026-05-03）**:
+      - Q2 (Python プロセス LCM): attach mode / in-process mode を自動判定して解決済み
+      - Q3b (GUI フォームのデフォルト値記憶): Phase 8.1c でフォーム実装、記憶方針は前回値保持なし（シンプル設計）
+      - Q8 (session ファイルパス): `data::data_path("engine-session.json")` を Rust が書き、Python が `platformdirs` で同パスを解決。実装済み（`engine-client/src/session_file.rs`, `python/engine/replay_session.py`）
+      - Q10 (state guard 範囲): `ReplayState`/`LiveState` 2 つの直交 state machine で実装済み
+      - Q11 (session ファイル書き込み判断): 常に書く（handshake 成立後に atomic write）。実装済み

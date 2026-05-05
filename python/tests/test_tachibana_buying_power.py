@@ -159,9 +159,9 @@ async def test_fetch_positions_cash_parses_response():
         "sCLMID": "CLMGenbutuKabuList",
         "aGenbutuKabuList": [
             {
-                "sIssueCode": "7203",
-                "sGenbutuZanSuu": "100",
-                "sGenbutuZanKingaku": "250000",
+                "sUriOrderIssueCode": "7203",
+                "sUriOrderZanKabuSuryou": "100",
+                "sUriOrderGaisanHyoukagaku": "250000",
             }
         ],
     }

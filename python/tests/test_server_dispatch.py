@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
@@ -31,6 +33,10 @@ async def _connect_and_handshake(port: int, token: str) -> websockets.ClientConn
     raw = await ws.recv()
     msg = orjson.loads(raw)
     assert msg["event"] == "Ready", f"Expected Ready, got: {msg}"
+    # Drain the ClientConnected broadcast that follows Ready in multi-client mode.
+    raw2 = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg2 = orjson.loads(raw2)
+    assert msg2["event"] == "ClientConnected", f"Expected ClientConnected, got: {msg2}"
     return ws
 
 
@@ -58,7 +64,7 @@ async def _wait_for_port(port: int, timeout: float = 2.0) -> None:
 @pytest.fixture
 async def running_server(unused_tcp_port):
     """Start DataEngineServer on a random port, yield (port, token, mock_worker), then stop."""
-    from engine.server import DataEngineServer
+    from engine.server import DataEngineServer, LiveState
 
     token = "test-token-abc123"
     mock_worker = _make_mock_worker()
@@ -67,6 +73,8 @@ async def running_server(unused_tcp_port):
     with patch("engine.server.BinanceWorker", return_value=mock_worker), \
          patch.object(DataEngineServer, "_startup_tachibana", noop_startup):
         server = DataEngineServer(port=unused_tcp_port, token=token)
+        # B3: 統合テストはセッション確立済みを前提とするため CONNECTED にする。
+        server._live_state = LiveState.CONNECTED
         task = asyncio.create_task(server.serve())
 
         await _wait_for_port(unused_tcp_port)
@@ -762,6 +770,181 @@ async def test_cancel_order_replay_venue_returns_unsupported_order_venue(running
         f"Expected code='unsupported_order_venue', got: {msg.get('code')!r}"
     )
     assert msg["request_id"] == "req-cancel-replay-001"
+
+    await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# F6: LoadStrategyScenario / SaveStrategyScenario dispatch tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_strategy_scenario_found(running_server, tmp_path):
+    """LoadStrategyScenario: SCENARIO が存在する .py を送ると StrategyScenarioLoaded が返る。"""
+    port, token, _ = running_server
+
+    # SCENARIO 定数を持つ一時ファイルを作成する
+    strategy_file = tmp_path / "strategy.py"
+    strategy_file.write_text(
+        "SCENARIO = {\n"
+        "    'schema_version': 1,\n"
+        "    'instrument': '1301.TSE',\n"
+        "    'start': '2025-01-06',\n"
+        "    'end': '2025-03-31',\n"
+        "    'granularity': 'Daily',\n"
+        "    'initial_cash': 1000000,\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "LoadStrategyScenario",
+        "request_id": "req-scenario-001",
+        "path": str(strategy_file),
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "StrategyScenarioLoaded", f"Expected StrategyScenarioLoaded, got: {msg}"
+    assert msg["request_id"] == "req-scenario-001"
+    assert msg["path"] == str(strategy_file)
+    assert msg["scenario"] is not None
+    assert msg["scenario"]["instrument"] == "1301.TSE"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_load_strategy_scenario_not_found(running_server, tmp_path):
+    """LoadStrategyScenario: SCENARIO が存在しない .py を送ると StrategyScenarioLoaded(scenario=None) が返る。"""
+    port, token, _ = running_server
+
+    # SCENARIO 定数を持たない一時ファイル
+    strategy_file = tmp_path / "no_scenario.py"
+    strategy_file.write_text("# no SCENARIO constant here\ndef run(): pass\n", encoding="utf-8")
+
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "LoadStrategyScenario",
+        "request_id": "req-scenario-002",
+        "path": str(strategy_file),
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "StrategyScenarioLoaded", f"Expected StrategyScenarioLoaded (not LoadFailed), got: {msg}"
+    assert msg["request_id"] == "req-scenario-002"
+    assert msg["scenario"] is None, f"Expected scenario=None for missing SCENARIO, got: {msg['scenario']}"
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_load_strategy_scenario_file_not_found(running_server, tmp_path):
+    """LoadStrategyScenario: 存在しないファイルパスを送ると StrategyScenarioLoadFailed が返る。"""
+    port, token, _ = running_server
+
+    nonexistent = str(tmp_path / "does_not_exist.py")
+
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "LoadStrategyScenario",
+        "request_id": "req-scenario-003",
+        "path": nonexistent,
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "StrategyScenarioLoadFailed", f"Expected StrategyScenarioLoadFailed, got: {msg}"
+    assert msg["request_id"] == "req-scenario-003"
+    assert msg["path"] == nonexistent
+    assert "reason" in msg
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_save_strategy_scenario_success(running_server, tmp_path):
+    """SaveStrategyScenario: save_as=True の正常リクエストで StrategyScenarioSaved(ok=True) が返る。"""
+    port, token, _ = running_server
+
+    dest = tmp_path / "new_strategy.py"
+    scenario = {
+        "schema_version": 1,
+        "instrument": "7203.TSE",
+        "start": "2025-01-06",
+        "end": "2025-03-31",
+        "granularity": "Daily",
+        "initial_cash": 500000,
+    }
+
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "SaveStrategyScenario",
+        "request_id": "req-scenario-save-001",
+        "path": str(dest),
+        "scenario": scenario,
+        "save_as": True,
+        "loaded_path": None,
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "StrategyScenarioSaved", f"Expected StrategyScenarioSaved, got: {msg}"
+    assert msg["request_id"] == "req-scenario-save-001"
+    assert msg["ok"] is True, f"Expected ok=True, got: {msg}"
+    assert msg.get("error") is None
+
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_save_strategy_scenario_path_guard_violation(running_server):
+    """SaveStrategyScenario: 永続ディレクトリへの書き込みで StrategyScenarioSaved(ok=False, error=...) が返る。"""
+    port, token, _ = running_server
+
+    # 永続状態ディレクトリ内のパス（APPDATA/flowsurface 配下）を構築する
+    appdata = os.environ.get("APPDATA", "C:\\Users\\test\\AppData\\Roaming")
+    forbidden_path = str(Path(appdata) / "flowsurface" / "evil.py")
+
+    scenario = {
+        "schema_version": 1,
+        "instrument": "7203.TSE",
+        "start": "2025-01-06",
+        "end": "2025-03-31",
+        "granularity": "Daily",
+        "initial_cash": 500000,
+    }
+
+    ws = await _connect_and_handshake(port, token)
+
+    req = {
+        "op": "SaveStrategyScenario",
+        "request_id": "req-scenario-save-guard",
+        "path": forbidden_path,
+        "scenario": scenario,
+        "save_as": True,
+        "loaded_path": None,
+    }
+    await ws.send(orjson.dumps(req))
+
+    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+    msg = orjson.loads(raw)
+    assert msg.get("event") == "StrategyScenarioSaved", f"Expected StrategyScenarioSaved, got: {msg}"
+    assert msg["request_id"] == "req-scenario-save-guard"
+    assert msg["ok"] is False, f"Expected ok=False for path guard violation, got: {msg}"
+    assert msg.get("error") is not None
+    assert "path_guard_violation" in msg["error"]
 
     await ws.close()
 

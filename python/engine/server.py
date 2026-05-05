@@ -1,4 +1,4 @@
-"""WebSocket IPC server — loopback-only, single-client, token-authenticated."""
+"""WebSocket IPC server — loopback-only, multi-client (broadcast event, FCFS command), token-authenticated."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -63,8 +64,14 @@ from engine.exchanges.tachibana_orders import (
 )
 from engine.schemas import OrderListFilter as SchemaOrderListFilter, OrderModifyChange as SchemaOrderModifyChange
 from engine.schemas import (
+    AUTH_FAILED_CODE,
     SCHEMA_MAJOR,
     SCHEMA_MINOR,
+    AppMode,
+    AttemptedCommand,
+    ClientConnected,
+    ClientDisconnected,
+    EngineBusy,
     EngineError,
     Hello,
     Ready,
@@ -77,6 +84,24 @@ from engine.mode import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# B3: Engine state machines (Replay and Live)
+# ---------------------------------------------------------------------------
+
+
+class ReplayState(Enum):
+    IDLE = auto()
+    LOADED = auto()
+    RUNNING = auto()
+    STOPPING = auto()
+
+
+class LiveState(Enum):
+    DISCONNECTED = auto()
+    CONNECTING = auto()
+    CONNECTED = auto()
 
 # C-M2: httpx/httpcore の INFO/DEBUG ログには立花 API の URL が含まれ、
 # クエリパラメータ sSecondPassword が露出するため WARNING 以上に抑制する。
@@ -94,9 +119,109 @@ for _http_logger_name in ("httpx", "httpcore"):
 
 _ENGINE_VERSION = "0.1.0"
 
+# Maximum concurrent WebSocket clients (GUI 1 + helper 1 + headroom 2).
+MAX_CONNECTIONS = 4
+
+# Phase 8 R1 / Phase 2 (WS-MED1): handshake() で最初の Hello を待つタイムアウト秒数。
+# 接続後に Hello を送って来ないクライアント（半開接続 / probe / 不正クライアント）を
+# 検出して 1002 で切断する。テストでは monkeypatch で短縮する。
+_HANDSHAKE_TIMEOUT_S: float = 15.0
+
+
+class _Broadcaster:
+    """Per-connection asyncio.Queue-based broadcaster.
+
+    Each connected client gets its own queue so event fanout is non-blocking
+    and slow clients cannot block fast ones.  The ``append`` interface is
+    identical to the old ``_Outbox`` so all ``self._outbox.append(...)`` call
+    sites continue to work without modification.
+
+    ``_q`` is a backward-compatibility deque for unit tests that inspect
+    ``srv._outbox._q`` directly (e.g. test_ec_server_dispatch.py). Items
+    appended while no client is connected land only in ``_q``. Items appended
+    while clients are connected go to every client queue AND ``_q`` so the
+    combined length/iteration matches the old single-client _Outbox behavior.
+    """
+
+    def __init__(self) -> None:
+        self._queues: dict[ServerConnection, asyncio.Queue] = {}
+        # Compat deque used by tests that inspect _outbox._q directly.
+        self._q: deque[dict] = deque()
+
+    def add_conn(self, ws: ServerConnection) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self._queues[ws] = q
+        return q
+
+    def remove_conn(self, ws: ServerConnection) -> None:
+        self._queues.pop(ws, None)
+
+    def append(self, item: dict) -> None:
+        """Enqueue item to every connected client's queue (fanout).
+
+        H-SF2: 1クライアントのキューが満杯でも後続クライアントへの broadcast を
+        継続する。QueueFull は WARNING でログし、イベントを破棄する（drop）。
+        """
+        for ws, q in list(self._queues.items()):
+            try:
+                q.put_nowait(item)
+            except asyncio.QueueFull:
+                log.warning(
+                    "[_Broadcaster] outbox full for client, dropping event %s",
+                    item.get("event", "?"),
+                )
+            except Exception as exc:
+                log.warning("[_Broadcaster] put_nowait failed: %s", exc)
+        # Also write to compat deque so unit tests that read _q still work.
+        self._q.append(item)
+
+    def send_to(self, ws: ServerConnection, item: dict) -> None:
+        """Unicast: enqueue item only to a single connection's queue.
+
+        M-GP8 / Silent-M2 (Phase 8 R1 / Phase 2): broadcast でなく特定の接続だけに
+        送るべきイベント (EngineBusy / malformed_json Error 等) のための経路。
+        対象 ws が登録されていない場合 (テストが ``__new__`` で server を生成して
+        ws を登録せずに dispatch するケース) は compat deque への書き込みのみ行う。
+        queue 満杯のときは WARNING ログだけ残して drop する。
+
+        いずれの場合も compat deque (``self._q``) には append する。これは既存テスト
+        が ``server._outbox`` を反復して event を観測する規約に合わせるため。
+        """
+        q = self._queues.get(ws) if ws is not None else None
+        if q is None:
+            # テスト経路 / 登録前: compat deque だけに記録する。
+            self._q.append(item)
+            return
+        try:
+            q.put_nowait(item)
+        except asyncio.QueueFull:
+            log.warning(
+                "[_Broadcaster] send_to: outbox full, dropping event %s",
+                item.get("event", "?"),
+            )
+        except Exception as exc:
+            log.warning("[_Broadcaster] send_to: put_nowait failed: %s", exc)
+        # Mirror to compat deque so unit tests inspecting ``_outbox`` keep working.
+        self._q.append(item)
+
+    def popleft(self) -> dict:
+        return self._q.popleft()
+
+    def count(self) -> int:
+        return len(self._queues)
+
+    def __len__(self) -> int:
+        # For test assertions: return number of pending items in compat deque.
+        return len(self._q)
+
+    def __bool__(self) -> bool:
+        return bool(self._q) or bool(self._queues)
+
+    def __iter__(self):
+        return iter(list(self._q))
+
 
 class _Outbox:
-    """Deque-backed outbox that wakes the send loop whenever an event is appended."""
 
     def __init__(self, wake_send_loop: Any) -> None:
         self._q: deque[dict] = deque()
@@ -168,7 +293,8 @@ class DataEngineServer:
         # arg. The TachibanaWorker is the only worker that uses it (master
         # cache path) so a None here would crash worker construction below.
         if cache_dir is None:
-            cache_dir = Path.home() / ".cache" / "flowsurface" / "engine"
+            _env_cache = os.environ.get("FLOWSURFACE_CACHE_DIR")
+            cache_dir = Path(_env_cache) if _env_cache else Path.home() / ".cache" / "flowsurface" / "engine"
         self._cache_dir = Path(cache_dir)
         if config_dir is None:
             config_dir = Path.home() / ".config" / "flowsurface" / "engine"
@@ -179,14 +305,19 @@ class DataEngineServer:
             if wal_path is not None
             else self._cache_dir / "tachibana_orders.jsonl"
         )
-        self._current_conn: ServerConnection | None = None
+        self._connections: set[ServerConnection] = set()
         self._shutdown_event = asyncio.Event()
-        self._outbox_event = asyncio.Event()
+        self._outbox_event = asyncio.Event()  # kept for shutdown() compat
         self._engine_session_id: UUID = uuid.uuid4()
-        self._handshake_lock = asyncio.Lock()
         # N1.13: 起動時固定 mode (`"live"` | `"replay"`).
         # Hello 受信時に上書きする。default は旧クライアント互換の "live"。
-        self._mode: str = "live"
+        # C-Type2: AppMode Literal で illegal 文字列代入を静的に防ぐ。
+        self._mode: AppMode = "live"
+        # 防衛: 不正値の代入をルートで検出するための pin (mypy/pyright で漏れた場合の保険)。
+        # L-R4-1 (ラウンド4): `python -O` で assert は無効化されるため if/raise に統一。
+        # `_emit` invariant (M-R3-2) と同じ方針。
+        if self._mode not in ("live", "replay"):
+            raise RuntimeError(f"DataEngineServer: invalid mode {self._mode!r}")
 
         # Tachibana p_no counter MUST be constructed before the worker dict
         # so the worker shares the same monotonic counter as
@@ -287,6 +418,10 @@ class DataEngineServer:
         # compute_sleep_sec は multiplier >= 1 を要求するため、デフォルト 1 は安全。
         self._replay_speed_multiplier: int = 1
 
+        # B3: State machines for replay and live command gating.
+        self._replay_state: ReplayState = ReplayState.IDLE
+        self._live_state: LiveState = LiveState.DISCONNECTED
+
         # N1.16: REPLAY 仮想ポートフォリオ（CLMZanKaiKanougaku を呼ばない純粋 Python 実装）。
         # LoadReplayData 受信時に initial_cash で reset() する。
         from decimal import Decimal as _Decimal
@@ -297,7 +432,7 @@ class DataEngineServer:
         # _handle_start_engine の EngineStarted 受信時にリセットされる。
         self._replay_streaming_fills: list[dict] = []
 
-        self._outbox = _Outbox(self._outbox_event.set)
+        self._outbox = _Broadcaster()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -324,11 +459,37 @@ class DataEngineServer:
     # ------------------------------------------------------------------
 
     async def _handle(self, ws: ServerConnection) -> None:
+        # Reject connections exceeding the limit before handshake.
+        if self._outbox.count() >= MAX_CONNECTIONS:
+            # M-2 (silent): close する前に EngineError を送って、
+            # クライアント側で「server full」を分かるようにする（token は含まない）。
+            try:
+                import orjson
+                from engine.schemas import EngineError as _EngineError
+                err_payload = _EngineError(
+                    code="max_connections", message="server full"
+                ).model_dump()
+                await ws.send(orjson.dumps(err_payload).decode())
+            except Exception:
+                pass
+            try:
+                await ws.close(1008, "max connections exceeded")
+            except Exception:
+                pass
+            log.warning("Connection rejected: MAX_CONNECTIONS=%d reached", MAX_CONNECTIONS)
+            return
+
         recv_task: asyncio.Task | None = None
         send_task: asyncio.Task | None = None
         startup_task: asyncio.Task | None = None
         try:
             await self._handshake(ws)
+            q = self._outbox.add_conn(ws)
+            self._connections.add(ws)
+            # Broadcast ClientConnected to all clients (including the new one).
+            count = self._outbox.count()
+            self._outbox.append(ClientConnected(count=count).model_dump())
+
             # T-SC3: Python self-initiates Tachibana login after handshake.
             # The task runs concurrently with the recv/send loops.
             # Skip in replay mode — Tachibana is irrelevant for backtesting.
@@ -336,7 +497,7 @@ class DataEngineServer:
                 startup_task = asyncio.create_task(self._startup_tachibana())
                 self._tachibana_startup_task = startup_task
             recv_task = asyncio.create_task(self._recv_loop(ws))
-            send_task = asyncio.create_task(self._send_loop(ws))
+            send_task = asyncio.create_task(self._send_loop(ws, q))
             done, pending = await asyncio.wait(
                 {recv_task, send_task}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -358,45 +519,95 @@ class DataEngineServer:
         except Exception as exc:
             log.error("Connection error: %s", exc)
         finally:
-            task_to_cancel = self._tachibana_startup_task
-            if task_to_cancel is not None and not task_to_cancel.done():
-                task_to_cancel.cancel()
-                try:
-                    await task_to_cancel
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._tachibana_startup_task = None
-            # Phase O2: EVENT ループも停止する
-            if self._event_task is not None and not self._event_task.done():
-                self._event_task.cancel()
-                try:
-                    await self._event_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._event_task = None
-            # Reset startup latch so the next reconnect can call
-            # validate_session_on_startup again without the L6 guard firing.
-            self._tachibana_startup_latch = StartupLatch()
-            if self._current_conn is ws:
-                self._current_conn = None
-            await self._cancel_all_streams()
+            self._outbox.remove_conn(ws)
+            self._connections.discard(ws)
+            # Broadcast ClientDisconnected after removal so count is accurate.
+            count = self._outbox.count()
+            self._outbox.append(ClientDisconnected(count=count).model_dump())
+
+            # C1 (Phase 8.1b R10 / B1): Server-lifecycle resources — Tachibana
+            # startup task, EVENT loop, login latch, and stream subscriptions —
+            # are shared across all clients. Tearing them down on every
+            # per-connection finally block was killing live state for the OTHER
+            # connected clients. Only cleanup when the LAST client disconnects.
+            if not self._connections:
+                task_to_cancel = self._tachibana_startup_task
+                if task_to_cancel is not None and not task_to_cancel.done():
+                    task_to_cancel.cancel()
+                    try:
+                        await task_to_cancel
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self._tachibana_startup_task = None
+                # Phase O2: EVENT ループも停止する
+                if self._event_task is not None and not self._event_task.done():
+                    self._event_task.cancel()
+                    try:
+                        await self._event_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self._event_task = None
+                # Reset startup latch so the next reconnect can call
+                # validate_session_on_startup again without the L6 guard firing.
+                self._tachibana_startup_latch = StartupLatch()
+                await self._cancel_all_streams()
+
+                # HIGH-R2-4: 全接続が切れた時点で replay/live state を初期値に
+                # 戻す。これは「LoadReplayData 実行 → 接続全断 → 再接続後に
+                # LoadReplayData が IDLE state guard を通過する」を保証する。
+                # 動作中の runner があれば後で EngineStopped を emit するが、
+                # 既に listener が居ないため state は別経路で reset しないと
+                # stuck する。
+                self._replay_state = ReplayState.IDLE
+                self._live_state = LiveState.DISCONNECTED
+                self._replay_streaming_fills.clear()
 
     async def _handshake(self, ws: ServerConnection) -> None:
-        raw = await ws.recv()
+        # WS-MED1 (Phase 8 R1 / Phase 2): Hello を `_HANDSHAKE_TIMEOUT_S` 秒以内に
+        # 受信できなかった場合は protocol error (1002) で切断する。半開接続や
+        # probe、不正クライアントが ServerConnection を専有し続けるのを防ぐ。
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=_HANDSHAKE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            try:
+                await ws.close(1002, "handshake timeout")
+            except Exception:
+                pass
+            raise ValueError("handshake_timeout")
         msg = Hello.model_validate(orjson.loads(raw))
 
         # Constant-time token comparison to defeat timing attacks.
         if not hmac.compare_digest(msg.token, self._token):
             await ws.send(
                 orjson.dumps(
-                    EngineError(code="auth_failed", message="token mismatch").model_dump()
+                    EngineError(code=AUTH_FAILED_CODE, message="token mismatch").model_dump()
                 ).decode()
             )
-            await ws.close()
-            raise ValueError("auth_failed")
+            # WS-MED2 / L-WS-INFO (Phase 8 R1 / Phase 2): 認証失敗時の close code を
+            # 1008 Policy Violation に統一する。fastwebsockets / 任意 WS クライアント
+            # が「拒否されたか / 単に切断されたか」を区別できるようにする。
+            await ws.close(1008, "auth failed")
+            raise ValueError(AUTH_FAILED_CODE)
 
-        # N1.13: capture mode from Hello so dispatch policies (mode helper) can read it.
-        self._mode = msg.mode
+        # N1.13 / M-TA6: capture mode from Hello.
+        # 最初の Hello のみ _mode を設定する。以降の接続で mode が異なる場合は
+        # EngineError で reject して接続を閉じる。
+        if self._mode == "live" and not self._connections:
+            # 接続がまだない（最初の handshake）場合は mode を設定する。
+            # 注: _handle で handshake() 後に add_conn されるので、handshake 時点では
+            # _connections は空（まだ追加されていない）。
+            self._mode = msg.mode
+        elif msg.mode != self._mode:
+            await ws.send(
+                orjson.dumps(
+                    EngineError(
+                        code="mode_mismatch",
+                        message=f"Engine is in {self._mode!r} mode, cannot attach as {msg.mode!r}",
+                    ).model_dump()
+                ).decode()
+            )
+            await ws.close(1008, "mode mismatch")
+            raise ValueError(f"mode_mismatch: engine={self._mode!r}, client={msg.mode!r}")
 
         if msg.schema_major != SCHEMA_MAJOR:
             await ws.send(
@@ -407,30 +618,10 @@ class DataEngineServer:
                     ).model_dump()
                 ).decode()
             )
-            await ws.close()
+            # WS-MED2 / L-WS-INFO (Phase 8 R1 / Phase 2): schema mismatch も 1008 で
+            # 統一。クライアント側で auth_failed と同じハンドリングロジックに乗る。
+            await ws.close(1008, "schema mismatch")
             raise ValueError("schema_mismatch")
-
-        # Serialize the current-connection swap so concurrent handshakes
-        # cannot both observe `self._current_conn is None`.
-        async with self._handshake_lock:
-            if self._current_conn is not None and self._current_conn is not ws:
-                try:
-                    await self._current_conn.send(
-                        orjson.dumps(
-                            {
-                                "event": "Error",
-                                "code": "superseded",
-                                "message": "new client connected",
-                            }
-                        ).decode()
-                    )
-                    await self._current_conn.close()
-                except Exception as exc:
-                    log.warning("Failed to close superseded connection: %s", exc)
-                # Cancel stream tasks from the old connection before handing
-                # over to the new client so they don't become zombie tasks.
-                await self._cancel_all_streams()
-            self._current_conn = ws
 
         # Spec §4.5: warm every worker's HTTP client before announcing Ready,
         # so the client may issue list_tickers / fetch_ticker_stats / fetch_klines
@@ -493,7 +684,24 @@ class DataEngineServer:
 
     async def _recv_loop(self, ws: ServerConnection) -> None:
         async for raw in ws:
-            msg: dict[str, Any] = orjson.loads(raw)
+            # Silent-M2 (Phase 8 R1 / Phase 2): 不正 JSON フレームでは接続を切断
+            # しない。当該接続にだけ Error event を送って `continue` する。
+            # 旧実装は orjson.JSONDecodeError を catch せず async-for から
+            # propagate してこの client (および呼び出し側 finally) を黙って閉じていた。
+            try:
+                msg: dict[str, Any] = orjson.loads(raw)
+            except orjson.JSONDecodeError as exc:
+                log.warning("malformed JSON frame from client: %s", exc)
+                self._outbox.send_to(
+                    ws,
+                    {
+                        "event": "Error",
+                        "request_id": None,
+                        "code": "malformed_json",
+                        "message": str(exc),
+                    },
+                )
+                continue
             op = msg.get("op")
             try:
                 await self._dispatch(op, msg, ws)
@@ -505,19 +713,55 @@ class DataEngineServer:
     # Send loop — drains outbox and writes to client
     # ------------------------------------------------------------------
 
-    async def _send_loop(self, ws: ServerConnection) -> None:
-        while True:
-            while self._outbox:
-                event = self._outbox.popleft()
+    async def _send_loop(self, ws: ServerConnection, q: asyncio.Queue) -> None:
+        # H8: ws.send が ConnectionClosed / その他で raise したときに send_loop が
+        # 全 client 道連れになるのを防ぐ。送信失敗時はこの client 用 loop を
+        # 抜けるだけ（呼び出し元の handler の finally で接続クリーンアップが走る）。
+        #
+        # H-GP7 (Phase 8 R1 / Phase 2): shutdown 直前に append された最終 event
+        # （特に EngineStopped）が drop されないように、shutdown フラグを観測したら
+        # ループを抜ける前に queue を完全ドレインしてから return する。
+        import websockets as _ws_pkg
+
+        async def _send_one(event: dict) -> bool:
+            """Send one event; return True if loop should exit."""
+            try:
                 await ws.send(orjson.dumps(event).decode())
+                return False
+            except _ws_pkg.ConnectionClosed:
+                log.info("send_loop: client closed cleanly")
+                return True
+            except Exception as exc:
+                log.error("send_loop: send failed: %s", type(exc).__name__)
+                return True
+
+        while True:
+            try:
+                event = q.get_nowait()
+                if await _send_one(event):
+                    return
+                continue
+            except asyncio.QueueEmpty:
+                pass
 
             if self._shutdown_event.is_set():
-                break
+                # Final drain: ensure any event appended just before shutdown
+                # is delivered before we exit.
+                while True:
+                    try:
+                        event = q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if await _send_one(event):
+                        return
+                return
 
-            self._outbox_event.clear()
-            if self._outbox:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
                 continue
-            await self._outbox_event.wait()
+            if await _send_one(event):
+                return
 
     # ------------------------------------------------------------------
     # Op dispatcher
@@ -572,7 +816,7 @@ class DataEngineServer:
             # running login flow; the await here only blocks until the dispatch
             # logic (in-flight check, session clear) completes, not until login
             # finishes.
-            await self._do_request_venue_login(msg)
+            await self._do_request_venue_login(msg, ws=ws)
 
         elif op == "SetSecondPassword":
             self._handle_set_second_password(msg)
@@ -594,67 +838,81 @@ class DataEngineServer:
 
         elif op == "SubmitOrder":
             self._spawn_fetch(
-                self._do_submit_order(msg), msg.get("request_id")
+                self._do_submit_order(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "ModifyOrder":
             self._spawn_fetch(
-                self._do_modify_order(msg), msg.get("request_id")
+                self._do_modify_order(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "CancelOrder":
             self._spawn_fetch(
-                self._do_cancel_order(msg), msg.get("request_id")
+                self._do_cancel_order(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "CancelAllOrders":
             self._spawn_fetch(
-                self._do_cancel_all_orders(msg), msg.get("request_id")
+                self._do_cancel_all_orders(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "GetOrderList":
             self._spawn_fetch(
-                self._do_get_order_list(msg), msg.get("request_id")
+                self._do_get_order_list(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "GetBuyingPower":
             self._spawn_fetch(
-                self._do_get_buying_power(msg), msg.get("request_id")
+                self._do_get_buying_power(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "GetPositions":
             self._spawn_fetch(
-                self._do_get_positions(msg), msg.get("request_id")
+                self._do_get_positions(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "StartEngine":
             # N1.4: BacktestEngine 起動。replay モード必須。
             self._spawn_fetch(
-                self._handle_start_engine(msg), msg.get("request_id")
+                self._handle_start_engine(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "StopEngine":
             # N1.4: 走行中 BacktestEngine を停止する。
             self._spawn_fetch(
-                self._handle_stop_engine(msg), msg.get("request_id")
+                self._handle_stop_engine(msg, ws=ws), msg.get("request_id")
+            )
+
+        elif op == "StopReplay":
+            # F7: replay セッションを graceful に停止する（replay モード限定）。
+            self._spawn_fetch(
+                self._handle_stop_replay(msg, ws=ws), msg.get("request_id")
+            )
+
+        elif op == "ForceStopReplay":
+            # F7: replay セッションを強制停止する（タイムアウト fallback）。
+            self._spawn_fetch(
+                self._handle_force_stop_replay(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "LoadReplayData":
             # N1.4: J-Quants データを事前ロードして件数だけ通知する。
             # StartEngine が config に同等情報を持つので、本コマンドは事前確認用途。
             self._spawn_fetch(
-                self._handle_load_replay_data(msg), msg.get("request_id")
+                self._handle_load_replay_data(msg, ws=ws), msg.get("request_id")
             )
 
         elif op == "SetReplaySpeed":
             # N1.11: streaming 経路の pacing multiplier を変更する。
-            # 走行中の BacktestEngine が無い場合は no-op で ack のみ返す。
+            # B3: SetReplaySpeed は Replay::RUNNING 状態のみ受理する。
             multiplier = msg.get("multiplier", 1)
             request_id = msg.get("request_id", "")
             if not isinstance(multiplier, int) or multiplier <= 0:
                 log.warning(
                     "SetReplaySpeed: invalid multiplier=%r, ignored", multiplier
                 )
+                return
+            if not self._check_replay_state("SetReplaySpeed", ReplayState.RUNNING, ws=ws):
                 return
             self._replay_speed_multiplier = multiplier
             log.info(
@@ -665,6 +923,18 @@ class DataEngineServer:
             # 簡易 ack: SetReplaySpeed は Error response を返さないのが Rust 期待。
             # 走行中の streaming runner は self._replay_speed_multiplier を読むことで
             # 次の tick から新しい速度を使う。
+
+        elif op == "LoadStrategyScenario":
+            # F6: SCENARIO 定数の安全抽出（ast.parse のみ・import なし）。
+            self._spawn_fetch(
+                self._do_load_strategy_scenario(msg), msg.get("request_id")
+            )
+
+        elif op == "SaveStrategyScenario":
+            # F6: SCENARIO ブロックの libcst atomic 書き戻し。
+            self._spawn_fetch(
+                self._do_save_strategy_scenario(msg), msg.get("request_id")
+            )
 
         else:
             log.warning("Unhandled op=%s", op)
@@ -808,15 +1078,15 @@ class DataEngineServer:
             return
         self._session_holder.set_password(value)
 
-    async def _do_submit_order(self, msg: dict) -> None:
+    async def _do_submit_order(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         # C-2: in-flight カウンタをインクリメント（architecture.md §2.4 競合ポリシー）。
         self._submit_order_inflight_count += 1
         try:
-            await self._do_submit_order_inner(msg)
+            await self._do_submit_order_inner(msg, ws=ws)
         finally:
             self._submit_order_inflight_count -= 1
 
-    async def _do_submit_order_inner(self, msg: dict) -> None:
+    async def _do_submit_order_inner(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         raw_order = msg.get("order", {})
@@ -830,6 +1100,14 @@ class DataEngineServer:
         # Rust UI の submitting フラグが OrderSubmitted で reset され、続く OrderRejected の
         # toast 表示後に stuck しない。
         if venue == "replay":
+            # B3: SubmitOrder{venue="replay"} は Replay::RUNNING 状態のみ受理する。
+            # mode="replay" のときのみ state guard を適用する。
+            # mode="live" で venue="replay" が来た場合は state guard をスキップして
+            # 既存ロジック（REPLAY_NOT_IMPLEMENTED path）に流す。
+            if getattr(self, "_mode", "live") == "replay":
+                if not self._check_replay_state("SubmitOrder", ReplayState.RUNNING, ws=ws):
+                    return
+
             # Parse order (replay は session/second_password 不要)
             try:
                 order = SubmitOrderRequest.model_validate(raw_order)
@@ -884,6 +1162,10 @@ class DataEngineServer:
                     "ts_event_ms": int(time.time() * 1000),
                 }
             )
+            return
+
+        # B3: live 発注（replay 以外）は Live::CONNECTED 状態のみ受理する。
+        if not self._check_live_state("SubmitOrder", LiveState.CONNECTED, ws=ws):
             return
 
         # N3.C: 発注経路は "tachibana" のみ ("replay" は上のブランチで処理済み)
@@ -1101,13 +1383,17 @@ class DataEngineServer:
         if result.venue_order_id:
             self._venue_to_client[result.venue_order_id] = result.client_order_id
 
-    async def _do_modify_order(self, msg: dict) -> None:
+    async def _do_modify_order(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         import time
 
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         client_order_id = msg.get("client_order_id", "")
         raw_change = msg.get("change", {})
+
+        # B3: ModifyOrder は Live::CONNECTED 状態のみ受理する。
+        if not self._check_live_state("ModifyOrder", LiveState.CONNECTED, ws=ws):
+            return
 
         # N3.C: 発注 IPC 経路は tachibana のみサポート。
         # "hyperliquid" / "replay" / その他 venue はここで拒否する。
@@ -1210,13 +1496,17 @@ class DataEngineServer:
         else:
             self._session_holder.on_submit_success()
 
-    async def _do_cancel_order(self, msg: dict) -> None:
+    async def _do_cancel_order(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         import time
 
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         client_order_id = msg.get("client_order_id", "")
         venue_order_id = msg.get("venue_order_id", "")
+
+        # B3: CancelOrder は Live::CONNECTED 状態のみ受理する。
+        if not self._check_live_state("CancelOrder", LiveState.CONNECTED, ws=ws):
+            return
 
         # N3.C: 発注 IPC 経路は tachibana のみサポート。
         # "hyperliquid" / "replay" / その他 venue はここで拒否する。
@@ -1306,11 +1596,15 @@ class DataEngineServer:
         else:
             self._session_holder.on_submit_success()
 
-    async def _do_cancel_all_orders(self, msg: dict) -> None:
+    async def _do_cancel_all_orders(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         instrument_id = msg.get("instrument_id")
         order_side = msg.get("order_side")
+
+        # B3: CancelAllOrders は Live::CONNECTED 状態のみ受理する。
+        if not self._check_live_state("CancelAllOrders", LiveState.CONNECTED, ws=ws):
+            return
 
         # N3.C: 発注 IPC 経路は tachibana のみサポート。
         # "hyperliquid" / "replay" / その他 venue はここで拒否する。
@@ -1472,7 +1766,7 @@ class DataEngineServer:
             "orders": orders,
         })
 
-    async def _do_get_order_list(self, msg: dict) -> None:
+    async def _do_get_order_list(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         raw_filter = msg.get("filter", {})
@@ -1488,6 +1782,10 @@ class DataEngineServer:
                 "code": "unknown_venue",
                 "message": f"GetOrderList: unknown venue {venue!r}",
             })
+            return
+
+        # H-Type4: live 注文一覧取得は Live::CONNECTED 状態のみ受理する。
+        if not self._check_live_state("GetOrderList", LiveState.CONNECTED, ws=ws):
             return
 
         if self._tachibana_session is None:
@@ -1556,7 +1854,7 @@ class DataEngineServer:
             "orders": orders_json,
         })
 
-    async def _do_get_buying_power(self, msg: dict) -> None:
+    async def _do_get_buying_power(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         # N1.16: REPLAY モードでは CLMZanKaiKanougaku を呼ばない（D9.6 ガード）。
@@ -1570,6 +1868,10 @@ class DataEngineServer:
                 "code": "unknown_venue",
                 "message": f"GetBuyingPower: unknown venue {venue!r}",
             })
+            return
+
+        # H-Type4: live 余力取得は Live::CONNECTED 状態のみ受理する。
+        if not self._check_live_state("GetBuyingPower", LiveState.CONNECTED, ws=ws):
             return
 
         if self._tachibana_session is None:
@@ -1633,7 +1935,7 @@ class DataEngineServer:
         )
         self._outbox.append(ipc_dict)
 
-    async def _do_get_positions(self, msg: dict) -> None:
+    async def _do_get_positions(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         if venue != "tachibana":
@@ -1643,6 +1945,10 @@ class DataEngineServer:
                 "code": "unknown_venue",
                 "message": f"GetPositions: unknown venue {venue!r}",
             })
+            return
+
+        # H-Type4: live 建玉取得は Live::CONNECTED 状態のみ受理する。
+        if not self._check_live_state("GetPositions", LiveState.CONNECTED, ws=ws):
             return
 
         if self._tachibana_session is None:
@@ -1706,6 +2012,190 @@ class DataEngineServer:
             ],
             "ts_ms": ts_ms,
         })
+
+    # ------------------------------------------------------------------
+    # F6: SCENARIO 定数 load / save ハンドラ
+    # ------------------------------------------------------------------
+
+    async def _do_load_strategy_scenario(self, msg: dict) -> None:
+        """LoadStrategyScenario: .py から SCENARIO 定数を ast.literal_eval で安全抽出する。
+
+        - SCENARIO が存在する → StrategyScenarioLoaded(scenario=<dict>)
+        - SCENARIO が不在（extract が None を返す）→ StrategyScenarioLoaded(scenario=None)
+        - ファイルが存在しない / 構文エラー 等 → StrategyScenarioLoadFailed
+
+        M4 (レビュー反映 2026-05-04 ラウンド1): 失敗時のログ形式を
+        `WARN scenario.load failed reason=... path=...` に統一。
+        """
+        from engine import scenario as scenario_mod
+        from engine.schemas import StrategyScenarioLoaded, StrategyScenarioLoadFailed
+
+        request_id = msg.get("request_id", "")
+        path_str = msg.get("path", "")
+        try:
+            scenario = scenario_mod.extract(Path(path_str))
+            # H-R2-1 (ラウンド2): 送信パイプラインを model_dump 経由に統一。
+            self._outbox.append(
+                StrategyScenarioLoaded(
+                    request_id=request_id,
+                    path=path_str,
+                    scenario=scenario,
+                ).model_dump(exclude_none=False)
+            )
+        except Exception as exc:
+            log.warning("scenario.load failed reason=%s path=%r", exc, path_str)
+            self._outbox.append(
+                StrategyScenarioLoadFailed(
+                    request_id=request_id,
+                    path=path_str,
+                    reason=str(exc),
+                ).model_dump(exclude_none=False)
+            )
+
+    async def _do_save_strategy_scenario(self, msg: dict) -> None:
+        """SaveStrategyScenario: .py の SCENARIO ブロックを libcst で atomic 書き戻す。
+
+        - 成功 → StrategyScenarioSaved(ok=True, error=None)
+        - 失敗（path ガード違反 / 検証失敗 / IO エラー等）
+          → StrategyScenarioSaved(ok=False, error=<SaveErrorCode Literal>)
+
+        レビュー反映 (2026-05-04 ラウンド1):
+            - H1: error は SaveErrorCode Literal に固定
+            - H2: write_back に current_path は渡さない（loaded_path 一軸）
+            - M3: msg["scenario"] が None / 欠落で error="missing_scenario_field"
+            - M5: rollback は ERROR ログ（reason=syntax_error|validate_failed）
+            - M8: save_as のデフォルトを False に統一（dto.rs と整合）
+            - M11: 入口で validate(scenario_dict) を試行 → 失敗で validate_failed
+
+        レビュー反映 (2026-05-04 ラウンド2):
+            - H-R2-1: `_emit` を `StrategyScenarioSaved(...).model_dump()` 経由に統一。
+              未知 error コードは pydantic ValidationError で構築段階に検出する。
+            - H-R2-2: `tempfile_failed` を SaveErrorCode から削除（dead code）。
+              `tempfile.mkstemp` 失敗は errno に応じて parent_missing / disk_full /
+              permission_denied のいずれかに吸収される。
+            - H-R2-3: `OSError.winerror` (Windows) を `permission_denied` にマップ。
+              errno が None でも winerror が分類できればそちらを優先する。
+        """
+        import errno as _errno
+        from typing import Optional, get_args
+
+        from engine import scenario as scenario_mod
+        from engine.schemas import SaveErrorCode, StrategyScenarioSaved
+
+        _KNOWN_SAVE_ERROR_CODES = frozenset(get_args(SaveErrorCode))
+
+        request_id = msg.get("request_id", "")
+        path_str = msg.get("path", "")
+
+        def _emit(ok: bool, error: Optional[str]) -> None:
+            # M-R3-2 (ラウンド3): assert ではなく ValueError で内部不変条件を強制。
+            # `python -O` 最適化で assert は無効化されるため、本番でも保護を効かせる。
+            # L-R2-1: ok / error の不整合を構築前にガード（pydantic 自身は
+            # ok=True かつ error!=None の組合せを reject しないため明示チェック）。
+            if ok and error is not None:
+                raise ValueError(
+                    f"_emit invariant: ok=True must imply error is None (got {error!r})"
+                )
+            # H-R2-1: 未知 error コードは StrategyScenarioSaved 構築時の
+            # pydantic ValidationError で reject される。念押しのガードもここで行う。
+            if error is not None and error not in _KNOWN_SAVE_ERROR_CODES:
+                raise ValueError(
+                    f"_emit invariant: unknown SaveErrorCode {error!r}"
+                )
+            evt = StrategyScenarioSaved(
+                request_id=request_id,
+                path=path_str,
+                ok=ok,
+                error=error,  # type: ignore[arg-type]
+            )
+            self._outbox.append(evt.model_dump(exclude_none=False))
+
+        # M3: scenario フィールド必須チェック
+        scenario_dict = msg.get("scenario")
+        if scenario_dict is None:
+            log.warning(
+                "scenario.writeback rejected reason=missing_scenario_field path=%r",
+                path_str,
+            )
+            _emit(False, "missing_scenario_field")
+            return
+
+        # M11: 入口での形状検証（早期 reject で IO 副作用を防ぐ）
+        try:
+            scenario_mod.validate(scenario_dict)
+        except scenario_mod.ScenarioValidationError as exc:
+            log.warning(
+                "scenario.writeback rejected reason=validate_failed path=%r: %s",
+                path_str, exc,
+            )
+            _emit(False, "validate_failed")
+            return
+
+        loaded_path_str = msg.get("loaded_path")
+        # M8: save_as のデフォルトは False（dto.rs `#[serde(default)]` と整合）
+        save_as = msg.get("save_as", False)
+
+        try:
+            scenario_mod.write_back(
+                Path(path_str),
+                scenario_dict,
+                save_as=save_as,
+                loaded_path=Path(loaded_path_str) if loaded_path_str else None,
+            )
+            _emit(True, None)
+            return
+        except ValueError as exc:
+            # path guard violation は ValueError("path_guard_violation: ...")
+            msg_str = str(exc)
+            if msg_str.startswith("path_guard_violation"):
+                error_code = "path_guard_violation"
+            else:
+                error_code = "validate_failed"
+            log.error(
+                "scenario.writeback rollback reason=%s path=%r: %s",
+                error_code, path_str, exc,
+            )
+            _emit(False, error_code)
+        except scenario_mod.ScenarioValidationError as exc:
+            log.error(
+                "scenario.writeback rollback reason=validate_failed path=%r: %s",
+                path_str, exc,
+            )
+            _emit(False, "validate_failed")
+        except SyntaxError as exc:
+            log.error(
+                "scenario.writeback rollback reason=syntax_error path=%r: %s",
+                path_str, exc,
+            )
+            _emit(False, "syntax_error")
+        except OSError as exc:
+            err = getattr(exc, "errno", None)
+            winerr = getattr(exc, "winerror", None)
+            # H-R2-3 (ラウンド2): Windows の winerror を permission_denied にマップする。
+            # ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32) は errno に
+            # 表れない経路があるため、errno が None でも winerror で分類する。
+            if err == _errno.ENOSPC:
+                error_code = "disk_full"
+            elif err in (_errno.EACCES, _errno.EPERM):
+                error_code = "permission_denied"
+            elif err == _errno.ENOENT:
+                error_code = "parent_missing"
+            elif winerr in (5, 32):
+                error_code = "permission_denied"
+            else:
+                error_code = "rename_failed"
+            log.error(
+                "scenario.writeback rollback reason=%s path=%r errno=%s winerror=%s: %s",
+                error_code, path_str, err, winerr, exc,
+            )
+            _emit(False, error_code)
+        except Exception as exc:
+            # 未知例外はリグレッションを抑えるため validate_failed にフォールバック
+            log.error(
+                "scenario.writeback rollback reason=validate_failed path=%r: %s (%s)",
+                path_str, exc, type(exc).__name__,
+            )
+            _emit(False, "validate_failed")
 
     # ------------------------------------------------------------------
     # Fetch operation helpers (each is an async coroutine producing one event)
@@ -2009,6 +2499,100 @@ class DataEngineServer:
         for ev in events:
             self._outbox.append(ev)
 
+    # ------------------------------------------------------------------
+    # F7: unicast helper — used by _handle_stop_replay / _handle_force_stop_replay
+    # for malformed_json / mode_mismatch errors that must go ONLY to the caller.
+    # ------------------------------------------------------------------
+
+    def _send_unicast(self, ws: ServerConnection, payload: dict) -> None:
+        """Send `payload` only to `ws`. Used when an error response is
+        per-connection (e.g. mode_mismatch / malformed_json) and must not
+        leak to other clients. Mirrors the convention used by
+        ``_check_replay_state`` (`_outbox.send_to(ws, payload)``).
+
+        M-silent4: this helper is sync (the underlying `_outbox.send_to` is
+        sync — it merely queues into the per-connection send-loop). Callers
+        should NOT `await` the return; it returns `None`.
+        """
+        self._outbox.send_to(ws, payload)
+
+    # ------------------------------------------------------------------
+    # B3: State machine guard helpers
+    # ------------------------------------------------------------------
+
+    def _check_replay_state(
+        self,
+        command: AttemptedCommand,
+        required: ReplayState,
+        *,
+        ws: ServerConnection | None = None,
+        request_id: str | None = None,
+    ) -> bool:
+        """Return True if _replay_state == required; otherwise emit EngineBusy and return False.
+
+        H15: assumes ``_replay_state`` is initialised in ``__init__`` (default
+        ``ReplayState.IDLE``). Tests that bypass ``__init__`` via ``__new__``
+        must explicitly assign ``_replay_state`` before calling guarded
+        handlers — there is no longer a silent fallback that hid initialisation
+        bugs.
+
+        M-GP8 (Phase 8 R1 / Phase 2): EngineBusy は違反 command を送って来た接続
+        にだけ unicast する。``ws`` が None のとき (テストや legacy 経路) は
+        broadcast にフォールバックして既存挙動を保つ。
+
+        MEDIUM-R2-6: ``request_id`` を payload に伝播する。helper 側 wait_for()
+        / events() はこの id で「自分宛の reject」を識別する。
+        """
+        current = self._replay_state
+        if current != required:
+            payload = EngineBusy(
+                current_state=current.name,
+                attempted_command=command,
+                reason=f"replay state must be {required.name}, got {current.name}",
+                request_id=request_id,
+            ).model_dump()
+            if ws is not None:
+                self._outbox.send_to(ws, payload)
+            else:
+                self._outbox.append(payload)
+            return False
+        return True
+
+    def _check_live_state(
+        self,
+        command: AttemptedCommand,
+        required: LiveState,
+        *,
+        ws: ServerConnection | None = None,
+        request_id: str | None = None,
+    ) -> bool:
+        """Return True if _live_state == required; otherwise emit EngineBusy and return False.
+
+        H15: assumes ``_live_state`` is initialised in ``__init__`` (default
+        ``LiveState.DISCONNECTED``). Tests bypassing ``__init__`` must assign
+        ``_live_state`` explicitly — no silent default that masks bugs.
+
+        M-GP8 (Phase 8 R1 / Phase 2): EngineBusy は違反 command を送って来た接続
+        にだけ unicast する。``ws`` が None のとき (テスト経路) は broadcast に
+        フォールバックする。
+
+        MEDIUM-R2-6: ``request_id`` を payload に伝播する。
+        """
+        current = self._live_state
+        if current != required:
+            payload = EngineBusy(
+                current_state=current.name,
+                attempted_command=command,
+                reason=f"live state must be {required.name}, got {current.name}",
+                request_id=request_id,
+            ).model_dump()
+            if ws is not None:
+                self._outbox.send_to(ws, payload)
+            else:
+                self._outbox.append(payload)
+            return False
+        return True
+
     def _apply_tachibana_session(self, session: TachibanaSession) -> None:
         """Persist *session* to both server state and the TachibanaWorker.
 
@@ -2039,6 +2623,8 @@ class DataEngineServer:
                 )
             except LoginCancelled:
                 log.info("tachibana startup: user cancelled login")
+                # B3: ログインキャンセル → DISCONNECTED に戻す。
+                self._live_state = LiveState.DISCONNECTED
                 self._emit({
                     "event": "VenueLoginCancelled",
                     "venue": "tachibana",
@@ -2053,6 +2639,8 @@ class DataEngineServer:
                 os._exit(2)
             except UnreadNoticesError as exc:
                 log.info("tachibana startup: unread notices: %s", exc)
+                # B3: ログイン失敗 → DISCONNECTED に戻す。
+                self._live_state = LiveState.DISCONNECTED
                 self._emit({
                     "event": "VenueError",
                     "venue": "tachibana",
@@ -2070,6 +2658,8 @@ class DataEngineServer:
                 # Falls back when the underlying exception did not supply one
                 # (e.g. raw `Exception`).
                 msg = getattr(exc, "message", "") or _MSG_LOGIN_FAILED
+                # B3: ログイン失敗 → DISCONNECTED に戻す。
+                self._live_state = LiveState.DISCONNECTED
                 self._emit({
                     "event": "VenueError",
                     "venue": "tachibana",
@@ -2080,6 +2670,8 @@ class DataEngineServer:
                 return
 
             self._apply_tachibana_session(session)
+            # B3: ログイン成功 → CONNECTED 状態へ遷移。
+            self._live_state = LiveState.CONNECTED
             log.info("Tachibana session established successfully")
             self._emit({
                 "event": "VenueReady",
@@ -2175,7 +2767,7 @@ class DataEngineServer:
         else:
             log.debug("EC event: 未知の notification_type=%r (無視)", nt)
 
-    async def _do_request_venue_login(self, msg: dict) -> None:
+    async def _do_request_venue_login(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         """`RequestVenueLogin` from the Rust UI — drive a fresh login."""
         request_id = msg.get("request_id")
         venue = msg.get("venue")
@@ -2184,27 +2776,65 @@ class DataEngineServer:
         # HTTP call would still walk the full Tachibana → VenueReady →
         # bulk stats fetch path that broke replay startup (2026-04-30).
         if self._mode == "replay":
-            self._emit(
-                {
-                    "event": "VenueError",
-                    "venue": venue or "",
-                    "request_id": request_id,
-                    "code": "mode_mismatch",
-                    "message": "RequestVenueLogin not allowed in replay mode",
-                }
-            )
+            # HIGH-R2-2 (M-GP8 と同じ方針): reject 応答は要求した接続にだけ
+            # unicast する。broadcast すると別 client にも mode_mismatch が
+            # 流れ、その client の attach session が誤って失敗扱いになる。
+            payload = {
+                "event": "VenueError",
+                "venue": venue or "",
+                "request_id": request_id,
+                "code": "mode_mismatch",
+                "message": "RequestVenueLogin not allowed in replay mode",
+            }
+            if ws is not None:
+                self._outbox.send_to(ws, payload)
+            else:
+                self._emit(payload)
             return
         if venue != "tachibana":
             log.warning("RequestVenueLogin: unsupported venue=%r", venue)
-            self._emit(
-                {
-                    "event": "VenueError",
-                    "venue": venue or "",
-                    "request_id": request_id,
-                    "code": "unsupported_venue",
-                    "message": "対応していない venue です",
-                }
+            # HIGH-R2-2: unsupported venue 応答も unicast 化する。
+            payload = {
+                "event": "VenueError",
+                "venue": venue or "",
+                "request_id": request_id,
+                "code": "unsupported_venue",
+                "message": "対応していない venue です",
+            }
+            if ws is not None:
+                self._outbox.send_to(ws, payload)
+            else:
+                self._emit(payload)
+            return
+
+        # H-TA1: CONNECTING 中の RequestVenueLogin は「ログイン中」として VenueLoginStarted を返す。
+        if self._live_state == LiveState.CONNECTING:
+            log.info("RequestVenueLogin: login already in-progress (CONNECTING), re-emitting VenueLoginStarted")
+            self._emit({"event": "VenueLoginStarted", "venue": "tachibana", "request_id": request_id})
+            return
+
+        # CONNECTED 中の RequestVenueLogin は「ユーザーが明示的に再ログイン要求」とみなして
+        # 既存セッションをクリアし DISCONNECTED に戻してから通常フローへ進む。
+        # Rust 側 FSM (`venue_state.rs::try_claim_login_in_flight_succeeds_from_ready`) が
+        # Ready からの再ログインを許可しているため、ここで弾くと UI と齟齬が出る (2026-05-04)。
+        #
+        # Bug X (docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md):
+        # 旧 EVENT WS ループ (`_event_task`) もここで cancel する。新ログインが
+        # 失敗・キャンセルされると `_startup_tachibana` の終端 (2454-2455) を
+        # 通らず、旧セッション URL から EC 約定通知を受け続けるゴースト状態が
+        # 残るため。新ログイン成功時は `_startup_tachibana` が新タスクを建て
+        # 直すので await は不要。
+        if self._live_state == LiveState.CONNECTED:
+            log.info(
+                "RequestVenueLogin: re-login requested while CONNECTED — "
+                "clearing session and cancelling old EVENT loop"
             )
+            self._live_state = LiveState.DISCONNECTED
+            if self._event_task is not None and not self._event_task.done():
+                self._event_task.cancel()
+
+        # B3: 上記の救済を経た上で DISCONNECTED であることを保証する。
+        if not self._check_live_state("RequestVenueLogin", LiveState.DISCONNECTED, ws=ws):
             return
 
         if self._tachibana_login_inflight.locked():
@@ -2215,6 +2845,8 @@ class DataEngineServer:
         self._tachibana_session = None
         self._workers["tachibana"].set_session(None)
         tachibana_clear_session(self._cache_dir)
+        # B3: RequestVenueLogin 受理 → CONNECTING 状態へ遷移。
+        self._live_state = LiveState.CONNECTING
         # B-3: spawn as a task so _dispatch_message returns immediately and the
         # recv loop is not blocked while the login dialog is open.  The task is
         # stored so the _handle finally block can cancel it on disconnect.
@@ -2282,7 +2914,11 @@ class DataEngineServer:
     # ------------------------------------------------------------------
 
     async def _handle_load_replay_data(
-        self, msg: dict, *, base_dir: Path | None = None
+        self,
+        msg: dict,
+        *,
+        base_dir: Path | None = None,
+        ws: ServerConnection | None = None,
     ) -> None:
         """LoadReplayData IPC: J-Quants ファイルを件数確認だけして ReplayDataLoaded 送出。
 
@@ -2315,6 +2951,10 @@ class DataEngineServer:
             )
             return
 
+        # B3: LoadReplayData は Replay::IDLE 状態のみ受理する。
+        if not self._check_replay_state("LoadReplayData", ReplayState.IDLE, ws=ws):
+            return
+
         from engine.nautilus.jquants_loader import check_data_exists
 
         try:
@@ -2339,6 +2979,9 @@ class DataEngineServer:
             )
             return
 
+        # B3: データ確認成功 → LOADED 状態へ遷移。
+        self._replay_state = ReplayState.LOADED
+
         # H-H: LoadReplayData 時にポートフォリオをリセット（strategy 確定前なので cash=0）。
         from decimal import Decimal as _Decimal
         self._replay_strategy_id = ""
@@ -2353,12 +2996,20 @@ class DataEngineServer:
                 "strategy_id": None,
                 "bars_loaded": bars_loaded,
                 "trades_loaded": trades_loaded,
+                # schema 3.12: GUI helper-attach 経路で `auto_generate_replay_panes`
+                # を起動できるよう instrument_id / granularity を同梱する。
+                "instrument_id": instrument_id,
+                "granularity": granularity,
                 "ts_event_ms": int(time.time() * 1000),
             }
         )
 
     async def _handle_start_engine(
-        self, msg: dict, *, base_dir: Path | None = None
+        self,
+        msg: dict,
+        *,
+        base_dir: Path | None = None,
+        ws: ServerConnection | None = None,
     ) -> None:
         """StartEngine IPC: BacktestEngine を起動して EngineStarted/EngineStopped を送出。
 
@@ -2395,6 +3046,13 @@ class DataEngineServer:
         if not request_id:
             log.warning("StartEngine: missing request_id, ignoring")
             return
+
+        # B3: StartEngine は Replay::LOADED 状態のみ受理する（mode="replay" の場合）。
+        # mode="live" の場合は validate_start_engine が ModeMismatchError を raise するので
+        # state guard は replay モードのみ適用する。
+        if self._mode == "replay":
+            if not self._check_replay_state("StartEngine", ReplayState.LOADED, ws=ws):
+                return
 
         # H-2 (R2 review-fix R2): R1b の H-G で main thread と worker thread の
         # append を ``call_soon_threadsafe`` 経由で統一したが、これは
@@ -2519,6 +3177,10 @@ class DataEngineServer:
         # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
         self._engine_tasks[strategy_id] = runner
 
+        # B3: StartEngine 受理 → RUNNING 状態へ遷移（replay モードのみ）。
+        if self._mode == "replay":
+            self._replay_state = ReplayState.RUNNING
+
         # M-8 (R2 review-fix R2): StartEngine 受理直後に _replay_strategy_id を確定させる。
         # これ以降に GetBuyingPower(replay) が走った場合でも正しい strategy_id が
         # ReplayBuyingPower イベントに乗る。runner 完了後の result からの上書きはそのまま
@@ -2532,17 +3194,25 @@ class DataEngineServer:
         def _on_event(evt: dict) -> None:
             _emit_threadsafe(evt)
 
-        # H1 補助: EngineStarted を送出したかどうかを worker thread から記録する。
-        # 例外時に未送出なら EngineStopped 補完を抑制する。
-        # ただし TimeoutError パスでは started_marker に依存しない (HIGH-1)。
-        started_marker = {"sent": False}
+        # Silent-M1 (Phase 8 R1 / Phase 2): 旧実装で使っていた started_marker は
+        # 例外時の EngineStopped 補完を抑制するためだけに存在し、未送出時の
+        # silent failure を生んでいた。except 経路で常に補完するように変更したため
+        # marker は不要になり削除した。以下の callback は ExecutionMarker /
+        # streaming fills 集約 + EngineStopped emission tracking を担当する。
+        # MEDIUM-R2-8: runner が EngineStopped を emit したら ``engine_stopped_emitted``
+        # を True にし、except / timeout 補完パスで二重送出を防ぐ。
+        engine_stopped_emitted: list[bool] = [False]
 
         def _on_event_tracked(evt: dict) -> None:
-            if evt.get("event") == "EngineStarted":
-                started_marker["sent"] = True
+            ev_kind = evt.get("event")
+            if ev_kind == "EngineStarted":
                 # EngineStarted 受信時に前回の streaming fills をリセット。
                 self._replay_streaming_fills.clear()
-            elif evt.get("event") == "ExecutionMarker":
+            elif ev_kind == "EngineStopped":
+                # MEDIUM-R2-8: runner が自前で EngineStopped を流した。
+                # 例外パスの補完送出をスキップするためのフラグを立てる。
+                engine_stopped_emitted[0] = True
+            elif ev_kind == "ExecutionMarker":
                 # streaming replay の約定を in-memory に蓄積（GetOrderList{venue:"replay"} 用）。
                 qty_str = evt.get("qty", "0")
                 ts = evt.get("ts_event_ms", 0)
@@ -2632,14 +3302,17 @@ class DataEngineServer:
                 log.warning("[StartEngine] runner.stop() failed during timeout cleanup: %s", stop_exc)
             # HIGH-1: timeout 後も worker thread は走り続けるため started_marker に依存しない。
             # Rust 側は EngineStarted なしの EngineStopped を no-op として扱う。
-            _emit(
-                {
-                    "event": "EngineStopped",
-                    "strategy_id": strategy_id,
-                    "final_equity": "0",
-                    "ts_event_ms": int(time.time() * 1000),
-                }
-            )
+            # MEDIUM-R2-8: runner が既に EngineStopped を流していたら二重送出を避ける。
+            if not engine_stopped_emitted[0]:
+                _emit(
+                    {
+                        "event": "EngineStopped",
+                        "strategy_id": strategy_id,
+                        "final_equity": "0",
+                        "ts_event_ms": int(time.time() * 1000),
+                    }
+                )
+                engine_stopped_emitted[0] = True
             # MEDIUM-1: str(asyncio.TimeoutError()) は空文字なので fallback メッセージを使う。
             timeout_msg = str(exc) or f"StartEngine timed out after 3600s: strategy_id={strategy_id!r}"
             _emit(
@@ -2661,9 +3334,15 @@ class DataEngineServer:
         except Exception as exc:
             # M3: exc_info=True を追加し strategy_id をコンテキストとして記録
             log.error("StartEngine failed: strategy_id=%r", strategy_id, exc_info=True)
-            # H1: EngineStarted を送出済みで EngineStopped を未送出なら補完。
-            # Rust 側 state machine が stuck しないようにする。
-            if started_marker["sent"]:
+            # Silent-M1 (Phase 8 R1 / Phase 2): 旧実装は EngineStarted 送出済み
+            # (started_marker["sent"]) のときだけ EngineStopped を補完していたが、
+            # NautilusRunner が EngineStarted を emit する前に raise すると
+            # EngineStopped が一度も流れず、Rust 側 state machine が stuck する
+            # silent failure を生んでいた。常に補完送出する。Rust 側は
+            # EngineStarted なしの EngineStopped を no-op として扱う前提
+            # （TimeoutError パスと同じ契約）。
+            # MEDIUM-R2-8: runner が emit していたら二重送出を避ける。
+            if not engine_stopped_emitted[0]:
                 _emit(
                     {
                         "event": "EngineStopped",
@@ -2672,6 +3351,7 @@ class DataEngineServer:
                         "ts_event_ms": int(time.time() * 1000),
                     }
                 )
+                engine_stopped_emitted[0] = True
             _emit(
                 EngineErrorModel(
                     code="engine_run_failed",
@@ -2691,6 +3371,18 @@ class DataEngineServer:
         finally:
             self._engine_tasks.pop(strategy_id, None)
             self._engine_stop_events.pop(strategy_id, None)
+            # B3 / MEDIUM-R3-2: 走行終了（正常・例外・timeout 問わず）→ IDLE 状態へ戻す。
+            # ただし「全断 → 再接続 → LoadReplayData (LOADED)」が走った後に
+            # 古い runner の to_thread 完了がここに到達するケースでは、
+            # 現在の state が LOADED （別セッションが用意済み）の可能性がある。
+            # 古い runner の finally が新セッションの LOADED を IDLE に
+            # 上書きするとリグレッションになるため、自分の終了に責任のある
+            # RUNNING / STOPPING のときだけ IDLE に戻す。
+            if self._mode == "replay" and self._replay_state in (
+                ReplayState.RUNNING,
+                ReplayState.STOPPING,
+            ):
+                self._replay_state = ReplayState.IDLE
             # M-8 (R2 review-fix R2): 走行終了時に _replay_strategy_id をリセット。
             # 次の GetBuyingPower(replay) は空 strategy_id を返し、UI 側で
             # 「未実行」を識別できるようにする。
@@ -2700,7 +3392,7 @@ class DataEngineServer:
             # (テスト含む) が outbox を直ちに観測できるようにする。
             await _drain()
 
-    async def _handle_stop_engine(self, msg: dict) -> None:
+    async def _handle_stop_engine(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         """StopEngine IPC: 走行中 NautilusRunner を停止する。
 
         N1.4 では BacktestEngine.run() が完了するまで待つしかないため、
@@ -2708,6 +3400,13 @@ class DataEngineServer:
         ``_handle_start_engine`` の to_thread 完了に任せる。
         """
         strategy_id = msg.get("strategy_id", "")
+
+        # B3: StopEngine は Replay::RUNNING 状態のみ受理する（replay モードの場合）。
+        if self._mode == "replay":
+            if not self._check_replay_state("StopEngine", ReplayState.RUNNING, ws=ws):
+                return
+            self._replay_state = ReplayState.STOPPING
+
         runner = self._engine_tasks.get(strategy_id)
         if runner is None:
             log.info("StopEngine: no running engine for strategy_id=%r", strategy_id)
@@ -2724,6 +3423,167 @@ class DataEngineServer:
         # GetBuyingPower(replay) も「未実行」として扱う。
         if self._mode == "replay" and self._replay_strategy_id == strategy_id:
             self._replay_strategy_id = ""
+
+    async def _handle_stop_replay(
+        self, msg: dict, *, ws: ServerConnection
+    ) -> None:
+        """StopReplay IPC: replay セッションを graceful に停止する（F7）。
+
+        replay モードかつ RUNNING 状態のみ受理する。
+        内部で active な strategy_id を解決して runner を停止し、
+        完了後に ReplayStopped を全クライアントに broadcast する。
+
+        M12: ws is mandatory — error responses (mode_mismatch / malformed_json)
+             must unicast to the originating caller, not broadcast.
+        """
+        # M-1: ws is structurally mandatory for unicast error replies. A None
+        # ws would silently fall through to broadcast in `_send_unicast`,
+        # which violates the M10/M12 contract. Fail loud at the boundary.
+        assert ws is not None, "ws is mandatory for unicast error responses"
+
+        from engine.schemas import ReplayStopped as ReplayStoppedModel
+
+        # M10: reject malformed messages with no/empty request_id by unicasting
+        # an EngineError back to the caller. Empty-string fallback was masking
+        # client bugs and producing replies with request_id="".
+        request_id_raw = msg.get("request_id")
+        if not isinstance(request_id_raw, str) or not request_id_raw:
+            self._send_unicast(
+                ws,
+                EngineError(
+                    code="malformed_json",
+                    message="StopReplay requires a non-empty request_id",
+                    strategy_id=None,
+                ).model_dump(),
+            )
+            return
+        request_id: str = request_id_raw
+
+        # replay モードでのみ有効（live モードで受信した場合は mode_mismatch Error を返す）
+        # H4: live モードでの mode_mismatch error は呼び出し元のみに unicast する
+        # （broadcast すると他のクライアントが偽の error 表示をする）。
+        if self._mode != "replay":
+            log.info("StopReplay: ignored in mode=%r", self._mode)
+            self._send_unicast(
+                ws,
+                EngineError(
+                    code="mode_mismatch",
+                    message="StopReplay is only valid in replay mode",
+                    strategy_id=None,
+                ).model_dump(),
+            )
+            return
+
+        # RUNNING 状態のみ受理（STOPPING / IDLE / LOADED は EngineBusy）
+        if not self._check_replay_state("StopReplay", ReplayState.RUNNING, ws=ws, request_id=request_id):
+            return
+
+        # RUNNING → STOPPING へ遷移
+        self._replay_state = ReplayState.STOPPING
+
+        # active な strategy_id を取得（先頭 1 件）
+        strategy_ids = list(self._engine_tasks.keys())
+        strategy_id = strategy_ids[0] if strategy_ids else ""
+
+        if strategy_id:
+            stop_event = self._engine_stop_events.get(strategy_id)
+            if stop_event is not None:
+                stop_event.set()
+            runner = self._engine_tasks.get(strategy_id)
+            if runner is not None:
+                try:
+                    runner.stop()
+                except Exception as exc:
+                    log.warning("StopReplay: runner.stop() raised: %s", exc)
+            # strategy_id をクリア（GetBuyingPower(replay) が「未実行」として扱われるよう）
+            if self._replay_strategy_id == strategy_id:
+                self._replay_strategy_id = ""
+        else:
+            log.info("StopReplay: no active runner found, emitting ReplayStopped immediately")
+
+        # H2: state を IDLE に戻してから broadcast する（_handle_force_stop_replay
+        # の M-5 と同じ順序）。STOPPING のまま broadcast すると、ReplayStopped を
+        # 受け取ったクライアントが直後に LoadReplayData / StartEngine を投げても
+        # state guard で弾かれる race を防ぐ。
+        self._replay_state = ReplayState.IDLE
+
+        # ReplayStopped を全クライアントに broadcast
+        self._outbox.append(
+            ReplayStoppedModel(
+                request_id=request_id,
+                final_equity=None,
+            ).model_dump()
+        )
+        log.info("StopReplay: broadcast ReplayStopped(request_id=%r)", request_id)
+
+    async def _handle_force_stop_replay(
+        self, msg: dict, *, ws: ServerConnection
+    ) -> None:
+        """ForceStopReplay IPC: replay セッションを強制停止する（F7 タイムアウト fallback）。
+
+        _replay_state に関わらず強制実行する（state guard を使わない）。
+        active な全ランナーを強制停止し、ReplayStopped を broadcast する。
+
+        H3: 完了時に _replay_state を IDLE に戻し、後続の LoadReplayData /
+            StartEngine が STOPPING 残留で弾かれないようにする。
+        M10: request_id 空 / 非 str はクライアントバグなので malformed_json で reject する。
+        M12: ws is mandatory — error responses must unicast to the caller.
+        """
+        # M-1: ws is structurally mandatory for unicast error replies.
+        assert ws is not None, "ws is mandatory for unicast error responses"
+
+        from engine.schemas import ReplayStopped as ReplayStoppedModel
+
+        # M10: validate request_id and unicast malformed error.
+        request_id_raw = msg.get("request_id")
+        if not isinstance(request_id_raw, str) or not request_id_raw:
+            self._send_unicast(
+                ws,
+                EngineError(
+                    code="malformed_json",
+                    message="ForceStopReplay requires a non-empty request_id",
+                    strategy_id=None,
+                ).model_dump(),
+            )
+            return
+        request_id: str = request_id_raw
+
+        log.info(
+            "ForceStopReplay: force-stopping all runners (state=%r, request_id=%r)",
+            self._replay_state.name if hasattr(self._replay_state, "name") else self._replay_state,
+            request_id,
+        )
+
+        # 全ランナーを強制停止
+        for sid, runner in list(self._engine_tasks.items()):
+            stop_event = self._engine_stop_events.get(sid)
+            if stop_event is not None:
+                stop_event.set()
+            try:
+                runner.stop()
+            except Exception as exc:
+                log.warning("ForceStopReplay: runner.stop() for %r raised: %s", sid, exc)
+
+        # strategy_id をクリア
+        self._replay_strategy_id = ""
+
+        # M-5: state を IDLE に戻してから ReplayStopped を broadcast する。
+        # H3 (旧コード) では broadcast の後に state リセットしていたが、
+        # ReplayStopped を受け取ったクライアントが直後に LoadReplayData /
+        # StartEngine を投げると、まだ STOPPING 残留状態で受信されて state
+        # guard に弾かれる race があった。reset → broadcast の順序にする
+        # ことで「ReplayStopped を受信した時点で IDLE が確定している」という
+        # 不変条件を保証する。
+        self._replay_state = ReplayState.IDLE
+
+        # ReplayStopped を全クライアントに broadcast
+        self._outbox.append(
+            ReplayStoppedModel(
+                request_id=request_id,
+                final_equity=None,
+            ).model_dump()
+        )
+        log.info("ForceStopReplay: broadcast ReplayStopped(request_id=%r)", request_id)
 
     async def _cancel_all_streams(self) -> None:
         for handle in list(self._streams.values()):
@@ -2750,3 +3610,7 @@ def _market_from_msg(msg: dict, venue: str) -> str:
 
 def _default_market(venue: str) -> str:
     return "linear_perp"
+
+
+# Public alias used by tests and external callers that prefer the shorter name.
+EngineServer = DataEngineServer

@@ -1,5 +1,7 @@
 # 立花証券統合: 未確定事項
 
+> **Phase 8（2026-05-03 完了）注記**: Q42（nautilus 互換境界 lint の CI 組込）の対象 path には Rust HTTP API のソース（`src/api/order_api.rs` 等）も含まれていたが、Phase 8 で当該ファイルが削除されたため対象範囲は `engine-client/src/**` / `exchange/src/**` / `src/**`（HTTP API 関連は不在）に縮小。GUI 発注は元から HTTP を経由しないため、立花用語の境界漏出 lint 自体の必要性は変わらない。
+
 | # | 論点 | 候補 | 決定タイミング | 備考 |
 | :-- | :--- | :--- | :--- | :--- |
 | Q1 | クレデンシャル IPC コマンド名 | `SetVenueCredentials`（汎用）/ `SetTachibanaCredentials`（venue 固有） | T0 | **決定: 前者（generic + venue-tagged typed enum）**。payload は `serde_json::Value` ではなく `VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire)` で typed に持たせ、`Debug` マスク可能にする。`request_id` で `VenueReady`/`VenueError` と相関（F1/F6） |

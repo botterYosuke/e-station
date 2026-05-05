@@ -10,7 +10,7 @@
 
 - **リプレイ・発注エンジンを自作しない**: nautilus は `BacktestEngine`（決定論的イベントドリブン）と `LiveExecutionEngine`（実取引）の両方を持つ
 - **将来の Python 単独モード方針と整合**: nautilus は Python ファースト・Rust コアのライブラリ。Rust（iced）を外しても戦略・発注ループはそのまま動く（メモリ `project_python_only_mode.md`）
-- **ASI / ナラティブ層との配線がシンプル**: `Strategy` クラスの `on_event` / `on_trade_tick` フックでナラティブ生成 → 既存 `/api/agent/narrative` に POST するだけ
+- **ASI / ナラティブ層との配線がシンプル**: `Strategy` クラスの `on_event` / `on_trade_tick` フックでナラティブ生成 → Python 内 narrative store に直接書き込む（旧 `/api/agent/narrative` 経路は Phase 8 で廃止）
 
 ## 2 つのモードと制約
 
@@ -61,42 +61,60 @@
 | `docs/plan/README.md` Phase 2 仮想売買エンジン | **nautilus の `BacktestEngine` で代替**。自作 Virtual Exchange Engine は破棄 |
 | `docs/plan/README.md` Phase 4a ナラティブ | nautilus `Strategy` フックから既存 HTTP API に書き込む配線のみ追加 |
 
-## ユーザー定義 Strategy（N4 — 実装済み 2026-04-29）
+## ユーザー定義 Strategy（N4 — 実装済み 2026-04-29、Phase 8 で API を Python helper に置換）
 
 ユーザーが書いた `.py` ファイルを REPLAY エンジンに流す基盤を実装済み。
 
-### API フロー（2 ステップ）
+### Phase 8 以降の起動経路（python-helper-direct-api）
 
-```
-POST /api/replay/load   → データ件数確認のみ（strategy_file は不要）
-POST /api/replay/start  → strategy_file + strategy_init_kwargs を指定してバックテスト開始
-```
+旧 `POST /api/replay/load` → `POST /api/replay/start` の HTTP 2 ステップは廃止し、
+**Python helper `engine.replay_session.ReplaySession`** に集約した
+（[python-helper-direct-api.md](../✅python-data-engine/archive/python-helper-direct-api.md)）。
 
-`strategy_file` は **`/api/replay/start`** にのみ渡す。`/api/replay/load` は受け付けない。
+| 用途 | 旧 (Phase 7 まで) | 新 (Phase 8 以降) |
+|---|---|---|
+| CLI でバックテスト実行 | curl で 2 回叩く | `uv run python -m engine.replay_session run --strategy ... --instrument ... --start ... --end ...` |
+| pytest からドライブ | HTTP 経由 | `with ReplaySession() as s: s.load(...); s.run(...)` を直接 import |
+| GUI 内から起動 | `File > ストラテジーを開く...` → サイドバー操作 | `File > Replay を開始...` フォーム（instrument / start / end / granularity / strategy_file / initial_cash） |
+| GUI 起動中に外部から駆動 | curl POST | 別プロセスで `python -m engine.replay_session run ...`（helper が attach mode で WS client として接続） |
+
+`ReplaySession` は **in-process mode**（engine 不在で spawn）と **attach mode**（既存 engine に WS client として attach）を auto-detect する。
 
 ### 実装ポイント
 
 | 箇所 | 内容 |
 |---|---|
-| `ReplayStartBody` (`src/replay_api.rs`) | `strategy_file`, `strategy_init_kwargs` フィールドを追加。未知フィールドは `deny_unknown_fields` で HTTP 400 |
-| `EngineStartConfig` (`engine-client/src/dto.rs`) | 同フィールドを `Option` で保持。`None` は wire 上省略（`skip_serializing_if`） |
-| `EngineStartConfig` (`python/engine/schemas.py`) | Pydantic モデルで `extra="forbid"` 適用済み。`model_validate()` で検証して `invalid_config` エラーを返す |
-| `strategy_init_kwargs` の型 | `serde_json::Map<String, Value>` — object 以外（配列・スカラー）は HTTP 境界で即拒否 |
+| `engine.replay_session.ReplaySession` | contextmanager。`load()` / `run()` / `set_speed()` / `submit_order()` / `portfolio` / `status` を提供 |
+| `EngineStartConfig` (`engine-client/src/dto.rs`) | `strategy_file` / `strategy_init_kwargs` を `Option` で保持。`None` は wire 上省略 |
+| `EngineStartConfig` (`python/engine/schemas.py`) | Pydantic `extra="forbid"` で未知フィールド拒否。`model_validate()` で `invalid_config` エラーを返す |
 | `_handle_start_engine` (`python/engine/server.py`) | `EngineStartConfig.model_validate()` → `strategy_loader.load_strategy_from_file()` の順で処理 |
 
 ### サンプル
 
 ```bash
-# 1. データだけ読み込む
-curl -X POST http://127.0.0.1:9876/api/replay/load \
-  -d '{"instrument_id":"7203.TSE","start_date":"2024-01-01","end_date":"2024-12-31","granularity":"Daily"}'
-
-# 2. 戦略を指定してバックテスト開始
-curl -X POST http://127.0.0.1:9876/api/replay/start \
-  -d '{"instrument_id":"7203.TSE","start_date":"2024-01-01","end_date":"2024-12-31","granularity":"Daily","strategy_id":"user-defined","initial_cash":"1000000","strategy_file":"docs/example/buy_and_hold.py","strategy_init_kwargs":{"instrument_id":"7203.TSE","lot_size":100}}'
+# CLI: backtest を回すだけ（GUI 不要、in-process mode）
+uv run python -m engine.replay_session run \
+    --strategy docs/example/buy_and_hold.py \
+    --instrument 7203.TSE \
+    --start 2024-01-01 \
+    --end 2024-12-31 \
+    --granularity Daily \
+    --initial-cash 1000000
 ```
 
-詳細は [docs/wiki/backtest.md](../../wiki/backtest.md) を参照。
+```python
+# pytest / Python から
+from engine.replay_session import ReplaySession
+
+with ReplaySession() as s:
+    s.load(instrument="7203.TSE", start="2024-01-01", end="2024-12-31", granularity="Daily")
+    s.run(strategy_file="docs/example/buy_and_hold.py",
+          strategy_init_kwargs={"instrument_id": "7203.TSE", "lot_size": 100},
+          initial_cash="1000000")
+```
+
+詳細は [docs/wiki/backtest.md](../../wiki/backtest.md) と
+[python-helper-direct-api.md](../✅python-data-engine/archive/python-helper-direct-api.md) を参照。
 
 ---
 
@@ -104,7 +122,8 @@ curl -X POST http://127.0.0.1:9876/api/replay/start \
 
 `docs/✅order/` で **スコープ外**とした REPLAY モード仮想注文（[wiki UX](../../wiki/orders.md#replay-モード中の動作)）は本計画の **Phase N1** に集約する:
 
-- `POST /api/order/submit` 等を REPLAY モード時は **nautilus `BacktestEngine` の `SimulatedExchange` に流す**
+- 仮想注文は REPLAY モード時に **nautilus `BacktestEngine` の `SimulatedExchange` に流す**
+  （Phase 7 までは `POST /api/order/submit`、Phase 8 以降は `ReplaySession.submit_order()`）
 - 発注入力 UI は **Python tkinter 側**で live / replay の判定に応じて文言を切替
   （例: バナー「⏪ REPLAYモード中 — 実注文は送信されません」、確認文言「仮想注文確認」）。
   iced は監視・表示のみを担い、注文入力責務は持たない
