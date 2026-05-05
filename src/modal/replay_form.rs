@@ -55,7 +55,6 @@ pub enum Message {
     EndDateChanged(String),
     GranularityChanged(Granularity),
     PickStrategyFile,
-    StrategyFilePicked(Option<std::path::PathBuf>),
     InitialCashChanged(String),
     Submit,
     Cancel,
@@ -221,10 +220,6 @@ impl ReplayFormModal {
                 None
             }
             Message::PickStrategyFile => Some(Action::PickStrategyFile),
-            Message::StrategyFilePicked(path) => {
-                self.strategy_file = path;
-                None
-            }
             Message::InitialCashChanged(v) => {
                 self.initial_cash = v;
                 None

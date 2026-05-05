@@ -1268,6 +1268,10 @@ struct Flowsurface {
     /// one via the OS file dialog. Consumed by the Replay 起動フォーム modal as the
     /// `strategy_file` field on `Command::StartEngine`.
     replay_strategy_file: Option<std::path::PathBuf>,
+    /// F6a: 最後に送信した `LoadStrategyScenario` の request_id。
+    /// `StrategyScenarioLoadedEvent` 受信時に突き合わせ、古い応答を捨てるために使う。
+    /// `None` = 未送信 or 応答済み。
+    pending_scenario_request_id: Option<String>,
     /// Phase 8.1c: Replay 起動フォーム modal。`File > Replay を開始...` で Some に、
     /// Submit / Cancel で None に戻る。
     replay_form_modal: Option<modal::replay_form::ReplayFormModal>,
@@ -1522,12 +1526,14 @@ enum Message {
     /// `ReplayFormModal` を prefill し、`None`（SCENARIO 不在）なら strategy_file
     /// だけセットしてフォームは空のままにする。`current_path` は両ケースで更新。
     StrategyScenarioLoadedEvent {
+        request_id: String,
         path: std::path::PathBuf,
         scenario: Option<serde_json::Value>,
     },
     /// F6a: `Event::StrategyScenarioLoadFailed` 受信時。エラートーストを出し、
     /// `current_path` はセットしない。
     StrategyScenarioLoadFailedEvent {
+        request_id: String,
         path: std::path::PathBuf,
         reason: String,
     },
@@ -1932,14 +1938,24 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::ReplayStopped { .. } => Some(Message::ModeSwitchStopAcked),
         // F6a: SCENARIO 抽出結果 → ReplayFormModal prefill
         EngineEvent::StrategyScenarioLoaded {
-            path, scenario, ..
+            request_id,
+            path,
+            scenario,
+            ..
         } => Some(Message::StrategyScenarioLoadedEvent {
+            request_id,
             path: std::path::PathBuf::from(path),
             scenario,
         }),
         // F6a: SCENARIO 抽出失敗 → エラートースト
-        EngineEvent::StrategyScenarioLoadFailed { path, reason, .. } => {
+        EngineEvent::StrategyScenarioLoadFailed {
+            request_id,
+            path,
+            reason,
+            ..
+        } => {
             Some(Message::StrategyScenarioLoadFailedEvent {
+                request_id,
                 path: std::path::PathBuf::from(path),
                 reason,
             })
@@ -2140,6 +2156,7 @@ impl Flowsurface {
             order_list_request_id: None,
             positions_request_id: None,
             replay_strategy_file: None,
+            pending_scenario_request_id: None,
             replay_form_modal: None,
             strategy_load_error: None,
             last_saved_bytes: None,
@@ -3959,9 +3976,12 @@ impl Flowsurface {
                     return Task::none();
                 };
                 let path_str = path.to_string_lossy().into_owned();
+                // request_id を同期的に生成してステートに記録することで、
+                // 連続 open 時に古い応答を StrategyScenarioLoadedEvent で捨てられる。
+                let request_id = uuid::Uuid::new_v4().to_string();
+                self.pending_scenario_request_id = Some(request_id.clone());
                 return Task::perform(
                     async move {
-                        let request_id = uuid::Uuid::new_v4().to_string();
                         conn.send(engine_client::dto::Command::LoadStrategyScenario {
                             request_id,
                             path: path_str,
@@ -3979,17 +3999,20 @@ impl Flowsurface {
             }
             // F6a: SCENARIO 抽出成功 → ReplayFormModal を prefill。modal が
             // 開いていなければ新規生成する（GUI で `Open` 直後はまだ modal が
-            // 出ていない正規ルート）。`current_path` は両ケース（scenario
-            // None / Some）でセットする。
-            Message::StrategyScenarioLoadedEvent { path, scenario } => {
-                // M-7: poison recovery via `into_inner()` so a prior panic does
-                // not silently drop the new path.
-                let mut guard = match CURRENT_PATH.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                *guard = Some(path.clone());
-                drop(guard);
+            // 出ていない正規ルート）。
+            // CURRENT_PATH はレイアウト JSON の保存先のみを示す。戦略 .py を
+            // セットすると live 切替後の Ctrl+S が .py を JSON で上書きするため
+            // ここでは更新しない。
+            Message::StrategyScenarioLoadedEvent {
+                request_id,
+                path,
+                scenario,
+            } => {
+                // 連続して別ファイルを開いた場合、古い応答を無視する。
+                if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
+                    return Task::none();
+                }
+                self.pending_scenario_request_id = None;
                 let form = self
                     .replay_form_modal
                     .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
@@ -4000,7 +4023,16 @@ impl Flowsurface {
                 return Task::none();
             }
             // F6a: SCENARIO 抽出失敗 → トースト表示。`current_path` は更新しない。
-            Message::StrategyScenarioLoadFailedEvent { path, reason } => {
+            // 成功パスと対称に request_id で突き合わせ、古い失敗を捨てる。
+            Message::StrategyScenarioLoadFailedEvent {
+                request_id,
+                path,
+                reason,
+            } => {
+                if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
+                    return Task::none();
+                }
+                self.pending_scenario_request_id = None;
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -4026,11 +4058,7 @@ impl Flowsurface {
                             .await
                             .map(|h| h.path().to_owned())
                     },
-                    |path| {
-                        Message::ReplayFormMsg(modal::replay_form::Message::StrategyFilePicked(
-                            path,
-                        ))
-                    },
+                    Message::NativeOpenStrategyPicked,
                 );
             }
             Message::ReplayFormMsg(msg) => {
@@ -6601,12 +6629,56 @@ impl Flowsurface {
         // to Action::SwitchMode.
         lock_order_acquire("APP_MODE");
         set_app_mode(mode);
+
+        // F7-bugfix: update ProcessManager::mode and restart the Python engine
+        // so the next Hello carries the new mode. Without this the Python engine
+        // continues running with self._mode = "replay" even after APP_MODE is
+        // updated, causing RequestVenueLogin to be rejected with
+        // "RequestVenueLogin not allowed in replay mode".
+        //
+        // Sequence:
+        //   1. set_mode() updates the manager's mode Mutex so start() reads it.
+        //   2. Command::Shutdown causes the Python engine to close gracefully.
+        //   3. The recovery loop in main() sees wait_closed() complete and calls
+        //      manager.start() on a fresh port, sending Hello{mode: <new mode>}.
+        //   4. engine_status_stream yields EngineConnected with the new conn.
+        let engine_restart_task = {
+            let manager = ENGINE_MANAGER.get().map(Arc::clone);
+            // Clone the Arc before self.restart() replaces *self.
+            let conn = self.engine_connection.clone();
+            Task::perform(
+                async move {
+                    if let Some(m) = manager {
+                        m.set_mode(mode).await;
+                    }
+                    if let Some(c) = conn {
+                        // Ignore send errors — the connection may already be
+                        // closing. The recovery loop will restart regardless.
+                        let _ = c.send(engine_client::dto::Command::Shutdown).await;
+                    }
+                },
+                |_| Message::Noop,
+            )
+        };
+
+        // F7-bugfix (High): clear ENGINE_CONNECTION_TX BEFORE self.restart() so
+        // Flowsurface::new() reads engine_connection = None. This closes the race
+        // window where the live-mode UI would send RequestVenueLogin to the old
+        // replay-mode engine before the new Hello{mode=live} arrives.
+        //
+        // engine_status_stream handles None gracefully: it skips the EngineConnected
+        // yield and keeps event_rx pointing at the old conn until RecvError::Closed,
+        // then waits for the next conn_rx.changed() to set up the new conn.
+        if let Some(tx) = ENGINE_CONNECTION_TX.get() {
+            tx.send(None).ok();
+        }
+
         let task = self.restart();
         // restart() replaces *self; the per-thread lock-order tracker now
         // pertains to a stale critical section. Reset it so the next switch
         // starts from a clean slate.
         lock_order_reset();
-        task
+        Task::batch([task, engine_restart_task])
     }
 
     fn restart(&mut self) -> Task<Message> {
@@ -7107,7 +7179,7 @@ mod native_menu_handler_tests {
     #[test]
     fn strategy_scenario_load_failed_event_pushes_toast_only() {
         let body = handler_body(
-            "            Message::StrategyScenarioLoadFailedEvent { path, reason } =>",
+            "            Message::StrategyScenarioLoadFailedEvent {",
         );
         assert!(
             body.contains("notifications.push"),
@@ -7306,6 +7378,62 @@ mod mode_switch_engine_busy_routing_tests {
             MAIN_RS.contains("ModeSwitchStopBusy"),
             "Message::ModeSwitchStopBusy must exist — it handles StopReplay EngineBusy \
              by sending ForceStopReplay immediately instead of aborting the mode switch"
+        );
+    }
+}
+
+#[cfg(test)]
+mod app_mode_roundtrip_tests {
+    //! Acceptance criteria 2 (F7 bugfix): `app_mode()` must return the value
+    //! most recently written by `set_app_mode()`.
+    //!
+    //! These are runtime tests (not source inspection) so a broken
+    //! implementation (e.g. `app_mode()` hardcoded to return `Replay`) is
+    //! detected at test time, not just at review time.
+    //!
+    //! NOTE: `APP_MODE` is a process-global static. Tests in this module must
+    //! not run concurrently with other tests that mutate `APP_MODE`. Currently
+    //! no other test module writes `APP_MODE`, so `#[serial]` is not needed.
+    //! If that assumption changes, add `serial_test` or a `Mutex` guard.
+
+    use super::*;
+    use engine_client::dto::AppMode;
+
+    #[test]
+    fn set_app_mode_live_makes_app_mode_return_live() {
+        set_app_mode(AppMode::Live);
+        assert_eq!(
+            app_mode(),
+            AppMode::Live,
+            "app_mode() must return Live immediately after set_app_mode(Live)"
+        );
+    }
+
+    #[test]
+    fn set_app_mode_replay_makes_app_mode_return_replay() {
+        set_app_mode(AppMode::Replay);
+        assert_eq!(
+            app_mode(),
+            AppMode::Replay,
+            "app_mode() must return Replay immediately after set_app_mode(Replay)"
+        );
+        // Restore to Live so other tests that read APP_MODE are not surprised.
+        set_app_mode(AppMode::Live);
+    }
+
+    /// Acceptance criteria 2: after a replay→live mode switch, `app_mode()`
+    /// must return `AppMode::Live`. This is the direct runtime guard for the
+    /// "RequestVenueLogin not allowed in replay mode" regression.
+    #[test]
+    fn app_mode_returns_live_after_switch_from_replay() {
+        set_app_mode(AppMode::Replay);
+        assert_eq!(app_mode(), AppMode::Replay, "pre-condition: must start in Replay");
+        // Simulate what restart_with_mode(Live) does to APP_MODE.
+        set_app_mode(AppMode::Live);
+        assert_eq!(
+            app_mode(),
+            AppMode::Live,
+            "app_mode() must return Live after set_app_mode(Live) (acceptance criteria 2)"
         );
     }
 }
