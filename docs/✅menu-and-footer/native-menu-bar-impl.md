@@ -1,8 +1,19 @@
-# OS ネイティブメニューバー 実装記録
+# OS ネイティブメニューバー 実装記録（**歴史的記録 — 現行実装ではない**）
+
+> **⚠️ この文書は歴史的記録です。** muda（OS ネイティブメニュー）は完全廃止
+> され、現行実装は **全 OS で iced widget メニューバー**に統一されています。
+> 現行仕様は [widget-menu-bar-impl.md](./widget-menu-bar-impl.md) を参照。
+>
+> 廃止の経緯・移行手順は archive: [widget-menu-bar-windows.md](./archive/widget-menu-bar-windows.md)。
+>
+> 以下は muda 時代（2026-04-30 〜）の実装記録で、ファイル構成・muda::Menu の
+> Box::leak 対応・platform mod 構造・`init_for_hwnd` / `init_for_nsapp` 等は
+> 既にコードベースから削除されています。歴史的経緯と設計上の判断を残すために
+> 保存しています。
 
 **実装日**: 2026-04-30  
 **実装者**: Claude Sonnet 4.6 (botterYosuke)  
-**ステータス**: 完了・ビルド確認済み
+**ステータス**: **廃止済み（muda → iced widget へ統合）**
 
 ---
 

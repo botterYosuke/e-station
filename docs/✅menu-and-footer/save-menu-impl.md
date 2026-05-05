@@ -23,23 +23,30 @@ OS ネイティブメニューバー（[native-menu-bar-impl.md](./native-menu-b
 
 ## アクセラレータ経路
 
-二重発火を構造的に防ぐため、プラットフォーム別に経路を分けている：
+muda 廃止後、accelerator は **全 OS で `iced::keyboard::listen()` 経由の単一経路**：
 
-| プラットフォーム | 経路 | 備考 |
-|------------------|------|------|
-| Windows | muda の `MenuItem` accelerator | 一本化 |
-| macOS | muda + `PredefinedMenuItem::quit`（Cmd+Q） | Cmd+Q は OS 側 |
-| Linux | iced `keyboard::on_key_press` subscription | muda が GTK 制約で完全動作しないため fallback |
+| プラットフォーム | 経路 | 主修飾キー |
+|------------------|------|----------|
+| Windows | `widget_keyboard_subscription` | Ctrl |
+| macOS | 同上 | Ctrl または Cmd（logo） |
+| Linux | 同上 | Ctrl |
+
+実装: `src/native_menu.rs::widget_keyboard_subscription()`。`iced::keyboard::listen()`
+で全イベントを購読し、`physical_key`（`Code::KeyO` / `KeyS` / `KeyQ` / `KeyM`）で
+レイアウト非依存にマッチする。
 
 不変条件:
 
-- Linux 用 subscription は `cfg(target_os = "linux")` 限定で登録される（macOS/Windows で
-  二重発火しない）
-- `linux_keyboard_subscription(app_mode)` は `app_mode` を受け取り、replay モード時は
-  live 専用ショートカット（Open / Save / Save As）を抑制する
+- subscription は全 OS で 1 本だけ登録される（cfg gate なし、二重発火なし）。
+- `widget_keyboard_subscription(app_mode)` は `Subscription::with(is_live)` で
+  `is_live` を非キャプチャ渡しし、replay モード時は live 専用ショートカット
+  （Open / Save / Save As）を抑制する。
+- macOS のみ `modifiers.logo()`（Cmd キー）を受理。Win/Linux で受理すると
+  Super/Win キーが WM ショートカット（Win+Q 等）と衝突するため。
 - `Action::Quit` は `iced::window::close()` を直接呼ばず、
   `window::collect_window_specs(.., Message::ExitRequested)` を通して dirty チェックを
-  必ず通過させる
+  必ず通過させる（macOS の Cmd+Q もこの経路を通るため、`PredefinedMenuItem::quit`
+  時代と異なり dirty 確認が確実に走る）。
 
 リグレッションガード: `tests/accelerator_bind.rs` / `tests/menu_actions_cross_platform.rs`
 
@@ -244,7 +251,8 @@ docstring・import は一切触らない。書き込みは：
 
 | ファイル | 役割 |
 |---------|------|
-| `src/native_menu.rs` | muda 統合・Subscription・MENU_IDS poison 復旧 |
+| `src/native_menu.rs` | `Action` enum / `widget_keyboard_subscription`（全 OS、accelerator 経路） |
+| `src/widget_menu_bar.rs` | iced widget メニューバー（全 OS） |
 | `src/main.rs` | `NativeMenu*` ハンドラ群・`build_state_json` / `is_dirty` / `last_saved_bytes` / `CURRENT_PATH` |
 | `src/cli.rs` | `--saved-state <PATH>` 引数 |
 | `src/modal/replay_form.rs` | `prefill_from_scenario` / `set_strategy_file_only` |
@@ -278,10 +286,10 @@ cargo test --test menu_actions_cross_platform
 
 ## 既知の制限
 
-- **macOS Cmd+Q の dirty チェック**: `NSApplicationDelegate applicationShouldTerminate:`
-  フックを `muda` / `iced` に設けない限り、Cmd+Q は OS が直接処理し dirty チェックを
-  迂回する。Ctrl+Q 経由（自前 accelerator）であれば dirty チェックを通る
-- **Linux 自前メニューバー**: muda が GTK 制約で完全動作しないため、Linux では
-  iced widget による自前メニューバーが必要（別タスクで対応）
+- **macOS Cmd+Q の dirty チェック**: muda 廃止により `PredefinedMenuItem::quit` は
+  使わず、Cmd+Q もキーボード subscription 経由で `Action::Quit` → `ExitRequested` に
+  流れる。よって dirty チェックは確実に通る（旧 muda 時代の OS 直接処理による迂回問題は解消）。
+- **物理キー matching の盲点**: `physical_key` が `Physical::Unidentified` を返す
+  特殊配列（一部ノート PC キー等）ではマッチしない。OS / 機種別の実機検証が望ましい。
 - **`Cancelled` の無音中止**: rfd の Cancel パスはユーザー意図のキャンセルとして INFO
   相当扱いで記録しない。CI では rfd モックが必要
