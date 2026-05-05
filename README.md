@@ -24,19 +24,12 @@
 
 ## まず知っておくべきこと
 
-e-station は現在、**起動時にモードを固定**して使います。
+e-station は現在、**起動時にモードを固定**して使います（省略すると起動できません）。
 
 | モード | 目的 | 主な特徴 |
 |---|---|---|
 | `--mode live` | リアルタイム監視と実運用 | 取引所 / 立花証券のストリームを購読。Heatmap / DOM / Ladder が主役 |
-| `--mode replay` | 過去データ再生、仮想注文、戦略検証 | `/api/replay/load` でデータ投入。REPLAY 用ペインが自動生成 |
-
-```bash
-cargo run -- --mode live
-cargo run -- --mode replay
-```
-
-`--mode` を省略すると起動できません。
+| `--mode replay` | 過去データ再生、仮想注文、戦略検証 | J-Quants データで再生。REPLAY 用ペインが自動生成 |
 
 ## スクリーンショット
 
@@ -128,7 +121,7 @@ REPLAY は単なるチャート再生ではなく、**NautilusTrader ベース�
 - `strategy_file` は **現行実装では必須**です
 - `ReplayControl` ペインから `1x / 10x / 100x` を切り替えられます
 
-ユーザー定義 strategy の最小サンプルは [docs/example/buy_and_hold.py](docs/example/buy_and_hold.py) と [docs/example/README.md](docs/example/README.md) にあります。
+ユーザー定義 strategy の最小サンプルは [docs/example/test_strategy_daily.py](docs/example/test_strategy_daily.py) と [docs/example/README.md](docs/example/README.md) にあります。
 
 ## 注文まわり
 
@@ -139,11 +132,7 @@ live と replay では意味が異なります。
 | **live** | 立花証券 e支店に対する実注文 |
 | **replay** | 検証用の仮想注文 |
 
-補足:
-
-- `FLOWSURFACE_ORDER_GUARD_ENABLED=1` を設定しない限り、`/api/order/submit` は 503 で拒否されます
-- `TACHIBANA_ALLOW_PROD=1` を設定しない限り、本番 URL への送信は遮断されます
-- replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます
+replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます。安全ガードの詳細は [docs/✅order/spec.md](docs/✅order/spec.md) と [docs/✅tachibana/spec.md](docs/✅tachibana/spec.md) を参照してください。
 
 ## ドキュメントの読み分け
 
@@ -167,11 +156,7 @@ live と replay では意味が異なります。
 
 ## アーキテクチャ概要
 
-- **Rust / Iced**: デスクトップ UI、ペイン管理、レイアウト、テーマ、HTTP 制御の受け口
-- **Python engine**: 市場データ、NautilusTrader 統合、立花証券連携、REPLAY 実行
-- **localhost IPC**: WebSocket と HTTP API で UI と engine が連携
-
-この分離のおかげで、UI を保ったまま replay や strategy 実行を外部からドライブできます。
+Rust / Iced（UI）+ Python engine（市場データ・NautilusTrader・立花証券）の 2 プロセス構成で、IPC WebSocket で連携します。詳細は [AGENTS.md](AGENTS.md) と [docs/✅python-data-engine/](docs/✅python-data-engine/) を参照してください。
 
 ## 安全に関する注意
 

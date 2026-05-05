@@ -18,7 +18,7 @@ from pathlib import Path
 from engine.nautilus.data_loader import KlineRow
 from engine.nautilus.engine_runner import NautilusRunner
 
-_STRATEGY_FILE = str(Path(__file__).parent.parent.parent / "docs" / "example" / "buy_and_hold.py")
+_STRATEGY_FILE = str(Path(__file__).parent.parent.parent / "docs" / "example" / "test_strategy_daily.py")
 _STRATEGY_INIT_KWARGS = {"instrument_id": "7203.TSE", "bar_type_str": "7203.TSE-1-DAY-MID-EXTERNAL"}
 
 

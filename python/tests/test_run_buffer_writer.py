@@ -35,7 +35,7 @@ def _make_run_buffer(tmp_path: Path, run_id: str = "test-run-001") -> RunBuffer:
     """テスト用 RunBuffer を tmp_path 配下に作成する。"""
     return RunBuffer(
         run_id=run_id,
-        strategy_file="docs/example/buy_and_hold.py",
+        strategy_file="docs/example/test_strategy_daily.py",
         scenario={"instrument": "1301.TSE"},
         base_dir=tmp_path,
     )

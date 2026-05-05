@@ -5,7 +5,9 @@
 
 | ファイル | 内容 |
 |---------|------|
-| `buy_and_hold.py` | 最初のバーで成行買いし、以降は保有し続ける最小戦略 |
+| `test_strategy_daily.py` | 最初のバーで成行買いし、以降は保有し続ける最小戦略（Daily 足）|
+| `test_strategy_minute.py` | 同上の Minute 足バリエーション。1 週間 ≒ 1,500 本の分足で動作確認できる |
+| `test_strategy_trade.py` | 同上の歩み値（Trade）バリエーション。`subscribe_trade_ticks` + `on_trade_tick` で最初の tick で買う。GUI の TimeAndSales ペインに歩み値が流れる |
 
 ## 自己責任の注意
 
@@ -21,21 +23,45 @@ e-station の戦略は **ユーザー自身が書いた Python コードを同�
 
 ## 起動
 
+### A. headless（GUI なし・最速）
+
 ```bash
 uv run python -m engine.replay_session run \
-    --strategy docs/example/buy_and_hold.py \
+    --strategy docs/example/test_strategy_daily.py \
     --instrument 1301.TSE \
     --start 2025-01-06 \
-    --end 2025-03-31
+    --end 2025-03-31 \
+    --mode inprocess
+```
+
+### B. GUI で目視しながら（attach）
+
+別ターミナルで先に GUI を起動:
+
+```bash
+cargo run -- --mode replay
+```
+
+`%APPDATA%\flowsurface\engine-session.json` が書かれたら helper を attach mode で実行:
+
+```bash
+uv run python -m engine.replay_session run \
+    --strategy docs/example/test_strategy_daily.py \
+    --instrument 1301.TSE \
+    --start 2025-01-06 \
+    --end 2025-03-31 \
+    --mode auto
 ```
 
 GUI 側は `ReplayDataLoaded` を受信すると **TimeAndSales・CandlestickChart・
-OrderList・BuyingPower の 4 ペインを自動生成**します。
+OrderList・BuyingPower の 4 ペインを自動生成**します。完全な手順とトラブル
+シューティングは [docs/wiki/backtest.md](../wiki/backtest.md) と
+[python/tests/test_replay_session_attach_manual_smoke.md](../../python/tests/test_replay_session_attach_manual_smoke.md) を参照。
 
 > **注意**: `scripts/run-replay-debug.sh` と `scripts/replay_dev_load.sh` は
 > Phase 8.2 で廃止されました（HTTP API ポート 9876 依存のため）。
 
-## buy_and_hold.py の動作
+## test_strategy_daily.py の動作
 
 デフォルトのパラメータ（`instrument_id=1301.TSE`, `lot_size=100`, `Daily` 足）で
 2025-01-06〜2025-03-31（約 57 営業日）を実行すると、**初日に成行買い 100 株**を
@@ -50,28 +76,31 @@ OrderList・BuyingPower の 4 ペインを自動生成**します。
 
 ## パラメータの渡し方
 
-`strategy_init_kwargs` に JSON を指定すると、コンストラクタの引数を上書きできます。
+`strategy_init_kwargs` でコンストラクタ引数を上書きできます。CLI には
+`--strategy-init-kwargs` フラグが無いので、Python helper か GUI フォームから
+渡してください。
 
-```bash
-# HTTP body を直接 curl で渡す例（手動確認したいとき）
-curl -sS -X POST http://127.0.0.1:9876/api/replay/start \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "instrument_id": "1301.TSE",
-    "start_date": "2025-01-06",
-    "end_date": "2025-03-31",
-    "granularity": "Daily",
-    "strategy_id": "user-strategy",
-    "initial_cash": 1000000,
-    "strategy_file": "docs/example/buy_and_hold.py",
-    "strategy_init_kwargs": {"lot_size": 200}
-  }'
+Python helper 経由:
+
+```python
+from engine.replay_session import ReplaySession
+
+with ReplaySession() as s:
+    s.load("1301.TSE", "2025-01-06", "2025-03-31")
+    s.run(
+        strategy_file="docs/example/test_strategy_daily.py",
+        strategy_init_kwargs={"lot_size": 200},
+        initial_cash=1_000_000,
+    )
 ```
+
+GUI フォーム経由: `File > Replay を開始...` の `strategy_init_kwargs` 欄に
+`{"lot_size": 200}` を入力。
 
 Minute 足で動かすには `bar_type_str` をキーワード引数で渡します。
 
-```json
-{"bar_type_str": "1301.TSE-1-MINUTE-LAST-EXTERNAL"}
+```python
+strategy_init_kwargs={"bar_type_str": "1301.TSE-1-MINUTE-LAST-EXTERNAL"}
 ```
 
 ## 規約
@@ -101,7 +130,7 @@ Minute 足で動かすには `bar_type_str` をキーワード引数で渡しま
 uv run python -c "
 from pathlib import Path
 from engine.nautilus.strategy_loader import load_strategy_from_file
-s = load_strategy_from_file(Path('docs/example/buy_and_hold.py'), {'instrument_id': '1301.TSE'})
+s = load_strategy_from_file(Path('docs/example/test_strategy_daily.py'), {'instrument_id': '1301.TSE'})
 print(type(s).__name__)
 "
 ```
