@@ -23,6 +23,11 @@ Rust（Iced GUI）+ Python データエンジンで構成されるマーケッ�
   J-Quants バックテスト・立花 LiveExecutionClient・TradeTick 一本化・
   live/replay 互換不変条件・IPC スキーマを定義。
 
+- [メニューバー / Save 機能](✅menu-and-footer/README.md)
+  OS ネイティブメニューバー・ステータスバー・File メニュー（Open / Save / Save As）の
+  実装仕様。`CURRENT_PATH` 管理・dirty 判定・アクセラレータ経路・replay モードでの
+  戦略 `.py` `SCENARIO` 読み書きを定義。
+
 ## ソース
 
 [github.com/botterYosuke/e-station](https://github.com/botterYosuke/e-station)
