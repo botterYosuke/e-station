@@ -225,6 +225,9 @@ pub enum Command {
         start_date: String,
         end_date: String,
         granularity: ReplayGranularity,
+        /// schema 3.13: 複数銘柄指定。None のとき instrument_id 単体で動作（後方互換）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instrument_ids: Option<Vec<String>>,
     },
 
     // ── N1.11: Replay speed control ───────────────────────────────────────
@@ -530,6 +533,7 @@ impl std::fmt::Debug for Command {
             Command::LoadReplayData {
                 request_id,
                 instrument_id,
+                instrument_ids: _,
                 start_date,
                 end_date,
                 granularity,
@@ -603,6 +607,9 @@ pub enum ReplayGranularity {
 #[serde(deny_unknown_fields)]
 pub struct EngineStartConfig {
     pub instrument_id: String,
+    /// schema 3.13: 複数銘柄指定。None のとき instrument_id 単体で動作（後方互換）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument_ids: Option<Vec<String>>,
     pub start_date: String,
     pub end_date: String,
     pub initial_cash: String,
@@ -1167,6 +1174,9 @@ pub enum EngineEvent {
         /// 旧 engine（minor<12）からは `None` で deserialise される。
         #[serde(default)]
         instrument_id: Option<String>,
+        /// schema 3.13: 複数銘柄対応。None のとき instrument_id 単体として扱う（後方互換）。
+        #[serde(default)]
+        instrument_ids: Option<Vec<String>>,
         /// schema 3.12: bar 粒度。`Trade` のときは bar 無しなので
         /// CandlestickChart はスキップする。
         #[serde(default)]

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 12
+SCHEMA_MINOR: int = 13
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -721,6 +721,7 @@ class EngineStartConfig(IpcMessage):
     model_config = ConfigDict(extra="forbid")
 
     instrument_id: str
+    instrument_ids: list[str] | None = None
     start_date: str
     end_date: str
     initial_cash: str
@@ -750,6 +751,7 @@ class LoadReplayData(IpcMessage):
     start_date: str
     end_date: str
     granularity: Literal["Trade", "Minute", "Daily"]
+    instrument_ids: list[str] | None = None
 
 
 class EngineStarted(IpcMessage):
@@ -777,6 +779,7 @@ class ReplayDataLoaded(IpcMessage):
     # 呼べるよう、replay 対象の instrument_id と bar 粒度を同梱する。
     # 旧 GUI (minor<12) は serde(default) で安全に無視される。
     instrument_id: str | None = None
+    instrument_ids: list[str] | None = None
     granularity: Literal["Trade", "Minute", "Daily"] | None = None
     ts_event_ms: int
 

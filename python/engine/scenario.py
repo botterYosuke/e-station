@@ -51,9 +51,25 @@ class Scenario(TypedDict):
     initial_cash: int
 
 
+class Scenario_v2(TypedDict):
+    schema_version: int
+    instruments: list  # list[str] — TypedDict は list[str] の get_type_hints 展開が複雑なので list で受ける
+    start: str
+    end: str
+    granularity: str
+    initial_cash: int
+
+
 # Scenario TypedDict から自動生成（3点管理廃止）
 _EXPECTED_TYPES: dict[str, type] = typing.get_type_hints(Scenario)
 REQUIRED_KEYS: frozenset[str] = frozenset(_EXPECTED_TYPES.keys())
+
+# v2 用
+_EXPECTED_TYPES_V2: dict[str, type] = {
+    k: v for k, v in typing.get_type_hints(Scenario_v2).items() if k != "instruments"
+}
+_EXPECTED_TYPES_V2["instruments"] = list
+REQUIRED_KEYS_V2: frozenset[str] = frozenset(typing.get_type_hints(Scenario_v2).keys())
 
 
 class ScenarioValidationError(Exception):
@@ -131,16 +147,8 @@ def _path_under_persistent_suffix(target: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def validate(d: dict) -> None:  # type: ignore[type-arg]
-    """Scenario TypedDict の runtime 検証。失敗時は ScenarioValidationError を raise。
-
-    - 必須キー欠落 → ScenarioValidationError
-    - 余剰キー → ScenarioValidationError
-    - 型違反（bool は int のサブクラスだが int として認めない） → ScenarioValidationError
-    """
-    if not isinstance(d, dict):
-        raise ScenarioValidationError(f"SCENARIO must be a dict, got {type(d).__name__}")
-
+def _validate_v1(d: dict) -> None:  # type: ignore[type-arg]
+    """v1 (schema_version=1) 専用バリデーション。"""
     missing = REQUIRED_KEYS - d.keys()
     if missing:
         raise ScenarioValidationError(f"SCENARIO missing required keys: {sorted(missing)}")
@@ -161,10 +169,63 @@ def validate(d: dict) -> None:  # type: ignore[type-arg]
                 f"SCENARIO[{key!r}] must be {expected_type.__name__}, got {type(val).__name__}"
             )
 
-    # schema_version 値チェック（型チェック通過後）
-    if d.get("schema_version") != SCHEMA_VERSION:
+
+def _validate_v2(d: dict) -> None:  # type: ignore[type-arg]
+    """v2 (schema_version=2) 専用バリデーション。"""
+    missing = REQUIRED_KEYS_V2 - d.keys()
+    if missing:
+        raise ScenarioValidationError(f"SCENARIO missing required keys: {sorted(missing)}")
+
+    extra = d.keys() - REQUIRED_KEYS_V2
+    if extra:
+        raise ScenarioValidationError(f"SCENARIO has unknown keys: {sorted(extra)}")
+
+    for key, expected_type in _EXPECTED_TYPES_V2.items():
+        val = d[key]
+        # bool は Python では int のサブクラス。schema では bool を許可しない
+        if isinstance(val, bool) and expected_type is int:
+            raise ScenarioValidationError(
+                f"SCENARIO[{key!r}] must be int, got bool"
+            )
+        if not isinstance(val, expected_type):
+            raise ScenarioValidationError(
+                f"SCENARIO[{key!r}] must be {expected_type.__name__}, got {type(val).__name__}"
+            )
+
+    # instruments: list かつ全要素が str かつ非空
+    instruments = d["instruments"]
+    if not isinstance(instruments, list):
         raise ScenarioValidationError(
-            f"SCENARIO schema_version must be {SCHEMA_VERSION}, got {d.get('schema_version')!r}"
+            f"SCENARIO['instruments'] must be list, got {type(instruments).__name__}"
+        )
+    if len(instruments) == 0:
+        raise ScenarioValidationError("SCENARIO['instruments'] must not be empty")
+    for i, item in enumerate(instruments):
+        if not isinstance(item, str):
+            raise ScenarioValidationError(
+                f"SCENARIO['instruments'][{i}] must be str, got {type(item).__name__}"
+            )
+
+
+def validate(d: dict) -> None:  # type: ignore[type-arg]
+    """Scenario TypedDict の runtime 検証。失敗時は ScenarioValidationError を raise。
+
+    - 必須キー欠落 → ScenarioValidationError
+    - 余剰キー → ScenarioValidationError
+    - 型違反（bool は int のサブクラスだが int として認めない） → ScenarioValidationError
+    - schema_version が 1 または 2 以外 → ScenarioValidationError
+    """
+    if not isinstance(d, dict):
+        raise ScenarioValidationError(f"SCENARIO must be a dict, got {type(d).__name__}")
+
+    sv = d.get("schema_version")
+    if sv == 1:
+        _validate_v1(d)
+    elif sv == 2:
+        _validate_v2(d)
+    else:
+        raise ScenarioValidationError(
+            f"SCENARIO schema_version must be 1 or 2, got {sv!r}"
         )
 
 
@@ -270,6 +331,27 @@ def _dict_to_cst_expr(d: dict) -> cst.BaseExpression:  # type: ignore[type-arg]
             v_node = cst.Integer(str(v))
         elif isinstance(v, str):
             v_node = cst.SimpleString(repr(v))
+        elif isinstance(v, list):
+            # list[str] のみ許容。全要素が str であることを確認
+            if not all(isinstance(item, str) for item in v):
+                raise TypeError(
+                    f"unsupported scenario list value: all items must be str for key {k!r}"
+                )
+            list_elems = []
+            for j, item in enumerate(v):
+                is_last_item = j == len(v) - 1
+                item_comma: cst.BaseParenthesizableWhitespace | cst.MaybeSentinel
+                if is_last_item:
+                    item_comma = cst.MaybeSentinel.DEFAULT
+                else:
+                    item_comma = cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
+                list_elems.append(
+                    cst.Element(
+                        value=cst.SimpleString(repr(item)),
+                        comma=item_comma,
+                    )
+                )
+            v_node = cst.List(elements=list_elems)
         else:
             raise TypeError(
                 f"unsupported scenario value type: {type(v).__name__} for key {k!r}"

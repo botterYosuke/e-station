@@ -19,6 +19,23 @@ from engine.replay_session import LiveSession
 
 
 # ---------------------------------------------------------------------------
+# 全テスト共通: 実行中エンジンへの自動接続を防ぐ
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_running_engine(monkeypatch) -> None:
+    """engine-session.json が存在しても自動 attach しないよう session file を無効化する。
+
+    このモジュールのテストは in-process / auto-fallback 動作を検証する。
+    実行中のエンジンに接続すると attach mode になり、inprocess 前提の
+    アサーションが崩れる。
+    """
+    monkeypatch.setattr("engine.replay_session._read_session_file", lambda: None)
+    monkeypatch.delenv("FLOWSURFACE_ENGINE_TOKEN", raising=False)
+
+
+# ---------------------------------------------------------------------------
 # force_mode 契約（Group 1 で追加済み・リグレッションガード）
 # ---------------------------------------------------------------------------
 

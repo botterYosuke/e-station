@@ -583,7 +583,7 @@ def test_second_login_with_changed_credentials_raises(monkeypatch):
 
     monkeypatch.setattr("engine.replay_session._tachibana_login_call", _fake_login)
 
-    with LiveSession(venue="tachibana", demo=True) as s:
+    with LiveSession(venue="tachibana", demo=True, force_mode="inprocess") as s:
         s.login(user_id="user-A", password="pw-A")
         # 同じ credential での再 login は no-op (既存契約)
         s.login(user_id="user-A", password="pw-A")

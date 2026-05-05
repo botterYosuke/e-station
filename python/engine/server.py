@@ -2932,6 +2932,7 @@ class DataEngineServer:
             ``LoadReplayData`` は件数カウントのみ担当する。
         """
         instrument_id = msg.get("instrument_id", "")
+        instrument_ids = msg.get("instrument_ids")  # schema 3.13: 複数銘柄 (None なら instrument_id 単体)
         start_date = msg.get("start_date", "")
         end_date = msg.get("end_date", "")
         granularity = msg.get("granularity", "Trade")
@@ -2957,11 +2958,14 @@ class DataEngineServer:
 
         from engine.nautilus.jquants_loader import check_data_exists
 
+        # schema 3.13: instrument_ids が指定されていればそちらを使う
+        _iids_to_check = instrument_ids if instrument_ids else [instrument_id]
         try:
             bars_loaded = 0
             trades_loaded = 0
             kwargs = {"base_dir": base_dir} if base_dir is not None else {}
-            check_data_exists(instrument_id, start_date, end_date, granularity, **kwargs)
+            for _iid in _iids_to_check:
+                check_data_exists(_iid, start_date, end_date, granularity, **kwargs)
         except Exception as exc:
             log.error(
                 "LoadReplayData failed: instrument_id=%r granularity=%r",
@@ -2999,6 +3003,7 @@ class DataEngineServer:
                 # schema 3.12: GUI helper-attach 経路で `auto_generate_replay_panes`
                 # を起動できるよう instrument_id / granularity を同梱する。
                 "instrument_id": instrument_id,
+                "instrument_ids": instrument_ids,  # schema 3.13: 複数銘柄 (None なら後方互換)
                 "granularity": granularity,
                 "ts_event_ms": int(time.time() * 1000),
             }
@@ -3246,6 +3251,7 @@ class DataEngineServer:
                 result_holder[0] = runner.start_backtest_replay_streaming(
                     strategy_id=strategy_id,
                     instrument_id=config_obj.instrument_id,
+                    instrument_ids=config_obj.instrument_ids,  # schema 3.13
                     start_date=config_obj.start_date,
                     end_date=config_obj.end_date,
                     granularity=config_obj.granularity,
@@ -3261,6 +3267,7 @@ class DataEngineServer:
                 result_holder[0] = runner.start_backtest_replay(
                     strategy_id=strategy_id,
                     instrument_id=config_obj.instrument_id,
+                    instrument_ids=config_obj.instrument_ids,  # schema 3.13
                     start_date=config_obj.start_date,
                     end_date=config_obj.end_date,
                     granularity=config_obj.granularity,
