@@ -146,3 +146,37 @@ def test_scrub_narrative_event():
     result = scrub(event, NARRATIVE_ALLOWED_KEYS)
     assert "account_id" not in result
     assert result["message"] == "Bought 100 shares"
+
+
+# ---------------------------------------------------------------------------
+# F9 R1-H4: README import block must reference the live API.
+#
+# Regression: the README documented `from pii_scrub import scrub` after the
+# rename to `pii_scrub`, which would have crashed for any user copy/pasting
+# the example. We re-parse the README's first python code fence and verify
+# every imported name resolves via importlib.
+# ---------------------------------------------------------------------------
+
+def test_readme_python_imports_resolve():
+    import importlib
+    import re
+
+    readme = (EXAMPLES_WANDB / "README.md").read_text(encoding="utf-8")
+    # First ```python ... ``` fence
+    match = re.search(r"```python\n(.*?)```", readme, re.DOTALL)
+    assert match, "README.md must contain at least one ```python``` code fence"
+    block = match.group(1)
+    # Pull every `from pii_scrub import a, b, c` (single-line form). Anchor
+    # the capture to end-of-line so the match stops at the statement boundary
+    # (otherwise `[\w,\s]+` greedily eats the next blank line + identifier).
+    imports = re.findall(r"from\s+pii_scrub\s+import\s+([^\n]+)", block)
+    assert imports, f"README ```python``` fence must `from pii_scrub import ...` — block: {block!r}"
+
+    pii_scrub_mod = importlib.import_module("pii_scrub")
+    for clause in imports:
+        names = [n.strip() for n in clause.split(",") if n.strip()]
+        for name in names:
+            assert hasattr(pii_scrub_mod, name), (
+                f"F9 R1-H4: README references `from pii_scrub import {name}` but "
+                f"{name!r} is not exported from pii_scrub.py"
+            )

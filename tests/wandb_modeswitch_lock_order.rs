@@ -144,7 +144,7 @@ fn reverse_order_acquisition_panics_in_debug_via_source_inspection() {
     // reference `lock_order_acquire` directly. The actual `#[should_panic]`
     // runtime test lives in `src/main.rs` `mod lock_order_tests`. Here we
     // structurally verify the invariant is encoded with `debug_assert!` and
-    // a release-build `tracing::warn!`.
+    // a release-build `log::warn!`.
     let src = read_main_rs();
     let pos = src
         .find("pub fn lock_order_acquire")
@@ -160,7 +160,7 @@ fn reverse_order_acquisition_panics_in_debug_via_source_inspection() {
         "lock_order_acquire must use debug_assert! to panic on violation in debug builds (M2)"
     );
     assert!(
-        body.contains("tracing::warn!"),
-        "lock_order_acquire must log tracing::warn! on violation in release builds (統一決定 R6-82)"
+        body.contains("log::warn!"),
+        "lock_order_acquire must log log::warn! on violation in release builds (統一決定 R6-82, F9 R1-C1)"
     );
 }

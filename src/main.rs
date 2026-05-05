@@ -421,7 +421,12 @@ async fn submit_wandb_run(
                 if let Some(rest) = line.strip_prefix("URL: ") {
                     url = Some(rest.to_string());
                 }
-                let _ = log_tx_out.send(line);
+                // F9 R2-M3: when the receiver is dropped (modal closed) the
+                // send fails — exit early instead of looping forever and
+                // continuing to read stdout into a dead channel.
+                if log_tx_out.send(line).is_err() {
+                    break;
+                }
             }
         }
         url
@@ -431,7 +436,11 @@ async fn submit_wandb_run(
         if let Some(stderr) = stderr {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let _ = log_tx_err.send(line);
+                // F9 R2-M3: same as stdout reader — abort when receiver is
+                // gone to release the BufReader / pipe handle promptly.
+                if log_tx_err.send(line).is_err() {
+                    break;
+                }
             }
         }
     });
@@ -491,7 +500,13 @@ fn submit_wandb_run_stream(
     let event_tx_for_lines = event_tx.clone();
     tokio::spawn(async move {
         while let Some(line) = log_rx.recv().await {
-            let _ = event_tx_for_lines.send(WandbStreamEvent::Line(line));
+            // F9 R1-M2: log channel failures (receiver dropped) instead of
+            // silently `let _ = ...`. Helps surface dropped log lines when
+            // the submit modal is dismissed mid-stream.
+            if let Err(err) = event_tx_for_lines.send(WandbStreamEvent::Line(line)) {
+                log::warn!("[wandb] dropping submit log line; receiver gone: {err}");
+                break;
+            }
         }
     });
 
@@ -506,7 +521,10 @@ fn submit_wandb_run_stream(
             log_tx,
         )
         .await;
-        let _ = event_tx.send(WandbStreamEvent::Final(result));
+        // F9 R1-M2: ditto for the terminal Final event.
+        if let Err(err) = event_tx.send(WandbStreamEvent::Final(result)) {
+            log::warn!("[wandb] dropping submit Final event; receiver gone: {err}");
+        }
     });
 
     iced::futures::stream::unfold(event_rx, |mut rx| async move {
@@ -2162,11 +2180,22 @@ impl Flowsurface {
             wandb_auth::refresh_wandb_auth(),
             Message::WandbAuthRefreshed,
         );
-        // F9d: 起動時に run-buffer/ をスキャンして run_buffer を初期化する
-        {
+        // F9 R2-M5: 起動時 run-buffer/ scan を async 化し、startup の同期 I/O を
+        // 排除する。`new()` から sync `RunBufferIndex::scan` を呼ばず、empty で
+        // 初期化したのち `Task::perform(scan_async, RunBufferIndexScanned)` を
+        // チェーンする。完了通知は通常経路（Message::RunBufferIndexScanned）
+        // で `refresh_tools_enable` まで自動で流れる。
+        state.run_buffer = wandb_auth::RunBufferIndex::empty();
+        let init_run_buffer = {
             let base = data::data_path(Some("run-buffer"));
-            state.run_buffer = wandb_auth::RunBufferIndex::scan(&base);
-        }
+            Task::perform(
+                async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
+                |index| Message::RunBufferIndexScanned {
+                    index,
+                    show_toast: false,
+                },
+            )
+        };
 
         (
             state,
@@ -2176,7 +2205,8 @@ impl Flowsurface {
                 .chain(load_layout)
                 .chain(launch_sidebar.map(Message::Sidebar))
                 .chain(set_baseline)
-                .chain(init_wandb_auth),
+                .chain(init_wandb_auth)
+                .chain(init_run_buffer),
         )
     }
 
@@ -5378,6 +5408,13 @@ impl Flowsurface {
                             // 終焉を必ず観測する。idempotent reset (重複 store
                             // is safe; cf. submit_in_flight_is_idempotent_on_double_release)
                             self.wandb_submit_modal = None;
+                            // F9 R1-H10: removed `.discard()` so the trailing
+                            // `Message::Tick` is actually delivered to the
+                            // runtime. Discarding silently broke the Elm-style
+                            // contract that any non-`Task::none()` returns
+                            // a Message; `Tick` is harmless (just advances the
+                            // dashboard one frame) and makes the wiring
+                            // legible.
                             return Task::perform(
                                 async {
                                     let mut slot = SUBMIT_CHILD.lock().await;
@@ -5388,8 +5425,7 @@ impl Flowsurface {
                                         .store(false, std::sync::atomic::Ordering::Release);
                                 },
                                 |()| Message::Tick(std::time::Instant::now()),
-                            )
-                            .discard();
+                            );
                         }
                         Some(modal::wandb_submit::Action::Submit {
                             project,
@@ -5495,27 +5531,35 @@ impl Flowsurface {
                 return Task::none();
             }
             // F9c: wandb login 完了
-            Message::WandbLoginResult(result) => {
-                if let Some(modal) = self.wandb_signin_modal.as_mut() {
-                    match result {
-                        Ok(()) => {
-                            self.wandb_signin_modal = None;
-                            self.notifications
-                                .push(Toast::info("W&B にログインしました".to_string()));
-                            // auth キャッシュを invalidate して再取得
-                            return Task::perform(
-                                wandb_auth::refresh_wandb_auth(),
-                                Message::WandbAuthRefreshed,
-                            );
-                        }
-                        Err(err) => {
-                            modal.submitting = false;
-                            modal.error = Some(format!("ログイン失敗: {err}"));
-                        }
-                    }
+            // F9 R2-H1: handle Ok(()) regardless of whether the modal is still
+            // present. If the user cancels the modal mid-login, `wandb_signin_modal`
+            // becomes None — but credentials may already have been persisted by
+            // the subprocess (Python side), so the auth refresh must still be
+            // issued. Previously the entire arm was guarded by `if let
+            // Some(modal)`, silently dropping the refresh on cancel-then-success
+            // and leaving the UI as "未認証".
+            Message::WandbLoginResult(result) => match result {
+                Ok(()) => {
+                    self.wandb_signin_modal = None;
+                    self.notifications
+                        .push(Toast::info("W&B にログインしました".to_string()));
+                    // auth キャッシュを invalidate して再取得
+                    return Task::perform(
+                        wandb_auth::refresh_wandb_auth(),
+                        Message::WandbAuthRefreshed,
+                    );
                 }
-                return Task::none();
-            }
+                Err(err) => {
+                    if let Some(modal) = self.wandb_signin_modal.as_mut() {
+                        // F9 R1-M4: route failure via Message::LoginFailed
+                        // so the modal owns its own state mutations.
+                        let _ = modal.update(modal::wandb_signin::Message::LoginFailed(
+                            format!("ログイン失敗: {err}"),
+                        ));
+                    }
+                    return Task::none();
+                }
+            },
             // F9c: ログアウト確認ダイアログで確認 → 実際の subprocess を起動
             Message::WandbLogoutConfirmed => {
                 self.confirm_dialog = None;

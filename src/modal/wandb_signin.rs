@@ -6,8 +6,8 @@
 //! - `Action::Login` で呼び出し側に渡した後、入力バッファを即座にクリアする。
 //! - subprocess 起動時は argv にキーを渡さず stdin pipe 経由で渡す（呼び出し側責任）。
 
-// main.rs への統合は別エージェント担当のため、現時点では未使用アイテムを許可する。
-#![allow(dead_code)]
+// F9 R1-H8: removed module-wide `#![allow(dead_code)]`; per-item allows are
+// applied to public items still pending wiring in main.rs.
 
 use iced::{
     Element,
@@ -38,6 +38,10 @@ pub enum Message {
     Login,
     /// モーダルを閉じる。
     Cancel,
+    /// F9 R1-M4: subprocess `wandb login` 失敗。親が直接フィールドを書き換える
+    /// のではなく Message 経由で渡し、内部状態 (`submitting`/`error`) は
+    /// `update()` 内で一元管理する。
+    LoginFailed(String),
 }
 
 /// 呼び出し側（main.rs）に返す意図表明。
@@ -75,6 +79,14 @@ impl WandbSignInModal {
             Message::Cancel => {
                 self.api_key_input.clear();
                 Some(Action::Cancel)
+            }
+            Message::LoginFailed(err) => {
+                // F9 R1-M4: 失敗を Message 経由で受け取り、内部状態を update()
+                // 内に閉じ込める。submitting=false でボタン押下を再有効化し、
+                // error にメッセージを格納して view が赤文字で表示する。
+                self.submitting = false;
+                self.error = Some(err);
+                None
             }
         }
     }
@@ -118,18 +130,28 @@ impl WandbSignInModal {
     }
 
     /// ログインボタンが有効かどうか（空入力・送信中は無効）。
+    /// view() 側のロジック（同等条件）と乖離しないよう unit test 用に保持。
+    #[allow(dead_code)]
     pub fn can_submit(&self) -> bool {
         !self.api_key_input.is_empty() && !self.submitting
     }
 }
 
 // ─── WandbSignOutConfirm ─────────────────────────────────────────────────────
+//
+// F9 R1-H8: this confirm dialog is currently invoked through the shared
+// `confirm_dialog` overlay (see `Message::WandbLogoutConfirmed` in main.rs)
+// rather than via this stand-alone modal. The struct + enums are kept for
+// future restructuring and are exercised by unit tests below; per-item
+// `#[allow(dead_code)]` annotations replace the previous module-wide allow.
 
 /// W&B サインアウト確認ダイアログ。
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct WandbSignOutConfirm;
 
 /// サインアウト確認ダイアログのメッセージ。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum SignOutMessage {
     ConfirmSignOut,
@@ -137,11 +159,13 @@ pub enum SignOutMessage {
 }
 
 /// サインアウト確認ダイアログのアクション。
+#[allow(dead_code)]
 pub enum SignOutAction {
     SignOut,
     Cancel,
 }
 
+#[allow(dead_code)]
 impl WandbSignOutConfirm {
     pub fn new() -> Self {
         Self

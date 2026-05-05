@@ -61,13 +61,21 @@ def make_run_id(strategy_file: str, instrument: str) -> str:
     return f"{utc_sec}-{stem}-{instrument_clean}"
 
 
-def _get_git_rev() -> str:
+def _get_git_rev(cwd: Optional[Path] = None) -> str:
+    """Return ``git rev-parse HEAD`` for *cwd* (default: process CWD).
+
+    F9 R1-M14: ``cwd`` defaults to the current process directory but can be
+    overridden by callers that know the strategy file location, so we resolve
+    the **strategy's** repository commit instead of (an arbitrary) parent
+    process working directory.
+    """
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
+            cwd=str(cwd) if cwd is not None else None,
         )
         if result.returncode == 0:
             rev = result.stdout.strip()
@@ -204,7 +212,11 @@ class RunBuffer:
             "run_id": run_id,
             "strategy_file": strategy_file,
             "strategy_sha256": _sha256_file(strategy_file),
-            "git_rev": _get_git_rev(),
+            # F9 R1-M14: prefer the strategy file's own repo for git_rev; fall
+            # back to process CWD when strategy_file is empty/inaccessible.
+            "git_rev": _get_git_rev(
+                Path(strategy_file).resolve().parent if strategy_file else None
+            ),
             "scenario": scenario,
             "started_at": started_at,
             "finished_at": None,

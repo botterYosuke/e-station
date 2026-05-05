@@ -84,9 +84,9 @@ Forbidden keys (account IDs, tokens, credentials) are stripped before any data
 reaches W&B. This is an independent copy -- no dependency on `python/engine/`.
 
 ```python
-from pii_scrub import scrub, assert_no_forbidden_keys, FILLS_ALLOWED_KEYS
+from pii_scrub import pii_scrub, assert_no_forbidden_keys, FILLS_ALLOWED_KEYS
 
-clean = scrub(event_dict, FILLS_ALLOWED_KEYS)
+clean = pii_scrub(event_dict, FILLS_ALLOWED_KEYS)
 assert_no_forbidden_keys(clean, FILLS_ALLOWED_KEYS)  # raises ValueError if violated
 ```
 

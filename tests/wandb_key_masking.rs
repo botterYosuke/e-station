@@ -4,6 +4,13 @@
 
 /// mask_secrets のロジックをテスト用に再実装（bin-only crate のため）。
 /// 本番コードと同じ正規表現を使う。
+///
+/// **F9 R1-M6 (regression guard)**: 本番側の正規表現は
+/// `src/mask_secrets.rs` の `KEY_REGEX` / `HEX_REGEX` / `BEARER_REGEX`
+/// 定数で単一情報源化されている。**いずれかを変更する際は本ヘルパーの
+/// ハードコード値も同時に更新すること**。bin-only crate のため `use` で
+/// 共有できず、source-inspection (`mask_secrets_rs_uses_40_char_hex_pattern`)
+/// で部分的に保護している。
 fn mask_secrets_test(line: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
@@ -245,6 +252,29 @@ fn panic_hook_registered_in_main() {
     assert!(
         main_body.contains("mask_secrets"),
         "panic hook in main() must call mask_secrets to prevent key leakage"
+    );
+}
+
+/// F9 R2-M6: `MaskedLine::into_string` was removed (zero callers; defeats
+/// newtype). Guard against accidental re-introduction via source inspection.
+#[test]
+fn mask_secrets_into_string_does_not_exist() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/mask_secrets.rs");
+    let src = std::fs::read_to_string(path).expect("failed to read src/mask_secrets.rs");
+    // Filter out comment lines so the regression note itself does not
+    // accidentally re-trigger.
+    let has_decl = src.lines().any(|l| {
+        let t = l.trim_start();
+        if t.starts_with("//") {
+            return false;
+        }
+        // Function declaration: `fn into_string` (any visibility).
+        t.contains("fn into_string")
+    });
+    assert!(
+        !has_decl,
+        "F9 R2-M6: `fn into_string` must not exist on MaskedLine; \
+         use `as_str` / `Display` / `AsRef<str>` instead"
     );
 }
 

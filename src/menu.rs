@@ -263,7 +263,7 @@ mod tests {
             method: if authenticated {
                 AuthMethod::Netrc
             } else {
-                AuthMethod::None
+                AuthMethod::NotSet
             },
             username: None,
             error: None,

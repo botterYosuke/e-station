@@ -78,11 +78,24 @@ def main() -> None:
                         "error": "invalid_key",
                     }))
                     return
-                except Exception:
+                except Exception as exc:
+                    # F9 R1-M3: surface viewer_lookup_timeout to stderr so the
+                    # GUI shell / CI logs show why authenticated state landed
+                    # without a username. The JSON `error` field stays the
+                    # canonical machine-readable signal.
+                    print(
+                        f"WARNING: wandb viewer lookup failed (timeout/comm): {exc}",
+                        file=sys.stderr,
+                    )
                     username = None
                     err = "viewer_lookup_timeout"
-            except ImportError:
-                # wandb itself missing -> best-effort: still report netrc auth
+            except ImportError as exc:
+                # wandb itself missing -> best-effort: still report netrc auth.
+                # F9 R1-M3: also log the import failure to stderr.
+                print(
+                    f"WARNING: wandb not importable; skipping viewer lookup: {exc}",
+                    file=sys.stderr,
+                )
                 username = None
                 err = "viewer_lookup_timeout"
 

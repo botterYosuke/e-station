@@ -805,3 +805,293 @@ def test_outer_except_does_not_call_wandb_finish_when_run_not_initialized(
     assert fake_wandb.finish.call_count == 0, (
         f"wandb.finish() called {fake_wandb.finish.call_count}x with no active run"
     )
+
+
+# ---------------------------------------------------------------------------
+# F9 R1-H5: PII ValueError must call wandb.finish(exit_code=6) before return
+# ---------------------------------------------------------------------------
+
+def test_pii_violation_calls_wandb_finish_with_exit_code_6(tmp_path: Path):
+    """When forbidden keys reach the upload-time guard, the run must be
+    flushed via wandb.finish(exit_code=6) and the script must exit 6."""
+    _make_meta(tmp_path)
+    # equity.jsonl row with a forbidden key (account_id) — pii_scrub strips it
+    # already, so to actually trip ``assert_no_forbidden_keys`` we need a key
+    # that is NEITHER in EQUITY_ALLOWED_KEYS NOR in FORBIDDEN_KEYS (so pii_scrub
+    # leaves it alone). Inject ``not_in_allowlist`` which is neither.
+    _write_jsonl(
+        tmp_path / "equity.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "equity": 1.0, "pnl": 0.0}],
+    )
+
+    # Patch pii_scrub at the import site so the guard sees the raw event.
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    def passthrough_scrub(evt, _allowed):
+        # Inject a forbidden-by-allow-list key so assert_no_forbidden_keys raises.
+        out = dict(evt)
+        out["unexpected_extra_key"] = "boom"
+        return out
+
+    fake_wandb = _make_fake_wandb()
+    with (
+        patch.dict(sys.modules, {"wandb": fake_wandb}),
+        patch("builtins.print", lambda *a, **kw: None),
+        patch.object(submit_run, "pii_scrub", passthrough_scrub),
+    ):
+        rc = submit_run.run_submission(run_buffer_dir=tmp_path)
+
+    assert rc == 6, f"PII guard violation must exit 6 (got {rc})"
+    assert fake_wandb.finish.called, (
+        "F9 R1-H5: wandb.finish() must run on PII guard violation so the "
+        "partial run is flushed server-side"
+    )
+    # The exit_code kwarg should be 6 to mirror the script's exit code.
+    finish_call = fake_wandb.finish.call_args
+    assert finish_call.kwargs.get("exit_code") == 6, (
+        f"wandb.finish must receive exit_code=6, got {finish_call.kwargs}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F9 R1-H6: _write_lock must os.fsync before close
+# ---------------------------------------------------------------------------
+
+def test_write_lock_calls_fsync_before_close(tmp_path: Path, monkeypatch):
+    """`_write_lock` must invoke os.fsync on the lock fd to ensure the file
+    is durably on disk before os.replace renames it."""
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    fsync_calls: list[int] = []
+    real_fsync = submit_run.os.fsync
+
+    def spy_fsync(fd: int):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(submit_run.os, "fsync", spy_fsync)
+    submit_run._write_lock(tmp_path)
+
+    assert fsync_calls, (
+        "F9 R1-H6: _write_lock must call os.fsync(fd) on the lock file before "
+        "renaming it via os.replace"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F9 R1-M10: sentinel fallback must emit a WARNING to stderr
+# ---------------------------------------------------------------------------
+
+def test_sentinel_fallback_warns_to_stderr(tmp_path: Path, capsys):
+    """When wandb.errors is not importable AND top-level attrs are missing
+    or collapse to Exception, the sentinel fallback must print a WARNING to
+    stderr so the operator knows the auth/comm exit-code mapping is degraded.
+    """
+    _make_meta(tmp_path)
+    fake_wandb = types.ModuleType("wandb")
+    fake_run = MagicMock()
+    fake_run.url = "https://wandb.ai/fake"
+    fake_wandb.init = MagicMock(return_value=fake_run)
+    fake_wandb.log = MagicMock()
+    fake_wandb.finish = MagicMock()
+    fake_wandb.Table = MagicMock(return_value=MagicMock())
+    fake_wandb.Artifact = MagicMock(return_value=MagicMock())
+    # No .errors module → ImportError path; no top-level AuthenticationError /
+    # CommError → triggers the sentinel branch + WARNING.
+
+    if "submit_run" in sys.modules:
+        del sys.modules["submit_run"]
+    import submit_run
+
+    with patch.dict(sys.modules, {"wandb": fake_wandb}):
+        rc = submit_run.run_submission(run_buffer_dir=tmp_path)
+
+    captured = capsys.readouterr()
+    assert "wandb.errors not importable" in captured.err, (
+        f"F9 R1-M10: sentinel fallback must warn to stderr; got stderr={captured.err!r}"
+    )
+    # Run still succeeds even with degraded mapping.
+    assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# F9 R2-M9: outer except CommError must call wandb.finish() with the same
+# exit_code that the function returns (3=429 / 5=5xx / 4=other), not a
+# constant `1`. This keeps the W&B-side run status consistent with the
+# Rust caller's interpretation of the exit code.
+# ---------------------------------------------------------------------------
+
+def _trigger_commerror_after_init(tmp_path: Path, msg: str) -> tuple[int, MagicMock]:
+    """Helper: arrange for CommError to fire AFTER wandb.init() has succeeded
+    (so `_active_run is not None` and the outer except branch reaches
+    `wandb.finish(exit_code=...)`)."""
+    _make_meta(tmp_path, status="completed")
+    # Provide minimal jsonl so submit_run reaches wandb.log.
+    _write_jsonl(
+        tmp_path / "fills.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "symbol": "1301.TSE", "side": "BUY", "qty": 100, "price": 1000.0}],
+    )
+    _write_jsonl(
+        tmp_path / "equity.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "equity": 1000000.0, "pnl": 0.0}],
+    )
+    fake_wandb = _make_fake_wandb()
+    fake_wandb.log = MagicMock(side_effect=fake_wandb.CommError(msg))
+
+    exit_code, _ = _run_submission(tmp_path, fake_wandb=fake_wandb)
+    return exit_code, fake_wandb.finish
+
+
+def test_outer_commerror_finish_uses_429_exit_code(tmp_path: Path):
+    """429 (rate limit) -> return 3 AND wandb.finish(exit_code=3)."""
+    exit_code, finish_mock = _trigger_commerror_after_init(
+        tmp_path, "HTTP 429 Too Many Requests"
+    )
+    assert exit_code == 3, f"rate limit must return 3, got {exit_code}"
+    assert finish_mock.called, "wandb.finish must be called when _active_run is set"
+    finish_call = finish_mock.call_args
+    assert finish_call.kwargs.get("exit_code") == 3, (
+        f"F9 R2-M9: 429 path must call wandb.finish(exit_code=3); got {finish_call.kwargs}"
+    )
+
+
+def test_outer_commerror_finish_uses_5xx_exit_code(tmp_path: Path):
+    """5xx (server error) -> return 5 AND wandb.finish(exit_code=5)."""
+    exit_code, finish_mock = _trigger_commerror_after_init(
+        tmp_path, "HTTP 503 Service Unavailable"
+    )
+    assert exit_code == 5, f"5xx must return 5, got {exit_code}"
+    assert finish_mock.called
+    finish_call = finish_mock.call_args
+    assert finish_call.kwargs.get("exit_code") == 5, (
+        f"F9 R2-M9: 5xx path must call wandb.finish(exit_code=5); got {finish_call.kwargs}"
+    )
+
+
+def test_outer_commerror_finish_uses_default_4_exit_code(tmp_path: Path):
+    """Other CommError -> return 4 AND wandb.finish(exit_code=4)."""
+    exit_code, finish_mock = _trigger_commerror_after_init(
+        tmp_path, "generic comm failure"
+    )
+    assert exit_code == 4, f"generic comm error must return 4, got {exit_code}"
+    assert finish_mock.called
+    finish_call = finish_mock.call_args
+    assert finish_call.kwargs.get("exit_code") == 4, (
+        f"F9 R2-M9: generic CommError must call wandb.finish(exit_code=4); got {finish_call.kwargs}"
+    )
+
+
+def test_outer_oserror_finish_uses_4_exit_code(tmp_path: Path):
+    """OSError after init -> return 4 AND wandb.finish(exit_code=4)."""
+    _make_meta(tmp_path, status="completed")
+    _write_jsonl(
+        tmp_path / "fills.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "symbol": "1301.TSE", "side": "BUY", "qty": 100, "price": 1000.0}],
+    )
+    _write_jsonl(
+        tmp_path / "equity.jsonl",
+        [{"ts": "2025-01-06T09:01:00Z", "equity": 1000000.0, "pnl": 0.0}],
+    )
+    fake_wandb = _make_fake_wandb()
+    fake_wandb.log = MagicMock(side_effect=OSError("connection reset"))
+
+    exit_code, _ = _run_submission(tmp_path, fake_wandb=fake_wandb)
+    assert exit_code == 4
+    finish_call = fake_wandb.finish.call_args
+    assert finish_call.kwargs.get("exit_code") == 4, (
+        f"F9 R2-M9: OSError path must call wandb.finish(exit_code=4); got {finish_call.kwargs}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F9 R1-M12: meta.json with scenario=None must succeed (exit 0)
+# ---------------------------------------------------------------------------
+
+def test_submit_run_handles_meta_with_null_scenario(tmp_path: Path):
+    """meta.json with scenario=None must not crash; wandb.init(config=...) is
+    still called with a usable dict and exit code is 0 on the happy path."""
+    _make_meta(tmp_path, scenario=None)
+    fake_wandb = _make_fake_wandb()
+    rc, _ = _run_submission(tmp_path, fake_wandb=fake_wandb)
+    assert rc == 0, f"scenario=None must not crash run_submission (got {rc})"
+    assert fake_wandb.init.called
+    init_kwargs = fake_wandb.init.call_args.kwargs
+    assert "config" in init_kwargs
+    # config is built from `scenario or {}`, so an empty dict is fine.
+    assert isinstance(init_kwargs["config"], dict)
+
+
+# ---------------------------------------------------------------------------
+# F9 R1-M13 / R2-M7: pii_scrub WARNING configuration is sourced from the
+# guarded `if __name__ == "__main__":` entry path. We assert the wiring via
+# source inspection rather than running `main()` itself, because:
+#   - main() parses argv and calls sys.exit, which is awkward in pytest
+#   - R2-M8 moves `basicConfig(force=True)` out of main() into a helper that
+#     fires only under `if __name__ == "__main__":`, so a runtime test would
+#     either silently skip the configuration (no entry path) or stomp the
+#     pytest logging config (force=True at import time).
+# ---------------------------------------------------------------------------
+
+def test_submit_run_main_configures_logging_to_stderr_via_entrypoint_helper():
+    """F9 R2-M7+M8: `submit_run` must configure pii_scrub WARNING routing in a
+    helper invoked from `if __name__ == "__main__":`, not directly inside
+    `main()`. Source-inspection guards both halves.
+    """
+    from pathlib import Path
+    submit_path = Path(__file__).resolve().parent.parent / "submit_run.py"
+    src = submit_path.read_text(encoding="utf-8")
+
+    # 1. Helper exists and configures basicConfig with stream=sys.stderr.
+    assert "_configure_cli_logging" in src, (
+        "F9 R2-M8: submit_run.py must define _configure_cli_logging() helper"
+    )
+    helper_idx = src.find("def _configure_cli_logging")
+    assert helper_idx != -1, "F9 R2-M8: helper must be a def, not just referenced"
+    helper_end = src.find("\ndef ", helper_idx + 1)
+    if helper_end == -1:
+        helper_end = src.find("\nif __name__", helper_idx + 1)
+    helper_body = src[helper_idx:helper_end if helper_end != -1 else len(src)]
+    assert "basicConfig" in helper_body, (
+        "F9 R2-M8: _configure_cli_logging must call logging.basicConfig"
+    )
+    assert "stream=sys.stderr" in helper_body, (
+        "F9 R2-M8 / R1-M13: basicConfig must route to sys.stderr so the URL "
+        "line on stdout stays clean"
+    )
+    assert "force=True" in helper_body, (
+        "F9 R2-M8: helper must use force=True to override any pre-existing "
+        "logging config inherited from a parent process"
+    )
+
+    # 2. main() body must NOT call basicConfig directly anymore — that would
+    #    re-introduce the side effect of stomping logging config when
+    #    submit_run is imported by another process (e.g. pytest).
+    main_idx = src.find("def main(")
+    assert main_idx != -1, "submit_run.py must define `def main(`"
+    main_end = src.find("\nif __name__", main_idx)
+    assert main_end != -1, "submit_run.py must have `if __name__ == \"__main__\":` block"
+    main_body = src[main_idx:main_end]
+    # Allow comments referencing basicConfig but no actual call.
+    has_basicconfig_call = any(
+        line.strip().startswith("logging.basicConfig")
+        or line.strip().startswith("basicConfig")
+        for line in main_body.splitlines()
+    )
+    assert not has_basicconfig_call, (
+        "F9 R2-M8: main() must NOT call logging.basicConfig directly; "
+        "delegate to _configure_cli_logging() invoked under "
+        "`if __name__ == \"__main__\":` instead"
+    )
+
+    # 3. The `if __name__ == "__main__":` block must invoke the helper
+    #    before main(), so pii_scrub warnings produced during main() reach
+    #    stderr.
+    entry_block = src[main_end:]
+    assert "_configure_cli_logging" in entry_block, (
+        "F9 R2-M8: `if __name__ == \"__main__\":` block must call "
+        "_configure_cli_logging() to wire pii_scrub WARNING -> stderr"
+    )

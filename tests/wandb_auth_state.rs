@@ -2,11 +2,19 @@
 //!
 //! Source-inspection based: flowsurface は bin-only crate のため、
 //! `use flowsurface::...` ではなく include_str! + serde_json 直接デシリアライズを使う。
+//!
+//! F9 R2-H3: ローカルミラー定義は **bin-only API のスモーク用 stub** であり、
+//! 本物の `try_from` validator は通らない（mirror 側に validator が無いため
+//! illegal state を assert しても実装の挙動を保証できない）。illegal-state
+//! 検査は src/wandb_auth.rs 内部の `#[cfg(test)] mod tests` に置いてある:
+//! `illegal_state_authenticated_true_method_none_is_rejected` ほか。
+//! reason: bin-only crate のため tests/ から本物 struct を import できない。
 
 // ── WandbAuthState JSON deserialize テスト ──────────────────────────────────
 
 /// WandbAuthState と同じ構造を持つローカル定義（src/wandb_auth.rs のミラー）。
 /// bin-only crate のため、ここでデシリアライズロジックを検証する。
+/// 注意: `try_from` validator は再現していない（F9 R2-H3 参照）。
 #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
 struct WandbAuthState {
     authenticated: bool,
@@ -18,14 +26,19 @@ struct WandbAuthState {
 /// M4 (R1 Phase 1): method を String → enum 化。
 /// 取りうる値は env / netrc / none のみ。snake_case JSON → variant マッピングは
 /// `#[serde(rename_all = "snake_case")]` で自動。
+///
+/// F9 R1-M15: variant `None` → `NotSet` rename（`Option::None` 視覚的混同回避）。
+/// wire 値は `serde(rename = "none")` で互換維持。
 #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum AuthMethod {
     Env,
     Netrc,
-    None,
+    #[serde(rename = "none")]
+    NotSet,
 }
 
+#[allow(dead_code)] // mirror struct retained for future deserialize tests
 #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
 struct RunBufferIndex {
     latest_completed: Option<String>,
@@ -47,7 +60,7 @@ fn authenticated_false_none_method_deserialized() {
     let json = r#"{"authenticated": false, "method": "none", "username": null, "error": null}"#;
     let state: WandbAuthState = serde_json::from_str(json).unwrap();
     assert!(!state.authenticated);
-    assert_eq!(state.method, AuthMethod::None);
+    assert_eq!(state.method, AuthMethod::NotSet);
 }
 
 #[test]
@@ -310,5 +323,82 @@ fn run_buffer_index_scan_async_defined() {
     assert!(
         src.contains("async fn scan_async"),
         "src/wandb_auth.rs must define `pub async fn scan_async` (M3)"
+    );
+}
+
+/// F9 R2-M1: `scan_async` must `continue` on transient `next_entry` errors
+/// instead of `break`-ing — otherwise a single unreadable entry truncates the
+/// scan and silently misses `latest_completed`. Mirrors `list_run_buffer_entries`.
+#[test]
+fn scan_async_continues_on_next_entry_error() {
+    let src = read_wandb_auth_src();
+    let fn_idx = src
+        .find("pub async fn scan_async")
+        .expect("scan_async must exist");
+    // Slice safely up to ~3000 bytes of body
+    let body_end = (fn_idx + 3000).min(src.len());
+    let mut safe = body_end;
+    while !src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let body = &src[fn_idx..safe];
+    let next_entry_idx = body
+        .find("next_entry().await")
+        .expect("scan_async must call entries.next_entry().await");
+    let arm = &body[next_entry_idx..(next_entry_idx + 800).min(body.len())];
+    assert!(
+        arm.contains("continue"),
+        "F9 R2-M1: scan_async's next_entry error arm must `continue` (not `break`) — arm: {arm}"
+    );
+    assert!(
+        body.contains("MAX_CONSECUTIVE_ERRORS"),
+        "F9 R2-M1: scan_async must bound consecutive next_entry errors via MAX_CONSECUTIVE_ERRORS"
+    );
+}
+
+/// F9 R2-M5: startup `RunBufferIndex::scan` must be async via Task::perform
+/// rather than sync-blocking the iced `new()` constructor. The init path
+/// must call `RunBufferIndex::empty()` and chain a `Task::perform(scan_async,
+/// RunBufferIndexScanned)`.
+#[test]
+fn startup_run_buffer_index_scan_is_async() {
+    let main_src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let main_src = std::fs::read_to_string(main_src_path)
+        .unwrap_or_else(|e| panic!("cannot read src/main.rs: {e}"));
+
+    // Locate the F9 R2-M5 startup block by anchoring on the doc comment we
+    // wrote next to it. Falling back to scanning the whole `new()` if the
+    // comment moves.
+    let anchor = main_src
+        .find("F9 R2-M5")
+        .or_else(|| main_src.find("起動時 run-buffer/ scan"))
+        .expect("F9 R2-M5 startup block marker must exist in src/main.rs");
+    let block_end = (anchor + 2000).min(main_src.len());
+    let mut safe = block_end;
+    while !main_src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let block = &main_src[anchor..safe];
+
+    // Sync `RunBufferIndex::scan(` (no `_async`) must NOT appear in this
+    // startup block — that would re-introduce the synchronous I/O. Allow
+    // `scan_async(` and `RunBufferIndex::empty(`.
+    let has_sync_scan = block.contains("RunBufferIndex::scan(");
+    assert!(
+        !has_sync_scan,
+        "F9 R2-M5: startup must not call sync RunBufferIndex::scan(...). \
+         Use empty() + Task::perform(scan_async, ...) instead. block: {block}"
+    );
+    assert!(
+        block.contains("RunBufferIndex::empty()"),
+        "F9 R2-M5: startup must initialise run_buffer with RunBufferIndex::empty(). block: {block}"
+    );
+    assert!(
+        block.contains("scan_async"),
+        "F9 R2-M5: startup must spawn RunBufferIndex::scan_async via Task::perform. block: {block}"
+    );
+    assert!(
+        block.contains("RunBufferIndexScanned"),
+        "F9 R2-M5: startup Task::perform must emit Message::RunBufferIndexScanned. block: {block}"
     );
 }

@@ -682,3 +682,64 @@ def test_write_meta_atomic_gives_up_after_3_attempts(
         rb_mod._write_meta_atomic(meta_path, meta)
 
     assert call_count["n"] == 3, f"retry 回数が 3 ではない: {call_count['n']}"
+
+
+# ---------------------------------------------------------------------------
+# F9 R1-M14: _get_git_rev resolves the strategy file's repository, not the
+# arbitrary process CWD.
+# ---------------------------------------------------------------------------
+
+def test_get_git_rev_uses_strategy_repo_when_cwd_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_get_git_rev(cwd=...) must invoke ``git rev-parse HEAD`` with the
+    requested directory, not the process CWD."""
+    from engine import run_buffer as rb_mod
+
+    captured: dict = {}
+
+    class _Result:
+        def __init__(self, stdout: str, returncode: int = 0) -> None:
+            self.stdout = stdout
+            self.returncode = returncode
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["cwd"] = kwargs.get("cwd")
+        return _Result("deadbeefdeadbeef\n", 0)
+
+    monkeypatch.setattr(rb_mod.subprocess, "run", fake_run)
+
+    rev = rb_mod._get_git_rev(tmp_path)
+    assert rev == "deadbeefdeadbeef"
+    assert captured["cmd"] == ["git", "rev-parse", "HEAD"]
+    # Pass cwd through to subprocess.run as a string.
+    assert captured["cwd"] == str(tmp_path), (
+        f"F9 R1-M14: _get_git_rev must forward cwd to subprocess.run; got {captured!r}"
+    )
+
+
+def test_get_git_rev_default_cwd_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without an explicit cwd argument, _get_git_rev must pass cwd=None to
+    subprocess.run so the legacy behaviour (process CWD) is preserved for
+    callers that haven't migrated."""
+    from engine import run_buffer as rb_mod
+
+    captured: dict = {}
+
+    class _Result:
+        def __init__(self, stdout: str, returncode: int = 0) -> None:
+            self.stdout = stdout
+            self.returncode = returncode
+
+    def fake_run(cmd, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return _Result("0123456789abcdef\n", 0)
+
+    monkeypatch.setattr(rb_mod.subprocess, "run", fake_run)
+
+    rev = rb_mod._get_git_rev()
+    assert rev == "0123456789abcdef"
+    assert captured["cwd"] is None, (
+        f"_get_git_rev() default cwd must be None; got {captured['cwd']!r}"
+    )

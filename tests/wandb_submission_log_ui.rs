@@ -242,6 +242,37 @@ fn clear_run_buffer_confirmed_uses_tokio_remove_dir_all() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// F9 R1-M1: 履歴 UI で `status="unknown"` の row が他と視覚的に区別できる
+// テキストを含むこと。`parse_meta_loose` で status が欠落した meta.json を
+// 読み込んだとき、行が表示されるが Submit はできない silent failure を
+// 可視化する。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unknown_status_row_is_visually_distinguished() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/modal/wandb_submission_log.rs");
+    let src = fs::read_to_string(&path).expect("failed to read wandb_submission_log.rs");
+    // view() must contain logic that distinguishes `status == "unknown"`
+    // — we assert the literal "unknown" comparison and a visually-distinct
+    // marker (warning icon or "parse-degraded" annotation) appear in view().
+    let view_idx = src
+        .find("pub fn view")
+        .expect("WandbSubmissionLogModal::view must exist");
+    let body = safe_slice(&src, view_idx, view_idx + 3000);
+    assert!(
+        body.contains("\"unknown\""),
+        "view() must compare entry.status against \"unknown\" — body: {body}"
+    );
+    let has_marker = body.contains("⚠") || body.contains("parse-degraded");
+    assert!(
+        has_marker,
+        "view() must include a visual marker (⚠ or 'parse-degraded') for \
+         status=\"unknown\" rows so they are distinguishable from completed/\
+         running/aborted rows (F9 R1-M1) — body: {body}"
+    );
+}
+
 #[test]
 fn wandb_signin_modal_only_on_main_window() {
     let src = read_main_rs();

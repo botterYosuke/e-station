@@ -158,6 +158,138 @@ fn wandb_login_returns_error_on_stdin_write_failure() {
     );
 }
 
+/// F9 R1-M4: `Message::LoginFailed(String)` が定義され、`update()` が内部状態
+/// (`submitting=false` + `error=Some`) を一元管理する。親（main.rs）が直接
+/// `modal.submitting = false; modal.error = Some(...)` を書き換える経路は禁止。
+#[test]
+fn login_failed_message_routes_through_update() {
+    let src = read_modal_src();
+    // Message::LoginFailed(String) variant が enum に追加されている
+    assert!(
+        src.contains("LoginFailed(String)"),
+        "wandb_signin::Message must define LoginFailed(String) (F9 R1-M4)"
+    );
+    // update() 内に `Message::LoginFailed` arm が存在し、submitting=false /
+    // error=Some を設定する
+    // The Message enum variant declaration appears first ("LoginFailed(String)");
+    // skip past it to land on the arm inside `update()`.
+    let arm_idx = src
+        .match_indices("Message::LoginFailed")
+        .map(|(i, _)| i)
+        .next()
+        .expect("update() must handle Message::LoginFailed");
+    // arm body を 1200 byte 切り出して内部状態の更新を確認（日本語コメントが
+    // バイト数を膨らませるため余裕を持たせる）
+    let arm_body_end = (arm_idx + 1200).min(src.len());
+    let mut safe = arm_body_end;
+    while !src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let arm = &src[arm_idx..safe];
+    assert!(
+        arm.contains("self.submitting = false"),
+        "Message::LoginFailed arm must set self.submitting = false — arm: {arm}"
+    );
+    assert!(
+        arm.contains("self.error = Some"),
+        "Message::LoginFailed arm must set self.error = Some(...) — arm: {arm}"
+    );
+}
+
+/// F9 R1-M4: main.rs は失敗時に直接フィールドを書き換えず Message 経由で
+/// `Message::LoginFailed` を `modal.update(...)` に流す。
+#[test]
+fn main_rs_routes_login_failure_via_message() {
+    let main_src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let main_src = std::fs::read_to_string(main_src_path)
+        .unwrap_or_else(|e| panic!("cannot read src/main.rs: {e}"));
+    // WandbLoginResult ハンドラ（match arm）が Message::LoginFailed を経由
+    // していること。単純な `Message::WandbLoginResult` は Task::perform 末尾の
+    // mapper にもヒットするため、handler arm の開始位置 `Message::WandbLoginResult(...)
+    //  =>` を優先して探す。
+    let idx = main_src
+        .find("Message::WandbLoginResult(result)")
+        .or_else(|| main_src.find("Message::WandbLoginResult(res)"))
+        .or_else(|| main_src.find("Message::WandbLoginResult"))
+        .expect("main.rs must handle Message::WandbLoginResult");
+    let end = (idx + 2000).min(main_src.len());
+    let mut safe = end;
+    while !main_src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let handler = &main_src[idx..safe];
+    assert!(
+        handler.contains("Message::LoginFailed"),
+        "WandbLoginResult error arm must dispatch wandb_signin::Message::LoginFailed (F9 R1-M4) — handler: {handler}"
+    );
+}
+
+/// F9 R2-H1: `Message::WandbLoginResult(Ok)` must trigger `refresh_wandb_auth`
+/// even when the user has cancelled the modal mid-login (`wandb_signin_modal
+/// = None`). The previous structure wrapped the entire match in
+/// `if let Some(modal)` and silently dropped the refresh on cancel-then-success,
+/// leaving the UI in "未認証" while `.netrc` was already populated.
+#[test]
+fn wandb_login_result_ok_dispatches_refresh_unconditionally() {
+    let main_src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let main_src = std::fs::read_to_string(main_src_path)
+        .unwrap_or_else(|e| panic!("cannot read src/main.rs: {e}"));
+
+    // Locate the handler arm specifically (skip the variant declaration).
+    let idx = main_src
+        .find("Message::WandbLoginResult(result)")
+        .expect("main.rs must handle Message::WandbLoginResult(result) (F9 R2-H1)");
+    let end = (idx + 2000).min(main_src.len());
+    let mut safe = end;
+    while !main_src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let handler = &main_src[idx..safe];
+
+    // Locate the `Ok(())` branch and the `Err(err)` branch.
+    let ok_idx = handler
+        .find("Ok(())")
+        .expect("handler must have Ok(()) arm");
+    let err_idx = handler
+        .find("Err(err)")
+        .expect("handler must have Err(err) arm");
+    assert!(
+        ok_idx < err_idx,
+        "Ok(()) arm should appear before Err(err) arm — handler: {handler}"
+    );
+    let ok_arm = &handler[ok_idx..err_idx];
+
+    // The Ok(()) arm must NOT be wrapped in `if let Some(modal)` — that's the
+    // original bug that silently drops the refresh on cancel-then-success.
+    assert!(
+        !ok_arm.contains("if let Some(modal)"),
+        "F9 R2-H1: the Ok(()) arm must not be guarded by `if let Some(modal)`; \
+         the auth refresh must fire even when the modal has been cancelled. \
+         arm: {ok_arm}"
+    );
+    // The Ok(()) arm must dispatch refresh_wandb_auth.
+    assert!(
+        ok_arm.contains("refresh_wandb_auth"),
+        "F9 R2-H1: the Ok(()) arm must call wandb_auth::refresh_wandb_auth — arm: {ok_arm}"
+    );
+    // The Ok(()) arm must reset the modal to None.
+    assert!(
+        ok_arm.contains("self.wandb_signin_modal = None"),
+        "F9 R2-H1: the Ok(()) arm must reset wandb_signin_modal to None — arm: {ok_arm}"
+    );
+
+    // The Err(err) arm should still wrap modal mutation in `if let Some(modal)`.
+    let err_arm = &handler[err_idx..];
+    assert!(
+        err_arm.contains("if let Some(modal)"),
+        "F9 R2-H1: the Err(err) arm must guard modal mutation with `if let Some(modal)` — arm: {err_arm}"
+    );
+    assert!(
+        err_arm.contains("Message::LoginFailed"),
+        "F9 R2-H1: the Err(err) arm must dispatch Message::LoginFailed (F9 R1-M4) — arm: {err_arm}"
+    );
+}
+
 /// テスト 8: `view` が `Element` を返すシグネチャを持つこと。
 #[test]
 fn view_returns_element() {

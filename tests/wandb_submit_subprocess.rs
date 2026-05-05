@@ -237,6 +237,39 @@ fn submit_run_returns_error_on_non_utf8_path() {
     );
 }
 
+/// F9 R2-M3: stdout/stderr reader tasks must abort early when the receiver
+/// is dropped (modal closed) instead of silently looping with `let _ =
+/// log_tx_*.send(line)` and leaking the BufReader/pipe handle.
+#[test]
+fn stdout_stderr_readers_break_when_log_channel_closed() {
+    let main_src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let main_src = std::fs::read_to_string(main_src_path)
+        .unwrap_or_else(|e| panic!("cannot read src/main.rs: {e}"));
+    // Filter out comment lines so the regression note doesn't itself cause a
+    // false trigger.
+    let has_silent = main_src.lines().any(|l| {
+        let t = l.trim_start();
+        if t.starts_with("//") {
+            return false;
+        }
+        t.contains("let _ = log_tx_out.send") || t.contains("let _ = log_tx_err.send")
+    });
+    assert!(
+        !has_silent,
+        "F9 R2-M3: stdout/stderr reader tasks must not silently ignore send \
+         failures (`let _ = log_tx_*.send(...)`); use `if log_tx_*.send(...).is_err() {{ break; }}`."
+    );
+    // Confirm the new pattern exists.
+    assert!(
+        main_src.contains("if log_tx_out.send(line).is_err()"),
+        "F9 R2-M3: stdout reader must break when log_tx_out.send fails"
+    );
+    assert!(
+        main_src.contains("if log_tx_err.send(line).is_err()"),
+        "F9 R2-M3: stderr reader must break when log_tx_err.send fails"
+    );
+}
+
 #[test]
 fn log_lines_use_masking() {
     let source = read_source("modal/wandb_submit.rs");

@@ -188,7 +188,9 @@ fn cancel_during_submit_clears_in_flight() {
     let cancel_idx = source
         .find("Some(modal::wandb_submit::Action::Cancel)")
         .expect("main.rs must match Some(modal::wandb_submit::Action::Cancel)");
-    let window = safe_slice(&source, cancel_idx.saturating_sub(200), cancel_idx + 2400);
+    // F9 R1: window widened to 4000 bytes to accommodate added explanatory
+    // comments (R2-M3 + F9 R1-H10) without breaking the structural assertion.
+    let window = safe_slice(&source, cancel_idx.saturating_sub(200), cancel_idx + 4000);
     // rustfmt may break the call across lines; tolerate both forms.
     let condensed: String = window.split_whitespace().collect::<Vec<_>>().join(" ");
     let has_reset = condensed.contains("SUBMIT_IN_FLIGHT .store(false")
@@ -197,6 +199,31 @@ fn cancel_during_submit_clears_in_flight() {
         has_reset,
         "Action::Cancel handler must reset SUBMIT_IN_FLIGHT to false \
          (統一決定 46) — window: {window}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F9 R1-H10: Action::Cancel handler must NOT call `.discard()` on its returned
+// Task. The previous code dispatched Message::Tick via Task::perform and
+// then immediately discarded it, defeating the Elm-style contract that every
+// non-`Task::none()` produces an observable Message.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_task_is_not_discarded() {
+    let source = read_source("main.rs");
+    let cancel_idx = source
+        .find("Some(modal::wandb_submit::Action::Cancel)")
+        .expect("main.rs must match Action::Cancel");
+    let window = safe_slice(&source, cancel_idx, cancel_idx + 4000);
+    let condensed: String = window.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        condensed.contains("Message::Tick(std::time::Instant::now())"),
+        "Cancel arm must still emit Message::Tick via Task::perform — condensed: {condensed}"
+    );
+    assert!(
+        !condensed.contains(") .discard()") && !condensed.contains(").discard()"),
+        "Cancel-arm Task must NOT be `.discard()`d (F9 R1-H10) — condensed: {condensed}"
     );
 }
 

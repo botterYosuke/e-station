@@ -78,6 +78,17 @@ def assert_no_forbidden_keys(event_dict: dict, allowed_keys: frozenset) -> None:
     """Raise ValueError if *event_dict* contains keys outside *allowed_keys*.
 
     Call this immediately before uploading to W&B as a final upload-time guard.
+
+    F9 R1-M11: this function is a **double-guard**. The primary scrub happens in
+    :func:`pii_scrub`, which already strips forbidden keys and any keys outside
+    *allowed_keys*. ``assert_no_forbidden_keys`` then re-validates the final
+    payload immediately before it crosses into ``wandb.log`` / ``wandb.Artifact``.
+    The intent is to catch any third-party code path that constructed an event
+    dict **without** going through :func:`pii_scrub` (e.g. a future caller that
+    inlines its own filtering and accidentally drops the scrub step). Keeping
+    the name unchanged avoids a breaking API rename; the contract is encoded in
+    this docstring.
+
     Raises:
         ValueError: with the set of offending keys listed in the message.
     """

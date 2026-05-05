@@ -8,7 +8,9 @@
 //! The `submitting` flag acts as the `submit_in_flight` sentinel (統一決定 46).
 //! While it is `true` any further `Message::Submit` is silently dropped, so
 //! only one subprocess can run at a time.
-#![allow(dead_code)]
+//
+// F9 R1-H8: module-wide `#![allow(dead_code)]` removed. Per-item allows only
+// where strictly needed.
 
 // マスキングは crate::mask_secrets に集約（C3, R1 Phase 1）。raw String を直接
 // log_lines に格納する経路は型レベルで禁止する。
@@ -63,7 +65,7 @@ impl From<&crate::wandb_auth::WandbAuthState> for AuthDisplayState {
         match state.method {
             AuthMethod::Env => Self::Env,
             AuthMethod::Netrc => Self::Netrc,
-            AuthMethod::None => Self::NotSet,
+            AuthMethod::NotSet => Self::NotSet,
         }
     }
 }
@@ -108,26 +110,30 @@ pub enum Action {
 const MAX_LOG_LINES: usize = 100;
 
 /// W&B run submission modal state.
+///
+/// F9 R1-M8: fields are `pub(crate)` (not `pub`) because flowsurface is a
+/// bin-only crate and these fields are only accessed from the binary.
 pub struct WandbSubmitModal {
     /// W&B project name.
-    pub project: String,
+    pub(crate) project: String,
     /// Human-readable run name.
-    pub run_name: String,
+    pub(crate) run_name: String,
     /// Comma-separated tags.
-    pub tags: String,
+    pub(crate) tags: String,
     /// Optional free-form notes.
-    pub notes: String,
+    pub(crate) notes: String,
     /// Current W&B authentication status (no key value).
-    pub auth_status: AuthDisplayState,
+    pub(crate) auth_status: AuthDisplayState,
     /// Stdout tail from the running subprocess (mask_secrets applied).
     /// `MaskedLine` newtype によって raw String 格納が型レベルで禁止される（C3）。
-    pub log_lines: Vec<MaskedLine>,
+    /// F9 R1-M5: `VecDeque` で先頭 pop を O(1) 化（旧 `Vec::remove(0)` を排除）。
+    pub(crate) log_lines: std::collections::VecDeque<MaskedLine>,
     /// URL returned by a successful submission.
-    pub result_url: Option<String>,
+    pub(crate) result_url: Option<String>,
     /// Error message from a failed submission.
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     /// `true` while the subprocess is running (submit_in_flight guard).
-    pub submitting: bool,
+    pub(crate) submitting: bool,
 }
 
 impl WandbSubmitModal {
@@ -146,7 +152,7 @@ impl WandbSubmitModal {
             tags: format!("replay,{stem}"),
             notes: String::new(),
             auth_status,
-            log_lines: Vec::new(),
+            log_lines: std::collections::VecDeque::new(),
             result_url: None,
             error: None,
             submitting: false,
@@ -190,10 +196,11 @@ impl WandbSubmitModal {
             Message::LogLine(raw_line) => {
                 // Apply masking before storing.
                 let masked = mask_secrets(&raw_line);
+                // F9 R1-M5: VecDeque::pop_front (O(1)) replaces Vec::remove(0) (O(n)).
                 if self.log_lines.len() >= MAX_LOG_LINES {
-                    self.log_lines.remove(0);
+                    self.log_lines.pop_front();
                 }
-                self.log_lines.push(masked);
+                self.log_lines.push_back(masked);
             }
             Message::Done(url) => {
                 self.submitting = false;
@@ -490,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn from_wandb_auth_state_maps_none_to_not_set() {
-        let s = auth(true, AuthMethod::None);
+    fn from_wandb_auth_state_maps_not_set_to_not_set() {
+        let s = auth(true, AuthMethod::NotSet);
         assert_eq!(AuthDisplayState::from(&s), AuthDisplayState::NotSet);
     }
 

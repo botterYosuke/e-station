@@ -55,9 +55,16 @@ impl WandbSubmissionLogModal {
                 .entries
                 .iter()
                 .fold(column![header_row].spacing(2), |col, entry| {
+                    // F9 R1-M1: `status="unknown"` の row は視覚的に注記する
+                    // （履歴に出るが Submit できない silent failure を可視化）。
+                    let status_label = if entry.status == "unknown" {
+                        format!("⚠ {} (parse-degraded)", entry.status)
+                    } else {
+                        entry.status.clone()
+                    };
                     col.push(
                         row![
-                            text(entry.status.as_str()).size(11).width(80),
+                            text(status_label).size(11).width(80),
                             text(entry.started_at.as_str()).size(11).width(180),
                             text(entry.run_id.as_str()).size(11).width(Length::Fill),
                         ]

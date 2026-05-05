@@ -168,6 +168,15 @@ def _write_lock(run_dir: Path) -> Path:
     try:
         try:
             os.write(fd, payload)
+            # F9 R1-H6: fsync before close so a crash between write() and the
+            # subsequent os.replace cannot leave a zero-byte .lock that masks
+            # the real PID. Mirrors `_write_meta_atomic` durability guarantees.
+            try:
+                os.fsync(fd)
+            except OSError as exc:
+                # On some filesystems (tmpfs, certain network mounts) fsync is
+                # not supported; warn but do not fail the lock acquisition.
+                print(f"WARNING: fsync(.lock) failed: {exc}", file=sys.stderr)
         finally:
             os.close(fd)
         os.replace(tmp_path, lock_path)
@@ -283,6 +292,14 @@ def run_submission(
             or _AuthErr is Exception
             or _CommErr is Exception
         ):
+            # F9 R1-M10: alert the operator that wandb.errors module did not
+            # expose discrete classes, so the auth/comm exit-code mapping is
+            # degraded (sentinels never match real exceptions, both fall
+            # through to the generic OSError/Exception arms with exit=4).
+            print(
+                "WARNING: wandb.errors not importable; auth/comm exit-code mapping degraded",
+                file=sys.stderr,
+            )
             AuthenticationError = type("_AuthErrSentinel", (Exception,), {})
             CommError = type("_CommErrSentinel", (Exception,), {})
         else:
@@ -362,6 +379,16 @@ def run_submission(
                         assert_no_forbidden_keys(clean, EQUITY_ALLOWED_KEYS)
                     except ValueError as exc:
                         print(f"ERROR: PII in equity.jsonl row {i}: {exc}", file=sys.stderr)
+                        # F9 R1-H5: ensure wandb.finish() runs so the partial run
+                        # is flushed and shows up as exit_code=6 server-side.
+                        if _active_run is not None:
+                            try:
+                                wandb.finish(exit_code=6, quiet=True)
+                            except Exception as fexc:
+                                print(
+                                    f"WARNING: wandb.finish() failed: {fexc}",
+                                    file=sys.stderr,
+                                )
                         return 6
                     clean["step"] = i
                     wandb.log(clean)
@@ -387,6 +414,15 @@ def run_submission(
                             assert_no_forbidden_keys(clean, FILLS_ALLOWED_KEYS)
                         except ValueError as exc:
                             print(f"ERROR: PII in fills.jsonl row {i}: {exc}", file=sys.stderr)
+                            # F9 R1-H5
+                            if _active_run is not None:
+                                try:
+                                    wandb.finish(exit_code=6, quiet=True)
+                                except Exception as fexc:
+                                    print(
+                                        f"WARNING: wandb.finish() failed: {fexc}",
+                                        file=sys.stderr,
+                                    )
                             return 6
                         af.write(json.dumps(clean) + "\n")
             run.log_artifact(fills_artifact)
@@ -411,6 +447,15 @@ def run_submission(
                         assert_no_forbidden_keys(clean, NARRATIVE_ALLOWED_KEYS)
                     except ValueError as exc:
                         print(f"ERROR: PII in narrative.jsonl row {i}: {exc}", file=sys.stderr)
+                        # F9 R1-H5
+                        if _active_run is not None:
+                            try:
+                                wandb.finish(exit_code=6, quiet=True)
+                            except Exception as fexc:
+                                print(
+                                    f"WARNING: wandb.finish() failed: {fexc}",
+                                    file=sys.stderr,
+                                )
                         return 6
                     rows.append(clean)
 
@@ -446,26 +491,36 @@ def run_submission(
         return 2
 
     except CommError as exc:
+        # F9 R2-M9: pass the same exit_code we return so wandb.finish()
+        # records a status that matches the Rust caller's interpretation
+        # (3=rate-limit / 5=5xx / 4=other). Previously a constant `1` was
+        # passed regardless of which CommError sub-class triggered, leaving
+        # the W&B-side run status inconsistent with the CLI exit code.
         msg = str(exc)
+        if "429" in msg:
+            mapped_exit = 3
+            err_label = "rate limit"
+        elif any(code in msg for code in ("500", "501", "502", "503", "504", "5xx")):
+            mapped_exit = 5
+            err_label = "server error"
+        else:
+            mapped_exit = 4
+            err_label = "comm error"
         if _active_run is not None:
             try:
-                wandb.finish(exit_code=1, quiet=True)
+                wandb.finish(exit_code=mapped_exit, quiet=True)
             except Exception as fexc:
                 print(f"WARNING: wandb.finish() failed: {fexc}", file=sys.stderr)
-        if "429" in msg:
-            print(f"ERROR: rate limit: {exc}", file=sys.stderr)
-            return 3
-        if any(code in msg for code in ("500", "501", "502", "503", "504", "5xx")):
-            print(f"ERROR: server error: {exc}", file=sys.stderr)
-            return 5
-        print(f"ERROR: comm error: {exc}", file=sys.stderr)
-        return 4
+        print(f"ERROR: {err_label}: {exc}", file=sys.stderr)
+        return mapped_exit
 
     except OSError as exc:
+        # F9 R2-M9: align finish() exit_code with the function's return
+        # value (4 = network/OS error).
         print(f"ERROR: network error: {exc}", file=sys.stderr)
         if _active_run is not None:
             try:
-                wandb.finish(exit_code=1, quiet=True)
+                wandb.finish(exit_code=4, quiet=True)
             except Exception as fexc:
                 print(f"WARNING: wandb.finish() failed: {fexc}", file=sys.stderr)
         return 4
@@ -486,7 +541,37 @@ def run_submission(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _configure_cli_logging() -> None:
+    """F9 R2-M8: Configure stdlib logging only when invoked as a CLI script.
+
+    Previously this lived inline at the top of ``main()`` and called
+    ``logging.basicConfig(force=True)``, which silently stomped the logging
+    configuration of any process that imported and called ``main()`` (most
+    notably pytest, which then loses its own log capture). Moving the
+    side-effecting call into a helper that is fired only under
+    ``if __name__ == "__main__":`` makes the side effect explicit and
+    confined to the CLI entry path.
+
+    Routes WARNING and above to ``sys.stderr`` so pii_scrub's
+    "forbidden keys detected" warnings reach the parent process / CI logs;
+    ``stdout`` is reserved for the final ``URL: <wandb_run_url>`` line that
+    the Rust GUI parses.
+    """
+    import logging
+    logging.basicConfig(
+        level=logging.WARNING,
+        stream=sys.stderr,
+        format="%(message)s",
+        force=True,
+    )
+
+
 def main() -> None:
+    # F9 R2-M8: logging configuration is no longer performed here. Callers
+    # that import `main()` (e.g. tests) inherit the parent process's logging
+    # configuration. The CLI entry path below invokes
+    # `_configure_cli_logging()` to set up the WARNING -> stderr routing.
+
     parser = argparse.ArgumentParser(
         description="Upload a Flowsurface replay RunBuffer to Weights & Biases."
     )
@@ -529,4 +614,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _configure_cli_logging()
     main()
