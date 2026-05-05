@@ -4833,14 +4833,15 @@ impl Flowsurface {
             // Shared between mode-switch and stop-only flows.
             Message::ModeSwitchForceStopTimeout => {
                 log::warn!("[F7] ForceStopReplay also timed out — aborting");
-                let was_mode_switch = self.mode_switch_state.take().is_some();
+                let stale = self.mode_switch_state.take().is_none();
                 let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
-                let body = if was_mode_switch {
-                    "モード切替に失敗しました。\nエンジンが応答しません。"
-                } else if was_stop_only {
-                    "リプレイ停止に失敗しました。\nエンジンが応答しません。"
-                } else {
+                if stale && !was_stop_only {
                     return Task::none();
+                }
+                let body = if !stale {
+                    "モード切替に失敗しました。\nエンジンが応答しません。"
+                } else {
+                    "リプレイ停止に失敗しました。\nエンジンが応答しません。"
                 };
                 let dialog = screen::ConfirmDialog::new(
                     body.to_string(),
