@@ -1198,3 +1198,143 @@ F8（Linux 向け iced 自前メニューバー）の review-fix-loop は R3 で
 - **iced `mouse_area::on_move` の座標系**: `cursor.position_in(layout.bounds())` 経由で **widget ローカル座標**を返す（widget 左上原点）。window 絶対座標が必要な場合は `iced::event::listen_with` で `Event::Mouse(CursorMoved)` を購読する。F8 R1 でこれを「window-Y」と誤解して `BarMessage::BarMoved(u32)` を導入したが、R2 で「現状は偶然 0〜BAR_HEIGHT が一致するだけ」と判明し全廃した。両 R2 reviewer（rust-reviewer / silent-failure-hunter）が独立に同一指摘を出すまで動作上の異常は表面化しなかった、典型的な「設計意図とコメントは正しいが実装が違う」silent failure
 - **wrapper 関数 + テストでの強制保持の罠**: `tests/tools_actions_for_state.rs` の `pub enum AuthState/BufferState` 存在検査が legacy enum の削除を阻止していたケース。**P9 §852 で「保持」を明示決定**しているのを尊重し、削除ではなくドキュメント側を実装に合わせる方針（選択肢 A）を採用。テストが「死コード」を保護する状態は MISSES.md「テストが設計判断を凍結する」パターンに該当
 - **R1 fix が R2 で新規 HIGH を生む連鎖を 1 ラウンドで断ち切る方法**: 両系統 reviewer（rust-reviewer / silent-failure-hunter）を毎回回し、独立発見が一致した時点で「設計判断（候補 A/B）」をユーザーに提示してから修正に進む。Phase 8 のラウンド連鎖（R1 → R2 → R3 → R4）と比べて F8 は R1 → R2 → R3 で収束
+
+---
+
+## レビュー反映 (2026-05-05, ラウンド R2 fix)
+
+F9（W&B Submit メニュー）の R1 fix（commit `fae73dc`）後に実施した R2 サニティで
+HIGH 3 / MEDIUM 9 / LOW 6 を新たに検出した。HIGH 3 件はいずれも R1 fix が誘発した
+連鎖（cancel-then-success silent failure / orphan subprocess on timeout / validator
+が tests から到達不能）。TDD で依存順 3 batch を順次消化し、MEDIUM+ ゼロまで収束。
+
+### HIGH（3件 — R1 fix 連鎖）
+
+| ID | 場所 | 指摘 | 対処 |
+|----|------|------|------|
+| H1 | `src/main.rs:5513-5534` (R1 後) | `Message::WandbLoginResult(Ok)` 全体が `if let Some(modal)` に包まれており、ユーザーがログイン中にモーダルをキャンセル → subprocess が `Ok(())` 完了 すると `wandb_signin_modal = None` で arm がスキップされ `refresh_wandb_auth` が発行されない。Python 側で credential が永続化されていても UI は「未認証」のまま | `match result` を `if let Some(modal)` の外に出して構造を反転。`Ok(())` 経路は modal 有無に関わらず modal=None / Toast / refresh Task を発行。`Err(err)` 経路のみ `if let Some(modal)` 内で `Message::LoginFailed` を呼ぶ。`tests/wandb_signin_flow.rs::wandb_login_result_ok_dispatches_refresh_unconditionally` で source-inspection（`Ok(())` 周辺に `if let Some(modal)` が無いこと / `refresh_wandb_auth` 呼び出しが在ること / `Err` 側は guard あり）を保護 |
+| H2 | `src/wandb_auth.rs:32-54` | `tokio::time::timeout` Elapsed → `Command::output()` Future が drop。`tokio::process::Command` は `kill_on_drop` のデフォルトが `false` のため `uv run check_auth.py` が orphan として残留 | `.kill_on_drop(true)` を Command builder に追加。`tests/wandb_auth_timeout.rs::refresh_wandb_auth_uses_kill_on_drop` で source-inspection 保護 |
+| H3 | `tests/wandb_auth_state.rs:8-31` | bin-only crate のため tests/ から本物の `WandbAuthState` を import できず、ローカルミラー定義に validator が無い → `try_from = "RawWandbAuthState"` の illegal-state 拒絶ロジックが一切テストでカバーされない | `src/wandb_auth.rs` 内 `#[cfg(test)] mod tests` に validator テスト 5 件を追加（illegal: `authenticated=true ∧ method=NotSet` 拒絶 / 許容 4 ケース）。`tests/wandb_auth_state.rs` のミラー定義に「bin-only API のスモーク用 stub。validator は src 内部に置いている」旨を doc コメントで明記 |
+
+### MEDIUM（9件）
+
+| ID | 対処 |
+|----|------|
+| M1 | `src/wandb_auth.rs::scan_async` の `next_entry` Err arm を `break` から `continue` に統一。`MAX_CONSECUTIVE_ERRORS=64` でガード。`list_run_buffer_entries` と同パターン。`tests/wandb_auth_state.rs::scan_async_continues_on_next_entry_error` で source-inspection 保護 |
+| M2 | `entry.file_type().await` Err 時の `unwrap_or(false)` を `match` に展開し `log::warn!` 出力。`scan_async` / `list_run_buffer_entries` 両方で対称化 |
+| M3 | `src/main.rs` の subprocess stdout/stderr reader タスクで `let _ = log_tx_*.send(line)` を `if log_tx_*.send(line).is_err() { break; }` に置換。受信側 drop 時に reader を即座に終了させ BufReader / pipe handle のリークを防止。`tests/wandb_submit_subprocess.rs::stdout_stderr_readers_break_when_log_channel_closed` で保護 |
+| M4 | `MetaJson::scan` / `scan_async` の `started_at.unwrap_or_default()` を「`Some(s) if !s.trim().is_empty() => s, _ => continue`」に変更。`started_at` 欠落の completed run は `latest_completed` ランキングから除外し、空文字 sentinel が降順ソート末尾に居座る silent な非決定性を排除 |
+| M5 | `src/main.rs::new()` の `state.run_buffer = wandb_auth::RunBufferIndex::scan(&base)` を排除。`empty()` で初期化したのち `Task::perform(scan_async, RunBufferIndexScanned)` を起動 chain に追加し、startup の同期 I/O を排除。完了通知は通常経路で `refresh_tools_enable` まで自動連鎖。`tests/wandb_auth_state.rs::startup_run_buffer_index_scan_is_async` で保護 |
+| M6 | `src/mask_secrets.rs::MaskedLine::into_string` を削除（呼び出しゼロ / `as_str` で十分）。`tests/wandb_key_masking.rs::mask_secrets_into_string_does_not_exist` で再追加防止 |
+| M7 | `examples/wandb/tests/test_submit_run.py::test_pii_scrub_warning_routed_to_stderr_via_logging` を「`submit_run.main()` 冒頭の `basicConfig` を実行する」型から「`_configure_cli_logging` ヘルパー存在 + `if __name__ == "__main__":` 配置 + `main()` 内 basicConfig 不在」の source-inspection 型に切り替え。M8 と相性が良く pytest の logging を stomping しない |
+| M8 | `examples/wandb/submit_run.py::main()` から `logging.basicConfig(force=True)` を切り出し `_configure_cli_logging()` ヘルパー化。CLI entry path（`if __name__ == "__main__":`）でのみ呼ぶ。`main()` を import して呼ぶ呼び出し側（テスト含む）の logging config を上書きしない |
+| M9 | outer `except CommError` の `wandb.finish(exit_code=1, quiet=True)` を 関数戻り値 (`3` / `5` / `4`) と一致させる。msg 解析で 429→3 / 5xx→5 / その他→4 を選択。`except OSError` も `exit_code=4` に統一。`test_outer_commerror_finish_uses_429_exit_code` / `_5xx_` / `_default_4_` / `test_outer_oserror_finish_uses_4_exit_code` の 4 件で `_active_run` が立つ経路（`wandb.log` で raise）を作って finish の kwarg を直接 assert |
+
+### LOW（6件 — 次イテレーション判断）
+
+L1〜L6: `webbrowser::open` 無音 / `safe_slice` の重複 / README cwd 注意 / docstring 微差 / docs ID 衝突等。本ラウンドでは MEDIUM+ ゼロ達成優先で繰越。
+
+### 修正対象ファイル
+
+- `src/main.rs` — H1（`WandbLoginResult` arm 構造反転）/ M3（reader task 早期終了）/ M5（startup async scan）
+- `src/wandb_auth.rs` — H2（`kill_on_drop(true)`）/ H3（`#[cfg(test)] mod tests` に validator 5 件）/ M1（`scan_async` continue + MAX_CONSECUTIVE_ERRORS）/ M2（`file_type` Err 警告ログ × 2 箇所）/ M4（`started_at` empty/None で `latest_completed` から除外、sync/async 両方）/ M5（同期 `scan` を `#[allow(dead_code)]` で diagnostic 用に保持）
+- `src/mask_secrets.rs` — M6（`into_string` 削除）
+- `examples/wandb/submit_run.py` — M8（`_configure_cli_logging` ヘルパー切出 / `main()` から basicConfig 排除 / entry path で helper 呼出）/ M9（outer CommError / OSError の finish exit_code 整合）
+- `examples/wandb/tests/test_submit_run.py` — M7（M13 テスト書き換え）/ M9（4 件の outer-except finish exit_code テスト追加）
+- `tests/wandb_signin_flow.rs` — H1（`wandb_login_result_ok_dispatches_refresh_unconditionally` 追加）
+- `tests/wandb_auth_timeout.rs` — H2（`refresh_wandb_auth_uses_kill_on_drop` 追加）
+- `tests/wandb_auth_state.rs` — H3（mirror struct 説明 doc コメント追加）/ M1（`scan_async_continues_on_next_entry_error`）/ M5（`startup_run_buffer_index_scan_is_async`）
+- `tests/wandb_key_masking.rs` — M6（`mask_secrets_into_string_does_not_exist`）
+- `tests/wandb_submit_subprocess.rs` — M3（`stdout_stderr_readers_break_when_log_channel_closed`）
+- `docs/✅menu-and-footer/archive/fix-save-menu.md` — 本ブロック追記
+
+### 検証コマンド
+
+```
+$ cargo fmt --check                                  → clean
+$ cargo clippy --workspace -- -D warnings            → clean
+$ cargo check --release --bin flowsurface            → clean
+$ cargo test --workspace                             → 全 GREEN（FAILED 0）
+   src/wandb_auth.rs::tests に validator 5 件 + 既存 5 件 = 10 件 PASS
+   tests/wandb_signin_flow.rs 12 PASS（+1）
+   tests/wandb_auth_timeout.rs 5 PASS（+1）
+   tests/wandb_auth_state.rs 20 PASS（+2）
+   tests/wandb_key_masking.rs 19 PASS（+1）
+   tests/wandb_submit_subprocess.rs +1 件
+$ uv run pytest python/tests/ examples/wandb/tests/ -q
+   1916 passed, 4 skipped, 9 warnings
+```
+
+### 設計判断
+
+- **H1 を構造反転で解く理由**: 「Ok(()) では modal 有無を問わず処理する」「Err(err) では modal がある場合のみ通知」という二択。modal キャンセル時に subprocess が後勝ちで成功するレースは現実的で、credentials が永続化されているのに UI が「未認証」のままになる silent failure は最も悪質。`refresh_wandb_auth` を必ず投げる（`.netrc` などの実際の保存はチェック後の `WandbAuthRefreshed` で反映）方が安全側
+- **H2 で `kill_on_drop(true)` 単独**: `Child::kill().await` を timeout 経路に明示的に書く案も検討したが、`Command::output()` で得られる Future は内部 spawn を抽象化しているため Child handle が露出しない。tokio の `kill_on_drop` フラグだけで Drop 時 SIGKILL が走る挙動が文書化されており、単一フラグで対処できる
+- **H3 を src 内テストに置いた理由**: bin-only crate で `tests/` からは validator を持つ本物の struct に到達できない。同じ理由で他の F9 src 内 #[cfg(test)] mod tests も既に存在する。reason: コメントで「bin-only crate のため」を明記し、tests/wandb_auth_state.rs のミラー定義は意図的な「stub 用」と doc 化
+- **M4 で `unwrap_or_default()` を排除した理由**: completed run のソート鍵に空文字を入れると、`started_at` 欠落の run が降順ソート末尾でも `Vec::pop` しない実装上は先頭判定に影響しないが、複数の `started_at` 欠落 run が並ぶと iteration 順 = FS 列挙順に依存する非決定性が残る。「ランキング不能なものは候補に入れない」方が UI 的にも自然（履歴モーダル側は `parse_meta_loose` で別ロジック）
+- **M9 で `wandb.log` を side_effect に使った理由**: 既存の M9 系テストは `wandb.init.side_effect = CommError` で例外を起こしており、`_active_run is None` のため finish が呼ばれず exit_code を観測できない。実コード上 `wandb.init` 成功後（log フェーズ）に CommError が起こるケースを想定して `wandb.log = MagicMock(side_effect=CommError(...))` 経路でテスト
+
+### MISSES.md 候補（次回 bug-postmortem 起動時に転記推奨）
+
+- **`tokio::process::Command::kill_on_drop` のデフォルトは `false`**: `tokio::time::timeout` で `Command::output()` Future を包んで Elapsed させると、子プロセスは tokio に管理されたまま orphan として残る（panic 経路でも同様）。`kill_on_drop(true)` を必ず付けるか、明示的に Child handle を保持して `kill().await` を呼ぶこと。subprocess 起動を `tokio::time::timeout` で守るパターン全般に適用される一般則
+- **bin-only crate と tests/ ミラーの罠**: bin-only な flowsurface では `tests/*.rs` integration test が src の private/`pub(crate)` API に到達できず、ミラー struct を tests 側で再定義する逃げが横行している。`#[serde(try_from = "...")]` のような derive-time validator はミラー側に再現されない限り「テストが pass しても本物のロジックは無検査」になる。illegal-state 検査は src 内部の `#[cfg(test)] mod tests` に置くか、ミラー側にも validator を再現する必要がある
+- **iced update スレッドでの cancel-then-success レース**: subprocess 完了通知 (`Message::WandbLoginResult(Ok)`) が「対応する modal が既に閉じられている」状態で届くケースを常に考慮する。modal 存在を guard にして「副作用つき後処理」（state refresh / disk-write 反映取得）を `if let Some(modal)` 内に書くと、cancel-then-success で副作用が発火せず UI 状態が真実と乖離する典型的な silent failure になる。modal は **UI 表示**のみを所有し、副作用処理は Message arm の外側（modal 非依存層）に書くこと
+
+---
+
+## レビュー反映 (2026-05-05, ラウンド R3 fix)
+
+R2 fix（同日中）後の R3 サニティで MEDIUM 3 / LOW 2 を検出。HIGH ゼロで R2 → R3 の
+連鎖は断ち切れたが、R1 fix で導入した `Message::LoginFailed` ルーティングと
+`wandb_login` subprocess 経路に R2 では潰しきれなかった silent-failure 系の
+エッジが残っていた。本ラウンドで MEDIUM+ ゼロまで収束させる。
+
+### MEDIUM（3件）
+
+| ID | 場所 | 指摘 | 対処 |
+|----|------|------|------|
+| M1 | `src/main.rs:5556` (`Message::WandbLoginResult` の `Err` arm) | `let _ = modal.update(modal::wandb_signin::Message::LoginFailed(..))` で `Option<Action>` を握り捨てている。LoginFailed の現契約は `None` を返すが、将来 `update()` が `Some(Action)` を返す設計変更が起きた場合に silent drop で覆い隠される | (a) `modal/wandb_signin.rs` 側に「LoginFailed は常に None を返す」契約テスト (`login_failed_update_returns_none_always`) を追加。(b) main.rs では `match modal.update(...)` で受け、`Some(_)` 経路に `log::warn!("[wandb_signin] unexpected Action ...")` を出すハッチを残す。`tests/wandb_signin_flow.rs::wandb_login_result_err_handles_unexpected_action` で source-inspection 保護（`let _ = modal.update(` の不在 / `match` + `log::warn!` の存在） |
+| M2 | `src/main.rs:537-581` (`async fn wandb_login`) | `wandb login --relogin` subprocess に `kill_on_drop` も `tokio::time::timeout` も無く、wandb 側が対話プロンプトに突入して stdin EOF 後も応答しない場合 GUI が無限ブロックする。R2 で `refresh_wandb_auth` には `kill_on_drop(true)` + 7 s timeout を入れたが、`wandb_login` 経路には未適用 | Command builder に `.kill_on_drop(true)` を追加。`child.wait_with_output()` を `tokio::time::timeout(Duration::from_secs(30), ...)` で包む（login は netrc 書き込み・env 探索を含むため refresh の 7 s より長い 30 s 予算）。timeout 時は `Err("wandb login timed out after 30s")` を返し、`kill_on_drop` 経由で child SIGKILL。`tests/wandb_auth_timeout.rs::wandb_login_uses_kill_on_drop_and_timeout` で source-inspection 保護 |
+| M3 | `examples/wandb/submit_run.py:500-503` (outer `except CommError` 文字列分類) | `"429" in msg` / `any(code in msg for code in ("500","501","502","503","504","5xx"))` の部分文字列マッチ。run 名が `"attempt 4290 baseline"` や `"batch 5030"` を含む CommError をそれぞれ rate-limit (3) / 5xx (5) と誤分類し、Rust 側 exit-code 解釈と W&B run status が乖離する | `_HTTP_429_RE = re.compile(r"\b429\b")` / `_HTTP_5XX_RE = re.compile(r"\b5\d{2}\b")` を module 先頭に追加。outer `except CommError` 内の if 分岐を `.search(msg)` に置換。曖昧な `"5xx"` リテラルマッチは廃止し HTTP status code 数字の単語境界マッチに統一。`test_outer_commerror_substring_429_in_run_name_does_not_misclassify` / `_503_in_run_name_` / `_genuine_429_is_classified_as_rate_limit` / `_genuine_503_is_classified_as_server_error` の 4 件で false-positive 排除と true-positive 維持を直接 assert |
+
+### LOW（2件 — 次イテレーション判断）
+
+L1: `parse_meta_loose` の `started_at` 空文字列処理が `MetaJson::scan` 系（M4 で対処済）と非対称。
+L2: `entry.file_type()` の Err 警告ログが大量ファイル列挙時に flooding し得る（rate-limit / dedupe 未実装）。
+本ラウンドでは MEDIUM+ ゼロ達成優先で繰越。
+
+### 修正対象ファイル
+
+- `src/main.rs` — M1（`WandbLoginResult` Err arm の `match` 化 + `log::warn!`）/ M2（`wandb_login` に `.kill_on_drop(true)` + 30 s `tokio::time::timeout`）
+- `src/modal/wandb_signin.rs` — M1（`#[cfg(test)] mod tests` に `login_failed_update_returns_none_always` 追加）
+- `examples/wandb/submit_run.py` — M3（`import re` / `_HTTP_429_RE` / `_HTTP_5XX_RE` 定数 / `CommError` 分類を regex 化）
+- `examples/wandb/tests/test_submit_run.py` — M3（substring false-positive ガード 2 件 + genuine 2 件 = 計 4 件追加）
+- `tests/wandb_signin_flow.rs` — M1（`wandb_login_result_err_handles_unexpected_action` 追加）
+- `tests/wandb_auth_timeout.rs` — M2（`wandb_login_uses_kill_on_drop_and_timeout` 追加）
+- `docs/✅menu-and-footer/archive/fix-save-menu.md` — 本ブロック追記
+
+### 検証コマンド
+
+```
+$ cargo fmt --check                                  → clean
+$ cargo clippy --workspace -- -D warnings            → clean
+$ cargo check --release --bin flowsurface            → clean
+$ cargo test --workspace                             → 全 GREEN（FAILED 0）
+   tests/wandb_signin_flow.rs 13 PASS（+1）
+   tests/wandb_auth_timeout.rs 6 PASS（+1）
+   src/modal/wandb_signin.rs::tests +1 件（modal 内 7 PASS）
+$ uv run pytest python/tests/ examples/wandb/tests/ -q
+   1920 passed, 4 skipped, 10 warnings  (R2 比 +4 件)
+```
+
+### 設計判断
+
+- **M1 を「修正＋ハッチ」二段構えで解く理由**: 単に main.rs を `let _` から `match` に変えるだけだと、なぜそうしたかが将来読みづらい。modal 側に「LoginFailed は常に None」を契約として固める単体テストを置き、main.rs の `match` と `log::warn!` は「契約逸脱を即可視化するハッチ」として機能させる。これで「契約変更」と「main.rs 側の防御」が両方検査される
+- **M2 で 30 s を選んだ根拠**: refresh_wandb_auth (`check_auth.py`) は単純に netrc を読むだけなので 7 s で十分。一方 `wandb login --relogin` は (a) `--with wandb` の uv 解決 / (b) wandb の env 変数チェック / (c) ターミナル機能 probe / (d) netrc 書き込み を行うため、低速マシン・コールドキャッシュで合計 10 s 程度を要するケースがある。30 s なら正常完了は確実に通り、一方ハング時には 1 分以内に確実に解放される
+- **M3 で `"5xx"` リテラルマッチを廃止した理由**: 旧コードは wandb 内部実装 (`wandb-core`) が CommError 文字列に "5xx" を埋め込んでいることを暗黙に仮定していたが、これは undocumented で wandb のバージョン更新で消える可能性がある。`\b5\d{2}\b` 正規表現で 500-599 全てを直接捕捉するほうが堅牢で、wandb upstream 変更耐性も高い
+- **M3 で precompile した理由**: outer `except CommError` は CommError 発生時にしか入らない hot path ではないが、`re.compile` を module top-level に置いておけば再コンパイルゼロかつ regex 意図が docstring 形式で読める。コード冗長化は最小限
+
+### MISSES.md 候補（次回 bug-postmortem 起動時に転記推奨）
+
+- **`Option<T>` を `let _` で握り捨てる pattern の落とし穴**: 戻り値が「現状常に None」だからといって `let _ = f()` で潰すと、将来 `f` の契約が `Some(_)` を返すように変わったときに silent drop が起きる。受け側で `match` し、想定外の variant には `log::warn!` を出すハッチを残しておくこと。modal/widget の `update() -> Option<Action>` 系は特に注意（呼び出し側がアクションを実行する責任を負っているため、漏れると UI 状態と内部状態が乖離する）
+- **`tokio::process::Command` を timeout で守るときは login 系も漏らさない**: refresh / probe 系の subprocess に `kill_on_drop(true)` + `tokio::time::timeout` を入れても、別の経路（login / logout / clear 系）の Command にも個別に同じガードを入れないと、その経路だけが orphan / 永久ブロックの脆弱性として残る。一括 grep（`Command::new(`）で漏れチェックする習慣をつけること
+- **HTTP status code を文字列でマッチするときは必ず単語境界**: `"429" in msg` のような部分文字列マッチは数字 ID（run 名・batch 番号・order ID 等）が紛れ込んだ瞬間に false-positive を生む。Python なら `re.compile(r"\b\d{3}\b")`、Rust なら `regex::Regex` で `\b` 境界を要求する。HTTP status とユーザー入力文字列が同じテキストに混在する分類器全般に適用される一般則

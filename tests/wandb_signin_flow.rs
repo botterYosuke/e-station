@@ -290,6 +290,53 @@ fn wandb_login_result_ok_dispatches_refresh_unconditionally() {
     );
 }
 
+/// F9 R3-M1: main.rs の `WandbLoginResult::Err` arm は `modal.update(LoginFailed(..))`
+/// の戻り値を `let _ =` で握り潰さず、`match` して `Some(action)` 経路を warn ログに
+/// 出すこと。LoginFailed の契約は `None` を返すことだが、将来の変更で `Some` を返す
+/// 設計変更が起きた場合に silent drop で覆い隠されないよう、観測ハッチを残す。
+#[test]
+fn wandb_login_result_err_handles_unexpected_action() {
+    let main_src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let main_src = std::fs::read_to_string(main_src_path)
+        .unwrap_or_else(|e| panic!("cannot read src/main.rs: {e}"));
+
+    // Locate the handler arm.
+    let idx = main_src
+        .find("Message::WandbLoginResult(result)")
+        .expect("main.rs must handle Message::WandbLoginResult(result)");
+    let end = (idx + 2500).min(main_src.len());
+    let mut safe = end;
+    while !main_src.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let handler = &main_src[idx..safe];
+    let err_idx = handler
+        .find("Err(err)")
+        .expect("handler must have Err(err) arm");
+    let err_arm = &handler[err_idx..];
+
+    // The Err arm must NOT use `let _ = modal.update(...)` to discard the
+    // Option<Action> return value silently.
+    assert!(
+        !err_arm.contains("let _ = modal.update("),
+        "F9 R3-M1: Err arm must not use `let _ = modal.update(...)`; \
+         match the Option<Action> and warn on Some(_) — arm: {err_arm}"
+    );
+    // The Err arm must call modal.update(...) inside a `match` (or `if let`)
+    // and emit a `log::warn!` when an unexpected Action is returned.
+    assert!(
+        err_arm.contains("modal.update(") && err_arm.contains("log::warn!"),
+        "F9 R3-M1: Err arm must call modal.update(...) and log::warn! on \
+         unexpected Action — arm: {err_arm}"
+    );
+    // Concrete signal: a warning string mentioning unexpected/LoginFailed.
+    assert!(
+        err_arm.contains("unexpected") || err_arm.contains("LoginFailed"),
+        "F9 R3-M1: Err arm warn message should reference the unexpected \
+         LoginFailed Action contract — arm: {err_arm}"
+    );
+}
+
 /// テスト 8: `view` が `Element` を返すシグネチャを持つこと。
 #[test]
 fn view_returns_element() {

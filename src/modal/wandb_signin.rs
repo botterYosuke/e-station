@@ -251,4 +251,29 @@ mod tests {
         let action = confirm.update(SignOutMessage::CancelSignOut);
         assert!(matches!(action, SignOutAction::Cancel));
     }
+
+    /// F9 R3-M1: `Message::LoginFailed` must always return `None` from
+    /// `update()` (no `Action` is meaningful for a failure notification).
+    /// main.rs relies on this contract — if it ever returned `Some(Action)`
+    /// the action would silently be discarded by the caller's `let _ = ...`
+    /// pattern, hiding intent drift.
+    #[test]
+    fn login_failed_update_returns_none_always() {
+        let mut modal = WandbSignInModal::new();
+        let action = modal.update(Message::LoginFailed("any error".to_string()));
+        assert!(
+            action.is_none(),
+            "F9 R3-M1: Message::LoginFailed must yield no Action; got Some(_)"
+        );
+        // Internal state is still mutated.
+        assert!(!modal.submitting);
+        assert_eq!(modal.error.as_deref(), Some("any error"));
+
+        // Empty error still returns None.
+        let mut modal = WandbSignInModal::new();
+        modal.submitting = true;
+        let action = modal.update(Message::LoginFailed(String::new()));
+        assert!(action.is_none());
+        assert!(!modal.submitting);
+    }
 }

@@ -1008,6 +1008,60 @@ def test_outer_oserror_finish_uses_4_exit_code(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# F9 R3-M3: HTTP status code matching must use word boundaries so spurious
+# digit substrings inside run names / URLs / payload text do not misclassify
+# the error category. e.g. a CommError describing a run named
+# "attempt 4290 baseline" must NOT be classified as 429 (rate limit).
+# ---------------------------------------------------------------------------
+
+def test_outer_commerror_substring_429_in_run_name_does_not_misclassify(tmp_path: Path):
+    """A CommError whose message contains '4290' (digits glued together) must
+    fall through to exit_code 4 (default), NOT 3 (rate limit). This guards
+    against `"429" in msg` substring matching."""
+    exit_code, finish_mock = _trigger_commerror_after_init(
+        tmp_path, "connection failed for run 'attempt 4290 baseline'"
+    )
+    assert exit_code == 4, (
+        f"F9 R3-M3: '4290' (no word boundary around 429) must NOT be classified "
+        f"as rate limit; got exit_code {exit_code}"
+    )
+    assert finish_mock.call_args.kwargs.get("exit_code") == 4, (
+        f"F9 R3-M3: wandb.finish must record exit_code=4, not 3; got "
+        f"{finish_mock.call_args.kwargs}"
+    )
+
+
+def test_outer_commerror_genuine_429_is_classified_as_rate_limit(tmp_path: Path):
+    """Sanity check: a genuine '429' token (with word boundaries) is still
+    classified as rate limit (exit 3) after switching to regex matching."""
+    exit_code, finish_mock = _trigger_commerror_after_init(
+        tmp_path, "HTTP 429 too many requests"
+    )
+    assert exit_code == 3, f"genuine 429 must be exit 3, got {exit_code}"
+    assert finish_mock.call_args.kwargs.get("exit_code") == 3
+
+
+def test_outer_commerror_substring_503_in_run_name_does_not_misclassify(tmp_path: Path):
+    """Same word-boundary guarantee for 5xx classification: a digit run like
+    '5030' must not be misread as 503."""
+    exit_code, _ = _trigger_commerror_after_init(
+        tmp_path, "connection failed for batch 5030 of replay"
+    )
+    assert exit_code == 4, (
+        f"F9 R3-M3: '5030' must NOT be classified as 5xx server error; "
+        f"got exit_code {exit_code}"
+    )
+
+
+def test_outer_commerror_genuine_503_is_classified_as_server_error(tmp_path: Path):
+    """Sanity check: '503' with word boundaries is still classified as 5xx."""
+    exit_code, _ = _trigger_commerror_after_init(
+        tmp_path, "HTTP 503 service unavailable"
+    )
+    assert exit_code == 5, f"genuine 503 must be exit 5, got {exit_code}"
+
+
+# ---------------------------------------------------------------------------
 # F9 R1-M12: meta.json with scenario=None must succeed (exit 0)
 # ---------------------------------------------------------------------------
 

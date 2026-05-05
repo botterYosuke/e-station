@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -48,6 +49,22 @@ from pii_scrub import (  # noqa: E402
     assert_no_forbidden_keys,
     pii_scrub,
 )
+
+# ---------------------------------------------------------------------------
+# F9 R3-M3: HTTP status code patterns for CommError classification.
+#
+# Earlier code used `"429" in msg` (substring match), which would misclassify
+# any error message containing "429" as a digit fragment (e.g. a run named
+# "attempt 4290 baseline") as rate limiting. Word boundaries (`\b...\b`)
+# require the digits to be a standalone token, eliminating that false
+# positive while still matching genuine "HTTP 429" / "503 Service ..." text.
+#
+# We match only the canonical 3-digit token; the previous "5xx" literal
+# (matched via substring) was wandb-internal-implementation-dependent and
+# is dropped in favour of regex-based detection of any 5xx code.
+# ---------------------------------------------------------------------------
+_HTTP_429_RE = re.compile(r"\b429\b")
+_HTTP_5XX_RE = re.compile(r"\b5\d{2}\b")
 
 # ---------------------------------------------------------------------------
 # Global: active wandb run (for SIGTERM handler)
@@ -497,10 +514,14 @@ def run_submission(
         # passed regardless of which CommError sub-class triggered, leaving
         # the W&B-side run status inconsistent with the CLI exit code.
         msg = str(exc)
-        if "429" in msg:
+        # F9 R3-M3: word-boundary regex match — see _HTTP_429_RE / _HTTP_5XX_RE
+        # at module top. Substring matching ("429" in msg) caused false
+        # positives whenever a run name or numeric payload contained these
+        # digits as a fragment (e.g. "batch 5030", "attempt 4290").
+        if _HTTP_429_RE.search(msg):
             mapped_exit = 3
             err_label = "rate limit"
-        elif any(code in msg for code in ("500", "501", "502", "503", "504", "5xx")):
+        elif _HTTP_5XX_RE.search(msg):
             mapped_exit = 5
             err_label = "server error"
         else:

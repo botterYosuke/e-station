@@ -550,7 +550,8 @@ mod tests {
 
     #[test]
     fn legal_state_authenticated_true_method_env_is_accepted() {
-        let json = r#"{"authenticated": true, "method": "env", "username": "alice", "error": null}"#;
+        let json =
+            r#"{"authenticated": true, "method": "env", "username": "alice", "error": null}"#;
         let state: WandbAuthState = serde_json::from_str(json).expect("must deserialize");
         assert!(state.authenticated);
         assert!(matches!(state.method, AuthMethod::Env));
@@ -559,7 +560,8 @@ mod tests {
 
     #[test]
     fn legal_state_authenticated_true_when_method_is_credential_file() {
-        let json = r#"{"authenticated": true, "method": "netrc", "username": "bob", "error": null}"#;
+        let json =
+            r#"{"authenticated": true, "method": "netrc", "username": "bob", "error": null}"#;
         let state: WandbAuthState = serde_json::from_str(json).expect("must deserialize");
         assert!(state.authenticated);
         assert!(matches!(state.method, AuthMethod::Netrc));

@@ -534,7 +534,14 @@ fn submit_wandb_run_stream(
 
 /// `wandb login --relogin` を stdin pipe 経由で API キーを渡して実行する。
 /// argv に API キーを渡さない（プロセスリスト・シェル履歴への漏洩防止）。
+///
+/// F9 R3-M2: hard timeout 30s + kill_on_drop(true)。wandb login は対話プロンプト
+/// (環境変数チェック・netrc 書き込み・ターミナル機能 probe) で時間がかかるため
+/// refresh_wandb_auth の 7s より長い 30s を割り当てる。timeout が elapse した
+/// 場合は spawn future が drop され、`kill_on_drop(true)` により child プロセスに
+/// SIGKILL が送られて GUI が永久ブロックしない。
 async fn wandb_login(api_key: String) -> Result<(), String> {
+    use std::time::Duration;
     use tokio::io::AsyncWriteExt as _;
     use tokio::process::Command;
 
@@ -543,6 +550,7 @@ async fn wandb_login(api_key: String) -> Result<(), String> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawn failed: {e}"))?;
 
@@ -563,10 +571,16 @@ async fn wandb_login(api_key: String) -> Result<(), String> {
         .map_err(|e| format!("stdin write failed: {e}"))?;
     drop(stdin);
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("wait failed: {e}"))?;
+    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(format!("wait failed: {e}")),
+        Err(_elapsed) => {
+            // timeout — `kill_on_drop(true)` ensures the child is killed when
+            // `child` is dropped at the end of this scope.
+            return Err("wandb login timed out after 30s".to_string());
+        }
+    };
 
     if output.status.success() {
         Ok(())
@@ -5553,9 +5567,25 @@ impl Flowsurface {
                     if let Some(modal) = self.wandb_signin_modal.as_mut() {
                         // F9 R1-M4: route failure via Message::LoginFailed
                         // so the modal owns its own state mutations.
-                        let _ = modal.update(modal::wandb_signin::Message::LoginFailed(
-                            format!("ログイン失敗: {err}"),
-                        ));
+                        // F9 R3-M1: do NOT discard `update()`'s Option<Action>
+                        // with `let _ = ...`. The LoginFailed contract is to
+                        // return None (see modal/wandb_signin.rs unit test
+                        // `login_failed_update_returns_none_always`), but if a
+                        // future refactor changes that contract we want a
+                        // visible warning rather than a silent action drop.
+                        match modal.update(modal::wandb_signin::Message::LoginFailed(format!(
+                            "ログイン失敗: {err}"
+                        ))) {
+                            None => {}
+                            Some(_action) => {
+                                log::warn!(
+                                    "[wandb_signin] unexpected Action returned from \
+                                     Message::LoginFailed; the contract is to return None. \
+                                     The Action is being dropped — investigate the modal \
+                                     update() refactor that changed this."
+                                );
+                            }
+                        }
                     }
                     return Task::none();
                 }

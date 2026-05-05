@@ -98,6 +98,52 @@ fn refresh_wandb_auth_uses_kill_on_drop() {
     );
 }
 
+/// F9 R3-M2: `wandb_login` (main.rs) must apply `kill_on_drop(true)` and
+/// wrap `wait_with_output` in `tokio::time::timeout` so a hung subprocess
+/// (e.g. wandb prompting interactively despite stdin pipe) does not leave
+/// the GUI blocked indefinitely. 30 s is the budget — refresh_wandb_auth
+/// uses 7 s, but login involves netrc writes / env probing that legitimately
+/// take longer.
+#[test]
+fn wandb_login_uses_kill_on_drop_and_timeout() {
+    let main_src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+    let main_src = std::fs::read_to_string(main_src_path)
+        .unwrap_or_else(|e| panic!("cannot read src/main.rs: {e}"));
+
+    // Locate `async fn wandb_login` body (NOT the `wandb_logout` neighbour).
+    let fn_idx = main_src
+        .find("async fn wandb_login(")
+        .expect("src/main.rs must define `async fn wandb_login(...)`");
+    let after = &main_src[fn_idx..];
+    // Slice up to the next top-level `async fn` / `fn ` boundary, capped to
+    // a generous window in case the function grows.
+    let end = after[1..]
+        .find("\nasync fn ")
+        .or_else(|| after[1..].find("\nfn "))
+        .map(|i| i + 1)
+        .unwrap_or_else(|| after.len().min(3000));
+    let body = &after[..end];
+
+    assert!(
+        body.contains(".kill_on_drop(true)"),
+        "F9 R3-M2: wandb_login Command builder must call .kill_on_drop(true) \
+         so the child process is killed when the timeout future is dropped — body: {body}"
+    );
+    assert!(
+        body.contains("tokio::time::timeout"),
+        "F9 R3-M2: wandb_login must wrap wait_with_output in tokio::time::timeout — body: {body}"
+    );
+    assert!(
+        body.contains("Duration::from_secs(30)"),
+        "F9 R3-M2: wandb_login timeout must be 30 seconds — body: {body}"
+    );
+    assert!(
+        body.contains("timed out"),
+        "F9 R3-M2: timeout elapsed arm must return an explicit \"timed out\" \
+         error message — body: {body}"
+    );
+}
+
 /// Run a real timeout against a fake hung subprocess via tokio::time::timeout.
 /// We cannot invoke `refresh_wandb_auth_with_timeout` directly (bin-only
 /// crate), so we sanity-check that `tokio::time::timeout` itself behaves as
