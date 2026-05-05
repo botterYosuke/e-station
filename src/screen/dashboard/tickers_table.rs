@@ -2220,13 +2220,17 @@ mod tests {
     }
 
     #[test]
-    fn new_with_settings_marks_selected_venue_in_flight() {
-        let settings = settings_for(Venue::Bybit);
+    fn new_with_settings_starts_with_empty_rows_and_metadata() {
+        // 立花 fork は Tachibana 単独。Tachibana は U4 ゲートにより
+        // pending に振られるので in_flight にはならない。ここでは
+        // 起動時の空状態（rows / tickers_info）だけを検証する。
+        let settings = settings_for(Venue::Tachibana);
         let (table, _task) =
-            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Bybit));
+            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
 
-        assert!(table.metadata_fetch_state.is_in_flight(Venue::Bybit));
-        assert!(!table.metadata_fetch_state.has_fetched(Venue::Bybit));
+        assert!(!table.metadata_fetch_state.is_in_flight(Venue::Tachibana));
+        assert!(!table.metadata_fetch_state.has_fetched(Venue::Tachibana));
+        assert!(table.tachibana_fetch_pending);
         assert!(table.ticker_rows.is_empty());
         assert!(table.tickers_info.is_empty());
     }
@@ -2545,12 +2549,9 @@ mod tests {
         // selection that includes Tachibana must NOT trigger an
         // immediate `fetch_metadata_task(Tachibana)`. The fetch is
         // recorded as pending and replays on the next VenueReady.
-        let mut settings = settings_for(Venue::Tachibana);
+        let settings = settings_for(Venue::Tachibana);
         // Verify saved-state simulates an actual user selection.
         assert!(settings.selected_exchanges.contains(&Venue::Tachibana));
-        // Add a non-Tachibana venue to verify the filter is per-venue
-        // (other venues still fire their fetches at startup).
-        settings.selected_exchanges.push(Venue::Bybit);
         let (table, _initial_task) =
             TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
 
@@ -2565,10 +2566,6 @@ mod tests {
         assert!(
             !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
             "no begin_venue mark on Tachibana before VenueReady"
-        );
-        assert!(
-            table.metadata_fetch_state.is_in_flight(Venue::Bybit),
-            "non-Tachibana venues are still fetched on startup"
         );
     }
 
