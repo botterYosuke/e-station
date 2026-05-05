@@ -30,7 +30,9 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # Phase 8.1b B1: SCHEMA_MINOR を 8 → 9 に bump (multi-client broadcast, ClientConnected/Disconnected)
     # F6: SCHEMA_MINOR を 9 → 10 に bump (LoadStrategyScenario / SaveStrategyScenario / 応答イベント追加)
     # F7: SCHEMA_MINOR を 10 → 11 に bump (StopReplay / ForceStopReplay / ReplayStopped 追加)
-    assert s.SCHEMA_MINOR == 11
+    # schema 3.12: SCHEMA_MINOR を 11 → 12 に bump
+    # (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)
+    assert s.SCHEMA_MINOR == 12
     assert s.SCHEMA_MAJOR == 3
 
 

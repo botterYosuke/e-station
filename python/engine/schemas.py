@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 11
+SCHEMA_MINOR: int = 12
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -773,6 +773,11 @@ class ReplayDataLoaded(IpcMessage):
     strategy_id: str | None = None
     bars_loaded: int
     trades_loaded: int
+    # schema 3.12: GUI が helper attach mode で `auto_generate_replay_panes` を
+    # 呼べるよう、replay 対象の instrument_id と bar 粒度を同梱する。
+    # 旧 GUI (minor<12) は serde(default) で安全に無視される。
+    instrument_id: str | None = None
+    granularity: Literal["Trade", "Minute", "Daily"] | None = None
     ts_event_ms: int
 
 

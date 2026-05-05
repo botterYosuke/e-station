@@ -1162,6 +1162,15 @@ pub enum EngineEvent {
         strategy_id: Option<String>,
         bars_loaded: u64,
         trades_loaded: u64,
+        /// schema 3.12: replay 対象の instrument_id。helper attach mode で
+        /// GUI が `auto_generate_replay_panes` を呼ぶために必要。
+        /// 旧 engine（minor<12）からは `None` で deserialise される。
+        #[serde(default)]
+        instrument_id: Option<String>,
+        /// schema 3.12: bar 粒度。`Trade` のときは bar 無しなので
+        /// CandlestickChart はスキップする。
+        #[serde(default)]
+        granularity: Option<ReplayGranularity>,
         ts_event_ms: i64,
     },
     /// nautilus Position opened (transition flat → long/short).

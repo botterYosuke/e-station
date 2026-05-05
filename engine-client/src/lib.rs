@@ -32,5 +32,6 @@ pub use venue_caps::VenueCapsStore;
 /// SCHEMA_MINOR 履歴（時系列順、M13 レビュー反映 2026-05-04 ラウンド1）:
 ///   - 10: F6 SCENARIO 定数 IPC（LoadStrategyScenario / SaveStrategyScenario / 関連 events）
 ///   - 11: F7 モード切替 (StopReplay / ForceStopReplay / ReplayStopped)
+///   - 12: ReplayDataLoaded.instrument_id / granularity を追加（auto_generate_replay_panes 復活用）
 pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 11;
+pub const SCHEMA_MINOR: u16 = 12;

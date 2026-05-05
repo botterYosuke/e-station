@@ -29,10 +29,12 @@ fn schema_minor_is_7_for_positions() {
     // SaveStrategyScenario コマンドと StrategyScenarioLoaded / StrategyScenarioSaved イベント）。
     // F7: SCHEMA_MINOR を 10 → 11 に bump（StopReplay / ForceStopReplay コマンドと
     // ReplayStopped イベント追加）。
+    // schema 3.12: SCHEMA_MINOR を 11 → 12 に bump
+    // (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        11,
-        "SCHEMA_MINOR must be 11 after F7 (StopReplay / ForceStopReplay / ReplayStopped IPC)"
+        12,
+        "SCHEMA_MINOR must be 12 after schema 3.12 (ReplayDataLoaded.instrument_id / granularity)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -324,12 +326,18 @@ fn replay_data_loaded_deserializes() {
             bars_loaded,
             trades_loaded,
             ts_event_ms,
+            instrument_id,
+            granularity,
         } => {
             // M-8: Option<String> へ。strategy_id 文字列付きは Some(...) で来る。
             assert_eq!(strategy_id.as_deref(), Some("strat-001"));
             assert_eq!(bars_loaded, 1234);
             assert_eq!(trades_loaded, 56789);
             assert_eq!(ts_event_ms, 1_700_000_000_002);
+            // schema 3.12: 旧 fixture には instrument_id / granularity が無いので None。
+            // 新 fixture では Some(...) で送出される。
+            assert!(instrument_id.is_none());
+            assert!(granularity.is_none());
         }
         other => panic!("expected ReplayDataLoaded, got {other:?}"),
     }

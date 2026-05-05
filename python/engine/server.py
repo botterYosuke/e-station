@@ -2996,6 +2996,10 @@ class DataEngineServer:
                 "strategy_id": None,
                 "bars_loaded": bars_loaded,
                 "trades_loaded": trades_loaded,
+                # schema 3.12: GUI helper-attach 経路で `auto_generate_replay_panes`
+                # を起動できるよう instrument_id / granularity を同梱する。
+                "instrument_id": instrument_id,
+                "granularity": granularity,
                 "ts_event_ms": int(time.time() * 1000),
             }
         )

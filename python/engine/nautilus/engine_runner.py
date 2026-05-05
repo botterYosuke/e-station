@@ -390,6 +390,9 @@ class NautilusRunner:
                 "strategy_id": strategy_id,
                 "bars_loaded": bars_loaded,
                 "trades_loaded": trades_loaded,
+                # schema 3.12: GUI helper-attach 経路の auto_generate_replay_panes 用。
+                "instrument_id": instrument_id,
+                "granularity": granularity,
                 "ts_event_ms": loaded_ts_ms,
             })
 
@@ -611,6 +614,9 @@ class NautilusRunner:
                 "strategy_id": strategy_id,
                 "bars_loaded": bars_loaded,
                 "trades_loaded": trades_loaded,
+                # schema 3.12: GUI helper-attach 経路の auto_generate_replay_panes 用。
+                "instrument_id": instrument_id,
+                "granularity": granularity,
                 "ts_event_ms": loaded_ts_ms,
             })
 

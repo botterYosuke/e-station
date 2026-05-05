@@ -1438,6 +1438,19 @@ enum Message {
     DismissStrategyLoadError,
     /// Replay engine finished — auto-refresh the order list.
     ReplayFinished,
+    /// schema 3.12: `EngineEvent::ReplayDataLoaded` — replay 用ペインを
+    /// 自動生成する。GUI 内フォーム経由でも helper attach mode でも
+    /// 同じ経路を通る。`instrument_id` / `granularity` は schema 3.12 で
+    /// 追加された optional フィールドで、旧 engine（minor<12）からは
+    /// `None` で届く（その場合 `update()` 側で防御的に弾く）。
+    ReplayDataLoaded {
+        instrument_id: Option<String>,
+        granularity: Option<engine_client::dto::ReplayGranularity>,
+        #[allow(dead_code)]
+        bars_loaded: u64,
+        #[allow(dead_code)]
+        trades_loaded: u64,
+    },
     /// Native OS menu bar: HWND / window handle received; attach muda menu.
     NativeMenuSetup(u64),
     /// Native OS menu bar: user selected a menu item.
@@ -1662,7 +1675,7 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                     use tokio::sync::broadcast::error::RecvError;
                     match event {
                         Some(Ok(ev)) => {
-                            if let Some(msg) = map_engine_event_to_tachibana(ev) {
+                            if let Some(msg) = map_engine_event_to_message(ev) {
                                 yield msg;
                             }
                         }
@@ -1688,11 +1701,16 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
     }
 }
 
-/// Translate a low-level `EngineEvent` into a `Message::TachibanaVenueEvent`
-/// when it concerns the Tachibana venue lifecycle, otherwise `None`.
-/// Other venues are funnelled through their existing exchange-event
-/// path and don't need state-machine treatment.
-fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<Message> {
+/// Translate a low-level `EngineEvent` into a `Message` for the GUI's update loop.
+///
+/// Despite the historical name (`map_engine_event_to_tachibana`), this function
+/// is the **single dispatch point** for every `EngineEvent` flowing into the
+/// app — Tachibana venue lifecycle, REPLAY portfolio updates, execution markers,
+/// strategy signals, replay completion, etc. New `EngineEvent` variants must
+/// add an arm here or be deliberately routed elsewhere; otherwise they fall
+/// into the trailing `_ => None` and are silently dropped (the bug class fixed
+/// by [docs/✅python-data-engine/replay-pane-auto-generate-fix.md]).
+pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -> Option<Message> {
     use engine_client::dto::EngineEvent;
     match ev {
         EngineEvent::VenueReady { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
@@ -1892,10 +1910,25 @@ fn map_engine_event_to_tachibana(ev: engine_client::dto::EngineEvent) -> Option<
                 reason,
             })
         }
+        // schema 3.12: replay 自動ペイン生成。GUI 内フォーム経由でも
+        // helper attach mode でも同じ経路を通すため、ここで一律変換する。
+        EngineEvent::ReplayDataLoaded {
+            instrument_id,
+            granularity,
+            bars_loaded,
+            trades_loaded,
+            ..
+        } => Some(Message::ReplayDataLoaded {
+            instrument_id,
+            granularity,
+            bars_loaded,
+            trades_loaded,
+        }),
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
-        // ここに一致 arm を加えるか、`None`（このマップは Tachibana 関連
-        // イベントだけを `Message` に変換する責務であり、新バリアントは
-        // 別経路で処理される）が正しいことを確認すること。
+        // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
+        // 正しいことを確認すること。`_ => None` で握り潰すと
+        // `ReplayDataLoaded` のように UI 機能が丸ごと欠落する事故を
+        // 再発させる（schema 3.12 の見逃しクラス）。
         _ => None,
     }
 }
@@ -3428,6 +3461,43 @@ impl Flowsurface {
             Message::DismissStrategyLoadError => {
                 self.strategy_load_error = None;
                 return Task::none();
+            }
+            // schema 3.12: replay 用ペイン自動生成。GUI 内フォーム経由でも
+            // helper attach mode でも同じ経路を通す。
+            Message::ReplayDataLoaded {
+                instrument_id,
+                granularity,
+                ..
+            } => {
+                let Some(instrument_id) = instrument_id.filter(|s| !s.is_empty()) else {
+                    log::error!(
+                        "ReplayDataLoaded: instrument_id missing — auto pane generation \
+                         skipped. (Old engine schema_minor<12 or schema bug.)"
+                    );
+                    return Task::none();
+                };
+                let timeframe = match granularity {
+                    Some(engine_client::dto::ReplayGranularity::Daily) => {
+                        Some(exchange::Timeframe::D1)
+                    }
+                    Some(engine_client::dto::ReplayGranularity::Minute) => {
+                        Some(exchange::Timeframe::M1)
+                    }
+                    // Trade tick：bar 無しなので CandlestickChart はスキップ。
+                    Some(engine_client::dto::ReplayGranularity::Trade) | None => None,
+                };
+                let main_window_id = self.main_window.id;
+                log::info!(
+                    "ReplayDataLoaded: auto-generating replay panes for \
+                     instrument_id={instrument_id:?} timeframe={timeframe:?}"
+                );
+                return self
+                    .active_dashboard_mut()
+                    .auto_generate_replay_panes(main_window_id, &instrument_id, timeframe)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    });
             }
             // Replay engine finished → auto-refresh order list from Python's in-memory fills.
             Message::ReplayFinished => {
