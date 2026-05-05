@@ -1567,8 +1567,10 @@ enum Message {
         target: engine_client::dto::AppMode,
         windows: HashMap<window::Id, WindowSpec>,
     },
-    /// F7: engine returned `EngineBusy` for a `StopReplay` or `ForceStopReplay` command
-    /// while a mode switch is pending. Aborts the switch and shows an error dialog.
+    /// F7: engine returned `EngineBusy` for `StopReplay` (engine IDLE — no replay loaded).
+    /// Does NOT abort the switch; sends `ForceStopReplay` immediately as fallback.
+    ModeSwitchStopBusy,
+    /// F7: engine returned `EngineBusy` for `ForceStopReplay` — genuine failure; abort.
     ModeSwitchEngineBusy(String),
     /// Internal: genuinely does nothing in update(). Used to discard async Task
     /// completion events where the result is irrelevant (fire-and-forget IPC sends).
@@ -1897,23 +1899,23 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         }
         // Phase 8: EngineBusy → GUI ユーザーへの warn toast
         // Python engine が state guard で Command を拒否したときに emit される。
-        // F7: StopReplay / ForceStopReplay の EngineBusy のみ mode-switch 中断として扱う
-        //     (replay→live 専用)。live→replay の EngineBusy 行は別経路で対処する。
+        // F7: StopReplay の EngineBusy はエンジン IDLE（リプレイ未ロード）を意味する。
+        //     mode-switch を中断せず ForceStopReplay fallback に即移行する。
+        //     ForceStopReplay の EngineBusy は真の失敗なのでスイッチを中断する。
         EngineEvent::EngineBusy {
             attempted_command,
             reason,
             ..
         } => {
             use engine_client::dto::AttemptedCommand;
-            if matches!(
-                attempted_command,
-                AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay
-            ) {
-                Some(Message::ModeSwitchEngineBusy(reason))
-            } else {
-                Some(Message::OrderToast(Toast::warn(format!(
+            match attempted_command {
+                AttemptedCommand::StopReplay => Some(Message::ModeSwitchStopBusy),
+                AttemptedCommand::ForceStopReplay => {
+                    Some(Message::ModeSwitchEngineBusy(reason))
+                }
+                _ => Some(Message::OrderToast(Toast::warn(format!(
                     "操作を受け付けられませんでした: {attempted_command} — {reason}"
-                ))))
+                )))),
             }
         }
         // Phase 8.1b: multi-client 接続ライフサイクルイベント
@@ -4056,6 +4058,7 @@ impl Flowsurface {
                                         conn.send(engine_client::dto::Command::LoadReplayData {
                                             request_id: load_req_id,
                                             instrument_id: instrument_id.clone(),
+                                            instrument_ids: None,
                                             start_date: start_date.clone(),
                                             end_date: end_date.clone(),
                                             granularity: gran_dto.clone(),
@@ -4069,6 +4072,7 @@ impl Flowsurface {
                                             strategy_id: "user-strategy".to_string(),
                                             config: engine_client::dto::EngineStartConfig {
                                                 instrument_id,
+                                                instrument_ids: None,
                                                 start_date,
                                                 end_date,
                                                 initial_cash: initial_cash.to_string(),
@@ -4626,10 +4630,50 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
-            // F7: EngineBusy for StopReplay/ForceStopReplay — abort mode switch immediately.
-            // This handles the 5-axis matrix row "replay→live, EngineBusy" without waiting
-            // for the 5s timeout. The stale ModeSwitchStopTimeout fires later but is ignored
-            // because mode_switch_state will be None at that point.
+            // F7: StopReplay EngineBusy — engine is IDLE (no replay loaded).
+            // Skip the remaining 5s wait and send ForceStopReplay immediately.
+            // ForceStopReplay has no state guard on the Python side and always responds
+            // with ReplayStopped, so the mode switch can complete normally.
+            // If the stale ModeSwitchStopTimeout fires later, mode_switch_state will
+            // already be None (cleared by ModeSwitchStopAcked) and is safely ignored.
+            Message::ModeSwitchStopBusy => {
+                log::warn!("[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately");
+                if self.mode_switch_state.is_none() {
+                    return Task::none();
+                }
+                if let Some(conn) = self.engine_connection.clone() {
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    let force_task = Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::ForceStopReplay { request_id })
+                                .await
+                        },
+                        |result| match result {
+                            Ok(()) => Message::Noop,
+                            Err(_) => Message::ModeSwitchSendFailed,
+                        },
+                    );
+                    let timeout_task = Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        },
+                        |_| Message::ModeSwitchForceStopTimeout,
+                    );
+                    return Task::batch([force_task, timeout_task]);
+                } else {
+                    self.mode_switch_state = None;
+                    let dialog = screen::ConfirmDialog::new(
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
+                    return Task::none();
+                }
+            }
+            // F7: ForceStopReplay EngineBusy — genuine failure; abort mode switch.
+            // The stale ModeSwitchStopTimeout (if still pending) fires later but is
+            // ignored because mode_switch_state will be None at that point.
             Message::ModeSwitchEngineBusy(reason) => {
                 if self.mode_switch_state.take().is_some() {
                     let dialog = screen::ConfirmDialog::new(
@@ -7216,6 +7260,52 @@ mod lock_order_tests {
         assert!(
             third.is_some(),
             "try_acquire must return Some again after the previous guard is dropped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mode_switch_engine_busy_routing_tests {
+    //! Regression guards for the F7 replay→live mode-switch bug where
+    //! `StopReplay` EngineBusy aborted the switch instead of falling through
+    //! to the `ForceStopReplay` fallback.
+    //!
+    //! Root cause: both `AttemptedCommand::StopReplay` and `ForceStopReplay`
+    //! routed to `ModeSwitchEngineBusy` which calls `.take()` and clears
+    //! `mode_switch_state`. The 5-second `ModeSwitchStopTimeout` then saw
+    //! `is_none()` and early-returned without sending `ForceStopReplay`.
+
+    const MAIN_RS: &str = include_str!("./main.rs");
+
+    /// StopReplay and ForceStopReplay must be handled in separate arms.
+    /// Sharing a branch means StopReplay EngineBusy aborts the mode switch,
+    /// preventing the ForceStopReplay fallback from ever being sent.
+    #[test]
+    fn stop_replay_and_force_stop_replay_engine_busy_are_separate_arms() {
+        // Strip the test module itself so we only inspect production code.
+        let test_mod_marker = "mod mode_switch_engine_busy_routing_tests {";
+        let prod_code = MAIN_RS
+            .split_once(test_mod_marker)
+            .map(|(prod, _)| prod)
+            .expect("test module marker must exist in main.rs");
+        // The old shared-branch pattern must not appear in production code.
+        let shared_branch = "AttemptedCommand::StopReplay | AttemptedCommand::ForceStopReplay";
+        assert!(
+            !prod_code.contains(shared_branch),
+            "StopReplay must not share an EngineBusy arm with ForceStopReplay. \
+             StopReplay EngineBusy = engine IDLE (continue with ForceStopReplay). \
+             ForceStopReplay EngineBusy = genuine failure (abort mode switch)."
+        );
+    }
+
+    /// The new `ModeSwitchStopBusy` message must exist to handle
+    /// `StopReplay` EngineBusy by sending `ForceStopReplay` immediately.
+    #[test]
+    fn mode_switch_stop_busy_message_exists() {
+        assert!(
+            MAIN_RS.contains("ModeSwitchStopBusy"),
+            "Message::ModeSwitchStopBusy must exist — it handles StopReplay EngineBusy \
+             by sending ForceStopReplay immediately instead of aborting the mode switch"
         );
     }
 }
