@@ -9,6 +9,9 @@ pub enum Action {
     Save,
     SaveAs,
     OpenReplayDialog,
+    /// Stop the currently running replay without switching app mode.
+    /// (Replay モードに留まり、エンジンだけ IDLE に落とす)
+    StopReplay,
     Quit,
     /// F7/T3: switch to the given app mode (menu item clicked).
     SwitchMode(AppMode),

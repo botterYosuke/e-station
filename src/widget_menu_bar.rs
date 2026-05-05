@@ -104,6 +104,7 @@ pub fn with_dropdown_overlay<'a>(
     mode: AppMode,
     wandb_auth: &'a WandbAuthState,
     run_buf: &'a RunBufferIndex,
+    replay_running: bool,
 ) -> Element<'a, Message> {
     let Some(open_top) = state.open else {
         return base;
@@ -122,7 +123,7 @@ pub fn with_dropdown_overlay<'a>(
     // anchor — see the rationale on `view()`'s removed `.on_move` handler.
     let top_offset = BAR_HEIGHT;
 
-    let entries = entries_for_menu(open_top, &mode, wandb_auth, run_buf);
+    let entries = entries_for_menu(open_top, &mode, wandb_auth, run_buf, replay_running);
     let items = build_dropdown(entries);
     let dropdown_panel = opaque(
         container(column(items))
@@ -160,15 +161,26 @@ fn entries_for_menu(
     mode: &AppMode,
     wandb_auth: &WandbAuthState,
     run_buf: &RunBufferIndex,
+    replay_running: bool,
 ) -> Vec<MenuEntry> {
     match top {
         TopMenu::File => actions_for_mode(mode)
             .into_iter()
-            .map(|action| MenuEntry {
-                action,
-                enabled: true,
-                tooltip: None,
-                checked: None,
+            .map(|action| {
+                // "リプレイ停止" is only clickable while a replay is actually
+                // running; everything else in the File menu is unconditional.
+                let (enabled, tooltip) = match action {
+                    Action::ReplayStop if !replay_running => {
+                        (false, Some("リプレイは実行されていません"))
+                    }
+                    _ => (true, None),
+                };
+                MenuEntry {
+                    action,
+                    enabled,
+                    tooltip,
+                    checked: None,
+                }
             })
             .collect(),
         TopMenu::Mode => mode_menu_items(mode),
@@ -272,8 +284,9 @@ fn action_label_and_shortcut(action: &Action) -> (&'static str, Option<&'static 
 
 /// Maps `menu::Action` to the equivalent `native_menu::Action`, if one exists.
 ///
-/// `ReplayStop` maps to `SwitchMode(Live)` — stopping replay on Linux goes through
-/// the same mode-switch flow as on Win/Mac (F7 guard + StopReplay command).
+/// `ReplayStop` maps to `StopReplay` — stops the running replay without
+/// switching app mode. The dashboard stays in Replay mode and the engine
+/// transitions to IDLE (a new replay can then be started via `ReplayStart`).
 pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Action> {
     use crate::native_menu::Action as N;
     match action {
@@ -281,7 +294,7 @@ pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Ac
         Action::Save => Some(N::Save),
         Action::SaveAs => Some(N::SaveAs),
         Action::ReplayStart => Some(N::OpenReplayDialog),
-        Action::ReplayStop => Some(N::SwitchMode(AppMode::Live)),
+        Action::ReplayStop => Some(N::StopReplay),
         Action::Quit => Some(N::Quit),
         Action::SwitchAppMode(mode) => Some(N::SwitchMode(*mode)),
         Action::SubmitToWandb => Some(N::SubmitToWandb),

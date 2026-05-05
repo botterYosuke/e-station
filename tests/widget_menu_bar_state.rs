@@ -413,14 +413,21 @@ fn to_native_action_function_exists() {
         src.contains("N::OpenFile") || src.contains("native_menu::Action::OpenFile"),
         "to_native_action must map Action::Open to native_menu::Action::OpenFile"
     );
-    // ReplayStop must NOT return None — it maps to SwitchMode(Live) so the item is functional
+    // ReplayStop must NOT return None — it maps to N::StopReplay so the item is functional.
+    // Stop-only flow: stops the running replay without switching app mode (engine → IDLE,
+    // dashboard stays in Replay mode).
     assert!(
         src.contains("Action::ReplayStop"),
         "to_native_action must explicitly handle Action::ReplayStop"
     );
     assert!(
         !src.contains("Action::ReplayStop => None"),
-        "Action::ReplayStop must NOT return None — dead menu items are HIGH severity (maps to SwitchMode(Live))"
+        "Action::ReplayStop must NOT return None — dead menu items are HIGH severity (maps to N::StopReplay)"
+    );
+    assert!(
+        src.contains("Action::ReplayStop => Some(N::StopReplay)")
+            || src.contains("Action::ReplayStop => Some(native_menu::Action::StopReplay)"),
+        "Action::ReplayStop must map to native_menu::Action::StopReplay (stop-only flow, no mode switch)"
     );
 }
 

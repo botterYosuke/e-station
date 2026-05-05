@@ -1422,6 +1422,17 @@ struct Flowsurface {
     /// The leading `_` on the field name silences the unused-field lint for
     /// the guard half (it is held purely for its Drop side-effect).
     mode_switch_state: Option<(engine_client::dto::AppMode, ModeSwitchGuard)>,
+    /// True while a replay is currently loaded/running. Drives the
+    /// "リプレイ停止（Replay Stop）" menu item's enabled state — the item is
+    /// only clickable while a replay is actually playing. Set true on
+    /// `EngineEvent::ReplayDataLoaded`; reset on `ReplayFinished` /
+    /// `ReplayStopped` (both stop-only and mode-switch paths).
+    replay_running: bool,
+    /// True between `Message::StopReplayOnly` dispatch and the corresponding
+    /// `ReplayStopped` ack / final timeout. Distinguishes the stop-only flow
+    /// from the F7 mode-switch flow inside the shared `ModeSwitch*` message
+    /// handlers (which now serve both flows).
+    replay_stop_only_pending: bool,
     /// Widget menu bar open/close state (all platforms).
     menu_bar: crate::menu_bar_state::State,
     /// P9: W&B authentication state. Populated when Python check_auth subprocess responds.
@@ -1700,6 +1711,11 @@ enum Message {
     ModeSwitchStopBusy,
     /// F7: engine returned `EngineBusy` for `ForceStopReplay` — genuine failure; abort.
     ModeSwitchEngineBusy(String),
+    /// User clicked "リプレイ停止（Replay Stop）" — stop the running replay without
+    /// switching app mode. Sends `Command::StopReplay`; the subsequent ack /
+    /// timeout / EngineBusy events are routed through the shared `ModeSwitch*`
+    /// handlers, distinguished by `replay_stop_only_pending`.
+    StopReplayOnly,
     /// Internal: genuinely does nothing in update(). Used to discard async Task
     /// completion events where the result is irrelevant (fire-and-forget IPC sends).
     Noop,
@@ -2285,6 +2301,8 @@ impl Flowsurface {
             pending_exit_windows: None,
             pending_open_file: None,
             mode_switch_state: None,
+            replay_running: false,
+            replay_stop_only_pending: false,
             menu_bar: crate::menu_bar_state::State::default(),
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
             run_buffer: wandb_auth::RunBufferIndex::empty(),
@@ -3671,6 +3689,7 @@ impl Flowsurface {
                     Some(engine_client::dto::ReplayGranularity::Trade) | None => None,
                 };
                 let main_window_id = self.main_window.id;
+                self.replay_running = true;
                 log::info!(
                     "ReplayDataLoaded: auto-generating replay panes for \
                      instrument_id={instrument_id:?} timeframe={timeframe:?}"
@@ -3685,6 +3704,7 @@ impl Flowsurface {
             }
             // Replay engine finished → auto-refresh order list from Python's in-memory fills.
             Message::ReplayFinished => {
+                self.replay_running = false;
                 if let Some(conn) = self.engine_connection.as_ref().cloned() {
                     return Task::perform(
                         async move {
@@ -3880,6 +3900,9 @@ impl Flowsurface {
                     }
                     Action::OpenReplayDialog => {
                         return Task::done(Message::ShowReplayDialog);
+                    }
+                    Action::StopReplay => {
+                        return Task::done(Message::StopReplayOnly);
                     }
                     Action::Quit => {
                         let active_windows: Vec<window::Id> = self
@@ -4703,21 +4726,70 @@ impl Flowsurface {
                 }
                 return self.restart_with_mode(target);
             }
-            // F7: ReplayStopped event received — proceed with restart_with_mode
-            Message::ModeSwitchStopAcked => {
-                let Some((target, _guard)) = self.mode_switch_state.take() else {
-                    // Stale event (e.g. timeout already handled it) — ignore
+            // User clicked "リプレイ停止" — stop replay without changing app mode.
+            // Sends StopReplay (with the same 5s timeout as the F7 mode-switch flow);
+            // the ack / timeout / EngineBusy events are routed through the shared
+            // `ModeSwitch*` handlers, distinguished by `replay_stop_only_pending`.
+            Message::StopReplayOnly => {
+                if self.replay_stop_only_pending || self.mode_switch_state.is_some() {
+                    return Task::none();
+                }
+                if !self.replay_running {
+                    return Task::none();
+                }
+                let Some(conn) = self.engine_connection.clone() else {
+                    let dialog = screen::ConfirmDialog::new(
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                            .to_string(),
+                        Box::new(Message::ToggleDialogModal(None)),
+                    )
+                    .with_confirm_btn_text("閉じる".to_string());
+                    self.confirm_dialog = Some(dialog);
                     return Task::none();
                 };
-                return self.restart_with_mode(target);
+                self.replay_stop_only_pending = true;
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let send_task = Task::perform(
+                    async move {
+                        conn.send(engine_client::dto::Command::StopReplay { request_id })
+                            .await
+                    },
+                    |result| match result {
+                        Ok(()) => Message::Noop,
+                        Err(_) => Message::ModeSwitchSendFailed,
+                    },
+                );
+                let timeout_task = Task::perform(
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    },
+                    |_| Message::ModeSwitchStopTimeout,
+                );
+                return Task::batch([send_task, timeout_task]);
+            }
+            // F7: ReplayStopped event received — proceed with restart_with_mode
+            // (also handles the stop-only flow: drops the pending flag and emits
+            // a confirmation toast without restarting the dashboard).
+            Message::ModeSwitchStopAcked => {
+                self.replay_running = false;
+                if let Some((target, _guard)) = self.mode_switch_state.take() {
+                    self.replay_stop_only_pending = false;
+                    return self.restart_with_mode(target);
+                }
+                if std::mem::take(&mut self.replay_stop_only_pending) {
+                    self.notifications
+                        .push(Toast::info("リプレイを停止しました".to_string()));
+                }
+                return Task::none();
             }
             // F7: 5-second StopReplay timeout — send ForceStopReplay fallback
+            // Shared between mode-switch and stop-only flows.
             Message::ModeSwitchStopTimeout => {
                 log::warn!("[F7] StopReplay timed out — sending ForceStopReplay fallback");
-                if self.mode_switch_state.is_none() {
+                if self.mode_switch_state.is_none() && !self.replay_stop_only_pending {
                     // Already handled (ReplayStopped arrived before timeout) — ignore
                     return Task::none();
-                };
+                }
                 if let Some(conn) = self.engine_connection.clone() {
                     let request_id = uuid::Uuid::new_v4().to_string();
                     let force_task = Task::perform(
@@ -4738,10 +4810,18 @@ impl Flowsurface {
                     );
                     return Task::batch([force_task, timeout_task]);
                 } else {
-                    // No connection — release guard and show error dialog
-                    self.mode_switch_state = None;
+                    // No connection — release guard / pending flag and show error dialog
+                    let was_mode_switch = self.mode_switch_state.take().is_some();
+                    let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                    let body = if was_mode_switch {
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。"
+                    } else if was_stop_only {
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                    } else {
+                        return Task::none();
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        body.to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -4750,14 +4830,20 @@ impl Flowsurface {
                 }
             }
             // F7: ForceStopReplay also timed out — release guard and show error
+            // Shared between mode-switch and stop-only flows.
             Message::ModeSwitchForceStopTimeout => {
-                log::warn!("[F7] ForceStopReplay also timed out — aborting mode switch");
-                if self.mode_switch_state.take().is_none() {
-                    // Already handled (ReplayStopped arrived before timeout) — ignore
+                log::warn!("[F7] ForceStopReplay also timed out — aborting");
+                let was_mode_switch = self.mode_switch_state.take().is_some();
+                let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                let body = if was_mode_switch {
+                    "モード切替に失敗しました。\nエンジンが応答しません。"
+                } else if was_stop_only {
+                    "リプレイ停止に失敗しました。\nエンジンが応答しません。"
+                } else {
                     return Task::none();
-                }
+                };
                 let dialog = screen::ConfirmDialog::new(
-                    "モード切替に失敗しました。\nエンジンが応答しません。".to_string(),
+                    body.to_string(),
                     Box::new(Message::ToggleDialogModal(None)),
                 )
                 .with_confirm_btn_text("閉じる".to_string());
@@ -4766,11 +4852,19 @@ impl Flowsurface {
             }
             // F7: send() returned Err — socket is broken; abort mode switch immediately without
             // waiting for the 5-second (StopReplay) or 2-second (ForceStopReplay) timeout.
-            // Stale timeout messages that fire later are ignored because mode_switch_state is None.
+            // Stale timeout messages that fire later are ignored because the pending
+            // state will be cleared by then.
             Message::ModeSwitchSendFailed => {
-                if self.mode_switch_state.take().is_some() {
+                let was_mode_switch = self.mode_switch_state.take().is_some();
+                let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                if was_mode_switch || was_stop_only {
+                    let body = if was_mode_switch {
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。"
+                    } else {
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        body.to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -4781,12 +4875,11 @@ impl Flowsurface {
             // F7: StopReplay EngineBusy — engine is IDLE (no replay loaded).
             // Skip the remaining 5s wait and send ForceStopReplay immediately.
             // ForceStopReplay has no state guard on the Python side and always responds
-            // with ReplayStopped, so the mode switch can complete normally.
-            // If the stale ModeSwitchStopTimeout fires later, mode_switch_state will
-            // already be None (cleared by ModeSwitchStopAcked) and is safely ignored.
+            // with ReplayStopped, so the flow can complete normally. Shared between
+            // mode-switch and stop-only paths.
             Message::ModeSwitchStopBusy => {
                 log::warn!("[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately");
-                if self.mode_switch_state.is_none() {
+                if self.mode_switch_state.is_none() && !self.replay_stop_only_pending {
                     return Task::none();
                 }
                 if let Some(conn) = self.engine_connection.clone() {
@@ -4809,9 +4902,17 @@ impl Flowsurface {
                     );
                     return Task::batch([force_task, timeout_task]);
                 } else {
-                    self.mode_switch_state = None;
+                    let was_mode_switch = self.mode_switch_state.take().is_some();
+                    let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                    let body = if was_mode_switch {
+                        "モード切替に失敗しました。\nエンジンとの接続が切れています。"
+                    } else if was_stop_only {
+                        "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
+                    } else {
+                        return Task::none();
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        "モード切替に失敗しました。\nエンジンとの接続が切れています。".to_string(),
+                        body.to_string(),
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -4819,13 +4920,19 @@ impl Flowsurface {
                     return Task::none();
                 }
             }
-            // F7: ForceStopReplay EngineBusy — genuine failure; abort mode switch.
-            // The stale ModeSwitchStopTimeout (if still pending) fires later but is
-            // ignored because mode_switch_state will be None at that point.
+            // F7: ForceStopReplay EngineBusy — genuine failure; abort the flow.
+            // Shared between mode-switch and stop-only paths.
             Message::ModeSwitchEngineBusy(reason) => {
-                if self.mode_switch_state.take().is_some() {
+                let was_mode_switch = self.mode_switch_state.take().is_some();
+                let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
+                if was_mode_switch || was_stop_only {
+                    let body = if was_mode_switch {
+                        format!("モード切替を中止しました。\nエンジンがビジー状態です: {reason}")
+                    } else {
+                        format!("リプレイ停止を中止しました。\nエンジンがビジー状態です: {reason}")
+                    };
                     let dialog = screen::ConfirmDialog::new(
-                        format!("モード切替を中止しました。\nエンジンがビジー状態です: {reason}"),
+                        body,
                         Box::new(Message::ToggleDialogModal(None)),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
@@ -5969,6 +6076,7 @@ impl Flowsurface {
                 current_mode,
                 &self.wandb_auth,
                 &self.run_buffer,
+                self.replay_running,
             )
         } else {
             container(
