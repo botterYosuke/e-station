@@ -632,7 +632,7 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 **使い方（Phase 8 以降の正規 CLI）**:
 ```bash
 uv run python -m engine.replay_session run \
-    --strategy docs/example/buy_and_hold.py \
+    --strategy examples/buy_and_hold.py \
     --instrument 1301.TSE \
     --start 2025-01-06 \
     --end 2025-03-31

@@ -58,7 +58,7 @@ Get-Content "$env:APPDATA\flowsurface\engine-session.json"
 
 ```powershell
 uv run python -m engine.replay_session run `
-    --strategy docs/example/buy_and_hold.py `
+    --strategy examples/buy_and_hold.py `
     --instrument 1301.TSE `
     --start 2025-01-06 `
     --end 2025-03-31 `
@@ -121,7 +121,7 @@ engine の state guard が弾いて `EngineBusy` event が返される。
 ```powershell
 # 実行中に別ターミナルで（意図的に拒否されることを確認）
 uv run python -m engine.replay_session run `
-    --strategy docs/example/buy_and_hold.py `
+    --strategy examples/buy_and_hold.py `
     --instrument 1301.TSE `
     --start 2025-01-06 `
     --end 2025-03-31

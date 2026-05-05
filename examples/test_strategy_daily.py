@@ -1,25 +1,30 @@
-"""バイアンドホールド戦略サンプル（分足版・動作確認用）。
+"""バイアンドホールド戦略サンプル（動作確認・決定論性テスト用）。
 
-`buy_and_hold.py` の Minute 足バリエーションです。granularity を ``"Minute"``
-にし、bar_type を ``1-MINUTE-LAST-EXTERNAL`` で購読する点だけが違います。
-最初の分足で成行買いし、その後は保有し続けます。
+最初のバーで成行買いし、その後は保有し続ける最小戦略。
+numpy / pandas は使わず、追加依存は不要です。
 
 起動（headless / in-process）:
 
     uv run python -m engine.replay_session run \
-        --strategy docs/example/buy_and_hold_minute.py \
-        --instrument 1301.TSE --start 2025-01-06 --end 2025-01-10 \
-        --granularity Minute --mode inprocess
+        --strategy examples/buy_and_hold.py \
+        --instrument 1301.TSE --start 2025-01-06 --end 2025-03-31 \
+        --mode inprocess
 
 GUI 付きで attach する場合は別ターミナルで先に `cargo run -- --mode replay`
 を起動してから上記コマンドを `--mode auto`（または `attach`）で実行する。
-詳しい手順は docs/wiki/backtest.md / docs/example/README.md を参照。
+詳しい手順は docs/wiki/backtest.md を参照。
+
+strategy_init_kwargs で初期化パラメータを上書きする場合は Python から呼ぶ:
+
+    from engine.replay_session import ReplaySession
+    with ReplaySession() as s:
+        s.load("1301.TSE", "2025-01-06", "2025-03-31")
+        s.run(strategy_file="examples/buy_and_hold.py",
+              strategy_init_kwargs={"lot_size": 200})
 
 注意:
     - サンドボックスはありません。バグによる誤発注はユーザー責任です
     - 教育用の最小実装です。スリッページ・手数料・リスク管理は含みません
-    - 1 週間（5 営業日）でおよそ 1,500 本の分足が流れます。データ範囲を
-      広げる場合は実行時間とメモリに注意してください
 """
 
 from __future__ import annotations
@@ -42,8 +47,8 @@ SCENARIO: Scenario = {
     "schema_version": 1,
     "instrument": "1301.TSE",
     "start": "2025-01-06",
-    "end": "2025-01-10",
-    "granularity": "Minute",
+    "end": "2025-03-31",
+    "granularity": "Daily",
     "initial_cash": 1_000_000,
 }
 from nautilus_trader.model.data import Bar, BarType
@@ -53,8 +58,8 @@ from nautilus_trader.model.objects import Quantity
 from nautilus_trader.trading.strategy import Strategy
 
 
-class BuyAndHoldMinuteStrategy(Strategy):
-    """最初の分足で成行買いし、以降は保有し続ける最小戦略。"""
+class BuyAndHoldStrategy(Strategy):
+    """最初のバーで成行買いし、以降は保有し続ける最小戦略。"""
 
     def __init__(
         self,
@@ -63,10 +68,10 @@ class BuyAndHoldMinuteStrategy(Strategy):
         lot_size: int = 100,
         bar_type_str: str | None = None,
     ) -> None:
-        super().__init__(config=StrategyConfig(strategy_id="buy-and-hold-minute"))
+        super().__init__(config=StrategyConfig(strategy_id="buy-and-hold"))
         self.instrument_id = InstrumentId.from_str(instrument_id)
         self.lot_size = int(lot_size)
-        self.bar_type_str = bar_type_str or f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
+        self.bar_type_str = bar_type_str or f"{instrument_id}-1-DAY-LAST-EXTERNAL"
         self._bought = False
 
     def on_start(self) -> None:
@@ -76,7 +81,7 @@ class BuyAndHoldMinuteStrategy(Strategy):
             return
         self.subscribe_bars(BarType.from_str(self.bar_type_str))
         self.log.info(
-            f"BuyAndHoldMinuteStrategy started: instrument={self.instrument_id} "
+            f"BuyAndHoldStrategy started: instrument={self.instrument_id} "
             f"lot_size={self.lot_size} bar_type={self.bar_type_str}"
         )
 

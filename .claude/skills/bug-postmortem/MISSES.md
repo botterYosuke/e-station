@@ -1273,18 +1273,18 @@ closure を呼ぶテスト追加まで `AttributeError` が露顕しなかった
 
 ---
 
-## 2026-04-30 — `docs/example/buy_and_hold.py` が存在せず 12 テストが FileNotFoundError
+## 2026-04-30 — `examples/buy_and_hold.py` が存在せず 12 テストが FileNotFoundError
 
 **見逃しパターン**: 参照リソース未作成（test が fixture/example ファイルの存在を前提とするが未コミット）
 
 **不具合の概要**:
 `test_strategy_live_replay_smoke.py`・`test_nautilus_determinism.py`・
-`test_strategy_compat_lint.py` が `docs/example/buy_and_hold.py` を
+`test_strategy_compat_lint.py` が `examples/buy_and_hold.py` を
 `strategy_file` として参照していたが、ファイルが存在しなかった。
 `FileNotFoundError: strategy file not found` で 12 テストが FAIL した。
 
 **修正内容**:
-- `docs/example/buy_and_hold.py` を新規作成（BuyAndHoldStrategy: 最初の bar で成行買い・保有継続）
+- `examples/buy_and_hold.py` を新規作成（BuyAndHoldStrategy: 最初の bar で成行買い・保有継続）
 
 **既存テストが見逃した理由**:
 テストコードと対応するリソースファイルが同一コミットで追加されなかった。
@@ -1301,7 +1301,7 @@ CI の「コレクション」フェーズでは発見されず個別テスト�
 - `strategy_file` など外部リソースを参照するテストは、対応ファイルと **同一 PR/コミット** で
   追加すること。
 - テストが参照するファイルパスを `git grep` で検索し、実ファイルの存在を PR マージ前に確認する。
-- `docs/example/` のような「例示コード」ディレクトリは、テストが参照するファイルが揃っているか
+- `examples/` のような「例示コード」ディレクトリは、テストが参照するファイルが揃っているか
   定期的に棚卸しする。
 
 ---

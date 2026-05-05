@@ -140,7 +140,7 @@ Rust 側 receiver が**特別扱い**する。`path_guard_violation` のみ **`t
 {
   "schema_version": 1,
   "run_id": "1714800123-buy_and_hold-1301_TSE",
-  "strategy_file": "docs/example/buy_and_hold.py",
+  "strategy_file": "examples/buy_and_hold.py",
   "strategy_sha256": "<file digest>",
   "git_rev": "<HEAD or 'dirty'>",
   "scenario": {

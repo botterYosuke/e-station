@@ -347,7 +347,7 @@ cargo test --workspace
 | `python/engine/server.py` | `_dispatch()` に LoadStrategyScenario / SaveStrategyScenario ハンドラ |
 | `python/engine/schemas.py` | IPC コマンド / イベント定義（SCHEMA_MINOR=10） |
 | `engine-client/src/dto.rs` | Rust 側 Command / Event バリアント |
-| `docs/example/buy_and_hold.py` | SCENARIO 定数サンプル |
+| `examples/buy_and_hold.py` | SCENARIO 定数サンプル |
 
 ### 設計上の知見・落とし穴
 

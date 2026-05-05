@@ -6,7 +6,7 @@ schema_version: 2 と instruments リストを使って 2 銘柄を同時にリ�
 起動:
 
     uv run python -m engine.replay_session run \
-        --strategy docs/example/pair_trade_minute.py \
+        --strategy examples/pair_trade_minute.py \
         --mode inprocess
 
 注意:

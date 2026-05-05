@@ -127,7 +127,7 @@ def test_strategy_with_multiple_forbidden_methods_detects_all():
 
 
 def test_example_buy_and_hold_replay_compat_lint():
-    """docs/example/test_strategy_daily.py は on_order_book_* / on_quote_tick を持たないこと。
+    """examples/test_strategy_daily.py は on_order_book_* / on_quote_tick を持たないこと。
 
     サンプル戦略が live/replay 互換規約（spec.md §3.5.2）を満たすことを保証する。
     """

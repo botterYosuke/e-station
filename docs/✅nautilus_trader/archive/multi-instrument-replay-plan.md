@@ -7,7 +7,7 @@
 
 ## 1. 背景・動機 {#background-motivation}
 
-現状、`docs/example/buy_and_hold_minute.py` などで使う `SCENARIO.instrument` は単一文字列で、
+現状、`examples/buy_and_hold_minute.py` などで使う `SCENARIO.instrument` は単一文字列で、
 リプレイハーネスは end-to-end で「1 戦略 = 1 銘柄」を前提にしている。
 
 しかし以下のユースケースでは複数銘柄を同一バックテストで扱いたい:
@@ -31,7 +31,7 @@ Nautilus Trader 自体は `BacktestEngine.add_instrument()` を複数回呼べ�
 | C3 | [python/engine/schemas.py:723](../../python/engine/schemas.py#L723), [:749](../../python/engine/schemas.py#L749), [:779](../../python/engine/schemas.py#L779) | IPC schema (`LoadReplayData`, `EngineStartConfig` 等) の `instrument_id: str` が単数 |
 | C4 | [python/engine/nautilus/engine_runner.py:259-385](../../python/engine/nautilus/engine_runner.py#L259-L385) | `start_backtest_replay()` は単一 `instrument_id` を受け、`load_*_bars()` を 1 回しか呼ばない。`add_instrument()` も 1 回のみ |
 | C5 | [python/engine/nautilus/engine_runner.py:480-](../../python/engine/nautilus/engine_runner.py#L480) | `start_backtest_replay_streaming()` も同形 |
-| C6 | docs/example/*.py | `SCENARIO.instrument` を単一文字列前提でサンプル化 |
+| C6 | examples/*.py | `SCENARIO.instrument` を単一文字列前提でサンプル化 |
 | C7 | GUI replay panes | `ReplayDataLoaded.instrument_id: str \| None` を単数前提で受け取り、`auto_generate_replay_panes` も 1 銘柄想定 |
 
 ## 3. 設計方針 {#design-principles}
@@ -149,13 +149,13 @@ SCENARIO = {"schema_version": 2, "instruments": ["1301.TSE", "7203.TSE"], ...}
 
 ### M5: ドキュメント / サンプル
 
-- [ ] M5.1 [docs/example/README.md](../example/README.md) に複数銘柄サンプルの節を追加（TODO）
+- [ ] M5.1 [examples/README.md](../example/README.md) に複数銘柄サンプルの節を追加（TODO）
 
-- [x] **M5.2a** 新規サンプル `docs/example/pair_trade_minute.py` を追加 ✅
+- [x] **M5.2a** 新規サンプル `examples/pair_trade_minute.py` を追加 ✅
   - schema_version=2: `SCENARIO.instruments = ["1301.TSE", "7203.TSE"]`
   - Strategy.on_bar(bar) で銘柄判定パターンを提示
 
-- [x] **M5.2b** 新規サンプル `docs/example/multiinst_10pairs_minute.py` を追加（10銘柄、T-AC-5 用）✅
+- [x] **M5.2b** 新規サンプル `examples/multiinst_10pairs_minute.py` を追加（10銘柄、T-AC-5 用）✅
   - schema_version=2: `SCENARIO.instruments` 10銘柄
   - Strategy はシンプルに全銘柄を等重購読
 
@@ -166,11 +166,11 @@ SCENARIO = {"schema_version": 2, "instruments": ["1301.TSE", "7203.TSE"], ...}
 
 | ID | 内容 | 実行コマンド |
 |---|---|---|
-| T-AC-1 | v1 SCENARIO（既存）が無修正で動くこと（回帰） | `uv run python -m engine.replay_session run --strategy docs/example/test_strategy_minute.py` |
-| T-AC-2 | v2 SCENARIO（2 銘柄）で `replay_session run` が完走し、両銘柄の `Bar` が strategy `on_bar` に到達 | `uv run python -m engine.replay_session run --strategy docs/example/pair_trade_minute.py` |
-| T-AC-3 | CLI `--instrument 1301.TSE 7203.TSE` で SCENARIO を上書きできる | `uv run python -m engine.replay_session run --strategy docs/example/test_strategy_minute.py --instrument 1301.TSE 7203.TSE` |
+| T-AC-1 | v1 SCENARIO（既存）が無修正で動くこと（回帰） | `uv run python -m engine.replay_session run --strategy examples/test_strategy_minute.py` |
+| T-AC-2 | v2 SCENARIO（2 銘柄）で `replay_session run` が完走し、両銘柄の `Bar` が strategy `on_bar` に到達 | `uv run python -m engine.replay_session run --strategy examples/pair_trade_minute.py` |
+| T-AC-3 | CLI `--instrument 1301.TSE 7203.TSE` で SCENARIO を上書きできる | `uv run python -m engine.replay_session run --strategy examples/test_strategy_minute.py --instrument 1301.TSE 7203.TSE` |
 | T-AC-4 | 旧 GUI（古い SCHEMA_MINOR）が単一銘柄として fallback して動く | 旧 GUI simulator: SCHEMA_MINOR=N-1 で LoadReplayData `{instrument_id: "1301.TSE", instrument_ids: null}` を送信 → engine が `instrument_ids` を無視し `instrument_id` で単一銘柄処理。確認: GUI chart pane が 1 銘柄のみ表示 |
-| T-AC-5 | 10 銘柄 × 1 営業日（minute=約 1,500 本/銘柄）で計 15,000 本。推定メモリ 200-300 MB（開発環境標準）。上限確認は `python -m tracemalloc` で計測 | `uv run python -m engine.replay_session run --strategy docs/example/multiinst_10pairs_minute.py` |
+| T-AC-5 | 10 銘柄 × 1 営業日（minute=約 1,500 本/銘柄）で計 15,000 本。推定メモリ 200-300 MB（開発環境標準）。上限確認は `python -m tracemalloc` で計測 | `uv run python -m engine.replay_session run --strategy examples/multiinst_10pairs_minute.py` |
 | T-AC-6 | データ未収録の銘柄が混ざった場合、明示的エラーで停止し、他銘柄に黙って fallback しない（C-4 Medium Priority Fix） | 期待動作: `jquants_loader.load_minute_bars("9999.TSE", ...)` が FileNotFoundError を raise → engine_runner が EngineFailure event を emit（status="data_load_failed"）。GUI が error dialog を表示。他銘柄は loaded されず、backtest は全体停止 |
 
 ## 5. 非ゴール / 先送り {#non-goals}

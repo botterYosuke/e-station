@@ -81,7 +81,7 @@ def test_buy_and_hold_runs_to_completion(tmp_path):
         assert s.mode == "inprocess"   # engine が居なければ in-process
         s.load("1301.TSE", "2025-01-06", "2025-03-31", "Daily")
         s.run(
-            strategy_file="docs/example/test_strategy_daily.py",
+            strategy_file="examples/test_strategy_daily.py",
             on_event=events.append,
             initial_cash=1_000_000,
         )
@@ -103,7 +103,7 @@ cargo run -- --mode replay
 
 # ターミナル2: helper を attach mode で走らせる。
 uv run python -m engine.replay_session run \
-    --strategy docs/example/test_strategy_daily.py \
+    --strategy examples/test_strategy_daily.py \
     --instrument 1301.TSE --start 2025-01-06 --end 2025-03-31 \
     --mode auto
 ```
@@ -122,7 +122,7 @@ def test_helper_attaches_to_running_gui():
         assert s.mode == "attach"
         s.load("1301.TSE", "2025-01-06", "2025-03-31")
         # event は GUI チャートと pytest 両方に流れる
-        s.run(strategy_file="docs/example/buy_and_hold.py", on_event=lambda e: None)
+        s.run(strategy_file="examples/buy_and_hold.py", on_event=lambda e: None)
 ```
 
 > stderr に `Subscribe: unknown venue 'replay'` が出るのは仕様（[AGENTS.md](../../../AGENTS.md) §replay 参照）。

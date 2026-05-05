@@ -135,7 +135,7 @@ replay は「この .py 1 個」だけで回るようにする（補助設定フ
 **実装計画**: [P5-scenario-in-strategy.md](./P5-scenario-in-strategy.md) を参照。以下は仕様の根拠記録として残す。
 
 ```python
-# docs/example/buy_and_hold.py
+# examples/buy_and_hold.py
 from typing import TypedDict
 
 class Scenario(TypedDict):
@@ -167,7 +167,7 @@ class MyStrategy(Strategy):
   `SCENARIO` 定数のみを安全抽出し、`ReplayFormModal` が prefill される。
   Run 押下時のみ `importlib.util.spec_from_file_location` でフルロードする
   （任意コード実行は明示的なユーザー操作の後に限定）
-- CLI: `uv run python -m engine.replay_session run --strategy docs/example/buy_and_hold.py`
+- CLI: `uv run python -m engine.replay_session run --strategy examples/buy_and_hold.py`
   （`--instrument` / `--start` / `--end` 引数が省略された場合 `SCENARIO` を使う）
 
 **この設計の利点**:
@@ -468,7 +468,7 @@ P1〜P6 を依存関係と難易度に沿ってフェーズ化する（P5 は別
 - `python/engine/server.py` — `_dispatch()` に `LoadStrategyScenario` / `SaveStrategyScenario` の IPC ハンドラ追加
 - `python/engine/schemas.py` — `LoadStrategyScenario` / `SaveStrategyScenario` コマンド、`StrategyScenarioLoaded` / `StrategyScenarioLoadFailed` / `StrategyScenarioSaved` イベント（SCHEMA_MINOR=10）
 - `engine-client/src/dto.rs` — 対応 Command / Event バリアント
-- `docs/example/buy_and_hold.py` — `SCENARIO` 定数追加
+- `examples/buy_and_hold.py` — `SCENARIO` 定数追加
 - テスト: `test_scenario_load.py` / `test_scenario_writeback.py` / `test_scenario_path_guard.py` / `test_scenario_cli.py` / `engine-client/tests/scenario_roundtrip.rs`
 
 **意図的に次フェーズ以降へ持ち越した項目**:

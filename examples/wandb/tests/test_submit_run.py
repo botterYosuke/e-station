@@ -30,7 +30,7 @@ def _make_meta(tmp_path: Path, status: str = "completed", **extra) -> Path:
     meta = {
         "schema_version": 1,
         "run_id": "1714800123-buy_and_hold-1301_TSE",
-        "strategy_file": "docs/example/test_strategy_daily.py",
+        "strategy_file": "examples/test_strategy_daily.py",
         "strategy_sha256": "abc123",
         "git_rev": "deadbeef",
         "scenario": {

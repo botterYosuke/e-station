@@ -6,7 +6,7 @@ schema_version: 2 と instruments リストで 10 銘柄を指定します。
 起動:
 
     uv run python -m engine.replay_session run \
-        --strategy docs/example/multiinst_10pairs_minute.py \
+        --strategy examples/multiinst_10pairs_minute.py \
         --mode inprocess
 
 注意:

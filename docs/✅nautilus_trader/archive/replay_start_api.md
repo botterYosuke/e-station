@@ -51,7 +51,7 @@ GET /api/replay/portfolio → 最終 equity / PnL が取得できる
 
 3. `GET /api/replay/portfolio` が最終的に `final_equity` を含む JSON を返す
 
-4. `docs/example/run_buy_and_hold_backtest_with_ui.py` を実行すると
+4. `examples/run_buy_and_hold_backtest_with_ui.py` を実行すると
    スクリプトが自動で load → start → portfolio 取得まで走りきる
 
 5. 単体テスト（Rust + Python）が追加されており GREEN
@@ -88,7 +88,7 @@ fn default_speed() -> u32 { 1 }
 
 `_handle_start_engine` は既に実装済み。追加作業なし。
 
-### `docs/example/run_buy_and_hold_backtest_with_ui.py` の更新
+### `examples/run_buy_and_hold_backtest_with_ui.py` の更新
 
 現状は `load` まで。`start` 呼び出しと `portfolio` ポーリングを追加する。
 
@@ -117,7 +117,7 @@ status, resp = _http("POST", f"http://127.0.0.1:{API_PORT}/api/replay/start", {
 | `src/replay_api.rs` | HTTP ルータ（追加先） |
 | `engine-client/src/dto.rs` | `Command::StartEngine` / `EngineStartConfig` の定義 |
 | `python/engine/server.py` | `_handle_start_engine`（既存、変更不要） |
-| `docs/example/run_buy_and_hold_backtest_with_ui.py` | デモスクリプト（更新対象） |
+| `examples/run_buy_and_hold_backtest_with_ui.py` | デモスクリプト（更新対象） |
 | `docs/✅nautilus_trader/` | 設計ドキュメント群（参照専用） |
 
 ---
