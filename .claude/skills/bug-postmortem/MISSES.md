@@ -32,6 +32,8 @@
 | Subscription 継続 restart 後状態消失 | `restart()` が `*self = new_state` で状態を全置換するとき、iced が同一 ID のサブスクリプションを継続するため初期化 yield が再発火せず、FSM 状態がリセットされる | 1 |
 | バックエンド段階解禁 UI 追従漏れ | バックエンドが Phase を上げて新機能（SELL 等）を解禁済みなのに、Rust UI の `view()` が旧 Phase のコメント・disabled 設定のまま取り残され、ユーザーが操作できない | 1 |
 | URL エンコード関数の適用範囲誤り | REQUEST URL 用のエンコード関数を WebSocket URL パラメータにも適用してしまい、サーバが期待する生区切り文字（カンマ等）が `%2C` に変換されてサーバがパラメータを誤解釈する | 1 |
+| EngineEvent フィールド追加時の `..` 黙示破棄 | 既存 `EngineEvent` バリアントに新フィールドを追加したとき、ディスパッチャ arm の `..` がそのフィールドを黙って捨てる。アーム存在確認テストはあるがフィールド転送確認テストがないため、新フィールドが UI に届かない | 1 |
+| セッション境界 IPC 欠如 | engine 側が「新セッション開始」を IPC で表現せず、GUI 側の per-session レジストリ（loaded / dismissed / registered の蓄積）に「リセットの契機」がユーザーの手動 dismiss しか存在しない。リプレイファイル切替・モード切替などの境界で前セッションの状態が孤児として残り、`Waiting for data...` 状態のペインが居座る。修正は engine に単調増加 epoch を持たせて `ReplayDataLoaded` に同梱し、GUI で `prev != curr` を切替検知トリガにする（schema 3.14）| 1 |
 
 ---
 
@@ -1747,3 +1749,98 @@ lifecycle / session swap / integration) を揃えたつもりが、**「session 
    自動 cleanup」というクロスレイヤーのライフサイクル伝播**は別軸の検証が必要。
    コンシューマがブロッキング待機する設計は、外部からの強制終了経路を必ず
    end-to-end でテストすること。
+
+---
+
+## 2026-05-06 — 複数銘柄リプレイ時にチャートペインが1銘柄しか生成されない（schema 3.13 フィールド転送漏れ）
+
+**見逃しパターン**: EngineEvent フィールド追加時の `..` 黙示破棄
+
+**不具合の概要**:
+`SCENARIO["instruments"]` に複数銘柄（例: 10 銘柄）を指定したリプレイを起動すると、
+注文一覧には全銘柄の約定が表示されるにもかかわらず、チャートエリアには先頭の1銘柄のペインしか生成されない。
+
+**根本原因**:
+schema 3.13 で Python エンジンの `ReplayDataLoaded` に `instrument_ids: list[str]`（全銘柄リスト）が追加された。
+Rust 側の `EngineEvent::ReplayDataLoaded` DTO も `instrument_ids: Option<Vec<String>>` が追加されたが、
+`map_engine_event_to_message` の destructure arm が `..` で追加フィールドを黙って捨てていた。
+`Message::ReplayDataLoaded` 自体にも `instrument_ids` フィールドがなく、
+ハンドラは単一 `instrument_id` でのみ `auto_generate_replay_panes` を呼んでいた。
+
+```rust
+// 修正前（schema 3.13 追加後も残存していたバグ）
+EngineEvent::ReplayDataLoaded {
+    instrument_id,
+    granularity,
+    bars_loaded,
+    trades_loaded,
+    ..   // ← instrument_ids が `..` に飲み込まれた
+} => Some(Message::ReplayDataLoaded {
+    instrument_id,
+    granularity,
+    bars_loaded,
+    trades_loaded,
+}),
+```
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `tests/engine_event_replay_data_loaded_routing.rs` | schema 3.12 の「アームが存在するか」「`Message::ReplayDataLoaded` を返すか」を検証していたが、**どのフィールドが転送されるか**は検証していなかった |
+| `tests/auto_generate_replay_panes_auto_bind.rs` | `auto_generate_replay_panes` の内部実装（set_content_and_streams、granularity 等）を検証していたが、呼び出し元が正しい instrument_id リストを渡すかは検証範囲外 |
+| 単体/統合テスト全体 | bin-only クレートのため `map_engine_event_to_message` を直接呼べず、source scan テストで補完していたが、`instrument_ids` の転送有無を明示的に pin したテストが未追加だった |
+
+**修正内容**:
+
+| 変更箇所 | 内容 |
+|---------|------|
+| `Message::ReplayDataLoaded` | `instrument_ids: Option<Vec<String>>` フィールドを追加 |
+| `map_engine_event_to_message` | `instrument_ids` を `..` で捨てず `Message` に転送 |
+| `update()` ハンドラ | `instrument_ids` 優先 → `instrument_id` フォールバック → `Task::batch` で全銘柄分ループ |
+
+**追加したテスト**:
+- `tests/multiinst_replay_pane_routing.rs::dispatcher_forwards_instrument_ids_to_message`
+  — ディスパッチャが `instrument_ids` を source 内に持つことを assert
+- `tests/multiinst_replay_pane_routing.rs::message_replay_data_loaded_has_instrument_ids_field`
+  — `Message::ReplayDataLoaded` バリアント定義に `instrument_ids` フィールドがあることを assert
+- `tests/multiinst_replay_pane_routing.rs::handler_uses_task_batch_for_multi_instrument`
+  — ハンドラが `Task::batch` を使うことを assert
+- `tests/multiinst_replay_pane_routing.rs::handler_iterates_over_instrument_ids`
+  — ハンドラが `for id in` でループすることを assert
+- `tests/multiinst_replay_pane_routing.rs::handler_fallbacks_to_single_instrument_id_when_instrument_ids_is_none`
+  — `instrument_ids=None` 時に `instrument_id` へ後方互換フォールバックすることを assert
+- `tests/multiinst_replay_pane_routing.rs::handler_returns_task_none_when_ids_is_empty`
+  — `ids.is_empty()` 時に `Task::none()` を返すガードが存在することを assert
+- `tests/multiinst_replay_pane_routing.rs::handler_treats_empty_instrument_ids_vec_as_absent`
+  — `instrument_ids=[]` が `filter` で除外されて `instrument_id` フォールバックに至ることを assert
+
+**リグレッション確認**:
+- `instrument_ids` を `..` に戻した状態: `dispatcher_forwards_instrument_ids_to_message` が FAIL
+- `Message::ReplayDataLoaded` から `instrument_ids` フィールドを削除: `message_replay_data_loaded_has_instrument_ids_field` が FAIL
+- `Task::batch` を削除した状態: `handler_uses_task_batch_for_multi_instrument` が FAIL
+- 修正済み状態: 7 テスト全 PASS（`tests/multiinst_replay_pane_routing.rs` で確認）
+
+**教訓**:
+
+1. **フィールド追加時は「転送テスト」をセットで書く**: 既存 `EngineEvent` バリアントに新フィールドを
+   追加するときは、ディスパッチャが「そのフィールドを転送するか」を source scan テストで
+   pin する。アームの存在確認（schema 3.12 テスト）だけでは不十分で、各フィールドの
+   転送確認が必要。`instrument_id` の存在を検査していたが `instrument_ids` の検査が抜けていた。
+
+2. **`..` による黙示的フィールド無視の危険性**: Rust の struct pattern の `..` は
+   「未来の追加フィールドを安全に無視する」ための構文だが、ディスパッチャで使うと
+   「転送すべきフィールドも無視する」サイレントバグを引き起こしうる。
+   `map_engine_event_to_message` のような UI-critical なディスパッチャでは、
+   新フィールドを追加した直後に「このフィールドを Message 側に転送するか？」を
+   必ずコードレビューで問う。
+
+3. **Message バリアントと EngineEvent バリアントの構造同期**: `EngineEvent::Foo` に新フィールドを
+   追加したら、対応する `Message::Foo` に同フィールドを追加することをセットのルールにする。
+   IPC schema のバージョンコメント（`// schema 3.13`）を両者に揃えることで、
+   片方だけが更新されるリスクを減らせる。
+
+4. **複数 instrument に依存する機能はリプレイ E2E で確認する**: 単銘柄リプレイは動作しても
+   複数銘柄では動かない類のバグは `examples/multiinst_10pairs_minute.py` などの実環境確認で
+   のみ検出できる。CI に統合できない場合でも、新機能追加後の受け入れチェックリストに
+   「複数銘柄リプレイで N 銘柄分のペインが生成されるか目視確認」を含める。

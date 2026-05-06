@@ -114,6 +114,9 @@ class TestStartBacktestReplayTrades:
         # 経路で auto_generate_replay_panes を呼べるようにする (replay-pane-auto-generate-fix)
         assert loaded["instrument_id"] == "1301.TSE"
         assert loaded["granularity"] == "Trade"
+        # schema 3.14: session_epoch は呼出側 (server) が払い出すので runner 単体
+        # 経路では None で良い (本テストは on_event を直接渡しているため未指定 = None)。
+        assert loaded["session_epoch"] is None
 
 
 class TestStartBacktestReplayBars:

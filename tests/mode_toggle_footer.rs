@@ -21,7 +21,10 @@ fn read_menu() -> String {
 /// indentation level (works for top-level and 4-space-indented fns).
 fn fn_body(src: &str, fn_start: usize) -> &str {
     let after = &src[fn_start..];
-    let end = after[1..].find("\nfn ").map(|i| i + 1).unwrap_or(after.len());
+    let end = after[1..]
+        .find("\nfn ")
+        .map(|i| i + 1)
+        .unwrap_or(after.len());
     &after[..end]
 }
 

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 13
+SCHEMA_MINOR: int = 14
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -781,6 +781,9 @@ class ReplayDataLoaded(IpcMessage):
     instrument_id: str | None = None
     instrument_ids: list[str] | None = None
     granularity: Literal["Trade", "Minute", "Daily"] | None = None
+    # schema 3.14: 新セッション識別子。LoadReplayData 受理ごとに +1。
+    # 旧 GUI (minor<14) は Option<u64>::None で deserialise され無視される。
+    session_epoch: int | None = None
     ts_event_ms: int
 
 

@@ -80,6 +80,8 @@ _REQUIRED_ATTRS: dict[str, object] = {
     # B3: state machine attributes
     "_replay_state": None,
     "_live_state": None,
+    # schema 3.14: replay セッション識別子カウンタ
+    "_replay_session_epoch": 0,
 }
 
 
@@ -120,6 +122,8 @@ def _make_server(mode: str = "replay"):
         # B3: state machine — LOADED は StartEngine/StopEngine が有効な状態
         "_replay_state": ReplayState.LOADED,
         "_live_state": LiveState.CONNECTED,
+        # schema 3.14: replay セッション識別子カウンタ（初期 0、+1 で発番）
+        "_replay_session_epoch": 0,
     }
     # _REQUIRED_ATTRS に列挙された属性をすべて設定する。差分があれば KeyError で
     # 検出する (silent 黙殺防止)。
@@ -157,6 +161,86 @@ class TestLoadReplayDataDispatch:
         assert events[0]["bars_loaded"] == 0
         # M-8 (R1b / schema 2.5): 単独 LoadReplayData では strategy_id=None を送る。
         assert events[0]["strategy_id"] is None
+        # schema 3.14: 新セッション識別子。LoadReplayData 受理ごとに +1。
+        assert events[0]["session_epoch"] == 1
+
+    @pytest.mark.asyncio
+    async def test_load_replay_data_session_epoch_monotonic(self) -> None:
+        """schema 3.14: LoadReplayData を立て続けに 2 回受理すると epoch が単調増加する。
+
+        ファイル切替時に旧 GUI が前 epoch のペインを全閉じできるよう、engine 側で
+        セッション境界を一意に発番する必要がある。
+        """
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.IDLE
+        msg1 = {
+            "op": "LoadReplayData",
+            "request_id": "req-load-a",
+            "instrument_id": "1301.TSE",
+            "start_date": "2024-01-04",
+            "end_date": "2024-01-05",
+            "granularity": "Trade",
+        }
+        await server._handle_load_replay_data(msg1, base_dir=FIXTURES)
+        # 2 回目のために LOADED → IDLE に戻す（テスト用直書き）。
+        server._replay_state = ReplayState.IDLE
+        msg2 = dict(msg1, request_id="req-load-b", instrument_id="7203.TSE")
+        await server._handle_load_replay_data(msg2, base_dir=FIXTURES)
+
+        events = [e for e in server._outbox if e.get("event") == "ReplayDataLoaded"]
+        assert len(events) == 2
+        epochs = [e["session_epoch"] for e in events]
+        assert epochs == [1, 2], f"expected monotonic [1, 2], got {epochs}"
+
+    def test_start_engine_source_does_not_increment_session_epoch(self) -> None:
+        """schema 3.14: 1 ファイル切替 = 1 epoch（source-pin）。
+
+        ``LoadReplayData → StartEngine`` の 2-hop で 2 件の ``ReplayDataLoaded``
+        が emit されるが、両者の ``session_epoch`` は同値でなければならない。
+        ここで epoch が +2 進むと GUI が直前 LoadReplayData で生成したペインを
+        ``StartEngine`` 受信時に drain して誤再生成する（review-fix R1 HIGH-1）。
+
+        ``_handle_start_engine`` は nautilus / engine_runner の重い依存を持ち、
+        outbox を観測する e2e ライクなテストは fixtures + asyncio.to_thread の
+        起動コストが大きい。代替として server.py のソーステキストを直接 pin し
+        「StartEngine 経路で ``_next_replay_session_epoch()`` を呼んでいないこと」
+        と「``session_epoch=self._replay_session_epoch`` で再利用していること」
+        を保証する。
+        """
+        import re
+        from pathlib import Path
+        src = Path(__file__).resolve().parents[1] / "engine" / "server.py"
+        text = src.read_text(encoding="utf-8")
+
+        # _handle_start_engine 関数本体を抽出。
+        m = re.search(
+            r"async def _handle_start_engine\(.*?\n(?=    async def |\nclass |\Z)",
+            text,
+            re.DOTALL,
+        )
+        assert m is not None, "_handle_start_engine not found in server.py"
+        body = m.group(0)
+
+        # _next_replay_session_epoch() の実呼び出しが無いこと（コメント行は除外）。
+        non_comment_lines = "\n".join(
+            ln for ln in body.splitlines() if not ln.lstrip().startswith("#")
+        )
+        assert "_next_replay_session_epoch()" not in non_comment_lines, (
+            "`_handle_start_engine` must NOT call `_next_replay_session_epoch()`. "
+            "Calling it here advances the epoch a second time within a single "
+            "file-switch (LoadReplayData → StartEngine), causing the GUI to drain "
+            "and re-generate panes immediately after the user opens a file. "
+            "Reuse `self._replay_session_epoch` instead (allocated by LoadReplayData)."
+        )
+
+        # session_epoch を runner.start_backtest_replay(_streaming) に渡す行で
+        # `self._replay_session_epoch` を読み取り渡しにしていること。
+        assert "session_epoch=self._replay_session_epoch" in body, (
+            "`_handle_start_engine` must pass "
+            "`session_epoch=self._replay_session_epoch` to runner so the "
+            "epoch allocated by LoadReplayData is reused (1 file = 1 epoch)."
+        )
 
     @pytest.mark.asyncio
     async def test_load_replay_data_rejected_in_live_mode(self) -> None:
@@ -295,6 +379,66 @@ class TestStartEngineDispatch:
         assert "EngineStopped" in kinds
         # 順序: started が stopped より先
         assert kinds.index("EngineStarted") < kinds.index("EngineStopped")
+
+    @pytest.mark.asyncio
+    async def test_load_then_start_emits_same_session_epoch(self) -> None:
+        """schema 3.14: 1 ファイル切替 = 1 epoch（e2e outbox 観測）。
+
+        ``LoadReplayData → StartEngine`` の 2-hop で 2 件の ``ReplayDataLoaded``
+        が emit されるが、両者の ``session_epoch`` は **同値**でなければならない。
+        epoch が +2 進むと GUI が直前 LoadReplayData で生成したペインを drain
+        して誤再生成する（review-fix R1 HIGH-1 の e2e 補強テスト R2 HIGH-2）。
+
+        同じ test を source-scan
+        (``test_start_engine_source_does_not_increment_session_epoch``) でも
+        pin しているが、等価リファクタで源コードが書き換わったときに source-scan
+        は false-pass / false-fail どちらにも転びやすいため、outbox 観測の
+        e2e テストで真の不変条件 (= emit 値の一致) を保証する。
+        """
+        from engine.server import ReplayState
+        server = _make_server(mode="replay")
+        server._replay_state = ReplayState.IDLE
+
+        load_msg = {
+            "op": "LoadReplayData",
+            "request_id": "req-load-then-start",
+            "instrument_id": "1301.TSE",
+            "start_date": "2024-01-04",
+            "end_date": "2024-01-05",
+            "granularity": "Trade",
+        }
+        await server._handle_load_replay_data(load_msg, base_dir=FIXTURES)
+
+        start_msg = {
+            "op": "StartEngine",
+            "request_id": "req-start-then",
+            "engine": "Backtest",
+            "strategy_id": "buy-and-hold",
+            "config": {
+                "instrument_id": "1301.TSE",
+                "start_date": "2024-01-04",
+                "end_date": "2024-01-05",
+                "initial_cash": "1000000",
+                "granularity": "Trade",
+                "strategy_file": str(FIXTURES / "test_strategy.py"),
+            },
+        }
+        await server._handle_start_engine(start_msg, base_dir=FIXTURES)
+
+        loaded_events = [
+            e for e in server._outbox if e.get("event") == "ReplayDataLoaded"
+        ]
+        assert len(loaded_events) == 2, (
+            f"expected 2 ReplayDataLoaded events (LoadReplayData + StartEngine), "
+            f"got {len(loaded_events)}"
+        )
+        epochs = [e["session_epoch"] for e in loaded_events]
+        assert epochs[0] == epochs[1] == 1, (
+            f"LoadReplayData and StartEngine must emit ReplayDataLoaded with "
+            f"the SAME session_epoch (1 file-switch = 1 epoch). Got epochs={epochs}. "
+            "If StartEngine path calls _next_replay_session_epoch() it advances "
+            "to 2, which makes the GUI drain panes generated by LoadReplayData."
+        )
 
     @pytest.mark.asyncio
     async def test_start_engine_live_mode_rejects_backtest(self) -> None:

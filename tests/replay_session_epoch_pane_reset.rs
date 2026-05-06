@@ -111,8 +111,7 @@ fn flowsurface_has_last_replay_session_epoch_field() {
 fn handler_compares_session_epoch_for_change_detection() {
     let window = handler_window();
     assert!(
-        window.contains("last_replay_session_epoch")
-            && window.contains("session_epoch"),
+        window.contains("last_replay_session_epoch") && window.contains("session_epoch"),
         "Message::ReplayDataLoaded handler must read `self.last_replay_session_epoch` \
          and compare it against the incoming `session_epoch` to detect session \
          boundaries."
@@ -142,6 +141,22 @@ fn handler_closes_stale_panes_when_session_epoch_changes() {
     );
 }
 
+// 6b (review fix R1 HIGH-4): (None, Some(_)) arm uses has_registered_panes()
+//     guard so the very first ReplayDataLoaded after startup does NOT drain
+//     when the registry is empty (the normal path).
+#[test]
+fn handler_none_to_some_uses_has_registered_panes_guard() {
+    let window = handler_window();
+    assert!(
+        window.contains("has_registered_panes"),
+        "Handler's `(None, Some(_))` arm must check `has_registered_panes()` \
+         so the very first epoch after startup or reconnect does not drain. \
+         Without this, the first LoadReplayData triggers a no-op drain on an \
+         empty grid, which is benign now but loses meaning if helper-attach \
+         pre-populates the registry."
+    );
+}
+
 // 7. Old-engine compat: persistent None must not trigger drain.
 #[test]
 fn handler_does_not_close_when_session_epoch_is_none() {
@@ -168,6 +183,61 @@ fn handler_does_not_close_for_same_session_epoch() {
         "Handler must use a `prev != curr` comparison on `(Some(prev), Some(curr))` \
          so a duplicate ReplayDataLoaded with the same epoch (e.g. incremental \
          load future-extension or re-emit) does not destroy the live panes."
+    );
+}
+
+// 9b (review fix): session-level OrderList / BuyingPower panes are registered
+//     in `replay_pane_registry` so `drain_all_registered()` actually closes
+//     them on file switch — otherwise the new session generates fresh
+//     OrderList/BuyingPower panes alongside the orphans from the previous file.
+const DASHBOARD_SOURCE: &str = include_str!("../src/screen/dashboard.rs");
+
+#[test]
+fn session_level_order_list_pane_is_registered_for_drain() {
+    // Locate the auto_generate_replay_panes function body and assert that the
+    // OrderList block both creates a pane AND registers it with the empty
+    // sentinel instrument id. Without registration the pane survives a
+    // session reset and shows up duplicated in file 2.
+    let fn_idx = DASHBOARD_SOURCE
+        .find("fn auto_generate_replay_panes")
+        .expect("auto_generate_replay_panes not found in dashboard.rs");
+    let body = &DASHBOARD_SOURCE[fn_idx..];
+    let order_list_block = body
+        .find("auto-generated REPLAY OrderList pane")
+        .expect("OrderList generation block not found");
+    let window = &body[order_list_block..body.len().min(order_list_block + 1_500)];
+    assert!(
+        window.contains("register_pane(\"\", \"OrderList\"")
+            || window.contains(
+                "register_pane(\n                    \"\",\n                    \"OrderList\""
+            ),
+        "Session-level REPLAY OrderList pane must be registered in \
+         `replay_pane_registry` (key: instrument_id=\"\", kind=\"OrderList\") so \
+         that `drain_all_registered()` on file switch closes it. Without this \
+         registration the new session creates a second OrderList pane and the \
+         old one stays as a zombie. See review feedback on Approach B fix."
+    );
+}
+
+#[test]
+fn session_level_buying_power_pane_is_registered_for_drain() {
+    let fn_idx = DASHBOARD_SOURCE
+        .find("fn auto_generate_replay_panes")
+        .expect("auto_generate_replay_panes not found in dashboard.rs");
+    let body = &DASHBOARD_SOURCE[fn_idx..];
+    let buying_power_block = body
+        .find("auto-generated REPLAY BuyingPower pane")
+        .expect("BuyingPower generation block not found");
+    let window = &body[buying_power_block..body.len().min(buying_power_block + 1_500)];
+    assert!(
+        window.contains("register_pane(\"\", \"BuyingPower\"")
+            || window.contains(
+                "register_pane(\n                    \"\",\n                    \"BuyingPower\""
+            ),
+        "Session-level REPLAY BuyingPower pane must be registered in \
+         `replay_pane_registry` (key: instrument_id=\"\", kind=\"BuyingPower\") \
+         so `drain_all_registered()` closes it on file switch. Same failure \
+         mode as the OrderList case."
     );
 }
 
