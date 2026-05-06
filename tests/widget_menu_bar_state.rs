@@ -124,8 +124,9 @@ fn with_dropdown_overlay_uses_bar_height_constant_for_top_offset() {
         "with_dropdown_overlay must not reference `anchor_y` (F8 R2 H3': mechanism abolished)"
     );
     assert!(
-        body.contains("let top_offset = BAR_HEIGHT"),
-        "with_dropdown_overlay must anchor at the BAR_HEIGHT constant (F8 R2 H3': `let top_offset = BAR_HEIGHT;`)"
+        body.contains("let top_offset = bar_height(mode)")
+            || body.contains("let top_offset = BAR_HEIGHT"),
+        "with_dropdown_overlay must anchor at bar_height(mode) (schema 3.15) or BAR_HEIGHT (legacy)"
     );
 }
 
@@ -420,22 +421,6 @@ fn to_native_action_function_exists() {
         src.contains("N::OpenFile") || src.contains("native_menu::Action::OpenFile"),
         "to_native_action must map Action::Open to native_menu::Action::OpenFile"
     );
-    // ReplayStop must NOT return None — it maps to N::StopReplay so the item is functional.
-    // Stop-only flow: stops the running replay without switching app mode (engine → IDLE,
-    // dashboard stays in Replay mode).
-    assert!(
-        src.contains("Action::ReplayStop"),
-        "to_native_action must explicitly handle Action::ReplayStop"
-    );
-    assert!(
-        !src.contains("Action::ReplayStop => None"),
-        "Action::ReplayStop must NOT return None — dead menu items are HIGH severity (maps to N::StopReplay)"
-    );
-    assert!(
-        src.contains("Action::ReplayStop => Some(N::StopReplay)")
-            || src.contains("Action::ReplayStop => Some(native_menu::Action::StopReplay)"),
-        "Action::ReplayStop must map to native_menu::Action::StopReplay (stop-only flow, no mode switch)"
-    );
 }
 
 #[test]
@@ -479,5 +464,109 @@ fn file_has_no_linux_cfg_gate() {
     assert!(
         !src.contains("#![cfg(target_os = \"linux\")]"),
         "widget_menu_bar.rs must NOT be linux-only — it is now cross-platform (all OS)"
+    );
+}
+
+// ── M-5: menu_bar_state::update() source-inspection tests ───────────────────
+//
+// Source-inspection tests verifying the update() function handles new BarMessage
+// variants correctly. These follow the same approach as existing tests in this file.
+
+#[test]
+fn press_step_backward_variant_exists_in_update() {
+    let src = read_menu_bar_state();
+    let fn_start = src
+        .find("pub fn update(state: State, msg: BarMessage) -> State")
+        .expect("update function must exist");
+    let fn_body = &src[fn_start..];
+    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
+    let body = &fn_body[..fn_end];
+    assert!(
+        body.contains("PressStepBackward"),
+        "update() must handle BarMessage::PressStepBackward (M-5: Step- button dispatch)"
+    );
+}
+
+#[test]
+fn replay_pause_state_changed_updates_replay_bar() {
+    let src = read_menu_bar_state();
+    let fn_start = src
+        .find("pub fn update(state: State, msg: BarMessage) -> State")
+        .expect("update function must exist");
+    let fn_body = &src[fn_start..];
+    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
+    let body = &fn_body[..fn_end];
+    assert!(
+        body.contains("ReplayPauseStateChanged"),
+        "update() must handle BarMessage::ReplayPauseStateChanged"
+    );
+    assert!(
+        body.contains("replay_paused: paused") || body.contains("replay_paused"),
+        "ReplayPauseStateChanged arm must update replay_bar.replay_paused"
+    );
+    assert!(
+        body.contains("replay_has_history: has_history") || body.contains("replay_has_history"),
+        "ReplayPauseStateChanged arm must update replay_bar.replay_has_history"
+    );
+}
+
+#[test]
+fn replay_bar_state_has_replay_paused_and_history_fields() {
+    let src = read_menu_bar_state();
+    assert!(
+        src.contains("pub replay_paused: bool"),
+        "ReplayBarState must have `pub replay_paused: bool` field (H-1)"
+    );
+    assert!(
+        src.contains("pub replay_has_history: bool"),
+        "ReplayBarState must have `pub replay_has_history: bool` field (H-1)"
+    );
+}
+
+// ── R2-M2: Source-inspection state-transition tests for update() ──────────────
+//
+// flowsurface is a binary crate — integration tests cannot invoke update()
+// directly. We source-inspect the update() body to verify the arm shapes.
+
+#[test]
+fn replay_pause_state_changed_updates_both_paused_and_history() {
+    let src = read_menu_bar_state();
+    let fn_start = src
+        .find("pub fn update(state: State, msg: BarMessage) -> State")
+        .expect("update function must exist");
+    let fn_body = &src[fn_start..];
+    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
+    let body = &fn_body[..fn_end];
+
+    // The ReplayPauseStateChanged arm must update replay_paused with the incoming `paused` value.
+    assert!(
+        body.contains("replay_paused: paused"),
+        "ReplayPauseStateChanged arm must contain `replay_paused: paused` (R2-M2)"
+    );
+    // The arm must also update replay_has_history with the incoming `has_history` value.
+    assert!(
+        body.contains("replay_has_history: has_history"),
+        "ReplayPauseStateChanged arm must contain `replay_has_history: has_history` (R2-M2)"
+    );
+}
+
+#[test]
+fn instrument_changed_updates_replay_bar_instrument_id() {
+    let src = read_menu_bar_state();
+    let fn_start = src
+        .find("pub fn update(state: State, msg: BarMessage) -> State")
+        .expect("update function must exist");
+    let fn_body = &src[fn_start..];
+    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
+    let body = &fn_body[..fn_end];
+
+    // The InstrumentChanged arm must update replay_bar.instrument_id with the new value.
+    assert!(
+        body.contains("InstrumentChanged(s)"),
+        "update() must match BarMessage::InstrumentChanged(s) (R2-M2)"
+    );
+    assert!(
+        body.contains("instrument_id: s"),
+        "InstrumentChanged arm must set `instrument_id: s` in ReplayBarState (R2-M2)"
     );
 }

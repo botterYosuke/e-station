@@ -467,3 +467,10 @@ newtype 導入後に `impl From<InnerType> for NewType` を残しておくと、
 - 新しい gate / FSM / banner / recovery path を見たら、bootstrap と reconnect を必ず追う
 - 1 つの fix で複数 bootstrap 経路を救っているように見えたら、本当に両方通るか疑う
 - helper や callback の再利用で隠れる race を疑う
+## Review Additions: restore / state-change / parity
+
+- Treat `RestoreSnapshot` / `StepBackward` as incomplete unless the snapshot carries every user-visible state that must roll back and the restore path actually consumes those fields.
+- Flag `ui_events=[]`, unused `strategy_state`, or TODO-only restore handlers as real review findings, not follow-up notes.
+- For any UI enable flag like `has_history`, `ready`, `pending`, or `paused`, verify both directions: the code must emit updates on append/push/success paths as well as pop/clear/error paths.
+- When a control is displayed in the UI, check that the first success path can actually enable it; missing false→true notifications are a common silent failure pattern.
+- Check menu labels, shortcut text, keyboard subscriptions, and handler gating together; if the UI advertises `Ctrl/Cmd` behavior, confirm the actual subscription allows it in that mode.
