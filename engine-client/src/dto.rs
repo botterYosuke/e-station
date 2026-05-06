@@ -533,7 +533,7 @@ impl std::fmt::Debug for Command {
             Command::LoadReplayData {
                 request_id,
                 instrument_id,
-                instrument_ids: _,
+                instrument_ids,
                 start_date,
                 end_date,
                 granularity,
@@ -541,6 +541,7 @@ impl std::fmt::Debug for Command {
                 .debug_struct("LoadReplayData")
                 .field("request_id", request_id)
                 .field("instrument_id", instrument_id)
+                .field("instrument_ids", instrument_ids)
                 .field("start_date", start_date)
                 .field("end_date", end_date)
                 .field("granularity", granularity)
@@ -1181,6 +1182,11 @@ pub enum EngineEvent {
         /// CandlestickChart はスキップする。
         #[serde(default)]
         granularity: Option<ReplayGranularity>,
+        /// schema 3.14: 新セッション識別子 (engine 内で LoadReplayData ごとに +1)。
+        /// GUI は前 epoch の `replay_pane_registry` を全クリアしてから
+        /// 新 epoch のペインを生成する。旧 engine (minor<14) からは `None`。
+        #[serde(default)]
+        session_epoch: Option<u64>,
         ts_event_ms: i64,
     },
     /// nautilus Position opened (transition flat → long/short).

@@ -1149,3 +1149,114 @@ def test_submit_run_main_configures_logging_to_stderr_via_entrypoint_helper():
         "F9 R2-M8: `if __name__ == \"__main__\":` block must call "
         "_configure_cli_logging() to wire pii_scrub WARNING -> stderr"
     )
+
+
+# ---------------------------------------------------------------------------
+# compute_summary: regression baseline for the four headline metrics
+#
+# `compute_summary` is the comparison substrate for every future strategy
+# experiment, so any drift in total_pnl / max_drawdown / trade_count /
+# win_rate would silently corrupt cross-run judgement. These tests pin the
+# four metrics against hand-computed expectations on minimal, auditable
+# fixtures. Add a new case here before changing the aggregation contract.
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSummary:
+    def test_normal_case_two_round_trips_one_win_one_loss(self, tmp_path: Path) -> None:
+        """Equity peaks then dips; two round trips, one winning one losing."""
+        from submit_run import compute_summary
+
+        _write_jsonl(tmp_path / "equity.jsonl", [
+            {"ts": 1, "equity": "1000000"},
+            {"ts": 2, "equity": "1010000"},  # peak
+            {"ts": 3, "equity": "990000"},   # trough -> DD = 20000 from peak
+            {"ts": 4, "equity": "998959"},
+        ])
+        _write_jsonl(tmp_path / "fills.jsonl", [
+            {"ts": 1, "side": "BUY",  "qty": "100", "price": "3950"},
+            {"ts": 2, "side": "SELL", "qty": "100", "price": "3955"},  # +500
+            {"ts": 3, "side": "BUY",  "qty": "100", "price": "4000"},
+            {"ts": 4, "side": "SELL", "qty": "100", "price": "3990"},  # -1000
+        ])
+
+        s = compute_summary(tmp_path)
+
+        assert s["total_pnl"] == pytest.approx(998959 - 1000000)
+        assert s["max_drawdown"] == pytest.approx(20000.0)
+        assert s["trade_count"] == 2
+        assert s["win_rate"] == pytest.approx(0.5)
+        assert s["equity_points"] == 4
+        assert s["fills_count"] == 4
+
+    def test_empty_buffer_returns_safe_defaults(self, tmp_path: Path) -> None:
+        """No equity / no fills must not raise; win_rate is None when there are
+        no closed trades so consumers can distinguish 'no data' from '0% wins'."""
+        from submit_run import compute_summary
+
+        s = compute_summary(tmp_path)
+
+        assert s == {
+            "total_pnl": 0.0,
+            "max_drawdown": 0.0,
+            "trade_count": 0,
+            "win_rate": None,
+            "equity_points": 0,
+            "fills_count": 0,
+        }
+
+    def test_partial_close_splits_into_two_round_trips(self, tmp_path: Path) -> None:
+        """One BUY 100 closed by two SELL 50s must yield two FIFO-matched trades.
+
+        Slice 1: buy@100 / sell@110 -> +500 (win)
+        Slice 2: buy@100 / sell@90  -> -500 (loss)
+        Net realised = 0, so win_rate = 0.5 over 2 trades.
+        """
+        from submit_run import compute_summary
+
+        _write_jsonl(tmp_path / "fills.jsonl", [
+            {"ts": 1, "side": "BUY",  "qty": "100", "price": "100"},
+            {"ts": 2, "side": "SELL", "qty": "50",  "price": "110"},
+            {"ts": 3, "side": "SELL", "qty": "50",  "price": "90"},
+        ])
+
+        s = compute_summary(tmp_path)
+
+        assert s["trade_count"] == 2
+        assert s["win_rate"] == pytest.approx(0.5)
+        assert s["fills_count"] == 3
+        assert s["equity_points"] == 0  # no equity.jsonl written
+        # No equity series -> total_pnl/max_drawdown stay at safe zero, but
+        # the fills tell us two trades happened. Surfacing that asymmetry is
+        # the whole point of keeping equity_points / fills_count diagnostics.
+        assert s["total_pnl"] == 0.0
+        assert s["max_drawdown"] == 0.0
+
+    def test_all_losing_trades_yield_zero_win_rate(self, tmp_path: Path) -> None:
+        """Three round trips, all losing -> win_rate is exactly 0.0
+        (must not collapse to None, which is reserved for 'no trades')."""
+        from submit_run import compute_summary
+
+        _write_jsonl(tmp_path / "equity.jsonl", [
+            {"ts": 1, "equity": "1000000"},
+            {"ts": 2, "equity": "990000"},
+            {"ts": 3, "equity": "980000"},
+            {"ts": 4, "equity": "970000"},
+        ])
+        _write_jsonl(tmp_path / "fills.jsonl", [
+            {"ts": 1, "side": "BUY",  "qty": "100", "price": "1000"},
+            {"ts": 2, "side": "SELL", "qty": "100", "price": "990"},   # -1000
+            {"ts": 3, "side": "BUY",  "qty": "100", "price": "990"},
+            {"ts": 4, "side": "SELL", "qty": "100", "price": "980"},   # -1000
+            {"ts": 5, "side": "BUY",  "qty": "100", "price": "980"},
+            {"ts": 6, "side": "SELL", "qty": "100", "price": "970"},   # -1000
+        ])
+
+        s = compute_summary(tmp_path)
+
+        assert s["trade_count"] == 3
+        assert s["win_rate"] == 0.0
+        assert s["win_rate"] is not None  # explicit: 0% wins != no data
+        assert s["total_pnl"] == pytest.approx(-30000.0)
+        # Strictly monotonic decline -> drawdown equals peak - trough
+        assert s["max_drawdown"] == pytest.approx(30000.0)

@@ -16,7 +16,7 @@ use flowsurface_engine_client::dto::{
 // ── Schema version guard ────────────────────────────────────────────────────
 
 #[test]
-fn schema_minor_is_7_for_positions() {
+fn schema_minor_matches_current_bump() {
     // R2 review-fix R1b M-8: ReplayDataLoaded.strategy_id を Optional に緩和し
     // SCHEMA_MINOR を 4 → 5 に bump。MAJOR は据え置き (互換維持; minor mismatch は WARN のみ)。
     // レビュー反映 2026-04-29: LoadReplayData/ReplayLoadBody.strategy_init_kwargs を Map 型に
@@ -33,10 +33,12 @@ fn schema_minor_is_7_for_positions() {
     // (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)。
     // schema 3.13: SCHEMA_MINOR を 12 → 13 に bump
     // (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: Vec<String> 追加)。
+    // schema 3.14: SCHEMA_MINOR を 13 → 14 に bump
+    // (ReplayDataLoaded.session_epoch 追加; リプレイファイル切替時の旧ペイン全閉じ用、Approach B)。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        13,
-        "SCHEMA_MINOR must be 13 after schema 3.13 (instrument_ids multi-instrument support)"
+        14,
+        "SCHEMA_MINOR must be 14 after schema 3.14 (ReplayDataLoaded.session_epoch)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -334,6 +336,9 @@ fn replay_data_loaded_deserializes() {
             instrument_id,
             instrument_ids: _,
             granularity,
+            // schema 3.14: 旧 fixture (pre-3.14) には session_epoch が無いので
+            // serde(default) により Option<u64>::None で deserialise される。
+            session_epoch: _,
         } => {
             // M-8: Option<String> へ。strategy_id 文字列付きは Some(...) で来る。
             assert_eq!(strategy_id.as_deref(), Some("strat-001"));

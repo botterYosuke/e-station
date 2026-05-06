@@ -271,6 +271,7 @@ class NautilusRunner:
         on_event: Callable[[dict], None] | None = None,
         strategy_file: str | None = None,
         strategy_init_kwargs: dict | None = None,
+        session_epoch: int | None = None,
     ) -> ReplayBacktestResult:
         """J-Quants 入力でバックテストを実行する (N1.4)。
 
@@ -387,8 +388,16 @@ class NautilusRunner:
                 "instrument_id": instrument_id,
                 "instrument_ids": _iids,
                 "granularity": granularity,
+                # schema 3.14: server から受領した既存セッション識別子。LoadReplayData
+                # 受理時に発番済み（StartEngine 経路では再利用するのみ）。
+                "session_epoch": session_epoch,
                 "ts_event_ms": loaded_ts_ms,
             })
+            log.info(
+                "ReplayDataLoaded emitted (start_backtest_replay): session_epoch=%r "
+                "strategy=%r instruments=%r",
+                session_epoch, strategy_id, _iids,
+            )
 
             strategy_instance = _make_replay_strategy(
                 strategy_file=strategy_file,
@@ -489,6 +498,7 @@ class NautilusRunner:
         strategy_file: str | None = None,
         strategy_init_kwargs: dict | None = None,
         stop_event: threading.Event | None = None,
+        session_epoch: int | None = None,
     ) -> ReplayBacktestResult:
         """streaming=True 経路で 1 tick ずつ pacing しながら replay する (N1.11)。
 
@@ -613,8 +623,15 @@ class NautilusRunner:
                 "instrument_id": instrument_id,
                 "instrument_ids": _iids,
                 "granularity": granularity,
+                # schema 3.14: server から受領した既存セッション識別子（再利用）。
+                "session_epoch": session_epoch,
                 "ts_event_ms": loaded_ts_ms,
             })
+            log.info(
+                "ReplayDataLoaded emitted (start_backtest_replay_streaming): "
+                "session_epoch=%r strategy=%r instruments=%r",
+                session_epoch, strategy_id, _iids,
+            )
 
             strategy_instance = _make_replay_strategy(
                 strategy_file=strategy_file,

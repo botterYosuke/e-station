@@ -106,6 +106,26 @@ impl ReplayPaneRegistry {
             pane_kind,
         });
     }
+
+    /// Returns `true` when at least one pane is currently auto-registered.
+    pub fn has_registered_panes(&self) -> bool {
+        !self.registered.is_empty()
+    }
+
+    /// schema 3.14: drain every registered pane and reset the per-session state.
+    ///
+    /// Returns the `pane_grid::Pane` IDs the caller must close on the dashboard
+    /// (the registry doesn't own the pane grid). Also clears `loaded` and
+    /// `dismissed` so a brand-new replay session starts from a clean slate —
+    /// `dismissed` deliberately does NOT carry over because "file switch" is
+    /// a new session, not a reload.
+    pub fn drain_all_registered(&mut self) -> Vec<pane_grid::Pane> {
+        let panes: Vec<pane_grid::Pane> = self.registered.values().copied().collect();
+        self.loaded.clear();
+        self.registered.clear();
+        self.dismissed.clear();
+        panes
+    }
 }
 
 impl Default for ReplayPaneRegistry {
@@ -168,5 +188,67 @@ mod tests {
         let mut registry = ReplayPaneRegistry::new();
         registry.mark_loaded("1301.TSE");
         assert!(registry.is_loaded("1301.TSE"));
+    }
+
+    // schema 3.14: drain_all_registered() tests.
+    //
+    // `pane_grid::Pane` has a `pub(super)` constructor so we acquire valid
+    // values through `pane_grid::State::new` / `split`.
+    #[test]
+    fn drain_all_registered_returns_panes_and_clears_state() {
+        let (mut grid, first) = pane_grid::State::<()>::new(());
+        let (second, _) = grid
+            .split(pane_grid::Axis::Horizontal, first, ())
+            .expect("split should succeed");
+
+        let mut registry = ReplayPaneRegistry::new();
+        registry.mark_loaded("1301.TSE");
+        registry.mark_loaded("7203.TSE");
+        registry.dismiss("8306.TSE", "TimeAndSales");
+        registry.register_pane("1301.TSE", "TimeAndSales", first);
+        registry.register_pane("7203.TSE", "CandlestickChart", second);
+
+        let drained = registry.drain_all_registered();
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(&first));
+        assert!(drained.contains(&second));
+
+        // Internal state is fully reset — including `dismissed` so that a new
+        // session does not inherit close-decisions from the previous file.
+        assert_eq!(registry.loaded_count(), 0);
+        assert!(!registry.has_registered_panes());
+        assert!(registry.should_generate("8306.TSE", "TimeAndSales"));
+    }
+
+    #[test]
+    fn drain_all_registered_on_empty_returns_empty() {
+        let mut registry = ReplayPaneRegistry::new();
+        assert!(registry.drain_all_registered().is_empty());
+    }
+
+    #[test]
+    fn drain_all_registered_includes_session_level_sentinel_panes() {
+        // Review-fix regression: session-level REPLAY panes (OrderList /
+        // BuyingPower) are registered with the empty sentinel instrument id.
+        // Drain MUST return them too — otherwise a file switch leaves the old
+        // OrderList/BuyingPower as zombies alongside the freshly generated ones.
+        let (mut grid, first) = pane_grid::State::<()>::new(());
+        let (second, _) = grid
+            .split(pane_grid::Axis::Horizontal, first, ())
+            .expect("split should succeed");
+
+        let mut registry = ReplayPaneRegistry::new();
+        registry.mark_loaded("1301.TSE");
+        registry.register_pane("1301.TSE", "TimeAndSales", first);
+        registry.register_pane("", "OrderList", second);
+        registry.register_pane("", "BuyingPower", first); // any valid pane id
+
+        let drained = registry.drain_all_registered();
+        assert_eq!(
+            drained.len(),
+            3,
+            "drain must return instrument-keyed AND session-level panes"
+        );
+        assert!(!registry.has_registered_panes());
     }
 }

@@ -431,6 +431,10 @@ class DataEngineServer:
         # Streaming replay 中に約定した注文を蓄積する（GetOrderList{venue:"replay"} で返す）。
         # _handle_start_engine の EngineStarted 受信時にリセットされる。
         self._replay_streaming_fills: list[dict] = []
+        # schema 3.14: Replay セッション識別子。LoadReplayData / start_backtest_replay
+        # 受理ごとに `_next_replay_session_epoch()` で +1 し ReplayDataLoaded に同梱する。
+        # GUI は前 epoch のペインを全閉じして新 epoch のペインを構築する。
+        self._replay_session_epoch: int = 0
 
         self._outbox = _Broadcaster()
 
@@ -441,6 +445,27 @@ class DataEngineServer:
     def shutdown(self) -> None:
         self._shutdown_event.set()
         self._outbox_event.set()
+
+    def _next_replay_session_epoch(self) -> int:
+        """schema 3.14: 新しい replay セッションを開始し epoch を払い出す。
+
+        **発番元は ``LoadReplayData`` ハンドラのみ**。``start_backtest_replay`` /
+        ``start_backtest_replay_streaming`` 経路は ``self._replay_session_epoch``
+        の現在値を再利用すること（1 ファイル切替 = 1 epoch の不変条件を守るため）。
+        ``LoadReplayData→StartEngine`` の 2-hop で +2 進めると GUI が直前
+        ``LoadReplayData`` で生成したペインを drain して誤再生成する
+        （review-fix R1 HIGH-1）。
+
+        engine プロセス起動後に単調増加（初期値 0、初回呼び出しで 1 を返す）。
+        プロセス再起動で 0 に戻るが GUI 側は engine 切断時に
+        ``last_replay_session_epoch`` を ``None`` にリセットするため衝突しない。
+
+        スレッド安全: 本メソッドは ``DataEngineServer`` の event loop main thread
+        からのみ呼ぶこと（``_handle_load_replay_data`` のみで OK）。worker thread
+        (``asyncio.to_thread`` 内) からは呼ばない。
+        """
+        self._replay_session_epoch += 1
+        return self._replay_session_epoch
 
     async def serve(self) -> None:
         async with websockets.serve(
@@ -2991,6 +3016,13 @@ class DataEngineServer:
         self._replay_strategy_id = ""
         self._replay_portfolio.reset(_Decimal(0))
 
+        # schema 3.14: 新セッション識別子。GUI は前 epoch の registered ペインを
+        # 全閉じしてから新 epoch のペインを構築する。発番元は本ハンドラのみ。
+        epoch = self._next_replay_session_epoch()
+        log.info(
+            "LoadReplayData accepted: session_epoch=%d instrument_ids=%r granularity=%r",
+            epoch, _iids_to_check, granularity,
+        )
         self._outbox.append(
             {
                 "event": "ReplayDataLoaded",
@@ -3005,6 +3037,7 @@ class DataEngineServer:
                 "instrument_id": instrument_id,
                 "instrument_ids": instrument_ids,  # schema 3.13: 複数銘柄 (None なら後方互換)
                 "granularity": granularity,
+                "session_epoch": epoch,
                 "ts_event_ms": int(time.time() * 1000),
             }
         )
@@ -3262,6 +3295,12 @@ class DataEngineServer:
                     strategy_file=config_obj.strategy_file,
                     strategy_init_kwargs=config_obj.strategy_init_kwargs,
                     stop_event=stop_event,
+                    # schema 3.14: 1 ファイル切替 = 1 epoch。LoadReplayData で発番済みの
+                    # epoch をそのまま再利用する（StartEngine は B3 ガードで LOADED 状態
+                    # 必須なので必ず >= 1）。ここで `_next_replay_session_epoch()` を
+                    # 呼ぶと epoch が +2 進み、GUI が直前 LoadReplayData で生成した
+                    # ペインを drain して誤再生成する（review-fix R1 HIGH）。
+                    session_epoch=self._replay_session_epoch,
                 )
             else:
                 result_holder[0] = runner.start_backtest_replay(
@@ -3276,6 +3315,8 @@ class DataEngineServer:
                     on_event=_on_event_tracked,
                     strategy_file=config_obj.strategy_file,
                     strategy_init_kwargs=config_obj.strategy_init_kwargs,
+                    # schema 3.14: 1 ファイル切替 = 1 epoch。詳細は streaming 側コメント参照。
+                    session_epoch=self._replay_session_epoch,
                 )
 
         try:

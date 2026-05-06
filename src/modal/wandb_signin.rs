@@ -10,7 +10,7 @@
 // applied to public items still pending wiring in main.rs.
 
 use iced::{
-    Element,
+    Color, Element,
     widget::{button, column, container, row, text, text_input},
 };
 
@@ -126,6 +126,17 @@ impl WandbSignInModal {
             ]
             .spacing(8),
         )
+        .max_width(400)
+        .padding(24)
+        .style(|_theme| container::Style {
+            background: Some(Color::from_rgb(0.13, 0.13, 0.13).into()),
+            border: iced::Border {
+                color: Color::from_rgb(0.25, 0.25, 0.25),
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..container::Style::default()
+        })
         .into()
     }
 

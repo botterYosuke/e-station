@@ -1250,8 +1250,18 @@ impl Dashboard {
                     .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
             {
                 log::info!("replay: auto-generated REPLAY OrderList pane");
+                // schema 3.14: session-level pane も registry に登録し、
+                // ファイル切替時の `drain_all_registered()` で確実に閉じられるようにする。
+                // sentinel instrument_id="" は dismiss/should_generate と同一規約。
+                self.replay_pane_registry
+                    .register_pane("", "OrderList", new_pane);
                 self.focus = Some((main_window_id, new_pane));
                 last_split_pane = new_pane;
+            } else {
+                log::warn!(
+                    "auto_generate_replay_panes: pane split failed for OrderList \
+                     (session-level pane skipped silently otherwise)"
+                );
             }
         }
 
@@ -1266,7 +1276,15 @@ impl Dashboard {
                     .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
             {
                 log::info!("replay: auto-generated REPLAY BuyingPower pane");
+                // schema 3.14: 同上 — session-level pane も registry に登録。
+                self.replay_pane_registry
+                    .register_pane("", "BuyingPower", new_pane);
                 self.focus = Some((main_window_id, new_pane));
+            } else {
+                log::warn!(
+                    "auto_generate_replay_panes: pane split failed for BuyingPower \
+                     (session-level pane skipped silently otherwise)"
+                );
             }
         }
 

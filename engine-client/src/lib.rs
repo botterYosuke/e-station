@@ -33,6 +33,7 @@ pub use venue_caps::VenueCapsStore;
 ///   - 10: F6 SCENARIO 定数 IPC（LoadStrategyScenario / SaveStrategyScenario / 関連 events）
 ///   - 11: F7 モード切替 (StopReplay / ForceStopReplay / ReplayStopped)
 ///   - 12: ReplayDataLoaded.instrument_id / granularity を追加（auto_generate_replay_panes 復活用）
-///   - 13: Python 側 bump に追従
+///   - 13: LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: Vec<String> 追加（複数銘柄対応）
+///   - 14: ReplayDataLoaded.session_epoch（リプレイファイル切替時のペイン全閉じ用、Approach B）
 pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 13;
+pub const SCHEMA_MINOR: u16 = 14;

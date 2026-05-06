@@ -672,7 +672,13 @@ async fn wandb_login(api_key: String) -> Result<(), String> {
     use tokio::process::Command;
 
     let mut child = Command::new("uv")
-        .args(["run", "--with", "wandb", "wandb", "login", "--relogin"])
+        .args([
+            "run",
+            "--with",
+            "wandb",
+            "python",
+            "examples/wandb/do_login.py",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -708,6 +714,20 @@ async fn wandb_login(api_key: String) -> Result<(), String> {
         }
     };
 
+    // do_login.py prints {"ok": true} or {"ok": false, "error": "..."} to stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+        if val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(());
+        }
+        let err = val
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(err.to_string());
+    }
+    // Fallback: no JSON — surface stderr or exit code.
     if output.status.success() {
         Ok(())
     } else {
@@ -1434,6 +1454,11 @@ struct Flowsurface {
     /// `EngineEvent::ReplayDataLoaded`; reset on `ReplayFinished` /
     /// `ReplayStopped` (both stop-only and mode-switch paths).
     replay_running: bool,
+    /// schema 3.14: 直前に処理した `ReplayDataLoaded.session_epoch`。
+    /// 新 epoch を観測したら `replay_pane_registry` を全リセットして旧ペインを
+    /// 閉じる。engine 切断時に `None` にリセットする（プロセス再起動で epoch が
+    /// 0 に巻き戻ったとき `Some(N) → Some(0)` の `!=` 誤発火を防ぐため）。
+    last_replay_session_epoch: Option<u64>,
     /// True between `Message::StopReplayOnly` dispatch and the corresponding
     /// `ReplayStopped` ack / final timeout. Distinguishes the stop-only flow
     /// from the F7 mode-switch flow inside the shared `ModeSwitch*` message
@@ -1622,11 +1647,17 @@ enum Message {
     /// `None` で届く（その場合 `update()` 側で防御的に弾く）。
     ReplayDataLoaded {
         instrument_id: Option<String>,
+        /// schema 3.13: 複数銘柄対応。None のとき instrument_id 単体として扱う（後方互換）。
+        instrument_ids: Option<Vec<String>>,
         granularity: Option<engine_client::dto::ReplayGranularity>,
         #[allow(dead_code)]
         bars_loaded: u64,
         #[allow(dead_code)]
         trades_loaded: u64,
+        /// schema 3.14: 新セッション識別子。`Flowsurface::last_replay_session_epoch`
+        /// と `!=` 比較して、新 epoch を観測したら旧ペインを全閉じする。
+        /// 旧 engine（minor<14）からは `None` で届く（後方互換）。
+        session_epoch: Option<u64>,
     },
     /// Native OS menu bar: HWND / window handle received; attach muda menu.
     NativeMenuSetup(u64),
@@ -2108,15 +2139,19 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         // helper attach mode でも同じ経路を通すため、ここで一律変換する。
         EngineEvent::ReplayDataLoaded {
             instrument_id,
+            instrument_ids,
             granularity,
             bars_loaded,
             trades_loaded,
+            session_epoch,
             ..
         } => Some(Message::ReplayDataLoaded {
             instrument_id,
+            instrument_ids,
             granularity,
             bars_loaded,
             trades_loaded,
+            session_epoch,
         }),
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
@@ -2369,6 +2404,7 @@ impl Flowsurface {
             mode_switch_state: None,
             engine_busy: false,
             replay_running: false,
+            last_replay_session_epoch: None,
             replay_stop_only_pending: false,
             menu_bar: crate::menu_bar_state::State::default(),
             wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
@@ -2463,6 +2499,11 @@ impl Flowsurface {
                     self.buying_power_request_id = None;
                     self.order_list_request_id = None;
                     self.positions_request_id = None;
+                    // schema 3.14: engine プロセス再起動で session_epoch が 0 に
+                    // 巻き戻る。前回値を `None` にリセットして `Some(N) → Some(0)`
+                    // の `!=` 誤発火を防ぐ。registry の drain は不要 — 既存ロジックで
+                    // pane 構造は保たれ、次回 ReplayDataLoaded で初期遷移として扱う。
+                    self.last_replay_session_epoch = None;
                     self.layout_manager
                         .iter_dashboards_mut()
                         .for_each(|dashboard| {
@@ -3735,16 +3776,60 @@ impl Flowsurface {
             // helper attach mode でも同じ経路を通す。
             Message::ReplayDataLoaded {
                 instrument_id,
+                instrument_ids,
                 granularity,
+                session_epoch,
                 ..
             } => {
-                let Some(instrument_id) = instrument_id.filter(|s| !s.is_empty()) else {
+                // schema 3.14: 新 epoch を観測したら旧ペインを全閉じして registry を
+                // リセット（リプレイファイル切替時の stale pane 残存バグ対応）。
+                // 比較は `!=` — engine 再起動で epoch が 0 に巻き戻ったときは切断
+                // ハンドラで `last_replay_session_epoch = None` にリセットされる。
+                //
+                // 読み (has_registered_panes) と書き (drain + close) を 1 回の
+                // mutable 借用にまとめ、active_dashboard() / active_dashboard_mut()
+                // の二段呼び出しによる「読み先と書き先がずれるリスク」を回避する
+                // （review-fix R1 MEDIUM iced-1）。
+                let prev = self.last_replay_session_epoch;
+                let dashboard = self.active_dashboard_mut();
+                let session_changed = match (prev, session_epoch) {
+                    (Some(p), Some(c)) => p != c,
+                    // 初回 None → Some(N): registry が空でない場合のみ発動
+                    // （helper attach 経路で先に何かが登録されている異常系のガード）。
+                    (None, Some(_)) => dashboard.replay_pane_registry.has_registered_panes(),
+                    // 旧 engine（minor<14）からの永続 None や None → None は無視。
+                    _ => false,
+                };
+                if session_changed {
+                    let stale = dashboard.replay_pane_registry.drain_all_registered();
+                    let n = stale.len();
+                    // pane_grid::State::close は未知の pane id に対して None を
+                    // 返す (no-op)。drain で回収した id はこの dashboard に紐づく
+                    // ものだけなので安全。
+                    for pane in stale {
+                        dashboard.panes.close(pane);
+                    }
+                    log::info!(
+                        "ReplayDataLoaded: session_epoch={session_epoch:?} \
+                         — closed {n} stale panes from previous session"
+                    );
+                }
+                if session_epoch.is_some() {
+                    self.last_replay_session_epoch = session_epoch;
+                }
+
+                // schema 3.13: instrument_ids（複数）を優先。なければ instrument_id 単体に後方互換。
+                let ids: Vec<String> = instrument_ids
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| instrument_id.into_iter().collect());
+
+                if ids.is_empty() {
                     log::error!(
-                        "ReplayDataLoaded: instrument_id missing — auto pane generation \
-                         skipped. (Old engine schema_minor<12 or schema bug.)"
+                        "ReplayDataLoaded: instrument_id(s) missing — auto pane generation \
+                         skipped. (Old engine schema_minor<13 or schema bug.)"
                     );
                     return Task::none();
-                };
+                }
                 let timeframe = match granularity {
                     Some(engine_client::dto::ReplayGranularity::Daily) => {
                         Some(exchange::Timeframe::D1)
@@ -3758,16 +3843,22 @@ impl Flowsurface {
                 let main_window_id = self.main_window.id;
                 self.replay_running = true;
                 log::info!(
-                    "ReplayDataLoaded: auto-generating replay panes for \
-                     instrument_id={instrument_id:?} timeframe={timeframe:?}"
+                    "ReplayDataLoaded: auto-generating replay panes for {} instrument(s) \
+                     timeframe={timeframe:?}",
+                    ids.len()
                 );
-                return self
-                    .active_dashboard_mut()
-                    .auto_generate_replay_panes(main_window_id, &instrument_id, timeframe)
-                    .map(move |msg| Message::Dashboard {
-                        layout_id: None,
-                        event: msg,
-                    });
+                let mut tasks = Vec::with_capacity(ids.len());
+                for id in &ids {
+                    let task = self
+                        .active_dashboard_mut()
+                        .auto_generate_replay_panes(main_window_id, id, timeframe)
+                        .map(move |msg| Message::Dashboard {
+                            layout_id: None,
+                            event: msg,
+                        });
+                    tasks.push(task);
+                }
+                return Task::batch(tasks);
             }
             // Replay engine finished → auto-refresh order list from Python's in-memory fills.
             Message::ReplayFinished => {
