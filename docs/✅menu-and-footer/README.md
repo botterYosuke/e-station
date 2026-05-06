@@ -13,6 +13,7 @@
 
 ## ドキュメント
 
+- [`replay-control-bar-impl.md`](./replay-control-bar-impl.md) — **Replay コントロールバー**（2 段化・再生制御・Step±・snapshot ring buffer）
 - [`widget-menu-bar-impl.md`](./widget-menu-bar-impl.md) — **メニューバー実装の主要仕様**（iced widget、全 OS 統一）
 - [`footer-impl.md`](./footer-impl.md) — ステータスバー（フッター）の要件・設計・テスト
 - [`save-menu-impl.md`](./save-menu-impl.md) — File メニュー / Save 実装（Open / Save / Save As / dirty 判定 / `CURRENT_PATH` / replay 戦略 `.py` `SCENARIO` 経路）
