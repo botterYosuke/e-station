@@ -84,7 +84,6 @@ nav:
       - File メニュー / Save 実装: ✅menu-and-footer/save-menu-impl.md
       - モード切替（live ⇄ replay）: ✅menu-and-footer/mode-switch-impl.md
       - Linux widget メニューバー: ✅menu-and-footer/widget-menu-bar-impl.md
-      - W&B Submit メニュー: ✅menu-and-footer/wandb-submit-impl.md
 
 markdown_extensions:
   - admonition

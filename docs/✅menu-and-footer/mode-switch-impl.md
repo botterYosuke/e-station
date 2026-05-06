@@ -37,7 +37,6 @@ pub struct ModeToggleState {
 pub fn mode_toggle_state(
     current: AppMode,
     engine_busy: bool,
-    submit_in_flight: bool,
     mode_switch_in_progress: bool,
 ) -> ModeToggleState { ... }
 ```
@@ -45,9 +44,8 @@ pub fn mode_toggle_state(
 抑制理由の優先順位（高 → 低）:
 
 1. `mode_switch_in_progress` → `Engine を再起動中…`
-2. `submit_in_flight` → `W&B 送信中は切替できません`
-3. `engine_busy` → `Engine がビジーです`
-4. それ以外 → `enabled = true`
+2. `engine_busy` → `Engine がビジーです`
+3. それ以外 → `enabled = true`
 
 ---
 
@@ -75,7 +73,6 @@ pub fn mode_toggle_state(
 | 切替先 | live / replay | 同モードへの切替は no-op |
 | In-flight order | あり / なし | live → replay 切替時のみ参照（read-only） |
 | EngineBusy | true / false | true 時は切替を保留しユーザーに通知 |
-| submit_in_flight | true / false | W&B submit 中は切替を抑制（[wandb-submit-impl.md](./wandb-submit-impl.md) 参照） |
 
 不変条件：
 
@@ -90,14 +87,11 @@ pub fn mode_toggle_state(
 
 - `tests/mode_switch_restart.rs` — engine 再起動経路
 - `tests/mode_switch_in_flight_order.rs` — in-flight order の read-only 参照
-- `tests/mode_switch_blocks_during_submit.rs` — `submit_in_flight` 抑制
 - `tests/mode_switch_reentry.rs` — 再入禁止
 - `tests/mode_switch_panic_recovery.rs` — guard の panic 時解除
 - `tests/mode_switch_timeout_abort.rs` — engine 起動タイムアウト時の abort
 - `tests/mode_switch_accelerator_disabled.rs` — `Ctrl/Cmd+M` の `MODE_SWITCHING` 中抑止
   （フッター disabled と独立した軸として**維持**。フッター側は TT2〜TT4 で別途保証）
-- `tests/wandb_modeswitch_lock_order.rs` — `CURRENT_PATH` / `MENU_IDS` /
-  `_mode_switch_guard` の lock 取得順序
 - `src/menu.rs` unit TT1〜TT4 — `mode_toggle_state(...)` の enable 計算
 - integration TT5〜TT6 — フッタークリック dispatch / dirty 時 confirm dialog
 
@@ -110,8 +104,8 @@ pub fn mode_toggle_state(
 | `src/menu.rs` | `Action::SwitchAppMode(AppMode)` / `ModeToggleState` / `mode_toggle_state` |
 | `src/main.rs` | `status_bar(ModeToggleState)` / `SwitchMode` ハンドラ群（`SaveAndSwitchMode` / `DiscardAndSwitchMode`） / engine 再起動 / `_mode_switch_guard` |
 | `src/native_menu.rs` | `Action` enum / `widget_keyboard_subscription`（Ctrl/Cmd+M 残置） |
-| `src/widget_menu_bar.rs` | iced widget bar（`File` / `Tools` 2 本立て。`Mode` ボタン廃止） |
-| `src/menu_bar_state.rs` | `TopMenu { File, Tools }`（`Mode` バリアント廃止） |
+| `src/widget_menu_bar.rs` | iced widget bar（`File` 1 本立て。`Mode` / `Tools` ボタン廃止） |
+| `src/menu_bar_state.rs` | `TopMenu { File }`（`Mode` / `Tools` バリアント廃止） |
 
 ---
 

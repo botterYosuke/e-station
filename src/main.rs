@@ -7,7 +7,7 @@ mod connector;
 mod layout;
 mod logger;
 mod mask_secrets;
-// `menu` exposes `tools_actions_for_state`, `MenuEntry`, and `Action` used by
+// `menu` exposes `MenuEntry` and `Action` used by
 // the iced widget menu bar on all platforms.
 mod menu;
 // `menu_bar_state` houses the pure `update()` state machine for the iced widget
@@ -20,8 +20,6 @@ mod screen;
 mod style;
 mod venue_state;
 mod version;
-mod wandb_auth;
-mod wandb_submit_proc;
 mod widget;
 mod widget_menu_bar;
 mod window;
@@ -91,7 +89,7 @@ static VENUE_READY_CACHE: std::sync::OnceLock<
 /// Startup mode (`live` or `replay`) captured from `--mode` before any runtime
 /// is created.  Changed from OnceLock to Mutex<Option<_>> so that
 /// `set_app_mode()` can overwrite the value during mode-switch restarts (F7/T1).
-/// Lock-acquisition order: MODE_SWITCHING → SUBMIT_IN_FLIGHT → APP_MODE → CURRENT_PATH (統一決定 58).
+/// Lock-acquisition order: MODE_SWITCHING → APP_MODE → CURRENT_PATH (統一決定 58).
 static APP_MODE: std::sync::Mutex<Option<engine_client::dto::AppMode>> =
     std::sync::Mutex::new(None);
 
@@ -101,20 +99,12 @@ static APP_MODE: std::sync::Mutex<Option<engine_client::dto::AppMode>> =
 pub static MODE_SWITCHING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// P9 W&B run buffer: set to `true` while an active submit is in progress.
-/// SwitchMode is rejected when this is true (5-axis matrix axis-5 / 統一決定 61, 68).
-/// P9 will set/clear this around submission; F7 only reads it.
-/// Lock-acquisition order: MODE_SWITCHING → SUBMIT_IN_FLIGHT → APP_MODE → CURRENT_PATH
-pub static SUBMIT_IN_FLIGHT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 // F7 / M2 (lightweight lock-order guard): track the highest-index lock
 // acquired on the current thread so reverse-order acquisitions are caught
 // in debug builds. The fixed order is:
 //   0: MODE_SWITCHING
-//   1: SUBMIT_IN_FLIGHT
-//   2: APP_MODE
-//   3: CURRENT_PATH
+//   1: APP_MODE
+//   2: CURRENT_PATH
 // Helper `lock_order_acquire(name)` is called at known acquisition points
 // (`restart_with_mode` / `Action::SwitchMode`). Release builds only log a
 // `log::warn!` so production safety is preserved (統一決定 R6-82).
@@ -126,9 +116,8 @@ thread_local! {
 fn lock_order_index_for(name: &str) -> Option<usize> {
     match name {
         "MODE_SWITCHING" => Some(0),
-        "SUBMIT_IN_FLIGHT" => Some(1),
-        "APP_MODE" => Some(2),
-        "CURRENT_PATH" => Some(3),
+        "APP_MODE" => Some(1),
+        "CURRENT_PATH" => Some(2),
         _ => None,
     }
 }
@@ -165,7 +154,7 @@ pub fn lock_order_acquire(name: &'static str) {
                 p <= next,
                 "lock-order violation: tried to acquire {name} (index {next}) \
                  while already holding index {p}. Fixed order: \
-                 MODE_SWITCHING(0) → SUBMIT_IN_FLIGHT(1) → APP_MODE(2) → CURRENT_PATH(3) \
+                 MODE_SWITCHING(0) → APP_MODE(1) → CURRENT_PATH(2) \
                  (統一決定 58 / R6-82)"
             );
             #[cfg(not(debug_assertions))]
@@ -190,48 +179,6 @@ pub fn lock_order_acquire(name: &'static str) {
 /// critical section have been released (e.g. at the bottom of `restart_with_mode`).
 pub fn lock_order_reset() {
     LOCK_ORDER_INDEX.with(|cell| cell.set(None));
-}
-
-/// Phase 3-A C2: handle to the in-flight `submit_run.py` child process.
-///
-/// `submit_wandb_run` stores the spawned `Child` here so that the W&B Cancel
-/// path (`modal::wandb_submit::Action::Cancel`) can reach in and kill the
-/// subprocess. On Windows `Child::kill()` is effectively `TerminateProcess`
-/// (immediate kill — no SIGTERM/grace-period semantics). On Unix tokio's
-/// `Child::kill` also issues SIGKILL, so the 5 second grace period documented
-/// in 統一決定 46 is best-effort and only meaningful if the kernel itself
-/// takes time to reap the process.
-pub static SUBMIT_CHILD: tokio::sync::Mutex<Option<tokio::process::Child>> =
-    tokio::sync::Mutex::const_new(None);
-
-/// F9d: W&B 送信エラーの種類。`examples/wandb/submit_run.py` の exit code に対応する。
-#[derive(Debug, Clone)]
-pub enum WandbSubmitError {
-    /// exit code 2: W&B 未認証
-    AuthFailed,
-    /// exit code 3: Rate limit (429)
-    RateLimit,
-    /// exit code 4: ネットワークエラー
-    Network,
-    /// exit code 5: サーバーエラー (5xx)
-    ServerError,
-    /// exit code 6: 部分的成功 / meta.json status != "completed"
-    Partial,
-    /// 予期しない exit code または spawn 失敗
-    ProcessFailed(String),
-}
-
-/// `submit_run.py` の exit code を `WandbSubmitError` に変換する。
-/// exit code 0 は成功なので呼ばれない。
-fn exit_code_to_error(code: i32) -> WandbSubmitError {
-    match code {
-        2 => WandbSubmitError::AuthFailed,
-        3 => WandbSubmitError::RateLimit,
-        4 => WandbSubmitError::Network,
-        5 => WandbSubmitError::ServerError,
-        6 => WandbSubmitError::Partial,
-        other => WandbSubmitError::ProcessFailed(format!("unexpected exit code: {other}")),
-    }
 }
 
 /// Returns the current app mode.  Falls back to `Live` when the static has not
@@ -451,319 +398,6 @@ mod wal_today_cutoff_tests {
         assert!(now_ms - today < 36 * 3600 * 1000); // within 36h window
     }
 }
-
-/// F9d streaming events emitted by [`submit_wandb_run_stream`].
-///
-/// `Line` carries one raw stdout/stderr line from the subprocess (already
-/// UTF-8). The modal applies `mask_secrets()` before storing it. `Final`
-/// carries the terminal result (success URL or `WandbSubmitError`).
-#[derive(Debug, Clone)]
-pub enum WandbStreamEvent {
-    Line(String),
-    Final(Result<String, WandbSubmitError>),
-}
-
-/// F9d: `examples/wandb/submit_run.py` を subprocess で起動し、結果を返す。
-///
-/// 起動コマンド: `uv run --with wandb python examples/wandb/submit_run.py --run-buffer <path>`
-/// exit code 0: stdout の `URL: <url>` 行を返す。
-/// 非ゼロ exit code: `WandbSubmitError` に変換して返す。
-///
-/// 実行中の stdout / stderr 行は `log_tx` 経由でリアルタイムに流す。Cancel 経路は
-/// `SUBMIT_CHILD` を介して `kill()` を呼ぶ。`try_wait()` ポーリングで Mutex を
-/// 長期保持しないため、kill が常に確実に届く。
-async fn submit_wandb_run(
-    run_buffer_dir: std::path::PathBuf,
-    script: std::path::PathBuf,
-    project: String,
-    run_name: String,
-    tags: String,
-    notes: String,
-    log_tx: tokio::sync::mpsc::UnboundedSender<String>,
-) -> Result<String, WandbSubmitError> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::process::Command;
-
-    // H8: 非UTF-8 path で空文字列に silent fallback せず、明示的にエラーを返す。
-    let script_str = script.to_str().ok_or_else(|| {
-        WandbSubmitError::ProcessFailed(format!(
-            "path contains non-UTF-8 characters: {}",
-            script.display()
-        ))
-    })?;
-    let run_buffer_str = run_buffer_dir.to_str().ok_or_else(|| {
-        WandbSubmitError::ProcessFailed(format!(
-            "path contains non-UTF-8 characters: {}",
-            run_buffer_dir.display()
-        ))
-    })?;
-
-    let mut cmd = Command::new("uv");
-    cmd.args([
-        "run",
-        "--with",
-        "wandb",
-        "python",
-        script_str,
-        "--run-buffer",
-        run_buffer_str,
-    ]);
-    if !project.is_empty() {
-        cmd.args(["--project", &project]);
-    }
-    if !run_name.is_empty() {
-        cmd.args(["--run-name", &run_name]);
-    }
-    if !tags.is_empty() {
-        cmd.args(["--tags", &tags]);
-    }
-    // M6: notes を `--notes` で渡す。
-    if !notes.is_empty() {
-        cmd.args(["--notes", &notes]);
-    }
-    // Phase 3-A C2: spawn explicitly so the Child handle can be stored in
-    // SUBMIT_CHILD for the Cancel path.
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| WandbSubmitError::ProcessFailed(format!("spawn failed: {e}")))?;
-
-    // Stream stdout / stderr line-by-line via dedicated reader tasks.
-    // Take the pipes BEFORE moving the Child into SUBMIT_CHILD.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    {
-        let mut slot = SUBMIT_CHILD.lock().await;
-        *slot = Some(child);
-    }
-
-    let log_tx_out = log_tx.clone();
-    let stdout_handle = tokio::spawn(async move {
-        let mut url: Option<String> = None;
-        if let Some(stdout) = stdout {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(rest) = line.strip_prefix("URL: ") {
-                    url = Some(rest.to_string());
-                }
-                // F9 R2-M3: when the receiver is dropped (modal closed) the
-                // send fails — exit early instead of looping forever and
-                // continuing to read stdout into a dead channel.
-                if log_tx_out.send(line).is_err() {
-                    break;
-                }
-            }
-        }
-        url
-    });
-    let log_tx_err = log_tx.clone();
-    let stderr_handle = tokio::spawn(async move {
-        if let Some(stderr) = stderr {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                // F9 R2-M3: same as stdout reader — abort when receiver is
-                // gone to release the BufReader / pipe handle promptly.
-                if log_tx_err.send(line).is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    drop(log_tx);
-
-    // Poll try_wait() in a tight loop so the SUBMIT_CHILD lock is held only
-    // for the duration of one syscall. The Cancel path needs the lock to
-    // call `kill()` and would be starved out if we held it across a blocking
-    // `wait()`.
-    let exit_status = loop {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let mut slot = SUBMIT_CHILD.lock().await;
-        let Some(c) = slot.as_mut() else {
-            // Cancel reached the slot first and is killing the process.
-            break None;
-        };
-        match c.try_wait() {
-            Ok(Some(status)) => {
-                let _ = slot.take();
-                break Some(status);
-            }
-            Ok(None) => continue,
-            Err(e) => {
-                let _ = slot.take();
-                return Err(WandbSubmitError::ProcessFailed(format!("wait failed: {e}")));
-            }
-        }
-    };
-
-    // Drain readers — they exit once the subprocess closes its pipes.
-    let url = stdout_handle.await.ok().flatten();
-    let _ = stderr_handle.await;
-
-    match exit_status {
-        Some(status) if status.success() => Ok(url.unwrap_or_default()),
-        Some(status) => Err(exit_code_to_error(status.code().unwrap_or(-1))),
-        None => Err(WandbSubmitError::ProcessFailed(
-            "cancelled before completion".to_string(),
-        )),
-    }
-}
-
-/// Wraps [`submit_wandb_run`] as a stream of [`WandbStreamEvent`] values so
-/// `iced::Task::run` can dispatch live `LogLine` updates AND a final
-/// completion event in one Task.
-fn submit_wandb_run_stream(
-    run_buffer_dir: std::path::PathBuf,
-    script: std::path::PathBuf,
-    project: String,
-    run_name: String,
-    tags: String,
-    notes: String,
-) -> impl iced::futures::Stream<Item = WandbStreamEvent> + Send + 'static {
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<WandbStreamEvent>();
-    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    let event_tx_for_lines = event_tx.clone();
-    tokio::spawn(async move {
-        while let Some(line) = log_rx.recv().await {
-            // F9 R1-M2: log channel failures (receiver dropped) instead of
-            // silently `let _ = ...`. Helps surface dropped log lines when
-            // the submit modal is dismissed mid-stream.
-            if let Err(err) = event_tx_for_lines.send(WandbStreamEvent::Line(line)) {
-                log::warn!("[wandb] dropping submit log line; receiver gone: {err}");
-                break;
-            }
-        }
-    });
-
-    tokio::spawn(async move {
-        let result = submit_wandb_run(
-            run_buffer_dir,
-            script,
-            project,
-            run_name,
-            tags,
-            notes,
-            log_tx,
-        )
-        .await;
-        // F9 R1-M2: ditto for the terminal Final event.
-        if let Err(err) = event_tx.send(WandbStreamEvent::Final(result)) {
-            log::warn!("[wandb] dropping submit Final event; receiver gone: {err}");
-        }
-    });
-
-    iced::futures::stream::unfold(event_rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    })
-}
-
-/// `wandb login --relogin` を stdin pipe 経由で API キーを渡して実行する。
-/// argv に API キーを渡さない（プロセスリスト・シェル履歴への漏洩防止）。
-///
-/// F9 R3-M2: hard timeout 30s + kill_on_drop(true)。wandb login は対話プロンプト
-/// (環境変数チェック・netrc 書き込み・ターミナル機能 probe) で時間がかかるため
-/// refresh_wandb_auth の 7s より長い 30s を割り当てる。timeout が elapse した
-/// 場合は spawn future が drop され、`kill_on_drop(true)` により child プロセスに
-/// SIGKILL が送られて GUI が永久ブロックしない。
-async fn wandb_login(api_key: String) -> Result<(), String> {
-    use std::time::Duration;
-    use tokio::io::AsyncWriteExt as _;
-    use tokio::process::Command;
-
-    let mut child = Command::new("uv")
-        .args([
-            "run",
-            "--with",
-            "wandb",
-            "python",
-            "examples/wandb/do_login.py",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-
-    // M8: stdin write の失敗を握り潰さず Result で伝播する。
-    // 旧コードは `let _ = stdin.write_all(...).await` で pipe broken 等の
-    // OS-level I/O 失敗を黙殺していたため、原因不明のログイン失敗の温床だった。
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "stdin not piped".to_string())?;
-    stdin
-        .write_all(api_key.as_bytes())
-        .await
-        .map_err(|e| format!("stdin write failed: {e}"))?;
-    stdin
-        .write_all(b"\n")
-        .await
-        .map_err(|e| format!("stdin write failed: {e}"))?;
-    drop(stdin);
-
-    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(format!("wait failed: {e}")),
-        Err(_elapsed) => {
-            // timeout — `kill_on_drop(true)` ensures the child is killed when
-            // `child` is dropped at the end of this scope.
-            return Err("wandb login timed out after 30s".to_string());
-        }
-    };
-
-    // do_login.py prints {"ok": true} or {"ok": false, "error": "..."} to stdout.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-        if val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-            return Ok(());
-        }
-        let err = val
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        return Err(err.to_string());
-    }
-    // Fallback: no JSON — surface stderr or exit code.
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(if stderr.is_empty() {
-            format!("exit code {:?}", output.status.code())
-        } else {
-            stderr
-        })
-    }
-}
-
-/// `wandb logout` を実行して netrc エントリを削除する。
-async fn wandb_logout() -> Result<(), String> {
-    use tokio::process::Command;
-
-    let output = Command::new("uv")
-        .args(["run", "--with", "wandb", "wandb", "logout"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("spawn failed: {e}"))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(if stderr.is_empty() {
-            format!("exit code {:?}", output.status.code())
-        } else {
-            stderr
-        })
-    }
-}
-
 /// F7/T2: RAII guard for the mode-switch critical section.
 /// Call `try_acquire()` at the top of `restart_with_mode()`; the flag is
 /// automatically cleared when the guard is dropped — including panic unwinds.
@@ -808,9 +442,6 @@ pub enum ModeSwitchError {
     SaveFailed,
     /// The replay engine did not stop in time and force-stop also failed.
     StopFailed,
-    /// An active W&B submit (`SUBMIT_IN_FLIGHT == true`) blocks the switch
-    /// (5-axis matrix axis-5 / 統一決定 61, 68).
-    SubmitInFlight,
     /// User cancelled the unsaved-changes confirm dialog (F4).
     ///
     /// L2-rust: not yet emitted on a concrete code path — `GoBack` and
@@ -1466,18 +1097,6 @@ struct Flowsurface {
     replay_stop_only_pending: bool,
     /// Widget menu bar open/close state (all platforms).
     menu_bar: crate::menu_bar_state::State,
-    /// P9: W&B authentication state. Populated when Python check_auth subprocess responds.
-    /// Drives Tools submenu enabled/disabled state on all platforms.
-    wandb_auth: wandb_auth::WandbAuthState,
-    /// P9: local run-buffer index. Populated by run-buffer directory scan.
-    /// Drives "Submit to W&B" enabled state (needs at least one completed run).
-    run_buffer: wandb_auth::RunBufferIndex,
-    /// F9c: W&B サインインモーダル。SignInWandb で Some に、Cancel / ログイン完了で None。
-    wandb_signin_modal: Option<modal::wandb_signin::WandbSignInModal>,
-    /// F9c: W&B 送信モーダル。SubmitToWandb で Some に、Cancel / 送信完了で None。
-    wandb_submit_modal: Option<modal::wandb_submit::WandbSubmitModal>,
-    /// F9e: W&B 送信履歴モーダル。OpenSubmissionLog で run-buffer/ をスキャンして開く。
-    wandb_submission_log_modal: Option<modal::wandb_submission_log::WandbSubmissionLogModal>,
 }
 
 #[derive(Debug, Clone)]
@@ -1775,37 +1394,6 @@ enum Message {
         /// `false` means the named doc is saved but next startup will auto-restore old state.
         saved_state_ok: bool,
     },
-    /// F9d: `examples/wandb/submit_run.py` subprocess の完了通知。
-    /// `Ok(url)` = 成功 + W&B run URL。`Err(e)` = 送信失敗の理由。
-    WandbSubmitResult(Result<String, WandbSubmitError>),
-    /// F9d: `examples/wandb/check_auth.py` subprocess の完了通知。
-    /// `WandbAuthState` を受け取ってメニュー状態を更新する。
-    WandbAuthRefreshed(wandb_auth::WandbAuthState),
-    /// F9c: W&B 送信モーダル内部メッセージ。
-    WandbSubmitMsg(modal::wandb_submit::Message),
-    /// F9c: W&B サインインモーダル内部メッセージ。
-    WandbSignInMsg(modal::wandb_signin::Message),
-    /// F9e: W&B 送信履歴モーダル内部メッセージ。
-    WandbSubmissionLogMsg(modal::wandb_submission_log::Message),
-    /// F9e: `list_run_buffer_entries` 完了通知。Vec を受け取って履歴モーダルを開く。
-    WandbSubmissionLogScanned(Vec<wandb_auth::RunBufferEntry>),
-    /// F9c: `wandb login --relogin` subprocess の完了通知。
-    WandbLoginResult(Result<(), String>),
-    /// F9c: ログアウト確認ダイアログで「ログアウト」が押された。
-    WandbLogoutConfirmed,
-    /// F9c: `wandb logout` subprocess の完了通知。
-    WandbLogoutResult(Result<(), String>),
-    /// F9e: バッファ削除確認後の実行。
-    ClearRunBufferConfirmed,
-    /// M3 (R1 Phase 3-C): `RunBufferIndex::scan_async` の完了通知。
-    /// 結果でメニュー有効化判定 (`run_buffer`) を更新し、トースト表示も行う。
-    RunBufferIndexScanned {
-        index: wandb_auth::RunBufferIndex,
-        /// `OpenSubmissionLog` 経由ならトーストを出す。`true` のとき `notifications` に push する。
-        show_toast: bool,
-    },
-    /// M3 (R1 Phase 3-C): `tokio::fs::remove_dir_all` の完了通知。
-    RunBufferCleared(Result<(), String>),
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -2233,7 +1821,7 @@ fn status_bar(state: crate::menu::ModeToggleState) -> Element<'static, Message> 
     let badge_el: Element<'static, Message> = if state.enabled {
         // Route through the same BarMessage::Pick → to_native_action → NativeMenuAction
         // path as the widget menu bar, so the Action::SwitchMode handler's guard
-        // invariants (SUBMIT_IN_FLIGHT, dirty check, etc.) are preserved.
+        // invariants (dirty check, etc.) are preserved.
         badge
             .on_press(Message::MenuBar(crate::menu_bar_state::BarMessage::Pick(
                 crate::menu::Action::SwitchAppMode(target),
@@ -2407,11 +1995,6 @@ impl Flowsurface {
             last_replay_session_epoch: None,
             replay_stop_only_pending: false,
             menu_bar: crate::menu_bar_state::State::default(),
-            wandb_auth: wandb_auth::WandbAuthState::unauthenticated(),
-            run_buffer: wandb_auth::RunBufferIndex::empty(),
-            wandb_signin_modal: None,
-            wandb_submit_modal: None,
-            wandb_submission_log_modal: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -2450,28 +2033,6 @@ impl Flowsurface {
             window::collect_window_specs(baseline_ids, Message::SetDirtyBaseline)
         };
 
-        // F9d: 起動時に check_auth.py を一度だけ非同期実行して wandb_auth を初期化する
-        let init_wandb_auth = Task::perform(
-            wandb_auth::refresh_wandb_auth(),
-            Message::WandbAuthRefreshed,
-        );
-        // F9 R2-M5: 起動時 run-buffer/ scan を async 化し、startup の同期 I/O を
-        // 排除する。`new()` から sync `RunBufferIndex::scan` を呼ばず、empty で
-        // 初期化したのち `Task::perform(scan_async, RunBufferIndexScanned)` を
-        // チェーンする。完了通知は通常経路（Message::RunBufferIndexScanned）
-        // で `refresh_tools_enable` まで自動で流れる。
-        state.run_buffer = wandb_auth::RunBufferIndex::empty();
-        let init_run_buffer = {
-            let base = data::data_path(Some("run-buffer"));
-            Task::perform(
-                async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
-                |index| Message::RunBufferIndexScanned {
-                    index,
-                    show_toast: false,
-                },
-            )
-        };
-
         (
             state,
             open_main_window
@@ -2479,9 +2040,7 @@ impl Flowsurface {
                 .chain(setup_native_menu)
                 .chain(load_layout)
                 .chain(launch_sidebar.map(Message::Sidebar))
-                .chain(set_baseline)
-                .chain(init_wandb_auth)
-                .chain(init_run_buffer),
+                .chain(set_baseline),
         )
     }
 
@@ -3793,7 +3352,7 @@ impl Flowsurface {
                 let prev = self.last_replay_session_epoch;
                 let dashboard = self.active_dashboard_mut();
                 let session_changed = match (prev, session_epoch) {
-                    (Some(p), Some(c)) => p != c,
+                    (Some(prev), Some(curr)) => prev != curr,
                     // 初回 None → Some(N): registry が空でない場合のみ発動
                     // （helper attach 経路で先に何かが登録されている異常系のガード）。
                     (None, Some(_)) => dashboard.replay_pane_registry.has_registered_panes(),
@@ -3952,7 +3511,7 @@ impl Flowsurface {
             }
             // ── Native OS menu bar ──────────────────────────────────────────
             Message::NativeMenuSetup(raw_id) => {
-                native_menu::attach(raw_id, app_mode(), &self.wandb_auth, &self.run_buffer);
+                native_menu::attach(raw_id, app_mode());
                 return Task::none();
             }
             Message::NativeMenuAction(action) => {
@@ -4075,86 +3634,6 @@ impl Flowsurface {
                             Message::ExitRequested,
                         );
                     }
-                    // ── F9c: Tools / W&B submenu ──────────────────────────────────────
-                    Action::SubmitToWandb => {
-                        // ガード 1: 既に送信中なら no-op
-                        if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
-                            self.notifications
-                                .push(Toast::info("送信中です...".to_string()));
-                            return Task::none();
-                        }
-                        // ガード 2: 未認証なら no-op
-                        if !self.wandb_auth.authenticated {
-                            self.notifications
-                                .push(Toast::warn("W&B にログインしてください".to_string()));
-                            return Task::none();
-                        }
-                        // ガード 3: completed run がなければ no-op
-                        let Some(run_id) = self.run_buffer.latest_completed.clone() else {
-                            self.notifications
-                                .push(Toast::warn("送信可能な run がありません".to_string()));
-                            return Task::none();
-                        };
-
-                        // F9c: モーダルを表示してユーザーに project / run_name / tags を
-                        // 確認・編集させてから送信する（P9 spec「メニュー押下 → WandbSubmitModal 表示」）
-                        if self.wandb_submit_modal.is_none() {
-                            let auth_display =
-                                modal::wandb_submit::AuthDisplayState::from(&self.wandb_auth);
-                            self.wandb_submit_modal =
-                                Some(modal::wandb_submit::WandbSubmitModal::new(
-                                    &run_id,
-                                    run_id.split('-').nth(1).unwrap_or("strategy"),
-                                    auth_display,
-                                ));
-                        }
-                        return Task::none();
-                    }
-                    Action::SignInWandb => {
-                        if self.wandb_signin_modal.is_none() {
-                            self.wandb_signin_modal =
-                                Some(modal::wandb_signin::WandbSignInModal::new());
-                        }
-                        return Task::none();
-                    }
-                    Action::SignOutWandb => {
-                        if self.confirm_dialog.is_none() {
-                            let dialog = screen::ConfirmDialog::new(
-                                "W&B からログアウトします。\nnetrc のエントリが削除されます。"
-                                    .to_string(),
-                                Box::new(Message::WandbLogoutConfirmed),
-                            )
-                            .with_confirm_btn_text("ログアウト".to_string());
-                            self.confirm_dialog = Some(dialog);
-                        }
-                        return Task::none();
-                    }
-                    Action::OpenSubmissionLog => {
-                        // F9e: run-buffer/ 配下の全 run を async でスキャンして
-                        // 履歴モーダルに渡す。iced update loop をブロックしない
-                        // よう Task::perform 経由で list_run_buffer_entries を
-                        // 呼ぶ。受信側は Message::WandbSubmissionLogScanned。
-                        if self.wandb_submission_log_modal.is_some() {
-                            return Task::none();
-                        }
-                        let base = data::data_path(Some("run-buffer"));
-                        return Task::perform(
-                            async move { wandb_auth::list_run_buffer_entries(&base).await },
-                            Message::WandbSubmissionLogScanned,
-                        );
-                    }
-                    Action::ClearRunBuffer => {
-                        if self.confirm_dialog.is_none() {
-                            let base = data::data_path(Some("run-buffer"));
-                            let dialog = screen::ConfirmDialog::new(
-                                format!("run-buffer を削除しますか？\nパス: {}", base.display()),
-                                Box::new(Message::ClearRunBufferConfirmed),
-                            )
-                            .with_confirm_btn_text("削除".to_string());
-                            self.confirm_dialog = Some(dialog);
-                        }
-                        return Task::none();
-                    }
                     Action::SwitchMode(target) => {
                         use engine_client::dto::AppMode;
                         // Guard: don't start a mode switch if another dialog is already showing
@@ -4171,23 +3650,10 @@ impl Flowsurface {
                             return Task::none();
                         };
                         // M2 (lightweight): record MODE_SWITCHING acquisition so
-                        // any subsequent SUBMIT_IN_FLIGHT / APP_MODE / CURRENT_PATH
-                        // acquisitions on this thread can be order-checked.
+                        // any subsequent APP_MODE / CURRENT_PATH acquisitions on
+                        // this thread can be order-checked.
                         lock_order_acquire("MODE_SWITCHING");
                         self.mode_switch_state = Some((target, guard));
-
-                        // Axis-5: reject if a W&B submit is in progress (統一決定 61, 68)
-                        if SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
-                            self.mode_switch_state = None;
-                            let dialog = screen::ConfirmDialog::new(
-                                "W&B 送信中です。\n送信が完了してからモードを切り替えてください。"
-                                    .to_string(),
-                                Box::new(Message::ToggleDialogModal(None)),
-                            )
-                            .with_confirm_btn_text("閉じる".to_string());
-                            self.confirm_dialog = Some(dialog);
-                            return Task::none();
-                        }
 
                         match (current, target) {
                             (AppMode::Live, AppMode::Replay) => {
@@ -5425,7 +4891,7 @@ impl Flowsurface {
                     //
                     // M-rust3: this reset is unconditional — `ToggleDialogModal(None)`
                     // also fires for non-mode-switch dialogs (e.g. save-as overwrite,
-                    // wandb confirm). When `mode_switch_state` is already `None` the
+                    // logout confirm). When `mode_switch_state` is already `None` the
                     // assignment is idempotent. The `ModeSwitchGuard::drop` Drop impl
                     // is what actually releases the cross-thread `MODE_SWITCHING`
                     // atomic and runs `lock_order_reset()` (H1), so dismissing an
@@ -5787,348 +5253,6 @@ impl Flowsurface {
                     Message::RestartRequested(Some(windows))
                 });
             }
-            // F9d: W&B submit subprocess 完了
-            Message::WandbSubmitResult(result) => {
-                SUBMIT_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
-                match result {
-                    Ok(url) => {
-                        log::info!("W&B submit succeeded: {url}");
-                        // モーダルが開いていれば Done を通知して URL を表示する
-                        if let Some(modal) = self.wandb_submit_modal.as_mut() {
-                            let url_opt = if url.is_empty() {
-                                None
-                            } else {
-                                Some(url.clone())
-                            };
-                            modal.update(modal::wandb_submit::Message::Done(url_opt));
-                        } else {
-                            self.notifications
-                                .push(Toast::info(format!("W&B に送信しました: {url}")));
-                        }
-                        // R2-H2 / M3: run-buffer スキャンを async で行い iced
-                        // update スレッドをブロックしない。完了通知は
-                        // Message::RunBufferIndexScanned ハンドラ側で
-                        // refresh_tools_enable を実行するため戻り値の Task に
-                        // 統合する。
-                        let base = data::data_path(Some("run-buffer"));
-                        return Task::perform(
-                            async move { wandb_auth::RunBufferIndex::scan_async(&base).await },
-                            |index| Message::RunBufferIndexScanned {
-                                index,
-                                show_toast: false,
-                            },
-                        );
-                    }
-                    Err(ref e) => {
-                        let msg = match e {
-                            WandbSubmitError::AuthFailed => {
-                                log::warn!("W&B submit failed: auth error");
-                                "W&B 認証エラー: 再ログインしてください".to_string()
-                            }
-                            WandbSubmitError::RateLimit => {
-                                log::warn!("W&B submit failed: rate limit");
-                                "W&B 送信失敗: レートリミット超過".to_string()
-                            }
-                            WandbSubmitError::Network => {
-                                log::warn!("W&B submit failed: network error");
-                                "W&B 送信失敗: ネットワークエラー".to_string()
-                            }
-                            WandbSubmitError::ServerError => {
-                                log::warn!("W&B submit failed: server error");
-                                "W&B 送信失敗: サーバーエラー".to_string()
-                            }
-                            WandbSubmitError::Partial => {
-                                log::warn!("W&B submit failed: partial");
-                                "W&B 送信: 部分的な失敗（run buffer を確認してください）"
-                                    .to_string()
-                            }
-                            WandbSubmitError::ProcessFailed(m) => {
-                                log::warn!("W&B submit failed: {m}");
-                                format!("W&B 送信失敗: {m}")
-                            }
-                        };
-                        if let Some(modal) = self.wandb_submit_modal.as_mut() {
-                            modal.update(modal::wandb_submit::Message::Failed(msg, -1));
-                        } else {
-                            self.notifications.push(Toast::error(msg));
-                        }
-                    }
-                }
-                return Task::none();
-            }
-            // F9d: W&B check_auth subprocess 完了 — wandb_auth を更新する
-            Message::WandbAuthRefreshed(state) => {
-                self.wandb_auth = state;
-                // H5: ネイティブメニュー Tools 項目の enable/disable を再計算
-                native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
-                return Task::none();
-            }
-            // F9c: 送信モーダル内部メッセージ
-            Message::WandbSubmitMsg(msg) => {
-                if let Some(modal) = self.wandb_submit_modal.as_mut() {
-                    match modal.update(msg) {
-                        Some(modal::wandb_submit::Action::Cancel) => {
-                            // Phase 3-A C2: dismiss the modal AND release the
-                            // submit_in_flight reentrancy guard. If a subprocess
-                            // is currently running, take its handle out of
-                            // SUBMIT_CHILD and kill it. On Windows this is an
-                            // immediate TerminateProcess; on Unix tokio's
-                            // Child::kill also issues SIGKILL, so the 5 second
-                            // grace period documented in 統一決定 46 is
-                            // best-effort and depends on kernel reaping.
-                            // R2-M3: SUBMIT_IN_FLIGHT のリセットは kill が
-                            // 完了した「後」に行う。先にリセットすると、
-                            // kill 完了前に新しい Submit が再入できてしまい
-                            // 同じ run-buffer に対して 2 つの subprocess が
-                            // 競合する窓ができる。kill().await 完了後に store
-                            // することで、新しい Submit は古い subprocess の
-                            // 終焉を必ず観測する。idempotent reset (重複 store
-                            // is safe; cf. submit_in_flight_is_idempotent_on_double_release)
-                            self.wandb_submit_modal = None;
-                            // F9 R1-H10: removed `.discard()` so the trailing
-                            // `Message::Tick` is actually delivered to the
-                            // runtime. Discarding silently broke the Elm-style
-                            // contract that any non-`Task::none()` returns
-                            // a Message; `Tick` is harmless (just advances the
-                            // dashboard one frame) and makes the wiring
-                            // legible.
-                            return Task::perform(
-                                async {
-                                    let mut slot = SUBMIT_CHILD.lock().await;
-                                    if let Some(mut child) = slot.take() {
-                                        let _ = child.kill().await;
-                                    }
-                                    SUBMIT_IN_FLIGHT
-                                        .store(false, std::sync::atomic::Ordering::Release);
-                                },
-                                |()| Message::Tick(std::time::Instant::now()),
-                            );
-                        }
-                        Some(modal::wandb_submit::Action::Submit {
-                            project,
-                            run_name,
-                            tags,
-                            notes,
-                        }) => {
-                            // R2-M1: latest_completed が無い状態で Submit が
-                            // 走るのは仕様上ありえないが、防御的に no-op する。
-                            // SUBMIT_IN_FLIGHT を立てる前に弾くことで「送信中」
-                            // 状態に入って永久ロックされる事故を防ぐ。
-                            if self.run_buffer.latest_completed.is_none() {
-                                log::warn!(
-                                    "[wandb] Submit dispatched with no completed run; ignoring"
-                                );
-                                return Task::none();
-                            }
-                            // ガード: 再入禁止
-                            if SUBMIT_IN_FLIGHT
-                                .compare_exchange(
-                                    false,
-                                    true,
-                                    std::sync::atomic::Ordering::AcqRel,
-                                    std::sync::atomic::Ordering::Acquire,
-                                )
-                                .is_err()
-                            {
-                                return Task::none();
-                            }
-                            let run_id = self.run_buffer.latest_completed.clone();
-                            let run_buffer_dir = run_id
-                                .map(|id| data::data_path(Some("run-buffer")).join(id))
-                                .unwrap_or_default();
-                            let script = std::path::PathBuf::from("examples/wandb/submit_run.py");
-                            // F9d: stream stdout/stderr lines as LogLine
-                            // updates so the modal tail is populated while
-                            // the subprocess is still running, instead of
-                            // appearing only on completion. The terminal
-                            // event is dispatched as Message::WandbSubmitResult.
-                            let stream = submit_wandb_run_stream(
-                                run_buffer_dir,
-                                script,
-                                project,
-                                run_name,
-                                tags,
-                                notes,
-                            );
-                            return Task::run(stream, |evt| match evt {
-                                WandbStreamEvent::Line(line) => Message::WandbSubmitMsg(
-                                    modal::wandb_submit::Message::LogLine(line),
-                                ),
-                                WandbStreamEvent::Final(result) => {
-                                    Message::WandbSubmitResult(result)
-                                }
-                            });
-                        }
-                        Some(modal::wandb_submit::Action::OpenUrl(url)) => {
-                            let _ = webbrowser::open(&url);
-                        }
-                        None => {}
-                    }
-                }
-                return Task::none();
-            }
-            // F9c: サインインモーダル内部メッセージ
-            Message::WandbSignInMsg(msg) => {
-                if let Some(modal) = self.wandb_signin_modal.as_mut() {
-                    match modal.update(msg) {
-                        Some(modal::wandb_signin::Action::Cancel) => {
-                            self.wandb_signin_modal = None;
-                        }
-                        Some(modal::wandb_signin::Action::OpenBrowserForKey) => {
-                            let _ = webbrowser::open("https://wandb.ai/authorize");
-                        }
-                        Some(modal::wandb_signin::Action::Login { api_key }) => {
-                            return Task::perform(
-                                async move { wandb_login(api_key).await },
-                                Message::WandbLoginResult,
-                            );
-                        }
-                        None => {}
-                    }
-                }
-                return Task::none();
-            }
-            // F9e: list_run_buffer_entries の完了 — 履歴モーダルを開く
-            Message::WandbSubmissionLogScanned(entries) => {
-                self.wandb_submission_log_modal = Some(
-                    modal::wandb_submission_log::WandbSubmissionLogModal::new(entries),
-                );
-                return Task::none();
-            }
-            // F9e: 履歴モーダル内部メッセージ
-            Message::WandbSubmissionLogMsg(msg) => {
-                if let Some(modal) = self.wandb_submission_log_modal.as_mut() {
-                    match modal.update(msg) {
-                        Some(modal::wandb_submission_log::Action::Close) => {
-                            self.wandb_submission_log_modal = None;
-                        }
-                        None => {}
-                    }
-                }
-                return Task::none();
-            }
-            // F9c: wandb login 完了
-            // F9 R2-H1: handle Ok(()) regardless of whether the modal is still
-            // present. If the user cancels the modal mid-login, `wandb_signin_modal`
-            // becomes None — but credentials may already have been persisted by
-            // the subprocess (Python side), so the auth refresh must still be
-            // issued. Previously the entire arm was guarded by `if let
-            // Some(modal)`, silently dropping the refresh on cancel-then-success
-            // and leaving the UI as "未認証".
-            Message::WandbLoginResult(result) => match result {
-                Ok(()) => {
-                    self.wandb_signin_modal = None;
-                    self.notifications
-                        .push(Toast::info("W&B にログインしました".to_string()));
-                    // auth キャッシュを invalidate して再取得
-                    return Task::perform(
-                        wandb_auth::refresh_wandb_auth(),
-                        Message::WandbAuthRefreshed,
-                    );
-                }
-                Err(err) => {
-                    if let Some(modal) = self.wandb_signin_modal.as_mut() {
-                        // F9 R1-M4: route failure via Message::LoginFailed
-                        // so the modal owns its own state mutations.
-                        // F9 R3-M1: do NOT discard `update()`'s Option<Action>
-                        // with `let _ = ...`. The LoginFailed contract is to
-                        // return None (see modal/wandb_signin.rs unit test
-                        // `login_failed_update_returns_none_always`), but if a
-                        // future refactor changes that contract we want a
-                        // visible warning rather than a silent action drop.
-                        match modal.update(modal::wandb_signin::Message::LoginFailed(format!(
-                            "ログイン失敗: {err}"
-                        ))) {
-                            None => {}
-                            Some(_action) => {
-                                log::warn!(
-                                    "[wandb_signin] unexpected Action returned from \
-                                     Message::LoginFailed; the contract is to return None. \
-                                     The Action is being dropped — investigate the modal \
-                                     update() refactor that changed this."
-                                );
-                            }
-                        }
-                    }
-                    return Task::none();
-                }
-            },
-            // F9c: ログアウト確認ダイアログで確認 → 実際の subprocess を起動
-            Message::WandbLogoutConfirmed => {
-                self.confirm_dialog = None;
-                return Task::perform(async { wandb_logout().await }, Message::WandbLogoutResult);
-            }
-            // F9c: wandb logout subprocess の完了通知
-            Message::WandbLogoutResult(result) => {
-                match result {
-                    Ok(()) => {
-                        self.notifications
-                            .push(Toast::info("W&B からログアウトしました".to_string()));
-                        return Task::perform(
-                            wandb_auth::refresh_wandb_auth(),
-                            Message::WandbAuthRefreshed,
-                        );
-                    }
-                    Err(err) => {
-                        log::warn!("W&B logout failed: {err}");
-                        self.notifications
-                            .push(Toast::error(format!("W&B ログアウト失敗: {err}")));
-                    }
-                }
-                return Task::none();
-            }
-            // F9e: バッファ削除確認後 — M3: tokio::fs で async 削除する。
-            Message::ClearRunBufferConfirmed => {
-                self.confirm_dialog = None;
-                let base = data::data_path(Some("run-buffer"));
-                return Task::perform(
-                    async move {
-                        match tokio::fs::metadata(&base).await {
-                            Ok(_) => tokio::fs::remove_dir_all(&base)
-                                .await
-                                .map_err(|e| e.to_string()),
-                            // 元から存在しない場合は成功扱い（冪等）。
-                            Err(_) => Ok(()),
-                        }
-                    },
-                    Message::RunBufferCleared,
-                );
-            }
-            // M3: tokio::fs::remove_dir_all の完了通知。
-            Message::RunBufferCleared(result) => {
-                match result {
-                    Ok(()) => {
-                        self.run_buffer = wandb_auth::RunBufferIndex::empty();
-                        // H5: Tools 項目 enable/disable を再計算
-                        native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
-                        self.notifications
-                            .push(Toast::info("run-buffer を削除しました".to_string()));
-                    }
-                    Err(e) => {
-                        self.notifications
-                            .push(Toast::error(format!("削除失敗: {e}")));
-                    }
-                }
-                return Task::none();
-            }
-            // M3: scan_async の完了通知。run_buffer 更新 + （任意で）トースト表示。
-            Message::RunBufferIndexScanned { index, show_toast } => {
-                if show_toast {
-                    if let Some(ref latest) = index.latest_completed {
-                        self.notifications.push(Toast::info(format!(
-                            "最新 run: {latest} (completed runs: {})",
-                            index.total
-                        )));
-                    } else {
-                        self.notifications
-                            .push(Toast::info("送信履歴がまだありません".to_string()));
-                    }
-                }
-                self.run_buffer = index;
-                // H5: Tools 項目 enable/disable を再計算
-                native_menu::refresh_tools_enable(&self.wandb_auth, &self.run_buffer);
-                return Task::none();
-            }
         }
         Task::none()
     }
@@ -6228,7 +5352,6 @@ impl Flowsurface {
             let mode_toggle = crate::menu::mode_toggle_state(
                 current_mode,
                 self.engine_busy,
-                SUBMIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire),
                 self.mode_switch_state.is_some(),
             );
             base = base.push(status_bar(mode_toggle));
@@ -6242,8 +5365,6 @@ impl Flowsurface {
                 view_result,
                 &self.menu_bar,
                 current_mode,
-                &self.wandb_auth,
-                &self.run_buffer,
                 self.replay_running,
             )
         } else {
@@ -6287,7 +5408,7 @@ impl Flowsurface {
             toasted
         };
 
-        let after_replay_form = if let Some(form) = &self.replay_form_modal {
+        if let Some(form) = &self.replay_form_modal {
             let form_view = form.view().map(Message::ReplayFormMsg);
             main_dialog_modal(
                 after_second_password,
@@ -6296,56 +5417,6 @@ impl Flowsurface {
             )
         } else {
             after_second_password
-        };
-
-        // Phase 3-A H7: W&B submit / signin modals must only render on the
-        // main window. Popout windows (detached panes) host neither modal
-        // and would otherwise duplicate the dialog across every open window.
-        // The confirm_dialog overlay above (`id == self.main_window.id`)
-        // already follows this pattern; mirror it here so the symmetry holds.
-        let after_wandb_submit = if id == self.main_window.id {
-            if let Some(submit) = &self.wandb_submit_modal {
-                let submit_view = submit.view().map(Message::WandbSubmitMsg);
-                main_dialog_modal(
-                    after_replay_form,
-                    submit_view,
-                    Message::WandbSubmitMsg(modal::wandb_submit::Message::Cancel),
-                )
-            } else {
-                after_replay_form
-            }
-        } else {
-            after_replay_form
-        };
-
-        let after_signin = if id == self.main_window.id {
-            if let Some(signin) = &self.wandb_signin_modal {
-                let signin_view = signin.view().map(Message::WandbSignInMsg);
-                main_dialog_modal(
-                    after_wandb_submit,
-                    signin_view,
-                    Message::WandbSignInMsg(modal::wandb_signin::Message::Cancel),
-                )
-            } else {
-                after_wandb_submit
-            }
-        } else {
-            after_wandb_submit
-        };
-
-        if id == self.main_window.id {
-            if let Some(log) = &self.wandb_submission_log_modal {
-                let log_view = log.view().map(Message::WandbSubmissionLogMsg);
-                main_dialog_modal(
-                    after_signin,
-                    log_view,
-                    Message::WandbSubmissionLogMsg(modal::wandb_submission_log::Message::Close),
-                )
-            } else {
-                after_signin
-            }
-        } else {
-            after_signin
         }
     }
 
@@ -7659,7 +6730,6 @@ mod lock_order_tests {
     fn lock_order_acquire_in_correct_order_does_not_panic() {
         lock_order_reset();
         lock_order_acquire("MODE_SWITCHING");
-        lock_order_acquire("SUBMIT_IN_FLIGHT");
         lock_order_acquire("APP_MODE");
         lock_order_acquire("CURRENT_PATH");
         lock_order_reset();
@@ -7667,12 +6737,11 @@ mod lock_order_tests {
 
     #[test]
     fn lock_order_acquire_skipping_levels_is_allowed() {
-        // Skipping intermediate levels (e.g. MODE_SWITCHING then APP_MODE
-        // without acquiring SUBMIT_IN_FLIGHT) is fine — the order is a
-        // partial order.
+        // Skipping intermediate levels (e.g. MODE_SWITCHING then CURRENT_PATH
+        // without acquiring APP_MODE) is fine — the order is a partial order.
         lock_order_reset();
         lock_order_acquire("MODE_SWITCHING");
-        lock_order_acquire("APP_MODE");
+        lock_order_acquire("CURRENT_PATH");
         lock_order_reset();
     }
 

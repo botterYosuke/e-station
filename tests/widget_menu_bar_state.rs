@@ -8,7 +8,7 @@
 //! - Contract 1: Esc (→ Dismiss)
 //! - Contract 2: focus-lost (→ Dismiss)
 //! - Contract 3: outside click (→ Dismiss)
-//! × {File open, Tools open, Closed}
+//! × {File open, Closed}
 //!
 //! All 12 cases share the same `Dismiss → open: None` transition in the
 //! pure `update()` function. The "dismiss reason" distinction is handled
@@ -63,7 +63,10 @@ fn top_menu_enum_has_file_and_tools() {
         "menu_bar_state.rs must define `pub enum TopMenu`"
     );
     assert!(src.contains("File"), "TopMenu must have File variant");
-    assert!(src.contains("Tools"), "TopMenu must have Tools variant");
+    assert!(
+        !src.contains("TopMenu::Tools") && !src.contains("    Tools,"),
+        "TopMenu must NOT have Tools variant — Tools menu has been removed"
+    );
     assert!(
         !src.contains("    Mode,"),
         "TopMenu must NOT have Mode variant — Mode menu is replaced by footer toggle"
@@ -311,7 +314,7 @@ fn view_function_returns_bar_message_element() {
         src.contains("Element<'a, BarMessage>") || src.contains("-> Element<'_, BarMessage>"),
         "view() must return Element<'a, BarMessage> (not Message) for .map(Message::MenuBar) in main.rs"
     );
-    // Must emit Toggle messages and include both top-level menu variants
+    // Must emit Toggle messages and include the File top-level menu variant
     assert!(
         src.contains("BarMessage::Toggle"),
         "view() must emit BarMessage::Toggle for top-level button presses"
@@ -321,8 +324,8 @@ fn view_function_returns_bar_message_element() {
         "view() must reference TopMenu::File for the File ▼ button"
     );
     assert!(
-        src.contains("TopMenu::Tools"),
-        "view() must reference TopMenu::Tools for the Tools ▼ button"
+        !src.contains("TopMenu::Tools"),
+        "view() must NOT reference TopMenu::Tools — Tools menu has been removed"
     );
     assert!(
         !src.contains("TopMenu::Mode"),

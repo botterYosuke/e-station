@@ -34,7 +34,8 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)
     # schema 3.13: SCHEMA_MINOR を 12 → 13 に bump
     # (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: list[str] | None 追加)
-    assert s.SCHEMA_MINOR == 13
+    # schema 3.14: SCHEMA_MINOR を 13 → 14 に bump (replay_session_epoch フィールド追加)
+    assert s.SCHEMA_MINOR == 14
     assert s.SCHEMA_MAJOR == 3
 
 

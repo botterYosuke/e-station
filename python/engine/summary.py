@@ -5,8 +5,8 @@ Computes the four headline metrics — `total_pnl`, `max_drawdown`,
 diagnostic fields (`equity_points`, `fills_count`).
 
 This module is a **stable contract** consumed by:
-    - examples/wandb/submit_run.py  (uploads metrics to W&B summary)
-    - external research repos (e.g. blacksheep) ingesting run-buffers
+    - blacksheep/publish_run.py  (uploads metrics; W&B responsibility migrated to blacksheep)
+    - external research repos ingesting run-buffers
 
 Definitions (kept simple so audit by hand is feasible):
     - total_pnl    : equity[-1] - equity[0]

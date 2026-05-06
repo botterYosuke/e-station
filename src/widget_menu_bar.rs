@@ -16,9 +16,8 @@ use iced::widget::{
 use iced::{Element, Length};
 
 use crate::Message;
-use crate::menu::{Action, MenuEntry, actions_for_mode, tools_actions_for_state};
+use crate::menu::{Action, MenuEntry, actions_for_mode};
 pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
-use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
 
 /// Fixed width for each top-level menu button.  The dropdown's horizontal
 /// position is derived from this value, so there are no magic pixel offsets.
@@ -30,14 +29,14 @@ const BTN_WIDTH: f32 = 155.0;
 /// cursor last rested.
 const BAR_HEIGHT: f32 = 32.0;
 
-/// Returns the menu button row (`File ▼` / `Tools ▼`).
+/// Returns the menu button row (`File ▼`).
 ///
 /// Each button has an explicit fixed width so the horizontal dropdown positions
 /// can be computed exactly from `BTN_WIDTH + spacing`.  The bar itself is
 /// wrapped in a `container` with an explicit `BAR_HEIGHT` so the overlay anchor
 /// is always the bar's bottom edge, not the cursor's position within the bar.
 ///
-/// A `mouse_area` fills the space to the right of the two buttons and fires
+/// A `mouse_area` fills the space to the right of the button and fires
 /// `BarMessage::Dismiss` on press, satisfying DoD-4 for the full bar width.
 ///
 /// The caller must `.map(Message::MenuBar)` before pushing into the column.
@@ -54,17 +53,12 @@ pub fn view<'a>(state: &'a State, _mode: AppMode) -> Element<'a, BarMessage> {
             })
     };
 
-    // Rightmost fill-space: clicking the empty bar strip (right of Tools) fires
-    // Dismiss so DoD-4 holds across the full bar width.
+    // Rightmost fill-space: clicking the empty bar strip fires Dismiss so
+    // DoD-4 holds across the full bar width.
     let empty_strip = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
         .on_press(BarMessage::Dismiss);
 
-    let bar_row = row![
-        mk("ファイル（File）▼", TopMenu::File),
-        mk("ツール（Tools）▼", TopMenu::Tools),
-        empty_strip,
-    ]
-    .spacing(2);
+    let bar_row = row![mk("ファイル（File）▼", TopMenu::File), empty_strip,].spacing(2);
 
     // F8 R2 / H3': no `.on_move` handler. The previous `BarMoved(y)` design
     // (added in F8 R1 to anchor the dropdown dynamically) was a category error:
@@ -101,8 +95,6 @@ pub fn with_dropdown_overlay<'a>(
     base: Element<'a, Message>,
     state: &'a State,
     mode: AppMode,
-    wandb_auth: &'a WandbAuthState,
-    run_buf: &'a RunBufferIndex,
     replay_running: bool,
 ) -> Element<'a, Message> {
     let Some(open_top) = state.open else {
@@ -110,10 +102,8 @@ pub fn with_dropdown_overlay<'a>(
     };
 
     // Horizontal offset derived from fixed button widths — adapts if BTN_WIDTH changes.
-    let step = BTN_WIDTH + 2.0; // 2.0 = row spacing
     let left_offset = match open_top {
         TopMenu::File => 0.0,
-        TopMenu::Tools => step,
     };
 
     // Vertical offset: bar's bottom edge = BAR_HEIGHT (bar is always at y=0
@@ -121,7 +111,7 @@ pub fn with_dropdown_overlay<'a>(
     // anchor — see the rationale on `view()`'s removed `.on_move` handler.
     let top_offset = BAR_HEIGHT;
 
-    let entries = entries_for_menu(open_top, &mode, wandb_auth, run_buf, replay_running);
+    let entries = entries_for_menu(open_top, &mode, replay_running);
     let items = build_dropdown(entries);
     let dropdown_panel = opaque(
         container(column(items))
@@ -158,13 +148,7 @@ pub fn with_dropdown_overlay<'a>(
 }
 
 /// Normalises all menu types into a `Vec<MenuEntry>` with full label/enabled/tooltip/checked.
-fn entries_for_menu(
-    top: TopMenu,
-    mode: &AppMode,
-    wandb_auth: &WandbAuthState,
-    run_buf: &RunBufferIndex,
-    replay_running: bool,
-) -> Vec<MenuEntry> {
+fn entries_for_menu(top: TopMenu, mode: &AppMode, replay_running: bool) -> Vec<MenuEntry> {
     match top {
         TopMenu::File => actions_for_mode(mode)
             .into_iter()
@@ -185,7 +169,6 @@ fn entries_for_menu(
                 }
             })
             .collect(),
-        TopMenu::Tools => tools_actions_for_state(wandb_auth, run_buf),
     }
 }
 
@@ -275,11 +258,6 @@ fn action_label_and_shortcut(action: &Action) -> (&'static str, Option<&'static 
         Action::Quit => ("終了（Quit）", Some(q)),
         Action::SwitchAppMode(AppMode::Live) => ("ライブ（Live）", None),
         Action::SwitchAppMode(AppMode::Replay) => ("リプレイ（Replay）", None),
-        Action::SubmitToWandb => ("W&B に送信（Submit）", None),
-        Action::SignInWandb => ("W&B にログイン（Sign In）", None),
-        Action::SignOutWandb => ("W&B からログアウト（Sign Out）", None),
-        Action::OpenSubmissionLog => ("送信ログを開く（Submission Log）", None),
-        Action::ClearRunBuffer => ("バッファをクリア（Clear Buffer）", None),
     }
 }
 
@@ -298,11 +276,6 @@ pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Ac
         Action::ReplayStop => Some(N::StopReplay),
         Action::Quit => Some(N::Quit),
         Action::SwitchAppMode(mode) => Some(N::SwitchMode(*mode)),
-        Action::SubmitToWandb => Some(N::SubmitToWandb),
-        Action::SignInWandb => Some(N::SignInWandb),
-        Action::SignOutWandb => Some(N::SignOutWandb),
-        Action::OpenSubmissionLog => Some(N::OpenSubmissionLog),
-        Action::ClearRunBuffer => Some(N::ClearRunBuffer),
     }
 }
 

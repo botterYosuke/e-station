@@ -1,14 +1,13 @@
 use crate::menu::Action;
 
 /// Which top-level menu is currently open (or None = all closed).
-// reason: variants are constructed only by the Linux `widget_menu_bar`. The
+// reason: variant is constructed only by the Linux `widget_menu_bar`. The
 // enum lives in `mod menu_bar_state` (no platform gate) so that source-
 // inspection tests can compile on every OS. (H1 / M6 / F8 R1)
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopMenu {
     File,
-    Tools,
 }
 
 /// Messages emitted by the widget menu bar's button/overlay layer.
@@ -100,9 +99,9 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_focus_lost_closes_when_tools_open() {
+    fn dismiss_focus_lost_closes_when_file_open_again() {
         let s = State {
-            open: Some(TopMenu::Tools),
+            open: Some(TopMenu::File),
         };
         let next = update(s, BarMessage::DismissFocusLost);
         assert_eq!(next.open, None);
@@ -120,7 +119,7 @@ mod tests {
     #[test]
     fn pick_dismiss_focus_lost_all_close_menu() {
         let base = State {
-            open: Some(TopMenu::Tools),
+            open: Some(TopMenu::File),
         };
         for msg in [
             BarMessage::Pick(Action::SwitchAppMode(AppMode::Live)),

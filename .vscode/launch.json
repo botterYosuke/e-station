@@ -8,7 +8,9 @@
             "program": "${workspaceFolder}/target/debug/flowsurface.exe",
             "args": [
                 "--mode",
-                "live"
+                "live",
+                "--engine-cmd",
+                "${workspaceFolder}/.venv/Scripts/python.exe"
             ],
             "cwd": "${workspaceFolder}",
             "env": {
@@ -27,7 +29,9 @@
             "program": "${workspaceFolder}/target/debug/flowsurface.exe",
             "args": [
                 "--mode",
-                "replay"
+                "replay",
+                "--engine-cmd",
+                "${workspaceFolder}/.venv/Scripts/python.exe"
             ],
             "cwd": "${workspaceFolder}",
             "env": {

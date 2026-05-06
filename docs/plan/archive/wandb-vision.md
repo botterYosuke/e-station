@@ -1,3 +1,5 @@
+> **ARCHIVED**: W&B の責務は blacksheep リポジトリへ移管済み (2026-05-06)
+
 # Flow Surface × Weights & Biases — 完成図
 
 ## 概念的な位置づけ

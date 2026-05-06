@@ -1,8 +1,6 @@
 use engine_client::dto::AppMode;
 use iced::Subscription;
 
-use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     OpenFile,
@@ -15,17 +13,6 @@ pub enum Action {
     Quit,
     /// F7/T3: switch to the given app mode (menu item clicked).
     SwitchMode(AppMode),
-    // ── Tools / W&B submenu ────────────────────────────────────────────────
-    /// F9c: W&B に送信（Submit to W&B）
-    SubmitToWandb,
-    /// F9c: W&B にサインイン（Sign In to W&B）
-    SignInWandb,
-    /// F9c: W&B からサインアウト（Sign Out from W&B）
-    SignOutWandb,
-    /// F9c: 送信ログを開く（Open Submission Log）
-    OpenSubmissionLog,
-    /// F9c: バッファを消去（Clear Run Buffer）
-    ClearRunBuffer,
 }
 
 /// Returns which menu actions are present for a given app mode.
@@ -46,21 +33,8 @@ pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool, bool, bo
 }
 
 /// Attach the menu bar. All platforms now use the iced widget menu bar
-/// (see `widget_menu_bar.rs`) which renders the `ツール（Tools）` submenu.
-/// Enable/disable state for each item is computed by `tools_actions_for_state`
-/// and read via each entry's `.enabled` field. The Tools items are:
-/// - `submit_to_wandb`     → `Action::SubmitToWandb`
-/// - `sign_in_wandb`       → `Action::SignInWandb`
-/// - `sign_out_wandb`      → `Action::SignOutWandb`
-/// - `open_submission_log` → `Action::OpenSubmissionLog`
-/// - `clear_run_buffer`    → `Action::ClearRunBuffer`
-pub fn attach(_raw_id: u64, _app_mode: AppMode, _auth: &WandbAuthState, _buffer: &RunBufferIndex) {}
-
-/// Refresh Tools submenu enable/disable state (no-op on unified system).
-/// Tools enable/disable is now computed by `menu_bar_state` and rendered by the widget.
-pub fn refresh_tools_enable(_auth: &WandbAuthState, _buffer: &RunBufferIndex) {
-    // All platforms use iced widget menu bar; enable/disable is reactive to state.
-}
+/// (see `widget_menu_bar.rs`).
+pub fn attach(_raw_id: u64, _app_mode: AppMode) {}
 
 /// All platforms use the unified iced widget keyboard subscription.
 /// No platform-specific branching needed.

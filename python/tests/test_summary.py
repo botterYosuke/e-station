@@ -1,9 +1,9 @@
 """Tests for engine.summary.
 
-These complement the regression tests in
-examples/wandb/tests/test_submit_run.py::TestComputeSummary by pinning the
-canonical engine-side import path. If `compute_summary` is ever moved or
-renamed inside engine/, both test suites must be updated together.
+These pin the canonical engine-side import path for `compute_summary` and
+`write_summary_json`. If either is moved or renamed inside engine/, this test
+suite must be updated. The publish path has been migrated to the blacksheep
+repository (blacksheep/tests/test_publish_run.py).
 """
 from __future__ import annotations
 

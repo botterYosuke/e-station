@@ -15,7 +15,7 @@ OS ネイティブメニュー統合は廃止済み。
 ┌──────────────────────────────────────────────────────┐
 │ src/menu.rs                                          │
 │   Action enum / MenuEntry / actions_for_mode /       │
-│   mode_menu_items / tools_actions_for_state          │  cross-platform
+│   mode_toggle_state                                  │  cross-platform
 └──────────┬───────────────────────────────────────────┘
            │
            ▼
@@ -38,9 +38,8 @@ OS ネイティブメニュー統合は廃止済み。
 
 **不変条件**：
 
-- メニュー項目の表示計算（`actions_for_mode` / `mode_menu_items` /
-  `tools_actions_for_state`）は `src/menu.rs` に集約。**プラットフォームを
-  問わず同じ集合を返す**。
+- メニュー項目の表示計算（`actions_for_mode` / `mode_toggle_state`）は
+  `src/menu.rs` に集約。**プラットフォームを問わず同じ集合を返す**。
 - アクション dispatch は **`Message::NativeMenuAction(Action)` 単一経路**。
   widget 側の `to_native_action()` で Pick → Action に正規化する。
 - ファイル全体に `#[cfg(target_os = ...)]` ゲートはなし。`menu_bar_state` /
@@ -55,7 +54,7 @@ OS ネイティブメニュー統合は廃止済み。
 `src/menu_bar_state.rs`（全 OS で compile）に以下を定義：
 
 ```rust
-pub enum TopMenu { File, Mode, Tools }
+pub enum TopMenu { File }
 
 pub enum BarMessage {
     Toggle(TopMenu),         // 上位メニューの開閉トグル
@@ -80,7 +79,7 @@ pub fn update(state: State, msg: BarMessage) -> State;
 
 | 要素 | サイズ | 役割 |
 |------|--------|------|
-| 各メニューボタン | `BTN_WIDTH = 155.0` 固定 | `File ▼` / `Mode ▼` / `Tools ▼` |
+| 各メニューボタン | `BTN_WIDTH = 155.0` 固定 | `File ▼` |
 | バー高 | `BAR_HEIGHT = 32.0` 固定 | ドロップダウン anchor を bar 下端に固定 |
 | 残り領域 | flex | `mouse_area` で `Dismiss` を発火（DoD-4） |
 
@@ -174,8 +173,7 @@ Win/Linux で `logo()`（Super/Win キー）を受理すると WM 側のショ�
 |--------|------|
 | `tests/widget_menu_bar_state.rs` | `update` の状態遷移、`widget_menu_bar.rs` に linux cfg gate がないこと |
 | `tests/menu_actions_cross_platform.rs` | 全 OS で `actions_for_mode(&AppMode::Live\|Replay)` が同じ集合 |
-| `tests/tools_actions_for_state.rs` | Tools サブメニューの `MenuEntry` 期待値 |
-| `tests/mode_menu_items.rs` | Mode サブメニューの `MenuEntry` 期待値 |
+| `tests/menu_actions_cross_platform.rs` | Mode / File サブメニューの `MenuEntry` 期待値（クロスプラットフォーム） |
 | `tests/accelerator_bind.rs` | `Code::KeyO/S/Q/M` 物理キーマッチ・`physical_key` 使用・`logo()` の macOS gate・`keyboard::listen` 使用 |
 | `tests/mode_switch_accelerator_disabled.rs` | `widget_keyboard_subscription` 内の `MODE_SWITCHING` 確認 |
 
