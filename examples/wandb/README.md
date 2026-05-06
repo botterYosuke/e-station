@@ -4,6 +4,10 @@ This directory contains standalone scripts for uploading Flowsurface replay resu
 to [Weights & Biases](https://wandb.ai). None of these scripts are imported by the
 Flowsurface core (`python/engine/`, `src/`, `engine-client/`).
 
+Strategy repositories such as `blacksheep` may live alongside `e-station` in the
+same workspace, but result export and W&B submission remain owned by `e-station`
+and its `examples/wandb/` scripts.
+
 ## Prerequisites
 
 - `uv` installed (`pip install uv` or see https://docs.astral.sh/uv/getting-started/installation/)

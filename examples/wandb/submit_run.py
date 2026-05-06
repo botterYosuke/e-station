@@ -209,6 +209,24 @@ def _write_lock(run_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Aggregate summary (total_pnl / max_drawdown / trade_count / win_rate)
+#
+# The implementation lives in `engine.summary` so external research repos
+# (e.g. blacksheep) can import the same function without depending on this
+# wandb-side script. Re-exported here for backwards-compatible import paths
+# (`from submit_run import compute_summary`) used by existing tests.
+# ---------------------------------------------------------------------------
+_REPO_PYTHON = (Path(__file__).resolve().parents[2] / "python").as_posix()
+if _REPO_PYTHON not in sys.path:
+    sys.path.insert(0, _REPO_PYTHON)
+
+from engine.summary import compute_summary, write_summary_json  # noqa: E402
+
+# Backwards-compatible alias (older callers used the underscored helper).
+_write_summary_json = write_summary_json
+
+
+# ---------------------------------------------------------------------------
 # Core submission logic
 # ---------------------------------------------------------------------------
 
@@ -482,6 +500,19 @@ def run_submission(
                 for row in rows:
                     table.add_data(*[row.get(c) for c in columns])
                 wandb.log({"narrative": table})
+
+        # ------------------------------------------------------------------
+        # 10. Compute aggregate summary and publish to wandb.summary +
+        #     persist as run-buffer/summary.json. Failures here are
+        #     non-fatal: the upload itself has already succeeded, and the
+        #     summary is derived data we can recompute later.
+        # ------------------------------------------------------------------
+        try:
+            summary = compute_summary(run_buffer_dir)
+            run.summary.update(summary)
+            _write_summary_json(run_buffer_dir, summary)
+        except Exception as exc:
+            print(f"WARNING: summary aggregation failed: {exc}", file=sys.stderr)
 
         # ------------------------------------------------------------------
         # 11. Finish (M7: log finish() failures to stderr instead of swallowing)
