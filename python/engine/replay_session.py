@@ -1272,6 +1272,7 @@ class LiveSession:
         force_mode: _ForceMode = "auto",
         attach_endpoint: str | None = None,
         attach_timeout_s: float = 2.0,
+        second_password: str | None = None,
     ) -> None:
         self._venue = venue
         self._demo = demo
@@ -1293,6 +1294,10 @@ class LiveSession:
         # MEDIUM-R2-7: 初回 login() で使った credential のハッシュ (検知用に
         # 平文ではなく SHA-256 で保管)。2回目以降 credential 変更を検知する。
         self._login_cred_fingerprint: str | None = None
+        # Phase 4+5: in-process live run 用
+        self._second_password: str | None = second_password
+        self._stop_event: threading.Event | None = None
+        self._strategy_id: str | None = None
 
     # ------------------------------------------------------------------
     # Context manager
@@ -1590,6 +1595,74 @@ class LiveSession:
                     f"cmd={got.get('attempted_command')!r}"
                 )
             # 他 event (VenueLoginStarted / 他 client 由来の Error 等) は無視して続行。
+
+    # ------------------------------------------------------------------
+    # Phase 4+5: live run / stop
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        *,
+        instrument_id: str,
+        strategy_file: str,
+        max_qty: int,
+        max_notional_jpy: int,
+        on_event: "Callable[[dict], None] | None" = None,
+        strategy_init_kwargs: "dict | None" = None,
+        strategy_id: str = "live-strategy",
+    ) -> None:
+        """Live strategy を実行する（blocking）。
+
+        in-process 経路: NautilusRunner.start_live() を直接呼ぶ（ReplaySession と同方式）。
+
+        Args:
+            instrument_id: 取引対象銘柄 ID（例: ``"8306.T"``）。
+            strategy_file: strategy .py ファイルパス。
+            max_qty: 1 注文あたりの最大株数。
+            max_notional_jpy: 1 注文あたりの最大金額（円）。
+            on_event: IPC イベントを受け取るコールバック。None の場合は no-op。
+            strategy_init_kwargs: strategy の `__init__` に渡す追加引数。
+            strategy_id: strategy 識別子。
+
+        Raises:
+            RuntimeError: login() 前に呼んだ場合。
+            RuntimeError: second_password が None の場合。
+        """
+        if not self._logged_in:
+            raise RuntimeError("call login() before run()")
+        if self._second_password is None:
+            raise RuntimeError(
+                "second_password is required for in-process live run. "
+                "Pass second_password=... to LiveSession()"
+            )
+        self._strategy_id = strategy_id
+
+        from engine.nautilus.engine_runner import NautilusRunner
+
+        runner = NautilusRunner()
+        self._stop_event = threading.Event()
+        runner.start_live(
+            instrument_id=instrument_id,
+            strategy_file=strategy_file,
+            strategy_init_kwargs=strategy_init_kwargs,
+            max_qty=max_qty,
+            max_notional_jpy=max_notional_jpy,
+            second_password=self._second_password,
+            session=self._session,
+            fd_queue=__import__("queue").Queue(maxsize=10_000),
+            ec_queue=__import__("queue").Queue(maxsize=1_000),
+            on_event=on_event if on_event is not None else (lambda _: None),
+            stop_event=self._stop_event,
+            strategy_id=strategy_id,
+        )
+
+    def stop(self) -> None:
+        """実行中の live strategy を停止する。
+
+        in-process 経路: stop_event を set して start_live() の worker に停止シグナルを送る。
+        """
+        if self._stop_event is not None:
+            self._stop_event.set()
 
 
 # ---------------------------------------------------------------------------

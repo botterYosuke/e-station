@@ -1234,6 +1234,12 @@ enum Message {
         equity: String,
         ts_event_ms: i64,
     },
+    /// N3: `EngineEvent::LiveBuyingPower` — live strategy 買付余力スナップショット更新。
+    LiveBuyingPowerUpdated {
+        cash: String,
+        equity: String,
+        ts_event_ms: i64,
+    },
     /// `EngineEvent::Error` — routed to the BuyingPower panel if `request_id`
     /// matches the pending buying-power request, otherwise silently ignored.
     IpcError {
@@ -1634,6 +1640,17 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         } => Some(Message::ReplayBuyingPower {
             cash,
             buying_power,
+            equity,
+            ts_event_ms,
+        }),
+        // N3: live strategy 買付余力スナップショット
+        EngineEvent::LiveBuyingPower {
+            cash,
+            equity,
+            ts_event_ms,
+            ..
+        } => Some(Message::LiveBuyingPowerUpdated {
+            cash,
             equity,
             ts_event_ms,
         }),
@@ -3306,6 +3323,20 @@ impl Flowsurface {
                     ts_event_ms,
                 );
             }
+            // N3: live strategy 買付余力スナップショット — dashboard に配布
+            Message::LiveBuyingPowerUpdated {
+                cash,
+                equity,
+                ts_event_ms,
+            } => {
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut().distribute_live_buying_power(
+                    main_window,
+                    cash,
+                    equity,
+                    ts_event_ms,
+                );
+            }
             // Phase U3: IpcError → route to BuyingPower / OrderList panel if request_id matches
             Message::IpcError {
                 request_id,
@@ -3496,8 +3527,10 @@ impl Flowsurface {
                 self.menu_bar.replay_bar.replay_has_history = has_history;
                 return Task::none();
             }
-            // R2-H1: RestoreSnapshot received — reset current_day display as minimal state update.
-            // TODO: chart pane should flush data from ts_event_ms onward when RestoreSnapshot arrives.
+            // R2-H1: RestoreSnapshot received — flush chart overlay markers + reset day display.
+            // ExecutionMarker / StrategySignal は戦略状態に依存するため、巻き戻し時に必ずクリア
+            // する。OHLC kline 自体は実市場データなので保持する（次の StepReplay で再進入する
+            // 際は同じ ts まで再生される）。
             Message::RestoreSnapshotPending {
                 step_index,
                 ts_event_ms,
@@ -3505,6 +3538,9 @@ impl Flowsurface {
                 log::debug!(
                     "RestoreSnapshotPending: step_index={step_index} ts_event_ms={ts_event_ms}"
                 );
+                let main_window_id = self.main_window.id;
+                self.active_dashboard_mut()
+                    .clear_chart_overlays(main_window_id);
                 self.menu_bar.replay_bar.current_day = None;
                 return Task::none();
             }

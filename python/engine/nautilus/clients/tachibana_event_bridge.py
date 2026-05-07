@@ -11,6 +11,7 @@ data-mapping.md §5 の写像仕様に従う。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
@@ -62,6 +63,7 @@ class TachibanaEventBridge:
         self._order_id_map = order_id_map
         # 冪等化用 seen-set: (venue_order_id, trade_id)
         self._seen: set[tuple[str, str]] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def process_ec_event(self, ec: OrderEcEvent) -> None:
         """EC フレーム由来の OrderEcEvent を nautilus イベントに変換して発火する。

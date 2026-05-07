@@ -497,6 +497,7 @@ class NautilusRunner:
         push_snapshot: "Callable[..., None] | None" = None,
         restore_strategy_holder: "list | None" = None,
         restore_portfolio_holder: "list | None" = None,
+        get_orders_snapshot: "Callable[[], list] | None" = None,
         currency: str = "JPY",
         base_dir: Path | str | None = None,
         on_event: Callable[[dict], None] | None = None,
@@ -943,7 +944,12 @@ class NautilusRunner:
                         try:
                             _snap_portfolio = _portfolio.to_ipc_dict(strategy_id, _last_prices)
                             _snap_portfolio_state = _portfolio.to_snapshot_dict(_last_prices)
-                            _snap_orders: list = []  # open orders not tracked in NautilusRunner
+                            # schema 3.16: server-side fills を snapshot 時点でコピーして含める。
+                            # server.py の _replay_streaming_fills は ExecutionMarker emit 経由で
+                            # 蓄積されており、StepBackward 後の OrderList rollback に必要。
+                            _snap_orders: list = (
+                                list(get_orders_snapshot()) if get_orders_snapshot else []
+                            )
                             # strategy_instance may not support deepcopy; pass None if so.
                             # server.push_snapshot handles None strategy_state gracefully.
                             push_snapshot(
@@ -1069,27 +1075,185 @@ class NautilusRunner:
             engine.dispose()
             self._engine = None
 
-    def start_live(self) -> None:
-        """N2: TachibanaLiveExecutionClient / TachibanaLiveDataClient を組み立てる。
+    def start_live(
+        self,
+        *,
+        instrument_id: str,
+        strategy_file: "str | None",
+        strategy_init_kwargs: "dict | None",
+        max_qty: int,
+        max_notional_jpy: int,
+        second_password: str,
+        session: "Any",
+        fd_queue: "queue.Queue",
+        ec_queue: "queue.Queue",
+        on_event: "Callable[[dict], None]",
+        stop_event: "threading.Event",
+        strategy_id: str,
+    ) -> None:
+        """N3: TradingNode を起動して live strategy を実行する。
 
-        実際の接続・セッション注入は server.py 層が管理する。
-        NautilusRunner は thin facade として LiveExecutionEngine の設定のみを担う。
+        この関数は同期関数であり、server.py の asyncio.to_thread(_run) 内か、
+        LiveSession.run() から直接 blocking 呼び出しされる。
+        内部で asyncio.run() を使って TradingNode の非同期処理を実行する。
 
-        N2 では CacheConfig.database = None（永続化 OFF）を維持し、
-        起動ごとに CLMOrderList から warm-up する（data-mapping.md §6.1）。
-
-        NOTE: N1 では nautilus.live=false のまま（Hello.capabilities）。
-              N2 以降で nautilus.live=true に切り替える（server.py で設定）。
+        Args:
+            instrument_id: 取引対象銘柄 ID（例: ``"8306.T"``）。
+            strategy_file: strategy .py ファイルパス。None の場合は ValueError。
+            strategy_init_kwargs: strategy の `__init__` に渡す追加引数。
+            max_qty: 1 注文あたりの最大株数。
+            max_notional_jpy: 1 注文あたりの最大金額（円）。
+            second_password: 第二暗証番号（env 変数不使用。引数で受け取る）。
+            session: Tachibana セッションオブジェクト。
+            fd_queue: FD frame を受け取るキュー。
+            ec_queue: EC frame を受け取るキュー。
+            on_event: IPC イベントを受け取るコールバック。
+            stop_event: 停止シグナル。set されたら TradingNode を停止する。
+            strategy_id: strategy 識別子。
         """
-        # N2.3: persistence=None assertion（spec.md §3.2）
-        # 将来 CacheConfig を外部から受け取る際のガード: database=None が維持されていることを保証。
-        from nautilus_trader.config import CacheConfig
-        config = CacheConfig(database=None)
-        assert config.database is None, "N2 invariant: CacheConfig.database must be None"
-        log.info(
-            "start_live() called — adapter classes ready, server.py wiring pending (N3). "
-            "CacheConfig.database=%s (persistence=OFF)", config.database
+        import asyncio as _asyncio
+        import threading as _threading
+        import time as _time
+
+        from nautilus_trader.config import CacheConfig, TradingNodeConfig
+        from nautilus_trader.live.node import TradingNode
+
+        from engine.nautilus.instrument_factory import make_equity_instrument
+        from engine.nautilus.clients.tachibana import TachibanaLiveExecutionClient
+        from engine.nautilus.clients.tachibana_data import TachibanaLiveDataClient
+        from engine.nautilus.clients.tachibana_event_bridge import (
+            OrderIdMap,
+            TachibanaEventBridge,
         )
+        from engine.exchanges.tachibana_helpers import PNoCounter
+
+        # instrument_id は "8306.T" 形式 → symbol="8306", venue="T"
+        # make_equity_instrument は (symbol, venue) を受け取る
+        if "." in instrument_id:
+            _sym, _venue = instrument_id.rsplit(".", 1)
+        else:
+            _sym = instrument_id
+            _venue = "TSE"
+
+        async def _run_node() -> None:
+            safe_id = strategy_id.replace("-", "_").replace(".", "_")
+            config = TradingNodeConfig(
+                trader_id=f"TACHIBANA-{safe_id}",
+                cache=CacheConfig(database=None),
+            )
+            node = TradingNode(config=config)
+
+            # クライアント生成
+            p_no_counter = PNoCounter()
+            exec_client = TachibanaLiveExecutionClient(
+                session=session,
+                second_password=second_password,
+                max_qty=max_qty,
+                max_notional_jpy=max_notional_jpy,
+                p_no_counter=p_no_counter,
+                strategy_id=strategy_id,
+            )
+            data_client = TachibanaLiveDataClient()
+            order_id_map = OrderIdMap()
+            event_bridge = TachibanaEventBridge(
+                client=exec_client,
+                order_id_map=order_id_map,
+            )
+
+            node._data_engine.register_client(data_client)
+            node._exec_engine.register_client(exec_client)
+
+            # Instrument 登録
+            instrument = make_equity_instrument(_sym, _venue)
+            node.add_data(instrument)
+
+            # Strategy ロード
+            if strategy_file:
+                strategy = _load_user_strategy(strategy_file, strategy_init_kwargs)
+                node.add_strategies([strategy])
+
+            # warm_up: CLMOrderList から未決注文復元
+            try:
+                if hasattr(exec_client, "warm_up"):
+                    await exec_client.warm_up()
+            except Exception as exc:
+                on_event({
+                    "event": "Error",
+                    "code": "warm_up_failed",
+                    "message": str(exc),
+                })
+                return
+
+            # EngineStarted emit
+            on_event({
+                "event": "EngineStarted",
+                "strategy_id": strategy_id,
+                "account_id": "tachibana",
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+
+            # Bridge threads 起動（live_bridges が存在する場合）
+            try:
+                from engine.nautilus.live_bridges import LiveDataBridge, LiveEcBridge
+                data_bridge = LiveDataBridge(data_client, fd_queue, instrument_id, stop_event)
+                ec_bridge = LiveEcBridge(event_bridge, ec_queue, stop_event)
+                t_data = _threading.Thread(target=data_bridge.run, daemon=True)
+                t_ec = _threading.Thread(target=ec_bridge.run, daemon=True)
+                t_data.start()
+                t_ec.start()
+                _bridge_threads = [t_data, t_ec]
+            except ImportError:
+                _bridge_threads = []
+
+            try:
+                # TradingNode ビルドと実行
+                node.build()
+                # stop_event を監視しながらグレースフルシャットダウン
+                loop = _asyncio.get_event_loop()
+                node_task: _asyncio.Task | None = None
+                if hasattr(node, "run_async"):
+                    node_task = loop.create_task(node.run_async())
+                else:
+                    # run() が同期 blocking の場合: executor で実行
+                    node_task = loop.create_task(
+                        loop.run_in_executor(None, node.run)
+                    )
+                stop_waiter = loop.create_task(
+                    loop.run_in_executor(None, stop_event.wait)
+                )
+                done, pending = await _asyncio.wait(
+                    {node_task, stop_waiter},
+                    return_when=_asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except _asyncio.CancelledError:
+                        pass
+
+                # グレースフルシャットダウン
+                if hasattr(node, "stop_async"):
+                    try:
+                        await node.stop_async()
+                    except Exception as exc:
+                        log.warning("start_live: node.stop_async() raised: %s", exc)
+                elif hasattr(node, "stop"):
+                    try:
+                        node.stop()
+                    except Exception as exc:
+                        log.warning("start_live: node.stop() raised: %s", exc)
+            finally:
+                stop_event.set()
+                for t in _bridge_threads:
+                    t.join(timeout=5.0)
+                on_event({
+                    "event": "EngineStopped",
+                    "strategy_id": strategy_id,
+                    "final_equity": "0",
+                })
+
+        _asyncio.run(_run_node())
 
     def stop(self) -> None:
         """エンジンを停止する。

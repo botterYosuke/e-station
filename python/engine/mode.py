@@ -64,7 +64,7 @@ def validate_start_engine(mode: Mode, engine_kind: str) -> None:
 def nautilus_capabilities(mode: Mode) -> dict[str, bool]:
     """Ready.capabilities.nautilus の値。
 
-    N1 では live は LiveExecutionEngine を起動しないので常に False。
+    N3: live strategy 実行に対応したため live=True に変更。
     backtest は実装済みなので True。
     """
-    return {"backtest": True, "live": False}
+    return {"backtest": True, "live": True}

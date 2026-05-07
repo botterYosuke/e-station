@@ -7,6 +7,7 @@ import copy
 import hmac
 import logging
 import os
+import queue as _stdlib_queue
 import threading
 import time
 import uuid
@@ -82,6 +83,7 @@ from engine.schemas import (
 from engine.mode import (
     ModeMismatchError,
     UnknownEngineKindError,
+    nautilus_capabilities,
     validate_start_engine,
 )
 
@@ -105,6 +107,8 @@ class LiveState(Enum):
     DISCONNECTED = auto()
     CONNECTING = auto()
     CONNECTED = auto()
+    TRADING = auto()    # Phase 2: live strategy 実行中
+    STOPPING = auto()   # Phase 2: graceful stop 待ち
 
 
 # ── schema 3.16: Snapshot ring buffer ────────────────────────────────────────
@@ -465,6 +469,11 @@ class DataEngineServer:
         self._replay_state: ReplayState = ReplayState.IDLE
         self._live_state: LiveState = LiveState.DISCONNECTED
 
+        # Phase 2: live strategy 用の FD/EC frame キュー。
+        # server.py (loop A) が put_nowait し、start_live worker が get して消費する。
+        self._live_fd_queue: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=10_000)
+        self._live_ec_queue: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=1_000)
+
         # N1.16: REPLAY 仮想ポートフォリオ（CLMZanKaiKanougaku を呼ばない純粋 Python 実装）。
         # LoadReplayData 受信時に initial_cash で reset() する。
         from decimal import Decimal as _Decimal
@@ -810,8 +819,8 @@ class DataEngineServer:
                 "supports_bulk_trades": True,
                 "supports_depth_binary": False,
                 "venue_capabilities": venue_caps,
-                # N1.1: Phase N1 では BacktestEngine のみ実装、Live は N2 から。
-                "nautilus": {"backtest": True, "live": False},
+                # N3: Phase 2+7 で live strategy 対応済み。mode.py から読む。
+                "nautilus": nautilus_capabilities(self._mode),
                 # N1.13: クライアントから受け取った mode をエコーバック。
                 # UI 側は capabilities["mode"] で正規化された値を読む。
                 "mode": self._mode,
@@ -1120,6 +1129,14 @@ class DataEngineServer:
             #  to_ipc_dict() が生成した ReplayBuyingPower event を直接 emit する)
             if snap.portfolio.get("event") == "ReplayBuyingPower":
                 self._outbox.append(snap.portfolio)
+            # 2.6: OrderList UI を復元済み order list で push 更新する。
+            # _restore_snapshot で _replay_streaming_fills は復元済み。GetOrderList を
+            # 待たずに UI に push して order panel を即座にロールバックさせる。
+            self._outbox.append({
+                "event": "OrderListUpdated",
+                "request_id": "",
+                "orders": list(self._replay_streaming_fills),
+            })
             # 3. ui_events を再 emit（Rust UI が RestoreSnapshot 受信済みのため重複扱いにならない）
             for ev in snap.ui_events:
                 self._outbox.append(ev)
@@ -3391,22 +3408,10 @@ class DataEngineServer:
             await _drain()
             return
 
-        # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
-        # LOW-A: バリデーション成功後に runner と _engine_tasks を登録することで、
-        # parse 失敗時に残骸が _engine_tasks に残らない。
-        try:
-            initial_cash = int(config_obj.initial_cash)
-        except (ValueError, TypeError) as exc:
-            _emit(
-                {
-                    "event": "Error",
-                    "request_id": request_id,
-                    "code": "invalid_config",
-                    "message": f"initial_cash: {exc}",
-                }
-            )
-            await _drain()
-            return
+        # Phase 2: initial_cash のパースは replay 分岐内で行う（live は initial_cash=None 許容）。
+        # initial_cash 変数は後の _run() クロージャ内 replay 分岐で定義される。
+        # live では使わないため None で初期化しておく。
+        initial_cash: "int | None" = None
 
         if not config_obj.strategy_file:
             _emit(
@@ -3456,33 +3461,35 @@ class DataEngineServer:
         def _on_event_tracked(evt: dict) -> None:
             ev_kind = evt.get("event")
             if ev_kind == "EngineStarted":
-                # EngineStarted 受信時に前回の streaming fills をリセット。
-                self._replay_streaming_fills.clear()
+                # Phase 2: replay のみ streaming fills をリセット（live では操作しない）。
+                if self._mode == "replay":
+                    self._replay_streaming_fills.clear()
             elif ev_kind == "EngineStopped":
                 # MEDIUM-R2-8: runner が自前で EngineStopped を流した。
                 # 例外パスの補完送出をスキップするためのフラグを立てる。
                 engine_stopped_emitted[0] = True
             elif ev_kind == "ExecutionMarker":
-                # streaming replay の約定を in-memory に蓄積（GetOrderList{venue:"replay"} 用）。
-                qty_str = evt.get("qty", "0")
-                ts = evt.get("ts_event_ms", 0)
-                self._replay_streaming_fills.append({
-                    "client_order_id": f"replay-fill-{ts}",
-                    "venue_order_id": "",
-                    "instrument_id": evt.get("instrument_id", ""),
-                    "order_side": evt.get("side", "BUY"),
-                    "order_type": "MARKET",
-                    "quantity": qty_str,
-                    "filled_qty": qty_str,
-                    "leaves_qty": "0",
-                    "price": evt.get("price"),
-                    "trigger_price": None,
-                    "time_in_force": "DAY",
-                    "expire_time_ns": None,
-                    "status": "FILLED",
-                    "ts_event_ms": ts,
-                    "venue": "replay",
-                })
+                # Phase 2: streaming replay の約定蓄積は replay のみ（live では操作しない）。
+                if self._mode == "replay":
+                    qty_str = evt.get("qty", "0")
+                    ts = evt.get("ts_event_ms", 0)
+                    self._replay_streaming_fills.append({
+                        "client_order_id": f"replay-fill-{ts}",
+                        "venue_order_id": "",
+                        "instrument_id": evt.get("instrument_id", ""),
+                        "order_side": evt.get("side", "BUY"),
+                        "order_type": "MARKET",
+                        "quantity": qty_str,
+                        "filled_qty": qty_str,
+                        "leaves_qty": "0",
+                        "price": evt.get("price"),
+                        "trigger_price": None,
+                        "time_in_force": "DAY",
+                        "expire_time_ns": None,
+                        "status": "FILLED",
+                        "ts_event_ms": ts,
+                        "venue": "replay",
+                    })
             _on_event(evt)
 
         # C-1: result_holder で ReplayBacktestResult をキャプチャし、fills を portfolio に反映。
@@ -3490,6 +3497,21 @@ class DataEngineServer:
 
         def _run() -> None:
             if self._mode == "replay":
+                # Phase 2: initial_cash のパースを replay 分岐内へ移設。
+                # live では initial_cash=None を許容するため、_run() 外でパースしない。
+                nonlocal initial_cash
+                try:
+                    initial_cash = int(config_obj.initial_cash)
+                except (ValueError, TypeError) as exc:
+                    _on_event_tracked(
+                        {
+                            "event": "Error",
+                            "request_id": request_id,
+                            "code": "invalid_config",
+                            "message": f"initial_cash: {exc}",
+                        }
+                    )
+                    return
                 stop_event = self._engine_stop_events.setdefault(
                     strategy_id, threading.Event()
                 )
@@ -3522,42 +3544,74 @@ class DataEngineServer:
                     restore_strategy_holder=getattr(self, "_restore_strategy_holder", None),
                     # HIGH-2: portfolio_state restore channel (asyncio ↔ runner thread).
                     restore_portfolio_holder=getattr(self, "_restore_portfolio_holder", None),
+                    # schema 3.16: snapshot 時点の streaming fills をコピーして渡す。
+                    # StepBackward 後の OrderList rollback で _replay_streaming_fills
+                    # を正確に復元するために必要。
+                    get_orders_snapshot=lambda: list(self._replay_streaming_fills),
                 )
-            else:
-                result_holder[0] = runner.start_backtest_replay(
-                    strategy_id=strategy_id,
+            elif self._mode == "live":
+                # Phase 2: live 分岐。CONNECTED 状態のみ受理する。
+                if not self._check_live_state("StartEngine", LiveState.CONNECTED):
+                    return
+                # live 専用バリデーション
+                if config_obj.max_qty is None or config_obj.max_notional_jpy is None:
+                    _on_event_tracked(
+                        {
+                            "event": "Error",
+                            "request_id": request_id,
+                            "code": "invalid_config",
+                            "message": "max_qty and max_notional_jpy required for live engine",
+                        }
+                    )
+                    return
+                # SessionHolder から第二暗証番号を取得（env 変数不使用）
+                second_password = self._session_holder.get_password()
+                if second_password is None:
+                    _on_event_tracked(
+                        {
+                            "event": "SecondPasswordRequired",
+                            "request_id": request_id,
+                        }
+                    )
+                    return
+                self._live_state = LiveState.TRADING
+                stop_event = self._engine_stop_events.setdefault(
+                    strategy_id, threading.Event()
+                )
+                runner.start_live(
                     instrument_id=config_obj.instrument_id,
-                    instrument_ids=config_obj.instrument_ids,  # schema 3.13
-                    start_date=config_obj.start_date,
-                    end_date=config_obj.end_date,
-                    granularity=config_obj.granularity,
-                    initial_cash=initial_cash,
-                    base_dir=base_dir,
-                    on_event=_on_event_tracked,
                     strategy_file=config_obj.strategy_file,
                     strategy_init_kwargs=config_obj.strategy_init_kwargs,
-                    # schema 3.14: 1 ファイル切替 = 1 epoch。詳細は streaming 側コメント参照。
-                    session_epoch=self._replay_session_epoch,
+                    max_qty=config_obj.max_qty,
+                    max_notional_jpy=config_obj.max_notional_jpy,
+                    second_password=second_password,
+                    session=self._tachibana_session,
+                    fd_queue=self._live_fd_queue,
+                    ec_queue=self._live_ec_queue,
+                    on_event=_on_event_tracked,
+                    stop_event=stop_event,
+                    strategy_id=strategy_id,
                 )
 
         try:
             # H2: timeout=3600s でラップし、TimeoutError を code="timeout" で送出。
             await asyncio.wait_for(asyncio.to_thread(_run), timeout=3600.0)
-            # C-1: 実行完了後に fills を PortfolioView に反映する。
-            result = result_holder[0]
-            if result is not None:
-                from decimal import Decimal as _Decimal
-                self._replay_strategy_id = result.strategy_id
-                self._replay_portfolio.reset(_Decimal(initial_cash))
-                for fill in result.portfolio_fills:
-                    self._replay_portfolio.on_fill(
-                        fill.instrument_id, fill.side, fill.qty, fill.price
+            # C-1: 実行完了後に fills を PortfolioView に反映する（replay のみ）。
+            if self._mode == "replay":
+                result = result_holder[0]
+                if result is not None:
+                    from decimal import Decimal as _Decimal
+                    self._replay_strategy_id = result.strategy_id
+                    self._replay_portfolio.reset(_Decimal(initial_cash))
+                    for fill in result.portfolio_fills:
+                        self._replay_portfolio.on_fill(
+                            fill.instrument_id, fill.side, fill.qty, fill.price
+                        )
+                else:
+                    log.warning(
+                        "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
+                        strategy_id,
                     )
-            else:
-                log.warning(
-                    "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
-                    strategy_id,
-                )
         except asyncio.TimeoutError as exc:
             log.error(
                 "StartEngine timed out: strategy_id=%r",
@@ -3658,6 +3712,20 @@ class DataEngineServer:
             # 「未実行」を識別できるようにする。
             if self._mode == "replay" and self._replay_strategy_id == strategy_id:
                 self._replay_strategy_id = ""
+            # Phase 2: live 走行終了後に CONNECTED に戻す + キュードレイン。
+            if self._mode == "live" and self._live_state in (
+                LiveState.TRADING,
+                LiveState.STOPPING,
+            ):
+                self._live_state = LiveState.CONNECTED
+            # Phase 2: live_fd_queue / live_ec_queue の残留メッセージをドレイン。
+            if self._mode == "live":
+                for _q in (self._live_fd_queue, self._live_ec_queue):
+                    while not _q.empty():
+                        try:
+                            _q.get_nowait()
+                        except _stdlib_queue.Empty:
+                            break
             # H-G (R1b): 関数 return 前に scheduled callback を drain して呼び出し側
             # (テスト含む) が outbox を直ちに観測できるようにする。
             await _drain()
@@ -3676,6 +3744,15 @@ class DataEngineServer:
             if not self._check_replay_state("StopEngine", ReplayState.RUNNING, ws=ws):
                 return
             self._replay_state = ReplayState.STOPPING
+        elif self._mode == "live":
+            # Phase 2: live TRADING 状態のみ StopEngine を受理する。
+            if not self._check_live_state("StopEngine", LiveState.TRADING, ws=ws):
+                return
+            self._live_state = LiveState.STOPPING
+            stop_event = self._engine_stop_events.get(strategy_id)
+            if stop_event:
+                stop_event.set()
+            return
 
         runner = self._engine_tasks.get(strategy_id)
         if runner is None:

@@ -118,7 +118,7 @@ IPC events (live stream):
 
 ---
 
-## Phase 2: LiveState 拡張 + server.py dispatch 修正
+## ✅ Phase 2: LiveState 拡張 + server.py dispatch 修正
 
 ### `python/engine/server.py`
 
@@ -243,7 +243,7 @@ EC frame も同様に `_live_ec_queue` へ。
 
 ---
 
-## Phase 3: LiveDataBridge / LiveEcBridge
+## ✅ Phase 3: LiveDataBridge / LiveEcBridge
 
 ### 新規ファイル: `python/engine/nautilus/live_bridges.py`
 
@@ -300,7 +300,7 @@ class LiveEcBridge:
 
 ---
 
-## Phase 4: NautilusRunner.start_live() 実装
+## ✅ Phase 4: NautilusRunner.start_live() 実装
 
 ### `python/engine/nautilus/engine_runner.py`
 
@@ -380,7 +380,7 @@ def _on_order_filled(event: OrderFilled) -> None:
 
 ---
 
-## Phase 5: LiveSession.run() 実装
+## ✅ Phase 5: LiveSession.run() 実装
 
 ### `python/engine/replay_session.py`
 
@@ -469,7 +469,7 @@ for evt in self._client.events():
 
 ---
 
-## Phase 6: LiveBuyingPower UI 統合
+## ✅ Phase 6: LiveBuyingPower UI 統合
 
 ### `src/screen/dashboard/panel/buying_power.rs`
 
@@ -497,7 +497,7 @@ EngineEvent::LiveBuyingPower { strategy_id, cash, equity, ts_event_ms, .. } => {
 
 ---
 
-## Phase 7: capabilities 更新（mode.py + server.py 両方）
+## ✅ Phase 7: capabilities 更新（mode.py + server.py 両方）
 
 `Ready` イベントの `capabilities["nautilus"]` は `server.py` でハードコードされている（L799: `"live": False`）。`mode.py` の `nautilus_capabilities()` を変更するだけではクライアントに届く値が変わらない。両箇所を必ず更新すること。
 
@@ -518,7 +518,7 @@ def nautilus_capabilities(mode: Mode) -> dict[str, bool]:
 
 ---
 
-## Phase 8: テスト
+## ✅ Phase 8: テスト（Phase 2+7 分のみ）
 
 ### 新規テストファイル
 

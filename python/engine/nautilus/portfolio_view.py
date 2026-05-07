@@ -23,12 +23,22 @@ class PortfolioView:
         self._initial_cash = initial_cash
         self._cash = initial_cash
         self._positions: dict[str, dict] = {}  # instrument_id → {qty, cost}
+        # 最新参照価格。on_fill / update_last_price で更新され、
+        # equity() / to_ipc_dict() の last_prices 引数省略時のフォールバックに使う。
+        # StepBackward 後の pull 経路（GetBuyingPower）でも MTM を保つため必要。
+        self._last_prices: dict[str, Decimal] = {}
 
     def reset(self, initial_cash: Decimal) -> None:
         """reload 時に initial_cash からリセット。"""
         self._initial_cash = initial_cash
         self._cash = initial_cash
         self._positions = {}
+        self._last_prices = {}
+
+    def update_last_price(self, instrument_id: str, price: Decimal) -> None:
+        """外部から最新参照価格を更新する（bar close など）。"""
+        if price > 0:
+            self._last_prices[instrument_id] = price
 
     def on_fill(
         self, instrument_id: str, side: str, qty: Decimal, price: Decimal
@@ -36,6 +46,8 @@ class PortfolioView:
         """約定イベントを処理して cash / position を更新する。"""
         if qty <= 0 or price <= 0:
             return
+        # fill 価格を最新参照価格として記録（pull 経路の equity 計算に使う）
+        self._last_prices[instrument_id] = price
         amount = qty * price
         if side == "BUY":
             self._cash -= amount
@@ -65,11 +77,16 @@ class PortfolioView:
         return self._cash
 
     def equity(self, last_prices: dict[str, Decimal] | None = None) -> Decimal:
-        """equity = cash + position MTM."""
-        if not last_prices or not self._positions:
+        """equity = cash + position MTM。
+
+        last_prices 省略時は内部保持の self._last_prices にフォールバックする
+        （StepBackward 後の pull 経路で MTM を維持するため）。
+        """
+        prices = last_prices if last_prices else self._last_prices
+        if not prices or not self._positions:
             return self._cash
         mtm = sum(
-            pos["qty"] * last_prices.get(inst, Decimal(0))
+            pos["qty"] * prices.get(inst, Decimal(0))
             for inst, pos in self._positions.items()
         )
         return self._cash + mtm
@@ -88,6 +105,10 @@ class PortfolioView:
                 "qty": Decimal(str(pos_data["qty"])),
                 "cost": Decimal(str(pos_data["cost"])),
             }
+        # last_prices を復元（pull 経路の equity 計算で MTM を維持するため）
+        self._last_prices.clear()
+        for inst, p in d.get("last_prices", {}).items():
+            self._last_prices[inst] = Decimal(str(p))
 
     def to_snapshot_dict(self, last_prices: "dict | None" = None) -> dict:
         """Serialize full portfolio state for runner-side restoration.
@@ -109,13 +130,17 @@ class PortfolioView:
         strategy_id: str,
         last_prices: dict[str, Decimal] | None = None,
     ) -> dict:
-        """ReplayBuyingPower IPC event dict を返す。"""
-        if self._positions and not last_prices:
+        """ReplayBuyingPower IPC event dict を返す。
+
+        last_prices 省略時は内部保持の self._last_prices にフォールバックする。
+        """
+        prices = last_prices if last_prices else self._last_prices
+        if self._positions and not prices:
             log.warning(
                 "PortfolioView.to_ipc_dict: %d position(s) held but last_prices=None, MTM=0",
                 len(self._positions),
             )
-        eq = self.equity(last_prices)
+        eq = self.equity(prices)
         return {
             "event": "ReplayBuyingPower",
             "strategy_id": strategy_id,

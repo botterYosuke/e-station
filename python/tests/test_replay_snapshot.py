@@ -49,6 +49,71 @@ def _make_portfolio(cash: str, ts_event_ms: int = 1700000000000) -> dict:
 
 
 class TestSnapshotRoundtrip:
+    def test_step_backward_emits_order_list_updated(self) -> None:
+        """StepBackward 後に OrderListUpdated イベントが emit されること（OrderList 巻き戻し）。"""
+        import asyncio
+
+        srv = _make_server()
+        srv._replay_state = ReplayState.PAUSED
+        srv._replay_paused = True
+
+        # step_0 は注文 0 件、step_1 で注文 1 件追加
+        srv._push_replay_snapshot(0, _make_portfolio("1000000"), [], {}, [])
+        srv._push_replay_snapshot(
+            1, _make_portfolio("999000"),
+            [{"client_order_id": "c1", "venue_order_id": "v1", "status": "FILLED"}],
+            {}, [],
+        )
+
+        ws = _make_ws()
+        srv._outbox.add_conn(ws)
+        asyncio.run(srv._dispatch("StepBackward", {"op": "StepBackward", "request_id": "req"}, ws))
+
+        events = list(srv._outbox)
+        ol_events = [e for e in events if e.get("event") == "OrderListUpdated"]
+        assert ol_events, "StepBackward must emit OrderListUpdated to roll back order panel"
+        # step_0 を restore したので orders は空
+        assert ol_events[0]["orders"] == [], (
+            f"restored orders must match step_0 (empty), got {ol_events[0]['orders']}"
+        )
+
+    def test_step_backward_emits_order_list_updated_with_restored_fills(self) -> None:
+        """StepBackward 後に OrderListUpdated が snap.open_orders で push されること。
+
+        engine_runner の get_orders_snapshot 経路で snapshot に注入された fills が
+        ロールバック時に UI へ復元されることを保証する（ユーザー報告 #1）。
+        """
+        import asyncio
+
+        srv = _make_server()
+        srv._replay_state = ReplayState.PAUSED
+        srv._replay_paused = True
+
+        order_step0 = [{
+            "client_order_id": "replay-fill-1700000000000",
+            "instrument_id": "1301.TSE",
+            "order_side": "BUY",
+            "quantity": "100",
+            "price": "3000",
+            "status": "FILLED",
+        }]
+        srv._push_replay_snapshot(0, _make_portfolio("1000000"), order_step0, {}, [])
+        srv._push_replay_snapshot(1, _make_portfolio("1001000"), [], {}, [])
+
+        ws = _make_ws()
+        srv._outbox.add_conn(ws)
+        asyncio.run(srv._dispatch("StepBackward", {"op": "StepBackward", "request_id": "req"}, ws))
+
+        events = list(srv._outbox)
+        order_events = [e for e in events if e.get("event") == "OrderListUpdated"]
+        assert order_events, "StepBackward must emit OrderListUpdated to roll back order panel"
+        assert order_events[0]["orders"] == order_step0, (
+            f"OrderListUpdated must contain step_0 fills, got {order_events[0]['orders']}"
+        )
+        assert srv._replay_streaming_fills == order_step0, (
+            "_replay_streaming_fills must be restored from snap.open_orders"
+        )
+
     def test_step_backward_emits_replay_buying_power(self) -> None:
         """StepBackward 後に ReplayBuyingPower イベントが emit されること。"""
         import asyncio
@@ -546,29 +611,39 @@ class TestPortfolioStateRestore:
 
 
 # ---------------------------------------------------------------------------
-# R2-H1 (deferred): RestoreSnapshot 後に Rust UI が巻き戻ること
-# 本フェーズでは TODO として記録する（次フェーズで実装）
+# R2-H1: RestoreSnapshot 後に Rust UI が overlay markers をクリアすること
+# main.rs の RestoreSnapshotPending ハンドラが clear_chart_overlays を呼ぶことを
+# ソースインスペクションで検証する（Rust 単体テストは tests/widget_*.rs で書く）。
 # ---------------------------------------------------------------------------
 
 
-import pytest  # noqa: E402
-
-
 class TestRestoreSnapshotUiRollback:
-    @pytest.mark.xfail(
-        reason="R2-H1 deferred: chart/trades pane flush on RestoreSnapshot not yet implemented in Rust UI",
-        strict=False,
-    )
-    def test_restore_snapshot_flushes_chart_data(self) -> None:
-        """RestoreSnapshot 受信後に Rust UI のチャートデータが ts_event_ms 以降を削除すること。
+    def test_main_rs_restore_snapshot_handler_clears_overlays(self) -> None:
+        """main.rs の RestoreSnapshotPending ハンドラが clear_chart_overlays を呼ぶこと。
 
-        現状: main.rs の RestoreSnapshotPending ハンドラは current_day = None にするだけ。
-        TODO: chart pane に対して ts_event_ms 以降のデータをフラッシュする Rust 実装が必要。
-        この xfail テストは未実装を文書化するためのプレースホルダー。
-        Rust 側のテストは tests/e2e/ または tests/replay_session_*.rs で書くこと。
+        ExecutionMarker / StrategySignal は戦略状態に依存するため、StepBackward 巻き戻し時に
+        必ずクリアする。OHLC kline 自体は実市場データなので保持して構わない。
         """
-        # Rust UI のテストはここでは実行できないため、明示的に失敗させて残債を示す。
-        raise NotImplementedError(
-            "Rust UI chart flush on RestoreSnapshot is not implemented (R2-H1 deferred). "
-            "Implement in src/main.rs RestoreSnapshotPending handler before removing xfail."
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        main_rs = (repo_root / "src" / "main.rs").read_text(encoding="utf-8")
+
+        # RestoreSnapshotPending ハンドラのブロック内で clear_chart_overlays を
+        # 呼んでいることを構造的に確認する。
+        # IPC dispatch 側 (Some(Message::RestoreSnapshotPending {...})) ではなく
+        # update() のハンドラアーム (Message::RestoreSnapshotPending { ... } => { ... })
+        # を探す。アーム識別子は直前の改行 + インデント + `Message::` で始まる。
+        import re
+
+        m = re.search(
+            r"Message::RestoreSnapshotPending\s*\{[^}]*\}\s*=>\s*\{(?P<body>.*?)\n\s{12}\}",
+            main_rs,
+            flags=re.DOTALL,
+        )
+        assert m is not None, "RestoreSnapshotPending update() handler arm must exist in main.rs"
+        body = m.group("body")
+        assert "clear_chart_overlays" in body, (
+            "RestoreSnapshotPending handler must call clear_chart_overlays "
+            "to flush ExecutionMarker / StrategySignal on snapshot rollback"
         )

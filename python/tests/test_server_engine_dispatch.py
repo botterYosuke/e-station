@@ -1121,7 +1121,11 @@ class TestStartEngineLowATasksCleanup:
 
     @pytest.mark.asyncio
     async def test_invalid_initial_cash_does_not_leak_engine_tasks(self) -> None:
-        """LOW-A: initial_cash が不正な場合、_engine_tasks に strategy_id が残らない。"""
+        """LOW-A: initial_cash が不正な場合、_engine_tasks に strategy_id が残らない。
+
+        Phase 2 修正: initial_cash のパースは _run() 内の replay 分岐で行われるため、
+        strategy_file を指定して _run() まで到達させる必要がある。
+        """
         server = _make_server(mode="replay")
         msg = {
             "op": "StartEngine",
@@ -1134,6 +1138,7 @@ class TestStartEngineLowATasksCleanup:
                 "end_date": "2024-01-05",
                 "initial_cash": "not-a-number",  # 不正値
                 "granularity": "Trade",
+                "strategy_file": "dummy.py",  # Phase 2: _run() 内でパースするため strategy_file が必要
             },
         }
 

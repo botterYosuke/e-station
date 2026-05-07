@@ -31,12 +31,12 @@ CurrentEngineState = Union[ReplayStateName, LiveStateName]
 # Replay-only / Live-only コマンドの分類 (EngineBusy 直交制約に使用)
 ReplayOnlyCommand = Literal[
     "LoadReplayData",
-    "StartEngine",
-    "StopEngine",
     "SetReplaySpeed",
     "StopReplay",
     "ForceStopReplay",
 ]
+# Phase 2: StartEngine / StopEngine は live/replay 両方で使用するため SharedEngineCommand に分類。
+SharedEngineCommand = Literal["StartEngine", "StopEngine"]
 LiveOnlyCommand = Literal[
     "ModifyOrder",
     "CancelOrder",
