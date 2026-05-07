@@ -138,7 +138,7 @@ class KabuStationAdapter:
 
 ### Step 1: モデル定義と単体テスト（リスクなし）
 
-> **本計画の目標**: 「adapter まで model 化」。adapter（`kabusapi.py` 等）が Pydantic model を返し、`server.py` がそれを受け取って `.model_dump(mode="json")` する形に変換する。現行の worker → `outbox.append({...})` で wire-format dict を直接書くパスは Step 2 の廃止対象であり、Step 3 完了時に完全削除する。
+> **本計画の目標**: 「adapter 内部の正規化層整理」。本計画は internal model 整理が目的であり、adapter model は adapter 内部の正規化層である。adapter model は event/venue/market/request_id 等の wire 責務を持たない。schemas.py が wire source of truth を維持する。adapter model → wire DTO（schemas.py 定義）への明示マッピング（mapper 関数 1 段）を経由して wire 送出を行う。現行の worker → `outbox.append({...})` で wire-format dict を直接書くパスは Step 2 の廃止対象であり、Step 3 完了時に完全削除する。
 
 - `python/engine/models.py` を追加。`Instrument` / `OrderBook` / `Trade` / `DepthDiff` の 4 モデルを定義する。
 - `DepthDiff` には必須フィールド `stream_session_id: str`・`sequence_id: int`・`prev_sequence_id: int`・`symbol: str`・`timestamp: datetime`・`bids: list[tuple[Decimal, Decimal]]`・`asks: list[tuple[Decimal, Decimal]]` を含めること。
@@ -160,18 +160,22 @@ class KabuStationAdapter:
 - `parse_board` / `parse_execution` を実装し、戻り値を `OrderBook` / `Trade` に変更。
 - `python/tests/test_kabusapi_adapter.py` でラウンドトリップ（生 JSON → モデル）を検証。
 
-> **migration path（dict 直書きパスの段階移行）**: 現行の dict 直書きパス（`worker → outbox.append({...})`）を Pydantic model 化パス（`worker → model → outbox.append(model.model_dump(mode='json'))`）に段階移行する。この移行中は両パスが並存することを許容し、Step 3 完了時に dict 直書きパスを完全削除する。他 venue（Tachibana 等）は Step 3 完了まで旧境界（dict 直書き）のまま動作する。
+> **migration path（dict 直書きパスの段階移行）**: 現行の dict 直書きパス（`worker → outbox.append({...})`）を adapter model 経由パス（`worker → adapter model → mapper → wire DTO → outbox.append(...)`）に段階移行する。adapter model は schemas.py 定義の wire DTO に変換する mapper 関数（1 段）を経由して wire DTO 型を生成する。`.model_dump(mode="json")` で wire に直結するのでなく、mapper 経由で wire DTO 型を生成することで、schemas.py が wire source of truth を維持し続ける。この移行中は両パスが並存することを許容し、Step 3 完了時に dict 直書きパスを完全削除する。他 venue（Tachibana 等）は Step 3 完了まで旧境界（dict 直書き）のまま動作する。
 
 ### Step 3: server.py の配信パスを adapter 経由に差し替え
 
 > ⚠ **C1 の適用範囲**: `server.py` が outbox を直接 worker に渡す構造を変えない限り、`server.py` 側だけを変更しても効果がない。C1 は「B1 で worker 側が pydantic モデルを outbox に入れるようになった後に、server.py がそれを `.model_dump(mode="json")` する」という順序依存がある。B1 完了前に C1 に着手しないこと。
 
-- `server.py` が adapter の変換結果（pydantic モデル）を受け取り、`.model_dump(mode="json")` を使って IPC JSON に変換する（`mode="json"` により Decimal が str に変換される）。
+- `server.py` が adapter の変換結果（adapter model）を受け取り、mapper 関数経由で schemas.py 定義の wire DTO に変換した後、wire DTO を outbox に送出する。`.model_dump(mode="json")` で adapter model を wire に直結するのではなく、mapper 経由で wire DTO 型を生成することで schemas.py が wire source of truth を維持する。
 - IPC スキーマ（`SCHEMA_MAJOR` / `SCHEMA_MINOR`）は **変更しない**。変換は adapter ↔ server の内部境界で完結する。
-- **gap recovery フィールドの保持**: `DepthDiff.stream_session_id`・`sequence_id`・`prev_sequence_id` は `server.py` が `.model_dump(mode="json")` して IPC JSON に変換する際にそのまま渡す。これらが欠落すると Rust 側の gap recovery（`RequestDepthSnapshot` の自動発行）が機能しない。`SCHEMA_MAJOR/MINOR` は変更しないが、`DepthDiff` イベントの必須フィールドは現行 `schemas.py` の `DepthDiff` クラス定義と一致させること。
+- **gap recovery フィールドの保持**: `DepthDiff.stream_session_id`・`sequence_id`・`prev_sequence_id` は mapper が wire DTO に変換する際にそのまま渡す。これらが欠落すると Rust 側の gap recovery（`RequestDepthSnapshot` の自動発行）が機能しない。`SCHEMA_MAJOR/MINOR` は変更しないが、`DepthDiff` イベントの必須フィールドは現行 `schemas.py` の `DepthDiff` クラス定義と一致させること。
 - `engine_runner.py` への変更は ImplementationLoop-plan.md C1 のスコープ外。
-- [ ] **`.model_dump(mode="json")` wire compatibility テスト**: serialization 変更前後で生成 JSON の形式が変わらないことを確認するテストを追加する。`Decimal`（文字列 vs 数値）・`datetime`（タイムゾーン有無）・`None` フィールドの扱いを対象とする。IPC スキーマバージョン不変でも wire 互換性は別途確認が必要。
-- [ ] **Step 3 完了条件（統合テスト必須）**: 本番経路（`worker → model → server.py → model_dump`）を通る統合テストが PASS すること。model 化の単体テストだけでは不十分であり、`test_server_adapter_integration.py` 等で実際の worker → outbox → server の経路を E2E で通すテストが必要。
+- [ ] **wire compatibility テスト**: mapper 変換前後で生成 JSON の形式が変わらないことを確認するテストを追加する。`Decimal`（文字列 vs 数値）・`datetime`（タイムゾーン有無）・`None` フィールドの扱いを対象とする。IPC スキーマバージョン不変でも wire 互換性は別途確認が必要。
+- [ ] **Step 3 完了条件（統合テスト必須）**: 本番経路（`worker → adapter model → mapper → wire DTO → outbox`）を通る統合テストが PASS すること。model 化の単体テストだけでは不十分であり、`test_server_adapter_integration.py` 等で実際の worker → adapter model → mapper → outbox → server の経路を E2E で通すテストが必要。
+- [ ] **adapter model フィールド境界テスト（CI 必須）**: `Instrument` / `OrderBook` / `Trade` / `DepthDiff` の各モデルのフィールド集合に `event` / `venue` / `market` / `request_id` が含まれないことを CI で検証するテストを追加する。具体的には各モデルの `model_fields` を列挙し、禁止フィールド名が含まれていないことをアサートする。これにより wire 責務フィールドの adapter model への混入を回帰防止する。
+- [ ] **`.model_dump(mode="json")` 直結禁止の検証**: adapter model（`Instrument` / `OrderBook` / `Trade` / `DepthDiff`）の `.model_dump(mode="json")` 結果を直接 wire に送出するコードパスが存在しないことをテストで保証する。wire 送出は必ず mapper 関数を経由し、schemas.py 定義の wire DTO 型を生成した上で行うこと。統合テスト（`test_server_adapter_integration.py`）で outbox に書き込まれるオブジェクトが wire DTO 型インスタンス（または明示的な mapper 出力）であることをアサートすること。
+- [ ] **DepthSnapshot → DepthDiff continuity テスト**: stream_session_id 切替を含む real-protocol path（DepthSnapshot 受信後に DepthDiff が継続するシナリオ）の統合テストを追加する。
+- [ ] **gap 検出後の RequestDepthSnapshot 再送テスト**: sequence_id のギャップを検出した後、RequestDepthSnapshot を再送し、新しい DepthSnapshot を起点に DepthDiff の continuity が回復するシナリオをテスト観点として明記する。
 
 ### Step 4: 他 adapter（将来）
 

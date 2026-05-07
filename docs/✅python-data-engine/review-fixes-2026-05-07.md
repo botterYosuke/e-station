@@ -330,3 +330,36 @@ HIGH: 0件 / MEDIUM: 4件（全修正済み）/ LOW: 4件（対応不要）
 | User-46 | MEDIUM | ipc-grpc-migration.md / ImplementationLoop-plan.md | G2 を独立マイルストーンに格上げ。Arc<EngineConnection> リファクタ・trait 化を G1 並列不可ブロッカーとして明示 |
 
 HIGH: 4件 / MED-HIGH: 1件 / MEDIUM: 2件（全修正済み）
+
+---
+
+## ラウンド 12 — ユーザーレビュー（2026-05-07）
+
+補足: 現行 wire 契約・canonical literal・reconnect/replay lifecycle との乖離が中心。先決事項 2 点（handshake failure 正本・adapter 境界主目的）をユーザー確認で確定。
+
+### 統一決定
+1. handshake failure 正本 = stream status コード（FAILED_PRECONDITION / UNAUTHENTICATED / INVALID_ARGUMENT）で stream 終了。Event::EngineError は出さない。EngineError は handshake 後の session 中エラー専用に限定。ReadyResponse は handshake 成功時のみ最初の payload。
+2. adapter 境界 = internal 整理層（event/venue/market/request_id は持たない）。schemas.py が wire source of truth 維持。adapter → wire DTO は mapper 1 段経由。.model_dump(mode="json") で直接 wire に出さない。
+3. mock script literal = schemas.py / replay_session.py の canonical literal に統一（event: "ClientConnected" / "EngineError" 等）
+4. Phase 2 owner table に VenueReady sticky cache + invalidation + stale-ready 抑制を追加
+5. session-file writer 側 acceptance pin = session_data["transport"] == "grpc" assertion を G0.9 完了条件に追加
+6. rollback = G3 直前まで dual-transport artifact 常備（gRPC-only Rust 後の Python WS 戻し rollback は不成立と明記）
+7. parity check = field 番号・oneof 配置・optionality・reserved の field-level CI 検証を追加
+8. live_session.py → replay_session.py 内 LiveSession クラスに修正
+
+### Findings 一覧
+
+| Finding ID | 重要度 | 対象ファイル | 修正概要 |
+|---|---|---|---|
+| User-47 | HIGH | ipc-grpc-migration.md | handshake failure = stream status 確定。status code 対応表追加。EngineError は session 中専用に限定。 |
+| User-48 | HIGH | adapter-type-boundary.md | adapter = internal 整理層。mapper 1 段経由で wire DTO 生成。model_dump 直結禁止。 |
+| User-49 | HIGH | plan-test-mock-ipc-server.md | mock script literal を canonical に修正（"ClientConnected"/"EngineError"/"Ready"等）。S5 depth bootstrap 追加。 |
+| User-50 | HIGH | gui-triple-state-refactor.md | Phase 2 owner table に VenueReady sticky cache + invalidation + stale-ready 抑制を追加。 |
+| User-51 | HIGH | ImplementationLoop-plan.md | G0.9 完了条件に session-file writer 側（assert transport=="grpc"）+ external mode 読み取り確認を追加。 |
+| User-52 | MED-HIGH | ipc-grpc-migration.md | check_schema_parity.py に field-level チェック（field 番号・oneof・optionality・reserved）を追加。 |
+| User-53 | MED-HIGH | gui-triple-state-refactor.md | Phase 1 acceptance に live/replay 境界テスト・RestoreSnapshotPending・pending replay 優先度を追加。 |
+| User-54 | MEDIUM | ipc-grpc-migration.md | rollback を dual-transport artifact 常備に修正。gRPC-only Rust 後の WS 戻し不成立を明記。 |
+| User-55 | MEDIUM | adapter-type-boundary.md / plan-test-mock-ipc-server.md | depth bootstrap/recovery pin 追加（DepthSnapshot→DepthDiff continuity / gap→RequestDepthSnapshot）。 |
+| User-56 | MEDIUM | ipc-grpc-migration.md | live_session.py → replay_session.py 内 LiveSession クラスに参照先を統一。 |
+
+HIGH: 5件 / MED-HIGH: 2件 / MEDIUM: 3件（全修正済み）

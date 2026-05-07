@@ -138,7 +138,22 @@ service DataEngine {
 `FetchKlines` 等）、`Event` は現行イベント群（`TradesBatch` / `KlineUpdate` 等）を
 protobuf message に 1:1 対応させる。
 
-**エラーハンドリング**: Session 冒頭の `HelloRequest`（`Command.oneof.hello`）に対してサーバーが gRPC ステータスコード `FAILED_PRECONDITION` または `UNAUTHENTICATED` を `Event` として返した場合、クライアント（Rust `tonic`）はストリームを切断する。G2 完了条件にこのパスの Rust 統合テスト（`HelloRequest` 送信後に `FAILED_PRECONDITION` を受けたとき以降のコマンドを送らずに切断することを mock で確認）を追加する。
+**ハンドシェイク失敗契約（確定）**: Session 冒頭の `HelloRequest`（`Command.oneof.hello`）に対するサーバーの失敗応答は **stream status コードで完結する。`Event::EngineError` は出さない**。クライアント（Rust `tonic`）は stream status を受け取ると同時にストリームを終了し、Python fanout は stream close で検知する。
+
+> **`Event::EngineError` の用途限定（確定）**: `Event::EngineError` は **ハンドシェイク成功後の Session 中エラー専用**である。ハンドシェイクフェーズ（`HelloRequest` 受信〜 `ReadyResponse` 送信まで）の失敗には `EngineError` を使用してはならない。proto 定義・Python サーバー実装・Rust クライアント実装・wire テスト・mock helper のすべてでこの区分を維持すること。
+
+> **ReadyResponse 先頭 payload 契約（確定）**: ハンドシェイクが成功した場合、サーバーが最初に送信する `Event` の payload は必ず `ReadyResponse` でなければならない。proto 定義・G0 wire テスト・G0.5 mock helper・G2 実 wire テストのすべてがこの前提で統一されている。`ReadyResponse` より前に他の `Event` payload を送信することは禁止する。
+
+失敗パターン別 status code 対応表:
+
+| 失敗パターン | stream status code |
+|---|---|
+| `schema_major` 不一致 | `FAILED_PRECONDITION` |
+| token 不正 / 認証失敗 | `UNAUTHENTICATED` |
+| プロトコル違反（例: 最初のメッセージが `HelloRequest` でない） | `INVALID_ARGUMENT` |
+| 接続数上限超過 | `RESOURCE_EXHAUSTED` |
+
+Rust 側は status code で retry/fallback を分岐する。`Event::EngineError` を handshake 失敗パスに使用してはならない。G2 完了条件にこのパスの Rust 統合テスト（`HelloRequest` 送信後に各 status code を受けたとき以降のコマンドを送らずに stream が終了することを mock で確認）を追加する。
 
 #### Session 冒頭ハンドシェイク方式（採用済み設計決定）
 
@@ -214,10 +229,18 @@ message Command {
 - [ ] Python: `grpcio-tools` を `pyproject.toml` に追加。`Makefile` / `scripts/` に生成コマンド追加。
 - [ ] `buf.yaml` + `buf.gen.yaml` で Buf CLI 管理（オプション、なければ `protoc` 直叩き）。
 - [ ] CI に `buf lint` + `buf breaking --against .git#branch=main` を追加。
-- [ ] `commands.json` / `events.json` と `engine.proto` の parity を CI で確認するスクリプトを追加（`scripts/check_schema_parity.py`）。コマンド名・イベント名の対応が取れているかを機械検証し、drift を PR 時点で検知する。G3（WS 廃止）時に削除。
+- [ ] `commands.json` / `events.json` と `engine.proto` の parity を CI で確認するスクリプトを追加（`scripts/check_schema_parity.py`）。コマンド名・イベント名の対応チェックに加え、**field-level の比較**を機械検証し、drift を PR 時点で検知する。G3（WS 廃止）時に削除。
+
+  field-level チェック項目（`check_schema_parity.py` に実装必須）:
+  - field 番号（proto field number と JSON スキーマの順序対応）
+  - oneof 名と oneof 内の配置順序
+  - optional/repeated の区別
+  - reserved field 番号の存在確認（削除済みフィールドの番号再利用防止）
+  - 新規追加 field の Rust/Python 両側への対称確認（片側のみ追加を検知）
 
 **完了条件**: 両言語でコードが生成され、型エラーなくコンパイルできる。`buf lint` がエラーコード 0 で通過し、`buf breaking --against .git#branch=main` による後方互換チェックがエラーゼロであること（初回は main ブランチに proto がないため `--against` チェックは次コミット以降から有効）。
-- [ ] `python scripts/check_schema_parity.py` がゼロエラーで完了（JSON↔proto 対応チェック）
+- [ ] `python scripts/check_schema_parity.py` がゼロエラーで完了（JSON↔proto の名前対応 + field-level チェック）
+- [ ] proto の `Event` message の `oneof` 定義において、`ReadyResponse` が最初の payload（フィールド番号 1）として配置されていることを確認する。G0.5 mock helper および G2 wire テストはこの配置を前提として実装すること（§3.1「ReadyResponse 先頭 payload 契約」との整合）。
 
 ### フェーズ G0.5: Python 側 gRPC mock サーバー骨格（0.5〜1 日）
 
@@ -245,12 +268,12 @@ G1 では `engine-client/src/session_file.rs` の `EngineSession` 構造体と P
 
 - [ ] `engine-client/src/session_file.rs::EngineSession` に `transport: String` フィールドを追加（`#[serde(default = "default_transport")]` で `"ws"` をデフォルト値とし、既存の session ファイルに `transport` フィールドがなくても読めること）。
 - [ ] `python/engine/replay_session.py::_resolve_endpoint_and_token()` が session ファイルの `transport` フィールドを読み、`"grpc"` の場合は `ws://` URL ではなく `127.0.0.1:{port}` 形式の gRPC channel address を返す最小実装を追加する。`transport` フィールド不在時は既存の WS 動作を維持する（後方互換）。
-- [ ] `python/engine/live_session.py::LiveSession._resolve_endpoint_and_token()`（または相当メソッド）にも同じ `transport` 分岐を追加する。
+- [ ] `python/engine/replay_session.py` 内の `LiveSession._resolve_endpoint_and_token()`（`LiveSession` は `replay_session.py` に `ReplaySession` と同居する helper クラス）にも同じ `transport` 分岐を追加する。
 - [ ] `python/engine/replay_session.py::SessionFileData` に `transport: str` フィールドを追加（デフォルト `"ws"`）。
 
 **G0.9 完了条件:**
 - `engine-client/src/session_file.rs::EngineSession` に `transport: String`（serde default="ws"）が存在する。
-- `replay_session.py::_resolve_endpoint_and_token()` および `LiveSession._resolve_endpoint_and_token()` が `transport` 値に応じて ws/grpc endpoint を返す最小実装が存在する。
+- `replay_session.py::_resolve_endpoint_and_token()` および `replay_session.py` 内の `LiveSession._resolve_endpoint_and_token()` が `transport` 値に応じて ws/grpc endpoint を返す最小実装が存在する。
 - 既存の全テスト（`cargo test --workspace` + `pytest python/tests/`）が G0.9 前後で同じ PASS/FAIL 状態を維持する（回帰なし）。
 
 ---
@@ -301,7 +324,12 @@ G1 では `engine-client/src/session_file.rs` の `EngineSession` 構造体と P
 | Python server | `--transport grpc` フラグで `server_grpc.py` を起動 | `--transport ws` フラグで `server.py` を起動（ランタイム切替・再デプロイのみ） |
 | Rust client | `ws-transport` feature OFF でビルド（デフォルト） | `--features ws-transport` で**再ビルドが必要**（ランタイム切替不可） |
 
-**意味**: Python 側は即時ロールバック可能。Rust 側は再ビルドが必要なため、Rust client のロールバックは事前ビルド済みバイナリが必要。G2 完了後は gRPC ビルドと ws-transport ビルドを CI で両方保持し、rollback 用バイナリを手元に置くこと。
+**非対称性の明記**: Python 側は `--transport ws` フラグで即時ランタイム切替が可能。Rust 側は `ws-transport` feature 付き再ビルドが必要であり、ランタイム切替は不可。この非対称性により、rollback 手段は以下の 2 パターンに分かれる:
+
+- **Python WS 戻し + Rust ws-transport 付きバイナリあり**: rollback 成立（双方を WS に戻せる）。
+- **gRPC-only Rust バイナリ配布済み + Python を WS に戻したい**: rollback 不成立（Rust が gRPC-only のため、Python を WS に戻しても Rust 側が接続できない）。
+
+**dual-transport artifact 常備方針**: G3（WS 廃止）直前まで、CI は `--features ws-transport` 付きの Rust バイナリ（dual-transport artifact）を gRPC-only バイナリと並行してビルド・保持すること。gRPC-only Rust バイナリのみを配布した後に Python 側を WS に戻す rollback は成立しないため、dual artifact が常備されている間のみ完全 rollback が保証される。G2 完了後は gRPC ビルドと ws-transport ビルドの両方を CI artifact として保持し、rollback 用バイナリを手元に置くこと。
 
 ### G2（独立マイルストーン）: EngineConnection 抽象化 + Rust クライアントを gRPC に置き換え（3〜4 日）
 
@@ -344,7 +372,7 @@ async fn test_wire_handshake_with_real_python_server() {
 **なぜ mock では不十分か**: tonic（Rust）と grpcio（Python）は protobuf エンコーディングの実装が独立しているため、同じ `.proto` からコード生成しても wire 互換性が壊れることがある（フィールド番号のズレ・oneofエンコーディング差異・compression ネゴシエーションなど）。mock_grpc_server.py も grpcio で書かれているが、そこで通っても `server_grpc.py` の実装バグを隠す可能性がある。G2 では必ず本物のサーバーと通信させること。
 
 **完了条件**: `cargo test --workspace`（gRPC transport デフォルト）と `cargo test --workspace --features ws-transport`（WebSocket フォールバック）の両方が全 PASS。**かつ** `cargo test grpc_wire_integration` が実 Python サーバーを起動した上で PASS すること（CI では `python/engine/server_grpc.py` が起動可能な環境で実行すること）。`.github/workflows/rust-tests.yml`（または相当ファイル）に Python セットアップと `grpcio-tools` インストールステップの追加が必要。
-- [ ] `python/tests/test_live_session_attach.py` が gRPC transport で PASS すること（live attach 回帰）。
+- [ ] `python/tests/test_live_session_attach.py` が gRPC transport で PASS すること（`replay_session.py` 内 `LiveSession` の live attach 回帰）。
 
 ### フェーズ G3: WebSocket トランスポート廃止（1 日）
 

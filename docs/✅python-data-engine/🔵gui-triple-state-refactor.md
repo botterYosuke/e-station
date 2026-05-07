@@ -119,6 +119,10 @@ fn update(&mut self, message: Message) -> Task<Message> {
 - `cargo clippy` 警告なし
 - `cargo test --workspace` で `tests/mode_toggle_footer.rs`・`tests/multiinst_replay_pane_routing.rs` を含む全統合テストが PASS
 - `map_engine_event_to_message()` が全 `EngineEvent` バリアントを exhaustive に `Message` に変換していることを `#[test]` でカバーする（未配線バリアントへの match が compile-error になること、または enum のバリアント網羅テストを追加すること）。`src/main.rs` の `map_engine_event_to_message` 関数への入力と出力を pin するスナップショットテストでも可。
+- **live/replay 境界テスト（必須）**: `Message::Replay(ReplayMessage)` 等に分割した後、以下のシナリオに対してテストが存在し PASS すること:
+  - replay 完了後の live reconnect で Message routing が正しく切り替わること（`Message::Replay` → `Message::Engine` / `Message::Venue` の routing が混在しないこと）
+  - `RestoreSnapshotPending` および `session_epoch` の state transition が replay/live の境界で正しく行われること
+  - pending replay 中（replay 未完了時）に live reconnect が来たときの優先度と state 遷移が明確に定義され、テストで確認されていること
 
 ---
 
@@ -145,12 +149,18 @@ fn update(&mut self, message: Message) -> Task<Message> {
 > | live 復帰（再接続後の追従再開） | ? | ? |
 > | catch-up（再接続後の last-known 位置へのスクロール） | ? | ? |
 > | rebuild trigger（データ更新時の再描画要求） | ? | ? |
+> | VenueReady sticky cache（readiness の保持と読取） | ? | ? |
+> | cache invalidation（LoginStarted / LoginCancelled / relogin / reconnect） | ? | ? |
+> | stale-ready 抑制ガード（reconnect 直後の誤 bootstrap 防止） | ? | ? |
 >
 > owner table の必須項目:
 > - **follow モード**: 誰が追従先を決め、誰が ViewState を更新するか
 > - **pause/resume**: 誰が pause 状態を保持し、誰が live 復帰をトリガーするか
 > - **catch-up（再接続後）**: 誰が last-known 位置を保持し、誰がスクロール復帰をかけるか
 > - **rebuild trigger**: データ更新時の再描画は誰が要求するか（shader vs ViewState vs main loop）
+> - **VenueReady sticky cache**: 誰が readiness を保持し、誰が cache を読むか（`src/main.rs:77, 539` 付近で race/stale-ready を明示的に抑制している実装の設計対象）
+> - **cache invalidation trigger**: LoginStarted / LoginCancelled / relogin / reconnect で cache を無効化する owner は誰か
+> - **stale-ready 抑制ガード**: reconnect 直後の誤 bootstrap を防ぐ gate の owner は誰か
 
 **目的**: HeatmapShader を「描画専用」にし、③ のループを廃止する。
 
@@ -200,6 +210,7 @@ rebuild_policy: view::RebuildPolicy,
   - pause/resume: pause 中は ViewState が自動更新されず、resume で live 位置へ復帰すること
   - catch-up（再接続後）: 再接続イベント後に last-known 位置へのスクロール復帰が発火すること
   - rebuild trigger: データ更新時に再描画要求が正しい owner から発行されること
+  - VenueReady cache invalidation（reconnect シナリオ）: LoginStarted / LoginCancelled / reconnect イベント後に VenueReady cache が無効化され、stale-ready による誤 bootstrap が発生しないこと
 
 ---
 

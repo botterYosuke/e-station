@@ -134,6 +134,8 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 - **完了条件**:
   - `session_file.rs::EngineSession` の `transport` フィールド追加テスト PASS
   - `ReplaySession` / `LiveSession` 両方の `_resolve_endpoint_and_token()` gRPC 分岐テスト PASS
+  - **[writer 側 acceptance pin]** `engine-session.json` に `"transport": "grpc"` を書く主体（`--transport grpc` で起動した `server_grpc.py` / engine プロセス）が、実際にそのフィールドを session file に書き込むことを確認するテストが存在すること。具体的には `test_mock_grpc_server_basic.py` または新規テストで、MockIPCServer 起動後に session file の `transport` フィールドが `"grpc"` であることを明示的にアサートする（例: `assert session_data["transport"] == "grpc"`）。このテストが存在しない場合、unit test は通っても実 attach / external mode では session file が既定の `"ws"` のまま残り、helper と `start_or_attach()` が WS に誤誘導される。
+  - **[external mode 読み取り確認]** external mode（既存の session file がある場合）においても、session file の `transport` フィールドが正しく読み取られ、`"grpc"` の場合に gRPC チャネル URI が返ることを確認すること（reader 側の acceptance pin と writer 側の acceptance pin の両方が揃うことで G0.9 完了とみなす）。
 - **⚠ G0.9 完了後でないと G1 に着手してはならない**（endpoint 解決経路が未整備のまま G1 を実施すると attach mode が WS 固定のまま残る）
 
 **G1: Python サーバーを gRPC に置き換え（2〜3 日）**

@@ -64,7 +64,9 @@ class MockIPCServer:
     def __exit__(self, *_): self.stop()
 ```
 
-`script` は `[{"on": "Hello", "reply": [{"type": "Ready", ...}]}, ...]` のような宣言的リストとし、テストが期待する IPC 応答シーケンスを明示できる形にする。
+`script` は `[{"on": "Hello", "reply": [{"event": "Ready", ...}]}, ...]` のような宣言的リストとし、テストが期待する IPC 応答シーケンスを明示できる形にする。
+
+> **wire literal 参照先**: `event` フィールドの値（`"Ready"`, `"ClientConnected"`, `"EngineError"`, `"DepthSnapshot"` 等）は `python/engine/schemas.py` の各クラスの `event: Literal[...]` フィールドが canonical であり、`op` フィールド（コマンド側: `"Hello"`, `"Subscribe"` 等）も同ファイルの `op: Literal[...]` が canonical である。mock script 例はすべてこれらの値に合わせること。
 
 ### 既存 `ReplaySession` / `LiveSession` の拡張
 
@@ -76,8 +78,8 @@ class MockIPCServer:
 def test_handshake_schema_mismatch(mock_ipc_server_factory):
     script = [
         {"on": "Hello", "reply": [
-            {"event": "client_connected", "count": 1},
-            {"event": "engine_error", "reason": "schema_mismatch", "code": "SCHEMA_MAJOR_MISMATCH"}
+            {"event": "ClientConnected", "count": 1},
+            {"event": "EngineError", "code": "schema_mismatch", "message": "SCHEMA_MAJOR_MISMATCH"}
         ]}
     ]
     with mock_ipc_server_factory(script) as srv:
@@ -169,6 +171,85 @@ markers =
 - **既存テストとの棲み分け**: `test_live_session_kabu.py` 等の既存 attach テストは実プロセスに依存しており `@pytest.mark.smoke` で管理する。S4 のテストは `MockIPCServer` を使うことで**実プロセス不要**、かつ **1 秒以内**に同じ分岐を検証できる点が差別化価値である。重複を避けるため、S4 では「分岐ロジック」の検証に絞り、実プロセス間通信の結合確認は smoke に委ねる。
 
 **完了条件**: `pytest python/tests/test_mock_ipc_server_attach.py` が 1 秒以内に PASS。`_resolve_endpoint_and_token()` の S4-A / S4-B / S4-C の 3 分岐すべてがカバーされていること。
+
+### フェーズ S5: depth bootstrap / continuity（新規）
+
+attach 後の板情報連続性を MockIPCServer で検証する。実プロセス不要で DepthSnapshot → DepthDiff の continuity 経路と、gap 検出後の再要求経路をカバーする。
+
+#### S5-A: DepthSnapshot → DepthDiff continuity（同一 stream_session_id）
+
+MockIPCServer が以下のシーケンスを送出するシナリオを定義する:
+
+```python
+script = [
+    {"on": "Hello", "reply": [
+        {"event": "Ready", "schema_major": SCHEMA_MAJOR, "schema_minor": SCHEMA_MINOR,
+         "engine_version": "test", "engine_session_id": str(uuid4()), "capabilities": {}}
+    ]},
+    {"on": "Subscribe", "reply": [
+        {"event": "DepthSnapshot",
+         "request_id": None,
+         "venue": "binance", "ticker": "BTCUSDT", "market": "spot",
+         "stream_session_id": "sess-1", "sequence_id": 100,
+         "bids": [{"price": "30000", "qty": "1.0"}],
+         "asks": [{"price": "30001", "qty": "0.5"}]},
+        {"event": "DepthDiff",
+         "venue": "binance", "ticker": "BTCUSDT", "market": "spot",
+         "stream_session_id": "sess-1",
+         "sequence_id": 101, "prev_sequence_id": 100,
+         "bids": [{"price": "30000", "qty": "1.5"}],
+         "asks": []}
+    ]}
+]
+```
+
+- **期待**: クライアントが DepthSnapshot (seq=100) を受け取り、DepthDiff (seq=101, prev=100) で更新を適用できること。
+- `stream_session_id` が両メッセージで一致していることを検証する。
+
+#### S5-B: stream_session_id 変化（attach reconnect 相当）
+
+`stream_session_id` が DepthSnapshot と DepthDiff で異なる場合の挙動を検証する:
+
+```python
+# DepthSnapshot: stream_session_id="sess-1"
+# DepthDiff:     stream_session_id="sess-2"  ← セッション変更
+```
+
+- **期待**: クライアント実装が `stream_session_id` の不一致を検出し、`DepthGap` event（`{"event": "DepthGap", "stream_session_id": "sess-2", ...}`）を受け取るか、または RequestDepthSnapshot を再送する経路をとること。
+- 注記: `DepthGap` の wire literal は `schemas.py` の `DepthGap` クラス（`event: Literal["DepthGap"]`）が canonical である。
+
+#### S5-C: gap 検出後の RequestDepthSnapshot 再送（実 protocol path 1 本確保）
+
+MockIPCServer が `DepthGap` を送出し、クライアントが `RequestDepthSnapshot` を送り返すシーケンスを検証する:
+
+```python
+script = [
+    {"on": "Hello",   "reply": [{"event": "Ready", ...}]},
+    {"on": "Subscribe", "reply": [
+        {"event": "DepthGap",
+         "venue": "binance", "ticker": "BTCUSDT", "market": "spot",
+         "stream_session_id": "sess-broken"}
+    ]},
+    {"on": "RequestDepthSnapshot", "reply": [
+        {"event": "DepthSnapshot",
+         "request_id": "<will be matched by on-field>",
+         "venue": "binance", "ticker": "BTCUSDT", "market": "spot",
+         "stream_session_id": "sess-2", "sequence_id": 200,
+         "bids": [], "asks": []}
+    ]}
+]
+```
+
+- **期待**: `DepthGap` 受信後にクライアントが `{"op": "RequestDepthSnapshot", ...}` を送出し、MockIPCServer が新しい DepthSnapshot を返すこと。
+- **注記**: `RequestDepthSnapshot` の `op` literal は `schemas.py` `RequestDepthSnapshot` クラス（`op: Literal["RequestDepthSnapshot"]`）が canonical である。この経路は「gap → 再取得」の実 protocol path を 1 本確保する最小テストであり、リトライ回数・バックオフ等の詳細は実装に委ねる。
+
+#### S5 共通の注意点
+
+- wire literal（`event` / `op` フィールド値）はすべて `python/engine/schemas.py` の Literal 定義と一致させること。
+- `stream_session_id` は文字列 UUID などを使い、テスト間で衝突しないよう `uuid.uuid4()` で生成することを推奨する。
+- テスト終了後は MockIPCServer を `stop()` し、環境変数を `del` して汚染を防ぐ。
+
+**完了条件**: `pytest python/tests/test_mock_ipc_server_depth.py` が 1 秒以内に PASS。S5-A（continuity 確認）・S5-B（stream_session_id 変化検出）・S5-C（gap 後再要求）の 3 シナリオがカバーされていること。
 
 ### フェーズ S3: smoke 整理
 
