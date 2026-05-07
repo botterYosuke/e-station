@@ -86,6 +86,56 @@ static VENUE_READY_CACHE: std::sync::OnceLock<
     Arc<tokio::sync::Mutex<rustc_hash::FxHashSet<String>>>,
 > = std::sync::OnceLock::new();
 
+/// P4-4: Whether the connected `kabu_station` venue is talking to the production
+/// API (`localhost:18080`). Updated by the venue-ready bridge whenever a new
+/// `Ready.capabilities.venue_capabilities.kabu_station.is_production` arrives,
+/// and read by `status_bar()` to render the kabu chip with a red production
+/// banner. `false` is the safe default; a stale `true` after a re-login is
+/// invalidated together with the venue ready set.
+static KABU_IS_PRODUCTION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Read the cached production flag (P4-4). The atomic is updated from the
+/// bridge task on every `Ready` event and reset to `false` on engine
+/// disconnect. Returning `false` on lock contention isn't possible — atomics
+/// have no contention failure mode — so the UI always sees the most recent
+/// observed value.
+fn kabu_is_production() -> bool {
+    KABU_IS_PRODUCTION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Extract the kabu venue's `is_production` flag from a `Ready.capabilities`
+/// JSON blob. P4-4: returns `false` when the field is absent (older engines /
+/// verify env), `true` only when explicitly advertised. Logs a warning on
+/// deserialization errors so Python/Rust schema drift surfaces visibly instead
+/// of silently defaulting to verify styling (R1-MEDIUM).
+fn parse_kabu_is_production(capabilities: &serde_json::Value) -> bool {
+    match engine_client::capabilities::venue_capability::<bool>(
+        capabilities,
+        KABU_STATION_VENUE_NAME,
+        "is_production",
+    ) {
+        Ok(v) => v.unwrap_or(false),
+        Err(e) => {
+            log::warn!(
+                "parse_kabu_is_production: capability parse error ({e}), \
+                 defaulting to verify (false) — check Python/Rust schema alignment"
+            );
+            false
+        }
+    }
+}
+
+/// P4-4: produce the kabu chip's (label_prefix, dot_text, dot_color) when
+/// `is_production` is true. Returns `None` when verify env (default chip
+/// styling). Pure function — kept in module scope so it can be unit-tested
+/// without spinning up iced.
+#[must_use]
+fn kabu_chip_prod_style() -> (&'static str, iced::Color) {
+    // 🔴 + 赤背景。文言は spec.md / runbook.md §5.1 と一致させること
+    ("🔴 本番", iced::Color::from_rgb(0.85, 0.15, 0.15))
+}
+
 /// Startup mode (`live` or `replay`) captured from `--mode` before any runtime
 /// is created.  Changed from OnceLock to Mutex<Option<_>> so that
 /// `set_app_mode()` can overwrite the value during mode-switch restarts (F7/T1).
@@ -541,6 +591,15 @@ fn spawn_venue_ready_bridge_on(
     handle: &tokio::runtime::Handle,
     conn: &engine_client::EngineConnection,
 ) {
+    // R1-HIGH: Seed KABU_IS_PRODUCTION from the handshake capabilities snapshot
+    // before subscribing to future events.  The initial Ready event is broadcast
+    // during perform_handshake before any subscriber exists, so the event loop
+    // below will never deliver it.  conn.capabilities() holds the authoritative
+    // snapshot regardless of subscriber timing.
+    // Seeded *before* the VENUE_READY_CACHE guard so the atomic is always
+    // updated even when called from tests that skip VENUE_READY_CACHE setup.
+    let initial_prod = parse_kabu_is_production(&conn.capabilities());
+    KABU_IS_PRODUCTION.store(initial_prod, std::sync::atomic::Ordering::Release);
     let cache = match VENUE_READY_CACHE.get() {
         Some(cache) => Arc::clone(cache),
         None => return,
@@ -551,33 +610,38 @@ fn spawn_venue_ready_bridge_on(
         use tokio::sync::broadcast::error::RecvError;
         loop {
             match event_rx.recv().await {
+                // P4-4: Ready が来たら capabilities から kabu の is_production を抽出してキャッシュ更新。
+                // VenueReady より先に Ready が来るので、UI が初回 chip を描画する時には正しい値が読める。
+                Ok(EngineEvent::Ready { capabilities, .. }) => {
+                    let prod = parse_kabu_is_production(&capabilities);
+                    KABU_IS_PRODUCTION.store(prod, std::sync::atomic::Ordering::Release);
+                }
                 Ok(EngineEvent::VenueReady { venue, .. }) => {
                     cache.lock().await.insert(venue);
                 }
-                // Invalidate the readiness cache aggressively when the
-                // venue lifecycle leaves `Ready`. Without these arms a
-                // stale `Ready` from a previous session could survive
-                // a re-login dialog open / cancel pair and a later
-                // engine reconnect would resurrect it via
-                // `Message::EngineConnected`'s synthesized
-                // `VenueEvent::Ready`. Reviewer 2026-04-26 R4
-                // (MEDIUM-3).
-                Ok(EngineEvent::VenueError { venue, .. }) => {
+                // Invalidate cache on lifecycle edges (R4 MEDIUM-3 / HIGH-1).
+                Ok(EngineEvent::VenueError { venue, .. })
+                | Ok(EngineEvent::VenueLoginStarted { venue, .. })
+                | Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
                     cache.lock().await.remove(&venue);
-                }
-                Ok(EngineEvent::VenueLoginStarted { venue, .. }) => {
-                    cache.lock().await.remove(&venue);
-                }
-                Ok(EngineEvent::VenueLoginCancelled { venue, .. }) => {
-                    cache.lock().await.remove(&venue);
+                    if venue == KABU_STATION_VENUE_NAME {
+                        KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+                    }
                 }
                 Ok(_) => {}
                 Err(RecvError::Lagged(n)) => {
                     log::warn!(
-                        "venue_ready_bridge lagged, dropped {n} events — UI may briefly mis-bootstrap"
+                        "venue_ready_bridge lagged, dropped {n} events \
+                         — resetting KABU_IS_PRODUCTION to false as safe default"
                     );
+                    KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
                 }
-                Err(RecvError::Closed) => break,
+                Err(RecvError::Closed) => {
+                    // P4-4: 接続終了 = engine プロセスが落ちた／再接続待ち。
+                    // 次の Ready が来るまでは「不明」だが UI 上は安全側 (verify 表示) に倒す。
+                    KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+                    break;
+                }
             }
         }
     });
@@ -1860,6 +1924,7 @@ fn venue_login_chip(
     label: &'static str,
     state: VenueState,
     on_press: Message,
+    is_production: bool,
 ) -> Element<'static, Message> {
     let (dot, dot_color, btn_label) = match &state {
         VenueState::Idle => ("○", iced::Color::from_rgb(0.5, 0.5, 0.5), "ログイン"),
@@ -1868,7 +1933,16 @@ fn venue_login_chip(
         VenueState::Error { .. } => ("●", iced::Color::from_rgb(0.9, 0.2, 0.2), "再ログイン"),
     };
 
-    let chip_label = text(format!("{label} {dot}")).size(11).color(dot_color);
+    // P4-4: 本番接続中は赤バナーで強調。文言は kabu_chip_prod_style() で一元管理し、
+    // runbook.md §5.1（実弾スモーク前のチェック項目）と同期する。
+    let (display_label, prod_bg) = if is_production {
+        let (prefix, bg) = kabu_chip_prod_style();
+        (format!("{prefix} {label} {dot}"), Some(bg))
+    } else {
+        (format!("{label} {dot}"), None)
+    };
+
+    let chip_label = text(display_label).size(11).color(dot_color);
 
     let in_flight = matches!(state, VenueState::LoginInFlight);
 
@@ -1888,6 +1962,22 @@ fn venue_login_chip(
             // LoginInFlight 時はホバーエフェクトを抑制
             if in_flight {
                 return Style::default();
+            }
+            // P4-4: prod 時は赤背景を常時表示（hover 時はやや明るく）
+            if let Some(prod) = prod_bg {
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => iced::Color {
+                        r: (prod.r + 0.1).min(1.0),
+                        g: prod.g,
+                        b: prod.b,
+                        a: 1.0,
+                    },
+                    _ => prod,
+                };
+                return Style {
+                    background: Some(iced::Background::Color(bg)),
+                    ..Style::default()
+                };
             }
             Style {
                 background: match status {
@@ -1978,8 +2068,14 @@ fn status_bar(
         "立花",
         tachibana,
         Message::RequestTachibanaLogin(Trigger::Manual),
+        false,
     );
-    let kabu_chip = venue_login_chip("kabu", kabu, Message::RequestKabuLogin(Trigger::Manual));
+    let kabu_chip = venue_login_chip(
+        "kabu",
+        kabu,
+        Message::RequestKabuLogin(Trigger::Manual),
+        kabu_is_production(),
+    );
 
     container(
         row![
@@ -7522,5 +7618,199 @@ mod app_mode_roundtrip_tests {
             AppMode::Live,
             "app_mode() must return Live after set_app_mode(Live) (acceptance criteria 2)"
         );
+    }
+}
+
+#[cfg(test)]
+mod kabu_production_banner_tests {
+    //! P4-4: kabu venue の本番接続バナーが capabilities から正しく抽出されること。
+    //! UI 描画は iced ランタイム必須なので、ここでは pure helper を直接検証する。
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_returns_true_when_is_production_advertised() {
+        let caps = json!({
+            "venue_capabilities": {
+                "kabu_station": { "is_production": true }
+            }
+        });
+        assert!(parse_kabu_is_production(&caps));
+    }
+
+    #[test]
+    fn parse_returns_false_when_is_production_explicitly_false() {
+        let caps = json!({
+            "venue_capabilities": {
+                "kabu_station": { "is_production": false }
+            }
+        });
+        assert!(!parse_kabu_is_production(&caps));
+    }
+
+    #[test]
+    fn parse_returns_false_when_field_absent() {
+        // 旧 engine / 異 venue / 空 capabilities いずれも安全側 = verify 表示
+        let caps = json!({
+            "venue_capabilities": {
+                "kabu_station": { "requires_local_app": true }
+            }
+        });
+        assert!(!parse_kabu_is_production(&caps));
+    }
+
+    #[test]
+    fn parse_returns_false_when_kabu_venue_missing() {
+        let caps = json!({
+            "venue_capabilities": {
+                "tachibana": { "supports_depth_diff": false }
+            }
+        });
+        assert!(!parse_kabu_is_production(&caps));
+    }
+
+    #[test]
+    fn parse_returns_false_on_empty_capabilities() {
+        let caps = json!({});
+        assert!(!parse_kabu_is_production(&caps));
+    }
+
+    #[test]
+    fn parse_returns_false_when_value_type_mismatches() {
+        // 型不一致 = malformed wire は fail-safe で false (UI が誤って prod を表示しないことを優先)
+        let caps = json!({
+            "venue_capabilities": {
+                "kabu_station": { "is_production": "yes" }
+            }
+        });
+        assert!(!parse_kabu_is_production(&caps));
+    }
+
+    #[test]
+    fn prod_chip_style_uses_red_label_and_runbook_aligned_text() {
+        // runbook.md §5.1 / spec.md と同じ文言: "🔴 本番"
+        let (label, color) = kabu_chip_prod_style();
+        assert_eq!(label, "🔴 本番");
+        // 赤系（R チャネルが他より圧倒的に大きい）
+        assert!(color.r > color.g && color.r > color.b);
+        assert!(color.r > 0.7);
+    }
+
+    // R1-MEDIUM regression pin: malformed is_production (Python/Rust schema drift)
+    // must fail-safe to false.  log::warn is not directly assertable here but
+    // the false return proves the Err arm is reached rather than panicking.
+    #[test]
+    fn parse_fails_gracefully_on_type_mismatch_for_schema_drift() {
+        let caps_bad_type = json!({
+            "venue_capabilities": { "kabu_station": { "is_production": "yes" } }
+        });
+        assert!(
+            !parse_kabu_is_production(&caps_bad_type),
+            "type mismatch must fail-safe to false (not panic)"
+        );
+        // Root-not-object path also hits the Err arm.
+        let caps_bad_root = json!("not-an-object");
+        assert!(
+            !parse_kabu_is_production(&caps_bad_root),
+            "non-object root must fail-safe to false"
+        );
+    }
+
+    // HIGH-3: bridge_seeds_is_production_from_handshake_capabilities は
+    // atomic_store_load_and_seeding に統合済み（並列競合防止）。
+
+    // HIGH-3: テスト間の AtomicBool 競合を防ぐため、KABU_IS_PRODUCTION を書き換える
+    // 既存の 2 テスト (cache_load_store_round_trips, bridge_seeds_is_production_from_handshake_capabilities)
+    // を 1 関数に統合する。cargo test は各テストをデフォルトで並列実行するが、1 関数内の処理は順次実行される。
+    #[test]
+    fn atomic_store_load_and_seeding() {
+        // Part A: cache_load_store_round_trips の検証
+        KABU_IS_PRODUCTION.store(true, std::sync::atomic::Ordering::Release);
+        assert!(kabu_is_production());
+        KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+        assert!(!kabu_is_production());
+
+        // Part B: bridge_seeds_is_production_from_handshake_capabilities の検証
+        let prod_caps = serde_json::json!({
+            "venue_capabilities": { "kabu_station": { "is_production": true } }
+        });
+        let absent_caps = serde_json::json!({
+            "venue_capabilities": { "kabu_station": {} }
+        });
+        let seed = parse_kabu_is_production(&prod_caps);
+        KABU_IS_PRODUCTION.store(seed, std::sync::atomic::Ordering::Release);
+        assert!(
+            kabu_is_production(),
+            "prod capabilities snapshot must seed atomic to true"
+        );
+        let seed = parse_kabu_is_production(&absent_caps);
+        KABU_IS_PRODUCTION.store(seed, std::sync::atomic::Ordering::Release);
+        assert!(
+            !kabu_is_production(),
+            "absent field (older engine) must seed atomic to false"
+        );
+
+        // HIGH-1: VenueError アームのリセット検証
+        // spawn_venue_ready_bridge_on の VenueError アームと同じロジック
+        KABU_IS_PRODUCTION.store(true, std::sync::atomic::Ordering::Release);
+        assert!(kabu_is_production(), "should be true before reset");
+        // VenueError / VenueLoginStarted / VenueLoginCancelled アームのリセットロジック
+        let venue = KABU_STATION_VENUE_NAME;
+        if venue == KABU_STATION_VENUE_NAME {
+            KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+        }
+        assert!(
+            !kabu_is_production(),
+            "bridge_resets_is_production_on_venue_error: VenueError arm must reset to false"
+        );
+
+        // HIGH-1: VenueLoginStarted アームのリセット検証
+        KABU_IS_PRODUCTION.store(true, std::sync::atomic::Ordering::Release);
+        assert!(kabu_is_production(), "should be true before reset");
+        let venue = KABU_STATION_VENUE_NAME;
+        if venue == KABU_STATION_VENUE_NAME {
+            KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+        }
+        assert!(
+            !kabu_is_production(),
+            "bridge_resets_is_production_on_venue_login_started: VenueLoginStarted arm must reset to false"
+        );
+
+        // HIGH-1: VenueLoginCancelled アームのリセット検証
+        KABU_IS_PRODUCTION.store(true, std::sync::atomic::Ordering::Release);
+        assert!(kabu_is_production(), "should be true before reset");
+        let venue = KABU_STATION_VENUE_NAME;
+        if venue == KABU_STATION_VENUE_NAME {
+            KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+        }
+        assert!(
+            !kabu_is_production(),
+            "bridge_resets_is_production_on_venue_login_cancelled: VenueLoginCancelled arm must reset to false"
+        );
+
+        // HIGH-2: RecvError::Lagged アームのリセット検証
+        KABU_IS_PRODUCTION.store(true, std::sync::atomic::Ordering::Release);
+        assert!(kabu_is_production(), "should be true before lagged reset");
+        // Lagged アームと同じロジック
+        KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+        assert!(
+            !kabu_is_production(),
+            "bridge_resets_is_production_on_lagged: Lagged arm must reset to false"
+        );
+
+        // non-kabu venue は KABU_IS_PRODUCTION をリセットしないことを確認
+        KABU_IS_PRODUCTION.store(true, std::sync::atomic::Ordering::Release);
+        let other_venue = TACHIBANA_VENUE_NAME;
+        if other_venue == KABU_STATION_VENUE_NAME {
+            KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
+        }
+        assert!(
+            kabu_is_production(),
+            "non-kabu venue error must NOT reset KABU_IS_PRODUCTION"
+        );
+
+        // 後片付け: 安全なデフォルト値に戻す
+        KABU_IS_PRODUCTION.store(false, std::sync::atomic::Ordering::Release);
     }
 }

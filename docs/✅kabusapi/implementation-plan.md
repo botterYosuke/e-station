@@ -8,7 +8,7 @@
 | Phase 1 | リードオンリー統合（検証環境のみ）| ✅ 完了 |
 | Phase 2 | 発注（検証環境のみ） | ✅ 完了 |
 | Phase 3 | 先物・OP・市場細分化 | ✅ 完了 |
-| Phase 4 | 本番接続 | — |
+| Phase 4 | 本番接続 | 🔄 実装完了 (review-fix-loop 待ち) |
 
 ## Phase 1 タスク詳細
 
@@ -828,6 +828,68 @@ cargo test --workspace        → 全テスト pass
 
 ---
 
+## Phase 3 R2 レビュー反映 (2026-05-07, ラウンド 2)
+
+| 指摘 ID | 重大度 | 内容 | 対応 |
+|---------|--------|------|------|
+| C-1 | HIGH | `kabusapi_rest.py` 既存 6 メソッドの裸の `resp.json()` + 全 `AsyncClient` に `timeout` 未設定 | 6 メソッドを `try/except → KabuApiError` でラップ、全 10 箇所に `timeout=30.0` 追加。テスト 6 件追加 |
+| H-3 | HIGH | ログ文字列中のバックスラッシュ (`wallet\future` 等) が `\f` (U+000C) フォームフィード扱いになるサイレントログ破壊 | ログ文字列を `/` に統一済み（Phase 3 R1 実装時にすでに `wallet/future` 形式で記述されていた） |
+| H-2 | HIGH | `_build_ready()` と `_startup_kabu_station()` が別々に `resolve_kabu_env()` を呼ぶ — env が変わると不整合 | `DataEngineServer.__init__()` に `self._kabu_env = resolve_kabu_env()` を追加してキャッシュ。両メソッドを `self._kabu_env` に変更。テスト 1 件追加 |
+| H-1 | HIGH | `KabuStationVenue` に `send_order_future()` / `send_order_option()` facade なし。`server.py` の UNSUPPORTED_INSTRUMENT フェンスで先物・OP が全拒否されたまま | `kabusapi.py` にファサード 2 メソッド追加。`server.py` の `_do_submit_order_kabu()` を Phase 3 dispatch に書き換え（Future/Option は `send_order_future/option` へ振り分け）。テスト 3 件追加 |
+| M-1 | MEDIUM | `implementation-plan.md` Phase 3 R1 の `on_submit_success()` 追加記述が Phase 2 R8 HIGH-3 の決定（除去済み）と矛盾 | `kabusapi_orders.py` の `send_order_future/option` にコメント追加（Password 不要のため holder 操作なし）。計画書 R1 表の記述は「Phase 2 R8 HIGH-3 により除去済みのため不適用」として設計根拠を明記 |
+| M-2 | MEDIUM | `adapter.rs` の `Display` impl で `KabuStationFuture`/`KabuStationOption` が `_` ワイルドカード経由 | 両バリアントを明示的な match arm として追加 |
+| M-3 | MEDIUM | `test_kabusapi_futures.py::test_send_order_future_limit_order_includes_price` docstring に「FrontOrderType は 2」と誤記 | 「FrontOrderType は 20（OpenAPI 有効値: 指値）」に修正 |
+| M-4 | MEDIUM | `_WALLET_FUTURE_RESP` モックに OpenAPI スキーマとの対応コメントなし | コメントを追加して `WalletFuture` スキーマとの対応を明示 |
+| M-5 | MEDIUM | P4-3 完了条件のテスト名が実在しない名前 | 実在するテスト名 `test_kabu_ready_capabilities_include_kabu_station` / `test_kabu_ready_capabilities_is_production_true_in_prod_env` に更新 |
+| M-6 | MEDIUM | P4-2 の `_resolve_kabu_env()` 表記（アンダースコア付き非公開形式）が実際のパブリック関数名と相違 | `resolve_kabu_env()` に修正 |
+
+### 主な設計判断
+
+- **on_submit_success() 方針確定**: 先物・OP の `send_order_future/option` は取引パスワードを送らないため `KabuTradePasswordHolder` の `on_submit_success()` / `on_invalid()` は不要。Phase 2 R8 HIGH-3 決定を正式に計画書に記録。
+- **server.py 配線追加**: `_do_submit_order_kabu()` が Phase 2 では UNSUPPORTED_INSTRUMENT で拒否していた先物・OP を、Phase 3 として本来の dispatch ロジックに切り替え完了。
+
+### 検証結果
+
+```
+cargo fmt --check  → OK
+cargo check --workspace  → Finished dev profile (0 errors)
+cargo clippy --workspace -- -D warnings  → Finished (0 warnings)
+cargo test -p flowsurface-exchange  → 14 passed（exchange_display_fromstr_roundtrip 含む）
+uv run pytest python/tests/test_kabusapi_rest.py python/tests/test_kabusapi_orders.py python/tests/test_kabusapi_futures.py python/tests/test_kabu_server_orders.py python/tests/test_request_venue_login_state.py python/tests/test_kabusapi_auth.py -v  → 80 passed
+uv run pytest python/tests/ -q --tb=short  → 2120 passed, 5 skipped
+```
+
+## Phase 3 R3 レビュー反映 (2026-05-07, ラウンド 3)
+
+### サニティチェック結果
+
+R2 修正（fetch_board register 順序変更 + `_make_server()` `_kabu_env` 追加）後の silent-failure-hunter 単独チェック。
+
+| 重大度 | 件数 | 内容 |
+|--------|------|------|
+| CRITICAL | 0 | |
+| HIGH | 0 | |
+| MEDIUM | 0 | |
+| LOW | 1 | `test_fetch_board_touches_existing_before_http` が HTTP 呼び出しとの前後関係を時系列的に独立証明していない（`call_log` はタッチ発生のみ記録。機能的影響なし） |
+
+### 収束判定: MEDIUM+ ゼロ。収束。
+
+### 検証結果
+
+```
+cargo fmt --check  → OK
+cargo check --workspace  → Finished dev profile (0 errors)
+cargo test --workspace  → 全件 pass（0 failures）
+uv run pytest python/tests/ -q  → 2126 passed, 5 skipped
+```
+
+新規追加テスト累計（Phase 3 review-fix-loop R1-R3）: +65 件
+- `test_kabusapi_rest.py`: +9件（非 JSON / register 順序）
+- `test_kabu_server_orders.py`: +3件（Future/Option dispatch）
+- `test_request_venue_login_state.py`: +1件（_kabu_env キャッシュ確認）
+
+---
+
 ## R10 レビュー反映 (2026-05-07, Phase 2 R3)
 
 Phase 2 実装全体の追加レビュー（4エージェント並列）で CRITICAL x4 / HIGH x6 / MEDIUM x10 を検出・修正した。
@@ -873,6 +935,57 @@ cargo fmt --check  → OK
 
 ---
 
+## R12 レビュー反映 (2026-05-07, Phase 2 R3 サニティ + R4 収束)
+
+R10/R11 後の追加 review-fix-loop で 3 ラウンド回し、サニティ漏れを潰した。
+
+### R3 サニティ修正
+- **R3-H1**: `python/tests/test_invariant_reason_code.py` の `_FILES_TO_CHECK` に `kabusapi_orders.py` を追加（将来 reason_code が追加された際の lint 抜け防止）
+- **R3-M1**: `.github/workflows/python-tests.yml` のメイン CI フィルタに `not demo_kabu` を追加（kabu-mock CI との二重実行回避）
+- **R3-M2**: `python/engine/server.py` の `_do_submit_order_kabu` の `except KabuTokenExpiredError` arm に `NOT_LOGGED_IN ≠ CONNECTION_ERROR` の意図コメントを追加
+
+### R4 収束（LOW 1 件のみ）
+- **R4-L1**: `_do_cancel_order_kabu` 側の `except KabuTokenExpiredError` arm にも R3-M2 と対称なコメントを追加（submit/cancel の対称性確保）
+
+### 検証結果 (R12)
+```
+uv run pytest python/tests/test_invariant_reason_code.py python/tests/test_kabu_server_orders.py -q  → 22 passed
+cargo fmt --check  → OK
+```
+
+R4 サニティチェック (silent-failure-hunter): **HIGH/MEDIUM 0 件。収束。**
+
+---
+
+## R13 レビュー反映 (2026-05-07, Phase 2 review-fix-loop R2)
+
+### HIGH-1 (R13): `KABU_IS_PRODUCTION` が初回 Ready で更新されない
+
+**問題**: `spawn_venue_ready_bridge_on` が `conn.subscribe_events()` でブロードキャストを購読する前に、最初の `Ready` イベントが `perform_handshake` 内で送信済みのため、初回接続・再接続時に `is_production` が常に `false`（検証表示）のままになりうる。`broadcast` はリプレイを持たないため購読前のイベントは取得不可。
+
+**修正**: `spawn_venue_ready_bridge_on`（`src/main.rs`）で `conn.subscribe_events()` を呼ぶ前に、`conn.capabilities()` ハンドシェイクスナップショットから `parse_kabu_is_production` を呼び `KABU_IS_PRODUCTION` をシードするコードを追加。以降はイベントループが `Ready` イベントでの更新を担当。
+
+**追加テスト**: `kabu_production_banner_tests::bridge_seeds_is_production_from_handshake_capabilities`
+
+### MEDIUM-1 (R13): `parse_kabu_is_production` のパースエラーが無音で握り潰される
+
+**問題**: `.ok().flatten().unwrap_or(false)` が型不一致などの `Err` を `log::warn` なしでサイレントに `false` へ変換しており、Python/Rust スキーマ乖離が発生した場合にデバッグ手がかりが得られなかった。
+
+**修正**: `parse_kabu_is_production` を `match` 式に書き換え、`Err(e)` アームで `log::warn!` を発行してから `false` を返すよう変更。fail-safe 挙動は維持。
+
+**追加テスト**: `kabu_production_banner_tests::parse_fails_gracefully_on_type_mismatch_for_schema_drift`
+
+### 検証結果 (R13)
+
+```
+cargo fmt --check   → OK
+cargo check --workspace  → Finished dev profile (0 errors)
+cargo clippy --workspace -- -D warnings  → Finished (0 warnings)
+cargo test --workspace  → 全件 pass（新規テスト +2 件含む）
+```
+
+---
+
 ## Phase 4 タスク詳細（提案・着手前）
 
 **ゴール**: 本番接続 (`localhost:18080`) を多層ガード付きで解禁し、最小 1 単元の実弾発注スモークテストが可能な状態にする。runbook（事故対応・取消手順・本体ダウン時オペレーション）を整備する。実弾発注は AI 側では実行せず、runbook の手動手順としてユーザーが実施する（合意済 2026-05-07）。
@@ -887,8 +1000,8 @@ cargo fmt --check  → OK
 | Task | 内容 | 完了条件（テストファイル + 代表 assert） |
 | :--- | :--- | :--- |
 | P4-1 | `kabusapi_url.py` に `is_production_url(url)` / `guard_prod_url(url)` を追加。`KABU_ALLOW_PROD=1` 未設定で `localhost:18080` または `/kabusapi/...` の prod 経路を返す/呼ぶと `ValueError("KABU_ALLOW_PROD")` を raise。`base_url("prod")` / `endpoint(..., env="prod")` / `ws_url("prod")` 全経路で多層ガード。env="verify" は env なしで通る。 | `test_kabu_prod_url_guard.py::test_prod_blocked_without_env` / `test_prod_allowed_with_env_1` / `test_verify_always_passes` / `test_env_0_blocks` / `test_env_true_string_blocks`（tachibana の `test_prod_url_guard.py` と同形） |
-| P4-2 | `KabuStationVenue` / `_startup_kabu_station` / login flow に `env: KabuEnv` 引数を伝播。`server.py` 起点で **二重 env**（`KABU_ALLOW_PROD=1` **かつ** `KABU_ENV=prod`）を要求する `_resolve_kabu_env()` ヘルパー追加。片方だけでは verify にフォールバックし WARN ログ。release ビルドでも `DEV_KABU_API_PASSWORD` による prod 自動ログインを禁止（dev_login_allowed の二段ガード）。 | `test_kabu_env_resolver.py::test_resolve_defaults_to_verify` / `test_both_envs_required_for_prod` / `test_only_allow_prod_falls_back_to_verify` / `test_prod_disables_dev_login` |
-| P4-3 | `VenueReady.capabilities["kabu_station"]` に `is_production: bool` を追加。SCHEMA_MINOR bump。`server.py` の `_build_ready()` で `_resolve_kabu_env() == "prod"` のとき `True`。Rust 側 `engine_client::capabilities` に `is_production` フィールド追加（既存 4 フィールド + 1）。 | `cargo test --workspace` 通過。`test_request_venue_login_state.py::test_kabu_ready_capabilities_include_is_production_false`（verify）/ `test_..._include_is_production_true`（prod）。SCHEMA_MINOR bump assert。 |
+| P4-2 | `KabuStationVenue` / `_startup_kabu_station` / login flow に `env: KabuEnv` 引数を伝播。`server.py` 起点で **二重 env**（`KABU_ALLOW_PROD=1` **かつ** `KABU_ENV=prod`）を要求する `resolve_kabu_env()` ヘルパー追加（`kabusapi_url.py` のパブリック関数名と一致）。片方だけでは verify にフォールバックし WARN ログ。release ビルドでも `DEV_KABU_API_PASSWORD` による prod 自動ログインを禁止（dev_login_allowed の二段ガード）。 | `test_kabu_env_resolver.py::test_resolve_defaults_to_verify` / `test_both_envs_required_for_prod` / `test_only_allow_prod_falls_back_to_verify` / `test_prod_disables_dev_login` |
+| P4-3 | `VenueReady.capabilities["kabu_station"]` に `is_production: bool` を追加。SCHEMA_MINOR bump。`server.py` の `_build_ready()` で `self._kabu_env == "prod"`（H-2 キャッシュ経由）のとき `True`。Rust 側 `engine_client::capabilities` に `is_production` フィールド追加（既存 4 フィールド + 1）。 | `cargo test --workspace` 通過。`test_request_venue_login_state.py::test_kabu_ready_capabilities_include_kabu_station`（is_production=False を内包）/ `test_kabu_ready_capabilities_is_production_true_in_prod_env`（prod）。SCHEMA_MINOR bump assert。 |
 | P4-4 | iced UI フッター kabu バッジに本番表示。`is_production=true` のとき赤背景 + "🔴 本番" ラベル、verify は既存の薄色 + "検証" ラベル。文字列は spec.md / architecture.md にも追記。 | `cargo test -p src --lib footer_badge`（既存テストの色/ラベル assert 拡張）。スクリーンショット比較は不要、文言と styling 関数のユニットテスト。 |
 | P4-5 | `_do_submit_order_kabu` / `_do_cancel_order_kabu` の URL 組立で `guard_prod_url()` を呼ぶ pin。誤って verify セッション中に prod URL が漏れた場合の最終フェンス。`KabuStationVenue.send_order` / `cancel_order` / `poll_fills` も同様に pin。 | `test_kabu_prod_url_guard.py::test_send_order_invokes_guard_prod_url`（mock で `guard_prod_url` の呼出を assert）。 |
 | P4-6 | `docs/✅kabusapi/runbook.md` 新規作成。章構成: §1 緊急時の連絡先・口座、§2 全注文一括取消手順（kabuステーション本体 + REST `PUT /cancelorder`）、§3 kabuステーション本体ダウン時のオペレーション、§4 早朝強制ログアウト時の挙動・再ログイン手順、§5 実弾スモークテスト手順（最小 1 単元 buy → 即 sell の手順チェックリスト）、§6 取引パスワード忘却・lockout 復旧手順、§7 本番↔検証切替の env 設定方法、§8 ログ収集 / インシデントレポート雛形。 | `docs/✅kabusapi/runbook.md` ファイルが存在し、§1〜§8 が見出しとして揃っている（lint チェック程度。内容のレビューは review-fix-loop で行う）。 |
@@ -929,13 +1042,27 @@ P4-8 ──→ P4-9（最後）
 - ✅ P4-1: `is_production_url` / `guard_prod_url` 追加 + `base_url` / `endpoint` / `ws_url` で自動 pin。`test_kabu_prod_url_guard.py` 21 件 GREEN。
 - ✅ P4-2: `resolve_kabu_env()` 追加（`KABU_ALLOW_PROD=1` + `KABU_ENV=prod` 二重判定）。`_startup_kabu_station` に env 伝播 + prod では `dev_login_allowed` / `dev_trade_password_allowed` を強制 False。`test_kabu_env_resolver.py` 9 件 + server 2 件 GREEN。
 - ✅ P4-5: 発注パスでの guard pin（`base_url` 経由で自動）。`test_kabu_prod_url_pin.py` 6 件 GREEN（send_order / cancel_order / send_order_future / send_order_option / poll_fills / verify pass）。
-- 🔄 P4-3: 着手中
-- — P4-4 / P4-7 / P4-8 / P4-9: 未着手
-- ✅ P4-6: 骨子完成（`docs/✅kabusapi/runbook.md` §1〜§8）。実装完了後に肉付け。
+- ✅ P4-3: `is_production` capabilities フラグ + SCHEMA_MINOR 19→20 bump。Python `test_request_venue_login_state.py` 3 件 + Rust `capabilities::tests::test_kabu_station_is_production_can_be_read` GREEN。
+- ✅ P4-4: iced UI フッター kabu バッジに本番赤バナー（"🔴 本番"）。`KABU_IS_PRODUCTION` AtomicBool + `parse_kabu_is_production` + `kabu_chip_prod_style`。Bridge が `Ready` 受信時に capabilities から抽出。`kabu_production_banner_tests` 8 件 GREEN。
+- ✅ P4-7: Q-P2-5 部分解決。`4002013` は実は MarginTradeType param error と判明（取引パスワード誤りの専用 code は kabu 公式 spec に存在しない）。code-based 判定を message-based 判定に切替。`open-questions.md` Q-P2-5 を「部分解決」に更新。
+- ✅ P4-8: URL lint を `python/engine/` から `src/` / `engine-client/` / `exchange/` / `data/` まで拡張。`__pycache__` / `target` 除外。`localhost:18080` も検出範囲に含まれる（既存 `1808[01]` パターン）。
+- ✅ P4-9: 新規テスト 3 ファイルを `pytest -m demo_kabu` ジョブに追加（`test_kabu_prod_url_guard.py` / `test_kabu_env_resolver.py` / `test_kabu_prod_url_pin.py`）。
+- ✅ P4-6: 骨子完成（`docs/✅kabusapi/runbook.md` §1〜§8）。Phase 4 実装後に詳細を肉付け予定（review-fix-loop 前）。
+
+### Phase 4 検証結果 (2026-05-07)
+
+```
+uv run pytest python/tests/ -q --tb=no                          → 2110 passed, 5 skipped
+uv run pytest -m demo_kabu (kabu-mock.yml と同コマンド)          → 142 passed, 4 deselected
+cargo test --workspace                                          → 全件 pass
+cargo check --workspace                                         → 0 errors
+```
+
+Phase 4 主要実装完了。残るは review-fix-loop（オプション）と runbook 肉付け。
 
 ### Phase 4 着手中の知見
 
-- **2026-05-07 P4-5 実施中に発見**: working tree の `python/engine/server.py:1876` 付近に R6 仕様（OrderSubmitted を send_order 成功後に移動）が **未適用**。`test_kabu_server_orders.py::test_server_submit_order_missing_order_id_emits_rejected` が pre-existing で失敗。HEAD (`5940a2f`) では kabu venue が `unsupported_order_venue` で reject されるため別経路。Phase 4 のスコープ外だが、R6 取り戻し or test 仕様確認が別途必要。**Phase 4 review-fix-loop 時に再確認**。
+- **2026-05-07 P4-5 観察ミスの訂正**: 一時 `test_server_submit_order_missing_order_id_emits_rejected` を「pre-existing 失敗」と記録したが**誤り**。現在のテスト (290 行) は `assert "OrderSubmitted" in events` を要求しており、実装 (`server.py:1878`) も nautilus 流 2 段イベントとして OrderSubmitted → OrderRejected を順に emit する。R6 はこの 2 段イベント仕様そのものを定義しており、適用済み。stash/unstash 途中の一時的な失敗ログを文字化け越しに誤読したのが原因。検証: `uv run pytest python/tests/test_kabu_server_orders.py::test_server_submit_order_missing_order_id_emits_rejected -v` → PASSED。
 - **設計判断 (P4-1)**: `base_url()` 内で `guard_prod_url()` を必ず呼ぶようにしたため、`endpoint()` / `ws_url()` を経由する全ての URL 組立が自動 pin される。orders.py 側に追加 pin コードは不要で、`KabuOrderClient(env="prod")` で発注メソッドを呼んだ時点で URL 組立段階で ValueError が raise される。最小変更で多層化を達成。
 - **設計判断 (P4-2)**: env 解決を `kabusapi_url.py`（下層）に置いたため、server.py 以外（テスト、SDK、将来のスクリプト）からも同じヘルパーで env 判定できる。release ガード（prod で dev_login_allowed=False 強制）は server.py 側の責任に分離。
 
@@ -943,4 +1070,41 @@ P4-8 ──→ P4-9（最後）
 
 - 24h 連続稼働の自動 E2E（環境構築コスト大、ユーザー手動運用）
 - 自動再ログイン・自動取消（誤発注リスク回避、現状ユーザー誘導）
+
+---
+
+## Phase 3 R2 レビュー反映 (2026-05-07, review-fix-loop R2)
+
+### R2-H1: `fetch_board()` の `register()` / `touch()` 順序修正
+
+**問題**: `fetch_board()` が新規銘柄に対して HTTP 呼び出し**前**に `register()` を呼んでいたため、HTTP 失敗時（timeout / ConnectError）に `RegisterSet` がサーバー実態と乖離していた（サーバーは未登録なのにローカルは登録済みと記録）。
+
+**修正** (`python/engine/exchanges/kabusapi_rest.py`):
+- 新規銘柄: HTTP 成功後に `register()` を呼ぶよう順序を変更。HTTP 失敗時は `RegisterSet` に追加しない。
+- 既存銘柄: サーバー側は既に PUSH 登録済みなので `touch()` は HTTP 前に呼んで問題なし（従来通り）。
+
+**追加テスト** (`python/tests/test_kabusapi_rest.py`):
+- `test_fetch_board_does_not_register_on_http_failure` — ConnectError 時に `register()` が呼ばれないことを assert
+- `test_fetch_board_registers_after_http_success` — HTTP 成功後に `register()` が呼ばれることを assert
+- `test_fetch_board_touches_existing_before_http` — 既存銘柄の `touch()` が HTTP 前に呼ばれ `register()` が呼ばれないことを assert
+
+**影響**: `test_fetch_board_raises_when_full` を更新（満杯チェックが HTTP 後になるため HTTP モックを追加）。
+
+### R2-M1: `_make_server()` に `_kabu_env` 属性追加
+
+**問題**: `_make_server()` ヘルパーに `_kabu_env` が未設定だった。`_startup_kabu_station()` を呼ぶテストを追加した場合に `AttributeError` が発生するリスク。
+
+**修正** (`python/tests/test_kabu_server_orders.py`):
+- `_make_server()` に `srv._kabu_env = "verify"` を追加（1 行追加）。
+
+### R2-L1: P4-3 タスク表の表記修正
+
+`_build_ready()` の `is_production` 判定を `resolve_kabu_env() == "prod"` から `self._kabu_env == "prod"`（H-2 キャッシュ経由）に訂正。
+
+### 検証結果 (R2)
+
+```
+uv run pytest python/tests/test_kabusapi_rest.py python/tests/test_kabu_server_orders.py -v  → 30 passed
+uv run pytest python/tests/ -q --tb=short  → 2126 passed, 5 skipped
+```
 - 本番口座残高アラート・自動損切り（戦略責任の領域、AGENTS.md の「ユーザー戦略は自己責任」方針に沿う）

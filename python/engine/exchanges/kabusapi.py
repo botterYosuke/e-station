@@ -74,6 +74,18 @@ class KabuStationVenue:
         """取消する（検証環境のみ）。"""
         return await self._get_order_client().cancel_order(order_id=order_id)
 
+    async def send_order_future(self, **kwargs: Any) -> dict[str, Any]:
+        """先物発注。引数は KabuOrderClient.send_order_future() に委譲。
+        # Password 不要のため KabuTradePasswordHolder 操作なし（Phase 2 R8 HIGH-3）
+        """
+        return await self._get_order_client().send_order_future(**kwargs)
+
+    async def send_order_option(self, **kwargs: Any) -> dict[str, Any]:
+        """OP 発注。引数は KabuOrderClient.send_order_option() に委譲。
+        # Password 不要のため KabuTradePasswordHolder 操作なし（Phase 2 R8 HIGH-3）
+        """
+        return await self._get_order_client().send_order_option(**kwargs)
+
     async def poll_fills(self, **params: Any) -> list[dict[str, Any]]:
         """約定済み注文を polling で取得する。"""
         return await self._get_order_client().poll_fills(**params)

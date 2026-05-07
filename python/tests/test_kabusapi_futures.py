@@ -61,6 +61,8 @@ def make_rest_client() -> KabuRestClient:
 
 _FUTURE_ORDER_RESP = {"OrderID": "20240101A01N00000001", "Result": 0}
 _OPTION_ORDER_RESP = {"OrderID": "20240101A01N00000002", "Result": 0}
+# OpenAPI WalletFuture の StockAccountWallet フィールド（現物取引余力）のみを最低限モック。
+# 実際のレスポンスには追加フィールドが存在するが fetch_wallet_future() は dict をそのまま返す設計。
 _WALLET_FUTURE_RESP = {"StockAccountWallet": 1000000.0}
 _WALLET_OPTION_RESP = {"StockAccountWallet": 500000.0}
 _SYMBOLNAME_FUTURE_RESP = {"Symbol": "169090018", "SymbolName": "日経225先物 22/03"}
@@ -154,7 +156,7 @@ async def test_send_order_future_market_order_front_order_type_120(httpx_mock: p
 @pytest.mark.demo_kabu
 @pytest.mark.asyncio
 async def test_send_order_future_limit_order_includes_price(httpx_mock: pytest_httpx.HTTPXMock):
-    """指値注文の FrontOrderType は 2 かつ Price フィールドが含まれる。"""
+    """指値注文の FrontOrderType は 20（OpenAPI 有効値: 指値）かつ Price フィールドが含まれる。"""
     httpx_mock.add_response(
         method="POST",
         url=endpoint("sendorder/future", env="verify"),

@@ -234,6 +234,7 @@ def test_startup_kabu_station_cancel_emits_venue_login_cancelled(monkeypatch):
     srv = DataEngineServer.__new__(DataEngineServer)
     srv._mode = "live"
     srv._live_state = LiveState.CONNECTING
+    srv._kabu_env = "verify"  # H-2: インスタンスキャッシュ
     srv._kabu_venue = None
     srv._dev_kabu_login_allowed = False
     srv._dev_kabu_trade_password_allowed = False
@@ -296,6 +297,7 @@ def test_startup_kabu_station_uses_resolve_kabu_env_for_env(monkeypatch):
     srv = DataEngineServer.__new__(DataEngineServer)
     srv._mode = "live"
     srv._live_state = LiveState.CONNECTING
+    srv._kabu_env = "verify"  # H-2: インスタンスキャッシュ済みの env を直接設定
     srv._kabu_venue = None
     srv._dev_kabu_login_allowed = True
     srv._dev_kabu_trade_password_allowed = False
@@ -322,9 +324,6 @@ def test_startup_kabu_station_uses_resolve_kabu_env_for_env(monkeypatch):
             pass
 
     monkeypatch.setattr("engine.server.KabuStationVenue", _FakeKabuVenue)
-    monkeypatch.setattr(
-        "engine.server.resolve_kabu_env", lambda: "verify"
-    )
 
     async def _run():
         await srv._startup_kabu_station(request_id="req-env-1")
@@ -350,6 +349,7 @@ def test_startup_kabu_station_disables_dev_login_in_prod(monkeypatch):
     srv = DataEngineServer.__new__(DataEngineServer)
     srv._mode = "live"
     srv._live_state = LiveState.CONNECTING
+    srv._kabu_env = "prod"  # H-2: インスタンスキャッシュ済みの env を直接設定
     srv._kabu_venue = None
     srv._dev_kabu_login_allowed = True  # debug ビルドのつもり
     srv._dev_kabu_trade_password_allowed = True
@@ -376,7 +376,6 @@ def test_startup_kabu_station_disables_dev_login_in_prod(monkeypatch):
             pass
 
     monkeypatch.setattr("engine.server.KabuStationVenue", _FakeKabuVenue)
-    monkeypatch.setattr("engine.server.resolve_kabu_env", lambda: "prod")
 
     async def _run():
         await srv._startup_kabu_station(request_id="req-env-2")
@@ -405,6 +404,7 @@ def test_kabu_ready_capabilities_include_kabu_station(monkeypatch):
 
     srv = DataEngineServer.__new__(DataEngineServer)
     srv._mode = "live"
+    srv._kabu_env = "verify"  # H-2: インスタンスキャッシュ
     srv._workers = {}  # kabu_station は _workers に含まれない
     srv._engine_session_id = "00000000-0000-0000-0000-000000000000"
     srv._connections = set()  # handshake 内で参照される
@@ -475,6 +475,7 @@ def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
 
     srv = DataEngineServer.__new__(DataEngineServer)
     srv._mode = "live"
+    srv._kabu_env = "prod"  # H-2: インスタンスキャッシュ（prod 直接設定）
     srv._workers = {}
     srv._engine_session_id = "00000000-0000-0000-0000-000000000000"
     srv._connections = set()
@@ -516,6 +517,7 @@ def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
     assert venue_caps["kabu_station"]["is_production"] is True
 
 
+@pytest.mark.demo_kabu
 def test_schema_minor_is_20_after_p4_3():
     """P4-3: capabilities に is_production を追加したので SCHEMA_MINOR を 19 → 20 に bump。"""
     from engine.schemas import SCHEMA_MINOR
@@ -607,3 +609,23 @@ def test_kabu_relogin_from_tachibana_connected_cancels_event_task(monkeypatch, t
     )
     assert srv._tachibana_session is None, "tachibana_session がクリアされていない"
     assert fake_worker.cleared, "worker の session が None にリセットされていない"
+
+
+@pytest.mark.demo_kabu
+def test_kabu_env_cached_in_init(monkeypatch):
+    """H-2: DataEngineServer.__init__() が resolve_kabu_env() をキャッシュし、
+    _kabu_env 属性として保持する。env が変わっても _build_ready() と
+    _startup_kabu_station() が同じ値を参照する。
+    """
+    import os
+    from engine.server import DataEngineServer
+
+    monkeypatch.setenv("KABU_ENV", "verify")
+    monkeypatch.delenv("KABU_ALLOW_PROD", raising=False)
+
+    srv = DataEngineServer(port=19876, token="test-token")
+
+    assert hasattr(srv, "_kabu_env"), "_kabu_env 属性が DataEngineServer に存在しない"
+    assert srv._kabu_env == "verify", (
+        f"_kabu_env は 'verify' であるべき; got: {srv._kabu_env!r}"
+    )

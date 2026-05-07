@@ -26,6 +26,7 @@ def _make_server() -> DataEngineServer:
     srv._live_state = LiveState.CONNECTED
     srv._connected_venue = "kabu_station"
     srv._kabu_venue = None
+    srv._kabu_env = "verify"  # [R2-M1] _startup_kabu_station() 参照時の AttributeError 防止
     srv._submit_order_inflight_count = 0
     srv._kabu_fill_poller_task = None  # [H-1] _clear_kabu_session で参照される
     srv._venue_to_client = {}  # [C-3] _do_submit_order_kabu で参照される
@@ -219,6 +220,7 @@ def test_dev_trade_password_allowed_propagated_to_kabu_venue():
         # _dev_kabu_trade_password_allowed を直接設定して _startup_kabu_station の挙動をテスト
         srv._dev_kabu_login_allowed = False
         srv._dev_kabu_trade_password_allowed = True
+        srv._kabu_env = "verify"  # H-2: インスタンスキャッシュ
         srv._kabu_venue = None
         srv._kabu_login_inflight = asyncio.Lock()
         srv._kabu_startup_task = None
@@ -513,3 +515,94 @@ async def test_server_cancel_order_rate_limited_emits_rate_limited_reason_code()
     assert rejected.get("reason_code") == "RATE_LIMITED"
     # rate_limited は _clear_kabu_session() を呼ばない設計
     mock_venue.clear.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# [H-1] 先物・OP dispatch テスト
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.demo_kabu
+@pytest.mark.asyncio
+async def test_server_submit_order_future_dispatches_to_send_order_future():
+    """instrument_id が '.KabuStation Future' で終わる場合 send_order_future() を呼ぶ。"""
+    srv = _make_server()
+
+    mock_venue = MagicMock()
+    mock_venue.send_order_future = AsyncMock(return_value={"OrderID": "20240101F01234567"})
+    mock_venue.is_trade_locked_out.return_value = False
+    srv._kabu_venue = mock_venue
+
+    msg = _make_submit_msg(
+        venue="kabu_station",
+        instrument_id="169090018.KabuStation Future",
+        order_side="BUY",
+        order_type="MARKET",
+        quantity="1",
+    )
+    await srv._do_submit_order_inner(msg, ws=None)
+
+    mock_venue.send_order_future.assert_called_once()
+    # send_order は呼ばれない
+    mock_venue.send_order.assert_not_called()
+    events = [e.get("event") for e in srv._emitted]
+    assert "OrderAccepted" in events, f"OrderAccepted が emit されていない: {srv._emitted}"
+    accepted = next(e for e in srv._emitted if e.get("event") == "OrderAccepted")
+    assert accepted["venue_order_id"] == "20240101F01234567"
+
+
+@pytest.mark.demo_kabu
+@pytest.mark.asyncio
+async def test_server_submit_order_option_dispatches_to_send_order_option():
+    """instrument_id が '.KabuStation Option' で終わる場合 send_order_option() を呼ぶ。"""
+    srv = _make_server()
+
+    mock_venue = MagicMock()
+    mock_venue.send_order_option = AsyncMock(return_value={"OrderID": "20240101O01234567"})
+    mock_venue.is_trade_locked_out.return_value = False
+    srv._kabu_venue = mock_venue
+
+    msg = _make_submit_msg(
+        venue="kabu_station",
+        instrument_id="169090019.KabuStation Option",
+        order_side="BUY",
+        order_type="MARKET",
+        quantity="1",
+    )
+    await srv._do_submit_order_inner(msg, ws=None)
+
+    mock_venue.send_order_option.assert_called_once()
+    mock_venue.send_order.assert_not_called()
+    events = [e.get("event") for e in srv._emitted]
+    assert "OrderAccepted" in events, f"OrderAccepted が emit されていない: {srv._emitted}"
+
+
+@pytest.mark.demo_kabu
+@pytest.mark.asyncio
+async def test_server_submit_order_future_limit_order():
+    """先物 LIMIT 注文で front_order_type=20 + price が send_order_future に渡る。"""
+    srv = _make_server()
+
+    mock_venue = MagicMock()
+    mock_venue.send_order_future = AsyncMock(return_value={"OrderID": "20240101F99999999"})
+    mock_venue.is_trade_locked_out.return_value = False
+    srv._kabu_venue = mock_venue
+
+    msg = _make_submit_msg(
+        venue="kabu_station",
+        instrument_id="169090018.KabuStation Future",
+        order_side="BUY",
+        order_type="LIMIT",
+        quantity="1",
+        price="28500.0",
+    )
+    await srv._do_submit_order_inner(msg, ws=None)
+
+    mock_venue.send_order_future.assert_called_once()
+    call_kwargs = mock_venue.send_order_future.call_args.kwargs
+    assert call_kwargs["front_order_type"] == 20, (
+        f"LIMIT 注文の front_order_type は 20 であるべき; got: {call_kwargs}"
+    )
+    assert call_kwargs["price"] == 28500.0, (
+        f"price が送られていない; got: {call_kwargs}"
+    )

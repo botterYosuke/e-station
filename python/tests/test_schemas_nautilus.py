@@ -39,7 +39,8 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # N3: SCHEMA_MINOR を 16 → 17 に bump（live strategy 実行基盤）
     # kabu venue Phase 1: SCHEMA_MINOR を 17 → 18 に bump
     # kabu venue Phase 2: SCHEMA_MINOR を 18 → 19 に bump (発注経路 + RATE_LIMITED / UNSUPPORTED_INSTRUMENT reason_code)
-    assert s.SCHEMA_MINOR == 19
+    # kabu venue Phase 4 (P4-3): SCHEMA_MINOR を 19 → 20 に bump (venue_capabilities.kabu_station.is_production)
+    assert s.SCHEMA_MINOR == 20
     assert s.SCHEMA_MAJOR == 3
 
 

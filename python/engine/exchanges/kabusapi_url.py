@@ -54,10 +54,10 @@ def resolve_kabu_env() -> KabuEnv:
 
 
 def is_production_url(url: str) -> bool:
-    """`localhost:18080` を含む URL を本番と判定する (http/ws どちらも)。"""
+    """`localhost:18080` または `127.0.0.1:18080` を含む URL を本番と判定する (http/ws どちらも)。"""
     if not url:
         return False
-    return "localhost:18080" in url
+    return "localhost:18080" in url or "127.0.0.1:18080" in url
 
 
 def guard_prod_url(url: str) -> None:

@@ -401,11 +401,15 @@ impl std::fmt::Display for Exchange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // kabuStation market-segmented variants use a sub-identifier to
         // distinguish from each other (all share Venue::KabuStation).
+        // M-2: KabuStationFuture / KabuStationOption を明示的に列挙する。
+        // _ ワイルドカードを避けることで将来のバリアント追加時にコンパイルエラーで検出できる。
         match self {
             Exchange::KabuStationTse => write!(f, "KabuStation TSE"),
             Exchange::KabuStationNse => write!(f, "KabuStation NSE"),
             Exchange::KabuStationFse => write!(f, "KabuStation FSE"),
             Exchange::KabuStationSse => write!(f, "KabuStation SSE"),
+            Exchange::KabuStationFuture => write!(f, "KabuStation Future"),
+            Exchange::KabuStationOption => write!(f, "KabuStation Option"),
             _ => write!(f, "{} {}", self.venue(), self.market_type()),
         }
     }

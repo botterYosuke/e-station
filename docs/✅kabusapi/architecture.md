@@ -154,9 +154,13 @@ CI ジョブ: `.github/workflows/kabu-mock.yml` / job: `pytest-kabu-mock` / コ�
   "requires_local_app": true,
   "max_push_symbols": 50,
   "supports_amend": false,
-  "requires_trade_password_for_cancel": true
+  "requires_trade_password_for_cancel": true,
+  "is_production": false
 }
 ```
+
+`is_production` はデフォルト `false`（検証環境）。`KABU_ALLOW_PROD=1` + `KABU_ENV=prod` の二重設定時のみ `true` になる。
+Rust 側 `KABU_IS_PRODUCTION` AtomicBool に反映され、UI の本番バナー描画に使われる（P4-4）。
 
 数値 `50` の一次ソースは comparison.md §7 PUSH 配信。
 `max_push_symbols` と `RegisterSet.MAX` は常に一致していなければならない

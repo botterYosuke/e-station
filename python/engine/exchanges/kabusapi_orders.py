@@ -255,7 +255,9 @@ class KabuOrderClient:
         price: float = 0,
         expire_day: int = 0,
     ) -> dict[str, Any]:
-        """POST /sendorder/future — 先物発注（検証環境のみ）。"""
+        """POST /sendorder/future — 先物発注（検証環境のみ）。
+        # Password 不要のため KabuTradePasswordHolder 操作なし（Phase 2 R8 HIGH-3）
+        """
         body: dict[str, Any] = {
             "Symbol": symbol,
             "Exchange": exchange,
@@ -293,7 +295,9 @@ class KabuOrderClient:
         price: float = 0,
         expire_day: int = 0,
     ) -> dict[str, Any]:
-        """POST /sendorder/option — OP 発注（検証環境のみ）。"""
+        """POST /sendorder/option — OP 発注（検証環境のみ）。
+        # Password 不要のため KabuTradePasswordHolder 操作なし（Phase 2 R8 HIGH-3）
+        """
         body: dict[str, Any] = {
             "Symbol": symbol,
             "Exchange": exchange,

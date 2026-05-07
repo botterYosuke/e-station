@@ -60,10 +60,14 @@ class KabuTradeLockedOutError(KabuApiError):
 
 
 class KabuTradePasswordInvalidError(KabuApiError):
-    """取引パスワードが誤っている (Code=4002013 など)。
+    """取引パスワード (`Password` フィールド) が誤っているとき送出する例外。
 
-    NOTE: open-questions.md — 正確なエラーコードは kabu API ドキュメント §4.2 で要確認。
-    現時点では 4002013 をプレースホルダーとして使用する。
+    P4-7 / Q-P2-5: kabu API v1.5 公式 spec (`ptal/error.html`) には取引パスワード誤りの
+    専用 code が記載されていない。`4001013` は API パスワード誤り、`4002013` は
+    MarginTradeType パラメータ不正と別物。確定 code が判明するまでは
+    `check_response()` がメッセージ文字列ベースで検出する（"パスワード" + "誤"/"不正"
+    キーワード or 英語メッセージ）。実機運用で確定 code を観測したら code 比較に
+    切り替える。
     """
 
 
@@ -220,8 +224,22 @@ def check_response(payload: Any, http_status: int) -> None:
     if code in (4002001, 4002008):
         raise KabuRegisterFullError(code, message)
 
-    # 取引パスワード誤り (NOTE: open-questions.md — 正確なコードは要確認)
-    if code == 4002013:
+    # 取引パスワード誤り (P4-7 / Q-P2-5):
+    # kabu API v1.5 公式 spec (`ptal/error.html`) には取引パスワード誤りの専用 code が
+    # 記載されていない（4001013=API パスワード誤り、4002013=MarginTradeType パラメータ
+    # 不正、で別物）。実機で発生する code が確定するまでは、メッセージ文字列でも検出する
+    # 多層判定にする。Phase 4 でも未確定。
+    #   - 既知の誤検出リスク: 4002013 を取引パスワード誤りとして扱うと、本来は
+    #     MarginTradeType の param error がパスワード lockout カウンタを増やす副作用が
+    #     起きる。そのため code-based 判定からは 4002013 を外す。
+    #   - 暫定: 「パスワード」キーワードを含む業務エラーメッセージは
+    #     KabuTradePasswordInvalidError として扱う。確定 code を実機で確認次第、
+    #     code 比較に切り替える（kabusapi_auth.py + tests/test_kabusapi_orders.py 同期）。
+    if isinstance(message, str) and (
+        ("パスワード" in message and ("誤" in message or "不正" in message))
+        or "Password is invalid" in message
+        or "Trade password is invalid" in message
+    ):
         raise KabuTradePasswordInvalidError(code, message)
 
     # その他業務エラー

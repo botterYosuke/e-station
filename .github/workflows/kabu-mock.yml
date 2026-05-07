@@ -23,7 +23,18 @@ jobs:
 
             - name: Run kabu mock tests
               run: |
-                  uv run pytest -m demo_kabu python/tests/test_kabusapi_*.py python/tests/test_live_session_kabu.py python/tests/test_request_venue_login_state.py python/tests/test_kabu_server_orders.py python/tests/test_invariant_reason_code.py -v
+                  # P4-9: Phase 4 新規テストを demo_kabu ジョブに含める。
+                  # - test_kabu_prod_url_guard.py / test_kabu_env_resolver.py / test_kabu_prod_url_pin.py
+                  uv run pytest -m demo_kabu \
+                      python/tests/test_kabusapi_*.py \
+                      python/tests/test_live_session_kabu.py \
+                      python/tests/test_request_venue_login_state.py \
+                      python/tests/test_kabu_server_orders.py \
+                      python/tests/test_invariant_reason_code.py \
+                      python/tests/test_kabu_prod_url_guard.py \
+                      python/tests/test_kabu_env_resolver.py \
+                      python/tests/test_kabu_prod_url_pin.py \
+                      -v
 
     url-lint:
         runs-on: ubuntu-latest
@@ -35,19 +46,21 @@ jobs:
 
             - name: Check no kabu URL literals outside kabusapi_url.py
               run: |
-                  # Exclude the single-source-of-truth file itself.
-                  # Zero matches = pass.
-                  count=$(grep -rn \
-                      -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|cancelorder|board|wallet|orders|positions|symbol|symbolname)' \
-                      python/engine/ \
+                  # K8 + P4-8: kabu の base URL（verify 18081 / prod 18080）と /kabusapi/* パスは
+                  # 全て python/engine/exchanges/kabusapi_url.py 経由で組み立てる。Rust 側にも同じ
+                  # 文字列が漏れていないかを同時に検査する。zero matches = pass.
+                  PATTERN='(http|ws)://(localhost|127\.0\.0\.1):1808[01]|/kabusapi/(websocket|register|sendorder|cancelorder|board|wallet|orders|positions|symbol|symbolname|token)'
+                  count=$(grep -rEn "$PATTERN" \
+                      python/engine/ src/ engine-client/ exchange/ data/ \
                       --exclude='kabusapi_url.py' \
+                      --exclude-dir='__pycache__' --exclude-dir='target' \
                       | wc -l)
                   if [ "$count" -gt 0 ]; then
                       echo "FAIL: kabu URL literals found outside kabusapi_url.py:"
-                      grep -rn \
-                          -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|cancelorder|board|wallet|orders|positions|symbol|symbolname)' \
-                          python/engine/ \
-                          --exclude='kabusapi_url.py'
+                      grep -rEn "$PATTERN" \
+                          python/engine/ src/ engine-client/ exchange/ data/ \
+                          --exclude='kabusapi_url.py' \
+                          --exclude-dir='__pycache__' --exclude-dir='target'
                       exit 1
                   fi
                   echo "OK: zero kabu URL literals outside kabusapi_url.py"

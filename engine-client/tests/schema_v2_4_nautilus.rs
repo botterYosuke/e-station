@@ -38,10 +38,11 @@ fn schema_minor_matches_current_bump() {
     // schema 3.15–17: LiveBuyingPower / LiveState 拡張 / 正採番修正。
     // schema 3.18: K1 Venue::KabuStation / Exchange::KabuStationStock 追加。
     // schema 3.19: P3-1 Exchange::KabuStation* 市場細分化 + 先物・OP バリアント追加。
+    // schema 3.20: P4-3 venue_capabilities.kabu_station に is_production フィールド追加。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        19,
-        "SCHEMA_MINOR must be 19 after P3-1 (Exchange::KabuStation* 市場細分化 + 先物・OP)"
+        20,
+        "SCHEMA_MINOR must be 20 after P4-3 (venue_capabilities.kabu_station.is_production)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

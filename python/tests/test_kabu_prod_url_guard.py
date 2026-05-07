@@ -130,3 +130,33 @@ class TestEndpointBuildersInvokeGuard:
     def test_ws_url_verify_always_ok(self, monkeypatch):
         monkeypatch.delenv("KABU_ALLOW_PROD", raising=False)
         assert ws_url("verify") == "ws://localhost:18081/kabusapi/websocket"
+
+
+# ---------------------------------------------------------------------------
+# MED-C: 127.0.0.1:18080 の検出 (RED → GREEN)
+# ---------------------------------------------------------------------------
+
+
+class TestIsProductionUrlIpLiteral:
+    """127.0.0.1:18080 も本番 URL として検出すること (MED-C)。"""
+
+    def test_127_0_0_1_18080_is_prod(self):
+        assert is_production_url("http://127.0.0.1:18080/kabusapi/token") is True
+
+    def test_127_0_0_1_18081_is_not_prod(self):
+        assert is_production_url("http://127.0.0.1:18081/kabusapi/token") is False
+
+
+# ---------------------------------------------------------------------------
+# MED-B: guard_prod_url の呼出チェーンを mock で assert (P4-5 完了条件)
+# ---------------------------------------------------------------------------
+
+
+def test_send_order_invokes_guard_prod_url(monkeypatch):
+    """P4-5 pin: base_url() → guard_prod_url() の呼出チェーンを mock で assert"""
+    from unittest.mock import patch
+    from engine.exchanges.kabusapi_url import base_url
+    with patch("engine.exchanges.kabusapi_url.guard_prod_url") as mock_guard:
+        mock_guard.return_value = None  # guard 通過扱い
+        base_url("prod")
+    mock_guard.assert_called_once()

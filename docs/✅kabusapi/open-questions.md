@@ -28,7 +28,7 @@ Phase 0 出口時点で未確定の事項をまとめる。解消次第、ここ
 - 発注時の取引パスワード収集 UI（tkinter subprocess 方式確定済み、UI 設計は Phase 2）✅ 確定
 - `OrderAmendFailed.original_cancelled` を `Option<bool>` 化（`None` = 取消結果不確定）
 
-| Q-P2-5 | 取引パスワード誤りのエラーコード | kabu API v1.5 §4.2 を確認し code を確定する | Phase 4（本番接続前）| **未確定**: 現在 4002013 をプレースホルダー使用 |
+| Q-P2-5 | 取引パスワード誤りのエラーコード | kabu API v1.5 ptal/error.html を確認し code を確定する | Phase 4 (P4-7) で部分解決。実機検証で確定 code 判明後に再 close | **部分解決 (2026-05-07 P4-7)**: kabu 公式 `ptal/error.html` には取引パスワード (`Password` フィールド) 誤り専用 code が**記載されていない**ことを確認。`4001013` は API パスワード誤り、`4002013` は **MarginTradeType param error** で別物。当初 4002013 をプレースホルダーとして使っていたが誤検出リスクあり (`MarginTradeType` 違反が lockout カウンタを増やす副作用) のため除去。`check_response()` を**メッセージ文字列検出**（"パスワード" + "誤"/"不正" or 英語 "Password is invalid"）に切替。実機運用で確定 code 観測次第、code 比較へ切替予定 |
 
 ## Phase 2 設計決定済み
 

@@ -53,33 +53,44 @@ class KabuRestClient:
         """GET /board/{symbol}@{exchange} — 板情報を取得する。
 
         R6: GET /board は内部的に PUSH 登録を自動発火する。
-        既存登録 hit なら touch() のみ。新規 + 満杯時は KabuRegisterFullError。
+        既存登録 hit なら touch() のみ（サーバー既登録なので HTTP 前に呼んでよい）。
+        新規銘柄は HTTP 成功後に register()（失敗時はローカルに登録しない）。
         (INV-K6-TOUCH, INV-K6-REST-FULL)
         """
         key = (symbol, exchange)
-        if key in self._register_set:
+        is_new = key not in self._register_set
+        if not is_new:
+            # 既存登録: サーバー側は既に PUSH 登録済みなので touch() を先に呼んでよい
             self._register_set.touch(symbol, exchange)
-        else:
-            # 新規銘柄: 満杯チェック（KabuRegisterFullError を投げる場合あり）
-            self._register_set.register(symbol, exchange)
 
         async with self._info_bucket:
             url = endpoint(f"board/{symbol_key(symbol, exchange)}", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers())
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu board: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"board non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
+        # HTTP 成功後に新規銘柄を RegisterSet に追加（失敗時は登録しない）
+        if is_new:
+            self._register_set.register(symbol, exchange)
         return body
 
     async def fetch_symbol(self, symbol: str, exchange: int = 1) -> dict[str, Any]:
         """GET /symbol/{symbol}@{exchange} — 銘柄情報を取得する。"""
         async with self._info_bucket:
             url = endpoint(f"symbol/{symbol_key(symbol, exchange)}", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers())
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu symbol: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"symbol non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
         return body
 
@@ -87,10 +98,14 @@ class KabuRestClient:
         """GET /orders — 注文一覧を取得する。"""
         async with self._info_bucket:
             url = endpoint("orders", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers(), params=params)
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu orders: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"orders non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
         return body if isinstance(body, list) else []
 
@@ -98,10 +113,14 @@ class KabuRestClient:
         """GET /positions — 残高一覧を取得する。"""
         async with self._info_bucket:
             url = endpoint("positions", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers(), params=params)
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu positions: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"positions non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
         return body if isinstance(body, list) else []
 
@@ -109,10 +128,14 @@ class KabuRestClient:
         """GET /wallet/cash — 現物余力を取得する。"""
         async with self._wallet_bucket:
             url = endpoint("wallet/cash", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers())
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu wallet/cash: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"wallet/cash non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
         return body
 
@@ -120,10 +143,14 @@ class KabuRestClient:
         """GET /wallet/margin — 信用余力を取得する。"""
         async with self._wallet_bucket:
             url = endpoint("wallet/margin", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers())
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu wallet/margin: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"wallet/margin non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
         return body
 
@@ -131,7 +158,7 @@ class KabuRestClient:
         """GET /wallet/future — 先物余力を取得する。"""
         async with self._wallet_bucket:
             url = endpoint("wallet/future", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers())
 
         try:
@@ -146,7 +173,7 @@ class KabuRestClient:
         """GET /wallet/option — OP 余力を取得する。"""
         async with self._wallet_bucket:
             url = endpoint("wallet/option", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=self._headers())
 
         try:
@@ -170,7 +197,7 @@ class KabuRestClient:
         """
         async with self._info_bucket:
             url = endpoint("symbolname/future", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(
                     url, headers=self._headers(),
                     params={"FutureCode": future_code, "DerivMonth": deriv_month},
@@ -201,7 +228,7 @@ class KabuRestClient:
         """
         async with self._info_bucket:
             url = endpoint("symbolname/option", env=self._env)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(
                     url, headers=self._headers(),
                     params={
