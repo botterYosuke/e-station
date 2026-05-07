@@ -1,6 +1,40 @@
-use chrono::DateTime;
+use chrono::{DateTime, Datelike};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+/// 月番号（1〜12）を日本語月名文字列に変換する。
+///
+/// `chrono::Datelike::month()` の戻り値を入力として想定する。
+/// 範囲外の値が渡された場合は `unreachable!` でパニックする。
+pub fn month_ja(month: u32) -> &'static str {
+    match month {
+        1 => "1月",
+        2 => "2月",
+        3 => "3月",
+        4 => "4月",
+        5 => "5月",
+        6 => "6月",
+        7 => "7月",
+        8 => "8月",
+        9 => "9月",
+        10 => "10月",
+        11 => "11月",
+        12 => "12月",
+        _ => unreachable!("chrono::month() は 1-12 を保証する。got: {}", month),
+    }
+}
+
+fn weekday_ja(wd: chrono::Weekday) -> &'static str {
+    match wd {
+        chrono::Weekday::Mon => "月",
+        chrono::Weekday::Tue => "火",
+        chrono::Weekday::Wed => "水",
+        chrono::Weekday::Thu => "木",
+        chrono::Weekday::Fri => "金",
+        chrono::Weekday::Sat => "土",
+        chrono::Weekday::Sun => "日",
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum UserTimezone {
@@ -43,7 +77,13 @@ impl UserTimezone {
                     if show_millis {
                         time_with_zone.format("%H:%M:%S.%3f").to_string()
                     } else {
-                        time_with_zone.format("%a %b %-d %H:%M").to_string()
+                        format!(
+                            "{}{}日({}) {}",
+                            month_ja(time_with_zone.month()),
+                            time_with_zone.day(),
+                            weekday_ja(time_with_zone.weekday()),
+                            time_with_zone.format("%H:%M"),
+                        )
                     }
                 }
                 TimeLabelKind::Custom(fmt) => time_with_zone.format(fmt).to_string(),
@@ -124,5 +164,53 @@ impl Serialize for UserTimezone {
             UserTimezone::Utc => serializer.serialize_str("UTC"),
             UserTimezone::Local => serializer.serialize_str("Local"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn month_ja_covers_all_months() {
+        for m in 1u32..=12 {
+            let s = month_ja(m);
+            assert!(!s.contains('?'), "month {m} returned fallback: {s}");
+            assert!(s.ends_with('月'), "month {m} should end with 月: {s}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "chrono::month()")]
+    fn month_ja_panics_on_zero() {
+        month_ja(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "chrono::month()")]
+    fn month_ja_panics_on_thirteen() {
+        month_ja(13);
+    }
+
+    #[test]
+    fn crosshair_format_no_millis_japanese() {
+        let tz = UserTimezone::Utc;
+        // 2024-01-05 (金) 15:30:00 UTC
+        let ts_ms = 1704468600000i64;
+        let result = tz.format_with_kind(ts_ms, TimeLabelKind::Crosshair { show_millis: false });
+        let s = result.expect("format_with_kind returned None");
+        assert!(s.contains("1月"), "should contain 1月, got: {s}");
+        assert!(s.contains("金"), "should contain 金, got: {s}");
+        assert!(s.contains("15:30"), "should contain 15:30, got: {s}");
+    }
+
+    #[test]
+    fn crosshair_format_with_millis_unchanged() {
+        let tz = UserTimezone::Utc;
+        let ts_ms = 1704468600123i64;
+        let result = tz.format_with_kind(ts_ms, TimeLabelKind::Crosshair { show_millis: true });
+        let s = result.expect("format_with_kind returned None");
+        assert!(s.contains("15:30:00"), "got: {s}");
+        assert!(s.contains("123"), "got: {s}");
     }
 }
