@@ -543,7 +543,15 @@ impl ProcessManager {
     ) -> Result<EngineConnection, EngineClientError> {
         if !token.is_empty() {
             let mode = *self.mode.lock().await;
-            match EngineConnection::probe(probe_url, token, mode).await {
+            // G2: route gRPC probe URLs (written by Python with transport="grpc")
+            // to `connect_grpc` instead of the WS `probe` path.
+            let conn_result = if probe_url.starts_with("grpc://") {
+                let http_target = probe_url.replacen("grpc://", "http://", 1);
+                EngineConnection::connect_grpc(&http_target, token, mode).await
+            } else {
+                EngineConnection::probe(probe_url, token, mode).await
+            };
+            match conn_result {
                 Ok(conn) => {
                     log::info!(
                         target: "engine_client::process",

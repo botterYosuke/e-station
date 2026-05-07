@@ -423,15 +423,53 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 > ⚠ **endpoint 解決経路の再設計が必要**: 現行 `replay_session.py::_resolve_endpoint_and_token()` は session ファイルから `ws://127.0.0.1:{port}/` を組み立てる（WS URL 固定）。gRPC 移行後は `transport` フィールドを見て gRPC チャネルを組み立てる分岐に変更する必要がある。**`replay_session.py` 内の `LiveSession._resolve_endpoint_and_token()`（`ReplaySession` とは独立した実装）も同様に `transport` フィールド分岐を追加する必要がある**。この修正を忘れると attach mode が WS のままになる。`process.rs::DEFAULT_PROBE_URL = "ws://127.0.0.1:19876/"` もトランスポート対応に変更が必要。これらは `ipc-grpc-migration.md` G1 作業項目に詳細を追記済み。G1 の工数見積もりにこの endpoint 解決経路の再設計（`ReplaySession` 側・`LiveSession` 側の両方）を含めること。
 
-**G2: Rust クライアントを gRPC に置き換え（独立マイルストーン、G1 完了後に着手）（3〜4 日）**
-- `engine-client/src/grpc_client.rs` を新設（`tonic` ベース）
-- 現行 `ws_client.rs` はフィーチャーフラグ `ws-transport` で保持
-- `SCHEMA_MAJOR` チェックを Session 冒頭 `HelloRequest`（`Command.oneof.hello`）の `schema_major` / `schema_minor` チェック（`ipc-grpc-migration.md` §3.3）に置き換え
-- **`tests/grpc_wire_integration.rs` を新設**: `python/engine/server_grpc.py` をサブプロセスで起動し、tonic クライアントが実 grpcio サーバーと通信することを確認（`mock_grpc_server.py` ではなく本物のサーバーを使う）
-- `cargo test --workspace` 全 PASS（`grpc_wire_integration` を含む）
-- **⚠ 工数注意・並列実施不可**: 現行 `EngineConnection` は concrete struct であり `Arc<EngineConnection>` として `main.rs`・`backend.rs`・`process.rs` 等で広く使われている。`EngineConnectionLike` trait（仮称）の新設と既存呼び出し箇所のジェネリクス化が必要。この trait 化リファクタは影響範囲が広く G1 と並行実施すると競合が多発するため、**G1 が完全に完了してから G2 に着手すること**。この作業を含めての 3〜4 日見積もりであることを確認する。
+**✅ G2: Rust クライアントを gRPC に置き換え（2026-05-08 完了）**
 
-  **G2 着手前必須調査**: G2 実装開始前に `rg "EngineConnection" --type rust` を実行し、変更が必要なファイル数と呼び出し箇所数を一覧化し、3〜4 日の工数見積もりが妥当かどうかを確認すること。この調査なしに G2 の実装を開始してはならない。
+**完了内容:**
+- `engine-client/src/grpc_transport.rs` 新設（約 700 行、`tonic` ベース gRPC クライアント）
+- `engine-client/tests/grpc_wire_integration.rs` 新設（4 `#[ignore]` テスト、実 Python サブプロセスを使うワイヤー統合テスト）
+- `engine-client/src/connection.rs`: `EngineConnection::connect_grpc()` コンストラクタ追加
+- `engine-client/src/process.rs`: `grpc://` プローブ URL のハンドリング追加
+- `python/engine/server_grpc.py`: 起動時に `engine-session.json` へ `transport="grpc"` を書き込む
+- `engine-client/Cargo.toml`: `tokio-stream` 依存追加
+- `cargo test --workspace` 全 PASS（`grpc_wire_integration` の 4 テストは `#[ignore]`、Python+grpcio 環境で明示実行）
+
+**設計決定と背景:**
+
+**① `EngineConnectionLike` trait 化を回避 → 第2コンストラクタ方式を採用**
+- 当初計画では `Arc<EngineConnection>` を trait object に変える大規模リファクタを想定していた
+- 実際には `connect_grpc()` を `EngineConnection` の第2コンストラクタとして追加し、戻り型は同一の `EngineConnection` にすることで全呼び出し箇所の変更ゼロを達成
+- 教訓: concrete struct に複数コンストラクタを生やす方が trait 化より影響範囲が小さい場合が多い
+
+**② HelloRequest の事前バッファリング**
+- `tonic::client::session(stream)` を呼ぶ前に `proto_tx.send(hello_cmd)` で HelloRequest をチャネルに積む
+- こうすると `ReceiverStream::new(proto_rx)` がストリームの先頭要素として HelloRequest を自動的に送信する
+- `client.session()` 呼び出し後に送ると HelloRequest がサーバーに届く前に ReadyResponse を待ち始めてデッドロックする危険がある
+
+**③ 2 段チャネルアーキテクチャ**
+```
+dto::Command  →  [converter task]  →  proto::Command  →  ReceiverStream  →  gRPC request stream
+                                                                           ↓
+dto::EngineEvent  ←  [reader task]  ←  proto::Event  ←  event_stream.message()
+```
+- `mpsc::Sender<dto::Command>` を外部に公開し、内部で converter task が `proto::Command` に変換
+- これにより `grpc_transport.rs` の内部実装を変えても呼び出し側 (`connection.rs` 等) は変更不要
+
+**④ grpc:// → http:// URL 変換**
+- `engine-session.json` には `"transport":"grpc"` と `"port":50051` が書かれる
+- `process.rs` の `try_attach_or_spawn_inner` が `grpc://127.0.0.1:50051` を組み立てて保持する
+- tonic の `Endpoint::from_shared()` は `http://` スキームを要求するため、`grpc://` → `http://` に変換してから渡す
+
+**⑤ prost optional enum フィールドの型**
+- `.proto` の `optional ReplayGranularity granularity` は Rust 側で `Option<i32>` になる（`Option<ReplayGranularity>` ではない）
+- 変換パターン: `.granularity.and_then(proto_optional_granularity_to_dto)`（helper が `i32 → Option<dto::ReplayGranularity>` を返す）
+
+**Tips（次の作業者向け）:**
+- gRPC ハンドシェイクエラー（FAILED_PRECONDITION, UNAUTHENTICATED）は `client.session().await` では出ない。`event_stream.message().await` （ReadyResponse 待ち）で出る。タイムアウトはここに設定する
+- `grpc_status_to_error()` でステータスコード → `EngineClientError` のマッピングを一元管理している（`src/grpc_transport.rs` 内）
+- proto enum の Rust 変換: `AppMode::try_from(i32_value).ok()` のパターン。`as i32` でプロトコル送信
+- `capabilities_to_json()` で `engine::EngineCapabilities` → `serde_json::Value` 変換。NULL 安全に `Option<engine::EngineCapabilities>` を受け取る
+- ワイヤー統合テスト実行: `cargo test -p flowsurface-engine-client --test grpc_wire_integration -- --include-ignored`（Python venv 要）
 
 **G3: WebSocket トランスポート廃止（1 日）**
 - `ws-transport` フィーチャーフラグと `server.py` を削除
@@ -468,7 +506,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
                                                               │
                                               fee_total 完了 ─┤  ← ✅ 完了（2026-05-07, R1-R3 収束）
                                                               │
-                                                              └─[G0✅→G0.5✅→G0.9✅→G1✅→G2→G3]► G1完了
+                                                              └─[G0✅→G0.5✅→G0.9✅→G1✅→G2✅→G3]► G2完了
 ```
 
 ---
@@ -515,6 +553,15 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
    - `summary.py::compute_summary()` に `fee_total` 出力
    - blacksheep parity 同期（FILLS_ALLOWED_KEYS）
 
+6. ~~**G2: Rust クライアントを gRPC に置き換え**~~ — ✅ 2026-05-08 完了
+   - `grpc_transport.rs` 新設（tonic ベース、~700 行）
+   - `EngineConnection::connect_grpc()` 第2コンストラクタ追加（trait 化不要）
+   - `process.rs` に `grpc://` プローブ URL ハンドリング追加
+   - `server_grpc.py` が `engine-session.json` に `transport="grpc"` を書くよう更新
+   - `tests/grpc_wire_integration.rs` 4 `#[ignore]` テスト追加
+   - `cargo test --workspace` 全 PASS
+
 ### 解禁済み
 
 - **Stage D (G0〜G3)**: 着手可能（fee_total 完了済み）
+- **G3**: G2 完了済みのため着手可能

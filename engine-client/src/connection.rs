@@ -141,6 +141,26 @@ impl EngineConnection {
         })
     }
 
+    /// Connect to the Python engine at `target` via gRPC (e.g. `"http://127.0.0.1:19876"`).
+    ///
+    /// Performs the `HelloRequest` / `ReadyResponse` handshake and starts the
+    /// background converter + reader tasks.  Returns the same `EngineConnection`
+    /// type as `connect()` so all callers remain transport-agnostic.
+    pub async fn connect_grpc(
+        target: &str,
+        token: &str,
+        mode: crate::dto::AppMode,
+    ) -> Result<Self, EngineClientError> {
+        let (sender, events, closed, capabilities) =
+            crate::grpc_transport::start_grpc_session(target, token, mode).await?;
+        Ok(Self {
+            sender,
+            events,
+            closed,
+            capabilities,
+        })
+    }
+
     /// Snapshot of `Ready.capabilities` captured during the handshake.
     ///
     /// Returned as an `Arc<Value>` so callers can hand the blob to the

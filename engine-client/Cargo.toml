@@ -39,6 +39,8 @@ hyper-util = { version = "0.1.10", default-features = false }
 # gRPC transport (G0 — proto codegen via build.rs + tonic-build)
 tonic = { version = "0.12", default-features = false, features = ["channel", "codegen", "prost"] }
 prost = "0.13"
+# G2: ReceiverStream wraps mpsc::Receiver as a tonic request stream.
+tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
 
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }

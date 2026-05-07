@@ -13,6 +13,7 @@ pub mod convert;
 pub mod depth_tracker;
 pub mod dto;
 pub mod error;
+pub(crate) mod grpc_transport;
 pub mod order_session_state;
 pub mod process;
 pub mod session_file;
