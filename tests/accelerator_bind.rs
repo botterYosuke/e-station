@@ -174,12 +174,12 @@ fn action_switch_mode_variant_exists() {
 }
 
 #[test]
-fn actions_for_mode_returns_six_tuple() {
+fn actions_for_mode_returns_five_tuple() {
     let src = read_native_menu();
     assert!(
-        src.contains("(bool, bool, bool, bool, bool, bool)"),
-        "actions_for_mode must return a 6-tuple (has_open_file, has_save, has_save_as, \
-         has_open_replay_dialog, has_switch_live, has_switch_replay)"
+        src.contains("(bool, bool, bool, bool, bool)"),
+        "actions_for_mode must return a 5-tuple (has_open_file, has_save, has_save_as, \
+         has_switch_live, has_switch_replay) — OpenReplayDialog removed in schema 3.16"
     );
 }
 

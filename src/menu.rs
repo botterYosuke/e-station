@@ -18,9 +18,6 @@ pub enum Action {
     Open,
     Save,
     SaveAs,
-    // ── Replay menu ────────────────────────────────────────────────────────
-    ReplayStart,
-    ReplayStop,
     // ── Common ─────────────────────────────────────────────────────────────
     Quit,
     // ── Mode switch ────────────────────────────────────────────────────────
@@ -61,11 +58,8 @@ pub struct MenuEntry {
 // appears unused to `cargo check` on Win/Mac despite being part of the public
 // menu contract. (M6 / F8 R1 / R2 / R3)
 #[allow(dead_code)]
-pub fn actions_for_mode(mode: &AppMode) -> Vec<Action> {
-    match mode {
-        AppMode::Live => vec![Action::Open, Action::Save, Action::SaveAs, Action::Quit],
-        AppMode::Replay => vec![Action::ReplayStart, Action::ReplayStop, Action::Quit],
-    }
+pub fn actions_for_mode(_mode: &AppMode) -> Vec<Action> {
+    vec![Action::Open, Action::Save, Action::SaveAs, Action::Quit]
 }
 
 /// State of the footer mode-toggle badge.
@@ -116,6 +110,63 @@ pub fn mode_toggle_state(
     }
 }
 
+/// Per-button enable state for the replay control bar.
+///
+/// Computed by [`replay_control_state`] from four parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct ReplayControlState {
+    /// ▶ 再生 / Resume — enabled when idle (new session) or paused (resume).
+    pub play: bool,
+    /// ⏸ 一時停止 — enabled only when running (not paused).
+    pub pause: bool,
+    /// ⏭ Step+ — enabled only while paused (PAUSED state only; RUNNING → EngineBusy).
+    pub step_forward: bool,
+    /// ⏮ Step- — enabled while PAUSED AND has snapshot history.
+    pub step_backward: bool,
+    /// ⏹ 停止 — enabled while running or paused.
+    pub stop: bool,
+}
+
+/// Computes the replay control bar button enable state.
+///
+/// | state               | ▶ | ⏸ | ⏭ | ⏮          | ⏹ |
+/// |---------------------|---|---|---|------------|---|
+/// | idle                | ✓ | ✗ | ✗ | ✗          | ✗ |
+/// | running             | ✗ | ✓ | ✗ | ✗          | ✓ |
+/// | paused              | ✓ | ✗ | ✓ | ✗ (no hist)| ✓ |
+/// | paused + history    | ✓ | ✗ | ✓ | ✓          | ✓ |
+///
+/// Step+ enabled condition: `PAUSED` only (計画書 R1 決定; RUNNING 中は EngineBusy)
+/// Step- enabled condition: `paused && replay_has_history` (PAUSED のみ; Python サーバーと整合)
+#[allow(dead_code)]
+pub fn replay_control_state(
+    replay_running: bool,
+    replay_paused: bool,
+    replay_has_history: bool,
+    mode_switch_in_progress: bool,
+) -> ReplayControlState {
+    if mode_switch_in_progress {
+        return ReplayControlState {
+            play: false,
+            pause: false,
+            step_forward: false,
+            step_backward: false,
+            stop: false,
+        };
+    }
+    let idle = !replay_running;
+    let running_not_paused = replay_running && !replay_paused;
+    let paused = replay_running && replay_paused;
+    ReplayControlState {
+        play: idle || paused,
+        pause: running_not_paused,
+        step_forward: paused,
+        step_backward: paused && replay_has_history,
+        stop: replay_running,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,10 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn replay_actions_are_replay_start_stop_quit() {
+    fn replay_actions_are_same_as_live() {
         assert_eq!(
             actions_for_mode(&AppMode::Replay),
-            vec![Action::ReplayStart, Action::ReplayStop, Action::Quit],
+            vec![Action::Open, Action::Save, Action::SaveAs, Action::Quit],
         );
     }
 
@@ -174,5 +225,63 @@ mod tests {
         let s = mode_toggle_state(AppMode::Replay, false, true);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
+    }
+
+    // ── replay_control_state ─────────────────────────────────────────────
+
+    #[test]
+    fn rcs_idle_only_play_enabled() {
+        let s = replay_control_state(false, false, false, false);
+        assert!(s.play, "idle: play should be enabled");
+        assert!(!s.pause);
+        assert!(!s.step_forward);
+        assert!(!s.step_backward);
+        assert!(!s.stop);
+    }
+
+    #[test]
+    fn rcs_running_pause_and_stop_enabled() {
+        let s = replay_control_state(true, false, false, false);
+        assert!(!s.play, "running: play should be disabled");
+        assert!(s.pause);
+        assert!(!s.step_forward);
+        assert!(!s.step_backward);
+        assert!(s.stop);
+    }
+
+    #[test]
+    fn rcs_paused_no_history() {
+        let s = replay_control_state(true, true, false, false);
+        assert!(s.play, "paused: play (resume) should be enabled");
+        assert!(!s.pause);
+        assert!(s.step_forward);
+        assert!(
+            !s.step_backward,
+            "no history: step_backward should be disabled"
+        );
+        assert!(s.stop);
+    }
+
+    #[test]
+    fn rcs_paused_with_history() {
+        let s = replay_control_state(true, true, true, false);
+        assert!(s.play, "paused+history: play (resume) should be enabled");
+        assert!(!s.pause);
+        assert!(s.step_forward);
+        assert!(
+            s.step_backward,
+            "has history: step_backward should be enabled"
+        );
+        assert!(s.stop);
+    }
+
+    #[test]
+    fn rcs_mode_switch_in_progress_disables_all() {
+        let s = replay_control_state(true, true, true, true);
+        assert!(!s.play, "mode switch: play should be disabled");
+        assert!(!s.pause);
+        assert!(!s.step_forward);
+        assert!(!s.step_backward);
+        assert!(!s.stop);
     }
 }

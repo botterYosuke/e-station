@@ -6,7 +6,7 @@
 //!
 //! Key invariants (DoD-7):
 //! - `actions_for_mode(Live)` ⊇ {Open, Save, SaveAs, Quit}
-//! - `actions_for_mode(Replay)` ⊇ {ReplayStart, ReplayStop, Quit}
+//! - `actions_for_mode(Replay)` == `actions_for_mode(Live)` — replay start/stop moved to control bar
 
 fn read_menu() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/menu.rs");
@@ -55,23 +55,32 @@ fn live_actions_include_quit() {
     );
 }
 
-// ── DoD-7: replay mode actions ─────────────────────────────────────────────
+// ── DoD-7: replay mode actions — same set as live (Step 7) ────────────────
 
 #[test]
-fn replay_actions_include_replay_start() {
+fn replay_actions_include_open() {
     let src = read_menu();
     assert!(
-        src.contains("Action::ReplayStart"),
-        "actions_for_mode(Replay) must include Action::ReplayStart"
+        src.contains("Action::Open"),
+        "actions_for_mode(Replay) must include Action::Open"
     );
 }
 
 #[test]
-fn replay_actions_include_replay_stop() {
+fn replay_actions_do_not_include_replay_start_in_function_body() {
     let src = read_menu();
+    // `actions_for_mode` must not return ReplayStart — that action was moved to the
+    // replay control bar (schema 3.15). The variants ReplayStart/ReplayStop have been
+    // removed from the Action enum entirely (schema 3.16).
+    let fn_body_start = src.find("pub fn actions_for_mode").unwrap_or(0);
+    let fn_body_end = src[fn_body_start..]
+        .find("\n}")
+        .map(|i| fn_body_start + i + 2)
+        .unwrap_or(src.len());
+    let fn_body = &src[fn_body_start..fn_body_end];
     assert!(
-        src.contains("Action::ReplayStop"),
-        "actions_for_mode(Replay) must include Action::ReplayStop"
+        !fn_body.contains("ReplayStart"),
+        "actions_for_mode must not return Action::ReplayStart"
     );
 }
 

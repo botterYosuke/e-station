@@ -108,7 +108,7 @@ fn is_valid_date(s: &str) -> bool {
 }
 
 impl ReplayFormModal {
-    fn validate(&self) -> Result<ValidatedForm, String> {
+    pub fn validate(&self) -> Result<ValidatedForm, String> {
         let raw = self.instrument_id.trim();
         if raw.is_empty() {
             return Err("銘柄コードを入力してください".to_string());

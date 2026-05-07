@@ -6,10 +6,6 @@ pub enum Action {
     OpenFile,
     Save,
     SaveAs,
-    OpenReplayDialog,
-    /// Stop the currently running replay without switching app mode.
-    /// (Replay モードに留まり、エンジンだけ IDLE に落とす)
-    StopReplay,
     Quit,
     /// F7/T3: switch to the given app mode (menu item clicked).
     SwitchMode(AppMode),
@@ -17,18 +13,18 @@ pub enum Action {
 
 /// Returns which menu actions are present for a given app mode.
 ///
-/// Tuple: `(has_open_file, has_save, has_save_as, has_open_replay_dialog,
-///          has_switch_live, has_switch_replay)`
+/// Tuple: `(has_open_file, has_save, has_save_as, has_switch_live, has_switch_replay)`
 ///
-/// `has_switch_live`   = `true` when we are currently in Replay mode (clicking
-///                       it switches to Live).
-/// `has_switch_replay` = `true` when we are currently in Live mode (clicking
-///                       it switches to Replay).
+/// `has_switch_live`   = `true` when we are currently in Replay mode.
+/// `has_switch_replay` = `true` when we are currently in Live mode.
+///
+/// File actions (Open / Save / Save As) are available in both modes so that the
+/// keyboard shortcuts shown in the File menu actually work in replay mode too.
 #[cfg(test)]
-pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool, bool, bool, bool) {
+pub(crate) fn actions_for_mode(app_mode: AppMode) -> (bool, bool, bool, bool, bool) {
     match app_mode {
-        AppMode::Live => (true, true, true, false, false, true),
-        AppMode::Replay => (false, false, false, true, true, false),
+        AppMode::Live => (true, true, true, false, true),
+        AppMode::Replay => (true, true, true, true, false),
     }
 }
 
@@ -80,18 +76,12 @@ fn widget_keyboard_subscription(app_mode: AppMode) -> Subscription<Action> {
             let shift = modifiers.shift();
 
             match physical_key {
-                // Ctrl+O / Cmd+O (macOS): open file (live only)
-                Physical::Code(Code::KeyO) if ctrl_or_cmd && !shift && is_live => {
-                    Some(Action::OpenFile)
-                }
-                // Ctrl+S / Cmd+S (macOS): save (live only)
-                Physical::Code(Code::KeyS) if ctrl_or_cmd && !shift && is_live => {
-                    Some(Action::Save)
-                }
-                // Ctrl+Shift+S / Cmd+Shift+S (macOS): save as (live only)
-                Physical::Code(Code::KeyS) if ctrl_or_cmd && shift && is_live => {
-                    Some(Action::SaveAs)
-                }
+                // Ctrl+O / Cmd+O (macOS): open file (both modes — spec: same File menu in replay)
+                Physical::Code(Code::KeyO) if ctrl_or_cmd && !shift => Some(Action::OpenFile),
+                // Ctrl+S / Cmd+S (macOS): save (both modes)
+                Physical::Code(Code::KeyS) if ctrl_or_cmd && !shift => Some(Action::Save),
+                // Ctrl+Shift+S / Cmd+Shift+S (macOS): save as (both modes)
+                Physical::Code(Code::KeyS) if ctrl_or_cmd && shift => Some(Action::SaveAs),
                 // Ctrl+Q / Cmd+Q (macOS): quit (both modes)
                 Physical::Code(Code::KeyQ) if ctrl_or_cmd && !shift => Some(Action::Quit),
                 // Ctrl+M / Cmd+M (macOS): switch mode (Live ↔ Replay)
@@ -122,14 +112,10 @@ mod tests {
     fn action_variants_are_distinct() {
         assert_ne!(Action::OpenFile, Action::Save);
         assert_ne!(Action::OpenFile, Action::SaveAs);
-        assert_ne!(Action::OpenFile, Action::OpenReplayDialog);
         assert_ne!(Action::OpenFile, Action::Quit);
         assert_ne!(Action::Save, Action::SaveAs);
-        assert_ne!(Action::Save, Action::OpenReplayDialog);
         assert_ne!(Action::Save, Action::Quit);
-        assert_ne!(Action::SaveAs, Action::OpenReplayDialog);
         assert_ne!(Action::SaveAs, Action::Quit);
-        assert_ne!(Action::OpenReplayDialog, Action::Quit);
         // SwitchMode variants
         assert_ne!(
             Action::SwitchMode(AppMode::Live),
@@ -140,15 +126,11 @@ mod tests {
 
     #[test]
     fn live_mode_provides_open_file_save_and_save_as() {
-        let (open_file, save, save_as, open_replay_dialog, switch_live, switch_replay) =
+        let (open_file, save, save_as, switch_live, switch_replay) =
             actions_for_mode(AppMode::Live);
         assert!(open_file, "live mode must have Open File action");
         assert!(save, "live mode must have Save action");
         assert!(save_as, "live mode must have Save As action");
-        assert!(
-            !open_replay_dialog,
-            "live mode must NOT have Open Replay Dialog action"
-        );
         assert!(
             !switch_live,
             "live mode must NOT offer switch-to-live (already live)"
@@ -160,16 +142,14 @@ mod tests {
     }
 
     #[test]
-    fn replay_mode_provides_open_replay_dialog_only() {
-        let (open_file, save, save_as, open_replay_dialog, switch_live, switch_replay) =
+    fn replay_mode_has_file_actions() {
+        // Spec: replay and live modes share the same File menu (Open/Save/SaveAs/Quit).
+        // Keyboard shortcuts must therefore work in both modes.
+        let (open_file, save, save_as, switch_live, switch_replay) =
             actions_for_mode(AppMode::Replay);
-        assert!(!open_file, "replay mode must NOT have Open File action");
-        assert!(!save, "replay mode must NOT have Save action");
-        assert!(!save_as, "replay mode must NOT have Save As action");
-        assert!(
-            open_replay_dialog,
-            "replay mode must have Open Replay Dialog action"
-        );
+        assert!(open_file, "replay mode must have Open File action");
+        assert!(save, "replay mode must have Save action");
+        assert!(save_as, "replay mode must have Save As action");
         assert!(switch_live, "replay mode must offer switch-to-live action");
         assert!(
             !switch_replay,

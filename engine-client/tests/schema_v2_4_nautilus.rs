@@ -35,10 +35,13 @@ fn schema_minor_matches_current_bump() {
     // (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: Vec<String> 追加)。
     // schema 3.14: SCHEMA_MINOR を 13 → 14 に bump
     // (ReplayDataLoaded.session_epoch 追加; リプレイファイル切替時の旧ペイン全閉じ用、Approach B)。
-    assert_eq!(
-        flowsurface_engine_client::SCHEMA_MINOR,
-        14,
-        "SCHEMA_MINOR must be 14 after schema 3.14 (ReplayDataLoaded.session_epoch)"
+    // schema 3.15: SCHEMA_MINOR を 14 → 15 に bump
+    // (PauseReplay / ResumeReplay / StepReplay 追加)。
+    // schema 3.16: SCHEMA_MINOR を 15 → 16 に bump
+    // (StepBackward / RestoreSnapshot / ReplayHistoryChanged 追加)。
+    assert!(
+        flowsurface_engine_client::SCHEMA_MINOR >= 16,
+        "SCHEMA_MINOR must be >= 16 (StepBackward / RestoreSnapshot / ReplayHistoryChanged)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

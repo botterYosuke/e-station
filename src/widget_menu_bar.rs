@@ -11,36 +11,45 @@
 
 use engine_client::dto::AppMode;
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, row, stack, text, tooltip,
+    Space, button, column, container, mouse_area, opaque, pick_list, row, stack, text, text_input,
+    tooltip,
 };
 use iced::{Element, Length};
 
 use crate::Message;
-use crate::menu::{Action, MenuEntry, actions_for_mode};
+use crate::menu::{Action, MenuEntry, ReplayControlState, actions_for_mode, replay_control_state};
+use crate::menu_bar_state::ReplayBarState;
 pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
+use crate::modal::replay_form::Granularity;
 
 /// Fixed width for each top-level menu button.  The dropdown's horizontal
 /// position is derived from this value, so there are no magic pixel offsets.
 const BTN_WIDTH: f32 = 155.0;
 
-/// Height of the button row in logical pixels.  Setting this explicitly on the
-/// bar container makes the value authoritative: `with_dropdown_overlay` anchors
-/// the dropdown at exactly `BAR_HEIGHT` regardless of where inside the bar the
-/// cursor last rested.
-const BAR_HEIGHT: f32 = 32.0;
+/// Single row height in logical pixels.
+const ROW_HEIGHT: f32 = 32.0;
 
-/// Returns the menu button row (`File ▼`).
+/// Returns the menu bar height for the given mode.
 ///
-/// Each button has an explicit fixed width so the horizontal dropdown positions
-/// can be computed exactly from `BTN_WIDTH + spacing`.  The bar itself is
-/// wrapped in a `container` with an explicit `BAR_HEIGHT` so the overlay anchor
-/// is always the bar's bottom edge, not the cursor's position within the bar.
-///
-/// A `mouse_area` fills the space to the right of the button and fires
-/// `BarMessage::Dismiss` on press, satisfying DoD-4 for the full bar width.
+/// - Live: single row (32 px)
+/// - Replay: two rows — menu row + input/control row (64 px)
+pub fn bar_height(mode: AppMode) -> f32 {
+    match mode {
+        AppMode::Live => ROW_HEIGHT,
+        AppMode::Replay => ROW_HEIGHT * 2.0,
+    }
+}
+
+/// Returns the menu bar view — single row in Live mode, two rows in Replay mode.
 ///
 /// The caller must `.map(Message::MenuBar)` before pushing into the column.
-pub fn view<'a>(state: &'a State, _mode: AppMode) -> Element<'a, BarMessage> {
+pub fn view<'a>(
+    state: &'a State,
+    mode: AppMode,
+    replay_running: bool,
+    replay_paused: bool,
+    mode_switch_in_progress: bool,
+) -> Element<'a, BarMessage> {
     let mk = |label: &str, top: TopMenu| {
         let active = state.open == Some(top);
         button(text(label.to_owned()))
@@ -53,28 +62,33 @@ pub fn view<'a>(state: &'a State, _mode: AppMode) -> Element<'a, BarMessage> {
             })
     };
 
-    // Rightmost fill-space: clicking the empty bar strip fires Dismiss so
-    // DoD-4 holds across the full bar width.
     let empty_strip = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
         .on_press(BarMessage::Dismiss);
 
-    let bar_row = row![mk("ファイル（File）▼", TopMenu::File), empty_strip,].spacing(2);
+    let top_row = row![mk("ファイル（File）▼", TopMenu::File), empty_strip,].spacing(2);
 
-    // F8 R2 / H3': no `.on_move` handler. The previous `BarMoved(y)` design
-    // (added in F8 R1 to anchor the dropdown dynamically) was a category error:
-    // `mouse_area::on_move` calls back with `cursor.position_in(layout.bounds())`
-    // — i.e. **widget-local** coordinates in the range `0..BAR_HEIGHT` — but
-    // `with_dropdown_overlay`'s `top_offset` is interpreted as a **window-Y**
-    // offset. Feeding widget-local Y into a window-Y slot drove the dropdown
-    // up to the window top whenever the cursor sat near y=0 of the bar, which
-    // is precisely the common case. The mechanism is abolished; the dropdown
-    // is anchored at the constant `BAR_HEIGHT` in `with_dropdown_overlay`.
-    mouse_area(
-        container(bar_row)
-            .height(Length::Fixed(BAR_HEIGHT))
-            .width(Length::Fill),
-    )
-    .into()
+    let top_row_container = container(top_row)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .width(Length::Fill);
+
+    if mode == AppMode::Replay {
+        let ctrl = replay_control_state(
+            replay_running,
+            replay_paused,
+            state.replay_bar.replay_has_history,
+            mode_switch_in_progress,
+        );
+        let col = column![
+            mouse_area(top_row_container).on_press(BarMessage::Dismiss),
+            replay_input_row(&state.replay_bar, ctrl),
+        ];
+        container(col)
+            .height(Length::Fixed(bar_height(AppMode::Replay)))
+            .width(Length::Fill)
+            .into()
+    } else {
+        mouse_area(top_row_container).into()
+    }
 }
 
 /// Wraps the full window `base` in a dropdown overlay when a top-level menu is open.
@@ -95,7 +109,6 @@ pub fn with_dropdown_overlay<'a>(
     base: Element<'a, Message>,
     state: &'a State,
     mode: AppMode,
-    replay_running: bool,
 ) -> Element<'a, Message> {
     let Some(open_top) = state.open else {
         return base;
@@ -106,12 +119,12 @@ pub fn with_dropdown_overlay<'a>(
         TopMenu::File => 0.0,
     };
 
-    // Vertical offset: bar's bottom edge = BAR_HEIGHT (bar is always at y=0
-    // in iced's window-content coordinate space). F8 R2 / H3': constant
-    // anchor — see the rationale on `view()`'s removed `.on_move` handler.
-    let top_offset = BAR_HEIGHT;
+    // Vertical offset: bar's bottom edge = bar_height(mode). F8 R2 / H3':
+    // constant anchor derived from mode — see the rationale on `view()`'s
+    // removed `.on_move` handler. In Replay mode the bar is 64 px tall.
+    let top_offset = bar_height(mode);
 
-    let entries = entries_for_menu(open_top, &mode, replay_running);
+    let entries = entries_for_menu(open_top, &mode);
     let items = build_dropdown(entries);
     let dropdown_panel = opaque(
         container(column(items))
@@ -147,26 +160,108 @@ pub fn with_dropdown_overlay<'a>(
     stack![base, overlay].into()
 }
 
+/// Second row of the replay control bar: input fields + control buttons.
+///
+/// Displayed only in Replay mode. Button enable/disable is controlled by
+/// `ReplayControlState` computed from the current playback state.
+fn replay_input_row<'a>(
+    bar: &'a ReplayBarState,
+    ctrl: ReplayControlState,
+) -> Element<'a, BarMessage> {
+    let play_btn = {
+        let b = button(text("▶")).style(button::primary);
+        if ctrl.play {
+            b.on_press(BarMessage::PressPlay)
+        } else {
+            b
+        }
+    };
+    let pause_btn = {
+        let b = button(text("⏸")).style(button::secondary);
+        if ctrl.pause {
+            b.on_press(BarMessage::PressPause)
+        } else {
+            b
+        }
+    };
+    let step_fwd_btn = {
+        let b = button(text("⏭")).style(button::secondary);
+        if ctrl.step_forward {
+            b.on_press(BarMessage::PressStepForward)
+        } else {
+            b
+        }
+    };
+    let step_bwd_btn = {
+        let b = button(text("⏮")).style(button::secondary);
+        if ctrl.step_backward {
+            b.on_press(BarMessage::PressStepBackward)
+        } else {
+            b
+        }
+    };
+    let stop_btn = {
+        let b = button(text("⏹")).style(button::danger);
+        if ctrl.stop {
+            b.on_press(BarMessage::PressStop)
+        } else {
+            b
+        }
+    };
+
+    let strat_label = bar
+        .strategy_file
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "戦略未選択".to_string());
+    let strat_btn = button(text(strat_label)).on_press(BarMessage::PickStrategyFile);
+
+    let day_display = text(bar.current_day.as_deref().unwrap_or("--").to_string());
+
+    row![
+        strat_btn,
+        day_display,
+        text_input("銘柄 (例: 7203)", &bar.instrument_id)
+            .on_input(BarMessage::InstrumentChanged)
+            .width(Length::Fixed(120.0)),
+        text_input("開始 YYYY-MM-DD", &bar.start_date)
+            .on_input(BarMessage::StartDateChanged)
+            .width(Length::Fixed(110.0)),
+        text_input("終了 YYYY-MM-DD", &bar.end_date)
+            .on_input(BarMessage::EndDateChanged)
+            .width(Length::Fixed(110.0)),
+        pick_list(
+            Granularity::ALL,
+            bar.granularity.as_ref(),
+            BarMessage::GranularityChanged
+        )
+        .width(Length::Fixed(90.0)),
+        text_input("初期資金", &bar.initial_cash)
+            .on_input(BarMessage::InitialCashChanged)
+            .width(Length::Fixed(100.0)),
+        Space::new().width(Length::Fill).height(Length::Shrink),
+        step_bwd_btn,
+        step_fwd_btn,
+        pause_btn,
+        play_btn,
+        stop_btn,
+    ]
+    .spacing(4)
+    .height(Length::Fixed(ROW_HEIGHT))
+    .into()
+}
+
 /// Normalises all menu types into a `Vec<MenuEntry>` with full label/enabled/tooltip/checked.
-fn entries_for_menu(top: TopMenu, mode: &AppMode, replay_running: bool) -> Vec<MenuEntry> {
+fn entries_for_menu(top: TopMenu, mode: &AppMode) -> Vec<MenuEntry> {
     match top {
         TopMenu::File => actions_for_mode(mode)
             .into_iter()
-            .map(|action| {
-                // "リプレイ停止" is only clickable while a replay is actually
-                // running; everything else in the File menu is unconditional.
-                let (enabled, tooltip) = match action {
-                    Action::ReplayStop if !replay_running => {
-                        (false, Some("リプレイは実行されていません"))
-                    }
-                    _ => (true, None),
-                };
-                MenuEntry {
-                    action,
-                    enabled,
-                    tooltip,
-                    checked: None,
-                }
+            .map(|action| MenuEntry {
+                action,
+                enabled: true,
+                tooltip: None,
+                checked: None,
             })
             .collect(),
     }
@@ -253,8 +348,6 @@ fn action_label_and_shortcut(action: &Action) -> (&'static str, Option<&'static 
         Action::Open => ("ファイルを開く...（Open）", Some(o)),
         Action::Save => ("上書き保存（Save）", Some(s)),
         Action::SaveAs => ("名前を付けて保存...（Save As）", Some(ss)),
-        Action::ReplayStart => ("リプレイを開始...（Replay Start）", None),
-        Action::ReplayStop => ("リプレイを停止（Replay Stop）", None),
         Action::Quit => ("終了（Quit）", Some(q)),
         Action::SwitchAppMode(AppMode::Live) => ("ライブ（Live）", None),
         Action::SwitchAppMode(AppMode::Replay) => ("リプレイ（Replay）", None),
@@ -262,18 +355,12 @@ fn action_label_and_shortcut(action: &Action) -> (&'static str, Option<&'static 
 }
 
 /// Maps `menu::Action` to the equivalent `native_menu::Action`, if one exists.
-///
-/// `ReplayStop` maps to `StopReplay` — stops the running replay without
-/// switching app mode. The dashboard stays in Replay mode and the engine
-/// transitions to IDLE (a new replay can then be started via `ReplayStart`).
 pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Action> {
     use crate::native_menu::Action as N;
     match action {
         Action::Open => Some(N::OpenFile),
         Action::Save => Some(N::Save),
         Action::SaveAs => Some(N::SaveAs),
-        Action::ReplayStart => Some(N::OpenReplayDialog),
-        Action::ReplayStop => Some(N::StopReplay),
         Action::Quit => Some(N::Quit),
         Action::SwitchAppMode(mode) => Some(N::SwitchMode(*mode)),
     }

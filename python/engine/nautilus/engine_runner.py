@@ -492,6 +492,10 @@ class NautilusRunner:
         initial_cash: int,
         multiplier: int = 1,
         get_multiplier: Callable[[], int] | None = None,
+        get_paused: Callable[[], bool] | None = None,
+        consume_step_request: Callable[[], int] | None = None,
+        push_snapshot: "Callable[[int, dict, list, object, list], None] | None" = None,
+        restore_strategy_holder: "list | None" = None,
         currency: str = "JPY",
         base_dir: Path | str | None = None,
         on_event: Callable[[dict], None] | None = None,
@@ -785,6 +789,7 @@ class NautilusRunner:
             ipc_timeframe = _granularity_to_timeframe(granularity)  # "1d" / "1m" / "tick"
 
             prev_ts_ns: int | None = None
+            _step_counter: int = 0
             self._running = True
             try:
                 for item in items:
@@ -796,6 +801,34 @@ class NautilusRunner:
                             strategy_id,
                         )
                         break
+
+                    # Pause / step check.
+                    # When paused and no step is requested the loop busy-waits
+                    # until ResumeReplay, StepReplay, or StopReplay.
+                    while True:
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                        _is_paused = get_paused() if get_paused is not None else False
+                        if not _is_paused:
+                            break
+                        _pending = (
+                            consume_step_request() if consume_step_request is not None else 0
+                        )
+                        if _pending > 0:
+                            break
+                        time.sleep(0.01)
+                    if stop_event is not None and stop_event.is_set():
+                        break
+
+                    # HIGH-1: apply pending strategy_state restore before processing this step.
+                    # _restore_snapshot (server.py) writes here; we consume and clear.
+                    if restore_strategy_holder is not None and restore_strategy_holder[0] is not None:
+                        strategy_instance = restore_strategy_holder[0]
+                        restore_strategy_holder[0] = None
+                        log.debug(
+                            "[NautilusRunner] strategy_state restored at step %d",
+                            _step_counter,
+                        )
 
                     curr_ts_ns: int = item.ts_event
 
@@ -875,6 +908,33 @@ class NautilusRunner:
                         break
 
                     prev_ts_ns = curr_ts_ns
+
+                    # schema 3.16: push_snapshot at each granularity boundary.
+                    # Every Bar (Daily/Minute) and every TradeTick (Trade) is one
+                    # granularity unit, so each processed item is a boundary.
+                    if push_snapshot is not None:
+                        try:
+                            _snap_portfolio = _portfolio.to_ipc_dict(strategy_id, _last_prices)
+                            _snap_orders: list = []  # open orders not tracked in NautilusRunner
+                            # strategy_instance may not support deepcopy; pass None if so.
+                            # server.push_snapshot handles None strategy_state gracefully.
+                            push_snapshot(
+                                _step_counter,
+                                _snap_portfolio,
+                                _snap_orders,
+                                strategy_instance,
+                                [],  # ui_events collected per-step not yet wired; pass empty
+                            )
+                        except Exception:
+                            log.warning(
+                                "[NautilusRunner] push_snapshot failed at step %d: "
+                                "strategy=%r",
+                                _step_counter,
+                                strategy_id,
+                                exc_info=True,
+                            )
+
+                    _step_counter += 1
 
                     # pacing sleep: stop_event.wait で sleep しつつ中断要求を受け付ける
                     if sleep_sec > 0.0:

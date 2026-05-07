@@ -35,5 +35,7 @@ pub use venue_caps::VenueCapsStore;
 ///   - 12: ReplayDataLoaded.instrument_id / granularity を追加（auto_generate_replay_panes 復活用）
 ///   - 13: LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: Vec<String> 追加（複数銘柄対応）
 ///   - 14: ReplayDataLoaded.session_epoch（リプレイファイル切替時のペイン全閉じ用、Approach B）
+///   - 15: Replay playback control (PauseReplay / ResumeReplay / StepReplay)
+///   - 16: StepBackward / RestoreSnapshot / ReplayHistoryChanged (snapshot ring buffer)
 pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 14;
+pub const SCHEMA_MINOR: u16 = 16;

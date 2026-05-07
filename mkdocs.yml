@@ -77,13 +77,13 @@ nav:
       - データマッピング: ✅nautilus_trader/data-mapping.md
       - 実装計画: ✅nautilus_trader/implementation-plan.md
       - Open Questions: ✅nautilus_trader/open-questions.md
-  - メニューバー / Save 機能:
+  - メニューバー / フッター / Replay コントロール:
       - 概要: ✅menu-and-footer/README.md
-      - ネイティブメニューバー: ✅menu-and-footer/native-menu-bar-impl.md
-      - ステータスバー（フッター）: ✅menu-and-footer/footer-impl.md
-      - File メニュー / Save 実装: ✅menu-and-footer/save-menu-impl.md
-      - モード切替（live ⇄ replay）: ✅menu-and-footer/mode-switch-impl.md
-      - Linux widget メニューバー: ✅menu-and-footer/widget-menu-bar-impl.md
+      - Widget メニューバー: ✅menu-and-footer/menu-bar.md
+      - Replay コントロールバー: ✅menu-and-footer/replay-control.md
+      - ステータスバー（フッター）: ✅menu-and-footer/footer.md
+      - モード切替: ✅menu-and-footer/mode-switch.md
+      - File メニュー / Save: ✅menu-and-footer/file-menu.md
 
 markdown_extensions:
   - admonition
