@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-08（G0 proto 定義 + ビルドパイプライン完了）
+最終更新: 2026-05-08（G0 + G0.5 完了）
 
 ## 対象ドキュメント
 
@@ -253,7 +253,20 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
   - ✅ `pytest python/tests/` — 2200 passed（既存の pre-existing 1 failure のみ）
 - buf lint / `buf breaking --against .git#branch=main` は buf CLI インストール後に CI で実行予定
 
-**G0.5: Python 側 gRPC mock サーバー骨格（1 日）**
+### ✅ G0.5: Python 側 gRPC mock サーバー骨格 — **完了（2026-05-08）**
+
+- `python/engine/proto/` 新設: `grpcio-tools` で生成した Python スタブ（engine_pb2.py / engine_pb2_grpc.py）
+  - `scripts/gen_proto_python.py` で再生成可能、import パスを自動パッチ済み
+- `python/tests/fixtures/mock_grpc_server.py` 新設（`grpcio.aio` ベース）
+  - `_DataEngineServicer.Session()`: HelloRequest → ReadyResponse、schema_major 不一致で FAILED_PRECONDITION、非 Hello 先頭で INVALID_ARGUMENT
+  - `MockGrpcServer`: `async with` / `start()` / `stop()` API、port=0 ランダムポート、stop() 冪等
+- `python/tests/test_mock_grpc_server_basic.py` 新設: 9 tests / 0.26s PASS（1 秒制限大幅クリア）
+  - lifecycle: 起動・停止・冪等性・context manager
+  - handshake: ReadyResponse 先頭確認・schema echo・session_id 一意性・stream 維持
+  - failures: INVALID_ARGUMENT / FAILED_PRECONDITION
+- `pyproject.toml` dev deps に `pytest-timeout>=2.3` 追加
+
+**[前フェーズ]** G0.5: Python 側 gRPC mock サーバー骨格（1 日）
 - `python/tests/fixtures/mock_grpc_server.py` を新設（`grpcio.aio` ベースのテスト用最小サーバー）
 - Session 冒頭メッセージ方式の mock 骨格（`Command.oneof.hello = HelloRequest` を受け付け、`ReadyResponse` を最初の `Event` として返す）のみ実装（script 形式は不要、固定応答でよい）
 - G1 の `server_grpc.py` 実装の acceptance テストで mock として使用する
