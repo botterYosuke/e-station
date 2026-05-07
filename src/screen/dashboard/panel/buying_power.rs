@@ -27,6 +27,12 @@ pub struct BuyingPowerPanel {
     replay_cash: Option<String>,
     /// REPLAY モード: 仮想 equity（decimal 文字列）
     replay_equity: Option<String>,
+    /// N3: live strategy 余力（decimal 文字列、円）
+    live_strategy_cash: Option<String>,
+    /// N3: live strategy 評価額（decimal 文字列、円）
+    live_strategy_equity: Option<String>,
+    /// N3: live strategy 余力最終更新時刻（Unix ミリ秒）
+    live_strategy_ts_ms: Option<i64>,
     /// 最終更新時刻（Unix ミリ秒）
     last_updated_ms: Option<i64>,
     /// エラーメッセージ（API 呼び出し失敗時）
@@ -81,6 +87,13 @@ impl BuyingPowerPanel {
         self.loading = false;
     }
 
+    /// N3: Live strategy ポートフォリオデータを更新する（streaming push）。
+    pub fn set_live_strategy_portfolio(&mut self, cash: String, equity: String, ts_ms: i64) {
+        self.live_strategy_cash = Some(cash);
+        self.live_strategy_equity = Some(equity);
+        self.live_strategy_ts_ms = Some(ts_ms);
+    }
+
     /// 信用余力データを更新する。
     pub fn set_credit_buying_power(&mut self, available: i64, ts_ms: i64) {
         self.credit_available = Some(available);
@@ -131,8 +144,15 @@ pub fn update(_panel: &mut BuyingPowerPanel, msg: Message) -> Option<Action> {
 /// 余力表示パネルをレンダリングする。
 pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
     if let Some(ref err) = panel.error {
+        let refresh_btn =
+            iced::widget::button(text("更新").size(11)).on_press(Message::RefreshRequested);
         return center(
-            column![text("余力取得エラー").size(13), text(err.as_str()).size(11),].spacing(4),
+            column![
+                text("余力取得エラー").size(13),
+                text(err.as_str()).size(11),
+                refresh_btn,
+            ]
+            .spacing(4),
         )
         .into();
     }
@@ -192,7 +212,30 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
         text("余力").size(12).into()
     };
 
-    let content = column![header, cash_row, credit_row, refresh_btn].spacing(6);
+    // N3: live strategy 余力行（live モードかつデータあり）
+    let live_cash_row = panel.live_strategy_cash.as_ref().map(|cash| {
+        row![
+            text("ライブ戦略余力:").size(12),
+            text(format!("¥{cash}")).size(12),
+        ]
+        .spacing(8)
+    });
+    let live_equity_row = panel.live_strategy_equity.as_ref().map(|equity| {
+        row![
+            text("ライブ戦略評価額:").size(12),
+            text(format!("¥{equity}")).size(12),
+        ]
+        .spacing(8)
+    });
+
+    let mut col = column![header, cash_row, credit_row].spacing(6);
+    if let Some(r) = live_cash_row {
+        col = col.push(r);
+    }
+    if let Some(r) = live_equity_row {
+        col = col.push(r);
+    }
+    let content = col.push(refresh_btn);
 
     container(content).padding(8).into()
 }
@@ -414,6 +457,31 @@ mod tests {
     fn live_panel_is_not_marked_replay() {
         let panel = BuyingPowerPanel::new();
         assert!(!panel.is_replay);
+    }
+
+    // ── N3: Live strategy portfolio tests ────────────────────────────────
+
+    #[test]
+    fn set_live_strategy_portfolio_stores_values() {
+        let mut panel = BuyingPowerPanel::default();
+        panel.set_live_strategy_portfolio("1000000".to_string(), "1100000".to_string(), 123456);
+        assert_eq!(panel.live_strategy_cash, Some("1000000".to_string()));
+        assert_eq!(panel.live_strategy_equity, Some("1100000".to_string()));
+    }
+
+    #[test]
+    fn set_live_strategy_portfolio_stores_ts_ms() {
+        let mut panel = BuyingPowerPanel::default();
+        panel.set_live_strategy_portfolio("500000".to_string(), "600000".to_string(), 999999);
+        assert_eq!(panel.live_strategy_ts_ms, Some(999999));
+    }
+
+    #[test]
+    fn live_strategy_fields_default_to_none() {
+        let panel = BuyingPowerPanel::default();
+        assert!(panel.live_strategy_cash.is_none());
+        assert!(panel.live_strategy_equity.is_none());
+        assert!(panel.live_strategy_ts_ms.is_none());
     }
 
     #[test]

@@ -73,10 +73,22 @@ class TestNautilusRunnerSmoke:
         )
         assert result.strategy_id == "buy-and-hold"
 
-    def test_start_live_is_stub(self):
-        """N0 では start_live() は stub（NotImplementedError を出さない）。"""
+    def test_start_live_has_required_signature(self):
+        """N3: start_live() が必須引数付きのシグネチャを持つことを確認する。
+
+        N3 実装で stub から完全実装に置き換えたため、引数なしでは TypeError になる。
+        """
+        import inspect
         runner = NautilusRunner()
-        runner.start_live()  # must not raise
+        sig = inspect.signature(runner.start_live)
+        params = set(sig.parameters.keys())
+        required = {
+            "instrument_id", "strategy_file", "strategy_init_kwargs",
+            "max_qty", "max_notional_jpy", "second_password",
+            "session", "fd_queue", "ec_queue", "on_event",
+            "stop_event", "strategy_id",
+        }
+        assert required.issubset(params), f"Missing params: {required - params}"
 
     def test_stop_is_safe(self):
         runner = NautilusRunner()

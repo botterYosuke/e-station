@@ -19,7 +19,9 @@ pub enum KlineIndicator {
 impl Indicator for KlineIndicator {
     fn for_market(market: MarketKind) -> &'static [Self] {
         match market {
-            MarketKind::Spot | MarketKind::Stock => &Self::FOR_SPOT,
+            MarketKind::Spot | MarketKind::Stock | MarketKind::Future | MarketKind::Option => {
+                &Self::FOR_SPOT
+            }
             MarketKind::LinearPerps | MarketKind::InversePerps => &Self::FOR_PERPS,
         }
     }
@@ -51,7 +53,9 @@ pub enum HeatmapIndicator {
 impl Indicator for HeatmapIndicator {
     fn for_market(market: MarketKind) -> &'static [Self] {
         match market {
-            MarketKind::Spot | MarketKind::Stock => &Self::FOR_SPOT,
+            MarketKind::Spot | MarketKind::Stock | MarketKind::Future | MarketKind::Option => {
+                &Self::FOR_SPOT
+            }
             MarketKind::LinearPerps | MarketKind::InversePerps => &Self::FOR_PERPS,
         }
     }

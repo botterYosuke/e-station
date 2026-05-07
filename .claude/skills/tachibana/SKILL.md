@@ -1,27 +1,13 @@
 ---
-name: 立花証券・ｅ支店・ＡＰＩ
-description: 立花証券 e支店 API（v4r7/v4r8）を使ったコーディング規約と運用クイックスタート。認証フロー・仮想URL管理・JSON クエリ形式・EVENT/WebSocket ストリーム・注文送信の不変条件に加え、flowsurface をローカル起動する際の debug/release 区別・.env ロード・セッションファイルキャッシュ・GUI CLI 制約・ポート衝突の落とし穴を定義する。
+name: tachibana-e-api
+description: 立花証券 e支店 API（v4r7/v4r8、tachibana）でコードを書く・運用するときの必読スキル。「立花」「e支店」「ｅ支店」「tachibana」「kabuka.e-shiten.jp」「demo-kabuka」「sUrlRequest」「sUrlEvent」「CLMAuthLoginRequest」「CLMKabuNewOrder」「sCLMID」「sResultCode」「p_errno」「sJsonOfmt」に触れたら必ず起動する。CLMAuthLoginRequest によるログイン、仮想 URL（sUrlRequest/Master/Price/Event/EventWebSocket）の取り扱い、`{virtual_url}?{JSON文字列}` 独自形式、p_no/p_sd_date/sJsonOfmt の必須化、p_errno と sResultCode の二段判定、Shift-JIS、空配列が "" で返る件、第二暗証番号の必須化、CLMKabuNewOrder のパラメータ、EVENT/WebSocket の ^A^B^C 区切り、CLMEventDownload マスタの特殊フロー、flowsurface ローカル起動時の debug/release・.env・セッションキャッシュ・ポート衝突の落とし穴を扱う。
 ---
 
 # 立花証券・ｅ支店・ＡＰＩ スキル
 
-> **状態（2026-04-25, T0.2 同期完了）**: 立花 venue は **Phase 1 計画フェーズ → 型実装着手**。
->
-> - **API 仕様（R1〜R10、sCLMID、EVENT 規約、Shift-JIS、URL 形式）は一次資料として信頼してよい**
-> - **Rust 側 venue adapter は新設しない**（Python 集約方針、[architecture.md §1](../../../docs/✅tachibana/architecture.md)）。本ファイルが旧版で参照していた `exchange/src/adapter/tachibana.rs` / `src/connector/auth.rs` / `src/replay_api.rs` などは **書かない**ファイルパス
-> - **Rust 側に追加されるのは下記のみ**:
->   - `data/src/config/tachibana.rs` — **実装しない** — Python autonomous 方針により削除済み（[architecture.md §2.3](../../../docs/✅tachibana/architecture.md)）
->   - `engine-client/src/dto.rs` — IPC コマンド `RequestVenueLogin` と venue ライフサイクルイベント `VenueReady` / `VenueError` / `VenueLoginStarted` / `VenueLoginCancelled`（T0.2 で追加済み）
->   - `engine-client/src/capabilities.rs` — `Ready.capabilities.venue_capabilities` 抽出ヘルパー（T0.2）
->   - `exchange/src/adapter.rs` — `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 列挙子（T0.2）
-> - **ログイン UI は Python tkinter ヘルパー subprocess で開く**。Rust 側にログイン画面コード（フィールド名・ラベル・順序）を**書かない**。旧版で参照していた `src/screen/login.rs` は不要
-> - **env 名は venue prefix 付き**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO`（既定 `true` = demo、F-Default-Demo）。**読むのは Python 側 `tachibana_login_flow`**（Rust 側に `#[cfg(debug_assertions)]` の env 取込みは不要）。`DEV_TACHIBANA_SECOND_PASSWORD` は **ログイン時も Phase O0 以降も env には採用しない**（F-H5、発注時は iced modal で都度取得しメモリのみ保持、env 経路は使わない）
-> - **第二暗証番号はログイン時（tkinter ダイアログ）では収集しない**（F-H5）。**Phase O0 以降の発注時は iced modal で取得しメモリのみ保持**（`Command::SetSecondPassword` で Python に送信 → idle forget タイマーで自動消去）
-> - 詳細は [docs/✅tachibana/](../../../docs/✅tachibana/) を参照
+立花 venue 統合は **Python 側 `python/engine/exchanges/tachibana*.py` にロジックを集約**する。Rust 側はチャート描画と IPC ライフサイクルイベントに責務を絞り、立花プロトコル固有のヘルパー（URL ビルド・Shift-JIS デコード・p_no 採番・WS 接続）は Rust に書かない（[architecture.md §1](../../../docs/✅tachibana/architecture.md)）。本スキルは Claude が API 仕様に正しく沿って Python / IPC コードを書くためのルール集である。
 
-flowsurface 立花 venue 統合は **Python 側 `python/engine/exchanges/tachibana*.py` にロジックを集約**する。Rust 側はチャート描画に責務を絞る（セッション永続化は Python がファイルキャッシュで管理）。本スキルは Claude が API 仕様に正しく沿って Python / IPC コードを書くためのルール集である。
-
-> **以降、本ファイル本文中で「実装」「実装済み」と書かれた Rust 側ヘルパーへの言及は、特記がない限り**「将来実装予定（T1〜T3 で Python 側に新設、Rust 側は新設しない）」**と読み替えること**。
+> **最新の進行ステータス・タスク完了状況は [docs/✅tachibana/implementation-plan.md](../../../docs/✅tachibana/implementation-plan.md) を参照**。本ファイルには腐りやすいマイルストン情報を書かない（不変ルールのみを書く）。
 
 ## 参照リソース
 
@@ -38,8 +24,8 @@ flowsurface 立花 venue 統合は **Python 側 `python/engine/exchanges/tachiba
     - `api_overview_v4r7.pdf` — インタフェース概要（ComP2 からリンク）
     - `api_event_if_v4r7.pdf` / `api_event_if.xlsx` — EVENT I/F 利用方法・データ仕様（ComT6 からリンク、同内容の PDF/Excel 版）
     - これら外部資料を参照する場合はブラウザ側で e-shiten.jp の公開 URL を確認する。ローカルでは Python サンプルに抜粋コメントがあるのでそれを補助資料にする
-- **バージョン表記**: 本番 URL は現行 **v4r8**（`e_api_v4r8`）、ドキュメント類は v4r7 ファイル名のまま流用されている。**`BASE_URL_PROD` リテラル (`kabuka.e-shiten.jp`) を持てるのは `python/engine/exchanges/tachibana_url.py` の冒頭定義 1 箇所のみ**（F-L1）。Rust 側には本番 URL リテラルを書かず、Python から受け取る設計（architecture.md §1）。「Rust 側も `BASE_URL_*` は `v4r8`」という旧記述はこの方針変更により廃止。v4r7 と v4r8 で互換を保つ方針のため、パラメータ仕様は v4r7 ドキュメントを参照してよい
-- **Python サンプル（1 サンプル = 1 サブディレクトリ）**: `.claude/skills/tachibana/samples/e_api_*_tel.py/`
+- **バージョン表記**: 本番 URL は現行 **v4r8**（`e_api_v4r8`）、ドキュメント類は v4r7 ファイル名のまま流用されている。v4r7 と v4r8 で互換を保つ方針のため、パラメータ仕様は v4r7 ドキュメントを参照してよい
+- **Python サンプル（1 サンプル = 1 サブディレクトリ）**: `samples/e_api_*_tel.py/`
   - 各ディレクトリに `LICENSE` / `README.md` / `e_api_*.py` が同梱（`e_api_login_tel.py/` には更に `e_api_login_response.txt` と `e_api_account_info.txt` の実例 JSON が入っている）
   - ログイン: `e_api_login_tel.py/e_api_login_tel.py`
   - 新規注文（現物）: `e_api_order_genbutsu_buy_tel.py` / `e_api_order_genbutsu_sell_tel.py`
@@ -54,19 +40,26 @@ flowsurface 立花 venue 統合は **Python 側 `python/engine/exchanges/tachiba
   - プッシュ: `e_api_event_receive_tel.py`（EVENT HTTP long-polling）/ `e_api_websocket_receive_tel.py`（WebSocket 版）
   - 総合例（スタンドアロン、直下に配置）: `samples/e_api_sample_v4r8.py` / `samples/e_api_sample_v4r8.txt`
   - 参考（非 Python）: `samples/Excel_VBA_api_sample_tel.xlsm/`（VBA 版サンプル一式）/ `samples/e_api_test_compress_v4r2_js.py/`（レスポンス gzip 圧縮の動作確認）
-- **計画文書**: [docs/✅tachibana/](../../../docs/✅tachibana/)（README / spec / architecture / data-mapping / implementation-plan / open-questions）。Phase 1 の作業は **Python 側に集約**するため、Rust adapter は**新設しない**
+- **計画文書**: [docs/✅tachibana/](../../../docs/✅tachibana/)（README / spec / architecture / data-mapping / implementation-plan / open-questions）
 
-**原則**: 公式マニュアルが最優先。Python サンプルはマニュアル記載のパラメータを動作コードで示す参考実装。矛盾があればマニュアルに従う。Rust の既存実装は検証済みの参考パターンであり、新規コードはできるだけこの構造を踏襲する。
+**原則**: 公式マニュアルが最優先。Python サンプルはマニュアル記載のパラメータを動作コードで示す参考実装。矛盾があればマニュアルに従う。
+
+## サブリファレンス（必要時のみ読む）
+
+- [references/sclmid.md](references/sclmid.md) — sCLMID 一覧（認証・業務・マスタ・時価・EVENT）。新しい機能追加時に該当行を引く
+- [references/order_params.md](references/order_params.md) — `CLMKabuNewOrder` の入出力項目定石、訂正・取消との関係
+- [references/event_protocol.md](references/event_protocol.md) — EVENT / WebSocket の `^A^B^C` 区切り規約、`p_evt_cmd` 種別、URL パラメータ
+- [references/master_download.md](references/master_download.md) — `CLMEventDownload` ストリーム処理の特殊ルール、`sTargetCLMID` 一覧
 
 ---
 
-## 立花 venue 利用の前提条件（T7 追記）
+## 立花 venue 利用の前提条件
 
 立花証券 venue を使うには以下が**すべて**必要:
 
 1. **電話認証済みの立花証券 e支店 口座** — e支店 API は電話認証（電話番号照合）完了後でないとプログラマチックログインが成立しない。電話認証未済のアカウントでは tkinter ログインダイアログが弾かれる。
 2. **e支店 API サービスの申込み** — API 利用は口座開設とは別途申込みが必要な場合がある（立花証券営業窓口に確認すること）。
-3. **デモ環境デフォルト** — Phase 1 はデモ環境（`demo-kabuka.e-shiten.jp`）に接続する。本番接続には `TACHIBANA_ALLOW_PROD=1` env が必要（設定しても demo/prod 選択は tkinter ダイアログで都度行う）。
+3. **デモ環境デフォルト** — デモ環境（`demo-kabuka.e-shiten.jp`）に接続する。本番接続には `TACHIBANA_ALLOW_PROD=1` env が必要（設定しても demo/prod 選択は tkinter ダイアログで都度行う）。
 4. **CI demo ジョブは `workflow_dispatch` のみ** — `pytest -m demo_tachibana` を回す CI ジョブ（`.github/workflows/tachibana-demo.yml`）は手動トリガ限定。PR/push への組み込みは閉局帯ヒットによる偽陰性を防ぐため禁止（open-questions.md Q21）。
 
 ---
@@ -76,7 +69,7 @@ flowsurface 立花 venue 統合は **Python 側 `python/engine/exchanges/tachiba
 - 立花証券 API に対する新規エンドポイント・新しい `sCLMID` を追加するとき
 - 立花 Python モジュール（`tachibana.py` / `tachibana_auth.py` / `tachibana_codec.py` / `tachibana_url.py` / `tachibana_ws.py` / `tachibana_master.py` 等）のリクエスト/レスポンス型を追加・修正するとき
 - Python 側の EVENT / WebSocket 受信パース（`tachibana_codec.py` / `tachibana_ws.py`）を触るとき
-- 注文入力・訂正・取消のパラメータ（Phase 2 以降）を扱うとき
+- 注文入力・訂正・取消のパラメータを扱うとき
 - `sResultCode` / `p_errno` のハンドリングを設計するとき
 - ユーザーが「立花」「e支店」「ｅ支店」「tachibana」に触れたとき
 - flowsurface をローカルで起動して立花セッションを必要とする検証を行うとき（下記「運用クイックスタート」を参照）
@@ -89,12 +82,12 @@ E2E 検証やエージェント体験検証で flowsurface を起動し、立花
 
 ### S1. ビルドは **debug** を使う（release では自動ログイン不可）
 
-`DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO`（既定 `true`）による自動ログインは **Python 側 `python/engine/exchanges/tachibana_login_flow.py`** が読む（`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 不採用、F-H5）。Rust 側に `#[cfg(debug_assertions)]` の env 取込みコードは追加しない（経路が Python に閉じる）。release ビルドでは `DEV_TACHIBANA_*` を読み込まず常にユーザー入力を要求する。
+`DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO`（既定 `true`）による自動ログインは **Python 側 `python/engine/exchanges/tachibana_login_flow.py`** が読む。release ビルドでは `DEV_TACHIBANA_*` を読み込まず常にユーザー入力を要求する（release Python パスでガード）。Rust 側に env 取込みコードは追加しない（経路が Python に閉じる）。
 
 | ビルド | 自動ログイン | デモトグル自動化 | 用途 |
 | :--- | :--- | :--- | :--- |
 | `target/debug/flowsurface.exe` | ✅（Python 側が env を読む） | ✅（`DEV_TACHIBANA_DEMO`） | E2E・検証・開発 |
-| `target/release/flowsurface.exe` | ❌（Python 側も env を**完全無視**、release Python パスでガード） | ❌ | 本番配布のみ |
+| `target/release/flowsurface.exe` | ❌（Python 側も env を**完全無視**） | ❌ | 本番配布のみ |
 
 **禁止**: release で起動してログイン画面が空なのを「env 未設定」と誤診断すること。release は env を読まない。
 
@@ -121,13 +114,12 @@ Get-Content .env | ForEach-Object {
 ```
 DEV_TACHIBANA_USER_ID=...          # 立花ユーザーID
 DEV_TACHIBANA_PASSWORD=...         # ログインパスワード
-# DEV_TACHIBANA_SECOND_PASSWORD はログイン時（Phase 1 / Phase O0 以降とも）には採用しない（F-H5）。
-# Phase O0 以降の発注時は iced modal で取得しメモリのみ保持（Command::SetSecondPassword 経由）。
-# env 経路は採用しない。
 DEV_TACHIBANA_DEMO=true            # demo 環境フラグ（**未設定時は demo 既定**で本番に飛ばない）
 ```
 
-**`DEV_TACHIBANA_DEMO` 既定値は `true`**。未設定でも demo URL のみを叩く（spec.md §3.1 / architecture.md §7.7、F-Default-Demo）。**本番接続は別途 `TACHIBANA_ALLOW_PROD=1` を併用したときに限り Python URL builder が解禁する**（implementation-plan T7、Q7）。`DEV_IS_DEMO` / `TACHIBANA_USER_ID` / `TACHIBANA_PASSWORD` といった旧名は**いずれも採用しない**。`.env` に書かれていても Python は読まない（誤って残しても害は無いが混乱の元なので削除推奨）。
+**第二暗証番号は env に置かない**（F-H5）。ログイン時（tkinter ダイアログ）では収集せず、発注時に iced modal で取得しメモリのみ保持する（`Command::SetSecondPassword` 経由で Python に送信、idle forget タイマーで自動消去）。`.env` に `DEV_TACHIBANA_SECOND_PASSWORD` を書いても Python は読まない。
+
+**`DEV_TACHIBANA_DEMO` 既定値は `true`**。未設定でも demo URL のみを叩く（spec.md §3.1 / architecture.md §7.7、F-Default-Demo）。**本番接続は別途 `TACHIBANA_ALLOW_PROD=1` を併用したときに限り Python URL builder が解禁する**（Q7）。`DEV_IS_DEMO` / `TACHIBANA_USER_ID` / `TACHIBANA_PASSWORD` といった旧名は採用しない。
 
 ### S3. 2 回目以降の起動は **セッションファイルキャッシュ** が利用される
 
@@ -150,19 +142,24 @@ INFO -- Tachibana session validated successfully, restoring
 
 clap CLI は `src/headless.rs` にしか実装されていない。GUI バイナリに `--ticker BinanceLinear:BTCUSDT --timeframe M1` を渡しても**無視**され、保存済みダッシュボード設定が復元される。
 
-> **Phase 8.3 で HTTP API は廃止された**。起動後の pane 差し替えは GUI 内のサイドバー UI から手動で行う。
+> 旧 HTTP API（:9876）は廃止された。起動後の pane 差し替えは GUI 内のサイドバー UI から手動で行う。
 > 自動化したい場合は `saved-state.json` を起動前に書き換えるか、Python helper 経由で WS IPC（:19876）に attach する。
 
 ### S5. ポート衝突（19876）に気をつける
 
-flowsurface engine WS server は `:19876` を bind する。複数起動した場合、後発の engine は bind に失敗する。`FLOWSURFACE_ENGINE_TOKEN` を設定していると `start_or_attach` で既存 engine に attach する経路に入るため、**意図せず別プロセスの engine を駆動**しているケースが起きる。事前に既存プロセスを確認すること:
+flowsurface engine WS server は `:19876` を bind する。複数起動した場合、後発の engine は bind に失敗する。`FLOWSURFACE_ENGINE_TOKEN` を設定していると `start_or_attach` で既存 engine に attach する経路に入るため、**意図せず別プロセスの engine を駆動**しているケースが起きる。事前に既存プロセスを確認する:
 
-```bash
-netstat -ano | grep 19876        # LISTENING の PID を確認
-taskkill //PID <pid> //F
+```powershell
+# PowerShell（Windows 既定）
+Get-NetTCPConnection -LocalPort 19876 -ErrorAction SilentlyContinue
+Stop-Process -Id <pid> -Force
 ```
 
-> 旧 HTTP API の :9876 ポートは Phase 8.3 で完全廃止された（参照すべき箇所はもう無い）。
+```bash
+# bash / git-bash
+netstat -ano | grep 19876
+taskkill //PID <pid> //F
+```
 
 ### S6. 起動時ログで拾うべきサイン
 
@@ -177,11 +174,11 @@ taskkill //PID <pid> //F
 
 ## 絶対に守るべきルール
 
-### R1. 本番環境では実弾が飛ぶ
+### R1. 本番環境では実弾が飛ぶ／URL リテラルは 1 箇所限定
 
 - **本番 URL** `https://kabuka.e-shiten.jp/e_api_v4r8/` に接続すると、発注関連 API は**実際に市場へ注文が出る**。約定は取り消せない
 - **開発・テストはデモ環境** `https://demo-kabuka.e-shiten.jp/e_api_v4r8/` を使う
-- **URL リテラルの所在は 1 箇所限定（F-L1、L41 と整合）**: `BASE_URL_PROD` / `BASE_URL_DEMO` を持てるのは **`python/engine/exchanges/tachibana_url.py` の冒頭定義 1 箇所のみ**。Rust 側には本番 URL リテラルを書かず、Python から venue 設定経由で受け取る（旧版で参照していた `exchange::adapter::tachibana` 経由の Rust 側切替は本計画で**廃止**）
+- **URL リテラルの所在は 1 箇所限定（F-L1）**: `BASE_URL_PROD` / `BASE_URL_DEMO` を持てるのは **`python/engine/exchanges/tachibana_url.py` の冒頭定義 1 箇所のみ**。Rust 側に本番 URL リテラルを書かず、Python から venue 設定経由で受け取る（architecture.md §1）
 - Python 側のテストでは `BASE_URL_DEMO` またはテスト用モック URL のみを使う（`HTTPXMock` 既定）
 
 ### R2. URL 形式は独自仕様（クエリ構造ではない）
@@ -189,8 +186,8 @@ taskkill //PID <pid> //F
 - マニュアル根拠: `mfds_json_api_ref_text.html#ComP1`「【アクセス方法】」
 - REQUEST I/F はすべて `{virtual_url}?{JSON 文字列}` の形で送る
   - `?` 以降に **JSON オブジェクトの文字列をそのまま**付ける（`key=value&...` 形式ではない）
-  - reqwest の `.query()` / `urllib` の `params=` は**使えない**
-  - URL 構築は **Python 側 `python/engine/exchanges/tachibana_url.py`** に集約予定（T1）。`build_request_url(base, json_obj)`（REQUEST 用、JSON 文字列パス）と `build_event_url(base, params)`（EVENT 用、key=value 形式）を別関数として実装する
+  - `httpx` の `params=` / `requests` の `params=` / `urllib` の `params=` は**使えない**
+  - URL 構築は **Python 側 `tachibana_url.py`** に集約。`build_request_url(base, json_obj)`（REQUEST 用、JSON 文字列パス）と `build_event_url(base, params)`（EVENT 用、key=value 形式）を別関数として実装する
 - EVENT I/F だけは例外で **通常の `key=value&key=value` 形式**（`p_rid`, `p_board_no`, `p_gyou_no`, `p_issue_code`, `p_mkt_code`, `p_eno`, `p_evt_cmd`）。REQUEST と混同しない
 - 認証は `{BASE_URL}/auth/?{JSON}` と `/auth/` セグメントを挟む。それ以外は仮想 URL に直接付ける（仮想 URL 自体の末尾に `/` が含まれている）
 
@@ -207,20 +204,20 @@ taskkill //PID <pid> //F
 3. 夜間の閉局まで仮想 URL は有効。閉局後は電話認証からやり直し
 4. **仮想 URL はセッション秘密**。ログ出力・テレメトリ送信時はマスクすること
 5. 永続化は **Python 側 [`tachibana_file_store.py`](../../../python/engine/exchanges/tachibana_file_store.py)** が `tachibana_session.json` ファイルキャッシュで行う（JST 当日付で有効判定）。keyring は使用しない
-6. ログイン応答パース → `TachibanaSession` 変換は **Python 側 `python/engine/exchanges/tachibana_auth.py`** で実装する（T2）。`p_errno` → `sResultCode` → `sKinsyouhouMidokuFlg` の 3 段チェックを強制し、途中のいずれかが NG なら `LoginError` / `UnreadNoticesError` で早期脱出する
+6. ログイン応答パース → セッション変換は **Python 側 `tachibana_auth.py`** で実装する。`p_errno` → `sResultCode` → `sKinsyouhouMidokuFlg` の 3 段チェックを強制し、途中のいずれかが NG なら `LoginError` / `UnreadNoticesError` で早期脱出する
 
 ### R4. `p_no` と `p_sd_date` は全リクエストに必須
 
 - `p_no` — リクエスト通番。**リクエストごとに単調増加**する整数（最大 10 桁）。セッション復元後も必ず前回より大きい値を使う
-  - flowsurface では `tachibana::next_p_no()` が AtomicU64 + Unix 秒初期化で保証。自前で採番しない
+  - Python 側 `tachibana_auth.next_p_no()` を使う（`asyncio` 単一スレッド前提の単調増加カウンタ、Unix 秒で初期化）。**自前採番禁止**
 - `p_sd_date` — 送信日時 `YYYY.MM.DD-hh:mm:ss.sss`（JST）。UTC で送らない
-  - 既存: `current_p_sd_date()` が `chrono::FixedOffset::east_opt(9*3600)` で JST 固定
+  - Python 側 `tachibana_auth.current_p_sd_date()` を使う（JST 固定）
 
 ### R5. `sJsonOfmt`="5" を必ず指定する
 
 - "5" = bit1 ON（ブラウザで見やすい形式）+ bit3 ON（引数項目名称での応答）
 - 指定しないとレスポンスのキーが数値 ID になりデシリアライズできない
-- マスタダウンロード（`CLMEventDownload`）は "4" を使う（一行 1 データで保存しやすい）
+- マスタダウンロード（`CLMEventDownload`）は "4" を使う（一行 1 データで保存しやすい — [references/master_download.md](references/master_download.md) 参照）
 
 ### R6. エラーは 2 段階で判定する
 
@@ -230,23 +227,23 @@ if sResultCode != "0"   → 業務処理エラー（パラメータ不正・残�
 ```
 
 - **両方**をチェックする。片方だけではエラーを見逃す
-- `p_errno` はレスポンスで**空文字列のことがある**ため、`"0" または空文字 = 正常` として扱う（Rust 実装もそうしている）
+- `p_errno` はレスポンスで**空文字列のことがある**ため、`"0" または空文字 = 正常` として扱う（公式サンプル `e_api_login_tel.py` などで観測される挙動。マニュアル `ComT7` の結果コード表は `"0"=正常` のみ規定し、空文字の取り扱いはサンプル準拠）
 - `sResultCode` 一覧は `ComT7`（[`#sResultCode`](manual_files/mfds_json_api_ref_text.html#sResultCode)）参照。警告コード `sWarningCode` / `sWarningText` も同セクションに一覧あり
 - `p_errno="2"` は**仮想 URL 無効**（セッション切れ or 営業時間外） → 再ログインが必要
-- ログインで `p_errno=0 && sResultCode=0` でも `sKinsyouhouMidokuFlg=="1"` なら仮想 URL が空で利用不可 → `TachibanaError::UnreadNotices`
-- 既存 Rust 実装は `TachibanaError::ApiError { code, message }` に `sResultCode` / `p_errno` の値を埋めて返す。`code` で分岐する側のコードは、コードが数値（5 桁）か `"2"` かで原因切り分けできる
+- ログインで `p_errno=0 && sResultCode=0` でも `sKinsyouhouMidokuFlg=="1"` なら仮想 URL が空で利用不可 → `UnreadNoticesError`
+- 共通判定は Python 側 `tachibana_auth.check_response(payload)` に集約し、例外型 `ApiError(code, message)` / `LoginError` / `UnreadNoticesError` / `SessionExpiredError` で原因切り分けする
 
 ### R7. レスポンスは Shift-JIS
 
 - 日本語テキスト（銘柄名・エラーメッセージ）は Shift-JIS エンコード
-- Python サンプルでは `bytes.decode("shift-jis", errors="ignore")`
-- Rust では `decode_response_body` を経由。`String::from_utf8` 直叩きは文字化けする
+- Python 側 `tachibana_codec.decode_response_body(bytes)` を経由。`bytes.decode("utf-8")` 直叩きは文字化けする
+- **`errors="ignore"` を本番経路で使わない**。サイレントにバイトを落とすと銘柄名・エラーメッセージが部分破損したまま処理継続してしまう。既定は `errors="strict"`、失敗を許容したいログ出力経路だけ `errors="replace"`（`?` 化＋警告ログ）に切り替える。Python 公式サンプルが `errors="ignore"` を使っているのは教育用の簡略化であり、規範ではない
 
 ### R8. 空配列は `""` で返る
 
 - 注文ゼロ件などの場合、本来配列のフィールドが空文字列 `""` で返る
-- `deserialize_tachibana_list` カスタムデシリアライザを使う（既存）
-- 新しい List 応答型を追加する際は必ず `#[serde(deserialize_with = "deserialize_tachibana_list")]` を付ける
+- Python 側 `tachibana_codec.deserialize_tachibana_list(value)` で `""` → `[]` 正規化する
+- 新しい List 応答型を追加する際は必ずこのヘルパー（または同等のバリデータ）を通す
 
 ### R9. URL エンコードの非標準文字
 
@@ -261,194 +258,32 @@ JSON 文字列を `?` 以降に貼り付けた後、含まれる記号文字を�
 '{' → '%7B'    '|' → '%7C'    '}' → '%7D'    '~' → '%7E'
 ```
 
-- JSON 構造の `{` `}` `"` `:` `,` は**エンコードされる**。つまり「生 JSON 文字列をそのまま全体エンコード」してから仮想 URL の `?` 後ろに貼る運用ではない。サンプルは key / value を個別にエンコードしつつ `"` `:` `,` `{` `}` は構造維持のままクエリに埋める
-- パスワードに記号が含まれる場合は必ずエンコード。`func_replace_urlecnode` をそのまま移植するか、Rust 側では `percent-encoding` クレート相当の独自実装を使う（`reqwest` 内蔵のエンコーダは使わない — R2 の独自形式と競合する）
-- マルチバイト（日本語）は Shift-JIS エンコード後に `%xx` 化が公式流儀だが、flowsurface では現状マルチバイト送信は発生していないため未検証。拡張時は `api_web_access.xlsx` の事例に従う
+JSON 構造の `{` `}` `"` `:` `,` も**置換対象に含まれる**。つまり「生 JSON 文字列をそのまま全体エンコード」してから貼る運用ではなく、**key/value を個別にエンコードしつつ JSON 構造文字（`{` `}` `"` `:` `,`）はクエリにそのまま埋める**のが正しい:
+
+```python
+# 誤: httpx.get(url, params=payload)                       # 標準クエリエンコードされ立花仕様外
+# 誤: url + "?" + urllib.parse.quote(json.dumps(payload))  # 構造文字までエンコードされ JSON にならない
+# 正: url + "?" + tachibana_url.func_replace_urlecnode(json.dumps(payload))
+#     # ↑ key/value 内の 30 文字を %xx 化、JSON 構造は保持
+```
+
+- パスワードに記号が含まれる場合は必ずエンコード。`func_replace_urlecnode` をそのまま `tachibana_url.py` に移植する（標準ライブラリの `urllib.parse.quote` の `safe` 引数チューニングでは立花仕様を再現しにくいので、置換テーブル直書きが安全）
+- マルチバイト（日本語）は Shift-JIS エンコード後に `%xx` 化が公式流儀だが、現状マルチバイト送信は発生していないため未検証。拡張時は `api_web_access.xlsx` の事例に従う
 
 ### R10. シークレットは**絶対に**ハードコードしない
 
 - `sUserId` / `sPassword` / `sSecondPassword` / 仮想 URL はすべて機密情報
 - 運用時は Python の [`tachibana_file_store.py`](../../../python/engine/exchanges/tachibana_file_store.py)（ファイルキャッシュ）経由でのみ扱う。keyring は使用しない
-- `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` 環境変数による自動ログインは **Python 側 `tachibana_login_flow.py` の fast path** で扱う（**将来実装予定（T3 で新設）**）。Rust 側に `#[cfg(debug_assertions)]` の env 取込みコードは追加しない。release ビルドでも env を読まないようガードする
+- `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` 環境変数による自動ログインは **Python 側 `tachibana_login_flow.py` の fast path** で扱い、release ビルドでは env を読まないようガードする
+- 第二暗証番号は env / ファイルに保存しない。発注時に iced modal で取得しメモリのみ保持、idle forget タイマーで自動消去
 - `.env` を使う場合は `.gitignore` に入れ、PR/コミットにも載せない
-- `log::info!` に仮想 URL・パスワード・第二暗証番号を含めない（`debug!` ですら生で流さず、`***` にマスク）。テストコード内でも同じ
+- ログ（`logger.info` / `log::info!`）に仮想 URL・パスワード・第二暗証番号を含めない（`debug` レベルですら生で流さず、`***` にマスク）。テストコード内でも同じ
 
 ---
 
-## リクエスト体系（sCLMID 一覧）
+## Python 実装ヘルパー（`python/engine/exchanges/tachibana*.py`）
 
-マニュアルの章立てに対応。Claude が新しい機能を追加する際は、この表から該当 `sCLMID` を選び、マニュアル該当セクションを読んでパラメータを確定させる。
-
-### 認証 I/F — `ComT2`
-| sCLMID | 機能 | 接続先 |
-| :--- | :--- | :--- |
-| `CLMAuthLoginRequest` | ログイン（仮想 URL 取得） | `{BASE_URL}/auth/` |
-| `CLMAuthLogoutRequest` | ログアウト | `sUrlRequest` |
-
-### 業務機能（REQUEST I/F）— `ComT3` — 接続先 `sUrlRequest`
-| sCLMID | 機能 |
-| :--- | :--- |
-| `CLMKabuNewOrder` | 株式新規注文（現物/信用、買/売、成行/指値/逆指値） |
-| `CLMKabuCorrectOrder` | 株式訂正注文 |
-| `CLMKabuCancelOrder` | 株式取消注文 |
-| `CLMKabuCancelOrderAll` | 株式一括取消 |
-| `CLMGenbutuKabuList` | 現物保有銘柄一覧 |
-| `CLMShinyouTategyokuList` | 信用建玉一覧 |
-| `CLMZanKaiKanougaku` | 買余力 |
-| `CLMZanShinkiKanoIjiritu` | 建余力＆本日維持率 |
-| `CLMZanUriKanousuu` | 売却可能数量 |
-| `CLMOrderList` | 注文一覧 |
-| `CLMOrderListDetail` | 注文約定一覧（詳細） |
-| `CLMZanKaiSummary` | 可能額サマリー |
-| `CLMZanKaiKanougakuSuii` | 可能額推移 |
-| `CLMZanKaiGenbutuKaitukeSyousai` | 現物株式買付可能額詳細 |
-| `CLMZanKaiSinyouSinkidateSyousai` | 信用新規建て可能額詳細 |
-| `CLMZanRealHosyoukinRitu` | リアル保証金率 |
-
-### マスタ機能 — `ComT4` — 接続先 `sUrlMaster`
-| sCLMID | 機能 |
-| :--- | :--- |
-| `CLMEventDownload` | マスタ一括ダウンロード（ストリーム、約 21MB） |
-| `CLMMfdsGetMasterData` | マスタ情報問合取得（個別列指定） |
-| `CLMMfdsGetNewsHead` | ニュースヘッダー |
-| `CLMMfdsGetNewsBody` | ニュースボディー（**Base64 エンコード**、デコード必須） |
-| `CLMMfdsGetIssueDetail` | 銘柄詳細情報 |
-| `CLMMfdsGetSyoukinZan` | 証金残 |
-| `CLMMfdsGetShinyouZan` | 信用残 |
-| `CLMMfdsGetHibuInfo` | 逆日歩 |
-
-### 時価情報機能 — `ComT5` — 接続先 `sUrlPrice`
-| sCLMID | 機能 |
-| :--- | :--- |
-| `CLMMfdsGetMarketPrice` | 時価スナップショット（最大 120 銘柄） |
-| `CLMMfdsGetMarketPriceHistory` | 日足履歴（1 銘柄、最大約 20 年分） |
-
-### EVENT I/F — `ComT6` — 接続先 `sUrlEvent` / `sUrlEventWebSocket`
-
-プッシュ型。HTTP はチャンク長期接続（long-polling）、WebSocket 版もあり。詳細は別紙「立花証券・ｅ支店・ＡＰＩ、EVENT I/F 利用方法、データ仕様」（HTML 版 `api_event_if_v4r7.pdf` / Excel 版 `api_event_if.xlsx`、どちらも `manual_files/` には同梱なし）。手元では Python サンプル [`e_api_event_receive_tel.py`](samples/e_api_event_receive_tel.py/e_api_event_receive_tel.py) / [`e_api_websocket_receive_tel.py`](samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py) の冒頭コメントが抜粋リファレンスとして機能する。
-
----
-
-## 注文（CLMKabuNewOrder）パラメータの定石
-
-マニュアル該当章: [`#CLMKabuNewOrder`](manual_files/mfds_json_api_ref_text.html#CLMKabuNewOrder)。Python サンプル [`e_api_order_genbutsu_buy_tel.py:460-518`](samples/e_api_order_genbutsu_buy_tel.py/e_api_order_genbutsu_buy_tel.py#L460) のコメントに No.1〜No.28 の項目解説が揃っている（入出力別、char 長、取り得る値）。頻出フィールドのみ抜粋:
-
-| 項目 | 意味 | 代表値 |
-| :--- | :--- | :--- |
-| `sIssueCode` | 銘柄コード | 通常 4 桁 / 優先株 5 桁（例 `6501`, `25935`） |
-| `sSizyouC` | 市場 | `00`=東証（現状これのみ） |
-| `sBaibaiKubun` | 売買区分 | `1`=売 / `3`=買 / `5`=現渡 / `7`=現引 |
-| `sCondition` | 執行条件 | `0`=指定なし / `2`=寄付 / `4`=引け / `6`=不成 |
-| `sOrderPrice` | 注文値段 | `*`=指定なし / `0`=成行 / それ以外は指値（呼値単位で丸める — マスタデータ利用方法 `2-12 呼値`） |
-| `sOrderSuryou` | 注文数量 | 整数（単元株数の倍数） |
-| `sGenkinShinyouKubun` | 現金信用区分 | `0`=現物 / `2`=制度信用新規 6m / `4`=制度信用返済 6m / `6`=一般信用新規 6m / `8`=一般信用返済 6m |
-| `sOrderExpireDay` | 注文期日 | `0`=当日 / それ以外は `YYYYMMDD`（10 営業日まで） |
-| `sGyakusasiOrderType` | 逆指値注文種別 | `0`=通常 |
-| `sGyakusasiZyouken` | 逆指値条件 | `0`=指定なし / 条件値段 |
-| `sGyakusasiPrice` | 逆指値値段 | `*`=指定なし / `0`=成行 / それ以外 |
-| `sTatebiType` | 建日種類 | `*`=指定なし（現物または新規）/ `1`=個別指定 / `2`=建日順 / `3`=単価益順 / `4`=単価損順 |
-| `sZyoutoekiKazeiC` | 譲渡益課税区分 | `1`=特定 / `3`=一般 / `5`=NISA（**ログイン応答を流用**） |
-| `sTategyokuZyoutoekiKazeiC` | 建玉譲渡益課税区分 | 現引/現渡時のみ意味を持つ（`*`/`1`/`3`/`5`） |
-| `sSecondPassword` | 第二暗証番号 | **省略不可**（ブラウザ版と異なり API 発注では必須） |
-| `aCLMKabuHensaiData` | 返済リスト | 個別指定時のみ必須。`sTategyokuNumber` / `sTatebiZyuni` / `sOrderSuryou` の配列 |
-
-**出力項目の抜粋**: `sOrderNumber`（注文番号、訂正・取消に必要）/ `sEigyouDay`（営業日 YYYYMMDD）/ `sOrderUkewatasiKingaku`（受渡金額）/ `sOrderTesuryou`（手数料）/ `sOrderSyouhizei`（消費税）。注文番号は以降の訂正・取消 API の `sOrderNumber` 引数として必ず保存する。
-
-**信用 6 ヶ月以外（無期限・短期）は `CLMKabuNewOrder` では直接指定できない**（関連マニュアル参照）。
-
-**訂正・取消の関係**:
-- `CLMKabuCorrectOrder`: `sOrderNumber` を指定し、変更可能なのは `sOrderPrice` / `sCondition` / `sOrderSuryou` / `sOrderExpireDay` など限定項目。新規注文と同じく `sSecondPassword` が必要
-- `CLMKabuCancelOrder`: `sOrderNumber` 単位
-- `CLMKabuCancelOrderAll`: 未約定全件。誤爆に注意
-
-**参考**: 各発注系サンプルは `samples/e_api_order_*_tel.py/` 配下。現物買=`genbutsu_buy`、信用新規買=`shinyou_buy_shinki`、信用返済（建玉個別指定）=`shinyou_*_hensai_kobetsu` といった命名で、引数の組合せ例がそのまま読める。
-
----
-
-## EVENT / WebSocket ストリームのパース規約
-
-### 区切り文字
-
-受信データは ASCII 制御文字を区切りとして項目を羅列する:
-
-| 記号 | コード | 意味 |
-| :--- | :--- | :--- |
-| `^A` | `\x01` | 項目区切り |
-| `^B` | `\x02` | 項目名と値の区切り |
-| `^C` | `\x03` | 値と値の区切り（複数値時） |
-| `\n` | 0x0A | メッセージ区切り（WebSocket は ^A 末尾でも区切る） |
-
-形式例: `項目A1^B値B1^A項目A2^B値B21^CB22^CB23^A...`
-
-### キー命名
-
-キーは `<型>_<行番号>_<情報コード>` 形式:
-- 例 `p_1_DPP` → 型 `p`（プレーン文字列）・行番号 `1`・情報コード `DPP`（現在値）
-- 行番号は `p_gyou_no`（1〜120）と対応
-- 既存: `parse_event_frame(data: &str) -> Vec<(&str, &str)>` で分解可能
-
-### URL パラメータ（重要な固定値）
-
-EVENT I/F は **REQUEST と違い通常の `key=value&...` 形式**で組み立てる（R2 参照）。サンプルの並び順と値に合わせる:
-
-```
-{sUrlEvent}?p_evt_cmd=ST,KP,EC,SS,US,FD
-           &p_eno=0            ※イベント通知番号（0=全件、再送時は指定値の次から）
-           &p_rid=22           ※株価ボード・アプリ識別値（No.2: e支店・API、時価配信あり）
-           &p_board_no=1000    ※固定値（株価ボード機能）
-           &p_gyou_no=N[,N,...]    ※行番号（1-120）
-           &p_issue_code=NNNN[,NNNN,...]   ※銘柄コード
-           &p_mkt_code=NN[,NN,...]         ※市場コード
-```
-
-`p_evt_cmd` の種別（マニュアル別紙「EVENT I/F 利用方法」 p3/26 および [`e_api_event_receive_tel.py` l.534-544](samples/e_api_event_receive_tel.py/e_api_event_receive_tel.py)）:
-
-| コード | 意味 | 通知契機 |
-| :--- | :--- | :--- |
-| `ST` | エラーステータス | 発生時 |
-| `KP` | キープアライブ | 5 秒間通知未送信時 |
-| `FD` | 時価情報 | 初回はメモリ内スナップショット（全データ）、以降は変化分のみ |
-| `EC` | 注文約定通知 | 初回は当日分の未削除通知を接続毎に再送、以降は発生時 |
-| `NS` | ニュース通知 | 初回再送、以降発生時。**重いため必要時のみ** |
-| `SS` | システムステータス | 初回再送、以降発生時 |
-| `US` | 運用ステータス | 初回再送、以降発生時 |
-| `RR` | 画面リフレッシュ | 現時点不使用（指定しても無視） |
-
-### 注意点
-
-- **EVENT URL に `\n` や `\t` を入れない**（制御文字でサーバがエラー応答する）
-- WebSocket 接続は Python 側 `python/engine/exchanges/tachibana_ws.py` に集約する（本 SKILL L11 / L17 の方針）。`websockets.connect(uri, ping_interval=None, ping_timeout=None)` で `websockets` ライブラリの自動 ping を無効化し、**受信ループで ping を受け取ったら手動で pong を返す**（[`e_api_websocket_receive_tel.py:710-723`](samples/e_api_websocket_receive_tel.py/e_api_websocket_receive_tel.py#L710) の `pong_handler` を参照）。Rust 側で立花 WebSocket を直接張る経路は採用しない（Python 集約方針）
-- `p_errno:"2"` は仮想 URL 無効 → 再ログイン（電話認証から）
-- EVENT 受信データはメッセージ単位で `\n`（LF）または `^A` 終端。一塊のチャンクに複数メッセージが含まれるため、受信バッファを蓄積しながら区切り子で分割する必要がある
-- 受信本文も Shift-JIS。REQUEST と同じく UTF-8 前提で読むと銘柄名・ニュース本文が文字化けする
-
----
-
-## マスタダウンロードの特殊ルール
-
-`CLMEventDownload` は他の REQUEST と流れが違う:
-
-- ストリーム形式（`urllib3` の `preload_content=False` 相当）で全量配信
-- 1 レコードの終端は `}`、**全体の終端はレコード `{"sCLMID":"CLMEventDownloadComplete", ...}` の到着**。Python サンプルは `str_terminate = 'CLMEventDownloadComplete'` を定数化している
-- 接続先は `sUrlMaster`（`sUrlRequest` ではない — [`e_api_get_master_tel.py:578-580`](samples/e_api_get_master_tel.py/e_api_get_master_tel.py#L578)）
-- `sJsonOfmt` は `"4"` を使う（1 行 1 JSON 形式、ファイル保存・後続パース向け。`"5"` を使うと区切れなくなる）
-- 受信チャンクをバイト列で蓄積し `byte_data[-1:] == b'}'` で 1 レコード分として Shift-JIS デコード → `json.loads`（[`e_api_get_master_tel.py:492-518`](samples/e_api_get_master_tel.py/e_api_get_master_tel.py#L492)）
-- データ量が大きいため、メモリ展開ではなくストリーム処理を守ること（Rust なら `reqwest::Response::bytes_stream()`）
-
-マスタデータ識別子（`sTargetCLMID`）:
-- `CLMIssueMstKabu` 銘柄マスタ（株）
-- `CLMIssueSizyouMstKabu` 銘柄市場マスタ（株）
-- `CLMIssueMstSak` 銘柄マスタ（先物）
-- `CLMIssueMstOp` 銘柄マスタ（OP）
-- `CLMIssueMstOther` 日経平均・為替など
-- `CLMOrderErrReason` 取引所エラー理由コード
-- `CLMDateZyouhou` 日付情報
-
----
-
-## Python 実装ヘルパー（**将来実装予定（T1〜T3 で新設）**、`python/engine/exchanges/tachibana*.py`）
-
-立花 venue の I/O は **Python 側に集約**される。新しい sCLMID を追加する際は下記の Python ヘルパーを踏襲する（T1 / T2 で実装する）。Rust 側に同等ヘルパーを実装してはいけない。
+立花 venue の I/O は Python 側に集約する。新しい sCLMID を追加する際は下記ヘルパーを踏襲する（未実装のものはこの規約に沿って新設する）。Rust 側に同等ヘルパーを実装してはいけない。
 
 - `tachibana_url.build_request_url(base, json_obj)` — REQUEST 用 `{base}?{JSON文字列}` を組み立て（R2）
 - `tachibana_url.build_event_url(base, params: dict)` — EVENT 用 `{base}?key=value&...` を組み立て（R2 例外）
@@ -459,11 +294,26 @@ EVENT I/F は **REQUEST と違い通常の `key=value&...` 形式**で組み立�
 - `tachibana_auth.next_p_no()` — `asyncio` 単一スレッド前提の単調増加カウンタ（R4、自前採番禁止）
 - `tachibana_auth.current_p_sd_date()` — JST 固定の送信日時（R4）
 - `tachibana_auth.check_response(payload)` — `p_errno` → `sResultCode` の二段判定（R6、`p_errno` 空文字 = 正常）
-- エラー型: Python 例外クラス階層（`LoginError`, `UnreadNoticesError`, `SessionExpiredError` ほか）。`tachibana_auth.py` で定義
-- テストは [`pytest-httpx`](https://pypi.org/project/pytest-httpx/) の `HTTPXMock` フィクスチャでモック（既存 [`python/tests/test_binance_rest.py`](../../../python/tests/test_binance_rest.py) パターン踏襲）。本番 URL を絶対に踏まない（R1、F11）。ログイン応答は [`samples/e_api_login_tel.py/e_api_login_response.txt`](samples/e_api_login_tel.py/e_api_login_response.txt) の実例を流用する
+- 例外階層: `LoginError` / `UnreadNoticesError` / `SessionExpiredError` / `ApiError` を `tachibana_auth.py` で定義
+- テストは [`pytest-httpx`](https://pypi.org/project/pytest-httpx/) の `HTTPXMock` フィクスチャでモック（既存 [`python/tests/test_binance_rest.py`](../../../python/tests/test_binance_rest.py) パターン踏襲）。本番 URL を絶対に踏まない（R1）。ログイン応答は [`samples/e_api_login_tel.py/e_api_login_response.txt`](samples/e_api_login_tel.py/e_api_login_response.txt) の実例を流用する
 
-### Rust 側に新設されるもの（T0.2 で着手）
+## Rust 側に置くもの／置かないもの
 
-- ~~[`data::config::tachibana`](../../../data/src/config/tachibana.rs)~~ — **実装しない**（Python autonomous 方針により削除。セッション永続化は Python が `tachibana_file_store.py` で管理）
-- [`engine_client::dto`](../../../engine-client/src/dto.rs) — IPC コマンド `RequestVenueLogin`、イベント `VenueReady` / `VenueError` / `VenueLoginStarted` / `VenueLoginCancelled`（T0.2 完了済み）。`SetVenueCredentials` / `VenueCredentialsRefreshed` は**削除済み**（Python autonomous 方針）
-- [`engine_client::capabilities::venue_capability`](../../../engine-client/src/capabilities.rs) — `Ready.capabilities.venue_capabilities[<venue>][<key>]` の型付き抽出（T0.2 完了済み）
+**置くもの**（IPC ライフサイクル＋ enum 定義のみ）:
+
+- `engine-client/src/dto.rs` — IPC コマンド `RequestVenueLogin` / venue ライフサイクルイベント `VenueReady` / `VenueError` / `VenueLoginStarted` / `VenueLoginCancelled`
+- `engine-client/src/capabilities.rs` — `Ready.capabilities.venue_capabilities[<venue>][<key>]` の型付き抽出
+- `exchange/src/adapter.rs` — `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 列挙子
+
+**置かないもの**（Python に集約）:
+
+- `exchange/src/adapter/tachibana.rs` — venue adapter は新設しない
+- `data/src/config/tachibana.rs` — Python autonomous 方針によりセッション永続化は Python `tachibana_file_store.py` 側
+- `src/connector/auth.rs` / `src/replay_api.rs` の立花拡張 — 不要
+- `src/screen/login.rs` の立花用ログイン UI — Python tkinter ヘルパー subprocess で開く（フィールド名・ラベル・順序を Rust 側に書かない）
+- `#[cfg(debug_assertions)]` の env 取込みコード — env は Python `tachibana_login_flow.py` のみが読む
+- 立花 WebSocket クライアント — Python `tachibana_ws.py` に集約
+
+---
+
+詳細は [docs/✅tachibana/](../../../docs/✅tachibana/) を参照。

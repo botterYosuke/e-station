@@ -14,6 +14,7 @@ data-mapping.md §1.2 の写像仕様に従う。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time as _time
 from decimal import Decimal
@@ -106,6 +107,7 @@ class TachibanaLiveDataClient(LiveDataClient):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._seq_per_ms = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
     # 公開 API（server.py から呼ぶ）
@@ -150,8 +152,16 @@ class TachibanaLiveDataClient(LiveDataClient):
     # LiveDataClient abstract methods
     # ------------------------------------------------------------------
 
+    def _feed_trade_dict_sync(self, instrument_id_str: str, trade: dict[str, Any]) -> None:
+        """call_soon_threadsafe 経由で loop B から呼ばれる同期ラッパー。
+
+        feed_trade_dict() は sync メソッドのためそのまま委譲する。
+        """
+        self.feed_trade_dict(instrument_id_str, trade)
+
     async def _connect(self) -> None:
         # EVENT WebSocket 接続は server.py 層が管理するため no-op。
+        self._loop = asyncio.get_running_loop()
         self._set_connected(True)
         log.info("TachibanaLiveDataClient connected")
 

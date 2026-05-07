@@ -623,6 +623,11 @@ async def test_engine_stopped_emitted_only_once_on_runner_failure(monkeypatch, t
     server._replay_portfolio = type("P", (), {"reset": lambda *a, **k: None, "on_fill": lambda *a, **k: None})()
     server._scheduled_callbacks = deque()
     server._tachibana_startup_latch = StartupLatch()
+    import threading
+    server._replay_snapshots = deque(maxlen=1000)
+    server._replay_snapshots_lock = threading.Lock()
+    server._notify_history_fn = None
+    server._restore_strategy_holder = [None]
 
     # NautilusRunner を mock — start_backtest_replay_streaming の中で
     # EngineStopped を emit してから例外を投げる。

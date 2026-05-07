@@ -1,14 +1,79 @@
+use std::path::PathBuf;
+
 use crate::menu::Action;
+use crate::modal::replay_form::Granularity;
 
 /// Which top-level menu is currently open (or None = all closed).
-// reason: variants are constructed only by the Linux `widget_menu_bar`. The
+// reason: variant is constructed only by the Linux `widget_menu_bar`. The
 // enum lives in `mod menu_bar_state` (no platform gate) so that source-
 // inspection tests can compile on every OS. (H1 / M6 / F8 R1)
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopMenu {
     File,
-    Tools,
+}
+
+/// Persistent state for the replay control bar (2nd row, replay mode only).
+///
+/// Mirrors `ReplayFormModal` minus `validation_error` / `submitting` — those are
+/// transient per-submission concerns, not bar-persistent concerns.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayBarState {
+    pub instrument_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub granularity: Option<Granularity>,
+    pub initial_cash: String,
+    pub strategy_file: Option<PathBuf>,
+    /// Current replay day — updated by `DateChangeMarker` IPC event.
+    pub current_day: Option<String>,
+    /// True while the engine is in PAUSED state — mirrors `DataEngineServer._replay_paused`.
+    /// Updated by `BarMessage::ReplayPauseStateChanged`.
+    pub replay_paused: bool,
+    /// True when the snapshot ring buffer is non-empty — mirrors `has_history` from
+    /// `ReplayHistoryChanged` IPC event. Controls ⏮ Step- button enable state.
+    pub replay_has_history: bool,
+}
+
+impl ReplayBarState {
+    /// Prefill fields from a SCENARIO JSON object (mirrors `ReplayFormModal::prefill_from_scenario`).
+    pub fn prefill_from_scenario(&mut self, path: PathBuf, scenario: &serde_json::Value) {
+        self.strategy_file = Some(path);
+        let Some(obj) = scenario.as_object() else {
+            return;
+        };
+        if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
+            self.instrument_id = s.to_string();
+        }
+        if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
+            let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+            if !ids.is_empty() {
+                self.instrument_id = ids.join(", ");
+            }
+        }
+        if let Some(s) = obj.get("start").and_then(|v| v.as_str()) {
+            self.start_date = s.to_string();
+        }
+        if let Some(s) = obj.get("end").and_then(|v| v.as_str()) {
+            self.end_date = s.to_string();
+        }
+        if let Some(s) = obj.get("granularity").and_then(|v| v.as_str()) {
+            match s {
+                "Daily" => self.granularity = Some(Granularity::Daily),
+                "Minute" => self.granularity = Some(Granularity::Minute),
+                "Trade" => self.granularity = Some(Granularity::Trade),
+                _ => {}
+            }
+        }
+        if let Some(n) = obj.get("initial_cash").and_then(|v| v.as_u64()) {
+            self.initial_cash = n.to_string();
+        }
+    }
+
+    pub fn set_strategy_file_only(&mut self, path: PathBuf) {
+        self.strategy_file = Some(path);
+    }
 }
 
 /// Messages emitted by the widget menu bar's button/overlay layer.
@@ -31,6 +96,27 @@ pub enum BarMessage {
     /// Close all menus: window lost focus (`Window::Unfocused`).
     /// Kept separate from `Dismiss` so call sites can log the distinct reason.
     DismissFocusLost,
+    // ── Replay bar input field changes ────────────────────────────────────────
+    InstrumentChanged(String),
+    StartDateChanged(String),
+    EndDateChanged(String),
+    GranularityChanged(Granularity),
+    InitialCashChanged(String),
+    // ── Replay bar button actions (dispatched as Tasks in main.rs) ────────────
+    PickStrategyFile,
+    PressPlay,
+    PressPause,
+    PressStepForward,
+    /// ⏮ Step backward — sent by the Step- button. `main.rs` dispatches
+    /// `Command::StepBackward` IPC; state itself is unchanged here.
+    PressStepBackward,
+    PressStop,
+    /// Python engine confirmed pause/resume state change and history status.
+    /// Updates `replay_bar.replay_paused` and `replay_bar.replay_has_history`.
+    ReplayPauseStateChanged {
+        paused: bool,
+        has_history: bool,
+    },
 }
 
 /// Lightweight state for the widget menu bar: which top-level menu is open.
@@ -47,6 +133,7 @@ pub enum BarMessage {
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub open: Option<TopMenu>,
+    pub replay_bar: ReplayBarState,
 }
 
 /// Pure state-transition function (R2-39). No GUI dependencies — fully
@@ -69,10 +156,67 @@ pub fn update(state: State, msg: BarMessage) -> State {
             } else {
                 Some(top)
             },
+            ..state
         },
-        BarMessage::Pick(_) | BarMessage::Dismiss | BarMessage::DismissFocusLost => {
-            State { open: None }
-        }
+        BarMessage::Pick(_) | BarMessage::Dismiss | BarMessage::DismissFocusLost => State {
+            open: None,
+            ..state
+        },
+        // Input field changes: update replay_bar, keep open state unchanged.
+        BarMessage::InstrumentChanged(s) => State {
+            replay_bar: ReplayBarState {
+                instrument_id: s,
+                ..state.replay_bar
+            },
+            ..state
+        },
+        BarMessage::StartDateChanged(s) => State {
+            replay_bar: ReplayBarState {
+                start_date: s,
+                ..state.replay_bar
+            },
+            ..state
+        },
+        BarMessage::EndDateChanged(s) => State {
+            replay_bar: ReplayBarState {
+                end_date: s,
+                ..state.replay_bar
+            },
+            ..state
+        },
+        BarMessage::GranularityChanged(g) => State {
+            replay_bar: ReplayBarState {
+                granularity: Some(g),
+                ..state.replay_bar
+            },
+            ..state
+        },
+        BarMessage::InitialCashChanged(s) => State {
+            replay_bar: ReplayBarState {
+                initial_cash: s,
+                ..state.replay_bar
+            },
+            ..state
+        },
+        // Action variants: state is unchanged; main.rs dispatches the IPC task.
+        BarMessage::PickStrategyFile
+        | BarMessage::PressPlay
+        | BarMessage::PressPause
+        | BarMessage::PressStepForward
+        | BarMessage::PressStepBackward
+        | BarMessage::PressStop => state,
+        // Pause/history state change from Python engine via IPC.
+        BarMessage::ReplayPauseStateChanged {
+            paused,
+            has_history,
+        } => State {
+            replay_bar: ReplayBarState {
+                replay_paused: paused,
+                replay_has_history: has_history,
+                ..state.replay_bar
+            },
+            ..state
+        },
     }
 }
 
@@ -90,27 +234,28 @@ mod tests {
     use crate::menu::Action;
     use engine_client::dto::AppMode;
 
+    fn open_file() -> State {
+        State {
+            open: Some(TopMenu::File),
+            ..State::default()
+        }
+    }
+
     #[test]
     fn dismiss_focus_lost_closes_when_file_open() {
-        let s = State {
-            open: Some(TopMenu::File),
-        };
-        let next = update(s, BarMessage::DismissFocusLost);
+        let next = update(open_file(), BarMessage::DismissFocusLost);
         assert_eq!(next.open, None);
     }
 
     #[test]
-    fn dismiss_focus_lost_closes_when_tools_open() {
-        let s = State {
-            open: Some(TopMenu::Tools),
-        };
-        let next = update(s, BarMessage::DismissFocusLost);
+    fn dismiss_focus_lost_closes_when_file_open_again() {
+        let next = update(open_file(), BarMessage::DismissFocusLost);
         assert_eq!(next.open, None);
     }
 
     #[test]
     fn dismiss_focus_lost_is_idempotent_when_already_closed() {
-        let s = State { open: None };
+        let s = State::default();
         let next = update(s, BarMessage::DismissFocusLost);
         assert_eq!(next.open, None);
     }
@@ -119,15 +264,77 @@ mod tests {
     // matching the source-inspection guard in tests/widget_menu_bar_state.rs.
     #[test]
     fn pick_dismiss_focus_lost_all_close_menu() {
-        let base = State {
-            open: Some(TopMenu::Tools),
-        };
         for msg in [
             BarMessage::Pick(Action::SwitchAppMode(AppMode::Live)),
             BarMessage::Dismiss,
             BarMessage::DismissFocusLost,
         ] {
-            assert_eq!(update(base.clone(), msg).open, None);
+            assert_eq!(update(open_file(), msg).open, None);
         }
+    }
+
+    // R2-M2: actual update() behavioural tests (not source inspection)
+    #[test]
+    fn replay_pause_state_changed_sets_paused_and_history() {
+        let s = State::default();
+        assert!(!s.replay_bar.replay_paused);
+        assert!(!s.replay_bar.replay_has_history);
+        let next = update(
+            s,
+            BarMessage::ReplayPauseStateChanged {
+                paused: true,
+                has_history: true,
+            },
+        );
+        assert!(
+            next.replay_bar.replay_paused,
+            "replay_paused should be true"
+        );
+        assert!(
+            next.replay_bar.replay_has_history,
+            "replay_has_history should be true"
+        );
+    }
+
+    #[test]
+    fn replay_pause_state_changed_clears_paused_and_history() {
+        let s = State {
+            replay_bar: ReplayBarState {
+                replay_paused: true,
+                replay_has_history: true,
+                ..ReplayBarState::default()
+            },
+            ..State::default()
+        };
+        let next = update(
+            s,
+            BarMessage::ReplayPauseStateChanged {
+                paused: false,
+                has_history: false,
+            },
+        );
+        assert!(
+            !next.replay_bar.replay_paused,
+            "replay_paused should be reset to false"
+        );
+        assert!(
+            !next.replay_bar.replay_has_history,
+            "replay_has_history should be reset to false"
+        );
+    }
+
+    #[test]
+    fn instrument_changed_updates_replay_bar_instrument_id() {
+        let s = State::default();
+        let next = update(s, BarMessage::InstrumentChanged("1301.T".to_string()));
+        assert_eq!(next.replay_bar.instrument_id, "1301.T");
+    }
+
+    #[test]
+    fn press_step_backward_does_not_mutate_state() {
+        let s = State::default();
+        let next = update(s.clone(), BarMessage::PressStepBackward);
+        assert_eq!(next.replay_bar.instrument_id, s.replay_bar.instrument_id);
+        assert_eq!(next.replay_bar.replay_paused, s.replay_bar.replay_paused);
     }
 }

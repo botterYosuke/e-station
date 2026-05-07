@@ -75,6 +75,7 @@ def _make_server(mode: str = "replay"):
     server._replay_state = ReplayState.IDLE
     server._live_state = LiveState.DISCONNECTED
     server._event_task = None
+    server._replay_session_epoch = 0
     return server
 
 

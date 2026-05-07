@@ -29,12 +29,21 @@ class TestPortfolioView:
         equity = pv.equity({"1301.TSE": Decimal("3100")})
         assert equity == Decimal("1010000")  # 700000 + 100*3100
 
-    def test_equity_without_last_prices_returns_cash(self):
+    def test_equity_without_last_prices_uses_fill_price_fallback(self):
+        """last_prices 省略時は on_fill で記録された価格にフォールバックする
+        （StepBackward 後の pull 経路で MTM を保つため）。"""
         pv = PortfolioView(Decimal("1000000"))
         pv.on_fill("1301.TSE", "BUY", Decimal("100"), Decimal("3000"))
-        # no last_prices provided
+        # last_prices 省略 → 内部の _last_prices (fill 価格 3000) にフォールバック
         equity = pv.equity()
-        assert equity == Decimal("700000")  # cash only
+        assert equity == Decimal("1000000"), (
+            "equity must use stored fill price as last-known reference (700000 cash + 100*3000 MTM)"
+        )
+
+    def test_equity_no_positions_no_last_prices_returns_cash(self):
+        """ポジションも last_prices もないとき equity は cash と等しい。"""
+        pv = PortfolioView(Decimal("500000"))
+        assert pv.equity() == Decimal("500000")
 
     def test_reset_restores_initial_cash(self):
         pv = PortfolioView(Decimal("1000000"))
@@ -77,6 +86,44 @@ class TestPortfolioView:
         pv.on_fill("6758.TSE", "BUY", Decimal("10"), Decimal("5000"))
         assert pv.cash == Decimal("1000000") - Decimal("300000") - Decimal("50000")
         assert pv.cash == Decimal("650000")
+
+    def test_restore_from_dict_restores_cash(self):
+        pv = PortfolioView(Decimal("2000000"))
+        pv._restore_from_dict({"cash": "1500000", "ts_event_ms": 0})
+        assert pv.cash == Decimal("1500000")
+
+    def test_restore_from_dict_clears_positions(self):
+        pv = PortfolioView(Decimal("1000000"))
+        pv.on_fill("1301.TSE", "BUY", Decimal("10"), Decimal("100"))
+        assert pv.has_open_positions
+        pv._restore_from_dict({"cash": "900000", "ts_event_ms": 0})
+        assert not pv.has_open_positions, "positions must be cleared after _restore_from_dict"
+
+    def test_restore_from_dict_missing_cash_keeps_current(self):
+        pv = PortfolioView(Decimal("1000000"))
+        pv._restore_from_dict({"ts_event_ms": 0})
+        assert pv.cash == Decimal("1000000")
+
+    def test_restore_from_dict_with_positions_and_last_prices_preserves_mtm(self):
+        """StepBackward 後の pull 経路 (GetBuyingPower) で equity が MTM 込みで返ること。
+
+        ユーザー再現シナリオ: cash=700000, position=100, last_price=3100 →
+        equity = 700000 + 100*3100 = 1010000 が返るべき。
+        以前は to_ipc_dict が last_prices なしで呼ばれて equity=cash のみだった。
+        """
+        pv = PortfolioView(Decimal("1000000"))
+        snapshot = {
+            "cash": "700000",
+            "positions": {"1301.TSE": {"qty": "100", "cost": "300000"}},
+            "last_prices": {"1301.TSE": "3100"},
+        }
+        pv._restore_from_dict(snapshot)
+        # equity() / to_ipc_dict() を last_prices 省略で呼んでも MTM が反映されること
+        assert pv.equity() == Decimal("1010000")
+        ipc = pv.to_ipc_dict("strategy-x")
+        assert ipc["equity"] == "1010000", (
+            f"to_ipc_dict must use restored _last_prices for MTM, got equity={ipc['equity']}"
+        )
 
 
 class TestReplayBuyingPowerClmGuard:

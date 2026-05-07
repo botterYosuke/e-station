@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 14
+SCHEMA_MINOR: int = 20
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -23,7 +23,7 @@ AppMode = Literal["live", "replay"]
 # ReplayStateName / LiveStateName: 直交する 2 つの state machine の wire 名前。
 # server.py の `ReplayState` / `LiveState` Enum の `.name` と一致させる。
 ReplayStateName = Literal["IDLE", "LOADED", "RUNNING", "STOPPING"]
-LiveStateName = Literal["DISCONNECTED", "CONNECTING", "CONNECTED"]
+LiveStateName = Literal["DISCONNECTED", "CONNECTING", "CONNECTED", "TRADING", "STOPPING"]
 
 # CurrentEngineState: EngineBusy.current_state の wire 形 (どちらかの state)
 CurrentEngineState = Union[ReplayStateName, LiveStateName]
@@ -31,12 +31,12 @@ CurrentEngineState = Union[ReplayStateName, LiveStateName]
 # Replay-only / Live-only コマンドの分類 (EngineBusy 直交制約に使用)
 ReplayOnlyCommand = Literal[
     "LoadReplayData",
-    "StartEngine",
-    "StopEngine",
     "SetReplaySpeed",
     "StopReplay",
     "ForceStopReplay",
 ]
+# Phase 2: StartEngine / StopEngine は live/replay 両方で使用するため SharedEngineCommand に分類。
+SharedEngineCommand = Literal["StartEngine", "StopEngine"]
 LiveOnlyCommand = Literal[
     "ModifyOrder",
     "CancelOrder",
@@ -58,6 +58,10 @@ AttemptedCommand = Literal[
     "SetReplaySpeed",
     "StopReplay",
     "ForceStopReplay",
+    "PauseReplay",
+    "ResumeReplay",
+    "StepReplay",
+    "StepBackward",
     "SubmitOrder",
     "ModifyOrder",
     "CancelOrder",
@@ -594,7 +598,9 @@ class VenueError(IpcMessage):
     event: Literal["VenueError"] = "VenueError"
     venue: str
     request_id: str | None = None
-    code: str  # e.g. "session_expired", "unread_notices", "login_failed"
+    code: str  # e.g. "session_expired", "unread_notices", "login_failed",
+    # "token_expired" (kabuステーション: retry 1 回失敗で発火、再ログイン誘導),
+    # "local_app_down" (kabuステーション: 本体プロセス落ち / 5s×N 回 TCP refused)
     message: str
 
 
@@ -716,18 +722,30 @@ class OrderListUpdated(IpcMessage):
 
 
 class EngineStartConfig(IpcMessage):
-    """Engine start config — mirrors `engine_runner.py` arguments."""
+    """Engine start config — mirrors `engine_runner.py` arguments.
+
+    replay 専用フィールド: start_date / end_date / initial_cash / granularity
+    live 専用フィールド:   max_qty / max_notional_jpy
+
+    どちらのモードで使うかは StartEngine.engine ("Backtest" / "Live") が決定する。
+    EngineStartConfig 自体は engine フィールドを持たないため、
+    両グループが同時に全 None の場合のみ validator でエラーとする。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     instrument_id: str
     instrument_ids: list[str] | None = None
-    start_date: str
-    end_date: str
-    initial_cash: str
-    granularity: Literal["Trade", "Minute", "Daily"]
+    # replay 専用フィールド（Optional 化）
+    start_date: str | None = None
+    end_date: str | None = None
+    initial_cash: str | None = None
+    granularity: Literal["Trade", "Minute", "Daily"] | None = None
     strategy_file: str | None = None
     strategy_init_kwargs: dict[str, Any] | None = None
+    # live 専用フィールド（新規追加）
+    max_qty: int | None = None
+    max_notional_jpy: int | None = None
 
 
 class StartEngine(IpcMessage):
@@ -875,6 +893,24 @@ class ReplayBuyingPower(IpcMessage):
     cash: str
     buying_power: str
     equity: str
+    ts_event_ms: int
+
+
+# ── N1.17: LIVE 買付余力 ────────────────────────────────────────────────────
+
+
+class LiveBuyingPower(IpcMessage):
+    """LIVE モードの買付余力（live_portfolio_view.py が送出）。
+    cash / buying_power / equity はすべて decimal 文字列（float 丸め防止）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["LiveBuyingPower"] = "LiveBuyingPower"
+    strategy_id: str
+    cash: str           # decimal 文字列（円）
+    buying_power: str   # decimal 文字列（円）
+    equity: str         # decimal 文字列（円）
     ts_event_ms: int
 
 

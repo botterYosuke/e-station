@@ -182,4 +182,50 @@ mod tests {
             venue_capability(&caps, "tachibana", "supported_timeframes");
         assert!(matches!(v, Err(CapabilityError::Deserialize { .. })));
     }
+
+    #[test]
+    fn test_kabu_station_max_push_symbols() {
+        let caps = json!({
+            "venue_capabilities": {
+                "kabu_station": {
+                    "requires_local_app": true,
+                    "max_push_symbols": 50_i64,
+                    "supports_amend": false,
+                    "requires_trade_password_for_cancel": true
+                }
+            }
+        });
+        let v: Option<i64> = venue_capability(&caps, "kabu_station", "max_push_symbols").unwrap();
+        assert_eq!(v, Some(50));
+    }
+
+    /// P4-3: `is_production` フラグを Rust 側から読めること。
+    #[test]
+    fn test_kabu_station_is_production_can_be_read() {
+        let caps_prod = json!({
+            "venue_capabilities": {
+                "kabu_station": {
+                    "requires_local_app": true,
+                    "max_push_symbols": 50_i64,
+                    "supports_amend": false,
+                    "requires_trade_password_for_cancel": true,
+                    "is_production": true
+                }
+            }
+        });
+        let v: Option<bool> =
+            venue_capability(&caps_prod, "kabu_station", "is_production").unwrap();
+        assert_eq!(v, Some(true));
+
+        let caps_verify = json!({
+            "venue_capabilities": {
+                "kabu_station": {
+                    "is_production": false
+                }
+            }
+        });
+        let v: Option<bool> =
+            venue_capability(&caps_verify, "kabu_station", "is_production").unwrap();
+        assert_eq!(v, Some(false));
+    }
 }

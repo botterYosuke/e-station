@@ -313,7 +313,9 @@ fn monthly_labels_gen(
             dt.checked_add_months(Months::new(1))
                 .map(reset_to_start_of_month_utc)
         },
-        with_user_timezone(timezone, |dt| dt.format("%b").to_string()),
+        with_user_timezone(timezone, |dt| {
+            data::config::timezone::month_ja(dt.month()).to_string()
+        }),
         with_user_timezone(timezone, |dt| dt.month() == 1),
         palette,
     );

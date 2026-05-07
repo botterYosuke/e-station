@@ -728,7 +728,10 @@ impl State {
             let mut label = {
                 let symbol = base_ti.ticker.display_symbol_and_type().0;
                 match base_ti.ticker.market_type() {
-                    MarketKind::Spot | MarketKind::Stock => symbol,
+                    MarketKind::Spot
+                    | MarketKind::Stock
+                    | MarketKind::Future
+                    | MarketKind::Option => symbol,
                     MarketKind::LinearPerps | MarketKind::InversePerps => symbol + " PERP",
                 }
             };

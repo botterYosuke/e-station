@@ -816,6 +816,24 @@ impl Dashboard {
             });
     }
 
+    /// N3: Live strategy BuyingPower snapshot を live 専用パネルに配布する。
+    pub fn distribute_live_buying_power(
+        &mut self,
+        main_window: window::Id,
+        cash: String,
+        equity: String,
+        ts_ms: i64,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::BuyingPower(panel) = &mut state.content
+                    && !panel.is_replay
+                {
+                    panel.set_live_strategy_portfolio(cash.clone(), equity.clone(), ts_ms);
+                }
+            });
+    }
+
     /// N1.12: Distribute an `ExecutionMarker` to all Kline panes.
     /// In replay mode all panes show data for the same instrument, so we broadcast
     /// unconditionally rather than filtering by instrument_id.

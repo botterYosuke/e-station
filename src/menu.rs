@@ -1,21 +1,15 @@
 use engine_client::dto::AppMode;
 
-use crate::wandb_auth::{RunBufferIndex, WandbAuthState};
-
 /// Unified menu action enum for cross-platform dispatch.
 ///
 /// `native_menu::Action` covers Win/Mac muda items. This enum is the
 /// common vocabulary used by both the Linux iced widget menu bar and
 /// any future cross-platform menu infrastructure.
-///
-/// **Invariant R7-88**: `actions_for_mode` returns only File/Mode actions.
-/// Tools submenu actions live exclusively in `tools_actions_for_state`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // reason: variants File/Replay/Quit/SwitchAppMode are consumed by the Linux
 // widget menu bar (`src/widget_menu_bar.rs`). The `mod menu` itself is
 // cross-platform — exposed on every OS so `tests/menu_actions_cross_platform.rs`
-// and the source-inspection tests in `tests/tools_actions_for_state.rs` can
-// compile and assert against the source. Variants therefore look "unused" on
+// can compile and assert against the source. Variants therefore look "unused" on
 // Win/Mac at the `cargo check` level even though they are reached at runtime
 // on Linux. (M6 / F8 R1)
 #[allow(dead_code)]
@@ -24,23 +18,14 @@ pub enum Action {
     Open,
     Save,
     SaveAs,
-    // ── Replay menu ────────────────────────────────────────────────────────
-    ReplayStart,
-    ReplayStop,
     // ── Common ─────────────────────────────────────────────────────────────
     Quit,
     // ── Mode switch ────────────────────────────────────────────────────────
     SwitchAppMode(AppMode),
-    // ── Tools / W&B submenu ────────────────────────────────────────────────
-    SubmitToWandb,
-    SignInWandb,
-    SignOutWandb,
-    OpenSubmissionLog,
-    ClearRunBuffer,
 }
 
 /// A menu item entry for submenus that need enabled/tooltip/checked state
-/// (Mode submenu, Tools submenu).
+/// (Mode submenu).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuEntry {
     pub action: Action,
@@ -50,54 +35,22 @@ pub struct MenuEntry {
     /// - `Some(true)` → currently-selected mode (renders `✓` prefix).
     /// - `Some(false)` → candidate but not selected (renders alignment padding
     ///   so all items in a checkable group line up).
-    /// - `None` → item has no check column (normal File / Tools items).
+    /// - `None` → item has no check column (normal File items).
     ///
     /// The third state is *load-bearing*: collapsing to `bool` would force every
-    /// File / Tools entry to claim a check column and would render an extra
+    /// File entry to claim a check column and would render an extra
     /// `  ` indent on items that should sit flush with their button label.
     /// Keep as `Option<bool>` until a real need to widen it appears.
     pub checked: Option<bool>,
 }
 
-/// W&B authentication state — legacy enum; kept for backward compatibility.
-/// New code uses `WandbAuthState` from `crate::wandb_auth` (R7-86).
-// reason: kept for source-inspection tests in tests/tools_actions_for_state.rs
-// (P9 §852). The integration test asserts `pub enum AuthState` / `SignedIn` /
-// `SignedOut` literals are present in `src/menu.rs`, so removing the enum
-// would break the F8 R1 user-decided "Option A" approach (enum retention,
-// docs-only correction). (H6 / M6 / F8 R1)
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthState {
-    SignedIn,
-    SignedOut,
-}
-
-/// Local run-buffer state — legacy enum; kept for backward compatibility.
-/// New code uses `RunBufferIndex` from `crate::wandb_auth` (R7-86).
-// reason: kept for source-inspection tests in tests/tools_actions_for_state.rs
-// (P9 §852). See `AuthState` above for the same rationale. (H6 / M6 / F8 R1)
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferState {
-    HasRuns,
-    Empty,
-}
-
 /// Returns the ordered File menu actions for the given app mode.
-///
-/// **Invariant R7-88 / DoD-11**: This function contains ONLY File/Quit
-/// actions. Tools submenu actions must NOT appear here; they belong in
-/// `tools_actions_for_state`.
 ///
 /// **Frozen signature (R7-88, M5 / F8 R1)**: the return type stays
 /// `Vec<Action>` (not `Vec<MenuEntry>`). File items have no enabled/tooltip/
 /// checked state distinct from "always enabled, no tooltip, no check", so the
 /// richer `MenuEntry` adds nothing here while breaking the cross-platform
 /// `tests/menu_actions_cross_platform.rs` contract that pins this signature.
-/// Touching the return type re-opens the responsibility-split decision frozen
-/// by R3-66 / R3-69 / R6-83 / R7-88; do not change without re-running those
-/// reviews.
 // reason: called directly from `widget_menu_bar::entries_for_menu` (TopMenu::File arm)
 // and by the cross-platform `tests/menu_actions_cross_platform.rs`. The
 // `widget_menu_bar::menu_items` wrapper that R1 introduced was removed in
@@ -105,86 +58,8 @@ pub enum BufferState {
 // appears unused to `cargo check` on Win/Mac despite being part of the public
 // menu contract. (M6 / F8 R1 / R2 / R3)
 #[allow(dead_code)]
-pub fn actions_for_mode(mode: &AppMode) -> Vec<Action> {
-    match mode {
-        AppMode::Live => vec![Action::Open, Action::Save, Action::SaveAs, Action::Quit],
-        AppMode::Replay => vec![Action::ReplayStart, Action::ReplayStop, Action::Quit],
-    }
-}
-
-/// Returns the ordered Tools submenu entries given the current W&B
-/// authentication and run-buffer state (DoD-10 / R3-66/69 / R7-86).
-///
-/// Invariants:
-/// - `SignInWandb` and `SignOutWandb` are mutually exclusive: exactly one is enabled.
-/// - `OpenSubmissionLog` is always present in the returned Vec.
-/// - `tooltip` is `None` when `enabled=true`, `Some(reason)` when `enabled=false`.
-pub fn tools_actions_for_state(auth: &WandbAuthState, buf: &RunBufferIndex) -> Vec<MenuEntry> {
-    let has_completed = buf.latest_completed.is_some();
-    // OpenSubmissionLog / ClearRunBuffer は run-buffer/ 配下に「何かあるか」で
-    // 判定する。aborted / running しか無くても履歴閲覧と削除は可能であるべき。
-    let has_buffer = buf.total > 0;
-
-    vec![
-        // SignInWandb — enabled only when not authenticated
-        MenuEntry {
-            action: Action::SignInWandb,
-            enabled: !auth.authenticated,
-            tooltip: if auth.authenticated {
-                Some("ログイン済みです")
-            } else {
-                None
-            },
-            checked: None,
-        },
-        // SignOutWandb — enabled only when authenticated
-        MenuEntry {
-            action: Action::SignOutWandb,
-            enabled: auth.authenticated,
-            tooltip: if !auth.authenticated {
-                Some("ログインしていません")
-            } else {
-                None
-            },
-            checked: None,
-        },
-        // SubmitToWandb — enabled only when authenticated AND has completed runs
-        MenuEntry {
-            action: Action::SubmitToWandb,
-            enabled: auth.authenticated && has_completed,
-            tooltip: if !auth.authenticated {
-                Some("W&B にログインしてください")
-            } else if !has_completed {
-                Some("送信可能な run がありません（最初に replay を実行してください）")
-            } else {
-                None
-            },
-            checked: None,
-        },
-        // OpenSubmissionLog — always present; enabled when run-buffer/ has any entries
-        // (including aborted / running, so users can inspect failed runs)
-        MenuEntry {
-            action: Action::OpenSubmissionLog,
-            enabled: has_buffer,
-            tooltip: if !has_buffer {
-                Some("送信履歴がまだありません")
-            } else {
-                None
-            },
-            checked: None,
-        },
-        // ClearRunBuffer — enabled when run-buffer/ has any entries
-        MenuEntry {
-            action: Action::ClearRunBuffer,
-            enabled: has_buffer,
-            tooltip: if !has_buffer {
-                Some("削除できるバッファがありません")
-            } else {
-                None
-            },
-            checked: None,
-        },
-    ]
+pub fn actions_for_mode(_mode: &AppMode) -> Vec<Action> {
+    vec![Action::Open, Action::Save, Action::SaveAs, Action::Quit]
 }
 
 /// State of the footer mode-toggle badge.
@@ -204,16 +79,14 @@ pub struct ModeToggleState {
 ///
 /// Priority (highest first):
 /// 1. `mode_switch_in_progress` → disabled, reason: `"Engine を再起動中…"`
-/// 2. `submit_in_flight` → disabled, reason: `"W&B 送信中は切替できません"`
-/// 3. `engine_busy` → disabled, reason: `"Engine がビジーです"`
-/// 4. otherwise → enabled
+/// 2. `engine_busy` → disabled, reason: `"Engine がビジーです"`
+/// 3. otherwise → enabled
 ///
 /// `dirty` is intentionally **not** a parameter — dirty state means "prompt
 /// the user before switching", not "prevent switching altogether".
 pub fn mode_toggle_state(
     current: AppMode,
     engine_busy: bool,
-    submit_in_flight: bool,
     mode_switch_in_progress: bool,
 ) -> ModeToggleState {
     if mode_switch_in_progress {
@@ -221,13 +94,6 @@ pub fn mode_toggle_state(
             current,
             enabled: false,
             disabled_reason: Some("Engine を再起動中…"),
-        };
-    }
-    if submit_in_flight {
-        return ModeToggleState {
-            current,
-            enabled: false,
-            disabled_reason: Some("W&B 送信中は切替できません"),
         };
     }
     if engine_busy {
@@ -244,10 +110,66 @@ pub fn mode_toggle_state(
     }
 }
 
+/// Per-button enable state for the replay control bar.
+///
+/// Computed by [`replay_control_state`] from four parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct ReplayControlState {
+    /// ▶ 再生 / Resume — enabled when idle (new session) or paused (resume).
+    pub play: bool,
+    /// ⏸ 一時停止 — enabled only when running (not paused).
+    pub pause: bool,
+    /// ⏭ Step+ — enabled only while paused (PAUSED state only; RUNNING → EngineBusy).
+    pub step_forward: bool,
+    /// ⏮ Step- — enabled while PAUSED AND has snapshot history.
+    pub step_backward: bool,
+    /// ⏹ 停止 — enabled while running or paused.
+    pub stop: bool,
+}
+
+/// Computes the replay control bar button enable state.
+///
+/// | state               | ▶ | ⏸ | ⏭ | ⏮          | ⏹ |
+/// |---------------------|---|---|---|------------|---|
+/// | idle                | ✓ | ✗ | ✗ | ✗          | ✗ |
+/// | running             | ✗ | ✓ | ✗ | ✗          | ✓ |
+/// | paused              | ✓ | ✗ | ✓ | ✗ (no hist)| ✓ |
+/// | paused + history    | ✓ | ✗ | ✓ | ✓          | ✓ |
+///
+/// Step+ enabled condition: `PAUSED` only (計画書 R1 決定; RUNNING 中は EngineBusy)
+/// Step- enabled condition: `paused && replay_has_history` (PAUSED のみ; Python サーバーと整合)
+#[allow(dead_code)]
+pub fn replay_control_state(
+    replay_running: bool,
+    replay_paused: bool,
+    replay_has_history: bool,
+    mode_switch_in_progress: bool,
+) -> ReplayControlState {
+    if mode_switch_in_progress {
+        return ReplayControlState {
+            play: false,
+            pause: false,
+            step_forward: false,
+            step_backward: false,
+            stop: false,
+        };
+    }
+    let idle = !replay_running;
+    let running_not_paused = replay_running && !replay_paused;
+    let paused = replay_running && replay_paused;
+    ReplayControlState {
+        play: idle || paused,
+        pause: running_not_paused,
+        step_forward: paused,
+        step_backward: paused && replay_has_history,
+        stop: replay_running,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wandb_auth::AuthMethod;
 
     // ── actions_for_mode ──────────────────────────────────────────────────
 
@@ -260,258 +182,18 @@ mod tests {
     }
 
     #[test]
-    fn replay_actions_are_replay_start_stop_quit() {
+    fn replay_actions_are_same_as_live() {
         assert_eq!(
             actions_for_mode(&AppMode::Replay),
-            vec![Action::ReplayStart, Action::ReplayStop, Action::Quit],
+            vec![Action::Open, Action::Save, Action::SaveAs, Action::Quit],
         );
-    }
-
-    #[test]
-    fn actions_for_mode_excludes_tools_actions() {
-        let tools_only = [
-            Action::SubmitToWandb,
-            Action::SignInWandb,
-            Action::SignOutWandb,
-            Action::OpenSubmissionLog,
-            Action::ClearRunBuffer,
-        ];
-        for mode in [AppMode::Live, AppMode::Replay] {
-            let got = actions_for_mode(&mode);
-            for action in &tools_only {
-                assert!(
-                    !got.contains(action),
-                    "Tools action {action:?} must not appear in actions_for_mode({mode:?}) — DoD-11"
-                );
-            }
-        }
-    }
-
-    // ── tools_actions_for_state (R7-86: Vec<MenuEntry>) ──────────────────
-
-    fn make_auth(authenticated: bool) -> WandbAuthState {
-        WandbAuthState {
-            authenticated,
-            method: if authenticated {
-                AuthMethod::Netrc
-            } else {
-                AuthMethod::NotSet
-            },
-            username: None,
-            error: None,
-        }
-    }
-
-    fn make_buf(has_runs: bool) -> RunBufferIndex {
-        if has_runs {
-            RunBufferIndex {
-                latest_completed: Some("run-1".to_string()),
-                total: 1,
-            }
-        } else {
-            RunBufferIndex::empty()
-        }
-    }
-
-    fn find_entry(entries: &[MenuEntry], action: &Action) -> Option<MenuEntry> {
-        entries.iter().find(|e| &e.action == action).cloned()
-    }
-
-    #[test]
-    fn auth_ok_buffer_has_runs_submit_enabled() {
-        let entries = tools_actions_for_state(&make_auth(true), &make_buf(true));
-        assert_eq!(entries.len(), 5);
-
-        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
-        assert!(submit.enabled);
-        assert_eq!(submit.tooltip, None);
-
-        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
-        assert!(!sign_in.enabled);
-        assert_eq!(sign_in.tooltip, Some("ログイン済みです"));
-
-        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
-        assert!(sign_out.enabled);
-        assert_eq!(sign_out.tooltip, None);
-
-        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
-        assert!(log.enabled);
-        assert_eq!(log.tooltip, None);
-
-        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
-        assert!(clear.enabled);
-        assert_eq!(clear.tooltip, None);
-    }
-
-    #[test]
-    fn auth_ok_buffer_empty_submit_disabled() {
-        let entries = tools_actions_for_state(&make_auth(true), &make_buf(false));
-        assert_eq!(entries.len(), 5);
-
-        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
-        assert!(!submit.enabled);
-        assert_eq!(
-            submit.tooltip,
-            Some("送信可能な run がありません（最初に replay を実行してください）")
-        );
-
-        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
-        assert!(!sign_in.enabled);
-
-        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
-        assert!(sign_out.enabled);
-
-        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
-        assert!(!log.enabled);
-        assert_eq!(log.tooltip, Some("送信履歴がまだありません"));
-
-        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
-        assert!(!clear.enabled);
-        assert_eq!(clear.tooltip, Some("削除できるバッファがありません"));
-    }
-
-    #[test]
-    fn auth_none_buffer_has_runs_submit_disabled_login_prompt() {
-        let entries = tools_actions_for_state(&make_auth(false), &make_buf(true));
-        assert_eq!(entries.len(), 5);
-
-        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
-        assert!(!submit.enabled);
-        assert_eq!(submit.tooltip, Some("W&B にログインしてください"));
-
-        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
-        assert!(sign_in.enabled);
-        assert_eq!(sign_in.tooltip, None);
-
-        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
-        assert!(!sign_out.enabled);
-        assert_eq!(sign_out.tooltip, Some("ログインしていません"));
-
-        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
-        assert!(log.enabled);
-
-        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
-        assert!(clear.enabled);
-    }
-
-    #[test]
-    fn auth_none_buffer_empty_all_disabled_appropriately() {
-        let entries = tools_actions_for_state(&make_auth(false), &make_buf(false));
-        assert_eq!(entries.len(), 5);
-
-        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
-        assert!(!submit.enabled);
-        assert_eq!(submit.tooltip, Some("W&B にログインしてください"));
-
-        let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
-        assert!(sign_in.enabled);
-
-        let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
-        assert!(!sign_out.enabled);
-
-        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
-        assert!(!log.enabled);
-
-        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
-        assert!(!clear.enabled);
-    }
-
-    /// Regression: `OpenSubmissionLog` / `ClearRunBuffer` must be enabled
-    /// even when only aborted / running runs exist (no completed run).
-    /// `SubmitToWandb` must remain disabled because there's nothing to send.
-    #[test]
-    fn open_log_and_clear_enabled_when_only_aborted_runs() {
-        let buf = RunBufferIndex {
-            latest_completed: None,
-            total: 3,
-        };
-        let entries = tools_actions_for_state(&make_auth(true), &buf);
-
-        let log = find_entry(&entries, &Action::OpenSubmissionLog).unwrap();
-        assert!(
-            log.enabled,
-            "OpenSubmissionLog must be enabled when buffer has entries"
-        );
-        assert_eq!(log.tooltip, None);
-
-        let clear = find_entry(&entries, &Action::ClearRunBuffer).unwrap();
-        assert!(
-            clear.enabled,
-            "ClearRunBuffer must be enabled when buffer has entries"
-        );
-        assert_eq!(clear.tooltip, None);
-
-        let submit = find_entry(&entries, &Action::SubmitToWandb).unwrap();
-        assert!(
-            !submit.enabled,
-            "SubmitToWandb must remain disabled without completed runs"
-        );
-    }
-
-    #[test]
-    fn signin_signout_mutually_exclusive_all_combinations() {
-        for authenticated in [true, false] {
-            for has_runs in [true, false] {
-                let entries =
-                    tools_actions_for_state(&make_auth(authenticated), &make_buf(has_runs));
-                let sign_in = find_entry(&entries, &Action::SignInWandb).unwrap();
-                let sign_out = find_entry(&entries, &Action::SignOutWandb).unwrap();
-                assert_ne!(
-                    sign_in.enabled, sign_out.enabled,
-                    "SignInWandb and SignOutWandb must be mutually exclusive \
-                     (auth={authenticated}, has_runs={has_runs})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn open_submission_log_always_present_all_combinations() {
-        for authenticated in [true, false] {
-            for has_runs in [true, false] {
-                let entries =
-                    tools_actions_for_state(&make_auth(authenticated), &make_buf(has_runs));
-                assert!(
-                    find_entry(&entries, &Action::OpenSubmissionLog).is_some(),
-                    "OpenSubmissionLog must always be present \
-                     (auth={authenticated}, has_runs={has_runs})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn enabled_true_always_has_none_tooltip() {
-        for authenticated in [true, false] {
-            for has_runs in [true, false] {
-                let entries =
-                    tools_actions_for_state(&make_auth(authenticated), &make_buf(has_runs));
-                for entry in &entries {
-                    if entry.enabled {
-                        assert_eq!(
-                            entry.tooltip, None,
-                            "enabled entry {:?} must have tooltip=None \
-                             (auth={authenticated}, has_runs={has_runs})",
-                            entry.action
-                        );
-                    } else {
-                        assert!(
-                            entry.tooltip.is_some(),
-                            "disabled entry {:?} must have tooltip=Some(...) \
-                             (auth={authenticated}, has_runs={has_runs})",
-                            entry.action
-                        );
-                    }
-                }
-            }
-        }
     }
 
     // ── mode_toggle_state (TT1-TT4) ──────────────────────────────────────
 
     #[test]
     fn tt1_all_false_yields_enabled() {
-        let s = mode_toggle_state(AppMode::Live, false, false, false);
+        let s = mode_toggle_state(AppMode::Live, false, false);
         assert!(s.enabled);
         assert_eq!(s.disabled_reason, None);
         assert_eq!(s.current, AppMode::Live);
@@ -519,37 +201,87 @@ mod tests {
 
     #[test]
     fn tt2_engine_busy_disables_with_reason() {
-        let s = mode_toggle_state(AppMode::Live, true, false, false);
+        let s = mode_toggle_state(AppMode::Live, true, false);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("Engine がビジーです"));
     }
 
     #[test]
-    fn tt3_submit_in_flight_beats_engine_busy() {
-        // submit_in_flight has higher priority than engine_busy
-        let s = mode_toggle_state(AppMode::Live, true, true, false);
-        assert!(!s.enabled);
-        assert_eq!(s.disabled_reason, Some("W&B 送信中は切替できません"));
-    }
-
-    #[test]
     fn tt4_mode_switch_in_progress_is_highest_priority() {
-        let s = mode_toggle_state(AppMode::Replay, false, true, true);
+        let s = mode_toggle_state(AppMode::Replay, false, true);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
     }
 
     #[test]
     fn tt4b_mode_switch_alone_disables() {
-        let s = mode_toggle_state(AppMode::Live, false, false, true);
+        let s = mode_toggle_state(AppMode::Live, false, true);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
     }
 
     #[test]
     fn tt4c_replay_mode_also_disabled_when_switching() {
-        let s = mode_toggle_state(AppMode::Replay, false, false, true);
+        let s = mode_toggle_state(AppMode::Replay, false, true);
         assert!(!s.enabled);
         assert_eq!(s.disabled_reason, Some("Engine を再起動中…"));
+    }
+
+    // ── replay_control_state ─────────────────────────────────────────────
+
+    #[test]
+    fn rcs_idle_only_play_enabled() {
+        let s = replay_control_state(false, false, false, false);
+        assert!(s.play, "idle: play should be enabled");
+        assert!(!s.pause);
+        assert!(!s.step_forward);
+        assert!(!s.step_backward);
+        assert!(!s.stop);
+    }
+
+    #[test]
+    fn rcs_running_pause_and_stop_enabled() {
+        let s = replay_control_state(true, false, false, false);
+        assert!(!s.play, "running: play should be disabled");
+        assert!(s.pause);
+        assert!(!s.step_forward);
+        assert!(!s.step_backward);
+        assert!(s.stop);
+    }
+
+    #[test]
+    fn rcs_paused_no_history() {
+        let s = replay_control_state(true, true, false, false);
+        assert!(s.play, "paused: play (resume) should be enabled");
+        assert!(!s.pause);
+        assert!(s.step_forward);
+        assert!(
+            !s.step_backward,
+            "no history: step_backward should be disabled"
+        );
+        assert!(s.stop);
+    }
+
+    #[test]
+    fn rcs_paused_with_history() {
+        let s = replay_control_state(true, true, true, false);
+        assert!(s.play, "paused+history: play (resume) should be enabled");
+        assert!(!s.pause);
+        assert!(s.step_forward);
+        assert!(
+            s.step_backward,
+            "has history: step_backward should be enabled"
+        );
+        assert!(s.stop);
+    }
+
+    #[test]
+    fn rcs_mode_switch_in_progress_disables_all() {
+        let s = replay_control_state(true, true, true, true);
+        assert!(!s.play, "mode switch: play should be disabled");
+        assert!(!s.pause);
+        assert!(!s.step_forward);
+        assert!(!s.step_backward);
+        assert!(!s.stop);
     }
 }

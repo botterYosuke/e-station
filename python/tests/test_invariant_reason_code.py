@@ -43,6 +43,20 @@ CANONICAL_REASON_CODES: frozenset[str] = frozenset(
         # SubmitOrder を N1.4 で受けた場合に N1.5 未実装を明示する一時 reason_code。
         # N1.5 で wrapper Strategy が実装され次第、本コードは削除する。
         "REPLAY_NOT_IMPLEMENTED",
+        # kabu_station 発注経路 (Phase 2) — HIGH-1 R1 review-fix
+        "TRADE_PASSWORD_LOCKED",
+        "TRADE_PASSWORD_INVALID",
+        "TRADE_PASSWORD_CANCELLED",
+        # kabu_station 発注経路 (Phase 2) — R2 review-fix B-1/B-2
+        "MISSING_ORDER_ID",
+        "INVALID_PRICE",
+        # kabu_station 発注経路 (Phase 2) — R8 review-fix H-2/M-4
+        # NOTE: RATE_LIMITED は kabu_station 経路でも使用されるが、上の元エントリ（line 30）と
+        # 重複するため、ここでは追加しない（R2 review-fix M-5）
+        "UNSUPPORTED_INSTRUMENT",
+        # kabu_station 発注経路 (Phase 2) — R8 review-fix H-2 で
+        # KabuConnectionError 時に NOT_LOGGED_IN から CONNECTION_ERROR に変更（server.py L1922/L2073）
+        "CONNECTION_ERROR",
     }
 )
 
@@ -54,6 +68,7 @@ PYTHON_ROOT = REPO_ROOT / "python" / "engine"
 _FILES_TO_CHECK = [
     PYTHON_ROOT / "server.py",
     PYTHON_ROOT / "exchanges" / "tachibana_orders.py",
+    PYTHON_ROOT / "exchanges" / "kabusapi_orders.py",
 ]
 
 # ---------------------------------------------------------------------------
@@ -99,6 +114,7 @@ def _collect_reason_codes_from_file(path: Path) -> list[tuple[str, int]]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.demo_kabu
 def test_canonical_codes_are_screaming_snake_case():
     """canonical セット内の全コードが SCREAMING_SNAKE_CASE である。"""
     violations = [
@@ -111,6 +127,7 @@ def test_canonical_codes_are_screaming_snake_case():
     )
 
 
+@pytest.mark.demo_kabu
 @pytest.mark.parametrize("path", _FILES_TO_CHECK)
 def test_all_reason_codes_in_source_are_canonical(path: Path):
     """ソースファイル中の reason_code 文字列値がすべて canonical セットに含まれる。"""
@@ -126,6 +143,7 @@ def test_all_reason_codes_in_source_are_canonical(path: Path):
     )
 
 
+@pytest.mark.demo_kabu
 @pytest.mark.parametrize("path", _FILES_TO_CHECK)
 def test_all_reason_codes_in_source_are_screaming_snake_case(path: Path):
     """ソースファイル中の reason_code 文字列値がすべて SCREAMING_SNAKE_CASE である。"""

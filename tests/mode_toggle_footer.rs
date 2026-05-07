@@ -33,9 +33,16 @@ fn fn_body(src: &str, fn_start: usize) -> &str {
 #[test]
 fn tt5_status_bar_body_contains_bar_message_pick() {
     let src = read_main();
-    let start = src
-        .find("fn status_bar(state: crate::menu::ModeToggleState)")
-        .expect("status_bar must accept ModeToggleState");
+    let start = src.find("fn status_bar(").expect("status_bar must exist");
+    // Verify the signature contains ModeToggleState (even if split across lines)
+    let sig_end = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .unwrap_or(src.len());
+    assert!(
+        src[start..sig_end].contains("crate::menu::ModeToggleState"),
+        "status_bar must accept ModeToggleState"
+    );
     let body = fn_body(&src, start);
 
     assert!(
@@ -88,27 +95,28 @@ fn tt5_mode_toggle_state_does_not_accept_dirty_param() {
     );
 }
 
-// ── TT6: SwitchMode handler body contains SaveAndSwitchMode (dirty check) ─────
+// ── TT6: SwitchModeWithSpecs handler body contains SaveAndSwitchMode (dirty check) ─────
 
 #[test]
 fn tt6_switch_mode_handler_body_contains_dirty_check_flow() {
     let src = read_main();
+    // The dirty check lives in SwitchModeWithSpecs (the continuation of SwitchMode).
+    // Find the match arm (not the enum definition or comment).
     let handler_start = src
-        .find("Action::SwitchMode(target) =>")
-        .expect("Action::SwitchMode handler must exist");
-    // Bound the handler to ~6000 bytes — enough to cover the full match arm.
+        .find("Message::SwitchModeWithSpecs { target, windows } =>")
+        .expect("SwitchModeWithSpecs handler must exist");
     let handler_body = &src[handler_start..];
-    let end = handler_body.len().min(6000);
+    let end = handler_body.len().min(3000);
     let body = &handler_body[..end];
 
     assert!(
         body.contains("SaveAndSwitchMode"),
-        "Action::SwitchMode handler must reference SaveAndSwitchMode — \
+        "SwitchModeWithSpecs handler must reference SaveAndSwitchMode — \
          dirty check confirm dialog is in this path (TT6)"
     );
     assert!(
         body.contains("DiscardAndSwitchMode"),
-        "Action::SwitchMode handler must reference DiscardAndSwitchMode — \
+        "SwitchModeWithSpecs handler must reference DiscardAndSwitchMode — \
          discard confirm is in this path (TT6)"
     );
 }

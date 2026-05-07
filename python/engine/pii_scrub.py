@@ -1,11 +1,10 @@
 """engine.pii_scrub -- PII allow-list scrubber.
 
 This is the canonical (engine-side) source for PII allow-list constants.
-The examples-side copy at examples/wandb/pii_scrub.py MUST keep the same
-constant values; consistency is asserted by
-python/tests/test_run_buffer_writer.py::test_pii_allowlist_consistency_engine_and_examples.
+The W&B upload responsibility has been migrated to the blacksheep repository;
+this module owns the engine-side constants and scrubbing logic only.
 
-Contract (unified with examples/wandb/pii_scrub.py, M12):
+Contract:
 
     pii_scrub(event_dict: dict, allowed_keys: frozenset) -> dict
 

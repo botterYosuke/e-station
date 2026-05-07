@@ -6,9 +6,6 @@ pub mod pane;
 pub mod replay_form;
 pub mod second_password;
 pub mod theme_editor;
-pub mod wandb_signin;
-pub mod wandb_submission_log;
-pub mod wandb_submit;
 
 use iced::widget::{center, container, mouse_area, opaque, stack};
 use iced::{Alignment, Color, Element, Length, padding};

@@ -35,5 +35,10 @@ pub use venue_caps::VenueCapsStore;
 ///   - 12: ReplayDataLoaded.instrument_id / granularity を追加（auto_generate_replay_panes 復活用）
 ///   - 13: LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: Vec<String> 追加（複数銘柄対応）
 ///   - 14: ReplayDataLoaded.session_epoch（リプレイファイル切替時のペイン全閉じ用、Approach B）
+///   - 15: LiveBuyingPower 追加 / LiveStateName に TRADING・STOPPING 追加 / EngineStartConfig live フィールド追加
+///   - 17: SCHEMA_MINOR を 16→17 に修正（e-station branch での正しい採番）
+///   - 18: K1 Venue::KabuStation / Exchange::KabuStationStock 追加（IPC で "kabu_station" を受理）
+///   - 19: P3-1 Exchange::KabuStation* 市場細分化 + 先物・OP バリアント追加
+///   - 20: P4-3 venue_capabilities.kabu_station に is_production フィールド追加
 pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 14;
+pub const SCHEMA_MINOR: u16 = 20;

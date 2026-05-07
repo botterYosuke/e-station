@@ -73,17 +73,18 @@ def test_start_engine_unknown_kind_raises() -> None:
         validate_start_engine("replay", "Bogus")
 
 
-# ── live モードで Hello.capabilities.nautilus.live が false のまま ──────────
+# ── N3: live capabilities が true に更新された ──────────────────────────────
 
 
-def test_live_mode_nautilus_live_capability_is_false() -> None:
+def test_live_mode_nautilus_live_capability_is_true() -> None:
+    """N3: live strategy 実行に対応したため nautilus.live=True に変更。"""
     caps = nautilus_capabilities("live")
     assert caps["backtest"] is True
-    assert caps["live"] is False
+    assert caps["live"] is True
 
 
-def test_replay_mode_nautilus_live_capability_is_false() -> None:
-    # N1 では replay でも live engine は起動しない
+def test_replay_mode_nautilus_live_capability_is_true() -> None:
+    """N3: live strategy 実行に対応したため nautilus.live=True に変更（mode に依存しない）。"""
     caps = nautilus_capabilities("replay")
     assert caps["backtest"] is True
-    assert caps["live"] is False
+    assert caps["live"] is True

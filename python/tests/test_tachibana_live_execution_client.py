@@ -229,8 +229,8 @@ class TestCacheConfigPersistenceOff:
     def test_cache_config_database_is_none(self):
         """start_live() が CacheConfig(database=None) を使っていることをソース検査で確認する。
 
-        自己発火パターン（CacheConfig を自前で作るだけ）を避け、実際に start_live()
-        の実装が database=None を維持していることを AST / ソース検査で保証する。
+        N3 実装: stub から完全実装に置き換えたため、assertion ではなく TradingNodeConfig で
+        CacheConfig(database=None) を使っていることをソース検査で確認する。
         """
         import inspect
         from engine.nautilus.engine_runner import NautilusRunner
@@ -240,28 +240,29 @@ class TestCacheConfigPersistenceOff:
             "start_live() must construct CacheConfig(database=None) "
             "to keep nautilus persistence OFF (spec.md §3.2)"
         )
-        assert "config.database is None" in src, (
-            "start_live() must assert config.database is None "
-            "as a guard against future misconfiguration"
-        )
 
-    def test_start_live_completes_without_exception(self):
-        """start_live() が例外なく終了すること（P-5）。"""
+    def test_start_live_has_correct_signature(self):
+        """N3: start_live() が完全なシグネチャを持つことを確認する（P-5）。"""
+        import inspect
         from engine.nautilus.engine_runner import NautilusRunner
 
-        runner = NautilusRunner()
-        # 例外が出なければ OK
-        runner.start_live()
+        sig = inspect.signature(NautilusRunner.start_live)
+        params = set(sig.parameters.keys())
+        # N3 完全実装では必須引数が揃っていること
+        assert "instrument_id" in params
+        assert "second_password" in params
+        assert "max_qty" in params
+        assert "max_notional_jpy" in params
 
-    def test_start_live_log_message(self, caplog):
-        """start_live() が新しいログメッセージを出力すること（P-5）。"""
+    def test_start_live_uses_cache_config_in_source(self, caplog):
+        """start_live() のソースに CacheConfig が使われていることを確認する（P-5）。"""
         import logging
+        import inspect
         from engine.nautilus.engine_runner import NautilusRunner
 
-        runner = NautilusRunner()
-        with caplog.at_level(logging.INFO, logger="engine.nautilus.engine_runner"):
-            runner.start_live()
-        assert any("adapter classes ready" in r.message for r in caplog.records)
+        src = inspect.getsource(NautilusRunner.start_live)
+        assert "CacheConfig" in src, "start_live() must use CacheConfig"
+        assert "TradingNodeConfig" in src, "start_live() must use TradingNodeConfig"
 
 
 # ---------------------------------------------------------------------------

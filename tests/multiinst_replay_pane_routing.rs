@@ -13,6 +13,15 @@
 
 const SOURCE: &str = include_str!("../src/main.rs");
 
+fn safe_window(s: &str, max_bytes: usize) -> &str {
+    let end = max_bytes.min(s.len());
+    let safe = (0..=end)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0);
+    &s[..safe]
+}
+
 fn extract_function_body<'a>(source: &'a str, sig_marker: &str) -> Option<&'a str> {
     let start = source.find(sig_marker)?;
     let rest = &source[start..];
@@ -92,7 +101,7 @@ fn handler_uses_task_batch_for_multi_instrument() {
         .expect("Message::ReplayDataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     // Grab enough of the arm body (~80 lines)
-    let window = &rest[..rest.len().min(8_000)];
+    let window = safe_window(rest, 8_000);
 
     assert!(
         window.contains("Task::batch"),
@@ -111,7 +120,7 @@ fn handler_iterates_over_instrument_ids() {
         .rfind("Message::ReplayDataLoaded {")
         .expect("Message::ReplayDataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
-    let window = &rest[..rest.len().min(8_000)];
+    let window = safe_window(rest, 8_000);
 
     assert!(
         window.contains("for id in") || window.contains("for id in &ids"),
@@ -130,7 +139,7 @@ fn handler_fallbacks_to_single_instrument_id_when_instrument_ids_is_none() {
         .rfind("Message::ReplayDataLoaded {")
         .expect("Message::ReplayDataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
-    let window = &rest[..rest.len().min(8_000)];
+    let window = safe_window(rest, 8_000);
 
     assert!(
         window.contains("unwrap_or_else") || window.contains("unwrap_or"),
@@ -153,7 +162,7 @@ fn handler_returns_task_none_when_ids_is_empty() {
         .rfind("Message::ReplayDataLoaded {")
         .expect("Message::ReplayDataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
-    let window = &rest[..rest.len().min(8_000)];
+    let window = safe_window(rest, 8_000);
 
     assert!(
         window.contains("ids.is_empty()") || window.contains("if ids.is_empty"),
@@ -172,7 +181,7 @@ fn handler_treats_empty_instrument_ids_vec_as_absent() {
         .rfind("Message::ReplayDataLoaded {")
         .expect("Message::ReplayDataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
-    let window = &rest[..rest.len().min(8_000)];
+    let window = safe_window(rest, 8_000);
 
     // The filter(|v| !v.is_empty()) normalises Some([]) → None so the
     // unwrap_or_else fallback picks up instrument_id instead.

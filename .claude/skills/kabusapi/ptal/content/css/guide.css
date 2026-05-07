@@ -1,0 +1,26 @@
+
+
+#contents-inner div.issue div.issue-inner h3 {
+    line-height: initial;
+    font-size: 1.4em;
+    font-weight: bold;
+    margin-bottom: 20px;
+}
+
+#contents-inner div.issue div.issue-inner h4 {
+    line-height: initial;
+    font-size: 1.2em;
+    font-weight: normal;
+    margin-bottom: 10px;
+}
+
+#contents-inner div.issue div.issue-inner p {
+    line-height: initial;
+    margin: 10px;
+}
+
+#contents-inner div.issue div.issue-inner ul {
+    line-height: initial;
+    list-style: none;
+    margin: 10px;
+}

@@ -253,6 +253,32 @@ pub enum Command {
         request_id: String,
     },
 
+    // ── schema 3.15: Replay playback control ─────────────────────────────────
+    /// Pause streaming replay at the current granularity boundary.
+    /// Accepted state: `RUNNING`.
+    PauseReplay {
+        request_id: String,
+    },
+
+    // ── schema 3.16: Step backward (snapshot restore) ────────────────────────
+    /// Step backward one granularity unit by restoring the most recent snapshot.
+    /// Accepted state: `PAUSED` and snapshot ring buffer non-empty.
+    StepBackward {
+        request_id: String,
+    },
+
+    /// Resume a paused replay.
+    /// Accepted state: `PAUSED`.
+    ResumeReplay {
+        request_id: String,
+    },
+
+    /// Advance replay by one granularity unit (Daily/Minute/Trade) then pause.
+    /// Accepted states: `RUNNING` or `PAUSED`.
+    StepReplay {
+        request_id: String,
+    },
+
     // ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────
     /// 戦略 .py から SCENARIO 定数を安全抽出するよう Python に要求する（F6a）。
     /// Python 側は ast.parse + ast.literal_eval のみ使用（副作用ゼロ）。
@@ -581,6 +607,22 @@ impl std::fmt::Debug for Command {
                 .debug_struct("ForceStopReplay")
                 .field("request_id", request_id)
                 .finish(),
+            Command::PauseReplay { request_id } => f
+                .debug_struct("PauseReplay")
+                .field("request_id", request_id)
+                .finish(),
+            Command::ResumeReplay { request_id } => f
+                .debug_struct("ResumeReplay")
+                .field("request_id", request_id)
+                .finish(),
+            Command::StepReplay { request_id } => f
+                .debug_struct("StepReplay")
+                .field("request_id", request_id)
+                .finish(),
+            Command::StepBackward { request_id } => f
+                .debug_struct("StepBackward")
+                .field("request_id", request_id)
+                .finish(),
         }
     }
 }
@@ -611,15 +653,25 @@ pub struct EngineStartConfig {
     /// schema 3.13: 複数銘柄指定。None のとき instrument_id 単体で動作（後方互換）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument_ids: Option<Vec<String>>,
-    pub start_date: String,
-    pub end_date: String,
-    pub initial_cash: String,
-    pub granularity: ReplayGranularity,
+    /// Replay-only fields — optional so live callers can omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_cash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<ReplayGranularity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_file: Option<String>,
     /// JSON object only — array/scalar rejected at HTTP boundary before IPC send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Live-only fields — optional so replay callers can omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_qty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_notional_jpy: Option<u64>,
 }
 
 // ── Order sub-types (schema 1.3) ──────────────────────────────────────────────
@@ -832,6 +884,8 @@ pub enum CurrentEngineState {
     Disconnected,
     Connecting,
     Connected,
+    /// N3: live strategy 実行中
+    Trading,
 }
 
 /// State guard で reject された command 名 (Python `schemas.AttemptedCommand` と一致)。
@@ -846,6 +900,14 @@ pub enum AttemptedCommand {
     StopReplay,
     /// F7: ForceStopReplay fallback (schema 3.11)
     ForceStopReplay,
+    /// schema 3.15: pause streaming replay
+    PauseReplay,
+    /// schema 3.15: resume paused replay
+    ResumeReplay,
+    /// schema 3.15: step one granularity unit forward
+    StepReplay,
+    /// schema 3.16: step one granularity unit backward (snapshot restore)
+    StepBackward,
     SubmitOrder,
     ModifyOrder,
     CancelOrder,
@@ -865,6 +927,10 @@ impl AttemptedCommand {
             AttemptedCommand::SetReplaySpeed => "SetReplaySpeed",
             AttemptedCommand::StopReplay => "StopReplay",
             AttemptedCommand::ForceStopReplay => "ForceStopReplay",
+            AttemptedCommand::PauseReplay => "PauseReplay",
+            AttemptedCommand::ResumeReplay => "ResumeReplay",
+            AttemptedCommand::StepReplay => "StepReplay",
+            AttemptedCommand::StepBackward => "StepBackward",
             AttemptedCommand::SubmitOrder => "SubmitOrder",
             AttemptedCommand::ModifyOrder => "ModifyOrder",
             AttemptedCommand::CancelOrder => "CancelOrder",
@@ -893,6 +959,7 @@ impl CurrentEngineState {
             CurrentEngineState::Disconnected => "DISCONNECTED",
             CurrentEngineState::Connecting => "CONNECTING",
             CurrentEngineState::Connected => "CONNECTED",
+            CurrentEngineState::Trading => "TRADING",
         }
     }
 }
@@ -1285,9 +1352,24 @@ pub enum EngineEvent {
 
     // ── N1.11: streaming replay pacing marker ────────────────────────────────
     /// Python が営業日跨ぎ時に emit するマーカー（N1.11 D7）。
-    /// Rust 側は現状 ignore してよい（将来の日付ヘッダー表示などに流用可能）。
+    /// Rust 側はリプレイバーの「現在日」表示を更新するために使う。
     DateChangeMarker {
         date: String,
+    },
+
+    // ── schema 3.16: Replay Step-backward events ─────────────────────────────
+    /// Emitted by Python before restoring a snapshot (Step- operation).
+    /// Rust UI should switch the pane to "replace mode" to avoid duplicate
+    /// events being treated as additions. `step_index` is the snapshot's
+    /// granularity step index; `ts_event_ms` is the snapshot's timestamp.
+    RestoreSnapshot {
+        step_index: u64,
+        ts_event_ms: i64,
+    },
+    /// Emitted by Python after a StepBackward operation or whenever the
+    /// snapshot ring buffer changes. Rust UI updates the ⏮ button enable state.
+    ReplayHistoryChanged {
+        has_history: bool,
     },
 
     // ── F7: モード切替 (schema 3.11) ─────────────────────────────────────────────
@@ -1351,6 +1433,19 @@ pub enum EngineEvent {
     /// `count` は接続中のクライアント総数（切断後）。
     ClientDisconnected {
         count: u32,
+    },
+
+    // ── N3: Live strategy buying power (schema 3.17) ─────────────────────────
+    /// Live strategy 実行中に OrderFilled 後に push される買付余力スナップショット。
+    LiveBuyingPower {
+        strategy_id: String,
+        /// 現金残高（decimal 文字列、円）
+        cash: String,
+        /// 買付余力（decimal 文字列、円）
+        buying_power: String,
+        /// 評価額（decimal 文字列、円）
+        equity: String,
+        ts_event_ms: i64,
     },
 }
 

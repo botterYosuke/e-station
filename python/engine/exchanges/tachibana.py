@@ -87,6 +87,40 @@ _WS_PARAM_ALLOWED_RE: re.Pattern[str] = re.compile(r"^[0-9A-Za-z]+$")
 _ST_VENUE_ERROR_RATE_LIMIT_S: float = 30.0
 
 
+def _apply_carry_forward(
+    norm_bids: list[dict[str, str]],
+    norm_asks: list[dict[str, str]],
+    last_bids: list[dict[str, str]],
+    last_asks: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """片側が空の FD フレームで直前値をキャリーフォワードする（D-A）。
+
+    キャッシュが空の場合（初回フレームなど）は補完せず空リストのまま返す。
+    参照共有を避けるため list() でコピーを返す。
+    """
+    if norm_bids and not norm_asks:
+        if last_asks:
+            log.debug(
+                "tachibana: depth partial (no asks) — carrying forward last asks"
+            )
+            norm_asks = list(last_asks)
+        else:
+            log.debug(
+                "tachibana: depth partial (no asks) — no cache yet, emitting empty"
+            )
+    elif norm_asks and not norm_bids:
+        if last_bids:
+            log.debug(
+                "tachibana: depth partial (no bids) — carrying forward last bids"
+            )
+            norm_bids = list(last_bids)
+        else:
+            log.debug(
+                "tachibana: depth partial (no bids) — no cache yet, emitting empty"
+            )
+    return norm_bids, norm_asks
+
+
 def build_ws_url(url_event_ws: str, ticker: str, sizyou_c: str) -> str:
     """Build the EVENT WebSocket subscription URL — pure function.
 
@@ -1153,18 +1187,24 @@ class TachibanaWorker(ExchangeWorker):
         # on_connect から bump する。
         conn_counter = 0
         ssid_holder = [f"{stream_session_id}:1"]
+        # D-A: last known bids/asks for carry-forward on partial FD frames
+        last_norm_bids: list[dict[str, str]] = []
+        last_norm_asks: list[dict[str, str]] = []
 
         def _on_connect_depth() -> None:
-            nonlocal conn_counter
+            nonlocal conn_counter, last_norm_bids, last_norm_asks
             conn_counter += 1
             ssid_holder[0] = f"{stream_session_id}:{conn_counter}"
             if on_ssid is not None:
                 on_ssid(ssid_holder[0])
             processor.reset()
+            last_norm_bids = []   # H-1: stale キャッシュを破棄（reconnect 時）
+            last_norm_asks = []   # H-1
             # H-C rate limiter は再接続毎にリセットして 1 件は必ず emit する
             st_last_emit.clear()
 
         async def _cb_depth(frame_type: str, fields: dict, recv_ts_ms: int) -> None:
+            nonlocal last_norm_bids, last_norm_asks
             ssid = ssid_holder[0]
             # Update shared counts (M-C). Counter handles missing keys as 0.
             if frame_type in ("FD", "KP", "ST"):
@@ -1185,6 +1225,28 @@ class TachibanaWorker(ExchangeWorker):
                     norm_bids, norm_asks = self._normalize_depth_levels(
                         ticker, depth["bids"], depth["asks"]
                     )
+                    # D-A: 片側が空の FD フレーム（GAP/GBP 欠落）では直前値を維持。
+                    # 立花 API は稀に ask または bid フィールドを省略したフレームを
+                    # 送出する（プレマーケット・薄い板等）。空リストで DepthSnapshot
+                    # を送ると Rust 側が既存板を完全消去するため、最後に受信した
+                    # 非空の値でキャリーフォワードする。
+                    # 両側空フレームは outbox.append 前の `if depth:` でほぼガード済み。
+                    norm_bids, norm_asks = _apply_carry_forward(
+                        norm_bids, norm_asks, last_norm_bids, last_norm_asks
+                    )
+                    # M-1: list() コピーで参照共有を排除
+                    if norm_bids:
+                        last_norm_bids = list(norm_bids)
+                    if norm_asks:
+                        last_norm_asks = list(norm_asks)
+                    # D-A: normalize 後に両側空になった場合は板消去を防ぐためスキップ
+                    if not norm_bids and not norm_asks:
+                        log.debug(
+                            "tachibana: depth snapshot fully empty after normalize"
+                            " ticker=%s — skipping outbox",
+                            ticker,
+                        )
+                        return
                     outbox.append({
                         "event": "DepthSnapshot",
                         "venue": "tachibana",

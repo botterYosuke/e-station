@@ -76,6 +76,7 @@ fn available_markets(venue: Venue) -> &'static [MarketKind] {
         // TODO: include after protobuf implementation and Mexc spot markets ready to stream
         Venue::Mexc => &[MarketKind::LinearPerps, MarketKind::InversePerps],
         Venue::Tachibana => &[MarketKind::Stock],
+        Venue::KabuStation => &[MarketKind::Stock, MarketKind::Future, MarketKind::Option],
         Venue::Replay => &[],
     }
 }
@@ -947,6 +948,8 @@ impl TickersTable {
         let linear_markets_btn = self.market_filter_btn("Linear", MarketKind::LinearPerps);
         let inverse_markets_btn = self.market_filter_btn("Inverse", MarketKind::InversePerps);
         let stock_market_btn = self.market_filter_btn("Stock", MarketKind::Stock);
+        let future_market_btn = self.market_filter_btn("Future", MarketKind::Future);
+        let option_market_btn = self.market_filter_btn("Option", MarketKind::Option);
 
         let exchange_filters = {
             let mut col = column![];
@@ -996,6 +999,8 @@ impl TickersTable {
                 linear_markets_btn.width(Length::Fill),
                 inverse_markets_btn.width(Length::Fill),
                 stock_market_btn.width(Length::Fill),
+                future_market_btn.width(Length::Fill),
+                option_market_btn.width(Length::Fill),
             ]
             .spacing(4),
             rule::horizontal(1.0).style(style::split_ruler),
@@ -1336,7 +1341,10 @@ impl TickersTable {
                         + " "
                         + &market.to_string()
                         + match market {
-                            MarketKind::Spot | MarketKind::Stock => "",
+                            MarketKind::Spot
+                            | MarketKind::Stock
+                            | MarketKind::Future
+                            | MarketKind::Option => "",
                             MarketKind::LinearPerps | MarketKind::InversePerps => " Perp",
                         }
                 ),

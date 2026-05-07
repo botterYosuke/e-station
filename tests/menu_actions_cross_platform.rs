@@ -4,11 +4,9 @@
 //! expected function definitions and Action variants as specified in
 //! `docs/✅menu-and-footer/P8-widget-menu-bar-linux.md`.
 //!
-//! Key invariants (DoD-7, DoD-11):
+//! Key invariants (DoD-7):
 //! - `actions_for_mode(Live)` ⊇ {Open, Save, SaveAs, Quit}
-//! - `actions_for_mode(Replay)` ⊇ {ReplayStart, ReplayStop, Quit}
-//! - `actions_for_mode` does NOT contain Tools submenu actions
-//!   (SubmitToWandb / SignInWandb / SignOutWandb / OpenSubmissionLog / ClearRunBuffer)
+//! - `actions_for_mode(Replay)` == `actions_for_mode(Live)` — replay start/stop moved to control bar
 
 fn read_menu() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/menu.rs");
@@ -57,27 +55,36 @@ fn live_actions_include_quit() {
     );
 }
 
-// ── DoD-7: replay mode actions ─────────────────────────────────────────────
+// ── DoD-7: replay mode actions — same set as live (Step 7) ────────────────
 
 #[test]
-fn replay_actions_include_replay_start() {
+fn replay_actions_include_open() {
     let src = read_menu();
     assert!(
-        src.contains("Action::ReplayStart"),
-        "actions_for_mode(Replay) must include Action::ReplayStart"
+        src.contains("Action::Open"),
+        "actions_for_mode(Replay) must include Action::Open"
     );
 }
 
 #[test]
-fn replay_actions_include_replay_stop() {
+fn replay_actions_do_not_include_replay_start_in_function_body() {
     let src = read_menu();
+    // `actions_for_mode` must not return ReplayStart — that action was moved to the
+    // replay control bar (schema 3.15). The variants ReplayStart/ReplayStop have been
+    // removed from the Action enum entirely (schema 3.16).
+    let fn_body_start = src.find("pub fn actions_for_mode").unwrap_or(0);
+    let fn_body_end = src[fn_body_start..]
+        .find("\n}")
+        .map(|i| fn_body_start + i + 2)
+        .unwrap_or(src.len());
+    let fn_body = &src[fn_body_start..fn_body_end];
     assert!(
-        src.contains("Action::ReplayStop"),
-        "actions_for_mode(Replay) must include Action::ReplayStop"
+        !fn_body.contains("ReplayStart"),
+        "actions_for_mode must not return Action::ReplayStart"
     );
 }
 
-// ── DoD-11: actions_for_mode excludes Tools submenu actions ───────────────
+// ── actions_for_mode function must exist ──────────────────────────────────
 
 #[test]
 fn actions_for_mode_function_exists() {
@@ -85,98 +92,6 @@ fn actions_for_mode_function_exists() {
     assert!(
         src.contains("pub fn actions_for_mode"),
         "menu.rs must export `pub fn actions_for_mode`"
-    );
-}
-
-#[test]
-fn tools_actions_are_in_separate_function() {
-    let src = read_menu();
-    // tools_actions_for_state must exist as a distinct function (not mixed into actions_for_mode).
-    assert!(
-        src.contains("pub fn tools_actions_for_state"),
-        "menu.rs must export `pub fn tools_actions_for_state` as a separate function from actions_for_mode (DoD-11)"
-    );
-}
-
-#[test]
-fn action_enum_has_submit_to_wandb() {
-    let src = read_menu();
-    assert!(
-        src.contains("SubmitToWandb"),
-        "Action enum must have SubmitToWandb variant"
-    );
-}
-
-#[test]
-fn action_enum_has_sign_in_wandb() {
-    let src = read_menu();
-    assert!(
-        src.contains("SignInWandb"),
-        "Action enum must have SignInWandb variant"
-    );
-}
-
-#[test]
-fn action_enum_has_sign_out_wandb() {
-    let src = read_menu();
-    assert!(
-        src.contains("SignOutWandb"),
-        "Action enum must have SignOutWandb variant"
-    );
-}
-
-#[test]
-fn action_enum_has_open_submission_log() {
-    let src = read_menu();
-    assert!(
-        src.contains("OpenSubmissionLog"),
-        "Action enum must have OpenSubmissionLog variant"
-    );
-}
-
-#[test]
-fn action_enum_has_clear_run_buffer() {
-    let src = read_menu();
-    assert!(
-        src.contains("ClearRunBuffer"),
-        "Action enum must have ClearRunBuffer variant"
-    );
-}
-
-// ── `actions_for_mode` does NOT mention Tools actions ─────────────────────
-
-#[test]
-fn actions_for_mode_body_excludes_submit_to_wandb() {
-    let src = read_menu();
-    // Extract only the body of `actions_for_mode` to verify it doesn't include Tools variants.
-    let start = src
-        .find("pub fn actions_for_mode")
-        .expect("actions_for_mode must exist");
-    // Stop at the first blank line after the function (excludes the doc comment of the
-    // next pub fn which may legitimately mention tool-action names).
-    let after = &src[start..];
-    let end = after.find("\n\n").unwrap_or(after.len());
-    let body = &after[..end];
-
-    assert!(
-        !body.contains("SubmitToWandb"),
-        "actions_for_mode body must NOT contain SubmitToWandb (DoD-11 responsibility separation)"
-    );
-    assert!(
-        !body.contains("SignInWandb"),
-        "actions_for_mode body must NOT contain SignInWandb (DoD-11)"
-    );
-    assert!(
-        !body.contains("SignOutWandb"),
-        "actions_for_mode body must NOT contain SignOutWandb (DoD-11)"
-    );
-    assert!(
-        !body.contains("OpenSubmissionLog"),
-        "actions_for_mode body must NOT contain OpenSubmissionLog (DoD-11)"
-    );
-    assert!(
-        !body.contains("ClearRunBuffer"),
-        "actions_for_mode body must NOT contain ClearRunBuffer (DoD-11)"
     );
 }
 

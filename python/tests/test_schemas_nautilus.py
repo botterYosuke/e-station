@@ -34,7 +34,13 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)
     # schema 3.13: SCHEMA_MINOR を 12 → 13 に bump
     # (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: list[str] | None 追加)
-    assert s.SCHEMA_MINOR == 13
+    # schema 3.14: SCHEMA_MINOR を 13 → 14 に bump (ReplayBuyingPower 追加)
+    # schema 3.15: SCHEMA_MINOR を 14 → 15 に bump (LiveBuyingPower 追加 / LiveStateName に TRADING・STOPPING 追加)
+    # N3: SCHEMA_MINOR を 16 → 17 に bump（live strategy 実行基盤）
+    # kabu venue Phase 1: SCHEMA_MINOR を 17 → 18 に bump
+    # kabu venue Phase 2: SCHEMA_MINOR を 18 → 19 に bump (発注経路 + RATE_LIMITED / UNSUPPORTED_INSTRUMENT reason_code)
+    # kabu venue Phase 4 (P4-3): SCHEMA_MINOR を 19 → 20 に bump (venue_capabilities.kabu_station.is_production)
+    assert s.SCHEMA_MINOR == 20
     assert s.SCHEMA_MAJOR == 3
 
 

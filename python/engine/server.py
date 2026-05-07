@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hmac
 import logging
 import os
+import queue as _stdlib_queue
 import threading
 import time
 import uuid
 from collections import deque
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 import orjson
@@ -40,6 +43,18 @@ from engine.exchanges.tachibana_login_flow import (
     LoginCancelled,
     startup_login as tachibana_startup_login,
     _MSG_LOGIN_FAILED,
+)
+from engine.exchanges.kabusapi import KabuStationVenue
+from engine.exchanges.kabusapi_url import resolve_kabu_env
+from engine.exchanges.kabusapi_auth import (
+    KabuApiError,
+    KabuConnectionError as KabuConnectionError,
+    KabuLoginCancelledError,
+    KabuRateLimitError,
+    KabuTradeCancelledError,
+    KabuTradeLockedOutError,
+    KabuTradePasswordInvalidError,
+    KabuTokenExpiredError,
 )
 from engine.exchanges.binance import BinanceWorker
 from engine.exchanges.bybit import BybitWorker
@@ -80,6 +95,7 @@ from engine.schemas import (
 from engine.mode import (
     ModeMismatchError,
     UnknownEngineKindError,
+    nautilus_capabilities,
     validate_start_engine,
 )
 
@@ -95,6 +111,7 @@ class ReplayState(Enum):
     IDLE = auto()
     LOADED = auto()
     RUNNING = auto()
+    PAUSED = auto()
     STOPPING = auto()
 
 
@@ -102,6 +119,30 @@ class LiveState(Enum):
     DISCONNECTED = auto()
     CONNECTING = auto()
     CONNECTED = auto()
+    TRADING = auto()    # Phase 2: live strategy 実行中
+    STOPPING = auto()   # Phase 2: graceful stop 待ち
+
+
+# ── schema 3.16: Snapshot ring buffer ────────────────────────────────────────
+
+
+@dataclass
+class ReplaySnapshot:
+    """One granularity-boundary snapshot for Step- (snapshot ring buffer).
+
+    仕様書 §Snapshot ring buffer 設計参照。
+    """
+
+    step_index: int           # 粒度ステップ番号（0-based）
+    portfolio: dict           # to_ipc_dict() 由来の ReplayBuyingPower event dict（UI 送信用）
+    open_orders: list         # 未約定注文リスト
+    strategy_state: object    # copy.deepcopy(strategy) — 任意の Python オブジェクト
+    ui_events: list = field(default_factory=list)  # この step で送出した UI イベント群
+    # schema 3.16 HIGH-2: runner 側 _portfolio / _last_prices 復元用のフル状態。
+    # to_snapshot_dict() 由来: {"cash": str, "positions": {...}, "last_prices": {...}}
+    # engine_runner がスナップショット取得時に populate し、StepBackward 後に runner へ戻す。
+    portfolio_state: dict = field(default_factory=dict)
+
 
 # C-M2: httpx/httpcore の INFO/DEBUG ログには立花 API の URL が含まれ、
 # クエリパラメータ sSecondPassword が露出するため WARNING 以上に抑制する。
@@ -279,6 +320,8 @@ class DataEngineServer:
         token: str,
         *,
         dev_tachibana_login_allowed: bool = False,
+        dev_kabu_login_allowed: bool = False,
+        dev_kabu_trade_password_allowed: bool = False,
         cache_dir: Path | None = None,
         config_dir: Path | None = None,
         tachibana_is_demo: bool = True,
@@ -287,6 +330,8 @@ class DataEngineServer:
         self._port = port
         self._token = token
         self._dev_tachibana_login_allowed = dev_tachibana_login_allowed
+        self._dev_kabu_login_allowed = dev_kabu_login_allowed
+        self._dev_kabu_trade_password_allowed = dev_kabu_trade_password_allowed
         # B3: cache_dir is plumbed from __main__.py (T4 stdin payload). It
         # falls back to a per-user default so dev mode (`uv run python -m
         # engine --port ... --token ...`) keeps working without an explicit
@@ -374,6 +419,18 @@ class DataEngineServer:
         # Task handle for the background startup login (cancelled on disconnect).
         self._tachibana_startup_task: asyncio.Task | None = None
 
+        # ── KabuStation state (K7 / Phase 1) ─────────────────────────────
+        # H-2: resolve_kabu_env() をインスタンス初期化時にキャッシュ。
+        # _build_ready() と _startup_kabu_station() が同じ env を参照するよう保証する。
+        self._kabu_env: str = resolve_kabu_env()
+        self._kabu_venue: KabuStationVenue | None = None
+        self._kabu_login_inflight = asyncio.Lock()
+        self._kabu_startup_task: asyncio.Task | None = None
+        self._kabu_fill_poller_task: asyncio.Task | None = None  # [H-1]
+        # VenueReady を emit した venue 名。None = 未接続 / "tachibana" / "kabu_station"。
+        # StartEngine(engine="Live") の venue guard に使う。
+        self._connected_venue: str | None = None
+
         # ── Phase O2: EVENT WebSocket EC 約定通知 ────────────────────────
         # venue_order_id → client_order_id 逆引きマップ（EC フレームには client_order_id がない）
         self._venue_to_client: dict[str, str] = {}
@@ -417,10 +474,33 @@ class DataEngineServer:
         # N1.11: streaming replay の pacing 倍率。SetReplaySpeed で変更される。
         # compute_sleep_sec は multiplier >= 1 を要求するため、デフォルト 1 は安全。
         self._replay_speed_multiplier: int = 1
+        # schema 3.15: Pause/Step 制御フィールド。
+        self._replay_paused: bool = False
+        self._replay_step_request: int = 0  # StepReplay で +1、runner が消費して -1
+        # schema 3.16: Snapshot ring buffer for Step- (StepBackward).
+        # M-3: protected by threading.Lock because push_snapshot is called from the
+        # runner thread (asyncio.to_thread), while StepBackward reads/pops from the
+        # asyncio event loop thread.
+        self._replay_snapshots: deque[ReplaySnapshot] = deque(maxlen=1000)
+        self._replay_snapshots_lock = threading.Lock()
+        # HIGH-2: called (thread-safe) when buffer transitions 0→1 so Rust ⏮ button enables.
+        # Set to _emit_threadsafe lambda in _handle_start_engine; None outside an engine run.
+        self._notify_history_fn: "Callable[[], None] | None" = None
+        # HIGH-1: runner thread writes strategy_state here when _restore_snapshot fires.
+        # Engine runner reads + clears before processing the next step.
+        self._restore_strategy_holder: list = [None]
+        # HIGH-2: runner thread reads portfolio_state from here when _restore_snapshot fires.
+        # Holds {"cash": str, "positions": {...}, "last_prices": {...}} or None.
+        self._restore_portfolio_holder: list = [None]
 
         # B3: State machines for replay and live command gating.
         self._replay_state: ReplayState = ReplayState.IDLE
         self._live_state: LiveState = LiveState.DISCONNECTED
+
+        # Phase 2: live strategy 用の FD/EC frame キュー。
+        # server.py (loop A) が put_nowait し、start_live worker が get して消費する。
+        self._live_fd_queue: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=10_000)
+        self._live_ec_queue: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=1_000)
 
         # N1.16: REPLAY 仮想ポートフォリオ（CLMZanKaiKanougaku を呼ばない純粋 Python 実装）。
         # LoadReplayData 受信時に initial_cash で reset() する。
@@ -466,6 +546,79 @@ class DataEngineServer:
         """
         self._replay_session_epoch += 1
         return self._replay_session_epoch
+
+    def _push_replay_snapshot(
+        self,
+        step_index: int,
+        portfolio: dict,
+        open_orders: list,
+        strategy_state: object,
+        ui_events: list,
+        portfolio_state: "dict | None" = None,
+    ) -> None:
+        """schema 3.16: snapshot ring buffer に 1 粒度境界スナップショットを push する。
+
+        - ``copy.deepcopy(strategy_state)`` が失敗した場合はスナップショットを保存せずに
+          ``logger.warning`` でログして skip する（deepcopy 失敗対策）。
+        - ``has_history`` の変化は呼び出し元の pacing ループが担当しない。
+          StepBackward ハンドラが pop 後に ReplayHistoryChanged を emit する。
+
+        スレッド安全: ``_replay_snapshots_lock`` で保護する。runner thread
+        (asyncio.to_thread 内) から呼ばれる想定。
+        """
+        try:
+            strategy_copy = copy.deepcopy(strategy_state)
+        except Exception as exc:
+            log.warning(
+                "snapshot deepcopy failed at step %d: %s — skipping snapshot",
+                step_index,
+                exc,
+            )
+            return
+        snap = ReplaySnapshot(
+            step_index=step_index,
+            portfolio=portfolio,
+            open_orders=list(open_orders),
+            strategy_state=strategy_copy,
+            ui_events=list(ui_events),
+            portfolio_state=dict(portfolio_state) if portfolio_state else {},
+        )
+        with self._replay_snapshots_lock:
+            was_empty = len(self._replay_snapshots) == 0
+            self._replay_snapshots.append(snap)
+        log.debug("push_snapshot: step_index=%d buffer_len=%d", step_index, len(self._replay_snapshots))
+        # HIGH-2: notify Rust that history is now available (0→1 transition only).
+        if was_empty and (fn := self._notify_history_fn) is not None:
+            fn()
+
+    def _restore_snapshot(self, snap: ReplaySnapshot) -> None:
+        """schema 3.16: ``ReplaySnapshot`` の内容を server state に復元する。
+
+        ポートフォリオ・注文・戦略状態を snapshot から書き戻す。
+        呼び出し元（StepBackward ハンドラ）が ``_replay_snapshots_lock`` を
+        保持した状態で pop した後に呼ぶこと（unlock 後に呼んでも安全）。
+        """
+        # ポートフォリオ復元: _replay_portfolio はデシリアライズ済み dict から再構築
+        try:
+            from decimal import Decimal as _Decimal
+            from engine.nautilus.portfolio_view import PortfolioView as _PortfolioView
+            # portfolio_state（フル状態）があればそれを優先。なければ IPC dict（cash のみ）で復元。
+            _pstate = snap.portfolio_state if snap.portfolio_state else snap.portfolio
+            restored_portfolio = _PortfolioView(_Decimal(str(_pstate.get("cash", "0"))))
+            restored_portfolio._restore_from_dict(_pstate)
+            self._replay_portfolio = restored_portfolio
+        except Exception as exc:
+            log.warning("_restore_snapshot: portfolio restore failed: %s", exc)
+        # 注文リスト復元
+        self._replay_streaming_fills = list(snap.open_orders)
+        # HIGH-1: strategy_state をホルダーに置く。engine_runner が次ステップ開始前に
+        # strategy_instance の属性を in-place で更新して None にリセットする。
+        self._restore_strategy_holder[0] = snap.strategy_state
+        # HIGH-2: portfolio_state をホルダーに置く。engine_runner が次ステップ開始前に
+        # _portfolio / _last_prices をローカルで復元して None にリセットする。
+        if snap.portfolio_state:
+            self._restore_portfolio_holder[0] = snap.portfolio_state
+        log.debug("_restore_snapshot: step_index=%d restored strategy_state queued", snap.step_index)
 
     async def serve(self) -> None:
         async with websockets.serve(
@@ -564,6 +717,14 @@ class DataEngineServer:
                     except (asyncio.CancelledError, Exception):
                         pass
                 self._tachibana_startup_task = None
+                kabu_task = self._kabu_startup_task
+                if kabu_task is not None and not kabu_task.done():
+                    kabu_task.cancel()
+                    try:
+                        await kabu_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self._kabu_startup_task = None
                 # Phase O2: EVENT ループも停止する
                 if self._event_task is not None and not self._event_task.done():
                     self._event_task.cancel()
@@ -585,6 +746,7 @@ class DataEngineServer:
                 # stuck する。
                 self._replay_state = ReplayState.IDLE
                 self._live_state = LiveState.DISCONNECTED
+                self._connected_venue = None
                 self._replay_streaming_fills.clear()
 
     async def _handshake(self, ws: ServerConnection) -> None:
@@ -684,18 +846,29 @@ class DataEngineServer:
             if caps:
                 venue_caps[venue] = caps
 
+        # Phase 1: kabu_station は _workers に含まれないため capabilities を直接追記
+        from engine.exchanges.kabusapi_register import RegisterSet as _KabuRegisterSet
+        # P4-3: is_production フラグを追加。KABU_ALLOW_PROD=1 + KABU_ENV=prod の二重判定で True。
+        venue_caps["kabu_station"] = {
+            "requires_local_app": True,
+            "max_push_symbols": _KabuRegisterSet.MAX,  # architecture.md §8: 50 と一致を保証
+            "supports_amend": False,
+            "requires_trade_password_for_cancel": True,
+            "is_production": self._kabu_env == "prod",
+        }
+
         ready = Ready(
             schema_major=SCHEMA_MAJOR,
             schema_minor=SCHEMA_MINOR,
             engine_version=_ENGINE_VERSION,
             engine_session_id=self._engine_session_id,
             capabilities={
-                "supported_venues": list(self._workers.keys()),
+                "supported_venues": list(self._workers.keys()) + ["kabu_station"],
                 "supports_bulk_trades": True,
                 "supports_depth_binary": False,
                 "venue_capabilities": venue_caps,
-                # N1.1: Phase N1 では BacktestEngine のみ実装、Live は N2 から。
-                "nautilus": {"backtest": True, "live": False},
+                # N3: Phase 2+7 で live strategy 対応済み。mode.py から読む。
+                "nautilus": nautilus_capabilities(self._mode),
                 # N1.13: クライアントから受け取った mode をエコーバック。
                 # UI 側は capabilities["mode"] で正規化された値を読む。
                 "mode": self._mode,
@@ -949,6 +1122,84 @@ class DataEngineServer:
             # 走行中の streaming runner は self._replay_speed_multiplier を読むことで
             # 次の tick から新しい速度を使う。
 
+        elif op == "PauseReplay":
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("PauseReplay", ReplayState.RUNNING, ws=ws, request_id=request_id):
+                return
+            self._replay_paused = True
+            self._replay_state = ReplayState.PAUSED
+            log.info("PauseReplay: request_id=%s", request_id)
+
+        elif op == "ResumeReplay":
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("ResumeReplay", ReplayState.PAUSED, ws=ws, request_id=request_id):
+                return
+            self._replay_paused = False
+            self._replay_state = ReplayState.RUNNING
+            log.info("ResumeReplay: request_id=%s", request_id)
+
+        elif op == "StepReplay":
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("StepReplay", ReplayState.PAUSED, ws=ws, request_id=request_id):
+                return
+            self._replay_step_request += 1
+            log.info("StepReplay: request_id=%s pending_steps=%d", request_id, self._replay_step_request)
+
+        elif op == "StepBackward":
+            # schema 3.16: 1 粒度後退（snapshot 復元）。受理状態: PAUSED かつ snapshot 非空。
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("StepBackward", ReplayState.PAUSED, ws=ws, request_id=request_id):
+                return
+            with self._replay_snapshots_lock:
+                if len(self._replay_snapshots) < 2:
+                    # buffer に「現在状態 + 1つ前」が揃っていない → 戻れない
+                    self._outbox.send_to(ws, {
+                        "event": "EngineBusy",
+                        "current_state": self._replay_state.name,
+                        "attempted_command": "StepBackward",
+                        "reason": "no previous snapshot to restore",
+                        "request_id": request_id,
+                    })
+                    return
+                self._replay_snapshots.pop()  # 現在状態を捨てる
+                snap = self._replay_snapshots[-1]  # 1つ前（新しい末尾）を復元
+                has_history = len(self._replay_snapshots) > 1
+            # 1. RestoreSnapshot event を先行 emit して Rust UI をリセットモードに切り替える
+            self._outbox.append({
+                "event": "RestoreSnapshot",
+                "step_index": snap.step_index,
+                "ts_event_ms": int(snap.portfolio.get("ts_event_ms", 0)),
+            })
+            # 2. portfolio / orders / strategy を復元
+            self._restore_snapshot(snap)
+            # 2.5: BuyingPower UI を復元済みポートフォリオ値で更新する
+            # (ui_events は engine_runner が [] で渡すため空。portfolio dict は
+            #  to_ipc_dict() が生成した ReplayBuyingPower event を直接 emit する)
+            if snap.portfolio.get("event") == "ReplayBuyingPower":
+                self._outbox.append(snap.portfolio)
+            # 2.6: OrderList UI を復元済み order list で push 更新する。
+            # _restore_snapshot で _replay_streaming_fills は復元済み。GetOrderList を
+            # 待たずに UI に push して order panel を即座にロールバックさせる。
+            self._outbox.append({
+                "event": "OrderListUpdated",
+                "request_id": "",
+                "orders": list(self._replay_streaming_fills),
+            })
+            # 3. ui_events を再 emit（Rust UI が RestoreSnapshot 受信済みのため重複扱いにならない）
+            for ev in snap.ui_events:
+                self._outbox.append(ev)
+            # 4. ReplayHistoryChanged で Rust ボタン有効/無効を更新
+            self._outbox.append({
+                "event": "ReplayHistoryChanged",
+                "has_history": has_history,
+            })
+            log.info(
+                "StepBackward: restored step_index=%d has_history=%s request_id=%s",
+                snap.step_index,
+                has_history,
+                request_id,
+            )
+
         elif op == "LoadStrategyScenario":
             # F6: SCENARIO 定数の安全抽出（ast.parse のみ・import なし）。
             self._spawn_fetch(
@@ -1193,9 +1444,12 @@ class DataEngineServer:
         if not self._check_live_state("SubmitOrder", LiveState.CONNECTED, ws=ws):
             return
 
-        # N3.C: 発注経路は "tachibana" のみ ("replay" は上のブランチで処理済み)
+        # N3.C: 発注経路は "tachibana" / "kabu_station" ("replay" は上のブランチで処理済み)
         # 暗号資産 venue は自身のデータワーカーを持つが、発注 IPC 経路はサポートしない
-        if venue != "tachibana":
+        if venue == "kabu_station":
+            await self._do_submit_order_kabu(msg, ws=ws)
+            return
+        elif venue != "tachibana":
             self._outbox.append(
                 {
                     "event": "Error",
@@ -1521,6 +1775,496 @@ class DataEngineServer:
         else:
             self._session_holder.on_submit_success()
 
+    def _clear_kabu_session(self) -> None:
+        """トークン期限切れ・接続断時に kabu セッション状態をリセットする。"""
+        if self._kabu_venue is not None:
+            self._kabu_venue.clear()
+        self._kabu_venue = None  # [M-2] 古い venue 参照が残らないようにする
+        # [H-1] fill poller タスクをキャンセル
+        if self._kabu_fill_poller_task is not None and not self._kabu_fill_poller_task.done():
+            self._kabu_fill_poller_task.cancel()
+        self._kabu_fill_poller_task = None
+        self._connected_venue = None
+        self._live_state = LiveState.DISCONNECTED
+
+    async def _do_submit_order_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """kabu_station 発注経路 (Phase 3: Stock / Future / Option に対応)。"""
+        import time
+
+        req_id = msg.get("request_id", "")
+
+        # 接続チェック
+        if self._kabu_venue is None:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": msg.get("order", {}).get("client_order_id", ""),
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "KabuStation venue is not connected",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # lockout チェック
+        if self._kabu_venue.is_trade_locked_out():
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": msg.get("order", {}).get("client_order_id", ""),
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out due to repeated failures",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        raw_order = msg.get("order", {})
+        try:
+            order = SubmitOrderRequest.model_validate(raw_order)
+        except Exception as exc:
+            # [M-3] tachibana 対称化: Error → OrderRejected{VALIDATION_ERROR}
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": raw_order.get("client_order_id", ""),
+                "reason_code": "VALIDATION_ERROR",
+                "reason_text": str(exc),
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # Phase 3: instrument_id 末尾で Stock / Future / Option を分岐
+        # instrument_id 形式は "<symbol>.KabuStation <ExchangeKind>"
+        instrument_id = order.instrument_id
+        symbol = instrument_id.split(".")[0]
+        side = "buy" if order.order_side == "BUY" else "sell"
+
+        is_future = instrument_id.endswith(".KabuStation Future")
+        is_option = instrument_id.endswith(".KabuStation Option")
+
+        if is_future or is_option:
+            # 先物・OP: FrontOrderType 120=成行, 20=指値 — OpenAPI RequestSendOrderDerivFuture/Option
+            if order.order_type == "MARKET":
+                deriv_kwargs: dict = {
+                    "symbol": symbol,
+                    "exchange": 23,  # OSE (Osaka Exchange) デフォルト
+                    "side": side,
+                    "qty": int(float(order.quantity)),
+                    "front_order_type": 120,  # 成行（マーケットオーダー）
+                    "price": 0,
+                }
+            else:  # LIMIT
+                if order.price is None:
+                    self._outbox.append({
+                        "event": "OrderRejected",
+                        "client_order_id": order.client_order_id,
+                        "reason_code": "INVALID_PRICE",
+                        "reason_text": "LIMIT order requires price",
+                        "ts_event_ms": int(time.time() * 1000),
+                    })
+                    return
+                deriv_kwargs = {
+                    "symbol": symbol,
+                    "exchange": 23,
+                    "side": side,
+                    "qty": int(float(order.quantity)),
+                    "front_order_type": 20,  # 指値
+                    "price": float(order.price),
+                }
+
+            # [M-1] OrderSubmitted を API 呼び出し前に発火（nautilus 流 2 段イベント）
+            self._outbox.append({
+                "event": "OrderSubmitted",
+                "client_order_id": order.client_order_id,
+                "ts_event_ms": int(time.time() * 1000),
+            })
+
+            try:
+                if is_future:
+                    result = await self._kabu_venue.send_order_future(**deriv_kwargs)
+                else:
+                    result = await self._kabu_venue.send_order_option(**deriv_kwargs)
+            except KabuTradePasswordInvalidError:
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "TRADE_PASSWORD_INVALID",
+                    "reason_text": "Trade password is invalid",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            except KabuTradeLockedOutError:
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "TRADE_PASSWORD_LOCKED",
+                    "reason_text": "Trade password is locked out",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            except KabuTradeCancelledError:
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "TRADE_PASSWORD_CANCELLED",
+                    "reason_text": "Trade password entry was cancelled",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            except KabuTokenExpiredError:
+                log.warning("_do_submit_order_kabu(deriv): KabuTokenExpiredError for cid=%s", order.client_order_id)
+                self._clear_kabu_session()
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "NOT_LOGGED_IN",
+                    "reason_text": "kabu token expired or not logged in",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            except KabuConnectionError as exc:
+                log.error("_do_submit_order_kabu(deriv): KabuConnectionError for cid=%s: %s", order.client_order_id, exc)
+                self._clear_kabu_session()
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "CONNECTION_ERROR",
+                    "reason_text": "kabu connection lost",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            except KabuRateLimitError:
+                log.warning("kabu sendorder(deriv): rate limited, cid=%s", order.client_order_id)
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "RATE_LIMITED",
+                    "reason_text": "kabu API rate limit exceeded",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            except KabuApiError as exc:
+                log.error("_do_submit_order_kabu(deriv): KabuApiError for cid=%s: code=%s", order.client_order_id, exc.code)
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "VENUE_REJECTED",
+                    "reason_text": str(exc),
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            except Exception:
+                log.exception("_do_submit_order_kabu(deriv): unexpected error for cid=%s", order.client_order_id)
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "INTERNAL_ERROR",
+                    "reason_text": "Internal error during kabu order submission",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+
+            order_id = result.get("OrderID", "")
+            if not order_id:
+                log.error(
+                    "_do_submit_order_kabu(deriv): OrderID missing in response for cid=%s",
+                    order.client_order_id,
+                )
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "MISSING_ORDER_ID",
+                    "reason_text": "API response did not contain OrderID",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+
+            self._venue_to_client[order_id] = order.client_order_id
+            self._outbox.append({
+                "event": "OrderAccepted",
+                "client_order_id": order.client_order_id,
+                "venue_order_id": order_id,
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        else:
+            # 株式経路（既存ロジック）
+            # instrument_id から銘柄コードを抽出 ("9433.KabuStation Stock" → "9433")
+            exchange = 1  # TSE (Phase 2: KabuStationStock のみ)
+
+        # [C-1] FrontOrderType: 10=成行, 20=指値 — OpenAPI RequestSendOrder 参照
+        if order.order_type == "MARKET":
+            send_kwargs: dict = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "side": side,
+                "qty": int(float(order.quantity)),
+                "front_order_type": 10,  # 成行
+                "price": 0,
+            }
+        else:  # LIMIT
+            if order.price is None:
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "INVALID_PRICE",
+                    "reason_text": "LIMIT order requires price",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            send_kwargs = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "side": side,
+                "qty": int(float(order.quantity)),
+                "front_order_type": 20,  # 指値
+                "price": float(order.price),
+            }
+
+        # [M-1] OrderSubmitted を API 呼び出し前に発火（nautilus 流 2 段イベント、tachibana と対称）
+        self._outbox.append({
+            "event": "OrderSubmitted",
+            "client_order_id": order.client_order_id,
+            "ts_event_ms": int(time.time() * 1000),
+        })
+
+        try:
+            result = await self._kabu_venue.send_order(**send_kwargs)
+        except KabuTradePasswordInvalidError:
+            # on_invalid() は KabuOrderClient.send_order() 内で既に呼ばれている (A-1)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "TRADE_PASSWORD_INVALID",
+                "reason_text": "Trade password is invalid",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeLockedOutError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeCancelledError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "TRADE_PASSWORD_CANCELLED",
+                "reason_text": "Trade password entry was cancelled",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTokenExpiredError:
+            # NOT_LOGGED_IN ≠ CONNECTION_ERROR: トークン期限切れは「再ログインで復旧」、
+            # ConnectionError は「kabuStation 本体または網路の問題」を意味する。意図的に分離。
+            log.warning("_do_submit_order_kabu: KabuTokenExpiredError for cid=%s", order.client_order_id)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "kabu token expired or not logged in",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuConnectionError as exc:
+            log.error("_do_submit_order_kabu: KabuConnectionError for cid=%s: %s", order.client_order_id, exc)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "CONNECTION_ERROR",  # [H-2] NOT_LOGGED_IN から変更
+                "reason_text": "kabu connection lost",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuRateLimitError:
+            log.warning("kabu sendorder: rate limited, request_id=%s", req_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "RATE_LIMITED",
+                "reason_text": "kabu API rate limit exceeded",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuApiError as exc:
+            log.error("_do_submit_order_kabu: KabuApiError for cid=%s: code=%s", order.client_order_id, exc.code)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "VENUE_REJECTED",
+                "reason_text": str(exc),
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except Exception:
+            log.exception("_do_submit_order_kabu: unexpected error for cid=%s", order.client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "INTERNAL_ERROR",
+                "reason_text": "Internal error during kabu order submission",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        order_id = result.get("OrderID", "")
+        if not order_id:
+            log.error(
+                "_do_submit_order_kabu: OrderID missing in response for cid=%s",
+                order.client_order_id,
+            )
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "MISSING_ORDER_ID",
+                "reason_text": "API response did not contain OrderID",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # [C-3] venue_order_id → client_order_id のマッピングを記録（fill 受信時の逆引き用）
+        self._venue_to_client[order_id] = order.client_order_id
+        self._outbox.append({
+            "event": "OrderAccepted",
+            "client_order_id": order.client_order_id,
+            "venue_order_id": order_id,
+            "ts_event_ms": int(time.time() * 1000),
+        })
+
+    async def _do_cancel_order_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """kabu_station 取消経路 (Phase 2: KabuStationStock, 検証環境のみ)。"""
+        import time
+
+        client_order_id = msg.get("client_order_id", "")
+        venue_order_id = msg.get("venue_order_id", "")
+
+        if not venue_order_id:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "VALIDATION_ERROR",
+                "reason_text": "venue_order_id is required for CancelOrder",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # 接続チェック
+        if self._kabu_venue is None:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "KabuStation venue is not connected",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # lockout チェック
+        if self._kabu_venue.is_trade_locked_out():
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out due to repeated failures",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        try:
+            await self._kabu_venue.cancel_order(order_id=venue_order_id)
+        except KabuTradePasswordInvalidError:
+            # on_invalid() は KabuOrderClient.cancel_order() 内で既に呼ばれている (A-1)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_INVALID",
+                "reason_text": "Trade password is invalid",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeLockedOutError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeCancelledError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_CANCELLED",
+                "reason_text": "Trade password entry was cancelled",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTokenExpiredError:
+            # NOT_LOGGED_IN ≠ CONNECTION_ERROR: トークン期限切れは「再ログインで復旧」、
+            # ConnectionError は「kabuStation 本体または網路の問題」を意味する。意図的に分離。
+            log.warning("_do_cancel_order_kabu: KabuTokenExpiredError for cid=%s", client_order_id)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "kabu token expired or not logged in",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuConnectionError as exc:
+            log.error("_do_cancel_order_kabu: KabuConnectionError for cid=%s: %s", client_order_id, exc)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "CONNECTION_ERROR",  # [H-2] NOT_LOGGED_IN から変更
+                "reason_text": "kabu connection lost",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuRateLimitError:
+            log.warning("kabu cancelorder: rate limited, request_id=%s", client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "RATE_LIMITED",
+                "reason_text": "kabu API rate limit exceeded",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuApiError as exc:
+            log.error("_do_cancel_order_kabu: KabuApiError for cid=%s: code=%s", client_order_id, exc.code)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "VENUE_REJECTED",
+                "reason_text": str(exc),
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except Exception:
+            log.exception("_do_cancel_order_kabu: unexpected error for cid=%s", client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "INTERNAL_ERROR",
+                "reason_text": "Internal error during kabu order cancellation",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        self._outbox.append({
+            "event": "OrderCancelled",
+            "client_order_id": client_order_id,
+            "venue_order_id": venue_order_id,
+            "ts_event_ms": int(time.time() * 1000),
+        })
+
     async def _do_cancel_order(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         import time
 
@@ -1533,11 +2277,14 @@ class DataEngineServer:
         if not self._check_live_state("CancelOrder", LiveState.CONNECTED, ws=ws):
             return
 
-        # N3.C: 発注 IPC 経路は tachibana のみサポート。
+        # N3.C: 発注 IPC 経路は tachibana / kabu_station をサポート。
         # "hyperliquid" / "replay" / その他 venue はここで拒否する。
         # replay 注文のキャンセル/訂正は N1.15 の UI ガードで事前に抑止されているため
         # IPC に届くことは通常ない。
-        if venue != "tachibana":
+        if venue == "kabu_station":
+            await self._do_cancel_order_kabu(msg, ws=ws)
+            return
+        elif venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
@@ -2542,6 +3289,17 @@ class DataEngineServer:
         self._outbox.send_to(ws, payload)
 
     # ------------------------------------------------------------------
+    # schema 3.15: Pause/Step callbacks (called from worker thread via lambda)
+    # ------------------------------------------------------------------
+
+    def _consume_step_request(self) -> int:
+        """Atomically consume one pending step request; return 1 if consumed, else 0."""
+        if self._replay_step_request > 0:
+            self._replay_step_request -= 1
+            return 1
+        return 0
+
+    # ------------------------------------------------------------------
     # B3: State machine guard helpers
     # ------------------------------------------------------------------
 
@@ -2697,6 +3455,7 @@ class DataEngineServer:
             self._apply_tachibana_session(session)
             # B3: ログイン成功 → CONNECTED 状態へ遷移。
             self._live_state = LiveState.CONNECTED
+            self._connected_venue = "tachibana"
             log.info("Tachibana session established successfully")
             self._emit({
                 "event": "VenueReady",
@@ -2710,6 +3469,111 @@ class DataEngineServer:
             self._event_task = asyncio.create_task(
                 self._run_event_loop(session.url_event_ws)
             )
+
+    async def _startup_kabu_station(self, request_id: str | None = None) -> None:
+        """Drive KabuStation startup login (K7 / Phase 4). env={_kabu_env} (verify|prod).
+
+        Emits VenueLoginStarted → VenueReady / VenueError to outbox.
+        """
+        try:
+            async with self._kabu_login_inflight:
+                self._emit({
+                    "event": "VenueLoginStarted",
+                    "venue": "kabu_station",
+                    "request_id": request_id,
+                })
+                try:
+                    if self._kabu_venue is None:
+                        # P4-2: env は KABU_ALLOW_PROD=1 + KABU_ENV=prod の二重判定で解決。
+                        # H-2: インスタンスキャッシュ済みの _kabu_env を使う（_build_ready との一貫性）。
+                        # prod では dev_login / dev_trade_password を強制 False にして
+                        # 本番口座への誤発注経路を最小化する（release ガードの第二段）。
+                        is_prod = self._kabu_env == "prod"
+                        self._kabu_venue = KabuStationVenue(
+                            env=self._kabu_env,
+                            dev_login_allowed=(
+                                self._dev_kabu_login_allowed and not is_prod
+                            ),
+                            dev_trade_password_allowed=(
+                                self._dev_kabu_trade_password_allowed and not is_prod
+                            ),
+                        )
+                    await self._kabu_venue.startup_login()
+                except KabuLoginCancelledError:
+                    log.info("_startup_kabu_station: login cancelled by user")
+                    self._live_state = LiveState.DISCONNECTED
+                    self._emit({
+                        "event": "VenueLoginCancelled",
+                        "venue": "kabu_station",
+                        "request_id": request_id,
+                    })
+                    return
+                except KabuConnectionError as exc:
+                    log.error("_startup_kabu_station: local_app_down: %s", exc)
+                    self._live_state = LiveState.DISCONNECTED
+                    self._emit({
+                        "event": "VenueError",
+                        "venue": "kabu_station",
+                        "request_id": request_id,
+                        "code": "local_app_down",
+                        "message": str(exc),
+                    })
+                    return
+                except Exception as exc:
+                    log.exception("_startup_kabu_station: login failed: %s", exc)
+                    self._live_state = LiveState.DISCONNECTED
+                    self._emit({
+                        "event": "VenueError",
+                        "venue": "kabu_station",
+                        "request_id": request_id,
+                        "code": "login_failed",
+                        "message": str(exc),
+                    })
+                    return
+
+                self._live_state = LiveState.CONNECTED
+                self._connected_venue = "kabu_station"
+                log.info("KabuStation session established successfully")
+                # [H-1] fill poller バックグラウンドタスクを起動
+                if self._kabu_fill_poller_task is None or self._kabu_fill_poller_task.done():
+                    self._kabu_fill_poller_task = asyncio.create_task(
+                        self._kabu_fill_poller()
+                    )
+                self._emit({
+                    "event": "VenueReady",
+                    "venue": "kabu_station",
+                    "request_id": request_id,
+                })
+        finally:
+            # MEDIUM-C: 完了後（成功・キャンセル・エラー全パス）に stale 参照をリセットする。
+            # disconnect 時の cleanup が done タスクに対して cancel を試みないよう None にする。
+            self._kabu_startup_task = None
+
+    async def _kabu_fill_poller(self) -> None:
+        """kabu venue の約定 polling ループ（30 秒間隔）。[H-1]
+
+        VenueReady 後にバックグラウンドタスクとして起動される。
+        _clear_kabu_session() でキャンセルされる。
+        # TODO Phase 4: emit OrderFilled IPC event（現状はログのみ）
+        """
+        _POLL_INTERVAL = 30.0
+        try:
+            while True:
+                await asyncio.sleep(_POLL_INTERVAL)
+                if self._kabu_venue is None:
+                    break
+                try:
+                    fills = await self._kabu_venue.poll_fills()
+                    for fill in fills:
+                        log.info("kabu fill: %s", fill)
+                        # TODO Phase 4: emit OrderFilled IPC event
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.error("_kabu_fill_poller: poll_fills error: %s", exc)
+        except asyncio.CancelledError:
+            log.info("_kabu_fill_poller: cancelled")
+            raise
 
     async def _run_event_loop(self, url: str) -> None:
         """EVENT WebSocket に接続して EC 約定通知の受信ループを実行する（Phase O2）。
@@ -2744,6 +3608,20 @@ class DataEngineServer:
             "3" = 取消 → OrderCanceled
             "4" = 失効 → OrderExpired
         """
+        # N3 Phase 2: live strategy 実行中は FD/EC フレームをキューに投入する。
+        if self._mode == "live" and self._live_state == LiveState.TRADING:
+            if frame_type == "FD":
+                try:
+                    self._live_fd_queue.put_nowait(event)
+                except _stdlib_queue.Full:
+                    log.warning("live_fd_queue full, dropping FD frame")
+                return
+            elif frame_type == "EC":
+                try:
+                    self._live_ec_queue.put_nowait(event)
+                except _stdlib_queue.Full:
+                    log.warning("live_ec_queue full, dropping EC frame")
+
         if frame_type != "EC":
             return
 
@@ -2816,7 +3694,7 @@ class DataEngineServer:
             else:
                 self._emit(payload)
             return
-        if venue != "tachibana":
+        if venue not in ("tachibana", "kabu_station"):
             log.warning("RequestVenueLogin: unsupported venue=%r", venue)
             # HIGH-R2-2: unsupported venue 応答も unicast 化する。
             payload = {
@@ -2830,6 +3708,38 @@ class DataEngineServer:
                 self._outbox.send_to(ws, payload)
             else:
                 self._emit(payload)
+            return
+
+        if venue == "kabu_station":
+            if self._live_state == LiveState.CONNECTING and self._kabu_login_inflight.locked():
+                log.info("RequestVenueLogin(kabu_station): login already in-progress (CONNECTING)")
+                self._emit({"event": "VenueLoginStarted", "venue": "kabu_station", "request_id": request_id})
+                return
+            if self._live_state == LiveState.CONNECTED:
+                log.info("RequestVenueLogin(kabu_station): re-login requested while CONNECTED — clearing session")
+                self._live_state = LiveState.DISCONNECTED
+                # tachibana 接続中なら旧 EVENT WS と session もクリア (M3)
+                if self._connected_venue == "tachibana":
+                    if self._event_task is not None and not self._event_task.done():
+                        self._event_task.cancel()
+                    self._tachibana_session = None
+                    self._workers["tachibana"].set_session(None)
+                    tachibana_clear_session(self._cache_dir)
+                if self._kabu_venue is not None:
+                    self._kabu_venue.clear()
+                self._connected_venue = None
+            if self._kabu_login_inflight.locked():
+                log.info("RequestVenueLogin(kabu_station): login already in-flight")
+                self._emit({"event": "VenueLoginStarted", "venue": "kabu_station", "request_id": request_id})
+                return
+            self._live_state = LiveState.CONNECTING
+            task = asyncio.create_task(self._startup_kabu_station(request_id=request_id))
+            task.add_done_callback(
+                lambda t: log.error(
+                    "_startup_kabu_station task raised: %s", t.exception()
+                ) if not t.cancelled() and t.exception() is not None else None
+            )
+            self._kabu_startup_task = task
             return
 
         # H-TA1: CONNECTING 中の RequestVenueLogin は「ログイン中」として VenueLoginStarted を返す。
@@ -3117,6 +4027,18 @@ class DataEngineServer:
         # 既存パスは _emit_direct と等価。
         _emit = _emit_direct
 
+        # HIGH-2: reset snapshot buffer for the new session and wire notify callback.
+        # Guard with hasattr: tests that create the server via __new__ may not have called
+        # __init__, so these fields might be absent on synthetic server instances.
+        if hasattr(self, "_replay_snapshots_lock"):
+            with self._replay_snapshots_lock:
+                self._replay_snapshots.clear()
+            self._restore_strategy_holder[0] = None
+            self._notify_history_fn = lambda: _emit_threadsafe(
+                {"event": "ReplayHistoryChanged", "has_history": True}
+            )
+            _emit_direct({"event": "ReplayHistoryChanged", "has_history": False})
+
         # _drain は ``asyncio.to_thread`` 完了後の保険として継続する。
         # worker thread が schedule した callback を drain して呼び出し側が
         # outbox を直ちに観測できる semantics を保つ。
@@ -3182,22 +4104,10 @@ class DataEngineServer:
             await _drain()
             return
 
-        # M4: initial_cash を to_thread 前にパースし、parse 失敗は即 Error で返す。
-        # LOW-A: バリデーション成功後に runner と _engine_tasks を登録することで、
-        # parse 失敗時に残骸が _engine_tasks に残らない。
-        try:
-            initial_cash = int(config_obj.initial_cash)
-        except (ValueError, TypeError) as exc:
-            _emit(
-                {
-                    "event": "Error",
-                    "request_id": request_id,
-                    "code": "invalid_config",
-                    "message": f"initial_cash: {exc}",
-                }
-            )
-            await _drain()
-            return
+        # Phase 2: initial_cash のパースは replay 分岐内で行う（live は initial_cash=None 許容）。
+        # initial_cash 変数は後の _run() クロージャ内 replay 分岐で定義される。
+        # live では使わないため None で初期化しておく。
+        initial_cash: "int | None" = None
 
         if not config_obj.strategy_file:
             _emit(
@@ -3218,6 +4128,9 @@ class DataEngineServer:
         # B3: StartEngine 受理 → RUNNING 状態へ遷移（replay モードのみ）。
         if self._mode == "replay":
             self._replay_state = ReplayState.RUNNING
+            # schema 3.15: pause/step フィールドを初期化。
+            self._replay_paused = False
+            self._replay_step_request = 0
 
         # M-8 (R2 review-fix R2): StartEngine 受理直後に _replay_strategy_id を確定させる。
         # これ以降に GetBuyingPower(replay) が走った場合でも正しい strategy_id が
@@ -3244,33 +4157,35 @@ class DataEngineServer:
         def _on_event_tracked(evt: dict) -> None:
             ev_kind = evt.get("event")
             if ev_kind == "EngineStarted":
-                # EngineStarted 受信時に前回の streaming fills をリセット。
-                self._replay_streaming_fills.clear()
+                # Phase 2: replay のみ streaming fills をリセット（live では操作しない）。
+                if self._mode == "replay":
+                    self._replay_streaming_fills.clear()
             elif ev_kind == "EngineStopped":
                 # MEDIUM-R2-8: runner が自前で EngineStopped を流した。
                 # 例外パスの補完送出をスキップするためのフラグを立てる。
                 engine_stopped_emitted[0] = True
             elif ev_kind == "ExecutionMarker":
-                # streaming replay の約定を in-memory に蓄積（GetOrderList{venue:"replay"} 用）。
-                qty_str = evt.get("qty", "0")
-                ts = evt.get("ts_event_ms", 0)
-                self._replay_streaming_fills.append({
-                    "client_order_id": f"replay-fill-{ts}",
-                    "venue_order_id": "",
-                    "instrument_id": evt.get("instrument_id", ""),
-                    "order_side": evt.get("side", "BUY"),
-                    "order_type": "MARKET",
-                    "quantity": qty_str,
-                    "filled_qty": qty_str,
-                    "leaves_qty": "0",
-                    "price": evt.get("price"),
-                    "trigger_price": None,
-                    "time_in_force": "DAY",
-                    "expire_time_ns": None,
-                    "status": "FILLED",
-                    "ts_event_ms": ts,
-                    "venue": "replay",
-                })
+                # Phase 2: streaming replay の約定蓄積は replay のみ（live では操作しない）。
+                if self._mode == "replay":
+                    qty_str = evt.get("qty", "0")
+                    ts = evt.get("ts_event_ms", 0)
+                    self._replay_streaming_fills.append({
+                        "client_order_id": f"replay-fill-{ts}",
+                        "venue_order_id": "",
+                        "instrument_id": evt.get("instrument_id", ""),
+                        "order_side": evt.get("side", "BUY"),
+                        "order_type": "MARKET",
+                        "quantity": qty_str,
+                        "filled_qty": qty_str,
+                        "leaves_qty": "0",
+                        "price": evt.get("price"),
+                        "trigger_price": None,
+                        "time_in_force": "DAY",
+                        "expire_time_ns": None,
+                        "status": "FILLED",
+                        "ts_event_ms": ts,
+                        "venue": "replay",
+                    })
             _on_event(evt)
 
         # C-1: result_holder で ReplayBacktestResult をキャプチャし、fills を portfolio に反映。
@@ -3278,6 +4193,21 @@ class DataEngineServer:
 
         def _run() -> None:
             if self._mode == "replay":
+                # Phase 2: initial_cash のパースを replay 分岐内へ移設。
+                # live では initial_cash=None を許容するため、_run() 外でパースしない。
+                nonlocal initial_cash
+                try:
+                    initial_cash = int(config_obj.initial_cash)
+                except (ValueError, TypeError) as exc:
+                    _on_event_tracked(
+                        {
+                            "event": "Error",
+                            "request_id": request_id,
+                            "code": "invalid_config",
+                            "message": f"initial_cash: {exc}",
+                        }
+                    )
+                    return
                 stop_event = self._engine_stop_events.setdefault(
                     strategy_id, threading.Event()
                 )
@@ -3301,42 +4231,95 @@ class DataEngineServer:
                     # 呼ぶと epoch が +2 進み、GUI が直前 LoadReplayData で生成した
                     # ペインを drain して誤再生成する（review-fix R1 HIGH）。
                     session_epoch=self._replay_session_epoch,
+                    # schema 3.15: pause/step コールバック。
+                    get_paused=lambda: getattr(self, "_replay_paused", False),
+                    consume_step_request=self._consume_step_request,
+                    # schema 3.16: snapshot ring buffer push クロージャ。
+                    push_snapshot=self._push_replay_snapshot,
+                    # HIGH-1: strategy_state restore channel (asyncio ↔ runner thread).
+                    restore_strategy_holder=getattr(self, "_restore_strategy_holder", None),
+                    # HIGH-2: portfolio_state restore channel (asyncio ↔ runner thread).
+                    restore_portfolio_holder=getattr(self, "_restore_portfolio_holder", None),
+                    # schema 3.16: snapshot 時点の streaming fills をコピーして渡す。
+                    # StepBackward 後の OrderList rollback で _replay_streaming_fills
+                    # を正確に復元するために必要。
+                    get_orders_snapshot=lambda: list(self._replay_streaming_fills),
                 )
-            else:
-                result_holder[0] = runner.start_backtest_replay(
-                    strategy_id=strategy_id,
+            elif self._mode == "live":
+                # Phase 2: live 分岐。CONNECTED 状態のみ受理する。
+                if not self._check_live_state("StartEngine", LiveState.CONNECTED):
+                    return
+                # tachibana 以外の venue でログイン済みの場合は拒否する。
+                # kabu_station の live 実行は未実装のため、ここで明示的にエラーを返す。
+                if self._connected_venue != "tachibana":
+                    _on_event_tracked(
+                        {
+                            "event": "Error",
+                            "request_id": request_id,
+                            "code": "venue_not_supported",
+                            "message": f"Live engine requires tachibana venue (connected: {self._connected_venue!r}). kabu_station live execution is not yet implemented.",
+                        }
+                    )
+                    return
+                # live 専用バリデーション
+                if config_obj.max_qty is None or config_obj.max_notional_jpy is None:
+                    _on_event_tracked(
+                        {
+                            "event": "Error",
+                            "request_id": request_id,
+                            "code": "invalid_config",
+                            "message": "max_qty and max_notional_jpy required for live engine",
+                        }
+                    )
+                    return
+                # SessionHolder から第二暗証番号を取得（env 変数不使用）
+                second_password = self._session_holder.get_password()
+                if second_password is None:
+                    _on_event_tracked(
+                        {
+                            "event": "SecondPasswordRequired",
+                            "request_id": request_id,
+                        }
+                    )
+                    return
+                self._live_state = LiveState.TRADING
+                stop_event = self._engine_stop_events.setdefault(
+                    strategy_id, threading.Event()
+                )
+                runner.start_live(
                     instrument_id=config_obj.instrument_id,
-                    instrument_ids=config_obj.instrument_ids,  # schema 3.13
-                    start_date=config_obj.start_date,
-                    end_date=config_obj.end_date,
-                    granularity=config_obj.granularity,
-                    initial_cash=initial_cash,
-                    base_dir=base_dir,
-                    on_event=_on_event_tracked,
                     strategy_file=config_obj.strategy_file,
                     strategy_init_kwargs=config_obj.strategy_init_kwargs,
-                    # schema 3.14: 1 ファイル切替 = 1 epoch。詳細は streaming 側コメント参照。
-                    session_epoch=self._replay_session_epoch,
+                    max_qty=config_obj.max_qty,
+                    max_notional_jpy=config_obj.max_notional_jpy,
+                    second_password=second_password,
+                    session=self._tachibana_session,
+                    fd_queue=self._live_fd_queue,
+                    ec_queue=self._live_ec_queue,
+                    on_event=_on_event_tracked,
+                    stop_event=stop_event,
+                    strategy_id=strategy_id,
                 )
 
         try:
             # H2: timeout=3600s でラップし、TimeoutError を code="timeout" で送出。
             await asyncio.wait_for(asyncio.to_thread(_run), timeout=3600.0)
-            # C-1: 実行完了後に fills を PortfolioView に反映する。
-            result = result_holder[0]
-            if result is not None:
-                from decimal import Decimal as _Decimal
-                self._replay_strategy_id = result.strategy_id
-                self._replay_portfolio.reset(_Decimal(initial_cash))
-                for fill in result.portfolio_fills:
-                    self._replay_portfolio.on_fill(
-                        fill.instrument_id, fill.side, fill.qty, fill.price
+            # C-1: 実行完了後に fills を PortfolioView に反映する（replay のみ）。
+            if self._mode == "replay":
+                result = result_holder[0]
+                if result is not None:
+                    from decimal import Decimal as _Decimal
+                    self._replay_strategy_id = result.strategy_id
+                    self._replay_portfolio.reset(_Decimal(initial_cash))
+                    for fill in result.portfolio_fills:
+                        self._replay_portfolio.on_fill(
+                            fill.instrument_id, fill.side, fill.qty, fill.price
+                        )
+                else:
+                    log.warning(
+                        "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
+                        strategy_id,
                     )
-            else:
-                log.warning(
-                    "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
-                    strategy_id,
-                )
         except asyncio.TimeoutError as exc:
             log.error(
                 "StartEngine timed out: strategy_id=%r",
@@ -3428,6 +4411,7 @@ class DataEngineServer:
             # RUNNING / STOPPING のときだけ IDLE に戻す。
             if self._mode == "replay" and self._replay_state in (
                 ReplayState.RUNNING,
+                ReplayState.PAUSED,
                 ReplayState.STOPPING,
             ):
                 self._replay_state = ReplayState.IDLE
@@ -3436,6 +4420,20 @@ class DataEngineServer:
             # 「未実行」を識別できるようにする。
             if self._mode == "replay" and self._replay_strategy_id == strategy_id:
                 self._replay_strategy_id = ""
+            # Phase 2: live 走行終了後に CONNECTED に戻す + キュードレイン。
+            if self._mode == "live" and self._live_state in (
+                LiveState.TRADING,
+                LiveState.STOPPING,
+            ):
+                self._live_state = LiveState.CONNECTED
+            # Phase 2: live_fd_queue / live_ec_queue の残留メッセージをドレイン。
+            if self._mode == "live":
+                for _q in (self._live_fd_queue, self._live_ec_queue):
+                    while not _q.empty():
+                        try:
+                            _q.get_nowait()
+                        except _stdlib_queue.Empty:
+                            break
             # H-G (R1b): 関数 return 前に scheduled callback を drain して呼び出し側
             # (テスト含む) が outbox を直ちに観測できるようにする。
             await _drain()
@@ -3454,6 +4452,15 @@ class DataEngineServer:
             if not self._check_replay_state("StopEngine", ReplayState.RUNNING, ws=ws):
                 return
             self._replay_state = ReplayState.STOPPING
+        elif self._mode == "live":
+            # Phase 2: live TRADING 状態のみ StopEngine を受理する。
+            if not self._check_live_state("StopEngine", LiveState.TRADING, ws=ws):
+                return
+            self._live_state = LiveState.STOPPING
+            stop_event = self._engine_stop_events.get(strategy_id)
+            if stop_event:
+                stop_event.set()
+            return
 
         runner = self._engine_tasks.get(strategy_id)
         if runner is None:
@@ -3522,11 +4529,21 @@ class DataEngineServer:
             )
             return
 
-        # RUNNING 状態のみ受理（STOPPING / IDLE / LOADED は EngineBusy）
-        if not self._check_replay_state("StopReplay", ReplayState.RUNNING, ws=ws, request_id=request_id):
+        # RUNNING または PAUSED 状態のみ受理（STOPPING / IDLE / LOADED は EngineBusy）
+        if self._replay_state not in (ReplayState.RUNNING, ReplayState.PAUSED):
+            from engine.schemas import EngineBusy as EngineBusyModel
+            payload = EngineBusyModel(
+                current_state=self._replay_state.name,
+                attempted_command="StopReplay",
+                reason=f"replay state must be RUNNING or PAUSED, got {self._replay_state.name}",
+                request_id=request_id,
+            ).model_dump()
+            self._outbox.send_to(ws, payload)
             return
+        if self._replay_state == ReplayState.PAUSED:
+            self._replay_paused = False
 
-        # RUNNING → STOPPING へ遷移
+        # RUNNING / PAUSED → STOPPING へ遷移
         self._replay_state = ReplayState.STOPPING
 
         # active な strategy_id を取得（先頭 1 件）
@@ -3614,6 +4631,9 @@ class DataEngineServer:
 
         # strategy_id をクリア
         self._replay_strategy_id = ""
+        # schema 3.15: pause/step フラグをリセット
+        self._replay_paused = False
+        self._replay_step_request = 0
 
         # M-5: state を IDLE に戻してから ReplayStopped を broadcast する。
         # H3 (旧コード) では broadcast の後に state リセットしていたが、
