@@ -1085,6 +1085,8 @@ struct Flowsurface {
     /// `EngineEvent::ReplayDataLoaded`; reset on `ReplayFinished` /
     /// `ReplayStopped` (both stop-only and mode-switch paths).
     replay_running: bool,
+    /// schema 3.15: True while the engine is in PAUSED state (PauseReplay received).
+    replay_paused: bool,
     /// schema 3.14: 直前に処理した `ReplayDataLoaded.session_epoch`。
     /// 新 epoch を観測したら `replay_pane_registry` を全リセットして旧ペインを
     /// 閉じる。engine 切断時に `None` にリセットする（プロセス再起動で epoch が
@@ -1278,6 +1280,12 @@ enum Message {
         /// 旧 engine（minor<14）からは `None` で届く（後方互換）。
         session_epoch: Option<u64>,
     },
+    /// schema 3.15: `EngineEvent::DateChangeMarker` — update replay bar current day display.
+    ReplayDateChanged(String),
+    /// schema 3.16: `EngineEvent::ReplayHistoryChanged` — update ⏮ button enable state.
+    ReplayHistoryChanged {
+        has_history: bool,
+    },
     /// Native OS menu bar: HWND / window handle received; attach muda menu.
     NativeMenuSetup(u64),
     /// Native OS menu bar: user selected a menu item.
@@ -1326,7 +1334,9 @@ enum Message {
         path: std::path::PathBuf,
         reason: String,
     },
-    /// Phase 8.1c: `File > Replay を開始...` メニューで表示。
+    /// UI entry point removed in schema 3.16 (replay control bar replaces the menu item).
+    /// Handler and ReplayFormModal kept until next cleanup phase (validate() still shared).
+    #[allow(dead_code)]
     ShowReplayDialog,
     /// Phase 8.1c: Replay 起動フォーム modal の内部メッセージ。
     ReplayFormMsg(modal::replay_form::Message),
@@ -1372,6 +1382,13 @@ enum Message {
     /// timeout / EngineBusy events are routed through the shared `ModeSwitch*`
     /// handlers, distinguished by `replay_stop_only_pending`.
     StopReplayOnly,
+    /// R2-H1: `EngineEvent::RestoreSnapshot` — Step- 後の巻き戻し通知。
+    /// current_day をリセットして将来の chart pane フラッシュのプレースホルダーとする。
+    /// TODO: chart pane should flush data from ts_event_ms onward when this arrives.
+    RestoreSnapshotPending {
+        step_index: u64,
+        ts_event_ms: i64,
+    },
     /// Internal: genuinely does nothing in update(). Used to discard async Task
     /// completion events where the result is irrelevant (fire-and-forget IPC sends).
     Noop,
@@ -1741,6 +1758,19 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             trades_loaded,
             session_epoch,
         }),
+        // schema 3.15: DateChangeMarker — replay bar の現在日表示を更新。
+        EngineEvent::DateChangeMarker { date } => Some(Message::ReplayDateChanged(date)),
+        // schema 3.16: RestoreSnapshot — Step- 後に Python が巻き戻し地点を通知する。
+        // R2-H1: サイレント黙殺から「状態保持 + TODO」に昇格。
+        // TODO: chart pane should flush data from ts_event_ms onward when RestoreSnapshot arrives.
+        EngineEvent::RestoreSnapshot { step_index, ts_event_ms } => {
+            Some(Message::RestoreSnapshotPending { step_index, ts_event_ms })
+        }
+        // schema 3.16: ReplayHistoryChanged — ⏮ Step- ボタンの有効/無効を更新。
+        // `paused` フィールドは ReplayHistoryChanged では変化しないため現在値を保持する。
+        EngineEvent::ReplayHistoryChanged { has_history } => {
+            Some(Message::ReplayHistoryChanged { has_history })
+        }
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
         // 正しいことを確認すること。`_ => None` で握り潰すと
@@ -1992,6 +2022,7 @@ impl Flowsurface {
             mode_switch_state: None,
             engine_busy: false,
             replay_running: false,
+            replay_paused: false,
             last_replay_session_epoch: None,
             replay_stop_only_pending: false,
             menu_bar: crate::menu_bar_state::State::default(),
@@ -3422,6 +3453,9 @@ impl Flowsurface {
             // Replay engine finished → auto-refresh order list from Python's in-memory fills.
             Message::ReplayFinished => {
                 self.replay_running = false;
+                self.replay_paused = false;
+                self.menu_bar.replay_bar.current_day = None;
+                self.menu_bar.replay_bar.replay_has_history = false;
                 if let Some(conn) = self.engine_connection.as_ref().cloned() {
                     return Task::perform(
                         async move {
@@ -3452,6 +3486,28 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
+            // schema 3.15: replay bar current-day display update.
+            Message::ReplayDateChanged(date) => {
+                self.menu_bar.replay_bar.current_day = Some(date);
+                return Task::none();
+            }
+            // schema 3.16: replay history changed — update ⏮ button enable state.
+            Message::ReplayHistoryChanged { has_history } => {
+                self.menu_bar.replay_bar.replay_has_history = has_history;
+                return Task::none();
+            }
+            // R2-H1: RestoreSnapshot received — reset current_day display as minimal state update.
+            // TODO: chart pane should flush data from ts_event_ms onward when RestoreSnapshot arrives.
+            Message::RestoreSnapshotPending {
+                step_index,
+                ts_event_ms,
+            } => {
+                log::debug!(
+                    "RestoreSnapshotPending: step_index={step_index} ts_event_ms={ts_event_ms}"
+                );
+                self.menu_bar.replay_bar.current_day = None;
+                return Task::none();
+            }
             // ── Widget menu bar (all platforms) ───────────────────────────
             Message::MenuBar(bar_msg) => {
                 use crate::menu_bar_state::{self, BarMessage};
@@ -3472,42 +3528,250 @@ impl Flowsurface {
                 } else {
                     None
                 };
-                match &bar_msg {
+                // schema 3.15: handle action variants before calling update().
+                // Input-field variants are handled purely by update() below.
+                let task = match &bar_msg {
                     BarMessage::Toggle(top) if self.menu_bar.open != Some(*top) => {
                         log::debug!("widget_menu_bar: open={top:?}");
+                        Task::none()
                     }
-                    // M3 (F8 R1): re-toggling the same top-level menu closes
-                    // it. Surface this as its own log line so transcript
-                    // analysis can tell "user opened then re-clicked the same
-                    // button" apart from outside-click / focus-lost dismissals.
                     BarMessage::Toggle(top) => {
                         log::debug!("widget_menu_bar: toggle_close reason=re_toggle top={top:?}");
+                        Task::none()
                     }
                     BarMessage::Dismiss => {
                         log::debug!(
                             "widget_menu_bar: dismiss reason=outside_click open={:?}",
                             self.menu_bar.open
                         );
+                        Task::none()
                     }
                     BarMessage::DismissFocusLost => {
                         log::debug!(
                             "widget_menu_bar: dismiss reason=focus_lost open={:?}",
                             self.menu_bar.open
                         );
+                        Task::none()
                     }
-                    // F8 R2 / M-B: exhaustive match. `Pick(_)` is the only
-                    // remaining variant after `BarMoved` was abolished — the
-                    // `to_native_action` mapping above already handles its
-                    // dispatch, so this arm is a deliberate no-op for logging.
-                    // Keeping the match exhaustive (no wildcard) means future
-                    // `BarMessage` additions surface as compile errors.
-                    BarMessage::Pick(_) => {}
-                }
+                    BarMessage::Pick(_) => Task::none(),
+                    // Input-field changes — pure state update, no side effects.
+                    BarMessage::InstrumentChanged(_)
+                    | BarMessage::StartDateChanged(_)
+                    | BarMessage::EndDateChanged(_)
+                    | BarMessage::GranularityChanged(_)
+                    | BarMessage::InitialCashChanged(_) => Task::none(),
+                    BarMessage::PickStrategyFile => Task::perform(
+                        async {
+                            rfd::AsyncFileDialog::new()
+                                .add_filter("Python", &["py"])
+                                .set_title("戦略ファイルを選択")
+                                .pick_file()
+                                .await
+                                .map(|h| h.path().to_owned())
+                        },
+                        Message::NativeOpenStrategyPicked,
+                    ),
+                    BarMessage::PressPlay => {
+                        // If paused, this is a Resume action.
+                        if self.replay_paused && self.replay_running {
+                            self.replay_paused = false;
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let req_id = uuid::Uuid::new_v4().to_string();
+                                Task::perform(
+                                    async move {
+                                        conn.send(engine_client::dto::Command::ResumeReplay {
+                                            request_id: req_id,
+                                        })
+                                        .await
+                                    },
+                                    |_| Message::Noop,
+                                )
+                            } else {
+                                Task::none()
+                            }
+                        } else {
+                            // Otherwise: new replay session.
+                            use crate::modal::replay_form::ReplayFormModal;
+                            let bar = &self.menu_bar.replay_bar;
+                            let form = ReplayFormModal {
+                                instrument_id: bar.instrument_id.clone(),
+                                start_date: bar.start_date.clone(),
+                                end_date: bar.end_date.clone(),
+                                granularity: bar.granularity.clone(),
+                                strategy_file: bar.strategy_file.clone(),
+                                initial_cash: bar.initial_cash.clone(),
+                                validation_error: None,
+                                submitting: false,
+                            };
+                            match form.validate() {
+                                Err(e) => {
+                                    self.notifications
+                                        .push(Toast::warn(format!("入力エラー: {e}")));
+                                    Task::none()
+                                }
+                                Ok(v) => {
+                                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                        let strategy_file_str =
+                                            v.strategy_file.to_string_lossy().into_owned();
+                                        let gran_dto = v.granularity.to_dto();
+                                        let first_id = v.instrument_ids[0].clone();
+                                        let instrument_ids = v.instrument_ids;
+                                        let start_date = v.start_date;
+                                        let end_date = v.end_date;
+                                        let initial_cash = v.initial_cash;
+                                        Task::perform(
+                                            async move {
+                                                let load_req_id = uuid::Uuid::new_v4().to_string();
+                                                conn.send(
+                                                    engine_client::dto::Command::LoadReplayData {
+                                                        request_id: load_req_id,
+                                                        instrument_id: first_id.clone(),
+                                                        instrument_ids: Some(
+                                                            instrument_ids.clone(),
+                                                        ),
+                                                        start_date: start_date.clone(),
+                                                        end_date: end_date.clone(),
+                                                        granularity: gran_dto.clone(),
+                                                    },
+                                                )
+                                                .await
+                                                .map_err(|e| e.to_string())?;
+                                                let start_req_id = uuid::Uuid::new_v4().to_string();
+                                                conn.send(
+                                                engine_client::dto::Command::StartEngine {
+                                                    request_id: start_req_id,
+                                                    engine: engine_client::dto::EngineKind::Backtest,
+                                                    strategy_id: "user-strategy".to_string(),
+                                                    config: engine_client::dto::EngineStartConfig {
+                                                        instrument_id: first_id,
+                                                        instrument_ids: Some(instrument_ids),
+                                                        start_date,
+                                                        end_date,
+                                                        initial_cash: initial_cash.to_string(),
+                                                        granularity: gran_dto,
+                                                        strategy_file: Some(strategy_file_str),
+                                                        strategy_init_kwargs: None,
+                                                    },
+                                                },
+                                            )
+                                            .await
+                                            .map_err(|e| e.to_string())?;
+                                                Ok::<(), String>(())
+                                            },
+                                            |res| match res {
+                                                Ok(()) => Message::OrderToast(Toast::info(
+                                                    "Replay を開始しました".to_string(),
+                                                )),
+                                                Err(e) => Message::OrderToast(Toast::error(
+                                                    format!("Replay 起動失敗: {e}"),
+                                                )),
+                                            },
+                                        )
+                                    } else {
+                                        self.notifications.push(Toast::error(
+                                            "エンジンに接続されていません".to_string(),
+                                        ));
+                                        Task::none()
+                                    }
+                                }
+                            }
+                        } // end else (new replay session)
+                    }
+                    BarMessage::PressPause => {
+                        self.replay_paused = true;
+                        let has_history = self.menu_bar.replay_bar.replay_has_history;
+                        if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                            let req_id = uuid::Uuid::new_v4().to_string();
+                            Task::perform(
+                                async move {
+                                    conn.send(engine_client::dto::Command::PauseReplay {
+                                        request_id: req_id,
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                },
+                                move |res| match res {
+                                    Ok(()) => Message::Noop,
+                                    // R2-H2: IPC 失敗時は楽観的更新をロールバックする。
+                                    // ReplayPauseStateChanged { paused: false } で self.replay_paused
+                                    // と menu_bar.replay_bar.replay_paused を両方 false に戻す。
+                                    // エラーは log::error で記録する（Toast は R2-H2 要件外）。
+                                    Err(e) => {
+                                        log::error!("PressPause IPC failed (rolling back): {e}");
+                                        Message::MenuBar(
+                                            crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
+                                                paused: false,
+                                                has_history,
+                                            },
+                                        )
+                                    }
+                                },
+                            )
+                        } else {
+                            Task::none()
+                        }
+                    }
+                    BarMessage::PressStepForward => {
+                        if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                            let req_id = uuid::Uuid::new_v4().to_string();
+                            Task::perform(
+                                async move {
+                                    conn.send(engine_client::dto::Command::StepReplay {
+                                        request_id: req_id,
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                },
+                                |res| match res {
+                                    Ok(()) => Message::Noop,
+                                    Err(e) => Message::OrderToast(Toast::error(format!(
+                                        "Step+ に失敗: {e}"
+                                    ))),
+                                },
+                            )
+                        } else {
+                            Task::none()
+                        }
+                    }
+                    BarMessage::PressStepBackward => {
+                        if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                            let req_id = uuid::Uuid::new_v4().to_string();
+                            Task::perform(
+                                async move {
+                                    conn.send(engine_client::dto::Command::StepBackward {
+                                        request_id: req_id,
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                },
+                                |res| match res {
+                                    Ok(()) => Message::Noop,
+                                    Err(e) => Message::OrderToast(Toast::error(format!(
+                                        "Step- に失敗: {e}"
+                                    ))),
+                                },
+                            )
+                        } else {
+                            Task::none()
+                        }
+                    }
+                    // R2-M1: ReplayPauseStateChanged が来るたびに self.replay_paused も同期する。
+                    // menu_bar_state::update() は menu_bar.replay_bar.replay_paused を更新するが、
+                    // view() は self.replay_paused を参照するため両方を同期する必要がある。
+                    BarMessage::ReplayPauseStateChanged { paused, .. } => {
+                        self.replay_paused = *paused;
+                        Task::none()
+                    }
+                    BarMessage::PressStop => Task::done(Message::StopReplayOnly),
+                };
                 self.menu_bar = menu_bar_state::update(self.menu_bar.clone(), bar_msg);
                 if let Some(native_action) = native {
-                    return Task::done(Message::NativeMenuAction(native_action));
+                    return Task::batch([
+                        task,
+                        Task::done(Message::NativeMenuAction(native_action)),
+                    ]);
                 }
-                return Task::none();
+                return task;
             }
             // ── Native OS menu bar ──────────────────────────────────────────
             Message::NativeMenuSetup(raw_id) => {
@@ -3614,12 +3878,6 @@ impl Flowsurface {
                             },
                             Message::NativeSaveAsPath,
                         );
-                    }
-                    Action::OpenReplayDialog => {
-                        return Task::done(Message::ShowReplayDialog);
-                    }
-                    Action::StopReplay => {
-                        return Task::done(Message::StopReplayOnly);
                     }
                     Action::Quit => {
                         let active_windows: Vec<window::Id> = self
@@ -3784,8 +4042,14 @@ impl Flowsurface {
                     .replay_form_modal
                     .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
                 match scenario {
-                    Some(value) => form.prefill_from_scenario(path, &value),
-                    None => form.set_strategy_file_only(path),
+                    Some(value) => {
+                        form.prefill_from_scenario(path.clone(), &value);
+                        self.menu_bar.replay_bar.prefill_from_scenario(path, &value);
+                    }
+                    None => {
+                        form.set_strategy_file_only(path.clone());
+                        self.menu_bar.replay_bar.set_strategy_file_only(path);
+                    }
                 }
                 return Task::none();
             }
@@ -4397,6 +4661,8 @@ impl Flowsurface {
             // a confirmation toast without restarting the dashboard).
             Message::ModeSwitchStopAcked => {
                 self.replay_running = false;
+                self.replay_paused = false;
+                self.menu_bar.replay_bar.replay_has_history = false;
                 if let Some((target, _guard)) = self.mode_switch_state.take() {
                     self.replay_stop_only_pending = false;
                     return self.restart_with_mode(target);
@@ -5318,8 +5584,14 @@ impl Flowsurface {
             let current_mode = app_mode();
             let mut base = column![header_title];
             {
-                let menu_bar_view = crate::widget_menu_bar::view(&self.menu_bar, current_mode)
-                    .map(Message::MenuBar);
+                let menu_bar_view = crate::widget_menu_bar::view(
+                    &self.menu_bar,
+                    current_mode,
+                    self.replay_running,
+                    self.replay_paused,
+                    MODE_SWITCHING.load(std::sync::atomic::Ordering::Acquire),
+                )
+                .map(Message::MenuBar);
                 base = base.push(menu_bar_view);
             }
             if let Some(banner) = banner {
@@ -5361,12 +5633,7 @@ impl Flowsurface {
             } else {
                 base.into()
             };
-            crate::widget_menu_bar::with_dropdown_overlay(
-                view_result,
-                &self.menu_bar,
-                current_mode,
-                self.replay_running,
-            )
+            crate::widget_menu_bar::with_dropdown_overlay(view_result, &self.menu_bar, current_mode)
         } else {
             container(
                 dashboard

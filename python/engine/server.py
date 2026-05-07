@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hmac
 import logging
 import os
@@ -10,9 +11,10 @@ import threading
 import time
 import uuid
 from collections import deque
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 import orjson
@@ -95,6 +97,7 @@ class ReplayState(Enum):
     IDLE = auto()
     LOADED = auto()
     RUNNING = auto()
+    PAUSED = auto()
     STOPPING = auto()
 
 
@@ -102,6 +105,24 @@ class LiveState(Enum):
     DISCONNECTED = auto()
     CONNECTING = auto()
     CONNECTED = auto()
+
+
+# ── schema 3.16: Snapshot ring buffer ────────────────────────────────────────
+
+
+@dataclass
+class ReplaySnapshot:
+    """One granularity-boundary snapshot for Step- (snapshot ring buffer).
+
+    仕様書 §Snapshot ring buffer 設計参照。
+    """
+
+    step_index: int           # 粒度ステップ番号（0-based）
+    portfolio: dict           # positions / cash / realized_pnl のシリアライズ
+    open_orders: list         # 未約定注文リスト
+    strategy_state: object    # copy.deepcopy(strategy) — 任意の Python オブジェクト
+    ui_events: list = field(default_factory=list)  # この step で送出した UI イベント群
+
 
 # C-M2: httpx/httpcore の INFO/DEBUG ログには立花 API の URL が含まれ、
 # クエリパラメータ sSecondPassword が露出するため WARNING 以上に抑制する。
@@ -417,6 +438,21 @@ class DataEngineServer:
         # N1.11: streaming replay の pacing 倍率。SetReplaySpeed で変更される。
         # compute_sleep_sec は multiplier >= 1 を要求するため、デフォルト 1 は安全。
         self._replay_speed_multiplier: int = 1
+        # schema 3.15: Pause/Step 制御フィールド。
+        self._replay_paused: bool = False
+        self._replay_step_request: int = 0  # StepReplay で +1、runner が消費して -1
+        # schema 3.16: Snapshot ring buffer for Step- (StepBackward).
+        # M-3: protected by threading.Lock because push_snapshot is called from the
+        # runner thread (asyncio.to_thread), while StepBackward reads/pops from the
+        # asyncio event loop thread.
+        self._replay_snapshots: deque[ReplaySnapshot] = deque(maxlen=1000)
+        self._replay_snapshots_lock = threading.Lock()
+        # HIGH-2: called (thread-safe) when buffer transitions 0→1 so Rust ⏮ button enables.
+        # Set to _emit_threadsafe lambda in _handle_start_engine; None outside an engine run.
+        self._notify_history_fn: "Callable[[], None] | None" = None
+        # HIGH-1: runner thread writes strategy_state here when _restore_snapshot fires.
+        # Engine runner reads + clears before processing the next step.
+        self._restore_strategy_holder: list = [None]
 
         # B3: State machines for replay and live command gating.
         self._replay_state: ReplayState = ReplayState.IDLE
@@ -466,6 +502,71 @@ class DataEngineServer:
         """
         self._replay_session_epoch += 1
         return self._replay_session_epoch
+
+    def _push_replay_snapshot(
+        self,
+        step_index: int,
+        portfolio: dict,
+        open_orders: list,
+        strategy_state: object,
+        ui_events: list,
+    ) -> None:
+        """schema 3.16: snapshot ring buffer に 1 粒度境界スナップショットを push する。
+
+        - ``copy.deepcopy(strategy_state)`` が失敗した場合はスナップショットを保存せずに
+          ``logger.warning`` でログして skip する（deepcopy 失敗対策）。
+        - ``has_history`` の変化は呼び出し元の pacing ループが担当しない。
+          StepBackward ハンドラが pop 後に ReplayHistoryChanged を emit する。
+
+        スレッド安全: ``_replay_snapshots_lock`` で保護する。runner thread
+        (asyncio.to_thread 内) から呼ばれる想定。
+        """
+        try:
+            strategy_copy = copy.deepcopy(strategy_state)
+        except Exception as exc:
+            log.warning(
+                "snapshot deepcopy failed at step %d: %s — skipping snapshot",
+                step_index,
+                exc,
+            )
+            return
+        snap = ReplaySnapshot(
+            step_index=step_index,
+            portfolio=portfolio,
+            open_orders=list(open_orders),
+            strategy_state=strategy_copy,
+            ui_events=list(ui_events),
+        )
+        with self._replay_snapshots_lock:
+            was_empty = len(self._replay_snapshots) == 0
+            self._replay_snapshots.append(snap)
+        log.debug("push_snapshot: step_index=%d buffer_len=%d", step_index, len(self._replay_snapshots))
+        # HIGH-2: notify Rust that history is now available (0→1 transition only).
+        if was_empty and (fn := self._notify_history_fn) is not None:
+            fn()
+
+    def _restore_snapshot(self, snap: ReplaySnapshot) -> None:
+        """schema 3.16: ``ReplaySnapshot`` の内容を server state に復元する。
+
+        ポートフォリオ・注文・戦略状態を snapshot から書き戻す。
+        呼び出し元（StepBackward ハンドラ）が ``_replay_snapshots_lock`` を
+        保持した状態で pop した後に呼ぶこと（unlock 後に呼んでも安全）。
+        """
+        # ポートフォリオ復元: _replay_portfolio はデシリアライズ済み dict から再構築
+        try:
+            from decimal import Decimal as _Decimal
+            from engine.nautilus.portfolio_view import PortfolioView as _PortfolioView
+            restored_portfolio = _PortfolioView(_Decimal(str(snap.portfolio.get("cash", "0"))))
+            restored_portfolio._restore_from_dict(snap.portfolio)
+            self._replay_portfolio = restored_portfolio
+        except Exception as exc:
+            log.warning("_restore_snapshot: portfolio restore failed: %s", exc)
+        # 注文リスト復元
+        self._replay_streaming_fills = list(snap.open_orders)
+        # HIGH-1: strategy_state をホルダーに置く。engine_runner が次ステップ開始前に
+        # strategy_instance を差し替えて None にリセットする。
+        self._restore_strategy_holder[0] = snap.strategy_state
+        log.debug("_restore_snapshot: step_index=%d restored strategy_state queued", snap.step_index)
 
     async def serve(self) -> None:
         async with websockets.serve(
@@ -948,6 +1049,71 @@ class DataEngineServer:
             # 簡易 ack: SetReplaySpeed は Error response を返さないのが Rust 期待。
             # 走行中の streaming runner は self._replay_speed_multiplier を読むことで
             # 次の tick から新しい速度を使う。
+
+        elif op == "PauseReplay":
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("PauseReplay", ReplayState.RUNNING, ws=ws, request_id=request_id):
+                return
+            self._replay_paused = True
+            self._replay_state = ReplayState.PAUSED
+            log.info("PauseReplay: request_id=%s", request_id)
+
+        elif op == "ResumeReplay":
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("ResumeReplay", ReplayState.PAUSED, ws=ws, request_id=request_id):
+                return
+            self._replay_paused = False
+            self._replay_state = ReplayState.RUNNING
+            log.info("ResumeReplay: request_id=%s", request_id)
+
+        elif op == "StepReplay":
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("StepReplay", ReplayState.PAUSED, ws=ws, request_id=request_id):
+                return
+            self._replay_step_request += 1
+            log.info("StepReplay: request_id=%s pending_steps=%d", request_id, self._replay_step_request)
+
+        elif op == "StepBackward":
+            # schema 3.16: 1 粒度後退（snapshot 復元）。受理状態: PAUSED かつ snapshot 非空。
+            request_id = msg.get("request_id", "")
+            if not self._check_replay_state("StepBackward", ReplayState.PAUSED, ws=ws, request_id=request_id):
+                return
+            with self._replay_snapshots_lock:
+                if len(self._replay_snapshots) < 2:
+                    # buffer に「現在状態 + 1つ前」が揃っていない → 戻れない
+                    self._outbox.send_to(ws, {
+                        "event": "EngineBusy",
+                        "current_state": self._replay_state.name,
+                        "attempted_command": "StepBackward",
+                        "reason": "no previous snapshot to restore",
+                        "request_id": request_id,
+                    })
+                    return
+                self._replay_snapshots.pop()  # 現在状態を捨てる
+                snap = self._replay_snapshots[-1]  # 1つ前（新しい末尾）を復元
+                has_history = len(self._replay_snapshots) > 1
+            # 1. RestoreSnapshot event を先行 emit して Rust UI をリセットモードに切り替える
+            self._outbox.append({
+                "event": "RestoreSnapshot",
+                "step_index": snap.step_index,
+                "ts_event_ms": int(snap.portfolio.get("ts_event_ms", 0)),
+            })
+            # 2. portfolio / orders / strategy を復元
+            self._restore_snapshot(snap)
+            # 3. ui_events を再 emit（Rust UI が RestoreSnapshot 受信済みのため重複扱いにならない）
+            for ev in snap.ui_events:
+                self._outbox.append(ev)
+            # 4. ReplayHistoryChanged で Rust ボタン有効/無効を更新
+            self._outbox.append({
+                "event": "ReplayHistoryChanged",
+                "has_history": has_history,
+            })
+            log.info(
+                "StepBackward: restored step_index=%d has_history=%s request_id=%s",
+                snap.step_index,
+                has_history,
+                request_id,
+            )
 
         elif op == "LoadStrategyScenario":
             # F6: SCENARIO 定数の安全抽出（ast.parse のみ・import なし）。
@@ -2542,6 +2708,17 @@ class DataEngineServer:
         self._outbox.send_to(ws, payload)
 
     # ------------------------------------------------------------------
+    # schema 3.15: Pause/Step callbacks (called from worker thread via lambda)
+    # ------------------------------------------------------------------
+
+    def _consume_step_request(self) -> int:
+        """Atomically consume one pending step request; return 1 if consumed, else 0."""
+        if self._replay_step_request > 0:
+            self._replay_step_request -= 1
+            return 1
+        return 0
+
+    # ------------------------------------------------------------------
     # B3: State machine guard helpers
     # ------------------------------------------------------------------
 
@@ -3117,6 +3294,18 @@ class DataEngineServer:
         # 既存パスは _emit_direct と等価。
         _emit = _emit_direct
 
+        # HIGH-2: reset snapshot buffer for the new session and wire notify callback.
+        # Guard with hasattr: tests that create the server via __new__ may not have called
+        # __init__, so these fields might be absent on synthetic server instances.
+        if hasattr(self, "_replay_snapshots_lock"):
+            with self._replay_snapshots_lock:
+                self._replay_snapshots.clear()
+            self._restore_strategy_holder[0] = None
+            self._notify_history_fn = lambda: _emit_threadsafe(
+                {"event": "ReplayHistoryChanged", "has_history": True}
+            )
+            _emit_direct({"event": "ReplayHistoryChanged", "has_history": False})
+
         # _drain は ``asyncio.to_thread`` 完了後の保険として継続する。
         # worker thread が schedule した callback を drain して呼び出し側が
         # outbox を直ちに観測できる semantics を保つ。
@@ -3218,6 +3407,9 @@ class DataEngineServer:
         # B3: StartEngine 受理 → RUNNING 状態へ遷移（replay モードのみ）。
         if self._mode == "replay":
             self._replay_state = ReplayState.RUNNING
+            # schema 3.15: pause/step フィールドを初期化。
+            self._replay_paused = False
+            self._replay_step_request = 0
 
         # M-8 (R2 review-fix R2): StartEngine 受理直後に _replay_strategy_id を確定させる。
         # これ以降に GetBuyingPower(replay) が走った場合でも正しい strategy_id が
@@ -3301,6 +3493,13 @@ class DataEngineServer:
                     # 呼ぶと epoch が +2 進み、GUI が直前 LoadReplayData で生成した
                     # ペインを drain して誤再生成する（review-fix R1 HIGH）。
                     session_epoch=self._replay_session_epoch,
+                    # schema 3.15: pause/step コールバック。
+                    get_paused=lambda: getattr(self, "_replay_paused", False),
+                    consume_step_request=self._consume_step_request,
+                    # schema 3.16: snapshot ring buffer push クロージャ。
+                    push_snapshot=self._push_replay_snapshot,
+                    # HIGH-1: strategy_state restore channel (asyncio ↔ runner thread).
+                    restore_strategy_holder=getattr(self, "_restore_strategy_holder", None),
                 )
             else:
                 result_holder[0] = runner.start_backtest_replay(
@@ -3428,6 +3627,7 @@ class DataEngineServer:
             # RUNNING / STOPPING のときだけ IDLE に戻す。
             if self._mode == "replay" and self._replay_state in (
                 ReplayState.RUNNING,
+                ReplayState.PAUSED,
                 ReplayState.STOPPING,
             ):
                 self._replay_state = ReplayState.IDLE
@@ -3522,11 +3722,21 @@ class DataEngineServer:
             )
             return
 
-        # RUNNING 状態のみ受理（STOPPING / IDLE / LOADED は EngineBusy）
-        if not self._check_replay_state("StopReplay", ReplayState.RUNNING, ws=ws, request_id=request_id):
+        # RUNNING または PAUSED 状態のみ受理（STOPPING / IDLE / LOADED は EngineBusy）
+        if self._replay_state not in (ReplayState.RUNNING, ReplayState.PAUSED):
+            from engine.schemas import EngineBusy as EngineBusyModel
+            payload = EngineBusyModel(
+                current_state=self._replay_state.name,
+                attempted_command="StopReplay",
+                reason=f"replay state must be RUNNING or PAUSED, got {self._replay_state.name}",
+                request_id=request_id,
+            ).model_dump()
+            self._outbox.send_to(ws, payload)
             return
+        if self._replay_state == ReplayState.PAUSED:
+            self._replay_paused = False
 
-        # RUNNING → STOPPING へ遷移
+        # RUNNING / PAUSED → STOPPING へ遷移
         self._replay_state = ReplayState.STOPPING
 
         # active な strategy_id を取得（先頭 1 件）
@@ -3614,6 +3824,9 @@ class DataEngineServer:
 
         # strategy_id をクリア
         self._replay_strategy_id = ""
+        # schema 3.15: pause/step フラグをリセット
+        self._replay_paused = False
+        self._replay_step_request = 0
 
         # M-5: state を IDLE に戻してから ReplayStopped を broadcast する。
         # H3 (旧コード) では broadcast の後に state リセットしていたが、
