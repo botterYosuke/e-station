@@ -88,13 +88,13 @@
 
 | ファイル | 内容 |
 | :--- | :--- |
-| `docs/plan/kabusapi/spec.md`（後続） | ゴール・非ゴール・スコープ。立花 spec.md を雛形にする |
-| `docs/plan/kabusapi/architecture.md`（後続） | プロセス境界・起動シーケンス。立花 architecture.md を雛形にする |
-| `docs/plan/kabusapi/data-mapping.md`（後続） | kabu の `PushBoardSuccess` ↔ 既存 `DepthSnapshot` IPC マッピング。立花計画には対応文書なし、kabu 固有の新規ドキュメント。雛形は立花 [architecture.md §7 PUSH 配信（時価ストリーム）](../../✅tachibana/architecture.md#7-push-配信時価ストリーム) から流用 |
-| `docs/plan/kabusapi/implementation-plan.md`（後続） | Phase 0/1/2 の受入条件・テスト戦略 |
-| `docs/plan/kabusapi/open-questions.md`（後続） | 再接続後の銘柄再登録要否（仕様確認）、`/orders` polling vs PUSH の選択、ほか |
-| `docs/plan/kabusapi/invariant-tests.md` | **Phase 0 では雛形（K-task ↔ 不変条件 ID の対応表のみ）を作成**、各 K-task 詳細は Phase 1 内で追記（U33 / R2-A-H1 / R2-A-H3 / U13）。`local_app_down` の早朝強制ログアウト時刻帯の分岐定義（リトライ後 `local_app_down` を ERROR でなく INFO 扱いとする時刻帯、U25 / R2-C-M2）も本ファイルに記述 |
-| `docs/plan/kabusapi/runbook.md`（**Phase 4 着手時作成**、U37 / R2-A-L3） | 本番事故対応・取消手順・kabuステーション本体ダウン時のオペレーション |
+| `docs//✅kabusapi/spec.md`（後続） | ゴール・非ゴール・スコープ。立花 spec.md を雛形にする |
+| `docs//✅kabusapi/architecture.md`（後続） | プロセス境界・起動シーケンス。立花 architecture.md を雛形にする |
+| `docs//✅kabusapi/data-mapping.md`（後続） | kabu の `PushBoardSuccess` ↔ 既存 `DepthSnapshot` IPC マッピング。立花計画には対応文書なし、kabu 固有の新規ドキュメント。雛形は立花 [architecture.md §7 PUSH 配信（時価ストリーム）](../../✅tachibana/architecture.md#7-push-配信時価ストリーム) から流用 |
+| `docs//✅kabusapi/implementation-plan.md`（後続） | Phase 0/1/2 の受入条件・テスト戦略 |
+| `docs//✅kabusapi/open-questions.md`（後続） | 再接続後の銘柄再登録要否（仕様確認）、`/orders` polling vs PUSH の選択、ほか |
+| `docs//✅kabusapi/invariant-tests.md` | **Phase 0 では雛形（K-task ↔ 不変条件 ID の対応表のみ）を作成**、各 K-task 詳細は Phase 1 内で追記（U33 / R2-A-H1 / R2-A-H3 / U13）。`local_app_down` の早朝強制ログアウト時刻帯の分岐定義（リトライ後 `local_app_down` を ERROR でなく INFO 扱いとする時刻帯、U25 / R2-C-M2）も本ファイルに記述 |
+| `docs//✅kabusapi/runbook.md`（**Phase 4 着手時作成**、U37 / R2-A-L3） | 本番事故対応・取消手順・kabuステーション本体ダウン時のオペレーション |
 
 ## 2. フェーズ分割
 
@@ -205,7 +205,7 @@
 
 ### Phase 4（本番接続）
 
-`KABU_ALLOW_PROD=1` 解禁。本番 `localhost:18080` で実弾発注テスト（最小 1 単元）。`docs/plan/kabusapi/runbook.md`（事故対応・取消手順）を整備。
+`KABU_ALLOW_PROD=1` 解禁。本番 `localhost:18080` で実弾発注テスト（最小 1 単元）。`docs//✅kabusapi/runbook.md`（事故対応・取消手順）を整備。
 
 ## 3. 立花計画から流用する既存資産
 

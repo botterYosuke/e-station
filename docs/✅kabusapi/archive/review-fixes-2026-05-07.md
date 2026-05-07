@@ -1,6 +1,6 @@
 # kabuステーション API 統合プラン レビュー修正ログ
 
-対象: `docs/plan/kabusapi/{README,plan,comparison}.md`
+対象: `docs//✅kabusapi/{README,plan,comparison}.md`
 スキル: `/review-fix-loop` + `/e-station-review`（PlanLoop モード）
 開始日: 2026-05-07
 状態: **収束（Round 3、HIGH=0 / MEDIUM=0、LOW のみ残存）**
