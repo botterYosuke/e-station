@@ -45,7 +45,7 @@ IPC events (live stream):
 
 ---
 
-## Phase 1: IPC スキーマ拡張（Python + Rust）
+## ✅ Phase 1: IPC スキーマ拡張（Python + Rust）
 
 ### `python/engine/schemas.py`
 
