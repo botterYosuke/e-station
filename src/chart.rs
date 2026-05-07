@@ -24,6 +24,24 @@ use iced::{
 const ZOOM_SENSITIVITY: f32 = 30.0;
 const TEXT_SIZE: f32 = 12.0;
 
+/// Canvas-local sub-state for `canvas::Program::State` (③ Canvas ループ).
+///
+/// 🔵gui-triple-state-refactor.md Phase 4 の境界明文化。
+/// ここに保持してよいのは「draw サイクル中のみ意味を持ち Elm 状態に含めると
+/// 1 フレーム遅延する」値だけ。データ・スケール・再描画ポリシーは Elm 管理。
+///
+/// 許容（Canvas-local OK）:
+/// - ドラッグ中・ズーム中などの過渡的 Interaction サブ状態
+/// - ホバー座標（カーソル位置）
+///
+/// 禁止（必ず Elm 管理 — `ViewState` / `Message` 経由）:
+/// - 表示範囲・スケール（translation / scaling / camera）
+/// - データ配列（execution_markers / trades / depth）
+/// - 再描画ポリシー（RebuildPolicy / CanvasInvalidation）
+///
+/// 新しい canvas widget を実装するときは、`State` に何を入れるかをこの境界で
+/// 判定すること。「便利だから」で `State` にデータを入れると ③ ループが ① の
+/// 責務を侵食し、HeatmapShader と同じアンチパターンを再生産する。
 #[derive(Default, Debug, Clone, Copy)]
 pub enum Interaction {
     #[default]
