@@ -50,7 +50,7 @@ fn dirty_none_is_clean() {
 #[test]
 fn exit_requested_checks_dirty() {
     let src = read_main();
-    let prefix = "            Message::ExitRequested(windows) =>";
+    let prefix = "            Message::Window(WindowMsg::ExitRequested(windows)) =>";
     let start = src
         .find(prefix)
         .expect("ExitRequested handler arm must exist");
@@ -70,7 +70,7 @@ fn exit_requested_checks_dirty() {
 #[test]
 fn exit_requested_shows_confirm_when_dirty() {
     let src = read_main();
-    let prefix = "            Message::ExitRequested(windows) =>";
+    let prefix = "            Message::Window(WindowMsg::ExitRequested(windows)) =>";
     let start = src
         .find(prefix)
         .expect("ExitRequested handler arm must exist");
@@ -96,7 +96,7 @@ fn open_file_apply_checks_dirty_before_restart() {
     let src = read_main();
 
     // Step 1: NativeOpenFileApply must dispatch NativeOpenFilePendingCheck.
-    let apply_prefix = "            Message::NativeOpenFileApply { json, path } =>";
+    let apply_prefix = "            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>";
     let apply_start = src
         .find(apply_prefix)
         .expect("NativeOpenFileApply handler arm must exist");
@@ -116,7 +116,7 @@ fn open_file_apply_checks_dirty_before_restart() {
     // rustfmt may reformat the struct pattern across multiple lines, so search
     // for the newline-prefixed match arm (12-space indent, not a deeper nested
     // construction site).
-    let check_needle = "\n            Message::NativeOpenFilePendingCheck {";
+    let check_needle = "\n            Message::Window(WindowMsg::NativeOpenFilePendingCheck {";
     let check_start = src
         .find(check_needle)
         .map(|i| i + 1) // skip the leading '\n' so the slice starts at the arm
@@ -141,7 +141,7 @@ fn toggle_dialog_modal_none_clears_pending_open_file() {
     // Fix for Issue 2: ToggleDialogModal(None) must clear pending_open_file so that
     // a subsequent Open action re-enters the dirty-check flow instead of skipping it.
     let src = read_main();
-    let prefix = "            Message::ToggleDialogModal(dialog) =>";
+    let prefix = "            Message::Window(WindowMsg::ToggleDialogModal(dialog)) =>";
     let start = src
         .find(prefix)
         .expect("ToggleDialogModal handler arm must exist");
@@ -433,7 +433,7 @@ fn escape_on_confirm_clears_pending_state() {
     // pending_open_file / pending_exit_windows / pending_save_path remain set.
     let src = read_main();
 
-    let prefix = "            Message::GoBack =>";
+    let prefix = "            Message::Window(WindowMsg::GoBack) =>";
     let start = src
         .find(prefix)
         .expect("Message::GoBack handler must exist");

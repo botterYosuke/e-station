@@ -124,7 +124,7 @@ fn save_as_with_specs_io_error_uses_warn() {
     // failures as WARN (IoError category).
     let src = read_main();
 
-    let arm_prefix = "            Message::NativeSaveAsWithSpecs {";
+    let arm_prefix = "            Message::Window(WindowMsg::NativeSaveAsWithSpecs {";
     let start = src
         .find(arm_prefix)
         .expect("NativeSaveAsWithSpecs handler must exist");
@@ -154,10 +154,10 @@ fn save_and_exit_updates_last_saved_bytes_on_current_path_write() {
     // violating A-7's "明示 Save 直後に last_saved_bytes 更新" contract.
     let src = read_main();
 
-    let prefix = "            Message::SaveAndExit =>";
+    let prefix = "            Message::Window(WindowMsg::SaveAndExit) =>";
     let start = src
         .find(prefix)
-        .expect("Message::SaveAndExit handler must exist");
+        .expect("Message::Window(WindowMsg::SaveAndExit) handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
         .find("\n            Message::")
@@ -183,10 +183,10 @@ fn save_and_exit_logs_warn_when_pending_exit_windows_is_none() {
     // with `let-else` + `log::warn!` + `return Task::none()`.
     let src = read_main();
 
-    let prefix = "            Message::SaveAndExit =>";
+    let prefix = "            Message::Window(WindowMsg::SaveAndExit) =>";
     let start = src
         .find(prefix)
-        .expect("Message::SaveAndExit handler must exist");
+        .expect("Message::Window(WindowMsg::SaveAndExit) handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
         .find("\n            Message::")
@@ -254,10 +254,10 @@ fn save_and_open_file_aborts_and_keeps_current_path_when_saved_state_write_fails
     // Ok branch only: update CURRENT_PATH then restart().
     let src = read_main();
 
-    let prefix = "            Message::SaveAndOpenFile =>";
+    let prefix = "            Message::Window(WindowMsg::SaveAndOpenFile) =>";
     let start = src
         .find(prefix)
-        .expect("Message::SaveAndOpenFile handler must exist");
+        .expect("Message::Window(WindowMsg::SaveAndOpenFile) handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
         .find("\n            Message::")

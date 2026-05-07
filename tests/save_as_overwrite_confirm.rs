@@ -17,7 +17,7 @@ fn save_as_overwrite_confirm() {
     let src = read_main();
 
     // 1. NativeSaveAsPath(Some(path)) handler must check path existence.
-    let arm_prefix = "            Message::NativeSaveAsPath(Some(path)) =>";
+    let arm_prefix = "            Message::Window(WindowMsg::NativeSaveAsPath(Some(path))) =>";
     let start = src
         .find(arm_prefix)
         .expect("NativeSaveAsPath(Some(path)) handler must exist");
@@ -49,7 +49,7 @@ fn save_as_overwrite_confirm() {
 #[test]
 fn save_as_path_checks_file_existence() {
     let src = read_main();
-    let arm_prefix = "            Message::NativeSaveAsPath(Some(path)) =>";
+    let arm_prefix = "            Message::Window(WindowMsg::NativeSaveAsPath(Some(path))) =>";
     let start = src
         .find(arm_prefix)
         .expect("NativeSaveAsPath(Some(path)) handler must exist");
@@ -122,7 +122,7 @@ fn confirm_save_as_overwrite_handler_proceeds_with_save() {
     let src = read_main();
     // Find handler arm in update() by finding the => pattern.
     // The variant now carries a path field: ConfirmSaveAsOverwrite { path }.
-    let handler_prefix = "            Message::ConfirmSaveAsOverwrite {";
+    let handler_prefix = "            Message::Window(WindowMsg::ConfirmSaveAsOverwrite {";
     let hstart = src
         .find(handler_prefix)
         .expect("ConfirmSaveAsOverwrite handler arm must exist in update()");

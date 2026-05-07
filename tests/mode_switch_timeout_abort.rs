@@ -16,11 +16,11 @@ fn read_main() -> String {
         .replace("\r\n", "\n")
 }
 
-/// Extract the handler arm body for a given Message variant.
-/// Searches for `Message::<name> =>` (the match arm, not a `|_| Message::` mapping)
+/// Extract the handler arm body for a given Message::Window(WindowMsg::...) variant.
+/// Searches for `Message::Window(WindowMsg::<name>) =>` (the match arm, not a `|_| Message::` mapping)
 /// and returns content up to the next top-level `Message::` arm.
 fn handler_body(src: &str, variant: &str) -> String {
-    let marker = format!("Message::{variant} =>");
+    let marker = format!("Message::Window(WindowMsg::{variant}) =>");
     let start = src
         .find(&marker)
         .unwrap_or_else(|| panic!("handler `{marker}` not found in src/main.rs"));
@@ -53,8 +53,8 @@ fn safe_contains_near(src: &str, start_marker: &str, needle: &str, window: usize
 fn stop_timeout_handler_exists() {
     let src = read_main();
     assert!(
-        src.contains("Message::ModeSwitchStopTimeout =>"),
-        "Message::ModeSwitchStopTimeout handler arm must exist"
+        src.contains("Message::Window(WindowMsg::ModeSwitchStopTimeout) =>"),
+        "Message::Window(WindowMsg::ModeSwitchStopTimeout) handler arm must exist"
     );
 }
 
@@ -84,8 +84,8 @@ fn stop_timeout_sends_force_stop_replay() {
 fn force_stop_timeout_handler_exists() {
     let src = read_main();
     assert!(
-        src.contains("Message::ModeSwitchForceStopTimeout =>"),
-        "Message::ModeSwitchForceStopTimeout handler arm must exist"
+        src.contains("Message::Window(WindowMsg::ModeSwitchForceStopTimeout) =>"),
+        "Message::Window(WindowMsg::ModeSwitchForceStopTimeout) handler arm must exist"
     );
 }
 
@@ -131,8 +131,8 @@ fn force_stop_timeout_shows_error_dialog() {
 fn send_failed_message_variant_exists() {
     let src = read_main();
     assert!(
-        src.contains("ModeSwitchSendFailed,"),
-        "ModeSwitchSendFailed variant must exist in the Message enum"
+        src.contains("ModeSwitchSendFailed"),
+        "ModeSwitchSendFailed must exist in src/main.rs"
     );
 }
 
@@ -140,8 +140,8 @@ fn send_failed_message_variant_exists() {
 fn send_failed_handler_exists() {
     let src = read_main();
     assert!(
-        src.contains("Message::ModeSwitchSendFailed =>"),
-        "Message::ModeSwitchSendFailed handler arm must exist in update()"
+        src.contains("Message::Window(WindowMsg::ModeSwitchSendFailed) =>"),
+        "Message::Window(WindowMsg::ModeSwitchSendFailed) handler arm must exist in update()"
     );
 }
 

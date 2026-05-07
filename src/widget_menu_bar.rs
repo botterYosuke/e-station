@@ -16,6 +16,7 @@ use iced::widget::{
 };
 use iced::{Element, Length};
 
+use crate::messages::MenuMsg;
 use crate::Message;
 use crate::menu::{Action, MenuEntry, ReplayControlState, actions_for_mode, replay_control_state};
 pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
@@ -161,7 +162,7 @@ pub fn with_dropdown_overlay<'a>(
             .width(Length::Fill)
             .height(Length::Fill),
         )
-        .on_press(Message::MenuBar(BarMessage::Dismiss)),
+        .on_press(Message::Menu(MenuMsg::Bar(BarMessage::Dismiss))),
     );
 
     // The leading Space is NOT wrapped in opaque/mouse_area, so pointer events
@@ -375,7 +376,7 @@ fn build_dropdown<'a>(entries: Vec<MenuEntry>) -> Vec<Element<'a, Message>> {
                 None => row![text(prefix), text(base_label)].into(),
             };
 
-            let msg = Message::MenuBar(BarMessage::Pick(action));
+            let msg = Message::Menu(MenuMsg::Bar(BarMessage::Pick(action)));
             let btn = button(content).width(Length::Fill).style(button::text);
             let btn_el: Element<'a, Message> = if enabled {
                 btn.on_press(msg).into()

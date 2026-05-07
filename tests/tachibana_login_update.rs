@@ -21,10 +21,10 @@ fn read_handler_body() -> String {
     let src = std::fs::read_to_string(path).expect("read src/main.rs");
 
     // `Message::RequestTachibanaLogin` アームの開始位置を見つける。
-    let needle = "Message::RequestTachibanaLogin(trigger)";
+    let needle = "Message::Venue(VenueMsg::RequestTachibanaLogin(trigger))";
     let start = src
         .find(needle)
-        .expect("Message::RequestTachibanaLogin(trigger) not found in src/main.rs");
+        .expect("Message::Venue(VenueMsg::RequestTachibanaLogin(trigger)) not found in src/main.rs");
 
     // 次の `Message::` アームの開始位置を末端とする（最大 3000 バイト）。
     // これにより他のハンドラの記述が混入しない。
@@ -80,9 +80,9 @@ fn request_login_sends_request_venue_login_command() {
 fn request_login_hooks_tachibana_login_ipc_result() {
     let body = read_handler_body();
     assert!(
-        body.contains("Message::TachibanaLoginIpcResult"),
+        body.contains("Message::Venue(VenueMsg::TachibanaLoginIpcResult"),
         "Message::RequestTachibanaLogin handler must use \
-         `Message::TachibanaLoginIpcResult` as the Task::perform callback. \
+         `Message::Venue(VenueMsg::TachibanaLoginIpcResult` as the Task::perform callback. \
          Without this hook, IPC send failures do not roll back the FSM \
          from LoginInFlight to Idle, leaving the user unable to retry. \
          T35-LoginUpdate / R4 MEDIUM-2."

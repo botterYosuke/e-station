@@ -103,7 +103,7 @@ fn tt6_switch_mode_handler_body_contains_dirty_check_flow() {
     // The dirty check lives in SwitchModeWithSpecs (the continuation of SwitchMode).
     // Find the match arm (not the enum definition or comment).
     let handler_start = src
-        .find("Message::SwitchModeWithSpecs { target, windows } =>")
+        .find("Message::Window(WindowMsg::SwitchModeWithSpecs { target, windows }) =>")
         .expect("SwitchModeWithSpecs handler must exist");
     let handler_body = &src[handler_start..];
     let end = handler_body.len().min(3000);

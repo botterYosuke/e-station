@@ -140,7 +140,7 @@ fn main_menu_bar_handler_match_is_exhaustive_without_wildcard() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
     let src = std::fs::read_to_string(path).expect("failed to read src/main.rs");
     let handler_start = src
-        .find("Message::MenuBar(bar_msg) =>")
+        .find("Message::Menu(MenuMsg::Bar(bar_msg)) =>")
         .expect("MenuBar handler must exist");
     let after = &src[handler_start..];
     // The handler ends at the next top-level `Message::` arm.
@@ -431,8 +431,8 @@ fn esc_dismiss_is_wired_in_go_back_handler() {
         .replace("\r\n", "\n");
     // The GoBack handler must dismiss the Linux menu bar (cfg-gated)
     let go_back_start = src
-        .find("Message::GoBack =>")
-        .expect("Message::GoBack handler must exist in main.rs");
+        .find("Message::Window(WindowMsg::GoBack) =>")
+        .expect("Message::Window(WindowMsg::GoBack) handler must exist in main.rs");
     let after = &src[go_back_start..];
     let end = after.find("\n            Message::").unwrap_or(after.len());
     let body = &after[..end];

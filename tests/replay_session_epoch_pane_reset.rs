@@ -42,8 +42,8 @@ fn extract_function_body<'a>(source: &'a str, sig_marker: &str) -> Option<&'a st
 /// not the variant declaration nor the dispatcher).
 fn handler_window() -> &'static str {
     let handler_start = SOURCE
-        .rfind("Message::ReplayDataLoaded {")
-        .expect("Message::ReplayDataLoaded arm in update() not found");
+        .rfind("Message::Replay(ReplayMsg::DataLoaded {")
+        .expect("Message::Replay(ReplayMsg::DataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     &rest[..rest.len().min(6_000)]
 }
@@ -54,20 +54,24 @@ fn handler_window() -> &'static str {
 //    has a `pub(super)` constructor unreachable from this binary.
 
 // 2. Message::ReplayDataLoaded carries session_epoch.
+// After the refactor, the variant fields are defined in src/messages.rs as ReplayMsg::DataLoaded.
+const MESSAGES_RS: &str = include_str!("../src/messages.rs");
+
 #[test]
 fn message_replay_data_loaded_has_session_epoch_field() {
-    let variant_start = SOURCE
-        .find("ReplayDataLoaded {")
-        .expect("Message::ReplayDataLoaded variant not found in src/main.rs");
-    let rest = &SOURCE[variant_start..];
+    // The variant is now ReplayMsg::DataLoaded in src/messages.rs.
+    let variant_start = MESSAGES_RS
+        .find("DataLoaded {")
+        .expect("ReplayMsg::DataLoaded variant not found in src/messages.rs");
+    let rest = &MESSAGES_RS[variant_start..];
     let end = rest
         .find('}')
-        .expect("closing brace of ReplayDataLoaded variant not found");
+        .expect("closing brace of DataLoaded variant not found");
     let body = &rest[..end];
 
     assert!(
         body.contains("session_epoch"),
-        "Message::ReplayDataLoaded must declare `session_epoch: Option<u64>` \
+        "ReplayMsg::DataLoaded must declare `session_epoch: Option<u64>` \
          (schema 3.14). Without it the GUI cannot detect replay-file-switch \
          boundaries and the previous file's panes remain as zombies — the bug \
          this fix is for."
@@ -247,10 +251,12 @@ fn disconnect_resets_last_replay_session_epoch() {
     // The reset lives in the EngineRestarting(true) branch — find that branch
     // and confirm `last_replay_session_epoch = None` is inside it.
     let restart_idx = SOURCE
-        .find("Message::EngineRestarting(restarting)")
-        .expect("Message::EngineRestarting handler not found");
+        .find("Message::Engine(EngineMsg::Restarting(restarting))")
+        .expect("Message::Engine(EngineMsg::Restarting) handler not found");
     let rest = &SOURCE[restart_idx..];
-    let window = &rest[..rest.len().min(4_000)];
+    let max = rest.len().min(4_000);
+    let safe_max = (0..=max).rev().find(|&i| rest.is_char_boundary(i)).unwrap_or(0);
+    let window = &rest[..safe_max];
     assert!(
         window.contains("last_replay_session_epoch = None"),
         "On engine restart/disconnect the handler must reset \

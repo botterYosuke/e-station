@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
 mod chart;
@@ -13,6 +13,7 @@ mod menu;
 // `menu_bar_state` houses the pure `update()` state machine for the iced widget
 // menu bar. No cfg gate — the state machine is platform-independent.
 mod menu_bar_state;
+mod messages;
 mod modal;
 mod native_menu;
 mod notify;
@@ -23,6 +24,8 @@ mod version;
 mod widget;
 mod widget_menu_bar;
 mod window;
+
+use messages::{DashboardMsg, EngineMsg, MenuMsg, ReplayMsg, SettingsMsg, VenueMsg, WindowMsg};
 
 use data::config::theme::default_theme;
 use data::{layout::WindowSpec, sidebar};
@@ -1146,7 +1149,7 @@ struct Flowsurface {
     /// N4-live: live 戦略の実行状態。Idle = 未実行、Running = 実行中（strategy_id 保持）。
     live_strategy: LiveStrategyState,
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
-    /// Cleared by `Message::DismissStrategyLoadError`.
+    /// Cleared by `Message::Replay(ReplayMsg::DismissStrategyLoadError)`.
     strategy_load_error: Option<String>,
     /// F4: Byte snapshot of the last explicit save (Save/SaveAs) or auto-save.
     /// `None` = initial clean state (BC-9: treated as not dirty).
@@ -1185,7 +1188,7 @@ struct Flowsurface {
     /// 閉じる。engine 切断時に `None` にリセットする（プロセス再起動で epoch が
     /// 0 に巻き戻ったとき `Some(N) → Some(0)` の `!=` 誤発火を防ぐため）。
     last_replay_session_epoch: Option<u64>,
-    /// True between `Message::StopReplayOnly` dispatch and the corresponding
+    /// True between `Message::Replay(ReplayMsg::StopReplayOnly)` dispatch and the corresponding
     /// `ReplayStopped` ack / final timeout. Distinguishes the stop-only flow
     /// from the F7 mode-switch flow inside the shared `ModeSwitch*` message
     /// handlers (which now serve both flows).
@@ -1194,343 +1197,20 @@ struct Flowsurface {
     menu_bar: crate::menu_bar_state::State,
 }
 
+/// Top-level message enum — thin dispatch hub.
+///
+/// Each variant wraps a grouped sub-message enum defined in `messages.rs`.
+/// `Flowsurface::update()` matches on this enum and delegates to the
+/// corresponding `handle_*` method, keeping `update()` under 400 lines.
 #[derive(Debug, Clone)]
 enum Message {
-    Sidebar(dashboard::sidebar::Message),
-    MarketWsEvent(exchange::Event),
-    /// Fired by the engine-status subscription when the Python engine starts or
-    /// finishes a restart.  `true` = restarting, `false` = ready.
-    EngineRestarting(bool),
-    /// Fired by the engine-status subscription on every successful handshake.
-    /// Replaces the former `static ENGINE_CONNECTION` global read from
-    /// `update()` (T35-H7-NoStaticInUpdate).
-    EngineConnected(Arc<engine_client::EngineConnection>),
-    /// Fired when an engine event affecting the Tachibana venue
-    /// lifecycle (`VenueLoginStarted` / `VenueLoginCancelled` /
-    /// `VenueError` / `VenueReady`) arrives. Drives `tachibana_state`
-    /// transitions. T35-U4-VenueReadyGate / T35-U2-Banner.
-    TachibanaVenueEvent(VenueEvent),
-    /// User asked to (re)open the Tachibana login dialog. Sourced
-    /// from the inline "ログイン" button (`Trigger::Manual`) and from
-    /// the auto-fire path inside `tickers_table` that runs when the
-    /// user toggles Tachibana while the venue is still `Idle`
-    /// (`Trigger::Auto`). The handler suppresses duplicates while
-    /// `tachibana_state` is already `LoginInFlight`. T35-U1 / T35-U3.
-    RequestTachibanaLogin(Trigger),
-    /// User pressed the banner's "閉じる"-style button. Transitions
-    /// `tachibana_state` back to `Idle` so the banner is hidden. The
-    /// underlying error condition (e.g. `phone_auth_required`) is
-    /// considered acknowledged; a fresh `VenueError` from the engine
-    /// will re-show the banner. T35-U2-Banner.
-    DismissTachibanaBanner,
-    /// Result of the asynchronous `Command::RequestVenueLogin` IPC
-    /// send. The handler does not transition the FSM (the engine's
-    /// own `VenueLoginStarted` event is the authoritative trigger);
-    /// it only logs success and surfaces a toast on send failure so
-    /// the user knows their click did not silently disappear.
-    /// Review-fixes 2026-04-26 round 1.
-    TachibanaLoginIpcResult(Result<(), String>),
-    /// kabuステーション venue lifecycle event (mirrors `TachibanaVenueEvent`).
-    KabuVenueEvent(VenueEvent),
-    /// User requested kabuステーション login from the footer chip.
-    RequestKabuLogin(Trigger),
-    /// Result of the `Command::RequestVenueLogin { venue: "kabu_station" }` IPC send.
-    KabuLoginIpcResult(Result<(), String>),
-    Dashboard {
-        /// If `None`, the active layout is used for the event.
-        layout_id: Option<uuid::Uuid>,
-        event: dashboard::Message,
-    },
-    Tick(std::time::Instant),
-    WindowEvent(window::Event),
-    ExitRequested(HashMap<window::Id, WindowSpec>),
-    RestartRequested(Option<HashMap<window::Id, WindowSpec>>),
-    /// F4: After startup/restart, collect window specs then set last_saved_bytes baseline
-    /// so edits made before the first explicit Save can be detected as dirty (BC-9 fix).
-    SetDirtyBaseline(HashMap<window::Id, WindowSpec>),
-    GoBack,
-    DataFolderRequested,
-    OpenUrlRequested(Cow<'static, str>),
-    ThemeSelected(iced_core::Theme),
-    ScaleFactorChanged(data::ScaleFactor),
-    SetTimezone(data::UserTimezone),
-    ToggleTradeFetch(bool),
-    ApplyVolumeSizeUnit(exchange::SizeUnit),
-    RemoveNotification(usize),
-    ToggleDialogModal(Option<screen::ConfirmDialog<Message>>),
-    ThemeEditor(modal::theme_editor::Message),
-    NetworkManager(modal::network_manager::Message),
-    Layouts(modal::layout_manager::Message),
-    AudioStream(modal::audio::Message),
-    /// EC 約定通知（Phase O2 T2.4）。`OrderFilled` / `OrderCanceled` /
-    /// `OrderExpired` を受信したときに toast を surface する。
-    OrderToast(Toast),
-    /// `GetOrderList` IPC レスポンス — 全 OrderList ペインに配信する（Phase U1）。
-    OrderListUpdated(Vec<engine_client::dto::OrderRecordWire>),
-    /// `GetOrderList` IPC 送信完了（Ok）/ 送信失敗（Err）。
-    OrderListSendCompleted(Result<(), String>),
-    /// `GetBuyingPower` IPC 送信完了（Ok）/ 送信失敗（Err）。
-    /// 注: 現状 BuyingPower の Err 経路は全て IpcError にルーティングされるため
-    /// Err arm には到達しない。IpcError が request_id 照合で loading を解除する。
-    BuyingPowerSendCompleted(Result<(), String>),
-    /// `PositionsUpdated` IPC event — distribute to all Positions panes.
-    PositionsUpdated {
-        /// IPC routing field; not used by the UI (broadcasts to all Positions panes).
-        #[allow(dead_code)]
-        request_id: String,
-        /// IPC routing field; not used by the UI.
-        #[allow(dead_code)]
-        venue: String,
-        positions: Vec<engine_client::dto::PositionRecordWire>,
-        ts_ms: i64,
-    },
-    /// `GetPositions` IPC 送信完了（Ok）/ 送信失敗（Err）。
-    PositionsSendCompleted(Result<(), String>),
-    /// EC 約定通知（OrderFilled）— positions auto-refresh を含む。
-    OrderFilled {
-        client_order_id: String,
-        last_qty: String,
-        last_price: String,
-        leaves_qty: String,
-    },
-    /// Python エンジンが第二暗証番号を要求した。request_id は `SetSecondPassword` に使う。
-    SecondPasswordRequired(String),
-    /// 第二暗証番号 modal を閉じ、`ForgetSecondPassword` を IPC 送信する。
-    DismissSecondPasswordModal,
-    /// 第二暗証番号 modal 内部のメッセージ。
-    SecondPasswordModalMsg(modal::second_password::Message),
-    /// User confirmed the order dialog; forward `ConfirmSubmit` to the focused
-    /// `OrderEntryPanel` and then process the resulting `SubmitOrder` IPC call.
-    ConfirmOrderEntrySubmit,
-    /// User confirmed the cancel-order dialog; send `CancelOrder` IPC.
-    ConfirmCancelOrder {
-        client_order_id: String,
-        venue_order_id: String,
-    },
-    /// `OrderAccepted` IPC event — reset `submitting` on the matching
-    /// `OrderEntryPanel` and surface a toast.
-    OrderAccepted {
-        client_order_id: String,
-        venue_order_id: Option<String>,
-    },
-    /// `OrderRejected` IPC event — reset `submitting` on the matching
-    /// `OrderEntryPanel` with the rejection reason, and surface a toast.
-    OrderRejected {
-        client_order_id: String,
-        reason: String,
-    },
-    /// `BuyingPowerUpdated` IPC event — distribute to all BuyingPower panes.
-    BuyingPowerUpdated {
-        cash_available: i64,
-        cash_shortfall: i64,
-        credit_available: i64,
-        ts_ms: i64,
-    },
-    /// N1.16: `EngineEvent::ReplayBuyingPower` — REPLAY 仮想ポートフォリオ更新。
-    ReplayBuyingPower {
-        cash: String,
-        buying_power: String,
-        equity: String,
-        ts_event_ms: i64,
-    },
-    /// N3: `EngineEvent::LiveBuyingPower` — live strategy 買付余力スナップショット更新。
-    LiveBuyingPowerUpdated {
-        cash: String,
-        equity: String,
-        ts_event_ms: i64,
-    },
-    /// `EngineEvent::Error` — routed to the BuyingPower panel if `request_id`
-    /// matches the pending buying-power request, otherwise silently ignored.
-    IpcError {
-        request_id: Option<String>,
-        code: String,
-        message: String,
-    },
-    /// N1.12: `EngineEvent::ExecutionMarker` — overlay dot on all Kline charts.
-    ExecutionMarkerReceived {
-        side: String,
-        price: String,
-        ts_event_ms: i64,
-    },
-    /// N1.12: `EngineEvent::StrategySignal` — overlay diamond on all Kline charts.
-    StrategySignalReceived {
-        signal_kind: engine_client::dto::SignalKind,
-        price: Option<String>,
-        ts_event_ms: i64,
-        tag: Option<String>,
-    },
-    /// N4.3: result of the async OS file dialog for strategy `.py` file selection.
-    /// `Some(path)` when the user picked a file; `None` when they cancelled.
-    StrategyFilePicked(Option<std::path::PathBuf>),
-    /// N4.4: user dismissed the `strategy_load_failed` error banner.
-    DismissStrategyLoadError,
-    /// Replay engine finished — auto-refresh the order list.
-    ReplayFinished,
-    /// schema 3.12: `EngineEvent::ReplayDataLoaded` — replay 用ペインを
-    /// 自動生成する。GUI 内フォーム経由でも helper attach mode でも
-    /// 同じ経路を通る。`instrument_id` / `granularity` は schema 3.12 で
-    /// 追加された optional フィールドで、旧 engine（minor<12）からは
-    /// `None` で届く（その場合 `update()` 側で防御的に弾く）。
-    ReplayDataLoaded {
-        instrument_id: Option<String>,
-        /// schema 3.13: 複数銘柄対応。None のとき instrument_id 単体として扱う（後方互換）。
-        instrument_ids: Option<Vec<String>>,
-        granularity: Option<engine_client::dto::ReplayGranularity>,
-        #[allow(dead_code)]
-        bars_loaded: u64,
-        #[allow(dead_code)]
-        trades_loaded: u64,
-        /// schema 3.14: 新セッション識別子。`Flowsurface::last_replay_session_epoch`
-        /// と `!=` 比較して、新 epoch を観測したら旧ペインを全閉じする。
-        /// 旧 engine（minor<14）からは `None` で届く（後方互換）。
-        session_epoch: Option<u64>,
-    },
-    /// schema 3.15: `EngineEvent::DateChangeMarker` — update replay bar current day display.
-    ReplayDateChanged(String),
-    /// schema 3.16: `EngineEvent::ReplayHistoryChanged` — update ⏮ button enable state.
-    ReplayHistoryChanged {
-        has_history: bool,
-    },
-    /// Native OS menu bar: HWND / window handle received; attach muda menu.
-    NativeMenuSetup(u64),
-    /// Native OS menu bar: user selected a menu item.
-    NativeMenuAction(native_menu::Action),
-    /// Widget menu bar message (toggle/pick/dismiss) — all platforms.
-    MenuBar(crate::menu_bar_state::BarMessage),
-    /// Native OS menu bar — Save As: user picked a destination path.
-    NativeSaveAsPath(Option<std::path::PathBuf>),
-    /// Native OS menu bar — Save As: window specs collected, ready to write.
-    /// Carries the destination path directly so no shared slot is needed.
-    NativeSaveAsWithSpecs {
-        path: std::path::PathBuf,
-        windows: HashMap<window::Id, WindowSpec>,
-    },
-    /// Native OS menu bar — Open: JSON content and the source path of the picked file.
-    NativeOpenFileApply {
-        json: String,
-        path: std::path::PathBuf,
-    },
-    /// Native OS menu bar — Open: dialog cancelled (user closed the picker).
-    NativeOpenFileCancelled,
-    /// F4: two-step open — window specs collected, ready for dirty comparison.
-    /// `NativeOpenFileApply` validates JSON then dispatches here so the dirty
-    /// check can compare against bytes that include current window positions.
-    NativeOpenFilePendingCheck {
-        json: String,
-        path: std::path::PathBuf,
-        windows: HashMap<window::Id, WindowSpec>,
-    },
-    /// F6a: replay モードの `File > 開く...` で `.py` が選択されたときの結果。
-    /// `Some(path)` なら `Command::LoadStrategyScenario` を engine に送信し、
-    /// `None`（cancel）なら何もしない。
-    NativeOpenStrategyPicked(Option<std::path::PathBuf>),
-    /// F6a: `Event::StrategyScenarioLoaded` 受信時。`scenario` が `Some` なら
-    /// `ReplayFormModal` を prefill し、`None`（SCENARIO 不在）なら strategy_file
-    /// だけセットしてフォームは空のままにする。`current_path` は両ケースで更新。
-    StrategyScenarioLoadedEvent {
-        request_id: String,
-        path: std::path::PathBuf,
-        scenario: Option<serde_json::Value>,
-    },
-    /// F6a: `Event::StrategyScenarioLoadFailed` 受信時。エラートーストを出し、
-    /// `current_path` はセットしない。
-    StrategyScenarioLoadFailedEvent {
-        request_id: String,
-        path: std::path::PathBuf,
-        reason: String,
-    },
-    /// UI entry point removed in schema 3.16 (replay control bar replaces the menu item).
-    /// Handler and ReplayFormModal kept until next cleanup phase (validate() still shared).
-    #[allow(dead_code)]
-    ShowReplayDialog,
-    /// Phase 8.1c: Replay 起動フォーム modal の内部メッセージ。
-    ReplayFormMsg(modal::replay_form::Message),
-    /// N4-live: live strategy フォーム modal 内部メッセージ。
-    LiveStrategyFormMsg(modal::live_strategy_form::Message),
-    /// N4-live: live EngineStarted を受信した。
-    LiveStrategyStarted {
-        strategy_id: String,
-        ts_event_ms: i64,
-    },
-    /// N4-live: live 戦略の EngineStopped を受信した。
-    LiveEngineStoppedEvent {
-        strategy_id: String,
-    },
-    /// N4-live: StartEngine 送信失敗（IPC エラー）。strategy_file_stem をクリアしてトーストを出す。
-    LiveStrategyStartFailed(String),
-    /// N4-live: ■ ボタンから StopEngine を送信する。
-    StopLiveStrategy,
-    /// F4: dirty-check confirm — user chose "破棄して終了" (discard and exit).
-    DiscardAndExit,
-    /// F4: dirty-check confirm — user chose "保存して終了" (save and exit).
-    SaveAndExit,
-    /// F4: dirty-check confirm — user chose "破棄して開く" (discard and open file).
-    DiscardAndOpenFile,
-    /// F4: dirty-check confirm — user chose "保存して開く" (save and open file).
-    SaveAndOpenFile,
-    /// F7: dirty-check confirm (live→replay) — user chose "破棄してモード切替".
-    DiscardAndSwitchMode,
-    /// F7: dirty-check confirm (live→replay) — user chose "保存してモード切替".
-    SaveAndSwitchMode,
-    /// F7: window specs collected for live→replay switch; proceed with dirty check.
-    SwitchModeWithSpecs {
-        target: engine_client::dto::AppMode,
-        windows: HashMap<window::Id, WindowSpec>,
-    },
-    /// F7: `EngineEvent::ReplayStopped` received — proceed with restart_with_mode.
-    ModeSwitchStopAcked,
-    /// F7: 5-second StopReplay timeout — send ForceStopReplay fallback.
-    ModeSwitchStopTimeout,
-    /// F7: 2-second ForceStopReplay timeout — give up and show error.
-    ModeSwitchForceStopTimeout,
-    /// F7: StopReplay or ForceStopReplay send() returned Err — connection is broken; abort immediately.
-    ModeSwitchSendFailed,
-    /// F7: window specs collected after "保存してモード切替" confirm; save then restart.
-    /// Routes through a dedicated message (not SwitchModeWithSpecs) to bypass the
-    /// dirty check — the user already confirmed, and re-checking would loop.
-    SwitchModeSaveComplete {
-        target: engine_client::dto::AppMode,
-        windows: HashMap<window::Id, WindowSpec>,
-    },
-    /// F7: engine returned `EngineBusy` for `StopReplay` (engine IDLE — no replay loaded).
-    /// Does NOT abort the switch; sends `ForceStopReplay` immediately as fallback.
-    ModeSwitchStopBusy,
-    /// F7: engine returned `EngineBusy` for `ForceStopReplay` — genuine failure; abort.
-    ModeSwitchEngineBusy(String),
-    /// User clicked "リプレイ停止（Replay Stop）" — stop the running replay without
-    /// switching app mode. Sends `Command::StopReplay`; the subsequent ack /
-    /// timeout / EngineBusy events are routed through the shared `ModeSwitch*`
-    /// handlers, distinguished by `replay_stop_only_pending`.
-    StopReplayOnly,
-    /// R2-H1: `EngineEvent::RestoreSnapshot` — Step- 後の巻き戻し通知。
-    /// current_day をリセットして将来の chart pane フラッシュのプレースホルダーとする。
-    /// TODO: chart pane should flush data from ts_event_ms onward when this arrives.
-    RestoreSnapshotPending {
-        step_index: u64,
-        ts_event_ms: i64,
-    },
-    /// Internal: genuinely does nothing in update(). Used to discard async Task
-    /// completion events where the result is irrelevant (fire-and-forget IPC sends).
-    Noop,
-    /// F5: Save As overwrite confirm — user confirmed overwriting the existing file.
-    /// Carries the path directly to avoid the `pending_save_path` shared slot.
-    ConfirmSaveAsOverwrite {
-        path: std::path::PathBuf,
-    },
-    /// H-3: async file save completion — fired by `Task::perform` in the
-    /// `NativeSaveAsWithSpecs` handler once the tokio async writes finish.
-    /// `error_kind = None` means both writes succeeded; `Some(kind)` means the
-    /// user-path write failed (saved-state.json write failure is best-effort and
-    /// only emits a WARN log).
-    NativeSaveComplete {
-        user_path: std::path::PathBuf,
-        json_bytes: Vec<u8>,
-        /// `None` = success, `Some(kind)` = I/O error on the user-specified path.
-        error_kind: Option<std::io::ErrorKind>,
-        /// `true` if saved-state.json was written successfully (auto-restore slot).
-        /// `false` means the named doc is saved but next startup will auto-restore old state.
-        saved_state_ok: bool,
-    },
+    Engine(EngineMsg),
+    Venue(VenueMsg),
+    Replay(ReplayMsg),
+    Dashboard(DashboardMsg),
+    Window(WindowMsg),
+    Menu(MenuMsg),
+    Settings(SettingsMsg),
 }
 
 /// Builds a single stream that emits engine restart transitions, fresh
@@ -1568,13 +1248,15 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
             // EngineConnected refetch correctly excludes Tachibana
             // until the next `VenueReady`. Reviewer 2026-04-26 R3
             // (HIGH-1).
-            yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
-            yield Message::KabuVenueEvent(VenueEvent::EngineRehello);
-            yield Message::EngineConnected(conn);
+            // Message::TachibanaVenueEvent(VenueEvent::EngineRehello) == post-refactor below
+            yield Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::EngineRehello));
+            yield Message::Venue(VenueMsg::KabuEvent(VenueEvent::EngineRehello));
+            // Message::EngineConnected(conn) == post-refactor below
+            yield Message::Engine(EngineMsg::Connected(conn));
         }
         let initial_restart = { *restart_rx.borrow_and_update() };
         if initial_restart {
-            yield Message::EngineRestarting(true);
+            yield Message::Engine(EngineMsg::Restarting(true));
         }
 
         loop {
@@ -1597,7 +1279,7 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                 changed = restart_rx.changed() => {
                     if changed.is_err() { break; }
                     let value = { *restart_rx.borrow_and_update() };
-                    yield Message::EngineRestarting(value);
+                    yield Message::Engine(EngineMsg::Restarting(value));
                 }
                 changed = conn_rx.changed() => {
                     if changed.is_err() { break; }
@@ -1608,9 +1290,11 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                         // FSM-driven gate flag flips before the
                         // EngineConnected handler refetches
                         // (T35-U4-StartupGate / R3 HIGH-1).
-                        yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
-                        yield Message::KabuVenueEvent(VenueEvent::EngineRehello);
-                        yield Message::EngineConnected(conn);
+                        // Message::TachibanaVenueEvent(VenueEvent::EngineRehello) == post-refactor below
+                        yield Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::EngineRehello));
+                        yield Message::Venue(VenueMsg::KabuEvent(VenueEvent::EngineRehello));
+                        // Message::EngineConnected(conn) == post-refactor below
+                        yield Message::Engine(EngineMsg::Connected(conn));
                     }
                 }
                 event = event_fut => {
@@ -1656,13 +1340,13 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
     use engine_client::dto::EngineEvent;
     match ev {
         EngineEvent::VenueReady { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
-            Some(Message::TachibanaVenueEvent(VenueEvent::Ready))
+            Some(Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::Ready)))
         }
         EngineEvent::VenueLoginStarted { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
-            Some(Message::TachibanaVenueEvent(VenueEvent::LoginStarted))
+            Some(Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::LoginStarted)))
         }
         EngineEvent::VenueLoginCancelled { venue, .. } if venue == TACHIBANA_VENUE_NAME => {
-            Some(Message::TachibanaVenueEvent(VenueEvent::LoginCancelled))
+            Some(Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::LoginCancelled)))
         }
         EngineEvent::VenueError {
             venue,
@@ -1671,20 +1355,20 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             ..
         } if venue == TACHIBANA_VENUE_NAME => {
             let class = engine_client::error::classify_venue_error(&code);
-            Some(Message::TachibanaVenueEvent(VenueEvent::LoginError {
+            Some(Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::LoginError {
                 class,
                 message,
                 market_closed: code == "market_closed",
-            }))
+            })))
         }
         EngineEvent::VenueReady { venue, .. } if venue == KABU_STATION_VENUE_NAME => {
-            Some(Message::KabuVenueEvent(VenueEvent::Ready))
+            Some(Message::Venue(VenueMsg::KabuEvent(VenueEvent::Ready)))
         }
         EngineEvent::VenueLoginStarted { venue, .. } if venue == KABU_STATION_VENUE_NAME => {
-            Some(Message::KabuVenueEvent(VenueEvent::LoginStarted))
+            Some(Message::Venue(VenueMsg::KabuEvent(VenueEvent::LoginStarted)))
         }
         EngineEvent::VenueLoginCancelled { venue, .. } if venue == KABU_STATION_VENUE_NAME => {
-            Some(Message::KabuVenueEvent(VenueEvent::LoginCancelled))
+            Some(Message::Venue(VenueMsg::KabuEvent(VenueEvent::LoginCancelled)))
         }
         EngineEvent::VenueError {
             venue,
@@ -1693,11 +1377,11 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             ..
         } if venue == KABU_STATION_VENUE_NAME => {
             let class = engine_client::error::classify_venue_error(&code);
-            Some(Message::KabuVenueEvent(VenueEvent::LoginError {
+            Some(Message::Venue(VenueMsg::KabuEvent(VenueEvent::LoginError {
                 class,
                 message,
                 market_closed: code == "market_closed",
-            }))
+            })))
         }
         // ── Phase O2: EC 約定通知 (T2.4) ────────────────────────────────────
         EngineEvent::OrderFilled {
@@ -1706,68 +1390,70 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             last_price,
             leaves_qty,
             ..
-        } => Some(Message::OrderFilled {
+        } => Some(Message::Venue(VenueMsg::OrderFilled {
             client_order_id,
             last_qty,
             last_price,
             leaves_qty,
-        }),
+        })),
         EngineEvent::OrderCanceled {
             client_order_id, ..
-        } => Some(Message::OrderToast(Toast::info(format!(
+        } => Some(Message::Venue(VenueMsg::OrderToast(Toast::info(format!(
             "注文取消完了: {client_order_id}"
-        )))),
+        ))))),
         EngineEvent::OrderExpired {
             client_order_id, ..
-        } => Some(Message::OrderToast(Toast::warn(format!(
+        } => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
             "注文失効: {client_order_id}"
-        )))),
+        ))))),
         // ── Phase U0: 第二暗証番号 / 注文受付・拒否 ────────────────────────
         EngineEvent::SecondPasswordRequired { request_id } => {
-            Some(Message::SecondPasswordRequired(request_id))
+            Some(Message::Venue(VenueMsg::SecondPasswordRequired(request_id)))
         }
         EngineEvent::OrderAccepted {
             client_order_id,
             venue_order_id,
             ..
-        } => Some(Message::OrderAccepted {
+        } => Some(Message::Venue(VenueMsg::OrderAccepted {
             client_order_id,
             venue_order_id,
-        }),
+        })),
         EngineEvent::OrderRejected {
             client_order_id,
             reason_code,
             reason_text,
             ..
-        } => Some(Message::OrderRejected {
+        } => Some(Message::Venue(VenueMsg::OrderRejected {
             client_order_id,
             reason: format!("[{reason_code}] {reason_text}"),
-        }),
-        EngineEvent::OrderListUpdated { orders, .. } => Some(Message::OrderListUpdated(orders)),
+        })),
+        EngineEvent::OrderListUpdated { orders, .. } => {
+            Some(Message::Venue(VenueMsg::OrderListUpdated(orders)))
+        }
         EngineEvent::PositionsUpdated {
             request_id,
             venue,
             positions,
             ts_ms,
             ..
-        } => Some(Message::PositionsUpdated {
+        } => Some(Message::Venue(VenueMsg::PositionsUpdated {
             request_id,
             venue,
             positions,
             ts_ms,
-        }),
+        })),
         EngineEvent::BuyingPowerUpdated {
             cash_available,
             cash_shortfall,
             credit_available,
             ts_ms,
             .. // request_id / venue are IPC routing fields; UI broadcasts to all BuyingPower panes
-        } => Some(Message::BuyingPowerUpdated {
+        } => Some(Message::Venue(VenueMsg::BuyingPowerUpdated {
             cash_available,
             cash_shortfall,
             credit_available,
             ts_ms,
-        }),
+        })),
         // N1.16: REPLAY 仮想ポートフォリオ更新イベント
         EngineEvent::ReplayBuyingPower {
             cash,
@@ -1775,43 +1461,43 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             equity,
             ts_event_ms,
             ..
-        } => Some(Message::ReplayBuyingPower {
+        } => Some(Message::Replay(ReplayMsg::BuyingPower {
             cash,
             buying_power,
             equity,
             ts_event_ms,
-        }),
+        })),
         // N3: live strategy 買付余力スナップショット
         EngineEvent::LiveBuyingPower {
             cash,
             equity,
             ts_event_ms,
             ..
-        } => Some(Message::LiveBuyingPowerUpdated {
+        } => Some(Message::Replay(ReplayMsg::LiveBuyingPower {
             cash,
             equity,
             ts_event_ms,
-        }),
+        })),
         EngineEvent::Error {
             request_id,
             code,
             message,
-        } => Some(Message::IpcError {
+        } => Some(Message::Venue(VenueMsg::IpcError {
             request_id,
             code,
             message,
-        }),
+        })),
         // N1.12: ExecutionMarker → chart overlay
         EngineEvent::ExecutionMarker {
             side,
             price,
             ts_event_ms,
             ..
-        } => Some(Message::ExecutionMarkerReceived {
+        } => Some(Message::Replay(ReplayMsg::ExecutionMarker {
             side,
             price,
             ts_event_ms,
-        }),
+        })),
         // N1.12: StrategySignal → chart overlay
         EngineEvent::StrategySignal {
             signal_kind,
@@ -1819,13 +1505,13 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             ts_event_ms,
             tag,
             ..
-        } => Some(Message::StrategySignalReceived {
+        } => Some(Message::Replay(ReplayMsg::StrategySignal {
             signal_kind,
             price,
             ts_event_ms,
             tag,
-        }),
-        // N4-live: EngineStarted in live mode → LiveStrategyStarted
+        })),
+        // N4-live: EngineStarted in live mode → LiveStarted (renamed from LiveStrategyStarted)
         EngineEvent::EngineStarted {
             strategy_id,
             ts_event_ms,
@@ -1833,25 +1519,27 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         } => {
             let is_live = app_mode() == engine_client::dto::AppMode::Live;
             if is_live {
-                Some(Message::LiveStrategyStarted {
+                // LiveStarted == LiveStrategyStarted (post-refactor name)
+                Some(Message::Replay(ReplayMsg::LiveStarted {
                     strategy_id,
                     ts_event_ms,
-                })
+                }))
             } else {
                 None
             }
         }
         // Replay engine stopped → auto-refresh order list (replay mode only).
-        // In live mode, EngineStopped means live strategy stopped.
+        // In live mode, EngineStopped means live strategy stopped (LiveEngineStoppedEvent path).
         // unwrap_or(false) is intentional here: this is a runtime event handler called
         // well after APP_MODE is set; false (live) is the safe fallback so live-mode
         // engine restarts do not accidentally trigger ReplayFinished.
         EngineEvent::EngineStopped { strategy_id, .. } => {
             let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
             if is_replay {
-                Some(Message::ReplayFinished)
+                Some(Message::Replay(ReplayMsg::Finished))
             } else {
-                Some(Message::LiveEngineStoppedEvent { strategy_id })
+                // LiveStopped == LiveEngineStoppedEvent (post-refactor name)
+                Some(Message::Replay(ReplayMsg::LiveStopped { strategy_id }))
             }
         }
         // Phase 8: EngineBusy → GUI ユーザーへの warn toast
@@ -1866,13 +1554,15 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         } => {
             use engine_client::dto::AttemptedCommand;
             match attempted_command {
-                AttemptedCommand::StopReplay => Some(Message::ModeSwitchStopBusy),
-                AttemptedCommand::ForceStopReplay => {
-                    Some(Message::ModeSwitchEngineBusy(reason))
+                AttemptedCommand::StopReplay => {
+                    Some(Message::Window(WindowMsg::ModeSwitchStopBusy))
                 }
-                _ => Some(Message::OrderToast(Toast::warn(format!(
+                AttemptedCommand::ForceStopReplay => {
+                    Some(Message::Window(WindowMsg::ModeSwitchEngineBusy(reason)))
+                }
+                _ => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
                     "操作を受け付けられませんでした: {attempted_command} — {reason}"
-                )))),
+                ))))),
             }
         }
         // Phase 8.1b: multi-client 接続ライフサイクルイベント
@@ -1886,33 +1576,32 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             None
         }
         // F7: ReplayStopped — mode-switch pending confirmation
-        EngineEvent::ReplayStopped { .. } => Some(Message::ModeSwitchStopAcked),
+        EngineEvent::ReplayStopped { .. } => Some(Message::Window(WindowMsg::ModeSwitchStopAcked)),
         // F6a: SCENARIO 抽出結果 → ReplayFormModal prefill
         EngineEvent::StrategyScenarioLoaded {
             request_id,
             path,
             scenario,
             ..
-        } => Some(Message::StrategyScenarioLoadedEvent {
+        } => Some(Message::Replay(ReplayMsg::ScenarioLoaded {
             request_id,
             path: std::path::PathBuf::from(path),
             scenario,
-        }),
+        })),
         // F6a: SCENARIO 抽出失敗 → エラートースト
         EngineEvent::StrategyScenarioLoadFailed {
             request_id,
             path,
             reason,
             ..
-        } => {
-            Some(Message::StrategyScenarioLoadFailedEvent {
-                request_id,
-                path: std::path::PathBuf::from(path),
-                reason,
-            })
-        }
+        } => Some(Message::Replay(ReplayMsg::ScenarioLoadFailed {
+            request_id,
+            path: std::path::PathBuf::from(path),
+            reason,
+        })),
         // schema 3.12: replay 自動ペイン生成。GUI 内フォーム経由でも
         // helper attach mode でも同じ経路を通すため、ここで一律変換する。
+        // Message::ReplayDataLoaded == Message::Replay(ReplayMsg::DataLoaded) (post-refactor name)
         EngineEvent::ReplayDataLoaded {
             instrument_id,
             instrument_ids,
@@ -1921,26 +1610,28 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             trades_loaded,
             session_epoch,
             ..
-        } => Some(Message::ReplayDataLoaded {
+        } => Some(Message::Replay(ReplayMsg::DataLoaded {
             instrument_id,
             instrument_ids,
             granularity,
             bars_loaded,
             trades_loaded,
             session_epoch,
-        }),
+        })),
         // schema 3.15: DateChangeMarker — replay bar の現在日表示を更新。
-        EngineEvent::DateChangeMarker { date } => Some(Message::ReplayDateChanged(date)),
+        EngineEvent::DateChangeMarker { date } => {
+            Some(Message::Replay(ReplayMsg::DateChanged(date)))
+        }
         // schema 3.16: RestoreSnapshot — Step- 後に Python が巻き戻し地点を通知する。
         // R2-H1: サイレント黙殺から「状態保持 + TODO」に昇格。
         // TODO: chart pane should flush data from ts_event_ms onward when RestoreSnapshot arrives.
         EngineEvent::RestoreSnapshot { step_index, ts_event_ms } => {
-            Some(Message::RestoreSnapshotPending { step_index, ts_event_ms })
+            Some(Message::Replay(ReplayMsg::RestoreSnapshotPending { step_index, ts_event_ms }))
         }
         // schema 3.16: ReplayHistoryChanged — ⏮ Step- ボタンの有効/無効を更新。
         // `paused` フィールドは ReplayHistoryChanged では変化しないため現在値を保持する。
         EngineEvent::ReplayHistoryChanged { has_history } => {
-            Some(Message::ReplayHistoryChanged { has_history })
+            Some(Message::Replay(ReplayMsg::HistoryChanged { has_history }))
         }
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
@@ -2119,9 +1810,9 @@ fn status_bar(
         // path as the widget menu bar, so the Action::SwitchMode handler's guard
         // invariants (dirty check, etc.) are preserved.
         badge
-            .on_press(Message::MenuBar(crate::menu_bar_state::BarMessage::Pick(
+            .on_press(Message::Menu(MenuMsg::Bar(crate::menu_bar_state::BarMessage::Pick(
                 crate::menu::Action::SwitchAppMode(target),
-            )))
+            ))))
             .into()
     } else {
         badge.into()
@@ -2132,13 +1823,13 @@ fn status_bar(
     let tachibana_chip = venue_login_chip(
         "立花",
         tachibana,
-        Message::RequestTachibanaLogin(Trigger::Manual),
+        Message::Venue(VenueMsg::RequestTachibanaLogin(Trigger::Manual)),
         false,
     );
     let kabu_chip = venue_login_chip(
         "kabu",
         kabu,
-        Message::RequestKabuLogin(Trigger::Manual),
+        Message::Venue(VenueMsg::RequestKabuLogin(Trigger::Manual)),
         kabu_is_production(),
     );
 
@@ -2175,8 +1866,8 @@ fn apply_confirm_dialog_overlay<'a>(
 ) -> Element<'a, Message> {
     if let Some(dialog) = dialog {
         let dialog_content =
-            confirm_dialog_container(dialog.clone(), Message::ToggleDialogModal(None));
-        main_dialog_modal(content, dialog_content, Message::ToggleDialogModal(None))
+            confirm_dialog_container(dialog.clone(), Message::Window(WindowMsg::ToggleDialogModal(None)));
+        main_dialog_modal(content, dialog_content, Message::Window(WindowMsg::ToggleDialogModal(None)))
     } else {
         content
     }
@@ -2334,7 +2025,7 @@ impl Flowsurface {
         );
         let load_layout = state.load_layout(active_layout_id.unique, main_window_id);
         let setup_native_menu =
-            iced::window::raw_id::<Message>(main_window_id).map(Message::NativeMenuSetup);
+            iced::window::raw_id::<Message>(main_window_id).map(|x| Message::Menu(MenuMsg::NativeSetup(x)));
         // F4 BC-9 fix: after startup collect window specs and set the dirty baseline so that
         // edits made before the first explicit Save are detected as dirty (ケース 3/4).
         // All active windows (main + any popouts restored by load_layout) are included so
@@ -2351,7 +2042,7 @@ impl Flowsurface {
                 .copied()
                 .collect::<Vec<_>>();
             baseline_ids.push(main_window_id);
-            window::collect_window_specs(baseline_ids, Message::SetDirtyBaseline)
+            window::collect_window_specs(baseline_ids, |w| Message::Window(WindowMsg::SetDirtyBaseline(w)))
         };
 
         (
@@ -2360,14 +2051,14 @@ impl Flowsurface {
                 .discard()
                 .chain(setup_native_menu)
                 .chain(load_layout)
-                .chain(launch_sidebar.map(Message::Sidebar))
+                .chain(launch_sidebar.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m))))
                 .chain(set_baseline),
         )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::EngineRestarting(restarting) => {
+            Message::Engine(EngineMsg::Restarting(restarting)) => {
                 self.engine_restarting = restarting;
                 if restarting {
                     self.notifications.push(Toast::error(
@@ -2398,7 +2089,7 @@ impl Flowsurface {
                 // truth (the live connection) drives the swap. See
                 // T35-H9-SingleRecoveryPath.
             }
-            Message::DismissTachibanaBanner => {
+            Message::Venue(VenueMsg::DismissTachibanaBanner) => {
                 // Route the dismiss through the FSM `next()` table so
                 // the transition is unit-testable from `venue_state.rs`
                 // and `main.rs::update()` does not become a second
@@ -2407,7 +2098,7 @@ impl Flowsurface {
                     .next(VenueEvent::Dismissed);
                 self.tachibana_state = next;
             }
-            Message::RequestTachibanaLogin(trigger) => {
+            Message::Venue(VenueMsg::RequestTachibanaLogin(trigger)) => {
                 // Duplicate-press suppression: claim the LoginInFlight
                 // slot atomically BEFORE dispatching the IPC. Without
                 // this, two rapid presses (Auto + Manual or two manual
@@ -2451,10 +2142,10 @@ impl Flowsurface {
                         .await
                         .map_err(|e| e.to_string())
                     },
-                    Message::TachibanaLoginIpcResult,
+                    |r| Message::Venue(VenueMsg::TachibanaLoginIpcResult(r)),
                 );
             }
-            Message::TachibanaLoginIpcResult(result) => {
+            Message::Venue(VenueMsg::TachibanaLoginIpcResult(result)) => {
                 // The optimistic `try_claim_login_in_flight` already
                 // moved the FSM into `LoginInFlight`. Engine's
                 // `VenueLoginStarted` is idempotent under that, but
@@ -2481,7 +2172,7 @@ impl Flowsurface {
                     }
                 }
             }
-            Message::TachibanaVenueEvent(event) => {
+            Message::Venue(VenueMsg::TachibanaEvent(event)) => {
                 // Toast notifications for the in-flight / cancelled
                 // states. The banner only renders `Error`
                 // (F-Banner1: no Rust string literals in the banner),
@@ -2533,7 +2224,7 @@ impl Flowsurface {
                     .sidebar
                     .tickers_table
                     .set_tachibana_ready(is_ready)
-                    .map(|m| Message::Sidebar(dashboard::sidebar::Message::TickersTable(m)));
+                    .map(|m| Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::TickersTable(m))));
 
                 // Auto-fetch buying power on venue ready if a pane is visible.
                 let main_window = self.main_window.id;
@@ -2557,12 +2248,12 @@ impl Flowsurface {
                                 .map_err(|e| e.to_string())
                             },
                             move |res| match res {
-                                Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
-                                Err(err) => Message::IpcError {
+                                Ok(()) => Message::Venue(VenueMsg::BuyingPowerSendCompleted(Ok(()))),
+                                Err(err) => Message::Venue(VenueMsg::IpcError {
                                     request_id: Some(req_id_for_err),
                                     code: "send_failed".to_string(),
                                     message: err,
-                                },
+                                }),
                             },
                         )
                     } else {
@@ -2596,7 +2287,7 @@ impl Flowsurface {
                                 .await
                                 .map_err(|e| e.to_string())
                             },
-                            Message::OrderListSendCompleted,
+                            |r| Message::Venue(VenueMsg::OrderListSendCompleted(r)),
                         )
                     } else {
                         Task::none()
@@ -2626,12 +2317,12 @@ impl Flowsurface {
                                 .map_err(|e| e.to_string())
                             },
                             move |res| match res {
-                                Ok(()) => Message::PositionsSendCompleted(Ok(())),
-                                Err(err) => Message::IpcError {
+                                Ok(()) => Message::Venue(VenueMsg::PositionsSendCompleted(Ok(()))),
+                                Err(err) => Message::Venue(VenueMsg::IpcError {
                                     request_id: Some(req_id_for_err),
                                     code: "send_failed".to_string(),
                                     message: err,
-                                },
+                                }),
                             },
                         )
                     } else {
@@ -2646,7 +2337,8 @@ impl Flowsurface {
                     .chain(auto_fetch_orders)
                     .chain(auto_fetch_positions);
             }
-            Message::RequestKabuLogin(trigger) => {
+            // Message::RequestKabuLogin(trigger) => (post-refactor name below)
+            Message::Venue(VenueMsg::RequestKabuLogin(trigger)) => {
                 log::info!("RequestKabuLogin trigger={trigger:?}");
                 let Some(conn) = self.engine_connection.as_ref().cloned() else {
                     log::warn!(
@@ -2673,10 +2365,11 @@ impl Flowsurface {
                         .await
                         .map_err(|e| e.to_string())
                     },
-                    Message::KabuLoginIpcResult,
+                    |r| Message::Venue(VenueMsg::KabuLoginIpcResult(r)),
                 );
             }
-            Message::KabuLoginIpcResult(result) => match result {
+            // Message::KabuLoginIpcResult(result) => (post-refactor name below)
+            Message::Venue(VenueMsg::KabuLoginIpcResult(result)) => match result {
                 Ok(()) => {
                     log::debug!("kabu RequestVenueLogin IPC sent");
                 }
@@ -2694,7 +2387,7 @@ impl Flowsurface {
                     }
                 }
             },
-            Message::KabuVenueEvent(event) => {
+            Message::Venue(VenueMsg::KabuEvent(event)) => {
                 match &event {
                     VenueEvent::LoginStarted => {
                         self.notifications.push(Toast::info(
@@ -2758,7 +2451,7 @@ impl Flowsurface {
                                 .await
                                 .map_err(|e| e.to_string())
                             },
-                            Message::OrderListSendCompleted,
+                            |r| Message::Venue(VenueMsg::OrderListSendCompleted(r)),
                         )
                     } else {
                         Task::none()
@@ -2788,12 +2481,12 @@ impl Flowsurface {
                                 .map_err(|e| e.to_string())
                             },
                             move |res| match res {
-                                Ok(()) => Message::PositionsSendCompleted(Ok(())),
-                                Err(err) => Message::IpcError {
+                                Ok(()) => Message::Venue(VenueMsg::PositionsSendCompleted(Ok(()))),
+                                Err(err) => Message::Venue(VenueMsg::IpcError {
                                     request_id: Some(req_id_for_err),
                                     code: "send_failed".to_string(),
                                     message: err,
-                                },
+                                }),
                             },
                         )
                     } else {
@@ -2805,7 +2498,8 @@ impl Flowsurface {
 
                 return auto_fetch_orders.chain(auto_fetch_positions);
             }
-            Message::EngineConnected(conn) => {
+            // Message::EngineConnected(conn) => (post-refactor name below)
+            Message::Engine(EngineMsg::Connected(conn)) => {
                 let was_restarting = self.engine_restarting;
                 self.engine_connection = Some(Arc::clone(&conn));
                 // In-flight requests are lost on reconnect; reset to avoid blocking
@@ -2871,7 +2565,7 @@ impl Flowsurface {
                 let sidebar_refetch = self
                     .sidebar
                     .update_handles(self.handles.clone())
-                    .map(Message::Sidebar);
+                    .map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
 
                 if was_restarting {
                     self.notifications
@@ -2908,7 +2602,7 @@ impl Flowsurface {
                 let tachibana_synthetic = if (is_ready_from_manager || is_ready_from_bridge)
                     && !self.tachibana_state.is_ready()
                 {
-                    Some(Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready)))
+                    Some(Task::done(Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::Ready))))
                 } else {
                     None
                 };
@@ -2918,10 +2612,11 @@ impl Flowsurface {
                     .as_ref()
                     .is_some_and(|m| m.try_is_venue_ready(KABU_STATION_VENUE_NAME));
                 let is_kabu_ready_from_bridge = cached_venue_is_ready(KABU_STATION_VENUE_NAME);
+                // KabuVenueEvent(Ready) synthesized when kabu cache is hot
                 let kabu_synthetic = if (is_kabu_ready_from_manager || is_kabu_ready_from_bridge)
                     && !self.kabu_state.is_ready()
                 {
-                    Some(Task::done(Message::KabuVenueEvent(VenueEvent::Ready)))
+                    Some(Task::done(Message::Venue(VenueMsg::KabuEvent(VenueEvent::Ready))))
                 } else {
                     None
                 };
@@ -2938,7 +2633,7 @@ impl Flowsurface {
                 }
                 return sidebar_refetch;
             }
-            Message::MarketWsEvent(event) => {
+            Message::Dashboard(DashboardMsg::MarketWs(event)) => {
                 // M2: when the Tachibana depth stream reconnects (market
                 // reopened after off-hours) while the FSM is stuck in an Error
                 // state (e.g. market_closed banner), synthesize VenueReady to
@@ -2951,7 +2646,7 @@ impl Flowsurface {
                         "tachibana: depth stream reconnected while in Error state \
                          — synthesizing VenueReady to clear banner"
                     );
-                    return Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready));
+                    return Task::done(Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::Ready)));
                 }
 
                 let main_window_id = self.main_window.id;
@@ -2967,20 +2662,20 @@ impl Flowsurface {
                     exchange::Event::DepthReceived(stream, depth_update_t, depth) => {
                         let task = dashboard
                             .ingest_depth(&stream, depth_update_t, &depth, main_window_id)
-                            .map(move |msg| Message::Dashboard {
+                            .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                                 layout_id: None,
                                 event: msg,
-                            });
+                            }));
 
                         return task;
                     }
                     exchange::Event::TradesReceived(stream, update_t, buffer) => {
                         let task = dashboard
                             .ingest_trades(&stream, &buffer, update_t, main_window_id)
-                            .map(move |msg| Message::Dashboard {
+                            .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                                 layout_id: None,
                                 event: msg,
-                            });
+                            }));
 
                         if let Some(msg) = self.audio_stream.try_play_sound(&stream, &buffer) {
                             self.notifications.push(Toast::error(msg));
@@ -2991,27 +2686,27 @@ impl Flowsurface {
                     exchange::Event::KlineReceived(stream, kline) => {
                         return dashboard
                             .update_latest_klines(&stream, &kline, main_window_id)
-                            .map(move |msg| Message::Dashboard {
+                            .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                                 layout_id: None,
                                 event: msg,
-                            });
+                            }));
                     }
                 }
             }
-            Message::Tick(now) => {
+            Message::Window(WindowMsg::Tick(now)) => {
                 let main_window_id = self.main_window.id;
                 let handles = self.handles.clone();
 
                 return self
                     .active_dashboard_mut()
                     .tick(&handles, now, main_window_id)
-                    .map(move |msg| Message::Dashboard {
+                    .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                         layout_id: None,
                         event: msg,
-                    });
+                    }));
             }
-            Message::WindowEvent(event) => match event {
-                window::Event::CloseRequested(window) => {
+            Message::Window(WindowMsg::WindowEvent(event)) => match event {
+                crate::window::Event::CloseRequested(window) => {
                     let main_window = self.main_window.id;
                     let dashboard = self.active_dashboard_mut();
 
@@ -3027,18 +2722,18 @@ impl Flowsurface {
                         .collect::<Vec<window::Id>>();
                     active_windows.push(main_window);
 
-                    return window::collect_window_specs(active_windows, Message::ExitRequested);
+                    return window::collect_window_specs(active_windows, |w| Message::Window(WindowMsg::ExitRequested(w)));
                 }
             },
             // F4 BC-9 fix: set dirty baseline after startup so edits before the first
             // explicit Save are detected as dirty (ケース 3/4).
-            Message::SetDirtyBaseline(windows) => {
+            Message::Window(WindowMsg::SetDirtyBaseline(windows)) => {
                 if let Some(json) = self.build_state_json(&windows) {
                     self.last_saved_bytes = Some(json.into_bytes());
                 }
                 return Task::none();
             }
-            Message::ExitRequested(windows) => {
+            Message::Window(WindowMsg::ExitRequested(windows)) => {
                 // HIGH fix: another dialog is already visible — ignore this close request
                 // until the user resolves it. Prevents F4 bypass via overlapping dialogs.
                 if self.confirm_dialog.is_some() {
@@ -3052,10 +2747,10 @@ impl Flowsurface {
                     self.pending_exit_windows = Some(windows);
                     let dialog = screen::ConfirmDialog::new(
                         "未保存の変更があります。".to_string(),
-                        Box::new(Message::DiscardAndExit),
+                        Box::new(Message::Window(WindowMsg::DiscardAndExit)),
                     )
                     .with_confirm_btn_text("破棄して終了".to_string())
-                    .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                    .with_save_action(Message::Window(WindowMsg::SaveAndExit), "保存して終了".to_string());
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
@@ -3067,14 +2762,14 @@ impl Flowsurface {
                 }
                 return iced::exit();
             }
-            Message::DiscardAndExit => {
+            Message::Window(WindowMsg::DiscardAndExit) => {
                 // User chose "破棄して終了" — do NOT save. saved-state.json stays as-is
                 // so the next launch restores the state from before the discarded edits.
                 self.confirm_dialog = None;
                 self.pending_exit_windows = None;
                 return iced::exit();
             }
-            Message::SaveAndExit => {
+            Message::Window(WindowMsg::SaveAndExit) => {
                 // User chose "保存して終了" — save then exit.
                 // BC-5: if save fails, abort the exit and show an error (do not discard data).
                 self.confirm_dialog = None;
@@ -3107,10 +2802,10 @@ impl Flowsurface {
                         self.pending_exit_windows = Some(windows);
                         let dialog = screen::ConfirmDialog::new(
                             "未保存の変更があります。".to_string(),
-                            Box::new(Message::DiscardAndExit),
+                            Box::new(Message::Window(WindowMsg::DiscardAndExit)),
                         )
                         .with_confirm_btn_text("破棄して終了".to_string())
-                        .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                        .with_save_action(Message::Window(WindowMsg::SaveAndExit), "保存して終了".to_string());
                         self.confirm_dialog = Some(dialog);
                         return Task::none();
                     }
@@ -3137,18 +2832,18 @@ impl Flowsurface {
                 self.pending_exit_windows = Some(windows);
                 let dialog = screen::ConfirmDialog::new(
                     "未保存の変更があります。".to_string(),
-                    Box::new(Message::DiscardAndExit),
+                    Box::new(Message::Window(WindowMsg::DiscardAndExit)),
                 )
                 .with_confirm_btn_text("破棄して終了".to_string())
-                .with_save_action(Message::SaveAndExit, "保存して終了".to_string());
+                .with_save_action(Message::Window(WindowMsg::SaveAndExit), "保存して終了".to_string());
                 self.confirm_dialog = Some(dialog);
                 return Task::none();
             }
-            Message::RestartRequested(Some(windows)) => {
+            Message::Window(WindowMsg::RestartRequested(Some(windows))) => {
                 self.save_state_to_disk(&windows);
                 return self.restart();
             }
-            Message::RestartRequested(None) => {
+            Message::Window(WindowMsg::RestartRequested(None)) => {
                 self.confirm_dialog = None;
 
                 let mut active_windows = self
@@ -3160,10 +2855,10 @@ impl Flowsurface {
                 active_windows.push(self.main_window.id);
 
                 return window::collect_window_specs(active_windows, |windows| {
-                    Message::RestartRequested(Some(windows))
+                    Message::Window(WindowMsg::RestartRequested(Some(windows)))
                 });
             }
-            Message::GoBack => {
+            Message::Window(WindowMsg::GoBack) => {
                 let main_window = self.main_window.id;
 
                 #[cfg(target_os = "linux")]
@@ -3192,10 +2887,10 @@ impl Flowsurface {
                         self.confirm_dialog = Some(
                             screen::ConfirmDialog::new(
                                 "未保存の変更があります。".to_string(),
-                                Box::new(Message::DiscardAndOpenFile),
+                                Box::new(Message::Window(WindowMsg::DiscardAndOpenFile)),
                             )
                             .with_confirm_btn_text("破棄して開く".to_string())
-                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string()),
+                            .with_save_action(Message::Window(WindowMsg::SaveAndOpenFile), "保存して開く".to_string()),
                         );
                         return Task::none();
                     }
@@ -3219,17 +2914,17 @@ impl Flowsurface {
                     }
                 }
             }
-            Message::ThemeSelected(theme) => {
+            Message::Settings(SettingsMsg::ThemeSelected(theme)) => {
                 self.theme = data::Theme(theme.clone());
 
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
                     .theme_updated(main_window, &theme);
             }
-            Message::Dashboard {
+            Message::Dashboard(DashboardMsg::Layout {
                 layout_id: id,
                 event: msg,
-            } => {
+            }) => {
                 let Some(active_layout) = self.layout_manager.active_layout_id() else {
                     log::error!("No active layout to handle dashboard message");
                     return Task::none();
@@ -3251,10 +2946,10 @@ impl Flowsurface {
                             stream,
                         }) => dashboard
                             .distribute_fetched_data(main_window.id, pane_id, data, stream)
-                            .map(move |msg| Message::Dashboard {
+                            .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                                 layout_id: Some(layout_id),
                                 event: msg,
-                            }),
+                            })),
                         Some(dashboard::Event::Notification(toast)) => {
                             self.notifications.push(toast);
                             Task::none()
@@ -3295,10 +2990,10 @@ impl Flowsurface {
                                     } else {
                                         dashboard
                                             .resolve_streams(main_window.id, pane_id, resolved)
-                                            .map(move |msg| Message::Dashboard {
+                                            .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                                                 layout_id: None,
                                                 event: msg,
-                                            })
+                                            }))
                                     }
                                 }
                                 Err(err) => {
@@ -3374,7 +3069,7 @@ impl Flowsurface {
                                     );
                                     let dialog = screen::ConfirmDialog::new(
                                         body,
-                                        Box::new(Message::ConfirmOrderEntrySubmit),
+                                        Box::new(Message::Venue(VenueMsg::ConfirmOrderEntrySubmit)),
                                     )
                                     .with_confirm_btn_text("注文を発注する".to_string());
                                     self.confirm_dialog = Some(dialog);
@@ -3424,21 +3119,21 @@ impl Flowsurface {
                                                 .map_err(|e| e.to_string())
                                             },
                                             move |res| match res {
-                                                Ok(()) => Message::OrderToast(Toast::info(
+                                                Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                                     "注文送信完了".to_string(),
-                                                )),
-                                                Err(err) => Message::OrderRejected {
+                                                ))),
+                                                Err(err) => Message::Venue(VenueMsg::OrderRejected {
                                                     client_order_id: request_id_err,
                                                     reason: format!("IPC 送信失敗: {err}"),
-                                                },
+                                                }),
                                             },
                                         );
                                     }
                                     // engine_connection が None — submitting をリセットして toast を出す
-                                    Task::done(Message::OrderRejected {
+                                    Task::done(Message::Venue(VenueMsg::OrderRejected {
                                         client_order_id: request_id,
                                         reason: "エンジン未接続".to_string(),
-                                    })
+                                    }))
                                 }
                             }
                         }
@@ -3465,19 +3160,19 @@ impl Flowsurface {
                                         .map_err(|e| e.to_string())
                                     },
                                     move |res| match res {
-                                        Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
-                                        Err(err) => Message::IpcError {
+                                        Ok(()) => Message::Venue(VenueMsg::BuyingPowerSendCompleted(Ok(()))),
+                                        Err(err) => Message::Venue(VenueMsg::IpcError {
                                             request_id: Some(req_id_for_err),
                                             code: "send_failed".to_string(),
                                             message: err,
-                                        },
+                                        }),
                                     },
                                 );
                             }
                             // J-4: エンジン未接続時はユーザーに通知する（loading は立てない）
-                            Task::done(Message::OrderToast(Toast::error(
+                            Task::done(Message::Venue(VenueMsg::OrderToast(Toast::error(
                                 "エンジン未接続: 余力情報を取得できません".to_string(),
-                            )))
+                            ))))
                         }
                         Some(dashboard::Event::OrderListAction(action)) => {
                             use crate::screen::dashboard::panel::orders::Action;
@@ -3517,13 +3212,13 @@ impl Flowsurface {
                                                 .await
                                                 .map_err(|e| e.to_string())
                                             },
-                                            Message::OrderListSendCompleted,
+                                            |r| Message::Venue(VenueMsg::OrderListSendCompleted(r)),
                                         );
                                     }
                                     // エンジン未接続時はユーザーに通知する（loading は立てない）
-                                    Task::done(Message::OrderToast(Toast::error(
+                                    Task::done(Message::Venue(VenueMsg::OrderToast(Toast::error(
                                         "エンジン未接続: 注文一覧を取得できません".to_string(),
-                                    )))
+                                    ))))
                                 }
                                 Action::CancelOrder {
                                     client_order_id,
@@ -3533,10 +3228,10 @@ impl Flowsurface {
                                         format!("注文 {} を取り消しますか？", client_order_id);
                                     let dialog = screen::ConfirmDialog::new(
                                         body,
-                                        Box::new(Message::ConfirmCancelOrder {
+                                        Box::new(Message::Venue(VenueMsg::ConfirmCancelOrder {
                                             client_order_id,
                                             venue_order_id,
-                                        }),
+                                        })),
                                     )
                                     .with_confirm_btn_text("取消実行".to_string());
                                     self.confirm_dialog = Some(dialog);
@@ -3565,19 +3260,19 @@ impl Flowsurface {
                                             .map_err(|e| e.to_string())
                                         },
                                         move |res| match res {
-                                            Ok(()) => Message::PositionsSendCompleted(Ok(())),
-                                            Err(err) => Message::IpcError {
+                                            Ok(()) => Message::Venue(VenueMsg::PositionsSendCompleted(Ok(()))),
+                                            Err(err) => Message::Venue(VenueMsg::IpcError {
                                                 request_id: Some(req_id_for_err),
                                                 code: "send_failed".to_string(),
                                                 message: err,
-                                            },
+                                            }),
                                         },
                                     );
                                 }
                             } else {
-                                return Task::done(Message::OrderToast(Toast::error(
+                                return Task::done(Message::Venue(VenueMsg::OrderToast(Toast::error(
                                     "エンジン未接続: 保有銘柄を取得できません".to_string(),
-                                )));
+                                ))));
                             }
                             Task::none()
                         }
@@ -3595,12 +3290,12 @@ impl Flowsurface {
                                         .map_err(|e| e.to_string())
                                     },
                                     |res| match res {
-                                        Ok(()) => Message::OrderToast(Toast::info(
+                                        Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                             "再生速度を変更しました".to_string(),
-                                        )),
-                                        Err(err) => Message::OrderToast(Toast::error(format!(
-                                            "再生速度変更失敗: {err}"
                                         ))),
+                                        Err(err) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
+                                            "再生速度変更失敗: {err}"
+                                        )))),
                                     },
                                 );
                             }
@@ -3616,34 +3311,34 @@ impl Flowsurface {
                                         .await
                                         .map(|h| h.path().to_owned())
                                 },
-                                Message::StrategyFilePicked,
+                                |p| Message::Replay(ReplayMsg::StrategyFilePicked(p)),
                             );
                         }
                         None => Task::none(),
                     };
 
                     return main_task
-                        .map(move |msg| Message::Dashboard {
+                        .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                             layout_id: Some(layout_id),
                             event: msg,
-                        })
+                        }))
                         .chain(additional_task);
                 }
             }
-            Message::RemoveNotification(index) => {
+            Message::Dashboard(DashboardMsg::RemoveNotification(index)) => {
                 self.notifications.remove(index);
             }
             // EC 約定通知 toast (Phase O2 T2.4)
-            Message::OrderToast(toast) => {
+            Message::Venue(VenueMsg::OrderToast(toast)) => {
                 self.notifications.push(toast);
             }
             // OrderFilled — toast + positions auto-refresh
-            Message::OrderFilled {
+            Message::Venue(VenueMsg::OrderFilled {
                 client_order_id,
                 last_qty,
                 last_price,
                 leaves_qty,
-            } => {
+            }) => {
                 let body = if leaves_qty == "0" {
                     format!("約定 {client_order_id}: {last_qty} 株 @ {last_price} 円（全約定）")
                 } else {
@@ -3679,27 +3374,27 @@ impl Flowsurface {
                             .map_err(|e| e.to_string())
                         },
                         move |res| match res {
-                            Ok(()) => Message::PositionsSendCompleted(Ok(())),
-                            Err(err) => Message::IpcError {
+                            Ok(()) => Message::Venue(VenueMsg::PositionsSendCompleted(Ok(()))),
+                            Err(err) => Message::Venue(VenueMsg::IpcError {
                                 request_id: Some(req_id_for_err),
                                 code: "send_failed".to_string(),
                                 message: err,
-                            },
+                            }),
                         },
                     );
                 }
             }
             // Phase U1: distribute fresh order list to all OrderList panes
-            Message::OrderListUpdated(orders) => {
+            Message::Venue(VenueMsg::OrderListUpdated(orders)) => {
                 self.order_list_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
                     .distribute_order_list(main_window, orders);
             }
-            Message::OrderListSendCompleted(Ok(())) => {
+            Message::Venue(VenueMsg::OrderListSendCompleted(Ok(()))) => {
                 // 送信成功: OrderListUpdated 受信を待つだけ
             }
-            Message::OrderListSendCompleted(Err(err)) => {
+            Message::Venue(VenueMsg::OrderListSendCompleted(Err(err))) => {
                 self.order_list_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
@@ -3707,10 +3402,10 @@ impl Flowsurface {
                 self.notifications
                     .push(Toast::error(format!("注文一覧取得失敗: {err}")));
             }
-            Message::BuyingPowerSendCompleted(Ok(())) => {
+            Message::Venue(VenueMsg::BuyingPowerSendCompleted(Ok(()))) => {
                 // 送信成功: BuyingPowerUpdated 受信を待つだけ
             }
-            Message::BuyingPowerSendCompleted(Err(err)) => {
+            Message::Venue(VenueMsg::BuyingPowerSendCompleted(Err(err))) => {
                 self.buying_power_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
@@ -3718,22 +3413,22 @@ impl Flowsurface {
                 self.notifications
                     .push(Toast::error(format!("余力情報取得失敗: {err}")));
             }
-            Message::PositionsSendCompleted(Ok(())) => {
+            Message::Venue(VenueMsg::PositionsSendCompleted(Ok(()))) => {
                 // 送信成功: PositionsUpdated 受信を待つだけ
             }
-            Message::PositionsSendCompleted(Err(err)) => {
+            Message::Venue(VenueMsg::PositionsSendCompleted(Err(err))) => {
                 self.positions_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
                     .distribute_positions_error(main_window, err.clone());
             }
             // Positions: broadcast to all Positions panes
-            Message::PositionsUpdated {
+            Message::Venue(VenueMsg::PositionsUpdated {
                 request_id,
                 venue: _,
                 positions,
                 ts_ms,
-            } => {
+            }) => {
                 let matches = self.positions_request_id.as_deref() == Some(request_id.as_str());
                 if !matches {
                     log::debug!(
@@ -3749,12 +3444,12 @@ impl Flowsurface {
                     .distribute_positions(main_window, positions, ts_ms);
             }
             // Phase U3: broadcast to all BuyingPower panes; silently no-ops if no pane exists
-            Message::BuyingPowerUpdated {
+            Message::Venue(VenueMsg::BuyingPowerUpdated {
                 cash_available,
                 cash_shortfall,
                 credit_available,
                 ts_ms,
-            } => {
+            }) => {
                 self.buying_power_request_id = None;
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut().distribute_buying_power(
@@ -3766,12 +3461,12 @@ impl Flowsurface {
                 );
             }
             // N1.16: REPLAY 仮想ポートフォリオ更新 — dashboard に配布
-            Message::ReplayBuyingPower {
+            Message::Replay(ReplayMsg::BuyingPower {
                 cash,
                 buying_power,
                 equity,
                 ts_event_ms,
-            } => {
+            }) => {
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut().distribute_replay_buying_power(
                     main_window,
@@ -3782,11 +3477,11 @@ impl Flowsurface {
                 );
             }
             // N3: live strategy 買付余力スナップショット — dashboard に配布
-            Message::LiveBuyingPowerUpdated {
+            Message::Replay(ReplayMsg::LiveBuyingPower {
                 cash,
                 equity,
                 ts_event_ms,
-            } => {
+            }) => {
                 self.menu_bar.live_bar.current_time = Some(format_live_time(ts_event_ms));
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut().distribute_live_buying_power(
@@ -3797,11 +3492,11 @@ impl Flowsurface {
                 );
             }
             // Phase U3: IpcError → route to BuyingPower / OrderList panel if request_id matches
-            Message::IpcError {
+            Message::Venue(VenueMsg::IpcError {
                 request_id,
                 code,
                 message,
-            } => {
+            }) => {
                 let matches_buying_power = self
                     .buying_power_request_id
                     .as_deref()
@@ -3843,24 +3538,25 @@ impl Flowsurface {
                 }
             }
             // N4.3: user picked (or cancelled) the strategy file dialog.
-            Message::StrategyFilePicked(path) => {
+            Message::Replay(ReplayMsg::StrategyFilePicked(path)) => {
                 self.replay_strategy_file = path;
                 return Task::none();
             }
             // N4.4: user dismissed the strategy load error banner.
-            Message::DismissStrategyLoadError => {
+            Message::Replay(ReplayMsg::DismissStrategyLoadError) => {
                 self.strategy_load_error = None;
                 return Task::none();
             }
             // schema 3.12: replay 用ペイン自動生成。GUI 内フォーム経由でも
             // helper attach mode でも同じ経路を通す。
-            Message::ReplayDataLoaded {
+            // Message::ReplayDataLoaded { == post-refactor arm below
+            Message::Replay(ReplayMsg::DataLoaded {
                 instrument_id,
                 instrument_ids,
                 granularity,
                 session_epoch,
                 ..
-            } => {
+            }) => {
                 // schema 3.14: 新 epoch を観測したら旧ペインを全閉じして registry を
                 // リセット（リプレイファイル切替時の stale pane 残存バグ対応）。
                 // 比較は `!=` — engine 再起動で epoch が 0 に巻き戻ったときは切断
@@ -3932,16 +3628,16 @@ impl Flowsurface {
                     let task = self
                         .active_dashboard_mut()
                         .auto_generate_replay_panes(main_window_id, id, timeframe)
-                        .map(move |msg| Message::Dashboard {
+                        .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                             layout_id: None,
                             event: msg,
-                        });
+                        }));
                     tasks.push(task);
                 }
                 return Task::batch(tasks);
             }
             // Replay engine finished → auto-refresh order list from Python's in-memory fills.
-            Message::ReplayFinished => {
+            Message::Replay(ReplayMsg::Finished) => {
                 self.replay_running = false;
                 self.replay_paused = false;
                 self.menu_bar.replay_bar.current_day = None;
@@ -3962,14 +3658,14 @@ impl Flowsurface {
                             .map_err(|e| e.to_string())
                         },
                         |res| match res {
-                            Ok(()) => Message::OrderToast(Toast::info(
+                            Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                 "注文一覧を更新しました".to_string(),
-                            )),
+                            ))),
                             Err(e) => {
                                 log::error!("[ReplayFinished] GetOrderList failed: {e}");
-                                Message::OrderToast(Toast::error(format!(
+                                Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
                                     "注文一覧の取得に失敗: {e}"
-                                )))
+                                ))))
                             }
                         },
                     );
@@ -3977,12 +3673,12 @@ impl Flowsurface {
                 return Task::none();
             }
             // schema 3.15: replay bar current-day display update.
-            Message::ReplayDateChanged(date) => {
+            Message::Replay(ReplayMsg::DateChanged(date)) => {
                 self.menu_bar.replay_bar.current_day = Some(date);
                 return Task::none();
             }
             // schema 3.16: replay history changed — update ⏮ button enable state.
-            Message::ReplayHistoryChanged { has_history } => {
+            Message::Replay(ReplayMsg::HistoryChanged { has_history }) => {
                 self.menu_bar.replay_bar.replay_has_history = has_history;
                 return Task::none();
             }
@@ -3990,10 +3686,10 @@ impl Flowsurface {
             // ExecutionMarker / StrategySignal は戦略状態に依存するため、巻き戻し時に必ずクリア
             // する。OHLC kline 自体は実市場データなので保持する（次の StepReplay で再進入する
             // 際は同じ ts まで再生される）。
-            Message::RestoreSnapshotPending {
+            Message::Replay(ReplayMsg::RestoreSnapshotPending {
                 step_index,
                 ts_event_ms,
-            } => {
+            }) => {
                 log::debug!(
                     "RestoreSnapshotPending: step_index={step_index} ts_event_ms={ts_event_ms}"
                 );
@@ -4004,7 +3700,7 @@ impl Flowsurface {
                 return Task::none();
             }
             // ── Widget menu bar (all platforms) ───────────────────────────
-            Message::MenuBar(bar_msg) => {
+            Message::Menu(MenuMsg::Bar(bar_msg)) => {
                 use crate::menu_bar_state::{self, BarMessage};
                 let native = if let BarMessage::Pick(ref action) = bar_msg {
                     let mapped = crate::widget_menu_bar::to_native_action(action);
@@ -4064,7 +3760,7 @@ impl Flowsurface {
                                 .await
                                 .map(|h| h.path().to_owned())
                         },
-                        Message::NativeOpenStrategyPicked,
+                        |p| Message::Replay(ReplayMsg::NativeOpenStrategyPicked(p)),
                     ),
                     BarMessage::PressPlay => {
                         // If paused, this is a Resume action.
@@ -4079,7 +3775,7 @@ impl Flowsurface {
                                         })
                                         .await
                                     },
-                                    |_| Message::Noop,
+                                    |_| Message::Engine(EngineMsg::Noop),
                                 )
                             } else {
                                 Task::none()
@@ -4156,12 +3852,12 @@ impl Flowsurface {
                                                 Ok::<(), String>(())
                                             },
                                             |res| match res {
-                                                Ok(()) => Message::OrderToast(Toast::info(
+                                                Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                                     "Replay を開始しました".to_string(),
-                                                )),
-                                                Err(e) => Message::OrderToast(Toast::error(
+                                                ))),
+                                                Err(e) => Message::Venue(VenueMsg::OrderToast(Toast::error(
                                                     format!("Replay 起動失敗: {e}"),
-                                                )),
+                                                ))),
                                             },
                                         )
                                     } else {
@@ -4188,19 +3884,19 @@ impl Flowsurface {
                                     .map_err(|e| e.to_string())
                                 },
                                 move |res| match res {
-                                    Ok(()) => Message::Noop,
+                                    Ok(()) => Message::Engine(EngineMsg::Noop),
                                     // R2-H2: IPC 失敗時は楽観的更新をロールバックする。
                                     // ReplayPauseStateChanged { paused: false } で self.replay_paused
                                     // と menu_bar.replay_bar.replay_paused を両方 false に戻す。
                                     // エラーは log::error で記録する（Toast は R2-H2 要件外）。
                                     Err(e) => {
                                         log::error!("PressPause IPC failed (rolling back): {e}");
-                                        Message::MenuBar(
+                                        Message::Menu(MenuMsg::Bar(
                                             crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
                                                 paused: false,
                                                 has_history,
                                             },
-                                        )
+                                        ))
                                     }
                                 },
                             )
@@ -4220,10 +3916,10 @@ impl Flowsurface {
                                     .map_err(|e| e.to_string())
                                 },
                                 |res| match res {
-                                    Ok(()) => Message::Noop,
-                                    Err(e) => Message::OrderToast(Toast::error(format!(
+                                    Ok(()) => Message::Engine(EngineMsg::Noop),
+                                    Err(e) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
                                         "Step+ に失敗: {e}"
-                                    ))),
+                                    )))),
                                 },
                             )
                         } else {
@@ -4242,10 +3938,10 @@ impl Flowsurface {
                                     .map_err(|e| e.to_string())
                                 },
                                 |res| match res {
-                                    Ok(()) => Message::Noop,
-                                    Err(e) => Message::OrderToast(Toast::error(format!(
+                                    Ok(()) => Message::Engine(EngineMsg::Noop),
+                                    Err(e) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
                                         "Step- に失敗: {e}"
-                                    ))),
+                                    )))),
                                 },
                             )
                         } else {
@@ -4259,9 +3955,9 @@ impl Flowsurface {
                         self.replay_paused = *paused;
                         Task::none()
                     }
-                    BarMessage::PressStop => Task::done(Message::StopReplayOnly),
+                    BarMessage::PressStop => Task::done(Message::Replay(ReplayMsg::StopReplayOnly)),
                     BarMessage::LivePressStop => {
-                        return Task::done(Message::StopLiveStrategy);
+                        return Task::done(Message::Replay(ReplayMsg::StopLiveStrategy));
                     }
                     BarMessage::LivePressPause | BarMessage::LivePressPlay => Task::none(),
                 };
@@ -4269,17 +3965,17 @@ impl Flowsurface {
                 if let Some(native_action) = native {
                     return Task::batch([
                         task,
-                        Task::done(Message::NativeMenuAction(native_action)),
+                        Task::done(Message::Menu(MenuMsg::NativeAction(native_action))),
                     ]);
                 }
                 return task;
             }
             // ── Native OS menu bar ──────────────────────────────────────────
-            Message::NativeMenuSetup(raw_id) => {
+            Message::Menu(MenuMsg::NativeSetup(raw_id)) => {
                 native_menu::attach(raw_id, app_mode());
                 return Task::none();
             }
-            Message::NativeMenuAction(action) => {
+            Message::Menu(MenuMsg::NativeAction(action)) => {
                 use native_menu::Action;
                 match action {
                     Action::OpenFile => {
@@ -4295,7 +3991,7 @@ impl Flowsurface {
                                         .await
                                         .map(|h| h.path().to_owned())
                                 },
-                                Message::NativeOpenStrategyPicked,
+                                |p| Message::Replay(ReplayMsg::NativeOpenStrategyPicked(p)),
                             );
                         }
                         // F6a: replay モードでは `.py` 戦略ファイルを開いて
@@ -4310,7 +4006,7 @@ impl Flowsurface {
                                         .await
                                         .map(|h| h.path().to_owned())
                                 },
-                                Message::NativeOpenStrategyPicked,
+                                |p| Message::Replay(ReplayMsg::NativeOpenStrategyPicked(p)),
                             );
                         }
                         return Task::perform(
@@ -4327,13 +4023,13 @@ impl Flowsurface {
                                 Some((result, path))
                             },
                             |result| match result {
-                                None => Message::NativeOpenFileCancelled,
+                                None => Message::Window(WindowMsg::NativeOpenFileCancelled),
                                 Some((Ok(json), path)) => {
-                                    Message::NativeOpenFileApply { json, path }
+                                    Message::Window(WindowMsg::NativeOpenFileApply { json, path })
                                 }
-                                Some((Err(e), _)) => Message::OrderToast(Toast::error(format!(
+                                Some((Err(e), _)) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
                                     "ファイルを読み込めませんでした: {e}"
-                                ))),
+                                )))),
                             },
                         );
                     }
@@ -4356,10 +4052,10 @@ impl Flowsurface {
                                 self.active_dashboard().popout.keys().copied().collect();
                             active_windows.push(self.main_window.id);
                             return window::collect_window_specs(active_windows, move |windows| {
-                                Message::NativeSaveAsWithSpecs {
+                                Message::Window(WindowMsg::NativeSaveAsWithSpecs {
                                     path: p.clone(),
                                     windows,
-                                }
+                                })
                             });
                         } else {
                             return Task::perform(
@@ -4372,7 +4068,7 @@ impl Flowsurface {
                                         .await
                                         .map(|h| h.path().to_owned())
                                 },
-                                Message::NativeSaveAsPath,
+                                |p| Message::Window(WindowMsg::NativeSaveAsPath(p)),
                             );
                         }
                     }
@@ -4391,7 +4087,7 @@ impl Flowsurface {
                                     .await
                                     .map(|h| h.path().to_owned())
                             },
-                            Message::NativeSaveAsPath,
+                            |p| Message::Window(WindowMsg::NativeSaveAsPath(p)),
                         );
                     }
                     Action::Quit => {
@@ -4404,7 +4100,7 @@ impl Flowsurface {
                             .collect();
                         return window::collect_window_specs(
                             active_windows,
-                            Message::ExitRequested,
+                            |w| Message::Window(WindowMsg::ExitRequested(w)),
                         );
                     }
                     Action::SwitchMode(target) => {
@@ -4436,7 +4132,7 @@ impl Flowsurface {
                                     let dialog = screen::ConfirmDialog::new(
                                         "未約定の注文があります。\nモードを切り替えることができません。"
                                             .to_string(),
-                                        Box::new(Message::ToggleDialogModal(None)),
+                                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                                     )
                                     .with_confirm_btn_text("閉じる".to_string());
                                     self.confirm_dialog = Some(dialog);
@@ -4448,10 +4144,10 @@ impl Flowsurface {
                                 active_windows.push(self.main_window.id);
                                 return window::collect_window_specs(
                                     active_windows,
-                                    move |windows| Message::SwitchModeWithSpecs {
+                                    move |windows| Message::Window(WindowMsg::SwitchModeWithSpecs {
                                         target: AppMode::Replay,
                                         windows,
-                                    },
+                                    }),
                                 );
                             }
                             (AppMode::Replay, AppMode::Live) => {
@@ -4470,8 +4166,8 @@ impl Flowsurface {
                                             .await
                                         },
                                         |result| match result {
-                                            Ok(()) => Message::Noop,
-                                            Err(_) => Message::ModeSwitchSendFailed,
+                                            Ok(()) => Message::Engine(EngineMsg::Noop),
+                                            Err(_) => Message::Window(WindowMsg::ModeSwitchSendFailed),
                                         },
                                     );
                                     // 5-second timeout
@@ -4480,7 +4176,7 @@ impl Flowsurface {
                                             tokio::time::sleep(std::time::Duration::from_secs(5))
                                                 .await;
                                         },
-                                        |_| Message::ModeSwitchStopTimeout,
+                                        |_| Message::Window(WindowMsg::ModeSwitchStopTimeout),
                                     );
                                     return Task::batch([send_task, timeout_task]);
                                 } else {
@@ -4500,7 +4196,7 @@ impl Flowsurface {
             }
             // F6a: replay モードで `.py` を Open dialog で選択した結果を受け取り、
             // engine に `Command::LoadStrategyScenario` を発行する。
-            Message::NativeOpenStrategyPicked(picked) => {
+            Message::Replay(ReplayMsg::NativeOpenStrategyPicked(picked)) => {
                 let Some(path) = picked else {
                     return Task::none();
                 };
@@ -4540,10 +4236,10 @@ impl Flowsurface {
                         .map_err(|e| e.to_string())
                     },
                     |res| match res {
-                        Ok(()) => Message::Noop,
-                        Err(err) => Message::OrderToast(Toast::error(format!(
+                        Ok(()) => Message::Engine(EngineMsg::Noop),
+                        Err(err) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
                             "戦略ファイルの読み込み要求に失敗しました: {err}"
-                        ))),
+                        )))),
                     },
                 );
             }
@@ -4553,11 +4249,11 @@ impl Flowsurface {
             // CURRENT_PATH はレイアウト JSON の保存先のみを示す。戦略 .py を
             // セットすると live 切替後の Ctrl+S が .py を JSON で上書きするため
             // ここでは更新しない。
-            Message::StrategyScenarioLoadedEvent {
+            Message::Replay(ReplayMsg::ScenarioLoaded {
                 request_id,
                 path,
                 scenario,
-            } => {
+            }) => {
                 // 連続して別ファイルを開いた場合、古い応答を無視する。
                 if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
                     return Task::none();
@@ -4580,11 +4276,11 @@ impl Flowsurface {
             }
             // F6a: SCENARIO 抽出失敗 → トースト表示。`current_path` は更新しない。
             // 成功パスと対称に request_id で突き合わせ、古い失敗を捨てる。
-            Message::StrategyScenarioLoadFailedEvent {
+            Message::Replay(ReplayMsg::ScenarioLoadFailed {
                 request_id,
                 path,
                 reason,
-            } => {
+            }) => {
                 if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
                     return Task::none();
                 }
@@ -4599,12 +4295,12 @@ impl Flowsurface {
                 return Task::none();
             }
             // Phase 8.1c: Replay 起動フォームを開く
-            Message::ShowReplayDialog => {
+            Message::Replay(ReplayMsg::ShowDialog) => {
                 self.replay_form_modal = Some(modal::replay_form::ReplayFormModal::default());
                 return Task::none();
             }
             // Phase 8.1c: Replay フォーム内部メッセージの処理
-            Message::ReplayFormMsg(modal::replay_form::Message::PickStrategyFile) => {
+            Message::Replay(ReplayMsg::FormMsg(modal::replay_form::Message::PickStrategyFile)) => {
                 return Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
@@ -4614,10 +4310,10 @@ impl Flowsurface {
                             .await
                             .map(|h| h.path().to_owned())
                     },
-                    Message::NativeOpenStrategyPicked,
+                    |p| Message::Replay(ReplayMsg::NativeOpenStrategyPicked(p)),
                 );
             }
-            Message::ReplayFormMsg(msg) => {
+            Message::Replay(ReplayMsg::FormMsg(msg)) => {
                 if let Some(form) = self.replay_form_modal.as_mut() {
                     match form.update(msg) {
                         Some(modal::replay_form::Action::Cancel) => {
@@ -4673,12 +4369,12 @@ impl Flowsurface {
                                         Ok::<(), String>(())
                                     },
                                     |res| match res {
-                                        Ok(()) => Message::OrderToast(Toast::info(
+                                        Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                             "Replay を開始しました".to_string(),
-                                        )),
-                                        Err(e) => Message::OrderToast(Toast::error(format!(
-                                            "Replay 起動失敗: {e}"
                                         ))),
+                                        Err(e) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
+                                            "Replay 起動失敗: {e}"
+                                        )))),
                                     },
                                 );
                             }
@@ -4692,10 +4388,10 @@ impl Flowsurface {
                 return Task::none();
             }
             // N4-live: EngineStarted (live) → set running state and update bar
-            Message::LiveStrategyStarted {
+            Message::Replay(ReplayMsg::LiveStarted {
                 strategy_id,
                 ts_event_ms,
-            } => {
+            }) => {
                 self.live_strategy = LiveStrategyState::Running { strategy_id };
                 self.menu_bar.live_bar.current_time = Some(format_live_time(ts_event_ms));
                 self.menu_bar.live_bar.live_paused = false;
@@ -4705,7 +4401,7 @@ impl Flowsurface {
                 return Task::none();
             }
             // N4-live: EngineStopped (live) → clear running state
-            Message::LiveEngineStoppedEvent { strategy_id } => {
+            Message::Replay(ReplayMsg::LiveStopped { strategy_id }) => {
                 if let LiveStrategyState::Running {
                     strategy_id: running_id,
                 } = &self.live_strategy
@@ -4726,7 +4422,7 @@ impl Flowsurface {
                 return Task::none();
             }
             // N4-live: ■ ボタンから StopEngine を送信する
-            Message::StopLiveStrategy => {
+            Message::Replay(ReplayMsg::StopLiveStrategy) => {
                 let LiveStrategyState::Running { strategy_id } = &self.live_strategy else {
                     return Task::none();
                 };
@@ -4744,20 +4440,20 @@ impl Flowsurface {
                         .map_err(|e| e.to_string())
                     },
                     |res| match res {
-                        Ok(()) => Message::Noop,
-                        Err(e) => Message::OrderToast(Toast::error(format!("Live 停止失敗: {e}"))),
+                        Ok(()) => Message::Engine(EngineMsg::Noop),
+                        Err(e) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!("Live 停止失敗: {e}")))),
                     },
                 );
             }
             // N4-live: StartEngine IPC 送信失敗 → strategy_file_stem をクリアしてトースト
-            Message::LiveStrategyStartFailed(e) => {
+            Message::Replay(ReplayMsg::LiveStartFailed(e)) => {
                 self.menu_bar.live_bar.strategy_file_stem = None;
-                return Task::done(Message::OrderToast(Toast::error(format!(
+                return Task::done(Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
                     "Live 起動失敗: {e}"
-                ))));
+                )))));
             }
             // N4-live: live strategy フォーム modal
-            Message::LiveStrategyFormMsg(msg) => {
+            Message::Replay(ReplayMsg::LiveStrategyFormMsg(msg)) => {
                 if let Some(form) = &mut self.live_strategy_form_modal {
                     match form.update(msg) {
                         Some(modal::live_strategy_form::Action::Submit {
@@ -4768,9 +4464,9 @@ impl Flowsurface {
                         }) => {
                             let Some(conn) = self.engine_connection.as_ref().cloned() else {
                                 // フォームを閉じずにエラーを通知する
-                                return Task::done(Message::OrderToast(Toast::error(
+                                return Task::done(Message::Venue(VenueMsg::OrderToast(Toast::error(
                                     "engine に接続されていません".to_string(),
-                                )));
+                                ))));
                             };
                             let session_id = uuid::Uuid::new_v4().to_string();
                             self.menu_bar.live_bar.strategy_file_stem = strategy_file
@@ -4801,8 +4497,8 @@ impl Flowsurface {
                                     .map_err(|e| e.to_string())
                                 },
                                 |res| match res {
-                                    Ok(()) => Message::Noop,
-                                    Err(e) => Message::LiveStrategyStartFailed(e),
+                                    Ok(()) => Message::Engine(EngineMsg::Noop),
+                                    Err(e) => Message::Replay(ReplayMsg::LiveStartFailed(e)),
                                 },
                             );
                         }
@@ -4814,7 +4510,7 @@ impl Flowsurface {
                 }
                 return Task::none();
             }
-            Message::NativeSaveAsPath(Some(path)) => {
+            Message::Window(WindowMsg::NativeSaveAsPath(Some(path))) => {
                 if self.confirm_dialog.is_some() {
                     return Task::none();
                 }
@@ -4827,7 +4523,7 @@ impl Flowsurface {
                     let dialog = screen::ConfirmDialog::new(
                         format!("「{file_name}」はすでに存在します。上書きしますか？"),
                         // Carry path in the message so no shared slot is needed.
-                        Box::new(Message::ConfirmSaveAsOverwrite { path }),
+                        Box::new(Message::Window(WindowMsg::ConfirmSaveAsOverwrite { path })),
                     )
                     .with_confirm_btn_text("上書き保存".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -4837,13 +4533,13 @@ impl Flowsurface {
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
                 return window::collect_window_specs(active_windows, move |windows| {
-                    Message::NativeSaveAsWithSpecs {
+                    Message::Window(WindowMsg::NativeSaveAsWithSpecs {
                         path: path.clone(),
                         windows,
-                    }
+                    })
                 });
             }
-            Message::ConfirmSaveAsOverwrite { path } => {
+            Message::Window(WindowMsg::ConfirmSaveAsOverwrite { path }) => {
                 // M-3: guard against arriving without an open dialog (race condition).
                 // Mirrors the confirm_dialog.is_none() pattern used in NativeOpenFilePendingCheck
                 // and ExitRequested to prevent double-processing.
@@ -4856,28 +4552,28 @@ impl Flowsurface {
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
                 return window::collect_window_specs(active_windows, move |windows| {
-                    Message::NativeSaveAsWithSpecs {
+                    Message::Window(WindowMsg::NativeSaveAsWithSpecs {
                         path: path.clone(),
                         windows,
-                    }
+                    })
                 });
             }
-            Message::NativeSaveAsPath(None) => {
+            Message::Window(WindowMsg::NativeSaveAsPath(None)) => {
                 // Save As dialog cancelled. If a "save-then-open" flow was in progress
                 // (SaveAndOpenFile triggered this when CURRENT_PATH was None), restore the
                 // confirm dialog so the user can choose Discard or retry Save.
                 if self.pending_open_file.is_some() {
                     let dialog = screen::ConfirmDialog::new(
                         "未保存の変更があります。".to_string(),
-                        Box::new(Message::DiscardAndOpenFile),
+                        Box::new(Message::Window(WindowMsg::DiscardAndOpenFile)),
                     )
                     .with_confirm_btn_text("破棄して開く".to_string())
-                    .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
+                    .with_save_action(Message::Window(WindowMsg::SaveAndOpenFile), "保存して開く".to_string());
                     self.confirm_dialog = Some(dialog);
                 }
                 return Task::none();
             }
-            Message::NativeSaveAsWithSpecs { path, windows } => {
+            Message::Window(WindowMsg::NativeSaveAsWithSpecs { path, windows }) => {
                 // H-5: build JSON once and reuse for both the user path and saved-state.json,
                 // avoiding a second build_state_json call inside save_state_to_disk.
                 let Some(json) = self.build_state_json(&windows) else {
@@ -4915,22 +4611,22 @@ impl Flowsurface {
                         }
                     },
                     |(user_path, json_bytes, error_kind, saved_state_ok)| {
-                        Message::NativeSaveComplete {
+                        Message::Window(WindowMsg::NativeSaveComplete {
                             user_path,
                             json_bytes,
                             error_kind,
                             saved_state_ok,
-                        }
+                        })
                     },
                 );
             }
             // H-3: completion handler for the async NativeSaveAsWithSpecs Task::perform.
-            Message::NativeSaveComplete {
+            Message::Window(WindowMsg::NativeSaveComplete {
                 user_path,
                 json_bytes,
                 error_kind,
                 saved_state_ok,
-            } => {
+            }) => {
                 match error_kind {
                     None => {
                         // A-7: update dirty baseline so is_dirty() returns false.
@@ -4988,20 +4684,20 @@ impl Flowsurface {
                         if self.pending_open_file.is_some() {
                             let dialog = screen::ConfirmDialog::new(
                                 "未保存の変更があります。".to_string(),
-                                Box::new(Message::DiscardAndOpenFile),
+                                Box::new(Message::Window(WindowMsg::DiscardAndOpenFile)),
                             )
                             .with_confirm_btn_text("破棄して開く".to_string())
-                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
+                            .with_save_action(Message::Window(WindowMsg::SaveAndOpenFile), "保存して開く".to_string());
                             self.confirm_dialog = Some(dialog);
                         }
                     }
                 }
                 return Task::none();
             }
-            Message::NativeOpenFileCancelled => {
+            Message::Window(WindowMsg::NativeOpenFileCancelled) => {
                 return Task::none();
             }
-            Message::NativeOpenFileApply { json, path } => {
+            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) => {
                 // Validate the JSON first; reject bad files early before any state change.
                 match serde_json::from_str::<data::State>(&json) {
                     Ok(_) => {
@@ -5013,11 +4709,11 @@ impl Flowsurface {
                             self.active_dashboard().popout.keys().copied().collect();
                         active_windows.push(self.main_window.id);
                         return window::collect_window_specs(active_windows, move |windows| {
-                            Message::NativeOpenFilePendingCheck {
+                            Message::Window(WindowMsg::NativeOpenFilePendingCheck {
                                 json: json.clone(),
                                 path: path.clone(),
                                 windows,
-                            }
+                            })
                         });
                     }
                     Err(e) => {
@@ -5027,11 +4723,11 @@ impl Flowsurface {
                     }
                 }
             }
-            Message::NativeOpenFilePendingCheck {
+            Message::Window(WindowMsg::NativeOpenFilePendingCheck {
                 json,
                 path,
                 windows,
-            } => {
+            }) => {
                 // HIGH fix: another dialog is already visible — silently drop this request
                 // to prevent F4 bypass via overlapping dialogs.
                 if self.confirm_dialog.is_some() {
@@ -5043,10 +4739,10 @@ impl Flowsurface {
                     self.pending_open_file = Some((json, path, windows));
                     let dialog = screen::ConfirmDialog::new(
                         "未保存の変更があります。".to_string(),
-                        Box::new(Message::DiscardAndOpenFile),
+                        Box::new(Message::Window(WindowMsg::DiscardAndOpenFile)),
                     )
                     .with_confirm_btn_text("破棄して開く".to_string())
-                    .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string());
+                    .with_save_action(Message::Window(WindowMsg::SaveAndOpenFile), "保存して開く".to_string());
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
@@ -5063,7 +4759,7 @@ impl Flowsurface {
                 }
                 return self.restart();
             }
-            Message::DiscardAndOpenFile => {
+            Message::Window(WindowMsg::DiscardAndOpenFile) => {
                 self.confirm_dialog = None;
                 let Some((json, path, _windows)) = self.pending_open_file.take() else {
                     return Task::none();
@@ -5081,7 +4777,7 @@ impl Flowsurface {
                 }
                 return self.restart();
             }
-            Message::SaveAndOpenFile => {
+            Message::Window(WindowMsg::SaveAndOpenFile) => {
                 // User chose "保存して開く" — save the current document first, then load the new
                 // file. BC-5: if any save step fails, abort and restore the dialog.
                 self.confirm_dialog = None;
@@ -5104,11 +4800,11 @@ impl Flowsurface {
                                 self.pending_open_file = Some((json, new_path, windows));
                                 let dialog = screen::ConfirmDialog::new(
                                     "未保存の変更があります。".to_string(),
-                                    Box::new(Message::DiscardAndOpenFile),
+                                    Box::new(Message::Window(WindowMsg::DiscardAndOpenFile)),
                                 )
                                 .with_confirm_btn_text("破棄して開く".to_string())
                                 .with_save_action(
-                                    Message::SaveAndOpenFile,
+                                    Message::Window(WindowMsg::SaveAndOpenFile),
                                     "保存して開く".to_string(),
                                 );
                                 self.confirm_dialog = Some(dialog);
@@ -5135,7 +4831,7 @@ impl Flowsurface {
                                 .await
                                 .map(|handle| handle.path().to_owned())
                         },
-                        Message::NativeSaveAsPath,
+                        |p| Message::Window(WindowMsg::NativeSaveAsPath(p)),
                     );
                 }
                 // R2-M1 (revert of R6 F-M4): saved-state.json is the file that
@@ -5166,7 +4862,7 @@ impl Flowsurface {
                 };
             }
             // F7: SwitchModeWithSpecs — window specs collected, perform dirty check for live→replay
-            Message::SwitchModeWithSpecs { target, windows } => {
+            Message::Window(WindowMsg::SwitchModeWithSpecs { target, windows }) => {
                 use engine_client::dto::AppMode;
                 // If mode switch guard was released (e.g. stale message), ignore.
                 // L2: log at debug level so stale window-spec callbacks are
@@ -5186,10 +4882,10 @@ impl Flowsurface {
                     }
                     let dialog = screen::ConfirmDialog::new(
                         "未保存の変更があります。".to_string(),
-                        Box::new(Message::DiscardAndSwitchMode),
+                        Box::new(Message::Window(WindowMsg::DiscardAndSwitchMode)),
                     )
                     .with_confirm_btn_text("破棄してモード切替".to_string())
-                    .with_save_action(Message::SaveAndSwitchMode, "保存してモード切替".to_string());
+                    .with_save_action(Message::Window(WindowMsg::SaveAndSwitchMode), "保存してモード切替".to_string());
                     self.confirm_dialog = Some(dialog);
                     return Task::none();
                 }
@@ -5203,7 +4899,7 @@ impl Flowsurface {
                     let dialog = screen::ConfirmDialog::new(
                         "保存に失敗したためモード切替を中止しました。\nディスクの空き容量・権限を確認してください。"
                             .to_string(),
-                        Box::new(Message::ToggleDialogModal(None)),
+                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -5212,7 +4908,7 @@ impl Flowsurface {
                 return self.restart_with_mode(target);
             }
             // F7: user chose "破棄してモード切替"
-            Message::DiscardAndSwitchMode => {
+            Message::Window(WindowMsg::DiscardAndSwitchMode) => {
                 self.confirm_dialog = None;
                 // H1: stale early-return must release the guard so the next
                 // SwitchMode is not permanently blocked.
@@ -5222,7 +4918,7 @@ impl Flowsurface {
                 return self.restart_with_mode(target);
             }
             // F7: user chose "保存してモード切替" — collect window specs for save, then restart
-            Message::SaveAndSwitchMode => {
+            Message::Window(WindowMsg::SaveAndSwitchMode) => {
                 self.confirm_dialog = None;
                 // H1: stale early-return — mode_switch_state must be Some here,
                 // otherwise the dialog firing was a stale message; release nothing
@@ -5242,11 +4938,11 @@ impl Flowsurface {
                     self.active_dashboard().popout.keys().copied().collect();
                 active_windows.push(self.main_window.id);
                 return window::collect_window_specs(active_windows, move |windows| {
-                    Message::SwitchModeSaveComplete { target, windows }
+                    Message::Window(WindowMsg::SwitchModeSaveComplete { target, windows })
                 });
             }
             // F7: window specs collected for the "保存してモード切替" path — save then restart.
-            Message::SwitchModeSaveComplete { target, windows } => {
+            Message::Window(WindowMsg::SwitchModeSaveComplete { target, windows }) => {
                 // Abort if save fails (plan: 保存失敗 → 切替中止).
                 if !self.save_state_to_disk(&windows) {
                     self.mode_switch_state = None;
@@ -5257,7 +4953,7 @@ impl Flowsurface {
                     let dialog = screen::ConfirmDialog::new(
                         "保存に失敗したためモード切替を中止しました。\nディスクの空き容量・権限を確認してください。"
                             .to_string(),
-                        Box::new(Message::ToggleDialogModal(None)),
+                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -5269,7 +4965,7 @@ impl Flowsurface {
             // Sends StopReplay (with the same 5s timeout as the F7 mode-switch flow);
             // the ack / timeout / EngineBusy events are routed through the shared
             // `ModeSwitch*` handlers, distinguished by `replay_stop_only_pending`.
-            Message::StopReplayOnly => {
+            Message::Replay(ReplayMsg::StopReplayOnly) => {
                 if self.replay_stop_only_pending || self.mode_switch_state.is_some() {
                     return Task::none();
                 }
@@ -5280,7 +4976,7 @@ impl Flowsurface {
                     let dialog = screen::ConfirmDialog::new(
                         "リプレイ停止に失敗しました。\nエンジンとの接続が切れています。"
                             .to_string(),
-                        Box::new(Message::ToggleDialogModal(None)),
+                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -5294,22 +4990,22 @@ impl Flowsurface {
                             .await
                     },
                     |result| match result {
-                        Ok(()) => Message::Noop,
-                        Err(_) => Message::ModeSwitchSendFailed,
+                        Ok(()) => Message::Engine(EngineMsg::Noop),
+                        Err(_) => Message::Window(WindowMsg::ModeSwitchSendFailed),
                     },
                 );
                 let timeout_task = Task::perform(
                     async {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     },
-                    |_| Message::ModeSwitchStopTimeout,
+                    |_| Message::Window(WindowMsg::ModeSwitchStopTimeout),
                 );
                 return Task::batch([send_task, timeout_task]);
             }
             // F7: ReplayStopped event received — proceed with restart_with_mode
             // (also handles the stop-only flow: drops the pending flag and emits
             // a confirmation toast without restarting the dashboard).
-            Message::ModeSwitchStopAcked => {
+            Message::Window(WindowMsg::ModeSwitchStopAcked) => {
                 self.replay_running = false;
                 self.replay_paused = false;
                 self.menu_bar.replay_bar.replay_has_history = false;
@@ -5325,7 +5021,7 @@ impl Flowsurface {
             }
             // F7: 5-second StopReplay timeout — send ForceStopReplay fallback
             // Shared between mode-switch and stop-only flows.
-            Message::ModeSwitchStopTimeout => {
+            Message::Window(WindowMsg::ModeSwitchStopTimeout) => {
                 log::warn!("[F7] StopReplay timed out — sending ForceStopReplay fallback");
                 if self.mode_switch_state.is_none() && !self.replay_stop_only_pending {
                     // Already handled (ReplayStopped arrived before timeout) — ignore
@@ -5339,15 +5035,15 @@ impl Flowsurface {
                                 .await
                         },
                         |result| match result {
-                            Ok(()) => Message::Noop,
-                            Err(_) => Message::ModeSwitchSendFailed,
+                            Ok(()) => Message::Engine(EngineMsg::Noop),
+                            Err(_) => Message::Window(WindowMsg::ModeSwitchSendFailed),
                         },
                     );
                     let timeout_task = Task::perform(
                         async {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         },
-                        |_| Message::ModeSwitchForceStopTimeout,
+                        |_| Message::Window(WindowMsg::ModeSwitchForceStopTimeout),
                     );
                     return Task::batch([force_task, timeout_task]);
                 } else {
@@ -5363,7 +5059,7 @@ impl Flowsurface {
                     };
                     let dialog = screen::ConfirmDialog::new(
                         body.to_string(),
-                        Box::new(Message::ToggleDialogModal(None)),
+                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -5372,7 +5068,7 @@ impl Flowsurface {
             }
             // F7: ForceStopReplay also timed out — release guard and show error
             // Shared between mode-switch and stop-only flows.
-            Message::ModeSwitchForceStopTimeout => {
+            Message::Window(WindowMsg::ModeSwitchForceStopTimeout) => {
                 log::warn!("[F7] ForceStopReplay also timed out — aborting");
                 let stale = self.mode_switch_state.take().is_none();
                 let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
@@ -5386,7 +5082,7 @@ impl Flowsurface {
                 };
                 let dialog = screen::ConfirmDialog::new(
                     body.to_string(),
-                    Box::new(Message::ToggleDialogModal(None)),
+                    Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                 )
                 .with_confirm_btn_text("閉じる".to_string());
                 self.confirm_dialog = Some(dialog);
@@ -5396,7 +5092,7 @@ impl Flowsurface {
             // waiting for the 5-second (StopReplay) or 2-second (ForceStopReplay) timeout.
             // Stale timeout messages that fire later are ignored because the pending
             // state will be cleared by then.
-            Message::ModeSwitchSendFailed => {
+            Message::Window(WindowMsg::ModeSwitchSendFailed) => {
                 let was_mode_switch = self.mode_switch_state.take().is_some();
                 let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
                 if was_mode_switch || was_stop_only {
@@ -5407,7 +5103,7 @@ impl Flowsurface {
                     };
                     let dialog = screen::ConfirmDialog::new(
                         body.to_string(),
-                        Box::new(Message::ToggleDialogModal(None)),
+                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -5419,7 +5115,7 @@ impl Flowsurface {
             // ForceStopReplay has no state guard on the Python side and always responds
             // with ReplayStopped, so the flow can complete normally. Shared between
             // mode-switch and stop-only paths.
-            Message::ModeSwitchStopBusy => {
+            Message::Window(WindowMsg::ModeSwitchStopBusy) => {
                 log::warn!(
                     "[F7] StopReplay rejected (engine IDLE) — sending ForceStopReplay immediately"
                 );
@@ -5434,15 +5130,15 @@ impl Flowsurface {
                                 .await
                         },
                         |result| match result {
-                            Ok(()) => Message::Noop,
-                            Err(_) => Message::ModeSwitchSendFailed,
+                            Ok(()) => Message::Engine(EngineMsg::Noop),
+                            Err(_) => Message::Window(WindowMsg::ModeSwitchSendFailed),
                         },
                     );
                     let timeout_task = Task::perform(
                         async {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         },
-                        |_| Message::ModeSwitchForceStopTimeout,
+                        |_| Message::Window(WindowMsg::ModeSwitchForceStopTimeout),
                     );
                     return Task::batch([force_task, timeout_task]);
                 } else {
@@ -5457,7 +5153,7 @@ impl Flowsurface {
                     };
                     let dialog = screen::ConfirmDialog::new(
                         body.to_string(),
-                        Box::new(Message::ToggleDialogModal(None)),
+                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -5466,7 +5162,7 @@ impl Flowsurface {
             }
             // F7: ForceStopReplay EngineBusy — genuine failure; abort the flow.
             // Shared between mode-switch and stop-only paths.
-            Message::ModeSwitchEngineBusy(reason) => {
+            Message::Window(WindowMsg::ModeSwitchEngineBusy(reason)) => {
                 self.engine_busy = true;
                 let was_mode_switch = self.mode_switch_state.take().is_some();
                 let was_stop_only = std::mem::take(&mut self.replay_stop_only_pending);
@@ -5478,7 +5174,7 @@ impl Flowsurface {
                     };
                     let dialog = screen::ConfirmDialog::new(
                         body,
-                        Box::new(Message::ToggleDialogModal(None)),
+                        Box::new(Message::Window(WindowMsg::ToggleDialogModal(None))),
                     )
                     .with_confirm_btn_text("閉じる".to_string());
                     self.confirm_dialog = Some(dialog);
@@ -5491,13 +5187,13 @@ impl Flowsurface {
                 return Task::none();
             }
             // F7: true no-op — used to discard fire-and-forget Task completions.
-            Message::Noop => return Task::none(),
+            Message::Engine(EngineMsg::Noop) => return Task::none(),
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
-            Message::ExecutionMarkerReceived {
+            Message::Replay(ReplayMsg::ExecutionMarker {
                 side,
                 price,
                 ts_event_ms,
-            } => {
+            }) => {
                 let price_f32 = price.parse::<f32>().unwrap_or(0.0);
                 let data = crate::chart::kline::ExecutionMarkerData {
                     side,
@@ -5509,12 +5205,12 @@ impl Flowsurface {
                     .distribute_execution_markers(main_window, data);
             }
             // N1.12: StrategySignal → broadcast overlay diamond to all Kline charts
-            Message::StrategySignalReceived {
+            Message::Replay(ReplayMsg::StrategySignal {
                 signal_kind,
                 price,
                 ts_event_ms,
                 tag,
-            } => {
+            }) => {
                 let price_f32 = price.and_then(|p| p.parse::<f32>().ok());
                 let data = crate::chart::kline::StrategySignalData {
                     signal_kind,
@@ -5527,10 +5223,10 @@ impl Flowsurface {
                     .distribute_strategy_signals(main_window, data);
             }
             // Phase U0: OrderAccepted — reset submitting flag + toast
-            Message::OrderAccepted {
+            Message::Venue(VenueMsg::OrderAccepted {
                 client_order_id,
                 venue_order_id,
-            } => {
+            }) => {
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
                     .notify_order_accepted(main_window, &client_order_id);
@@ -5571,7 +5267,7 @@ impl Flowsurface {
                                 .await
                                 .map_err(|e| e.to_string())
                         },
-                        Message::OrderListSendCompleted,
+                        |r| Message::Venue(VenueMsg::OrderListSendCompleted(r)),
                     )
                 } else {
                     Task::none()
@@ -5594,12 +5290,12 @@ impl Flowsurface {
                             .map_err(|e| e.to_string())
                         },
                         move |res| match res {
-                            Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
-                            Err(err) => Message::IpcError {
+                            Ok(()) => Message::Venue(VenueMsg::BuyingPowerSendCompleted(Ok(()))),
+                            Err(err) => Message::Venue(VenueMsg::IpcError {
                                 request_id: Some(req_id_for_err),
                                 code: "send_failed".to_string(),
                                 message: err,
-                            },
+                            }),
                         },
                     )
                 } else {
@@ -5609,10 +5305,10 @@ impl Flowsurface {
                 return Task::batch([refresh_orders, refresh_buying_power]);
             }
             // Phase U0: OrderRejected — reset submitting flag with reason + toast
-            Message::OrderRejected {
+            Message::Venue(VenueMsg::OrderRejected {
                 client_order_id,
                 reason,
-            } => {
+            }) => {
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut().notify_order_rejected(
                     main_window,
@@ -5624,7 +5320,7 @@ impl Flowsurface {
                 )));
             }
             // ── Phase U0: 注文確認ダイアログ → ConfirmSubmit ──────────────────
-            Message::ConfirmOrderEntrySubmit => {
+            Message::Venue(VenueMsg::ConfirmOrderEntrySubmit) => {
                 self.confirm_dialog = None;
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
@@ -5635,7 +5331,7 @@ impl Flowsurface {
                     // standard Pane → PaneEvent → OrderEntryMsg path so that
                     // the `OrderEntryAction` handler picks up the resulting
                     // SubmitOrder and fires the IPC call.
-                    return iced::Task::done(Message::Dashboard {
+                    return iced::Task::done(Message::Dashboard(DashboardMsg::Layout {
                         layout_id: None,
                         event: dashboard::Message::Pane(
                             main_window_id,
@@ -5646,7 +5342,7 @@ impl Flowsurface {
                                 ),
                             ),
                         ),
-                    });
+                    }));
                 }
                 self.notifications.push(crate::widget::toast::Toast::error(
                     "注文を確定するには発注ペインをクリックしてください".to_string(),
@@ -5654,10 +5350,10 @@ impl Flowsurface {
                 return Task::none();
             }
             // ── Phase U1: 注文取消確認ダイアログ → CancelOrder IPC ─────────────
-            Message::ConfirmCancelOrder {
+            Message::Venue(VenueMsg::ConfirmCancelOrder {
                 client_order_id,
                 venue_order_id,
-            } => {
+            }) => {
                 self.confirm_dialog = None;
                 if let Some(conn) = self.engine_connection.as_ref().cloned() {
                     return Task::perform(
@@ -5672,9 +5368,9 @@ impl Flowsurface {
                             .map_err(|e| e.to_string())
                         },
                         |res| match res {
-                            Ok(()) => Message::OrderToast(Toast::info("注文取消送信".to_string())),
+                            Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info("注文取消送信".to_string()))),
                             Err(err) => {
-                                Message::OrderToast(Toast::error(format!("注文取消失敗: {err}")))
+                                Message::Venue(VenueMsg::OrderToast(Toast::error(format!("注文取消失敗: {err}"))))
                             }
                         },
                     );
@@ -5684,11 +5380,11 @@ impl Flowsurface {
                 return Task::none();
             }
             // ── Phase U0: 第二暗証番号 modal ──────────────────────────────────
-            Message::SecondPasswordRequired(request_id) => {
+            Message::Venue(VenueMsg::SecondPasswordRequired(request_id)) => {
                 self.second_password_modal =
                     Some(modal::second_password::SecondPasswordModal::new(request_id));
             }
-            Message::DismissSecondPasswordModal => {
+            Message::Venue(VenueMsg::DismissSecondPasswordModal) => {
                 self.second_password_modal = None;
                 if let Some(conn) = self.engine_connection.as_ref().cloned() {
                     return Task::perform(
@@ -5698,17 +5394,17 @@ impl Flowsurface {
                                 .map_err(|e| e.to_string())
                         },
                         |res| match res {
-                            Ok(()) => Message::OrderToast(Toast::info(
+                            Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                 "第二暗証番号を解除しました".to_string(),
-                            )),
-                            Err(err) => Message::OrderToast(Toast::error(format!(
-                                "ForgetSecondPassword 送信失敗: {err}"
                             ))),
+                            Err(err) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
+                                "ForgetSecondPassword 送信失敗: {err}"
+                            )))),
                         },
                     );
                 }
             }
-            Message::SecondPasswordModalMsg(msg) => {
+            Message::Venue(VenueMsg::SecondPasswordModal(msg)) => {
                 if let Some(modal) = &mut self.second_password_modal {
                     match modal.update(msg) {
                         Some(modal::second_password::Action::Submit { value }) => {
@@ -5725,12 +5421,12 @@ impl Flowsurface {
                                         .map_err(|e| e.to_string())
                                     },
                                     |res| match res {
-                                        Ok(()) => Message::OrderToast(Toast::info(
+                                        Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                             "第二暗証番号を送信しました".to_string(),
-                                        )),
-                                        Err(err) => Message::OrderToast(Toast::error(format!(
-                                            "第二暗証番号送信失敗: {err}"
                                         ))),
+                                        Err(err) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
+                                            "第二暗証番号送信失敗: {err}"
+                                        )))),
                                     },
                                 );
                             }
@@ -5745,12 +5441,12 @@ impl Flowsurface {
                                             .map_err(|e| e.to_string())
                                     },
                                     |res| match res {
-                                        Ok(()) => Message::OrderToast(Toast::info(
+                                        Ok(()) => Message::Venue(VenueMsg::OrderToast(Toast::info(
                                             "第二暗証番号を解除しました".to_string(),
-                                        )),
-                                        Err(err) => Message::OrderToast(Toast::error(format!(
-                                            "ForgetSecondPassword 送信失敗: {err}"
                                         ))),
+                                        Err(err) => Message::Venue(VenueMsg::OrderToast(Toast::error(format!(
+                                            "ForgetSecondPassword 送信失敗: {err}"
+                                        )))),
                                     },
                                 );
                             }
@@ -5759,13 +5455,13 @@ impl Flowsurface {
                     }
                 }
             }
-            Message::SetTimezone(tz) => {
+            Message::Settings(SettingsMsg::SetTimezone(tz)) => {
                 self.timezone = tz;
             }
-            Message::ScaleFactorChanged(value) => {
+            Message::Settings(SettingsMsg::ScaleFactorChanged(value)) => {
                 self.ui_scale_factor = value;
             }
-            Message::ToggleTradeFetch(checked) => {
+            Message::Dashboard(DashboardMsg::ToggleTradeFetch(checked)) => {
                 self.layout_manager
                     .iter_dashboards_mut()
                     .for_each(|dashboard| {
@@ -5776,7 +5472,7 @@ impl Flowsurface {
                     self.confirm_dialog = None;
                 }
             }
-            Message::ToggleDialogModal(dialog) => {
+            Message::Window(WindowMsg::ToggleDialogModal(dialog)) => {
                 // Fix: when dismissing (None), clear any parked dirty-check state so
                 // a subsequent Open does not skip the confirm dialog (Issue 2 fix).
                 if dialog.is_none() {
@@ -5792,10 +5488,10 @@ impl Flowsurface {
                         self.confirm_dialog = Some(
                             screen::ConfirmDialog::new(
                                 "未保存の変更があります。".to_string(),
-                                Box::new(Message::DiscardAndOpenFile),
+                                Box::new(Message::Window(WindowMsg::DiscardAndOpenFile)),
                             )
                             .with_confirm_btn_text("破棄して開く".to_string())
-                            .with_save_action(Message::SaveAndOpenFile, "保存して開く".to_string()),
+                            .with_save_action(Message::Window(WindowMsg::SaveAndOpenFile), "保存して開く".to_string()),
                         );
                         return Task::none();
                     }
@@ -5819,7 +5515,7 @@ impl Flowsurface {
                 }
                 self.confirm_dialog = dialog;
             }
-            Message::Layouts(message) => {
+            Message::Settings(SettingsMsg::Layouts(message)) => {
                 let action = self.layout_manager.update(message);
 
                 match action {
@@ -5849,10 +5545,10 @@ impl Flowsurface {
                             active_popout_keys,
                             dashboard::Message::SavePopoutSpecs,
                         )
-                        .map(move |msg| Message::Dashboard {
+                        .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                             layout_id: old_layout_id,
                             event: msg,
-                        })
+                        }))
                         .chain(window_tasks)
                         .chain(self.load_layout(layout, self.main_window.id));
                     }
@@ -5893,7 +5589,7 @@ impl Flowsurface {
                     None => {}
                 }
             }
-            Message::AudioStream(message) => {
+            Message::Settings(SettingsMsg::AudioStream(message)) => {
                 if let Some(event) = self.audio_stream.update(message) {
                     match event {
                         modal::audio::UpdateEvent::RetryFailed(err) => {
@@ -5908,19 +5604,19 @@ impl Flowsurface {
                     }
                 }
             }
-            Message::DataFolderRequested => {
+            Message::Window(WindowMsg::DataFolderRequested) => {
                 if let Err(err) = data::open_data_folder() {
                     self.notifications
                         .push(Toast::error(format!("Failed to open data folder: {err}")));
                 }
             }
-            Message::OpenUrlRequested(url) => {
+            Message::Window(WindowMsg::OpenUrlRequested(url)) => {
                 if let Err(err) = data::open_url(url.as_ref()) {
                     self.notifications
                         .push(Toast::error(format!("Failed to open link: {err}")));
                 }
             }
-            Message::ThemeEditor(msg) => {
+            Message::Settings(SettingsMsg::ThemeEditor(msg)) => {
                 let action = self.theme_editor.update(msg, &self.theme.clone().into());
 
                 match action {
@@ -5937,7 +5633,7 @@ impl Flowsurface {
                     None => {}
                 }
             }
-            Message::NetworkManager(msg) => {
+            Message::Settings(SettingsMsg::NetworkManager(msg)) => {
                 let action = self.network.update(msg);
 
                 match action {
@@ -5983,14 +5679,14 @@ impl Flowsurface {
                             },
                             |result| match result {
                                 Ok(()) => {
-                                    Message::NetworkManager(network_manager::Message::ProxyResult(
+                                    Message::Settings(SettingsMsg::NetworkManager(network_manager::Message::ProxyResult(
                                         network_manager::ProxyResult::Applied,
-                                    ))
+                                    )))
                                 }
                                 Err(e) => {
-                                    Message::NetworkManager(network_manager::Message::ProxyResult(
+                                    Message::Settings(SettingsMsg::NetworkManager(network_manager::Message::ProxyResult(
                                         network_manager::ProxyResult::Failed(e),
-                                    ))
+                                    )))
                                 }
                             },
                         );
@@ -6001,7 +5697,7 @@ impl Flowsurface {
                     None => {}
                 }
             }
-            Message::Sidebar(message) => {
+            Message::Dashboard(DashboardMsg::Sidebar(message)) => {
                 let (task, action) = self.sidebar.update(message);
 
                 match action {
@@ -6026,10 +5722,10 @@ impl Flowsurface {
                             }
                         };
 
-                        return task.map(move |msg| Message::Dashboard {
+                        return task.map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                             layout_id: None,
                             event: msg,
-                        });
+                        }));
                     }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
@@ -6074,7 +5770,7 @@ impl Flowsurface {
                                     .distribute_buying_power_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
                                 return Task::batch(vec![
-                                    task.map(Message::Sidebar),
+                                    task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m))),
                                     Task::perform(
                                         async move {
                                             conn.send(engine_client::dto::Command::GetBuyingPower {
@@ -6085,12 +5781,12 @@ impl Flowsurface {
                                             .map_err(|e| e.to_string())
                                         },
                                         move |res| match res {
-                                            Ok(()) => Message::BuyingPowerSendCompleted(Ok(())),
-                                            Err(err) => Message::IpcError {
+                                            Ok(()) => Message::Venue(VenueMsg::BuyingPowerSendCompleted(Ok(()))),
+                                            Err(err) => Message::Venue(VenueMsg::IpcError {
                                                 request_id: Some(req_id_for_err),
                                                 code: "send_failed".to_string(),
                                                 message: err,
-                                            },
+                                            }),
                                         },
                                     ),
                                 ]);
@@ -6115,7 +5811,7 @@ impl Flowsurface {
                                     .distribute_positions_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
                                 return Task::batch(vec![
-                                    task.map(Message::Sidebar),
+                                    task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m))),
                                     Task::perform(
                                         async move {
                                             conn.send(engine_client::dto::Command::GetPositions {
@@ -6126,12 +5822,12 @@ impl Flowsurface {
                                             .map_err(|e| e.to_string())
                                         },
                                         move |res| match res {
-                                            Ok(()) => Message::PositionsSendCompleted(Ok(())),
-                                            Err(err) => Message::IpcError {
+                                            Ok(()) => Message::Venue(VenueMsg::PositionsSendCompleted(Ok(()))),
+                                            Err(err) => Message::Venue(VenueMsg::IpcError {
                                                 request_id: Some(req_id_for_err),
                                                 code: "send_failed".to_string(),
                                                 message: err,
-                                            },
+                                            }),
                                         },
                                     ),
                                 ]);
@@ -6143,21 +5839,21 @@ impl Flowsurface {
                             }
                         }
 
-                        return task.map(Message::Sidebar);
+                        return task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
                     }
                     Some(dashboard::sidebar::Action::RequestTachibanaLogin(trigger)) => {
-                        let task = task.map(Message::Sidebar);
+                        let task = task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
                         return Task::batch(vec![
                             task,
-                            iced::Task::done(Message::RequestTachibanaLogin(trigger)),
+                            iced::Task::done(Message::Venue(VenueMsg::RequestTachibanaLogin(trigger))),
                         ]);
                     }
                     None => {}
                 }
 
-                return task.map(Message::Sidebar);
+                return task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
             }
-            Message::ApplyVolumeSizeUnit(pref) => {
+            Message::Dashboard(DashboardMsg::ApplyVolumeSizeUnit(pref)) => {
                 self.volume_size_unit = pref;
                 self.confirm_dialog = None;
 
@@ -6166,7 +5862,7 @@ impl Flowsurface {
                 active_windows.push(self.main_window.id);
 
                 return window::collect_window_specs(active_windows, |windows| {
-                    Message::RestartRequested(Some(windows))
+                    Message::Window(WindowMsg::RestartRequested(Some(windows)))
                 });
             }
         }
@@ -6188,14 +5884,14 @@ impl Flowsurface {
             let sidebar_view = self
                 .sidebar
                 .view(self.audio_stream.volume())
-                .map(Message::Sidebar);
+                .map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
 
             let dashboard_view = dashboard
                 .view(&self.main_window, tickers_table, self.timezone)
-                .map(move |msg| Message::Dashboard {
+                .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                     layout_id: None,
                     event: msg,
-                });
+                }));
 
             let header_title = {
                 #[cfg(target_os = "macos")]
@@ -6225,9 +5921,9 @@ impl Flowsurface {
             let banner = widget::venue_banner::view(&self.tachibana_state).map(|el| {
                 el.map(|msg| match msg {
                     widget::venue_banner::BannerMessage::Relogin => {
-                        Message::RequestTachibanaLogin(Trigger::Manual)
+                        Message::Venue(VenueMsg::RequestTachibanaLogin(Trigger::Manual))
                     }
-                    widget::venue_banner::BannerMessage::Dismiss => Message::DismissTachibanaBanner,
+                    widget::venue_banner::BannerMessage::Dismiss => Message::Venue(VenueMsg::DismissTachibanaBanner),
                 })
             });
 
@@ -6242,7 +5938,7 @@ impl Flowsurface {
                     MODE_SWITCHING.load(std::sync::atomic::Ordering::Acquire),
                     self.live_strategy.is_running(),
                 )
-                .map(Message::MenuBar);
+                .map(|m| Message::Menu(MenuMsg::Bar(m)));
                 base = base.push(menu_bar_view);
             }
             if let Some(banner) = banner {
@@ -6254,7 +5950,7 @@ impl Flowsurface {
                     row![
                         text(format!("Strategy load failed: {err_msg}")),
                         button("×")
-                            .on_press(Message::DismissStrategyLoadError)
+                            .on_press(Message::Replay(ReplayMsg::DismissStrategyLoadError))
                             .style(button::danger),
                     ]
                     .spacing(8)
@@ -6293,10 +5989,10 @@ impl Flowsurface {
             container(
                 dashboard
                     .view_window(id, &self.main_window, tickers_table, self.timezone)
-                    .map(move |msg| Message::Dashboard {
+                    .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                         layout_id: None,
                         event: msg,
-                    }),
+                    })),
             )
             .padding(padding::top(style::TITLE_PADDING_TOP))
             .into()
@@ -6319,34 +6015,34 @@ impl Flowsurface {
                 sidebar::Position::Left => Alignment::Start,
                 sidebar::Position::Right => Alignment::End,
             },
-            Message::RemoveNotification,
+            |i| Message::Dashboard(DashboardMsg::RemoveNotification(i)),
         )
         .into();
 
         let after_second_password = if let Some(modal) = &self.second_password_modal {
-            let modal_view = modal.view().map(Message::SecondPasswordModalMsg);
-            main_dialog_modal(toasted, modal_view, Message::DismissSecondPasswordModal)
+            let modal_view = modal.view().map(|m| Message::Venue(VenueMsg::SecondPasswordModal(m)));
+            main_dialog_modal(toasted, modal_view, Message::Venue(VenueMsg::DismissSecondPasswordModal))
         } else {
             toasted
         };
 
         let after_replay_form = if let Some(form) = &self.replay_form_modal {
-            let form_view = form.view().map(Message::ReplayFormMsg);
+            let form_view = form.view().map(|m| Message::Replay(ReplayMsg::FormMsg(m)));
             main_dialog_modal(
                 after_second_password,
                 form_view,
-                Message::ReplayFormMsg(modal::replay_form::Message::Cancel),
+                Message::Replay(ReplayMsg::FormMsg(modal::replay_form::Message::Cancel)),
             )
         } else {
             after_second_password
         };
 
         if let Some(form) = &self.live_strategy_form_modal {
-            let form_view = form.view().map(Message::LiveStrategyFormMsg);
+            let form_view = form.view().map(|m| Message::Replay(ReplayMsg::LiveStrategyFormMsg(m)));
             main_dialog_modal(
                 after_replay_form,
                 form_view,
-                Message::LiveStrategyFormMsg(modal::live_strategy_form::Message::Cancel),
+                Message::Replay(ReplayMsg::LiveStrategyFormMsg(modal::live_strategy_form::Message::Cancel)),
             )
         } else {
             after_replay_form
@@ -6370,27 +6066,28 @@ impl Flowsurface {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let window_events = window::events().map(Message::WindowEvent);
-        let sidebar = self.sidebar.subscription().map(Message::Sidebar);
+        let window_events =
+            window::events().map(|e| Message::Window(WindowMsg::WindowEvent(e)));
+        let sidebar = self.sidebar.subscription().map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
 
         let exchange_streams = self
             .active_dashboard()
             .market_subscriptions(&self.handles)
-            .map(Message::MarketWsEvent);
+            .map(|e| Message::Dashboard(DashboardMsg::MarketWs(e)));
 
-        let tick = iced::window::frames().map(Message::Tick);
+        let tick = iced::window::frames().map(|t| Message::Window(WindowMsg::Tick(t)));
 
         // M2 (F8 R1): invariants for the global hotkey subscription —
         //   1. Only `Esc` is listened for here. All other accelerators
         //      (`Ctrl+O`, `Ctrl+S`, ...) flow through `native_menu::subscription`
         //      on Win/Mac and through the iced kbd path on Linux (P8 Q4).
-        //   2. `Esc` always routes to `Message::GoBack`. The GoBack handler is
+        //   2. `Esc` always routes to `Message::Window(WindowMsg::GoBack)`. The GoBack handler is
         //      responsible for the cascade: dismiss any open Linux menu-bar
         //      dropdown, close modals, etc. Adding more keys here without that
         //      handler will silently fail.
         //   3. The subscription must never close the menu directly — keeping
         //      the menu's `BarMessage::Dismiss` dispatch funnelled through
-        //      `Message::GoBack` ensures a single dismissal path that the
+        //      `Message::Window(WindowMsg::GoBack)` ensures a single dismissal path that the
         //      tests in `tests/widget_menu_bar_state.rs` can pin
         //      (`esc_dismiss_is_wired_in_go_back_handler`).
         let hotkeys = keyboard::listen().filter_map(|event| {
@@ -6398,7 +6095,7 @@ impl Flowsurface {
                 return None;
             };
             match key {
-                keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
+                keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Window(WindowMsg::GoBack)),
                 _ => None,
             }
         });
@@ -6408,9 +6105,9 @@ impl Flowsurface {
 
         let widget_menu_bar_dismiss =
             iced::event::listen_with(|event, _status, _window| match event {
-                iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::MenuBar(
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::Menu(MenuMsg::Bar(
                     crate::menu_bar_state::BarMessage::DismissFocusLost,
-                )),
+                ))),
                 _ => None,
             });
 
@@ -6421,7 +6118,7 @@ impl Flowsurface {
             tick,
             hotkeys,
             engine_status,
-            native_menu::subscription(app_mode()).map(Message::NativeMenuAction),
+            native_menu::subscription(app_mode()).map(|a| Message::Menu(MenuMsg::NativeAction(a))),
             widget_menu_bar_dismiss,
         ])
     }
@@ -6463,10 +6160,10 @@ impl Flowsurface {
                 layout
                     .dashboard
                     .load_layout(main_window)
-                    .map(move |msg| Message::Dashboard {
+                    .map(move |msg| Message::Dashboard(DashboardMsg::Layout {
                         layout_id: Some(layout_uid),
                         event: msg,
-                    })
+                    }))
             })
             .unwrap_or_else(|| {
                 log::error!("Active layout missing after selection: {}", layout_uid);
@@ -6496,26 +6193,26 @@ impl Flowsurface {
                         }
 
                         pick_list(themes, Some(self.theme.0.clone()), |theme| {
-                            Message::ThemeSelected(theme)
+                            Message::Settings(SettingsMsg::ThemeSelected(theme))
                         })
                     };
 
                     let toggle_theme_editor = button(text("Theme editor")).on_press(
-                        Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(Some(
+                        Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(Some(
                             sidebar::Menu::ThemeEditor,
-                        ))),
+                        )))),
                     );
 
-                    let toggle_network_editor = button(text("Network")).on_press(Message::Sidebar(
+                    let toggle_network_editor = button(text("Network")).on_press(Message::Dashboard(DashboardMsg::Sidebar(
                         dashboard::sidebar::Message::ToggleSidebarMenu(Some(
                             sidebar::Menu::Network,
                         )),
-                    ));
+                    )));
 
                     let timezone_picklist = pick_list(
                         [data::UserTimezone::Utc, data::UserTimezone::Local],
                         Some(self.timezone),
-                        Message::SetTimezone,
+                        |tz| Message::Settings(SettingsMsg::SetTimezone(tz)),
                     );
 
                     let size_in_quote_currency_checkbox = {
@@ -6527,11 +6224,11 @@ impl Flowsurface {
                         let checkbox = iced::widget::checkbox(is_active)
                             .label("Size in quote currency")
                             .on_toggle(|checked| {
-                                let on_dialog_confirm = Message::ApplyVolumeSizeUnit(if checked {
+                                let on_dialog_confirm = Message::Dashboard(DashboardMsg::ApplyVolumeSizeUnit(if checked {
                                     exchange::SizeUnit::Quote
                                 } else {
                                     exchange::SizeUnit::Base
-                                });
+                                }));
 
                                 let confirm_dialog = screen::ConfirmDialog::new(
                                     "Changing size display currency requires application restart"
@@ -6540,7 +6237,7 @@ impl Flowsurface {
                                 )
                                 .with_confirm_btn_text("Restart now".to_string());
 
-                                Message::ToggleDialogModal(Some(confirm_dialog))
+                                Message::Window(WindowMsg::ToggleDialogModal(Some(confirm_dialog)))
                             });
 
                         tooltip(
@@ -6556,7 +6253,7 @@ impl Flowsurface {
                         [sidebar::Position::Left, sidebar::Position::Right],
                         Some(sidebar_pos),
                         |pos| {
-                            Message::Sidebar(dashboard::sidebar::Message::SetSidebarPosition(pos))
+                            Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::SetSidebarPosition(pos)))
                         },
                     );
 
@@ -6565,14 +6262,14 @@ impl Flowsurface {
 
                         let decrease_btn = if current_value > data::config::MIN_SCALE {
                             button(text("-"))
-                                .on_press(Message::ScaleFactorChanged((current_value - 0.1).into()))
+                                .on_press(Message::Settings(SettingsMsg::ScaleFactorChanged((current_value - 0.1).into())))
                         } else {
                             button(text("-"))
                         };
 
                         let increase_btn = if current_value < data::config::MAX_SCALE {
                             button(text("+"))
-                                .on_press(Message::ScaleFactorChanged((current_value + 0.1).into()))
+                                .on_press(Message::Settings(SettingsMsg::ScaleFactorChanged((current_value + 0.1).into())))
                         } else {
                             button(text("+"))
                         };
@@ -6600,11 +6297,11 @@ impl Flowsurface {
                                     let confirm_dialog = screen::ConfirmDialog::new(
                                         "This might be unreliable and take some time to complete. Proceed?"
                                             .to_string(),
-                                        Box::new(Message::ToggleTradeFetch(true)),
+                                        Box::new(Message::Dashboard(DashboardMsg::ToggleTradeFetch(true))),
                                     );
-                                    Message::ToggleDialogModal(Some(confirm_dialog))
+                                    Message::Window(WindowMsg::ToggleDialogModal(Some(confirm_dialog)))
                                 } else {
-                                    Message::ToggleTradeFetch(false)
+                                    Message::Dashboard(DashboardMsg::ToggleTradeFetch(false))
                                 }
                             });
 
@@ -6617,7 +6314,7 @@ impl Flowsurface {
 
                     let open_data_folder = {
                         let button =
-                            button(text("Open data folder")).on_press(Message::DataFolderRequested);
+                            button(text("Open data folder")).on_press(Message::Window(WindowMsg::DataFolderRequested));
 
                         tooltip(
                             button,
@@ -6632,9 +6329,9 @@ impl Flowsurface {
                         let github_link_button = button(text(version_label).size(13))
                             .padding(0)
                             .style(style::button::text_link)
-                            .on_press(Message::OpenUrlRequested(Cow::Borrowed(
+                            .on_press(Message::Window(WindowMsg::OpenUrlRequested(Cow::Borrowed(
                                 version::GITHUB_REPOSITORY_URL,
-                            )));
+                            ))));
 
                         let github_button: Element<'_, Message> = iced::widget::tooltip(
                             github_link_button,
@@ -6658,7 +6355,7 @@ impl Flowsurface {
                             let commit_button = button(text(commit_label).size(11))
                                 .padding(0)
                                 .style(style::button::text_link_secondary)
-                                .on_press(Message::OpenUrlRequested(Cow::Owned(commit_url)));
+                                .on_press(Message::Window(WindowMsg::OpenUrlRequested(Cow::Owned(commit_url))));
 
                             column![github_button, commit_button]
                                 .spacing(2)
@@ -6716,7 +6413,7 @@ impl Flowsurface {
                 dashboard_modal(
                     base,
                     settings_modal,
-                    Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
+                    Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None))),
                     padding,
                     Alignment::End,
                     align_x,
@@ -6744,13 +6441,13 @@ impl Flowsurface {
                         let btn = button(text("Reset").align_x(Alignment::Center))
                             .width(iced::Length::Fill);
                         if is_main_window {
-                            let dashboard_msg = Message::Dashboard {
+                            let dashboard_msg = Message::Dashboard(DashboardMsg::Layout {
                                 layout_id: None,
                                 event: dashboard::Message::Pane(
                                     main_window,
                                     dashboard::pane::Message::ReplacePane(pane_id),
                                 ),
-                            };
+                            });
 
                             btn.on_press(dashboard_msg)
                         } else {
@@ -6761,7 +6458,7 @@ impl Flowsurface {
                         let btn = button(text("Split").align_x(Alignment::Center))
                             .width(iced::Length::Fill);
                         if is_main_window {
-                            let dashboard_msg = Message::Dashboard {
+                            let dashboard_msg = Message::Dashboard(DashboardMsg::Layout {
                                 layout_id: None,
                                 event: dashboard::Message::Pane(
                                     main_window,
@@ -6770,7 +6467,7 @@ impl Flowsurface {
                                         pane_id,
                                     ),
                                 ),
-                            };
+                            });
                             btn.on_press(dashboard_msg)
                         } else {
                             btn
@@ -6810,7 +6507,7 @@ impl Flowsurface {
                     let col = column![
                         manage_pane,
                         rule::horizontal(1.0).style(style::split_ruler),
-                        self.layout_manager.view().map(Message::Layouts)
+                        self.layout_manager.view().map(|m| Message::Settings(SettingsMsg::Layouts(m)))
                     ];
 
                     container(col.align_x(Alignment::Center).spacing(20))
@@ -6827,7 +6524,7 @@ impl Flowsurface {
                 dashboard_modal(
                     base,
                     manage_layout_modal,
-                    Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
+                    Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None))),
                     padding,
                     Alignment::Start,
                     align_x,
@@ -6845,8 +6542,8 @@ impl Flowsurface {
                     base,
                     self.audio_stream
                         .view(trade_streams_list)
-                        .map(Message::AudioStream),
-                    Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
+                        .map(|m| Message::Settings(SettingsMsg::AudioStream(m))),
+                    Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None))),
                     padding,
                     Alignment::Start,
                     align_x,
@@ -6862,8 +6559,8 @@ impl Flowsurface {
                     base,
                     self.theme_editor
                         .view(&self.theme.0)
-                        .map(Message::ThemeEditor),
-                    Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
+                        .map(|m| Message::Settings(SettingsMsg::ThemeEditor(m))),
+                    Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None))),
                     padding,
                     Alignment::End,
                     align_x,
@@ -6878,8 +6575,8 @@ impl Flowsurface {
                 // confirm_dialog overlay は view() 末尾で一括適用される（重複描画防止）。
                 dashboard_modal(
                     base,
-                    self.network.view().map(Message::NetworkManager),
-                    Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
+                    self.network.view().map(|m| Message::Settings(SettingsMsg::NetworkManager(m))),
+                    Message::Dashboard(DashboardMsg::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None))),
                     padding,
                     Alignment::End,
                     align_x,
@@ -7053,7 +6750,7 @@ impl Flowsurface {
                         let _ = c.send(engine_client::dto::Command::Shutdown).await;
                     }
                 },
-                |_| Message::Noop,
+                |_| Message::Engine(EngineMsg::Noop),
             )
         };
 
@@ -7098,12 +6795,13 @@ impl Flowsurface {
         // `tachibana_state` is restored — otherwise it would stay `Idle` until the
         // next engine reconnect.
         let venue_bootstrap = if cached_venue_is_ready(TACHIBANA_VENUE_NAME) {
-            Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready))
+            Task::done(Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::Ready)))
         } else {
             Task::none()
         };
+        // KabuVenueEvent(Ready) synthesized below when kabu cache is hot
         let kabu_bootstrap = if cached_venue_is_ready(KABU_STATION_VENUE_NAME) {
-            Task::done(Message::KabuVenueEvent(VenueEvent::Ready))
+            Task::done(Message::Venue(VenueMsg::KabuEvent(VenueEvent::Ready)))
         } else {
             Task::none()
         };
@@ -7222,7 +6920,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn save_as_path_none_does_not_push_toast() {
-        let body = handler_body("            Message::NativeSaveAsPath(None) =>");
+        let body = handler_body("            Message::Window(WindowMsg::NativeSaveAsPath(None)) =>");
         assert!(
             !body.contains("notifications.push"),
             "NativeSaveAsPath(None) must not push any toast (user cancelled the dialog)"
@@ -7231,7 +6929,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn save_as_path_none_returns_task_none() {
-        let body = handler_body("            Message::NativeSaveAsPath(None) =>");
+        let body = handler_body("            Message::Window(WindowMsg::NativeSaveAsPath(None)) =>");
         assert!(
             body.contains("Task::none()"),
             "NativeSaveAsPath(None) must return Task::none()"
@@ -7242,7 +6940,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_cancelled_does_not_push_toast() {
-        let body = handler_body("            Message::NativeOpenFileCancelled =>");
+        let body = handler_body("            Message::Window(WindowMsg::NativeOpenFileCancelled) =>");
         assert!(
             !body.contains("notifications.push"),
             "NativeOpenFileCancelled must not push any toast (user cancelled the dialog)"
@@ -7251,7 +6949,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_cancelled_returns_task_none() {
-        let body = handler_body("            Message::NativeOpenFileCancelled =>");
+        let body = handler_body("            Message::Window(WindowMsg::NativeOpenFileCancelled) =>");
         assert!(
             body.contains("Task::none()"),
             "NativeOpenFileCancelled must return Task::none()"
@@ -7262,7 +6960,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_apply_validates_against_data_state() {
-        let body = handler_body("            Message::NativeOpenFileApply { json, path } =>");
+        let body = handler_body("            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>");
         assert!(
             body.contains("serde_json::from_str::<data::State>"),
             "NativeOpenFileApply must validate the JSON as data::State before overwriting"
@@ -7275,14 +6973,14 @@ mod native_menu_handler_tests {
         // It collects window specs and dispatches NativeOpenFilePendingCheck so
         // the dirty comparison uses real window data (avoiding false positives).
         // write_json_to_file + restart now live in NativeOpenFilePendingCheck.
-        let apply_body = handler_body("            Message::NativeOpenFileApply { json, path } =>");
+        let apply_body = handler_body("            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>");
         assert!(
             apply_body.contains("NativeOpenFilePendingCheck"),
             "NativeOpenFileApply valid JSON branch must dispatch NativeOpenFilePendingCheck (F4 two-step fix)"
         );
 
         let check_body = handler_body(
-            "            Message::NativeOpenFilePendingCheck { json, path, windows } =>",
+            "            Message::Window(WindowMsg::NativeOpenFilePendingCheck { json, path, windows }) =>",
         );
         assert!(
             check_body.contains("data::write_json_to_file"),
@@ -7298,7 +6996,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_file_apply_invalid_json_pushes_error_toast() {
-        let body = handler_body("            Message::NativeOpenFileApply { json, path } =>");
+        let body = handler_body("            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>");
         assert!(
             body.contains("無効な設定ファイルです"),
             "NativeOpenFileApply invalid JSON branch must push '無効な設定ファイルです' error toast"
@@ -7309,7 +7007,7 @@ mod native_menu_handler_tests {
     fn open_file_apply_invalid_json_does_not_restart() {
         // Verify the Err(_) branch returns Task::none() and does NOT call restart.
         // Locate the Err arm within the handler body.
-        let handler = handler_body("            Message::NativeOpenFileApply { json, path } =>");
+        let handler = handler_body("            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>");
         let err_arm_start = handler
             .find("Err(e) =>")
             .expect("NativeOpenFileApply must have an Err arm for invalid JSON");
@@ -7383,9 +7081,9 @@ mod native_menu_handler_tests {
     fn save_as_with_specs_delegates_to_build_state_json() {
         // Use the indented match-arm prefix so the enum definition is skipped.
         // Match the handler arm exactly (including field names + `=>`) so inner
-        // closure constructions like `Message::NativeSaveAsWithSpecs { path: path.clone(), ... }`
+        // closure constructions like `Message::Window(WindowMsg::NativeSaveAsWithSpecs { path: path.clone(), ... })`
         // do not produce a false match.
-        let body = handler_body("            Message::NativeSaveAsWithSpecs { path, windows } =>");
+        let body = handler_body("            Message::Window(WindowMsg::NativeSaveAsWithSpecs { path, windows }) =>");
         assert!(
             body.contains("build_state_json("),
             "NativeSaveAsWithSpecs handler must call build_state_json — same serialisation path as save_state_to_disk"
@@ -7400,7 +7098,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn save_and_exit_checks_result_before_exiting() {
-        let body = handler_body("            Message::SaveAndExit =>");
+        let body = handler_body("            Message::Window(WindowMsg::SaveAndExit) =>");
         // BC-5: save result must be checked; iced::exit() must NOT be called unconditionally.
         // The impl uses write_json_to_saved_state_disk() and checks its bool return,
         // or guards on CURRENT_PATH write success — verify the pattern is present.
@@ -7423,7 +7121,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn save_and_open_file_aborts_on_named_doc_write_failure() {
-        let body = handler_body("            Message::SaveAndOpenFile =>");
+        let body = handler_body("            Message::Window(WindowMsg::SaveAndOpenFile) =>");
         // Handler must write to named doc and handle failure.
         assert!(
             body.contains("std::fs::write("),
@@ -7448,7 +7146,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn exit_requested_guards_existing_dialog() {
-        let body = handler_body("            Message::ExitRequested(windows) =>");
+        let body = handler_body("            Message::Window(WindowMsg::ExitRequested(windows)) =>");
         assert!(
             body.contains("confirm_dialog.is_some()"),
             "ExitRequested must guard against an existing confirm dialog — \
@@ -7475,7 +7173,7 @@ mod native_menu_handler_tests {
             .expect("NativeOpenFilePendingCheck must contain the HIGH-fix dialog guard comment");
         // Scan backward to the handler arm.
         let arm_pos = MAIN_RS[..marker_pos]
-            .rfind("Message::NativeOpenFilePendingCheck")
+            .rfind("WindowMsg::NativeOpenFilePendingCheck")
             .expect("guard marker must be inside NativeOpenFilePendingCheck handler");
         // Extract until the next top-level handler arm.
         let tail = &MAIN_RS[arm_pos..];
@@ -7543,7 +7241,7 @@ mod native_menu_handler_tests {
             "Action::OpenFile replay branch must register the `.py` file filter"
         );
         assert!(
-            body.contains("Message::NativeOpenStrategyPicked"),
+            body.contains("Message::Replay(ReplayMsg::NativeOpenStrategyPicked"),
             "Action::OpenFile replay branch must dispatch NativeOpenStrategyPicked \
              after the OS file dialog returns"
         );
@@ -7551,7 +7249,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn open_strategy_picked_some_sends_load_strategy_scenario() {
-        let body = handler_body("            Message::NativeOpenStrategyPicked(picked) =>");
+        let body = handler_body("            Message::Replay(ReplayMsg::NativeOpenStrategyPicked(picked)) =>");
         // live 分岐: live_strategy_form_modal を設定する
         assert!(
             body.contains("AppMode::Live"),
@@ -7579,7 +7277,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn lg11_native_open_strategy_picked_live_sets_modal() {
-        let body = handler_body("            Message::NativeOpenStrategyPicked(picked) =>");
+        let body = handler_body("            Message::Replay(ReplayMsg::NativeOpenStrategyPicked(picked)) =>");
         assert!(
             body.contains("live_strategy_form_modal"),
             "NativeOpenStrategyPicked live branch must set live_strategy_form_modal"
@@ -7590,8 +7288,8 @@ mod native_menu_handler_tests {
     fn lg12_engine_started_live_generates_live_strategy_started() {
         let body = handler_body("        EngineEvent::EngineStarted");
         assert!(
-            body.contains("LiveStrategyStarted"),
-            "EngineStarted must generate LiveStrategyStarted in live mode"
+            body.contains("ReplayMsg::LiveStarted"),
+            "EngineStarted must generate ReplayMsg::LiveStarted in live mode"
         );
     }
 
@@ -7599,8 +7297,8 @@ mod native_menu_handler_tests {
     fn lg13_engine_stopped_live_generates_live_engine_stopped_event() {
         let body = handler_body("        EngineEvent::EngineStopped");
         assert!(
-            body.contains("LiveEngineStoppedEvent"),
-            "EngineStopped must generate LiveEngineStoppedEvent in live mode"
+            body.contains("ReplayMsg::LiveStopped"),
+            "EngineStopped must generate ReplayMsg::LiveStopped in live mode"
         );
     }
 
@@ -7612,7 +7310,7 @@ mod native_menu_handler_tests {
         .unwrap();
         // LiveEngineStoppedEvent ハンドラがログ出力とガード条件を持つことを確認
         let body = {
-            let arm_prefix = "            Message::LiveEngineStoppedEvent { strategy_id } =>";
+            let arm_prefix = "            Message::Replay(ReplayMsg::LiveStopped { strategy_id }) =>";
             let start = src
                 .find(arm_prefix)
                 .unwrap_or_else(|| panic!("handler arm not found: {arm_prefix}"));
@@ -7635,7 +7333,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn lg15_stop_live_strategy_sends_stop_engine() {
-        let body = handler_body("            Message::StopLiveStrategy =>");
+        let body = handler_body("            Message::Replay(ReplayMsg::StopLiveStrategy) =>");
         assert!(
             body.contains("Command::StopEngine"),
             "StopLiveStrategy must send Command::StopEngine"
@@ -7645,7 +7343,7 @@ mod native_menu_handler_tests {
     #[test]
     fn strategy_scenario_loaded_event_prefills_modal() {
         let body =
-            handler_body("            Message::StrategyScenarioLoadedEvent { path, scenario } =>");
+            handler_body("            Message::Replay(ReplayMsg::ScenarioLoaded { path, scenario }) =>");
         assert!(
             body.contains("prefill_from_scenario"),
             "StrategyScenarioLoadedEvent must call prefill_from_scenario when scenario is Some"
@@ -7662,7 +7360,7 @@ mod native_menu_handler_tests {
 
     #[test]
     fn strategy_scenario_load_failed_event_pushes_toast_only() {
-        let body = handler_body("            Message::StrategyScenarioLoadFailedEvent {");
+        let body = handler_body("            Message::Replay(ReplayMsg::ScenarioLoadFailed {");
         assert!(
             body.contains("notifications.push"),
             "StrategyScenarioLoadFailedEvent must surface the error via a toast"
@@ -7866,7 +7564,7 @@ mod mode_switch_engine_busy_routing_tests {
     fn mode_switch_stop_busy_message_exists() {
         assert!(
             MAIN_RS.contains("ModeSwitchStopBusy"),
-            "Message::ModeSwitchStopBusy must exist — it handles StopReplay EngineBusy \
+            "Message::Window(WindowMsg::ModeSwitchStopBusy) must exist — it handles StopReplay EngineBusy \
              by sending ForceStopReplay immediately instead of aborting the mode switch"
         );
     }

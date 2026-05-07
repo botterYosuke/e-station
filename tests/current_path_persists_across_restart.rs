@@ -100,7 +100,7 @@ fn open_file_apply_sets_current_path() {
     let src = read_main();
 
     // NativeOpenFileApply must dispatch NativeOpenFilePendingCheck.
-    let apply_prefix = "            Message::NativeOpenFileApply { json, path } =>";
+    let apply_prefix = "            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>";
     let apply_start = src
         .find(apply_prefix)
         .expect("NativeOpenFileApply handler must exist");
@@ -119,7 +119,7 @@ fn open_file_apply_sets_current_path() {
     // rustfmt may reformat the struct pattern across multiple lines, so search
     // for the newline-prefixed match arm (12-space indent, not a deeper nested
     // construction site with 28 spaces).
-    let check_needle = "\n            Message::NativeOpenFilePendingCheck {";
+    let check_needle = "\n            Message::Window(WindowMsg::NativeOpenFilePendingCheck {";
     let check_start = src
         .find(check_needle)
         .map(|i| i + 1) // skip the leading '\n' so the slice starts at the arm
@@ -151,8 +151,8 @@ fn save_as_with_specs_sets_current_path() {
 
     // NativeSaveAsWithSpecs must dispatch NativeSaveComplete (via Task::perform).
     // Use a newline-prefixed, 12-space-indented prefix so the enum definition
-    // (which also starts with "Message::NativeSaveAsWithSpecs {") is skipped.
-    let arm_needle = "\n            Message::NativeSaveAsWithSpecs {";
+    // (which also starts with "Message::Window(WindowMsg::NativeSaveAsWithSpecs {") is skipped.
+    let arm_needle = "\n            Message::Window(WindowMsg::NativeSaveAsWithSpecs {";
     let start = src
         .find(arm_needle)
         .map(|i| i + 1) // skip leading '\n'
@@ -172,7 +172,7 @@ fn save_as_with_specs_sets_current_path() {
     // NativeSaveComplete is where CURRENT_PATH is actually written.
     // Search for the match arm at 12-space indentation (not the Task::perform
     // construction site at deeper indentation).
-    let complete_needle = "\n            Message::NativeSaveComplete {";
+    let complete_needle = "\n            Message::Window(WindowMsg::NativeSaveComplete {";
     let complete_start = src
         .find(complete_needle)
         .map(|i| i + 1) // skip the leading '\n'
@@ -198,7 +198,7 @@ fn save_as_with_specs_sets_current_path() {
 fn save_as_with_specs_double_writes_a3() {
     let src = read_main();
     // Use newline-prefixed prefix to skip the enum definition and find the match arm.
-    let arm_needle = "\n            Message::NativeSaveAsWithSpecs {";
+    let arm_needle = "\n            Message::Window(WindowMsg::NativeSaveAsWithSpecs {";
     let start = src
         .find(arm_needle)
         .map(|i| i + 1) // skip leading '\n'

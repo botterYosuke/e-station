@@ -66,8 +66,8 @@ fn dispatcher_routes_replay_data_loaded_to_message() {
          will never be called and the replay GUI will stay empty)."
     );
     assert!(
-        body.contains("Message::ReplayDataLoaded"),
-        "ReplayDataLoaded arm does not yield `Message::ReplayDataLoaded` — \
+        body.contains("Message::Replay(ReplayMsg::DataLoaded"),
+        "ReplayDataLoaded arm does not yield `Message::Replay(ReplayMsg::DataLoaded` — \
          Flowsurface::update() will not be able to invoke \
          Dashboard::auto_generate_replay_panes."
     );
