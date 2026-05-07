@@ -1108,3 +1108,62 @@ uv run pytest python/tests/test_kabusapi_rest.py python/tests/test_kabu_server_o
 uv run pytest python/tests/ -q --tb=short  → 2126 passed, 5 skipped
 ```
 - 本番口座残高アラート・自動損切り（戦略責任の領域、AGENTS.md の「ユーザー戦略は自己責任」方針に沿う）
+
+---
+
+## R14 レビュー反映 (2026-05-07, Phase 4 R1)
+
+3 エージェント並列（rust-reviewer / silent-failure-hunter / general-purpose）で CRITICAL 0 / HIGH 3 / MEDIUM 8 / LOW 3 を検出・修正。
+
+### HIGH-1: `KABU_IS_PRODUCTION` が VenueError/VenueLoginStarted/VenueLoginCancelled で false リセットされない
+`src/main.rs` の 3 イベントアームを OR パターンに統合し `if venue == KABU_STATION_VENUE_NAME` ブロックで `KABU_IS_PRODUCTION.store(false, Release)` を追加。回帰テスト 3 件追加。
+
+### HIGH-2: `RecvError::Lagged` 時の `KABU_IS_PRODUCTION` リセット欠如
+Lagged アームに `false` store + warn ログ追加。回帰テスト 1 件追加。
+
+### HIGH-3: `KABU_IS_PRODUCTION` を書き換えるテスト 2 件が並列競合 (flaky)
+`cache_load_store_round_trips` と `bridge_seeds_is_production_from_handshake_capabilities` を `atomic_store_load_and_seeding` 1 関数に統合。
+
+### MED-A: URL lint に `/kabusapi/token` 追加
+### MED-B: `guard_prod_url` mock 呼出 assert テスト追加 (`test_send_order_invokes_guard_prod_url`)
+### MED-C: `is_production_url()` が `127.0.0.1:18080` を見逃す → `or "127.0.0.1:18080" in url` 追加
+### MED-D: `test_schema_minor_is_20_after_p4_3` に `@pytest.mark.demo_kabu` 付与
+### MED-E: `architecture.md §8` capabilities JSON に `"is_production": false` 追記
+### MED-F: `runbook.md §6` の "暫定 4002013" を P4-7 解決済み内容に更新
+### MED-G: `_startup_kabu_station` docstring を Phase 4 実態に合わせて更新
+### MED-H: `kabu_chip_prod_style()` に `#[must_use]` 追加
+
+### 検証結果 (R14)
+```
+cargo fmt --check  → OK
+cargo check --workspace  → 0 errors
+cargo clippy --workspace -- -D warnings  → 0 warnings
+cargo test --workspace  → 全件 pass
+uv run pytest python/tests/ -q --tb=no  → 2126 passed, 5 skipped
+uv run pytest -m demo_kabu ...  → 97 passed, 3 deselected
+```
+
+---
+
+## R15 レビュー反映 (2026-05-07, Phase 4 R2)
+
+R14 修正後のサニティチェックで MEDIUM 2 / LOW 1 を追加修正。
+
+### MEDIUM R2-A: `spawn_venue_ready_bridge_on` の `KABU_IS_PRODUCTION` シードが `VENUE_READY_CACHE` 未初期化時にスキップされる
+シード処理を `VENUE_READY_CACHE` の `match` ガードより前に移動。本番パスでは問題なかったが、テストコードから直接呼ばれた場合の silent no-seed を防止。
+
+### MEDIUM R2-B: URL lint 正規表現が `127.0.0.1:18080` リテラルを検出しない
+`kabu-mock.yml` の lint PATTERN を `(localhost|127\.0\.0\.1):1808[01]` に拡張（MED-C の `is_production_url()` 変更との整合）。
+
+### LOW R2-C: `test_send_order_invokes_guard_prod_url` に `@pytest.mark.demo_kabu` の二重付与
+ファイルレベル `pytestmark` で全テストに適用済みのため個別デコレータを削除。
+
+### 検証結果 (R15)
+```
+cargo fmt --check  → OK
+cargo check --workspace  → 0 errors
+cargo test --workspace  → 全件 pass
+uv run pytest python/tests/ -q --tb=no  → 2126 passed, 5 skipped
+```
+
+R2 サニティチェック (silent-failure-hunter): **MEDIUM+ 0 件。収束。**
