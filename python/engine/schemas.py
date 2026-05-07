@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 18
+SCHEMA_MINOR: int = 19
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across

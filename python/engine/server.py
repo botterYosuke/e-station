@@ -45,7 +45,17 @@ from engine.exchanges.tachibana_login_flow import (
     _MSG_LOGIN_FAILED,
 )
 from engine.exchanges.kabusapi import KabuStationVenue
-from engine.exchanges.kabusapi_auth import KabuConnectionError as KabuConnectionError, KabuLoginCancelledError
+from engine.exchanges.kabusapi_url import resolve_kabu_env
+from engine.exchanges.kabusapi_auth import (
+    KabuApiError,
+    KabuConnectionError as KabuConnectionError,
+    KabuLoginCancelledError,
+    KabuRateLimitError,
+    KabuTradeCancelledError,
+    KabuTradeLockedOutError,
+    KabuTradePasswordInvalidError,
+    KabuTokenExpiredError,
+)
 from engine.exchanges.binance import BinanceWorker
 from engine.exchanges.bybit import BybitWorker
 from engine.exchanges.hyperliquid import HyperliquidWorker
@@ -311,6 +321,7 @@ class DataEngineServer:
         *,
         dev_tachibana_login_allowed: bool = False,
         dev_kabu_login_allowed: bool = False,
+        dev_kabu_trade_password_allowed: bool = False,
         cache_dir: Path | None = None,
         config_dir: Path | None = None,
         tachibana_is_demo: bool = True,
@@ -320,6 +331,7 @@ class DataEngineServer:
         self._token = token
         self._dev_tachibana_login_allowed = dev_tachibana_login_allowed
         self._dev_kabu_login_allowed = dev_kabu_login_allowed
+        self._dev_kabu_trade_password_allowed = dev_kabu_trade_password_allowed
         # B3: cache_dir is plumbed from __main__.py (T4 stdin payload). It
         # falls back to a per-user default so dev mode (`uv run python -m
         # engine --port ... --token ...`) keeps working without an explicit
@@ -411,6 +423,7 @@ class DataEngineServer:
         self._kabu_venue: KabuStationVenue | None = None
         self._kabu_login_inflight = asyncio.Lock()
         self._kabu_startup_task: asyncio.Task | None = None
+        self._kabu_fill_poller_task: asyncio.Task | None = None  # [H-1]
         # VenueReady を emit した venue 名。None = 未接続 / "tachibana" / "kabu_station"。
         # StartEngine(engine="Live") の venue guard に使う。
         self._connected_venue: str | None = None
@@ -1426,9 +1439,12 @@ class DataEngineServer:
         if not self._check_live_state("SubmitOrder", LiveState.CONNECTED, ws=ws):
             return
 
-        # N3.C: 発注経路は "tachibana" のみ ("replay" は上のブランチで処理済み)
+        # N3.C: 発注経路は "tachibana" / "kabu_station" ("replay" は上のブランチで処理済み)
         # 暗号資産 venue は自身のデータワーカーを持つが、発注 IPC 経路はサポートしない
-        if venue != "tachibana":
+        if venue == "kabu_station":
+            await self._do_submit_order_kabu(msg, ws=ws)
+            return
+        elif venue != "tachibana":
             self._outbox.append(
                 {
                     "event": "Error",
@@ -1754,6 +1770,354 @@ class DataEngineServer:
         else:
             self._session_holder.on_submit_success()
 
+    def _clear_kabu_session(self) -> None:
+        """トークン期限切れ・接続断時に kabu セッション状態をリセットする。"""
+        if self._kabu_venue is not None:
+            self._kabu_venue.clear()
+        self._kabu_venue = None  # [M-2] 古い venue 参照が残らないようにする
+        # [H-1] fill poller タスクをキャンセル
+        if self._kabu_fill_poller_task is not None and not self._kabu_fill_poller_task.done():
+            self._kabu_fill_poller_task.cancel()
+        self._kabu_fill_poller_task = None
+        self._connected_venue = None
+        self._live_state = LiveState.DISCONNECTED
+
+    async def _do_submit_order_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """kabu_station 発注経路 (Phase 2: KabuStationStock, 検証環境のみ)。"""
+        import time
+
+        req_id = msg.get("request_id", "")
+
+        # 接続チェック
+        if self._kabu_venue is None:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": msg.get("order", {}).get("client_order_id", ""),
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "KabuStation venue is not connected",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # lockout チェック
+        if self._kabu_venue.is_trade_locked_out():
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": msg.get("order", {}).get("client_order_id", ""),
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out due to repeated failures",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        raw_order = msg.get("order", {})
+        try:
+            order = SubmitOrderRequest.model_validate(raw_order)
+        except Exception as exc:
+            # [M-3] tachibana 対称化: Error → OrderRejected{VALIDATION_ERROR}
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": raw_order.get("client_order_id", ""),
+                "reason_code": "VALIDATION_ERROR",
+                "reason_text": str(exc),
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # Phase 2 は KabuStationStock のみ対応。先物・OP は Phase 3 で配線予定
+        # instrument_id 形式は "<symbol>.KabuStation <ExchangeKind>"
+        instrument_id = order.instrument_id
+        if instrument_id.endswith(".KabuStation Future") or instrument_id.endswith(".KabuStation Option"):
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "UNSUPPORTED_INSTRUMENT",
+                "reason_text": "Future/Option instruments are not supported in Phase 2",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # instrument_id から銘柄コードを抽出 ("9433.KabuStation Stock" → "9433")
+        symbol = instrument_id.split(".")[0]
+        # exchange=1 固定 (TSE、Phase 2 は KabuStationStock のみ)
+        exchange = 1
+
+        side = "buy" if order.order_side == "BUY" else "sell"
+
+        # [C-1] FrontOrderType: 10=成行, 20=指値 — OpenAPI RequestSendOrder 参照
+        if order.order_type == "MARKET":
+            send_kwargs: dict = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "side": side,
+                "qty": int(float(order.quantity)),
+                "front_order_type": 10,  # 成行
+                "price": 0,
+            }
+        else:  # LIMIT
+            if order.price is None:
+                self._outbox.append({
+                    "event": "OrderRejected",
+                    "client_order_id": order.client_order_id,
+                    "reason_code": "INVALID_PRICE",
+                    "reason_text": "LIMIT order requires price",
+                    "ts_event_ms": int(time.time() * 1000),
+                })
+                return
+            send_kwargs = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "side": side,
+                "qty": int(float(order.quantity)),
+                "front_order_type": 20,  # 指値
+                "price": float(order.price),
+            }
+
+        # [M-1] OrderSubmitted を API 呼び出し前に発火（nautilus 流 2 段イベント、tachibana と対称）
+        self._outbox.append({
+            "event": "OrderSubmitted",
+            "client_order_id": order.client_order_id,
+            "ts_event_ms": int(time.time() * 1000),
+        })
+
+        try:
+            result = await self._kabu_venue.send_order(**send_kwargs)
+        except KabuTradePasswordInvalidError:
+            # on_invalid() は KabuOrderClient.send_order() 内で既に呼ばれている (A-1)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "TRADE_PASSWORD_INVALID",
+                "reason_text": "Trade password is invalid",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeLockedOutError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeCancelledError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "TRADE_PASSWORD_CANCELLED",
+                "reason_text": "Trade password entry was cancelled",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTokenExpiredError:
+            # NOT_LOGGED_IN ≠ CONNECTION_ERROR: トークン期限切れは「再ログインで復旧」、
+            # ConnectionError は「kabuStation 本体または網路の問題」を意味する。意図的に分離。
+            log.warning("_do_submit_order_kabu: KabuTokenExpiredError for cid=%s", order.client_order_id)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "kabu token expired or not logged in",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuConnectionError as exc:
+            log.error("_do_submit_order_kabu: KabuConnectionError for cid=%s: %s", order.client_order_id, exc)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "CONNECTION_ERROR",  # [H-2] NOT_LOGGED_IN から変更
+                "reason_text": "kabu connection lost",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuRateLimitError:
+            log.warning("kabu sendorder: rate limited, request_id=%s", req_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "RATE_LIMITED",
+                "reason_text": "kabu API rate limit exceeded",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuApiError as exc:
+            log.error("_do_submit_order_kabu: KabuApiError for cid=%s: code=%s", order.client_order_id, exc.code)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "VENUE_REJECTED",
+                "reason_text": str(exc),
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except Exception:
+            log.exception("_do_submit_order_kabu: unexpected error for cid=%s", order.client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "INTERNAL_ERROR",
+                "reason_text": "Internal error during kabu order submission",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        order_id = result.get("OrderID", "")
+        if not order_id:
+            log.error(
+                "_do_submit_order_kabu: OrderID missing in response for cid=%s",
+                order.client_order_id,
+            )
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": order.client_order_id,
+                "reason_code": "MISSING_ORDER_ID",
+                "reason_text": "API response did not contain OrderID",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # [C-3] venue_order_id → client_order_id のマッピングを記録（fill 受信時の逆引き用）
+        self._venue_to_client[order_id] = order.client_order_id
+        self._outbox.append({
+            "event": "OrderAccepted",
+            "client_order_id": order.client_order_id,
+            "venue_order_id": order_id,
+            "ts_event_ms": int(time.time() * 1000),
+        })
+
+    async def _do_cancel_order_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """kabu_station 取消経路 (Phase 2: KabuStationStock, 検証環境のみ)。"""
+        import time
+
+        client_order_id = msg.get("client_order_id", "")
+        venue_order_id = msg.get("venue_order_id", "")
+
+        if not venue_order_id:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "VALIDATION_ERROR",
+                "reason_text": "venue_order_id is required for CancelOrder",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # 接続チェック
+        if self._kabu_venue is None:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "KabuStation venue is not connected",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        # lockout チェック
+        if self._kabu_venue.is_trade_locked_out():
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out due to repeated failures",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        try:
+            await self._kabu_venue.cancel_order(order_id=venue_order_id)
+        except KabuTradePasswordInvalidError:
+            # on_invalid() は KabuOrderClient.cancel_order() 内で既に呼ばれている (A-1)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_INVALID",
+                "reason_text": "Trade password is invalid",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeLockedOutError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_LOCKED",
+                "reason_text": "Trade password is locked out",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTradeCancelledError:
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "TRADE_PASSWORD_CANCELLED",
+                "reason_text": "Trade password entry was cancelled",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuTokenExpiredError:
+            log.warning("_do_cancel_order_kabu: KabuTokenExpiredError for cid=%s", client_order_id)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "NOT_LOGGED_IN",
+                "reason_text": "kabu token expired or not logged in",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuConnectionError as exc:
+            log.error("_do_cancel_order_kabu: KabuConnectionError for cid=%s: %s", client_order_id, exc)
+            self._clear_kabu_session()
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "CONNECTION_ERROR",  # [H-2] NOT_LOGGED_IN から変更
+                "reason_text": "kabu connection lost",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuRateLimitError:
+            log.warning("kabu cancelorder: rate limited, request_id=%s", client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "RATE_LIMITED",
+                "reason_text": "kabu API rate limit exceeded",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except KabuApiError as exc:
+            log.error("_do_cancel_order_kabu: KabuApiError for cid=%s: code=%s", client_order_id, exc.code)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "VENUE_REJECTED",
+                "reason_text": str(exc),
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+        except Exception:
+            log.exception("_do_cancel_order_kabu: unexpected error for cid=%s", client_order_id)
+            self._outbox.append({
+                "event": "OrderRejected",
+                "client_order_id": client_order_id,
+                "reason_code": "INTERNAL_ERROR",
+                "reason_text": "Internal error during kabu order cancellation",
+                "ts_event_ms": int(time.time() * 1000),
+            })
+            return
+
+        self._outbox.append({
+            "event": "OrderCancelled",
+            "client_order_id": client_order_id,
+            "venue_order_id": venue_order_id,
+            "ts_event_ms": int(time.time() * 1000),
+        })
+
     async def _do_cancel_order(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         import time
 
@@ -1766,11 +2130,14 @@ class DataEngineServer:
         if not self._check_live_state("CancelOrder", LiveState.CONNECTED, ws=ws):
             return
 
-        # N3.C: 発注 IPC 経路は tachibana のみサポート。
+        # N3.C: 発注 IPC 経路は tachibana / kabu_station をサポート。
         # "hyperliquid" / "replay" / その他 venue はここで拒否する。
         # replay 注文のキャンセル/訂正は N1.15 の UI ガードで事前に抑止されているため
         # IPC に届くことは通常ない。
-        if venue != "tachibana":
+        if venue == "kabu_station":
+            await self._do_cancel_order_kabu(msg, ws=ws)
+            return
+        elif venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
                 "request_id": req_id,
@@ -2970,9 +3337,19 @@ class DataEngineServer:
                 })
                 try:
                     if self._kabu_venue is None:
+                        # P4-2: env は KABU_ALLOW_PROD=1 + KABU_ENV=prod の二重判定で解決。
+                        # prod では dev_login / dev_trade_password を強制 False にして
+                        # 本番口座への誤発注経路を最小化する（release ガードの第二段）。
+                        kabu_env = resolve_kabu_env()
+                        is_prod = kabu_env == "prod"
                         self._kabu_venue = KabuStationVenue(
-                            env="verify",
-                            dev_login_allowed=self._dev_kabu_login_allowed,
+                            env=kabu_env,
+                            dev_login_allowed=(
+                                self._dev_kabu_login_allowed and not is_prod
+                            ),
+                            dev_trade_password_allowed=(
+                                self._dev_kabu_trade_password_allowed and not is_prod
+                            ),
                         )
                     await self._kabu_venue.startup_login()
                 except KabuLoginCancelledError:
@@ -3010,6 +3387,11 @@ class DataEngineServer:
                 self._live_state = LiveState.CONNECTED
                 self._connected_venue = "kabu_station"
                 log.info("KabuStation session established successfully")
+                # [H-1] fill poller バックグラウンドタスクを起動
+                if self._kabu_fill_poller_task is None or self._kabu_fill_poller_task.done():
+                    self._kabu_fill_poller_task = asyncio.create_task(
+                        self._kabu_fill_poller()
+                    )
                 self._emit({
                     "event": "VenueReady",
                     "venue": "kabu_station",
@@ -3019,6 +3401,32 @@ class DataEngineServer:
             # MEDIUM-C: 完了後（成功・キャンセル・エラー全パス）に stale 参照をリセットする。
             # disconnect 時の cleanup が done タスクに対して cancel を試みないよう None にする。
             self._kabu_startup_task = None
+
+    async def _kabu_fill_poller(self) -> None:
+        """kabu venue の約定 polling ループ（30 秒間隔）。[H-1]
+
+        VenueReady 後にバックグラウンドタスクとして起動される。
+        _clear_kabu_session() でキャンセルされる。
+        # TODO Phase 4: emit OrderFilled IPC event（現状はログのみ）
+        """
+        _POLL_INTERVAL = 30.0
+        try:
+            while True:
+                await asyncio.sleep(_POLL_INTERVAL)
+                if self._kabu_venue is None:
+                    break
+                try:
+                    fills = await self._kabu_venue.poll_fills()
+                    for fill in fills:
+                        log.info("kabu fill: %s", fill)
+                        # TODO Phase 4: emit OrderFilled IPC event
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.error("_kabu_fill_poller: poll_fills error: %s", exc)
+        except asyncio.CancelledError:
+            log.info("_kabu_fill_poller: cancelled")
+            raise
 
     async def _run_event_loop(self, url: str) -> None:
         """EVENT WebSocket に接続して EC 約定通知の受信ループを実行する（Phase O2）。

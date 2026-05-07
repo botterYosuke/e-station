@@ -59,6 +59,14 @@ class KabuTradeLockedOutError(KabuApiError):
     """取引パスワード 3 回連続誤入力による lockout 中。"""
 
 
+class KabuTradePasswordInvalidError(KabuApiError):
+    """取引パスワードが誤っている (Code=4002013 など)。
+
+    NOTE: open-questions.md — 正確なエラーコードは kabu API ドキュメント §4.2 で要確認。
+    現時点では 4002013 をプレースホルダーとして使用する。
+    """
+
+
 # ---------------------------------------------------------------------------
 # 取引パスワード保持
 # ---------------------------------------------------------------------------
@@ -120,6 +128,7 @@ class KabuTradePasswordHolder:
         t = now if now is not None else self._now()
         if t >= self._lockout_until:
             self._lockout_until = None
+            self._invalid_count = 0  # [H-3] 解除後は猶予 max_retries 回を再付与
             return False
         return True
 
@@ -131,7 +140,7 @@ class KabuTradePasswordHolder:
         return self._password
 
     def clear(self) -> None:
-        """パスワードをクリアする。セッション終了・エラー時に呼ぶ。"""
+        """パスワードをクリアする。lockout 状態・invalid カウントは意図的に保持する（TachibanaSessionHolder 同設計）。"""
         self._password = None
         self._last_use_time = None
 
@@ -140,6 +149,7 @@ class KabuTradePasswordHolder:
         Returns True ならば lockout 状態に入った（以降の発注をブロックすべき）。
         """
         self._password = None
+        self._last_use_time = None
         self._invalid_count += 1
         if self._invalid_count >= self._max_retries:
             t = now if now is not None else self._now()
@@ -150,6 +160,10 @@ class KabuTradePasswordHolder:
     def on_submit_success(self) -> None:
         """発注成功時に invalid_count をリセット。"""
         self._invalid_count = 0
+
+    def __repr__(self) -> str:
+        masked = "***" if self._password else "None"
+        return f"KabuTradePasswordHolder(password={masked}, invalid_count={self._invalid_count})"
 
 
 # ---------------------------------------------------------------------------
@@ -165,15 +179,22 @@ async def fetch_token(api_password: str, *, env: KabuEnv) -> str:
     url = endpoint("token", env=env)
     payload = {"APIPassword": api_password}
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, json=payload)
     except httpx.ConnectError as exc:
         raise KabuConnectionError(0, str(exc)) from exc
 
-    body = resp.json()
+    try:
+        body = resp.json()
+    except Exception as exc:
+        logger.error("kabu /token: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+        raise KabuConnectionError(resp.status_code, f"token non-JSON response: {exc}") from exc
     check_response(body, resp.status_code)
 
-    token: str = body["Token"]
+    token: str = body.get("Token") or ""
+    if not token:
+        logger.error("kabu /token: Token key missing in 200 response: %s", body)
+        raise KabuConnectionError(0, "Token key missing in /token response")
     masked = f"***{token[-4:]}" if len(token) >= 4 else "***"
     logger.info("kabu /token: 200 OK, token=%s", masked)
     return token
@@ -198,6 +219,10 @@ def check_response(payload: Any, http_status: int) -> None:
     # 銘柄登録上限
     if code in (4002001, 4002008):
         raise KabuRegisterFullError(code, message)
+
+    # 取引パスワード誤り (NOTE: open-questions.md — 正確なコードは要確認)
+    if code == 4002013:
+        raise KabuTradePasswordInvalidError(code, message)
 
     # その他業務エラー
     if code != 0:

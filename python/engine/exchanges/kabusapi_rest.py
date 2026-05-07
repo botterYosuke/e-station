@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from engine.exchanges.kabusapi_auth import check_response
+from engine.exchanges.kabusapi_auth import KabuApiError, check_response
 from engine.exchanges.kabusapi_register import RegisterSet
 from engine.exchanges.kabusapi_ratelimit import InfoBucket, WalletBucket, TokenBucket
 from engine.exchanges.kabusapi_url import KabuEnv, endpoint, symbol_key
@@ -124,5 +124,98 @@ class KabuRestClient:
                 resp = await client.get(url, headers=self._headers())
 
         body = resp.json()
+        check_response(body, resp.status_code)
+        return body
+
+    async def fetch_wallet_future(self) -> dict[str, Any]:
+        """GET /wallet/future — 先物余力を取得する。"""
+        async with self._wallet_bucket:
+            url = endpoint("wallet/future", env=self._env)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=self._headers())
+
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu wallet/future: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"wallet/future non-JSON response: {exc}") from exc
+        check_response(body, resp.status_code)
+        return body
+
+    async def fetch_wallet_option(self) -> dict[str, Any]:
+        """GET /wallet/option — OP 余力を取得する。"""
+        async with self._wallet_bucket:
+            url = endpoint("wallet/option", env=self._env)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=self._headers())
+
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu wallet/option: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"wallet/option non-JSON response: {exc}") from exc
+        check_response(body, resp.status_code)
+        return body
+
+    async def fetch_symbolname_future(
+        self,
+        future_code: str,
+        deriv_month: int,
+    ) -> dict[str, Any]:
+        """GET /symbolname/future — 先物銘柄コードを取得する。
+
+        Args:
+            future_code: 先物コード (例: "NK225")
+            deriv_month: 限月 (yyyymm, 0=直近限月)
+        """
+        async with self._info_bucket:
+            url = endpoint("symbolname/future", env=self._env)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    url, headers=self._headers(),
+                    params={"FutureCode": future_code, "DerivMonth": deriv_month},
+                )
+
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu symbolname/future: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"symbolname/future non-JSON response: {exc}") from exc
+        check_response(body, resp.status_code)
+        return body
+
+    async def fetch_symbolname_option(
+        self,
+        option_code: str,
+        deriv_month: int,
+        put_or_call: str,
+        strike_price: int,
+    ) -> dict[str, Any]:
+        """GET /symbolname/option — OP 銘柄コードを取得する。
+
+        Args:
+            option_code: OP コード (例: "NK225op")
+            deriv_month: 限月 (yyyymm)
+            put_or_call: "C" or "P"
+            strike_price: 権利行使価格
+        """
+        async with self._info_bucket:
+            url = endpoint("symbolname/option", env=self._env)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    url, headers=self._headers(),
+                    params={
+                        "OptionCode": option_code,
+                        "DerivMonth": deriv_month,
+                        "PutOrCall": put_or_call,
+                        "StrikePrice": strike_price,
+                    },
+                )
+
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu symbolname/option: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"symbolname/option non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
         return body

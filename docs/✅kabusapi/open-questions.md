@@ -28,6 +28,8 @@ Phase 0 出口時点で未確定の事項をまとめる。解消次第、ここ
 - 発注時の取引パスワード収集 UI（tkinter subprocess 方式確定済み、UI 設計は Phase 2）✅ 確定
 - `OrderAmendFailed.original_cancelled` を `Option<bool>` 化（`None` = 取消結果不確定）
 
+| Q-P2-5 | 取引パスワード誤りのエラーコード | kabu API v1.5 §4.2 を確認し code を確定する | Phase 4（本番接続前）| **未確定**: 現在 4002013 をプレースホルダー使用 |
+
 ## Phase 2 設計決定済み
 
 | # | 論点 | 決定 |

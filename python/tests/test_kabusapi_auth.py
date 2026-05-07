@@ -6,6 +6,7 @@ from engine.exchanges.kabusapi_auth import (
     KabuTokenExpiredError,
     KabuRateLimitError,
     KabuRegisterFullError,
+    KabuTradePasswordHolder,
     fetch_token,
     check_response,
 )
@@ -65,3 +66,52 @@ async def test_fetch_token_401_raises_token_expired(httpx_mock: pytest_httpx.HTT
     )
     with pytest.raises(KabuTokenExpiredError):
         await fetch_token("wrong_password", env="verify")
+
+
+# ---------------------------------------------------------------------------
+# R2 review-fix M-3 / M-4: KabuTradePasswordHolder の単体テスト
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.demo_kabu
+def test_kabu_station_venue_is_trade_locked_out_after_3_invalids():
+    """KabuStationVenue.is_trade_locked_out() が 3 回連続失敗後 True を返す。"""
+    from engine.exchanges.kabusapi import KabuStationVenue
+
+    venue = KabuStationVenue(env="verify")
+    # 失敗前は False
+    assert venue.is_trade_locked_out() is False
+
+    # on_invalid を 3 回呼んで lockout
+    holder = venue._trade_password_holder
+    holder.set_password("dummy")
+    holder.on_invalid()
+    holder.on_invalid()
+    holder.on_invalid()
+
+    assert venue.is_trade_locked_out() is True
+
+
+@pytest.mark.demo_kabu
+def test_kabu_station_venue_is_trade_locked_out_false_before_lockout():
+    """lockout 前は is_trade_locked_out() が False を返す（負の不変条件）。"""
+    from engine.exchanges.kabusapi import KabuStationVenue
+
+    venue = KabuStationVenue(env="verify")
+    holder = venue._trade_password_holder
+    holder.set_password("dummy")
+    # 1 回 / 2 回失敗ではまだ lockout しない
+    holder.on_invalid()
+    assert venue.is_trade_locked_out() is False
+    holder.on_invalid()
+    assert venue.is_trade_locked_out() is False
+
+
+@pytest.mark.demo_kabu
+def test_on_invalid_clears_last_use_time():
+    """on_invalid() が _last_use_time を None にリセットする pin（R8 M-3 後退防止）。"""
+    holder = KabuTradePasswordHolder()
+    holder.set_password("dummy")
+    assert holder._last_use_time is not None
+    holder.on_invalid()
+    assert holder._last_use_time is None

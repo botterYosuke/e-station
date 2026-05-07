@@ -210,6 +210,8 @@ Python に渡す前に **Rust 側 IPC ハンドラ / pydantic バリデータで
 | `SESSION_EXPIRED` | 503 | `p_errno=2`（OrderSessionState=frozen 中の全 `/api/order/*` 拒否を含む） |
 | `REPLAY_MODE_ACTIVE` | 503 | `replay_mode == true` の間の全 `/api/order/*`（C-H4、Phase O0 必須） |
 | `RATE_LIMITED` | 429 | 同一 `(instrument_id, side, qty, price)` の N 秒/Y 回連打検知（C-M3） |
+| `UNSUPPORTED_INSTRUMENT` | 400 | Phase 2 で先物・OP の instrument_id が届いた場合の防御フェンス（kabu_station venue, Phase 3 配線完了まで） |
+| `CONNECTION_ERROR` | 503 | kabu_station venue で `KabuConnectionError`（kabuステーション本体プロセスへの接続不可）が発生した場合。token と FSM をリセットして再ログインを促す |
 | `MARKET_CLOSED` | 409 | 立花応答 `sResultCode` が時間外 |
 | `ORDER_GUARD_NOT_CONFIGURED` | 503 | ~~`OrderGuardConfig.enabled == false`（運用ガード設定が未投入のまま `/api/order/*` を叩いた）。Rust HTTP 層 (`src/api/order_api.rs`) が最前段で判定~~（Phase 8 で `OrderGuardConfig` ごと削除。GUI 発注は元から HTTP を経由しないため挙動変更なし） |
 | `QTY_LIMIT_EXCEEDED` | 400 | リクエスト `quantity` が `OrderGuardConfig.max_qty_per_order` を超過 |

@@ -21,7 +21,7 @@ jobs:
                   enable-cache: true
 
             - name: Run Python unit tests
-              run: uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana" -v --timeout=60
+              run: uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana and not demo_kabu" -v --timeout=60
 
     secret-scan:
         if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}

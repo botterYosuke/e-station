@@ -6,8 +6,8 @@
 | :--- | :--- | :--- |
 | Phase 0 | 計画フェーズ（本文書群） | 🔵 完了 |
 | Phase 1 | リードオンリー統合（検証環境のみ）| ✅ 完了 |
-| Phase 2 | 発注（検証環境のみ） | — |
-| Phase 3 | 先物・OP・市場細分化 | — |
+| Phase 2 | 発注（検証環境のみ） | ✅ 完了 |
+| Phase 3 | 先物・OP・市場細分化 | ✅ 完了 |
 | Phase 4 | 本番接続 | — |
 
 ## Phase 1 タスク詳細
@@ -196,6 +196,80 @@ debug env 自動ログイン経路。本体プロセス落ち（TCP refused）�
 
 ---
 
+## Phase 2 タスク詳細
+
+### P2-1 — KabuTradePasswordHolder
+
+**内容**: `kabusapi_auth.py` に `KabuTradePasswordHolder` クラスを追加。
+`TachibanaSessionHolder` と同じ設計（idle forget / lockout / ログマスク）。
+
+**追加エラー型**: `KabuTradeCancelledError` / `KabuTradeLockedOutError`
+
+**状態**: ✅ 完了
+
+---
+
+### P2-2 — kabusapi_trade_dialog.py
+
+**内容**: 取引パスワード収集 tkinter subprocess。stdout に `{"status":"ok","trade_password":"..."}` を返す。
+
+**状態**: ✅ 完了
+
+---
+
+### P2-3 — kabusapi_orders.py
+
+**内容**: `KabuOrderClient` — sendorder / cancelorder / poll_fills。
+
+**設計ポイント**:
+- `send_order()`: POST /sendorder、`async with order_bucket:`
+- `cancel_order()`: PUT /cancelorder、同じ order_bucket
+- `poll_fills()`: GET /orders、State=5 のみフィルタ
+- `_ensure_trade_password()`: 未保持時はダイアログ or `DEV_KABU_TRADE_PASSWORD` env
+- 買い Side = **"2"**（立花の "3" と混同禁止 — data-mapping.md §8）
+- 取引パスワードはリクエストボディにのみ使用、ログ出力禁止
+
+**状態**: ✅ 完了
+
+---
+
+### P2-4 — KabuStationVenue facade 拡張
+
+**内容**: `kabusapi.py` に `send_order()` / `cancel_order()` / `poll_fills()` 追加。
+`KabuOrderClient` を遅延構築（token 取得後に初期化、再ログイン時に invalidate）。
+
+**状態**: ✅ 完了
+
+---
+
+### P2-5 — kabusapi_rest.py クリーンアップ
+
+**内容**: Phase 2 制限コメント削除・未使用 import `KabuRegisterFullError` 削除。
+
+**状態**: ✅ 完了
+
+---
+
+### Phase 2 検証結果 (2026-05-07)
+
+```
+uv run pytest python/tests/test_kabusapi_orders.py -v   → 12 passed
+uv run pytest -m demo_kabu python/tests/test_kabusapi_*.py → 57 passed
+uv run pytest python/tests/ -q --tb=no                  → 2029 passed, 5 skipped
+```
+
+**新規ファイル**:
+- `python/engine/exchanges/kabusapi_orders.py`
+- `python/engine/exchanges/kabusapi_trade_dialog.py`
+- `python/tests/test_kabusapi_orders.py` (12 tests)
+
+**修正ファイル**:
+- `python/engine/exchanges/kabusapi_auth.py` — KabuTradePasswordHolder + 2 エラー型
+- `python/engine/exchanges/kabusapi.py` — send_order / cancel_order / poll_fills
+- `python/engine/exchanges/kabusapi_rest.py` — コメント・import クリーンアップ
+
+---
+
 ## タスクグラフ（依存関係）
 
 ```
@@ -223,8 +297,108 @@ K8.5 (CI): K2〜K7 完了後
 - Rust: `cargo test --workspace`（enum 網羅 match / schema_minor_kabu）
 - Python: `uv run pytest python/tests/test_kabusapi_*.py python/tests/test_live_session_kabu.py`
 - モック: `pytest-httpx` (HTTPXMock) + WebSocket mock
+
+---
+
+## R8 レビュー反映 (2026-05-07, Phase 2 R1)
+
+> **連番方針メモ**: R1〜R7 は Phase 1 のラウンド連番。R8 以降は Phase 2 のラウンド連番として再起動している（R8 = Phase 2 R1, R9 = Phase 2 R2）。混乱を避けるため見出しに Phase ラベルを併記する。
+
+
+### HIGH-1 (R1-new): `_spawn_trade_dialog()` タイムアウト追加
+`kabusapi_orders.py` の `_spawn_trade_dialog()` に `asyncio.wait_for(..., timeout=120.0)` を追加。タイムアウト時は `proc.kill()` + `KabuTradeCancelledError` を raise。
+
+### HIGH-2: `KabuRateLimitError` に専用 except ブランチ + RATE_LIMITED reason_code
+`server.py` の `_do_submit_order_kabu()` / `_do_cancel_order_kabu()` に `except KabuRateLimitError` ブランチを追加。`OrderRejected{RATE_LIMITED}` を emit。`kabusapi_auth` import に `KabuRateLimitError` 追加。
+
+### HIGH-3: `send_order_future()` / `send_order_option()` の `KabuTradePasswordHolder` 操作を除去
+先物・OP は `"Password"` フィールドを body に含まないため `_holder.on_invalid()` / `on_submit_success()` は不要。両メソッドから除去。
+
+### HIGH-4: `KabuStationVenue.is_trade_locked_out()` プロパティを公開
+`kabusapi.py` に `is_trade_locked_out()` を追加。`server.py` の `_trade_password_holder.is_locked_out()` 直接参照 2 箇所を `is_trade_locked_out()` に置換。
+
+### MEDIUM-1: `test_kabu_server_orders.py` 修正 + テスト 3 件追加
+- `_make_server()` に `_connected_venue = "kabu_station"` を追加
+- 既存テストの `mock_venue._trade_password_holder.is_locked_out` を `mock_venue.is_trade_locked_out` に置換
+- `test_server_submit_order_token_expired_clears_session` 追加（FSM リセット確認）
+- `test_server_submit_order_connection_error_clears_session` 追加（FSM リセット確認）
+- `test_server_submit_order_rate_limited_emits_rate_limited_reason_code` 追加
+
+### MEDIUM-2: `httpx.AsyncClient()` に `timeout=30.0` を追加
+`kabusapi_orders.py` の全 `httpx.AsyncClient()` 生成箇所（5 箇所）に `timeout=30.0` を追加。
+
+### MEDIUM-3: `on_invalid()` が `_last_use_time` をリセットしない
+`kabusapi_auth.py` の `KabuTradePasswordHolder.on_invalid()` に `self._last_use_time = None` を追加。lockout 後の状態が "idle forget" と区別可能になる。
+
+### MEDIUM-4: 先物・OP `instrument_id` の防御フェンスを追加
+`server.py` の `_do_submit_order_kabu()` に instrument_id チェックを追加。`"Future"` / `"Option"` を含む場合 `OrderRejected{UNSUPPORTED_INSTRUMENT}` を emit して早期リターン。
+
+### MEDIUM-5: `kabu-mock.yml` に `test_invariant_reason_code.py` を追加
+CI pytest コマンドに `python/tests/test_invariant_reason_code.py` を追加。
+
+### MEDIUM-6: `_side_to_kabu` の引数を `Literal["buy", "sell"]` に強化
+`kabusapi_orders.py` に `SideStr = Literal["buy", "sell"]` 型エイリアスを追加し `_side_to_kabu` の引数型を強化。
+
+### 検証結果 (R1-new)
+```
+cargo fmt --check  → OK（変更なし）
+cargo check --workspace  → Finished dev profile
+uv run pytest python/tests/test_kabusapi_orders.py python/tests/test_kabu_server_orders.py python/tests/test_invariant_reason_code.py python/tests/test_live_session_kabu.py python/tests/test_request_venue_login_state.py python/tests/test_kabusapi_auth.py -v  → 54 passed
+uv run pytest python/tests/ -q --tb=short  → 2061 passed, 5 skipped (pre-existing test_schema_minor_is_9 failure は対象外)
+```
 - CI: `.github/workflows/kabu-mock.yml` / `pytest -m demo_kabu`
 - 本物 kabuステーション: Windows 環境のみ、CI 不可
+
+---
+
+## R9 レビュー反映 (2026-05-07, Phase 2 R2)
+
+R8 (Phase 2 R1) サニティチェック後の追加レビュー指摘を TDD で修正。
+
+### HIGH-1 (R2): `_spawn_trade_dialog()` タイムアウト時 `proc.wait()` 不在
+`proc.kill()` 後にプロセス終了待ち `await proc.wait()` を追加。zombie プロセス回避。
+
+### HIGH-2 (R2): `test_invariant_reason_code.py` に `@pytest.mark.demo_kabu` 未付与
+全 3 テスト関数 (`test_canonical_codes_are_screaming_snake_case` / `test_all_reason_codes_in_source_are_canonical` / `test_all_reason_codes_in_source_are_screaming_snake_case`) に `@pytest.mark.demo_kabu` を付与。CI フィルタとの整合を確保。
+
+### HIGH-3 (R2): canonical reason_code 一覧に `UNSUPPORTED_INSTRUMENT` 未登録
+- `docs/✅order/spec.md §5.2` に `UNSUPPORTED_INSTRUMENT` 行を追加（HTTP 旧 400, Phase 2 防御フェンス）
+- `docs/✅python-data-engine/schemas/events.json` の `OrderRejected.reason_code` Known values に `UNSUPPORTED_INSTRUMENT` を追加
+
+### MEDIUM-1 (R2): R1 新規 3 テストに `mock_venue.clear` assert 不在
+- `test_server_submit_order_token_expired_clears_session` / `test_server_submit_order_connection_error_clears_session` に `mock_venue.clear.assert_called_once()` を追加
+- `test_server_submit_order_rate_limited_emits_rate_limited_reason_code` には `mock_venue.clear.assert_not_called()` を追加（負の不変条件 pin）
+
+### MEDIUM-2 (R2): `_do_cancel_order_kabu` の対応テスト 3 件追加
+- `test_server_cancel_order_token_expired_clears_session`
+- `test_server_cancel_order_connection_error_clears_session`
+- `test_server_cancel_order_rate_limited_emits_rate_limited_reason_code`
+
+### MEDIUM-3 (R2): `KabuStationVenue.is_trade_locked_out()` 単体テスト追加
+`test_kabusapi_auth.py` に lockout 状態 (3 連続 invalid) と非 lockout 状態の 2 ケースを追加。
+
+### MEDIUM-4 (R2): `on_invalid()` の `_last_use_time = None` pin テスト追加
+`test_on_invalid_clears_last_use_time` で R8 M-3 後退防止を保証。
+
+### MEDIUM-5 (R2): `CANONICAL_REASON_CODES` の `RATE_LIMITED` 重複削除
+`test_invariant_reason_code.py` の後方 `RATE_LIMITED` (line 54 付近) を削除し、kabu_station 経路でも前方の元エントリを共有することをコメントで明記。
+
+### MEDIUM-6 (R2): `fetch_token` の `httpx.AsyncClient()` に `timeout=30.0` 追加
+`kabusapi_auth.py` の `fetch_token()` に明示タイムアウトを追加。`kabusapi_orders.py` 各メソッドとの対称性確保。
+
+### MEDIUM-7 (R2): Future/Option フェンスを suffix match に変更
+`server.py` の `_do_submit_order_kabu()` の Future/Option フェンスを `"Future" in instrument_id` から `instrument_id.endswith(".KabuStation Future") or .endswith(".KabuStation Option")` に変更。symbol 名に "Future"/"Option" 文字列が混入した場合の誤判定を防止。
+
+### MEDIUM-8 (R2): 計画書 R8 ブロック見出し整理
+本ブロック (R9) の追加に合わせ、R8 見出しに `Phase 2 R1` ラベルを付与し、文書冒頭に連番方針メモを追加。
+
+### 検証結果 (R2)
+```
+cargo fmt --check  → OK
+cargo check --workspace  → Finished dev profile (0 errors)
+uv run pytest python/tests/test_kabu_server_orders.py python/tests/test_kabusapi_auth.py python/tests/test_kabusapi_orders.py python/tests/test_invariant_reason_code.py -v  → 全件 pass
+uv run pytest python/tests/ -q --tb=short  → 全件 pass
+```
 
 ---
 
@@ -372,3 +546,401 @@ uv run pytest python/tests/ -q --tb=no
 uv run pytest python/tests/test_live_session_kabu.py python/tests/test_kabusapi_login_flow.py python/tests/test_request_venue_login_state.py -v
 18 passed in 1.28s
 ```
+
+---
+
+## R3 レビュー反映 (2026-05-07, ラウンド 3)
+
+### MEDIUM-1（R3 サニティ）: `_login_attach()` VenueLoginCancelled の `is None` dead code 除去
+
+**問題**: R2 で追加した `_login_attach()` の `VenueLoginCancelled` ハンドラが
+`evt_request_id == request_id or evt_request_id is None` を使っていた。
+`is None` アームは server.py が VenueLoginCancelled に必ず request_id を付けるため
+到達しない dead code であり、将来 broadcast で request_id=None の cancel が来た際に
+別 client のイベントを誤検知するリスクがあった。
+
+**修正**: `python/engine/replay_session.py` の VenueLoginCancelled フィルタから
+`or evt_request_id is None` を削除し、`evt_request_id == request_id` のみに変更。
+コメントに server.py 側の invariant（必ず request_id 付き）を明記。
+
+**追加テスト**: `python/tests/test_live_session_kabu.py::test_login_cancelled_with_wrong_request_id_is_ignored`
+- wrong request_id の VenueLoginCancelled が来ても ConnectionError が raise されない
+- その後の正しい VenueReady でログインが成功する
+
+### 検証結果 (R3)
+
+```
+uv run pytest python/tests/test_live_session_kabu.py python/tests/test_kabusapi_login_flow.py python/tests/test_request_venue_login_state.py -q
+19 passed in 1.22s
+```
+
+---
+
+## R4 レビュー反映 (2026-05-07, ラウンド 4)
+
+### HIGH-1 (R4): `KabuTokenExpiredError` が `KabuApiError` に吸収される + `"no token"` 文字列チェック
+
+**問題**: `_do_submit_order_kabu` / `_do_cancel_order_kabu` の except チェーンで
+`KabuApiError` が先行し、そのサブクラス `KabuTokenExpiredError` が捕捉されなかった。
+さらに `reason_code` の切り替えに `"no token" in str(exc)` という壊れたパターンを使っており、
+kabu API が日本語メッセージを返す場合に NOT_LOGGED_IN が発行されなかった。
+
+**修正**:
+- `except KabuTokenExpiredError` を `except KabuApiError` より前に追加（両メソッド）
+- 文字列チェックを完全削除し、`reason_code: "NOT_LOGGED_IN"` に固定
+- `log.warning` 追加
+- `KabuTokenExpiredError` 発生時に `self._kabu_venue.clear()` を呼び、
+  続く発注がすべて NOT_LOGGED_IN になる状態を防止
+
+### MEDIUM-1 (R4): `_spawn_trade_dialog` の `json.loads` が `JSONDecodeError` を無言で伝播
+
+**修正**: `json.loads` を `try/except json.JSONDecodeError → KabuTradeCancelledError` に包み、
+エラーログを追加。
+
+### MEDIUM-2 (R4): `result["trade_password"]` の `KeyError` が無言で伝播
+
+**修正**: `result.get("trade_password")` + 空チェック + `KabuTradeCancelledError` に変更。
+
+### MEDIUM-3 (R4): `resp.json()` が `httpx.DecodingError` / `json.JSONDecodeError` を伝播
+
+**修正**: `send_order` / `cancel_order` / `poll_fills` の `resp.json()` を
+`try/except Exception → log.error + KabuApiError` に包み、HTTP status と body[:200] を記録。
+
+### 検証結果 (R4)
+
+```
+uv run pytest python/tests/ -q --tb=no
+2044 passed, 5 skipped, 8 warnings in 195.06s
+```
+
+---
+
+## R5 レビュー反映 (2026-05-07, ラウンド 5)
+
+### MEDIUM-1 (R5): `fetch_token` の `resp.json()` が非 JSON 応答で無言に失敗
+
+**問題**: `kabusapi_auth.py:fetch_token` の `resp.json()` に try/except がなく、
+kabuStation がメンテナンス中などに HTML を返した場合に `JSONDecodeError` が
+ログ記録なしで呼び出し元に伝播した。
+
+**修正**: `try/except Exception → KabuConnectionError` に包み、HTTP status + body[:200] をログ。
+
+### MEDIUM-2 (R5): `fetch_token` の `body["Token"]` が `KeyError` で無言に失敗
+
+**修正**: `body.get("Token") or ""` + 空チェック + `log.error + KabuConnectionError`。
+
+### MEDIUM-3 (R5): `KabuTokenExpiredError` でトークン状態がクリアされない
+
+**問題**: R4 で `except KabuTokenExpiredError` を追加したが `self._kabu_venue.clear()` を
+呼ばなかったため、切れたトークンが保持され続け、以降の全発注が NOT_LOGGED_IN で
+連続拒否される可能性があった（tachibana の `SessionExpiredError` arm との対称性の欠如）。
+
+**修正**: 両メソッドの `except KabuTokenExpiredError` arm に `self._kabu_venue.clear()` を追加。
+
+### 検証結果 (R5)
+
+```
+uv run pytest python/tests/test_kabusapi_orders.py python/tests/test_kabu_server_orders.py python/tests/test_invariant_reason_code.py -q
+31 passed in 2.70s
+```
+
+---
+
+## R6 レビュー反映 (2026-05-07, ラウンド 6)
+
+### MEDIUM-1 (R6): `OrderSubmitted` と `OrderRejected` の dual-event プロトコル違反
+
+**問題**: `_do_submit_order_kabu` が `OrderSubmitted` を `send_order()` 呼び出しの前に emit していた。
+`send_order()` が失敗した場合（例外 or `OrderID` なし）に `OrderRejected` も emit され、
+同一 `client_order_id` に対して `OrderSubmitted → OrderRejected` という不整合なシーケンスが発生。
+GUI の注文状態機械が undefined state に入る可能性があった。
+
+**修正**: `OrderSubmitted` emit を `send_order()` 成功 + 有効な `OrderID` 取得後に移動。
+失敗時は `OrderRejected` のみ emit される。
+
+### MEDIUM-2 (R6): `KabuConnectionError` が `except KabuApiError` で吸収され venue がゾンビ状態に
+
+**問題**: `send_order()` / `cancel_order()` 内で `httpx.ConnectError` が起きた場合、
+`KabuConnectionError` (= `KabuApiError` のサブクラス) が server.py の `except KabuApiError` アームで
+捕捉されていたが、`self._kabu_venue.clear()` が呼ばれていなかった。
+その結果 token が保持され続け、次回の発注も同様に失敗する zombie 状態になった。
+
+**修正**: `_do_submit_order_kabu` / `_do_cancel_order_kabu` に `except KabuConnectionError` アームを追加
+（`except KabuTokenExpiredError` の後、`except KabuApiError` の前）。
+`self._kabu_venue.clear()` を呼び出して token と order_client をリセット。
+
+### 検証結果 (R6)
+
+```
+uv run pytest python/tests/test_kabu_server_orders.py python/tests/test_kabusapi_orders.py python/tests/test_invariant_reason_code.py -q
+31 passed in 8.16s
+```
+
+---
+
+## R7 レビュー反映 (2026-05-07, ラウンド 7)
+
+### MEDIUM-1 (R7): `KabuTokenExpiredError` / `KabuConnectionError` 時に `_connected_venue` / `_live_state` がリセットされない
+
+**問題**: R6 で `self._kabu_venue.clear()` を呼んでいたが、`self._connected_venue` と
+`self._live_state` がリセットされなかった。GUI の `RequestVenueLoginState` ポーリングが
+「接続中」を返し続け、zombie 状態になりうる。tachibana の `SessionExpiredError` 処理との
+非対称性。
+
+**修正**: `_clear_kabu_session()` ヘルパーを新設:
+```python
+def _clear_kabu_session(self) -> None:
+    if self._kabu_venue is not None:
+        self._kabu_venue.clear()
+    self._connected_venue = None
+    self._live_state = LiveState.DISCONNECTED
+```
+両メソッドの `KabuTokenExpiredError` / `KabuConnectionError` アームで
+`self._kabu_venue.clear()` → `self._clear_kabu_session()` に変更。
+
+### MEDIUM-2 (R7): `_do_cancel_order_kabu` に `venue_order_id` 空チェックがない
+
+**問題**: `venue_order_id=""` が kabu API に渡ると、API エラーかランダムな発注取消が起きうる。
+エラーは `except KabuApiError` で捕捉されるが、原因が空 venue_order_id とはログから分からない。
+
+**修正**: メソッド冒頭に `if not venue_order_id: → OrderRejected{VALIDATION_ERROR}` ガードを追加。
+接続チェック・lockout チェックよりも前に評価される。
+
+### 検証結果 (R7, 収束確認)
+
+```
+uv run pytest python/tests/test_kabu_server_orders.py python/tests/test_kabusapi_orders.py python/tests/test_invariant_reason_code.py -q
+31 passed
+```
+
+R7 サニティチェック (silent-failure-hunter): **MEDIUM+ ゼロ。収束。**
+
+---
+
+## Phase 3 タスク詳細
+
+### P3-1 — Rust Exchange enum 市場細分化 + 先物・OP バリアント追加
+
+**内容**: `Exchange` enum に以下を追加。`MarketKind` に `Future` / `Option` バリアントを追加。
+- `KabuStationTse` — 東証 (exchange=1)
+- `KabuStationNse` — 名証 (exchange=3)
+- `KabuStationFse` — 福証 (exchange=5)
+- `KabuStationSse` — 札証 (exchange=6)
+- `KabuStationFuture` — 先物 (exchange=2/23/24)
+- `KabuStationOption` — OP (exchange=2/23/24)
+
+SCHEMA_MINOR: 18 → 19（Exchange enum 拡張）
+
+**完了条件**:
+- `cargo check --workspace` 通過
+- `cargo test --workspace` 通過
+- 網羅 match 全箇所が compile（adapter.rs / tickers_table.rs）
+
+**関連ファイル**:
+- `exchange/src/adapter.rs`
+- `src/screen/dashboard/tickers_table.rs`
+- `engine-client/src/lib.rs`（SCHEMA_MINOR bump）
+- `engine-client/tests/schema_v2_4_nautilus.rs`
+
+**状態**: ✅ 完了
+
+---
+
+### P3-2 — 先物・OP 発注 (kabusapi_orders.py 拡張)
+
+**内容**: `KabuOrderClient` に `send_order_future()` / `send_order_option()` を追加。
+
+**API**: `POST /sendorder/future` / `POST /sendorder/option`
+
+**パラメータ** (OpenAPI `RequestSendOrderDerivFuture` / `RequestSendOrderDerivOption` より):
+- Symbol (str), Exchange (int), TradeType (int), TimeInForce (int)
+- Side (str: "1"=売/"2"=買), Qty (int), FrontOrderType (int)
+- Price (float), ExpireDay (int)
+- Optional: ClosePositionOrder, ClosePositions, ReverseLimitOrder
+
+**設計決定**: 
+- 取引パスワード (`Password`) は先物・OP の sendorder/future・sendorder/option には不要（OpenAPI スキーマに含まれない）
+- cancelorder は既存の `cancel_order()` を流用（Password フィールドは引き続き必要）
+
+**完了条件**:
+- `test_kabusapi_futures.py::test_send_order_future_posts_to_correct_url` pass
+- `test_kabusapi_futures.py::test_send_order_option_posts_to_correct_url` pass
+- `test_kabusapi_futures.py::test_send_order_future_buy_side_is_2` pass
+
+**関連ファイル**:
+- `python/engine/exchanges/kabusapi_orders.py`（拡張）
+- `python/tests/test_kabusapi_futures.py`（新規）
+
+**状態**: ✅ 完了
+
+---
+
+### P3-3 — 余力照会・銘柄名照会 (kabusapi_rest.py 拡張)
+
+**内容**: `KabuRestClient` に以下を追加。
+- `fetch_wallet_future()` — GET /wallet/future
+- `fetch_wallet_option()` — GET /wallet/option
+- `fetch_symbolname_future(future_code, deriv_month)` — GET /symbolname/future
+- `fetch_symbolname_option(option_code, deriv_month, put_or_call, strike_price)` — GET /symbolname/option
+
+**完了条件**:
+- `test_kabusapi_futures.py::test_fetch_wallet_future_calls_correct_url` pass
+- `test_kabusapi_futures.py::test_fetch_wallet_option_calls_correct_url` pass
+- `test_kabusapi_futures.py::test_fetch_symbolname_future_calls_correct_url` pass
+- `test_kabusapi_futures.py::test_fetch_symbolname_option_calls_correct_url` pass
+
+**関連ファイル**:
+- `python/engine/exchanges/kabusapi_rest.py`（拡張）
+- `python/tests/test_kabusapi_futures.py`（新規）
+
+**状態**: ✅ 完了
+
+---
+
+### Phase 3 検証結果
+
+```
+uv run pytest python/tests/test_kabusapi_futures.py -v → 15 passed
+uv run pytest python/tests/test_kabusapi_orders.py python/tests/test_kabusapi_futures.py python/tests/test_live_session_kabu.py -q → 39 passed
+cargo check --workspace       → Finished (0 errors)
+cargo clippy --workspace -- -D warnings → Finished (0 warnings)
+cargo fmt --check             → OK (no formatting issues)
+cargo test --workspace        → 全テスト pass
+```
+
+### Phase 3 R1 レビュー反映（2026-05-07）
+
+4エージェント並列レビュー（rust-reviewer / silent-failure-hunter / ws-compatibility-auditor / general-purpose）実施。CRITICAL x2 / HIGH x5 を修正。
+
+| 指摘 | 重大度 | 対応 |
+|------|--------|------|
+| `FrontOrderType` デフォルト `1` → OpenAPI 不正値（先物/OP 有効値: 18/20/28/30/120） | CRITICAL | `120` (成行マーケットオーダー) に修正 |
+| `kabusapi_ws.py` `websockets.connect()` に `compression=None` 欠落（RSV1 バグ再発） | CRITICAL | `compression=None` 追加 |
+| `kabusapi_rest.py` 4メソッドの `resp.json()` に `try/except` なし | HIGH | `try/except → KabuApiError` 追加 |
+| `send_order_future/option` に `on_submit_success()` 欠如（idle タイマー未更新） | HIGH | `on_submit_success()` 追加 |
+| `send_order_future/option` に `KabuTradePasswordInvalidError` ハンドリング欠如 | HIGH | `try/except` + `holder.on_invalid()` 追加 |
+| `tickers_table.rs` フィルターボタンに Future/Option なし | HIGH | `future_market_btn` / `option_market_btn` 追加 |
+| `from_venue_and_market(KabuStation, Stock)` 設計意図が未明示 | HIGH | doc コメント追記（意図的後方互換設計） |
+| URL lint 正規表現が Phase 3 エンドポイントを対象外 | MEDIUM | `wallet/symbolname/cancelorder/orders/positions` 追加 |
+| `test_send_order_option_sell_side_is_1` テスト欠如 | MEDIUM | テスト追加 |
+| `Password` 非混入ピンテスト欠如 | MEDIUM | `test_*_no_password_in_body` x2 追加 |
+| テスト名 `front_order_type_1` が不正値を明示 | MEDIUM | `_120` にリネーム、アサートも修正 |
+
+---
+
+## R10 レビュー反映 (2026-05-07, Phase 2 R3)
+
+Phase 2 実装全体の追加レビュー（4エージェント並列）で CRITICAL x4 / HIGH x6 / MEDIUM x10 を検出・修正した。
+
+| 指摘 | 重大度 | 対応 |
+|------|--------|------|
+| `send_order()` body に `OrderType` フィールド（OpenAPI 不存在）。`FrontOrderType`/`Price`/`ExpireDay` が欠落 | CRITICAL | `OrderType` 削除、`FrontOrderType=10`/`Price=0`/`ExpireDay=0` 追加（C-1） |
+| `cancel_order()` が `"OrderID"`（大文字D）を送信（OpenAPI は `"OrderId"` 小文字d）+ `Password` フィールドは OpenAPI に不存在 | CRITICAL | `"OrderId"` に修正、`Password` 削除、`_ensure_trade_password()` 呼出も削除（C-2） |
+| 発注成功後 `_venue_to_client[order_id]` を更新しないため約定/取消イベントが Rust に届かない | CRITICAL | `self._venue_to_client[order_id] = order.client_order_id` 追加（C-3） |
+| `_ensure_trade_password()` に `asyncio.Lock` なし — 並列発注でダイアログが多重起動しキャンセルで全発注ブロック | CRITICAL | `self._dialog_lock = asyncio.Lock()` + double-check パターン（C-4） |
+| `poll_fills()` のポーラータスクが `server.py` に未配線（約定イベントが永遠に届かない） | HIGH | `_kabu_fill_poller_task` 属性追加、`_startup_kabu_station()` で起動、`_clear_kabu_session()` でキャンセル（H-1） |
+| `KabuConnectionError` の `reason_code` が `"NOT_LOGGED_IN"` — 接続エラーに意味的に不適切 | HIGH | `"CONNECTION_ERROR"` に変更（H-2） |
+| `is_locked_out()` のロックアウト解除後 `_invalid_count` がリセットされない | HIGH | `self._invalid_count = 0` 追加（H-3） |
+| `KabuTradePasswordHolder` に `__repr__` なく、デバッグ時にパスワードが漏洩するリスク | HIGH | `__repr__()` 追加（パスワードマスク）（H-5） |
+| `_emit_result()` が `except Exception` 内で例外を raise しても後続コードが続く | HIGH | `_emit_result()` を追加 `try/except` で保護（H-6） |
+| `dev_kabu_trade_password_allowed` が `__main__.py` → `DataEngineServer` に未配線 | HIGH | `_env_dev_kabu_trade_password_allowed()` 関数追加 + `DataEngineServer()` に配線（H-4） |
+| `OrderSubmitted` emit が API 呼び出し**後**（tachibana と非対称） | MEDIUM | API 呼び出し**前**に移動（M-1） |
+| `_clear_kabu_session()` で `self._kabu_venue = None` 漏れ | MEDIUM | `None` 代入追加（M-2） |
+| バリデーション失敗時の emit が `"Error"` 文字列（OrderRejected でない） | MEDIUM | `OrderRejected{VALIDATION_ERROR}` に変更（M-3） |
+| `poll_fills()` にフィルタ前後デバッグログなし（調査困難） | MEDIUM | ログ追加（M-4） |
+| `_make_server()` に `_kabu_fill_poller_task = None` / `_venue_to_client = {}` 未初期化 | MEDIUM | テストヘルパー補完（M-5） |
+| `test_cancelorder_sends_password_in_body` — OpenAPI 修正後も古い仕様をテスト | MEDIUM | `test_cancelorder_includes_correct_fields` にリネーム + アサート更新（M-6） |
+| stderr 切り捨て 200 バイトで日本語エラーが途切れる | MEDIUM | 500 バイトに拡大（M-7） |
+| `clear()` docstring が lockout 保持の意図を説明していない | MEDIUM | docstring 更新（H-6 兼 M-8） |
+| `test_server_submit_order_connection_error_clears_session` に `OrderRejected{CONNECTION_ERROR}` アサートなし | MEDIUM | アサート追加（M-9） |
+| `_emit_result()` の例外保護漏れ | MEDIUM | `kabusapi_trade_dialog.py` の `except Exception` 内 `_emit_result()` を try/except で囲む（M-10） |
+
+### R11 追加修正 (R2 指摘)
+
+| 指摘 | 重大度 | 対応 |
+|------|--------|------|
+| `OrderSubmitted` emit が API 呼び出し後（tachibana は API 呼び出し前に発火） | MEDIUM | API 呼び出し直前に移動し `test_server_submit_order_missing_order_id_emits_rejected` を nautilus 流シーケンスに更新 |
+
+### 検証結果 (R10 + R11)
+```
+uv run pytest python/tests/test_kabusapi_orders.py python/tests/test_kabu_server_orders.py \
+  python/tests/test_live_session_kabu.py python/tests/test_request_venue_login_state.py \
+  python/tests/test_invariant_reason_code.py python/tests/test_kabusapi_futures.py -q  → 67 passed
+cargo check --workspace  → Finished dev profile (0 errors)
+cargo clippy --workspace -- -D warnings  → Finished (0 warnings)
+cargo fmt --check  → OK
+```
+
+---
+
+## Phase 4 タスク詳細（提案・着手前）
+
+**ゴール**: 本番接続 (`localhost:18080`) を多層ガード付きで解禁し、最小 1 単元の実弾発注スモークテストが可能な状態にする。runbook（事故対応・取消手順・本体ダウン時オペレーション）を整備する。実弾発注は AI 側では実行せず、runbook の手動手順としてユーザーが実施する（合意済 2026-05-07）。
+
+**スコープ外（明示）**:
+- 24h 連続稼働の自動検証（ユーザーの手動運用に委ねる）
+- 自動再ログイン（早朝強制ログアウトはバナー誘導のまま）
+- 本番口座の自動残高チェック・自動損切り
+
+### Phase 4 タスク表
+
+| Task | 内容 | 完了条件（テストファイル + 代表 assert） |
+| :--- | :--- | :--- |
+| P4-1 | `kabusapi_url.py` に `is_production_url(url)` / `guard_prod_url(url)` を追加。`KABU_ALLOW_PROD=1` 未設定で `localhost:18080` または `/kabusapi/...` の prod 経路を返す/呼ぶと `ValueError("KABU_ALLOW_PROD")` を raise。`base_url("prod")` / `endpoint(..., env="prod")` / `ws_url("prod")` 全経路で多層ガード。env="verify" は env なしで通る。 | `test_kabu_prod_url_guard.py::test_prod_blocked_without_env` / `test_prod_allowed_with_env_1` / `test_verify_always_passes` / `test_env_0_blocks` / `test_env_true_string_blocks`（tachibana の `test_prod_url_guard.py` と同形） |
+| P4-2 | `KabuStationVenue` / `_startup_kabu_station` / login flow に `env: KabuEnv` 引数を伝播。`server.py` 起点で **二重 env**（`KABU_ALLOW_PROD=1` **かつ** `KABU_ENV=prod`）を要求する `_resolve_kabu_env()` ヘルパー追加。片方だけでは verify にフォールバックし WARN ログ。release ビルドでも `DEV_KABU_API_PASSWORD` による prod 自動ログインを禁止（dev_login_allowed の二段ガード）。 | `test_kabu_env_resolver.py::test_resolve_defaults_to_verify` / `test_both_envs_required_for_prod` / `test_only_allow_prod_falls_back_to_verify` / `test_prod_disables_dev_login` |
+| P4-3 | `VenueReady.capabilities["kabu_station"]` に `is_production: bool` を追加。SCHEMA_MINOR bump。`server.py` の `_build_ready()` で `_resolve_kabu_env() == "prod"` のとき `True`。Rust 側 `engine_client::capabilities` に `is_production` フィールド追加（既存 4 フィールド + 1）。 | `cargo test --workspace` 通過。`test_request_venue_login_state.py::test_kabu_ready_capabilities_include_is_production_false`（verify）/ `test_..._include_is_production_true`（prod）。SCHEMA_MINOR bump assert。 |
+| P4-4 | iced UI フッター kabu バッジに本番表示。`is_production=true` のとき赤背景 + "🔴 本番" ラベル、verify は既存の薄色 + "検証" ラベル。文字列は spec.md / architecture.md にも追記。 | `cargo test -p src --lib footer_badge`（既存テストの色/ラベル assert 拡張）。スクリーンショット比較は不要、文言と styling 関数のユニットテスト。 |
+| P4-5 | `_do_submit_order_kabu` / `_do_cancel_order_kabu` の URL 組立で `guard_prod_url()` を呼ぶ pin。誤って verify セッション中に prod URL が漏れた場合の最終フェンス。`KabuStationVenue.send_order` / `cancel_order` / `poll_fills` も同様に pin。 | `test_kabu_prod_url_guard.py::test_send_order_invokes_guard_prod_url`（mock で `guard_prod_url` の呼出を assert）。 |
+| P4-6 | `docs/✅kabusapi/runbook.md` 新規作成。章構成: §1 緊急時の連絡先・口座、§2 全注文一括取消手順（kabuステーション本体 + REST `PUT /cancelorder`）、§3 kabuステーション本体ダウン時のオペレーション、§4 早朝強制ログアウト時の挙動・再ログイン手順、§5 実弾スモークテスト手順（最小 1 単元 buy → 即 sell の手順チェックリスト）、§6 取引パスワード忘却・lockout 復旧手順、§7 本番↔検証切替の env 設定方法、§8 ログ収集 / インシデントレポート雛形。 | `docs/✅kabusapi/runbook.md` ファイルが存在し、§1〜§8 が見出しとして揃っている（lint チェック程度。内容のレビューは review-fix-loop で行う）。 |
+| P4-7 | `open-questions.md` Q-P2-5（取引パスワード誤りエラーコード）を解消。kabu OpenAPI / ptal/howto を再確認し、確定 code を `kabusapi_auth.py` の `KabuTradePasswordInvalidError` 判定に反映。確定不能な場合は「Phase 4 でも未確定 + 検出戦略」を計画書に明記。 | `test_kabusapi_orders.py::test_invalid_trade_password_recognized_for_code_*` の code を確定値に更新（または `Phase 4 未確定` の根拠コメントを残す）。 |
+| P4-8 | URL lint 正規表現を本番 URL も拾うよう拡張: `(http\|ws)://localhost:1808[01]` のうち `:18080` を含むリテラルが `kabusapi_url.py` 以外で現れたら fail。CI に追加。 | `.github/workflows/kabu-mock.yml` に lint step 追加 + zero-match assert。 |
+| P4-9 | `pytest -m demo_kabu` ジョブに Phase 4 新規テスト群を追加。`test_kabu_prod_url_guard.py` / `test_kabu_env_resolver.py` を CI コマンドに含める。 | CI グリーン。 |
+
+### 依存関係
+
+```
+P4-1 ──→ P4-2 ──→ P4-3 ──→ P4-4
+            └──→ P4-5
+P4-6（並列可、ドキュメント単独）
+P4-7（並列可、Q-P2-5 調査依存）
+P4-8 ──→ P4-9（最後）
+```
+
+並列実行フェーズ:
+- Phase A（直列）: P4-1
+- Phase B（並列可）: P4-2 + P4-6 + P4-7
+- Phase C（並列可）: P4-3 + P4-5（B 完了後）
+- Phase D（直列）: P4-4（C 完了後）
+- Phase E（直列）: P4-8 + P4-9（全完了後）
+
+### Acceptance criteria（Phase 4 全体）
+
+1. `KABU_ALLOW_PROD` 未設定では prod URL 生成・接続が必ず ValueError を raise
+2. `is_production` フラグが Ready handshake 経由で UI に伝わり、本番接続中は赤バナー表示
+3. `runbook.md` §1〜§8 が揃っており、最小 1 単元実弾スモークテスト手順がチェックリスト化
+4. `cargo test --workspace` / `uv run pytest python/tests/ -q` 全件グリーン
+5. `pytest -m demo_kabu` CI ジョブに新規テスト含めてグリーン
+6. SCHEMA_MINOR bump 反映（19 → 20 想定）
+7. 既存 Phase 1〜3 テストを 1 件も壊していない
+8. review-fix-loop で MEDIUM+ 指摘ゼロまで収束
+
+### Phase 4 進捗 (2026-05-07)
+
+- ✅ P4-1: `is_production_url` / `guard_prod_url` 追加 + `base_url` / `endpoint` / `ws_url` で自動 pin。`test_kabu_prod_url_guard.py` 21 件 GREEN。
+- ✅ P4-2: `resolve_kabu_env()` 追加（`KABU_ALLOW_PROD=1` + `KABU_ENV=prod` 二重判定）。`_startup_kabu_station` に env 伝播 + prod では `dev_login_allowed` / `dev_trade_password_allowed` を強制 False。`test_kabu_env_resolver.py` 9 件 + server 2 件 GREEN。
+- ✅ P4-5: 発注パスでの guard pin（`base_url` 経由で自動）。`test_kabu_prod_url_pin.py` 6 件 GREEN（send_order / cancel_order / send_order_future / send_order_option / poll_fills / verify pass）。
+- 🔄 P4-3: 着手中
+- — P4-4 / P4-7 / P4-8 / P4-9: 未着手
+- ✅ P4-6: 骨子完成（`docs/✅kabusapi/runbook.md` §1〜§8）。実装完了後に肉付け。
+
+### Phase 4 着手中の知見
+
+- **2026-05-07 P4-5 実施中に発見**: working tree の `python/engine/server.py:1876` 付近に R6 仕様（OrderSubmitted を send_order 成功後に移動）が **未適用**。`test_kabu_server_orders.py::test_server_submit_order_missing_order_id_emits_rejected` が pre-existing で失敗。HEAD (`5940a2f`) では kabu venue が `unsupported_order_venue` で reject されるため別経路。Phase 4 のスコープ外だが、R6 取り戻し or test 仕様確認が別途必要。**Phase 4 review-fix-loop 時に再確認**。
+- **設計判断 (P4-1)**: `base_url()` 内で `guard_prod_url()` を必ず呼ぶようにしたため、`endpoint()` / `ws_url()` を経由する全ての URL 組立が自動 pin される。orders.py 側に追加 pin コードは不要で、`KabuOrderClient(env="prod")` で発注メソッドを呼んだ時点で URL 組立段階で ValueError が raise される。最小変更で多層化を達成。
+- **設計判断 (P4-2)**: env 解決を `kabusapi_url.py`（下層）に置いたため、server.py 以外（テスト、SDK、将来のスクリプト）からも同じヘルパーで env 判定できる。release ガード（prod で dev_login_allowed=False 強制）は server.py 側の責任に分離。
+
+### スコープ外 / 後続 Phase 候補
+
+- 24h 連続稼働の自動 E2E（環境構築コスト大、ユーザー手動運用）
+- 自動再ログイン・自動取消（誤発注リスク回避、現状ユーザー誘導）
+- 本番口座残高アラート・自動損切り（戦略責任の領域、AGENTS.md の「ユーザー戦略は自己責任」方針に沿う）

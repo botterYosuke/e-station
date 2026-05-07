@@ -74,6 +74,7 @@ async def _run(
     *,
     dev_tachibana_login_allowed: bool,
     dev_kabu_login_allowed: bool = False,
+    dev_kabu_trade_password_allowed: bool = False,  # [H-4]
     cache_dir: str | None = None,
     config_dir: str | None = None,
 ) -> None:
@@ -86,6 +87,7 @@ async def _run(
         token=token,
         dev_tachibana_login_allowed=dev_tachibana_login_allowed,
         dev_kabu_login_allowed=dev_kabu_login_allowed,
+        dev_kabu_trade_password_allowed=dev_kabu_trade_password_allowed,  # [H-4]
         cache_dir=Path(cache_dir) if cache_dir else None,
         config_dir=Path(config_dir) if config_dir else None,
     )
@@ -136,6 +138,12 @@ def _env_dev_kabu_login_allowed() -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_dev_kabu_trade_password_allowed() -> bool:
+    """Resolve `dev_kabu_trade_password_allowed` from the environment (H-4)."""
+    raw = os.environ.get("FLOWSURFACE_DEV_KABU_TRADE_PASSWORD_ALLOWED", "")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.DEBUG,
@@ -159,6 +167,7 @@ def main() -> None:
 
     dev_tachibana_login_allowed = False
     dev_kabu_login_allowed = False
+    dev_kabu_trade_password_allowed = False  # [H-4]
     cache_dir: str | None = None
     config_dir: str | None = None
 
@@ -175,6 +184,7 @@ def main() -> None:
         port, token = args.port, args.token
         dev_tachibana_login_allowed = _env_dev_login_allowed()
         dev_kabu_login_allowed = _env_dev_kabu_login_allowed()
+        dev_kabu_trade_password_allowed = _env_dev_kabu_trade_password_allowed()  # [H-4]
         config_dir = getattr(args, "config_dir", None)
     else:
         # Production: receive config from Rust via stdin
@@ -184,6 +194,7 @@ def main() -> None:
             port, token = int(env_port), env_token
             dev_tachibana_login_allowed = _env_dev_login_allowed()
             dev_kabu_login_allowed = _env_dev_kabu_login_allowed()
+            dev_kabu_trade_password_allowed = _env_dev_kabu_trade_password_allowed()  # [H-4]
             config_dir = getattr(args, "config_dir", None)
         else:
             # The stdin path is Rust-controlled. The flag rides the
@@ -197,6 +208,9 @@ def main() -> None:
             dev_kabu_login_allowed = _coerce_dev_login_allowed(
                 cfg.get("dev_kabu_login_allowed", False)
             )
+            dev_kabu_trade_password_allowed = _coerce_dev_login_allowed(
+                cfg.get("dev_kabu_trade_password_allowed", False)
+            )  # [H-4]
             cache_dir = cfg.get("cache_dir")
             config_dir = cfg.get("config_dir")
 
@@ -206,6 +220,7 @@ def main() -> None:
             token,
             dev_tachibana_login_allowed=dev_tachibana_login_allowed,
             dev_kabu_login_allowed=dev_kabu_login_allowed,
+            dev_kabu_trade_password_allowed=dev_kabu_trade_password_allowed,  # [H-4]
             cache_dir=cache_dir,
             config_dir=config_dir,
         )

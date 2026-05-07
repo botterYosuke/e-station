@@ -23,7 +23,7 @@ jobs:
 
             - name: Run kabu mock tests
               run: |
-                  uv run pytest -m demo_kabu python/tests/test_kabusapi_*.py python/tests/test_live_session_kabu.py python/tests/test_request_venue_login_state.py -v
+                  uv run pytest -m demo_kabu python/tests/test_kabusapi_*.py python/tests/test_live_session_kabu.py python/tests/test_request_venue_login_state.py python/tests/test_kabu_server_orders.py python/tests/test_invariant_reason_code.py -v
 
     url-lint:
         runs-on: ubuntu-latest
@@ -38,14 +38,14 @@ jobs:
                   # Exclude the single-source-of-truth file itself.
                   # Zero matches = pass.
                   count=$(grep -rn \
-                      -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|board)' \
+                      -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|cancelorder|board|wallet|orders|positions|symbol|symbolname)' \
                       python/engine/ \
                       --exclude='kabusapi_url.py' \
                       | wc -l)
                   if [ "$count" -gt 0 ]; then
                       echo "FAIL: kabu URL literals found outside kabusapi_url.py:"
                       grep -rn \
-                          -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|board)' \
+                          -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|cancelorder|board|wallet|orders|positions|symbol|symbolname)' \
                           python/engine/ \
                           --exclude='kabusapi_url.py'
                       exit 1

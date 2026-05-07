@@ -37,10 +37,11 @@ fn schema_minor_matches_current_bump() {
     // (ReplayDataLoaded.session_epoch 追加; リプレイファイル切替時の旧ペイン全閉じ用、Approach B)。
     // schema 3.15–17: LiveBuyingPower / LiveState 拡張 / 正採番修正。
     // schema 3.18: K1 Venue::KabuStation / Exchange::KabuStationStock 追加。
+    // schema 3.19: P3-1 Exchange::KabuStation* 市場細分化 + 先物・OP バリアント追加。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        18,
-        "SCHEMA_MINOR must be 18 after K1 (Venue::KabuStation / Exchange::KabuStationStock)"
+        19,
+        "SCHEMA_MINOR must be 19 after P3-1 (Exchange::KabuStation* 市場細分化 + 先物・OP)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

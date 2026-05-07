@@ -40,14 +40,20 @@ pub enum MarketKind {
     InversePerps,
     /// Equity (cash & margin) markets — Phase 1 covers Tachibana 立花証券 only.
     Stock,
+    /// Futures derivatives (e.g., kabuStation Nikkei 225 futures).
+    Future,
+    /// Options derivatives (e.g., kabuStation Nikkei 225 options).
+    Option,
 }
 
 impl MarketKind {
-    pub const ALL: [MarketKind; 4] = [
+    pub const ALL: [MarketKind; 6] = [
         MarketKind::Spot,
         MarketKind::LinearPerps,
         MarketKind::InversePerps,
         MarketKind::Stock,
+        MarketKind::Future,
+        MarketKind::Option,
     ];
 
     pub fn qty_in_quote_value(&self, qty: Qty, price: Price, size_in_quote_ccy: bool) -> f32 {
@@ -57,7 +63,7 @@ impl MarketKind {
             // Stocks: quote value is always price * qty (JPY). The
             // `size_in_quote_ccy` flag is ignored on purpose — the crypto-only
             // call sites pass it and we must not silently produce a wrong value.
-            MarketKind::Stock => price.to_f32() * qty_f,
+            MarketKind::Stock | MarketKind::Future | MarketKind::Option => price.to_f32() * qty_f,
             MarketKind::InversePerps => qty_f,
             MarketKind::Spot | MarketKind::LinearPerps => {
                 if size_in_quote_ccy {
@@ -80,6 +86,8 @@ impl std::fmt::Display for MarketKind {
                 MarketKind::LinearPerps => "Linear",
                 MarketKind::InversePerps => "Inverse",
                 MarketKind::Stock => "Stock",
+                MarketKind::Future => "Future",
+                MarketKind::Option => "Option",
             }
         )
     }
@@ -97,6 +105,10 @@ impl FromStr for MarketKind {
             Ok(Self::InversePerps)
         } else if s.eq_ignore_ascii_case("stock") {
             Ok(Self::Stock)
+        } else if s.eq_ignore_ascii_case("future") {
+            Ok(Self::Future)
+        } else if s.eq_ignore_ascii_case("option") {
+            Ok(Self::Option)
         } else {
             Err(format!("Invalid market kind: {}", s))
         }
@@ -365,16 +377,37 @@ pub enum Exchange {
     MexcSpot,
     /// 立花証券 e支店 — Tokyo Stock Exchange equities (cash & margin merged).
     TachibanaStock,
-    /// kabuステーション API — Tokyo Stock Exchange equities (Phase 1: TSE only).
-    /// Market segmentation (TSE=1/NSE=3/FSE=5/SSE=6) deferred to Phase 3.
+    /// kabuステーション API — legacy stock catch-all バリアント（後方互換）。
+    /// `from_venue_and_market(KabuStation, Stock)` はこれを返す（IPC ticker 登録の互換パス）。
+    /// 市場細分化（TSE/NSE/FSE/SSE）は Phase 3 で追加済み: `FromStr` / Display 経由で到達可能。
     KabuStationStock,
+    /// kabuStation — Tokyo Stock Exchange equities (exchange=1).
+    KabuStationTse,
+    /// kabuStation — Nagoya Stock Exchange equities (exchange=3).
+    KabuStationNse,
+    /// kabuStation — Fukuoka Stock Exchange equities (exchange=5).
+    KabuStationFse,
+    /// kabuStation — Sapporo Securities Exchange equities (exchange=6).
+    KabuStationSse,
+    /// kabuStation — Futures derivatives (exchange=2/23/24).
+    KabuStationFuture,
+    /// kabuStation — Options derivatives (exchange=2/23/24).
+    KabuStationOption,
     /// Replay engine — backtesting data from NautilusTrader Python engine.
     ReplayStock,
 }
 
 impl std::fmt::Display for Exchange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}", self.venue(), self.market_type())
+        // kabuStation market-segmented variants use a sub-identifier to
+        // distinguish from each other (all share Venue::KabuStation).
+        match self {
+            Exchange::KabuStationTse => write!(f, "KabuStation TSE"),
+            Exchange::KabuStationNse => write!(f, "KabuStation NSE"),
+            Exchange::KabuStationFse => write!(f, "KabuStation FSE"),
+            Exchange::KabuStationSse => write!(f, "KabuStation SSE"),
+            _ => write!(f, "{} {}", self.venue(), self.market_type()),
+        }
     }
 }
 
@@ -382,6 +415,22 @@ impl FromStr for Exchange {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Fast-path for kabuStation sub-market variants that share the same
+        // Venue + MarketKind and therefore cannot round-trip via
+        // from_venue_and_market alone.
+        if s.eq_ignore_ascii_case("kabustation tse") {
+            return Ok(Self::KabuStationTse);
+        }
+        if s.eq_ignore_ascii_case("kabustation nse") {
+            return Ok(Self::KabuStationNse);
+        }
+        if s.eq_ignore_ascii_case("kabustation fse") {
+            return Ok(Self::KabuStationFse);
+        }
+        if s.eq_ignore_ascii_case("kabustation sse") {
+            return Ok(Self::KabuStationSse);
+        }
+
         let mut parts = s.split_whitespace();
         let Some(venue_part) = parts.next() else {
             return Err(format!("Invalid exchange: {}", s));
@@ -403,7 +452,7 @@ impl FromStr for Exchange {
 }
 
 impl Exchange {
-    pub const ALL: [Exchange; 17] = [
+    pub const ALL: [Exchange; 23] = [
         Exchange::BinanceLinear,
         Exchange::BinanceInverse,
         Exchange::BinanceSpot,
@@ -420,9 +469,20 @@ impl Exchange {
         Exchange::MexcSpot,
         Exchange::TachibanaStock,
         Exchange::KabuStationStock,
+        Exchange::KabuStationTse,
+        Exchange::KabuStationNse,
+        Exchange::KabuStationFse,
+        Exchange::KabuStationSse,
+        Exchange::KabuStationFuture,
+        Exchange::KabuStationOption,
         Exchange::ReplayStock,
     ];
 
+    /// venue + market_kind の組合せから Exchange を解決する（先頭一致）。
+    ///
+    /// KabuStation + Stock は `KabuStationStock` を返す（ALL の順序上 Tse/Nse/Fse/Sse より先頭）。
+    /// これは IPC からの後方互換解決パスとして意図的な設計。
+    /// Tse/Nse/Fse/Sse に到達するには `FromStr("kabustation tse")` または Display→FromStr を使う。
     pub fn from_venue_and_market(venue: Venue, market: MarketKind) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -445,9 +505,15 @@ impl Exchange {
             | Exchange::HyperliquidSpot
             | Exchange::OkexSpot
             | Exchange::MexcSpot => MarketKind::Spot,
-            Exchange::TachibanaStock | Exchange::KabuStationStock | Exchange::ReplayStock => {
-                MarketKind::Stock
-            }
+            Exchange::TachibanaStock
+            | Exchange::KabuStationStock
+            | Exchange::KabuStationTse
+            | Exchange::KabuStationNse
+            | Exchange::KabuStationFse
+            | Exchange::KabuStationSse
+            | Exchange::ReplayStock => MarketKind::Stock,
+            Exchange::KabuStationFuture => MarketKind::Future,
+            Exchange::KabuStationOption => MarketKind::Option,
         }
     }
 
@@ -461,7 +527,13 @@ impl Exchange {
             Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => Venue::Okex,
             Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => Venue::Mexc,
             Exchange::TachibanaStock => Venue::Tachibana,
-            Exchange::KabuStationStock => Venue::KabuStation,
+            Exchange::KabuStationStock
+            | Exchange::KabuStationTse
+            | Exchange::KabuStationNse
+            | Exchange::KabuStationFse
+            | Exchange::KabuStationSse
+            | Exchange::KabuStationFuture
+            | Exchange::KabuStationOption => Venue::KabuStation,
             Exchange::ReplayStock => Venue::Replay,
         }
     }

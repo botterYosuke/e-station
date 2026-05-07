@@ -236,6 +236,7 @@ def test_startup_kabu_station_cancel_emits_venue_login_cancelled(monkeypatch):
     srv._live_state = LiveState.CONNECTING
     srv._kabu_venue = None
     srv._dev_kabu_login_allowed = False
+    srv._dev_kabu_trade_password_allowed = False
     srv._kabu_login_inflight = asyncio.Lock()
 
     emitted: list[dict] = []
@@ -282,6 +283,116 @@ def test_startup_kabu_station_cancel_emits_venue_login_cancelled(monkeypatch):
     cancel_evt = next(e for e in emitted if e.get("event") == "VenueLoginCancelled")
     assert cancel_evt.get("venue") == "kabu_station"
     assert cancel_evt.get("request_id") == "req-cancel-1"
+
+
+@pytest.mark.demo_kabu
+def test_startup_kabu_station_uses_resolve_kabu_env_for_env(monkeypatch):
+    """P4-2: _startup_kabu_station が resolve_kabu_env() の戻り値を
+    KabuStationVenue 構築の env パラメータに使う。env=verify、dev_login_allowed=True 経路。
+    """
+    from engine.server import DataEngineServer, LiveState
+    from engine.exchanges.kabusapi_auth import KabuLoginCancelledError
+
+    srv = DataEngineServer.__new__(DataEngineServer)
+    srv._mode = "live"
+    srv._live_state = LiveState.CONNECTING
+    srv._kabu_venue = None
+    srv._dev_kabu_login_allowed = True
+    srv._dev_kabu_trade_password_allowed = False
+    srv._kabu_login_inflight = asyncio.Lock()
+
+    class _FakeOutbox:
+        def __init__(self):
+            self.items: list[dict] = []
+        def append(self, item):
+            self.items.append(item)
+        def count(self):
+            return 1
+
+    srv._outbox = _FakeOutbox()
+
+    captured: dict = {}
+
+    class _FakeKabuVenue:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+        async def startup_login(self):
+            raise KabuLoginCancelledError(0, "skip")
+        def clear(self):
+            pass
+
+    monkeypatch.setattr("engine.server.KabuStationVenue", _FakeKabuVenue)
+    monkeypatch.setattr(
+        "engine.server.resolve_kabu_env", lambda: "verify"
+    )
+
+    async def _run():
+        await srv._startup_kabu_station(request_id="req-env-1")
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
+    assert captured.get("env") == "verify"
+    assert captured.get("dev_login_allowed") is True
+
+
+@pytest.mark.demo_kabu
+def test_startup_kabu_station_disables_dev_login_in_prod(monkeypatch):
+    """P4-2: prod env 解決時は dev_login_allowed が強制 False。
+    self._dev_kabu_login_allowed=True でも prod では release ガードが効く。
+    """
+    from engine.server import DataEngineServer, LiveState
+    from engine.exchanges.kabusapi_auth import KabuLoginCancelledError
+
+    srv = DataEngineServer.__new__(DataEngineServer)
+    srv._mode = "live"
+    srv._live_state = LiveState.CONNECTING
+    srv._kabu_venue = None
+    srv._dev_kabu_login_allowed = True  # debug ビルドのつもり
+    srv._dev_kabu_trade_password_allowed = True
+    srv._kabu_login_inflight = asyncio.Lock()
+
+    class _FakeOutbox:
+        def __init__(self):
+            self.items: list[dict] = []
+        def append(self, item):
+            self.items.append(item)
+        def count(self):
+            return 1
+
+    srv._outbox = _FakeOutbox()
+
+    captured: dict = {}
+
+    class _FakeKabuVenue:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+        async def startup_login(self):
+            raise KabuLoginCancelledError(0, "skip")
+        def clear(self):
+            pass
+
+    monkeypatch.setattr("engine.server.KabuStationVenue", _FakeKabuVenue)
+    monkeypatch.setattr("engine.server.resolve_kabu_env", lambda: "prod")
+
+    async def _run():
+        await srv._startup_kabu_station(request_id="req-env-2")
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
+    assert captured.get("env") == "prod"
+    assert captured.get("dev_login_allowed") is False, (
+        "prod env では dev_login_allowed は強制 False になるべき"
+    )
+    # 取引パスワード dev も同様にゼロ化（誤発注リスク低減）
+    assert captured.get("dev_trade_password_allowed") is False
 
 
 @pytest.mark.demo_kabu
@@ -344,6 +455,72 @@ def test_kabu_ready_capabilities_include_kabu_station(monkeypatch):
     assert "kabu_station" in caps.get("supported_venues", []), (
         f"supported_venues に kabu_station がない; got: {caps.get('supported_venues')}"
     )
+    # P4-3: is_production フラグの存在確認（デフォルト = False, verify env）
+    assert "is_production" in kabu_cap, (
+        f"kabu_station capabilities に is_production がない; got: {kabu_cap}"
+    )
+    assert kabu_cap["is_production"] is False
+
+
+@pytest.mark.demo_kabu
+def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
+    """P4-3: KABU_ALLOW_PROD=1 + KABU_ENV=prod のとき capabilities.is_production=True。"""
+    import asyncio
+    import orjson
+    from engine.server import DataEngineServer, SCHEMA_MAJOR, SCHEMA_MINOR
+    from engine.schemas import Hello
+
+    monkeypatch.setenv("KABU_ALLOW_PROD", "1")
+    monkeypatch.setenv("KABU_ENV", "prod")
+
+    srv = DataEngineServer.__new__(DataEngineServer)
+    srv._mode = "live"
+    srv._workers = {}
+    srv._engine_session_id = "00000000-0000-0000-0000-000000000000"
+    srv._connections = set()
+    srv._token = "test-token"
+
+    sent: list[dict] = []
+    hello = Hello(
+        token="test-token",
+        mode="live",
+        schema_major=SCHEMA_MAJOR,
+        schema_minor=SCHEMA_MINOR,
+        client_version="test",
+    )
+
+    class _FakeWs:
+        async def recv(self):
+            return orjson.dumps(hello.model_dump(mode="json")).decode()
+
+        async def send(self, data):
+            sent.append(orjson.loads(data))
+
+        async def close(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr("engine.server.nautilus_capabilities", lambda _mode: {})
+
+    async def _run():
+        await srv._handshake(_FakeWs())
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
+    ready_msg = next((m for m in sent if m.get("event") == "Ready"), None)
+    assert ready_msg is not None
+    venue_caps = ready_msg["capabilities"]["venue_capabilities"]
+    assert venue_caps["kabu_station"]["is_production"] is True
+
+
+def test_schema_minor_is_20_after_p4_3():
+    """P4-3: capabilities に is_production を追加したので SCHEMA_MINOR を 19 → 20 に bump。"""
+    from engine.schemas import SCHEMA_MINOR
+
+    assert SCHEMA_MINOR == 20
 
 
 @pytest.mark.demo_kabu

@@ -79,7 +79,10 @@ def main() -> int:
         return _run_gui()
     except Exception as exc:  # pragma: no cover
         sys.stderr.write(f"trade dialog crashed: {exc}\n")
-        _emit_result({"status": "cancelled"})
+        try:
+            _emit_result({"status": "cancelled"})
+        except Exception:
+            pass  # stdout が既に閉じている場合は無視
         return 1
 
 

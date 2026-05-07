@@ -1609,9 +1609,9 @@ class LiveSession:
             # HIGH-A: VenueLoginCancelled を受信したら即座に ConnectionError を raise する。
             # kabu ダイアログキャンセル時に server.py が VenueLoginCancelled を emit するため、
             # ここで捕捉しないと 30 秒 timeout まで待機してしまう。
-            if event == "VenueLoginCancelled" and (
-                evt_request_id == request_id or evt_request_id is None
-            ):
+            # server.py は VenueLoginCancelled に必ず request_id を付けるため、
+            # request_id 一致のみでフィルタする（is None アームは不要）。
+            if event == "VenueLoginCancelled" and evt_request_id == request_id:
                 raise ConnectionError(
                     f"LiveSession.login: login cancelled by user (venue={self._venue!r})"
                 )

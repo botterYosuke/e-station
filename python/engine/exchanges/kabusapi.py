@@ -53,10 +53,13 @@ class KabuStationVenue:
 
     def _get_order_client(self):
         """KabuOrderClient を遅延構築して返す。"""
+        if not self._token:
+            from engine.exchanges.kabusapi_auth import KabuApiError
+            raise KabuApiError(0, "KabuStationVenue: no token — call startup_login() first")
         if self._order_client is None:
             from engine.exchanges.kabusapi_orders import KabuOrderClient
             self._order_client = KabuOrderClient(
-                token=self._token or "",
+                token=self._token,
                 env=self._env,
                 trade_password_holder=self._trade_password_holder,
                 dev_trade_password_allowed=self._dev_trade_password_allowed,
@@ -78,6 +81,10 @@ class KabuStationVenue:
     def set_token(self, token: str) -> None:
         self._token = token
         self._order_client = None  # invalidate when token changes
+
+    def is_trade_locked_out(self) -> bool:
+        """取引パスワードが lockout 中かどうかを返す。"""
+        return self._trade_password_holder.is_locked_out()
 
     def clear(self) -> None:
         self._token = None

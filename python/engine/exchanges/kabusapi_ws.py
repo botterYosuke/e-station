@@ -56,6 +56,7 @@ async def connect(
                 url,
                 ping_interval=20,
                 ping_timeout=10,
+                compression=None,  # kabuStation が permessage-deflate を受け入れた場合の RSV1 バグ回避
             ) as ws:
                 consecutive_failures = 0
                 # 再接続後は全件 re-register (U6)

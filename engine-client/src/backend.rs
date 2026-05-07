@@ -127,6 +127,8 @@ impl EngineClientBackend {
             MarketKind::InversePerps => "inverse_perp".to_string(),
             MarketKind::Spot => "spot".to_string(),
             MarketKind::Stock => "stock".to_string(),
+            MarketKind::Future => "future".to_string(),
+            MarketKind::Option => "option".to_string(),
         }
     }
 

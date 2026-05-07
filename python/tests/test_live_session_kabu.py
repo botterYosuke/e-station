@@ -223,6 +223,75 @@ def test_login_kabu_station_raises_on_venue_login_cancelled(monkeypatch):
 
 
 @pytest.mark.demo_kabu
+def test_login_cancelled_with_wrong_request_id_is_ignored(monkeypatch):
+    """MEDIUM-C: wrong request_id の VenueLoginCancelled は _login_attach() が無視する。
+
+    別 client 由来の VenueLoginCancelled が broadcast されても、
+    request_id 不一致で ConnectionError を raise しないことを確認する。
+    mock engine は wrong request_id の cancel を送ってから正しい VenueReady を送る。
+    """
+    import uuid
+
+    class _MockEngineWrongCancel(_MockEngine):
+        async def _handler(self, ws):
+            try:
+                hello_raw = await ws.recv()
+                self.received.append(orjson.loads(hello_raw))
+            except Exception:
+                return
+
+            ready = {
+                "event": "Ready",
+                "schema_major": SCHEMA_MAJOR,
+                "schema_minor": SCHEMA_MINOR,
+                "engine_version": "test",
+                "engine_session_id": "00000000-0000-0000-0000-000000000000",
+                "capabilities": {},
+            }
+            await ws.send(orjson.dumps(ready).decode())
+
+            try:
+                async for raw in ws:
+                    msg = orjson.loads(raw)
+                    self.received.append(msg)
+                    if msg.get("op") == "RequestVenueLogin":
+                        # 別 client の cancel (wrong request_id) を先に送る
+                        wrong_cancel = {
+                            "event": "VenueLoginCancelled",
+                            "venue": "kabu_station",
+                            "request_id": str(uuid.uuid4()),  # 別の ID
+                        }
+                        await ws.send(orjson.dumps(wrong_cancel).decode())
+                        # その後に正しい VenueReady を送る
+                        rid = msg.get("request_id")
+                        ready_resp = {
+                            "event": "VenueReady",
+                            "venue": "kabu_station",
+                            "request_id": rid,
+                        }
+                        await ws.send(orjson.dumps(ready_resp).decode())
+            except Exception:
+                pass
+
+    port = _free_port()
+    server = _MockEngineWrongCancel(port)
+    server.start()
+    try:
+        monkeypatch.setenv("FLOWSURFACE_ENGINE_TOKEN", "tok")
+        with LiveSession(
+            venue="kabu_station",
+            demo=True,
+            force_mode="attach",
+            attach_endpoint=f"ws://127.0.0.1:{port}/",
+            attach_timeout_s=2.0,
+        ) as s:
+            s.login()  # wrong cancel は無視され VenueReady でログイン成功
+            assert s.is_logged_in is True
+    finally:
+        server.stop()
+
+
+@pytest.mark.demo_kabu
 def test_venue_not_overridden_when_already_logged_in(monkeypatch):
     """MEDIUM-B: _logged_in=True の状態で login(venue="other") を呼んでも _venue が変わらない。
 

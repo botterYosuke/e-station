@@ -191,7 +191,7 @@ pub fn calc_search_rank(ticker: &Ticker, query: &str) -> Option<SearchRank> {
 
 pub fn market_suffix(market: MarketKind) -> &'static str {
     match market {
-        MarketKind::Spot | MarketKind::Stock => "",
+        MarketKind::Spot | MarketKind::Stock | MarketKind::Future | MarketKind::Option => "",
         MarketKind::LinearPerps | MarketKind::InversePerps => "P",
     }
 }
