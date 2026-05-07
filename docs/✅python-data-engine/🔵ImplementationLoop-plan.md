@@ -89,22 +89,28 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
   - `received` リストでテスト側からの受信確認をサポート
 - テスト: `python/tests/test_mock_ipc_server_basic.py` — 5 tests PASS、全体 0.27s（< 1s ✅）
 
-### 🔴 B3: `HeatmapShader` 状態整理 — **未着手（設計ドキュメント未作成）**
+### ✅ B3: `HeatmapShader` 状態整理 — **完了（2026-05-07）**
 
-- 文書: gui-triple-state Phase 2
+- 文書: `docs/✅python-data-engine/🔵heatmap-phase2-ownership.md`（作成済み）
+- review-fix-loop: R1（4 reviewers）→ R2（rust-reviewer）、MEDIUM+ ゼロで収束
 
-> ⚠ **着手前提**: `docs/✅python-data-engine/🔵heatmap-phase2-ownership.md`（仮称）が作成され、`follow/pause/live 遷移`・`CanvasInvalidation`・`RebuildPolicy`・`camera` の4グループそれぞれの移行先 owner が確定していることが B3 着手の必須条件。この設計ドキュメントなしに B3 に着手してはならない。A2 完了後すぐに着手するのではなく、Phase 2 owner 設計を先行させること。
+**完了した作業:**
+- `CanvasInvalidation` struct 削除（`ui.rs`）→ 直接 `cache.clear()` に置き換え
+- `RebuildPolicy` enum 削除（`view.rs`）→ `RebuildSignal` enum に置き換え
+- `last_interaction`, `needs_immediate_rebuild`, `force_rebuild_from_historical` の3フィールド削除
+- `RebuildSignal { Idle | Debouncing { since, force_historical } | Immediate { force_historical } }` 追加
+- `RebuildDecision { Idle | OverlaysOnly | Full }` 追加（旧 `(bool,bool)` を型安全化）
+- `rebuild_all_immediate()` ヘルパー追加（BoundsChanged・ybin_changed のフラグリセット漏れバグ修正）
+- `camera_scale() -> f32` 公開メソッド追加
+- `HeatmapViewState { camera_scale: f32 }` 公開 struct 追加
+- 11 件の新テスト追加（RebuildSignal 境界条件 + acceptance test）
 
-- 作業（未着手）:
-  - `ViewState` に `camera_offset: Vector` / `camera_scale: f32` を追加し GPU カメラと統合
-  - `CanvasInvalidation` / `RebuildPolicy` フィールドを削除
-  - `HeatmapShader::update()` が `ViewState` を更新する Elm メッセージ経由に変更
-- 依存: A2 完了 + `🔵heatmap-phase2-ownership.md` 作成・承認
-- リスク: **中**（最も影響範囲が広い）
-- 完了条件: `HeatmapShader` フィールド数 75 以下、ズーム・パン操作で `ViewState.scaling` と GPU カメラが常に同値
+**残作業（Phase 2-A、次フェーズ）:**
+- `scene.camera` → `HeatmapViewState` への委譲（`camera_offset`, `cell_width_world` 等）
+- これにより展開フィールド数の 75 以下目標を達成できる
 
 **Stage B 完了条件**: `HeatmapShader` フィールド 75 以下 + `MockIPCServer` 基本動作 1 秒以内 PASS  
-→ **B3 が未着手のため Stage B は部分完了。**
+→ **B2 ✅ + B3 ✅。フィールド数 75 以下は Phase 2-A 残作業で達成予定。**
 
 ---
 
@@ -278,7 +284,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
                          │
                          ├─[B1 KabuStationAdapter]──────────────── ✅ 完了
                          ├─[B2 MockIPCServer S1]─────────────────── ✅ 完了
-                         └─[B3 HeatmapShader ★]──────────────────── 🔴 未着手（設計Doc未作成）
+                         └─[B3 HeatmapShader ★]──────────────────── ✅ 完了
                                               │
                                               ├─[C1 mappers.py + adapter→wire定義]── ✅ 完了（server.py配線は未）
                                               ├─[C2 S2+S3 smoke整理]────────────── ✅ 完了
@@ -314,18 +320,15 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 ### 次に着手すべき作業（優先順）
 
-1. **`🔵heatmap-phase2-ownership.md` 作成**（B3 着手の必須条件）
-   - follow/pause/live 遷移・CanvasInvalidation・RebuildPolicy・camera の4グループの owner table を確定する
-   - このドキュメントなしに B3 を開始してはならない
+1. **A2 残作業: `update()` 委譲**（`src/main.rs` ~3800 行の大規模作業）
+   - Message enum 分割は完了。`update()` のハンドラをサブ関数に委譲して 400 行以内へ
+   - `Engine` / `Venue` / `Replay` / `Dashboard` / `Window` / `Menu` / `Settings` の 7 グループごとに委譲
 
-2. **A2: Message enum 分割**（main.rs 7,816 行の大規模作業）
-   - 着手前に `rg "Message::" src/ --count` で最新バリアント数を再確認
-   - `Engine` / `Venue` / `Replay` / `Dashboard` / `Window` / `Menu` / `Settings` の 7 グループに nested 化
-   - 38 ファイル横断・複数日の作業
+2. **B3 Phase 2-A: `scene.camera` → `HeatmapViewState` 委譲**（フィールド数 75 以下目標）
+   - `camera_offset: [f32; 2]`, `camera_scale: f32`, `cell_width_world: f32`, `cell_height_world: f32` を `HeatmapViewState` に移す
+   - `HeatmapViewState` を Elm `ViewState` に統合
 
-3. **B3: HeatmapShader 状態整理**（`🔵heatmap-phase2-ownership.md` + A2 完了後）
-
-4. **C1 server.py 配線**（B1+B3 完了後）
+3. **C1 server.py 配線**（B1+B3 完了後）
    - worker → adapter model → mapper → wire DTO → outbox のパスを実際に wire-up する
    - `test_server_adapter_integration.py` 統合テストが必要
 
