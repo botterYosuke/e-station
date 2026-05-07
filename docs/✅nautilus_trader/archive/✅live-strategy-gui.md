@@ -162,7 +162,7 @@ pub enum Action {
 
 ---
 
-## Phase 2: `main.rs` の状態拡張
+## ✅ Phase 2: `main.rs` の状態拡張
 
 ### App 状態フィールド追加
 
@@ -200,7 +200,7 @@ StopLiveStrategy,
 
 ---
 
-## Phase 3: `Action::OpenFile` に live 分岐を追加
+## ✅ Phase 3: `Action::OpenFile` に live 分岐を追加
 
 現行の `Action::OpenFile` ハンドラ ([main.rs L3823](../../src/main.rs#L3823)) は
 replay のときだけ `.py` picker を出す。live のときは JSON picker へ fallthrough する。
@@ -238,7 +238,7 @@ Action::OpenFile => {
 
 ---
 
-## Phase 4: `NativeOpenStrategyPicked` ドロップガード削除と live 分岐追加
+## ✅ Phase 4: `NativeOpenStrategyPicked` ドロップガード削除と live 分岐追加
 
 ### 変更箇所: `main.rs` — `Message::NativeOpenStrategyPicked` ハンドラ
 
@@ -267,7 +267,7 @@ if app_mode() == engine_client::dto::AppMode::Live {
 
 ---
 
-## Phase 5: `EngineStarted` の live 分岐追加
+## ✅ Phase 5: `EngineStarted` の live 分岐追加
 
 `map_engine_event()` 内（[main.rs 近傍](../../src/main.rs#L1580)）:
 
@@ -297,7 +297,7 @@ Message::LiveStrategyStarted { strategy_id, ts_event_ms } => {
 
 ---
 
-## Phase 6: `EngineStopped` — strategy_id 突き合わせで live 戦略停止を検知
+## ✅ Phase 6: `EngineStopped` — strategy_id 突き合わせで live 戦略停止を検知
 
 > **背景**: 現行コードは live モードの `EngineStopped` に対して `None`（no-op）を返す。
 > コメントには「live の EngineStopped は replay 完了ではなく engine restart を意味する」
@@ -350,7 +350,7 @@ Message::LiveEngineStoppedEvent { strategy_id } => {
 
 ---
 
-## Phase 7: `LiveStrategyFormMsg` ハンドラ + `StartEngine` 送信
+## ✅ Phase 7: `LiveStrategyFormMsg` ハンドラ + `StartEngine` 送信
 
 ```rust
 Message::LiveStrategyFormMsg(msg) => {
@@ -412,7 +412,7 @@ Message::LiveStrategyFormMsg(msg) => {
 
 ---
 
-## Phase 8: `StopLiveStrategy` ハンドラ
+## ✅ Phase 8: `StopLiveStrategy` ハンドラ
 
 ```rust
 Message::StopLiveStrategy => {
@@ -440,7 +440,7 @@ Message::StopLiveStrategy => {
 
 ---
 
-## Phase 9: メニューバー — `LiveBarState` + 2 段目レイアウト
+## ✅ Phase 9: メニューバー — `LiveBarState` + 2 段目レイアウト
 
 > **ビルド依存注意**: Phase 9 は 2 段階に分割する。
 >
@@ -656,7 +656,7 @@ Phase 7 のコードに含まれる（`self.menu_bar.live_bar.strategy_file_stem
 
 ---
 
-## Phase 10: `view()` — modal レイヤー追加
+## ✅ Phase 10: `view()` — modal レイヤー追加
 
 `second_password_modal` → `replay_form_modal` → `live_strategy_form_modal` の順で重ねる:
 
