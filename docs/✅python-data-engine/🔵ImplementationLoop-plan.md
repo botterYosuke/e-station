@@ -43,13 +43,11 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 - テスト: `python/tests/test_models.py` — 19 tests PASS
 - 既存コードへの変更: **なし**
 
-### 🟡 A2: `Message` enum 分割 → `update()` 委譲化 — **部分完了（enum 分割済み・委譲未着手）**
+### ✅ A2: `Message` enum 分割 → `update()` 委譲化 — **完了（2026-05-07）**
 
 - 文書: gui-triple-state Phase 1
-- 作業: 158 バリアント（2026-05-07 実測）のフラット enum を `Engine` / `Venue` / `Replay` / `Dashboard` / `Window` / `Menu` / `Settings` グループに分割（nested enum）。`main.rs::update()` を委譲ハブに縮小。着手前に `rg "Message::" src/ --count` で最新バリアント数を再確認すること。
-- 実施済み（2026-05-07）: `src/messages.rs` 新設、7 グループ nested enum 実装完了、`cargo test` 全 PASS、`cargo clippy` 警告なし
-- 残作業: `update()` をハンドラメソッドに委譲（現在 ~3,800 行 → 目標 400 行以内）
-- 完了条件: `update()` 400 行以内、`cargo clippy` 警告なし
+- 実施内容: `src/messages.rs` 新設、7 グループ nested enum 実装、`update()` を 11 行の dispatch hub に縮小、7 つの `handle_*` メソッドに委譲
+- 完了条件達成: `update()` 11 行（400 行以内）、`cargo test` 全 PASS、`cargo clippy -- -D warnings` 警告なし
 
 ### ✅ A3: `Ladder.insert_depth()` Elm 管理移行 — **完了（不変条件すでに満足）**
 
@@ -62,7 +60,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 > ⚠ **A2/A3 の実行順序**: 計画上は並列可としているが、depth routing の実装を調査した結果、**A3 は A2 完了後に実施することを推奨**する。現行の depth fanout は `main.rs` → `dashboard.rs::ingest_depth()` → `ladder.rs::insert_depth()` という routing に乗っており、A3 で `Message::LadderScroll { pane_id, delta }` を新設すると `Message` enum への追加と routing 再設計が同時に発生する。A2 で Message enum の構造が固まった後に A3 を実施した方が、競合と二重修正を避けられる。`cargo test` の失敗が A2 由来か A3 由来か切り分けやすくもなる。
 
 **Stage A 完了条件**: `cargo test --workspace` + `pytest` 全 PASS + `cargo clippy -- -D warnings` 警告なし + `map_engine_event_to_message()` 網羅テスト PASS  
-→ **A2 の enum 分割は完了。`update()` 委譲（400 行目標）が残作業。完了後に改めて Stage A 完了条件を確認すること。**
+→ **A2 完了。Stage A 完了条件（cargo test + clippy 全 PASS）達成。**
 
 ---
 
@@ -275,7 +273,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 2026-05-07
  │
  ├─[A1 Python]──────────────────────────────── ✅ 完了
- ├─[A2 Rust: Message分割]─────────────────────── 🟡 部分完了（enum分割済/委譲未）
+ ├─[A2 Rust: Message分割]─────────────────────── ✅ 完了
  └─[A3 Rust: Ladder scroll]──────────────────── ✅ 不変条件確認済（追加実装不要）
                          │
                          ├─[B1 KabuStationAdapter]──────────────── ✅ 完了
@@ -298,8 +296,8 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 | 指標 | 2026-05-07 着手前 | 2026-05-07 現在 | 目標 |
 |------|------|------|------|
 | `main.rs` 総行数 | 7,447 行 | 7,816 行（変更なし） | 4,000 行以下 |
-| `update()` 行数 | 3,579 行 | ~3,800 行（inline handler 維持） | 400 行以下 |
-| `Message` バリアント数（フラット） | 158（2026-05-07 実測） | 7 グループ nested enum（完了） | グループ 7 以下（nested enum 再設計） |
+| `update()` 行数 | 3,579 行 | 11 行（dispatch hub）✅ | 400 行以下 |
+| `Message` バリアント数（フラット） | 158（2026-05-07 実測） | 7 グループ nested enum ✅ | グループ 7 以下（nested enum 再設計） |
 | `HeatmapShader` フィールド数 | 150+ | 150+（変更なし） | 75 以下 |
 | `pytest`（引数なし）実行時間 | 30〜120 秒 | 86 秒（新規 50 tests は 0.5s 以内） | 60 秒以内（実プロセス起動ゼロ） |
 | adapter boundary モデル | なし | `models.py`（4 モデル / 19 tests） | — |
