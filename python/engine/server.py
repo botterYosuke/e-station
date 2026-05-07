@@ -2958,6 +2958,20 @@ class DataEngineServer:
             "3" = 取消 → OrderCanceled
             "4" = 失効 → OrderExpired
         """
+        # N3 Phase 2: live strategy 実行中は FD/EC フレームをキューに投入する。
+        if self._mode == "live" and self._live_state == LiveState.TRADING:
+            if frame_type == "FD":
+                try:
+                    self._live_fd_queue.put_nowait(event)
+                except _stdlib_queue.Full:
+                    log.warning("live_fd_queue full, dropping FD frame")
+                return
+            elif frame_type == "EC":
+                try:
+                    self._live_ec_queue.put_nowait(event)
+                except _stdlib_queue.Full:
+                    log.warning("live_ec_queue full, dropping EC frame")
+
         if frame_type != "EC":
             return
 
