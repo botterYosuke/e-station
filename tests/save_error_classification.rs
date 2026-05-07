@@ -1,4 +1,4 @@
-﻿//! Structural regression pins for F4 BC-5: save error classification.
+//! Structural regression pins for F4 BC-5: save error classification.
 //!
 //! Pins the log-level contracts for the three SaveError variants:
 //! - `Cancelled`           → INFO-level (no ERROR, no WARN in the Cancelled path)
@@ -6,8 +6,13 @@
 //! - `PathGuardViolation`  → ERROR-level + "BUG:" prefix (bug detection signal)
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    let menu = std::fs::read_to_string(format!("{base}/src/handlers/menu.rs")).unwrap_or_default();
+    format!("{main}\n{window}\n{menu}")
 }
 
 // ── SaveError enum variants ────────────────────────────────────────────────────
@@ -154,9 +159,11 @@ fn save_and_exit_updates_last_saved_bytes_on_current_path_write() {
     // violating A-7's "明示 Save 直後に last_saved_bytes 更新" contract.
     let src = read_main();
 
-    let prefix = "            WindowMsg::SaveAndExit =>";
+    // Use newline-prefix to skip occurrences inside string literals in test code.
+    let needle = "\n            WindowMsg::SaveAndExit =>";
     let start = src
-        .find(prefix)
+        .find(needle)
+        .map(|i| i + 1)
         .expect("WindowMsg::SaveAndExit handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
@@ -183,9 +190,11 @@ fn save_and_exit_logs_warn_when_pending_exit_windows_is_none() {
     // with `let-else` + `log::warn!` + `return Task::none()`.
     let src = read_main();
 
-    let prefix = "            WindowMsg::SaveAndExit =>";
+    // Use newline-prefix to skip occurrences inside string literals in test code.
+    let needle = "\n            WindowMsg::SaveAndExit =>";
     let start = src
-        .find(prefix)
+        .find(needle)
+        .map(|i| i + 1)
         .expect("WindowMsg::SaveAndExit handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
@@ -254,9 +263,11 @@ fn save_and_open_file_aborts_and_keeps_current_path_when_saved_state_write_fails
     // Ok branch only: update CURRENT_PATH then restart().
     let src = read_main();
 
-    let prefix = "            WindowMsg::SaveAndOpenFile =>";
+    // Use newline-prefix to skip occurrences inside string literals in test code.
+    let needle = "\n            WindowMsg::SaveAndOpenFile =>";
     let start = src
-        .find(prefix)
+        .find(needle)
+        .map(|i| i + 1)
         .expect("WindowMsg::SaveAndOpenFile handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
@@ -370,4 +381,3 @@ fn save_state_to_disk_does_not_use_log_error() {
         "save_state_to_disk must NOT use log::error! — I/O write failure is IoError (WARN), not a bug (BC-5 / M-5)"
     );
 }
-

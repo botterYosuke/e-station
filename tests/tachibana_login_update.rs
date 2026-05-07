@@ -1,4 +1,4 @@
-﻿//! Structural pins for invariant **T35-LoginUpdate**.
+//! Structural pins for invariant **T35-LoginUpdate**.
 //!
 //! `Message::RequestTachibanaLogin` の `update()` ハンドラが保持すべき 4 つの
 //! 不変条件をソースコードレベルで固定する。
@@ -17,8 +17,11 @@
 //! | `request_login_returns_none_when_no_connection` | 未接続時に `Task::none()` で早期リターンする |
 
 fn read_handler_body() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    let src = std::fs::read_to_string(path).expect("read src/main.rs");
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main = std::fs::read_to_string(format!("{base}/src/main.rs")).expect("read src/main.rs");
+    let venue =
+        std::fs::read_to_string(format!("{base}/src/handlers/venue.rs")).unwrap_or_default();
+    let src = format!("{main}\n{venue}");
 
     // `Message::RequestTachibanaLogin` アームの開始位置を見つける。
     let needle = "VenueMsg::RequestTachibanaLogin(trigger)";
@@ -129,4 +132,3 @@ fn request_login_returns_none_when_no_connection() {
          co-located with the connection check. T35-LoginUpdate."
     );
 }
-

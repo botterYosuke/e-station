@@ -137,8 +137,12 @@ fn with_dropdown_overlay_uses_bar_height_constant_for_top_offset() {
 // additions trigger a compile error.
 #[test]
 fn main_menu_bar_handler_match_is_exhaustive_without_wildcard() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    let src = std::fs::read_to_string(path).expect("failed to read src/main.rs");
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let menu_handler =
+        std::fs::read_to_string(format!("{base}/src/handlers/menu.rs")).unwrap_or_default();
+    let src = format!("{main}\n{menu_handler}");
     let handler_start = src
         .find("MenuMsg::Bar(bar_msg) =>")
         .expect("MenuBar handler must exist");
@@ -425,16 +429,20 @@ fn to_native_action_function_exists() {
 
 #[test]
 fn esc_dismiss_is_wired_in_go_back_handler() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    let src = std::fs::read_to_string(path)
-        .expect("failed to read src/main.rs")
-        .replace("\r\n", "\n");
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window_handler =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    let src = format!("{main}\n{window_handler}").replace("\r\n", "\n");
     // The GoBack handler must dismiss the Linux menu bar (cfg-gated)
     let go_back_start = src
         .find("WindowMsg::GoBack =>")
         .expect("WindowMsg::GoBack handler must exist in main.rs");
     let after = &src[go_back_start..];
-    let end = after.find("\n            WindowMsg::").unwrap_or(after.len());
+    let end = after
+        .find("\n            WindowMsg::")
+        .unwrap_or(after.len());
     let body = &after[..end];
     assert!(
         body.contains("menu_bar") && body.contains("BarMessage::Dismiss"),

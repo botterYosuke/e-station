@@ -1,4 +1,4 @@
-﻿//! 計画書テスト方針の 8 テスト（kabu venue login state machine + UI 配線）。
+//! 計画書テスト方針の 8 テスト（kabu venue login state machine + UI 配線）。
 //!
 //! `Flowsurface` はバイナリクレートでフル構造体インスタンス化が困難なため、
 //! 本ファイルは update()/restart()/EngineConnected ハンドラを
@@ -10,8 +10,13 @@
 // ── Source helpers ────────────────────────────────────────────────────────────
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main = std::fs::read_to_string(format!("{base}/src/main.rs")).expect("read src/main.rs");
+    let venue =
+        std::fs::read_to_string(format!("{base}/src/handlers/venue.rs")).unwrap_or_default();
+    let engine =
+        std::fs::read_to_string(format!("{base}/src/handlers/engine.rs")).unwrap_or_default();
+    format!("{main}\n{venue}\n{engine}")
 }
 
 fn scan_brace_body(src: &str, needle: &str, fallback_bytes: Option<usize>) -> String {
@@ -213,4 +218,3 @@ fn kabu_chip_wired_to_request_kabu_login() {
         "status_bar must wire kabu chip to Message::RequestKabuLogin, not RequestTachibanaLogin"
     );
 }
-

@@ -1,4 +1,4 @@
-﻿//! Structural regression pins for F3: `CURRENT_PATH` static.
+//! Structural regression pins for F3: `CURRENT_PATH` static.
 //!
 //! Pins the invariants documented in `fix-save-menu.md §F3-DoD`:
 //! - `CURRENT_PATH` is a `static Mutex<Option<PathBuf>>`
@@ -13,8 +13,13 @@
 //! files in this workspace) provide structural guarantees without a live runtime.
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    let menu = std::fs::read_to_string(format!("{base}/src/handlers/menu.rs")).unwrap_or_default();
+    format!("{main}\n{window}\n{menu}")
 }
 
 // ── CURRENT_PATH static ───────────────────────────────────────────────────────
@@ -250,4 +255,3 @@ fn action_save_handler_reads_current_path() {
         "Action::Save arm must read CURRENT_PATH to determine the target path"
     );
 }
-

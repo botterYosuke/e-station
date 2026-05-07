@@ -105,18 +105,22 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 - `HeatmapViewState { camera_scale: f32 }` 公開 struct 追加
 - 11 件の新テスト追加（RebuildSignal 境界条件 + acceptance test）
 
-**残作業（Phase 2-A、次フェーズ）:**
-- `scene.camera` → `HeatmapViewState` への委譲（`camera_offset`, `cell_width_world` 等）
-- これにより展開フィールド数の 75 以下目標を達成できる
+**Phase 2-A 完了確認（2026-05-07）:**
+- `HeatmapViewState { camera_scale, camera_offset, cell_width_world, cell_height_world }` 定義済み（`heatmap.rs:161-166`）
+- `view_state()` / `apply_view_state()` 実装済み（`heatmap.rs:477-493`）
+- Elm 側 `Content::ShaderHeatmap.view_state: Option<HeatmapViewState>` 追加済み（`pane.rs:2287`）
+- インタラクション後に `*view_state = Some(c.view_state())` で更新済み（`pane.rs:1844`）
+- `HeatmapShader` フィールド数: **25**（目標 75 以下を大幅に達成）
+- 委譲 API・Elm 統合とも完了。B3 Phase 2-A を ✅ 完了とする。
 
 **Stage B 完了条件**: `HeatmapShader` フィールド 75 以下 + `MockIPCServer` 基本動作 1 秒以内 PASS  
-→ **B2 ✅ + B3 ✅。フィールド数 75 以下は Phase 2-A 残作業で達成予定。**
+→ **B2 ✅ + B3 ✅ + Phase 2-A ✅。フィールド数 25（達成）。Stage B 完全完了。**
 
 ---
 
 ## Stage C — ✅ 部分完了（2026-05-07）
 
-### ✅ C1: `mappers.py` 追加・adapter→wire DTO 変換層の定義 — **完了（配線は次フェーズ）**
+### ✅ C1: `mappers.py` 追加・adapter→wire DTO 変換層 + server.py 配線 — **完了（2026-05-08）**
 
 - 文書: adapter-type-boundary Step 3
 - 実装済み: `python/engine/mappers.py`
@@ -126,10 +130,26 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
   - Decimal の指数表記（`1E-4`）を抑止（`format(d, "f")` を使用）
   - `.model_dump(mode="json")` 直結禁止の設計境界を維持
 - テスト: `python/tests/test_mappers.py` — 9 tests PASS（wire compatibility・JSON dump 形式確認を含む）
-- **注意**: `server.py` の配信パスを mapper 経由に差し替える作業（本来の C1 完成形）はまだ未実施。
-  mapper の定義と型安全な変換層が揃った状態。server.py 側の wire-up は B3 完了後に実施する。
+
+**server.py 配線（2026-05-08 完了）:**
+- `python/engine/kabu_push_pipeline.py` 新設（純粋関数、I/O なし・独立テスト可）
+  - `kabu_board_to_wire_dict()` — Raw kabu PUSH 板 JSON → DepthSnapshot wire dict
+  - `kabu_execution_to_wire_dict()` — Raw kabu PUSH JSON → Trades wire dict（1 件バッチ）
+  - kabu PUSH には ssid/seq がないため server 層が補充する設計を明示
+- `server.py` に追加:
+  - `_kabu_adapter: KabuStationAdapter`（ログイン前から空で保持）
+  - `_kabu_push_ssid: str | None`（VenueReady 後に `{engine_session_id}:kabu_push` で採番）
+  - `_kabu_push_seq: int`（PUSH ごとに単調増加）
+  - `_on_kabu_board_push(raw)` — 板スナップショット PUSH → pipeline → outbox
+  - `_on_kabu_trade_push(raw)` — 約定 PUSH → pipeline → outbox
+  - `_clear_kabu_session()` で `_kabu_push_ssid = None` にリセット
+- テスト: `python/tests/test_server_adapter_integration.py` — 16 tests PASS
 - IPC スキーマ（`SCHEMA_MAJOR` / `SCHEMA_MINOR`）は変更なし ✅
-- 依存: B1 完了後 ✅
+
+**残作業（次フェーズ C1-next）:**
+- `Subscribe(venue="kabu_station")` コマンドを受け付け、`RegisterSet` 動的更新 + kabu WS PUSH ループ起動
+- kabu PUSH WS（`kabusapi_ws.connect()`）を `_startup_kabu_station()` 内で開始する
+- `_on_kabu_board_push` / `_on_kabu_trade_push` は既に実装済みなので WS ループ追加のみ
 
 ### ✅ C2: IPC プロトコル網羅 (S2) + smoke 整理 (S3) — **完了**
 
@@ -324,11 +344,12 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
    - Message enum 分割は完了。`update()` のハンドラをサブ関数に委譲して 400 行以内へ
    - `Engine` / `Venue` / `Replay` / `Dashboard` / `Window` / `Menu` / `Settings` の 7 グループごとに委譲
 
-2. **B3 Phase 2-A: `scene.camera` → `HeatmapViewState` 委譲**（フィールド数 75 以下目標）
-   - `camera_offset: [f32; 2]`, `camera_scale: f32`, `cell_width_world: f32`, `cell_height_world: f32` を `HeatmapViewState` に移す
-   - `HeatmapViewState` を Elm `ViewState` に統合
+2. ~~**B3 Phase 2-A: `scene.camera` → `HeatmapViewState` 委譲**~~ — ✅ 2026-05-07 完了確認
+   - `HeatmapViewState` 定義・`view_state()`/`apply_view_state()` 実装・Elm 側 `view_state` フィールドすべて実装済み
+   - `HeatmapShader` フィールド数 25（目標 75 以下）
 
-3. **C1 server.py 配線**（B1+B3 完了後）
+3. ~~**C1 server.py 配線**~~ — ✅ 2026-05-08 完了
+   - `kabu_push_pipeline.py` 新設 + server.py メソッド追加 + 16 tests PASS
    - worker → adapter model → mapper → wire DTO → outbox のパスを実際に wire-up する
    - `test_server_adapter_integration.py` 統合テストが必要
 

@@ -14,6 +14,12 @@
 //! source-scan technique as `multiinst_replay_pane_routing.rs`.
 
 const SOURCE: &str = include_str!("../src/main.rs");
+const HANDLER_REPLAY: &str = include_str!("../src/handlers/replay.rs");
+const HANDLER_ENGINE: &str = include_str!("../src/handlers/engine.rs");
+
+fn combined_source() -> String {
+    format!("{SOURCE}\n{HANDLER_REPLAY}\n{HANDLER_ENGINE}")
+}
 
 fn extract_function_body<'a>(source: &'a str, sig_marker: &str) -> Option<&'a str> {
     let start = source.find(sig_marker)?;
@@ -38,14 +44,17 @@ fn extract_function_body<'a>(source: &'a str, sig_marker: &str) -> Option<&'a st
     None
 }
 
-/// Window over the `Message::ReplayDataLoaded` arm in `update()` (the *handler*,
+/// Window over the `ReplayMsg::DataLoaded` arm in the handler (the *handler*,
 /// not the variant declaration nor the dispatcher).
-fn handler_window() -> &'static str {
-    let handler_start = SOURCE
+fn handler_window() -> String {
+    let src = combined_source();
+    let handler_start = src
         .rfind("ReplayMsg::DataLoaded {")
         .expect("ReplayMsg::DataLoaded arm in update() not found");
-    let rest = &SOURCE[handler_start..];
-    &rest[..rest.len().min(6_000)]
+    let rest = &src[handler_start..];
+    let max = rest.len().min(6_000);
+    let safe_max = (0..=max).rev().find(|&i| rest.is_char_boundary(i)).unwrap_or(0);
+    rest[..safe_max].to_string()
 }
 
 // 1. drain_all_registered unit logic — covered in
@@ -250,12 +259,16 @@ fn session_level_buying_power_pane_is_registered_for_drain() {
 fn disconnect_resets_last_replay_session_epoch() {
     // The reset lives in the EngineRestarting(true) branch — find that branch
     // and confirm `last_replay_session_epoch = None` is inside it.
-    let restart_idx = SOURCE
+    let src = combined_source();
+    let restart_idx = src
         .find("EngineMsg::Restarting(restarting)")
         .expect("EngineMsg::Restarting handler not found");
-    let rest = &SOURCE[restart_idx..];
+    let rest = &src[restart_idx..];
     let max = rest.len().min(4_000);
-    let safe_max = (0..=max).rev().find(|&i| rest.is_char_boundary(i)).unwrap_or(0);
+    let safe_max = (0..=max)
+        .rev()
+        .find(|&i| rest.is_char_boundary(i))
+        .unwrap_or(0);
     let window = &rest[..safe_max];
     assert!(
         window.contains("last_replay_session_epoch = None"),

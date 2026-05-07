@@ -24,11 +24,9 @@ use crate::{
     },
     style::{self, Icon, icon_text},
     widget::{
-        self,
-        button_with_tooltip,
+        self, button_with_tooltip,
         chart::heatmap::{HeatmapShader, HeatmapViewState},
-        column_drag,
-        link_group_button,
+        column_drag, link_group_button,
         toast::Toast,
     },
     window::{self, Window},

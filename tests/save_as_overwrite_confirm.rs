@@ -1,4 +1,4 @@
-﻿//! Structural regression pins for F5: Save As overwrite confirmation.
+//! Structural regression pins for F5: Save As overwrite confirmation.
 //!
 //! Pins the invariants documented in `fix-save-menu.md §F5-DoD`:
 //! - `NativeSaveAsPath(Some(path))` checks whether the target file already exists
@@ -6,8 +6,12 @@
 //! - `Message::ConfirmSaveAsOverwrite` carries the confirm action
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    format!("{main}\n{window}")
 }
 
 /// Entry-point test matching `cargo test save_as_overwrite_confirm`.
@@ -138,4 +142,3 @@ fn confirm_save_as_overwrite_handler_proceeds_with_save() {
         "ConfirmSaveAsOverwrite handler must proceed with the save operation (F5)"
     );
 }
-

@@ -1,4 +1,4 @@
-﻿//! Structural regression pins for F4: dirty detection and confirm-on-exit/open.
+//! Structural regression pins for F4: dirty detection and confirm-on-exit/open.
 //!
 //! Pins the invariants documented in `fix-save-menu.md §F4-DoD`:
 //! - `last_saved_bytes: Option<Vec<u8>>` field exists (BC-9)
@@ -10,8 +10,12 @@
 //! - Auto-save does NOT write to `CURRENT_PATH` (R3)
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    format!("{main}\n{window}")
 }
 
 // ── Case 1 / BC-9: last_saved_bytes field and None-is-clean invariant ─────────
@@ -463,4 +467,3 @@ fn escape_on_confirm_clears_pending_state() {
         "GoBack with confirm_dialog must clear mode_switch_state (F7 orphan prevention; M13)"
     );
 }
-

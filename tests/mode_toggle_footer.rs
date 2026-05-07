@@ -8,8 +8,12 @@
 //!      within its own body, so the footer dispatch path cannot bypass it.
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    format!("{main}\n{window}")
 }
 
 fn read_menu() -> String {

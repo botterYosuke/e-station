@@ -1,4 +1,4 @@
-﻿//! Structural regression pins for F7: timeout / abort / send-failure behavior.
+//! Structural regression pins for F7: timeout / abort / send-failure behavior.
 //!
 //! These source-inspection tests verify that the replay→live async error paths
 //! in `src/main.rs` maintain the key invariants documented in
@@ -10,10 +10,14 @@
 //! - ModeSwitchSendFailed aborts immediately without waiting for the timeout.
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path)
-        .expect("failed to read src/main.rs")
-        .replace("\r\n", "\n")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    let replay =
+        std::fs::read_to_string(format!("{base}/src/handlers/replay.rs")).unwrap_or_default();
+    format!("{main}\n{window}\n{replay}").replace("\r\n", "\n")
 }
 
 /// Extract the handler arm body for a given Message::Window(WindowMsg::...) variant.
@@ -313,4 +317,3 @@ fn switch_mode_save_complete_save_fail_shows_dialog() {
         "SwitchModeSaveComplete save-fail path must surface a modal alert (M5)"
     );
 }
-

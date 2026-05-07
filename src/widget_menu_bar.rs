@@ -16,11 +16,11 @@ use iced::widget::{
 };
 use iced::{Element, Length};
 
-use crate::messages::MenuMsg;
 use crate::Message;
 use crate::menu::{Action, MenuEntry, ReplayControlState, actions_for_mode, replay_control_state};
 pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
 use crate::menu_bar_state::{LiveBarState, ReplayBarState};
+use crate::messages::MenuMsg;
 use crate::modal::replay_form::Granularity;
 
 /// Fixed width for each top-level menu button.  The dropdown's horizontal

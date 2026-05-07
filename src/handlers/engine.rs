@@ -1,0 +1,192 @@
+use std::sync::Arc;
+
+use iced::Task;
+
+use crate::Message;
+use crate::messages::{DashboardMsg, EngineMsg, VenueMsg};
+use crate::venue_state::VenueEvent;
+use crate::widget::toast::Toast;
+
+impl crate::Flowsurface {
+    pub(crate) fn handle_engine(&mut self, msg: EngineMsg) -> Task<Message> {
+        match msg {
+            EngineMsg::Restarting(restarting) => {
+                self.engine_restarting = restarting;
+                if restarting {
+                    self.notifications.push(Toast::error(
+                        "データエンジン再起動中 — チャートは復旧後に自動更新されます".to_string(),
+                    ));
+                    let main_window = self.main_window.id;
+                    // [R03] Clear in-flight loading on disconnect so panes don't stay
+                    // in "updating" state forever if the engine never comes back.
+                    self.buying_power_request_id = None;
+                    self.order_list_request_id = None;
+                    self.positions_request_id = None;
+                    // schema 3.14: engine プロセス再起動で session_epoch が 0 に
+                    // 巻き戻る。前回値を `None` にリセットして `Some(N) → Some(0)`
+                    // の `!=` 誤発火を防ぐ。registry の drain は不要 — 既存ロジックで
+                    // pane 構造は保たれ、次回 ReplayDataLoaded で初期遷移として扱う。
+                    self.last_replay_session_epoch = None;
+                    self.layout_manager
+                        .iter_dashboards_mut()
+                        .for_each(|dashboard| {
+                            dashboard.distribute_buying_power_loading(main_window, false);
+                            dashboard.distribute_order_list_loading(main_window, false);
+                            dashboard.distribute_positions_loading(main_window, false);
+                            dashboard.notify_engine_disconnected(main_window);
+                        });
+                }
+                // The actual backend rebuild + recovery toast are emitted
+                // by `Message::EngineConnected` so a single source of
+                // truth (the live connection) drives the swap. See
+                // T35-H9-SingleRecoveryPath.
+            }
+            EngineMsg::Connected(conn) => {
+                let was_restarting = self.engine_restarting;
+                self.engine_connection = Some(Arc::clone(&conn));
+                // In-flight requests are lost on reconnect; reset to avoid blocking
+                // future auto-fetches via the is_none() guard. Also clear loading
+                // so panes don't stay in "updating" state forever.
+                let main_window = self.main_window.id;
+                self.buying_power_request_id = None;
+                self.order_list_request_id = None;
+                self.positions_request_id = None;
+                self.active_dashboard_mut()
+                    .distribute_buying_power_loading(main_window, false);
+                self.active_dashboard_mut()
+                    .distribute_order_list_loading(main_window, false);
+                self.active_dashboard_mut()
+                    .distribute_positions_loading(main_window, false);
+
+                // Rebuild backends with the new connection and bump the generation
+                // counter so iced assigns new subscription IDs and restarts streams.
+                // D1: do NOT clear VENUE_CAPS_STORE here — old values remain as the
+                // authoritative source during the reconnect window until
+                // fetch_ticker_metadata upserts fresh entries. Clearing creates an
+                // empty-store window where caps_client_aggr() falls back to the wrong
+                // default (Hyperliquid would be misclassified as client-aggregated).
+                let mut tachibana_meta_handle = None;
+                for &(venue, name) in crate::VENUE_NAMES {
+                    let backend = Arc::new(engine_client::EngineClientBackend::new(
+                        Arc::clone(&conn),
+                        name,
+                        crate::VENUE_CAPS_STORE
+                            .get()
+                            .map(Arc::clone)
+                            .unwrap_or_else(|| {
+                                Arc::new(tokio::sync::RwLock::new(
+                                    engine_client::VenueCapsStore::new(),
+                                ))
+                            }),
+                    ));
+                    // B5: capture the Tachibana meta handle before the backend
+                    // is moved into the type-erased `AdapterHandles`. This is
+                    // the only point where the typed `Arc<EngineClientBackend>`
+                    // is available to call `ticker_meta_handle()`.
+                    if venue == exchange::adapter::Venue::Tachibana {
+                        tachibana_meta_handle = Some(backend.ticker_meta_handle());
+                    }
+                    self.handles.set_backend(venue, backend);
+                }
+                // Wire the handle into the sidebar's ticker filter so
+                // Japanese-name incremental search works after each reconnect.
+                self.sidebar
+                    .set_tachibana_meta_handle(tachibana_meta_handle);
+
+                // Re-apply current proxy state before bumping the generation so
+                // that stream-subscribe commands are enqueued after SetProxy in
+                // the engine's FIFO command channel.  Send unconditionally —
+                // including `None` — so a user-cleared proxy cannot be revived
+                // by a stale value held in the freshly spawned engine.
+                let proxy_url = self.network.proxy_cfg().map(|p| p.to_url_string());
+                if !conn.try_send_now(engine_client::dto::Command::SetProxy { url: proxy_url }) {
+                    log::warn!("Failed to queue proxy for engine reconnect");
+                }
+
+                self.handles.bump_generation();
+
+                // Also propagate to the sidebar's TickersTable so it uses
+                // the new connection for metadata/stats fetches.
+                let sidebar_refetch = self
+                    .sidebar
+                    .update_handles(self.handles.clone())
+                    .map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
+
+                if was_restarting {
+                    self.notifications
+                        .push(Toast::info("データエンジン接続を復旧しました".to_string()));
+                }
+
+                // Clear the disconnection error from all OrderEntry panes so
+                // they return to normal state after reconnect (M-1).
+                {
+                    let main_window = self.main_window.id;
+                    self.layout_manager
+                        .iter_dashboards_mut()
+                        .for_each(|dashboard| {
+                            dashboard.notify_engine_reconnected(main_window);
+                        });
+                }
+
+                // Bridge the broadcast-replay gap from BOTH directions:
+                //   - managed mode: `ProcessManager` caches post-
+                //     `apply_after_handshake` readiness internally.
+                //   - external mode (`--data-engine-url`): the
+                //     mode-agnostic `VENUE_READY_CACHE` bridge task
+                //     captured `VenueReady` between connect() and
+                //     iced's late `subscribe_events()`.
+                // Either source being `true` means the engine
+                // currently considers Tachibana ready — synthesize
+                // `VenueEvent::Ready` so the FSM bootstraps correctly.
+                // Reviewers 2026-04-26 R2 (HIGH-1) / R3 (HIGH-2).
+                let is_ready_from_manager = self
+                    .engine_manager
+                    .as_ref()
+                    .is_some_and(|m| m.try_is_venue_ready(crate::TACHIBANA_VENUE_NAME));
+                let is_ready_from_bridge =
+                    crate::cached_venue_is_ready(crate::TACHIBANA_VENUE_NAME);
+                let tachibana_synthetic = if (is_ready_from_manager || is_ready_from_bridge)
+                    && !self.tachibana_state.is_ready()
+                {
+                    Some(Task::done(Message::Venue(VenueMsg::TachibanaEvent(
+                        VenueEvent::Ready,
+                    ))))
+                } else {
+                    None
+                };
+
+                let is_kabu_ready_from_manager = self
+                    .engine_manager
+                    .as_ref()
+                    .is_some_and(|m| m.try_is_venue_ready(crate::KABU_STATION_VENUE_NAME));
+                let is_kabu_ready_from_bridge =
+                    crate::cached_venue_is_ready(crate::KABU_STATION_VENUE_NAME);
+                // KabuVenueEvent(Ready) synthesized when kabu cache is hot
+                let kabu_synthetic = if (is_kabu_ready_from_manager || is_kabu_ready_from_bridge)
+                    && !self.kabu_state.is_ready()
+                {
+                    Some(Task::done(Message::Venue(VenueMsg::KabuEvent(
+                        VenueEvent::Ready,
+                    ))))
+                } else {
+                    None
+                };
+
+                let extras = [tachibana_synthetic, kabu_synthetic];
+                let has_extras = extras.iter().any(Option::is_some);
+                if has_extras {
+                    return Task::batch(
+                        std::iter::once(Some(sidebar_refetch))
+                            .chain(extras)
+                            .flatten()
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                return sidebar_refetch;
+            }
+            EngineMsg::Noop => return Task::none(),
+            // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts
+        }
+        Task::none()
+    }
+}
