@@ -3600,12 +3600,12 @@ class DataEngineServer:
         from engine.kabu_push_pipeline import kabu_board_to_wire_dict
 
         try:
-            ssid = self._kabu_push_ssid or str(self._engine_session_id)
-            self._kabu_push_seq += 1
             ticker = str(raw.get("Symbol", ""))
             if not ticker:
                 log.warning("_on_kabu_board_push: missing Symbol field, skipping")
                 return
+            ssid = self._kabu_push_ssid or str(self._engine_session_id)
+            self._kabu_push_seq += 1
             payload = kabu_board_to_wire_dict(
                 raw,
                 adapter=self._kabu_adapter,

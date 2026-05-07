@@ -34,6 +34,7 @@
 | URL エンコード関数の適用範囲誤り | REQUEST URL 用のエンコード関数を WebSocket URL パラメータにも適用してしまい、サーバが期待する生区切り文字（カンマ等）が `%2C` に変換されてサーバがパラメータを誤解釈する | 1 |
 | EngineEvent フィールド追加時の `..` 黙示破棄 | 既存 `EngineEvent` バリアントに新フィールドを追加したとき、ディスパッチャ arm の `..` がそのフィールドを黙って捨てる。アーム存在確認テストはあるがフィールド転送確認テストがないため、新フィールドが UI に届かない | 1 |
 | セッション境界 IPC 欠如 | engine 側が「新セッション開始」を IPC で表現せず、GUI 側の per-session レジストリ（loaded / dismissed / registered の蓄積）に「リセットの契機」がユーザーの手動 dismiss しか存在しない。リプレイファイル切替・モード切替などの境界で前セッションの状態が孤児として残り、`Waiting for data...` 状態のペインが居座る。修正は engine に単調増加 epoch を持たせて `ReplayDataLoaded` に同梱し、GUI で `prev != curr` を切替検知トリガにする（schema 3.14）| 1 |
+| pipeline 直接テストによるサーバー層ロジック見逃し | pipeline 純粋関数をテストして満足し、server.py メソッド内の state 管理（seq 採番順序・Symbol ガード・ssid フォールバック）を未テスト。seq を Symbol チェック前に increment するバグを実装してもパイプラインテストは PASS した | 1 |
 
 ---
 
@@ -1844,3 +1845,63 @@ EngineEvent::ReplayDataLoaded {
    複数銘柄では動かない類のバグは `examples/multiinst_10pairs_minute.py` などの実環境確認で
    のみ検出できる。CI に統合できない場合でも、新機能追加後の受け入れチェックリストに
    「複数銘柄リプレイで N 銘柄分のペインが生成されるか目視確認」を含める。
+
+---
+
+## 2026-05-08 — kabu PUSH seq がシンボル欠損 PUSH で誤消費される（C1 adapter-type-boundary 配線）
+
+**見逃しパターン**: pipeline 直接テストによるサーバー層ロジック見逃し
+
+**不具合の概要**:
+`_on_kabu_board_push` で `self._kabu_push_seq += 1` を `Symbol` チェックより前に実行していたため、
+`Symbol` フィールドが欠損した PUSH（kabuStation の不正データや内部テスト mock の一部）を受け取るたびに
+sequence_id カウンターが消費されていた。これにより Rust 側の gap detector が
+`prev_sequence_id` との連続性チェックで「gap あり」と判断し、不要な `RequestDepthSnapshot` を
+送信するリスクがある。
+
+**修正**: `ticker = str(raw.get("Symbol", ""))` の空チェック→早期 return **後**に
+`self._kabu_push_seq += 1` を移動（`server.py:3602-3615`）。
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_server_adapter_integration.py` | `kabu_push_pipeline.py` の純粋関数を直接呼ぶため、`server.py` の `_kabu_push_seq` state management は一切経由しない |
+| `test_kabusapi_adapter.py` | adapter 単体テストのため server.py 層を通らない |
+| `test_mappers.py` | mapper 単体テストのため同上 |
+
+**追加したテスト** (`python/tests/test_server_kabu_push.py` — 17 tests):
+- `TestBoardPushSeq::test_seq_increments_on_each_call` — seq が 0→1→2 と増えること
+- `TestBoardPushSeq::test_seq_in_outbox_matches_post_increment_value` — outbox の sequence_id が increment 後の値
+- `TestBoardPushSeq::test_two_calls_produce_consecutive_seqs` — 連続呼び出しで 1, 2 になること
+- `TestBoardPushSymbolGuard::test_missing_symbol_key_skips_outbox` — Symbol なし → outbox 書き込みなし
+- `TestBoardPushSymbolGuard::test_missing_symbol_does_not_increment_seq` — Symbol なし → seq 変化なし（今回のバグを検出）
+- `TestBoardPushSymbolGuard::test_empty_symbol_string_skips_outbox` — 空 Symbol → outbox 書き込みなし
+- `TestBoardPushExceptionIsolation::test_parse_error_does_not_raise` — parse error → クラッシュしない
+- `TestBoardPushExceptionIsolation::test_parse_error_does_not_write_outbox` — parse error → outbox 変化なし
+- `TestBoardPushSsidFallback::test_explicit_ssid_is_used` — 設定済み ssid が wire に渡る
+- `TestBoardPushSsidFallback::test_ssid_fallback_to_engine_session_id_when_none` — None 時のフォールバック
+- `TestBoardPushWireDtoPath::test_outbox_dict_has_event_field` — adapter model 直 dump 禁止の明示確認
+- `TestBoardPushWireDtoPath::test_outbox_dict_has_venue_field` — 同上（venue フィールド存在）
+- `TestBoardPushWireDtoPath::test_outbox_dict_has_no_none_top_level_values` — exclude_none=True 確認
+- `TestTradePush::test_valid_push_writes_trades_event` / `test_missing_symbol_skips_outbox` /
+  `test_parse_error_does_not_raise` / `test_ssid_fallback_when_none` — trade push 同等テスト
+
+**リグレッション確認**:
+- 修正前（seq を Symbol チェック前に increment）: `test_missing_symbol_does_not_increment_seq` が FAIL ✓
+- 修正後: 17/17 PASS ✓
+- 全テストスイート: 2156 passed, 109 skipped（リグレッションなし）✓
+
+**教訓**:
+
+1. **pipeline 純粋関数テストだけでは server 層 state は守れない**: `kabu_push_pipeline.py` の
+   テストは純粋関数を直接呼ぶため、server.py の `_kabu_push_seq` increment 順序・Symbol ガード・
+   例外封じ込め・ssid フォールバックはすべてテストされない。adapter 境界を実装したら、
+   必ずそれを**呼ぶ側（server メソッド）のテスト**も書くこと。
+
+2. **state 管理のある薄いラッパーは統合テスト必須**: 「単純なラッパー」に見えても seq 採番など
+   状態管理を持つ場合は、単体テストではなく `_make_server()` パターンのサーバー層テストが必要。
+
+3. **gap recovery フィールド（sequence_id）の正当性は E2E まで通してテストする**: 採番ロジックの
+   バグは Rust 側の gap detector でしか顕在化しないため、Python 単体テストのみでは発見できない。
+   `kabu_board_to_wire_dict` の正しさと `_on_kabu_board_push` の正しさは別々にテストする。
