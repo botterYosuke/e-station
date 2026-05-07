@@ -293,7 +293,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 ---
 
-## 全体タイムライン（2026-05-07 時点）
+## 全体タイムライン（2026-05-08 更新）
 
 ```
 2026-05-07
@@ -321,7 +321,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 | 指標 | 2026-05-07 着手前 | 2026-05-07 現在 | 目標 |
 |------|------|------|------|
-| `main.rs` 総行数 | 7,447 行 | 7,816 行（変更なし） | 4,000 行以下 |
+| `main.rs` 総行数 | 7,447 行 | 4,109 行（handle_* を src/handlers/ に抽出）✅ | 4,000 行以下 |
 | `update()` 行数 | 3,579 行 | 11 行（dispatch hub）✅ | 400 行以下 |
 | `Message` バリアント数（フラット） | 158（2026-05-07 実測） | 7 グループ nested enum ✅ | グループ 7 以下（nested enum 再設計） |
 | `HeatmapShader` フィールド数 | 150+ | 150+（変更なし） | 75 以下 |
@@ -340,9 +340,9 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 ### 次に着手すべき作業（優先順）
 
-1. **A2 残作業: `update()` 委譲**（`src/main.rs` ~3800 行の大規模作業）
-   - Message enum 分割は完了。`update()` のハンドラをサブ関数に委譲して 400 行以内へ
-   - `Engine` / `Venue` / `Replay` / `Dashboard` / `Window` / `Menu` / `Settings` の 7 グループごとに委譲
+1. ~~**A2 残作業: `update()` 委譲**~~ — ✅ 2026-05-08 完了
+   - `handle_*` 7 メソッドを `src/handlers/` サブモジュール群に抽出（3,772 行削減）
+   - `main.rs` 7,881 行 → 4,109 行。`cargo test --workspace` 全 PASS
 
 2. ~~**B3 Phase 2-A: `scene.camera` → `HeatmapViewState` 委譲**~~ — ✅ 2026-05-07 完了確認
    - `HeatmapViewState` 定義・`view_state()`/`apply_view_state()` 実装・Elm 側 `view_state` フィールドすべて実装済み
