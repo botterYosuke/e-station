@@ -8,8 +8,12 @@
 //!      within its own body, so the footer dispatch path cannot bypass it.
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    format!("{main}\n{window}")
 }
 
 fn read_menu() -> String {
@@ -103,7 +107,7 @@ fn tt6_switch_mode_handler_body_contains_dirty_check_flow() {
     // The dirty check lives in SwitchModeWithSpecs (the continuation of SwitchMode).
     // Find the match arm (not the enum definition or comment).
     let handler_start = src
-        .find("Message::SwitchModeWithSpecs { target, windows } =>")
+        .find("WindowMsg::SwitchModeWithSpecs { target, windows } =>")
         .expect("SwitchModeWithSpecs handler must exist");
     let handler_body = &src[handler_start..];
     let end = handler_body.len().min(3000);

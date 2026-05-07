@@ -17,14 +17,17 @@
 //! | `request_login_returns_none_when_no_connection` | 未接続時に `Task::none()` で早期リターンする |
 
 fn read_handler_body() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    let src = std::fs::read_to_string(path).expect("read src/main.rs");
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main = std::fs::read_to_string(format!("{base}/src/main.rs")).expect("read src/main.rs");
+    let venue =
+        std::fs::read_to_string(format!("{base}/src/handlers/venue.rs")).unwrap_or_default();
+    let src = format!("{main}\n{venue}");
 
     // `Message::RequestTachibanaLogin` アームの開始位置を見つける。
-    let needle = "Message::RequestTachibanaLogin(trigger)";
+    let needle = "VenueMsg::RequestTachibanaLogin(trigger)";
     let start = src
         .find(needle)
-        .expect("Message::RequestTachibanaLogin(trigger) not found in src/main.rs");
+        .expect("VenueMsg::RequestTachibanaLogin(trigger) not found in src/main.rs");
 
     // 次の `Message::` アームの開始位置を末端とする（最大 3000 バイト）。
     // これにより他のハンドラの記述が混入しない。
@@ -32,7 +35,7 @@ fn read_handler_body() -> String {
     // 3000 バイトは 1 アーム分を確実に収める余裕値。
     let after = &src[start..];
     let end = after
-        .find("\n            Message::")
+        .find("\n            VenueMsg::")
         .map(|n| n.min(3000))
         .unwrap_or(3000.min(after.len()));
 
@@ -80,9 +83,9 @@ fn request_login_sends_request_venue_login_command() {
 fn request_login_hooks_tachibana_login_ipc_result() {
     let body = read_handler_body();
     assert!(
-        body.contains("Message::TachibanaLoginIpcResult"),
+        body.contains("Message::Venue(VenueMsg::TachibanaLoginIpcResult"),
         "Message::RequestTachibanaLogin handler must use \
-         `Message::TachibanaLoginIpcResult` as the Task::perform callback. \
+         `Message::Venue(VenueMsg::TachibanaLoginIpcResult` as the Task::perform callback. \
          Without this hook, IPC send failures do not roll back the FSM \
          from LoginInFlight to Idle, leaving the user unable to retry. \
          T35-LoginUpdate / R4 MEDIUM-2."

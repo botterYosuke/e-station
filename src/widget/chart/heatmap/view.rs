@@ -23,7 +23,8 @@ pub enum Anchor {
         scroll_ref_bucket: i64,
         render_latest_time: u64,
         x_phase_bucket: f32,
-        frozen_base_price: Option<Price>,
+        /// Guaranteed non-None: pause transition is skipped if no price is available.
+        frozen_base_price: Price,
     },
 }
 
@@ -123,7 +124,7 @@ impl Anchor {
             Anchor::Live { .. } => live_base_price,
             Anchor::Paused {
                 frozen_base_price, ..
-            } => *frozen_base_price,
+            } => Some(*frozen_base_price),
         }
     }
 
@@ -144,11 +145,14 @@ impl Anchor {
                 ..
             } => {
                 if !x0_visible {
-                    // Transition to Paused
+                    // Only pause if a price is available to freeze; skip otherwise.
+                    let Some(frozen) = current_base_price else {
+                        return false;
+                    };
                     *self = Anchor::Paused {
                         render_latest_time: live_render_latest_time.max(*render_latest_time),
                         x_phase_bucket: live_x_phase_bucket.max(*x_phase_bucket),
-                        frozen_base_price: current_base_price,
+                        frozen_base_price: frozen,
                         scroll_ref_bucket: *scroll_ref_bucket,
                     };
                     true
@@ -279,130 +283,6 @@ impl Anchor {
         let live_phase_bucket = (live_phase_ms as f32 / aggr_time as f32).clamp(0.0, 0.999_999);
 
         (bucketed, *live_render_latest_time, live_phase_bucket)
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy)]
-pub enum RebuildPolicy {
-    /// Full rebuild should run immediately
-    Immediate { force_rebuild_from_historical: bool },
-    /// Full rebuild should run once interaction settles
-    Debounced {
-        last_input: Instant,
-        force_rebuild_from_historical: bool,
-    },
-    /// No pending rebuild requested.
-    #[default]
-    Idle,
-}
-
-impl RebuildPolicy {
-    #[inline]
-    pub fn immediate() -> Self {
-        RebuildPolicy::Immediate {
-            force_rebuild_from_historical: false,
-        }
-    }
-
-    /// Promote current policy to Immediate while preserving any pending "force from historical".
-    #[inline]
-    pub fn promote_to_immediate(self) -> Self {
-        match self {
-            RebuildPolicy::Idle => RebuildPolicy::immediate(),
-            RebuildPolicy::Immediate {
-                force_rebuild_from_historical,
-            } => RebuildPolicy::Immediate {
-                force_rebuild_from_historical,
-            },
-            RebuildPolicy::Debounced {
-                force_rebuild_from_historical,
-                ..
-            } => RebuildPolicy::Immediate {
-                force_rebuild_from_historical,
-            },
-        }
-    }
-
-    /// Request that the next full rebuild is done by rebuilding from historical (one-shot).
-    /// If currently Idle, this also schedules an Immediate rebuild.
-    #[inline]
-    pub fn request_rebuild_from_historical(self) -> Self {
-        match self {
-            RebuildPolicy::Idle => RebuildPolicy::Immediate {
-                force_rebuild_from_historical: true,
-            },
-            RebuildPolicy::Immediate { .. } => RebuildPolicy::Immediate {
-                force_rebuild_from_historical: true,
-            },
-            RebuildPolicy::Debounced { last_input, .. } => RebuildPolicy::Debounced {
-                last_input,
-                force_rebuild_from_historical: true,
-            },
-        }
-    }
-
-    /// Consume the one-shot directive (used by `rebuild_all()`).
-    #[inline]
-    pub fn take_force_rebuild_from_historical(&mut self) -> bool {
-        match self {
-            RebuildPolicy::Immediate {
-                force_rebuild_from_historical,
-            } => std::mem::replace(force_rebuild_from_historical, false),
-            RebuildPolicy::Debounced {
-                force_rebuild_from_historical,
-                ..
-            } => std::mem::replace(force_rebuild_from_historical, false),
-            RebuildPolicy::Idle => false,
-        }
-    }
-
-    pub fn mark_input(self, now: Instant) -> Self {
-        match self {
-            RebuildPolicy::Immediate {
-                force_rebuild_from_historical,
-            } => RebuildPolicy::Debounced {
-                last_input: now,
-                force_rebuild_from_historical,
-            },
-            RebuildPolicy::Debounced {
-                force_rebuild_from_historical,
-                ..
-            } => RebuildPolicy::Debounced {
-                last_input: now,
-                force_rebuild_from_historical,
-            },
-            RebuildPolicy::Idle => RebuildPolicy::Debounced {
-                last_input: now,
-                force_rebuild_from_historical: false,
-            },
-        }
-    }
-
-    #[inline]
-    pub fn decide(self, now: Instant, debounce_ms: u64) -> (bool, bool, RebuildPolicy) {
-        match self {
-            RebuildPolicy::Immediate { .. } => (false, true, RebuildPolicy::Idle),
-            RebuildPolicy::Idle => (false, false, RebuildPolicy::Idle),
-            RebuildPolicy::Debounced {
-                last_input,
-                force_rebuild_from_historical,
-            } => {
-                let due =
-                    (now.saturating_duration_since(last_input).as_millis() as u64) >= debounce_ms;
-                if due {
-                    (true, true, RebuildPolicy::Idle)
-                } else {
-                    (
-                        true,
-                        false,
-                        RebuildPolicy::Debounced {
-                            last_input,
-                            force_rebuild_from_historical,
-                        },
-                    )
-                }
-            }
-        }
     }
 }
 

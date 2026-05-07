@@ -24,7 +24,9 @@ use crate::{
     },
     style::{self, Icon, icon_text},
     widget::{
-        self, button_with_tooltip, chart::heatmap::HeatmapShader, column_drag, link_group_button,
+        self, button_with_tooltip,
+        chart::heatmap::{HeatmapShader, HeatmapViewState},
+        column_drag, link_group_button,
         toast::Toast,
     },
     window::{self, Window},
@@ -535,6 +537,7 @@ impl State {
                         chart,
                         indicators,
                         studies,
+                        ..
                     } = &self.content
                     {
                         (
@@ -562,6 +565,7 @@ impl State {
                         ))),
                         studies,
                         indicators,
+                        view_state: None,
                     };
 
                     let streams = vec![depth_stream(&derived_plan), trades_stream(&derived_plan)];
@@ -1591,7 +1595,7 @@ impl State {
                                             chart: Some(c),
                                             indicators,
                                             studies,
-                                            ..
+                                            view_state,
                                         } => {
                                             **c = HeatmapShader::new(
                                                 c.basis,
@@ -1600,6 +1604,9 @@ impl State {
                                                 studies.clone(),
                                                 indicators.clone(),
                                             );
+                                            if let Some(vs) = view_state {
+                                                c.apply_view_state(*vs);
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -1662,6 +1669,7 @@ impl State {
                                     Content::ShaderHeatmap {
                                         chart: Some(c),
                                         indicators,
+                                        view_state,
                                         ..
                                     } => {
                                         **c = HeatmapShader::new(
@@ -1671,6 +1679,9 @@ impl State {
                                             c.studies.clone(),
                                             indicators.clone(),
                                         );
+                                        if let Some(vs) = view_state {
+                                            c.apply_view_state(*vs);
+                                        }
 
                                         if let Some(stream_type) =
                                             self.streams.ready_iter_mut().and_then(|mut it| {
@@ -1828,8 +1839,14 @@ impl State {
                 }
             }
             Event::HeatmapShaderInteraction(message) => {
-                if let Content::ShaderHeatmap { chart: Some(c), .. } = &mut self.content {
+                if let Content::ShaderHeatmap {
+                    chart: Some(c),
+                    view_state,
+                    ..
+                } = &mut self.content
+                {
                     c.update(message);
+                    *view_state = Some(c.view_state());
                 }
             }
             Event::MiniTickersListInteraction(message) => {
@@ -2270,6 +2287,9 @@ pub enum Content {
         chart: Option<Box<HeatmapShader>>,
         indicators: Vec<HeatmapIndicator>,
         studies: Vec<data::chart::heatmap::HeatmapStudy>,
+        /// Camera state snapshot; updated after each user interaction.
+        /// Used to restore view position when creating a replacement shader.
+        view_state: Option<HeatmapViewState>,
     },
     Kline {
         chart: Option<KlineChart>,
@@ -2483,6 +2503,7 @@ impl Content {
                 studies: vec![data::chart::heatmap::HeatmapStudy::VolumeProfile(
                     data::chart::heatmap::ProfileKind::default(),
                 )],
+                view_state: None,
             },
             ContentKind::HeatmapChart => Content::Heatmap {
                 chart: None,

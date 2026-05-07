@@ -28,6 +28,8 @@ import websockets
 from engine.replay_session import _AttachClient
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — multi-client broadcast covered by test_server_grpc_multi_client.py")
+
 
 # ---------------------------------------------------------------------------
 # Server / GUI helpers

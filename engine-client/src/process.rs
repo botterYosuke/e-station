@@ -3,7 +3,11 @@
 /// `PythonProcess` spawns the Python engine and communicates its `{port, token}`
 /// via stdin as a JSON line.  `ProcessManager` wraps it with exponential-backoff
 /// restart logic and re-applies subscriptions after each recovery.
-use crate::{connection::EngineConnection, error::EngineClientError, session_file::EngineSession};
+use crate::{
+    connection::EngineConnection,
+    error::EngineClientError,
+    session_file::{EngineSession, TransportKind},
+};
 
 use std::{
     collections::HashSet,
@@ -18,7 +22,23 @@ use tokio::{process::Child, sync::Mutex};
 
 use data::data_path;
 
-const DEFAULT_PROBE_URL: &str = "ws://127.0.0.1:19876/";
+/// G3: Read the session file and derive the probe URL based on the `transport`
+/// field.  Returns an empty string when no valid gRPC session is found, which
+/// causes `try_attach_or_spawn_inner` to fall through to spawn.
+///
+/// Transport mapping:
+/// - `"grpc"` → `grpc://127.0.0.1:{port}`
+/// - anything else (missing, `"ws"`) → `""` (no probe, fall through to spawn)
+fn probe_url_from_session_or_default() -> String {
+    let path = data_path(Some("engine-session.json"));
+    if let Ok(bytes) = std::fs::read(&path)
+        && let Ok(session) = serde_json::from_slice::<EngineSession>(&bytes)
+        && session.transport == TransportKind::Grpc
+    {
+        return format!("grpc://127.0.0.1:{}", session.port);
+    }
+    String::new()
+}
 
 // ── EngineCommand ─────────────────────────────────────────────────────────────
 
@@ -480,7 +500,7 @@ impl ProcessManager {
         self.spawn_count.load(Ordering::Relaxed)
     }
 
-    /// Try to attach to a running engine at `ws://127.0.0.1:19876/`, falling
+    /// Try to attach to a running engine at the probe URL (gRPC), falling
     /// back to a fresh Python spawn when:
     /// - `FLOWSURFACE_ENGINE_TOKEN` env var is unset or empty (skip probe entirely)
     /// - The probe TCP connect times out (2 s)
@@ -489,7 +509,11 @@ impl ProcessManager {
     /// The attach/spawn policy lives entirely here so `src/main.rs` stays thin.
     pub async fn start_or_attach(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
         let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
-        self.try_attach_or_spawn_inner(port, DEFAULT_PROBE_URL, &token)
+        // G0.9: resolve the probe URL from the session file so that a gRPC session
+        // (transport="grpc") is not probed as a WebSocket endpoint.  Falls back to
+        // DEFAULT_PROBE_URL when no valid session is present.
+        let probe_url = probe_url_from_session_or_default();
+        self.try_attach_or_spawn_inner(port, &probe_url, &token)
             .await
     }
 
@@ -520,7 +544,16 @@ impl ProcessManager {
     ) -> Result<EngineConnection, EngineClientError> {
         if !token.is_empty() {
             let mode = *self.mode.lock().await;
-            match EngineConnection::probe(probe_url, token, mode).await {
+            // G3: all probe URLs are gRPC; legacy ws:// sessions fall through
+            // to spawn via ConnectionRefused.
+            let conn_result = if probe_url.starts_with("grpc://") {
+                let http_target = probe_url.replacen("grpc://", "http://", 1);
+                EngineConnection::connect_grpc(&http_target, token, mode).await
+            } else {
+                // No valid gRPC session URL — fall through to spawn.
+                Err(EngineClientError::ConnectionRefused)
+            };
+            match conn_result {
                 Ok(conn) => {
                     log::info!(
                         target: "engine_client::process",
@@ -555,11 +588,11 @@ impl ProcessManager {
         // spawning a fresh Python engine. Files whose recorded pid is still
         // live are kept (the live engine owns them); dead-pid / corrupt files
         // are removed so the helper does not attach to a stale token.
-        EngineSession::reap_stale(&session_path());
+        EngineSession::reap_stale(&session_path()).await;
 
         let mut proc = PythonProcess::spawn_with(&self.command, port).await?;
 
-        let url = format!("ws://127.0.0.1:{port}");
+        let url = format!("http://127.0.0.1:{port}");
 
         // Retry connecting with exponential backoff while the process is starting up.
         // Total wait budget: 50+100+200+400+800+1600 ≈ 3.2 s before giving up.
@@ -570,7 +603,7 @@ impl ProcessManager {
             loop {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 let mode = *self.mode.lock().await;
-                match EngineConnection::connect_with_mode(&url, proc.token(), mode).await {
+                match EngineConnection::connect_grpc(&url, proc.token(), mode).await {
                     Ok(conn) => break conn,
                     Err(EngineClientError::ConnectionRefused) if attempt < MAX_CONNECT_ATTEMPTS => {
                         log::debug!(
@@ -595,11 +628,12 @@ impl ProcessManager {
         // 書く意味が無い。helper 側も `_is_pid_alive(0)` が false で stale 扱いにする。
         match proc.pid() {
             Some(pid) => {
-                let session = EngineSession::new(
+                let session = EngineSession::with_transport(
                     proc.port(),
                     proc.token().to_string(),
                     pid,
-                    u32::from(crate::SCHEMA_MAJOR),
+                    crate::SCHEMA_MAJOR,
+                    TransportKind::Grpc,
                 );
                 if let Err(e) = session.write_atomic(&session_path()) {
                     log::warn!("failed to write engine-session.json: {e}");
@@ -657,7 +691,7 @@ impl ProcessManager {
                     log::info!("engine connection established");
                     on_ready();
 
-                    // Wait until the WS read loop exits (remote close or IO error).
+                    // Wait until the gRPC stream exits (remote close or IO error).
                     // Using wait_closed() instead of RecvError::Closed because
                     // EngineConnection itself holds a broadcast::Sender, so the
                     // channel is never "Closed" while the conn is alive.

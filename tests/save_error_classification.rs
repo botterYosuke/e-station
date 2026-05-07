@@ -6,8 +6,13 @@
 //! - `PathGuardViolation`  → ERROR-level + "BUG:" prefix (bug detection signal)
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    let menu = std::fs::read_to_string(format!("{base}/src/handlers/menu.rs")).unwrap_or_default();
+    format!("{main}\n{window}\n{menu}")
 }
 
 // ── SaveError enum variants ────────────────────────────────────────────────────
@@ -124,13 +129,13 @@ fn save_as_with_specs_io_error_uses_warn() {
     // failures as WARN (IoError category).
     let src = read_main();
 
-    let arm_prefix = "            Message::NativeSaveAsWithSpecs {";
+    let arm_prefix = "            WindowMsg::NativeSaveAsWithSpecs {";
     let start = src
         .find(arm_prefix)
         .expect("NativeSaveAsWithSpecs handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -154,13 +159,15 @@ fn save_and_exit_updates_last_saved_bytes_on_current_path_write() {
     // violating A-7's "明示 Save 直後に last_saved_bytes 更新" contract.
     let src = read_main();
 
-    let prefix = "            Message::SaveAndExit =>";
+    // Use newline-prefix to skip occurrences inside string literals in test code.
+    let needle = "\n            WindowMsg::SaveAndExit =>";
     let start = src
-        .find(prefix)
-        .expect("Message::SaveAndExit handler must exist");
+        .find(needle)
+        .map(|i| i + 1)
+        .expect("WindowMsg::SaveAndExit handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -183,13 +190,15 @@ fn save_and_exit_logs_warn_when_pending_exit_windows_is_none() {
     // with `let-else` + `log::warn!` + `return Task::none()`.
     let src = read_main();
 
-    let prefix = "            Message::SaveAndExit =>";
+    // Use newline-prefix to skip occurrences inside string literals in test code.
+    let needle = "\n            WindowMsg::SaveAndExit =>";
     let start = src
-        .find(prefix)
-        .expect("Message::SaveAndExit handler must exist");
+        .find(needle)
+        .map(|i| i + 1)
+        .expect("WindowMsg::SaveAndExit handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -254,13 +263,15 @@ fn save_and_open_file_aborts_and_keeps_current_path_when_saved_state_write_fails
     // Ok branch only: update CURRENT_PATH then restart().
     let src = read_main();
 
-    let prefix = "            Message::SaveAndOpenFile =>";
+    // Use newline-prefix to skip occurrences inside string literals in test code.
+    let needle = "\n            WindowMsg::SaveAndOpenFile =>";
     let start = src
-        .find(prefix)
-        .expect("Message::SaveAndOpenFile handler must exist");
+        .find(needle)
+        .map(|i| i + 1)
+        .expect("WindowMsg::SaveAndOpenFile handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];

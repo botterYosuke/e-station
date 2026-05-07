@@ -1,7 +1,7 @@
 /// IPC Data Transfer Objects for the Rust ↔ Python data engine protocol.
 ///
 /// Commands flow Rust → Python; Events flow Python → Rust.
-/// Both are transported as JSON text frames over a local WebSocket.
+/// Both are transported as protobuf frames over a local gRPC stream.
 use serde::{Deserialize, Serialize};
 
 /// N1.13 / R1b H-E: 起動時固定モード。CLI `--mode {live|replay}` で指定する。
@@ -50,8 +50,8 @@ impl AppMode {
 #[serde(tag = "op")]
 pub enum Command {
     Hello {
-        schema_major: u16,
-        schema_minor: u16,
+        schema_major: u32,
+        schema_minor: u32,
         client_version: String,
         token: String,
         /// N1.13 / R1b H-E: 起動時に固定する mode (`AppMode::Live` | `AppMode::Replay`).
@@ -890,8 +890,11 @@ pub enum CurrentEngineState {
 
 /// State guard で reject された command 名 (Python `schemas.AttemptedCommand` と一致)。
 /// M-Type4: `EngineBusy.attempted_command` を `String` から enum に格上げ。
+/// M4: `Unknown` variant を追加 — proto の `Unspecified` を安全にマップする。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AttemptedCommand {
+    /// proto `Unspecified` を受け取ったときのフォールバック (M4)。
+    Unknown,
     LoadReplayData,
     StartEngine,
     StopEngine,
@@ -921,6 +924,7 @@ pub enum AttemptedCommand {
 impl AttemptedCommand {
     pub fn as_wire_str(self) -> &'static str {
         match self {
+            AttemptedCommand::Unknown => "Unknown",
             AttemptedCommand::LoadReplayData => "LoadReplayData",
             AttemptedCommand::StartEngine => "StartEngine",
             AttemptedCommand::StopEngine => "StopEngine",
@@ -976,8 +980,8 @@ impl std::fmt::Display for CurrentEngineState {
 #[serde(tag = "event")]
 pub enum EngineEvent {
     Ready {
-        schema_major: u16,
-        schema_minor: u16,
+        schema_major: u32,
+        schema_minor: u32,
         engine_version: String,
         engine_session_id: String,
         // `#[serde(default)]` is a defensive read for older engines that may
@@ -1290,6 +1294,9 @@ pub enum EngineEvent {
         /// Filled quantity as decimal string.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         qty: Option<String>,
+        /// Commission as decimal string (schema 3.21).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commission: Option<String>,
         ts_event_ms: i64,
     },
 

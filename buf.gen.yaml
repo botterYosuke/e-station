@@ -1,0 +1,8 @@
+version: v2
+plugins:
+  # Rust: prost + tonic stubs (consumed by engine-client/build.rs — not used directly)
+  # Python: grpcio stubs via grpc_tools.protoc (run: make proto-python)
+  - remote: buf.build/community/neoeinstein-prost
+    out: engine-client/src/gen
+  - remote: buf.build/community/neoeinstein-tonic
+    out: engine-client/src/gen

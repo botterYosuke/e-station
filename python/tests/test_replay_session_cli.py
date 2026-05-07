@@ -9,6 +9,10 @@ import os
 import subprocess
 import sys
 
+import pytest
+
+pytestmark = pytest.mark.smoke
+
 # 子プロセスの stdout/stderr を UTF-8 で統一する（Windows の cp932 デフォルトを上書き）
 _CHILD_ENV = {**os.environ, "PYTHONUTF8": "1"}
 

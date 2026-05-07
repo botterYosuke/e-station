@@ -47,6 +47,33 @@ def test_emit_execution_marker_uses_last_price_fallback():
     assert collected[0]["price"] == "1600.5"
 
 
+def test_emit_execution_marker_propagates_commission():
+    """schema 3.21+: 上流 dict が commission を持つ場合、ExecutionMarker に伝搬する。"""
+    collected: list[dict] = []
+    event = {
+        "instrument_id": "1301.TSE",
+        "side": "BUY",
+        "price": "1500.0",
+        "ts_event_ms": 1_700_000_000_000,
+        "commission": "12.5",
+    }
+    _emit_execution_marker("strat", event, collected.append)
+    assert collected[0]["commission"] == "12.5"
+
+
+def test_emit_execution_marker_omits_commission_when_absent():
+    """commission が無いイベントでは marker にも含めない（後方互換）。"""
+    collected: list[dict] = []
+    event = {
+        "instrument_id": "1301.TSE",
+        "side": "BUY",
+        "price": "1500.0",
+        "ts_event_ms": 1_700_000_000_000,
+    }
+    _emit_execution_marker("strat", event, collected.append)
+    assert "commission" not in collected[0]
+
+
 def test_emit_execution_marker_price_converted_to_str():
     """price が数値でも文字列に変換される。"""
     collected: list[dict] = []

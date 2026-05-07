@@ -65,6 +65,12 @@ def _parse_args() -> argparse.Namespace:
     # smell visible in the log.
     parser.add_argument("--token", type=str, help=argparse.SUPPRESS)
     parser.add_argument("--config-dir", type=str, default=None, help="Config directory (dev mode)")
+    parser.add_argument(
+        "--transport",
+        choices=["ws", "grpc"],
+        default="grpc",
+        help="Transport protocol (default: grpc)",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +78,7 @@ async def _run(
     port: int,
     token: str,
     *,
+    transport: str = "grpc",
     dev_tachibana_login_allowed: bool,
     dev_kabu_login_allowed: bool = False,
     dev_kabu_trade_password_allowed: bool = False,  # [H-4]
@@ -80,17 +87,28 @@ async def _run(
 ) -> None:
     from pathlib import Path
 
-    from engine.server import DataEngineServer
-
-    server = DataEngineServer(
-        port=port,
-        token=token,
-        dev_tachibana_login_allowed=dev_tachibana_login_allowed,
-        dev_kabu_login_allowed=dev_kabu_login_allowed,
-        dev_kabu_trade_password_allowed=dev_kabu_trade_password_allowed,  # [H-4]
-        cache_dir=Path(cache_dir) if cache_dir else None,
-        config_dir=Path(config_dir) if config_dir else None,
-    )
+    if transport == "grpc":
+        from engine.server_grpc import GrpcDataEngineServer
+        server = GrpcDataEngineServer(
+            port=port,
+            token=token,
+            dev_tachibana_login_allowed=dev_tachibana_login_allowed,
+            dev_kabu_login_allowed=dev_kabu_login_allowed,
+            dev_kabu_trade_password_allowed=dev_kabu_trade_password_allowed,
+            cache_dir=Path(cache_dir) if cache_dir else None,
+            config_dir=Path(config_dir) if config_dir else None,
+        )
+    else:
+        from engine.server import DataEngineServer
+        server = DataEngineServer(
+            port=port,
+            token=token,
+            dev_tachibana_login_allowed=dev_tachibana_login_allowed,
+            dev_kabu_login_allowed=dev_kabu_login_allowed,
+            dev_kabu_trade_password_allowed=dev_kabu_trade_password_allowed,  # [H-4]
+            cache_dir=Path(cache_dir) if cache_dir else None,
+            config_dir=Path(config_dir) if config_dir else None,
+        )
     await server.serve()
 
 
@@ -214,10 +232,12 @@ def main() -> None:
             cache_dir = cfg.get("cache_dir")
             config_dir = cfg.get("config_dir")
 
+    transport = getattr(args, "transport", "grpc")
     asyncio.run(
         _run(
             port,
             token,
+            transport=transport,
             dev_tachibana_login_allowed=dev_tachibana_login_allowed,
             dev_kabu_login_allowed=dev_kabu_login_allowed,
             dev_kabu_trade_password_allowed=dev_kabu_trade_password_allowed,  # [H-4]

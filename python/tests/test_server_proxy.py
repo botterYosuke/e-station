@@ -19,6 +19,8 @@ import websockets
 
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — SetProxy business logic covered by unit tests")
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 

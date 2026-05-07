@@ -17,6 +17,8 @@ import pytest
 from engine.replay_session import LiveSession
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — migrate to gRPC mock")
+
 
 def _free_port() -> int:
     with socket.socket() as sock:

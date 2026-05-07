@@ -5,6 +5,9 @@ on:
         branches: [main]
     pull_request:
         branches: [main]
+    schedule:
+        # nightly at 02:00 UTC
+        - cron: '0 2 * * *'
 
 jobs:
     rust-tests:
@@ -22,3 +25,32 @@ jobs:
 
             - name: Run Rust workspace tests
               run: cargo test --workspace
+
+    grpc-wire-integration:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: windows-latest
+        # Only run on nightly schedule or manual dispatch, not on every push/PR
+        # (integration test requires Python subprocess + grpcio)
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install stable Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo dependencies
+              uses: Swatinem/rust-cache@v2
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+
+            - name: Install Python dependencies
+              run: uv sync
+              working-directory: python
+
+            - name: Run gRPC wire integration tests (with real Python server)
+              run: cargo test --test grpc_wire_integration -p flowsurface-engine-client -- --include-ignored --nocapture

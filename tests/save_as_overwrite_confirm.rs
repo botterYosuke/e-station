@@ -6,8 +6,12 @@
 //! - `Message::ConfirmSaveAsOverwrite` carries the confirm action
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("failed to read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    format!("{main}\n{window}")
 }
 
 /// Entry-point test matching `cargo test save_as_overwrite_confirm`.
@@ -17,13 +21,13 @@ fn save_as_overwrite_confirm() {
     let src = read_main();
 
     // 1. NativeSaveAsPath(Some(path)) handler must check path existence.
-    let arm_prefix = "            Message::NativeSaveAsPath(Some(path)) =>";
+    let arm_prefix = "            WindowMsg::NativeSaveAsPath(Some(path)) =>";
     let start = src
         .find(arm_prefix)
         .expect("NativeSaveAsPath(Some(path)) handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -49,13 +53,13 @@ fn save_as_overwrite_confirm() {
 #[test]
 fn save_as_path_checks_file_existence() {
     let src = read_main();
-    let arm_prefix = "            Message::NativeSaveAsPath(Some(path)) =>";
+    let arm_prefix = "            WindowMsg::NativeSaveAsPath(Some(path)) =>";
     let start = src
         .find(arm_prefix)
         .expect("NativeSaveAsPath(Some(path)) handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -122,13 +126,13 @@ fn confirm_save_as_overwrite_handler_proceeds_with_save() {
     let src = read_main();
     // Find handler arm in update() by finding the => pattern.
     // The variant now carries a path field: ConfirmSaveAsOverwrite { path }.
-    let handler_prefix = "            Message::ConfirmSaveAsOverwrite {";
+    let handler_prefix = "            WindowMsg::ConfirmSaveAsOverwrite {";
     let hstart = src
         .find(handler_prefix)
         .expect("ConfirmSaveAsOverwrite handler arm must exist in update()");
     let htail = &src[hstart..];
     let hend = htail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(htail.len());
     let hbody = &htail[..hend];

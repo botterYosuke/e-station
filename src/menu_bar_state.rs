@@ -76,6 +76,15 @@ impl ReplayBarState {
     }
 }
 
+/// N4-live: Live 戦略実行中の 2 段目バー状態。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveBarState {
+    pub strategy_file_stem: Option<String>,
+    pub current_time: Option<String>,
+    pub live_paused: bool,
+}
+
 /// Messages emitted by the widget menu bar's button/overlay layer.
 // reason: variants `Toggle`, `Pick` are constructed only by the Linux widget
 // menu bar (`src/widget_menu_bar.rs`). The enum is exposed on every OS
@@ -117,6 +126,12 @@ pub enum BarMessage {
         paused: bool,
         has_history: bool,
     },
+    /// ▶（paused → running）
+    LivePressPlay,
+    /// ⏸（running → paused）
+    LivePressPause,
+    /// ■（StopEngine を発行）
+    LivePressStop,
 }
 
 /// Lightweight state for the widget menu bar: which top-level menu is open.
@@ -134,6 +149,7 @@ pub enum BarMessage {
 pub struct State {
     pub open: Option<TopMenu>,
     pub replay_bar: ReplayBarState,
+    pub live_bar: LiveBarState,
 }
 
 /// Pure state-transition function (R2-39). No GUI dependencies — fully
@@ -205,6 +221,21 @@ pub fn update(state: State, msg: BarMessage) -> State {
         | BarMessage::PressStepForward
         | BarMessage::PressStepBackward
         | BarMessage::PressStop => state,
+        BarMessage::LivePressPause => State {
+            live_bar: crate::menu_bar_state::LiveBarState {
+                live_paused: true,
+                ..state.live_bar
+            },
+            ..state
+        },
+        BarMessage::LivePressPlay => State {
+            live_bar: crate::menu_bar_state::LiveBarState {
+                live_paused: false,
+                ..state.live_bar
+            },
+            ..state
+        },
+        BarMessage::LivePressStop => state,
         // Pause/history state change from Python engine via IPC.
         BarMessage::ReplayPauseStateChanged {
             paused,
@@ -243,12 +274,6 @@ mod tests {
 
     #[test]
     fn dismiss_focus_lost_closes_when_file_open() {
-        let next = update(open_file(), BarMessage::DismissFocusLost);
-        assert_eq!(next.open, None);
-    }
-
-    #[test]
-    fn dismiss_focus_lost_closes_when_file_open_again() {
         let next = update(open_file(), BarMessage::DismissFocusLost);
         assert_eq!(next.open, None);
     }
@@ -336,5 +361,51 @@ mod tests {
         let next = update(s.clone(), BarMessage::PressStepBackward);
         assert_eq!(next.replay_bar.instrument_id, s.replay_bar.instrument_id);
         assert_eq!(next.replay_bar.replay_paused, s.replay_bar.replay_paused);
+    }
+
+    #[test]
+    fn live_press_stop_does_not_mutate_state() {
+        let s = State::default();
+        let next = update(s.clone(), BarMessage::LivePressStop);
+        assert_eq!(next.open, s.open);
+        assert_eq!(next.live_bar, s.live_bar);
+    }
+
+    #[test]
+    fn live_press_pause_sets_live_paused() {
+        let s = State::default();
+        assert!(!s.live_bar.live_paused);
+        let next = update(s.clone(), BarMessage::LivePressPause);
+        assert_eq!(next.open, s.open);
+        assert!(
+            next.live_bar.live_paused,
+            "LivePressPause should set live_paused = true"
+        );
+    }
+
+    #[test]
+    fn live_press_play_clears_live_paused() {
+        let s = State {
+            live_bar: LiveBarState {
+                live_paused: true,
+                ..LiveBarState::default()
+            },
+            ..State::default()
+        };
+        let next = update(s.clone(), BarMessage::LivePressPlay);
+        assert_eq!(next.open, s.open);
+        assert!(
+            !next.live_bar.live_paused,
+            "LivePressPlay should set live_paused = false"
+        );
+    }
+
+    #[test]
+    fn state_default_live_bar_is_default() {
+        let s = State::default();
+        assert_eq!(s.live_bar, LiveBarState::default());
+        assert!(s.live_bar.strategy_file_stem.is_none());
+        assert!(s.live_bar.current_time.is_none());
+        assert!(!s.live_bar.live_paused);
     }
 }

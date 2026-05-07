@@ -224,6 +224,7 @@ async def _drain_event_or_none(ws, event_name: str, timeout: float = 0.5) -> dic
         return None
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_request_venue_login_mode_mismatch_is_unicast(replay_running_server):
     """HIGH-R2-2: replay mode reject の VenueError は要求した接続にだけ unicast。
@@ -419,6 +420,7 @@ def test_engine_busy_schema_accepts_request_id():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_full_disconnect_resets_replay_state(replay_running_server):
     """HIGH-R2-4: 1 client が LoadReplayData → 切断後、再接続で再 LoadReplayData できる。

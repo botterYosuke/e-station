@@ -28,6 +28,7 @@ from engine.schemas import SCHEMA_MAJOR
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_engine_session_file_lifecycle(tmp_path):
     """subprocess 起動中は data を返し、終了後は None を返す（pid liveness 検証）。
 

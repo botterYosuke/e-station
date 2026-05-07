@@ -9,6 +9,21 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Transport protocol in use for the engine session.
+///
+/// Serialised as lowercase string (`"ws"` / `"grpc"`) to match the Python
+/// output and the existing `engine-session.json` format.
+///
+/// Old session files that lack the `transport` field default to [`TransportKind::Ws`]
+/// via the `#[serde(default)]` attribute on `EngineSession.transport`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    #[default]
+    Ws,
+    Grpc,
+}
+
 /// Snapshot of the engine session written to disk after a successful handshake.
 ///
 /// The `token` field is `pub(crate)` to discourage external code from
@@ -24,6 +39,11 @@ pub struct EngineSession {
     /// ISO-8601 UTC timestamp captured at write time. Helps the Python helper
     /// detect stale session files when the supervisor PID was reused.
     pub started_at: DateTime<Utc>,
+    /// Transport protocol in use.
+    /// G0.9: present in all new sessions; old session files without this field
+    /// default to `TransportKind::Ws` via `#[serde(default)]`.
+    #[serde(default)]
+    pub transport: TransportKind,
 }
 
 impl fmt::Debug for EngineSession {
@@ -34,18 +54,31 @@ impl fmt::Debug for EngineSession {
             .field("pid", &self.pid)
             .field("schema_major", &self.schema_major)
             .field("started_at", &self.started_at)
+            .field("transport", &self.transport)
             .finish()
     }
 }
 
 impl EngineSession {
-    /// Create a new session with `started_at = now()`.
+    /// Creates a WS-transport session. For gRPC use [`EngineSession::with_transport`] with [`TransportKind::Grpc`].
     pub fn new(port: u16, token: String, pid: u32, schema_major: u32) -> Self {
+        Self::with_transport(port, token, pid, schema_major, TransportKind::Ws)
+    }
+
+    /// Create a new session with an explicit transport kind.
+    pub fn with_transport(
+        port: u16,
+        token: String,
+        pid: u32,
+        schema_major: u32,
+        transport: TransportKind,
+    ) -> Self {
         Self {
             port,
             token,
             pid,
             schema_major,
+            transport,
             started_at: Utc::now(),
         }
     }
@@ -107,7 +140,7 @@ impl EngineSession {
     /// Called from the spawn path before launching a fresh Python engine so
     /// orphaned files from a previous crash don't fool the helper into
     /// attaching to a dead pid.
-    pub fn reap_stale(path: &Path) {
+    pub async fn reap_stale(path: &Path) {
         if !path.exists() {
             return;
         }
@@ -125,7 +158,7 @@ impl EngineSession {
             let _ = std::fs::remove_file(path);
             return;
         };
-        if !pid_is_live(session.pid) {
+        if !pid_is_live(session.pid).await {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -141,7 +174,7 @@ impl EngineSession {
 /// `reap_stale_keeps_live_pid_file` cannot turn a live engine pid into
 /// a "stale" verdict and cause the live engine-session.json to be
 /// deleted out from under a running engine.
-fn pid_is_live(pid: u32) -> bool {
+async fn pid_is_live(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
@@ -155,7 +188,7 @@ fn pid_is_live(pid: u32) -> bool {
             return true;
         }
         if attempt < 2 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
     false
@@ -169,20 +202,20 @@ mod tests {
     /// live. Calling `pid_is_live(std::process::id())` 10 times in a row must
     /// yield `true` every time. If sysinfo's snapshot occasionally misses the
     /// pid (Windows flake) the retry loop inside `pid_is_live` must absorb it.
-    #[test]
-    fn pid_is_live_for_self_is_stable() {
+    #[tokio::test]
+    async fn pid_is_live_for_self_is_stable() {
         let me = std::process::id();
         for i in 0..10 {
             assert!(
-                pid_is_live(me),
+                pid_is_live(me).await,
                 "pid_is_live(self) returned false on iteration {i} — \
                  retry loop is not absorbing sysinfo flake"
             );
         }
     }
 
-    #[test]
-    fn pid_is_live_zero_is_not_live() {
-        assert!(!pid_is_live(0));
+    #[tokio::test]
+    async fn pid_is_live_zero_is_not_live() {
+        assert!(!pid_is_live(0).await);
     }
 }

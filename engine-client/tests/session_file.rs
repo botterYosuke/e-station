@@ -3,7 +3,7 @@
 ///
 /// These tests do NOT require a live Python engine: they exercise only the
 /// file-system primitives and trait impls in the session_file module.
-use flowsurface_engine_client::session_file::EngineSession;
+use flowsurface_engine_client::session_file::{EngineSession, TransportKind};
 
 #[test]
 fn write_and_delete() {
@@ -83,8 +83,8 @@ fn write_handles_token_with_special_characters() {
 }
 
 /// C3: `reap_stale` must remove session files whose recorded pid is no longer live.
-#[test]
-fn reap_stale_removes_dead_pid_file() {
+#[tokio::test]
+async fn reap_stale_removes_dead_pid_file() {
     let tmp = std::env::temp_dir().join("test-reap-stale-dead-pid.json");
     // Pid 0 is treated as not-live (sentinel for unknown). We could also
     // pick a high unlikely pid, but 0 is deterministic across platforms.
@@ -92,7 +92,7 @@ fn reap_stale_removes_dead_pid_file() {
     session.write_atomic(&tmp).unwrap();
     assert!(tmp.exists());
 
-    EngineSession::reap_stale(&tmp);
+    EngineSession::reap_stale(&tmp).await;
     assert!(
         !tmp.exists(),
         "reap_stale must delete files whose pid is not live"
@@ -100,13 +100,13 @@ fn reap_stale_removes_dead_pid_file() {
 }
 
 /// C3: `reap_stale` must keep the file when its pid points to a live process.
-#[test]
-fn reap_stale_keeps_live_pid_file() {
+#[tokio::test]
+async fn reap_stale_keeps_live_pid_file() {
     let tmp = std::env::temp_dir().join("test-reap-stale-live-pid.json");
     let session = EngineSession::new(19876, "tok".to_string(), std::process::id(), 3);
     session.write_atomic(&tmp).unwrap();
 
-    EngineSession::reap_stale(&tmp);
+    EngineSession::reap_stale(&tmp).await;
     assert!(
         tmp.exists(),
         "reap_stale must NOT delete files whose pid is live"
@@ -116,13 +116,13 @@ fn reap_stale_keeps_live_pid_file() {
 }
 
 /// C3: `reap_stale` must remove files whose contents do not parse as JSON.
-#[test]
-fn reap_stale_removes_corrupt_json() {
+#[tokio::test]
+async fn reap_stale_removes_corrupt_json() {
     let tmp = std::env::temp_dir().join("test-reap-stale-corrupt.json");
     std::fs::write(&tmp, b"{not valid json").unwrap();
     assert!(tmp.exists());
 
-    EngineSession::reap_stale(&tmp);
+    EngineSession::reap_stale(&tmp).await;
     assert!(
         !tmp.exists(),
         "reap_stale must delete files with corrupt JSON"
@@ -130,13 +130,13 @@ fn reap_stale_removes_corrupt_json() {
 }
 
 /// C3: `reap_stale` is a no-op when the file does not exist.
-#[test]
-fn reap_stale_missing_file_is_noop() {
+#[tokio::test]
+async fn reap_stale_missing_file_is_noop() {
     let tmp = std::env::temp_dir().join("test-reap-stale-missing-xyz.json");
     let _ = std::fs::remove_file(&tmp);
     assert!(!tmp.exists());
 
-    EngineSession::reap_stale(&tmp);
+    EngineSession::reap_stale(&tmp).await;
     assert!(!tmp.exists());
 }
 
@@ -146,13 +146,13 @@ fn reap_stale_missing_file_is_noop() {
 /// test pins the behaviour by asserting that `write_atomic` with `pid=0`
 /// produces a file that `reap_stale` immediately deletes (the round-trip
 /// confirms `pid=0` is never a useful state to persist).
-#[test]
-fn pid_zero_session_file_is_immediately_reaped() {
+#[tokio::test]
+async fn pid_zero_session_file_is_immediately_reaped() {
     let tmp = std::env::temp_dir().join("test-engine-session-pid-zero.json");
     let session = EngineSession::new(19876, "irrelevant".to_string(), 0, 3);
     session.write_atomic(&tmp).unwrap();
     assert!(tmp.exists());
-    EngineSession::reap_stale(&tmp);
+    EngineSession::reap_stale(&tmp).await;
     assert!(
         !tmp.exists(),
         "pid=0 must be reaped (it represents an unknown/missing pid sentinel)"
@@ -178,5 +178,74 @@ fn debug_redacts_token() {
     assert!(
         !dbg.contains("super-secret-token-do-not-leak"),
         "Debug leaked the raw token: {dbg}"
+    );
+}
+
+// ── G0.9: transport フィールド ────────────────────────────────────────────────
+
+/// G0.9: `EngineSession::new()` で作ったセッションは `transport == TransportKind::Ws` であること。
+#[test]
+fn transport_field_defaults_to_ws() {
+    let session = EngineSession::new(19876, "tok".to_string(), std::process::id(), 3);
+    assert_eq!(
+        session.transport,
+        TransportKind::Ws,
+        "new() must default transport to Ws"
+    );
+}
+
+/// G0.9: `EngineSession::with_transport(TransportKind::Grpc)` で作ったセッションは
+/// `transport == "grpc"` が JSON に書き出されること。
+#[test]
+fn transport_field_grpc_serializes_to_json() {
+    let tmp = std::env::temp_dir().join("test-engine-session-grpc-transport.json");
+    let session = EngineSession::with_transport(
+        19876,
+        "tok".to_string(),
+        std::process::id(),
+        3,
+        TransportKind::Grpc,
+    );
+    assert_eq!(session.transport, TransportKind::Grpc);
+    session.write_atomic(&tmp).unwrap();
+
+    let content = std::fs::read_to_string(&tmp).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        parsed["transport"].as_str().unwrap(),
+        "grpc",
+        "transport field must appear as 'grpc' in serialized JSON"
+    );
+
+    EngineSession::delete(&tmp);
+}
+
+/// G0.9: `transport` フィールドが無い旧形式の JSON は `transport == TransportKind::Ws` に
+/// デシリアライズされること（後方互換性）。
+#[test]
+fn transport_field_missing_in_old_format_defaults_to_ws() {
+    let old_json = r#"{"port":19876,"token":"tok","pid":9999,"schema_major":3,"started_at":"2026-05-08T00:00:00Z"}"#;
+    let session: EngineSession = serde_json::from_str(old_json).unwrap();
+    assert_eq!(
+        session.transport,
+        TransportKind::Ws,
+        "old session files without transport field must deserialize as Ws"
+    );
+}
+
+/// G0.9: `Debug` 出力に `transport` フィールドが含まれること。
+#[test]
+fn debug_shows_transport_field() {
+    let session = EngineSession::with_transport(
+        19876,
+        "tok".to_string(),
+        std::process::id(),
+        3,
+        TransportKind::Grpc,
+    );
+    let dbg = format!("{:?}", session);
+    assert!(
+        dbg.contains("transport"),
+        "Debug output must include 'transport' field: {dbg}"
     );
 }

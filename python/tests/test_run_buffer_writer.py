@@ -81,6 +81,31 @@ def test_write_fills_event(tmp_path: Path) -> None:
     assert "event" not in rows[0]
 
 
+def test_write_fills_event_with_commission(tmp_path: Path) -> None:
+    """schema 3.21+: commission キーが pii_scrub 後も fills.jsonl に保持される。
+
+    fee_total 集計の上流確認: engine_runner → run_buffer → fills.jsonl → summary
+    の中継点が wire-format を保つことを pin。FILLS_ALLOWED_KEYS から
+    commission が誤って外されると本テストが FAIL する。
+    """
+    rb = _make_run_buffer(tmp_path)
+    evt = {
+        "event": "ExecutionMarker",
+        "strategy_id": "user-strategy",
+        "instrument_id": "1301.TSE",
+        "side": "BUY",
+        "price": "2500.0",
+        "qty": "100",
+        "commission": "59.25",
+        "ts_event_ms": 1714800123000,
+    }
+    rb.write_event(evt)
+
+    rows = _read_jsonl(rb.run_dir / "fills.jsonl")
+    assert len(rows) == 1
+    assert rows[0].get("commission") == "59.25"
+
+
 # ---------------------------------------------------------------------------
 # test 2: ReplayBuyingPower を write_event → equity.jsonl に書かれる
 # ---------------------------------------------------------------------------
@@ -411,6 +436,7 @@ def _wait_ready(proc: subprocess.Popen, timeout: float = 10.0) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM not supported on Windows")
+@pytest.mark.smoke
 def test_sigterm_aborts_run(tmp_path: Path) -> None:
     """SIGTERM 受信時に RunBuffer が status='aborted' を書き出す。"""
     import signal
@@ -434,6 +460,7 @@ def test_sigterm_aborts_run(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.smoke
 def test_atexit_aborts_unfinished_run(tmp_path: Path) -> None:
     """子プロセスが finish() せず exit すると atexit handler が aborted に書く。"""
     run_id = "atexit-test-001"

@@ -7,12 +7,13 @@ mod widget;
 use instance::InstanceBuilder;
 use scene::{
     Scene,
+    cell::Cell,
     depth_grid::{GridRing, HeatmapPalette},
 };
+use ui::CanvasCaches;
 use ui::axisx::AxisXLabelCanvas;
 use ui::axisy::AxisYLabelCanvas;
 use ui::overlay::OverlayCanvas;
-use ui::{CanvasCaches, CanvasInvalidation};
 use view::{ViewConfig, ViewInputs, ViewWindow};
 use widget::{DEFAULT_Y_AXIS_GUTTER, HeatmapShaderWidget};
 
@@ -47,6 +48,92 @@ const VOLUME_PROFILE_WIDTH_PCT: f32 = 0.10;
 // Depth profile width in pixels fixed
 const DEPTH_PROFILE_WIDTH_PX: f32 = 160.0;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RebuildDecision {
+    Idle,
+    OverlaysOnly,
+    Full,
+}
+
+#[derive(Debug, Clone, Default)]
+enum RebuildSignal {
+    #[default]
+    Idle,
+    /// `since` は常に過去の時刻（デバウンス開始時刻）。
+    /// `decide()` が `saturating_duration_since` を使うため、将来時刻が誤って渡されても
+    /// 経過 0ms として扱われ、ハングしない（実装上の安全装置）。
+    Debouncing {
+        since: Instant,
+        force_historical: bool,
+    },
+    Immediate {
+        force_historical: bool,
+    },
+}
+
+impl RebuildSignal {
+    fn is_interacting(&self) -> bool {
+        matches!(self, Self::Debouncing { .. })
+    }
+
+    fn set_debouncing(&mut self, force_historical: bool) {
+        let prev = self.peek_force_historical();
+        *self = Self::Debouncing {
+            since: Instant::now(),
+            force_historical: prev || force_historical,
+        };
+    }
+
+    // Schedule an immediate full rebuild, bypassing the debounce window.
+    // `force_historical` is OR-merged with any existing flag so a true value is never silently
+    // downgraded. Callers must ensure `set_idle()` is called after the rebuild completes.
+    fn set_immediate(&mut self, force_historical: bool) {
+        let prev = self.peek_force_historical();
+        *self = Self::Immediate {
+            force_historical: prev || force_historical,
+        };
+    }
+
+    fn set_idle(&mut self) {
+        *self = Self::Idle;
+    }
+
+    fn peek_force_historical(&self) -> bool {
+        match self {
+            Self::Immediate { force_historical }
+            | Self::Debouncing {
+                force_historical, ..
+            } => *force_historical,
+            Self::Idle => false,
+        }
+    }
+
+    fn take_force_historical(&mut self) -> bool {
+        match self {
+            Self::Immediate { force_historical }
+            | Self::Debouncing {
+                force_historical, ..
+            } => std::mem::replace(force_historical, false),
+            Self::Idle => false,
+        }
+    }
+
+    fn decide(&self, now: Instant) -> RebuildDecision {
+        match self {
+            Self::Idle => RebuildDecision::Idle,
+            Self::Immediate { .. } => RebuildDecision::Full,
+            Self::Debouncing { since, .. } => {
+                let elapsed = now.saturating_duration_since(*since).as_millis() as u64;
+                if elapsed >= REBUILD_DEBOUNCE_MS {
+                    RebuildDecision::Full
+                } else {
+                    RebuildDecision::OverlaysOnly
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     BoundsChanged(iced::Rectangle),
@@ -76,6 +163,16 @@ pub enum Message {
     PauseBtnClicked,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct HeatmapViewState {
+    pub camera_scale: f32,
+    /// GPU 内部形式の生配列 [x, y]。`view_state()` / `apply_view_state()` が変換境界を担う。
+    /// クレート外部から直接アクセス不可（不透明ハンドルとして扱う）。
+    pub(crate) camera_offset: [f32; 2],
+    pub cell_width_world: f32,
+    pub cell_height_world: f32,
+}
+
 pub struct HeatmapShader {
     pub last_tick: Option<Instant>,
     scene: Scene,
@@ -83,7 +180,6 @@ pub struct HeatmapShader {
     palette: Option<HeatmapPalette>,
     instances: InstanceBuilder,
     canvas_caches: CanvasCaches,
-    canvas_invalidation: CanvasInvalidation,
 
     step: PriceStep,
     pub basis: Basis,
@@ -102,7 +198,7 @@ pub struct HeatmapShader {
     depth_norm: view::DepthNormCache,
     data_gen: u64,
     qty_scale: f32,
-    rebuild_policy: view::RebuildPolicy,
+    rebuild_signal: RebuildSignal,
     indicators: Vec<HeatmapIndicator>,
     pub studies: Vec<HeatmapStudy>,
     pub study_configurator: study::Configurator<HeatmapStudy>,
@@ -144,11 +240,10 @@ impl HeatmapShader {
             y_axis_gutter: DEFAULT_Y_AXIS_GUTTER,
             instances: InstanceBuilder::default(),
             canvas_caches: CanvasCaches::default(),
-            canvas_invalidation: CanvasInvalidation::default(),
             depth_grid: GridRing::default(),
             depth_norm: view::DepthNormCache::new(),
             data_gen: 1,
-            rebuild_policy: view::RebuildPolicy::Idle,
+            rebuild_signal: RebuildSignal::default(),
             indicators,
             anchor: view::Anchor::default(),
             config: data::chart::heatmap::Config::default(),
@@ -157,14 +252,15 @@ impl HeatmapShader {
         }
     }
 
+    /// Canvas-local インタラクションを処理する。follow/pause/live 遷移は
+    /// `anchor` が内部管理するが、Elm 上位への通知は `view()` が `anchor.is_paused()`
+    /// を直接参照することで実現する（Effect を返さない設計は意図的）。
     pub fn update(&mut self, message: Message) {
         match message {
             Message::BoundsChanged(bounds) => {
                 self.viewport = Some(bounds);
-                self.canvas_invalidation.mark_all();
-
-                self.rebuild_policy = self.rebuild_policy.promote_to_immediate();
-                self.rebuild_all(None);
+                self.clear_all_caches();
+                self.rebuild_all_immediate(None, false);
             }
             Message::DragZoomAxisXKeepAnchor {
                 factor,
@@ -173,12 +269,12 @@ impl HeatmapShader {
             } => {
                 self.scene
                     .zoom_column_world_keep_anchor(factor, 0.0, anchor_screen_x, viewport_w);
-                self.canvas_invalidation.mark_axis_x_motion();
+                self.clear_x_axis_motion();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
                 if !resumed {
-                    self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                    self.rebuild_signal.set_debouncing(false);
                 }
             }
             Message::PanDeltaPx(delta_px) => {
@@ -189,12 +285,12 @@ impl HeatmapShader {
 
                 self.scene.camera.offset[0] -= dx_world;
                 self.scene.camera.offset[1] -= dy_world;
-                self.canvas_invalidation.mark_axes_motion();
+                self.clear_axes_motion();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
                 if !resumed {
-                    self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                    self.rebuild_signal.set_debouncing(false);
                 }
             }
             Message::ZoomAt { factor, cursor } => {
@@ -219,14 +315,14 @@ impl HeatmapShader {
                     size.width,
                     size.height,
                 );
-                self.canvas_invalidation.mark_axes_motion();
+                self.clear_axes_motion();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
                 self.force_rebuild_if_ybin_changed();
 
                 if !resumed {
-                    self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                    self.rebuild_signal.set_debouncing(false);
                 }
             }
             Message::ScrolledAxisY {
@@ -235,12 +331,12 @@ impl HeatmapShader {
                 viewport_h,
             } => {
                 self.scene.zoom_row_h_at(factor, cursor_y, viewport_h);
-                self.canvas_invalidation.mark_axis_y_motion();
+                self.clear_y_axis_motion();
 
                 self.try_rebuild_instances();
                 self.force_rebuild_if_ybin_changed();
 
-                self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                self.rebuild_signal.set_debouncing(false);
             }
             Message::ScrolledAxisX {
                 factor,
@@ -249,22 +345,22 @@ impl HeatmapShader {
             } => {
                 self.scene
                     .zoom_column_world_at(factor, cursor_x, viewport_w);
-                self.canvas_invalidation.mark_axis_x_motion();
+                self.clear_x_axis_motion();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
                 if !resumed {
-                    self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                    self.rebuild_signal.set_debouncing(false);
                 }
             }
             Message::AxisYDoubleClicked => {
                 self.scene.camera.offset[1] = 0.0;
-                self.canvas_invalidation.mark_axis_y_motion();
+                self.clear_y_axis_motion();
 
                 self.try_rebuild_instances();
                 self.force_rebuild_if_ybin_changed();
 
-                self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                self.rebuild_signal.set_debouncing(false);
             }
             Message::AxisXDoubleClicked => {
                 if let Some(size) = self.viewport_size_px() {
@@ -272,32 +368,31 @@ impl HeatmapShader {
                         .camera
                         .reset_to_live_edge(size.width, false, false);
                     self.scene.set_default_column_width();
-                    self.canvas_invalidation.mark_axis_x_motion();
+                    self.clear_x_axis_motion();
 
                     let resumed = self.try_resume_if_x0_visible();
                     self.try_rebuild_instances();
                     if !resumed {
-                        self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                        self.rebuild_signal.set_debouncing(false);
                     }
                 }
             }
             Message::PauseBtnClicked => {
                 if let Some(size) = self.viewport_size_px() {
                     self.scene.camera.reset_to_live_edge(size.width, true, true);
-                    self.canvas_invalidation.mark_axis_x_motion();
+                    self.clear_x_axis_motion();
 
                     let resumed = self.try_resume_if_x0_visible();
 
                     self.try_rebuild_instances();
 
                     if !resumed {
-                        self.rebuild_policy = self.rebuild_policy.mark_input(Instant::now());
+                        self.rebuild_signal.set_debouncing(false);
                     }
                 }
             }
             Message::CursorMoved => {
-                self.canvas_invalidation
-                    .mark_cursor_moved(self.anchor.is_paused());
+                self.clear_cursor_moved(self.anchor.is_paused());
             }
         }
     }
@@ -379,17 +474,50 @@ impl HeatmapShader {
         self.palette = Some(palette);
 
         self.scene.sync_palette(self.palette.as_ref());
-        self.canvas_invalidation.mark_all();
+        self.clear_all_caches();
     }
 
     pub fn tick_size(&self) -> PriceStep {
         self.step
     }
 
+    pub fn camera_scale(&self) -> f32 {
+        self.scene.camera.scale()
+    }
+
+    pub fn view_state(&self) -> HeatmapViewState {
+        HeatmapViewState {
+            camera_scale: self.scene.camera.scale(),
+            camera_offset: self.scene.camera.offset,
+            cell_width_world: self.scene.cell.width_world(),
+            cell_height_world: self.scene.cell.height_world(),
+        }
+    }
+
+    /// Restore camera and cell dimensions from a previously captured `HeatmapViewState`.
+    /// Must be called immediately after [`HeatmapShader::new`], before the first `insert_depth`.
+    /// The rebuild is deferred: `rebuild_signal` is set to `Immediate { force_historical: true }`
+    /// and the actual rebuild runs on the first `invalidate` once viewport and data are available.
+    pub fn apply_view_state(&mut self, vs: HeatmapViewState) {
+        debug_assert!(
+            self.latest_time.is_none(),
+            "apply_view_state called after data ingestion — will trigger a full rebuild"
+        );
+        self.scene.camera.set_scale(vs.camera_scale);
+        self.scene.camera.offset = vs.camera_offset;
+        self.scene.cell = Cell::new(vs.cell_width_world, vs.cell_height_world);
+        // Do not call rebuild_all_immediate here: viewport is None at construction time,
+        // so rebuild_all would early-return and destroy the force_historical flag.
+        self.rebuild_signal.set_immediate(true);
+    }
+
     /// called periodically on every window frame
     /// to update time-based rendering and animate/scroll
     pub fn invalidate(&mut self, now: Option<Instant>) -> Option<Action> {
         let now_i = now.unwrap_or_else(Instant::now);
+        // Check for stall before updating last_tick so the elapsed time reflects the actual gap.
+        // This handles paused mode where insert_depth never fires the stall check.
+        self.mark_needs_full_upload_if_stalled();
         self.last_tick = Some(now_i);
 
         if self.palette.is_none() {
@@ -415,12 +543,11 @@ impl HeatmapShader {
             }
 
             if !self.anchor.is_paused() {
-                self.canvas_invalidation.mark_axis_x();
-                self.canvas_invalidation.mark_overlay_tooltip();
+                self.clear_x_axis();
+                self.clear_overlay();
             }
         }
 
-        self.canvas_invalidation.apply(&self.canvas_caches);
         None
     }
 
@@ -429,7 +556,7 @@ impl HeatmapShader {
         let prev_effective_base = self.anchor.effective_base_price(self.base_price);
 
         let paused = self.anchor.is_paused();
-        let is_interacting = matches!(self.rebuild_policy, view::RebuildPolicy::Debounced { .. });
+        let is_interacting = self.rebuild_signal.is_interacting();
 
         let aggr_time = self.depth_history.aggr_time.max(1);
         let rounded_t = view::round_time_to_bucket(update_t, aggr_time);
@@ -460,13 +587,16 @@ impl HeatmapShader {
             self.cleanup_old_data(aggr_time);
         }
 
+        // is_interacting is captured before update_live_ring_and_scene, which may call
+        // set_immediate(true) for recentering. set_immediate here preserves any force_historical
+        // already set, so calling it again is idempotent and safe.
         if !paused && !is_interacting {
-            self.rebuild_policy = self.rebuild_policy.promote_to_immediate();
+            self.rebuild_signal.set_immediate(false);
         }
 
         if self.anchor.effective_base_price(self.base_price) != prev_effective_base {
             self.refresh_y_axis_gutter();
-            self.canvas_invalidation.mark_axis_y();
+            self.clear_y_axis();
         }
     }
 
@@ -481,8 +611,8 @@ impl HeatmapShader {
         self.trades
             .ingest_trades_bucket(rounded_t, buffer, self.step);
 
-        self.canvas_invalidation.mark_overlay_tooltip();
-        self.canvas_invalidation.mark_overlay_scale_labels();
+        self.clear_overlay();
+        self.clear_scale_labels();
         self.try_rebuild_instances();
     }
 
@@ -525,8 +655,8 @@ impl HeatmapShader {
             return;
         }
 
-        self.canvas_invalidation.mark_overlay_tooltip();
-        self.canvas_invalidation.mark_overlay_scale_labels();
+        self.clear_overlay();
+        self.clear_scale_labels();
         self.try_rebuild_instances();
     }
 
@@ -544,8 +674,8 @@ impl HeatmapShader {
             != self.config.trade_size_filter.to_bits()
             || prev.trade_size_scale != self.config.trade_size_scale;
 
-        self.canvas_invalidation.mark_overlay_tooltip();
-        self.canvas_invalidation.mark_overlay_scale_labels();
+        self.clear_overlay();
+        self.clear_scale_labels();
 
         if trade_visual_changed || order_filter_changed {
             self.try_rebuild_instances();
@@ -553,10 +683,9 @@ impl HeatmapShader {
 
         if order_filter_changed {
             self.data_gen = self.data_gen.wrapping_add(1);
-            self.rebuild_policy = self
-                .rebuild_policy
-                .request_rebuild_from_historical()
-                .mark_input(Instant::now());
+            // Delay full historical rebuild until user stops adjusting (debounce); force_historical
+            // ensures the rebuild uses the updated filter when it fires.
+            self.rebuild_signal.set_debouncing(true);
         }
     }
 
@@ -567,8 +696,8 @@ impl HeatmapShader {
             self.indicators.push(indicator);
         }
 
-        self.canvas_invalidation.mark_overlay_tooltip();
-        self.canvas_invalidation.mark_overlay_scale_labels();
+        self.clear_overlay();
+        self.clear_scale_labels();
         self.try_rebuild_instances();
     }
 
@@ -648,7 +777,8 @@ impl HeatmapShader {
 
         // If we are interacting (debounced), keep overlays on the *same* y-binning
         let mut effective_window = *w;
-        if matches!(self.rebuild_policy, view::RebuildPolicy::Debounced { .. }) {
+        let is_interacting = self.rebuild_signal.is_interacting();
+        if is_interacting {
             let heatmap_steps_per_y_bin: i64 = self.scene.params.steps_per_y_bin();
 
             if effective_window.steps_per_y_bin != heatmap_steps_per_y_bin {
@@ -697,7 +827,7 @@ impl HeatmapShader {
         self.scene.set_circles(built.circles);
         self.scene.set_rectangles(built.rects);
         self.scene.set_draw_list(draw_list);
-        self.canvas_invalidation.mark_overlay_scale_labels();
+        self.clear_scale_labels();
     }
 
     fn try_rebuild_instances(&mut self) {
@@ -711,23 +841,26 @@ impl HeatmapShader {
         self.rebuild_instances(&w);
     }
 
-    fn rebuild_all(&mut self, window: Option<ViewWindow>) {
+    /// Returns `true` if the rebuild completed, `false` if it was skipped (no viewport / no data).
+    /// Callers must only call `rebuild_signal.set_idle()` when this returns `true`; skipping
+    /// `set_idle()` on `false` preserves any pending `force_historical` flag for the next frame.
+    fn rebuild_all(&mut self, window: Option<ViewWindow>) -> bool {
         let Some(w) = window.or_else(|| {
             let size = self.viewport_size_px()?;
             self.compute_view_window(size)
         }) else {
             self.scene.clear();
             self.depth_grid.force_full_upload();
-            return;
+            return false;
         };
 
         let latest_time = match self.latest_time {
             Some(time) => time,
-            None => return,
+            None => return false,
         };
         let base_price = match self.anchor.effective_base_price(self.base_price) {
             Some(price) => price,
-            None => return,
+            None => return false,
         };
 
         let aggr_time: u64 = self.depth_history.aggr_time.max(1);
@@ -741,9 +874,8 @@ impl HeatmapShader {
 
         self.scene.params.set_steps_per_y_bin(new_steps_per_y_bin);
 
-        // Consume one-shot rebuild directives.
-        let force_from_policy = self.rebuild_policy.take_force_rebuild_from_historical();
-        let force_full_rebuild = force_from_policy;
+        // Consume one-shot rebuild directive.
+        let force_full_rebuild = self.rebuild_signal.take_force_historical();
 
         let recenter_target = self.scene.price_at_center(base_price, self.step);
 
@@ -812,11 +944,21 @@ impl HeatmapShader {
             .sync_heatmap_upload_from_grid(&mut self.depth_grid, need_full_rebuild);
 
         self.rebuild_instances(&w);
+        true
+    }
+
+    fn rebuild_all_immediate(&mut self, w: Option<ViewWindow>, force_historical: bool) {
+        self.rebuild_signal.set_immediate(force_historical);
+        if self.rebuild_all(w) {
+            self.rebuild_signal.set_idle();
+        }
+        // If rebuild_all returned false (no viewport / no data), leave the signal intact so
+        // the next invalidate can retry with force_historical still set.
     }
 
     /// If the y-binning (steps_per_y_bin) would change, we must rebuild the heatmap texture.
     fn force_rebuild_if_ybin_changed(&mut self) {
-        if matches!(self.rebuild_policy, view::RebuildPolicy::Debounced { .. }) {
+        if self.rebuild_signal.is_interacting() {
             return;
         }
 
@@ -829,8 +971,7 @@ impl HeatmapShader {
 
         let cur_steps_per_y_bin: i64 = self.scene.params.steps_per_y_bin();
         if w.steps_per_y_bin != cur_steps_per_y_bin {
-            self.rebuild_policy = self.rebuild_policy.promote_to_immediate();
-            self.rebuild_all(Some(w));
+            self.rebuild_all_immediate(Some(w), false);
         }
     }
 
@@ -853,12 +994,7 @@ impl HeatmapShader {
             let recenter_target = self.scene.price_at_center(base_price, self.step);
 
             if self.depth_grid.should_recenter(recenter_target, self.step) {
-                // Recenter implies a y-mapping change: force rebuild-from-historical so older cols
-                // get repopulated under the new anchor
-                self.rebuild_policy = self
-                    .rebuild_policy
-                    .request_rebuild_from_historical()
-                    .promote_to_immediate();
+                self.rebuild_signal.set_immediate(true);
             }
         }
 
@@ -885,27 +1021,27 @@ impl HeatmapShader {
             scroll_ref_bucket,
         );
 
-        let (do_overlays, do_full, next_policy) =
-            self.rebuild_policy.decide(now_i, REBUILD_DEBOUNCE_MS);
-
-        if do_overlays {
-            self.rebuild_instances(w);
-        }
-        if do_full {
-            self.rebuild_all(Some(*w));
+        match self.rebuild_signal.decide(now_i) {
+            RebuildDecision::Idle => {}
+            RebuildDecision::OverlaysOnly => {
+                self.rebuild_instances(w);
+            }
+            RebuildDecision::Full => {
+                if self.rebuild_all(Some(*w)) {
+                    self.rebuild_signal.set_idle();
+                }
+            }
         }
 
         self.scene
             .sync_heatmap_upload_from_grid(&mut self.depth_grid, false);
-
-        self.rebuild_policy = next_policy;
 
         self.update_depth_norm_and_params(*w, now_i);
     }
 
     fn update_depth_norm_and_params(&mut self, w: ViewWindow, now_i: Instant) {
         let latest_incl = w.latest_vis.saturating_add(w.aggr_time);
-        let is_interacting = matches!(self.rebuild_policy, view::RebuildPolicy::Debounced { .. });
+        let is_interacting = self.rebuild_signal.is_interacting();
 
         let norm_gen = if is_interacting || self.anchor.is_paused() {
             self.data_gen
@@ -954,15 +1090,8 @@ impl HeatmapShader {
         let resumed = self.anchor.resume_to_live();
         if resumed {
             self.refresh_y_axis_gutter();
-            self.canvas_invalidation.mark_all();
-
-            self.rebuild_policy = self
-                .rebuild_policy
-                .request_rebuild_from_historical()
-                .promote_to_immediate();
-
-            self.rebuild_all(None);
-            self.rebuild_policy = view::RebuildPolicy::Idle;
+            self.clear_all_caches();
+            self.rebuild_all_immediate(None, true);
         }
 
         resumed
@@ -983,10 +1112,7 @@ impl HeatmapShader {
 
         // If live ingest is about to recenter, schedule a forced rebuild-from-historical
         if self.depth_grid.should_recenter(recenter_target, self.step) {
-            self.rebuild_policy = self
-                .rebuild_policy
-                .request_rebuild_from_historical()
-                .promote_to_immediate();
+            self.rebuild_signal.set_immediate(true);
         }
 
         self.depth_grid.ingest_snapshot(
@@ -1009,17 +1135,12 @@ impl HeatmapShader {
         }
 
         self.refresh_y_axis_gutter();
-        self.canvas_invalidation.mark_all();
-        self.rebuild_policy = self.rebuild_policy.promote_to_immediate();
+        self.clear_all_caches();
 
-        if state_change == view::FollowStateChange::ResumedToLive {
-            self.rebuild_policy = self
-                .rebuild_policy
-                .request_rebuild_from_historical()
-                .promote_to_immediate();
-
-            self.rebuild_all(None);
-            self.rebuild_policy = view::RebuildPolicy::Idle;
+        match state_change {
+            view::FollowStateChange::ResumedToLive => self.rebuild_all_immediate(None, true),
+            view::FollowStateChange::PausedFromLive => self.rebuild_signal.set_immediate(false),
+            view::FollowStateChange::Unchanged => {}
         }
     }
 
@@ -1029,5 +1150,309 @@ impl HeatmapShader {
             self.ticker_info.min_ticksize,
         )
         .unwrap_or(DEFAULT_Y_AXIS_GUTTER);
+    }
+
+    // --- Cache invalidation helpers ---
+
+    fn clear_x_axis(&self) {
+        self.canvas_caches.x_axis.clear();
+    }
+
+    fn clear_y_axis(&self) {
+        self.canvas_caches.y_axis.clear();
+    }
+
+    fn clear_overlay(&self) {
+        self.canvas_caches.overlay.clear();
+    }
+
+    fn clear_scale_labels(&self) {
+        self.canvas_caches.scale_labels.clear();
+    }
+
+    fn clear_all_caches(&self) {
+        self.canvas_caches.x_axis.clear();
+        self.canvas_caches.y_axis.clear();
+        self.canvas_caches.overlay.clear();
+        self.canvas_caches.scale_labels.clear();
+    }
+
+    fn clear_x_axis_motion(&self) {
+        // mark_axis_x_motion = x_axis + overlay + scale_labels
+        self.clear_x_axis();
+        self.clear_overlay();
+        self.clear_scale_labels();
+    }
+
+    fn clear_y_axis_motion(&self) {
+        // mark_axis_y_motion = y_axis + overlay + scale_labels
+        self.clear_y_axis();
+        self.clear_overlay();
+        self.clear_scale_labels();
+    }
+
+    fn clear_axes_motion(&self) {
+        // mark_axes_motion = all 4
+        self.clear_all_caches();
+    }
+
+    fn clear_cursor_moved(&self, x_axis_has_cursor_label: bool) {
+        // mark_cursor_moved
+        self.clear_y_axis();
+        if x_axis_has_cursor_label {
+            self.clear_x_axis();
+        }
+        self.clear_overlay();
+        self.clear_scale_labels();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ticker_info_test() -> exchange::TickerInfo {
+        exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            0.01,
+            1.0,
+            None,
+        )
+    }
+
+    fn make_shader() -> HeatmapShader {
+        HeatmapShader::new(
+            data::chart::Basis::Time(exchange::Timeframe::MS1000),
+            exchange::unit::PriceStep::from_f32_lossy(0.01),
+            ticker_info_test(),
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn camera_scale_returns_default_value() {
+        let shader = make_shader();
+        // Default camera scale is 100.0 (from Camera::default())
+        assert_eq!(shader.camera_scale(), 100.0);
+    }
+
+    #[test]
+    fn view_state_camera_scale_matches_shader() {
+        let shader = make_shader();
+        let vs = shader.view_state();
+        assert_eq!(vs.camera_scale, shader.camera_scale());
+    }
+
+    #[test]
+    fn view_state_captures_all_camera_fields() {
+        let shader = make_shader();
+        let vs = shader.view_state();
+        assert_eq!(vs.camera_scale, shader.camera_scale());
+        // Camera::default() starts at [0.0, 0.0]
+        assert_eq!(vs.camera_offset, [0.0, 0.0]);
+        // Cell dimensions must be positive
+        assert!(vs.cell_width_world > 0.0);
+        assert!(vs.cell_height_world > 0.0);
+    }
+
+    #[test]
+    fn apply_view_state_restores_camera_fields() {
+        let mut shader = make_shader();
+        let vs = HeatmapViewState {
+            camera_scale: 200.0,
+            camera_offset: [5.0, -3.0],
+            cell_width_world: 0.05,
+            cell_height_world: 0.08,
+        };
+        shader.apply_view_state(vs);
+        let restored = shader.view_state();
+        assert_eq!(restored.camera_scale, 200.0);
+        assert_eq!(restored.camera_offset, [5.0, -3.0]);
+        assert_eq!(restored.cell_width_world, 0.05);
+        assert_eq!(restored.cell_height_world, 0.08);
+    }
+
+    #[test]
+    fn rebuild_signal_initial_is_idle() {
+        let shader = make_shader();
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::Idle
+        );
+    }
+
+    #[test]
+    fn rebuild_signal_immediate_returns_full() {
+        let mut shader = make_shader();
+        shader.rebuild_signal.set_immediate(false);
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::Full
+        );
+    }
+
+    #[test]
+    fn rebuild_signal_debouncing_before_timeout_is_overlays_only() {
+        let mut shader = make_shader();
+        shader.rebuild_signal.set_debouncing(false);
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::OverlaysOnly
+        );
+    }
+
+    #[test]
+    fn rebuild_signal_debouncing_after_timeout_is_full() {
+        let mut shader = make_shader();
+        let past = Instant::now() - Duration::from_millis(REBUILD_DEBOUNCE_MS + 10);
+        shader.rebuild_signal = RebuildSignal::Debouncing {
+            since: past,
+            force_historical: false,
+        };
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::Full
+        );
+    }
+
+    #[test]
+    fn rebuild_signal_debouncing_at_exact_boundary_is_full() {
+        // M-3: elapsed == REBUILD_DEBOUNCE_MS（ちょうど境界値）でも Full を返すことを確認。
+        // `decide()` の判定は `>=` なので境界値は Full に含まれる。
+        let mut shader = make_shader();
+        // `saturating_duration_since` を使うため、過去 exactly REBUILD_DEBOUNCE_MS ms の
+        // 時刻を設定する。実行タイミングのずれで elapsed が +1ms になる可能性を考慮し、
+        // ちょうど REBUILD_DEBOUNCE_MS ms 前に設定する。
+        let past = Instant::now() - Duration::from_millis(REBUILD_DEBOUNCE_MS);
+        shader.rebuild_signal = RebuildSignal::Debouncing {
+            since: past,
+            force_historical: false,
+        };
+        // elapsed >= REBUILD_DEBOUNCE_MS であれば Full が返る。
+        // 実行が瞬時ではないため elapsed は必ず >= REBUILD_DEBOUNCE_MS になる。
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::Full,
+            "elapsed == REBUILD_DEBOUNCE_MS の境界値でも Full を返す必要がある (M-3)"
+        );
+    }
+
+    #[test]
+    fn force_historical_preserved_across_signal_transitions() {
+        let mut signal = RebuildSignal::Idle;
+        signal.set_immediate(true); // Immediate { force_historical: true }
+        signal.set_debouncing(false); // Debouncing { since: now, force_historical: true }
+        assert!(signal.peek_force_historical());
+        let consumed = signal.take_force_historical();
+        assert!(consumed);
+        assert!(!signal.peek_force_historical());
+    }
+
+    #[test]
+    fn initial_anchor_is_live() {
+        let shader = make_shader();
+        assert!(!shader.anchor.is_paused());
+    }
+
+    #[test]
+    fn zoom_at_changes_camera_scale_with_viewport() {
+        let mut shader = make_shader();
+        shader.viewport = Some(iced::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        });
+        let initial_scale = shader.camera_scale();
+        shader.update(Message::ZoomAt {
+            factor: 1.5,
+            cursor: iced::Point { x: 500.0, y: 400.0 },
+        });
+        assert_ne!(
+            shader.camera_scale(),
+            initial_scale,
+            "camera scale should change after zoom"
+        );
+    }
+
+    #[test]
+    fn pan_changes_camera_offset() {
+        let mut shader = make_shader();
+        let initial_offset = shader.scene.camera.offset;
+        shader.update(Message::PanDeltaPx(iced::Vector { x: 10.0, y: 5.0 }));
+        assert_ne!(
+            shader.scene.camera.offset, initial_offset,
+            "camera offset should change after pan"
+        );
+    }
+
+    // --- Regression tests for B3 review findings ---
+
+    /// H-2 regression: apply_view_state with viewport=None must preserve force_historical.
+    /// Before fix: rebuild_all_immediate → rebuild_all early-return → set_idle() destroyed the flag.
+    /// After fix: only set_immediate(true) is called; viewport=None defers the rebuild.
+    #[test]
+    fn apply_view_state_preserves_force_historical_without_viewport() {
+        let mut shader = make_shader(); // viewport = None
+        let vs = HeatmapViewState {
+            camera_scale: 200.0,
+            camera_offset: [1.0, -2.0],
+            cell_width_world: 0.05,
+            cell_height_world: 0.08,
+        };
+        shader.apply_view_state(vs);
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::Full,
+            "apply_view_state must leave signal as Immediate, not Idle (H-2)"
+        );
+        assert!(
+            shader.rebuild_signal.peek_force_historical(),
+            "force_historical must survive apply_view_state with no viewport (H-2)"
+        );
+    }
+
+    /// H-4 regression: pause transition must be skipped when base_price is None.
+    /// Before fix: Anchor::Paused { frozen_base_price: None } was valid, causing
+    /// effective_base_price() to return None and the overlay to disappear silently.
+    #[test]
+    fn anchor_skips_pause_transition_when_no_base_price() {
+        let mut anchor = view::Anchor::default();
+        assert!(!anchor.is_paused());
+        let changed = anchor.update_auto_follow(
+            false, // x0 not visible → would normally trigger pause
+            1000,
+            0.0,
+            None, // no price yet
+        );
+        assert!(!changed, "anchor must not transition to Paused without a base price (H-4)");
+        assert!(!anchor.is_paused(), "anchor must remain Live when no price available (H-4)");
+    }
+
+    /// Verifies that pause transition DOES occur once a price is available.
+    #[test]
+    fn anchor_pauses_when_price_is_available() {
+        let mut anchor = view::Anchor::default();
+        let price = exchange::unit::Price::from_f32(50000.0);
+        let changed = anchor.update_auto_follow(false, 1000, 0.0, Some(price));
+        assert!(changed, "anchor should pause when x0 not visible and price exists");
+        assert!(anchor.is_paused());
+    }
+
+    /// Guards against `decide()` panicking or returning Full when `since` is a future timestamp.
+    /// saturating_duration_since should return Duration::ZERO → OverlaysOnly.
+    #[test]
+    fn rebuild_signal_future_since_returns_overlays_only() {
+        let future_since = Instant::now() + Duration::from_secs(10);
+        let signal = RebuildSignal::Debouncing {
+            since: future_since,
+            force_historical: false,
+        };
+        assert_eq!(
+            signal.decide(Instant::now()),
+            RebuildDecision::OverlaysOnly,
+            "future since must yield OverlaysOnly via saturating_duration_since"
+        );
     }
 }

@@ -1,0 +1,1007 @@
+// engine.proto — single schema source for the Rust ↔ Python data engine IPC.
+//
+// Transport: gRPC bidirectional streaming (HTTP/2 loopback).
+// Codegen: Rust via tonic-build (engine-client/build.rs),
+//          Python via grpcio-tools / grpc_tools.protoc.
+//
+// Versioning contract:
+//   - Field numbers are stable. Never reuse a deleted field number — use `reserved`.
+//   - HelloRequest.schema_major bump = breaking change (server rejects with FAILED_PRECONDITION).
+//   - HelloRequest.schema_minor bump = backward-compatible addition (server warns, continues).
+//
+// Handshake contract (Session RPC):
+//   - Client MUST send HelloRequest as the first Command.
+//   - Server MUST respond with ReadyResponse as the first Event on success.
+//   - Handshake failures use gRPC status codes ONLY (never EngineError events):
+//       schema_major mismatch   → FAILED_PRECONDITION
+//       bad token / auth fail   → UNAUTHENTICATED
+//       wrong first message     → INVALID_ARGUMENT
+//       connection limit exceeded → RESOURCE_EXHAUSTED
+
+syntax = "proto3";
+
+package engine;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service
+// ─────────────────────────────────────────────────────────────────────────────
+
+service DataEngine {
+  // Bidirectional streaming session. One RPC per client connection.
+  // First Command must be HelloRequest; first Event is ReadyResponse on success.
+  rpc Session(stream Command) returns (stream Event);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level wrapper messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Command {
+  oneof payload {
+    // IMPORTANT: hello = 1 is the handshake message and MUST remain field 1.
+    HelloRequest                hello                = 1;
+    SetProxyRequest             set_proxy            = 2;
+    SubscribeRequest            subscribe            = 3;
+    UnsubscribeRequest          unsubscribe          = 4;
+    FetchKlinesRequest          fetch_klines         = 5;
+    FetchTradesRequest          fetch_trades         = 6;
+    FetchOpenInterestRequest    fetch_open_interest  = 7;
+    FetchTickerStatsRequest     fetch_ticker_stats   = 8;
+    ListTickersRequest          list_tickers         = 9;
+    GetTickerMetadataRequest    get_ticker_metadata  = 10;
+    RequestDepthSnapshotRequest request_depth_snapshot = 11;
+    PingRequest                 ping                 = 12;
+    ShutdownRequest             shutdown             = 13;
+    RequestVenueLoginRequest    request_venue_login  = 14;
+    SetSecondPasswordRequest    set_second_password  = 15;
+    ForgetSecondPasswordRequest forget_second_password = 16;
+    SubmitOrderRequest          submit_order         = 17;
+    ModifyOrderRequest          modify_order         = 18;
+    CancelOrderRequest          cancel_order         = 19;
+    CancelAllOrdersRequest      cancel_all_orders    = 20;
+    GetOrderListRequest         get_order_list       = 21;
+    GetBuyingPowerRequest       get_buying_power     = 22;
+    GetPositionsRequest         get_positions        = 23;
+    StartEngineRequest          start_engine         = 24;
+    StopEngineRequest           stop_engine          = 25;
+    LoadReplayDataRequest       load_replay_data     = 26;
+    SetReplaySpeedRequest       set_replay_speed     = 27;
+    StopReplayRequest           stop_replay          = 28;
+    ForceStopReplayRequest      force_stop_replay    = 29;
+    PauseReplayRequest          pause_replay         = 30;
+    ResumeReplayRequest         resume_replay        = 31;
+    StepReplayRequest           step_replay          = 32;
+    StepBackwardRequest         step_backward        = 33;
+    LoadStrategyScenarioRequest load_strategy_scenario = 34;
+    SaveStrategyScenarioRequest save_strategy_scenario = 35;
+  }
+}
+
+message Event {
+  oneof payload {
+    // IMPORTANT: ready = 1 is the first event on successful handshake and MUST remain field 1.
+    ReadyResponse                   ready                       = 1;
+    EngineErrorEvent                engine_error                = 2;
+    ConnectedEvent                  connected                   = 3;
+    DisconnectedEvent               disconnected                = 4;
+    TradesEvent                     trades                      = 5;
+    TradesFetchedEvent              trades_fetched              = 6;
+    KlineUpdateEvent                kline_update                = 7;
+    KlinesEvent                     klines                      = 8;
+    DepthSnapshotEvent              depth_snapshot              = 9;
+    DepthDiffEvent                  depth_diff                  = 10;
+    DepthGapEvent                   depth_gap                   = 11;
+    OpenInterestEvent               open_interest               = 12;
+    TickerInfoEvent                 ticker_info                 = 13;
+    TickerStatsEvent                ticker_stats                = 14;
+    PongEvent                       pong                        = 15;
+    ErrorEvent                      error                       = 16;
+    VenueReadyEvent                 venue_ready                 = 17;
+    VenueErrorEvent                 venue_error                 = 18;
+    VenueLoginStartedEvent          venue_login_started         = 19;
+    VenueLoginCancelledEvent        venue_login_cancelled       = 20;
+    SecondPasswordRequiredEvent     second_password_required    = 21;
+    OrderSubmittedEvent             order_submitted             = 22;
+    OrderAcceptedEvent              order_accepted              = 23;
+    OrderRejectedEvent              order_rejected              = 24;
+    OrderPendingUpdateEvent         order_pending_update        = 25;
+    OrderPendingCancelEvent         order_pending_cancel        = 26;
+    OrderFilledEvent                order_filled                = 27;
+    OrderCanceledEvent              order_canceled              = 28;
+    OrderExpiredEvent               order_expired               = 29;
+    OrderListUpdatedEvent           order_list_updated          = 30;
+    EngineStartedEvent              engine_started              = 31;
+    EngineStoppedEvent              engine_stopped              = 32;
+    ReplayDataLoadedEvent           replay_data_loaded          = 33;
+    PositionOpenedEvent             position_opened             = 34;
+    PositionClosedEvent             position_closed             = 35;
+    ExecutionMarkerEvent            execution_marker            = 36;
+    StrategySignalEvent             strategy_signal             = 37;
+    BuyingPowerUpdatedEvent         buying_power_updated        = 38;
+    PositionsUpdatedEvent           positions_updated           = 39;
+    ReplayBuyingPowerEvent          replay_buying_power         = 40;
+    DateChangeMarkerEvent           date_change_marker          = 41;
+    RestoreSnapshotEvent            restore_snapshot            = 42;
+    ReplayHistoryChangedEvent       replay_history_changed      = 43;
+    ReplayStoppedEvent              replay_stopped              = 44;
+    EngineBusyEvent                 engine_busy                 = 45;
+    ClientConnectedEvent            client_connected            = 46;
+    StrategyScenarioLoadedEvent     strategy_scenario_loaded    = 47;
+    StrategyScenarioLoadFailedEvent strategy_scenario_load_failed = 48;
+    StrategyScenarioSavedEvent      strategy_scenario_saved     = 49;
+    ClientDisconnectedEvent         client_disconnected         = 50;
+    LiveBuyingPowerEvent            live_buying_power           = 51;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Command payloads
+// ─────────────────────────────────────────────────────────────────────────────
+
+message HelloRequest {
+  uint32  schema_major   = 1;
+  uint32  schema_minor   = 2;
+  string  client_version = 3;
+  string  token          = 4;  // HMAC token passed via stdin; masked in logs
+  AppMode mode           = 5;  // "live" | "replay"
+}
+
+message SetProxyRequest {
+  optional string url = 1;
+}
+
+message SubscribeRequest {
+  string          venue     = 1;
+  string          ticker    = 2;
+  string          stream    = 3;  // "trade" | "depth" | "kline"
+  optional string timeframe = 4;
+  string          market    = 5;
+}
+
+message UnsubscribeRequest {
+  string          venue     = 1;
+  string          ticker    = 2;
+  string          stream    = 3;
+  optional string timeframe = 4;
+  string          market    = 5;
+}
+
+message FetchKlinesRequest {
+  string         request_id = 1;
+  string         venue      = 2;
+  string         ticker     = 3;
+  string         timeframe  = 4;
+  uint32         limit      = 5;
+  optional int64 start_ms   = 6;
+  optional int64 end_ms     = 7;
+  string         market     = 8;
+}
+
+message FetchTradesRequest {
+  string          request_id = 1;
+  string          venue      = 2;
+  string          ticker     = 3;
+  string          market     = 4;
+  int64           start_ms   = 5;
+  int64           end_ms     = 6;
+  optional string data_path  = 7;
+}
+
+message FetchOpenInterestRequest {
+  string         request_id = 1;
+  string         venue      = 2;
+  string         ticker     = 3;
+  string         timeframe  = 4;
+  uint32         limit      = 5;
+  optional int64 start_ms   = 6;
+  optional int64 end_ms     = 7;
+  string         market     = 8;
+}
+
+message FetchTickerStatsRequest {
+  string request_id = 1;
+  string venue      = 2;
+  string ticker     = 3;
+  string market     = 4;
+}
+
+message ListTickersRequest {
+  string request_id = 1;
+  string venue      = 2;
+  string market     = 3;
+}
+
+message GetTickerMetadataRequest {
+  string request_id = 1;
+  string venue      = 2;
+  string ticker     = 3;
+}
+
+message RequestDepthSnapshotRequest {
+  string request_id = 1;
+  string venue      = 2;
+  string ticker     = 3;
+  string market     = 4;
+}
+
+message PingRequest {
+  string request_id = 1;
+}
+
+message ShutdownRequest {}
+
+message RequestVenueLoginRequest {
+  string request_id = 1;
+  string venue      = 2;
+}
+
+// SetSecondPassword carries a raw secret over IPC; Python wraps it in SecretStr immediately.
+// Debug/logging must mask the value field.
+message SetSecondPasswordRequest {
+  string request_id = 1;
+  string value      = 2;
+}
+
+message ForgetSecondPasswordRequest {}
+
+message SubmitOrderRequest {
+  string             request_id = 1;
+  string             venue      = 2;
+  SubmitOrderPayload order      = 3;
+}
+
+message ModifyOrderRequest {
+  string           request_id      = 1;
+  string           venue           = 2;
+  string           client_order_id = 3;
+  optional string  venue_order_id  = 4;
+  OrderModifyChange change         = 5;
+}
+
+message CancelOrderRequest {
+  string request_id      = 1;
+  string venue           = 2;
+  string client_order_id = 3;
+  string venue_order_id  = 4;
+}
+
+message CancelAllOrdersRequest {
+  string          request_id    = 1;
+  string          venue         = 2;
+  optional string instrument_id = 3;
+  optional OrderSide order_side = 4;
+}
+
+message GetOrderListRequest {
+  string          request_id = 1;
+  string          venue      = 2;
+  OrderListFilter filter     = 3;
+}
+
+message GetBuyingPowerRequest {
+  string request_id = 1;
+  string venue      = 2;
+}
+
+message GetPositionsRequest {
+  string request_id = 1;
+  string venue      = 2;
+}
+
+message StartEngineRequest {
+  string            request_id  = 1;
+  EngineKind        engine      = 2;
+  string            strategy_id = 3;
+  EngineStartConfig config      = 4;
+}
+
+message StopEngineRequest {
+  string request_id  = 1;
+  string strategy_id = 2;
+}
+
+message LoadReplayDataRequest {
+  string            request_id    = 1;
+  string            instrument_id = 2;
+  string            start_date    = 3;
+  string            end_date      = 4;
+  ReplayGranularity granularity   = 5;
+  repeated string   instrument_ids = 6;  // empty = use instrument_id only
+}
+
+message SetReplaySpeedRequest {
+  string request_id  = 1;
+  uint32 multiplier  = 2;  // 1 = real-time, N = Nx speed
+}
+
+message StopReplayRequest {
+  string request_id = 1;
+}
+
+message ForceStopReplayRequest {
+  string request_id = 1;
+}
+
+message PauseReplayRequest {
+  string request_id = 1;
+}
+
+message ResumeReplayRequest {
+  string request_id = 1;
+}
+
+message StepReplayRequest {
+  string request_id = 1;
+}
+
+message StepBackwardRequest {
+  string request_id = 1;
+}
+
+message LoadStrategyScenarioRequest {
+  string request_id = 1;
+  string path       = 2;
+}
+
+message SaveStrategyScenarioRequest {
+  string          request_id  = 1;
+  string          path        = 2;
+  string          scenario    = 3;  // JSON-encoded dict
+  bool            save_as     = 4;
+  optional string loaded_path = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Event payloads
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ReadyResponse: first event on successful handshake (field 1 in Event.oneof).
+// EngineError events must NOT be used for handshake failures — use gRPC status codes instead.
+message ReadyResponse {
+  uint32             schema_major      = 1;
+  uint32             schema_minor      = 2;
+  string             engine_version    = 3;
+  string             engine_session_id = 4;  // UUIDv4; changes on every restart
+  EngineCapabilities capabilities      = 5;
+}
+
+// EngineError: session-level errors only (post-handshake). Never used for handshake failures.
+// strategy_id absent → connection-level error (client should disconnect).
+// strategy_id present → strategy-scoped error (connection is maintained).
+message EngineErrorEvent {
+  string          code        = 1;
+  string          message     = 2;
+  optional string strategy_id = 3;
+}
+
+message ConnectedEvent {
+  string venue  = 1;
+  string ticker = 2;
+  string stream = 3;
+  string market = 4;
+}
+
+message DisconnectedEvent {
+  string          venue  = 1;
+  string          ticker = 2;
+  string          stream = 3;
+  string          market = 4;
+  optional string reason = 5;
+}
+
+message TradesEvent {
+  string               venue             = 1;
+  string               ticker            = 2;
+  string               market            = 3;
+  string               stream_session_id = 4;
+  repeated TradeRecord trades            = 5;
+}
+
+message TradesFetchedEvent {
+  string               request_id = 1;
+  string               venue      = 2;
+  string               ticker     = 3;
+  repeated TradeRecord trades     = 4;
+  bool                 is_last    = 5;  // false = more chunks follow
+}
+
+message KlineUpdateEvent {
+  string      venue     = 1;
+  string      ticker    = 2;
+  string      market    = 3;
+  string      timeframe = 4;
+  KlineRecord kline     = 5;
+}
+
+message KlinesEvent {
+  string               request_id = 1;
+  string               venue      = 2;
+  string               ticker     = 3;
+  string               timeframe  = 4;
+  repeated KlineRecord klines     = 5;
+}
+
+message DepthSnapshotEvent {
+  optional string      request_id        = 1;
+  string               venue             = 2;
+  string               ticker            = 3;
+  string               market            = 4;
+  string               stream_session_id = 5;
+  int64                sequence_id       = 6;
+  repeated DepthLevel  bids              = 7;
+  repeated DepthLevel  asks              = 8;
+  optional int64       checksum          = 9;
+}
+
+message DepthDiffEvent {
+  string              venue             = 1;
+  string              ticker            = 2;
+  string              market            = 3;
+  string              stream_session_id = 4;
+  int64               sequence_id       = 5;
+  int64               prev_sequence_id  = 6;
+  repeated DepthLevel bids              = 7;
+  repeated DepthLevel asks              = 8;
+}
+
+message DepthGapEvent {
+  string venue             = 1;
+  string ticker            = 2;
+  string market            = 3;
+  string stream_session_id = 4;
+}
+
+message OpenInterestEvent {
+  string           request_id = 1;
+  string           venue      = 2;
+  string           ticker     = 3;
+  repeated OiPoint data       = 4;
+}
+
+message TickerInfoEvent {
+  string               request_id = 1;
+  string               venue      = 2;
+  repeated TickerEntry tickers    = 3;
+}
+
+message TickerStatsEvent {
+  string request_id = 1;
+  string venue      = 2;
+  string ticker     = 3;
+  string stats      = 4;  // JSON-encoded object
+}
+
+message PongEvent {
+  string request_id = 1;
+}
+
+message ErrorEvent {
+  optional string request_id = 1;
+  string          code       = 2;
+  string          message    = 3;
+}
+
+// VenueReady is idempotent — Python re-emits it after every restart / credential update.
+message VenueReadyEvent {
+  string          venue      = 1;
+  optional string request_id = 2;
+}
+
+message VenueErrorEvent {
+  string          venue      = 1;
+  optional string request_id = 2;
+  string          code       = 3;
+  string          message    = 4;
+}
+
+message VenueLoginStartedEvent {
+  string          venue      = 1;
+  optional string request_id = 2;
+}
+
+message VenueLoginCancelledEvent {
+  string          venue      = 1;
+  optional string request_id = 2;
+}
+
+message SecondPasswordRequiredEvent {
+  string request_id = 1;
+}
+
+message OrderSubmittedEvent {
+  string client_order_id = 1;
+  int64  ts_event_ms     = 2;
+}
+
+message OrderAcceptedEvent {
+  string          client_order_id = 1;
+  optional string venue_order_id  = 2;  // null on async acceptance paths
+  int64           ts_event_ms     = 3;
+}
+
+message OrderRejectedEvent {
+  string client_order_id = 1;
+  string reason_code     = 2;
+  string reason_text     = 3;
+  int64  ts_event_ms     = 4;
+}
+
+message OrderPendingUpdateEvent {
+  string client_order_id = 1;
+  int64  ts_event_ms     = 2;
+}
+
+message OrderPendingCancelEvent {
+  string client_order_id = 1;
+  int64  ts_event_ms     = 2;
+}
+
+// leaves_qty = "0" means full fill (nautilus convention).
+message OrderFilledEvent {
+  string client_order_id = 1;
+  string venue_order_id  = 2;
+  string trade_id        = 3;
+  string last_qty        = 4;
+  string last_price      = 5;
+  string cumulative_qty  = 6;
+  string leaves_qty      = 7;
+  int64  ts_event_ms     = 8;
+}
+
+message OrderCanceledEvent {
+  string client_order_id = 1;
+  string venue_order_id  = 2;
+  int64  ts_event_ms     = 3;
+}
+
+message OrderExpiredEvent {
+  string client_order_id = 1;
+  string venue_order_id  = 2;
+  int64  ts_event_ms     = 3;
+}
+
+message OrderListUpdatedEvent {
+  string               request_id = 1;
+  repeated OrderRecord orders     = 2;
+}
+
+message EngineStartedEvent {
+  string strategy_id = 1;
+  string account_id  = 2;
+  int64  ts_event_ms = 3;
+}
+
+// final_equity is a decimal string (float round-trip safety).
+message EngineStoppedEvent {
+  string strategy_id  = 1;
+  string final_equity = 2;
+  int64  ts_event_ms  = 3;
+}
+
+message ReplayDataLoadedEvent {
+  optional string           strategy_id    = 1;
+  uint64                    bars_loaded    = 2;
+  uint64                    trades_loaded  = 3;
+  optional string           instrument_id  = 4;
+  repeated string           instrument_ids = 5;
+  optional ReplayGranularity granularity   = 6;
+  optional uint64           session_epoch  = 7;  // monotonic; GUI clears pane registry on change
+  int64                     ts_event_ms    = 8;
+}
+
+message PositionOpenedEvent {
+  string strategy_id    = 1;
+  string venue          = 2;
+  string instrument_id  = 3;
+  string position_id    = 4;
+  string side           = 5;
+  string opened_qty     = 6;
+  string avg_open_price = 7;
+  int64  ts_event_ms    = 8;
+}
+
+message PositionClosedEvent {
+  string strategy_id   = 1;
+  string venue         = 2;
+  string instrument_id = 3;
+  string position_id   = 4;
+  string realized_pnl  = 5;
+  int64  ts_event_ms   = 6;
+}
+
+// One ExecutionMarker per OrderFilled (1:1 mapping).
+message ExecutionMarkerEvent {
+  string          strategy_id   = 1;
+  string          instrument_id = 2;
+  string          side          = 3;  // "BUY" | "SELL"
+  string          price         = 4;  // decimal string
+  optional string qty           = 5;  // decimal string
+  optional string commission    = 6;  // decimal string
+  int64           ts_event_ms   = 7;
+}
+
+message StrategySignalEvent {
+  string          strategy_id   = 1;
+  string          instrument_id = 2;
+  SignalKind      signal_kind   = 3;
+  optional string side          = 4;  // "BUY" | "SELL" | absent
+  optional string price         = 5;  // decimal string or absent
+  optional string tag           = 6;  // machine-readable label e.g. "entry"
+  optional string note          = 7;  // human-readable annotation
+  int64           ts_event_ms   = 8;
+}
+
+message BuyingPowerUpdatedEvent {
+  string request_id      = 1;
+  string venue           = 2;
+  int64  cash_available  = 3;  // JPY
+  int64  cash_shortfall  = 4;  // JPY; 0 = no shortfall
+  int64  credit_available = 5; // JPY
+  int64  ts_ms           = 6;
+}
+
+message PositionsUpdatedEvent {
+  string                  request_id = 1;
+  string                  venue      = 2;
+  repeated PositionRecord positions  = 3;
+  int64                   ts_ms      = 4;
+}
+
+// Replay-mode virtual buying power (emitted by portfolio_view.py).
+message ReplayBuyingPowerEvent {
+  string strategy_id  = 1;
+  string cash         = 2;  // decimal string
+  string buying_power = 3;  // decimal string
+  string equity       = 4;  // decimal string
+  int64  ts_event_ms  = 5;
+}
+
+// Emitted at trading-day boundaries during streaming replay.
+message DateChangeMarkerEvent {
+  string date = 1;  // ISO 8601 date e.g. "2024-01-15"
+}
+
+// Emitted before restoring a snapshot (StepBackward operation).
+message RestoreSnapshotEvent {
+  uint64 step_index  = 1;
+  int64  ts_event_ms = 2;
+}
+
+message ReplayHistoryChangedEvent {
+  bool has_history = 1;
+}
+
+message ReplayStoppedEvent {
+  string          request_id   = 1;
+  optional string final_equity = 2;  // absent if session ended without a completed strategy run
+}
+
+// Emitted when a command is rejected because the engine state machine cannot accept it.
+message EngineBusyEvent {
+  EngineState      current_state     = 1;
+  AttemptedCommand attempted_command = 2;
+  string           reason            = 3;
+  optional string  request_id        = 4;  // identifies the rejected command's caller
+}
+
+message ClientConnectedEvent {
+  uint32 count = 1;  // total connected clients after this connection
+}
+
+message ClientDisconnectedEvent {
+  uint32 count = 1;  // total connected clients after this disconnection
+}
+
+// scenario absent (not set) means SCENARIO constant was not found in the file.
+message StrategyScenarioLoadedEvent {
+  string          request_id = 1;
+  string          path       = 2;
+  optional string scenario   = 3;  // JSON-encoded dict or absent
+}
+
+message StrategyScenarioLoadFailedEvent {
+  string request_id = 1;
+  string path       = 2;
+  string reason     = 3;
+}
+
+message StrategyScenarioSavedEvent {
+  string          request_id = 1;
+  string          path       = 2;
+  bool            ok         = 3;
+  optional string error      = 4;
+}
+
+// Live strategy buying power snapshot — emitted after OrderFilled during live execution.
+message LiveBuyingPowerEvent {
+  string strategy_id  = 1;
+  string cash         = 2;  // decimal string, JPY
+  string buying_power = 3;  // decimal string, JPY
+  string equity       = 4;  // decimal string, JPY
+  int64  ts_event_ms  = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-messages — order domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+// deny_unknown_fields equivalent: proto unknown fields are silently ignored by default.
+// Security: second_password / p_no injection is prevented at the application layer.
+message SubmitOrderPayload {
+  string               client_order_id = 1;
+  string               instrument_id   = 2;
+  OrderSide            order_side      = 3;
+  OrderType            order_type      = 4;
+  string               quantity        = 5;  // decimal string
+  optional string      price           = 6;  // decimal string
+  optional string      trigger_price   = 7;  // decimal string
+  optional TriggerType trigger_type    = 8;
+  TimeInForce          time_in_force   = 9;
+  optional int64       expire_time_ns  = 10;
+  bool                 post_only       = 11;
+  bool                 reduce_only     = 12;
+  repeated string      tags            = 13;
+  uint64               request_key     = 14;  // xxh3_64 hash; 0 = unknown / skip WAL restore
+}
+
+message OrderModifyChange {
+  optional string new_quantity      = 1;
+  optional string new_price         = 2;
+  optional string new_trigger_price = 3;
+  optional int64  new_expire_time_ns = 4;
+}
+
+message OrderListFilter {
+  optional string status        = 1;
+  optional string instrument_id = 2;
+  optional string date          = 3;
+}
+
+message OrderRecord {
+  optional string client_order_id = 1;
+  string          venue_order_id  = 2;
+  string          instrument_id   = 3;
+  OrderSide       order_side      = 4;
+  OrderType       order_type      = 5;
+  string          quantity        = 6;
+  string          filled_qty      = 7;
+  string          leaves_qty      = 8;
+  optional string price           = 9;
+  optional string trigger_price   = 10;
+  TimeInForce     time_in_force   = 11;
+  optional int64  expire_time_ns  = 12;
+  OrderStatus     status          = 13;
+  int64           ts_event_ms     = 14;
+  string          venue           = 15;
+}
+
+message PositionRecord {
+  string               instrument_id  = 1;
+  string               qty            = 2;  // integer string
+  string               market_value   = 3;  // integer string; "" = unknown
+  PositionType         position_type  = 4;
+  optional string      tategyoku_id   = 5;  // margin credit only
+  string               venue          = 6;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-messages — engine / replay domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+message EngineStartConfig {
+  string                     instrument_id         = 1;
+  repeated string            instrument_ids        = 2;   // empty = use instrument_id only
+  optional string            start_date            = 3;   // replay only
+  optional string            end_date              = 4;   // replay only
+  optional string            initial_cash          = 5;   // decimal string, JPY
+  optional ReplayGranularity granularity           = 6;
+  optional string            strategy_file         = 7;
+  optional string            strategy_init_kwargs  = 8;   // JSON-encoded object
+  optional uint32            max_qty               = 9;   // live only
+  optional uint64            max_notional_jpy      = 10;  // live only
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-messages — market data
+// ─────────────────────────────────────────────────────────────────────────────
+
+message TradeRecord {
+  string price          = 1;  // decimal string
+  string qty            = 2;  // decimal string
+  string side           = 3;  // "buy" | "sell" | "unknown"
+  int64  ts_ms          = 4;
+  bool   is_liquidation = 5;
+}
+
+message KlineRecord {
+  int64           open_time_ms      = 1;
+  string          open              = 2;  // decimal string
+  string          high              = 3;
+  string          low               = 4;
+  string          close             = 5;
+  string          volume            = 6;
+  bool            is_closed         = 7;
+  optional string taker_buy_volume  = 8;  // decimal string or absent
+}
+
+message DepthLevel {
+  string price = 1;  // decimal string
+  string qty   = 2;  // decimal string
+}
+
+message OiPoint {
+  int64  ts_ms          = 1;
+  string open_interest  = 2;  // decimal string
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-messages — venue capabilities and ticker info
+// ─────────────────────────────────────────────────────────────────────────────
+
+message EngineCapabilities {
+  repeated string supported_venues      = 1;
+  bool            supports_bulk_trades  = 2;
+  bool            supports_depth_binary = 3;
+}
+
+message VenueCaps {
+  bool               client_aggr_depth      = 1;
+  bool               supports_spread_display = 2;
+  optional QtyNormKind qty_norm_kind        = 3;
+}
+
+message StockTickerEntry {
+  string          symbol          = 1;
+  optional string display_symbol  = 2;
+  optional string display_name_ja = 3;
+  float           min_ticksize    = 4;
+  optional uint32 lot_size        = 5;
+  optional float  min_qty         = 6;
+  optional string quote_currency  = 7;
+  optional string yobine_code     = 8;
+  optional string sizyou_c        = 9;
+  VenueCaps       venue_caps      = 10;
+}
+
+message CryptoTickerEntry {
+  string          symbol          = 1;
+  optional string display_symbol  = 2;
+  float           min_ticksize    = 3;
+  float           min_qty         = 4;
+  optional float  contract_size   = 5;
+  VenueCaps       venue_caps      = 6;
+}
+
+message TickerEntry {
+  oneof kind {
+    StockTickerEntry  stock  = 1;
+    CryptoTickerEntry crypto = 2;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum AppMode {
+  APP_MODE_UNSPECIFIED = 0;
+  APP_MODE_LIVE        = 1;
+  APP_MODE_REPLAY      = 2;
+}
+
+enum EngineKind {
+  ENGINE_KIND_UNSPECIFIED = 0;
+  ENGINE_KIND_BACKTEST    = 1;
+  ENGINE_KIND_LIVE        = 2;
+}
+
+enum ReplayGranularity {
+  REPLAY_GRANULARITY_UNSPECIFIED = 0;
+  REPLAY_GRANULARITY_TRADE       = 1;
+  REPLAY_GRANULARITY_MINUTE      = 2;
+  REPLAY_GRANULARITY_DAILY       = 3;
+}
+
+enum OrderSide {
+  ORDER_SIDE_UNSPECIFIED = 0;
+  ORDER_SIDE_BUY         = 1;
+  ORDER_SIDE_SELL        = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED       = 0;
+  ORDER_TYPE_MARKET            = 1;
+  ORDER_TYPE_LIMIT             = 2;
+  ORDER_TYPE_STOP_MARKET       = 3;
+  ORDER_TYPE_STOP_LIMIT        = 4;
+  ORDER_TYPE_MARKET_IF_TOUCHED = 5;
+  ORDER_TYPE_LIMIT_IF_TOUCHED  = 6;
+}
+
+enum TimeInForce {
+  TIME_IN_FORCE_UNSPECIFIED  = 0;
+  TIME_IN_FORCE_DAY          = 1;
+  TIME_IN_FORCE_GTC          = 2;
+  TIME_IN_FORCE_GTD          = 3;
+  TIME_IN_FORCE_IOC          = 4;
+  TIME_IN_FORCE_FOK          = 5;
+  TIME_IN_FORCE_AT_THE_OPEN  = 6;
+  TIME_IN_FORCE_AT_THE_CLOSE = 7;
+}
+
+enum TriggerType {
+  TRIGGER_TYPE_UNSPECIFIED = 0;
+  TRIGGER_TYPE_LAST        = 1;
+  TRIGGER_TYPE_BID_ASK     = 2;
+  TRIGGER_TYPE_INDEX       = 3;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED    = 0;
+  ORDER_STATUS_SUBMITTED      = 1;
+  ORDER_STATUS_ACCEPTED       = 2;
+  ORDER_STATUS_FILLED         = 3;
+  ORDER_STATUS_PENDING_CANCEL = 4;
+  ORDER_STATUS_CANCELED       = 5;
+  ORDER_STATUS_EXPIRED        = 6;
+  ORDER_STATUS_REJECTED       = 7;
+}
+
+// Maps to Python schemas.CurrentEngineState and Rust dto::CurrentEngineState.
+enum EngineState {
+  ENGINE_STATE_UNSPECIFIED  = 0;
+  ENGINE_STATE_IDLE         = 1;
+  ENGINE_STATE_LOADED       = 2;
+  ENGINE_STATE_RUNNING      = 3;
+  ENGINE_STATE_STOPPING     = 4;
+  ENGINE_STATE_DISCONNECTED = 5;
+  ENGINE_STATE_CONNECTING   = 6;
+  ENGINE_STATE_CONNECTED    = 7;
+  ENGINE_STATE_TRADING      = 8;
+}
+
+// Maps to Python schemas.AttemptedCommand and Rust dto::AttemptedCommand.
+enum AttemptedCommand {
+  ATTEMPTED_COMMAND_UNSPECIFIED         = 0;
+  ATTEMPTED_COMMAND_LOAD_REPLAY_DATA    = 1;
+  ATTEMPTED_COMMAND_START_ENGINE        = 2;
+  ATTEMPTED_COMMAND_STOP_ENGINE         = 3;
+  ATTEMPTED_COMMAND_SET_REPLAY_SPEED    = 4;
+  ATTEMPTED_COMMAND_STOP_REPLAY         = 5;
+  ATTEMPTED_COMMAND_FORCE_STOP_REPLAY   = 6;
+  ATTEMPTED_COMMAND_PAUSE_REPLAY        = 7;
+  ATTEMPTED_COMMAND_RESUME_REPLAY       = 8;
+  ATTEMPTED_COMMAND_STEP_REPLAY         = 9;
+  ATTEMPTED_COMMAND_STEP_BACKWARD       = 10;
+  ATTEMPTED_COMMAND_SUBMIT_ORDER        = 11;
+  ATTEMPTED_COMMAND_MODIFY_ORDER        = 12;
+  ATTEMPTED_COMMAND_CANCEL_ORDER        = 13;
+  ATTEMPTED_COMMAND_CANCEL_ALL_ORDERS   = 14;
+  ATTEMPTED_COMMAND_REQUEST_VENUE_LOGIN = 15;
+  ATTEMPTED_COMMAND_GET_BUYING_POWER    = 16;
+  ATTEMPTED_COMMAND_GET_POSITIONS       = 17;
+  ATTEMPTED_COMMAND_GET_ORDER_LIST      = 18;
+}
+
+// Provisional signal vocabulary (N1 scope; final vocabulary TBD in N2).
+enum SignalKind {
+  SIGNAL_KIND_UNSPECIFIED = 0;
+  SIGNAL_KIND_ENTRY_LONG  = 1;
+  SIGNAL_KIND_ENTRY_SHORT = 2;
+  SIGNAL_KIND_EXIT        = 3;
+  SIGNAL_KIND_ANNOTATE    = 4;
+}
+
+enum PositionType {
+  POSITION_TYPE_UNSPECIFIED    = 0;
+  POSITION_TYPE_CASH           = 1;
+  POSITION_TYPE_MARGIN_CREDIT  = 2;
+  POSITION_TYPE_MARGIN_GENERAL = 3;
+}
+
+enum QtyNormKind {
+  QTY_NORM_KIND_UNSPECIFIED = 0;
+  QTY_NORM_KIND_NONE        = 1;
+  QTY_NORM_KIND_CONTRACT    = 2;
+  QTY_NORM_KIND_LOT         = 3;
+}

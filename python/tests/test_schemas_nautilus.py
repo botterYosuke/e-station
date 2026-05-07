@@ -40,7 +40,8 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # kabu venue Phase 1: SCHEMA_MINOR を 17 → 18 に bump
     # kabu venue Phase 2: SCHEMA_MINOR を 18 → 19 に bump (発注経路 + RATE_LIMITED / UNSUPPORTED_INSTRUMENT reason_code)
     # kabu venue Phase 4 (P4-3): SCHEMA_MINOR を 19 → 20 に bump (venue_capabilities.kabu_station.is_production)
-    assert s.SCHEMA_MINOR == 20
+    # fee_total: SCHEMA_MINOR を 20 → 21 に bump (ExecutionMarker.commission 追加)
+    assert s.SCHEMA_MINOR == 21
     assert s.SCHEMA_MAJOR == 3
 
 
@@ -55,8 +56,8 @@ def test_rust_schema_constants_match_python() -> None:
     rust_lib = Path(__file__).parent.parent.parent / "engine-client" / "src" / "lib.rs"
     text = rust_lib.read_text(encoding="utf-8")
 
-    major_match = re.search(r"pub const SCHEMA_MAJOR\s*:\s*u16\s*=\s*(\d+)", text)
-    minor_match = re.search(r"pub const SCHEMA_MINOR\s*:\s*u16\s*=\s*(\d+)", text)
+    major_match = re.search(r"pub const SCHEMA_MAJOR\s*:\s*u32\s*=\s*(\d+)", text)
+    minor_match = re.search(r"pub const SCHEMA_MINOR\s*:\s*u32\s*=\s*(\d+)", text)
 
     assert major_match, "SCHEMA_MAJOR not found in engine-client/src/lib.rs"
     assert minor_match, "SCHEMA_MINOR not found in engine-client/src/lib.rs"

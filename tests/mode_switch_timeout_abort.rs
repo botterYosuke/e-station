@@ -10,24 +10,28 @@
 //! - ModeSwitchSendFailed aborts immediately without waiting for the timeout.
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path)
-        .expect("failed to read src/main.rs")
-        .replace("\r\n", "\n")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main =
+        std::fs::read_to_string(format!("{base}/src/main.rs")).expect("failed to read src/main.rs");
+    let window =
+        std::fs::read_to_string(format!("{base}/src/handlers/window.rs")).unwrap_or_default();
+    let replay =
+        std::fs::read_to_string(format!("{base}/src/handlers/replay.rs")).unwrap_or_default();
+    format!("{main}\n{window}\n{replay}").replace("\r\n", "\n")
 }
 
-/// Extract the handler arm body for a given Message variant.
-/// Searches for `Message::<name> =>` (the match arm, not a `|_| Message::` mapping)
+/// Extract the handler arm body for a given Message::Window(WindowMsg::...) variant.
+/// Searches for `Message::Window(WindowMsg::<name>) =>` (the match arm, not a `|_| Message::` mapping)
 /// and returns content up to the next top-level `Message::` arm.
 fn handler_body(src: &str, variant: &str) -> String {
-    let marker = format!("Message::{variant} =>");
+    let marker = format!("WindowMsg::{variant} =>");
     let start = src
         .find(&marker)
         .unwrap_or_else(|| panic!("handler `{marker}` not found in src/main.rs"));
     let after = &src[start..];
     // Next top-level arm (12-space indent before `Message::`)
     let end = after[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(after.len());
     after[..end].to_string()
@@ -53,8 +57,8 @@ fn safe_contains_near(src: &str, start_marker: &str, needle: &str, window: usize
 fn stop_timeout_handler_exists() {
     let src = read_main();
     assert!(
-        src.contains("Message::ModeSwitchStopTimeout =>"),
-        "Message::ModeSwitchStopTimeout handler arm must exist"
+        src.contains("WindowMsg::ModeSwitchStopTimeout =>"),
+        "WindowMsg::ModeSwitchStopTimeout handler arm must exist"
     );
 }
 
@@ -84,8 +88,8 @@ fn stop_timeout_sends_force_stop_replay() {
 fn force_stop_timeout_handler_exists() {
     let src = read_main();
     assert!(
-        src.contains("Message::ModeSwitchForceStopTimeout =>"),
-        "Message::ModeSwitchForceStopTimeout handler arm must exist"
+        src.contains("WindowMsg::ModeSwitchForceStopTimeout =>"),
+        "WindowMsg::ModeSwitchForceStopTimeout handler arm must exist"
     );
 }
 
@@ -131,8 +135,8 @@ fn force_stop_timeout_shows_error_dialog() {
 fn send_failed_message_variant_exists() {
     let src = read_main();
     assert!(
-        src.contains("ModeSwitchSendFailed,"),
-        "ModeSwitchSendFailed variant must exist in the Message enum"
+        src.contains("ModeSwitchSendFailed"),
+        "ModeSwitchSendFailed must exist in src/main.rs"
     );
 }
 
@@ -140,8 +144,8 @@ fn send_failed_message_variant_exists() {
 fn send_failed_handler_exists() {
     let src = read_main();
     assert!(
-        src.contains("Message::ModeSwitchSendFailed =>"),
-        "Message::ModeSwitchSendFailed handler arm must exist in update()"
+        src.contains("WindowMsg::ModeSwitchSendFailed =>"),
+        "Message::Window(WindowMsg::ModeSwitchSendFailed) handler arm must exist in update()"
     );
 }
 

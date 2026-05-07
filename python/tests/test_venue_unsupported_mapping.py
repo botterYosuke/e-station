@@ -21,6 +21,7 @@ import websockets
 
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — venue unsupported error mapping covered by unit tests")
 
 # ---------------------------------------------------------------------------
 # Shared helpers (test_order_dispatch.py と同じパターン)

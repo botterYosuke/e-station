@@ -34,6 +34,10 @@
 | URL エンコード関数の適用範囲誤り | REQUEST URL 用のエンコード関数を WebSocket URL パラメータにも適用してしまい、サーバが期待する生区切り文字（カンマ等）が `%2C` に変換されてサーバがパラメータを誤解釈する | 1 |
 | EngineEvent フィールド追加時の `..` 黙示破棄 | 既存 `EngineEvent` バリアントに新フィールドを追加したとき、ディスパッチャ arm の `..` がそのフィールドを黙って捨てる。アーム存在確認テストはあるがフィールド転送確認テストがないため、新フィールドが UI に届かない | 1 |
 | セッション境界 IPC 欠如 | engine 側が「新セッション開始」を IPC で表現せず、GUI 側の per-session レジストリ（loaded / dismissed / registered の蓄積）に「リセットの契機」がユーザーの手動 dismiss しか存在しない。リプレイファイル切替・モード切替などの境界で前セッションの状態が孤児として残り、`Waiting for data...` 状態のペインが居座る。修正は engine に単調増加 epoch を持たせて `ReplayDataLoaded` に同梱し、GUI で `prev != curr` を切替検知トリガにする（schema 3.14）| 1 |
+| pipeline 直接テストによるサーバー層ロジック見逃し | pipeline 純粋関数をテストして満足し、server.py メソッド内の state 管理（seq 採番順序・Symbol ガード・ssid フォールバック）を未テスト。seq を Symbol チェック前に increment するバグを実装してもパイプラインテストは PASS した | 1 |
+| 復元 API の保存のみ実装・呼び出し未配線 | `save()` / `view_state()` を実装して満足し、対称の `restore()` / `apply_view_state()` が再構築パス（設定変更で内部オブジェクトを new() する箇所）から呼ばれていない。保存は動作しているが復元が無効で、ユーザーが調整したカメラ/ズーム位置が再生成時にリセットされる | 1 |
+| CI タイムアウト未設定 + 優先順位分岐末尾カバー漏れ | `pytest.ini` に `timeout = 60` を設定せず、スタック時に CI が無限ブロックするリスクを放置した。また `_resolve_endpoint_and_token()` の優先順位 (c) env-only パス（セッションファイルなし・TOKEN 設定あり → `ws://127.0.0.1:19876/`）をテストせず、(a)(b) ケースだけをテストして S4-D 完了と判断した | 1 |
+| enum 下限チェックのみのバリアント数テスト | `assert!(count >= N)` 形式のバリアント数テストは新バリアント追加を検出しない。`_ => None` ワイルドカードがある match では新バリアントが追加されてもテストが通り、サイレント消失を見逃す。`assert_eq!(count, N)` の完全一致テストで新旧どちらの変化も検出する | 1 |
 
 ---
 
@@ -1844,3 +1848,148 @@ EngineEvent::ReplayDataLoaded {
    複数銘柄では動かない類のバグは `examples/multiinst_10pairs_minute.py` などの実環境確認で
    のみ検出できる。CI に統合できない場合でも、新機能追加後の受け入れチェックリストに
    「複数銘柄リプレイで N 銘柄分のペインが生成されるか目視確認」を含める。
+
+---
+
+## 2026-05-08 — kabu PUSH seq がシンボル欠損 PUSH で誤消費される（C1 adapter-type-boundary 配線）
+
+**見逃しパターン**: pipeline 直接テストによるサーバー層ロジック見逃し
+
+**不具合の概要**:
+`_on_kabu_board_push` で `self._kabu_push_seq += 1` を `Symbol` チェックより前に実行していたため、
+`Symbol` フィールドが欠損した PUSH（kabuStation の不正データや内部テスト mock の一部）を受け取るたびに
+sequence_id カウンターが消費されていた。これにより Rust 側の gap detector が
+`prev_sequence_id` との連続性チェックで「gap あり」と判断し、不要な `RequestDepthSnapshot` を
+送信するリスクがある。
+
+**修正**: `ticker = str(raw.get("Symbol", ""))` の空チェック→早期 return **後**に
+`self._kabu_push_seq += 1` を移動（`server.py:3602-3615`）。
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_server_adapter_integration.py` | `kabu_push_pipeline.py` の純粋関数を直接呼ぶため、`server.py` の `_kabu_push_seq` state management は一切経由しない |
+| `test_kabusapi_adapter.py` | adapter 単体テストのため server.py 層を通らない |
+| `test_mappers.py` | mapper 単体テストのため同上 |
+
+**追加したテスト** (`python/tests/test_server_kabu_push.py` — 17 tests):
+- `TestBoardPushSeq::test_seq_increments_on_each_call` — seq が 0→1→2 と増えること
+- `TestBoardPushSeq::test_seq_in_outbox_matches_post_increment_value` — outbox の sequence_id が increment 後の値
+- `TestBoardPushSeq::test_two_calls_produce_consecutive_seqs` — 連続呼び出しで 1, 2 になること
+- `TestBoardPushSymbolGuard::test_missing_symbol_key_skips_outbox` — Symbol なし → outbox 書き込みなし
+- `TestBoardPushSymbolGuard::test_missing_symbol_does_not_increment_seq` — Symbol なし → seq 変化なし（今回のバグを検出）
+- `TestBoardPushSymbolGuard::test_empty_symbol_string_skips_outbox` — 空 Symbol → outbox 書き込みなし
+- `TestBoardPushExceptionIsolation::test_parse_error_does_not_raise` — parse error → クラッシュしない
+- `TestBoardPushExceptionIsolation::test_parse_error_does_not_write_outbox` — parse error → outbox 変化なし
+- `TestBoardPushSsidFallback::test_explicit_ssid_is_used` — 設定済み ssid が wire に渡る
+- `TestBoardPushSsidFallback::test_ssid_fallback_to_engine_session_id_when_none` — None 時のフォールバック
+- `TestBoardPushWireDtoPath::test_outbox_dict_has_event_field` — adapter model 直 dump 禁止の明示確認
+- `TestBoardPushWireDtoPath::test_outbox_dict_has_venue_field` — 同上（venue フィールド存在）
+- `TestBoardPushWireDtoPath::test_outbox_dict_has_no_none_top_level_values` — exclude_none=True 確認
+- `TestTradePush::test_valid_push_writes_trades_event` / `test_missing_symbol_skips_outbox` /
+  `test_parse_error_does_not_raise` / `test_ssid_fallback_when_none` — trade push 同等テスト
+
+**リグレッション確認**:
+- 修正前（seq を Symbol チェック前に increment）: `test_missing_symbol_does_not_increment_seq` が FAIL ✓
+- 修正後: 17/17 PASS ✓
+- 全テストスイート: 2156 passed, 109 skipped（リグレッションなし）✓
+
+**教訓**:
+
+1. **pipeline 純粋関数テストだけでは server 層 state は守れない**: `kabu_push_pipeline.py` の
+   テストは純粋関数を直接呼ぶため、server.py の `_kabu_push_seq` increment 順序・Symbol ガード・
+   例外封じ込め・ssid フォールバックはすべてテストされない。adapter 境界を実装したら、
+   必ずそれを**呼ぶ側（server メソッド）のテスト**も書くこと。
+
+2. **state 管理のある薄いラッパーは統合テスト必須**: 「単純なラッパー」に見えても seq 採番など
+   状態管理を持つ場合は、単体テストではなく `_make_server()` パターンのサーバー層テストが必要。
+
+3. **gap recovery フィールド（sequence_id）の正当性は E2E まで通してテストする**: 採番ロジックの
+   バグは Rust 側の gap detector でしか顕在化しないため、Python 単体テストのみでは発見できない。
+   `kabu_board_to_wire_dict` の正しさと `_on_kabu_board_push` の正しさは別々にテストする。
+
+---
+
+## 2026-05-08 — kabu PUSH seq が Symbol チェック前にインクリメントされていた
+
+**見逃しパターン**: pipeline 直接テストによるサーバー層ロジック見逃し（パターン更新）
+
+**不具合の概要**:
+`DataEngineServer._on_kabu_board_push()` で `self._kabu_push_seq += 1` が `if not ticker: return`
+よりも前に置かれており、Symbol フィールドが欠損した PUSH でも seq が消費されていた。
+gap recovery の seq 連続性が壊れ、Rust 側が不必要な `RequestDepthSnapshot` を発行する可能性があった。
+
+修正コミット: `fix(server): kabu PUSH seq を Symbol チェック後にインクリメント`
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_server_adapter_integration.py` | `kabu_push_pipeline.py` の純粋関数のみをテスト。server.py の handler state を一切触らない |
+| `test_kabusapi_adapter.py` | adapter 単体のみ。server 層の seq 採番ロジック外 |
+
+**追加したテスト**:
+- `python/tests/test_server_kabu_push_state.py` — 12 tests
+  - `test_board_push_seq_not_incremented_on_missing_symbol` — **regression core**
+  - `test_board_push_seq_skips_missing_symbol_in_sequence` — 混在シナリオ
+  - `test_board_push_seq_monotone_across_three_calls` — 単調増加確認
+  - `test_board_push_ssid_fallback_to_engine_session_id_when_none` — ssid=None フォールバック
+  - `test_board_push_ssid_used_when_set` — ssid 伝搬確認
+  - `test_board_push_parse_error_does_not_propagate` — 例外飲み込み確認
+  - `test_trade_push_does_not_affect_seq` — trade push が board seq に影響しない確認
+  - 他 5 件
+
+**リグレッション確認**:
+- `_kabu_push_seq += 1` を Symbol チェック前に戻す → `test_board_push_seq_not_incremented_on_missing_symbol` と `test_board_push_seq_skips_missing_symbol_in_sequence` が FAIL することを実際に確認済み。
+
+**教訓**:
+
+1. **pipeline テストは server 層の state 管理を保証しない**: 純粋関数パイプライン（`kabu_push_pipeline.py`）のテストが全件 PASS しても、server.py の handler で seq 採番順序が壊れたままになる。**pipeline テストと server handler テストは独立して必要。**
+
+2. **SimpleNamespace + unbound method で server メソッドを単体テストする**: `DataEngineServer.__init__` を起動せずに handler だけをテストするには `types.SimpleNamespace` で必要な属性を用意し `types.MethodType(DataEngineServer._on_kabu_board_push, stub)` で bound method を作る。属性が足りなければ `AttributeError` でドリフトが即座に分かる。
+
+3. **gap recovery の seq 正当性は採番層まで通してテストする**: `kabu_board_to_wire_dict` が seq を正しく wire DTO に埋めても、呼び出し側の handler が正しい seq を渡さなければ意味がない。採番ロジックと変換ロジックは分けてテストする。
+
+---
+
+## 2026-05-08 — HeatmapShader B3: force_historical フラグが rebuild_all early return で消失
+
+**見逃しパターン**: サイレント状態消費（rebuild シグナルのフラグが副作用なしに廃棄される）
+
+**根本原因**:
+`rebuild_all_immediate()` が set_immediate → rebuild_all → set_idle の固定順序で動いており、
+`rebuild_all()` が viewport/data なしで early return しても set_idle が必ず呼ばれていた。
+take_force_historical は early return 後の L863 にあり、early return ではフラグを消費しないまま set_idle が廃棄した。
+
+同根の問題が apply_view_state にもあった: viewport=None の HeatmapShader 新規作成直後に
+rebuild_all_immediate(None, true) を呼ぶと同パスを通り force_historical=true が消える。
+これにより order_size_filter 変更後の historical rebuild や view state 復元後の再描画が永久スキップされた。
+
+**追加したテスト**:
+- heatmap.rs::tests::apply_view_state_preserves_force_historical_without_viewport — H-2 直接検証
+- heatmap.rs::tests::anchor_skips_pause_transition_when_no_base_price — H-4 直接検証
+- heatmap.rs::tests::anchor_pauses_when_price_is_available — H-4 正常系
+- heatmap.rs::tests::rebuild_signal_future_since_returns_overlays_only — future since の安全装置
+
+**修正内容**:
+- rebuild_all() が bool を返すよう変更。early return は false、完走は true。
+- rebuild_all_immediate / invalidate_with_view_window は true の場合のみ set_idle() を呼ぶ。
+- apply_view_state は rebuild_all_immediate を廃止し rebuild_signal.set_immediate(true) のみに変更。
+- Anchor::Paused.frozen_base_price を Option<Price> から Price に変更。
+  update_auto_follow で current_base_price == None の場合は遷移しない（pause をスキップ）。
+
+**教訓**:
+
+1. **bool を返さない void 関数 + その後の副作用 = 見逃しやすい条件分岐**:
+   rebuild_all が void で early return するため、呼び出し側は成否を判断できなかった。
+   GPU/状態変更系の関数はできる限り bool または Result を返し、呼び出し側が成否に基づいて行動できるようにする。
+
+2. **"必ず Idle に戻す" パターンは early return がある関数と組み合わせると危険**:
+   try-finally 相当のパターンで action の途中中断を区別しない finally がフラグを破壊するリスクがある。
+   戻り値で制御するか guard 構造体でドロップ時クリアを実装する。
+
+3. **型が Option を持つフィールドの意味論は Paused 状態と矛盾しないか確認する**:
+   frozen_base_price: Option<Price> は「Paused = 必ず価格が固定されている」という不変条件と矛盾した。
+   enum バリアントのフィールドに Option がある場合、None が成立する状況を具体的に列挙し、
+   矛盾する場合は型を非 Option にして遷移側でガードする。

@@ -1,19 +1,19 @@
 /// Regression test: when Python restarts and issues a new `stream_session_id`,
 /// the Rust gap-detector must treat the new session as fresh — DepthDiffs for
 /// the new session should be accepted without triggering RequestDepthSnapshot.
+///
+/// G3: Migrated from WS (tokio-tungstenite) to gRPC (tonic MockGrpcEngine).
+mod common;
+
 use exchange::adapter::{Event, Exchange, venue_backend::VenueBackend};
 use exchange::{PushFrequency, Ticker, TickerInfo};
 use flowsurface_engine_client::dto::EngineEvent;
-use flowsurface_engine_client::{
-    EngineClientBackend, EngineConnection, SCHEMA_MAJOR, SCHEMA_MINOR,
-};
+use flowsurface_engine_client::{EngineClientBackend, EngineConnection, dto::AppMode};
 
+use common::engine;
 use futures::StreamExt;
-use futures_util::SinkExt;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 #[test]
 fn depth_snapshot_with_new_session_id_deserializes() {
@@ -42,113 +42,81 @@ fn depth_snapshot_with_new_session_id_deserializes() {
     }
 }
 
+/// Build a DepthSnapshotEvent proto Event.
+fn make_snapshot(ticker: &str, market: &str, session_id: &str, seq: i64) -> engine::Event {
+    engine::Event {
+        payload: Some(engine::event::Payload::DepthSnapshot(
+            engine::DepthSnapshotEvent {
+                request_id: None,
+                venue: "tachibana".to_string(),
+                ticker: ticker.to_string(),
+                market: market.to_string(),
+                stream_session_id: session_id.to_string(),
+                sequence_id: seq,
+                bids: vec![engine::DepthLevel {
+                    price: "3000.0".to_string(),
+                    qty: "100.0".to_string(),
+                }],
+                asks: vec![engine::DepthLevel {
+                    price: "3001.0".to_string(),
+                    qty: "50.0".to_string(),
+                }],
+                checksum: None,
+            },
+        )),
+    }
+}
+
+/// Build a DepthDiffEvent proto Event.
+fn make_diff(ticker: &str, market: &str, session_id: &str, seq: i64, prev: i64) -> engine::Event {
+    engine::Event {
+        payload: Some(engine::event::Payload::DepthDiff(engine::DepthDiffEvent {
+            venue: "tachibana".to_string(),
+            ticker: ticker.to_string(),
+            market: market.to_string(),
+            stream_session_id: session_id.to_string(),
+            sequence_id: seq,
+            prev_sequence_id: prev,
+            bids: vec![engine::DepthLevel {
+                price: "2998.0".to_string(),
+                qty: "150.0".to_string(),
+            }],
+            asks: vec![],
+        })),
+    }
+}
+
 /// After a Python restart (new stream_session_id), DepthDiffs for the new
 /// session should be accepted by the gap-detector — no RequestDepthSnapshot
 /// should be triggered.
 #[tokio::test]
 async fn new_session_id_resets_gap_detector_and_accepts_diffs() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
     let token = "tok";
 
-    let (snapshot_request_tx, snapshot_request_rx) = tokio::sync::oneshot::channel::<bool>();
+    // Command interceptor: watch for RequestDepthSnapshot.
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<engine::Command>(32);
 
-    tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = accept_async(tcp).await.unwrap();
+    // Events: snapshot1 (session-1) → snapshot2 (session-2) → diff (session-2).
+    let events = vec![
+        make_snapshot("7203", "stock", "session-1:1", 100),
+        make_snapshot("7203", "stock", "session-2:1", 1),
+        make_diff("7203", "stock", "session-2:1", 2, 1),
+    ];
 
-        // Handshake: read Hello, send Ready.
-        let _hello = ws.next().await.unwrap().unwrap();
-        let ready = serde_json::json!({
-            "event": "Ready",
-            "schema_major": SCHEMA_MAJOR,
-            "schema_minor": SCHEMA_MINOR,
-            "engine_version": "mock",
-            "engine_session_id": "00000000-0000-0000-0000-000000000001",
-            "capabilities": {}
-        });
-        ws.send(Message::Text(ready.to_string().into()))
+    let mock = common::MockGrpcEngine::start(common::MockServicer {
+        token: token.to_string(),
+        extra_events: events,
+        event_delay_ms: 50,
+        cmd_sink: Some(cmd_tx),
+        ..Default::default()
+    })
+    .await;
+
+    let conn = Arc::new(
+        EngineConnection::connect_grpc(&mock.target(), token, AppMode::Live)
             .await
-            .unwrap();
-
-        // Expect Subscribe (depth).
-        let sub = ws.next().await.unwrap().unwrap().into_text().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&sub).unwrap();
-        assert_eq!(parsed["op"], "Subscribe");
-        assert_eq!(parsed["stream"], "depth");
-
-        // Give the client a beat to subscribe to the broadcast channel.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Phase 1: initial session-1 snapshot seats the tracker.
-        let snapshot1 = serde_json::json!({
-            "event": "DepthSnapshot",
-            "venue": "tachibana",
-            "ticker": "7203",
-            "market": "stock",
-            "stream_session_id": "session-1:1",
-            "sequence_id": 100i64,
-            "bids": [{"price": "3000.0", "qty": "100.0"}],
-            "asks": [{"price": "3001.0", "qty": "50.0"}],
-            "checksum": null,
-        });
-        ws.send(Message::Text(snapshot1.to_string().into()))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Phase 2: Python restarts — new stream_session_id with seq starting at 1.
-        let snapshot2 = serde_json::json!({
-            "event": "DepthSnapshot",
-            "venue": "tachibana",
-            "ticker": "7203",
-            "market": "stock",
-            "stream_session_id": "session-2:1",
-            "sequence_id": 1i64,
-            "bids": [{"price": "2999.0", "qty": "200.0"}],
-            "asks": [{"price": "3002.0", "qty": "75.0"}],
-            "checksum": null,
-        });
-        ws.send(Message::Text(snapshot2.to_string().into()))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Phase 3: DepthDiff for the new session — prev=1, seq=2.
-        // The gap-detector should accept this without requesting a snapshot.
-        let diff = serde_json::json!({
-            "event": "DepthDiff",
-            "venue": "tachibana",
-            "ticker": "7203",
-            "market": "stock",
-            "stream_session_id": "session-2:1",
-            "sequence_id": 2i64,
-            "prev_sequence_id": 1i64,
-            "bids": [{"price": "2998.0", "qty": "150.0"}],
-            "asks": [],
-        });
-        ws.send(Message::Text(diff.to_string().into()))
-            .await
-            .unwrap();
-
-        // Wait briefly to see if the client sends RequestDepthSnapshot.
-        let saw_snapshot_request =
-            match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
-                Ok(Some(Ok(msg))) => {
-                    let text = msg.into_text().unwrap_or_default();
-                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-                    v["op"] == "RequestDepthSnapshot"
-                }
-                _ => false,
-            };
-        let _ = snapshot_request_tx.send(saw_snapshot_request);
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let url = format!("ws://{addr}");
-    let conn = Arc::new(EngineConnection::connect(&url, token).await.unwrap());
+            .unwrap(),
+    );
 
     let backend = EngineClientBackend::new(
         conn,
@@ -174,9 +142,21 @@ async fn new_session_id_resets_gap_detector_and_accepts_diffs() {
             }
         }
     };
-    let _ = tokio::time::timeout(Duration::from_secs(3), drain).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
 
-    let saw_snapshot_request = snapshot_request_rx.await.unwrap_or(true);
+    // Check that the client did NOT send RequestDepthSnapshot.
+    let mut saw_snapshot_request = false;
+    let check = tokio::time::timeout(Duration::from_millis(300), async {
+        while let Some(cmd) = cmd_rx.recv().await {
+            if let Some(engine::command::Payload::RequestDepthSnapshot(_)) = cmd.payload {
+                saw_snapshot_request = true;
+                break;
+            }
+        }
+    });
+    let _ = check.await;
+
+    mock.shutdown().await;
 
     assert!(
         !saw_snapshot_request,

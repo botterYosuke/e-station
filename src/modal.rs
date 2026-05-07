@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod layout_manager;
+pub mod live_strategy_form;
 pub mod network_manager;
 pub mod order_modify;
 pub mod pane;

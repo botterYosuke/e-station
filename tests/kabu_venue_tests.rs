@@ -10,8 +10,13 @@
 // ── Source helpers ────────────────────────────────────────────────────────────
 
 fn read_main() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
-    std::fs::read_to_string(path).expect("read src/main.rs")
+    let base = env!("CARGO_MANIFEST_DIR");
+    let main = std::fs::read_to_string(format!("{base}/src/main.rs")).expect("read src/main.rs");
+    let venue =
+        std::fs::read_to_string(format!("{base}/src/handlers/venue.rs")).unwrap_or_default();
+    let engine =
+        std::fs::read_to_string(format!("{base}/src/handlers/engine.rs")).unwrap_or_default();
+    format!("{main}\n{venue}\n{engine}")
 }
 
 fn scan_brace_body(src: &str, needle: &str, fallback_bytes: Option<usize>) -> String {
@@ -98,7 +103,7 @@ fn kabu_footer_badge_in_flight_no_button() {
 #[test]
 fn request_kabu_login_sends_ipc() {
     let src = read_main();
-    let body = handler_body_str(&src, "Message::RequestKabuLogin(trigger) =>");
+    let body = handler_body_str(&src, "VenueMsg::RequestKabuLogin(trigger) =>");
 
     assert!(
         body.contains("try_claim_login_in_flight()"),
@@ -114,8 +119,8 @@ fn request_kabu_login_sends_ipc() {
         "RequestKabuLogin handler must use KABU_STATION_VENUE_NAME as the venue string"
     );
     assert!(
-        body.contains("Message::KabuLoginIpcResult"),
-        "RequestKabuLogin handler must use KabuLoginIpcResult as Task::perform callback"
+        body.contains("Message::Venue(VenueMsg::KabuLoginIpcResult"),
+        "RequestKabuLogin handler must use Message::Venue(VenueMsg::KabuLoginIpcResult as Task::perform callback"
     );
 }
 
@@ -153,7 +158,7 @@ fn restart_restores_kabu_state_when_cached() {
 #[test]
 fn kabu_login_ipc_send_failure_returns_idle() {
     let src = read_main();
-    let body = handler_body_str(&src, "Message::KabuLoginIpcResult(result) =>");
+    let body = handler_body_str(&src, "VenueMsg::KabuLoginIpcResult(result) =>");
 
     assert!(
         body.contains("is_login_in_flight()"),
@@ -178,10 +183,10 @@ fn kabu_login_ipc_send_failure_returns_idle() {
 fn engine_connected_restores_kabu_state_when_cached() {
     let src = read_main();
     let start = src
-        .find("Message::EngineConnected(conn) =>")
-        .expect("Message::EngineConnected arm not found");
+        .find("EngineMsg::Connected(conn) =>")
+        .expect("EngineMsg::Connected arm not found");
     let rest = &src[start..];
-    let raw_end = rest.find("\n            Message::").unwrap_or(rest.len());
+    let raw_end = rest.find("\n            EngineMsg::").unwrap_or(rest.len());
     let safe_end = (0..=raw_end.min(rest.len()))
         .rev()
         .find(|&i| rest.is_char_boundary(i))

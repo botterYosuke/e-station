@@ -230,6 +230,7 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
                 chart: None,
                 indicators: indicators.clone(),
                 studies,
+                view_state: None,
             };
 
             Configuration::Pane(pane::State::from_config(

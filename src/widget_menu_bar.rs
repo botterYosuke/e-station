@@ -6,7 +6,7 @@
 //! **Architecture** (widget-menu-bar-impl.md):
 //! - State transitions live in `menu_bar_state::{State, update}` (no cfg gate).
 //! - This module owns `view()` (button row) and `with_dropdown_overlay()` (overlay).
-//! - Actions dispatch via `Message::NativeMenuAction(native_menu::Action)` through
+//! - Actions dispatch via `Message::Menu(MenuMsg::NativeAction(native_menu::Action))` through
 //!   `to_native_action()` — single handler path on all platforms.
 
 use engine_client::dto::AppMode;
@@ -18,8 +18,9 @@ use iced::{Element, Length};
 
 use crate::Message;
 use crate::menu::{Action, MenuEntry, ReplayControlState, actions_for_mode, replay_control_state};
-use crate::menu_bar_state::ReplayBarState;
 pub use crate::menu_bar_state::{BarMessage, State, TopMenu};
+use crate::menu_bar_state::{LiveBarState, ReplayBarState};
+use crate::messages::MenuMsg;
 use crate::modal::replay_form::Granularity;
 
 /// Fixed width for each top-level menu button.  The dropdown's horizontal
@@ -31,24 +32,27 @@ const ROW_HEIGHT: f32 = 32.0;
 
 /// Returns the menu bar height for the given mode.
 ///
-/// - Live: single row (32 px)
+/// - Live with no running strategy: single row (32 px)
+/// - Live with strategy running: two rows — menu row + live control row (64 px)
 /// - Replay: two rows — menu row + input/control row (64 px)
-pub fn bar_height(mode: AppMode) -> f32 {
+pub fn bar_height(mode: AppMode, live_strategy_running: bool) -> f32 {
     match mode {
-        AppMode::Live => ROW_HEIGHT,
         AppMode::Replay => ROW_HEIGHT * 2.0,
+        AppMode::Live if live_strategy_running => ROW_HEIGHT * 2.0,
+        AppMode::Live => ROW_HEIGHT,
     }
 }
 
 /// Returns the menu bar view — single row in Live mode, two rows in Replay mode.
 ///
-/// The caller must `.map(Message::MenuBar)` before pushing into the column.
+/// The caller must `.map(|m| Message::Menu(MenuMsg::Bar(m)))` before pushing into the column.
 pub fn view<'a>(
     state: &'a State,
     mode: AppMode,
     replay_running: bool,
     replay_paused: bool,
     mode_switch_in_progress: bool,
+    live_strategy_running: bool,
 ) -> Element<'a, BarMessage> {
     let mk = |label: &str, top: TopMenu| {
         let active = state.open == Some(top);
@@ -83,7 +87,16 @@ pub fn view<'a>(
             replay_input_row(&state.replay_bar, ctrl),
         ];
         container(col)
-            .height(Length::Fixed(bar_height(AppMode::Replay)))
+            .height(Length::Fixed(bar_height(AppMode::Replay, false)))
+            .width(Length::Fill)
+            .into()
+    } else if live_strategy_running {
+        let col = column![
+            mouse_area(top_row_container).on_press(BarMessage::Dismiss),
+            live_control_row(&state.live_bar),
+        ];
+        container(col)
+            .height(Length::Fixed(bar_height(AppMode::Live, true)))
             .width(Length::Fill)
             .into()
     } else {
@@ -122,7 +135,11 @@ pub fn with_dropdown_overlay<'a>(
     // Vertical offset: bar's bottom edge = bar_height(mode). F8 R2 / H3':
     // constant anchor derived from mode — see the rationale on `view()`'s
     // removed `.on_move` handler. In Replay mode the bar is 64 px tall.
-    let top_offset = bar_height(mode);
+    // Vertical offset: bar's bottom edge = bar_height(mode). F8 R2 / H3':
+    // constant anchor derived from mode — see the rationale on `view()`'s
+    // removed `.on_move` handler. In Replay mode the bar is 64 px tall.
+    // For dropdown positioning, Live mode anchors at the single-row height (no strategy running).
+    let top_offset = bar_height(mode, false);
 
     let entries = entries_for_menu(open_top, &mode);
     let items = build_dropdown(entries);
@@ -145,7 +162,7 @@ pub fn with_dropdown_overlay<'a>(
             .width(Length::Fill)
             .height(Length::Fill),
         )
-        .on_press(Message::MenuBar(BarMessage::Dismiss)),
+        .on_press(Message::Menu(MenuMsg::Bar(BarMessage::Dismiss))),
     );
 
     // The leading Space is NOT wrapped in opaque/mouse_area, so pointer events
@@ -252,6 +269,58 @@ fn replay_input_row<'a>(
     .into()
 }
 
+/// Second row of the live strategy control bar: status + play/pause/stop buttons.
+///
+/// Displayed only in Live mode while a strategy is running.
+fn live_control_row<'a>(bar: &'a LiveBarState) -> Element<'a, BarMessage> {
+    let file_label = bar
+        .strategy_file_stem
+        .as_deref()
+        .unwrap_or("--")
+        .to_string();
+
+    let time_display = text(
+        bar.current_time
+            .as_deref()
+            .unwrap_or("--:--:--")
+            .to_string(),
+    );
+
+    let play_btn = {
+        let b = button(text("▶")).style(button::primary);
+        if bar.live_paused {
+            b.on_press(BarMessage::LivePressPlay)
+        } else {
+            b
+        }
+    };
+
+    let pause_btn = {
+        let b = button(text("⏸")).style(button::secondary);
+        if !bar.live_paused {
+            b.on_press(BarMessage::LivePressPause)
+        } else {
+            b
+        }
+    };
+
+    let stop_btn = button(text("■"))
+        .on_press(BarMessage::LivePressStop)
+        .style(button::danger);
+
+    row![
+        text(file_label),
+        time_display,
+        Space::new().width(Length::Fill).height(Length::Shrink),
+        pause_btn,
+        play_btn,
+        stop_btn,
+    ]
+    .spacing(4)
+    .height(Length::Fixed(ROW_HEIGHT))
+    .into()
+}
+
 /// Normalises all menu types into a `Vec<MenuEntry>` with full label/enabled/tooltip/checked.
 fn entries_for_menu(top: TopMenu, mode: &AppMode) -> Vec<MenuEntry> {
     match top {
@@ -307,7 +376,7 @@ fn build_dropdown<'a>(entries: Vec<MenuEntry>) -> Vec<Element<'a, Message>> {
                 None => row![text(prefix), text(base_label)].into(),
             };
 
-            let msg = Message::MenuBar(BarMessage::Pick(action));
+            let msg = Message::Menu(MenuMsg::Bar(BarMessage::Pick(action)));
             let btn = button(content).width(Length::Fill).style(button::text);
             let btn_el: Element<'a, Message> = if enabled {
                 btn.on_press(msg).into()
@@ -370,3 +439,23 @@ pub(crate) fn to_native_action(action: &Action) -> Option<crate::native_menu::Ac
 // they were pure delegation shims over `menu::actions_for_mode` with zero
 // external callers after H2 (F8 R1). The Mode menu itself was subsequently
 // removed and replaced by the footer toggle (mode-toggle-redesign).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_height_live_no_strategy() {
+        assert_eq!(bar_height(AppMode::Live, false), ROW_HEIGHT);
+    }
+
+    #[test]
+    fn bar_height_live_strategy_running() {
+        assert_eq!(bar_height(AppMode::Live, true), ROW_HEIGHT * 2.0);
+    }
+
+    #[test]
+    fn bar_height_replay() {
+        assert_eq!(bar_height(AppMode::Replay, false), ROW_HEIGHT * 2.0);
+    }
+}

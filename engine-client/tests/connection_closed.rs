@@ -1,85 +1,43 @@
 /// Fix 1: EngineConnection::wait_closed() resolves when the remote side closes.
 ///
-/// The mock server sends Ready then immediately closes its WS.
+/// The mock gRPC server sends ReadyResponse then closes its stream.
 /// `wait_closed()` must resolve within a generous timeout.
-use flowsurface_engine_client::{EngineConnection, SCHEMA_MAJOR, SCHEMA_MINOR};
+///
+/// G3: Migrated from WS (tokio-tungstenite) to gRPC (tonic MockGrpcEngine).
+mod common;
 
-use futures_util::{SinkExt, StreamExt};
-use std::{net::SocketAddr, time::Duration};
-use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
-
-async fn bind_loopback() -> (TcpListener, SocketAddr) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    (listener, addr)
-}
-
-/// Server: accept → Hello → Ready → close.
-async fn spawn_ready_then_close(listener: TcpListener, _token: &str) {
-    tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = accept_async(tcp).await.unwrap();
-        let _ = ws.next().await; // consume Hello
-        let ready = serde_json::json!({
-            "event": "Ready",
-            "schema_major": SCHEMA_MAJOR,
-            "schema_minor": SCHEMA_MINOR,
-            "engine_version": "0.0.1-mock",
-            "engine_session_id": "00000000-0000-0000-0000-000000000001",
-            "capabilities": {}
-        });
-        ws.send(Message::Text(ready.to_string().into())).await.ok();
-        // Drop ws → sends Close frame → connection closed.
-    });
-}
+use flowsurface_engine_client::{EngineConnection, dto::AppMode};
+use std::time::Duration;
 
 #[tokio::test]
-async fn wait_closed_resolves_when_ws_drops() {
-    let (listener, addr) = bind_loopback().await;
-    let token = "close-test-token";
-    spawn_ready_then_close(listener, token).await;
-    tokio::time::sleep(Duration::from_millis(10)).await;
+async fn wait_closed_resolves_when_stream_drops() {
+    // close_after_ready=true → server sends ReadyResponse then drops the stream.
+    let mock = common::MockGrpcEngine::start_close_after_ready("close-test-token").await;
 
-    let conn = EngineConnection::connect(&format!("ws://{addr}"), token)
+    let conn = EngineConnection::connect_grpc(&mock.target(), "close-test-token", AppMode::Live)
         .await
         .expect("connect should succeed");
 
-    // wait_closed() should resolve once the server drops the WS.
-    tokio::time::timeout(Duration::from_secs(3), conn.wait_closed())
+    // wait_closed() should resolve once the server drops the gRPC stream.
+    tokio::time::timeout(Duration::from_secs(5), conn.wait_closed())
         .await
-        .expect("wait_closed() should resolve within 3 s after remote close");
+        .expect("wait_closed() should resolve within 5 s after remote stream close");
+
+    mock.shutdown().await;
 }
 
-/// A second connection to a fresh server also satisfies the contract.
 #[tokio::test]
-async fn wait_closed_resolves_on_explicit_close_frame() {
-    let (listener, addr) = bind_loopback().await;
-    let token = "close-test-2";
+async fn wait_closed_resolves_after_second_connect() {
+    // Second independent connection also satisfies the contract.
+    let mock = common::MockGrpcEngine::start_close_after_ready("close-test-2").await;
 
-    tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = accept_async(tcp).await.unwrap();
-        let _ = ws.next().await;
-        let ready = serde_json::json!({
-            "event": "Ready",
-            "schema_major": SCHEMA_MAJOR,
-            "schema_minor": SCHEMA_MINOR,
-            "engine_version": "0.0.1-mock",
-            "engine_session_id": "00000000-0000-0000-0000-000000000002",
-            "capabilities": {}
-        });
-        ws.send(Message::Text(ready.to_string().into())).await.ok();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        ws.send(Message::Close(None)).await.ok();
-    });
-
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    let conn = EngineConnection::connect(&format!("ws://{addr}"), token)
+    let conn = EngineConnection::connect_grpc(&mock.target(), "close-test-2", AppMode::Live)
         .await
         .expect("connect should succeed");
 
-    tokio::time::timeout(Duration::from_secs(3), conn.wait_closed())
+    tokio::time::timeout(Duration::from_secs(5), conn.wait_closed())
         .await
-        .expect("wait_closed() should resolve after Close frame");
+        .expect("wait_closed() should resolve after gRPC stream close");
+
+    mock.shutdown().await;
 }

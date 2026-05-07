@@ -678,6 +678,32 @@ class NautilusRunner:
                         price_str = str(event.last_px)
                         qty_dec = Decimal(str(event.last_qty))
                         ts_ms = event.ts_event // 1_000_000
+                        # schema 3.21: commission（nautilus Money）を decimal 文字列で抽出。
+                        # 設計方針:
+                        #   - schema は Optional → 不明時は marker に key を入れない（live 経路と統一）
+                        #   - 抽出失敗は portfolio update とは独立した except でログし、
+                        #     commission_str=None として処理続行（ExecutionMarker は drop しない）
+                        commission_raw = getattr(event, "commission", None)
+                        # 初期値 None で明示初期化。下の str() が想定外に raise しても
+                        # commission_str は必ず束縛され、UnboundLocalError による
+                        # ExecutionMarker silent drop を防ぐ。
+                        commission_str: str | None = None
+                        if commission_raw is not None:
+                            try:
+                                commission_str = str(commission_raw.as_decimal())
+                            except AttributeError:
+                                commission_str = str(commission_raw)
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning(
+                                    "[NautilusRunner] commission.as_decimal() raised "
+                                    "(%s), falling back to str(): commission_raw=%r "
+                                    "strategy=%r instrument=%r",
+                                    exc, commission_raw, strategy_id, instrument_str,
+                                )
+                                try:
+                                    commission_str = str(commission_raw)
+                                except Exception:  # noqa: BLE001
+                                    commission_str = None
 
                         # portfolio 更新を先に行い、失敗した場合は emit しない（状態整合を保つ）
                         _portfolio.on_fill(instrument_str, side_str, qty_dec, Decimal(price_str))
@@ -698,7 +724,7 @@ class NautilusRunner:
                     # portfolio 更新成功後に IPC emit（両イベントを一括送出）
                     try:
                         # ExecutionMarker: 1 OrderFilled = 1 ExecutionMarker（1:1 契約）
-                        emit({
+                        marker_dict: dict = {
                             "event": "ExecutionMarker",
                             "strategy_id": strategy_id,
                             "instrument_id": instrument_str,
@@ -706,7 +732,12 @@ class NautilusRunner:
                             "price": price_str,
                             "qty": str(qty_dec),
                             "ts_event_ms": ts_ms,
-                        })
+                        }
+                        # schema 3.21: commission は Optional。不明時は key を省略
+                        # （schemas.py:860 / dto.rs:1294-1295 と整合）
+                        if commission_str is not None:
+                            marker_dict["commission"] = commission_str
+                        emit(marker_dict)
 
                         # ReplayBuyingPower: fill 後の残高を push emit する
                         bp_dict = _portfolio.to_ipc_dict(strategy_id, _last_prices)

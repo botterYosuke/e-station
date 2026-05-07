@@ -1,31 +1,43 @@
 """Aggregate summary for a replay run-buffer.
 
-Computes the four headline metrics — `total_pnl`, `max_drawdown`,
-`trade_count`, `win_rate` — from `equity.jsonl` / `fills.jsonl` plus two
-diagnostic fields (`equity_points`, `fills_count`).
+Computes the headline metrics — `total_pnl`, `max_drawdown`,
+`trade_count`, `win_rate`, `fee_total` — from `equity.jsonl` /
+`fills.jsonl` plus two diagnostic fields (`equity_points`, `fills_count`).
 
 This module is a **stable contract** consumed by:
     - blacksheep/publish_run.py  (uploads metrics; W&B responsibility migrated to blacksheep)
     - external research repos ingesting run-buffers
 
 Definitions (kept simple so audit by hand is feasible):
-    - total_pnl    : equity[-1] - equity[0]
-    - max_drawdown : max(running_peak - equity), absolute
+    - total_pnl    : equity[-1] - equity[0]  (account currency, float)
+    - max_drawdown : max(running_peak - equity), absolute (account currency, float)
     - trade_count  : FIFO-matched closing slices
     - win_rate     : fraction of closing slices with realised pnl > 0
                      (None when trade_count == 0)
-
-Out of scope: fee_total — the replay fill event does not carry commission
-yet. That requires an upstream schema change (replay -> fills.jsonl) before
-it can be aggregated here.
+    - fee_total    : naive sum of fills[].commission (schema 3.21+).
+                     Unit  : account currency string emitted by upstream
+                             (e.g. JPY for Tachibana, account currency for nautilus
+                             Money.as_decimal()). No currency normalization.
+                     Sign  : preserved as-is from upstream. Positive values
+                             typically indicate fee charged (i.e. cost to be
+                             subtracted from PnL); negative values indicate
+                             rebate. Aggregation does not absolute-value.
+                     Missing / non-numeric commission values are treated as 0.0
+                     (a WARNING is logged for non-numeric to aid auditability).
+                     Legacy run-buffers without any commission field yield
+                     fee_total == 0.0 (backward compatible).
+                     Tax / partial-fill rebate semantics are upstream-defined.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 def _coerce_float(value) -> Optional[float]:
@@ -89,7 +101,22 @@ def compute_summary(run_buffer_dir: Path) -> dict:
     # counts as one trade.
     open_lots: list[tuple[str, float, float]] = []  # (side, qty_remaining, price)
     realised: list[float] = []
+    fee_total = 0.0
     for row in fills_rows:
+        raw_commission = row.get("commission")
+        commission = _coerce_float(raw_commission)
+        if commission is not None:
+            fee_total += commission
+        elif raw_commission not in (None, ""):
+            # 値はあるが数値化できない（schema 違反）。silent に 0 扱いにすると
+            # fee_total が過小計上されるので audit 用に WARN を残す。
+            # 空文字 ("") は upstream の "missing" sentinel として扱い WARN しない
+            # （test_compute_summary_empty_string_commission_treated_as_missing 参照）。
+            log.warning(
+                "summary: non-numeric commission ignored (value=%r) — "
+                "fee_total may be understated",
+                raw_commission,
+            )
         side = row.get("side")
         qty = _coerce_float(row.get("qty"))
         price = _coerce_float(row.get("price"))
@@ -122,6 +149,7 @@ def compute_summary(run_buffer_dir: Path) -> dict:
         "max_drawdown": max_dd,
         "trade_count": trade_count,
         "win_rate": win_rate,
+        "fee_total": fee_total,
         "equity_points": len(equity_values),
         "fills_count": len(fills_rows),
     }

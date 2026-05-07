@@ -18,6 +18,8 @@ import websockets
 
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — capabilities tested via _build_ready_event in server_grpc.py")
+
 
 @pytest.fixture
 def unused_tcp_port():

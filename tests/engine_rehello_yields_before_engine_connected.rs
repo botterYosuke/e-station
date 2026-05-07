@@ -18,8 +18,8 @@
 //! their relative ordering is the load-bearing property.
 
 const ENGINE_STATUS_STREAM_START: &str = "fn engine_status_stream()";
-const REHELLO_TOKEN: &str = "Message::TachibanaVenueEvent(VenueEvent::EngineRehello)";
-const CONNECTED_TOKEN: &str = "Message::EngineConnected(conn)";
+const REHELLO_TOKEN: &str = "Message::Venue(VenueMsg::TachibanaEvent(VenueEvent::EngineRehello))";
+const CONNECTED_TOKEN: &str = "Message::Engine(EngineMsg::Connected(conn))";
 
 #[test]
 fn engine_rehello_yields_before_engine_connected_in_both_branches() {

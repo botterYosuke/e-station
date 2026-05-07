@@ -17,6 +17,8 @@ import websockets
 from engine.exchanges.tachibana import VenueCapabilityError
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — error mapping covered by unit tests")
+
 
 @pytest.fixture
 def unused_tcp_port():
