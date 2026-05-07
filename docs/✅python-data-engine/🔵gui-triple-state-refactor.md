@@ -16,7 +16,7 @@
 | ③ HeatmapShader ループ | [src/widget/chart/heatmap.rs — HeatmapShader::update](../../src/widget/chart/heatmap.rs) `HeatmapShader::update()` | `scene.camera`（GPU カメラ）、`CanvasInvalidation`、`RebuildPolicy` |
 
 Iced の設計上 ② は避けられない（Canvas::Program はフレームごとに独自の draw サイクルを持つ）。
-問題の本質は ③ が ① の責務を侵食していること、および ① が 89 バリアント・3,579行に膨張していること。
+問題の本質は ③ が ① の責務を侵食していること、および ① が **158 バリアント（2026-05-07 実測）**・3,579行以上に膨張していること。
 
 ### 1.2 状態が 6 か所に分散している
 
@@ -39,7 +39,7 @@ Iced の設計上 ② は避けられない（Canvas::Program はフレームご
 ```
 EngineEvent
   → map_engine_event_to_message()          src/main.rs:1553
-  → Message::ExecutionMarkerReceived       89バリアント中の1つ
+  → Message::ExecutionMarkerReceived       158バリアント中の1つ（2026-05-07 実測）
   → main.rs::update()                      3,579行の match
   → dashboard.panes[id].update()
   → pane.rs::handle_pane_event()           src/screen/dashboard/pane.rs:1492
@@ -63,7 +63,7 @@ EngineEvent
    `CanvasInvalidation` / `RebuildPolicy` フィールドを削除して Elm からの指示で動く。
 
 3. **`Message` enum を論理グループで分割する**
-   89 バリアントを持つフラットな enum を分解し、`main.rs::update()` を委譲ハブに縮小する。
+   158 バリアント（2026-05-07 実測）を持つフラットな enum を分解し、`main.rs::update()` を委譲ハブに縮小する。
 
 ---
 
@@ -73,10 +73,12 @@ EngineEvent
 
 **目的**: main.rs::update() 3,579行 → 各ハンドラーへの委譲 400行以内。
 
+> **update() 400行以内の前提**: この目標は各バリアントの処理をハンドラー関数（`handle_engine()`・`handle_venue()` 等）に委譲することで達成する。「委譲後の update() 本体」が 400 行以内であることが条件であり、ハンドラー関数群の合計行数は対象外。ハンドラー関数群の合計が数千行であっても、update() の責務が「ディスパッチのみ」であれば目標を達成しているとみなす。
+
 **作業**:
 
 ```rust
-// 現在: フラットな 89 バリアント
+// 現在: フラットな 158 バリアント（2026-05-07 実測）
 pub enum Message {
     EngineConnected(EngineConnection),
     TachibanaVenueEvent(VenueEvent),
@@ -114,6 +116,9 @@ fn update(&mut self, message: Message) -> Task<Message> {
 ```
 
 **完了条件**:
+
+> ⚠ **バリアント数の再算出**: 計画作成時点の 89 バリアントから 2026-05-07 実測時に 158 バリアントへ増加している（増加分は新機能追加による）。Phase 1 着手前に `rg "Message::" src/ --count` で最新バリアント数を再確認し、グループ設計（Engine/Venue/Replay/Dashboard/Window/Menu/Settings の 7 グループ）への分割可能数を見積もること。「30 以下（フラット）」目標は nested enum グループ 7 以下への再設計に変更する。
+
 - `main.rs` の `update()` が 400 行以内
 - 全既存テストがパス
 - `cargo clippy` 警告なし
@@ -285,7 +290,7 @@ pub fn insert_depth(&mut self, depth: &Depth, update_t: u64) -> Option<f32> {
 |------|------|------|
 | `main.rs` 総行数 | 7,447行 | 4,000行以下 |
 | `update()` 行数 | 3,579行 | 400行以下 |
-| `Message` バリアント数 | 89 | 30 以下（フラット） |
+| `Message` バリアント数 | 158（2026-05-07 実測） | グループ 7 以下（nested enum）に再設計。フラットバリアント削減数は Phase 1 実装時に確定 |
 | `HeatmapShader` フィールド数 | 150+ | 75 以下 |
 | `HeatmapShader` が持つ独自 update ループ | 1 | 0 |
 | `Ladder.scroll_px` の直接書き換え箇所 | 複数 | 0 |

@@ -1,4 +1,4 @@
-# 改修プラン: 取引所 adapter — 型で境界を固める
+﻿# 改修プラン: 取引所 adapter — 型で境界を固める
 
 作成日: 2026-05-07
 
@@ -118,6 +118,7 @@ class KabuStationAdapter:
         取引所が提供しない場合は adapter 内で採番する。"""
         ...
 
+> ⚠ **sequence_id 採番の state 管理**: kabuStation の PUSH 配信 JSON が `prev_sequence_id` を含まない場合、adapter インスタンスが `_last_sequence_id: int = 0` フィールドを持ち、呼び出しごとに `sequence_id = self._last_sequence_id + 1; prev_sequence_id = self._last_sequence_id` の形でインクリメントする。`stream_session_id` が変わった（WebSocket 再接続）場合は `_last_sequence_id` を 0 にリセットする。この state 保持は adapter インスタンスに対して 1 銘柄につき 1 インスタンス生成する運用前提とする。state 管理を必要としない場合（取引所が full sequence_id を返す場合）は raw 値をそのまま詰める。Step 2 着手前に kabuStation の PUSH JSON 仕様で `sequence_id`・`prev_sequence_id` フィールドの有無を確認すること。
     def parse_execution(self, raw: dict) -> Trade:
         """PUSH 配信の約定 JSON → Trade"""
         ...
@@ -156,6 +157,7 @@ class KabuStationAdapter:
 
 > ⚠ **他 venue との境界方針**: `kabusapi_adapter.py` を先に作っても、他の venue worker（Tachibana 等）は引き続き wire-format dict を `_Broadcaster.append()` に直接書く旧構造のまま残る。kabu 先行後に `models.py` の型変換層と wire-format 直書き層が並存する二重境界が発生する。この状態を許容して段階移行するか、全 venue worker を Step 2 で一括移行するかを事前に決めること。段階移行を選ぶ場合は Step 3 完了まで旧 venue は旧境界で動作する期間が生まれることをドキュメントに明記する。
 
+- 事前確認: kabuStation の PUSH 配信 JSON（`/register` 後に配信される板情報・約定情報）のフィールド一覧を確認し、`sequence_id`・`prev_sequence_id` の有無を記録する。存在しない場合は adapter 内採番（state machine）で対応する（上記 ⚠ 注記参照）。
 - `KabuStationAdapter` のコンストラクタに 50 件チェックを追加。
 - `parse_board` / `parse_execution` を実装し、戻り値を `OrderBook` / `Trade` に変更。
 - `python/tests/test_kabusapi_adapter.py` でラウンドトリップ（生 JSON → モデル）を検証。
@@ -163,6 +165,7 @@ class KabuStationAdapter:
 > **migration path（dict 直書きパスの段階移行）**: 現行の dict 直書きパス（`worker → outbox.append({...})`）を adapter model 経由パス（`worker → adapter model → mapper → wire DTO → outbox.append(...)`）に段階移行する。adapter model は schemas.py 定義の wire DTO に変換する mapper 関数（1 段）を経由して wire DTO 型を生成する。`.model_dump(mode="json")` で wire に直結するのでなく、mapper 経由で wire DTO 型を生成することで、schemas.py が wire source of truth を維持し続ける。この移行中は両パスが並存することを許容し、Step 3 完了時に dict 直書きパスを完全削除する。他 venue（Tachibana 等）は Step 3 完了まで旧境界（dict 直書き）のまま動作する。
 
 ### Step 3: server.py の配信パスを adapter 経由に差し替え
+> **mapper 関数の配置**: `python/engine/mappers.py`（新規ファイル）に `order_book_to_wire(model: OrderBook, venue: str, ticker: str, market: str) -> dict`・`depth_diff_to_wire(model: DepthDiff, venue: str, ticker: str, market: str) -> dict`・`trade_to_wire(model: Trade, venue: str, ticker: str, market: str) -> dict` を定義する。`event`・`venue`・`market` フィールドは mapper の引数から補充し、adapter model には持たせない。
 
 > ⚠ **C1 の適用範囲**: `server.py` が outbox を直接 worker に渡す構造を変えない限り、`server.py` 側だけを変更しても効果がない。C1 は「B1 で worker 側が pydantic モデルを outbox に入れるようになった後に、server.py がそれを `.model_dump(mode="json")` する」という順序依存がある。B1 完了前に C1 に着手しないこと。
 
@@ -175,6 +178,7 @@ class KabuStationAdapter:
 - [ ] **adapter model フィールド境界テスト（CI 必須）**: `Instrument` / `OrderBook` / `Trade` / `DepthDiff` の各モデルのフィールド集合に `event` / `venue` / `market` / `request_id` が含まれないことを CI で検証するテストを追加する。具体的には各モデルの `model_fields` を列挙し、禁止フィールド名が含まれていないことをアサートする。これにより wire 責務フィールドの adapter model への混入を回帰防止する。
 - [ ] **`.model_dump(mode="json")` 直結禁止の検証**: adapter model（`Instrument` / `OrderBook` / `Trade` / `DepthDiff`）の `.model_dump(mode="json")` 結果を直接 wire に送出するコードパスが存在しないことをテストで保証する。wire 送出は必ず mapper 関数を経由し、schemas.py 定義の wire DTO 型を生成した上で行うこと。統合テスト（`test_server_adapter_integration.py`）で outbox に書き込まれるオブジェクトが wire DTO 型インスタンス（または明示的な mapper 出力）であることをアサートすること。
 - [ ] **DepthSnapshot → DepthDiff continuity テスト**: stream_session_id 切替を含む real-protocol path（DepthSnapshot 受信後に DepthDiff が継続するシナリオ）の統合テストを追加する。
+> **stream_session_id 切替時の adapter state リセット**: `parse_board_diff()` は `stream_session_id` が前回呼び出しと異なる場合に `_last_sequence_id = 0` をリセットする（WebSocket 再接続後の新セッション開始を意味する）。`test_kabusapi_adapter.py` にセッション切替シナリオ（同一 adapter インスタンスで `stream_session_id` を変更して `parse_board_diff()` を呼ぶ）を追加すること。
 - [ ] **gap 検出後の RequestDepthSnapshot 再送テスト**: sequence_id のギャップを検出した後、RequestDepthSnapshot を再送し、新しい DepthSnapshot を起点に DepthDiff の continuity が回復するシナリオをテスト観点として明記する。
 
 ### Step 4: 他 adapter（将来）
@@ -190,7 +194,7 @@ class KabuStationAdapter:
 | 単体 | `models.py` | Decimal 精度、side バリデーション、immutability（`frozen=True` により `with pytest.raises(ValidationError): obj.price = Decimal("0")` が通ること） |
 | 単体 | 各 adapter | 生 JSON → 共通モデルへの変換精度、制約違反時の `ValueError` |
 | 単体 | 各 adapter | 不正 JSON / 欠損フィールド / 型違反入力で `pytest.raises(ValidationError)` が送出される |
-| 単体 | DepthDiff モデル | sequence_id の連続性・stream_session_id の一意性を確認。不正 raw JSON で ValidationError が出ることを確認 |
+| 単体 | DepthDiff モデル | stream_session_id フィールドの存在・型検証。不正 raw JSON（sequence_id 欠損など）で ValidationError が出ることを確認。sequence_id の連続性は adapter state machine テスト（統合）で確認（単体では不可） |
 | 統合 | `server.py` + adapter | adapter 出力が IPC JSON に正しくシリアライズされる（Decimal → str 変換確認を含む）。テストファイル: `python/tests/test_server_adapter_integration.py`。実行: `pytest python/tests/test_server_adapter_integration.py` |
 
 > ⚠ **設計境界**: Pydantic モデルが保証するのは「1 メッセージ内のフィールド正当性」のみ。

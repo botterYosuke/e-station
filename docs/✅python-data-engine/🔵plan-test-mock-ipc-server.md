@@ -146,31 +146,37 @@ markers =
 
 実プロセスを一切起動せず、`_resolve_endpoint_and_token()`（`replay_session.py` / `LiveSession`）の分岐を `MockIPCServer` で完全カバーする。
 
-#### S4-A: 正常 attach（session-file に有効な pid/port が存在するケース）
+#### S4-A: 明示 attach_endpoint 指定（直接接続）
+
+- `attach_endpoint=f"ws://127.0.0.1:{srv.port}/"` を直接指定し、`FLOWSURFACE_ENGINE_TOKEN` を env var で渡す。
+- `_resolve_endpoint_and_token()` が session-file を読まず直接 endpoint を返すことを確認。
+- **期待**: attach 成功、session-file 読み込みが発生しない。
+
+#### S4-B: session-file 経由の attach（正常 pid + MockIPCServer）
 
 - `engine-session.json` に生きているプロセスの pid と `MockIPCServer` のポートを書き込む。
-- `_resolve_endpoint_and_token()` が session-file を読んで `MockIPCServer` へ attach し、`Ready` を受け取れることを確認。
+- `_resolve_endpoint_and_token()` が session-file を読んで `MockIPCServer` へ attach することを確認。
+- `engine-session.json` の書き込みは `tmp_path` fixture + `monkeypatch.setattr(replay_session, "_resolve_session_file_path", lambda: tmp_path / "engine-session.json")` で行い、実環境の `user_data_dir()` への書き込みを防ぐ。
 - **期待**: attach 成功、inprocess フォールバックへ進まない。
 
-#### S4-B: stale pid（プロセス死亡済み）のケース
+#### S4-C: stale pid（プロセス死亡済み）→ フォールバック
 
-- `engine-session.json` に存在しない pid（例: `99999999`）と dummy port を書き込む。
-- `_resolve_endpoint_and_token()` が pid の死亡を検出してフォールバックを試みる動作を確認。
-- `MockIPCServer` は probe 先として機能しない（接続拒否 or タイムアウト）。
+- `engine-session.json` に存在しない pid（例: `99999999`）と dummy port を書き込む（`tmp_path` + `monkeypatch`）。
+- `_read_session_file()` が pid の死亡を検出して `(None, None)` または probe fallback を返す動作を確認。
 - **期待**: stale pid を読み捨てて probe fallback または inprocess fallback へ遷移する。
 
-#### S4-C: session-file なし（新規起動 fallback）のケース
+#### S4-D: session-file なし + env-only（token 設定済み）
 
-- `engine-session.json` が存在しない状態で `force_mode="attach"` を呼び出す。
-- **期待**: session-file なしを検知し、inprocess fallback または明示的な例外を送出する（実装に合わせてアサートを調整）。
+- `engine-session.json` が存在しない状態で `FLOWSURFACE_ENGINE_TOKEN` のみ設定して呼び出す。
+- **期待**: session-file なしを検知し、env-only パス（token のみ返却）またはフォールバックへ遷移する（実装に合わせてアサートを調整）。
 
 #### 各シナリオ共通の注意点
 
-- `MockIPCServer` が返す endpoint（`ws://127.0.0.1:{srv.port}/`）を `attach_endpoint` または session-file 経由で渡し、`FLOWSURFACE_ENGINE_TOKEN` 環境変数でトークンを注入する。
-- テスト終了後は session-file を削除し、環境変数を `del` して他テストへの汚染を防ぐ。
-- **既存テストとの棲み分け**: `test_live_session_kabu.py` 等の既存 attach テストは実プロセスに依存しており `@pytest.mark.smoke` で管理する。S4 のテストは `MockIPCServer` を使うことで**実プロセス不要**、かつ **1 秒以内**に同じ分岐を検証できる点が差別化価値である。重複を避けるため、S4 では「分岐ロジック」の検証に絞り、実プロセス間通信の結合確認は smoke に委ねる。
+- `engine-session.json` の書き込みは **`tmp_path` fixture + `monkeypatch.setattr(replay_session, "_resolve_session_file_path", lambda: tmp_path / "engine-session.json")`** を使用し、実環境の `platformdirs.user_data_dir()` への書き込みを防ぐ（並列テスト実行時の競合防止）。
+- テスト終了後は `monkeypatch` が自動でクリーンアップするため手動削除は不要。環境変数 `FLOWSURFACE_ENGINE_TOKEN` は `finally` で `del` するか `monkeypatch.delenv` を使うこと。
+- **既存テストとの棲み分け**: `test_live_session_kabu.py` 等の既存 attach テストは実プロセスに依存しており `@pytest.mark.smoke` で管理する。S4 のテストは `MockIPCServer` を使うことで**実プロセス不要**、かつ **1 秒以内**に同じ分岐を検証できる。
 
-**完了条件**: `pytest python/tests/test_mock_ipc_server_attach.py` が 1 秒以内に PASS。`_resolve_endpoint_and_token()` の S4-A / S4-B / S4-C の 3 分岐すべてがカバーされていること。
+**完了条件**: `pytest python/tests/test_mock_ipc_server_attach.py` が 1 秒以内に PASS。`_resolve_endpoint_and_token()` の S4-A / S4-B / S4-C / S4-D の **4 分岐**すべてがカバーされていること（旧: 3分岐）。
 
 ### フェーズ S5: depth bootstrap / continuity（新規）
 
@@ -232,7 +238,7 @@ script = [
     ]},
     {"on": "RequestDepthSnapshot", "reply": [
         {"event": "DepthSnapshot",
-         "request_id": "<will be matched by on-field>",
+         "request_id": None,  # MockIPCServer は request_id フィールドを検証しない（None で OK）
          "venue": "binance", "ticker": "BTCUSDT", "market": "spot",
          "stream_session_id": "sess-2", "sequence_id": 200,
          "bids": [], "asks": []}
@@ -242,6 +248,7 @@ script = [
 
 - **期待**: `DepthGap` 受信後にクライアントが `{"op": "RequestDepthSnapshot", ...}` を送出し、MockIPCServer が新しい DepthSnapshot を返すこと。
 - **注記**: `RequestDepthSnapshot` の `op` literal は `schemas.py` `RequestDepthSnapshot` クラス（`op: Literal["RequestDepthSnapshot"]`）が canonical である。この経路は「gap → 再取得」の実 protocol path を 1 本確保する最小テストであり、リトライ回数・バックオフ等の詳細は実装に委ねる。
+- **request_id マッチング**: MockIPCServer はこの script 例では request_id を検証しない（`None` を返す）。実際の Rust クライアントが `request_id` を一致確認するかどうかは実装に委ねる。厳密なマッチングが必要な場合は MockIPCServer の script エンジンに `on` フィールドの request_id パターンマッチ機能を追加すること（S2 フェーズで判断）。
 
 #### S5 共通の注意点
 
@@ -271,7 +278,7 @@ script = [
 
 1. `pytest -x` (引数なし) が実プロセス起動ゼロで **60 秒以内**に完走する。
 2. IPC ハンドシェイク・`ConnectionRefusedError` フォールバック・スキーマ不一致の各経路が `MockIPCServer` でカバーされている。
-3. `_resolve_endpoint_and_token()` の attach 解決 3 分岐（正常 attach / stale pid / session-file なし）が `MockIPCServer` でカバーされている（S4 完了条件）。
+3. `_resolve_endpoint_and_token()` の attach 解決 4 分岐（明示 attach_endpoint / session-file 正常 pid / stale pid / env-only）が `MockIPCServer` でカバーされている（S4 完了条件）。
 4. `pytest --smoke -x` で既存 smoke テストが引き続き PASS する。
 
 ## gRPC 移行時の注意（Stage D / G3）

@@ -266,6 +266,8 @@ G1 では `engine-client/src/session_file.rs` の `EngineSession` 構造体と P
 
 **G0.9 作業項目:**
 
+> **現状確認（G0.9 着手前）**: 現行コードの `engine-client/src/session_file.rs` の `EngineSession` 構造体には `transport` フィールドが存在しない（`port`・`token`・`pid`・`schema_major`・`started_at` のみ）。また `python/engine/replay_session.py` の `SessionFileData` TypedDict にも `transport` フィールドが存在しない。G0.9 は純粋な追加作業である。
+
 - [ ] `engine-client/src/session_file.rs::EngineSession` に `transport: String` フィールドを追加（`#[serde(default = "default_transport")]` で `"ws"` をデフォルト値とし、既存の session ファイルに `transport` フィールドがなくても読めること）。
 - [ ] `python/engine/replay_session.py::_resolve_endpoint_and_token()` が session ファイルの `transport` フィールドを読み、`"grpc"` の場合は `ws://` URL ではなく `127.0.0.1:{port}` 形式の gRPC channel address を返す最小実装を追加する。`transport` フィールド不在時は既存の WS 動作を維持する（後方互換）。
 - [ ] `python/engine/replay_session.py` 内の `LiveSession._resolve_endpoint_and_token()`（`LiveSession` は `replay_session.py` に `ReplaySession` と同居する helper クラス）にも同じ `transport` 分岐を追加する。
@@ -300,6 +302,7 @@ G1 では `engine-client/src/session_file.rs` の `EngineSession` 構造体と P
   - `process.rs::DEFAULT_PROBE_URL` のハードコードを撤廃し、`EngineSession.transport` を読んで WS/gRPC のどちらで probe するかを決める分岐に変更する（gRPC の場合は `127.0.0.1:{port}` 形式）。
   - auto-probe（プロセス未起動時の自動起動）パスも gRPC transport で動作することを G1 完了条件に追加する。
 - [ ] **gRPC smoke テスト（G1 時点で追加）**: `@pytest.mark.smoke` を付けた `test_grpc_smoke.py` を追加し、`server_grpc.py` の起動・Hello/Ready ハンドシェイク・最低1イベント受信を E2E で確認する。G1 完了時点から gRPC smoke が CI nightly で実行されること。WS smoke と並行して実行（排他ではない）。`.github/workflows/python-tests.yml` の nightly ジョブ（`plan-test-mock-ipc-server.md` S3 で追加）に `pytest --smoke -x` を追加すること。
+  > **前提注記**: gRPC smoke テストに `@pytest.mark.smoke` を付けるには `pytest.ini` に `smoke` マーカーが定義されていることが必要。`smoke` マーカー定義は `plan-test-mock-ipc-server.md` S3 フェーズの作業項目だが、G1 着手時点で S3 が完了していない場合は、G1 着手前に `pytest.ini` への `smoke` マーカー追加のみ先行して実施すること。
 - [ ] **`--transport` フラグを新設**: `python/engine/__main__.py` の `_parse_args()` に `--transport ws|grpc`（デフォルト `grpc`）を追加。G1 では `--transport grpc` で `server_grpc.py` を起動、`--transport ws` で従来 `server.py` を起動する分岐を追加。
 - [ ] **`EngineSession` に `transport` フィールドを追加**: `engine-client/src/session_file.rs` の `EngineSession` 構造体に `transport: String`（`"ws"` または `"grpc"`）を追加。`#[serde(default = "default_transport")]` で `"ws"` をデフォルト値とし（後方互換：既存の session ファイルに `transport` フィールドがなくても読めること）。Python helper が session ファイルを読んで正しいエンドポイント形式（`ws://` vs gRPC channel）を判断できるようにする。あわせて `replay_session.py::SessionFileData` に `transport: str` フィールドを追加（デフォルト `"ws"`）。
 - [ ] **`ws-transport` Cargo feature を追加**: `engine-client/Cargo.toml` に `ws-transport = []` feature を追加。WS 関連コード（`ws_client.rs`・`perform_handshake()` 等）をこの feature でゲートする準備をする（G2 で実装）。
@@ -341,7 +344,11 @@ G1 では `engine-client/src/session_file.rs` の `EngineSession` 構造体と P
 > - `Arc<EngineConnection>` が `main.rs`・`backend.rs`・`process.rs` 等で広範囲に使われており、trait 化の影響範囲特定だけで相応の調査コストがかかる。
 > - `EngineConnectionLike` trait（仮称）の設計によっては、既存の async メソッドシグネチャとの整合に工夫が必要になる（`async_trait` crate の使用要否など）。
 >
-> G2 着手前に影響範囲を `rg "EngineConnection"` で全列挙し、変更ファイル数と変更箇所数を見積もること。
+> **G2 着手条件（必須）**: G2 に着手する前に、以下の事前調査を完了し結果を PR または設計メモに記録すること:
+> - `rg "EngineConnection" --type rust` を実行し、変更が必要なファイル数と呼び出し箇所数を一覧化する
+> - `EngineConnectionLike` trait（仮称）の設計案（async メソッドシグネチャ・`async_trait` crate 使用有無）を文書化する
+> - 3〜4 日の工数見積もりが上記一覧に基づいて妥当であることを確認する
+> この事前調査なしに G2 の実装作業を開始してはならない。
 
 - [ ] `engine-client/src/grpc_client.rs` を新設（`tonic` ベース）。
 - [ ] 現行 `engine-client/src/ws_client.rs` はフィーチャーフラグ `ws-transport` で保持。
@@ -405,6 +412,7 @@ async fn test_wire_handshake_with_real_python_server() {
   venue 固有のコードへの影響はない。
 - **Python 単独モード**（Python 単独モード: Rust なしで Python クライアント同士でも gRPC は動作するため、将来的な Python 単独モードとの親和性が高い）。
 - **着手タイミング**: `fee_total` 実装完了後に着手を検討。IPC 移行は大きな変更なので、他の機能実装と並走させない。
+- **gRPC Session stream 切断時の再接続責務**: bidirectional streaming は HTTP/2 接続上の単一 stream であり、stream が切断された場合（サーバー終了・ネットワーク瞬断）には `Session` RPC を新規に呼び出すことで再接続する。この「stream 切断検知 → 新規 Session RPC 開始」ロジックの責務と実装場所（`grpc_client.rs` の reconnect loop か、`process.rs` の start_or_attach 呼び出し側か）を G2 設計時に確定すること。現行 WebSocket の `reconnect` 動作との parity 確認も G2 完了条件に含める。
 
 ---
 

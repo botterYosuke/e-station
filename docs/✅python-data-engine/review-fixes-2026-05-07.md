@@ -363,3 +363,51 @@ HIGH: 4件 / MED-HIGH: 1件 / MEDIUM: 2件（全修正済み）
 | User-56 | MEDIUM | ipc-grpc-migration.md | live_session.py → replay_session.py 内 LiveSession クラスに参照先を統一。 |
 
 HIGH: 5件 / MED-HIGH: 2件 / MEDIUM: 3件（全修正済み）
+
+---
+
+## ラウンド 13（2026-05-07）
+
+### 統一決定
+1. Message enum 数値: `89バリアント` → `158バリアント（2026-05-07 実測）` に修正。目標「30 以下（フラット）」→「nested enum グループ 7 以下に再設計、削減数は Phase 1 実装時に確定」
+2. mapper 配置: `python/engine/mappers.py`（新規）に集約。シグネチャ例を計画に追記
+3. adapter sequence state: `prev_sequence_id` が取引所未提供の場合、adapter インスタンスが `_last_sequence_id: int` state を保持するステートマシンが必要。Step 2 作業項目に追記
+4. S4 ケース再設計: `_resolve_endpoint_and_token()` の実コード4分岐に合わせて S4-A/B/C/D に再定義（旧 3分岐を廃止）
+5. session-file テスト一時化: `tmp_path` fixture + `monkeypatch` で `_resolve_session_file_path()` を差し替える方式を明示
+6. gRPC stream 切断再接続: §6 前提・保留事項に責務と設計課題を追記
+7. G2 trait 影響範囲定量化: G2 着手前に `rg "EngineConnection"` 結果を文書化することを G2 着手条件に追加
+8. G0.9 現状確認注記: 「現行コードに transport フィールドが存在しない」を明示
+
+### Findings 一覧
+
+| Finding ID | 重要度 | 対象ファイル | 修正概要 |
+|---|---|---|---|
+| R13-C1 | CRITICAL | adapter-type-boundary.md | mapper 関数の配置場所（mappers.py）・型シグネチャ例を Step 3 に追記 |
+| R13-C2 | CRITICAL | adapter-type-boundary.md | prev_sequence_id 採番の adapter state 管理（_last_sequence_id）を Step 2 に追記 |
+| R13-C3 | CRITICAL | gui-triple-state-refactor.md | Message enum 実測値 158 を反映、計測指標テーブル・コードサンプル・完了条件を修正 |
+| R13-C4 | CRITICAL | ipc-grpc-migration.md | G0.9 着手前現状確認注記（transport フィールドが現在存在しない）を追記 |
+| R13-C5 | CRITICAL | ipc-grpc-migration.md | G2 着手条件に trait 影響範囲定量化（rg "EngineConnection" 必須）を追加 |
+| R13-C6 | CRITICAL | plan-test-mock-ipc-server.md | S4 ケースを実コード4分岐に合わせて再定義（S4-A/B/C/D）、tmp_path + monkeypatch 明示 |
+| R13-C7 | CRITICAL | ImplementationLoop-plan.md | A2 作業説明の enum 数値 89 → 158 に修正 |
+| R13-C8 | CRITICAL | ImplementationLoop-plan.md | 計測指標テーブルの Message バリアント数を 158 / グループ 7 以下に修正 |
+| R13-H1 | HIGH | adapter-type-boundary.md | Step 2 作業項目先頭に kabuStation PUSH JSON の prev_sequence_id 確認を追加 |
+| R13-H2 | HIGH | adapter-type-boundary.md | stream_session_id 切替時の adapter state リセット方針を Step 3 に追記 |
+| R13-H3 | HIGH | ipc-grpc-migration.md | §6 に gRPC Session stream 切断時の再接続責務と設計課題を追記 |
+| R13-H4 | HIGH | plan-test-mock-ipc-server.md | session-file テストの tmp_path + monkeypatch 方式を S4 共通注意点に追記（R13-C6 で対処） |
+| R13-H5 | HIGH | ImplementationLoop-plan.md | G2 着手前必須調査（rg "EngineConnection" 実行）を G2 注記に追記 |
+| R13-M1 | MEDIUM | adapter-type-boundary.md | テスト方針表の DepthDiff 行「連続性確認（単体）」を「ValidationError 確認のみ（連続性は統合テスト）」に修正 |
+| R13-M2 | MEDIUM | gui-triple-state-refactor.md | Phase 1 目的節に「update() 400行以内はハブ本体のみ対象」の注記追加 |
+| R13-M3 | MEDIUM | ipc-grpc-migration.md | G1 smoke テスト項目に pytest.ini smoke マーカー先行追加注記を追記 |
+| R13-M4 | MEDIUM | plan-test-mock-ipc-server.md | S5-C の request_id placeholder を `None` + 説明注記に修正 |
+| R13-M5 | MEDIUM | ImplementationLoop-plan.md | Stage A 冒頭に「A1/A2 並列可、A3 は A2 完了後（並列不可）」を明示 |
+| R13-M6 | MEDIUM | ImplementationLoop-plan.md | C1 の .model_dump 直結記述を mapper 経由に修正（R12 反映漏れ確認） |
+
+CRITICAL: 8件 / HIGH: 5件 / MEDIUM: 6件
+
+### 残存 LOW（対応不要）
+- Decimal → JSON 変換時の round/quantize 設定（実装時に決定、計画での規定不要）
+- OrderBook frozen=True の意図説明（immutable 設計方針は README 記載が適切）
+- gui-triple-state の行番号参照ドリフト（シンボル名参照への変換推奨は既出 B-5 で対処済み）
+- heatmap-phase2-ownership.md が存在しないこと（計画文書の問題でなく着手前作成義務の問題）
+- G1 --transport デフォルト grpc のリスク（設計判断・open question として保留）
+- ipc-grpc-migration.md と ImplementationLoop-plan.md の G0.9 記述重複（ImplementationLoop が詳細版・grpc-migration が参照元として住み分け）

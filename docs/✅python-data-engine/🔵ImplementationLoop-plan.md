@@ -31,6 +31,8 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 ## Stage A — 今すぐ着手可（並列）
 
+**実施順序**: A1 と A2 は並列着手可。A3 は A2 完了後に実施（A1/A2 と並列不可）。
+
 **A1: `python/engine/models.py` 追加 + 単体テスト**
 - 文書: adapter-type-boundary Step 1
 - 作業: `Instrument` / `OrderBook` / `Trade` pydantic v2 モデルを新規ファイルに定義
@@ -39,7 +41,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 **A2: `Message` enum 分割 → `update()` 委譲化**
 - 文書: gui-triple-state Phase 1
-- 作業: 89 バリアントのフラット enum を `Engine` / `Venue` / `Replay` / `Dashboard` / `Window` / `Menu` / `Settings` グループに分割。`main.rs::update()` を委譲ハブに縮小。
+- 作業: 158 バリアント（2026-05-07 実測）のフラット enum を `Engine` / `Venue` / `Replay` / `Dashboard` / `Window` / `Menu` / `Settings` グループに分割（nested enum）。`main.rs::update()` を委譲ハブに縮小。着手前に `rg "Message::" src/ --count` で最新バリアント数を再確認すること。
 - 完了条件: `update()` 400 行以内、`cargo clippy` 警告なし
 
 **A3: `Ladder.insert_depth()` Elm 管理移行**
@@ -88,7 +90,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 **C1: `server.py` 配信パスを adapter 経由に差し替え**
 - 文書: adapter-type-boundary Step 3
-- 作業: `server.py` が adapter の変換結果（pydantic モデル）を受け取り `.model_dump(mode="json")` して既存 IPC JSON に変換する
+- 作業: `server.py` が adapter の変換結果（`OrderBook`・`Trade`・`DepthDiff` 等の pydantic モデル）を受け取り、`python/engine/mappers.py` の mapper 関数経由で schemas.py 定義の wire DTO 型に変換し、outbox に送出する（`.model_dump(mode="json")` での直結は禁止）
 - IPC スキーマ（`SCHEMA_MAJOR` / `SCHEMA_MINOR`）は変更しない
 - 依存: B1 完了後
 
@@ -154,6 +156,8 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 - `cargo test --workspace` 全 PASS（`grpc_wire_integration` を含む）
 - **⚠ 工数注意・並列実施不可**: 現行 `EngineConnection` は concrete struct であり `Arc<EngineConnection>` として `main.rs`・`backend.rs`・`process.rs` 等で広く使われている。`EngineConnectionLike` trait（仮称）の新設と既存呼び出し箇所のジェネリクス化が必要。この trait 化リファクタは影響範囲が広く G1 と並行実施すると競合が多発するため、**G1 が完全に完了してから G2 に着手すること**。この作業を含めての 3〜4 日見積もりであることを確認する。
 
+  **G2 着手前必須調査**: G2 実装開始前に `rg "EngineConnection" --type rust` を実行し、変更が必要なファイル数と呼び出し箇所数を一覧化し、3〜4 日の工数見積もりが妥当かどうかを確認すること。この調査なしに G2 の実装を開始してはならない。
+
 **G3: WebSocket トランスポート廃止（1 日）**
 - `ws-transport` フィーチャーフラグと `server.py` を削除
 - `SCHEMA_MAJOR` / `SCHEMA_MINOR` 定数を削除
@@ -200,7 +204,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 |------|------|------|
 | `main.rs` 総行数 | 7,447 行 | 4,000 行以下 |
 | `update()` 行数 | 3,579 行 | 400 行以下 |
-| `Message` バリアント数（フラット） | 89 | 30 以下 |
+| `Message` バリアント数（フラット） | 158（2026-05-07 実測） | グループ 7 以下（nested enum 再設計） |
 | `HeatmapShader` フィールド数 | 150+ | 75 以下 |
 | `pytest`（引数なし）実行時間 | 30〜120 秒 | 60 秒以内（実プロセス起動ゼロ） |
 | IPC スキーマ管理 | `SCHEMA_MAJOR/MINOR` 手書き | protobuf フィールド番号のみ |
