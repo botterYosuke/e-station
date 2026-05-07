@@ -36,6 +36,7 @@
 | セッション境界 IPC 欠如 | engine 側が「新セッション開始」を IPC で表現せず、GUI 側の per-session レジストリ（loaded / dismissed / registered の蓄積）に「リセットの契機」がユーザーの手動 dismiss しか存在しない。リプレイファイル切替・モード切替などの境界で前セッションの状態が孤児として残り、`Waiting for data...` 状態のペインが居座る。修正は engine に単調増加 epoch を持たせて `ReplayDataLoaded` に同梱し、GUI で `prev != curr` を切替検知トリガにする（schema 3.14）| 1 |
 | pipeline 直接テストによるサーバー層ロジック見逃し | pipeline 純粋関数をテストして満足し、server.py メソッド内の state 管理（seq 採番順序・Symbol ガード・ssid フォールバック）を未テスト。seq を Symbol チェック前に increment するバグを実装してもパイプラインテストは PASS した | 1 |
 | 復元 API の保存のみ実装・呼び出し未配線 | `save()` / `view_state()` を実装して満足し、対称の `restore()` / `apply_view_state()` が再構築パス（設定変更で内部オブジェクトを new() する箇所）から呼ばれていない。保存は動作しているが復元が無効で、ユーザーが調整したカメラ/ズーム位置が再生成時にリセットされる | 1 |
+| CI タイムアウト未設定 + 優先順位分岐末尾カバー漏れ | `pytest.ini` に `timeout = 60` を設定せず、スタック時に CI が無限ブロックするリスクを放置した。また `_resolve_endpoint_and_token()` の優先順位 (c) env-only パス（セッションファイルなし・TOKEN 設定あり → `ws://127.0.0.1:19876/`）をテストせず、(a)(b) ケースだけをテストして S4-D 完了と判断した | 1 |
 | enum 下限チェックのみのバリアント数テスト | `assert!(count >= N)` 形式のバリアント数テストは新バリアント追加を検出しない。`_ => None` ワイルドカードがある match では新バリアントが追加されてもテストが通り、サイレント消失を見逃す。`assert_eq!(count, N)` の完全一致テストで新旧どちらの変化も検出する | 1 |
 
 ---
@@ -1949,3 +1950,46 @@ gap recovery の seq 連続性が壊れ、Rust 側が不必要な `RequestDepthS
 2. **SimpleNamespace + unbound method で server メソッドを単体テストする**: `DataEngineServer.__init__` を起動せずに handler だけをテストするには `types.SimpleNamespace` で必要な属性を用意し `types.MethodType(DataEngineServer._on_kabu_board_push, stub)` で bound method を作る。属性が足りなければ `AttributeError` でドリフトが即座に分かる。
 
 3. **gap recovery の seq 正当性は採番層まで通してテストする**: `kabu_board_to_wire_dict` が seq を正しく wire DTO に埋めても、呼び出し側の handler が正しい seq を渡さなければ意味がない。採番ロジックと変換ロジックは分けてテストする。
+
+---
+
+## 2026-05-08 — HeatmapShader B3: force_historical フラグが rebuild_all early return で消失
+
+**見逃しパターン**: サイレント状態消費（rebuild シグナルのフラグが副作用なしに廃棄される）
+
+**根本原因**:
+`rebuild_all_immediate()` が set_immediate → rebuild_all → set_idle の固定順序で動いており、
+`rebuild_all()` が viewport/data なしで early return しても set_idle が必ず呼ばれていた。
+take_force_historical は early return 後の L863 にあり、early return ではフラグを消費しないまま set_idle が廃棄した。
+
+同根の問題が apply_view_state にもあった: viewport=None の HeatmapShader 新規作成直後に
+rebuild_all_immediate(None, true) を呼ぶと同パスを通り force_historical=true が消える。
+これにより order_size_filter 変更後の historical rebuild や view state 復元後の再描画が永久スキップされた。
+
+**追加したテスト**:
+- heatmap.rs::tests::apply_view_state_preserves_force_historical_without_viewport — H-2 直接検証
+- heatmap.rs::tests::anchor_skips_pause_transition_when_no_base_price — H-4 直接検証
+- heatmap.rs::tests::anchor_pauses_when_price_is_available — H-4 正常系
+- heatmap.rs::tests::rebuild_signal_future_since_returns_overlays_only — future since の安全装置
+
+**修正内容**:
+- rebuild_all() が bool を返すよう変更。early return は false、完走は true。
+- rebuild_all_immediate / invalidate_with_view_window は true の場合のみ set_idle() を呼ぶ。
+- apply_view_state は rebuild_all_immediate を廃止し rebuild_signal.set_immediate(true) のみに変更。
+- Anchor::Paused.frozen_base_price を Option<Price> から Price に変更。
+  update_auto_follow で current_base_price == None の場合は遷移しない（pause をスキップ）。
+
+**教訓**:
+
+1. **bool を返さない void 関数 + その後の副作用 = 見逃しやすい条件分岐**:
+   rebuild_all が void で early return するため、呼び出し側は成否を判断できなかった。
+   GPU/状態変更系の関数はできる限り bool または Result を返し、呼び出し側が成否に基づいて行動できるようにする。
+
+2. **"必ず Idle に戻す" パターンは early return がある関数と組み合わせると危険**:
+   try-finally 相当のパターンで action の途中中断を区別しない finally がフラグを破壊するリスクがある。
+   戻り値で制御するか guard 構造体でドロップ時クリアを実装する。
+
+3. **型が Option を持つフィールドの意味論は Paused 状態と矛盾しないか確認する**:
+   frozen_base_price: Option<Price> は「Paused = 必ず価格が固定されている」という不変条件と矛盾した。
+   enum バリアントのフィールドに Option がある場合、None が成立する状況を具体的に列挙し、
+   矛盾する場合は型を非 Option にして遷移側でガードする。

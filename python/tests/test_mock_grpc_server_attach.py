@@ -249,7 +249,9 @@ class TestS4cStalePidFallback:
 
 
 class TestS4dNoSessionFileNoToken:
-    """S4-D: session ファイルなし + FLOWSURFACE_ENGINE_TOKEN 未設定 → (None, None)。"""
+    """S4-D: session ファイルなし + FLOWSURFACE_ENGINE_TOKEN 未設定 → (None, None)。
+    また session ファイルなし + TOKEN 設定あり → env-only パス (ws://...19876/) を返すこと。
+    """
 
     def test_no_session_no_token_returns_none_none(self, tmp_path) -> None:
         """session ファイルも token env も存在しない場合 (None, None) を返すこと。"""
@@ -267,6 +269,32 @@ class TestS4dNoSessionFileNoToken:
         assert endpoint is None
         assert token is None
 
+    def test_env_only_token_set_returns_ws_endpoint(self, tmp_path) -> None:
+        """session ファイルなし + TOKEN 設定あり → env-only パス (c) を返すこと。
+
+        _resolve_endpoint_and_token() の優先順位 (c): session ファイルが存在せず
+        FLOWSURFACE_ENGINE_TOKEN が設定されている場合、既定ポート 19876 で
+        ws://127.0.0.1:19876/ 形式の endpoint を返す。
+        """
+        env_with_token = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "FLOWSURFACE_ENGINE_PORT"
+        }
+        env_with_token["FLOWSURFACE_DATA_PATH"] = str(tmp_path)
+        env_with_token["FLOWSURFACE_ENGINE_TOKEN"] = "env-only-token"
+
+        with patch.dict(os.environ, env_with_token, clear=True):
+            s = ReplaySession()
+            endpoint, token = s._resolve_endpoint_and_token()
+
+        assert endpoint == "ws://127.0.0.1:19876/", (
+            f"env-only path must return default WS endpoint, got: {endpoint!r}\n"
+            "Fix: ensure FLOWSURFACE_ENGINE_TOKEN is read in the env-only branch of "
+            "_resolve_endpoint_and_token() and port defaults to 19876."
+        )
+        assert token == "env-only-token"
+
     def test_force_attach_no_session_no_token_raises_connection_refused(
         self, tmp_path
     ) -> None:
@@ -279,6 +307,6 @@ class TestS4dNoSessionFileNoToken:
         env_without_token["FLOWSURFACE_DATA_PATH"] = str(tmp_path)
 
         with patch.dict(os.environ, env_without_token, clear=True):
-            s = ReplaySession(force_mode="attach")
             with pytest.raises(ConnectionRefusedError):
-                s.__enter__()
+                with ReplaySession(force_mode="attach"):
+                    pass
