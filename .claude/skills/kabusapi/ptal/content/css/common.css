@@ -1,0 +1,215 @@
+@charset "UTF-8";
+
+
+/*  reset
+-----------------------------------------------------*/
+html, body, div, span,
+h1, h2, h3, h4, h5, h6, p, blockquote, pre,
+small, strong, sub, sup, var,
+b, i,
+dl, dt, dd, ol, ul, li,
+table, caption, tbody, tfoot, thead, tr, th, td,
+article, aside, canvas, details, figcaption, figure,
+footer, header, hgroup, menu, nav, section, summary {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    font-size: 100%;
+    vertical-align: baseline;
+    background: transparent;
+}
+
+article, aside, figcaption, figure,
+footer, header, section {
+    display: block;
+}
+
+html {
+    min-height: 100%;
+    position: relative;
+}
+/*  header
+-----------------------------------------------------*/
+header {
+	width: 920px;
+	margin: 0 auto;
+}
+header p {
+	padding: 0.5rem;
+}
+
+/*  Container
+-----------------------------------------------------*/
+
+.container {
+    padding: 15px;
+    margin-right: auto;
+    margin-left: auto;
+    width: 1140px;
+}
+
+.btn_print {
+    display: block;
+    float: right;
+    margin: 12px 0 0 0;
+    background-image: url("../image/common/btn_print.gif");
+    width: 60px;
+    height: 24px;
+    text-indent: -9999px;
+}
+/*  footer
+-----------------------------------------------------*/
+.copy {
+    padding: 35px 0;
+    text-align: center;
+    border-bottom: 12px solid #003366;
+    font-size: 90%;
+    color: #990000;
+    width: 100%;
+    background-color: white;
+}
+
+#visual {
+    background: #6ebefc;
+}
+
+    #visual h1, #visual p {
+        padding: 0rem 0;
+        text-align: center;
+    }
+
+    #visual p {
+        width: 610px;
+        margin: 0 auto;
+        line-height: 1.0;
+        font-size: 108%;
+        color: #fff;
+    }
+
+    #visual .visual-inner {
+        padding: 1.0rem 0 1.0rem;
+    }
+
+body {
+    line-height: 1;
+    font-family: ���C���I, Meiryo, "�q���M�m�p�SProN W3", "Hiragino Kaku Gothic ProN", sans-serif;
+    color: #555;
+}
+
+
+ol, ul {
+    list-style: none;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-size: 100%;
+    font-weight: normal;
+    margin: 0;
+}
+
+b, strong {
+    font-weight: bold;
+}
+
+#header {
+    background: #990000;
+    padding: 4.0rem 0;
+    background-size: cover;
+    text-align: center;
+}
+
+#footer {
+    padding: 35px 0;
+    text-align: center;
+    border-bottom: 12px solid #003366;
+    font-size: 90%;
+    color: #990000;
+    position: absolute;
+    width: 100%;
+    bottom: 0;
+    background-color: white;
+}
+
+#container {
+    margin-top: 40px;
+    margin-bottom: auto;
+}
+
+#container-inner {
+    width: 80%;
+    margin: auto;
+}
+
+    #container-inner h1 {
+        margin-bottom: 20px;
+        position: relative;
+        border-bottom: solid 2px #003366;
+        border-left: solid 0.7em #003366;
+        padding: 0.2em 0.7em;
+        font-size: 1.4em;
+        font-weight: bold;
+    }
+
+
+/*----- �{�^�� -----*/
+button {
+    font-weight: normal;
+    text-align: center;
+    vertical-align: middle;
+    touch-action: manipulation;
+    cursor: pointer;
+    background-image: none;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    line-height: 1.5;
+    border-radius: 4px;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    font-family: inherit;
+    font-size: inherit;
+}
+/* �e�[�u�� */
+table.main-table {
+    width: 100%;
+    margin: 10px 0 30px 0;
+    border-collapse: separate;
+    border-spacing: 0;
+    text-align: left;
+    line-height: 1;
+    border-top: 1px solid #ccc;
+    border-left: 1px solid #ccc;
+}
+
+    table.main-table th {
+        width: auto;
+        padding: 10px 10px;
+        font-weight: bold;
+        text-align: left;
+        vertical-align: middle;
+        border-right: 1px solid #ccc;
+        border-bottom: 1px solid #ccc;
+        border-top: 1px solid #fff;
+        border-left: 1px solid #fff;
+        background: #eee;
+    }
+
+    table.main-table td {
+        width: auto;
+        padding: 10px;
+        vertical-align: middle;
+        border-right: 1px solid #ccc;
+        border-bottom: 1px solid #ccc;
+    }
+
+        table.main-table td ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+
+        table.main-table td li {
+            margin: 5px 0;
+        }
+
+
