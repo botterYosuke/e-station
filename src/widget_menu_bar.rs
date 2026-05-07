@@ -6,7 +6,7 @@
 //! **Architecture** (widget-menu-bar-impl.md):
 //! - State transitions live in `menu_bar_state::{State, update}` (no cfg gate).
 //! - This module owns `view()` (button row) and `with_dropdown_overlay()` (overlay).
-//! - Actions dispatch via `Message::NativeMenuAction(native_menu::Action)` through
+//! - Actions dispatch via `Message::Menu(MenuMsg::NativeAction(native_menu::Action))` through
 //!   `to_native_action()` — single handler path on all platforms.
 
 use engine_client::dto::AppMode;
@@ -45,7 +45,7 @@ pub fn bar_height(mode: AppMode, live_strategy_running: bool) -> f32 {
 
 /// Returns the menu bar view — single row in Live mode, two rows in Replay mode.
 ///
-/// The caller must `.map(Message::MenuBar)` before pushing into the column.
+/// The caller must `.map(|m| Message::Menu(MenuMsg::Bar(m)))` before pushing into the column.
 pub fn view<'a>(
     state: &'a State,
     mode: AppMode,
