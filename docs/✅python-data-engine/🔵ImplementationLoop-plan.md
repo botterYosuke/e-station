@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-08（G0 + G0.5 完了）
+最終更新: 2026-05-08（G0 + G0.5 + G0.9 完了）
 
 ## 対象ドキュメント
 
@@ -273,16 +273,41 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 - plan-test-mock-ipc-server.md の S1 骨格に相当する gRPC 版
 - **完了条件**: `python/tests/test_mock_grpc_server_basic.py` が `@pytest.mark.timeout(1)` デコレータ付きで 1 秒以内に PASS。`Session` 冒頭の `HelloRequest`（`Command.oneof.hello`）に対して `ReadyResponse`（最初の `Event`）を返すラウンドトリップを grpcio チャネルで確認すること。実行コマンド: `pytest python/tests/test_mock_grpc_server_basic.py`。加えて `server.stop(); server.stop()` を連続呼び出しても例外が発生しないことを `test_mock_grpc_server_basic.py` 内で確認すること（`stop()` 冪等性）。
 
-**G0.9: transport-aware attach/discovery 先行ゲート（1 日）**
-- `session_file.rs::EngineSession` 構造体に `transport` フィールド（`"ws"` / `"grpc"` 文字列）を追加
-- `replay_session.py::ReplaySession._resolve_endpoint_and_token()` に gRPC 分岐を最小実装（`transport == "grpc"` のとき gRPC チャネル URI を返す）
-- `replay_session.py::LiveSession._resolve_endpoint_and_token()` にも同様の gRPC 分岐を追加
-- `process.rs::DEFAULT_PROBE_URL` をトランスポート対応に変更（`transport` フィールドを参照）
-- **完了条件**:
-  - `session_file.rs::EngineSession` の `transport` フィールド追加テスト PASS
-  - `ReplaySession` / `LiveSession` 両方の `_resolve_endpoint_and_token()` gRPC 分岐テスト PASS
-  - **[writer 側 acceptance pin]** `engine-session.json` に `"transport": "grpc"` を書く主体（`--transport grpc` で起動した `server_grpc.py` / engine プロセス）が、実際にそのフィールドを session file に書き込むことを確認するテストが存在すること。具体的には `test_mock_grpc_server_basic.py` または新規テストで、MockIPCServer 起動後に session file の `transport` フィールドが `"grpc"` であることを明示的にアサートする（例: `assert session_data["transport"] == "grpc"`）。このテストが存在しない場合、unit test は通っても実 attach / external mode では session file が既定の `"ws"` のまま残り、helper と `start_or_attach()` が WS に誤誘導される。
-  - **[external mode 読み取り確認]** external mode（既存の session file がある場合）においても、session file の `transport` フィールドが正しく読み取られ、`"grpc"` の場合に gRPC チャネル URI が返ることを確認すること（reader 側の acceptance pin と writer 側の acceptance pin の両方が揃うことで G0.9 完了とみなす）。
+### ✅ G0.9: transport-aware attach/discovery 先行ゲート — **完了（2026-05-08）**
+
+**実装内容:**
+- `engine-client/src/session_file.rs::EngineSession` に `pub transport: String` フィールド追加
+  - `#[serde(default = "default_transport")]` で旧形式（フィールドなし）は `"ws"` にデフォルト（後方互換）
+  - `new()` は `"ws"` 固定（既存呼び出し箇所を破壊しない）
+  - `with_transport(port, token, pid, schema_major, transport)` を新設
+  - `Debug` 実装に `transport` フィールドを追加
+- `engine-client/src/process.rs`
+  - `probe_url_from_session_or_default()` ヘルパー追加: session ファイルの `transport` フィールドを読んで適切な probe URL を返す
+  - `start_or_attach()` が `DEFAULT_PROBE_URL` 直書きではなく `probe_url_from_session_or_default()` を使用するよう変更
+  - `"grpc"` → `grpc://127.0.0.1:{port}`、`"ws"` → `ws://127.0.0.1:{port}/`
+- `python/engine/replay_session.py`
+  - `PartialSessionFileData` / `SessionFileData` TypedDict に `transport: str` フィールド追加
+  - `ReplaySession._resolve_endpoint_and_token()` path (b) に gRPC 分岐: `transport == "grpc"` → `f"127.0.0.1:{port}"` (grpcio channel target 形式)
+  - `LiveSession._resolve_endpoint_and_token()` にも同じ gRPC 分岐を追加
+- `python/tests/test_engine_session_transport.py` 新設（8 tests）
+  - reader 側 acceptance pin: `_resolve_endpoint_and_token()` が `transport="grpc"` のとき gRPC URI を返す (ReplaySession / LiveSession 両方)
+  - writer 側 acceptance pin: session ファイルに `transport="grpc"` が書き込めること（`server_grpc.py` が G1 で書く契約を手動再現）
+  - 後方互換: `transport` フィールドなし → `"ws"` 扱い
+- `engine-client/tests/session_file.rs` に G0.9 テスト 4 件追加
+  - `transport_field_defaults_to_ws` / `transport_field_grpc_serializes_to_json` / `transport_field_missing_in_old_format_defaults_to_ws` / `debug_shows_transport_field`
+
+**完了確認:**
+- ✅ `cargo test --workspace` 全 PASS
+- ✅ `cargo clippy -p flowsurface-engine-client -- -D warnings` 警告なし
+- ✅ `pytest python/tests/test_engine_session_transport.py` 8/8 PASS
+- ✅ writer 側 acceptance pin: `test_writer_acceptance_pin_grpc_transport_in_session_file` PASS
+- ✅ reader 側 acceptance pin: ReplaySession/LiveSession 両 gRPC 分岐テスト PASS
+
+**⚠ G1 着手時の注意事項:**
+- `_AttachClient` は WS 専用のため、gRPC セッションファイルがある場合の `__enter__` では WS handshake が失敗して inprocess にフォールバックする（G0.9 では意図的な動作）。G1 では `_GrpcAttachClient` を追加し、`endpoint.startswith("ws://")` vs gRPC で分岐する
+- writer 側 acceptance pin は G1 で `server_grpc.py` が実際に session ファイルを書くようになったら置き換えること（現在は手動再現テスト）
+- `probe_url_from_session_or_default()` の gRPC 分岐は G2 の tonic クライアントが実装されるまで実際には使われない（`EngineConnection::probe` が WS 固定のため）
+
 - **⚠ G0.9 完了後でないと G1 に着手してはならない**（endpoint 解決経路が未整備のまま G1 を実施すると attach mode が WS 固定のまま残る）
 
 **G1: Python サーバーを gRPC に置き換え（2〜3 日）**

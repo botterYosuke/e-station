@@ -51,6 +51,7 @@ class PartialSessionFileData(TypedDict, total=False):
     pid: int
     schema_major: int
     started_at: str
+    transport: str  # G0.9: "ws" | "grpc" — 欠損時は "ws" 扱い
 
 
 class SessionFileData(TypedDict, total=False):
@@ -69,6 +70,7 @@ class SessionFileData(TypedDict, total=False):
     pid: int
     schema_major: int
     started_at: str
+    transport: str  # G0.9: "ws" | "grpc" — 欠損時は "ws" 扱い
 
 log = logging.getLogger(__name__)
 
@@ -1233,6 +1235,11 @@ class ReplaySession:
                     port,
                     started_at,
                 )
+            # G0.9: transport フィールドを読んでエンドポイント URI を決定する。
+            # 欠損時は旧形式（WS 固定）として扱い後方互換を維持する。
+            transport = session.get("transport", "ws")
+            if transport == "grpc":
+                return (f"127.0.0.1:{port}", token)
             return (f"ws://127.0.0.1:{port}/", token)
 
         # (c) env-only — H-GP4: FLOWSURFACE_ENGINE_PORT を尊重する。
@@ -1372,6 +1379,11 @@ class LiveSession:
         if session is not None:
             port = session.get("port", 19876)
             token = session.get("token")
+            # G0.9: transport フィールドを読んでエンドポイント URI を決定する。
+            # 欠損時は旧形式（WS 固定）として扱い後方互換を維持する。
+            transport = session.get("transport", "ws")
+            if transport == "grpc":
+                return (f"127.0.0.1:{port}", token)
             return (f"ws://127.0.0.1:{port}/", token)
 
         token = os.environ.get("FLOWSURFACE_ENGINE_TOKEN")

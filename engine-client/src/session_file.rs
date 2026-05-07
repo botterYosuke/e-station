@@ -24,6 +24,15 @@ pub struct EngineSession {
     /// ISO-8601 UTC timestamp captured at write time. Helps the Python helper
     /// detect stale session files when the supervisor PID was reused.
     pub started_at: DateTime<Utc>,
+    /// Transport protocol in use: `"ws"` (WebSocket) or `"grpc"`.
+    /// G0.9: present in all new sessions; old session files without this field
+    /// default to `"ws"` via `#[serde(default)]`.
+    #[serde(default = "default_transport")]
+    pub transport: String,
+}
+
+fn default_transport() -> String {
+    "ws".to_string()
 }
 
 impl fmt::Debug for EngineSession {
@@ -34,18 +43,34 @@ impl fmt::Debug for EngineSession {
             .field("pid", &self.pid)
             .field("schema_major", &self.schema_major)
             .field("started_at", &self.started_at)
+            .field("transport", &self.transport)
             .finish()
     }
 }
 
 impl EngineSession {
-    /// Create a new session with `started_at = now()`.
+    /// Create a new WebSocket session with `started_at = now()`.
+    ///
+    /// Defaults `transport` to `"ws"`. Use [`Self::with_transport`] when
+    /// creating a gRPC session.
     pub fn new(port: u16, token: String, pid: u32, schema_major: u32) -> Self {
+        Self::with_transport(port, token, pid, schema_major, "ws")
+    }
+
+    /// Create a new session with an explicit transport tag (`"ws"` or `"grpc"`).
+    pub fn with_transport(
+        port: u16,
+        token: String,
+        pid: u32,
+        schema_major: u32,
+        transport: impl Into<String>,
+    ) -> Self {
         Self {
             port,
             token,
             pid,
             schema_major,
+            transport: transport.into(),
             started_at: Utc::now(),
         }
     }

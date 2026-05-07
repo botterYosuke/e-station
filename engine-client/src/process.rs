@@ -20,6 +20,25 @@ use data::data_path;
 
 const DEFAULT_PROBE_URL: &str = "ws://127.0.0.1:19876/";
 
+/// G0.9: Read the session file and derive the probe URL based on the `transport`
+/// field.  Falls back to `DEFAULT_PROBE_URL` when no valid session is found.
+///
+/// Transport mapping:
+/// - `"ws"`  (or missing) → `ws://127.0.0.1:{port}/`
+/// - `"grpc"`             → `grpc://127.0.0.1:{port}` (used in G2+)
+fn probe_url_from_session_or_default() -> String {
+    let path = data_path(Some("engine-session.json"));
+    if let Ok(bytes) = std::fs::read(&path)
+        && let Ok(session) = serde_json::from_slice::<EngineSession>(&bytes)
+    {
+        if session.transport == "grpc" {
+            return format!("grpc://127.0.0.1:{}", session.port);
+        }
+        return format!("ws://127.0.0.1:{}/", session.port);
+    }
+    DEFAULT_PROBE_URL.to_string()
+}
+
 // ── EngineCommand ─────────────────────────────────────────────────────────────
 
 /// How to launch the Python data engine.
@@ -489,7 +508,11 @@ impl ProcessManager {
     /// The attach/spawn policy lives entirely here so `src/main.rs` stays thin.
     pub async fn start_or_attach(&self, port: u16) -> Result<EngineConnection, EngineClientError> {
         let token = std::env::var("FLOWSURFACE_ENGINE_TOKEN").unwrap_or_default();
-        self.try_attach_or_spawn_inner(port, DEFAULT_PROBE_URL, &token)
+        // G0.9: resolve the probe URL from the session file so that a gRPC session
+        // (transport="grpc") is not probed as a WebSocket endpoint.  Falls back to
+        // DEFAULT_PROBE_URL when no valid session is present.
+        let probe_url = probe_url_from_session_or_default();
+        self.try_attach_or_spawn_inner(port, &probe_url, &token)
             .await
     }
 
