@@ -124,9 +124,9 @@ fn with_dropdown_overlay_uses_bar_height_constant_for_top_offset() {
         "with_dropdown_overlay must not reference `anchor_y` (F8 R2 H3': mechanism abolished)"
     );
     assert!(
-        body.contains("let top_offset = bar_height(mode)")
+        body.contains("let top_offset = bar_height(mode")
             || body.contains("let top_offset = BAR_HEIGHT"),
-        "with_dropdown_overlay must anchor at bar_height(mode) (schema 3.15) or BAR_HEIGHT (legacy)"
+        "with_dropdown_overlay must anchor at bar_height(mode, ...) (schema 3.15) or BAR_HEIGHT (legacy)"
     );
 }
 

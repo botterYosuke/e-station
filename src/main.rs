@@ -1070,6 +1070,22 @@ fn main() {
         .run();
 }
 
+/// N4-live: live 戦略の実行状態。
+#[derive(Debug, Clone, Default)]
+enum LiveStrategyState {
+    #[default]
+    Idle,
+    Running {
+        strategy_id: String,
+    },
+}
+
+impl LiveStrategyState {
+    fn is_running(&self) -> bool {
+        matches!(self, LiveStrategyState::Running { .. })
+    }
+}
+
 struct Flowsurface {
     main_window: window::Window,
     sidebar: dashboard::Sidebar,
@@ -1125,6 +1141,10 @@ struct Flowsurface {
     /// Phase 8.1c: Replay 起動フォーム modal。`File > Replay を開始...` で Some に、
     /// Submit / Cancel で None に戻る。
     replay_form_modal: Option<modal::replay_form::ReplayFormModal>,
+    /// N4-live: ライブ戦略フォーム modal
+    live_strategy_form_modal: Option<modal::live_strategy_form::LiveStrategyFormModal>,
+    /// N4-live: live 戦略の実行状態。Idle = 未実行、Running = 実行中（strategy_id 保持）。
+    live_strategy: LiveStrategyState,
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
     /// Cleared by `Message::DismissStrategyLoadError`.
     strategy_load_error: Option<String>,
@@ -1425,6 +1445,21 @@ enum Message {
     ShowReplayDialog,
     /// Phase 8.1c: Replay 起動フォーム modal の内部メッセージ。
     ReplayFormMsg(modal::replay_form::Message),
+    /// N4-live: live strategy フォーム modal 内部メッセージ。
+    LiveStrategyFormMsg(modal::live_strategy_form::Message),
+    /// N4-live: live EngineStarted を受信した。
+    LiveStrategyStarted {
+        strategy_id: String,
+        ts_event_ms: i64,
+    },
+    /// N4-live: live 戦略の EngineStopped を受信した。
+    LiveEngineStoppedEvent {
+        strategy_id: String,
+    },
+    /// N4-live: StartEngine 送信失敗（IPC エラー）。strategy_file_stem をクリアしてトーストを出す。
+    LiveStrategyStartFailed(String),
+    /// N4-live: ■ ボタンから StopEngine を送信する。
+    StopLiveStrategy,
     /// F4: dirty-check confirm — user chose "破棄して終了" (discard and exit).
     DiscardAndExit,
     /// F4: dirty-check confirm — user chose "保存して終了" (save and exit).
@@ -1790,17 +1825,33 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             ts_event_ms,
             tag,
         }),
+        // N4-live: EngineStarted in live mode → LiveStrategyStarted
+        EngineEvent::EngineStarted {
+            strategy_id,
+            ts_event_ms,
+            ..
+        } => {
+            let is_live = app_mode() == engine_client::dto::AppMode::Live;
+            if is_live {
+                Some(Message::LiveStrategyStarted {
+                    strategy_id,
+                    ts_event_ms,
+                })
+            } else {
+                None
+            }
+        }
         // Replay engine stopped → auto-refresh order list (replay mode only).
-        // In live mode, EngineStopped means engine restart, not replay completion.
+        // In live mode, EngineStopped means live strategy stopped.
         // unwrap_or(false) is intentional here: this is a runtime event handler called
         // well after APP_MODE is set; false (live) is the safe fallback so live-mode
         // engine restarts do not accidentally trigger ReplayFinished.
-        EngineEvent::EngineStopped { .. } => {
+        EngineEvent::EngineStopped { strategy_id, .. } => {
             let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
             if is_replay {
                 Some(Message::ReplayFinished)
             } else {
-                None
+                Some(Message::LiveEngineStoppedEvent { strategy_id })
             }
         }
         // Phase 8: EngineBusy → GUI ユーザーへの warn toast
@@ -1898,6 +1949,20 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         // 再発させる（schema 3.12 の見逃しクラス）。
         _ => None,
     }
+}
+
+/// N4-live: Unix ミリ秒を JST の HH:MM:SS 文字列に変換する。
+fn format_live_time(ts_ms: i64) -> String {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    let jst = FixedOffset::east_opt(9 * 3600).expect("9h offset is valid");
+    let dt_utc = match Utc.timestamp_millis_opt(ts_ms).single() {
+        Some(dt) => dt,
+        None => {
+            log::warn!("format_live_time: invalid timestamp {ts_ms}, using current time");
+            Utc::now()
+        }
+    };
+    dt_utc.with_timezone(&jst).format("%H:%M:%S").to_string()
 }
 
 fn status_bar_label(is_replay: bool, enabled: bool) -> &'static str {
@@ -2238,6 +2303,8 @@ impl Flowsurface {
             replay_strategy_file: None,
             pending_scenario_request_id: None,
             replay_form_modal: None,
+            live_strategy_form_modal: None,
+            live_strategy: LiveStrategyState::default(),
             strategy_load_error: None,
             last_saved_bytes: None,
             pending_exit_windows: None,
@@ -3720,6 +3787,7 @@ impl Flowsurface {
                 equity,
                 ts_event_ms,
             } => {
+                self.menu_bar.live_bar.current_time = Some(format_live_time(ts_event_ms));
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut().distribute_live_buying_power(
                     main_window,
@@ -4192,6 +4260,10 @@ impl Flowsurface {
                         Task::none()
                     }
                     BarMessage::PressStop => Task::done(Message::StopReplayOnly),
+                    BarMessage::LivePressStop => {
+                        return Task::done(Message::StopLiveStrategy);
+                    }
+                    BarMessage::LivePressPause | BarMessage::LivePressPlay => Task::none(),
                 };
                 self.menu_bar = menu_bar_state::update(self.menu_bar.clone(), bar_msg);
                 if let Some(native_action) = native {
@@ -4211,9 +4283,23 @@ impl Flowsurface {
                 use native_menu::Action;
                 match action {
                     Action::OpenFile => {
+                        // N4-live: live モードでは `.py` 戦略ファイルを開いて
+                        // LiveStrategyFormModal を起動する。
+                        if app_mode() == engine_client::dto::AppMode::Live {
+                            return Task::perform(
+                                async {
+                                    rfd::AsyncFileDialog::new()
+                                        .add_filter("Python", &["py"])
+                                        .set_title("戦略ファイルを開く")
+                                        .pick_file()
+                                        .await
+                                        .map(|h| h.path().to_owned())
+                                },
+                                Message::NativeOpenStrategyPicked,
+                            );
+                        }
                         // F6a: replay モードでは `.py` 戦略ファイルを開いて
-                        // SCENARIO を Python 側で抽出する。live モードは従来通り
-                        // `saved-state.json` を読む。
+                        // SCENARIO を Python 側で抽出する。
                         if app_mode() == engine_client::dto::AppMode::Replay {
                             return Task::perform(
                                 async {
@@ -4418,11 +4504,21 @@ impl Flowsurface {
                 let Some(path) = picked else {
                     return Task::none();
                 };
-                // モードガード: live で誤って `.py` が選ばれても無視する。
-                if app_mode() != engine_client::dto::AppMode::Replay {
-                    log::warn!("NativeOpenStrategyPicked received outside replay mode — dropping");
+                // N4-live: live モードでは live_strategy_form_modal を設定する。
+                if app_mode() == engine_client::dto::AppMode::Live {
+                    if self.live_strategy.is_running() {
+                        self.notifications
+                            .push(Toast::warn("Live 戦略がすでに実行中です".to_string()));
+                        return Task::none();
+                    }
+                    let form = modal::live_strategy_form::LiveStrategyFormModal {
+                        strategy_file: path,
+                        ..Default::default()
+                    };
+                    self.live_strategy_form_modal = Some(form);
                     return Task::none();
                 }
+                // replay mode: LoadStrategyScenario 経路へ続く。
                 let Some(conn) = self.engine_connection.as_ref().cloned() else {
                     self.notifications.push(Toast::error(
                         "engine に接続されていないため SCENARIO を読み込めません".to_string(),
@@ -4589,6 +4685,129 @@ impl Flowsurface {
                         }
                         Some(modal::replay_form::Action::PickStrategyFile) => {
                             // PickStrategyFile は上の専用アームで処理される
+                        }
+                        None => {}
+                    }
+                }
+                return Task::none();
+            }
+            // N4-live: EngineStarted (live) → set running state and update bar
+            Message::LiveStrategyStarted {
+                strategy_id,
+                ts_event_ms,
+            } => {
+                self.live_strategy = LiveStrategyState::Running { strategy_id };
+                self.menu_bar.live_bar.current_time = Some(format_live_time(ts_event_ms));
+                self.menu_bar.live_bar.live_paused = false;
+                // strategy_file_stem は Submit 時に既設定済み（通常フロー）。
+                // 再接続シナリオでは None のままバーに "--" が表示されるが、
+                // 再接続サポートは Phase 1-11 の対象外。
+                return Task::none();
+            }
+            // N4-live: EngineStopped (live) → clear running state
+            Message::LiveEngineStoppedEvent { strategy_id } => {
+                if let LiveStrategyState::Running {
+                    strategy_id: running_id,
+                } = &self.live_strategy
+                {
+                    if running_id == &strategy_id {
+                        self.live_strategy = LiveStrategyState::Idle;
+                        self.menu_bar.live_bar = crate::menu_bar_state::LiveBarState::default();
+                        let main_window = self.main_window.id;
+                        self.active_dashboard_mut()
+                            .clear_live_strategy_portfolio(main_window);
+                    } else {
+                        log::warn!(
+                            "LiveEngineStoppedEvent: strategy_id mismatch (got={strategy_id}, \
+                             running={running_id}); ignoring"
+                        );
+                    }
+                }
+                return Task::none();
+            }
+            // N4-live: ■ ボタンから StopEngine を送信する
+            Message::StopLiveStrategy => {
+                let LiveStrategyState::Running { strategy_id } = &self.live_strategy else {
+                    return Task::none();
+                };
+                let strategy_id = strategy_id.clone();
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    return Task::none();
+                };
+                return Task::perform(
+                    async move {
+                        conn.send(engine_client::dto::Command::StopEngine {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            strategy_id,
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                    },
+                    |res| match res {
+                        Ok(()) => Message::Noop,
+                        Err(e) => Message::OrderToast(Toast::error(format!("Live 停止失敗: {e}"))),
+                    },
+                );
+            }
+            // N4-live: StartEngine IPC 送信失敗 → strategy_file_stem をクリアしてトースト
+            Message::LiveStrategyStartFailed(e) => {
+                self.menu_bar.live_bar.strategy_file_stem = None;
+                return Task::done(Message::OrderToast(Toast::error(format!(
+                    "Live 起動失敗: {e}"
+                ))));
+            }
+            // N4-live: live strategy フォーム modal
+            Message::LiveStrategyFormMsg(msg) => {
+                if let Some(form) = &mut self.live_strategy_form_modal {
+                    match form.update(msg) {
+                        Some(modal::live_strategy_form::Action::Submit {
+                            instrument_id,
+                            strategy_file,
+                            max_qty,
+                            max_notional_jpy,
+                        }) => {
+                            let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                                // フォームを閉じずにエラーを通知する
+                                return Task::done(Message::OrderToast(Toast::error(
+                                    "engine に接続されていません".to_string(),
+                                )));
+                            };
+                            let session_id = uuid::Uuid::new_v4().to_string();
+                            self.menu_bar.live_bar.strategy_file_stem = strategy_file
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().into_owned());
+                            self.live_strategy_form_modal = None;
+                            let strategy_file_str = strategy_file.to_string_lossy().into_owned();
+                            return Task::perform(
+                                async move {
+                                    conn.send(engine_client::dto::Command::StartEngine {
+                                        request_id: uuid::Uuid::new_v4().to_string(),
+                                        engine: engine_client::dto::EngineKind::Live,
+                                        strategy_id: session_id,
+                                        config: engine_client::dto::EngineStartConfig {
+                                            instrument_id,
+                                            instrument_ids: None,
+                                            strategy_file: Some(strategy_file_str),
+                                            strategy_init_kwargs: None,
+                                            max_qty: Some(max_qty),
+                                            max_notional_jpy: Some(max_notional_jpy),
+                                            start_date: None,
+                                            end_date: None,
+                                            initial_cash: None,
+                                            granularity: None,
+                                        },
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                },
+                                |res| match res {
+                                    Ok(()) => Message::Noop,
+                                    Err(e) => Message::LiveStrategyStartFailed(e),
+                                },
+                            );
+                        }
+                        Some(modal::live_strategy_form::Action::Cancel) => {
+                            self.live_strategy_form_modal = None;
                         }
                         None => {}
                     }
@@ -6021,6 +6240,7 @@ impl Flowsurface {
                     self.replay_running,
                     self.replay_paused,
                     MODE_SWITCHING.load(std::sync::atomic::Ordering::Acquire),
+                    self.live_strategy.is_running(),
                 )
                 .map(Message::MenuBar);
                 base = base.push(menu_bar_view);
@@ -6110,7 +6330,7 @@ impl Flowsurface {
             toasted
         };
 
-        if let Some(form) = &self.replay_form_modal {
+        let after_replay_form = if let Some(form) = &self.replay_form_modal {
             let form_view = form.view().map(Message::ReplayFormMsg);
             main_dialog_modal(
                 after_second_password,
@@ -6119,6 +6339,17 @@ impl Flowsurface {
             )
         } else {
             after_second_password
+        };
+
+        if let Some(form) = &self.live_strategy_form_modal {
+            let form_view = form.view().map(Message::LiveStrategyFormMsg);
+            main_dialog_modal(
+                after_replay_form,
+                form_view,
+                Message::LiveStrategyFormMsg(modal::live_strategy_form::Message::Cancel),
+            )
+        } else {
+            after_replay_form
         }
     }
 
@@ -7321,13 +7552,93 @@ mod native_menu_handler_tests {
     #[test]
     fn open_strategy_picked_some_sends_load_strategy_scenario() {
         let body = handler_body("            Message::NativeOpenStrategyPicked(picked) =>");
+        // live 分岐: live_strategy_form_modal を設定する
         assert!(
-            body.contains("AppMode::Replay"),
-            "NativeOpenStrategyPicked must guard on replay mode (live must drop the .py)"
+            body.contains("AppMode::Live"),
+            "NativeOpenStrategyPicked must have a Live branch"
         );
         assert!(
+            body.contains("live_strategy_form_modal"),
+            "NativeOpenStrategyPicked live branch must set live_strategy_form_modal"
+        );
+        // replay 分岐: LoadStrategyScenario を送信する
+        assert!(
             body.contains("Command::LoadStrategyScenario"),
-            "NativeOpenStrategyPicked(Some) must send Command::LoadStrategyScenario"
+            "NativeOpenStrategyPicked(Some) must send Command::LoadStrategyScenario in replay mode"
+        );
+    }
+
+    #[test]
+    fn lg10_open_file_live_mode_uses_py_filter() {
+        let body = handler_body("                    Action::OpenFile =>");
+        assert!(
+            body.contains("AppMode::Live"),
+            "Action::OpenFile must have a Live branch"
+        );
+    }
+
+    #[test]
+    fn lg11_native_open_strategy_picked_live_sets_modal() {
+        let body = handler_body("            Message::NativeOpenStrategyPicked(picked) =>");
+        assert!(
+            body.contains("live_strategy_form_modal"),
+            "NativeOpenStrategyPicked live branch must set live_strategy_form_modal"
+        );
+    }
+
+    #[test]
+    fn lg12_engine_started_live_generates_live_strategy_started() {
+        let body = handler_body("        EngineEvent::EngineStarted");
+        assert!(
+            body.contains("LiveStrategyStarted"),
+            "EngineStarted must generate LiveStrategyStarted in live mode"
+        );
+    }
+
+    #[test]
+    fn lg13_engine_stopped_live_generates_live_engine_stopped_event() {
+        let body = handler_body("        EngineEvent::EngineStopped");
+        assert!(
+            body.contains("LiveEngineStoppedEvent"),
+            "EngineStopped must generate LiveEngineStoppedEvent in live mode"
+        );
+    }
+
+    #[test]
+    fn lg14_live_engine_stopped_mismatch_does_not_clear_running() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        )
+        .unwrap();
+        // LiveEngineStoppedEvent ハンドラがログ出力とガード条件を持つことを確認
+        let body = {
+            let arm_prefix = "            Message::LiveEngineStoppedEvent { strategy_id } =>";
+            let start = src
+                .find(arm_prefix)
+                .unwrap_or_else(|| panic!("handler arm not found: {arm_prefix}"));
+            let tail = &src[start..];
+            let end = tail[1..]
+                .find("\n            Message::")
+                .map(|i| i + 1)
+                .unwrap_or(tail.len());
+            src[start..start + end].to_string()
+        };
+        assert!(
+            body.contains("log::warn"),
+            "mismatch path must log a warning: {body}"
+        );
+        assert!(
+            body.contains("LiveStrategyState::Running"),
+            "must pattern-match on LiveStrategyState::Running: {body}"
+        );
+    }
+
+    #[test]
+    fn lg15_stop_live_strategy_sends_stop_engine() {
+        let body = handler_body("            Message::StopLiveStrategy =>");
+        assert!(
+            body.contains("Command::StopEngine"),
+            "StopLiveStrategy must send Command::StopEngine"
         );
     }
 

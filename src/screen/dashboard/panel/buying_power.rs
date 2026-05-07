@@ -94,6 +94,13 @@ impl BuyingPowerPanel {
         self.live_strategy_ts_ms = Some(ts_ms);
     }
 
+    /// N4-live: live 戦略停止時に portfolio フィールドを None に戻す。
+    pub fn clear_live_strategy_portfolio(&mut self) {
+        self.live_strategy_cash = None;
+        self.live_strategy_equity = None;
+        self.live_strategy_ts_ms = None;
+    }
+
     /// 信用余力データを更新する。
     pub fn set_credit_buying_power(&mut self, available: i64, ts_ms: i64) {
         self.credit_available = Some(available);
@@ -479,6 +486,16 @@ mod tests {
     #[test]
     fn live_strategy_fields_default_to_none() {
         let panel = BuyingPowerPanel::default();
+        assert!(panel.live_strategy_cash.is_none());
+        assert!(panel.live_strategy_equity.is_none());
+        assert!(panel.live_strategy_ts_ms.is_none());
+    }
+
+    #[test]
+    fn clear_live_strategy_portfolio_resets_to_none() {
+        let mut panel = BuyingPowerPanel::new();
+        panel.set_live_strategy_portfolio("100000".to_string(), "110000".to_string(), 1000);
+        panel.clear_live_strategy_portfolio();
         assert!(panel.live_strategy_cash.is_none());
         assert!(panel.live_strategy_equity.is_none());
         assert!(panel.live_strategy_ts_ms.is_none());

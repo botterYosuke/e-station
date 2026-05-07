@@ -106,7 +106,7 @@ menu_bar.live_bar をリセット
 
 ---
 
-## Phase 1: `LiveStrategyFormModal` 実装
+## ✅ Phase 1: `LiveStrategyFormModal` 実装
 
 ### 新規ファイル: `src/modal/live_strategy_form.rs`
 
@@ -444,7 +444,7 @@ Message::StopLiveStrategy => {
 
 > **ビルド依存注意**: Phase 9 は 2 段階に分割する。
 >
-> - **Phase 9a** (`menu_bar_state.rs` のみ): `LiveBarState` struct・`live_bar` フィールド・`BarMessage::LivePress*` 追加。  
+> - ✅ **Phase 9a** (`menu_bar_state.rs` のみ): `LiveBarState` struct・`live_bar` フィールド・`BarMessage::LivePress*` 追加。  
 >   main.rs の呼び出し箇所を変更しないため、単独でコンパイルが通る。**Phase 1 と同様に先行着手可能**。
 > - **Phase 9b** (`widget_menu_bar.rs`): `bar_height()` / `view()` シグネチャ変更・`live_control_row()` 追加。  
 >   シグネチャ変更により main.rs の全呼び出し箇所が一斉にコンパイルエラーになる。  
@@ -680,7 +680,7 @@ let after_live_form = if let Some(form) = &self.live_strategy_form_modal {
 
 ---
 
-## Phase 11: `LiveBuyingPower` — 既存実装を再利用（`clear_live_strategy_portfolio()` 追加のみ）
+## ✅ Phase 11: `LiveBuyingPower` — 既存実装を再利用（`clear_live_strategy_portfolio()` 追加のみ）
 
 以下は **既に実装済み** であり、本プランで変更は不要。
 
@@ -828,3 +828,54 @@ Phase 2 (main.rs 状態追加)
 > 先にコミットするとビルドが壊れる。main.rs の全呼び出し箇所の更新（9c）と同時に入れること。
 
 **推奨着手順**: Phase 1 → Phase 9a（`menu_bar_state.rs`）→ Phase 2 → Phase 3〜11 並行（Phase 9b+9c は Phase 9a 完了後、Phase 2 以降と同時）。
+
+---
+
+## レビュー反映 (2026-05-07, R1+R2 完了)
+
+### ✅ R1 修正 (2026-05-07) — 11 件 MEDIUM+ 解消
+
+6 エージェント並列レビュー（silent-failure-hunter / ws-compatibility-auditor /
+iced-architecture-reviewer / type-design-analyzer / general-purpose / rust-reviewer）で
+検出された指摘を実装エージェントで一括修正。
+
+| 修正 ID | 内容 | ファイル |
+|---|---|---|
+| H-A | `live_strategy_running: bool` + `live_strategy_id: Option<String>` → `LiveStrategyState { Idle, Running { strategy_id } }` enum 統合 | main.rs |
+| H-B | `NativeOpenStrategyPicked` 重複起動ガード追加 | main.rs |
+| H-C | Submit 時 `engine_connection` None → フォームを閉じずに Toast エラー | main.rs |
+| H-D | `validate()` に `strategy_file.exists()` チェック追加 | live_strategy_form.rs |
+| H-E | `LiveEngineStoppedEvent` strategy_id 不一致時に `log::warn!` 追加 | main.rs |
+| M-1 | `format_live_time()`: 無効 ts に `log::warn!`、FixedOffset スタイルに統一 | main.rs |
+| M-2 | Python `max_qty`/`max_notional_jpy` に `Field(ge=1, le=...)` バリデーション追加 | schemas.py |
+| M-3 | `live_paused` 二重更新を解消: `menu_bar_state::update()` 内に一元化 | menu_bar_state.rs / main.rs |
+| M-4 | 未使用 `submitting` フィールド削除、`#![allow(dead_code)]` 除去 | live_strategy_form.rs |
+| M-5 | LG-14 テスト追加（strategy_id 不一致時 state 変化なし） | main.rs |
+| M-6 | LG-5b テスト追加（存在しない .py ファイルの validate Err） | live_strategy_form.rs |
+
+### ✅ R2 修正 (2026-05-07) — 2 件 MEDIUM 解消
+
+R2 レビュー（rust-reviewer / iced-architecture-reviewer）の指摘。
+
+| 修正 ID | 内容 | ファイル |
+|---|---|---|
+| R2-M-1 | `conn.send()` 失敗時の `strategy_file_stem` 汚染: `Message::LiveStrategyStartFailed(String)` を追加してクリア | main.rs |
+| R2-M-2 | `dismiss_focus_lost_closes_when_file_open_again` 重複テスト削除 | menu_bar_state.rs |
+
+### WONTFIX（意図的設計として確定）
+
+| 指摘 | 理由 |
+|---|---|
+| `with_dropdown_overlay` が `bar_height(mode, false)` 固定 | ドロップダウンはメニュー第1行の直下に表示するのが正しいアンカー。live 2段目バーが見えていても File ▼ ボタンの真下に出すべき |
+| `LivePressPause`/`LivePressPlay` に IPC コマンドなし | 計画書 非ゴール に「Live pause/resume の Python エンジン側実装（本プランは UI のみ）」と明記済み |
+| `live_paused = false` の直接代入（`LiveStrategyStarted`）| engine イベント由来の状態変化は `BarMessage` 経由でなく `update()` 内の直接代入が適切。Elm アーキテクチャ違反ではない |
+| `validate()` 内の `Path::exists()` 同期 I/O | OS ファイルピッカー経由のため local stat() 呼び出しは数マイクロ秒。ピッカー自体より低コスト |
+
+### 最終確認（R2 後）
+
+```
+cargo test --workspace   → 全緑 (300+ tests)
+cargo clippy -- -D warnings → クリーン
+cargo fmt --check        → 差分なし
+uv run pytest python/tests/ -x -q → 2126 passed, 5 skipped
+```

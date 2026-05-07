@@ -744,8 +744,8 @@ class EngineStartConfig(IpcMessage):
     strategy_file: str | None = None
     strategy_init_kwargs: dict[str, Any] | None = None
     # live 専用フィールド（新規追加）
-    max_qty: int | None = None
-    max_notional_jpy: int | None = None
+    max_qty: int | None = Field(default=None, ge=1, le=10_000)
+    max_notional_jpy: int | None = Field(default=None, ge=1, le=100_000_000)
 
 
 class StartEngine(IpcMessage):

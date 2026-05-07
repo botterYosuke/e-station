@@ -834,6 +834,18 @@ impl Dashboard {
             });
     }
 
+    /// N4-live: live 戦略停止時にすべての BuyingPower パネルの portfolio をクリアする。
+    pub fn clear_live_strategy_portfolio(&mut self, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::BuyingPower(panel) = &mut state.content
+                    && !panel.is_replay
+                {
+                    panel.clear_live_strategy_portfolio();
+                }
+            });
+    }
+
     /// N1.12: Distribute an `ExecutionMarker` to all Kline panes.
     /// In replay mode all panes show data for the same instrument, so we broadcast
     /// unconditionally rather than filtering by instrument_id.
