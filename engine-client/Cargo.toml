@@ -52,6 +52,8 @@ protoc-bin-vendored = "3"
 # never expose them. Integration tests in `engine-client/tests/*` enable
 # this via the self-dev-dependency below.
 testing = []
+# G1: WebSocket transport feature flag (kept for backward-compat / rollback).
+ws-transport = []
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }

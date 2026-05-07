@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-08（G0 + G0.5 + G0.9 完了）
+最終更新: 2026-05-08（G0 + G0.5 + G0.9 + G1 完了 + G1 レビュー R1 反映）
 
 ## 対象ドキュメント
 
@@ -310,11 +310,63 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 - **⚠ G0.9 完了後でないと G1 に着手してはならない**（endpoint 解決経路が未整備のまま G1 を実施すると attach mode が WS 固定のまま残る）
 
-**G1: Python サーバーを gRPC に置き換え（2〜3 日）**
-- `python/engine/server_grpc.py` を新設（`grpcio.aio` ベース）
-- 現行 `server.py`（WebSocket）は `--transport ws` フラグで残存（ロールバック用）
-- `pytest python/tests/` が全 PASS
-- **G1 完了条件追記**: gRPC mock（G0.5 作成）を使った transport-level 統合テストが PASS
+### ✅ G1: Python サーバーを gRPC に置き換え — **完了（2026-05-08）**
+
+**実装内容:**
+- `python/engine/server_grpc.py` 新設（290 行、`grpcio.aio` ベース）
+  - `_GrpcDataEngineServicer`: Session RPC 実装（handshake + recv/send ループ）
+  - `_GrpcSessionKey`: `_Broadcaster` dict key 用の sentinel クラス
+  - `_cmd_payload_to_dict()`: proto Command → dict（`MessageToDict` 利用）
+  - `_dict_to_proto_event()`: dict → proto Event（`ParseDict` + 51 event 全マッピングテーブル）
+  - `GrpcDataEngineServer`: ライフサイクル管理（`serve()` で gRPC サーバー起動）
+  - gRPC status codes: RESOURCE_EXHAUSTED / UNAUTHENTICATED / FAILED_PRECONDITION / INVALID_ARGUMENT / DEADLINE_EXCEEDED
+  - 既存 `DataEngineServer._dispatch()` / `_outbox` / `_connections` をそのまま再利用
+- `python/engine/__main__.py` 更新: `--transport ws|grpc`（デフォルト `grpc`）フラグ追加
+- `engine-client/Cargo.toml` 更新: `[features]` に `ws-transport = []` 追加
+- `python/tests/test_grpc_smoke.py` 新設: 5 tests（handshake / 認証失敗 / schema mismatch / wrong first message / Ping→Pong）
+- `python/tests/test_server_grpc_multi_client.py` 新設: 3 tests（2 クライアント ClientConnected / MAX_CONNECTIONS 超過 RESOURCE_EXHAUSTED / 2 回目 HelloRequest INVALID_ARGUMENT）
+
+**完了確認:**
+- ✅ `pytest python/tests/test_grpc_smoke.py python/tests/test_server_grpc_multi_client.py` 8/8 PASS（1.05s）
+- ✅ `pytest python/tests/test_mock_grpc_server_basic.py` 既存テスト引き続き PASS
+- ✅ `--transport ws` フラグで従来 WS server.py が起動（ロールバック手段確保）
+- ✅ full suite: 2223 passed（pre-existing 1 failure は test_replay_snapshot.py::TestRestoreSnapshotUiRollback、本変更に無関係）
+
+**設計上の知見:**
+- grpcio サーバー側の async iterator は `__anext__()` を使う（クライアント側の `.read()` とは異なる API）
+- `MessageToDict` のキーワード引数: `preserving_proto_field_name=True`（末尾の `s` なし）、`always_print_fields_with_no_presence=False`（`including_default_value_fields` は古い API）
+- `_Broadcaster` の dict key は `ServerConnection` 型制約ではなく hashable 任意オブジェクト → `_GrpcSessionKey` インスタンスがそのまま使える
+- クライアント側 `stream.cancel()` は coroutine ではない（`await` 不要）
+
+### レビュー反映 (2026-05-08, G1 ラウンド 1)
+
+**レビュー実施**: silent-failure-hunter + general-purpose の 2 エージェント並列  
+**集約結果**: CRITICAL×2, HIGH×4, MEDIUM×5 → 全件修正済み。LOW のみ残留。
+
+**修正内容:**
+
+| 重要度 | 対象 | 修正内容 |
+|--------|------|---------|
+| CRITICAL | `server_grpc.py:245` | `except (asyncio.TimeoutError, Exception): pass` → `log.warning` を各例外に追加（WS server.py と同じパターンに統一） |
+| CRITICAL | `server_grpc.py:259` | `_startup_tachibana` を全接続で呼んでいた → `len(self._server._connections) == 1` ガードで初回接続時のみ呼ぶように修正（多重 spawn 防止） |
+| HIGH | `server_grpc.py:281` | `done` タスクの例外を未チェック → `t.exception()` + `log.error` で確認するよう修正 |
+| HIGH | `server_grpc.py:293-313` | `except Exception` → `except (asyncio.CancelledError, Exception)` に修正（CancelledError が Exception を継承しないことがある Python バージョン対策） |
+| HIGH | `server_grpc.py:127-128` | `_ENGINE_VERSION if hasattr(server, "_ENGINE_VERSION") else _ENGINE_VERSION`（両辺が同じ） → `engine_version = _ENGINE_VERSION` に単純化 |
+| HIGH | `_recv_loop` | `_FIELD_TO_OP.get(which, which)` → `get()` が `None` を返した場合に `log.warning` を出してから `which` をフォールバックとして使用 |
+| MEDIUM | `test_server_grpc_multi_client.py:77` | `ev1 is not None or ev2 is not None` → `ev1 is not None and ev2 is not None` に修正（両クライアントへの broadcast を正しく検証） |
+
+**見送り（根拠あり）:**
+- `test_grpc_smoke.py` への `@pytest.mark.smoke` 付与: conftest.py の定義上 `smoke` マーカーは「実プロセス起動を伴うテスト」専用。gRPC テストは in-process fixture を使うため、付与すると CI で不当にスキップされる。**付与しない**。
+- `start_or_attach.rs` の gRPC mock 書き直し: G2（Rust クライアント gRPC 化）の一環として実施予定。G1 完了後の独立作業として繰り越し。
+- stdin `transport` フィールド: `args.transport` は常に CLI から読まれ、default `"grpc"` が設定される。Rust supervisor は `--transport` CLI フラグ経由で制御可能。stdin cfg には不要。
+
+**LOW（残留）:**
+- `server_grpc.py` に `_ENGINE_VERSION` が `engine.server` から import されている（モジュール結合）— G3 で server.py 廃止時に整理予定
+
+**残作業（G1-next / G2 前に確認）:**
+- `ReplaySession(force_mode="attach")` gRPC attach テスト（`test_replay_session_attach.py` gRPC 版）
+- `tests/start_or_attach.rs` の WS mock → gRPC mock 書き直し（G0.5 spec に記載、G2 フェーズで実施）
+- `server_grpc.py` が起動時に session ファイルへ `transport="grpc"` を書く（G2 で process.rs 連携時）
 
 > ⚠ **endpoint 解決経路の再設計が必要**: 現行 `replay_session.py::_resolve_endpoint_and_token()` は session ファイルから `ws://127.0.0.1:{port}/` を組み立てる（WS URL 固定）。gRPC 移行後は `transport` フィールドを見て gRPC チャネルを組み立てる分岐に変更する必要がある。**`replay_session.py` 内の `LiveSession._resolve_endpoint_and_token()`（`ReplaySession` とは独立した実装）も同様に `transport` フィールド分岐を追加する必要がある**。この修正を忘れると attach mode が WS のままになる。`process.rs::DEFAULT_PROBE_URL = "ws://127.0.0.1:19876/"` もトランスポート対応に変更が必要。これらは `ipc-grpc-migration.md` G1 作業項目に詳細を追記済み。G1 の工数見積もりにこの endpoint 解決経路の再設計（`ReplaySession` 側・`LiveSession` 側の両方）を含めること。
 
@@ -363,7 +415,7 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
                                                               │
                                               fee_total 完了 ─┤  ← ✅ 完了（2026-05-07, R1-R3 収束）
                                                               │
-                                                              └─[G0→G0.5→G0.9→G1→G2→G3]► 解禁
+                                                              └─[G0✅→G0.5✅→G0.9✅→G1✅→G2→G3]► G1完了
 ```
 
 ---

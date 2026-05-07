@@ -53,7 +53,10 @@ fn handler_window() -> String {
         .expect("ReplayMsg::DataLoaded arm in update() not found");
     let rest = &src[handler_start..];
     let max = rest.len().min(6_000);
-    let safe_max = (0..=max).rev().find(|&i| rest.is_char_boundary(i)).unwrap_or(0);
+    let safe_max = (0..=max)
+        .rev()
+        .find(|&i| rest.is_char_boundary(i))
+        .unwrap_or(0);
     rest[..safe_max].to_string()
 }
 

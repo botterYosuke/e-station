@@ -187,7 +187,10 @@ fn debug_redacts_token() {
 #[test]
 fn transport_field_defaults_to_ws() {
     let session = EngineSession::new(19876, "tok".to_string(), std::process::id(), 3);
-    assert_eq!(session.transport, "ws", "new() must default transport to 'ws'");
+    assert_eq!(
+        session.transport, "ws",
+        "new() must default transport to 'ws'"
+    );
 }
 
 /// G0.9: `EngineSession::with_transport("grpc")` で作ったセッションは
@@ -195,13 +198,8 @@ fn transport_field_defaults_to_ws() {
 #[test]
 fn transport_field_grpc_serializes_to_json() {
     let tmp = std::env::temp_dir().join("test-engine-session-grpc-transport.json");
-    let session = EngineSession::with_transport(
-        19876,
-        "tok".to_string(),
-        std::process::id(),
-        3,
-        "grpc",
-    );
+    let session =
+        EngineSession::with_transport(19876, "tok".to_string(), std::process::id(), 3, "grpc");
     assert_eq!(session.transport, "grpc");
     session.write_atomic(&tmp).unwrap();
 
@@ -231,13 +229,8 @@ fn transport_field_missing_in_old_format_defaults_to_ws() {
 /// G0.9: `Debug` 出力に `transport` フィールドが含まれること。
 #[test]
 fn debug_shows_transport_field() {
-    let session = EngineSession::with_transport(
-        19876,
-        "tok".to_string(),
-        std::process::id(),
-        3,
-        "grpc",
-    );
+    let session =
+        EngineSession::with_transport(19876, "tok".to_string(), std::process::id(), 3, "grpc");
     let dbg = format!("{:?}", session);
     assert!(
         dbg.contains("transport"),
