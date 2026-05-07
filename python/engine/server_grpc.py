@@ -12,6 +12,7 @@ from grpc import aio
 
 from engine.proto import engine_pb2, engine_pb2_grpc
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+from engine.server import _ENGINE_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -128,12 +129,13 @@ def _proto_mode_to_str(mode_int: int) -> str:
     """proto AppMode enum value を文字列に変換する。"""
     if mode_int == engine_pb2.APP_MODE_REPLAY:
         return "replay"
+    if mode_int != engine_pb2.APP_MODE_LIVE:
+        log.warning("Unknown AppMode value %d — falling back to 'live'", mode_int)
     return "live"
 
 
 def _build_ready_event(server) -> engine_pb2.Event:
     """DataEngineServer の状態から ReadyResponse Event を構築する。"""
-    from engine.server import _ENGINE_VERSION
     engine_version = _ENGINE_VERSION
     return engine_pb2.Event(
         ready=engine_pb2.ReadyResponse(
@@ -449,7 +451,9 @@ class GrpcDataEngineServer:
         try:
             _write_grpc_session_file(actual_port, self._token)
         except Exception as exc:
-            log.warning("Failed to write engine-session.json: %s", exc)
+            log.error(
+                "Failed to write engine-session.json: %s — attach mode will not work", exc
+            )
         await self._inner._shutdown_event.wait()
         await server.stop(grace=5)
 
@@ -458,7 +462,6 @@ def _write_grpc_session_file(port: int, token: str) -> None:
     """Write engine-session.json with transport="grpc" so Rust can attach."""
     import json
     import os
-    import platform
     import tempfile
     from datetime import datetime, timezone
 
@@ -475,14 +478,16 @@ def _write_grpc_session_file(port: int, token: str) -> None:
     }
 
     # Mirror the session file path used by Rust: data_path("engine-session.json").
-    if platform.system() == "Windows":
-        app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
-        session_dir = Path(app_data) / "flowsurface"
-    elif platform.system() == "Darwin":
-        session_dir = Path.home() / "Library" / "Application Support" / "flowsurface"
+    # FLOWSURFACE_DATA_PATH env override (mirrors replay_session._resolve_session_file_path).
+    env_path = os.environ.get("FLOWSURFACE_DATA_PATH")
+    if env_path:
+        session_dir = Path(env_path)
     else:
-        xdg = os.environ.get("XDG_DATA_HOME", "")
-        session_dir = Path(xdg) / "flowsurface" if xdg else Path.home() / ".local" / "share" / "flowsurface"
+        import platformdirs
+
+        session_dir = Path(
+            platformdirs.user_data_dir("flowsurface", appauthor=False, roaming=True)
+        )
 
     session_dir.mkdir(parents=True, exist_ok=True)
     target = session_dir / "engine-session.json"

@@ -14,6 +14,8 @@ import websockets
 from engine.exchanges.base import WsNativeResyncTriggered
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — business logic covered by unit tests and gRPC integration tests")
+
 
 # ---------------------------------------------------------------------------
 # Helper: connect with handshake

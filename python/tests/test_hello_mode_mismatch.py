@@ -9,6 +9,8 @@ import asyncio
 import socket
 import threading
 
+import pytest
+
 
 def test_handle_hello_mode_mismatch_rejects_second_client():
     """M-TA6: mode=live で接続済みの後、mode=replay で接続すると EngineError が返ること。"""
@@ -102,6 +104,7 @@ def test_handle_hello_mode_mismatch_rejects_second_client():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="WS transport removed in G3 — mode_mismatch covered by gRPC FAILED_PRECONDITION in test_grpc_smoke.py")
 def test_handle_hello_mode_mismatch_with_real_server():
     """R2-H2 / M-TA6: 実際の DataEngineServer を使って mode mismatch を検証する。
 

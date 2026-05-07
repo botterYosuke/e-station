@@ -1,4 +1,5 @@
 """G1 smoke test: server_grpc.py の起動・ハンドシェイク・Ping/Pong を検証する。"""
+import json
 import pytest
 import asyncio
 import grpc
@@ -8,6 +9,19 @@ from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 from engine.server_grpc import GrpcDataEngineServer
 from pathlib import Path
 import tempfile
+
+
+def test_write_grpc_session_file_is_importable_and_callable(tmp_path, monkeypatch):
+    """GrpcDataEngineServer.serve() 内で呼ばれる _write_grpc_session_file の smoke テスト。
+
+    M-E: セッションファイルが正しく書き込まれることを確認する。
+    """
+    monkeypatch.setenv("FLOWSURFACE_DATA_PATH", str(tmp_path))
+    from engine.server_grpc import _write_grpc_session_file
+
+    _write_grpc_session_file(port=50098, token="smoke-token")
+    data = json.loads((tmp_path / "engine-session.json").read_text())
+    assert data.get("transport") == "grpc"
 
 
 @pytest.fixture

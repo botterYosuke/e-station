@@ -232,34 +232,22 @@ def test_live_session_resolve_endpoint_ws_from_session_file(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_writer_acceptance_pin_grpc_transport_in_session_file(tmp_path):
-    """G0.9 writer 側 acceptance pin.
+def test_write_grpc_session_file_writes_correct_fields(tmp_path, monkeypatch):
+    """_write_grpc_session_file が transport='grpc' を含む正しい session JSON を書くことを確認。
 
-    server_grpc.py（G1 で実装）が書くセッションファイルの構造を手動で再現し、
-    transport="grpc" フィールドが正しく保存・読み取れることを確認する。
-
-    G1 完了後はこのテストを実際の server_grpc.py サブプロセスを使うものに
-    置き換えることが推奨される（G1 writer-side acceptance pin）。
+    G2 writer 側 acceptance pin: 実際の _write_grpc_session_file を呼び出して
+    セッションファイルの内容を直接検証する。
     """
-    session_file = tmp_path / "engine-session.json"
+    monkeypatch.setenv("FLOWSURFACE_DATA_PATH", str(tmp_path))
+    from engine.server_grpc import _write_grpc_session_file
 
-    # server_grpc.py が書くであろう内容を手動で再現する
-    session_data = {
-        "port": 50051,
-        "token": "grpc-session-token",
-        "pid": os.getpid(),
-        "schema_major": 3,
-        "started_at": "2026-05-08T12:00:00Z",
-        "transport": "grpc",  # G0.9 の核心: このフィールドが必要
-    }
-    session_file.write_text(json.dumps(session_data), encoding="utf-8")
-
-    # 書き込み内容を直接検証
-    raw = json.loads(session_file.read_text(encoding="utf-8"))
-    assert raw.get("transport") == "grpc", (
-        "session file must contain transport='grpc' — "
-        "this simulates what server_grpc.py will write in G1"
-    )
+    _write_grpc_session_file(port=50099, token="test-token-xxx")
+    target = tmp_path / "engine-session.json"
+    assert target.exists(), "session file must be created"
+    data = json.loads(target.read_text())
+    assert data["transport"] == "grpc"
+    assert data["port"] == 50099
+    assert data["token"] == "test-token-xxx"
 
     # Python helper が正しく読み取れることも確認
     with patch.dict(os.environ, {"FLOWSURFACE_DATA_PATH": str(tmp_path)}):
@@ -267,4 +255,4 @@ def test_writer_acceptance_pin_grpc_transport_in_session_file(tmp_path):
 
     assert result is not None
     assert result.get("transport") == "grpc"
-    assert result.get("port") == 50051
+    assert result.get("port") == 50099

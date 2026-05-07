@@ -394,6 +394,7 @@ def test_startup_kabu_station_disables_dev_login_in_prod(monkeypatch):
     assert captured.get("dev_trade_password_allowed") is False
 
 
+@pytest.mark.skip(reason="WS transport removed in G3 — _handshake() deleted; migrate to test _build_ready_event() in server_grpc.py")
 @pytest.mark.demo_kabu
 def test_kabu_ready_capabilities_include_kabu_station(monkeypatch):
     """HIGH-1: _handshake が送る Ready.capabilities.venue_capabilities["kabu_station"] が存在する。"""
@@ -462,6 +463,7 @@ def test_kabu_ready_capabilities_include_kabu_station(monkeypatch):
     assert kabu_cap["is_production"] is False
 
 
+@pytest.mark.skip(reason="WS transport removed in G3 — _handshake() deleted; migrate to test _build_ready_event() in server_grpc.py")
 @pytest.mark.demo_kabu
 def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
     """P4-3: KABU_ALLOW_PROD=1 + KABU_ENV=prod のとき capabilities.is_production=True。"""

@@ -18,25 +18,22 @@ use tokio::{process::Child, sync::Mutex};
 
 use data::data_path;
 
-const DEFAULT_PROBE_URL: &str = "ws://127.0.0.1:19876/";
-
-/// G0.9: Read the session file and derive the probe URL based on the `transport`
-/// field.  Falls back to `DEFAULT_PROBE_URL` when no valid session is found.
+/// G3: Read the session file and derive the probe URL based on the `transport`
+/// field.  Returns an empty string when no valid gRPC session is found, which
+/// causes `try_attach_or_spawn_inner` to fall through to spawn.
 ///
 /// Transport mapping:
-/// - `"ws"`  (or missing) → `ws://127.0.0.1:{port}/`
-/// - `"grpc"`             → `grpc://127.0.0.1:{port}` (used in G2+)
+/// - `"grpc"` → `grpc://127.0.0.1:{port}`
+/// - anything else (missing, `"ws"`) → `""` (no probe, fall through to spawn)
 fn probe_url_from_session_or_default() -> String {
     let path = data_path(Some("engine-session.json"));
     if let Ok(bytes) = std::fs::read(&path)
         && let Ok(session) = serde_json::from_slice::<EngineSession>(&bytes)
+        && session.transport == "grpc"
     {
-        if session.transport == "grpc" {
-            return format!("grpc://127.0.0.1:{}", session.port);
-        }
-        return format!("ws://127.0.0.1:{}/", session.port);
+        return format!("grpc://127.0.0.1:{}", session.port);
     }
-    DEFAULT_PROBE_URL.to_string()
+    String::new()
 }
 
 // ── EngineCommand ─────────────────────────────────────────────────────────────
@@ -543,13 +540,14 @@ impl ProcessManager {
     ) -> Result<EngineConnection, EngineClientError> {
         if !token.is_empty() {
             let mode = *self.mode.lock().await;
-            // G2: route gRPC probe URLs (written by Python with transport="grpc")
-            // to `connect_grpc` instead of the WS `probe` path.
+            // G3: all probe URLs are gRPC; legacy ws:// sessions fall through
+            // to spawn via ConnectionRefused.
             let conn_result = if probe_url.starts_with("grpc://") {
                 let http_target = probe_url.replacen("grpc://", "http://", 1);
                 EngineConnection::connect_grpc(&http_target, token, mode).await
             } else {
-                EngineConnection::probe(probe_url, token, mode).await
+                // No valid gRPC session URL — fall through to spawn.
+                Err(EngineClientError::ConnectionRefused)
             };
             match conn_result {
                 Ok(conn) => {
@@ -590,7 +588,7 @@ impl ProcessManager {
 
         let mut proc = PythonProcess::spawn_with(&self.command, port).await?;
 
-        let url = format!("ws://127.0.0.1:{port}");
+        let url = format!("http://127.0.0.1:{port}");
 
         // Retry connecting with exponential backoff while the process is starting up.
         // Total wait budget: 50+100+200+400+800+1600 ≈ 3.2 s before giving up.
@@ -601,7 +599,7 @@ impl ProcessManager {
             loop {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 let mode = *self.mode.lock().await;
-                match EngineConnection::connect_with_mode(&url, proc.token(), mode).await {
+                match EngineConnection::connect_grpc(&url, proc.token(), mode).await {
                     Ok(conn) => break conn,
                     Err(EngineClientError::ConnectionRefused) if attempt < MAX_CONNECT_ATTEMPTS => {
                         log::debug!(

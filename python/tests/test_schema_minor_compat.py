@@ -19,6 +19,8 @@ import websockets
 
 from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 
+pytestmark = pytest.mark.skip(reason="WS transport removed in G3 — schema checks covered by test_grpc_smoke.py")
+
 
 @pytest.fixture
 async def server_port():

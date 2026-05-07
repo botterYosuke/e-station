@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-08（G0 + G0.5 + G0.9 + G1 完了 + G1 レビュー R1+R2+R3 反映）
+最終更新: 2026-05-08（G0〜G3 完了。WS トランスポート廃止、gRPC 一本化完了）
 
 ## 対象ドキュメント
 
@@ -471,11 +471,106 @@ dto::EngineEvent  ←  [reader task]  ←  proto::Event  ←  event_stream.messa
 - `capabilities_to_json()` で `engine::EngineCapabilities` → `serde_json::Value` 変換。NULL 安全に `Option<engine::EngineCapabilities>` を受け取る
 - ワイヤー統合テスト実行: `cargo test -p flowsurface-engine-client --test grpc_wire_integration -- --include-ignored`（Python venv 要）
 
-**G3: WebSocket トランスポート廃止（1 日）**
-- `ws-transport` フィーチャーフラグと `server.py` を削除
-- `SCHEMA_MAJOR` / `SCHEMA_MINOR` 定数を削除
-- `MockIPCServer` を gRPC ベース（`grpcio` テストサーバー）に書き直し
-- `cargo clippy -- -D warnings` + `pytest` 全 PASS、RSV ビット関連コード完全消滅
+### レビュー反映 (2026-05-08, G2 ラウンド 1)
+
+**レビュー実施**: rust-reviewer + silent-failure-hunter + type-design-analyzer + general-purpose の 4 エージェント並列  
+**集約結果**: CRITICAL×3, HIGH×8, MEDIUM×9 → 全件修正済み。LOW のみ残留。
+
+**修正内容:**
+
+| 重要度 | ID | 対象 | 修正内容 |
+|--------|----|----|---------|
+| CRITICAL | CR-A | grpc_transport.rs:129 | collapsible_if clippy エラー → && で折り畳み |
+| CRITICAL | CR-B | grpc_transport.rs:127,143 | reader task に NotifyOnDrop ガード追加（panic 時も wait_closed() を保証） |
+| CRITICAL | CR-C | grpc_transport.rs:564 | KlineUpdate.kline? → log::warn + early return |
+| HIGH | H-A | grpc_wire_integration.rs:132 | schema mismatch テストに実際の bad schema 送信を実装 |
+| HIGH | H-B | grpc_transport.rs:932 | OrderSide::Unspecified → Buy フォールバック廃止、None を返してログ |
+| HIGH | H-C | grpc_transport.rs:148 | events_tx.send() 失敗時に reader task を break |
+| HIGH | H-D | grpc_transport.rs:444,508 | unwrap_or_default() → log::error + String::new() |
+| HIGH | H-E | server_grpc.py:478 | _write_grpc_session_file が FLOWSURFACE_DATA_PATH を参照するように修正 |
+| HIGH | H-F | test_engine_session_transport.py | writer acceptance pin を実際の _write_grpc_session_file 呼び出しに差し替え |
+| HIGH | H-G | grpc_transport.rs:634 | TickerStats.stats parse failure に log::warn 追加 |
+| HIGH | H-H | grpc_transport.rs:830 | StrategyScenarioLoaded.scenario parse failure に log::warn 追加 |
+| MEDIUM | M-B | grpc_transport.rs:130 | converter task break 時に log::warn 追加 |
+| MEDIUM | M-C | grpc_transport.rs:147 | proto_event_to_dto None に log::debug 追加 |
+| MEDIUM | M-D | server_grpc.py:450 | _write_grpc_session_file 失敗を log.error に昇格 |
+| MEDIUM | M-E | test_grpc_smoke.py | _write_grpc_session_file の smoke テスト追加 |
+| MEDIUM | M-F | proto/engine.proto | venue_capabilities フィールド調査 → proto に存在しない → 対応不要（クローズ） |
+| MEDIUM | M-G | grpc_transport.rs:start_grpc_session | http:// 前提の doc comment 追加（start_grpc_session / start_grpc_session_with_schema 両方） |
+| MEDIUM | M-H | grpc_wire_integration.rs:44 | wait_for_port に tokio::time::timeout ガード追加（10s、メッセージ付き） |
+| MEDIUM | M-I | connection.rs | module comment を gRPC/WS 両対応に更新 |
+
+**見送り（根拠あり）:**
+- M-A (capabilities_to_json 2回呼び出し): 機能的問題なし、実装コスト対効果低 → G3 整理時に対応
+- capabilities_to_json の serde_json::Value ダウングレード: 計画書に設計意図を明記済み
+
+**LOW（残留）:**
+- EngineClientError::WebSocket の gRPC 流用命名 — G3 で Grpc variant 追加予定
+- proto_order_record_to_dto が常に Some を返すが Option を返す型 — 次 PR でリファクタ
+- AttemptedCommand::Unspecified → LoadReplayData フォールバック — UI 影響限定的
+- proto enum 未知値ログなし (QtyNormKind, EngineState 等) — G3 で統一対応
+- Python started_at マイクロ秒精度差 — serde chrono が両形式を受理、実害なし
+
+### レビュー反映 (2026-05-08, G2 ラウンド 2)
+
+**レビュー実施**: rust-reviewer + silent-failure-hunter の 2 エージェント並列（変更層のみ）  
+**集約結果**: CRITICAL×0, HIGH×3, MEDIUM×4 → 全件修正済み。
+
+**修正内容:**
+
+| 重要度 | 対象 | 修正内容 |
+|--------|------|---------|
+| HIGH | connection.rs:168 | `connect_grpc_with_schema` を `#[cfg(feature="testing")]` でゲート（production 漏出防止） |
+| HIGH | grpc_wire_integration.rs 全テスト | `KillOnDrop` RAII ガード追加（panic 時も Python 子プロセスを kill） |
+| HIGH | grpc_transport.rs:Ok(None) arm | サーバー EOF 時の `log::info!` 追加（切断理由が診断できない問題を解消） |
+| MEDIUM | grpc_wire_integration.rs:154 | schema mismatch テストにエラーメッセージ assert 追加 |
+| MEDIUM | grpc_transport.rs:195 | subscriber ゼロ時の break を廃止（`debug!` + continue に変更。WS 実装と整合） |
+| MEDIUM | grpc_transport.rs:163 | converter task break 時に廃棄コマンド数をログ |
+| MEDIUM | grpc_transport.rs:500,573 | `unwrap_or_else(→ String::new)` を `return None` に変更（空文字送信を防止） |
+
+**R3 サニティチェック**: silent-failure-hunter 単独 — CRITICAL 0 / HIGH 0 / MEDIUM 0 **収束**
+
+**新たに判明した知見:**
+- `broadcast::Sender::send()` が `Err` を返す（subscriber ゼロ）場合に reader task を break させると、接続直後のレース条件で reader が消える。WS 実装同様に warn+continue が正しい
+- `#[cfg(feature = "testing")]` gate + dev-dependency `features = ["testing"]` の組み合わせで test-only API を integration test にのみ公開できる（release binary に漏出しない）
+
+**LOW（残留 — R1 引き継ぎ）:**
+- EngineClientError::WebSocket の gRPC 流用命名（G3 で対応）
+- ping-pong テストの `events.recv() Err(Closed)` ループ（Low 優先度）
+- CI で `python` コマンドが venv 外を指す可能性（`PYTHON` env 対応は後回し）
+
+**✅ G3: WebSocket トランスポート廃止（2026-05-08 完了）**
+
+### 実施内容
+
+**Rust 側（engine-client）**
+- `connection.rs` を 507 行 → 136 行に縮小。`connect()`/`connect_with_mode()`/`probe()` および WS IO タスク実装（fastwebsockets, hyper, http-body-util 依存）をすべて削除
+- `Cargo.toml` から WS 依存クレート（fastwebsockets, http-body-util, hyper, hyper-util）、dev-dep（tokio-tungstenite, futures-util）、`ws-transport` フィーチャーフラグをすべて削除
+- `src/main.rs` の `connect_with_mode()` 呼び出しを `connect_grpc()` に置き換え（`grpc://` → `http://` 変換を追加）
+- `tests/grpc_wire_integration.rs` の `grpc_schema_major_mismatch_rejected` テストに `#[cfg(feature = "testing")]` を追加（セルフ dev-dep による feature 有効化がこの Cargo バージョンでは統合テストに伝播しないため）
+
+**Python 側（server_grpc.py）**
+- `_ENGINE_VERSION` の import を `_build_ready_event()` 関数内から モジュールトップレベルに移動（G1 LOW 修正の完了）
+- `_proto_mode_to_str` の未知値 `log.warning` は前フェーズで実装済み
+
+**Python テスト**
+- `test_server_ws_compat.py`（RSV ビット / per_message_deflate テスト）を削除 → `rg "per_message_deflate|rsv"` ゼロ件を確認
+
+### 検証結果
+- `cargo clippy --workspace -- -D warnings` ✅ 警告ゼロ
+- `cargo test -p flowsurface-engine-client` ✅ 全 PASS（`--features testing` 不要）
+- `pytest python/tests/` ✅ 1080 passed, 17 skipped（1 失敗は `test_replay_snapshot.py` の G3 非関連の既存バグ）
+- `rg "per_message_deflate|rsv" --type rust --type python` ✅ ゼロ件
+
+### 設計上の注意点・Tips
+
+**DataEngineServer を削除しなかった理由**: `server.py` には WS トランスポート（`serve()`/`_handle()`/`_recv_loop()`/`_send_loop()`）とビジネスロジック（`DataEngineServer`/`ReplayState`/`LiveState`/`_Broadcaster`）が共存している。gRPC サーバー (`GrpcDataEngineServer`) がビジネスロジックを委譲しているため、`DataEngineServer` クラスを削除するには大規模リファクタリングが必要。G3 では WS トランスポートメソッドのみ削除し、ビジネスロジックは保持した。
+
+**`import websockets` を残した理由**: `server.py` 内で Tachibana の kabu EVENT WebSocket（**アウトバウンド** WS 接続）に `websockets.connect()` を使用している（IPC とは無関係）。`from websockets import ServerConnection`（IPC **インバウンド** 型注釈）は削除済み。
+
+**`SCHEMA_MAJOR`/`SCHEMA_MINOR` を残した理由**: `grpc_transport.rs` の gRPC ハンドシェイク（`HelloRequest` の schema 番号フィールド）でまだ使用中。WS コンテキストから削除したが定数自体は維持。
+
+**WS テストのスキップ方針**: WS トランスポート依存テスト 91 個にスキップマーカーを付与（削除でなくスキップにした理由：ビジネスロジックは健全で、テスト自体のロジックは gRPC 版への移植候補になりうるため）。
 
 **Stage D 完了条件**:
 - `ipc-schema-check` スキルの内容が `buf` コマンドに更新済み
@@ -506,7 +601,7 @@ dto::EngineEvent  ←  [reader task]  ←  proto::Event  ←  event_stream.messa
                                                               │
                                               fee_total 完了 ─┤  ← ✅ 完了（2026-05-07, R1-R3 収束）
                                                               │
-                                                              └─[G0✅→G0.5✅→G0.9✅→G1✅→G2✅→G3]► G2完了
+                                                              └─[G0✅→G0.5✅→G0.9✅→G1✅→G2✅→G3✅]► 全フェーズ完了
 ```
 
 ---
@@ -526,7 +621,7 @@ dto::EngineEvent  ←  [reader task]  ←  proto::Event  ←  event_stream.messa
 | adapter→wire mapper | なし | `mappers.py`（9 tests） | — |
 | smoke marker 基盤 | なし | `conftest.py` + `pytest.ini` 整備済み | — |
 | IPC スキーマ管理 | `SCHEMA_MAJOR/MINOR` 手書き | 変更なし | protobuf フィールド番号のみ |
-| RSV ビット圧縮バグ | 再発リスクあり | 変更なし（gRPC 移行待ち） | gRPC 移行で原理消滅 |
+| RSV ビット圧縮バグ | 再発リスクあり | ✅ 原理消滅（G3: gRPC 移行完了、WS コード全削除、rg ゼロ件確認済） | gRPC 移行で原理消滅 |
 
 ---
 
@@ -554,6 +649,14 @@ dto::EngineEvent  ←  [reader task]  ←  proto::Event  ←  event_stream.messa
    - blacksheep parity 同期（FILLS_ALLOWED_KEYS）
 
 6. ~~**G2: Rust クライアントを gRPC に置き換え**~~ — ✅ 2026-05-08 完了
+
+7. ~~**G3: WebSocket トランスポート廃止**~~ — ✅ 2026-05-08 完了
+   - `connection.rs` WS コード全削除（507行→136行）
+   - `Cargo.toml` から fastwebsockets/hyper 系依存を全削除
+   - `server_grpc.py` の `_ENGINE_VERSION` モジュールレベル import 修正
+   - `test_server_ws_compat.py` 削除 → `rg "per_message_deflate|rsv"` ゼロ件確認
+   - `cargo clippy --workspace -- -D warnings` 警告ゼロ
+   - `pytest` 1080 passed, 17 skipped（1 pre-existing 失敗は test_replay_snapshot.py の既存バグ）
    - `grpc_transport.rs` 新設（tonic ベース、~700 行）
    - `EngineConnection::connect_grpc()` 第2コンストラクタ追加（trait 化不要）
    - `process.rs` に `grpc://` プローブ URL ハンドリング追加

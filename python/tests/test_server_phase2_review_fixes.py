@@ -126,6 +126,7 @@ def test_auth_failed_code_is_imported_from_schemas():
 # ── WS-MED1: handshake timeout ────────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="WS transport removed in G3 — _HANDSHAKE_TIMEOUT_S deleted with WS serve()")
 @pytest.mark.asyncio
 async def test_handshake_timeout_closes_connection(monkeypatch):
     """If client does not send Hello within the timeout, server closes the WS."""
@@ -188,6 +189,7 @@ async def test_handshake_timeout_closes_connection(monkeypatch):
 # ── WS-MED2: auth_failed close code is 1008 ───────────────────────────────────
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_auth_failed_uses_close_code_1008(running_server):
     port, _token, _server = running_server
@@ -218,6 +220,7 @@ async def test_auth_failed_uses_close_code_1008(running_server):
 # ── L-WS-INFO: schema_mismatch close code is 1008 ─────────────────────────────
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_schema_mismatch_uses_close_code_1008(running_server):
     port, token, _server = running_server
@@ -246,6 +249,7 @@ async def test_schema_mismatch_uses_close_code_1008(running_server):
 # ── Silent-M2: malformed JSON does not drop the connection ────────────────────
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_malformed_json_keeps_connection_alive(running_server):
     port, token, _server = running_server
@@ -271,6 +275,7 @@ async def test_malformed_json_keeps_connection_alive(running_server):
 # ── Silent-M1: EngineStopped is always emitted on error path ──────────────────
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_engine_stopped_emitted_when_runner_raises_before_started(running_server):
     """If the NautilusRunner raises BEFORE EngineStarted is emitted, the server
@@ -341,6 +346,7 @@ async def test_engine_stopped_emitted_when_runner_raises_before_started(running_
 # ── M-GP8: EngineBusy is sent only to the offending connection ────────────────
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_engine_busy_is_unicast_to_offending_connection(running_server):
     port, token, _server = running_server
@@ -406,6 +412,7 @@ async def test_engine_busy_is_unicast_to_offending_connection(running_server):
 # ── H-GP7: send_loop drains queue on shutdown ─────────────────────────────────
 
 
+@pytest.mark.skip(reason="WS transport removed in G3")
 @pytest.mark.asyncio
 async def test_send_loop_drains_pending_events_on_shutdown(running_server):
     """An event appended just before shutdown must reach the client before close."""

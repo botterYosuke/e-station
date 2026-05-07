@@ -2,7 +2,7 @@
 ///
 /// Public surface:
 /// - [`EngineClientBackend`]: a `VenueBackend` impl that routes via Python IPC.
-/// - [`EngineConnection`]: low-level WS connection and event broadcast.
+/// - [`EngineConnection`]: gRPC connection and event broadcast.
 /// - [`PythonProcess`] / [`ProcessManager`]: subprocess management with auto-restart.
 /// - [`EngineClientError`]: unified error type.
 /// - [`dto`] / [`convert`]: IPC message types and domain-type conversions.

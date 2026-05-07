@@ -161,6 +161,31 @@ impl EngineConnection {
         })
     }
 
+    /// Test helper: connects to gRPC with an intentionally wrong schema version,
+    /// for testing schema rejection. Only available with the `testing` feature.
+    #[cfg(feature = "testing")]
+    pub async fn connect_grpc_with_schema(
+        target: &str,
+        token: &str,
+        mode: crate::dto::AppMode,
+        schema_major_override: u16,
+    ) -> Result<Self, EngineClientError> {
+        let (sender, events, closed, capabilities) =
+            crate::grpc_transport::start_grpc_session_with_schema(
+                target,
+                token,
+                mode,
+                schema_major_override,
+            )
+            .await?;
+        Ok(Self {
+            sender,
+            events,
+            closed,
+            capabilities,
+        })
+    }
+
     /// Snapshot of `Ready.capabilities` captured during the handshake.
     ///
     /// Returned as an `Arc<Value>` so callers can hand the blob to the

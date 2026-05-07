@@ -784,8 +784,12 @@ fn main() {
         // R1b H-E: cli::Mode → engine_client::dto::AppMode を境界で写す。
         let app_mode: engine_client::dto::AppMode = cli_args.mode.into();
         log::info!("Started in mode: {}", app_mode.as_wire_str());
-        match rt.block_on(engine_client::EngineConnection::connect_with_mode(
-            &url_str, &token, app_mode,
+        // G3: grpc:// → http:// for tonic; http:// passes through unchanged.
+        let grpc_target = url_str.replacen("grpc://", "http://", 1);
+        match rt.block_on(engine_client::EngineConnection::connect_grpc(
+            &grpc_target,
+            &token,
+            app_mode,
         )) {
             Ok(conn) => {
                 log::info!("Connected to external data engine at {url_str}");
@@ -815,7 +819,7 @@ fn main() {
                 }
 
                 // Monitor the connection and reconnect with exponential backoff on loss.
-                let reconnect_url = url_str.clone();
+                let reconnect_url = grpc_target.clone();
                 let reconnect_token = token.clone();
                 let reconnect_mode = app_mode;
                 rt.spawn(async move {
@@ -831,7 +835,7 @@ fn main() {
                         loop {
                             tokio::time::sleep(delay).await;
                             log::info!("Attempting to reconnect to engine at {reconnect_url} …");
-                            match engine_client::EngineConnection::connect_with_mode(
+                            match engine_client::EngineConnection::connect_grpc(
                                 &reconnect_url,
                                 &reconnect_token,
                                 reconnect_mode,

@@ -3,11 +3,7 @@
 /// Provides `start_grpc_session()` which performs the `HelloRequest`/`ReadyResponse`
 /// handshake and starts the background converter + reader tasks.  The returned
 /// raw channel parts are assembled into an `EngineConnection` by the caller.
-use crate::{
-    SCHEMA_MAJOR, SCHEMA_MINOR,
-    dto,
-    error::EngineClientError,
-};
+use crate::{SCHEMA_MINOR, dto, error::EngineClientError};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Notify, broadcast, mpsc};
@@ -27,9 +23,24 @@ const COMMAND_BUFFER: usize = 256;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// ── Panic-safe RAII guard ─────────────────────────────────────────────────────
+
+/// Calls `notify_waiters()` on drop so that `wait_closed()` resolves even if
+/// the reader task panics.
+struct NotifyOnDrop(Arc<Notify>);
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_waiters();
+    }
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Perform the gRPC handshake and start background IO tasks.
+///
+/// `target` must use the `http://` scheme (e.g., `http://127.0.0.1:50051`).
+/// `grpc://` URLs must be converted by the caller before passing here.
 ///
 /// Returns the raw channel parts used to construct an `EngineConnection`:
 /// `(cmd_tx, events_tx, closed, capabilities)`.
@@ -46,10 +57,35 @@ pub(crate) async fn start_grpc_session(
     ),
     EngineClientError,
 > {
+    start_grpc_session_with_schema(target, token, mode, crate::SCHEMA_MAJOR).await
+}
+
+/// Perform the gRPC handshake with an explicit `schema_major` override.
+///
+/// `target` must use the `http://` scheme (e.g., `http://127.0.0.1:50051`).
+/// `grpc://` URLs must be converted by the caller before passing here.
+///
+/// # Note
+/// This function is primarily intended for testing schema rejection.
+/// Production code should use [`start_grpc_session`] instead.
+pub(crate) async fn start_grpc_session_with_schema(
+    target: &str,
+    token: &str,
+    mode: dto::AppMode,
+    schema_major: u16,
+) -> Result<
+    (
+        mpsc::Sender<dto::Command>,
+        broadcast::Sender<dto::EngineEvent>,
+        Arc<Notify>,
+        Arc<Value>,
+    ),
+    EngineClientError,
+> {
     use engine::data_engine_client::DataEngineClient;
 
     // 1. Connect (with timeout).
-    let endpoint = tonic::transport::Endpoint::from_shared(target.to_string())
+    let endpoint = tonic::transport::Endpoint::from_shared(target.to_owned())
         .map_err(|e| EngineClientError::WebSocket(format!("invalid gRPC endpoint: {e}")))?;
 
     let channel = tokio::time::timeout(HANDSHAKE_TIMEOUT, endpoint.connect())
@@ -75,7 +111,7 @@ pub(crate) async fn start_grpc_session(
     proto_tx
         .send(engine::Command {
             payload: Some(engine::command::Payload::Hello(engine::HelloRequest {
-                schema_major: u32::from(SCHEMA_MAJOR),
+                schema_major: u32::from(schema_major),
                 schema_minor: u32::from(SCHEMA_MINOR),
                 client_version: CLIENT_VERSION.to_string(),
                 token: token.to_string(),
@@ -83,7 +119,9 @@ pub(crate) async fn start_grpc_session(
             })),
         })
         .await
-        .map_err(|_| EngineClientError::WebSocket("proto cmd channel closed immediately".to_string()))?;
+        .map_err(|_| {
+            EngineClientError::WebSocket("proto cmd channel closed immediately".to_string())
+        })?;
 
     // 4. Open the bidirectional stream.
     let request_stream = ReceiverStream::new(proto_rx);
@@ -128,10 +166,15 @@ pub(crate) async fn start_grpc_session(
         let mut cmd_rx = cmd_rx;
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if let Some(proto_cmd) = dto_cmd_to_proto(cmd) {
-                    if proto_tx.send(proto_cmd).await.is_err() {
-                        break;
-                    }
+                if let Some(proto_cmd) = dto_cmd_to_proto(cmd)
+                    && proto_tx.send(proto_cmd).await.is_err()
+                {
+                    let pending = cmd_rx.len();
+                    log::warn!(
+                        target: "engine_client::grpc_transport",
+                        "gRPC proto_tx closed — converter task exiting ({pending} commands discarded)"
+                    );
+                    break;
                 }
             }
             // Dropping proto_tx closes the request stream → server sees EOF.
@@ -141,16 +184,36 @@ pub(crate) async fn start_grpc_session(
     // 7. Spawn: proto::Event reader → dto::EngineEvent broadcast.
     {
         let events_tx = events_tx.clone();
-        let closed = Arc::clone(&closed);
+        let closed_arc = Arc::clone(&closed);
         tokio::spawn(async move {
+            // NotifyOnDrop ensures closed.notify_waiters() is called even if
+            // this task panics, preventing wait_closed() from hanging forever.
+            let _guard = NotifyOnDrop(Arc::clone(&closed_arc));
             loop {
                 match event_stream.message().await {
-                    Ok(Some(proto_ev)) => {
-                        if let Some(dto_ev) = proto_event_to_dto(proto_ev) {
-                            let _ = events_tx.send(dto_ev);
+                    Ok(Some(proto_ev)) => match proto_event_to_dto(proto_ev) {
+                        Some(dto_ev) => {
+                            if events_tx.send(dto_ev).is_err() {
+                                // No subscribers yet (or all dropped) — continue as the WS
+                                // transport does; do not exit, subscribers may join later.
+                                log::debug!(
+                                    target: "engine_client::grpc_transport",
+                                    "gRPC event dropped: no active subscribers"
+                                );
+                            }
                         }
-                    }
+                        None => {
+                            log::debug!(
+                                target: "engine_client::grpc_transport",
+                                "proto_event_to_dto returned None — event skipped"
+                            );
+                        }
+                    },
                     Ok(None) => {
+                        log::info!(
+                            target: "engine_client::grpc_transport",
+                            "gRPC server closed stream (EOF) — reader task exiting"
+                        );
                         let _ = events_tx.send(dto::EngineEvent::ConnectionDropped);
                         break;
                     }
@@ -164,7 +227,7 @@ pub(crate) async fn start_grpc_session(
                     }
                 }
             }
-            closed.notify_waiters();
+            // _guard drops here → notify_waiters() called.
         });
     }
 
@@ -178,19 +241,13 @@ fn grpc_status_to_error(status: &tonic::Status) -> EngineClientError {
     match status.code() {
         Code::DeadlineExceeded => EngineClientError::HandshakeTimeout,
         Code::Unavailable | Code::Internal => EngineClientError::ConnectionRefused,
-        Code::FailedPrecondition => EngineClientError::WebSocket(format!(
-            "schema/mode mismatch: {}",
-            status.message()
-        )),
-        Code::Unauthenticated => EngineClientError::WebSocket(format!(
-            "auth failed: {}",
-            status.message()
-        )),
-        _ => EngineClientError::WebSocket(format!(
-            "gRPC {}: {}",
-            status.code(),
-            status.message()
-        )),
+        Code::FailedPrecondition => {
+            EngineClientError::WebSocket(format!("schema/mode mismatch: {}", status.message()))
+        }
+        Code::Unauthenticated => {
+            EngineClientError::WebSocket(format!("auth failed: {}", status.message()))
+        }
+        _ => EngineClientError::WebSocket(format!("gRPC {}: {}", status.code(), status.message())),
     }
 }
 
@@ -214,9 +271,7 @@ fn dto_cmd_to_proto(cmd: dto::Command) -> Option<engine::Command> {
 
     let payload = match cmd {
         dto::Command::Hello { .. } => return None, // never enqueued post-handshake
-        dto::Command::SetProxy { url } => {
-            Payload::SetProxy(engine::SetProxyRequest { url })
-        }
+        dto::Command::SetProxy { url } => Payload::SetProxy(engine::SetProxyRequest { url }),
         dto::Command::Subscribe {
             venue,
             ticker,
@@ -338,9 +393,7 @@ fn dto_cmd_to_proto(cmd: dto::Command) -> Option<engine::Command> {
             ticker,
             market,
         }),
-        dto::Command::Ping { request_id } => {
-            Payload::Ping(engine::PingRequest { request_id })
-        }
+        dto::Command::Ping { request_id } => Payload::Ping(engine::PingRequest { request_id }),
         dto::Command::Shutdown => Payload::Shutdown(engine::ShutdownRequest {}),
         dto::Command::RequestVenueLogin { request_id, venue } => {
             Payload::RequestVenueLogin(engine::RequestVenueLoginRequest { request_id, venue })
@@ -439,25 +492,38 @@ fn dto_cmd_to_proto(cmd: dto::Command) -> Option<engine::Command> {
             engine: engine_kind,
             strategy_id,
             config,
-        } => Payload::StartEngine(engine::StartEngineRequest {
-            request_id,
-            engine: dto_engine_kind_to_proto(engine_kind),
-            strategy_id,
-            config: Some(engine::EngineStartConfig {
-                instrument_id: config.instrument_id,
-                instrument_ids: config.instrument_ids.unwrap_or_default(),
-                start_date: config.start_date,
-                end_date: config.end_date,
-                initial_cash: config.initial_cash,
-                granularity: config.granularity.map(dto_granularity_to_proto),
-                strategy_file: config.strategy_file,
-                strategy_init_kwargs: config
-                    .strategy_init_kwargs
-                    .map(|m| serde_json::to_string(&m).unwrap_or_default()),
-                max_qty: config.max_qty,
-                max_notional_jpy: config.max_notional_jpy,
-            }),
-        }),
+        } => {
+            let strategy_init_kwargs = match config.strategy_init_kwargs {
+                Some(m) => match serde_json::to_string(&m) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        log::error!(
+                            target: "engine_client::grpc_transport",
+                            "StartEngine: failed to serialize strategy_init_kwargs — command dropped: {e}"
+                        );
+                        return None;
+                    }
+                },
+                None => None,
+            };
+            Payload::StartEngine(engine::StartEngineRequest {
+                request_id,
+                engine: dto_engine_kind_to_proto(engine_kind),
+                strategy_id,
+                config: Some(engine::EngineStartConfig {
+                    instrument_id: config.instrument_id,
+                    instrument_ids: config.instrument_ids.unwrap_or_default(),
+                    start_date: config.start_date,
+                    end_date: config.end_date,
+                    initial_cash: config.initial_cash,
+                    granularity: config.granularity.map(dto_granularity_to_proto),
+                    strategy_file: config.strategy_file,
+                    strategy_init_kwargs,
+                    max_qty: config.max_qty,
+                    max_notional_jpy: config.max_notional_jpy,
+                }),
+            })
+        }
         dto::Command::StopEngine {
             request_id,
             strategy_id,
@@ -483,7 +549,10 @@ fn dto_cmd_to_proto(cmd: dto::Command) -> Option<engine::Command> {
         dto::Command::SetReplaySpeed {
             request_id,
             multiplier,
-        } => Payload::SetReplaySpeed(engine::SetReplaySpeedRequest { request_id, multiplier }),
+        } => Payload::SetReplaySpeed(engine::SetReplaySpeedRequest {
+            request_id,
+            multiplier,
+        }),
         dto::Command::StopReplay { request_id } => {
             Payload::StopReplay(engine::StopReplayRequest { request_id })
         }
@@ -511,13 +580,25 @@ fn dto_cmd_to_proto(cmd: dto::Command) -> Option<engine::Command> {
             scenario,
             save_as,
             loaded_path,
-        } => Payload::SaveStrategyScenario(engine::SaveStrategyScenarioRequest {
-            request_id,
-            path,
-            scenario: serde_json::to_string(&scenario).unwrap_or_default(),
-            save_as,
-            loaded_path,
-        }),
+        } => {
+            let scenario_json = match serde_json::to_string(&scenario) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!(
+                        target: "engine_client::grpc_transport",
+                        "SaveStrategyScenario: failed to serialize scenario — command dropped: {e}"
+                    );
+                    return None;
+                }
+            };
+            Payload::SaveStrategyScenario(engine::SaveStrategyScenarioRequest {
+                request_id,
+                path,
+                scenario: scenario_json,
+                save_as,
+                loaded_path,
+            })
+        }
     };
 
     Some(engine::Command {
@@ -571,7 +652,15 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             is_last: tf.is_last,
         }),
         Payload::KlineUpdate(ku) => {
-            let kline = proto_kline_to_dto(ku.kline?);
+            let Some(kline_proto) = ku.kline else {
+                log::warn!(
+                    target: "engine_client::grpc_transport",
+                    "KlineUpdate missing kline field — dropped (venue={} ticker={})",
+                    ku.venue, ku.ticker
+                );
+                return None;
+            };
+            let kline = proto_kline_to_dto(kline_proto);
             Some(dto::EngineEvent::KlineUpdate {
                 venue: ku.venue,
                 ticker: ku.ticker,
@@ -636,13 +725,22 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
                 .filter_map(proto_ticker_entry_to_dto)
                 .collect(),
         }),
-        Payload::TickerStats(ts) => Some(dto::EngineEvent::TickerStats {
-            request_id: ts.request_id,
-            venue: ts.venue,
-            ticker: ts.ticker,
-            stats: serde_json::from_str(&ts.stats)
-                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-        }),
+        Payload::TickerStats(ts) => {
+            let ticker = ts.ticker;
+            Some(dto::EngineEvent::TickerStats {
+                request_id: ts.request_id,
+                venue: ts.venue,
+                ticker: ticker.clone(),
+                stats: serde_json::from_str(&ts.stats).unwrap_or_else(|e| {
+                    log::warn!(
+                        target: "engine_client::grpc_transport",
+                        "TickerStats.stats JSON parse failed for ticker={}: {e}",
+                        ticker
+                    );
+                    Value::Object(serde_json::Map::new())
+                }),
+            })
+        }
         Payload::Pong(p) => Some(dto::EngineEvent::Pong {
             request_id: p.request_id,
         }),
@@ -743,9 +841,7 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             } else {
                 Some(rdl.instrument_ids)
             },
-            granularity: rdl
-                .granularity
-                .and_then(proto_optional_granularity_to_dto),
+            granularity: rdl.granularity.and_then(proto_optional_granularity_to_dto),
             session_epoch: rdl.session_epoch,
             ts_event_ms: rdl.ts_event_ms,
         }),
@@ -831,18 +927,24 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             reason: eb.reason,
             request_id: eb.request_id,
         }),
-        Payload::ClientConnected(cc) => {
-            Some(dto::EngineEvent::ClientConnected { count: cc.count })
-        }
+        Payload::ClientConnected(cc) => Some(dto::EngineEvent::ClientConnected { count: cc.count }),
         Payload::ClientDisconnected(cd) => {
             Some(dto::EngineEvent::ClientDisconnected { count: cd.count })
         }
         Payload::StrategyScenarioLoaded(ssl) => Some(dto::EngineEvent::StrategyScenarioLoaded {
             request_id: ssl.request_id,
             path: ssl.path,
-            scenario: ssl
-                .scenario
-                .and_then(|s| serde_json::from_str(&s).ok()),
+            scenario: ssl.scenario.and_then(|s| {
+                serde_json::from_str(&s)
+                    .map_err(|e| {
+                        log::warn!(
+                            target: "engine_client::grpc_transport",
+                            "StrategyScenarioLoaded: scenario JSON parse failed: {e}"
+                        );
+                        e
+                    })
+                    .ok()
+            }),
         }),
         Payload::StrategyScenarioLoadFailed(sslf) => {
             Some(dto::EngineEvent::StrategyScenarioLoadFailed {
@@ -945,18 +1047,24 @@ fn proto_order_record_to_dto(or_: engine::OrderRecord) -> Option<dto::OrderRecor
     use engine::{OrderSide, OrderStatus, OrderType, TimeInForce};
 
     let order_side = match OrderSide::try_from(or_.order_side).unwrap_or(OrderSide::Unspecified) {
-        OrderSide::Unspecified | OrderSide::Buy => dto::OrderSide::Buy,
+        OrderSide::Buy => dto::OrderSide::Buy,
         OrderSide::Sell => dto::OrderSide::Sell,
+        OrderSide::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "OrderRecord missing order_side — record dropped"
+            );
+            return None;
+        }
     };
-    let order_type =
-        match OrderType::try_from(or_.order_type).unwrap_or(OrderType::Unspecified) {
-            OrderType::Unspecified | OrderType::Market => dto::OrderType::Market,
-            OrderType::Limit => dto::OrderType::Limit,
-            OrderType::StopMarket => dto::OrderType::StopMarket,
-            OrderType::StopLimit => dto::OrderType::StopLimit,
-            OrderType::MarketIfTouched => dto::OrderType::MarketIfTouched,
-            OrderType::LimitIfTouched => dto::OrderType::LimitIfTouched,
-        };
+    let order_type = match OrderType::try_from(or_.order_type).unwrap_or(OrderType::Unspecified) {
+        OrderType::Unspecified | OrderType::Market => dto::OrderType::Market,
+        OrderType::Limit => dto::OrderType::Limit,
+        OrderType::StopMarket => dto::OrderType::StopMarket,
+        OrderType::StopLimit => dto::OrderType::StopLimit,
+        OrderType::MarketIfTouched => dto::OrderType::MarketIfTouched,
+        OrderType::LimitIfTouched => dto::OrderType::LimitIfTouched,
+    };
     let tif = match TimeInForce::try_from(or_.time_in_force).unwrap_or(TimeInForce::Unspecified) {
         TimeInForce::Unspecified | TimeInForce::Day => dto::TimeInForce::Day,
         TimeInForce::Gtc => dto::TimeInForce::Gtc,
@@ -966,16 +1074,15 @@ fn proto_order_record_to_dto(or_: engine::OrderRecord) -> Option<dto::OrderRecor
         TimeInForce::AtTheOpen => dto::TimeInForce::AtTheOpen,
         TimeInForce::AtTheClose => dto::TimeInForce::AtTheClose,
     };
-    let status =
-        match OrderStatus::try_from(or_.status).unwrap_or(OrderStatus::Unspecified) {
-            OrderStatus::Unspecified | OrderStatus::Submitted => dto::OrderStatus::Submitted,
-            OrderStatus::Accepted => dto::OrderStatus::Accepted,
-            OrderStatus::Filled => dto::OrderStatus::Filled,
-            OrderStatus::PendingCancel => dto::OrderStatus::PendingCancel,
-            OrderStatus::Canceled => dto::OrderStatus::Canceled,
-            OrderStatus::Expired => dto::OrderStatus::Expired,
-            OrderStatus::Rejected => dto::OrderStatus::Rejected,
-        };
+    let status = match OrderStatus::try_from(or_.status).unwrap_or(OrderStatus::Unspecified) {
+        OrderStatus::Unspecified | OrderStatus::Submitted => dto::OrderStatus::Submitted,
+        OrderStatus::Accepted => dto::OrderStatus::Accepted,
+        OrderStatus::Filled => dto::OrderStatus::Filled,
+        OrderStatus::PendingCancel => dto::OrderStatus::PendingCancel,
+        OrderStatus::Canceled => dto::OrderStatus::Canceled,
+        OrderStatus::Expired => dto::OrderStatus::Expired,
+        OrderStatus::Rejected => dto::OrderStatus::Rejected,
+    };
 
     Some(dto::OrderRecordWire {
         client_order_id: or_.client_order_id,
@@ -998,12 +1105,11 @@ fn proto_order_record_to_dto(or_: engine::OrderRecord) -> Option<dto::OrderRecor
 
 fn proto_position_record_to_dto(pr: engine::PositionRecord) -> Option<dto::PositionRecordWire> {
     use engine::PositionType;
-    let pt =
-        match PositionType::try_from(pr.position_type).unwrap_or(PositionType::Unspecified) {
-            PositionType::Unspecified | PositionType::Cash => dto::PositionType::Cash,
-            PositionType::MarginCredit => dto::PositionType::MarginCredit,
-            PositionType::MarginGeneral => dto::PositionType::MarginGeneral,
-        };
+    let pt = match PositionType::try_from(pr.position_type).unwrap_or(PositionType::Unspecified) {
+        PositionType::Unspecified | PositionType::Cash => dto::PositionType::Cash,
+        PositionType::MarginCredit => dto::PositionType::MarginCredit,
+        PositionType::MarginGeneral => dto::PositionType::MarginGeneral,
+    };
     Some(dto::PositionRecordWire {
         instrument_id: pr.instrument_id,
         qty: pr.qty,
