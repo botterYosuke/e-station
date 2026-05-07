@@ -36,6 +36,15 @@ http-body-util = "0.1.2"
 hyper = { version = "1", default-features = false, features = ["http1", "client"] }
 hyper-util = { version = "0.1.10", default-features = false }
 
+# gRPC transport (G0 — proto codegen via build.rs + tonic-build)
+tonic = { version = "0.12", default-features = false, features = ["channel", "codegen", "prost"] }
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+# Vendor protoc binary so builds work without a system protoc (Windows / CI).
+protoc-bin-vendored = "3"
+
 [features]
 # Phase 8 review-fix-loop R1 / Phase 4 H-Rust2:
 # Gate test-only public seams (`apply_after_handshake_with_timeout` /

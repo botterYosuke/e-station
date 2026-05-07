@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-07（Stage A〜C 実装完了）
+最終更新: 2026-05-08（G0 proto 定義 + ビルドパイプライン完了）
 
 ## 対象ドキュメント
 
@@ -234,11 +234,24 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 > ### gRPC 移行（解禁済み）
 
-**G0: `proto/engine.proto` + ビルドパイプライン（1〜2 日）**
-- 既存 `commands.json` / `events.json` から proto 変換
-- Rust: `tonic-build` を `build.rs` に追加
-- Python: `grpcio-tools` を `pyproject.toml` に追加
-- `buf lint` + `buf breaking` を CI に追加
+### ✅ G0: `proto/engine.proto` + ビルドパイプライン — **完了（2026-05-08）**
+
+- `proto/engine.proto` 新設（35 Commands, 51 Events を oneof で網羅）
+  - `HelloRequest` = `Command.oneof` field 1（handshake 先頭契約）
+  - `ReadyResponse` = `Event.oneof` field 1（handshake 成功時の先頭 Event 契約）
+  - 全 enum は `ENUM_NAME_UNSPECIFIED = 0` + prefix 付き値（buf lint ENUM_VALUE_PREFIX 準拠）
+  - optional フィールドは proto3 `optional` キーワードで明示
+- `buf.yaml` / `buf.gen.yaml` 新設（`buf lint` + `buf breaking` 設定）
+- `engine-client/build.rs` 新設（`tonic-build` + `protoc-bin-vendored` — Windows 対応）
+- `engine-client/Cargo.toml` 更新: `tonic 0.12` + `prost 0.13` + `tonic-build 0.12` + `protoc-bin-vendored 3`
+- `pyproject.toml` 更新: `grpcio>=1.62` + `grpcio-tools>=1.62` + `protobuf>=4.25`
+- `scripts/gen_proto_python.py` 新設（Python スタブ生成スクリプト）
+- `scripts/check_schema_parity.py` 新設（JSON↔proto name 対応チェック）
+- **完了条件**:
+  - ✅ `cargo check -p flowsurface-engine-client` — proto コンパイル成功（protoc-bin-vendored 経由）
+  - ✅ `python scripts/check_schema_parity.py` — 35 commands, 51 events parity OK
+  - ✅ `pytest python/tests/` — 2200 passed（既存の pre-existing 1 failure のみ）
+- buf lint / `buf breaking --against .git#branch=main` は buf CLI インストール後に CI で実行予定
 
 **G0.5: Python 側 gRPC mock サーバー骨格（1 日）**
 - `python/tests/fixtures/mock_grpc_server.py` を新設（`grpcio.aio` ベースのテスト用最小サーバー）

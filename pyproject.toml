@@ -15,6 +15,10 @@ dependencies = [
     "nautilus-trader>=1.211,<2.0",
     "platformdirs>=4.0",
     "libcst>=1.0",
+    # G0: gRPC transport (server side — replaces WebSocket IPC in G1)
+    "grpcio>=1.62",
+    "grpcio-tools>=1.62",
+    "protobuf>=4.25",
 ]
 
 [project.optional-dependencies]

@@ -45,6 +45,7 @@ from engine.exchanges.tachibana_login_flow import (
     _MSG_LOGIN_FAILED,
 )
 from engine.exchanges.kabusapi import KabuStationVenue
+from engine.exchanges.kabusapi_adapter import KabuStationAdapter
 from engine.exchanges.kabusapi_url import resolve_kabu_env
 from engine.exchanges.kabusapi_auth import (
     KabuApiError,
@@ -427,6 +428,10 @@ class DataEngineServer:
         self._kabu_login_inflight = asyncio.Lock()
         self._kabu_startup_task: asyncio.Task | None = None
         self._kabu_fill_poller_task: asyncio.Task | None = None  # [H-1]
+        # C1 配線: kabu PUSH adapter と採番カウンター
+        self._kabu_adapter: KabuStationAdapter = KabuStationAdapter([])
+        self._kabu_push_seq: int = 0
+        self._kabu_push_ssid: str | None = None
         # VenueReady を emit した venue 名。None = 未接続 / "tachibana" / "kabu_station"。
         # StartEngine(engine="Live") の venue guard に使う。
         self._connected_venue: str | None = None
@@ -1785,6 +1790,7 @@ class DataEngineServer:
             self._kabu_fill_poller_task.cancel()
         self._kabu_fill_poller_task = None
         self._connected_venue = None
+        self._kabu_push_ssid = None  # C1: PUSH セッション ID をリセット
         self._live_state = LiveState.DISCONNECTED
 
     async def _do_submit_order_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
@@ -3534,6 +3540,9 @@ class DataEngineServer:
                 self._live_state = LiveState.CONNECTED
                 self._connected_venue = "kabu_station"
                 log.info("KabuStation session established successfully")
+                # C1: PUSH セッション ID をログイン成功時に採番（seq リセット）
+                self._kabu_push_ssid = f"{self._engine_session_id}:kabu_push"
+                self._kabu_push_seq = 0
                 # [H-1] fill poller バックグラウンドタスクを起動
                 if self._kabu_fill_poller_task is None or self._kabu_fill_poller_task.done():
                     self._kabu_fill_poller_task = asyncio.create_task(
@@ -3574,6 +3583,64 @@ class DataEngineServer:
         except asyncio.CancelledError:
             log.info("_kabu_fill_poller: cancelled")
             raise
+
+    # ------------------------------------------------------------------
+    # C1: kabu PUSH → adapter → mapper → outbox pipeline entry points
+    # ------------------------------------------------------------------
+
+    def _on_kabu_board_push(self, raw: dict) -> None:
+        """Raw kabu PUSH 板スナップショット JSON → DepthSnapshot wire dict → outbox.
+
+        kabu PUSH には stream_session_id / sequence_id が存在しないため、
+        server 層が _kabu_push_ssid / _kabu_push_seq を採番して補充する。
+
+        TODO C1-next: Subscribe(kabu_station) コマンドを受け付けて
+        _kabu_adapter の登録銘柄を動的に更新する（現状は全 PUSH 受信・全配信）。
+        """
+        from engine.kabu_push_pipeline import kabu_board_to_wire_dict
+
+        try:
+            ssid = self._kabu_push_ssid or str(self._engine_session_id)
+            self._kabu_push_seq += 1
+            ticker = str(raw.get("Symbol", ""))
+            if not ticker:
+                log.warning("_on_kabu_board_push: missing Symbol field, skipping")
+                return
+            payload = kabu_board_to_wire_dict(
+                raw,
+                adapter=self._kabu_adapter,
+                ticker=ticker,
+                ssid=ssid,
+                seq=self._kabu_push_seq,
+            )
+            self._outbox.append(payload)
+        except Exception as exc:
+            log.warning("_on_kabu_board_push: parse/map error: %s", exc)
+
+    def _on_kabu_trade_push(self, raw: dict) -> None:
+        """Raw kabu PUSH 板 JSON の CurrentPrice から Trades wire dict → outbox.
+
+        kabu PUSH は独立した約定ストリームを持たないため、
+        板スナップショットの CurrentPrice / CurrentPriceTime を約定として扱う。
+        qty は 0 で正規化（kabu_push_pipeline 仕様、累積値のため）。
+        """
+        from engine.kabu_push_pipeline import kabu_execution_to_wire_dict
+
+        try:
+            ssid = self._kabu_push_ssid or str(self._engine_session_id)
+            ticker = str(raw.get("Symbol", ""))
+            if not ticker:
+                log.warning("_on_kabu_trade_push: missing Symbol field, skipping")
+                return
+            payload = kabu_execution_to_wire_dict(
+                raw,
+                adapter=self._kabu_adapter,
+                ticker=ticker,
+                ssid=ssid,
+            )
+            self._outbox.append(payload)
+        except Exception as exc:
+            log.warning("_on_kabu_trade_push: parse/map error: %s", exc)
 
     async def _run_event_loop(self, url: str) -> None:
         """EVENT WebSocket に接続して EC 約定通知の受信ループを実行する（Phase O2）。

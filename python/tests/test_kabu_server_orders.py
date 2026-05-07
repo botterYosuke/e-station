@@ -226,6 +226,11 @@ def test_dev_trade_password_allowed_propagated_to_kabu_venue():
         srv._kabu_startup_task = None
         srv._kabu_fill_poller_task = None  # [H-1] _startup_kabu_station で参照される
         srv._live_state = LiveState.DISCONNECTED
+        # C1: PUSH ssid 採番に使うセッション ID（__new__ では設定されないため手動で補充）
+        import uuid as _uuid
+        srv._engine_session_id = _uuid.UUID("00000000-0000-0000-0000-000000000001")
+        srv._kabu_push_ssid = None
+        srv._kabu_push_seq = 0
 
         emitted: list[dict] = []
 
