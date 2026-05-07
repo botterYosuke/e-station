@@ -8,7 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generate Rust gRPC stubs from proto/engine.proto using tonic-build.
     // Output lands in OUT_DIR; include it in lib.rs via tonic::include_proto!.
     tonic_build::configure()
-        .build_server(false) // engine-client is the gRPC client; server is in Python
+        .build_server(true) // G3: server stubs needed for Rust-native gRPC mock in tests
+        .build_client(true)
         .compile_protos(&["../proto/engine.proto"], &["../proto"])?;
 
     println!("cargo:rerun-if-changed=../proto/engine.proto");

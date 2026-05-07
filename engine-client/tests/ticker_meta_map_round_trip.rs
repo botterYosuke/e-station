@@ -1,106 +1,142 @@
 //! B4 / T4 R1: `EngineClientBackend` exposes a `Ticker -> TickerDisplayMeta`
 //! side-channel that the UI's incremental search consults.
 //!
-//! This integration test goes through the real handshake + IPC path:
-//! 1. Spin up a mock WS server (tokio-tungstenite) that completes
-//!    `Hello`/`Ready` and answers `ListTickers` with a Tachibana-shaped
-//!    `TickerInfo` event carrying one stock dict.
-//! 2. Wrap the resulting `EngineConnection` in `EngineClientBackend` and
-//!    assert that `ticker_meta_handle()` returns an Arc<Mutex<_>> whose
-//!    initial map is empty.
-//! 3. Drive `fetch_ticker_metadata(&[MarketKind::Stock])` and assert the
-//!    handle now contains the parsed `TickerDisplayMeta`.
-//! 4. Call `reset_ticker_meta()` and assert the map is cleared (T4 H1
-//!    reconnect-reset pin).
+//! G3: Migrated from WS (tokio-tungstenite) to gRPC (tonic MockGrpcEngine).
+mod common;
 
+use common::engine;
+use common::engine::data_engine_server::{DataEngine, DataEngineServer};
 use exchange::{
     Ticker,
     adapter::{Exchange, MarketKind, venue_backend::VenueBackend},
 };
-use flowsurface_engine_client::{
-    EngineClientBackend, EngineConnection, SCHEMA_MAJOR, SCHEMA_MINOR,
-};
+use flowsurface_engine_client::{EngineClientBackend, EngineConnection, dto::AppMode};
 
-use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tonic::{Request, Response, Status, Streaming};
 
-/// Spawn a mock engine server that completes the handshake then answers
-/// the next `ListTickers` request with a single Tachibana stock dict.
-async fn spawn_tachibana_mock(listener: TcpListener) {
-    tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = accept_async(tcp).await.unwrap();
+// ── Inline mock that serves ListTickers with Tachibana data ──────────────────
 
-        // Hello
-        let _hello = ws.next().await.unwrap().unwrap();
+struct TachibanaTickerMock;
 
-        // Ready
-        let ready = serde_json::json!({
-            "event": "Ready",
-            "schema_major": SCHEMA_MAJOR,
-            "schema_minor": SCHEMA_MINOR,
-            "engine_version": "1.0.0-mock",
-            "engine_session_id": "00000000-0000-0000-0000-00000000beef",
-            "capabilities": {
-                "supported_venues": ["tachibana"],
-                "venue_capabilities": {"tachibana": {"supported_timeframes": ["1d"]}}
+#[tonic::async_trait]
+impl DataEngine for TachibanaTickerMock {
+    type SessionStream = ReceiverStream<Result<engine::Event, Status>>;
+
+    async fn session(
+        &self,
+        request: Request<Streaming<engine::Command>>,
+    ) -> Result<Response<Self::SessionStream>, Status> {
+        let mut stream = request.into_inner();
+
+        // Consume Hello.
+        let first = stream
+            .message()
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| Status::invalid_argument("stream closed before Hello"))?;
+        let hello = match first.payload {
+            Some(engine::command::Payload::Hello(h)) => h,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "first message must be HelloRequest",
+                ));
+            }
+        };
+        let schema_major = flowsurface_engine_client::SCHEMA_MAJOR as u32;
+        if hello.schema_major != schema_major {
+            return Err(Status::failed_precondition("schema mismatch"));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<engine::Event, Status>>(64);
+
+        tokio::spawn(async move {
+            // Send Ready with tachibana capabilities.
+            let ready = engine::Event {
+                payload: Some(engine::event::Payload::Ready(engine::ReadyResponse {
+                    schema_major,
+                    schema_minor: flowsurface_engine_client::SCHEMA_MINOR as u32,
+                    engine_version: "1.0.0-mock".to_string(),
+                    engine_session_id: "00000000-0000-0000-0000-00000000beef".to_string(),
+                    capabilities: Some(engine::EngineCapabilities {
+                        supported_venues: vec!["tachibana".to_string()],
+                        supports_bulk_trades: true,
+                        supports_depth_binary: false,
+                    }),
+                })),
+            };
+            if tx.send(Ok(ready)).await.is_err() {
+                return;
+            }
+
+            // Wait for the ListTickers command and reply with TickerInfo.
+            loop {
+                match stream.message().await {
+                    Ok(Some(cmd)) => {
+                        if let Some(engine::command::Payload::ListTickers(lt)) = cmd.payload {
+                            let ticker_event = engine::Event {
+                                payload: Some(engine::event::Payload::TickerInfo(
+                                    engine::TickerInfoEvent {
+                                        request_id: lt.request_id,
+                                        venue: "tachibana".to_string(),
+                                        tickers: vec![engine::TickerEntry {
+                                            kind: Some(engine::ticker_entry::Kind::Stock(
+                                                engine::StockTickerEntry {
+                                                    symbol: "7203".to_string(),
+                                                    display_symbol: Some("TOYOTA".to_string()),
+                                                    display_name_ja: Some(
+                                                        "トヨタ自動車".to_string(),
+                                                    ),
+                                                    min_ticksize: 1.0,
+                                                    lot_size: Some(100),
+                                                    min_qty: Some(100.0),
+                                                    quote_currency: Some("JPY".to_string()),
+                                                    yobine_code: Some("103".to_string()),
+                                                    sizyou_c: Some("00".to_string()),
+                                                    venue_caps: Some(engine::VenueCaps {
+                                                        client_aggr_depth: true,
+                                                        supports_spread_display: false,
+                                                        qty_norm_kind: None,
+                                                    }),
+                                                },
+                                            )),
+                                        }],
+                                    },
+                                )),
+                            };
+                            let _ = tx.send(Ok(ticker_event)).await;
+                        }
+                        // Keep the stream open after answering.
+                    }
+                    Ok(None) | Err(_) => break,
+                }
             }
         });
-        ws.send(Message::Text(ready.to_string().into()))
-            .await
-            .unwrap();
 
-        // Next inbound frame must be a `ListTickers` for tachibana/stock.
-        let cmd_msg = ws.next().await.unwrap().unwrap();
-        let cmd_text = cmd_msg.into_text().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&cmd_text).unwrap();
-        assert_eq!(parsed["op"], "ListTickers");
-        assert_eq!(parsed["venue"], "tachibana");
-        assert_eq!(parsed["market"], "stock");
-        let request_id = parsed["request_id"].as_str().unwrap().to_owned();
-
-        // TickerInfo response with one Tachibana dict.
-        // Phase D: min_ticksize is required; absent entries are skipped.
-        let resp = serde_json::json!({
-            "event": "TickerInfo",
-            "request_id": request_id,
-            "venue": "tachibana",
-            "tickers": [{
-                "kind": "stock",
-                "symbol": "7203",
-                "display_symbol": "TOYOTA",
-                "display_name_ja": "トヨタ自動車",
-                "lot_size": 100,
-                "min_qty": 100,
-                "min_ticksize": 1.0,
-                "quote_currency": "JPY",
-                "yobine_code": "103",
-                "sizyou_c": "00",
-                "venue_caps": {"client_aggr_depth": true, "supports_spread_display": false},
-            }]
-        });
-        ws.send(Message::Text(resp.to_string().into()))
-            .await
-            .unwrap();
-
-        // Hold the socket open so the client doesn't EOF mid-test.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
 }
 
 #[tokio::test]
 async fn ticker_meta_handle_empty_then_populated_then_reset() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    spawn_tachibana_mock(listener).await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Give the spawned task a tick to start accepting.
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let server = tonic::transport::Server::builder()
+        .add_service(DataEngineServer::new(TachibanaTickerMock))
+        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+            shutdown_rx.await.ok();
+        });
+    tokio::spawn(server);
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let url = format!("ws://{addr}");
-    let conn = EngineConnection::connect(&url, "round-trip-token")
+    let target = format!("http://{addr}");
+    let conn = EngineConnection::connect_grpc(&target, "round-trip-token", AppMode::Live)
         .await
         .expect("handshake should succeed");
     let backend = EngineClientBackend::new(
@@ -118,8 +154,7 @@ async fn ticker_meta_handle_empty_then_populated_then_reset() {
         "freshly constructed backend must start with an empty meta map"
     );
 
-    // (2) Drive fetch_ticker_metadata; the mock answers with a Tachibana dict
-    //     and the parser stages it into the side-channel.
+    // (2) Drive fetch_ticker_metadata; the mock answers with a Tachibana dict.
     let map = backend
         .fetch_ticker_metadata(&[MarketKind::Stock])
         .await
@@ -131,7 +166,7 @@ async fn ticker_meta_handle_empty_then_populated_then_reset() {
         "TickerMetadataMap must contain the parsed Tachibana ticker"
     );
 
-    // (3) Side-channel handle now carries the display meta — UI reads via this Arc.
+    // (3) Side-channel handle now carries the display meta.
     {
         let handle2 = backend.ticker_meta_handle();
         let guard = handle2.lock().await;
@@ -143,10 +178,12 @@ async fn ticker_meta_handle_empty_then_populated_then_reset() {
         assert_eq!(meta.sizyou_c(), Some("00"));
     }
 
-    // (4) reset_ticker_meta() clears the map (T4 H1 reconnect pin).
+    // (4) reset_ticker_meta() clears the map.
     backend.reset_ticker_meta().await;
     assert!(
         backend.ticker_meta_handle().lock().await.is_empty(),
         "reset_ticker_meta() must clear the side-channel map"
     );
+
+    let _ = shutdown_tx.send(());
 }

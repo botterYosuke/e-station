@@ -30,17 +30,12 @@ async-stream = "0.3"
 # C3: pid liveness check for reap_stale (cross-platform)
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
-# WebSocket transport to Python engine (plain ws://, no TLS required for loopback)
-fastwebsockets = { version = "0.9.0", default-features = false, features = ["upgrade"] }
-http-body-util = "0.1.2"
-hyper = { version = "1", default-features = false, features = ["http1", "client"] }
-hyper-util = { version = "0.1.10", default-features = false }
-
 # gRPC transport (G0 — proto codegen via build.rs + tonic-build)
-tonic = { version = "0.12", default-features = false, features = ["channel", "codegen", "prost"] }
+tonic = { version = "0.12", default-features = false, features = ["channel", "codegen", "prost", "router", "server"] }
 prost = "0.13"
 # G2: ReceiverStream wraps mpsc::Receiver as a tonic request stream.
-tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
+# G3: net feature added for TcpListenerStream used in test mock server.
+tokio-stream = { version = "0.1", default-features = false, features = ["sync", "net"] }
 
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
@@ -54,13 +49,9 @@ protoc-bin-vendored = "3"
 # never expose them. Integration tests in `engine-client/tests/*` enable
 # this via the self-dev-dependency below.
 testing = []
-# G1: WebSocket transport feature flag (kept for backward-compat / rollback).
-ws-transport = []
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
-futures-util = "0.3"
 tempfile = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # H-Rust2: enable the `testing` feature for integration tests in `tests/`
