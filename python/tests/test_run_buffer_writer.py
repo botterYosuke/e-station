@@ -436,6 +436,7 @@ def _wait_ready(proc: subprocess.Popen, timeout: float = 10.0) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM not supported on Windows")
+@pytest.mark.smoke
 def test_sigterm_aborts_run(tmp_path: Path) -> None:
     """SIGTERM 受信時に RunBuffer が status='aborted' を書き出す。"""
     import signal
@@ -459,6 +460,7 @@ def test_sigterm_aborts_run(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.smoke
 def test_atexit_aborts_unfinished_run(tmp_path: Path) -> None:
     """子プロセスが finish() せず exit すると atexit handler が aborted に書く。"""
     run_id = "atexit-test-001"

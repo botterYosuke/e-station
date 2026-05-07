@@ -1,4 +1,4 @@
-"""gRPC mock server for DataEngine.Session — G0.5 テスト用フィクスチャ.
+"""gRPC mock server for DataEngine.Session — G0.5 / S4-S5 テスト用フィクスチャ.
 
 grpcio.aio ベースの最小実装:
   - Session 冒頭の HelloRequest を受け付け ReadyResponse を返す
@@ -13,6 +13,12 @@ grpcio.aio ベースの最小実装:
         await stream.write(Command(hello=HelloRequest(...)))
         event = await stream.read()
         assert event.HasField("ready")
+
+S5 depth continuity テスト向け ScriptedMockGrpcServer:
+    async with ScriptedMockGrpcServer(
+        events_after_hello=[depth_snapshot_event, depth_diff_event],
+    ) as srv:
+        ...
 """
 from __future__ import annotations
 
@@ -119,6 +125,126 @@ class MockGrpcServer:
         await server.stop(grace=0)
 
     async def __aenter__(self) -> "MockGrpcServer":
+        return await self.start()
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.stop()
+
+
+# ---------------------------------------------------------------------------
+# ScriptedMockGrpcServer — S5 depth continuity テスト用
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
+    """HandshakeRequest → ReadyResponse + scripted event stream + command reactions.
+
+    Attributes:
+        events_after_hello: HelloRequest に応答した直後に yield するイベント列。
+        on_request_depth_snapshot: RequestDepthSnapshot を受信したときに yield するイベント列。
+    """
+
+    def __init__(
+        self,
+        *,
+        events_after_hello: list,
+        on_request_depth_snapshot: list,
+    ) -> None:
+        self._events_after_hello = events_after_hello
+        self._on_request_depth_snapshot = on_request_depth_snapshot
+
+    async def Session(
+        self,
+        request_iterator: AsyncIterator[engine_pb2.Command],
+        context: aio.ServicerContext,
+    ) -> AsyncIterator[engine_pb2.Event]:
+        handshake_done = False
+
+        async for command in request_iterator:
+            if not handshake_done:
+                if not command.HasField("hello"):
+                    await context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                        "first message must be HelloRequest",
+                    )
+                    return
+
+                hello = command.hello
+                yield engine_pb2.Event(
+                    ready=engine_pb2.ReadyResponse(
+                        schema_major=hello.schema_major,
+                        schema_minor=hello.schema_minor,
+                        engine_version=_ENGINE_VERSION,
+                        engine_session_id=str(uuid.uuid4()),
+                        capabilities=engine_pb2.EngineCapabilities(
+                            supported_venues=[],
+                            supports_bulk_trades=False,
+                            supports_depth_binary=False,
+                        ),
+                    )
+                )
+                handshake_done = True
+
+                # ReadyResponse の直後にスクリプト済みイベントを送出する
+                for event in self._events_after_hello:
+                    yield event
+            else:
+                # RequestDepthSnapshot に対してリアクション
+                if (
+                    command.HasField("request_depth_snapshot")
+                    and self._on_request_depth_snapshot
+                ):
+                    for event in self._on_request_depth_snapshot:
+                        yield event
+                # その他のコマンドは無視してストリームを保持する
+
+
+class ScriptedMockGrpcServer:
+    """スクリプト済みイベントで応答する gRPC テストサーバー.
+
+    MockGrpcServer の拡張版。ハンドシェイク後に ``events_after_hello`` を
+    ストリームに送出し、``RequestDepthSnapshot`` を受信したときは
+    ``on_request_depth_snapshot`` のイベントを返す。
+
+    使い方:
+        snapshot = engine_pb2.Event(depth_snapshot=...)
+        diff = engine_pb2.Event(depth_diff=...)
+        async with ScriptedMockGrpcServer(events_after_hello=[snapshot, diff]) as srv:
+            channel = aio.insecure_channel(f"localhost:{srv.port}")
+            ...
+
+    Attributes:
+        port: サーバーが Listen しているポート番号（start() 後に確定）。
+    """
+
+    def __init__(
+        self,
+        *,
+        events_after_hello: list | None = None,
+        on_request_depth_snapshot: list | None = None,
+    ) -> None:
+        self._servicer = _ScriptedDataEngineServicer(
+            events_after_hello=events_after_hello or [],
+            on_request_depth_snapshot=on_request_depth_snapshot or [],
+        )
+        self._server: aio.Server | None = None
+        self.port: int = 0
+
+    async def start(self) -> "ScriptedMockGrpcServer":
+        server = aio.server()
+        engine_pb2_grpc.add_DataEngineServicer_to_server(self._servicer, server)
+        self.port = server.add_insecure_port("[::]:0")
+        await server.start()
+        self._server = server
+        return self
+
+    async def stop(self) -> None:
+        if self._server is None:
+            return
+        server, self._server = self._server, None
+        await server.stop(grace=0)
+
+    async def __aenter__(self) -> "ScriptedMockGrpcServer":
         return await self.start()
 
     async def __aexit__(self, *_: object) -> None:

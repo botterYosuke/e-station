@@ -12,6 +12,7 @@ from engine.exchanges.kabusapi_register import RegisterSet
 
 
 @pytest.mark.demo_kabu
+@pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_reconnect_reregisters_all_symbols():
     """再接続後に RegisterSet 全件を put_register で再登録する (INV-K5-RECONNECT-REREG)."""

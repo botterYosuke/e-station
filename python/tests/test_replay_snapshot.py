@@ -612,38 +612,41 @@ class TestPortfolioStateRestore:
 
 # ---------------------------------------------------------------------------
 # R2-H1: RestoreSnapshot 後に Rust UI が overlay markers をクリアすること
-# main.rs の RestoreSnapshotPending ハンドラが clear_chart_overlays を呼ぶことを
-# ソースインスペクションで検証する（Rust 単体テストは tests/widget_*.rs で書く）。
+# src/handlers/replay.rs の ReplayMsg::RestoreSnapshotPending ハンドラが
+# clear_chart_overlays を呼ぶことをソースインスペクションで検証する。
+# A2 リファクタリング後、ハンドラは main.rs から src/handlers/replay.rs に移動し、
+# Message::Replay(ReplayMsg::RestoreSnapshotPending {...}) としてディスパッチされる。
 # ---------------------------------------------------------------------------
 
 
 class TestRestoreSnapshotUiRollback:
-    def test_main_rs_restore_snapshot_handler_clears_overlays(self) -> None:
-        """main.rs の RestoreSnapshotPending ハンドラが clear_chart_overlays を呼ぶこと。
+    def test_replay_handler_restore_snapshot_clears_overlays(self) -> None:
+        """handlers/replay.rs の RestoreSnapshotPending アームが clear_chart_overlays を呼ぶこと。
 
         ExecutionMarker / StrategySignal は戦略状態に依存するため、StepBackward 巻き戻し時に
         必ずクリアする。OHLC kline 自体は実市場データなので保持して構わない。
+
+        A2 リファクタリング後の構造:
+          update() → handle_replay() → handlers/replay.rs::RestoreSnapshotPending アーム
         """
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[2]
-        main_rs = (repo_root / "src" / "main.rs").read_text(encoding="utf-8")
-
-        # RestoreSnapshotPending ハンドラのブロック内で clear_chart_overlays を
-        # 呼んでいることを構造的に確認する。
-        # IPC dispatch 側 (Some(Message::RestoreSnapshotPending {...})) ではなく
-        # update() のハンドラアーム (Message::RestoreSnapshotPending { ... } => { ... })
-        # を探す。アーム識別子は直前の改行 + インデント + `Message::` で始まる。
-        import re
-
-        m = re.search(
-            r"Message::RestoreSnapshotPending\s*\{[^}]*\}\s*=>\s*\{(?P<body>.*?)\n\s{12}\}",
-            main_rs,
-            flags=re.DOTALL,
+        replay_rs = (repo_root / "src" / "handlers" / "replay.rs").read_text(
+            encoding="utf-8"
         )
-        assert m is not None, "RestoreSnapshotPending update() handler arm must exist in main.rs"
-        body = m.group("body")
-        assert "clear_chart_overlays" in body, (
+
+        # ハンドラアームが存在することを確認する。
+        arm_idx = replay_rs.find("ReplayMsg::RestoreSnapshotPending")
+        assert arm_idx != -1, (
+            "ReplayMsg::RestoreSnapshotPending arm must exist in src/handlers/replay.rs"
+        )
+
+        # アームの => { から始まる本体に clear_chart_overlays が含まれることを確認する。
+        arm_body_start = replay_rs.find("=> {", arm_idx)
+        assert arm_body_start != -1, "RestoreSnapshotPending arm must have a => { body"
+        body_snippet = replay_rs[arm_body_start : arm_body_start + 500]
+        assert "clear_chart_overlays" in body_snippet, (
             "RestoreSnapshotPending handler must call clear_chart_overlays "
             "to flush ExecutionMarker / StrategySignal on snapshot rollback"
         )

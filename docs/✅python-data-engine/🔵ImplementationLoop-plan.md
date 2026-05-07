@@ -556,11 +556,37 @@ dto::EngineEvent  ←  [reader task]  ←  proto::Event  ←  event_stream.messa
 **Python テスト**
 - `test_server_ws_compat.py`（RSV ビット / per_message_deflate テスト）を削除 → `rg "per_message_deflate|rsv"` ゼロ件を確認
 
-### 検証結果
+### 検証結果（最終確認: 2026-05-08）
+- `cargo test --workspace` ✅ 全 PASS（0 failed, 2 ignored = grpc_wire_integration の #[ignore] テスト）
 - `cargo clippy --workspace -- -D warnings` ✅ 警告ゼロ
-- `cargo test -p flowsurface-engine-client` ✅ 全 PASS（`--features testing` 不要）
-- `pytest python/tests/` ✅ 1080 passed, 17 skipped（1 失敗は `test_replay_snapshot.py` の G3 非関連の既存バグ）
+- `cargo fmt --check` ✅ 差分なし
+- `uv run pytest python/tests/ --ignore=python/tests/test_replay_benchmark.py -q` ✅ 2145 passed, 97 skipped
 - `rg "per_message_deflate|rsv" --type rust --type python` ✅ ゼロ件
+
+### Rust 統合テストの gRPC 移行（G3 実装詳細）
+
+WS 依存だった 10 個の統合テストファイルを tonic gRPC モックに移行:
+
+**共通ヘルパー** (`tests/common/mod.rs`):
+- `MockServicer` — `DataEngine` trait 実装。token 検証・schema major 確認・ReadyResponse 送信・追加イベントストリーミング・`cmd_sink` チャネルへのコマンド転送をサポート
+- `MockGrpcEngine` — `start_basic` / `start_close_after_ready` / `start_with_events` / `start_with_capabilities` / `start` の 5 種のコンビニエンスコンストラクタ
+
+**移行ファイル**:
+- `wait_ready.rs` — `MockGrpcEngine::start_basic` + `connect_grpc` で `wait_ready()` 即時解決を確認
+- `connection_closed.rs` — `start_close_after_ready` で `wait_closed()` を確認
+- `handshake.rs` — Hello/Ready ハンドシェイク・schema mismatch 拒否・`capabilities()` getter
+- `capabilities_no_secret_keys.rs` — 空 caps でのキー検査
+- `capabilities_changed_after_reconnect.rs` — 2 つの MockGrpcEngine インスタンスで capabilities 更新を確認
+- `depth_gap_recovery.rs` — `DepthGapEvent` proto → `RequestDepthSnapshot` コマンド送信・ストリーム継続確認
+- `tachibana_session_reset.rs` — 新 `stream_session_id` で gap-detector がリセットされ `RequestDepthSnapshot` が送信されない確認
+- `process_lifecycle.rs` — `on_ready` / `on_restart` コールバック確認（WS 非依存テストはそのまま維持）
+- `ticker_meta_map_round_trip.rs` — インライン `TachibanaTickerMock` で `ListTickers` → `TickerInfoEvent` 応答 → `fetch_ticker_metadata` 動作確認
+- `tachibana_kline_capability_gate.rs` — インライン `KlineGateMock` で `FetchKlines` → `ErrorEvent{code:"not_implemented"}` → `AdapterError::InvalidRequest` 変換確認
+
+**Cargo.toml / build.rs 変更点**:
+- tonic: `"server"` + `"router"` フィーチャー追加（tonic サーバースタブ生成のため）
+- tokio-stream: `"net"` フィーチャー追加（`TcpListenerStream` のため）
+- `build.rs`: `build_server(false)` → `build_server(true)` に変更して `DataEngine` trait / `DataEngineServer` を生成
 
 ### 設計上の注意点・Tips
 
@@ -613,11 +639,11 @@ dto::EngineEvent  ←  [reader task]  ←  proto::Event  ←  event_stream.messa
 | `main.rs` 総行数 | 7,447 行 | 4,109 行（handle_* を src/handlers/ に抽出）✅ | 4,000 行以下 |
 | `update()` 行数 | 3,579 行 | 11 行（dispatch hub）✅ | 400 行以下 |
 | `Message` バリアント数（フラット） | 158（2026-05-07 実測） | 7 グループ nested enum ✅ | グループ 7 以下（nested enum 再設計） |
-| `HeatmapShader` フィールド数 | 150+ | 150+（変更なし） | 75 以下 |
-| `pytest`（引数なし）実行時間 | 30〜120 秒 | 86 秒（新規 50 tests は 0.5s 以内） | 60 秒以内（実プロセス起動ゼロ） |
+| `HeatmapShader` フィールド数 | 150+ | **25**（B3 Phase 2-A 完了 ✅） | 75 以下 |
+| `pytest`（引数なし）実行時間 | 30〜120 秒 | **44.7s**（2145 passed / 99 skipped ✅） | 60 秒以内 ✅ |
 | adapter boundary モデル | なし | `models.py`（4 モデル / 19 tests） | — |
 | KabuStation adapter | なし | `kabusapi_adapter.py`（13 tests） | — |
-| MockIPCServer | なし | S1+S2 完了（9 tests / < 0.5s） | S1〜S5 完了 |
+| MockIPCServer (gRPC) | なし | S1〜S5 完了（S4: 9 tests / S5: 6 tests / < 1s ✅） | S1〜S5 完了 ✅ |
 | adapter→wire mapper | なし | `mappers.py`（9 tests） | — |
 | smoke marker 基盤 | なし | `conftest.py` + `pytest.ini` 整備済み | — |
 | IPC スキーマ管理 | `SCHEMA_MAJOR/MINOR` 手書き | 変更なし | protobuf フィールド番号のみ |

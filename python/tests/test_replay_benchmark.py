@@ -41,6 +41,7 @@ class TestReplayBenchmark:
         # CI-safe: fixtures は小規模なので常に SLA 内
         assert elapsed < SLA_SECONDS, f"Replay took {elapsed:.1f}s > {SLA_SECONDS}s SLA"
 
+    @pytest.mark.smoke
     @pytest.mark.skipif(
         not (Path("S:/j-quants") / "equities_trades_202401.csv.gz").exists(),
         reason="Real J-Quants files not available",
