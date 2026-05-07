@@ -74,6 +74,11 @@ class PortfolioView:
         )
         return self._cash + mtm
 
+    def _restore_from_dict(self, d: dict) -> None:
+        """Restore _cash from snapshot dict; positions are cleared (not serialized in dict)."""
+        self._cash = Decimal(str(d.get("cash", str(self._cash))))
+        self._positions.clear()
+
     def to_ipc_dict(
         self,
         strategy_id: str,

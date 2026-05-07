@@ -1100,6 +1100,11 @@ class DataEngineServer:
             })
             # 2. portfolio / orders / strategy を復元
             self._restore_snapshot(snap)
+            # 2.5: BuyingPower UI を復元済みポートフォリオ値で更新する
+            # (ui_events は engine_runner が [] で渡すため空。portfolio dict は
+            #  to_ipc_dict() が生成した ReplayBuyingPower event を直接 emit する)
+            if snap.portfolio.get("event") == "ReplayBuyingPower":
+                self._outbox.append(snap.portfolio)
             # 3. ui_events を再 emit（Rust UI が RestoreSnapshot 受信済みのため重複扱いにならない）
             for ev in snap.ui_events:
                 self._outbox.append(ev)

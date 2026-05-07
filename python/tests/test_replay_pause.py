@@ -180,14 +180,19 @@ class TestStepBackward:
         )
 
     def test_step_backward_pops_snapshot_when_paused(self) -> None:
-        """(4) PAUSED かつ snapshot 非空のとき snapshot が pop されること。"""
+        """(4) PAUSED かつ snapshot が 2 件以上のとき末尾が pop されること。
+
+        StepBackward は「現在状態」(末尾) を pop して「1 つ前」を restore する。
+        そのため buffer に最低 2 件必要（current + previous）。
+        """
         srv = _make_server()
         srv._replay_state = ReplayState.PAUSED
         srv._replay_paused = True
 
-        snap = self._make_snapshot(step_index=2)
-        srv._replay_snapshots.append(snap)
-        assert len(srv._replay_snapshots) == 1
+        # 2 件必要: step_1 (previous), step_2 (current=tail)
+        srv._replay_snapshots.append(self._make_snapshot(step_index=1))
+        srv._replay_snapshots.append(self._make_snapshot(step_index=2))
+        assert len(srv._replay_snapshots) == 2
 
         import asyncio
 
@@ -196,8 +201,8 @@ class TestStepBackward:
         srv._outbox.add_conn(ws)
         asyncio.run(srv._dispatch(msg.get("op"), msg, ws))
 
-        assert len(srv._replay_snapshots) == 0, (
-            "StepBackward must pop the snapshot from the ring buffer"
+        assert len(srv._replay_snapshots) == 1, (
+            "StepBackward must pop the tail (current) snapshot; 1 must remain"
         )
         events = list(srv._outbox)
         event_names = [e.get("event") for e in events]
@@ -209,7 +214,7 @@ class TestStepBackward:
         )
         history_ev = next(e for e in events if e.get("event") == "ReplayHistoryChanged")
         assert history_ev["has_history"] is False, (
-            "ReplayHistoryChanged.has_history must be False when buffer is now empty"
+            "ReplayHistoryChanged.has_history must be False when only 1 snapshot remains"
         )
 
     def test_step_backward_returns_engine_busy_when_no_history(self) -> None:

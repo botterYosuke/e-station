@@ -49,6 +49,42 @@ def _make_portfolio(cash: str, ts_event_ms: int = 1700000000000) -> dict:
 
 
 class TestSnapshotRoundtrip:
+    def test_step_backward_emits_replay_buying_power(self) -> None:
+        """StepBackward 後に ReplayBuyingPower イベントが emit されること。"""
+        import asyncio
+
+        srv = _make_server()
+        srv._replay_state = ReplayState.PAUSED
+        srv._replay_paused = True
+
+        portfolio_step0 = {
+            "event": "ReplayBuyingPower",
+            "strategy_id": "s",
+            "cash": "1000000",
+            "buying_power": "1000000",
+            "equity": "1000000",
+            "ts_event_ms": 1700000000000,
+        }
+        portfolio_step1 = {
+            **portfolio_step0,
+            "cash": "1001000",
+            "buying_power": "1001000",
+            "equity": "1001000",
+        }
+        srv._push_replay_snapshot(0, portfolio_step0, [], {}, [])
+        srv._push_replay_snapshot(1, portfolio_step1, [], {}, [])
+
+        ws = _make_ws()
+        srv._outbox.add_conn(ws)
+        asyncio.run(srv._dispatch("StepBackward", {"op": "StepBackward", "request_id": "req"}, ws))
+
+        events = list(srv._outbox)
+        bp_events = [e for e in events if e.get("event") == "ReplayBuyingPower"]
+        assert bp_events, "StepBackward must emit ReplayBuyingPower to update UI panel"
+        assert bp_events[0]["cash"] == "1000000", (
+            f"emitted ReplayBuyingPower must reflect step_0 cash, got {bp_events[0]['cash']}"
+        )
+
     def test_three_steps_forward_two_steps_back_restores_portfolio(self) -> None:
         """3 step 進んで StepBackward × 2 後に step_index 0 の状態が復元されること。
 
