@@ -131,8 +131,15 @@ pub fn update(_panel: &mut BuyingPowerPanel, msg: Message) -> Option<Action> {
 /// 余力表示パネルをレンダリングする。
 pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
     if let Some(ref err) = panel.error {
+        let refresh_btn =
+            iced::widget::button(text("更新").size(11)).on_press(Message::RefreshRequested);
         return center(
-            column![text("余力取得エラー").size(13), text(err.as_str()).size(11),].spacing(4),
+            column![
+                text("余力取得エラー").size(13),
+                text(err.as_str()).size(11),
+                refresh_btn,
+            ]
+            .spacing(4),
         )
         .into();
     }
