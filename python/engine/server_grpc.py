@@ -115,6 +115,15 @@ class _GrpcSessionKey:
     pass
 
 
+def _log_startup_tachibana_error(t: asyncio.Task) -> None:
+    """_startup_tachibana タスクの done callback — 例外をログする。"""
+    if t.cancelled():
+        return
+    exc = t.exception()
+    if exc is not None:
+        log.error("_startup_tachibana failed: %s", exc, exc_info=exc)
+
+
 def _proto_mode_to_str(mode_int: int) -> str:
     """proto AppMode enum value を文字列に変換する。"""
     if mode_int == engine_pb2.APP_MODE_REPLAY:
@@ -178,6 +187,7 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
 
     def __init__(self, server) -> None:
         self._server = server
+        self._handshake_lock = asyncio.Lock()
 
     async def Session(
         self,
@@ -226,49 +236,48 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
             )
             return
 
-        # 6. mode チェック
-        mode_str = _proto_mode_to_str(hello.mode)
-        if self._server._mode == "live" and not self._server._connections:
-            self._server._mode = mode_str
-        elif mode_str != self._server._mode:
-            await context.abort(
-                grpc.StatusCode.FAILED_PRECONDITION,
-                f"mode mismatch: engine={self._server._mode!r}, client={mode_str!r}",
-            )
-            return
+        # 6–9. mode 確定・prepare・接続登録（Lock で同時ハンドシェイクの race を防ぐ）
+        async with self._handshake_lock:
+            mode_str = _proto_mode_to_str(hello.mode)
+            if self._server._mode == "live" and not self._server._connections:
+                self._server._mode = mode_str
+            elif mode_str != self._server._mode:
+                await context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    f"mode mismatch: engine={self._server._mode!r}, client={mode_str!r}",
+                )
+                return
+
+            is_first = not self._server._connections
+            session_key = _GrpcSessionKey()
+            q = self._server._outbox.add_conn(session_key)
+            self._server._connections.add(session_key)
 
         # 7. Worker prepare（初回接続時のみ・タイムアウト付き）
-        if not self._server._connections:
+        if is_first:
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(*(w.prepare() for w in self._server._workers.values())),
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        *(w.prepare() for w in self._server._workers.values()),
+                        return_exceptions=True,
+                    ),
                     timeout=20.0,
                 )
+                for name, res in zip(self._server._workers.keys(), results):
+                    if isinstance(res, Exception):
+                        log.warning("worker prepare() failed for %s: %s — continuing", name, res)
             except asyncio.TimeoutError:
                 log.warning("worker prepare() timed out — continuing without full worker init")
-            except Exception as exc:
-                log.warning("worker prepare() failed: %s — continuing", exc)
 
         # 8. ReadyResponse を最初の Event として送信
         yield _build_ready_event(self._server)
-
-        # 9. キュー登録 + 接続追加
-        session_key = _GrpcSessionKey()
-        q = self._server._outbox.add_conn(session_key)
-        self._server._connections.add(session_key)
         count = self._server._outbox.count()
         self._server._outbox.append({"event": "ClientConnected", "count": count})
 
         # Tachibana スタートアップ（replay でない場合・最初の接続時のみ）
-        if self._server._mode != "replay" and len(self._server._connections) == 1:
+        if self._server._mode != "replay" and is_first:
             startup_task = asyncio.create_task(self._server._startup_tachibana())
-            startup_task.add_done_callback(
-                lambda t: log.error(
-                    "_startup_tachibana failed: %s", t.exception(), exc_info=t.exception()
-                )
-                if not t.cancelled() and t.exception() is not None
-                else None
-            )
+            startup_task.add_done_callback(_log_startup_tachibana_error)
             self._server._tachibana_startup_task = startup_task
 
         # 10. recv/send ループを並行実行
@@ -293,8 +302,10 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
             for t in pending:
                 try:
                     await t
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
+                except Exception as exc:
+                    log.debug("pending task raised on cancel: %s", exc)
         finally:
             self._server._outbox.remove_conn(session_key)
             self._server._connections.discard(session_key)
@@ -372,15 +383,16 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
 
     async def _send_loop(self, q: asyncio.Queue, context: aio.ServicerContext) -> None:
         """_outbox キューからイベントを受信して gRPC stream に送信する。"""
+        event_dict: dict | None = None
         while True:
             try:
                 event_dict = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.CancelledError:
+                return
             except asyncio.TimeoutError:
                 if context.done():
                     return
                 continue
-            except asyncio.CancelledError:
-                return
 
             proto_event = _dict_to_proto_event(event_dict)
             if proto_event is None:
@@ -388,7 +400,12 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
             try:
                 await context.write(proto_event)
             except Exception as exc:
-                log.warning("gRPC send failed: %s", exc)
+                log.warning(
+                    "gRPC send failed (event=%s): %s",
+                    event_dict.get("event", "?"),
+                    exc,
+                    exc_info=True,
+                )
                 return
 
 
@@ -428,5 +445,58 @@ class GrpcDataEngineServer:
             raise RuntimeError(f"gRPC failed to bind port {self._port}")
         await server.start()
         log.info("Data engine gRPC listening on 127.0.0.1:%d", actual_port)
+        # G2: write session file so that a Rust supervisor can attach via gRPC probe.
+        try:
+            _write_grpc_session_file(actual_port, self._token)
+        except Exception as exc:
+            log.warning("Failed to write engine-session.json: %s", exc)
         await self._inner._shutdown_event.wait()
         await server.stop(grace=5)
+
+
+def _write_grpc_session_file(port: int, token: str) -> None:
+    """Write engine-session.json with transport="grpc" so Rust can attach."""
+    import json
+    import os
+    import platform
+    import tempfile
+    from datetime import datetime, timezone
+
+    pid = os.getpid()
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    session = {
+        "port": port,
+        "token": token,
+        "pid": pid,
+        "schema_major": SCHEMA_MAJOR,
+        "started_at": started_at,
+        "transport": "grpc",
+    }
+
+    # Mirror the session file path used by Rust: data_path("engine-session.json").
+    if platform.system() == "Windows":
+        app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
+        session_dir = Path(app_data) / "flowsurface"
+    elif platform.system() == "Darwin":
+        session_dir = Path.home() / "Library" / "Application Support" / "flowsurface"
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME", "")
+        session_dir = Path(xdg) / "flowsurface" if xdg else Path.home() / ".local" / "share" / "flowsurface"
+
+    session_dir.mkdir(parents=True, exist_ok=True)
+    target = session_dir / "engine-session.json"
+
+    # Atomic write: write to temp then rename.
+    fd, tmp_path = tempfile.mkstemp(dir=session_dir, prefix=".engine-session-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(session, f)
+        os.replace(tmp_path, target)
+        log.debug("Wrote engine-session.json (port=%d, transport=grpc)", port)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise

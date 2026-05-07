@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-08（G0 + G0.5 + G0.9 + G1 完了 + G1 レビュー R1+R2 反映）
+最終更新: 2026-05-08（G0 + G0.5 + G0.9 + G1 完了 + G1 レビュー R1+R2+R3 反映）
 
 ## 対象ドキュメント
 
@@ -386,6 +386,35 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 **LOW（残留）:**
 - `server_grpc.py` に `_ENGINE_VERSION` が `engine.server` から関数内 import されている（モジュール結合）— G3 で server.py 廃止時に整理予定
 - `_proto_mode_to_str` の未知 mode 値が無音で "live" フォールバック — G3 時に `log.warning` 追加予定
+
+### レビュー反映 (2026-05-08, G1 ラウンド 3)
+
+**レビュー実施**: silent-failure-hunter + general-purpose の 2 エージェント並列  
+**集約結果**: CRITICAL×0, HIGH×4, MEDIUM×4 → 全件修正済み。LOW のみ残留。
+
+**修正内容:**
+
+| 重要度 | 対象 | 修正内容 |
+|--------|------|---------|
+| HIGH | `server_grpc.py:265-271` | done_callback ラムダで `t.exception()` を2回評価 → `_log_startup_tachibana_error` 名前付き関数に置き換え |
+| HIGH | `server_grpc.py:391` | send 失敗ログにイベント名・`exc_info` なし → `event=%s` と `exc_info=True` 追加 |
+| HIGH | `server_grpc.py:377` | `except asyncio.TimeoutError` が `except asyncio.CancelledError` より先 → 順序を入れ替え |
+| HIGH | `server_grpc.py:230-258` | mode 設定と `_connections.add()` の間に await 境界2つ → `asyncio.Lock` で mode 確定・接続登録を atomic 化 |
+| MEDIUM | `server_grpc.py:244` | `gather(return_exceptions=False)` → どのワーカーが落ちたか不明 → `return_exceptions=True` + worker 名付きログ |
+| MEDIUM | `server_grpc.py:304` | pending タスクのキャンセル中例外を完全握り潰し → `CancelledError` と `Exception` を分けて後者は `log.debug` |
+| MEDIUM | `test_server_grpc_multi_client.py` | mode mismatch (FAILED_PRECONDITION) テスト未存在 → `test_mode_mismatch_second_client_returns_failed_precondition` 追加 |
+| MEDIUM | `server_grpc.py:263` | Tachibana ガードを `len(connections)==1` から Lock 内で確定した `is_first` フラグに変更（明確化） |
+
+**見送り（根拠あり）:**
+- `EngineCapabilities.venue_capabilities` 欠落（kabu 本番バナー）: proto 定義と Rust 実装を確認せずに修正不可 → 要調査 LOW として残留
+- `yield` 前キュー登録: 設計上の制約（ReadyResponse → 登録の順序）、窓は無視可能
+- ParseDict 変換失敗 WARNING → ERROR: 意図的 drop（ignore_unknown_fields=True のフォールバック）のため維持
+
+**LOW（残留）:**
+- `_ENGINE_VERSION` 関数内 import — G3 で整理
+- `_proto_mode_to_str` 未知値の無音フォールバック — G3 で `log.warning` 追加予定
+- `EngineCapabilities.venue_capabilities` 未設定 — proto/Rust 側の調査が必要（G2 着手前に確認）
+- type annotation: `_Broadcaster` key 型が `ServerConnection` 前提 — gRPC では `_GrpcSessionKey` を渡しているが mypy では検知不可
 
 **残作業（G1-next / G2 前に確認）:**
 - `ReplaySession(force_mode="attach")` gRPC attach テスト（`test_replay_session_attach.py` gRPC 版）

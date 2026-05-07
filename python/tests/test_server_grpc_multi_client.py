@@ -30,7 +30,11 @@ async def multi_client_server():
         await grpc_srv.stop(grace=0)
 
 
-async def _connect_and_handshake(port: int, token: str = "test-token") -> tuple:
+async def _connect_and_handshake(
+    port: int,
+    token: str = "test-token",
+    mode: int = engine_pb2.APP_MODE_LIVE,
+) -> tuple:
     """ハンドシェイクまで完了した gRPC ストリームを返す。"""
     channel = aio.insecure_channel(f"localhost:{port}")
     stub = engine_pb2_grpc.DataEngineStub(channel)
@@ -40,7 +44,7 @@ async def _connect_and_handshake(port: int, token: str = "test-token") -> tuple:
             schema_major=SCHEMA_MAJOR,
             schema_minor=SCHEMA_MINOR,
             token=token,
-            mode=engine_pb2.APP_MODE_LIVE,
+            mode=mode,
         )
     ))
     event = await asyncio.wait_for(stream.read(), timeout=5.0)
@@ -159,3 +163,34 @@ async def test_duplicate_hello_aborts_session(multi_client_server):
     assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
     await ch.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_mode_mismatch_second_client_returns_failed_precondition(multi_client_server):
+    """replay で接続済みのとき live クライアントが FAILED_PRECONDITION で拒否されること。"""
+    port, _ = multi_client_server
+
+    # 1 クライアント目: replay で接続
+    ch1, stream1 = await _connect_and_handshake(port, mode=engine_pb2.APP_MODE_REPLAY)
+
+    # 2 クライアント目: live で接続 → mode mismatch
+    ch2 = aio.insecure_channel(f"localhost:{port}")
+    stub2 = engine_pb2_grpc.DataEngineStub(ch2)
+    stream2 = stub2.Session()
+    await stream2.write(engine_pb2.Command(
+        hello=engine_pb2.HelloRequest(
+            schema_major=SCHEMA_MAJOR,
+            schema_minor=SCHEMA_MINOR,
+            token="test-token",
+            mode=engine_pb2.APP_MODE_LIVE,
+        )
+    ))
+
+    with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+        await asyncio.wait_for(stream2.read(), timeout=5.0)
+    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+
+    stream1.cancel()
+    await ch1.close()
+    await ch2.close()
