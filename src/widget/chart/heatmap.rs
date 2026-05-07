@@ -7,6 +7,7 @@ mod widget;
 use instance::InstanceBuilder;
 use scene::{
     Scene,
+    cell::Cell,
     depth_grid::{GridRing, HeatmapPalette},
 };
 use ui::CanvasCaches;
@@ -159,6 +160,9 @@ pub enum Message {
 #[derive(Debug, Clone, Copy)]
 pub struct HeatmapViewState {
     pub camera_scale: f32,
+    pub camera_offset: [f32; 2],
+    pub cell_width_world: f32,
+    pub cell_height_world: f32,
 }
 
 pub struct HeatmapShader {
@@ -472,8 +476,20 @@ impl HeatmapShader {
 
     pub fn view_state(&self) -> HeatmapViewState {
         HeatmapViewState {
-            camera_scale: self.camera_scale(),
+            camera_scale: self.scene.camera.scale(),
+            camera_offset: self.scene.camera.offset,
+            cell_width_world: self.scene.cell.width_world(),
+            cell_height_world: self.scene.cell.height_world(),
         }
+    }
+
+    /// Restore camera and cell dimensions from a previously captured `HeatmapViewState`.
+    /// Call after creating a new shader to reinstate saved view position.
+    pub fn apply_view_state(&mut self, vs: HeatmapViewState) {
+        self.scene.camera.set_scale(vs.camera_scale);
+        self.scene.camera.offset = vs.camera_offset;
+        self.scene.cell = Cell::new(vs.cell_width_world, vs.cell_height_world);
+        self.rebuild_all_immediate(None, true);
     }
 
     /// called periodically on every window frame
@@ -1196,6 +1212,35 @@ mod tests {
         let shader = make_shader();
         let vs = shader.view_state();
         assert_eq!(vs.camera_scale, shader.camera_scale());
+    }
+
+    #[test]
+    fn view_state_captures_all_camera_fields() {
+        let shader = make_shader();
+        let vs = shader.view_state();
+        assert_eq!(vs.camera_scale, shader.camera_scale());
+        // Camera::default() starts at [0.0, 0.0]
+        assert_eq!(vs.camera_offset, [0.0, 0.0]);
+        // Cell dimensions must be positive
+        assert!(vs.cell_width_world > 0.0);
+        assert!(vs.cell_height_world > 0.0);
+    }
+
+    #[test]
+    fn apply_view_state_restores_camera_fields() {
+        let mut shader = make_shader();
+        let vs = HeatmapViewState {
+            camera_scale: 200.0,
+            camera_offset: [5.0, -3.0],
+            cell_width_world: 0.05,
+            cell_height_world: 0.08,
+        };
+        shader.apply_view_state(vs);
+        let restored = shader.view_state();
+        assert_eq!(restored.camera_scale, 200.0);
+        assert_eq!(restored.camera_offset, [5.0, -3.0]);
+        assert_eq!(restored.cell_width_world, 0.05);
+        assert_eq!(restored.cell_height_world, 0.08);
     }
 
     #[test]

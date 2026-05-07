@@ -24,7 +24,11 @@ use crate::{
     },
     style::{self, Icon, icon_text},
     widget::{
-        self, button_with_tooltip, chart::heatmap::HeatmapShader, column_drag, link_group_button,
+        self,
+        button_with_tooltip,
+        chart::heatmap::{HeatmapShader, HeatmapViewState},
+        column_drag,
+        link_group_button,
         toast::Toast,
     },
     window::{self, Window},
@@ -535,6 +539,7 @@ impl State {
                         chart,
                         indicators,
                         studies,
+                        ..
                     } = &self.content
                     {
                         (
@@ -562,6 +567,7 @@ impl State {
                         ))),
                         studies,
                         indicators,
+                        view_state: None,
                     };
 
                     let streams = vec![depth_stream(&derived_plan), trades_stream(&derived_plan)];
@@ -1828,8 +1834,14 @@ impl State {
                 }
             }
             Event::HeatmapShaderInteraction(message) => {
-                if let Content::ShaderHeatmap { chart: Some(c), .. } = &mut self.content {
+                if let Content::ShaderHeatmap {
+                    chart: Some(c),
+                    view_state,
+                    ..
+                } = &mut self.content
+                {
                     c.update(message);
+                    *view_state = Some(c.view_state());
                 }
             }
             Event::MiniTickersListInteraction(message) => {
@@ -2270,6 +2282,9 @@ pub enum Content {
         chart: Option<Box<HeatmapShader>>,
         indicators: Vec<HeatmapIndicator>,
         studies: Vec<data::chart::heatmap::HeatmapStudy>,
+        /// Camera state snapshot; updated after each user interaction.
+        /// Used to restore view position when creating a replacement shader.
+        view_state: Option<HeatmapViewState>,
     },
     Kline {
         chart: Option<KlineChart>,
@@ -2483,6 +2498,7 @@ impl Content {
                 studies: vec![data::chart::heatmap::HeatmapStudy::VolumeProfile(
                     data::chart::heatmap::ProfileKind::default(),
                 )],
+                view_state: None,
             },
             ContentKind::HeatmapChart => Content::Heatmap {
                 chart: None,
