@@ -117,9 +117,12 @@ markers =
 
 ## 実装フェーズ
 
-### フェーズ S1: `MockIPCServer` 骨格 + Hello/Ready
+### ✅ フェーズ S1: `MockIPCServer` 骨格 + Hello/Ready — **完了（2026-05-07）**
 
-- [ ] `python/tests/fixtures/mock_ipc_server.py` を実装。
+> 実装済み: `python/tests/fixtures/mock_ipc_server.py`（5 tests PASS、0.27s < 1s ✅）。
+> compression=None 適用・stop() 冪等・script 形式・received リスト記録を実装。
+
+- [x] `python/tests/fixtures/mock_ipc_server.py` を実装。
   - `asyncio` + `websockets.serve` でインプロセス起動。**`compression=None` は必須。省略禁止**（省略すると `compression="deflate"` がデフォルトで適用され、RSV1=1 フレームを送出するため fastwebsockets が "Reserved bits are not zero" で切断する）。
     ```python
     server = await websockets.serve(handler, "127.0.0.1", 0, compression=None)
@@ -133,14 +136,18 @@ markers =
 
 **完了条件**: `pytest python/tests/test_mock_ipc_server_basic.py` が 1 秒以内に PASS。テストコードに `@pytest.mark.timeout(1)` デコレータ（`pytest-timeout` パッケージ）または `start = time.monotonic(); ...; assert time.monotonic() - start < 1.0` による明示的 assert を含めること。`stop()` を複数回呼んでも例外が発生しないこと（`test_mock_ipc_server_basic.py` 内に `server.stop(); server.stop()` のアサーションを追加すること）。
 
-### フェーズ S2: IPC プロトコル網羅
+### 🟡 フェーズ S2: IPC プロトコル網羅 — **部分完了（2026-05-07）**
 
-- [ ] `script` 形式でコマンド応答を定義できるようにする（`Subscribe`, `FetchKlines`, `Unsubscribe`, `Shutdown`）。
-- [ ] スキーマ不一致（`EngineError` + `SCHEMA_MAJOR_MISMATCH`）応答のテストを追加（`HelloReject` という wire は存在しない）。
+> 実装済み: `python/tests/test_mock_ipc_server_protocol.py`（4 tests PASS）
+> - Subscribe → DepthSnapshot / FetchKlines → Klines / EngineError(schema_mismatch) / Unsubscribe+Shutdown
+
+- [x] `script` 形式でコマンド応答を定義できるようにする（`Subscribe`, `FetchKlines`, `Unsubscribe`, `Shutdown`）。
+- [x] スキーマ不一致（`EngineError` + `SCHEMA_MAJOR_MISMATCH`）応答のテストを追加（`HelloReject` という wire は存在しない）。
 - [ ] `ConnectionRefusedError` / `attach` → `inprocess` フォールバックのテスト（現 `test_replay_session_attach.py` を `MockIPCServer` に移植）。
 - [ ] `pytest.ini` に `timeout = 60` を追記（`pytest-timeout` により `pytest`（引数なし）の全体タイムアウトを CI で強制）。`pyproject.toml` の `[project.optional-dependencies]` に `pytest-timeout` を追加。
 
 **完了条件**: `force_mode="attach"` 経路の WS ロジックが `MockIPCServer` でカバーされ、`pytest`（引数なし）が 60 秒以内に完走。
+> 現状: smoke marker 基盤（conftest.py / pytest.ini）は整備済み。60 秒未達（現 86 秒）。ConnectionRefusedError / attach→inprocess フォールバックテストは未移植。
 
 ### フェーズ S4: attach 解決シナリオ
 

@@ -137,6 +137,11 @@ class KabuStationAdapter:
 
 ## 移行ステップ
 
+### ✅ Step 1: モデル定義と単体テスト（リスクなし） — **完了（2026-05-07）**
+
+> 実装済み: `python/engine/models.py`（Instrument / OrderBook / DepthDiff / Trade）、`python/tests/test_models.py`（19 tests PASS）。
+> wire 責務フィールド禁止の CI テストを含む。
+
 ### Step 1: モデル定義と単体テスト（リスクなし）
 
 > **本計画の目標**: 「adapter 内部の正規化層整理」。本計画は internal model 整理が目的であり、adapter model は adapter 内部の正規化層である。adapter model は event/venue/market/request_id 等の wire 責務を持たない。schemas.py が wire source of truth を維持する。adapter model → wire DTO（schemas.py 定義）への明示マッピング（mapper 関数 1 段）を経由して wire 送出を行う。現行の worker → `outbox.append({...})` で wire-format dict を直接書くパスは Step 2 の廃止対象であり、Step 3 完了時に完全削除する。
@@ -145,6 +150,12 @@ class KabuStationAdapter:
 - `DepthDiff` には必須フィールド `stream_session_id: str`・`sequence_id: int`・`prev_sequence_id: int`・`symbol: str`・`timestamp: datetime`・`bids: list[tuple[Decimal, Decimal]]`・`asks: list[tuple[Decimal, Decimal]]` を含めること。
 - `python/tests/test_models.py` で pydantic バリデーション・Decimal 精度・side バリデーションを確認。`DepthDiff` のフィールド欠損時に `ValidationError` が出ることも対象とする。
 - 既存コードへの変更なし。
+
+### ✅ Step 2: kabuStation adapter をモデルに対応 — **部分完了（2026-05-07）**
+
+> 実装済み: `python/engine/exchanges/kabusapi_adapter.py`（KabuStationAdapter: 50銘柄制約・parse_board/parse_execution）、`python/tests/test_kabusapi_adapter.py`（13 tests PASS）。
+> kabuStation PUSH JSON に sequence_id / prev_sequence_id が存在しないため `parse_board_diff()` は非実装（スナップショットのみ）。
+> KabuStationWorker → outbox の wire-format 直書きパスの置き換えは未実施（C1 対象）。現状は二重境界状態。
 
 ### Step 2: kabuStation adapter をモデルに対応
 
@@ -163,6 +174,11 @@ class KabuStationAdapter:
 - `python/tests/test_kabusapi_adapter.py` でラウンドトリップ（生 JSON → モデル）を検証。
 
 > **migration path（dict 直書きパスの段階移行）**: 現行の dict 直書きパス（`worker → outbox.append({...})`）を adapter model 経由パス（`worker → adapter model → mapper → wire DTO → outbox.append(...)`）に段階移行する。adapter model は schemas.py 定義の wire DTO に変換する mapper 関数（1 段）を経由して wire DTO 型を生成する。`.model_dump(mode="json")` で wire に直結するのでなく、mapper 経由で wire DTO 型を生成することで、schemas.py が wire source of truth を維持し続ける。この移行中は両パスが並存することを許容し、Step 3 完了時に dict 直書きパスを完全削除する。他 venue（Tachibana 等）は Step 3 完了まで旧境界（dict 直書き）のまま動作する。
+
+### 🟡 Step 3: server.py の配信パスを adapter 経由に差し替え — **mapper 定義完了、配線未実施**
+
+> 実装済み: `python/engine/mappers.py`（order_book_to_wire / depth_diff_to_wire / trade_to_wire / trades_to_wire）、`python/tests/test_mappers.py`（9 tests PASS）。
+> 未実施: server.py / worker の実際の wire-up（worker → adapter model → mapper → outbox へのパス変更）。B3 完了後に着手。
 
 ### Step 3: server.py の配信パスを adapter 経由に差し替え
 > **mapper 関数の配置**: `python/engine/mappers.py`（新規ファイル）に `order_book_to_wire(model: OrderBook, venue: str, ticker: str, market: str) -> dict`・`depth_diff_to_wire(model: DepthDiff, venue: str, ticker: str, market: str) -> dict`・`trade_to_wire(model: Trade, venue: str, ticker: str, market: str) -> dict` を定義する。`event`・`venue`・`market` フィールドは mapper の引数から補充し、adapter model には持たせない。
