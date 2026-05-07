@@ -23,7 +23,8 @@ pub enum Anchor {
         scroll_ref_bucket: i64,
         render_latest_time: u64,
         x_phase_bucket: f32,
-        frozen_base_price: Option<Price>,
+        /// Guaranteed non-None: pause transition is skipped if no price is available.
+        frozen_base_price: Price,
     },
 }
 
@@ -123,7 +124,7 @@ impl Anchor {
             Anchor::Live { .. } => live_base_price,
             Anchor::Paused {
                 frozen_base_price, ..
-            } => *frozen_base_price,
+            } => Some(*frozen_base_price),
         }
     }
 
@@ -144,11 +145,14 @@ impl Anchor {
                 ..
             } => {
                 if !x0_visible {
-                    // Transition to Paused
+                    // Only pause if a price is available to freeze; skip otherwise.
+                    let Some(frozen) = current_base_price else {
+                        return false;
+                    };
                     *self = Anchor::Paused {
                         render_latest_time: live_render_latest_time.max(*render_latest_time),
                         x_phase_bucket: live_x_phase_bucket.max(*x_phase_bucket),
-                        frozen_base_price: current_base_price,
+                        frozen_base_price: frozen,
                         scroll_ref_bucket: *scroll_ref_bucket,
                     };
                     true

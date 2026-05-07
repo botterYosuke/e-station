@@ -152,8 +152,10 @@ assert_eq!(view_state.scaling, heatmap_shader.camera_scale());
 
 ## Phase 2 着手前チェックリスト
 
-- [ ] この `heatmap-phase2-ownership.md` が存在し owner table 8 行すべてに値が記入されている（本ファイルで充足）
-- [ ] `HeatmapViewState` の struct 定義（フィールド一覧）が確定している
+- [x] この `heatmap-phase2-ownership.md` が存在し owner table 8 行すべてに値が記入されている（本ファイルで充足）
+- [x] `HeatmapViewState` の struct 定義（フィールド一覧）が確定している（`src/widget/chart/heatmap.rs` に `HeatmapViewState { camera_scale, camera_offset, cell_width_world, cell_height_world }` として実装済み）
 - [ ] `RebuildPolicy` 削除後の debounce ロジック代替（Option A / B）が選択されている
 - [ ] `CanvasInvalidation` 削除後の各 mark_*() 箇所一覧が抽出されている
+- [x] `view_state()` / `apply_view_state()` 実装済み（`src/widget/chart/heatmap.rs`）
+- [x] Elm 統合（pane.rs）実装済み — `TicksizeSelected` / `BasisSelected` ハンドラで `apply_view_state()` を呼び出す（2026-05-08 H-3 反映）
 - [ ] Phase 2 acceptance テスト一覧（owner table 検証テスト 5 件）のスケルトンが作成されている

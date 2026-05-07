@@ -84,8 +84,9 @@ impl RebuildSignal {
         };
     }
 
-    // Only call via `HeatmapShader::rebuild_all_immediate()` or within `HeatmapShader::update()`.
-    // Direct calls outside those contexts risk bypassing the debounce contract.
+    // Schedule an immediate full rebuild, bypassing the debounce window.
+    // `force_historical` is OR-merged with any existing flag so a true value is never silently
+    // downgraded. Callers must ensure `set_idle()` is called after the rebuild completes.
     fn set_immediate(&mut self, force_historical: bool) {
         let prev = self.peek_force_historical();
         *self = Self::Immediate {
@@ -165,9 +166,9 @@ pub enum Message {
 #[derive(Debug, Clone, Copy)]
 pub struct HeatmapViewState {
     pub camera_scale: f32,
-    /// `camera_offset` は GPU シェーダー内部の `[f32; 2]` 形式（[x, y]）に合わせた生配列。
-    /// Elm 層に公開するため `iced::Vector` への変換境界は `view_state()` / `apply_view_state()` が担う。
-    pub camera_offset: [f32; 2],
+    /// GPU 内部形式の生配列 [x, y]。`view_state()` / `apply_view_state()` が変換境界を担う。
+    /// クレート外部から直接アクセス不可（不透明ハンドルとして扱う）。
+    pub(crate) camera_offset: [f32; 2],
     pub cell_width_world: f32,
     pub cell_height_world: f32,
 }
@@ -494,18 +495,29 @@ impl HeatmapShader {
     }
 
     /// Restore camera and cell dimensions from a previously captured `HeatmapViewState`.
-    /// Call after creating a new shader to reinstate saved view position.
+    /// Must be called immediately after [`HeatmapShader::new`], before the first `insert_depth`.
+    /// The rebuild is deferred: `rebuild_signal` is set to `Immediate { force_historical: true }`
+    /// and the actual rebuild runs on the first `invalidate` once viewport and data are available.
     pub fn apply_view_state(&mut self, vs: HeatmapViewState) {
+        debug_assert!(
+            self.latest_time.is_none(),
+            "apply_view_state called after data ingestion — will trigger a full rebuild"
+        );
         self.scene.camera.set_scale(vs.camera_scale);
         self.scene.camera.offset = vs.camera_offset;
         self.scene.cell = Cell::new(vs.cell_width_world, vs.cell_height_world);
-        self.rebuild_all_immediate(None, true);
+        // Do not call rebuild_all_immediate here: viewport is None at construction time,
+        // so rebuild_all would early-return and destroy the force_historical flag.
+        self.rebuild_signal.set_immediate(true);
     }
 
     /// called periodically on every window frame
     /// to update time-based rendering and animate/scroll
     pub fn invalidate(&mut self, now: Option<Instant>) -> Option<Action> {
         let now_i = now.unwrap_or_else(Instant::now);
+        // Check for stall before updating last_tick so the elapsed time reflects the actual gap.
+        // This handles paused mode where insert_depth never fires the stall check.
+        self.mark_needs_full_upload_if_stalled();
         self.last_tick = Some(now_i);
 
         if self.palette.is_none() {
@@ -829,23 +841,26 @@ impl HeatmapShader {
         self.rebuild_instances(&w);
     }
 
-    fn rebuild_all(&mut self, window: Option<ViewWindow>) {
+    /// Returns `true` if the rebuild completed, `false` if it was skipped (no viewport / no data).
+    /// Callers must only call `rebuild_signal.set_idle()` when this returns `true`; skipping
+    /// `set_idle()` on `false` preserves any pending `force_historical` flag for the next frame.
+    fn rebuild_all(&mut self, window: Option<ViewWindow>) -> bool {
         let Some(w) = window.or_else(|| {
             let size = self.viewport_size_px()?;
             self.compute_view_window(size)
         }) else {
             self.scene.clear();
             self.depth_grid.force_full_upload();
-            return;
+            return false;
         };
 
         let latest_time = match self.latest_time {
             Some(time) => time,
-            None => return,
+            None => return false,
         };
         let base_price = match self.anchor.effective_base_price(self.base_price) {
             Some(price) => price,
-            None => return,
+            None => return false,
         };
 
         let aggr_time: u64 = self.depth_history.aggr_time.max(1);
@@ -929,12 +944,16 @@ impl HeatmapShader {
             .sync_heatmap_upload_from_grid(&mut self.depth_grid, need_full_rebuild);
 
         self.rebuild_instances(&w);
+        true
     }
 
     fn rebuild_all_immediate(&mut self, w: Option<ViewWindow>, force_historical: bool) {
         self.rebuild_signal.set_immediate(force_historical);
-        self.rebuild_all(w);
-        self.rebuild_signal.set_idle();
+        if self.rebuild_all(w) {
+            self.rebuild_signal.set_idle();
+        }
+        // If rebuild_all returned false (no viewport / no data), leave the signal intact so
+        // the next invalidate can retry with force_historical still set.
     }
 
     /// If the y-binning (steps_per_y_bin) would change, we must rebuild the heatmap texture.
@@ -1008,8 +1027,9 @@ impl HeatmapShader {
                 self.rebuild_instances(w);
             }
             RebuildDecision::Full => {
-                self.rebuild_all(Some(*w));
-                self.rebuild_signal.set_idle();
+                if self.rebuild_all(Some(*w)) {
+                    self.rebuild_signal.set_idle();
+                }
             }
         }
 
@@ -1117,10 +1137,10 @@ impl HeatmapShader {
         self.refresh_y_axis_gutter();
         self.clear_all_caches();
 
-        if state_change == view::FollowStateChange::ResumedToLive {
-            self.rebuild_all_immediate(None, true);
-        } else {
-            self.rebuild_signal.set_immediate(false);
+        match state_change {
+            view::FollowStateChange::ResumedToLive => self.rebuild_all_immediate(None, true),
+            view::FollowStateChange::PausedFromLive => self.rebuild_signal.set_immediate(false),
+            view::FollowStateChange::Unchanged => {}
         }
     }
 
@@ -1364,6 +1384,75 @@ mod tests {
         assert_ne!(
             shader.scene.camera.offset, initial_offset,
             "camera offset should change after pan"
+        );
+    }
+
+    // --- Regression tests for B3 review findings ---
+
+    /// H-2 regression: apply_view_state with viewport=None must preserve force_historical.
+    /// Before fix: rebuild_all_immediate → rebuild_all early-return → set_idle() destroyed the flag.
+    /// After fix: only set_immediate(true) is called; viewport=None defers the rebuild.
+    #[test]
+    fn apply_view_state_preserves_force_historical_without_viewport() {
+        let mut shader = make_shader(); // viewport = None
+        let vs = HeatmapViewState {
+            camera_scale: 200.0,
+            camera_offset: [1.0, -2.0],
+            cell_width_world: 0.05,
+            cell_height_world: 0.08,
+        };
+        shader.apply_view_state(vs);
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::Full,
+            "apply_view_state must leave signal as Immediate, not Idle (H-2)"
+        );
+        assert!(
+            shader.rebuild_signal.peek_force_historical(),
+            "force_historical must survive apply_view_state with no viewport (H-2)"
+        );
+    }
+
+    /// H-4 regression: pause transition must be skipped when base_price is None.
+    /// Before fix: Anchor::Paused { frozen_base_price: None } was valid, causing
+    /// effective_base_price() to return None and the overlay to disappear silently.
+    #[test]
+    fn anchor_skips_pause_transition_when_no_base_price() {
+        let mut anchor = view::Anchor::default();
+        assert!(!anchor.is_paused());
+        let changed = anchor.update_auto_follow(
+            false, // x0 not visible → would normally trigger pause
+            1000,
+            0.0,
+            None, // no price yet
+        );
+        assert!(!changed, "anchor must not transition to Paused without a base price (H-4)");
+        assert!(!anchor.is_paused(), "anchor must remain Live when no price available (H-4)");
+    }
+
+    /// Verifies that pause transition DOES occur once a price is available.
+    #[test]
+    fn anchor_pauses_when_price_is_available() {
+        let mut anchor = view::Anchor::default();
+        let price = exchange::unit::Price::from_f32(50000.0);
+        let changed = anchor.update_auto_follow(false, 1000, 0.0, Some(price));
+        assert!(changed, "anchor should pause when x0 not visible and price exists");
+        assert!(anchor.is_paused());
+    }
+
+    /// Guards against `decide()` panicking or returning Full when `since` is a future timestamp.
+    /// saturating_duration_since should return Duration::ZERO → OverlaysOnly.
+    #[test]
+    fn rebuild_signal_future_since_returns_overlays_only() {
+        let future_since = Instant::now() + Duration::from_secs(10);
+        let signal = RebuildSignal::Debouncing {
+            since: future_since,
+            force_historical: false,
+        };
+        assert_eq!(
+            signal.decide(Instant::now()),
+            RebuildDecision::OverlaysOnly,
+            "future since must yield OverlaysOnly via saturating_duration_since"
         );
     }
 }
