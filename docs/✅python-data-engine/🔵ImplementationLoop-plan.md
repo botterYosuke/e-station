@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-08（G0 + G0.5 + G0.9 + G1 完了 + G1 レビュー R1 反映）
+最終更新: 2026-05-08（G0 + G0.5 + G0.9 + G1 完了 + G1 レビュー R1+R2 反映）
 
 ## 対象ドキュメント
 
@@ -360,8 +360,32 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 - `start_or_attach.rs` の gRPC mock 書き直し: G2（Rust クライアント gRPC 化）の一環として実施予定。G1 完了後の独立作業として繰り越し。
 - stdin `transport` フィールド: `args.transport` は常に CLI から読まれ、default `"grpc"` が設定される。Rust supervisor は `--transport` CLI フラグ経由で制御可能。stdin cfg には不要。
 
+### レビュー反映 (2026-05-08, G1 ラウンド 2)
+
+**レビュー実施**: silent-failure-hunter + general-purpose の 2 エージェント並列  
+**集約結果**: CRITICAL×1, HIGH×4, MEDIUM×3 → 全件修正済み。LOW のみ残留。
+
+**修正内容:**
+
+| 重要度 | 対象 | 修正内容 |
+|--------|------|---------|
+| CRITICAL | `server_grpc.py:295-331` | replay セッション終了後も `_mode="replay"` が残り次の live 接続が FAILED_PRECONDITION で弾かれるバグ → `_connections` が空になったときに `_mode = "live"` にリセット |
+| HIGH | `server_grpc.py:262` | `_startup_tachibana` タスク例外が無音 → `add_done_callback` で `log.error` + `exc_info` 追加 |
+| HIGH | `server_grpc.py:281` | `log.error` に `exc_info` なし → traceback 消える → `exc_info=exc` 追加 |
+| HIGH | `server_grpc.py:357` | dispatch `log.error` に `exc_info` なし → `exc_info=True` 追加 |
+| HIGH | `server_grpc.py:413` | `add_insecure_port` 返値 0（バインド失敗）を無チェック → `RuntimeError` raise 追加 |
+| MEDIUM | `server_grpc.py:202` | 汎用ハンドシェイク例外を `DEADLINE_EXCEEDED` で返すのは誤り → `INTERNAL` + `log.warning` に修正 |
+| MEDIUM | `server_grpc.py:325` | `_cancel_all_streams()` 例外で後続の state リセットがスキップ → `try/except log.error` で囲む |
+| MEDIUM | `server_grpc.py:241` | `prepare()` を全接続ごとに呼ぶ → `not self._server._connections` ガードで初回のみに変更 |
+
+**見送り（根拠あり）:**
+- mode write race: asyncio は協調マルチタスク、`await` なしの同期ブロックで2コルーチン交差不可 → LOW
+- stdin `transport` フィールド: 本番は常に gRPC、WS ロールバックは CLI `--transport` フラグで対応 → 設計上不要
+- `_send_loop` return が `_recv_loop` を停止しない: `asyncio.wait(FIRST_COMPLETED)` が正しく処理する → 偽陽性
+
 **LOW（残留）:**
-- `server_grpc.py` に `_ENGINE_VERSION` が `engine.server` から import されている（モジュール結合）— G3 で server.py 廃止時に整理予定
+- `server_grpc.py` に `_ENGINE_VERSION` が `engine.server` から関数内 import されている（モジュール結合）— G3 で server.py 廃止時に整理予定
+- `_proto_mode_to_str` の未知 mode 値が無音で "live" フォールバック — G3 時に `log.warning` 追加予定
 
 **残作業（G1-next / G2 前に確認）:**
 - `ReplaySession(force_mode="attach")` gRPC attach テスト（`test_replay_session_attach.py` gRPC 版）

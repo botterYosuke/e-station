@@ -200,7 +200,8 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
             await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "handshake timeout")
             return
         except Exception as exc:
-            await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, f"handshake error: {exc}")
+            log.warning("handshake error: %s", exc)
+            await context.abort(grpc.StatusCode.INTERNAL, f"handshake error: {exc}")
             return
 
         # 3. HelloRequest チェック
@@ -236,16 +237,17 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
             )
             return
 
-        # 7. Worker prepare（タイムアウト付き）
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*(w.prepare() for w in self._server._workers.values())),
-                timeout=20.0,
-            )
-        except asyncio.TimeoutError:
-            log.warning("worker prepare() timed out — continuing without full worker init")
-        except Exception as exc:
-            log.warning("worker prepare() failed: %s — continuing", exc)
+        # 7. Worker prepare（初回接続時のみ・タイムアウト付き）
+        if not self._server._connections:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(w.prepare() for w in self._server._workers.values())),
+                    timeout=20.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning("worker prepare() timed out — continuing without full worker init")
+            except Exception as exc:
+                log.warning("worker prepare() failed: %s — continuing", exc)
 
         # 8. ReadyResponse を最初の Event として送信
         yield _build_ready_event(self._server)
@@ -260,6 +262,13 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
         # Tachibana スタートアップ（replay でない場合・最初の接続時のみ）
         if self._server._mode != "replay" and len(self._server._connections) == 1:
             startup_task = asyncio.create_task(self._server._startup_tachibana())
+            startup_task.add_done_callback(
+                lambda t: log.error(
+                    "_startup_tachibana failed: %s", t.exception(), exc_info=t.exception()
+                )
+                if not t.cancelled() and t.exception() is not None
+                else None
+            )
             self._server._tachibana_startup_task = startup_task
 
         # 10. recv/send ループを並行実行
@@ -278,7 +287,7 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
                 if not t.cancelled():
                     exc = t.exception()
                     if exc is not None:
-                        log.error("session task raised: %s", exc)
+                        log.error("session task raised: %s", exc, exc_info=exc)
             for t in pending:
                 t.cancel()
             for t in pending:
@@ -322,13 +331,17 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
 
                 from engine.exchanges.tachibana_auth import StartupLatch
                 self._server._tachibana_startup_latch = StartupLatch()
-                await self._server._cancel_all_streams()
+                try:
+                    await self._server._cancel_all_streams()
+                except Exception as exc:
+                    log.error("_cancel_all_streams failed: %s", exc, exc_info=True)
 
                 from engine.server import ReplayState, LiveState
                 self._server._replay_state = ReplayState.IDLE
                 self._server._live_state = LiveState.DISCONNECTED
                 self._server._connected_venue = None
                 self._server._replay_streaming_fills.clear()
+                self._server._mode = "live"
 
     async def _recv_loop(
         self,
@@ -355,7 +368,7 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
                 msg = {"op": op, **payload_dict}
                 await self._server._dispatch(op, msg, session_key)
             except Exception as exc:
-                log.error("gRPC dispatch error op=%s: %s", op, exc)
+                log.error("gRPC dispatch error op=%s: %s", op, exc, exc_info=True)
 
     async def _send_loop(self, q: asyncio.Queue, context: aio.ServicerContext) -> None:
         """_outbox キューからイベントを受信して gRPC stream に送信する。"""
@@ -411,6 +424,8 @@ class GrpcDataEngineServer:
         servicer = _GrpcDataEngineServicer(self._inner)
         engine_pb2_grpc.add_DataEngineServicer_to_server(servicer, server)
         actual_port = server.add_insecure_port(f"127.0.0.1:{self._port}")
+        if actual_port == 0:
+            raise RuntimeError(f"gRPC failed to bind port {self._port}")
         await server.start()
         log.info("Data engine gRPC listening on 127.0.0.1:%d", actual_port)
         await self._inner._shutdown_event.wait()
