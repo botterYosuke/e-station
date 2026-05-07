@@ -411,6 +411,9 @@ class DataEngineServer:
         self._kabu_venue: KabuStationVenue | None = None
         self._kabu_login_inflight = asyncio.Lock()
         self._kabu_startup_task: asyncio.Task | None = None
+        # VenueReady を emit した venue 名。None = 未接続 / "tachibana" / "kabu_station"。
+        # StartEngine(engine="Live") の venue guard に使う。
+        self._connected_venue: str | None = None
 
         # ── Phase O2: EVENT WebSocket EC 約定通知 ────────────────────────
         # venue_order_id → client_order_id 逆引きマップ（EC フレームには client_order_id がない）
@@ -727,6 +730,7 @@ class DataEngineServer:
                 # stuck する。
                 self._replay_state = ReplayState.IDLE
                 self._live_state = LiveState.DISCONNECTED
+                self._connected_venue = None
                 self._replay_streaming_fills.clear()
 
     async def _handshake(self, ws: ServerConnection) -> None:
@@ -2928,6 +2932,7 @@ class DataEngineServer:
             self._apply_tachibana_session(session)
             # B3: ログイン成功 → CONNECTED 状態へ遷移。
             self._live_state = LiveState.CONNECTED
+            self._connected_venue = "tachibana"
             log.info("Tachibana session established successfully")
             self._emit({
                 "event": "VenueReady",
@@ -2984,6 +2989,7 @@ class DataEngineServer:
                 return
 
             self._live_state = LiveState.CONNECTED
+            self._connected_venue = "kabu_station"
             log.info("KabuStation session established successfully")
             self._emit({
                 "event": "VenueReady",
@@ -3656,6 +3662,18 @@ class DataEngineServer:
             elif self._mode == "live":
                 # Phase 2: live 分岐。CONNECTED 状態のみ受理する。
                 if not self._check_live_state("StartEngine", LiveState.CONNECTED):
+                    return
+                # tachibana 以外の venue でログイン済みの場合は拒否する。
+                # kabu_station の live 実行は未実装のため、ここで明示的にエラーを返す。
+                if self._connected_venue != "tachibana":
+                    _on_event_tracked(
+                        {
+                            "event": "Error",
+                            "request_id": request_id,
+                            "code": "venue_not_supported",
+                            "message": f"Live engine requires tachibana venue (connected: {self._connected_venue!r}). kabu_station live execution is not yet implemented.",
+                        }
+                    )
                     return
                 # live 専用バリデーション
                 if config_obj.max_qty is None or config_obj.max_notional_jpy is None:

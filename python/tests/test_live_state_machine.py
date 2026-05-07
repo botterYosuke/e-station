@@ -72,6 +72,7 @@ def _make_server(mode: str = "live"):
     server._replay_streaming_fills = []
     server._replay_state = ReplayState.IDLE
     server._live_state = LiveState.DISCONNECTED
+    server._connected_venue = "tachibana"  # live テストは tachibana 接続前提
     server._event_task = None
     server._replay_session_epoch = 0
     # Phase 2: queue フィールド

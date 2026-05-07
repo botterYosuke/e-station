@@ -248,10 +248,11 @@ class _AttachClient:
     compression=None を強制（RSV1 互換性問題: MISSES.md 2026-04-25 参照）。
     """
 
-    def __init__(self, endpoint: str, token: str, timeout_s: float) -> None:
+    def __init__(self, endpoint: str, token: str, timeout_s: float, *, mode: str = "replay") -> None:
         self._endpoint = endpoint
         self._token = token  # ログに出力禁止
         self._timeout_s = timeout_s
+        self._mode = mode
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws = None
         self._send_queue: asyncio.Queue | None = None
@@ -338,7 +339,7 @@ class _AttachClient:
                     schema_minor=SCHEMA_MINOR,
                     client_version="helper-attach",
                     token=self._token,
-                    mode="replay",
+                    mode=self._mode,
                 )
                 await ws.send(orjson.dumps(hello.model_dump()).decode())
 
@@ -1298,6 +1299,8 @@ class LiveSession:
         self._second_password: str | None = second_password
         self._stop_event: threading.Event | None = None
         self._strategy_id: str | None = None
+        # attach mode run() 状態追跡（二重 stop 防止）
+        self._live_running: bool = False
 
     # ------------------------------------------------------------------
     # Context manager
@@ -1320,7 +1323,7 @@ class LiveSession:
                 raise ConnectionRefusedError(
                     "force_mode='attach' but no engine-session.json / FLOWSURFACE_ENGINE_TOKEN found"
                 )
-            client = _AttachClient(endpoint, token, self._attach_timeout_s)
+            client = _AttachClient(endpoint, token, self._attach_timeout_s, mode="live")
             client.handshake()
             self._client = client
             self._mode = "attach"
@@ -1331,7 +1334,7 @@ class LiveSession:
             endpoint, token = self._resolve_endpoint_and_token()
             if endpoint is not None and token is not None:
                 try:
-                    client = _AttachClient(endpoint, token, self._attach_timeout_s)
+                    client = _AttachClient(endpoint, token, self._attach_timeout_s, mode="live")
                     client.handshake()
                     self._client = client
                     self._mode = "attach"
@@ -1613,7 +1616,9 @@ class LiveSession:
     ) -> None:
         """Live strategy を実行する（blocking）。
 
-        in-process 経路: NautilusRunner.start_live() を直接呼ぶ（ReplaySession と同方式）。
+        attach 経路: StartEngine{engine:"Live"} を engine に送り、events() ループで
+        EngineStopped を待つ。
+        in-process 経路: NautilusRunner.start_live() を直接呼ぶ。
 
         Args:
             instrument_id: 取引対象銘柄 ID（例: ``"8306.T"``）。
@@ -1626,41 +1631,111 @@ class LiveSession:
 
         Raises:
             RuntimeError: login() 前に呼んだ場合。
-            RuntimeError: second_password が None の場合。
+            RuntimeError: in-process モードで second_password が None の場合。
         """
         if not self._logged_in:
             raise RuntimeError("call login() before run()")
+
+        self._strategy_id = strategy_id
+        _on_event = on_event if on_event is not None else (lambda _: None)
+
+        if self._mode == "attach":
+            if self._client is None:
+                raise RuntimeError("attach client not initialized")
+            import uuid as _uuid
+            from engine.schemas import StartEngine, EngineStartConfig
+
+            run_request_id = str(_uuid.uuid4())
+            cmd = StartEngine(
+                request_id=run_request_id,
+                engine="Live",
+                strategy_id=strategy_id,
+                config=EngineStartConfig(
+                    instrument_id=instrument_id,
+                    strategy_file=strategy_file,
+                    strategy_init_kwargs=strategy_init_kwargs,
+                    max_qty=max_qty,
+                    max_notional_jpy=max_notional_jpy,
+                ),
+            )
+            _setter = getattr(self._client, "set_current_request_id", None)
+            self._live_running = True
+            if callable(_setter):
+                _setter(run_request_id)
+            try:
+                self._client.send_command(cmd.model_dump())
+            except Exception:
+                self._live_running = False
+                if callable(_setter):
+                    _setter(None)
+                raise
+            try:
+                for evt in self._client.events():
+                    _on_event(evt)
+                    kind = _extract_event_kind(evt)
+                    if kind == "EngineStopped":
+                        break
+                    if kind == "SecondPasswordRequired":
+                        raise RuntimeError(
+                            "LiveSession.run: engine requires second password — "
+                            "set it via the GUI before calling run()"
+                        )
+            finally:
+                self._live_running = False
+                _setter_finally = getattr(self._client, "set_current_request_id", None)
+                if callable(_setter_finally):
+                    _setter_finally(None)
+            return
+
+        # in-process mode
         if self._second_password is None:
             raise RuntimeError(
                 "second_password is required for in-process live run. "
                 "Pass second_password=... to LiveSession()"
             )
-        self._strategy_id = strategy_id
 
         from engine.nautilus.engine_runner import NautilusRunner
 
         runner = NautilusRunner()
         self._stop_event = threading.Event()
-        runner.start_live(
-            instrument_id=instrument_id,
-            strategy_file=strategy_file,
-            strategy_init_kwargs=strategy_init_kwargs,
-            max_qty=max_qty,
-            max_notional_jpy=max_notional_jpy,
-            second_password=self._second_password,
-            session=self._session,
-            fd_queue=__import__("queue").Queue(maxsize=10_000),
-            ec_queue=__import__("queue").Queue(maxsize=1_000),
-            on_event=on_event if on_event is not None else (lambda _: None),
-            stop_event=self._stop_event,
-            strategy_id=strategy_id,
-        )
+        self._live_running = True
+        try:
+            runner.start_live(
+                instrument_id=instrument_id,
+                strategy_file=strategy_file,
+                strategy_init_kwargs=strategy_init_kwargs,
+                max_qty=max_qty,
+                max_notional_jpy=max_notional_jpy,
+                second_password=self._second_password,
+                session=self._session,
+                fd_queue=__import__("queue").Queue(maxsize=10_000),
+                ec_queue=__import__("queue").Queue(maxsize=1_000),
+                on_event=_on_event,
+                stop_event=self._stop_event,
+                strategy_id=strategy_id,
+            )
+        finally:
+            self._live_running = False
 
     def stop(self) -> None:
         """実行中の live strategy を停止する。
 
+        attach 経路: StopEngine コマンドを engine に送る。
         in-process 経路: stop_event を set して start_live() の worker に停止シグナルを送る。
         """
+        if self._mode == "attach" and self._client is not None:
+            if self._live_running:
+                import uuid as _uuid
+                from engine.schemas import StopEngine
+
+                cmd = StopEngine(
+                    request_id=str(_uuid.uuid4()),
+                    strategy_id=self._strategy_id or "",
+                )
+                try:
+                    self._client.send_command(cmd.model_dump())
+                except Exception as exc:
+                    log.warning("[LiveSession.stop] StopEngine send failed: %s", exc)
         if self._stop_event is not None:
             self._stop_event.set()
 
