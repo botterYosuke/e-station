@@ -165,5 +165,5 @@ def test_engine_start_config_extra_forbid() -> None:
 
 
 def test_schema_minor_bumped_for_live_buying_power() -> None:
-    """N3 live strategy 実装で SCHEMA_MINOR が 17 になっていること。"""
-    assert s.SCHEMA_MINOR == 17
+    """N3 live strategy 実装で SCHEMA_MINOR が 17 に、kabu venue 追加で 18 に bump。"""
+    assert s.SCHEMA_MINOR >= 17

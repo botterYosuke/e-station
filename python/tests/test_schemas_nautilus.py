@@ -37,7 +37,8 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # schema 3.14: SCHEMA_MINOR を 13 → 14 に bump (ReplayBuyingPower 追加)
     # schema 3.15: SCHEMA_MINOR を 14 → 15 に bump (LiveBuyingPower 追加 / LiveStateName に TRADING・STOPPING 追加)
     # N3: SCHEMA_MINOR を 16 → 17 に bump（live strategy 実行基盤）
-    assert s.SCHEMA_MINOR == 17
+    # kabu venue Phase 1: SCHEMA_MINOR を 17 → 18 に bump
+    assert s.SCHEMA_MINOR == 18
     assert s.SCHEMA_MAJOR == 3
 
 

@@ -37,5 +37,6 @@ pub use venue_caps::VenueCapsStore;
 ///   - 14: ReplayDataLoaded.session_epoch（リプレイファイル切替時のペイン全閉じ用、Approach B）
 ///   - 15: LiveBuyingPower 追加 / LiveStateName に TRADING・STOPPING 追加 / EngineStartConfig live フィールド追加
 ///   - 17: SCHEMA_MINOR を 16→17 に修正（e-station branch での正しい採番）
+///   - 18: K1 Venue::KabuStation / Exchange::KabuStationStock 追加（IPC で "kabu_station" を受理）
 pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 17;
+pub const SCHEMA_MINOR: u16 = 18;

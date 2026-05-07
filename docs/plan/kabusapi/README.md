@@ -1,6 +1,12 @@
 # kabuステーション API 統合プラン
 
-三菱UFJ eスマート証券（旧 auカブコム）**kabuステーション API（v1.5）** を本アプリの venue として追加するための計画一式。立花証券 e支店 venue（[../../✅tachibana/README.md](../../✅tachibana/README.md)）と**同じ Python autonomous アーキテクチャ**に揃え、Rust 側は IPC enum 拡張に閉じる。
+三菱UFJ eスマート証券（旧 auカブコム）**kabuステーション API（v1.5）** を本アプリの venue として追加するための計画一式。立花証券 e支店 venue（[../../✅tachibana/README.md](../../✅tachibana/README.md)）と**同じ Python autonomous アーキテクチャ**に揃える。Rust 側は UI / I/O は持たないが、**enum 追加・capabilities 拡張・IPC schema minor bump・既存 lifecycle wiring の更新**は触る（詳細は [plan.md §1.1](./plan.md) と §3）。
+
+## 安全不変条件（実装着手前に必ず読む）
+
+- **本番接続は `KABU_ALLOW_PROD=1` の明示 opt-in を必須とする**。デフォルトは検証環境（`localhost:18081`）に固定し、Python 側で多層ガードを敷く（[plan.md Phase 1 非ゴール](./plan.md) / Phase 2 K13 / Phase 4）。Phase 1 では実弾発注経路を一切作らない
+- **取引パスワード `DEV_KABU_TRADE_PASSWORD` は Phase 2 着手前に env 名を予約決定**（API パスワードと別物）
+- **`LiveSession.login()` は Phase 1 着手で破壊的にシグネチャ拡張される**（既存 `*, user_id, password` → `*, venue, ...`）。立花の自動化や既存テストが kabu 実装着手と同時に壊れるリスクがあるため、互換策（venue 引数追加 or `login_kabu_station()` 等の別 method 分離）を Phase 1 着手前に確定する（[plan.md §1.3 / §3](./plan.md) U32）
 
 ## 文書構成
 
@@ -40,7 +46,11 @@ kabuステーション venue は **localhost ローカルサーバ・Windows 限
 ## 設計原則（立花 venue と共通）
 
 - **venue 固有 I/O は Python 側に集約**（`python/engine/exchanges/kabusapi*.py`）
-- **Rust 側は IPC enum バリアント追加のみ**（`Venue::KabuStation` / `Exchange::KabuStationStock`。Phase 1 は `KabuStationStock` 1 バリアントのみ／U2）
+- **Rust 側は UI / I/O を持たないが、以下の wiring は触る**（U2 / U8 / U9 / U10 / U39）:
+  - `Venue::KabuStation` / `Exchange::KabuStationStock` enum 追加（Phase 1 は `KabuStationStock` 1 バリアントのみ）
+  - `engine_client::capabilities` の `venue_capabilities["kabu_station"]` キー追加
+  - IPC schema minor bump（`Venue::from_str` / `AdapterHandles::kabu_station: Option<Arc<dyn VenueBackend>>` フィールド追加）
+  - 既存 lifecycle wiring（`apply_after_handshake` の venue-agnostic 経路を素通し確認、`Command::RequestVenueLogin.venue` で `"kabu_station"` 受理）
 - **IPC venue キー文字列は `"kabu_station"`**（Rust `Venue::KabuStation` と命名整合／U1）
 - **クレデンシャル・トークンは Python メモリのみ保持**（Rust 経路に流さない）
 - **ログイン UI は Python tkinter サブプロセス**（Rust にダイアログコードを書かない）。**取引パスワード（取消/発注時）の収集 UI も同じ tkinter サブプロセス方式に統一**（U4）

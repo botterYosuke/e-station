@@ -110,15 +110,76 @@
 
 | Task | 内容 | 完了条件（テストファイル名 + 代表 assert を併記） |
 | :--- | :--- | :--- |
-| K1 | Rust enum 拡張（`Venue::KabuStation` / `Exchange::KabuStationStock`）+ `Venue::from_str` + `AdapterHandles` dispatch + **`AdapterHandles.kabu_station: Option<Arc<dyn VenueBackend>>` フィールド追加**（U39 / R2-B-L2、Phase 1 では `None` 初期化のみ） | `cargo check` 通過、enum 網羅 match 全箇所が compile。`test_kabusapi_capabilities.py::test_capabilities_max_push_symbols_matches_register_set` で `max_push_symbols=50` と `RegisterSet.MAX = 50` の一致を assert（U27 / R2-C-L1） |
-| K2 | `kabusapi_url.py` / `kabusapi_codec.py` / `kabusapi_auth.py` 着地 + 単体テスト。**ログマスクは token + API パスワード + 取引パスワードの 3 種**（U26 / R2-C-M3） | `pytest python/tests/test_kabusapi_auth.py` グリーン。`test_kabusapi_auth.py` で `Code=4001005` **および `Code=4001001`** の両方から `KabuTokenExpiredError` を assert（U35 / R2-A-M2）。`test_kabusapi_auth_logging.py` で `caplog` に **token / API パスワード / 取引パスワード** 3 種いずれの文字列も出力されないことを assert（U26） |
-| K3 | `kabusapi_login_flow.py` + tkinter ダイアログ。debug env 自動ログイン経路。本体プロセス落ち（TCP refused）の検知・復帰。**早朝強制ログアウト時刻帯（Q-K3 確定までの暫定窓）はリトライ後の `local_app_down` を ERROR でなく INFO 扱いとし、`invariant-tests.md` の分岐定義に従う**（U25 / R2-C-M2） | flowsurface debug 起動 → `DEV_KABU_API_PASSWORD` 設定 → `/token` 取得ログ確認。`test_kabusapi_login_flow.py::test_tcp_refused_three_retries_then_local_app_down` で 5s × 3 回後の `VenueError{code:"local_app_down"}` を assert（U17）。同 test で `DEV_KABU_API_PASSWORD` 設定時に tkinter ダイアログを spawn しないことも assert。早朝時刻帯分岐の test も同ファイルに追加 |
-| K4 | `kabusapi_ratelimit.py` + `kabusapi_register.py` 単体テスト。**capabilities invariant test を K1 と横断で共有**（U27） | `test_kabusapi_register.py::test_register_51st_raises_full` で `KabuRegisterFullError`、`test_kabusapi_register.py::test_lru_evict_emits_subscription_evicted` で IPC `SubscriptionEvicted{symbol}` 送出を assert（U15）。`test_kabusapi_ratelimit.py::test_order_bucket_blocks_at_6th_req`。`test_kabusapi_capabilities.py::test_capabilities_max_push_symbols_matches_register_set`（K1 と共有、U27 / R2-C-L1） |
-| K5 | `kabusapi_ws.py`：WebSocket 接続・板パース・`DepthSnapshot` IPC 送出。再接続後は **常に `RegisterSet` 全件 re-register**（U6）。**再接続連続失敗の打ち切り条件は 5s × 5 回**（U22 / R2-C-H1）、上限到達で reconnect ループを抜け `VenueError{code:"local_app_down"}` 再発火 | `test_kabusapi_ws.py::test_reconnect_reregisters_all_symbols` / `test_kabusapi_ws.py::test_decode_rejects_sjis_bytes` / `test_kabusapi_ws.py::test_reconnect_aborts_after_5_consecutive_failures`（U22）。チャートに板表示が出ること |
-| K6 | `kabusapi_rest.py`（読取のみ）：`/board` / `/symbol` / `/orders` / `/positions` / `/wallet/*`。`fetch_board()` で `RegisterSet.touch()` 呼出 | レスポンスを既存 IPC 型へマッピング。`test_kabusapi_rest.py::test_fetch_board_touches_register_set` |
+| ✅ K1 | Rust enum 拡張（`Venue::KabuStation` / `Exchange::KabuStationStock`）+ `Venue::from_str` + `AdapterHandles` dispatch + **`AdapterHandles.kabu_station: Option<Arc<dyn VenueBackend>>` フィールド追加**（U39 / R2-B-L2、Phase 1 では `None` 初期化のみ） | `cargo check` 通過、enum 網羅 match 全箇所が compile。`test_kabusapi_capabilities.py::test_capabilities_max_push_symbols_matches_register_set` で `max_push_symbols=50` と `RegisterSet.MAX = 50` の一致を assert（U27 / R2-C-L1） |
+| ✅ K2 | `kabusapi_url.py` / `kabusapi_codec.py` / `kabusapi_auth.py` 着地 + 単体テスト。**ログマスクは token + API パスワード + 取引パスワードの 3 種**（U26 / R2-C-M3） | `pytest python/tests/test_kabusapi_auth.py` グリーン。`test_kabusapi_auth.py` で `Code=4001005` **および `Code=4001001`** の両方から `KabuTokenExpiredError` を assert（U35 / R2-A-M2）。`test_kabusapi_auth_logging.py` で `caplog` に **token / API パスワード / 取引パスワード** 3 種いずれの文字列も出力されないことを assert（U26） |
+| ✅ K3 | `kabusapi_login_flow.py` + tkinter ダイアログ。debug env 自動ログイン経路。本体プロセス落ち（TCP refused）の検知・復帰。**早朝強制ログアウト時刻帯（Q-K3 確定までの暫定窓）はリトライ後の `local_app_down` を ERROR でなく INFO 扱いとし、`invariant-tests.md` の分岐定義に従う**（U25 / R2-C-M2） | flowsurface debug 起動 → `DEV_KABU_API_PASSWORD` 設定 → `/token` 取得ログ確認。`test_kabusapi_login_flow.py::test_tcp_refused_three_retries_then_local_app_down` で 5s × 3 回後の `VenueError{code:"local_app_down"}` を assert（U17）。同 test で `DEV_KABU_API_PASSWORD` 設定時に tkinter ダイアログを spawn しないことも assert。早朝時刻帯分岐の test も同ファイルに追加 |
+| ✅ K4 | `kabusapi_ratelimit.py` + `kabusapi_register.py` 単体テスト。**capabilities invariant test を K1 と横断で共有**（U27） | `test_kabusapi_register.py::test_register_51st_raises_full` で `KabuRegisterFullError`、`test_kabusapi_register.py::test_lru_evict_emits_subscription_evicted` で IPC `SubscriptionEvicted{symbol}` 送出を assert（U15）。`test_kabusapi_ratelimit.py::test_order_bucket_blocks_at_6th_req`。`test_kabusapi_capabilities.py::test_capabilities_max_push_symbols_matches_register_set`（K1 と共有、U27 / R2-C-L1） |
+| ✅ K5 | `kabusapi_ws.py`：WebSocket 接続・板パース・`DepthSnapshot` IPC 送出。再接続後は **常に `RegisterSet` 全件 re-register**（U6）。**再接続連続失敗の打ち切り条件は 5s × 5 回**（U22 / R2-C-H1）、上限到達で reconnect ループを抜け `VenueError{code:"local_app_down"}` 再発火 | `test_kabusapi_ws.py::test_reconnect_reregisters_all_symbols` / `test_kabusapi_ws.py::test_decode_rejects_sjis_bytes` / `test_kabusapi_ws.py::test_reconnect_aborts_after_5_consecutive_failures`（U22）。チャートに板表示が出ること |
+| ✅ K6 | `kabusapi_rest.py`（読取のみ）：`/board` / `/symbol` / `/orders` / `/positions` / `/wallet/*`。`fetch_board()` で `RegisterSet.touch()` 呼出 | レスポンスを既存 IPC 型へマッピング。`test_kabusapi_rest.py::test_fetch_board_touches_register_set` |
 | K7 | IPC `Venue::KabuStation` ライフサイクル（`RequestVenueLogin` / `VenueReady` / `VenueError`）の E2E | `test_live_session_kabu.py::test_login_kabu_station_emits_venue_ready` で `LiveSession.login(venue="kabu_station")` が `VenueReady{venue:"kabu_station"}` を受信することを assert（U1） |
 | K8 | URL リテラル lint タスク（U12 / U28 / R2-A-M4 / R2-C-L2）：正規表現を **`(http\|ws)://localhost:1808[01]\|/kabusapi/(websocket\|register\|sendorder\|board)`** に拡張し、検査範囲を `src/` / `exchange/` / `engine-client/` / **`python/engine/`**（ただし `python/engine/exchanges/kabusapi_url.py` は除外）に拡大。CI で空一致を検証 | CI 上で zero-match を assert する step を追加。除外対象 1 ファイル以外で 1 件でも検出されたら fail |
 | K8.5 | `pytest -m demo_kabu` ジョブ（HTTPXMock のみ、本物は叩かない）を `.github/workflows/kabu-mock.yml` に追加 | CI グリーン。job 名 `pytest-kabu-mock`、コマンド `pytest -m demo_kabu python/tests/test_kabusapi_*.py` |
+
+<!-- K1 実装メモ（2026-05-07） -->
+> **K1 実装メモ**: `Venue::KabuStation` / `Exchange::KabuStationStock` を追加。
+> 網羅 match の更新箇所は合計 **6 箇所**:
+> 1. `exchange/src/adapter.rs` — `Venue::Display`
+> 2. `exchange/src/adapter.rs` — `Exchange::market_type()`
+> 3. `exchange/src/adapter.rs` — `Exchange::venue()`
+> 4. `exchange/src/adapter.rs` — `Exchange::default_quote_currency()`（venue match）
+> 5. `exchange/src/adapter.rs` — `Exchange::supports_kline_timeframe()`（venue match）
+> 6. `exchange/src/adapter/client.rs` — `AdapterHandles::set_backend()` / `get_backend_arc()`
+> 加えて `src/screen/dashboard/tickers_table.rs` と `src/style.rs` の main crate 側 match 2 箇所を更新。
+> `SCHEMA_MINOR` を 17 → 18 に bump（`python/engine/schemas.py` と `engine-client/src/lib.rs` 同期）。
+> `VenueError.code` docstring に `"token_expired"` / `"local_app_down"` を追記（型制約なし）。
+> `engine-client/src/capabilities.rs` に `test_kabu_station_max_push_symbols` テスト追加。
+> `engine-client/tests/schema_v2_4_nautilus.rs` の stale な `assert_eq!(SCHEMA_MINOR, 14)` を 18 に更新（元々 17 で既に失敗していた）。
+> `cargo check --workspace` / `cargo clippy --workspace -- -D warnings` / `cargo fmt --check` / `cargo test --workspace` 全通過。
+
+<!-- K2 実装メモ（2026-05-07） -->
+> **K2 実装メモ**: `kabusapi_url.py` / `kabusapi_codec.py` / `kabusapi_auth.py` の 3 モジュールを新設。
+> 新設ファイル:
+> - `python/engine/exchanges/kabusapi_url.py` — `BASE_URL_PROD` / `BASE_URL_VERIFY` / `endpoint()` / `symbol_key()` / `ws_url()`。URL リテラルの唯一の所在地（R1）。
+> - `python/engine/exchanges/kabusapi_codec.py` — UTF-8 JSON `encode()` / `decode()`。SJIS バイト列は `UnicodeDecodeError`（INV-K2-SJIS-REJECT）。`SIDE_BUY="2"` / `SIDE_SELL="1"` の regression guard（INV-K2-SIDE-BUY-2）。
+> - `python/engine/exchanges/kabusapi_auth.py` — `KabuApiError` 派生 5 種 + `fetch_token()` + `check_response()`。ログマスク: token 末尾 4 文字のみ出力（INV-K2-NO-LOG-SECRET）。
+> テストファイル 3 件（`test_kabusapi_auth.py` / `test_kabusapi_auth_logging.py` / `test_kabusapi_codec.py`）を新設。
+> `pytest.ini` に `demo_kabu` マーカーを追加。
+> `uv run pytest python/tests/test_kabusapi_auth.py python/tests/test_kabusapi_auth_logging.py python/tests/test_kabusapi_codec.py -v` → 14 passed。
+
+<!-- K3 実装メモ（2026-05-07） -->
+> **K3 実装メモ**: `kabusapi_login_flow.py` / `kabusapi_login_dialog.py` の 2 モジュールを新設。
+> 新設ファイル:
+> - `python/engine/exchanges/kabusapi_login_flow.py` — `startup_login()` / `_spawn_dialog()` / `_is_morning_logout_window()`。TCP 拒否時 `_RETRY_DELAY_S=5.0` × `_MAX_RETRIES=3` でリトライ後 `KabuConnectionError` を raise。早朝時刻帯（JST 4〜9 時）は `logger.info`、それ以外は `logger.error` で記録（INV-K3-MORNING）。`DEV_KABU_API_PASSWORD` 設定 + `dev_login_allowed=True` で tkinter ダイアログをスキップ（INV-K3-NO-TKINTER）。
+> - `python/engine/exchanges/kabusapi_login_dialog.py` — tkinter サブプロセス。API パスワード入力フィールド + `verify`/`prod` ラジオボタン。stdout に JSON で結果返却。`python -m engine.exchanges.kabusapi_login_dialog` で起動可能。
+> テストファイル 1 件（`test_kabusapi_login_flow.py`）を新設。
+> `uv run pytest python/tests/test_kabusapi_login_flow.py -v` → 4 passed。
+
+<!-- K4 実装メモ（2026-05-07） -->
+> **K4 実装メモ**: `kabusapi_ratelimit.py` / `kabusapi_register.py` の 2 モジュールを新設。
+> 新設ファイル:
+> - `python/engine/exchanges/kabusapi_ratelimit.py` — `TokenBucket` クラス（`async with bucket:` で 1 トークン消費）。`OrderBucket()` = 5 req/sec、`WalletBucket()` = 10 req/sec、`InfoBucket()` = 10 req/sec（INV-K4-RATELIMIT / SKILL R5）。
+> - `python/engine/exchanges/kabusapi_register.py` — `RegisterSet` クラス（`OrderedDict` ベース LRU）。`MAX_SYMBOLS = 50`（comparison.md §7 一次ソース）。`register()` で 51 件目に `KabuRegisterFullError`（暗黙 evict なし、Q-K5 決定 / U24）。`evict_lru()` で `on_evict` コールバック呼出（INV-K4-LRU-EVICT）。`RegisterSet.MAX = 50` でクラス属性公開（INV-K1-CAP）。
+> テストファイル 3 件（`test_kabusapi_ratelimit.py` / `test_kabusapi_register.py` / `test_kabusapi_capabilities.py`）を新設。
+> `uv run pytest python/tests/test_kabusapi_ratelimit.py python/tests/test_kabusapi_register.py python/tests/test_kabusapi_capabilities.py -v` → 9 passed。
+
+<!-- K5 実装メモ（2026-05-07） -->
+> **K5 実装メモ**: `kabusapi_ws.py` を新設。
+> 新設ファイル:
+> - `python/engine/exchanges/kabusapi_ws.py` — `connect()` 非同期関数。`websockets.connect(ping_interval=20, ping_timeout=10)` でループ。再接続後は `RegisterSet.all_symbols()` を `put_register` で全件再登録（U6 / INV-K5-RECONNECT-REREG）。`bytes` フレームは `decode("utf-8")` で SJIS 拒否（INV-K2-SJIS-REJECT 整合）。`ConnectionRefusedError` / `OSError` / 汎用例外いずれも連続失敗カウントに加算し、`_MAX_RECONNECT_ATTEMPTS=5` 到達で `KabuConnectionError` を raise（U22 / INV-K5-ABORT）。sleep 前に `asyncio.sleep(_RECONNECT_DELAY_S)` 呼出（モックでテスト可）。
+> テストファイル 1 件（`test_kabusapi_ws.py`）を新設。
+> `uv run pytest python/tests/test_kabusapi_ws.py -v` → 4 passed。
+
+<!-- K6 実装メモ（2026-05-07） -->
+> **K6 実装メモ**: `kabusapi_rest.py` を新設（読取専用）。
+> 新設ファイル:
+> - `python/engine/exchanges/kabusapi_rest.py` — `KabuRestClient` クラス。`fetch_board()` / `fetch_symbol()` / `fetch_orders()` / `fetch_positions()` / `fetch_wallet_cash()` / `fetch_wallet_margin()` を実装。
+> - `fetch_board()` 内で `RegisterSet.touch()` / `RegisterSet.register()` を呼び、GET /board の自動 PUSH 登録と同期（R6 / INV-K6-TOUCH）。
+> - 既存銘柄 hit なら `touch()` のみ、新規 + 満杯時は `KabuRegisterFullError`（INV-K6-REST-FULL / U24）。
+> - 情報系は `InfoBucket`（10 req/sec）、余力系は `WalletBucket`（10 req/sec）経由（R5）。
+> - 全リクエストに `X-API-KEY` ヘッダを付与（R3）。
+> - URL リテラルは `kabusapi_url.py` の `endpoint()` / `symbol_key()` のみ使用（R1）。
+> テストファイル: `python/tests/test_kabusapi_rest.py` — 3 件 passed。
+> `uv run pytest python/tests/test_kabusapi_rest.py -v` → 3 passed。
 
 **Phase 1 の非ゴール**:
 

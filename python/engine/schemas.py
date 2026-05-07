@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 17
+SCHEMA_MINOR: int = 18
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -598,7 +598,9 @@ class VenueError(IpcMessage):
     event: Literal["VenueError"] = "VenueError"
     venue: str
     request_id: str | None = None
-    code: str  # e.g. "session_expired", "unread_notices", "login_failed"
+    code: str  # e.g. "session_expired", "unread_notices", "login_failed",
+    # "token_expired" (kabuステーション: retry 1 回失敗で発火、再ログイン誘導),
+    # "local_app_down" (kabuステーション: 本体プロセス落ち / 5s×N 回 TCP refused)
     message: str
 
 

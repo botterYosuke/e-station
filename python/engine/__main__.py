@@ -73,6 +73,7 @@ async def _run(
     token: str,
     *,
     dev_tachibana_login_allowed: bool,
+    dev_kabu_login_allowed: bool = False,
     cache_dir: str | None = None,
     config_dir: str | None = None,
 ) -> None:
@@ -84,6 +85,7 @@ async def _run(
         port=port,
         token=token,
         dev_tachibana_login_allowed=dev_tachibana_login_allowed,
+        dev_kabu_login_allowed=dev_kabu_login_allowed,
         cache_dir=Path(cache_dir) if cache_dir else None,
         config_dir=Path(config_dir) if config_dir else None,
     )
@@ -128,6 +130,12 @@ def _env_dev_login_allowed() -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_dev_kabu_login_allowed() -> bool:
+    """Resolve `dev_kabu_login_allowed` from the environment (K7)."""
+    raw = os.environ.get("FLOWSURFACE_DEV_KABU_LOGIN_ALLOWED", "")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.DEBUG,
@@ -150,6 +158,7 @@ def main() -> None:
     args = _parse_args()
 
     dev_tachibana_login_allowed = False
+    dev_kabu_login_allowed = False
     cache_dir: str | None = None
     config_dir: str | None = None
 
@@ -165,6 +174,7 @@ def main() -> None:
         )
         port, token = args.port, args.token
         dev_tachibana_login_allowed = _env_dev_login_allowed()
+        dev_kabu_login_allowed = _env_dev_kabu_login_allowed()
         config_dir = getattr(args, "config_dir", None)
     else:
         # Production: receive config from Rust via stdin
@@ -173,6 +183,7 @@ def main() -> None:
         if env_port and env_token:
             port, token = int(env_port), env_token
             dev_tachibana_login_allowed = _env_dev_login_allowed()
+            dev_kabu_login_allowed = _env_dev_kabu_login_allowed()
             config_dir = getattr(args, "config_dir", None)
         else:
             # The stdin path is Rust-controlled. The flag rides the
@@ -183,6 +194,9 @@ def main() -> None:
             dev_tachibana_login_allowed = _coerce_dev_login_allowed(
                 cfg.get("dev_tachibana_login_allowed", False)
             )
+            dev_kabu_login_allowed = _coerce_dev_login_allowed(
+                cfg.get("dev_kabu_login_allowed", False)
+            )
             cache_dir = cfg.get("cache_dir")
             config_dir = cfg.get("config_dir")
 
@@ -191,6 +205,7 @@ def main() -> None:
             port,
             token,
             dev_tachibana_login_allowed=dev_tachibana_login_allowed,
+            dev_kabu_login_allowed=dev_kabu_login_allowed,
             cache_dir=cache_dir,
             config_dir=config_dir,
         )

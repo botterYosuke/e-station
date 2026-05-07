@@ -280,18 +280,22 @@ pub enum Venue {
     Mexc,
     /// 立花証券 e支店 (Japanese equities). Phase 1 is read-only; demo only.
     Tachibana,
+    /// 三菱UFJ eスマート証券（旧 auカブコム）kabuステーション API（v1.5）
+    /// Phase 1: read-only, verification env (localhost:18081) only.
+    KabuStation,
     /// Backtesting replay engine — market data emitted by Python NautilusTrader.
     Replay,
 }
 
 impl Venue {
-    pub const ALL: [Venue; 7] = [
+    pub const ALL: [Venue; 8] = [
         Venue::Bybit,
         Venue::Binance,
         Venue::Hyperliquid,
         Venue::Okex,
         Venue::Mexc,
         Venue::Tachibana,
+        Venue::KabuStation,
         Venue::Replay,
     ];
 }
@@ -308,6 +312,7 @@ impl std::fmt::Display for Venue {
                 Venue::Okex => "OKX",
                 Venue::Mexc => "MEXC",
                 Venue::Tachibana => "Tachibana",
+                Venue::KabuStation => "KabuStation",
                 Venue::Replay => "Replay",
             }
         )
@@ -330,6 +335,8 @@ impl FromStr for Venue {
             Ok(Self::Mexc)
         } else if s.eq_ignore_ascii_case("tachibana") {
             Ok(Self::Tachibana)
+        } else if s.eq_ignore_ascii_case("kabu_station") || s.eq_ignore_ascii_case("kabustation") {
+            Ok(Self::KabuStation)
         } else if s.eq_ignore_ascii_case("replay") {
             Ok(Self::Replay)
         } else {
@@ -358,6 +365,9 @@ pub enum Exchange {
     MexcSpot,
     /// 立花証券 e支店 — Tokyo Stock Exchange equities (cash & margin merged).
     TachibanaStock,
+    /// kabuステーション API — Tokyo Stock Exchange equities (Phase 1: TSE only).
+    /// Market segmentation (TSE=1/NSE=3/FSE=5/SSE=6) deferred to Phase 3.
+    KabuStationStock,
     /// Replay engine — backtesting data from NautilusTrader Python engine.
     ReplayStock,
 }
@@ -393,7 +403,7 @@ impl FromStr for Exchange {
 }
 
 impl Exchange {
-    pub const ALL: [Exchange; 16] = [
+    pub const ALL: [Exchange; 17] = [
         Exchange::BinanceLinear,
         Exchange::BinanceInverse,
         Exchange::BinanceSpot,
@@ -409,6 +419,7 @@ impl Exchange {
         Exchange::MexcInverse,
         Exchange::MexcSpot,
         Exchange::TachibanaStock,
+        Exchange::KabuStationStock,
         Exchange::ReplayStock,
     ];
 
@@ -434,7 +445,9 @@ impl Exchange {
             | Exchange::HyperliquidSpot
             | Exchange::OkexSpot
             | Exchange::MexcSpot => MarketKind::Spot,
-            Exchange::TachibanaStock | Exchange::ReplayStock => MarketKind::Stock,
+            Exchange::TachibanaStock | Exchange::KabuStationStock | Exchange::ReplayStock => {
+                MarketKind::Stock
+            }
         }
     }
 
@@ -448,6 +461,7 @@ impl Exchange {
             Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => Venue::Okex,
             Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => Venue::Mexc,
             Exchange::TachibanaStock => Venue::Tachibana,
+            Exchange::KabuStationStock => Venue::KabuStation,
             Exchange::ReplayStock => Venue::Replay,
         }
     }
@@ -457,7 +471,7 @@ impl Exchange {
     /// has no value.
     pub fn default_quote_currency(&self) -> QuoteCurrency {
         match self.venue() {
-            Venue::Tachibana | Venue::Replay => QuoteCurrency::Jpy,
+            Venue::Tachibana | Venue::KabuStation | Venue::Replay => QuoteCurrency::Jpy,
             // Crypto venues: USDT for derivatives + most spot pairs is a
             // reasonable default; the actual currency is conveyed by the
             // ticker symbol suffix (USDT/USDC/USD) which the formatter can
@@ -504,6 +518,9 @@ impl Exchange {
             // CLMMfdsGetMarketPriceHistory; sub-day timeframes are aggregated
             // client-side from FD frames in a future phase.
             Venue::Tachibana => tf == Timeframe::D1,
+            // kabuステーション: daily klines only in Phase 1 (same as Tachibana).
+            // Sub-day aggregation from PUSH frames deferred to Phase 3.
+            Venue::KabuStation => tf == Timeframe::D1,
             // Replay engine supports Daily (D1) and Minute (M1) bars from
             // NautilusTrader backtest data; sub-minute granularities are not
             // emitted as bars.
@@ -582,6 +599,45 @@ impl<I> StreamConfig<I> {
             exchange,
             tick_mltp,
             push_freq,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every Venue variant must round-trip through Display → FromStr.
+    #[test]
+    fn venue_display_fromstr_roundtrip() {
+        let venues = [
+            Venue::Bybit,
+            Venue::Binance,
+            Venue::Hyperliquid,
+            Venue::Okex,
+            Venue::Mexc,
+            Venue::Tachibana,
+            Venue::KabuStation,
+            Venue::Replay,
+        ];
+        for venue in venues {
+            let displayed = venue.to_string();
+            let parsed: Venue = displayed
+                .parse()
+                .unwrap_or_else(|e| panic!("{:?}.to_string() = {:?} failed to parse: {}", venue, displayed, e));
+            assert_eq!(venue, parsed, "round-trip failed for {:?}", venue);
+        }
+    }
+
+    /// Every Exchange variant must round-trip through Display → FromStr.
+    #[test]
+    fn exchange_display_fromstr_roundtrip() {
+        for exchange in Exchange::ALL {
+            let displayed = exchange.to_string();
+            let parsed: Exchange = displayed
+                .parse()
+                .unwrap_or_else(|e| panic!("{:?}.to_string() = {:?} failed to parse: {}", exchange, displayed, e));
+            assert_eq!(exchange, parsed, "round-trip failed for {:?}", exchange);
         }
     }
 }

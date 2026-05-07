@@ -182,4 +182,20 @@ mod tests {
             venue_capability(&caps, "tachibana", "supported_timeframes");
         assert!(matches!(v, Err(CapabilityError::Deserialize { .. })));
     }
+
+    #[test]
+    fn test_kabu_station_max_push_symbols() {
+        let caps = json!({
+            "venue_capabilities": {
+                "kabu_station": {
+                    "requires_local_app": true,
+                    "max_push_symbols": 50_i64,
+                    "supports_amend": false,
+                    "requires_trade_password_for_cancel": true
+                }
+            }
+        });
+        let v: Option<i64> = venue_capability(&caps, "kabu_station", "max_push_symbols").unwrap();
+        assert_eq!(v, Some(50));
+    }
 }

@@ -1,0 +1,53 @@
+name: KabuStation Mock Tests
+
+# K8 / K8.5: kabu venue mock tests (no real kabuStation connection required).
+# Runs on every PR and push to main. All tests use HTTPXMock / WS mock only.
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+jobs:
+    pytest-kabu-mock:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Run kabu mock tests
+              run: |
+                  uv run pytest -m demo_kabu python/tests/test_kabusapi_*.py python/tests/test_live_session_kabu.py -v
+
+    url-lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        name: K8 — URL literal lint (kabu endpoints must stay in kabusapi_url.py)
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Check no kabu URL literals outside kabusapi_url.py
+              run: |
+                  # Exclude the single-source-of-truth file itself.
+                  # Zero matches = pass.
+                  count=$(grep -rn \
+                      -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|board)' \
+                      python/engine/ \
+                      --exclude='kabusapi_url.py' \
+                      | wc -l)
+                  if [ "$count" -gt 0 ]; then
+                      echo "FAIL: kabu URL literals found outside kabusapi_url.py:"
+                      grep -rn \
+                          -E '(http|ws)://localhost:1808[01]|/kabusapi/(websocket|register|sendorder|board)' \
+                          python/engine/ \
+                          --exclude='kabusapi_url.py'
+                      exit 1
+                  fi
+                  echo "OK: zero kabu URL literals outside kabusapi_url.py"
