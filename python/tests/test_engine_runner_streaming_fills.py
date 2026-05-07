@@ -71,16 +71,37 @@ class TestStreamingFillsEmitExecutionMarker:
         """ExecutionMarker に必須フィールドが揃っており、venue など無関係なフィールドがない。"""
         events = _run_and_collect()
         markers = [e for e in events if e["event"] == "ExecutionMarker"]
-        required_keys = {"event", "strategy_id", "instrument_id", "side", "price", "qty", "ts_event_ms"}
+        required_keys = {
+            "event", "strategy_id", "instrument_id", "side", "price", "qty",
+            "ts_event_ms",
+        }
+        # schema 3.21: commission は Optional。上流が値を持たない場合は key 省略
+        optional_keys = {"commission"}
+        allowed_keys = required_keys | optional_keys
         for m in markers:
             assert required_keys.issubset(set(m.keys())), (
                 f"missing keys: {required_keys - set(m.keys())}"
             )
-            unexpected = set(m.keys()) - required_keys
+            unexpected = set(m.keys()) - allowed_keys
             assert not unexpected, (
                 f"unexpected keys: {unexpected}\n"
                 "Fix: remove extra fields from ExecutionMarker emit in engine_runner.py"
             )
+
+    def test_execution_marker_commission_when_present_is_decimal_string(self) -> None:
+        """schema 3.21: commission が marker に含まれる場合は decimal 文字列で parse 可能。
+
+        Optional 契約のため key 自体が無いケースは別経路で許容する。
+        """
+        from decimal import Decimal
+
+        events = _run_and_collect()
+        markers = [e for e in events if e["event"] == "ExecutionMarker"]
+        for m in markers:
+            if "commission" in m:
+                assert isinstance(m["commission"], str)
+                # parse できることを保証（NaN / 空文字 / 非数値が emit されない invariant）
+                Decimal(m["commission"])
 
     def test_execution_marker_qty_is_positive_decimal_string(self) -> None:
         """qty フィールドは正の decimal 文字列（注文数量）。"""

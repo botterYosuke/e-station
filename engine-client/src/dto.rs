@@ -1290,6 +1290,9 @@ pub enum EngineEvent {
         /// Filled quantity as decimal string.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         qty: Option<String>,
+        /// Commission as decimal string (schema 3.21).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commission: Option<String>,
         ts_event_ms: i64,
     },
 

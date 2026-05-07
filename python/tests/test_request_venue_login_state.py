@@ -518,11 +518,14 @@ def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
 
 
 @pytest.mark.demo_kabu
-def test_schema_minor_is_20_after_p4_3():
-    """P4-3: capabilities に is_production を追加したので SCHEMA_MINOR を 19 → 20 に bump。"""
+def test_schema_minor_is_at_least_20_after_p4_3():
+    """P4-3 以降: capabilities.is_production 追加 + fee_total (3.21) で bump 継続。
+
+    厳密一致から下限チェックに変更（後続 bump で再修正不要にするため）。
+    """
     from engine.schemas import SCHEMA_MINOR
 
-    assert SCHEMA_MINOR == 20
+    assert SCHEMA_MINOR >= 20
 
 
 @pytest.mark.demo_kabu

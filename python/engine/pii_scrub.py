@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 
 FILLS_ALLOWED_KEYS: frozenset = frozenset({
     "symbol", "side", "qty", "price", "ts", "pnl", "instrument_id",
+    "commission",  # schema 3.21+: fee_total 集計の上流。金額のみで口座情報は含まない。
 })
 EQUITY_ALLOWED_KEYS: frozenset = frozenset({
     "ts", "equity", "cash", "position", "buying_power", "strategy_id",

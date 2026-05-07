@@ -157,12 +157,57 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
 
 ---
 
-## Stage D — `fee_total` 実装完了後に解禁
+## Stage D — ✅ `fee_total` 実装完了（2026-05-07）。gRPC 移行解禁
 
 > **`fee_total` とは**: `python/engine/summary.py` のリプレイサマリに手数料合計（`fee_total`）を追加する機能。
-> 現在の fills.jsonl にはリプレイ約定に commission フィールドが存在しないため未実装（summary.py:18 の Out of scope コメント参照）。
-> fills.jsonl の上流スキーマ変更（replay fill event に commission フィールド追加）と IPC スキーマ変更が必要。
-> gRPC 移行（Stage D）は IPC スキーマ全体を proto 化する大変更なので、fee_total のスキーマ変更を先に確定させてから proto 化する順序とする。
+> 2026-05-07 完了。実装スコープは **replay summary 用途のみ**。live 経路の commission end-to-end 配線
+> （OrderFilled wire schema 拡張）は Stage D 後の別チケットへ繰越。
+
+### ✅ fee_total 完了内容（2026-05-07, レビューループ R1-R3）
+
+- **schema 3.20 → 3.21 bump** — `ExecutionMarker.commission: Optional[str]` 追加（schemas.py / dto.rs / lib.rs 同期）
+- **replay 経路** — `engine_runner.py` で nautilus `OrderFilled.commission` (Money) を `as_decimal()` 経由で decimal 文字列化。抽出失敗時は WARN ログ + str() フォールバック多段ガード
+- **live 経路** — `narrative_hook.py` で dict-form の commission を伝搬（実配線は `OrderFilled` wire 拡張待ち、scope-out として明記）
+- **wire 契約** — replay/live とも commission 不明時は marker dict から key を省略（schema Optional に整合、`skip_serializing_if = "Option::is_none"`）
+- **PII allow-list 同期** — `python/engine/pii_scrub.py` + `🐃_blacksheep/scripts/pii_scrub.py` の FILLS_ALLOWED_KEYS に commission 追加（parity test 通過）
+- **集計** — `summary.py::compute_summary()` に `fee_total: float` 出力。空文字 commission は upstream missing sentinel として silent 0 扱い、非数値は WARN ログ + 0 扱い
+- **docstring 契約** — fee_total の単位（account currency）/ 符号（rebate は負値保持）/ 欠落・非数値の扱い / 税は upstream-defined を明記
+- **schema_minor 履歴整合** — Rust `lib.rs` 履歴コメントに 16 番欠番を明文化、Python `schemas.py` には Rust を source of truth とする参照コメント
+- **新規/更新テスト** — pytest +12 件 (test_summary.py 5、test_execution_marker_emit.py 2、test_run_buffer_writer.py 1、Rust schema_v2_4_nautilus.rs 2、schema pin 緩和 2)。Python 全件 2185 passed / 5 skipped、Rust engine-client 全件緑
+
+### レビュー反映 (2026-05-07, ラウンド 1-3)
+
+**ラウンド 1（5 並列：silent / general / ws / rust + pytest 全体）**
+- CRIT-1 (general): 🐃_blacksheep/scripts/pii_scrub.py の `FILLS_ALLOWED_KEYS` parity を同期
+- CRIT-2 (pytest 発見): SCHEMA_MINOR pin 2 件（test_request_venue_login_state.py / test_schemas_nautilus.py）を `==` から `>=` 緩和
+- HIGH-1 (silent): commission 抽出を portfolio 更新 outer except から独立化、`as_decimal()` 失敗時に汎用 Exception キャッチ + WARN + str() 多段フォールバック
+- HIGH-2 (silent + general): replay の `"0"` デフォルト廃止 → live 経路と統一して **不明時は key 省略**（schema Optional 準拠）
+- HIGH-3 (general): `test_engine_runner_streaming_fills` の `required_keys` から commission を分離し `optional_keys` で表現
+- HIGH-4 (general): legacy fills.jsonl 後方互換テスト追加（全行 commission 無し → fee_total=0）
+- HIGH-5 (general): summary.py docstring に fee_total の単位/符号契約を明文化
+- MED 群: 非数値 WARN ログ追加 / Rust dto Some+Zero deserialize テスト / SCHEMA_MINOR 履歴 16 欠番コメント / negative・empty テスト追加 / pii_scrub コメント
+
+**ラウンド 2（2 並列：silent + general crosscheck）**
+- MED-1 (silent): `commission_str: str | None` をアノテのみ → `= None` で初期化必須化（UnboundLocalError silent drop ガード）
+- MED-2 (silent + general): 空文字 commission の WARN ノイズを除外（`raw_commission not in (None, "")`）
+- MED-3 (general): live 経路の commission 配線が wire schema 上で未配線である事実を docstring に明示し、本フェーズスコープを「replay summary」に限定
+- MED-4 (general): 計画書 Stage D に本ブロック追記
+- MED-5 (general): EngineEvent は Deserialize 専用のため Rust 側 serialize テストは不可。ロジックを deserialize 側で担保する旨をコメントで明記
+- LOW-1 (silent): test_run_buffer_writer に commission e2e テスト追加
+
+**ラウンド 3（1 体：silent サニティ）**
+- MED-1: engine_runner の `if commission_raw is None: commission_str = None` 重複代入を `is not None` 単純条件に整理
+- LOW (false positive 棄却): test_summary.py に `\` 構文エラー指摘 → 実コードは `tmp_path / "..."` で正しい（pytest 緑、CRLF 表示の誤読）
+- 残存 LOW: なし
+
+**繰越（Stage D 後の別チケット）**
+- `OrderFilled` wire schema (schemas.py / dto.rs) への commission フィールド追加 → live 経路 fee_total 動作開始
+- `_read_jsonl` の JSONDecodeError silent skip ログ化（fee_total 以前から効く既存挙動、cross-cutting）
+- summary.py の float→Decimal 移行（total_pnl/max_drawdown も float、本変更スコープ外の cross-cutting design）
+
+---
+
+> ### gRPC 移行（解禁済み）
 
 **G0: `proto/engine.proto` + ビルドパイプライン（1〜2 日）**
 - 既存 `commands.json` / `events.json` から proto 変換
@@ -240,9 +285,9 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
                                               ├─[C2 S2+S3 smoke整理]────────────── ✅ 完了
                                               └─[C3 Canvas境界]─────────────────── ✅ 完了
                                                               │
-                                              fee_total 完了 ─┤  ← 未実装（凍結中）
+                                              fee_total 完了 ─┤  ← ✅ 完了（2026-05-07, R1-R3 収束）
                                                               │
-                                                              └─[G0→G0.5→G0.9→G1→G2→G3]► 凍結中
+                                                              └─[G0→G0.5→G0.9→G1→G2→G3]► 解禁
 ```
 
 ---
@@ -285,11 +330,12 @@ ipc-grpc-migration      G0 → G0.5 → G0.9 → G1 → G2 → G3   最後（fee
    - worker → adapter model → mapper → wire DTO → outbox のパスを実際に wire-up する
    - `test_server_adapter_integration.py` 統合テストが必要
 
-5. **fee_total 実装**（Stage D 解禁のゲート）
-   - fills.jsonl への commission フィールド追加（上流スキーマ変更）
-   - `summary.py` への `fee_total` 集計追加
-   - IPC スキーマ（`schemas.py` + `events.json`）への commission フィールド追加
+5. ~~**fee_total 実装**（Stage D 解禁のゲート）~~ — ✅ 2026-05-07 完了
+   - ExecutionMarker.commission 追加（schema 3.20→3.21）
+   - replay 経路で nautilus `OrderFilled.commission` を decimal 文字列化
+   - `summary.py::compute_summary()` に `fee_total` 出力
+   - blacksheep parity 同期（FILLS_ALLOWED_KEYS）
 
-### 凍結中
+### 解禁済み
 
-- **Stage D (G0〜G3)**: `fee_total` 実装完了まで着手禁止
+- **Stage D (G0〜G3)**: 着手可能（fee_total 完了済み）

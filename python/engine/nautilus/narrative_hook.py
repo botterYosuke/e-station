@@ -98,6 +98,15 @@ def _emit_execution_marker(
             "price": str(price),
             "ts_event_ms": ts_event_ms,
         }
+        # schema 3.21: 上流 dict が commission を持っていれば伝搬する（live 経路）。
+        # ただし現状 OrderFilled wire schema (schemas.py の OrderFilled) には commission
+        # フィールドが無いため、live 経路の commission は **常に dict に入らない**。
+        # 結果として live ExecutionMarker は commission キーを持たず、
+        # live fee_total は 0 のまま。fee_total の live 対応は OrderFilled wire 拡張を
+        # 伴う別チケット（Stage D 後）で対応する。replay summary 用途のみ動作する。
+        commission = event.get("commission")
+        if commission is not None:
+            marker["commission"] = str(commission)
         on_event(marker)
     except Exception as exc:  # noqa: BLE001
         log.warning("narrative_hook: emit ExecutionMarker failed — %s", exc)

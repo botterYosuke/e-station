@@ -9,8 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
+# SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
+# 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 20
+SCHEMA_MINOR: int = 21
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -857,6 +859,7 @@ class ExecutionMarker(IpcMessage):
     side: str  # "BUY" | "SELL"
     price: str  # decimal string
     qty: str | None = None  # filled quantity as decimal string (added N1.13 Step A+)
+    commission: str | None = None  # commission as decimal string (schema 3.21)
     ts_event_ms: int
 
 

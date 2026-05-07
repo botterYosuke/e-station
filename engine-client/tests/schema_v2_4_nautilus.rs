@@ -39,10 +39,11 @@ fn schema_minor_matches_current_bump() {
     // schema 3.18: K1 Venue::KabuStation / Exchange::KabuStationStock 追加。
     // schema 3.19: P3-1 Exchange::KabuStation* 市場細分化 + 先物・OP バリアント追加。
     // schema 3.20: P4-3 venue_capabilities.kabu_station に is_production フィールド追加。
+    // schema 3.21: ExecutionMarker.commission 追加（fee_total 集計の上流）。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        20,
-        "SCHEMA_MINOR must be 20 after P4-3 (venue_capabilities.kabu_station.is_production)"
+        21,
+        "SCHEMA_MINOR must be 21 after fee_total (ExecutionMarker.commission)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -478,6 +479,7 @@ fn execution_marker_deserializes() {
             side,
             price,
             qty,
+            commission,
             ts_event_ms,
         } => {
             assert_eq!(strategy_id, "buy-and-hold-001");
@@ -486,6 +488,64 @@ fn execution_marker_deserializes() {
             assert_eq!(price, "1500.0");
             assert_eq!(ts_event_ms, 1_700_000_000_010);
             assert!(qty.is_none(), "qty absent in JSON must deserialize as None");
+            assert!(
+                commission.is_none(),
+                "commission absent in JSON must deserialize as None"
+            );
+        }
+        other => panic!("expected ExecutionMarker, got {other:?}"),
+    }
+}
+
+#[test]
+fn execution_marker_deserializes_with_commission() {
+    // schema 3.21: commission Some ケース。decimal 文字列を欠落なく Option<String> に載せる。
+    let json = r#"{
+        "event": "ExecutionMarker",
+        "strategy_id": "buy-and-hold-001",
+        "instrument_id": "1301.TSE",
+        "side": "BUY",
+        "price": "1500.0",
+        "qty": "100",
+        "commission": "59.25",
+        "ts_event_ms": 1700000000010
+    }"#;
+    let ev: EngineEvent = serde_json::from_str(json).expect("must deserialize");
+    match ev {
+        EngineEvent::ExecutionMarker {
+            commission, qty, ..
+        } => {
+            assert_eq!(commission.as_deref(), Some("59.25"));
+            assert_eq!(qty.as_deref(), Some("100"));
+        }
+        other => panic!("expected ExecutionMarker, got {other:?}"),
+    }
+}
+
+// NOTE: schema 3.21 では `EngineEvent` は Deserialize 専用 (Rust 側は wire を
+// 読むだけで書かない) のため、`skip_serializing_if = "Option::is_none"` 属性は
+// 機能的に inert。serialize 側 invariant の単体テストは書けない代わりに、
+// 「commission 欠落 JSON が deserialize で None になる」を `execution_marker_deserializes`
+// で担保する。Python 側 (engine_runner.py / narrative_hook.py) で marker dict から
+// commission キーを omit する設計を採用しているのは、Rust 側を read-only に保ったままの
+// wire-format 互換を確保するため。
+
+#[test]
+fn execution_marker_deserializes_with_zero_commission() {
+    // ゼロ手数料免除のケース。Some("0") と None を取り違えない invariant。
+    let json = r#"{
+        "event": "ExecutionMarker",
+        "strategy_id": "s",
+        "instrument_id": "1301.TSE",
+        "side": "SELL",
+        "price": "1500.0",
+        "commission": "0",
+        "ts_event_ms": 1700000000010
+    }"#;
+    let ev: EngineEvent = serde_json::from_str(json).expect("must deserialize");
+    match ev {
+        EngineEvent::ExecutionMarker { commission, .. } => {
+            assert_eq!(commission.as_deref(), Some("0"));
         }
         other => panic!("expected ExecutionMarker, got {other:?}"),
     }

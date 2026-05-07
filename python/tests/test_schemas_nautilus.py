@@ -40,7 +40,8 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # kabu venue Phase 1: SCHEMA_MINOR を 17 → 18 に bump
     # kabu venue Phase 2: SCHEMA_MINOR を 18 → 19 に bump (発注経路 + RATE_LIMITED / UNSUPPORTED_INSTRUMENT reason_code)
     # kabu venue Phase 4 (P4-3): SCHEMA_MINOR を 19 → 20 に bump (venue_capabilities.kabu_station.is_production)
-    assert s.SCHEMA_MINOR == 20
+    # fee_total: SCHEMA_MINOR を 20 → 21 に bump (ExecutionMarker.commission 追加)
+    assert s.SCHEMA_MINOR >= 21
     assert s.SCHEMA_MAJOR == 3
 
 

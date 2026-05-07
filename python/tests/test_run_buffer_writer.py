@@ -81,6 +81,31 @@ def test_write_fills_event(tmp_path: Path) -> None:
     assert "event" not in rows[0]
 
 
+def test_write_fills_event_with_commission(tmp_path: Path) -> None:
+    """schema 3.21+: commission キーが pii_scrub 後も fills.jsonl に保持される。
+
+    fee_total 集計の上流確認: engine_runner → run_buffer → fills.jsonl → summary
+    の中継点が wire-format を保つことを pin。FILLS_ALLOWED_KEYS から
+    commission が誤って外されると本テストが FAIL する。
+    """
+    rb = _make_run_buffer(tmp_path)
+    evt = {
+        "event": "ExecutionMarker",
+        "strategy_id": "user-strategy",
+        "instrument_id": "1301.TSE",
+        "side": "BUY",
+        "price": "2500.0",
+        "qty": "100",
+        "commission": "59.25",
+        "ts_event_ms": 1714800123000,
+    }
+    rb.write_event(evt)
+
+    rows = _read_jsonl(rb.run_dir / "fills.jsonl")
+    assert len(rows) == 1
+    assert rows[0].get("commission") == "59.25"
+
+
 # ---------------------------------------------------------------------------
 # test 2: ReplayBuyingPower を write_event → equity.jsonl に書かれる
 # ---------------------------------------------------------------------------
