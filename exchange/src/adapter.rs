@@ -622,9 +622,12 @@ mod tests {
         ];
         for venue in venues {
             let displayed = venue.to_string();
-            let parsed: Venue = displayed
-                .parse()
-                .unwrap_or_else(|e| panic!("{:?}.to_string() = {:?} failed to parse: {}", venue, displayed, e));
+            let parsed: Venue = displayed.parse().unwrap_or_else(|e| {
+                panic!(
+                    "{:?}.to_string() = {:?} failed to parse: {}",
+                    venue, displayed, e
+                )
+            });
             assert_eq!(venue, parsed, "round-trip failed for {:?}", venue);
         }
     }
@@ -634,9 +637,12 @@ mod tests {
     fn exchange_display_fromstr_roundtrip() {
         for exchange in Exchange::ALL {
             let displayed = exchange.to_string();
-            let parsed: Exchange = displayed
-                .parse()
-                .unwrap_or_else(|e| panic!("{:?}.to_string() = {:?} failed to parse: {}", exchange, displayed, e));
+            let parsed: Exchange = displayed.parse().unwrap_or_else(|e| {
+                panic!(
+                    "{:?}.to_string() = {:?} failed to parse: {}",
+                    exchange, displayed, e
+                )
+            });
             assert_eq!(exchange, parsed, "round-trip failed for {:?}", exchange);
         }
     }

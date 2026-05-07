@@ -225,3 +225,150 @@ K8.5 (CI): K2〜K7 完了後
 - モック: `pytest-httpx` (HTTPXMock) + WebSocket mock
 - CI: `.github/workflows/kabu-mock.yml` / `pytest -m demo_kabu`
 - 本物 kabuステーション: Windows 環境のみ、CI 不可
+
+---
+
+## R1 レビュー反映（2026-05-07）
+
+Phase 1 実装後の R1 レビュー指摘 4 件を TDD で修正した。
+
+### HIGH-1 修正: kabu_station capabilities が Ready handshake に広告されない
+
+**原因**: `_build_ready()` が `_workers.keys()` のみから venue_caps を組み立てており、
+`kabu_station` は `_workers` に含まれないため capabilities に現れなかった。
+
+**修正**:
+- `server.py` の venue_caps 組立ブロック後に `kabu_station` capabilities を直接追記
+- `supported_venues` に `"kabu_station"` を追加 (`list(self._workers.keys()) + ["kabu_station"]`)
+- `architecture.md §8` の JSON に一致する 4 フィールドを設定
+- `RegisterSet.MAX` を参照して `max_push_symbols` と `RegisterSet.MAX` の一致を保証
+
+**追加テスト**:
+- `test_request_venue_login_state.py::test_kabu_ready_capabilities_include_kabu_station`
+
+---
+
+### HIGH-2 修正: ログインキャンセルが VenueError{local_app_down} に化ける
+
+**原因**: `kabusapi_login_flow.py` がキャンセル時に `KabuConnectionError` を raise し、
+`server.py` の `except KabuConnectionError` が一律 `VenueError{local_app_down}` に変換していた。
+
+**修正**:
+- `kabusapi_auth.py` に `KabuLoginCancelledError(KabuApiError)` を追加
+- `kabusapi_login_flow.py:73` を `KabuLoginCancelledError` に変更
+- `server.py` の `_startup_kabu_station()` に `except KabuConnectionError` の前に
+  `except KabuLoginCancelledError` を追加 → `VenueLoginCancelled` を emit して return
+- `server.py` の import に `KabuLoginCancelledError` を追加
+
+**追加テスト**:
+- `test_kabusapi_login_flow.py::test_dialog_cancel_raises_kabu_login_cancelled_error`
+- `test_kabusapi_login_flow.py::test_dialog_cancel_is_not_kabu_connection_error`
+- `test_request_venue_login_state.py::test_startup_kabu_station_cancel_emits_venue_login_cancelled`
+
+---
+
+### MEDIUM-3 修正: CONNECTED 状態で kabu 切替時の tachibana 後始末が不完全
+
+**原因**: kabu の CONNECTED → re-login 分岐で `_kabu_venue.clear()` だけ実施し、
+tachibana の `_event_task` / `_tachibana_session` / worker session のクリアを行っていなかった。
+
+**修正**:
+- `server.py:3158` の kabu CONNECTED 分岐に、`_connected_venue == "tachibana"` の場合の
+  後始末を追加: `_event_task.cancel()` / `_tachibana_session = None` /
+  `_workers["tachibana"].set_session(None)` / `tachibana_clear_session(self._cache_dir)`
+- `_connected_venue = None` を追加
+
+**追加テスト**:
+- `test_request_venue_login_state.py::test_kabu_relogin_from_tachibana_connected_cancels_event_task`
+
+---
+
+### MEDIUM-4 修正: LiveSession.login() に venue 引数がない
+
+**原因**: `replay_session.py:1407` の `login()` シグネチャに `venue` 引数がなく、
+`implementation-plan.md:144` の `login(venue="kabu_station")` 完了条件を満たせない。
+
+**修正**:
+- `replay_session.py:1407` に `venue: str | None = None` を追加
+- `venue is not None` の場合は `self._venue` を上書きする（明示引数で venue を選択可能に）
+- `test_live_session_kabu.py:121` を `s.login(venue="kabu_station")` に変更
+
+**追加テスト**:
+- `test_live_session_kabu.py::test_login_venue_fallback_from_init`（venue 省略時のフォールバック）
+- `test_live_session_kabu.py::test_login_explicit_venue_overrides_init_venue`（明示引数で上書き）
+
+---
+
+### 検証結果
+
+```
+uv run pytest python/tests/test_live_session_kabu.py python/tests/test_kabusapi_login_flow.py python/tests/test_request_venue_login_state.py -v
+16 passed in 11.57s
+
+uv run pytest python/tests/ -q --tb=no
+2015 passed, 5 skipped in 218.88s
+```
+
+---
+
+## R2 レビュー反映 (2026-05-07, ラウンド 2)
+
+### HIGH-A: `_login_attach()` が `VenueLoginCancelled` を無視して 30 秒ハング
+
+**問題**: `_login_attach()` のイベントループが `VenueLoginCancelled` を無視し、30 秒 timeout まで待機していた。
+
+**修正**: `python/engine/replay_session.py` の `_login_attach()` に `VenueLoginCancelled` ハンドリングを追加。
+受信時に即座に `ConnectionError("LiveSession.login: login cancelled by user ...")` を raise する。
+
+**追加テスト**: `python/tests/test_live_session_kabu.py::test_login_kabu_station_raises_on_venue_login_cancelled`
+- `VenueLoginCancelled` 受信時に `ConnectionError` が raise されること
+- 30 秒待機せず 5 秒以内に raise されること
+
+---
+
+### HIGH-B: `test_tcp_refused_three_retries_then_local_app_down` が CI でハング
+
+**問題**: `dev_login_allowed=True` を渡しているが `DEV_KABU_API_PASSWORD` を設定していないため、`_spawn_dialog()` が呼ばれ CI でハングする。
+
+**修正**: `python/tests/test_kabusapi_login_flow.py` の `test_tcp_refused_three_retries_then_local_app_down` に `monkeypatch` パラメータと `monkeypatch.setenv("DEV_KABU_API_PASSWORD", "test_pass")` を追加。
+
+---
+
+### MEDIUM-A: R1 追加テスト 3 件の `@pytest.mark.demo_kabu` 未付与 + CI 未登録
+
+**問題**: R1 追加テスト 3 件に `@pytest.mark.demo_kabu` マーカーがなく、CI の `kabu-mock.yml` にも `test_request_venue_login_state.py` が含まれていなかった。
+
+**修正**:
+1. `python/tests/test_request_venue_login_state.py` に `import pytest` を追加し、以下の 3 関数に `@pytest.mark.demo_kabu` を付与:
+   - `test_startup_kabu_station_cancel_emits_venue_login_cancelled`
+   - `test_kabu_ready_capabilities_include_kabu_station`
+   - `test_kabu_relogin_from_tachibana_connected_cancels_event_task`
+2. `.github/workflows/kabu-mock.yml` の pytest コマンドに `python/tests/test_request_venue_login_state.py` を追加。
+
+---
+
+### MEDIUM-B: `venue` 上書きが `_logged_in` no-op ガードより前に実行される
+
+**問題**: `login(venue="other")` 呼び出し時、`_logged_in=True` の no-op パスでも `self._venue` が永続変更されていた（M-GP5 違反）。
+
+**修正**: `python/engine/replay_session.py` の `login()` で `self._venue = venue` の上書きを `if self._logged_in: ... return` ガードの **後**（実際の login 処理の直前）に移動。
+
+**追加テスト**: `python/tests/test_live_session_kabu.py::test_venue_not_overridden_when_already_logged_in`
+- `_logged_in=True` の状態で `login(venue="tachibana")` を呼んでも `self._venue` が `"kabu_station"` のまま
+
+---
+
+### MEDIUM-C: `_kabu_startup_task` が完了後 None リセットされない
+
+**問題**: `_startup_kabu_station()` が完了しても `self._kabu_startup_task` が done タスクへの stale 参照を保持し続けていた。
+
+**修正**: `python/engine/server.py` の `_startup_kabu_station()` を `try/finally` でラップし、`finally` ブロックで `self._kabu_startup_task = None` を実行。成功・キャンセル・エラー全パスでリセットされる。
+
+---
+
+### 検証結果 (R2)
+
+```
+uv run pytest python/tests/test_live_session_kabu.py python/tests/test_kabusapi_login_flow.py python/tests/test_request_venue_login_state.py -v
+18 passed in 1.28s
+```

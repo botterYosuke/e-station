@@ -1192,22 +1192,32 @@ class NautilusRunner:
                 "ts_event_ms": int(_time.time() * 1000),
             })
 
-            # Bridge threads 起動（live_bridges が存在する場合）
+            # live_bridges モジュール存在確認のみ（thread 起動は node.build() 後）
             try:
                 from engine.nautilus.live_bridges import LiveDataBridge, LiveEcBridge
-                data_bridge = LiveDataBridge(data_client, fd_queue, instrument_id, stop_event)
-                ec_bridge = LiveEcBridge(event_bridge, ec_queue, stop_event)
-                t_data = _threading.Thread(target=data_bridge.run, daemon=True)
-                t_ec = _threading.Thread(target=ec_bridge.run, daemon=True)
-                t_data.start()
-                t_ec.start()
-                _bridge_threads = [t_data, t_ec]
+                _have_bridges = True
             except ImportError:
-                _bridge_threads = []
+                _have_bridges = False
+
+            _bridge_threads: list[_threading.Thread] = []
 
             try:
-                # TradingNode ビルドと実行
+                # TradingNode ビルドと実行（_connect() 内で data_client._loop が確定する）
                 node.build()
+
+                # node.build() 完了後にブリッジを起動する。
+                # build() 内の _connect() で data_client._loop が asyncio.get_running_loop()
+                # に確定するため、ここまで待つ必要がある。
+                # event_bridge._loop は自動設定されないので明示的に注入する。
+                if _have_bridges:
+                    event_bridge._loop = _asyncio.get_running_loop()
+                    data_bridge = LiveDataBridge(data_client, fd_queue, instrument_id, stop_event)
+                    ec_bridge = LiveEcBridge(event_bridge, ec_queue, stop_event)
+                    t_data = _threading.Thread(target=data_bridge.run, daemon=True)
+                    t_ec = _threading.Thread(target=ec_bridge.run, daemon=True)
+                    t_data.start()
+                    t_ec.start()
+                    _bridge_threads = [t_data, t_ec]
                 # stop_event を監視しながらグレースフルシャットダウン
                 loop = _asyncio.get_event_loop()
                 node_task: _asyncio.Task | None = None
@@ -1251,6 +1261,7 @@ class NautilusRunner:
                     "event": "EngineStopped",
                     "strategy_id": strategy_id,
                     "final_equity": "0",
+                    "ts_event_ms": int(_time.time() * 1000),
                 })
 
         _asyncio.run(_run_node())

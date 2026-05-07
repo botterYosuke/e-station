@@ -15,7 +15,7 @@ import os
 import sys
 from asyncio import subprocess as aio_subprocess
 
-from engine.exchanges.kabusapi_auth import KabuConnectionError, fetch_token
+from engine.exchanges.kabusapi_auth import KabuConnectionError, KabuLoginCancelledError, fetch_token
 from engine.exchanges.kabusapi_url import KabuEnv
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ async def startup_login(
         # tkinter ダイアログで収集
         result = await _spawn_dialog()
         if result.get("status") != "ok":
-            raise KabuConnectionError(0, "Login cancelled by user")
+            raise KabuLoginCancelledError(0, "Login cancelled by user")
         api_password = result["api_password"]
         env = result.get("env", env)
 

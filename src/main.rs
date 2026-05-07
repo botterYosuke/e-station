@@ -600,6 +600,8 @@ fn cached_venue_is_ready(venue: &str) -> bool {
 /// future rename or IPC schema change is a one-line patch instead of
 /// a cross-file grep.
 const TACHIBANA_VENUE_NAME: &str = "tachibana";
+/// Wire-level identifier for the kabuステーション venue.
+const KABU_STATION_VENUE_NAME: &str = "kabu_station";
 
 /// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
 /// Referenced during initial setup and on every engine reconnect.
@@ -614,6 +616,10 @@ const VENUE_NAMES: &[(exchange::adapter::Venue, &str)] = &[
     (exchange::adapter::Venue::Okex, "okex"),
     (exchange::adapter::Venue::Mexc, "mexc"),
     (exchange::adapter::Venue::Tachibana, TACHIBANA_VENUE_NAME),
+    (
+        exchange::adapter::Venue::KabuStation,
+        KABU_STATION_VENUE_NAME,
+    ),
     (exchange::adapter::Venue::Replay, "replay"),
 ];
 
@@ -1029,6 +1035,9 @@ struct Flowsurface {
     /// flag with a single enum so illegal combinations are
     /// unrepresentable. T35-U4-VenueReadyGate.
     tachibana_state: VenueState,
+    /// kabuステーション venue lifecycle state — same FSM as `tachibana_state`
+    /// but kabu has no sidebar ticker filter and no GetBuyingPower.
+    kabu_state: VenueState,
     /// 第二暗証番号 modal。`SecondPasswordRequired` IPC イベントで Some に、
     /// Submit / Cancel / Dismiss で None に戻る。
     second_password_modal: Option<modal::second_password::SecondPasswordModal>,
@@ -1137,6 +1146,12 @@ enum Message {
     /// the user knows their click did not silently disappear.
     /// Review-fixes 2026-04-26 round 1.
     TachibanaLoginIpcResult(Result<(), String>),
+    /// kabuステーション venue lifecycle event (mirrors `TachibanaVenueEvent`).
+    KabuVenueEvent(VenueEvent),
+    /// User requested kabuステーション login from the footer chip.
+    RequestKabuLogin(Trigger),
+    /// Result of the `Command::RequestVenueLogin { venue: "kabu_station" }` IPC send.
+    KabuLoginIpcResult(Result<(), String>),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -1455,6 +1470,7 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
             // until the next `VenueReady`. Reviewer 2026-04-26 R3
             // (HIGH-1).
             yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
+            yield Message::KabuVenueEvent(VenueEvent::EngineRehello);
             yield Message::EngineConnected(conn);
         }
         let initial_restart = { *restart_rx.borrow_and_update() };
@@ -1494,6 +1510,7 @@ fn engine_status_stream() -> impl iced::futures::Stream<Item = Message> + Send +
                         // EngineConnected handler refetches
                         // (T35-U4-StartupGate / R3 HIGH-1).
                         yield Message::TachibanaVenueEvent(VenueEvent::EngineRehello);
+                        yield Message::KabuVenueEvent(VenueEvent::EngineRehello);
                         yield Message::EngineConnected(conn);
                     }
                 }
@@ -1556,6 +1573,28 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         } if venue == TACHIBANA_VENUE_NAME => {
             let class = engine_client::error::classify_venue_error(&code);
             Some(Message::TachibanaVenueEvent(VenueEvent::LoginError {
+                class,
+                message,
+                market_closed: code == "market_closed",
+            }))
+        }
+        EngineEvent::VenueReady { venue, .. } if venue == KABU_STATION_VENUE_NAME => {
+            Some(Message::KabuVenueEvent(VenueEvent::Ready))
+        }
+        EngineEvent::VenueLoginStarted { venue, .. } if venue == KABU_STATION_VENUE_NAME => {
+            Some(Message::KabuVenueEvent(VenueEvent::LoginStarted))
+        }
+        EngineEvent::VenueLoginCancelled { venue, .. } if venue == KABU_STATION_VENUE_NAME => {
+            Some(Message::KabuVenueEvent(VenueEvent::LoginCancelled))
+        }
+        EngineEvent::VenueError {
+            venue,
+            code,
+            message,
+            ..
+        } if venue == KABU_STATION_VENUE_NAME => {
+            let class = engine_client::error::classify_venue_error(&code);
+            Some(Message::KabuVenueEvent(VenueEvent::LoginError {
                 class,
                 message,
                 market_closed: code == "market_closed",
@@ -1817,10 +1856,65 @@ fn status_bar_dot_color(is_replay: bool) -> iced::Color {
 const STATUS_BAR_HEIGHT: u32 = 20;
 const STATUS_BAR_BG: iced::Color = iced::Color::from_rgb(0.08, 0.08, 0.08);
 
+fn venue_login_chip(
+    label: &'static str,
+    state: VenueState,
+    on_press: Message,
+) -> Element<'static, Message> {
+    let (dot, dot_color, btn_label) = match &state {
+        VenueState::Idle => ("○", iced::Color::from_rgb(0.5, 0.5, 0.5), "ログイン"),
+        VenueState::LoginInFlight => ("⟳", iced::Color::from_rgb(0.9, 0.6, 0.1), ""),
+        VenueState::Ready => ("●", iced::Color::from_rgb(0.2, 0.75, 0.3), "再ログイン"),
+        VenueState::Error { .. } => ("●", iced::Color::from_rgb(0.9, 0.2, 0.2), "再ログイン"),
+    };
+
+    let chip_label = text(format!("{label} {dot}")).size(11).color(dot_color);
+
+    let in_flight = matches!(state, VenueState::LoginInFlight);
+
+    // LoginInFlight 時はラベルのみ（ボタンテキストなし）
+    let row_content: Element<'static, Message> = if in_flight {
+        row![chip_label].align_y(Alignment::Center).into()
+    } else {
+        row![chip_label, text(format!(" {btn_label}")).size(11),]
+            .align_y(Alignment::Center)
+            .into()
+    };
+
+    let btn = button(row_content)
+        .padding(padding::left(6).right(6))
+        .style(move |_theme, status| {
+            use iced::widget::button::{Status, Style};
+            // LoginInFlight 時はホバーエフェクトを抑制
+            if in_flight {
+                return Style::default();
+            }
+            Style {
+                background: match status {
+                    Status::Hovered | Status::Pressed => Some(iced::Background::Color(
+                        iced::Color::from_rgba(1.0, 1.0, 1.0, 0.06),
+                    )),
+                    _ => None,
+                },
+                ..Style::default()
+            }
+        });
+
+    if in_flight {
+        btn.into()
+    } else {
+        btn.on_press(on_press).into()
+    }
+}
+
 // 'static: ModeToggleState contains only AppMode (Copy) and &'static str / bool —
 // no lifetime-bearing references. The button message and tooltip content are also
 // 'static, so the returned Element<'static, Message> bound is satisfied.
-fn status_bar(state: crate::menu::ModeToggleState) -> Element<'static, Message> {
+fn status_bar(
+    state: crate::menu::ModeToggleState,
+    tachibana: VenueState,
+    kabu: VenueState,
+) -> Element<'static, Message> {
     use engine_client::dto::AppMode;
 
     let is_replay = state.current == AppMode::Replay;
@@ -1878,18 +1972,33 @@ fn status_bar(state: crate::menu::ModeToggleState) -> Element<'static, Message> 
         badge.into()
     };
 
-    let content = tooltip(badge_el, tip, TooltipPosition::Top);
+    let mode_badge_el = tooltip(badge_el, tip, TooltipPosition::Top);
 
-    container(content)
-        .width(iced::Length::Fill)
-        .height(STATUS_BAR_HEIGHT)
+    let tachibana_chip = venue_login_chip(
+        "立花",
+        tachibana,
+        Message::RequestTachibanaLogin(Trigger::Manual),
+    );
+    let kabu_chip = venue_login_chip("kabu", kabu, Message::RequestKabuLogin(Trigger::Manual));
+
+    container(
+        row![
+            tachibana_chip,
+            kabu_chip,
+            iced::widget::Space::new().width(iced::Length::Fill),
+            mode_badge_el,
+        ]
         .align_y(Alignment::Center)
-        .style(|_| container::Style {
-            background: Some(STATUS_BAR_BG.into()),
-            snap: true,
-            ..Default::default()
-        })
-        .into()
+        .height(STATUS_BAR_HEIGHT),
+    )
+    .width(iced::Length::Fill)
+    .height(STATUS_BAR_HEIGHT)
+    .style(|_| container::Style {
+        background: Some(STATUS_BAR_BG.into()),
+        snap: true,
+        ..Default::default()
+    })
+    .into()
 }
 
 /// Wrap `content` in a `confirm_dialog` overlay when one is set.
@@ -2025,6 +2134,7 @@ impl Flowsurface {
             engine_connection: initial_conn,
             engine_manager,
             tachibana_state: VenueState::Idle,
+            kabu_state: VenueState::Idle,
             second_password_modal: None,
             buying_power_request_id: None,
             order_list_request_id: None,
@@ -2230,6 +2340,9 @@ impl Flowsurface {
                     VenueEvent::Ready => {
                         log::info!("tachibana: VenueReady — venue is now authenticated");
                     }
+                    VenueEvent::EngineRehello => {
+                        log::info!("tachibana: EngineRehello — state reset to Idle");
+                    }
                     _ => {}
                 }
 
@@ -2370,6 +2483,165 @@ impl Flowsurface {
                     .chain(auto_fetch_orders)
                     .chain(auto_fetch_positions);
             }
+            Message::RequestKabuLogin(trigger) => {
+                log::info!("RequestKabuLogin trigger={trigger:?}");
+                let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                    log::warn!(
+                        "RequestKabuLogin({trigger:?}) ignored — engine connection unavailable"
+                    );
+                    if matches!(trigger, Trigger::Manual) {
+                        self.notifications.push(Toast::error(
+                            "kabuログイン要求を送信できません — エンジン未接続".to_string(),
+                        ));
+                    }
+                    return Task::none();
+                };
+                if !self.kabu_state.try_claim_login_in_flight() {
+                    log::debug!("RequestKabuLogin({trigger:?}) ignored — login already in flight");
+                    return Task::none();
+                }
+                return Task::perform(
+                    async move {
+                        let request_id = uuid::Uuid::new_v4().to_string();
+                        conn.send(engine_client::dto::Command::RequestVenueLogin {
+                            request_id,
+                            venue: KABU_STATION_VENUE_NAME.to_string(),
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                    },
+                    Message::KabuLoginIpcResult,
+                );
+            }
+            Message::KabuLoginIpcResult(result) => match result {
+                Ok(()) => {
+                    log::debug!("kabu RequestVenueLogin IPC sent");
+                }
+                Err(err) => {
+                    log::warn!("kabu RequestVenueLogin IPC failed: {err}");
+                    self.notifications.push(Toast::error(format!(
+                        "kabuログイン要求の送信に失敗しました: {err}"
+                    )));
+                    // FSM の next() を意図的に迂回して直接 Idle に戻す。
+                    // IPC 送信が失敗した時点でエンジンには RequestVenueLogin が届いておらず、
+                    // VenueLoginStarted も来ない。LoginCancelled は「ユーザー操作でキャンセル」の
+                    // セマンティクスなので流用せず、ここで直接代入する。
+                    if self.kabu_state.is_login_in_flight() {
+                        self.kabu_state = VenueState::Idle;
+                    }
+                }
+            },
+            Message::KabuVenueEvent(event) => {
+                match &event {
+                    VenueEvent::LoginStarted => {
+                        self.notifications.push(Toast::info(
+                            "kabuログインダイアログを起動しました".to_string(),
+                        ));
+                    }
+                    VenueEvent::LoginCancelled => {
+                        self.notifications.push(Toast::warn(
+                            "kabuログインがキャンセルされました".to_string(),
+                        ));
+                    }
+                    VenueEvent::Ready => {
+                        log::info!("kabu: VenueReady — venue is now authenticated");
+                    }
+                    VenueEvent::LoginError { message, .. } => {
+                        log::warn!("kabu: VenueLoginError — {message}");
+                        self.notifications
+                            .push(Toast::error(format!("kabuログインエラー: {message}")));
+                    }
+                    VenueEvent::EngineRehello => {
+                        log::info!("kabu: EngineRehello — state reset to Idle");
+                    }
+                    VenueEvent::Dismissed => {}
+                }
+
+                let old_state = std::mem::replace(&mut self.kabu_state, VenueState::Idle);
+                let needs_bump =
+                    old_state.is_login_in_flight() || matches!(old_state, VenueState::Error { .. });
+                let next = old_state.next(event);
+                let is_ready = next.is_ready();
+                self.kabu_state = next;
+
+                if needs_bump && is_ready {
+                    self.handles.bump_generation();
+                    log::info!("kabu: session established — restarting subscriptions (gen bumped)");
+                }
+
+                let main_window = self.main_window.id;
+
+                // Auto-fetch order list on venue ready if a pane is visible.
+                let auto_fetch_orders = if is_ready
+                    && self.order_list_request_id.is_none()
+                    && self.active_dashboard().has_order_list_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        let req_id = uuid::Uuid::new_v4().to_string();
+                        self.order_list_request_id = Some(req_id.clone());
+                        self.active_dashboard_mut()
+                            .distribute_order_list_loading(main_window, true);
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetOrderList {
+                                    request_id: req_id,
+                                    venue: KABU_STATION_VENUE_NAME.to_string(),
+                                    filter: engine_client::dto::OrderListFilter {
+                                        status: None,
+                                        instrument_id: None,
+                                        date: None,
+                                    },
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            Message::OrderListSendCompleted,
+                        )
+                    } else {
+                        Task::none()
+                    }
+                } else {
+                    Task::none()
+                };
+
+                // Auto-fetch positions on venue ready if a pane is visible.
+                let auto_fetch_positions = if is_ready
+                    && self.positions_request_id.is_none()
+                    && self.active_dashboard().has_positions_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        let req_id = uuid::Uuid::new_v4().to_string();
+                        self.positions_request_id = Some(req_id.clone());
+                        self.active_dashboard_mut()
+                            .distribute_positions_loading(main_window, true);
+                        let req_id_for_err = req_id.clone();
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetPositions {
+                                    request_id: req_id,
+                                    venue: KABU_STATION_VENUE_NAME.to_string(),
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            move |res| match res {
+                                Ok(()) => Message::PositionsSendCompleted(Ok(())),
+                                Err(err) => Message::IpcError {
+                                    request_id: Some(req_id_for_err),
+                                    code: "send_failed".to_string(),
+                                    message: err,
+                                },
+                            },
+                        )
+                    } else {
+                        Task::none()
+                    }
+                } else {
+                    Task::none()
+                };
+
+                return auto_fetch_orders.chain(auto_fetch_positions);
+            }
             Message::EngineConnected(conn) => {
                 let was_restarting = self.engine_restarting;
                 self.engine_connection = Some(Arc::clone(&conn));
@@ -2470,13 +2742,36 @@ impl Flowsurface {
                     .as_ref()
                     .is_some_and(|m| m.try_is_venue_ready(TACHIBANA_VENUE_NAME));
                 let is_ready_from_bridge = cached_venue_is_ready(TACHIBANA_VENUE_NAME);
-                if (is_ready_from_manager || is_ready_from_bridge)
+                let tachibana_synthetic = if (is_ready_from_manager || is_ready_from_bridge)
                     && !self.tachibana_state.is_ready()
                 {
-                    return Task::batch(vec![
-                        sidebar_refetch,
-                        Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready)),
-                    ]);
+                    Some(Task::done(Message::TachibanaVenueEvent(VenueEvent::Ready)))
+                } else {
+                    None
+                };
+
+                let is_kabu_ready_from_manager = self
+                    .engine_manager
+                    .as_ref()
+                    .is_some_and(|m| m.try_is_venue_ready(KABU_STATION_VENUE_NAME));
+                let is_kabu_ready_from_bridge = cached_venue_is_ready(KABU_STATION_VENUE_NAME);
+                let kabu_synthetic = if (is_kabu_ready_from_manager || is_kabu_ready_from_bridge)
+                    && !self.kabu_state.is_ready()
+                {
+                    Some(Task::done(Message::KabuVenueEvent(VenueEvent::Ready)))
+                } else {
+                    None
+                };
+
+                let extras = [tachibana_synthetic, kabu_synthetic];
+                let has_extras = extras.iter().any(Option::is_some);
+                if has_extras {
+                    return Task::batch(
+                        std::iter::once(Some(sidebar_refetch))
+                            .chain(extras)
+                            .flatten()
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 return sidebar_refetch;
             }
@@ -5666,7 +5961,11 @@ impl Flowsurface {
                 self.engine_busy,
                 self.mode_switch_state.is_some(),
             );
-            base = base.push(status_bar(mode_toggle));
+            base = base.push(status_bar(
+                mode_toggle,
+                self.tachibana_state.clone(),
+                self.kabu_state.clone(),
+            ));
 
             let view_result = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
@@ -6476,8 +6775,16 @@ impl Flowsurface {
         } else {
             Task::none()
         };
+        let kabu_bootstrap = if cached_venue_is_ready(KABU_STATION_VENUE_NAME) {
+            Task::done(Message::KabuVenueEvent(VenueEvent::Ready))
+        } else {
+            Task::none()
+        };
 
-        close_windows.chain(init_task).chain(venue_bootstrap)
+        close_windows
+            .chain(init_task)
+            .chain(venue_bootstrap)
+            .chain(kabu_bootstrap)
     }
 }
 

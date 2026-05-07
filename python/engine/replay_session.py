@@ -1404,7 +1404,7 @@ class LiveSession:
     # Public API
     # ------------------------------------------------------------------
 
-    def login(self, *, user_id: str | None = None, password: str | None = None) -> None:
+    def login(self, *, user_id: str | None = None, password: str | None = None, venue: str | None = None) -> None:
         """ログインする。
 
         - in-process mode: 引数または ``DEV_TACHIBANA_*`` env から credential を
@@ -1420,6 +1420,9 @@ class LiveSession:
         Args:
             user_id: ユーザー ID。明示しない場合は env から解決 (in-process のみ)。
             password: パスワード。明示しない場合は env から解決 (in-process のみ)。
+            venue: venue 識別子 (例: ``"kabu_station"``、``"tachibana"``)。
+                明示した場合は ``__init__`` の ``venue`` を上書きする。
+                省略時は ``__init__`` の ``venue`` をフォールバックとして使う。
 
         Raises:
             ValueError: cred が引数でも env でも解決できない場合 (in-process)、
@@ -1447,6 +1450,12 @@ class LiveSession:
                     )
             log.debug("LiveSession.login: already logged in — no-op")
             return
+
+        # MEDIUM-B: venue 引数が渡された場合は self._venue を上書きする (MEDIUM-4)。
+        # _logged_in ガードの後に置くことで、no-op パスでは副作用ゼロを保証する。
+        # (M-GP5: is_logged_in=True なら副作用ゼロで return)
+        if venue is not None:
+            self._venue = venue
 
         # C-GP4: attach mode は engine に RequestVenueLogin を送って待つ。
         if self._mode == "attach":
@@ -1596,6 +1605,15 @@ class LiveSession:
                 raise BusyError(
                     f"EngineBusy: state={got.get('current_state')!r} "
                     f"cmd={got.get('attempted_command')!r}"
+                )
+            # HIGH-A: VenueLoginCancelled を受信したら即座に ConnectionError を raise する。
+            # kabu ダイアログキャンセル時に server.py が VenueLoginCancelled を emit するため、
+            # ここで捕捉しないと 30 秒 timeout まで待機してしまう。
+            if event == "VenueLoginCancelled" and (
+                evt_request_id == request_id or evt_request_id is None
+            ):
+                raise ConnectionError(
+                    f"LiveSession.login: login cancelled by user (venue={self._venue!r})"
                 )
             # 他 event (VenueLoginStarted / 他 client 由来の Error 等) は無視して続行。
 

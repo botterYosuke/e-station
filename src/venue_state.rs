@@ -1,4 +1,4 @@
-//! Tachibana venue lifecycle state machine.
+//! Venue lifecycle state machine（立花・kabu 共用）.
 //!
 //! Replaces the earlier `tachibana_ready: bool + tachibana_login_in_flight: bool`
 //! double-flag with a single enum so illegal combinations

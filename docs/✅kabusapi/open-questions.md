@@ -24,6 +24,15 @@ Phase 0 出口時点で未確定の事項をまとめる。解消次第、ここ
 
 ## Phase 2 着手前に確定必要な項目
 
-- **DEV_KABU_TRADE_PASSWORD** の env 名予約（Phase 2 着手前に確定、取引パスワード env）
-- 発注時の取引パスワード収集 UI（tkinter subprocess 方式確定済み、UI 設計は Phase 2）
+- **DEV_KABU_TRADE_PASSWORD** の env 名予約（Phase 2 着手前に確定、取引パスワード env）✅ 確定・設定済み
+- 発注時の取引パスワード収集 UI（tkinter subprocess 方式確定済み、UI 設計は Phase 2）✅ 確定
 - `OrderAmendFailed.original_cancelled` を `Option<bool>` 化（`None` = 取消結果不確定）
+
+## Phase 2 設計決定済み
+
+| # | 論点 | 決定 |
+| :-- | :--- | :--- |
+| Q-P2-1 | 取引パスワード収集タイミング | **セッション開始時 1 回**（立花の `TachibanaSessionHolder` と同じ設計）。発注ごとに毎回聞かない |
+| Q-P2-2 | 取引パスワードの保持方式 | メモリのみ。30 分 idle で自動クリア。3 回連続誤入力で 30 分 lockout（立花踏襲） |
+| Q-P2-3 | DEV_KABU_TRADE_PASSWORD env | 設定時は tkinter ダイアログをスキップ（DEV_KABU_API_PASSWORD と同じ流儀） |
+| Q-P2-4 | 取引パスワード保持クラス名 | `KabuTradePasswordHolder`（`TachibanaSessionHolder` の kabu 版） |

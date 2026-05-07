@@ -33,9 +33,16 @@ fn fn_body(src: &str, fn_start: usize) -> &str {
 #[test]
 fn tt5_status_bar_body_contains_bar_message_pick() {
     let src = read_main();
-    let start = src
-        .find("fn status_bar(state: crate::menu::ModeToggleState)")
-        .expect("status_bar must accept ModeToggleState");
+    let start = src.find("fn status_bar(").expect("status_bar must exist");
+    // Verify the signature contains ModeToggleState (even if split across lines)
+    let sig_end = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .unwrap_or(src.len());
+    assert!(
+        src[start..sig_end].contains("crate::menu::ModeToggleState"),
+        "status_bar must accept ModeToggleState"
+    );
     let body = fn_body(&src, start);
 
     assert!(

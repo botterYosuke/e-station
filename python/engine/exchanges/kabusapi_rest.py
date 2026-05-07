@@ -1,11 +1,9 @@
-"""kabuステーション REST API ラッパー（Phase 1: 読取のみ）。
+"""kabuステーション REST API ラッパー（読取専用）。
 
 R4: Symbol は {symbol}@{exchange} 複合キー形式。
 R5: 流量制限 bucket 経由でリクエスト。
 R6: GET /board は内部的に PUSH 登録を自動発火するため、fetch_board() で
     RegisterSet.touch() を必ず呼ぶ（新規 + 満杯時は KabuRegisterFullError）。
-
-Phase 2 以降: sendorder / cancelorder 等の発注系は実装しない。
 """
 from __future__ import annotations
 
@@ -14,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from engine.exchanges.kabusapi_auth import KabuRegisterFullError, check_response
+from engine.exchanges.kabusapi_auth import check_response
 from engine.exchanges.kabusapi_register import RegisterSet
 from engine.exchanges.kabusapi_ratelimit import InfoBucket, WalletBucket, TokenBucket
 from engine.exchanges.kabusapi_url import KabuEnv, endpoint, symbol_key

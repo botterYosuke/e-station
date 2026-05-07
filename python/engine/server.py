@@ -45,7 +45,7 @@ from engine.exchanges.tachibana_login_flow import (
     _MSG_LOGIN_FAILED,
 )
 from engine.exchanges.kabusapi import KabuStationVenue
-from engine.exchanges.kabusapi_auth import KabuConnectionError as KabuConnectionError
+from engine.exchanges.kabusapi_auth import KabuConnectionError as KabuConnectionError, KabuLoginCancelledError
 from engine.exchanges.binance import BinanceWorker
 from engine.exchanges.bybit import BybitWorker
 from engine.exchanges.hyperliquid import HyperliquidWorker
@@ -830,13 +830,22 @@ class DataEngineServer:
             if caps:
                 venue_caps[venue] = caps
 
+        # Phase 1: kabu_station は _workers に含まれないため capabilities を直接追記
+        from engine.exchanges.kabusapi_register import RegisterSet as _KabuRegisterSet
+        venue_caps["kabu_station"] = {
+            "requires_local_app": True,
+            "max_push_symbols": _KabuRegisterSet.MAX,  # architecture.md §8: 50 と一致を保証
+            "supports_amend": False,
+            "requires_trade_password_for_cancel": True,
+        }
+
         ready = Ready(
             schema_major=SCHEMA_MAJOR,
             schema_minor=SCHEMA_MINOR,
             engine_version=_ENGINE_VERSION,
             engine_session_id=self._engine_session_id,
             capabilities={
-                "supported_venues": list(self._workers.keys()),
+                "supported_venues": list(self._workers.keys()) + ["kabu_station"],
                 "supports_bulk_trades": True,
                 "supports_depth_binary": False,
                 "venue_capabilities": venue_caps,
@@ -2952,50 +2961,64 @@ class DataEngineServer:
 
         Emits VenueLoginStarted → VenueReady / VenueError to outbox.
         """
-        async with self._kabu_login_inflight:
-            self._emit({
-                "event": "VenueLoginStarted",
-                "venue": "kabu_station",
-                "request_id": request_id,
-            })
-            try:
-                if self._kabu_venue is None:
-                    self._kabu_venue = KabuStationVenue(
-                        env="verify",
-                        dev_login_allowed=self._dev_kabu_login_allowed,
-                    )
-                await self._kabu_venue.startup_login()
-            except KabuConnectionError as exc:
-                log.error("_startup_kabu_station: local_app_down: %s", exc)
-                self._live_state = LiveState.DISCONNECTED
+        try:
+            async with self._kabu_login_inflight:
                 self._emit({
-                    "event": "VenueError",
+                    "event": "VenueLoginStarted",
                     "venue": "kabu_station",
                     "request_id": request_id,
-                    "code": "local_app_down",
-                    "message": str(exc),
                 })
-                return
-            except Exception as exc:
-                log.exception("_startup_kabu_station: login failed: %s", exc)
-                self._live_state = LiveState.DISCONNECTED
-                self._emit({
-                    "event": "VenueError",
-                    "venue": "kabu_station",
-                    "request_id": request_id,
-                    "code": "login_failed",
-                    "message": str(exc),
-                })
-                return
+                try:
+                    if self._kabu_venue is None:
+                        self._kabu_venue = KabuStationVenue(
+                            env="verify",
+                            dev_login_allowed=self._dev_kabu_login_allowed,
+                        )
+                    await self._kabu_venue.startup_login()
+                except KabuLoginCancelledError:
+                    log.info("_startup_kabu_station: login cancelled by user")
+                    self._live_state = LiveState.DISCONNECTED
+                    self._emit({
+                        "event": "VenueLoginCancelled",
+                        "venue": "kabu_station",
+                        "request_id": request_id,
+                    })
+                    return
+                except KabuConnectionError as exc:
+                    log.error("_startup_kabu_station: local_app_down: %s", exc)
+                    self._live_state = LiveState.DISCONNECTED
+                    self._emit({
+                        "event": "VenueError",
+                        "venue": "kabu_station",
+                        "request_id": request_id,
+                        "code": "local_app_down",
+                        "message": str(exc),
+                    })
+                    return
+                except Exception as exc:
+                    log.exception("_startup_kabu_station: login failed: %s", exc)
+                    self._live_state = LiveState.DISCONNECTED
+                    self._emit({
+                        "event": "VenueError",
+                        "venue": "kabu_station",
+                        "request_id": request_id,
+                        "code": "login_failed",
+                        "message": str(exc),
+                    })
+                    return
 
-            self._live_state = LiveState.CONNECTED
-            self._connected_venue = "kabu_station"
-            log.info("KabuStation session established successfully")
-            self._emit({
-                "event": "VenueReady",
-                "venue": "kabu_station",
-                "request_id": request_id,
-            })
+                self._live_state = LiveState.CONNECTED
+                self._connected_venue = "kabu_station"
+                log.info("KabuStation session established successfully")
+                self._emit({
+                    "event": "VenueReady",
+                    "venue": "kabu_station",
+                    "request_id": request_id,
+                })
+        finally:
+            # MEDIUM-C: 完了後（成功・キャンセル・エラー全パス）に stale 参照をリセットする。
+            # disconnect 時の cleanup が done タスクに対して cancel を試みないよう None にする。
+            self._kabu_startup_task = None
 
     async def _run_event_loop(self, url: str) -> None:
         """EVENT WebSocket に接続して EC 約定通知の受信ループを実行する（Phase O2）。
@@ -3133,15 +3156,23 @@ class DataEngineServer:
             return
 
         if venue == "kabu_station":
-            if self._live_state == LiveState.CONNECTING:
+            if self._live_state == LiveState.CONNECTING and self._kabu_login_inflight.locked():
                 log.info("RequestVenueLogin(kabu_station): login already in-progress (CONNECTING)")
                 self._emit({"event": "VenueLoginStarted", "venue": "kabu_station", "request_id": request_id})
                 return
             if self._live_state == LiveState.CONNECTED:
                 log.info("RequestVenueLogin(kabu_station): re-login requested while CONNECTED — clearing session")
                 self._live_state = LiveState.DISCONNECTED
+                # tachibana 接続中なら旧 EVENT WS と session もクリア (M3)
+                if self._connected_venue == "tachibana":
+                    if self._event_task is not None and not self._event_task.done():
+                        self._event_task.cancel()
+                    self._tachibana_session = None
+                    self._workers["tachibana"].set_session(None)
+                    tachibana_clear_session(self._cache_dir)
                 if self._kabu_venue is not None:
                     self._kabu_venue.clear()
+                self._connected_venue = None
             if self._kabu_login_inflight.locked():
                 log.info("RequestVenueLogin(kabu_station): login already in-flight")
                 self._emit({"event": "VenueLoginStarted", "venue": "kabu_station", "request_id": request_id})

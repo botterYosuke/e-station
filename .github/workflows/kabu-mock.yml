@@ -23,7 +23,7 @@ jobs:
 
             - name: Run kabu mock tests
               run: |
-                  uv run pytest -m demo_kabu python/tests/test_kabusapi_*.py python/tests/test_live_session_kabu.py -v
+                  uv run pytest -m demo_kabu python/tests/test_kabusapi_*.py python/tests/test_live_session_kabu.py python/tests/test_request_venue_login_state.py -v
 
     url-lint:
         runs-on: ubuntu-latest

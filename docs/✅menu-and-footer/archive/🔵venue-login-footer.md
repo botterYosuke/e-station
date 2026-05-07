@@ -36,7 +36,7 @@ kabu も同じ規則。ラベルは `立花` → `kabu`。
 
 ## Rust 側変更一覧
 
-### 1. `src/main.rs` — 定数
+### ✅ 1. `src/main.rs` — 定数
 
 ```rust
 const KABU_STATION_VENUE_NAME: &str = "kabu_station";
@@ -46,7 +46,7 @@ const KABU_STATION_VENUE_NAME: &str = "kabu_station";
 
 ---
 
-### 2. `src/main.rs` — `Flowsurface` フィールド
+### ✅ 2. `src/main.rs` — `Flowsurface` フィールド
 
 ```rust
 tachibana_state: VenueState,   // 既存
@@ -55,7 +55,7 @@ kabu_state: VenueState,        // 追加
 
 ---
 
-### 3. `src/main.rs` — `Message` バリアント
+### ✅ 3. `src/main.rs` — `Message` バリアント
 
 Tachibana の 3 バリアントをそのままミラー:
 
@@ -67,7 +67,7 @@ KabuLoginIpcResult(Result<(), String>),
 
 ---
 
-### 4. `src/main.rs` — `map_engine_event_to_message()`
+### ✅ 4. `src/main.rs` — `map_engine_event_to_message()`
 
 Tachibana のルーティングに続けて `kabu_station` 用を追加:
 
@@ -86,7 +86,7 @@ EngineEvent::VenueError { venue, code, message, .. } if venue == KABU_STATION_VE
 
 ---
 
-### 5. `src/main.rs` — `engine_status_stream()`
+### ✅ 5. `src/main.rs` — `engine_status_stream()`
 
 `EngineConnected` を yield する 2 箇所（初回起動・再接続）で
 `TachibanaVenueEvent(EngineRehello)` の直後に追加:
@@ -99,7 +99,7 @@ yield Message::EngineConnected(conn);
 
 ---
 
-### 6. `src/main.rs` — `Flowsurface::new()` 初期化
+### ✅ 6. `src/main.rs` — `Flowsurface::new()` 初期化
 
 ```rust
 tachibana_state: VenueState::Idle,   // 既存
@@ -108,7 +108,7 @@ kabu_state: VenueState::Idle,        // 追加
 
 ---
 
-### 7. `src/main.rs` — `update()` ハンドラ
+### ✅ 7. `src/main.rs` — `update()` ハンドラ
 
 Tachibana の 3 ハンドラをそのままコピーし、
 フィールド名・venue 名・ログメッセージだけ差し替える。
@@ -129,7 +129,7 @@ kabu の Ready 遷移も market data 再購読のトリガーになるため必�
 
 ---
 
-### 8. `src/main.rs` — `restart()`
+### ✅ 8. `src/main.rs` — `restart()`
 
 Tachibana の venue_bootstrap と同様に kabu も復元:
 
@@ -144,7 +144,7 @@ close_windows.chain(init_task).chain(venue_bootstrap).chain(kabu_bootstrap)
 
 ---
 
-### 9. `src/main.rs` — `status_bar()` シグネチャ変更
+### ✅ 9. `src/main.rs` — `status_bar()` シグネチャ変更
 
 ```rust
 fn status_bar(
@@ -188,7 +188,7 @@ fn venue_login_chip(
 
 ---
 
-### 10. `src/main.rs` — `EngineConnected` ハンドラ
+### ✅ 10. `src/main.rs` — `EngineConnected` ハンドラ
 
 `Message::EngineConnected` の処理末尾（`src/main.rs:2471-2483` 付近）で、
 Tachibana の ready 合成ブロックと対称に kabu を追加する。
@@ -265,3 +265,64 @@ match (tachibana_synthetic, kabu_synthetic) {
 
 このタスクは **UI + Rust FSM 配線のみ**。Python 側の `kabusapi_login_flow.py` 完成は前提にしない。
 Rust 側を先行マージしてよい（IPC を送っても Python がまだ応答しなければ `LoginInFlight` のまま止まるだけ）。
+
+---
+
+## 実装ログ
+
+### 2026-05-07 — §1〜§10 完了 (cargo check/clippy/fmt/test すべて緑)
+
+**実装した変更点:**
+- `src/venue_state.rs`: モジュールコメントを「立花・kabu 共用」に更新
+- `src/main.rs`:
+  - §1: `KABU_STATION_VENUE_NAME` 定数は既存で存在していた
+  - §2〜§10: 全セクション実装完了
+  - `venue_login_chip()` ローカル関数を `status_bar()` の直前に追加
+  - `status_bar()` シグネチャを `(state, tachibana, kabu)` の 3 引数に変更
+
+**設計判断・Tips:**
+
+1. **`iced::widget::horizontal_space()` は存在しない** — プロジェクト内では `Space::new().width(Length::Fill)` を使う
+
+2. **`EngineConnected` ハンドラの `match (t, k)` パターンは所有権で詰まる** — `Option<Task<_>>` は Copy でないため `match (tachibana_synthetic, kabu_synthetic)` でアームに移動した後に再利用できない。代わりに `[t, k]` 配列を作り `.any(Option::is_some)` で分岐してから flatten する方式に変更
+
+3. **既存テスト `tt5_status_bar_body_contains_bar_message_pick`** — `fn status_bar(state: crate::menu::ModeToggleState)` を文字列検索していた。引数が複数行に展開されたため、シグネチャ全体を検索するのではなく `fn status_bar(` 位置を起点にブロック内で `ModeToggleState` 検索する方式に更新
+
+4. **`multiinst_replay_pane_routing.rs` の 8000 バイト固定スライス** — main.rs の `─` 等の多バイト UTF-8 文字がオフセット 8000 に当たって panic。`safe_window()` helper で char boundary を探して安全にスライスするよう修正
+
+5. **kabu FSM テスト (テスト 1・2)** — `flowsurface` はバイナリクレートなので統合テストから `VenueState` を直接参照できない。`main.rs` 末尾に `#[cfg(test)] mod kabu_fsm_tests` を追加して内部テストとして実装
+
+6. **`GetBuyingPower` は `KabuVenueEvent` ハンドラに含めない** — 計画書通り。立花と共用の `VenueState` FSM を使うが、kabu は buying power 非対応
+
+7. **`set_tachibana_ready()` は kabu ハンドラで呼ばない** — kabu はサイドバーのティッカーテーブルフィルタを持たない
+
+**最終確認（実装直後 R0）:**
+- `cargo check --workspace` ✅
+- `cargo clippy --workspace -- -D warnings` ✅
+- `cargo fmt --check` ✅
+- `cargo test --workspace` ✅（272 unit + 統合テスト全通過）
+
+---
+
+### 2026-05-07 — review-fix-loop R1〜R3 完了
+
+**R1 指摘（HIGH 1 / MEDIUM 2）修正済み:**
+- H1: `venue_login_chip` が `LoginInFlight` 時も空テキストウィジェットを生成 → `in_flight` フラグで row_content を条件分岐、ホバースタイルも抑制
+- M2: `handler_body_str` がインデント依存（`\n            Message::` 境界検索）→ ブレースカウント方式に変更
+- M3: `KabuVenueEvent` の `LoginError` / `EngineRehello` がサイレント（log/Toast なし）→ 明示的アームに `log::warn!` / `log::info!` + `Toast::error` 追加
+
+**R2 指摘（HIGH 1 / MEDIUM 1）修正済み:**
+- HIGH-1: Tachibana `EngineRehello` ハンドラに log がない（kabu との非対称）→ `log::info!` 追加
+- MEDIUM-2: kabu_footer_badge テストが `\nfn ` 境界依存 → `fn_body_brace()` helper（ブレースカウント）を追加し 3 テストを移行
+
+**R3 指摘（HIGH 1 / MEDIUM 2）修正済み:**
+- HIGH: `KabuVenueEvent` ハンドラの `_ => {}` ワイルドカード → `VenueEvent::Dismissed => {}` に明示化
+- MEDIUM: `VENUE_NAMES` 配列で `"kabu_station"` ハードコード → `KABU_STATION_VENUE_NAME` 定数を参照に変更
+- MEDIUM: `fn_body_brace` と `handler_body_str` にブレーススキャンが重複 → 共通関数 `scan_brace_body()` に抽出
+
+**R3 後最終確認:**
+- `cargo check --workspace` ✅
+- `cargo clippy --workspace -- -D warnings` ✅
+- `cargo fmt --check` ✅
+- `cargo test --workspace` ✅（全スイート 0 failed）
+- MEDIUM+ 指摘ゼロ → review-fix-loop 収束

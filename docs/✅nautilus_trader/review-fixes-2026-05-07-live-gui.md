@@ -29,3 +29,14 @@ target: docs/✅nautilus_trader/🔵live-strategy-gui.md
 |---|---|---|---|---|
 | F05 | HIGH | 受け入れ条件 8 | `EngineStopped{strategy_id: "live-strategy"}` リテラルが UUID 化後も残存。実装者が固定文字列でテストする誤解を招く | `strategy_id: "<session-uuid>"` に変更し「UUID が live_strategy_id と一致する場合のみ」を明記 |
 | F06 | MEDIUM | テスト戦略 LG-12〜15 | Phase 6 前提条件「Python engine が strategy_id をエコーバック」に対応するテスト ID なし | LG-16 を追加（server.py/engine_runner.py のソース確認テスト） |
+
+## ラウンド 3（2026-05-07）
+
+### Finding 一覧
+
+| ID | 重要度 | 対象 | 問題 | 修正概要 |
+|---|---|---|---|---|
+| F07 | HIGH | 実装順序 Phase 9 | Phase 9 全体を「独立先行可能」としているが widget_menu_bar.rs のシグネチャ変更（9b）は main.rs の全呼び出し箇所と同時更新が必要でビルドが壊れる | Phase 9 を 9a（menu_bar_state.rs データ定義のみ・独立可）と 9b+9c（シグネチャ変更＋呼び出し更新・同一コミット必須）に分割し依存グラフ更新 |
+| F08 | HIGH | Phase 7 / Phase 8 コード | `Message::Nothing` は存在しない。実際の enum 値は `Message::Noop` | `Message::Nothing` → `Message::Noop` に全修正 |
+| F09 | MEDIUM | Phase 7 コード | `.expect("engine_connection must be Some...")` は接続断時にパニック。replay フォームと設計が異なる | `if let Some(conn) = self.engine_connection.as_ref().cloned()` ガードに変更 |
+| F10 | MEDIUM | Phase 7 / Phase 8 コード | StartEngine / StopEngine の send 失敗をサイレントに握り潰している（`\|_\| Message::Noop`）。replay フォームはトースト表示する | `map_err(\|e\| e.to_string())` + `Message::OrderToast(Toast::error(...))` パターンに統一 |
