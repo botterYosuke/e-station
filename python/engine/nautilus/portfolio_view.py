@@ -75,9 +75,34 @@ class PortfolioView:
         return self._cash + mtm
 
     def _restore_from_dict(self, d: dict) -> None:
-        """Restore _cash from snapshot dict; positions are cleared (not serialized in dict)."""
+        """Restore state from a snapshot dict.
+
+        Handles two formats:
+        - portfolio_state dict (full): {"cash": str, "positions": {...}, "last_prices": {...}}
+        - IPC event dict (summary only): {"cash": str, ...} — positions are cleared.
+        """
         self._cash = Decimal(str(d.get("cash", str(self._cash))))
         self._positions.clear()
+        for inst, pos_data in d.get("positions", {}).items():
+            self._positions[inst] = {
+                "qty": Decimal(str(pos_data["qty"])),
+                "cost": Decimal(str(pos_data["cost"])),
+            }
+
+    def to_snapshot_dict(self, last_prices: "dict | None" = None) -> dict:
+        """Serialize full portfolio state for runner-side restoration.
+
+        Format: {"cash": str, "positions": {inst: {qty, cost}}, "last_prices": {inst: str}}
+        Different from to_ipc_dict() which produces the ReplayBuyingPower UI event.
+        """
+        return {
+            "cash": str(self._cash),
+            "positions": {
+                inst: {"qty": str(pos["qty"]), "cost": str(pos["cost"])}
+                for inst, pos in self._positions.items()
+            },
+            "last_prices": {k: str(v) for k, v in (last_prices or {}).items()},
+        }
 
     def to_ipc_dict(
         self,

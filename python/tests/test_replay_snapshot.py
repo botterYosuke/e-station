@@ -458,3 +458,117 @@ class TestStrategyStateRestore:
 
         # push 自体はホルダーを書き換えない
         assert srv._restore_strategy_holder[0] == {"old": True}  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# HIGH-2: StepBackward 後に portfolio_state が _restore_portfolio_holder に入ること
+# ---------------------------------------------------------------------------
+
+
+def _make_full_portfolio(cash: str, positions: dict | None = None) -> dict:
+    """portfolio_state dict（to_snapshot_dict() 形式）を生成する。"""
+    return {
+        "cash": cash,
+        "positions": positions or {},
+        "last_prices": {},
+    }
+
+
+class TestPortfolioStateRestore:
+    def test_step_backward_stores_portfolio_state_in_holder(self) -> None:
+        """StepBackward 後に _restore_portfolio_holder[0] に portfolio_state が入ること。"""
+        import asyncio
+
+        srv = _make_server()
+        srv._replay_state = ReplayState.PAUSED
+        srv._replay_paused = True
+
+        pstate0 = _make_full_portfolio("1000000", positions={"1301.TSE": {"qty": "100", "cost": "300000"}})
+        pstate1 = _make_full_portfolio("900000", positions={})
+
+        portfolio_ipc0 = {
+            "event": "ReplayBuyingPower", "strategy_id": "s",
+            "cash": "1000000", "buying_power": "1000000", "equity": "1000000",
+            "ts_event_ms": 1700000000000,
+        }
+        portfolio_ipc1 = {**portfolio_ipc0, "cash": "900000", "buying_power": "900000", "equity": "900000"}
+
+        srv._push_replay_snapshot(0, portfolio_ipc0, [], {}, [], portfolio_state=pstate0)
+        srv._push_replay_snapshot(1, portfolio_ipc1, [], {}, [], portfolio_state=pstate1)
+
+        ws = _make_ws()
+        srv._outbox.add_conn(ws)
+        asyncio.run(srv._dispatch("StepBackward", {"op": "StepBackward", "request_id": "req"}, ws))
+
+        holder = srv._restore_portfolio_holder  # type: ignore[attr-defined]
+        assert holder[0] is not None, "_restore_portfolio_holder[0] must be set after StepBackward"
+        assert holder[0]["cash"] == "1000000", "restored portfolio_state must reflect step_0 cash"
+        assert "1301.TSE" in holder[0]["positions"], "positions must be present in restored state"
+
+    def test_step_backward_without_portfolio_state_does_not_set_holder(self) -> None:
+        """portfolio_state 未設定のスナップショットでは _restore_portfolio_holder が None のまま。"""
+        import asyncio
+
+        srv = _make_server()
+        srv._replay_state = ReplayState.PAUSED
+        srv._replay_paused = True
+
+        srv._push_replay_snapshot(0, _make_portfolio("1000000"), [], {}, [])
+        srv._push_replay_snapshot(1, _make_portfolio("1001000"), [], {}, [])
+
+        ws = _make_ws()
+        srv._outbox.add_conn(ws)
+        asyncio.run(srv._dispatch("StepBackward", {"op": "StepBackward", "request_id": "req"}, ws))
+
+        holder = srv._restore_portfolio_holder  # type: ignore[attr-defined]
+        assert holder[0] is None, "portfolio_state が空なら holder は None のまま"
+
+    def test_restore_from_dict_with_positions_restores_positions(self) -> None:
+        """_restore_from_dict が positions キーを含む dict から positions を復元すること。"""
+        from decimal import Decimal
+        from engine.nautilus.portfolio_view import PortfolioView
+
+        pv = PortfolioView(Decimal("2000000"))
+        pv.on_fill("1301.TSE", "BUY", Decimal("100"), Decimal("3000"))
+        assert pv.has_open_positions
+
+        pstate = {
+            "cash": "1500000",
+            "positions": {"6758.TSE": {"qty": "10", "cost": "50000"}},
+            "last_prices": {},
+        }
+        pv._restore_from_dict(pstate)
+
+        assert pv.cash == Decimal("1500000"), "cash must be restored"
+        assert pv.has_open_positions, "positions must be restored (6758.TSE)"
+        assert "1301.TSE" not in pv._positions, "old positions must be cleared"
+        assert pv._positions["6758.TSE"]["qty"] == Decimal("10"), "qty must match"
+
+
+# ---------------------------------------------------------------------------
+# R2-H1 (deferred): RestoreSnapshot 後に Rust UI が巻き戻ること
+# 本フェーズでは TODO として記録する（次フェーズで実装）
+# ---------------------------------------------------------------------------
+
+
+import pytest  # noqa: E402
+
+
+class TestRestoreSnapshotUiRollback:
+    @pytest.mark.xfail(
+        reason="R2-H1 deferred: chart/trades pane flush on RestoreSnapshot not yet implemented in Rust UI",
+        strict=False,
+    )
+    def test_restore_snapshot_flushes_chart_data(self) -> None:
+        """RestoreSnapshot 受信後に Rust UI のチャートデータが ts_event_ms 以降を削除すること。
+
+        現状: main.rs の RestoreSnapshotPending ハンドラは current_day = None にするだけ。
+        TODO: chart pane に対して ts_event_ms 以降のデータをフラッシュする Rust 実装が必要。
+        この xfail テストは未実装を文書化するためのプレースホルダー。
+        Rust 側のテストは tests/e2e/ または tests/replay_session_*.rs で書くこと。
+        """
+        # Rust UI のテストはここでは実行できないため、明示的に失敗させて残債を示す。
+        raise NotImplementedError(
+            "Rust UI chart flush on RestoreSnapshot is not implemented (R2-H1 deferred). "
+            "Implement in src/main.rs RestoreSnapshotPending handler before removing xfail."
+        )

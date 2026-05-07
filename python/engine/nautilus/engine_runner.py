@@ -494,8 +494,9 @@ class NautilusRunner:
         get_multiplier: Callable[[], int] | None = None,
         get_paused: Callable[[], bool] | None = None,
         consume_step_request: Callable[[], int] | None = None,
-        push_snapshot: "Callable[[int, dict, list, object, list], None] | None" = None,
+        push_snapshot: "Callable[..., None] | None" = None,
         restore_strategy_holder: "list | None" = None,
+        restore_portfolio_holder: "list | None" = None,
         currency: str = "JPY",
         base_dir: Path | str | None = None,
         on_event: Callable[[dict], None] | None = None,
@@ -821,13 +822,39 @@ class NautilusRunner:
                         break
 
                     # HIGH-1: apply pending strategy_state restore before processing this step.
-                    # _restore_snapshot (server.py) writes here; we consume and clear.
+                    # Update attributes in-place so the Nautilus engine's registered reference
+                    # also reflects the restored state (replacing the local var alone is not enough).
                     if restore_strategy_holder is not None and restore_strategy_holder[0] is not None:
-                        strategy_instance = restore_strategy_holder[0]
+                        _restored_strategy = restore_strategy_holder[0]
                         restore_strategy_holder[0] = None
+                        try:
+                            # Only copy non-underscore attrs; framework attrs (_cache, _msgbus …)
+                            # must not be overwritten because they reference live engine objects.
+                            _public = {k: v for k, v in _restored_strategy.__dict__.items()
+                                       if not k.startswith("_")}
+                            strategy_instance.__dict__.update(_public)
+                        except Exception as _e:
+                            log.warning("[NautilusRunner] strategy restore in-place failed: %s", _e)
                         log.debug(
-                            "[NautilusRunner] strategy_state restored at step %d",
+                            "[NautilusRunner] strategy_state restored in-place at step %d",
                             _step_counter,
+                        )
+
+                    # HIGH-2: apply pending portfolio_state restore before processing this step.
+                    if restore_portfolio_holder is not None and restore_portfolio_holder[0] is not None:
+                        _pstate = restore_portfolio_holder[0]
+                        restore_portfolio_holder[0] = None
+                        try:
+                            from decimal import Decimal as _D
+                            _portfolio._restore_from_dict(_pstate)
+                            _last_prices.clear()
+                            _last_prices.update(
+                                {k: _D(str(v)) for k, v in _pstate.get("last_prices", {}).items()}
+                            )
+                        except Exception as _e:
+                            log.warning("[NautilusRunner] portfolio restore failed: %s", _e)
+                        log.debug(
+                            "[NautilusRunner] portfolio restored at step %d", _step_counter
                         )
 
                     curr_ts_ns: int = item.ts_event
@@ -915,6 +942,7 @@ class NautilusRunner:
                     if push_snapshot is not None:
                         try:
                             _snap_portfolio = _portfolio.to_ipc_dict(strategy_id, _last_prices)
+                            _snap_portfolio_state = _portfolio.to_snapshot_dict(_last_prices)
                             _snap_orders: list = []  # open orders not tracked in NautilusRunner
                             # strategy_instance may not support deepcopy; pass None if so.
                             # server.push_snapshot handles None strategy_state gracefully.
@@ -924,6 +952,7 @@ class NautilusRunner:
                                 _snap_orders,
                                 strategy_instance,
                                 [],  # ui_events collected per-step not yet wired; pass empty
+                                _snap_portfolio_state,
                             )
                         except Exception:
                             log.warning(

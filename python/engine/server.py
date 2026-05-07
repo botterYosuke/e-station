@@ -118,10 +118,14 @@ class ReplaySnapshot:
     """
 
     step_index: int           # 粒度ステップ番号（0-based）
-    portfolio: dict           # positions / cash / realized_pnl のシリアライズ
+    portfolio: dict           # to_ipc_dict() 由来の ReplayBuyingPower event dict（UI 送信用）
     open_orders: list         # 未約定注文リスト
     strategy_state: object    # copy.deepcopy(strategy) — 任意の Python オブジェクト
     ui_events: list = field(default_factory=list)  # この step で送出した UI イベント群
+    # schema 3.16 HIGH-2: runner 側 _portfolio / _last_prices 復元用のフル状態。
+    # to_snapshot_dict() 由来: {"cash": str, "positions": {...}, "last_prices": {...}}
+    # engine_runner がスナップショット取得時に populate し、StepBackward 後に runner へ戻す。
+    portfolio_state: dict = field(default_factory=dict)
 
 
 # C-M2: httpx/httpcore の INFO/DEBUG ログには立花 API の URL が含まれ、
@@ -453,6 +457,9 @@ class DataEngineServer:
         # HIGH-1: runner thread writes strategy_state here when _restore_snapshot fires.
         # Engine runner reads + clears before processing the next step.
         self._restore_strategy_holder: list = [None]
+        # HIGH-2: runner thread reads portfolio_state from here when _restore_snapshot fires.
+        # Holds {"cash": str, "positions": {...}, "last_prices": {...}} or None.
+        self._restore_portfolio_holder: list = [None]
 
         # B3: State machines for replay and live command gating.
         self._replay_state: ReplayState = ReplayState.IDLE
@@ -510,6 +517,7 @@ class DataEngineServer:
         open_orders: list,
         strategy_state: object,
         ui_events: list,
+        portfolio_state: "dict | None" = None,
     ) -> None:
         """schema 3.16: snapshot ring buffer に 1 粒度境界スナップショットを push する。
 
@@ -536,6 +544,7 @@ class DataEngineServer:
             open_orders=list(open_orders),
             strategy_state=strategy_copy,
             ui_events=list(ui_events),
+            portfolio_state=dict(portfolio_state) if portfolio_state else {},
         )
         with self._replay_snapshots_lock:
             was_empty = len(self._replay_snapshots) == 0
@@ -556,16 +565,22 @@ class DataEngineServer:
         try:
             from decimal import Decimal as _Decimal
             from engine.nautilus.portfolio_view import PortfolioView as _PortfolioView
-            restored_portfolio = _PortfolioView(_Decimal(str(snap.portfolio.get("cash", "0"))))
-            restored_portfolio._restore_from_dict(snap.portfolio)
+            # portfolio_state（フル状態）があればそれを優先。なければ IPC dict（cash のみ）で復元。
+            _pstate = snap.portfolio_state if snap.portfolio_state else snap.portfolio
+            restored_portfolio = _PortfolioView(_Decimal(str(_pstate.get("cash", "0"))))
+            restored_portfolio._restore_from_dict(_pstate)
             self._replay_portfolio = restored_portfolio
         except Exception as exc:
             log.warning("_restore_snapshot: portfolio restore failed: %s", exc)
         # 注文リスト復元
         self._replay_streaming_fills = list(snap.open_orders)
         # HIGH-1: strategy_state をホルダーに置く。engine_runner が次ステップ開始前に
-        # strategy_instance を差し替えて None にリセットする。
+        # strategy_instance の属性を in-place で更新して None にリセットする。
         self._restore_strategy_holder[0] = snap.strategy_state
+        # HIGH-2: portfolio_state をホルダーに置く。engine_runner が次ステップ開始前に
+        # _portfolio / _last_prices をローカルで復元して None にリセットする。
+        if snap.portfolio_state:
+            self._restore_portfolio_holder[0] = snap.portfolio_state
         log.debug("_restore_snapshot: step_index=%d restored strategy_state queued", snap.step_index)
 
     async def serve(self) -> None:
@@ -3505,6 +3520,8 @@ class DataEngineServer:
                     push_snapshot=self._push_replay_snapshot,
                     # HIGH-1: strategy_state restore channel (asyncio ↔ runner thread).
                     restore_strategy_holder=getattr(self, "_restore_strategy_holder", None),
+                    # HIGH-2: portfolio_state restore channel (asyncio ↔ runner thread).
+                    restore_portfolio_holder=getattr(self, "_restore_portfolio_holder", None),
                 )
             else:
                 result_holder[0] = runner.start_backtest_replay(
