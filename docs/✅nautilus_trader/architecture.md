@@ -69,10 +69,10 @@
 
 ## 2. プロセス起動とハンドシェイク
 
-既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。現在の実装は **SCHEMA_MAJOR=3, SCHEMA_MINOR=9**（`python/engine/schemas.py`）。
+既存 IPC は `Command::Hello` の `schema_major / schema_minor` 構成。現在の実装は `python/engine/schemas.py` の `SCHEMA_MINOR` を参照。**本文書の記載は参考値で、最新値は常に `schemas.py` の `SCHEMA_MINOR` が正**。
 
-1. Rust → Python: `Hello { schema_major: 3, schema_minor: 9, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
-2. Python → Rust: `Ready { schema_major: 3, schema_minor: 9, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
+1. Rust → Python: `Hello { schema_major: 3, schema_minor: <schemas.py 参照>, mode: "live" | "replay", capabilities: { nautilus: true } }`  // `mode` は N1.13 / D8 起動時固定
+2. Python → Rust: `Ready { schema_major: 3, schema_minor: <schemas.py 参照>, mode: "live" | "replay", capabilities: { nautilus: { backtest: true, live: false_until_n2 } } }`  // `mode` は N1.13 / D8 起動時固定
 3. Rust → Python: `SetVenueCredentials`（既存）
 4. Rust → Python: `Command::StartEngine { engine, ... }`（§3 参照）
    - `engine: Backtest` + `Hello.mode="replay"` → `BacktestEngine` 起動 + J-Quants ロード（`/api/replay/load` → §4）
@@ -143,6 +143,14 @@ pub enum EngineEvent {
         buying_power: String,        // N1 は cash と同値（現物のみ）
         equity: String,              // cash + Σ position MTM
         ts_event_ms: i64,            // 仮想時刻
+    },
+    // ⭐ live strategy 約定後に push
+    LiveBuyingPower {
+        strategy_id: String,
+        cash: String,                // 文字列精度規約
+        buying_power: String,        // 立花 CLMZanKaiKanougaku 由来
+        equity: String,              // cash + Σ position MTM
+        ts_event_ms: i64,            // UTC ミリ秒
     },
 }
 ```

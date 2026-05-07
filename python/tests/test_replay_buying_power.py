@@ -78,6 +78,23 @@ class TestPortfolioView:
         assert pv.cash == Decimal("1000000") - Decimal("300000") - Decimal("50000")
         assert pv.cash == Decimal("650000")
 
+    def test_restore_from_dict_restores_cash(self):
+        pv = PortfolioView(Decimal("2000000"))
+        pv._restore_from_dict({"cash": "1500000", "ts_event_ms": 0})
+        assert pv.cash == Decimal("1500000")
+
+    def test_restore_from_dict_clears_positions(self):
+        pv = PortfolioView(Decimal("1000000"))
+        pv.on_fill("1301.TSE", "BUY", Decimal("10"), Decimal("100"))
+        assert pv.has_open_positions
+        pv._restore_from_dict({"cash": "900000", "ts_event_ms": 0})
+        assert not pv.has_open_positions, "positions must be cleared after _restore_from_dict"
+
+    def test_restore_from_dict_missing_cash_keeps_current(self):
+        pv = PortfolioView(Decimal("1000000"))
+        pv._restore_from_dict({"ts_event_ms": 0})
+        assert pv.cash == Decimal("1000000")
+
 
 class TestReplayBuyingPowerClmGuard:
     """GetBuyingPower{venue="replay"} は CLMZanKaiKanougaku を呼ばない（D9.6 ガード）。"""
