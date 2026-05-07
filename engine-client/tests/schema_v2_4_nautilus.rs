@@ -35,13 +35,10 @@ fn schema_minor_matches_current_bump() {
     // (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: Vec<String> 追加)。
     // schema 3.14: SCHEMA_MINOR を 13 → 14 に bump
     // (ReplayDataLoaded.session_epoch 追加; リプレイファイル切替時の旧ペイン全閉じ用、Approach B)。
-    // schema 3.15: SCHEMA_MINOR を 14 → 15 に bump
-    // (PauseReplay / ResumeReplay / StepReplay 追加)。
-    // schema 3.16: SCHEMA_MINOR を 15 → 16 に bump
-    // (StepBackward / RestoreSnapshot / ReplayHistoryChanged 追加)。
-    assert!(
-        flowsurface_engine_client::SCHEMA_MINOR >= 16,
-        "SCHEMA_MINOR must be >= 16 (StepBackward / RestoreSnapshot / ReplayHistoryChanged)"
+    assert_eq!(
+        flowsurface_engine_client::SCHEMA_MINOR,
+        14,
+        "SCHEMA_MINOR must be 14 after schema 3.14 (ReplayDataLoaded.session_epoch)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,
@@ -183,12 +180,14 @@ fn start_engine_serializes() {
         config: EngineStartConfig {
             instrument_id: "1301.TSE".to_string(),
             instrument_ids: None,
-            start_date: "2024-01-04".to_string(),
-            end_date: "2024-01-31".to_string(),
-            initial_cash: "1000000".to_string(),
-            granularity: ReplayGranularity::Trade,
+            start_date: Some("2024-01-04".to_string()),
+            end_date: Some("2024-01-31".to_string()),
+            initial_cash: Some("1000000".to_string()),
+            granularity: Some(ReplayGranularity::Trade),
             strategy_file: None,
             strategy_init_kwargs: None,
+            max_qty: None,
+            max_notional_jpy: None,
         },
     };
     let json = serde_json::to_string(&cmd).expect("must serialize");
@@ -218,12 +217,14 @@ fn start_engine_with_strategy_file_serializes() {
         config: EngineStartConfig {
             instrument_id: "1301.TSE".to_string(),
             instrument_ids: None,
-            start_date: "2024-01-04".to_string(),
-            end_date: "2024-03-31".to_string(),
-            initial_cash: "1000000".to_string(),
-            granularity: ReplayGranularity::Daily,
+            start_date: Some("2024-01-04".to_string()),
+            end_date: Some("2024-03-31".to_string()),
+            initial_cash: Some("1000000".to_string()),
+            granularity: Some(ReplayGranularity::Daily),
             strategy_file: Some("examples/strategies/buy_and_hold.py".to_string()),
             strategy_init_kwargs: Some(kwargs),
+            max_qty: None,
+            max_notional_jpy: None,
         },
     };
     let json = serde_json::to_string(&cmd).expect("must serialize");

@@ -653,15 +653,25 @@ pub struct EngineStartConfig {
     /// schema 3.13: 複数銘柄指定。None のとき instrument_id 単体で動作（後方互換）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument_ids: Option<Vec<String>>,
-    pub start_date: String,
-    pub end_date: String,
-    pub initial_cash: String,
-    pub granularity: ReplayGranularity,
+    /// Replay-only fields — optional so live callers can omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_cash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<ReplayGranularity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_file: Option<String>,
     /// JSON object only — array/scalar rejected at HTTP boundary before IPC send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Live-only fields — optional so replay callers can omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_qty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_notional_jpy: Option<u64>,
 }
 
 // ── Order sub-types (schema 1.3) ──────────────────────────────────────────────
@@ -874,6 +884,8 @@ pub enum CurrentEngineState {
     Disconnected,
     Connecting,
     Connected,
+    /// N3: live strategy 実行中
+    Trading,
 }
 
 /// State guard で reject された command 名 (Python `schemas.AttemptedCommand` と一致)。
@@ -947,6 +959,7 @@ impl CurrentEngineState {
             CurrentEngineState::Disconnected => "DISCONNECTED",
             CurrentEngineState::Connecting => "CONNECTING",
             CurrentEngineState::Connected => "CONNECTED",
+            CurrentEngineState::Trading => "TRADING",
         }
     }
 }
@@ -1420,6 +1433,19 @@ pub enum EngineEvent {
     /// `count` は接続中のクライアント総数（切断後）。
     ClientDisconnected {
         count: u32,
+    },
+
+    // ── N3: Live strategy buying power (schema 3.17) ─────────────────────────
+    /// Live strategy 実行中に OrderFilled 後に push される買付余力スナップショット。
+    LiveBuyingPower {
+        strategy_id: String,
+        /// 現金残高（decimal 文字列、円）
+        cash: String,
+        /// 買付余力（decimal 文字列、円）
+        buying_power: String,
+        /// 評価額（decimal 文字列、円）
+        equity: String,
+        ts_event_ms: i64,
     },
 }
 

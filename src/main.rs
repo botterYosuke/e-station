@@ -3645,12 +3645,14 @@ impl Flowsurface {
                                                     config: engine_client::dto::EngineStartConfig {
                                                         instrument_id: first_id,
                                                         instrument_ids: Some(instrument_ids),
-                                                        start_date,
-                                                        end_date,
-                                                        initial_cash: initial_cash.to_string(),
-                                                        granularity: gran_dto,
+                                                        start_date: Some(start_date),
+                                                        end_date: Some(end_date),
+                                                        initial_cash: Some(initial_cash.to_string()),
+                                                        granularity: Some(gran_dto),
                                                         strategy_file: Some(strategy_file_str),
                                                         strategy_init_kwargs: None,
+                                                        max_qty: None,
+                                                        max_notional_jpy: None,
                                                     },
                                                 },
                                             )
@@ -4133,12 +4135,14 @@ impl Flowsurface {
                                             config: engine_client::dto::EngineStartConfig {
                                                 instrument_id: first_id,
                                                 instrument_ids: Some(instrument_ids),
-                                                start_date,
-                                                end_date,
-                                                initial_cash: initial_cash.to_string(),
-                                                granularity: gran_dto,
+                                                start_date: Some(start_date),
+                                                end_date: Some(end_date),
+                                                initial_cash: Some(initial_cash.to_string()),
+                                                granularity: Some(gran_dto),
                                                 strategy_file: Some(strategy_file_str),
                                                 strategy_init_kwargs: None,
+                                                max_qty: None,
+                                                max_notional_jpy: None,
                                             },
                                         })
                                         .await

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 16
+SCHEMA_MINOR: int = 17
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -22,8 +22,8 @@ AppMode = Literal["live", "replay"]
 
 # ReplayStateName / LiveStateName: 直交する 2 つの state machine の wire 名前。
 # server.py の `ReplayState` / `LiveState` Enum の `.name` と一致させる。
-ReplayStateName = Literal["IDLE", "LOADED", "RUNNING", "PAUSED", "STOPPING"]
-LiveStateName = Literal["DISCONNECTED", "CONNECTING", "CONNECTED"]
+ReplayStateName = Literal["IDLE", "LOADED", "RUNNING", "STOPPING"]
+LiveStateName = Literal["DISCONNECTED", "CONNECTING", "CONNECTED", "TRADING", "STOPPING"]
 
 # CurrentEngineState: EngineBusy.current_state の wire 形 (どちらかの state)
 CurrentEngineState = Union[ReplayStateName, LiveStateName]
@@ -36,10 +36,6 @@ ReplayOnlyCommand = Literal[
     "SetReplaySpeed",
     "StopReplay",
     "ForceStopReplay",
-    "PauseReplay",
-    "ResumeReplay",
-    "StepReplay",
-    "StepBackward",
 ]
 LiveOnlyCommand = Literal[
     "ModifyOrder",
@@ -724,18 +720,30 @@ class OrderListUpdated(IpcMessage):
 
 
 class EngineStartConfig(IpcMessage):
-    """Engine start config — mirrors `engine_runner.py` arguments."""
+    """Engine start config — mirrors `engine_runner.py` arguments.
+
+    replay 専用フィールド: start_date / end_date / initial_cash / granularity
+    live 専用フィールド:   max_qty / max_notional_jpy
+
+    どちらのモードで使うかは StartEngine.engine ("Backtest" / "Live") が決定する。
+    EngineStartConfig 自体は engine フィールドを持たないため、
+    両グループが同時に全 None の場合のみ validator でエラーとする。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     instrument_id: str
     instrument_ids: list[str] | None = None
-    start_date: str
-    end_date: str
-    initial_cash: str
-    granularity: Literal["Trade", "Minute", "Daily"]
+    # replay 専用フィールド（Optional 化）
+    start_date: str | None = None
+    end_date: str | None = None
+    initial_cash: str | None = None
+    granularity: Literal["Trade", "Minute", "Daily"] | None = None
     strategy_file: str | None = None
     strategy_init_kwargs: dict[str, Any] | None = None
+    # live 専用フィールド（新規追加）
+    max_qty: int | None = None
+    max_notional_jpy: int | None = None
 
 
 class StartEngine(IpcMessage):
@@ -886,6 +894,24 @@ class ReplayBuyingPower(IpcMessage):
     ts_event_ms: int
 
 
+# ── N1.17: LIVE 買付余力 ────────────────────────────────────────────────────
+
+
+class LiveBuyingPower(IpcMessage):
+    """LIVE モードの買付余力（live_portfolio_view.py が送出）。
+    cash / buying_power / equity はすべて decimal 文字列（float 丸め防止）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["LiveBuyingPower"] = "LiveBuyingPower"
+    strategy_id: str
+    cash: str           # decimal 文字列（円）
+    buying_power: str   # decimal 文字列（円）
+    equity: str         # decimal 文字列（円）
+    ts_event_ms: int
+
+
 # ── Buying Power Phase (schema 2.1) ─────────────────────────────────────────
 
 
@@ -1011,78 +1037,6 @@ class ForceStopReplay(IpcMessage):
     request_id: str
 
 
-# ── schema 3.15: Replay playback control ────────────────────────────────────
-
-
-class PauseReplay(IpcMessage):
-    """粒度境界で replay を一時停止する（schema 3.15）。
-
-    受理状態: ``RUNNING``。
-    停止後は ``ReplayState.PAUSED`` に遷移し、``ResumeReplay`` または
-    ``StepReplay`` を受け付ける。
-    """
-
-    op: Literal["PauseReplay"] = "PauseReplay"
-    request_id: str
-
-
-class ResumeReplay(IpcMessage):
-    """一時停止中の replay を再開する（schema 3.15）。
-
-    受理状態: ``PAUSED``。
-    """
-
-    op: Literal["ResumeReplay"] = "ResumeReplay"
-    request_id: str
-
-
-class StepReplay(IpcMessage):
-    """replay を 1 粒度単位だけ前進させて再び pause する（schema 3.15）。
-
-    受理状態: ``PAUSED`` のみ（RUNNING 中は EngineBusy）。
-    """
-
-    op: Literal["StepReplay"] = "StepReplay"
-    request_id: str
-
-
-# ── schema 3.16: Step backward (snapshot restore) ───────────────────────────
-
-
-class StepBackward(IpcMessage):
-    """snapshot ring buffer の末尾を pop して 1 粒度単位だけ後退する（schema 3.16）。
-
-    受理状態: ``PAUSED`` かつ snapshot ring buffer 非空。
-    空のとき（has_history=false）は ``EngineBusy`` を返す。
-    """
-
-    op: Literal["StepBackward"] = "StepBackward"
-    request_id: str
-
-
-class RestoreSnapshot(IpcMessage):
-    """StepBackward 実行前に Rust UI へ送出するマーカー（schema 3.16）。
-
-    Rust UI はこのイベントを受信したらペインを「全置換モード」に切り替え、
-    続いて届く ``ui_events`` の再送信を重複扱いにしないようにする。
-    """
-
-    event: Literal["RestoreSnapshot"] = "RestoreSnapshot"
-    step_index: int  # 復元するスナップショットの粒度ステップ番号（0-based）
-    ts_event_ms: int  # スナップショットのタイムスタンプ（Unix ミリ秒）
-
-
-class ReplayHistoryChanged(IpcMessage):
-    """StepBackward 完了後またはスナップショット追加後に Rust UI へ送出する（schema 3.16）。
-
-    Rust 側はこのイベントで ``ReplayBarState.replay_has_history`` を更新し、
-    ⏮ Step- ボタンの有効/無効を切り替える。
-    """
-
-    event: Literal["ReplayHistoryChanged"] = "ReplayHistoryChanged"
-    has_history: bool
-
-
 class ReplayStopped(IpcMessage):
     """StopReplay または ForceStopReplay が replay セッションを停止したときに emit する（F7）。
 
@@ -1093,19 +1047,6 @@ class ReplayStopped(IpcMessage):
     event: Literal["ReplayStopped"] = "ReplayStopped"
     request_id: str
     final_equity: str | None = None
-
-
-# ── schema 3.15: replay date / history markers ──────────────────────────────
-
-
-class DateChangeMarker(IpcMessage):
-    """engine_runner が営業日跨ぎ時に emit するマーカー（N1.11 D7）。
-
-    Rust 側はリプレイバーの「現在日」表示を更新するために使う。
-    """
-
-    event: Literal["DateChangeMarker"] = "DateChangeMarker"
-    date: str  # "YYYY-MM-DD"
 
 
 # ── F6: SCENARIO 定数 (schema 3.10) ─────────────────────────────────────────

@@ -34,10 +34,10 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # (ReplayDataLoaded.instrument_id / granularity 追加; replay-pane-auto-generate-fix)
     # schema 3.13: SCHEMA_MINOR を 12 → 13 に bump
     # (LoadReplayData / EngineStartConfig / ReplayDataLoaded に instrument_ids: list[str] | None 追加)
-    # schema 3.14: SCHEMA_MINOR を 13 → 14 に bump (replay_session_epoch フィールド追加)
-    # schema 3.15: SCHEMA_MINOR を 14 → 15 に bump (PauseReplay / ResumeReplay / StepReplay 追加)
-    # schema 3.16: SCHEMA_MINOR を 15 → 16 に bump (StepBackward / RestoreSnapshot / ReplayHistoryChanged 追加)
-    assert s.SCHEMA_MINOR == 16
+    # schema 3.14: SCHEMA_MINOR を 13 → 14 に bump (ReplayBuyingPower 追加)
+    # schema 3.15: SCHEMA_MINOR を 14 → 15 に bump (LiveBuyingPower 追加 / LiveStateName に TRADING・STOPPING 追加)
+    # N3: SCHEMA_MINOR を 16 → 17 に bump（live strategy 実行基盤）
+    assert s.SCHEMA_MINOR == 17
     assert s.SCHEMA_MAJOR == 3
 
 
