@@ -500,7 +500,7 @@ impl ProcessManager {
         self.spawn_count.load(Ordering::Relaxed)
     }
 
-    /// Try to attach to a running engine at `ws://127.0.0.1:19876/`, falling
+    /// Try to attach to a running engine at the probe URL (gRPC), falling
     /// back to a fresh Python spawn when:
     /// - `FLOWSURFACE_ENGINE_TOKEN` env var is unset or empty (skip probe entirely)
     /// - The probe TCP connect times out (2 s)
@@ -632,7 +632,7 @@ impl ProcessManager {
                     proc.port(),
                     proc.token().to_string(),
                     pid,
-                    u32::from(crate::SCHEMA_MAJOR),
+                    crate::SCHEMA_MAJOR,
                     TransportKind::Grpc,
                 );
                 if let Err(e) = session.write_atomic(&session_path()) {
@@ -691,7 +691,7 @@ impl ProcessManager {
                     log::info!("engine connection established");
                     on_ready();
 
-                    // Wait until the WS read loop exits (remote close or IO error).
+                    // Wait until the gRPC stream exits (remote close or IO error).
                     // Using wait_closed() instead of RecvError::Closed because
                     // EngineConnection itself holds a broadcast::Sender, so the
                     // channel is never "Closed" while the conn is alive.

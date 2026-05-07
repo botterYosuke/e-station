@@ -62,6 +62,7 @@ from engine.exchanges.bybit import BybitWorker
 from engine.exchanges.hyperliquid import HyperliquidWorker
 from engine.exchanges.mexc import MexcWorker
 from engine.exchanges.okex import OkexWorker
+from engine.kabu_push_pipeline import kabu_board_to_wire_dict, kabu_execution_to_wire_dict
 from engine.exchanges.tachibana import TachibanaWorker
 from engine.exchanges.tachibana_event import OrderEcEvent, TachibanaEventClient
 from engine.exchanges.tachibana_orders import (
@@ -186,16 +187,18 @@ class _Broadcaster:
     """
 
     def __init__(self) -> None:
-        self._queues: dict[ServerConnection, asyncio.Queue] = {}
+        # H2: dict key は ServerConnection (WebSocket パス) または _GrpcSessionKey
+        # (gRPC パス) のいずれか。Union 型を避けて Any にすることで両パスの型エラーを回避する。
+        self._queues: dict[Any, asyncio.Queue] = {}
         # Compat deque used by tests that inspect _outbox._q directly.
         self._q: deque[dict] = deque()
 
-    def add_conn(self, ws: ServerConnection) -> asyncio.Queue:
+    def add_conn(self, ws: Any) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
         self._queues[ws] = q
         return q
 
-    def remove_conn(self, ws: ServerConnection) -> None:
+    def remove_conn(self, ws: Any) -> None:
         self._queues.pop(ws, None)
 
     def append(self, item: dict) -> None:
@@ -217,7 +220,7 @@ class _Broadcaster:
         # Also write to compat deque so unit tests that read _q still work.
         self._q.append(item)
 
-    def send_to(self, ws: ServerConnection, item: dict) -> None:
+    def send_to(self, ws: Any, item: dict) -> None:
         """Unicast: enqueue item only to a single connection's queue.
 
         M-GP8 / Silent-M2 (Phase 8 R1 / Phase 2): broadcast でなく特定の接続だけに
@@ -3597,14 +3600,17 @@ class DataEngineServer:
         TODO C1-next: Subscribe(kabu_station) コマンドを受け付けて
         _kabu_adapter の登録銘柄を動的に更新する（現状は全 PUSH 受信・全配信）。
         """
-        from engine.kabu_push_pipeline import kabu_board_to_wire_dict
-
         try:
             ticker = str(raw.get("Symbol", ""))
             if not ticker:
                 log.warning("_on_kabu_board_push: missing Symbol field, skipping")
                 return
             ssid = self._kabu_push_ssid or str(self._engine_session_id)
+            # seq は Symbol チェック通過後・parse 前にインクリメントする。
+            # parse 失敗時は seq が消費されたまま outbox は空白になる（gap 発生）。
+            # kabu は DepthSnapshot のみであり Rust 側 gap detector は DepthDiff の
+            # prev_sequence_id 連続性を監視するため、このギャップは現行実装で影響なし。
+            # 将来 kabu が DepthDiff を提供する場合はロールバック方式を再検討すること。
             self._kabu_push_seq += 1
             payload = kabu_board_to_wire_dict(
                 raw,
@@ -3615,7 +3621,13 @@ class DataEngineServer:
             )
             self._outbox.append(payload)
         except Exception as exc:
-            log.warning("_on_kabu_board_push: parse/map error: %s", exc)
+            log.warning(
+                "_on_kabu_board_push: parse/map error at seq=%d ticker=%s: %s",
+                self._kabu_push_seq,
+                ticker,
+                exc,
+                exc_info=True,
+            )
 
     def _on_kabu_trade_push(self, raw: dict) -> None:
         """Raw kabu PUSH 板 JSON の CurrentPrice から Trades wire dict → outbox.
@@ -3624,14 +3636,13 @@ class DataEngineServer:
         板スナップショットの CurrentPrice / CurrentPriceTime を約定として扱う。
         qty は 0 で正規化（kabu_push_pipeline 仕様、累積値のため）。
         """
-        from engine.kabu_push_pipeline import kabu_execution_to_wire_dict
-
+        ticker = ""
         try:
-            ssid = self._kabu_push_ssid or str(self._engine_session_id)
             ticker = str(raw.get("Symbol", ""))
             if not ticker:
                 log.warning("_on_kabu_trade_push: missing Symbol field, skipping")
                 return
+            ssid = self._kabu_push_ssid or str(self._engine_session_id)
             payload = kabu_execution_to_wire_dict(
                 raw,
                 adapter=self._kabu_adapter,
@@ -3640,7 +3651,12 @@ class DataEngineServer:
             )
             self._outbox.append(payload)
         except Exception as exc:
-            log.warning("_on_kabu_trade_push: parse/map error: %s", exc)
+            log.warning(
+                "_on_kabu_trade_push: parse/map error ticker=%s: %s",
+                ticker,
+                exc,
+                exc_info=True,
+            )
 
     async def _run_event_loop(self, url: str) -> None:
         """EVENT WebSocket に接続して EC 約定通知の受信ループを実行する（Phase O2）。

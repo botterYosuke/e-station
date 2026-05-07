@@ -11,8 +11,12 @@ import grpc
 from grpc import aio
 
 from engine.proto import engine_pb2, engine_pb2_grpc
-from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
 from engine.server import _ENGINE_VERSION
+
+# gRPC IPC schema version — source of truth for the gRPC transport layer.
+# Keep in sync with engine-client/src/lib.rs SCHEMA_MAJOR / SCHEMA_MINOR.
+SCHEMA_MAJOR: int = 3   # gRPC IPC schema major version
+SCHEMA_MINOR: int = 21  # gRPC IPC schema minor version
 
 log = logging.getLogger(__name__)
 
@@ -113,8 +117,14 @@ _EVENT_TO_FIELD_AND_CLASS = {
 
 
 class _GrpcSessionKey:
-    """gRPC セッション用の一意キー。_Broadcaster の dict key として機能する。"""
-    pass
+    """gRPC session unique key using object identity (id-based hash). Intentional sentinel.
+
+    _Broadcaster の dict key として機能する。各 gRPC Session RPC 呼び出しごとに
+    新しいインスタンスを生成することで、Python のデフォルト id ベースの同一性比較
+    (__eq__ / __hash__ をオーバーライドしない) により自然な一意キーとなる。
+    """
+
+    __slots__ = ()
 
 
 def _log_startup_tachibana_error(t: asyncio.Task) -> None:
@@ -193,7 +203,7 @@ def _dict_to_proto_event(event_dict: dict) -> engine_pb2.Event | None:
     payload_dict = {k: v for k, v in event_dict.items() if k != "event"}
 
     try:
-        payload = ParseDict(payload_dict, msg_class(), ignore_unknown_fields=True)
+        payload = ParseDict(payload_dict, msg_class(), ignore_unknown_fields=False)
         return engine_pb2.Event(**{field_name: payload})
     except Exception as exc:
         log.warning("Failed to build proto Event %s: %s — dropping", event_name, exc)
@@ -250,10 +260,21 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
             )
             return
 
+        # 5b. schema_minor 不一致は警告のみ（互換性維持）
+        if hello.schema_minor != SCHEMA_MINOR:
+            log.warning(
+                "schema_minor mismatch: client=%d server=%d — continuing",
+                hello.schema_minor, SCHEMA_MINOR,
+            )
+
         # 6–9. 接続数チェック・mode 確定・prepare・接続登録（Lock で同時ハンドシェイクの race を防ぐ）
         async with self._handshake_lock:
             # 1. 接続数チェック（Lock 内でアトミックに確認）
             if len(self._server._connections) >= MAX_CONNECTIONS:
+                log.warning(
+                    "gRPC connection rejected: MAX_CONNECTIONS=%d reached, peer=%s",
+                    MAX_CONNECTIONS, context.peer(),
+                )
                 await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "max connections exceeded")
                 return
 

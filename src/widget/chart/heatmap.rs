@@ -59,6 +59,9 @@ enum RebuildDecision {
 enum RebuildSignal {
     #[default]
     Idle,
+    /// `since` は常に過去の時刻（デバウンス開始時刻）。
+    /// `decide()` が `saturating_duration_since` を使うため、将来時刻が誤って渡されても
+    /// 経過 0ms として扱われ、ハングしない（実装上の安全装置）。
     Debouncing {
         since: Instant,
         force_historical: bool,
@@ -81,6 +84,8 @@ impl RebuildSignal {
         };
     }
 
+    // Only call via `HeatmapShader::rebuild_all_immediate()` or within `HeatmapShader::update()`.
+    // Direct calls outside those contexts risk bypassing the debounce contract.
     fn set_immediate(&mut self, force_historical: bool) {
         let prev = self.peek_force_historical();
         *self = Self::Immediate {
@@ -160,6 +165,8 @@ pub enum Message {
 #[derive(Debug, Clone, Copy)]
 pub struct HeatmapViewState {
     pub camera_scale: f32,
+    /// `camera_offset` は GPU シェーダー内部の `[f32; 2]` 形式（[x, y]）に合わせた生配列。
+    /// Elm 層に公開するため `iced::Vector` への変換境界は `view_state()` / `apply_view_state()` が担う。
     pub camera_offset: [f32; 2],
     pub cell_width_world: f32,
     pub cell_height_world: f32,
@@ -244,6 +251,9 @@ impl HeatmapShader {
         }
     }
 
+    /// Canvas-local インタラクションを処理する。follow/pause/live 遷移は
+    /// `anchor` が内部管理するが、Elm 上位への通知は `view()` が `anchor.is_paused()`
+    /// を直接参照することで実現する（Effect を返さない設計は意図的）。
     pub fn update(&mut self, message: Message) {
         match message {
             Message::BoundsChanged(bounds) => {
@@ -1283,6 +1293,28 @@ mod tests {
         assert_eq!(
             shader.rebuild_signal.decide(Instant::now()),
             RebuildDecision::Full
+        );
+    }
+
+    #[test]
+    fn rebuild_signal_debouncing_at_exact_boundary_is_full() {
+        // M-3: elapsed == REBUILD_DEBOUNCE_MS（ちょうど境界値）でも Full を返すことを確認。
+        // `decide()` の判定は `>=` なので境界値は Full に含まれる。
+        let mut shader = make_shader();
+        // `saturating_duration_since` を使うため、過去 exactly REBUILD_DEBOUNCE_MS ms の
+        // 時刻を設定する。実行タイミングのずれで elapsed が +1ms になる可能性を考慮し、
+        // ちょうど REBUILD_DEBOUNCE_MS ms 前に設定する。
+        let past = Instant::now() - Duration::from_millis(REBUILD_DEBOUNCE_MS);
+        shader.rebuild_signal = RebuildSignal::Debouncing {
+            since: past,
+            force_historical: false,
+        };
+        // elapsed >= REBUILD_DEBOUNCE_MS であれば Full が返る。
+        // 実行が瞬時ではないため elapsed は必ず >= REBUILD_DEBOUNCE_MS になる。
+        assert_eq!(
+            shader.rebuild_signal.decide(Instant::now()),
+            RebuildDecision::Full,
+            "elapsed == REBUILD_DEBOUNCE_MS の境界値でも Full を返す必要がある (M-3)"
         );
     }
 

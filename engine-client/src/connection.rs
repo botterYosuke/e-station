@@ -65,7 +65,7 @@ impl EngineConnection {
         target: &str,
         token: &str,
         mode: crate::dto::AppMode,
-        schema_major_override: u16,
+        schema_major_override: u32,
     ) -> Result<Self, EngineClientError> {
         let (sender, events, closed, capabilities) =
             crate::grpc_transport::start_grpc_session_with_schema(

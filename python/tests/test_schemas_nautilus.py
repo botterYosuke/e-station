@@ -56,8 +56,8 @@ def test_rust_schema_constants_match_python() -> None:
     rust_lib = Path(__file__).parent.parent.parent / "engine-client" / "src" / "lib.rs"
     text = rust_lib.read_text(encoding="utf-8")
 
-    major_match = re.search(r"pub const SCHEMA_MAJOR\s*:\s*u16\s*=\s*(\d+)", text)
-    minor_match = re.search(r"pub const SCHEMA_MINOR\s*:\s*u16\s*=\s*(\d+)", text)
+    major_match = re.search(r"pub const SCHEMA_MAJOR\s*:\s*u32\s*=\s*(\d+)", text)
+    minor_match = re.search(r"pub const SCHEMA_MINOR\s*:\s*u32\s*=\s*(\d+)", text)
 
     assert major_match, "SCHEMA_MAJOR not found in engine-client/src/lib.rs"
     assert minor_match, "SCHEMA_MINOR not found in engine-client/src/lib.rs"

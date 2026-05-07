@@ -6,18 +6,22 @@
 ///
 /// # Scenarios covered
 ///
-/// 1. **probe_success_attaches_without_spawn**: gRPC mock at random port → attach,
-///    `spawn_count == 0`
-/// 2. **probe_refused_falls_back_to_spawn**: nothing at probe URL →
+/// 1. **probe_refused_falls_back_to_spawn**: nothing at probe URL →
 ///    `spawn_count == 1`
-/// 3. **token_mismatch_falls_back_to_spawn**: gRPC mock replies UNAUTHENTICATED →
+/// 2. **empty_token_skips_probe**: empty token → probe URL never reached,
 ///    `spawn_count == 1`
-/// 4. **schema_major_mismatch_falls_back_to_spawn**: gRPC mock replies
+/// 3. **non_grpc_probe_url_falls_back_to_spawn**: non-grpc:// probe URL → no probe,
+///    `spawn_count == 1`
+/// 4. **empty_probe_url_falls_back_to_spawn**: empty probe URL → no probe,
+///    `spawn_count == 1`
+/// 5. **token_mismatch_falls_back_to_spawn**: gRPC mock replies UNAUTHENTICATED →
+///    `spawn_count == 1`
+/// 6. **schema_major_mismatch_falls_back_to_spawn**: gRPC mock replies
 ///    FAILED_PRECONDITION → `spawn_count == 1`
-/// 5. **empty_token_skips_probe**: empty token → probe URL never reached,
-///    `spawn_count == 1`
-/// 6. **ws_probe_url_falls_back_to_spawn**: non-grpc:// probe URL → no probe,
-///    `spawn_count == 1`
+/// 7. **probe_success_attaches_without_spawn** (ignored): gRPC mock at random port → attach,
+///    `spawn_count == 0` — covered by grpc_wire_integration
+mod common;
+
 use flowsurface_engine_client::ProcessManager;
 
 use std::{net::SocketAddr, time::Duration};
@@ -34,12 +38,11 @@ async fn bind_loopback() -> (TcpListener, SocketAddr) {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-/// 1. Probe succeeds → attach without spawning Python.
+/// 1. Probe refused → fall through to spawn.
 ///
-/// This test requires a real gRPC server to perform the handshake.
-/// We use the Python engine process spawned in the CI via grpc_wire_integration,
-/// so here we just verify the probe-refused → spawn path more directly.
-/// The happy-path attach is covered by grpc_wire_integration.rs::test_grpc_attach_to_already_running_server.
+/// Binds a free port then immediately drops the listener so nothing listens
+/// at the probe URL.  The happy-path attach (scenario 7) is covered by
+/// grpc_wire_integration.rs::test_grpc_attach_to_already_running_server.
 #[tokio::test]
 async fn probe_refused_falls_back_to_spawn() {
     // Bind a free port then drop so nothing listens there.
@@ -123,7 +126,46 @@ async fn empty_probe_url_falls_back_to_spawn() {
     );
 }
 
-/// 5. Probe succeeds → attach without spawning Python.
+/// 5. Token mismatch → gRPC mock returns UNAUTHENTICATED → fall through to spawn.
+#[tokio::test]
+async fn token_mismatch_falls_back_to_spawn() {
+    let mock = common::MockGrpcEngine::start_unauthenticated("correct-token").await;
+    let probe_url = format!("grpc://{}", mock.addr);
+
+    let pm = ProcessManager::new("false");
+    // Send a different token so the mock rejects with UNAUTHENTICATED.
+    let _ = pm
+        .try_attach_or_spawn(9_u16, &probe_url, "wrong-token")
+        .await;
+
+    assert_eq!(
+        pm.spawn_count(),
+        1,
+        "spawn must be attempted when probe returns UNAUTHENTICATED"
+    );
+
+    mock.shutdown().await;
+}
+
+/// 6. Schema major mismatch → gRPC mock returns FAILED_PRECONDITION → fall through to spawn.
+#[tokio::test]
+async fn schema_major_mismatch_falls_back_to_spawn() {
+    let mock = common::MockGrpcEngine::start_schema_major_mismatch("any-token").await;
+    let probe_url = format!("grpc://{}", mock.addr);
+
+    let pm = ProcessManager::new("false");
+    let _ = pm.try_attach_or_spawn(9_u16, &probe_url, "any-token").await;
+
+    assert_eq!(
+        pm.spawn_count(),
+        1,
+        "spawn must be attempted when probe returns FAILED_PRECONDITION"
+    );
+
+    mock.shutdown().await;
+}
+
+/// 7. Probe succeeds → attach without spawning Python.
 ///
 /// This test requires a running gRPC mock server (real wire handshake).
 /// It is marked `#[ignore]` because spinning up a Python engine in unit-test

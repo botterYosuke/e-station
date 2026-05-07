@@ -12,91 +12,17 @@ import threading
 import pytest
 
 
+@pytest.mark.skip(
+    reason="WS transport WebSocket mock removed — mode_mismatch for gRPC is covered by "
+    "test_server_grpc_multi_client.py::test_mode_mismatch_second_client_returns_failed_precondition"
+)
 def test_handle_hello_mode_mismatch_rejects_second_client():
-    """M-TA6: mode=live で接続済みの後、mode=replay で接続すると EngineError が返ること。"""
-    import orjson
-    from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+    """M-TA6: mode=live で接続済みの後、mode=replay で接続すると EngineError が返ること。
 
-    # サーバーを起動して mode=live で Hello → Ready 後、
-    # mode=replay で2回目の Hello を送り EngineError を確認する
-    received_responses: list[dict] = []
-    server_ready = threading.Event()
-    chosen_port: list[int] = []
-    server_holder: list = []
-
-    async def _handler(ws):
-        # サーバー側の DataEngineServer._handshake() の代わりに
-        # mode mismatch ロジックだけを確認するモックサーバー
-
-        # _modeが既に設定されているシナリオをシミュレート
-        # ここでは _server_mode という変数でサーバー全体の mode を表す
-        raw = await ws.recv()
-        msg = orjson.loads(raw)
-        client_mode = msg.get("mode", "live")
-        server_mode = ws.server._server_mode if hasattr(ws.server, "_server_mode") else None
-
-        if server_mode is None:
-            # 最初のクライアント
-            ws.server._server_mode = client_mode
-            ready = {
-                "event": "Ready",
-                "schema_major": SCHEMA_MAJOR,
-                "schema_minor": SCHEMA_MINOR,
-                "engine_version": "test",
-                "engine_session_id": "00000000-0000-0000-0000-000000000000",
-                "capabilities": {},
-            }
-            await ws.send(orjson.dumps(ready).decode())
-            try:
-                async for _ in ws:
-                    pass
-            except Exception:
-                pass
-        else:
-            # 2番目のクライアント: mode mismatch チェック
-            if client_mode != server_mode:
-                err = {
-                    "event": "EngineError",
-                    "code": "mode_mismatch",
-                    "message": f"Engine is in {server_mode} mode, cannot attach as {client_mode}",
-                }
-                received_responses.append(err)
-                await ws.send(orjson.dumps(err).decode())
-                await ws.close(1008, "mode mismatch")
-            else:
-                ready = {
-                    "event": "Ready",
-                    "schema_major": SCHEMA_MAJOR,
-                    "schema_minor": SCHEMA_MINOR,
-                    "engine_version": "test",
-                    "engine_session_id": "00000000-0000-0000-0000-000000000000",
-                    "capabilities": {},
-                }
-                await ws.send(orjson.dumps(ready).decode())
-
-    # このテストは M-TA6 の意図を検証するユニットテストとして
-    # DataEngineServer._handshake() のロジックを直接テストする
-    from engine.server import DataEngineServer, LiveState
-
-    # _handle_hello の挙動をテストする
-    # 現状: self._mode = msg.mode で毎回上書き
-    # 期待: 最初の Hello のみ受け付け、2回目以降は mismatch なら EngineError
-    # これは _handshake() 内の self._mode = msg.mode のロジック変更で対応
-
-    # 現状の実装を確認: _handshake() は毎回 self._mode を上書きする
-    # 修正後: _mode が設定済みで mismatch なら EngineError → close
-    # このテストは修正後に PASS することを想定
-
-    # DataEngineServer のインスタンスを作らずに _handshake ロジックを確認する
-    # 実際のロジックは server.py 修正後に統合テストで確認する
-
-    # 簡易版テスト: _mode が "live" の状態で "replay" の Hello が来たとき
-    # DataEngineServer が EngineError を emit することを期待する
-    # ここでは server.py の _handshake の挙動を単体で確認する
-
-    # 注: このテストは現状 FAIL (修正前) になるが、
-    # 修正後の動作を示す仕様テストとして残す
-    pass  # 実際のサーバー統合テストは別ファイルで行う
+    このテストは WS transport 向けに書かれた仕様テストだが、
+    gRPC 移行後は test_server_grpc_multi_client.py でカバーされる。
+    """
+    pass  # 実際のサーバー統合テストは test_server_grpc_multi_client.py で行う
 
 
 # ---------------------------------------------------------------------------

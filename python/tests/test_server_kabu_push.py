@@ -155,11 +155,32 @@ class TestBoardPushExceptionIsolation:
         s._on_kabu_board_push(bad)  # must not raise
 
     def test_parse_error_does_not_write_outbox(self) -> None:
-        """parse エラー後も outbox は変化しない（中途半端なデータを書かない）。"""
+        """parse エラー後も outbox は変化しない（中途半端なデータを書かない）。
+
+        設計上の tradeoff: Symbol チェック後・parse 前に seq がインクリメントされるため、
+        parse 失敗時は seq が消費されたまま outbox は空白になる（ギャップ発生）。
+        kabu は DepthSnapshot のみであり Rust 側 gap detector への影響はない。
+        この動作は意図的であり「バグ動作 pin」ではない。
+        """
         s = _make_server()
         bad = {"Symbol": "1234", "CurrentPriceTime": None}
         s._on_kabu_board_push(bad)
         assert len(s._outbox._q) == 0
+        assert s._kabu_push_seq == 1  # seq は消費される（Symbol チェック後のため）
+
+    def test_seq_consumed_on_parse_error(self) -> None:
+        """parse 失敗でも seq がインクリメントされる（gap 発生は意図的）。"""
+        s = _make_server(seq=5)
+        bad = {"Symbol": "1234", "CurrentPriceTime": None}
+        s._on_kabu_board_push(bad)
+        assert s._kabu_push_seq == 6  # +1 consumed
+        assert len(s._outbox._q) == 0
+
+    def test_trade_push_does_not_affect_board_seq(self) -> None:
+        """_on_kabu_trade_push は _kabu_push_seq を変更しない。"""
+        s = _make_server(seq=7)
+        s._on_kabu_trade_push(_VALID_BOARD)
+        assert s._kabu_push_seq == 7
 
 
 # ---------------------------------------------------------------------------

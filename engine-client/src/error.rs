@@ -375,10 +375,10 @@ pub enum EngineClientError {
         "Schema version mismatch: local={local_major}.{local_minor}, remote={remote_major}.{remote_minor}"
     )]
     SchemaMismatch {
-        local_major: u16,
-        local_minor: u16,
-        remote_major: u16,
-        remote_minor: u16,
+        local_major: u32,
+        local_minor: u32,
+        remote_major: u32,
+        remote_minor: u32,
     },
 
     #[error("Handshake timeout")]

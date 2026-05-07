@@ -73,7 +73,7 @@ pub(crate) async fn start_grpc_session_with_schema(
     target: &str,
     token: &str,
     mode: dto::AppMode,
-    schema_major: u16,
+    schema_major: u32,
 ) -> Result<
     (
         mpsc::Sender<dto::Command>,
@@ -112,8 +112,8 @@ pub(crate) async fn start_grpc_session_with_schema(
     proto_tx
         .send(engine::Command {
             payload: Some(engine::command::Payload::Hello(engine::HelloRequest {
-                schema_major: u32::from(schema_major),
-                schema_minor: u32::from(SCHEMA_MINOR),
+                schema_major,
+                schema_minor: SCHEMA_MINOR,
                 client_version: CLIENT_VERSION.to_string(),
                 token: token.to_string(),
                 mode: dto_mode_to_proto(mode),
@@ -146,7 +146,28 @@ pub(crate) async fn start_grpc_session_with_schema(
         })?;
 
     let capabilities = match &first.payload {
-        Some(engine::event::Payload::Ready(r)) => capabilities_to_json(r.capabilities.clone()),
+        Some(engine::event::Payload::Ready(r)) => {
+            // H11: client-side schema_major cross-check. The server already
+            // validates the Hello.schema_major we sent, but we also verify the
+            // schema_major echoed back in ReadyResponse to detect proxy/mismatch.
+            if r.schema_major != schema_major {
+                return Err(EngineClientError::SchemaMismatch {
+                    local_major: schema_major,
+                    local_minor: SCHEMA_MINOR,
+                    remote_major: r.schema_major,
+                    remote_minor: r.schema_minor,
+                });
+            }
+            // C2-Rust: warn on schema_minor mismatch — connection continues.
+            if r.schema_minor != SCHEMA_MINOR {
+                log::warn!(
+                    target: "engine_client::grpc_transport",
+                    "schema_minor mismatch: local={} remote={} — continuing",
+                    SCHEMA_MINOR, r.schema_minor
+                );
+            }
+            capabilities_to_json(r.capabilities.clone())
+        }
         _ => {
             return Err(EngineClientError::GrpcTransport(
                 "first gRPC event was not ReadyResponse".to_string(),
@@ -170,7 +191,11 @@ pub(crate) async fn start_grpc_session_with_schema(
     {
         let proto_tx = proto_tx;
         let mut cmd_rx = cmd_rx;
+        let closed_arc_conv = Arc::clone(&closed);
         tokio::spawn(async move {
+            // H10: NotifyOnDrop ensures closed.notify_waiters() is called even
+            // if the converter task panics, preventing wait_closed() from hanging.
+            let _guard = NotifyOnDrop(Arc::clone(&closed_arc_conv));
             while let Some(cmd) = cmd_rx.recv().await {
                 if let Some(proto_cmd) = dto_cmd_to_proto(cmd)
                     && proto_tx.send(proto_cmd).await.is_err()
@@ -252,6 +277,13 @@ fn grpc_status_to_error(status: &tonic::Status) -> EngineClientError {
         }
         Code::Unauthenticated => {
             EngineClientError::GrpcTransport(format!("auth failed: {}", status.message()))
+        }
+        Code::ResourceExhausted => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "engine rejected connection: resource exhausted (max connections)"
+            );
+            EngineClientError::ConnectionRefused
         }
         _ => EngineClientError::GrpcTransport(format!(
             "gRPC {}: {}",
@@ -623,8 +655,8 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
 
     match event.payload? {
         Payload::Ready(r) => Some(dto::EngineEvent::Ready {
-            schema_major: r.schema_major as u16,
-            schema_minor: r.schema_minor as u16,
+            schema_major: r.schema_major,
+            schema_minor: r.schema_minor,
             engine_version: r.engine_version,
             engine_session_id: r.engine_session_id,
             capabilities: capabilities_to_json(r.capabilities),
@@ -882,16 +914,19 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             commission: em.commission,
             ts_event_ms: em.ts_event_ms,
         }),
-        Payload::StrategySignal(ss) => Some(dto::EngineEvent::StrategySignal {
-            strategy_id: ss.strategy_id,
-            instrument_id: ss.instrument_id,
-            signal_kind: proto_signal_kind_to_dto(ss.signal_kind),
-            side: ss.side,
-            price: ss.price,
-            tag: ss.tag,
-            note: ss.note,
-            ts_event_ms: ss.ts_event_ms,
-        }),
+        Payload::StrategySignal(ss) => {
+            let signal_kind = proto_signal_kind_to_dto(ss.signal_kind)?;
+            Some(dto::EngineEvent::StrategySignal {
+                strategy_id: ss.strategy_id,
+                instrument_id: ss.instrument_id,
+                signal_kind,
+                side: ss.side,
+                price: ss.price,
+                tag: ss.tag,
+                note: ss.note,
+                ts_event_ms: ss.ts_event_ms,
+            })
+        }
         Payload::BuyingPowerUpdated(bpu) => Some(dto::EngineEvent::BuyingPowerUpdated {
             request_id: bpu.request_id,
             venue: bpu.venue,
@@ -1137,7 +1172,14 @@ fn proto_order_record_to_dto(or_: engine::OrderRecord) -> Option<dto::OrderRecor
 fn proto_position_record_to_dto(pr: engine::PositionRecord) -> Option<dto::PositionRecordWire> {
     use engine::PositionType;
     let pt = match PositionType::try_from(pr.position_type).unwrap_or(PositionType::Unspecified) {
-        PositionType::Unspecified | PositionType::Cash => dto::PositionType::Cash,
+        PositionType::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "received PositionType::Unspecified — dropping PositionRecord"
+            );
+            return None;
+        }
+        PositionType::Cash => dto::PositionType::Cash,
         PositionType::MarginCredit => dto::PositionType::MarginCredit,
         PositionType::MarginGeneral => dto::PositionType::MarginGeneral,
     };
@@ -1154,7 +1196,14 @@ fn proto_position_record_to_dto(pr: engine::PositionRecord) -> Option<dto::Posit
 fn proto_engine_state_to_dto(state: i32) -> dto::CurrentEngineState {
     use engine::EngineState;
     match EngineState::try_from(state).unwrap_or(EngineState::Unspecified) {
-        EngineState::Unspecified | EngineState::Idle => dto::CurrentEngineState::Idle,
+        EngineState::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "received EngineState::Unspecified, treating as Idle"
+            );
+            dto::CurrentEngineState::Idle
+        }
+        EngineState::Idle => dto::CurrentEngineState::Idle,
         EngineState::Loaded => dto::CurrentEngineState::Loaded,
         EngineState::Running => dto::CurrentEngineState::Running,
         EngineState::Stopping => dto::CurrentEngineState::Stopping,
@@ -1196,13 +1245,20 @@ fn proto_attempted_command_to_dto(cmd: i32) -> dto::AttemptedCommand {
     }
 }
 
-fn proto_signal_kind_to_dto(sk: i32) -> dto::SignalKind {
+fn proto_signal_kind_to_dto(sk: i32) -> Option<dto::SignalKind> {
     use engine::SignalKind;
     match SignalKind::try_from(sk).unwrap_or(SignalKind::Unspecified) {
-        SignalKind::Unspecified | SignalKind::EntryLong => dto::SignalKind::EntryLong,
-        SignalKind::EntryShort => dto::SignalKind::EntryShort,
-        SignalKind::Exit => dto::SignalKind::Exit,
-        SignalKind::Annotate => dto::SignalKind::Annotate,
+        SignalKind::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "received SignalKind::Unspecified — dropping StrategySignal event"
+            );
+            None
+        }
+        SignalKind::EntryLong => Some(dto::SignalKind::EntryLong),
+        SignalKind::EntryShort => Some(dto::SignalKind::EntryShort),
+        SignalKind::Exit => Some(dto::SignalKind::Exit),
+        SignalKind::Annotate => Some(dto::SignalKind::Annotate),
     }
 }
 

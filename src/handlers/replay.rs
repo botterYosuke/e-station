@@ -566,7 +566,10 @@ impl crate::Flowsurface {
                 price,
                 ts_event_ms,
             } => {
-                let price_f32 = price.parse::<f32>().unwrap_or(0.0);
+                let price_f32 = price.parse::<f32>().unwrap_or_else(|e| {
+                    log::warn!("ExecutionMarker: price parse failed: {e}, raw={price:?}");
+                    0.0
+                });
                 let data = crate::chart::kline::ExecutionMarkerData {
                     side,
                     price_f32,

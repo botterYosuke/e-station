@@ -1488,6 +1488,27 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             code,
             message,
         })),
+        // H-1: EngineError — 接続レベルエラー (strategy_id=None) は error ログのみ。
+        // strategy_id=Some(_) の場合は走行中 strategy の outbox event (接続維持)。
+        // 将来 EngineMsg::ConnectionError が追加された際にはここで Some(...) を返す。
+        EngineEvent::EngineError {
+            code,
+            message,
+            strategy_id: None,
+        } => {
+            log::error!("[engine] connection error [{code}]: {message}");
+            None
+        }
+        EngineEvent::EngineError {
+            code,
+            message,
+            strategy_id: Some(sid),
+            ..
+        } => {
+            // strategy-level error; future UI toast when strategy panel is implemented
+            log::warn!("[engine] strategy error [{code}] strategy={sid}: {message}");
+            None
+        }
         // N1.12: ExecutionMarker → chart overlay
         EngineEvent::ExecutionMarker {
             side,
@@ -1534,7 +1555,13 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         // unwrap_or(false) is intentional here: this is a runtime event handler called
         // well after APP_MODE is set; false (live) is the safe fallback so live-mode
         // engine restarts do not accidentally trigger ReplayFinished.
-        EngineEvent::EngineStopped { strategy_id, .. } => {
+        EngineEvent::EngineStopped {
+            strategy_id,
+            final_equity,
+            ts_event_ms,
+        } => {
+            let _ = final_equity; // TODO: display final PnL in replay summary
+            let _ = ts_event_ms;
             let is_replay = app_mode() == engine_client::dto::AppMode::Replay;
             if is_replay {
                 Some(Message::Replay(ReplayMsg::Finished))
@@ -1577,7 +1604,14 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             None
         }
         // F7: ReplayStopped — mode-switch pending confirmation
-        EngineEvent::ReplayStopped { .. } => Some(Message::Window(WindowMsg::ModeSwitchStopAcked)),
+        EngineEvent::ReplayStopped {
+            request_id,
+            final_equity,
+        } => {
+            let _ = request_id; // TODO: match with pending_stop_request_id when parallel stops added
+            let _ = final_equity; // TODO: display final PnL
+            Some(Message::Window(WindowMsg::ModeSwitchStopAcked))
+        }
         // F6a: SCENARIO 抽出結果 → ReplayFormModal prefill
         EngineEvent::StrategyScenarioLoaded {
             request_id,

@@ -5,10 +5,12 @@ import asyncio
 import grpc
 from grpc import aio
 from engine.proto import engine_pb2, engine_pb2_grpc
-from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+from engine.server_grpc import SCHEMA_MAJOR, SCHEMA_MINOR
 from engine.server_grpc import GrpcDataEngineServer
 from pathlib import Path
 import tempfile
+
+pytestmark = pytest.mark.smoke
 
 
 def test_write_grpc_session_file_is_importable_and_callable(tmp_path, monkeypatch):
@@ -139,6 +141,38 @@ async def test_non_hello_first_message_aborts_with_invalid_argument(grpc_server)
         await stream.read()
     assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
+    await channel.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_schema_minor_mismatch_still_connects(grpc_server):
+    """schema_minor が SCHEMA_MINOR と異なっても ReadyResponse が返ること (H13)。
+
+    schema_minor の不一致は後方互換変更であり、接続を拒否してはならない。
+    サーバーは警告ログを出力するが ReadyResponse を返し続ける。
+    """
+    channel = aio.insecure_channel(f"localhost:{grpc_server}")
+    stub = engine_pb2_grpc.DataEngineStub(channel)
+    stream = stub.Session()
+
+    await stream.write(engine_pb2.Command(
+        hello=engine_pb2.HelloRequest(
+            schema_major=SCHEMA_MAJOR,
+            schema_minor=SCHEMA_MINOR + 1,  # minor mismatch — should still connect
+            token="test-token",
+            mode=engine_pb2.APP_MODE_LIVE,
+        )
+    ))
+
+    event = await stream.read()
+    assert event != grpc.aio.EOF
+    assert event.HasField("ready"), (
+        f"Expected ReadyResponse even with schema_minor mismatch, got: {event}"
+    )
+    assert event.ready.schema_major == SCHEMA_MAJOR
+
+    stream.cancel()
     await channel.close()
 
 

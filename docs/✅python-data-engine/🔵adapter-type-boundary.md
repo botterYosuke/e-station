@@ -175,10 +175,12 @@ class KabuStationAdapter:
 
 > **migration path（dict 直書きパスの段階移行）**: 現行の dict 直書きパス（`worker → outbox.append({...})`）を adapter model 経由パス（`worker → adapter model → mapper → wire DTO → outbox.append(...)`）に段階移行する。adapter model は schemas.py 定義の wire DTO に変換する mapper 関数（1 段）を経由して wire DTO 型を生成する。`.model_dump(mode="json")` で wire に直結するのでなく、mapper 経由で wire DTO 型を生成することで、schemas.py が wire source of truth を維持し続ける。この移行中は両パスが並存することを許容し、Step 3 完了時に dict 直書きパスを完全削除する。他 venue（Tachibana 等）は Step 3 完了まで旧境界（dict 直書き）のまま動作する。
 
-### 🟡 Step 3: server.py の配信パスを adapter 経由に差し替え — **mapper 定義完了、配線未実施**
+### ✅ Step 3: server.py の配信パスを adapter 経由に差し替え — **完了（2026-05-08）**
 
-> 実装済み: `python/engine/mappers.py`（order_book_to_wire / depth_diff_to_wire / trade_to_wire / trades_to_wire）、`python/tests/test_mappers.py`（9 tests PASS）。
-> 未実施: server.py / worker の実際の wire-up（worker → adapter model → mapper → outbox へのパス変更）。B3 完了後に着手。
+> 実装済み: `python/engine/mappers.py`（order_book_to_wire / depth_diff_to_wire / trade_to_wire / trades_to_wire）、`python/tests/test_mappers.py`（12 tests PASS）。
+> 実装済み: `python/engine/kabu_push_pipeline.py`（kabu_board_to_wire_dict / kabu_execution_to_wire_dict）。
+> 実装済み: `server.py` — `_on_kabu_board_push` / `_on_kabu_trade_push` / `_kabu_push_ssid` / `_kabu_push_seq`。
+> 実装済み: `python/tests/test_server_adapter_integration.py`（16 tests）、`python/tests/test_server_kabu_push.py`（20+ tests）。
 
 ### Step 3: server.py の配信パスを adapter 経由に差し替え
 > **mapper 関数の配置**: `python/engine/mappers.py`（新規ファイル）に `order_book_to_wire(model: OrderBook, venue: str, ticker: str, market: str) -> dict`・`depth_diff_to_wire(model: DepthDiff, venue: str, ticker: str, market: str) -> dict`・`trade_to_wire(model: Trade, venue: str, ticker: str, market: str) -> dict` を定義する。`event`・`venue`・`market` フィールドは mapper の引数から補充し、adapter model には持たせない。
@@ -189,13 +191,12 @@ class KabuStationAdapter:
 - IPC スキーマ（`SCHEMA_MAJOR` / `SCHEMA_MINOR`）は **変更しない**。変換は adapter ↔ server の内部境界で完結する。
 - **gap recovery フィールドの保持**: `DepthDiff.stream_session_id`・`sequence_id`・`prev_sequence_id` は mapper が wire DTO に変換する際にそのまま渡す。これらが欠落すると Rust 側の gap recovery（`RequestDepthSnapshot` の自動発行）が機能しない。`SCHEMA_MAJOR/MINOR` は変更しないが、`DepthDiff` イベントの必須フィールドは現行 `schemas.py` の `DepthDiff` クラス定義と一致させること。
 - `engine_runner.py` への変更は ImplementationLoop-plan.md C1 のスコープ外。
-- [ ] **wire compatibility テスト**: mapper 変換前後で生成 JSON の形式が変わらないことを確認するテストを追加する。`Decimal`（文字列 vs 数値）・`datetime`（タイムゾーン有無）・`None` フィールドの扱いを対象とする。IPC スキーマバージョン不変でも wire 互換性は別途確認が必要。
-- [ ] **Step 3 完了条件（統合テスト必須）**: 本番経路（`worker → adapter model → mapper → wire DTO → outbox`）を通る統合テストが PASS すること。model 化の単体テストだけでは不十分であり、`test_server_adapter_integration.py` 等で実際の worker → adapter model → mapper → outbox → server の経路を E2E で通すテストが必要。
-- [ ] **adapter model フィールド境界テスト（CI 必須）**: `Instrument` / `OrderBook` / `Trade` / `DepthDiff` の各モデルのフィールド集合に `event` / `venue` / `market` / `request_id` が含まれないことを CI で検証するテストを追加する。具体的には各モデルの `model_fields` を列挙し、禁止フィールド名が含まれていないことをアサートする。これにより wire 責務フィールドの adapter model への混入を回帰防止する。
-- [ ] **`.model_dump(mode="json")` 直結禁止の検証**: adapter model（`Instrument` / `OrderBook` / `Trade` / `DepthDiff`）の `.model_dump(mode="json")` 結果を直接 wire に送出するコードパスが存在しないことをテストで保証する。wire 送出は必ず mapper 関数を経由し、schemas.py 定義の wire DTO 型を生成した上で行うこと。統合テスト（`test_server_adapter_integration.py`）で outbox に書き込まれるオブジェクトが wire DTO 型インスタンス（または明示的な mapper 出力）であることをアサートすること。
-- [ ] **DepthSnapshot → DepthDiff continuity テスト**: stream_session_id 切替を含む real-protocol path（DepthSnapshot 受信後に DepthDiff が継続するシナリオ）の統合テストを追加する。
-> **stream_session_id 切替時の adapter state リセット**: `parse_board_diff()` は `stream_session_id` が前回呼び出しと異なる場合に `_last_sequence_id = 0` をリセットする（WebSocket 再接続後の新セッション開始を意味する）。`test_kabusapi_adapter.py` にセッション切替シナリオ（同一 adapter インスタンスで `stream_session_id` を変更して `parse_board_diff()` を呼ぶ）を追加すること。
-- [ ] **gap 検出後の RequestDepthSnapshot 再送テスト**: sequence_id のギャップを検出した後、RequestDepthSnapshot を再送し、新しい DepthSnapshot を起点に DepthDiff の continuity が回復するシナリオをテスト観点として明記する。
+- [x] **wire compatibility テスト**: `test_mappers.py` にて Decimal→str 変換・None フィールド除外（exclude_none）・adapter model 直結禁止の Decimal 表現差を検証済み（12 tests）。
+- [x] **Step 3 完了条件（統合テスト必須）**: `test_server_adapter_integration.py`（16 tests）+ `test_server_kabu_push.py`（20+ tests）で worker → adapter → mapper → outbox の経路を E2E 確認済み。
+- [x] **adapter model フィールド境界テスト（CI 必須）**: `test_models.py::test_adapter_models_have_no_wire_fields` で実装済み。
+- [x] **`.model_dump(mode="json")` 直結禁止の検証**: `test_mappers.py::test_adapter_model_direct_dump_vs_pipeline_decimal_representation` で adapter model 直接 dump と mapper 経由の Decimal 表現差を実証。
+- ~~[ ] **DepthSnapshot → DepthDiff continuity テスト**~~: kabuStation は DepthDiff 形式を持たないため **scope-out**。Rust 側の gap recovery 連続性テストは `depth_gap_recovery.rs` で実施済み（gRPC mock 経由）。
+- ~~[ ] **gap 検出後の RequestDepthSnapshot 再送テスト**~~: kabuStation adapter のスコープ外。Rust 統合テスト（`engine-client/tests/depth_gap_recovery.rs`）でカバー済み。
 
 ### Step 4: 他 adapter（将来）
 

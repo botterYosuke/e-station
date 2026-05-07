@@ -60,10 +60,7 @@ impl fmt::Debug for EngineSession {
 }
 
 impl EngineSession {
-    /// Create a new WebSocket session with `started_at = now()`.
-    ///
-    /// Defaults `transport` to [`TransportKind::Ws`]. Use [`Self::with_transport`] when
-    /// creating a gRPC session.
+    /// Creates a WS-transport session. For gRPC use [`EngineSession::with_transport`] with [`TransportKind::Grpc`].
     pub fn new(port: u16, token: String, pid: u32, schema_major: u32) -> Self {
         Self::with_transport(port, token, pid, schema_major, TransportKind::Ws)
     }

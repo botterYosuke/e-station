@@ -24,6 +24,9 @@ use crate::{
 pub(crate) enum EngineMsg {
     Restarting(bool),
     Connected(Arc<engine_client::EngineConnection>),
+    /// IPC コマンド送信が成功したが GUI 側に通知が不要な場合の sink variant。
+    /// EngineMsg グループ内にあるのは「engine に対するコマンドの結果」という文脈のため。
+    /// Task::none() の代替として使用される。
     Noop,
 }
 
@@ -97,6 +100,8 @@ pub(crate) enum VenueMsg {
 /// Replay playback, live strategy, and strategy-file operations.
 #[derive(Debug, Clone)]
 pub(crate) enum ReplayMsg {
+    /// `instrument_id` (single) と `instrument_ids` (multi) は排他的に使用すること。
+    /// 両方 Some になることはない。将来的には `InstrumentSpec::Single / Multi` enum に統合予定。
     DataLoaded {
         instrument_id: Option<String>,
         instrument_ids: Option<Vec<String>>,
@@ -173,6 +178,10 @@ pub(crate) enum ReplayMsg {
 /// Dashboard layout events and market-data streams.
 #[derive(Debug, Clone)]
 pub(crate) enum DashboardMsg {
+    /// Route `event` to a specific layout (by UUID) or to the active layout when `None`.
+    ///
+    /// `layout_id: None` is a sentinel meaning "active layout" — not an absent value.
+    /// Future refactor: replace with `enum LayoutTarget { Active, Specific(uuid::Uuid) }`.
     Layout {
         layout_id: Option<uuid::Uuid>,
         event: dashboard::Message,

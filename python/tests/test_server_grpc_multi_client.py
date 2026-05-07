@@ -62,21 +62,26 @@ async def test_two_clients_both_receive_client_connected(multi_client_server):
     ch2, stream2 = await _connect_and_handshake(port)
 
     # drain events — timeout 付きポーリングで broadcast 到達を待つ（sleep 不要）
-    async def drain_for_event(stream, event_type: str, timeout=3.0):
+    async def drain_for_client_connected(stream, expected_count: int, timeout=3.0):
+        """指定した count を持つ ClientConnected イベントを返す。"""
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             try:
                 ev = await asyncio.wait_for(stream.read(), timeout=0.5)
-                if ev.HasField(event_type):
+                if ev.HasField("client_connected") and ev.client_connected.count == expected_count:
                     return ev
             except asyncio.TimeoutError:
                 continue
         return None
 
-    ev1 = await drain_for_event(stream1, "client_connected")
-    ev2 = await drain_for_event(stream2, "client_connected")
+    # 両クライアントが count=2 の ClientConnected broadcast を受け取ること
+    ev1 = await drain_for_client_connected(stream1, expected_count=2)
+    ev2 = await drain_for_client_connected(stream2, expected_count=2)
 
     assert ev1 is not None and ev2 is not None, "Not all clients received ClientConnected"
+    assert ev1.client_connected.count == 2, (
+        "1st client should receive count=2 when 2nd client connects"
+    )
 
     stream1.cancel()
     stream2.cancel()

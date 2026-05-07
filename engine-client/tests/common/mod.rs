@@ -30,6 +30,9 @@ pub mod engine {
 use engine::data_engine_server::{DataEngine, DataEngineServer};
 use engine::{Command, Event, ReadyResponse};
 
+/// Convenience constant: `SCHEMA_MINOR + 1`, used in H13 tests.
+pub const SCHEMA_MINOR_PLUS_ONE: u32 = flowsurface_engine_client::SCHEMA_MINOR + 1;
+
 /// A controllable mock gRPC engine service.
 ///
 /// After the initial HelloRequest, it sends a ReadyResponse and then
@@ -45,8 +48,16 @@ pub struct MockServicer {
     pub close_after_ready: bool,
     /// If true, return UNAUTHENTICATED for wrong token.
     pub enforce_token: bool,
+    /// If false, skip server-side schema_major validation (for testing client-side H11 check).
+    pub enforce_schema: bool,
+    /// The schema_major the server expects from the client.  When `None`, defaults to
+    /// `SCHEMA_MAJOR` from the crate.  Setting this to a value different from `SCHEMA_MAJOR`
+    /// causes `enforce_schema=true` to reject the normal client Hello with FAILED_PRECONDITION.
+    pub server_expected_schema_major: Option<u32>,
     /// Schema major to echo back in ReadyResponse (default = SCHEMA_MAJOR from crate).
     pub schema_major_override: Option<u32>,
+    /// Schema minor to echo back in ReadyResponse (default = SCHEMA_MINOR from crate).
+    pub schema_minor_override: Option<u32>,
     /// Capabilities to include in ReadyResponse (default = None = empty).
     pub capabilities: Option<engine::EngineCapabilities>,
     /// Channel sink to forward received commands to the test. If None, commands
@@ -62,7 +73,10 @@ impl Default for MockServicer {
             event_delay_ms: 0,
             close_after_ready: false,
             enforce_token: true,
+            enforce_schema: true,
+            server_expected_schema_major: None,
             schema_major_override: None,
+            schema_minor_override: None,
             capabilities: None,
             cmd_sink: None,
         }
@@ -100,22 +114,31 @@ impl DataEngine for MockServicer {
             return Err(Status::unauthenticated("invalid token"));
         }
 
-        // Schema major check.
-        let schema_major = self
+        // Schema major check: only validate when enforce_schema is true (default).
+        // `server_expected_schema_major` sets the server's ground truth; defaults to
+        // the crate's `SCHEMA_MAJOR`.  A mismatch causes FAILED_PRECONDITION.
+        let expected_major = self
+            .server_expected_schema_major
+            .unwrap_or(flowsurface_engine_client::SCHEMA_MAJOR);
+        let ready_schema_major = self
             .schema_major_override
-            .unwrap_or(flowsurface_engine_client::SCHEMA_MAJOR as u32);
-        if hello.schema_major != schema_major {
+            .unwrap_or(flowsurface_engine_client::SCHEMA_MAJOR);
+        if self.enforce_schema && hello.schema_major != expected_major {
             return Err(Status::failed_precondition(format!(
                 "schema major mismatch: client={} server={}",
-                hello.schema_major, schema_major
+                hello.schema_major, expected_major
             )));
         }
+
+        let ready_schema_minor = self
+            .schema_minor_override
+            .unwrap_or(flowsurface_engine_client::SCHEMA_MINOR);
 
         // Build ReadyResponse.
         let ready_event = Event {
             payload: Some(engine::event::Payload::Ready(ReadyResponse {
-                schema_major,
-                schema_minor: flowsurface_engine_client::SCHEMA_MINOR as u32,
+                schema_major: ready_schema_major,
+                schema_minor: ready_schema_minor,
                 engine_version: "0.0.1-mock".to_string(),
                 engine_session_id: "00000000-0000-0000-0000-000000000001".to_string(),
                 capabilities: self.capabilities.clone(),
@@ -168,9 +191,15 @@ impl DataEngine for MockServicer {
 }
 
 /// A running mock gRPC engine bound to a random loopback port.
+///
+/// The `_handle` field retains the `JoinHandle` for the spawned server task so
+/// that calling `shutdown()` aborts the task — panics in the server task will not
+/// silently disappear.
 pub struct MockGrpcEngine {
     pub addr: SocketAddr,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    // M10: retain JoinHandle to enable abort() on shutdown().
+    _handle: tokio::task::JoinHandle<()>,
 }
 
 impl MockGrpcEngine {
@@ -215,7 +244,75 @@ impl MockGrpcEngine {
         .await
     }
 
+    /// Start a mock engine that returns UNAUTHENTICATED for any token other than
+    /// `token` (for testing that a token mismatch causes the probe to fall through
+    /// to spawn).
+    pub async fn start_unauthenticated(token: &str) -> Self {
+        // enforce_token=true with a specific token; any other token → UNAUTHENTICATED.
+        Self::start(MockServicer {
+            token: token.to_string(),
+            enforce_token: true,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Start a mock engine that returns FAILED_PRECONDITION due to schema mismatch
+    /// (for testing that a schema major mismatch causes the probe to fall through
+    /// to spawn).
+    ///
+    /// The server declares it expects `SCHEMA_MAJOR + 999` from the client, so any
+    /// normal client Hello (which carries the real `SCHEMA_MAJOR`) triggers the
+    /// FAILED_PRECONDITION rejection.
+    pub async fn start_schema_major_mismatch(token: &str) -> Self {
+        let bogus = flowsurface_engine_client::SCHEMA_MAJOR.saturating_add(999);
+        Self::start(MockServicer {
+            token: token.to_string(),
+            enforce_schema: true,
+            // The server expects this bogus major; the client sends the real SCHEMA_MAJOR
+            // → mismatch → FAILED_PRECONDITION.
+            server_expected_schema_major: Some(bogus),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Start a mock engine that echoes a specific `schema_minor` in ReadyResponse.
+    ///
+    /// The server accepts any HelloRequest with the real SCHEMA_MAJOR but returns
+    /// `override_minor` in ReadyResponse so the client's C2 warn path can be exercised.
+    pub async fn start_schema_minor_override(token: &str, override_minor: u32) -> Self {
+        Self::start(MockServicer {
+            token: token.to_string(),
+            schema_minor_override: Some(override_minor),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Start a mock engine that echoes a different `schema_major` in ReadyResponse,
+    /// bypassing the server-side mismatch rejection (for client-side H11 test).
+    ///
+    /// The server accepts any HelloRequest regardless of schema_major, but
+    /// returns `override_major` in ReadyResponse so the client's H11 check fires.
+    pub async fn start_with_ready_schema_major_override(token: &str, override_major: u32) -> Self {
+        Self::start(MockServicer {
+            token: token.to_string(),
+            // Disable server-side schema enforcement so HelloRequest passes even
+            // with the real SCHEMA_MAJOR — we want to test the client-side H11
+            // check on the ReadyResponse body, not the server-side reject path.
+            enforce_schema: false,
+            schema_major_override: Some(override_major),
+            ..Default::default()
+        })
+        .await
+    }
+
     /// Start a mock engine with a custom `MockServicer`.
+    ///
+    /// The returned `MockGrpcEngine` holds the server task's `JoinHandle` so that
+    /// calling `shutdown()` aborts the task — panics in the server task will not
+    /// silently disappear.
     pub async fn start(servicer: MockServicer) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -230,11 +327,17 @@ impl MockGrpcEngine {
                 },
             );
 
-        let _handle = tokio::spawn(server);
-        // Brief pause so tonic is accepting before the test starts.
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // M10: retain the JoinHandle so shutdown() can abort() the server task,
+        // ensuring server panics propagate to the test instead of being silently dropped.
+        let handle = tokio::spawn(async move {
+            server.await.ok();
+        });
 
-        Self { addr, shutdown_tx }
+        Self {
+            addr,
+            shutdown_tx,
+            _handle: handle,
+        }
     }
 
     /// gRPC `http://` target string, e.g. `"http://127.0.0.1:12345"`.
@@ -242,8 +345,11 @@ impl MockGrpcEngine {
         format!("http://{}", self.addr)
     }
 
-    /// Signal the mock server to stop.
+    /// Signal the mock server to stop and abort the server task.
     pub async fn shutdown(self) {
+        // Send the shutdown signal first (graceful stop).
         let _ = self.shutdown_tx.send(());
+        // Abort the task to ensure it is cleaned up even if it ignores the signal.
+        self._handle.abort();
     }
 }

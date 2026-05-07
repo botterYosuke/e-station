@@ -31,6 +31,9 @@ def kabu_board_to_wire_dict(
         outbox.append() にそのまま渡せる。
     """
     book = adapter.parse_board(raw)
+    # model_copy は shallow copy: book.bids is book_with_ids.bids が True になる。
+    # order_book_to_wire() 直後に book_with_ids を破棄するため現在は安全。
+    # book を長期キャッシュする場合は deep=True を使うこと。
     book_with_ids = book.model_copy(update={
         "stream_session_id": ssid,
         "sequence_id": seq,

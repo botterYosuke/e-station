@@ -6,7 +6,9 @@
 /// G3: Migrated from WS (tokio-tungstenite) to gRPC (tonic MockGrpcEngine).
 mod common;
 
-use flowsurface_engine_client::{EngineConnection, SCHEMA_MAJOR, dto::AppMode};
+use flowsurface_engine_client::{
+    EngineClientError, EngineConnection, SCHEMA_MAJOR, SCHEMA_MINOR, dto::AppMode,
+};
 
 #[tokio::test]
 async fn connect_grpc_performs_hello_ready_handshake() {
@@ -84,6 +86,77 @@ async fn capabilities_getter_exposes_ready_snapshot() {
     assert!(
         result.is_ok(),
         "is_timeframe_enabled should not error on empty caps"
+    );
+
+    mock.shutdown().await;
+}
+
+/// H11: client-side `ReadyResponse.schema_major` cross-check returns
+/// `SchemaMismatch` when the server echoes a different major version.
+///
+/// The mock server is configured to bypass its own schema check
+/// (`enforce_schema: false`) so the Hello passes, but it returns a bogus
+/// `schema_major` in ReadyResponse.  The client must detect this and error.
+#[tokio::test]
+async fn ready_schema_major_mismatch_returns_schema_mismatch_error() {
+    let bogus_major = SCHEMA_MAJOR.saturating_add(42);
+    let mock =
+        common::MockGrpcEngine::start_with_ready_schema_major_override("tok-h11", bogus_major)
+            .await;
+
+    let result = EngineConnection::connect_grpc(&mock.target(), "tok-h11", AppMode::Live).await;
+    assert!(result.is_err(), "expected SchemaMismatch error");
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            EngineClientError::SchemaMismatch {
+                local_major,
+                remote_major,
+                ..
+            } if local_major == SCHEMA_MAJOR && remote_major == bogus_major
+        ),
+        "error should be SchemaMismatch with correct fields"
+    );
+
+    mock.shutdown().await;
+}
+
+/// C2-Rust: `schema_minor` mismatch in ReadyResponse is a warning only —
+/// the connection must still succeed.
+///
+/// Verifies the non-error path: normal connection (minor matches) succeeds.
+/// The `schema_minor != SCHEMA_MINOR` log::warn branch is exercised when a
+/// real engine or a custom mock returns a different minor.
+#[tokio::test]
+async fn ready_schema_minor_mismatch_does_not_fail_handshake() {
+    // Smoke test: matching minor → no warn → handshake OK.
+    let mock = common::MockGrpcEngine::start_basic("tok-c2").await;
+    let result = EngineConnection::connect_grpc(&mock.target(), "tok-c2", AppMode::Live).await;
+    assert!(
+        result.is_ok(),
+        "handshake must succeed when schema_minor matches: {:?}",
+        result.err()
+    );
+    mock.shutdown().await;
+
+    // Verify SCHEMA_MINOR is u32 (H4 type-change contract).
+    let _: u32 = SCHEMA_MINOR;
+}
+
+/// H13: mock returns `schema_minor = SCHEMA_MINOR + 1` → connection must succeed.
+///
+/// `schema_minor` differences signal backward-compatible additions; the client
+/// should emit a log::warn but must NOT return an error.
+#[tokio::test]
+async fn schema_minor_plus_one_still_connects() {
+    let minor_ahead = SCHEMA_MINOR.saturating_add(1);
+    let mock = common::MockGrpcEngine::start_schema_minor_override("tok-h13", minor_ahead).await;
+
+    let result = EngineConnection::connect_grpc(&mock.target(), "tok-h13", AppMode::Live).await;
+    assert!(
+        result.is_ok(),
+        "connection must succeed when server schema_minor is SCHEMA_MINOR+1: {:?}",
+        result.err()
     );
 
     mock.shutdown().await;

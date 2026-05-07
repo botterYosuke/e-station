@@ -768,3 +768,60 @@ WS 依存だった 10 個の統合テストファイルを tonic gRPC モック�
 | M-NEW-1 | MEDIUM | `test_engine_session_transport.py` + `mock_grpc_server.py` — `_GrpcAttachClient.handshake()` 正常/schema_mismatch/wrong_token の 3 テスト追加、MockGrpcServer に `expected_token` パラメータ追加、`_GrpcAttachClient` に `_schema_major_override` パラメータ追加 |
 | M-NEW-2 | MEDIUM | `test_server_grpc_multi_client.py:104` — `asyncio.sleep(0.1)` を削除（handshake 完了は `wait_for` で保証済みのため sleep 不要） |
 | M-NEW-3 | MEDIUM | `.github/workflows/proto-lint.yml` — `buf breaking` に `fetch-depth: 0` と初回実行ガード追加（main に `buf.yaml` 未存在時にスキップ） |
+
+## レビュー反映 (2026-05-08, ラウンド 1)
+
+実施日: 2026-05-08  
+対象フェーズ: A2 / B3  
+新規テストファイル: `tests/engine_event_routing_exhaustive.rs`（4 tests）/ `tests/live_replay_routing_boundary.rs`（3 tests）
+
+### 修正済み Finding 一覧
+
+| Finding ID | 分類 | 内容（1 行サマリ） |
+|---|---|---|
+| H-1 | HIGH | `map_engine_event_to_message` exhaustive テスト追加 + `EngineError` arm 明示（`strategy_id: None` で `log::error!`、`Some(_)` は silent None） |
+| H-2 | HIGH | live/replay 境界テスト 3 件新設（`ReplayMsg::Finished` arm / `session_epoch` 管理 / `pending` 状態ハンドリング） |
+| H-3 | HIGH | `pane.rs` 再構築パスに `apply_view_state()` 追加（`TicksizeSelected` / `BasisSelected` ハンドラの `HeatmapShader::new()` 直後） |
+| H-4 | HIGH | Phase O1 繰越（Panning.translation canvas architecture 変更、ユーザー承認済み） |
+| H-5 | HIGH | `DashboardMsg::Layout.layout_id` を `Option<LayoutId>` に修正 — **STOP+REPORT**: `DistributeFetchedData.layout_id` が `Uuid` 型であり `Option<LayoutId>` の構築時に `name` フィールドが不明。変更すると多数の呼び出し箇所が壊れる。型変更の代わりに `handlers/dashboard.rs` 消費側での `id.map(\|l\| l.unique)` 変換で対応するか、`DistributeFetchedData.layout_id` を `LayoutId` に変更する広範な変更が必要。ユーザー判断を仰ぐ |
+| M-1 | MEDIUM | `src/chart.rs:926` — `partial_cmp().unwrap()` → `total_cmp()` に変更（NaN パニック防止） |
+| M-2 | MEDIUM | `src/handlers/replay.rs:569` — `price.parse()` フォールバックに `log::warn!` 追加 |
+| M-3 | MEDIUM | `src/widget/chart/heatmap.rs` — `rebuild_signal_debouncing_at_exact_boundary_is_full` テスト追加（境界値 `elapsed == REBUILD_DEBOUNCE_MS` が `Full` を返すことを確認） |
+| M-4 | MEDIUM | `HeatmapShader::update()` に doc コメント追加（Effect を返さない設計の意図を明記） |
+| M-5 | MEDIUM | `src/main.rs` — `EngineStopped` の `..` を `final_equity` / `ts_event_ms` 全フィールド明示に変更 |
+| M-6 | MEDIUM | `src/main.rs` — `ReplayStopped` の `..` を `request_id` / `final_equity` 全フィールド明示に変更 |
+| M-7 | MEDIUM | `heatmap.rs` — `RebuildSignal::set_immediate()` に「Only call via `rebuild_all_immediate()`」コメント追加（既に private `fn`） |
+| M-8 | MEDIUM | `HeatmapViewState.camera_offset` に「GPU シェーダー内部形式」説明コメント追加 |
+| M-9 | MEDIUM | `ReplayMsg::DataLoaded` に `instrument_id` / `instrument_ids` 排他性の doc コメント追加 |
+| M-10 | MEDIUM | `Interaction::Ruler` に「`start: None` は未初期化ではなく有効・開始点未選択を意味する」doc コメント追加 |
+| M-11 | MEDIUM | `EngineMsg::Noop` に「IPC コマンド送信成功時の sink variant / Task::none() 代替」doc コメント追加 |
+| M-12 | MEDIUM | `RebuildSignal::Debouncing.since` に「過去時刻保証・saturating_duration_since による安全装置」コメント追加 |
+| M-13 | MEDIUM | `heatmap-phase2-ownership.md` チェックリスト更新（`HeatmapViewState` 定義済み / `view_state()`/`apply_view_state()` 実装済み / Elm 統合済みに `[x]`） |
+
+**繰越（Phase O1 / 別 PR）**:
+- H-4: `Interaction::Panning { translation: Vector }` の canvas architecture 変更（ユーザー承認済み）
+- H-5: `DashboardMsg::Layout.layout_id` の `Option<LayoutId>` 変更（`DistributeFetchedData.layout_id: Uuid` との型不整合のため、doc コメントで None の意味を明示して対応済み。`LayoutTarget` enum への置換は別 PR）
+
+## レビュー反映 (2026-05-08, ラウンド 2)
+
+実施日: 2026-05-08  
+対象: R1 修正後のサニティチェック（silent-failure-hunter + iced-architecture-reviewer）  
+新規修正: 3 件（R2-M1〜M3）
+
+### 修正済み Finding 一覧
+
+| Finding ID | 分類 | 内容（1 行サマリ） |
+|---|---|---|
+| R2-M1 | MEDIUM | `EngineError { strategy_id: Some(sid) }` arm に `log::warn!` 追加（バックテスト中の strategy 例外が無応答だった） |
+| R2-M2 | MEDIUM | `engine_event_variant_count_is_as_expected` を `>= 50` → `assert_eq!(count, 52)` の完全一致に変更（新バリアント追加を検出できなかった） |
+| R2-M3 | MEDIUM | `live_replay_routing_boundary.rs` の 3 テストを精密パターンに改善（`self.replay_running = false` / `self.last_replay_session_epoch = session_epoch` / `self.replay_stop_only_pending` + `pending_scenario_request_id` の実コード確認済みパターン） |
+
+## レビュー反映 (2026-05-08, ラウンド 3)
+
+実施日: 2026-05-08  
+対象: R2 修正後の最終サニティチェック（silent-failure-hunter 単独）  
+結果: **CRITICAL 0 / HIGH 0 / MEDIUM 0 / LOW 0 — 収束**
+
+- R2 修正 3 件すべての正確性を確認（フィールドバインド、variant 数 52、精密パターン）
+- 新たな silent failure なし
+- `cargo test --workspace` 943 tests passed

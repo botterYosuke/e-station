@@ -35,6 +35,8 @@
 | EngineEvent フィールド追加時の `..` 黙示破棄 | 既存 `EngineEvent` バリアントに新フィールドを追加したとき、ディスパッチャ arm の `..` がそのフィールドを黙って捨てる。アーム存在確認テストはあるがフィールド転送確認テストがないため、新フィールドが UI に届かない | 1 |
 | セッション境界 IPC 欠如 | engine 側が「新セッション開始」を IPC で表現せず、GUI 側の per-session レジストリ（loaded / dismissed / registered の蓄積）に「リセットの契機」がユーザーの手動 dismiss しか存在しない。リプレイファイル切替・モード切替などの境界で前セッションの状態が孤児として残り、`Waiting for data...` 状態のペインが居座る。修正は engine に単調増加 epoch を持たせて `ReplayDataLoaded` に同梱し、GUI で `prev != curr` を切替検知トリガにする（schema 3.14）| 1 |
 | pipeline 直接テストによるサーバー層ロジック見逃し | pipeline 純粋関数をテストして満足し、server.py メソッド内の state 管理（seq 採番順序・Symbol ガード・ssid フォールバック）を未テスト。seq を Symbol チェック前に increment するバグを実装してもパイプラインテストは PASS した | 1 |
+| 復元 API の保存のみ実装・呼び出し未配線 | `save()` / `view_state()` を実装して満足し、対称の `restore()` / `apply_view_state()` が再構築パス（設定変更で内部オブジェクトを new() する箇所）から呼ばれていない。保存は動作しているが復元が無効で、ユーザーが調整したカメラ/ズーム位置が再生成時にリセットされる | 1 |
+| enum 下限チェックのみのバリアント数テスト | `assert!(count >= N)` 形式のバリアント数テストは新バリアント追加を検出しない。`_ => None` ワイルドカードがある match では新バリアントが追加されてもテストが通り、サイレント消失を見逃す。`assert_eq!(count, N)` の完全一致テストで新旧どちらの変化も検出する | 1 |
 
 ---
 
@@ -1905,3 +1907,45 @@ sequence_id カウンターが消費されていた。これにより Rust 側�
 3. **gap recovery フィールド（sequence_id）の正当性は E2E まで通してテストする**: 採番ロジックの
    バグは Rust 側の gap detector でしか顕在化しないため、Python 単体テストのみでは発見できない。
    `kabu_board_to_wire_dict` の正しさと `_on_kabu_board_push` の正しさは別々にテストする。
+
+---
+
+## 2026-05-08 — kabu PUSH seq が Symbol チェック前にインクリメントされていた
+
+**見逃しパターン**: pipeline 直接テストによるサーバー層ロジック見逃し（パターン更新）
+
+**不具合の概要**:
+`DataEngineServer._on_kabu_board_push()` で `self._kabu_push_seq += 1` が `if not ticker: return`
+よりも前に置かれており、Symbol フィールドが欠損した PUSH でも seq が消費されていた。
+gap recovery の seq 連続性が壊れ、Rust 側が不必要な `RequestDepthSnapshot` を発行する可能性があった。
+
+修正コミット: `fix(server): kabu PUSH seq を Symbol チェック後にインクリメント`
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_server_adapter_integration.py` | `kabu_push_pipeline.py` の純粋関数のみをテスト。server.py の handler state を一切触らない |
+| `test_kabusapi_adapter.py` | adapter 単体のみ。server 層の seq 採番ロジック外 |
+
+**追加したテスト**:
+- `python/tests/test_server_kabu_push_state.py` — 12 tests
+  - `test_board_push_seq_not_incremented_on_missing_symbol` — **regression core**
+  - `test_board_push_seq_skips_missing_symbol_in_sequence` — 混在シナリオ
+  - `test_board_push_seq_monotone_across_three_calls` — 単調増加確認
+  - `test_board_push_ssid_fallback_to_engine_session_id_when_none` — ssid=None フォールバック
+  - `test_board_push_ssid_used_when_set` — ssid 伝搬確認
+  - `test_board_push_parse_error_does_not_propagate` — 例外飲み込み確認
+  - `test_trade_push_does_not_affect_seq` — trade push が board seq に影響しない確認
+  - 他 5 件
+
+**リグレッション確認**:
+- `_kabu_push_seq += 1` を Symbol チェック前に戻す → `test_board_push_seq_not_incremented_on_missing_symbol` と `test_board_push_seq_skips_missing_symbol_in_sequence` が FAIL することを実際に確認済み。
+
+**教訓**:
+
+1. **pipeline テストは server 層の state 管理を保証しない**: 純粋関数パイプライン（`kabu_push_pipeline.py`）のテストが全件 PASS しても、server.py の handler で seq 採番順序が壊れたままになる。**pipeline テストと server handler テストは独立して必要。**
+
+2. **SimpleNamespace + unbound method で server メソッドを単体テストする**: `DataEngineServer.__init__` を起動せずに handler だけをテストするには `types.SimpleNamespace` で必要な属性を用意し `types.MethodType(DataEngineServer._on_kabu_board_push, stub)` で bound method を作る。属性が足りなければ `AttributeError` でドリフトが即座に分かる。
+
+3. **gap recovery の seq 正当性は採番層まで通してテストする**: `kabu_board_to_wire_dict` が seq を正しく wire DTO に埋めても、呼び出し側の handler が正しい seq を渡さなければ意味がない。採番ロジックと変換ロジックは分けてテストする。

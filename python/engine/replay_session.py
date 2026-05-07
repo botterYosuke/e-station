@@ -833,9 +833,10 @@ class _GrpcAttachClient:
                 self._ready.set()
             else:
                 log.warning(
-                    "[_GrpcAttachClient] post-handshake error (endpoint=%s): %s",
+                    "[_GrpcAttachClient] post-handshake error (endpoint=%s): %s: %s",
                     self._endpoint,
                     type(exc).__name__,
+                    exc,
                 )
                 try:
                     self._recv_queue.put_nowait({"__error__": "grpc_closed"})
@@ -845,8 +846,8 @@ class _GrpcAttachClient:
             if self._channel is not None:
                 try:
                     await self._channel.close(grace=0)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("[_GrpcAttachClient] channel.close failed: %s", exc)
 
     async def _recv_loop(self, response_stream) -> None:
         """gRPC イベントストリームを受信して recv_queue に積む。"""
@@ -880,8 +881,8 @@ class _GrpcAttachClient:
                     else:
                         msg = {"event": event_name}
                     self._recv_queue.put_nowait(msg)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("[_GrpcAttachClient] recv_loop error: %s: %s", type(exc).__name__, exc, exc_info=True)
         log.info("[_GrpcAttachClient] recv_loop ended")
         self._recv_queue.put_nowait({"__error__": "grpc_closed"})
 
@@ -938,29 +939,121 @@ class _GrpcAttachClient:
             return None
 
     def events(self, timeout: float = 60.0):
-        """イベントジェネレータ。WS 版と同インターフェイス。"""
+        """イベントジェネレータ。WS 版と同インターフェイス。
+
+        H3: WS 版 _AttachClient.events() に準拠し、__error__ / EngineBusy / Error を
+        それぞれ ConnectionError / BusyError / ConnectionError に変換して raise する。
+        R3: Error イベントに request_id フィルタを適用し、別クライアント宛は無視して続行する。
+        """
         while True:
             msg = self.recv(timeout=timeout)
             if msg is None:
-                return
-            if msg.get("__error__"):
+                raise ConnectionError("gRPC stream timed out / connection lost")
+            if "__error__" in msg:
+                raise ConnectionError("gRPC connection lost")
+            if msg.get("event") == "EngineBusy":
+                raise BusyError(
+                    f"EngineBusy: state={msg.get('current_state')!r} "
+                    f"cmd={msg.get('attempted_command')!r}"
+                )
+            if msg.get("event") == "Error":
+                evt_rid = msg.get("request_id")
+                if (
+                    self._current_request_id is not None
+                    and evt_rid is not None
+                    and evt_rid != self._current_request_id
+                ):
+                    log.debug(
+                        "[_GrpcAttachClient.events] ignoring Error from another "
+                        "request_id=%r (current=%r)",
+                        evt_rid,
+                        self._current_request_id,
+                    )
+                    continue
+                raise ConnectionError(
+                    f"engine returned Error: code={msg.get('code')!r} "
+                    f"message={msg.get('message')!r}"
+                )
+            if msg.get("event") == "EngineStopped":
+                yield msg
                 return
             yield msg
 
-    def wait_for(self, event_type: str, timeout_s: float = 30.0) -> dict | None:
-        """特定のイベントを待つ。WS 版と同インターフェイス。"""
+    def wait_for(self, event_type: str, timeout_s: float = 30.0) -> dict:
+        """特定のイベントを待つ。WS 版と同インターフェイス。
+
+        H1: None を返さない。切断時は ConnectionError、タイムアウト時は TimeoutError を raise する。
+        M6: EngineBusy 受信時は BusyError を raise する（WS 版 wait_for に準拠）。
+        R2-H1: Error event 受信時に ConnectionError を raise する（WS 版 wait_for との対称性）。
+               request_id フィルタにより別クライアント宛の Error は無視して続行する。
+        R2-M1: 目的以外のイベントは pending バッファに積み、正常終了時のみ re-queue する。
+               error path (ConnectionError / BusyError / TimeoutError) では破棄する（M-GP3 準拠）。
+        """
         import time
         deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            msg = self.recv(timeout=min(remaining, 1.0))
-            if msg is None:
-                continue
-            if msg.get("__error__"):
-                return None
-            if msg.get("event") == event_type:
-                return msg
-        return None
+        pending: list[dict] = []
+        # R2-M1: requeue_pending — True = 正常終了（re-queue）、False = error path（破棄）
+        requeue_pending = False
+        try:
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                msg = self.recv(timeout=min(remaining, 1.0))
+                if msg is None:
+                    continue
+                if "__error__" in msg:
+                    raise ConnectionError("gRPC stream closed during wait_for")
+                # R2-H1: Error event — request_id フィルタを適用して自分宛のみ raise する。
+                # 別クライアント由来の Error は無視して続行する（WS 版との対称性）。
+                if msg.get("event") == "Error":
+                    evt_rid = msg.get("request_id")
+                    if (
+                        self._current_request_id is not None
+                        and evt_rid is not None
+                        and evt_rid != self._current_request_id
+                    ):
+                        log.debug(
+                            "[_GrpcAttachClient.wait_for] ignoring Error from another "
+                            "request_id=%r (current=%r)",
+                            evt_rid,
+                            self._current_request_id,
+                        )
+                        continue
+                    raise ConnectionError(
+                        f"engine returned Error: code={msg.get('code')!r} "
+                        f"message={msg.get('message')!r}"
+                    )
+                if msg.get("event") == "EngineBusy":
+                    evt_rid = msg.get("request_id")
+                    if (
+                        self._current_request_id is not None
+                        and evt_rid is not None
+                        and evt_rid != self._current_request_id
+                    ):
+                        log.debug(
+                            "[_GrpcAttachClient.wait_for] ignoring EngineBusy from another "
+                            "request_id=%r (current=%r)",
+                            evt_rid,
+                            self._current_request_id,
+                        )
+                        continue
+                    raise BusyError(
+                        f"EngineBusy: state={msg.get('current_state')!r} "
+                        f"cmd={msg.get('attempted_command')!r}"
+                    )
+                if msg.get("event") == event_type:
+                    requeue_pending = True
+                    return msg
+                # R2-M1: 目的以外のイベントは pending バッファに積む
+                pending.append(msg)
+        finally:
+            # R2-M1: 正常終了（目的イベント一致）のみ pending を re-queue する。
+            # error path では破棄する（M-GP3 準拠）。
+            if requeue_pending:
+                for p in pending:
+                    self._recv_queue.put_nowait(p)
+        raise TimeoutError(f"wait_for {event_type!r} timed out after {timeout_s}s")
 
     def close(self) -> None:
         """接続を閉じる（冪等）。"""

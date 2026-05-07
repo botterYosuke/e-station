@@ -1595,7 +1595,7 @@ impl State {
                                             chart: Some(c),
                                             indicators,
                                             studies,
-                                            ..
+                                            view_state,
                                         } => {
                                             **c = HeatmapShader::new(
                                                 c.basis,
@@ -1604,6 +1604,9 @@ impl State {
                                                 studies.clone(),
                                                 indicators.clone(),
                                             );
+                                            if let Some(vs) = view_state {
+                                                c.apply_view_state(*vs);
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -1666,6 +1669,7 @@ impl State {
                                     Content::ShaderHeatmap {
                                         chart: Some(c),
                                         indicators,
+                                        view_state,
                                         ..
                                     } => {
                                         **c = HeatmapShader::new(
@@ -1675,6 +1679,9 @@ impl State {
                                             c.studies.clone(),
                                             indicators.clone(),
                                         );
+                                        if let Some(vs) = view_state {
+                                            c.apply_view_state(*vs);
+                                        }
 
                                         if let Some(stream_type) =
                                             self.streams.ready_iter_mut().and_then(|mut it| {

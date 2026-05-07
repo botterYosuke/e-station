@@ -424,3 +424,102 @@ async fn test_wire_handshake_with_real_python_server() {
 - [Buf CLI](https://buf.build/docs/introduction) — proto lint / breaking change detection
 - [protoc-bin-vendored](https://github.com/neoeinstein/protoc-bin-vendored) — Windows での protoc 同梱
 - [MISSES.md / WSコンパイル互換問題](../../MISSES.md) — RSV ビット過去事例
+
+---
+
+## レビュー反映 (2026-05-08, ラウンド 1)
+
+### 解消した指摘
+- ✅ C1: _GrpcAttachClient._recv_loop 全例外 pass → warning ログ追加 (Phase A)
+- ✅ C2: schema_minor 不一致 warning 未実装 → Python + Rust 両側に追加 (Phase B/C)
+- ✅ C3: check_schema_parity.py field-level 未実装 → field-level チェック追加（フィールド番号重複・ギャップ検出・reserved 有無確認）(Phase E)
+- ✅ H1: wait_for None 返却 → ConnectionError/TimeoutError raise (Phase A)
+- ✅ H2: _Broadcaster 型不一致 → 型アノテーション修正 (Phase B)
+- ✅ H3: events() EngineBusy 変換漏れ → BusyError raise 追加 (Phase A)
+- ✅ H4: SCHEMA_MAJOR/MINOR u16 → u32 (Phase C)
+- ✅ H7: server_grpc.py SCHEMA import → 定数をローカル定義 (Phase B)
+- ✅ H8: buf lint コマンド修正（`buf lint proto/` → `buf lint`、buf.yaml がルートで proto/ を解決）(Phase E)
+- ✅ H9: start_or_attach シナリオ 3/4 追加 (Phase D)
+- ✅ H10: converter task NotifyOnDrop 追加 (Phase C)
+- ✅ H11: ReadyResponse.schema_major クロスチェック追加 (Phase C)
+- ✅ H12: grpc_wire_integration CI ジョブ追加（rust-tests.yml に windows-latest nightly ジョブ新設）(Phase E)
+- ✅ H13: schema_minor 不一致でも接続継続テスト追加 Python/Rust (Phase D/E)
+- ✅ H14: RESOURCE_EXHAUSTED peer ログ追加 (Phase B)
+- ✅ M1-M3: Unspecified enum warn 追加 (Phase C)
+- ✅ M4: ignore_unknown_fields=False (Phase B)
+- ✅ M5: channel.close() exception logging (Phase A)
+- ✅ M6: wait_for EngineBusy BusyError 変換 (Phase A)
+- ✅ M8: EngineSession::new() docstring (Phase C)
+- ✅ M9: WebSocket コメント更新 (Phase C)
+- ✅ M10: common/mod.rs JoinHandle 保持 (Phase D)
+- ✅ M12: test_grpc_smoke.py smoke マーカー（pytestmark = pytest.mark.smoke 追加）(Phase E)
+- ✅ M13: grpc_wire_integration uv run (Phase D)
+- ✅ M14: 空テスト関数削除（test_hello_mode_mismatch.py の assert なし関数を pytest.mark.skip でマーク）(Phase E)
+- ✅ M15: broadcast count assert 追加（test_two_clients_both_receive_client_connected に ev1.client_connected.count == 2 追加）(Phase E)
+- ✅ M16: RESOURCE_EXHAUSTED Rust warn 追加 (Phase C)
+- ✅ M17: grpc_wire_integration ephemeral ポート (Phase D)
+- ✅ M18: _GrpcSessionKey docstring (Phase B)
+
+### 持ち越し（ユーザー承認待ち）
+- H5: CurrentEngineState Replay/Live 分割 — proto 変更が必要。スコープ外として次フェーズに繰越
+- H6: EngineBusy.request_id required 化 — proto 変更が必要。次フェーズに繰越
+- M7: process.rs sleep-based test — CI flaky リスク低（現状維持）
+- M11: _AttachClient WS 版残存 — G3 後のクリーンアップとして明示
+
+### 新たな知見
+- _GrpcAttachClient の例外ハンドリングは WS 版 _AttachClient と意味論的に統一する必要がある
+- converter task の NotifyOnDrop パターン（知見 5 の派生）
+
+---
+
+## レビュー反映 (2026-05-08, ラウンド 2)
+
+### HIGH 3件
+
+- ✅ R2-H1: `_GrpcAttachClient.wait_for` に `Error` イベント → `ConnectionError` 変換を追加。
+  request_id フィルタにより別クライアント宛の Error は無視して続行（WS 版 `_AttachClient.wait_for` との対称性確保）。
+  `python/engine/replay_session.py:967-1031`
+  TDD: `TestR2H1WaitForRaisesOnError` 4テスト追加（`test_grpc_attach_client_r1_fixes.py`）→ GREEN 確認
+
+- ✅ R2-H2: `server_grpc.SCHEMA_MAJOR/MINOR` vs `schemas.SCHEMA_MAJOR/MINOR` ドリフト検知テスト追加。
+  `python/tests/test_server_grpc_phase_b.py` に `test_r2h2_server_grpc_schema_constants_match_schemas` を新設。
+  現在値は両者とも 3/21 で一致しており GREEN 確認。
+
+- ✅ R2-H3: `scripts/check_schema_parity.py` に `repeated` ↔ JSON `"type": "array"` 対称確認（R2-H3a）と
+  oneof フィールド存在 NOTE 出力（R2-H3b）を追加。`extract_message_block` 関数（R2-M7 ブレース深さカウンタ）と
+  `check_repeated_vs_json` / `check_oneof_existence_in_json` を新設。`uv run python scripts/check_schema_parity.py` ゼロエラー確認。
+
+### MEDIUM 8件
+
+- ✅ R2-M1: `_GrpcAttachClient.wait_for` に `pending` バッファを追加。正常終了時のみ re-queue、
+  error path (ConnectionError/BusyError/TimeoutError) では破棄（M-GP3 準拠）。
+  `python/engine/replay_session.py:967-1031`
+  TDD: `TestR2M1WaitForPendingBuffer` 3テスト追加 → GREEN 確認
+
+- ✅ R2-M2: `TestM5ChannelCloseLogsDebug` をプロダクションコード経由でテストするように書き換え。
+  `_async_main` の finally ブロック（`channel.close()` 失敗 → `log.debug`）を
+  `_fake_async_main_finally_path` で直接実行し検証。
+  `python/tests/test_grpc_attach_client_r1_fixes.py:TestM5ChannelCloseLogsDebug`
+
+- ✅ R2-M3: `_dict_to_proto_event` に proto に存在しないキーを渡したとき `None` が返り warning ログが出ることを確認するテストを追加。
+  `python/tests/test_server_grpc_phase_b.py:test_r2m3_dict_to_proto_event_unknown_key_returns_none_and_logs_warning`
+
+- ✅ R2-M4: `test_grpc_smoke.py` と `test_server_grpc_phase_b.py` の import を
+  `engine.schemas` → `engine.server_grpc` に変更（R2-H2 の drift 検知テストが等価を保証）。
+
+- ✅ R2-M5: `engine-client/tests/common/mod.rs` の `tokio::time::sleep(Duration::from_millis(10))` を削除。
+  `TcpListener::bind` は同期的に完了しているため不要。`cargo test --workspace` 全 PASS 確認。
+
+- ✅ R2-M6: `engine-client/tests/start_or_attach.rs` のドキュメントコメント（シナリオ 1〜6）を
+  実際のテスト関数の並び順（7関数: 1〜7）に合わせて更新。コメントのみの変更。
+
+- ✅ R2-M7: `scripts/check_schema_parity.py` の `message_block_pattern` regex を `extract_message_block`
+  関数（ブレース深さカウンタ）に置き換え。ネストした `}` でも正確に message ブロックを抽出できる。
+
+### 完了確認コマンド結果
+- `cargo check --workspace` → Finished (no errors)
+- `cargo clippy --workspace -- -D warnings` → Finished (no warnings)
+- `cargo fmt --check` → OK
+- `cargo test --workspace` → 全 PASS
+- `uv run pytest python/tests/ -q` → 2180 passed, 118 skipped
+- `uv run python scripts/check_schema_parity.py` → Schema parity OK (0 errors)

@@ -53,6 +53,8 @@ pub enum Interaction {
         translation: Vector,
         start: Point,
     },
+    /// Ruler モード。`start: None` は「ルーラー有効・開始点未選択」を意味する（未初期化ではない）。
+    /// 将来的には `RulerReady` / `RulerActive { start: Point }` の 2 バリアントに分割予定。
     Ruler {
         start: Option<Point>,
     },
@@ -923,7 +925,7 @@ impl ViewState {
                 .min_by(|(_, a), (_, b)| {
                     let da = (a.x - p2.x).hypot(a.y - p2.y);
                     let db = (b.x - p2.x).hypot(b.y - p2.y);
-                    da.partial_cmp(&db).unwrap()
+                    da.total_cmp(&db)
                 })
                 .map(|(i, &c)| (c, i))
                 .unwrap();

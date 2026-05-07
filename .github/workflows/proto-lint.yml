@@ -8,6 +8,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: bufbuild/buf-setup-action@v1
-      - run: buf lint proto/
+      - run: buf lint
       - run: |
-          git show main:buf.yaml 2>/dev/null && buf breaking proto/ --against '.git#branch=main' || echo "buf.yaml not in main yet — skipping breaking check"
+          git show main:buf.yaml 2>/dev/null && buf breaking --against '.git#branch=main' || echo "buf.yaml not in main yet — skipping breaking check"

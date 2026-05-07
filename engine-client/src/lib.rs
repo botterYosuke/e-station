@@ -43,5 +43,5 @@ pub use venue_caps::VenueCapsStore;
 ///   - 19: P3-1 Exchange::KabuStation* 市場細分化 + 先物・OP バリアント追加
 ///   - 20: P4-3 venue_capabilities.kabu_station に is_production フィールド追加
 ///   - 21: ExecutionMarker.commission 追加（fee_total 集計の上流、optional フィールド）
-pub const SCHEMA_MAJOR: u16 = 3;
-pub const SCHEMA_MINOR: u16 = 21;
+pub const SCHEMA_MAJOR: u32 = 3;
+pub const SCHEMA_MINOR: u32 = 21;

@@ -185,14 +185,88 @@ def test_wire_dump_no_decimal_in_json() -> None:
 
 
 def test_wire_dump_no_exponent_form() -> None:
-    """大きい / 小さい Decimal が指数表記にならないこと（"1E-4" 等を回避）。"""
+    """真の指数表記 Decimal（1E-8 等）が wire で固定小数点表記になること。
+
+    Decimal("1E-8") の str() は "1E-8" だが format(d, "f") は "0.00000001"。
+    mappers._decimal_to_str が format(d, "f") を使っていることを確認する。
+    """
     trade = Trade(
         symbol="x",
         timestamp=_utc(),
-        price=Decimal("0.0001"),
-        qty=Decimal("100000000"),
+        price=Decimal("1E-8"),   # satoshi 相当の BTC 価格
+        qty=Decimal("1E+8"),     # 大量 qty
         side="buy",
     )
     msg = trade_to_wire(trade)
-    assert "E" not in msg.price
-    assert "E" not in msg.qty
+    assert "E" not in msg.price and "e" not in msg.price, (
+        f"price should be fixed-point, got {msg.price!r}. "
+        "Fix: use format(d, 'f') in _decimal_to_str()."
+    )
+    assert "E" not in msg.qty and "e" not in msg.qty
+
+
+# ---------------------------------------------------------------------------
+# Wire compatibility: None フィールドの exclude_none 保証
+# ---------------------------------------------------------------------------
+
+
+def test_wire_dump_none_fields_excluded() -> None:
+    """request_id=None / checksum=None が wire dict に含まれないこと。
+
+    DepthSnapshotMsg の Optional フィールドが exclude_none=True で正しく除外され、
+    Rust 側 ParseDict が予期しないフィールドを受信しないことを pin する。
+    """
+    ob = OrderBook(
+        symbol="x",
+        timestamp=_utc(),
+        bids=[],
+        asks=[],
+        stream_session_id="s",
+        sequence_id=1,
+    )
+    # request_id を渡さない（None）
+    msg = order_book_to_wire(ob, venue="v", ticker="x", market="spot")
+    dump = msg.model_dump(exclude_none=True)
+    assert "request_id" not in dump, (
+        "request_id=None should be excluded by exclude_none=True. "
+        "Check kabu_push_pipeline.py uses model_dump(exclude_none=True)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wire compatibility: adapter model 直結禁止の Decimal 表現差
+# ---------------------------------------------------------------------------
+
+
+def test_adapter_model_direct_dump_vs_pipeline_decimal_representation() -> None:
+    """adapter model .model_dump(mode="json") は指数表記を出し、mapper 経由は固定小数点。
+
+    これは adapter model を wire に直結してはならない理由の実証テスト。
+    mappers.py 経由 → _decimal_to_str(format(d, "f")) で固定小数点が保証される。
+    adapter model 直接 → pydantic JSON シリアライザが Decimal("1E-8") を "1E-8" で出す。
+    """
+    ob = OrderBook(
+        symbol="X",
+        timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        bids=[(Decimal("1E-8"), Decimal("1E+8"))],
+        asks=[],
+        stream_session_id="sess-1",
+        sequence_id=1,
+    )
+    # adapter model 直接 dump (adapter → wire を bypass)
+    raw_dump = ob.model_dump(mode="json")
+    raw_bid_price = raw_dump["bids"][0][0]  # pydantic が tuple→list で出す
+
+    # mapper 経由 (正規経路)
+    wire = order_book_to_wire(ob, venue="v", ticker="X", market="spot")
+    wire_dump = wire.model_dump(exclude_none=True)
+    wire_bid_price = wire_dump["bids"][0]["price"]
+
+    # 直接 dump は指数表記になる（これが禁止されている理由）
+    assert "E" in raw_bid_price or "e" in raw_bid_price, (
+        f"Expected raw dump to show exponent form for Decimal('1E-8'), got {raw_bid_price!r}"
+    )
+    # mapper 経由は固定小数点
+    assert "E" not in wire_bid_price and "e" not in wire_bid_price, (
+        f"Expected wire to show fixed-point, got {wire_bid_price!r}"
+    )

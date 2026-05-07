@@ -180,3 +180,18 @@ def test_parse_board_pydantic_validation_propagates() -> None:
     raw["CurrentPriceTime"] = ""
     with pytest.raises(ValueError):
         adapter.parse_board(raw)
+
+
+def test_parse_board_missing_symbol_key_raises_key_error() -> None:
+    """'Symbol' キー自体が欠損した raw dict では KeyError が送出される。
+
+    server.py は事前に `raw.get("Symbol", "")` でガードするが、
+    parse_board 自体は raw["Symbol"] を直接アクセスするため KeyError を出す。
+    この動作を pin することで「Symbol 欠損を黙って空文字にする」修正を防ぐ。
+    呼び出し元（_on_kabu_board_push）の except Exception が捕捉する設計。
+    """
+    adapter = KabuStationAdapter(["5401"])
+    raw = _push_board_sample()
+    del raw["Symbol"]
+    with pytest.raises(KeyError):
+        adapter.parse_board(raw)
