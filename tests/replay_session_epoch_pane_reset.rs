@@ -42,8 +42,8 @@ fn extract_function_body<'a>(source: &'a str, sig_marker: &str) -> Option<&'a st
 /// not the variant declaration nor the dispatcher).
 fn handler_window() -> &'static str {
     let handler_start = SOURCE
-        .rfind("Message::Replay(ReplayMsg::DataLoaded {")
-        .expect("Message::Replay(ReplayMsg::DataLoaded arm in update() not found");
+        .rfind("ReplayMsg::DataLoaded {")
+        .expect("ReplayMsg::DataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     &rest[..rest.len().min(6_000)]
 }
@@ -251,8 +251,8 @@ fn disconnect_resets_last_replay_session_epoch() {
     // The reset lives in the EngineRestarting(true) branch — find that branch
     // and confirm `last_replay_session_epoch = None` is inside it.
     let restart_idx = SOURCE
-        .find("Message::Engine(EngineMsg::Restarting(restarting))")
-        .expect("Message::Engine(EngineMsg::Restarting) handler not found");
+        .find("EngineMsg::Restarting(restarting)")
+        .expect("EngineMsg::Restarting handler not found");
     let rest = &SOURCE[restart_idx..];
     let max = rest.len().min(4_000);
     let safe_max = (0..=max).rev().find(|&i| rest.is_char_boundary(i)).unwrap_or(0);

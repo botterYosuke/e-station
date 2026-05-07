@@ -1,4 +1,4 @@
-//! Structural regression pins for F3: `CURRENT_PATH` static.
+﻿//! Structural regression pins for F3: `CURRENT_PATH` static.
 //!
 //! Pins the invariants documented in `fix-save-menu.md §F3-DoD`:
 //! - `CURRENT_PATH` is a `static Mutex<Option<PathBuf>>`
@@ -100,13 +100,13 @@ fn open_file_apply_sets_current_path() {
     let src = read_main();
 
     // NativeOpenFileApply must dispatch NativeOpenFilePendingCheck.
-    let apply_prefix = "            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>";
+    let apply_prefix = "            WindowMsg::NativeOpenFileApply { json, path } =>";
     let apply_start = src
         .find(apply_prefix)
         .expect("NativeOpenFileApply handler must exist");
     let apply_tail = &src[apply_start..];
     let apply_end = apply_tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(apply_tail.len());
     let apply_body = &apply_tail[..apply_end];
@@ -119,14 +119,14 @@ fn open_file_apply_sets_current_path() {
     // rustfmt may reformat the struct pattern across multiple lines, so search
     // for the newline-prefixed match arm (12-space indent, not a deeper nested
     // construction site with 28 spaces).
-    let check_needle = "\n            Message::Window(WindowMsg::NativeOpenFilePendingCheck {";
+    let check_needle = "\n            WindowMsg::NativeOpenFilePendingCheck {";
     let check_start = src
         .find(check_needle)
         .map(|i| i + 1) // skip the leading '\n' so the slice starts at the arm
         .expect("NativeOpenFilePendingCheck handler must exist");
     let check_tail = &src[check_start..];
     let check_end = check_tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(check_tail.len());
     let check_body = &check_tail[..check_end];
@@ -152,14 +152,14 @@ fn save_as_with_specs_sets_current_path() {
     // NativeSaveAsWithSpecs must dispatch NativeSaveComplete (via Task::perform).
     // Use a newline-prefixed, 12-space-indented prefix so the enum definition
     // (which also starts with "Message::Window(WindowMsg::NativeSaveAsWithSpecs {") is skipped.
-    let arm_needle = "\n            Message::Window(WindowMsg::NativeSaveAsWithSpecs {";
+    let arm_needle = "\n            WindowMsg::NativeSaveAsWithSpecs {";
     let start = src
         .find(arm_needle)
         .map(|i| i + 1) // skip leading '\n'
         .expect("NativeSaveAsWithSpecs handler arm must exist at 12-space indent");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -172,14 +172,14 @@ fn save_as_with_specs_sets_current_path() {
     // NativeSaveComplete is where CURRENT_PATH is actually written.
     // Search for the match arm at 12-space indentation (not the Task::perform
     // construction site at deeper indentation).
-    let complete_needle = "\n            Message::Window(WindowMsg::NativeSaveComplete {";
+    let complete_needle = "\n            WindowMsg::NativeSaveComplete {";
     let complete_start = src
         .find(complete_needle)
         .map(|i| i + 1) // skip the leading '\n'
         .expect("NativeSaveComplete handler arm must exist at 12-space indent");
     let complete_tail = &src[complete_start..];
     let complete_end = complete_tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(complete_tail.len());
     let complete_body = &complete_tail[..complete_end];
@@ -198,14 +198,14 @@ fn save_as_with_specs_sets_current_path() {
 fn save_as_with_specs_double_writes_a3() {
     let src = read_main();
     // Use newline-prefixed prefix to skip the enum definition and find the match arm.
-    let arm_needle = "\n            Message::Window(WindowMsg::NativeSaveAsWithSpecs {";
+    let arm_needle = "\n            WindowMsg::NativeSaveAsWithSpecs {";
     let start = src
         .find(arm_needle)
         .map(|i| i + 1) // skip leading '\n'
         .expect("NativeSaveAsWithSpecs handler arm must exist at 12-space indent");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -250,3 +250,4 @@ fn action_save_handler_reads_current_path() {
         "Action::Save arm must read CURRENT_PATH to determine the target path"
     );
 }
+

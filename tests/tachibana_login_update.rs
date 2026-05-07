@@ -1,4 +1,4 @@
-//! Structural pins for invariant **T35-LoginUpdate**.
+﻿//! Structural pins for invariant **T35-LoginUpdate**.
 //!
 //! `Message::RequestTachibanaLogin` の `update()` ハンドラが保持すべき 4 つの
 //! 不変条件をソースコードレベルで固定する。
@@ -21,10 +21,10 @@ fn read_handler_body() -> String {
     let src = std::fs::read_to_string(path).expect("read src/main.rs");
 
     // `Message::RequestTachibanaLogin` アームの開始位置を見つける。
-    let needle = "Message::Venue(VenueMsg::RequestTachibanaLogin(trigger))";
+    let needle = "VenueMsg::RequestTachibanaLogin(trigger)";
     let start = src
         .find(needle)
-        .expect("Message::Venue(VenueMsg::RequestTachibanaLogin(trigger)) not found in src/main.rs");
+        .expect("VenueMsg::RequestTachibanaLogin(trigger) not found in src/main.rs");
 
     // 次の `Message::` アームの開始位置を末端とする（最大 3000 バイト）。
     // これにより他のハンドラの記述が混入しない。
@@ -32,7 +32,7 @@ fn read_handler_body() -> String {
     // 3000 バイトは 1 アーム分を確実に収める余裕値。
     let after = &src[start..];
     let end = after
-        .find("\n            Message::")
+        .find("\n            VenueMsg::")
         .map(|n| n.min(3000))
         .unwrap_or(3000.min(after.len()));
 
@@ -129,3 +129,4 @@ fn request_login_returns_none_when_no_connection() {
          co-located with the connection check. T35-LoginUpdate."
     );
 }
+

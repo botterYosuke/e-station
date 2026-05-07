@@ -1,4 +1,4 @@
-//! Structural regression pins for F4: dirty detection and confirm-on-exit/open.
+﻿//! Structural regression pins for F4: dirty detection and confirm-on-exit/open.
 //!
 //! Pins the invariants documented in `fix-save-menu.md §F4-DoD`:
 //! - `last_saved_bytes: Option<Vec<u8>>` field exists (BC-9)
@@ -50,13 +50,13 @@ fn dirty_none_is_clean() {
 #[test]
 fn exit_requested_checks_dirty() {
     let src = read_main();
-    let prefix = "            Message::Window(WindowMsg::ExitRequested(windows)) =>";
+    let prefix = "            WindowMsg::ExitRequested(windows) =>";
     let start = src
         .find(prefix)
         .expect("ExitRequested handler arm must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -70,13 +70,13 @@ fn exit_requested_checks_dirty() {
 #[test]
 fn exit_requested_shows_confirm_when_dirty() {
     let src = read_main();
-    let prefix = "            Message::Window(WindowMsg::ExitRequested(windows)) =>";
+    let prefix = "            WindowMsg::ExitRequested(windows) =>";
     let start = src
         .find(prefix)
         .expect("ExitRequested handler arm must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -96,13 +96,13 @@ fn open_file_apply_checks_dirty_before_restart() {
     let src = read_main();
 
     // Step 1: NativeOpenFileApply must dispatch NativeOpenFilePendingCheck.
-    let apply_prefix = "            Message::Window(WindowMsg::NativeOpenFileApply { json, path }) =>";
+    let apply_prefix = "            WindowMsg::NativeOpenFileApply { json, path } =>";
     let apply_start = src
         .find(apply_prefix)
         .expect("NativeOpenFileApply handler arm must exist");
     let apply_tail = &src[apply_start..];
     let apply_end = apply_tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(apply_tail.len());
     let apply_body = &apply_tail[..apply_end];
@@ -116,14 +116,14 @@ fn open_file_apply_checks_dirty_before_restart() {
     // rustfmt may reformat the struct pattern across multiple lines, so search
     // for the newline-prefixed match arm (12-space indent, not a deeper nested
     // construction site).
-    let check_needle = "\n            Message::Window(WindowMsg::NativeOpenFilePendingCheck {";
+    let check_needle = "\n            WindowMsg::NativeOpenFilePendingCheck {";
     let check_start = src
         .find(check_needle)
         .map(|i| i + 1) // skip the leading '\n' so the slice starts at the arm
         .expect("NativeOpenFilePendingCheck handler arm must exist");
     let check_tail = &src[check_start..];
     let check_end = check_tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(check_tail.len());
     let check_body = &check_tail[..check_end];
@@ -141,13 +141,13 @@ fn toggle_dialog_modal_none_clears_pending_open_file() {
     // Fix for Issue 2: ToggleDialogModal(None) must clear pending_open_file so that
     // a subsequent Open action re-enters the dirty-check flow instead of skipping it.
     let src = read_main();
-    let prefix = "            Message::Window(WindowMsg::ToggleDialogModal(dialog)) =>";
+    let prefix = "            WindowMsg::ToggleDialogModal(dialog) =>";
     let start = src
         .find(prefix)
         .expect("ToggleDialogModal handler arm must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -433,13 +433,13 @@ fn escape_on_confirm_clears_pending_state() {
     // pending_open_file / pending_exit_windows / pending_save_path remain set.
     let src = read_main();
 
-    let prefix = "            Message::Window(WindowMsg::GoBack) =>";
+    let prefix = "            WindowMsg::GoBack =>";
     let start = src
         .find(prefix)
         .expect("Message::GoBack handler must exist");
     let tail = &src[start..];
     let end = tail[1..]
-        .find("\n            Message::")
+        .find("\n            WindowMsg::")
         .map(|i| i + 1)
         .unwrap_or(tail.len());
     let body = &tail[..end];
@@ -463,3 +463,4 @@ fn escape_on_confirm_clears_pending_state() {
         "GoBack with confirm_dialog must clear mode_switch_state (F7 orphan prevention; M13)"
     );
 }
+

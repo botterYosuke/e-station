@@ -1,4 +1,4 @@
-//! 計画書テスト方針の 8 テスト（kabu venue login state machine + UI 配線）。
+﻿//! 計画書テスト方針の 8 テスト（kabu venue login state machine + UI 配線）。
 //!
 //! `Flowsurface` はバイナリクレートでフル構造体インスタンス化が困難なため、
 //! 本ファイルは update()/restart()/EngineConnected ハンドラを
@@ -98,7 +98,7 @@ fn kabu_footer_badge_in_flight_no_button() {
 #[test]
 fn request_kabu_login_sends_ipc() {
     let src = read_main();
-    let body = handler_body_str(&src, "Message::Venue(VenueMsg::RequestKabuLogin(trigger)) =>");
+    let body = handler_body_str(&src, "VenueMsg::RequestKabuLogin(trigger) =>");
 
     assert!(
         body.contains("try_claim_login_in_flight()"),
@@ -153,7 +153,7 @@ fn restart_restores_kabu_state_when_cached() {
 #[test]
 fn kabu_login_ipc_send_failure_returns_idle() {
     let src = read_main();
-    let body = handler_body_str(&src, "Message::Venue(VenueMsg::KabuLoginIpcResult(result)) =>");
+    let body = handler_body_str(&src, "VenueMsg::KabuLoginIpcResult(result) =>");
 
     assert!(
         body.contains("is_login_in_flight()"),
@@ -178,10 +178,10 @@ fn kabu_login_ipc_send_failure_returns_idle() {
 fn engine_connected_restores_kabu_state_when_cached() {
     let src = read_main();
     let start = src
-        .find("Message::Engine(EngineMsg::Connected(conn)) =>")
-        .expect("Message::Engine(EngineMsg::Connected) arm not found");
+        .find("EngineMsg::Connected(conn) =>")
+        .expect("EngineMsg::Connected arm not found");
     let rest = &src[start..];
-    let raw_end = rest.find("\n            Message::").unwrap_or(rest.len());
+    let raw_end = rest.find("\n            EngineMsg::").unwrap_or(rest.len());
     let safe_end = (0..=raw_end.min(rest.len()))
         .rev()
         .find(|&i| rest.is_char_boundary(i))
@@ -213,3 +213,4 @@ fn kabu_chip_wired_to_request_kabu_login() {
         "status_bar must wire kabu chip to Message::RequestKabuLogin, not RequestTachibanaLogin"
     );
 }
+

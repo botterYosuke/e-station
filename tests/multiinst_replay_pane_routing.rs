@@ -100,8 +100,8 @@ fn message_replay_data_loaded_has_instrument_ids_field() {
 fn handler_uses_task_batch_for_multi_instrument() {
     // Locate the update() handler arm, not the dispatcher.
     let handler_start = SOURCE
-        .rfind("Message::Replay(ReplayMsg::DataLoaded {")
-        .expect("Message::Replay(ReplayMsg::DataLoaded arm in update() not found");
+        .rfind("ReplayMsg::DataLoaded {")
+        .expect("ReplayMsg::DataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     // Grab enough of the arm body (~80 lines)
     let window = safe_window(rest, 8_000);
@@ -120,8 +120,8 @@ fn handler_uses_task_batch_for_multi_instrument() {
 #[test]
 fn handler_iterates_over_instrument_ids() {
     let handler_start = SOURCE
-        .rfind("Message::Replay(ReplayMsg::DataLoaded {")
-        .expect("Message::Replay(ReplayMsg::DataLoaded arm in update() not found");
+        .rfind("ReplayMsg::DataLoaded {")
+        .expect("ReplayMsg::DataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     let window = safe_window(rest, 8_000);
 
@@ -139,8 +139,8 @@ fn handler_iterates_over_instrument_ids() {
 #[test]
 fn handler_fallbacks_to_single_instrument_id_when_instrument_ids_is_none() {
     let handler_start = SOURCE
-        .rfind("Message::Replay(ReplayMsg::DataLoaded {")
-        .expect("Message::Replay(ReplayMsg::DataLoaded arm in update() not found");
+        .rfind("ReplayMsg::DataLoaded {")
+        .expect("ReplayMsg::DataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     let window = safe_window(rest, 8_000);
 
@@ -162,8 +162,8 @@ fn handler_fallbacks_to_single_instrument_id_when_instrument_ids_is_none() {
 #[test]
 fn handler_returns_task_none_when_ids_is_empty() {
     let handler_start = SOURCE
-        .rfind("Message::Replay(ReplayMsg::DataLoaded {")
-        .expect("Message::Replay(ReplayMsg::DataLoaded arm in update() not found");
+        .rfind("ReplayMsg::DataLoaded {")
+        .expect("ReplayMsg::DataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     let window = safe_window(rest, 8_000);
 
@@ -181,8 +181,8 @@ fn handler_returns_task_none_when_ids_is_empty() {
 #[test]
 fn handler_treats_empty_instrument_ids_vec_as_absent() {
     let handler_start = SOURCE
-        .rfind("Message::Replay(ReplayMsg::DataLoaded {")
-        .expect("Message::Replay(ReplayMsg::DataLoaded arm in update() not found");
+        .rfind("ReplayMsg::DataLoaded {")
+        .expect("ReplayMsg::DataLoaded arm in update() not found");
     let rest = &SOURCE[handler_start..];
     let window = safe_window(rest, 8_000);
 
