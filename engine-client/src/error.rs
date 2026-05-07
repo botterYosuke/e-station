@@ -362,8 +362,8 @@ mod venue_error_class_tests {
 /// Errors produced by the engine-client crate.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineClientError {
-    #[error("WebSocket error: {0}")]
-    WebSocket(String),
+    #[error("gRPC transport error: {0}")]
+    GrpcTransport(String),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),

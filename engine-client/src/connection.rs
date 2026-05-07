@@ -102,7 +102,7 @@ impl EngineConnection {
         self.sender
             .send(cmd)
             .await
-            .map_err(|_| EngineClientError::WebSocket("command channel closed".to_string()))
+            .map_err(|_| EngineClientError::GrpcTransport("command channel closed".to_string()))
     }
 
     /// Non-async variant: enqueue `cmd` immediately without awaiting.

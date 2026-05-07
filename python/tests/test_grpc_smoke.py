@@ -19,9 +19,11 @@ def test_write_grpc_session_file_is_importable_and_callable(tmp_path, monkeypatc
     monkeypatch.setenv("FLOWSURFACE_DATA_PATH", str(tmp_path))
     from engine.server_grpc import _write_grpc_session_file
 
-    _write_grpc_session_file(port=50098, token="smoke-token")
+    expected_token = "smoke-token"
+    _write_grpc_session_file(port=50098, token=expected_token)
     data = json.loads((tmp_path / "engine-session.json").read_text())
     assert data.get("transport") == "grpc"
+    assert data.get("token") == expected_token
 
 
 @pytest.fixture

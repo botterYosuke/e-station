@@ -650,6 +650,356 @@ class _AttachClient:
 
 
 # ---------------------------------------------------------------------------
+# _GrpcAttachClient — gRPC 版 attach クライアント (H2 / G3)
+# ---------------------------------------------------------------------------
+
+
+class _GrpcAttachClient:
+    """GUI 内 gRPC engine への クライアント（helper attach mode 専用）。
+
+    `_AttachClient` (WS 版) のインターフェイスを gRPC で再実装する。
+    token はログ・例外に出力しない。
+
+    H2 (G3 R1): `_resolve_endpoint_and_token()` が ``"127.0.0.1:{port}"``
+    形式の endpoint を返したときに使う。WS 版は ``"ws://..."`` 形式で返す。
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        token: str,
+        timeout_s: float,
+        *,
+        mode: str = "replay",
+        _schema_major_override: int | None = None,
+    ) -> None:
+        self._endpoint = endpoint
+        self._token = token  # ログに出力禁止
+        self._timeout_s = timeout_s
+        self._mode = mode
+        # M-NEW-1: テスト用 schema_major オーバーライド（None の場合は schemas.SCHEMA_MAJOR を使う）
+        self._schema_major_override = _schema_major_override
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._send_queue: asyncio.Queue | None = None
+        self._recv_queue: queue.Queue = queue.Queue()
+        self._ready = threading.Event()
+        self._closed_event = threading.Event()
+        self._handshake_ok: bool = False
+        self._handshake_err: Exception | None = None
+        self._thread: threading.Thread | None = None
+        self._channel = None
+        self._stub = None
+        self._current_request_id: str | None = None
+
+    def set_current_request_id(self, request_id: str | None) -> None:
+        """events()/wait_for() の Error フィルタに使う request_id を設定する。"""
+        self._current_request_id = request_id
+
+    def handshake(self) -> None:
+        """バックグラウンドスレッドで asyncio loop を起動し handshake を実行する。"""
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        try:
+            self._ready.wait(timeout=self._timeout_s + 2.0)
+            if self._handshake_err is not None:
+                err = self._handshake_err
+                if isinstance(err, _TokenMismatchError):
+                    raise err
+                raise ConnectionRefusedError("gRPC attach handshake failed") from err
+            if not self._handshake_ok:
+                raise ConnectionRefusedError("gRPC attach handshake timeout")
+        except BaseException:
+            try:
+                self.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("gRPC handshake cleanup close() failed: %s", exc)
+            raise
+
+    def _run_loop(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._async_main())
+        finally:
+            self._loop.close()
+            self._closed_event.set()
+
+    async def _async_main(self) -> None:
+        import grpc
+        from grpc import aio as grpc_aio
+        from engine.proto import engine_pb2, engine_pb2_grpc
+        from engine.schemas import SCHEMA_MAJOR, SCHEMA_MINOR
+
+        # M-NEW-1: テスト用 schema_major オーバーライドがあれば使う
+        effective_schema_major = (
+            self._schema_major_override if self._schema_major_override is not None else SCHEMA_MAJOR
+        )
+
+        self._send_queue = asyncio.Queue()
+
+        try:
+            self._channel = grpc_aio.insecure_channel(self._endpoint)
+
+            stub = engine_pb2_grpc.DataEngineStub(self._channel)
+
+            # HelloRequest を先頭に含むジェネレータ
+            async def _request_stream():
+                yield engine_pb2.Command(
+                    hello=engine_pb2.HelloRequest(
+                        schema_major=effective_schema_major,
+                        schema_minor=SCHEMA_MINOR,
+                        client_version="helper-attach-grpc",
+                        token=self._token,
+                        mode=(
+                            engine_pb2.APP_MODE_REPLAY
+                            if self._mode == "replay"
+                            else engine_pb2.APP_MODE_LIVE
+                        ),
+                    )
+                )
+                # post-handshake commands from send_queue
+                while True:
+                    cmd = await self._send_queue.get()
+                    if cmd is None:
+                        return
+                    yield cmd
+
+            response_stream = stub.Session(_request_stream())
+
+            # ReadyResponse を待つ
+            try:
+                first = await asyncio.wait_for(
+                    response_stream.read(),
+                    timeout=self._timeout_s,
+                )
+            except asyncio.TimeoutError:
+                self._handshake_err = ConnectionRefusedError("gRPC handshake ReadyResponse timeout")
+                self._ready.set()
+                return
+
+            if not first.HasField("ready"):
+                self._handshake_err = ConnectionRefusedError(
+                    "first gRPC event was not ReadyResponse"
+                )
+                self._ready.set()
+                return
+
+            ready = first.ready
+            if ready.schema_major != SCHEMA_MAJOR:
+                from engine.schemas import AUTH_FAILED_CODE
+                self._handshake_err = ConnectionRefusedError(
+                    f"schema_major mismatch: remote={ready.schema_major} local={SCHEMA_MAJOR}"
+                )
+                self._ready.set()
+                return
+
+            self._handshake_ok = True
+            log.info("[_GrpcAttachClient] handshake ok (endpoint=%s)", self._endpoint)
+            self._ready.set()
+
+            # recv loop
+            await self._recv_loop(response_stream)
+
+        except grpc.aio.AioRpcError as exc:
+            if not self._handshake_ok:
+                log.error(
+                    "[_GrpcAttachClient] handshake failed (endpoint=%s): %s",
+                    self._endpoint,
+                    exc.code(),
+                )
+                if exc.code() == grpc.StatusCode.UNAUTHENTICATED:
+                    self._handshake_err = _TokenMismatchError("gRPC auth failed")
+                else:
+                    self._handshake_err = ConnectionRefusedError(str(exc.details()))
+                self._ready.set()
+            else:
+                log.warning(
+                    "[_GrpcAttachClient] post-handshake gRPC error (endpoint=%s): %s",
+                    self._endpoint,
+                    exc.code(),
+                )
+                try:
+                    self._recv_queue.put_nowait({"__error__": "grpc_closed"})
+                except Exception:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            if not self._handshake_ok:
+                log.error(
+                    "[_GrpcAttachClient] handshake failed (endpoint=%s): %s",
+                    self._endpoint,
+                    type(exc).__name__,
+                )
+                self._handshake_err = exc
+                self._ready.set()
+            else:
+                log.warning(
+                    "[_GrpcAttachClient] post-handshake error (endpoint=%s): %s",
+                    self._endpoint,
+                    type(exc).__name__,
+                )
+                try:
+                    self._recv_queue.put_nowait({"__error__": "grpc_closed"})
+                except Exception:
+                    pass
+        finally:
+            if self._channel is not None:
+                try:
+                    await self._channel.close(grace=0)
+                except Exception:
+                    pass
+
+    async def _recv_loop(self, response_stream) -> None:
+        """gRPC イベントストリームを受信して recv_queue に積む。"""
+        from google.protobuf.json_format import MessageToDict
+        from engine.server_grpc import _EVENT_TO_FIELD_AND_CLASS
+
+        # ループ外で逆引きマップを 1 度だけ構築する（H-NEW-1）
+        _field_to_event = {v[0]: k for k, v in _EVENT_TO_FIELD_AND_CLASS.items()}
+
+        try:
+            async for event in response_stream:
+                # proto Event → dict 変換
+                event_dict = MessageToDict(
+                    event,
+                    preserving_proto_field_name=True,
+                    always_print_fields_with_no_presence=False,
+                )
+                # which field was set → "event" key として追加
+                kind = event.WhichOneof("payload")
+                if kind is not None:
+                    # H-NEW-1: ハンドシェイク後のストリームに来た "ready" はフィルタする
+                    if kind == "ready":
+                        log.debug("[_GrpcAttachClient] filtering unexpected 'ready' event in recv_loop")
+                        continue
+                    # snake_case → PascalCase で event name を復元する
+                    event_name = _field_to_event.get(kind, kind)
+                    # flatten: payload dict をトップレベルに展開
+                    payload = event_dict.get(kind, {})
+                    if isinstance(payload, dict):
+                        msg = {**payload, "event": event_name}
+                    else:
+                        msg = {"event": event_name}
+                    self._recv_queue.put_nowait(msg)
+        except Exception:
+            pass
+        log.info("[_GrpcAttachClient] recv_loop ended")
+        self._recv_queue.put_nowait({"__error__": "grpc_closed"})
+
+    def send_command(self, cmd: dict) -> None:
+        """コマンドを gRPC ストリームに送信する（非同期キュー経由）。
+
+        WS 版 `_AttachClient.send_command()` と同インターフェイス。
+        """
+        from engine.proto import engine_pb2
+        from engine.server_grpc import _FIELD_TO_OP
+        from google.protobuf.json_format import ParseDict
+
+        # dict の "op" キーから proto Command を構築する
+        op = cmd.get("op")
+        if op is None:
+            return
+
+        # op → field name の逆引き
+        _op_to_field = {v: k for k, v in _FIELD_TO_OP.items()}
+        field_name = _op_to_field.get(op)
+        if field_name is None:
+            log.warning("[_GrpcAttachClient] unknown op=%r — dropping", op)
+            return
+
+        payload_dict = {k: v for k, v in cmd.items() if k != "op"}
+        try:
+            from engine.proto import engine_pb2 as pb2
+            # Get the field descriptor to find the message class
+            descriptor = pb2.Command.DESCRIPTOR.fields_by_name.get(field_name)
+            if descriptor is None:
+                log.warning("[_GrpcAttachClient] no proto field for field_name=%r", field_name)
+                return
+            msg_class = getattr(pb2, descriptor.message_type.name)
+            payload_msg = ParseDict(payload_dict, msg_class())
+            proto_cmd = engine_pb2.Command(**{field_name: payload_msg})
+        except Exception as exc:
+            log.warning("[_GrpcAttachClient] failed to build proto Command op=%r: %s", op, exc)
+            return
+
+        if self._loop is not None and self._send_queue is not None and self._loop.is_running():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._send_queue.put(proto_cmd), self._loop
+                )
+                fut.result(timeout=2.0)
+            except Exception as exc:
+                log.warning("[_GrpcAttachClient] send failed: %s", exc)
+
+    def recv(self, timeout: float = 60.0) -> dict | None:
+        """イベントを受信する（ブロッキング）。WS 版と同インターフェイス。"""
+        try:
+            return self._recv_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def events(self, timeout: float = 60.0):
+        """イベントジェネレータ。WS 版と同インターフェイス。"""
+        while True:
+            msg = self.recv(timeout=timeout)
+            if msg is None:
+                return
+            if msg.get("__error__"):
+                return
+            yield msg
+
+    def wait_for(self, event_type: str, timeout_s: float = 30.0) -> dict | None:
+        """特定のイベントを待つ。WS 版と同インターフェイス。"""
+        import time
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            msg = self.recv(timeout=min(remaining, 1.0))
+            if msg is None:
+                continue
+            if msg.get("__error__"):
+                return None
+            if msg.get("event") == event_type:
+                return msg
+        return None
+
+    def close(self) -> None:
+        """接続を閉じる（冪等）。"""
+        if self._closed_event.is_set():
+            return
+
+        if (
+            self._loop is not None
+            and self._send_queue is not None
+            and self._loop.is_running()
+        ):
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._send_queue.put(None), self._loop
+                )
+                fut.result(timeout=2.0)
+            except Exception as exc:
+                log.warning("[_GrpcAttachClient] close: send sentinel failed: %s", exc)
+
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                log.warning("[_GrpcAttachClient] close: attach thread did not terminate within 5s")
+
+
+def _make_attach_client(
+    endpoint: str, token: str, timeout_s: float, *, mode: str = "replay"
+) -> "_AttachClient | _GrpcAttachClient":
+    """endpoint の形式に応じて適切な attach クライアントを生成する。
+
+    - ``"ws://..."`` → `_AttachClient` (WebSocket 版、ロールバック用に残す)
+    - ``"127.0.0.1:{port}"`` 等 (gRPC URI) → `_GrpcAttachClient`
+    """
+    if endpoint.startswith("ws://") or endpoint.startswith("wss://"):
+        return _AttachClient(endpoint, token, timeout_s, mode=mode)
+    return _GrpcAttachClient(endpoint, token, timeout_s, mode=mode)
+
+
+# ---------------------------------------------------------------------------
 # ReplaySession
 # ---------------------------------------------------------------------------
 
@@ -690,7 +1040,7 @@ class ReplaySession:
         self._stop_event: threading.Event = threading.Event()
         self._multiplier: int = 1
         self._entered: bool = False
-        self._client: _AttachClient | None = None
+        self._client: "_AttachClient | _GrpcAttachClient | None" = None
         # C-2: run() が呼ばれたときの strategy_id を保存して stop() で StopEngine に使う。
         self._strategy_id: str = ""
 
@@ -720,7 +1070,7 @@ class ReplaySession:
                 raise ConnectionRefusedError(
                     "force_mode='attach' but no engine-session.json / FLOWSURFACE_ENGINE_TOKEN found"
                 )
-            client = _AttachClient(endpoint, token, self._attach_timeout_s)
+            client = _make_attach_client(endpoint, token, self._attach_timeout_s)
             client.handshake()
             self._client = client
             self._mode = "attach"
@@ -730,7 +1080,7 @@ class ReplaySession:
         endpoint, token = self._resolve_endpoint_and_token()
         if endpoint is not None and token is not None:
             try:
-                client = _AttachClient(endpoint, token, self._attach_timeout_s)
+                client = _make_attach_client(endpoint, token, self._attach_timeout_s)
                 client.handshake()
                 self._client = client
                 self._mode = "attach"
@@ -1294,8 +1644,8 @@ class LiveSession:
         # H11: login() 状態。in-process 経路で内部 API が成功すると True に遷移。
         self._logged_in: bool = False
         self._session: object | None = None
-        # C-GP4: attach mode 用の WS クライアント。inprocess では None のまま。
-        self._client: _AttachClient | None = None
+        # C-GP4: attach mode 用クライアント（WS or gRPC）。inprocess では None のまま。
+        self._client: "_AttachClient | _GrpcAttachClient | None" = None
         # CRITICAL-R2-1: 直近の RequestVenueLogin 用 request_id (broadcast 経路の
         # VenueError と別 client 由来の event を区別するために保存)。
         self._login_request_id: str | None = None
@@ -1330,7 +1680,7 @@ class LiveSession:
                 raise ConnectionRefusedError(
                     "force_mode='attach' but no engine-session.json / FLOWSURFACE_ENGINE_TOKEN found"
                 )
-            client = _AttachClient(endpoint, token, self._attach_timeout_s, mode="live")
+            client = _make_attach_client(endpoint, token, self._attach_timeout_s, mode="live")
             client.handshake()
             self._client = client
             self._mode = "attach"
@@ -1341,7 +1691,7 @@ class LiveSession:
             endpoint, token = self._resolve_endpoint_and_token()
             if endpoint is not None and token is not None:
                 try:
-                    client = _AttachClient(endpoint, token, self._attach_timeout_s, mode="live")
+                    client = _make_attach_client(endpoint, token, self._attach_timeout_s, mode="live")
                     client.handshake()
                     self._client = client
                     self._mode = "attach"

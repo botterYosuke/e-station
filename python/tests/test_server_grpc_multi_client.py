@@ -61,9 +61,7 @@ async def test_two_clients_both_receive_client_connected(multi_client_server):
     ch1, stream1 = await _connect_and_handshake(port)
     ch2, stream2 = await _connect_and_handshake(port)
 
-    await asyncio.sleep(0.2)  # broadcast が届くまで待つ
-
-    # drain events
+    # drain events — timeout 付きポーリングで broadcast 到達を待つ（sleep 不要）
     async def drain_for_event(stream, event_type: str, timeout=3.0):
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
@@ -72,7 +70,7 @@ async def test_two_clients_both_receive_client_connected(multi_client_server):
                 if ev.HasField(event_type):
                     return ev
             except asyncio.TimeoutError:
-                break
+                continue
         return None
 
     ev1 = await drain_for_event(stream1, "client_connected")
@@ -103,7 +101,8 @@ async def test_max_connections_exceeded_returns_resource_exhausted(multi_client_
             channels.append(ch)
             streams.append(st)
 
-        await asyncio.sleep(0.1)
+        # 全接続の handshake 完了は _connect_and_handshake() 内の wait_for で保証済み。
+        # sleep は不要（M-NEW-2）。
 
         # MAX_CONNECTIONS + 1 番目の接続
         extra_ch = aio.insecure_channel(f"localhost:{port}")

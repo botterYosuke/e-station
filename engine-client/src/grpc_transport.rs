@@ -68,6 +68,7 @@ pub(crate) async fn start_grpc_session(
 /// # Note
 /// This function is primarily intended for testing schema rejection.
 /// Production code should use [`start_grpc_session`] instead.
+/// The `connection.rs` public re-export is gated on `#[cfg(feature = "testing")]`.
 pub(crate) async fn start_grpc_session_with_schema(
     target: &str,
     token: &str,
@@ -86,7 +87,7 @@ pub(crate) async fn start_grpc_session_with_schema(
 
     // 1. Connect (with timeout).
     let endpoint = tonic::transport::Endpoint::from_shared(target.to_owned())
-        .map_err(|e| EngineClientError::WebSocket(format!("invalid gRPC endpoint: {e}")))?;
+        .map_err(|e| EngineClientError::GrpcTransport(format!("invalid gRPC endpoint: {e}")))?;
 
     let channel = tokio::time::timeout(HANDSHAKE_TIMEOUT, endpoint.connect())
         .await
@@ -96,7 +97,7 @@ pub(crate) async fn start_grpc_session_with_schema(
             if msg.contains("Connection refused") || msg.contains("connect error") {
                 EngineClientError::ConnectionRefused
             } else {
-                EngineClientError::WebSocket(msg)
+                EngineClientError::GrpcTransport(msg)
             }
         })?;
 
@@ -120,7 +121,7 @@ pub(crate) async fn start_grpc_session_with_schema(
         })
         .await
         .map_err(|_| {
-            EngineClientError::WebSocket("proto cmd channel closed immediately".to_string())
+            EngineClientError::GrpcTransport("proto cmd channel closed immediately".to_string())
         })?;
 
     // 4. Open the bidirectional stream.
@@ -141,21 +142,26 @@ pub(crate) async fn start_grpc_session_with_schema(
         .map_err(|_| EngineClientError::HandshakeTimeout)?
         .map_err(|s| grpc_status_to_error(&s))?
         .ok_or_else(|| {
-            EngineClientError::WebSocket("server closed stream before Ready".to_string())
+            EngineClientError::GrpcTransport("server closed stream before Ready".to_string())
         })?;
 
     let capabilities = match &first.payload {
         Some(engine::event::Payload::Ready(r)) => capabilities_to_json(r.capabilities.clone()),
         _ => {
-            return Err(EngineClientError::WebSocket(
+            return Err(EngineClientError::GrpcTransport(
                 "first gRPC event was not ReadyResponse".to_string(),
             ));
         }
     };
 
     // Broadcast the Ready event to any early subscribers.
-    if let Some(ev) = proto_event_to_dto(first) {
-        let _ = events_tx.send(ev);
+    if let Some(ev) = proto_event_to_dto(first)
+        && events_tx.send(ev).is_err()
+    {
+        log::debug!(
+            target: "engine_client::grpc_transport",
+            "Ready event dropped: no active subscribers at handshake time"
+        );
     }
 
     let closed = Arc::new(Notify::new());
@@ -242,12 +248,16 @@ fn grpc_status_to_error(status: &tonic::Status) -> EngineClientError {
         Code::DeadlineExceeded => EngineClientError::HandshakeTimeout,
         Code::Unavailable | Code::Internal => EngineClientError::ConnectionRefused,
         Code::FailedPrecondition => {
-            EngineClientError::WebSocket(format!("schema/mode mismatch: {}", status.message()))
+            EngineClientError::GrpcTransport(format!("schema/mode mismatch: {}", status.message()))
         }
         Code::Unauthenticated => {
-            EngineClientError::WebSocket(format!("auth failed: {}", status.message()))
+            EngineClientError::GrpcTransport(format!("auth failed: {}", status.message()))
         }
-        _ => EngineClientError::WebSocket(format!("gRPC {}: {}", status.code(), status.message())),
+        _ => EngineClientError::GrpcTransport(format!(
+            "gRPC {}: {}",
+            status.code(),
+            status.message()
+        )),
     }
 }
 
@@ -1058,7 +1068,14 @@ fn proto_order_record_to_dto(or_: engine::OrderRecord) -> Option<dto::OrderRecor
         }
     };
     let order_type = match OrderType::try_from(or_.order_type).unwrap_or(OrderType::Unspecified) {
-        OrderType::Unspecified | OrderType::Market => dto::OrderType::Market,
+        OrderType::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "OrderRecord order_type=Unspecified — record dropped"
+            );
+            return None;
+        }
+        OrderType::Market => dto::OrderType::Market,
         OrderType::Limit => dto::OrderType::Limit,
         OrderType::StopMarket => dto::OrderType::StopMarket,
         OrderType::StopLimit => dto::OrderType::StopLimit,
@@ -1066,7 +1083,14 @@ fn proto_order_record_to_dto(or_: engine::OrderRecord) -> Option<dto::OrderRecor
         OrderType::LimitIfTouched => dto::OrderType::LimitIfTouched,
     };
     let tif = match TimeInForce::try_from(or_.time_in_force).unwrap_or(TimeInForce::Unspecified) {
-        TimeInForce::Unspecified | TimeInForce::Day => dto::TimeInForce::Day,
+        TimeInForce::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "OrderRecord time_in_force=Unspecified — record dropped"
+            );
+            return None;
+        }
+        TimeInForce::Day => dto::TimeInForce::Day,
         TimeInForce::Gtc => dto::TimeInForce::Gtc,
         TimeInForce::Gtd => dto::TimeInForce::Gtd,
         TimeInForce::Ioc => dto::TimeInForce::Ioc,
@@ -1075,7 +1099,14 @@ fn proto_order_record_to_dto(or_: engine::OrderRecord) -> Option<dto::OrderRecor
         TimeInForce::AtTheClose => dto::TimeInForce::AtTheClose,
     };
     let status = match OrderStatus::try_from(or_.status).unwrap_or(OrderStatus::Unspecified) {
-        OrderStatus::Unspecified | OrderStatus::Submitted => dto::OrderStatus::Submitted,
+        OrderStatus::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "OrderRecord status=Unspecified — record dropped"
+            );
+            return None;
+        }
+        OrderStatus::Submitted => dto::OrderStatus::Submitted,
         OrderStatus::Accepted => dto::OrderStatus::Accepted,
         OrderStatus::Filled => dto::OrderStatus::Filled,
         OrderStatus::PendingCancel => dto::OrderStatus::PendingCancel,
@@ -1137,9 +1168,14 @@ fn proto_engine_state_to_dto(state: i32) -> dto::CurrentEngineState {
 fn proto_attempted_command_to_dto(cmd: i32) -> dto::AttemptedCommand {
     use engine::AttemptedCommand;
     match AttemptedCommand::try_from(cmd).unwrap_or(AttemptedCommand::Unspecified) {
-        AttemptedCommand::Unspecified | AttemptedCommand::LoadReplayData => {
-            dto::AttemptedCommand::LoadReplayData
+        AttemptedCommand::Unspecified => {
+            log::warn!(
+                target: "engine_client::grpc_transport",
+                "AttemptedCommand=Unspecified received — mapping to Unknown"
+            );
+            dto::AttemptedCommand::Unknown
         }
+        AttemptedCommand::LoadReplayData => dto::AttemptedCommand::LoadReplayData,
         AttemptedCommand::StartEngine => dto::AttemptedCommand::StartEngine,
         AttemptedCommand::StopEngine => dto::AttemptedCommand::StopEngine,
         AttemptedCommand::SetReplaySpeed => dto::AttemptedCommand::SetReplaySpeed,

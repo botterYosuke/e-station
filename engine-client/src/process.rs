@@ -3,7 +3,11 @@
 /// `PythonProcess` spawns the Python engine and communicates its `{port, token}`
 /// via stdin as a JSON line.  `ProcessManager` wraps it with exponential-backoff
 /// restart logic and re-applies subscriptions after each recovery.
-use crate::{connection::EngineConnection, error::EngineClientError, session_file::EngineSession};
+use crate::{
+    connection::EngineConnection,
+    error::EngineClientError,
+    session_file::{EngineSession, TransportKind},
+};
 
 use std::{
     collections::HashSet,
@@ -29,7 +33,7 @@ fn probe_url_from_session_or_default() -> String {
     let path = data_path(Some("engine-session.json"));
     if let Ok(bytes) = std::fs::read(&path)
         && let Ok(session) = serde_json::from_slice::<EngineSession>(&bytes)
-        && session.transport == "grpc"
+        && session.transport == TransportKind::Grpc
     {
         return format!("grpc://127.0.0.1:{}", session.port);
     }
@@ -584,7 +588,7 @@ impl ProcessManager {
         // spawning a fresh Python engine. Files whose recorded pid is still
         // live are kept (the live engine owns them); dead-pid / corrupt files
         // are removed so the helper does not attach to a stale token.
-        EngineSession::reap_stale(&session_path());
+        EngineSession::reap_stale(&session_path()).await;
 
         let mut proc = PythonProcess::spawn_with(&self.command, port).await?;
 
@@ -624,11 +628,12 @@ impl ProcessManager {
         // 書く意味が無い。helper 側も `_is_pid_alive(0)` が false で stale 扱いにする。
         match proc.pid() {
             Some(pid) => {
-                let session = EngineSession::new(
+                let session = EngineSession::with_transport(
                     proc.port(),
                     proc.token().to_string(),
                     pid,
                     u32::from(crate::SCHEMA_MAJOR),
+                    TransportKind::Grpc,
                 );
                 if let Err(e) = session.write_atomic(&session_path()) {
                     log::warn!("failed to write engine-session.json: {e}");

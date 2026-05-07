@@ -1,7 +1,7 @@
 # 実装計画: python-data-engine 改修 統合ロードマップ
 
 作成日: 2026-05-07  
-最終更新: 2026-05-08（G0〜G3 完了。WS トランスポート廃止、gRPC 一本化完了）
+最終更新: 2026-05-08（G0〜G3 完了。WS トランスポート廃止、gRPC 一本化完了。G1-G3 R1+R2 レビュー反映済み）
 
 ## 対象ドキュメント
 
@@ -598,6 +598,33 @@ WS 依存だった 10 個の統合テストファイルを tonic gRPC モック�
 
 **WS テストのスキップ方針**: WS トランスポート依存テスト 91 個にスキップマーカーを付与（削除でなくスキップにした理由：ビジネスロジックは健全で、テスト自体のロジックは gRPC 版への移植候補になりうるため）。
 
+### レビュー反映 (2026-05-08, G1-G3 ラウンド 1-3)
+
+**レビュー構成**: R1 (5並列: rust-reviewer / silent-failure-hunter / type-design-analyzer / ws-compatibility-auditor / general-purpose) → R2 修正 → R2 サニティ (silent + general) → R3 サニティ (silent)
+
+**R1 修正 (CRITICAL 0 / HIGH 8 / MEDIUM 13 → 全件解消):**
+
+| ID | 対象 | 修正内容 |
+|----|------|---------|
+| H1 | `process.rs:627` | `EngineSession::new()` → `with_transport(TransportKind::Grpc)` — attach mode 破損の修正 |
+| H2 | `replay_session.py` | `_GrpcAttachClient` 新設 — G1 完了条件の未実装を解消 |
+| H3 | `server_grpc.py:60` | `_EVENT_TO_FIELD_AND_CLASS` から `"Ready"` 削除 + `_dict_to_proto_event` に early-return ガード |
+| H4 | `server_grpc.py:209` | `StopAsyncIteration` に `log.debug` 追加 |
+| H5 | `error.rs:364` + 9箇所 | `EngineClientError::WebSocket` → `GrpcTransport` にリネーム |
+| H6 | `session_file.rs:31` | `transport: String` → `TransportKind` enum（typo による silent failure 防止） |
+| H7 | `test_live_session_attach.py` | `pytestmark = pytest.mark.skip` 追加（WS transport 廃止対応） |
+| H8 | `test_live_session_kabu.py` | 同上 |
+| M1-M13 | 各ファイル | MessageToDict 注釈 / buf CI / OrderType Unspecified → None / AttemptedCommand::Unknown / _proto_mode_to_str FAILED_PRECONDITION / tokio::spawn handle / 接続数 Lock / start_or_attach stub / Ready イベントログ / sleep(0.2)削除 / testing feature gate / pid_is_live async 化 / token sentinel |
+
+**R2 修正 (CRITICAL 0 / HIGH 3 / MEDIUM 3 → 全件解消):**
+- HIGH: `send` → `send_command` 改名、`wait_for(timeout=)` → `(timeout_s=)` 修正、`_recv_loop` import/dict をループ外移動 + `"ready"` フィルタ追加
+- MEDIUM: `handshake()` エラーパステスト 3件追加（schema mismatch / wrong token / 正常）、`sleep(0.1)` 削除、`buf breaking` 初回実行ガード
+
+**R3 サニティ**: CRITICAL 0 / HIGH 0 / MEDIUM 0 — **収束**
+
+**新規追加テスト**: +9件（`test_engine_session_transport.py` +6, `mock_grpc_server.py` expected_token 対応 +3）
+**繰越（LOW のみ）**: env-only gRPC attach フォールバック / `ConnectionDropped` send 失敗の診断性 / `AttemptedCommand::Unknown` UI 表示改善 / backend.rs/dto.rs コメント残骸
+
 **Stage D 完了条件**:
 - `ipc-schema-check` スキルの内容が `buf` コマンドに更新済み
 - `cargo test grpc_wire_integration` が実 `server_grpc.py` サブプロセスを起動した上で PASS（tonic↔grpcio の実 wire 互換性を確認。mock のみの完了は不可）
@@ -694,3 +721,50 @@ WS 依存だった 10 個の統合テストファイルを tonic gRPC モック�
 
 - **Stage D (G0〜G3)**: 着手可能（fee_total 完了済み）
 - **G3**: G2 完了済みのため着手可能
+
+---
+
+## レビュー反映 (2026-05-08, G1-G3 ラウンド 1)
+
+実施日: 2026-05-08  
+新規追加テスト数: 1（`start_or_attach.rs::probe_success_attaches_without_spawn` — `#[ignore]` スケルトン）
+
+### 修正済み Finding 一覧
+
+| Finding ID | 分類 | 内容（1 行サマリ） |
+|------------|------|------------------|
+| H1 | HIGH | `process.rs` — セッションファイル書き込みを `TransportKind::Grpc` で行うよう変更 |
+| H2 | HIGH | `replay_session.py` — `_GrpcAttachClient` クラス追加、`_make_attach_client()` ファクトリで WS/gRPC を自動選択 |
+| H3 | HIGH | `server_grpc.py` — `_EVENT_TO_FIELD_AND_CLASS` から `"Ready"` を削除し `_dict_to_proto_event()` に早期リターンガード追加 |
+| H4 | HIGH | `server_grpc.py` — `StopAsyncIteration` に `log.debug` 追加 |
+| H5 | HIGH | `error.rs` — `EngineClientError::WebSocket` を `GrpcTransport` に改名（全使用箇所更新） |
+| H6 | HIGH | `session_file.rs` — `transport: String` を `TransportKind` enum に変更、テスト更新 |
+| H7 | HIGH | `test_live_session_attach.py` — `pytestmark = pytest.mark.skip` 追加（WS transport 廃止） |
+| H8 | HIGH | `test_live_session_kabu.py` — `pytestmark = pytest.mark.skip` 追加（WS transport 廃止） |
+| M3 | MEDIUM | `grpc_transport.rs` — `OrderType/TIF/Status::Unspecified` を `log::warn + return None` で拒否 |
+| M4 | MEDIUM | `grpc_transport.rs` + `dto.rs` — `AttemptedCommand::Unknown` variant 追加、`Unspecified` を `Unknown` にマップ |
+| M5 | MEDIUM | `server_grpc.py` — `_proto_mode_to_str` が未知値で `ValueError` を raise、呼び出し元で `FAILED_PRECONDITION` に変換 |
+| M6 | MEDIUM | `tests/common/mod.rs` — `tokio::spawn(server)` を `let _handle = tokio::spawn(server)` に変更 |
+| M7 | MEDIUM | `server_grpc.py` — 接続数チェックを `handshake_lock` 内に移動し `len(_connections)` で確認 |
+| M8 | MEDIUM | `tests/start_or_attach.rs` — `probe_success_attaches_without_spawn` スケルトンテスト追加（`#[ignore]`） |
+| M9 | MEDIUM | `grpc_transport.rs` — Ready イベント送信失敗時に `log::debug` 追加 |
+| M10 | MEDIUM | `test_server_grpc_multi_client.py` — `asyncio.sleep(0.2)` 削除、timeout 付きポーリングに変更 |
+| M11 | MEDIUM | `connection.rs` — `connect_grpc_with_schema` は既存 `#[cfg(feature = "testing")]` ゲートで対応済み（追加変更不要） |
+| M12 | MEDIUM | `session_file.rs` — `std::thread::sleep` → `tokio::time::sleep`、`pid_is_live` / `reap_stale` を `async fn` に変更 |
+| M13 | MEDIUM | `test_grpc_smoke.py` — token フィールド検証 `assert data.get("token") == expected_token` 追加 |
+| M1 | MEDIUM | `server_grpc.py` — `_cmd_payload_to_dict` に optional フィールド欠落の注記を追加 |
+| M2 | MEDIUM | `.github/workflows/proto-lint.yml` 新設（buf lint + breaking change チェック） |
+
+## レビュー反映 (2026-05-08, G1-G3 ラウンド 2)
+
+実施日: 2026-05-08  
+新規追加テスト数: 3（`test_engine_session_transport.py` — `_GrpcAttachClient.handshake()` 正常/schema mismatch/wrong token）
+
+### 修正済み Finding 一覧
+
+| Finding ID | 分類 | 内容（1 行サマリ） |
+|------------|------|------------------|
+| H-NEW-1 | HIGH | `replay_session.py` — `_GrpcAttachClient._recv_loop` の import と `_field_to_event` dict 構築をループ外に移動、`"ready"` フィールドを `log.debug + continue` でフィルタ |
+| M-NEW-1 | MEDIUM | `test_engine_session_transport.py` + `mock_grpc_server.py` — `_GrpcAttachClient.handshake()` 正常/schema_mismatch/wrong_token の 3 テスト追加、MockGrpcServer に `expected_token` パラメータ追加、`_GrpcAttachClient` に `_schema_major_override` パラメータ追加 |
+| M-NEW-2 | MEDIUM | `test_server_grpc_multi_client.py:104` — `asyncio.sleep(0.1)` を削除（handshake 完了は `wait_for` で保証済みのため sleep 不要） |
+| M-NEW-3 | MEDIUM | `.github/workflows/proto-lint.yml` — `buf breaking` に `fetch-depth: 0` と初回実行ガード追加（main に `buf.yaml` 未存在時にスキップ） |

@@ -122,3 +122,38 @@ async fn empty_probe_url_falls_back_to_spawn() {
         "spawn must be attempted when probe URL is empty"
     );
 }
+
+/// 5. Probe succeeds → attach without spawning Python.
+///
+/// This test requires a running gRPC mock server (real wire handshake).
+/// It is marked `#[ignore]` because spinning up a Python engine in unit-test
+/// scope is impractical. The actual happy-path is exercised end-to-end in
+/// `grpc_wire_integration.rs::test_grpc_attach_to_already_running_server`.
+///
+/// Skeleton: when a live gRPC mock is present at `probe_url` with a matching
+/// `token` and schema, `try_attach_or_spawn` must return `Ok` and
+/// `spawn_count() == 0`.
+///
+/// TODO(grpc_wire_integration): wire test against real Python engine is done
+/// in `engine-client/tests/grpc_wire_integration.rs`. The mock-only skeleton
+/// here documents the expected behaviour without requiring a Python runtime.
+#[tokio::test]
+#[ignore = "requires a running Python gRPC engine — covered by grpc_wire_integration"]
+async fn probe_success_attaches_without_spawn() {
+    // To run this test manually, start the Python gRPC engine first:
+    //   uv run python -m engine --port 50051 --token test-token --mode live
+    // then run: cargo test probe_success_attaches_without_spawn -- --ignored
+    let pm = ProcessManager::new("false");
+    let probe_url = "grpc://127.0.0.1:50051";
+    let result = pm.try_attach_or_spawn(9_u16, probe_url, "test-token").await;
+
+    assert!(
+        result.is_ok(),
+        "attach to live gRPC server must succeed: {result:?}"
+    );
+    assert_eq!(
+        pm.spawn_count(),
+        0,
+        "spawn must NOT be attempted when probe succeeds"
+    );
+}

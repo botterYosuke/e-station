@@ -57,7 +57,8 @@ _FIELD_TO_OP = {
 }
 
 _EVENT_TO_FIELD_AND_CLASS = {
-    "Ready":                      ("ready",                       engine_pb2.ReadyResponse),
+    # NOTE: "Ready" is intentionally absent.  ReadyResponse must be sent only
+    # once during the handshake via _build_ready_event() — never via the outbox.
     "EngineError":                ("engine_error",                engine_pb2.EngineErrorEvent),
     "Connected":                  ("connected",                   engine_pb2.ConnectedEvent),
     "Disconnected":               ("disconnected",                engine_pb2.DisconnectedEvent),
@@ -126,12 +127,16 @@ def _log_startup_tachibana_error(t: asyncio.Task) -> None:
 
 
 def _proto_mode_to_str(mode_int: int) -> str:
-    """proto AppMode enum value を文字列に変換する。"""
+    """proto AppMode enum value を文字列に変換する。
+
+    未知の値は ValueError を raise する。呼び出し元でこれを捕捉して
+    FAILED_PRECONDITION で接続を拒否すること。
+    """
     if mode_int == engine_pb2.APP_MODE_REPLAY:
         return "replay"
-    if mode_int != engine_pb2.APP_MODE_LIVE:
-        log.warning("Unknown AppMode value %d — falling back to 'live'", mode_int)
-    return "live"
+    if mode_int == engine_pb2.APP_MODE_LIVE:
+        return "live"
+    raise ValueError(f"Unknown AppMode value: {mode_int}")
 
 
 def _build_ready_event(server) -> engine_pb2.Event:
@@ -153,7 +158,13 @@ def _build_ready_event(server) -> engine_pb2.Event:
 
 
 def _cmd_payload_to_dict(cmd, which: str) -> dict:
-    """Command の payload フィールドを dict に変換する。"""
+    """Command の payload フィールドを dict に変換する。
+
+    M1 注記: `always_print_fields_with_no_presence=False` により proto の
+    optional フィールドが未設定の場合は dict に含まれない（キー自体が欠落する）。
+    呼び出し側では `msg[key]` ではなく `msg.get(key)` または `msg.get(key, default)`
+    を使うこと。`server.py` の dispatch ハンドラがこれを尊重していることを確認済み。
+    """
     from google.protobuf.json_format import MessageToDict
     payload_msg = getattr(cmd, which)
     return MessageToDict(
@@ -168,6 +179,11 @@ def _dict_to_proto_event(event_dict: dict) -> engine_pb2.Event | None:
     from google.protobuf.json_format import ParseDict
 
     event_name = event_dict.get("event")
+    if event_name == "Ready":
+        log.error(
+            "Unexpected 'Ready' in outbox — ReadyResponse must be sent only once during handshake"
+        )
+        return None
     mapping = _EVENT_TO_FIELD_AND_CLASS.get(event_name)
     if mapping is None:
         log.warning("Unknown event name: %s — dropping", event_name)
@@ -196,17 +212,13 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
         request_iterator: AsyncIterator[engine_pb2.Command],
         context: aio.ServicerContext,
     ) -> AsyncIterator[engine_pb2.Event]:
-        # 1. 接続数チェック
-        if self._server._outbox.count() >= MAX_CONNECTIONS:
-            await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "max connections exceeded")
-            return
-
         # 2. 最初の Command を待つ（15秒タイムアウト）
         try:
             first_cmd = await asyncio.wait_for(
                 request_iterator.__anext__(), timeout=_HANDSHAKE_TIMEOUT_S
             )
         except StopAsyncIteration:
+            log.debug("gRPC session: client closed stream before sending HelloRequest")
             return
         except asyncio.TimeoutError:
             await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "handshake timeout")
@@ -238,9 +250,18 @@ class _GrpcDataEngineServicer(engine_pb2_grpc.DataEngineServicer):
             )
             return
 
-        # 6–9. mode 確定・prepare・接続登録（Lock で同時ハンドシェイクの race を防ぐ）
+        # 6–9. 接続数チェック・mode 確定・prepare・接続登録（Lock で同時ハンドシェイクの race を防ぐ）
         async with self._handshake_lock:
-            mode_str = _proto_mode_to_str(hello.mode)
+            # 1. 接続数チェック（Lock 内でアトミックに確認）
+            if len(self._server._connections) >= MAX_CONNECTIONS:
+                await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "max connections exceeded")
+                return
+
+            try:
+                mode_str = _proto_mode_to_str(hello.mode)
+            except ValueError as exc:
+                await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+                return
             if self._server._mode == "live" and not self._server._connections:
                 self._server._mode = mode_str
             elif mode_str != self._server._mode:

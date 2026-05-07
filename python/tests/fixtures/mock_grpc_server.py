@@ -39,13 +39,21 @@ class _DataEngineServicer(engine_pb2_grpc.DataEngineServicer):
     ハンドシェイク契約:
       - 最初の Command が HelloRequest であれば ReadyResponse を最初の Event として返す
       - schema_major 不一致は FAILED_PRECONDITION でストリームを終了する
+      - token 不一致は UNAUTHENTICATED でストリームを終了する（expected_token が None 以外の場合）
       - HelloRequest 以外が最初のメッセージであれば INVALID_ARGUMENT で終了する
       - 以降の Command はすべて無視してストリームを保持する
     """
 
-    def __init__(self, *, expected_schema_major: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        expected_schema_major: int = 0,
+        expected_token: str | None = None,
+    ) -> None:
         # 0 = 何でも受け付ける（テスト用デフォルト）
         self._expected_schema_major = expected_schema_major
+        # None = トークン検証をスキップ（テスト用デフォルト）
+        self._expected_token = expected_token
 
     async def Session(
         self,
@@ -75,6 +83,16 @@ class _DataEngineServicer(engine_pb2_grpc.DataEngineServicer):
                     )
                     return
 
+                if (
+                    self._expected_token is not None
+                    and hello.token != self._expected_token
+                ):
+                    await context.abort(
+                        grpc.StatusCode.UNAUTHENTICATED,
+                        "token mismatch",
+                    )
+                    return
+
                 yield engine_pb2.Event(
                     ready=engine_pb2.ReadyResponse(
                         schema_major=hello.schema_major,
@@ -101,9 +119,15 @@ class MockGrpcServer:
         port: サーバーが Listen しているポート番号（start() 後に確定）。
     """
 
-    def __init__(self, *, expected_schema_major: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        expected_schema_major: int = 0,
+        expected_token: str | None = None,
+    ) -> None:
         self._servicer = _DataEngineServicer(
-            expected_schema_major=expected_schema_major
+            expected_schema_major=expected_schema_major,
+            expected_token=expected_token,
         )
         self._server: aio.Server | None = None
         self.port: int = 0

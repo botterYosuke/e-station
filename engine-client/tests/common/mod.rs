@@ -230,7 +230,7 @@ impl MockGrpcEngine {
                 },
             );
 
-        tokio::spawn(server);
+        let _handle = tokio::spawn(server);
         // Brief pause so tonic is accepting before the test starts.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
