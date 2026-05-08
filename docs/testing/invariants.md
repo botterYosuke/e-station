@@ -70,7 +70,7 @@ status: draft
 
 ## 表
 
-| INV ID | 原 ID | 一次資料節 | pin する test ファイル::関数名 | 実行コマンド | Tx タスク | 関連 SKILL ID |
+| 不変条件 ID | 原 ID | 一次資料節 | pin する test ファイル::関数名 | 実行コマンド | Tx タスク | 関連 SKILL ID |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | INV-TACHIBANA-001 | F-H5 | spec.md §2.2 / architecture.md §7.4 | `data/tests/tachibana_second_password_guard.rs::test_phase1_second_password_guard_panics_in_debug`（同 pin に `debug_assert!(second_password.is_none())` 行を含める。R3 C-L1 の `second_password.is_none()` pin は独立 ID を切らず本 pin に統合する） | `cargo test -p flowsurface-data --tests -- test_phase1_second_password_guard_panics_in_debug` | T3 | R10 |
 | INV-TACHIBANA-002 | F-B1 | architecture.md §7.2 / data-mapping.md §2 | `data/tests/tachibana_dto_secrecy.rs::test_credentials_roundtrip_with_zeroize_and_masked_debug` | `cargo test -p flowsurface-data --tests -- test_credentials_roundtrip_with_zeroize_and_masked_debug` | T3 | R10 |
@@ -225,7 +225,7 @@ Python test: `uv run pytest python/tests/test_schema_compat.py`
 >
 > **Phase 8（2026-05-03 完了）注記**: 表中の `src/api/order_api.rs` は Phase 8 で削除済み。Rust 側ガード（INV-ORDER-005 / INV-ORDER-007 / INV-ORDER-008 等）は HTTP path 専用の防壁だったため Phase 8 で消滅した（GUI 発注は元から HTTP を経由しないため挙動変更なし）。これらのテストはリポジトリ履歴上の「旧 HTTP path レビュー時の記録」として残置。replay モード reject は engine state machine の `EngineBusy` event に置き換わっている。
 
-| INV ID | 元 ID | 説明 | テストファイル | 関数名 | ステータス |
+| 不変条件 ID | 元 ID | 説明 | テストファイル | 関数名 | ステータス |
 |---|---|---|---|---|---|
 | INV-ORDER-001 | A-H2 | `reason_code` は SCREAMING_SNAKE_CASE 固定文字列のみ（specs/order.md §5.2） | `python/tests/test_invariant_reason_code.py` | `test_canonical_codes_are_screaming_snake_case` / `test_all_reason_codes_in_source_are_canonical` / `test_all_reason_codes_in_source_are_screaming_snake_case` | 実装済み (2026-04-28) |
 | INV-ORDER-002 | C-H1 | 仮想 URL（sUrlRequest / sUrlEvent / sUrlEventWebSocket）と p_no クエリを WAL・ログ・reason_text に出さない。`mask_virtual_url()` 必須（specs/order.md §3.1 / §3.4） | `python/tests/test_url_masker.py` | `test_mask_virtual_url` | 実装済み (2026-04-28) |

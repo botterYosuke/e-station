@@ -371,9 +371,11 @@ mod tests {
 
     #[test]
     fn validation_fails_bad_start_date_format() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "1301.TSE".to_string();
-        form.start_date = "not-a-date".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "not-a-date".to_string(),
+            ..Default::default()
+        };
         let action = form.update(Message::Submit);
         assert!(action.is_none());
         assert!(form.validation_error.is_some());
@@ -382,10 +384,12 @@ mod tests {
 
     #[test]
     fn validation_fails_bad_end_date_format() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "1301.TSE".to_string();
-        form.start_date = "2025-01-06".to_string();
-        form.end_date = "2025/03/31".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "2025-01-06".to_string(),
+            end_date: "2025/03/31".to_string(),
+            ..Default::default()
+        };
         let action = form.update(Message::Submit);
         assert!(action.is_none());
         assert!(form.validation_error.is_some());
@@ -394,13 +398,15 @@ mod tests {
 
     #[test]
     fn validation_fails_invalid_cash() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "1301.TSE".to_string();
-        form.start_date = "2025-01-06".to_string();
-        form.end_date = "2025-03-31".to_string();
-        form.granularity = Some(Granularity::Daily);
-        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
-        form.initial_cash = "abc".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "2025-01-06".to_string(),
+            end_date: "2025-03-31".to_string(),
+            granularity: Some(Granularity::Daily),
+            strategy_file: Some(std::path::PathBuf::from("/tmp/strategy.py")),
+            initial_cash: "abc".to_string(),
+            ..Default::default()
+        };
         let action = form.update(Message::Submit);
         assert!(action.is_none());
         assert!(form.validation_error.is_some());
@@ -410,13 +416,15 @@ mod tests {
     #[test]
     fn validation_fails_zero_cash() {
         // M-Rust4: parse は通るが 0 は事故予防のため弾く。
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "1301.TSE".to_string();
-        form.start_date = "2025-01-06".to_string();
-        form.end_date = "2025-03-31".to_string();
-        form.granularity = Some(Granularity::Daily);
-        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
-        form.initial_cash = "0".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "2025-01-06".to_string(),
+            end_date: "2025-03-31".to_string(),
+            granularity: Some(Granularity::Daily),
+            strategy_file: Some(std::path::PathBuf::from("/tmp/strategy.py")),
+            initial_cash: "0".to_string(),
+            ..Default::default()
+        };
         let action = form.update(Message::Submit);
         assert!(action.is_none());
         let msg = form
@@ -432,13 +440,15 @@ mod tests {
     #[test]
     fn validation_fails_when_start_after_end() {
         // M-2 (rust): 開始日 > 終了日 を検出する。
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "1301.TSE".to_string();
-        form.start_date = "2025-03-31".to_string();
-        form.end_date = "2025-01-06".to_string();
-        form.granularity = Some(Granularity::Daily);
-        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
-        form.initial_cash = "1000000".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "2025-03-31".to_string(),
+            end_date: "2025-01-06".to_string(),
+            granularity: Some(Granularity::Daily),
+            strategy_file: Some(std::path::PathBuf::from("/tmp/strategy.py")),
+            initial_cash: "1000000".to_string(),
+            ..Default::default()
+        };
         let action = form.update(Message::Submit);
         assert!(action.is_none());
         assert!(form.validation_error.is_some());
@@ -451,13 +461,15 @@ mod tests {
 
     #[test]
     fn validation_succeeds_with_valid_inputs() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "1301.TSE".to_string();
-        form.start_date = "2025-01-06".to_string();
-        form.end_date = "2025-03-31".to_string();
-        form.granularity = Some(Granularity::Daily);
-        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
-        form.initial_cash = "1000000".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "2025-01-06".to_string(),
+            end_date: "2025-03-31".to_string(),
+            granularity: Some(Granularity::Daily),
+            strategy_file: Some(std::path::PathBuf::from("/tmp/strategy.py")),
+            initial_cash: "1000000".to_string(),
+            ..Default::default()
+        };
         let action = form.update(Message::Submit);
         assert!(
             matches!(action, Some(Action::Submit { .. })),
@@ -468,13 +480,15 @@ mod tests {
 
     #[test]
     fn validation_succeeds_with_multiple_instruments() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "1301.TSE, 7203.TSE, 6758.TSE".to_string();
-        form.start_date = "2025-01-06".to_string();
-        form.end_date = "2025-01-10".to_string();
-        form.granularity = Some(Granularity::Minute);
-        form.strategy_file = Some(std::path::PathBuf::from("/tmp/strategy.py"));
-        form.initial_cash = "10000000".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "1301.TSE, 7203.TSE, 6758.TSE".to_string(),
+            start_date: "2025-01-06".to_string(),
+            end_date: "2025-01-10".to_string(),
+            granularity: Some(Granularity::Minute),
+            strategy_file: Some(std::path::PathBuf::from("/tmp/strategy.py")),
+            initial_cash: "10000000".to_string(),
+            ..Default::default()
+        };
         let action = form.update(Message::Submit);
         match action {
             Some(Action::Submit { instrument_ids, .. }) => {
@@ -555,8 +569,10 @@ mod tests {
 
     #[test]
     fn prefill_from_scenario_clears_validation_error() {
-        let mut form = ReplayFormModal::default();
-        form.validation_error = Some("dangling".to_string());
+        let mut form = ReplayFormModal {
+            validation_error: Some("dangling".to_string()),
+            ..Default::default()
+        };
         let scenario = serde_json::json!({
             "instrument": "7203.TSE",
             "granularity": "Minute",
@@ -568,8 +584,10 @@ mod tests {
 
     #[test]
     fn prefill_from_scenario_unknown_granularity_preserves_existing() {
-        let mut form = ReplayFormModal::default();
-        form.granularity = Some(Granularity::Trade);
+        let mut form = ReplayFormModal {
+            granularity: Some(Granularity::Trade),
+            ..Default::default()
+        };
         let scenario = serde_json::json!({"granularity": "weekly"});
         form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario, None);
         assert_eq!(form.granularity, Some(Granularity::Trade));
@@ -577,11 +595,13 @@ mod tests {
 
     #[test]
     fn prefill_from_scenario_partial_keeps_other_fields() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "OLD".to_string();
-        form.start_date = "2024-01-01".to_string();
-        form.end_date = "2024-02-01".to_string();
-        form.initial_cash = "500".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "OLD".to_string(),
+            start_date: "2024-01-01".to_string(),
+            end_date: "2024-02-01".to_string(),
+            initial_cash: "500".to_string(),
+            ..Default::default()
+        };
         let scenario = serde_json::json!({"instrument": "NEW"});
         form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario, None);
         assert_eq!(form.instrument_id, "NEW");

@@ -33,26 +33,22 @@ impl crate::Flowsurface {
                 let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
                     .next(VenueEvent::Dismissed);
                 self.tachibana_state = next;
-                if should_logout {
-                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                        return Task::perform(
-                            async move {
-                                conn.send(engine_client::dto::Command::RequestVenueLogout {
-                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
-                                })
-                                .await
-                                .map_err(|e| e.to_string())
-                            },
-                            |r| {
-                                if let Err(e) = r {
-                                    log::warn!(
-                                        "Tachibana logout IPC (on banner dismiss) failed: {e}"
-                                    );
-                                }
-                                Message::Engine(crate::messages::EngineMsg::Noop)
-                            },
-                        );
-                    }
+                if should_logout && let Some(conn) = self.engine_connection.as_ref().cloned() {
+                    return Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::RequestVenueLogout {
+                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        |r| {
+                            if let Err(e) = r {
+                                log::warn!("Tachibana logout IPC (on banner dismiss) failed: {e}");
+                            }
+                            Message::Engine(crate::messages::EngineMsg::Noop)
+                        },
+                    );
                 }
             }
             VenueMsg::RequestTachibanaLogin(trigger) => {

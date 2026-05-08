@@ -469,8 +469,10 @@ mod tests {
 
     #[test]
     fn replay_bar_state_prefill_v3_resolved_empty_keeps_existing() {
-        let mut replay_bar = ReplayBarState::default();
-        replay_bar.instrument_id = "EXISTING".to_string();
+        let mut replay_bar = ReplayBarState {
+            instrument_id: "EXISTING".to_string(),
+            ..Default::default()
+        };
         let scenario = serde_json::json!({"schema_version": 3});
         replay_bar.prefill_from_scenario(PathBuf::from("/tmp/s.py"), &scenario, Some(&[]));
         assert_eq!(replay_bar.instrument_id, "EXISTING");

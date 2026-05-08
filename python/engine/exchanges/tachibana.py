@@ -1293,7 +1293,7 @@ class TachibanaWorker(ExchangeWorker):
                     # Rate-limit (H-C): one VenueError per code per
                     # _ST_VENUE_ERROR_RATE_LIMIT_S window.
                     now = loop.time()
-                    last = st_last_emit.get(code, 0.0)
+                    last = st_last_emit.get(code, -_ST_VENUE_ERROR_RATE_LIMIT_S)
                     if now - last >= _ST_VENUE_ERROR_RATE_LIMIT_S:
                         st_last_emit[code] = now
                         outbox.append({

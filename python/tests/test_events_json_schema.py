@@ -26,7 +26,7 @@ import warnings
 _SCHEMA_PATH = (
     pathlib.Path(__file__).parent.parent.parent
     / "docs"
-    / "specs/data-engine"
+    / "reference"
     / "schemas"
     / "events.json"
 )

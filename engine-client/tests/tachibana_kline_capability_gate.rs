@@ -47,7 +47,7 @@ impl DataEngine for KlineGateMock {
             }
         }
 
-        let schema_major = flowsurface_engine_client::SCHEMA_MAJOR as u32;
+        let schema_major = flowsurface_engine_client::SCHEMA_MAJOR;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<engine::Event, Status>>(64);
 
         tokio::spawn(async move {
@@ -55,7 +55,7 @@ impl DataEngine for KlineGateMock {
             let ready = engine::Event {
                 payload: Some(engine::event::Payload::Ready(engine::ReadyResponse {
                     schema_major,
-                    schema_minor: flowsurface_engine_client::SCHEMA_MINOR as u32,
+                    schema_minor: flowsurface_engine_client::SCHEMA_MINOR,
                     engine_version: "mock".to_string(),
                     engine_session_id: "00000000-0000-0000-0000-000000000001".to_string(),
                     capabilities: Some(engine::EngineCapabilities {
@@ -70,21 +70,16 @@ impl DataEngine for KlineGateMock {
             }
 
             // Wait for FetchKlines command and respond with Error (not_implemented).
-            loop {
-                match stream.message().await {
-                    Ok(Some(cmd)) => {
-                        if let Some(engine::command::Payload::FetchKlines(fk)) = cmd.payload {
-                            let err_event = engine::Event {
-                                payload: Some(engine::event::Payload::Error(engine::ErrorEvent {
-                                    request_id: Some(fk.request_id),
-                                    code: "not_implemented".to_string(),
-                                    message: "tachibana supports 1d only in Phase 1".to_string(),
-                                })),
-                            };
-                            let _ = tx.send(Ok(err_event)).await;
-                        }
-                    }
-                    Ok(None) | Err(_) => break,
+            while let Ok(Some(cmd)) = stream.message().await {
+                if let Some(engine::command::Payload::FetchKlines(fk)) = cmd.payload {
+                    let err_event = engine::Event {
+                        payload: Some(engine::event::Payload::Error(engine::ErrorEvent {
+                            request_id: Some(fk.request_id),
+                            code: "not_implemented".to_string(),
+                            message: "tachibana supports 1d only in Phase 1".to_string(),
+                        })),
+                    };
+                    let _ = tx.send(Ok(err_event)).await;
                 }
             }
         });
