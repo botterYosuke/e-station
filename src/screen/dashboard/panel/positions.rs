@@ -100,13 +100,14 @@ pub fn view(panel: &PositionsPanel) -> Element<'_, Message> {
         .on_press(Message::RefreshClicked)
         .padding([2, 8]);
 
-    let header = if panel.loading {
-        row![refresh_btn, text("↻ 更新中…").size(11)]
-            .spacing(4)
-            .padding([4, 8])
-    } else {
-        row![refresh_btn].spacing(4).padding([4, 8])
-    };
+    let mut header_items = vec![refresh_btn.into()];
+    if panel.loading {
+        header_items.push(text("↻ 更新中…").size(11).into());
+    }
+    if panel.is_replay() {
+        header_items.push(text("⏪ REPLAY").size(11).into());
+    }
+    let header = row(header_items).spacing(4).padding([4, 8]);
 
     // Issue 5: replay pane でも push 経由でデータが入った場合は通常の描画に進む。
     // 旧実装はバナーで早期 return していたため push イベントを描画できなかった。
