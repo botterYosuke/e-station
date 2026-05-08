@@ -487,6 +487,12 @@ impl crate::Flowsurface {
                                 |p| Message::Replay(ReplayMsg::StrategyFilePicked(p)),
                             );
                         }
+                        // Issue #25: venue toggle — no IPC needed here; the
+                        // dashboard already updated order_venue. We propagate
+                        // the new venue to both Tachibana-state and Kabu-state
+                        // aware panes simply by having the dashboard re-render
+                        // with the updated order_venue field.
+                        Some(dashboard::Event::OrderVenueSelected(_venue)) => Task::none(),
                         None => Task::none(),
                     };
 

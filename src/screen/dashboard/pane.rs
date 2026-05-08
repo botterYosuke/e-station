@@ -43,7 +43,7 @@ use data::{
 };
 use exchange::{
     Kline, OpenInterest, StreamPairKind, TickMultiplier, TickerInfo, Timeframe,
-    adapter::{Exchange, MarketKind, StreamKind, StreamTicksize},
+    adapter::{Exchange, MarketKind, StreamKind, StreamTicksize, Venue},
     unit::PriceStep,
 };
 use iced::{
@@ -89,6 +89,8 @@ pub enum Effect {
     SetReplaySpeed(u32),
     /// N4.3: User pressed the strategy file picker button in `ReplayControl` pane.
     PickStrategyFile,
+    /// Issue #25: User pressed the 立花/kabu toggle in this pane's title bar.
+    VenueToggle(Venue),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -149,6 +151,8 @@ pub enum Event {
     SetReplaySpeed(u32),
     /// N4.3: User pressed the "Strategy ファイルを選ぶ" button in `ReplayControl`.
     PickStrategyFile,
+    /// Issue #25: User pressed the 立花/kabu venue toggle in this pane's title bar.
+    VenueToggle(Venue),
 }
 
 pub struct State {
@@ -712,6 +716,9 @@ impl State {
         main_window: &'a Window,
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
+        order_venue: Venue,
+        tachibana_ready: bool,
+        kabu_ready: bool,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
         // 銘柄概念を持たないペイン（Starter / OrderList / BuyingPower）からは
         // link_group ボタン `[-]` を非表示にする。OrderEntry は銘柄を持つため
@@ -825,6 +832,7 @@ impl State {
             // N1.11: ReplayControl はタイトルなし（TODO: 将来 "リプレイ速度" を返す）
             | Content::ReplayControl => None,
         };
+        let is_order_panel = order_panel_title.is_some();
         if let Some(title) = order_panel_title {
             top_left_buttons = top_left_buttons.push(
                 text(title)
@@ -832,6 +840,38 @@ impl State {
                     .align_y(Alignment::Center)
                     .line_height(1.4),
             );
+        }
+
+        // Issue #25: venue toggle (立花 / kabu) shown in order panel title bars.
+        // Only rendered when both venues are ready (single-venue mode = fixed label,
+        // no toggle needed). When both are ready the active venue is highlighted
+        // with the primary button style; the inactive venue uses the flat style.
+        if is_order_panel && tachibana_ready && kabu_ready {
+            let tachi_active = order_venue == Venue::Tachibana;
+            let tachi_btn = button(
+                text("立花")
+                    .size(11)
+                    .align_y(Alignment::Center)
+                    .line_height(1.2),
+            )
+            .on_press(Message::PaneEvent(id, Event::VenueToggle(Venue::Tachibana)))
+            .style(move |theme, status| style::button::modifier(theme, status, tachi_active))
+            .height(widget::PANE_CONTROL_BTN_HEIGHT);
+
+            let kabu_btn = button(
+                text("kabu")
+                    .size(11)
+                    .align_y(Alignment::Center)
+                    .line_height(1.2),
+            )
+            .on_press(Message::PaneEvent(
+                id,
+                Event::VenueToggle(Venue::KabuStation),
+            ))
+            .style(move |theme, status| style::button::modifier(theme, status, !tachi_active))
+            .height(widget::PANE_CONTROL_BTN_HEIGHT);
+
+            top_left_buttons = top_left_buttons.push(tachi_btn).push(kabu_btn);
         }
 
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
@@ -1941,6 +1981,10 @@ impl State {
             // N4.3: Relay strategy file picker button press to the dashboard.
             Event::PickStrategyFile => {
                 return Some(Effect::PickStrategyFile);
+            }
+            // Issue #25: relay venue toggle to the dashboard so all panes update.
+            Event::VenueToggle(venue) => {
+                return Some(Effect::VenueToggle(venue));
             }
         }
         None

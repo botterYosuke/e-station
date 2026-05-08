@@ -39,6 +39,7 @@
 | CI タイムアウト未設定 + 優先順位分岐末尾カバー漏れ | `pytest.ini` に `timeout = 60` を設定せず、スタック時に CI が無限ブロックするリスクを放置した。また `_resolve_endpoint_and_token()` の優先順位 (c) env-only パス（セッションファイルなし・TOKEN 設定あり → `ws://127.0.0.1:19876/`）をテストせず、(a)(b) ケースだけをテストして S4-D 完了と判断した | 1 |
 | enum 下限チェックのみのバリアント数テスト | `assert!(count >= N)` 形式のバリアント数テストは新バリアント追加を検出しない。`_ => None` ワイルドカードがある match では新バリアントが追加されてもテストが通り、サイレント消失を見逃す。`assert_eq!(count, N)` の完全一致テストで新旧どちらの変化も検出する | 1 |
 | IPC 移行後 outbox dict → proto 整合性未検証 | 取引所アダプターが outbox に積む dict の全フィールドを proto 定義と照合するテストがなく、旧 IPC（JSON）向けの legacy フィールドが proto 変換時にサイレント DROP を引き起こす | 1 |
+| 孤立メソッド（Orphan Method） | 実装済みコールバックがプロダクションのコールパスに繋がれていない。メソッドが単体テストでパスしていても、実際に呼ばれていないため症状が出ない。起動確認テストがなければ検出不能 | 1 |
 
 ---
 
@@ -2055,3 +2056,34 @@ proto スキーマに適合しているかを検証する結合テストがな�
 3. **取引所アダプターに outbox dict のフィールドを変更したら、proto との整合テストを実行する**:
    `tachibana.py`、`kabusapi.py` 等の全アダプターで、outbox に積む dict のキー集合が
    対応する proto メッセージのフィールドと一致することをテストで保証する。
+
+---
+
+## 2026-05-08 — kabuStation Ladder 「Waiting for data...」永続表示（Issue #28）
+
+**見逃しパターン**: 孤立メソッド（Orphan Method）パターン
+**根本原因**: `_on_kabu_board_push()` / `_on_kabu_trade_push()` は単体テストが通っていたが、プロダクションのコールパス（`_startup_kabu_station()` → `kabusapi_ws.connect()` → `on_message`）に繋がれていなかった。3層のサイレント障害が重なり、症状が表面化しにくかった。
+- Layer 1: `_startup_kabu_station()` が PUSH WebSocket (`kabusapi_ws.connect()`) を起動しなかった
+- Layer 2: `_handle_subscribe()` が `kabu_station` を `unknown_venue` で即拒否した
+- Layer 3: `engine-client/src/backend.rs` の `depth_stream` が `EngineEvent::Error` を `_ => {}` でサイレント無視した
+
+**追加したテスト**:
+- `python/tests/test_server_kabu_push.py::TestKabuPushWsTaskStarted` — PUSH WS タスク起動確認
+- `python/tests/test_server_kabu_subscribe.py` — Subscribe(kabu_station) 受け入れ確認
+- `engine-client/tests/depth_stream_error_event.rs` — EngineEvent::Error → Event::Disconnected 確認
+
+**教訓**:
+
+1. **コールバックを実装したら、そのコールバックが実際のコードパスから呼ばれることをテストせよ**:
+   `_on_kabu_board_push()` のような受信コールバックは単体テストがパスしても、
+   `_startup_kabu_station()` に `kabusapi_ws.connect()` が存在しなければ一切呼ばれない。
+   コールバック実装時は「誰がそれを登録するか」「起動フローに繋がれているか」を smoke test で確認する。
+
+2. **新しいコンポーネント（PUSH WS 等）を追加したら「起動されているか」の smoke test を追加せよ**:
+   機能追加時は動作確認テスト（コールバックの内容）だけでなく、
+   起動確認テスト（`asyncio.Task` が生成されているか等）も合わせて追加する。
+
+3. **`_ => {}` ワイルドカードアームは定期的に見直し、Error/Unknown イベントを握り潰していないか確認せよ**:
+   Rust の match 式で `_ => {}` を使うと、新しいバリアント（`EngineEvent::Error` 等）が
+   追加されてもコンパイルエラーにならずサイレントに無視される。
+   Error 系イベントは必ず明示的なアームで処理し、`Event::Disconnected` 等に変換してクライアントに通知する。

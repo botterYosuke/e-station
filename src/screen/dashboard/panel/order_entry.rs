@@ -308,19 +308,19 @@ impl OrderEntryPanel {
         self.quantity.parse::<u64>().map(|v| v > 0).unwrap_or(false)
     }
 
-    pub fn set_instrument(&mut self, id: String, display: String) {
+    pub fn set_instrument(&mut self, id: String, display: String, venue: &str) {
         self.instrument_id = Some(id);
         self.display_label = Some(display);
-        // Phase O0: Tachibana 専用。将来の多取引所対応時は呼び出し元から venue を渡す。
-        self.venue = Some("tachibana".to_string());
+        self.venue = Some(venue.to_string());
     }
 
     /// Set instrument from full `TickerInfo` — used by link_group sync.
     /// Exchange guard (TachibanaStock only) is the caller's responsibility.
-    pub fn set_instrument_from_ticker(&mut self, ti: TickerInfo) {
+    /// `venue_name` is the IPC venue string (e.g. "tachibana" or "kabu_station").
+    pub fn set_instrument_from_ticker(&mut self, ti: TickerInfo, venue_name: &str) {
         let display = ti.ticker.display_symbol_and_type().0;
         let id = format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
-        self.set_instrument(id, display);
+        self.set_instrument(id, display, venue_name);
         self.ticker_info = Some(ti);
     }
 
@@ -550,12 +550,15 @@ mod tests {
         );
     }
 
-    // ── M-1: set_instrument が venue を自動セットすることを確認 ──
+    // ── M-1: set_instrument が venue を正しくセットすることを確認 ──
     #[test]
-    fn set_instrument_sets_venue_to_tachibana() {
+    fn set_instrument_sets_venue() {
         let mut panel = OrderEntryPanel::default();
-        panel.set_instrument("7203.TSE".into(), "トヨタ".into());
+        panel.set_instrument("7203.TSE".into(), "トヨタ".into(), "tachibana");
         assert_eq!(panel.venue, Some("tachibana".to_string()));
+
+        panel.set_instrument("7203.TSE".into(), "トヨタ".into(), "kabu_station");
+        assert_eq!(panel.venue, Some("kabu_station".to_string()));
     }
 
     // ── M-1: build_submit_action が venue を正しく使うことを確認 ──
@@ -648,7 +651,7 @@ mod tests {
         let ti = TickerInfo::new_stock(ticker, 1.0, 100.0, 100);
 
         let mut panel = OrderEntryPanel::default();
-        panel.set_instrument_from_ticker(ti);
+        panel.set_instrument_from_ticker(ti, "tachibana");
 
         assert!(panel.instrument_id.is_some(), "instrument_id should be set");
         assert!(panel.display_label.is_some(), "display_label should be set");
@@ -670,7 +673,7 @@ mod tests {
         let ti = TickerInfo::new(ticker, 0.1, 0.001, None);
 
         let mut panel = OrderEntryPanel::default();
-        panel.set_instrument_from_ticker(ti);
+        panel.set_instrument_from_ticker(ti, "tachibana");
 
         // No exchange guard in set_instrument_from_ticker — caller is responsible
         assert!(panel.ticker_info.is_some());
