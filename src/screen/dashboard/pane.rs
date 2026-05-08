@@ -854,10 +854,7 @@ impl State {
                     .align_y(Alignment::Center)
                     .line_height(1.2),
             )
-            .on_press(Message::PaneEvent(
-                id,
-                Event::VenueToggle(Venue::Tachibana),
-            ))
+            .on_press(Message::PaneEvent(id, Event::VenueToggle(Venue::Tachibana)))
             .style(move |theme, status| style::button::modifier(theme, status, tachi_active))
             .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
@@ -867,7 +864,10 @@ impl State {
                     .align_y(Alignment::Center)
                     .line_height(1.2),
             )
-            .on_press(Message::PaneEvent(id, Event::VenueToggle(Venue::KabuStation)))
+            .on_press(Message::PaneEvent(
+                id,
+                Event::VenueToggle(Venue::KabuStation),
+            ))
             .style(move |theme, status| style::button::modifier(theme, status, !tachi_active))
             .height(widget::PANE_CONTROL_BTN_HEIGHT);
 

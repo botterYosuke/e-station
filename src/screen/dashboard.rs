@@ -585,10 +585,7 @@ impl Dashboard {
                             // order_venue and propagate so IPC calls use the new venue.
                             pane::Effect::VenueToggle(venue) => {
                                 self.order_venue = venue;
-                                return (
-                                    Task::none(),
-                                    Some(Event::OrderVenueSelected(venue)),
-                                );
+                                return (Task::none(), Some(Event::OrderVenueSelected(venue)));
                             }
                         };
                         return (task, None);
