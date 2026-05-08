@@ -146,7 +146,8 @@ def build_replay_positions_event(portfolio_state: dict, ts_ms: int) -> dict:
     rows = []
     for inst_id in sorted(positions.keys()):
         pos_data = positions[inst_id]
-        qty_str = str(pos_data.get("qty", "0"))
+        qty_val = pos_data.get("qty", "0")
+        qty_str = str(int(Decimal(qty_val))) if qty_val not in ("", None) else "0"
 
         price_raw = last_prices.get(inst_id, "")
         try:
@@ -2844,8 +2845,8 @@ class DataEngineServer:
             "positions": [
                 {
                     "instrument_id": r.instrument_id,
-                    "qty": str(r.qty),
-                    "market_value": str(r.market_value) if r.market_value is not None else "",
+                    "qty": str(int(r.qty)),
+                    "market_value": str(int(r.market_value)) if r.market_value is not None else "",
                     "position_type": r.position_type,
                     "tategyoku_id": r.tategyoku_id,
                     "venue": "tachibana",
