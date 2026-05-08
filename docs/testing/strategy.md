@@ -23,6 +23,7 @@ TDD を基本姿勢とし、不具合修正後は必ず既存テストで検出�
 |---|---|---|---|
 | Rust ユニット | `src/`・各 crate 内 `#[cfg(test)] mod tests` | 標準 `#[test]` + `tokio::test` + `rstest` | 関数 / モジュール単位の振る舞い |
 | Rust 統合 | `tests/`・`engine-client/tests/` | tokio + tonic / mockito | IPC handshake / 状態遷移 / mode 切替 |
+| UI（ヘッドレス）| `tests/`（`iced_test` 使用）| `iced_test::simulator` | ウィジェット操作 → Message 検証・Issue バグ再現 |
 | Python ユニット | `python/tests/test_*.py` | pytest + pytest-asyncio | adapter / schema / dispatcher |
 | Python 統合 | `python/tests/test_engine_*.py` | pytest + grpc test client | engine.server の multi-client broadcast 等 |
 | E2E | Python helper（`ReplaySession` / `LiveSession`）+ pytest | — | アプリ全体（HTTP API・Playwright は不使用）|

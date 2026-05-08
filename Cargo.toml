@@ -85,6 +85,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 debug = ["iced/hot"]
 
 [dev-dependencies]
+iced_test = "0.14"
 futures = "0.3"
 proptest = "1"
 tempfile = "3"
