@@ -66,6 +66,10 @@ impl crate::Flowsurface {
                     |r| Message::Venue(VenueMsg::TachibanaLoginIpcResult(r)),
                 );
             }
+            VenueMsg::RequestTachibanaLogout => {
+                log::info!("RequestTachibanaLogout");
+                self.tachibana_state = VenueState::Idle;
+            }
             VenueMsg::TachibanaLoginIpcResult(result) => {
                 // The optimistic `try_claim_login_in_flight` already
                 // moved the FSM into `LoginInFlight`. Engine's
@@ -294,6 +298,10 @@ impl crate::Flowsurface {
                     },
                     |r| Message::Venue(VenueMsg::KabuLoginIpcResult(r)),
                 );
+            }
+            VenueMsg::RequestKabuLogout => {
+                log::info!("RequestKabuLogout");
+                self.kabu_state = VenueState::Idle;
             }
             // Message::KabuLoginIpcResult(result) => (post-refactor name below)
             VenueMsg::KabuLoginIpcResult(result) => match result {

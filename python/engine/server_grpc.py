@@ -219,9 +219,31 @@ def _dict_to_proto_event(event_dict: dict) -> engine_pb2.Event | None:
         for k, v in list(obj.items()):
             if k == "granularity" and isinstance(v, str) and not v.startswith("REPLAY_GRANULARITY_"):
                 obj[k] = f"REPLAY_GRANULARITY_{v.upper()}"
+            elif k == "qty_norm_kind" and isinstance(v, str) and not v.startswith("QTY_NORM_KIND_"):
+                obj[k] = f"QTY_NORM_KIND_{v.upper()}"
             elif isinstance(v, dict):
                 _fix_enum_out(v)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        _fix_enum_out(item)
     _fix_enum_out(payload_dict)
+
+    # TickerInfoEvent: Python list_tickers() returns flat dicts with
+    # "kind": "stock"|"crypto", but proto TickerEntry uses
+    # `oneof kind { StockTickerEntry stock; CryptoTickerEntry crypto; }`.
+    # Restructure each entry so ParseDict sees {"stock": {...}} or
+    # {"crypto": {...}} with the "kind" key removed.
+    if event_name == "TickerInfo" and "tickers" in payload_dict:
+        restructured: list[dict] = []
+        for entry in payload_dict["tickers"]:
+            kind = entry.get("kind")
+            if kind in ("stock", "crypto"):
+                inner = {k: v for k, v in entry.items() if k != "kind"}
+                restructured.append({kind: inner})
+            else:
+                restructured.append(entry)
+        payload_dict = dict(payload_dict, tickers=restructured)
 
     try:
         payload = ParseDict(payload_dict, msg_class(), ignore_unknown_fields=False)

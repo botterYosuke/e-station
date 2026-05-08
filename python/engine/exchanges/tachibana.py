@@ -1256,7 +1256,6 @@ class TachibanaWorker(ExchangeWorker):
                         "bids": norm_bids,
                         "asks": norm_asks,
                         "sequence_id": depth["sequence_id"],
-                        "recv_ts_ms": depth["recv_ts_ms"],
                     })
             elif frame_type == "ST":
                 # ST = server-side status frame. May carry an error.
@@ -1400,7 +1399,6 @@ class TachibanaWorker(ExchangeWorker):
                         "bids": norm_bids,
                         "asks": norm_asks,
                         "sequence_id": poll_counter,
-                        "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
                     })
             except Exception as exc:
                 log.warning("tachibana: depth poll error for %s: %s", ticker, exc)

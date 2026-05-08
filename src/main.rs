@@ -1755,14 +1755,35 @@ const STATUS_BAR_BG: iced::Color = iced::Color::from_rgb(0.08, 0.08, 0.08);
 fn venue_login_chip(
     label: &'static str,
     state: VenueState,
-    on_press: Message,
+    on_login: Message,
+    on_logout: Message,
     is_production: bool,
 ) -> Element<'static, Message> {
-    let (dot, dot_color, btn_label) = match &state {
-        VenueState::Idle => ("○", iced::Color::from_rgb(0.5, 0.5, 0.5), "ログイン"),
-        VenueState::LoginInFlight => ("⟳", iced::Color::from_rgb(0.9, 0.6, 0.1), ""),
-        VenueState::Ready => ("●", iced::Color::from_rgb(0.2, 0.75, 0.3), "再ログイン"),
-        VenueState::Error { .. } => ("●", iced::Color::from_rgb(0.9, 0.2, 0.2), "再ログイン"),
+    let (dot, dot_color, btn_label, on_press) = match &state {
+        VenueState::Idle => (
+            "○",
+            iced::Color::from_rgb(0.5, 0.5, 0.5),
+            "ログイン",
+            on_login,
+        ),
+        VenueState::LoginInFlight => (
+            "⟳",
+            iced::Color::from_rgb(0.9, 0.6, 0.1),
+            "",
+            on_login,
+        ),
+        VenueState::Ready => (
+            "●",
+            iced::Color::from_rgb(0.2, 0.75, 0.3),
+            "ログアウト",
+            on_logout,
+        ),
+        VenueState::Error { .. } => (
+            "●",
+            iced::Color::from_rgb(0.9, 0.2, 0.2),
+            "再ログイン",
+            on_login,
+        ),
     };
 
     // P4-4: 本番接続中は赤バナーで強調。文言は kabu_chip_prod_style() で一元管理し、
@@ -1900,12 +1921,14 @@ fn status_bar(
         "立花",
         tachibana,
         Message::Venue(VenueMsg::RequestTachibanaLogin(Trigger::Manual)),
+        Message::Venue(VenueMsg::RequestTachibanaLogout),
         false,
     );
     let kabu_chip = venue_login_chip(
         "kabu",
         kabu,
         Message::Venue(VenueMsg::RequestKabuLogin(Trigger::Manual)),
+        Message::Venue(VenueMsg::RequestKabuLogout),
         kabu_is_production(),
     );
 

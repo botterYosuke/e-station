@@ -46,11 +46,13 @@ pub(crate) enum VenueMsg {
     // Tachibana
     TachibanaEvent(VenueEvent),
     RequestTachibanaLogin(Trigger),
+    RequestTachibanaLogout,
     TachibanaLoginIpcResult(Result<(), String>),
     DismissTachibanaBanner,
     // Kabu
     KabuEvent(VenueEvent),
     RequestKabuLogin(Trigger),
+    RequestKabuLogout,
     KabuLoginIpcResult(Result<(), String>),
     // Second password
     SecondPasswordRequired(String),
