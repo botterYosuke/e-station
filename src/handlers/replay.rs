@@ -277,6 +277,7 @@ impl crate::Flowsurface {
                 request_id,
                 path,
                 scenario,
+                resolved_instruments,
             } => {
                 // 連続して別ファイルを開いた場合、古い応答を無視する。
                 if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
@@ -288,8 +289,16 @@ impl crate::Flowsurface {
                     .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
                 match scenario {
                     Some(value) => {
-                        form.prefill_from_scenario(path.clone(), &value);
-                        self.menu_bar.replay_bar.prefill_from_scenario(path, &value);
+                        form.prefill_from_scenario(
+                            path.clone(),
+                            &value,
+                            resolved_instruments.as_deref(),
+                        );
+                        self.menu_bar.replay_bar.prefill_from_scenario(
+                            path,
+                            &value,
+                            resolved_instruments.as_deref(),
+                        );
                     }
                     None => {
                         form.set_strategy_file_only(path.clone());
@@ -354,7 +363,8 @@ impl crate::Flowsurface {
                             self.replay_form_modal = None;
                             // Write back validated form values to ReplayBarState so the
                             // menu bar displays the active replay settings.
-                            self.menu_bar.replay_bar.instrument_id = instrument_ids.join(", ");
+                            // Display only first instrument_id to avoid UI layout breaking with long lists.
+                            self.menu_bar.replay_bar.instrument_id = instrument_ids[0].clone();
                             self.menu_bar.replay_bar.start_date = start_date.clone();
                             self.menu_bar.replay_bar.end_date = end_date.clone();
                             self.menu_bar.replay_bar.granularity = Some(granularity.clone());
