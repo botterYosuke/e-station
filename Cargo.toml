@@ -79,6 +79,7 @@ xxhash-rust.workspace = true
 rfd = "0.15"
 regex.workspace = true
 webbrowser = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 debug = ["iced/hot"]

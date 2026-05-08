@@ -111,12 +111,24 @@ pub enum BarMessage {
 
 macOS のみ `modifiers.logo()`（Cmd）を受理。Win/Linux で受理すると WM（Win+Q 等）と衝突する。
 
+#### キーバインド一覧
+
+| キー | Action | モード制限 | 実装 |
+|------|--------|-----------|------|
+| Ctrl+O / Cmd+O | `OpenFile` | Live のみ | `src/handlers/menu.rs` |
+| Ctrl+S / Cmd+S | `Save` | Live のみ | `src/handlers/menu.rs` |
+| Ctrl+Shift+S / Cmd+Shift+S | `SaveAs` | Live のみ | `src/handlers/menu.rs` |
+| Ctrl+Q / Cmd+Q | `Quit` | 両モード | `src/handlers/menu.rs` |
+| Ctrl+M / Cmd+M | `SwitchMode` | 両モード | `src/handlers/menu.rs` |
+| **F12** | **Screenshot** | **両モード** | **`src/handlers/window.rs`** |
+
 #### モード別ガード
 
 - `is_live` は `Subscription::with(is_live)` 経由で非キャプチャ渡し。
 - Replay モードでは `is_live = false` となり、Open / Save / SaveAs は発火しない。
 - `Quit` はモード非依存。
 - `SwitchMode` は `crate::MODE_SWITCHING.load(Acquire)` で再入を抑制。
+- `Screenshot`（F12）はモード非依存・修飾キー不要。
 
 ### 既知の制限
 
@@ -470,6 +482,57 @@ fn status_bar(
 
 ---
 
+## デバッグ支援: スクリーンショット（F12）
+
+アプリの状態を視覚的に記録するデバッグ専用機能。**F12** を押すとメインウィンドウ全体を
+PNG としてディスクに保存し、Toast で保存先パスを通知する。
+
+### 発火フロー
+
+```
+F12 キー押下
+  ↓ widget_keyboard_subscription() → Action::Screenshot
+  ↓ handlers/menu.rs → Message::Window(WindowMsg::CaptureScreenshot)
+  ↓ handlers/window.rs
+      iced::window::screenshot(main_window_id)   // Task<Screenshot>（RGBA8）
+  ↓ WindowMsg::ScreenshotReady(screenshot)
+      tokio::task::spawn_blocking {
+          image::save_buffer(path, &rgba, w, h, ColorType::Rgba8)
+      }
+  ├→ WindowMsg::ScreenshotSaved(path)  → Toast::info("スクリーンショット保存: ...")
+  └→ WindowMsg::ScreenshotFailed(msg) → Toast::error("スクリーンショット失敗: ...")
+```
+
+### 保存先
+
+```
+%APPDATA%\flowsurface\screenshots\screenshot_YYYYMMDD_HHMMSS.png
+```
+
+`data::data_path(Some("screenshots/screenshot_<ts>.png"))` で解決。
+`FLOWSURFACE_DATA_PATH` 環境変数で上書き可能（他の永続ファイルと同じルール）。
+ディレクトリが存在しない場合は自動生成する（`tokio::fs::create_dir_all`）。
+
+### AI（Claude Code）との連携
+
+スクリーンショット機能は Claude Code が UI 状態を把握するためにも使える。
+
+1. アプリで問題を再現する
+2. **F12** を押して PNG を保存（Toast でパスを確認）
+3. Claude Code のプロンプトで「見て」と伝えるだけで、最新ファイルを自動検索して読み込む
+
+Claude Code は multimodal LLM のため PNG を直接解析し、表示内容・エラーメッセージ・
+レイアウト崩れなどを言語で説明・診断できる。
+
+### 実装メモ
+
+- ピクセルフォーマット: `iced::window::Screenshot.rgba`（RGBA8）
+- エンコード: `image` クレート 0.25（feature: `png` のみ）
+- 非同期: PNG 書き込みは `spawn_blocking` でブロッキング I/O をオフロード
+- メッセージ定義: `src/messages.rs::WindowMsg::{CaptureScreenshot, ScreenshotReady, ScreenshotSaved, ScreenshotFailed}`
+
+---
+
 ## 主要ソースファイル一覧
 
 | ファイル | 役割 |
@@ -477,7 +540,8 @@ fn status_bar(
 | `src/menu.rs` | `Action` / `actions_for_mode` / `mode_toggle_state` / `replay_control_state` |
 | `src/menu_bar_state.rs` | `TopMenu` / `BarMessage` / `ReplayBarState` / `update()` |
 | `src/widget_menu_bar.rs` | iced widget bar / dropdown / `replay_control_row` / `replay_input_row` |
-| `src/native_menu.rs` | `widget_keyboard_subscription()`（accelerator、全 OS） |
+| `src/native_menu.rs` | `widget_keyboard_subscription()`（accelerator、全 OS）/ `Action::Screenshot`（F12） |
+| `src/handlers/window.rs` | `WindowMsg` ハンドラ群 / スクリーンショット保存ロジック |
 | `src/main.rs` | `NativeMenuAction` ハンドラ群 / `status_bar` / `venue_login_chip` / `build_state_json` / `CURRENT_PATH` / `_mode_switch_guard` |
 | `src/modal/replay_form.rs` | `validate()` (pub) / `prefill_from_scenario` / `Granularity` |
 | `src/venue_state.rs` | `VenueState` enum（汎用設計、tachibana / kabu 共通） |

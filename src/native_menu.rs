@@ -9,6 +9,7 @@ pub enum Action {
     Quit,
     /// F7/T3: switch to the given app mode (menu item clicked).
     SwitchMode(AppMode),
+    Screenshot,
 }
 
 /// Returns which menu actions are present for a given app mode.
@@ -98,6 +99,8 @@ fn widget_keyboard_subscription(app_mode: AppMode) -> Subscription<Action> {
                         Some(Action::SwitchMode(target))
                     }
                 }
+                // F12: capture screenshot (both modes, no modifier required)
+                Physical::Code(Code::F12) => Some(Action::Screenshot),
                 _ => None,
             }
         })

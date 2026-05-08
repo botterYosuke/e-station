@@ -363,6 +363,9 @@ impl crate::Flowsurface {
                             Message::Window(WindowMsg::ExitRequested(w))
                         })
                     }
+                    Action::Screenshot => {
+                        Task::done(Message::Window(WindowMsg::CaptureScreenshot))
+                    }
                     Action::SwitchMode(target) => {
                         use engine_client::dto::AppMode;
                         // Guard: don't start a mode switch if another dialog is already showing
