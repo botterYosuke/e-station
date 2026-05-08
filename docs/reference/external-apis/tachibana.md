@@ -11,7 +11,7 @@ source_commit: f62bf94
 
 # 立花証券統合: データモデル・マッピング
 
-立花証券のドメイン概念を、既存の `engine-client` IPC DTO（[engine-client/src/dto.rs](../../../engine-client/src/dto.rs)）と `exchange` 型（[exchange/src/lib.rs](../../../exchange/src/lib.rs)）に押し込めるための写像表。「合わない」場所は **拡張する** か **明示的に未対応とする** かを決める。
+立花証券のドメイン概念を、既存の `engine-client` IPC DTO（[engine-client/src/dto.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/dto.rs)）と `exchange` 型（[exchange/src/lib.rs](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/lib.rs)）に押し込めるための写像表。「合わない」場所は **拡張する** か **明示的に未対応とする** かを決める。
 
 ## 1. venue / market の追加
 
@@ -56,7 +56,7 @@ pub enum Exchange {
 
 立花にはミリ秒単位のテープデータ API は存在しない。代わりに EVENT の **FD frame**（時価情報）が変化分のみ来る。Phase 1 では下記をもって "trade" とみなす:
 
-> **✅ 2026-04-26 情報コード確定**: `.claude/skills/tachibana/manual_files/api_web_access.xlsx` 内の実 FD frame サンプル（2022-03-15）から全キー名を確認済み。旧暫定名（`GAK/GBK/GAS/GBS`、`DPP_TIME`、`DDT`）はすべて誤りだったため本節・§4 を訂正済み。詳細は [inventory-T0.md §11](./inventory-T0.md#112b-fd-frame-data-key) を参照。
+> **✅ 2026-04-26 情報コード確定**: `.claude/skills/tachibana/manual_files/api_web_access.xlsx` 内の実 FD frame サンプル（2022-03-15）から全キー名を確認済み。旧暫定名（`GAK/GBK/GAS/GBS`、`DPP_TIME`、`DDT`）はすべて誤りだったため本節・§4 を訂正済み。詳細は inventory-T0.md §11 を参照。
 
 
 | 立花 FD フィールド | 意味 | TradeMsg |
@@ -102,7 +102,7 @@ DepthSnapshot {
 ```
 
 - **`DepthDiff` は生成しない**。FD frame ごとに常に新規 `DepthSnapshot` を送る（10 本でも帯域は問題なし）
-- Rust 側 [docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §4.4 バックプレッシャと整合性保証 の gap 検知ロジックは、**snapshot-only venue では `DepthDiff` を受けない限り誤動作しない**。Phase 1 は `DepthSnapshot` のみで成立させ、capabilities は主に UI 非活性化用途に使う
+- Rust 側 [docs/specs/data-engine/spec.md](../../specs/data-engine.md) §4.4 バックプレッシャと整合性保証 の gap 検知ロジックは、**snapshot-only venue では `DepthDiff` を受けない限り誤動作しない**。Phase 1 は `DepthSnapshot` のみで成立させ、capabilities は主に UI 非活性化用途に使う
 - **`sequence_id` リセット規約（F7）**: Python 側プロセス内の `AtomicI64` で単調増加 ID を振る。Python 再起動や WebSocket 切断で counter は 0 に戻りうるが、`stream_session_id` の値を同時に更新するため、**消費側は `stream_session_id` 切替を検知したら sequence 比較をリセットする**。既存 gap-detector にもこの契約を明示することを T0 で schema に書き込む
 - 別ルート: ザラ場開始前 / 終了直後の板取得は `CLMMfdsGetMarketPrice` を 1 回叩いて `DepthSnapshot` を出す（ストリームに先立って 1 発投げる）
 
@@ -119,7 +119,7 @@ DepthSnapshot {
 価格 > 30,000,000: 10,000 円刻み（999999999 sentinel 終端）
 ```
 
-既存 `MinTicksize` は **1 値固定** を前提とした型（[exchange/src/unit.rs](../../../exchange/src/unit.rs) 周辺）。**3 つの選択肢**:
+既存 `MinTicksize` は **1 値固定** を前提とした型（[exchange/src/unit.rs](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/unit.rs) 周辺）。**3 つの選択肢**:
 
 - **(A) per-stock 1 値固定（Phase 1 採用、B4 改訂）** — `TickerInfo` 構築時に「当該銘柄の `sYobineTaniNumber` で `CLMYobine` を引き、現在価格帯から 1 band を選んだ刻み」を埋める。**T4 のマスタ取得時にスナップショット価格を参照して決定**し、ザラ場中の価格帯遷移は無視する。`tick_size_for_price(price, yobine_code, yobine_table)` の戻り値を `Decimal -> f32` で `TickerInfo::new_stock(min_ticksize: f32, ...)` に詰める
 - **(B) `MinTicksize` を「価格帯テーブル参照可能」に拡張** — 既存型のオーバーホール。波及範囲が大きい。Phase 2 候補
@@ -172,7 +172,7 @@ pub struct TickerInfo {
 ## 10. timezone / 時刻
 
 - すべて **JST (UTC+9)**
-- IPC DTO は **UNIX ms (UTC)** で統一（既存の方針通り、[docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §4.3.2 メッセージスキーマ）
+- IPC DTO は **UNIX ms (UTC)** で統一（既存の方針通り、[docs/specs/data-engine/spec.md](../../specs/data-engine.md) §4.3.2 メッセージスキーマ）
 - Python 側で `datetime.fromisoformat(...).replace(tzinfo=JST).timestamp() * 1000` 変換
 - ザラ場判定は Python 側で実施。Rust 側は `Disconnected` / `Connected` で受け取るのみ
 
@@ -205,7 +205,7 @@ pub struct TickerInfo {
 - venue ごとの quote 抽出関数は `Exchange::default_quote_currency(&self) -> QuoteCurrency` として `exchange/src/adapter.rs` に実装。ticker 単位で例外がある場合のみ `Some(_)` で override
 - UI のフォーマッタはこの enum を見て `¥` / `$` プレフィックス + 桁区切りを切り替える
 
-## 12. capabilities ハンドシェイク（[docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §4.5 起動ハンドシェイク）
+## 12. capabilities ハンドシェイク（[docs/specs/data-engine/spec.md](../../specs/data-engine.md) §4.5 起動ハンドシェイク）
 
 `Ready.capabilities` に立花用フラグを追加:
 

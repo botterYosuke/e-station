@@ -9,7 +9,7 @@ source_commit: 674aefd
 
 > **Phase 8（2026-05-03 完了）注記**: 本計画の Phase O0〜O3 は完了済み。Phase 8 で Rust 側 HTTP API（`src/api/order_api.rs` / `src/replay_api.rs` / `src/api/agent_api.rs` / `src/api/mod.rs` 合計約 6,756 行）を全廃し、Python helper class（`engine.replay_session.LiveSession` / `engine.replay_session.ReplaySession`）を新設。本計画内の T0.5（Rust HTTP API `/api/order/submit`）/ T1.3（`/api/order/modify` 等）/ T0.6（`OrderGuardConfig`）の成果物は Phase 8 で削除済み。E2E テスト（旧 `s80_*.sh` / `s81_*.sh` 等の bash + curl）は pytest + `LiveSession` に移植済み。GUI 発注は元から HTTP を経由していなかったため `Action::SubmitOrder` → `Command::SubmitOrder` IPC 直送経路で無傷。
 
-**前提条件（着手ブロッカー）**: 立花 Phase 1（[docs/specs/venues/tachibana/implementation-plan.md](../specs/venues/tachibana/implementation-plan.md)）の T2（認証実装）以降が完了していること。ログイン経路は `tachibana_login_flow.py` + `tachibana_auth.py` で構成される（`tachibana_login.py` は存在しない）。
+**前提条件（着手ブロッカー）**: 立花 Phase 1（[docs/specs/venues/tachibana/implementation-plan.md](../../roadmap/tachibana/implementation-plan.md)）の T2（認証実装）以降が完了していること。ログイン経路は `tachibana_login_flow.py` + `tachibana_auth.py` で構成される（`tachibana_login.py` は存在しない）。
 
 **現状確認（2026-04-25）**: `python/engine/exchanges/` に既存の tachibana 系ファイル:
 
@@ -23,13 +23,13 @@ source_commit: 674aefd
 
 **未実装（本計画で新規作成）**:
 
-- `tachibana_event.py` — EVENT WebSocket 受信ループ + EC パーサ。Phase O2 の Tpre.5 / T2.1 で新規作成する（FD 受信＋EC 受信の合流責務を持つ）。Phase 1（[docs/specs/venues/tachibana/implementation-plan.md](../specs/venues/tachibana/implementation-plan.md)）には EVENT 受信ループは含まれていないため、本計画で初めて導入する
+- `tachibana_event.py` — EVENT WebSocket 受信ループ + EC パーサ。Phase O2 の Tpre.5 / T2.1 で新規作成する（FD 受信＋EC 受信の合流責務を持つ）。Phase 1（[docs/specs/venues/tachibana/implementation-plan.md](../../roadmap/tachibana/implementation-plan.md)）には EVENT 受信ループは含まれていないため、本計画で初めて導入する
 
 O-pre の Tpre タスクは Phase 1 の認証基盤が無くても型定義だけ進められるが、T0.3 以降は Phase 1 完了が必要。
 
 ## マイルストーン一覧
 
-Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラックと並行実施する。
+Rust UI トラック（rust-ui-plan.md）を Python トラックと並行実施する。
 
 | Python Phase | ゴール | 並行 Rust UI Phase | 期間目安 |
 |---|---|---|---|
@@ -39,7 +39,7 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 | O2 | EVENT EC 約定通知の購読と UI 反映、重複検知 | **U2**: Toast 通知 + リアルタイム更新 | 2〜3 日 |
 | O3 | 信用・逆指値・期日指定・余力 API 連携 | **U3**: Buying Power パネル + フォーム拡張 | 4〜5 日 |
 
-**全フェーズ共通の不変条件**: [spec.md §6](./spec.md#6-nautilus_trader-互換要件不変条件) の nautilus 互換要件に違反する PR は merge 禁止。各 PR レビューチェックリストに「立花固有用語が HTTP API / IPC / Rust UI 層に漏れていないか」を必ず入れる。
+**全フェーズ共通の不変条件**: [spec.md §6](../../specs/order.md#6-nautilus_trader-互換要件不変条件) の nautilus 互換要件に違反する PR は merge 禁止。各 PR レビューチェックリストに「立花固有用語が HTTP API / IPC / Rust UI 層に漏れていないか」を必ず入れる。
 
 ---
 
@@ -65,7 +65,7 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 - [x] ✅ **新規 enum variant を凍結**: `Command::SetSecondPassword` / `Command::ForgetSecondPassword` / `Event::SecondPasswordRequired`
 - [x] ✅ **`Command` enum の `#[derive(Debug)]` を手実装に切り替え**。`value` が `[REDACTED]` にマスクされることをテスト検証
   - テスト: `engine-client/tests/command_debug_redaction.rs`（5 テスト全緑）
-- [x] ✅ [docs/specs/data-engine/schemas/commands.json](../specs/data-engine/schemas/commands.json) と `events.json` を更新（schema 1.3+）
+- [x] ✅ [docs/specs/data-engine/schemas/commands.json](https://github.com/botterYosuke/e-station/blob/main/roadmap/specs/data-engine/schemas/commands.json) と `events.json` を更新（schema 1.3+）
   - 全発注コマンド（SetSecondPassword / ForgetSecondPassword / SubmitOrder / ModifyOrder / CancelOrder / CancelAllOrders / GetOrderList）と全発注イベント（SecondPasswordRequired / OrderSubmitted / OrderAccepted / OrderRejected / OrderPendingUpdate / OrderPendingCancel / OrderFilled / OrderCanceled / OrderExpired / OrderListUpdated）を追加
 - [x] ✅ `python/engine/schemas.py` に対応 pydantic モデルを追加（`SCHEMA_MINOR=3`）
 - [x] ✅ **ラウンドトリップテスト**: Rust serialize → JSON で shape 確認（`schema_v1_3_roundtrip.rs`）、Python pydantic serialize 確認（`test_order_schema_v1_3.py`）
@@ -90,7 +90,7 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 
 **理由**: Phase O2 着手時に「マニュアル PDF が無く、サンプル frame も無い」状態で詰まるのを防ぐため、O-pre で根拠を確定する。Phase O0/O1 の作業と並行で進めて良いが、O2 着手 **前**に必ず完了させる。
 
-**新規作成**: `python/engine/exchanges/tachibana_event.py` をここで新規作成する（EVENT WebSocket 受信ループ含む。FD 受信＋EC 受信の合流責務）。Phase 1 計画 ([docs/specs/venues/tachibana/implementation-plan.md](../specs/venues/tachibana/implementation-plan.md)) には EVENT 受信ループは含まれていないため、本計画で初めて導入する依存関係に注意。
+**新規作成**: `python/engine/exchanges/tachibana_event.py` をここで新規作成する（EVENT WebSocket 受信ループ含む。FD 受信＋EC 受信の合流責務）。Phase 1 計画 ([docs/specs/venues/tachibana/implementation-plan.md](../../roadmap/tachibana/implementation-plan.md)) には EVENT 受信ループは含まれていないため、本計画で初めて導入する依存関係に注意。
 
 - [x] ✅ **flowsurface に EC パーサが存在するか確認**: `c:/Users/sasai/Documents/flowsurface/exchange/src/adapter/tachibana.rs` で `EC` / `OrderEcEvent` / `_parse_ec_frame` 相当を grep
   - **結果: 不在**。`EC` は `SECS` の部分文字列のみヒット。専用パーサ関数は flowsurface に存在しない（2026-04-28 確認）
@@ -116,9 +116,9 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 
 ### T0.1 第二暗証番号: iced modal で取得（Q1 案 D）
 
-- [x] ✅ ~~[data/src/config/tachibana.rs](../../../data/src/config/tachibana.rs) `TachibanaCredentials.second_password` は `None` 固定のまま~~（**N/A**: architecture.md §5 により `data/src/config/tachibana.rs` は削除済み。Python 自律管理方式への移行で Rust 側の creds/session 保持コードを全廃）
-- [x] ✅ [.claude/skills/tachibana/SKILL.md](../../../.claude/skills/tachibana/SKILL.md) S2 の `DEV_TACHIBANA_SECOND_PASSWORD` コメントを「**ログインでは収集しない（Phase O0 以降も）/ 発注時に iced modal で取得・メモリのみ保持**」に書き換え
-- [x] ✅ [docs/specs/venues/tachibana/architecture.md](../specs/venues/tachibana/architecture.md) §7.7 F-H5 を「**Phase O0 でも解除しない**: 発注時 iced modal 取得方式に変更」と注記
+- [x] ✅ ~~[data/src/config/tachibana.rs](https://github.com/botterYosuke/e-station/blob/main/../data/src/config/tachibana.rs) `TachibanaCredentials.second_password` は `None` 固定のまま~~（**N/A**: architecture.md §5 により `data/src/config/tachibana.rs` は削除済み。Python 自律管理方式への移行で Rust 側の creds/session 保持コードを全廃）
+- [x] ✅ [.claude/skills/tachibana/SKILL.md](https://github.com/botterYosuke/e-station/blob/main/.claude/skills/tachibana/SKILL.md) S2 の `DEV_TACHIBANA_SECOND_PASSWORD` コメントを「**ログインでは収集しない（Phase O0 以降も）/ 発注時に iced modal で取得・メモリのみ保持**」に書き換え
+- [x] ✅ [docs/specs/venues/tachibana/architecture.md](../../architecture/modules/tachibana-adapter.md) §7.7 F-H5 を「**Phase O0 でも解除しない**: 発注時 iced modal 取得方式に変更」と注記
 
 ### T0.2 iced modal: 第二暗証番号入力 ✅（2026-04-28 完了）
 
@@ -145,13 +145,13 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 - [x] ✅ **`UNSUPPORTED_IN_PHASE_O0` 境界テスト（C1 / D3-2）**: `uv run pytest python/tests/test_unsupported_phase_o0.py -v` — `pytest.mark.parametrize` で 7 条件 × 各 2〜4 値をカバー（24 テスト全緑）
 
 **Notes**:
-- `TachibanaCredentialsWire.second_password` は Phase 1 で `assert!(... is_none())` 強制済み（`From<&TachibanaCredentials> for TachibanaCredentialsWire` impl 内、参照: [`data/src/config/tachibana.rs`](../../../data/src/config/tachibana.rs)）。Order Phase で `Command::SetSecondPassword` 導入と同時に Phase 1 側の `#[deprecated]` 化を [docs/specs/venues/tachibana/implementation-plan.md](../specs/venues/tachibana/implementation-plan.md) 側にも書き戻すこと（双方向リンク）
+- `TachibanaCredentialsWire.second_password` は Phase 1 で `assert!(... is_none())` 強制済み（`From<&TachibanaCredentials> for TachibanaCredentialsWire` impl 内、参照: [`data/src/config/tachibana.rs`](https://github.com/botterYosuke/e-station/blob/main/../data/src/config/tachibana.rs)）。Order Phase で `Command::SetSecondPassword` 導入と同時に Phase 1 側の `#[deprecated]` 化を [docs/specs/venues/tachibana/implementation-plan.md](../../roadmap/tachibana/implementation-plan.md) 側にも書き戻すこと（双方向リンク）
 
 ### T0.4 Python 側 `tachibana_orders.py` の写像実装
 
 **注**: 公開 class（`NautilusOrderEnvelope` / `SubmitOrderResult`）は Tpre.3 で凍結済み。本タスクは **写像と HTTP 送信の中身**だけ書く。
 
-- [x] ✅ **flowsurface [`exchange/src/adapter/tachibana.rs:1307-1387`](../../../../flowsurface/exchange/src/adapter/tachibana.rs) の `NewOrderRequest` / `NewOrderResponse` を pydantic で wire 専用 class として 1:1 移植**:
+- [x] ✅ **flowsurface [`exchange/src/adapter/tachibana.rs:1307-1387`](https://github.com/botterYosuke/e-station/blob/main/../../flowsurface/exchange/src/adapter/tachibana.rs) の `NewOrderRequest` / `NewOrderResponse` を pydantic で wire 専用 class として 1:1 移植**:
   - 命名: `TachibanaWireOrderRequest` / `TachibanaWireOrderResponse`（**`Wire` prefix で「立花固有・公開しない」を明示**）
   - フィールド rename 名（`sZyoutoekiKazeiC` 等）一致
   - `__repr__` で `second_password` をマスク
@@ -243,9 +243,9 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 
 ### T0.5 Rust HTTP API `/api/order/submit` ✅
 
-- [x] **`Cargo.toml` に `xxhash-rust` を追加**（`xxh3` feature を有効化）。`request_key` の `xxh3_64` で使用（[architecture.md §4.1](./architecture.md#41-request_key-の-canonicalization)）
+- [x] **`Cargo.toml` に `xxhash-rust` を追加**（`xxh3` feature を有効化）。`request_key` の `xxh3_64` で使用（architecture.md §4.1）
 - [x] `src/api/order_api.rs` 新設
-- [x] 入力スキーマバリデーション（[spec.md §5](./spec.md#5-入力バリデーションrust-http-層)）
+- [x] 入力スキーマバリデーション（[spec.md §5](../../specs/order.md#5-入力バリデーションrust-http-層)）
 - [x] `engine-client/src/order_session_state.rs` 実装済み（`OrderSessionState` / `ClientOrderId` / `PlaceOrderOutcome`）
 - [x] `engine_client.send(SubmitOrder)` → `OrderAccepted` / `OrderRejected` を待機
   タイムアウト: `tokio::time::timeout(Duration::from_secs(30), ...)` / HTTP 504 + `reason_code="INTERNAL_ERROR"`
@@ -278,7 +278,7 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 
 ### T0.7 監査ログ WAL + 起動時復元（重複発注防止）
 
-- [x] ✅ **`python/engine/exchanges/tachibana_orders.py` に `_audit_log_submit()` / `_audit_log_accepted()` / `_audit_log_rejected()` を追加**（[architecture.md §4.2](./architecture.md#42-監査ログwal-write-ahead-log)）
+- [x] ✅ **`python/engine/exchanges/tachibana_orders.py` に `_audit_log_submit()` / `_audit_log_accepted()` / `_audit_log_rejected()` を追加**（architecture.md §4.2）
 - [x] ✅ **`wal_path` パラメータ経由で WAL ファイルに append**:
   - `submit` 行は HTTP 送信 **直前**に `f.write(line + "\n"); f.flush(); os.fsync(f.fileno())` で書く（クラッシュ安全性）
   - `accepted` / `rejected` 行は応答受領後に `f.write(line + "\n"); f.flush()` で書く（fsync 不要）
@@ -292,7 +292,7 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
   - `submit` のみで `accepted`/`rejected` 無し → `unknown` 状態で復元（Phase O1 T1.5 で `GetOrderList` から確定）
   - 同一 `client_order_id` で再送 → `IdempotentReplay` を返す
   - テスト: `engine-client/tests/order_session_state_wal.rs`（8 テスト全緑）
-- [x] ✅ **`request_key` の canonicalization** を [architecture.md §4.1](./architecture.md#41-request_key-の-canonicalization) の規則どおりに実装済み（`src/api/order_api.rs`）。テストで pin（`tags` 順序入替・null vs 空文字 で同一 key になることを確認）
+- [x] ✅ **`request_key` の canonicalization** を architecture.md §4.1 の規則どおりに実装済み（`src/api/order_api.rs`）。テストで pin（`tags` 順序入替・null vs 空文字 で同一 key になることを確認）
   - **canonicalization テスト（D2-L2）**: `cargo test --test request_key_canonical` — 5 テスト全緑（`tags` 順序入替 / `null` ↔ `""` / 重複排除 / 異なる qty / OrderSessionState end-to-end）
 - [x] ✅ **WAL 冪等再送テスト**: 同一論理リクエスト（tags 順序違い）の 2 連投 → 1 件 Created (201) + 1 件 IdempotentReplay (200) を Rust integration test で確認 — `test_idempotent_replay_with_different_tags_order_returns_200` を `src/api/order_api.rs` 内 `#[cfg(test)]` に実装済み
 - [x] ✅ **WAL 第二暗証番号漏洩 grep テスト（D2-H2）**: `uv run pytest python/tests/test_audit_log_no_secret.py`（5 テスト全緑）
@@ -303,10 +303,10 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 ### T0.8 テスト ✅（2026-04-26 完了）
 
 - [x] ✅ Python pytest-httpx で **flowsurface テスト群を移植**（入力は `NautilusOrderEnvelope` 経由に置換）:
-  - `submit_order_returns_error_on_wrong_password_response` ([flowsurface tachibana.rs:4168](../../../../flowsurface/exchange/src/adapter/tachibana.rs#L4168)）→ `python/tests/test_tachibana_error_responses.py`
+  - `submit_order_returns_error_on_wrong_password_response` ([flowsurface tachibana.rs:4168](https://github.com/botterYosuke/e-station/blob/main/../../flowsurface/exchange/src/adapter/tachibana.rs#L4168)）→ `python/tests/test_tachibana_error_responses.py`
   - `submit_order_returns_error_on_market_closed_response` (同 4215) → 同上
   - `submit_order_returns_error_on_invalid_issue_code_response` (同 4256) → 同上（3 テスト全緑）
-- [x] ✅ Python: `_envelope_to_wire` の写像テーブルテスト — [architecture.md §10.1〜§10.4](./architecture.md#101-ordertype-写像) の各行に 1 ケースずつ（`python/tests/test_tachibana_order_mapping.py` 28 テスト全緑、2026-04-28 完了）
+- [x] ✅ Python: `_envelope_to_wire` の写像テーブルテスト — architecture.md §10.1〜§10.4 の各行に 1 ケースずつ（`python/tests/test_tachibana_order_mapping.py` 28 テスト全緑、2026-04-28 完了）
 - [x] ✅ Python: `_compose_request_payload` のフィールド存在 / `sCLMID` / `sJsonOfmt` / 逆指値デフォルト（`test_tachibana_compose_payload.py` 8 テスト全緑）
 - [x] ✅ **nautilus 互換性テスト**: nautilus を import しない状態で、`nautilus_trader.model.orders.MarketOrder.create(...)` 互換の dict を `NautilusOrderEnvelope.model_validate(...)` で読み込み可能（field 名・enum 文字列一致を検証）— `python/tests/test_nautilus_compatibility.py`（6 テスト全緑）
 - [x] ✅ Rust: `OrderSessionState` の `Created/IdempotentReplay/Conflict` 3 ケース（flowsurface 同名テストの移植）— `engine-client/tests/order_session_state.rs`（既存 8 テスト）
@@ -339,8 +339,8 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 
 ### T1.3 Rust HTTP ✅
 - [x] `/api/order/modify` `/api/order/cancel` `/api/order/cancel-all` `/api/order/list`
-- [x] `cancel-all` は確認モーダル必須（HTTP 層では **JSON body に `confirm: true` を必須**とする。query param ではない。[spec.md §4](./spec.md#4-公開-apihttp) に準拠）
-- [x] `/api/order/cancel` の Rust 実装では `OrderSessionState.get_venue_order_id(client_order_id)` で lookup し、`venue_order_id` を Python `cancel_order(...)` に渡すこと（[architecture.md §2.3](./architecture.md#23-取消フローphase-o1)）。`venue_order_id = None`（unknown）は 404 reject
+- [x] `cancel-all` は確認モーダル必須（HTTP 層では **JSON body に `confirm: true` を必須**とする。query param ではない。[spec.md §4](../../specs/order.md#4-公開-apihttp) に準拠）
+- [x] `/api/order/cancel` の Rust 実装では `OrderSessionState.get_venue_order_id(client_order_id)` で lookup し、`venue_order_id` を Python `cancel_order(...)` に渡すこと（architecture.md §2.3）。`venue_order_id = None`（unknown）は 404 reject
 - [x] **`cancel-all` の `confirm` フィールド検証はテーブルテスト化**（body 欠落 / `confirm: false` / `confirm: "true"`（文字列）すべて 400 reject）
 
 ### T1.4 UI: 注文一覧パネル ✅（2026-04-28 完了）
@@ -370,16 +370,16 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 ## Phase O2: EVENT EC 約定通知
 
 ### T2.1 EC パーサ + `tachibana_event.py` 実装本体 ✅（2026-04-26 完了）
-- [x] ✅ **`tachibana_event.py` を Tpre.5 で新規作成済み**（EVENT WebSocket 受信ループ含む。FD 受信＋EC 受信の合流責務）。本タスクではその上に EC パース実装を載せる。Phase 1 計画 ([docs/specs/venues/tachibana/implementation-plan.md](../specs/venues/tachibana/implementation-plan.md)) との依存関係: Phase 1 の認証セッション（`tachibana_auth.py`）が前提
+- [x] ✅ **`tachibana_event.py` を Tpre.5 で新規作成済み**（EVENT WebSocket 受信ループ含む。FD 受信＋EC 受信の合流責務）。本タスクではその上に EC パース実装を載せる。Phase 1 計画 ([docs/specs/venues/tachibana/implementation-plan.md](../../roadmap/tachibana/implementation-plan.md)) との依存関係: Phase 1 の認証セッション（`tachibana_auth.py`）が前提
 - [x] ✅ `tachibana_event.py._parse_ec_frame(items) -> OrderEcEvent`
-- [x] ✅ 主要項目（[architecture.md §6](./architecture.md#6-event-ec-フレームのパースphase-o2)）の写像（p_NO/p_EDA/p_NT/p_DH/p_DSU/p_ZSU/p_OD → IPC フィールド）
+- [x] ✅ 主要項目（architecture.md §6）の写像（p_NO/p_EDA/p_NT/p_DH/p_DSU/p_ZSU/p_OD → IPC フィールド）
 - [x] ✅ **EVENT URL sanitize（C-R2-L1）**: `build_event_url` 内 `_check_no_control_chars` で制御文字を reject（既実装）
 - [x] ✅ **EVENT URL sanitize 受け入れテスト（D4-4）**: `python/tests/test_event_url_sanitize.py` — 15 テスト全緑
 - [x] ✅ **マニュアル現物確認 → samples で代替**: EC フィールド仕様は `.claude/skills/tachibana/samples/e_api_event_receive_tel.py`（行 534–568）で確認済み。PDF 不要。
 
 ### T2.2 IPC イベント拡張 ✅（2026-04-26 完了）
 - [x] ✅ `Event::OrderFilled` / `OrderCanceled` / `OrderExpired` — schema 1.3 で骨格定義済み。SCHEMA_MINOR 4→5 に bump
-- [x] ✅ **`OrderPartiallyFilled` は持たない**: nautilus 流に `OrderFilled` の `leaves_qty` で部分/全部を判定する。詳細は [architecture.md §3](./architecture.md#3-ipc-スキーマ拡張schema-12--13) 末尾
+- [x] ✅ **`OrderPartiallyFilled` は持たない**: nautilus 流に `OrderFilled` の `leaves_qty` で部分/全部を判定する。詳細は architecture.md §3 末尾
 
 ### T2.3 重複検知 ✅（2026-04-26 完了）
 - [x] ✅ `tachibana_event.py` の `TachibanaEventClient` に `_seen: set[tuple[str, str]]` を実装（**EC 重複検知キーは `(venue_order_id, trade_id)`** に統一。nautilus 用語）
@@ -449,13 +449,13 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 ## 横断タスク
 
 - [x] ✅ `.claude/skills/tachibana/SKILL.md` の Phase 1 制約記述を Phase O0 解禁時に更新（T0.1 内）— 第二暗証番号は「ログイン時には収集しない / Phase O0 以降は iced modal で取得・メモリのみ保持」に更新済み
-- [x] ✅ [docs/specs/venues/tachibana/spec.md](../specs/venues/tachibana/spec.md) §2.2「発注は Phase 2+」記述を「[docs/specs/order/](.) で管理」に書き換え完了
+- [x] ✅ [docs/specs/venues/tachibana/spec.md](../../specs/venues/tachibana.md) §2.2「発注は Phase 2+」記述を「[docs/specs/order/](.) で管理」に書き換え完了
 - [x] ✅ [docs/plan/README.md](../README.md) の Phase ロードマップに Order Phase O0–O3 を追記完了
-- ~~[docs/specs/backtest/spec.md](../specs/backtest/spec.md) §2.3 Phase N2 に「`tachibana_orders.py` を `LiveExecutionClient` 内で再利用」を明記~~ **N/A**: 変更不要。既に方針一致しており spec.md に追記しても冗長。N2 着手時に確認済みとみなす。
+- ~~[docs/specs/backtest/spec.md](../../specs/backtest.md) §2.3 Phase N2 に「`tachibana_orders.py` を `LiveExecutionClient` 内で再利用」を明記~~ **N/A**: 変更不要。既に方針一致しており spec.md に追記しても冗長。N2 着手時に確認済みとみなす。
 - [x] ✅ **nautilus 互換境界 lint テスト**: `python/tests/test_nautilus_boundary_lint.py` — `dto.rs` / `schemas.py` / `src/` Rust UI 層に立花固有禁止語（`sCLMID` / `p_sd_date` / `Zyoutoeki` / `p_no` / `p_eda_no` 等）が含まれないことを grep で確認
 - [x] ✅ **CI: `cargo test --workspace`（Q-CI-1）**: `.github/workflows/rust-tests.yml` を新設。`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2` + `cargo test --workspace` を `pull_request` + `push: branches: [main]` で実行（2026-04-28 完了）
 - [x] ✅ **不変条件マッピング doc 整合性テスト（D3-5）**: `uv run pytest python/tests/test_invariant_tests_doc.py`（5 テスト全緑）— `invariant-tests.md` の ✅ 行に紐付く test ファイル・関数名が実在することを CI で保証
-- [ ] **注文入力ペインの link_group 同期（後続 Phase）**: 計画書 [`order-entry-link-group-plan.md`](./order-entry-link-group-plan.md) 参照。注文入力にも銘柄概念があるため、チャート/板と同じ番号を割り当てると銘柄が同期する仕様。Phase O0 範囲では `[-]` ボタンの非表示分岐から OrderList/BuyingPower を除外する前提整備（`State::from_config` 正規化 + `switch_tickers_in_group` 防御層）を 2026-05-01 に完了済み。実装本体は別フェーズ予定
+- [ ] **注文入力ペインの link_group 同期（後続 Phase）**: 計画書 `order-entry-link-group-plan.md` 参照。注文入力にも銘柄概念があるため、チャート/板と同じ番号を割り当てると銘柄が同期する仕様。Phase O0 範囲では `[-]` ボタンの非表示分岐から OrderList/BuyingPower を除外する前提整備（`State::from_config` 正規化 + `switch_tickers_in_group` 防御層）を 2026-05-01 に完了済み。実装本体は別フェーズ予定
 
 ## 下流計画への影響
 
@@ -463,8 +463,8 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 
 | 完了フェーズ | 解除されるブロッカー | 参照先 |
 |---|---|---|
-| **O0（現物成行買い）完了** | nautilus N1（リプレイ API 差し替え + REPLAY 仮想注文）着手可能。N1 で `order_router.py` が本計画の `tachibana_orders.submit_order` を live 経路として呼ぶ | [nautilus_trader/implementation-plan.md Phase N1](../specs/backtest/implementation-plan.md) |
-| **O0〜O2（約定通知）完了** | nautilus N2（`LiveExecutionClient` デモ）着手可能。N2 は本計画の `tachibana_orders.py` / `tachibana_event._parse_ec_frame` / 監査ログ WAL がすべて稼働している前提 | [nautilus_trader/implementation-plan.md Phase N2](../specs/backtest/implementation-plan.md) |
+| **O0（現物成行買い）完了** | nautilus N1（リプレイ API 差し替え + REPLAY 仮想注文）着手可能。N1 で `order_router.py` が本計画の `tachibana_orders.submit_order` を live 経路として呼ぶ | nautilus_trader/implementation-plan.md Phase N1 |
+| **O0〜O2（約定通知）完了** | nautilus N2（`LiveExecutionClient` デモ）着手可能。N2 は本計画の `tachibana_orders.py` / `tachibana_event._parse_ec_frame` / 監査ログ WAL がすべて稼働している前提 | nautilus_trader/implementation-plan.md Phase N2 |
 
 > **nautilus 互換不変条件**: 本計画で書く `submit_order` / `modify_order` / `cancel_order` の**関数シグネチャ・型・戻り値は変更しない**（nautilus N2 での `LiveExecutionClient` 委譲先として再利用するため）。spec.md §6 の nautilus 互換要件違反は merge 禁止。
 >
@@ -474,7 +474,7 @@ Rust UI トラック（[rust-ui-plan.md](./rust-ui-plan.md)）を Python トラ�
 
 ## nautilus N2 移行時に行う作業（参考・本計画スコープ外）
 
-[architecture.md §10.6](./architecture.md#106-nautilus-移行時の差分n2-で実施する作業のみ) の通り、本計画完了時点で型互換が完全に取れていれば、N2 で行うのは:
+architecture.md §10.6 の通り、本計画完了時点で型互換が完全に取れていれば、N2 で行うのは:
 
 1. `pyproject.toml` に `nautilus_trader` を追加
 2. `python/engine/nautilus/clients/tachibana.py` を新設（`LiveExecutionClient` 継承）し中身は `tachibana_orders.submit_order(...)` を呼ぶだけ

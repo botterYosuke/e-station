@@ -20,7 +20,7 @@ PyInstaller `onefile` 形式では、起動のたびにバンドルを一時デ�
 
 - **計測対象**: `flowsurface-engine.exe` 単体の launch → "サーバが TCP 接続を受理可能" までの時間
 - **判定方法**: `subprocess.Popen` で起動 → 50 ms 周期で `socket.create_connection("127.0.0.1", port)` を試行 → 最初に成功するまでの elapsed 時間
-- **判定理由**: engine 内部に `logging.basicConfig` が無く ([python/engine/server.py:32](../../../python/engine/server.py#L32) の `log` は handler 未設定) `"Data engine listening on"` の log line を stdout でフックできない。Rust IPC クライアントから見える「接続可能になった瞬間」と等価な signal として TCP listen socket の accept ready を採用。
+- **判定理由**: engine 内部に `logging.basicConfig` が無く ([python/engine/server.py:32](https://github.com/botterYosuke/e-station/blob/main/../python/engine/server.py#L32) の `log` は handler 未設定) `"Data engine listening on"` の log line を stdout でフックできない。Rust IPC クライアントから見える「接続可能になった瞬間」と等価な signal として TCP listen socket の accept ready を採用。
 - **iteration**: 6 回連続実行。OS のページキャッシュは reboot 直後でなければ常時 warm 寄りなため、`first` を「半 cold（実際の初回ユーザー起動と近似）」、`warm runs` を「キャッシュ完全 hit のベスト値」として記録する。
 - **計測スクリプト**: 本ドキュメント §5 に inline 化（再現用途）。
 
@@ -76,7 +76,7 @@ warm max:     0.813s
 
 ### 4.1 `scripts/build-engine.sh` の `uv tool run pyinstaller` バグ
 
-[scripts/build-engine.sh:35](../../../scripts/build-engine.sh#L35) は PyInstaller を `uv tool run pyinstaller` で起動している。`uv tool run` は **isolated 環境**で PyInstaller を取ってくるため、プロジェクトの `pyproject.toml` 依存（`orjson` / `websockets` / `httpx` / `pydantic`）が解決されない。結果として PyInstaller が静的解析でこれらモジュールを検出できず、生成された `.exe` の起動時に `ModuleNotFoundError: No module named 'orjson'` で即死する。
+[scripts/build-engine.sh:35](https://github.com/botterYosuke/e-station/blob/main/../scripts/build-engine.sh#L35) は PyInstaller を `uv tool run pyinstaller` で起動している。`uv tool run` は **isolated 環境**で PyInstaller を取ってくるため、プロジェクトの `pyproject.toml` 依存（`orjson` / `websockets` / `httpx` / `pydantic`）が解決されない。結果として PyInstaller が静的解析でこれらモジュールを検出できず、生成された `.exe` の起動時に `ModuleNotFoundError: No module named 'orjson'` で即死する。
 
 **再現**:
 ```bash

@@ -17,7 +17,7 @@ source_commit: 674aefd
 
 ## 1. 配置原則
 
-[docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §2 の責務分割を踏襲:
+[docs/specs/data-engine/spec.md](../../specs/data-engine.md) §2 の責務分割を踏襲:
 
 | 責務 | 所在 | 備考 |
 | :--- | :--- | :--- |
@@ -37,7 +37,7 @@ source_commit: 674aefd
 | バナー文言（`VenueError.message`） | **Python** | Rust UI は `message` をそのまま描画（F-Banner1、§6） |
 | UI のフレーム（チャート / ticker selector / バナー枠 / ログインフォーム枠） | **Rust** | 既存 iced レイアウトを流用 |
 
-**Rust 直結（NativeBackend）は実装しない**。立花統合は最初から `EngineClientBackend` のみで成立させる。これにより [docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §7.1 案 A（完全撤去）の方針と一貫する。
+**Rust 直結（NativeBackend）は実装しない**。立花統合は最初から `EngineClientBackend` のみで成立させる。これにより [docs/specs/data-engine/spec.md](../../specs/data-engine.md) §7.1 案 A（完全撤去）の方針と一貫する。
 
 **長期方針（[README.md](./README.md) §「長期方針」と整合）**: 将来 Rust（iced）を使わない **Python 単独モード**を新設する予定。Phase 1 で Python 側に置く venue 固有実装（認証・パース・tkinter ログイン UI・バナー文言）は **Python-only モードでもそのまま再利用できる構造**にする。設計判断で迷ったら「Python 単独でも動くか？」を判断軸に使う。
 
@@ -113,7 +113,7 @@ Python が起動時の session 検証または初回ログインに成功した�
   4. Python が `VenueReady{venue:"tachibana"}` を送信（**同期点**）
   5. Rust が `VenueReady` を受信 → metadata fetch 再開
   6. active subscriptions 再送
-- これにより [docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §5.3 の「recovery handshake 後に購読再送」という既存契約に、立花の認証状態を安全に差し込める
+- これにより [docs/specs/data-engine/spec.md](../../specs/data-engine.md) §5.3 の「recovery handshake 後に購読再送」という既存契約に、立花の認証状態を安全に差し込める
 
 ## 3. 起動シーケンス
 
@@ -135,7 +135,7 @@ Rust 起動
 - Python は handshake 完了後に自律的に `_startup_tachibana` を開始する。Rust は `VenueReady` を venue 文字列 `"tachibana"` で待つ（`venue_ready_timeout` 60 秒以内）
 - **`VenueReady` の意味論**: 「認証・session validation 完了」を意味する。**マスタ初期 DL の完了は含まない**。マスタ取得完了は `ListTickers` 応答の到着で判定する（F12）
 - `VenueReady` は **冪等イベント**。Python 単独再起動 → `startup_login` 再実行 → `VenueReady` 再送、というサイクルを毎回踏む。UI は初回 / 再送を区別しない前提（差異が必要になれば `session_id` 同梱で拡張）（F8）。Rust 側はこれを**最終受信状態**として保持し、**`ProcessManager` が Python サブプロセスの再起動を検知した時点（次の `Hello` 受信時）にリセット**する。`EngineEvent::Disconnected` は ticker/stream 粒度（`{venue, ticker, stream, market, reason}`、`engine-client/src/dto.rs::EngineEvent::Disconnected`）であって venue 全体の disconnected ではない点に注意（C3 修正）。WebSocket 切断などで全 ticker の `Disconnected` を受信しても `VenueReady` 状態は維持し、Python プロセス自体が落ちた時のみリセットする
-- **`VenueReady` 再受信時の重複防止**: active subscriptions の resubscribe は `ProcessManager`（[engine-client/src/process.rs](../../../engine-client/src/process.rs)）が **1 度だけ** 行う。UI 側の view code は `VenueReady` イベントに反応して新規 subscribe を発行しないこと（既存購読の参照カウントは ProcessManager 経由でのみ維持）
+- **`VenueReady` 再受信時の重複防止**: active subscriptions の resubscribe は `ProcessManager`（[engine-client/src/process.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/process.rs)）が **1 度だけ** 行う。UI 側の view code は `VenueReady` イベントに反応して新規 subscribe を発行しないこと（既存購読の参照カウントは ProcessManager 経由でのみ維持）
 - Rust 側は `VenueReady` 受領前は立花 ticker の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を送らない。UI では venue 単位のローディング表示を出す
 - 既存 sidebar は起動直後に metadata fetch を自動発火するため、立花追加時は **venue-ready ゲート** を `AdapterHandles` 呼び出し前に差し込む必要がある
 
@@ -160,17 +160,17 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 ```
 
 - 依存追加: 立花 API は標準 HTTP/WS なので新規依存ゼロ。Shift-JIS は Python 標準 `bytes.decode("shift-jis")` で足りる
-- HTTP クライアントは既存 [python/engine/exchanges/binance.py](../../../python/engine/exchanges/binance.py) と同じく **`httpx`** に揃える。WS は同じく `websockets` を採用
+- HTTP クライアントは既存 [python/engine/exchanges/binance.py](https://github.com/botterYosuke/e-station/blob/main/../python/engine/exchanges/binance.py) と同じく **`httpx`** に揃える。WS は同じく `websockets` を採用
 - mock サーバは既存 [python/tests/](../../../python/tests/) と同一ツールチェーン（`pytest-httpx` の `HTTPXMock` フィクスチャ）に揃える。**`respx` は採用しない**（F15）。WS は `websockets.serve` でローカルサーバを立てて FD/KP frame を再生
 
 ## 5. Rust 側の変更箇所
 
 | ファイル | 変更内容 |
 | :--- | :--- |
-| [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) | `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 追加。`FromStr` / `Display` / `ALL` 配列更新、および `MarketKind` を網羅する既存 match の修正 |
-| [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) | `Command::RequestVenueLogin` / `EngineEvent::VenueReady` / `EngineEvent::VenueLoginStarted` / `EngineEvent::VenueLoginCancelled` / `EngineEvent::VenueError` 追加。`SCHEMA_MAJOR = 3`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更のため major を bump し、その後の追加変更でさらに bump して現在 3） |
-| [engine-client/src/process.rs](../../../engine-client/src/process.rs) | `apply_after_handshake_with_timeout` から `SetVenueCredentials` 送信ステップを削除。`VenueReady` を venue 文字列 `"tachibana"` で待つ方式に変更。`credentials_by_venue` 保持フィールドを削除 |
-| [src/main.rs](../../../src/main.rs) | keyring 復元・`SetVenueCredentials` 投入コードを削除。Python が自律起動するため Rust の関与不要 |
+| [exchange/src/adapter.rs](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/adapter.rs) | `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` 追加。`FromStr` / `Display` / `ALL` 配列更新、および `MarketKind` を網羅する既存 match の修正 |
+| [engine-client/src/dto.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/dto.rs) | `Command::RequestVenueLogin` / `EngineEvent::VenueReady` / `EngineEvent::VenueLoginStarted` / `EngineEvent::VenueLoginCancelled` / `EngineEvent::VenueError` 追加。`SCHEMA_MAJOR = 3`（`SetVenueCredentials` / `VenueCredentialsRefreshed` 削除は破壊的変更のため major を bump し、その後の追加変更でさらに bump して現在 3） |
+| [engine-client/src/process.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/process.rs) | `apply_after_handshake_with_timeout` から `SetVenueCredentials` 送信ステップを削除。`VenueReady` を venue 文字列 `"tachibana"` で待つ方式に変更。`credentials_by_venue` 保持フィールドを削除 |
+| [src/main.rs](https://github.com/botterYosuke/e-station/blob/main/../src/main.rs) | keyring 復元・`SetVenueCredentials` 投入コードを削除。Python が自律起動するため Rust の関与不要 |
 | Rust UI（`src/screen/`） | **ログイン画面コードを追加しない**。Python ヘルパー spawn 中は「ログインダイアログを別ウィンドウで表示中」のステータスバナーだけ出す（汎用 string、立花知識なし） |
 | `src/screen/dashboard/tickers_table.rs` ほか UI | `VenueReady` 前の metadata fetch を抑止し、`MarketKind::Stock` に応じた market filter / indicator / timeframe / 表示文言を調整。**抑止は `src/venue_state.rs::VenueState` FSM が前提**（`Trigger::{Auto,Manual}` で auto-fire と手動再ログインを区別、`engine_status_stream` は `tokio::select!` 1 本に singleton 化）。pin: T35-U4-VenueReadyGate / T35-H9-SingleRecoveryPath（リグレッションは `tests/engine_status_subscription_is_singleton.rs` で固定） |
 | `engine-client/src/tachibana_meta.rs`（新設） | `TickerDisplayMeta` 型・`parse_tachibana_ticker_dict`・`matches_tachibana_filter`（HIGH-U-9 / T4-B5 着地済み） |
@@ -193,11 +193,11 @@ python/tests/                   # ← 既存テストと同じディレクトリ
 | 認証失敗 | `login_failed` | 「ログインに失敗しました。ID / パスワードを確認してください」 | error / 再ログイン |
 | 銘柄コード未存在 | `ticker_not_found` | 「銘柄が見つかりません: 7203」 | warning / 閉じる |
 | ザラ場時間外 | （`VenueError` ではなく `Disconnected{reason:"market_closed"}`） | — | チャートに「市場時間外」オーバーレイ |
-| Python 再起動中 | （既存の `EngineRestarting` ステータスを流用） | — | [docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §5.3 |
+| Python 再起動中 | （既存の `EngineRestarting` ステータスを流用） | — | [docs/specs/data-engine/spec.md](../../specs/data-engine.md) §5.3 |
 
 - Python は `message` を Shift-JIS デコード後の文字列で組み立てる。立花 API の `sResultText` / `sWarningText` が含まれる場合はそれをそのまま文末に括弧書き付与してよい
 - Rust UI は **`message` をエスケープして 1 行で描画**（改行 / HTML タグは混入させない、CSS 側で折返し制御）
-- `code` の一覧は [docs/specs/data-engine/schemas/events.json](../specs/data-engine/schemas/events.json) の `VenueError.code` 列に enum として明記する（T0.2 で追記）
+- `code` の一覧は [docs/specs/data-engine/schemas/events.json](https://github.com/botterYosuke/e-station/blob/main/architecture/specs/data-engine/schemas/events.json) の `VenueError.code` 列に enum として明記する（T0.2 で追記）
 
 ## 7. ログイン画面の Python 駆動（F-Login1）
 
@@ -439,7 +439,7 @@ Rust 起動
 
 ### 8.2 結合（Python + mock サーバ）
 
-- **`pytest-httpx`**（`HTTPXMock` フィクスチャ）でデモサーバを擬似化。既存 [python/tests/test_binance_rest.py](../../../python/tests/test_binance_rest.py) のパターンを踏襲
+- **`pytest-httpx`**（`HTTPXMock` フィクスチャ）でデモサーバを擬似化。既存 [python/tests/test_binance_rest.py](https://github.com/botterYosuke/e-station/blob/main/../python/tests/test_binance_rest.py) のパターンを踏襲
   - `e_api_login_tel.py/e_api_login_response.txt` を fixture として再利用
   - 異常系: `p_errno=-62` (時間外) / `p_errno=2` (セッション切れ) / `sKinsyouhouMidokuFlg=1` (未読通知)
   - WebSocket は `websockets` の `serve` でローカルサーバを立てて FD/KP frame を再生
@@ -460,5 +460,5 @@ Rust 起動
 
 ### 8.5 シークレット流出ガード
 
-- リポジトリ全体に対する pre-commit secret scan は `tools/secret_scan_patterns.txt` を正本とし、`tools/secret_scan.{sh,ps1}` から呼び出す。本ドキュメントでは grep リテラルを重複定義しない（重複による drift 防止）。詳細・正本パターンは [implementation-plan.md T7](./implementation-plan.md) 参照
+- リポジトリ全体に対する pre-commit secret scan は `tools/secret_scan_patterns.txt` を正本とし、`tools/secret_scan.{sh,ps1}` から呼び出す。本ドキュメントでは grep リテラルを重複定義しない（重複による drift 防止）。詳細・正本パターンは [implementation-plan.md T7](../../roadmap/tachibana/implementation-plan.md) 参照
 - ログキャプチャテストで `sPassword` / `sSecondPassword` / 仮想 URL ホスト部分が出ないこと

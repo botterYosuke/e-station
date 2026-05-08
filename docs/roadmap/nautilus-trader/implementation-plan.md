@@ -10,7 +10,7 @@ source_commit: 8797909
 
 > **Phase 8 更新（python-helper-direct-api、2026-05）**: 本計画 N1〜N4 で参照する
 > Rust 側 HTTP API（ポート 9876、`/api/replay/*` / `/api/order/*` / `/api/agent/*` 等）は
-> Phase 8 で全廃止された（[python-helper-direct-api.md](../specs/data-engine/archive/python-helper-direct-api.md) §3）。
+> Phase 8 で全廃止された（python-helper-direct-api.md §3）。
 > 制御経路は Python helper（`engine.replay_session.ReplaySession` /
 > `engine.live_session.LiveSession`）と GUI 内部経路に集約され、IPC `Command::*` /
 > `EngineEvent::*` 自体は維持される（GUI ↔ engine の WebSocket、ポート 19876）。
@@ -29,22 +29,22 @@ source_commit: 8797909
 | N2 | 立花 `LiveExecutionClient` adapter（デモ）で実弾相当の発注往復が通る、**立花 FD frame → TradeTick の LiveDataClient** | N1、tachibana Phase 1 完了（T7 受け入れ緑）、order/ Phase O0〜O2 完了 |
 | N3 | 暗号資産 venue を nautilus 側に新規実装、Rust 発注コード撤去 | N2 |
 
-**Phase N1 の依存補正（C2）**: 旧版で「Phase 2（観測 API）完了済」を依存に挙げていたが、その「Phase 2」は本計画 N1 で置換・破棄する対象（[architecture.md §6](./architecture.md#6-既存計画との衝突点と整理)）。本計画では N1 の依存を「N0 + order/ Phase O0」に書き換え、自作 Virtual Exchange Engine の完成を依存条件にしない。
+**Phase N1 の依存補正（C2）**: 旧版で「Phase 2（観測 API）完了済」を依存に挙げていたが、その「Phase 2」は本計画 N1 で置換・破棄する対象（architecture.md §6）。本計画では N1 の依存を「N0 + order/ Phase O0」に書き換え、自作 Virtual Exchange Engine の完成を依存条件にしない。
 
 ## Phase N-pre: feasibility と前提固め（実装ゼロ）
 
-[spec.md §2.0](./spec.md#20-phase-n-pre--feasibility-確認と前提固め実装ゼロ) に対応するタスク列。
+spec.md §2.0 に対応するタスク列。
 
 ### Tpre.1 clock 注入 feasibility プロトタイプ（H4）✅ 完了 2026-04-26
 - [x] `tests/spike/nautilus_clock_injection/` に捨てコード spike を作る
 - [x] 案 A-2（外部 clock 駆動・`AdvanceClock` Command）: `TestClock.advance_time()` を `run(streaming=True)` と組み合わせると Rust clock 非減少不変条件違反でパニック → **実装不可**
 - [x] 案 A（streaming=True + 1 Bar ずつ逐次投入）: `add_data([bar]) + run(streaming=True) + clear_data()` サイクルで動作。将来の StepForward UX に使える
 - [x] 案 B（`BacktestEngine.run()` 自走）: 動作確認済み、決定論性も検証済み → **N0/N1 で採用**
-- [x] 結果を [architecture.md §3](./architecture.md#3-新規-ipc-メッセージ) と [open-questions.md Q3](./open-questions.md#q3) に追記して resolve
+- [x] 結果を architecture.md §3 と [open-questions.md Q3](./open-questions.md#q3) に追記して resolve
 
 ### Tpre.2 nautilus_trader バージョン pin 確定（H6 / Q1）✅ 完了 2026-04-26
 - [x] [open-questions.md Q1](./open-questions.md#q1) を resolve: **二段階 pin**（N0/N1: `>=1.211, <2.0`、N2 完了後: `==1.225.x` 厳密 pin）
-- [x] [spec.md §5](./spec.md#5-依存方針) を確定版に書き換え済み
+- [x] spec.md §5 を確定版に書き換え済み
 
 ### Tpre.3 配布形態と LGPL-3.0（M8 / Q5）✅ 完了 2026-04-26
 - [x] [open-questions.md Q5](./open-questions.md#q5) を resolve: **venv 配布** → LGPL 追加対応不要
@@ -57,11 +57,11 @@ source_commit: 8797909
 
 ### Tpre.5 動的呼値テーブル方針（C6 / 新規 Q8）✅ 完了 2026-04-26
 - [x] [open-questions.md Q8](./open-questions.md#q8) を resolve: **案 A**（`price_increment = Price(0.1, precision=1)` 固定）
-- [x] 結論を [data-mapping.md §3](./data-mapping.md#3-instrument-価格帯と呼値テーブル) に反映
+- [x] 結論を data-mapping.md §3 に反映
 
 ### Tpre.6 発注 UI の所在統一（L7 / Q7）✅ 完了 2026-04-26
 - [x] [open-questions.md Q7](./open-questions.md#q7) を resolve: **案 B**（Python tkinter に発注 UI 統一、iced は監視・表示のみ）
-- [x] [spec.md §4](./spec.md#4-公開-api不変条件) に Q7 決定の備考を追記済み
+- [x] spec.md §4 に Q7 決定の備考を追記済み
 
 ### Tpre.7 wheel 入手性確認✅ 完了 2026-04-26
 - [x] Windows 11 で `uv pip install nautilus_trader` → `nautilus-trader==1.225.0` wheel 取得成功
@@ -148,10 +148,10 @@ source_commit: 8797909
 **PR 切り方の規約**: N1.1〜N1.3（IPC schema + J-Quants loader + replay API 差し替え）は **1 PR でアトミック**にマージする。互換シムを残さない。
 
 ### N1.0 ホットフィックス: 立花曖昧 side → `None` 化（Q11-pre）⭐ 先行修正 ✅ 完了 2026-04-28
-- [x] ✅ [`tachibana_ws.py:190`](../../../python/engine/exchanges/tachibana_ws.py#L190) `_determine_side` 戻り値を `str | None` に変更し、曖昧時 `None` を返す
-- [x] ✅ 呼出側（[tachibana_ws.py:156](../../../python/engine/exchanges/tachibana_ws.py#L156) 付近）で `None` を内部表現の `"unknown"` に写像（既存 trade dict のキー互換は維持）
+- [x] ✅ [`tachibana_ws.py:190`](https://github.com/botterYosuke/e-station/blob/main/../python/engine/exchanges/tachibana_ws.py#L190) `_determine_side` 戻り値を `str | None` に変更し、曖昧時 `None` を返す
+- [x] ✅ 呼出側（[tachibana_ws.py:156](https://github.com/botterYosuke/e-station/blob/main/../python/engine/exchanges/tachibana_ws.py#L156) 付近）で `None` を内部表現の `"unknown"` に写像（既存 trade dict のキー互換は維持）
 - [x] ✅ 既存テスト `python/tests/test_tachibana_fd_trade.py::test_tick_rule_up_gives_buy` の曖昧 side 期待値を `"buy"` → `"unknown"` に書き換え
-- [x] ✅ [bug-postmortem](../../../.claude/skills/bug-postmortem/SKILL.md) を起動し MISSES.md に「曖昧 side が `"buy"` 寄せ → live/replay 互換性で false positive」を記録（2026-04-28 エントリ、教訓 3 点）
+- [x] ✅ [bug-postmortem](https://github.com/botterYosuke/e-station/blob/main/.claude/skills/bug-postmortem/SKILL.md) を起動し MISSES.md に「曖昧 side が `"buy"` 寄せ → live/replay 互換性で false positive」を記録（2026-04-28 エントリ、教訓 3 点）
 - [ ] N2.0 の `tachibana_data.py` 実装時に `"unknown"` → `AggressorSide.NO_AGGRESSOR` に写像（**N2 で実施**）
 
 #### 状況・知見・Tips（2026-04-28 R0 完了報告）
@@ -170,7 +170,7 @@ source_commit: 8797909
 - `git stash push -- <path>` で特定ファイルだけ stash → リグレッション実証 → `git stash pop` で復元、というパターンは TDD 事後検証に有効。本セッションでも N1.0 の事後検証で活用。
 
 ### N1.1 IPC schema 1.4 ✅ 完了 2026-04-28
-- [x] ✅ [engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に追加（[architecture.md §3](./architecture.md#3-新規-ipc-メッセージ)）:
+- [x] ✅ [engine-client/src/dto.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/dto.rs) に追加（architecture.md §3）:
   - `Command::StartEngine` / `StopEngine`
   - `Command::LoadReplayData { instrument_id, start_date, end_date, granularity }`
   - `EngineEvent::EngineStarted` / `EngineStopped`
@@ -199,7 +199,7 @@ source_commit: 8797909
 - `cargo test -p flowsurface-engine-client --test schema_v2_4_nautilus` で新規ファイルだけ走らせると RED→GREEN サイクルが 1 秒で回る。dto.rs を編集すると workspace 全体ビルドが入って遅くなるので、IPC dto を試行錯誤するときは新規テストファイルから先に書くと体感速度が大きく違う。
 
 ### N1.2 J-Quants ローダ + Instrument cache 実装 ⭐ replay モードの中核 ✅ 完了 2026-04-28
-- [x] ✅ `python/engine/nautilus/jquants_loader.py` 新設（[data-mapping.md §1.3 / §8](./data-mapping.md#13-replay-j-quants-equities_trades_csvgz--tradetick)）
+- [x] ✅ `python/engine/nautilus/jquants_loader.py` 新設（data-mapping.md §1.3 / §8）
   - [x] ✅ `jquants_code_to_instrument_id(code)`: `"13010"` → `"1301.TSE"`、末尾非 0 で `ValueError`
   - [x] ✅ `load_trades(instrument_id, start_date, end_date) -> Iterator[TradeTick]`: `S:\j-quants\equities_trades_*.csv.gz` を gzip stream で順次読み、銘柄・期間でフィルタ
   - [x] ✅ `load_minute_bars(...)`: bar `ts_event` を **close 時刻**に揃える（Q9）
@@ -443,7 +443,7 @@ source_commit: 8797909
 - `gymnasium` なし環境では `_GYM_BASE = object` にフォールバック。`super().reset(seed=seed)` は `if _GYM_AVAILABLE:` でガードすること
 
 ### N1.8 live/replay 互換 lint ⭐ 新設 ✅ 完了 2026-04-28
-- [x] `python/tests/test_strategy_compat_lint.py`: ユーザー Strategy ファイルの AST を解析し、`on_order_book_*` / `on_quote_tick` の定義があれば fail（[spec.md §3.5.4](./spec.md#354-互換性-ci-検査n18-で追加)）
+- [x] `python/tests/test_strategy_compat_lint.py`: ユーザー Strategy ファイルの AST を解析し、`on_order_book_*` / `on_quote_tick` の定義があれば fail（spec.md §3.5.4）
 - [x] 組み込み `BuyAndHold` を **live mock + replay J-Quants の両方**で走らせ最終ポジション方向が一致するスモークテスト（`test_strategy_live_replay_smoke.py`）
 - [ ] CI に組み込み (`uv run pytest python/tests/test_strategy_compat_lint.py`)
 
@@ -509,7 +509,7 @@ source_commit: 8797909
       （`OrderRejected{REPLAY_NOT_IMPLEMENTED}`）を解除し、`submit_order_replay(mode="replay", ...)` を呼ぶ
       配線を追加。`OrderAccepted` が返るようになり、`REPLAY_NOT_IMPLEMENTED` は廃止。
       `python/tests/test_order_router_dispatch.py::TestServerReplayRouting` 3 件 GREEN。
-- [x] ✅ **per-tick KlineUpdate / Trades IPC emit 実装 (2026-04-30, [replay-market-data-emit.md](./replay-market-data-emit.md))**:
+- [x] ✅ **per-tick KlineUpdate / Trades IPC emit 実装 (2026-04-30, replay-market-data-emit.md)**:
       - streaming ループ内で `Bar` → `KlineUpdate { venue:"replay", ticker, market:"stock", timeframe, kline:{...} }` を emit
       - 同ループ内で `TradeTick` → `Trades { venue:"replay", ticker, stream_session_id, trades:[{...}] }` を emit
       - `_granularity_to_timeframe()` / `_aggressor_to_side()` ヘルパーをモジュールレベルに新設
@@ -583,7 +583,7 @@ source_commit: 8797909
 - **`narrative_hook` と `strategy_helpers` の責務分離**: fill 由来の自動マーカーは `NarrativeHook` が担当、戦略意図の信号は `StrategySignalMixin` が担当。両者は独立した IPC event (`ExecutionMarker` vs `StrategySignal`) を送出する。
 
 ### N1.13 起動時モード固定（live / replay）✅ 完了 2026-04-28（一部繰越）
-- [x] ✅ Rust 側 [src/cli.rs](../../../src/cli.rs) に CLI 引数 `--mode {live|replay}` を追加（必須・デフォルトなし、D8 起動時固定の踏襲）
+- [x] ✅ Rust 側 [src/cli.rs](https://github.com/botterYosuke/e-station/blob/main/../src/cli.rs) に CLI 引数 `--mode {live|replay}` を追加（必須・デフォルトなし、D8 起動時固定の踏襲）
 - [x] ✅ IPC Hello に `mode` を載せ、Python 側 `server.py._handshake` で受け取って `self._mode` に保持。Ready capabilities にエコーバック (`capabilities.mode`)。
 - [x] ✅ Python 側 server.py の mode 別起動責務:
       - replay: 既存 BacktestEngine 起動経路を維持（N0 で実装済み）、LiveExecutionEngine は触らない
@@ -592,12 +592,12 @@ source_commit: 8797909
       - mode と StartEngine.engine の不一致は `engine.mode.validate_start_engine()` が `ValueError` で拒否
 - [ ] iced 側: mode に応じた Depth ペイン visibility・order UI 文言・バナー切替は **N1.14/N1.15 に委譲**（本タスクではログ出力のみ — main.rs に `Started in mode: live|replay`）
 - [x] ✅ 切替コマンド（IPC / HTTP）は追加していない（D8 起動時固定方針）
-- [x] ✅ [python/tests/test_mode_isolation.py](../../../python/tests/test_mode_isolation.py) 12 件 GREEN:
+- [x] ✅ [python/tests/test_mode_isolation.py](https://github.com/botterYosuke/e-station/blob/main/../python/tests/test_mode_isolation.py) 12 件 GREEN:
       - live モードで /api/replay/* が拒否される (`is_replay_path_allowed`)
       - replay モードで /api/order/submit が REPLAY ディスパッチに流れる (`order_dispatch_target`)
       - mode 不一致の StartEngine が拒否される (`validate_start_engine`)
       - live モードで Hello.capabilities.nautilus.live が false のまま (`nautilus_capabilities`)
-- [x] ✅ [tests/e2e/s55_mode_startup_smoke.sh](../../../tests/e2e/s55_mode_startup_smoke.sh) **stub** 配置（`bash s55_mode_startup_smoke.sh` で実行可能、release binary 未ビルド時は SKIP）。**完全な E2E は N1.14 で実装** — pane visibility 切替実装と一緒に書くのが効率的なため。
+- [x] ✅ [tests/e2e/s55_mode_startup_smoke.sh](https://github.com/botterYosuke/e-station/blob/main/../tests/e2e/s55_mode_startup_smoke.sh) **stub** 配置（`bash s55_mode_startup_smoke.sh` で実行可能、release binary 未ビルド時は SKIP）。**完全な E2E は N1.14 で実装** — pane visibility 切替実装と一緒に書くのが効率的なため。
 - [ ] ランタイム切替の責務は [Q15](./open-questions.md#q15) で N2 着手前に再評価（本タスク対象外）
 
 #### 状況・知見・Tips（2026-04-28 R1 完了報告 — N1.13）
@@ -789,7 +789,7 @@ source_commit: 8797909
 
 ### N2.0 立花 LiveDataClient（FD frame → TradeTick）⭐ 新設 ✅ 完了 2026-04-29
 - [x] ✅ `python/engine/nautilus/clients/tachibana_data.py` 新設
-- [x] ✅ 既存 `tachibana_ws._FdFrameProcessor` の trade dict 出力を nautilus `TradeTick` に変換（[data-mapping.md §1.2](./data-mapping.md#12-live-立花-fd-frame--tradetick)）
+- [x] ✅ 既存 `tachibana_ws._FdFrameProcessor` の trade dict 出力を nautilus `TradeTick` に変換（data-mapping.md §1.2）
 - [x] ✅ `TachibanaLiveDataClient` が `LiveDataClient` を継承し `feed_trade_dict()` で `_handle_data(tick)` に流す
 - [x] ✅ `aggressor_side` 推定不能 (`"unknown"`) の場合は `NO_AGGRESSOR` に写像
 - [x] ✅ テスト: `python/tests/test_tachibana_data_client.py` 13 件 GREEN（side 全 4 種・precision・ts_ms→ns・trade_id 連番・sanity check）
@@ -803,7 +803,7 @@ source_commit: 8797909
   - `submit_order(Order)` → `tachibana_orders.submit_order(session, second_password, NautilusOrderEnvelope.from_nautilus(order))`
   - `modify_order` → `tachibana_orders.modify_order(...)`
   - `cancel_order` → `tachibana_orders.cancel_order(...)`
-- [x] ✅ 立花 API 写像（`OrderType` / `TimeInForce` / `cash_margin` / `account_type`）は **[order/spec.md §6](../specs/order/spec.md#6-nautilus_trader-互換要件不変条件) と [data-mapping.md](./data-mapping.md) に従う**。本ファイル内に重複定義しない
+- [x] ✅ 立花 API 写像（`OrderType` / `TimeInForce` / `cash_margin` / `account_type`）は **[order/spec.md §6](../../specs/order.md#6-nautilus_trader-互換要件不変条件) と data-mapping.md に従う**。本ファイル内に重複定義しない
 
 ### N2.2 EC frame → nautilus イベント変換 ✅ 完了 2026-04-29
 - [x] ✅ `python/engine/nautilus/clients/tachibana_event_bridge.py` 新設
@@ -819,7 +819,7 @@ source_commit: 8797909
 
 ### N2.4 市場時間帯ガード（M2）✅ 完了 2026-04-29（N3 繰越: Rust 側）
 - [x] ✅ `_submit_order` / `_modify_order` / `_cancel_order` で `is_market_open()` を呼び、閉場中は `generate_order_denied` / `generate_order_modify_rejected` / `generate_order_cancel_rejected` を返す
-- [ ] ⏩ N3 繰越: HTTP API 層 (`order_api.rs`) で `MARKET_CLOSED` を先行 reject（[order/spec.md §5.2](../specs/order/spec.md#52-reason_code-体系観測性)）
+- [ ] ⏩ N3 繰越: HTTP API 層 (`order_api.rs`) で `MARKET_CLOSED` を先行 reject（[order/spec.md §5.2](../../specs/order.md#52-reason_code-体系観測性)）
 - [x] ✅ `_connect()` で市場閉場中は WARNING ログを出すが接続自体はブロックしない（nautilus start() 保留は不要と判断、logged warning で代替）
 
 ### N2.5 セーフティ（order/ と二重ガード）✅ 完了 2026-04-29

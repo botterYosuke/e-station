@@ -19,7 +19,7 @@ source_commit: 8797909
 
 ### 2.0 Phase N-pre — feasibility 確認と前提固め（実装ゼロ）✅ 完了 2026-04-26
 
-[open-questions.md](./open-questions.md) の Q1 / Q3 / Q5 / Q6 / Q7 / Q8 すべて Resolved。詳細は [implementation-plan.md §Phase N-pre](./implementation-plan.md#phase-n-pre-feasibility-と前提固め実装ゼロ)。
+open-questions.md の Q1 / Q3 / Q5 / Q6 / Q7 / Q8 すべて Resolved。詳細は implementation-plan.md §Phase N-pre。
 
 ### 2.1 Phase N0 — エンジン同梱と日足 Bar ハロー戦略（MVP）✅ 完了 2026-04-26
 
@@ -57,7 +57,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 | 分足 | `S:\j-quants\equities_bars_minute_YYYYMMDD.csv.gz` | `Bar`（1-MINUTE-LAST-EXTERNAL） | 補助。tick → 分足集約の sanity check に使う |
 | 日足 | `S:\j-quants\equities_bars_daily_YYYYMM.csv.gz` | `Bar`（1-DAY-LAST-EXTERNAL） | N0 互換。長期テスト用 |
 
-詳細は [data-mapping.md §1.1〜§1.3](./data-mapping.md#1-tradetick-歩み値) と §8。
+詳細は data-mapping.md §1.1〜§1.3 と §8。
 
 #### 2.2.3 REPLAY モード仮想注文の統合
 
@@ -69,7 +69,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 - `python/engine/order_router.py` 新設で live / replay を分岐:
   - live → `tachibana_orders.submit_order(...)` → 立花 HTTP
   - replay → `BacktestExecutionEngine.process_order(...)` → SimulatedExchange
-- 発注入力 UI（Python tkinter）は replay モード用文言に切替（[wiki UX](../../wiki/orders.md#replay-モード中の動作)）:
+- 発注入力 UI（Python tkinter）は replay モード用文言に切替（[wiki UX](https://github.com/botterYosuke/e-station/wiki/orders#replay-モード中の動作)）:
   - バナー例「⏪ REPLAYモード中 — 実注文は送信されません」
   - 確認文言「仮想注文確認」
   - 第二暗証番号 modal を **出さない**
@@ -91,7 +91,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 #### 2.2.5 N1.11〜N1.16 追加スコープ（2026-04-28 確定、UI 役割境界の確定に伴う）
 
-詳細は [./archive/replay-ui-role-revision-2026-04-28.md](./archive/replay-ui-role-revision-2026-04-28.md) を参照。
+詳細は ./archive/replay-ui-role-revision-2026-04-28.md を参照。
 
 - **N1.11（新設）** Replay 再生 speed コントロール（streaming=True 経路）+ IPC
   `Command::SetReplaySpeed` を追加。`add_data([item]) → run(streaming=True)
@@ -103,7 +103,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
   が自動送出）と `EngineEvent::StrategySignal`（Strategy が `emit_signal(kind, side,
   price, tag, note)` で明示送出。`signal_kind ∈ {EntryLong, EntryShort, Exit, Annotate}`）
   を追加。iced 側 chart pane に execution layer / signal layer の 2 レイヤーを重ねる。
-  `signal_kind` の wire 表現（enum vs `kind: String`）は [Q13](./open-questions.md#q13)
+  `signal_kind` の wire 表現（enum vs `kind: String`）は Q13
   で確定するまで暫定 enum 実装、後方互換性を破らない
 - **N1.11（補足・Phase 8）** 速度制御の入口は `POST /api/replay/control` から `ReplaySession.set_speed()` Python helper に置き換え。IPC `Command::SetReplaySpeed` 自体は維持
 - **N1.13（新設）** 起動時モード固定の CLI 引数 `--mode {live|replay}` を追加（必須・
@@ -111,7 +111,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
   Python 側 NautilusRunner に渡し、mode と `StartEngine.engine` の不一致は `ValueError`
   で拒否。**ランタイム切替コマンドは追加しない**。`--mode live` で起動しても N1 では
   nautilus `LiveExecutionEngine` は起動せず、Hello capabilities `nautilus.live=false`
-  を維持。ランタイム切替の責務は [Q15](./open-questions.md#q15) で N2 着手前に再評価
+  を維持。ランタイム切替の責務は Q15 で N2 着手前に再評価
 - **N1.14（新設）** REPLAY 銘柄追加時に Tick pane と Candlestick(1m) pane を自動生成。
   `ReplayPaneRegistry` で identity = `(mode=replay, instrument_id, pane_kind,
   granularity?)` を管理し重複生成防止。1 銘柄目は横並び 2 分割、2 銘柄目以降はフォーカス
@@ -144,7 +144,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 #### 2.3.1 live モードの TradeTick 接続
 
-- 既存 `tachibana_ws._FdFrameProcessor` の trade dict 出力を nautilus `TradeTick` に変換するブリッジを新設（[data-mapping.md §1.2](./data-mapping.md#12-live-立花-fd-frame--tradetick)）
+- 既存 `tachibana_ws._FdFrameProcessor` の trade dict 出力を nautilus `TradeTick` に変換するブリッジを新設（data-mapping.md §1.2）
 - `LiveDataClient` 系として `python/engine/nautilus/clients/tachibana_data.py` に置く
 - nautilus `LiveExecutionEngine` と `LiveDataEngine` を同時起動
 
@@ -180,7 +180,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 - 立花クレデンシャルは Phase 1 と同じ keyring 経路。nautilus には Python メモリ上でだけ渡す
 - nautilus persistence（Parquet/SQLite）は **無効化**（`CacheConfig.database = None`）。N2 起動時に `CLMOrderList` から毎回 warm-up
-- **Strategy 信頼境界**: ユーザー Strategy ロード（`strategy_file`）は **N4 で実装済み**（[open-questions.md Q2](./open-questions.md#q2) Resolved）。戦略コードは立花 creds と同プロセスで動く。サンドボックス・プロセス隔離は実装しない。戦略起因の誤発注はユーザー責任（README §戦略は自己責任 参照）
+- **Strategy 信頼境界**: ユーザー Strategy ロード（`strategy_file`）は **N4 で実装済み**（open-questions.md Q2 Resolved）。戦略コードは立花 creds と同プロセスで動く。サンドボックス・プロセス隔離は実装しない。戦略起因の誤発注はユーザー責任（README §戦略は自己責任 参照）
 
 ### 3.3 パフォーマンス
 
@@ -236,7 +236,7 @@ replay: J-Quants CSV   → JQuantsTradeLoader            → TradeTick (直接) 
 
 > **Phase 8 更新（python-helper-direct-api、2026-05）**: 本節で N1 当時に定義した
 > Rust 側 HTTP API（ポート 9876、`/api/replay/*` / `/api/order/*` / `/api/agent/*`）は
-> すべて廃止された（[python-helper-direct-api.md](../specs/data-engine/archive/python-helper-direct-api.md) §3）。
+> すべて廃止された（python-helper-direct-api.md §3）。
 > 制御経路は Python helper（`engine.replay_session.ReplaySession` /
 > `engine.live_session.LiveSession`）に集約され、IPC `Command::*` / `EngineEvent::*`
 > 自体は維持される（GUI ↔ engine の WebSocket、ポート 19876）。

@@ -20,21 +20,21 @@ status: draft
 
 # data-engine 不変条件 (抽出候補)
 
-[`specs/data-engine.md`](../../specs/data-engine.md) 本文中で「必ず」「禁止」「不変」相当として記述されている事項を、Wave 4 の testing/invariants.md 統合に向けて列挙する。
+[`specs/data-engine.md`](../specs/data-engine.md) 本文中で「必ず」「禁止」「不変」相当として記述されている事項を、Wave 4 の testing/invariants.md 統合に向けて列挙する。
 
 ## INV 候補
 
-- **IPC アクセス制御**: WebSocket サーバは loopback (`127.0.0.1` / `::1`) のみ listen する。token 不一致接続は即切断。([data-engine.md §4.1.1](../../specs/data-engine.md#411-ローカル-ipc-のアクセス制御))
-- **handshake 順序**: Rust は `Ready` 受領前にマーケットデータ系コマンドを送らない。([data-engine.md §4.5](../../specs/data-engine.md#45-起動ハンドシェイク))
-- **schema_major 不一致は致命的**: 不一致時はハンドシェイク失敗で接続拒否。`schema_minor` 差は警告のみで接続継続。([data-engine.md §4.5.1](../../specs/data-engine.md#451-スキーマバージョニング運用))
-- **depth diff は drop 不可**: 受信キューが詰まった場合でも depth 中間 diff は drop せず、coalesce か session 切り直しで対応。([data-engine.md §4.4](../../specs/data-engine.md#44-バックプレッシャと整合性保証))
+- **IPC アクセス制御**: WebSocket サーバは loopback (`127.0.0.1` / `::1`) のみ listen する。token 不一致接続は即切断。([data-engine.md §4.1.1](../specs/data-engine.md#411-ローカル-ipc-のアクセス制御))
+- **handshake 順序**: Rust は `Ready` 受領前にマーケットデータ系コマンドを送らない。([data-engine.md §4.5](../specs/data-engine.md#45-起動ハンドシェイク))
+- **schema_major 不一致は致命的**: 不一致時はハンドシェイク失敗で接続拒否。`schema_minor` 差は警告のみで接続継続。([data-engine.md §4.5.1](../specs/data-engine.md#451-スキーマバージョニング運用))
+- **depth diff は drop 不可**: 受信キューが詰まった場合でも depth 中間 diff は drop せず、coalesce か session 切り直しで対応。([data-engine.md §4.4](../specs/data-engine.md#44-バックプレッシャと整合性保証))
 - **stream_session_id 不一致時の板破棄**: `stream_session_id` 不一致または `prev_sequence_id != applied_seq` を検知したら板を破棄して `RequestDepthSnapshot` を送出。
 - **engine_session_id 切替時の全破棄**: `engine_session_id` が変わったら Rust は全ての板・未確定 kline・進行中 fetch を破棄する。
-- **trade dedup**: trade 重複配信は許容するが、`(venue, ticker, trade_id)` で Rust 側が dedup する。([data-engine.md §9.4](../../specs/data-engine.md#94-整合性))
+- **trade dedup**: trade 重複配信は許容するが、`(venue, ticker, trade_id)` で Rust 側が dedup する。([data-engine.md §9.4](../specs/data-engine.md#94-整合性))
 - **depth gap 検知漏れ = 0**: 長時間稼働でも gap 検知漏れが発生しないこと。
 - **MAX_CONNECTIONS=4** (Phase 8 attach mode): 同時接続上限を超えた場合は 1008 Policy Violation で reject。
-- **mode 一致**: 外部エンジン attach 時、`mode` ("live" | "replay") が一致しないクライアントは拒否。([replay.md §1](../../specs/replay.md))
-- **replay モードでの venue login 抑止**: `mode == "replay"` のとき Python は Tachibana startup login を skip し、`RequestVenueLogin` も `mode_mismatch` で拒否する。([replay.md §3](../../specs/replay.md))
+- **mode 一致**: 外部エンジン attach 時、`mode` ("live" | "replay") が一致しないクライアントは拒否。([replay.md §1](../specs/replay.md))
+- **replay モードでの venue login 抑止**: `mode == "replay"` のとき Python は Tachibana startup login を skip し、`RequestVenueLogin` も `mode_mismatch` で拒否する。([replay.md §3](../specs/replay.md))
 
 
 ## tachibana

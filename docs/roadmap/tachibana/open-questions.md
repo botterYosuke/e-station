@@ -13,7 +13,7 @@ source_commit: 236c0d2
 | # | 論点 | 候補 | 決定タイミング | 備考 |
 | :-- | :--- | :--- | :--- | :--- |
 | Q1 | クレデンシャル IPC コマンド名 | `SetVenueCredentials`（汎用）/ `SetTachibanaCredentials`（venue 固有） | T0 | **決定: 前者（generic + venue-tagged typed enum）**。payload は `serde_json::Value` ではなく `VenueCredentialsPayload::Tachibana(TachibanaCredentialsWire)` で typed に持たせ、`Debug` マスク可能にする。`request_id` で `VenueReady`/`VenueError` と相関（F1/F6） |
-| Q2 | `MinTicksize` の価格帯対応 | (A) per-stock 1 値固定 / (B) 型拡張 / (C) 動的更新 | T4 | **決定: (A) per-stock 1 値固定**。呼値は `CLMYobine`（`sYobineTaniNumber` ごとに 20 段の `sKizunPrice_n` / `sYobineTanka_n` / `sDecimal_n`）を master download で取得し、銘柄ごとに `CLMIssueSizyouMstKabu.sYobineTaniNumber` で参照して band を選ぶ。Phase 1 でも **per-stock 解決**を採用（旧「単一 hardcode 表 + `tick_size_for_price(price: Decimal) -> Decimal` 単一引数」前提は撤回）。資料_呼値の所在不明問題は `CLMYobine` 実データで Phase 1 実装前提として解決済み（B1 完了 / B2 で master 結合）。Phase 2（発注）で (B)/(C) 再検討（[data-mapping.md §5](./data-mapping.md#5-ticker-metadata呼値売買単位)） |
+| Q2 | `MinTicksize` の価格帯対応 | (A) per-stock 1 値固定 / (B) 型拡張 / (C) 動的更新 | T4 | **決定: (A) per-stock 1 値固定**。呼値は `CLMYobine`（`sYobineTaniNumber` ごとに 20 段の `sKizunPrice_n` / `sYobineTanka_n` / `sDecimal_n`）を master download で取得し、銘柄ごとに `CLMIssueSizyouMstKabu.sYobineTaniNumber` で参照して band を選ぶ。Phase 1 でも **per-stock 解決**を採用（旧「単一 hardcode 表 + `tick_size_for_price(price: Decimal) -> Decimal` 単一引数」前提は撤回）。資料_呼値の所在不明問題は `CLMYobine` 実データで Phase 1 実装前提として解決済み（B1 完了 / B2 で master 結合）。Phase 2（発注）で (B)/(C) 再検討（data-mapping.md §5） |
 | Q3 | 「diff のない venue」表現 | capabilities フラグ / stream-kind 追加 / 既存 DepthSnapshot の繰返しで運用 | T0 | **実装確認の結果、Phase 1 は `DepthSnapshot` の繰返しだけで成立見込み**。capabilities は主に UI 非活性化用途として残す |
 | Q4 | EVENT は HTTP long-poll か WebSocket か | (a) WS のみ / (b) フォールバック付き | T5 | サンプル WS 版のほうが軽量で構築が単純。**推奨: WS のみ**。HTTP long-poll は閉鎖環境向けの予備なので Phase 1 では切り捨て |
 | Q5 | 銘柄マスタ 21MB の保管場所 | メモリ展開のみ / アプリのキャッシュディレクトリに永続 | T4 | 起動時間と再ログイン頻度のトレードオフ。**推奨: 日付つきファイルでキャッシュ + 起動時に当日分なければ再取得** |
@@ -59,15 +59,15 @@ source_commit: 236c0d2
 
 ## 決定済み（参考）
 
-- [x] **本番 URL は Phase 1 では UI 露出しない** — env でのみ許可（[spec.md §2.2](./spec.md#22-含めないもの明示的に-phase-2-送り)）
+- [x] **本番 URL は Phase 1 では UI 露出しない** — env でのみ許可（[spec.md §2.2](../../specs/venues/tachibana.md#22-含めないもの明示的に-phase-2-送り)）
 - [x] **`MarketKind::Stock` を新設**（既存 Spot は暗号資産現物と意味的に異なるため流用しない）
-- [x] **NativeBackend は実装しない**（最初から `EngineClientBackend` のみ、[architecture.md §1](./architecture.md#1-配置原則)）
-- [x] **Phase 1 はリードオンリー**（[spec.md §2.2](./spec.md#22-含めないもの明示的に-phase-2-送り)）
+- [x] **NativeBackend は実装しない**（最初から `EngineClientBackend` のみ、architecture.md §1）
+- [x] **Phase 1 はリードオンリー**（[spec.md §2.2](../../specs/venues/tachibana.md#22-含めないもの明示的に-phase-2-送り)）
 - [x] **電話認証はアプリの関与外**（ユーザーが事前完了している前提）
 - [x] **runtime の session expiry では自動再ログインしない**（起動時 session 復元失敗時のみ 1 回 fallback 可）
 - [x] **第二暗証番号は Phase 1 では収集も保持もしない**（F-H5、Q11 改訂）。DTO スキーマには `Option<SecretString>` を切るが Rust UI / keyring / Python メモリのいずれにも値を入れず常に `None` を送る。Phase 2 着手時に値の収集・保持を有効化（スキーマ破壊変更なし）
 - [x] **managed mode の credentials 再注入は `ProcessManager` を source of truth にする**
-- [x] **立花 venue の metadata fetch / subscribe は `VenueReady` 後にのみ許可する**（T3.5 着地: [src/venue_state.rs](../../../src/venue_state.rs) FSM、[src/widget/venue_banner.rs](../../../src/widget/venue_banner.rs) ステータスバナー、[tests/engine_status_subscription_is_singleton.rs](../../../tests/engine_status_subscription_is_singleton.rs) テストで担保）
+- [x] **立花 venue の metadata fetch / subscribe は `VenueReady` 後にのみ許可する**（T3.5 着地: [src/venue_state.rs](https://github.com/botterYosuke/e-station/blob/main/../src/venue_state.rs) FSM、[src/widget/venue_banner.rs](https://github.com/botterYosuke/e-station/blob/main/../src/widget/venue_banner.rs) ステータスバナー、[tests/engine_status_subscription_is_singleton.rs](https://github.com/botterYosuke/e-station/blob/main/../tests/engine_status_subscription_is_singleton.rs) テストで担保）
 
 ## Q21 — demo 環境の運用時間
 

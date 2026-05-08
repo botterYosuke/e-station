@@ -159,7 +159,7 @@ Parquet キャッシュを有効化したい場合は、立花の session 情報
 3. ユーザーは起動 config で `lot_size_override: {instrument_id: int}` を渡してケース個別に上書きできる
 
 **根拠**:
-- 現コードに立花マスタ由来の `lot_size` 抽出 ([instrument_factory.py:18](../../../python/engine/nautilus/instrument_factory.py#L18) / [tachibana.py:380](../../../python/engine/exchanges/tachibana.py#L380)) があり再利用しやすい
+- 現コードに立花マスタ由来の `lot_size` 抽出 ([instrument_factory.py:18](https://github.com/botterYosuke/e-station/blob/main/../python/engine/nautilus/instrument_factory.py#L18) / [tachibana.py:380](https://github.com/botterYosuke/e-station/blob/main/../python/engine/exchanges/tachibana.py#L380)) があり再利用しやすい
 - J-Quants `listed/info` API には売買単位フィールドがない（https://jpx.gitbook.io/j-quants-en/api-reference/listed_info）
 - 一部 ETF / REIT は 1 株単位など 100 以外。100 固定では普通株以外で誤発注リスク
   - https://www.jpx.co.jp/equities/products/etfs/trading/
@@ -176,13 +176,13 @@ Parquet キャッシュを有効化したい場合は、立花の session 情報
 
 **先行修正タスク（Q11 着手前ブロッカー）**
 
-[`tachibana_ws.py:190`](../../../python/engine/exchanges/tachibana_ws.py#L190) の `_determine_side` は曖昧時に `return "buy"` しており、live 側の trade に **buy bias** が乗る。replay は `NO_AGGRESSOR` 固定なので、live/replay の互換性検証で false positive が出る。
+[`tachibana_ws.py:190`](https://github.com/botterYosuke/e-station/blob/main/../python/engine/exchanges/tachibana_ws.py#L190) の `_determine_side` は曖昧時に `return "buy"` しており、live 側の trade に **buy bias** が乗る。replay は `NO_AGGRESSOR` 固定なので、live/replay の互換性検証で false positive が出る。
 
 **修正方針**:
 - `_determine_side` の戻り値を `str | None` に変更
 - 曖昧時（quote rule も tick rule も決まらない）は `None` を返す
-- 呼び出し側 ([tachibana_ws.py:156](../../../python/engine/exchanges/tachibana_ws.py#L156) 付近) で `None` を `"unknown"` などに写像し、`tachibana_data.py`（N2.0）で `AggressorSide.NO_AGGRESSOR` に変換
-- 既存テスト: 曖昧時に `"buy"` を期待していたら `None` 期待に書き換える（[bug-postmortem](../../../.claude/skills/bug-postmortem/SKILL.md) で見逃しパターン記録）
+- 呼び出し側 ([tachibana_ws.py:156](https://github.com/botterYosuke/e-station/blob/main/../python/engine/exchanges/tachibana_ws.py#L156) 付近) で `None` を `"unknown"` などに写像し、`tachibana_data.py`（N2.0）で `AggressorSide.NO_AGGRESSOR` に変換
+- 既存テスト: 曖昧時に `"buy"` を期待していたら `None` 期待に書き換える（[bug-postmortem](https://github.com/botterYosuke/e-station/blob/main/.claude/skills/bug-postmortem/SKILL.md) で見逃しパターン記録）
 
 **アクション**:
 - N1.0（または N0 のホットフィックス枠）で先行修正

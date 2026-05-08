@@ -88,7 +88,7 @@ source_commit: 8797909
 
 ## 3. 新規 IPC メッセージ
 
-[engine-client/src/dto.rs](../../../engine-client/src/dto.rs) に以下を追加（N1 実装分、schema 3.9 時点）。**`SubmitOrder` / `Order*` 系は定義済み**。本計画で追加したのは backtest engine ライフサイクル、replay データロード、speed 制御、overlay、REPLAY 買付余力:
+[engine-client/src/dto.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/dto.rs) に以下を追加（N1 実装分、schema 3.9 時点）。**`SubmitOrder` / `Order*` 系は定義済み**。本計画で追加したのは backtest engine ライフサイクル、replay データロード、speed 制御、overlay、REPLAY 買付余力:
 
 ```rust
 pub enum Command {
@@ -173,7 +173,7 @@ pub enum EngineEvent {
 
 **`EngineEvent::EngineError` の二役 (H-F)**: 同一 wire 形を **(1) handshake 切断 frame** と **(2) StartEngine 例外通知 outbox event** の両方が共有する。`strategy_id == None` で (1) 接続レベルエラー、`strategy_id == Some(_)` で (2) strategy 固有 outbox event を表す。受信側 (Rust) は `strategy_id` で分岐し、(1) は接続を切る・(2) は接続維持して該当 strategy state machine にだけ反映する。
 
-**clock 注入（H4 / Q3 決定）**: `AdvanceClock` Command は **実装しない**。`BacktestEngine.run(start, end)` で自走（[open-questions.md Q3](./open-questions.md#q3)）。
+**clock 注入（H4 / Q3 決定）**: `AdvanceClock` Command は **実装しない**。`BacktestEngine.run(start, end)` で自走（[open-questions.md Q3](../../roadmap/nautilus-trader/open-questions.md#q3)）。
 
 ## 4. データフロー（replay モード）
 
@@ -214,7 +214,7 @@ Event::OrderFilled → IPC → Rust UI / Python helper（`ReplaySession.events()
    └─ Strategy.emit_signal → StrategySignal → iced signal layer
 ```
 
-**replay モードの約定判定**: 板履歴がないため、`SimulatedExchange` の matching engine は **直近 TradeTick の last_price ベース**で fill する。指値は `last_price <= limit_price`（買い）/ `>= limit_price`（売り）で fill する単純モデル。これは現実の板状況より楽観的だが、戦略の方向性検証には十分（[spec.md §3.5.3](./spec.md#353-既知のlivereplay差分) で利用者に明示）。
+**replay モードの約定判定**: 板履歴がないため、`SimulatedExchange` の matching engine は **直近 TradeTick の last_price ベース**で fill する。指値は `last_price <= limit_price`（買い）/ `>= limit_price`（売り）で fill する単純モデル。これは現実の板状況より楽観的だが、戦略の方向性検証には十分（spec.md §3.5.3 で利用者に明示）。
 
 **REPLAY 中は立花 `CLMZanKaiKanougaku` HTTP 呼び出しを `order_router.py` で skip する**（D9.6 の誤参照防止コードガード）。
 
@@ -267,7 +267,7 @@ class MyStrategy(Strategy):
         ...
 ```
 
-**禁止メソッド（[spec.md §3.5.2](./spec.md#352-戦略コード規約)）**:
+**禁止メソッド（spec.md §3.5.2）**:
 - `on_order_book_*` — replay で板を作らないため
 - `on_quote_tick` — 同上
 
@@ -278,7 +278,7 @@ class MyStrategy(Strategy):
 D4 の写像。N1 では実行モデルを 2 経路に分け、どちらでも仮想時刻 `tick.ts_event` の独立性を保つ。
 
 - **headless / 決定論性検証**: 既存の `BacktestEngine.run(start, end)` 自走をそのまま使う（N0.6 / N1.9 の wall clock 非参照テストはこの経路で維持）
-- **UI 駆動 viewer**: streaming=True ループ（[Tpre.1 spike](./implementation-plan.md#tpre1-clock-注入-feasibility-プロトタイプh4--完了-2026-04-26) 案 A）を採用し、bar/tick を 1 件ずつ `add_data([item])` → `run(streaming=True)` → `clear_data()` で進める
+- **UI 駆動 viewer**: streaming=True ループ（[Tpre.1 spike](../../roadmap/nautilus-trader/implementation-plan.md#tpre1-clock-注入-feasibility-プロトタイプh4--完了-2026-04-26) 案 A）を採用し、bar/tick を 1 件ずつ `add_data([item])` → `run(streaming=True)` → `clear_data()` で進める
 - **`SetReplaySpeed` の作用範囲**: streaming ループ間の sleep のみを操作する。pacing 式は D7 の
 
   ```
@@ -310,5 +310,5 @@ Python: nautilus_trader + jquants_loader + 既存 venue worker + narrative store
 ```
 
 - nautilus 関連コードは `engine-client` IPC を介さず直接 Python から叩けるよう、`engine_runner.py` に CLI / library 二系統のエントリを切る
-- 立花 Phase 1 の tkinter ログイン UI は **subprocess 隔離経由**で再利用（[tachibana/architecture.md §7.3](../specs/venues/tachibana/architecture.md#73-プロセスモデル-ログインヘルパー-subprocess)）
+- 立花 Phase 1 の tkinter ログイン UI は **subprocess 隔離経由**で再利用（[tachibana/architecture.md §7.3](./tachibana-adapter.md#73-プロセスモデル-ログインヘルパー-subprocess)）
 - J-Quants ローダは Rust に依存しないので Python 単独モードで完全に独立して動く

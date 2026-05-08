@@ -10,9 +10,9 @@ source_commit: 236c0d2
 
 > **Phase 8（2026-05-03 完了）注記**: Phase 1（読み取り基盤）は完了済み。Phase 8 で Rust HTTP API（ポート 9876）が全廃され、再ログイン経路は IPC `Command::RequestVenueLogin`（GUI）または Python helper `LiveSession.login()`（スクリプト・E2E）に統一された。本計画内で言及されている `tests/e2e/tachibana_relogin_after_cancel.sh` の HTTP API skip ゲート（T35-U5）は Phase 8 で pytest 移行により消滅、`scripts/run-replay-debug.sh` / `scripts/replay_dev_load.sh`（HTTP 9876 依存）は廃止された。
 
-親計画 [docs/specs/data-engine/implementation-plan.md](../specs/data-engine/implementation-plan.md) のフェーズ 6 完了後、または並行で着手する追加トラックとして位置づける。
+親計画 [docs/specs/data-engine/implementation-plan.md](../data-engine/implementation-plan.md) のフェーズ 6 完了後、または並行で着手する追加トラックとして位置づける。
 
-> **不変条件 ID ↔ test 関数名対応は [`docs/specs/venues/tachibana/invariant-tests.md`](./invariant-tests.md) を正本とする**（本ファイル内の各章で言及される不変条件 ID の test 紐付けは同表を参照）。
+> **不変条件 ID ↔ test 関数名対応は `docs/specs/venues/tachibana/invariant-tests.md` を正本とする**（本ファイル内の各章で言及される不変条件 ID の test 紐付けは同表を参照）。
 
 ## フェーズ T0: 既存型棚卸し + 仕様凍結 + スキーマ拡張（2〜3 日）
 
@@ -24,26 +24,26 @@ source_commit: 236c0d2
 - [x] `git grep -nE "MarketKind::(Spot|LinearPerps|InversePerps)"` で網羅 match の箇所を全部リストアップ（`exchange` / `engine-client` / `data` / `src` 配下）
 - [x] `Ticker::new` (`exchange/src/lib.rs::Ticker::new`) の `assert!(ticker.is_ascii())` を確認し、`130A0` 等が通ることをユニットテストで実機確認
 - [x] **既存 `Timeframe` の serde 形式は `"D1"`（変種名）であることを確認済み**（F-m2、F-H1）。`exchange/src/lib.rs::Timeframe` は `#[derive(Serialize, Deserialize)]` のみで `#[serde(rename = ...)]` 無し。`Display` は `"1d"` を返すが serde は別系統。**T0.2 で `#[serde(rename = "1d")]` 等の rename 属性を全変種に追加する必要がある**（既存暗号資産 venue 経路で IPC を通っている場合は変換層の有無を grep で先に棚卸し）
-- [x] **`qty_in_quote_value` 呼出箇所の棚卸し**（F-H4、H1 修正）: [`exchange/src/adapter.rs::qty_in_quote_value`](../../../exchange/src/adapter.rs) が正本。呼出は **9 箇所**（path::symbol 全数表は [inventory-T0.md §4](./inventory-T0.md#4-qty_in_quote_value-呼出箇所f-h4)）。`MarketKind::Stock => price * qty` を enum 内部分岐で強制すれば呼出側コード変更不要
+- [x] **`qty_in_quote_value` 呼出箇所の棚卸し**（F-H4、H1 修正）: [`exchange/src/adapter.rs::qty_in_quote_value`](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/adapter.rs) が正本。呼出は **9 箇所**（path::symbol 全数表は inventory-T0.md §4）。`MarketKind::Stock => price * qty` を enum 内部分岐で強制すれば呼出側コード変更不要
 - [x] **`EngineEvent::Disconnected` の shape は確認済み**（F-H2）: `engine-client/src/dto.rs::EngineEvent::Disconnected` で既に `{ venue, ticker, stream, market, reason: Option<String> }`。**DTO 追加は不要**、`reason: "market_closed"` は文字列規約として `events.json` schema に記載するだけで足りる
-- [x] `ProcessManager` ([engine-client/src/process.rs](../../../engine-client/src/process.rs)) の proxy 保持パターンを読み、credentials 保持の **mutex / Arc 戦略を T0.2 のうちに確定**（F-m4）。proxy が `Arc<Mutex<Option<Proxy>>>` ならそれに揃える、`watch::channel` ならそれに揃える、と決め切る
+- [x] `ProcessManager` ([engine-client/src/process.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/process.rs)) の proxy 保持パターンを読み、credentials 保持の **mutex / Arc 戦略を T0.2 のうちに確定**（F-m4）。proxy が `Arc<Mutex<Option<Proxy>>>` ならそれに揃える、`watch::channel` ならそれに揃える、と決め切る
 - [x] `src/screen/` の現在構造を確認し、立花ログイン UI の追加先（既存 `login.rs` 拡張 or 新ファイル）を T0 のうちに暫定確定（F-m3）
 - [x] `python/tests/test_*_rest.py` のモック方式（`pytest-httpx` / `HTTPXMock`）が他 venue で稼働中であることを確認
 - [x] [docs/specs/data-engine/schemas/](../specs/data-engine/schemas/) の `commands.json` / `events.json` が実在することを確認（実在を確認済み）
-- [x] ✅ **FD 情報コード一覧確定（F-M2a、F-H3、B3 クローズ、2026-04-26）**: `.claude/skills/tachibana/manual_files/api_web_access.xlsx` 内の実 FD frame サンプル（2022-03-15）から全キー名を実値で確認。旧暫定名 `GAK/GBK/GAS/GBS`（→ 実: `GAP/GBP/GAV/GBV`）・`DPP_TIME`（→ 実: `DPP:T`）・`DDT`（→ 実: 共通ヘッダ `p_date`）はすべて誤りだったため訂正済み。気配本数は旧想定 5 本 → **実際は 10 本**。確定コード一覧: [inventory-T0.md §11.2.b](./inventory-T0.md#112b-fd-frame-data-key)・data-mapping.md §3/§4 を同日更新済み。**T5 着手ブロッカー解除**。
+- [x] ✅ **FD 情報コード一覧確定（F-M2a、F-H3、B3 クローズ、2026-04-26）**: `.claude/skills/tachibana/manual_files/api_web_access.xlsx` 内の実 FD frame サンプル（2022-03-15）から全キー名を実値で確認。旧暫定名 `GAK/GBK/GAS/GBS`（→ 実: `GAP/GBP/GAV/GBV`）・`DPP_TIME`（→ 実: `DPP:T`）・`DDT`（→ 実: 共通ヘッダ `p_date`）はすべて誤りだったため訂正済み。気配本数は旧想定 5 本 → **実際は 10 本**。確定コード一覧: inventory-T0.md §11.2.b・data-mapping.md §3/§4 を同日更新済み。**T5 着手ブロッカー解除**。
 
   > ~~**明示ゲート規約（HIGH、ユーザー指摘ラウンド 7）**~~: ✅ 解消済み（2026-04-26）。T5 着手禁止は解除。
 
 ### T0.2 型・スキーマ追加
 
-- [x] `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` を [exchange/src/adapter.rs](../../../exchange/src/adapter.rs) に追加
+- [x] `Venue::Tachibana` / `MarketKind::Stock` / `Exchange::TachibanaStock` を [exchange/src/adapter.rs](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/adapter.rs) に追加
 - [x] **`MarketKind::Stock` の `qty_in_quote_value` は enum 内部分岐で `price * qty` 強制**（F-M3b）。`size_in_quote_ccy` 引数を見ない実装にし、`Stock` 用ユニットテストで誤呼出（`size_in_quote_ccy=true`）でも常に `price*qty` になることを確認
 - [x] **`secrecy = "0.8"` を `engine-client` / `data` の Cargo.toml に追加**（F-B1）。`SecretString` は **Rust 内部保持型**でのみ使い、IPC 送出時は `expose_secret()` 経由でプレーン `String` 化した送出専用 DTO（後述 `*Wire`）に写像する
 - [x] **`zeroize = "1"` を `engine-client` の `Cargo.toml` に追加し、Wire 型 secret フィールドを `Zeroizing<String>` で保持（M4、MEDIUM-B2-2）**: **現状の `engine-client/src/dto.rs::TachibanaCredentialsWire` / `engine-client/src/dto.rs::TachibanaSessionWire` は共にプレーン `String` でマージ済み**。`Zeroizing<String>` 化は型置換だけで足りる。**実装時の修正（M4-impl）**: zeroize 1.8 の `Zeroizing<T>` は `Serialize`/`Deserialize` を `Deref` 透過では提供しない（`zeroize` クレートの `serde` feature が必須）。本リポジトリでは workspace `Cargo.toml` で `zeroize = { version = "1.8", features = ["serde"] }` を有効化して採用する（旧記述の「serde feature 不要」は誤り）。Wire DTO の field 型を `String` → `Zeroizing<String>` に置換するだけで、JSON 出力フォーマットは不変。 `TachibanaCredentialsWire.password` / `TachibanaSessionWire.url_*` を `Zeroizing<String>` で持ち `Drop` 時のゼロ化を保証。Wire 値はスコープ最小化（serialize 直後に明示 drop）の規約を `engine-client/src/backend.rs` の `SetVenueCredentials` 送信パスに `// SAFETY-LITE: Wire は serialize 後即 drop — Zeroizing が Drop 時にゼロ化する` コメントで記す。テスト: `engine-client/tests/wire_dto_drop_scope.rs` に (a) `std::mem::needs_drop::<TachibanaCredentialsWire>()` が `true`、(b) `SetVenueCredentials` 送信関数が Wire 値を値渡し（move）で受け取ること（`&` 参照渡し禁止）を確認。ヒープ実メモリのゼロ化検証は OS 依存で不安定なため省略
 - [x] `QuoteCurrency` enum を新設（`Usdt`/`Usdc`/`Usd`/`Jpy`、`Copy + Hash + Eq + Serialize + Deserialize`）。**`Default` は実装しない**（F-M6a）。`&'static str` は使わない（serde ラウンドトリップ不可）
 - [x] `TickerInfo` に `#[serde(default)]` 付きで `lot_size: Option<u32>` と `quote_currency: Option<QuoteCurrency>` を追加（F13/F-M6a）。`TickerInfo` の `Copy` 制約を壊さない（`String` 追加禁止）。**`None` 復元時は読み込み層で `Exchange::default_quote_currency()` を使って `Some(_)` に正規化**し、UI フォーマッタへは常に `Some` で渡す
 - [x] `Exchange::default_quote_currency(&self) -> QuoteCurrency` を `exchange/src/adapter.rs` に実装（暗号資産 venue は USDT/USDC、`TachibanaStock` は `Jpy`）
-- [x] **既存永続 state の serde 互換性確認**（F13/F-M4）— [exchange/tests/ticker_info_state_migration.rs](../../../exchange/tests/ticker_info_state_migration.rs) で旧 `TickerInfo` payload (lot_size / quote_currency 欠如) が `serde(default)` 経由で読めることを検証。Hash 影響範囲は inventory-T0.md §1.2 にて「永続化されているのは `data/src/layout/pane.rs` の `ticker_info` フィールドのみ、`HashMap` キーは in-memory のみ」と確定済み: dashboard 設定ファイル / `state.rs` に `TickerInfo` が保存されているか `git grep` で特定。`#[serde(default)]` で missing field が読めることに加え、**`Hash` 値変化により既存 `HashMap<TickerInfo, _>` のキー突合が壊れないか**を実機テスト。受け入れ条件に「旧 `state.json` を起動 → pane 復元 → ticker 表示」を追加
+- [x] **既存永続 state の serde 互換性確認**（F13/F-M4）— [exchange/tests/ticker_info_state_migration.rs](https://github.com/botterYosuke/e-station/blob/main/../exchange/tests/ticker_info_state_migration.rs) で旧 `TickerInfo` payload (lot_size / quote_currency 欠如) が `serde(default)` 経由で読めることを検証。Hash 影響範囲は inventory-T0.md §1.2 にて「永続化されているのは `data/src/layout/pane.rs` の `ticker_info` フィールドのみ、`HashMap` キーは in-memory のみ」と確定済み: dashboard 設定ファイル / `state.rs` に `TickerInfo` が保存されているか `git grep` で特定。`#[serde(default)]` で missing field が読めることに加え、**`Hash` 値変化により既存 `HashMap<TickerInfo, _>` のキー突合が壊れないか**を実機テスト。受け入れ条件に「旧 `state.json` を起動 → pane 復元 → ticker 表示」を追加
 - [x] **日本語銘柄名の運搬経路を確定**: `EngineEvent::TickerInfo.tickers[*]` は `Vec<serde_json::Value>` のまま（`engine-client/src/dto.rs::EngineEvent::TickerInfo`）であり、Python 側が `display_name_ja` キーを各 ticker dict に詰めれば追加 schema 不要で運搬可能。Rust UI 側は将来 `HashMap<Ticker, TickerDisplayMeta>` で別管理する方針を inventory に確定（実 UI 配線は T4 で実装）
 - [x] ✅ **類似プロジェクト `C:\Users\sasai\Documents\flowsurface` の先行実装を参考にする（M9 決定）** — **本タスクは設計確定が deliverable**であり、実装配線は T4 に委譲する規約として T0.2 で閉じる:
   - `flowsurface/exchange/src/adapter/tachibana.rs::MasterRecord` 型を踏襲し、Python 側 `tachibana_master.py` のレコード型に **`sIssueName` / `sIssueNameRyaku` / `sIssueNameKana` / `sIssueNameEizi` の 4 種**を全て保持する（Phase 1 で全部使わなくても、後続フェーズの検索 UI で活きる）
@@ -57,7 +57,7 @@ source_commit: 236c0d2
   - **2 層 DTO 構造**（F-B2、**C2 修正反映**）: 内部保持型 `TachibanaCredentials`/`TachibanaSession`（`data` クレート、`SecretString` 保持、`Debug` 手実装マスク、`Serialize` 持たない、`Deserialize` のみ keyring 復元用に持つ） / 送出用 Wire DTO（`engine-client` クレート、プレーン `String`、`Debug` 手実装マスク）は **方向別に trait を分離**する: **`TachibanaCredentialsWire` は Rust→Python 一方向のため `Serialize` のみ**。**`TachibanaSessionWire` は `SetVenueCredentials`（Rust→Python）と `VenueCredentialsRefreshed`（Python→Rust）の双方向に出現するため `Serialize + Deserialize` の両方を派生**（architecture.md §2.1 C2 修正）。旧記述「Wire は `Deserialize` を持たない」は誤りであり、この行の旧表記を参照したコードに `Deserialize` を付け忘れないよう注意。送信時 `From<&TachibanaCredentials> for TachibanaCredentialsWire` で `expose_secret()` 経由の写像を 1 箇所に集約し、`Wire` は serialize 直後に drop
   - `TachibanaSessionWire.expires_at_ms: Option<i64>`（F-B3）。立花 API は明示的な期限を返さないため `None` を許容、`None` のとき起動時 `validate_session_on_startup` 必須
   - `EngineEvent::VenueReady { venue: String, request_id: Option<String> }`（**冪等イベント**、`request_id` は `SetVenueCredentials` との相関用。UI は初回 / 再送を区別しない）
-  - `EngineEvent::VenueError { venue: String, request_id: Option<String>, code: String, message: String }` — 旧 `EngineError{code:"tachibana_session_expired"}` は廃止、`VenueError{code:"session_expired"}` に統一。**`message` は Python 側が user-facing 文言として詰める**（Rust 側は描画のみ、F-Banner1）。`code` の許容値（`session_expired` / `unread_notices` / `phone_auth_required` / `login_failed` / `ticker_not_found` …）は [architecture.md §6](./architecture.md#6-失敗モードと-ui-表現) の表に従い、`events.json` schema にも enum で列挙する
+  - `EngineEvent::VenueError { venue: String, request_id: Option<String>, code: String, message: String }` — 旧 `EngineError{code:"tachibana_session_expired"}` は廃止、`VenueError{code:"session_expired"}` に統一。**`message` は Python 側が user-facing 文言として詰める**（Rust 側は描画のみ、F-Banner1）。`code` の許容値（`session_expired` / `unread_notices` / `phone_auth_required` / `login_failed` / `ticker_not_found` …）は architecture.md §6 の表に従い、`events.json` schema にも enum で列挙する
   - `EngineEvent::VenueCredentialsRefreshed { venue: String, session: TachibanaSessionWire }`
   - `EngineEvent::VenueLoginStarted { venue: String, request_id: Option<String> }` — Python が tkinter ログインヘルパーを spawn したことを Rust に通知（F-Login1、architecture.md §7.5）
   - `EngineEvent::VenueLoginCancelled { venue: String, request_id: Option<String> }` — ユーザーがダイアログをキャンセルした
@@ -68,10 +68,10 @@ source_commit: 236c0d2
 - [x] **venue-ready ゲート方針を固定** — `VenueReady` イベントを `engine-client::dto::EngineEvent` に追加済み（idempotent、`request_id` 相関）。実 UI ゲートと resubscribe 集約は T3 で実装: `Ready` と `VenueReady` の役割を分離し、立花 venue の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` を `VenueReady` 後まで待たせる。**`VenueReady` は「session 検証完了」のみを意味し、マスタ初期 DL 完了は含まない**（F12）。マスタ取得完了判定は `ListTickers` 応答到着で行う。`VenueReady` 再受信時に既存購読の重複再送が起きないよう `ProcessManager` 1 箇所で resubscribe を集約
 - [x] **Python の保存先パス受け渡し方法を決定** — `stdin` 初期 payload に `config_dir` / `cache_dir` を追加する方針で暫定確定（軽量・既存 stdin payload `{port, token}` の自然な拡張）。実 wire-up は T4（マスタキャッシュ着手時）で実装: `stdin` 初期 payload 拡張（`{port, token, config_dir, cache_dir}`）を採用方針として暫定固定（軽量・既存パスの拡張で済む）。最終 OK は T0 レビューで
 - [x] **env 変数名を venue prefix で確定（Phase 1 採用は 3 つ）**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO`。`DEV_TACHIBANA_SECOND_PASSWORD` は **Phase 1 では採用しない**（F-H5: 第二暗証番号は収集も保持もしない方針との整合）。Python 実装側でも `os.getenv("DEV_TACHIBANA_SECOND_PASSWORD")` 系の呼出を書かないことを規約とする。Phase 2 着手時に env 名を改めて確定する。SKILL.md S2/S3 の旧 `DEV_USER_ID` 系（架空ファイル前提）は本フェーズで SKILL.md 側を書き換える
-- [x] [docs/specs/data-engine/schemas/commands.json](../specs/data-engine/schemas/commands.json) / `events.json` / `CHANGELOG.md` 更新
+- [x] [docs/specs/data-engine/schemas/commands.json](https://github.com/botterYosuke/e-station/blob/main/roadmap/specs/data-engine/schemas/commands.json) / `events.json` / `CHANGELOG.md` 更新
 - [x] **`request_id` の規約確定（LOW-1、F-L7、M1 修正、MEDIUM-4 修正）**: `Command::SetVenueCredentials` / `RequestVenueLogin` の `request_id` は **UUIDv4 文字列（RFC 4122）固定**。最大長 36 文字。Python 側は `uuid.uuid4().hex` ではなく `str(uuid.uuid4())` を使う（hyphen 入り）。`commands.json` / `events.json` の `$defs/RequestId`（および nullable 用 `RequestIdNullable`）に `pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` を記載済み（schema 1.2）。Rust 側の `oneshot::Sender` / `Notify` 索引は `request_id` 単位で行う。
   - **衝突時の挙動（MEDIUM-4 修正）**: 同一 request_id の二重送信は **`oneshot::Sender` を `HashMap<request_id, oneshot::Sender<()>>` に `try_insert` する箇所で reject** する（`ProcessManager` の credentials setter ではなく、`SetVenueCredentials` 送信後に waiter を登録するヘルパー関数内）。`try_insert` が `Err(OccupiedEntry)` を返したら caller が `request_id` を生成し直す（`Err(DuplicateRequestId)` を返す）。`set_venue_credentials` setter は credentials を `Vec` に書き込むだけであり、request_id の衝突判定責務を持たない（roles が異なる）。「最後送信が勝ち、古い waiter は drop」案は採用しない（`oneshot::Sender` drop 時の `RecvError` を `VenueError` に変換する経路まで設計しないと caller hang or panic を生むため）
-- [x] **マスタキャッシュ路 path 受け渡し方式の確定（MEDIUM-4）**: `stdin` 初期 payload 拡張案を**確定**（暫定固定 → 確定済み）。commands.json には影響しない（stdin 形式は別領域）。[engine-client/src/process.rs](../../../engine-client/src/process.rs) の現行 stdin 書込み箇所に `config_dir` / `cache_dir` を追加するパッチは T4 着手時に書く。`dev_tachibana_login_allowed` は T3 で同 stdin payload に追加。本行は T0.2 の確定マークとして閉じ、後続 PR は確定済み方式に従う
+- [x] **マスタキャッシュ路 path 受け渡し方式の確定（MEDIUM-4）**: `stdin` 初期 payload 拡張案を**確定**（暫定固定 → 確定済み）。commands.json には影響しない（stdin 形式は別領域）。[engine-client/src/process.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/process.rs) の現行 stdin 書込み箇所に `config_dir` / `cache_dir` を追加するパッチは T4 着手時に書く。`dev_tachibana_login_allowed` は T3 で同 stdin payload に追加。本行は T0.2 の確定マークとして閉じ、後続 PR は確定済み方式に従う
 - [x] **SKILL.md の同期（F-m5、唯一の正本タスク）**: `.claude/skills/tachibana/SKILL.md` の以下を本計画ベースで書き換える。README.md / spec.md 側の同種記述は本タスクへリンクする形に簡約済み:
   - L8 警告ブロック（旧 env 名と架空ファイル参照）
   - R3/R4/R6/R10
@@ -79,7 +79,7 @@ source_commit: 236c0d2
   - S1〜S6（架空 `src/screen/login.rs` / `src/connector/auth.rs` / `src/replay_api.rs` 参照）
   - 環境変数名: `DEV_USER_ID` 系 → `DEV_TACHIBANA_*`
   - 実装未完の参照は「将来実装予定（T3 で新設）」と但し書き
-- [x] **`quote_currency` 正規化の実装位置を確定し、テスト追加（M1 再オープン）**: 正規化は **`TickerInfo::normalize_after_load()`（[exchange/src/lib.rs](../../../exchange/src/lib.rs)）に集約**。`Option<QuoteCurrency>` で `None` を返す deserialize 経路は (a) `data::layout::pane` の `saved-state.json` ロード時、(b) `engine_client::backend` で IPC 受信した `TickerInfo` を `exchange::TickerInfo` に詰め直す経路、の 2 箇所だが、(b) はすでに `TickerInfo::new()` 経由で `Some(default)` を埋めるため fold 不要。(a) のみ `normalize_after_load()` を呼ぶ規約とし、メソッドの doc コメントに 2 経路の関係を明示。受入: `exchange/tests/ticker_info_state_migration.rs` に「旧 payload (`quote_currency` キー欠落) → `normalize_after_load()` 後に `Some(Jpy)` / `Some(Usdt)` 等の venue 既定値が入っている」ケースを 2 件 + 既存値保持 1 件追加済み
+- [x] **`quote_currency` 正規化の実装位置を確定し、テスト追加（M1 再オープン）**: 正規化は **`TickerInfo::normalize_after_load()`（[exchange/src/lib.rs](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/lib.rs)）に集約**。`Option<QuoteCurrency>` で `None` を返す deserialize 経路は (a) `data::layout::pane` の `saved-state.json` ロード時、(b) `engine_client::backend` で IPC 受信した `TickerInfo` を `exchange::TickerInfo` に詰め直す経路、の 2 箇所だが、(b) はすでに `TickerInfo::new()` 経由で `Some(default)` を埋めるため fold 不要。(a) のみ `normalize_after_load()` を呼ぶ規約とし、メソッドの doc コメントに 2 経路の関係を明示。受入: `exchange/tests/ticker_info_state_migration.rs` に「旧 payload (`quote_currency` キー欠落) → `normalize_after_load()` 後に `Some(Jpy)` / `Some(Usdt)` 等の venue 既定値が入っている」ケースを 2 件 + 既存値保持 1 件追加済み
 - [x] **`VenueCredentialsPayload::venue_tag()` メソッド化（M2 再オープン、HIGH-B2-2）**: 現状 `engine-client/src/process.rs::set_venue_credentials` の retain ロジックが variant 列挙ベースで、将来 venue 追加時にコンパイル網羅 OK のまま論理破綻する。**緊急度**: 現実装は variant 列挙ベースで、第 2 venue（例えば SBI / 楽天等）を追加した瞬間に retain 述語が「同 variant 以外を全部 drop」する論理バグへ転落する予備軍。Phase 1 の Tachibana 単一 venue では症状が出ないが、設計上の地雷であり**先行修正必須**。`impl VenueCredentialsPayload { pub fn venue_tag(&self) -> &'static str }` を追加し、`set_venue_credentials` を `store.retain(|p| p.venue_tag() != payload.venue_tag())` に書換。同時に Wire 構造に対する `Hash + Eq` は不要（venue 名 1 文字列で識別）。**受け入れ**: `engine-client/src/process.rs` 単体テストで (a) 2 種類の venue payload（`Tachibana` + 仮の 2 つ目 variant、テスト用 `#[cfg(test)]` で stub variant を追加してよい）を順に setter に渡すと `store.len() == 2` になること、(b) 同一 venue payload を 2 回投入すると `store.len() == 1` のまま（最後勝ち）であることを assert
 - [x] **`python/engine/schemas.py` の同期確認（L8、M6 修正）**: `commands.json` / `events.json` 更新と同期して、Python 側 pydantic モデルが追加済みであること。実測: `grep -c "VenueReady\|VenueError\|VenueCredentialsRefreshed\|VenueLoginStarted\|VenueLoginCancelled\|RequestVenueLogin\|VenueCredentialsPayload" python/engine/schemas.py` → **14** (閾値 7 以上を満足)。tag フィールド `venue` の文字列値が両側で一致するテスト追加は T3 の `test_tachibana_login.py` に含める
 
@@ -149,7 +149,7 @@ source_commit: 236c0d2
 - [x] ✅ `p_no` 採番ヘルパ（**asyncio 単一スレッド前提の単純カウンタ**、Unix 秒初期化、Lock 不要、F18）と `current_p_sd_date()`（JST 固定、SKILL.md R4） — `tachibana_helpers.PNoCounter` / `current_p_sd_date()` 実装済み、テスト緑。
   - **既知バグ回避**: SKILL.md S6 表に「セッション復元と並行で走る history fetch が逆転して `p_no <= 前要求.p_no` エラー」が記載されている。Python 移植版では **session 復元（`SetVenueCredentials` 処理）の完了前に他リクエストを発行しない**直列化を `TachibanaWorker` 内で強制し、起動レース回帰テストを 1 件追加する
   - **直列化ゲートは T3 繰越**: `TachibanaWorker` クラス自体が T3 で `tachibana.py` に新設されるため、ゲート実装はそこで一緒に書く。T2 では `StartupLatch` で同等の単一実行保証を `validate_session_on_startup` に対して既に入れている。
-- [x] ✅ エラー判定ヘルパ `check_response(payload) -> None | TachibanaError`（[SKILL.md R6](../../../.claude/skills/tachibana/SKILL.md)、`p_errno` 空文字＝正常を含む） — 実装済み、`p_errno=""`/`"0"` 両ケースのテスト緑。
+- [x] ✅ エラー判定ヘルパ `check_response(payload) -> None | TachibanaError`（[SKILL.md R6](https://github.com/botterYosuke/e-station/blob/main/.claude/skills/tachibana/SKILL.md)、`p_errno` 空文字＝正常を含む） — 実装済み、`p_errno=""`/`"0"` 両ケースのテスト緑。
 - [x] ✅ **制御文字 reject（F-M6b）**: `tachibana_url._FORBIDDEN_CONTROL_CHARS`（U+0000..U+001F）で `build_request_url` / `build_event_url` 双方が値文字列を pre-check。テスト緑。
 - [x] ✅ **`p_no` 採番の整理（F-L5）— カウンタ層完了 / 直列化ゲートは T3**: 採番カウンタ自体（`PNoCounter`）は T1 で完了。`SetVenueCredentials` 処理中の他リクエスト抑止ゲートは `TachibanaWorker` 新設タイミング（T3）で実装する。本フェーズの責務は「カウンタは Lock 不要であることの規約化」までで完了。
 - [x] ✅ **受け入れ**: 上記モジュールを単体テストでカバー、サンプルレスポンス（`samples/e_api_login_tel.py/e_api_login_response.txt` ほか）から期待値抽出ができる。REQUEST URL と EVENT URL の差を別テストで検証。`conftest.py` 共通フィクスチャ（HTTPXMock 共通 base URL / WS server fixture）を整備（F-L3）。**実測**: `python/tests/test_tachibana_*.py` 75 件緑（url 16 / codec 14 / helpers 12 / master 19 / auth 14）。
@@ -176,7 +176,7 @@ source_commit: 236c0d2
 > **Tips**:
 > - `pytest-httpx` の `add_response(url=re.compile(...))` で R9 の bespoke percent-encoded クエリを正規表現マッチングできる。クエリ内容は `urllib.parse.unquote(url.split("?",1)[1])` → `json.loads()` で復号。
 > - レスポンス body は **必ず `decode_response_body` 経由（Shift-JIS）**。`Response.text` / `Response.json()` を直接呼ぶと R7 / HIGH-C2 違反。テスト fixture も `payload.encode("shift_jis")` で構築している。
-> - 立花の login response 実例は [`samples/e_api_login_tel.py/e_api_login_response.txt`](../../../.claude/skills/tachibana/samples/e_api_login_tel.py/e_api_login_response.txt)。テスト固定値はこれを下敷きに `e_api_v4r8` パスへ置換。
+> - 立花の login response 実例は [`samples/e_api_login_tel.py/e_api_login_response.txt`](https://github.com/botterYosuke/e-station/blob/main/../.claude/skills/tachibana/samples/e_api_login_tel.py/e_api_login_response.txt)。テスト固定値はこれを下敷きに `e_api_v4r8` パスへ置換。
 >
 > **レビュー反映 (2026-04-25)**:
 > - **HIGH (p_no 単調性)**: `login()` / `validate_session_on_startup()` の `p_no: int` パラメータを廃止し、`p_no_counter: PNoCounter` を**必須キーワード**化。各呼出で `.next()` を 1 回消費するため、起動時再ログインや retry で `p_no` を再送する事故を構造的に排除（R4）。回帰防止テスト `test_login_consumes_p_no_counter_so_retries_are_monotonic` 追加。
@@ -506,10 +506,10 @@ source_commit: 236c0d2
 - [x] ✅ **L2 修正（デモ固定ラベル文言）を `tachibana_login_dialog.py` に実装**: `prefill.allow_prod_choice == false` のとき本番ラジオを非表示にし、代わりに「**デモ環境固定（本番接続には `TACHIBANA_ALLOW_PROD=1` env が別途必要です）**」ラベルを 1 行表示する。`tachibana_login_flow.py` は起動時に同旨を `tracing::info!` で 1 行出す（architecture.md §7.4 L2 修正対応）
 - [x] ✅ **tkinter ヘルパー異常終了時の挙動規定（LOW-2、F-L8）**: `tachibana_login_flow.py` の責務に以下を明記する。(a) ヘルパー stdout EOF（0 byte で閉じる）→ `VenueError{code:"login_failed", message:"ログインヘルパーが応答せず終了しました"}`。(b) ヘルパー非ゼロ exit → 同上 + `stderr` を `tracing::error!` に転記（creds は混じらない前提）。(c) 全体タイムアウト 10 分（`asyncio.wait_for`）→ ヘルパー `terminate()` 後 5 秒で `kill()`、`VenueError{code:"login_failed", message:"ログイン操作がタイムアウトしました"}`。(d) WM 強制クローズ（窓の × ボタン）はヘルパー側 `WM_DELETE_WINDOW` バインドで `{"status":"cancelled"}` を出してから exit するため `VenueLoginCancelled` 経路で OK
 - [x] ✅ **tkinter ヘルパーの単体テスト**: `subprocess.run([sys.executable, "-m", ..., dialog])` を pytest から呼び、`headless=true` の起動引数で実 GUI を出さずにバリデーション規則だけテストできる「テスト専用モード」を `tachibana_login_dialog.py` に実装。実 GUI 確認は `pytest -m gui` で手動
-- [x] ✅ [engine-client/src/backend.rs](../../../engine-client/src/backend.rs) で `SetVenueCredentials` 送信パスを実装（既存 `SetProxy` パターン踏襲、`backend.rs` の実在は `ls engine-client/src/` で確認済み）— `engine-client/src/process.rs` の `start()` で `SetProxy` の直後に `SetVenueCredentials` を送る経路で実装済（T0.2 で土台、T3 でクレデンシャル供給を main.rs から keyring 経由で wire-up）
-- [x] ✅ **`VenueError.code` → severity / アクション マッピングの集約（MEDIUM-5、F-L9）**: Rust 側で `code` 文字列 → `(Severity, ActionButton)` を返すテーブル駆動関数を [engine-client/src/error.rs](../../../engine-client/src/error.rs) に集約（例: `pub fn classify_venue_error(code: &str) -> VenueErrorClass`）。Banner レンダラはこの関数の戻り値だけを参照する。未知 code → `(Severity::Error, ActionButton::Hidden)` で fail-safe。テスト: [architecture.md §6](./architecture.md#6-失敗モードと-ui-表現) 表の全 code を網羅したテーブルテスト
-- [x] ✅ [engine-client/src/process.rs](../../../engine-client/src/process.rs) に **Tachibana credentials の保持と再送**を追加し、managed mode の再起動時に `SetProxy -> SetVenueCredentials -> VenueReady -> resubscribe` を一貫して実行する
-- [x] ✅ [src/main.rs](../../../src/main.rs) 起動シーケンスに「keyring 読込 → `ProcessManager` / 接続オブジェクトへ creds 注入 → SetVenueCredentials → VenueReady 待ち」を追加
+- [x] ✅ [engine-client/src/backend.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/backend.rs) で `SetVenueCredentials` 送信パスを実装（既存 `SetProxy` パターン踏襲、`backend.rs` の実在は `ls engine-client/src/` で確認済み）— `engine-client/src/process.rs` の `start()` で `SetProxy` の直後に `SetVenueCredentials` を送る経路で実装済（T0.2 で土台、T3 でクレデンシャル供給を main.rs から keyring 経由で wire-up）
+- [x] ✅ **`VenueError.code` → severity / アクション マッピングの集約（MEDIUM-5、F-L9）**: Rust 側で `code` 文字列 → `(Severity, ActionButton)` を返すテーブル駆動関数を [engine-client/src/error.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/error.rs) に集約（例: `pub fn classify_venue_error(code: &str) -> VenueErrorClass`）。Banner レンダラはこの関数の戻り値だけを参照する。未知 code → `(Severity::Error, ActionButton::Hidden)` で fail-safe。テスト: architecture.md §6 表の全 code を網羅したテーブルテスト
+- [x] ✅ [engine-client/src/process.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/process.rs) に **Tachibana credentials の保持と再送**を追加し、managed mode の再起動時に `SetProxy -> SetVenueCredentials -> VenueReady -> resubscribe` を一貫して実行する
+- [x] ✅ [src/main.rs](https://github.com/botterYosuke/e-station/blob/main/../src/main.rs) 起動シーケンスに「keyring 読込 → `ProcessManager` / 接続オブジェクトへ creds 注入 → SetVenueCredentials → VenueReady 待ち」を追加
 - [x] ✅ `VenueCredentialsRefreshed` を受けて keyring session を更新する処理を Rust 側に実装（起動時再ログイン成功時のみ発火）
   - **`VenueCredentialsRefreshed` None フィールドのセマンティクス（C-H2）**: `user_id` / `password` / `is_demo` が `None` のとき、Rust 側は keyring の該当フィールドを**変更しない（上書きしない）**セマンティクス。`process_creds_refresh_hook.rs` のテストに「`password=None` で `VenueCredentialsRefreshed` を受けたとき、既存 keyring の password が保持されること（上書きされないこと）」を assert するケースを追加すること。
 - [x] (T3.5 Step C-F で着地, → implementation-plan-T3.5.md §3) 立花 venue 用の metadata / subscribe 要求を `VenueReady` まで抑止する UI ゲートを追加（VenueState FSM による venue gating、`tickers_table::exchange_filter_btn` 経路から initial metadata fetch を抑止）
@@ -578,7 +578,7 @@ source_commit: 236c0d2
 
 - [x] ✅ `tachibana_ws.py` — EVENT WebSocket クライアント（`p_evt_cmd=FD,KP,ST,SS,US,EC`、購読は最低でも `FD,KP,ST`）（ソース実態確認 2026-04-26: `python/engine/exchanges/tachibana_ws.py` 445 行。`TachibanaEventWs` クラス・`FdFrameProcessor` クラス・`is_market_open` 関数が実装済み。タイムアウトテスト `test_tachibana_ws_timeout.py` 2 件・WS プロキシテスト `test_tachibana_ws_proxy.py` 3 件も緑）
   - WebSocket URL は `build_event_url(session.url_event_ws, params)` で構築（R2 例外）
-  - 自動 ping 無効化、手動 pong（[SKILL.md ストリーム規約](../../../.claude/skills/tachibana/SKILL.md)）
+  - 自動 ping 無効化、手動 pong（[SKILL.md ストリーム規約](https://github.com/botterYosuke/e-station/blob/main/.claude/skills/tachibana/SKILL.md)）
   - **KP（KeepAlive）frame の処理**: 5 秒周期で届く `p_evt_cmd=KP` を受信タイマーのリセットに使う。**12 秒**（KP 2 回欠損相当 + 2 秒 jitter、spec.md §3.2 と同値）以上 KP も含めて全 frame が来なければ切断とみなして再接続（指数バックオフ）
   - **タイムアウト値の根拠（M2 修正）**: 12 秒 = 5 秒 × 2 + 2 秒（NIC・OS バッファ・GIL ワーストケースを 2 秒で見積もり）。実機計測で jitter 中央値が判明したら更新。Phase 1 では暫定値として固定し、変更時は本行を更新する
   - **タイムアウト発火テスト（M2 修正）**: `python/tests/test_tachibana_ws_timeout.py` に「11 秒沈黙 → 切断しない」「13 秒沈黙 → 切断 → 指数バックオフで再接続」の 2 ケースを追加（`websockets.serve` のローカル mock サーバで KP を任意間隔で投げる）
@@ -614,7 +614,7 @@ source_commit: 236c0d2
 **ゴール**: Python 異常終了・session 切れ・ザラ場跨ぎでも UI が破綻しない。
 
 - [x] ✅ `VenueError{venue:"tachibana", code:"session_expired", message}` → Rust UI バナー（旧 `EngineError{code:"tachibana_session_expired"}` は廃止）。**バナー文言は Python が `message` に詰めて送る**（F-Banner1）。Rust 側は `message` をそのまま描画し、固定文言を持たない。`code` は severity（warning/error）とアクションボタン（再ログイン / 閉じる）の出し分けにのみ使う
-- [x] ✅ **`VenueError.code` の enum 化（T0 schema 追加分の検証）**: Python 側の発出箇所（`tachibana_auth.py` / `tachibana_ws.py` / `tachibana.py`）で使う code 文字列が [architecture.md §6](./architecture.md#6-失敗モードと-ui-表現) の表と一致することを単体テストで検証。Rust 側 `engine-client/src/error.rs` の `VenueErrorCode` enum + `classify_venue_error` が各コードを網羅（全コード explicit test 済み）。未知 code は `(Error, Hidden)` fail-safe に倒す
+- [x] ✅ **`VenueError.code` の enum 化（T0 schema 追加分の検証）**: Python 側の発出箇所（`tachibana_auth.py` / `tachibana_ws.py` / `tachibana.py`）で使う code 文字列が architecture.md §6 の表と一致することを単体テストで検証。Rust 側 `engine-client/src/error.rs` の `VenueErrorCode` enum + `classify_venue_error` が各コードを網羅（全コード explicit test 済み）。未知 code は `(Error, Hidden)` fail-safe に倒す
 - [x] ✅ **バナー文言テスト** `python/tests/test_tachibana_banner_messages.py`（snapshot test、locale=`ja_JP` 固定）: `_MSG_*` 定数の snapshot assert（5 定数）＋ 日本語文字列ガード＋ `UnreadNoticesError` / `depth_unavailable` key phrase ガード実装済み。23 件全 PASS（2026-04-26）
 - [x] ✅ `VenueCredentialsRefreshed` 経由で**起動時再ログイン後**の session を Rust が keyring 更新。`engine-client/tests/process_creds_refresh_hook.rs` の 4 テスト（`patch_in_memory_session_replaces_session_field` / `refresh_hook_callback_fires_with_session` / `medium7_full_variant_overwrites_credentials_triple` / `medium7_from_wire_partial_mixture_falls_back_to_session_only`）で검증済み
 - [x] ✅ Python 再起動シナリオの自動テスト。`engine-client/tests/process_lifecycle.rs` に `test_credentials_resent_in_order_after_restart` を追記済み。コマンド送信順序 `SetProxy → SetVenueCredentials → Subscribe` を assert（2026-04-26）
@@ -624,7 +624,7 @@ source_commit: 236c0d2
 - [x] ✅ `NotImplementedError` → `Error{code:"not_implemented"}` 変換。`tachibana.py::VenueCapabilityError(code="not_implemented")` が server 側で `Error` イベントにマップされることを `test_tachibana_error_mapping.py` で검증済み
 - [x] ✅ 「ProcessManager が credentials を保持していないため再起動後に立花だけ復旧しない」回帰防止統合テスト。`engine-client/tests/process_lifecycle.rs::venue_credentials_are_retained_after_handshake` 追加済み（2026-04-26）
 - [x] ✅ **`VenueReady` 冪等性テスト**: `engine-client/tests/venue_ready_idempotent.rs` を新設（2026-04-26）。`second_venue_ready_does_not_trigger_extra_subscribe`（2 サブスクリプション×2 ready → Subscribe は 2 件のみ）＋ `apply_after_handshake_sends_subscribe_exactly_once_per_subscription` の 2 テスト全 PASS
-- [ ] **受け入れ**: [spec.md §4 受け入れ条件](./spec.md#4-受け入れ条件phase-1-完了の定義) 全て緑（デモ環境での実機確認が必要）
+- [ ] **受け入れ**: [spec.md §4 受け入れ条件](../../specs/venues/tachibana.md#4-受け入れ条件phase-1-完了の定義) 全て緑（デモ環境での実機確認が必要）
 
 ### T6 実装サマリ（2026-04-26）
 
@@ -753,9 +753,9 @@ R2・R3 で発見・解消した追加指摘。
 
 | 完了フェーズ | 解除されるブロッカー | 参照先 |
 |---|---|---|
-| **T2（認証実装）完了** | [order/ Phase O-pre](../specs/order/implementation-plan.md) 着手可能。`tachibana_auth.py` / `tachibana_url.py` / `tachibana_codec.py` が order/ の前提依存ファイル | [order/implementation-plan.md 冒頭](../specs/order/implementation-plan.md) |
-| **T4（マスタキャッシュ）完了** | IPC `stdin` 初期 payload への `config_dir` / `cache_dir` 追加が完了し、Python 側 fast-path が使えるようになる | [architecture.md §2.1.1](./architecture.md) |
-| **Phase 1 全完了（T7 受け入れ緑）** | nautilus N2（`LiveExecutionClient` デモ）の着手条件の一部を満たす | [nautilus_trader/implementation-plan.md Phase N2](../specs/backtest/implementation-plan.md) |
+| **T2（認証実装）完了** | [order/ Phase O-pre](../order/implementation-plan.md) 着手可能。`tachibana_auth.py` / `tachibana_url.py` / `tachibana_codec.py` が order/ の前提依存ファイル | [order/implementation-plan.md 冒頭](../order/implementation-plan.md) |
+| **T4（マスタキャッシュ）完了** | IPC `stdin` 初期 payload への `config_dir` / `cache_dir` 追加が完了し、Python 側 fast-path が使えるようになる | architecture.md §2.1.1 |
+| **Phase 1 全完了（T7 受け入れ緑）** | nautilus N2（`LiveExecutionClient` デモ）の着手条件の一部を満たす | nautilus_trader/implementation-plan.md Phase N2 |
 
 > **IPC schema 連鎖**: 本計画の T0.2 で schema **1.1 → 1.2** に bump する。order/ の Tpre.2（schema 1.2 → 1.3）は本計画の schema 1.2 ラウンドトリップテストが緑になるまで着手しないこと。連鎖の全体像は [docs/plan/README.md §実装トラック詳細](../README.md) を参照。
 
@@ -767,7 +767,7 @@ R2・R3 で発見・解消した追加指摘。
 - 信用建玉一覧、余力照会
 - 分足のクライアント側集計
 - 本番環境の正式サポートと UI からの切替
-- 呼値テーブル動的反映（[data-mapping.md §5](./data-mapping.md#5-ticker-metadata呼値売買単位) (B) or (C) 案）
+- 呼値テーブル動的反映（data-mapping.md §5 (B) or (C) 案）
 - 先物・OP（`CLMIssueMstSak` / `CLMIssueMstOp`）
 - ニュース表示
 
@@ -776,7 +776,7 @@ R2・R3 で発見・解消した追加指摘。
 | リスク | 緩和 |
 | :--- | :--- |
 | 仮想 URL の取り扱いミスでセッションリーク | `SecretString` 型で wrap、`Debug` 派生でマスク。`tools/secret_scan.sh`（T7 で実装）を pre-commit と CI 双方から呼び、`kabuka.e-shiten` リテラル + 仮想 URL ホスト + `sUserId`/`sPassword`/`sSecondPassword` を検出 |
-| **FD 情報コード未確定で Phase 1 縮退（HIGH-2）** ✅ 解消済み（2026-04-26） | `DV` / `GAP*` / `GBP*` / `GAV*` / `GBV*` / `DPP:T` / `p_date` の正式コード名は [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー解消記録b3-クローズ) のいずれか（PDF 同梱 / 実 frame キャプチャ / Phase 縮退）で**T5 着手前に必ず実体解決**（T0.1 ゲート規約 L23–L35 と整合）。T1 codec は確認済み data key (`DPP` のみ) の範囲で先行着手可。縮退案を取った場合は Phase 1 を「日足 kline + ticker stats のみ」に縮退し spec.md §2.1 を改訂。PR 説明文に解決証跡を必須記載（PR テンプレに gate 化） |
+| **FD 情報コード未確定で Phase 1 縮退（HIGH-2）** ✅ 解消済み（2026-04-26） | `DV` / `GAP*` / `GBP*` / `GAV*` / `GBV*` / `DPP:T` / `p_date` の正式コード名は inventory-T0.md §11.3 のいずれか（PDF 同梱 / 実 frame キャプチャ / Phase 縮退）で**T5 着手前に必ず実体解決**（T0.1 ゲート規約 L23–L35 と整合）。T1 codec は確認済み data key (`DPP` のみ) の範囲で先行着手可。縮退案を取った場合は Phase 1 を「日足 kline + ticker stats のみ」に縮退し spec.md §2.1 を改訂。PR 説明文に解決証跡を必須記載（PR テンプレに gate 化） |
 | **マスタからの異常 ticker で Rust panic（HIGH-3）** | `Ticker::new` (`exchange/src/lib.rs::Ticker::new`) は `assert!` で panic する。Python `tachibana_master.py` で「ASCII 28 文字以内・`\|` 不含」を pre-validate して逸脱は skip + warn ログ。Rust IPC 受信側は `EngineEvent::TickerInfo.tickers[*]` の各 ticker dict を `Ticker::new` 呼出前に同条件で再 validate し、不正値は drop（panic させない）|
 | **proxy 環境で `wss://` が張れず立花 venue 完全不可（MEDIUM-2）** | Phase 1 は WS のみ。`SetProxy` 設定時に WS が張れない場合は `VenueError{code:"transport_error"}` を返し、文言で「Phase 1 はプロキシ経由 WebSocket 未対応」を明示。HTTP long-poll fallback は Phase 2 で必須化（[Phase 2 以降](#phase-2-以降参考計画外) に追記） |
 | **FD 板キーが永久に来ない（MEDIUM-6）** | FD 受信開始から 30 秒以内に bid/ask キーが 1 件も来なければ `VenueError{code:"depth_unavailable"}` を発出して polling fallback に倒す。spec.md §3.3 と T5 受け入れに条文を追加 |
