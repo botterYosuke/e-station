@@ -37,6 +37,20 @@ status: skeleton
 - `status: accepted` の ADR は `source_commit:` フロントマターが必須
 - `supersedes:` で参照される ADR が `superseded` になっているかの整合性検査
 
-## 0009 以降の ADR
+## 0009 以降の ADR（起票済み・deferred）
 
-`docs/_migration-ledger.yaml` で `status: deferred` かつ `new_path: docs/decisions/NNNN-...` を持つエントリは ADR 抽出候補（0009〜0133、125 件）として台帳に予約されている。本ステップ（ステップ 4 = ADR 抽出）では **0001〜0008 のみを実装**し、0009 以降は将来の個別 PR で抽出する。抽出時は計画書「採用根拠 ADR の棚卸し」「既存資産の再利用」セクションの出典ポリシー（repo 内 commit 済み artifact 限定）に従い、典拠が確定しないものは `status: deferred` で起票する。
+0009〜0133 の 125 件は `status: deferred` のスタブとして起票済み。各スタブには `old_path`（旧ファイルパス）と `source_commit`（典拠 commit）が記録されており、`git show <source_commit>:"<old_path>"` で原文を参照できる。
+
+本文起票（deferred → accepted 昇格）は原本の内容を精査し Context / Decision / Consequences を記入した上で個別 PR で行う。
+
+### グループ別一覧
+
+| 番号 | グループ | 件数 |
+|------|----------|------|
+| 0009–0015 | floating-windows archive（iced/Bevy 採用検討）| 7 |
+| 0016–0021 | kabusapi archive | 6 |
+| 0022–0044 | menu-and-footer archive | 23 |
+| 0045–0073 | nautilus_trader archive | 29 |
+| 0074–0090 | order archive | 17 |
+| 0091–0110 | python-data-engine archive | 20 |
+| 0111–0133 | tachibana archive | 23 |

@@ -108,6 +108,14 @@ nav:
       - 0006 言語スタック: decisions/0006-language-stack-rust-plus-python.md
       - 0007 Rust 採用: decisions/0007-rust-adoption.md
       - 0008 Python 採用: decisions/0008-python-adoption.md
+      - deferred (0009–0133):
+          - 0009-0015 floating-windows: decisions/0009-readme.md
+          - 0016-0021 kabusapi: decisions/0016-comparison.md
+          - 0022-0044 menu-and-footer: decisions/0022-p5-scenario-in-strategy.md
+          - 0045-0073 nautilus_trader: decisions/0045-fix-issue1-instrument-input-removal.md
+          - 0074-0090 order: decisions/0074-add-positions-pane-plan.md
+          - 0091-0110 python-data-engine: decisions/0091-implementationloop-plan.md
+          - 0111-0133 tachibana: decisions/0111-fix-engine-pipe-non-utf8-2026-04-28.md
 
 markdown_extensions:
   - admonition
