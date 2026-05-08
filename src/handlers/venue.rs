@@ -204,8 +204,14 @@ impl crate::Flowsurface {
                         ))
                     });
 
+                // Issue #25: propagate venue readiness to all dashboards.
+                let main_window_id = self.main_window.id;
+                self.layout_manager
+                    .iter_dashboards_mut()
+                    .for_each(|d| d.set_tachibana_ready(is_ready));
+
                 // Auto-fetch buying power on venue ready if a pane is visible.
-                let main_window = self.main_window.id;
+                let main_window = main_window_id;
                 let auto_fetch_buying_power = if is_ready
                     && self.buying_power_request_id.is_none()
                     && self.active_dashboard().has_buying_power_pane(main_window)
@@ -490,6 +496,11 @@ impl crate::Flowsurface {
                             dashboard::sidebar::Message::TickersTable(m),
                         ))
                     });
+
+                // Issue #25: propagate kabu readiness to all dashboards.
+                self.layout_manager
+                    .iter_dashboards_mut()
+                    .for_each(|d| d.set_kabu_ready(is_ready));
 
                 return ticker_fetch
                     .chain(auto_fetch_orders)
