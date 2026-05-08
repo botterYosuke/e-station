@@ -133,11 +133,12 @@ async fn depth_gap_triggers_snapshot_request_without_closing_stream() {
     // Drain cmd_rx briefly to catch any buffered commands.
     let check = tokio::time::timeout(Duration::from_secs(1), async {
         while let Some(cmd) = cmd_rx.recv().await {
-            if let Some(engine::command::Payload::RequestDepthSnapshot(r)) = cmd.payload {
-                if r.ticker == "BTCUSDT" && r.market == "linear_perp" {
-                    saw_request = true;
-                    break;
-                }
+            if let Some(engine::command::Payload::RequestDepthSnapshot(r)) = cmd.payload
+                && r.ticker == "BTCUSDT"
+                && r.market == "linear_perp"
+            {
+                saw_request = true;
+                break;
             }
         }
     });
