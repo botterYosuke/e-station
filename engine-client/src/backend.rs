@@ -475,6 +475,15 @@ impl VenueBackend for EngineClientBackend {
                         yield Event::Disconnected(exchange, "engine connection closed".to_string());
                         return;
                     }
+                    // Issue #28 層3: Error イベントをサイレント無視せず Disconnected を yield する。
+                    // Subscribe が拒否された場合（例: unknown_venue）もストリームを終了させる。
+                    Ok(EngineEvent::Error { code, message, .. }) => {
+                        log::error!(
+                            "depth_stream subscribe error: code={code} message={message}"
+                        );
+                        yield Event::Disconnected(exchange, message);
+                        return;
+                    }
                     _ => {}
                 }
             }
