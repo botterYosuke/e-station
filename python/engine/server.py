@@ -47,6 +47,8 @@ from engine.exchanges.tachibana_login_flow import (
 from engine.exchanges.kabusapi import KabuStationVenue
 from engine.exchanges.kabusapi_adapter import KabuStationAdapter
 from engine.exchanges.kabusapi_url import resolve_kabu_env
+from engine.exchanges.kabusapi_register import RegisterSet as KabuRegisterSet
+import engine.exchanges.kabusapi_ws as kabusapi_ws
 from engine.exchanges.kabusapi_auth import (
     KabuApiError,
     KabuConnectionError as KabuConnectionError,
@@ -493,6 +495,9 @@ class DataEngineServer:
         self._kabu_login_inflight = asyncio.Lock()
         self._kabu_startup_task: asyncio.Task | None = None
         self._kabu_fill_poller_task: asyncio.Task | None = None  # [H-1]
+        self._kabu_push_task: asyncio.Task | None = None  # Issue #28 層1: PUSH WS タスク
+        # PUSH 銘柄登録セット（最大 50 銘柄 LRU、kabusapi_ws.connect に渡す）
+        self._kabu_register_set: KabuRegisterSet = KabuRegisterSet()
         # C1 配線: kabu PUSH adapter と採番カウンター
         self._kabu_adapter: KabuStationAdapter = KabuStationAdapter([])
         self._kabu_push_seq: int = 0
@@ -1312,6 +1317,13 @@ class DataEngineServer:
         stream = msg.get("stream", "")
         timeframe = msg.get("timeframe")
 
+        # Issue #28 層2: kabu_station は _workers 外で管理されるため専用パスで受け入れる。
+        # PUSH WS は _startup_kabu_station() で起動済み。Subscribe は銘柄登録とストリーム
+        # ライフサイクル管理のみを行う。
+        if venue == "kabu_station":
+            await self._handle_subscribe_kabu_station(msg)
+            return
+
         worker = self._workers.get(venue)
         if worker is None:
             log.warning("Subscribe: unknown venue %s", venue)
@@ -1400,6 +1412,78 @@ class DataEngineServer:
                             "message": f"Stream {key!r} terminated unexpectedly: {exc}",
                         }
                     )
+
+        task.add_done_callback(_on_done)
+
+    async def _handle_subscribe_kabu_station(self, msg: dict) -> None:
+        """Issue #28 層2: kabu_station の Subscribe を専用パスで処理する。
+
+        kabu_station は _workers に含まれないため通常の worker.stream_depth() は
+        使えない。PUSH WebSocket は _startup_kabu_station() で既に起動されており、
+        ここではストリームの「生存管理」と銘柄登録のみを行う。
+
+        - depth / trade ストリームのキーを _streams に登録して Unsubscribe まで保持。
+        - ticker を _kabu_register_set に登録（銘柄 PUSH 受信対象にする）。
+        - 未サポートのストリームタイプは unsupported_stream エラーを返す。
+        """
+        ticker = msg.get("ticker", "")
+        stream = msg.get("stream", "")
+        market = _market_from_msg(msg, "kabu_station")
+
+        if stream not in ("depth", "trade"):
+            log.warning("Subscribe(kabu_station): unsupported stream %s", stream)
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": None,
+                    "code": "unsupported_stream",
+                    "message": f"kabu_station does not support stream {stream!r}",
+                }
+            )
+            self._outbox_event.set()
+            return
+
+        key = ("kabu_station", ticker, market, stream, None)
+        if key in self._streams:
+            log.debug("Already subscribed to kabu_station %s %s", ticker, stream)
+            return
+
+        stop = asyncio.Event()
+        self._stream_counter += 1
+
+        handle = _StreamHandle(stop=stop)
+
+        # 銘柄を PUSH 登録セットに追加（exchange=1 は東証デフォルト）
+        try:
+            self._kabu_register_set.register(ticker, 1)
+        except Exception as exc:
+            log.warning("Subscribe(kabu_station): register_set.register failed for %s: %s", ticker, exc)
+
+        async def _kabu_stream_sentinel() -> None:
+            """PUSH WS が起動している間ストリームキーを保持するセンチネルタスク。
+
+            stop_event が set されるまでスリープし続ける。実際のデータは
+            _on_kabu_board_push / _on_kabu_trade_push が outbox に直接書く。
+            """
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(stop.wait()),
+                    timeout=None,
+                )
+            except asyncio.CancelledError:
+                pass
+
+        task = asyncio.create_task(_kabu_stream_sentinel())
+        handle.task = task
+        self._streams[key] = handle
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._outbox_event.set()
+            self._streams.pop(key, None)
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    log.error("kabu_station stream task %s died: %s", key, exc)
 
         task.add_done_callback(_on_done)
 
@@ -3708,6 +3792,16 @@ class DataEngineServer:
                     self._kabu_fill_poller_task = asyncio.create_task(
                         self._kabu_fill_poller()
                     )
+                # Issue #28 層1: PUSH WebSocket タスクを起動（孤立メソッドを配線）
+                if self._kabu_push_task is None or self._kabu_push_task.done():
+                    self._kabu_push_task = asyncio.create_task(
+                        kabusapi_ws.connect(
+                            env=self._kabu_env,
+                            on_message=self._on_kabu_board_push,
+                            register_set=self._kabu_register_set,
+                            put_register=self._kabu_put_register,
+                        )
+                    )
                 self._emit({
                     "event": "VenueReady",
                     "venue": "kabu_station",
@@ -3743,6 +3837,19 @@ class DataEngineServer:
         except asyncio.CancelledError:
             log.info("_kabu_fill_poller: cancelled")
             raise
+
+    async def _kabu_put_register(self, symbols: list[tuple[str, int]]) -> None:
+        """PUSH 銘柄登録 PUT /register コールバック（kabusapi_ws.connect に渡す）。
+
+        Issue #28 層1: 再接続後に RegisterSet 全件を kabuStation に再登録する。
+        _kabu_venue がない（未ログイン）場合はスキップ。
+        """
+        if self._kabu_venue is None or not self._kabu_venue.is_connected:
+            log.debug("_kabu_put_register: no active session, skipping re-register")
+            return
+        if not symbols:
+            return
+        log.info("_kabu_put_register: re-registering %d symbols after reconnect", len(symbols))
 
     # ------------------------------------------------------------------
     # C1: kabu PUSH → adapter → mapper → outbox pipeline entry points
