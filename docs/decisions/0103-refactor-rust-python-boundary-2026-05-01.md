@@ -7,6 +7,7 @@ source_commit: da20f73
 old_path: "docs/✅python-data-engine/archive/refactor-rust-python-boundary-2026-05-01.md"
 ---
 
+<!--
 # ADR 0103: Refactor Rust Python Boundary 2026 05 01
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show da20f73:"docs/✅python-data-engine/archive/refactor-rust-python-boundary-2026-05-01.md"
 ```
+-->

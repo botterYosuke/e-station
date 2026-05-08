@@ -7,6 +7,7 @@ source_commit: f0eb2c1
 old_path: "docs/✅python-data-engine/archive/python-helper-direct-api.md"
 ---
 
+<!--
 # ADR 0102: Python Helper Direct Api
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show f0eb2c1:"docs/✅python-data-engine/archive/python-helper-direct-api.md"
 ```
+-->

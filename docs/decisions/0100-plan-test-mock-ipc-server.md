@@ -7,6 +7,7 @@ source_commit: 5ecbda2
 old_path: "docs/✅python-data-engine/archive/plan-test-mock-ipc-server.md"
 ---
 
+<!--
 # ADR 0100: Plan Test Mock Ipc Server
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show 5ecbda2:"docs/✅python-data-engine/archive/plan-test-mock-ipc-server.md"
 ```
+-->

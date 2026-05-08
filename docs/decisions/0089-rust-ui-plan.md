@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅order/archive/rust-ui-plan.md"
 ---
 
+<!--
 # ADR 0089: Rust Ui Plan
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show f62bf94:"docs/✅order/archive/rust-ui-plan.md"
 ```
+-->

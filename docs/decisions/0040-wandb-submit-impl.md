@@ -7,6 +7,7 @@ source_commit: 13a3a78
 old_path: "docs/✅menu-and-footer/archive/wandb-submit-impl.md"
 ---
 
+<!--
 # ADR 0040: Wandb Submit Impl
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show 13a3a78:"docs/✅menu-and-footer/archive/wandb-submit-impl.md"
 ```
+-->

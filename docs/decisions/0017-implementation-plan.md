@@ -7,6 +7,7 @@ source_commit: 17617c3
 old_path: "docs/✅kabusapi/archive/implementation-plan.md"
 ---
 
+<!--
 # ADR 0017: Implementation Plan
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅kabusapi/archive
 ```sh
 git show 17617c3:"docs/✅kabusapi/archive/implementation-plan.md"
 ```
+-->

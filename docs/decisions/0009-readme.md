@@ -7,6 +7,7 @@ source_commit: 5c15ccd
 old_path: "docs/plan/floating-windows/archive/2026-04-29-pre-bevy-rewrite/README.md"
 ---
 
+<!--
 # ADR 0009: Readme
 
 ## Status
@@ -24,3 +25,4 @@ ADR candidate from floating-windows/archive (iced/Bevy adoption)
 ```sh
 git show 5c15ccd:"docs/plan/floating-windows/archive/2026-04-29-pre-bevy-rewrite/README.md"
 ```
+-->

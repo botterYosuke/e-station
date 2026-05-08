@@ -7,6 +7,7 @@ source_commit: 3149879
 old_path: "docs/✅nautilus_trader/archive/review-fixes-2026-05-07-live-gui.md"
 ---
 
+<!--
 # ADR 0069: Review Fixes 2026 05 07 Live Gui
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show 3149879:"docs/✅nautilus_trader/archive/review-fixes-2026-05-07-live-gui.md"
 ```
+-->

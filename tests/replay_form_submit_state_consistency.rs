@@ -28,7 +28,10 @@ fn replay_bar_updates_only_after_ipc_success() {
     // H-2: menu_bar updates must live in the CommitReplayBarState handler,
     // not in the Submit arm.
     let arm = submit_arm();
-    assert!(arm.contains("Task::perform"), "Submit arm should contain Task::perform");
+    assert!(
+        arm.contains("Task::perform"),
+        "Submit arm should contain Task::perform"
+    );
     assert!(
         !arm.contains("self.menu_bar.replay_bar.instrument_id"),
         "Menu_bar updates should NOT be in Submit arm (moved to CommitReplayBarState)"

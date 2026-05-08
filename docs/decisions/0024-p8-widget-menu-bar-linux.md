@@ -7,6 +7,7 @@ source_commit: 0ad6afb
 old_path: "docs/✅menu-and-footer/archive/P8-widget-menu-bar-linux.md"
 ---
 
+<!--
 # ADR 0024: P8 Widget Menu Bar Linux
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show 0ad6afb:"docs/✅menu-and-footer/archive/P8-widget-menu-bar-linux.md"
 ```
+-->

@@ -7,6 +7,7 @@ source_commit: fd3449e
 old_path: "docs/✅tachibana/archive/fix-event-ws-lifecycle-2026-05-04.md"
 ---
 
+<!--
 # ADR 0112: Fix Event Ws Lifecycle 2026 05 04
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show fd3449e:"docs/✅tachibana/archive/fix-event-ws-lifecycle-2026-05-04.md"
 ```
+-->

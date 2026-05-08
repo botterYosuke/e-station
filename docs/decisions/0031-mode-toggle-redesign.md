@@ -7,6 +7,7 @@ source_commit: 56dc6c6
 old_path: "docs/✅menu-and-footer/archive/mode-toggle-redesign.md"
 ---
 
+<!--
 # ADR 0031: Mode Toggle Redesign
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show 56dc6c6:"docs/✅menu-and-footer/archive/mode-toggle-redesign.md"
 ```
+-->

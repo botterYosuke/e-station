@@ -7,6 +7,7 @@ source_commit: 5215a03
 old_path: "docs/✅menu-and-footer/archive/replay-control-bar-impl.md"
 ---
 
+<!--
 # ADR 0033: Replay Control Bar Impl
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show 5215a03:"docs/✅menu-and-footer/archive/replay-control-bar-impl.md"
 ```
+-->

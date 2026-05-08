@@ -16,29 +16,20 @@ $FixturesPass = Join-Path $ScriptDir "fixtures\should_pass"
 $PassCount = 0
 $FailCount = 0
 
-function Assert-Exit {
+function Invoke-Scanner {
+    # Invoke secret_scan.ps1 as a subprocess and return its exit code.
+    # Uses the call operator (&) instead of Start-Process to avoid the
+    # PowerShell 5.1 restriction that forbids combining -NoNewWindow with
+    # -RedirectStandardOutput/-RedirectStandardError.
     param(
-        [string]$Description,
-        [int]$ExpectedExit,
         [string]$ScriptPath,
-        [string]$RepoRootOverride = ""
+        [string[]]$ExtraArgs = @()
     )
     try {
-        $args = @()
-        if ($RepoRootOverride) { $args += "-RepoRoot"; $args += $RepoRootOverride }
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList @("-NonInteractive", "-File", $ScriptPath) + $args `
-            -Wait -PassThru -NoNewWindow -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
-        $actual = $proc.ExitCode
+        & powershell.exe -NonInteractive -File $ScriptPath @ExtraArgs 2>$null | Out-Null
+        return $LASTEXITCODE
     } catch {
-        $actual = 99
-    }
-    if ($actual -eq $ExpectedExit) {
-        Write-Host "PASS: $Description (exit $actual)" -ForegroundColor Green
-        $script:PassCount++
-    } else {
-        Write-Host "FAIL: $Description — expected exit $ExpectedExit, got $actual" -ForegroundColor Red
-        $script:FailCount++
+        return 99
     }
 }
 
@@ -53,12 +44,7 @@ try {
     Copy-Item (Join-Path $RepoRoot "tools\secret_scan_allowlist.txt") (Join-Path $toolsDir "secret_scan_allowlist.txt")
 
     # Run the scanner with TmpFail as RepoRoot
-    try {
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList @("-NonInteractive", "-File", $Scanner, "-RepoRoot", $TmpFail) `
-            -Wait -PassThru -NoNewWindow -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
-        $actual = $proc.ExitCode
-    } catch { $actual = 99 }
+    $actual = Invoke-Scanner -ScriptPath $Scanner -ExtraArgs @("-RepoRoot", $TmpFail)
 
     if ($actual -eq 1) {
         Write-Host "PASS: should_fail fixture causes exit 1 (exit $actual)" -ForegroundColor Green
@@ -81,12 +67,7 @@ try {
     Copy-Item (Join-Path $RepoRoot "tools\secret_scan_patterns.txt") (Join-Path $toolsDir2 "secret_scan_patterns.txt")
     Copy-Item (Join-Path $RepoRoot "tools\secret_scan_allowlist.txt") (Join-Path $toolsDir2 "secret_scan_allowlist.txt")
 
-    try {
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList @("-NonInteractive", "-File", $Scanner, "-RepoRoot", $TmpPass) `
-            -Wait -PassThru -NoNewWindow -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
-        $actual = $proc.ExitCode
-    } catch { $actual = 99 }
+    $actual = Invoke-Scanner -ScriptPath $Scanner -ExtraArgs @("-RepoRoot", $TmpPass)
 
     if ($actual -eq 0) {
         Write-Host "PASS: allowlisted file causes exit 0 (exit $actual)" -ForegroundColor Green
@@ -100,12 +81,7 @@ try {
 }
 
 # ── Test 3: actual repo scan must pass ───────────────────────────────────────
-try {
-    $proc = Start-Process -FilePath "powershell.exe" `
-        -ArgumentList @("-NonInteractive", "-File", $Scanner, "-RepoRoot", $RepoRoot) `
-        -Wait -PassThru -NoNewWindow -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
-    $actual = $proc.ExitCode
-} catch { $actual = 99 }
+$actual = Invoke-Scanner -ScriptPath $Scanner -ExtraArgs @("-RepoRoot", $RepoRoot)
 
 if ($actual -eq 0) {
     Write-Host "PASS: actual repo scan returns exit 0 (exit $actual)" -ForegroundColor Green

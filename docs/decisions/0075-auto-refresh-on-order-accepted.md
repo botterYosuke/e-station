@@ -7,6 +7,7 @@ source_commit: 3d34512
 old_path: "docs/✅order/archive/auto-refresh-on-order-accepted.md"
 ---
 
+<!--
 # ADR 0075: Auto Refresh On Order Accepted
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show 3d34512:"docs/✅order/archive/auto-refresh-on-order-accepted.md"
 ```
+-->

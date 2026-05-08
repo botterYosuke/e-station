@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅tachibana/archive/review-fixes-tachibana-docs-2026-04-26.md"
 ---
 
+<!--
 # ADR 0131: Review Fixes Tachibana Docs 2026 04 26
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show f62bf94:"docs/✅tachibana/archive/review-fixes-tachibana-docs-2026-04-26.md"
 ```
+-->

@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅tachibana/archive/fix-ticker-list-not-shown-2026-04-27.md"
 ---
 
+<!--
 # ADR 0119: Fix Ticker List Not Shown 2026 04 27
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show f62bf94:"docs/✅tachibana/archive/fix-ticker-list-not-shown-2026-04-27.md"
 ```
+-->

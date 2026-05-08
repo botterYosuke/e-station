@@ -7,6 +7,7 @@ source_commit: ea5022b
 old_path: "docs/✅nautilus_trader/archive/🔵execute-live-strategy.md"
 ---
 
+<!--
 # ADR 0072: Execute Live Strategy
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show ea5022b:"docs/✅nautilus_trader/archive/🔵execute-live-strategy.md"
 ```
+-->

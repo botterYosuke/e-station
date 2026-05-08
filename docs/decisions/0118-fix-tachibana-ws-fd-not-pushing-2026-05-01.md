@@ -7,6 +7,7 @@ source_commit: da20f73
 old_path: "docs/✅tachibana/archive/fix-tachibana-ws-fd-not-pushing-2026-05-01.md"
 ---
 
+<!--
 # ADR 0118: Fix Tachibana Ws Fd Not Pushing 2026 05 01
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show da20f73:"docs/✅tachibana/archive/fix-tachibana-ws-fd-not-pushing-2026-05-01.md"
 ```
+-->

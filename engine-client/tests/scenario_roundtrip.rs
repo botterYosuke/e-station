@@ -14,10 +14,8 @@ use flowsurface_engine_client::{SCHEMA_MAJOR, SCHEMA_MINOR};
 #[test]
 fn schema_minor_is_at_least_11() {
     assert_eq!(SCHEMA_MAJOR, 3, "SCHEMA_MAJOR drift detected");
-    assert!(
-        SCHEMA_MINOR >= 11,
-        "SCHEMA_MINOR must be >= 11 (F6 + F7 schema bumps applied)"
-    );
+    // SCHEMA_MINOR must be >= 11 (F6 + F7 schema bumps applied)
+    const { assert!(SCHEMA_MINOR >= 11) };
 }
 
 /// LoadStrategyScenario コマンドが正しく JSON シリアライズされる。

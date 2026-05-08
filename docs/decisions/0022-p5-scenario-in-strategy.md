@@ -7,6 +7,7 @@ source_commit: f0eb2c1
 old_path: "docs/✅menu-and-footer/archive/P5-scenario-in-strategy.md"
 ---
 
+<!--
 # ADR 0022: P5 Scenario In Strategy
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show f0eb2c1:"docs/✅menu-and-footer/archive/P5-scenario-in-strategy.md"
 ```
+-->

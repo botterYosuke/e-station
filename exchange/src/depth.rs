@@ -198,38 +198,4 @@ impl LocalDepthCache {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        Exchange, MinTicksize, Ticker, TickerInfo,
-        unit::qty::{QtyNormalization, RawQtyUnit},
-    };
-
-    fn btc_ticker_info() -> TickerInfo {
-        TickerInfo::new(
-            Ticker::new("BTCUSDT", Exchange::BinanceSpot),
-            0.01,
-            0.001,
-            None,
-        )
-    }
-
-    fn min_tick(power: i8) -> MinTicksize {
-        MinTicksize::new(power)
-    }
-
-    fn normalised_snapshot() -> DepthUpdate {
-        DepthUpdate::Snapshot(DepthPayload {
-            last_update_id: 1,
-            time: 0,
-            bids: vec![DeOrder {
-                price: 100.0,
-                qty: 10.0,
-            }],
-            asks: vec![DeOrder {
-                price: 101.0,
-                qty: 5.0,
-            }],
-        })
-    }
-}
+mod tests {}

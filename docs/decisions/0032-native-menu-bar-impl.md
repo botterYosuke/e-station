@@ -7,6 +7,7 @@ source_commit: 0727a94
 old_path: "docs/✅menu-and-footer/archive/native-menu-bar-impl.md"
 ---
 
+<!--
 # ADR 0032: Native Menu Bar Impl
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show 0727a94:"docs/✅menu-and-footer/archive/native-menu-bar-impl.md"
 ```
+-->

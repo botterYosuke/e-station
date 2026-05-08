@@ -7,6 +7,7 @@ source_commit: f0eb2c1
 old_path: "docs/✅nautilus_trader/archive/replay-market-data-emit-handoff.md"
 ---
 
+<!--
 # ADR 0057: Replay Market Data Emit Handoff
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show f0eb2c1:"docs/✅nautilus_trader/archive/replay-market-data-emit-handoff.md"
 ```
+-->

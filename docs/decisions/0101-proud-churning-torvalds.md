@@ -7,6 +7,7 @@ source_commit: 1150239
 old_path: "docs/✅python-data-engine/archive/proud-churning-torvalds.md"
 ---
 
+<!--
 # ADR 0101: Proud Churning Torvalds
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show 1150239:"docs/✅python-data-engine/archive/proud-churning-torvalds.md"
 ```
+-->

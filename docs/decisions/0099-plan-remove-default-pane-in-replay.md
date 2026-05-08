@@ -7,6 +7,7 @@ source_commit: 6b1089a
 old_path: "docs/✅python-data-engine/archive/plan-remove-default-pane-in-replay.md"
 ---
 
+<!--
 # ADR 0099: Plan Remove Default Pane In Replay
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show 6b1089a:"docs/✅python-data-engine/archive/plan-remove-default-pane-in-replay.md"
 ```
+-->

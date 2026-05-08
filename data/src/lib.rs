@@ -201,6 +201,20 @@ fn cleanup_directory(data_path: &PathBuf) -> usize {
     deleted_files.len()
 }
 
+pub fn cleanup_old_market_data() -> usize {
+    let paths = ["um", "cm"].map(|market_type| {
+        data_path(Some(&format!(
+            "market_data/binance/data/futures/{}/daily/aggTrades",
+            market_type
+        )))
+    });
+
+    let total_deleted: usize = paths.iter().map(cleanup_directory).sum();
+
+    info!("File cleanup completed. Deleted {} files", total_deleted);
+    total_deleted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,18 +261,4 @@ mod tests {
         }
         assert_eq!(result, tmp);
     }
-}
-
-pub fn cleanup_old_market_data() -> usize {
-    let paths = ["um", "cm"].map(|market_type| {
-        data_path(Some(&format!(
-            "market_data/binance/data/futures/{}/daily/aggTrades",
-            market_type
-        )))
-    });
-
-    let total_deleted: usize = paths.iter().map(cleanup_directory).sum();
-
-    info!("File cleanup completed. Deleted {} files", total_deleted);
-    total_deleted
 }

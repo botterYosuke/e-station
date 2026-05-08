@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅order/archive/fix-buying-power-auto-fetch-on-add-2026-04-28.md"
 ---
 
+<!--
 # ADR 0078: Fix Buying Power Auto Fetch On Add 2026 04 28
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show f62bf94:"docs/✅order/archive/fix-buying-power-auto-fetch-on-add-2026-04-28.md"
 ```
+-->

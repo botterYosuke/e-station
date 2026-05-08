@@ -835,10 +835,7 @@ impl TickersTable {
     /// same `RequestTachibanaLogin` action with this button.
     fn tachibana_login_btn(&self) -> Element<'_, Message> {
         let (label, msg) = if self.tachibana_ready {
-            (
-                "立花 ログアウト",
-                Message::RequestTachibanaLogout,
-            )
+            ("立花 ログアウト", Message::RequestTachibanaLogout)
         } else {
             (
                 "立花 ログイン",

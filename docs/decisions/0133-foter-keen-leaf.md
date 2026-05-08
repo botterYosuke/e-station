@@ -7,6 +7,7 @@ source_commit: b02e614
 old_path: "docs/✅tachibana/archive/🔵foter-keen-leaf.md"
 ---
 
+<!--
 # ADR 0133: Foter Keen Leaf
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show b02e614:"docs/✅tachibana/archive/🔵foter-keen-leaf.md"
 ```
+-->

@@ -7,6 +7,7 @@ source_commit: 5ecbda2
 old_path: "docs/✅python-data-engine/archive/replay-file-switch-stale-panes-approach-b.md"
 ---
 
+<!--
 # ADR 0104: Replay File Switch Stale Panes Approach B
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show 5ecbda2:"docs/✅python-data-engine/archive/replay-file-switch-stale-panes-approach-b.md"
 ```
+-->

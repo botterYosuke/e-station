@@ -7,6 +7,7 @@ source_commit: 2995f15
 old_path: "docs/✅nautilus_trader/archive/replay-no-saved-state.md"
 ---
 
+<!--
 # ADR 0061: Replay No Saved State
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show 2995f15:"docs/✅nautilus_trader/archive/replay-no-saved-state.md"
 ```
+-->
