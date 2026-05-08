@@ -83,7 +83,6 @@ pub(crate) enum VenueMsg {
     BuyingPowerSendCompleted(Result<(), String>),
     PositionsSendCompleted(Result<(), String>),
     PositionsUpdated {
-        #[allow(dead_code)]
         request_id: String,
         #[allow(dead_code)]
         venue: String,
@@ -157,6 +156,7 @@ pub(crate) enum ReplayMsg {
         request_id: String,
         path: std::path::PathBuf,
         scenario: Option<serde_json::Value>,
+        resolved_instruments: Option<Vec<String>>,
     },
     ScenarioLoadFailed {
         request_id: String,
