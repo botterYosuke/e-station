@@ -1,11 +1,9 @@
 ---
 title: specs/venues
-status: skeleton
+status: active
 ---
 
 # specs/venues
 
-この階層には以下のドキュメントが入る予定です（移送中）:
-
-- tachibana.md — 旧 docs/specs/venues/tachibana/spec.md
-- kabusapi.md — 旧 docs/specs/venues/kabusapi/spec.md
+- [tachibana.md](tachibana.md) — Tachibana venue 仕様
+- [kabusapi.md](kabusapi.md) — kabusapi venue 仕様

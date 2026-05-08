@@ -1,12 +1,10 @@
 ---
 title: reference/external-apis
-status: skeleton
+status: active
 ---
 
 # reference/external-apis
 
-この階層には以下のドキュメントが入る予定です（移送中）:
-
-- tachibana.md — 旧 docs/specs/venues/tachibana/{architecture,data-mapping}.md の外部仕様部分
-- kabusapi.md — 旧 docs/specs/venues/kabusapi/* の外部仕様部分
-- nautilus-trader.md — 旧 docs/specs/backtest/data-mapping.md
+- [tachibana.md](tachibana.md) — Tachibana 外部 API リファレンス
+- [kabusapi.md](kabusapi.md) — kabusapi 外部 API リファレンス
+- [nautilus-trader.md](nautilus-trader.md) — nautilus-trader データマッピング

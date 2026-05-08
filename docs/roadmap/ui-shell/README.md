@@ -1,13 +1,11 @@
 ---
 title: roadmap/ui-shell
-status: skeleton
+status: active
 ---
 
 # roadmap/ui-shell
 
-この階層には以下のドキュメントが入る予定です（移送中）:
-
-- implementation-plan.md — 旧 docs/architecture/modules/ui-shell/* + docs/plan/floating-windows/implementation-plan.md
-- open-questions.md — 同上 open-questions
-- spec.md — 旧 docs/plan/floating-windows/spec.md (進行中判定)
-- architecture.md — 旧 docs/plan/floating-windows/architecture.md
+- [implementation-plan.md](implementation-plan.md) — UI シェル（menu-and-footer + floating-windows）実装計画
+- [spec.md](spec.md) — Floating Windows 移行: 仕様（Phase 1〜6 スコープ・機能要件・機能保持マトリクス）
+- [architecture.md](architecture.md) — Floating Windows 移行: アーキテクチャ（Bevy ECS モデル・入力境界契約・ライフサイクル契約）
+- [open-questions.md](open-questions.md) — 未解決問題（Q1 wgpu 共存性 PoC など）

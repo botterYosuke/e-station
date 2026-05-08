@@ -1,12 +1,10 @@
 ---
 title: testing/benchmarks
-status: skeleton
+status: active
 ---
 
 # testing/benchmarks
 
-この階層には以下のドキュメントが入る予定です（移送中）:
-
-- baseline.md — 旧 docs/specs/data-engine/benchmarks/baseline.md
-- phase-2.md — 旧同 phase-2.md
-- phase-6.md — 旧同 phase-6.md
+- [baseline.md](baseline.md) — ベースライン計測結果
+- [phase-2.md](phase-2.md) — Phase 2 ベンチマーク
+- [phase-6.md](phase-6.md) — Phase 6 ベンチマーク

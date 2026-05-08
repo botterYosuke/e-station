@@ -1,11 +1,11 @@
 ---
 title: reference/schemas
-status: skeleton
+status: active
 ---
 
 # reference/schemas
 
-この階層には以下のドキュメントが入る予定です（移送中）:
+機械可読スキーマ artifact（MkDocs 公開対象外、`exclude_docs: *.json` により除外）。
 
-- commands.json — 旧 docs/specs/data-engine/schemas/commands.json (据え置き)
-- events.json — 旧 docs/specs/data-engine/schemas/events.json (据え置き)
+- `commands.json` — IPC コマンドスキーマ
+- `events.json` — IPC イベントスキーマ

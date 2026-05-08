@@ -1,14 +1,12 @@
 ---
 title: architecture/modules
-status: skeleton
+status: active
 ---
 
 # architecture/modules
 
-この階層には以下のドキュメントが入る予定です（移送中）:
-
-- data-engine.md — 旧 docs/specs/data-engine/current-architecture.md
-- tachibana-adapter.md — 旧 docs/specs/venues/tachibana/architecture.md
-- kabusapi-adapter.md — 旧 docs/specs/venues/kabusapi/architecture.md
-- nautilus-trader.md — 旧 docs/specs/backtest/architecture.md
-- ui-shell.md — 旧 docs/architecture/modules/ui-shell/* (UI 構造側面)
+- [data-engine.md](data-engine.md) — Python data engine アーキテクチャ
+- [tachibana-adapter.md](tachibana-adapter.md) — Tachibana アダプタ構造
+- [kabusapi-adapter.md](kabusapi-adapter.md) — kabusapi アダプタ構造
+- [nautilus-trader.md](nautilus-trader.md) — nautilus-trader 統合構造
+- [ui-shell.md](ui-shell.md) — UI シェル（menu-and-footer / replay control / footer / venue login）
