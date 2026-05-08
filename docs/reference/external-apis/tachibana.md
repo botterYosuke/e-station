@@ -7,8 +7,6 @@ migrated_from:
 source_commit: f62bf94
 ---
 
-> **章分離注記**: 旧 `docs/specs/venues/tachibana/data-mapping.md` を全文移送（venue 概念 ↔ IPC DTO の写像表 + FD frame / depth / kline / capabilities 等の外部 API 仕様）。旧 `docs/specs/venues/tachibana/architecture.md` の外部 API 寄り記述（REQUEST 用 `build_request_url` / EVENT 用 `build_event_url` の URL 形式の違い、Shift-JIS / 制御文字 `^A^B^C` 分解、`sJsonOfmt` / `p_errno` / `sResultCode` 二段判定、`p_no` 採番、KP frame 死活監視など）は本書の各節と `docs/architecture/modules/tachibana-adapter.md` 側 §4「Python 側ファイル構成」のレイアウトを跨いで参照する。venue 内部構造は `docs/architecture/modules/tachibana-adapter.md` 側を参照。
-
 # 立花証券統合: データモデル・マッピング
 
 立花証券のドメイン概念を、既存の `engine-client` IPC DTO（[engine-client/src/dto.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/dto.rs)）と `exchange` 型（[exchange/src/lib.rs](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/lib.rs)）に押し込めるための写像表。「合わない」場所は **拡張する** か **明示的に未対応とする** かを決める。

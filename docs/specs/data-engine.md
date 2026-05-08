@@ -6,8 +6,6 @@ migrated_from:
 source_commit: 9f8b91b
 ---
 
-> **章分割の注記**: 旧 `docs/specs/data-engine/spec.md` は本ファイル（data-engine 全般）と [`specs/replay.md`](./replay.md)（replay モード関連）に分割移送した。バックテスト用 replay の仕様は [`specs/backtest.md`](./backtest.md) を参照。
-
 # 新仕様: Rust ビュアー + Python データエンジン
 
 ## 1. ゴール

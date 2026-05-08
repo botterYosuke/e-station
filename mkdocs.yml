@@ -99,6 +99,8 @@ nav:
           - Open Questions: roadmap/nautilus-trader/open-questions.md
       - UI シェル:
           - 実装計画: roadmap/ui-shell/implementation-plan.md
+          - 仕様: roadmap/ui-shell/spec.md
+          - アーキテクチャ: roadmap/ui-shell/architecture.md
           - Open Questions: roadmap/ui-shell/open-questions.md
       - スキーマ変更年表: roadmap/changelog.md
   - 決定 (ADR):
@@ -178,8 +180,8 @@ plugins:
         ✅python-data-engine/benchmarks/phase-2.md: testing/benchmarks/phase-2.md
         ✅python-data-engine/benchmarks/phase-6.md: testing/benchmarks/phase-6.md
         ✅python-data-engine/schemas/CHANGELOG.md: roadmap/changelog.md
-        plan/floating-windows/spec.md: roadmap/ui-shell/_floating-windows-original-spec.md
-        plan/floating-windows/architecture.md: roadmap/ui-shell/_floating-windows-original-spec.md
+        plan/floating-windows/spec.md: roadmap/ui-shell/spec.md
+        plan/floating-windows/architecture.md: roadmap/ui-shell/architecture.md
         plan/floating-windows/implementation-plan.md: roadmap/ui-shell/implementation-plan.md
         plan/floating-windows/open-questions.md: roadmap/ui-shell/open-questions.md
         plan/distribution-formats/linux-formats.md: development/build-and-release.md

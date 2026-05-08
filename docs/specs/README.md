@@ -1,16 +1,13 @@
 ---
 title: specs
-status: skeleton
+status: active
 ---
 
 # specs
 
-この階層には以下のドキュメントが入る予定です（移送中）:
-
-- order.md — 旧 docs/specs/order/spec.md
-- replay.md — 旧 docs/specs/data-engine/spec.md (replay 章)
-- live-strategy.md — venue 横断の抽象契約
-- backtest.md — 旧 docs/specs/backtest/spec.md
-- data-engine.md — 旧 docs/specs/data-engine/spec.md
-- strategy-sdk.md — ユーザー戦略の責任境界
-- venues/ — venue 固有仕様
+- [order.md](order.md) — 注文管理仕様
+- [replay.md](replay.md) — replay モード仕様
+- [live-strategy.md](live-strategy.md) — live strategy 仕様（venue 横断の抽象契約）
+- [backtest.md](backtest.md) — backtest / nautilus-trader 仕様
+- [data-engine.md](data-engine.md) — Python data engine 仕様
+- [venues/](venues/) — venue 固有仕様（tachibana / kabusapi）

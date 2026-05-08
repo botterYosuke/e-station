@@ -1,10 +1,10 @@
 ---
 title: assets
-status: skeleton
+status: active
 ---
 
 # assets
 
-この階層には以下のドキュメントが入る予定です（移送中）:
+MkDocs サイトに公開する画像・SVG を配置。
 
-- UI 構造図など、MkDocs サイトに公開する画像・SVG を配置 (旧 docs/architecture/modules/ui-shell/assets/ から移送)
+- `layout.drawio.svg` — UI レイアウト構造図

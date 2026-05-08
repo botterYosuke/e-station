@@ -28,7 +28,7 @@
   new_path: "docs/roadmap/ui-shell/architecture.md"
   new_anchor: ""
   source_commit: "5c15ccd"
-  status: deferred
+  status: migrated
   note: "floating-windows 進行中"
 - old_path: "docs/plan/floating-windows/archive/2026-04-29-pre-bevy-rewrite/README.md"
   old_anchor: ""
@@ -98,7 +98,7 @@
   new_path: "docs/roadmap/ui-shell/spec.md"
   new_anchor: ""
   source_commit: "5c15ccd"
-  status: deferred
+  status: migrated
   note: "floating-windows 進行中"
 - old_path: "docs/✅kabusapi/README.md"
   old_anchor: ""

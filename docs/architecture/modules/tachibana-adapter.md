@@ -6,8 +6,6 @@ migrated_from:
 source_commit: 674aefd
 ---
 
-> **章分離注記**: 旧 `docs/specs/venues/tachibana/architecture.md` を内部構造（責務分担・コンポーネント・起動シーケンス・Python/Rust ファイル構成・テスト戦略）として全文移送。外部 API 仕様（REQUEST/EVENT URL 形式・sJsonOfmt・Shift-JIS・FD frame・呼値テーブル等）は `docs/reference/external-apis/tachibana.md` 側に置く。本書中で外部 API 詳細に触れる箇所はそちらを参照する。
-
 # 立花証券統合: アーキテクチャ
 
 > **Phase 8（2026-05-03 完了）注記**: Rust 側 HTTP API（ポート 9876）は完全廃止された。本書中で `/api/sidebar/tachibana/request-login` / `/api/test/tachibana/cancel-helper` / `/api/test/tachibana/delete-session` を参照している場合は **Phase 8 以前の旧仕様**として読むこと。再ログイン経路の現在の正体:
