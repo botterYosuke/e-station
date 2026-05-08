@@ -47,6 +47,8 @@ from engine.exchanges.tachibana_login_flow import (
 from engine.exchanges.kabusapi import KabuStationVenue
 from engine.exchanges.kabusapi_adapter import KabuStationAdapter
 from engine.exchanges.kabusapi_url import resolve_kabu_env
+from engine.exchanges.kabusapi_rest import KabuRestClient
+from engine.exchanges.kabusapi_register import RegisterSet as KabuRegisterSet
 from engine.exchanges.kabusapi_auth import (
     KabuApiError,
     KabuConnectionError as KabuConnectionError,
@@ -2629,6 +2631,10 @@ class DataEngineServer:
         if venue == "replay":
             return await self._do_get_order_list_replay(msg)
 
+        # Issue #25: kabu_station は _workers に含まれないため専用ハンドラに分岐する
+        if venue == "kabu_station":
+            return await self._do_get_order_list_kabu(msg, ws=ws)
+
         if venue not in self._workers:
             self._outbox.append({
                 "event": "Error",
@@ -2715,6 +2721,9 @@ class DataEngineServer:
         if venue == "replay":
             await self._do_get_buying_power_replay(msg)
             return
+        # Issue #25: kabu_station は _workers に含まれないため専用ハンドラに分岐する
+        if venue == "kabu_station":
+            return await self._do_get_buying_power_kabu(msg, ws=ws)
         if venue not in self._workers:
             self._outbox.append({
                 "event": "Error",
@@ -2789,9 +2798,197 @@ class DataEngineServer:
         )
         self._outbox.append(ipc_dict)
 
+    # ------------------------------------------------------------------
+    # Issue #25: kabu_station 向け GetOrderList / GetBuyingPower / GetPositions
+    # ------------------------------------------------------------------
+
+    def _make_kabu_rest_client(self) -> "KabuRestClient":
+        """kabu_venue の token から KabuRestClient を構築して返す。
+
+        呼び出し前に _kabu_venue と _kabu_venue._token が None でないことを確認すること。
+        """
+        token: str = self._kabu_venue._token  # type: ignore[union-attr]
+        return KabuRestClient(
+            token=token,
+            env=self._kabu_env,
+            register_set=KabuRegisterSet(),
+        )
+
+    async def _do_get_order_list_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """Issue #25: kabu_station 注文一覧取得 — GET /orders。"""
+        req_id = msg.get("request_id", "")
+
+        if self._kabu_venue is None or not self._kabu_venue._token:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "NOT_LOGGED_IN",
+                "message": "GetOrderList: kabu_station not logged in",
+            })
+            return
+
+        try:
+            client = self._make_kabu_rest_client()
+            raw_orders = await client.fetch_orders()
+        except KabuApiError as exc:
+            log.error("_do_get_order_list_kabu: KabuApiError: %s", exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "FETCH_ERROR",
+                "message": str(exc),
+            })
+            return
+        except Exception:
+            log.exception("_do_get_order_list_kabu: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching kabu order list",
+            })
+            return
+
+        # kabu API の生レスポンスを IPC OrderRecordWire 形式に変換する。
+        # 注: kabu の ID フィールド名は "ID"（tachibana は sOrderOrderNumber）。
+        orders_json = [
+            {
+                "client_order_id": None,
+                "venue_order_id": o.get("ID", ""),
+                "instrument_id": f"{o.get('Symbol', '')}.KabuStation Stock",
+                "order_side": "BUY" if o.get("Side") == "1" else "SELL",
+                "order_type": "MARKET" if o.get("OrdType") == "1" else "LIMIT",
+                "quantity": str(o.get("OrderQty", 0)),
+                "filled_qty": str(o.get("CumQty", 0)),
+                "leaves_qty": str(int(o.get("OrderQty", 0)) - int(o.get("CumQty", 0))),
+                "price": str(o.get("Price", 0)),
+                "trigger_price": None,
+                "time_in_force": "DAY",
+                "expire_time_ns": None,
+                "status": "FILLED" if o.get("OrdStatus") == "2" else "OPEN",
+                "ts_event_ms": 0,
+                "venue": "kabu_station",
+            }
+            for o in raw_orders
+        ]
+        self._outbox.append({
+            "event": "OrderListUpdated",
+            "request_id": req_id,
+            "orders": orders_json,
+        })
+
+    async def _do_get_buying_power_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """Issue #25: kabu_station 余力取得 — GET /wallet/cash + /wallet/margin。"""
+        req_id = msg.get("request_id", "")
+
+        if self._kabu_venue is None or not self._kabu_venue._token:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "NOT_LOGGED_IN",
+                "message": "GetBuyingPower: kabu_station not logged in",
+            })
+            return
+
+        try:
+            client = self._make_kabu_rest_client()
+            cash_data = await client.fetch_wallet_cash()
+            margin_data = await client.fetch_wallet_margin()
+        except KabuApiError as exc:
+            log.error("_do_get_buying_power_kabu: KabuApiError: %s", exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "FETCH_ERROR",
+                "message": str(exc),
+            })
+            return
+        except Exception:
+            log.exception("_do_get_buying_power_kabu: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching kabu buying power",
+            })
+            return
+
+        ts_ms = int(time.time() * 1000)
+        # kabu wallet/cash: StockAccountWallet = 現物余力
+        # kabu wallet/margin: MarginAccountWallet = 信用余力
+        cash_available = cash_data.get("StockAccountWallet", 0.0)
+        credit_available = margin_data.get("MarginAccountWallet", 0.0)
+        self._outbox.append({
+            "event": "BuyingPowerUpdated",
+            "request_id": req_id,
+            "venue": "kabu_station",
+            "cash_available": cash_available,
+            "cash_shortfall": 0,
+            "credit_available": credit_available,
+            "ts_ms": ts_ms,
+        })
+
+    async def _do_get_positions_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """Issue #25: kabu_station 建玉取得 — GET /positions。"""
+        req_id = msg.get("request_id", "")
+
+        if self._kabu_venue is None or not self._kabu_venue._token:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "NOT_LOGGED_IN",
+                "message": "GetPositions: kabu_station not logged in",
+            })
+            return
+
+        try:
+            client = self._make_kabu_rest_client()
+            raw_positions = await client.fetch_positions()
+        except KabuApiError as exc:
+            log.error("_do_get_positions_kabu: KabuApiError: %s", exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "FETCH_ERROR",
+                "message": str(exc),
+            })
+            return
+        except Exception:
+            log.exception("_do_get_positions_kabu: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching kabu positions",
+            })
+            return
+
+        ts_ms = int(time.time() * 1000)
+        positions_json = [
+            {
+                "instrument_id": f"{p.get('Symbol', '')}.KabuStation Stock",
+                "qty": str(int(p.get("Leaves", 0))),
+                "market_value": str(int(p.get("Price", 0) * p.get("Leaves", 0))),
+                "position_type": "LONG" if p.get("Side") == "1" else "SHORT",
+                "tategyoku_id": "",
+                "venue": "kabu_station",
+            }
+            for p in raw_positions
+        ]
+        self._outbox.append({
+            "event": "PositionsUpdated",
+            "request_id": req_id,
+            "venue": "kabu_station",
+            "positions": positions_json,
+            "ts_ms": ts_ms,
+        })
+
     async def _do_get_positions(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
+        # Issue #25: kabu_station は専用ハンドラに分岐する
+        if venue == "kabu_station":
+            return await self._do_get_positions_kabu(msg, ws=ws)
         if venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
