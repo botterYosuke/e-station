@@ -172,21 +172,29 @@ impl ReplayFormModal {
         &mut self,
         path: std::path::PathBuf,
         scenario: &serde_json::Value,
+        resolved_instruments: Option<&[String]>,
     ) {
         self.strategy_file = Some(path);
         let Some(obj) = scenario.as_object() else {
             self.validation_error = None;
             return;
         };
-        // v1: instrument (単一銘柄)
-        if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
-            self.instrument_id = s.to_string();
-        }
-        // v2: instruments (複数銘柄リスト) — カンマ区切りで結合して入力欄に表示
-        if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
-            let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        // 優先順位: resolved_instruments (v3+ref) > instruments (v2) > instrument (v1)
+        if let Some(ids) = resolved_instruments {
             if !ids.is_empty() {
                 self.instrument_id = ids.join(", ");
+            }
+        } else {
+            // v1: instrument (単一銘柄)
+            if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
+                self.instrument_id = s.to_string();
+            }
+            // v2: instruments (複数銘柄リスト) — カンマ区切りで結合して入力欄に表示
+            if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
+                let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                if !ids.is_empty() {
+                    self.instrument_id = ids.join(", ");
+                }
             }
         }
         if let Some(s) = obj.get("start").and_then(|v| v.as_str()) {
@@ -502,7 +510,7 @@ mod tests {
             "granularity": "Daily",
             "initial_cash": 1_000_000_u64,
         });
-        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/s.py"), &scenario);
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/s.py"), &scenario, None);
         assert_eq!(form.instrument_id, "1301.TSE");
         assert_eq!(form.start_date, "2025-01-06");
         assert_eq!(form.end_date, "2025-03-31");
@@ -526,7 +534,7 @@ mod tests {
             "granularity": "Minute",
             "initial_cash": 10_000_000_u64,
         });
-        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/multi.py"), &scenario);
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/multi.py"), &scenario, None);
         assert_eq!(form.instrument_id, "1301.TSE, 7203.TSE, 6758.TSE");
         assert_eq!(form.start_date, "2025-01-06");
         assert_eq!(form.end_date, "2025-01-10");
@@ -543,7 +551,7 @@ mod tests {
             "instrument": "7203.TSE",
             "granularity": "Minute",
         });
-        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario, None);
         assert!(form.validation_error.is_none());
         assert_eq!(form.granularity, Some(Granularity::Minute));
     }
@@ -553,7 +561,7 @@ mod tests {
         let mut form = ReplayFormModal::default();
         form.granularity = Some(Granularity::Trade);
         let scenario = serde_json::json!({"granularity": "weekly"});
-        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario, None);
         assert_eq!(form.granularity, Some(Granularity::Trade));
     }
 
@@ -565,7 +573,7 @@ mod tests {
         form.end_date = "2024-02-01".to_string();
         form.initial_cash = "500".to_string();
         let scenario = serde_json::json!({"instrument": "NEW"});
-        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario, None);
         assert_eq!(form.instrument_id, "NEW");
         assert_eq!(form.start_date, "2024-01-01");
         assert_eq!(form.end_date, "2024-02-01");
@@ -577,12 +585,64 @@ mod tests {
         let mut form = ReplayFormModal::default();
         form.instrument_id = "KEEP".to_string();
         let scenario = serde_json::json!(null);
-        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario);
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario, None);
         assert_eq!(form.instrument_id, "KEEP");
         assert_eq!(
             form.strategy_file,
             Some(std::path::PathBuf::from("/tmp/x.py"))
         );
+    }
+
+    #[test]
+    fn prefill_from_scenario_v3_resolved_takes_priority() {
+        let mut form = ReplayFormModal::default();
+        let scenario = serde_json::json!({
+            "schema_version": 3,
+            "instruments_ref": "data/universe.json#/instruments",
+            "instruments": ["FROM_INSTRUMENTS", "IGNORED"],
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1_000_000_u64,
+        });
+        let resolved = vec!["1301.TSE".to_string(), "7203.TSE".to_string()];
+        form.prefill_from_scenario(
+            std::path::PathBuf::from("/tmp/s.py"),
+            &scenario,
+            Some(resolved.as_slice()),
+        );
+        assert_eq!(form.instrument_id, "1301.TSE, 7203.TSE");
+    }
+
+    #[test]
+    fn prefill_from_scenario_v3_resolved_empty_falls_back() {
+        // resolved_instruments が Some([]) の場合は instrument_id を触らない（既存値保持）
+        let mut form = ReplayFormModal::default();
+        form.instrument_id = "EXISTING".to_string();
+        let scenario = serde_json::json!({"schema_version": 3});
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/s.py"), &scenario, Some(&[]));
+        assert_eq!(form.instrument_id, "EXISTING");
+    }
+
+    #[test]
+    fn prefill_from_scenario_v1_uses_instrument_field() {
+        // 既存挙動回帰（resolved_instruments=None）
+        let mut form = ReplayFormModal::default();
+        let scenario = serde_json::json!({"instrument": "1301.TSE"});
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/s.py"), &scenario, None);
+        assert_eq!(form.instrument_id, "1301.TSE");
+    }
+
+    #[test]
+    fn prefill_from_scenario_v2_uses_instruments_array() {
+        // 既存挙動回帰（resolved_instruments=None）
+        let mut form = ReplayFormModal::default();
+        let scenario = serde_json::json!({
+            "schema_version": 2,
+            "instruments": ["1301.TSE", "7203.TSE"],
+        });
+        form.prefill_from_scenario(std::path::PathBuf::from("/tmp/multi.py"), &scenario, None);
+        assert_eq!(form.instrument_id, "1301.TSE, 7203.TSE");
     }
 
     #[test]

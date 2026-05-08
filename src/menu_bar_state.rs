@@ -39,18 +39,30 @@ pub struct ReplayBarState {
 
 impl ReplayBarState {
     /// Prefill fields from a SCENARIO JSON object (mirrors `ReplayFormModal::prefill_from_scenario`).
-    pub fn prefill_from_scenario(&mut self, path: PathBuf, scenario: &serde_json::Value) {
+    pub fn prefill_from_scenario(
+        &mut self,
+        path: PathBuf,
+        scenario: &serde_json::Value,
+        resolved_instruments: Option<&[String]>,
+    ) {
         self.strategy_file = Some(path);
         let Some(obj) = scenario.as_object() else {
             return;
         };
-        if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
-            self.instrument_id = s.to_string();
-        }
-        if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
-            let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        // 優先順位: resolved_instruments (v3+ref) > instruments (v2) > instrument (v1)
+        if let Some(ids) = resolved_instruments {
             if !ids.is_empty() {
                 self.instrument_id = ids.join(", ");
+            }
+        } else {
+            if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
+                self.instrument_id = s.to_string();
+            }
+            if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
+                let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                if !ids.is_empty() {
+                    self.instrument_id = ids.join(", ");
+                }
             }
         }
         if let Some(s) = obj.get("start").and_then(|v| v.as_str()) {
@@ -432,6 +444,36 @@ mod tests {
             !next.live_bar.live_paused,
             "LivePressPlay should set live_paused = false"
         );
+    }
+
+    #[test]
+    fn replay_bar_state_prefill_v3_resolved() {
+        let mut replay_bar = ReplayBarState::default();
+        let scenario = serde_json::json!({
+            "schema_version": 3,
+            "instruments_ref": "data/universe.json#/instruments",
+            "instruments": ["FROM_INSTRUMENTS", "IGNORED"],
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1_000_000_u64,
+        });
+        let resolved = vec!["1301.TSE".to_string(), "7203.TSE".to_string()];
+        replay_bar.prefill_from_scenario(
+            PathBuf::from("/tmp/s.py"),
+            &scenario,
+            Some(resolved.as_slice()),
+        );
+        assert_eq!(replay_bar.instrument_id, "1301.TSE, 7203.TSE");
+    }
+
+    #[test]
+    fn replay_bar_state_prefill_v3_resolved_empty_keeps_existing() {
+        let mut replay_bar = ReplayBarState::default();
+        replay_bar.instrument_id = "EXISTING".to_string();
+        let scenario = serde_json::json!({"schema_version": 3});
+        replay_bar.prefill_from_scenario(PathBuf::from("/tmp/s.py"), &scenario, Some(&[]));
+        assert_eq!(replay_bar.instrument_id, "EXISTING");
     }
 
     #[test]

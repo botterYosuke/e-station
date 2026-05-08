@@ -1626,11 +1626,12 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             request_id,
             path,
             scenario,
-            ..
+            resolved_instruments,
         } => Some(Message::Replay(ReplayMsg::ScenarioLoaded {
             request_id,
             path: std::path::PathBuf::from(path),
             scenario,
+            resolved_instruments,
         })),
         // F6a: SCENARIO 抽出失敗 → エラートースト
         EngineEvent::StrategyScenarioLoadFailed {
@@ -3769,8 +3770,8 @@ mod native_menu_handler_tests {
             "FormMsg Submit must write initial_cash back to replay_bar: {body}"
         );
         assert!(
-            body.contains("join"),
-            "FormMsg Submit must join instrument_ids with a separator: {body}"
+            body.contains("[0]") || body.contains(".get(0)"),
+            "FormMsg Submit must display only first instrument_id (not join all): {body}"
         );
     }
 

@@ -84,7 +84,8 @@ impl crate::Flowsurface {
                                         .await
                                         .map_err(|e| e.to_string())
                                     },
-                                    move |res| match res {
+                                    move |res| {
+                                        match res {
                                         Ok(()) => {
                                             Message::Menu(MenuMsg::Bar(
                                                 crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
@@ -104,6 +105,7 @@ impl crate::Flowsurface {
                                                 },
                                             ))
                                         }
+                                    }
                                     },
                                 )
                             } else {
