@@ -1588,6 +1588,12 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
                 AttemptedCommand::ForceStopReplay => {
                     Some(Message::Window(WindowMsg::ModeSwitchEngineBusy(reason)))
                 }
+                AttemptedCommand::PauseReplay => {
+                    Some(Message::Engine(EngineMsg::PauseReplayBusy { reason }))
+                }
+                AttemptedCommand::ResumeReplay => {
+                    Some(Message::Engine(EngineMsg::ResumeReplayBusy { reason }))
+                }
                 _ => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
                     "操作を受け付けられませんでした: {attempted_command} — {reason}"
                 ))))),
@@ -3694,6 +3700,43 @@ mod native_menu_handler_tests {
         assert!(
             !body.contains("prefill_from_scenario"),
             "StrategyScenarioLoadFailedEvent must NOT prefill the modal on failure"
+        );
+    }
+
+    // Issue 4 regression: FormMsg Submit must write back all fields to ReplayBarState.
+    // instrument_id uses join(", ") for multi-instrument; other fields come from
+    // the validated Action::Submit payload (not from DataLoaded, which lacks
+    // start_date / end_date / initial_cash / strategy_file).
+    #[test]
+    fn form_submit_writes_all_fields_back_to_replay_bar() {
+        let body = replay_handler_body("            ReplayMsg::FormMsg(msg) =>");
+        assert!(
+            body.contains("replay_bar.instrument_id"),
+            "FormMsg Submit must write instrument_id back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.start_date"),
+            "FormMsg Submit must write start_date back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.end_date"),
+            "FormMsg Submit must write end_date back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.granularity"),
+            "FormMsg Submit must write granularity back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.strategy_file"),
+            "FormMsg Submit must write strategy_file back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.initial_cash"),
+            "FormMsg Submit must write initial_cash back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("join"),
+            "FormMsg Submit must join instrument_ids with a separator: {body}"
         );
     }
 }

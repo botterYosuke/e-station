@@ -214,6 +214,8 @@ fn engine_busy_dispatch_limited_to_stop_replay_commands() {
         .find("EngineEvent::EngineBusy {")
         .expect("EngineEvent::EngineBusy dispatch must exist");
     let after = &src[busy_start..];
+    // NOTE: このテストは src/main.rs のテキスト内容を直接検査する source-inspection テスト。
+    // map_engine_event_to_message の構造が大幅に変わった場合は終端文字列も更新が必要。
     // End at the closing `}` of the match arm (next `EngineEvent::` or `_ =>` line)
     let end = after[1..]
         .find("\n        EngineEvent::")
@@ -221,10 +223,15 @@ fn engine_busy_dispatch_limited_to_stop_replay_commands() {
         .map(|i| i + 1)
         .unwrap_or(after.len());
     let body = &after[..end];
+    // NOTE: このチェックは `src/main.rs` の EngineBusy dispatch body（`_ =>` までの範囲）内に
+    // 各 variant の文字列が存在することを確認する。コメントでの残存リスクを避けるため、
+    // body の終端を `_ =>` で区切っている。
     assert!(
         body.contains("AttemptedCommand::StopReplay")
-            && body.contains("AttemptedCommand::ForceStopReplay"),
-        "EngineBusy dispatch must match AttemptedCommand::StopReplay | ForceStopReplay"
+            && body.contains("AttemptedCommand::ForceStopReplay")
+            && body.contains("AttemptedCommand::PauseReplay")
+            && body.contains("AttemptedCommand::ResumeReplay"),
+        "EngineBusy dispatch must match AttemptedCommand::StopReplay | ForceStopReplay | PauseReplay | ResumeReplay"
     );
     assert!(
         !body.contains("MODE_SWITCHING"),
