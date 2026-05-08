@@ -123,6 +123,7 @@ const REQUIRED_EXPLICIT_ARMS: &[&str] = &[
     "EngineEvent::RestoreSnapshot",
     "EngineEvent::ReplayHistoryChanged",
     "EngineEvent::DateChangeMarker",
+    "EngineEvent::ReplayTimeUpdated",
 ];
 
 #[test]
@@ -152,9 +153,10 @@ fn engine_event_variant_count_is_as_expected() {
     // Exact count pinned 2026-05-08. If this fails: a variant was added or removed.
     // When adding a new EngineEvent variant, ALSO add an explicit arm in
     // `map_engine_event_to_message` (src/main.rs) — do NOT rely on `_ => None`.
+    // schema 3.22: ReplayTimeUpdated 追加で 52 → 53
     assert_eq!(
-        count, 52,
-        "EngineEvent variant count changed (got {count}, expected 52). \
+        count, 53,
+        "EngineEvent variant count changed (got {count}, expected 53). \
          Ensure the new/removed variant has an explicit arm in map_engine_event_to_message."
     );
 }

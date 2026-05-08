@@ -853,12 +853,16 @@ class _GrpcAttachClient:
         """gRPC イベントストリームを受信して recv_queue に積む。"""
         from google.protobuf.json_format import MessageToDict
         from engine.server_grpc import _EVENT_TO_FIELD_AND_CLASS
+        import grpc
 
         # ループ外で逆引きマップを 1 度だけ構築する（H-NEW-1）
         _field_to_event = {v[0]: k for k, v in _EVENT_TO_FIELD_AND_CLASS.items()}
 
         try:
-            async for event in response_stream:
+            while True:
+                event = await response_stream.read()
+                if event == grpc.aio.EOF:
+                    break
                 # proto Event → dict 変換
                 event_dict = MessageToDict(
                     event,
@@ -908,6 +912,18 @@ class _GrpcAttachClient:
             return
 
         payload_dict = {k: v for k, v in cmd.items() if k != "op"}
+        
+        # M-NEW-2: ParseDict のため、granularity Enum を protobuf 形式 ("REPLAY_GRANULARITY_MINUTE" 等) に変換
+        def _fix_enum(d: dict):
+            for k, v in list(d.items()):
+                if k == "granularity" and isinstance(v, str) and not v.startswith("REPLAY_GRANULARITY_"):
+                    d[k] = f"REPLAY_GRANULARITY_{v.upper()}"
+                elif k == "engine" and isinstance(v, str) and not v.startswith("ENGINE_KIND_"):
+                    d[k] = f"ENGINE_KIND_{v.upper()}"
+                elif isinstance(v, dict):
+                    _fix_enum(v)
+        _fix_enum(payload_dict)
+
         try:
             from engine.proto import engine_pb2 as pb2
             # Get the field descriptor to find the message class
@@ -960,7 +976,6 @@ class _GrpcAttachClient:
                 evt_rid = msg.get("request_id")
                 if (
                     self._current_request_id is not None
-                    and evt_rid is not None
                     and evt_rid != self._current_request_id
                 ):
                     log.debug(

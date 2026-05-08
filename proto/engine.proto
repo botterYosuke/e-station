@@ -131,6 +131,7 @@ message Event {
     StrategyScenarioSavedEvent      strategy_scenario_saved     = 49;
     ClientDisconnectedEvent         client_disconnected         = 50;
     LiveBuyingPowerEvent            live_buying_power           = 51;
+    ReplayTimeUpdatedEvent          replay_time_updated         = 52;
   }
 }
 
@@ -661,6 +662,12 @@ message DateChangeMarkerEvent {
   string date = 1;  // ISO 8601 date e.g. "2024-01-15"
 }
 
+// Emitted after each bar/tick during streaming replay (schema 3.22).
+// Allows the menu bar to display current replay time at sub-day granularity.
+message ReplayTimeUpdatedEvent {
+  int64 timestamp_ms = 1;  // Unix milliseconds of the current replay item
+}
+
 // Emitted before restoring a snapshot (StepBackward operation).
 message RestoreSnapshotEvent {
   uint64 step_index  = 1;
@@ -696,7 +703,8 @@ message ClientDisconnectedEvent {
 message StrategyScenarioLoadedEvent {
   string          request_id = 1;
   string          path       = 2;
-  optional string scenario   = 3;  // JSON-encoded dict or absent
+  optional string scenario   = 3;  // JSON-encoded dict or absent (raw, instruments_ref preserved)
+  repeated string resolved_instruments = 4;  // v3 + instruments_ref のとき Python が解決した銘柄リスト。空は None 扱い
 }
 
 message StrategyScenarioLoadFailedEvent {

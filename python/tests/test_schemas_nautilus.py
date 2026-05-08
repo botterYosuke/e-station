@@ -41,7 +41,9 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # kabu venue Phase 2: SCHEMA_MINOR を 18 → 19 に bump (発注経路 + RATE_LIMITED / UNSUPPORTED_INSTRUMENT reason_code)
     # kabu venue Phase 4 (P4-3): SCHEMA_MINOR を 19 → 20 に bump (venue_capabilities.kabu_station.is_production)
     # fee_total: SCHEMA_MINOR を 20 → 21 に bump (ExecutionMarker.commission 追加)
-    assert s.SCHEMA_MINOR == 21
+    # schema 3.22: SCHEMA_MINOR を 21 → 22 に bump (ReplayTimeUpdated 追加)
+    # schema 3.23: SCHEMA_MINOR を 22 → 23 に bump (StrategyScenarioLoaded.resolved_instruments 追加)
+    assert s.SCHEMA_MINOR == 23
     assert s.SCHEMA_MAJOR == 3
 
 

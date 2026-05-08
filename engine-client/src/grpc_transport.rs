@@ -990,6 +990,12 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
                     })
                     .ok()
             }),
+            // proto repeated string: 空 Vec は None（v1/v2）、非空は Some（v3 + ref）
+            resolved_instruments: if ssl.resolved_instruments.is_empty() {
+                None
+            } else {
+                Some(ssl.resolved_instruments)
+            },
         }),
         Payload::StrategyScenarioLoadFailed(sslf) => {
             Some(dto::EngineEvent::StrategyScenarioLoadFailed {
@@ -1010,6 +1016,10 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             buying_power: lbp.buying_power,
             equity: lbp.equity,
             ts_event_ms: lbp.ts_event_ms,
+        }),
+        // schema 3.22: per-tick replay time signal
+        Payload::ReplayTimeUpdated(rtu) => Some(dto::EngineEvent::ReplayTimeUpdated {
+            timestamp_ms: rtu.timestamp_ms,
         }),
     }
 }

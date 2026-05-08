@@ -28,6 +28,14 @@ pub(crate) enum EngineMsg {
     /// EngineMsg グループ内にあるのは「engine に対するコマンドの結果」という文脈のため。
     /// Task::none() の代替として使用される。
     Noop,
+    /// Python state guard が PauseReplay を拒否した — replay_paused を false に戻す。
+    PauseReplayBusy {
+        reason: String,
+    },
+    /// Python state guard が ResumeReplay を拒否した — replay_paused を true に戻す。
+    ResumeReplayBusy {
+        reason: String,
+    },
 }
 
 // ── Venue ────────────────────────────────────────────────────────────────────
@@ -154,6 +162,10 @@ pub(crate) enum ReplayMsg {
         request_id: String,
         path: std::path::PathBuf,
         reason: String,
+    },
+    /// schema 3.22: per-tick replay time signal (Issue 3).
+    TimeUpdated {
+        timestamp_ms: i64,
     },
     StopReplayOnly,
     FormMsg(modal::replay_form::Message),

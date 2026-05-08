@@ -278,6 +278,51 @@ class TestMsgbusTopic:
         )
 
 
+class TestStreamingFillsEmitPositionsUpdated:
+    """Issue 5: fill 後に PositionsUpdated が emit されることを検証する。
+
+    fill 単位のみで emit される（bar MTM では emit しない）ため、
+    2 fills (BUY, SELL) に対して PositionsUpdated は 2 件のみ。
+    """
+
+    def test_emits_one_positions_updated_per_fill(self) -> None:
+        events = _run_and_collect()
+        pos_events = [e for e in events if e["event"] == "PositionsUpdated"]
+        # 2 fills (bar1 BUY / bar2 SELL) → 2 PositionsUpdated
+        # bar MTM では emit しないこと（過剰 emit 防止）
+        assert len(pos_events) == 2, (
+            f"expected 2 PositionsUpdated (fill 単位), got {len(pos_events)}. "
+            f"bar MTM 起点で emit していないか？"
+        )
+
+    def test_positions_updated_has_required_wire_fields(self) -> None:
+        events = _run_and_collect()
+        pos_events = [e for e in events if e["event"] == "PositionsUpdated"]
+        for ev in pos_events:
+            assert ev["request_id"] == "", "push 型は request_id 空"
+            assert ev["venue"] == "replay"
+            assert isinstance(ev["ts_ms"], int) and ev["ts_ms"] > 0
+            assert "positions" in ev
+
+    def test_positions_after_buy_contains_position(self) -> None:
+        """bar 1 BUY fill 後の PositionsUpdated に保有が反映されている。"""
+        events = _run_and_collect()
+        pos_events = [e for e in events if e["event"] == "PositionsUpdated"]
+        first = pos_events[0]
+        assert len(first["positions"]) == 1
+        p = first["positions"][0]
+        assert p["instrument_id"] == "1301.TSE"
+        assert Decimal(p["qty"]) == Decimal("100")
+        assert p["venue"] == "replay"
+
+    def test_positions_after_sell_is_empty(self) -> None:
+        """bar 2 SELL でクローズ後の PositionsUpdated は空。"""
+        events = _run_and_collect()
+        pos_events = [e for e in events if e["event"] == "PositionsUpdated"]
+        last = pos_events[-1]
+        assert last["positions"] == []
+
+
 class TestStreamingFillsPassPydanticSchema:
     """emit されたイベントが pydantic IPC スキーマを通過することを検証する。"""
 

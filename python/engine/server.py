@@ -125,6 +125,59 @@ class LiveState(Enum):
     STOPPING = auto()   # Phase 2: graceful stop 待ち
 
 
+# ── Issue 5: replay PositionsUpdated push helper ────────────────────────────
+
+
+def build_replay_positions_event(portfolio_state: dict, ts_ms: int) -> dict:
+    """portfolio_state dict から replay 用 PositionsUpdated event を生成する。
+
+    portfolio_state 形式: ``{"cash": str, "positions": {inst: {qty, cost}},
+    "last_prices": {inst: str}}`` (PortfolioView.to_snapshot_dict() 由来)。
+
+    market_value = qty * last_price。last_price 不明時は "" を返す
+    (PositionRecordWire schema が "" を許容)。
+    instrument_id 順にソートし、決定論性を確保する。
+    """
+    from decimal import Decimal, InvalidOperation
+
+    positions = portfolio_state.get("positions", {}) or {}
+    last_prices = portfolio_state.get("last_prices", {}) or {}
+
+    rows = []
+    for inst_id in sorted(positions.keys()):
+        pos_data = positions[inst_id]
+        qty_str = str(pos_data.get("qty", "0"))
+
+        price_raw = last_prices.get(inst_id, "")
+        try:
+            if price_raw not in ("", None):
+                mv = Decimal(qty_str) * Decimal(str(price_raw))
+                mv_str = str(int(mv))
+            else:
+                mv_str = ""
+        except (InvalidOperation, ValueError, TypeError):
+            mv_str = ""
+
+        rows.append({
+            "instrument_id": inst_id,
+            "qty": qty_str,
+            "market_value": mv_str,
+            # PositionType (Rust dto.rs) は cash | margin_credit | margin_general のみ。
+            # replay は現物のみシミュレートするため "cash" 固定。
+            "position_type": "cash",
+            "tategyoku_id": None,
+            "venue": "replay",
+        })
+
+    return {
+        "event": "PositionsUpdated",
+        "request_id": "",
+        "venue": "replay",
+        "positions": rows,
+        "ts_ms": ts_ms,
+    }
+
+
 # ── schema 3.16: Snapshot ring buffer ────────────────────────────────────────
 
 
@@ -1193,6 +1246,14 @@ class DataEngineServer:
                 "request_id": "",
                 "orders": list(self._replay_streaming_fills),
             })
+            # 2.7 (Issue 5): PositionsUpdated を push して replay Positions pane を更新。
+            # snap.portfolio_state から build (request_id="" の push 型)。
+            self._outbox.append(
+                build_replay_positions_event(
+                    snap.portfolio_state,
+                    int(time.time() * 1000),
+                )
+            )
             # 3. ui_events を再 emit（Rust UI が RestoreSnapshot 受信済みのため重複扱いにならない）
             for ev in snap.ui_events:
                 self._outbox.append(ev)

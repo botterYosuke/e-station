@@ -119,6 +119,10 @@ impl crate::Flowsurface {
                     // Trade tick：bar 無しなので CandlestickChart はスキップ。
                     Some(engine_client::dto::ReplayGranularity::Trade) | None => None,
                 };
+                // Sync bar to first instrument so the read-only label reflects what's loaded.
+                self.menu_bar.replay_bar.instrument_id = ids[0].clone();
+                // Clear stale time display from previous replay session (Issue 3).
+                self.menu_bar.replay_bar.current_day = None;
                 let main_window_id = self.main_window.id;
                 self.replay_running = true;
                 log::info!(
@@ -180,6 +184,17 @@ impl crate::Flowsurface {
             // schema 3.15: replay bar current-day display update.
             ReplayMsg::DateChanged(date) => {
                 self.menu_bar.replay_bar.current_day = Some(date);
+                return Task::none();
+            }
+            // schema 3.22: per-tick replay time signal — update current_day with sub-day
+            // precision. TimeUpdated arrives after DateChanged for the same tick, so it
+            // overwrites the date-only string with a formatted timestamp.
+            ReplayMsg::TimeUpdated { timestamp_ms } => {
+                let formatted = crate::format_replay_time(
+                    timestamp_ms,
+                    self.menu_bar.replay_bar.granularity.as_ref(),
+                );
+                self.menu_bar.replay_bar.current_day = Some(formatted);
                 return Task::none();
             }
             // schema 3.16: replay history changed — update ⏮ button enable state.
@@ -337,6 +352,14 @@ impl crate::Flowsurface {
                             initial_cash,
                         }) => {
                             self.replay_form_modal = None;
+                            // Write back validated form values to ReplayBarState so the
+                            // menu bar displays the active replay settings.
+                            self.menu_bar.replay_bar.instrument_id = instrument_ids.join(", ");
+                            self.menu_bar.replay_bar.start_date = start_date.clone();
+                            self.menu_bar.replay_bar.end_date = end_date.clone();
+                            self.menu_bar.replay_bar.granularity = Some(granularity.clone());
+                            self.menu_bar.replay_bar.strategy_file = Some(strategy_file.clone());
+                            self.menu_bar.replay_bar.initial_cash = initial_cash.to_string();
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                 let strategy_file_str =
                                     strategy_file.to_string_lossy().into_owned();

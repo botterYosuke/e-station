@@ -607,12 +607,14 @@ def test_saved_error_is_known_literal() -> None:
         "missing_scenario_field",
         "validate_failed",
         "syntax_error",
+        "unresolved_ref",            # Step 5: instruments_ref 参照解決失敗
+        "relative_ref_crosses_dir",  # Step 5: Save As で相対 ref の base_dir が変わる
     }
     assert known_values == expected, (
         f"SaveErrorCode の Literal 値が想定と異なる: {known_values} vs {expected}"
     )
 
-    # 各 8 値で StrategyScenarioSaved を構築でき、wire payload (model_dump) でも
+    # 各 10 値で StrategyScenarioSaved を構築でき、wire payload (model_dump) でも
     # error 値が想定値どおり残ることを確認する（H-R2-1 の送信パイプライン整合）。
     for code in expected:
         evt = StrategyScenarioSaved(

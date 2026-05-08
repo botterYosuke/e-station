@@ -5,13 +5,14 @@ extract() と validate() の RED フェーズ TDD テスト。
 
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 
-from engine.scenario import ScenarioValidationError, extract, validate
+from engine.scenario import ScenarioValidationError, extract, resolve_refs, validate
 
 # ---------------------------------------------------------------------------
 # ヘルパー
@@ -433,4 +434,252 @@ def test_load_failed_log_format(tmp_path: Path, caplog) -> None:
         f"`scenario.load failed reason=` を含む WARN ログが出ていない:\n"
         f"records: {[r.getMessage() for r in caplog.records]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Step 1: ScenarioValidationError.code 属性
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_validation_error_code_attr() -> None:
+    """ScenarioValidationError.code 属性が正しくセットされること（R1-Finding-3）。"""
+    # code=None（デフォルト）
+    err_default = ScenarioValidationError("schema error")
+    assert hasattr(err_default, "code"), "code 属性が存在しない"
+    assert err_default.code is None, f"code=None のデフォルトが期待値と異なる: {err_default.code!r}"
+
+    # code="unresolved_ref"
+    err_ref = ScenarioValidationError("ref error", code="unresolved_ref")
+    assert err_ref.code == "unresolved_ref", f"code='unresolved_ref' が期待値と異なる: {err_ref.code!r}"
+
+    # code="schema"
+    err_schema = ScenarioValidationError("bad shape", code="schema")
+    assert err_schema.code == "schema", f"code='schema' が期待値と異なる: {err_schema.code!r}"
+
+    # 既存の Exception インタフェース（str(e)）が壊れないこと
+    assert str(err_default) == "schema error"
+    assert str(err_ref) == "ref error"
+
+
+# ---------------------------------------------------------------------------
+# Step 2/3: resolve_refs — v3 instruments_ref 解決
+# ---------------------------------------------------------------------------
+
+
+def _make_universe_json(tmp_path: Path, instruments: object, filename: str = "universe.json") -> Path:
+    """テスト用の外部 JSON ファイルを tmp_path に作成して返す。"""
+    p = tmp_path / filename
+    p.write_text(json.dumps(instruments), encoding="utf-8")
+    return p
+
+
+def test_v3_scenario_with_instruments_ref(tmp_path: Path) -> None:
+    """tmp 配下に JSON を作って ref 経由で instruments が読み込まれること。"""
+    _make_universe_json(tmp_path, ["1301.TSE", "7203.TSE", "9984.TSE"])
+    d = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    result = resolve_refs(d, base_dir=tmp_path)
+    assert result["instruments"] == ["1301.TSE", "7203.TSE", "9984.TSE"]
+
+
+def test_v3_scenario_inline_instruments(tmp_path: Path) -> None:
+    """instruments_ref 無しの v3（instruments 直書き）が v2 と同じく動くこと。"""
+    d = {
+        "schema_version": 3,
+        "instruments": ["1301.TSE", "7203.TSE"],
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    result = resolve_refs(d, base_dir=tmp_path)
+    assert result["instruments"] == ["1301.TSE", "7203.TSE"]
+
+
+def test_v3_scenario_both_keys_rejected(tmp_path: Path) -> None:
+    """instruments と instruments_ref 同居で ScenarioValidationError。"""
+    _make_universe_json(tmp_path, ["1301.TSE"])
+    d = {
+        "schema_version": 3,
+        "instruments": ["7203.TSE"],
+        "instruments_ref": "universe.json",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    with pytest.raises(ScenarioValidationError):
+        resolve_refs(d, base_dir=tmp_path)
+
+
+def test_v3_scenario_missing_file(tmp_path: Path) -> None:
+    """ref 先 .json が存在しないと ScenarioValidationError(code='unresolved_ref')。"""
+    d = {
+        "schema_version": 3,
+        "instruments_ref": "nonexistent.json",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    with pytest.raises(ScenarioValidationError) as exc_info:
+        resolve_refs(d, base_dir=tmp_path)
+    assert exc_info.value.code == "unresolved_ref", (
+        f"code='unresolved_ref' が期待値と異なる: {exc_info.value.code!r}"
+    )
+
+
+def test_v3_scenario_pointer_invalid(tmp_path: Path) -> None:
+    """#/nonexistent で code='unresolved_ref'。"""
+    _make_universe_json(tmp_path, {"instruments": ["1301.TSE"]})
+    d = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json#/nonexistent",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    with pytest.raises(ScenarioValidationError) as exc_info:
+        resolve_refs(d, base_dir=tmp_path)
+    assert exc_info.value.code == "unresolved_ref"
+
+
+def test_v3_scenario_pointer_root(tmp_path: Path) -> None:
+    """# または空 pointer で root をそのまま list として返すこと。"""
+    _make_universe_json(tmp_path, ["1301.TSE", "7203.TSE"])
+
+    # "#" のみ
+    d_hash = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json#",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    result = resolve_refs(d_hash, base_dir=tmp_path)
+    assert result["instruments"] == ["1301.TSE", "7203.TSE"]
+
+    # ポインタ部分が空（"#" なし）
+    d_no_hash = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    result2 = resolve_refs(d_no_hash, base_dir=tmp_path)
+    assert result2["instruments"] == ["1301.TSE", "7203.TSE"]
+
+
+def test_v3_scenario_pointer_escape(tmp_path: Path) -> None:
+    """~0 / ~1 のエスケープ動作（RFC 6901）。"""
+    data = {"a/b": {"c~d": ["1301.TSE"]}}
+    _make_universe_json(tmp_path, data)
+
+    # ~1 → / , ~0 → ~
+    d = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json#/a~1b/c~0d",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    result = resolve_refs(d, base_dir=tmp_path)
+    assert result["instruments"] == ["1301.TSE"]
+
+
+def test_v3_scenario_ref_must_be_list_of_str(tmp_path: Path) -> None:
+    """ref 先が list[int] / dict / str で code='unresolved_ref'。"""
+    for bad_value in ([1, 2, 3], {"key": "val"}, "not_a_list"):
+        _make_universe_json(tmp_path, bad_value, "bad.json")
+        d = {
+            "schema_version": 3,
+            "instruments_ref": "bad.json",
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1_000_000,
+        }
+        with pytest.raises(ScenarioValidationError) as exc_info:
+            resolve_refs(d, base_dir=tmp_path)
+        assert exc_info.value.code == "unresolved_ref", (
+            f"bad_value={bad_value!r} で code='unresolved_ref' が期待値と異なる: {exc_info.value.code!r}"
+        )
+
+
+def test_v3_scenario_resolve_does_not_mutate_input(tmp_path: Path) -> None:
+    """resolve_refs(d) が元 d を破壊しないこと。"""
+    _make_universe_json(tmp_path, ["1301.TSE"])
+    d = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    original_keys = set(d.keys())
+    resolve_refs(d, base_dir=tmp_path)
+    assert set(d.keys()) == original_keys, "resolve_refs が元 dict のキーを変更した"
+    assert "instruments" not in d, "元 dict に 'instruments' キーが追加された（破壊的変更）"
+
+
+def test_v3_scenario_resolve_keeps_instruments_ref(tmp_path: Path) -> None:
+    """resolve 後 dict に instruments_ref キーが残ること（非破壊仕様 / R1-Finding-1）。"""
+    _make_universe_json(tmp_path, ["1301.TSE"])
+    d = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json",
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    result = resolve_refs(d, base_dir=tmp_path)
+    assert "instruments_ref" in result, "resolve 後の dict から instruments_ref が消えた"
+    assert result["instruments_ref"] == "universe.json"
+
+
+# ---------------------------------------------------------------------------
+# Step 4: _validate_v3 / validate() dispatch 拡張
+# ---------------------------------------------------------------------------
+
+
+def test_validate_v3_with_instruments_and_ref() -> None:
+    """instruments + instruments_ref 両持ちの resolve 後 dict が validate を pass すること。"""
+    # resolve 後の dict（instruments が解決済み、instruments_ref も保持）
+    d = {
+        "schema_version": 3,
+        "instruments": ["1301.TSE", "7203.TSE"],
+        "instruments_ref": "universe.json",  # resolve 後も保持される
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    validate(d)  # 例外が出なければ OK
+
+
+def test_validate_v3_unresolved_dict_rejected() -> None:
+    """resolve 前 dict（instruments 欠落）を validate に通すと ScenarioValidationError。"""
+    d = {
+        "schema_version": 3,
+        "instruments_ref": "universe.json",  # instruments は未解決
+        "start": "2025-01-06",
+        "end": "2025-01-10",
+        "granularity": "Minute",
+        "initial_cash": 1_000_000,
+    }
+    with pytest.raises(ScenarioValidationError):
+        validate(d)
 

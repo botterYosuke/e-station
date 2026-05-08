@@ -192,6 +192,14 @@ impl State {
         }
     }
 
+    /// Issue 5: Create a REPLAY Positions pane. push 型 `PositionsUpdated` で更新される。
+    pub fn new_replay_positions() -> Self {
+        Self {
+            content: Content::Positions(panel::positions::PositionsPanel::new_replay()),
+            ..Default::default()
+        }
+    }
+
     pub fn clear_replay_chart_data(&mut self) {
         match &mut self.content {
             Content::Kline {

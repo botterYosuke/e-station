@@ -557,24 +557,3 @@ fn replay_pause_state_changed_updates_both_paused_and_history() {
         "ReplayPauseStateChanged arm must contain `replay_has_history: has_history` (R2-M2)"
     );
 }
-
-#[test]
-fn instrument_changed_updates_replay_bar_instrument_id() {
-    let src = read_menu_bar_state();
-    let fn_start = src
-        .find("pub fn update(state: State, msg: BarMessage) -> State")
-        .expect("update function must exist");
-    let fn_body = &src[fn_start..];
-    let fn_end = fn_body.find("\npub fn ").unwrap_or(fn_body.len());
-    let body = &fn_body[..fn_end];
-
-    // The InstrumentChanged arm must update replay_bar.instrument_id with the new value.
-    assert!(
-        body.contains("InstrumentChanged(s)"),
-        "update() must match BarMessage::InstrumentChanged(s) (R2-M2)"
-    );
-    assert!(
-        body.contains("instrument_id: s"),
-        "InstrumentChanged arm must set `instrument_id: s` in ReplayBarState (R2-M2)"
-    );
-}

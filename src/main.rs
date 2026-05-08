@@ -1591,6 +1591,12 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
                 AttemptedCommand::ForceStopReplay => {
                     Some(Message::Window(WindowMsg::ModeSwitchEngineBusy(reason)))
                 }
+                AttemptedCommand::PauseReplay => {
+                    Some(Message::Engine(EngineMsg::PauseReplayBusy { reason }))
+                }
+                AttemptedCommand::ResumeReplay => {
+                    Some(Message::Engine(EngineMsg::ResumeReplayBusy { reason }))
+                }
                 _ => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
                     "操作を受け付けられませんでした: {attempted_command} — {reason}"
                 ))))),
@@ -1660,6 +1666,10 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::DateChangeMarker { date } => {
             Some(Message::Replay(ReplayMsg::DateChanged(date)))
         }
+        // schema 3.22: ReplayTimeUpdated — 分足・tick 足での時刻表示（Issue 3）。
+        EngineEvent::ReplayTimeUpdated { timestamp_ms } => {
+            Some(Message::Replay(ReplayMsg::TimeUpdated { timestamp_ms }))
+        }
         // schema 3.16: RestoreSnapshot — Step- 後に Python が巻き戻し地点を通知する。
         // R2-H1: サイレント黙殺から「状態保持 + TODO」に昇格。
         // TODO: chart pane should flush data from ts_event_ms onward when RestoreSnapshot arrives.
@@ -1692,6 +1702,33 @@ fn format_live_time(ts_ms: i64) -> String {
         }
     };
     dt_utc.with_timezone(&jst).format("%H:%M:%S").to_string()
+}
+
+/// Format a replay timestamp (milliseconds since epoch) as a JST string.
+///
+/// `granularity` controls the output format:
+/// - `Some(Granularity::Daily)` → `%Y-%m-%d`
+/// - `None` or any other variant → `%H:%M:%S`
+///
+/// Returns `"--"` when `timestamp_ms` is out of range.
+pub(crate) fn format_replay_time(
+    timestamp_ms: i64,
+    granularity: Option<&crate::modal::replay_form::Granularity>,
+) -> String {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    let jst = FixedOffset::east_opt(9 * 3600).expect("9h offset is valid");
+    match Utc.timestamp_millis_opt(timestamp_ms).single() {
+        Some(dt) => {
+            let dt_jst = dt.with_timezone(&jst);
+            match granularity {
+                Some(crate::modal::replay_form::Granularity::Daily) => {
+                    dt_jst.format("%Y-%m-%d").to_string()
+                }
+                _ => dt_jst.format("%H:%M:%S").to_string(),
+            }
+        }
+        None => "--".to_string(),
+    }
 }
 
 fn status_bar_label(is_replay: bool, enabled: bool) -> &'static str {
@@ -3697,6 +3734,81 @@ mod native_menu_handler_tests {
         assert!(
             !body.contains("prefill_from_scenario"),
             "StrategyScenarioLoadFailedEvent must NOT prefill the modal on failure"
+        );
+    }
+
+    // Issue 4 regression: FormMsg Submit must write back all fields to ReplayBarState.
+    // instrument_id uses join(", ") for multi-instrument; other fields come from
+    // the validated Action::Submit payload (not from DataLoaded, which lacks
+    // start_date / end_date / initial_cash / strategy_file).
+    #[test]
+    fn form_submit_writes_all_fields_back_to_replay_bar() {
+        let body = replay_handler_body("            ReplayMsg::FormMsg(msg) =>");
+        assert!(
+            body.contains("replay_bar.instrument_id"),
+            "FormMsg Submit must write instrument_id back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.start_date"),
+            "FormMsg Submit must write start_date back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.end_date"),
+            "FormMsg Submit must write end_date back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.granularity"),
+            "FormMsg Submit must write granularity back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.strategy_file"),
+            "FormMsg Submit must write strategy_file back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("replay_bar.initial_cash"),
+            "FormMsg Submit must write initial_cash back to replay_bar: {body}"
+        );
+        assert!(
+            body.contains("join"),
+            "FormMsg Submit must join instrument_ids with a separator: {body}"
+        );
+    }
+
+    // Issue 3 regression: ReplayTimeUpdated must be routed through map_engine_event_to_message
+    // and handled by the ReplayMsg::TimeUpdated arm. DataLoaded must also clear current_day
+    // so stale timestamps don't persist across replay sessions.
+    #[test]
+    fn replay_time_updated_is_routed_to_replay_msg() {
+        let src = include_str!("./main.rs");
+        assert!(
+            src.contains("EngineEvent::ReplayTimeUpdated"),
+            "map_engine_event_to_message must have a ReplayTimeUpdated arm"
+        );
+        assert!(
+            src.contains("TimeUpdated"),
+            "map_engine_event_to_message must map to ReplayMsg::TimeUpdated"
+        );
+    }
+
+    #[test]
+    fn replay_time_updated_handler_sets_current_day() {
+        let body = replay_handler_body("            ReplayMsg::TimeUpdated {");
+        assert!(
+            body.contains("current_day"),
+            "ReplayMsg::TimeUpdated handler must update current_day: {body}"
+        );
+        assert!(
+            body.contains("format"),
+            "ReplayMsg::TimeUpdated handler must format the timestamp: {body}"
+        );
+    }
+
+    #[test]
+    fn data_loaded_clears_current_day() {
+        let body = replay_handler_body("            ReplayMsg::DataLoaded {");
+        assert!(
+            body.contains("current_day"),
+            "DataLoaded handler must clear current_day to avoid showing stale time: {body}"
         );
     }
 }

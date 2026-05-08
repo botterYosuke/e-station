@@ -60,8 +60,10 @@ uv sync
 ### 3. live を触る
 
 ```bash
-cargo run -- --mode live
+uv run cargo run -- --mode live
 ```
+
+> **注意**: Rust アプリ内から Python エンジンを子プロセスとして起動するため、`uv run` を使って仮想環境のパスを通すか、事前に `.venv\Scripts\activate` などで仮想環境を有効化しておく必要があります（未設定の場合、`program not found` などのエラーが発生します）。
 
 最初のおすすめ:
 
@@ -73,7 +75,7 @@ cargo run -- --mode live
 ### 4. replay を触る
 
 ```bash
-cargo run -- --mode replay
+uv run cargo run -- --mode replay
 ```
 
 起動後は `ReplayControl` ペインで銘柄・期間を設定してデータをロードします。読み込み成功後は対象銘柄の `Kline Chart` と `Time & Sales`、セッション共通の `Order List (REPLAY)` と `Buying Power (REPLAY)` が自動生成されます。

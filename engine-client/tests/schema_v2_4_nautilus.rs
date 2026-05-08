@@ -40,10 +40,12 @@ fn schema_minor_matches_current_bump() {
     // schema 3.19: P3-1 Exchange::KabuStation* 市場細分化 + 先物・OP バリアント追加。
     // schema 3.20: P4-3 venue_capabilities.kabu_station に is_production フィールド追加。
     // schema 3.21: ExecutionMarker.commission 追加（fee_total 集計の上流）。
+    // schema 3.22: ReplayTimeUpdated 追加（分足・tick 足での current_day 時刻表示）。
+    // schema 3.23: StrategyScenarioLoaded.resolved_instruments 追加（schema v3 instruments_ref 対応）。
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        21,
-        "SCHEMA_MINOR must be 21 after fee_total (ExecutionMarker.commission)"
+        23,
+        "SCHEMA_MINOR must be 23 after StrategyScenarioLoaded.resolved_instruments (schema v3 instruments_ref)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

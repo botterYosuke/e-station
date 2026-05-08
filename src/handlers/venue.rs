@@ -539,6 +539,18 @@ impl crate::Flowsurface {
                 positions,
                 ts_ms,
             } => {
+                // Issue 5: push 型（request_id == ""）は replay 専用 pane へ配布。
+                // engine_runner の fill / server.py の StepBackward が起点。
+                if request_id.is_empty() {
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut().distribute_replay_positions(
+                        main_window,
+                        positions,
+                        ts_ms,
+                    );
+                    return Task::none();
+                }
+
                 let matches = self.positions_request_id.as_deref() == Some(request_id.as_str());
                 if !matches {
                     log::debug!(
