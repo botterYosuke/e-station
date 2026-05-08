@@ -785,7 +785,10 @@ fn main() {
         let app_mode: engine_client::dto::AppMode = cli_args.mode.into();
         log::info!("Started in mode: {}", app_mode.as_wire_str());
         // G3: grpc:// → http:// for tonic; http:// passes through unchanged.
-        let grpc_target = url_str.replacen("grpc://", "http://", 1);
+        // WS scheme validation is in CLI, but gRPC needs http://.
+        let grpc_target = url_str
+            .replacen("ws://", "http://", 1)
+            .replacen("grpc://", "http://", 1);
         match rt.block_on(engine_client::EngineConnection::connect_grpc(
             &grpc_target,
             &token,
@@ -1588,6 +1591,12 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
                 AttemptedCommand::ForceStopReplay => {
                     Some(Message::Window(WindowMsg::ModeSwitchEngineBusy(reason)))
                 }
+                AttemptedCommand::PauseReplay => {
+                    Some(Message::Engine(EngineMsg::PauseReplayBusy { reason }))
+                }
+                AttemptedCommand::ResumeReplay => {
+                    Some(Message::Engine(EngineMsg::ResumeReplayBusy { reason }))
+                }
                 _ => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
                     "操作を受け付けられませんでした: {attempted_command} — {reason}"
                 ))))),
@@ -1617,11 +1626,12 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             request_id,
             path,
             scenario,
-            ..
+            resolved_instruments,
         } => Some(Message::Replay(ReplayMsg::ScenarioLoaded {
             request_id,
             path: std::path::PathBuf::from(path),
             scenario,
+            resolved_instruments,
         })),
         // F6a: SCENARIO 抽出失敗 → エラートースト
         EngineEvent::StrategyScenarioLoadFailed {
@@ -1657,6 +1667,10 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::DateChangeMarker { date } => {
             Some(Message::Replay(ReplayMsg::DateChanged(date)))
         }
+        // schema 3.22: ReplayTimeUpdated — 分足・tick 足での時刻表示（Issue 3）。
+        EngineEvent::ReplayTimeUpdated { timestamp_ms } => {
+            Some(Message::Replay(ReplayMsg::TimeUpdated { timestamp_ms }))
+        }
         // schema 3.16: RestoreSnapshot — Step- 後に Python が巻き戻し地点を通知する。
         // R2-H1: サイレント黙殺から「状態保持 + TODO」に昇格。
         // TODO: chart pane should flush data from ts_event_ms onward when RestoreSnapshot arrives.
@@ -1691,6 +1705,33 @@ fn format_live_time(ts_ms: i64) -> String {
     dt_utc.with_timezone(&jst).format("%H:%M:%S").to_string()
 }
 
+/// Format a replay timestamp (milliseconds since epoch) as a JST string.
+///
+/// `granularity` controls the output format:
+/// - `Some(Granularity::Daily)` → `%Y-%m-%d`
+/// - `None` or any other variant → `%H:%M:%S`
+///
+/// Returns `"--"` when `timestamp_ms` is out of range.
+pub(crate) fn format_replay_time(
+    timestamp_ms: i64,
+    granularity: Option<&crate::modal::replay_form::Granularity>,
+) -> String {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    let jst = FixedOffset::east_opt(9 * 3600).expect("9h offset is valid");
+    match Utc.timestamp_millis_opt(timestamp_ms).single() {
+        Some(dt) => {
+            let dt_jst = dt.with_timezone(&jst);
+            match granularity {
+                Some(crate::modal::replay_form::Granularity::Daily) => {
+                    dt_jst.format("%Y-%m-%d").to_string()
+                }
+                _ => dt_jst.format("%H:%M:%S").to_string(),
+            }
+        }
+        None => "--".to_string(),
+    }
+}
+
 fn status_bar_label(is_replay: bool, enabled: bool) -> &'static str {
     match (is_replay, enabled) {
         (false, true) => "● LIVE",
@@ -1714,14 +1755,35 @@ const STATUS_BAR_BG: iced::Color = iced::Color::from_rgb(0.08, 0.08, 0.08);
 fn venue_login_chip(
     label: &'static str,
     state: VenueState,
-    on_press: Message,
+    on_login: Message,
+    on_logout: Message,
     is_production: bool,
 ) -> Element<'static, Message> {
-    let (dot, dot_color, btn_label) = match &state {
-        VenueState::Idle => ("○", iced::Color::from_rgb(0.5, 0.5, 0.5), "ログイン"),
-        VenueState::LoginInFlight => ("⟳", iced::Color::from_rgb(0.9, 0.6, 0.1), ""),
-        VenueState::Ready => ("●", iced::Color::from_rgb(0.2, 0.75, 0.3), "再ログイン"),
-        VenueState::Error { .. } => ("●", iced::Color::from_rgb(0.9, 0.2, 0.2), "再ログイン"),
+    let (dot, dot_color, btn_label, on_press) = match &state {
+        VenueState::Idle => (
+            "○",
+            iced::Color::from_rgb(0.5, 0.5, 0.5),
+            "ログイン",
+            on_login,
+        ),
+        VenueState::LoginInFlight => (
+            "⟳",
+            iced::Color::from_rgb(0.9, 0.6, 0.1),
+            "",
+            on_login,
+        ),
+        VenueState::Ready => (
+            "●",
+            iced::Color::from_rgb(0.2, 0.75, 0.3),
+            "ログアウト",
+            on_logout,
+        ),
+        VenueState::Error { .. } => (
+            "●",
+            iced::Color::from_rgb(0.9, 0.2, 0.2),
+            "再ログイン",
+            on_login,
+        ),
     };
 
     // P4-4: 本番接続中は赤バナーで強調。文言は kabu_chip_prod_style() で一元管理し、
@@ -1859,12 +1921,14 @@ fn status_bar(
         "立花",
         tachibana,
         Message::Venue(VenueMsg::RequestTachibanaLogin(Trigger::Manual)),
+        Message::Venue(VenueMsg::RequestTachibanaLogout),
         false,
     );
     let kabu_chip = venue_login_chip(
         "kabu",
         kabu,
         Message::Venue(VenueMsg::RequestKabuLogin(Trigger::Manual)),
+        Message::Venue(VenueMsg::RequestKabuLogout),
         kabu_is_production(),
     );
 
@@ -3694,6 +3758,88 @@ mod native_menu_handler_tests {
         assert!(
             !body.contains("prefill_from_scenario"),
             "StrategyScenarioLoadFailedEvent must NOT prefill the modal on failure"
+        );
+    }
+
+    // Issue 4 regression: FormMsg Submit must write back all fields to ReplayBarState.
+    // instrument_id uses join(", ") for multi-instrument; other fields come from
+    // the validated Action::Submit payload (not from DataLoaded, which lacks
+    // start_date / end_date / initial_cash / strategy_file).
+    #[test]
+    fn form_submit_writes_all_fields_back_to_replay_bar() {
+        // H-2: Bar updates deferred until IPC success via CommitReplayBarState message
+        // FormMsg::Submit should emit CommitReplayBarState on IPC success
+        let body = replay_handler_body("            ReplayMsg::CommitReplayBarState {");
+        assert!(
+            body.contains("instrument_id"),
+            "CommitReplayBarState must update instrument_id: {body}"
+        );
+        assert!(
+            body.contains("start_date"),
+            "CommitReplayBarState must update start_date: {body}"
+        );
+        assert!(
+            body.contains("end_date"),
+            "CommitReplayBarState must update end_date: {body}"
+        );
+        assert!(
+            body.contains("granularity"),
+            "CommitReplayBarState must update granularity: {body}"
+        );
+        assert!(
+            body.contains("strategy_file"),
+            "CommitReplayBarState must update strategy_file: {body}"
+        );
+        assert!(
+            body.contains("initial_cash"),
+            "CommitReplayBarState must update initial_cash: {body}"
+        );
+        // Verify FormMsg::Submit dispatches via submit_result_to_message
+        // (which produces CommitReplayBarState for both BothOk and StartFailed
+        // outcomes — see handlers/replay.rs::tests for the pure-function
+        // coverage of those branches).
+        let submit_body = replay_handler_body("            ReplayMsg::FormMsg(msg) =>");
+        assert!(
+            submit_body.contains("submit_result_to_message"),
+            "FormMsg Submit must dispatch via submit_result_to_message on Task completion: {submit_body}"
+        );
+    }
+
+    // Issue 3 regression: ReplayTimeUpdated must be routed through map_engine_event_to_message
+    // and handled by the ReplayMsg::TimeUpdated arm. DataLoaded must also clear current_day
+    // so stale timestamps don't persist across replay sessions.
+    #[test]
+    fn replay_time_updated_is_routed_to_replay_msg() {
+        let src = include_str!("./main.rs");
+        assert!(
+            src.contains("EngineEvent::ReplayTimeUpdated"),
+            "map_engine_event_to_message must have a ReplayTimeUpdated arm"
+        );
+        assert!(
+            src.contains("TimeUpdated"),
+            "map_engine_event_to_message must map to ReplayMsg::TimeUpdated"
+        );
+    }
+
+    #[test]
+    fn replay_time_updated_handler_sets_current_day() {
+        let body = replay_handler_body("            ReplayMsg::TimeUpdated {");
+        assert!(
+            body.contains("current_day"),
+            "ReplayMsg::TimeUpdated handler must update current_day: {body}"
+        );
+        assert!(
+            body.contains("format"),
+            "ReplayMsg::TimeUpdated handler must format the timestamp: {body}"
+        );
+    }
+
+    #[test]
+    fn data_loaded_clears_current_day() {
+        let body = replay_handler_body("            ReplayMsg::DataLoaded {");
+        assert!(
+            body.contains("current_day"),
+            "DataLoaded handler must clear current_day to avoid showing stale time: {body}"
         );
     }
 }

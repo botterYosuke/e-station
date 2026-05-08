@@ -3,7 +3,7 @@ use std::sync::Arc;
 use iced::Task;
 
 use crate::Message;
-use crate::messages::{DashboardMsg, EngineMsg, VenueMsg};
+use crate::messages::{DashboardMsg, EngineMsg, MenuMsg, VenueMsg};
 use crate::venue_state::VenueEvent;
 use crate::widget::toast::Toast;
 
@@ -183,6 +183,31 @@ impl crate::Flowsurface {
                     );
                 }
                 return sidebar_refetch;
+            }
+            // INVARIANT: Python は command を reject した場合のみ EngineBusy を送出する。
+            // IPC Ok(()) の後に EngineBusy が来ることはない。
+            // したがってロールバックと IPC 成功が競合するシナリオは発生しない。
+            EngineMsg::PauseReplayBusy { reason } => {
+                log::warn!("PauseReplay EngineBusy (rolling back): {reason}");
+                // reason は log のみ。Toast は out of scope（R2-H2）。
+                let has_history = self.menu_bar.replay_bar.replay_has_history;
+                return Task::done(Message::Menu(MenuMsg::Bar(
+                    crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
+                        paused: false,
+                        has_history,
+                    },
+                )));
+            }
+            EngineMsg::ResumeReplayBusy { reason } => {
+                log::warn!("ResumeReplay EngineBusy (rolling back): {reason}");
+                // reason は log のみ。Toast は out of scope（R2-H2）。
+                let has_history = self.menu_bar.replay_bar.replay_has_history;
+                return Task::done(Message::Menu(MenuMsg::Bar(
+                    crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
+                        paused: true,
+                        has_history,
+                    },
+                )));
             }
             EngineMsg::Noop => return Task::none(),
             // N1.12: ExecutionMarker → broadcast overlay dot to all Kline charts

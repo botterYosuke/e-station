@@ -100,15 +100,18 @@ pub fn view(panel: &PositionsPanel) -> Element<'_, Message> {
         .on_press(Message::RefreshClicked)
         .padding([2, 8]);
 
-    let header = if panel.loading {
-        row![refresh_btn, text("↻ 更新中…").size(11)]
-            .spacing(4)
-            .padding([4, 8])
-    } else {
-        row![refresh_btn].spacing(4).padding([4, 8])
-    };
-
+    let mut header_items = vec![refresh_btn.into()];
+    if panel.loading {
+        header_items.push(text("↻ 更新中…").size(11).into());
+    }
     if panel.is_replay() {
+        header_items.push(text("⏪ REPLAY").size(11).into());
+    }
+    let header = row(header_items).spacing(4).padding([4, 8]);
+
+    // Issue 5: replay pane でも push 経由でデータが入った場合は通常の描画に進む。
+    // 旧実装はバナーで早期 return していたため push イベントを描画できなかった。
+    if panel.is_replay() && panel.positions.is_empty() {
         return column![header, center(text("⏪ REPLAY — 保有銘柄なし").size(13)),]
             .height(iced::Length::Fill)
             .into();
@@ -269,5 +272,37 @@ mod tests {
         let mut panel = PositionsPanel::new_replay();
         let action = update(&mut panel, Message::RefreshClicked);
         assert!(action.is_none());
+    }
+
+    // ── Issue 5: replay pane が push 経由でデータを保持する ─────────────────────
+
+    #[test]
+    fn replay_panel_stores_positions_via_set_positions() {
+        let mut panel = PositionsPanel::new_replay();
+        assert!(panel.is_replay());
+        assert!(panel.is_empty());
+
+        panel.set_positions(vec![make_wire("7203.TSE", 100, 260000)], 1746000000000);
+
+        // データ更新後は replay でも非空になり、count が増える
+        assert!(
+            !panel.is_empty(),
+            "replay pane should hold pushed positions"
+        );
+        assert_eq!(panel.position_count(), 1);
+        assert_eq!(panel.last_updated_ms, Some(1746000000000));
+    }
+
+    #[test]
+    fn replay_panel_view_with_data_does_not_panic() {
+        // view() が replay+データ有りの分岐を panic せず通ることを保証する。
+        // 既存実装では `if panel.is_replay()` で常にバナーを返していたため、
+        // データが設定されていてもアクセスせずに早期 return していた。
+        // 修正後は positions を辿る描画パスに進むため、このテストは
+        // panel.positions のアクセスが安全であることのリグレッションガードとなる。
+        let mut panel = PositionsPanel::new_replay();
+        panel.set_positions(vec![make_wire("7203.TSE", 100, 260000)], 1746000000000);
+        // view() 自体は Element を返すだけで panic しなければ OK。
+        let _: Element<'_, Message> = view(&panel);
     }
 }

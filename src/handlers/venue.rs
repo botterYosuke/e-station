@@ -66,6 +66,10 @@ impl crate::Flowsurface {
                     |r| Message::Venue(VenueMsg::TachibanaLoginIpcResult(r)),
                 );
             }
+            VenueMsg::RequestTachibanaLogout => {
+                log::info!("RequestTachibanaLogout");
+                self.tachibana_state = VenueState::Idle;
+            }
             VenueMsg::TachibanaLoginIpcResult(result) => {
                 // The optimistic `try_claim_login_in_flight` already
                 // moved the FSM into `LoginInFlight`. Engine's
@@ -295,6 +299,10 @@ impl crate::Flowsurface {
                     |r| Message::Venue(VenueMsg::KabuLoginIpcResult(r)),
                 );
             }
+            VenueMsg::RequestKabuLogout => {
+                log::info!("RequestKabuLogout");
+                self.kabu_state = VenueState::Idle;
+            }
             // Message::KabuLoginIpcResult(result) => (post-refactor name below)
             VenueMsg::KabuLoginIpcResult(result) => match result {
                 Ok(()) => {
@@ -423,7 +431,20 @@ impl crate::Flowsurface {
                     Task::none()
                 };
 
-                return auto_fetch_orders.chain(auto_fetch_positions);
+                // Tachibana と同様に metadata fetch ゲートを解除
+                let ticker_fetch = self
+                    .sidebar
+                    .tickers_table
+                    .set_kabu_station_ready(is_ready)
+                    .map(|m| {
+                        Message::Dashboard(DashboardMsg::Sidebar(
+                            dashboard::sidebar::Message::TickersTable(m),
+                        ))
+                    });
+
+                return ticker_fetch
+                    .chain(auto_fetch_orders)
+                    .chain(auto_fetch_positions);
             }
             // Message::EngineConnected(conn) => (post-refactor name below)
             VenueMsg::OrderToast(toast) => {
@@ -526,6 +547,18 @@ impl crate::Flowsurface {
                 positions,
                 ts_ms,
             } => {
+                // Issue 5: push 型（request_id == ""）は replay 専用 pane へ配布。
+                // engine_runner の fill / server.py の StepBackward が起点。
+                if request_id.is_empty() {
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut().distribute_replay_positions(
+                        main_window,
+                        positions,
+                        ts_ms,
+                    );
+                    return Task::none();
+                }
+
                 let matches = self.positions_request_id.as_deref() == Some(request_id.as_str());
                 if !matches {
                     log::debug!(

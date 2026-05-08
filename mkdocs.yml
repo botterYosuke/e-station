@@ -8,13 +8,15 @@ edit_uri: edit/main/docs/
 docs_dir: docs
 site_dir: site
 
-# 公開対象を docs/✅*/**.md と docs/index.md に絞る（archive は除外）。
-# MkDocs 1.6+ の exclude_docs は gitignore 形式で、! で再包含できる。
+# 公開対象から除外するファイル群。MkDocs 1.6+ の exclude_docs は gitignore 形式。
+# wiki/** と plan/floating-windows / plan/distribution-formats は Wave 4 で物理削除済み。
+# plan/❌archive/ のみ残置 (計画書方針)。
 exclude_docs: |
   *.json
-  plan/**
-  wiki/**
   */archive/**
+  decisions/manifest.yaml
+  plan/❌archive/**
+  plan/doc-restructure/**
 
 theme:
   name: material
@@ -43,47 +45,69 @@ theme:
 
 nav:
   - ホーム: index.md
-  - Python データエンジン:
-      - 概要: ✅python-data-engine/README.md
-      - 仕様: ✅python-data-engine/spec.md
-      - 現行アーキテクチャ: ✅python-data-engine/current-architecture.md
-      - 実装計画: ✅python-data-engine/implementation-plan.md
-      - Open Questions: ✅python-data-engine/open-questions.md
-      - ベンチマーク:
-          - Baseline: ✅python-data-engine/benchmarks/baseline.md
-          - Phase 2: ✅python-data-engine/benchmarks/phase-2.md
-          - Phase 6: ✅python-data-engine/benchmarks/phase-6.md
-      - スキーマ:
-          - CHANGELOG: ✅python-data-engine/schemas/CHANGELOG.md
-  - 立花証券 API 統合:
-      - 概要: ✅tachibana/README.md
-      - 仕様: ✅tachibana/spec.md
-      - アーキテクチャ: ✅tachibana/architecture.md
-      - データマッピング: ✅tachibana/data-mapping.md
-      - 実装計画: ✅tachibana/implementation-plan.md
-      - 不変条件テスト: ✅tachibana/invariant-tests.md
-      - Open Questions: ✅tachibana/open-questions.md
-  - 立花注文機能:
-      - 概要: ✅order/README.md
-      - 仕様: ✅order/spec.md
-      - アーキテクチャ: ✅order/architecture.md
-      - 実装計画: ✅order/implementation-plan.md
-      - 不変条件テスト: ✅order/invariant-tests.md
-      - Open Questions: ✅order/open-questions.md
-  - nautilus_trader 統合:
-      - 概要: ✅nautilus_trader/README.md
-      - 仕様: ✅nautilus_trader/spec.md
-      - アーキテクチャ: ✅nautilus_trader/architecture.md
-      - データマッピング: ✅nautilus_trader/data-mapping.md
-      - 実装計画: ✅nautilus_trader/implementation-plan.md
-      - Open Questions: ✅nautilus_trader/open-questions.md
-  - メニューバー / フッター / Replay コントロール:
-      - 概要: ✅menu-and-footer/README.md
-      - Widget メニューバー: ✅menu-and-footer/menu-bar.md
-      - Replay コントロールバー: ✅menu-and-footer/replay-control.md
-      - ステータスバー（フッター）: ✅menu-and-footer/footer.md
-      - モード切替: ✅menu-and-footer/mode-switch.md
-      - File メニュー / Save: ✅menu-and-footer/file-menu.md
+  - アーキテクチャ:
+      - 概要: architecture/overview.md
+      - 境界: architecture/boundaries.md
+      - データフロー: architecture/data-flow.md
+      - IPC スキーマ: architecture/ipc-schema.md
+      - モジュール:
+          - data engine: architecture/modules/data-engine.md
+          - tachibana adapter: architecture/modules/tachibana-adapter.md
+          - kabusapi adapter: architecture/modules/kabusapi-adapter.md
+          - nautilus-trader: architecture/modules/nautilus-trader.md
+          - UI シェル: architecture/modules/ui-shell.md
+  - 仕様:
+      - 注文: specs/order.md
+      - replay: specs/replay.md
+      - live strategy: specs/live-strategy.md
+      - backtest: specs/backtest.md
+      - data engine: specs/data-engine.md
+      - venue:
+          - tachibana: specs/venues/tachibana.md
+          - kabusapi: specs/venues/kabusapi.md
+  - リファレンス:
+      - 外部 API:
+          - tachibana: reference/external-apis/tachibana.md
+          - kabusapi: reference/external-apis/kabusapi.md
+          - nautilus-trader: reference/external-apis/nautilus-trader.md
+      - IPC プロトコル: reference/ipc-protocol.md
+  - 開発:
+      - セットアップ: development/setup.md
+      - ビルド & リリース: development/build-and-release.md
+      - トラブルシューティング: development/troubleshooting.md
+  - テスト:
+      - 戦略: testing/strategy.md
+      - ベンチマーク: testing/benchmarks.md
+  - コントリビュート:
+      - コーディング規約: contributing/coding-standards.md
+  - ロードマップ:
+      - 概要: roadmap/README.md
+      - data engine:
+          - 実装計画: roadmap/data-engine/implementation-plan.md
+          - Open Questions: roadmap/data-engine/open-questions.md
+      - tachibana:
+          - 実装計画: roadmap/tachibana/implementation-plan.md
+          - Open Questions: roadmap/tachibana/open-questions.md
+      - kabusapi:
+          - 実装計画: roadmap/kabusapi/implementation-plan.md
+          - Open Questions: roadmap/kabusapi/open-questions.md
+      - order:
+          - 実装計画: roadmap/order/implementation-plan.md
+          - Open Questions: roadmap/order/open-questions.md
+      - nautilus-trader:
+          - 実装計画: roadmap/nautilus-trader/implementation-plan.md
+          - Open Questions: roadmap/nautilus-trader/open-questions.md
+      - UI シェル:
+          - 実装計画: roadmap/ui-shell/implementation-plan.md
+          - Open Questions: roadmap/ui-shell/open-questions.md
+      - スキーマ変更年表: roadmap/changelog.md
+  - 決定 (ADR):
+      - 一覧: decisions/README.md
+      - 0001 Rust↔Python 境界: decisions/0001-rust-python-boundary.md
+      - 0002 IPC スキーマ版数: decisions/0002-ipc-schema-versioning.md
+      - 0006 言語スタック: decisions/0006-language-stack-rust-plus-python.md
+      - 0007 Rust 採用: decisions/0007-rust-adoption.md
+      - 0008 Python 採用: decisions/0008-python-adoption.md
 
 markdown_extensions:
   - admonition
@@ -107,6 +131,51 @@ plugins:
       lang:
         - ja
         - en
+  - redirects:
+      redirect_maps:
+        # 旧 ✅* パスを台帳に基づいて新パスに 301
+        ✅python-data-engine/spec.md: specs/data-engine.md
+        ✅python-data-engine/current-architecture.md: architecture/modules/data-engine.md
+        ✅python-data-engine/implementation-plan.md: roadmap/data-engine/implementation-plan.md
+        ✅python-data-engine/open-questions.md: roadmap/data-engine/open-questions.md
+        ✅tachibana/spec.md: specs/venues/tachibana.md
+        ✅tachibana/architecture.md: architecture/modules/tachibana-adapter.md
+        ✅tachibana/data-mapping.md: reference/external-apis/tachibana.md
+        ✅tachibana/implementation-plan.md: roadmap/tachibana/implementation-plan.md
+        ✅tachibana/open-questions.md: roadmap/tachibana/open-questions.md
+        ✅tachibana/invariant-tests.md: testing/strategy.md
+        ✅kabusapi/spec.md: specs/venues/kabusapi.md
+        ✅kabusapi/architecture.md: architecture/modules/kabusapi-adapter.md
+        ✅kabusapi/data-mapping.md: reference/external-apis/kabusapi.md
+        ✅kabusapi/implementation-plan.md: roadmap/kabusapi/implementation-plan.md
+        ✅kabusapi/open-questions.md: roadmap/kabusapi/open-questions.md
+        ✅kabusapi/invariant-tests.md: testing/strategy.md
+        ✅order/spec.md: specs/order.md
+        ✅order/architecture.md: specs/order.md
+        ✅order/implementation-plan.md: roadmap/order/implementation-plan.md
+        ✅order/open-questions.md: roadmap/order/open-questions.md
+        ✅order/invariant-tests.md: testing/strategy.md
+        ✅nautilus_trader/spec.md: specs/backtest.md
+        ✅nautilus_trader/architecture.md: architecture/modules/nautilus-trader.md
+        ✅nautilus_trader/data-mapping.md: reference/external-apis/nautilus-trader.md
+        ✅nautilus_trader/implementation-plan.md: roadmap/nautilus-trader/implementation-plan.md
+        ✅nautilus_trader/open-questions.md: roadmap/nautilus-trader/open-questions.md
+        ✅menu-and-footer/menu-bar.md: architecture/modules/ui-shell.md
+        ✅menu-and-footer/replay-control.md: architecture/modules/ui-shell.md
+        ✅menu-and-footer/footer.md: architecture/modules/ui-shell.md
+        ✅menu-and-footer/mode-switch.md: architecture/modules/ui-shell.md
+        ✅menu-and-footer/file-menu.md: architecture/modules/ui-shell.md
+        ✅menu-and-footer/venue-login-footer.md: architecture/modules/ui-shell.md
+        ✅python-data-engine/benchmarks/baseline.md: testing/benchmarks/baseline.md
+        ✅python-data-engine/benchmarks/phase-2.md: testing/benchmarks/phase-2.md
+        ✅python-data-engine/benchmarks/phase-6.md: testing/benchmarks/phase-6.md
+        ✅python-data-engine/schemas/CHANGELOG.md: roadmap/changelog.md
+        plan/floating-windows/spec.md: roadmap/ui-shell/_floating-windows-original-spec.md
+        plan/floating-windows/architecture.md: roadmap/ui-shell/_floating-windows-original-spec.md
+        plan/floating-windows/implementation-plan.md: roadmap/ui-shell/implementation-plan.md
+        plan/floating-windows/open-questions.md: roadmap/ui-shell/open-questions.md
+        plan/distribution-formats/linux-formats.md: development/build-and-release.md
+        plan/distribution-formats/pip-install-estation.md: development/build-and-release.md
 
 extra:
   social:

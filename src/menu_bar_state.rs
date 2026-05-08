@@ -26,7 +26,8 @@ pub struct ReplayBarState {
     pub granularity: Option<Granularity>,
     pub initial_cash: String,
     pub strategy_file: Option<PathBuf>,
-    /// Current replay day — updated by `DateChangeMarker` IPC event.
+    /// Current replay time — updated by `TimeUpdated` (毎足) and `DateChangeMarker` IPC events.
+    /// Daily granularity: `%Y-%m-%d`; それ以外: `%H:%M:%S` (JST).
     pub current_day: Option<String>,
     /// True while the engine is in PAUSED state — mirrors `DataEngineServer._replay_paused`.
     /// Updated by `BarMessage::ReplayPauseStateChanged`.
@@ -38,18 +39,30 @@ pub struct ReplayBarState {
 
 impl ReplayBarState {
     /// Prefill fields from a SCENARIO JSON object (mirrors `ReplayFormModal::prefill_from_scenario`).
-    pub fn prefill_from_scenario(&mut self, path: PathBuf, scenario: &serde_json::Value) {
+    pub fn prefill_from_scenario(
+        &mut self,
+        path: PathBuf,
+        scenario: &serde_json::Value,
+        resolved_instruments: Option<&[String]>,
+    ) {
         self.strategy_file = Some(path);
         let Some(obj) = scenario.as_object() else {
             return;
         };
-        if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
-            self.instrument_id = s.to_string();
-        }
-        if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
-            let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        // 優先順位: resolved_instruments (v3+ref) > instruments (v2) > instrument (v1)
+        if let Some(ids) = resolved_instruments {
             if !ids.is_empty() {
                 self.instrument_id = ids.join(", ");
+            }
+        } else {
+            if let Some(s) = obj.get("instrument").and_then(|v| v.as_str()) {
+                self.instrument_id = s.to_string();
+            }
+            if let Some(arr) = obj.get("instruments").and_then(|v| v.as_array()) {
+                let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                if !ids.is_empty() {
+                    self.instrument_id = ids.join(", ");
+                }
             }
         }
         if let Some(s) = obj.get("start").and_then(|v| v.as_str()) {
@@ -106,7 +119,6 @@ pub enum BarMessage {
     /// Kept separate from `Dismiss` so call sites can log the distinct reason.
     DismissFocusLost,
     // ── Replay bar input field changes ────────────────────────────────────────
-    InstrumentChanged(String),
     StartDateChanged(String),
     EndDateChanged(String),
     GranularityChanged(Granularity),
@@ -179,13 +191,6 @@ pub fn update(state: State, msg: BarMessage) -> State {
             ..state
         },
         // Input field changes: update replay_bar, keep open state unchanged.
-        BarMessage::InstrumentChanged(s) => State {
-            replay_bar: ReplayBarState {
-                instrument_id: s,
-                ..state.replay_bar
-            },
-            ..state
-        },
         BarMessage::StartDateChanged(s) => State {
             replay_bar: ReplayBarState {
                 start_date: s,
@@ -349,13 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn instrument_changed_updates_replay_bar_instrument_id() {
-        let s = State::default();
-        let next = update(s, BarMessage::InstrumentChanged("1301.T".to_string()));
-        assert_eq!(next.replay_bar.instrument_id, "1301.T");
-    }
-
-    #[test]
     fn press_step_backward_does_not_mutate_state() {
         let s = State::default();
         let next = update(s.clone(), BarMessage::PressStepBackward);
@@ -384,6 +382,54 @@ mod tests {
     }
 
     #[test]
+    fn press_play_rollback_preserves_has_history() {
+        // Simulates: was paused with has_history=true, IPC failed → rollback to paused=true
+        let mut s = State::default();
+        s.replay_bar.replay_has_history = true;
+        s.replay_bar.replay_paused = false; // optimistic update already done
+
+        let next = update(
+            s,
+            BarMessage::ReplayPauseStateChanged {
+                paused: true, // rollback
+                has_history: true,
+            },
+        );
+        assert!(
+            next.replay_bar.replay_paused,
+            "should be paused after rollback"
+        );
+        assert!(
+            next.replay_bar.replay_has_history,
+            "has_history must be preserved during rollback"
+        );
+    }
+
+    #[test]
+    fn press_pause_rollback_preserves_has_history() {
+        // Simulates: was playing with has_history=true, IPC failed → rollback to paused=false
+        let mut s = State::default();
+        s.replay_bar.replay_has_history = true;
+        s.replay_bar.replay_paused = true; // optimistic update already done
+
+        let next = update(
+            s,
+            BarMessage::ReplayPauseStateChanged {
+                paused: false, // rollback
+                has_history: true,
+            },
+        );
+        assert!(
+            !next.replay_bar.replay_paused,
+            "should not be paused after rollback"
+        );
+        assert!(
+            next.replay_bar.replay_has_history,
+            "has_history must be preserved during rollback"
+        );
+    }
+
+    #[test]
     fn live_press_play_clears_live_paused() {
         let s = State {
             live_bar: LiveBarState {
@@ -398,6 +444,36 @@ mod tests {
             !next.live_bar.live_paused,
             "LivePressPlay should set live_paused = false"
         );
+    }
+
+    #[test]
+    fn replay_bar_state_prefill_v3_resolved() {
+        let mut replay_bar = ReplayBarState::default();
+        let scenario = serde_json::json!({
+            "schema_version": 3,
+            "instruments_ref": "data/universe.json#/instruments",
+            "instruments": ["FROM_INSTRUMENTS", "IGNORED"],
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1_000_000_u64,
+        });
+        let resolved = vec!["1301.TSE".to_string(), "7203.TSE".to_string()];
+        replay_bar.prefill_from_scenario(
+            PathBuf::from("/tmp/s.py"),
+            &scenario,
+            Some(resolved.as_slice()),
+        );
+        assert_eq!(replay_bar.instrument_id, "1301.TSE, 7203.TSE");
+    }
+
+    #[test]
+    fn replay_bar_state_prefill_v3_resolved_empty_keeps_existing() {
+        let mut replay_bar = ReplayBarState::default();
+        replay_bar.instrument_id = "EXISTING".to_string();
+        let scenario = serde_json::json!({"schema_version": 3});
+        replay_bar.prefill_from_scenario(PathBuf::from("/tmp/s.py"), &scenario, Some(&[]));
+        assert_eq!(replay_bar.instrument_id, "EXISTING");
     }
 
     #[test]

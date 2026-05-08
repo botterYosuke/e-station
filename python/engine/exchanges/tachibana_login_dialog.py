@@ -1,6 +1,6 @@
 """Tkinter login dialog helper for the Tachibana e-shiten venue.
 
-Architecture: [docs/✅tachibana/architecture.md §7.4](../../../docs/✅tachibana/architecture.md#74).
+Architecture: [docs/specs/venues/tachibana/architecture.md §7.4](../../../docs/specs/venues/tachibana/architecture.md#74).
 
 Run as a subprocess of `engine.exchanges.tachibana_login_flow`:
 

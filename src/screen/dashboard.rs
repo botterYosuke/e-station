@@ -109,6 +109,9 @@ pub enum Event {
     ReplaySpeedAction(u32),
     /// N4.3: User pressed the strategy file picker button in a `ReplayControl` pane.
     PickStrategyFile,
+    /// User switched ticker via pane title bar; propagate to replay bar label.
+    /// Emitted unconditionally — caller guards with `replay_running`.
+    ReplayBarSync(String),
 }
 
 impl Dashboard {
@@ -503,7 +506,15 @@ impl Dashboard {
                                 .chain(self.refresh_streams(main_window.id))
                             }
                             pane::Effect::SwitchTickersInGroup(ticker_info) => {
-                                self.switch_tickers_in_group(handles, main_window.id, ticker_info)
+                                let task = self.switch_tickers_in_group(
+                                    handles,
+                                    main_window.id,
+                                    ticker_info,
+                                );
+                                return (
+                                    task,
+                                    Some(Event::ReplayBarSync(ticker_info.ticker.to_string())),
+                                );
                             }
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
@@ -904,6 +915,25 @@ impl Dashboard {
     pub fn has_positions_pane(&self, main_window: window::Id) -> bool {
         self.iter_all_panes(main_window)
             .any(|(_, _, state)| matches!(state.content, pane::Content::Positions(_)))
+    }
+
+    /// Issue 5: replay モードの `Positions` pane にのみスナップショットを配布する。
+    /// `request_id == ""` の push 型 `PositionsUpdated` 用の経路。live pane は
+    /// 既存の `distribute_positions` で pull 型を担うため互いに干渉しない。
+    pub fn distribute_replay_positions(
+        &mut self,
+        main_window: window::Id,
+        positions: Vec<engine_client::dto::PositionRecordWire>,
+        ts_ms: i64,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::Positions(panel) = &mut state.content
+                    && panel.is_replay()
+                {
+                    panel.set_positions(positions.clone(), ts_ms);
+                }
+            });
     }
 
     /// Distribute a fresh positions snapshot to all `Positions` panes.
@@ -1310,9 +1340,34 @@ impl Dashboard {
                 self.replay_pane_registry
                     .register_pane("", "BuyingPower", new_pane);
                 self.focus = Some((main_window_id, new_pane));
+                last_split_pane = new_pane;
             } else {
                 log::warn!(
                     "auto_generate_replay_panes: pane split failed for BuyingPower \
+                     (session-level pane skipped silently otherwise)"
+                );
+            }
+        }
+
+        // Issue 5: セッションレベルの REPLAY 保有銘柄 pane は最初の1銘柄ロード時のみ生成。
+        // OrderList / BuyingPower と同パターン。push 型 PositionsUpdated 受信時に
+        // distribute_replay_positions() で更新される。
+        if is_first
+            && self.replay_pane_registry.loaded_count() == 1
+            && self.replay_pane_registry.should_generate("", "Positions")
+        {
+            let new_state = pane::State::new_replay_positions();
+            if let Some((new_pane, _)) =
+                self.panes
+                    .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
+            {
+                log::info!("replay: auto-generated REPLAY Positions pane");
+                self.replay_pane_registry
+                    .register_pane("", "Positions", new_pane);
+                self.focus = Some((main_window_id, new_pane));
+            } else {
+                log::warn!(
+                    "auto_generate_replay_panes: pane split failed for Positions \
                      (session-level pane skipped silently otherwise)"
                 );
             }

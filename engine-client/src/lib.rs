@@ -43,5 +43,7 @@ pub use venue_caps::VenueCapsStore;
 ///   - 19: P3-1 Exchange::KabuStation* 市場細分化 + 先物・OP バリアント追加
 ///   - 20: P4-3 venue_capabilities.kabu_station に is_production フィールド追加
 ///   - 21: ExecutionMarker.commission 追加（fee_total 集計の上流、optional フィールド）
+///   - 22: ReplayTimeUpdated 追加（分足・tick 足での current_day 時刻表示、Issue 3）
+///   - 23: StrategyScenarioLoaded.resolved_instruments 追加（schema v3 instruments_ref 対応）
 pub const SCHEMA_MAJOR: u32 = 3;
-pub const SCHEMA_MINOR: u32 = 21;
+pub const SCHEMA_MINOR: u32 = 23;

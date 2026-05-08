@@ -1,7 +1,7 @@
 """Tachibana login orchestration — the bridge between the IPC server,
 the env fast paths, and the tkinter login helper subprocess.
 
-Architecture: [docs/✅tachibana/architecture.md §7](../../../docs/✅tachibana/architecture.md).
+Architecture: [docs/specs/venues/tachibana/architecture.md §7](../../../docs/specs/venues/tachibana/architecture.md).
 
 Public entry point:
 

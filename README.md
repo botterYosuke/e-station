@@ -60,8 +60,10 @@ uv sync
 ### 3. live を触る
 
 ```bash
-cargo run -- --mode live
+uv run cargo run -- --mode live
 ```
+
+> **注意**: Rust アプリ内から Python エンジンを子プロセスとして起動するため、`uv run` を使って仮想環境のパスを通すか、事前に `.venv\Scripts\activate` などで仮想環境を有効化しておく必要があります（未設定の場合、`program not found` などのエラーが発生します）。
 
 最初のおすすめ:
 
@@ -73,7 +75,7 @@ cargo run -- --mode live
 ### 4. replay を触る
 
 ```bash
-cargo run -- --mode replay
+uv run cargo run -- --mode replay
 ```
 
 起動後は `ReplayControl` ペインで銘柄・期間を設定してデータをロードします。読み込み成功後は対象銘柄の `Kline Chart` と `Time & Sales`、セッション共通の `Order List (REPLAY)` と `Buying Power (REPLAY)` が自動生成されます。
@@ -121,7 +123,7 @@ live と replay では意味が異なります。
 | **live** | 立花証券 e支店に対する実注文 |
 | **replay** | 検証用の仮想注文 |
 
-replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます。安全ガードの詳細は [docs/✅order/spec.md](https://botteryosuke.github.io/e-station/%E2%9C%85order/) と [docs/✅tachibana/spec.md](https://botteryosuke.github.io/e-station/%E2%9C%85tachibana/) を参照してください。
+replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます。安全ガードの詳細は [docs/specs/order.md](https://botteryosuke.github.io/e-station/specs/order/) と [docs/specs/venues/tachibana.md](https://botteryosuke.github.io/e-station/specs/venues/tachibana/) を参照してください。
 
 ## ドキュメントの読み分け
 
@@ -132,7 +134,7 @@ replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付
 
 ## アーキテクチャ概要
 
-Rust / Iced（UI）+ Python engine（市場データ・NautilusTrader・立花証券）の 2 プロセス構成で、IPC WebSocket で連携します。詳細は [AGENTS.md](AGENTS.md) と [docs/✅python-data-engine/](https://botteryosuke.github.io/e-station/%E2%9C%85python-data-engine) を参照してください。
+Rust / Iced（UI）+ Python engine（市場データ・NautilusTrader・立花証券）の 2 プロセス構成で、IPC WebSocket で連携します。詳細は [AGENTS.md](AGENTS.md) と [docs/specs/data-engine.md](https://botteryosuke.github.io/e-station/specs/data-engine/) を参照してください。
 
 ## 安全に関する注意
 

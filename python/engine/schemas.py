@@ -12,7 +12,7 @@ from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 # SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
 # 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 21
+SCHEMA_MINOR: int = 23
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -78,13 +78,17 @@ AttemptedCommand = Literal[
 AUTH_FAILED_CODE: str = "auth_failed"
 
 # SaveErrorCode (F6 / レビュー反映 2026-05-04 ラウンド1 / H1, ラウンド2 / H-R2-2):
-# `StrategyScenarioSaved.error` の wire 形を Literal で固定する。これら 8 値以外は
+# `StrategyScenarioSaved.error` の wire 形を Literal で固定する。これら 10 値以外は
 # pydantic validation で reject される。server.py 側の例外→error コード変換は
 # `_do_save_strategy_scenario` の責務。
 #
 # ラウンド2 で `tempfile_failed` を削除（dead code: `tempfile.mkstemp` 失敗は
 # OSError errno に応じて parent_missing / disk_full / permission_denied のいずれかに
 # 吸収される。専用コードは server.py の例外マッピングから到達しない）。
+#
+# schema v3 instruments_ref 対応で 8 値 → 10 値に拡張:
+#   unresolved_ref: instruments_ref の参照解決失敗（server 層が write_back 前に return）
+#   relative_ref_crosses_dir: Save As で相対 ref の base_dir が変わる
 SaveErrorCode = Literal[
     "permission_denied",
     "parent_missing",
@@ -94,6 +98,8 @@ SaveErrorCode = Literal[
     "missing_scenario_field",
     "validate_failed",
     "syntax_error",
+    "unresolved_ref",            # 追加: instruments_ref の参照解決失敗
+    "relative_ref_crosses_dir",  # 追加: Save As で相対 ref の base_dir が変わる
 ]
 
 # 内部: EngineBusy validator が使う set
@@ -899,6 +905,22 @@ class ReplayBuyingPower(IpcMessage):
     ts_event_ms: int
 
 
+# ── schema 3.22: per-tick replay time signal ─────────────────────────────────
+
+
+class ReplayTimeUpdated(IpcMessage):
+    """各足処理後に現在リプレイ時刻を Rust に通知するイベント（Issue 3）。
+
+    DateChangeMarker が営業日跨ぎ時のみ emit されるのに対し、毎足 emit する。
+    Rust 側はメニューバーの current_day を分秒単位で更新するために使う。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["ReplayTimeUpdated"] = "ReplayTimeUpdated"
+    timestamp_ms: int
+
+
 # ── N1.17: LIVE 買付余力 ────────────────────────────────────────────────────
 
 
@@ -947,7 +969,7 @@ class PositionRecord(IpcMessage):
     market_value: str  # 整数文字列、"0" は ¥0 表示
     position_type: Literal["cash", "margin_credit", "margin_general"]
     tategyoku_id: str | None = None
-    venue: Literal["tachibana"]
+    venue: Literal["tachibana", "replay"]
 
 
 class PositionsUpdated(IpcMessage):
@@ -1088,12 +1110,20 @@ class StrategyScenarioLoaded(IpcMessage):
     """LoadStrategyScenario の応答。SCENARIO が見つかった場合は scenario を返す。
 
     scenario=None は SCENARIO 不在（prefill なし）を示す。
+
+    IPC 契約（固定）:
+    - scenario フィールドは raw dict（instruments_ref を含む / resolve 前の状態）
+    - resolved_instruments は v3 + instruments_ref 経由のときだけ非 None
+    - v1/v2 では resolved_instruments=None のまま（GUI は scenario["instrument"] /
+      scenario["instruments"] を見る）
     """
 
     event: Literal["StrategyScenarioLoaded"] = "StrategyScenarioLoaded"
     request_id: str
     path: str                      # 読み込んだ .py の絶対パス
-    scenario: dict | None = None   # SCENARIO dict, または不在時 None
+    scenario: dict | None = None   # raw SCENARIO dict（instruments_ref を含む）、または不在時 None
+    # v3 + ref 経由のときだけ非 None。v1/v2 や inline v3 では None
+    resolved_instruments: list[str] | None = None
 
 
 class StrategyScenarioLoadFailed(IpcMessage):
@@ -1112,8 +1142,9 @@ class StrategyScenarioSaved(IpcMessage):
     request_id: str
     path: str
     ok: bool
-    # H1 (レビュー反映 2026-05-04 ラウンド1): `error` は SaveErrorCode Literal の
-    # 9 値に固定。未知値は pydantic validation で reject される。
+    # H1 (レビュー反映 2026-05-04 ラウンド1): `error` は SaveErrorCode Literal で固定。
+    # 未知値は pydantic validation で reject される。
+    # schema v3 instruments_ref 対応で 8 値 → 10 値に拡張済み（unresolved_ref / relative_ref_crosses_dir 追加）。
     error: SaveErrorCode | None = None
 
 

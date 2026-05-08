@@ -524,7 +524,7 @@ class TickerEventWsHub:
     フレームは登録順に subscriber へ ``await`` で配り、1 subscriber の例外は
     他 subscriber に伝播させない (log のみ)。
 
-    docs: ``docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md`` Bug Y.
+    docs: ``docs/specs/venues/tachibana/fix-event-ws-lifecycle-2026-05-04.md`` Bug Y.
     """
 
     def __init__(

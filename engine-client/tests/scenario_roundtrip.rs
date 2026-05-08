@@ -79,6 +79,7 @@ fn strategy_scenario_loaded_deserializes() {
             request_id,
             path,
             scenario,
+            ..
         } => {
             assert_eq!(request_id, "req-1");
             assert_eq!(path, "/path/to/strategy.py");
@@ -101,6 +102,65 @@ fn strategy_scenario_loaded_no_scenario_deserializes() {
     match event {
         EngineEvent::StrategyScenarioLoaded { scenario, .. } => {
             assert!(scenario.is_none(), "scenario should be None when absent");
+        }
+        _ => panic!("Expected StrategyScenarioLoaded"),
+    }
+}
+
+/// StrategyScenarioLoaded に resolved_instruments が含まれる場合のデシリアライズ。
+#[test]
+fn strategy_scenario_loaded_with_resolved_instruments_deserializes() {
+    let json = r#"{
+        "event": "StrategyScenarioLoaded",
+        "request_id": "req-v3",
+        "path": "/path/to/strategy.py",
+        "scenario": {
+            "schema_version": 3,
+            "instruments_ref": "data/universe.json#/instruments",
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1000000
+        },
+        "resolved_instruments": ["1301.TSE", "7203.TSE"]
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::StrategyScenarioLoaded {
+            resolved_instruments,
+            scenario,
+            ..
+        } => {
+            let ids = resolved_instruments.unwrap();
+            assert_eq!(ids, vec!["1301.TSE", "7203.TSE"]);
+            // scenario は raw のまま（instruments_ref が保持されている）
+            let s = scenario.unwrap();
+            assert_eq!(s["instruments_ref"], "data/universe.json#/instruments");
+            assert!(
+                s.get("instruments").is_none(),
+                "raw scenario must not have instruments key"
+            );
+        }
+        _ => panic!("Expected StrategyScenarioLoaded"),
+    }
+}
+
+/// v1/v2 では resolved_instruments が absent（None）でもデシリアライズできる。
+#[test]
+fn strategy_scenario_loaded_v1_resolved_instruments_absent_is_none() {
+    let json = r#"{
+        "event": "StrategyScenarioLoaded",
+        "request_id": "req-v1",
+        "path": "/path/to/strategy.py",
+        "scenario": {"schema_version": 1, "instrument": "1301.TSE", "start": "2025-01-06", "end": "2025-01-10", "granularity": "Minute", "initial_cash": 1000000}
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::StrategyScenarioLoaded {
+            resolved_instruments,
+            ..
+        } => {
+            assert!(resolved_instruments.is_none());
         }
         _ => panic!("Expected StrategyScenarioLoaded"),
     }

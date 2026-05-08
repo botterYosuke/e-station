@@ -10,7 +10,9 @@ P5-scenario-in-strategy.md §F6c DoD より:
 
 from __future__ import annotations
 
+import asyncio
 import glob
+import json
 import textwrap
 from pathlib import Path
 from typing import Optional
@@ -20,6 +22,8 @@ import pytest
 
 from engine.scenario import (
     ScenarioValidationError,
+    extract,
+    resolve_refs,
     write_back,
 )
 
@@ -607,12 +611,14 @@ def test_saved_error_is_known_literal() -> None:
         "missing_scenario_field",
         "validate_failed",
         "syntax_error",
+        "unresolved_ref",            # Step 5: instruments_ref 参照解決失敗
+        "relative_ref_crosses_dir",  # Step 5: Save As で相対 ref の base_dir が変わる
     }
     assert known_values == expected, (
         f"SaveErrorCode の Literal 値が想定と異なる: {known_values} vs {expected}"
     )
 
-    # 各 8 値で StrategyScenarioSaved を構築でき、wire payload (model_dump) でも
+    # 各 10 値で StrategyScenarioSaved を構築でき、wire payload (model_dump) でも
     # error 値が想定値どおり残ることを確認する（H-R2-1 の送信パイプライン整合）。
     for code in expected:
         evt = StrategyScenarioSaved(
@@ -909,3 +915,299 @@ def test_emit_invariants_raise_value_error_not_assert() -> None:
     assert "_emit invariant" in src, (
         "_emit invariant message must be present in server source"
     )
+
+
+# ---------------------------------------------------------------------------
+# Step 11: v3 write_back / Save As 別ディレクトリ系テスト
+# ---------------------------------------------------------------------------
+
+
+VALID_V3_SCENARIO_RAW = {
+    "schema_version": 3,
+    "instruments_ref": "universe.json#/instruments",
+    "start": "2025-01-06",
+    "end": "2025-01-10",
+    "granularity": "Minute",
+    "initial_cash": 1_000_000,
+}
+
+
+def _write_universe_json(directory: Path, instruments: list) -> Path:
+    """テスト用 universe JSON を directory 配下に作成して Path を返す。"""
+    p = directory / "universe.json"
+    p.write_text(json.dumps({"instruments": instruments}))
+    return p
+
+
+def test_v3_writeback_preserves_instruments_ref(tmp_path: Path) -> None:
+    """raw dict（instruments_ref 付き）を write_back → 読み戻しても instruments_ref が保たれる。"""
+    _write_universe_json(tmp_path, ["1301.TSE", "7203.TSE"])
+
+    source = """\
+        SCENARIO = {
+            "schema_version": 3,
+            "instruments_ref": "old.json#/instruments",
+            "start": "2025-01-01",
+            "end": "2025-01-05",
+            "granularity": "Daily",
+            "initial_cash": 500_000,
+        }
+        """
+    path = _write_py(tmp_path, "strategy.py", source)
+
+    write_back(
+        path,
+        VALID_V3_SCENARIO_RAW,
+        save_as=True,
+        loaded_path=None,
+    )
+
+    result_text = path.read_text(encoding="utf-8")
+    assert "instruments_ref" in result_text
+    assert "universe.json#/instruments" in result_text
+
+    # extract した dict で直接キー確認（ファイルテキスト解析より確実）
+    extracted = extract(path)
+    assert extracted is not None
+    assert extracted.get("instruments_ref") == "universe.json#/instruments"
+    # raw dict に instruments キー（解決後）が書き込まれていないこと
+    assert "instruments" not in extracted
+
+
+def test_v3_writeback_verify_resolves(tmp_path: Path) -> None:
+    """_verify_writeback が ref を解決して validate に通す（tmp に JSON 存在）。"""
+    _write_universe_json(tmp_path, ["1301.TSE", "7203.TSE"])
+
+    source = """\
+        SCENARIO = {
+            "schema_version": 3,
+            "instruments_ref": "old.json#/instruments",
+            "start": "2025-01-01",
+            "end": "2025-01-05",
+            "granularity": "Daily",
+            "initial_cash": 500_000,
+        }
+        """
+    path = _write_py(tmp_path, "strategy_v3.py", source)
+
+    # write_back が成功する（_verify_writeback が resolve_refs → validate を通す）
+    write_back(
+        path,
+        VALID_V3_SCENARIO_RAW,
+        save_as=True,
+        loaded_path=None,
+    )
+
+    # 書き戻し後のファイルを再度 extract + resolve → validate も通ること
+    extracted = extract(path)
+    assert extracted is not None
+    resolved = resolve_refs(extracted, base_dir=path.parent)
+    assert resolved["instruments"] == ["1301.TSE", "7203.TSE"]
+
+
+def test_v3_writeback_unresolved_ref_rolls_back_as_validate_failed(
+    tmp_path: Path,
+) -> None:
+    """_verify_writeback 内で ref 解決失敗 → rollback reason は validate_failed で固定。
+
+    universe.json を作らないことで _verify_writeback 内の resolve_refs が失敗し、
+    write_back が ScenarioValidationError として rollback することを確認する。
+    """
+    # universe.json を作らない（参照先が存在しない）
+    source = """\
+        SCENARIO = {
+            "schema_version": 3,
+            "instruments_ref": "old.json#/instruments",
+            "start": "2025-01-01",
+            "end": "2025-01-05",
+            "granularity": "Daily",
+            "initial_cash": 500_000,
+        }
+        """
+    path = _write_py(tmp_path, "strategy_v3.py", source)
+    original_bytes = path.read_bytes()
+
+    # write_back は ScenarioValidationError を raise してロールバックする
+    with pytest.raises(ScenarioValidationError):
+        write_back(
+            path,
+            VALID_V3_SCENARIO_RAW,
+            save_as=True,
+            loaded_path=None,
+        )
+
+    # rollback でオリジナルに戻っていること
+    assert path.read_bytes() == original_bytes
+
+
+def test_v3_save_as_relative_ref_crosses_dir_rejected(tmp_path: Path) -> None:
+    """server 層: Save As 別ディレクトリ + 相対 ref を relative_ref_crosses_dir で拒否。"""
+    from engine.server import DataEngineServer
+
+    src_dir = tmp_path / "src"
+    dst_dir = tmp_path / "dst"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+
+    # 参照先の universe.json は src_dir に存在
+    _write_universe_json(src_dir, ["1301.TSE"])
+
+    loaded_path = src_dir / "strategy.py"
+    loaded_path.write_text("# dummy\n")
+    save_path = dst_dir / "strategy_new.py"
+
+    server = DataEngineServer.__new__(DataEngineServer)
+    server._outbox = []  # type: ignore[attr-defined]
+
+    msg = {
+        "request_id": "r1",
+        "path": str(save_path),
+        "scenario": {
+            "schema_version": 3,
+            "instruments_ref": "universe.json#/instruments",  # 相対パス
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1_000_000,
+        },
+        "save_as": True,
+        "loaded_path": str(loaded_path),
+    }
+
+    asyncio.run(server._do_save_strategy_scenario(msg))  # type: ignore[attr-defined]
+
+    assert len(server._outbox) == 1  # type: ignore[attr-defined]
+    evt = server._outbox[0]  # type: ignore[attr-defined]
+    assert evt["event"] == "StrategyScenarioSaved"
+    assert evt["ok"] is False
+    assert evt["error"] == "relative_ref_crosses_dir"
+
+
+def test_v3_save_as_absolute_ref_crosses_dir_allowed(tmp_path: Path) -> None:
+    """絶対 ref なら別ディレクトリ Save As でも通る。"""
+    from engine.server import DataEngineServer
+
+    src_dir = tmp_path / "src"
+    dst_dir = tmp_path / "dst"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+
+    universe_path = src_dir / "universe.json"
+    _write_universe_json(src_dir, ["1301.TSE", "7203.TSE"])
+
+    loaded_path = src_dir / "strategy.py"
+    source = """\
+        SCENARIO = {
+            "schema_version": 1,
+            "instrument": "1301.TSE",
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Daily",
+            "initial_cash": 1_000_000,
+        }
+        """
+    loaded_path.write_text(textwrap.dedent(source))
+    save_path = dst_dir / "strategy_new.py"
+    save_path.write_text(textwrap.dedent(source))
+
+    server = DataEngineServer.__new__(DataEngineServer)
+    server._outbox = []  # type: ignore[attr-defined]
+
+    msg = {
+        "request_id": "r2",
+        "path": str(save_path),
+        "scenario": {
+            "schema_version": 3,
+            "instruments_ref": f"{universe_path}#/instruments",  # 絶対パス
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1_000_000,
+        },
+        "save_as": True,
+        "loaded_path": str(loaded_path),
+    }
+
+    asyncio.run(server._do_save_strategy_scenario(msg))  # type: ignore[attr-defined]
+
+    assert len(server._outbox) == 1  # type: ignore[attr-defined]
+    evt = server._outbox[0]  # type: ignore[attr-defined]
+    assert evt["event"] == "StrategyScenarioSaved"
+    assert evt["ok"] is True, f"Expected ok=True, got error={evt.get('error')}"
+
+
+def test_v3_save_unresolved_ref_emits_save_error_code(tmp_path: Path) -> None:
+    """server の事前 validate 段階で unresolved_ref を返す（write_back 未到達）。"""
+    from engine.server import DataEngineServer
+
+    path = tmp_path / "strategy.py"
+    source = """\
+        SCENARIO = {
+            "schema_version": 1,
+            "instrument": "1301.TSE",
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Daily",
+            "initial_cash": 1_000_000,
+        }
+        """
+    path.write_text(textwrap.dedent(source))
+
+    server = DataEngineServer.__new__(DataEngineServer)
+    server._outbox = []  # type: ignore[attr-defined]
+
+    # missing.json が存在しない → unresolved_ref
+    msg = {
+        "request_id": "r3",
+        "path": str(path),
+        "scenario": {
+            "schema_version": 3,
+            "instruments_ref": "missing.json#/instruments",
+            "start": "2025-01-06",
+            "end": "2025-01-10",
+            "granularity": "Minute",
+            "initial_cash": 1_000_000,
+        },
+        "save_as": True,
+        "loaded_path": str(path),
+    }
+
+    asyncio.run(server._do_save_strategy_scenario(msg))  # type: ignore[attr-defined]
+
+    assert len(server._outbox) == 1  # type: ignore[attr-defined]
+    evt = server._outbox[0]  # type: ignore[attr-defined]
+    assert evt["event"] == "StrategyScenarioSaved"
+    assert evt["ok"] is False
+    assert evt["error"] == "unresolved_ref"
+
+
+def test_v3_save_non_dict_scenario_emits_missing_scenario_field(tmp_path: Path) -> None:
+    """scenario フィールドが非 dict（list 等）の場合は missing_scenario_field で reject される。
+
+    MEDIUM-1 回帰防止: scenario_dict が非 None の非 dict のとき、
+    resolve_refs 内の .get() で AttributeError が出て ScenarioValidationError catch を
+    素通りしないことを確認する。
+    """
+    from engine.server import DataEngineServer
+
+    path = tmp_path / "strategy.py"
+    path.write_text("# dummy\n")
+
+    server = DataEngineServer.__new__(DataEngineServer)
+    server._outbox = []  # type: ignore[attr-defined]
+
+    msg = {
+        "request_id": "r",
+        "path": str(path),
+        "scenario": ["not", "a", "dict"],  # 非 dict
+        "save_as": True,
+        "loaded_path": None,
+    }
+
+    asyncio.run(server._do_save_strategy_scenario(msg))  # type: ignore[attr-defined]
+
+    assert len(server._outbox) == 1  # type: ignore[attr-defined]
+    evt = server._outbox[0]  # type: ignore[attr-defined]
+    assert evt["event"] == "StrategyScenarioSaved"
+    assert evt["ok"] is False
+    assert evt["error"] == "missing_scenario_field"

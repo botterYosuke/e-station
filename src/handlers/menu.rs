@@ -55,8 +55,7 @@ impl crate::Flowsurface {
                     }
                     BarMessage::Pick(_) => Task::none(),
                     // Input-field changes — pure state update, no side effects.
-                    BarMessage::InstrumentChanged(_)
-                    | BarMessage::StartDateChanged(_)
+                    BarMessage::StartDateChanged(_)
                     | BarMessage::EndDateChanged(_)
                     | BarMessage::GranularityChanged(_)
                     | BarMessage::InitialCashChanged(_) => Task::none(),
@@ -74,8 +73,8 @@ impl crate::Flowsurface {
                     BarMessage::PressPlay => {
                         // If paused, this is a Resume action.
                         if self.replay_paused && self.replay_running {
-                            self.replay_paused = false;
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let has_history = self.menu_bar.replay_bar.replay_has_history;
                                 let req_id = uuid::Uuid::new_v4().to_string();
                                 Task::perform(
                                     async move {
@@ -83,17 +82,43 @@ impl crate::Flowsurface {
                                             request_id: req_id,
                                         })
                                         .await
+                                        .map_err(|e| e.to_string())
                                     },
-                                    |_| Message::Engine(EngineMsg::Noop),
+                                    move |res| {
+                                        match res {
+                                        Ok(()) => {
+                                            Message::Menu(MenuMsg::Bar(
+                                                crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
+                                                    paused: false,
+                                                    has_history,
+                                                },
+                                            ))
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "ResumeReplay IPC failed: {e}"
+                                            );
+                                            Message::Menu(MenuMsg::Bar(
+                                                crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
+                                                    paused: true,
+                                                    has_history,
+                                                },
+                                            ))
+                                        }
+                                    }
+                                    },
                                 )
                             } else {
                                 Task::none()
                             }
                         } else {
-                            // Otherwise: new replay session.
+                            // New replay session: open the form modal so the user
+                            // can review / enter the instrument_id before submitting.
+                            // Bar fields (prefilled by SCENARIO) are propagated into
+                            // the modal so they are visible as defaults.
                             use crate::modal::replay_form::ReplayFormModal;
                             let bar = &self.menu_bar.replay_bar;
-                            let form = ReplayFormModal {
+                            self.replay_form_modal = Some(ReplayFormModal {
                                 instrument_id: bar.instrument_id.clone(),
                                 start_date: bar.start_date.clone(),
                                 end_date: bar.end_date.clone(),
@@ -102,89 +127,14 @@ impl crate::Flowsurface {
                                 initial_cash: bar.initial_cash.clone(),
                                 validation_error: None,
                                 submitting: false,
-                            };
-                            match form.validate() {
-                                Err(e) => {
-                                    self.notifications
-                                        .push(Toast::warn(format!("入力エラー: {e}")));
-                                    Task::none()
-                                }
-                                Ok(v) => {
-                                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                                        let strategy_file_str =
-                                            v.strategy_file.to_string_lossy().into_owned();
-                                        let gran_dto = v.granularity.to_dto();
-                                        let first_id = v.instrument_ids[0].clone();
-                                        let instrument_ids = v.instrument_ids;
-                                        let start_date = v.start_date;
-                                        let end_date = v.end_date;
-                                        let initial_cash = v.initial_cash;
-                                        Task::perform(
-                                            async move {
-                                                let load_req_id = uuid::Uuid::new_v4().to_string();
-                                                conn.send(
-                                                    engine_client::dto::Command::LoadReplayData {
-                                                        request_id: load_req_id,
-                                                        instrument_id: first_id.clone(),
-                                                        instrument_ids: Some(
-                                                            instrument_ids.clone(),
-                                                        ),
-                                                        start_date: start_date.clone(),
-                                                        end_date: end_date.clone(),
-                                                        granularity: gran_dto.clone(),
-                                                    },
-                                                )
-                                                .await
-                                                .map_err(|e| e.to_string())?;
-                                                let start_req_id = uuid::Uuid::new_v4().to_string();
-                                                conn.send(
-                                                engine_client::dto::Command::StartEngine {
-                                                    request_id: start_req_id,
-                                                    engine: engine_client::dto::EngineKind::Backtest,
-                                                    strategy_id: "user-strategy".to_string(),
-                                                    config: engine_client::dto::EngineStartConfig {
-                                                        instrument_id: first_id,
-                                                        instrument_ids: Some(instrument_ids),
-                                                        start_date: Some(start_date),
-                                                        end_date: Some(end_date),
-                                                        initial_cash: Some(initial_cash.to_string()),
-                                                        granularity: Some(gran_dto),
-                                                        strategy_file: Some(strategy_file_str),
-                                                        strategy_init_kwargs: None,
-                                                        max_qty: None,
-                                                        max_notional_jpy: None,
-                                                    },
-                                                },
-                                            )
-                                            .await
-                                            .map_err(|e| e.to_string())?;
-                                                Ok::<(), String>(())
-                                            },
-                                            |res| match res {
-                                                Ok(()) => Message::Venue(VenueMsg::OrderToast(
-                                                    Toast::info(
-                                                        "Replay を開始しました".to_string(),
-                                                    ),
-                                                )),
-                                                Err(e) => Message::Venue(VenueMsg::OrderToast(
-                                                    Toast::error(format!("Replay 起動失敗: {e}")),
-                                                )),
-                                            },
-                                        )
-                                    } else {
-                                        self.notifications.push(Toast::error(
-                                            "エンジンに接続されていません".to_string(),
-                                        ));
-                                        Task::none()
-                                    }
-                                }
-                            }
+                            });
+                            Task::none()
                         } // end else (new replay session)
                     }
                     BarMessage::PressPause => {
-                        self.replay_paused = true;
-                        let has_history = self.menu_bar.replay_bar.replay_has_history;
                         if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                            self.replay_paused = true;
+                            let has_history = self.menu_bar.replay_bar.replay_has_history;
                             let req_id = uuid::Uuid::new_v4().to_string();
                             Task::perform(
                                 async move {

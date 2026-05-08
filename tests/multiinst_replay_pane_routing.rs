@@ -1,5 +1,5 @@
 //! Regression guard for the schema 3.13 fix
-//! ([docs/✅python-data-engine/🔵multiinst-replay-pane-missing.md]).
+//! ([docs/specs/data-engine/🔵multiinst-replay-pane-missing.md]).
 //!
 //! Before the fix, `map_engine_event_to_message` destructured
 //! `EngineEvent::ReplayDataLoaded` with `..`, silently dropping
@@ -64,7 +64,7 @@ fn dispatcher_forwards_instrument_ids_to_message() {
          from EngineEvent::ReplayDataLoaded to Message::ReplayDataLoaded. \
          Dropping it with `..` causes multi-instrument replay to create only \
          one chart pane (schema 3.13 regression, \
-         docs/✅python-data-engine/🔵multiinst-replay-pane-missing.md)."
+         docs/specs/data-engine/🔵multiinst-replay-pane-missing.md)."
     );
 }
 
@@ -97,7 +97,7 @@ fn message_replay_data_loaded_has_instrument_ids_field() {
         variant_body.contains("session_epoch"),
         "Message::ReplayDataLoaded must declare a `session_epoch: Option<u64>` \
          field (schema 3.14). Dropping it re-introduces the file-switch stale \
-         pane bug — see docs/✅python-data-engine/🔵replay-file-switch-stale-panes-approach-b.md"
+         pane bug — see docs/specs/data-engine/🔵replay-file-switch-stale-panes-approach-b.md"
     );
 }
 

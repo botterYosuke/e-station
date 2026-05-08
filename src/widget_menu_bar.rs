@@ -239,9 +239,12 @@ fn replay_input_row<'a>(
     row![
         strat_btn,
         day_display,
-        text_input("銘柄 (例: 7203)", &bar.instrument_id)
-            .on_input(BarMessage::InstrumentChanged)
-            .width(Length::Fixed(120.0)),
+        text(if bar.instrument_id.is_empty() {
+            "(未選択)".to_string()
+        } else {
+            bar.instrument_id.clone()
+        })
+        .width(Length::Fixed(120.0)),
         text_input("開始 YYYY-MM-DD", &bar.start_date)
             .on_input(BarMessage::StartDateChanged)
             .width(Length::Fixed(110.0)),

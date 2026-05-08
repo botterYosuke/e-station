@@ -38,6 +38,10 @@ pub enum Action {
     /// the duplicate-press suppression can consult `tachibana_state`
     /// (which lives at the top level). T35-U1 / T35-U3.
     RequestTachibanaLogin(crate::venue_state::Trigger),
+    /// Forwarded from `tickers_table::Action::RequestKabuLogin`.
+    RequestKabuLogin(crate::venue_state::Trigger),
+    /// Forwarded from `tickers_table::Action::RequestTachibanaLogout`.
+    RequestTachibanaLogout,
     /// User selected an order panel from the sidebar Order menu.
     /// Flowsurface splits the focused pane and opens the selected content.
     OpenOrderPanel(data::layout::pane::ContentKind),
@@ -93,6 +97,12 @@ impl Sidebar {
                     }
                     Some(tickers_table::Action::RequestTachibanaLogin(trigger)) => {
                         return (Task::none(), Some(Action::RequestTachibanaLogin(trigger)));
+                    }
+                    Some(tickers_table::Action::RequestKabuLogin(trigger)) => {
+                        return (Task::none(), Some(Action::RequestKabuLogin(trigger)));
+                    }
+                    Some(tickers_table::Action::RequestTachibanaLogout) => {
+                        return (Task::none(), Some(Action::RequestTachibanaLogout));
                     }
                     None => {}
                 }

@@ -262,7 +262,7 @@ class TachibanaWorker(ExchangeWorker):
         self._proxy: str | None = None
         self._client: httpx.AsyncClient | None = None
 
-        # Bug Y (docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md):
+        # Bug Y (docs/specs/venues/tachibana/fix-event-ws-lifecycle-2026-05-04.md):
         # ticker 毎の EVENT WS マルチプレクサ。stream_depth と stream_trades が
         # 同 ticker に並行接続して broker から p_errno=2 を蹴られる事故の防止。
         self._ticker_hubs: dict[str, TickerEventWsHub] = {}
@@ -1256,7 +1256,6 @@ class TachibanaWorker(ExchangeWorker):
                         "bids": norm_bids,
                         "asks": norm_asks,
                         "sequence_id": depth["sequence_id"],
-                        "recv_ts_ms": depth["recv_ts_ms"],
                     })
             elif frame_type == "ST":
                 # ST = server-side status frame. May carry an error.
@@ -1400,7 +1399,6 @@ class TachibanaWorker(ExchangeWorker):
                         "bids": norm_bids,
                         "asks": norm_asks,
                         "sequence_id": poll_counter,
-                        "recv_ts_ms": snapshot.get("recv_ts_ms", 0),
                     })
             except Exception as exc:
                 log.warning("tachibana: depth poll error for %s: %s", ticker, exc)

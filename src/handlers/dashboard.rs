@@ -468,6 +468,12 @@ impl crate::Flowsurface {
                             }
                             Task::none()
                         }
+                        Some(dashboard::Event::ReplayBarSync(instrument_id)) => {
+                            if self.replay_running {
+                                self.menu_bar.replay_bar.instrument_id = instrument_id;
+                            }
+                            Task::none()
+                        }
                         // N4.3: open OS file dialog for strategy .py file
                         Some(dashboard::Event::PickStrategyFile) => {
                             return Task::perform(
@@ -666,6 +672,20 @@ impl crate::Flowsurface {
                             iced::Task::done(Message::Venue(VenueMsg::RequestTachibanaLogin(
                                 trigger,
                             ))),
+                        ]);
+                    }
+                    Some(dashboard::sidebar::Action::RequestKabuLogin(trigger)) => {
+                        let task = task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
+                        return Task::batch(vec![
+                            task,
+                            iced::Task::done(Message::Venue(VenueMsg::RequestKabuLogin(trigger))),
+                        ]);
+                    }
+                    Some(dashboard::sidebar::Action::RequestTachibanaLogout) => {
+                        let task = task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
+                        return Task::batch(vec![
+                            task,
+                            iced::Task::done(Message::Venue(VenueMsg::RequestTachibanaLogout)),
                         ]);
                     }
                     None => {}

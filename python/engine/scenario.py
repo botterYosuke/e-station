@@ -5,12 +5,31 @@ Public API:
         .py から SCENARIO 定数を ast.parse + ast.literal_eval で安全抽出。
         import は発火しない（副作用ゼロ）。
 
+    resolve_refs(d: dict, *, base_dir: Path) -> dict
+        v3 SCENARIO の instruments_ref を外部 JSON から解決して instruments を追加した
+        新 dict を返す（非破壊・instruments_ref キーは保持）。v1/v2 は no-op。
+        失敗時は ScenarioValidationError(code="unresolved_ref") を raise。
+
+        layer contract:
+          - scenario.py 内の rollback reason は syntax_error / validate_failed の 2 値固定。
+          - unresolved_ref / relative_ref_crosses_dir は server 層（_do_save_strategy_scenario）が
+            write_back 呼び出し前に返す SaveErrorCode であり、このモジュールには現れない。
+
     validate(d: dict) -> None
         Scenario TypedDict 形状を runtime 検証。失敗時は ScenarioValidationError を raise。
+        v3 の場合は resolve_refs 後の dict（instruments キー必須）を渡すこと。
 
     write_back(path, scenario, *, save_as, loaded_path) -> None
         libcst で SCENARIO ブロックを atomic 書き戻し。
         tempfile + os.replace() による atomic write、世代付き .bak、2段検証 + rollback。
+        v3 の場合も raw dict（instruments_ref を含む）を渡す — _verify_writeback が
+        内部で resolve_refs を呼んで検証する。
+
+schema バージョン一覧:
+    v1 (schema_version=1): instrument (str) — 単一銘柄
+    v2 (schema_version=2): instruments (list[str]) — 複数銘柄
+    v3 (schema_version=3): instruments_ref (str) または instruments (list[str]) —
+                           外部 JSON 参照または直書き（resolve 後は instruments が必須）
 
 レビュー反映 (2026-05-04 ラウンド1, 方針 B):
     `current_path` 引数は本モジュールから削除。loaded_path 一軸の FCFS 不変条件
@@ -20,6 +39,7 @@ Public API:
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
 import shutil
@@ -60,6 +80,16 @@ class Scenario_v2(TypedDict):
     initial_cash: int
 
 
+class Scenario_v3(TypedDict, total=False):
+    schema_version: int
+    instruments: list          # instruments_ref と排他（resolve 後は必須）
+    instruments_ref: str       # instruments と排他（任意キー）
+    start: str
+    end: str
+    granularity: str
+    initial_cash: int
+
+
 # Scenario TypedDict から自動生成（3点管理廃止）
 _EXPECTED_TYPES: dict[str, type] = typing.get_type_hints(Scenario)
 REQUIRED_KEYS: frozenset[str] = frozenset(_EXPECTED_TYPES.keys())
@@ -71,9 +101,25 @@ _EXPECTED_TYPES_V2: dict[str, type] = {
 _EXPECTED_TYPES_V2["instruments"] = list
 REQUIRED_KEYS_V2: frozenset[str] = frozenset(typing.get_type_hints(Scenario_v2).keys())
 
+# v3 用（resolve 後の必須キー）
+_EXPECTED_TYPES_V3: dict[str, type] = {
+    "schema_version": int,
+    "instruments": list,
+    "start": str,
+    "end": str,
+    "granularity": str,
+    "initial_cash": int,
+}
+REQUIRED_KEYS_V3: frozenset[str] = frozenset(_EXPECTED_TYPES_V3.keys())
+_OPTIONAL_KEYS_V3: frozenset[str] = frozenset({"instruments_ref"})
+
 
 class ScenarioValidationError(Exception):
     """SCENARIO 辞書の形状違反（必須キー欠落・型違反・余剰キー）。"""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code  # "unresolved_ref" / "schema" / None
 
 
 # ---------------------------------------------------------------------------
@@ -207,13 +253,56 @@ def _validate_v2(d: dict) -> None:  # type: ignore[type-arg]
             )
 
 
+def _validate_v3(d: dict) -> None:  # type: ignore[type-arg]
+    """v3 (schema_version=3) 専用バリデーション。resolve_refs 後の dict を受ける前提。
+
+    resolve 後は `instruments` が必須・`instruments_ref` は任意（保持されていれば許可）。
+    """
+    missing = REQUIRED_KEYS_V3 - d.keys()
+    if missing:
+        raise ScenarioValidationError(f"SCENARIO missing required keys: {sorted(missing)}")
+
+    extra = d.keys() - REQUIRED_KEYS_V3 - _OPTIONAL_KEYS_V3
+    if extra:
+        raise ScenarioValidationError(f"SCENARIO has unknown keys: {sorted(extra)}")
+
+    for key, expected_type in _EXPECTED_TYPES_V3.items():
+        val = d[key]
+        if isinstance(val, bool) and expected_type is int:
+            raise ScenarioValidationError(
+                f"SCENARIO[{key!r}] must be int, got bool"
+            )
+        if not isinstance(val, expected_type):
+            raise ScenarioValidationError(
+                f"SCENARIO[{key!r}] must be {expected_type.__name__}, got {type(val).__name__}"
+            )
+
+    # instruments: list[str] かつ非空ルール（v2 と同様）
+    instruments = d["instruments"]
+    if len(instruments) == 0:
+        raise ScenarioValidationError("SCENARIO['instruments'] must not be empty")
+    for i, item in enumerate(instruments):
+        if not isinstance(item, str):
+            raise ScenarioValidationError(
+                f"SCENARIO['instruments'][{i}] must be str, got {type(item).__name__}"
+            )
+
+    # instruments_ref: あれば str 型のみチェック（中身は resolve_refs が保証済み）
+    if "instruments_ref" in d:
+        ref = d["instruments_ref"]
+        if not isinstance(ref, str):
+            raise ScenarioValidationError(
+                f"SCENARIO['instruments_ref'] must be str, got {type(ref).__name__}"
+            )
+
+
 def validate(d: dict) -> None:  # type: ignore[type-arg]
     """Scenario TypedDict の runtime 検証。失敗時は ScenarioValidationError を raise。
 
     - 必須キー欠落 → ScenarioValidationError
     - 余剰キー → ScenarioValidationError
     - 型違反（bool は int のサブクラスだが int として認めない） → ScenarioValidationError
-    - schema_version が 1 または 2 以外 → ScenarioValidationError
+    - schema_version が 1, 2 または 3 以外 → ScenarioValidationError
     """
     if not isinstance(d, dict):
         raise ScenarioValidationError(f"SCENARIO must be a dict, got {type(d).__name__}")
@@ -223,10 +312,149 @@ def validate(d: dict) -> None:  # type: ignore[type-arg]
         _validate_v1(d)
     elif sv == 2:
         _validate_v2(d)
+    elif sv == 3:
+        _validate_v3(d)  # resolve 後の dict を渡すこと
     else:
         raise ScenarioValidationError(
-            f"SCENARIO schema_version must be 1 or 2, got {sv!r}"
+            f"SCENARIO schema_version must be 1, 2 or 3, got {sv!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# resolve_refs（v3 instruments_ref 解決）
+# ---------------------------------------------------------------------------
+
+
+def _resolve_json_pointer(doc: object, pointer: str) -> object:
+    """RFC 6901 JSON Pointer の最小実装。
+
+    - "" または "#" → doc 全体
+    - "#/a/b" → doc["a"]["b"]
+    - list の場合 token を int に変換
+    - ~1 → / / ~0 → ~ のアンエスケープ
+
+    Raises:
+        ScenarioValidationError: 解決失敗時（code="unresolved_ref"）。
+    """
+    # "#" または空文字列 → root
+    if pointer in ("", "#"):
+        return doc
+
+    # "#/..." → "/..." に正規化
+    if pointer.startswith("#/"):
+        pointer = pointer[1:]  # "#/" → "/"
+
+    if not pointer.startswith("/"):
+        raise ScenarioValidationError(
+            f"Invalid JSON Pointer: {pointer!r}",
+            code="unresolved_ref",
+        )
+
+    tokens = pointer[1:].split("/")
+    current = doc
+    for token in tokens:
+        # RFC 6901 §3: ~1→/ を先に処理し、次に ~0→~ する（この順でないと ~01 が誤解釈される）
+        token = token.replace("~1", "/").replace("~0", "~")
+        try:
+            if isinstance(current, list):
+                current = current[int(token)]
+            elif isinstance(current, dict):
+                current = current[token]
+            else:
+                raise ScenarioValidationError(
+                    f"JSON Pointer traversal failed at token {token!r}: "
+                    f"not a dict or list",
+                    code="unresolved_ref",
+                )
+        except (KeyError, IndexError, ValueError) as exc:
+            raise ScenarioValidationError(
+                f"JSON Pointer traversal failed at token {token!r}: {exc}",
+                code="unresolved_ref",
+            ) from exc
+
+    return current
+
+
+def resolve_refs(d: dict, *, base_dir: Path) -> dict:  # type: ignore[type-arg]
+    """v3 のとき instruments_ref を解決して `instruments` を追加した新 dict を返す。
+
+    - 元 d は破壊しない（dict(d) コピーを返す）
+    - instruments_ref キーは出力にも保持される
+    - v1/v2 は no-op（dict(d) をそのまま返す）
+    - instruments と instruments_ref の両立は明示エラー（code=None）
+    - ファイル読み込み失敗 / JSON Pointer 失敗 → code="unresolved_ref"
+    - 解決結果が list[str] 以外 → code="unresolved_ref"
+
+    Raises:
+        ScenarioValidationError: 参照解決失敗または入力不正。
+    """
+    if d.get("schema_version") != 3:
+        return dict(d)
+
+    # instruments と instruments_ref の両立は reject（resolve 前の dict が対象）
+    if "instruments" in d and "instruments_ref" in d:
+        raise ScenarioValidationError(
+            "SCENARIO['instruments'] and ['instruments_ref'] cannot coexist; "
+            "remove one before calling resolve_refs()",
+        )
+
+    # instruments_ref がなければ（inline instruments）そのまま返す
+    if "instruments_ref" not in d:
+        return dict(d)
+
+    ref: str = d["instruments_ref"]
+
+    # path_part と pointer_part に分解
+    if "#" in ref:
+        path_part, pointer_part = ref.split("#", 1)
+        pointer_part = "#" + pointer_part  # _resolve_json_pointer に渡す形式に戻す
+    else:
+        path_part = ref
+        pointer_part = ""  # root
+
+    # path_part == "" は「現在ファイル参照」→ 本フェーズでは reject
+    if not path_part:
+        raise ScenarioValidationError(
+            "instruments_ref with empty path (self-reference) is not supported",
+            code="unresolved_ref",
+        )
+
+    # ファイル読み込み
+    try:
+        file_path = base_dir / path_part
+        raw = file_path.read_text(encoding="utf-8")
+        doc = json.loads(raw)
+    except OSError as exc:
+        raise ScenarioValidationError(
+            f"instruments_ref: cannot read {path_part!r}: {exc}",
+            code="unresolved_ref",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ScenarioValidationError(
+            f"instruments_ref: invalid JSON in {path_part!r}: {exc}",
+            code="unresolved_ref",
+        ) from exc
+
+    # JSON Pointer 解決
+    resolved = _resolve_json_pointer(doc, pointer_part)
+
+    # 型チェック: list[str] であること
+    if not isinstance(resolved, list):
+        raise ScenarioValidationError(
+            f"instruments_ref resolved to {type(resolved).__name__}, expected list[str]",
+            code="unresolved_ref",
+        )
+    for i, item in enumerate(resolved):
+        if not isinstance(item, str):
+            raise ScenarioValidationError(
+                f"instruments_ref resolved list[{i}] must be str, got {type(item).__name__}",
+                code="unresolved_ref",
+            )
+
+    # 非破壊コピーを返す（instruments_ref は保持、instruments を追加）
+    result = dict(d)
+    result["instruments"] = resolved
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -571,13 +799,18 @@ def _check_path_guard(
 
 
 def _verify_writeback(path: Path, _scenario: dict) -> None:  # type: ignore[type-arg]
-    """書き戻し後の二段検証: ast.parse + extract（構文）+ validate（形状）。
+    """書き戻し後の二段検証: ast.parse + extract（構文）+ resolve_refs + validate（形状）。
 
     レビュー反映 (2026-05-04 ラウンド1, M6):
         importlib による import 検証は採用しない。`nautilus_trader` 等の
         サードパーティ依存が読み込めない環境で誤検知するため要件から除外。
         構文エラーは extract() が raise する SyntaxError として検出され、
         形状違反は validate() が raise する ScenarioValidationError として検出される。
+
+    v3 の場合は resolve_refs を挟んで validate する。
+    base_dir = path.parent（書き戻し先 .py 自身の基準ディレクトリ）。
+    resolve 失敗は ScenarioValidationError として捕捉され、
+    rollback reason は validate_failed に分類される（R1-Finding-5）。
 
     Raises:
         SyntaxError: 書き戻したファイルが構文的に invalid な場合（extract 内 ast.parse）。
@@ -586,7 +819,8 @@ def _verify_writeback(path: Path, _scenario: dict) -> None:  # type: ignore[type
     extracted = extract(path)
     if extracted is None:
         raise ScenarioValidationError("SCENARIO not found in written file")
-    validate(extracted)
+    resolved = resolve_refs(extracted, base_dir=path.parent)
+    validate(resolved)
 
 
 # ---------------------------------------------------------------------------
