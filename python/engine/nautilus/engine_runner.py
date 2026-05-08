@@ -744,6 +744,15 @@ class NautilusRunner:
                         bp_dict["ts_event_ms"] = ts_ms  # time.time() を上書きして決定論性を保つ
                         emit(bp_dict)
 
+                        # Issue 5: PositionsUpdated push emit (fill 単位)。
+                        # bar MTM では emit しない（過剰 emit 防止）。
+                        from engine.server import build_replay_positions_event  # noqa: PLC0415
+                        pos_event = build_replay_positions_event(
+                            _portfolio.to_snapshot_dict(_last_prices),
+                            ts_ms,
+                        )
+                        emit(pos_event)
+
                     except Exception:
                         log.error(
                             "[NautilusRunner] OrderFilled emit failed (portfolio already updated): "
@@ -903,6 +912,13 @@ class NautilusRunner:
                             "date": curr_date_str,
                         })
 
+                    # schema 3.22: per-tick replay time signal (Issue 3)
+                    # DateChangeMarker の直後に emit して TimeUpdated が後着することを保証。
+                    emit({
+                        "event": "ReplayTimeUpdated",
+                        "timestamp_ms": curr_ts_ns // 1_000_000,
+                    })
+
                     # D7 pacing sleep 計算（multiplier=0 は「即時」扱い）
                     _mult = get_multiplier() if get_multiplier is not None else multiplier
                     if _mult <= 0 or prev_ts_ns is None:
@@ -964,7 +980,7 @@ class NautilusRunner:
                             strategy_id,
                             exc_info=True,
                         )
-                        break
+                        continue
 
                     prev_ts_ns = curr_ts_ns
 

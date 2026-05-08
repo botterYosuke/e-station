@@ -763,7 +763,7 @@ pub struct PositionRecordWire {
     pub position_type: PositionType,
     /// 信用建玉番号（margin_credit のみ Some）
     pub tategyoku_id: Option<String>,
-    /// venue 名（"tachibana" 固定）
+    /// venue 名（"tachibana" または "replay"）
     pub venue: String,
 }
 
@@ -1364,6 +1364,14 @@ pub enum EngineEvent {
         date: String,
     },
 
+    // ── schema 3.22: per-tick replay time signal ─────────────────────────────────
+    /// 各足処理後に emit されるリプレイ時刻通知（Issue 3）。
+    /// `DateChangeMarker` が営業日跨ぎ時のみ emit されるのに対し、毎足 emit する。
+    /// Rust 側はメニューバーの `current_day` を分秒単位で更新するために使う。
+    ReplayTimeUpdated {
+        timestamp_ms: i64,
+    },
+
     // ── schema 3.16: Replay Step-backward events ─────────────────────────────
     /// Emitted by Python before restoring a snapshot (Step- operation).
     /// Rust UI should switch the pane to "replace mode" to avoid duplicate
@@ -1415,9 +1423,13 @@ pub enum EngineEvent {
     StrategyScenarioLoaded {
         request_id: String,
         path: String,
-        /// SCENARIO dict、または SCENARIO 不在時 None。
+        /// raw SCENARIO dict（instruments_ref を含む。resolve 前）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scenario: Option<serde_json::Value>,
+        /// v3 + instruments_ref 経由のとき Python が解決した銘柄リスト。
+        /// v1/v2 / inline v3 では None。GUI prefill が最優先で参照する。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_instruments: Option<Vec<String>>,
     },
 
     /// LoadStrategyScenario 失敗時の応答（構文エラー / リテラル以外の dict）。

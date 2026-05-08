@@ -16,7 +16,7 @@ from engine.server import _ENGINE_VERSION
 # gRPC IPC schema version — source of truth for the gRPC transport layer.
 # Keep in sync with engine-client/src/lib.rs SCHEMA_MAJOR / SCHEMA_MINOR.
 SCHEMA_MAJOR: int = 3   # gRPC IPC schema major version
-SCHEMA_MINOR: int = 21  # gRPC IPC schema minor version
+SCHEMA_MINOR: int = 22  # gRPC IPC schema minor version
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +113,7 @@ _EVENT_TO_FIELD_AND_CLASS = {
     "StrategyScenarioLoadFailed": ("strategy_scenario_load_failed", engine_pb2.StrategyScenarioLoadFailedEvent),
     "StrategyScenarioSaved":      ("strategy_scenario_saved",     engine_pb2.StrategyScenarioSavedEvent),
     "LiveBuyingPower":            ("live_buying_power",           engine_pb2.LiveBuyingPowerEvent),
+    "ReplayTimeUpdated":          ("replay_time_updated",         engine_pb2.ReplayTimeUpdatedEvent),
 }
 
 
@@ -177,11 +178,23 @@ def _cmd_payload_to_dict(cmd, which: str) -> dict:
     """
     from google.protobuf.json_format import MessageToDict
     payload_msg = getattr(cmd, which)
-    return MessageToDict(
+    d = MessageToDict(
         payload_msg,
         preserving_proto_field_name=True,
         always_print_fields_with_no_presence=False,
     )
+
+    def _unfix_enum(obj: dict):
+        for k, v in list(obj.items()):
+            if k == "granularity" and isinstance(v, str) and v.startswith("REPLAY_GRANULARITY_"):
+                obj[k] = v[len("REPLAY_GRANULARITY_"):].capitalize()
+            elif k == "engine" and isinstance(v, str) and v.startswith("ENGINE_KIND_"):
+                obj[k] = v[len("ENGINE_KIND_"):].capitalize()
+            elif isinstance(v, dict):
+                _unfix_enum(v)
+    _unfix_enum(d)
+
+    return d
 
 
 def _dict_to_proto_event(event_dict: dict) -> engine_pb2.Event | None:
@@ -202,11 +215,19 @@ def _dict_to_proto_event(event_dict: dict) -> engine_pb2.Event | None:
     field_name, msg_class = mapping
     payload_dict = {k: v for k, v in event_dict.items() if k != "event"}
 
+    def _fix_enum_out(obj: dict):
+        for k, v in list(obj.items()):
+            if k == "granularity" and isinstance(v, str) and not v.startswith("REPLAY_GRANULARITY_"):
+                obj[k] = f"REPLAY_GRANULARITY_{v.upper()}"
+            elif isinstance(v, dict):
+                _fix_enum_out(v)
+    _fix_enum_out(payload_dict)
+
     try:
         payload = ParseDict(payload_dict, msg_class(), ignore_unknown_fields=False)
         return engine_pb2.Event(**{field_name: payload})
     except Exception as exc:
-        log.warning("Failed to build proto Event %s: %s — dropping", event_name, exc)
+        log.warning("Failed to build proto Event %s: %s — dropping: payload=%r", event_name, exc, payload_dict)
         return None
 
 

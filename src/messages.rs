@@ -163,6 +163,10 @@ pub(crate) enum ReplayMsg {
         path: std::path::PathBuf,
         reason: String,
     },
+    /// schema 3.22: per-tick replay time signal (Issue 3).
+    TimeUpdated {
+        timestamp_ms: i64,
+    },
     StopReplayOnly,
     FormMsg(modal::replay_form::Message),
     #[allow(dead_code)]

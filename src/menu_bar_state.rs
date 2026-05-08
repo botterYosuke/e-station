@@ -26,7 +26,8 @@ pub struct ReplayBarState {
     pub granularity: Option<Granularity>,
     pub initial_cash: String,
     pub strategy_file: Option<PathBuf>,
-    /// Current replay day — updated by `DateChangeMarker` IPC event.
+    /// Current replay time — updated by `TimeUpdated` (毎足) and `DateChangeMarker` IPC events.
+    /// Daily granularity: `%Y-%m-%d`; それ以外: `%H:%M:%S` (JST).
     pub current_day: Option<String>,
     /// True while the engine is in PAUSED state — mirrors `DataEngineServer._replay_paused`.
     /// Updated by `BarMessage::ReplayPauseStateChanged`.

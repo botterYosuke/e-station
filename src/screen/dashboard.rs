@@ -917,6 +917,25 @@ impl Dashboard {
             .any(|(_, _, state)| matches!(state.content, pane::Content::Positions(_)))
     }
 
+    /// Issue 5: replay モードの `Positions` pane にのみスナップショットを配布する。
+    /// `request_id == ""` の push 型 `PositionsUpdated` 用の経路。live pane は
+    /// 既存の `distribute_positions` で pull 型を担うため互いに干渉しない。
+    pub fn distribute_replay_positions(
+        &mut self,
+        main_window: window::Id,
+        positions: Vec<engine_client::dto::PositionRecordWire>,
+        ts_ms: i64,
+    ) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::Positions(panel) = &mut state.content
+                    && panel.is_replay()
+                {
+                    panel.set_positions(positions.clone(), ts_ms);
+                }
+            });
+    }
+
     /// Distribute a fresh positions snapshot to all `Positions` panes.
     pub fn distribute_positions(
         &mut self,
@@ -1321,9 +1340,34 @@ impl Dashboard {
                 self.replay_pane_registry
                     .register_pane("", "BuyingPower", new_pane);
                 self.focus = Some((main_window_id, new_pane));
+                last_split_pane = new_pane;
             } else {
                 log::warn!(
                     "auto_generate_replay_panes: pane split failed for BuyingPower \
+                     (session-level pane skipped silently otherwise)"
+                );
+            }
+        }
+
+        // Issue 5: セッションレベルの REPLAY 保有銘柄 pane は最初の1銘柄ロード時のみ生成。
+        // OrderList / BuyingPower と同パターン。push 型 PositionsUpdated 受信時に
+        // distribute_replay_positions() で更新される。
+        if is_first
+            && self.replay_pane_registry.loaded_count() == 1
+            && self.replay_pane_registry.should_generate("", "Positions")
+        {
+            let new_state = pane::State::new_replay_positions();
+            if let Some((new_pane, _)) =
+                self.panes
+                    .split(pane_grid::Axis::Horizontal, last_split_pane, new_state)
+            {
+                log::info!("replay: auto-generated REPLAY Positions pane");
+                self.replay_pane_registry
+                    .register_pane("", "Positions", new_pane);
+                self.focus = Some((main_window_id, new_pane));
+            } else {
+                log::warn!(
+                    "auto_generate_replay_panes: pane split failed for Positions \
                      (session-level pane skipped silently otherwise)"
                 );
             }

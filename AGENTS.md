@@ -140,6 +140,8 @@ cargo fmt
 cargo clippy -- -D warnings
 ```
 
+> **注意 (Python パス解決)**: `cargo run` が内部で `Command::new("python")` を起動するため、仮想環境が未アクティベートの Windows シェル等では「program not found」等のエラーになります。必要に応じて `uv run cargo run -- --mode {live|replay}` のように実行するか、事前に仮想環境（`.venv\Scripts\activate`）を有効化してください。
+
 ### 起動モード（`--mode` は必須）
 
 N1.13 以降、`flowsurface` 起動時に `--mode {live|replay}` の指定が**必須**になった。
@@ -214,6 +216,8 @@ replay モードでは `saved-state.json` を **load も save も行わない**�
 TimeAndSales / CandlestickChart / OrderList / BuyingPower を自動生成する。
 
 #### よくある落とし穴
+
+- **プロセス強制終了時の Python エンジン孤立化**：開発・デバッグ中に `flowsurface` を強制終了（Ctrl+C や `Stop-Process` 等）すると、Rust から子プロセスとして起動された `python -m engine` が終了せずに **Orphan（孤立プロセス）** として背後に残り続けます。次回起動時にポートの競合や予期せぬエラーが起きる原因となるため、強制終了した場合はタスクマネージャー等で Python プロセスを確実にキルしてください。
 
 - **`Subscribe: unknown venue 'replay'` ログ**：Python は replay を実 venue として
   登録していないため Subscribe / FetchKlines は拒否される。これは仕様通り。

@@ -1422,12 +1422,16 @@ mod tests {
         assert!(!anchor.is_paused());
         let changed = anchor.update_auto_follow(
             false, // x0 not visible → would normally trigger pause
-            1000,
-            0.0,
-            None, // no price yet
+            1000, 0.0, None, // no price yet
         );
-        assert!(!changed, "anchor must not transition to Paused without a base price (H-4)");
-        assert!(!anchor.is_paused(), "anchor must remain Live when no price available (H-4)");
+        assert!(
+            !changed,
+            "anchor must not transition to Paused without a base price (H-4)"
+        );
+        assert!(
+            !anchor.is_paused(),
+            "anchor must remain Live when no price available (H-4)"
+        );
     }
 
     /// Verifies that pause transition DOES occur once a price is available.
@@ -1436,7 +1440,10 @@ mod tests {
         let mut anchor = view::Anchor::default();
         let price = exchange::unit::Price::from_f32(50000.0);
         let changed = anchor.update_auto_follow(false, 1000, 0.0, Some(price));
-        assert!(changed, "anchor should pause when x0 not visible and price exists");
+        assert!(
+            changed,
+            "anchor should pause when x0 not visible and price exists"
+        );
         assert!(anchor.is_paused());
     }
 
