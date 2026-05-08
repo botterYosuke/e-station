@@ -47,14 +47,14 @@ J-Quants の 5 桁コードは「東証 4 桁コード + チェックデジッ�
 | `instrument_id`（`"7203.TSE"`） | `instrument_id` | 既存 venue 側で組み立て済み |
 | `price`（`Decimal`） | `price: Price` | `Price(value, precision=Instrument.price_precision)` |
 | `qty`（`Decimal`） | `size: Quantity` | `Quantity(value, precision=0)`（株数は整数） |
-| `side`（`"buy"` / `"sell"` / 推定不能 → `None`） | `aggressor_side: AggressorSide` | `BUYER` / `SELLER` / `NO_AGGRESSOR`。**前提**: [tachibana_ws.py:190](../../../python/engine/exchanges/tachibana_ws.py#L190) の `_determine_side` を曖昧時 `None` 返却に修正済みであること（[Q11-pre](./open-questions.md#q11-pre-立花-live-モードの曖昧-side-が-buy-寄せになっている-bug-to-fix-first-2026-04-28-新設)） |
+| `side`（`"buy"` / `"sell"` / 推定不能 → `None`） | `aggressor_side: AggressorSide` | `BUYER` / `SELLER` / `NO_AGGRESSOR`。**前提**: [tachibana_ws.py:190](https://github.com/botterYosuke/e-station/blob/main/../python/engine/exchanges/tachibana_ws.py#L190) の `_determine_side` を曖昧時 `None` 返却に修正済みであること（[Q11-pre](../../roadmap/nautilus-trader/open-questions.md#q11-pre-立花-live-モードの曖昧-side-が-buy-寄せになっている-bug-to-fix-first-2026-04-28-新設)） |
 | `ts_ms` | `ts_event: int (ns)` | ms → ns（×1_000_000） |
 | 採番（同一秒内連番） | `trade_id: TradeId` | live は連番文字列。`f"L-{ts_ms}-{seq}"` |
 
 **Strategy 開発者向け注意**:
 - live の `aggressor_side` は quote rule + tick rule 推定。曖昧時は `NO_AGGRESSOR`
 - replay は J-Quants 仕様で常に `NO_AGGRESSOR`
-- nautilus `SimulatedExchange` の fill 判定で `aggressor_side` が効く場面があるため、**意思決定の入力には使わない**（[spec.md §3.5.3](./spec.md#353-既知のlivereplay差分) / [Q11](./open-questions.md#q11)）
+- nautilus `SimulatedExchange` の fill 判定で `aggressor_side` が効く場面があるため、**意思決定の入力には使わない**（spec.md §3.5.3 / [Q11](../../roadmap/nautilus-trader/open-questions.md#q11)）
 
 ### 1.3 replay: J-Quants `equities_trades_*.csv.gz` → TradeTick
 
@@ -169,7 +169,7 @@ nautilus の `Equity` を使う。
 
 ## 4. OrderType / TimeInForce ↔ 立花
 
-**写像の正本**: [order/spec.md §5.1](../specs/order/spec.md#51-nautilus-互換のリクエストシェイプ) および `tachibana_orders._compose_request_payload`。本表はその参照コピー。
+**写像の正本**: [order/spec.md §5.1](../../specs/order.md#51-nautilus-互換のリクエストシェイプ) および `tachibana_orders._compose_request_payload`。本表はその参照コピー。
 
 ### 4.1 OrderType → 立花 `sOrderPrice` / `sCondition`
 
@@ -196,7 +196,7 @@ nautilus の `Equity` を使う。
 
 ### 4.3 `cash_margin` / `account_type` タグ
 
-[order/spec.md §5.1](../specs/order/spec.md#51-nautilus-互換のリクエストシェイプ) と完全同一。重複掲載しない。
+[order/spec.md §5.1](../../specs/order.md#51-nautilus-互換のリクエストシェイプ) と完全同一。重複掲載しない。
 
 ---
 
@@ -227,7 +227,7 @@ nautilus の `Equity` を使う。
 |---|---|---|
 | `REPLAY_NOT_IMPLEMENTED` | REPLAY 仮想注文の本配線が N1.11 まで保留中であることを示す。Rust UI は本 code 受信時に toast 表示のみ、submitting フラグは reset する。N1.11 完了後にこの code は廃止する。 | 一時（N1.5 〜 N1.11） |
 
-通常運用の reason_code 体系（`MARKET_CLOSED` / `INSUFFICIENT_FUNDS` 等）は [`docs/specs/order/spec.md §5.2`](../specs/order/spec.md#52-reason_code-体系観測性) を参照する。本表は N1 期間中に追加された REPLAY 専用の暫定 code のみを記載する。
+通常運用の reason_code 体系（`MARKET_CLOSED` / `INSUFFICIENT_FUNDS` 等）は [`docs/specs/order/spec.md §5.2`](../../specs/order.md#52-reason_code-体系観測性) を参照する。本表は N1 期間中に追加された REPLAY 専用の暫定 code のみを記載する。
 
 ---
 

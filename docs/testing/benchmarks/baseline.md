@@ -9,7 +9,7 @@ source_commit: f62bf94
 # Baseline Measurements — Phase 0
 
 Phase 0 の完了条件として記録する現行 Rust 直結構成のベースライン。
-以降のフェーズでは各項目が **許容範囲内**（[spec.md §9](../spec.md#9-非機能要件合格ライン) 参照）であることを確認する。
+以降のフェーズでは各項目が **許容範囲内**（[spec.md §9](../../specs/data-engine.md#9-非機能要件合格ライン) 参照）であることを確認する。
 
 ## 環境
 
@@ -46,7 +46,7 @@ Phase 0 の完了条件として記録する現行 Rust 直結構成のベース
 | 中央値 | 未計測 |
 | p99 | 未計測 |
 
-**目標**: IPC 追加後も中央値 < 2 ms、p99 < 10 ms（[spec.md §9](../spec.md#9-非機能要件合格ライン)）。
+**目標**: IPC 追加後も中央値 < 2 ms、p99 < 10 ms（[spec.md §9](../../specs/data-engine.md#9-非機能要件合格ライン)）。
 
 ## 3. Trade バッチ処理レイテンシ（Rust 直結）
 
@@ -66,7 +66,7 @@ Phase 0 の完了条件として記録する現行 Rust 直結構成のベース
 | CPU（アイドル） | 未計測 |
 | RSS（アイドル） | 未計測 |
 
-**目標**: Python エンジン追加後 CPU +30% 以内（[spec.md §9](../spec.md#9-非機能要件合格ライン)）。
+**目標**: Python エンジン追加後 CPU +30% 以内（[spec.md §9](../../specs/data-engine.md#9-非機能要件合格ライン)）。
 
 ## 5. `cargo test --workspace` 実行時間
 

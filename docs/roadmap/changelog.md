@@ -33,7 +33,7 @@ source_commit: bc6d8dd
 
 
 
-Schema versioning follows the policy in [spec.md §4.5.1](../spec.md#451-スキーマバージョニング運用).
+Schema versioning follows the policy in spec.md §4.5.1.
 
 - **major** bump: breaking changes (field removal, rename, enum variant removal)
 - **minor** bump: backwards-compatible additions (new fields, new variants, new commands)

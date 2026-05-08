@@ -8,7 +8,7 @@ source_commit: f0eb2c1
 
 # 実装計画
 
-[`spec.md`](./spec.md) の構成へ段階的に移行するためのフェーズ分け。
+[`spec.md`](../../specs/data-engine.md) の構成へ段階的に移行するためのフェーズ分け。
 各フェーズは単独でマージ可能・動作確認可能な粒度を目指す。
 
 ## フェーズ 0: 準備 & ベースライン計測（リスク低）
@@ -18,18 +18,18 @@ source_commit: f0eb2c1
 - [ ] `python/` に `engine` パッケージのスケルトンを置く。
 - [ ] [`docs/schemas/`](./schemas/) に IPC DTO の JSON Schema を作成。
   - 対象: `TradeMsg`, `KlineMsg`, `DepthSnapshotMsg`, `DepthDiffMsg`, `TickerMsg`, `TickerInfoMsg`, `TickerStatsMsg`, `OpenInterestMsg`, および各コマンド (`Hello` / `Ready` / `Subscribe` / `Unsubscribe` / `FetchKlines` / `FetchTrades` / `FetchOpenInterest` / `FetchTickerStats` / `ListTickers` / `GetTickerMetadata` / `RequestDepthSnapshot` / `SetProxy` / `Shutdown` / `Error` / `EngineError` / `DepthGap`)。
-  - 参考: 既存 Rust 型 [`exchange/src/lib.rs`](../../exchange/src/lib.rs), [`exchange/src/adapter.rs`](../../exchange/src/adapter.rs) の `Event`。
+  - 参考: 既存 Rust 型 [`exchange/src/lib.rs`](https://github.com/botterYosuke/e-station/blob/main/exchange/src/lib.rs), [`exchange/src/adapter.rs`](https://github.com/botterYosuke/e-station/blob/main/exchange/src/adapter.rs) の `Event`。
   - スキーマ ⇔ 型定義の生成方針（`quicktype` / `datamodel-code-generator` 等）を決定。
   - `schema_major` / `schema_minor` の運用ポリシーを [`CHANGELOG.md`](./schemas/) に記載。
-- [ ] Rust 側に `--data-engine-url ws://...` CLI フラグを追加（未指定時は従来動作）。dev モード時の接続トークンは環境変数 `FLOWSURFACE_ENGINE_TOKEN` から読み、本番同梱 spawn 時は stdin から受け取る（[spec.md §4.1.1](./spec.md#411-ローカル-ipc-のアクセス制御)）。
-- [ ] **ベースライン計測**（[spec.md §9.3](./spec.md#93-ベースライン計測)）を実施し `docs/benchmarks/baseline.md` に記録。以降のフェーズで比較する基準。Windows (開発環境) 必須、可能なら Linux も。
+- [ ] Rust 側に `--data-engine-url ws://...` CLI フラグを追加（未指定時は従来動作）。dev モード時の接続トークンは環境変数 `FLOWSURFACE_ENGINE_TOKEN` から読み、本番同梱 spawn 時は stdin から受け取る（[spec.md §4.1.1](../../specs/data-engine.md#411-ローカル-ipc-のアクセス制御)）。
+- [ ] **ベースライン計測**（[spec.md §9.3](../../specs/data-engine.md#93-ベースライン計測)）を実施し `docs/benchmarks/baseline.md` に記録。以降のフェーズで比較する基準。Windows (開発環境) 必須、可能なら Linux も。
 - [ ] 既存 Rust テストを通したまま CI を維持する。
 
 **完了条件**: 既存挙動を変えずにマージでき、ベースラインが数値で記録されている。
 
 ## フェーズ 0.5: venue 単位 backend 抽象化（Rust 側のみ）✅
 
-[spec.md §5.1](./spec.md#51-venue-単位の-backend-抽象化先行作業) に対応。取引所単位の段階移行を現実的にする前提工事。
+[spec.md §5.1](../../specs/data-engine.md#51-venue-単位の-backend-抽象化先行作業) に対応。取引所単位の段階移行を現実的にする前提工事。
 
 > **完了** (2026-04-24, commit `4456ea5` ブランチ `phase-0.5/venue-backend-trait`)
 
@@ -38,7 +38,7 @@ source_commit: f0eb2c1
   - ストリーム: `kline_stream` / `trade_stream` / `depth_stream`
   - フェッチ: `fetch_klines` / `fetch_open_interest` / `fetch_ticker_stats` / `fetch_trades`
   - 運用: `request_depth_snapshot` / `health`
-  - 実装場所: [`exchange/src/adapter/venue_backend.rs`](../../exchange/src/adapter/venue_backend.rs)
+  - 実装場所: [`exchange/src/adapter/venue_backend.rs`](https://github.com/botterYosuke/e-station/blob/main/exchange/src/adapter/venue_backend.rs)
 - [x] `AdapterHandles` の各 venue フィールドを `Arc<dyn VenueBackend>` に置換（`Clone` 互換性のため `Box` ではなく `Arc`）。
   - `set_backend(venue, Arc<dyn VenueBackend>)` API を追加（Phase 2 で `EngineClientBackend` を差し込む入口）。
   - stream / fetch メソッドをすべて `get_backend(venue) -> Option<Arc<dyn VenueBackend>>` 経由に統一。
@@ -55,11 +55,11 @@ source_commit: f0eb2c1
 
 > **完了** (2026-04-24, commit `51459a7` ブランチ `phase-1/python-data-engine`)
 
-- [x] `engine.server` に WS サーバを実装（`websockets` ライブラリ）。loopback バインドのみ、単一クライアント制限 + トークン一致時の既存接続置換（[spec.md §4.5.2](./spec.md#452-既存接続の置換半死接続対策)）、接続トークン検証、起動ハンドシェイク（[spec.md §4.5](./spec.md#45-起動ハンドシェイク)）、ping/pong keepalive を初期実装に含める。
-- [x] `ExchangeWorker` 抽象 / server↔worker dispatch の境界を最初から設ける（[spec.md §6.1](./spec.md#61-プロセスモデルフェーズ-1-時点)）。フェーズ 1 は asyncio 単一プロセスだが、将来 venue 分割できる構造で着地させる。
+- [x] `engine.server` に WS サーバを実装（`websockets` ライブラリ）。loopback バインドのみ、単一クライアント制限 + トークン一致時の既存接続置換（[spec.md §4.5.2](../../specs/data-engine.md#452-既存接続の置換半死接続対策)）、接続トークン検証、起動ハンドシェイク（[spec.md §4.5](../../specs/data-engine.md#45-起動ハンドシェイク)）、ping/pong keepalive を初期実装に含める。
+- [x] `ExchangeWorker` 抽象 / server↔worker dispatch の境界を最初から設ける（[spec.md §6.1](../../specs/data-engine.md#61-プロセスモデルフェーズ-1-時点)）。フェーズ 1 は asyncio 単一プロセスだが、将来 venue 分割できる構造で着地させる。
 - [x] `exchanges/binance.py` で REST メタデータ + Kline + **Open Interest** + 24h 統計 + WebSocket trade/depth/kline を実装（OI はインジケータが継続要求するため初期から必須）。
-- [x] depth 整合性プロトコル（[spec.md §4.4](./spec.md#44-バックプレッシャと整合性保証)）: `session_id` / `sequence_id` / `prev_sequence_id` の付与、gap 検知時の `DepthGap` 送出と自発的再スナップショット、checksum がある場合の検証を実装。
-- [x] `limiter.py` で Binance のレート制限を移植（[`exchange/src/adapter/limiter.rs`](../../exchange/src/adapter/limiter.rs) を参考）。
+- [x] depth 整合性プロトコル（[spec.md §4.4](../../specs/data-engine.md#44-バックプレッシャと整合性保証)）: `session_id` / `sequence_id` / `prev_sequence_id` の付与、gap 検知時の `DepthGap` 送出と自発的再スナップショット、checksum がある場合の検証を実装。
+- [x] `limiter.py` で Binance のレート制限を移植（[`exchange/src/adapter/limiter.rs`](https://github.com/botterYosuke/e-station/blob/main/exchange/src/adapter/limiter.rs) を参考）。
 - [x] スキーマは pydantic、出力は orjson。
 - [x] stdin から `{port, token}` JSON を受け取り、ランダムポート・トークンで起動できるようにする（開発時は環境変数フォールバックを許容）。
 - [x] pytest で REST/WS の最低限のテスト（モック取引所 or VCR）＋ depth gap / session 切替の再同期テスト。
@@ -146,7 +146,7 @@ source_commit: f0eb2c1
 
 ### MEXC 実装詳細（2026-04-24 完了）
 
-- **実装ファイル**: [`python/engine/exchanges/mexc.py`](../../python/engine/exchanges/mexc.py)
+- **実装ファイル**: [`python/engine/exchanges/mexc.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/mexc.py)
 - **テスト**: `python/tests/test_mexc_rest.py` (22件) + `python/tests/test_mexc_depth_sync.py` (12件) = 計 34件全 PASS
 - **server.py 統合**: `self._workers["mexc"] = MexcWorker()` 追加済み
 
@@ -206,7 +206,7 @@ Rust の実装も futures WS (`contract.mexc.com`) のみを使用している�
 
 ### OKX 実装詳細（2026-04-24 完了）
 
-- **実装ファイル**: [`python/engine/exchanges/okex.py`](../../python/engine/exchanges/okex.py)
+- **実装ファイル**: [`python/engine/exchanges/okex.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/okex.py)
 - **テスト**: `python/tests/test_okex_rest.py` (20件) + `python/tests/test_okex_depth_sync.py` (10件) = 計 30件全 PASS
 - **server.py 統合**: `self._workers["okex"] = OkexWorker()` 追加済み
 
@@ -263,7 +263,7 @@ OKX `/market/history-candles` はページネーション cursor:
 
 ### Hyperliquid 実装詳細（2026-04-24 完了）
 
-- **実装ファイル**: [`python/engine/exchanges/hyperliquid.py`](../../python/engine/exchanges/hyperliquid.py)
+- **実装ファイル**: [`python/engine/exchanges/hyperliquid.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/hyperliquid.py)
 - **テスト**: `python/tests/test_hyperliquid_rest.py` (16件) + `python/tests/test_hyperliquid_depth_sync.py` (9件) = 計 25件全 PASS
 - **server.py 統合**: `self._workers["hyperliquid"] = HyperliquidWorker()` 追加済み
 
@@ -311,7 +311,7 @@ Hyperliquid の `candleSnapshot` は `startTime`/`endTime` のみで制御し `l
 
 #### 既知の課題（Medium）― IPC 経由の display symbol 欠落
 
-**状況**: Python IPC パスでは spot ティッカーの `symbol` フィールドが raw pair name（`BTC/USDC`, `@1` 等）のまま Rust 側に届く。`engine-client/src/backend.rs:397` は `Ticker::new(symbol, exchange)` に渡すだけなので、`BTCUSDC` / `HYPEUSDC` 相当の display alias が構築されない。ネイティブ Hyperliquid アダプタは [`exchange/src/adapter/hub/hyperliquid/fetch.rs:283`](../../exchange/src/adapter/hub/hyperliquid/fetch.rs) で display symbol を別途生成しており、IPC パスとで表示が乖離する。`@...` 形式の pair がサイドバー・保存レイアウト上に生のまま露出しうる。
+**状況**: Python IPC パスでは spot ティッカーの `symbol` フィールドが raw pair name（`BTC/USDC`, `@1` 等）のまま Rust 側に届く。`engine-client/src/backend.rs:397` は `Ticker::new(symbol, exchange)` に渡すだけなので、`BTCUSDC` / `HYPEUSDC` 相当の display alias が構築されない。ネイティブ Hyperliquid アダプタは [`exchange/src/adapter/hub/hyperliquid/fetch.rs:283`](https://github.com/botterYosuke/e-station/blob/main/exchange/src/adapter/hub/hyperliquid/fetch.rs) で display symbol を別途生成しており、IPC パスとで表示が乖離する。`@...` 形式の pair がサイドバー・保存レイアウト上に生のまま露出しうる。
 
 **影響範囲**: Hyperliquid Python worker が本番 wiring されるまでは潜在バグ（現状は native backend が生きている）。フル切替前に修正が必要。
 
@@ -329,7 +329,7 @@ Hyperliquid の `candleSnapshot` は `startTime`/`endTime` のみで制御し `l
 
 ### Bybit 実装詳細（2026-04-24 完了）
 
-- **実装ファイル**: [`python/engine/exchanges/bybit.py`](../../python/engine/exchanges/bybit.py)
+- **実装ファイル**: [`python/engine/exchanges/bybit.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/bybit.py)
 - **テスト**: `python/tests/test_bybit_rest.py` (11件) + `python/tests/test_bybit_depth_sync.py` (10件) = 計 21件全 PASS
 - **server.py 統合**: `self._workers["bybit"] = BybitWorker()` 追加済み
 
@@ -370,7 +370,7 @@ Binance と異なり WS 自身がスナップショットを配信する:
 
 ### OKX 実装詳細（2026-04-24 完了）
 
-- **実装ファイル**: [`python/engine/exchanges/okx.py`](../../python/engine/exchanges/okx.py)
+- **実装ファイル**: [`python/engine/exchanges/okx.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/okx.py)
 - **server.py 統合**: `self._workers["okx"] = OkxWorker()` 追加済み
 
 ## フェーズ 3 完了後レビュー指摘 (2026-04-24)
@@ -384,14 +384,14 @@ pytest 124/124 PASS の状態で実施したコードレビューで検出した
 
 **修正**: `BybitWorker._reconnect_triggers` (dict[(ticker, market), asyncio.Event]) を追加。`fetch_depth_snapshot` は trigger をセットして `NotImplementedError` を raise する代わりに WS ストリームに再接続を促す。`stream_depth` は各メッセージ後に trigger を確認し set 済みなら内部ループを break して WS 再接続。`server.py._do_request_depth_snapshot` は `NotImplementedError` を info ログのみで握りつぶし（Error イベントを送出しない）。WS 再接続後の `DepthSnapshot` イベントがそのまま Rust に届き tracker が再設定される。
 
-**ファイル**: [`python/engine/exchanges/bybit.py`](../../python/engine/exchanges/bybit.py), [`python/engine/server.py`](../../python/engine/server.py)
+**ファイル**: [`python/engine/exchanges/bybit.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/bybit.py), [`python/engine/server.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/server.py)
 
 #### Fix #4 (Medium): MEXC perp `daily_volume` がコントラクト枚数のまま返る
-**症状**: `_fetch_ticker_stats_futures._parse()` が `volume24`（コントラクト枚数）をそのまま `daily_volume` として返していた。ネイティブ Rust アダプタは `volume24 * contract_size * last_price`（linear）/ `volume24 * contract_size`（inverse）で USD 換算している（[exchange/src/adapter/hub/mexc/fetch.rs:365](../../exchange/src/adapter/hub/mexc/fetch.rs)）。
+**症状**: `_fetch_ticker_stats_futures._parse()` が `volume24`（コントラクト枚数）をそのまま `daily_volume` として返していた。ネイティブ Rust アダプタは `volume24 * contract_size * last_price`（linear）/ `volume24 * contract_size`（inverse）で USD 換算している（[exchange/src/adapter/hub/mexc/fetch.rs:365](https://github.com/botterYosuke/e-station/blob/main/exchange/src/adapter/hub/mexc/fetch.rs)）。
 
 **修正**: `MexcWorker.__init__` に `_contract_sizes: dict[str, float]` を追加。`_list_tickers_futures` が各銘柄の `contractSize` をキャッシュ。`_fetch_ticker_stats_futures._parse()` でキャッシュ値を使い linear/inverse を判別して USD 換算するよう修正。
 
-**ファイル**: [`python/engine/exchanges/mexc.py`](../../python/engine/exchanges/mexc.py)
+**ファイル**: [`python/engine/exchanges/mexc.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/mexc.py)
 
 ### フェーズ 3 完了後レビュー追加修正 (2026-04-24)
 
@@ -407,35 +407,35 @@ pytest 124/124 PASS の状態で実施したコードレビューで検出した
 
 **修正**: `_spawn_fetch._run()` に `except WsNativeResyncTriggered: raise` を追加して明示的に除外。
 
-**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+**ファイル**: [`python/engine/server.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/server.py)
 
 #### 修正 H3: IPC スキーマの `market` フィールド欠落
 **症状**: `Subscribe` / `ListTickers` / `GetTickerMetadata` / `RequestDepthSnapshot` / `FetchTickerStats` に `market` フィールドが未定義。`extra="ignore"` により偶然動いていたが、Rust 側が送る `market` が無言で破棄されていた。
 
 **修正**: 該当 Pydantic モデルに `market: str | None = None` を追加。
 
-**ファイル**: [`python/engine/schemas.py`](../../python/engine/schemas.py)
+**ファイル**: [`python/engine/schemas.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/schemas.py)
 
 #### 修正 M1: 未知 venue/stream で Error イベントを送出
 **症状**: `_handle_subscribe` で未知 venue・未知 stream の場合に `log.warning` + silent return だったため Rust 側が永遠にイベントを待ち続けた。
 
 **修正**: 両経路で `outbox` に `Error` イベント（code=`unknown_venue` / `unsupported_stream`）を積むよう変更。
 
-**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+**ファイル**: [`python/engine/server.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/server.py)
 
 #### 修正 M3: 接続置換時に旧ストリームタスクが残存
 **症状**: `_do_handshake` の接続置換処理が旧コネクションを close するだけで `_cancel_all_streams()` を呼ばないため、旧接続のストリームタスクが zombie として残存し得た。
 
 **修正**: handshake lock 内の接続置換後に `await self._cancel_all_streams()` を追加。
 
-**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+**ファイル**: [`python/engine/server.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/server.py)
 
 #### 修正 M6: ストリームタスク例外時に Error イベントを送出
 **症状**: ストリームタスクが予期せず終了しても done_callback は `_outbox_event.set()` するだけで Rust 側に一切通知がなかった。
 
 **修正**: done_callback を `_on_done(t)` に変更し、`t.exception()` が非 None の場合に `Error`（code=`stream_error`）を outbox に積み、`_streams` から該当キーを除去。
 
-**ファイル**: [`python/engine/server.py`](../../python/engine/server.py)
+**ファイル**: [`python/engine/server.py`](https://github.com/botterYosuke/e-station/blob/main/python/engine/server.py)
 
 > **テスト結果 (2026-04-24)**: pytest 全体 161 件 PASS（旧 156 件 + 上記修正で追加テスト 5 件は今回の修正に追加テストなし、既存テストがすべて通過）
 
@@ -444,7 +444,7 @@ pytest 124/124 PASS の状態で実施したコードレビューで検出した
 ### 未修正（要対応、フェーズ 4 以前）
 
 #### Finding #1 (High): Kline IPC 経由でボリューム正規化が失われる ✅ (2026-04-24, phase-4/historical-trades)
-**症状**: Python ワーカーは取引所の raw `volume` フィールド（基本通貨建てや枚数など）をそのまま `KlineMsg.volume` にシリアライズ。Rust の `KlineMsg::to_kline()` は `Volume::TotalOnly(Qty::from_f32(volume))` に直接変換する（[engine-client/src/convert.rs:48](../../engine-client/src/convert.rs)）。ネイティブアダプタは `Kline` 構築前に正規化している（例: [exchange/src/adapter/hub/mexc/fetch.rs:301](../../exchange/src/adapter/hub/mexc/fetch.rs) は `quoteVolume` を優先）ため、IPC チャートは現行 Rust パスと異なるボリュームバーを表示する。
+**症状**: Python ワーカーは取引所の raw `volume` フィールド（基本通貨建てや枚数など）をそのまま `KlineMsg.volume` にシリアライズ。Rust の `KlineMsg::to_kline()` は `Volume::TotalOnly(Qty::from_f32(volume))` に直接変換する（[engine-client/src/convert.rs:48](https://github.com/botterYosuke/e-station/blob/main/engine-client/src/convert.rs)）。ネイティブアダプタは `Kline` 構築前に正規化している（例: [exchange/src/adapter/hub/mexc/fetch.rs:301](https://github.com/botterYosuke/e-station/blob/main/exchange/src/adapter/hub/mexc/fetch.rs) は `quoteVolume` を優先）ため、IPC チャートは現行 Rust パスと異なるボリュームバーを表示する。
 
 **修正内容**:
 - `KlineMsg` に `quote_volume`, `taker_buy_volume`, `taker_buy_quote_volume` オプションフィールドを追加（Python schemas.py および Rust dto.rs）。
@@ -491,19 +491,19 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 #### Finding #1 (High): Binance ヒストリカル取得で `from_time` 下限が無視されていた
 **症状**: `fetch_trades()` が `start_ms` から日付のみを抽出し `_fetch_historical_trades()` に渡す実装だったため、返却される aggTrades zip の全日分（`start_ms` より前のデータを含む）がそのままチャートに挿入されていた。Rust 側 `dashboard.rs` は `trade.time <= until_time` のみクリップし、下限は信頼していた。日中から始まるヒストリカル要求で過剰なデータが描画される。
 
-**修正**: [python/engine/exchanges/binance.py:522](../../python/engine/exchanges/binance.py#L522) — `_fetch_historical_trades()` の戻り値を `ts_ms >= start_ms` でフィルタしてから返却。根本原因を Python 側で封じ込めたため、`dashboard.rs` の下限クリップ追加は不要。
+**修正**: [python/engine/exchanges/binance.py:522](https://github.com/botterYosuke/e-station/blob/main/python/engine/exchanges/binance.py#L522) — `_fetch_historical_trades()` の戻り値を `ts_ms >= start_ms` でフィルタしてから返却。根本原因を Python 側で封じ込めたため、`dashboard.rs` の下限クリップ追加は不要。
 
 #### Finding #2 (Medium): 空バッチが後続日のフェッチを打ち切っていた
 **症状**: Phase 4 で「1 リクエスト = 1 カレンダー日」契約に変更されたが、`fetch_trades_batched()` は空バッチで `break` する実装のままだった。流動性の低い銘柄・新規上場直後・取引所のデータ欠損などで 1 日分が空の場合、それ以降の全日がフェッチされず途切れる。
 
-**修正**: [src/connector/fetcher.rs:477](../../src/connector/fetcher.rs#L477) — 空バッチ時は `latest_trade_t` を翌日 midnight に進めて `continue`。全体ループ条件 `latest_trade_t < to_time` で自然終了する。
+**修正**: [src/connector/fetcher.rs:477](https://github.com/botterYosuke/e-station/blob/main/src/connector/fetcher.rs#L477) — 空バッチ時は `latest_trade_t` を翌日 midnight に進めて `continue`。全体ループ条件 `latest_trade_t < to_time` で自然終了する。
 
 #### Finding #3 (Medium): `to_time` 上限が IPC 層で失われ `now_ms` が送られていた
 **症状**: `fetch_trades_batched()` は `to_time` を保持するが、`VenueBackend::fetch_trades()` 以降のシグネチャが `from_time` のみで、`EngineClientBackend` はハードコードで `end_ms: now_ms` を送っていた。過去スライスを要求しても常に「現在まで」を取得しに行くため、レート制限・ダウンロード量が悪化。
 
 **修正**: `VenueBackend` トレイトに `to_time: u64` を追加して 9 ファイルで伝搬（`VenueBackend` トレイト、`AdapterHandles`、`FetchCommand::Trades`、`BinanceHandle`/`HyperliquidHandle`、Binance Worker `FetchCommandHandler` 実装、`binance/fetch.rs`、`EngineClientBackend`、`HybridBackend`、テストスタブ 2 箇所）。
-- [engine-client/src/backend.rs:708](../../engine-client/src/backend.rs#L708): `end_ms: to_time as i64`（旧: `now_ms`）。
-- [exchange/src/adapter/hub/binance/fetch.rs:704](../../exchange/src/adapter/hub/binance/fetch.rs#L704): ヒストリカル zip を `retain(|t| t.time >= from_time)`、intraday 拡張分を `filter(|t| t.time <= to_time)`。
+- [engine-client/src/backend.rs:708](https://github.com/botterYosuke/e-station/blob/main/engine-client/src/backend.rs#L708): `end_ms: to_time as i64`（旧: `now_ms`）。
+- [exchange/src/adapter/hub/binance/fetch.rs:704](https://github.com/botterYosuke/e-station/blob/main/exchange/src/adapter/hub/binance/fetch.rs#L704): ヒストリカル zip を `retain(|t| t.time >= from_time)`、intraday 拡張分を `filter(|t| t.time <= to_time)`。
 
 **テスト**: `cargo test -p flowsurface-exchange` 17/17 PASS。`cargo check --workspace` clean。Python 側は既存 `test_binance_fetch_trades.py` / `test_server_dispatch.py` が引き続き PASS。
 
@@ -541,13 +541,13 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 > **進行中** (2026-04-25, ブランチ `phase-6/distribution-runtime`)
 
 - [x] PyInstaller で Python サイドを単一実行ファイル化、Rust バイナリと同梱。
-  - [`python/engine.spec`](../../python/engine.spec): PyInstaller spec（`onefile`、`console=True`、`hiddenimports` で全 5 取引所モジュールを明示）。
-  - [`scripts/build-engine.sh`](../../scripts/build-engine.sh): `uv tool run pyinstaller`（または `pyinstaller`）でビルドし `target/release/python-engine/flowsurface-engine[.exe]` に出力。
-  - [`pyproject.toml`](../../pyproject.toml) に `[project.optional-dependencies] build = ["pyinstaller>=6.5"]` を追加。
+  - [`python/engine.spec`](https://github.com/botterYosuke/e-station/blob/main/python/engine.spec): PyInstaller spec（`onefile`、`console=True`、`hiddenimports` で全 5 取引所モジュールを明示）。
+  - [`scripts/build-engine.sh`](https://github.com/botterYosuke/e-station/blob/main/scripts/build-engine.sh): `uv tool run pyinstaller`（または `pyinstaller`）でビルドし `target/release/python-engine/flowsurface-engine[.exe]` に出力。
+  - [`pyproject.toml`](https://github.com/botterYosuke/e-station/blob/main/pyproject.toml) に `[project.optional-dependencies] build = ["pyinstaller>=6.5"]` を追加。
 - [x] [`scripts/`](../../scripts/) の Win/Mac/Linux ビルドスクリプトに Python 同梱手順を追加。
-  - [`scripts/build-windows.sh`](../../scripts/build-windows.sh): Rust ビルド後 `build-engine.sh` を呼び `flowsurface.exe` と一緒に zip。
-  - [`scripts/build-macos.sh`](../../scripts/build-macos.sh): Universal lipo 後 `flowsurface-engine` を tar に同梱（PyInstaller はクロスアーチ非対応のためエンジンはホスト arch のまま）。
-  - [`scripts/package-linux.sh`](../../scripts/package-linux.sh): `package` サブコマンドが Rust ビルド + エンジンビルドを実行し `archive/bin/` に両方をインストール。
+  - [`scripts/build-windows.sh`](https://github.com/botterYosuke/e-station/blob/main/scripts/build-windows.sh): Rust ビルド後 `build-engine.sh` を呼び `flowsurface.exe` と一緒に zip。
+  - [`scripts/build-macos.sh`](https://github.com/botterYosuke/e-station/blob/main/scripts/build-macos.sh): Universal lipo 後 `flowsurface-engine` を tar に同梱（PyInstaller はクロスアーチ非対応のためエンジンはホスト arch のまま）。
+  - [`scripts/package-linux.sh`](https://github.com/botterYosuke/e-station/blob/main/scripts/package-linux.sh): `package` サブコマンドが Rust ビルド + エンジンビルドを実行し `archive/bin/` に両方をインストール。
 - [x] 起動時の Python プロセス監視・再起動ロジックを本実装。
   - `--data-engine-url` 未指定時は **マネージドモード**（既定）に切り替え、`ENGINE_CONNECTION` を `ProcessManager::with_command(EngineCommand::resolve()…)` で配置した Python サブプロセスにバインドする。
   - `pick_free_port()` で 127.0.0.1 のフリーポートを取得 → `ProcessManager::start(port)` がハンドシェイク／プロキシ再投入／購読再送を実施。
@@ -556,15 +556,15 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
   - 既存の `--data-engine-url` モードは「外部管理エンジンに接続するだけ」に再分類（ドキュメント上は dev モード扱い）。
 - [x] エラーログを Rust 側 `fern` ロガーに集約（Python の stderr/stdout を吸い上げる）。
   - `PythonProcess::spawn_with` が stdout/stderr を `Stdio::piped()` に変更し、`forward_lines` タスクが行単位で `log::log!(target: "engine", level, "...")` に転送。
-  - [`src/logger.rs`](../../src/logger.rs) の fern dispatch に `level_for("engine", level_filter)` と `level_for("flowsurface_engine_client", level_filter)` を追加し `flowsurface.log` に同居させる（spec §6.4）。
+  - [`src/logger.rs`](https://github.com/botterYosuke/e-station/blob/main/src/logger.rs) の fern dispatch に `level_for("engine", level_filter)` と `level_for("flowsurface_engine_client", level_filter)` を追加し `flowsurface.log` に同居させる（spec §6.4）。
 - [x] README / ユーザードキュメント更新。
   - "Method 2: Build from Source" を Python 必須前提に書き換え、`uv sync` での依存導入手順、`--engine-cmd`／`--data-engine-url` の使い分け、`scripts/build-*.sh` の同梱バイナリ生成手順、ランタイムログ／監視挙動を新セクションで追記。
 
-**完了条件**: ユーザーが Python ランタイムを別途インストールせずに既存と同じ操作で起動できる。✅ **達成見込み**（PyInstaller 産物の動作はリリースビルド検証で確認）。**追加 (Phase 7)**: マージ前に `bash tests/e2e/smoke.sh` が PASS していること（handshake + 30s 無 silent failure）。手動 GUI シナリオは [`tests/e2e/README.md`](../../tests/e2e/README.md) を参照。
+**完了条件**: ユーザーが Python ランタイムを別途インストールせずに既存と同じ操作で起動できる。✅ **達成見込み**（PyInstaller 産物の動作はリリースビルド検証で確認）。**追加 (Phase 7)**: マージ前に `bash tests/e2e/smoke.sh` が PASS していること（handshake + 30s 無 silent failure）。手動 GUI シナリオは [`tests/e2e/README.md`](https://github.com/botterYosuke/e-station/blob/main/tests/e2e/README.md) を参照。
 
 ### Phase 6 設計判断・ハマりどころ・Tips
 
-- **`EngineCommand` enum**: `Bundled(PathBuf)` / `System { program, args }` の 2 バリアント。`resolve_with(base_dir, override)` の優先順位は (1) override → (2) `base_dir/flowsurface-engine[.exe]` 存在 → (3) フォールバックで `python -m engine`。テストは [`engine-client/tests/engine_command.rs`](../../engine-client/tests/engine_command.rs) に 3 件（Bundled/System fallback/explicit override）。
+- **`EngineCommand` enum**: `Bundled(PathBuf)` / `System { program, args }` の 2 バリアント。`resolve_with(base_dir, override)` の優先順位は (1) override → (2) `base_dir/flowsurface-engine[.exe]` 存在 → (3) フォールバックで `python -m engine`。テストは [`engine-client/tests/engine_command.rs`](https://github.com/botterYosuke/e-station/blob/main/engine-client/tests/engine_command.rs) に 3 件（Bundled/System fallback/explicit override）。
 - **`ProcessManager::new` の互換性**: 既存テスト `process_lifecycle.rs` が `ProcessManager::new("python")` で**バイナリのみ**（引数なし）を spawn することに依存しているため、レガシー `new` は `EngineCommand::System { program, args: vec![] }` を保つ。新コードは `with_command(EngineCommand)` を使う。
 - **stdin payload 競合**: `forward_lines` タスクが child の stdout/stderr を保持するので、`PythonProcess` 自体は spawn 後すぐ child を返してよい。stdin は `take().write_all(...).shutdown()` で即時クローズ。
 - **`pick_free_port` のレース**: `bind 127.0.0.1:0` → `local_addr().port()` を取得 → リスナーを drop してそのポート番号を Python に渡す。OS 依存の小さな race window があるが、Phase 6 では妥協（loopback only、同時 spawn しない）。spec §4.5 と整合。
@@ -596,7 +596,7 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 
 ## 計測指標と合格ライン
 
-詳細は [spec.md §9](./spec.md#9-非機能要件合格ライン)。各フェーズ完了時に再計測し `docs/benchmarks/` に追記する。
+詳細は [spec.md §9](../../specs/data-engine.md#9-非機能要件合格ライン)。各フェーズ完了時に再計測し `docs/benchmarks/` に追記する。
 
 フェーズ 2 合格ライン（抜粋）:
 - IPC 追加レイテンシ: 中央値 < 2 ms / p99 < 10 ms
@@ -606,14 +606,14 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 - depth gap 検知漏れ: 0
 
 未達時の対応:
-- レイテンシ / CPU 不足 → [spec.md §4.3.1](./spec.md#431-depth-チャネルのバイナリ化検討) のバイナリ化を適用。
-- 慢性的な性能差 → [spec.md §7.1](./spec.md#71-rust-直結モードの長期方針要決定) の案 C（Rust 直結の optional 残置）を再検討。
+- レイテンシ / CPU 不足 → [spec.md §4.3.1](../../specs/data-engine.md#431-depth-チャネルのバイナリ化検討) のバイナリ化を適用。
+- 慢性的な性能差 → [spec.md §7.1](../../specs/data-engine.md#71-rust-直結モードの長期方針要決定) の案 C（Rust 直結の optional 残置）を再検討。
 
 ---
 
 ## フェーズ 8 — Python 単独モード化 / Rust HTTP API 廃止（attach mode 採用）
 
-> 詳細計画: [python-helper-direct-api.md](./archive/python-helper-direct-api.md)
+> 詳細計画: python-helper-direct-api.md
 > **✅ 完了 (2026-05-03)**
 
 **概要**: HTTP API（ポート 9876）を廃止し、Python `ReplaySession` / `LiveSession` helper class で直接 IPC を駆動するアーキテクチャに移行する。Rust GUI が起動中なら helper は attach mode（WS クライアント）、GUI なしなら in-process mode で `NautilusRunner` を直接呼ぶ。
@@ -628,7 +628,7 @@ Phase 4 完了後のレビューで検出した、`FetchRange::Trades(from, to)`
 - Phase 8 R1〜R4 — review-fix-loop 全件解消 ✅ (2026-05-04, commit `cb9207f`)
   - **CRITICAL 7 / HIGH 13 / MEDIUM 22** を 4 ラウンドで収束（pytest 1598 → 1691, +93 件）
   - 主要成果: 型基盤確立（`AppMode` / `AttemptedCommand` / `ReplayStateName | LiveStateName` / `AUTH_FAILED_CODE` / Rust enum 化）/ **LiveSession attach mode 本実装**（NotImplementedError 撤廃、`RequestVenueLogin` ↔ `VenueReady`/`VenueError` wire 待ち合わせ）/ silent failure 除去（handshake 15s timeout / EngineBusy unicast + `request_id` フィルタ / 全断時 state リセット / EngineStopped 補完 + 二重送出ガード / sticky error / narrative_hook thread fallback）/ Rust 健全化（`#[doc(hidden)] pub` を testing feature gate / `pid_is_live` retry / `spawn_venue_ready_bridge` 単一化）/ test_review_fixes.py 898 行を機能別 10 ファイルに分割
-  - 詳細: [`python-helper-direct-api.md` 末尾「レビュー反映」ブロック群](./archive/python-helper-direct-api.md)
+  - 詳細: `python-helper-direct-api.md` 末尾「レビュー反映」ブロック群
 
 **主要成果物**:
 - `python/engine/replay_session.py`: `ReplaySession` + `LiveSession` + `_AttachClient`（1 ファイル構成）

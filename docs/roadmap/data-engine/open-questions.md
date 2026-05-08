@@ -18,7 +18,7 @@ source_commit: 9f8b91b
    - (c) ハイブリッド（dev は b、リリースは a）
 
 2. ~~**Python プロセスのライフサイクル**~~
-   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は [python-helper-direct-api.md §0.1](./archive/python-helper-direct-api.md)。
+   - **決定済み（Phase 8 着手前, 2026-05-01）**: helper は `attach mode` / `in-process mode` を自動判定し、GUI 起動中は attach、engine 不在時は helper 内で `NautilusRunner` を直接起動する。詳細は python-helper-direct-api.md §0.1。
 
 ## B. IPC
 
@@ -33,11 +33,11 @@ source_commit: 9f8b91b
 
 5. ~~**WS 直結のオプション残置**~~
    - **決定済み・実施済み（Phase 5 完了, 2026-04-25）**: 案 A（撤去）を採用。`exchange/src/adapter/hub/` を全削除し、`reqwest` / `fastwebsockets` / `tokio-rustls` / `tokio-socks` / `sonic-rs` 等の native 依存も `exchange/Cargo.toml` から除去済み。
-   - `--data-engine-url` フラグは Phase 5 で必須化、Phase 6 で `--engine-cmd` によるオーバーライドへ進化。Phase 8 で固定ポート 19876 自動 attach + spawn フォールバックに到達（[spec.md §3.1](./spec.md#31-起動フロー外部エンジン自動-attach--spawn-フォールバック)）。
+   - `--data-engine-url` フラグは Phase 5 で必須化、Phase 6 で `--engine-cmd` によるオーバーライドへ進化。Phase 8 で固定ポート 19876 自動 attach + spawn フォールバックに到達（[spec.md §3.1](../../specs/data-engine.md#31-起動フロー外部エンジン自動-attach--spawn-フォールバック)）。
    - 案 C（optional feature）の復活余地は理論上残るが、現時点で要望なし。
 
 6. **マルチプロセス構成**
-   - フェーズ 1 は asyncio 単一プロセスで確定（[spec.md §6.1](./spec.md#61-プロセスモデルフェーズ-1-時点)）。
+   - フェーズ 1 は asyncio 単一プロセスで確定（[spec.md §6.1](../../specs/data-engine.md#61-プロセスモデルフェーズ-1-時点)）。
    - 将来分割できるよう `ExchangeWorker` 抽象を先に入れる方針。GIL / CPU がボトルネックと判明した時点で分割。
    - **残論点**: 分割時に使うのが `multiprocessing` か subprocess + IPC か。フェーズ 3 以降で決定でも可。
 
@@ -49,7 +49,7 @@ source_commit: 9f8b91b
      - (a) JSON Schema を single source of truth にし、`quicktype` で Rust / Python 両方を生成。
      - (b) Rust 側 `serde` 定義 + `schemars` で JSON Schema をエクスポート → Python は `datamodel-code-generator` で pydantic を生成。
      - (c) `.proto` で定義して `prost` + `betterproto` を使う（将来の gRPC 切替にも繋がる）。
-   - 決定後、[spec.md §4.3](./spec.md#43-メッセージスキーマ) と [implementation-plan.md](./implementation-plan.md) フェーズ 0 の生成手順に反映する。
+   - 決定後、[spec.md §4.3](../../specs/data-engine.md#43-メッセージスキーマ) と [implementation-plan.md](./implementation-plan.md) フェーズ 0 の生成手順に反映する。
 
 8. **テスト戦略**
    - 取引所 API の VCR / モック方針。Live テストはどこまで CI に載せるか。
@@ -70,7 +70,7 @@ source_commit: 9f8b91b
 12. ~~**E2E テスト自動化の運用方針**~~ (Phase 7 T3 で発生)
     - **決定済み・実施済み（Phase 8.2 完了, 2026-05-03）**: HTTP 依存の bash E2E（s56〜s83, s90, tachibana_* 11 ファイル）を削除。`smoke.sh` のみ起動監視用として維持。
     - `scripts/replay_dev_load.sh` 削除済み。`scripts/run-replay-debug.sh` は DEPRECATED コメントを追記済み（HTTP API ポート 9876 依存のため機能しない）。
-    - 新たな E2E は `pytest + python -m engine.replay_session run` で代替。詳細は [python-helper-direct-api.md](./archive/python-helper-direct-api.md)。
+    - 新たな E2E は `pytest + python -m engine.replay_session run` で代替。詳細は python-helper-direct-api.md。
 
 13. ~~**Phase 8 helper API 設計の未決 Q (Q2/Q3b/Q8/Q10/Q11)**~~
     - **すべて決定済み・実装済み（Phase 8 完了, 2026-05-03）**:

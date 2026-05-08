@@ -30,7 +30,7 @@ GUI / 描画 / 板キャッシュ層の言語に **Rust（edition 2021、toolcha
 採用観点:
 
 - 所有権・借用検査による メモリ安全性 + ゼロコスト抽象
-- `Price` / `Qty` / `MinTicksize` などの newtype による不変条件の型表現（[Rust patterns](../../.claude/rules/rust/patterns.md) 参照）
+- `Price` / `Qty` / `MinTicksize` などの newtype による不変条件の型表現（[Rust patterns](https://github.com/botterYosuke/e-station/blob/main/.claude/rules/rust/patterns.md) 参照）
 - iced / wgpu エコシステムによるネイティブ GUI
 - `cargo` による単一の依存・テスト・ベンチマーク管理
 - workspace 構成で `exchange` / `data` / `engine-client` などの境界を明示できる

@@ -28,7 +28,7 @@ source_commit: 674aefd
 **決定**: **案 D** — メモリのみ。**初回発注時に iced modal で取得** → 同一プロセス中はメモリ保持 → セッション切れ・forget API・プロセス終了でクリア。
 
 - keyring 永続化は **採用しない**（opt-in も提供しない）
-- 詳細は [architecture.md §5](./architecture.md#5-第二暗証番号の取扱い)
+- 詳細は architecture.md §5
 - 検討時の選択肢:
   - 案 A: keyring 永続化 → OS 侵害時の被害が大きすぎるため不採用
   - 案 B: 毎回入力 → UX 破綻のため不採用
@@ -40,7 +40,7 @@ source_commit: 674aefd
 
 - iced 発注フォームは送信時に `Uuid::new_v4()` を生成する（Rust 側責務）
 - curl / HTTP クライアント直叩きは送信側責務
-- 詳細は [spec.md §4](./spec.md#4-公開-apihttp)「`client_order_id` 発行元」節
+- 詳細は [spec.md §4](../../specs/order.md#4-公開-apihttp)「`client_order_id` 発行元」節
 
 ### Q3. 発注 UI を iced に出すか Python tkinter に出すか ✅ 確定（2026-04-25）
 
@@ -82,7 +82,7 @@ source_commit: 674aefd
 
 - 立花注文には replay session 概念はない。`AgentSessionState` の per-session 抽象は不要
 - `Arc<Mutex<OrderSessionState>>` を Axum `State` として渡す設計で十分
-- 詳細は [architecture.md §4](./architecture.md#4-冪等性flowsurface-agent_session_staters-の移植)
+- 詳細は architecture.md §4
 
 ### Q8. 本番接続を許可するときのガード ✅ 暫定確定（2026-04-25）
 
@@ -96,7 +96,7 @@ source_commit: 674aefd
 
 - `instrument_id` の `<venue>` 部分が `TSE` 以外（`OSE`, `NSE`, `FKE` 等）のときの `sSizyouC` 写像表が未定義
 - Phase O0〜O2 は `TSE` のみ受理（HTTP 層で 400 reject）
-- O3 着手時に写像表を [architecture.md §10](./architecture.md#10-nautilus_trader-との型マッピング) に追記する
+- O3 着手時に写像表を architecture.md §10 に追記する
 - Tpre.2 着手前に `docs/specs/data-engine/schemas/` ディレクトリ（または `schemas.py` のあるパス）の実在確認を必須化する（A-L3）
 
 ### Q10. nautilus_trader 用語の正本ファイル ✅ 確定（Q0 と同時確定, 2026-04-26）

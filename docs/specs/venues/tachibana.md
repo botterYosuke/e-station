@@ -26,8 +26,8 @@ source_commit: 236c0d2
 
 ### 2.1 含めるもの
 
-- **新 venue `Venue::Tachibana`**（[exchange/src/adapter.rs::Exchange::TachibanaStock](../../../exchange/src/adapter.rs) に追加）
-- **新 `MarketKind::Stock`**（株式現物市場。信用は内部的に同じ market でハンドル）。`qty_in_quote_value` は enum 内部分岐で `price * qty` を強制（呼出 9 箇所、[inventory-T0.md §4](./inventory-T0.md#4-qty_in_quote_value-呼出箇所f-h4)）
+- **新 venue `Venue::Tachibana`**（[exchange/src/adapter.rs::Exchange::TachibanaStock](https://github.com/botterYosuke/e-station/blob/main/../exchange/src/adapter.rs) に追加）
+- **新 `MarketKind::Stock`**（株式現物市場。信用は内部的に同じ market でハンドル）。`qty_in_quote_value` は enum 内部分岐で `price * qty` を強制（呼出 9 箇所、inventory-T0.md §4）
 - **新 `Exchange::TachibanaStock`**
 - **`Timeframe` の serde 形式統一（F-H1）**: 現状 `#[derive(Serialize)]` のみで `"D1"` / `"M1"` 等が出る既知の不整合がある。立花 capabilities (`["1d"]`) と既存 `Display` (`"1d"`) に合わせるため、`Timeframe` 全変種に `#[serde(rename = "...")]` を T0.2 で追加
 - **Python 実装** `python/engine/exchanges/tachibana.py`（`ExchangeWorker` 実装、デモ環境のみ）
@@ -37,19 +37,19 @@ source_commit: 236c0d2
   - ティッカーメタデータ（呼値単位・売買単位・銘柄名）— **本線は銘柄マスタ（`CLMIssueMstKabu` + `CLMIssueSizyouMstKabu` + `CLMYobine`）から合成**し、マスタ未掲載や追加情報が必要な場合のみ `CLMMfdsGetIssueDetail` をフォールバックで叩く（F9）。呼値は **per-stock 解決**（`CLMIssueSizyouMstKabu.sYobineTaniNumber` で `CLMYobine` 行を引いて band を選ぶ）であり、全銘柄共通の単一価格帯テーブルは存在しない（data-mapping.md §5）
   - 日足 kline 履歴（`CLMMfdsGetMarketPriceHistory`）
   - 24h ticker stats 相当（`CLMMfdsGetMarketPrice` のスナップショットから派生）
-  - **取引（FD frame）ストリーム** *(実装済 2026-04-26、`stream_trades`)*: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）。FD 情報コードは [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー解消記録b3-クローズ) で 2026-04-26 にクローズ済み（旧 T0.1 ゲート / B 系縮退分岐は廃止）
+  - **取引（FD frame）ストリーム** *(実装済 2026-04-26、`stream_trades`)*: EVENT WebSocket (`sUrlEventWebSocket`) で `p_evt_cmd=FD` を購読 → 現値変化を 1 件 = 1 trade として配信（`p_*_DPP` フィールド）。FD 情報コードは inventory-T0.md §11.3 で 2026-04-26 にクローズ済み（旧 T0.1 ゲート / B 系縮退分岐は廃止）
   - **板スナップショット** *(実装済、`fetch_depth_snapshot` + `stream_depth`)*: **FD frame 駆動が正**（FD frame ごとに 10 本気配を `DepthSnapshot` 化して配信、data-mapping §4）。`CLMMfdsGetMarketPrice` は (a) ザラ場前後の初回 snapshot、(b) FD WS 12 秒無通信の再接続中フォールバック、(c) `depth_unavailable` セーフティ発動時の polling fallback の **3 ケースに限定**（§3.3 と整合）。**runtime の定期 polling は実装しない**。`DepthDiff` / L2 はサポートしない
   - **未実装**: `stream_kline`（分足 kline は FD 集計が必要、Phase 2 送り）と `fetch_open_interest`（株式に概念なし、`NotImplementedError`）。`fetch_trades`（過去 tick）も同様に未対応
 - **Rust 側の最小変更**:
   - `Venue` / `Exchange` / `MarketKind` 拡張
-  - **ログイン関連の画面（フォーム・エラー表示・確認モーダル）は Python が tkinter で独立ウィンドウとして開く**（[architecture.md §7](./architecture.md#7-ログイン画面の-python-駆動f-login1)、F-Login1）。Rust 側に立花のログイン画面コード（フィールド名・ラベル・順序）を書かない
+  - **ログイン関連の画面（フォーム・エラー表示・確認モーダル）は Python が tkinter で独立ウィンドウとして開く**（[architecture.md §7](../../architecture/modules/tachibana-adapter.md#7-ログイン画面の-python-駆動f-login1)、F-Login1）。Rust 側に立花のログイン画面コード（フィールド名・ラベル・順序）を書かない
   - GUI ライブラリは **tkinter（Python 標準ライブラリ）** を採用（追加依存ゼロ、日本語 IME 対応、軽量）。tkinter の制約（メインスレッド要求）はログインヘルパー subprocess 隔離で回避
   - **tkinter ヘルパー spawn の起動条件（runtime 中の自動再ログイン禁止と整合、§3.2 LOW-3 参照）**: (a) アプリ起動直後の session 検証フェーズで `tachibana_session.json` が無い / 復元 session が validate に失敗した場合、(b) Rust UI が `Command::RequestVenueLogin` を発火した場合、の 2 経路のみ。**runtime 中に `p_errno=2` を検知しても Python は自発的にダイアログを spawn しない**（`VenueError{code:"session_expired"}` を返すだけ）。Rust UI には Python engine event DTO 名 `VenueLoginStarted` / `VenueLoginCancelled` / `VenueReady` / `VenueError` で状態を伝え、Rust UI 側の状態管理は `VenueState{Idle/LoginInFlight/Ready/Error}` 1 本化で受ける（用語使い分け: DTO = `VenueLogin*`、UI 状態 = `VenueState::*`）
-  - **「立花にログイン」ボタンの常設（T35-U1、LOW-7、F-M1a、H3 修正）**: 再ログイン導線（Python engine event = `VenueLoginCancelled` / Rust UI 状態 = `VenueState::Idle` 後）として、**[src/screen/dashboard/tickers_table.rs::exchange_filter_btn](../../../src/screen/dashboard/tickers_table.rs) の Tachibana 行直下**に常設する（`Venue::ALL` ベースで `VenueState::Ready` 以外でも常時描画される領域、T3.5 Step D 着地済）。**禁止配置**: 立花 ticker selector / 立花 pane のヘッダ部に置くと `VenueState::Ready` 前は ticker selector / pane が空 or 非表示でデッドロックするため不可。フォールバックとしてメインウィンドウ上部のステータスバナー領域（T35-U2）に「立花未ログイン」表示中のみ補助ボタンを許容。押下で `Command::RequestVenueLogin` を発火（複数経路で発火させない、[implementation-plan.md T3 H3 修正](./implementation-plan.md)）
+  - **「立花にログイン」ボタンの常設（T35-U1、LOW-7、F-M1a、H3 修正）**: 再ログイン導線（Python engine event = `VenueLoginCancelled` / Rust UI 状態 = `VenueState::Idle` 後）として、**[src/screen/dashboard/tickers_table.rs::exchange_filter_btn](https://github.com/botterYosuke/e-station/blob/main/../src/screen/dashboard/tickers_table.rs) の Tachibana 行直下**に常設する（`Venue::ALL` ベースで `VenueState::Ready` 以外でも常時描画される領域、T3.5 Step D 着地済）。**禁止配置**: 立花 ticker selector / 立花 pane のヘッダ部に置くと `VenueState::Ready` 前は ticker selector / pane が空 or 非表示でデッドロックするため不可。フォールバックとしてメインウィンドウ上部のステータスバナー領域（T35-U2）に「立花未ログイン」表示中のみ補助ボタンを許容。押下で `Command::RequestVenueLogin` を発火（複数経路で発火させない、[implementation-plan.md T3 H3 修正](../../roadmap/tachibana/implementation-plan.md)）
   - `TickerInfo`・`Exchange::price_step` 等で立花特有の呼値単位を反映（実装源は `CLMYobine` + `CLMIssueSizyouMstKabu.sYobineTaniNumber`、Phase 1 でも銘柄別呼値を使用、data-mapping.md §5）
   - `MarketKind::Stock` 追加に伴う UI / indicator / timeframe / market filter / 表示ラベルの網羅修正
 - **デモ環境のみ**: `https://demo-kabuka.e-shiten.jp/e_api_v4r8/`
-- **debug ビルドの env 自動ログイン**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO=true`（venue prefix を付けて将来の他 venue ID と衝突させない方針）。**`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 では予約名として一覧化せず、計画文書からも削除する**（F-H5、第二暗証番号は収集も保持もしない方針との整合）。Phase 2 着手時に env 名を改めて確定する。SKILL.md 側の `DEV_USER_ID` 旧表記の書き換えは [implementation-plan.md T0.2 の SKILL.md 同期タスク](./implementation-plan.md) に集約
+- **debug ビルドの env 自動ログイン**: `DEV_TACHIBANA_USER_ID` / `DEV_TACHIBANA_PASSWORD` / `DEV_TACHIBANA_DEMO=true`（venue prefix を付けて将来の他 venue ID と衝突させない方針）。**`DEV_TACHIBANA_SECOND_PASSWORD` は Phase 1 では予約名として一覧化せず、計画文書からも削除する**（F-H5、第二暗証番号は収集も保持もしない方針との整合）。Phase 2 着手時に env 名を改めて確定する。SKILL.md 側の `DEV_USER_ID` 旧表記の書き換えは [implementation-plan.md T0.2 の SKILL.md 同期タスク](../../roadmap/tachibana/implementation-plan.md) に集約
 
 ### 2.2 含めないもの（Phase 1 スコープ外）
 
@@ -66,7 +66,7 @@ source_commit: 236c0d2
 ### 2.3 MVP 必須に昇格した項目
 
 - **ザラ場時間帯の判定（MVP 必須、T5 で実装）**: JST 9:00–11:30 前場 / 12:30–15:25 後場連続 / **15:25–15:30 クロージング・オークション**（**2024-11-05 以降の現行東証取引時間**）。`Connected` を維持するのは **9:00–15:30 全体**。クロージング・オークション中は気配がほぼ動かなくても「市場時間外」UI を出さない。閉場（〜9:00 / 11:30〜12:30 / 15:30〜）でのみ subscribe を `Disconnected{reason:"market_closed"}` で停止する。**Phase 1 はハードコード**（祝日カレンダー判定なし）。営業日カレンダー動的取得（`CLMDateZyouhou`）は Phase 2 送り
-  - **発出粒度（M5 修正）**: `Disconnected` イベントは ticker/stream 粒度（`engine-client/src/dto.rs::EngineEvent::Disconnected`）のため、閉場帯に届いた立花 ticker subscribe ごとに 1 件返す。**Rust UI 側はバナー表示を venue 単位で de-dup**（複数銘柄購読中でも「市場時間外」バナーは 1 つ）。実装位置は `code` → severity マッピングと同じレイヤ（[engine-client/src/error.rs](../../../engine-client/src/error.rs) の `classify_*` 関数群、F-L9）に集約
+  - **発出粒度（M5 修正）**: `Disconnected` イベントは ticker/stream 粒度（`engine-client/src/dto.rs::EngineEvent::Disconnected`）のため、閉場帯に届いた立花 ticker subscribe ごとに 1 件返す。**Rust UI 側はバナー表示を venue 単位で de-dup**（複数銘柄購読中でも「市場時間外」バナーは 1 つ）。実装位置は `code` → severity マッピングと同じレイヤ（[engine-client/src/error.rs](https://github.com/botterYosuke/e-station/blob/main/../engine-client/src/error.rs) の `classify_*` 関数群、F-L9）に集約
 
 ### 2.4 ストレッチゴール（同フェーズ内で時間が許せば）
 
@@ -76,7 +76,7 @@ source_commit: 236c0d2
 
 ### 3.1 セキュリティ
 
-- ユーザー ID / パスワード / 第二暗証番号 / 仮想 URL 5 種は **すべて機密**（[SKILL.md R10](../../../.claude/skills/tachibana/SKILL.md)）
+- ユーザー ID / パスワード / 第二暗証番号 / 仮想 URL 5 種は **すべて機密**（[SKILL.md R10](https://github.com/botterYosuke/e-station/blob/main/.claude/skills/tachibana/SKILL.md)）
   - **Python が OS ファイルシステムで管理**（`tachibana_account.json` に user_id + is_demo、`tachibana_session.json` に仮想 URL 5 種 + `zyoutoeki_kazei_c`（課税区分コード）+ `saved_at_ms`）
   - **password はファイルに書かない**。tkinter ダイアログで毎回入力させるか、`DEV_TACHIBANA_PASSWORD` env（debug ビルドのみ）で供給する
   - Rust 側は creds / session を一切保持しない（keyring 不使用）。IPC で creds を送受信しない
@@ -101,17 +101,17 @@ source_commit: 236c0d2
   - ただし **アプリ起動直後の session 復元フェーズ**に限り、`tachibana_session.json` の session 検証が失敗した場合は `user_id/password` による再ログインを 1 回だけ試してよい。ここで成功した session を再永続化する（`tachibana_session.json` を上書き保存）
   - **夜間閉局またぎ運用（F-m1）**: アプリを起動しっぱなしで翌日のザラ場開始を迎えた場合、最初の subscribe で `p_errno=2` を踏むのは仕様通り。Python 側は `VenueError{code:"session_expired"}` を返し、Rust UI は再ログインバナーを表示する。**ここで自動再ログインはしない**（電話認証完了の確認が取れないため）。ユーザーがバナーから再ログイン操作を行うと、`Command::RequestVenueLogin` → Python が `tachibana_session.json` をクリアして `startup_login` を再実行する経路を辿る
   - **「自動」と「手動（ユーザー明示）」の境界（LOW-3）**: 「自動再ログイン禁止」とは *Python / Rust がユーザー操作なしにパスワードを再送する*ことを禁止する。ユーザーがバナーから「ログイン」ボタンを押して `Command::RequestVenueLogin` が発火する経路は「ユーザー明示の再ログイン」であり禁止しない。実装者向け判別基準: **`RequestVenueLogin` コマンドの受信を起点とする経路 → 許可**、**Python 側内部ロジックが `p_errno=2` 検知後に自発的に再ログインを開始する経路 → 禁止**
-  - **replay モード除外（2026-04-30）**: `Hello.mode == "replay"` のセッションでは Python は (a) ハンドシェイク後の `_startup_tachibana()` を spawn せず、(b) ユーザー明示の `RequestVenueLogin` も `VenueError{code:"mode_mismatch"}` で拒否する。バックテストはブローカー接続を要さず、replay 中に Tachibana fetch（特に `FetchTickerStats("__all__")` の bulk レスポンス）が走ると過去に IPC 切断事故 (278 KB → fastwebsockets RSV ビット拒否) を起こした履歴があるため。詳細: [`.claude/skills/bug-postmortem/MISSES.md`](../../.claude/skills/bug-postmortem/MISSES.md) 2026-04-30 エントリ。
+  - **replay モード除外（2026-04-30）**: `Hello.mode == "replay"` のセッションでは Python は (a) ハンドシェイク後の `_startup_tachibana()` を spawn せず、(b) ユーザー明示の `RequestVenueLogin` も `VenueError{code:"mode_mismatch"}` で拒否する。バックテストはブローカー接続を要さず、replay 中に Tachibana fetch（特に `FetchTickerStats("__all__")` の bulk レスポンス）が走ると過去に IPC 切断事故 (278 KB → fastwebsockets RSV ビット拒否) を起こした履歴があるため。詳細: [`.claude/skills/bug-postmortem/MISSES.md`](https://github.com/botterYosuke/e-station/blob/main/.claude/skills/bug-postmortem/MISSES.md) 2026-04-30 エントリ。
   - **バナー「閉じる」(`Message::DismissTachibanaBanner` / `VenueEvent::Dismissed`) の FSM 意味論（C-L1）**: `VenueState::Error{..} → Idle` の 1 遷移として `next()` テーブルに含まれる（`src/venue_state.rs::VenueState::next` の `(Error, Dismissed) → Idle` arm）。`Idle` / `LoginInFlight` / `Ready` で受けた場合は no-op（同状態を返す）であり副作用なし。Dismiss は keyring / Python セッション / 購読状態に触れないため、後続の `VenueError` 受信でバナーは再表示される（acknowledge セマンティクス）。既存 9 遷移にこの 1 遷移を加えた計 10 遷移が FSM 正本。
 - **WebSocket 死活監視**: EVENT WS は **5 秒周期で `p_evt_cmd=KP`（KeepAlive）frame** を送ってくる。Python 側は KP 受信をタイマリセットに使い、**12 秒（KP 2 回欠損相当 + 2 秒 jitter）以上 KP も含めて全 frame が来なければ切断とみなして再接続**する（定数 `_DEAD_FRAME_TIMEOUT_S = 12.0`）。WS は Python 側 (`tachibana_ws.py`、`websockets` ライブラリ) が担当する設計（architecture.md §4）のため、`websockets.connect(..., ping_interval=None)` でライブラリ側の自動 Ping 送信を無効化する（`ping_timeout` は設定しない）。立花サーバ側が送ってくる websockets-level の `Ping` フレームにはライブラリが自動で `Pong` を返す（`ping_interval=None` のとき自動エコーは有効）
 - `VenueReady{venue}` は **冪等イベント**として扱う。session が新たに validate / 再ログインされるたびに送ってよく、Rust 側は最後に受信した状態を保持する。**Python サブプロセス再起動検知時（次の `Hello` 受信時）に限り `VenueReady` 状態をリセット**し、再 ready 後に既存購読の重複再送を行わないこと（`ProcessManager` 側で active subscriptions を 1 度だけ resubscribe する）。`EngineEvent::Disconnected` は ticker/stream 粒度であり venue 全体の状態管理には使わない（C3 修正、architecture.md §3 と整合）
-- Python 単独再起動時（[docs/specs/data-engine/spec.md](../specs/data-engine/spec.md) §5.3 Python プロセス復旧プロトコル）は、**Python プロセスが自律的に `startup_login` を再実行**し（`tachibana_session.json` / `tachibana_account.json` から復元 → 必要なら再ログイン → `VenueReady` 送信）、Rust は `VenueReady` を待ってから metadata fetch / resubscribe を再開する。`SetVenueCredentials` の再送は行わない
+- Python 単独再起動時（[docs/specs/data-engine/spec.md](../data-engine.md) §5.3 Python プロセス復旧プロトコル）は、**Python プロセスが自律的に `startup_login` を再実行**し（`tachibana_session.json` / `tachibana_account.json` から復元 → 必要なら再ログイン → `VenueReady` 送信）、Rust は `VenueReady` を待ってから metadata fetch / resubscribe を再開する。`SetVenueCredentials` の再送は行わない
 
 ### 3.3 整合性 / レイテンシ
 
 - FD frame 受信→ Rust 描画キュー投入: 中央値 < 50ms（株式は暗号資産より頻度が低いので緩め）
 - **板更新は FD ストリーム駆動が正**（FD frame ごとに `DepthSnapshot` を再生成、data-mapping §4）。REST `CLMMfdsGetMarketPrice` polling は (a) ザラ場前後の初回 snapshot 1 発、(b) FD WS が一定時間（KP 含めて 12 秒）無通信で再接続中のフォールバック時、(c) **`depth_unavailable` セーフティ発動時の polling fallback（10 秒間隔・上限 5 分）** のみ。**runtime の定期 polling は実装しない**
-- **`depth_unavailable` セーフティ（MEDIUM-6、F-M12）**: FD WS 受信開始 30 秒以内に bid/ask キーが 1 件も来ない場合、`VenueError{code:"depth_unavailable"}` を発出して当該銘柄 depth を polling fallback に倒す。FD 情報コード未確定（[inventory-T0.md §11](./inventory-T0.md#11-fd-情報コード一覧f-m2a--f-h3)）の影響で板キーが永久に来ない事故を防ぐ
+- **`depth_unavailable` セーフティ（MEDIUM-6、F-M12）**: FD WS 受信開始 30 秒以内に bid/ask キーが 1 件も来ない場合、`VenueError{code:"depth_unavailable"}` を発出して当該銘柄 depth を polling fallback に倒す。FD 情報コード未確定（inventory-T0.md §11）の影響で板キーが永久に来ない事故を防ぐ
 - **proxy 環境での WebSocket 制約（MEDIUM-2）**: Phase 1 は WS のみで `SetProxy` 経由の CONNECT が張れない場合は `VenueError{code:"transport_error"}` を返して立花 venue を非活性化する。HTTP long-poll fallback は Phase 2 で必須化
 - マスタダウンロードは **起動時 1 回 + 日次更新のみ**、各 ticker subscribe ごとには走らせない。**kick タイミングは `VenueReady` 受信直後**（`sUrlMaster` が必要なため）。完了は `ListTickers` 応答到着で判定（F-H6、`VenueReady` 自体には含めない）
 - 立花 venue の `ListTickers` / `GetTickerMetadata` / `FetchTickerStats` / `Subscribe` は **`VenueReady` 前に送らない**。`Ready` 直後に sidebar が自動 metadata fetch する既存導線があるため、Rust 側に venue-ready ゲートを追加する
@@ -123,7 +123,7 @@ source_commit: 236c0d2
 
 ## 4. 受け入れ条件（Phase 1 完了の定義）
 
-> **2026-04-26 更新**: FD 情報コード（`DV` / `GAP*` / `GBP*` / `GAV*` / `GBV*` / `DPP:T` / `p_date` 等）は [inventory-T0.md §11.3](./inventory-T0.md#113-ブロッカー解消記録b3-クローズ) で実体解決済み。**A 系（フル受け入れ）に確定**。旧 B 系（縮退受け入れ）分岐は廃止し、§4 末尾に履歴として残す。
+> **2026-04-26 更新**: FD 情報コード（`DV` / `GAP*` / `GBP*` / `GAV*` / `GBV*` / `DPP:T` / `p_date` 等）は inventory-T0.md §11.3 で実体解決済み。**A 系（フル受け入れ）に確定**。旧 B 系（縮退受け入れ）分岐は廃止し、§4 末尾に履歴として残す。
 
 ### A 系（フル受け入れ、確定運用）
 
