@@ -333,7 +333,10 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
         } => {
             let mut order_entry = panel::order_entry::OrderEntryPanel::new();
             if let Some(ti) = ticker_info {
-                order_entry.set_instrument_from_ticker(ti);
+                // Issue #25: on layout restore we default to tachibana.
+                // The order_venue is set at runtime by the Dashboard; this
+                // path only reconstructs the instrument metadata.
+                order_entry.set_instrument_from_ticker(ti, "tachibana");
             }
             Configuration::Pane(pane::State::from_config(
                 pane::Content::OrderEntry(order_entry),
