@@ -1766,12 +1766,7 @@ fn venue_login_chip(
             "ログイン",
             on_login,
         ),
-        VenueState::LoginInFlight => (
-            "⟳",
-            iced::Color::from_rgb(0.9, 0.6, 0.1),
-            "",
-            on_login,
-        ),
+        VenueState::LoginInFlight => ("⟳", iced::Color::from_rgb(0.9, 0.6, 0.1), "", on_login),
         VenueState::Ready => (
             "●",
             iced::Color::from_rgb(0.2, 0.75, 0.3),

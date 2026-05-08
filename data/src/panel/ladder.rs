@@ -466,7 +466,7 @@ mod tests {
 
             // Every grouped key must be a multiple of step.
             let step_f32 = step_raw as f32;
-            for (grouped_price, _) in &group.orders {
+            for grouped_price in group.orders.keys() {
                 let p = grouped_price.to_f32();
                 let rem = (p / step_f32).round() * step_f32 - p;
                 prop_assert!(

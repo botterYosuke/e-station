@@ -173,15 +173,10 @@ impl DataEngine for MockServicer {
             }
 
             // Drain incoming commands, forwarding them to cmd_sink if set.
-            loop {
-                match stream.message().await {
-                    Ok(Some(cmd)) => {
-                        if let Some(ref sink) = cmd_sink {
-                            // Ignore send errors (test may have already closed the receiver).
-                            let _ = sink.send(cmd).await;
-                        }
-                    }
-                    Ok(None) | Err(_) => break,
+            while let Ok(Some(cmd)) = stream.message().await {
+                if let Some(ref sink) = cmd_sink {
+                    // Ignore send errors (test may have already closed the receiver).
+                    let _ = sink.send(cmd).await;
                 }
             }
         });
