@@ -3300,7 +3300,7 @@ class DataEngineServer:
                 "request_id": req_id,
                 "venue": venue,
                 "ticker": ticker,
-                "stats": stats,
+                "stats": orjson.dumps(stats).decode(),  # proto field is string (JSON-encoded)
             }
         )
 
