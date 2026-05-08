@@ -3744,34 +3744,38 @@ mod native_menu_handler_tests {
     // start_date / end_date / initial_cash / strategy_file).
     #[test]
     fn form_submit_writes_all_fields_back_to_replay_bar() {
-        let body = replay_handler_body("            ReplayMsg::FormMsg(msg) =>");
+        // H-2: Bar updates deferred until IPC success via CommitReplayBarState message
+        // FormMsg::Submit should emit CommitReplayBarState on IPC success
+        let body = replay_handler_body("            ReplayMsg::CommitReplayBarState {");
         assert!(
-            body.contains("replay_bar.instrument_id"),
-            "FormMsg Submit must write instrument_id back to replay_bar: {body}"
+            body.contains("instrument_id"),
+            "CommitReplayBarState must update instrument_id: {body}"
         );
         assert!(
-            body.contains("replay_bar.start_date"),
-            "FormMsg Submit must write start_date back to replay_bar: {body}"
+            body.contains("start_date"),
+            "CommitReplayBarState must update start_date: {body}"
         );
         assert!(
-            body.contains("replay_bar.end_date"),
-            "FormMsg Submit must write end_date back to replay_bar: {body}"
+            body.contains("end_date"),
+            "CommitReplayBarState must update end_date: {body}"
         );
         assert!(
-            body.contains("replay_bar.granularity"),
-            "FormMsg Submit must write granularity back to replay_bar: {body}"
+            body.contains("granularity"),
+            "CommitReplayBarState must update granularity: {body}"
         );
         assert!(
-            body.contains("replay_bar.strategy_file"),
-            "FormMsg Submit must write strategy_file back to replay_bar: {body}"
+            body.contains("strategy_file"),
+            "CommitReplayBarState must update strategy_file: {body}"
         );
         assert!(
-            body.contains("replay_bar.initial_cash"),
-            "FormMsg Submit must write initial_cash back to replay_bar: {body}"
+            body.contains("initial_cash"),
+            "CommitReplayBarState must update initial_cash: {body}"
         );
+        // Verify FormMsg::Submit emits the message on success
+        let submit_body = replay_handler_body("            ReplayMsg::FormMsg(msg) =>");
         assert!(
-            body.contains("[0]") || body.contains(".get(0)"),
-            "FormMsg Submit must display only first instrument_id (not join all): {body}"
+            submit_body.contains("CommitReplayBarState"),
+            "FormMsg Submit must emit CommitReplayBarState on IPC success: {submit_body}"
         );
     }
 
