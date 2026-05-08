@@ -61,10 +61,7 @@ fn engine_event_variants() -> Vec<&'static str> {
                 && !trimmed.starts_with('#')
             {
                 // Take only the identifier part (stop at space, '{', ',').
-                let name = trimmed
-                    .split([' ', '{', ','])
-                    .next()
-                    .unwrap_or("");
+                let name = trimmed.split([' ', '{', ',']).next().unwrap_or("");
                 if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
                     Some(name)
                 } else {

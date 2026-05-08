@@ -8,6 +8,7 @@
 //! - Contract 1: Esc (→ Dismiss)
 //! - Contract 2: focus-lost (→ Dismiss)
 //! - Contract 3: outside click (→ Dismiss)
+//!
 //! × {File open, Closed}
 //!
 //! All 12 cases share the same `Dismiss → open: None` transition in the
