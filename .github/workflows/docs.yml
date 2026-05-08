@@ -1,4 +1,4 @@
-name: Deploy docs to GitHub Pages
+name: Docs (verify + deploy)
 
 on:
   push:
@@ -7,6 +7,16 @@ on:
       - 'docs/**'
       - 'mkdocs.yml'
       - 'pyproject.toml'
+      - 'scripts/verify_*.py'
+      - 'scripts/check_adr_status.py'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'pyproject.toml'
+      - 'scripts/verify_*.py'
+      - 'scripts/check_adr_status.py'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -20,7 +30,50 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies (docs + dev)
+        run: uv sync --group docs --group dev
+
+      - name: verify_migration_manifest
+        run: uv run python scripts/verify_migration_manifest.py
+        continue-on-error: true
+
+      - name: verify_migrated_from
+        run: uv run python scripts/verify_migrated_from.py
+        continue-on-error: true
+
+      - name: verify_no_legacy_paths
+        run: uv run python scripts/verify_no_legacy_paths.py
+        continue-on-error: true
+
+      - name: verify_nav_depth
+        run: uv run python scripts/verify_nav_depth.py
+
+      - name: check_adr_status
+        run: uv run python scripts/check_adr_status.py
+
+      - name: mkdocs build --strict
+        run: uv run --group docs mkdocs build --strict
+        continue-on-error: true
+
   build:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -45,6 +98,7 @@ jobs:
           path: site
 
   deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

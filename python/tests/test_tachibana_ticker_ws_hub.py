@@ -1,4 +1,4 @@
-"""Bug Y (docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md):
+"""Bug Y (docs/specs/venues/tachibana/fix-event-ws-lifecycle-2026-05-04.md):
 per-ticker EVENT WS multiplexer (`TickerEventWsHub`).
 
 立花 EVENT WS は (session, p_issue_code) 単位で 1 接続のみ。stream_depth と

@@ -1,6 +1,6 @@
 //! schema 3.14: regression guard for the replay-file-switch stale-pane bug.
 //!
-//! See [docs/✅python-data-engine/🔵replay-file-switch-stale-panes-approach-b.md].
+//! See [docs/specs/data-engine/🔵replay-file-switch-stale-panes-approach-b.md].
 //!
 //! The fix introduces a monotonically-increasing `session_epoch: Option<u64>`
 //! on `ReplayDataLoaded`, plus a GUI-side `Flowsurface::last_replay_session_epoch`

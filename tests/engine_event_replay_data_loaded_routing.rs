@@ -1,5 +1,5 @@
 //! Regression guard for the schema 3.12 fix
-//! ([docs/✅python-data-engine/replay-pane-auto-generate-fix.md]).
+//! ([docs/specs/data-engine/replay-pane-auto-generate-fix.md]).
 //!
 //! Before the fix, `map_engine_event_to_tachibana` (now
 //! `map_engine_event_to_message`) had **no arm** for
@@ -44,7 +44,7 @@ fn dispatcher_renamed_to_map_engine_event_to_message() {
         SOURCE.contains("fn map_engine_event_to_message"),
         "map_engine_event_to_message not found in src/main.rs — was it renamed back to \
          map_engine_event_to_tachibana? See \
-         docs/✅python-data-engine/replay-pane-auto-generate-fix.md (schema 3.12)."
+         docs/specs/data-engine/replay-pane-auto-generate-fix.md (schema 3.12)."
     );
     assert!(
         !SOURCE.contains("fn map_engine_event_to_tachibana"),

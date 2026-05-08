@@ -2,7 +2,7 @@
 //!
 //! Source-inspection tests verifying `src/widget_menu_bar.rs` contains the
 //! correct `update()` pure function logic as specified in
-//! `docs/✅menu-and-footer/P8-widget-menu-bar-linux.md` (DoD-12 / R2-39).
+//! `docs/architecture/modules/ui-shell/P8-widget-menu-bar-linux.md` (DoD-12 / R2-39).
 //!
 //! The plan specifies a 3-contract × 3-open-state = 9 case matrix:
 //! - Contract 1: Esc (→ Dismiss)

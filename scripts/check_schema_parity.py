@@ -28,8 +28,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-COMMANDS_JSON = ROOT / "docs" / "✅python-data-engine" / "schemas" / "commands.json"
-EVENTS_JSON = ROOT / "docs" / "✅python-data-engine" / "schemas" / "events.json"
+COMMANDS_JSON = ROOT / "docs" / "specs/data-engine" / "schemas" / "commands.json"
+EVENTS_JSON = ROOT / "docs" / "specs/data-engine" / "schemas" / "events.json"
 PROTO_FILE = ROOT / "proto" / "engine.proto"
 
 # Commands that exist in dto.rs but are NOT yet in commands.json (newer additions).
