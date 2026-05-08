@@ -3056,6 +3056,20 @@ class DataEngineServer:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
         market = _market_from_msg(msg, venue)
+
+        # ── kabu_station は _workers 外で管理されるため専用パス ──
+        if venue == "kabu_station":
+            tickers = await self._list_kabu_tickers(market)
+            self._outbox.append(
+                {
+                    "event": "TickerInfo",
+                    "request_id": req_id,
+                    "venue": "kabu_station",
+                    "tickers": tickers,
+                }
+            )
+            return
+
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
@@ -3068,6 +3082,31 @@ class DataEngineServer:
                 "tickers": tickers,
             }
         )
+
+    async def _list_kabu_tickers(self, market: str) -> list[dict]:
+        """KabuStation 銘柄一覧。
+
+        stock: 立花ワーカーのキャッシュマスターを kabu_station venue として返す。
+               立花未接続でもディスクキャッシュがあれば動作する。
+               キャッシュなし / 失敗時は空リストで graceful degradation。
+        future / option: 現時点では空リスト（TODO）。
+        """
+        if market != "stock":
+            return []
+
+        tachibana: TachibanaWorker | None = self._workers.get("tachibana")  # type: ignore[assignment]
+        if tachibana is None:
+            return []
+
+        try:
+            entries = await tachibana.list_tickers("stock")
+        except Exception as exc:
+            log.debug("kabu list_tickers: tachibana cache unavailable: %s", exc)
+            return []
+
+        # venue_caps を kabu 用に上書き（立花固有フラグを除去）
+        kabu_caps = tachibana.venue_caps()
+        return [{**e, "venue_caps": kabu_caps} for e in entries]
 
     async def _do_get_ticker_metadata(self, msg: dict) -> None:
         req_id = msg.get("request_id", "")

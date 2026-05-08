@@ -668,6 +668,13 @@ impl crate::Flowsurface {
                             ))),
                         ]);
                     }
+                    Some(dashboard::sidebar::Action::RequestKabuLogin(trigger)) => {
+                        let task = task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
+                        return Task::batch(vec![
+                            task,
+                            iced::Task::done(Message::Venue(VenueMsg::RequestKabuLogin(trigger))),
+                        ]);
+                    }
                     None => {}
                 }
 

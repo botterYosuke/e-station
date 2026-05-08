@@ -94,6 +94,11 @@ pub enum Action {
     /// presses never spawn two helper subprocesses. T35-U1-LoginButton
     /// / T35-U3-AutoRequestLogin.
     RequestTachibanaLogin(crate::venue_state::Trigger),
+    /// Mirror of `RequestTachibanaLogin` for KabuStation. Emitted by
+    /// `ToggleExchangeFilter(KabuStation)` when the venue is not yet
+    /// `Ready`. Flowsurface suppresses the request while
+    /// `kabu_state` is `LoginInFlight`.
+    RequestKabuLogin(crate::venue_state::Trigger),
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +159,12 @@ pub struct TickersTable {
     /// [`TickersTable::set_tachibana_ready(true)`] once `VenueReady`
     /// arrives.
     tachibana_fetch_pending: bool,
+    /// Mirror of `Flowsurface::kabu_state.is_ready()`. Gates KabuStation
+    /// metadata fetches (same rationale as T35-U4 for Tachibana).
+    /// Default `false`.
+    kabu_station_ready: bool,
+    /// Pending KabuStation metadata fetch blocked until VenueReady.
+    kabu_station_fetch_pending: bool,
     /// B5: Arc handle to the Tachibana display-metadata side-channel populated
     /// by `EngineClientBackend::fetch_ticker_metadata`. Set from `main.rs`
     /// after each `EngineConnected` event. `None` until the first connection.
@@ -188,10 +199,13 @@ impl TickersTable {
         // fetch list and mark a pending fetch instead — the watch on
         // `set_tachibana_ready(true)` will replay it once the engine
         // signals readiness.
+        // KabuStation applies the same gate: no `fetch_metadata_task`
+        // until `set_kabu_station_ready(true)` fires.
         let tachibana_initially_selected = selected_exchanges.contains(&Venue::Tachibana);
+        let kabu_station_initially_selected = selected_exchanges.contains(&Venue::KabuStation);
         let fetch_metadata = selected_exchanges
             .iter()
-            .filter(|venue| **venue != Venue::Tachibana)
+            .filter(|v| **v != Venue::Tachibana && **v != Venue::KabuStation)
             .map(|venue: &Venue| fetch_metadata_task(&handles, *venue))
             .collect::<Vec<_>>();
 
@@ -216,12 +230,14 @@ impl TickersTable {
                     selected_exchanges
                         .iter()
                         .copied()
-                        .filter(|v| *v != Venue::Tachibana),
+                        .filter(|v| *v != Venue::Tachibana && *v != Venue::KabuStation),
                 ),
                 stats_fetch_state: StatsFetchState::default(),
                 handles,
                 tachibana_ready: false,
                 tachibana_fetch_pending: tachibana_initially_selected,
+                kabu_station_ready: false,
+                kabu_station_fetch_pending: kabu_station_initially_selected,
                 tachibana_meta_handle: None,
             },
             Task::batch(fetch_metadata),
@@ -270,6 +286,27 @@ impl TickersTable {
         Task::none()
     }
 
+    /// Mirror of `set_tachibana_ready` for KabuStation. Called by
+    /// `Flowsurface::update` whenever `kabu_state` transitions. When
+    /// the venue becomes ready and a previous
+    /// `ToggleExchangeFilter(KabuStation)` had been blocked, returns the
+    /// deferred metadata fetch as a `Task`. Returns `Task::none()` otherwise.
+    pub fn set_kabu_station_ready(&mut self, ready: bool) -> Task<Message> {
+        let was_ready = self.kabu_station_ready;
+        self.kabu_station_ready = ready;
+
+        if ready && !was_ready && self.kabu_station_fetch_pending {
+            self.kabu_station_fetch_pending = false;
+            if !self.selected_exchanges.contains(&Venue::KabuStation) {
+                return Task::none();
+            }
+            if self.metadata_fetch_state.begin_venue(Venue::KabuStation) {
+                return fetch_metadata_task(&self.handles, Venue::KabuStation);
+            }
+        }
+        Task::none()
+    }
+
     /// B5: Wire the Tachibana display-metadata handle so `filtered_rows` can
     /// do Japanese-name prefix search. Called from `main.rs` after each
     /// `EngineConnected` event, right after the new backend is constructed.
@@ -292,11 +329,18 @@ impl TickersTable {
             .selected_exchanges
             .iter()
             .copied()
-            .filter(|v| *v != Venue::Tachibana || self.tachibana_ready)
+            .filter(|v| {
+                (*v != Venue::Tachibana || self.tachibana_ready)
+                    && (*v != Venue::KabuStation || self.kabu_station_ready)
+            })
             .collect();
         // Tachibana selected but not yet ready → defer until VenueReady.
         if self.selected_exchanges.contains(&Venue::Tachibana) && !self.tachibana_ready {
             self.tachibana_fetch_pending = true;
+        }
+        // KabuStation selected but not yet ready → defer until VenueReady.
+        if self.selected_exchanges.contains(&Venue::KabuStation) && !self.kabu_station_ready {
+            self.kabu_station_fetch_pending = true;
         }
         self.metadata_fetch_state =
             MetadataFetchState::with_pending(venues_to_refetch.iter().copied());
@@ -371,6 +415,9 @@ impl TickersTable {
                     if exch == Venue::Tachibana {
                         self.tachibana_fetch_pending = false;
                     }
+                    if exch == Venue::KabuStation {
+                        self.kabu_station_fetch_pending = false;
+                    }
                 } else {
                     self.selected_exchanges.insert(exch);
 
@@ -389,6 +436,12 @@ impl TickersTable {
                         return Some(Action::RequestTachibanaLogin(
                             crate::venue_state::Trigger::Auto,
                         ));
+                    }
+
+                    // Mirror of the Tachibana gate above for KabuStation.
+                    if exch == Venue::KabuStation && !self.kabu_station_ready {
+                        self.kabu_station_fetch_pending = true;
+                        return Some(Action::RequestKabuLogin(crate::venue_state::Trigger::Auto));
                     }
 
                     if !self.metadata_fetch_state.has_fetched(exch) {

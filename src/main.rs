@@ -785,7 +785,10 @@ fn main() {
         let app_mode: engine_client::dto::AppMode = cli_args.mode.into();
         log::info!("Started in mode: {}", app_mode.as_wire_str());
         // G3: grpc:// → http:// for tonic; http:// passes through unchanged.
-        let grpc_target = url_str.replacen("grpc://", "http://", 1);
+        // WS scheme validation is in CLI, but gRPC needs http://.
+        let grpc_target = url_str
+            .replacen("ws://", "http://", 1)
+            .replacen("grpc://", "http://", 1);
         match rt.block_on(engine_client::EngineConnection::connect_grpc(
             &grpc_target,
             &token,

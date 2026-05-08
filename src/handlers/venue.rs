@@ -423,7 +423,20 @@ impl crate::Flowsurface {
                     Task::none()
                 };
 
-                return auto_fetch_orders.chain(auto_fetch_positions);
+                // Tachibana と同様に metadata fetch ゲートを解除
+                let ticker_fetch = self
+                    .sidebar
+                    .tickers_table
+                    .set_kabu_station_ready(is_ready)
+                    .map(|m| {
+                        Message::Dashboard(DashboardMsg::Sidebar(
+                            dashboard::sidebar::Message::TickersTable(m),
+                        ))
+                    });
+
+                return ticker_fetch
+                    .chain(auto_fetch_orders)
+                    .chain(auto_fetch_positions);
             }
             // Message::EngineConnected(conn) => (post-refactor name below)
             VenueMsg::OrderToast(toast) => {
