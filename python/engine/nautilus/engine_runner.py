@@ -21,7 +21,7 @@ spec.md §3.2: CacheConfig.database = None（永続化 OFF）を必ず維持す�
   N1.11 まで no-op なので未使用)。
 - market data 複製送出 (Trades/KlineUpdate) は run-once 版 ``start_backtest_replay()``
   では no-op（決定論性テスト経路）。streaming 版で per-tick emit する。
-  詳細は ``docs/✅nautilus_trader/replay-market-data-emit.md`` を参照。
+  詳細は ``docs/specs/backtest/replay-market-data-emit.md`` を参照。
 - SubmitOrder の replay 経路は N1.4 ではスケルトンのみ (ユーザー Strategy 自身が
   on_trade_tick / on_bar で submit_order するのが本筋)。外部 IPC からの SubmitOrder の
   replay venue 内部 queue 投入は N1.5 で実装。
@@ -293,7 +293,7 @@ class NautilusRunner:
         本 run-once 版は market data 複製 (Trades/KlineUpdate) を **意図的に行わない**
         (決定論性テスト・gym_env 用に温存)。``ReplayDataLoaded`` で件数のみ通知する。
         Rust UI へのリアルタイム配信は ``start_backtest_replay_streaming()`` を使うこと。
-        詳細は ``docs/✅nautilus_trader/replay-market-data-emit.md`` 参照。
+        詳細は ``docs/specs/backtest/replay-market-data-emit.md`` 参照。
         """
         if currency not in _CURRENCY_MAP:
             raise ValueError(
@@ -520,7 +520,7 @@ class NautilusRunner:
 
             KlineUpdate / Trades は per-tick で emit され、venue="replay" タグで
             Rust UI のチャート / Time&Sales ペインに送られる。
-            詳細は ``docs/✅nautilus_trader/replay-market-data-emit.md`` 参照。
+            詳細は ``docs/specs/backtest/replay-market-data-emit.md`` 参照。
 
         get_multiplier: 走行中に再生倍率を読み直すための callback。``None`` のときは
             初期 ``multiplier`` を使い続ける。``SetReplaySpeed`` IPC を per-tick で

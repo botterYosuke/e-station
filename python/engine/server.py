@@ -3986,7 +3986,7 @@ class DataEngineServer:
         # Rust 側 FSM (`venue_state.rs::try_claim_login_in_flight_succeeds_from_ready`) が
         # Ready からの再ログインを許可しているため、ここで弾くと UI と齟齬が出る (2026-05-04)。
         #
-        # Bug X (docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md):
+        # Bug X (docs/specs/venues/tachibana/fix-event-ws-lifecycle-2026-05-04.md):
         # 旧 EVENT WS ループ (`_event_task`) もここで cancel する。新ログインが
         # 失敗・キャンセルされると `_startup_tachibana` の終端 (2454-2455) を
         # 通らず、旧セッション URL から EC 約定通知を受け続けるゴースト状態が

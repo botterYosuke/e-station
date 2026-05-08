@@ -2,7 +2,7 @@
 //!
 //! These source-inspection tests verify that `src/menu.rs` contains the
 //! expected function definitions and Action variants as specified in
-//! `docs/✅menu-and-footer/P8-widget-menu-bar-linux.md`.
+//! `docs/architecture/modules/ui-shell/P8-widget-menu-bar-linux.md`.
 //!
 //! Key invariants (DoD-7):
 //! - `actions_for_mode(Live)` ⊇ {Open, Save, SaveAs, Quit}

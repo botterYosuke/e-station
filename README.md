@@ -123,7 +123,7 @@ live と replay では意味が異なります。
 | **live** | 立花証券 e支店に対する実注文 |
 | **replay** | 検証用の仮想注文 |
 
-replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます。安全ガードの詳細は [docs/✅order/spec.md](https://botteryosuke.github.io/e-station/%E2%9C%85order/) と [docs/✅tachibana/spec.md](https://botteryosuke.github.io/e-station/%E2%9C%85tachibana/) を参照してください。
+replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付余力に分離されます。安全ガードの詳細は [docs/specs/order.md](https://botteryosuke.github.io/e-station/specs/order/) と [docs/specs/venues/tachibana.md](https://botteryosuke.github.io/e-station/specs/venues/tachibana/) を参照してください。
 
 ## ドキュメントの読み分け
 
@@ -134,7 +134,7 @@ replay 注文は実口座には送られず、REPLAY 用の注文一覧と買付
 
 ## アーキテクチャ概要
 
-Rust / Iced（UI）+ Python engine（市場データ・NautilusTrader・立花証券）の 2 プロセス構成で、IPC WebSocket で連携します。詳細は [AGENTS.md](AGENTS.md) と [docs/✅python-data-engine/](https://botteryosuke.github.io/e-station/%E2%9C%85python-data-engine) を参照してください。
+Rust / Iced（UI）+ Python engine（市場データ・NautilusTrader・立花証券）の 2 プロセス構成で、IPC WebSocket で連携します。詳細は [AGENTS.md](AGENTS.md) と [docs/specs/data-engine.md](https://botteryosuke.github.io/e-station/specs/data-engine/) を参照してください。
 
 ## 安全に関する注意
 

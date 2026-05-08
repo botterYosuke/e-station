@@ -1,32 +1,59 @@
-# e-station エンジニア向けドキュメント
+---
+title: e-station ドキュメント
+status: draft
+authored: 2026-05-08
+---
 
-Rust（Iced GUI）+ Python データエンジンで構成されるマーケットデータ可視化アプリ
-**e-station** の機能別実装仕様書。
+# e-station ドキュメント
 
-## 実装仕様書
+**e-station** は Rust（Iced GUI）+ Python データエンジンで構成されるマーケットデータ可視化アプリです。
+本サイトは **エンジニアおよびコントリビュータ向け** のドキュメントを集約します。
 
-- [Python データエンジン](✅python-data-engine/README.md)
-  Rust ビュアーとローカル WebSocket IPC で連携するデータエンジン。取引所 REST/WebSocket
-  接続・レート制限・データ正規化・配信を担当。IPC スキーマ・バックプレッシャ・
-  起動ハンドシェイクを定義。
+> エンドユーザー向けの操作手順 / Getting Started / Live Strategy / Replay / Backtest /
+> Orders / Charts / Modes & Venues / File Menu / Settings / Troubleshooting は、
+> **GitHub Wiki** に分離されています。
+> → [GitHub Wiki](https://github.com/botterYosuke/e-station/wiki)
 
-- [立花証券 API 統合](✅tachibana/README.md)
-  立花証券 e支店 API（v4r8）を使った日本株チャート閲覧。認証フロー・銘柄マスタ・
-  FD ストリーム・日足 kline・セッション管理・セキュリティ要件を定義。
+---
 
-- [立花注文機能](✅order/README.md)
-  現物・信用の新規注文/訂正/取消/約定通知。nautilus_trader 互換 API 設計・
-  第二暗証番号管理・誤発注防止安全装置・reason_code 体系を定義。
+## エンジニア向け
 
-- [NautilusTrader 統合](✅nautilus_trader/README.md)
-  NautilusTrader を中核エンジンに据えた live / replay 両対応の実装仕様。
-  J-Quants バックテスト・立花 LiveExecutionClient・TradeTick 一本化・
-  live/replay 互換不変条件・IPC スキーマを定義。
+実装仕様・アーキテクチャ・IPC 契約・モジュール詳細を読みたい方。
 
-- [メニューバー / Save 機能](✅menu-and-footer/README.md)
-  OS ネイティブメニューバー・ステータスバー・File メニュー（Open / Save / Save As）の
-  実装仕様。`CURRENT_PATH` 管理・dirty 判定・アクセラレータ経路・replay モードでの
-  戦略 `.py` `SCENARIO` 読み書きを定義。
+- **アーキテクチャ**
+  - [全体像](architecture/overview.md) — プロセス構成と責務分担
+  - [Rust ↔ Python 境界](architecture/boundaries.md) — 所有権と責務
+  - [データフロー](architecture/data-flow.md) — live / replay / backtest
+  - [IPC スキーマ](architecture/ipc-schema.md) — SCHEMA_MAJOR/MINOR 運用
+  - モジュール別: [data-engine](architecture/modules/data-engine.md) / [tachibana-adapter](architecture/modules/tachibana-adapter.md) / [kabusapi-adapter](architecture/modules/kabusapi-adapter.md) / [nautilus-trader](architecture/modules/nautilus-trader.md) / [ui-shell](architecture/modules/ui-shell.md)
+- **仕様（実装契約）**
+  - [data-engine](specs/data-engine.md) / [order](specs/order.md) / [replay](specs/replay.md) / [backtest](specs/backtest.md) / [live-strategy](specs/live-strategy.md)
+  - venue 別: [tachibana](specs/venues/tachibana.md) / [kabusapi](specs/venues/kabusapi.md)
+- **リファレンス**
+  - [IPC プロトコル契約](reference/ipc-protocol.md)
+  - 外部 API: [external-apis/](reference/external-apis/)
+- **ロードマップ / 進行中の論点**
+  - [roadmap/](roadmap/README.md) — モジュール別 implementation-plan / open-questions
+  - [スキーマ年表 changelog](roadmap/changelog.md)
+
+## コントリビュータ向け
+
+コードを書く / レビューする / リリースする方。
+
+- **開発環境**
+  - [setup](development/setup.md) — toolchain / 依存 / ローカル起動
+  - [build-and-release](development/build-and-release.md) — ビルド / 配布 / バージョニング
+  - [troubleshooting](development/troubleshooting.md) — 開発時のハマりどころ・runbook
+- **規約**
+  - [coding-standards](contributing/coding-standards.md)
+- **テスト**
+  - [strategy](testing/strategy.md) — unit / integration / E2E / invariant / TDD
+  - [invariants](testing/invariants.md) — INV-ID 一覧
+  - [benchmarks](testing/benchmarks.md)
+- **意思決定**
+  - [decisions/](decisions/README.md) — ADR 一覧（status: proposed / accepted / deferred / superseded）
+
+---
 
 ## ソース
 

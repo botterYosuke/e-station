@@ -2,7 +2,7 @@
 //!
 //! These source-inspection tests verify that the replay→live async error paths
 //! in `src/main.rs` maintain the key invariants documented in
-//! `docs/✅menu-and-footer/P7-mode-switch-menu.md`:
+//! `docs/architecture/modules/ui-shell/P7-mode-switch-menu.md`:
 //!
 //! - Stale timeout messages are silently ignored (pending_mode_switch guard).
 //! - Error dialogs are shown on ForceStopReplay timeout and send failure.

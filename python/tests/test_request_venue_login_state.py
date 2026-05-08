@@ -146,7 +146,7 @@ def test_request_venue_login_connected_triggers_relogin(monkeypatch, tmp_path):
 def test_relogin_from_connected_cancels_old_event_task(monkeypatch, tmp_path):
     """CONNECTED 中の RequestVenueLogin で旧 `_event_task` が cancel されること。
 
-    Bug X (docs/✅tachibana/fix-event-ws-lifecycle-2026-05-04.md):
+    Bug X (docs/specs/venues/tachibana/fix-event-ws-lifecycle-2026-05-04.md):
     `_live_state` を CONNECTED → DISCONNECTED に巻き戻すだけでは旧 EVENT WS
     受信ループが残り、新ログインが失敗・キャンセルされた場合に旧セッション URL
     から EC 約定通知を受け続けるゴースト状態になる。
