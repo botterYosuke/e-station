@@ -147,17 +147,25 @@ def build_replay_positions_event(portfolio_state: dict, ts_ms: int) -> dict:
     for inst_id in sorted(positions.keys()):
         pos_data = positions[inst_id]
         qty_val = pos_data.get("qty", "0")
-        qty_str = str(int(Decimal(qty_val))) if qty_val not in ("", None) else "0"
+
+        # H-1: Wrap Decimal(qty_val) in try/except to handle malformed qty
+        # (e.g., qty_val="invalid", "N/A", etc.) that slipped past validation.
+        # Silent failure would stop fill emit path (PositionsUpdated never sent).
+        try:
+            qty_str = str(int(Decimal(qty_val))) if qty_val not in ("", None) else "0"
+        except (InvalidOperation, ValueError, TypeError):
+            qty_str = "0"
 
         price_raw = last_prices.get(inst_id, "")
         try:
             if price_raw not in ("", None):
+                # H-1: Also protect market_value conversion from invalid price
                 mv = Decimal(qty_str) * Decimal(str(price_raw))
                 mv_str = str(int(mv))
             else:
                 mv_str = ""
         except (InvalidOperation, ValueError, TypeError):
-            mv_str = ""
+            mv_str = "0"
 
         rows.append({
             "instrument_id": inst_id,
