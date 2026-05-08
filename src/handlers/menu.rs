@@ -74,7 +74,6 @@ impl crate::Flowsurface {
                         // If paused, this is a Resume action.
                         if self.replay_paused && self.replay_running {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                                self.replay_paused = false;
                                 let has_history = self.menu_bar.replay_bar.replay_has_history;
                                 let req_id = uuid::Uuid::new_v4().to_string();
                                 Task::perform(
@@ -85,11 +84,19 @@ impl crate::Flowsurface {
                                         .await
                                         .map_err(|e| e.to_string())
                                     },
-                                    move |res| match res {
-                                        Ok(()) => Message::Engine(EngineMsg::Noop),
+                                    move |res| {
+                                        match res {
+                                        Ok(()) => {
+                                            Message::Menu(MenuMsg::Bar(
+                                                crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
+                                                    paused: false,
+                                                    has_history,
+                                                },
+                                            ))
+                                        }
                                         Err(e) => {
                                             log::error!(
-                                                "ResumeReplay IPC failed (rolling back): {e}"
+                                                "ResumeReplay IPC failed: {e}"
                                             );
                                             Message::Menu(MenuMsg::Bar(
                                                 crate::menu_bar_state::BarMessage::ReplayPauseStateChanged {
@@ -98,6 +105,7 @@ impl crate::Flowsurface {
                                                 },
                                             ))
                                         }
+                                    }
                                     },
                                 )
                             } else {

@@ -149,3 +149,46 @@ class PortfolioView:
             "equity": str(eq),
             "ts_event_ms": int(time.time() * 1000),
         }
+
+    def to_position_records(
+        self,
+        last_prices: dict[str, Decimal] | None = None,
+    ) -> list[dict]:
+        """Convert portfolio state to PositionRecord list for PositionsUpdated event.
+
+        Returns list of dicts matching PositionRecord schema:
+        [{
+            "instrument_id": str,
+            "qty": int (as string),
+            "market_value": str (int, or "" if price unknown),
+            "position_type": "cash",
+            "tategyoku_id": None,
+            "venue": "replay",
+        }, ...]
+
+        Positions are sorted by instrument_id for determinism.
+        last_prices=None → use internal _last_prices (fallback).
+        last_prices={...} → use provided prices (may be empty).
+        """
+        prices = last_prices if last_prices is not None else self._last_prices
+        records = []
+        for inst_id in sorted(self._positions.keys()):
+            pos = self._positions[inst_id]
+            qty = int(pos["qty"])
+
+            # Calculate market_value if price is available
+            price = prices.get(inst_id, Decimal(0)) if prices else Decimal(0)
+            market_value = ""
+            if price > 0:
+                mv = qty * price
+                market_value = str(int(mv))
+
+            records.append({
+                "instrument_id": inst_id,
+                "qty": str(qty),
+                "market_value": market_value,
+                "position_type": "cash",
+                "tategyoku_id": None,
+                "venue": "replay",
+            })
+        return records

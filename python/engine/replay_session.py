@@ -2252,7 +2252,9 @@ def _resolve_cli_params(
         (instrument, start, end, granularity, initial_cash)
         instrument は str (単一) または list[str] (複数)
     """
+    from engine.scenario import ScenarioValidationError as _ScenarioValidationError
     from engine.scenario import extract as _extract_scenario
+    from engine.scenario import resolve_refs as _resolve_refs
 
     scenario: dict | None = None
 
@@ -2263,7 +2265,10 @@ def _resolve_cli_params(
     if needs_scenario:
         try:
             scenario = _extract_scenario(Path(strategy_path))
-        except (SyntaxError, ValueError) as exc:
+            if scenario is not None:
+                # CLI 文脈: base_dir = strategy_path の親
+                scenario = _resolve_refs(scenario, base_dir=Path(strategy_path).parent)
+        except (SyntaxError, ValueError, _ScenarioValidationError) as exc:
             log.error(
                 "scenario.cli: SCENARIO in %s has invalid syntax: %s",
                 strategy_path, exc,

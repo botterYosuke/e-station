@@ -5,12 +5,31 @@ Public API:
         .py から SCENARIO 定数を ast.parse + ast.literal_eval で安全抽出。
         import は発火しない（副作用ゼロ）。
 
+    resolve_refs(d: dict, *, base_dir: Path) -> dict
+        v3 SCENARIO の instruments_ref を外部 JSON から解決して instruments を追加した
+        新 dict を返す（非破壊・instruments_ref キーは保持）。v1/v2 は no-op。
+        失敗時は ScenarioValidationError(code="unresolved_ref") を raise。
+
+        layer contract:
+          - scenario.py 内の rollback reason は syntax_error / validate_failed の 2 値固定。
+          - unresolved_ref / relative_ref_crosses_dir は server 層（_do_save_strategy_scenario）が
+            write_back 呼び出し前に返す SaveErrorCode であり、このモジュールには現れない。
+
     validate(d: dict) -> None
         Scenario TypedDict 形状を runtime 検証。失敗時は ScenarioValidationError を raise。
+        v3 の場合は resolve_refs 後の dict（instruments キー必須）を渡すこと。
 
     write_back(path, scenario, *, save_as, loaded_path) -> None
         libcst で SCENARIO ブロックを atomic 書き戻し。
         tempfile + os.replace() による atomic write、世代付き .bak、2段検証 + rollback。
+        v3 の場合も raw dict（instruments_ref を含む）を渡す — _verify_writeback が
+        内部で resolve_refs を呼んで検証する。
+
+schema バージョン一覧:
+    v1 (schema_version=1): instrument (str) — 単一銘柄
+    v2 (schema_version=2): instruments (list[str]) — 複数銘柄
+    v3 (schema_version=3): instruments_ref (str) または instruments (list[str]) —
+                           外部 JSON 参照または直書き（resolve 後は instruments が必須）
 
 レビュー反映 (2026-05-04 ラウンド1, 方針 B):
     `current_path` 引数は本モジュールから削除。loaded_path 一軸の FCFS 不変条件
@@ -334,7 +353,7 @@ def _resolve_json_pointer(doc: object, pointer: str) -> object:
     tokens = pointer[1:].split("/")
     current = doc
     for token in tokens:
-        # RFC 6901 アンエスケープ（順序重要: ~1 → / の前に ~0 → ~）
+        # RFC 6901 §3: ~1→/ を先に処理し、次に ~0→~ する（この順でないと ~01 が誤解釈される）
         token = token.replace("~1", "/").replace("~0", "~")
         try:
             if isinstance(current, list):

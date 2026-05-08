@@ -510,14 +510,41 @@ Rust 側 unit テスト（[src/modal/replay_form.rs](../../src/modal/replay_form
 | 2 | `_resolve_json_pointer` + 単体テスト | なし | 0.5h | ✅ 完了 |
 | 3 | `resolve_refs`（非破壊・instruments_ref 保持）+ 単体テスト | 1, 2 | 0.75h | ✅ 完了 |
 | 4 | `Scenario_v3` TypedDict + `_validate_v3`（`instruments_ref` 任意キー）+ `validate()` dispatch | 3 | 0.5h | ✅ 完了 |
-| 5 | `replay_session._resolve_replay_params` で resolve 呼び出し（base_dir = strategy 親）+ acceptance test | 4 | 0.5h | — |
+| 5 | `replay_session._resolve_replay_params` で resolve 呼び出し（base_dir = strategy 親）+ acceptance test | 4 | 0.5h | ✅ 完了 |
 | 6 | `_verify_writeback` の resolve 化（base_dir = path.parent）+ v1/v2 regression 確認 | 4 | 0.5h | ✅ 完了 |
 | 7 | `StrategyScenarioLoaded` に `resolved_instruments` フィールド追加 + `_do_load_strategy_scenario` で resolve & 別フィールド埋め | 4 | 0.5h | ✅ 完了（Python schemas.py + Rust dto.rs + proto + grpc_transport）|
 | 8 | `SaveErrorCode` 拡張（`unresolved_ref` / `relative_ref_crosses_dir`） + schemas regression | 4 | 0.25h | ✅ 完了（schemas.py 10 値、SCHEMA_MINOR 23 bump、Rust / Python 全テスト通過）|
-| 9 | `_do_save_strategy_scenario` で base_dir 選定 + 相対 ref ガード + `code` 分岐 | 6, 8 | 0.75h | — |
-| 10 | Rust `prefill_from_scenario` 署名拡張 + 呼び出し元配線 + Rust unit テスト | 7 | 1.0h | — |
-| 11 | write_back 系テスト追加（Save As 別ディレクトリ系含む） | 6, 9 | 0.75h | — |
-| 12 | docstring / module header 更新（層分離の明文化） | 全部 | 0.25h | — |
+| 9 | `_do_save_strategy_scenario` で base_dir 選定 + 相対 ref ガード + `code` 分岐 | 6, 8 | 0.75h | ✅ 完了 |
+| 10 | Rust `prefill_from_scenario` 署名拡張 + 呼び出し元配線 + Rust unit テスト | 7 | 1.0h | ✅ 完了（messages.rs / handlers/replay.rs / modal/replay_form.rs / menu_bar_state.rs / main.rs 全配線 + 6テスト追加）|
+| 11 | write_back 系テスト追加（Save As 別ディレクトリ系含む） | 6, 9 | 0.75h | ✅ 完了 |
+| 12 | docstring / module header 更新（層分離の明文化） | 全部 | 0.25h | ✅ 完了（scenario.py Public API docstring に resolve_refs・schema v1/v2/v3 一覧・layer contract を追記）|
+
+### 実装知見（2026-05-08 Rust prefill 担当 / Step 10）
+
+- `ReplayMsg::ScenarioLoaded` に `resolved_instruments: Option<Vec<String>>` を追加する際、`src/main.rs` のエンジンイベントマッピング（`..` で省略していた箇所）を exhaustive match に戻して明示的に渡す必要がある。`..` を残すと L1 指摘（サイレント破棄）が残存する。
+- `prefill_from_scenario` の 3 引数化で既存テストがすべてコンパイルエラーになる。テスト側に `None` を追加するだけで既存挙動は完全保持。
+- `Some(&[])` の空スライスは "触らない" セマンティクスにする（`!ids.is_empty()` ガード）。これで resolved_instruments が空のとき既存値が保持される。
+- `else { if let ... }` が 2 つ連続する場合、Clippy は警告しない（単一 `if let` なら `else if let` に縮小できるが、連続 2 個は不可）。現在の形で OK。
+- `scenario=None` 時の `resolved_instruments` は完全無視（仕様通り）。`resolved_instruments` は `scenario` が存在する文脈でのみ意味を持つ — コメント不要。
+
+### レビュー反映 (2026-05-08, ラウンド 1 — Step 10 R1)
+
+**解消した指摘**: CRITICAL 0 / HIGH 0 / MEDIUM 0 — 初回レビューで収束。
+
+**残存 LOW**（対応不要）:
+- RS-1: `else { if let }` ネスト — Clippy 警告なし、変更不要
+- RS-2: `replay_form.rs` と `menu_bar_state.rs` の instrument 選択ロジック共通化 — 独立型のため YAGNI
+- RS-3: `ReplayBarState::prefill_from_scenario` docstring に第3引数の言及なし — 機能上問題なし
+- SF-1: `scenario=None` 時に `resolved_instruments` が無視される点のコメント欠如 — 仕様通りで明白
+- TD-2: `resolved_instruments = Some([])` テストコメントに「Python 側では ScenarioValidationError になる正常系」の説明があると良い
+
+**検証コマンド全緑確認**:
+```
+cargo check --workspace  ✅
+cargo clippy --workspace -- -D warnings  ✅
+cargo fmt --check  ✅
+cargo test --workspace（FAILED なし）  ✅
+```
 
 ### 実装知見（2026-05-08 scenario.py コア担当）
 
@@ -531,6 +558,11 @@ Rust 側 unit テスト（[src/modal/replay_form.rs](../../src/modal/replay_form
 - 既存テストが `StrategyScenarioLoaded` を exhaustive match していた（`..` なし）場合、新フィールド追加で compile error になる。`..` を追加しても assertion の意味は変わらない。
 - SCHEMA_MINOR を bump するとき：`engine-client/src/lib.rs`・`python/engine/schemas.py`・`engine-client/tests/schema_v2_4_nautilus.rs`・`python/tests/test_schemas_nautilus.py` の 4 か所すべてを同期する。
 - `StrategyScenarioSaved.error` のコメントに "N 値に固定" という定数参照を書くと `SaveErrorCode` 拡張のたびに stale になる。コメントは値数を書かず「Literal で固定」と書き、詳細は `SaveErrorCode` 定義のコメントに委ねるほうがメンテしやすい。
+- `replay_session._resolve_cli_params` では `from engine.scenario import ...` を関数内 import で書く慣例がある（モジュール先頭でなく関数内）。追加する `ScenarioValidationError` / `resolve_refs` の import も同じスタイルで揃えること。
+- acceptance test で `Scenario_v3` TypedDict の `from engine.scenario import Scenario_v3` 型注釈は不要。`SCENARIO = {...}` の平文 dict で十分（`ast.literal_eval` は TypedDict annotation を評価しないため `extract()` が値を取れなくなる）。テスト内の strategy.py は `SCENARIO = {...}` の plain dict として書くこと。
+- `_do_save_strategy_scenario` で `loaded_path_str` / `save_as` の取得を `validate` 呼び出し前に移動する必要がある（Step 9 では base_dir の選定に `loaded_path_str` が必要なため）。元の実装は `validate` の後で取得していたが、`resolve_refs → validate` の前に必要な情報なので順序を入れ替えた。
+- `test_v3_writeback_preserves_instruments_ref` で「`instruments` キーが単独で書き込まれていない」を確認するアサーションは、ファイルテキストの文字列検索より `extract()` した dict でキーの存在を確認するほうが確実（`universe.json#/instruments` の値文字列に `instruments` が含まれるため）。
+- Save As 別ディレクトリ + 絶対 ref のテストでは、保存先ファイルが事前に存在しないと `_check_path_guard`（Save As + `path != loaded_path` の条件）を通過しても `write_back` 内部で `_verify_writeback` が走り `_replace_or_insert_scenario` → 書き込みに失敗することがある。テストでは保存先 .py を事前に作成しておくこと。
 
 ## レビュー反映 (2026-05-08, ラウンド 1)
 
@@ -549,6 +581,35 @@ Rust 側 unit テスト（[src/modal/replay_form.rs](../../src/modal/replay_form
 - `python/tests/test_schemas_nautilus.py`: SCHEMA_MINOR == 23 アサーション更新（既存テスト `test_schema_minor_is_9_for_phase_b1` を更新）
 
 合計 約 **6.5h**（v1/v2 のみ運用するユーザー向け編集 UI は別タスク）。
+
+## レビュー反映 (2026-05-08, ラウンド 2) — Step 7b / 9 / 11 server.py 担当
+
+### 完了した指摘
+
+- **MEDIUM-1**: `_do_save_strategy_scenario` の `scenario_dict` が非 None の非 dict（例: list）のとき、`resolve_refs` 内の `.get()` で `AttributeError` が発生し `ScenarioValidationError` catch を素通りする → `scenario_dict is None or not isinstance(scenario_dict, dict)` に強化して `missing_scenario_field` で明示 reject。回帰防止テスト `test_v3_save_non_dict_scenario_emits_missing_scenario_field` を追加。
+
+### 残存 LOW（対応不要）
+
+- **LOW-1**: v1/v2 の `resolve_refs` コールが `dict(d)` コピーを生成するが実害なし。
+- **LOW-2**: v3 inline の `resolved_instruments=None` は設計・テスト済み。
+- **LOW-3**: 空 `instruments_ref` パス（`""`）のエラーコードが `relative_ref_crosses_dir` vs `unresolved_ref` に分岐するが、どちらも reject で正しい動作。
+
+### テスト追加（この担当分）
+
+- `python/tests/test_scenario_writeback.py`: Step 11 として 6 件追加（`test_v3_writeback_*` 4 件 + `test_v3_save_*` 3 件）
+- `python/tests/test_multi_instrument_acceptance.py`: 2 件追加（`test_strategy_scenario_loaded_carries_resolved_instruments` / `test_strategy_scenario_loaded_v1_v2_resolved_is_none`）
+- 合計新テスト: 9 件（52 → 53 件, pytest 全緑確認）
+
+### Step 5 レビュー反映 (2026-05-08, ラウンド 1)
+
+**解消した指摘**:
+- **M1 (MEDIUM)**: `test_replay_session_loads_v3_with_instruments_ref` が `resolve_refs` 単体テストになっており `_resolve_cli_params` 統合経路を pin していなかった → `_resolve_cli_params` を呼ぶ統合テストに変更し、非破壊性確認は末尾で継続。docstring も `_resolve_cli_params` 言及に修正済み（旧称 `_resolve_replay_params` との乖離を解消）。
+- **M2 (MEDIUM)**: `instruments` と `instruments_ref` 共存（both_keys）の `ScenarioValidationError` が `sys.exit(1)` に変換される CLI 経路が未テスト → `test_replay_session_v3_both_keys_exits` を追加。
+
+**残存 LOW（対応不要）**:
+- **L2**: `base_dir=tmp_path` の直書きが `Path(strategy_py).parent` と偶然一致している表記 → 単体テスト範囲内で実害なし。
+
+**テスト追加**: 1 件（`test_replay_session_v3_both_keys_exits`）、Step 5 acceptance テスト計 4 件で収束。
 
 ## 互換性・リスク
 

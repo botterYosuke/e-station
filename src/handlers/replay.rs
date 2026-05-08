@@ -7,6 +7,71 @@ use crate::modal;
 use crate::screen;
 use crate::widget::toast::Toast;
 
+/// Outcome of the two-step replay submit IPC chain.
+///
+/// `LoadReplayData` is sent first, then `StartEngine`. The backend treats them
+/// independently, so partial failures must be distinguishable to keep UI and
+/// backend in sync (review M1):
+/// - `BothOk` — backend has new replay loaded AND engine running.
+/// - `StartFailed` — backend has new replay loaded; engine NOT running.
+///   UI must still adopt the new params (the replay IS loaded) but surface
+///   the start error so the user knows the run did not begin.
+/// - `LoadFailed` — backend unchanged; UI must NOT adopt new params.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReplaySubmitResult {
+    BothOk,
+    StartFailed(String),
+    LoadFailed(String),
+}
+
+/// Form data captured at Submit time, threaded through the async Task.
+/// Used by `submit_result_to_message` to build the follow-up Message.
+#[derive(Debug, Clone)]
+pub(crate) struct ReplayCommitData {
+    pub instrument_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub granularity: crate::modal::replay_form::Granularity,
+    pub strategy_file: std::path::PathBuf,
+    pub initial_cash: String,
+}
+
+/// Pure mapping from the IPC outcome to the follow-up Message.
+/// Extracted so the partial-failure branches can be unit-tested without
+/// constructing a full `Flowsurface`.
+pub(crate) fn submit_result_to_message(
+    result: ReplaySubmitResult,
+    commit: ReplayCommitData,
+) -> Message {
+    match result {
+        ReplaySubmitResult::BothOk => Message::Replay(ReplayMsg::CommitReplayBarState {
+            instrument_id: commit.instrument_id,
+            start_date: commit.start_date,
+            end_date: commit.end_date,
+            granularity: commit.granularity,
+            strategy_file: commit.strategy_file,
+            initial_cash: commit.initial_cash,
+            start_error: None,
+        }),
+        ReplaySubmitResult::StartFailed(error) => {
+            // M1: Load succeeded → backend has new replay loaded → commit bar
+            // state. Carry the start-engine error so the handler shows a toast.
+            Message::Replay(ReplayMsg::CommitReplayBarState {
+                instrument_id: commit.instrument_id,
+                start_date: commit.start_date,
+                end_date: commit.end_date,
+                granularity: commit.granularity,
+                strategy_file: commit.strategy_file,
+                initial_cash: commit.initial_cash,
+                start_error: Some(error),
+            })
+        }
+        ReplaySubmitResult::LoadFailed(error) => Message::Venue(VenueMsg::OrderToast(
+            Toast::error(format!("Replay 起動失敗: {error}")),
+        )),
+    }
+}
+
 impl crate::Flowsurface {
     pub(crate) fn handle_replay(&mut self, msg: ReplayMsg) -> Task<Message> {
         match msg {
@@ -277,6 +342,7 @@ impl crate::Flowsurface {
                 request_id,
                 path,
                 scenario,
+                resolved_instruments,
             } => {
                 // 連続して別ファイルを開いた場合、古い応答を無視する。
                 if self.pending_scenario_request_id.as_deref() != Some(request_id.as_str()) {
@@ -288,8 +354,16 @@ impl crate::Flowsurface {
                     .get_or_insert_with(modal::replay_form::ReplayFormModal::default);
                 match scenario {
                     Some(value) => {
-                        form.prefill_from_scenario(path.clone(), &value);
-                        self.menu_bar.replay_bar.prefill_from_scenario(path, &value);
+                        form.prefill_from_scenario(
+                            path.clone(),
+                            &value,
+                            resolved_instruments.as_deref(),
+                        );
+                        self.menu_bar.replay_bar.prefill_from_scenario(
+                            path,
+                            &value,
+                            resolved_instruments.as_deref(),
+                        );
                     }
                     None => {
                         form.set_strategy_file_only(path.clone());
@@ -351,24 +425,41 @@ impl crate::Flowsurface {
                             strategy_file,
                             initial_cash,
                         }) => {
+                            // M2: Check connection BEFORE clearing the modal so a missing
+                            // connection does not silently discard user input. Keep the
+                            // modal open and surface a toast so the user can retry.
+                            let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                                return Task::done(Message::Venue(VenueMsg::OrderToast(
+                                    Toast::error(
+                                        "エンジン未接続のため Replay を開始できません。再接続後にやり直してください。"
+                                            .to_string(),
+                                    ),
+                                )));
+                            };
                             self.replay_form_modal = None;
-                            // Write back validated form values to ReplayBarState so the
-                            // menu bar displays the active replay settings.
-                            self.menu_bar.replay_bar.instrument_id = instrument_ids.join(", ");
-                            self.menu_bar.replay_bar.start_date = start_date.clone();
-                            self.menu_bar.replay_bar.end_date = end_date.clone();
-                            self.menu_bar.replay_bar.granularity = Some(granularity.clone());
-                            self.menu_bar.replay_bar.strategy_file = Some(strategy_file.clone());
-                            self.menu_bar.replay_bar.initial_cash = initial_cash.to_string();
-                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
-                                let strategy_file_str =
-                                    strategy_file.to_string_lossy().into_owned();
-                                let gran_dto = granularity.to_dto();
-                                let first_id = instrument_ids[0].clone();
-                                return Task::perform(
-                                    async move {
-                                        let load_req_id = uuid::Uuid::new_v4().to_string();
-                                        conn.send(engine_client::dto::Command::LoadReplayData {
+                            // H-2: DO NOT update menu_bar.replay_bar here. Only commit state
+                            // after IPC succeeds, in the Task callback below.
+                            let strategy_file_str = strategy_file.to_string_lossy().into_owned();
+                            let gran_dto = granularity.to_dto();
+                            let first_id = instrument_ids[0].clone();
+                            // Capture form data for the follow-up Message (BothOk / StartFailed
+                            // both commit; LoadFailed leaves the bar unchanged).
+                            let commit = ReplayCommitData {
+                                instrument_id: first_id.clone(),
+                                start_date: start_date.clone(),
+                                end_date: end_date.clone(),
+                                granularity: granularity.clone(),
+                                strategy_file: strategy_file.clone(),
+                                initial_cash: initial_cash.to_string(),
+                            };
+                            return Task::perform(
+                                async move {
+                                    // M1: differentiate Load failure (backend unchanged) vs
+                                    // Start failure (backend has new replay loaded). The two
+                                    // cases require different UI follow-ups.
+                                    let load_req_id = uuid::Uuid::new_v4().to_string();
+                                    if let Err(e) = conn
+                                        .send(engine_client::dto::Command::LoadReplayData {
                                             request_id: load_req_id,
                                             instrument_id: first_id.clone(),
                                             instrument_ids: Some(instrument_ids.clone()),
@@ -377,9 +468,12 @@ impl crate::Flowsurface {
                                             granularity: gran_dto.clone(),
                                         })
                                         .await
-                                        .map_err(|e| e.to_string())?;
-                                        let start_req_id = uuid::Uuid::new_v4().to_string();
-                                        conn.send(engine_client::dto::Command::StartEngine {
+                                    {
+                                        return ReplaySubmitResult::LoadFailed(e.to_string());
+                                    }
+                                    let start_req_id = uuid::Uuid::new_v4().to_string();
+                                    if let Err(e) = conn
+                                        .send(engine_client::dto::Command::StartEngine {
                                             request_id: start_req_id,
                                             engine: engine_client::dto::EngineKind::Backtest,
                                             strategy_id: "user-strategy".to_string(),
@@ -397,19 +491,13 @@ impl crate::Flowsurface {
                                             },
                                         })
                                         .await
-                                        .map_err(|e| e.to_string())?;
-                                        Ok::<(), String>(())
-                                    },
-                                    |res| match res {
-                                        Ok(()) => Message::Venue(VenueMsg::OrderToast(
-                                            Toast::info("Replay を開始しました".to_string()),
-                                        )),
-                                        Err(e) => Message::Venue(VenueMsg::OrderToast(
-                                            Toast::error(format!("Replay 起動失敗: {e}")),
-                                        )),
-                                    },
-                                );
-                            }
+                                    {
+                                        return ReplaySubmitResult::StartFailed(e.to_string());
+                                    }
+                                    ReplaySubmitResult::BothOk
+                                },
+                                move |res| submit_result_to_message(res, commit.clone()),
+                            );
                         }
                         Some(modal::replay_form::Action::PickStrategyFile) => {
                             // PickStrategyFile は上の専用アームで処理される
@@ -620,7 +708,113 @@ impl crate::Flowsurface {
                 self.active_dashboard_mut()
                     .distribute_strategy_signals(main_window, data);
             } // Phase U0: OrderAccepted — reset submitting flag + toast
+            // H-2: Commit replay_bar state after `LoadReplayData` succeeds.
+            // Emitted from the Submit Task for both `BothOk` and `StartFailed`
+            // — in either case the backend has loaded the new replay session,
+            // so the bar must reflect the new params (M1).
+            // `start_error.is_some()` ⇒ StartEngine failed; surface a toast
+            // so the user knows the strategy did not start.
+            ReplayMsg::CommitReplayBarState {
+                instrument_id,
+                start_date,
+                end_date,
+                granularity,
+                strategy_file,
+                initial_cash,
+                start_error,
+            } => {
+                self.menu_bar.replay_bar.instrument_id = instrument_id;
+                self.menu_bar.replay_bar.start_date = start_date;
+                self.menu_bar.replay_bar.end_date = end_date;
+                self.menu_bar.replay_bar.granularity = Some(granularity);
+                self.menu_bar.replay_bar.strategy_file = Some(strategy_file);
+                self.menu_bar.replay_bar.initial_cash = initial_cash;
+                if let Some(err) = start_error {
+                    return Task::done(Message::Venue(VenueMsg::OrderToast(Toast::error(
+                        format!("Replay データは読み込まれましたが起動に失敗しました: {err}"),
+                    ))));
+                }
+            }
         }
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modal::replay_form::Granularity;
+    use std::path::PathBuf;
+
+    fn sample_commit() -> ReplayCommitData {
+        ReplayCommitData {
+            instrument_id: "1301.TSE".to_string(),
+            start_date: "2025-01-06".to_string(),
+            end_date: "2025-01-10".to_string(),
+            granularity: Granularity::Minute,
+            strategy_file: PathBuf::from("/tmp/strategy.py"),
+            initial_cash: "1000000".to_string(),
+        }
+    }
+
+    #[test]
+    fn both_ok_emits_commit_with_no_start_error() {
+        let msg = submit_result_to_message(ReplaySubmitResult::BothOk, sample_commit());
+        match msg {
+            Message::Replay(ReplayMsg::CommitReplayBarState {
+                instrument_id,
+                start_error,
+                ..
+            }) => {
+                assert_eq!(instrument_id, "1301.TSE");
+                assert!(start_error.is_none(), "BothOk must not carry a start_error");
+            }
+            other => panic!("expected CommitReplayBarState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_failed_still_commits_bar_state() {
+        // M1 regression: backend has new replay loaded after LoadReplayData
+        // succeeded, so the bar MUST reflect the new params even if
+        // StartEngine failed afterwards.
+        let msg = submit_result_to_message(
+            ReplaySubmitResult::StartFailed("schema mismatch".to_string()),
+            sample_commit(),
+        );
+        match msg {
+            Message::Replay(ReplayMsg::CommitReplayBarState {
+                instrument_id,
+                start_date,
+                start_error,
+                ..
+            }) => {
+                assert_eq!(instrument_id, "1301.TSE");
+                assert_eq!(start_date, "2025-01-06");
+                assert_eq!(
+                    start_error.as_deref(),
+                    Some("schema mismatch"),
+                    "StartFailed must carry the engine-start error so the handler shows a toast",
+                );
+            }
+            other => panic!("expected CommitReplayBarState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_failed_does_not_commit_bar_state() {
+        // M1 regression: backend is unchanged when LoadReplayData failed,
+        // so the bar must NOT adopt the new params. Only a toast is emitted.
+        let msg = submit_result_to_message(
+            ReplaySubmitResult::LoadFailed("connection reset".to_string()),
+            sample_commit(),
+        );
+        match msg {
+            Message::Venue(VenueMsg::OrderToast(_)) => {}
+            Message::Replay(ReplayMsg::CommitReplayBarState { .. }) => {
+                panic!("LoadFailed must NOT commit bar state — backend unchanged");
+            }
+            other => panic!("expected OrderToast, got {other:?}"),
+        }
     }
 }

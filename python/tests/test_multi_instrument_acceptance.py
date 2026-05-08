@@ -9,6 +9,8 @@ T-AC-6: 未収録銘柄がある場合、明示的エラーで停止（silent fa
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import subprocess
 import sys
 import textwrap
@@ -485,3 +487,243 @@ def test_v2_with_instrument_key_fails_validate() -> None:
             "granularity": "Daily",
             "initial_cash": 1_000_000,
         })
+
+
+# ---------------------------------------------------------------------------
+# Step 5: v3 + instruments_ref の acceptance テスト
+# ---------------------------------------------------------------------------
+
+
+def test_replay_session_loads_v3_with_instruments_ref(tmp_path: Path) -> None:
+    """_resolve_cli_params が v3 + instruments_ref を解決して instruments list を返す。
+
+    resolve_refs の非破壊性（instruments_ref を保持）も確認する。
+    """
+    from engine.replay_session import _resolve_cli_params
+    from engine.scenario import extract, resolve_refs
+
+    # universe JSON を tmp_path 配下に作成
+    universe = {"instruments": ["1301.TSE", "7203.TSE", "6758.TSE"]}
+    (tmp_path / "universe.json").write_text(json.dumps(universe))
+
+    # v3 SCENARIO を書いた .py ファイル
+    strategy_py = tmp_path / "strategy.py"
+    strategy_py.write_text(
+        'SCENARIO = {\n'
+        '    "schema_version": 3,\n'
+        '    "instruments_ref": "universe.json#/instruments",\n'
+        '    "start": "2025-01-06",\n'
+        '    "end": "2025-01-10",\n'
+        '    "granularity": "Minute",\n'
+        '    "initial_cash": 1_000_000,\n'
+        '}\n'
+    )
+
+    # _resolve_cli_params 経由で統合経路をテスト（replay_session.py:2270 の統合を pin）
+    instrument, start, end, gran, cash = _resolve_cli_params(
+        strategy_path=str(strategy_py),
+        cli_instrument=None,
+        cli_start=None,
+        cli_end=None,
+        cli_granularity=None,
+        cli_initial_cash=None,
+    )
+    assert instrument == ["1301.TSE", "7203.TSE", "6758.TSE"]
+    assert start == "2025-01-06"
+    assert end == "2025-01-10"
+
+    # resolve_refs の非破壊性確認（instruments_ref は保持される）
+    raw = extract(strategy_py)
+    assert raw is not None
+    resolved = resolve_refs(raw, base_dir=tmp_path)
+    assert resolved["instruments"] == ["1301.TSE", "7203.TSE", "6758.TSE"]
+    assert "instruments_ref" in resolved
+
+
+def test_replay_session_v3_resolve_cli_params(tmp_path: Path) -> None:
+    """_resolve_cli_params が v3 + instruments_ref シナリオで instruments list を返す。"""
+    from engine.replay_session import _resolve_cli_params
+
+    # universe JSON
+    universe = {"instruments": ["1301.TSE", "7203.TSE", "6758.TSE"]}
+    (tmp_path / "universe.json").write_text(json.dumps(universe))
+
+    # v3 SCENARIO を持つ戦略ファイル
+    strategy_py = tmp_path / "strategy.py"
+    strategy_py.write_text(
+        'SCENARIO = {\n'
+        '    "schema_version": 3,\n'
+        '    "instruments_ref": "universe.json#/instruments",\n'
+        '    "start": "2025-01-06",\n'
+        '    "end": "2025-01-10",\n'
+        '    "granularity": "Minute",\n'
+        '    "initial_cash": 1_000_000,\n'
+        '}\n'
+    )
+
+    instrument, start, end, gran, cash = _resolve_cli_params(
+        strategy_path=str(strategy_py),
+        cli_instrument=None,
+        cli_start=None,
+        cli_end=None,
+        cli_granularity=None,
+        cli_initial_cash=None,
+    )
+
+    assert instrument == ["1301.TSE", "7203.TSE", "6758.TSE"]
+    assert start == "2025-01-06"
+    assert end == "2025-01-10"
+    assert gran == "Minute"
+    assert cash == 1_000_000
+
+
+def test_replay_session_v3_unresolved_ref_exits(tmp_path: Path) -> None:
+    """_resolve_cli_params が v3 で参照先 JSON が存在しない場合 SystemExit する。"""
+    from engine.replay_session import _resolve_cli_params
+
+    # universe.json を作らない（参照先が存在しない）
+    strategy_py = tmp_path / "strategy.py"
+    strategy_py.write_text(
+        'SCENARIO = {\n'
+        '    "schema_version": 3,\n'
+        '    "instruments_ref": "missing.json#/instruments",\n'
+        '    "start": "2025-01-06",\n'
+        '    "end": "2025-01-10",\n'
+        '    "granularity": "Minute",\n'
+        '    "initial_cash": 1_000_000,\n'
+        '}\n'
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_cli_params(
+            strategy_path=str(strategy_py),
+            cli_instrument=None,
+            cli_start=None,
+            cli_end=None,
+            cli_granularity=None,
+            cli_initial_cash=None,
+        )
+    assert exc_info.value.code == 1
+
+
+def test_replay_session_v3_both_keys_exits(tmp_path: Path) -> None:
+    """v3 SCENARIO に instruments と instruments_ref が共存する場合、_resolve_cli_params は sys.exit(1) する。
+
+    ScenarioValidationError が (SyntaxError, ValueError) と同列で扱われることを pin する。
+    """
+    from engine.replay_session import _resolve_cli_params
+
+    # universe.json を作成しておく（ファイル自体は存在するが両立が問題）
+    universe = {"instruments": ["1301.TSE"]}
+    (tmp_path / "universe.json").write_text(json.dumps(universe))
+
+    strategy_py = tmp_path / "strategy.py"
+    strategy_py.write_text(
+        'SCENARIO = {\n'
+        '    "schema_version": 3,\n'
+        '    "instruments": ["1301.TSE"],\n'
+        '    "instruments_ref": "universe.json#/instruments",\n'
+        '    "start": "2025-01-06",\n'
+        '    "end": "2025-01-10",\n'
+        '    "granularity": "Minute",\n'
+        '    "initial_cash": 1_000_000,\n'
+        '}\n'
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_cli_params(
+            strategy_path=str(strategy_py),
+            cli_instrument=None,
+            cli_start=None,
+            cli_end=None,
+            cli_granularity=None,
+            cli_initial_cash=None,
+        )
+    assert exc_info.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# Step 7b / Step 11: _do_load_strategy_scenario が resolved_instruments を埋める
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_scenario_loaded_carries_resolved_instruments(tmp_path: Path) -> None:
+    """server _do_load_strategy_scenario が v3+ref で resolved_instruments を埋める。"""
+    from engine.server import DataEngineServer
+
+    # universe.json を tmp_path 配下に作成
+    universe = {"instruments": ["1301.TSE", "7203.TSE", "6758.TSE"]}
+    (tmp_path / "universe.json").write_text(json.dumps(universe))
+
+    # v3 SCENARIO を書いた .py ファイル
+    strategy_py = tmp_path / "strategy.py"
+    strategy_py.write_text(
+        'SCENARIO = {\n'
+        '    "schema_version": 3,\n'
+        '    "instruments_ref": "universe.json#/instruments",\n'
+        '    "start": "2025-01-06",\n'
+        '    "end": "2025-01-10",\n'
+        '    "granularity": "Minute",\n'
+        '    "initial_cash": 1_000_000,\n'
+        '}\n'
+    )
+
+    server = DataEngineServer.__new__(DataEngineServer)
+    server._outbox = []  # type: ignore[attr-defined]
+
+    msg = {"request_id": "r1", "path": str(strategy_py)}
+    asyncio.run(server._do_load_strategy_scenario(msg))  # type: ignore[attr-defined]
+
+    assert len(server._outbox) == 1  # type: ignore[attr-defined]
+    evt = server._outbox[0]  # type: ignore[attr-defined]
+    assert evt["event"] == "StrategyScenarioLoaded"
+    # v3 + ref → resolved_instruments が埋まっている
+    assert evt["resolved_instruments"] == ["1301.TSE", "7203.TSE", "6758.TSE"]
+    # scenario は raw のまま（instruments_ref を保持）
+    assert evt["scenario"].get("instruments_ref") == "universe.json#/instruments"
+    assert "instruments" not in evt["scenario"]
+
+
+def test_strategy_scenario_loaded_v1_v2_resolved_is_none(tmp_path: Path) -> None:
+    """v1/v2 では resolved_instruments=None で wire を流れる（回帰防止）。"""
+    from engine.server import DataEngineServer
+
+    for schema_version, scenario_content in [
+        (
+            1,
+            'SCENARIO = {\n'
+            '    "schema_version": 1,\n'
+            '    "instrument": "1301.TSE",\n'
+            '    "start": "2025-01-06",\n'
+            '    "end": "2025-01-10",\n'
+            '    "granularity": "Daily",\n'
+            '    "initial_cash": 1_000_000,\n'
+            '}\n',
+        ),
+        (
+            2,
+            'SCENARIO = {\n'
+            '    "schema_version": 2,\n'
+            '    "instruments": ["1301.TSE", "7203.TSE"],\n'
+            '    "start": "2025-01-06",\n'
+            '    "end": "2025-01-10",\n'
+            '    "granularity": "Minute",\n'
+            '    "initial_cash": 1_000_000,\n'
+            '}\n',
+        ),
+    ]:
+        strategy_py = tmp_path / f"strategy_v{schema_version}.py"
+        strategy_py.write_text(scenario_content)
+
+        server = DataEngineServer.__new__(DataEngineServer)
+        server._outbox = []  # type: ignore[attr-defined]
+
+        msg = {"request_id": "r", "path": str(strategy_py)}
+        asyncio.run(server._do_load_strategy_scenario(msg))  # type: ignore[attr-defined]
+
+        assert len(server._outbox) == 1  # type: ignore[attr-defined]
+        evt = server._outbox[0]  # type: ignore[attr-defined]
+        assert evt["event"] == "StrategyScenarioLoaded", f"v{schema_version}: wrong event"
+        assert evt["resolved_instruments"] is None, (
+            f"v{schema_version}: resolved_instruments should be None, got {evt['resolved_instruments']}"
+        )

@@ -146,17 +146,26 @@ def build_replay_positions_event(portfolio_state: dict, ts_ms: int) -> dict:
     rows = []
     for inst_id in sorted(positions.keys()):
         pos_data = positions[inst_id]
-        qty_str = str(pos_data.get("qty", "0"))
+        qty_val = pos_data.get("qty", "0")
+
+        # H-1: Wrap Decimal(qty_val) in try/except to handle malformed qty
+        # (e.g., qty_val="invalid", "N/A", etc.) that slipped past validation.
+        # Silent failure would stop fill emit path (PositionsUpdated never sent).
+        try:
+            qty_str = str(int(Decimal(qty_val))) if qty_val not in ("", None) else "0"
+        except (InvalidOperation, ValueError, TypeError):
+            qty_str = "0"
 
         price_raw = last_prices.get(inst_id, "")
         try:
             if price_raw not in ("", None):
+                # H-1: Also protect market_value conversion from invalid price
                 mv = Decimal(qty_str) * Decimal(str(price_raw))
                 mv_str = str(int(mv))
             else:
                 mv_str = ""
         except (InvalidOperation, ValueError, TypeError):
-            mv_str = ""
+            mv_str = "0"
 
         rows.append({
             "instrument_id": inst_id,
@@ -2844,8 +2853,8 @@ class DataEngineServer:
             "positions": [
                 {
                     "instrument_id": r.instrument_id,
-                    "qty": str(r.qty),
-                    "market_value": str(r.market_value) if r.market_value is not None else "",
+                    "qty": str(int(r.qty)),
+                    "market_value": str(int(r.market_value)) if r.market_value is not None else "",
                     "position_type": r.position_type,
                     "tategyoku_id": r.tategyoku_id,
                     "venue": "tachibana",
@@ -2876,12 +2885,20 @@ class DataEngineServer:
         path_str = msg.get("path", "")
         try:
             scenario = scenario_mod.extract(Path(path_str))
+            resolved_instruments: list[str] | None = None
+            if scenario is not None:
+                # base_dir = 読み込み元 .py の親（GUI Load 経路では path_str == loaded_path）
+                resolved = scenario_mod.resolve_refs(scenario, base_dir=Path(path_str).parent)
+                if scenario.get("schema_version") == 3 and "instruments_ref" in scenario:
+                    # v3 + ref 経由のみ resolved_instruments を別フィールドとして送る
+                    resolved_instruments = list(resolved.get("instruments", []))
             # H-R2-1 (ラウンド2): 送信パイプラインを model_dump 経由に統一。
             self._outbox.append(
                 StrategyScenarioLoaded(
                     request_id=request_id,
                     path=path_str,
-                    scenario=scenario,
+                    scenario=scenario,          # raw のまま（instruments_ref 保持）
+                    resolved_instruments=resolved_instruments,
                 ).model_dump(exclude_none=False)
             )
         except Exception as exc:
@@ -2954,7 +2971,7 @@ class DataEngineServer:
 
         # M3: scenario フィールド必須チェック
         scenario_dict = msg.get("scenario")
-        if scenario_dict is None:
+        if scenario_dict is None or not isinstance(scenario_dict, dict):
             log.warning(
                 "scenario.writeback rejected reason=missing_scenario_field path=%r",
                 path_str,
@@ -2962,25 +2979,58 @@ class DataEngineServer:
             _emit(False, "missing_scenario_field")
             return
 
-        # M11: 入口での形状検証（早期 reject で IO 副作用を防ぐ）
-        try:
-            scenario_mod.validate(scenario_dict)
-        except scenario_mod.ScenarioValidationError as exc:
-            log.warning(
-                "scenario.writeback rejected reason=validate_failed path=%r: %s",
-                path_str, exc,
-            )
-            _emit(False, "validate_failed")
-            return
-
         loaded_path_str = msg.get("loaded_path")
         # M8: save_as のデフォルトは False（dto.rs `#[serde(default)]` と整合）
         save_as = msg.get("save_as", False)
 
+        # Step 9: base_dir 選定（R1-Finding-2）
+        # Load 履歴がある場合は常に loaded_path.parent を基準にして ref を検証する。
+        # これにより「保存先ディレクトリを変えただけで相対 ref の意味が静かに変わる」事故を防ぐ。
+        if loaded_path_str is not None:
+            base_dir = Path(loaded_path_str).parent
+        else:
+            base_dir = Path(path_str).parent
+
+        # Step 9: Save As 別ディレクトリ + 相対 ref の事前ガード（R1-Finding-2 / 4-2）
+        if save_as and loaded_path_str is not None:
+            ref = scenario_dict.get("instruments_ref") if isinstance(scenario_dict, dict) else None
+            if isinstance(ref, str):
+                ref_path_str = ref.split("#", 1)[0]
+                is_abs = bool(ref_path_str) and Path(ref_path_str).is_absolute()
+                if not is_abs and Path(loaded_path_str).parent.resolve() != Path(path_str).parent.resolve():
+                    log.warning(
+                        "scenario.writeback rejected reason=relative_ref_crosses_dir path=%r "
+                        "loaded_path=%r ref=%r",
+                        path_str, loaded_path_str, ref,
+                    )
+                    _emit(False, "relative_ref_crosses_dir")
+                    return
+
+        # M11: 入口での形状検証（resolve → validate の順）
+        # v3 の場合は resolve_refs で instruments を解決してから validate する。
+        # unresolved_ref は write_back 呼び出し前に server 層で return する（R1-Finding-3 / -5）。
+        try:
+            resolved = scenario_mod.resolve_refs(scenario_dict, base_dir=base_dir)
+            scenario_mod.validate(resolved)
+        except scenario_mod.ScenarioValidationError as exc:
+            if getattr(exc, "code", None) == "unresolved_ref":
+                log.warning(
+                    "scenario.writeback rejected reason=unresolved_ref path=%r: %s",
+                    path_str, exc,
+                )
+                _emit(False, "unresolved_ref")
+            else:
+                log.warning(
+                    "scenario.writeback rejected reason=validate_failed path=%r: %s",
+                    path_str, exc,
+                )
+                _emit(False, "validate_failed")
+            return
+
         try:
             scenario_mod.write_back(
                 Path(path_str),
-                scenario_dict,
+                scenario_dict,          # raw dict を渡す（instruments_ref 保持）
                 save_as=save_as,
                 loaded_path=Path(loaded_path_str) if loaded_path_str else None,
             )

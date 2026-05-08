@@ -83,7 +83,6 @@ pub(crate) enum VenueMsg {
     BuyingPowerSendCompleted(Result<(), String>),
     PositionsSendCompleted(Result<(), String>),
     PositionsUpdated {
-        #[allow(dead_code)]
         request_id: String,
         #[allow(dead_code)]
         venue: String,
@@ -157,6 +156,7 @@ pub(crate) enum ReplayMsg {
         request_id: String,
         path: std::path::PathBuf,
         scenario: Option<serde_json::Value>,
+        resolved_instruments: Option<Vec<String>>,
     },
     ScenarioLoadFailed {
         request_id: String,
@@ -183,6 +183,24 @@ pub(crate) enum ReplayMsg {
     },
     LiveStartFailed(String),
     StopLiveStrategy,
+    /// H-2: Commit replay_bar state after `LoadReplayData` succeeded.
+    /// Emitted from the Submit Task callback for both `BothOk` and
+    /// `StartFailed` outcomes — in either case the backend has loaded the new
+    /// replay session, so the bar must reflect the new params.
+    ///
+    /// `start_error` carries the `StartEngine` failure message when only
+    /// `LoadReplayData` succeeded; the handler then shows a toast so the user
+    /// knows the strategy did not start (UI/backend remain consistent: the
+    /// loaded replay is real, but no run is in progress).
+    CommitReplayBarState {
+        instrument_id: String,
+        start_date: String,
+        end_date: String,
+        granularity: crate::modal::replay_form::Granularity,
+        strategy_file: std::path::PathBuf,
+        initial_cash: String,
+        start_error: Option<String>,
+    },
 }
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
