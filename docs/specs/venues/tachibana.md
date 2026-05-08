@@ -6,8 +6,6 @@ migrated_from:
 source_commit: 236c0d2
 ---
 
-> **章分離注記**: 旧 `docs/specs/venues/tachibana/spec.md` の内容を venue 固有として全文移送。venue 横断の抽象契約（注文ライフサイクル / Strategy SDK 接点 / VenueState FSM / VenueError DTO 形状）は `docs/specs/live-strategy.md` 側に薄いスケルトンとしてリンクのみ置く。境界が曖昧な章は本ファイル側に倒した。
-
 # 立花証券統合: 仕様
 
 > **Phase 8（2026-05-03 完了）注記**: 本仕様内に記載されている再ログイン HTTP path（`/api/sidebar/tachibana/request-login` 等）は Rust HTTP API 廃止（Phase 8）で消滅した。現在の正規ルート:
