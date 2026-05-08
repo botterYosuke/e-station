@@ -1778,6 +1778,15 @@ fn venue_login_chip(
             "ログアウト",
             on_logout,
         ),
+        VenueState::Error {
+            market_closed: true,
+            ..
+        } => (
+            "●",
+            iced::Color::from_rgb(0.8, 0.6, 0.1),
+            "ログアウト",
+            on_logout,
+        ),
         VenueState::Error { .. } => (
             "●",
             iced::Color::from_rgb(0.9, 0.2, 0.2),

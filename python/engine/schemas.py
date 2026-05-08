@@ -12,7 +12,7 @@ from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 # SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
 # 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 23
+SCHEMA_MINOR: int = 24
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -44,6 +44,7 @@ LiveOnlyCommand = Literal[
     "CancelOrder",
     "CancelAllOrders",
     "RequestVenueLogin",
+    "RequestVenueLogout",
     "GetBuyingPower",
     "GetPositions",
     "GetOrderList",
@@ -69,6 +70,7 @@ AttemptedCommand = Literal[
     "CancelOrder",
     "CancelAllOrders",
     "RequestVenueLogin",
+    "RequestVenueLogout",
     "GetBuyingPower",
     "GetPositions",
     "GetOrderList",

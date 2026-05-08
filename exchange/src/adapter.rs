@@ -594,9 +594,9 @@ impl Exchange {
             // CLMMfdsGetMarketPriceHistory; sub-day timeframes are aggregated
             // client-side from FD frames in a future phase.
             Venue::Tachibana => tf == Timeframe::D1,
-            // kabuステーション: daily klines only in Phase 1 (same as Tachibana).
-            // Sub-day aggregation from PUSH frames deferred to Phase 3.
-            Venue::KabuStation => tf == Timeframe::D1,
+            // kabuステーション: no historical OHLC endpoint exists in the API.
+            // Python _do_fetch_klines raises NotImplementedError for kabu_station.
+            Venue::KabuStation => false,
             // Replay engine supports Daily (D1) and Minute (M1) bars from
             // NautilusTrader backtest data; sub-minute granularities are not
             // emitted as bars.

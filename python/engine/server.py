@@ -1086,6 +1086,9 @@ class DataEngineServer:
             # finishes.
             await self._do_request_venue_login(msg, ws=ws)
 
+        elif op == "RequestVenueLogout":
+            await self._do_venue_logout(msg)
+
         elif op == "SetSecondPassword":
             self._handle_set_second_password(msg)
 
@@ -3248,6 +3251,10 @@ class DataEngineServer:
         raw_end = msg.get("end_ms")
         start_ms = int(raw_start) if raw_start is not None else None
         end_ms = int(raw_end) if raw_end is not None else None
+        if venue == "kabu_station":
+            raise NotImplementedError(
+                "kabuStation API does not provide historical OHLC data"
+            )
         worker = self._workers.get(venue)
         if worker is None:
             raise ValueError(f"unknown venue: {venue}")
@@ -4025,6 +4032,28 @@ class DataEngineServer:
             ) if not t.cancelled() and t.exception() is not None else None
         )
         self._tachibana_startup_task = task
+
+    async def _do_venue_logout(self, msg: dict) -> None:
+        """`RequestVenueLogout` from the Rust UI — invalidate the venue session."""
+        venue = msg.get("venue", "")
+        if venue == "tachibana":
+            tachibana = self._workers.get("tachibana")
+            if tachibana is not None:
+                tachibana.set_session(None)
+            self._tachibana_session = None
+            tachibana_clear_session(self._cache_dir)
+            # Cancel the EVENT WebSocket loop so it does not hold a stale WS
+            # connection and does not emit spurious order events after logout.
+            if self._event_task is not None and not self._event_task.done():
+                self._event_task.cancel()
+            self._event_task = None
+            self._connected_venue = None
+            self._live_state = LiveState.DISCONNECTED
+            # Clear the second password from memory so it cannot be reused
+            # after a fresh login without re-entry (same as ForgetSecondPassword).
+            self._session_holder.clear()
+            log.info("tachibana: session invalidated by user logout")
+        # kabu_station has no Python-side session yet (Phase 0) — no-op
 
     async def _handle_set_proxy(self, msg: dict) -> None:
         proxy_url = msg.get("url")

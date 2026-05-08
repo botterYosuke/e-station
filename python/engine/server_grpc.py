@@ -16,7 +16,7 @@ from engine.server import _ENGINE_VERSION
 # gRPC IPC schema version — source of truth for the gRPC transport layer.
 # Keep in sync with engine-client/src/lib.rs SCHEMA_MAJOR / SCHEMA_MINOR.
 SCHEMA_MAJOR: int = 3   # gRPC IPC schema major version
-SCHEMA_MINOR: int = 23  # gRPC IPC schema minor version
+SCHEMA_MINOR: int = 24  # gRPC IPC schema minor version
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ _FIELD_TO_OP = {
     "step_backward": "StepBackward",
     "load_strategy_scenario": "LoadStrategyScenario",
     "save_strategy_scenario": "SaveStrategyScenario",
+    "request_venue_logout": "RequestVenueLogout",
 }
 
 _EVENT_TO_FIELD_AND_CLASS = {

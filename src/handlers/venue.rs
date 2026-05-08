@@ -15,9 +15,42 @@ impl crate::Flowsurface {
                 // the transition is unit-testable from `venue_state.rs`
                 // and `main.rs::update()` does not become a second
                 // source of truth for FSM mutations.
+                //
+                // Send RequestVenueLogout only for market_closed errors: in
+                // that case the Python session is still valid and would be
+                // silently reused on the next stock selection (auto-login).
+                // For non-market-closed errors (ticker_not_found, login
+                // failure, …) the session is already invalid — wiping it is
+                // harmless but the condition stays narrow to avoid
+                // unintended side-effects on recoverable warnings.
+                let should_logout = matches!(
+                    self.tachibana_state,
+                    VenueState::Error { market_closed: true, .. }
+                );
                 let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
                     .next(VenueEvent::Dismissed);
                 self.tachibana_state = next;
+                if should_logout {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        return Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::RequestVenueLogout {
+                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            |r| {
+                                if let Err(e) = r {
+                                    log::warn!(
+                                        "Tachibana logout IPC (on banner dismiss) failed: {e}"
+                                    );
+                                }
+                                Message::Engine(crate::messages::EngineMsg::Noop)
+                            },
+                        );
+                    }
+                }
             }
             VenueMsg::RequestTachibanaLogin(trigger) => {
                 // Duplicate-press suppression: claim the LoginInFlight
@@ -69,6 +102,23 @@ impl crate::Flowsurface {
             VenueMsg::RequestTachibanaLogout => {
                 log::info!("RequestTachibanaLogout");
                 self.tachibana_state = VenueState::Idle;
+                if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                    return Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::RequestVenueLogout {
+                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        |r| {
+                            if let Err(e) = r {
+                                log::warn!("Tachibana logout IPC failed: {e}");
+                            }
+                            Message::Engine(crate::messages::EngineMsg::Noop)
+                        },
+                    );
+                }
             }
             VenueMsg::TachibanaLoginIpcResult(result) => {
                 // The optimistic `try_claim_login_in_flight` already

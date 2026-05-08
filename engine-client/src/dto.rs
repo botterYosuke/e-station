@@ -140,6 +140,12 @@ pub enum Command {
         request_id: String,
         venue: String,
     },
+    /// Rust UI asks the engine to invalidate the venue's session and clear
+    /// any cached credentials.  Currently used for Tachibana logout so the
+    /// Python TachibanaWorker drops its session and the file cache.
+    RequestVenueLogout {
+        venue: String,
+    },
 
     // ── Order Phase (schema 1.3) ──────────────────────────────────────────
     /// Set the second password in Python memory for order submission.
@@ -465,6 +471,10 @@ impl std::fmt::Debug for Command {
             Command::RequestVenueLogin { request_id, venue } => f
                 .debug_struct("RequestVenueLogin")
                 .field("request_id", request_id)
+                .field("venue", venue)
+                .finish(),
+            Command::RequestVenueLogout { venue } => f
+                .debug_struct("RequestVenueLogout")
                 .field("venue", venue)
                 .finish(),
             Command::ForgetSecondPassword => write!(f, "ForgetSecondPassword"),
@@ -916,6 +926,8 @@ pub enum AttemptedCommand {
     CancelOrder,
     CancelAllOrders,
     RequestVenueLogin,
+    /// schema 3.24: explicit session invalidation for Tachibana logout
+    RequestVenueLogout,
     GetBuyingPower,
     GetPositions,
     GetOrderList,
@@ -940,6 +952,7 @@ impl AttemptedCommand {
             AttemptedCommand::CancelOrder => "CancelOrder",
             AttemptedCommand::CancelAllOrders => "CancelAllOrders",
             AttemptedCommand::RequestVenueLogin => "RequestVenueLogin",
+            AttemptedCommand::RequestVenueLogout => "RequestVenueLogout",
             AttemptedCommand::GetBuyingPower => "GetBuyingPower",
             AttemptedCommand::GetPositions => "GetPositions",
             AttemptedCommand::GetOrderList => "GetOrderList",

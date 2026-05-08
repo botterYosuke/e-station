@@ -440,6 +440,9 @@ fn dto_cmd_to_proto(cmd: dto::Command) -> Option<engine::Command> {
         dto::Command::RequestVenueLogin { request_id, venue } => {
             Payload::RequestVenueLogin(engine::RequestVenueLoginRequest { request_id, venue })
         }
+        dto::Command::RequestVenueLogout { venue } => {
+            Payload::RequestVenueLogout(engine::RequestVenueLogoutRequest { venue })
+        }
         dto::Command::SetSecondPassword { request_id, value } => {
             Payload::SetSecondPassword(engine::SetSecondPasswordRequest { request_id, value })
         }
@@ -1249,6 +1252,7 @@ fn proto_attempted_command_to_dto(cmd: i32) -> dto::AttemptedCommand {
         AttemptedCommand::CancelOrder => dto::AttemptedCommand::CancelOrder,
         AttemptedCommand::CancelAllOrders => dto::AttemptedCommand::CancelAllOrders,
         AttemptedCommand::RequestVenueLogin => dto::AttemptedCommand::RequestVenueLogin,
+        AttemptedCommand::RequestVenueLogout => dto::AttemptedCommand::RequestVenueLogout,
         AttemptedCommand::GetBuyingPower => dto::AttemptedCommand::GetBuyingPower,
         AttemptedCommand::GetPositions => dto::AttemptedCommand::GetPositions,
         AttemptedCommand::GetOrderList => dto::AttemptedCommand::GetOrderList,

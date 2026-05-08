@@ -74,6 +74,7 @@ message Command {
     StepBackwardRequest         step_backward        = 33;
     LoadStrategyScenarioRequest load_strategy_scenario = 34;
     SaveStrategyScenarioRequest save_strategy_scenario = 35;
+    RequestVenueLogoutRequest   request_venue_logout   = 36;
   }
 }
 
@@ -234,6 +235,10 @@ message ShutdownRequest {}
 message RequestVenueLoginRequest {
   string request_id = 1;
   string venue      = 2;
+}
+
+message RequestVenueLogoutRequest {
+  string venue = 1;
 }
 
 // SetSecondPassword carries a raw secret over IPC; Python wraps it in SecretStr immediately.
@@ -985,10 +990,11 @@ enum AttemptedCommand {
   ATTEMPTED_COMMAND_MODIFY_ORDER        = 12;
   ATTEMPTED_COMMAND_CANCEL_ORDER        = 13;
   ATTEMPTED_COMMAND_CANCEL_ALL_ORDERS   = 14;
-  ATTEMPTED_COMMAND_REQUEST_VENUE_LOGIN = 15;
-  ATTEMPTED_COMMAND_GET_BUYING_POWER    = 16;
-  ATTEMPTED_COMMAND_GET_POSITIONS       = 17;
-  ATTEMPTED_COMMAND_GET_ORDER_LIST      = 18;
+  ATTEMPTED_COMMAND_REQUEST_VENUE_LOGIN  = 15;
+  ATTEMPTED_COMMAND_GET_BUYING_POWER     = 16;
+  ATTEMPTED_COMMAND_GET_POSITIONS        = 17;
+  ATTEMPTED_COMMAND_GET_ORDER_LIST       = 18;
+  ATTEMPTED_COMMAND_REQUEST_VENUE_LOGOUT = 19;
 }
 
 // Provisional signal vocabulary (N1 scope; final vocabulary TBD in N2).
