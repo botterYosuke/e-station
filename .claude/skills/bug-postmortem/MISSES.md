@@ -38,6 +38,7 @@
 | 復元 API の保存のみ実装・呼び出し未配線 | `save()` / `view_state()` を実装して満足し、対称の `restore()` / `apply_view_state()` が再構築パス（設定変更で内部オブジェクトを new() する箇所）から呼ばれていない。保存は動作しているが復元が無効で、ユーザーが調整したカメラ/ズーム位置が再生成時にリセットされる | 1 |
 | CI タイムアウト未設定 + 優先順位分岐末尾カバー漏れ | `pytest.ini` に `timeout = 60` を設定せず、スタック時に CI が無限ブロックするリスクを放置した。また `_resolve_endpoint_and_token()` の優先順位 (c) env-only パス（セッションファイルなし・TOKEN 設定あり → `ws://127.0.0.1:19876/`）をテストせず、(a)(b) ケースだけをテストして S4-D 完了と判断した | 1 |
 | enum 下限チェックのみのバリアント数テスト | `assert!(count >= N)` 形式のバリアント数テストは新バリアント追加を検出しない。`_ => None` ワイルドカードがある match では新バリアントが追加されてもテストが通り、サイレント消失を見逃す。`assert_eq!(count, N)` の完全一致テストで新旧どちらの変化も検出する | 1 |
+| IPC 移行後 outbox dict → proto 整合性未検証 | 取引所アダプターが outbox に積む dict の全フィールドを proto 定義と照合するテストがなく、旧 IPC（JSON）向けの legacy フィールドが proto 変換時にサイレント DROP を引き起こす | 1 |
 
 ---
 
@@ -1993,3 +1994,64 @@ rebuild_all_immediate(None, true) を呼ぶと同パスを通り force_historica
    frozen_base_price: Option<Price> は「Paused = 必ず価格が固定されている」という不変条件と矛盾した。
    enum バリアントのフィールドに Option がある場合、None が成立する状況を具体的に列挙し、
    矛盾する場合は型を非 Option にして遷移側でガードする。
+
+## 2026-05-08 — Ladder（板情報）が live モードで空白 — recv_ts_ms による gRPC サイレント DROP
+
+**見逃しパターン**: IPC 移行後 outbox dict → proto 整合性未検証
+
+**不具合の概要**:
+live モード起動時に Ladder panel のヘッダー（銘柄名・深さ）は正しく表示されるが、
+板（bid/ask 価格・数量）の行が一切描画されない。Python ログに
+`WARNING: Failed to build proto Event DepthSnapshot: Message type "engine.DepthSnapshotEvent"
+has no field named "recv_ts_ms"` が出力され続け、全 DepthSnapshot イベントが DROP。
+
+**根本原因**:
+gRPC 移行（G0–G3）後も `tachibana.py` の `_cb_depth` と `_depth_polling_fallback` が
+旧 JSON IPC 時代の `"recv_ts_ms"` フィールドを outbox dict に含め続けていた。
+`server_grpc.py` の `_dict_to_proto_event` は `ParseDict(ignore_unknown_fields=False)` を
+使用するため ParseError を raise し、`except` で catch して `None` を返す（サイレント DROP）。
+Rust 側は `None` を受け取らないため、Ladder に深さデータが到達しない。
+
+**修正**: `tachibana.py` の 2 箇所から `"recv_ts_ms"` キーを削除。
+
+```diff
+- "recv_ts_ms": depth["recv_ts_ms"],   # _cb_depth
+- "recv_ts_ms": snapshot.get("recv_ts_ms", 0),  # _depth_polling_fallback
+```
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_tachibana_ws_fd_depth_recv.py` | WS フレーム → outbox dict の bid/ask 値を検証したが、その dict を `_dict_to_proto_event` に通すテストがなかった |
+| `test_mock_grpc_server_depth.py` | proto 変換を手作りの dict でテストしたが、`recv_ts_ms` を含む実運用パスの dict ではなかった |
+| smoke.sh | `WARNING: Failed to build proto Event` を grep していなかった |
+
+WS パース層と proto 変換層をそれぞれ独立にテストして「結合」をテストしなかったことが根因。
+IPC プロトコルが JSON → gRPC に移行した際に、アダプター側の outbox dict が
+proto スキーマに適合しているかを検証する結合テストがなかった。
+
+**追加したテスト**:
+- `python/tests/test_grpc_depth_snapshot_recv_ts_ms.py::test_depth_snapshot_from_stream_depth_is_proto_convertible`
+  — 実 WS モックサーバーから FD フレームを受信させ、outbox の DepthSnapshot が `_dict_to_proto_event` で `None` でないことを検証
+- `python/tests/test_grpc_depth_snapshot_recv_ts_ms.py::test_depth_snapshot_outbox_dict_has_no_recv_ts_ms`
+  — outbox dict に `recv_ts_ms` が含まれないことを直接検証
+
+**リグレッション確認**: 修正前（`recv_ts_ms` あり）の状態では `_dict_to_proto_event` が
+`WARNING` を出して `None` を返すことを実ログで確認。修正後は 2 テストともに PASS。
+
+**教訓**:
+
+1. **IPC プロトコル移行後は outbox dict → proto の結合テストを必ず追加する**:
+   アダプターが生成する dict と proto スキーマを独立にテストしても、フィールドの不整合は
+   検出できない。`stream_depth` → outbox → `_dict_to_proto_event` → proto のパイプライン全体を
+   1 つの integration test で覆う。
+
+2. **`ignore_unknown_fields=False` の ParseDict は早期 fail ではなくサイレント DROP になる**:
+   `_dict_to_proto_event` の `except` が DROP を隠蔽する。proto 変換層に WARNING が出ても
+   UI は空白になるだけで気づきにくい。`smoke.sh` に `"Failed to build proto Event"` の
+   grep チェックを追加して監視する。
+
+3. **取引所アダプターに outbox dict のフィールドを変更したら、proto との整合テストを実行する**:
+   `tachibana.py`、`kabusapi.py` 等の全アダプターで、outbox に積む dict のキー集合が
+   対応する proto メッセージのフィールドと一致することをテストで保証する。
