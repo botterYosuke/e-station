@@ -183,9 +183,15 @@ pub(crate) enum ReplayMsg {
     },
     LiveStartFailed(String),
     StopLiveStrategy,
-    /// H-2: Commit replay_bar state only after IPC succeeds (not before).
-    /// Emitted in the Task callback on IPC success to update menu_bar with
-    /// the form data, ensuring UI and backend states stay synchronized.
+    /// H-2: Commit replay_bar state after `LoadReplayData` succeeded.
+    /// Emitted from the Submit Task callback for both `BothOk` and
+    /// `StartFailed` outcomes — in either case the backend has loaded the new
+    /// replay session, so the bar must reflect the new params.
+    ///
+    /// `start_error` carries the `StartEngine` failure message when only
+    /// `LoadReplayData` succeeded; the handler then shows a toast so the user
+    /// knows the strategy did not start (UI/backend remain consistent: the
+    /// loaded replay is real, but no run is in progress).
     CommitReplayBarState {
         instrument_id: String,
         start_date: String,
@@ -193,6 +199,7 @@ pub(crate) enum ReplayMsg {
         granularity: crate::modal::replay_form::Granularity,
         strategy_file: std::path::PathBuf,
         initial_cash: String,
+        start_error: Option<String>,
     },
 }
 

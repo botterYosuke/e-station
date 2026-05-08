@@ -3771,11 +3771,14 @@ mod native_menu_handler_tests {
             body.contains("initial_cash"),
             "CommitReplayBarState must update initial_cash: {body}"
         );
-        // Verify FormMsg::Submit emits the message on success
+        // Verify FormMsg::Submit dispatches via submit_result_to_message
+        // (which produces CommitReplayBarState for both BothOk and StartFailed
+        // outcomes — see handlers/replay.rs::tests for the pure-function
+        // coverage of those branches).
         let submit_body = replay_handler_body("            ReplayMsg::FormMsg(msg) =>");
         assert!(
-            submit_body.contains("CommitReplayBarState"),
-            "FormMsg Submit must emit CommitReplayBarState on IPC success: {submit_body}"
+            submit_body.contains("submit_result_to_message"),
+            "FormMsg Submit must dispatch via submit_result_to_message on Task completion: {submit_body}"
         );
     }
 
