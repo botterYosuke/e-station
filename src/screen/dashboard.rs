@@ -109,6 +109,9 @@ pub enum Event {
     ReplaySpeedAction(u32),
     /// N4.3: User pressed the strategy file picker button in a `ReplayControl` pane.
     PickStrategyFile,
+    /// User switched ticker via pane title bar; propagate to replay bar label.
+    /// Emitted unconditionally — caller guards with `replay_running`.
+    ReplayBarSync(String),
 }
 
 impl Dashboard {
@@ -503,7 +506,15 @@ impl Dashboard {
                                 .chain(self.refresh_streams(main_window.id))
                             }
                             pane::Effect::SwitchTickersInGroup(ticker_info) => {
-                                self.switch_tickers_in_group(handles, main_window.id, ticker_info)
+                                let task = self.switch_tickers_in_group(
+                                    handles,
+                                    main_window.id,
+                                    ticker_info,
+                                );
+                                return (
+                                    task,
+                                    Some(Event::ReplayBarSync(ticker_info.ticker.to_string())),
+                                );
                             }
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);

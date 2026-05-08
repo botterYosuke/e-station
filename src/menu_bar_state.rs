@@ -106,7 +106,6 @@ pub enum BarMessage {
     /// Kept separate from `Dismiss` so call sites can log the distinct reason.
     DismissFocusLost,
     // ── Replay bar input field changes ────────────────────────────────────────
-    InstrumentChanged(String),
     StartDateChanged(String),
     EndDateChanged(String),
     GranularityChanged(Granularity),
@@ -179,13 +178,6 @@ pub fn update(state: State, msg: BarMessage) -> State {
             ..state
         },
         // Input field changes: update replay_bar, keep open state unchanged.
-        BarMessage::InstrumentChanged(s) => State {
-            replay_bar: ReplayBarState {
-                instrument_id: s,
-                ..state.replay_bar
-            },
-            ..state
-        },
         BarMessage::StartDateChanged(s) => State {
             replay_bar: ReplayBarState {
                 start_date: s,
@@ -349,13 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn instrument_changed_updates_replay_bar_instrument_id() {
-        let s = State::default();
-        let next = update(s, BarMessage::InstrumentChanged("1301.T".to_string()));
-        assert_eq!(next.replay_bar.instrument_id, "1301.T");
-    }
-
-    #[test]
     fn press_step_backward_does_not_mutate_state() {
         let s = State::default();
         let next = update(s.clone(), BarMessage::PressStepBackward);
@@ -380,6 +365,54 @@ mod tests {
         assert!(
             next.live_bar.live_paused,
             "LivePressPause should set live_paused = true"
+        );
+    }
+
+    #[test]
+    fn press_play_rollback_preserves_has_history() {
+        // Simulates: was paused with has_history=true, IPC failed → rollback to paused=true
+        let mut s = State::default();
+        s.replay_bar.replay_has_history = true;
+        s.replay_bar.replay_paused = false; // optimistic update already done
+
+        let next = update(
+            s,
+            BarMessage::ReplayPauseStateChanged {
+                paused: true, // rollback
+                has_history: true,
+            },
+        );
+        assert!(
+            next.replay_bar.replay_paused,
+            "should be paused after rollback"
+        );
+        assert!(
+            next.replay_bar.replay_has_history,
+            "has_history must be preserved during rollback"
+        );
+    }
+
+    #[test]
+    fn press_pause_rollback_preserves_has_history() {
+        // Simulates: was playing with has_history=true, IPC failed → rollback to paused=false
+        let mut s = State::default();
+        s.replay_bar.replay_has_history = true;
+        s.replay_bar.replay_paused = true; // optimistic update already done
+
+        let next = update(
+            s,
+            BarMessage::ReplayPauseStateChanged {
+                paused: false, // rollback
+                has_history: true,
+            },
+        );
+        assert!(
+            !next.replay_bar.replay_paused,
+            "should not be paused after rollback"
+        );
+        assert!(
+            next.replay_bar.replay_has_history,
+            "has_history must be preserved during rollback"
         );
     }
 

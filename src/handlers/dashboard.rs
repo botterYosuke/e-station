@@ -468,6 +468,12 @@ impl crate::Flowsurface {
                             }
                             Task::none()
                         }
+                        Some(dashboard::Event::ReplayBarSync(instrument_id)) => {
+                            if self.replay_running {
+                                self.menu_bar.replay_bar.instrument_id = instrument_id;
+                            }
+                            Task::none()
+                        }
                         // N4.3: open OS file dialog for strategy .py file
                         Some(dashboard::Event::PickStrategyFile) => {
                             return Task::perform(
