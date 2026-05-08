@@ -122,12 +122,6 @@ pub enum Message {
     RetryMetadataFetch(Venue),
     MetadataFetchFailed(Venue, data::InternalError),
     StatsFetchFailed(Venue, data::InternalError),
-    /// User-initiated Tachibana login request. Emitted by the inline
-    /// "ログイン" button next to the Tachibana row (T35-U1) and by the
-    /// auto-fire path inside `ToggleExchangeFilter(Tachibana)` when
-    /// the venue is not yet ready (T35-U3).
-    RequestTachibanaLogin(crate::venue_state::Trigger),
-    RequestTachibanaLogout,
 }
 
 pub struct TickersTable {
@@ -528,12 +522,6 @@ impl TickersTable {
                     self.sort_ticker_rows();
                 }
             }
-            Message::RequestTachibanaLogin(trigger) => {
-                return Some(Action::RequestTachibanaLogin(trigger));
-            }
-            Message::RequestTachibanaLogout => {
-                return Some(Action::RequestTachibanaLogout);
-            }
             Message::StatsFetchFailed(venue, err) => {
                 let can_sort = self.stats_fetch_state.complete_venue(venue);
 
@@ -826,29 +814,6 @@ impl TickersTable {
             .style(move |theme, status| style::button::transparent(theme, status, selected))
     }
 
-    /// Render the inline "ログイン" button that sits underneath the
-    /// Tachibana row (T35-U1-LoginButton). Always enabled — duplicate
-    /// presses while a dialog is in flight are suppressed at the
-    /// Flowsurface layer (`is_login_in_flight()` check), not by
-    /// disabling the widget here, so users still get visual feedback
-    /// that their click registered. T35-U3-AutoRequestLogin shares the
-    /// same `RequestTachibanaLogin` action with this button.
-    fn tachibana_login_btn(&self) -> Element<'_, Message> {
-        let (label, msg) = if self.tachibana_ready {
-            ("立花 ログアウト", Message::RequestTachibanaLogout)
-        } else {
-            (
-                "立花 ログイン",
-                Message::RequestTachibanaLogin(crate::venue_state::Trigger::Manual),
-            )
-        };
-        button(text(label).size(11))
-            .on_press(msg)
-            .width(Length::Fill)
-            .style(|theme, status| style::button::transparent(theme, status, false))
-            .into()
-    }
-
     fn exchange_filter_btn<'a>(&'a self, venue: Venue) -> Element<'a, Message> {
         let unavailable = self.unavailable_exchanges.contains(&venue);
         let selected = self.selected_exchanges.contains(&venue);
@@ -1013,23 +978,10 @@ impl TickersTable {
         let exchange_filters = {
             let mut col = column![];
             for venue in Venue::ALL {
-                if venue == Venue::Tachibana {
-                    // Tachibana ships with a dedicated inline login
-                    // button so the user can re-trigger the dialog
-                    // without first clicking the venue toggle. The
-                    // button is always visible (T35-U1, deadlock
-                    // avoidance: VenueReady-gated UIs would otherwise
-                    // hide the only way to recover from a cancelled
-                    // login).
-                    col = col.push(
-                        column![self.exchange_filter_btn(venue), self.tachibana_login_btn(),]
-                            .spacing(2),
-                    );
-                } else if venue == Venue::Replay {
-                    // Replay panes are auto-generated on ReplayDataLoaded — no sidebar filter UI
-                } else {
-                    col = col.push(self.exchange_filter_btn(venue));
+                if venue == Venue::Replay {
+                    continue;
                 }
+                col = col.push(self.exchange_filter_btn(venue));
             }
             col.spacing(4)
         };
@@ -2539,25 +2491,6 @@ mod tests {
         assert!(
             !table.metadata_fetch_state.is_in_flight(Venue::Tachibana),
             "no pending request → no fetch on VenueReady"
-        );
-    }
-
-    #[test]
-    fn sidebar_login_button_emits_request_venue_login() {
-        // Pin for T35-U1-LoginButton: the inline "ログイン" button under
-        // the Tachibana row dispatches `Message::RequestTachibanaLogin`
-        // with `Trigger::Manual`, which `update()` forwards verbatim
-        // as an `Action::RequestTachibanaLogin(Manual)` for the
-        // Sidebar/Flowsurface chain to act on.
-        use crate::venue_state::Trigger;
-        let settings = settings_for(Venue::Bybit);
-        let (mut table, _task) =
-            TickersTable::new_with_settings(&settings, handles_with_inert(Venue::Tachibana));
-
-        let action = table.update(Message::RequestTachibanaLogin(Trigger::Manual));
-        assert!(
-            matches!(action, Some(Action::RequestTachibanaLogin(Trigger::Manual))),
-            "manual button must propagate Trigger::Manual unchanged"
         );
     }
 
