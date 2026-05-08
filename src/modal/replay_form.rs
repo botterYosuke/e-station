@@ -23,6 +23,16 @@ impl Granularity {
             Self::Trade => engine_client::dto::ReplayGranularity::Trade,
         }
     }
+
+    /// IPC の `ReplayGranularity` から変換する。
+    #[allow(dead_code)]
+    pub fn from_dto(dto: engine_client::dto::ReplayGranularity) -> Self {
+        match dto {
+            engine_client::dto::ReplayGranularity::Daily => Self::Daily,
+            engine_client::dto::ReplayGranularity::Minute => Self::Minute,
+            engine_client::dto::ReplayGranularity::Trade => Self::Trade,
+        }
+    }
 }
 
 impl std::fmt::Display for Granularity {

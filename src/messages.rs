@@ -183,6 +183,17 @@ pub(crate) enum ReplayMsg {
     },
     LiveStartFailed(String),
     StopLiveStrategy,
+    /// H-2: Commit replay_bar state only after IPC succeeds (not before).
+    /// Emitted in the Task callback on IPC success to update menu_bar with
+    /// the form data, ensuring UI and backend states stay synchronized.
+    CommitReplayBarState {
+        instrument_id: String,
+        start_date: String,
+        end_date: String,
+        granularity: crate::modal::replay_form::Granularity,
+        strategy_file: std::path::PathBuf,
+        initial_cash: String,
+    },
 }
 
 // ── Dashboard ────────────────────────────────────────────────────────────────

@@ -361,20 +361,20 @@ impl crate::Flowsurface {
                             initial_cash,
                         }) => {
                             self.replay_form_modal = None;
-                            // Write back validated form values to ReplayBarState so the
-                            // menu bar displays the active replay settings.
-                            // Display only first instrument_id to avoid UI layout breaking with long lists.
-                            self.menu_bar.replay_bar.instrument_id = instrument_ids[0].clone();
-                            self.menu_bar.replay_bar.start_date = start_date.clone();
-                            self.menu_bar.replay_bar.end_date = end_date.clone();
-                            self.menu_bar.replay_bar.granularity = Some(granularity.clone());
-                            self.menu_bar.replay_bar.strategy_file = Some(strategy_file.clone());
-                            self.menu_bar.replay_bar.initial_cash = initial_cash.to_string();
+                            // H-2: DO NOT update menu_bar.replay_bar here. Only commit state
+                            // after IPC succeeds, in the Task callback below.
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                 let strategy_file_str =
                                     strategy_file.to_string_lossy().into_owned();
                                 let gran_dto = granularity.to_dto();
                                 let first_id = instrument_ids[0].clone();
+                                // Capture form data for CommitReplayBarState on success
+                                let form_instrument_id = first_id.clone();
+                                let form_start_date = start_date.clone();
+                                let form_end_date = end_date.clone();
+                                let form_granularity = granularity.clone();
+                                let form_strategy_file = strategy_file.clone();
+                                let form_initial_cash = initial_cash.to_string();
                                 return Task::perform(
                                     async move {
                                         let load_req_id = uuid::Uuid::new_v4().to_string();
@@ -410,10 +410,18 @@ impl crate::Flowsurface {
                                         .map_err(|e| e.to_string())?;
                                         Ok::<(), String>(())
                                     },
-                                    |res| match res {
-                                        Ok(()) => Message::Venue(VenueMsg::OrderToast(
-                                            Toast::info("Replay を開始しました".to_string()),
-                                        )),
+                                    move |res| match res {
+                                        Ok(()) => {
+                                            // H-2: Only on IPC success, emit CommitReplayBarState
+                                            Message::Replay(ReplayMsg::CommitReplayBarState {
+                                                instrument_id: form_instrument_id,
+                                                start_date: form_start_date,
+                                                end_date: form_end_date,
+                                                granularity: form_granularity,
+                                                strategy_file: form_strategy_file,
+                                                initial_cash: form_initial_cash,
+                                            })
+                                        }
                                         Err(e) => Message::Venue(VenueMsg::OrderToast(
                                             Toast::error(format!("Replay 起動失敗: {e}")),
                                         )),
@@ -630,6 +638,24 @@ impl crate::Flowsurface {
                 self.active_dashboard_mut()
                     .distribute_strategy_signals(main_window, data);
             } // Phase U0: OrderAccepted — reset submitting flag + toast
+            // H-2: Commit replay_bar state only after IPC succeeds.
+            // This handler is emitted in the Task callback on IPC success,
+            // ensuring UI and backend states stay synchronized.
+            ReplayMsg::CommitReplayBarState {
+                instrument_id,
+                start_date,
+                end_date,
+                granularity,
+                strategy_file,
+                initial_cash,
+            } => {
+                self.menu_bar.replay_bar.instrument_id = instrument_id;
+                self.menu_bar.replay_bar.start_date = start_date;
+                self.menu_bar.replay_bar.end_date = end_date;
+                self.menu_bar.replay_bar.granularity = Some(granularity);
+                self.menu_bar.replay_bar.strategy_file = Some(strategy_file);
+                self.menu_bar.replay_bar.initial_cash = initial_cash;
+            }
         }
         Task::none()
     }
