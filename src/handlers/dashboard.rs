@@ -681,6 +681,13 @@ impl crate::Flowsurface {
                             iced::Task::done(Message::Venue(VenueMsg::RequestKabuLogin(trigger))),
                         ]);
                     }
+                    Some(dashboard::sidebar::Action::RequestTachibanaLogout) => {
+                        let task = task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
+                        return Task::batch(vec![
+                            task,
+                            iced::Task::done(Message::Venue(VenueMsg::RequestTachibanaLogout)),
+                        ]);
+                    }
                     None => {}
                 }
 

@@ -99,6 +99,7 @@ pub enum Action {
     /// `Ready`. Flowsurface suppresses the request while
     /// `kabu_state` is `LoginInFlight`.
     RequestKabuLogin(crate::venue_state::Trigger),
+    RequestTachibanaLogout,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +127,7 @@ pub enum Message {
     /// auto-fire path inside `ToggleExchangeFilter(Tachibana)` when
     /// the venue is not yet ready (T35-U3).
     RequestTachibanaLogin(crate::venue_state::Trigger),
+    RequestTachibanaLogout,
 }
 
 pub struct TickersTable {
@@ -529,6 +531,9 @@ impl TickersTable {
             Message::RequestTachibanaLogin(trigger) => {
                 return Some(Action::RequestTachibanaLogin(trigger));
             }
+            Message::RequestTachibanaLogout => {
+                return Some(Action::RequestTachibanaLogout);
+            }
             Message::StatsFetchFailed(venue, err) => {
                 let can_sort = self.stats_fetch_state.complete_venue(venue);
 
@@ -829,15 +834,19 @@ impl TickersTable {
     /// that their click registered. T35-U3-AutoRequestLogin shares the
     /// same `RequestTachibanaLogin` action with this button.
     fn tachibana_login_btn(&self) -> Element<'_, Message> {
-        let label = if self.tachibana_ready {
-            "立花 再ログイン"
+        let (label, msg) = if self.tachibana_ready {
+            (
+                "立花 ログアウト",
+                Message::RequestTachibanaLogout,
+            )
         } else {
-            "立花 ログイン"
+            (
+                "立花 ログイン",
+                Message::RequestTachibanaLogin(crate::venue_state::Trigger::Manual),
+            )
         };
         button(text(label).size(11))
-            .on_press(Message::RequestTachibanaLogin(
-                crate::venue_state::Trigger::Manual,
-            ))
+            .on_press(msg)
             .width(Length::Fill)
             .style(|theme, status| style::button::transparent(theme, status, false))
             .into()
