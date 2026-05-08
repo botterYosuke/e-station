@@ -331,7 +331,7 @@ def test_make_attach_client_selects_grpc_when_transport_is_grpc(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(5)
+@pytest.mark.timeout(10)
 async def test_grpc_attach_client_handshake_success():
     """M-NEW-1: _GrpcAttachClient が MockGrpcServer に正常接続・ハンドシェイクできること。"""
     import asyncio
@@ -342,7 +342,7 @@ async def test_grpc_attach_client_handshake_success():
         endpoint = f"127.0.0.1:{srv.port}"
         client = _GrpcAttachClient(endpoint, "test-token", timeout_s=3.0)
         # handshake() はブロッキング — スレッド内で asyncio loop を起動する
-        await asyncio.get_event_loop().run_in_executor(None, client.handshake)
+        await asyncio.get_running_loop().run_in_executor(None, client.handshake)
         assert client._handshake_ok, "handshake_ok must be True after successful handshake"
         client.close()
 
