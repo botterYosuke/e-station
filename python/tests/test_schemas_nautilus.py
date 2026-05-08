@@ -43,7 +43,8 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # fee_total: SCHEMA_MINOR を 20 → 21 に bump (ExecutionMarker.commission 追加)
     # schema 3.22: SCHEMA_MINOR を 21 → 22 に bump (ReplayTimeUpdated 追加)
     # schema 3.23: SCHEMA_MINOR を 22 → 23 に bump (StrategyScenarioLoaded.resolved_instruments 追加)
-    assert s.SCHEMA_MINOR == 23
+    # schema 3.24: SCHEMA_MINOR を 23 → 24 に bump (RequestVenueLogout コマンド追加)
+    assert s.SCHEMA_MINOR == 24
     assert s.SCHEMA_MAJOR == 3
 
 

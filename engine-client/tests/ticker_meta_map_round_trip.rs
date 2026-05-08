@@ -47,7 +47,7 @@ impl DataEngine for TachibanaTickerMock {
                 ));
             }
         };
-        let schema_major = flowsurface_engine_client::SCHEMA_MAJOR as u32;
+        let schema_major = flowsurface_engine_client::SCHEMA_MAJOR;
         if hello.schema_major != schema_major {
             return Err(Status::failed_precondition("schema mismatch"));
         }
@@ -59,7 +59,7 @@ impl DataEngine for TachibanaTickerMock {
             let ready = engine::Event {
                 payload: Some(engine::event::Payload::Ready(engine::ReadyResponse {
                     schema_major,
-                    schema_minor: flowsurface_engine_client::SCHEMA_MINOR as u32,
+                    schema_minor: flowsurface_engine_client::SCHEMA_MINOR,
                     engine_version: "1.0.0-mock".to_string(),
                     engine_session_id: "00000000-0000-0000-0000-00000000beef".to_string(),
                     capabilities: Some(engine::EngineCapabilities {
@@ -74,46 +74,39 @@ impl DataEngine for TachibanaTickerMock {
             }
 
             // Wait for the ListTickers command and reply with TickerInfo.
-            loop {
-                match stream.message().await {
-                    Ok(Some(cmd)) => {
-                        if let Some(engine::command::Payload::ListTickers(lt)) = cmd.payload {
-                            let ticker_event = engine::Event {
-                                payload: Some(engine::event::Payload::TickerInfo(
-                                    engine::TickerInfoEvent {
-                                        request_id: lt.request_id,
-                                        venue: "tachibana".to_string(),
-                                        tickers: vec![engine::TickerEntry {
-                                            kind: Some(engine::ticker_entry::Kind::Stock(
-                                                engine::StockTickerEntry {
-                                                    symbol: "7203".to_string(),
-                                                    display_symbol: Some("TOYOTA".to_string()),
-                                                    display_name_ja: Some(
-                                                        "トヨタ自動車".to_string(),
-                                                    ),
-                                                    min_ticksize: 1.0,
-                                                    lot_size: Some(100),
-                                                    min_qty: Some(100.0),
-                                                    quote_currency: Some("JPY".to_string()),
-                                                    yobine_code: Some("103".to_string()),
-                                                    sizyou_c: Some("00".to_string()),
-                                                    venue_caps: Some(engine::VenueCaps {
-                                                        client_aggr_depth: true,
-                                                        supports_spread_display: false,
-                                                        qty_norm_kind: None,
-                                                    }),
-                                                },
-                                            )),
-                                        }],
-                                    },
-                                )),
-                            };
-                            let _ = tx.send(Ok(ticker_event)).await;
-                        }
-                        // Keep the stream open after answering.
-                    }
-                    Ok(None) | Err(_) => break,
+            while let Ok(Some(cmd)) = stream.message().await {
+                if let Some(engine::command::Payload::ListTickers(lt)) = cmd.payload {
+                    let ticker_event = engine::Event {
+                        payload: Some(engine::event::Payload::TickerInfo(
+                            engine::TickerInfoEvent {
+                                request_id: lt.request_id,
+                                venue: "tachibana".to_string(),
+                                tickers: vec![engine::TickerEntry {
+                                    kind: Some(engine::ticker_entry::Kind::Stock(
+                                        engine::StockTickerEntry {
+                                            symbol: "7203".to_string(),
+                                            display_symbol: Some("TOYOTA".to_string()),
+                                            display_name_ja: Some("トヨタ自動車".to_string()),
+                                            min_ticksize: 1.0,
+                                            lot_size: Some(100),
+                                            min_qty: Some(100.0),
+                                            quote_currency: Some("JPY".to_string()),
+                                            yobine_code: Some("103".to_string()),
+                                            sizyou_c: Some("00".to_string()),
+                                            venue_caps: Some(engine::VenueCaps {
+                                                client_aggr_depth: true,
+                                                supports_spread_display: false,
+                                                qty_norm_kind: None,
+                                            }),
+                                        },
+                                    )),
+                                }],
+                            },
+                        )),
+                    };
+                    let _ = tx.send(Ok(ticker_event)).await;
                 }
+                // Keep the stream open after answering.
             }
         });
 

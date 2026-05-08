@@ -25,7 +25,10 @@ impl crate::Flowsurface {
                 // unintended side-effects on recoverable warnings.
                 let should_logout = matches!(
                     self.tachibana_state,
-                    VenueState::Error { market_closed: true, .. }
+                    VenueState::Error {
+                        market_closed: true,
+                        ..
+                    }
                 );
                 let next = std::mem::replace(&mut self.tachibana_state, VenueState::Idle)
                     .next(VenueEvent::Dismissed);
