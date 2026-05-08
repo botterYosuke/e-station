@@ -612,8 +612,10 @@ mod tests {
 
     #[test]
     fn prefill_from_scenario_non_object_only_sets_path() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "KEEP".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "KEEP".to_string(),
+            ..Default::default()
+        };
         let scenario = serde_json::json!(null);
         form.prefill_from_scenario(std::path::PathBuf::from("/tmp/x.py"), &scenario, None);
         assert_eq!(form.instrument_id, "KEEP");
@@ -647,8 +649,10 @@ mod tests {
     #[test]
     fn prefill_from_scenario_v3_resolved_empty_falls_back() {
         // resolved_instruments が Some([]) の場合は instrument_id を触らない（既存値保持）
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "EXISTING".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "EXISTING".to_string(),
+            ..Default::default()
+        };
         let scenario = serde_json::json!({"schema_version": 3});
         form.prefill_from_scenario(std::path::PathBuf::from("/tmp/s.py"), &scenario, Some(&[]));
         assert_eq!(form.instrument_id, "EXISTING");
@@ -677,8 +681,10 @@ mod tests {
 
     #[test]
     fn set_strategy_file_only_sets_path_and_keeps_fields() {
-        let mut form = ReplayFormModal::default();
-        form.instrument_id = "KEEP".to_string();
+        let mut form = ReplayFormModal {
+            instrument_id: "KEEP".to_string(),
+            ..Default::default()
+        };
         form.set_strategy_file_only(std::path::PathBuf::from("/tmp/y.py"));
         assert_eq!(form.instrument_id, "KEEP");
         assert_eq!(

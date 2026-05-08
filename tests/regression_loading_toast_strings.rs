@@ -16,10 +16,10 @@ fn read_rs_files_recursive(dir: &Path, out: &mut Vec<String>) {
         let path = entry.path();
         if path.is_dir() {
             read_rs_files_recursive(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            if let Ok(content) = fs::read_to_string(&path) {
-                out.push(format!("{}\n{}", path.display(), content));
-            }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs")
+            && let Ok(content) = fs::read_to_string(&path)
+        {
+            out.push(format!("{}\n{}", path.display(), content));
         }
     }
 }

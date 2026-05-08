@@ -65,8 +65,7 @@ fn engine_event_variants() -> Vec<&'static str> {
                     .split([' ', '{', ','])
                     .next()
                     .unwrap_or("");
-                if name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                {
+                if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
                     Some(name)
                 } else {
                     None
