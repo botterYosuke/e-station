@@ -7,6 +7,7 @@ source_commit: 07de7d3
 old_path: "docs/✅order/archive/inline-loading-indicator-plan.md"
 ---
 
+<!--
 # ADR 0082: Inline Loading Indicator Plan
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show 07de7d3:"docs/✅order/archive/inline-loading-indicator-plan.md"
 ```
+-->

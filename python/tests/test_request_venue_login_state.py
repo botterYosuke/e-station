@@ -521,10 +521,10 @@ def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
 
 @pytest.mark.demo_kabu
 def test_schema_minor_is_21_after_fee_total():
-    """fee_total (3.21): ExecutionMarker.commission 追加で SCHEMA_MINOR == 21 に固定。"""
+    """fee_total (3.21): ExecutionMarker.commission 追加で SCHEMA_MINOR == 23 に固定。"""
     from engine.schemas import SCHEMA_MINOR
 
-    assert SCHEMA_MINOR == 21
+    assert SCHEMA_MINOR == 23
 
 
 @pytest.mark.demo_kabu

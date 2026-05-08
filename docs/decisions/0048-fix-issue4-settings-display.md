@@ -7,6 +7,7 @@ source_commit: 8797909
 old_path: "docs/✅nautilus_trader/archive/fix-issue4-settings-display.md"
 ---
 
+<!--
 # ADR 0048: Fix Issue4 Settings Display
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show 8797909:"docs/✅nautilus_trader/archive/fix-issue4-settings-display.md"
 ```
+-->

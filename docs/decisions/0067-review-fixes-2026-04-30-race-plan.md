@@ -7,6 +7,7 @@ source_commit: 3d34512
 old_path: "docs/✅nautilus_trader/archive/review-fixes-2026-04-30-race-plan.md"
 ---
 
+<!--
 # ADR 0067: Review Fixes 2026 04 30 Race Plan
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show 3d34512:"docs/✅nautilus_trader/archive/review-fixes-2026-04-30-race-plan.md"
 ```
+-->

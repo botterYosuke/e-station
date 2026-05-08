@@ -7,6 +7,7 @@ source_commit: 4e87787
 old_path: "docs/✅menu-and-footer/archive/widget-menu-bar-windows.md"
 ---
 
+<!--
 # ADR 0042: Widget Menu Bar Windows
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show 4e87787:"docs/✅menu-and-footer/archive/widget-menu-bar-windows.md"
 ```
+-->

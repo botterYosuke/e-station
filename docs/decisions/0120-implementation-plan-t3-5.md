@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅tachibana/archive/implementation-plan-T3.5.md"
 ---
 
+<!--
 # ADR 0120: Implementation Plan T3 5
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show f62bf94:"docs/✅tachibana/archive/implementation-plan-T3.5.md"
 ```
+-->

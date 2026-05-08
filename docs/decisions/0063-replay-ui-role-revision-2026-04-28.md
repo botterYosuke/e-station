@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅nautilus_trader/archive/replay-ui-role-revision-2026-04-28.md"
 ---
 
+<!--
 # ADR 0063: Replay Ui Role Revision 2026 04 28
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show f62bf94:"docs/✅nautilus_trader/archive/replay-ui-role-revision-2026-04-28.md"
 ```
+-->

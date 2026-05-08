@@ -7,6 +7,7 @@ source_commit: 07de7d3
 old_path: "docs/✅order/archive/fix-sell-button-disabled-2026-05-01.md"
 ---
 
+<!--
 # ADR 0081: Fix Sell Button Disabled 2026 05 01
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show 07de7d3:"docs/✅order/archive/fix-sell-button-disabled-2026-05-01.md"
 ```
+-->

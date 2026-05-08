@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅python-data-engine/archive/phase-7-ui-regression-remediation.md"
 ---
 
+<!--
 # ADR 0098: Phase 7 Ui Regression Remediation
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show f62bf94:"docs/✅python-data-engine/archive/phase-7-ui-regression-remediation.md"
 ```
+-->

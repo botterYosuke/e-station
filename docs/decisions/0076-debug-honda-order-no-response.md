@@ -7,6 +7,7 @@ source_commit: e9bfc98
 old_path: "docs/✅order/archive/debug-honda-order-no-response.md"
 ---
 
+<!--
 # ADR 0076: Debug Honda Order No Response
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show e9bfc98:"docs/✅order/archive/debug-honda-order-no-response.md"
 ```
+-->

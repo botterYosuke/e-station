@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅order/archive/task-buying-power-ipc.md"
 ---
 
+<!--
 # ADR 0090: Task Buying Power Ipc
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show f62bf94:"docs/✅order/archive/task-buying-power-ipc.md"
 ```
+-->

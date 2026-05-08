@@ -7,6 +7,7 @@ source_commit: f0eb2c1
 old_path: "docs/✅nautilus_trader/archive/replay-load-start-race-fix-plan.md"
 ---
 
+<!--
 # ADR 0056: Replay Load Start Race Fix Plan
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show f0eb2c1:"docs/✅nautilus_trader/archive/replay-load-start-race-fix-plan.md"
 ```
+-->

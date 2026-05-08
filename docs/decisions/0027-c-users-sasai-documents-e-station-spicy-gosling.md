@@ -7,6 +7,7 @@ source_commit: be73291
 old_path: "docs/✅menu-and-footer/archive/c-users-sasai-documents-e-station-spicy-gosling.md"
 ---
 
+<!--
 # ADR 0027: C Users Sasai Documents E Station Spicy Gosling
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show be73291:"docs/✅menu-and-footer/archive/c-users-sasai-documents-e-station-spicy-gosling.md"
 ```
+-->

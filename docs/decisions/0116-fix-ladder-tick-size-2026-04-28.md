@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅tachibana/archive/fix-ladder-tick-size-2026-04-28.md"
 ---
 
+<!--
 # ADR 0116: Fix Ladder Tick Size 2026 04 28
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show f62bf94:"docs/✅tachibana/archive/fix-ladder-tick-size-2026-04-28.md"
 ```
+-->

@@ -7,6 +7,7 @@ source_commit: b88642b
 old_path: "docs/✅order/archive/order-entry-link-group-plan.md"
 ---
 
+<!--
 # ADR 0083: Order Entry Link Group Plan
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show b88642b:"docs/✅order/archive/order-entry-link-group-plan.md"
 ```
+-->

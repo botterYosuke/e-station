@@ -7,6 +7,7 @@ source_commit: f0eb2c1
 old_path: "docs/✅python-data-engine/archive/replay-pane-auto-generate-fix.md"
 ---
 
+<!--
 # ADR 0105: Replay Pane Auto Generate Fix
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show f0eb2c1:"docs/✅python-data-engine/archive/replay-pane-auto-generate-fix.md"
 ```
+-->

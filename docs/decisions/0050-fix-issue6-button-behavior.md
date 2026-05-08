@@ -7,6 +7,7 @@ source_commit: 8797909
 old_path: "docs/✅nautilus_trader/archive/fix-issue6-button-behavior.md"
 ---
 
+<!--
 # ADR 0050: Fix Issue6 Button Behavior
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅nautilus_trader/archive
 ```sh
 git show 8797909:"docs/✅nautilus_trader/archive/fix-issue6-button-behavior.md"
 ```
+-->

@@ -7,6 +7,7 @@ source_commit: 0328b48
 old_path: "docs/✅order/archive/add-positions-pane-plan.md"
 ---
 
+<!--
 # ADR 0074: Add Positions Pane Plan
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅order/archive
 ```sh
 git show 0328b48:"docs/✅order/archive/add-positions-pane-plan.md"
 ```
+-->

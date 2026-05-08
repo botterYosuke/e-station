@@ -7,6 +7,7 @@ source_commit: f0eb2c1
 old_path: "docs/✅menu-and-footer/archive/fix-save-menu.md"
 ---
 
+<!--
 # ADR 0028: Fix Save Menu
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show f0eb2c1:"docs/✅menu-and-footer/archive/fix-save-menu.md"
 ```
+-->

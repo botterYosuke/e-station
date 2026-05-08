@@ -7,6 +7,7 @@ source_commit: da20f73
 old_path: "docs/✅tachibana/archive/fix-min-ticksize-fallback-2026-05-01.md"
 ---
 
+<!--
 # ADR 0117: Fix Min Ticksize Fallback 2026 05 01
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show da20f73:"docs/✅tachibana/archive/fix-min-ticksize-fallback-2026-05-01.md"
 ```
+-->

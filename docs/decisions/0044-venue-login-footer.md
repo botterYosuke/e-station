@@ -7,6 +7,7 @@ source_commit: f663317
 old_path: "docs/✅menu-and-footer/archive/🔵venue-login-footer.md"
 ---
 
+<!--
 # ADR 0044: Venue Login Footer
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅menu-and-footer/archive
 ```sh
 git show f663317:"docs/✅menu-and-footer/archive/🔵venue-login-footer.md"
 ```
+-->

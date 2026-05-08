@@ -7,6 +7,7 @@ source_commit: 58a1c6a
 old_path: "docs/✅python-data-engine/archive/wal-accepted-stale-bug.md"
 ---
 
+<!--
 # ADR 0110: Wal Accepted Stale Bug
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅python-data-engine/archive
 ```sh
 git show 58a1c6a:"docs/✅python-data-engine/archive/wal-accepted-stale-bug.md"
 ```
+-->

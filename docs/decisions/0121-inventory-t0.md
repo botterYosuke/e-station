@@ -7,6 +7,7 @@ source_commit: f62bf94
 old_path: "docs/✅tachibana/archive/inventory-T0.md"
 ---
 
+<!--
 # ADR 0121: Inventory T0
 
 ## Status
@@ -24,3 +25,4 @@ ADR extraction candidate from ✅tachibana/archive
 ```sh
 git show f62bf94:"docs/✅tachibana/archive/inventory-T0.md"
 ```
+-->
