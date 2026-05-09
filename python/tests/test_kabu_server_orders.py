@@ -29,6 +29,7 @@ def _make_server() -> DataEngineServer:
     srv._kabu_env = "verify"  # [R2-M1] _startup_kabu_station() 参照時の AttributeError 防止
     srv._submit_order_inflight_count = 0
     srv._kabu_fill_poller_task = None  # [H-1] _clear_kabu_session で参照される
+    srv._kabu_push_task = None  # [R3-H1] _clear_kabu_session で参照される
     srv._venue_to_client = {}  # [C-3] _do_submit_order_kabu で参照される
 
     emitted: list[dict] = []

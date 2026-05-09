@@ -45,7 +45,10 @@ class _StubOutbox:
 
 
 def _make_subscribe_server() -> DataEngineServer:
-    """_handle_subscribe テスト用の最小 DataEngineServer インスタンスを返す。"""
+    """_handle_subscribe テスト用の最小 DataEngineServer インスタンスを返す。
+
+    注意: このヘルパーと test_kabu_put_register.py の _make_subscribe_server() は同期を保つこと。
+    """
     with patch.object(DataEngineServer, "__init__", lambda self, **_: None):
         server = DataEngineServer()
 
@@ -60,8 +63,15 @@ def _make_subscribe_server() -> DataEngineServer:
     server._kabu_push_seq = 0
     server._kabu_adapter = MagicMock()
     server._kabu_venue = MagicMock()
+    server._kabu_venue._token = "test-session-token"
+    server._kabu_env = "verify"
     server._kabu_register_set = MagicMock()  # type: ignore[attr-defined]
     server._kabu_register_set.register = MagicMock()
+    server._kabu_register_set.all_symbols = MagicMock(return_value=[])
+    # Issue #35: _kabu_put_register は HTTP を呼ぶようになったが、
+    # このテストは subscribe ルーティングのみを検証するため no-op に差し替える。
+    from unittest.mock import AsyncMock
+    server._kabu_put_register = AsyncMock(return_value=True)  # type: ignore[method-assign]
     return server
 
 

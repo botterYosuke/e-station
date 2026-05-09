@@ -55,6 +55,7 @@ from engine.exchanges.kabusapi_auth import (
     KabuConnectionError as KabuConnectionError,
     KabuLoginCancelledError,
     KabuRateLimitError,
+    KabuRegisterFullError,
     KabuTradeCancelledError,
     KabuTradeLockedOutError,
     KabuTradePasswordInvalidError,
@@ -1457,8 +1458,34 @@ class DataEngineServer:
         # 銘柄を PUSH 登録セットに追加（exchange=1 は東証デフォルト）
         try:
             self._kabu_register_set.register(ticker, 1)
+        except KabuRegisterFullError as exc:
+            log.warning("Subscribe(kabu_station): register full for %s: %s", ticker, exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "register_full",
+                "message": str(exc),
+            })
+            self._outbox_event.set()
+            return
         except Exception as exc:
             log.warning("Subscribe(kabu_station): register_set.register failed for %s: %s", ticker, exc)
+            return
+
+        if not await self._kabu_put_register(self._kabu_register_set.all_symbols()):
+            # PUT /register 失敗: ticker を register_set から除外しセンチネルタスクは作らない
+            try:
+                self._kabu_register_set.unregister(ticker, 1)
+            except Exception as exc:
+                log.error("_handle_subscribe_kabu_station: unregister failed for %s: %s", ticker, exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "register_failed",
+                "message": f"PUT /register failed for {ticker}",
+            })
+            self._outbox_event.set()
+            return
 
         async def _kabu_stream_sentinel() -> None:
             """PUSH WS が起動している間ストリームキーを保持するセンチネルタスク。
@@ -1506,6 +1533,13 @@ class DataEngineServer:
         handle = self._streams.pop(key, None)
         if handle:
             await handle.cancel()
+            if venue == "kabu_station":
+                try:
+                    self._kabu_register_set.unregister(ticker, 1)
+                except Exception as exc:
+                    log.warning("_handle_unsubscribe(kabu_station): unregister failed: %s", exc)
+                if not await self._kabu_put_register(self._kabu_register_set.all_symbols()):
+                    log.warning("_handle_unsubscribe(kabu_station): put_register failed after unregistering %s", ticker)
 
     # ------------------------------------------------------------------
     # Order Phase handlers (T0.3)
@@ -1950,6 +1984,10 @@ class DataEngineServer:
         if self._kabu_fill_poller_task is not None and not self._kabu_fill_poller_task.done():
             self._kabu_fill_poller_task.cancel()
         self._kabu_fill_poller_task = None
+        # R3-H1: PUSH WS タスクもキャンセルする（未キャンセルだと再ログイン時に二重起動ガードが効かなくなる）
+        if self._kabu_push_task is not None and not self._kabu_push_task.done():
+            self._kabu_push_task.cancel()
+        self._kabu_push_task = None
         self._connected_venue = None
         self._kabu_push_ssid = None  # C1: PUSH セッション ID をリセット
         self._live_state = LiveState.DISCONNECTED
@@ -3998,6 +4036,20 @@ class DataEngineServer:
                             put_register=self._kabu_put_register,
                         )
                     )
+
+                    def _on_push_task_done(t: asyncio.Task) -> None:
+                        if not t.cancelled() and t.exception() is not None:
+                            exc = t.exception()
+                            log.error("_kabu_push_task died: %s", exc)
+                            self._emit({
+                                "event": "VenueError",
+                                "venue": "kabu_station",
+                                "request_id": None,
+                                "code": "push_ws_failed",
+                                "message": str(exc),
+                            })
+
+                    self._kabu_push_task.add_done_callback(_on_push_task_done)
                 self._emit({
                     "event": "VenueReady",
                     "venue": "kabu_station",
@@ -4034,7 +4086,7 @@ class DataEngineServer:
             log.info("_kabu_fill_poller: cancelled")
             raise
 
-    async def _kabu_put_register(self, symbols: list[tuple[str, int]]) -> None:
+    async def _kabu_put_register(self, symbols: list[tuple[str, int]]) -> bool:
         """PUSH 銘柄登録 PUT /register コールバック（kabusapi_ws.connect に渡す）。
 
         Issue #28 層1: 再接続後に RegisterSet 全件を kabuStation に再登録する。
@@ -4042,10 +4094,17 @@ class DataEngineServer:
         """
         if self._kabu_venue is None or not self._kabu_venue.is_connected:
             log.debug("_kabu_put_register: no active session, skipping re-register")
-            return
+            return True  # 未接続はスキップ扱い（エラーではない）
         if not symbols:
-            return
-        log.info("_kabu_put_register: re-registering %d symbols after reconnect", len(symbols))
+            return True
+        log.info("_kabu_put_register: registering %d symbols", len(symbols))
+        try:
+            client = self._make_kabu_rest_client()
+            await client.put_register(symbols)
+            return True
+        except Exception as exc:
+            log.error("_kabu_put_register: PUT /register failed: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # C1: kabu PUSH → adapter → mapper → outbox pipeline entry points

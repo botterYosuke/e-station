@@ -34,7 +34,7 @@ async def connect(
     env: KabuEnv,
     on_message: MessageHandler,
     register_set: RegisterSet,
-    put_register: Callable[[list[tuple[str, int]]], Awaitable[None]],
+    put_register: Callable[[list[tuple[str, int]]], Awaitable[bool]],
 ) -> None:
     """WebSocket に接続して受信ループを実行する。
 
@@ -62,7 +62,8 @@ async def connect(
                 # 再接続後は全件 re-register (U6)
                 symbols = register_set.all_symbols()
                 if symbols:
-                    await put_register(symbols)
+                    if not await put_register(symbols):
+                        log.warning("kabusapi_ws: put_register failed after reconnect (%d symbols)", len(symbols))
 
                 async for raw in ws:
                     if isinstance(raw, bytes):

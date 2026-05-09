@@ -42,6 +42,9 @@
 | enum 下限チェックのみのバリアント数テスト | `assert!(count >= N)` 形式のバリアント数テストは新バリアント追加を検出しない。`_ => None` ワイルドカードがある match では新バリアントが追加されてもテストが通り、サイレント消失を見逃す。`assert_eq!(count, N)` の完全一致テストで新旧どちらの変化も検出する | 1 |
 | IPC 移行後 outbox dict → proto 整合性未検証 | 取引所アダプターが outbox に積む dict の全フィールドを proto 定義と照合するテストがなく、旧 IPC（JSON）向けの legacy フィールドが proto 変換時にサイレント DROP を引き起こす | 1 |
 | 孤立メソッド（Orphan Method） | 実装済みコールバックがプロダクションのコールパスに繋がれていない。メソッドが単体テストでパスしていても、実際に呼ばれていないため症状が出ない。起動確認テストがなければ検出不能 | 1 |
+| 例外握り潰し後の資源継続登録 | HTTP 呼び出し失敗を except して飲み込んだあと、呼び出し元がセンチネルタスク・ストリームキーを「成功扱い」で継続登録する。"subscribed なのにデータが来ない" silent failure が生じる。戻り値 bool で成否を伝達し、失敗時は登録をスキップする設計が必要 | 1 |
+| タスク cancel 対称性欠如 | 起動メソッドでタスクを `create_task` しても、対応する cleanup メソッド（`_clear_kabu_session` 等）でそのタスクを `cancel()` していない。再ログイン・セッションリセット後も旧タスクが生き続け、資源の宙ぶらりんや二重起動ガードの誤発動を招く | 1 |
+| コールバック型シグネチャ陳腐化 | コールバックの戻り値型を変更したとき（`None` → `bool`）、呼び出し側の型アノテーションと処理が旧シグネチャのまま残り、失敗を示す `False` が無音で捨てられる。型ヒントとテストの両方で契約を固める | 1 |
 
 ---
 
@@ -2219,3 +2222,28 @@ WS 接続中に新規 ticker が Subscribe されても、`PUT /register` は WS
    ハンドラは多 venue 対応で必ず壊れる。venue を引数・state から動的に選択する設計にする。
 3. **コメントの "no X" は実装が完成したら削除する**: "no GetBuyingPower" コメントが
    バグの見逃しを助長した。機能が追加されたらコメントも必ず更新する。
+
+---
+
+## 2026-05-09 — kabu ログイン済みでもラダーが "Waiting for data..." のまま（Issue #35）
+
+**見逃しパターン**: PUSH 登録スタブ / 孤立メソッド / 例外握り潰し後の資源継続登録 / タスク cancel 対称性欠如
+
+**根本原因**:
+- Bug A: `_kabu_put_register` がログのみのスタブで、PUT /register HTTP 呼び出しが存在しなかった
+- Bug B: `_handle_subscribe_kabu_station` が subscribe 後に `_kabu_put_register` を呼ばなかった
+- Bug C（修正過程で発覚）: `_clear_kabu_session` が `_kabu_push_task` をキャンセルしていなかった
+- Bug D（修正過程で発覚）: `kabusapi_ws.py` の `put_register` コールバック型が `Awaitable[None]` のまま
+
+**既存テストが見逃した理由**:
+- `test_server_kabu_subscribe.py` が `_kabu_register_set.register()` の成功と subscribe の受け入れのみをテストし、PUT /register HTTP が実際に呼ばれることをテストしなかった（孤立メソッドパターン）
+- `_kabu_put_register` のスタブ完成度が高く（ログ出力・早期リターン条件が完備）、コードを見ても動作しているように見えた
+
+**追加したテスト**:
+- `python/tests/test_kabu_put_register.py` — 13 件（put_register HTTP 呼び出し、subscribe 後の即時登録、KabuApiError 飲み込み、PUT 失敗時のセンチネル未作成、Unsubscribe の unregister 等）
+
+**教訓**:
+1. **コールバックの配線確認テストが必要**: `put_register=self._kabu_put_register` という配線だけでなく、「実際に HTTP PUT が送られるか」を統合レベルでテストする。httpx_mock を使えば HTTP 呼び出しの有無を検証できる。
+2. **例外を飲み込んだらリソース登録をスキップせよ**: except して return しても呼び出し元がリソースを「成功扱い」で登録すると silent failure になる。戻り値 `bool` で成否を伝達し、失敗時は登録をスキップする。
+3. **タスクは start と cancel を対称に**: `create_task` で起動したタスクは、対応する cleanup メソッドで必ず `cancel()` する。`_kabu_fill_poller_task` にはあったが `_kabu_push_task` には欠落していた。
+4. **コールバック型を変えたら呼び出し側も更新せよ**: `None → bool` の変更を `kabusapi_ws.py` のシグネチャと `await` 後の処理の両方に反映する必要があった。
