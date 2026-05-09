@@ -326,6 +326,18 @@ impl State {
         None
     }
 
+    fn stream_venue(&self) -> Option<exchange::adapter::Venue> {
+        // Ready 状態のストリームから
+        if let Some(ti) = self.stream_pair() {
+            return Some(ti.ticker.exchange.venue());
+        }
+        // Waiting 状態のストリームから
+        if let crate::connector::ResolvedStream::Waiting { streams, .. } = &self.streams {
+            return streams.first().map(|s| s.venue());
+        }
+        None
+    }
+
     pub fn stream_pair_kind(&self) -> Option<StreamPairKind> {
         let ready_streams = self.streams.ready_iter()?;
         let mut unique = vec![];
@@ -892,9 +904,20 @@ impl State {
             None
         };
 
+        // stream_venue を一度だけ計算して uninitialized_base と stream_empty_reason の両方で使う
+        let sv = self.stream_venue();
+
+        let stream_empty_reason: &'static str = match sv {
+            None => "銘柄を選択してください",
+            Some(Venue::Tachibana) if !tachibana_ready => "立花へのログインが必要です",
+            Some(Venue::KabuStation) if !kabu_ready => "kabuステーションへのログインが必要です",
+            _ => "データ受信待ち...",
+        };
+
         let uninitialized_base = |kind: ContentKind| -> Element<'a, Message> {
             if self.has_stream() {
-                center(text("Loading…").size(16)).into()
+                // stream_empty_reason を再利用（重複排除）。&'static str はコピー型。
+                center(text(stream_empty_reason).size(16)).into()
             } else {
                 let content = column![
                     text(kind.to_string()).size(16),
@@ -905,6 +928,18 @@ impl State {
 
                 center(content).into()
             }
+        };
+
+        let order_venue_ready = match order_venue {
+            Venue::Tachibana => tachibana_ready,
+            Venue::KabuStation => kabu_ready,
+            // 注文パネルの対象は立花・kabu のみ。Crypto/Replay は認証不要として常に true
+            Venue::Replay
+            | Venue::Bybit
+            | Venue::Binance
+            | Venue::Hyperliquid
+            | Venue::Okex
+            | Venue::Mexc => true,
         };
 
         let body = match &self.content {
@@ -979,9 +1014,10 @@ impl State {
             }
             Content::TimeAndSales(panel) => {
                 if let Some(panel) = panel {
-                    let base = panel::view(panel, timezone).map(move |message| {
-                        Message::PaneEvent(id, Event::PanelInteraction(message))
-                    });
+                    let base =
+                        panel::view(panel, timezone, stream_empty_reason).map(move |message| {
+                            Message::PaneEvent(id, Event::PanelInteraction(message))
+                        });
 
                     let settings_modal =
                         || modal::pane::settings::timesales_cfg_view(panel.config, id);
@@ -1043,9 +1079,10 @@ impl State {
 
                     top_left_buttons = top_left_buttons.push(modifiers);
 
-                    let base = panel::view(panel, timezone).map(move |message| {
-                        Message::PaneEvent(id, Event::PanelInteraction(message))
-                    });
+                    let base =
+                        panel::view(panel, timezone, stream_empty_reason).map(move |message| {
+                            Message::PaneEvent(id, Event::PanelInteraction(message))
+                        });
 
                     let settings_modal =
                         || modal::pane::settings::ladder_cfg_view(panel.config, id);
@@ -1115,9 +1152,9 @@ impl State {
 
                     top_left_buttons = top_left_buttons.push(modifiers);
 
-                    let base = chart::view(chart, indicators, timezone).map(move |message| {
-                        Message::PaneEvent(id, Event::ChartInteraction(message))
-                    });
+                    let base = chart::view(chart, indicators, timezone, stream_empty_reason).map(
+                        move |message| Message::PaneEvent(id, Event::ChartInteraction(message)),
+                    );
                     let settings_modal = || {
                         heatmap_cfg_view(
                             chart.visual_config(),
@@ -1221,9 +1258,9 @@ impl State {
                         }
                     }
 
-                    let base = chart::view(chart, indicators, timezone).map(move |message| {
-                        Message::PaneEvent(id, Event::ChartInteraction(message))
-                    });
+                    let base = chart::view(chart, indicators, timezone, stream_empty_reason).map(
+                        move |message| Message::PaneEvent(id, Event::ChartInteraction(message)),
+                    );
                     let settings_modal = || {
                         kline_cfg_view(
                             chart.study_configurator(),
@@ -1277,9 +1314,11 @@ impl State {
                 chart, indicators, ..
             } => {
                 if let Some(chart) = chart {
-                    let base = HeatmapShader::view(chart, timezone).map(move |message| {
-                        Message::PaneEvent(id, Event::HeatmapShaderInteraction(message))
-                    });
+                    let base = HeatmapShader::view(chart, timezone, stream_empty_reason).map(
+                        move |message| {
+                            Message::PaneEvent(id, Event::HeatmapShaderInteraction(message))
+                        },
+                    );
 
                     let ticker_info = self.stream_pair();
                     let exchange = ticker_info.as_ref().map(|info| info.ticker.exchange);
@@ -1366,7 +1405,7 @@ impl State {
             }
             Content::OrderEntry(panel) => {
                 let base = panel
-                    .view()
+                    .view(order_venue_ready)
                     .map(move |msg| Message::PaneEvent(id, Event::OrderEntryMsg(msg)));
                 self.compose_stack_view(
                     base,
@@ -1379,7 +1418,7 @@ impl State {
                 )
             }
             Content::OrderList(panel) => {
-                let base = panel::orders::view(panel)
+                let base = panel::orders::view(panel, order_venue_ready)
                     .map(move |msg| Message::PaneEvent(id, Event::OrderListMsg(msg)));
                 self.compose_stack_view(
                     base,
@@ -1392,7 +1431,7 @@ impl State {
                 )
             }
             Content::BuyingPower(panel) => {
-                let base = panel::buying_power::view(panel)
+                let base = panel::buying_power::view(panel, order_venue_ready)
                     .map(move |msg| Message::PaneEvent(id, Event::BuyingPowerMsg(msg)));
                 self.compose_stack_view(
                     base,
@@ -1405,7 +1444,7 @@ impl State {
                 )
             }
             Content::Positions(panel) => {
-                let base = panel::positions::view(panel)
+                let base = panel::positions::view(panel, order_venue_ready)
                     .map(move |msg| Message::PaneEvent(id, Event::PositionsMsg(msg)));
                 self.compose_stack_view(
                     base,

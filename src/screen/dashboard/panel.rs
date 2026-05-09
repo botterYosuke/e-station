@@ -30,9 +30,13 @@ pub trait Panel: canvas::Program<Message> {
     fn is_empty(&self) -> bool;
 }
 
-pub fn view<T: Panel>(panel: &'_ T, _timezone: data::UserTimezone) -> Element<'_, Message> {
+pub fn view<'a, T: Panel>(
+    panel: &'a T,
+    _timezone: data::UserTimezone,
+    empty_reason: &'a str,
+) -> Element<'a, Message> {
     if panel.is_empty() {
-        return center(text("Waiting for data...").size(16)).into();
+        return center(text(empty_reason).size(16)).into();
     }
 
     container(

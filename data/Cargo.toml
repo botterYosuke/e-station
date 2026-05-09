@@ -28,3 +28,4 @@ exchange.workspace = true
 [dev-dependencies]
 serial_test = "3"
 proptest = "1"
+rstest = "0.23"

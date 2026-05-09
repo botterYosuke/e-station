@@ -135,6 +135,11 @@ impl OrderEntryPanel {
                 }
             }
             Message::ConfirmSubmit => {
+                // Safety: ConfirmSubmit は SubmitClicked → 確認ダイアログ → ConfirmSubmit
+                // という経路でのみ到達する。SubmitClicked 自体は view() の on_press_maybe で
+                // venue_ready が true のときのみ発火するため、ConfirmSubmit が venue_ready=false
+                // の状態で呼ばれることはない。
+                // （参照: view() の submit_btn.on_press_maybe — venue_ready チェック済み）
                 if self.quantity_valid() && self.instrument_id.is_some() {
                     return self.build_submit_action();
                 }
@@ -208,7 +213,7 @@ impl OrderEntryPanel {
         })
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, venue_ready: bool) -> Element<'_, Message> {
         let instrument_label = self.display_label.as_deref().unwrap_or("銘柄未選択");
 
         let side_row = {
@@ -278,15 +283,19 @@ impl OrderEntryPanel {
             form = form.push(trigger_input);
         }
 
-        let submit_enabled =
-            !self.submitting && self.quantity_valid() && self.instrument_id.is_some();
-        let submit_btn = if submit_enabled {
-            button(text("注文").size(13))
-                .on_press(Message::SubmitClicked)
-                .width(Length::Fill)
-        } else {
-            button(text("注文").size(13)).width(Length::Fill)
-        };
+        let submit_btn = button(text("注文").size(13))
+            .on_press_maybe(
+                if venue_ready
+                    && !self.submitting
+                    && self.quantity_valid()
+                    && self.instrument_id.is_some()
+                {
+                    Some(Message::SubmitClicked)
+                } else {
+                    None
+                },
+            )
+            .width(Length::Fill);
 
         form = form.push(submit_btn);
 

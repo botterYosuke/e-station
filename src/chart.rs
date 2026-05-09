@@ -515,9 +515,10 @@ pub fn view<'a, T: Chart>(
     chart: &'a T,
     indicators: &'a [T::IndicatorKind],
     timezone: data::UserTimezone,
+    empty_reason: &'a str,
 ) -> Element<'a, Message> {
     if chart.is_empty() {
-        return center(text("Waiting for data...").size(16)).into();
+        return center(text(empty_reason).size(16)).into();
     }
 
     let state = chart.state();

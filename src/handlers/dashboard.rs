@@ -734,6 +734,26 @@ impl crate::Flowsurface {
                             }
                         }
 
+                        // Issue #39: ベニューが未準備でスキップした場合のデバッグログ。
+                        if pane_added
+                            && matches!(
+                                kind,
+                                ContentKind::BuyingPower
+                                    | ContentKind::Positions
+                                    | ContentKind::OrderList
+                            )
+                            && !self.tachibana_state.is_ready()
+                            && !self.kabu_state.is_ready()
+                        {
+                            log::debug!(
+                                "[auto-fetch] skipped {:?}: no venue ready \
+                                 (tachibana_ready={}, kabu_ready={})",
+                                kind,
+                                self.tachibana_state.is_ready(),
+                                self.kabu_state.is_ready(),
+                            );
+                        }
+
                         return task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m)));
                     }
                     Some(dashboard::sidebar::Action::RequestTachibanaLogin(trigger)) => {
