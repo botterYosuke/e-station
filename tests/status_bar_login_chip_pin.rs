@@ -14,8 +14,7 @@
 
 fn read_main_rs() -> String {
     let base = env!("CARGO_MANIFEST_DIR");
-    std::fs::read_to_string(format!("{base}/src/main.rs"))
-        .expect("src/main.rs must be readable")
+    std::fs::read_to_string(format!("{base}/src/main.rs")).expect("src/main.rs must be readable")
 }
 
 fn extract_fn_body(src: &str, fn_needle: &str, max_bytes: usize) -> String {

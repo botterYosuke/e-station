@@ -311,11 +311,7 @@ impl crate::Flowsurface {
                                 self.active_dashboard_mut()
                                     .distribute_buying_power_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
-                                let venue = if self.kabu_state.is_ready() {
-                                    crate::KABU_STATION_VENUE_NAME.to_string()
-                                } else {
-                                    crate::TACHIBANA_VENUE_NAME.to_string()
-                                };
+                                let venue = self.active_venue_name().to_string();
                                 return Task::perform(
                                     async move {
                                         conn.send(engine_client::dto::Command::GetBuyingPower {
@@ -353,12 +349,11 @@ impl crate::Flowsurface {
                                     if let Some(conn) = self.engine_connection.as_ref().cloned() {
                                         let is_replay = crate::app_mode()
                                             == engine_client::dto::AppMode::Replay;
+                                        // replay パスは専用 venue 名; live パスは active_venue_name() で解決
                                         let venue = if is_replay {
                                             "replay".to_string()
-                                        } else if self.kabu_state.is_ready() {
-                                            crate::KABU_STATION_VENUE_NAME.to_string()
                                         } else {
-                                            crate::TACHIBANA_VENUE_NAME.to_string()
+                                            self.active_venue_name().to_string()
                                         };
                                         let req_id = uuid::Uuid::new_v4().to_string();
                                         self.order_list_request_id = Some(req_id.clone());
@@ -420,11 +415,7 @@ impl crate::Flowsurface {
                                     self.active_dashboard_mut()
                                         .distribute_positions_loading(main_window, true);
                                     let req_id_for_err = req_id.clone();
-                                    let venue = if self.kabu_state.is_ready() {
-                                        crate::KABU_STATION_VENUE_NAME.to_string()
-                                    } else {
-                                        crate::TACHIBANA_VENUE_NAME.to_string()
-                                    };
+                                    let venue = self.active_venue_name().to_string();
                                     return Task::perform(
                                         async move {
                                             conn.send(engine_client::dto::Command::GetPositions {
@@ -597,13 +588,15 @@ impl crate::Flowsurface {
                         // reconnect による VenueReady 再発火も同じ経路をカバーする。
                         if pane_added
                             && kind == ContentKind::BuyingPower
-                            && self.tachibana_state.is_ready()
+                            && (self.tachibana_state.is_ready() || self.kabu_state.is_ready())
                             && self.buying_power_request_id.is_none()
                         {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let venue = self.active_venue_name().to_string();
                                 let req_id = uuid::Uuid::new_v4().to_string();
                                 self.buying_power_request_id = Some(req_id.clone());
                                 let main_window = self.main_window.id;
+                                // active_dashboard_mut() は conn を取得後に呼ぶ（borrow 順序）
                                 self.active_dashboard_mut()
                                     .distribute_buying_power_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
@@ -613,7 +606,7 @@ impl crate::Flowsurface {
                                         async move {
                                             conn.send(engine_client::dto::Command::GetBuyingPower {
                                                 request_id: req_id,
-                                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                                venue,
                                             })
                                             .await
                                             .map_err(|e| e.to_string())
@@ -632,21 +625,27 @@ impl crate::Flowsurface {
                                 ]);
                             } else {
                                 log::warn!(
-                                    "[BuyingPower auto-fetch] tachibana is ready but \
+                                    "[BuyingPower auto-fetch] venue is ready but \
                                      engine_connection is None"
                                 );
+                                self.notifications.push(Toast::error(
+                                    "余力情報の自動取得に失敗しました（エンジン未接続）"
+                                        .to_string(),
+                                ));
                             }
                         }
 
                         if pane_added
                             && kind == ContentKind::Positions
-                            && self.tachibana_state.is_ready()
+                            && (self.tachibana_state.is_ready() || self.kabu_state.is_ready())
                             && self.positions_request_id.is_none()
                         {
                             if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let venue = self.active_venue_name().to_string();
                                 let req_id = uuid::Uuid::new_v4().to_string();
                                 self.positions_request_id = Some(req_id.clone());
                                 let main_window = self.main_window.id;
+                                // active_dashboard_mut() は conn を取得後に呼ぶ（borrow 順序）
                                 self.active_dashboard_mut()
                                     .distribute_positions_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
@@ -656,7 +655,7 @@ impl crate::Flowsurface {
                                         async move {
                                             conn.send(engine_client::dto::Command::GetPositions {
                                                 request_id: req_id,
-                                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                                venue,
                                             })
                                             .await
                                             .map_err(|e| e.to_string())
@@ -675,9 +674,63 @@ impl crate::Flowsurface {
                                 ]);
                             } else {
                                 log::warn!(
-                                    "[Positions auto-fetch] tachibana is ready but \
+                                    "[Positions auto-fetch] venue is ready but \
                                      engine_connection is None"
                                 );
+                                self.notifications.push(Toast::error(
+                                    "保有銘柄の自動取得に失敗しました（エンジン未接続）"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+
+                        // M4: OrderList pane_added 自動フェッチ（BuyingPower / Positions と同パターン）
+                        if pane_added
+                            && kind == ContentKind::OrderList
+                            && (self.tachibana_state.is_ready() || self.kabu_state.is_ready())
+                            && self.order_list_request_id.is_none()
+                        {
+                            if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                                let is_replay =
+                                    crate::app_mode() == engine_client::dto::AppMode::Replay;
+                                let venue = if is_replay {
+                                    "replay".to_string()
+                                } else {
+                                    self.active_venue_name().to_string()
+                                };
+                                let req_id = uuid::Uuid::new_v4().to_string();
+                                self.order_list_request_id = Some(req_id.clone());
+                                let main_window = self.main_window.id;
+                                self.active_dashboard_mut()
+                                    .distribute_order_list_loading(main_window, true);
+                                return Task::batch(vec![
+                                    task.map(|m| Message::Dashboard(DashboardMsg::Sidebar(m))),
+                                    Task::perform(
+                                        async move {
+                                            conn.send(engine_client::dto::Command::GetOrderList {
+                                                request_id: req_id,
+                                                venue,
+                                                filter: engine_client::dto::OrderListFilter {
+                                                    status: None,
+                                                    instrument_id: None,
+                                                    date: None,
+                                                },
+                                            })
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                        },
+                                        |r| Message::Venue(VenueMsg::OrderListSendCompleted(r)),
+                                    ),
+                                ]);
+                            } else {
+                                log::warn!(
+                                    "[OrderList auto-fetch] venue is ready but \
+                                     engine_connection is None"
+                                );
+                                self.notifications.push(Toast::error(
+                                    "注文一覧の自動取得に失敗しました（エンジン未接続）"
+                                        .to_string(),
+                                ));
                             }
                         }
 
