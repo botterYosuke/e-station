@@ -333,8 +333,9 @@ use std::time::Duration;
 #[tokio::test]
 #[ignore = "requires display + ANTHROPIC_API_KEY"]
 async fn chart_renders_after_ticker_click() -> anyhow::Result<()> {
-    let mut child = tokio::process::Command::new("cargo")
-        .args(["run", "--release", "--"])
+    // uv run 経由で起動しないと Python engine が transport error ループになる
+    let mut child = tokio::process::Command::new("uv")
+        .args(["run", "cargo", "run", "--release", "--", "--mode", "live"])
         .spawn()?;
 
     let window = wait_for_window("Flowsurface", Duration::from_secs(15))?;
@@ -431,10 +432,201 @@ jobs:
 - **ウィンドウタイトル**: `"Flowsurface"` または `"Flowsurface [<layout-name>]"`。
   `wait_for_window("Flowsurface", ...)` で prefix 一致。
 - **起動時間**: iced + wgpu の初期化は 2〜4 秒。最初の `sleep` は 2 秒以上。
-- **モード引数**: ライブ vs リプレイで UI が変わる。`--mode replay` を明示する。
+- **モード引数**: ライブ vs リプレイで UI が変わる。`--mode live` / `--mode replay` を明示する。
 - **engine セッション**: ビジュアル E2E でライブ GUI を起動すると
   `%APPDATA%\flowsurface\engine-session.json` が生成される。
   `child.kill()` しないと次の attach モードテストに干渉する。
+
+### アプリ起動コマンド（Tier 2 実機確認用）
+
+**必ず `uv run` 経由で起動すること。** bare `Start-Process flowsurface.exe` や
+`cargo run` 単体では Python engine が `transport error` ループに陥る。
+
+```powershell
+# .env の dev credentials を読み込んでから起動
+cd D:\Documents\e-station
+Get-Content .env | Where-Object { $_ -match '^\s*[^#]' -and $_ -match '=' } | ForEach-Object {
+    $parts = $_ -split '=', 2
+    [System.Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1].Trim(), 'Process')
+}
+$proc = Start-Process -FilePath "uv" -ArgumentList "run", "cargo", "run", "--release", "--", "--mode", "live" `
+    -WorkingDirectory "D:\Documents\e-station" -PassThru -WindowStyle Normal
+Write-Host "PID: $($proc.Id)"
+```
+
+起動後は release build のログファイルで状態確認:
+
+```powershell
+$log = "$env:APPDATA\flowsurface\flowsurface-current.log"
+# ログが出るまで最大40秒待つ
+$deadline = (Get-Date).AddSeconds(40)
+while (-not (Test-Path $log) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+# ログイン・接続状態のみ抽出
+Get-Content $log | Select-String "VenueReady|market_closed|depth_stream|connected|disconnected|VenueLogin"
+```
+
+ログで確認するキーワード:
+| キーワード | 意味 |
+|---|---|
+| `VenueReady` | ログイン成功（自動ログインが効いた） |
+| `market_closed` | 市場閉場で WS 切断 → depth データは来ない |
+| `a stream connected to ... WS` | depth/trades の WS 接続確立 |
+| `depth_stream subscribe error` | depth 購読失敗 |
+| `VenueLoginError` | ログイン失敗 |
+
+---
+
+## Tier 2 実行前プリフライトチェック
+
+**視覚的な動作確認（Tier 2）を行う前に、必ずこの確認を済ませること。**
+特に「Waiting for data...」「データが来ない」系のバグは、コードのバグと
+環境条件が重なって見えるため、条件を先に分離する。
+
+### チェックリスト
+
+```
+□ 1. バグ発現の venue を特定する
+      → python/engine/exchanges/<venue>.py の venue_caps() で
+        client_aggr_depth が True/False を確認
+
+□ 2. その venue のサービスが起動しているか確認する
+      → KabuStation: Get-Process | Where-Object { $_.Name -match "kabu" }
+      → 立花: .env に DEV_TACHIBANA_USER_ID があれば自動ログイン可
+
+□ 3. 市場が開いているか確認する（depth ストリームには市場時間が必要）
+      → 東証（TSE）: 9:00-11:30 / 12:30-15:30 JST
+      → 市場外ではログに "market_closed" が出て depth データは来ない
+
+□ 4. saved-state.json に対象ペイン構成が入っているか確認する
+      $f = "$env:APPDATA\flowsurface\saved-state.json"
+      Get-Content $f -Raw | Select-String 'Ladder|depth_aggr'
+```
+
+### 「Waiting for data...」の原因切り分け
+
+Ladder パネルがこのメッセージを表示する原因は複数ある。視覚確認で
+見えても、**それがバグなのか環境問題なのかは切り分けが必要**。
+
+| 原因 | 見分け方 |
+|---|---|
+| **コードの routing バグ**（Issue #38 等） | Tier 0 静的解析でコードの不一致を確認 |
+| **市場閉場**（正常動作） | ログに `market_closed` が出ている |
+| **ログイン失敗・未接続** | ログに `VenueLoginError` / `VenueReady` がない |
+| **依存サービス未起動** | ログに `transport error` ループがある |
+
+**Tier 0 で決定論的にバグが確認できた場合**（`A == B` が型レベルで常に false
+になるなど）は、Tier 2 による視覚確認は必須ではない。環境条件が揃わない
+状況で強行しても「再現できない＝バグがない」と誤解されるリスクがある。
+
+### 視覚再現不可の場合の記録パターン
+
+条件が揃わず Tier 2 で再現できなかった場合は、以下を明示して報告する：
+
+```
+## 動作確認結果（視覚再現不可）
+
+**バグの存在**: Tier 0 静的解析で確定（決定論的）
+**視覚再現**: 不可
+**再現不可の理由**: <以下から選ぶ>
+  - 市場閉場（JSE 15:30 JST 閉場 / 確認時刻 XX:XX JST）
+  - 依存サービス未起動（KabuStation が起動していない）
+  - 対象 venue の VenueCaps がバグ条件を満たさない
+    （例: 立花は client_aggr_depth=True のため Issue #38 は発現しない）
+
+**視覚再現に必要な条件**:
+  - <具体的な条件を列挙>
+```
+
+---
+
+## ログデバッグ手順
+
+静的解析だけでは原因が特定できない場合（ランタイム値・タイミング依存の問題）に使う。
+
+### 手順
+
+1. **仮説を 2〜8 つ作成する**
+   現状のコードを静的に読み、「ここが怪しい」という候補を列挙する。
+   パターン例（バグの種類に応じて読み替える）:
+   - 「フラグ X が想定外の値になっている」
+   - 「条件分岐 Y が期待と逆の方向に進んでいる」
+   - 「イベント Z がルーティング先に届いていない」
+   - 「状態 W が初期化前に参照されている」
+
+2. **各仮説を検証するログを追加する**
+   `log::debug!` を使い、各仮説の検証点にログを置く。
+   ログには仮説番号とコンテキスト値を含める。
+
+   ```rust
+   // 仮説 A: フラグが想定外の値になっている
+   log::debug!("[DEBUG-A] flag_name({context}) = {value}");
+
+   // 仮説 B: ルーティング条件が false を返している
+   log::debug!("[DEBUG-B] routing_check: expected={expected:?}, actual={actual:?}");
+   ```
+
+3. **ログを確認する**
+
+   `RUST_LOG` はクレート名でスコープを絞るとノイズが少ない（`debug` 全体だと
+   依存クレートのログが大量に出る）。
+
+   ```powershell
+   # クレート名でスコープを絞って起動
+   $env:RUST_LOG = "flowsurface=debug"
+   cargo run --release
+
+   # ログをファイルに保存して [DEBUG- 行だけ抽出
+   $env:RUST_LOG = "flowsurface=debug"
+   cargo run --release 2>&1 | Tee-Object -FilePath debug.log
+   Select-String "\[DEBUG-" debug.log
+   ```
+
+4. **ログ結果から原因を特定する**
+   各仮説に対応するログが出力されているか、値が期待通りかを確認する。
+   原因が特定できたら、その仮説に対応する修正方針を決める。
+
+5. **追加したログをすべて削除する**
+   原因特定後は `[DEBUG-` プレフィックスで検索してすべて除去する。
+
+   ```powershell
+   # 残存チェック（0 件になるまで削除する）
+   # ※ Select-String は ** glob を展開しないため Get-ChildItem 経由で検索する
+   Get-ChildItem -Recurse -Filter "*.rs" -Path src | Select-String "\[DEBUG-"
+   ```
+
+   `cargo check` でコンパイルエラーがないことを確認してから commit する。
+
+### ログ追加のルール
+
+- プレフィックスは `[DEBUG-A]` のように仮説番号を入れる（後で一括削除しやすいため）
+- 本番ログ（`log::warn!` / `log::error!` で既存のもの）は触らない
+- ログの追加・削除は小さなコミットにせず、原因特定後に一括で削除する
+- ログが残ったまま PR を出さない
+
+### ⚠️ PowerShell 出力キャプチャの落とし穴
+
+`| Select-Object -First N` はパイプライン上流のプロセスを N 行取得後に **強制終了**する。
+これにより：
+
+- 上流プロセスの **exit code が失われ**、PowerShell パイプライン全体は exit code **0** を返す（偽の成功）
+- エラーが出力の後半にあると **見えないまま診断が終わる**
+- Python スクリプト（`replay_session.py` など）を確認するときに特にハマりやすい
+
+**正しいキャプチャ方法**:
+
+```powershell
+# NG: 80行でプロセスを kill → エラーが後半にあると見えない
+uv run python -m engine.replay_session run ... 2>&1 | Select-Object -First 80
+
+# OK: 全出力をキャプチャ（長くなっても全部見える）
+uv run python -m engine.replay_session run ... 2>&1 | Out-String -Width 300
+
+# OK: ファイルにも残したい場合
+uv run python -m engine.replay_session run ... 2>&1 | Tee-Object -FilePath out.txt
+```
+
+exit code を確認したい場合は `$LASTEXITCODE` を使う（パイプ後でも有効）。
+`Out-String` 経由では `$LASTEXITCODE` が保持されるが、`Select-Object` 後は不定になる。
 
 ---
 
