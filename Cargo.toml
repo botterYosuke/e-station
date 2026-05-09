@@ -96,3 +96,7 @@ tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 walkdir = "2"
 serial_test = "3"
+xcap = "0.0.14"
+base64 = { version = "0.22", features = ["alloc"] }
+reqwest = { version = "0.12", features = ["json"] }
+anyhow = "1"
