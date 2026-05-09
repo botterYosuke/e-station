@@ -18,6 +18,8 @@
 | API 仕様固定なし | Mock レスポンスが誤ったキー名・フィールド名を前提に書かれており、実 API の必須パラメータ欠落・レスポンス形式ズレを素通りする | 2 |
 | ライブデータ前提 | テストが「常にライブストリームあり」を前提とし、市場クローズ・週末など「ストリームなし」で起動するシナリオを未検証 | 1 |
 | モード境界 saved-state 混入 | saved-state.json に含まれるライブモード用ペインがリプレイモード起動時にも読み込まれ、無効な状態で描画が実行される | 1 |
+| Venue-Error Deadlock | venue 認証失敗後も pane が Waiting streams を持ち続け has_stream()=true のまま "Loading…" が永続する | 1 |
+| PUSH 登録スタブ | _kabu_put_register が PUT /register を呼ばないスタブのまま残され、kabu ログイン後も板データが一切届かない | 1 |
 | saved-state migration 未実装 | enum バリアント追加時に、追加前の saved-state を読んだ場合の migration テストがなく、旧フォーマットでの起動時のみ再現するバグを見逃す | 1 |
 | IPC 契約の片側未実装 | Rust が特殊パス（`"__all__"` 等）を送る契約が `backend.rs` に書かれているが、Python 側の対応実装とテストが追いついていない | 1 |
 | バグ動作 pin | 既存のバグ挙動（空返却・None 返却）をリグレッションガードとして固定し、正しい設計（raise 等）と乖離した状態を固める | 2 |
@@ -2087,3 +2089,104 @@ proto スキーマに適合しているかを検証する結合テストがな�
    Rust の match 式で `_ => {}` を使うと、新しいバリアント（`EngineEvent::Error` 等）が
    追加されてもコンパイルエラーにならずサイレントに無視される。
    Error 系イベントは必ず明示的なアームで処理し、`Event::Disconnected` 等に変換してクライアントに通知する。
+
+---
+
+## 2026-05-09 — 立花ログアウト + kabu 認証失敗でラダーが "Loading…" から抜け出せない
+
+**見逃しパターン**: Venue-Error Deadlock（ベニュー認証失敗によるローディングデッドロック）
+
+**根本原因**（3段階のゲートが直列に絡む）:
+
+1. **kabu 認証失敗** — kabu ログイン時に `KabuApiError(4001007): ログイン認証エラー` が発生。
+   Python が `VenueError { code: "login_failed" }` を送信し、Rust は `VenueState::Error { ... }` へ遷移。
+   `is_ready = false` → `set_kabu_station_ready(false)` が呼ばれる。
+
+2. **ticker メタデータ未取得** — T35-U4 ゲート（`tickers_table.rs:190-206`）により、
+   kabu が ready でないとメタデータ fetch が実行されない。
+   `tickers_info` は空のまま。ログアウト状態の 立花も同様。
+
+3. **ストリーム解決の無限延期** — `handlers/dashboard.rs:117-123` で
+   `has_any_ticker_info = false` を検出し `Task::none()` で無期限に解決を延期。
+   pane は `ResolvedStream::Waiting { streams: [TOYOTA/Depth, ...] }` を保持したまま。
+   `has_stream() = true` → `uninitialized_base` が `"Loading…"` を返す（`pane.rs:897`）。
+
+結果：ラダーは `Content::Ladder(None)` のまま"Loading…"を永続的に表示。
+kabu エラーポップアップは表示されるが、ラダー自体は理由を伝えない。
+
+**追加したテスト**: なし（UX 設計ギャップであり、修正方針の決定が先行する）
+
+**教訓**:
+
+1. **"Loading…" は「待機中」を示すが「なぜ待つのか」を示さない**:
+   `pane.rs` の `uninitialized_base` は `has_stream() == true` のときに一律 "Loading…" を返す。
+   venue が Error 状態にあることを UI に伝える手段がない。
+   次回以降: venue 状態を pane に伝播するか、stream resolution 失敗時に pane に error フラグを立てること。
+
+2. **ゲートの直列構造をドキュメント化せよ**:
+   「venue ready → ticker info → stream resolve → ladder init」の4段ゲートが存在するが、
+   どこか一段でも失敗すると後続全体がデッドロックする。各ゲートの失敗が UI 上で見えない。
+   ゲートが複数存在する経路には必ず「失敗フォールバック表示」を設けること。
+
+3. **新しいパターン: Venue-Error Deadlock**:
+   venue ログインが失敗しても、pane 側は "Waiting" streams を持ち続けるため `has_stream()` が true のまま。
+   pane に「解決不能」を伝えるメッセージパスが存在しないと、"Loading…" は永続する。
+
+---
+
+## 2026-05-09 — kabu ログイン成功後もラダーが "Waiting for data..." のまま（PUSH 登録スタブ）
+
+**見逃しパターン**: PUSH 登録スタブ（実装漏れのサイレントフェイラー）
+
+**根本原因**（2つの独立したバグが直列）:
+
+**Bug A: `_kabu_put_register` スタブ** — `server.py:4037-4048`
+
+```python
+async def _kabu_put_register(self, symbols):
+    if ...: return   # ガード
+    if not symbols: return
+    log.info("re-registering %d symbols after reconnect", len(symbols))
+    # ← ここで終わり。PUT /register の HTTP 呼び出しが存在しない
+```
+
+ログに「re-registering N symbols」が出るので動作しているように見えるが、
+実際には `PUT http://localhost:18081/kabusapi/register` を一度も呼ばない。
+`KabuStationVenue` にも `KabuRestClient` にも `/register` エンドポイントのメソッドが存在しない。
+
+**Bug B: Subscribe 時の PUT /register 省略** — `server.py:1459`
+
+```python
+self._kabu_register_set.register(ticker, 1)
+# ← await self._kabu_put_register([...]) が呼ばれない
+```
+
+WS 接続中に新規 ticker が Subscribe されても、`PUT /register` は WS 再接続時のみ試みる設計。
+しかし Bug A によりその再接続時でも実際の API 呼び出しはない。
+
+**結果フロー**:
+1. kabu ログイン成功 → PUSH WS 起動
+2. WS 接続時: `_kabu_register_set` が空 → `PUT /register` 呼ばれず（正しい）
+3. TOYOTA Subscribe → `_kabu_register_set.register("9999", 1)` → PUT /register 呼ばれず（Bug B）
+4. kabuStation は TOYOTA PUSH 配信対象を知らない → `_on_kabu_board_push` 呼ばれない
+5. ラダー: orderbook 空 → `is_empty() = true` → "Waiting for data..."
+
+**追加すべきテスト**:
+- `python/tests/test_server_kabu_subscribe.py` に「Subscribe 後に PUT /register が呼ばれる」を追加
+- `python/tests/test_kabu_put_register.py` に「`_kabu_put_register` が実際に httpx PUT を呼ぶ」を追加
+
+**教訓**:
+
+1. **ログ行だけのスタブは「動いているように見える」最悪のサイレントフェイラー**:
+   `log.info("re-registering N symbols")` は成功を示唆するが、その後に実処理がない。
+   実装完了チェックは「ログが出る」ではなく「外部 API が実際に呼ばれる」で判断する。
+
+2. **「コールバックを渡している」≠「コールバックが正しく実装されている」**:
+   `kabusapi_ws.connect(put_register=self._kabu_put_register)` とコールバックを渡す形式は、
+   コールバック本体の実装漏れをコードレビューで見落としやすい。
+   新しいコールバックは必ず「実際に HTTP を叩く」E2E テストで検証する。
+
+3. **Subscribe → PUT /register の即時呼び出しが必要**:
+   WS 接続中の新規 ticker 登録は、RegisterSet への追加だけでなく
+   即座に `PUT /register` を呼ばないと kabuStation にデータを要求できない。
+   PUSH 系の銘柄登録は「設定する」と「サーバに通知する」の2ステップが必要であることを覚えておく。
