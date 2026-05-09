@@ -2190,3 +2190,32 @@ WS 接続中に新規 ticker が Subscribe されても、`PUT /register` は WS
    WS 接続中の新規 ticker 登録は、RegisterSet への追加だけでなく
    即座に `PUT /register` を呼ばないと kabuStation にデータを要求できない。
    PUSH 系の銘柄登録は「設定する」と「サーバに通知する」の2ステップが必要であることを覚えておく。
+
+
+---
+
+## 2026-05-09 — kabu VenueReady 時に GetBuyingPower が未送信（立花の旧値が表示される）
+
+**見逃しパターン**: 対称性ギャップ（Tachibana にはある処理が kabu には未実装）
+
+**根本原因**:
+- `KabuEvent::Ready` ハンドラ（`src/handlers/venue.rs`）に `GetBuyingPower` の送信が欠落していた
+- `BuyingPowerAction`（更新ボタン）ハンドラが常に `TACHIBANA_VENUE_NAME` を使っていた（`src/handlers/dashboard.rs`）
+- `OrderListAction`（注文一覧更新ボタン）も同様に常に `TACHIBANA_VENUE_NAME` を使っていた
+- `src/main.rs` の `kabu_state` フィールドコメントに "no GetBuyingPower" と誤記があり、
+  開発時の意図的省略と誤解させた
+
+**追加したテスト**:
+- `tests/kabu_venue_tests.rs::kabu_venue_ready_sends_get_buying_power`
+- `tests/kabu_venue_tests.rs::buying_power_refresh_button_uses_active_venue`
+- `tests/kabu_venue_tests.rs::order_list_refresh_button_uses_active_venue`
+
+**教訓**:
+1. **新 venue を追加するとき、既存 venue の VenueReady ハンドラの処理リストを全部チェックする**:
+   立花 VenueReady が持つ GetBuyingPower / GetOrderList / GetPositions の3つを
+   kabu VenueReady にも揃えることが必要だった。
+   対称性ギャップは実装直後に `status_bar_login_chip_pin.rs` 等と同様の pin テストで検出できた。
+2. **ハードコードされた venue 名は危険**: `TACHIBANA_VENUE_NAME` をリテラルに持つ
+   ハンドラは多 venue 対応で必ず壊れる。venue を引数・state から動的に選択する設計にする。
+3. **コメントの "no X" は実装が完成したら削除する**: "no GetBuyingPower" コメントが
+   バグの見逃しを助長した。機能が追加されたらコメントも必ず更新する。

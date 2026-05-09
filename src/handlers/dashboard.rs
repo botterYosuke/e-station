@@ -311,11 +311,16 @@ impl crate::Flowsurface {
                                 self.active_dashboard_mut()
                                     .distribute_buying_power_loading(main_window, true);
                                 let req_id_for_err = req_id.clone();
+                                let venue = if self.kabu_state.is_ready() {
+                                    crate::KABU_STATION_VENUE_NAME.to_string()
+                                } else {
+                                    crate::TACHIBANA_VENUE_NAME.to_string()
+                                };
                                 return Task::perform(
                                     async move {
                                         conn.send(engine_client::dto::Command::GetBuyingPower {
                                             request_id: req_id,
-                                            venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                            venue,
                                         })
                                         .await
                                         .map_err(|e| e.to_string())
@@ -350,6 +355,8 @@ impl crate::Flowsurface {
                                             == engine_client::dto::AppMode::Replay;
                                         let venue = if is_replay {
                                             "replay".to_string()
+                                        } else if self.kabu_state.is_ready() {
+                                            crate::KABU_STATION_VENUE_NAME.to_string()
                                         } else {
                                             crate::TACHIBANA_VENUE_NAME.to_string()
                                         };

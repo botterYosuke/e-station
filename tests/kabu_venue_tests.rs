@@ -16,7 +16,9 @@ fn read_main() -> String {
         std::fs::read_to_string(format!("{base}/src/handlers/venue.rs")).unwrap_or_default();
     let engine =
         std::fs::read_to_string(format!("{base}/src/handlers/engine.rs")).unwrap_or_default();
-    format!("{main}\n{venue}\n{engine}")
+    let dashboard =
+        std::fs::read_to_string(format!("{base}/src/handlers/dashboard.rs")).unwrap_or_default();
+    format!("{main}\n{venue}\n{engine}\n{dashboard}")
 }
 
 fn scan_brace_body(src: &str, needle: &str, fallback_bytes: Option<usize>) -> String {
@@ -204,6 +206,69 @@ fn engine_connected_restores_kabu_state_when_cached() {
     assert!(
         body.contains("KabuVenueEvent"),
         "EngineConnected handler must synthesize Message::KabuVenueEvent(VenueEvent::Ready)"
+    );
+}
+
+// ── 買余力バグ回帰テスト (Issue: kabu VenueReady 時に GetBuyingPower が未送信) ─────
+
+#[test]
+fn kabu_venue_ready_sends_get_buying_power() {
+    // 修正前: KabuEvent::Ready ハンドラに GetBuyingPower が存在しなかった。
+    // 結果: 立花セッションの旧値(¥20000000 等)がパネルに残り続けた。
+    // 修正後: 立花 VenueReady と同様に KABU_STATION_VENUE_NAME で GetBuyingPower を送信する。
+    let src = read_main();
+    let body = scan_brace_body(&src, "VenueMsg::KabuEvent(event) =>", None);
+
+    assert!(
+        body.contains("Command::GetBuyingPower"),
+        "KabuEvent::Ready ハンドラは GetBuyingPower を送信しなければならない。\n\
+         存在しない場合、立花ログアウト後に kabu でログインしても買余力パネルは\n\
+         立花の旧値を表示し続ける。"
+    );
+    assert!(
+        body.contains("KABU_STATION_VENUE_NAME"),
+        "KabuEvent::Ready ハンドラの GetBuyingPower は venue に KABU_STATION_VENUE_NAME を\n\
+         使わなければならない。TACHIBANA_VENUE_NAME を渡すと kabu セッションがない状態で\n\
+         立花 API を叩こうとしてエラーになる。"
+    );
+}
+
+#[test]
+fn buying_power_refresh_button_uses_active_venue() {
+    // 修正前: BuyingPowerAction ハンドラは常に TACHIBANA_VENUE_NAME を使っていた。
+    // 結果: kabu のみログイン中に「更新」ボタンを押すと立花 API にリクエストが飛び、
+    //       SESSION_NOT_ESTABLISHED エラーになる（または古い立花値が保持される）。
+    let src = read_main();
+    let body = scan_brace_body(&src, "dashboard::Event::BuyingPowerAction(_action)", None);
+
+    assert!(
+        body.contains("kabu_state.is_ready()"),
+        "BuyingPowerAction ハンドラは kabu_state.is_ready() で venue を切り替えなければ\n\
+         ならない。そうしないと kabu ログイン中の「更新」ボタンが立花 API を叩く。"
+    );
+    assert!(
+        body.contains("KABU_STATION_VENUE_NAME"),
+        "BuyingPowerAction ハンドラは kabu がアクティブなとき KABU_STATION_VENUE_NAME を\n\
+         GetBuyingPower の venue に使わなければならない。"
+    );
+}
+
+#[test]
+fn order_list_refresh_button_uses_active_venue() {
+    // 修正前: OrderListAction ハンドラは非 replay 時に常に TACHIBANA_VENUE_NAME を使っていた。
+    // 結果: kabu のみログイン中に注文一覧「更新」を押すと立花 API にリクエストが飛ぶ。
+    let src = read_main();
+    let body = scan_brace_body(&src, "Action::RequestOrderList =>", None);
+
+    assert!(
+        body.contains("kabu_state.is_ready()"),
+        "OrderListAction ハンドラは kabu_state.is_ready() で venue を切り替えなければ\n\
+         ならない。そうしないと kabu ログイン中の注文一覧「更新」が立花 API を叩く。"
+    );
+    assert!(
+        body.contains("KABU_STATION_VENUE_NAME"),
+        "OrderListAction ハンドラは kabu がアクティブなとき KABU_STATION_VENUE_NAME を\n\
+         GetOrderList の venue に使わなければならない。"
     );
 }
 

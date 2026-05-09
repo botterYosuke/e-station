@@ -502,7 +502,46 @@ impl crate::Flowsurface {
                     .iter_dashboards_mut()
                     .for_each(|d| d.set_kabu_ready(is_ready));
 
+                // Auto-fetch buying power on venue ready if a pane is visible.
+                let auto_fetch_buying_power = if is_ready
+                    && self.buying_power_request_id.is_none()
+                    && self.active_dashboard().has_buying_power_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        let req_id = uuid::Uuid::new_v4().to_string();
+                        self.buying_power_request_id = Some(req_id.clone());
+                        self.active_dashboard_mut()
+                            .distribute_buying_power_loading(main_window, true);
+                        let req_id_for_err = req_id.clone();
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetBuyingPower {
+                                    request_id: req_id,
+                                    venue: crate::KABU_STATION_VENUE_NAME.to_string(),
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            move |res| match res {
+                                Ok(()) => {
+                                    Message::Venue(VenueMsg::BuyingPowerSendCompleted(Ok(())))
+                                }
+                                Err(err) => Message::Venue(VenueMsg::IpcError {
+                                    request_id: Some(req_id_for_err),
+                                    code: "send_failed".to_string(),
+                                    message: err,
+                                }),
+                            },
+                        )
+                    } else {
+                        Task::none()
+                    }
+                } else {
+                    Task::none()
+                };
+
                 return ticker_fetch
+                    .chain(auto_fetch_buying_power)
                     .chain(auto_fetch_orders)
                     .chain(auto_fetch_positions);
             }

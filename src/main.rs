@@ -1123,7 +1123,7 @@ struct Flowsurface {
     /// unrepresentable. T35-U4-VenueReadyGate.
     tachibana_state: VenueState,
     /// kabuステーション venue lifecycle state — same FSM as `tachibana_state`
-    /// but kabu has no sidebar ticker filter and no GetBuyingPower.
+    /// but kabu has no sidebar ticker filter.
     kabu_state: VenueState,
     /// 第二暗証番号 modal。`SecondPasswordRequired` IPC イベントで Some に、
     /// Submit / Cancel / Dismiss で None に戻る。
