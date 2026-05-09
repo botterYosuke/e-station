@@ -272,6 +272,26 @@ fn order_list_refresh_button_uses_active_venue() {
     );
 }
 
+#[test]
+fn positions_refresh_button_uses_active_venue() {
+    // 修正前: PositionsAction ハンドラは常に TACHIBANA_VENUE_NAME を使っていた。
+    // 結果: kabu のみログイン中に保有銘柄「更新」を押すと立花 API にリクエストが飛ぶ。
+    // BuyingPowerAction / OrderListAction は Issue #36 で修正済みだが PositionsAction が漏れていた。
+    let src = read_main();
+    let body = scan_brace_body(&src, "Action::RequestPositions", None);
+
+    assert!(
+        body.contains("kabu_state.is_ready()"),
+        "PositionsAction ハンドラは kabu_state.is_ready() で venue を切り替えなければ\n\
+         ならない。そうしないと kabu ログイン中の保有銘柄「更新」が立花 API を叩く。"
+    );
+    assert!(
+        body.contains("KABU_STATION_VENUE_NAME"),
+        "PositionsAction ハンドラは kabu がアクティブなとき KABU_STATION_VENUE_NAME を\n\
+         GetPositions の venue に使わなければならない。"
+    );
+}
+
 // ── M4. status_bar が kabu チップを RequestKabuLogin に配線している ─────────────────
 
 #[test]
