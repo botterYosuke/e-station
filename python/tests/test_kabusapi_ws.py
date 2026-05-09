@@ -6,6 +6,8 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
+import websockets
+import websockets.exceptions
 
 from engine.exchanges.kabusapi_auth import KabuConnectionError
 from engine.exchanges.kabusapi_register import RegisterSet
@@ -121,3 +123,154 @@ def test_constants():
     from engine.exchanges import kabusapi_ws
     assert kabusapi_ws._RECONNECT_DELAY_S == 5.0
     assert kabusapi_ws._MAX_RECONNECT_ATTEMPTS == 5
+
+
+@pytest.mark.demo_kabu
+@pytest.mark.asyncio
+async def test_connection_closed_ok_uses_info_log_not_error(monkeypatch):
+    """ConnectionClosedOK (code=1000) 発生時のログレベルが ERROR でないことを確認する（H-R2-4 → M-R3-2 更新）。
+
+    M-R3-2: ConnectionClosedOK が繰り返された場合は consecutive_failures をインクリメントして
+    _MAX_RECONNECT_ATTEMPTS に達したら KabuConnectionError を raise する。
+    ただしログレベルは info/warning のまま（正常切断の可能性があるため ERROR にしない）。
+
+    このテストは _MAX_RECONNECT_ATTEMPTS 回の ConnectionClosedOK で KabuConnectionError が
+    raise されることと、接続試行回数が正確であることを確認する。
+    """
+    import websockets.frames
+    import engine.exchanges.kabusapi_ws as kabusapi_ws
+
+    rs = RegisterSet(max_symbols=50)
+
+    def on_message(msg):
+        pass
+
+    async def mock_put_register(symbols):
+        return True
+
+    _MAX = kabusapi_ws._MAX_RECONNECT_ATTEMPTS  # 5
+    _rcvd = websockets.frames.Close(1000, "")
+
+    class FakeWSClosedOK:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise websockets.exceptions.ConnectionClosedOK(_rcvd, None)
+
+    connection_count = 0
+
+    def fake_connect(url, **kwargs):
+        nonlocal connection_count
+        connection_count += 1
+        return FakeWSClosedOK()
+
+    async def instant_sleep(_delay):
+        return
+
+    monkeypatch.setattr(kabusapi_ws.websockets, "connect", fake_connect)
+    monkeypatch.setattr(kabusapi_ws.asyncio, "sleep", instant_sleep)
+
+    raised_kabu_error: KabuConnectionError | None = None
+    try:
+        await kabusapi_ws.connect(
+            env="verify",
+            on_message=on_message,
+            register_set=rs,
+            put_register=mock_put_register,
+        )
+    except KabuConnectionError as exc:
+        raised_kabu_error = exc
+
+    # M-R3-2: _MAX + 1 回目の ConnectionClosedOK で KabuConnectionError が raise される
+    # (H-R2-4 との両立: consecutive_ok_close_count > MAX のため MAX+1 回目でエラー)
+    assert raised_kabu_error is not None, (
+        f"ConnectionClosedOK が {_MAX + 1} 回続いたとき KabuConnectionError が raise される必要があります（M-R3-2）。\n"
+        f"接続試行回数: {connection_count}"
+    )
+    assert connection_count == _MAX + 1, (
+        f"KabuConnectionError は {_MAX + 1} 回目の ConnectionClosedOK 後に raise される必要があります（M-R3-2）。\n"
+        f"実際の接続試行回数: {connection_count}"
+    )
+
+
+@pytest.mark.demo_kabu
+@pytest.mark.asyncio
+async def test_repeated_connection_closed_ok_raises_kabu_connection_error(monkeypatch):
+    """ConnectionClosedOK が _MAX_RECONNECT_ATTEMPTS 回繰り返されたとき KabuConnectionError が raise されることを確認（M-R3-2）。
+
+    Regression: ConnectionClosedOK (code=1000) が繰り返された場合、
+    consecutive_failures がインクリメントされないため _MAX_RECONNECT_ATTEMPTS に達せず
+    5 秒ごとに永続再接続ループが発生する。
+    Fix: except websockets.exceptions.ConnectionClosedOK でも consecutive_failures を
+    インクリメントし、上限到達で KabuConnectionError を raise する。
+    """
+    import websockets.frames
+    import engine.exchanges.kabusapi_ws as kabusapi_ws
+
+    rs = RegisterSet(max_symbols=50)
+
+    def on_message(msg):
+        pass
+
+    async def mock_put_register(symbols):
+        return True
+
+    _MAX = kabusapi_ws._MAX_RECONNECT_ATTEMPTS  # 5
+    connection_count = 0
+
+    # websockets v13+ requires rcvd=Close frame for ConnectionClosedOK
+    _rcvd = websockets.frames.Close(1000, "")
+
+    class FakeWSClosedOK:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise websockets.exceptions.ConnectionClosedOK(_rcvd, None)
+
+    def fake_connect(url, **kwargs):
+        nonlocal connection_count
+        connection_count += 1
+        return FakeWSClosedOK()
+
+    async def instant_sleep(_delay):
+        """asyncio.sleep の no-op 代替: 実際に待機しない。"""
+        return
+
+    monkeypatch.setattr(kabusapi_ws.websockets, "connect", fake_connect)
+    monkeypatch.setattr(kabusapi_ws.asyncio, "sleep", instant_sleep)
+
+    raised_kabu_error: KabuConnectionError | None = None
+    try:
+        await kabusapi_ws.connect(
+            env="verify",
+            on_message=on_message,
+            register_set=rs,
+            put_register=mock_put_register,
+        )
+    except KabuConnectionError as exc:
+        raised_kabu_error = exc
+
+    assert raised_kabu_error is not None, (
+        f"ConnectionClosedOK が {_MAX} 回繰り返されたとき KabuConnectionError が raise されなければなりません（M-R3-2）。\n"
+        f"実際の接続試行回数: {connection_count}\n"
+        "Fix: except ConnectionClosedOK でも consecutive_failures をインクリメントし、\n"
+        "上限到達で KabuConnectionError を raise してください。"
+    )
+    assert connection_count >= _MAX, (
+        f"KabuConnectionError は少なくとも {_MAX} 回の接続試行後に raise される必要があります。\n"
+        f"実際の接続試行回数: {connection_count}"
+    )

@@ -99,18 +99,27 @@ class TestBoardPushSeq:
         assert s._kabu_push_seq == 2
 
     def test_seq_in_outbox_matches_post_increment_value(self) -> None:
-        """outbox の sequence_id が +1 後の _kabu_push_seq と一致する。"""
+        """outbox の DepthSnapshot の sequence_id が +1 後の _kabu_push_seq と一致する。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        sequence_id は DepthSnapshot にのみ存在するためそちらを参照する。
+        """
         s = _make_server(seq=9)
         s._on_kabu_board_push(_VALID_BOARD)
-        payload = s._outbox._q[-1]
-        assert payload["sequence_id"] == 10
+        depth_payloads = [item for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
+        assert len(depth_payloads) == 1
+        assert depth_payloads[0]["sequence_id"] == 10
 
     def test_two_calls_produce_consecutive_seqs(self) -> None:
-        """連続 PUSH の sequence_id が 1 ずつ増加する。"""
+        """連続 PUSH の DepthSnapshot sequence_id が 1 ずつ増加する。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        sequence_id は DepthSnapshot にのみ存在するためフィルタリングして確認する。
+        """
         s = _make_server()
         s._on_kabu_board_push(_VALID_BOARD)
         s._on_kabu_board_push(_VALID_BOARD)
-        seqs = [item["sequence_id"] for item in s._outbox._q]
+        seqs = [item["sequence_id"] for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
         assert seqs == [1, 2]
 
 
@@ -202,11 +211,15 @@ class TestBoardPushSsidFallback:
 
         Fix: _on_kabu_board_push の ssid = self._kabu_push_ssid or str(self._engine_session_id)。
         ssid が None のまま wire に渡ると mapper が ValueError を raise してしまう。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        DepthSnapshot の stream_session_id を確認する。
         """
         s = _make_server(ssid=None)
         s._on_kabu_board_push(_VALID_BOARD)
-        assert len(s._outbox._q) == 1
-        assert s._outbox._q[-1]["stream_session_id"] == str(s._engine_session_id)
+        depth_items = [item for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
+        assert len(depth_items) == 1
+        assert depth_items[0]["stream_session_id"] == str(s._engine_session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -220,11 +233,15 @@ class TestBoardPushWireDtoPath:
 
         adapter model (OrderBook) は wire 責務フィールドを持たない（test_models.py が保証）。
         'event' が存在 ⟹ wire DTO (DepthSnapshotMsg) 経由で model_dump されている。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        DepthSnapshot の event フィールドを確認する。
         """
         s = _make_server()
         s._on_kabu_board_push(_VALID_BOARD)
-        payload = s._outbox._q[-1]
-        assert payload.get("event") == "DepthSnapshot"
+        depth_items = [item for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
+        assert len(depth_items) == 1
+        assert depth_items[0].get("event") == "DepthSnapshot"
 
     def test_outbox_dict_has_venue_field(self) -> None:
         """outbox の dict に 'venue' フィールドがあることで mapper 経由を確認。"""

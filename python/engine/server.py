@@ -1428,6 +1428,18 @@ class DataEngineServer:
         - ticker を _kabu_register_set に登録（銘柄 PUSH 受信対象にする）。
         - 未サポートのストリームタイプは unsupported_stream エラーを返す。
         """
+        # 早期チェック: kabu が接続済みでなければ Subscribe を拒否
+        if self._kabu_venue is None or not self._kabu_venue.is_connected:
+            ticker = msg.get("ticker", "")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "kabu_not_connected",
+                "message": f"kabu_station is not connected, cannot subscribe to {ticker}",
+            })
+            self._outbox_event.set()
+            return
+
         ticker = msg.get("ticker", "")
         stream = msg.get("stream", "")
         market = _market_from_msg(msg, "kabu_station")
@@ -1450,10 +1462,7 @@ class DataEngineServer:
             log.debug("Already subscribed to kabu_station %s %s", ticker, stream)
             return
 
-        stop = asyncio.Event()
-        self._stream_counter += 1
-
-        handle = _StreamHandle(stop=stop)
+        handle = _StreamHandle(stop=asyncio.Event())
 
         # 銘柄を PUSH 登録セットに追加（exchange=1 は東証デフォルト）
         try:
@@ -1469,7 +1478,18 @@ class DataEngineServer:
             self._outbox_event.set()
             return
         except Exception as exc:
-            log.warning("Subscribe(kabu_station): register_set.register failed for %s: %s", ticker, exc)
+            # H-R2-2: 予期しない例外は WARNING ではなく ERROR レベルでログする
+            log.error(
+                "Subscribe(kabu_station): register_set.register failed for %s: %s",
+                ticker, exc, exc_info=True,
+            )
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "register_error",
+                "message": f"register failed for {ticker}: {exc}",
+            })
+            self._outbox_event.set()
             return
 
         if not await self._kabu_put_register(self._kabu_register_set.all_symbols()):
@@ -1486,6 +1506,10 @@ class DataEngineServer:
             })
             self._outbox_event.set()
             return
+
+        # H-R2-5: _stream_counter は register() 成功確認後にインクリメントする
+        stop = handle.stop
+        self._stream_counter += 1
 
         async def _kabu_stream_sentinel() -> None:
             """PUSH WS が起動している間ストリームキーを保持するセンチネルタスク。
@@ -4116,9 +4140,22 @@ class DataEngineServer:
         kabu PUSH には stream_session_id / sequence_id が存在しないため、
         server 層が _kabu_push_ssid / _kabu_push_seq を採番して補充する。
 
+        C-R2-1: 板スナップショット処理後に _on_kabu_trade_push も呼び出す。
+        kabu PUSH は同一 WebSocket メッセージに板情報と CurrentPrice（約定）が共存するため、
+        1 メッセージで両方を処理する。一方の例外が他方の呼び出しをスキップしないよう
+        それぞれ独立した try/except で囲む。
+
+        C-R2-2: ticker は try ブロックの外で初期化する（except ブロックでの UnboundLocalError 防止）。
+
         TODO C1-next: Subscribe(kabu_station) コマンドを受け付けて
         _kabu_adapter の登録銘柄を動的に更新する（現状は全 PUSH 受信・全配信）。
         """
+        # M-R3-1: non-dict raw (e.g. None) は両メソッド共通の早期リターン
+        if not isinstance(raw, dict):
+            log.error("_on_kabu_board_push: non-dict raw ignored: %r", type(raw))
+            return
+        # C-R2-2: ticker を try ブロックの外で初期化して except ブロックでの UnboundLocalError を防ぐ
+        ticker = ""
         try:
             ticker = str(raw.get("Symbol", ""))
             if not ticker:
@@ -4137,16 +4174,20 @@ class DataEngineServer:
                 ticker=ticker,
                 ssid=ssid,
                 seq=self._kabu_push_seq,
+                market="stock",
             )
             self._outbox.append(payload)
         except Exception as exc:
-            log.warning(
+            log.error(
                 "_on_kabu_board_push: parse/map error at seq=%d ticker=%s: %s",
                 self._kabu_push_seq,
                 ticker,
                 exc,
                 exc_info=True,
             )
+
+        # C-R2-1: 板処理後に約定ストリームも処理する（独立した try/except で例外を分離）
+        self._on_kabu_trade_push(raw)
 
     def _on_kabu_trade_push(self, raw: dict) -> None:
         """Raw kabu PUSH 板 JSON の CurrentPrice から Trades wire dict → outbox.
@@ -4167,10 +4208,11 @@ class DataEngineServer:
                 adapter=self._kabu_adapter,
                 ticker=ticker,
                 ssid=ssid,
+                market="stock",
             )
             self._outbox.append(payload)
         except Exception as exc:
-            log.warning(
+            log.error(
                 "_on_kabu_trade_push: parse/map error ticker=%s: %s",
                 ticker,
                 exc,
@@ -5301,6 +5343,8 @@ def _market_from_msg(msg: dict, venue: str) -> str:
 
 
 def _default_market(venue: str) -> str:
+    if venue in ("kabu_station", "tachibana"):
+        return "stock"
     return "linear_perp"
 
 

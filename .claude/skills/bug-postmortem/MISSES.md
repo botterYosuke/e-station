@@ -20,6 +20,7 @@
 | モード境界 saved-state 混入 | saved-state.json に含まれるライブモード用ペインがリプレイモード起動時にも読み込まれ、無効な状態で描画が実行される | 1 |
 | Venue-Error Deadlock | venue 認証失敗後も pane が Waiting streams を持ち続け has_stream()=true のまま "Loading…" が永続する | 1 |
 | PUSH 登録スタブ | _kabu_put_register が PUT /register を呼ばないスタブのまま残され、kabu ログイン後も板データが一切届かない | 1 |
+| IPC market フィールド不一致 | Python が outbox に書く market 文字列と Rust が期待する market 文字列が異なり、Rust depth_stream が毎回 continue してデータをスキップする | 1 |
 | saved-state migration 未実装 | enum バリアント追加時に、追加前の saved-state を読んだ場合の migration テストがなく、旧フォーマットでの起動時のみ再現するバグを見逃す | 1 |
 | IPC 契約の片側未実装 | Rust が特殊パス（`"__all__"` 等）を送る契約が `backend.rs` に書かれているが、Python 側の対応実装とテストが追いついていない | 1 |
 | バグ動作 pin | 既存のバグ挙動（空返却・None 返却）をリグレッションガードとして固定し、正しい設計（raise 等）と乖離した状態を固める | 2 |
@@ -2247,3 +2248,61 @@ WS 接続中に新規 ticker が Subscribe されても、`PUT /register` は WS
 2. **例外を飲み込んだらリソース登録をスキップせよ**: except して return しても呼び出し元がリソースを「成功扱い」で登録すると silent failure になる。戻り値 `bool` で成否を伝達し、失敗時は登録をスキップする。
 3. **タスクは start と cancel を対称に**: `create_task` で起動したタスクは、対応する cleanup メソッドで必ず `cancel()` する。`_kabu_fill_poller_task` にはあったが `_kabu_push_task` には欠落していた。
 4. **コールバック型を変えたら呼び出し側も更新せよ**: `None → bool` の変更を `kabusapi_ws.py` のシグネチャと `await` 後の処理の両方に反映する必要があった。
+
+
+---
+
+## 2026-05-09 — kabu PUSH DepthSnapshot が market="spot" で送られ Rust depth_stream がスキップ (Bug C)
+
+**見逃しパターン**: バグ動作 pin / IPC market フィールド不一致
+
+**不具合の概要**:
+`_on_kabu_board_push` が `kabu_board_to_wire_dict(...)` を `market` 引数なしで呼ぶため、
+デフォルト値 `"spot"` が wire dict に入る。
+Rust の `depth_stream` は kabu 株式を `MarketKind::Stock` → `"stock"` で待機しており、
+`ev_market="spot"` と `"stock"` が不一致のため毎回 `continue` →
+ラダーに板データが届かず "Waiting for data..." が永続する。
+
+Issue #28 / #35 の修正（PUSH WS 起動・PUT /register 実装）が正しく入っていても、
+この Bug C により板データは最終的にスキップされていた。
+
+**根本原因**:
+`kabu_board_to_wire_dict` の `market` パラメータのデフォルト値が `"spot"` になっており、
+呼び出し側で明示しない限りバグが隠れる。kabu_station は日本株専用取引所であり
+`"stock"` 以外の市場は存在しないが、デフォルトを変えずに省略可能なままにしていた。
+
+**なぜ既存テストが見逃したか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_server_adapter_integration.py::test_ticker_and_default_market` | `payload["market"] == "spot"` と**バグ動作を仕様として固定**していた。テスト名も "default_market" とデフォルト値の確認を主目的として書かれており、「実際に Rust に渡る値が正しいか」を検証していなかった |
+| `test_kabu_put_register.py` | `_on_kabu_board_push` の outbox 内容を確認するテストが存在せず、market フィールドの値を一切検証していなかった |
+| `test_server_kabu_subscribe.py` | Subscribe パスのみ検証しており、PUSH データのパイプライン出力は範囲外 |
+| Python ユニットテスト全般 | Python 側は "spot" を書いても例外が出ない。Rust 側で `continue` して捨てるまでエラーが見えない（IPC 契約の両端をまたぐテストがなかった） |
+
+**修正内容**:
+- `server.py::_on_kabu_board_push`: `kabu_board_to_wire_dict(..., market="stock")` を明示
+- `server.py::_on_kabu_trade_push`: `kabu_execution_to_wire_dict(..., market="stock")` を明示
+- `test_server_adapter_integration.py::test_ticker_and_default_market` → `test_ticker_and_market` にリネームし、`market="stock"` を明示して呼ぶよう変更
+
+**追加したテスト**:
+- `python/tests/test_kabu_put_register.py::test_on_kabu_board_push_emits_market_stock` — outbox に market="stock" が入ることを検証
+- `python/tests/test_kabu_put_register.py::test_on_kabu_trade_push_emits_market_stock` — Trades wire dict にも market="stock" が入ることを検証
+
+**リグレッション確認**: `market="stock"` の引数を削除すると両テストが「outbox の market は 'stock' である必要があります（Bug C 未修正: 'spot'）」で FAIL する。追加後は PASS。
+
+**教訓**:
+
+1. **IPC 契約は両端（Python 出力 + Rust 受信フィルタ）をまたいで検証せよ**:
+   `ev_market != market_kind_to_ipc(market_kind)` のようなフィルタが Rust 側にあるとき、
+   Python 側でそのフィルタが期待する値と一致するかを統合テストで確認する。
+   同一言語テスト（Python→Python）だけでは見えない。
+
+2. **デフォルト引数は「正しいデフォルト」か「省略禁止」のどちらかにせよ**:
+   `market: str = "spot"` のように「間違ったデフォルト値」を設定すると、省略した呼び出し箇所でサイレントに誤動作する。
+   kabu_station は株式専用なので `market: str = "stock"` にするか、デフォルト引数をなくして必須にするか選択すべきだった。
+
+3. **テスト名が「デフォルト確認」だと仕様検証と見なされない**:
+   `test_ticker_and_default_market` は「デフォルト値を確認する」テストであり、「正しい仕様を守る」テストではない。
+   "spot" というデフォルト値そのものを仕様として固定してしまった。
+   テスト名には「何が守られるべきか」を書くべきで、実装詳細（default値）は書かない。

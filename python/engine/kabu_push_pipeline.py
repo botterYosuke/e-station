@@ -19,7 +19,7 @@ def kabu_board_to_wire_dict(
     ticker: str,
     ssid: str,
     seq: int,
-    market: str = "spot",
+    market: str,
 ) -> dict:
     """Raw kabu PUSH 板スナップショット JSON → DepthSnapshot wire dict.
 
@@ -50,7 +50,7 @@ def kabu_execution_to_wire_dict(
     adapter: KabuStationAdapter,
     ticker: str,
     ssid: str,
-    market: str = "spot",
+    market: str,
 ) -> dict:
     """Raw kabu PUSH 約定 JSON → Trades wire dict（1 件バッチ）.
 

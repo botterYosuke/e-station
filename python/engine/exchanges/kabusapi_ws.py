@@ -15,6 +15,7 @@ import logging
 from typing import Awaitable, Callable
 
 import websockets
+import websockets.exceptions
 
 from engine.exchanges.kabusapi_auth import KabuConnectionError
 from engine.exchanges.kabusapi_register import RegisterSet
@@ -49,6 +50,10 @@ async def connect(
     """
     url = ws_url(env)
     consecutive_failures = 0
+    # H-R2-4 / M-R3-2: consecutive_failures とは独立したカウンタ。
+    # async with 内でリセットすると ConnectionClosedOK が続いても毎回 0 に戻るため、
+    # 実メッセージ受信時にのみリセットし、> MAX で永久切断と判定する。
+    consecutive_ok_close_count = 0
 
     while True:
         try:
@@ -63,9 +68,10 @@ async def connect(
                 symbols = register_set.all_symbols()
                 if symbols:
                     if not await put_register(symbols):
-                        log.warning("kabusapi_ws: put_register failed after reconnect (%d symbols)", len(symbols))
+                        logger.warning("kabusapi_ws: put_register failed after reconnect (%d symbols)", len(symbols))
 
                 async for raw in ws:
+                    consecutive_ok_close_count = 0  # 実メッセージ受信 → 正常接続とみなしリセット
                     if isinstance(raw, bytes):
                         # SJIS バイト列拒否 (INV-K2-SJIS-REJECT と整合)
                         text = raw.decode("utf-8")
@@ -96,10 +102,38 @@ async def connect(
             )
             await asyncio.sleep(_RECONNECT_DELAY_S)
 
+        except websockets.exceptions.ConnectionClosedOK as exc:
+            # H-R2-4: consecutive_failures はインクリメントしない（正常切断は失敗ではない）。
+            # M-R3-2: 別カウンタで追跡し > MAX で永久切断と判定してループを打ち切る。
+            consecutive_ok_close_count += 1
+            logger.info(
+                "kabu WS: connection closed normally (count=%d), reconnecting...",
+                consecutive_ok_close_count,
+            )
+            if consecutive_ok_close_count > _MAX_RECONNECT_ATTEMPTS:
+                raise KabuConnectionError(
+                    0, f"repeated ConnectionClosedOK ({consecutive_ok_close_count} times)"
+                ) from exc
+            await asyncio.sleep(_RECONNECT_DELAY_S)
+
+        except websockets.exceptions.ConnectionClosedError as exc:
+            consecutive_failures += 1
+            if consecutive_failures >= _MAX_RECONNECT_ATTEMPTS:
+                logger.error(
+                    "kabu WS: connection closed permanently: code=%s reason=%s",
+                    exc.code, exc.reason,
+                )
+                raise KabuConnectionError(0, str(exc)) from exc
+            logger.warning(
+                "kabu WS: connection closed (code=%s reason=%s, attempt %d/%d), reconnecting...",
+                exc.code, exc.reason, consecutive_failures, _MAX_RECONNECT_ATTEMPTS,
+            )
+            await asyncio.sleep(_RECONNECT_DELAY_S)
+
         except Exception as exc:
             consecutive_failures += 1
             if consecutive_failures >= _MAX_RECONNECT_ATTEMPTS:
-                logger.error("kabu WS: reconnect aborted: %s", exc)
+                logger.error("kabu WS: reconnect aborted: %s", exc, exc_info=True)
                 raise KabuConnectionError(0, str(exc)) from exc
-            logger.warning("kabu WS: disconnected (%s), reconnecting...", exc)
+            logger.warning("kabu WS: disconnected (%s), reconnecting...", exc, exc_info=True)
             await asyncio.sleep(_RECONNECT_DELAY_S)
