@@ -1705,9 +1705,11 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::EngineBusy {
             attempted_command,
             reason,
+            busy_kind,
+            venue,
             ..
         } => {
-            use engine_client::dto::AttemptedCommand;
+            use engine_client::dto::{AttemptedCommand, BusyKind};
             match attempted_command {
                 AttemptedCommand::StopReplay => {
                     Some(Message::Window(WindowMsg::ModeSwitchStopBusy))
@@ -1721,9 +1723,22 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
                 AttemptedCommand::ResumeReplay => {
                     Some(Message::Engine(EngineMsg::ResumeReplayBusy { reason }))
                 }
-                _ => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
-                    "操作を受け付けられませんでした: {attempted_command} — {reason}"
-                ))))),
+                _ => {
+                    // R4 R3-RUST-3: live 重複起動拒否時にどの venue で reject されたか
+                    // を toast に表示する。busy_kind が AnotherStrategyOnVenue なら
+                    // venue 名を含む専用文言、それ以外は汎用文言。venue が None の
+                    // 旧 server (minor < 28) からの応答は "unknown" で fallback する。
+                    let detail = match busy_kind {
+                        Some(BusyKind::AnotherStrategyOnVenue) => {
+                            let v = venue.as_deref().unwrap_or("unknown");
+                            format!("別の戦略が {v} で実行中です — {reason}")
+                        }
+                        _ => format!(
+                            "操作を受け付けられませんでした: {attempted_command} — {reason}"
+                        ),
+                    };
+                    Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(detail))))
+                }
             }
         }
         // Phase 8.1b: multi-client 接続ライフサイクルイベント

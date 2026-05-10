@@ -478,6 +478,48 @@ fn test_disabled_reason_disables_submit() {
     );
 }
 
+// ── R4 R3-RUST-3: EngineBusy{AnotherStrategyOnVenue} は venue 名を toast に含む ───
+
+/// 旧実装は EngineBusy の fallback アーム (`_ =>`) で venue / busy_kind を
+/// destructure せず汎用文言だけを出していたため、live 重複起動拒否時にどの
+/// venue で reject されたかが GUI に表示されない silent UX failure を抱えていた。
+/// busy_kind == AnotherStrategyOnVenue のとき venue を含む文言を出すこと、
+/// および BusyKind enum を import していることを source-pin する。
+#[test]
+fn test_engine_busy_another_strategy_on_venue_includes_venue_in_toast() {
+    // EngineBusy arm 全体を含む slice を切り出す。
+    let pos = MAIN_RS
+        .find("EngineEvent::EngineBusy {")
+        .expect("EngineBusy arm not found in main.rs");
+    let mut end = (pos + 2500).min(MAIN_RS.len());
+    while end > 0 && !MAIN_RS.is_char_boundary(end) {
+        end -= 1;
+    }
+    let arm = &MAIN_RS[pos..end];
+
+    assert!(
+        arm.contains("busy_kind"),
+        "EngineBusy arm must destructure busy_kind: {arm}"
+    );
+    assert!(
+        arm.contains("venue"),
+        "EngineBusy arm must destructure venue: {arm}"
+    );
+    assert!(
+        arm.contains("BusyKind::AnotherStrategyOnVenue"),
+        "EngineBusy arm must match BusyKind::AnotherStrategyOnVenue: {arm}"
+    );
+    assert!(
+        arm.contains("別の戦略"),
+        "AnotherStrategyOnVenue toast must include 「別の戦略」 wording: {arm}"
+    );
+    // venue 値を文言にフォーマットすること (リテラル変数名は `v` を期待)。
+    assert!(
+        arm.contains("{v}") || arm.contains("venue.as_deref"),
+        "AnotherStrategyOnVenue toast must format venue into the message: {arm}"
+    );
+}
+
 // ── messages.rs invariants ────────────────────────────────────────────────────
 
 #[test]

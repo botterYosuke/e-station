@@ -161,17 +161,46 @@ def _aggressor_to_side(side) -> str:
 # 開発者は log を見れば原因究明可能（log は wire / GUI に出ない）。
 _CREDENTIAL_TYPE_NAME_TOKENS: tuple[str, ...] = ("Password", "Auth", "Credential")
 
+# R4 R3-SILENT-1: venue API 由来の例外の str(exc) には virtual URL / session token
+# 断片 / account 等の機微情報がそのまま含まれうるため、型名 prefix が venue を
+# 名乗っているものは保守的に一括 scrub する。``KabuApiError`` / ``TachibanaError``
+# のサブクラス (``KabuTradeLockedOutError`` / ``SessionExpiredError`` 等) も
+# prefix で hit する。誤検知時も型名は残るので診断は可能 (詳細は
+# ``log.error(..., exc_info=True)`` 経由で local log に残る)。
+_CREDENTIAL_TYPE_PREFIXES: tuple[str, ...] = ("Tachibana", "Kabu")
+
 
 def _scrub_credential_exception(exc: BaseException) -> str:
     """例外メッセージから credential 漏洩を回避した文字列を返す。
 
-    type 名が ``Password`` / ``Auth`` / ``Credential`` を含むなら、
+    type 名 (MRO のいずれか) が ``Password`` / ``Auth`` / ``Credential`` を含むなら、
     ``"<TypeName> (details suppressed for credential safety)"`` を返す。
+    type 名 (MRO のいずれか) が ``Tachibana`` / ``Kabu`` で始まる場合
+    （venue API 由来の例外、``SessionExpiredError`` / ``KabuTradeLockedOutError``
+    のような subclass を含む）は
+    ``"<TypeName> (details suppressed for venue API safety)"`` を返す。
     それ以外は ``str(exc)`` をそのまま返す（大半の RuntimeError / ValueError 等）。
+
+    MRO walk: ``SessionExpiredError(TachibanaError)`` のように venue prefix が
+    付かない subclass 名でも、親クラスが ``TachibanaError`` なら hit させる。
     """
     type_name = type(exc).__name__
-    if any(token in type_name for token in _CREDENTIAL_TYPE_NAME_TOKENS):
+    # MRO 全体を走査して prefix / token 判定する (subclass の安全網)。
+    mro_names = tuple(base.__name__ for base in type(exc).__mro__)
+
+    def _has_credential_token() -> bool:
+        return any(
+            any(token in name for token in _CREDENTIAL_TYPE_NAME_TOKENS)
+            for name in mro_names
+        )
+
+    def _has_venue_prefix() -> bool:
+        return any(name.startswith(_CREDENTIAL_TYPE_PREFIXES) for name in mro_names)
+
+    if _has_credential_token():
         return f"{type_name} (details suppressed for credential safety)"
+    if _has_venue_prefix():
+        return f"{type_name} (details suppressed for venue API safety)"
     return str(exc)
 
 
@@ -1373,12 +1402,12 @@ class NautilusRunner:
                 # Nautilus 親が要求する追加引数（loop / client_id / venue / oms_type /
                 # account_type / base_currency / instrument_provider / msgbus / cache /
                 # clock）を node.kernel 経由で取得して super().__init__ に転送する。
-                # 単体テストでは KabuStationLive* factory 自体を monkeypatch するため
-                # kernel が無い FakeNode でも parent kwargs は無害に投げ捨てられる。
                 from nautilus_trader.common.providers import InstrumentProvider
                 from nautilus_trader.model.enums import AccountType, OmsType
                 from nautilus_trader.model.identifiers import ClientId, Venue
 
+                # 単体テストでは KabuStationLive* factory 自体を monkeypatch するため
+                # kernel が無い FakeNode でも parent kwargs は無害に投げ捨てられる。
                 _kabu_parent_kwargs: dict = {}
                 _kernel = getattr(node, "kernel", None)
                 if _kernel is not None:
@@ -1518,10 +1547,18 @@ class NautilusRunner:
                     # TradingNode ビルドと実行（_connect() 内で data_client._loop が確定する）
                     node.build()
                 except Exception as build_exc:
+                    # R4 R3-SILENT-2: node.build() 失敗時の例外 message にも
+                    # venue API のクレデンシャル / セッション断片が混入する
+                    # 可能性があるため、wire / GUI に流す前に scrub する。
+                    # 診断用の詳細スタックは log.error(exc_info=True) で local に残す。
+                    log.error(
+                        "[start_live] node.build() failed",
+                        exc_info=True,
+                    )
                     on_event({
                         "event": "EngineError",
                         "code": "node_build_failed",
-                        "message": str(build_exc),
+                        "message": _scrub_credential_exception(build_exc),
                         "strategy_id": strategy_id,
                         "ts_event_ms": int(_time.time() * 1000),
                     })

@@ -81,6 +81,71 @@ class TestScrubCredentialExceptionUnit:
         result = _scrub_credential_exception(exc)
         assert "max_qty must be positive" == result
 
+    # R4 R3-SILENT-1: venue API 由来の例外も型名 prefix で scrub する
+    # token / Password / Auth / Credential を含まない型名でも、
+    # 取引所 API レスポンスの生テキスト（virtual URL, session token 断片, account 等）
+    # が str(exc) に乗る可能性があるため保守的に suppress する。
+    def test_tachibana_error_message_scrubbed(self) -> None:
+        """``TachibanaError`` の str(exc) は wire / GUI に流さない。"""
+        from engine.exchanges.tachibana_helpers import TachibanaError
+
+        exc = TachibanaError(
+            code="999",
+            message="login failed token=eyJSECRET.payload.sig pass=hunter2",
+        )
+        result = _scrub_credential_exception(exc)
+        assert "TachibanaError" in result, (
+            f"type name must be exposed for diagnosability: {result!r}"
+        )
+        assert "hunter2" not in result, (
+            f"credential value leaked through scrub: {result!r}"
+        )
+        assert "eyJSECRET" not in result, (
+            f"token value leaked through scrub: {result!r}"
+        )
+
+    def test_kabu_api_error_message_scrubbed(self) -> None:
+        """``KabuApiError`` の str(exc) は wire / GUI に流さない。"""
+        from engine.exchanges.kabusapi_auth import KabuApiError
+
+        exc = KabuApiError(
+            code=4001001,
+            message="not logged in: APIPassword=hunter2 acct=12345",
+        )
+        result = _scrub_credential_exception(exc)
+        assert "KabuApiError" in result
+        assert "hunter2" not in result
+        assert "12345" not in result, (
+            f"account value leaked through scrub: {result!r}"
+        )
+
+    def test_session_expired_error_message_scrubbed(self) -> None:
+        """``SessionExpiredError`` (TachibanaError subclass) も scrub される。"""
+        from engine.exchanges.tachibana_helpers import SessionExpiredError
+
+        exc = SessionExpiredError(
+            message="session expired token=eyJSECRET sid=sensitive-sid",
+        )
+        result = _scrub_credential_exception(exc)
+        assert "SessionExpiredError" in result, (
+            f"type name must be exposed: {result!r}"
+        )
+        assert "eyJSECRET" not in result
+        assert "sensitive-sid" not in result
+
+    def test_kabu_trade_locked_out_error_message_scrubbed(self) -> None:
+        """``KabuTradeLockedOutError`` (KabuApiError subclass) も scrub される。"""
+        from engine.exchanges.kabusapi_auth import KabuTradeLockedOutError
+
+        exc = KabuTradeLockedOutError(
+            code=4001013,
+            message="trade locked out password=hunter2 acct=secret-account",
+        )
+        result = _scrub_credential_exception(exc)
+        assert "KabuTradeLockedOutError" in result
+        assert "hunter2" not in result
+        assert "secret-account" not in result
+
 
 # ---------------------------------------------------------------------------
 # H5: warm_up 例外時の credential scrub（engine_runner 経路）
