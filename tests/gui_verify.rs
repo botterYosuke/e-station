@@ -55,6 +55,18 @@ async fn vision_yes_no(img: &DynamicImage, question: &str) -> anyhow::Result<boo
 }
 
 #[tokio::test]
+#[ignore = "requires display + running app"]
+async fn capture_screenshot_only() -> anyhow::Result<()> {
+    let window = wait_for_window("Flowsurface", Duration::from_secs(10))?;
+    std::thread::sleep(Duration::from_secs(2));
+    let img = DynamicImage::ImageRgba8(window.capture_image()?);
+    std::fs::create_dir_all("tests/screenshots")?;
+    img.save("tests/screenshots/verify_empty_state.png")?;
+    println!("スクリーンショット保存: tests/screenshots/verify_empty_state.png");
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires display + running app + ANTHROPIC_API_KEY"]
 async fn verify_empty_state_message() -> anyhow::Result<()> {
     // アプリは手順 1 で起動済みの前提
