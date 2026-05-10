@@ -208,9 +208,8 @@ pub(crate) enum ReplayMsg {
         token: u64,
     },
     /// issue #42 Phase 3: warm_up timeout banner の「再試行」ボタンや dismiss 操作で発火。
-    /// 現状は handler 側の「banner 消去」分岐を本 variant で網羅しており、UI ボタンは
-    /// follow-up でバナー表示と併せて追加する（lint 用に dead_code 抑止）。
-    #[allow(dead_code)]
+    /// R2-B H2: view() 内に live_warmup_timeout_banner を strategy_load_error と同じパターン
+    /// で描画し、「再試行」ボタンで本 variant を on_press する（dead_code 抑止解除）。
     DismissLiveWarmupTimeoutBanner,
     /// issue #42 Phase 3: `LoadLiveStrategyScenario` 応答 → modal prefill。
     LiveStrategyScenarioLoaded {

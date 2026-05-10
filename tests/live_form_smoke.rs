@@ -85,6 +85,34 @@ fn test_live_strategy_ready_clears_pending_strategy_id() {
     );
 }
 
+/// R2-B H2: view() 内に live_warmup_timeout_banner を表示するパスがあることを source-pin する。
+/// strategy_load_error と同パターン (banner_msg + 「再試行」ボタン + DismissLiveWarmupTimeoutBanner)
+/// を要求する。banner 文字列の中身は handler 側で生成するため pin しない。
+#[test]
+fn test_view_renders_live_warmup_timeout_banner() {
+    assert!(
+        MAIN_RS.contains("self.live_warmup_timeout_banner"),
+        "main.rs must reference self.live_warmup_timeout_banner in view()"
+    );
+    // Banner rendering signature: live_warmup_timeout_banner + 再試行 button + Dismiss msg.
+    let pos = MAIN_RS
+        .find("if let Some(banner_msg) = &self.live_warmup_timeout_banner")
+        .expect("view() must render live_warmup_timeout_banner with `if let Some(banner_msg)`");
+    let mut end = (pos + 1500).min(MAIN_RS.len());
+    while end > 0 && !MAIN_RS.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &MAIN_RS[pos..end];
+    assert!(
+        window.contains("再試行"),
+        "warmup banner must include 「再試行」 button label: {window}"
+    );
+    assert!(
+        window.contains("DismissLiveWarmupTimeoutBanner"),
+        "warmup banner button must dispatch DismissLiveWarmupTimeoutBanner: {window}"
+    );
+}
+
 #[test]
 fn test_live_strategy_ready_idempotent_on_double_emit() {
     // Idempotency: auto_generate_live_panes uses live_pane_keys HashSet to

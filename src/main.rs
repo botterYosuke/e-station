@@ -2431,6 +2431,23 @@ impl Flowsurface {
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
             }
+            // R2-B H2 / 統一決定 #17: warm_up timeout banner (60s 経過しても
+            // LiveStrategyReady が来なかった場合)。「再試行」ボタンで dismiss。
+            // strategy_load_error と同じレイアウトで両者を共存可能にする。
+            if let Some(banner_msg) = &self.live_warmup_timeout_banner {
+                let warmup_banner = container(
+                    row![
+                        text(banner_msg.as_str()),
+                        button("再試行")
+                            .on_press(Message::Replay(ReplayMsg::DismissLiveWarmupTimeoutBanner))
+                            .style(button::primary),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding(padding::all(8));
+                base = base.push(warmup_banner);
+            }
             base = base.push(
                 match sidebar_pos {
                     sidebar::Position::Left => row![sidebar_view, dashboard_view,],
