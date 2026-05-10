@@ -834,7 +834,12 @@ impl crate::Flowsurface {
                     let main_window = self.main_window.id;
                     let dashboard = self.active_dashboard_mut();
                     dashboard.clear_live_strategy_portfolio(main_window);
-                    dashboard.clear_live_pane_keys();
+                    // R4 R3-SILENT-3: 正常停止経路でも 4 ペインを teardown する。
+                    // 旧実装は `clear_live_pane_keys()` で key だけ消し実ペインを
+                    // 残していたため、再起動時に `auto_generate_live_panes` が key
+                    // 不一致で重複生成する UX silent failure を抱えていた。
+                    // `node_build_failed` arm と同じ teardown を呼んで対称化する。
+                    dashboard.teardown_live_panes(&strategy_id);
                 } else {
                     log::warn!(
                         "LiveEngineStoppedEvent: strategy_id mismatch (got={strategy_id}); ignoring"

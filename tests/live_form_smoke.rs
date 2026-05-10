@@ -478,6 +478,23 @@ fn test_disabled_reason_disables_submit() {
     );
 }
 
+// ── R4 R3-SILENT-3: LiveStopped (正常停止) 経路でも teardown_live_panes ──────
+
+/// 旧実装は LiveStopped arm で `clear_live_pane_keys()` だけ呼び、実際の 4 ペイン
+/// は閉じられず残っていた。再起動時に `auto_generate_live_panes` が key 不一致で
+/// 重複生成し、UX 上「同じパネルが 2 重に出る」 silent failure を抱えていた。
+/// 正常停止経路も `node_build_failed` arm と同じく `teardown_live_panes(&strategy_id)`
+/// で対称に閉じることを source-pin する。
+#[test]
+fn test_live_stopped_teardowns_panes() {
+    let arm = handler_arm("ReplayMsg::LiveStopped {");
+    assert!(
+        arm.contains("teardown_live_panes"),
+        "LiveStopped arm must call teardown_live_panes(&strategy_id) for symmetry \
+         with node_build_failed teardown: {arm}"
+    );
+}
+
 // ── R4 R3-RUST-3: EngineBusy{AnotherStrategyOnVenue} は venue 名を toast に含む ───
 
 /// 旧実装は EngineBusy の fallback アーム (`_ =>`) で venue / busy_kind を
