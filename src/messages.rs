@@ -185,6 +185,51 @@ pub(crate) enum ReplayMsg {
     },
     LiveStartFailed(String),
     StopLiveStrategy,
+    /// issue #42 Phase 3: live strategy warm_up 完了 → Running 遷移 + 4 ペイン自動生成。
+    /// `EngineEvent::LiveStrategyReady` を `map_engine_event_to_message` 経由で受け取る。
+    LiveStrategyReady {
+        strategy_id: String,
+        instrument_id: String,
+        venue: String,
+        #[allow(dead_code)]
+        ts_event_ms: i64,
+    },
+    /// issue #42 Phase 3: warm_up 進捗（5s 毎、`LiveStrategyReady` 60s timeout のリセットに使う）。
+    LiveWarmingUp {
+        strategy_id: String,
+        #[allow(dead_code)]
+        progress: f32,
+        message: String,
+    },
+    /// issue #42 Phase 3: `EngineStarted` 後 60s 以内に `LiveStrategyReady` が来なかったときに
+    /// `Task::perform` 経由で発火。`token` が古ければ捨てる（タイマーリセット用）。
+    LiveWarmupTimeoutFired {
+        strategy_id: String,
+        token: u64,
+    },
+    /// issue #42 Phase 3: warm_up timeout banner の「再試行」ボタンや dismiss 操作で発火。
+    /// 現状は handler 側の「banner 消去」分岐を本 variant で網羅しており、UI ボタンは
+    /// follow-up でバナー表示と併せて追加する（lint 用に dead_code 抑止）。
+    #[allow(dead_code)]
+    DismissLiveWarmupTimeoutBanner,
+    /// issue #42 Phase 3: `LoadLiveStrategyScenario` 応答 → modal prefill。
+    LiveStrategyScenarioLoaded {
+        request_id: String,
+        instrument_id: Option<String>,
+        max_qty: Option<u32>,
+        max_notional_jpy: Option<u64>,
+        #[allow(dead_code)]
+        venue: Option<String>,
+        strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+    /// issue #42 Phase 3: `LoadLiveStrategyScenario` の 5s timeout / `strategy_parse_failed`
+    /// 受信時に pending を解除し手入力モードへ戻す。
+    LiveStrategyScenarioFallback {
+        request_id: String,
+    },
+    /// issue #42 Phase 3: `EngineRehello` 受信時に `LiveStrategyState::Running` の
+    /// 三つ組で `auto_generate_live_panes` を冪等に再実行する。Rust 内部イベント。
+    LiveStrategyRehelloReplay,
     /// H-2: Commit replay_bar state after `LoadReplayData` succeeded.
     /// Emitted from the Submit Task callback for both `BothOk` and
     /// `StartFailed` outcomes — in either case the backend has loaded the new

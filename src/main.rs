@@ -667,6 +667,18 @@ const TACHIBANA_VENUE_NAME: &str = "tachibana";
 /// Wire-level identifier for the kabuステーション venue.
 const KABU_STATION_VENUE_NAME: &str = "kabu_station";
 
+/// issue #42 Phase 3 (統一決定 #17): live 戦略 `EngineStarted` 受信後 60 秒以内に
+/// `LiveStrategyReady` が来なければ "warm_up timeout" banner を表示する。
+/// `LiveStrategyWarmingUp` 受信ごとにカウンタ（token）が再起動されるため、
+/// engine が定期的に進捗 emit している限り timeout は発火しない。
+pub(crate) const LIVE_WARMUP_TIMEOUT_SECS: u64 = 60;
+
+/// issue #42 Phase 3 (統一決定 #18): `LoadLiveStrategyScenario` 送信後 5 秒以内に
+/// `LiveStrategyScenarioLoaded` も `Error` も来なければ手入力フォールバック
+/// （フォームを編集可能のままにする）。engine 無応答時の安全網であり、
+/// `LIVE_SCENARIO` 不在時は engine が即時応答するため通常は使わない（統一決定 #22）。
+pub(crate) const LIVE_SCENARIO_FALLBACK_TIMEOUT_SECS: u64 = 5;
+
 /// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
 /// Referenced during initial setup and on every engine reconnect.
 /// **Includes `Tachibana`** — without the entry the venue would never
@@ -1078,12 +1090,25 @@ fn main() {
 }
 
 /// N4-live: live 戦略の実行状態。
+///
+/// issue #42 Phase 3 で `Running` に `instrument_id` / `venue` を追加し、
+/// reconnect 時の `auto_generate_live_panes` 再実行に必要な三つ組
+/// `(strategy_id, instrument_id, venue)` を SoT として保持する
+/// （統一決定 #4 / R3-C1 / R5-MED-2）。
+///
+/// `pending_live_config` を別フィールドに置く設計案は撤回し、`Running`
+/// 自体を「ランタイム state 兼 reconnect 用 pending 設定」として直接使う。
+/// `EngineRehello` 受信時に `Running` 状態なら `auto_generate_live_panes` を
+/// 冪等に再呼出する（VenueState には触らず、LiveStrategyState のみが
+/// `EngineRehello` で生き残る設計）。
 #[derive(Debug, Clone, Default)]
 enum LiveStrategyState {
     #[default]
     Idle,
     Running {
         strategy_id: String,
+        instrument_id: String,
+        venue: String,
     },
 }
 
@@ -1150,8 +1175,24 @@ struct Flowsurface {
     replay_form_modal: Option<modal::replay_form::ReplayFormModal>,
     /// N4-live: ライブ戦略フォーム modal
     live_strategy_form_modal: Option<modal::live_strategy_form::LiveStrategyFormModal>,
-    /// N4-live: live 戦略の実行状態。Idle = 未実行、Running = 実行中（strategy_id 保持）。
+    /// N4-live: live 戦略の実行状態。Idle = 未実行、Running = 実行中。
+    /// issue #42 Phase 3: `Running { strategy_id, instrument_id, venue }` 三つ組を保持し、
+    /// `EngineRehello` 受信時に `auto_generate_live_panes` を冪等に再呼出する SoT。
     live_strategy: LiveStrategyState,
+    /// issue #42 Phase 3: `EngineStarted`(live) 受信後、`LiveStrategyReady` が来るまで
+    /// 保持する pending strategy_id。warm_up timeout タイマーの照合 / 異 strategy のタイマー
+    /// 無視に使う。`LiveStrategyReady` / `EngineStopped` で None に戻す。
+    live_strategy_pending_strategy_id: Option<String>,
+    /// issue #42 Phase 3: warm_up timeout banner（`None` = 表示しない）。
+    /// `EngineStarted` 後 60s 以内に `LiveStrategyReady` が来なければ Some にセット、
+    /// 「再試行」 / `LiveStrategyReady` / `EngineStopped` で None に戻す。
+    live_warmup_timeout_banner: Option<String>,
+    /// issue #42 Phase 3: `LiveStrategyWarmingUp` の最新 message を保持してバナーに表示する。
+    live_warmup_warming_message: Option<String>,
+    /// issue #42 Phase 3: warm_up timeout タイマーのトークン。`LiveStrategyWarmingUp` 受信や
+    /// `LiveStrategyReady` 受信 / `EngineStopped` などで wrapping_add(1) して古いタイマー
+    /// 発火を破棄する（タイマーリセットの実装）。
+    live_warmup_timeout_token: u64,
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
     /// Cleared by `Message::Replay(ReplayMsg::DismissStrategyLoadError)`.
     strategy_load_error: Option<String>,
@@ -1682,29 +1723,47 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::ReplayHistoryChanged { has_history } => {
             Some(Message::Replay(ReplayMsg::HistoryChanged { has_history }))
         }
-        // issue #42 Phase 2 (schema 3.25): LiveStrategyScenarioLoaded — Phase 3 で
-        // GUI live form prefill を実装する。schema-chain commit 時点では明示 arm を
-        // 用意して `_ => None` で握り潰される事故を防ぎ、TODO 化する。
-        EngineEvent::LiveStrategyScenarioLoaded { .. } => {
-            // TODO(issue #42 Phase 3): route to a LiveMsg::ScenarioLoaded equivalent
-            // and call the live form prefill handler. For now, intentionally drop.
-            None
-        }
-        // issue #42 Phase 3 (schema 3.26): LiveStrategyReady — Phase 3 functional impl で
-        // auto_generate_live_panes(strategy_id, instrument_id, venue) の冪等トリガーに
-        // 接続する。schema-chain commit 時点では明示 arm + TODO で None 返却。
-        EngineEvent::LiveStrategyReady { .. } => {
-            // TODO(issue #42 Phase 3): route to LiveMsg::StrategyReady to trigger
-            // the idempotent 4-pane auto-generation. For now, intentionally drop.
-            None
-        }
-        // issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp — Phase 3 functional impl で
-        // banner 表示更新と LiveStrategyReady 60s timeout のリセットに使う。
-        EngineEvent::LiveStrategyWarmingUp { .. } => {
-            // TODO(issue #42 Phase 3): route to LiveMsg::WarmingUp to update progress
-            // banner and reset Ready-event timeout. For now, intentionally drop.
-            None
-        }
+        // issue #42 Phase 3 (schema 3.25): LiveStrategyScenarioLoaded — modal prefill。
+        // pending_scenario_request_id と突合して古い応答は handler 側で捨てる（replay 対称）。
+        EngineEvent::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        } => Some(Message::Replay(ReplayMsg::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        })),
+        // issue #42 Phase 3 (schema 3.26): LiveStrategyReady — Running 遷移 +
+        // auto_generate_live_panes(strategy_id, instrument_id, venue) の冪等トリガー。
+        EngineEvent::LiveStrategyReady {
+            strategy_id,
+            venue,
+            instrument_id,
+            ts_event_ms,
+        } => Some(Message::Replay(ReplayMsg::LiveStrategyReady {
+            strategy_id,
+            instrument_id,
+            venue,
+            ts_event_ms,
+        })),
+        // issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp — 進捗 banner 更新 +
+        // 60s timeout カウンタリセット（統一決定 #17）。
+        EngineEvent::LiveStrategyWarmingUp {
+            strategy_id,
+            progress,
+            message,
+        } => Some(Message::Replay(ReplayMsg::LiveWarmingUp {
+            strategy_id,
+            progress,
+            message,
+        })),
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
         // 正しいことを確認すること。`_ => None` で握り潰すと
@@ -2128,6 +2187,10 @@ impl Flowsurface {
             replay_form_modal: None,
             live_strategy_form_modal: None,
             live_strategy: LiveStrategyState::default(),
+            live_strategy_pending_strategy_id: None,
+            live_warmup_timeout_banner: None,
+            live_warmup_warming_message: None,
+            live_warmup_timeout_token: 0,
             strategy_load_error: None,
             last_saved_bytes: None,
             pending_exit_windows: None,

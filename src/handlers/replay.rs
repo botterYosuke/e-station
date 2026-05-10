@@ -296,12 +296,57 @@ impl crate::Flowsurface {
                             .push(Toast::warn("Live 戦略がすでに実行中です".to_string()));
                         return Task::none();
                     }
+                    // issue #42 Phase 3 (統一決定 #18): LoadLiveStrategyScenario を送って
+                    // LIVE_SCENARIO の prefill を要求する。同期的に request_id を保存し、
+                    // 5s 経って応答が来なければ pending を解除して手入力 fallback に戻す。
+                    let request_id = uuid::Uuid::new_v4().to_string();
                     let form = modal::live_strategy_form::LiveStrategyFormModal {
-                        strategy_file: path,
+                        strategy_file: path.clone(),
+                        pending_scenario_request_id: Some(request_id.clone()),
                         ..Default::default()
                     };
                     self.live_strategy_form_modal = Some(form);
-                    return Task::none();
+                    let Some(conn) = self.engine_connection.as_ref().cloned() else {
+                        // engine 未接続でも form は表示する（手入力で続行可能）。
+                        if let Some(f) = self.live_strategy_form_modal.as_mut() {
+                            f.release_scenario_pending();
+                        }
+                        return Task::none();
+                    };
+                    let path_str = path.to_string_lossy().into_owned();
+                    let request_id_for_send = request_id.clone();
+                    let send_task = Task::perform(
+                        async move {
+                            conn.send(engine_client::dto::Command::LoadLiveStrategyScenario {
+                                request_id: request_id_for_send,
+                                strategy_path: path_str,
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        |res| match res {
+                            Ok(()) => Message::Engine(EngineMsg::Noop),
+                            Err(err) => Message::Venue(VenueMsg::OrderToast(Toast::error(
+                                format!("LoadLiveStrategyScenario 送信失敗: {err}"),
+                            ))),
+                        },
+                    );
+                    let request_id_for_timeout = request_id;
+                    let timeout_task = Task::perform(
+                        async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                crate::LIVE_SCENARIO_FALLBACK_TIMEOUT_SECS,
+                            ))
+                            .await;
+                            request_id_for_timeout
+                        },
+                        |req_id| {
+                            Message::Replay(ReplayMsg::LiveStrategyScenarioFallback {
+                                request_id: req_id,
+                            })
+                        },
+                    );
+                    return Task::batch([send_task, timeout_task]);
                 }
                 // replay mode: LoadStrategyScenario 経路へ続く。
                 let Some(conn) = self.engine_connection.as_ref().cloned() else {
@@ -507,43 +552,203 @@ impl crate::Flowsurface {
                 }
                 return Task::none();
             }
-            // N4-live: EngineStarted (live) → set running state and update bar
+            // N4-live: EngineStarted (live) → bar 表示更新と warm_up timeout タイマー起動。
+            // issue #42 Phase 3 (統一決定 #4): Running 遷移は `LiveStrategyReady` 受信時に
+            // 行う（`EngineStarted` には instrument_id / venue が無いため）。ここでは
+            // pending_strategy_id 設定と 60s timeout タイマーの起動のみを担当する。
             ReplayMsg::LiveStarted {
                 strategy_id,
                 ts_event_ms,
             } => {
-                self.live_strategy = LiveStrategyState::Running { strategy_id };
+                self.live_strategy_pending_strategy_id = Some(strategy_id.clone());
                 self.menu_bar.live_bar.current_time = Some(crate::format_live_time(ts_event_ms));
                 self.menu_bar.live_bar.live_paused = false;
-                // strategy_file_stem は Submit 時に既設定済み（通常フロー）。
-                // 再接続シナリオでは None のままバーに "--" が表示されるが、
-                // 再接続サポートは Phase 1-11 の対象外。
+                self.live_warmup_timeout_banner = None;
+                // 統一決定 #17: EngineStarted 受信後 60s 以内に LiveStrategyReady が
+                // 来なければ "warm_up timeout" banner を出す。LiveStrategyWarmingUp 受信
+                // ごとに `live_warmup_timeout_token` を bump してタイマーをリセットする。
+                let token = self.live_warmup_timeout_token.wrapping_add(1);
+                self.live_warmup_timeout_token = token;
+                let sid = strategy_id;
+                return Task::perform(
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            crate::LIVE_WARMUP_TIMEOUT_SECS,
+                        ))
+                        .await;
+                        (sid, token)
+                    },
+                    |(sid, token)| {
+                        Message::Replay(ReplayMsg::LiveWarmupTimeoutFired {
+                            strategy_id: sid,
+                            token,
+                        })
+                    },
+                );
+            }
+            // issue #42 Phase 3: LiveStrategyReady 受信 → Running 遷移 + 4 ペイン自動生成。
+            // 冪等: 同じ三つ組で 2 度受信しても auto_generate_live_panes が no-op で済む。
+            ReplayMsg::LiveStrategyReady {
+                strategy_id,
+                instrument_id,
+                venue,
+                ..
+            } => {
+                self.live_strategy = LiveStrategyState::Running {
+                    strategy_id: strategy_id.clone(),
+                    instrument_id: instrument_id.clone(),
+                    venue: venue.clone(),
+                };
+                self.live_warmup_timeout_banner = None;
+                // タイマートークンを bump して未到達タイマーを無効化する。
+                self.live_warmup_timeout_token =
+                    self.live_warmup_timeout_token.wrapping_add(1);
+                self.live_warmup_warming_message = None;
+                let main_window_id = self.main_window.id;
+                self.active_dashboard_mut().auto_generate_live_panes(
+                    main_window_id,
+                    &strategy_id,
+                    &instrument_id,
+                    &venue,
+                );
+                return Task::none();
+            }
+            // issue #42 Phase 3: warm_up 進捗 banner 更新 + timeout カウンタリセット。
+            ReplayMsg::LiveWarmingUp {
+                strategy_id,
+                progress: _,
+                message,
+            } => {
+                self.live_warmup_warming_message = Some(message);
+                // 既存タイマーを無効化して 60s タイマーを再起動する（カウンタリセット）。
+                let token = self.live_warmup_timeout_token.wrapping_add(1);
+                self.live_warmup_timeout_token = token;
+                return Task::perform(
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            crate::LIVE_WARMUP_TIMEOUT_SECS,
+                        ))
+                        .await;
+                        (strategy_id, token)
+                    },
+                    |(sid, token)| {
+                        Message::Replay(ReplayMsg::LiveWarmupTimeoutFired {
+                            strategy_id: sid,
+                            token,
+                        })
+                    },
+                );
+            }
+            // issue #42 Phase 3: warm_up 60s timeout 発火 — token が古ければ無視。
+            ReplayMsg::LiveWarmupTimeoutFired { strategy_id, token } => {
+                if token != self.live_warmup_timeout_token {
+                    // LiveStrategyWarmingUp / LiveStrategyReady 受信で token が bump 済 → 無視。
+                    return Task::none();
+                }
+                if matches!(self.live_strategy, LiveStrategyState::Running { .. }) {
+                    // 既に Running に遷移済（Ready が来た）→ 表示しない。
+                    return Task::none();
+                }
+                if self.live_strategy_pending_strategy_id.as_deref() != Some(strategy_id.as_str())
+                {
+                    // 別 strategy_id 用のタイマー（古い start のもの）→ 無視。
+                    return Task::none();
+                }
+                self.live_warmup_timeout_banner =
+                    Some("ライブ戦略起動失敗（warm_up timeout）".to_string());
+                return Task::none();
+            }
+            // issue #42 Phase 3: 「再試行」ボタン押下 — banner を消す（再 Submit は modal 経由）。
+            ReplayMsg::DismissLiveWarmupTimeoutBanner => {
+                self.live_warmup_timeout_banner = None;
+                return Task::none();
+            }
+            // issue #42 Phase 3: LIVE_SCENARIO 抽出応答 → modal prefill。
+            // pending_scenario_request_id と突合して古い応答は捨てる（replay 対称）。
+            ReplayMsg::LiveStrategyScenarioLoaded {
+                request_id,
+                instrument_id,
+                max_qty,
+                max_notional_jpy,
+                strategy_init_kwargs,
+                ..
+            } => {
+                if let Some(form) = self.live_strategy_form_modal.as_mut()
+                    && form.pending_scenario_request_id.as_deref() == Some(request_id.as_str())
+                {
+                    form.prefill_from_scenario(
+                        instrument_id,
+                        max_qty,
+                        max_notional_jpy,
+                        strategy_init_kwargs,
+                    );
+                }
+                return Task::none();
+            }
+            // issue #42 Phase 3: LoadLiveStrategyScenario の 5s timeout / parse_failed →
+            // pending を解除して手入力フォールバック。
+            ReplayMsg::LiveStrategyScenarioFallback { request_id } => {
+                if let Some(form) = self.live_strategy_form_modal.as_mut()
+                    && form.pending_scenario_request_id.as_deref() == Some(request_id.as_str())
+                {
+                    form.release_scenario_pending();
+                }
+                return Task::none();
+            }
+            // issue #42 Phase 3: EngineRehello 受信時に Running 状態なら 4 ペイン再生成。
+            // Python engine からの再 emit は不要（Rust 内部で完結する冪等再生）。
+            ReplayMsg::LiveStrategyRehelloReplay => {
+                if let LiveStrategyState::Running {
+                    strategy_id,
+                    instrument_id,
+                    venue,
+                } = &self.live_strategy
+                {
+                    let strategy_id = strategy_id.clone();
+                    let instrument_id = instrument_id.clone();
+                    let venue = venue.clone();
+                    let main_window_id = self.main_window.id;
+                    self.active_dashboard_mut().auto_generate_live_panes(
+                        main_window_id,
+                        &strategy_id,
+                        &instrument_id,
+                        &venue,
+                    );
+                }
                 return Task::none();
             }
             // N4-live: EngineStopped (live) → clear running state
             ReplayMsg::LiveStopped { strategy_id } => {
-                if let LiveStrategyState::Running {
-                    strategy_id: running_id,
-                } = &self.live_strategy
-                {
-                    if running_id == &strategy_id {
-                        self.live_strategy = LiveStrategyState::Idle;
-                        self.menu_bar.live_bar = crate::menu_bar_state::LiveBarState::default();
-                        let main_window = self.main_window.id;
-                        self.active_dashboard_mut()
-                            .clear_live_strategy_portfolio(main_window);
-                    } else {
-                        log::warn!(
-                            "LiveEngineStoppedEvent: strategy_id mismatch (got={strategy_id}, \
-                             running={running_id}); ignoring"
-                        );
-                    }
+                let pending_match =
+                    self.live_strategy_pending_strategy_id.as_deref() == Some(strategy_id.as_str());
+                let running_match = match &self.live_strategy {
+                    LiveStrategyState::Running {
+                        strategy_id: running_id,
+                        ..
+                    } => running_id == &strategy_id,
+                    LiveStrategyState::Idle => false,
+                };
+                if running_match || pending_match {
+                    self.live_strategy = LiveStrategyState::Idle;
+                    self.live_strategy_pending_strategy_id = None;
+                    self.live_warmup_timeout_banner = None;
+                    self.live_warmup_warming_message = None;
+                    self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
+                    self.menu_bar.live_bar = crate::menu_bar_state::LiveBarState::default();
+                    let main_window = self.main_window.id;
+                    let dashboard = self.active_dashboard_mut();
+                    dashboard.clear_live_strategy_portfolio(main_window);
+                    dashboard.clear_live_pane_keys();
+                } else {
+                    log::warn!(
+                        "LiveEngineStoppedEvent: strategy_id mismatch (got={strategy_id}); ignoring"
+                    );
                 }
                 return Task::none();
             }
             // N4-live: ■ ボタンから StopEngine を送信する
             ReplayMsg::StopLiveStrategy => {
-                let LiveStrategyState::Running { strategy_id } = &self.live_strategy else {
+                let LiveStrategyState::Running { strategy_id, .. } = &self.live_strategy else {
                     return Task::none();
                 };
                 let strategy_id = strategy_id.clone();
