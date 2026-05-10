@@ -200,6 +200,57 @@ fn test_warming_up_resets_timeout_counter() {
     );
 }
 
+/// R2-B H4: EngineError{code:"node_build_failed", strategy_id} を
+/// LiveStrategyBuildFailed ReplayMsg に変換する map_engine_event_to_message ルート、
+/// ハンドラが LiveStrategyState を Idle に戻し teardown_live_panes を呼ぶこと、
+/// dashboard.rs に teardown_live_panes API があることを 3 点 pin する。
+#[test]
+fn test_node_build_failed_resets_state_and_teardowns_panes() {
+    // (1) map_engine_event_to_message が code=="node_build_failed" を
+    //     LiveStrategyBuildFailed に変換するパスがあること。
+    assert!(
+        MAIN_RS.contains("\"node_build_failed\""),
+        "map_engine_event_to_message must branch on EngineError code == \"node_build_failed\""
+    );
+    assert!(
+        MAIN_RS.contains("LiveStrategyBuildFailed"),
+        "main.rs must emit ReplayMsg::LiveStrategyBuildFailed for node_build_failed"
+    );
+
+    // (2) Handler arm が LiveStrategyState::Idle に戻し teardown_live_panes を呼ぶ。
+    let arm = handler_arm("ReplayMsg::LiveStrategyBuildFailed {");
+    assert!(
+        arm.contains("LiveStrategyState::Idle"),
+        "LiveStrategyBuildFailed arm must reset to LiveStrategyState::Idle: {arm}"
+    );
+    assert!(
+        arm.contains("teardown_live_panes"),
+        "LiveStrategyBuildFailed arm must call teardown_live_panes: {arm}"
+    );
+
+    // (3) dashboard.rs に teardown_live_panes 関数があり、live_pane_keys を掃除する。
+    assert!(
+        DASHBOARD.contains("pub fn teardown_live_panes"),
+        "dashboard.rs must declare pub fn teardown_live_panes"
+    );
+    let pos = DASHBOARD
+        .find("pub fn teardown_live_panes")
+        .expect("teardown_live_panes function not found");
+    let mut end = (pos + 3000).min(DASHBOARD.len());
+    while end > 0 && !DASHBOARD.is_char_boundary(end) {
+        end -= 1;
+    }
+    let body = &DASHBOARD[pos..end];
+    assert!(
+        body.contains("live_pane_keys"),
+        "teardown_live_panes must touch live_pane_keys: {body}"
+    );
+    assert!(
+        body.contains("panes.close"),
+        "teardown_live_panes must close panes: {body}"
+    );
+}
+
 /// R2-B H3: LiveWarmingUp arm は strategy_id を pending / running と照合し、
 /// mismatch の場合は早期 return する（旧 strategy の遅延 ticker で banner / timer が
 /// 誤動作するのを防ぐ）。

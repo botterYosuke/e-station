@@ -185,6 +185,16 @@ pub(crate) enum ReplayMsg {
     },
     LiveStartFailed(String),
     StopLiveStrategy,
+    /// R2-B H4 / 統一決定 #21 副次 invariant: live strategy の `warm_up()` 成功
+    /// (LiveStrategyReady emit) 直後に `node.build()` が失敗した場合、Python engine
+    /// が `EngineError{code:"node_build_failed", strategy_id}` を emit する。Rust 側は
+    /// (a) `LiveStrategyState` を Idle に戻し、
+    /// (b) 既に生成済みの 4 ペイン (`auto_generate_live_panes` の結果) を teardown し、
+    /// (c) ユーザーに失敗を通知する。
+    LiveStrategyBuildFailed {
+        strategy_id: String,
+        message: String,
+    },
     /// issue #42 Phase 3: live strategy warm_up 完了 → Running 遷移 + 4 ペイン自動生成。
     /// `EngineEvent::LiveStrategyReady` を `map_engine_event_to_message` 経由で受け取る。
     LiveStrategyReady {

@@ -1621,6 +1621,20 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             strategy_id: Some(sid),
             ..
         } => {
+            // R2-B H4 / 統一決定 #21 副次 invariant: `node.build()` 失敗時は
+            // 生成済みの 4 ペインを teardown して LiveStrategyState を Idle に戻す。
+            // 専用 ReplayMsg variant を経由して handler 内で完結させる
+            // (notification も含む)。
+            if code == "node_build_failed" {
+                log::warn!(
+                    "[engine] node_build_failed strategy={sid}: {message} \
+                     — tearing down live panes"
+                );
+                return Some(Message::Replay(ReplayMsg::LiveStrategyBuildFailed {
+                    strategy_id: sid,
+                    message,
+                }));
+            }
             // strategy-level error; future UI toast when strategy panel is implemented
             log::warn!("[engine] strategy error [{code}] strategy={sid}: {message}");
             None

@@ -716,6 +716,49 @@ impl crate::Flowsurface {
                 self.live_warmup_timeout_banner = None;
                 return Task::none();
             }
+            // R2-B H4 / 統一決定 #21 副次 invariant:
+            // `node.build()` 失敗 → live 4 ペインを teardown + LiveStrategyState を
+            // Idle に戻す + ユーザー通知。strategy_id が pending / running と一致しない
+            // 場合は古い start の遅延通知として log warn のみ（auto_generate_live_panes が
+            // 走っていないペインを誤って teardown しないため）。
+            ReplayMsg::LiveStrategyBuildFailed {
+                strategy_id,
+                message,
+            } => {
+                let matches_pending = self.live_strategy_pending_strategy_id.as_deref()
+                    == Some(strategy_id.as_str());
+                let matches_running = matches!(
+                    &self.live_strategy,
+                    LiveStrategyState::Running { strategy_id: s, .. } if s == &strategy_id
+                );
+                if !matches_pending && !matches_running {
+                    log::warn!(
+                        "LiveStrategyBuildFailed ignored — strategy_id mismatch \
+                         (got={strategy_id}, message={message})"
+                    );
+                    return Task::none();
+                }
+
+                // state machine reset
+                self.live_strategy = LiveStrategyState::Idle;
+                self.live_strategy_pending_strategy_id = None;
+                self.live_warmup_timeout_banner = None;
+                self.live_warmup_warming_message = None;
+                self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
+                self.menu_bar.live_bar = crate::menu_bar_state::LiveBarState::default();
+
+                // ペイン teardown
+                let main_window = self.main_window.id;
+                let dashboard = self.active_dashboard_mut();
+                dashboard.clear_live_strategy_portfolio(main_window);
+                dashboard.teardown_live_panes(&strategy_id);
+
+                // ユーザー通知（fix wording に合わせて固定文言 + 詳細を併記）
+                self.notifications.push(Toast::error(format!(
+                    "ライブ戦略起動失敗（node.build 失敗）: {message}"
+                )));
+                return Task::none();
+            }
             // issue #42 Phase 3: LIVE_SCENARIO 抽出応答 → modal prefill。
             // pending_scenario_request_id と突合して古い応答は捨てる（replay 対称）。
             ReplayMsg::LiveStrategyScenarioLoaded {

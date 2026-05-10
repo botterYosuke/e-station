@@ -1560,6 +1560,68 @@ impl Dashboard {
         self.live_pane_keys.clear();
     }
 
+    /// R2-B H4 / 統一決定 #21 副次 invariant:
+    /// `node.build()` 失敗 (`EngineError{code:"node_build_failed"}`) 受信時に
+    /// `auto_generate_live_panes` で生成済みの 4 ペイン (TimeAndSales / OrderList
+    /// / BuyingPower / Positions) を逆操作で teardown する。
+    ///
+    /// 動作:
+    /// - 該当 `strategy_id` の key を `live_pane_keys` から取り除く。
+    /// - `Content` が live 4 panel kind (TimeAndSales / OrderList / BuyingPower /
+    ///   Positions) のペインを `panes.close()` で閉じる。`CandlestickChart` 等は
+    ///   live 専用ではないため触らない（auto_generate_live_panes は base に対する
+    ///   分割で 4 panel を増やす実装なので、base 側の CandlestickChart は live 起動
+    ///   前から存在する pre-existing pane の可能性がある）。
+    ///
+    /// 副作用:
+    /// - 同 dashboard 上に live 起動と無関係に手動で配置された TimeAndSales /
+    ///   OrderList / BuyingPower / Positions ペインがあった場合、それも一緒に
+    ///   閉じる。`node_build_failed` は通常の運用フローでは稀なため、安全側
+    ///   (= 確実に live 4 ペインを掃除する) を優先する。GUI 上で再起動するときは
+    ///   ユーザーが手動でペインを再配置する設計（統一決定 #21）。
+    pub fn teardown_live_panes(&mut self, strategy_id: &str) {
+        // 1. live_pane_keys から該当 strategy_id を持つ key を全部削除する。
+        //    （`auto_generate_live_panes` は (strategy_id, instrument_id, venue) 三つ組を
+        //     登録するため、同 strategy_id で複数 venue / instrument_id があれば全部消す）
+        let removed: Vec<_> = self
+            .live_pane_keys
+            .iter()
+            .filter(|(sid, _, _)| sid == strategy_id)
+            .cloned()
+            .collect();
+        let removed_len = removed.len();
+        for key in removed {
+            self.live_pane_keys.remove(&key);
+        }
+
+        // 2. live 4 panel kind のペインを閉じる。
+        //    `pane_grid::State::iter()` で借用中に close できないため、対象 id を
+        //    先に集めてから close する（HashSet にしないのは順序を保つだけで本質ではない）。
+        let targets: Vec<_> = self
+            .panes
+            .iter()
+            .filter_map(|(id, state)| {
+                let is_live_panel = matches!(
+                    &state.content,
+                    pane::Content::TimeAndSales(_)
+                        | pane::Content::OrderList(_)
+                        | pane::Content::BuyingPower(_)
+                        | pane::Content::Positions(_)
+                );
+                if is_live_panel { Some(*id) } else { None }
+            })
+            .collect();
+        let closed_len = targets.len();
+        for id in targets {
+            self.panes.close(id);
+        }
+
+        log::info!(
+            "teardown_live_panes: strategy_id={strategy_id} \
+             removed_keys={removed_len} closed_panes={closed_len}"
+        );
+    }
+
     pub fn view<'a>(
         &'a self,
         main_window: &'a Window,
