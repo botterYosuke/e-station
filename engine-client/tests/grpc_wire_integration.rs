@@ -362,16 +362,9 @@ async fn test_new_live_ipcs_round_trip_via_grpc() {
                     ..
                 }) => return Some(("loaded", request_id, instrument_id, venue)),
                 Ok(flowsurface_engine_client::dto::EngineEvent::Error {
-                    request_id,
-                    code,
-                    ..
+                    request_id, code, ..
                 }) => {
-                    return Some((
-                        "error",
-                        request_id.unwrap_or_default(),
-                        Some(code),
-                        None,
-                    ));
+                    return Some(("error", request_id.unwrap_or_default(), Some(code), None));
                 }
                 Ok(_) => continue,
                 Err(_) => return None,
