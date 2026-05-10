@@ -1,5 +1,11 @@
 // tests/gui_verify.rs
 // cargo test verify_empty_state_message -- --ignored --nocapture で実行
+//
+// Windows 専用: xcap での画面キャプチャを使うため、Linux runner では
+// libxcb / libdbus / display server のセットアップが必要になりビルドも実行も
+// 現実的でない。このテストはそもそも Windows でしか意味がないので Linux
+// ビルドからは外す。
+#![cfg(target_os = "windows")]
 
 use base64::Engine as _;
 use image::DynamicImage;
