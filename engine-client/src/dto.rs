@@ -1441,6 +1441,14 @@ pub enum EngineEvent {
         /// 「broadcast / 別 client 由来」を区別するために使う。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        /// issue #42 Phase 3 (schema 3.28): reject 対象 venue（同一 venue で別 strategy
+        /// が走っている場合）。旧 server (minor < 28) からは `None` で deserialise される。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        venue: Option<String>,
+        /// issue #42 Phase 3 (schema 3.28): reject の具体カテゴリ（例:
+        /// `"another_strategy_on_venue"`）。旧 server (minor < 28) からは `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy_kind: Option<String>,
     },
     /// 新規クライアントが engine WebSocket に接続したことを全 client に broadcast する。
     /// `count` は接続中のクライアント総数（接続後）。

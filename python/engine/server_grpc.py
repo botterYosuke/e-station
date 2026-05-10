@@ -17,7 +17,7 @@ from engine.server import _ENGINE_VERSION
 # gRPC IPC schema version — source of truth for the gRPC transport layer.
 # Keep in sync with engine-client/src/lib.rs SCHEMA_MAJOR / SCHEMA_MINOR.
 SCHEMA_MAJOR: int = 3   # gRPC IPC schema major version
-SCHEMA_MINOR: int = 27  # gRPC IPC schema minor version
+SCHEMA_MINOR: int = 28  # gRPC IPC schema minor version
 
 log = logging.getLogger(__name__)
 

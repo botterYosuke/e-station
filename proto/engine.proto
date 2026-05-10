@@ -706,6 +706,12 @@ message EngineBusyEvent {
   AttemptedCommand attempted_command = 2;
   string           reason            = 3;
   optional string  request_id        = 4;  // identifies the rejected command's caller
+  // issue #42 Phase 3 (schema 3.28): venue-scoped concurrent-live guard fields.
+  // `venue` is the venue holding another strategy; `busy_kind` is the specific reject
+  // category (e.g. "another_strategy_on_venue"). Older clients (minor < 28) absent
+  // both fields and decode them as None.
+  optional string  venue             = 5;
+  optional string  busy_kind         = 6;
 }
 
 message ClientConnectedEvent {

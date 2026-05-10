@@ -12,7 +12,7 @@ from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 # SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
 # 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 27
+SCHEMA_MINOR: int = 28
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -1021,6 +1021,12 @@ class EngineBusy(IpcMessage):
     # `events()` はこの値で「自分宛の reject」と「broadcast / 別 client 由来」を
     # 区別する。
     request_id: str | None = None
+    # issue #42 Phase 3 (schema 3.28): venue 単位の concurrent live ガードで使う追加情報。
+    # venue は reject 対象 venue（同一 venue で別 strategy が走っているとき）。
+    # busy_kind は具体的な reject 種別（例: "another_strategy_on_venue"）。
+    # 旧 schema (minor < 28) からの payload は両方とも None で deserialise される。
+    venue: str | None = None
+    busy_kind: str | None = None
 
     @model_validator(mode="after")
     def _validate_state_command_orthogonal(self) -> "EngineBusy":

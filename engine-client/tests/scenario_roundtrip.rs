@@ -516,3 +516,88 @@ fn live_strategy_warming_up_unknown_field_tolerated() {
         _ => panic!("Expected LiveStrategyWarmingUp"),
     }
 }
+
+// ── issue #42 Phase 3 (schema 3.28): EngineBusy.venue / busy_kind round-trip ──
+
+/// SCHEMA_MINOR は P3c 完了後 28 以上であること。
+#[test]
+fn schema_minor_is_at_least_28_after_p3c() {
+    const { assert!(SCHEMA_MINOR >= 28) };
+}
+
+/// EngineBusy が新しい optional `venue` / `busy_kind` フィールドをデシリアライズする。
+/// venue 単位で別 strategy が走っているとき: busy_kind="another_strategy_on_venue"
+/// （統一決定 #7）。
+#[test]
+fn engine_busy_with_venue_and_busy_kind_deserializes() {
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "TRADING",
+        "attempted_command": "StartEngine",
+        "reason": "venue tachibana is hosting another strategy",
+        "request_id": "req-busy-1",
+        "venue": "tachibana",
+        "busy_kind": "another_strategy_on_venue"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::EngineBusy {
+            venue, busy_kind, ..
+        } => {
+            assert_eq!(venue.as_deref(), Some("tachibana"));
+            assert_eq!(busy_kind.as_deref(), Some("another_strategy_on_venue"));
+        }
+        _ => panic!("Expected EngineBusy"),
+    }
+}
+
+/// 旧 wire 形（venue / busy_kind 不在）でも EngineBusy はデシリアライズに成功し、
+/// 両フィールドは `None` になる（後方互換）。
+#[test]
+fn engine_busy_missing_venue_busy_kind_falls_back_to_none() {
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "RUNNING",
+        "attempted_command": "LoadReplayData",
+        "reason": "already running",
+        "request_id": "req-busy-2"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::EngineBusy {
+            venue, busy_kind, ..
+        } => {
+            assert!(venue.is_none(), "venue must default to None on absent");
+            assert!(
+                busy_kind.is_none(),
+                "busy_kind must default to None on absent"
+            );
+        }
+        _ => panic!("Expected EngineBusy"),
+    }
+}
+
+/// EngineBusy の追加フィールド未知 field があっても tolerated（forward compat）。
+#[test]
+fn engine_busy_unknown_field_tolerated() {
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "TRADING",
+        "attempted_command": "StartEngine",
+        "reason": "duplicate venue",
+        "request_id": "req-busy-3",
+        "venue": "tachibana",
+        "busy_kind": "another_strategy_on_venue",
+        "future_field": "ignored-by-old-clients"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::EngineBusy {
+            venue, busy_kind, ..
+        } => {
+            assert_eq!(venue.as_deref(), Some("tachibana"));
+            assert_eq!(busy_kind.as_deref(), Some("another_strategy_on_venue"));
+        }
+        _ => panic!("Expected EngineBusy"),
+    }
+}

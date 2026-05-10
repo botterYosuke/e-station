@@ -981,6 +981,8 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             attempted_command: proto_attempted_command_to_dto(eb.attempted_command),
             reason: eb.reason,
             request_id: eb.request_id,
+            venue: eb.venue,
+            busy_kind: eb.busy_kind,
         }),
         Payload::ClientConnected(cc) => Some(dto::EngineEvent::ClientConnected { count: cc.count }),
         Payload::ClientDisconnected(cd) => {

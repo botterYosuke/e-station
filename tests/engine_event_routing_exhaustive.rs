@@ -150,6 +150,7 @@ fn engine_event_variant_count_is_as_expected() {
     // schema 3.25 (issue #42 Phase 2): LiveStrategyScenarioLoaded 追加で 53 → 54
     // schema 3.26 (issue #42 Phase 3): LiveStrategyReady 追加で 54 → 55
     // schema 3.27 (issue #42 Phase 3): LiveStrategyWarmingUp 追加で 55 → 56
+    // schema 3.28 (issue #42 Phase 3): EngineBusy.venue / busy_kind フィールド追加（variant 数は変わらず 56）
     assert_eq!(
         count, 56,
         "EngineEvent variant count changed (got {count}, expected 56). \

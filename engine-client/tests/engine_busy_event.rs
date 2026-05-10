@@ -23,6 +23,8 @@ fn engine_busy_deserializes_correctly() {
             attempted_command,
             reason,
             request_id,
+            venue,
+            busy_kind,
         } => {
             assert_eq!(current_state, CurrentEngineState::Running);
             assert_eq!(attempted_command, AttemptedCommand::LoadReplayData);
@@ -33,6 +35,10 @@ fn engine_busy_deserializes_correctly() {
                 request_id.is_none(),
                 "old wire format should deserialize as None"
             );
+            // issue #42 Phase 3 (schema 3.28): 旧 wire (venue / busy_kind 未送出) は
+            // 両フィールドとも `None` にデシリアライズされる (後方互換)。
+            assert!(venue.is_none(), "old wire: venue must be None");
+            assert!(busy_kind.is_none(), "old wire: busy_kind must be None");
         }
         other => panic!("expected EngineBusy, got {other:?}"),
     }

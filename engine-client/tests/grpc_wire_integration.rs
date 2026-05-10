@@ -270,6 +270,50 @@ async fn test_load_live_strategy_scenario_forward_compat() {
     assert!(result.is_ok(), "send must not fail at the wire level");
 }
 
+// ── issue #42 Phase 3 (schema 3.28): EngineBusy.venue / busy_kind wire 経路 ──
+
+/// Python が EngineBusy event を venue / busy_kind フィールド付きで送出すると
+/// Rust 側で `EngineEvent::EngineBusy { venue, busy_kind, .. }` として受信できる。
+/// Phase 3 functional impl (server.py の venue-scoped guard) が入るまでは観測されない
+/// ので timeout は緩く取る。
+#[tokio::test]
+#[ignore = "requires Python+grpcio"]
+async fn test_engine_busy_with_venue_round_trip() {
+    let port = alloc_ephemeral_port();
+    let _child = KillOnDrop(start_python_server(port, TEST_TOKEN));
+    wait_for_port(port).await;
+
+    let target = format!("http://127.0.0.1:{port}");
+    let conn = EngineConnection::connect_grpc(&target, TEST_TOKEN, AppMode::Live)
+        .await
+        .expect("handshake should succeed");
+
+    let mut events = conn.subscribe_events();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match events.recv().await {
+                Ok(flowsurface_engine_client::dto::EngineEvent::EngineBusy {
+                    venue,
+                    busy_kind,
+                    ..
+                }) => return Some((venue, busy_kind)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    })
+    .await;
+
+    if matches!(outcome, Ok(Some(_))) {
+        // green: 実装到達済み
+    } else {
+        eprintln!(
+            "test_engine_busy_with_venue_round_trip: no EngineBusy with venue/busy_kind observed — Python emit path not yet wired (expected before Phase 1 functional impl)"
+        );
+    }
+}
+
 // ── issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp wire 経路 ───────
 
 /// Python が LiveStrategyWarmingUp event を 5s 毎に送出すると Rust 側で

@@ -174,3 +174,51 @@ def test_live_strategy_warming_up_unknown_variant_tolerated() -> None:
     ev = s.LiveStrategyWarmingUp.model_validate(data)
     assert ev.progress == pytest.approx(0.0)
     assert not hasattr(ev, "future_field")
+
+
+# ── Phase P3c (27 → 28): EngineBusy.venue / EngineBusy.busy_kind ────────────
+
+
+def test_schema_minor_is_28_for_phase_p3c() -> None:
+    """SCHEMA_MINOR must be bumped to 28 for Phase P3c (EngineBusy.venue/busy_kind)."""
+    assert s.SCHEMA_MINOR >= 28, "Phase P3c: bump 27 → 28 not applied"
+
+
+def test_engine_busy_with_venue_round_trip() -> None:
+    """`EngineBusy` は新しい optional `venue` / `busy_kind` フィールドを受け入れる。
+
+    venue 単位で別 strategy が走っているとき: busy_kind="another_strategy_on_venue"
+    （統一決定 #7）。
+    """
+    data = {
+        "event": "EngineBusy",
+        "current_state": "TRADING",
+        "attempted_command": "StartEngine",
+        "reason": "venue tachibana is hosting another strategy",
+        "request_id": "req-busy-1",
+        "venue": "tachibana",
+        "busy_kind": "another_strategy_on_venue",
+    }
+    ev = s.EngineBusy.model_validate(data)
+    out = orjson.loads(orjson.dumps(ev.model_dump(mode="json")))
+    assert out["event"] == "EngineBusy"
+    assert out["venue"] == "tachibana"
+    assert out["busy_kind"] == "another_strategy_on_venue"
+
+
+def test_engine_busy_missing_venue_busy_kind_falls_back_to_none() -> None:
+    """旧 wire 形（venue / busy_kind 不在）でも EngineBusy はデシリアライズ成功（後方互換）."""
+    data = {
+        "event": "EngineBusy",
+        "current_state": "RUNNING",
+        "attempted_command": "LoadReplayData",
+        "reason": "already running",
+        "request_id": "req-busy-2",
+    }
+    ev = s.EngineBusy.model_validate(data)
+    assert ev.venue is None
+    assert ev.busy_kind is None
+    # 旧形式と等価な round-trip ができる
+    out = orjson.loads(orjson.dumps(ev.model_dump(mode="json", exclude_none=True)))
+    assert "venue" not in out
+    assert "busy_kind" not in out

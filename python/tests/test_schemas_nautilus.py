@@ -50,7 +50,9 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # (LiveStrategyReady 追加、auto_generate_live_panes 冪等トリガー)
     # issue #42 Phase 3 (schema 3.27): SCHEMA_MINOR を 26 → 27 に bump
     # (LiveStrategyWarmingUp 追加、warm_up 進捗 5s 毎 emit)
-    assert s.SCHEMA_MINOR == 27
+    # issue #42 Phase 3 (schema 3.28): SCHEMA_MINOR を 27 → 28 に bump
+    # (EngineBusy.venue / EngineBusy.busy_kind 追加、venue-scoped concurrent live ガード)
+    assert s.SCHEMA_MINOR == 28
     assert s.SCHEMA_MAJOR == 3
 
 

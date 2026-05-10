@@ -49,5 +49,6 @@ pub use venue_caps::VenueCapsStore;
 ///   - 25: LoadLiveStrategyScenario / LiveStrategyScenarioLoaded 追加（issue #42 Phase 2）
 ///   - 26: LiveStrategyReady 追加（issue #42 Phase 3、auto_generate_live_panes 冪等トリガー）
 ///   - 27: LiveStrategyWarmingUp 追加（issue #42 Phase 3、warm_up 進捗 5s 毎 emit）
+///   - 28: EngineBusy.venue / EngineBusy.busy_kind 追加（issue #42 Phase 3、venue-scoped concurrent live ガード）
 pub const SCHEMA_MAJOR: u32 = 3;
-pub const SCHEMA_MINOR: u32 = 27;
+pub const SCHEMA_MINOR: u32 = 28;
