@@ -243,3 +243,51 @@ class TestVenueDiscardedOnWarmUpFailure:
             f"_active_live_venues must be cleaned up even when start_live fails early, "
             f"got {server._active_live_venues!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# R2-A H6: CancelledError / SIGTERM 経路でも _active_live_venues が discard される
+# ---------------------------------------------------------------------------
+
+
+class TestActiveLiveVenuesDiscardedOnCancellation:
+    """H6: ``asyncio.to_thread(_run)`` が CancelledError で中断された経路でも
+    ``_active_live_venues`` が cleanup される（finally の discard で保証）。
+
+    旧実装: ``finally`` で discard する作りだったが、CancelledError 伝播の
+    タイミングによっては venue が discard されないリスクがあった
+    （review 指摘 H6: "CancelledError 伝播時に到達しない可能性"）。
+    新実装: 二重防御（``except asyncio.CancelledError`` 経路でも discard +
+    ``finally`` の discard）で冪等に確実 cleanup する。
+    """
+
+    @pytest.mark.asyncio
+    async def test_active_live_venues_discarded_on_cancellation(self) -> None:
+        """``to_thread(_run)`` を CancelledError で中断 → venue が discard される。"""
+        import asyncio
+
+        server = _make_server()
+
+        # asyncio.wait_for の内部で raise させるため、to_thread を patch する。
+        async def fake_to_thread(_fn, *_args, **_kwargs):
+            # SIGTERM / cancel 経路を模擬
+            raise asyncio.CancelledError()
+
+        # エンジンランナー本体は呼ばないので patch して安全に
+        def fake_start_live(self_runner, **kwargs):
+            return None
+
+        with patch("asyncio.to_thread", fake_to_thread), patch(
+            "engine.nautilus.engine_runner.NautilusRunner.start_live",
+            fake_start_live,
+        ):
+            msg = _start_engine_msg("cancel-strategy", "req-cancel-1")
+            # CancelledError は server 内部で raise → ハンドラ自体は再 raise する
+            with pytest.raises(asyncio.CancelledError):
+                await server._handle_start_engine(msg)
+
+        # CancelledError 経路でも venue が discard されている
+        assert "tachibana" not in server._active_live_venues, (
+            "_active_live_venues must be discarded on CancelledError "
+            f"(SIGTERM 経路の cleanup 失敗), got {server._active_live_venues!r}"
+        )

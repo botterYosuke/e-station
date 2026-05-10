@@ -5144,6 +5144,18 @@ class DataEngineServer:
                         "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
                         strategy_id,
                     )
+        except asyncio.CancelledError:
+            # R2-A H6: SIGTERM / cancel 経路で CancelledError が伝播してきた場合、
+            # 後続の ``finally:`` 節も走るため理論上は cleanup される。ただし
+            # CancelledError は ``Exception`` を継承しないため、もし将来 ``finally:``
+            # 内に await が入ったり順序が変わると discard を取りこぼす可能性がある。
+            # 二重防御として here で明示的に discard し、その後 raise で伝播継続する。
+            # set.discard は冪等なので finally 節と二重実行しても問題なし。
+            if live_venue_for_cleanup is not None:
+                _venues_cancel = getattr(self, "_active_live_venues", None)
+                if _venues_cancel is not None:
+                    _venues_cancel.discard(live_venue_for_cleanup)
+            raise
         except asyncio.TimeoutError as exc:
             log.error(
                 "StartEngine timed out: strategy_id=%r",
@@ -5207,10 +5219,15 @@ class DataEngineServer:
                     }
                 )
                 engine_stopped_emitted[0] = True
+            # R2-A M9: credential 漏洩防止。認証関連例外の str(exc) は wire に
+            # 流さず、engine_runner の helper を経由して scrub する。
+            # 詳細は log.error(..., exc_info=True) で local 側に残る。
+            from engine.nautilus.engine_runner import _scrub_credential_exception
+            scrubbed_msg = _scrub_credential_exception(exc)
             _emit(
                 EngineErrorModel(
                     code="engine_run_failed",
-                    message=str(exc),
+                    message=scrubbed_msg,
                     strategy_id=strategy_id,
                 ).model_dump()
             )
@@ -5220,7 +5237,7 @@ class DataEngineServer:
                     "event": "Error",
                     "request_id": request_id,
                     "code": "engine_run_failed",
-                    "message": str(exc),
+                    "message": scrubbed_msg,
                 }
             )
         finally:

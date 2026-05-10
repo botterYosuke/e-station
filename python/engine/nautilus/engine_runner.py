@@ -150,6 +150,31 @@ def _aggressor_to_side(side) -> str:
     return "BUY"
 
 
+# issue #42 R2-A H5 / M9: credential 漏洩防止 helper。
+# warm_up() / live engine 走行時に発生した例外を ``EngineError.message`` や
+# ``Error.message`` に詰める前にこの関数を通すことで、wire / GUI ログへの
+# credential（second password / API key / token 等）漏洩を防ぐ。
+#
+# 完全な scrub ではなく **「型名が credential 関連と思われる場合は str(exc) を捨てて
+# 型名のみ expose する」** 防御線。誤検知時も型名は残るので診断はできる。
+# 詳細は server / engine_runner の log.error(..., exc_info=True) に残るため、
+# 開発者は log を見れば原因究明可能（log は wire / GUI に出ない）。
+_CREDENTIAL_TYPE_NAME_TOKENS: tuple[str, ...] = ("Password", "Auth", "Credential")
+
+
+def _scrub_credential_exception(exc: BaseException) -> str:
+    """例外メッセージから credential 漏洩を回避した文字列を返す。
+
+    type 名が ``Password`` / ``Auth`` / ``Credential`` を含むなら、
+    ``"<TypeName> (details suppressed for credential safety)"`` を返す。
+    それ以外は ``str(exc)`` をそのまま返す（大半の RuntimeError / ValueError 等）。
+    """
+    type_name = type(exc).__name__
+    if any(token in type_name for token in _CREDENTIAL_TYPE_NAME_TOKENS):
+        return f"{type_name} (details suppressed for credential safety)"
+    return str(exc)
+
+
 class NautilusRunner:
     """nautilus エンジンのライフサイクルを管理するワーカー。
 
@@ -1378,13 +1403,31 @@ class NautilusRunner:
                     try:
                         warm_up_ok = await exec_client.warm_up()
                     except Exception as exc:
-                        await _emit_warmup_failed_and_close(str(exc), exec_client)
+                        # R2-A H5: credential 漏洩防止。``str(exc)`` を直接 wire に
+                        # 流すと認証エラーの message に second_password / token 等が
+                        # 混入する恐れがあるため scrub helper を経由する。
+                        log.error(
+                            "[start_live] warm_up raised exception",
+                            exc_info=True,
+                        )
+                        scrubbed = _scrub_credential_exception(exc)
+                        await _emit_warmup_failed_and_close(scrubbed, exec_client)
                         return
                     if warm_up_ok is False:
                         await _emit_warmup_failed_and_close(
                             "warm_up returned False", exec_client
                         )
                         return
+                else:
+                    # R2-A M10: hasattr が False のとき silent skip しない。
+                    # 旧実装は warm_up が無いクライアントでもそのまま起動を続行し、
+                    # 認証/state 不整合に気付けない silent failure を生んでいた。
+                    # 既存挙動互換のため起動自体は継続するが、warning を残す。
+                    log.warning(
+                        "[start_live] exec_client (%s) has no warm_up method — "
+                        "skipping warm_up phase (potential state inconsistency)",
+                        type(exec_client).__name__,
+                    )
             finally:
                 warmup_stop.set()
                 try:

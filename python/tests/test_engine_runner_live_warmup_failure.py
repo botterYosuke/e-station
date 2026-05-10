@@ -270,3 +270,109 @@ class TestWarmUpFailureClosesExecClient:
         assert exec_client.close_called, (
             "close() must be called after warm_up returned False (resource leak guard)"
         )
+
+
+# ---------------------------------------------------------------------------
+# R2-A M10: warm_up が無いクライアントは silent skip しない（log.warning を残す）
+# ---------------------------------------------------------------------------
+
+
+class _FakeExecClientNoWarmUp:
+    """``warm_up`` メソッドを持たない fake exec client。"""
+
+    instances: list["_FakeExecClientNoWarmUp"] = []
+
+    def __init__(self, **_kwargs) -> None:
+        self.close_called = False
+        self.id = "fake-exec-client-no-warmup"
+        type(self).instances.append(self)
+
+    async def close(self) -> None:
+        self.close_called = True
+
+
+def _patch_no_warmup_dependencies(monkeypatch) -> None:
+    """warm_up を持たない client を返す patch。それ以降の経路は早めに失敗させたい
+    ので make_equity_instrument を例外にし、ログ記録を観測する箇所までで止める。
+    """
+    monkeypatch.setattr(
+        "engine.nautilus.engine_runner.is_market_open",
+        lambda *_a, **_kw: True,
+    )
+    _FakeExecClientNoWarmUp.instances = []
+    monkeypatch.setattr(
+        "engine.nautilus.clients.tachibana.TachibanaLiveExecutionClient",
+        lambda *a, **kw: _FakeExecClientNoWarmUp(**kw),
+    )
+
+    class _FakeDataClient:
+        def __init__(self, *_a, **_kw) -> None:
+            self.id = "fake-data-client"
+
+    class _FakeOrderIdMap:
+        def __init__(self, *_a, **_kw) -> None:
+            pass
+
+    class _FakeEventBridge:
+        def __init__(self, *_a, **_kw) -> None:
+            self._loop = None
+
+    monkeypatch.setattr(
+        "engine.nautilus.clients.tachibana_data.TachibanaLiveDataClient",
+        _FakeDataClient,
+    )
+    monkeypatch.setattr(
+        "engine.nautilus.clients.tachibana_event_bridge.OrderIdMap",
+        _FakeOrderIdMap,
+    )
+    monkeypatch.setattr(
+        "engine.nautilus.clients.tachibana_event_bridge.TachibanaEventBridge",
+        _FakeEventBridge,
+    )
+
+    class _FakeNode:
+        def __init__(self, *_a, **_kw) -> None:
+            self._data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+            self._exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+
+        def add_data(self, *_a, **_kw) -> None:
+            pass
+
+        def add_strategies(self, *_a, **_kw) -> None:
+            pass
+
+        def build(self) -> None:
+            # warm_up skip 後 build は呼ばれる想定だが、本テストは log 観測が目的なので
+            # ここで raise して以降の処理は cut-off する。
+            raise RuntimeError("test cut-off after warm_up skip log observation")
+
+    monkeypatch.setattr("nautilus_trader.live.node.TradingNode", _FakeNode)
+    monkeypatch.setattr(
+        "engine.nautilus.instrument_factory.make_equity_instrument",
+        lambda *_a, **_kw: object(),
+    )
+
+
+class TestStartLiveLogsWarningWhenWarmUpMissing:
+    """M10: warm_up メソッドが無い client → ``log.warning`` を残し、silent skip しない。"""
+
+    def test_start_live_logs_warning_when_warm_up_missing(
+        self, monkeypatch, caplog
+    ) -> None:
+        import logging
+        _patch_no_warmup_dependencies(monkeypatch)
+
+        events: list[dict] = []
+        runner = NautilusRunner()
+        with caplog.at_level(logging.WARNING, logger="engine.nautilus.engine_runner"):
+            runner.start_live(**_make_runner_args(events.append))
+
+        # warm_up が無い client であっても警告が出ている（silent skip しない）
+        warmup_warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "no warm_up method" in r.getMessage()
+        ]
+        assert len(warmup_warnings) >= 1, (
+            f"expected log.warning when warm_up missing, got records: "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
