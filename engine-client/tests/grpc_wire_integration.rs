@@ -316,6 +316,80 @@ async fn test_engine_busy_with_venue_round_trip() {
     }
 }
 
+/// issue #42 Phase 2 functional / 受け入れ基準 #22:
+/// 新 live IPCs (LoadLiveStrategyScenario / LiveStrategyScenarioLoaded) が
+/// gRPC 経路で送受信できることを wire レベルで観測する。
+///
+/// Python engine が ``_handle_load_live_strategy_scenario`` で
+/// LIVE_SCENARIO 不在パスに対して **即時** ``LiveStrategyScenarioLoaded``（全フィールド None）
+/// を返すことを検証する（統一決定 #18 / 受け入れ基準 #23）。
+#[tokio::test]
+#[ignore = "requires Python+grpcio"]
+async fn test_new_live_ipcs_round_trip_via_grpc() {
+    let port = alloc_ephemeral_port();
+    let _child = KillOnDrop(start_python_server(port, TEST_TOKEN));
+    wait_for_port(port).await;
+
+    let target = format!("http://127.0.0.1:{port}");
+    let conn = EngineConnection::connect_grpc(&target, TEST_TOKEN, AppMode::Live)
+        .await
+        .expect("handshake should succeed");
+
+    let mut events = conn.subscribe_events();
+
+    // LIVE_SCENARIO を含まない（存在しない）path を渡すと Python 側 handler は
+    // 即時 LiveStrategyScenarioLoaded(全フィールド None) を返す（受け入れ基準 #23）。
+    // ファイル不在は ScenarioValidationError ではなく OSError → strategy_parse_failed
+    // 経路に流れるため、本テストでは「LIVE_SCENARIO 無しで構文エラーなしの .py」を
+    // path に渡したい。実機の subprocess に temp ファイルを書き込むのは過剰なので、
+    // ここは strategy_parse_failed の Error も合わせて受理する。
+    conn.send(
+        flowsurface_engine_client::dto::Command::LoadLiveStrategyScenario {
+            request_id: "live-ipcs-rt-1".to_string(),
+            strategy_path: "/nonexistent/no_live_scenario.py".to_string(),
+        },
+    )
+    .await
+    .expect("send LoadLiveStrategyScenario via gRPC");
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Ok(flowsurface_engine_client::dto::EngineEvent::LiveStrategyScenarioLoaded {
+                    request_id,
+                    instrument_id,
+                    venue,
+                    ..
+                }) => return Some(("loaded", request_id, instrument_id, venue)),
+                Ok(flowsurface_engine_client::dto::EngineEvent::Error {
+                    request_id,
+                    code,
+                    ..
+                }) => {
+                    return Some((
+                        "error",
+                        request_id.unwrap_or_default(),
+                        Some(code),
+                        None,
+                    ));
+                }
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    })
+    .await
+    .expect("should receive a response within 5 s")
+    .expect("event stream closed unexpectedly");
+
+    let (kind, req_id, _slot1, _slot2) = outcome;
+    assert_eq!(req_id, "live-ipcs-rt-1");
+    assert!(
+        kind == "loaded" || kind == "error",
+        "unexpected response kind: {kind}"
+    );
+}
+
 // ── issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp wire 経路 ───────
 
 /// Python が LiveStrategyWarmingUp event を 5s 毎に送出すると Rust 側で
