@@ -491,7 +491,10 @@ fn live_strategy_warming_up_deserializes() {
             message,
         } => {
             assert_eq!(strategy_id, "live-strat-3");
-            assert!((progress - 0.42).abs() < 1e-5, "progress 0.42 expected, got {progress}");
+            assert!(
+                (progress - 0.42).abs() < 1e-5,
+                "progress 0.42 expected, got {progress}"
+            );
             assert_eq!(message, "warming up...");
         }
         _ => panic!("Expected LiveStrategyWarmingUp"),

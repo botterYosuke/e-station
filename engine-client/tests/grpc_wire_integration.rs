@@ -207,10 +207,12 @@ async fn test_load_live_strategy_scenario_round_trip() {
     let mut events = conn.subscribe_events();
 
     // 存在しない / LIVE_SCENARIO を含まない path を渡すと engine は即時応答する想定。
-    conn.send(flowsurface_engine_client::dto::Command::LoadLiveStrategyScenario {
-        request_id: "live-rt-1".to_string(),
-        strategy_path: "/nonexistent/strategy.py".to_string(),
-    })
+    conn.send(
+        flowsurface_engine_client::dto::Command::LoadLiveStrategyScenario {
+            request_id: "live-rt-1".to_string(),
+            strategy_path: "/nonexistent/strategy.py".to_string(),
+        },
+    )
     .await
     .expect("send LoadLiveStrategyScenario");
 
