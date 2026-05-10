@@ -225,9 +225,20 @@ impl LiveStrategyFormModal {
             self.max_notional_jpy = n.to_string();
         }
         if let Some(kwargs) = strategy_init_kwargs {
-            self.strategy_init_kwargs =
-                serde_json::to_string_pretty(&serde_json::Value::Object(kwargs))
-                    .unwrap_or_default();
+            // R2-B M6: 旧実装は `unwrap_or_default()` で silent fallback だったが、
+            // serde_json::Value::Object のシリアライズが失敗するのは std fmt 内部の
+            // memory 系エラーに限る（typical な map は必ず通る）。万一失敗した場合は
+            // 既存値（modal が開いたばかりなら空文字）を保ち、log warn を残す。
+            match serde_json::to_string_pretty(&serde_json::Value::Object(kwargs)) {
+                Ok(s) => self.strategy_init_kwargs = s,
+                Err(e) => {
+                    log::warn!(
+                        "[LiveStrategyFormModal] strategy_init_kwargs serialization failed: {e} \
+                         — keeping existing value"
+                    );
+                    // 既存値を維持（明示的に何もしない）。
+                }
+            }
         }
         // engine から応答が返った時点で pending を解除（手入力 fallback の対称）。
         self.pending_scenario_request_id = None;
@@ -664,6 +675,39 @@ mod tests {
         assert!(
             form.pending_scenario_request_id.is_none(),
             "prefill must clear pending_scenario_request_id"
+        );
+    }
+
+    // R2-B M6: prefill_from_scenario の strategy_init_kwargs シリアライズ失敗ハンドリング
+    // を source-pin する。実 runtime で serde_json::to_string_pretty が
+    // Map<String, Value> に対して失敗するのは std fmt 内部限定のため挙動テストは困難。
+    // 代わりにソース上に「log warn + 既存値保持」の経路が残っていることを pin する。
+    #[test]
+    fn test_prefill_from_scenario_logs_on_serialize_error() {
+        let src = include_str!("../modal/live_strategy_form.rs");
+        let pos = src
+            .find("pub fn prefill_from_scenario")
+            .expect("prefill_from_scenario not found");
+        let mut end = (pos + 2500).min(src.len());
+        while end > 0 && !src.is_char_boundary(end) {
+            end -= 1;
+        }
+        let body = &src[pos..end];
+        assert!(
+            body.contains("log::warn!"),
+            "prefill_from_scenario must log::warn! on serialization failure: {body}"
+        );
+        // 旧実装の `to_string_pretty(...).unwrap_or_default()` パターンが消えていること
+        // (コメント内の言及は許容するため `).unwrap_or_default()` の閉じ括弧つきで pin する)。
+        assert!(
+            !body.contains(").unwrap_or_default()"),
+            "prefill_from_scenario must NOT chain unwrap_or_default() on serialize result \
+             (silent fallback): {body}"
+        );
+        // serialize 失敗時に既存値が保たれる (= self.strategy_init_kwargs = s は Ok 経路のみ)。
+        assert!(
+            body.contains("Ok(s) => self.strategy_init_kwargs = s"),
+            "prefill_from_scenario must only assign strategy_init_kwargs on Ok: {body}"
         );
     }
 
