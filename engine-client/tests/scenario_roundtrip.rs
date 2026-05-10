@@ -3,7 +3,7 @@
 //! StrategyScenarioLoaded / StrategyScenarioSaved イベントの
 //! JSON シリアライズ・デシリアライズを検証する。
 
-use flowsurface_engine_client::dto::{Command, EngineEvent};
+use flowsurface_engine_client::dto::{BusyKind, Command, EngineEvent};
 use flowsurface_engine_client::{SCHEMA_MAJOR, SCHEMA_MINOR};
 
 /// SCHEMA_MINOR が期待値以上であることを確認するリグレッションガード。
@@ -548,7 +548,8 @@ fn engine_busy_with_venue_and_busy_kind_deserializes() {
             venue, busy_kind, ..
         } => {
             assert_eq!(venue.as_deref(), Some("tachibana"));
-            assert_eq!(busy_kind.as_deref(), Some("another_strategy_on_venue"));
+            // R2-B H8: busy_kind は `Option<BusyKind>` 型。既知値は enum variant に decode。
+            assert_eq!(busy_kind, Some(BusyKind::AnotherStrategyOnVenue));
         }
         _ => panic!("Expected EngineBusy"),
     }
@@ -599,7 +600,8 @@ fn engine_busy_unknown_field_tolerated() {
             venue, busy_kind, ..
         } => {
             assert_eq!(venue.as_deref(), Some("tachibana"));
-            assert_eq!(busy_kind.as_deref(), Some("another_strategy_on_venue"));
+            // R2-B H8: busy_kind は `Option<BusyKind>`。
+            assert_eq!(busy_kind, Some(BusyKind::AnotherStrategyOnVenue));
         }
         _ => panic!("Expected EngineBusy"),
     }

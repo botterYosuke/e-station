@@ -896,6 +896,69 @@ impl std::fmt::Display for OrderStatus {
     }
 }
 
+/// `EngineBusy.busy_kind` の wire 値 (issue #42 Phase 3 / R2-B H8)。
+///
+/// venue 単位で別 strategy が走っている場合に Python が
+/// `another_strategy_on_venue` を emit する。新カテゴリが追加されたとき
+/// 旧クライアントでもデシリアライズが失敗しないよう、`grpc_transport.rs::
+/// proto_event_to_dto` で未知値は `None` にフォールバックする
+/// （R2-B H8: forward compatibility）。
+///
+/// `serde(rename_all = "snake_case")` で wire 表現は従来の文字列と互換。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BusyKind {
+    /// 同一 venue で別 strategy が走っている場合の reject カテゴリ。
+    AnotherStrategyOnVenue,
+}
+
+impl BusyKind {
+    /// Wire-form string (`"another_strategy_on_venue"`). Convenient for log lines.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            BusyKind::AnotherStrategyOnVenue => "another_strategy_on_venue",
+        }
+    }
+
+    /// Parse a wire string. Returns `None` for unknown values so callers can
+    /// implement forward-compatible fallback (proto path uses this; serde path
+    /// uses `deserialize_busy_kind_lenient`).
+    pub fn from_wire_str(s: &str) -> Option<Self> {
+        match s {
+            "another_strategy_on_venue" => Some(BusyKind::AnotherStrategyOnVenue),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BusyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
+
+/// Lenient deserializer for `Option<BusyKind>` — unknown wire strings degrade
+/// to `None` (forward compat) instead of producing a deserialize error.
+///
+/// `#[serde(default)]` covers the absent-field case; this function covers the
+/// "field present but value unknown" case (R2-B H8).
+fn deserialize_busy_kind_lenient<'de, D>(deserializer: D) -> Result<Option<BusyKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|s| {
+        let parsed = BusyKind::from_wire_str(&s);
+        if parsed.is_none() {
+            log::warn!(
+                target: "engine_client::dto",
+                "EngineBusy.busy_kind: unknown value {s:?} — falling back to None"
+            );
+        }
+        parsed
+    }))
+}
+
 /// Engine state machine の wire 名 (Python `schemas.CurrentEngineState` と一致)。
 /// M-Type4: `EngineBusy.current_state` を `String` から enum に格上げ。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1445,10 +1508,19 @@ pub enum EngineEvent {
         /// が走っている場合）。旧 server (minor < 28) からは `None` で deserialise される。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         venue: Option<String>,
-        /// issue #42 Phase 3 (schema 3.28): reject の具体カテゴリ（例:
-        /// `"another_strategy_on_venue"`）。旧 server (minor < 28) からは `None`。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        busy_kind: Option<String>,
+        /// issue #42 Phase 3 (schema 3.28): reject の具体カテゴリ。
+        /// R2-B H8: `Option<String>` から `Option<BusyKind>` へ enum 化。
+        /// 旧 server (minor < 28) からは `None`。`grpc_transport.rs::proto_event_to_dto`
+        /// で proto 文字列を enum に変換し、未知値は `None` + log warn にフォールバック
+        /// する (forward compat)。serde 経路でも `deserialize_busy_kind_lenient` で
+        /// 未知文字列を `None` に degrade し、新カテゴリ wire 拡張で旧クライアントが
+        /// 壊れないよう対称な振る舞いを保つ。
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_busy_kind_lenient"
+        )]
+        busy_kind: Option<BusyKind>,
     },
     /// 新規クライアントが engine WebSocket に接続したことを全 client に broadcast する。
     /// `count` は接続中のクライアント総数（接続後）。

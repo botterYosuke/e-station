@@ -976,32 +976,54 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             request_id: rst.request_id,
             final_equity: rst.final_equity,
         }),
-        Payload::EngineBusy(eb) => Some(dto::EngineEvent::EngineBusy {
-            current_state: proto_engine_state_to_dto(eb.current_state),
-            attempted_command: proto_attempted_command_to_dto(eb.attempted_command),
-            reason: eb.reason,
-            request_id: eb.request_id,
-            venue: eb.venue,
-            busy_kind: eb.busy_kind,
-        }),
+        Payload::EngineBusy(eb) => {
+            // R2-B H8: proto wire の `busy_kind: optional string` を `Option<BusyKind>`
+            // enum に変換する。未知値は `None` にフォールバックして log warn する。
+            // 新カテゴリが Python 側で追加されたときに旧 Rust client が壊れないよう
+            // forward-compat に倒す（serde 経路の `deserialize_busy_kind_lenient` と対称）。
+            let busy_kind = eb.busy_kind.and_then(|s| {
+                let parsed = dto::BusyKind::from_wire_str(&s);
+                if parsed.is_none() {
+                    log::warn!(
+                        target: "engine_client::grpc_transport",
+                        "EngineBusy: unknown busy_kind {s:?} (request_id={:?}) — falling back to None",
+                        eb.request_id
+                    );
+                }
+                parsed
+            });
+            Some(dto::EngineEvent::EngineBusy {
+                current_state: proto_engine_state_to_dto(eb.current_state),
+                attempted_command: proto_attempted_command_to_dto(eb.attempted_command),
+                reason: eb.reason,
+                request_id: eb.request_id,
+                venue: eb.venue,
+                busy_kind,
+            })
+        }
         Payload::ClientConnected(cc) => Some(dto::EngineEvent::ClientConnected { count: cc.count }),
         Payload::ClientDisconnected(cd) => {
             Some(dto::EngineEvent::ClientDisconnected { count: cd.count })
         }
         Payload::StrategyScenarioLoaded(ssl) => Some(dto::EngineEvent::StrategyScenarioLoaded {
-            request_id: ssl.request_id,
+            request_id: ssl.request_id.clone(),
             path: ssl.path,
-            scenario: ssl.scenario.and_then(|s| {
-                serde_json::from_str(&s)
-                    .map_err(|e| {
-                        log::warn!(
-                            target: "engine_client::grpc_transport",
-                            "StrategyScenarioLoaded: scenario JSON parse failed: {e}"
-                        );
-                        e
-                    })
-                    .ok()
-            }),
+            scenario: {
+                // R2-B R1-RUST-7: log warning に request_id を含めて
+                // 多 client / 並列 SCENARIO 解析でも相関を取りやすくする。
+                let req_id = ssl.request_id.clone();
+                ssl.scenario.and_then(|s| {
+                    serde_json::from_str(&s)
+                        .map_err(|e| {
+                            log::warn!(
+                                target: "engine_client::grpc_transport",
+                                "StrategyScenarioLoaded: scenario JSON parse failed (request_id={req_id}): {e}"
+                            );
+                            e
+                        })
+                        .ok()
+                })
+            },
             // proto repeated string: 空 Vec は None（v1/v2）、非空は Some（v3 + ref）
             resolved_instruments: if ssl.resolved_instruments.is_empty() {
                 None
@@ -1041,28 +1063,48 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             ts_event_ms: lsr.ts_event_ms,
         }),
         // issue #42 Phase 3 (schema 3.27): warm_up 進捗
-        Payload::LiveStrategyWarmingUp(lswu) => Some(dto::EngineEvent::LiveStrategyWarmingUp {
-            strategy_id: lswu.strategy_id,
-            progress: lswu.progress,
-            message: lswu.message,
-        }),
+        // R2-B M1: progress を [0.0, 1.0] にクランプする。Python emit 側で
+        // すでに同範囲だが、防衛的に Rust 側でも clamp して GUI バナー描画 (
+        // ProgressBar など) で NaN / 範囲外による描画事故を防ぐ。NaN は
+        // f32::clamp の仕様で `f32::clamp(NaN, lo, hi)` が NaN を返す
+        // ため、明示的に `is_nan()` で 0.0 にフォールバックする。
+        Payload::LiveStrategyWarmingUp(lswu) => {
+            let progress = if lswu.progress.is_nan() {
+                log::warn!(
+                    target: "engine_client::grpc_transport",
+                    "LiveStrategyWarmingUp: progress is NaN (strategy_id={}) — falling back to 0.0",
+                    lswu.strategy_id
+                );
+                0.0_f32
+            } else {
+                lswu.progress.clamp(0.0_f32, 1.0_f32)
+            };
+            Some(dto::EngineEvent::LiveStrategyWarmingUp {
+                strategy_id: lswu.strategy_id,
+                progress,
+                message: lswu.message,
+            })
+        }
         // issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 応答
         Payload::LiveStrategyScenarioLoaded(lssl) => {
             // strategy_init_kwargs は wire 上 JSON 文字列。dict として decode する。
+            // R2-B R1-RUST-7: log warning に request_id を含めて
+            // 多 client / 並列 LIVE_SCENARIO 解析でも相関を取りやすくする。
+            let req_id = lssl.request_id.clone();
             let strategy_init_kwargs = lssl.strategy_init_kwargs.and_then(|s| {
                 match serde_json::from_str::<serde_json::Value>(&s) {
                     Ok(serde_json::Value::Object(m)) => Some(m),
                     Ok(other) => {
                         log::warn!(
                             target: "engine_client::grpc_transport",
-                            "LiveStrategyScenarioLoaded: strategy_init_kwargs is not an object: {other:?}"
+                            "LiveStrategyScenarioLoaded: strategy_init_kwargs is not an object (request_id={req_id}): {other:?}"
                         );
                         None
                     }
                     Err(e) => {
                         log::warn!(
                             target: "engine_client::grpc_transport",
-                            "LiveStrategyScenarioLoaded: strategy_init_kwargs JSON parse failed: {e}"
+                            "LiveStrategyScenarioLoaded: strategy_init_kwargs JSON parse failed (request_id={req_id}): {e}"
                         );
                         None
                     }
@@ -1440,6 +1482,133 @@ mod tests {
             .scenario
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
         assert!(scenario.is_none());
+    }
+
+    /// R2-B M1: `LiveStrategyWarmingUp.progress` が [0.0, 1.0] にクランプされること。
+    /// Python emit 側で範囲外を送ってきても GUI 描画が壊れないよう Rust 側で clamp する。
+    #[test]
+    fn live_warming_up_progress_clamped_to_unit_interval() {
+        let cases = [
+            (-0.5_f32, 0.0_f32, "below 0.0"),
+            (0.0_f32, 0.0_f32, "exact 0.0"),
+            (0.5_f32, 0.5_f32, "mid"),
+            (1.0_f32, 1.0_f32, "exact 1.0"),
+            (1.5_f32, 1.0_f32, "above 1.0"),
+            (f32::INFINITY, 1.0_f32, "inf"),
+            (f32::NEG_INFINITY, 0.0_f32, "neg inf"),
+        ];
+        for (input, expected, label) in cases {
+            let proto = engine::LiveStrategyWarmingUpEvent {
+                strategy_id: "S".to_string(),
+                progress: input,
+                message: "warm".to_string(),
+            };
+            let payload = engine::event::Payload::LiveStrategyWarmingUp(proto);
+            let dto_event = super::proto_event_to_dto(engine::Event {
+                payload: Some(payload),
+            })
+            .expect("event should map");
+            let progress = match dto_event {
+                super::dto::EngineEvent::LiveStrategyWarmingUp { progress, .. } => progress,
+                other => panic!("expected LiveStrategyWarmingUp, got {other:?}"),
+            };
+            assert!(
+                (progress - expected).abs() < 1e-6,
+                "{label}: input={input}, expected={expected}, got={progress}"
+            );
+        }
+    }
+
+    /// R2-B M1: NaN は明示的に 0.0 にフォールバックされる。f32::clamp は NaN を
+    /// 入力にすると NaN を返す仕様なので、別経路で防衛する必要がある。
+    #[test]
+    fn live_warming_up_progress_nan_falls_back_to_zero() {
+        let proto = engine::LiveStrategyWarmingUpEvent {
+            strategy_id: "S".to_string(),
+            progress: f32::NAN,
+            message: "warm".to_string(),
+        };
+        let dto_event = super::proto_event_to_dto(engine::Event {
+            payload: Some(engine::event::Payload::LiveStrategyWarmingUp(proto)),
+        })
+        .expect("event should map");
+        match dto_event {
+            super::dto::EngineEvent::LiveStrategyWarmingUp { progress, .. } => {
+                assert!(!progress.is_nan(), "NaN must fall back to a finite value");
+                assert_eq!(progress, 0.0_f32, "NaN should fall back to 0.0");
+            }
+            other => panic!("expected LiveStrategyWarmingUp, got {other:?}"),
+        }
+    }
+
+    /// R2-B H8: 既知 busy_kind 文字列は `BusyKind::AnotherStrategyOnVenue` にマップ。
+    #[test]
+    fn engine_busy_known_busy_kind_maps_to_enum() {
+        let proto = engine::EngineBusyEvent {
+            current_state: engine::EngineState::Trading as i32,
+            attempted_command: engine::AttemptedCommand::StartEngine as i32,
+            reason: "venue tachibana is hosting another strategy".to_string(),
+            request_id: Some("req-1".to_string()),
+            venue: Some("tachibana".to_string()),
+            busy_kind: Some("another_strategy_on_venue".to_string()),
+        };
+        let dto_event = super::proto_event_to_dto(engine::Event {
+            payload: Some(engine::event::Payload::EngineBusy(proto)),
+        })
+        .expect("event should map");
+        match dto_event {
+            super::dto::EngineEvent::EngineBusy { busy_kind, .. } => {
+                assert_eq!(busy_kind, Some(super::dto::BusyKind::AnotherStrategyOnVenue));
+            }
+            other => panic!("expected EngineBusy, got {other:?}"),
+        }
+    }
+
+    /// R2-B H8: 未知 busy_kind 文字列は `None` にフォールバック。新カテゴリ wire 拡張で
+    /// 旧 Rust client が壊れないことを保証する。
+    #[test]
+    fn engine_busy_with_unknown_busy_kind_falls_back_none() {
+        let proto = engine::EngineBusyEvent {
+            current_state: engine::EngineState::Trading as i32,
+            attempted_command: engine::AttemptedCommand::StartEngine as i32,
+            reason: "future busy reason".to_string(),
+            request_id: Some("req-2".to_string()),
+            venue: Some("tachibana".to_string()),
+            busy_kind: Some("future_unknown_kind".to_string()),
+        };
+        let dto_event = super::proto_event_to_dto(engine::Event {
+            payload: Some(engine::event::Payload::EngineBusy(proto)),
+        })
+        .expect("event should map");
+        match dto_event {
+            super::dto::EngineEvent::EngineBusy { busy_kind, .. } => {
+                assert!(busy_kind.is_none(), "unknown busy_kind should be None");
+            }
+            other => panic!("expected EngineBusy, got {other:?}"),
+        }
+    }
+
+    /// R2-B H8: busy_kind 不在（旧 wire）は `None` を返す。
+    #[test]
+    fn engine_busy_without_busy_kind_is_none() {
+        let proto = engine::EngineBusyEvent {
+            current_state: engine::EngineState::Running as i32,
+            attempted_command: engine::AttemptedCommand::LoadReplayData as i32,
+            reason: "wrong state".to_string(),
+            request_id: Some("req-3".to_string()),
+            venue: None,
+            busy_kind: None,
+        };
+        let dto_event = super::proto_event_to_dto(engine::Event {
+            payload: Some(engine::event::Payload::EngineBusy(proto)),
+        })
+        .expect("event should map");
+        match dto_event {
+            super::dto::EngineEvent::EngineBusy { busy_kind, .. } => {
+                assert!(busy_kind.is_none());
+            }
+            other => panic!("expected EngineBusy, got {other:?}"),
+        }
     }
 
     /// v3 + instruments_ref: resolved_instruments が非空のとき Some(Vec) になること。
