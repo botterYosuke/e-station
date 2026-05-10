@@ -609,12 +609,30 @@ impl crate::Flowsurface {
                 venue,
                 ..
             } => {
-                self.live_strategy = LiveStrategyState::Running {
-                    strategy_id: strategy_id.clone(),
-                    instrument_id: instrument_id.clone(),
-                    venue: venue.clone(),
+                // R2-B H7: 空文字列 sentinel を防ぐため `try_running` factory を経由する。
+                // 失敗時は log warn を残して遷移しない（auto_generate_live_panes 呼出も skip）。
+                let new_state = match LiveStrategyState::try_running(
+                    strategy_id.clone(),
+                    instrument_id.clone(),
+                    venue.clone(),
+                ) {
+                    Ok(s) => s,
+                    Err(reason) => {
+                        log::warn!(
+                            "LiveStrategyReady ignored — invalid triple ({reason}): \
+                             strategy_id={strategy_id:?}, instrument_id={instrument_id:?}, venue={venue:?}"
+                        );
+                        return Task::none();
+                    }
                 };
+                self.live_strategy = new_state;
                 self.live_warmup_timeout_banner = None;
+                // R2-B H1: pending_strategy_id をここでもクリアする。LiveStopped arm のみで
+                // クリアする実装だと、reconnect で LiveStrategyReady 受信 → Running 遷移したあと
+                // 別 strategy が再 Submit された際に 旧 pending_strategy_id が残ってしまい
+                // LiveWarmupTimeoutFired の照合 (`pending_strategy_id == strategy_id` 比較) を
+                // 誤発火させる可能性がある。
+                self.live_strategy_pending_strategy_id = None;
                 // タイマートークンを bump して未到達タイマーを無効化する。
                 self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
                 self.live_warmup_warming_message = None;

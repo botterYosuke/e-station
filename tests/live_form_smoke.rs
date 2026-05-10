@@ -61,13 +61,27 @@ fn handler_arm_match(match_arms: &[&str]) -> &'static str {
 #[test]
 fn test_live_strategy_ready_auto_generates_four_panes() {
     let arm = handler_arm("ReplayMsg::LiveStrategyReady {");
+    // R2-B H7: factory `LiveStrategyState::try_running` 経由で空文字列 sentinel を
+    // 防ぐ。caller は struct literal の代わりに factory を呼ぶ。
     assert!(
-        arm.contains("LiveStrategyState::Running"),
-        "LiveStrategyReady arm must transition LiveStrategyState to Running: {arm}"
+        arm.contains("LiveStrategyState::try_running"),
+        "LiveStrategyReady arm must transition LiveStrategyState via try_running factory: {arm}"
     );
     assert!(
         arm.contains("auto_generate_live_panes"),
         "LiveStrategyReady arm must call auto_generate_live_panes: {arm}"
+    );
+}
+
+/// R2-B H1: LiveStrategyReady arm は live_strategy_pending_strategy_id を None に戻す。
+/// これがないと reconnect 後に旧 pending_strategy_id が残り、後続の LiveWarmupTimeoutFired
+/// と誤照合してタイムアウトバナーを誤発火させる。
+#[test]
+fn test_live_strategy_ready_clears_pending_strategy_id() {
+    let arm = handler_arm("ReplayMsg::LiveStrategyReady {");
+    assert!(
+        arm.contains("live_strategy_pending_strategy_id = None"),
+        "LiveStrategyReady arm must clear live_strategy_pending_strategy_id: {arm}"
     );
 }
 

@@ -1104,6 +1104,90 @@ impl LiveStrategyState {
     fn is_running(&self) -> bool {
         matches!(self, LiveStrategyState::Running { .. })
     }
+
+    /// R2-B H7: 空文字列 sentinel を防ぐ factory。
+    ///
+    /// `LiveStrategyState::Running { .. }` を直接 struct literal で生成すると、
+    /// caller の入力チェック漏れで `strategy_id == ""` 等の sentinel 状態に
+    /// 遷移してしまう（auto_generate_live_panes は instrument_id の空チェック
+    /// しかしておらず、strategy_id / venue が空でも 4 ペインを生成してしまう）。
+    /// 本 factory は 3 つ組すべての非空を契約として強制する。
+    ///
+    /// 失敗時は遷移を行わずに `Err` を返し、caller 側で `log::warn!` する。
+    pub(crate) fn try_running(
+        strategy_id: String,
+        instrument_id: String,
+        venue: String,
+    ) -> Result<Self, &'static str> {
+        if strategy_id.is_empty() {
+            return Err("strategy_id must not be empty");
+        }
+        if instrument_id.is_empty() {
+            return Err("instrument_id must not be empty");
+        }
+        if venue.is_empty() {
+            return Err("venue must not be empty");
+        }
+        Ok(Self::Running {
+            strategy_id,
+            instrument_id,
+            venue,
+        })
+    }
+}
+
+#[cfg(test)]
+mod live_strategy_state_tests {
+    use super::*;
+
+    /// R2-B H7: try_running は 3 つ組のうち空文字が混じっていれば Err を返す。
+    #[test]
+    fn test_live_strategy_state_try_running_rejects_empty_fields() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("", "8306.T", "tachibana", "strategy_id must not be empty"),
+            ("S1", "", "tachibana", "instrument_id must not be empty"),
+            ("S1", "8306.T", "", "venue must not be empty"),
+        ];
+        for (sid, iid, venue, expected_msg) in cases {
+            let result = LiveStrategyState::try_running(
+                sid.to_string(),
+                iid.to_string(),
+                venue.to_string(),
+            );
+            assert!(
+                result.is_err(),
+                "expected Err for ({sid:?}, {iid:?}, {venue:?})"
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                *expected_msg,
+                "unexpected message for ({sid:?}, {iid:?}, {venue:?})"
+            );
+        }
+    }
+
+    /// R2-B H7: 全フィールド非空なら Running variant を返す。
+    #[test]
+    fn test_live_strategy_state_try_running_accepts_valid_triple() {
+        let result = LiveStrategyState::try_running(
+            "S1".to_string(),
+            "8306.T".to_string(),
+            "tachibana".to_string(),
+        );
+        assert!(result.is_ok(), "valid triple should succeed: {result:?}");
+        match result.unwrap() {
+            LiveStrategyState::Running {
+                strategy_id,
+                instrument_id,
+                venue,
+            } => {
+                assert_eq!(strategy_id, "S1");
+                assert_eq!(instrument_id, "8306.T");
+                assert_eq!(venue, "tachibana");
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
 }
 
 struct Flowsurface {
