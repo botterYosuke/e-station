@@ -130,6 +130,68 @@ def test_run_called_in_separate_function_without_login_fails(tmp_path: Path) -> 
         check_live_login_call(cli_path=f)
 
 
+def test_module_level_with_block_without_login_fails(tmp_path: Path) -> None:
+    """モジュール直下（関数の外）の ``with LiveSession(...) as s:`` でも検出する.
+
+    ``enclosing_func is None`` 経路の正しさを pin する。
+    """
+    body = textwrap.dedent(
+        """\
+        from engine.replay_session import LiveSession
+
+        with LiveSession() as s:
+            s.run()
+        """
+    )
+    f = _write_cli(tmp_path, body)
+    with pytest.raises(MissingLoginCallError):
+        check_live_login_call(cli_path=f)
+
+
+def test_class_method_with_login_passes(tmp_path: Path) -> None:
+    """``class`` 内のメソッドにある ``with LiveSession(...) as s:`` でも login() を検出する.
+
+    ``ast.ClassDef`` の body 走査経路を pin する（_walk が ClassDef を再帰している）。
+    """
+    body = textwrap.dedent(
+        """\
+        from engine.replay_session import LiveSession
+
+        class Runner:
+            def run_strategy(self):
+                with LiveSession() as s:
+                    s.login()
+                    s.run()
+        """
+    )
+    f = _write_cli(tmp_path, body)
+    assert check_live_login_call(cli_path=f) is None
+
+
+def test_class_method_with_run_without_login_fails(tmp_path: Path) -> None:
+    """``class`` 内メソッドで run() を呼ぶが login() がない → reject."""
+    body = textwrap.dedent(
+        """\
+        from engine.replay_session import LiveSession
+
+        class Runner:
+            def run_strategy(self):
+                with LiveSession() as s:
+                    s.run()
+        """
+    )
+    f = _write_cli(tmp_path, body)
+    with pytest.raises(MissingLoginCallError):
+        check_live_login_call(cli_path=f)
+
+
+def test_check_live_login_call_fails_when_cli_path_missing(tmp_path: Path) -> None:
+    """``cli_path`` で指定したファイルが存在しないときは MissingLoginCallError."""
+    nonexistent = tmp_path / "does_not_exist.py"
+    with pytest.raises(MissingLoginCallError):
+        check_live_login_call(cli_path=nonexistent)
+
+
 # ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
