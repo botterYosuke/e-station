@@ -477,12 +477,21 @@ impl VenueBackend for EngineClientBackend {
                     }
                     // Issue #28 層3: Error イベントをサイレント無視せず Disconnected を yield する。
                     // Subscribe が拒否された場合（例: unknown_venue）もストリームを終了させる。
-                    Ok(EngineEvent::Error { code, message, .. }) => {
+                    //
+                    // ただし code="stream_error" は Python engine が別ストリーム（kline 等）の
+                    // 終了をブロードキャストしたものであり、depth ストリームには無関係。
+                    // depth 自身の終了は EngineEvent::Disconnected { stream="depth" } で到達する。
+                    Ok(EngineEvent::Error { code, message, .. }) if code != "stream_error" => {
                         log::error!(
                             "depth_stream subscribe error: code={code} message={message}"
                         );
                         yield Event::Disconnected(exchange, message);
                         return;
+                    }
+                    Ok(EngineEvent::Error { code, message, .. }) => {
+                        log::warn!(
+                            "depth_stream: ignoring stream_error from sibling stream: {message} (code={code})"
+                        );
                     }
                     _ => {}
                 }
