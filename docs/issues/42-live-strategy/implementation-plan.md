@@ -562,3 +562,41 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **`self.id` の手動設定禁止**: `LiveExecutionClient` の `id` は Cython getset_descriptor (parent の `client_id` から自動派生)。`__init__` で `self.id = "..."` と setattr すると AttributeError / 型エラー。継承後は parent の id getter に任せる
   - **`asyncio.set_event_loop()` の必要性**: `nautilus_trader.common.functions.get_event_loop()` が test 環境では `RuntimeError("No event loop available in test environment")` を投げる。test fixture や helper で `asyncio.set_event_loop(asyncio.new_event_loop())` を明示する必要がある（pytest-asyncio の auto mode でも fixture 引数を経由しないなら自動 bind されない）
 - ❗ 注意: H-1 punt は本 R2-C で完全解消。issue 本文の「punt」記述も R2-D で update 必要
+
+### R2-B 反映（2026-05-11、修正担当）
+- 担当: r2b-agent
+- 主要 commit:
+  - `6ac5b93` — feat(engine-client): H8 + M1 + R1-RUST-7 — BusyKind enum + progress clamp + log request_id
+  - `8717b26` — feat(live-strategy): H7 + H1 — `LiveStrategyState::try_running` factory + pending_strategy_id クリア
+  - `36f55a5` — feat(view): H2 — `live_warmup_timeout_banner` を view() に描画 + 「再試行」ボタン
+  - `ea85585` — fix(handlers): H3 — `LiveWarmingUp` arm で strategy_id 照合
+  - `bc383de` — feat(live-strategy): H4 — `node_build_failed` handler + `teardown_live_panes`
+  - `86a0ef1` — fix(live-strategy-form): M6 — `prefill_from_scenario` の silent `unwrap_or_default` 撤廃
+  - `f5539cb` — feat(live-strategy): M7 + M8 + R1-RUST-8 — `disabled_reason` 動的更新 / `EngineConnected` で pending クリア / proto 削除手順コメント
+  - `a559304` — chore(fmt): cargo fmt apply after R2-B 修正系
+- 解消: H1, H2, H3, H4, H7, H8 (Rust part), M1 (Rust part), M6, M7, M8, R1-RUST-7, R1-RUST-8（全 12 件）
+- 設計判断:
+  - **`BusyKind` enum の配置**: `engine-client/src/dto.rs` に `pub enum BusyKind { AnotherStrategyOnVenue }` を新設し、`serde(rename_all = "snake_case")` で wire 文字列との対称性を保つ。`from_wire_str()` / `as_wire_str()` / `Display` impl を併設して proto 経路 / serde 経路の双方で「未知値 → `None` + log warn」を統一する。serde は通常 unknown enum value を `Err` で reject するが、`deserialize_busy_kind_lenient` で `Option<String>` 経由で読み取り、parse 失敗時は `None` に degrade する custom deserializer を入れた（forward-compat: 新カテゴリ wire 拡張で旧 client が壊れない）
+  - **`LiveStrategyState::try_running` factory の API 設計**: 失敗時に `Err(&'static str)` を返す Result API にして、caller 側で `log::warn!` + 遷移なしを選択できるようにする。旧 `Self::Running { .. }` 直代入経路を `replay.rs::LiveStrategyReady arm` だけ書き換え、他に直接生成している箇所が無いことを `grep` で確認済。enum 表現は変えずに、生成経路にのみ非空契約を加えた最小侵襲設計
+  - **`teardown_live_panes` の閉じる範囲**: `auto_generate_live_panes` は base pane を split して 4 panel (TimeAndSales / OrderList / BuyingPower / Positions) を増やす実装なので、`teardown_live_panes` も 4 panel の `Content` variant だけを `panes.close()` する。base の `CandlestickChart` は live 起動前から存在する可能性が高く（live 用 panel ではない）、誤って閉じない方針。副作用として「手動で配置した TimeAndSales 等が同 dashboard にあると一緒に閉じられる」が、`node_build_failed` は通常の運用ではほぼ起きない（warm_up 成功直後の build 失敗）ため安全側 = 確実に live 4 panel を掃除する戦略を優先
+  - **`set_disabled_reason` setter の責務範囲**: venue 接続状態 / 市場開閉状態のみを対象。`is_production` cap は engine プロセスの env (`TACHIBANA_ALLOW_PROD=1`) 経由なので動的に切り替わらず（統一決定 #14）、本 setter は触らない。tachibana / kabu 両 venue 経路で対称に呼ぶ（同じ live form に対する disable 理由は venue 全体 OR で決まる）
+  - **`DismissLiveWarmupTimeoutBanner` の handler 実装**: 既存実装の「banner を None に戻す」分岐をそのまま使い、view() 側に「再試行」ボタンを足しただけ。再 Submit は別 modal 操作（ユーザーが live form を再度開く）が責務で、本 button は banner 消去のみ。最小実装で十分（統一決定 #17）
+  - **`LiveStrategyBuildFailed` の strategy_id 照合**: pending / running と一致しないときは log warn のみで teardown を skip する。これにより、誤った EngineError 通知（古い start の遅延 emit など）で正常な live セッションのペインを誤って閉じる事故を防ぐ
+- 検証:
+  - `cargo check --workspace` → clean（exit 0）
+  - `cargo clippy --workspace --tests -- -D warnings` → clean（exit 0）
+  - `cargo fmt --check` → clean（適用済）
+  - `cargo test --workspace` → 全テスト緑（exit 0、Doc-tests 含む）
+  - `cargo test --test live_form_smoke` → **19 件全緑**（既存 14 + 新規 5: `test_live_strategy_ready_clears_pending_strategy_id` / `test_view_renders_live_warmup_timeout_banner` / `test_live_warming_up_ignores_mismatched_strategy_id` / `test_node_build_failed_resets_state_and_teardowns_panes` / `test_disabled_reason_cleared_on_venue_ready` / `test_engine_connected_releases_scenario_pending`）
+  - `cargo test -p flowsurface-engine-client --lib grpc_transport` → **8 件全緑**（既存 3 + 新規 5: progress clamp 2 + BusyKind 3）
+  - `cargo test -p flowsurface-engine-client --test engine_busy_event` → **11 件全緑**（既存 8 + 新規 3: BusyKind known/unknown/absent）
+  - `cargo test --bin flowsurface live_strategy_form` → 23 件全緑（M6 source-pin を含む）
+  - `cargo test --bin flowsurface live_strategy_state` → 2 件全緑（H7 try_running factory）
+  - `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana" --timeout=120` → **2480 passed / 116 skipped / 8 deselected**（Python 側に R2-B 触手なし、regression なし）
+- 知見/Tips（次への引き継ぎ）:
+  - **`#[serde(deserialize_with)]` で未知 enum 値を None に degrade する pattern**: `Option<String>` を `Option::deserialize(deserializer)` で先に読み取り、enum mapping は手で行う custom deserializer 化することで、serde の「unknown variant = error」のデフォルト挙動を回避できる。proto 経路と JSON 経路の両方を forward-compat に倒せるので、新カテゴリ追加が schema bump 不要になる。`BusyKind` で導入したパターンは将来 `AttemptedCommand` / `CurrentEngineState` 等にも横展開可能（現状は厳格 reject 仕様で、本 issue では変更しない）
+  - **factory + caller log warn の役割分担**: factory は契約違反を `Result::Err` で報告するだけで、log 出力は caller の責務。これにより同じ factory が「テストで明示的に Err を期待する箇所」と「実行時に log warn する箇所」で再利用できる。`LiveStrategyState::try_running` で実証
+  - **source-pin tests の使い分け**: 挙動テスト (`#[test] fn` で実 struct を construct) と source-pin (`include_str!` で正規表現マッチ) は補完関係。binary crate のため `Flowsurface` を直接 instantiate できないので、`handlers/*.rs` / `main.rs::view` / `messages.rs` の契約は source-pin で守る。逆に `live_strategy_form_modal::*` のように lib module 化されている部分は挙動テストで pin する
+  - **`pane_grid::State::iter()` の borrow チェッカー対策**: `panes.iter()` で借用中に `panes.close(id)` を呼ぶと `&mut` / `&` 競合で reject される。一度 `Vec<Pane>` に id を collect してから iterate して close する pattern が定番。`teardown_live_panes` で実装済
+  - **`cargo fmt` がコメント内 multi-line を改行する**: `if *market_closed && let Some(...) = ...` のような複合条件は fmt で勝手に改行ブロック化される。事前に `cargo fmt --check` を回してから commit するか、commit 後に専用 fmt commit で揃えるのが安全（本 Phase では後者で対応）
+  - **R2-A との同期**: H8 (BusyKind) の wire 値 `"another_strategy_on_venue"` は Python `schemas.py` の `BusyKind` Literal と一致している必要がある。R2-A 側の `test_schemas_nautilus.py::test_rust_schema_constants_match_python` で SCHEMA_MAJOR/MINOR は守られるが、Literal 値の対称性は手動で確認した（commit `6ac5b93` 時点で一致）。将来 enum 値を追加するときは Python / Rust 同時 PR で運用
