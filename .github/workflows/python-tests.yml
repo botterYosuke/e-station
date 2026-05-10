@@ -21,7 +21,9 @@ jobs:
                   enable-cache: true
 
             - name: Run Python unit tests
-              run: uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana and not demo_kabu" -v --timeout=60
+              # issue #42 Phase 7 (統一決定 #9): live_demo / live_demo_inprocess は
+              # push/PR から除外（前者は workflow_dispatch のみ、後者はローカル限定）。
+              run: uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana and not demo_kabu and not live_demo and not live_demo_inprocess" -v --timeout=60
 
     docs-lint:
         # issue #42 Phase 6 (受け入れ基準 #3 / #4 / #5 / #10):

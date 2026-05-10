@@ -8,6 +8,13 @@ name: Tachibana Demo Integration
 # exact times TBD per open-questions.md Q21) and would cause spurious failures
 # outside those hours.
 #
+# issue #42 Phase 7 (統一決定 #9 / R3-M3): adds ``live_demo`` marker for the
+# attach-mode live strategy CLI smoke. The in-process variant
+# (``live_demo_inprocess``) is intentionally **excluded** because it requires
+# ``--second-password-stdin`` and we do not pass second passwords through CI
+# Secrets (OS exposure mitigation, 統一決定 #7). Run the in-process smoke
+# locally only.
+#
 # Trigger manually via:
 #   gh workflow run tachibana-demo.yml
 # or via the GitHub Actions UI with optional env override.
@@ -38,6 +45,9 @@ jobs:
               with:
                   enable-cache: true
 
-            - name: Run demo_tachibana pytest marker
+            - name: Run demo_tachibana + live_demo pytest markers
+              # issue #42 Phase 7 (統一決定 #9 / R3-M3): live_demo は attach
+              # mode のみ。live_demo_inprocess は CI からは除外（ローカル限定、
+              # --second-password-stdin 経由で OS 露出を避ける）。
               run: |
-                  uv run pytest python/tests/ -m demo_tachibana -v --timeout=120
+                  uv run pytest python/tests/ -m "demo_tachibana or live_demo" -v --timeout=120
