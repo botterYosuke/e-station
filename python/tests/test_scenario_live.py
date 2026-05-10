@@ -501,3 +501,201 @@ def test_strategy_parse_failed_on_validation_error(tmp_path: Path) -> None:
     ev = out[0]
     assert ev["event"] == "Error"
     assert ev["code"] == "strategy_parse_failed"
+
+
+# ---------------------------------------------------------------------------
+# R2-A M4: LiveScenario TypedDict が Required / NotRequired を使った形になっている
+# ---------------------------------------------------------------------------
+
+
+def test_live_scenario_typeddict_required_fields_are_required() -> None:
+    """M4: ``LiveScenario`` TypedDict は ``Required`` を使って必須フィールドを宣言する。
+
+    ``total=False`` ベースの旧定義は全フィールドが任意扱いになるため、
+    typing.Required / NotRequired への移行で「runtime 検証 (_validate_live_v1) と
+    型情報が二重管理になる」問題は残るが、最低限「TypedDict が `total` (default=True)
+    で定義され、必須キーが ``__required_keys__`` に含まれる」ことを pin する。
+    """
+    from engine.scenario import LiveScenario
+
+    # 必須キーは Required[...] で宣言され、__required_keys__ に含まれる
+    required = LiveScenario.__required_keys__
+    assert "schema_version" in required, f"schema_version not required: {required}"
+    assert "instrument" in required, f"instrument not required: {required}"
+    assert "max_qty" in required, f"max_qty not required: {required}"
+    assert "max_notional_jpy" in required, f"max_notional_jpy not required: {required}"
+    assert "venue" in required, f"venue not required: {required}"
+
+    # 任意フィールドは NotRequired[...] で宣言され、__optional_keys__ に含まれる
+    optional = LiveScenario.__optional_keys__
+    assert "strategy_init_kwargs" in optional, (
+        f"strategy_init_kwargs should be optional: {optional}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R2-A M5: _validate_live_v1 で max_qty / max_notional_jpy の値域検証
+# ---------------------------------------------------------------------------
+
+
+def test_extract_live_rejects_zero_max_qty(tmp_path: Path) -> None:
+    """max_qty=0 → ScenarioValidationError（範囲: 1..10000）。"""
+    f = _write(
+        tmp_path,
+        "zero_qty.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": 0,
+            "max_notional_jpy": 500000,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    with pytest.raises(ScenarioValidationError) as exc:
+        extract_live(f)
+    assert "max_qty" in str(exc.value)
+
+
+def test_extract_live_rejects_negative_max_qty(tmp_path: Path) -> None:
+    """max_qty<0 → ScenarioValidationError。"""
+    f = _write(
+        tmp_path,
+        "neg_qty.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": -100,
+            "max_notional_jpy": 500000,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    with pytest.raises(ScenarioValidationError) as exc:
+        extract_live(f)
+    assert "max_qty" in str(exc.value)
+
+
+def test_extract_live_rejects_exceed_max_qty_limit(tmp_path: Path) -> None:
+    """max_qty>10_000 → ScenarioValidationError（schemas.py の Field(le=10_000) と整合）。"""
+    f = _write(
+        tmp_path,
+        "huge_qty.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": 10001,
+            "max_notional_jpy": 500000,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    with pytest.raises(ScenarioValidationError) as exc:
+        extract_live(f)
+    assert "max_qty" in str(exc.value)
+
+
+def test_extract_live_rejects_zero_max_notional(tmp_path: Path) -> None:
+    """max_notional_jpy=0 → ScenarioValidationError。"""
+    f = _write(
+        tmp_path,
+        "zero_notional.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": 100,
+            "max_notional_jpy": 0,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    with pytest.raises(ScenarioValidationError) as exc:
+        extract_live(f)
+    assert "max_notional_jpy" in str(exc.value)
+
+
+def test_extract_live_rejects_negative_max_notional(tmp_path: Path) -> None:
+    """max_notional_jpy<0 → ScenarioValidationError。"""
+    f = _write(
+        tmp_path,
+        "neg_notional.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": 100,
+            "max_notional_jpy": -1,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    with pytest.raises(ScenarioValidationError) as exc:
+        extract_live(f)
+    assert "max_notional_jpy" in str(exc.value)
+
+
+def test_extract_live_rejects_exceed_max_notional_limit(tmp_path: Path) -> None:
+    """max_notional_jpy>100_000_000 → ScenarioValidationError
+    （schemas.py の Field(le=100_000_000) と整合）。"""
+    f = _write(
+        tmp_path,
+        "huge_notional.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": 100,
+            "max_notional_jpy": 100000001,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    with pytest.raises(ScenarioValidationError) as exc:
+        extract_live(f)
+    assert "max_notional_jpy" in str(exc.value)
+
+
+def test_extract_live_accepts_boundary_max_qty_one(tmp_path: Path) -> None:
+    """max_qty=1 (下限境界) → 正常（accept）。"""
+    f = _write(
+        tmp_path,
+        "min_qty.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": 1,
+            "max_notional_jpy": 1,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    result = extract_live(f)
+    assert result is not None
+    assert result["max_qty"] == 1
+    assert result["max_notional_jpy"] == 1
+
+
+def test_extract_live_accepts_boundary_max_qty_top(tmp_path: Path) -> None:
+    """max_qty=10_000 / max_notional_jpy=100_000_000 (上限境界) → 正常。"""
+    f = _write(
+        tmp_path,
+        "max_qty.py",
+        """\
+        LIVE_SCENARIO = {
+            "schema_version": 1,
+            "instrument": "8306.T",
+            "max_qty": 10000,
+            "max_notional_jpy": 100000000,
+            "venue": "tachibana",
+        }
+        """,
+    )
+    result = extract_live(f)
+    assert result is not None
+    assert result["max_qty"] == 10_000
+    assert result["max_notional_jpy"] == 100_000_000

@@ -48,7 +48,7 @@ import tempfile
 import time
 import typing
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import NotRequired, Optional, Required, TypedDict
 
 import libcst as cst
 
@@ -92,13 +92,26 @@ class Scenario_v3(TypedDict, total=False):
 
 # issue #42 Phase 2: LIVE_SCENARIO 用の TypedDict。
 # replay 用 SCENARIO とは独立した定数で、live 専用フォーム prefill に使う。
-class LiveScenario(TypedDict, total=False):
-    schema_version: int                  # 必須・現状 1 のみ
-    instrument: str                      # 必須・単一銘柄（v1 では list 不可）
-    max_qty: int                         # 必須・1 注文あたりの最大株数
-    max_notional_jpy: int                # 必須・1 注文あたりの最大金額（円）
-    venue: str                           # 必須・"tachibana" / "kabu_station"
-    strategy_init_kwargs: dict           # 任意・Strategy.__init__ への kwargs
+# R2-A M4 (Python 3.11+ 利用): ``Required`` / ``NotRequired`` で必須/任意を明示。
+# 旧 ``total=False`` は全フィールドを optional 扱いにするため意図と乖離していた。
+# プロジェクトは Python 3.14 を使うので Required / NotRequired は標準で利用可能。
+#
+# 注意: 本モジュール先頭の ``from __future__ import annotations`` (PEP 563) により、
+# class-syntax の TypedDict は annotation を文字列として保持し、``Required[...]`` /
+# ``NotRequired[...]`` の introspection が壊れる（``__required_keys__`` に全
+# キーが入ってしまう）。functional syntax (``TypedDict(name, fields)``) は
+# annotation を即時評価するため introspection が正しく機能する。
+LiveScenario = TypedDict(
+    "LiveScenario",
+    {
+        "schema_version": Required[int],            # 必須・現状 1 のみ
+        "instrument": Required[str],                # 必須・単一銘柄（v1 では list 不可）
+        "max_qty": Required[int],                   # 必須・1 注文あたりの最大株数
+        "max_notional_jpy": Required[int],          # 必須・1 注文あたりの最大金額（円）
+        "venue": Required[str],                     # 必須・"tachibana" / "kabu_station"
+        "strategy_init_kwargs": NotRequired[dict],  # 任意・Strategy.__init__ への kwargs
+    },
+)
 
 
 # Scenario TypedDict から自動生成（3点管理廃止）
@@ -597,6 +610,20 @@ def _validate_live_v1(d: dict) -> None:  # type: ignore[type-arg]
             raise ScenarioValidationError(
                 f"LIVE_SCENARIO[{key!r}] must be {expected_type.__name__}, "
                 f"got {type(val).__name__}"
+            )
+
+        # R2-A M5: 値域検証（schemas.py の EngineStartConfig.max_qty /
+        # max_notional_jpy の Field 制約と一致させる）。
+        # max_qty:          1 ≤ x ≤ 10_000
+        # max_notional_jpy: 1 ≤ x ≤ 100_000_000
+        if key == "max_qty" and not (0 < val <= 10_000):
+            raise ScenarioValidationError(
+                f"LIVE_SCENARIO['max_qty'] must be 1..10000, got {val}"
+            )
+        if key == "max_notional_jpy" and not (0 < val <= 100_000_000):
+            raise ScenarioValidationError(
+                f"LIVE_SCENARIO['max_notional_jpy'] must be 1..100000000, "
+                f"got {val}"
             )
 
     # 任意フィールド strategy_init_kwargs は dict のみ許可
