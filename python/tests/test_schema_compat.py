@@ -222,3 +222,56 @@ def test_engine_busy_missing_venue_busy_kind_falls_back_to_none() -> None:
     out = orjson.loads(orjson.dumps(ev.model_dump(mode="json", exclude_none=True)))
     assert "venue" not in out
     assert "busy_kind" not in out
+
+
+# ── Phase 3.5: per-venue capability fallback (no schema bump needed) ─────────
+
+
+def test_supports_live_strategy_missing_falls_back_false() -> None:
+    """旧 server から ``supports_live_strategy`` cap が欠落しているとき、
+    Rust 側 helper が ``false`` にフォールバックする契約を pin する（Python から見える wire 観点）。
+
+    Phase 3.5 は capability map のキー追加のみで SCHEMA_MINOR を bump しない。
+    旧 client が新 server に接続しても既存 ``venue_capability::<bool>`` helper の
+    ``Ok(None)`` 仕様で安全側（false = "live 戦略未対応扱い"）に倒れる。
+    """
+    # capability map から supports_live_strategy が抜けた wire を再現
+    legacy_caps_blob = {
+        "supported_venues": ["tachibana"],
+        "venue_capabilities": {
+            "tachibana": {
+                # supports_live_strategy なし (旧 server)
+                "supported_timeframes": ["1d"],
+            },
+        },
+    }
+    venue_caps = legacy_caps_blob["venue_capabilities"]["tachibana"]
+    # 旧 wire には supports_live_strategy キー自体が無い
+    assert "supports_live_strategy" not in venue_caps, (
+        "テストは『キー欠落 → Rust が false にフォールバック』を pin するため、"
+        "テスト fixture から supports_live_strategy を意図的に省く必要がある"
+    )
+    # `engine_client::capabilities::supports_live_strategy(caps, venue)` は
+    # 欠落時に false を返す契約（同名 Rust unit test で pin）。
+    # Python 側からは「欠落キー = 旧 wire と等価」であることだけを保証する。
+
+
+def test_tachibana_is_production_missing_falls_back_false() -> None:
+    """旧 server から tachibana の ``is_production`` cap が欠落しているとき、
+    Rust 側 helper は ``false`` にフォールバックする契約を pin する。
+    """
+    legacy_caps_blob = {
+        "supported_venues": ["tachibana"],
+        "venue_capabilities": {
+            "tachibana": {
+                # is_production なし (旧 server: tachibana 用 is_production を expose していなかった)
+                "supported_timeframes": ["1d"],
+            },
+        },
+    }
+    venue_caps = legacy_caps_blob["venue_capabilities"]["tachibana"]
+    assert "is_production" not in venue_caps, (
+        "テストは『キー欠落 → Rust が false にフォールバック』を pin する目的"
+    )
+    # `engine_client::capabilities::is_production(caps, "tachibana")` は欠落時に false。
+    # 安全側 (= demo 扱い) に倒すことで本番投入を予防する。

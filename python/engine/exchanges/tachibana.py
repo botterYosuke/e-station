@@ -332,8 +332,24 @@ class TachibanaWorker(ExchangeWorker):
         The Rust UI consumes ``supported_timeframes`` to pre-disable non-``"1d"``
         choices in the timeframe dropdown so the user never sends a request the
         worker would reject with ``not_implemented``.
+
+        issue #42 Phase 3.5: live strategy 起動可否と本番フラグも venue 単位で expose する。
+
+        - ``supports_live_strategy``: tachibana は ``NautilusRunner.start_live`` で
+          live 戦略実行に対応済みのため常に ``True``。kabu_station は server.py で
+          ``False`` を出す（Phase 4 完了時に flip）。
+        - ``is_production``: ``TACHIBANA_ALLOW_PROD == "1"`` のときのみ ``True``。
+          ``"0"`` / unset / それ以外の値は全て ``False`` (orchestrator 確定の契約)。
+          Rust 側は ``engine_client::capabilities::is_production(caps, "tachibana")``
+          helper 経由で読み取り、GUI の prod_mode disable 判定に使う（統一決定 #14）。
         """
-        return {"supported_timeframes": ["1d"]}
+        import os
+
+        return {
+            "supported_timeframes": ["1d"],
+            "supports_live_strategy": True,
+            "is_production": os.environ.get("TACHIBANA_ALLOW_PROD") == "1",
+        }
 
     async def prepare(self) -> None:
         # Construct the HTTP client eagerly so the first list_tickers call

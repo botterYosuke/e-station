@@ -933,12 +933,16 @@ class DataEngineServer:
         # Phase 1: kabu_station は _workers に含まれないため capabilities を直接追記
         from engine.exchanges.kabusapi_register import RegisterSet as _KabuRegisterSet
         # P4-3: is_production フラグを追加。KABU_ALLOW_PROD=1 + KABU_ENV=prod の二重判定で True。
+        # issue #42 Phase 3.5: ``supports_live_strategy`` は False で固定 (Phase 4 で flip)。
+        # tachibana は live 起動済みだが kabu_station は ``NautilusRunner.start_live``
+        # 側が tachibana 専用のため、venue dropdown で誤選択されないよう False を expose する。
         venue_caps["kabu_station"] = {
             "requires_local_app": True,
             "max_push_symbols": _KabuRegisterSet.MAX,  # architecture.md §8: 50 と一致を保証
             "supports_amend": False,
             "requires_trade_password_for_cancel": True,
             "is_production": self._kabu_env == "prod",
+            "supports_live_strategy": False,
         }
 
         ready = Ready(
