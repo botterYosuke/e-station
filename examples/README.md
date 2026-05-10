@@ -74,6 +74,12 @@ LIVE_SCENARIO がない戦略でも CLI / GUI ともに手入力で起動でき�
 #### 同じ戦略ファイルを replay → demo → prod で動かす完全コマンド例
 
 `examples/test_strategy_minute.py` を例に、3 段階の起動フローを示します。
+`--mode inprocess` は CLI 単独で engine を直起動するモードで、`--mode attach` は
+別ターミナルで先に GUI（`cargo run -- --mode live`）を立ち上げて attach するモード、
+`--mode auto` は attach probe → fallback inprocess の自動切替です。
+本サンプルでは挙動が予測しやすい `inprocess` を例示します。
+
+##### Linux / macOS（bash / zsh）
 
 ```sh
 # 1. replay で十分検証（headless / inprocess、GUI 不要）
@@ -93,7 +99,7 @@ echo "$DEV_TACHIBANA_SECOND_PASSWORD" | uv run python -m engine.live_session_cli
     --max-notional-jpy 500000 \
     --venue tachibana \
     --demo \
-    --mode auto \
+    --mode inprocess \
     --second-password-stdin
 
 # 3. 本番（要 TACHIBANA_ALLOW_PROD=1 + engine プロセス再起動）
@@ -104,12 +110,54 @@ TACHIBANA_ALLOW_PROD=1 uv run python -m engine.live_session_cli run \
     --max-notional-jpy 500000 \
     --venue tachibana \
     --prod \
-    --mode auto \
+    --mode inprocess \
+    --second-password-stdin
+```
+
+##### Windows（PowerShell 7+）
+
+```powershell
+# 1. replay
+uv run python -m engine.replay_session run `
+    --strategy examples/test_strategy_minute.py `
+    --instrument 1301.TSE `
+    --start 2025-01-06 `
+    --end 2025-01-10 `
+    --granularity Minute `
+    --mode inprocess
+
+# 2. demo 口座（PowerShell の echo は Write-Output。here-string で trailing CRLF 対策）
+$env:DEV_TACHIBANA_SECOND_PASSWORD | uv run python -m engine.live_session_cli run `
+    --strategy examples/test_strategy_minute.py `
+    --instrument 1301.TSE `
+    --max-qty 100 `
+    --max-notional-jpy 500000 `
+    --venue tachibana `
+    --demo `
+    --mode inprocess `
+    --second-password-stdin
+
+# 3. 本番（PowerShell では env は別行で設定し、その session でのみ有効）
+$env:TACHIBANA_ALLOW_PROD = "1"
+$env:DEV_TACHIBANA_SECOND_PASSWORD | uv run python -m engine.live_session_cli run `
+    --strategy examples/test_strategy_minute.py `
+    --instrument 1301.TSE `
+    --max-qty 100 `
+    --max-notional-jpy 500000 `
+    --venue tachibana `
+    --prod `
+    --mode inprocess `
     --second-password-stdin
 ```
 
 `test_strategy_daily.py` / `test_strategy_trade.py` でも `--strategy` を差し替えれば
 同じ 3 段階のフローで動かせます（`--granularity` は replay でのみ指定）。
+
+> **GUI と組み合わせる場合**: 別ターミナルで先に `cargo run -- --mode live` を
+> 起動し、attach 経由で同じ engine プロセスに接続するなら `--mode attach`（または
+> `--mode auto`）を使ってください。attach mode では第二暗証番号は wire に流さず、
+> engine 側 SessionHolder で事前設定済みの前提です（受け入れ基準 #20、
+> [`docs/specs/live-strategy.md §3.2-D.1`](../docs/specs/live-strategy.md)）。
 
 #### kabu_station venue でも同じ戦略を起動可能
 
@@ -119,7 +167,7 @@ Phase 4 で `kabu_station` venue の `supports_live_strategy=True` にフリッ�
 prefill も連動します（`test_strategy_minute.py` のコメント例を参照）。
 
 ```sh
-# kabu_station demo
+# kabu_station demo（bash / zsh）
 echo "$DEV_TACHIBANA_SECOND_PASSWORD" | uv run python -m engine.live_session_cli run \
     --strategy examples/test_strategy_minute.py \
     --instrument 1301.TSE \
@@ -127,7 +175,7 @@ echo "$DEV_TACHIBANA_SECOND_PASSWORD" | uv run python -m engine.live_session_cli
     --max-notional-jpy 500000 \
     --venue kabu_station \
     --demo \
-    --mode auto \
+    --mode inprocess \
     --second-password-stdin
 ```
 

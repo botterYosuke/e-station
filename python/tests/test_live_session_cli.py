@@ -274,6 +274,34 @@ def test_max_notional_overflow_reject(strategy_file) -> None:
     assert excinfo.value.code != 0
 
 
+def test_venue_choices_accept_tachibana_and_kabu_station(strategy_file) -> None:
+    """``--venue`` choices は tachibana / kabu_station の両方を受理する.
+
+    issue #42 Phase 4 で kabu_station capability flip 済 + engine_runner.start_live が
+    venue 引数で dispatch するため、CLI argparse も両 venue を受理する必要がある。
+    Phase 5 で choices を拡張した（README §C の kabu_station 例を成立させる）。
+    """
+    from engine.live_session_cli import _build_arg_parser
+
+    parser = _build_arg_parser()
+    # --venue tachibana
+    a = parser.parse_args(_common_args(strategy_file) + ["--venue", "tachibana"])
+    assert a.venue == "tachibana"
+    # --venue kabu_station
+    b = parser.parse_args(_common_args(strategy_file) + ["--venue", "kabu_station"])
+    assert b.venue == "kabu_station"
+
+
+def test_venue_choices_reject_unknown(strategy_file) -> None:
+    """``--venue`` choices に無い値は argparse SystemExit で reject される."""
+    from engine.live_session_cli import main
+
+    args = _common_args(strategy_file) + ["--venue", "binance"]
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv=args, stdin=io.StringIO(""))
+    assert excinfo.value.code != 0, "unknown venue must be rejected"
+
+
 def test_strategy_init_kwargs_parse_error_reject(strategy_file) -> None:
     """``--strategy-init-kwargs`` 不正 JSON → argparse reject."""
     from engine.live_session_cli import main

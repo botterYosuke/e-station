@@ -118,8 +118,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="1 注文あたりの最大金額（円）（1 ≤ n ≤ 100000000）",
     )
     run_p.add_argument(
-        "--venue", default="tachibana", choices=["tachibana"],
-        help="venue 識別子（Phase 1 は tachibana のみ）",
+        "--venue", default="tachibana", choices=["tachibana", "kabu_station"],
+        help=(
+            "venue 識別子（Phase 4 で kabu_station 対応済 / capability "
+            "supports_live_strategy=True を満たす venue のみ）"
+        ),
     )
 
     # demo / prod (mutex)
