@@ -97,6 +97,43 @@ venue 固有の契約は `docs/specs/venues/tachibana.md` を参照。本書の 
 - `caplog` に credential が出ないことをテストで確認（venue ごとに `test_*_logging.py` を持つ）。
 - debug env は venue prefix 付き: `DEV_TACHIBANA_*` / `DEV_KABU_*`。
 
+### D.1 第二暗証番号: プロセス引数経路の禁止（issue #42 統一決定 #7）
+
+**「Rust に流さない」だけでなく「プロセス引数（`argv`）にも入れない」** を加える。
+理由は OS の露出経路:
+
+- shell history（`.bash_history` / `.zsh_history` / PowerShell `ConsoleHost_history.txt`）
+- `ps` / `wmic process` / Windows タスクマネージャの「コマンド ライン」列
+- `procmon` / `dtrace` / `strace` の syscall ログ
+
+非対称な対策として、`python -m engine.live_session_cli` は次の優先順で第二暗証番号を解決する:
+
+| 優先順 | 経路 | 推奨度 |
+|--------|------|--------|
+| 1 | `--second-password-stdin`（stdin から読む） | **推奨** |
+| 2 | `DEV_TACHIBANA_SECOND_PASSWORD` env | 推奨 |
+| 3 | `--second-password <plain>`（平文 argv） | **非推奨**（stderr 警告） |
+
+attach mode では CLI は第二暗証番号を **wire に流さない**（engine 側 `SessionHolder` で
+事前設定済みである前提）。ユーザーが上記 1-3 のいずれかで指定した場合は、
+silent ignore 防止のため stderr に hint を出して捨てる。
+
+#### stdin 仕様（4 経路の挙動 pin）
+
+CLI 内部では `sys.stdin.read().rstrip("\r\n")` で読み取る。trailing newline / CRLF
+だけ除去し、内部空白は意図的に保持する（パスワードに `" "` が含まれるケースを潰さないため）。
+対話判定は `sys.stdin.isatty()` で行う。
+
+| ケース | 例 | 期待挙動 |
+|--------|------|----------|
+| heredoc | `python -m engine.live_session_cli ... --second-password-stdin <<< "$PW"` | stdin から `$PW` を読み、内部空白保持で渡す |
+| pipe | `echo "$PW" \| python -m engine.live_session_cli ... --second-password-stdin` | 同上（trailing `\n` を rstrip で除去） |
+| empty stdin | `python -m engine.live_session_cli ... --second-password-stdin < /dev/null` | 非対話 + 空入力 → `argparse.error` で reject（CI silent failure 防止） |
+| 非対話 CI | tty 不在の CI runner で `--second-password-stdin` のみ指定 | tty 不在判定 → 空入力 reject パス（`isatty() == False && raw == ""`） |
+
+実装ファイル: `python/engine/live_session_cli.py::_resolve_second_password`。
+受け入れ基準 #20（`test_second_password_stdin_handles_heredoc_pipe_empty_and_noninteractive`）で pin。
+
 ## E. ログイン UI は Python tkinter subprocess に統一
 
 - Rust にダイアログコードを書かない。
@@ -128,3 +165,113 @@ venue 固有の契約は `docs/specs/venues/tachibana.md` を参照。本書の 
 - `src/venue_state.rs`
 - `engine-client/src/process.rs::ProcessManager`
 - `engine-client/src/dto.rs::EngineEvent::{VenueReady, VenueLoginStarted, VenueLoginCancelled, VenueError}`
+
+---
+
+## 5. ユーザー戦略の live 投入手順
+
+> **status**: issue #42 で起票（Phase 6）。replay → demo → prod の順で動かすことを強く推奨。
+> 実コマンド例の充実は `examples/README.md` および `docs/wiki/live-strategy.md` を参照。
+
+リプレイで検証したユーザー戦略ファイルを **無改変で** demo / prod venue に投入する公式手順。
+
+### 5.1 CLI 経路（`python -m engine.live_session_cli`）
+
+`replay_session.py::ReplaySession.run` と対称な live サブコマンド:
+
+```bash
+uv run python -m engine.live_session_cli run \
+    --strategy examples/test_strategy_minute.py \
+    --instrument 8306.T \
+    --max-qty 100 \
+    --max-notional-jpy 500000 \
+    --venue tachibana \
+    --demo \
+    --mode {auto|attach|inprocess}
+```
+
+- 認証: `--user-id` / `--password`（省略時は `DEV_TACHIBANA_USER_ID` /
+  `DEV_TACHIBANA_PASSWORD` env）
+- 第二暗証番号: §3.2-D.1 を参照。`--second-password-stdin` または env を推奨
+- safety:
+  - `--max-qty` / `--max-notional-jpy` は **必須**（受け入れ基準 #6）
+  - `--prod` は env `TACHIBANA_ALLOW_PROD=1` との **AND 条件**（受け入れ基準 #7）
+- exit code:
+  - `0` 正常 / `1` 一般エラー / `2` busy / `3` 第二暗証番号要求
+
+`SecondPasswordRequired` を engine から受信した場合、CLI は stderr に固定文言
+**「第二暗証番号を設定してください」** を出力して exit code `3` で終了する
+（受け入れ基準 #8 CLI 部分、`SECOND_PASSWORD_REQUIRED_MESSAGE` 定数で pin）。
+
+### 5.2 GUI 経路（`File > Open` → 戦略ファイル選択）
+
+iced GUI で `File > Open...` メニューから `.py` 戦略ファイルを選択すると、
+`LiveStrategyFormModal` が開いて 4 フィールド（`instrument_id` / `strategy_file` /
+`max_qty` / `max_notional_jpy`）の入力を促す。Submit すると engine に
+`StartEngine{engine: "Live"}` を送る。
+
+`LIVE_SCENARIO` 定数を持つ戦略ファイルを選んだ場合は、engine が
+`LiveStrategyScenarioLoaded` 経由でフォームを **自動 prefill** する
+（受け入れ基準 #13）。`LIVE_SCENARIO` を持たない戦略ファイルでも engine は
+即時 `LiveStrategyScenarioLoaded { instrument_id: None, ... }` を返す
+（5s 待たせない、受け入れ基準 #23）。
+
+`LiveStrategyReady` 受信で 4 ペイン（CandlestickChart / TimeAndSales /
+OrderList / BuyingPower / Positions）が自動生成され、冪等 key
+`(strategy_id, instrument_id, venue)` で重複生成を防ぐ（受け入れ基準 #11 / #17）。
+
+`SecondPasswordRequired` を engine から受信した場合、GUI は
+**ステータスバーに赤帯で固定文言「第二暗証番号を設定してください」** を表示する
+（受け入れ基準 #8 GUI 部分、CLI と同一文言）。
+
+### 5.3 `TACHIBANA_ALLOW_PROD` ガード
+
+prod venue に発注する経路を物理的に塞ぐ env 固定 SoT。**engine プロセスの env が
+single source of truth** で、GUI から触れない（issue #42 統一決定 #14）。
+
+- `TACHIBANA_ALLOW_PROD=1` リテラル一致のみ true 扱い。`"true"` / `"yes"` 等は
+  unsafe を倒すために **false** とする。
+- env 変更には engine プロセスの **再起動が必須**。GUI が capability `is_production`
+  を読み取って disable 判定するが、env を runtime に書き換える経路は持たない。
+- tachibana worker は `capabilities()` で `{"is_production": <bool>}` を expose
+  し、Rust 側 `engine_client::capabilities::is_production(caps, "tachibana")` 経由で
+  読み取る（受け入れ基準 #18）。
+
+### 5.4 `is_market_open()` ガード SoT
+
+「市場閉場時刻に live を起こさない」ガードは **engine 側の authoritative reject** を
+SoT とする（issue #42 統一決定 #5）。
+
+- `engine.nautilus.engine_runner.start_live()` の冒頭で `is_market_open(now_utc)`
+  を確認し、false なら `EngineError{code:"market_closed", strategy_id}` を emit して
+  warm_up に到達する前に abort する（受け入れ基準 #9）。
+- CLI / GUI は **事前 hint のみ**（stderr or banner）。authoritative reject は engine
+  に集約することで、time skew や境界 race を engine 1 箇所で管理する。
+
+### 5.5 demo → prod 移行の安全装置リスト
+
+| # | 安全装置 | 実装場所 | 受け入れ基準 |
+|---|---------|---------|------------|
+| 1 | `max_qty` 必須（1 ≤ n ≤ 10000） | CLI argparse + `EngineStartConfig` validator | #6 |
+| 2 | `max_notional_jpy` 必須（1 ≤ n ≤ 100_000_000） | CLI argparse + `EngineStartConfig` validator | #6 |
+| 3 | `--prod` は `TACHIBANA_ALLOW_PROD=1` env と AND | CLI argparse | #7 |
+| 4 | `is_market_open()` 認可 reject | `engine_runner.start_live` 冒頭 | #9 |
+| 5 | warm_up 失敗（例外 OR `False` 戻り値）→ `EngineError{warm_up_failed}` + `exec_client.close()` | `engine_runner.start_live` | #14 |
+| 6 | `SecondPasswordRequired` フロー（CLI 非ゼロ + GUI 赤帯、固定文言） | CLI / GUI 両経路 | #8 |
+| 7 | 同 venue concurrent live → `EngineBusy{busy_kind:"another_strategy_on_venue"}` | `server.py::_handle_start_engine` | #16 |
+| 8 | 同一 strategy_id concurrent → `Error{code:"engine_already_running"}` | `server.py::_engine_tasks` ガード | #16 |
+| 9 | credential（特に第二暗証番号）を Rust / argv に流さない | §3.2-D / §3.2-D.1 | — |
+| 10 | `LiveSession.login()` 未呼出 → `LiveSession.run()` 経路の不在 | `tools/lint/check_live_login_call.py` AST lint | #10 |
+
+**移行フロー推奨**:
+
+1. `python -m engine.replay_session run --mode inprocess --strategy <file> ...` で
+   過去データに対する PnL / behavior を検証
+2. `python -m engine.live_session_cli run --demo --mode attach --strategy <file> ...`
+   で demo 口座に発注（`SubscriptionEvicted` / 板乖離 / `is_market_open` などの
+   live 固有エッジを実機で確認）
+3. **十分な demo 試験を経たうえで** `TACHIBANA_ALLOW_PROD=1` を set し、
+   engine プロセスを再起動してから `--prod` で本番発注
+
+各段階で同じ戦略ファイル（`examples/test_strategy_*.py` 等）を **無改変で** 持ち回せる
+ことが本仕様の核（受け入れ基準 #1）。
