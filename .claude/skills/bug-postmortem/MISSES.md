@@ -2364,3 +2364,58 @@ Issue #28 / #35 の修正（PUSH WS 起動・PUT /register 実装）が正しく
    今回のバグは Bybit/Binance（常に `Client`）では発生せず、KabuStation のみで発生した。
    取引所固有フラグが `false` のパスを単体テストで明示的にカバーすることで、
    今後の新取引所追加時の同類バグを防げる。
+
+---
+
+## 2026-05-10 — kabu PUSH WS が 30 秒ごとに keepalive ping timeout で切断・再接続
+
+**見逃しパターン**: Mock 置換漏れ（count: 2→3）
+
+**不具合の概要**:
+`kabusapi_ws.py` の `websockets.connect()` に `ping_interval=20, ping_timeout=10` を
+設定していたが、kabuStation サーバーは RFC 6455 準拠の PONG を返さない。
+PING payload `ff 78 27 16`（4 bytes）に対して空 PONG（0 bytes）を返す。
+`websockets` ライブラリは payload 不一致の PONG を無視して待機を継続し、
+`ping_timeout=10` 秒後にタイムアウトして `CLOSE 1011` を送信する。
+これが 30 秒ごとの切断・再接続ループを引き起こした。
+
+**修正**: `ping_interval=None` を設定してライブラリの keepalive を無効化する。
+接続生存確認はメッセージ受信に委ねる。
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `python/tests/test_kabusapi_ws.py` の全テスト | `fake_connect(url, **kwargs)` でモックしているが `kwargs` の内容（`ping_interval` 等）を検証するアサーションが一切なかった。接続の成否だけを検証し、接続パラメータの正確性は未テスト |
+
+**追加したテスト**:
+- `python/tests/test_kabusapi_ws.py::test_connect_passes_ping_interval_none_to_websockets`
+  — `websockets.connect()` に `ping_interval=None` が渡されることを検証するリグレッションテスト
+
+**リグレッション確認**: 修正前（`ping_interval=20`）で FAIL、修正後（`ping_interval=None`）で PASS を実際に確認済み。
+
+**教訓**:
+
+1. **`websockets.connect()` のパラメータを検証するテストを書く**:
+   `compression=None` の教訓（2026-04-25）と同じ構造。モックで接続をスタブするだけでなく、
+   `captured_kwargs` を検証してライブラリ設定の正確性を保証する。
+
+2. **「設定値の削除で元に戻る」バグは必ずリグレッションテストを追加する**:
+   `ping_interval=None` はコードレビューで見落とされやすい 1 行の削除で元に戻せる。
+   この種の設定値は「動いていること」だけで正しさを判定できないため、
+   引数の中身を assert するテストが唯一のガード。
+
+3. **外部サーバーの RFC 非準拠挙動はドキュメントと合わせて固める**:
+   kabuStation の PONG 非準拠（空 PONG）はサーバー側の仕様であり変わらない。
+   コードコメントに根拠を書き、テストでも enforcement することで仕様の維持を保証する。
+
+**追記 (review-fix-loop R1-R2 で発覚した追加問題)**:
+
+- **async for vs ws.recv() の振る舞い差異**: websockets 16.0 の `__aiter__` は `ConnectionClosedOK` を `StopAsyncIteration` に変換するため、`async for raw in ws:` 使用時は `except ConnectionClosedOK` に到達しない。`ws.recv()` を直接呼び出すことで例外が正しく伝播する。
+- **受信タイムアウト追加**: `asyncio.wait_for(ws.recv(), timeout=_RECV_TIMEOUT_S)` で無メッセージ接続ハングを検出し再接続する実装を追加。テスト `test_recv_timeout_triggers_reconnect` を追加。
+- **put_register 型不一致**: テストで `lambda symbols: True` を使っていたが `AsyncMock(return_value=True)` に修正。
+
+4. **ライブラリバージョンによる `__aiter__` の挙動差異を確認せよ**:
+   `async for` と `ws.recv()` 直接呼び出しでは例外伝播の挙動が異なる。
+   `async for` はライブラリ内部で特定例外を `StopAsyncIteration` に変換する可能性がある。
+   接続クローズ例外を `except` で拾いたい場合は `ws.recv()` を直接呼び出す。
