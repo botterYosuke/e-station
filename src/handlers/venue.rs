@@ -177,7 +177,8 @@ impl crate::Flowsurface {
                         // R2-B M7: 市場閉場中は live form の Submit を disable して
                         // 固定文言を提示する。market_closed=false の login error は別経路
                         // (notification / banner) で扱う既存仕様を維持。
-                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut() {
+                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut()
+                        {
                             form.set_disabled_reason(Some("市場が閉場中です".to_string()));
                         }
                     }
@@ -443,7 +444,8 @@ impl crate::Flowsurface {
                         self.notifications
                             .push(Toast::error(format!("kabuログインエラー: {message}")));
                         // R2-B M7: market_closed のみ live form を disable に倒す。
-                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut() {
+                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut()
+                        {
                             form.set_disabled_reason(Some("市場が閉場中です".to_string()));
                         }
                     }

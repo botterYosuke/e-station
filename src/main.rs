@@ -1149,11 +1149,8 @@ mod live_strategy_state_tests {
             ("S1", "8306.T", "", "venue must not be empty"),
         ];
         for (sid, iid, venue, expected_msg) in cases {
-            let result = LiveStrategyState::try_running(
-                sid.to_string(),
-                iid.to_string(),
-                venue.to_string(),
-            );
+            let result =
+                LiveStrategyState::try_running(sid.to_string(), iid.to_string(), venue.to_string());
             assert!(
                 result.is_err(),
                 "expected Err for ({sid:?}, {iid:?}, {venue:?})"

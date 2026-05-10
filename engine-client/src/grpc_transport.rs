@@ -1558,7 +1558,10 @@ mod tests {
         .expect("event should map");
         match dto_event {
             super::dto::EngineEvent::EngineBusy { busy_kind, .. } => {
-                assert_eq!(busy_kind, Some(super::dto::BusyKind::AnotherStrategyOnVenue));
+                assert_eq!(
+                    busy_kind,
+                    Some(super::dto::BusyKind::AnotherStrategyOnVenue)
+                );
             }
             other => panic!("expected EngineBusy, got {other:?}"),
         }

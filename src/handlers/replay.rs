@@ -655,8 +655,8 @@ impl crate::Flowsurface {
                 // 反映しないよう strategy_id 照合を加える。pending（EngineStarted 後
                 // Ready 前）または Running（Ready 後 / 後追い ticker）のいずれかに
                 // 該当する場合のみ受け取る。それ以外は古い start のものとして無視。
-                let matches_pending = self.live_strategy_pending_strategy_id.as_deref()
-                    == Some(strategy_id.as_str());
+                let matches_pending =
+                    self.live_strategy_pending_strategy_id.as_deref() == Some(strategy_id.as_str());
                 let matches_running = matches!(
                     &self.live_strategy,
                     LiveStrategyState::Running { strategy_id: s, .. } if s == &strategy_id
@@ -725,8 +725,8 @@ impl crate::Flowsurface {
                 strategy_id,
                 message,
             } => {
-                let matches_pending = self.live_strategy_pending_strategy_id.as_deref()
-                    == Some(strategy_id.as_str());
+                let matches_pending =
+                    self.live_strategy_pending_strategy_id.as_deref() == Some(strategy_id.as_str());
                 let matches_running = matches!(
                     &self.live_strategy,
                     LiveStrategyState::Running { strategy_id: s, .. } if s == &strategy_id
