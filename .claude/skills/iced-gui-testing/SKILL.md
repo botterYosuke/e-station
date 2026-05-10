@@ -197,7 +197,12 @@ cargo test verify_empty_state_message -- --ignored --nocapture
 □ 3. .env に DEV_TACHIBANA_USER_ID がある（立花自動ログイン用）
 □ 4. ANTHROPIC_API_KEY が設定済み（Vision 検証用）
 □ 5. Cargo.toml に xcap / reqwest / base64 / image が dev-dependencies にある
+□ 6. kabu 動作確認が必要なら .env に DEV_KABU_API_PASSWORD がある（ダイアログ入力用）
 ```
+
+**kabu ログインの注意**: kabu はダイアログサブプロセスを経由してログインする。
+ログイン後に Python ログが出るまで数分かかることがある。
+起動中に `Get-WmiObject Win32_Process` でサブプロセス一覧を確認すること。
 
 Cargo.toml に不足があれば追加:
 
@@ -339,6 +344,143 @@ mod venue_chip_tests {
 
 ---
 
+## Python エンジンログの読み方（2026-05 確認）
+
+### Python ログは Rust ログファイルに混在する
+
+`engine-client/src/process.rs` が Python の stdout/stderr を Rust の `log` クレートにパイプしている:
+
+- `stdout` → `log::Level::Info`
+- `stderr` → `log::Level::Warn`
+
+Python の `logging.basicConfig(stream=sys.stderr)` で出力した全ログ（DEBUG 含む）は
+`flowsurface-current.log` に **WARN** エントリとして混在する。別ファイルを探す必要はない。
+
+```
+11:03:58.883:WARN -- 2026-05-10 11:03:58,883 INFO     engine.server KabuStation session established
+11:03:58.975:WARN -- 2026-05-10 11:03:58,975 DEBUG    websockets.client = connection is OPEN
+```
+
+### 「Python ログなし」≠ タスク未実行
+
+**ダイアログサブプロセスが起動して待機している場合、ログエントリは一切出ない。**
+
+例: `_startup_kabu_station` は `asyncio.create_task()` で起動後、
+ダイアログサブプロセス (`python -m engine.exchanges.kabusapi_login_dialog`) を
+`asyncio.create_subprocess_exec()` で起動して `communicate()` で待機する。
+この待機中は Python のログ文が1行も実行されない。
+
+**「ログが出ない」と気づいたら必ずプロセスリストを確認する:**
+
+```powershell
+Get-WmiObject Win32_Process | Where-Object { $_.Name -match "python" } |
+    Select-Object ProcessId, @{N="CMD";E={$_.CommandLine}} | Format-List
+```
+
+確認ポイント:
+- `kabusapi_login_dialog` → kabu ログインダイアログが起動して待機中
+- `tachibana_login_dialog` → 立花ログインダイアログが起動して待機中
+- `python -m engine` が複数 → エンジンが重複して起動している（要整理）
+
+---
+
+## GUI インタラクション（ダイアログ操作）
+
+ダイアログが画面に出ているが自動で操作したい場合に使う PowerShell スニペット。
+
+### ウィンドウ位置の取得
+
+```powershell
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public class WinEnum {
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc f, IntPtr lp);
+    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    # ⚠️ PowerShell では $PID が read-only — 必ず別名 ($procId 等) を使う
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint procId);
+    public delegate bool EnumWindowsProc(IntPtr h, IntPtr lp);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
+}
+'@
+
+$targetPids = @(1234, 5678)  # 対象プロセスの PID
+[WinEnum]::EnumWindows({
+    param($hwnd, $lp)
+    $procId = [uint32]0
+    [WinEnum]::GetWindowThreadProcessId($hwnd, [ref]$procId) | Out-Null
+    if ($procId -in $targetPids -and [WinEnum]::IsWindowVisible($hwnd)) {
+        $sb = [System.Text.StringBuilder]::new(256)
+        [WinEnum]::GetWindowText($hwnd, $sb, 256) | Out-Null
+        $rect = [WinEnum+RECT]::new()
+        [WinEnum]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+        Write-Host "PID=$procId title='$($sb)' L=$($rect.L) T=$($rect.T) R=$($rect.R) B=$($rect.B)"
+    }
+    return $true
+}, [IntPtr]::Zero) | Out-Null
+```
+
+### マウスクリック
+
+```powershell
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public class MouseClick {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, int e);
+    public static void Click(int x, int y) {
+        SetCursorPos(x, y); System.Threading.Thread.Sleep(100);
+        mouse_event(0x0002, x, y, 0, 0); System.Threading.Thread.Sleep(50);
+        mouse_event(0x0004, x, y, 0, 0);
+    }
+}
+'@
+[MouseClick]::Click(377, 263)  # ダイアログ中央をクリック
+```
+
+### キーボード入力（テキスト入力 + Enter）
+
+```powershell
+$shell = New-Object -ComObject WScript.Shell
+$shell.AppActivate("ウィンドウタイトル")  # フォーカスを移す
+Start-Sleep -Milliseconds 300
+$shell.SendKeys("入力テキスト")
+$shell.SendKeys("{ENTER}")
+```
+
+### フルスクリーンキャプチャ（ダイアログがアプリ外に出るとき）
+
+xcap の `Window::capture_image()` はアプリウィンドウだけを撮る。
+**ダイアログはアプリウィンドウ外（左側 / 別位置）に出ることがあるため、全画面を撮ること。**
+
+```powershell
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bmp = [System.Drawing.Bitmap]::new($screen.Width, $screen.Height)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen(0, 0, 0, 0, $screen.Size)
+$bmp.Save("D:\Documents\e-station\tests\screenshots\fullscreen.png")
+$g.Dispose(); $bmp.Dispose()
+```
+
+### kabu ログインダイアログの自動操作
+
+```powershell
+# kabu ダイアログが起動したら自動で API パスワードを入力する
+# DEV_KABU_API_PASSWORD は .env に記載されている
+$kabuPass = (Get-Content "D:\Documents\e-station\.env" |
+    Select-String "DEV_KABU_API_PASSWORD" |
+    ForEach-Object { ($_ -split '=', 2)[1].Trim() })
+$shell = New-Object -ComObject WScript.Shell
+$shell.AppActivate("kabuステーション ログイン")
+Start-Sleep -Milliseconds 300
+$shell.SendKeys($kabuPass)
+$shell.SendKeys("{ENTER}")
+```
+
+---
+
 ## ログデバッグ手順（ランタイム値の確認）
 
 静的解析で原因が特定できないとき（タイミング依存・条件分岐の値確認）に使う。
@@ -445,6 +587,28 @@ Get-Content $log | Select-String "depth_stream subscribe error|depth_stream: ign
 # ↑ subscribe error → 修正不完全
 # ↑ ignoring → 正常（Issue #38 追加修正が効いている）
 ```
+
+### kabu PUSH WS 30 秒再接続ループ（2026-05 発見）
+
+**症状**: kabu ログイン後に PUSH WebSocket が約 30 秒ごとに切断・再接続を繰り返す。
+
+```
+DEBUG websockets.client > PING ff 78 27 16 [binary, 4 bytes]
+DEBUG websockets.client < PONG '' [0 bytes]      ← 空 PONG（PING payload と不一致）
+DEBUG websockets.client - timed out waiting for keepalive pong
+DEBUG websockets.client > CLOSE 1011 (internal error) keepalive ping timeout
+WARNING engine.exchanges.kabusapi_ws kabu WS: connection closed (code=1006 ...), reconnecting...
+```
+
+**原因**: kabuStation サーバーが RFC 6455 の keepalive PONG を正しく返さない。
+`ping_interval=20, ping_timeout=10` の設定（`kabusapi_ws.py:62`）で 30 秒ごとに timeout。
+
+**判定**:
+- `connection closed (code=1006)` → 正常な再接続ループ（機能的には壊れていない）
+- `connection closed (code=1000)` → 正常クローズ（ `consecutive_ok_close_count` インクリメント）
+- `KabuConnectionError` → 上限 5 回到達 → PUSH WS が完全に死んだ（VenueError 発火）
+
+**恒久修正**: Issue #40 参照 (`ping_interval=None` に変更)
 
 ### ストリーム系バグのクローズ条件
 
