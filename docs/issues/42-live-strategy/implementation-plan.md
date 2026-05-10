@@ -279,3 +279,36 @@ Wave 4: Final review
   - **EngineStartConfig.venue field 追加判断**: GUI dropdown 解禁時に schema bump 1 件で venue field を追加する案と、`StartEngine.engine` を `Literal["Backtest", "Live"]` から `enum Engine { Backtest, Live { venue: str } }` のような discriminated union に拡張する案がある。後者の方が wire 上「Live + venue は不可分」を強制できるが schema bump コストが大きい。前者の方が後方互換が単純。Phase 5 のスキーマ設計レビューで決める
   - **review-fix で踏んだ silent failure pattern**: tachibana 専用の bridge / hardcode 文字列を kabu 経路に流すと daemon thread 内 AttributeError や UI 文言誤表示として silent failure になる。venue 引数を増やす際は **必ず**「(a) bridge / thread 起動条件、(b) UI 文言、(c) wire 値（account_id / venue）」の 3 点を venue 別に grep して洗うこと
   - **冪等 key 三つ組のテスト pin**: Rust 側 `auto_generate_live_panes(strategy_id, instrument_id, venue)` の冪等 key は三つ組。venue 取り違え regression を防ぐには engine 側 `LiveStrategyReady.venue` の値を「warm_up=true で正しく venue 引数が伝搬する」test で pin する（`TestLiveStrategyReadyVenuePropagation::test_kabu_warm_up_success_emits_live_strategy_ready_with_kabu_venue`）。warm_up failure 経路の negative test だけでは「venue 値の正の伝搬」を観測できない
+
+### Phase 6 完了（2026-05-10）
+- 担当: phase6-agent
+- 主要 commit:
+  - `91b453c` — feat(lint): tools/lint/ + examples README live section（17 unit tests RED→GREEN + 受け入れ基準 #3 / #4 / #10 pin）
+  - `161072d` — docs(specs): live-strategy §3.2-D.1（credential argv 経路禁止 + stdin 4 経路）+ §5（CLI / GUI / TACHIBANA_ALLOW_PROD / is_market_open / demo→prod 安全装置 10 項目）
+  - `f4e2029` — docs(adr): 0071 Live Strategy GUI deferred → accepted（原本 3149879 を Context / Decision / Consequences で本文化）
+  - `915df27` — docs(adr): 0072 Execute Live Strategy deferred → accepted（原本 ea5022b を本文化、loop A/B 二段構成 + warm_up 9 ステップ + concurrent ガード 7 段 gating）
+  - `b380e14` — ci(python-tests): docs-lint job 新設（check_adr_status / check_examples_readme / check_live_login_call を CI 常時実行）
+- 設計判断:
+  - **ADR 原本 → 現代化方針**: 原本（古い形式の Markdown）をそのまま貼らず、`docs/decisions/README.md` の status 遷移ルールに従い `Status / Context / Decision / Consequences / 関連` の構造で再構成。原本の実装ステップ（Phase 1〜9 等の節）は Decision 節内の番号付き項目で要約し、issue #42 の対応 Phase / 受け入れ基準を相互参照として残した。`source_commit:` は原本 SHA（3149879 / ea5022b）を保持し、本 PR の merge SHA への更新は accepted 化の trigger を後追いする 2 段スタイルで後続 fixup commit に委譲する Note を本文に明記
+  - **lint script の AST 解析戦略**: `check_live_login_call.py` は `ast.With` / `ast.AsyncWith` の `items` を走査して `_is_live_session_call` で `LiveSession(...)` 呼出かを判定 → `optional_vars`（`as <name>`）で束縛された変数名を抽出 → 同 with ブロック内に `<var>.run(...)` 呼出があり、かつ「同 with ブロック または 外側の関数全体」に `<var>.login(...)` 呼出が無いケースのみ reject。「外側で login → with run」慣用句も許容するよう enclosing function を引数に取る `_audit_with_block(stmt, enclosing_func, ...)` で実装。文字列マッチではなく AST に依存することで、コメント / 文字列リテラル中の "login" / "run" を誤検出しない
+  - **lint script の文字列マッチ戦略**: `check_examples_readme.py` は ATX heading 行（`^#{1,6}\s+...`）のみフィードして `_iter_headings` で fenced code block (` ``` ` / `~~~`) を skip。本文中の「ライブで動かす」言及（地の文、コードブロック内）は検出しないことを `test_live_section_present_fails_when_match_in_body_only` で pin
+  - **`pytest.ini` / `pyproject.toml` の `pythonpath` に `.` 追加**: `tools.lint` をテストから import するため。pytest は `pytest.ini` を優先するため両方に追加（pyproject 側は将来 ini 廃止時の保険）。リポジトリ直下の他のディレクトリへの sys.path 経由の意図しない import が起きないかは、既存テストの 2231 件全緑で副作用ゼロを確認
+  - **CI 配線方針**: 既存 `python-tests` job に lint step を追加せず、独立した `docs-lint` job を新設。理由 = (1) lint は重い pytest scan より早く失敗を返したい、(2) 並列実行で全体時間を短縮、(3) lint 失敗時に「unit test も止まった」と誤認しない
+  - **examples README は Phase 6 では見出しスタブのみ**: 本 Phase は lint script の検証用としての「ライブで動かす」見出し存在のみを担保し、replay → demo → prod の完全コマンド例の充実は Phase 5 に委譲。スタブには `> **TODO (Phase 5)**: ...` の表示を残し Phase 5 担当が拡充する起点を明示
+- ✅ 達成した受け入れ基準:
+  - #3 `examples/README.md` に replay → demo → prod を同ファイルで通すコマンド例（`tools/lint/check_examples_readme.py::test_live_section_present` で見出し存在を pin、内容充実は Phase 5）
+  - #4 `docs/specs/live-strategy.md §5` 起票（CLI / GUI / SecondPasswordRequired / TACHIBANA_ALLOW_PROD / is_market_open / 安全装置 10 項目）
+  - #5 ADR 0071 / 0072 accepted 昇格 + 本文起票（`scripts/check_adr_status.py` 全緑、CI 常時実行）
+  - #10 `LiveSession.login()` 未呼出経路の不在（`tools/lint/check_live_login_call.py` の AST lint を CI 常時実行 + 17 unit tests）
+- 検証:
+  - `uv run pytest python/tests/` 2231 passed / 106 skipped / 198 deselected（Phase 6 で +17 件、live_demo マーカー由来の deselected 数は変わらず）
+  - `uv run python scripts/check_adr_status.py` OK（134 ADR files）
+  - `uv run python -m tools.lint.check_examples_readme` OK
+  - `uv run python -m tools.lint.check_live_login_call` OK
+  - `cargo test --workspace` 全緑（既存 issue 範囲外）
+- 知見/Tips（Phase 5 への引き継ぎ + 将来）:
+  - **`examples/README.md §C` 充実時の lint 互換性**: `check_examples_readme.py` は heading 文字列マッチで「ライブで動かす」を探すだけなので、Phase 5 で本文を書き換えても見出し文字列を変えない限り lint は green のまま。逆に「## D. 本番運用」のような新セクションを書く際は、ライブ section の見出しを `## ライブで動かす（demo / prod）` などに統合してもよい（lint は match 単位で OK）。表記揺れ用の正規表現は `_LIVE_HEADING_PATTERNS` に集約（`ライブで動かす` / `ライブ運用` / `^Live\b`）
+  - **ADR 0071 / 0072 の `source_commit:` 更新タイミング**: 本 PR が main に merge されたら、別 commit で `source_commit:` を merge SHA に更新できる（現状は原本 SHA を指している）。`scripts/check_adr_status.py` は accepted 状態 + `source_commit:` の存在のみを assert し、SHA の妥当性は検証しないので、merge 後の更新は purely documentation な fixup
+  - **AST lint の拡張ポイント**: `check_live_login_call.py` は現状「`with LiveSession(...) as s: ... s.run() ...` 経路で login() なし」のみを reject。将来 `LiveSession` の使用パターンが増えたら（例: context manager を使わずに直接 `s = LiveSession(...)` で生成するケース）、`_walk` を拡張して `Assign` 文の RHS が `LiveSession(...)` のケースも追加判定する設計。現状の AST 走査骨格はそのまま活きる
+  - **CI 経路の追加**: `docs-lint` job は ubuntu-latest で 1 分以下で完了する想定。GitHub status check に追加する場合、branch protection rule の Required checks に `docs-lint` を入れることで lint 不合格 PR を block できる（merge 経路の物理ガード）
+  - **`pytest.ini` の `pythonpath = python .`**: 将来 `tools.lint` 以外にもリポジトリ直下のパッケージ（`scripts.foo` 等）を test から import したくなった場合、すでに `.` が pythonpath に入っているので追加変更不要。pytest は両 ini ファイルの設定をマージせず、`pytest.ini` が見つかればそちらを優先するので、`pyproject.toml` 側の `pythonpath = ["python", "."]` 同期更新は将来の `pytest.ini` 廃止時の保険として保持
