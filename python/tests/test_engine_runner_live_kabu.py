@@ -107,10 +107,21 @@ def _patch_kabu_dependencies(
         _FakeEventBridge,
     )
 
+    # R4 R3-SILENT-5: engine_runner.py kabu 分岐は ``node.kernel`` が None なら
+    # 早期 abort して EngineError(kernel_unavailable) を emit する。テスト経路は
+    # kernel を mock で持たせて parent kwargs 組み立てを通す（factory 側で kwargs
+    # は無害に投げ捨てられる）。
+    class _FakeKernel:
+        loop = None
+        msgbus = None
+        cache = None
+        clock = None
+
     class _FakeNode:
         def __init__(self, *_a, **_kw):
             self._data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
             self._exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+            self.kernel = _FakeKernel()
 
         def add_data(self, *_a, **_kw):
             pass
