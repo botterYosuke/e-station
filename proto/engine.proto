@@ -136,6 +136,7 @@ message Event {
     ReplayTimeUpdatedEvent          replay_time_updated         = 52;
     LiveStrategyScenarioLoadedEvent live_strategy_scenario_loaded = 53;
     LiveStrategyReadyEvent          live_strategy_ready         = 54;
+    LiveStrategyWarmingUpEvent      live_strategy_warming_up    = 55;
   }
 }
 
@@ -765,6 +766,14 @@ message LiveStrategyReadyEvent {
   string venue         = 2;
   string instrument_id = 3;
   int64  ts_event_ms   = 4;
+}
+
+// issue #42 Phase 3 (schema 3.27): warm_up 進捗を 5s 毎に emit する中間 event。
+// GUI 側は LiveStrategyReady 60s timeout のリセットと banner 表示更新に使う。
+message LiveStrategyWarmingUpEvent {
+  string strategy_id = 1;
+  float  progress    = 2;  // 0.0..=1.0
+  string message     = 3;  // user-facing progress text
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

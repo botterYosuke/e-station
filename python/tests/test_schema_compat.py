@@ -136,3 +136,41 @@ def test_live_strategy_ready_unknown_variant_tolerated() -> None:
     ev = s.LiveStrategyReady.model_validate(data)
     assert ev.strategy_id == "live-strat-2"
     assert not hasattr(ev, "future_field")
+
+
+# ── Phase P3b (26 → 27): LiveStrategyWarmingUp ─────────────────────────────
+
+
+def test_schema_minor_is_27_for_phase_p3b() -> None:
+    """SCHEMA_MINOR must be bumped to 27 for Phase P3b (LiveStrategyWarmingUp)."""
+    assert s.SCHEMA_MINOR >= 27, "Phase P3b: bump 26 → 27 not applied"
+
+
+def test_live_strategy_warming_up_round_trip() -> None:
+    """`LiveStrategyWarmingUp` event は warm_up 進捗を 5s 毎に emit する（progress + message）."""
+    data = {
+        "event": "LiveStrategyWarmingUp",
+        "strategy_id": "live-strat-3",
+        "progress": 0.42,
+        "message": "ヒストリカルデータ取得中…",
+    }
+    ev = s.LiveStrategyWarmingUp.model_validate(data)
+    out = orjson.loads(orjson.dumps(ev.model_dump(mode="json")))
+    assert out["event"] == "LiveStrategyWarmingUp"
+    assert out["strategy_id"] == "live-strat-3"
+    assert out["progress"] == pytest.approx(0.42)
+    assert out["message"] == "ヒストリカルデータ取得中…"
+
+
+def test_live_strategy_warming_up_unknown_variant_tolerated() -> None:
+    """旧 client が `LiveStrategyWarmingUp` を unknown event として握り潰せる（後方互換）."""
+    data = {
+        "event": "LiveStrategyWarmingUp",
+        "strategy_id": "live-strat-4",
+        "progress": 0.0,
+        "message": "warming up",
+        "future_field": 123,
+    }
+    ev = s.LiveStrategyWarmingUp.model_validate(data)
+    assert ev.progress == pytest.approx(0.0)
+    assert not hasattr(ev, "future_field")

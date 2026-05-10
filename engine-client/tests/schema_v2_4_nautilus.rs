@@ -45,10 +45,11 @@ fn schema_minor_matches_current_bump() {
     // schema 3.24: RequestVenueLogout コマンド追加（立花セッション明示破棄 IPC）
     // schema 3.25: LoadLiveStrategyScenario / LiveStrategyScenarioLoaded 追加（issue #42 Phase 2）
     // schema 3.26: LiveStrategyReady 追加（issue #42 Phase 3、auto_generate_live_panes 冪等トリガー）
+    // schema 3.27: LiveStrategyWarmingUp 追加（issue #42 Phase 3、warm_up 進捗 5s 毎 emit）
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        26,
-        "SCHEMA_MINOR must be 26 after LiveStrategyReady added (schema v3.26, issue #42 Phase 3)"
+        27,
+        "SCHEMA_MINOR must be 27 after LiveStrategyWarmingUp added (schema v3.27, issue #42 Phase 3)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

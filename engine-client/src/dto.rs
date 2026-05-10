@@ -1524,6 +1524,17 @@ pub enum EngineEvent {
         instrument_id: String,
         ts_event_ms: i64,
     },
+
+    // ── issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp ────────────────
+    /// warm_up 進捗を 5s 毎に emit する中間 event。GUI banner 表示更新と
+    /// LiveStrategyReady 60s timeout のリセットに使う（統一決定 #10）。
+    LiveStrategyWarmingUp {
+        strategy_id: String,
+        /// 0.0–1.0 の進捗値
+        progress: f32,
+        /// user-facing 進捗文言
+        message: String,
+    },
 }
 
 fn default_true() -> bool {

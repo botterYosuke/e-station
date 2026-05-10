@@ -12,7 +12,7 @@ from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 # SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
 # 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 26
+SCHEMA_MINOR: int = 27
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -1198,6 +1198,22 @@ class LiveStrategyReady(IpcMessage):
     venue: str
     instrument_id: str
     ts_event_ms: int
+
+
+# ── issue #42 Phase 3 / schema 3.27: LiveStrategyWarmingUp ──────────────────
+
+
+class LiveStrategyWarmingUp(IpcMessage):
+    """warm_up 進捗を 5s 毎に emit する中間イベント。
+
+    GUI 側は ``LiveStrategyReady`` 60s timeout のリセットと banner 表示の更新に使う
+    （統一決定 #10）。``progress`` は 0.0–1.0、``message`` は user-facing 進捗文言。
+    """
+
+    event: Literal["LiveStrategyWarmingUp"] = "LiveStrategyWarmingUp"
+    strategy_id: str
+    progress: float
+    message: str
 
 
 # ---------------------------------------------------------------------------

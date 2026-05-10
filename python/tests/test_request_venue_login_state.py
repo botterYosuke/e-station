@@ -523,11 +523,11 @@ def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
 def test_schema_minor_current_value():
     """SCHEMA_MINOR の現在値を固定するスモークテスト。
     変更時はここも更新すること（履歴は engine-client/src/lib.rs を参照）。
-    26: LiveStrategyReady 追加（issue #42 Phase 3、auto_generate_live_panes 冪等トリガー）。
+    27: LiveStrategyWarmingUp 追加（issue #42 Phase 3、warm_up 進捗 5s 毎 emit）。
     """
     from engine.schemas import SCHEMA_MINOR
 
-    assert SCHEMA_MINOR == 26
+    assert SCHEMA_MINOR == 27
 
 
 @pytest.mark.demo_kabu

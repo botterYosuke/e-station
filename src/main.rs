@@ -1698,6 +1698,13 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             // the idempotent 4-pane auto-generation. For now, intentionally drop.
             None
         }
+        // issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp — Phase 3 functional impl で
+        // banner 表示更新と LiveStrategyReady 60s timeout のリセットに使う。
+        EngineEvent::LiveStrategyWarmingUp { .. } => {
+            // TODO(issue #42 Phase 3): route to LiveMsg::WarmingUp to update progress
+            // banner and reset Ready-event timeout. For now, intentionally drop.
+            None
+        }
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
         // 正しいことを確認すること。`_ => None` で握り潰すと

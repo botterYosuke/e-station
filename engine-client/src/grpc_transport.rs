@@ -1038,6 +1038,12 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
             instrument_id: lsr.instrument_id,
             ts_event_ms: lsr.ts_event_ms,
         }),
+        // issue #42 Phase 3 (schema 3.27): warm_up 進捗
+        Payload::LiveStrategyWarmingUp(lswu) => Some(dto::EngineEvent::LiveStrategyWarmingUp {
+            strategy_id: lswu.strategy_id,
+            progress: lswu.progress,
+            message: lswu.message,
+        }),
         // issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 応答
         Payload::LiveStrategyScenarioLoaded(lssl) => {
             // strategy_init_kwargs は wire 上 JSON 文字列。dict として decode する。

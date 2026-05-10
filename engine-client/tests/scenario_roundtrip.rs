@@ -465,3 +465,54 @@ fn live_strategy_ready_unknown_field_tolerated() {
         _ => panic!("Expected LiveStrategyReady"),
     }
 }
+
+// ── issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp の serde round-trip ──
+
+/// SCHEMA_MINOR は P3b 完了後 27 以上であること。
+#[test]
+fn schema_minor_is_at_least_27_after_p3b() {
+    const { assert!(SCHEMA_MINOR >= 27) };
+}
+
+/// LiveStrategyWarmingUp イベントが正しくデシリアライズされる。
+#[test]
+fn live_strategy_warming_up_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyWarmingUp",
+        "strategy_id": "live-strat-3",
+        "progress": 0.42,
+        "message": "warming up..."
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyWarmingUp {
+            strategy_id,
+            progress,
+            message,
+        } => {
+            assert_eq!(strategy_id, "live-strat-3");
+            assert!((progress - 0.42).abs() < 1e-5, "progress 0.42 expected, got {progress}");
+            assert_eq!(message, "warming up...");
+        }
+        _ => panic!("Expected LiveStrategyWarmingUp"),
+    }
+}
+
+/// LiveStrategyWarmingUp に未知 field があっても tolerated（forward compat）。
+#[test]
+fn live_strategy_warming_up_unknown_field_tolerated() {
+    let json = r#"{
+        "event": "LiveStrategyWarmingUp",
+        "strategy_id": "live-strat-4",
+        "progress": 0.0,
+        "message": "init",
+        "future_field": "extra"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyWarmingUp { progress, .. } => {
+            assert!(progress.abs() < 1e-6);
+        }
+        _ => panic!("Expected LiveStrategyWarmingUp"),
+    }
+}
