@@ -147,9 +147,10 @@ fn engine_event_variant_count_is_as_expected() {
     // When adding a new EngineEvent variant, ALSO add an explicit arm in
     // `map_engine_event_to_message` (src/main.rs) — do NOT rely on `_ => None`.
     // schema 3.22: ReplayTimeUpdated 追加で 52 → 53
+    // schema 3.25 (issue #42 Phase 2): LiveStrategyScenarioLoaded 追加で 53 → 54
     assert_eq!(
-        count, 53,
-        "EngineEvent variant count changed (got {count}, expected 53). \
+        count, 54,
+        "EngineEvent variant count changed (got {count}, expected 54). \
          Ensure the new/removed variant has an explicit arm in map_engine_event_to_message."
     );
 }

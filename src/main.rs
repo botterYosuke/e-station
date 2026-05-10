@@ -1682,6 +1682,14 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::ReplayHistoryChanged { has_history } => {
             Some(Message::Replay(ReplayMsg::HistoryChanged { has_history }))
         }
+        // issue #42 Phase 2 (schema 3.25): LiveStrategyScenarioLoaded — Phase 3 で
+        // GUI live form prefill を実装する。schema-chain commit 時点では明示 arm を
+        // 用意して `_ => None` で握り潰される事故を防ぎ、TODO 化する。
+        EngineEvent::LiveStrategyScenarioLoaded { .. } => {
+            // TODO(issue #42 Phase 3): route to a LiveMsg::ScenarioLoaded equivalent
+            // and call the live form prefill handler. For now, intentionally drop.
+            None
+        }
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
         // 正しいことを確認すること。`_ => None` で握り潰すと

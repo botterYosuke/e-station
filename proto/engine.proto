@@ -75,6 +75,7 @@ message Command {
     LoadStrategyScenarioRequest load_strategy_scenario = 34;
     SaveStrategyScenarioRequest save_strategy_scenario = 35;
     RequestVenueLogoutRequest   request_venue_logout   = 36;
+    LoadLiveStrategyScenarioRequest load_live_strategy_scenario = 37;
   }
 }
 
@@ -133,6 +134,7 @@ message Event {
     ClientDisconnectedEvent         client_disconnected         = 50;
     LiveBuyingPowerEvent            live_buying_power           = 51;
     ReplayTimeUpdatedEvent          replay_time_updated         = 52;
+    LiveStrategyScenarioLoadedEvent live_strategy_scenario_loaded = 53;
   }
 }
 
@@ -355,6 +357,14 @@ message SaveStrategyScenarioRequest {
   string          scenario    = 3;  // JSON-encoded dict
   bool            save_as     = 4;
   optional string loaded_path = 5;
+}
+
+// issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 抽出要求。SCENARIO とは独立した
+// 定数で、live モード form prefill に使う。Python 側は ast.parse + ast.literal_eval
+// のみで抽出する（副作用ゼロ）。
+message LoadLiveStrategyScenarioRequest {
+  string request_id    = 1;
+  string strategy_path = 2;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -732,6 +742,18 @@ message LiveBuyingPowerEvent {
   string buying_power = 3;  // decimal string, JPY
   string equity       = 4;  // decimal string, JPY
   int64  ts_event_ms  = 5;
+}
+
+// issue #42 Phase 2 (schema 3.25): LoadLiveStrategyScenario の応答。LIVE_SCENARIO
+// が見つかった場合は各フィールドを返す。LIVE_SCENARIO 不在時は全フィールドを未設定で返す。
+// strategy_init_kwargs は wire 上 JSON 文字列で、Python が dict を json.dumps して送出する。
+message LiveStrategyScenarioLoadedEvent {
+  string          request_id           = 1;
+  optional string instrument_id        = 2;
+  optional uint32 max_qty              = 3;  // matches EngineStartConfig.max_qty
+  optional uint64 max_notional_jpy     = 4;  // matches EngineStartConfig.max_notional_jpy
+  optional string venue                = 5;
+  optional string strategy_init_kwargs = 6;  // JSON-encoded object or absent
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

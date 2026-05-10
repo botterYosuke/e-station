@@ -523,11 +523,11 @@ def test_kabu_ready_capabilities_is_production_true_in_prod_env(monkeypatch):
 def test_schema_minor_current_value():
     """SCHEMA_MINOR の現在値を固定するスモークテスト。
     変更時はここも更新すること（履歴は engine-client/src/lib.rs を参照）。
-    24: RequestVenueLogout コマンド追加（立花セッション明示破棄 IPC）。
+    25: LoadLiveStrategyScenario / LiveStrategyScenarioLoaded 追加（issue #42 Phase 2）。
     """
     from engine.schemas import SCHEMA_MINOR
 
-    assert SCHEMA_MINOR == 24
+    assert SCHEMA_MINOR == 25
 
 
 @pytest.mark.demo_kabu

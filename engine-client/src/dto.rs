@@ -306,6 +306,14 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         loaded_path: Option<String>,
     },
+
+    // ── issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 抽出 ─────────────────
+    /// 戦略 .py から LIVE_SCENARIO 定数を ast.literal_eval で安全抽出するよう Python に要求する。
+    /// SCENARIO とは独立した定数で、live モード form prefill に使う。Python 側は副作用ゼロ。
+    LoadLiveStrategyScenario {
+        request_id: String,
+        strategy_path: String,
+    },
 }
 
 /// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
@@ -632,6 +640,14 @@ impl std::fmt::Debug for Command {
             Command::StepBackward { request_id } => f
                 .debug_struct("StepBackward")
                 .field("request_id", request_id)
+                .finish(),
+            Command::LoadLiveStrategyScenario {
+                request_id,
+                strategy_path,
+            } => f
+                .debug_struct("LoadLiveStrategyScenario")
+                .field("request_id", request_id)
+                .field("strategy_path", strategy_path)
                 .finish(),
         }
     }
@@ -1478,6 +1494,24 @@ pub enum EngineEvent {
         /// 評価額（decimal 文字列、円）
         equity: String,
         ts_event_ms: i64,
+    },
+
+    // ── issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 応答 ───────────────────
+    /// `LoadLiveStrategyScenario` の応答。LIVE_SCENARIO が見つかった場合は各フィールドを返す。
+    /// LIVE_SCENARIO 不在時は全フィールド None で即時応答する。
+    /// `strategy_init_kwargs` は wire 上 JSON 文字列で、Rust 側で decode して dict 化する。
+    LiveStrategyScenarioLoaded {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instrument_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_qty: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_notional_jpy: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        venue: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     },
 }
 

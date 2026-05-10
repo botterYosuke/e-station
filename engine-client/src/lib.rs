@@ -46,5 +46,6 @@ pub use venue_caps::VenueCapsStore;
 ///   - 22: ReplayTimeUpdated 追加（分足・tick 足での current_day 時刻表示、Issue 3）
 ///   - 23: StrategyScenarioLoaded.resolved_instruments 追加（schema v3 instruments_ref 対応）
 ///   - 24: RequestVenueLogout コマンド追加（立花セッション明示破棄 IPC）
+///   - 25: LoadLiveStrategyScenario / LiveStrategyScenarioLoaded 追加（issue #42 Phase 2）
 pub const SCHEMA_MAJOR: u32 = 3;
-pub const SCHEMA_MINOR: u32 = 24;
+pub const SCHEMA_MINOR: u32 = 25;

@@ -277,3 +277,136 @@ fn saved_with_ok_true_and_error_some_is_inconsistent() {
         _ => panic!("Expected StrategyScenarioSaved"),
     }
 }
+
+// ── issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 抽出の serde round-trip ──
+
+/// SCHEMA_MINOR は P2 完了後 25 以上であること。
+#[test]
+fn schema_minor_is_at_least_25_after_p2() {
+    const { assert!(SCHEMA_MINOR >= 25) };
+}
+
+/// LoadLiveStrategyScenario コマンドが正しく JSON シリアライズされる。
+#[test]
+fn load_live_strategy_scenario_serializes() {
+    let cmd = Command::LoadLiveStrategyScenario {
+        request_id: "live-req-1".to_string(),
+        strategy_path: "/path/to/live.py".to_string(),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    assert!(json.contains(r#""op":"LoadLiveStrategyScenario""#));
+    assert!(json.contains(r#""request_id":"live-req-1""#));
+    assert!(json.contains(r#""strategy_path":"/path/to/live.py""#));
+}
+
+/// LiveStrategyScenarioLoaded イベント（全フィールド設定）がデシリアライズできる。
+#[test]
+fn live_strategy_scenario_loaded_full_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyScenarioLoaded",
+        "request_id": "live-req-1",
+        "instrument_id": "7203.TSE",
+        "max_qty": 100,
+        "max_notional_jpy": 1000000,
+        "venue": "tachibana",
+        "strategy_init_kwargs": {"foo": 1, "bar": "baz"}
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        } => {
+            assert_eq!(request_id, "live-req-1");
+            assert_eq!(instrument_id.as_deref(), Some("7203.TSE"));
+            assert_eq!(max_qty, Some(100));
+            assert_eq!(max_notional_jpy, Some(1_000_000));
+            assert_eq!(venue.as_deref(), Some("tachibana"));
+            let kw = strategy_init_kwargs.expect("kwargs should be Some");
+            assert_eq!(kw.get("foo").and_then(|v| v.as_i64()), Some(1));
+            assert_eq!(kw.get("bar").and_then(|v| v.as_str()), Some("baz"));
+        }
+        _ => panic!("Expected LiveStrategyScenarioLoaded"),
+    }
+}
+
+/// LiveStrategyScenarioLoaded イベント（LIVE_SCENARIO 不在時 = 全フィールド省略）も
+/// デシリアライズできる（Open Q2: 即時応答 SoT）。
+#[test]
+fn live_strategy_scenario_loaded_all_absent_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyScenarioLoaded",
+        "request_id": "live-req-2"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        } => {
+            assert_eq!(request_id, "live-req-2");
+            assert!(instrument_id.is_none());
+            assert!(max_qty.is_none());
+            assert!(max_notional_jpy.is_none());
+            assert!(venue.is_none());
+            assert!(strategy_init_kwargs.is_none());
+        }
+        _ => panic!("Expected LiveStrategyScenarioLoaded"),
+    }
+}
+
+/// 旧 server (minor < 25) は LoadLiveStrategyScenario を unknown command として
+/// 握り潰す（forward compat）。新 client → 旧 server の wire 上の挙動を検証する。
+///
+/// proto wire-format では、未知の oneof variant field number は受信側の proto デコード時に
+/// 「未知フィールド」として silently 無視されるか、`payload: None` として届く。
+/// ここではコマンドが Some(payload) で構築できることだけを確認する（旧 server 側で
+/// `WhichOneof("payload") is None` または `_FIELD_TO_OP.get(which) is None` の経路で
+/// 無視される実装契約 = 後方互換性）。
+#[test]
+fn load_live_strategy_scenario_forward_compat() {
+    // 新 client: LoadLiveStrategyScenario を構築して wire 用 JSON serialise できる。
+    let cmd = Command::LoadLiveStrategyScenario {
+        request_id: "forward-1".to_string(),
+        strategy_path: "/strat.py".to_string(),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    // tag は `op`、旧 server からは未知の値として扱われる
+    assert!(json.contains(r#""op":"LoadLiveStrategyScenario""#));
+
+    // Command は serialise のみで deserialise されないため、wire 形が JSON 値として
+    // 取り出せることだけ確認する（旧 server は proto 側で oneof field を unknown と
+    // して skip し、`_FIELD_TO_OP.get(which) is None` の経路にも到達しない）。
+    let v: serde_json::Value = serde_json::from_str(&json).expect("json must parse");
+    assert_eq!(v["op"], "LoadLiveStrategyScenario");
+    assert_eq!(v["strategy_path"], "/strat.py");
+}
+
+/// LiveStrategyScenarioLoaded のうち kwargs が空の dict であるケースのデシリアライズ。
+#[test]
+fn live_strategy_scenario_loaded_empty_kwargs_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyScenarioLoaded",
+        "request_id": "live-req-3",
+        "strategy_init_kwargs": {}
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyScenarioLoaded {
+            strategy_init_kwargs,
+            ..
+        } => {
+            let kw = strategy_init_kwargs.expect("empty dict should still be Some");
+            assert!(kw.is_empty(), "empty dict should remain empty");
+        }
+        _ => panic!("Expected LiveStrategyScenarioLoaded"),
+    }
+}

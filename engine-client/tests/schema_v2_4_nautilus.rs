@@ -43,10 +43,11 @@ fn schema_minor_matches_current_bump() {
     // schema 3.22: ReplayTimeUpdated 追加（分足・tick 足での current_day 時刻表示）。
     // schema 3.23: StrategyScenarioLoaded.resolved_instruments 追加（schema v3 instruments_ref 対応）。
     // schema 3.24: RequestVenueLogout コマンド追加（立花セッション明示破棄 IPC）
+    // schema 3.25: LoadLiveStrategyScenario / LiveStrategyScenarioLoaded 追加（issue #42 Phase 2）
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        24,
-        "SCHEMA_MINOR must be 24 after RequestVenueLogout command added (schema v3.24)"
+        25,
+        "SCHEMA_MINOR must be 25 after LoadLiveStrategyScenario added (schema v3.25, issue #42 Phase 2)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

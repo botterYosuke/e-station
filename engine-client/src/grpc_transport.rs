@@ -644,6 +644,13 @@ fn dto_cmd_to_proto(cmd: dto::Command) -> Option<engine::Command> {
                 loaded_path,
             })
         }
+        dto::Command::LoadLiveStrategyScenario {
+            request_id,
+            strategy_path,
+        } => Payload::LoadLiveStrategyScenario(engine::LoadLiveStrategyScenarioRequest {
+            request_id,
+            strategy_path,
+        }),
     };
 
     Some(engine::Command {
@@ -1024,6 +1031,37 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
         Payload::ReplayTimeUpdated(rtu) => Some(dto::EngineEvent::ReplayTimeUpdated {
             timestamp_ms: rtu.timestamp_ms,
         }),
+        // issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 応答
+        Payload::LiveStrategyScenarioLoaded(lssl) => {
+            // strategy_init_kwargs は wire 上 JSON 文字列。dict として decode する。
+            let strategy_init_kwargs = lssl.strategy_init_kwargs.and_then(|s| {
+                match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(serde_json::Value::Object(m)) => Some(m),
+                    Ok(other) => {
+                        log::warn!(
+                            target: "engine_client::grpc_transport",
+                            "LiveStrategyScenarioLoaded: strategy_init_kwargs is not an object: {other:?}"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            target: "engine_client::grpc_transport",
+                            "LiveStrategyScenarioLoaded: strategy_init_kwargs JSON parse failed: {e}"
+                        );
+                        None
+                    }
+                }
+            });
+            Some(dto::EngineEvent::LiveStrategyScenarioLoaded {
+                request_id: lssl.request_id,
+                instrument_id: lssl.instrument_id,
+                max_qty: lssl.max_qty,
+                max_notional_jpy: lssl.max_notional_jpy,
+                venue: lssl.venue,
+                strategy_init_kwargs,
+            })
+        }
     }
 }
 

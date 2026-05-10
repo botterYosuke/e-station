@@ -12,7 +12,7 @@ from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 # SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
 # 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 24
+SCHEMA_MINOR: int = 25
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -1148,6 +1148,38 @@ class StrategyScenarioSaved(IpcMessage):
     # 未知値は pydantic validation で reject される。
     # schema v3 instruments_ref 対応で 8 値 → 10 値に拡張済み（unresolved_ref / relative_ref_crosses_dir 追加）。
     error: SaveErrorCode | None = None
+
+
+# ── issue #42 Phase 2 / schema 3.25: LIVE_SCENARIO 抽出 IPC ───────────────────
+
+
+class LoadLiveStrategyScenario(IpcMessage):
+    """戦略 .py から LIVE_SCENARIO 定数を ast.literal_eval で安全抽出するよう Python に要求する。
+
+    live モードの `File > Open` で .py を選択したときに Rust が送出する。
+    Python 側は importlib を使わず ast.parse + ast.literal_eval のみで抽出する（副作用ゼロ）。
+    SCENARIO とは独立した定数で、live 専用フォーム prefill に使う。
+    """
+
+    op: Literal["LoadLiveStrategyScenario"] = "LoadLiveStrategyScenario"
+    request_id: str
+    strategy_path: str  # 戦略 .py の絶対パス
+
+
+class LiveStrategyScenarioLoaded(IpcMessage):
+    """LoadLiveStrategyScenario の応答。LIVE_SCENARIO が見つかった場合は各フィールドを返す。
+
+    すべて Optional。LIVE_SCENARIO 不在時は全フィールド None で即時応答する（Open Q2 の SoT）。
+    `strategy_init_kwargs` は wire 上 dict（Rust 側では JSON 文字列を decode して受信）。
+    """
+
+    event: Literal["LiveStrategyScenarioLoaded"] = "LiveStrategyScenarioLoaded"
+    request_id: str
+    instrument_id: Optional[str] = None
+    max_qty: Optional[int] = None
+    max_notional_jpy: Optional[int] = None
+    venue: Optional[str] = None
+    strategy_init_kwargs: Optional[dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
