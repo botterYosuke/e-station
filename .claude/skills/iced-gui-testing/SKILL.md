@@ -34,6 +34,12 @@ e-station (Flowsurface) は Rust + iced 0.14 GUI。Python 側 E2E は `e2e-testi
 「動作確認完了」と言えるのは、アプリを起動してスクリーンショットを撮り、
 Vision API または目視で実際の表示を確認したときだけ。
 
+また、以下も「動作確認完了」ではない:
+
+- **ユニットテストが全合格した** → テストは修正した関数の正しさのみを証明する。データパス全体を通した動作は別。
+- **スクリーンショットで「それっぽい UI」が映った** → 問題のパネルが画面に映っていなければ症状の消失を確認できていない。
+- **「症状はランタイム依存だから確認できない」** → ログを見れば stream の生死は確認できる。省略の言い訳にしない。
+
 ---
 
 ## Tier 2: 実機起動 + 視覚確認（動作確認の標準手順）
@@ -363,6 +369,91 @@ cmd 2>&1 | Select-Object -First 80
 # OK: 全出力を取得
 cmd 2>&1 | Out-String -Width 300
 ```
+
+---
+
+## ⛔ Issue クローズ前必須チェックリスト（2026-05 事件から）
+
+**ユニットテスト合格 ≠ 修正完了。Issue をクローズする前に必ず全項目を確認する。**
+
+> 背景: Issue #38 で `matches_stream` の修正ユニットテストが全合格したにも関わらず、
+> `depth_stream` が kline の `stream_error` を受けて切断するという別のバグが残存していた。
+> ユニットテストが通り、かつスクリーンショットで「それっぽい UI」が映ったため
+> クローズしたが、ユーザーが「まだ壊れてる」と報告してきた。
+
+### クローズ前の必須確認
+
+```
+□ 1. Issue に報告されている "具体的な症状" がスクリーンショットで消えているか？
+      → 「Ladderが'データ受信待ち...'」なら、Ladder パネルが画面に映っていること
+      → 症状の対象パネルが画面に出ていなければ確認できていない
+
+□ 2. 起動後のログに、症状と因果関係のある WARNING / ERROR がないか？
+      → 修正したコードパスと同じ症状を引き起こしうる別エラーが残っていないか
+
+□ 3. ユニットテストの検証範囲は修正した全コードパスをカバーしているか？
+      → テストが通っても「テストされていない別のバグ」が残ることがある
+
+□ 4. 「関連ファイル」を全部見たか？
+      → Issue に「修正対象: X」と書いてあっても、同じ症状を引き起こす Y が別にある場合がある
+```
+
+### 症状パネルが画面に映っていない場合の対処
+
+スクリーンショットを見て「関係するパネルが映っていない」場合：
+
+```
+❌ NG: 「UI は正常です」とクローズする
+✅ OK: 「Ladder パネルが現在のレイアウトに表示されていないため視覚確認できていません。
+        ログ検証のみ実施済みです。ユーザーが Ladder を開いて確認するまで Issue を開いたままにします。」と報告する
+```
+
+---
+
+## ストリーム系バグの検証手順
+
+Ladder / Heatmap / Footprint など、リアルタイムデータストリームに関連するバグは
+**ログの確認が必須**。「スクリーンショットで UI が映った」だけでは不十分。
+
+### 起動後に必ず確認するログパターン
+
+```powershell
+$log = "$env:APPDATA\flowsurface\flowsurface-current.log"
+Get-Content $log | Select-String "depth_stream|stream_error|subscribe error|connected to|disconnected from|VenueReady|DepthReceived"
+```
+
+| ログパターン | 正常 | 異常（要調査） |
+|---|---|---|
+| `a stream connected to X WS` | 接続した | — |
+| `a stream disconnected from X WS` | — | 接続後すぐ切断 → 原因を調べる |
+| `depth_stream subscribe error` | — | depth ストリームが強制終了 |
+| `depth_stream: ignoring stream_error` | kline 等の死を無視して継続 | — |
+| `VenueReady` | ログイン成功 | — |
+
+### ストリーム系バグで見落としやすいパターン
+
+**「兄弟ストリームエラー汚染」** (Issue #38 追加修正で発見):
+
+- Python engine が kline ストリームの死を `EngineEvent::Error { code: "stream_error" }` でブロードキャスト
+- depth_stream がこれを自分のエラーと誤認して `Disconnected` を yield → Ladder が "待ち" 状態に
+- ユニットテストは `matches_stream` だけをテストしていたため見落とし
+
+確認方法:
+```powershell
+# 修正後のアプリ起動時に "depth_stream subscribe error" が出ていないか確認
+Get-Content $log | Select-String "depth_stream subscribe error|depth_stream: ignoring"
+# ↑ subscribe error → 修正不完全
+# ↑ ignoring → 正常（Issue #38 追加修正が効いている）
+```
+
+### ストリーム系バグのクローズ条件
+
+以下が **全て** 成立する場合のみクローズ:
+
+1. 問題のパネル（Ladder 等）がスクリーンショットに映っていて、症状テキストが消えている
+2. ログに `depth_stream subscribe error` がない
+3. `a stream connected to X WS` の後に `a stream disconnected from X WS` が来ていない
+4. FD カウントが増加している（`FD=1` のまま長時間 → データが届いていない）
 
 ---
 
