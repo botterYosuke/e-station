@@ -1143,6 +1143,7 @@ class NautilusRunner:
         on_event: "Callable[[dict], None]",
         stop_event: "threading.Event",
         strategy_id: str,
+        venue: str = "tachibana",
     ) -> None:
         """N3: TradingNode を起動して live strategy を実行する。
 
@@ -1156,13 +1157,17 @@ class NautilusRunner:
             strategy_init_kwargs: strategy の `__init__` に渡す追加引数。
             max_qty: 1 注文あたりの最大株数。
             max_notional_jpy: 1 注文あたりの最大金額（円）。
-            second_password: 第二暗証番号（env 変数不使用。引数で受け取る）。
-            session: Tachibana セッションオブジェクト。
-            fd_queue: FD frame を受け取るキュー。
-            ec_queue: EC frame を受け取るキュー。
+            second_password: 第二暗証番号（tachibana 専用。kabu_station では不使用）。
+            session: venue セッションオブジェクト（tachibana ``SessionHolder`` または
+                kabu_station ``KabuStationVenue``）。
+            fd_queue: FD frame を受け取るキュー（tachibana 経路で使用）。
+            ec_queue: EC frame を受け取るキュー（tachibana 経路で使用）。
             on_event: IPC イベントを受け取るコールバック。
             stop_event: 停止シグナル。set されたら TradingNode を停止する。
             strategy_id: strategy 識別子。
+            venue: 起動 venue。``"tachibana"`` (default) または ``"kabu_station"``。
+                未対応 venue は ``EngineError{code:"venue_not_supported"}`` を emit
+                して abort する（issue #42 Phase 4）。
         """
         import asyncio as _asyncio
         import threading as _threading
@@ -1187,6 +1192,25 @@ class NautilusRunner:
                 "ts_event_ms": int(_time.time() * 1000),
             })
 
+        # issue #42 Phase 4: venue 引数で経路を分岐。未対応 venue は即 reject。
+        # tachibana = 既存の TachibanaLiveExecutionClient/Data/EventBridge 経路。
+        # kabu_station = 新 KabuStationLive* 経路（python/engine/nautilus/clients/kabu_station/）。
+        # 未対応 venue は EngineError{venue_not_supported} + EngineStopped を emit して abort。
+        _SUPPORTED_LIVE_VENUES = ("tachibana", "kabu_station")
+        if venue not in _SUPPORTED_LIVE_VENUES:
+            on_event({
+                "event": "EngineError",
+                "code": "venue_not_supported",
+                "message": (
+                    f"venue {venue!r} is not supported for live strategy execution. "
+                    f"Supported venues: {_SUPPORTED_LIVE_VENUES!r}."
+                ),
+                "strategy_id": strategy_id,
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+            _emit_engine_stopped_for_early_abort()
+            return
+
         # issue #42 Phase 1 / 統一決定 #5: 市場閉場 → 即 abort（exec_client / TradingNode 構築前）。
         # is_market_open は module top で import され、テストは monkeypatch で差し替え可能。
         if not is_market_open(_datetime.now(_timezone.utc)):
@@ -1207,6 +1231,8 @@ class NautilusRunner:
         from nautilus_trader.live.node import TradingNode
 
         from engine.nautilus.instrument_factory import make_equity_instrument
+        # tachibana imports — tachibana 経路でのみ使用するが、後方互換のため top で import
+        # （未使用警告は付かない: kabu 経路でも _venue 計算用 PNoCounter 等は触らない）。
         from engine.nautilus.clients.tachibana import TachibanaLiveExecutionClient
         from engine.nautilus.clients.tachibana_data import TachibanaLiveDataClient
         from engine.nautilus.clients.tachibana_event_bridge import (
@@ -1214,6 +1240,16 @@ class NautilusRunner:
             TachibanaEventBridge,
         )
         from engine.exchanges.tachibana_helpers import PNoCounter
+        # kabu_station imports — venue=="kabu_station" 経路で使用。
+        from engine.nautilus.clients.kabu_station.kabu_station_exec_client import (
+            KabuStationLiveExecutionClient,
+        )
+        from engine.nautilus.clients.kabu_station.kabu_station_data_client import (
+            KabuStationLiveDataClient,
+        )
+        from engine.nautilus.clients.kabu_station.kabu_station_event_bridge import (
+            KabuStationEventBridge,
+        )
 
         # instrument_id は "8306.T" 形式 → symbol="8306", venue="T"
         # make_equity_instrument は (symbol, venue) を受け取る
@@ -1277,28 +1313,42 @@ class NautilusRunner:
 
         async def _run_node() -> None:
             safe_id = strategy_id.replace("-", "_").replace(".", "_")
+            # trader_id は venue ごとに prefix を分け、TradingNode 識別を容易にする。
+            _trader_prefix = "TACHIBANA" if venue == "tachibana" else "KABUSTATION"
             config = TradingNodeConfig(
-                trader_id=f"TACHIBANA-{safe_id}",
+                trader_id=f"{_trader_prefix}-{safe_id}",
                 cache=CacheConfig(database=None),
             )
             node = TradingNode(config=config)
 
-            # クライアント生成
-            p_no_counter = PNoCounter()
-            exec_client = TachibanaLiveExecutionClient(
-                session=session,
-                second_password=second_password,
-                max_qty=max_qty,
-                max_notional_jpy=max_notional_jpy,
-                p_no_counter=p_no_counter,
-                strategy_id=strategy_id,
-            )
-            data_client = TachibanaLiveDataClient()
-            order_id_map = OrderIdMap()
-            event_bridge = TachibanaEventBridge(
-                client=exec_client,
-                order_id_map=order_id_map,
-            )
+            # issue #42 Phase 4: venue 引数で client 生成経路を分岐。
+            # tachibana = 既存経路（PNoCounter + Tachibana* + OrderIdMap）。
+            # kabu_station = KabuStationLive*（KabuStationVenue を session として渡す）。
+            if venue == "tachibana":
+                p_no_counter = PNoCounter()
+                exec_client = TachibanaLiveExecutionClient(
+                    session=session,
+                    second_password=second_password,
+                    max_qty=max_qty,
+                    max_notional_jpy=max_notional_jpy,
+                    p_no_counter=p_no_counter,
+                    strategy_id=strategy_id,
+                )
+                data_client = TachibanaLiveDataClient()
+                order_id_map = OrderIdMap()
+                event_bridge = TachibanaEventBridge(
+                    client=exec_client,
+                    order_id_map=order_id_map,
+                )
+            else:  # venue == "kabu_station"（venue validation で他値は弾かれている）
+                exec_client = KabuStationLiveExecutionClient(
+                    kabu_venue=session,
+                    strategy_id=strategy_id,
+                    max_qty=max_qty,
+                    max_notional_jpy=max_notional_jpy,
+                )
+                data_client = KabuStationLiveDataClient(on_event=on_event)
+                event_bridge = KabuStationEventBridge(client=exec_client)
 
             node._data_engine.register_client(data_client)
             node._exec_engine.register_client(exec_client)
@@ -1346,19 +1396,20 @@ class NautilusRunner:
             # issue #42 Phase 1 / 統一決定 #15 (Open Q1):
             # LiveStrategyReady は warm_up 成功直後 / node.build() より前に emit。
             # Rust 側はこれを受信して 4 ペイン自動生成（冪等）の trigger とする。
+            # issue #42 Phase 4: venue は引数からそのまま流す（"tachibana" or "kabu_station"）。
             on_event({
                 "event": "LiveStrategyReady",
                 "strategy_id": strategy_id,
-                "venue": "tachibana",
+                "venue": venue,
                 "instrument_id": instrument_id,
                 "ts_event_ms": int(_time.time() * 1000),
             })
 
-            # EngineStarted emit
+            # EngineStarted emit — account_id は venue 名を流用（既存契約を踏襲）。
             on_event({
                 "event": "EngineStarted",
                 "strategy_id": strategy_id,
-                "account_id": "tachibana",
+                "account_id": venue,
                 "ts_event_ms": int(_time.time() * 1000),
             })
 
