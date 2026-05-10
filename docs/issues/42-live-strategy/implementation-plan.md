@@ -384,3 +384,28 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **wire の null 表現**: pydantic `model_dump(exclude_none=False)` で全フィールドが dict に出る → `server_grpc.py` の `ParseDict` で proto optional フィールドに正しくマップされる（proto 側は `optional` 修飾子付き）。Rust 側 `LiveStrategyScenarioLoaded { instrument_id: Option<String>, ... }` は `serde(default, skip_serializing_if = "Option::is_none")` で受信側の None deserialize は安全。`exclude_none=True` にすると proto field が落ちて wire 上で区別できなくなるので注意
   - **handler test の `_outbox.append` 観測手法**: `_make_server()` で `BinanceWorker` 等を mock した最小 `DataEngineServer` を生成し、`asyncio.run(server._handle_load_live_strategy_scenario(msg))` を直接呼ぶ。`_outbox` は `_Broadcaster` で iter 可能なので `list(server._outbox)` で観測する。同パターンは既存 `test_scenario_load.py::test_load_failed_log_format` と同じ
   - **`_FIELD_TO_OP` mapping pin の重要性**: Wave 1 で wire 配線済の `load_live_strategy_scenario` が `_FIELD_TO_OP` から削除されると、Rust が proto Command を送信しても `_handle` まで到達しない silent failure になる。`test_field_to_op_mapping_contains_new_commands` で mapping を pin することで、リファクタ時の意図しない削除を即座に検知できる
+
+### Phase 5 完了（2026-05-10）
+- 担当: phase5-agent
+- 主要 commit:
+  - `156da9a` — feat(examples): test_strategy_minute.py / test_strategy_daily.py / test_strategy_trade.py に `LIVE_SCENARIO` 定数追記 + `python/tests/test_examples_live_scenario.py` 6 件追加（RED→GREEN）
+  - `be193bf` — docs(examples): README §C を replay → demo → prod の完全コマンド例 + 安全装置 6 項目 + GUI 経路で充実 / live_sample.py の docstring を「発注しない最小ロガー」と明示
+- 設計判断:
+  - **live_sample.py の位置づけ**: コメント追記方式を採用（リネームせず）。理由: (1) 既存テストや内部参照（仮にあった場合）への副作用ゼロ、(2) ファイル冒頭 docstring で「発注しない、接続確認専用」+「本番起動の正式 CLI は `python -m engine.live_session_cli run`」を明示すれば位置づけは十分伝わる、(3) リネームは将来 `live_logger_only.py` へ別 PR で行っても安全
+  - **LIVE_SCENARIO の型**: `dict` を採用（`engine.scenario.LiveScenario` TypedDict は import しない）。理由: (1) example が `engine.scenario` を import すると重い transitive dependency が走り、戦略単体での動作確認 / strategy_loader の最小限読込みを汚す、(2) `extract_live` は schema_version=1 をランタイム validate するので、static type 注釈は無くても安全装置は engine 側で守られる、(3) Phase 2 引き継ぎサンプルも `dict` 形式
+  - **kabu_station 用例の配置**: `test_strategy_minute.py` 内のコメント例として併記する方針を採用（新 `examples/live_kabu_minute.py` を作らない）。理由: (1) kabu_station venue は CLI/GUI から `--venue kabu_station` / dropdown で切り替えるだけで動く（戦略コードは無変更）、(2) コード重複（同じ Strategy class を 2 ファイルに展開する）を避けられる、(3) README §C 内に kabu_station 起動コマンド完全例を載せたので CLI 経路の参照は十分。Phase 4 引き継ぎ Tips の「`examples/live_kabu_minute.py` 新設案」は将来 venue 専用ロジック（先物 / OP）が必要になった時の予備案として残す
+  - **README §C の構造**: replay → demo → prod を 3 ブロックの sh code で並べ、その後に kabu_station / 安全装置 / GUI 経路 / live_sample.py 注意 を続ける構成。Phase 6 で起票したスタブ（TODO 表示付き）を完全に書き換え、`tools/lint/check_examples_readme.py` の見出し検出（「ライブで動かす」）は維持。「### C. ライブで動かす（demo 口座）」の heading 文字列を変えていないので lint は green 維持
+  - **同一戦略 instrument SoT**: LIVE_SCENARIO['instrument'] は SCENARIO['instrument'] と一致させる pin を test 化（`test_test_strategy_*_has_live_scenario` で `extract` / `extract_live` 両方を呼んで instrument 一致を assert）。これにより「同じ戦略ファイルを replay → live で動かす」建前を test 単位で固定する
+- ✅ 達成した受け入れ基準:
+  - #3 `examples/README.md` に replay → demo → prod の完全コマンド例（`tools/lint/check_examples_readme.py::test_live_section_present` で見出し継続検出 + `python/tests/test_examples_live_scenario.py` で各 example の LIVE_SCENARIO を pin / Phase 6 で起票したスタブを Phase 5 で本文化）
+- 検証:
+  - `uv run pytest python/tests/test_examples_live_scenario.py` 6 件 GREEN
+  - `uv run pytest python/tests/test_lint_check_examples_readme.py python/tests/test_lint_check_live_login_call.py` 22 件 GREEN（lint regression なし）
+  - `uv run pytest python/tests/test_scenario_load.py python/tests/test_scenario_live.py` 48 件 GREEN（既存 SCENARIO / LIVE_SCENARIO 経路 regression なし）
+  - `uv run python -m tools.lint.check_examples_readme` OK
+  - `uv run python -m tools.lint.check_live_login_call` OK
+- 知見/Tips（Phase 7 統合テスト + 将来）:
+  - **example の LIVE_SCENARIO は extract_live + GUI prefill の E2E 経路 pin として再利用できる**: `python/tests/test_examples_live_scenario.py::_assert_live_scenario_well_formed` の helper は (a) 必須キー網羅、(b) venue が capability `supports_live_strategy=True` の値、(c) max_qty / max_notional_jpy が CLI のレンジ内 を一括検証する。Phase 7 でこの helper を `test_load_live_strategy_scenario_round_trip` のような「examples/test_strategy_minute.py を engine に投げて prefill 値を観測する」E2E test の前提条件として呼ぶと、example が壊れた瞬間 E2E test が即 fail する設計になる
+  - **README §C は live モード CLI コマンドの SoT に近い**: Phase 6 で起票したスタブは「TODO」付きで最小限だったが、Phase 5 で 3 段階フロー + 安全装置 + GUI 経路を完全に記載。今後 CLI 引数の追加 / 安全装置の更新があったら README §C を一次更新先にするのが整合的（specs/live-strategy.md §5 は契約レベル、README §C はユーザー向けクイックスタート）
+  - **kabu_station example の今後**: 現状 README §C に「`--venue kabu_station` を指定するだけ」と記載しているが、実機で動かすには Phase 4 引き継ぎ Tips の H-1（Nautilus 親クラス継承）と M-3（RegisterSet 二重化）が解消されている必要がある。Phase 7 統合テストは tachibana 経路に集中し、kabu_station live 経路のテストは別 issue に切り出す方針が合理的
+  - **live_sample.py の将来の扱い**: 現状の docstring で位置づけは明示できているが、将来 `examples/live_logger_only.py` へリネームする選択肢は残っている。リネームする場合は (a) git mv で履歴を保つ、(b) README §C と test 注釈の参照を grep で更新、(c) STRATEGY_CONFIG / STRATEGY_CLASS の global 定数（strategy_loader が探す）が export されているか確認、の 3 点を 1 commit で行う必要がある
