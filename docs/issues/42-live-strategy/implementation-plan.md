@@ -432,3 +432,70 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **LOW-2**: `python/tests/test_examples_live_scenario.py::_assert_live_scenario_well_formed` で `int(scenario["max_qty"])` のように防御的 conversion をかけているが、`extract_live` が `_validate_live_v1` で int 型を強制済のため redundant。test 意図の明示性を優先して残す
 - 次フェーズへの引き継ぎ:
   - Phase 7（統合テスト）で kabu_station venue 経由の live test を書く場合、`live_session_cli.py --venue kabu_station --mode inprocess` 経路が CLI argparse を通過することは Phase 5 で pin 済（H-1 = Nautilus 親クラス継承未対応のため warm_up 経路までの subset テストになるが、CLI argparse → engine config は通る）
+
+### Phase 7 完了（2026-05-11）
+- 担当: phase7-agent
+- 主要 commit:
+  - `53c38b6` — test(markers): pytest marker `live_demo` / `live_demo_inprocess` を `pyproject.toml` + `pytest.ini` に登録（統一決定 #9 / D-H1）。Phase 1 で追加済の `@pytest.mark.live_demo` / `@pytest.mark.live_demo_inprocess` test の `PytestUnknownMarkWarning` を解消
+  - `915088b` — ci: `tachibana-demo.yml` の pytest 行を `-m "demo_tachibana or live_demo"` に変更（attach mode のみ CI 実行）+ `python-tests.yml` の push/PR 既定実行から `live_demo` / `live_demo_inprocess` を除外する exclusion clause を追加（統一決定 #7 / R3-M3 — CI Secrets を経由させない）
+  - `495de2c` — test(loader-pin): `python/tests/test_strategy_live_replay_smoke.py` に契約テスト 3 件追加（受け入れ基準 #21）。(a) `test_load_strategy_from_file_used_for_both_paths` で mock spy + 同 class 比較、(b) `test_load_user_strategy_is_thin_wrapper_around_load_strategy_from_file` で AST 走査 pin、(c) `test_make_replay_strategy_delegates_to_load_user_strategy` で委譲 chain pin
+  - `7434ee4` — test(cli-e2e): `python/tests/test_live_session_cli_e2e.py` 新設。(a) `@pytest.mark.live_demo` で attach mode lifecycle pin、(b) `@pytest.mark.live_demo_inprocess` で in-process lifecycle pin、(c) マーカー無し helper self-check で部分列マッチを CI 既定実行
+- 設計判断:
+  - **loader pin の実装方法**: **mock 確認 + 同 class 比較 + AST 走査** の 3 段重ねを採用。
+    - (1) `unittest.mock.patch.object(strategy_loader, "load_strategy_from_file", wraps=...)` で **同じ関数オブジェクト** が両経路から呼ばれることを spy で観測（mock の wraps モード経由でロード動作も維持）
+    - (2) live / replay 両経路で得た Strategy インスタンスの `type(...).__qualname__` 一致 + 親 class `nautilus_trader.trading.strategy.Strategy` の isinstance check
+    - (3) AST 走査で `_load_user_strategy` が `load_strategy_from_file(...)` 呼出 + `engine.nautilus.strategy_loader` import を持つこと、`_make_replay_strategy` が `_load_user_strategy(...)` 呼出を持つことを pin
+    - 3 段重ねの理由: (a) mock spy だけだと「mock を使わない future 実装」で silent に通過する、(b) 同 class 比較だけだと両経路が **別々の関数経由で同じ class を返す** 場合に騙される（loader fork 検知不可）、(c) AST 走査だけだと「呼出はあるが結果が違う」誤実装を見逃す。3 段で完全に loader 統一の不変条件を pin する
+  - **`tachibana-demo.yml` への live_demo 統合方法**: `-m demo_tachibana` を `-m "demo_tachibana or live_demo"` に変更する **1 行 fix** で済んだ（pytest の boolean marker expression）。`live_demo_inprocess` は OR に含めず、ローカル限定の方針を維持（統一決定 #7）。tachibana-demo.yml 冒頭コメントで「in-process は CI から除外、`--second-password-stdin` 経由のローカル運用」を明記
+  - **python-tests.yml 除外句の最終形**: `-m "not tk_smoke and not demo_tachibana and not demo_kabu and not live_demo and not live_demo_inprocess"`。既存の 3 マーカー除外（tk_smoke / demo_tachibana / demo_kabu）に **2 マーカーを末尾連結** することで意図が明確（既存除外パターンに変更を加えない）。Phase 6 の docs-lint job は別 job として独立しているので変更不要
+  - **E2E test の skip 戦略**: 実 engine 環境変数（`FLOWSURFACE_ENGINE_TOKEN` / `DEV_TACHIBANA_*`）が無い CI / ローカル環境では `pytest.skip()` で graceful skip。マーカー除外（CI 既定）と二段防御で「実 engine が無くても sus failure を起こさない」設計
+  - **lifecycle 期待 event の subsequence マッチ**: 厳密一致ではなく `EngineStarted` → `LiveStrategyReady` → `EngineStopped` の **部分列** マッチ。`LiveStrategyWarmingUp` / `LiveBuyingPower` 等の中間 event が挟まる実 engine の挙動を許容する。helper 自体は CI 既定で実行される `test_expected_subsequence_self_check` で自己検証
+  - **gRPC integration test の運用方針**: `cargo test -p flowsurface-engine-client --test grpc_wire_integration -- --include-ignored --test-threads=1` で全 10 件 GREEN を観測（Wave 1 引き継ぎ Tips の `#[ignore]` 既定はそのまま維持）。**`--test-threads=1` 必須** の発見が重要 — parallel 実行だと port-binding race / Python subprocess の同時起動で fail する。今後 CI に組み込む場合は serial 実行を強制するか、専用 GitHub Actions workflow を起こす（本 Phase の scope 外）
+- ✅ 達成した受け入れ基準:
+  - **#21 loader pin（live / replay 両経路同実装）** — 主要対応。`test_load_strategy_from_file_used_for_both_paths` + 補助 AST 走査 pin 2 件
+  - 既存 pin の継続実行確認（マーカー登録 + CI 配線後も既存テストの pass 状態維持）
+
+#### 受け入れ基準対応表 全 #1〜#23 の current state（Phase 7 終了時点）
+
+| # | 受け入れ条件 | 主担当 Phase | current state |
+|---|---|---|---|
+| 1 | replay 戦略無改変で live CLI 起動 + EngineStarted | Phase 1 + 2 | ✅ pin 済（`test_attach_starts_engine_for_replay_strategy_unchanged` + `test_inprocess_starts_engine_for_replay_strategy_unchanged`、live_demo / live_demo_inprocess マーカー） |
+| 2 | GUI File>Open → 4 ペイン自動生成 | Phase 3 | ✅ pin 済（`tests/live_form_smoke.rs::test_live_strategy_ready_auto_generates_four_panes`） |
+| 3 | examples/README.md replay → demo → prod 完全コマンド例 | Phase 5 + 6 lint | ✅ pin 済（`tools/lint/check_examples_readme.py` + Phase 5 の README §C 本文化） |
+| 4 | docs/specs/live-strategy.md §5 起票 | Phase 6 | ✅ pin 済（Phase 6 で本文起票） |
+| 5 | ADR 0071 / 0072 accepted 昇格 + 本文起票 | Phase 6 | ✅ pin 済（`scripts/check_adr_status.py` CI 常時実行） |
+| 6 | max_qty 必須 | Phase 1 | ✅ pin 済（`test_invalid_config_when_max_qty_missing` + boundary 2 件） |
+| 7 | TACHIBANA_ALLOW_PROD=0 で本番 reject | Phase 1 | ✅ pin 済（`test_prod_blocked_without_env`） |
+| 8 | SecondPasswordRequired フロー（CLI 非ゼロ + GUI 赤帯） | Phase 1 + 3 | ✅ pin 済（`test_attach_second_password_required_exits_nonzero` + `tests/live_form_smoke.rs::test_second_password_required_shows_status_banner`） |
+| 9 | is_market_open() ガード reject | Phase 1（engine_runner） | ✅ pin 済（`test_start_live_rejects_when_market_closed`） |
+| 10 | login() 未呼出経路の不在（lint） | Phase 6 | ✅ pin 済（`tools/lint/check_live_login_call.py` AST lint + CI 常時実行） |
+| 11 | LiveStrategyReady 4 ペイン自動生成 + 冪等 | Phase 3 | ✅ pin 済（`test_live_strategy_ready_idempotent_on_double_emit`） |
+| 12 | supports_live_strategy cap | Phase 3.5 | ✅ pin 済（`test_supports_live_strategy_per_venue` — tachibana=true / kabu_station=true（Phase 4 で flip）） |
+| 13 | LIVE_SCENARIO 戦略 → GUI prefill | Phase 2 + 3 | ✅ pin 済（`test_live_strategy_scenario_loaded_prefills_form`） |
+| 14 | warm_up 失敗 → EngineError + close() | Phase 1 | ✅ pin 済（`test_warm_up_exception_emits_error_not_ready` + `test_warm_up_returns_false_emits_error_not_ready` + `_closes_exec_client`） |
+| 15 | LiveStrategyReady timeout 60s + LiveStrategyWarmingUp リセット | Phase 3 | ✅ pin 済（`test_engine_started_without_live_strategy_ready_shows_timeout_banner` + `test_warming_up_resets_timeout_counter` + `test_live_warmup_timeout_constant_is_60s`） |
+| 16 | concurrent live reject（venue 単位 EngineBusy + 同一 sid engine_already_running） | Phase 1 + 3 | ✅ pin 済（`test_concurrent_live_emits_engine_busy_for_venue` + `test_duplicate_strategy_id_emits_engine_already_running`） |
+| 17 | reconnect 時の LiveStrategyReady 冪等再生 | Phase 3 | ✅ pin 済（`test_engine_rehello_replays_live_strategy_ready_via_pending_config`） |
+| 18 | tachibana is_production cap 露出 | Phase 3.5 | ✅ pin 済（`test_tachibana_is_production_per_env` 4 ケース） |
+| 19 | LoadLiveStrategyScenario fallback（5s timeout / strategy_parse_failed） | Phase 2 + 3 | ✅ pin 済（`test_load_live_strategy_scenario_timeout_falls_back_to_manual_input` + `test_strategy_parse_failed_releases_form` + Python 側 `test_strategy_parse_failed_emits_error_with_code`） |
+| 20 | --second-password-stdin 4 経路 | Phase 1 | ✅ pin 済（`test_second_password_stdin_handles_heredoc_pipe_empty_and_noninteractive`） |
+| 21 | loader pin（live / replay 同一） | **Phase 7** | ✅ **pin 済（本 Phase）**（`test_load_strategy_from_file_used_for_both_paths` + AST 走査 2 件） |
+| 22 | gRPC 経路で新 IPC 送受信 | Phase 2 + 3（schema chain） | ✅ pin 済（`engine-client/tests/grpc_wire_integration.rs::test_new_live_ipcs_round_trip_via_grpc` + `python/tests/test_server_grpc_live_ipcs.py::test_field_to_op_mapping_contains_new_commands`、Phase 7 で `--include-ignored --test-threads=1` で 10 件全緑を観測） |
+| 23 | LIVE_SCENARIO 不在時の即応答 | Phase 2 functional | ✅ pin 済（`test_absent_live_scenario_emits_immediate_loaded_with_nulls`） |
+
+**全 23 受け入れ基準 → 対応 test 関数のマッピング完了**。Phase 7 で追加した #21 を除き、すべて他 Phase で pin 済 → Phase 7 では「全 23 件が現在も green か」を CI 既定 + workflow_dispatch の 2 経路で実行可能な状態に整備した。
+
+- 検証:
+  - `uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana and not demo_kabu and not live_demo and not live_demo_inprocess" --timeout=120` → **2256 passed / 106 skipped / 200 deselected**（Phase 7 で +5 件: loader pin 3 / E2E helper 1 / E2E lifecycle 2 のうち live_demo は CI 除外）
+  - `uv run pytest python/tests/test_strategy_live_replay_smoke.py -v` → 9 件全緑（既存 6 + 新規 3）
+  - `uv run pytest python/tests/test_live_session_cli_e2e.py -v` → 1 passed（self-check） / 2 skipped（実 engine 無し）
+  - `cargo test --workspace` → 全緑（exit 0）
+  - `cargo test -p flowsurface-engine-client --test grpc_wire_integration -- --include-ignored --test-threads=1` → **10 件全緑**（gRPC integration tests 全件）
+  - `cargo clippy --workspace --tests -- -D warnings` → clean（exit 0）
+- 知見/Tips（最終 review-fix-loop への引き継ぎ）:
+  - **gRPC integration test の `--test-threads=1` 必須化**: 並列実行だと Python subprocess の port-binding race / 同時起動で 9/10 件 fail する。serial 実行で 10/10 件全緑。今後 CI 化する場合は workflow YAML 側で `--test-threads=1` を指定する必要がある。本 Phase ではドキュメント化（本 Tips）のみで CI 組込は scope 外
+  - **マーカー登録の 2 ファイル同期**: pytest は `pytest.ini` を優先し `pyproject.toml` の `[tool.pytest.ini_options]` を **無視** する（pytest.ini が repo に存在する場合）。マーカー登録は両ファイルに同じ定義を入れて将来 `pytest.ini` 廃止時の保険とする（Phase 6 と同じ流儀）
+  - **live_demo マーカーの実 E2E test を CI で動かす日**: `tachibana-demo.yml` の workflow_dispatch で `gh workflow run tachibana-demo.yml` を叩いた時のみ `test_attach_mode_full_lifecycle` が実行される。実 engine が attach 可能な状態（`FLOWSURFACE_ENGINE_TOKEN` 設定済 + 立花 demo ログイン済）でないと skip するため、CI 失敗リスクは無い
+  - **CLI E2E 拡張ポイント**: 現状の `test_live_session_cli_e2e.py` は lifecycle subsequence のみを観測する最小実装。将来 (a) `LiveBuyingPower` の数値 invariants（initial_cash と一致など）、(b) `EngineBusy` 経路の reject 確認、(c) `--mode auto` の attach probe → fallback inprocess の path 切替 を追加する場合、`@pytest.mark.live_demo` 配下に新 test 関数を追加する。helper `_expected_subsequence` は再利用可能
+  - **loader pin の AST 走査拡張**: 本 Phase の AST 走査は `_load_user_strategy` / `_make_replay_strategy` の 2 関数に絞っている。将来 `LiveSession.run` 内部で別 loader を呼ぶような refactor が入った場合、`engine.replay_session` 側にも同様の AST pin を追加する。現状 `replay_session.py` は `engine_runner.start_live` に委譲しているのみで loader を持たないため、ここに pin を入れる必要は無い
+  - **schema bump 不要を維持**: 本 Phase で proto / schemas.py の変更ゼロ。SCHEMA_MINOR=28 のまま。`/ipc-schema-check` skill PASS 状態を維持
