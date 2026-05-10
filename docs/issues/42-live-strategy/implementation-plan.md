@@ -296,7 +296,7 @@ Wave 4: Final review
   - **CI 配線方針**: 既存 `python-tests` job に lint step を追加せず、独立した `docs-lint` job を新設。理由 = (1) lint は重い pytest scan より早く失敗を返したい、(2) 並列実行で全体時間を短縮、(3) lint 失敗時に「unit test も止まった」と誤認しない
   - **examples README は Phase 6 では見出しスタブのみ**: 本 Phase は lint script の検証用としての「ライブで動かす」見出し存在のみを担保し、replay → demo → prod の完全コマンド例の充実は Phase 5 に委譲。スタブには `> **TODO (Phase 5)**: ...` の表示を残し Phase 5 担当が拡充する起点を明示
 - ✅ 達成した受け入れ基準:
-  - #3 `examples/README.md` に replay → demo → prod を同ファイルで通すコマンド例（`tools/lint/check_examples_readme.py::test_live_section_present` で見出し存在を pin、内容充実は Phase 5）
+  - #3 `examples/README.md` に replay → demo → prod を同ファイルで通すコマンド例（`python/tests/test_lint_check_examples_readme.py::test_live_section_present` で見出し存在を pin、内容充実は Phase 5）
   - #4 `docs/specs/live-strategy.md §5` 起票（CLI / GUI / SecondPasswordRequired / TACHIBANA_ALLOW_PROD / is_market_open / 安全装置 10 項目）
   - #5 ADR 0071 / 0072 accepted 昇格 + 本文起票（`scripts/check_adr_status.py` 全緑、CI 常時実行）
   - #10 `LiveSession.login()` 未呼出経路の不在（`tools/lint/check_live_login_call.py` の AST lint を CI 常時実行 + 17 unit tests）
@@ -383,7 +383,7 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **`LIVE_SCENARIO` フィールド型違反の `Error` メッセージ**: `ScenarioValidationError` の `__str__` が `LIVE_SCENARIO['max_qty'] must be int, got str` のような Python レベルメッセージを返す。GUI banner にそのまま表示すると技術的すぎるが、本 Phase では Rust 側 `handlers/replay.rs` で「手入力で続行」warn toast を出して終わるため UX 上は許容範囲。将来 i18n 経路で人間向け文言に置換する場合、Rust 側の toast 文言を切替える方が Python 側の Error.message を変えるより安全
   - **wire の null 表現**: pydantic `model_dump(exclude_none=False)` で全フィールドが dict に出る → `server_grpc.py` の `ParseDict` で proto optional フィールドに正しくマップされる（proto 側は `optional` 修飾子付き）。Rust 側 `LiveStrategyScenarioLoaded { instrument_id: Option<String>, ... }` は `serde(default, skip_serializing_if = "Option::is_none")` で受信側の None deserialize は安全。`exclude_none=True` にすると proto field が落ちて wire 上で区別できなくなるので注意
   - **handler test の `_outbox.append` 観測手法**: `_make_server()` で `BinanceWorker` 等を mock した最小 `DataEngineServer` を生成し、`asyncio.run(server._handle_load_live_strategy_scenario(msg))` を直接呼ぶ。`_outbox` は `_Broadcaster` で iter 可能なので `list(server._outbox)` で観測する。同パターンは既存 `test_scenario_load.py::test_load_failed_log_format` と同じ
-  - **`_FIELD_TO_OP` mapping pin の重要性**: Wave 1 で wire 配線済の `load_live_strategy_scenario` が `_FIELD_TO_OP` から削除されると、Rust が proto Command を送信しても `_handle` まで到達しない silent failure になる。`test_field_to_op_mapping_contains_new_commands` で mapping を pin することで、リファクタ時の意図しない削除を即座に検知できる
+  - **`_FIELD_TO_OP` mapping pin の重要性**: Wave 1 で wire 配線済の `load_live_strategy_scenario` が `_FIELD_TO_OP` から削除されると、Rust が proto Command を送信しても `_handle` まで到達しない silent failure になる。`test_field_to_op_mapping_contains_load_live_strategy_scenario` で mapping を pin することで、リファクタ時の意図しない削除を即座に検知できる
 
 ### Phase 5 完了（2026-05-10）
 - 担当: phase5-agent
@@ -397,7 +397,7 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **README §C の構造**: replay → demo → prod を 3 ブロックの sh code で並べ、その後に kabu_station / 安全装置 / GUI 経路 / live_sample.py 注意 を続ける構成。Phase 6 で起票したスタブ（TODO 表示付き）を完全に書き換え、`tools/lint/check_examples_readme.py` の見出し検出（「ライブで動かす」）は維持。「### C. ライブで動かす（demo 口座）」の heading 文字列を変えていないので lint は green 維持
   - **同一戦略 instrument SoT**: LIVE_SCENARIO['instrument'] は SCENARIO['instrument'] と一致させる pin を test 化（`test_test_strategy_*_has_live_scenario` で `extract` / `extract_live` 両方を呼んで instrument 一致を assert）。これにより「同じ戦略ファイルを replay → live で動かす」建前を test 単位で固定する
 - ✅ 達成した受け入れ基準:
-  - #3 `examples/README.md` に replay → demo → prod の完全コマンド例（`tools/lint/check_examples_readme.py::test_live_section_present` で見出し継続検出 + `python/tests/test_examples_live_scenario.py` で各 example の LIVE_SCENARIO を pin / Phase 6 で起票したスタブを Phase 5 で本文化）
+  - #3 `examples/README.md` に replay → demo → prod の完全コマンド例（`python/tests/test_lint_check_examples_readme.py::test_live_section_present` で見出し継続検出 + `python/tests/test_examples_live_scenario.py` で各 example の LIVE_SCENARIO を pin / Phase 6 で起票したスタブを Phase 5 で本文化）
 - 検証:
   - `uv run pytest python/tests/test_examples_live_scenario.py` 6 件 GREEN
   - `uv run pytest python/tests/test_lint_check_examples_readme.py python/tests/test_lint_check_live_login_call.py` 22 件 GREEN（lint regression なし）
@@ -480,7 +480,7 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
 | 19 | LoadLiveStrategyScenario fallback（5s timeout / strategy_parse_failed） | Phase 2 + 3 | ✅ pin 済（`test_load_live_strategy_scenario_timeout_falls_back_to_manual_input` + `test_strategy_parse_failed_releases_form` + Python 側 `test_strategy_parse_failed_emits_error_with_code`） |
 | 20 | --second-password-stdin 4 経路 | Phase 1 | ✅ pin 済（`test_second_password_stdin_handles_heredoc_pipe_empty_and_noninteractive`） |
 | 21 | loader pin（live / replay 同一） | **Phase 7** | ✅ **pin 済（本 Phase）**（`test_load_strategy_from_file_used_for_both_paths` + AST 走査 2 件） |
-| 22 | gRPC 経路で新 IPC 送受信 | Phase 2 + 3（schema chain） | ✅ pin 済（`engine-client/tests/grpc_wire_integration.rs::test_new_live_ipcs_round_trip_via_grpc` + `python/tests/test_server_grpc_live_ipcs.py::test_field_to_op_mapping_contains_new_commands`、Phase 7 で `--include-ignored --test-threads=1` で 10 件全緑を観測） |
+| 22 | gRPC 経路で新 IPC 送受信 | Phase 2 + 3（schema chain） | ✅ pin 済（`engine-client/tests/grpc_wire_integration.rs::test_new_live_ipcs_round_trip_via_grpc` + `python/tests/test_server_grpc_live_ipcs.py::test_field_to_op_mapping_contains_load_live_strategy_scenario`、Phase 7 で `--include-ignored --test-threads=1` で 10 件全緑を観測） |
 | 23 | LIVE_SCENARIO 不在時の即応答 | Phase 2 functional | ✅ pin 済（`test_absent_live_scenario_emits_immediate_loaded_with_nulls`） |
 
 **全 23 受け入れ基準 → 対応 test 関数のマッピング完了**。Phase 7 で追加した #21 を除き、すべて他 Phase で pin 済 → Phase 7 では「全 23 件が現在も green か」を CI 既定 + workflow_dispatch の 2 経路で実行可能な状態に整備した。
