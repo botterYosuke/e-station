@@ -73,3 +73,22 @@ kabuステーション venue は **localhost ローカルサーバ・Windows 限
 | Phase 2 | 発注・取消（取引パスワード収集 UI、`KabuTradePasswordHolder`） | 別途定義 |
 | Phase 3 | 市場細分化（東証 / 名証 / 福証 / 札証） | 別途定義 |
 | Phase 4 | 本番接続有効化（バナー / `KABU_IS_PRODUCTION` AtomicBool） | 別途定義 |
+
+## 進捗ノート（2026-05-09 時点）
+
+### Phase 1 完了
+
+Phase 1 MVP（リードオンリー統合）は完了済み。完了後に以下の post-fix バグが修正されました:
+
+- **Issue #35**: kabu ログイン済みでもラダーが "Waiting for data..." のまま（`kabusapi_rest.py` / `kabusapi_ws.py` / `server.py` 修正）
+- **Issue #36**: kabu VenueReady 時に `GetBuyingPower` / `GetPositions` が送信されなかった（`handlers/dashboard.rs` / `handlers/venue.rs` 修正）
+- **Issue #37**: kabu ログイン中に BuyingPower / Positions ペインを後から追加しても auto-fetch が発火しなかった（`handlers/dashboard.rs` / `handlers/venue.rs` / `main.rs` 修正）
+
+### Phase 2 着手（2026-05-09）
+
+Issue #25 / #33 / #34 にて以下を実装:
+
+- **注文パネル venue トグル（Rust フロントエンド, Issue #34）**: OrderEntry / OrderList / BuyingPower / Positions パネルのタイトルバーに 立花 / kabu トグルボタンを追加。`Dashboard` に `order_venue: Venue`, `tachibana_ready: bool`, `kabu_ready: bool` フィールドを追加。両 venue が Ready のときのみトグルを表示
+- **注文 venue ルーティング（Python バックエンド, Issue #33）**: `python/engine/server.py` が選択 venue（立花 or kabu）に応じて注文を振り分けるルーティングを実装。テスト: `python/tests/test_server_order_venue_routing.py`
+
+> **スコープ注意**: Phase 2 着手 = venue toggle UI + ルーティング基盤の整備。実弾発注（`POST /sendorder`）は引き続き Phase 2 完了を待つ。取引パスワード収集 UI 等の未実装要素は変わらず Phase 2 スコープ内。

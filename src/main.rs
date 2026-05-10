@@ -1123,7 +1123,7 @@ struct Flowsurface {
     /// unrepresentable. T35-U4-VenueReadyGate.
     tachibana_state: VenueState,
     /// kabuステーション venue lifecycle state — same FSM as `tachibana_state`
-    /// but kabu has no sidebar ticker filter and no GetBuyingPower.
+    /// but kabu has no sidebar ticker filter.
     kabu_state: VenueState,
     /// 第二暗証番号 modal。`SecondPasswordRequired` IPC イベントで Some に、
     /// Submit / Cancel / Dismiss で None に戻る。
@@ -2451,6 +2451,16 @@ impl Flowsurface {
             native_menu::subscription(app_mode()).map(|a| Message::Menu(MenuMsg::NativeAction(a))),
             widget_menu_bar_dismiss,
         ])
+    }
+
+    /// 現在アクティブな venue の IPC 名を返す。
+    /// 両方 Ready の場合は kabu を優先する（発注パネルの venue toggle 仕様と一致）。
+    fn active_venue_name(&self) -> &'static str {
+        if self.kabu_state.is_ready() {
+            crate::KABU_STATION_VENUE_NAME
+        } else {
+            crate::TACHIBANA_VENUE_NAME
+        }
     }
 
     fn active_dashboard(&self) -> &Dashboard {
@@ -4052,14 +4062,15 @@ mod app_mode_roundtrip_tests {
     //! detected at test time, not just at review time.
     //!
     //! NOTE: `APP_MODE` is a process-global static. Tests in this module must
-    //! not run concurrently with other tests that mutate `APP_MODE`. Currently
-    //! no other test module writes `APP_MODE`, so `#[serial]` is not needed.
-    //! If that assumption changes, add `serial_test` or a `Mutex` guard.
+    //! not run concurrently with other tests that mutate `APP_MODE`.
+    //! `#[serial]` ensures sequential execution within this module.
 
     use super::*;
     use engine_client::dto::AppMode;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn set_app_mode_live_makes_app_mode_return_live() {
         set_app_mode(AppMode::Live);
         assert_eq!(
@@ -4070,6 +4081,7 @@ mod app_mode_roundtrip_tests {
     }
 
     #[test]
+    #[serial]
     fn set_app_mode_replay_makes_app_mode_return_replay() {
         set_app_mode(AppMode::Replay);
         assert_eq!(
@@ -4085,6 +4097,7 @@ mod app_mode_roundtrip_tests {
     /// must return `AppMode::Live`. This is the direct runtime guard for the
     /// "RequestVenueLogin not allowed in replay mode" regression.
     #[test]
+    #[serial]
     fn app_mode_returns_live_after_switch_from_replay() {
         set_app_mode(AppMode::Replay);
         assert_eq!(

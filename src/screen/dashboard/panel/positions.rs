@@ -95,7 +95,7 @@ pub fn update(panel: &mut PositionsPanel, msg: Message) -> Option<Action> {
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
-pub fn view(panel: &PositionsPanel) -> Element<'_, Message> {
+pub fn view(panel: &PositionsPanel, venue_ready: bool) -> Element<'_, Message> {
     let refresh_btn = button(text("更新").size(12))
         .on_press(Message::RefreshClicked)
         .padding([2, 8]);
@@ -131,7 +131,14 @@ pub fn view(panel: &PositionsPanel) -> Element<'_, Message> {
     }
 
     if panel.positions.is_empty() {
-        return column![header, center(text("保有なし").size(13)),]
+        let msg = if panel.loading {
+            "↻ 更新中…"
+        } else if venue_ready {
+            "保有なし"
+        } else {
+            "ログインが必要です"
+        };
+        return column![header, center(text(msg).size(13)),]
             .height(iced::Length::Fill)
             .into();
     }
@@ -303,6 +310,7 @@ mod tests {
         let mut panel = PositionsPanel::new_replay();
         panel.set_positions(vec![make_wire("7203.TSE", 100, 260000)], 1746000000000);
         // view() 自体は Element を返すだけで panic しなければ OK。
-        let _: Element<'_, Message> = view(&panel);
+        // venue_ready=true: ログイン済みの通常パス
+        let _: Element<'_, Message> = view(&panel, true);
     }
 }

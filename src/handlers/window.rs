@@ -954,6 +954,55 @@ impl crate::Flowsurface {
                         .push(Toast::error(format!("Failed to open link: {err}")));
                 }
             }
+            WindowMsg::CaptureScreenshot => {
+                let id = self.main_window.id;
+                return iced::window::screenshot(id)
+                    .map(|s| Message::Window(WindowMsg::ScreenshotReady(s)));
+            }
+            WindowMsg::ScreenshotReady(screenshot) => {
+                let bytes = screenshot.rgba.to_vec();
+                let width = screenshot.size.width;
+                let height = screenshot.size.height;
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+                let path = data::data_path(Some(&format!("screenshots/screenshot_{ts}.png")));
+                return Task::perform(
+                    async move {
+                        if let Some(parent) = path.parent() {
+                            tokio::fs::create_dir_all(parent)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
+                        let path2 = path.clone();
+                        tokio::task::spawn_blocking(move || {
+                            image::save_buffer(
+                                &path2,
+                                &bytes,
+                                width,
+                                height,
+                                image::ColorType::Rgba8,
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())??;
+                        Ok::<_, String>(path)
+                    },
+                    |result| match result {
+                        Ok(path) => Message::Window(WindowMsg::ScreenshotSaved(path)),
+                        Err(e) => Message::Window(WindowMsg::ScreenshotFailed(e)),
+                    },
+                );
+            }
+            WindowMsg::ScreenshotSaved(path) => {
+                self.notifications.push(Toast::info(format!(
+                    "スクリーンショット保存: {}",
+                    path.display()
+                )));
+            }
+            WindowMsg::ScreenshotFailed(reason) => {
+                self.notifications
+                    .push(Toast::error(format!("スクリーンショット失敗: {reason}")));
+            }
         }
         Task::none()
     }

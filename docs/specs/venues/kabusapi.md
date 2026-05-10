@@ -110,3 +110,20 @@ source_commit: ea5022b
 - ログイン UI は Python tkinter subprocess に統一（Rust にダイアログコード非搭載）
 - `Ready.capabilities.venue_capabilities[<venue>]` への capability キー追加プロトコル
 - `SubscriptionEvicted{symbol}` 通知の汎用契約（PUSH 上限ある venue の共通インターフェース）
+
+## Phase 1 完了ノート（2026-05-09 時点）
+
+§4 の受け入れ条件はすべて満たされています。完了後に以下の post-fix バグが修正されました:
+
+- **Issue #35** (`kabusapi_rest.py` / `kabusapi_ws.py` / `server.py`): kabu ログイン済みでもラダーが "Waiting for data..." のまま — 3 層のサイレント障害を修正
+- **Issue #36** (`handlers/dashboard.rs` / `handlers/venue.rs`): VenueReady 受信時に `GetBuyingPower` / `GetPositions` コマンドが送信されなかった
+- **Issue #37** (`handlers/dashboard.rs` / `handlers/venue.rs` / `main.rs`): kabu ログイン中に BuyingPower / Positions ペインを後から追加しても auto-fetch が発火しなかった
+
+## Phase 2 状況（2026-05-09 着手）
+
+§2.2「含めないもの」に列挙した「発注・取消」のうち、以下が Issue #25/#33/#34 で着手されました:
+
+- **注文パネル venue トグル（Rust フロントエンド）**: OrderEntry / OrderList / BuyingPower / Positions タイトルバーに 立花 / kabu トグルボタンを実装。両 venue が Ready のときのみ表示
+- **注文 venue ルーティング（Python バックエンド）**: `server.py` が選択 venue に応じて注文を振り分け
+
+> 実弾発注（`POST /sendorder`）・取引パスワード収集 UI 等の残スコープは引き続き Phase 2 完了待ち。

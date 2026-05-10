@@ -204,8 +204,14 @@ impl crate::Flowsurface {
                         ))
                     });
 
+                // Issue #25: propagate venue readiness to all dashboards.
+                let main_window_id = self.main_window.id;
+                self.layout_manager
+                    .iter_dashboards_mut()
+                    .for_each(|d| d.set_tachibana_ready(is_ready));
+
                 // Auto-fetch buying power on venue ready if a pane is visible.
-                let main_window = self.main_window.id;
+                let main_window = main_window_id;
                 let auto_fetch_buying_power = if is_ready
                     && self.buying_power_request_id.is_none()
                     && self.active_dashboard().has_buying_power_pane(main_window)
@@ -220,6 +226,9 @@ impl crate::Flowsurface {
                             async move {
                                 conn.send(engine_client::dto::Command::GetBuyingPower {
                                     request_id: req_id,
+                                    // VenueReady ハンドラは自 venue（Tachibana）を使う。
+                                    // active_venue_name() に統一しないのは、各 VenueReady が自身の最新データを
+                                    // 取得する責務を持ち、他 venue の状態に依存しないようにするため。
                                     venue: crate::TACHIBANA_VENUE_NAME.to_string(),
                                 })
                                 .await
@@ -257,6 +266,9 @@ impl crate::Flowsurface {
                             async move {
                                 conn.send(engine_client::dto::Command::GetOrderList {
                                     request_id: req_id,
+                                    // VenueReady ハンドラは自 venue（Tachibana）を使う。
+                                    // active_venue_name() に統一しないのは、各 VenueReady が自身の最新データを
+                                    // 取得する責務を持ち、他 venue の状態に依存しないようにするため。
                                     venue: crate::TACHIBANA_VENUE_NAME.to_string(),
                                     filter: engine_client::dto::OrderListFilter {
                                         status: None,
@@ -291,6 +303,9 @@ impl crate::Flowsurface {
                             async move {
                                 conn.send(engine_client::dto::Command::GetPositions {
                                     request_id: req_id,
+                                    // VenueReady ハンドラは自 venue（Tachibana）を使う。
+                                    // active_venue_name() に統一しないのは、各 VenueReady が自身の最新データを
+                                    // 取得する責務を持ち、他 venue の状態に依存しないようにするため。
                                     venue: crate::TACHIBANA_VENUE_NAME.to_string(),
                                 })
                                 .await
@@ -425,6 +440,9 @@ impl crate::Flowsurface {
                             async move {
                                 conn.send(engine_client::dto::Command::GetOrderList {
                                     request_id: req_id,
+                                    // VenueReady ハンドラは自 venue（KabuStation）を使う。
+                                    // active_venue_name() に統一しないのは、各 VenueReady が自身の最新データを
+                                    // 取得する責務を持ち、他 venue の状態に依存しないようにするため。
                                     venue: crate::KABU_STATION_VENUE_NAME.to_string(),
                                     filter: engine_client::dto::OrderListFilter {
                                         status: None,
@@ -459,6 +477,9 @@ impl crate::Flowsurface {
                             async move {
                                 conn.send(engine_client::dto::Command::GetPositions {
                                     request_id: req_id,
+                                    // VenueReady ハンドラは自 venue（KabuStation）を使う。
+                                    // active_venue_name() に統一しないのは、各 VenueReady が自身の最新データを
+                                    // 取得する責務を持ち、他 venue の状態に依存しないようにするため。
                                     venue: crate::KABU_STATION_VENUE_NAME.to_string(),
                                 })
                                 .await
@@ -491,7 +512,54 @@ impl crate::Flowsurface {
                         ))
                     });
 
+                // Issue #25: propagate kabu readiness to all dashboards.
+                self.layout_manager
+                    .iter_dashboards_mut()
+                    .for_each(|d| d.set_kabu_ready(is_ready));
+
+                // Auto-fetch buying power on venue ready if a pane is visible.
+                let auto_fetch_buying_power = if is_ready
+                    && self.buying_power_request_id.is_none()
+                    && self.active_dashboard().has_buying_power_pane(main_window)
+                {
+                    if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                        let req_id = uuid::Uuid::new_v4().to_string();
+                        self.buying_power_request_id = Some(req_id.clone());
+                        self.active_dashboard_mut()
+                            .distribute_buying_power_loading(main_window, true);
+                        let req_id_for_err = req_id.clone();
+                        Task::perform(
+                            async move {
+                                conn.send(engine_client::dto::Command::GetBuyingPower {
+                                    request_id: req_id,
+                                    // VenueReady ハンドラは自 venue（KabuStation）を使う。
+                                    // active_venue_name() に統一しないのは、各 VenueReady が自身の最新データを
+                                    // 取得する責務を持ち、他 venue の状態に依存しないようにするため。
+                                    venue: crate::KABU_STATION_VENUE_NAME.to_string(),
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            move |res| match res {
+                                Ok(()) => {
+                                    Message::Venue(VenueMsg::BuyingPowerSendCompleted(Ok(())))
+                                }
+                                Err(err) => Message::Venue(VenueMsg::IpcError {
+                                    request_id: Some(req_id_for_err),
+                                    code: "send_failed".to_string(),
+                                    message: err,
+                                }),
+                            },
+                        )
+                    } else {
+                        Task::none()
+                    }
+                } else {
+                    Task::none()
+                };
+
                 return ticker_fetch
+                    .chain(auto_fetch_buying_power)
                     .chain(auto_fetch_orders)
                     .chain(auto_fetch_positions);
             }
@@ -515,8 +583,8 @@ impl crate::Flowsurface {
                 };
                 self.notifications.push(Toast::info(body));
 
-                // live モード（tachibana ログイン済み）のときのみ positions 自動更新。
-                if !self.tachibana_state.is_ready() {
+                // live モード（tachibana または kabu がログイン済み）のときのみ positions 自動更新。
+                if !self.tachibana_state.is_ready() && !self.kabu_state.is_ready() {
                     return Task::none();
                 }
                 let Some(conn) = self.engine_connection.as_ref().cloned() else {
@@ -531,11 +599,12 @@ impl crate::Flowsurface {
                     self.active_dashboard_mut()
                         .distribute_positions_loading(main_window, true);
                     let req_id_for_err = req_id.clone();
+                    let venue = self.active_venue_name().to_string();
                     return Task::perform(
                         async move {
                             conn.send(engine_client::dto::Command::GetPositions {
                                 request_id: req_id,
-                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                venue,
                             })
                             .await
                             .map_err(|e| e.to_string())
@@ -588,6 +657,8 @@ impl crate::Flowsurface {
                 let main_window = self.main_window.id;
                 self.active_dashboard_mut()
                     .distribute_positions_error(main_window, err.clone());
+                self.notifications
+                    .push(Toast::error(format!("保有銘柄取得失敗: {err}")));
             }
             // Positions: broadcast to all Positions panes
             VenueMsg::PositionsUpdated {
@@ -698,9 +769,9 @@ impl crate::Flowsurface {
                     "注文受付: {client_order_id} (venue: {vid})"
                 )));
 
-                // live モード（tachibana ログイン済み）のときのみ自動更新。
+                // live モード（tachibana または kabu がログイン済み）のときのみ自動更新。
                 // replay バックテストも OrderAccepted を emit するため、このガードは必須。
-                if !self.tachibana_state.is_ready() {
+                if !self.tachibana_state.is_ready() && !self.kabu_state.is_ready() {
                     return Task::none();
                 }
 
@@ -708,6 +779,7 @@ impl crate::Flowsurface {
                     return Task::none();
                 };
 
+                let active_venue = self.active_venue_name().to_string();
                 let refresh_orders = if self.order_list_request_id.is_none() {
                     let req_id = uuid::Uuid::new_v4().to_string();
                     self.order_list_request_id = Some(req_id.clone());
@@ -715,12 +787,13 @@ impl crate::Flowsurface {
                     self.active_dashboard_mut()
                         .distribute_order_list_loading(main_window, true);
                     let conn_for_orders = conn.clone();
+                    let venue_for_orders = active_venue.clone();
                     Task::perform(
                         async move {
                             conn_for_orders
                                 .send(engine_client::dto::Command::GetOrderList {
                                     request_id: req_id,
-                                    venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                    venue: venue_for_orders,
                                     filter: engine_client::dto::OrderListFilter {
                                         status: None,
                                         instrument_id: None,
@@ -747,7 +820,7 @@ impl crate::Flowsurface {
                         async move {
                             conn.send(engine_client::dto::Command::GetBuyingPower {
                                 request_id: req_id,
-                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                venue: active_venue,
                             })
                             .await
                             .map_err(|e| e.to_string())
@@ -819,11 +892,12 @@ impl crate::Flowsurface {
             } => {
                 self.confirm_dialog = None;
                 if let Some(conn) = self.engine_connection.as_ref().cloned() {
+                    let venue = self.active_venue_name().to_string();
                     return Task::perform(
                         async move {
                             conn.send(engine_client::dto::Command::CancelOrder {
                                 request_id: uuid::Uuid::new_v4().to_string(),
-                                venue: crate::TACHIBANA_VENUE_NAME.to_string(),
+                                venue,
                                 client_order_id,
                                 venue_order_id,
                             })

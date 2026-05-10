@@ -1,0 +1,139 @@
+{
+  "skill_name": "iced-gui-testing",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "iced_test を使ってサイドバーのベニューボタンクリックで正しい Message が生成されるかテストするコードを書いて。e-station の flowsurface クレート向けで、iced_test = \"0.14\" はすでに dev-dependencies にある。テストファイルのコードだけ書いてくれればいい。",
+      "expected_output": "iced_test::simulator を使ったヘッドレステストコード。simulator(view) でシミュレータを作り、ui.click() でボタンをクリックして into_messages() で Message を取得し assert する。Cargo.toml の変更は不要（すでに入っている）。",
+      "files": [],
+      "assertions": [
+        {
+          "name": "uses_iced_test_simulator",
+          "description": "iced_test::simulator または simulator( の呼び出しが含まれる",
+          "type": "contains",
+          "value": "simulator"
+        },
+        {
+          "name": "uses_click_interaction",
+          "description": "ui.click() でウィジェットをクリックしている",
+          "type": "contains",
+          "value": ".click("
+        },
+        {
+          "name": "uses_into_messages",
+          "description": "into_messages() で生成された Message を取得している",
+          "type": "contains",
+          "value": "into_messages"
+        },
+        {
+          "name": "has_assert",
+          "description": "assert! または assert_eq! による検証がある",
+          "type": "contains_any",
+          "value": ["assert!", "assert_eq!"]
+        },
+        {
+          "name": "has_test_attribute",
+          "description": "#[test] アトリビュートがある",
+          "type": "contains",
+          "value": "#[test]"
+        },
+        {
+          "name": "no_cargo_toml_changes_mentioned",
+          "description": "すでに dev-dependencies にある旨を認識し、Cargo.toml 変更を不要と扱っている（enigo/xcap 追加を促していない）",
+          "type": "not_contains",
+          "value": "enigo"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "xcap と enigo を使って Flowsurface アプリを起動し、ティッカーリストの最初の項目をクリックして、チャートが描画されたかどうかを Claude Vision API（claude-sonnet-4-6）で確認する e2e テストを書いて。Cargo.toml に追加すべき dev-dependencies も含めて。",
+      "expected_output": "Tier 2 ビジュアル E2E テストコード。xcap::Window::all() でウィンドウ検索、enigo で座標クリック、window.capture_image() でスクリーンショット、Anthropic API への base64 PNG 送信と YES/NO 判定を含む。#[ignore] アトリビュートが付いている。Cargo.toml の enigo/xcap/image/base64/reqwest の dev-dependencies も含む。",
+      "files": [],
+      "assertions": [
+        {
+          "name": "uses_xcap_window_all",
+          "description": "xcap::Window::all() または Window::all() でウィンドウ列挙",
+          "type": "contains",
+          "value": "Window::all()"
+        },
+        {
+          "name": "uses_enigo",
+          "description": "Enigo::new で enigo インスタンスを作成",
+          "type": "contains",
+          "value": "Enigo::new"
+        },
+        {
+          "name": "uses_capture_image",
+          "description": "window.capture_image() でスクリーンショットを取得",
+          "type": "contains",
+          "value": "capture_image"
+        },
+        {
+          "name": "has_ignore_attribute",
+          "description": "#[ignore] でビジュアルテストを隔離している",
+          "type": "contains",
+          "value": "#[ignore"
+        },
+        {
+          "name": "uses_base64_encoding",
+          "description": "base64 エンコードを使って画像を API に送信",
+          "type": "contains_any",
+          "value": ["base64", "STANDARD.encode"]
+        },
+        {
+          "name": "calls_anthropic_api",
+          "description": "Anthropic API エンドポイントまたは anthropic-version ヘッダを含む",
+          "type": "contains_any",
+          "value": ["anthropic.com/v1/messages", "anthropic-version"]
+        },
+        {
+          "name": "cargo_includes_xcap",
+          "description": "cargo_additions.toml に xcap が含まれる",
+          "type": "file_contains",
+          "file": "cargo_additions.toml",
+          "value": "xcap"
+        },
+        {
+          "name": "cargo_includes_enigo",
+          "description": "cargo_additions.toml に enigo が含まれる",
+          "type": "file_contains",
+          "file": "cargo_additions.toml",
+          "value": "enigo"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "iced_test を使って、FlowsurfaceのURLまたはシンボル入力フィールドで空文字列を submit しようとしたとき、Message が生成されないことを確認するテストを書いて。",
+      "expected_output": "iced_test::simulator を使ったヘッドレステスト。ui.typewrite(\"\") または空のまま ui.tap_key(Enter) した後 into_messages() が空であることを assert。空文字ガードを検証する意図が明確なコード。",
+      "files": [],
+      "assertions": [
+        {
+          "name": "uses_iced_test_simulator",
+          "description": "iced_test::simulator または simulator( の呼び出しが含まれる",
+          "type": "contains",
+          "value": "simulator"
+        },
+        {
+          "name": "tests_empty_input",
+          "description": "空文字列 \"\" のケースがある",
+          "type": "contains",
+          "value": "\"\""
+        },
+        {
+          "name": "asserts_no_messages",
+          "description": "Message が生成されないことを assert（is_empty / count() == 0 など）",
+          "type": "contains_any",
+          "value": ["is_empty()", "count() == 0", ".len() == 0"]
+        },
+        {
+          "name": "has_test_attribute",
+          "description": "#[test] アトリビュートがある",
+          "type": "contains",
+          "value": "#[test]"
+        }
+      ]
+    }
+  ]
+}

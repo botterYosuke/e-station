@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 from pathlib import Path
 from typing import AsyncIterator
@@ -245,6 +246,11 @@ def _dict_to_proto_event(event_dict: dict) -> engine_pb2.Event | None:
             else:
                 restructured.append(entry)
         payload_dict = dict(payload_dict, tickers=restructured)
+
+    # Issue #43: proto scenario フィールドは optional string (JSON-encoded dict)。
+    # server.py の outbox には raw dict が入るため、ParseDict に渡す前に json.dumps する。
+    if event_name == "StrategyScenarioLoaded" and isinstance(payload_dict.get("scenario"), dict):
+        payload_dict = dict(payload_dict, scenario=json.dumps(payload_dict["scenario"]))
 
     try:
         payload = ParseDict(payload_dict, msg_class(), ignore_unknown_fields=False)

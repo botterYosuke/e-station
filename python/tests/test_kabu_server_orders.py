@@ -29,6 +29,7 @@ def _make_server() -> DataEngineServer:
     srv._kabu_env = "verify"  # [R2-M1] _startup_kabu_station() 参照時の AttributeError 防止
     srv._submit_order_inflight_count = 0
     srv._kabu_fill_poller_task = None  # [H-1] _clear_kabu_session で参照される
+    srv._kabu_push_task = None  # [R3-H1] _clear_kabu_session で参照される
     srv._venue_to_client = {}  # [C-3] _do_submit_order_kabu で参照される
 
     emitted: list[dict] = []
@@ -225,6 +226,9 @@ def test_dev_trade_password_allowed_propagated_to_kabu_venue():
         srv._kabu_login_inflight = asyncio.Lock()
         srv._kabu_startup_task = None
         srv._kabu_fill_poller_task = None  # [H-1] _startup_kabu_station で参照される
+        srv._kabu_push_task = None  # Issue #28 層1: PUSH WS タスク
+        from engine.exchanges.kabusapi_register import RegisterSet as _RS
+        srv._kabu_register_set = _RS()  # Issue #28 層1: PUSH 銘柄登録セット
         srv._live_state = LiveState.DISCONNECTED
         # C1: PUSH ssid 採番に使うセッション ID（__new__ では設定されないため手動で補充）
         import uuid as _uuid
@@ -245,7 +249,10 @@ def test_dev_trade_password_allowed_propagated_to_kabu_venue():
             with patch(
                 "engine.exchanges.kabusapi.KabuStationVenue.startup_login",
                 new_callable=AsyncMock,
-            ) as mock_login:
+            ) as mock_login, patch(
+                "engine.server.kabusapi_ws.connect",
+                new_callable=AsyncMock,
+            ):
                 mock_login.return_value = "dummy_token"
                 # _startup_kabu_station を呼ぶためには _emit が必要
                 srv._connected_venue = None

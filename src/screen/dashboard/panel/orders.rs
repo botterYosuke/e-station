@@ -126,7 +126,7 @@ pub fn update(panel: &mut OrdersPanel, msg: Message) -> Option<Action> {
 // ── View ──────────────────────────────────────────────────────────────────────
 
 /// Render the orders panel.
-pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
+pub fn view(panel: &OrdersPanel, venue_ready: bool) -> Element<'_, Message> {
     let refresh_btn = button(text("更新").size(12))
         .on_press(Message::RefreshClicked)
         .padding([2, 8]);
@@ -168,7 +168,14 @@ pub fn view(panel: &OrdersPanel) -> Element<'_, Message> {
     }
 
     if panel.is_empty() {
-        return column![header, center(text("注文なし").size(14))].into();
+        let msg = if panel.loading {
+            "↻ 更新中…"
+        } else if venue_ready {
+            "注文なし"
+        } else {
+            "ログインが必要です"
+        };
+        return column![header, center(text(msg).size(14))].into();
     }
 
     let is_replay = panel.is_replay;

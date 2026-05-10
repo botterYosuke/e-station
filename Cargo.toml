@@ -79,11 +79,13 @@ xxhash-rust.workspace = true
 rfd = "0.15"
 regex.workspace = true
 webbrowser = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 debug = ["iced/hot"]
 
 [dev-dependencies]
+iced_test = "0.14"
 futures = "0.3"
 proptest = "1"
 tempfile = "3"
@@ -93,3 +95,8 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 walkdir = "2"
+serial_test = "3"
+xcap = "0.0.14"
+base64 = { version = "0.22", features = ["alloc"] }
+reqwest = { version = "0.12", features = ["json"] }
+anyhow = "1"

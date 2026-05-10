@@ -238,6 +238,10 @@ pub(crate) enum WindowMsg {
     GoBack,
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
+    CaptureScreenshot,
+    ScreenshotReady(iced::window::Screenshot),
+    ScreenshotSaved(std::path::PathBuf),
+    ScreenshotFailed(String),
     ToggleDialogModal(Option<screen::ConfirmDialog<crate::Message>>),
     // File save / open
     NativeSaveAsPath(Option<std::path::PathBuf>),

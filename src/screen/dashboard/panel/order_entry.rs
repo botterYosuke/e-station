@@ -135,6 +135,11 @@ impl OrderEntryPanel {
                 }
             }
             Message::ConfirmSubmit => {
+                // Safety: ConfirmSubmit は SubmitClicked → 確認ダイアログ → ConfirmSubmit
+                // という経路でのみ到達する。SubmitClicked 自体は view() の on_press_maybe で
+                // venue_ready が true のときのみ発火するため、ConfirmSubmit が venue_ready=false
+                // の状態で呼ばれることはない。
+                // （参照: view() の submit_btn.on_press_maybe — venue_ready チェック済み）
                 if self.quantity_valid() && self.instrument_id.is_some() {
                     return self.build_submit_action();
                 }
@@ -208,7 +213,7 @@ impl OrderEntryPanel {
         })
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, venue_ready: bool) -> Element<'_, Message> {
         let instrument_label = self.display_label.as_deref().unwrap_or("銘柄未選択");
 
         let side_row = {
@@ -278,15 +283,19 @@ impl OrderEntryPanel {
             form = form.push(trigger_input);
         }
 
-        let submit_enabled =
-            !self.submitting && self.quantity_valid() && self.instrument_id.is_some();
-        let submit_btn = if submit_enabled {
-            button(text("注文").size(13))
-                .on_press(Message::SubmitClicked)
-                .width(Length::Fill)
-        } else {
-            button(text("注文").size(13)).width(Length::Fill)
-        };
+        let submit_btn = button(text("注文").size(13))
+            .on_press_maybe(
+                if venue_ready
+                    && !self.submitting
+                    && self.quantity_valid()
+                    && self.instrument_id.is_some()
+                {
+                    Some(Message::SubmitClicked)
+                } else {
+                    None
+                },
+            )
+            .width(Length::Fill);
 
         form = form.push(submit_btn);
 
@@ -308,19 +317,19 @@ impl OrderEntryPanel {
         self.quantity.parse::<u64>().map(|v| v > 0).unwrap_or(false)
     }
 
-    pub fn set_instrument(&mut self, id: String, display: String) {
+    pub fn set_instrument(&mut self, id: String, display: String, venue: &str) {
         self.instrument_id = Some(id);
         self.display_label = Some(display);
-        // Phase O0: Tachibana 専用。将来の多取引所対応時は呼び出し元から venue を渡す。
-        self.venue = Some("tachibana".to_string());
+        self.venue = Some(venue.to_string());
     }
 
     /// Set instrument from full `TickerInfo` — used by link_group sync.
     /// Exchange guard (TachibanaStock only) is the caller's responsibility.
-    pub fn set_instrument_from_ticker(&mut self, ti: TickerInfo) {
+    /// `venue_name` is the IPC venue string (e.g. "tachibana" or "kabu_station").
+    pub fn set_instrument_from_ticker(&mut self, ti: TickerInfo, venue_name: &str) {
         let display = ti.ticker.display_symbol_and_type().0;
         let id = format!("{}.TSE", ti.ticker.to_full_symbol_and_type().0);
-        self.set_instrument(id, display);
+        self.set_instrument(id, display, venue_name);
         self.ticker_info = Some(ti);
     }
 
@@ -550,12 +559,15 @@ mod tests {
         );
     }
 
-    // ── M-1: set_instrument が venue を自動セットすることを確認 ──
+    // ── M-1: set_instrument が venue を正しくセットすることを確認 ──
     #[test]
-    fn set_instrument_sets_venue_to_tachibana() {
+    fn set_instrument_sets_venue() {
         let mut panel = OrderEntryPanel::default();
-        panel.set_instrument("7203.TSE".into(), "トヨタ".into());
+        panel.set_instrument("7203.TSE".into(), "トヨタ".into(), "tachibana");
         assert_eq!(panel.venue, Some("tachibana".to_string()));
+
+        panel.set_instrument("7203.TSE".into(), "トヨタ".into(), "kabu_station");
+        assert_eq!(panel.venue, Some("kabu_station".to_string()));
     }
 
     // ── M-1: build_submit_action が venue を正しく使うことを確認 ──
@@ -648,7 +660,7 @@ mod tests {
         let ti = TickerInfo::new_stock(ticker, 1.0, 100.0, 100);
 
         let mut panel = OrderEntryPanel::default();
-        panel.set_instrument_from_ticker(ti);
+        panel.set_instrument_from_ticker(ti, "tachibana");
 
         assert!(panel.instrument_id.is_some(), "instrument_id should be set");
         assert!(panel.display_label.is_some(), "display_label should be set");
@@ -670,7 +682,7 @@ mod tests {
         let ti = TickerInfo::new(ticker, 0.1, 0.001, None);
 
         let mut panel = OrderEntryPanel::default();
-        panel.set_instrument_from_ticker(ti);
+        panel.set_instrument_from_ticker(ti, "tachibana");
 
         // No exchange guard in set_instrument_from_ticker — caller is responsible
         assert!(panel.ticker_info.is_some());

@@ -267,6 +267,9 @@ class RunBuffer:
         fh.flush()
 
     def _write_equity(self, evt: dict) -> None:
+        ts_ms = evt.get("ts_event_ms")
+        if ts_ms is not None and "ts" not in evt:
+            evt = {**evt, "ts": ts_ms // 1000}
         scrubbed = pii_scrub(evt, EQUITY_ALLOWED_KEYS)
         if not scrubbed:
             return

@@ -15,13 +15,15 @@ spec: adapter-type-boundary.md Step 3 残項目
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections import deque
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from engine.exchanges.kabusapi_adapter import KabuStationAdapter
+from engine.exchanges.kabusapi_register import RegisterSet
 from engine.server import DataEngineServer
 
 
@@ -97,18 +99,27 @@ class TestBoardPushSeq:
         assert s._kabu_push_seq == 2
 
     def test_seq_in_outbox_matches_post_increment_value(self) -> None:
-        """outbox の sequence_id が +1 後の _kabu_push_seq と一致する。"""
+        """outbox の DepthSnapshot の sequence_id が +1 後の _kabu_push_seq と一致する。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        sequence_id は DepthSnapshot にのみ存在するためそちらを参照する。
+        """
         s = _make_server(seq=9)
         s._on_kabu_board_push(_VALID_BOARD)
-        payload = s._outbox._q[-1]
-        assert payload["sequence_id"] == 10
+        depth_payloads = [item for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
+        assert len(depth_payloads) == 1
+        assert depth_payloads[0]["sequence_id"] == 10
 
     def test_two_calls_produce_consecutive_seqs(self) -> None:
-        """連続 PUSH の sequence_id が 1 ずつ増加する。"""
+        """連続 PUSH の DepthSnapshot sequence_id が 1 ずつ増加する。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        sequence_id は DepthSnapshot にのみ存在するためフィルタリングして確認する。
+        """
         s = _make_server()
         s._on_kabu_board_push(_VALID_BOARD)
         s._on_kabu_board_push(_VALID_BOARD)
-        seqs = [item["sequence_id"] for item in s._outbox._q]
+        seqs = [item["sequence_id"] for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
         assert seqs == [1, 2]
 
 
@@ -200,11 +211,15 @@ class TestBoardPushSsidFallback:
 
         Fix: _on_kabu_board_push の ssid = self._kabu_push_ssid or str(self._engine_session_id)。
         ssid が None のまま wire に渡ると mapper が ValueError を raise してしまう。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        DepthSnapshot の stream_session_id を確認する。
         """
         s = _make_server(ssid=None)
         s._on_kabu_board_push(_VALID_BOARD)
-        assert len(s._outbox._q) == 1
-        assert s._outbox._q[-1]["stream_session_id"] == str(s._engine_session_id)
+        depth_items = [item for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
+        assert len(depth_items) == 1
+        assert depth_items[0]["stream_session_id"] == str(s._engine_session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -218,11 +233,15 @@ class TestBoardPushWireDtoPath:
 
         adapter model (OrderBook) は wire 責務フィールドを持たない（test_models.py が保証）。
         'event' が存在 ⟹ wire DTO (DepthSnapshotMsg) 経由で model_dump されている。
+
+        C-R2-1 修正後: _on_kabu_board_push は DepthSnapshot と Trades の 2 件を outbox に書く。
+        DepthSnapshot の event フィールドを確認する。
         """
         s = _make_server()
         s._on_kabu_board_push(_VALID_BOARD)
-        payload = s._outbox._q[-1]
-        assert payload.get("event") == "DepthSnapshot"
+        depth_items = [item for item in s._outbox._q if item.get("event") == "DepthSnapshot"]
+        assert len(depth_items) == 1
+        assert depth_items[0].get("event") == "DepthSnapshot"
 
     def test_outbox_dict_has_venue_field(self) -> None:
         """outbox の dict に 'venue' フィールドがあることで mapper 経由を確認。"""
@@ -268,3 +287,72 @@ class TestTradePush:
         s._on_kabu_trade_push(_VALID_BOARD)
         assert len(s._outbox._q) == 1
         assert s._outbox._q[-1]["stream_session_id"] == str(s._engine_session_id)
+
+
+# ---------------------------------------------------------------------------
+# PUSH WebSocket 起動確認（Issue #28 層1 Fix）
+# ---------------------------------------------------------------------------
+
+
+class TestKabuPushWsTaskStarted:
+    @pytest.mark.asyncio
+    async def test_kabu_push_ws_task_started_after_login(self) -> None:
+        """_startup_kabu_station() ログイン成功後に kabusapi_ws.connect() が
+        asyncio.create_task で起動されることを確認する（Issue #28 層1）。"""
+        with patch.object(DataEngineServer, "__init__", lambda self, **_: None):
+            server = DataEngineServer()
+
+        # 必要な最小フィールドを注入
+        server._outbox = _StubOutbox()  # type: ignore[assignment]
+        server._engine_session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        server._kabu_env = "verify"
+        server._kabu_venue = None
+        server._kabu_login_inflight = asyncio.Lock()
+        server._kabu_startup_task = None
+        server._kabu_fill_poller_task = None
+        server._kabu_push_task = None  # type: ignore[attr-defined]
+        server._kabu_push_ssid = None
+        server._kabu_push_seq = 0
+        server._kabu_register_set = RegisterSet()  # type: ignore[attr-defined]
+        server._connected_venue = None
+        server._dev_kabu_login_allowed = False
+        server._dev_kabu_trade_password_allowed = False
+        server._live_state = MagicMock()
+
+        from engine.exchanges.kabusapi_auth import (
+            KabuLoginCancelledError,
+            KabuConnectionError,
+        )
+
+        # mock_venue: startup_login() を成功させる
+        mock_venue = MagicMock()
+        mock_venue.startup_login = AsyncMock(return_value="test-token")
+        server._kabu_venue = mock_venue
+
+        connect_called_with: list = []
+
+        async def fake_connect(**kwargs):
+            connect_called_with.append(kwargs)
+            # 即座に返る（タスクとして起動されるので await されるまで実行されない）
+            await asyncio.sleep(0)
+
+        with patch(
+            "engine.server.kabusapi_ws.connect",
+            side_effect=fake_connect,
+        ) as mock_connect:
+            with patch.object(server, "_emit"):
+                with patch.object(server, "_kabu_fill_poller", return_value=asyncio.sleep(0)):
+                    await server._startup_kabu_station()
+
+        # _kabu_push_task が None でないことを確認（タスクが起動された）
+        assert server._kabu_push_task is not None, (
+            "_kabu_push_task should be set after successful login"
+        )
+        # タスクがキャンセルされていないことを確認
+        assert not server._kabu_push_task.cancelled()
+        # タスクをクリーンアップ
+        server._kabu_push_task.cancel()
+        try:
+            await server._kabu_push_task
+        except (asyncio.CancelledError, Exception):
+            pass

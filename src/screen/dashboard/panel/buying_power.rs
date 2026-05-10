@@ -149,7 +149,7 @@ pub fn update(_panel: &mut BuyingPowerPanel, msg: Message) -> Option<Action> {
 // ── View ──────────────────────────────────────────────────────────────────────
 
 /// 余力表示パネルをレンダリングする。
-pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
+pub fn view(panel: &BuyingPowerPanel, venue_ready: bool) -> Element<'_, Message> {
     if let Some(ref err) = panel.error {
         let refresh_btn =
             iced::widget::button(text("更新").size(11)).on_press(Message::RefreshRequested);
@@ -162,6 +162,10 @@ pub fn view(panel: &BuyingPowerPanel) -> Element<'_, Message> {
             .spacing(4),
         )
         .into();
+    }
+
+    if !venue_ready && !panel.is_replay && !panel.loading {
+        return iced::widget::center(iced::widget::text("ログインが必要です").size(14)).into();
     }
 
     // REPLAY モード: 仮想ポートフォリオ表示（loading バッジなし — streaming push のみ）

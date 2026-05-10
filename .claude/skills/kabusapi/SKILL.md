@@ -229,7 +229,8 @@ HTTP 4xx/5xx        → API レベル（接続/認証/流量）
 - 配信内容: `PUT /register` で登録した銘柄の時価更新を JSON で push（板気配・歩み値・各値）
 - **メッセージ送信は不要**（クライアントから何も送らない）。サーバから一方向に flow し、`on_message` で JSON parse する
 - 受信ボディは UTF-8 JSON（立花の `^A^B^C` 区切りバイナリとは違う）
-- **再接続はクライアント側責務**。`websockets` ライブラリの `ping_interval=20, ping_timeout=10` を設定し、切断検知後 exponential backoff で再接続
+- **再接続はクライアント側責務**。切断検知後 exponential backoff で再接続する
+- **keepalive ping は無効化する**: kabuStation は RFC 6455 準拠の PONG を返さない（空 PONG を返す）。`ping_interval=None` を必ず指定し、`asyncio.wait_for(ws.recv(), timeout=3600)` で無メッセージハングを検出して再接続する（Issue #40）
 - 実装は **Python 側 `python/engine/exchanges/kabusapi_ws.py`**（**将来実装予定**）に集約。Rust 側で kabu WebSocket を直接張らない
 
 ### R9. 価格は `float`、数量は `int`
@@ -362,7 +363,7 @@ UTF-8 JSON、1 メッセージ = 1 銘柄スナップショット（OpenAPI `Pus
 
 - メッセージは `\n` 区切りではなく **WebSocket frame 単位で 1 JSON**。`json.loads(message)` で 1 発デシリアライズ
 - 受信 throughput は登録銘柄数と相場速度に比例。50 銘柄全部に活発な板更新があるとピーク数百 msg/sec を覚悟
-- **ping/pong は library 任せで OK**。`websockets.connect(uri, ping_interval=20, ping_timeout=10)` を推奨（kabuステーション本体が pong を返す）。立花のような手動 pong は不要
+- **keepalive ping は `ping_interval=None` で無効化する**。kabuStation は RFC 6455 準拠の PONG を返さない（PING payload と不一致の空 PONG を返す）ため、`ping_interval` を設定すると 30 秒ごとに timeout 切断ループが発生する（Issue #40）。`asyncio.wait_for(ws.recv(), timeout=3600)` で無メッセージハングを検出して再接続する。立花のような手動 pong も不要
 - 切断後の再接続: `PUT /register` した銘柄リストはサーバ側で保持されないので、**再接続後に再登録が必要**かどうか OpenAPI を再確認（[ptal/push.html](ptal/push.html) の「再接続時の挙動」セクション参照、実装時に検証する）
 
 ---
@@ -378,7 +379,7 @@ kabu venue の I/O は **Python 側に集約**される。新しいエンドポ�
 - `kabusapi_auth.check_response(payload, http_status) -> None` — `Code`/`Message` 二段判定（R7）。失敗時は `KabuApiError` 派生例外を投げる
 - `kabusapi_ratelimit.OrderBucket() / WalletBucket() / InfoBucket()` — token-bucket、`async with bucket:` で取得（R5）
 - `kabusapi_register.RegisterSet` — 50 銘柄上限を Python 側で追跡し、超過前に LRU で `unregister`（R6）
-- `kabusapi_ws.connect(env, on_message)` — `ping_interval=20` で接続し、再接続時に `RegisterSet` から再登録（R8）
+- `kabusapi_ws.connect(env, on_message)` — `ping_interval=None` + `asyncio.wait_for(ws.recv(), 3600s)` で接続し、再接続時に `RegisterSet` から再登録（R8、Issue #40）
 - エラー型: `KabuApiError` / `KabuTokenExpiredError` / `KabuRateLimitError` / `KabuRegisterFullError` / `KabuConnectionError`（kabuステーション本体落ち）
 - テストは `pytest-httpx` の `HTTPXMock` でモック（既存 [`python/tests/test_binance_rest.py`](../../../python/tests/test_binance_rest.py) パターン）。本番 18080 を絶対に踏まない（R1）
 
@@ -404,7 +405,7 @@ kabu venue の I/O は **Python 側に集約**される。新しいエンドポ�
 | セッション寿命 | JST 当日（夜間閉局でリセット）、ファイルキャッシュ可 | 本体終了/ログアウトで失効、**キャッシュ不要** |
 | 第二暗証番号 | 発注時 iced modal で都度取得 | 取消時 `Password` フィールド（取引パスワード） |
 | PUSH 区切り | `^A^B^C` ASCII 制御文字 + Shift-JIS | WebSocket frame = 1 JSON、UTF-8 |
-| WebSocket ping | 手動 pong 必須 | library 任せ（`ping_interval=20`） |
+| WebSocket ping | 手動 pong 必須 | **`ping_interval=None` で無効化**（kabuStation が RFC 6455 非準拠の空 PONG を返すため）+ `asyncio.wait_for` でハング検出 |
 | 訂正 API | あり（`CLMKabuCorrectOrder`） | **無し**（取消→再発注） |
 | 流量制限 | 明示記載なし（実測で TPS 制限あり） | **明示**（発注 5/s、余力 10/s、情報 10/s） |
 | 銘柄登録 | 不要（任意の銘柄を直接照会） | **50 銘柄上限**の登録制 |

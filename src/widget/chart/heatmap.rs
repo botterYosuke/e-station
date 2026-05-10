@@ -397,9 +397,13 @@ impl HeatmapShader {
         }
     }
 
-    pub fn view(&self, timezone: data::UserTimezone) -> iced::Element<'_, Message> {
+    pub fn view<'a>(
+        &'a self,
+        timezone: data::UserTimezone,
+        empty_reason: &'a str,
+    ) -> iced::Element<'a, Message> {
         if self.base_price.is_none() {
-            return iced::widget::center(iced::widget::text("Waiting for data...").size(16)).into();
+            return iced::widget::center(iced::widget::text(empty_reason).size(16)).into();
         }
 
         let render_latest_time = self.anchor.render_latest_time();

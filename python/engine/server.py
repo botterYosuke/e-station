@@ -47,11 +47,15 @@ from engine.exchanges.tachibana_login_flow import (
 from engine.exchanges.kabusapi import KabuStationVenue
 from engine.exchanges.kabusapi_adapter import KabuStationAdapter
 from engine.exchanges.kabusapi_url import resolve_kabu_env
+from engine.exchanges.kabusapi_rest import KabuRestClient
+from engine.exchanges.kabusapi_register import RegisterSet as KabuRegisterSet
+import engine.exchanges.kabusapi_ws as kabusapi_ws
 from engine.exchanges.kabusapi_auth import (
     KabuApiError,
     KabuConnectionError as KabuConnectionError,
     KabuLoginCancelledError,
     KabuRateLimitError,
+    KabuRegisterFullError,
     KabuTradeCancelledError,
     KabuTradeLockedOutError,
     KabuTradePasswordInvalidError,
@@ -493,6 +497,9 @@ class DataEngineServer:
         self._kabu_login_inflight = asyncio.Lock()
         self._kabu_startup_task: asyncio.Task | None = None
         self._kabu_fill_poller_task: asyncio.Task | None = None  # [H-1]
+        self._kabu_push_task: asyncio.Task | None = None  # Issue #28 層1: PUSH WS タスク
+        # PUSH 銘柄登録セット（最大 50 銘柄 LRU、kabusapi_ws.connect に渡す）
+        self._kabu_register_set: KabuRegisterSet = KabuRegisterSet()
         # C1 配線: kabu PUSH adapter と採番カウンター
         self._kabu_adapter: KabuStationAdapter = KabuStationAdapter([])
         self._kabu_push_seq: int = 0
@@ -1312,6 +1319,13 @@ class DataEngineServer:
         stream = msg.get("stream", "")
         timeframe = msg.get("timeframe")
 
+        # Issue #28 層2: kabu_station は _workers 外で管理されるため専用パスで受け入れる。
+        # PUSH WS は _startup_kabu_station() で起動済み。Subscribe は銘柄登録とストリーム
+        # ライフサイクル管理のみを行う。
+        if venue == "kabu_station":
+            await self._handle_subscribe_kabu_station(msg)
+            return
+
         worker = self._workers.get(venue)
         if worker is None:
             log.warning("Subscribe: unknown venue %s", venue)
@@ -1403,6 +1417,128 @@ class DataEngineServer:
 
         task.add_done_callback(_on_done)
 
+    async def _handle_subscribe_kabu_station(self, msg: dict) -> None:
+        """Issue #28 層2: kabu_station の Subscribe を専用パスで処理する。
+
+        kabu_station は _workers に含まれないため通常の worker.stream_depth() は
+        使えない。PUSH WebSocket は _startup_kabu_station() で既に起動されており、
+        ここではストリームの「生存管理」と銘柄登録のみを行う。
+
+        - depth / trade ストリームのキーを _streams に登録して Unsubscribe まで保持。
+        - ticker を _kabu_register_set に登録（銘柄 PUSH 受信対象にする）。
+        - 未サポートのストリームタイプは unsupported_stream エラーを返す。
+        """
+        # 早期チェック: kabu が接続済みでなければ Subscribe を拒否
+        if self._kabu_venue is None or not self._kabu_venue.is_connected:
+            ticker = msg.get("ticker", "")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "kabu_not_connected",
+                "message": f"kabu_station is not connected, cannot subscribe to {ticker}",
+            })
+            self._outbox_event.set()
+            return
+
+        ticker = msg.get("ticker", "")
+        stream = msg.get("stream", "")
+        market = _market_from_msg(msg, "kabu_station")
+
+        if stream not in ("depth", "trade"):
+            log.warning("Subscribe(kabu_station): unsupported stream %s", stream)
+            self._outbox.append(
+                {
+                    "event": "Error",
+                    "request_id": None,
+                    "code": "unsupported_stream",
+                    "message": f"kabu_station does not support stream {stream!r}",
+                }
+            )
+            self._outbox_event.set()
+            return
+
+        key = ("kabu_station", ticker, market, stream, None)
+        if key in self._streams:
+            log.debug("Already subscribed to kabu_station %s %s", ticker, stream)
+            return
+
+        handle = _StreamHandle(stop=asyncio.Event())
+
+        # 銘柄を PUSH 登録セットに追加（exchange=1 は東証デフォルト）
+        try:
+            self._kabu_register_set.register(ticker, 1)
+        except KabuRegisterFullError as exc:
+            log.warning("Subscribe(kabu_station): register full for %s: %s", ticker, exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "register_full",
+                "message": str(exc),
+            })
+            self._outbox_event.set()
+            return
+        except Exception as exc:
+            # H-R2-2: 予期しない例外は WARNING ではなく ERROR レベルでログする
+            log.error(
+                "Subscribe(kabu_station): register_set.register failed for %s: %s",
+                ticker, exc, exc_info=True,
+            )
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "register_error",
+                "message": f"register failed for {ticker}: {exc}",
+            })
+            self._outbox_event.set()
+            return
+
+        if not await self._kabu_put_register(self._kabu_register_set.all_symbols()):
+            # PUT /register 失敗: ticker を register_set から除外しセンチネルタスクは作らない
+            try:
+                self._kabu_register_set.unregister(ticker, 1)
+            except Exception as exc:
+                log.error("_handle_subscribe_kabu_station: unregister failed for %s: %s", ticker, exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": None,
+                "code": "register_failed",
+                "message": f"PUT /register failed for {ticker}",
+            })
+            self._outbox_event.set()
+            return
+
+        # H-R2-5: _stream_counter は register() 成功確認後にインクリメントする
+        stop = handle.stop
+        self._stream_counter += 1
+
+        async def _kabu_stream_sentinel() -> None:
+            """PUSH WS が起動している間ストリームキーを保持するセンチネルタスク。
+
+            stop_event が set されるまでスリープし続ける。実際のデータは
+            _on_kabu_board_push / _on_kabu_trade_push が outbox に直接書く。
+            """
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(stop.wait()),
+                    timeout=None,
+                )
+            except asyncio.CancelledError:
+                pass
+
+        task = asyncio.create_task(_kabu_stream_sentinel())
+        handle.task = task
+        self._streams[key] = handle
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._outbox_event.set()
+            self._streams.pop(key, None)
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    log.error("kabu_station stream task %s died: %s", key, exc)
+
+        task.add_done_callback(_on_done)
+
     async def _handle_unsubscribe(self, msg: dict) -> None:
         venue = msg.get("venue", "")
         ticker = msg.get("ticker", "")
@@ -1421,6 +1557,13 @@ class DataEngineServer:
         handle = self._streams.pop(key, None)
         if handle:
             await handle.cancel()
+            if venue == "kabu_station":
+                try:
+                    self._kabu_register_set.unregister(ticker, 1)
+                except Exception as exc:
+                    log.warning("_handle_unsubscribe(kabu_station): unregister failed: %s", exc)
+                if not await self._kabu_put_register(self._kabu_register_set.all_symbols()):
+                    log.warning("_handle_unsubscribe(kabu_station): put_register failed after unregistering %s", ticker)
 
     # ------------------------------------------------------------------
     # Order Phase handlers (T0.3)
@@ -1865,6 +2008,10 @@ class DataEngineServer:
         if self._kabu_fill_poller_task is not None and not self._kabu_fill_poller_task.done():
             self._kabu_fill_poller_task.cancel()
         self._kabu_fill_poller_task = None
+        # R3-H1: PUSH WS タスクもキャンセルする（未キャンセルだと再ログイン時に二重起動ガードが効かなくなる）
+        if self._kabu_push_task is not None and not self._kabu_push_task.done():
+            self._kabu_push_task.cancel()
+        self._kabu_push_task = None
         self._connected_venue = None
         self._kabu_push_ssid = None  # C1: PUSH セッション ID をリセット
         self._live_state = LiveState.DISCONNECTED
@@ -2629,6 +2776,10 @@ class DataEngineServer:
         if venue == "replay":
             return await self._do_get_order_list_replay(msg)
 
+        # Issue #25: kabu_station は _workers に含まれないため専用ハンドラに分岐する
+        if venue == "kabu_station":
+            return await self._do_get_order_list_kabu(msg, ws=ws)
+
         if venue not in self._workers:
             self._outbox.append({
                 "event": "Error",
@@ -2715,6 +2866,9 @@ class DataEngineServer:
         if venue == "replay":
             await self._do_get_buying_power_replay(msg)
             return
+        # Issue #25: kabu_station は _workers に含まれないため専用ハンドラに分岐する
+        if venue == "kabu_station":
+            return await self._do_get_buying_power_kabu(msg, ws=ws)
         if venue not in self._workers:
             self._outbox.append({
                 "event": "Error",
@@ -2789,9 +2943,197 @@ class DataEngineServer:
         )
         self._outbox.append(ipc_dict)
 
+    # ------------------------------------------------------------------
+    # Issue #25: kabu_station 向け GetOrderList / GetBuyingPower / GetPositions
+    # ------------------------------------------------------------------
+
+    def _make_kabu_rest_client(self) -> "KabuRestClient":
+        """kabu_venue の token から KabuRestClient を構築して返す。
+
+        呼び出し前に _kabu_venue と _kabu_venue._token が None でないことを確認すること。
+        """
+        token: str = self._kabu_venue._token  # type: ignore[union-attr]
+        return KabuRestClient(
+            token=token,
+            env=self._kabu_env,
+            register_set=KabuRegisterSet(),
+        )
+
+    async def _do_get_order_list_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """Issue #25: kabu_station 注文一覧取得 — GET /orders。"""
+        req_id = msg.get("request_id", "")
+
+        if self._kabu_venue is None or not self._kabu_venue._token:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "NOT_LOGGED_IN",
+                "message": "GetOrderList: kabu_station not logged in",
+            })
+            return
+
+        try:
+            client = self._make_kabu_rest_client()
+            raw_orders = await client.fetch_orders()
+        except KabuApiError as exc:
+            log.error("_do_get_order_list_kabu: KabuApiError: %s", exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "FETCH_ERROR",
+                "message": str(exc),
+            })
+            return
+        except Exception:
+            log.exception("_do_get_order_list_kabu: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching kabu order list",
+            })
+            return
+
+        # kabu API の生レスポンスを IPC OrderRecordWire 形式に変換する。
+        # 注: kabu の ID フィールド名は "ID"（tachibana は sOrderOrderNumber）。
+        orders_json = [
+            {
+                "client_order_id": None,
+                "venue_order_id": o.get("ID", ""),
+                "instrument_id": f"{o.get('Symbol', '')}.KabuStation Stock",
+                "order_side": "BUY" if o.get("Side") == "1" else "SELL",
+                "order_type": "MARKET" if o.get("OrdType") == "1" else "LIMIT",
+                "quantity": str(o.get("OrderQty", 0)),
+                "filled_qty": str(o.get("CumQty", 0)),
+                "leaves_qty": str(int(o.get("OrderQty", 0)) - int(o.get("CumQty", 0))),
+                "price": str(o.get("Price", 0)),
+                "trigger_price": None,
+                "time_in_force": "DAY",
+                "expire_time_ns": None,
+                "status": "FILLED" if o.get("OrdStatus") == "2" else "OPEN",
+                "ts_event_ms": 0,
+                "venue": "kabu_station",
+            }
+            for o in raw_orders
+        ]
+        self._outbox.append({
+            "event": "OrderListUpdated",
+            "request_id": req_id,
+            "orders": orders_json,
+        })
+
+    async def _do_get_buying_power_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """Issue #25: kabu_station 余力取得 — GET /wallet/cash + /wallet/margin。"""
+        req_id = msg.get("request_id", "")
+
+        if self._kabu_venue is None or not self._kabu_venue._token:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "NOT_LOGGED_IN",
+                "message": "GetBuyingPower: kabu_station not logged in",
+            })
+            return
+
+        try:
+            client = self._make_kabu_rest_client()
+            cash_data = await client.fetch_wallet_cash()
+            margin_data = await client.fetch_wallet_margin()
+        except KabuApiError as exc:
+            log.error("_do_get_buying_power_kabu: KabuApiError: %s", exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "FETCH_ERROR",
+                "message": str(exc),
+            })
+            return
+        except Exception:
+            log.exception("_do_get_buying_power_kabu: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching kabu buying power",
+            })
+            return
+
+        ts_ms = int(time.time() * 1000)
+        # kabu wallet/cash: StockAccountWallet = 現物余力
+        # kabu wallet/margin: MarginAccountWallet = 信用余力
+        cash_available = cash_data.get("StockAccountWallet", 0.0)
+        credit_available = margin_data.get("MarginAccountWallet", 0.0)
+        self._outbox.append({
+            "event": "BuyingPowerUpdated",
+            "request_id": req_id,
+            "venue": "kabu_station",
+            "cash_available": cash_available,
+            "cash_shortfall": 0,
+            "credit_available": credit_available,
+            "ts_ms": ts_ms,
+        })
+
+    async def _do_get_positions_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
+        """Issue #25: kabu_station 建玉取得 — GET /positions。"""
+        req_id = msg.get("request_id", "")
+
+        if self._kabu_venue is None or not self._kabu_venue._token:
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "NOT_LOGGED_IN",
+                "message": "GetPositions: kabu_station not logged in",
+            })
+            return
+
+        try:
+            client = self._make_kabu_rest_client()
+            raw_positions = await client.fetch_positions()
+        except KabuApiError as exc:
+            log.error("_do_get_positions_kabu: KabuApiError: %s", exc)
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "FETCH_ERROR",
+                "message": str(exc),
+            })
+            return
+        except Exception:
+            log.exception("_do_get_positions_kabu: unexpected error")
+            self._outbox.append({
+                "event": "Error",
+                "request_id": req_id,
+                "code": "INTERNAL_ERROR",
+                "message": "Internal error fetching kabu positions",
+            })
+            return
+
+        ts_ms = int(time.time() * 1000)
+        positions_json = [
+            {
+                "instrument_id": f"{p.get('Symbol', '')}.KabuStation Stock",
+                "qty": str(int(p.get("Leaves", 0))),
+                "market_value": str(int(p.get("Price", 0) * p.get("Leaves", 0))),
+                "position_type": "LONG" if p.get("Side") == "1" else "SHORT",
+                "tategyoku_id": "",
+                "venue": "kabu_station",
+            }
+            for p in raw_positions
+        ]
+        self._outbox.append({
+            "event": "PositionsUpdated",
+            "request_id": req_id,
+            "venue": "kabu_station",
+            "positions": positions_json,
+            "ts_ms": ts_ms,
+        })
+
     async def _do_get_positions(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
         req_id = msg.get("request_id", "")
         venue = msg.get("venue", "")
+        # Issue #25: kabu_station は専用ハンドラに分岐する
+        if venue == "kabu_station":
+            return await self._do_get_positions_kabu(msg, ws=ws)
         if venue != "tachibana":
             self._outbox.append({
                 "event": "Error",
@@ -3708,6 +4050,30 @@ class DataEngineServer:
                     self._kabu_fill_poller_task = asyncio.create_task(
                         self._kabu_fill_poller()
                     )
+                # Issue #28 層1: PUSH WebSocket タスクを起動（孤立メソッドを配線）
+                if self._kabu_push_task is None or self._kabu_push_task.done():
+                    self._kabu_push_task = asyncio.create_task(
+                        kabusapi_ws.connect(
+                            env=self._kabu_env,
+                            on_message=self._on_kabu_board_push,
+                            register_set=self._kabu_register_set,
+                            put_register=self._kabu_put_register,
+                        )
+                    )
+
+                    def _on_push_task_done(t: asyncio.Task) -> None:
+                        if not t.cancelled() and t.exception() is not None:
+                            exc = t.exception()
+                            log.error("_kabu_push_task died: %s", exc)
+                            self._emit({
+                                "event": "VenueError",
+                                "venue": "kabu_station",
+                                "request_id": None,
+                                "code": "push_ws_failed",
+                                "message": str(exc),
+                            })
+
+                    self._kabu_push_task.add_done_callback(_on_push_task_done)
                 self._emit({
                     "event": "VenueReady",
                     "venue": "kabu_station",
@@ -3744,6 +4110,26 @@ class DataEngineServer:
             log.info("_kabu_fill_poller: cancelled")
             raise
 
+    async def _kabu_put_register(self, symbols: list[tuple[str, int]]) -> bool:
+        """PUSH 銘柄登録 PUT /register コールバック（kabusapi_ws.connect に渡す）。
+
+        Issue #28 層1: 再接続後に RegisterSet 全件を kabuStation に再登録する。
+        _kabu_venue がない（未ログイン）場合はスキップ。
+        """
+        if self._kabu_venue is None or not self._kabu_venue.is_connected:
+            log.debug("_kabu_put_register: no active session, skipping re-register")
+            return True  # 未接続はスキップ扱い（エラーではない）
+        if not symbols:
+            return True
+        log.info("_kabu_put_register: registering %d symbols", len(symbols))
+        try:
+            client = self._make_kabu_rest_client()
+            await client.put_register(symbols)
+            return True
+        except Exception as exc:
+            log.error("_kabu_put_register: PUT /register failed: %s", exc)
+            return False
+
     # ------------------------------------------------------------------
     # C1: kabu PUSH → adapter → mapper → outbox pipeline entry points
     # ------------------------------------------------------------------
@@ -3754,9 +4140,22 @@ class DataEngineServer:
         kabu PUSH には stream_session_id / sequence_id が存在しないため、
         server 層が _kabu_push_ssid / _kabu_push_seq を採番して補充する。
 
+        C-R2-1: 板スナップショット処理後に _on_kabu_trade_push も呼び出す。
+        kabu PUSH は同一 WebSocket メッセージに板情報と CurrentPrice（約定）が共存するため、
+        1 メッセージで両方を処理する。一方の例外が他方の呼び出しをスキップしないよう
+        それぞれ独立した try/except で囲む。
+
+        C-R2-2: ticker は try ブロックの外で初期化する（except ブロックでの UnboundLocalError 防止）。
+
         TODO C1-next: Subscribe(kabu_station) コマンドを受け付けて
         _kabu_adapter の登録銘柄を動的に更新する（現状は全 PUSH 受信・全配信）。
         """
+        # M-R3-1: non-dict raw (e.g. None) は両メソッド共通の早期リターン
+        if not isinstance(raw, dict):
+            log.error("_on_kabu_board_push: non-dict raw ignored: %r", type(raw))
+            return
+        # C-R2-2: ticker を try ブロックの外で初期化して except ブロックでの UnboundLocalError を防ぐ
+        ticker = ""
         try:
             ticker = str(raw.get("Symbol", ""))
             if not ticker:
@@ -3775,16 +4174,20 @@ class DataEngineServer:
                 ticker=ticker,
                 ssid=ssid,
                 seq=self._kabu_push_seq,
+                market="stock",
             )
             self._outbox.append(payload)
         except Exception as exc:
-            log.warning(
+            log.error(
                 "_on_kabu_board_push: parse/map error at seq=%d ticker=%s: %s",
                 self._kabu_push_seq,
                 ticker,
                 exc,
                 exc_info=True,
             )
+
+        # C-R2-1: 板処理後に約定ストリームも処理する（独立した try/except で例外を分離）
+        self._on_kabu_trade_push(raw)
 
     def _on_kabu_trade_push(self, raw: dict) -> None:
         """Raw kabu PUSH 板 JSON の CurrentPrice から Trades wire dict → outbox.
@@ -3805,10 +4208,11 @@ class DataEngineServer:
                 adapter=self._kabu_adapter,
                 ticker=ticker,
                 ssid=ssid,
+                market="stock",
             )
             self._outbox.append(payload)
         except Exception as exc:
-            log.warning(
+            log.error(
                 "_on_kabu_trade_push: parse/map error ticker=%s: %s",
                 ticker,
                 exc,
@@ -4939,6 +5343,8 @@ def _market_from_msg(msg: dict, venue: str) -> str:
 
 
 def _default_market(venue: str) -> str:
+    if venue in ("kabu_station", "tachibana"):
+        return "stock"
     return "linear_perp"
 
 

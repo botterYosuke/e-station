@@ -45,7 +45,7 @@ SCENARIO: Scenario = {
     "start": "2025-01-06",
     "end": "2025-01-10",
     "granularity": "Minute",
-    "initial_cash": 10_000_000,
+    "initial_cash": 20_000_000,
 }
 
 from nautilus_trader.config import StrategyConfig

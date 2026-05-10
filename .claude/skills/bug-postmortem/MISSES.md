@@ -18,6 +18,9 @@
 | API 仕様固定なし | Mock レスポンスが誤ったキー名・フィールド名を前提に書かれており、実 API の必須パラメータ欠落・レスポンス形式ズレを素通りする | 2 |
 | ライブデータ前提 | テストが「常にライブストリームあり」を前提とし、市場クローズ・週末など「ストリームなし」で起動するシナリオを未検証 | 1 |
 | モード境界 saved-state 混入 | saved-state.json に含まれるライブモード用ペインがリプレイモード起動時にも読み込まれ、無効な状態で描画が実行される | 1 |
+| Venue-Error Deadlock | venue 認証失敗後も pane が Waiting streams を持ち続け has_stream()=true のまま "Loading…" が永続する | 1 |
+| PUSH 登録スタブ | _kabu_put_register が PUT /register を呼ばないスタブのまま残され、kabu ログイン後も板データが一切届かない | 1 |
+| IPC market フィールド不一致 | Python が outbox に書く market 文字列と Rust が期待する market 文字列が異なり、Rust depth_stream が毎回 continue してデータをスキップする | 1 |
 | saved-state migration 未実装 | enum バリアント追加時に、追加前の saved-state を読んだ場合の migration テストがなく、旧フォーマットでの起動時のみ再現するバグを見逃す | 1 |
 | IPC 契約の片側未実装 | Rust が特殊パス（`"__all__"` 等）を送る契約が `backend.rs` に書かれているが、Python 側の対応実装とテストが追いついていない | 1 |
 | バグ動作 pin | 既存のバグ挙動（空返却・None 返却）をリグレッションガードとして固定し、正しい設計（raise 等）と乖離した状態を固める | 2 |
@@ -39,6 +42,11 @@
 | CI タイムアウト未設定 + 優先順位分岐末尾カバー漏れ | `pytest.ini` に `timeout = 60` を設定せず、スタック時に CI が無限ブロックするリスクを放置した。また `_resolve_endpoint_and_token()` の優先順位 (c) env-only パス（セッションファイルなし・TOKEN 設定あり → `ws://127.0.0.1:19876/`）をテストせず、(a)(b) ケースだけをテストして S4-D 完了と判断した | 1 |
 | enum 下限チェックのみのバリアント数テスト | `assert!(count >= N)` 形式のバリアント数テストは新バリアント追加を検出しない。`_ => None` ワイルドカードがある match では新バリアントが追加されてもテストが通り、サイレント消失を見逃す。`assert_eq!(count, N)` の完全一致テストで新旧どちらの変化も検出する | 1 |
 | IPC 移行後 outbox dict → proto 整合性未検証 | 取引所アダプターが outbox に積む dict の全フィールドを proto 定義と照合するテストがなく、旧 IPC（JSON）向けの legacy フィールドが proto 変換時にサイレント DROP を引き起こす | 1 |
+| 孤立メソッド（Orphan Method） | 実装済みコールバックがプロダクションのコールパスに繋がれていない。メソッドが単体テストでパスしていても、実際に呼ばれていないため症状が出ない。起動確認テストがなければ検出不能 | 1 |
+| 例外握り潰し後の資源継続登録 | HTTP 呼び出し失敗を except して飲み込んだあと、呼び出し元がセンチネルタスク・ストリームキーを「成功扱い」で継続登録する。"subscribed なのにデータが来ない" silent failure が生じる。戻り値 bool で成否を伝達し、失敗時は登録をスキップする設計が必要 | 1 |
+| タスク cancel 対称性欠如 | 起動メソッドでタスクを `create_task` しても、対応する cleanup メソッド（`_clear_kabu_session` 等）でそのタスクを `cancel()` していない。再ログイン・セッションリセット後も旧タスクが生き続け、資源の宙ぶらりんや二重起動ガードの誤発動を招く | 1 |
+| コールバック型シグネチャ陳腐化 | コールバックの戻り値型を変更したとき（`None` → `bool`）、呼び出し側の型アノテーションと処理が旧シグネチャのまま残り、失敗を示す `False` が無音で捨てられる。型ヒントとテストの両方で契約を固める | 1 |
+| ルーティング述語全フィールド照合 | ストリームのルーティング述語（`matches_stream` 等）が `PartialEq`（全フィールド一致）を使い、意味的に同等だが表現が異なる（`Client` vs `ServerSide`）ストリームをミスマッチと判定する。エミッター側が常に特定タグを使うとき、レシーバー側の登録タグと一致しなくなる | 1 |
 
 ---
 
@@ -2055,3 +2063,359 @@ proto スキーマに適合しているかを検証する結合テストがな�
 3. **取引所アダプターに outbox dict のフィールドを変更したら、proto との整合テストを実行する**:
    `tachibana.py`、`kabusapi.py` 等の全アダプターで、outbox に積む dict のキー集合が
    対応する proto メッセージのフィールドと一致することをテストで保証する。
+
+---
+
+## 2026-05-08 — kabuStation Ladder 「Waiting for data...」永続表示（Issue #28）
+
+**見逃しパターン**: 孤立メソッド（Orphan Method）パターン
+**根本原因**: `_on_kabu_board_push()` / `_on_kabu_trade_push()` は単体テストが通っていたが、プロダクションのコールパス（`_startup_kabu_station()` → `kabusapi_ws.connect()` → `on_message`）に繋がれていなかった。3層のサイレント障害が重なり、症状が表面化しにくかった。
+- Layer 1: `_startup_kabu_station()` が PUSH WebSocket (`kabusapi_ws.connect()`) を起動しなかった
+- Layer 2: `_handle_subscribe()` が `kabu_station` を `unknown_venue` で即拒否した
+- Layer 3: `engine-client/src/backend.rs` の `depth_stream` が `EngineEvent::Error` を `_ => {}` でサイレント無視した
+
+**追加したテスト**:
+- `python/tests/test_server_kabu_push.py::TestKabuPushWsTaskStarted` — PUSH WS タスク起動確認
+- `python/tests/test_server_kabu_subscribe.py` — Subscribe(kabu_station) 受け入れ確認
+- `engine-client/tests/depth_stream_error_event.rs` — EngineEvent::Error → Event::Disconnected 確認
+
+**教訓**:
+
+1. **コールバックを実装したら、そのコールバックが実際のコードパスから呼ばれることをテストせよ**:
+   `_on_kabu_board_push()` のような受信コールバックは単体テストがパスしても、
+   `_startup_kabu_station()` に `kabusapi_ws.connect()` が存在しなければ一切呼ばれない。
+   コールバック実装時は「誰がそれを登録するか」「起動フローに繋がれているか」を smoke test で確認する。
+
+2. **新しいコンポーネント（PUSH WS 等）を追加したら「起動されているか」の smoke test を追加せよ**:
+   機能追加時は動作確認テスト（コールバックの内容）だけでなく、
+   起動確認テスト（`asyncio.Task` が生成されているか等）も合わせて追加する。
+
+3. **`_ => {}` ワイルドカードアームは定期的に見直し、Error/Unknown イベントを握り潰していないか確認せよ**:
+   Rust の match 式で `_ => {}` を使うと、新しいバリアント（`EngineEvent::Error` 等）が
+   追加されてもコンパイルエラーにならずサイレントに無視される。
+   Error 系イベントは必ず明示的なアームで処理し、`Event::Disconnected` 等に変換してクライアントに通知する。
+
+---
+
+## 2026-05-09 — 立花ログアウト + kabu 認証失敗でラダーが "Loading…" から抜け出せない
+
+**見逃しパターン**: Venue-Error Deadlock（ベニュー認証失敗によるローディングデッドロック）
+
+**根本原因**（3段階のゲートが直列に絡む）:
+
+1. **kabu 認証失敗** — kabu ログイン時に `KabuApiError(4001007): ログイン認証エラー` が発生。
+   Python が `VenueError { code: "login_failed" }` を送信し、Rust は `VenueState::Error { ... }` へ遷移。
+   `is_ready = false` → `set_kabu_station_ready(false)` が呼ばれる。
+
+2. **ticker メタデータ未取得** — T35-U4 ゲート（`tickers_table.rs:190-206`）により、
+   kabu が ready でないとメタデータ fetch が実行されない。
+   `tickers_info` は空のまま。ログアウト状態の 立花も同様。
+
+3. **ストリーム解決の無限延期** — `handlers/dashboard.rs:117-123` で
+   `has_any_ticker_info = false` を検出し `Task::none()` で無期限に解決を延期。
+   pane は `ResolvedStream::Waiting { streams: [TOYOTA/Depth, ...] }` を保持したまま。
+   `has_stream() = true` → `uninitialized_base` が `"Loading…"` を返す（`pane.rs:897`）。
+
+結果：ラダーは `Content::Ladder(None)` のまま"Loading…"を永続的に表示。
+kabu エラーポップアップは表示されるが、ラダー自体は理由を伝えない。
+
+**追加したテスト**: なし（UX 設計ギャップであり、修正方針の決定が先行する）
+
+**教訓**:
+
+1. **"Loading…" は「待機中」を示すが「なぜ待つのか」を示さない**:
+   `pane.rs` の `uninitialized_base` は `has_stream() == true` のときに一律 "Loading…" を返す。
+   venue が Error 状態にあることを UI に伝える手段がない。
+   次回以降: venue 状態を pane に伝播するか、stream resolution 失敗時に pane に error フラグを立てること。
+
+2. **ゲートの直列構造をドキュメント化せよ**:
+   「venue ready → ticker info → stream resolve → ladder init」の4段ゲートが存在するが、
+   どこか一段でも失敗すると後続全体がデッドロックする。各ゲートの失敗が UI 上で見えない。
+   ゲートが複数存在する経路には必ず「失敗フォールバック表示」を設けること。
+
+3. **新しいパターン: Venue-Error Deadlock**:
+   venue ログインが失敗しても、pane 側は "Waiting" streams を持ち続けるため `has_stream()` が true のまま。
+   pane に「解決不能」を伝えるメッセージパスが存在しないと、"Loading…" は永続する。
+
+---
+
+## 2026-05-09 — kabu ログイン成功後もラダーが "Waiting for data..." のまま（PUSH 登録スタブ）
+
+**見逃しパターン**: PUSH 登録スタブ（実装漏れのサイレントフェイラー）
+
+**根本原因**（2つの独立したバグが直列）:
+
+**Bug A: `_kabu_put_register` スタブ** — `server.py:4037-4048`
+
+```python
+async def _kabu_put_register(self, symbols):
+    if ...: return   # ガード
+    if not symbols: return
+    log.info("re-registering %d symbols after reconnect", len(symbols))
+    # ← ここで終わり。PUT /register の HTTP 呼び出しが存在しない
+```
+
+ログに「re-registering N symbols」が出るので動作しているように見えるが、
+実際には `PUT http://localhost:18081/kabusapi/register` を一度も呼ばない。
+`KabuStationVenue` にも `KabuRestClient` にも `/register` エンドポイントのメソッドが存在しない。
+
+**Bug B: Subscribe 時の PUT /register 省略** — `server.py:1459`
+
+```python
+self._kabu_register_set.register(ticker, 1)
+# ← await self._kabu_put_register([...]) が呼ばれない
+```
+
+WS 接続中に新規 ticker が Subscribe されても、`PUT /register` は WS 再接続時のみ試みる設計。
+しかし Bug A によりその再接続時でも実際の API 呼び出しはない。
+
+**結果フロー**:
+1. kabu ログイン成功 → PUSH WS 起動
+2. WS 接続時: `_kabu_register_set` が空 → `PUT /register` 呼ばれず（正しい）
+3. TOYOTA Subscribe → `_kabu_register_set.register("9999", 1)` → PUT /register 呼ばれず（Bug B）
+4. kabuStation は TOYOTA PUSH 配信対象を知らない → `_on_kabu_board_push` 呼ばれない
+5. ラダー: orderbook 空 → `is_empty() = true` → "Waiting for data..."
+
+**追加すべきテスト**:
+- `python/tests/test_server_kabu_subscribe.py` に「Subscribe 後に PUT /register が呼ばれる」を追加
+- `python/tests/test_kabu_put_register.py` に「`_kabu_put_register` が実際に httpx PUT を呼ぶ」を追加
+
+**教訓**:
+
+1. **ログ行だけのスタブは「動いているように見える」最悪のサイレントフェイラー**:
+   `log.info("re-registering N symbols")` は成功を示唆するが、その後に実処理がない。
+   実装完了チェックは「ログが出る」ではなく「外部 API が実際に呼ばれる」で判断する。
+
+2. **「コールバックを渡している」≠「コールバックが正しく実装されている」**:
+   `kabusapi_ws.connect(put_register=self._kabu_put_register)` とコールバックを渡す形式は、
+   コールバック本体の実装漏れをコードレビューで見落としやすい。
+   新しいコールバックは必ず「実際に HTTP を叩く」E2E テストで検証する。
+
+3. **Subscribe → PUT /register の即時呼び出しが必要**:
+   WS 接続中の新規 ticker 登録は、RegisterSet への追加だけでなく
+   即座に `PUT /register` を呼ばないと kabuStation にデータを要求できない。
+   PUSH 系の銘柄登録は「設定する」と「サーバに通知する」の2ステップが必要であることを覚えておく。
+
+
+---
+
+## 2026-05-09 — kabu VenueReady 時に GetBuyingPower が未送信（立花の旧値が表示される）
+
+**見逃しパターン**: 対称性ギャップ（Tachibana にはある処理が kabu には未実装）
+
+**根本原因**:
+- `KabuEvent::Ready` ハンドラ（`src/handlers/venue.rs`）に `GetBuyingPower` の送信が欠落していた
+- `BuyingPowerAction`（更新ボタン）ハンドラが常に `TACHIBANA_VENUE_NAME` を使っていた（`src/handlers/dashboard.rs`）
+- `OrderListAction`（注文一覧更新ボタン）も同様に常に `TACHIBANA_VENUE_NAME` を使っていた
+- `src/main.rs` の `kabu_state` フィールドコメントに "no GetBuyingPower" と誤記があり、
+  開発時の意図的省略と誤解させた
+
+**追加したテスト**:
+- `tests/kabu_venue_tests.rs::kabu_venue_ready_sends_get_buying_power`
+- `tests/kabu_venue_tests.rs::buying_power_refresh_button_uses_active_venue`
+- `tests/kabu_venue_tests.rs::order_list_refresh_button_uses_active_venue`
+
+**教訓**:
+1. **新 venue を追加するとき、既存 venue の VenueReady ハンドラの処理リストを全部チェックする**:
+   立花 VenueReady が持つ GetBuyingPower / GetOrderList / GetPositions の3つを
+   kabu VenueReady にも揃えることが必要だった。
+   対称性ギャップは実装直後に `status_bar_login_chip_pin.rs` 等と同様の pin テストで検出できた。
+2. **ハードコードされた venue 名は危険**: `TACHIBANA_VENUE_NAME` をリテラルに持つ
+   ハンドラは多 venue 対応で必ず壊れる。venue を引数・state から動的に選択する設計にする。
+3. **コメントの "no X" は実装が完成したら削除する**: "no GetBuyingPower" コメントが
+   バグの見逃しを助長した。機能が追加されたらコメントも必ず更新する。
+
+---
+
+## 2026-05-09 — kabu ログイン済みでもラダーが "Waiting for data..." のまま（Issue #35）
+
+**見逃しパターン**: PUSH 登録スタブ / 孤立メソッド / 例外握り潰し後の資源継続登録 / タスク cancel 対称性欠如
+
+**根本原因**:
+- Bug A: `_kabu_put_register` がログのみのスタブで、PUT /register HTTP 呼び出しが存在しなかった
+- Bug B: `_handle_subscribe_kabu_station` が subscribe 後に `_kabu_put_register` を呼ばなかった
+- Bug C（修正過程で発覚）: `_clear_kabu_session` が `_kabu_push_task` をキャンセルしていなかった
+- Bug D（修正過程で発覚）: `kabusapi_ws.py` の `put_register` コールバック型が `Awaitable[None]` のまま
+
+**既存テストが見逃した理由**:
+- `test_server_kabu_subscribe.py` が `_kabu_register_set.register()` の成功と subscribe の受け入れのみをテストし、PUT /register HTTP が実際に呼ばれることをテストしなかった（孤立メソッドパターン）
+- `_kabu_put_register` のスタブ完成度が高く（ログ出力・早期リターン条件が完備）、コードを見ても動作しているように見えた
+
+**追加したテスト**:
+- `python/tests/test_kabu_put_register.py` — 13 件（put_register HTTP 呼び出し、subscribe 後の即時登録、KabuApiError 飲み込み、PUT 失敗時のセンチネル未作成、Unsubscribe の unregister 等）
+
+**教訓**:
+1. **コールバックの配線確認テストが必要**: `put_register=self._kabu_put_register` という配線だけでなく、「実際に HTTP PUT が送られるか」を統合レベルでテストする。httpx_mock を使えば HTTP 呼び出しの有無を検証できる。
+2. **例外を飲み込んだらリソース登録をスキップせよ**: except して return しても呼び出し元がリソースを「成功扱い」で登録すると silent failure になる。戻り値 `bool` で成否を伝達し、失敗時は登録をスキップする。
+3. **タスクは start と cancel を対称に**: `create_task` で起動したタスクは、対応する cleanup メソッドで必ず `cancel()` する。`_kabu_fill_poller_task` にはあったが `_kabu_push_task` には欠落していた。
+4. **コールバック型を変えたら呼び出し側も更新せよ**: `None → bool` の変更を `kabusapi_ws.py` のシグネチャと `await` 後の処理の両方に反映する必要があった。
+
+
+---
+
+## 2026-05-09 — kabu PUSH DepthSnapshot が market="spot" で送られ Rust depth_stream がスキップ (Bug C)
+
+**見逃しパターン**: バグ動作 pin / IPC market フィールド不一致
+
+**不具合の概要**:
+`_on_kabu_board_push` が `kabu_board_to_wire_dict(...)` を `market` 引数なしで呼ぶため、
+デフォルト値 `"spot"` が wire dict に入る。
+Rust の `depth_stream` は kabu 株式を `MarketKind::Stock` → `"stock"` で待機しており、
+`ev_market="spot"` と `"stock"` が不一致のため毎回 `continue` →
+ラダーに板データが届かず "Waiting for data..." が永続する。
+
+Issue #28 / #35 の修正（PUSH WS 起動・PUT /register 実装）が正しく入っていても、
+この Bug C により板データは最終的にスキップされていた。
+
+**根本原因**:
+`kabu_board_to_wire_dict` の `market` パラメータのデフォルト値が `"spot"` になっており、
+呼び出し側で明示しない限りバグが隠れる。kabu_station は日本株専用取引所であり
+`"stock"` 以外の市場は存在しないが、デフォルトを変えずに省略可能なままにしていた。
+
+**なぜ既存テストが見逃したか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `test_server_adapter_integration.py::test_ticker_and_default_market` | `payload["market"] == "spot"` と**バグ動作を仕様として固定**していた。テスト名も "default_market" とデフォルト値の確認を主目的として書かれており、「実際に Rust に渡る値が正しいか」を検証していなかった |
+| `test_kabu_put_register.py` | `_on_kabu_board_push` の outbox 内容を確認するテストが存在せず、market フィールドの値を一切検証していなかった |
+| `test_server_kabu_subscribe.py` | Subscribe パスのみ検証しており、PUSH データのパイプライン出力は範囲外 |
+| Python ユニットテスト全般 | Python 側は "spot" を書いても例外が出ない。Rust 側で `continue` して捨てるまでエラーが見えない（IPC 契約の両端をまたぐテストがなかった） |
+
+**修正内容**:
+- `server.py::_on_kabu_board_push`: `kabu_board_to_wire_dict(..., market="stock")` を明示
+- `server.py::_on_kabu_trade_push`: `kabu_execution_to_wire_dict(..., market="stock")` を明示
+- `test_server_adapter_integration.py::test_ticker_and_default_market` → `test_ticker_and_market` にリネームし、`market="stock"` を明示して呼ぶよう変更
+
+**追加したテスト**:
+- `python/tests/test_kabu_put_register.py::test_on_kabu_board_push_emits_market_stock` — outbox に market="stock" が入ることを検証
+- `python/tests/test_kabu_put_register.py::test_on_kabu_trade_push_emits_market_stock` — Trades wire dict にも market="stock" が入ることを検証
+
+**リグレッション確認**: `market="stock"` の引数を削除すると両テストが「outbox の market は 'stock' である必要があります（Bug C 未修正: 'spot'）」で FAIL する。追加後は PASS。
+
+**教訓**:
+
+1. **IPC 契約は両端（Python 出力 + Rust 受信フィルタ）をまたいで検証せよ**:
+   `ev_market != market_kind_to_ipc(market_kind)` のようなフィルタが Rust 側にあるとき、
+   Python 側でそのフィルタが期待する値と一致するかを統合テストで確認する。
+   同一言語テスト（Python→Python）だけでは見えない。
+
+2. **デフォルト引数は「正しいデフォルト」か「省略禁止」のどちらかにせよ**:
+   `market: str = "spot"` のように「間違ったデフォルト値」を設定すると、省略した呼び出し箇所でサイレントに誤動作する。
+   kabu_station は株式専用なので `market: str = "stock"` にするか、デフォルト引数をなくして必須にするか選択すべきだった。
+
+3. **テスト名が「デフォルト確認」だと仕様検証と見なされない**:
+   `test_ticker_and_default_market` は「デフォルト値を確認する」テストであり、「正しい仕様を守る」テストではない。
+   "spot" というデフォルト値そのものを仕様として固定してしまった。
+   テスト名には「何が守られるべきか」を書くべきで、実装詳細（default値）は書かない。
+
+---
+
+## 2026-05-10 — `matches_stream` が `depth_aggr` 不一致で Ladder データ未到達（issue #38）
+
+**見逃しパターン**: ルーティング述語全フィールド照合
+
+**不具合の概要**:
+`VenueCaps.client_aggr_depth = false`（KabuStation 国内株等）のティッカーで Ladder パネルを開くと、
+`DepthReceived` イベントが永久にパネルへ届かず「Waiting for data...」が表示され続ける。
+
+根本原因は三層の不整合：
+1. `engine-client/src/backend.rs` の `depth_stream` が常に `depth_aggr: StreamTicksize::Client` で emit する
+2. `data/src/layout/pane.rs` の `PaneSetup::new` は `client_aggr_depth = false` のとき `depth_aggr: StreamTicksize::ServerSide(TickMultiplier(50))` で登録する
+3. `src/connector/stream.rs` の `matches_stream` が `PartialEq`（全フィールド完全一致）で比較するため、`Client` vs `ServerSide` が不一致となりデータがルーティングされない
+
+**修正**: `src/connector/stream.rs` に `stream_eq` ヘルパーを追加し、`Depth` ストリームは `ticker_info` のみで照合するよう `matches_stream` を変更。
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `tests/kabu_venue_tests.rs` | ソースコードパターン検査（テキスト検索）のみ。`matches_stream` の実際のルーティング挙動を実行しない |
+| `tests/engine_event_routing*.rs` | 同様にソース検査。イベントディスパッチャの arm 存在確認のみ |
+| `tests/engine_event_routing_exhaustive.rs` | `map_engine_event_to_message` の arm 網羅性のみ。`DepthReceived` がパネルに届くか否かは検証しない |
+| E2E / smoke.sh | `DepthGap` ログはチェックするが「データが来ない」という silent failure は grep 対象外 |
+
+**構造的盲点**: `ResolvedStream::matches_stream` は単体テストがゼロだった。
+この述語はイベントルーティングの最初のフィルタであり、`false` を返すと上位ロジックへ
+何も伝わらない（silent drop）にもかかわらず、誰も直接テストしていなかった。
+
+**追加したテスト** (`src/connector/stream.rs` `#[cfg(test)] mod tests`):
+- `depth_matches_ignores_depth_aggr` — `ServerSide` 登録に `Client` emit がマッチすること（リグレッション Pin）
+- `depth_matches_same_depth_aggr` — `Client` ＋ `Client` の正常系が維持されること
+- `depth_does_not_match_different_ticker` — 異なる ticker は一致しないこと
+- `non_depth_stream_uses_exact_match` — `Trades` 等の非 Depth は完全一致のままであること
+
+**リグレッション確認**: `stream_eq` の `Depth` arm を除去（`a == b` に戻す）すると
+`depth_matches_ignores_depth_aggr` が FAIL する。修正を再適用すると PASS。
+
+**教訓**:
+
+1. **ルーティング述語は独立して単体テストする**:
+   `matches_stream` のような predicate が silent drop を引き起こす場合、
+   上位の E2E テストでは「データが来ない」としか観測できない。
+   predicate 自体を `(stored_stream, emitted_stream) → bool` の形で直接検証するテストが必要。
+
+2. **エミッター側の型と登録側の型が異なる場合は意味論的一致が必要**:
+   `StreamTicksize::Client` と `StreamTicksize::ServerSide(n)` は「エンジンが集約責任を持つ」
+   か「クライアントが持つ」かの実装詳細であり、同じ ticker のストリームを表す点では等価。
+   `PartialEq` の自動実装（全フィールド比較）は構造的一致だが、ドメイン的一致ではない。
+   ルーティング述語では「どのフィールドが識別子か」を意識的に選ぶ必要がある。
+
+3. **新取引所・新 VenueCaps フラグを追加するとき、`client_aggr_depth = false` のパスを必ず通すテストを書く**:
+   今回のバグは Bybit/Binance（常に `Client`）では発生せず、KabuStation のみで発生した。
+   取引所固有フラグが `false` のパスを単体テストで明示的にカバーすることで、
+   今後の新取引所追加時の同類バグを防げる。
+
+---
+
+## 2026-05-10 — kabu PUSH WS が 30 秒ごとに keepalive ping timeout で切断・再接続
+
+**見逃しパターン**: Mock 置換漏れ（count: 2→3）
+
+**不具合の概要**:
+`kabusapi_ws.py` の `websockets.connect()` に `ping_interval=20, ping_timeout=10` を
+設定していたが、kabuStation サーバーは RFC 6455 準拠の PONG を返さない。
+PING payload `ff 78 27 16`（4 bytes）に対して空 PONG（0 bytes）を返す。
+`websockets` ライブラリは payload 不一致の PONG を無視して待機を継続し、
+`ping_timeout=10` 秒後にタイムアウトして `CLOSE 1011` を送信する。
+これが 30 秒ごとの切断・再接続ループを引き起こした。
+
+**修正**: `ping_interval=None` を設定してライブラリの keepalive を無効化する。
+接続生存確認はメッセージ受信に委ねる。
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `python/tests/test_kabusapi_ws.py` の全テスト | `fake_connect(url, **kwargs)` でモックしているが `kwargs` の内容（`ping_interval` 等）を検証するアサーションが一切なかった。接続の成否だけを検証し、接続パラメータの正確性は未テスト |
+
+**追加したテスト**:
+- `python/tests/test_kabusapi_ws.py::test_connect_passes_ping_interval_none_to_websockets`
+  — `websockets.connect()` に `ping_interval=None` が渡されることを検証するリグレッションテスト
+
+**リグレッション確認**: 修正前（`ping_interval=20`）で FAIL、修正後（`ping_interval=None`）で PASS を実際に確認済み。
+
+**教訓**:
+
+1. **`websockets.connect()` のパラメータを検証するテストを書く**:
+   `compression=None` の教訓（2026-04-25）と同じ構造。モックで接続をスタブするだけでなく、
+   `captured_kwargs` を検証してライブラリ設定の正確性を保証する。
+
+2. **「設定値の削除で元に戻る」バグは必ずリグレッションテストを追加する**:
+   `ping_interval=None` はコードレビューで見落とされやすい 1 行の削除で元に戻せる。
+   この種の設定値は「動いていること」だけで正しさを判定できないため、
+   引数の中身を assert するテストが唯一のガード。
+
+3. **外部サーバーの RFC 非準拠挙動はドキュメントと合わせて固める**:
+   kabuStation の PONG 非準拠（空 PONG）はサーバー側の仕様であり変わらない。
+   コードコメントに根拠を書き、テストでも enforcement することで仕様の維持を保証する。
+
+**追記 (review-fix-loop R1-R2 で発覚した追加問題)**:
+
+- **async for vs ws.recv() の振る舞い差異**: websockets 16.0 の `__aiter__` は `ConnectionClosedOK` を `StopAsyncIteration` に変換するため、`async for raw in ws:` 使用時は `except ConnectionClosedOK` に到達しない。`ws.recv()` を直接呼び出すことで例外が正しく伝播する。
+- **受信タイムアウト追加**: `asyncio.wait_for(ws.recv(), timeout=_RECV_TIMEOUT_S)` で無メッセージ接続ハングを検出し再接続する実装を追加。テスト `test_recv_timeout_triggers_reconnect` を追加。
+- **put_register 型不一致**: テストで `lambda symbols: True` を使っていたが `AsyncMock(return_value=True)` に修正。
+
+4. **ライブラリバージョンによる `__aiter__` の挙動差異を確認せよ**:
+   `async for` と `ws.recv()` 直接呼び出しでは例外伝播の挙動が異なる。
+   `async for` はライブラリ内部で特定例外を `StopAsyncIteration` に変換する可能性がある。
+   接続クローズ例外を `except` で拾いたい場合は `ws.recv()` を直接呼び出す。

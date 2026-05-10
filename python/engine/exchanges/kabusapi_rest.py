@@ -246,3 +246,24 @@ class KabuRestClient:
             raise KabuApiError(resp.status_code, f"symbolname/option non-JSON response: {exc}") from exc
         check_response(body, resp.status_code)
         return body
+
+    async def put_register(self, symbols: list[tuple[str, int]]) -> dict[str, Any]:
+        """PUT /register — PUSH 銘柄登録リストを全件置換する。
+
+        kabuStation の PUT /register は additive ではなく全件置換。
+        空リストの場合は HTTP を送らずに即リターンする。
+        """
+        if not symbols:
+            return {}
+        payload = {"Symbols": [{"Symbol": s, "Exchange": e} for s, e in symbols]}
+        async with self._info_bucket:
+            url = endpoint("register", env=self._env)
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.put(url, headers=self._headers(), json=payload)
+        try:
+            body = resp.json()
+        except Exception as exc:
+            logger.error("kabu register: non-JSON response HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise KabuApiError(resp.status_code, f"register non-JSON response: {exc}") from exc
+        check_response(body, resp.status_code)
+        return body
