@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use iced::Task;
 
-use crate::Message;
 use crate::messages::{DashboardMsg, EngineMsg, MenuMsg, VenueMsg};
 use crate::venue_state::VenueEvent;
 use crate::widget::toast::Toast;
+use crate::{LiveStrategyState, Message};
 
 impl crate::Flowsurface {
     pub(crate) fn handle_engine(&mut self, msg: EngineMsg) -> Task<Message> {
@@ -58,6 +58,18 @@ impl crate::Flowsurface {
                 // 流儀 (buying_power_request_id 等のリセットと対称) で扱う。
                 if let Some(form) = self.live_strategy_form_modal.as_mut() {
                     form.release_scenario_pending();
+                }
+                // R4 R3-SILENT-4: live session が Running でなければ pending 状態を
+                // reset する。reconnect 直前に「pending だが Ready が来ない」状態
+                // だった場合、reconnect 後も古い pending_strategy_id が残ると
+                // 後続の LiveWarmupTimeoutFired を誤照合して既に消えた session の
+                // banner を出してしまう silent UX failure になる。
+                // Running 状態 (LiveStrategyReady 受信済み) は保持する — reconnect
+                // 後に EngineRehello → 4 ペイン再生成の冪等再生経路が走るため。
+                if !matches!(self.live_strategy, LiveStrategyState::Running { .. }) {
+                    self.live_strategy_pending_strategy_id = None;
+                    self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
+                    self.live_warmup_warming_message = None;
                 }
                 self.active_dashboard_mut()
                     .distribute_buying_power_loading(main_window, false);

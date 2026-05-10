@@ -478,6 +478,43 @@ fn test_disabled_reason_disables_submit() {
     );
 }
 
+// ── R4 R3-SILENT-4: EngineConnected で pending_strategy_id を reset ──────────
+
+/// engine reconnect 時、live session が Running でなければ pending_strategy_id /
+/// warmup timeout token / warming message を reset すること。reconnect 直前まで
+/// 「pending だが reply が来ない」状態だった場合、reconnect 後も古い
+/// pending_strategy_id が残ると後続の LiveWarmupTimeoutFired を誤照合して
+/// 既に消えた session のバナーを出してしまう silent UX failure になる。
+#[test]
+fn test_engine_connected_resets_pending_strategy_id() {
+    let pos = HANDLER_ENGINE
+        .find("EngineMsg::Connected(conn)")
+        .expect("EngineMsg::Connected arm not found");
+    let mut end = (pos + 6000).min(HANDLER_ENGINE.len());
+    while end > 0 && !HANDLER_ENGINE.is_char_boundary(end) {
+        end -= 1;
+    }
+    let arm = &HANDLER_ENGINE[pos..end];
+
+    // 「live が Running でなければ pending 状態をクリアする」ガード + リセット文を pin。
+    assert!(
+        arm.contains("LiveStrategyState::Running"),
+        "EngineConnected arm must check LiveStrategyState::Running before reset: {arm}"
+    );
+    assert!(
+        arm.contains("live_strategy_pending_strategy_id = None"),
+        "EngineConnected arm must reset live_strategy_pending_strategy_id when not Running: {arm}"
+    );
+    assert!(
+        arm.contains("live_warmup_timeout_token"),
+        "EngineConnected arm must bump live_warmup_timeout_token to invalidate stale timers: {arm}"
+    );
+    assert!(
+        arm.contains("live_warmup_warming_message = None"),
+        "EngineConnected arm must clear live_warmup_warming_message: {arm}"
+    );
+}
+
 // ── R4 R3-SILENT-3: LiveStopped (正常停止) 経路でも teardown_live_panes ──────
 
 /// 旧実装は LiveStopped arm で `clear_live_pane_keys()` だけ呼び、実際の 4 ペイン
