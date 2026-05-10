@@ -1,10 +1,10 @@
 // tests/gui_verify.rs
 // cargo test verify_empty_state_message -- --ignored --nocapture で実行
 
+use base64::Engine as _;
 use image::DynamicImage;
 use std::time::{Duration, Instant};
 use xcap::Window;
-use base64::Engine as _;
 
 fn wait_for_window(prefix: &str, timeout: Duration) -> anyhow::Result<Window> {
     let deadline = Instant::now() + timeout;

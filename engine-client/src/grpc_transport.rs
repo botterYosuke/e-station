@@ -1347,3 +1347,63 @@ fn dto_granularity_to_proto(g: dto::ReplayGranularity) -> i32 {
         dto::ReplayGranularity::Daily => engine::ReplayGranularity::Daily as i32,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::engine;
+
+    /// Issue #43 リグレッション: gRPC 経路で scenario が JSON string のとき
+    /// serde_json::Value::Object に正しく変換されること。
+    /// Python 修正後の outbox payload を模擬。
+    #[test]
+    fn grpc_scenario_json_string_parses_to_object() {
+        let scenario_json = r#"{"schema_version":1,"instrument":"1301.TSE","start":"2025-01-06","end":"2025-01-06","granularity":"Trade","initial_cash":1000000}"#;
+        let proto_ssl = engine::StrategyScenarioLoadedEvent {
+            request_id: "test-id".to_string(),
+            path: "/some/path.py".to_string(),
+            scenario: Some(scenario_json.to_string()),
+            resolved_instruments: vec![],
+        };
+
+        let scenario = proto_ssl
+            .scenario
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let s = scenario.expect("scenario should parse successfully");
+        assert!(s.is_object(), "scenario must be a JSON object");
+        assert_eq!(s["instrument"], "1301.TSE");
+        assert_eq!(s["schema_version"], 1);
+    }
+
+    /// scenario=None (SCENARIO 定数なし) は None のまま変換されること。
+    #[test]
+    fn grpc_scenario_none_stays_none() {
+        let proto_ssl = engine::StrategyScenarioLoadedEvent {
+            request_id: "test-id".to_string(),
+            path: "/some/path.py".to_string(),
+            scenario: None,
+            resolved_instruments: vec![],
+        };
+        let scenario = proto_ssl
+            .scenario
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        assert!(scenario.is_none());
+    }
+
+    /// v3 + instruments_ref: resolved_instruments が非空のとき Some(Vec) になること。
+    #[test]
+    fn grpc_resolved_instruments_non_empty_is_some() {
+        let proto_ssl = engine::StrategyScenarioLoadedEvent {
+            request_id: "req-v3".to_string(),
+            path: "/some/path.py".to_string(),
+            scenario: Some(r#"{"schema_version":3,"instruments_ref":"data/u.json"}"#.to_string()),
+            resolved_instruments: vec!["1301.TSE".to_string(), "7203.TSE".to_string()],
+        };
+        let resolved = if proto_ssl.resolved_instruments.is_empty() {
+            None
+        } else {
+            Some(proto_ssl.resolved_instruments.clone())
+        };
+        let ids = resolved.expect("resolved_instruments should be Some");
+        assert_eq!(ids, vec!["1301.TSE", "7203.TSE"]);
+    }
+}

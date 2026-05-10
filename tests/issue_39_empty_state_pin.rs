@@ -336,7 +336,9 @@ fn positions_view_shows_login_required_when_not_ready() {
             .find("if let Some(ref err)")
             .map(|o| is_empty_start + o)
             .unwrap_or(is_empty_start);
-        src[replay_end..].find("if panel.positions.is_empty()").map(|o| replay_end + o)
+        src[replay_end..]
+            .find("if panel.positions.is_empty()")
+            .map(|o| replay_end + o)
     };
     let block_start = after_replay.unwrap_or(is_empty_start);
     let is_empty_block = &src[block_start..(block_start + 500).min(src.len())];

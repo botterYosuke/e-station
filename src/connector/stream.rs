@@ -9,8 +9,12 @@ use exchange::adapter::StreamKind;
 fn stream_eq(a: &StreamKind, b: &StreamKind) -> bool {
     match (a, b) {
         (
-            StreamKind::Depth { ticker_info: ta, .. },
-            StreamKind::Depth { ticker_info: tb, .. },
+            StreamKind::Depth {
+                ticker_info: ta, ..
+            },
+            StreamKind::Depth {
+                ticker_info: tb, ..
+            },
         ) => ta == tb,
         _ => a == b,
     }
@@ -109,7 +113,7 @@ impl ResolvedStream {
 mod tests {
     use super::*;
     use exchange::{
-        PushFrequency, TickMultiplier, TickerInfo, Ticker,
+        PushFrequency, TickMultiplier, Ticker, TickerInfo,
         adapter::{Exchange, StreamKind, StreamTicksize},
     };
 
@@ -200,10 +204,14 @@ mod tests {
     fn non_depth_stream_uses_exact_match() {
         let ticker = kabu_ticker();
 
-        let stored = StreamKind::Trades { ticker_info: ticker };
+        let stored = StreamKind::Trades {
+            ticker_info: ticker,
+        };
         let resolved = ResolvedStream::Ready(vec![stored]);
 
-        assert!(resolved.matches_stream(&StreamKind::Trades { ticker_info: ticker }));
+        assert!(resolved.matches_stream(&StreamKind::Trades {
+            ticker_info: ticker
+        }));
         assert!(!resolved.matches_stream(&StreamKind::Trades {
             ticker_info: TickerInfo::new_stock(
                 Ticker::new("6758", Exchange::KabuStationTse),
