@@ -200,6 +200,27 @@ fn test_warming_up_resets_timeout_counter() {
     );
 }
 
+/// R2-B H3: LiveWarmingUp arm は strategy_id を pending / running と照合し、
+/// mismatch の場合は早期 return する（旧 strategy の遅延 ticker で banner / timer が
+/// 誤動作するのを防ぐ）。
+#[test]
+fn test_live_warming_up_ignores_mismatched_strategy_id() {
+    let arm = handler_arm("ReplayMsg::LiveWarmingUp {");
+    assert!(
+        arm.contains("live_strategy_pending_strategy_id"),
+        "LiveWarmingUp arm must check live_strategy_pending_strategy_id: {arm}"
+    );
+    assert!(
+        arm.contains("LiveStrategyState::Running"),
+        "LiveWarmingUp arm must also check the running-state strategy_id: {arm}"
+    );
+    // mismatch 経路は早期 return (Task::none()) を返す。
+    assert!(
+        arm.contains("return Task::none()"),
+        "LiveWarmingUp arm must early-return when strategy_id mismatches: {arm}"
+    );
+}
+
 #[test]
 fn test_live_warmup_timeout_constant_is_60s() {
     // Pin the canonical value (統一決定 #17). Any change must be deliberate.

@@ -651,6 +651,28 @@ impl crate::Flowsurface {
                 progress: _,
                 message,
             } => {
+                // R2-B H3: 別 strategy 用の warm_up 進捗を誤って banner / timer に
+                // 反映しないよう strategy_id 照合を加える。pending（EngineStarted 後
+                // Ready 前）または Running（Ready 後 / 後追い ticker）のいずれかに
+                // 該当する場合のみ受け取る。それ以外は古い start のものとして無視。
+                let matches_pending = self.live_strategy_pending_strategy_id.as_deref()
+                    == Some(strategy_id.as_str());
+                let matches_running = matches!(
+                    &self.live_strategy,
+                    LiveStrategyState::Running { strategy_id: s, .. } if s == &strategy_id
+                );
+                if !matches_pending && !matches_running {
+                    log::debug!(
+                        "LiveWarmingUp ignored — strategy_id mismatch \
+                         (got={strategy_id}, pending={:?}, running={:?})",
+                        self.live_strategy_pending_strategy_id,
+                        match &self.live_strategy {
+                            LiveStrategyState::Running { strategy_id: s, .. } => Some(s.clone()),
+                            LiveStrategyState::Idle => None,
+                        }
+                    );
+                    return Task::none();
+                }
                 self.live_warmup_warming_message = Some(message);
                 // 既存タイマーを無効化して 60s タイマーを再起動する（カウンタリセット）。
                 let token = self.live_warmup_timeout_token.wrapping_add(1);
