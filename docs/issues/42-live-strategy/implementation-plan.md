@@ -499,3 +499,24 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **CLI E2E 拡張ポイント**: 現状の `test_live_session_cli_e2e.py` は lifecycle subsequence のみを観測する最小実装。将来 (a) `LiveBuyingPower` の数値 invariants（initial_cash と一致など）、(b) `EngineBusy` 経路の reject 確認、(c) `--mode auto` の attach probe → fallback inprocess の path 切替 を追加する場合、`@pytest.mark.live_demo` 配下に新 test 関数を追加する。helper `_expected_subsequence` は再利用可能
   - **loader pin の AST 走査拡張**: 本 Phase の AST 走査は `_load_user_strategy` / `_make_replay_strategy` の 2 関数に絞っている。将来 `LiveSession.run` 内部で別 loader を呼ぶような refactor が入った場合、`engine.replay_session` 側にも同様の AST pin を追加する。現状 `replay_session.py` は `engine_runner.start_live` に委譲しているのみで loader を持たないため、ここに pin を入れる必要は無い
   - **schema bump 不要を維持**: 本 Phase で proto / schemas.py の変更ゼロ。SCHEMA_MINOR=28 のまま。`/ipc-schema-check` skill PASS 状態を維持
+
+#### Phase 7 レビュー反映（2026-05-11, ラウンド 1 / セルフレビュー）
+- 担当: phase7-agent (self-review)
+- 主要 commit: `b502b4e` — fix(cli-e2e): login() 呼出修正 + 未使用 import 整理
+- ✅ 解消した指摘:
+  - **MEDIUM-1**: `test_attach_mode_full_lifecycle` で `sess.login()` を呼んでいなかった。`LiveSession.run` は `self._logged_in == True` を要求する（`replay_session.py:2124` で `RuntimeError("call login() before run()")`）。attach 経路では credential 明示渡しせず `sess.login()` を呼ぶと engine に `RequestVenueLogin` を送る ack handshake になる（`live_session_cli.py` 経路と整合、CLI も同じく `s.login(user_id=user_id, password=password)` を呼ぶ）。ローカルで実 engine が無いため動的検証はできないが、コード経路をなぞって不整合を発見
+  - **LOW-1**: `import io` が未使用だったため削除（CLI 単体テスト `test_live_session_cli.py` から copy-paste した残骸）
+  - **LOW-2**: `_resolve_repo_root()` の戻り値型注釈を `Path` で明示（`pathlib.Path` を module top-level import に移動）
+  - **LOW-3**: attach test docstring の「ログイン操作は行わない」を「ack handshake として `login()` を呼ぶ」に訂正（コードと文言を整合）
+- 設計判断（追加分）:
+  - **attach mode の `sess.login()` の役割**: 「credential を wire に流さない」と「engine に ack handshake を送らない」は **別の話**。前者は統一決定 #7 の不変条件（credential を wire 経由で送らない）、後者は LiveSession の内部 state machine（`_logged_in == True` への遷移）。attach 経路の `login()` は credential 引数を渡さなければ engine に `RequestVenueLogin` を送るだけで credential は wire に乗らない（実装は `replay_session.py:1877-1903`）
+  - **AST 走査による loader pin の表現力**: review 時に「同 class 比較だけだと両経路が別関数経由で同じ class を返す silent failure を見逃す」と判断し、AST 走査を 3 段重ねの一部に組み込んだ（オリジナル設計も同じ）。これは「fork detect の確実性 vs テストの脆さ（AST 構造が変わると false positive）」のトレードオフだが、loader 統一は本 issue の中核 invariant（受け入れ基準 #21）なので false positive 側に倒すのが安全
+- 検証:
+  - `uv run pytest python/tests/test_live_session_cli_e2e.py python/tests/test_strategy_live_replay_smoke.py -v --timeout=60` → 10 passed, 2 skipped (live_demo / live_demo_inprocess は実 engine 無しで graceful skip)
+  - `uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana and not demo_kabu and not live_demo and not live_demo_inprocess" --timeout=120` → 2256 passed / 106 skipped / 200 deselected（regression なし）
+- 残存 LOW（対応不要）:
+  - **LOW-A**: in-process E2E テストの実機検証は行えていない（ローカル credential が無いため）。実機検証は本 issue close 後の手動 smoke で別途行う想定。テストロジック自体は CLI フロー（`live_session_cli.py:455-482`）を直接なぞっているため、CLI 単体テストが pass する限り実機での挙動も整合的に推測できる
+  - **LOW-B**: `gRPC integration test の --test-threads=1 必須化` は実装プランに知見として記載済だが、CI 自動化（GitHub Actions workflow への組込）は本 Phase の scope 外。将来 `python-tests-grpc.yml` のような独立 workflow を起こす別 issue を切り出す候補
+- 次フェーズへの引き継ぎ（最終 review-fix-loop / 本 issue close 前）:
+  - **GUI スモーク** (`/iced-gui-testing` skill) は別途実機で実行する想定（本 Phase の自動テスト範囲外、issue Phase 7 の §「GUI スモーク」を参照）
+  - **実機 demo lifecycle 検証**: `tachibana-demo.yml` を `gh workflow run tachibana-demo.yml` で叩いて attach mode lifecycle が green になるかは、実 engine + 立花 demo 環境が用意できた段階で 1 回手動確認する。Phase 7 の責務は test と CI 配線までで、実機 trigger は scope 外
