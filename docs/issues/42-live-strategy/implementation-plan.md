@@ -409,3 +409,26 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **README §C は live モード CLI コマンドの SoT に近い**: Phase 6 で起票したスタブは「TODO」付きで最小限だったが、Phase 5 で 3 段階フロー + 安全装置 + GUI 経路を完全に記載。今後 CLI 引数の追加 / 安全装置の更新があったら README §C を一次更新先にするのが整合的（specs/live-strategy.md §5 は契約レベル、README §C はユーザー向けクイックスタート）
   - **kabu_station example の今後**: 現状 README §C に「`--venue kabu_station` を指定するだけ」と記載しているが、実機で動かすには Phase 4 引き継ぎ Tips の H-1（Nautilus 親クラス継承）と M-3（RegisterSet 二重化）が解消されている必要がある。Phase 7 統合テストは tachibana 経路に集中し、kabu_station live 経路のテストは別 issue に切り出す方針が合理的
   - **live_sample.py の将来の扱い**: 現状の docstring で位置づけは明示できているが、将来 `examples/live_logger_only.py` へリネームする選択肢は残っている。リネームする場合は (a) git mv で履歴を保つ、(b) README §C と test 注釈の参照を grep で更新、(c) STRATEGY_CONFIG / STRATEGY_CLASS の global 定数（strategy_loader が探す）が export されているか確認、の 3 点を 1 commit で行う必要がある
+
+#### Phase 5 レビュー反映（2026-05-10, ラウンド 1 / セルフレビュー）
+- 担当: phase5-agent (self-review)
+- 主要 commit: `5f5b56d` — fix(issue-42): Phase 5 self-review
+- ✅ 解消した指摘:
+  - **HIGH-1**: `live_session_cli.py::_build_arg_parser` の `--venue` argparse choices が `["tachibana"]` のままで、Phase 4 で完了済の kabu_station capability flip + `engine_runner.start_live(venue=...)` dispatch と整合していなかった。`["tachibana", "kabu_station"]` に拡張 + `test_venue_choices_accept_tachibana_and_kabu_station` / `test_venue_choices_reject_unknown` を新設（RED→GREEN）。これで README §C の kabu_station 例 (`--venue kabu_station`) が成立する
+  - **MEDIUM-1**: README §C で sh code block のみだったため Windows ユーザーが `$env:TACHIBANA_ALLOW_PROD=1` 構文への置換を強いられていた。Linux/macOS（bash/zsh）と Windows（PowerShell 7+）の 2 ブロックで完全コマンド例を併記
+  - **MEDIUM-2**: README §C の demo / prod 例が `--mode auto` を使っており、attach 経路に入った場合 stdin 第二暗証番号が wire に流れない hint が stderr に出る挙動を説明していなかった。`--mode inprocess` を例示に変更し、attach / inprocess / auto の意味を冒頭 1 段落で説明 + GUI 連携時の `--mode attach` への切替を注意ブロックで記載
+- 設計判断（追加分）:
+  - **CLI argparse choices 更新を Phase 5 範疇とした理由**: Phase 4 で engine 側 dispatch / capability flip は完了していたが、CLI argparse の choices だけ tachibana 限定のまま残っていた（取りこぼし）。これを修正しないと「README §C で kabu_station 例を書く Phase 5 のゴール」が破綻するため、Phase 5 で 1 行 + テスト 2 件で fix。Phase 4 引き継ぎ Tips の「M-1 GUI venue dropdown」は別件（Rust GUI 側）として残す
+  - **PowerShell 構文を併記する範囲**: 開発者向けの完全コマンド例（demo / prod の 3 段階）と kabu_station 例の主ブロックのみ。`--prod` 失敗例 / GUI 起動例は sh のみ（短く・OS 依存度低い）
+  - **`--mode inprocess` を default 例示に選んだ理由**: (a) 挙動が予測しやすい（GUI が無くても動く / attach probe 不要 / stdin 第二暗証番号が確実に wire に流れる）、(b) replay の `--mode inprocess` と対称、(c) attach 連携は注意ブロックで補足するだけで充分
+- 検証:
+  - `uv run pytest python/tests/test_live_session_cli.py` 17 件 GREEN（+2 件）
+  - `uv run pytest python/tests/` 2442 passed / 120 skipped（Phase 5 全体で +8 件、regression なし）
+  - `uv run python -m tools.lint.check_examples_readme` OK（heading 文字列「ライブで動かす」を維持）
+  - `uv run python -m tools.lint.check_live_login_call` OK
+  - `cargo clippy --workspace --tests -- -D warnings` clean（Phase 5 では Rust 変更なし）
+- 残存 LOW（対応不要）:
+  - **LOW-1**: `examples/test_strategy_*.py` の `from nautilus_trader.model.data import ...` 行が LIVE_SCENARIO トップレベル定数の **後** にある（PEP 8 では import が上にあるべき）。既存 SCENARIO も同じ構造で、`extract` / `extract_live` がトップレベル assignment を AST で見るため副作用ゼロ。修正は将来 example 全体を再整理する別 PR で対応する
+  - **LOW-2**: `python/tests/test_examples_live_scenario.py::_assert_live_scenario_well_formed` で `int(scenario["max_qty"])` のように防御的 conversion をかけているが、`extract_live` が `_validate_live_v1` で int 型を強制済のため redundant。test 意図の明示性を優先して残す
+- 次フェーズへの引き継ぎ:
+  - Phase 7（統合テスト）で kabu_station venue 経由の live test を書く場合、`live_session_cli.py --venue kabu_station --mode inprocess` 経路が CLI argparse を通過することは Phase 5 で pin 済（H-1 = Nautilus 親クラス継承未対応のため warm_up 経路までの subset テストになるが、CLI argparse → engine config は通る）
