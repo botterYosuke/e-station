@@ -106,24 +106,12 @@ fn kabu_is_production() -> bool {
 
 /// Extract the kabu venue's `is_production` flag from a `Ready.capabilities`
 /// JSON blob. P4-4: returns `false` when the field is absent (older engines /
-/// verify env), `true` only when explicitly advertised. Logs a warning on
-/// deserialization errors so Python/Rust schema drift surfaces visibly instead
-/// of silently defaulting to verify styling (R1-MEDIUM).
+/// verify env), `true` only when explicitly advertised. issue #42 Phase 3.5 で
+/// 共通ヘルパー `engine_client::capabilities::is_production` に薄いリネーム委譲。
+/// 安全側 (= verify 表示) フォールバック仕様は不変（malformed wire / 異 venue /
+/// cap 欠落いずれも false）。schema drift の検知は `/ipc-schema-check` skill 側で担う。
 fn parse_kabu_is_production(capabilities: &serde_json::Value) -> bool {
-    match engine_client::capabilities::venue_capability::<bool>(
-        capabilities,
-        KABU_STATION_VENUE_NAME,
-        "is_production",
-    ) {
-        Ok(v) => v.unwrap_or(false),
-        Err(e) => {
-            log::warn!(
-                "parse_kabu_is_production: capability parse error ({e}), \
-                 defaulting to verify (false) — check Python/Rust schema alignment"
-            );
-            false
-        }
-    }
+    engine_client::capabilities::is_production(capabilities, KABU_STATION_VENUE_NAME)
 }
 
 /// P4-4: produce the kabu chip's (label_prefix, dot_text, dot_color) when
