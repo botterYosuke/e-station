@@ -291,3 +291,46 @@ class TestActiveLiveVenuesDiscardedOnCancellation:
             "_active_live_venues must be discarded on CancelledError "
             f"(SIGTERM 経路の cleanup 失敗), got {server._active_live_venues!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# R4 R3-SILENT-6: _connected_venue 未設定時の hardcode fallback 撤廃
+# ---------------------------------------------------------------------------
+
+
+class TestVenueNotConnectedRejectsLiveStart:
+    """R3-SILENT-6: ``_connected_venue`` が未設定なら StartEngine(Live) を reject する。
+
+    旧実装は ``current_venue = getattr(self, "_connected_venue", None) or "tachibana"``
+    の hardcode fallback で「未接続なのに tachibana として動こうとして失敗する」
+    silent failure を抱えていた。venue 未接続なら ``Error{code:"venue_not_connected"}``
+    を emit + early return することで Rust 側に正しく状態を伝える。
+    """
+
+    @pytest.mark.asyncio
+    async def test_venue_not_connected_rejects_live_start(self) -> None:
+        """``_connected_venue`` が None なら StartEngine(Live) は reject される。"""
+        server = _make_server()
+        # 既存 fixture は ``_connected_venue = "tachibana"`` を設定済み → reset
+        server._connected_venue = None
+
+        msg = _start_engine_msg("orphan-strategy", "req-orphan-1")
+        await server._handle_start_engine(msg)
+
+        # Error{code:"venue_not_connected"} が emit される
+        errors = [
+            e for e in server._outbox
+            if e.get("event") == "Error" and e.get("code") == "venue_not_connected"
+        ]
+        assert len(errors) == 1, (
+            f"expected 1 Error(venue_not_connected), got events={list(server._outbox)!r}"
+        )
+        assert errors[0]["request_id"] == "req-orphan-1", errors[0]
+
+        # tachibana hardcode fallback が走っていないこと
+        assert "tachibana" not in server._active_live_venues, (
+            "hardcode fallback to 'tachibana' must be removed: "
+            f"_active_live_venues={server._active_live_venues!r}"
+        )
+        # 起動経路にも進まない (engine_tasks に登録されていない)
+        assert "orphan-strategy" not in server._engine_tasks

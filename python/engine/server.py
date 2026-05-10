@@ -4853,7 +4853,29 @@ class DataEngineServer:
             if active_live_venues is None:
                 active_live_venues = set()
                 self._active_live_venues = active_live_venues
-            current_venue = getattr(self, "_connected_venue", None) or "tachibana"
+            # R4 R3-SILENT-6: ``_connected_venue`` の hardcode fallback "tachibana"
+            # 撤廃。venue 未接続 (None / 空文字) のまま StartEngine が来たら、後段の
+            # venue_not_supported / `_active_live_venues` cleanup 漏れ等の silent
+            # failure を防ぐため早期 reject する。venue 種別の妥当性 (tachibana /
+            # kabu_station) 検査は live 分岐内の既存 venue_not_supported チェック
+            # に任せる (本ガードは「venue が確定しているか」だけを見る)。
+            current_venue = getattr(self, "_connected_venue", None)
+            if not current_venue:
+                log.error(
+                    "[StartEngine Live] _connected_venue is not set — "
+                    "cannot determine venue (request_id=%s)",
+                    request_id,
+                )
+                _emit(
+                    {
+                        "event": "Error",
+                        "request_id": request_id,
+                        "code": "venue_not_connected",
+                        "message": "venue が未接続です",
+                    }
+                )
+                await _drain()
+                return
             if current_venue in active_live_venues:
                 from engine.schemas import EngineBusy as EngineBusyModel
                 payload = EngineBusyModel(
@@ -4913,11 +4935,12 @@ class DataEngineServer:
         # が同 venue で来たら EngineBusy で reject される。
         # 終了時（正常 / 例外 / timeout / warm_up failure 問わず）には
         # finally 節で discard する。
+        # R4 R3-SILENT-6: 旧実装の "tachibana" hardcode fallback を撤廃。上で
+        # ``_connected_venue`` 未設定なら早期 reject 済みなので、ここでは値が
+        # 確定している前提で使う。
         live_venue_for_cleanup: "str | None" = None
         if engine_kind == "Live":
-            live_venue_for_cleanup = (
-                getattr(self, "_connected_venue", None) or "tachibana"
-            )
+            live_venue_for_cleanup = getattr(self, "_connected_venue", None)
             # 上で初期化を保証済みだが defensive に再確認する。
             if not hasattr(self, "_active_live_venues"):
                 self._active_live_venues = set()
