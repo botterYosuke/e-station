@@ -120,7 +120,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--venue", default="tachibana", choices=["tachibana", "kabu_station"],
         help=(
-            "venue 識別子（Phase 4 で kabu_station 対応済 / capability "
+            "venue 識別子（Phase 4 + R2-C で kabu_station 対応済 — "
+            "Nautilus 親継承で `node.build()` 通過可能 / capability "
             "supports_live_strategy=True を満たす venue のみ）"
         ),
     )

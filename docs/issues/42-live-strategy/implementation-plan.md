@@ -220,7 +220,7 @@ Wave 4: Final review
   - **server.py の `_active_live_venues` cleanup**: kabu_station venue が venue として "kabu_station" 文字列で登録される設計（Phase 4 完了時）。現状 ``self._connected_venue or "tachibana"`` で fallback しているが、Phase 4 で kabu live が解放されたら `self._connected_venue` が "kabu_station" になっているはずなので fallback は問題ない。ただし Phase 4 では `_handle_start_engine` の `venue_not_supported` reject が外れるので、その時点で再確認すること
   - **未対応 silent failure（次フェーズ対象）**: `start_live` の warm_up 失敗時に server.py 側で `Error{request_id, code:"engine_run_failed"}` を emit する経路が抜けている（exception を catch する except 経路でしか送らない）。CLI 側で blocking 待機する Rust client は EngineStopped で待機解除する設計のため致命ではないが、Rust 側の Error 待ちロジックが追加されたら問題になる。Phase 6 review で要再確認
   - **CLI exit code 体系**: 0=正常、1=一般エラー（EngineError / login fail / unexpected）、2=busy（EngineBusy / engine_already_running）、3=auth required（SecondPasswordRequired）。replay CLI と整合させた
-- ✅ 達成した受け入れ基準: #1 (CLI 経路 — `test_attach_starts_engine_for_replay_strategy_unchanged` + `test_inprocess_starts_engine_for_replay_strategy_unchanged`), #6 (`test_invalid_config_when_max_qty_missing` + `test_max_qty_zero_or_negative_reject` + `test_max_notional_overflow_reject`), #7 (`test_prod_blocked_without_env`), #8 CLI 部分 (`test_attach_second_password_required_exits_nonzero`), #9 (`test_start_live_rejects_when_market_closed`), #14 (`test_warm_up_exception_emits_error_not_ready` + `test_warm_up_returns_false_emits_error_not_ready` + `test_warm_up_*_closes_exec_client`), #16 (`test_concurrent_live_emits_engine_busy_for_venue` + `test_duplicate_strategy_id_emits_engine_already_running`), #20 (`test_second_password_stdin_handles_heredoc_pipe_empty_and_noninteractive`)
+- ✅ 達成した受け入れ基準: #1 (CLI 経路 — `test_attach_starts_engine_for_replay_strategy_unchanged` + `test_inprocess_starts_engine_for_replay_strategy_unchanged`), #6 (`test_invalid_config_when_max_qty_missing` + `test_max_qty_zero_or_negative_reject` + `test_max_notional_overflow_reject`), #7 (`test_prod_blocked_without_env`), #8 CLI 部分 (`test_attach_second_password_required_exits_nonzero`), #9 (`test_start_live_rejects_when_market_closed`), #14 (`test_warm_up_exception_emits_error_not_ready` + `test_warm_up_returns_false_emits_error_not_ready` + `test_warm_up_exception_closes_exec_client` + `test_warm_up_returns_false_closes_exec_client`), #16 (`test_concurrent_live_emits_engine_busy_for_venue` + `test_duplicate_strategy_id_emits_engine_already_running`), #20 (`test_second_password_stdin_handles_heredoc_pipe_empty_and_noninteractive`)
 - ❌ Phase 6 に委譲: #10 (lint via `tools/lint/check_live_login_call.py`)
 - 検証: `cargo test --workspace` 全緑、`uv run pytest python/tests/` 2352 passed / 114 skipped、`cargo clippy --workspace --tests -- -D warnings` clean
 
@@ -264,11 +264,11 @@ Wave 4: Final review
 - ✅ 達成した受け入れ基準: なし（Phase 4 自体は受け入れ基準対応表に直接エントリなし）
   - ただし **#12 の kabu_station 部** = `supports_live_strategy=True` に flip 完了。`python/tests/test_capabilities_live.py::test_supports_live_strategy_per_venue` の kabu_station 期待値を True に更新済
 - ⚠️ TODO 残し（Phase 5+ または別 issue で対応）:
-  - **H-1 (Nautilus 親クラス継承)**: `KabuStationLiveExecutionClient` / `KabuStationLiveDataClient` は `nautilus_trader.live.execution_client.LiveExecutionClient` / `LiveDataClient` を継承していない thin adapter。`engine_runner.py:1357-1358` の `node._exec_engine.register_client(...)` / `node._data_engine.register_client(...)` は本物の Nautilus Cython 親クラスのインスタンスを期待するため、warm_up 成功 → `node.build()` 経路では type check で落ちる。現状 Phase 4 のテストは全て warm_up 失敗で abort するためこの経路を踏まないが、実機で kabu live を動かすと `node_build_failed` になる。Phase 5 で Nautilus 親クラスから派生させる必要あり（`abstractmethod` の `_connect` / `_disconnect` / `_submit_order` / `_cancel_order` / `_modify_order` / `_subscribe_*` などを実装）
+  - **H-1 (Nautilus 親クラス継承)**: ✅ **R2-C (`84cf060`) で完全解消**。`KabuStationLiveExecutionClient` / `KabuStationLiveDataClient` は `nautilus_trader.live.execution_client.LiveExecutionClient` / `LiveMarketDataClient` を継承し、`node.kernel` 経由で `loop / msgbus / cache / clock / instrument_provider` を `super().__init__` に転送する。`node._exec_engine.register_client(...)` / `node._data_engine.register_client(...)` の Cython type check を通過可能で、warm_up 成功 → `node.build()` 経路で `node_build_failed` にならない。詳細は本ドキュメント末尾の「R2-C 反映」セクション参照
   - **M-1 (GUI venue dropdown)**: `src/modal/live_strategy_form.rs::view()` への venue dropdown 追加が **未対応**。Phase 3.5 引き継ぎ Tips では「Phase 4 と一緒に解放」と書かれていたが、Phase 4 の実装範囲が広く（client 一式 + engine_runner 分岐 + server.py + tests）コミット粒度を分けたため、GUI 側変更は Phase 5（examples 対称化）と一緒に着手する。capability flip は完了済なので Rust 側 `engine_client::capabilities::supports_live_strategy(caps, "kabu_station")` は True を返す。dropdown を追加するには `EngineStartConfig` に `venue: Optional[str]` フィールドを追加するか（schema bump 1 件）、modal の `Action::Submit` に venue を載せて server.py 側で `_connected_venue` と照合する経路を決める必要あり
-  - **M-3 (RegisterSet 二重化)**: `KabuStationLiveDataClient` 内部の `RegisterSet` と既存 `server.py::self._kabu_register_set` が独立している。前者は live strategy の「契約 stub」（subscribe/evict 通知契約）、後者が PUSH 物理経路（`PUT /register` / `_handle_subscribe_kabu_station`）。kabu live data は実際には flow しない（H-1 と合わせて Phase 5 で本配線）。spec §3.2-G の `SubscriptionEvicted` 通知契約は live data client が IPC emit するので満たす
+  - **M-3 (RegisterSet 二重化)**: `KabuStationLiveDataClient` 内部の `RegisterSet` と既存 `server.py::self._kabu_register_set` が独立している。前者は live strategy の「契約 stub」（subscribe/evict 通知契約）、後者が PUSH 物理経路（`PUT /register` / `_handle_subscribe_kabu_station`）。kabu live data は実際には flow しない（R2-C で親継承は解消されたが、PUSH 経路の本配線は引き続き Phase 5 以降）。spec §3.2-G の `SubscriptionEvicted` 通知契約は live data client が IPC emit するので満たす
   - **M-5 (fetch_orders 意味論)**: `KabuStationVenue.fetch_orders` は現状 `KabuOrderClient.poll_fills(**params)` に委譲しており、`State=5 (約定)` のみを返す。warm_up の本来の目的「未決注文 (open orders) 復元」とは意味が違う（未決 = State 1, 3, 4 等）。Phase 5 で `KabuRestClient.fetch_orders` (`/orders` 全件) に切替え + OrderIdMap 相当の写像を kabu 側にも実装する
-  - **代表 1 経路（注文発行 + フィル受信）の実機通過**: H-1 が解消されないと実機で node.build() に到達できないため、attach mode の実機 smoke は Phase 5 以降に持ち越し
+  - **代表 1 経路（注文発行 + フィル受信）の実機通過**: H-1 は R2-C で解消したため `node.build()` 通過は技術的に可能。attach mode の実機 smoke は credential / 立花 demo 環境が整い次第別途実施（テストロジック自体は Phase 7 `test_live_session_cli_e2e.py` で `@pytest.mark.live_demo` 配下に整備済）
 - 検証:
   - `cargo test --workspace` 全緑
   - `uv run pytest python/tests/` 2379 passed / 118 skipped（Phase 4 で +23 件 — kabu client 16 / engine_runner kabu 7 + 既存 capabilities_live を kabu=True に更新）
@@ -407,7 +407,7 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
 - 知見/Tips（Phase 7 統合テスト + 将来）:
   - **example の LIVE_SCENARIO は extract_live + GUI prefill の E2E 経路 pin として再利用できる**: `python/tests/test_examples_live_scenario.py::_assert_live_scenario_well_formed` の helper は (a) 必須キー網羅、(b) venue が capability `supports_live_strategy=True` の値、(c) max_qty / max_notional_jpy が CLI のレンジ内 を一括検証する。Phase 7 でこの helper を `test_load_live_strategy_scenario_round_trip` のような「examples/test_strategy_minute.py を engine に投げて prefill 値を観測する」E2E test の前提条件として呼ぶと、example が壊れた瞬間 E2E test が即 fail する設計になる
   - **README §C は live モード CLI コマンドの SoT に近い**: Phase 6 で起票したスタブは「TODO」付きで最小限だったが、Phase 5 で 3 段階フロー + 安全装置 + GUI 経路を完全に記載。今後 CLI 引数の追加 / 安全装置の更新があったら README §C を一次更新先にするのが整合的（specs/live-strategy.md §5 は契約レベル、README §C はユーザー向けクイックスタート）
-  - **kabu_station example の今後**: 現状 README §C に「`--venue kabu_station` を指定するだけ」と記載しているが、実機で動かすには Phase 4 引き継ぎ Tips の H-1（Nautilus 親クラス継承）と M-3（RegisterSet 二重化）が解消されている必要がある。Phase 7 統合テストは tachibana 経路に集中し、kabu_station live 経路のテストは別 issue に切り出す方針が合理的
+  - **kabu_station example の今後**: 現状 README §C に「`--venue kabu_station` を指定するだけ」と記載している。実機で動かすための前提のうち H-1（Nautilus 親クラス継承）は R2-C で解消済。残る M-3（RegisterSet 二重化）は PUSH 経路の本配線が未着手だが、live data flow に依存しない注文 / 約定経路は `node.build()` 通過可能。Phase 7 統合テストは tachibana 経路に集中し、kabu_station live 経路の実機テストは別 issue に切り出す方針が合理的
   - **live_sample.py の将来の扱い**: 現状の docstring で位置づけは明示できているが、将来 `examples/live_logger_only.py` へリネームする選択肢は残っている。リネームする場合は (a) git mv で履歴を保つ、(b) README §C と test 注釈の参照を grep で更新、(c) STRATEGY_CONFIG / STRATEGY_CLASS の global 定数（strategy_loader が探す）が export されているか確認、の 3 点を 1 commit で行う必要がある
 
 #### Phase 5 レビュー反映（2026-05-10, ラウンド 1 / セルフレビュー）
@@ -431,7 +431,7 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **LOW-1**: `examples/test_strategy_*.py` の `from nautilus_trader.model.data import ...` 行が LIVE_SCENARIO トップレベル定数の **後** にある（PEP 8 では import が上にあるべき）。既存 SCENARIO も同じ構造で、`extract` / `extract_live` がトップレベル assignment を AST で見るため副作用ゼロ。修正は将来 example 全体を再整理する別 PR で対応する
   - **LOW-2**: `python/tests/test_examples_live_scenario.py::_assert_live_scenario_well_formed` で `int(scenario["max_qty"])` のように防御的 conversion をかけているが、`extract_live` が `_validate_live_v1` で int 型を強制済のため redundant。test 意図の明示性を優先して残す
 - 次フェーズへの引き継ぎ:
-  - Phase 7（統合テスト）で kabu_station venue 経由の live test を書く場合、`live_session_cli.py --venue kabu_station --mode inprocess` 経路が CLI argparse を通過することは Phase 5 で pin 済（H-1 = Nautilus 親クラス継承未対応のため warm_up 経路までの subset テストになるが、CLI argparse → engine config は通る）
+  - Phase 7（統合テスト）で kabu_station venue 経由の live test を書く場合、`live_session_cli.py --venue kabu_station --mode inprocess` 経路が CLI argparse を通過することは Phase 5 で pin 済（H-1 = Nautilus 親クラス継承は R2-C `84cf060` で解消したため、warm_up 成功 → `node.build()` 通過まで届く。実機検証は M-3 PUSH 配線完了と credential が揃った段階で別途実施）
 
 ### Phase 7 完了（2026-05-11）
 - 担当: phase7-agent
@@ -472,7 +472,7 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
 | 11 | LiveStrategyReady 4 ペイン自動生成 + 冪等 | Phase 3 | ✅ pin 済（`test_live_strategy_ready_idempotent_on_double_emit`） |
 | 12 | supports_live_strategy cap | Phase 3.5 | ✅ pin 済（`test_supports_live_strategy_per_venue` — tachibana=true / kabu_station=true（Phase 4 で flip）） |
 | 13 | LIVE_SCENARIO 戦略 → GUI prefill | Phase 2 + 3 | ✅ pin 済（`test_live_strategy_scenario_loaded_prefills_form`） |
-| 14 | warm_up 失敗 → EngineError + close() | Phase 1 | ✅ pin 済（`test_warm_up_exception_emits_error_not_ready` + `test_warm_up_returns_false_emits_error_not_ready` + `_closes_exec_client`） |
+| 14 | warm_up 失敗 → EngineError + close() | Phase 1 | ✅ pin 済（`test_warm_up_exception_emits_error_not_ready` + `test_warm_up_returns_false_emits_error_not_ready` + `test_warm_up_exception_closes_exec_client` + `test_warm_up_returns_false_closes_exec_client`） |
 | 15 | LiveStrategyReady timeout 60s + LiveStrategyWarmingUp リセット | Phase 3 | ✅ pin 済（`test_engine_started_without_live_strategy_ready_shows_timeout_banner` + `test_warming_up_resets_timeout_counter` + `test_live_warmup_timeout_constant_is_60s`） |
 | 16 | concurrent live reject（venue 単位 EngineBusy + 同一 sid engine_already_running） | Phase 1 + 3 | ✅ pin 済（`test_concurrent_live_emits_engine_busy_for_venue` + `test_duplicate_strategy_id_emits_engine_already_running`） |
 | 17 | reconnect 時の LiveStrategyReady 冪等再生 | Phase 3 | ✅ pin 済（`test_engine_rehello_replays_live_strategy_ready_via_pending_config`） |
@@ -600,3 +600,23 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **`pane_grid::State::iter()` の borrow チェッカー対策**: `panes.iter()` で借用中に `panes.close(id)` を呼ぶと `&mut` / `&` 競合で reject される。一度 `Vec<Pane>` に id を collect してから iterate して close する pattern が定番。`teardown_live_panes` で実装済
   - **`cargo fmt` がコメント内 multi-line を改行する**: `if *market_closed && let Some(...) = ...` のような複合条件は fmt で勝手に改行ブロック化される。事前に `cargo fmt --check` を回してから commit するか、commit 後に専用 fmt commit で揃えるのが安全（本 Phase では後者で対応）
   - **R2-A との同期**: H8 (BusyKind) の wire 値 `"another_strategy_on_venue"` は Python `schemas.py` の `BusyKind` Literal と一致している必要がある。R2-A 側の `test_schemas_nautilus.py::test_rust_schema_constants_match_python` で SCHEMA_MAJOR/MINOR は守られるが、Literal 値の対称性は手動で確認した（commit `6ac5b93` 時点で一致）。将来 enum 値を追加するときは Python / Rust 同時 PR で運用
+
+### Wave R2 集約サマリ（2026-05-11）
+
+R1 全 6 レビュアー集約（CRITICAL 1 / HIGH ~10 / MEDIUM ~14 / LOW ~10）に対する fix を 3 並列で実装:
+
+- **R2-A** (`d033c0c` まで 4 commits): Python schema/scenario validators + silent failure × 11 件
+  - 解消: H5, H6, H8 (Py), H9, M1 (Py), M2, M3, M4, M5, M9, M10
+- **R2-B** (`8c15c19` まで 9 commits): Rust LiveStrategyState + EngineBusy.busy_kind enum + GUI behavior × 12 件
+  - 解消: H1, H2, H3, H4, H7, H8 (Rust), M1 (Rust), M6, M7, M8, R1-RUST-7, R1-RUST-8
+- **R2-C** (`84cf060`): CRITICAL Nautilus parent inheritance + 3-way schema test × 2 件
+  - 解消: C1 (CRITICAL), M12
+- **R2-D** (本 commit): docs / issue body fix × 1 件
+  - 解消: H10 (受け入れ基準 #14 関数名)
+
+R2 で解消した finding 総数: CRITICAL 1 / HIGH 10 / MEDIUM 13 / R1-RUST low 2 = 計 26 件
+残存 LOW: ~8 件（同 PR 必須ではない、follow-up issue 候補）
+
+Phase 4 H-1 punt は R2-C で完全解消。`KabuStationLive*` は `nautilus_trader.live.execution_client.LiveExecutionClient` / `LiveMarketDataClient` を継承し、`node.build()` 通過可能。
+
+次: Round 3 sanity sweep（silent-failure-hunter 単独）で R2 fix が新規 silent failure を導入していないことを確認 → 収束。
