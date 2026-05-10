@@ -520,3 +520,28 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
 - 次フェーズへの引き継ぎ（最終 review-fix-loop / 本 issue close 前）:
   - **GUI スモーク** (`/iced-gui-testing` skill) は別途実機で実行する想定（本 Phase の自動テスト範囲外、issue Phase 7 の §「GUI スモーク」を参照）
   - **実機 demo lifecycle 検証**: `tachibana-demo.yml` を `gh workflow run tachibana-demo.yml` で叩いて attach mode lifecycle が green になるかは、実 engine + 立花 demo 環境が用意できた段階で 1 回手動確認する。Phase 7 の責務は test と CI 配線までで、実機 trigger は scope 外
+
+### R2-A 反映（2026-05-11、修正担当）
+- 担当: r2a-agent
+- 主要 commit:
+  - `f6759eb` — fix(schemas): H8/H9/M1/M2/M3 — Python schema validators 強化
+  - `c791904` — fix(scenario): M4/M5 — LiveScenario TypedDict 厳格化 + 値域検証
+  - `39b7915` — fix(silent-failure): H5/H6/M9/M10 — credential scrub + cleanup 強化
+- 解消: H5, H6, H8 (Python part), H9, M1 (Python part), M2, M3, M4, M5, M9, M10（全 11 件）
+- 設計判断:
+  - **credential scrub helper の配置**: `python/engine/nautilus/engine_runner.py` の top-level に `_scrub_credential_exception(exc) -> str` を新設。server.py からは local import で参照する（循環 import を避けるため module top で import しない）。type 名の token 判定方式は `"Password" / "Auth" / "Credential"` の 3 つ — 完全な scrub ではなく「型名が credential 関連と思われるなら詳細を捨てる」防御線。詳細は `log.error(..., exc_info=True)` で local 側に残るため診断は可能
+  - **BusyKind Literal の拡張方針**: 現状 `Literal["another_strategy_on_venue"]` の 1 値固定。将来 `"strategy_id_already_running"` 等を追加する場合は `schemas.py` の `BusyKind` の Literal を拡張し、Rust 側 `engine-client/src/dto.rs` の `BusyKind` enum も同期して追加する（R2-B 担当）。本 Phase では Rust 側が既に enum 化済（commit `6ac5b93`）なので Python の Literal と一致
+  - **H9 (venue 必須化) の実装位置**: `EngineBusy._validate_state_command_orthogonal` に追記。既存の state/command 直交検証と同じ model_validator に置くことで、`EngineBusy` の不変条件を 1 関数に集約できる
+  - **M2 (LiveStrategyScenarioLoaded all-or-none) の対象フィールド**: `instrument_id` / `max_qty` / `max_notional_jpy` / `venue` の 4 フィールドのみ。`strategy_init_kwargs` は対象外（任意フィールド、prefill とは独立）。test_schema_compat の partial-fill 検証は payload を全フィールド充足に更新して整合
+  - **M4 (TypedDict Required/NotRequired) の syntax 選択**: scenario.py に `from __future__ import annotations` (PEP 563) があるため class-syntax の TypedDict は annotation を文字列として保持し `__required_keys__` / `__optional_keys__` の introspection が壊れる（全キーが required 扱いになる）。functional syntax `TypedDict("LiveScenario", {...})` は annotation を即時評価するため introspection が正しく機能する。今回は後者を採用
+  - **M5 (値域検証) の上限値**: `schemas.py` の `EngineStartConfig.max_qty/max_notional_jpy` の `Field(ge=1, le=10_000)` / `Field(ge=1, le=100_000_000)` と一致。「LIVE_SCENARIO で書ける値」と「StartEngine で受理される値」が同じ範囲になることで、scenario 検証 → engine 起動の経路で「ここでは通るがここで弾かれる」の境界外傷を回避
+  - **H6 (CancelledError 経路の二重防御)**: 既存 `finally:` 節は `CancelledError` 時にも走るので理論上は cleanup される。ただし `CancelledError` は `Exception` を継承しないため、もし将来 `finally:` 内に `await` が入ったり例外順序が変わると discard を取りこぼす可能性がある。明示的に `except asyncio.CancelledError:` で discard + raise する二重防御を入れた。`set.discard` は冪等なので二重実行で問題なし
+  - **M10 (warm_up 無し client の log warning)**: 既存挙動互換のため warm_up が無い client でも起動自体は継続（旧挙動: silent skip）。`log.warning(...)` を残すことで silent failure を観測可能にする。完全な reject にすると後方互換が壊れる懸念があるため warning のみに留めた
+- 検証:
+  - `uv run pytest python/tests/test_engine_runner_live_warmup_failure.py python/tests/test_server_concurrent_live.py python/tests/test_credential_scrub.py python/tests/test_schemas_types.py python/tests/test_scenario_live.py python/tests/test_schemas.py python/tests/test_schemas_nautilus.py python/tests/test_schema_compat.py python/tests/test_scenario_load.py python/tests/test_scenario_writeback.py python/tests/test_scenario_path_guard.py python/tests/test_scenario_cli.py python/tests/test_examples_live_scenario.py python/tests/test_engine_busy_query_guards.py python/tests/test_engine_busy_reject.py python/tests/test_engine_runner_live_market_closed.py python/tests/test_engine_runner_live_kabu.py --timeout=60` → **258 passed, 1 skipped**（R2-A スコープ 17 ファイル全緑）
+  - `uv run pytest python/tests/ -m "not tk_smoke and not demo_tachibana and not demo_kabu and not live_demo and not live_demo_inprocess" --timeout=120` → **2294 passed / 106 skipped / 202 deselected**（R2-A スコープ外の R2-C 未完了 `test_kabu_station_nautilus_parent.py` のみ 2 件 fail — 当該テストは R2-C の `kabu_station_*_client.py` 親 kwargs 統合に依存、本 Phase の責務外）
+- 知見/Tips（次への引き継ぎ）:
+  - **Parallel agent commit との競合**: R2-B / R2-C と並行作業すると同一 branch で他 agent の untracked / unstaged 変更が `git stash`/`stash pop` 経由で working tree に混入することがある。`git status` で自分が編集した覚えの無い path が出たら即座に `git checkout HEAD -- <path>` で revert すること。本 Phase では `kabu_station/*` / `src/handlers/replay.rs` / `src/main.rs` / `tests/live_form_smoke.rs` / `src/messages.rs` / `test_kabu_station_live_*.py` / `test_schemas_nautilus.py` を誤って取り込んでいたので個別 revert で対処
+  - **scenario.py の `from __future__ import annotations` 配下 TypedDict**: 同じ罠で `Required` / `NotRequired` を class-syntax で書くと introspection が壊れる。新規に optional フィールドが入る TypedDict を追加する場合は functional syntax を使うか、`get_type_hints()` 経由で再評価すること
+  - **credential scrub の token リスト拡張**: 現状 `("Password", "Auth", "Credential")` の 3 トークン。新しい venue（証券 API）を追加して認証エラー型名が異なるなら token リストを追加する。`KabuStationLoginError` のような型名も `"Login"` を含む形なら token 追加検討
+  - **Rust 側 R2-B との同期**: H8 (BusyKind) は Python `Literal` と Rust `enum` の値が一致する必要がある。R2-B が enum 値を追加するときは Python `BusyKind` Literal も同期して追加。`test_schemas_nautilus.py::test_rust_schema_constants_match_python` がペアの整合性を担保（schema_minor 経由）
