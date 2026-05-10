@@ -1290,9 +1290,11 @@ class NautilusRunner:
 
             GUI の `LiveStrategyReady` 60s timeout カウンタリセットに使う。
             最低限の段階的 message を emit（Phase 1 受け入れに必要十分）。
+            issue #42 Phase 4 (review-fix H-3): venue 名を含めて UI 文言契約を venue
+            ごとに正しく出す（旧版は "tachibana" ハードコードで kabu live でも誤表示）。
             """
             stages: list[tuple[float, str]] = [
-                (0.2, "connecting to tachibana"),
+                (0.2, f"connecting to {venue}"),
                 (0.5, "fetching open orders"),
                 (0.8, "synchronizing positions"),
             ]
@@ -1452,7 +1454,14 @@ class NautilusRunner:
                 # build() 内の _connect() で data_client._loop が asyncio.get_running_loop()
                 # に確定するため、ここまで待つ必要がある。
                 # event_bridge._loop は自動設定されないので明示的に注入する。
-                if _have_bridges:
+                # issue #42 Phase 4 (review-fix H-2): LiveDataBridge / LiveEcBridge は
+                # tachibana の FD/EC frame 専用（``data_client._feed_trade_dict_sync``
+                # 等を呼ぶ）。kabu_station 経路では不要 + 起動すると AttributeError の
+                # silent failure になるため venue==tachibana で gate する。
+                # kabu PUSH 配信の物理経路は server.py 側 _handle_subscribe_kabu_station
+                # / _kabu_register_set / _startup_kabu_station が管理する（Phase 4 minimal
+                # scope では live data client への配線は TODO で残す）。
+                if _have_bridges and venue == "tachibana":
                     event_bridge._loop = _asyncio.get_running_loop()
                     data_bridge = LiveDataBridge(data_client, fd_queue, instrument_id, stop_event)
                     ec_bridge = LiveEcBridge(event_bridge, ec_queue, stop_event)
