@@ -61,6 +61,30 @@ OrderList・BuyingPower の 4 ペインを自動生成**します。完全な手
 > **注意**: `scripts/run-replay-debug.sh` と `scripts/replay_dev_load.sh` は
 > Phase 8.2 で廃止されました（HTTP API ポート 9876 依存のため）。
 
+### C. ライブで動かす（demo 口座）
+
+> **TODO (Phase 5)**: replay → demo → prod の完全コマンド例を記載予定。
+> 本セクションは `tools/lint/check_examples_readme.py`（受け入れ基準 #3 / #4）の
+> 検証用見出しとして Phase 6 で先行起票したスタブです。
+
+最小起動例（CLI、attach mode）:
+
+```bash
+# 別ターミナルで GUI を起動 → tachibana にログイン済の状態で:
+uv run python -m engine.live_session_cli run \
+    --strategy examples/test_strategy_minute.py \
+    --instrument 8306.T \
+    --max-qty 100 \
+    --max-notional-jpy 500000 \
+    --venue tachibana \
+    --demo \
+    --mode attach
+```
+
+詳細手順・第二暗証番号フロー・`TACHIBANA_ALLOW_PROD` ガード・
+`is_market_open()` SoT は [`docs/specs/live-strategy.md §5`](../docs/specs/live-strategy.md)
+を参照してください。
+
 ## test_strategy_daily.py の動作
 
 デフォルトのパラメータ（`instrument_id=1301.TSE`, `lot_size=100`, `Daily` 足）で

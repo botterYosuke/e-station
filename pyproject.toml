@@ -38,7 +38,9 @@ packages = ["python/engine"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["python"]
+# `python` for engine package; `.` for repo-root packages like `tools.lint`
+# (issue #42 Phase 6: lint scripts under `tools/lint/` need to be importable).
+pythonpath = ["python", "."]
 testpaths = ["python/tests"]
 markers = [
     "demo_tachibana: requires real Tachibana demo account credentials (DEV_TACHIBANA_USER_ID / DEV_TACHIBANA_PASSWORD)",
