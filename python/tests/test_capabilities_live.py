@@ -48,7 +48,9 @@ def _build_venue_caps(server: Any) -> dict[str, dict]:
         "supports_amend": False,
         "requires_trade_password_for_cancel": True,
         "is_production": server._kabu_env == "prod",
-        "supports_live_strategy": False,
+        # issue #42 Phase 4: kabu_station venue で live strategy 起動経路を確立した
+        # ため True に flip。venue dropdown / start_live(venue="kabu_station") が解放される。
+        "supports_live_strategy": True,
     }
     return venue_caps
 
@@ -91,8 +93,9 @@ def test_supports_live_strategy_per_venue(
     )
 
     assert "kabu_station" in venue_caps, f"kabu_station cap missing: {venue_caps}"
-    assert venue_caps["kabu_station"].get("supports_live_strategy") is False, (
-        "kabu_station must advertise supports_live_strategy=False until Phase 4 "
+    # issue #42 Phase 4: kabu_station live 経路が確立したので True に flip。
+    assert venue_caps["kabu_station"].get("supports_live_strategy") is True, (
+        "kabu_station must advertise supports_live_strategy=True after Phase 4 "
         f"(got {venue_caps['kabu_station']})"
     )
 

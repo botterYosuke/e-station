@@ -933,16 +933,17 @@ class DataEngineServer:
         # Phase 1: kabu_station は _workers に含まれないため capabilities を直接追記
         from engine.exchanges.kabusapi_register import RegisterSet as _KabuRegisterSet
         # P4-3: is_production フラグを追加。KABU_ALLOW_PROD=1 + KABU_ENV=prod の二重判定で True。
-        # issue #42 Phase 3.5: ``supports_live_strategy`` は False で固定 (Phase 4 で flip)。
-        # tachibana は live 起動済みだが kabu_station は ``NautilusRunner.start_live``
-        # 側が tachibana 専用のため、venue dropdown で誤選択されないよう False を expose する。
+        # issue #42 Phase 4: kabu_station venue で live strategy 起動経路を確立した
+        # （``NautilusRunner.start_live(venue="kabu_station")`` + KabuStationLive* 一式）ため、
+        # ``supports_live_strategy`` を **True** に flip。venue dropdown と GUI Submit 経路
+        # が解放される。Phase 3.5 では False で pin されていた。
         venue_caps["kabu_station"] = {
             "requires_local_app": True,
             "max_push_symbols": _KabuRegisterSet.MAX,  # architecture.md §8: 50 と一致を保証
             "supports_amend": False,
             "requires_trade_password_for_cancel": True,
             "is_production": self._kabu_env == "prod",
-            "supports_live_strategy": False,
+            "supports_live_strategy": True,
         }
 
         ready = Ready(
@@ -4971,15 +4972,22 @@ class DataEngineServer:
                 # Phase 2: live 分岐。CONNECTED 状態のみ受理する。
                 if not self._check_live_state("StartEngine", LiveState.CONNECTED):
                     return
-                # tachibana 以外の venue でログイン済みの場合は拒否する。
-                # kabu_station の live 実行は未実装のため、ここで明示的にエラーを返す。
-                if self._connected_venue != "tachibana":
+                # issue #42 Phase 4: tachibana / kabu_station の両 venue を許可する。
+                # それ以外の venue（未ログイン含む）は明示的に reject。
+                # capability ベースの判定は Ready.capabilities.venue_capabilities
+                # [<venue>].supports_live_strategy で行われる（GUI 側）。engine 側は
+                # 接続済 venue が両 venue のいずれかであることだけ確認する。
+                live_venue = self._connected_venue
+                if live_venue not in ("tachibana", "kabu_station"):
                     _on_event_tracked(
                         {
                             "event": "Error",
                             "request_id": request_id,
                             "code": "venue_not_supported",
-                            "message": f"Live engine requires tachibana venue (connected: {self._connected_venue!r}). kabu_station live execution is not yet implemented.",
+                            "message": (
+                                f"Live engine requires tachibana or kabu_station venue "
+                                f"(connected: {live_venue!r})."
+                            ),
                         }
                     )
                     return
@@ -4994,16 +5002,34 @@ class DataEngineServer:
                         }
                     )
                     return
-                # SessionHolder から第二暗証番号を取得（env 変数不使用）
-                second_password = self._session_holder.get_password()
-                if second_password is None:
-                    _on_event_tracked(
-                        {
-                            "event": "SecondPasswordRequired",
-                            "request_id": request_id,
-                        }
-                    )
-                    return
+                # 第二暗証番号 / session の解決を venue 別に分ける。
+                # tachibana: SessionHolder から第二暗証番号を取得（env 変数不使用）。
+                # kabu_station: 第二暗証番号は使わず、KabuStationVenue の
+                # KabuTradePasswordHolder で取引パスワードを別管理（既存設計）。
+                if live_venue == "tachibana":
+                    second_password = self._session_holder.get_password()
+                    if second_password is None:
+                        _on_event_tracked(
+                            {
+                                "event": "SecondPasswordRequired",
+                                "request_id": request_id,
+                            }
+                        )
+                        return
+                    live_session = self._tachibana_session
+                else:  # live_venue == "kabu_station"
+                    if self._kabu_venue is None:
+                        _on_event_tracked(
+                            {
+                                "event": "Error",
+                                "request_id": request_id,
+                                "code": "venue_not_connected",
+                                "message": "kabu_station venue is not connected (no token)",
+                            }
+                        )
+                        return
+                    second_password = ""  # kabu_station では未使用
+                    live_session = self._kabu_venue
                 self._live_state = LiveState.TRADING
                 stop_event = self._engine_stop_events.setdefault(
                     strategy_id, threading.Event()
@@ -5015,12 +5041,13 @@ class DataEngineServer:
                     max_qty=config_obj.max_qty,
                     max_notional_jpy=config_obj.max_notional_jpy,
                     second_password=second_password,
-                    session=self._tachibana_session,
+                    session=live_session,
                     fd_queue=self._live_fd_queue,
                     ec_queue=self._live_ec_queue,
                     on_event=_on_event_tracked,
                     stop_event=stop_event,
                     strategy_id=strategy_id,
+                    venue=live_venue,
                 )
 
         try:
