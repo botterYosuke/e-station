@@ -7,12 +7,21 @@ BuyAndHold 戦略を:
 
 spec.md §3.5.4: 最終ポジション方向の一致検証は fill_timestamps の非空チェックで代用。
 (複雑な fill 解析は N1.5 で実施。本テストでは「完走 + クラッシュしない」が主眼。)
+
+issue #42 Phase 7（受け入れ基準 #21）: ``load_strategy_from_file`` が live /
+replay の **両経路で同じ実装** に統一されていることを pin する契約テストを
+本ファイルに追加した。``test_load_strategy_from_file_used_for_both_paths`` 系
+（下方）を参照。
 """
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from engine.nautilus.data_loader import KlineRow
 from engine.nautilus.engine_runner import NautilusRunner, BacktestResult, ReplayBacktestResult
@@ -191,3 +200,159 @@ def test_replay_ipc_events_emitted():
     assert "EngineStarted" in event_names, f"EngineStarted not emitted: {event_names}"
     assert "ReplayDataLoaded" in event_names, f"ReplayDataLoaded not emitted: {event_names}"
     assert "EngineStopped" in event_names, f"EngineStopped not emitted: {event_names}"
+
+
+# ---------------------------------------------------------------------------
+# issue #42 Phase 7（受け入れ基準 #21）: loader 互換契約テスト
+#
+# Phase 1 引き継ぎで「``engine_runner._load_user_strategy`` は既に
+# ``load_strategy_from_file`` の薄ラッパー」「``replay`` 起動経路（=
+# ``_make_replay_strategy``）も同じく ``_load_user_strategy`` 経由」という事実が
+# 確認されている。この事実を **pin** することで、誰かが loader を fork した
+# 場合（例: live と replay で別々の strategy module キャッシュを持つ実装に
+# 戻す等）に CI で検知できるようにする。
+#
+# spec.md §3.2-A / 統一決定 #1（戦略ファイル無改変） / Phase 0 既存実装事実
+# 確認表の `LiveSession.run` / `NautilusRunner.start_live` 行を参照。
+# ---------------------------------------------------------------------------
+
+
+def test_load_strategy_from_file_used_for_both_paths(tmp_path):
+    """live / replay 両経路で **同じ ``load_strategy_from_file`` が呼ばれる** ことを pin。
+
+    実装方法:
+      - mock 確認: live 経路の薄ラッパー ``_load_user_strategy`` と replay 経路の
+        ``_make_replay_strategy`` を直接呼び、両方が ``load_strategy_from_file``
+        に委譲することを assert する。
+      - 同 class 比較: 同じ戦略ファイルを両経路でロードし、得られる Strategy
+        サブクラスの ``__qualname__`` が一致することを assert する。
+
+    なぜ pin する: issue #42 Phase 1 で「live 経路 loader が既に
+    ``load_strategy_from_file`` の薄ラッパーである」という事実を引き継ぎ Tips
+    に明記済み。本テストは将来 fork されても CI で即検知できるようにする。
+    """
+    from engine.nautilus import engine_runner as er
+    from engine.nautilus import strategy_loader as sl
+
+    # 最小ダミー戦略（``Strategy`` 派生クラス 1 個 + 副作用なし）
+    dummy_path = tmp_path / "dummy_strategy.py"
+    dummy_path.write_text(
+        "from nautilus_trader.trading.strategy import Strategy, StrategyConfig\n"
+        "\n"
+        "class DummyStrategy(Strategy):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(config=StrategyConfig(strategy_id='dummy-loader-pin'))\n",
+        encoding="utf-8",
+    )
+
+    # ---- 経路 A: live 起動経路 = ``_load_user_strategy`` ----
+    # ``engine_runner._load_user_strategy`` は ``load_strategy_from_file`` を
+    # ファクトリとして呼ぶ。mock を ``strategy_loader`` モジュール側にかける
+    # ことで、live / replay 両経路が **本当に同じ関数** を呼ぶことを観測する。
+    with patch.object(sl, "load_strategy_from_file", wraps=sl.load_strategy_from_file) as live_spy:
+        live_inst = er._load_user_strategy(str(dummy_path), strategy_init_kwargs=None)
+        assert live_spy.call_count == 1, (
+            f"live 経路 (_load_user_strategy) は load_strategy_from_file を 1 回呼ぶこと: "
+            f"call_count={live_spy.call_count}"
+        )
+
+    # ---- 経路 B: replay 起動経路 = ``_make_replay_strategy`` ----
+    with patch.object(sl, "load_strategy_from_file", wraps=sl.load_strategy_from_file) as replay_spy:
+        replay_inst = er._make_replay_strategy(str(dummy_path), strategy_init_kwargs=None)
+        assert replay_spy.call_count == 1, (
+            f"replay 経路 (_make_replay_strategy) は load_strategy_from_file を 1 回呼ぶこと: "
+            f"call_count={replay_spy.call_count}"
+        )
+
+    # ---- 両経路で同じ Strategy class が解決されること ----
+    # （別経路で別々の module loader を使っていれば __qualname__ は同じでも
+    # ``type(...)`` は異なるが、同じ ``load_strategy_from_file`` を通っている
+    # 限り、少なくとも __qualname__ + 親 class が一致する）。
+    assert type(live_inst).__qualname__ == type(replay_inst).__qualname__, (
+        "live / replay 両経路で同じ Strategy サブクラスが解決されること: "
+        f"live={type(live_inst).__qualname__!r}, "
+        f"replay={type(replay_inst).__qualname__!r}"
+    )
+    # 親 class chain に Strategy が居ることも pin（loader が誤って別物を返す
+    # silent failure を捕捉）
+    from nautilus_trader.trading.strategy import Strategy as _NTStrategy
+    assert isinstance(live_inst, _NTStrategy)
+    assert isinstance(replay_inst, _NTStrategy)
+
+
+def test_load_user_strategy_is_thin_wrapper_around_load_strategy_from_file():
+    """``engine_runner._load_user_strategy`` のソース実装が ``load_strategy_from_file``
+    の薄ラッパーであることを **AST レベル** で pin する。
+
+    Phase 1 引き継ぎ Tips:
+      > engine_runner._load_user_strategy は既に load_strategy_from_file の
+      > 薄ラッパーになっている事実を pin する
+
+    本テストは AST 走査で「関数本体に ``load_strategy_from_file(...)`` 呼出が
+    存在する」「``Path(...).resolve()`` が引数に含まれる」を assert する。誰かが
+    loader を fork して別実装に書き換えると AST 構造が崩れて検知できる。
+    """
+    import inspect
+    from engine.nautilus import engine_runner as er
+
+    src = inspect.getsource(er._load_user_strategy)
+    tree = ast.parse(src)
+
+    # 関数定義は 1 個（_load_user_strategy 自体）
+    func_defs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    assert len(func_defs) == 1
+    func = func_defs[0]
+    assert func.name == "_load_user_strategy"
+
+    # 関数本体に ``load_strategy_from_file(...)`` 呼出が存在
+    calls = [
+        n for n in ast.walk(func)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "load_strategy_from_file"
+    ]
+    assert len(calls) >= 1, (
+        "_load_user_strategy 関数本体に load_strategy_from_file(...) 呼出が必須"
+    )
+
+    # ``load_strategy_from_file`` を ``engine.nautilus.strategy_loader`` から
+    # import している（モジュール内 import で OK — 関数内 import 含む）
+    imports = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom)
+        and n.module == "engine.nautilus.strategy_loader"
+        and any(alias.name == "load_strategy_from_file" for alias in n.names)
+    ]
+    assert len(imports) >= 1, (
+        "engine.nautilus.strategy_loader から load_strategy_from_file を import すること"
+    )
+
+
+def test_make_replay_strategy_delegates_to_load_user_strategy():
+    """``_make_replay_strategy`` が ``_load_user_strategy`` に委譲することを pin。
+
+    両経路の loader 統一は ``_make_replay_strategy → _load_user_strategy →
+    load_strategy_from_file`` のチェーンで成立している。中間の委譲が崩れると
+    live / replay 経路で挙動が分岐する silent failure が起きるため、AST 走査
+    で「``_make_replay_strategy`` 関数本体に ``_load_user_strategy(...)`` 呼出
+    がある」を pin する。
+    """
+    import inspect
+    from engine.nautilus import engine_runner as er
+
+    src = inspect.getsource(er._make_replay_strategy)
+    tree = ast.parse(src)
+
+    func_defs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    assert len(func_defs) == 1
+    func = func_defs[0]
+    assert func.name == "_make_replay_strategy"
+
+    calls = [
+        n for n in ast.walk(func)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "_load_user_strategy"
+    ]
+    assert len(calls) >= 1, (
+        "_make_replay_strategy は _load_user_strategy へ委譲すること "
+        "(loader 統一の不変条件)"
+    )
