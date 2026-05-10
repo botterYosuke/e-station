@@ -79,11 +79,18 @@ def test_live_strategy_scenario_loaded_unknown_variant_tolerated() -> None:
     として validate しようとしても reject されるが、それは旧 client 側で握り潰す責務。
     ここでは、新 event (``LiveStrategyScenarioLoaded``) 単体が dict 形式で問題なく
     serialise でき、旧 client がそれを **無視** できる前提を保証する。
+
+    R2-A M2 補足: 4 フィールド (instrument_id / max_qty / max_notional_jpy / venue) は
+    all-or-none 不変条件があるので、extra フィールド tolerance は **全フィールド充足**
+    の payload で検証する（部分 None は全 None / 全 Some 以外 = ValidationError）。
     """
     data = {
         "event": "LiveStrategyScenarioLoaded",
         "request_id": "req-live-3",
         "instrument_id": "7203.TSE",
+        "max_qty": 100,
+        "max_notional_jpy": 500_000,
+        "venue": "tachibana",
     }
     raw = orjson.dumps(data)
     decoded = orjson.loads(raw)
