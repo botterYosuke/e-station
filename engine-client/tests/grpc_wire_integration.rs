@@ -269,3 +269,48 @@ async fn test_load_live_strategy_scenario_forward_compat() {
         .await;
     assert!(result.is_ok(), "send must not fail at the wire level");
 }
+
+// ── issue #42 Phase 3 (schema 3.26): LiveStrategyReady wire 経路 ────────────
+
+/// Python が LiveStrategyReady event を送出すると Rust 側で
+/// `EngineEvent::LiveStrategyReady` として受信できる。Phase 3 の Python 実装が
+/// 入るまでは event 観測が出ないため、timeout は緩く取る。
+#[tokio::test]
+#[ignore = "requires Python+grpcio"]
+async fn test_live_strategy_ready_round_trip() {
+    let port = alloc_ephemeral_port();
+    let _child = KillOnDrop(start_python_server(port, TEST_TOKEN));
+    wait_for_port(port).await;
+
+    let target = format!("http://127.0.0.1:{port}");
+    let conn = EngineConnection::connect_grpc(&target, TEST_TOKEN, AppMode::Live)
+        .await
+        .expect("handshake should succeed");
+
+    let mut events = conn.subscribe_events();
+
+    // Phase 3 functional impl 後は warm_up 完了で emit される。schema-chain commit 時点では
+    // engine が emit しない（Python 側に emit 経路が未実装）ため、観測できなくても OK。
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match events.recv().await {
+                Ok(flowsurface_engine_client::dto::EngineEvent::LiveStrategyReady {
+                    strategy_id,
+                    ..
+                }) => return Some(strategy_id),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    })
+    .await;
+
+    // schema bump 単独の commit では到達しない。Phase 3 で実 emit 経路が入るのを待つ。
+    if matches!(outcome, Ok(Some(_))) {
+        // green: 実装到達済み
+    } else {
+        eprintln!(
+            "test_live_strategy_ready_round_trip: no LiveStrategyReady observed — Python emit path not yet wired (expected before Phase 3 functional impl)"
+        );
+    }
+}

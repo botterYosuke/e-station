@@ -410,3 +410,58 @@ fn live_strategy_scenario_loaded_empty_kwargs_deserializes() {
         _ => panic!("Expected LiveStrategyScenarioLoaded"),
     }
 }
+
+// ── issue #42 Phase 3 (schema 3.26): LiveStrategyReady の serde round-trip ──
+
+/// SCHEMA_MINOR は P3a 完了後 26 以上であること。
+#[test]
+fn schema_minor_is_at_least_26_after_p3a() {
+    const { assert!(SCHEMA_MINOR >= 26) };
+}
+
+/// LiveStrategyReady イベントが正しくデシリアライズされる。
+#[test]
+fn live_strategy_ready_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyReady",
+        "strategy_id": "live-strat-1",
+        "venue": "tachibana",
+        "instrument_id": "7203.TSE",
+        "ts_event_ms": 1700000000123
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyReady {
+            strategy_id,
+            venue,
+            instrument_id,
+            ts_event_ms,
+        } => {
+            assert_eq!(strategy_id, "live-strat-1");
+            assert_eq!(venue, "tachibana");
+            assert_eq!(instrument_id, "7203.TSE");
+            assert_eq!(ts_event_ms, 1_700_000_000_123);
+        }
+        _ => panic!("Expected LiveStrategyReady"),
+    }
+}
+
+/// LiveStrategyReady に未知 field があっても tolerated（forward compat）。
+#[test]
+fn live_strategy_ready_unknown_field_tolerated() {
+    let json = r#"{
+        "event": "LiveStrategyReady",
+        "strategy_id": "live-strat-2",
+        "venue": "tachibana",
+        "instrument_id": "7203.TSE",
+        "ts_event_ms": 1700000000456,
+        "future_unknown_field": 999
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyReady { strategy_id, .. } => {
+            assert_eq!(strategy_id, "live-strat-2");
+        }
+        _ => panic!("Expected LiveStrategyReady"),
+    }
+}

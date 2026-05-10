@@ -1031,6 +1031,13 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
         Payload::ReplayTimeUpdated(rtu) => Some(dto::EngineEvent::ReplayTimeUpdated {
             timestamp_ms: rtu.timestamp_ms,
         }),
+        // issue #42 Phase 3 (schema 3.26): live strategy ready
+        Payload::LiveStrategyReady(lsr) => Some(dto::EngineEvent::LiveStrategyReady {
+            strategy_id: lsr.strategy_id,
+            venue: lsr.venue,
+            instrument_id: lsr.instrument_id,
+            ts_event_ms: lsr.ts_event_ms,
+        }),
         // issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 応答
         Payload::LiveStrategyScenarioLoaded(lssl) => {
             // strategy_init_kwargs は wire 上 JSON 文字列。dict として decode する。

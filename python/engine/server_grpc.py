@@ -17,7 +17,7 @@ from engine.server import _ENGINE_VERSION
 # gRPC IPC schema version — source of truth for the gRPC transport layer.
 # Keep in sync with engine-client/src/lib.rs SCHEMA_MAJOR / SCHEMA_MINOR.
 SCHEMA_MAJOR: int = 3   # gRPC IPC schema major version
-SCHEMA_MINOR: int = 25  # gRPC IPC schema minor version
+SCHEMA_MINOR: int = 26  # gRPC IPC schema minor version
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +118,7 @@ _EVENT_TO_FIELD_AND_CLASS = {
     "LiveBuyingPower":            ("live_buying_power",           engine_pb2.LiveBuyingPowerEvent),
     "ReplayTimeUpdated":          ("replay_time_updated",         engine_pb2.ReplayTimeUpdatedEvent),
     "LiveStrategyScenarioLoaded": ("live_strategy_scenario_loaded", engine_pb2.LiveStrategyScenarioLoadedEvent),
+    "LiveStrategyReady":          ("live_strategy_ready",          engine_pb2.LiveStrategyReadyEvent),
 }
 
 

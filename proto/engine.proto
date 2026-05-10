@@ -135,6 +135,7 @@ message Event {
     LiveBuyingPowerEvent            live_buying_power           = 51;
     ReplayTimeUpdatedEvent          replay_time_updated         = 52;
     LiveStrategyScenarioLoadedEvent live_strategy_scenario_loaded = 53;
+    LiveStrategyReadyEvent          live_strategy_ready         = 54;
   }
 }
 
@@ -754,6 +755,16 @@ message LiveStrategyScenarioLoadedEvent {
   optional uint64 max_notional_jpy     = 4;  // matches EngineStartConfig.max_notional_jpy
   optional string venue                = 5;
   optional string strategy_init_kwargs = 6;  // JSON-encoded object or absent
+}
+
+// issue #42 Phase 3 (schema 3.26): live strategy が warm_up() 成功時に emit する。
+// node.build() より前に emit され、Rust 側の auto_generate_live_panes 冪等トリガー
+// として使われる。reconnect 時にも再生される（pending replay 経路）。
+message LiveStrategyReadyEvent {
+  string strategy_id   = 1;
+  string venue         = 2;
+  string instrument_id = 3;
+  int64  ts_event_ms   = 4;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

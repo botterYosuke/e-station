@@ -95,3 +95,44 @@ def test_live_strategy_scenario_loaded_unknown_variant_tolerated() -> None:
     )
     assert ev.request_id == "req-live-3"
     assert not hasattr(ev, "future_unknown_field")
+
+
+# ── Phase P3a (25 → 26): LiveStrategyReady ─────────────────────────────────
+
+
+def test_schema_minor_is_26_for_phase_p3a() -> None:
+    """SCHEMA_MINOR must be bumped to 26 for Phase P3a (LiveStrategyReady)."""
+    assert s.SCHEMA_MINOR >= 26, "Phase P3a: bump 25 → 26 not applied"
+
+
+def test_live_strategy_ready_round_trip() -> None:
+    """`LiveStrategyReady` event serialises and round-trips via JSON."""
+    data = {
+        "event": "LiveStrategyReady",
+        "strategy_id": "live-strat-1",
+        "venue": "tachibana",
+        "instrument_id": "7203.TSE",
+        "ts_event_ms": 1_700_000_000_123,
+    }
+    ev = s.LiveStrategyReady.model_validate(data)
+    out = orjson.loads(orjson.dumps(ev.model_dump(mode="json")))
+    assert out["event"] == "LiveStrategyReady"
+    assert out["strategy_id"] == "live-strat-1"
+    assert out["venue"] == "tachibana"
+    assert out["instrument_id"] == "7203.TSE"
+    assert out["ts_event_ms"] == 1_700_000_000_123
+
+
+def test_live_strategy_ready_unknown_variant_tolerated() -> None:
+    """旧 client が `LiveStrategyReady` event を unknown として握り潰せる（後方互換）。"""
+    data = {
+        "event": "LiveStrategyReady",
+        "strategy_id": "live-strat-2",
+        "venue": "tachibana",
+        "instrument_id": "7203.TSE",
+        "ts_event_ms": 1_700_000_000_456,
+        "future_field": "ignored",
+    }
+    ev = s.LiveStrategyReady.model_validate(data)
+    assert ev.strategy_id == "live-strat-2"
+    assert not hasattr(ev, "future_field")

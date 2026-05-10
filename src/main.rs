@@ -1690,6 +1690,14 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             // and call the live form prefill handler. For now, intentionally drop.
             None
         }
+        // issue #42 Phase 3 (schema 3.26): LiveStrategyReady — Phase 3 functional impl で
+        // auto_generate_live_panes(strategy_id, instrument_id, venue) の冪等トリガーに
+        // 接続する。schema-chain commit 時点では明示 arm + TODO で None 返却。
+        EngineEvent::LiveStrategyReady { .. } => {
+            // TODO(issue #42 Phase 3): route to LiveMsg::StrategyReady to trigger
+            // the idempotent 4-pane auto-generation. For now, intentionally drop.
+            None
+        }
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
         // 正しいことを確認すること。`_ => None` で握り潰すと

@@ -1513,6 +1513,17 @@ pub enum EngineEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     },
+
+    // ── issue #42 Phase 3 (schema 3.26): LiveStrategyReady ────────────────────
+    /// live strategy が ``warm_up()`` 成功時に emit する。``node.build()`` より前。
+    /// Rust 側はこれを auto_generate_live_panes(strategy_id, instrument_id, venue) の
+    /// 冪等トリガーとして使う。reconnect 時にも再生される。
+    LiveStrategyReady {
+        strategy_id: String,
+        venue: String,
+        instrument_id: String,
+        ts_event_ms: i64,
+    },
 }
 
 fn default_true() -> bool {
