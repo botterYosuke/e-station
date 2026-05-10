@@ -129,9 +129,8 @@ fn test_engine_started_without_live_strategy_ready_shows_timeout_banner() {
         arm.contains("LiveWarmupTimeoutFired"),
         "LiveStarted arm must emit LiveWarmupTimeoutFired after the timeout: {arm}"
     );
-    let timeout_arm = handler_arm_match(&[
-        "ReplayMsg::LiveWarmupTimeoutFired { strategy_id, token } =>",
-    ]);
+    let timeout_arm =
+        handler_arm_match(&["ReplayMsg::LiveWarmupTimeoutFired { strategy_id, token } =>"]);
     assert!(
         timeout_arm.contains("live_warmup_timeout_banner"),
         "LiveWarmupTimeoutFired arm must set live_warmup_timeout_banner: {timeout_arm}"
@@ -212,7 +211,8 @@ fn test_load_live_strategy_scenario_timeout_falls_back_to_manual_input() {
         "fallback timer must emit LiveStrategyScenarioFallback"
     );
     // The fallback arm must release the pending scenario.
-    let fallback = handler_arm_match(&["ReplayMsg::LiveStrategyScenarioFallback { request_id } =>"]);
+    let fallback =
+        handler_arm_match(&["ReplayMsg::LiveStrategyScenarioFallback { request_id } =>"]);
     assert!(
         fallback.contains("release_scenario_pending"),
         "LiveStrategyScenarioFallback arm must call release_scenario_pending: {fallback}"

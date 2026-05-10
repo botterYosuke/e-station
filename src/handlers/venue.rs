@@ -181,7 +181,9 @@ impl crate::Flowsurface {
                 // 一律で `LiveStrategyRehelloReplay` を発火し、handler 側で `Running` 状態の
                 // 三つ組のみ再生する（Idle のときは no-op）。
                 let live_replay_task = if matches!(event, VenueEvent::EngineRehello) {
-                    Task::done(Message::Replay(crate::messages::ReplayMsg::LiveStrategyRehelloReplay))
+                    Task::done(Message::Replay(
+                        crate::messages::ReplayMsg::LiveStrategyRehelloReplay,
+                    ))
                 } else {
                     Task::none()
                 };
@@ -428,7 +430,9 @@ impl crate::Flowsurface {
                 // issue #42 Phase 3 (統一決定 #4): EngineRehello で live strategy の
                 // 4 ペイン再生成を冪等に再実行する。tachibana 経路と対称。
                 let live_replay_task = if matches!(event, VenueEvent::EngineRehello) {
-                    Task::done(Message::Replay(crate::messages::ReplayMsg::LiveStrategyRehelloReplay))
+                    Task::done(Message::Replay(
+                        crate::messages::ReplayMsg::LiveStrategyRehelloReplay,
+                    ))
                 } else {
                     Task::none()
                 };

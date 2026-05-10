@@ -601,8 +601,7 @@ impl crate::Flowsurface {
                 };
                 self.live_warmup_timeout_banner = None;
                 // タイマートークンを bump して未到達タイマーを無効化する。
-                self.live_warmup_timeout_token =
-                    self.live_warmup_timeout_token.wrapping_add(1);
+                self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
                 self.live_warmup_warming_message = None;
                 let main_window_id = self.main_window.id;
                 self.active_dashboard_mut().auto_generate_live_panes(
@@ -649,8 +648,7 @@ impl crate::Flowsurface {
                     // 既に Running に遷移済（Ready が来た）→ 表示しない。
                     return Task::none();
                 }
-                if self.live_strategy_pending_strategy_id.as_deref() != Some(strategy_id.as_str())
-                {
+                if self.live_strategy_pending_strategy_id.as_deref() != Some(strategy_id.as_str()) {
                     // 別 strategy_id 用のタイマー（古い start のもの）→ 無視。
                     return Task::none();
                 }

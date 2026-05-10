@@ -1522,7 +1522,10 @@ impl Dashboard {
 
         // ② OrderList（水平分割で下側に追加）
         let ol_state = pane::State::with_kind(data::layout::pane::ContentKind::OrderList);
-        if let Some((p, _)) = self.panes.split(pane_grid::Axis::Horizontal, last, ol_state) {
+        if let Some((p, _)) = self
+            .panes
+            .split(pane_grid::Axis::Horizontal, last, ol_state)
+        {
             last = p;
         } else {
             log::warn!("auto_generate_live_panes: OrderList split failed");
@@ -1530,7 +1533,10 @@ impl Dashboard {
 
         // ③ BuyingPower（さらに水平分割で下側に追加）
         let bp_state = pane::State::with_kind(data::layout::pane::ContentKind::BuyingPower);
-        if let Some((p, _)) = self.panes.split(pane_grid::Axis::Horizontal, last, bp_state) {
+        if let Some((p, _)) = self
+            .panes
+            .split(pane_grid::Axis::Horizontal, last, bp_state)
+        {
             last = p;
         } else {
             log::warn!("auto_generate_live_panes: BuyingPower split failed");
@@ -1538,7 +1544,10 @@ impl Dashboard {
 
         // ④ Positions（水平分割で下側に追加）
         let pos_state = pane::State::with_kind(data::layout::pane::ContentKind::Positions);
-        if let Some((_p, _)) = self.panes.split(pane_grid::Axis::Horizontal, last, pos_state) {
+        if let Some((_p, _)) = self
+            .panes
+            .split(pane_grid::Axis::Horizontal, last, pos_state)
+        {
             // OK
         } else {
             log::warn!("auto_generate_live_panes: Positions split failed");
