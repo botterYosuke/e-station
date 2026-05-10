@@ -1312,6 +1312,13 @@ class DataEngineServer:
                 self._do_save_strategy_scenario(msg), msg.get("request_id")
             )
 
+        elif op == "LoadLiveStrategyScenario":
+            # issue #42 Phase 2: LIVE_SCENARIO 定数の安全抽出（live フォーム prefill 用）。
+            self._spawn_fetch(
+                self._handle_load_live_strategy_scenario(msg),
+                msg.get("request_id"),
+            )
+
         else:
             log.warning("Unhandled op=%s", op)
             await self._send_error(
@@ -3267,6 +3274,74 @@ class DataEngineServer:
                     reason=str(exc),
                 ).model_dump(exclude_none=False)
             )
+
+    async def _handle_load_live_strategy_scenario(self, msg: dict) -> None:
+        """issue #42 Phase 2: ``LoadLiveStrategyScenario`` ハンドラ。
+
+        戦略 .py から ``LIVE_SCENARIO`` 定数を ``ast.literal_eval`` で安全抽出し、
+        live フォーム prefill 用に Rust GUI に返す。``_do_load_strategy_scenario``
+        （SCENARIO 抽出）の対称ペア。
+
+        emit する event:
+            - 成功（LIVE_SCENARIO 存在 + validate OK）→
+              ``LiveStrategyScenarioLoaded(instrument_id=..., max_qty=..., ..., venue=...)``
+            - LIVE_SCENARIO 不在 → ``LiveStrategyScenarioLoaded(全フィールド None)``
+              を **即時** emit する（5s 待たせない / 統一決定 #18 / 受け入れ基準 #23）。
+            - parse / IO / validate 失敗 →
+              ``Error{code:"strategy_parse_failed", request_id, message}``
+              （受け入れ基準 #19 の一部 — Rust 側 ``handlers/replay.rs`` の
+              IpcError handler が ``release_scenario_pending()`` を呼ぶ code）。
+        """
+        from engine import scenario as scenario_mod
+        from engine.schemas import Error, LiveStrategyScenarioLoaded
+
+        request_id = msg.get("request_id", "")
+        strategy_path = msg.get("strategy_path", "")
+
+        try:
+            live_scenario = scenario_mod.extract_live(Path(strategy_path))
+        except Exception as exc:
+            # AST parse / IO / ScenarioValidationError 等は全て strategy_parse_failed に
+            # 集約する（Rust 側 GUI は単一 code で release_scenario_pending する設計）。
+            log.warning(
+                "scenario.load_live failed reason=%s path=%r", exc, strategy_path
+            )
+            self._outbox.append(
+                Error(
+                    request_id=request_id,
+                    code="strategy_parse_failed",
+                    message=str(exc),
+                ).model_dump(exclude_none=False)
+            )
+            return
+
+        if live_scenario is None:
+            # 受け入れ基準 #23 / 統一決定 #18: LIVE_SCENARIO 不在は即時 null 応答。
+            # GUI 側の 5s timeout は engine 無応答時の fallback のみ。
+            self._outbox.append(
+                LiveStrategyScenarioLoaded(
+                    request_id=request_id,
+                    instrument_id=None,
+                    max_qty=None,
+                    max_notional_jpy=None,
+                    venue=None,
+                    strategy_init_kwargs=None,
+                ).model_dump(exclude_none=False)
+            )
+            return
+
+        # 成功: LIVE_SCENARIO の各フィールドを wire 形に詰める。
+        # extract_live の validation で全必須キーは保証されている。
+        self._outbox.append(
+            LiveStrategyScenarioLoaded(
+                request_id=request_id,
+                instrument_id=live_scenario["instrument"],
+                max_qty=live_scenario["max_qty"],
+                max_notional_jpy=live_scenario["max_notional_jpy"],
+                venue=live_scenario["venue"],
+                strategy_init_kwargs=live_scenario.get("strategy_init_kwargs"),
+            ).model_dump(exclude_none=False)
+        )
 
     async def _do_save_strategy_scenario(self, msg: dict) -> None:
         """SaveStrategyScenario: .py の SCENARIO ブロックを libcst で atomic 書き戻す。
