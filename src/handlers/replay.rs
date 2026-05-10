@@ -583,6 +583,8 @@ impl crate::Flowsurface {
                             strategy_file,
                             max_qty,
                             max_notional_jpy,
+                            strategy_init_kwargs,
+                            prod_mode,
                         }) => {
                             let Some(conn) = self.engine_connection.as_ref().cloned() else {
                                 // フォームを閉じずにエラーを通知する
@@ -596,6 +598,12 @@ impl crate::Flowsurface {
                                 .map(|s| s.to_string_lossy().into_owned());
                             self.live_strategy_form_modal = None;
                             let strategy_file_str = strategy_file.to_string_lossy().into_owned();
+                            // TODO(issue #42 Phase 3.5): prod_mode を venue 引数 / engine config
+                            // に伝搬する経路を追加する。現在は engine プロセス起動時の
+                            // `TACHIBANA_ALLOW_PROD` env が SoT で、GUI 側からは変更できない
+                            // （統一決定 #14）。Phase 3.5 で is_production cap と AND 判定して
+                            // disable トグルが解放される。
+                            let _ = prod_mode;
                             return Task::perform(
                                 async move {
                                     conn.send(engine_client::dto::Command::StartEngine {
@@ -606,7 +614,7 @@ impl crate::Flowsurface {
                                             instrument_id,
                                             instrument_ids: None,
                                             strategy_file: Some(strategy_file_str),
-                                            strategy_init_kwargs: None,
+                                            strategy_init_kwargs,
                                             max_qty: Some(max_qty),
                                             max_notional_jpy: Some(max_notional_jpy),
                                             start_date: None,
