@@ -2211,6 +2211,41 @@ impl Dashboard {
     }
 }
 
+impl From<fetcher::FetchUpdate> for Message {
+    fn from(update: fetcher::FetchUpdate) -> Self {
+        match update {
+            fetcher::FetchUpdate::Status { pane_id, status } => match status {
+                fetcher::FetchTaskStatus::Loading(info) => {
+                    Message::ChangePaneStatus(pane_id, pane::Status::Loading(info))
+                }
+                fetcher::FetchTaskStatus::Completed => {
+                    Message::ChangePaneStatus(pane_id, pane::Status::Ready)
+                }
+            },
+            fetcher::FetchUpdate::Data {
+                layout_id,
+                pane_id,
+                stream,
+                data,
+            } => Message::DistributeFetchedData {
+                layout_id,
+                pane_id,
+                stream,
+                data,
+            },
+            fetcher::FetchUpdate::Error {
+                pane_id,
+                error,
+                req_id,
+            } => Message::FetchFailed {
+                pane_id,
+                error,
+                req_id,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2281,40 +2316,5 @@ mod tests {
         // invariant at the model level.
         dashboard.order_venue = Venue::Tachibana;
         assert_eq!(dashboard.order_venue, Venue::Tachibana);
-    }
-}
-
-impl From<fetcher::FetchUpdate> for Message {
-    fn from(update: fetcher::FetchUpdate) -> Self {
-        match update {
-            fetcher::FetchUpdate::Status { pane_id, status } => match status {
-                fetcher::FetchTaskStatus::Loading(info) => {
-                    Message::ChangePaneStatus(pane_id, pane::Status::Loading(info))
-                }
-                fetcher::FetchTaskStatus::Completed => {
-                    Message::ChangePaneStatus(pane_id, pane::Status::Ready)
-                }
-            },
-            fetcher::FetchUpdate::Data {
-                layout_id,
-                pane_id,
-                stream,
-                data,
-            } => Message::DistributeFetchedData {
-                layout_id,
-                pane_id,
-                stream,
-                data,
-            },
-            fetcher::FetchUpdate::Error {
-                pane_id,
-                error,
-                req_id,
-            } => Message::FetchFailed {
-                pane_id,
-                error,
-                req_id,
-            },
-        }
     }
 }
