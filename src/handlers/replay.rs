@@ -300,9 +300,24 @@ impl crate::Flowsurface {
                     // LIVE_SCENARIO の prefill を要求する。同期的に request_id を保存し、
                     // 5s 経って応答が来なければ pending を解除して手入力 fallback に戻す。
                     let request_id = uuid::Uuid::new_v4().to_string();
+                    // issue #42 Phase 3.5: Ready から tachibana の `is_production` cap を
+                    // 抜いて modal の prod_mode disable 判定に渡す。engine 未接続のときは
+                    // 安全側 = false (= demo 扱い) で構築する。env 変更には engine 再起動が
+                    // 必要なため、modal 表示中の動的更新は不要 (統一決定 #14)。
+                    let tachibana_is_production = self
+                        .engine_connection
+                        .as_ref()
+                        .map(|conn| {
+                            engine_client::capabilities::is_production(
+                                conn.capabilities().as_ref(),
+                                "tachibana",
+                            )
+                        })
+                        .unwrap_or(false);
                     let form = modal::live_strategy_form::LiveStrategyFormModal {
                         strategy_file: path.clone(),
                         pending_scenario_request_id: Some(request_id.clone()),
+                        tachibana_is_production,
                         ..Default::default()
                     };
                     self.live_strategy_form_modal = Some(form);
@@ -801,11 +816,15 @@ impl crate::Flowsurface {
                                 .map(|s| s.to_string_lossy().into_owned());
                             self.live_strategy_form_modal = None;
                             let strategy_file_str = strategy_file.to_string_lossy().into_owned();
-                            // TODO(issue #42 Phase 3.5): prod_mode を venue 引数 / engine config
-                            // に伝搬する経路を追加する。現在は engine プロセス起動時の
-                            // `TACHIBANA_ALLOW_PROD` env が SoT で、GUI 側からは変更できない
-                            // （統一決定 #14）。Phase 3.5 で is_production cap と AND 判定して
-                            // disable トグルが解放される。
+                            // issue #42 Phase 3.5: prod_mode は engine config に流さない。
+                            // engine プロセス起動時の env (`TACHIBANA_ALLOW_PROD=1` +
+                            // `tachibana_is_demo=False`) が SoT で、GUI からは変更できない
+                            // (統一決定 #14)。modal の `validate()` は cap=false で
+                            // `prod_mode=true` を reject するため、ここに到達した時点で
+                            //   - prod_mode=false なら engine は demo env、または
+                            //   - prod_mode=true && cap=true（engine が prod env で起動済み）
+                            // のいずれかが成立する。よって StartEngine だけ送れば、
+                            // engine は自分の env に従って demo / prod を決定する。
                             let _ = prod_mode;
                             return Task::perform(
                                 async move {

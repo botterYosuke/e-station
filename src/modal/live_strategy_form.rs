@@ -30,6 +30,13 @@ pub struct LiveStrategyFormModal {
     /// `LiveStrategyScenarioLoaded` / `Error{code:"strategy_parse_failed"}` /
     /// 5s timeout のいずれかで `None` に戻す。
     pub pending_scenario_request_id: Option<String>,
+    /// issue #42 Phase 3.5: tachibana の `is_production` cap (engine 再起動時に固定)。
+    /// `Ready.capabilities.venue_capabilities["tachibana"].is_production` から
+    /// 読み取る (cap 欠落 / 旧 server / malformed wire は安全側の `false`)。
+    /// `prod_mode=true && tachibana_is_production=false` で validate() は reject する。
+    /// engine プロセスの env (`TACHIBANA_ALLOW_PROD=1`) を書き換えるには engine 再起動が
+    /// 必要なので、本フィールドは modal 側で勝手に True に変更してはならない。
+    pub tachibana_is_production: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +111,13 @@ impl LiveStrategyFormModal {
             .map_err(|_| "最大金額（円）は正の整数で入力してください".to_string())?;
         if !(1..=100_000_000).contains(&max_notional_jpy) {
             return Err("最大金額（円）は 1〜100,000,000 の範囲で入力してください".to_string());
+        }
+
+        // issue #42 Phase 3.5: prod_mode を選択しているのに engine が
+        // `TACHIBANA_ALLOW_PROD=1` を expose していない場合は明示 reject する。
+        // engine プロセスの env が SoT なので runtime での切替は不可 (統一決定 #14)。
+        if self.prod_mode && !self.tachibana_is_production {
+            return Err("TACHIBANA_ALLOW_PROD env が未設定です（engine 再起動が必要）".to_string());
         }
 
         // strategy_init_kwargs: 空文字列はスキップ、非空のときは JSON object として parse 検証。
@@ -536,10 +550,13 @@ mod tests {
     }
 
     // prod_mode true は ValidatedForm に伝搬する。
+    // issue #42 Phase 3.5: validate() が prod_mode + cap を要求するため、
+    // 既存テスト互換のため `tachibana_is_production` も合わせて true にする。
     #[test]
     fn test_prod_mode_propagates_to_validated_form() {
         let (mut form, tmp_file) = make_valid_form();
         form.prod_mode = true;
+        form.tachibana_is_production = true;
         let result = form.validate();
         assert!(result.is_ok());
         assert!(result.unwrap().prod_mode, "prod_mode must propagate");
@@ -555,6 +572,71 @@ mod tests {
         assert!(form.prod_mode);
         form.update(Message::ProdModeToggled(false));
         assert!(!form.prod_mode);
+    }
+
+    // ── issue #42 Phase 3.5: tachibana is_production cap 連動 ────────────────
+
+    /// Phase 3.5: `tachibana_is_production` cap が false のまま `prod_mode=true` を
+    /// 選んで Submit すると validate() で reject される。固定文言を返すこと。
+    #[test]
+    fn test_validate_rejects_prod_mode_when_is_production_cap_false() {
+        let (mut form, tmp_file) = make_valid_form();
+        form.prod_mode = true;
+        form.tachibana_is_production = false; // env 未設定相当
+        let result = form.validate();
+        assert!(
+            result.is_err(),
+            "prod_mode=true + cap=false は reject すべき"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("TACHIBANA_ALLOW_PROD"),
+            "固定文言に TACHIBANA_ALLOW_PROD が含まれるべき: {err}"
+        );
+        assert!(
+            err.contains("再起動"),
+            "engine 再起動を促す文言が必要: {err}"
+        );
+        let _ = std::fs::remove_file(&tmp_file);
+    }
+
+    /// Phase 3.5: cap=true なら prod_mode=true で validate() 成功。
+    #[test]
+    fn test_validate_allows_prod_mode_when_is_production_cap_true() {
+        let (mut form, tmp_file) = make_valid_form();
+        form.prod_mode = true;
+        form.tachibana_is_production = true;
+        let result = form.validate();
+        assert!(
+            result.is_ok(),
+            "prod_mode=true + cap=true は OK: {:?}",
+            result
+        );
+        let _ = std::fs::remove_file(&tmp_file);
+    }
+
+    /// Phase 3.5: cap=false でも prod_mode=false なら validate() は副作用なし。
+    #[test]
+    fn test_validate_ignores_is_production_cap_when_prod_mode_false() {
+        let (mut form, tmp_file) = make_valid_form();
+        form.prod_mode = false;
+        form.tachibana_is_production = false;
+        let result = form.validate();
+        assert!(result.is_ok(), "prod_mode=false なら cap 値に関係なく OK");
+        let _ = std::fs::remove_file(&tmp_file);
+    }
+
+    /// Phase 3.5: `tachibana_is_production` フィールドの default は false (安全側)。
+    /// modal 構築は handlers 側で struct literal による直代入で
+    /// `engine_client::capabilities::is_production` の戻り値を流す経路 (replay.rs::
+    /// NativeOpenStrategyPicked live 分岐)。
+    #[test]
+    fn test_tachibana_is_production_default_is_false() {
+        let form = LiveStrategyFormModal::default();
+        assert!(
+            !form.tachibana_is_production,
+            "default は false (安全側 = demo 扱い)"
+        );
     }
 
     // prefill_from_scenario が全フィールドを埋める。
