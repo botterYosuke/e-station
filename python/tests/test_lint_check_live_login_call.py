@@ -192,6 +192,47 @@ def test_check_live_login_call_fails_when_cli_path_missing(tmp_path: Path) -> No
         check_live_login_call(cli_path=nonexistent)
 
 
+def test_no_python_engine_namespace_collision_in_repo() -> None:
+    """``pythonpath = ["python", "."]`` 設定下で ``from python.engine import ...``
+    のような **二重 import 経路** が repo 内に出現していないことを pin.
+
+    Phase 6 で repo root を pytest pythonpath に追加した結果、``engine`` (正規) と
+    ``python.engine`` (PEP 420 namespace 経由) の **2 つの module 経路** が両立する。
+    これを誰かが両方使うと module-level singleton / class identity が壊れる
+    silent failure になるため、コード規約として ``python.engine`` 表記を repo に
+    入れない契約を ここで pin する。
+    """
+    import re as _re
+    repo_root = Path(__file__).resolve().parents[2]
+    pat = _re.compile(r"^\s*(from\s+python\.engine\b|import\s+python\.engine\b)", _re.MULTILINE)
+    # スキャン対象を repo 内の Python ソース root に限定（.venv / target / __pycache__
+    # 等の巨大ツリーを最初から候補に入れない）。
+    scan_dirs = [
+        repo_root / "python",
+        repo_root / "tools",
+        repo_root / "scripts",
+        repo_root / "examples",
+    ]
+    offenders: list[str] = []
+    for root in scan_dirs:
+        if not root.is_dir():
+            continue
+        for py in root.rglob("*.py"):
+            if any(part == "__pycache__" for part in py.parts):
+                continue
+            try:
+                text = py.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if pat.search(text):
+                offenders.append(str(py.relative_to(repo_root)))
+    assert not offenders, (
+        "`python.engine` namespace 経路の import を検出: "
+        f"{offenders}. 正規の `from engine import ...` を使ってください "
+        "(issue #42 Phase 6 R2: pythonpath 二重 import 防止)."
+    )
+
+
 # ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
