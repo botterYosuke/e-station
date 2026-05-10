@@ -308,6 +308,38 @@ R2 で見つかった 8 件のうち、CRITICAL `_login_attach()` の `request_i
 
 **毎ラウンド `silent-failure-hunter` を必ず投入**し、特に「前ラウンドで導入した新変数・新フィールド・新 if 分岐」をピンポイントで検査する prompt にすると効率的。
 
+### 18. websockets `async for` vs `ws.recv()` の挙動差異（Issue #40, 2026-05-10）
+
+websockets 10+ / 16.0 では `ClientConnection.__aiter__` が内部で `ConnectionClosedOK` を `return`（= `StopAsyncIteration`）に変換する:
+
+```python
+# websockets 16.0 実装
+async def __aiter__(self):
+    try:
+        while True:
+            yield await self.recv()
+    except ConnectionClosedOK:
+        return  # StopAsyncIteration に変換 → except ConnectionClosedOK に到達しない
+```
+
+**結果**: `async for raw in ws:` でループするコードは、サーバが正常切断（code=1000）しても `except ConnectionClosedOK` ブロックに到達しない。`async with` を正常終了してカウンタを一切触れずにループが続く → 無限高速再接続。
+
+**修正パターン**: `ws.recv()` を直接呼び出す + `asyncio.wait_for` でタイムアウトを設ける:
+
+```python
+while True:
+    try:
+        raw = await asyncio.wait_for(ws.recv(), timeout=_RECV_TIMEOUT_S)
+    except TimeoutError:
+        logger.warning("no message for %.0fs, reconnecting...", _RECV_TIMEOUT_S)
+        break  # async with を抜けて再接続
+    # ConnectionClosedOK/Error は asyncio.wait_for を素通りして外の except に到達する
+```
+
+**テストへの影響**: モックの `FakeWS` が `__aiter__`/`__anext__` を実装していた場合、プロダクションコードが `ws.recv()` に変わると `recv()` メソッドが必要になる。モックはプロダクションの実際の API を反映するように更新する。
+
+**reviewer 観点**: WebSocket 受信ループを `async for` で書いたコードがあれば、`except ConnectionClosedOK` ブロックが実際に到達可能かを websockets バージョンと照合する。
+
 ## 適用例
 
 ### 立花 T3 フェーズ R6-R9（実測）
