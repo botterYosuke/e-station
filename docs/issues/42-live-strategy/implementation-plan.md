@@ -312,3 +312,42 @@ Wave 4: Final review
   - **AST lint の拡張ポイント**: `check_live_login_call.py` は現状「`with LiveSession(...) as s: ... s.run() ...` 経路で login() なし」のみを reject。将来 `LiveSession` の使用パターンが増えたら（例: context manager を使わずに直接 `s = LiveSession(...)` で生成するケース）、`_walk` を拡張して `Assign` 文の RHS が `LiveSession(...)` のケースも追加判定する設計。現状の AST 走査骨格はそのまま活きる
   - **CI 経路の追加**: `docs-lint` job は ubuntu-latest で 1 分以下で完了する想定。GitHub status check に追加する場合、branch protection rule の Required checks に `docs-lint` を入れることで lint 不合格 PR を block できる（merge 経路の物理ガード）
   - **`pytest.ini` の `pythonpath = python .`**: 将来 `tools.lint` 以外にもリポジトリ直下のパッケージ（`scripts.foo` 等）を test から import したくなった場合、すでに `.` が pythonpath に入っているので追加変更不要。pytest は両 ini ファイルの設定をマージせず、`pytest.ini` が見つかればそちらを優先するので、`pyproject.toml` 側の `pythonpath = ["python", "."]` 同期更新は将来の `pytest.ini` 廃止時の保険として保持
+
+### Phase 2 functional 完了（2026-05-10）
+- 担当: phase2-functional-agent
+- 主要 commit:
+  - `19bd4f2` — feat(scenario): `engine.scenario.extract_live(strategy_path)` 新設 + `LiveScenario` TypedDict + `_validate_live_v1` + 17 件のテスト（extract_live 12 / handler 5）+ gRPC mapping pin 4 件
+  - `36703a0` — feat(server): `_handle_load_live_strategy_scenario(msg)` ハンドラ + `_handle` dispatcher 配線
+  - `9fb4434` — test(grpc-wire): `test_new_live_ipcs_round_trip_via_grpc` 追加（受け入れ基準 #22 — 新 live IPCs が gRPC 経路で送受信できる pin）
+- 設計判断:
+  - **`extract_live` の AST 抽出方針**: 既存 `extract()` (SCENARIO 用) と完全に対称な構造を採用。`ast.parse + ast.literal_eval` のみで import を発火させない（副作用ゼロ・統一決定通り）。Assign / AnnAssign 両形を許容し、annotation-only 宣言（value=None）は後続 Assign を見つけるまでスキャンを継続する（`extract()` と同じ流儀）。多重 LIVE_SCENARIO 定義は `ScenarioValidationError` で reject
+  - **`LiveScenario` TypedDict 配置**: `engine.scenario` モジュール内、既存 `Scenario_v3` の隣に追加。`total=False` で `strategy_init_kwargs` の任意性を表現。schema_version=1 のみ対応で、`_validate_live_v1` で必須キー / 型 / 単一銘柄制約を強制（list `instrument` は明示 reject — 統一決定）
+  - **`Error{code:"strategy_parse_failed"}` への集約**: AST parse / IO / `ScenarioValidationError` / `ValueError` を全て **単一 error code** にまとめる。Rust 側 `src/handlers/replay.rs` の IpcError handler は `code == "strategy_parse_failed"` を pin に `release_scenario_pending()` を呼ぶ設計のため、validate 失敗 / 構文エラー / IO エラーを区別する必要が無い。区別はログ（`scenario.load_live failed reason=... path=...`）で行う
+  - **null 即応答の場所**: `_handle_load_live_strategy_scenario` 内、`extract_live` が `None` を返した直後に `LiveStrategyScenarioLoaded(全フィールド None).model_dump(exclude_none=False)` を `_outbox` に追加して `return`。**5s 待たない / GUI 側 timeout はあくまで engine 無応答時の fallback**（統一決定 #18 / 受け入れ基準 #23）。`exclude_none=False` を指定して null フィールドを wire 形に明示的に乗せる（`server_grpc.py` の ParseDict 経路と整合）
+  - **`extract_live` への validation 統合**: 当初は `extract_live` を syntactic 抽出のみにして validate を server 層に分離する案もあったが、`extract` と対称にするため validation を `extract_live` 自身に内包した。理由: (1) server 層は単一 try/except で全失敗を `strategy_parse_failed` に集約しており、validate 失敗とその他失敗を区別する必要が無い、(2) validation 違反は実質的に「ファイルが live 用に使えない」ことを意味し、syntactic 成功だけでは GUI prefill が成立しない、(3) test の表現力（`extract_live(...)` 単体で validate も観測できる）
+- ✅ 達成した受け入れ基準:
+  - #19 (parse_failed 部) `Error{code:"strategy_parse_failed", request_id, message}` 経路（`test_strategy_parse_failed_emits_error_with_code` + `test_strategy_parse_failed_on_syntax_error` + `test_strategy_parse_failed_on_validation_error`）
+  - #22 新 live IPCs が gRPC 経路で送受信できる（`test_field_to_op_mapping_contains_load_live_strategy_scenario` + `test_event_to_field_mapping_contains_live_strategy_scenario_loaded` + `test_new_live_ipcs_round_trip_via_grpc` `#[ignore]`）
+  - #23 LIVE_SCENARIO 不在時の即応答（`test_absent_live_scenario_emits_immediate_loaded_with_nulls` — outbox 1 件のみ + 全フィールド None）
+- 検証:
+  - `uv run pytest python/tests/` 2417 passed / 118 skipped（Phase 2 functional で +17 件）
+  - `cargo test --workspace --no-fail-fast` 全緑
+  - `cargo clippy --workspace --tests -- -D warnings` clean
+- 知見/Tips（Phase 5 examples 追記の参考形式 + 将来）:
+  - **`examples/test_strategy_minute.py` への `LIVE_SCENARIO` 追記サンプル**: 本 Phase ではコード追加せず Phase 5 に委譲。追記時の最小形は以下:
+    ```python
+    LIVE_SCENARIO = {
+        "schema_version": 1,
+        "instrument": "8306.T",
+        "max_qty": 100,
+        "max_notional_jpy": 500000,
+        "venue": "tachibana",
+        # 任意: strategy_init_kwargs={"trade_size": 100} など
+    }
+    ```
+    `instrument` は単一銘柄 str 必須（list は v1 で reject）。`venue` は capability `supports_live_strategy=True` の文字列を入れる（"tachibana" / "kabu_station"）
+  - **`extract_live` と `extract` の coexistence**: 同一 .py に `SCENARIO` と `LIVE_SCENARIO` が両方あっても干渉しない（AST node 名でフィルタ）。replay 経路は `extract` を、live 経路は `extract_live` を呼ぶ独立した経路。Phase 5 で example を編集するときは「既存 SCENARIO はそのまま、LIVE_SCENARIO を追記」のスタイルで OK
+  - **`LIVE_SCENARIO` フィールド型違反の `Error` メッセージ**: `ScenarioValidationError` の `__str__` が `LIVE_SCENARIO['max_qty'] must be int, got str` のような Python レベルメッセージを返す。GUI banner にそのまま表示すると技術的すぎるが、本 Phase では Rust 側 `handlers/replay.rs` で「手入力で続行」warn toast を出して終わるため UX 上は許容範囲。将来 i18n 経路で人間向け文言に置換する場合、Rust 側の toast 文言を切替える方が Python 側の Error.message を変えるより安全
+  - **wire の null 表現**: pydantic `model_dump(exclude_none=False)` で全フィールドが dict に出る → `server_grpc.py` の `ParseDict` で proto optional フィールドに正しくマップされる（proto 側は `optional` 修飾子付き）。Rust 側 `LiveStrategyScenarioLoaded { instrument_id: Option<String>, ... }` は `serde(default, skip_serializing_if = "Option::is_none")` で受信側の None deserialize は安全。`exclude_none=True` にすると proto field が落ちて wire 上で区別できなくなるので注意
+  - **handler test の `_outbox.append` 観測手法**: `_make_server()` で `BinanceWorker` 等を mock した最小 `DataEngineServer` を生成し、`asyncio.run(server._handle_load_live_strategy_scenario(msg))` を直接呼ぶ。`_outbox` は `_Broadcaster` で iter 可能なので `list(server._outbox)` で観測する。同パターンは既存 `test_scenario_load.py::test_load_failed_log_format` と同じ
+  - **`_FIELD_TO_OP` mapping pin の重要性**: Wave 1 で wire 配線済の `load_live_strategy_scenario` が `_FIELD_TO_OP` から削除されると、Rust が proto Command を送信しても `_handle` まで到達しない silent failure になる。`test_field_to_op_mapping_contains_new_commands` で mapping を pin することで、リファクタ時の意図しない削除を即座に検知できる
