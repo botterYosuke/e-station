@@ -57,9 +57,15 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
 
 
 def test_rust_schema_constants_match_python() -> None:
-    """H4: Rust engine-client/src/lib.rs の SCHEMA_MAJOR/MINOR が Python 側と一致すること。
+    """H4 + R2-C M12: Rust engine-client/src/lib.rs / Python schemas.py /
+    Python server_grpc.py の SCHEMA_MAJOR/MINOR が 3-way で一致すること。
 
-    両方を同期し忘れると ハンドシェイクのログ警告 + minor 機能差異が出る。
+    3 箇所いずれかの同期漏れで:
+    - Rust ↔ Python schemas.py の差異 → ハンドシェイク warning + minor 機能差異
+    - schemas.py ↔ server_grpc.py の差異 → gRPC 経路と raw IPC 経路で別バージョン応答
+
+    issue #42 R1 review R2-C (M12): 旧 2-way + 別 test での server_grpc 比較を、
+    本 test に統合して 3-way 単一 source-of-truth とする。
     """
     import re
     from pathlib import Path
@@ -76,11 +82,30 @@ def test_rust_schema_constants_match_python() -> None:
     rust_major = int(major_match.group(1))
     rust_minor = int(minor_match.group(1))
 
+    # 1) Rust ↔ Python schemas.py
     assert rust_major == s.SCHEMA_MAJOR, (
-        f"SCHEMA_MAJOR drift: Rust={rust_major} Python={s.SCHEMA_MAJOR}"
+        f"SCHEMA_MAJOR drift: Rust={rust_major} Python schemas.py={s.SCHEMA_MAJOR}"
     )
     assert rust_minor == s.SCHEMA_MINOR, (
-        f"SCHEMA_MINOR drift: Rust={rust_minor} Python={s.SCHEMA_MINOR}"
+        f"SCHEMA_MINOR drift: Rust={rust_minor} Python schemas.py={s.SCHEMA_MINOR}"
+    )
+
+    # 2) Rust ↔ Python server_grpc.py（R2-C M12 で本 test に統合）
+    import engine.server_grpc as sg
+
+    assert rust_major == sg.SCHEMA_MAJOR, (
+        f"SCHEMA_MAJOR drift: Rust={rust_major} Python server_grpc.py={sg.SCHEMA_MAJOR}"
+    )
+    assert rust_minor == sg.SCHEMA_MINOR, (
+        f"SCHEMA_MINOR drift: Rust={rust_minor} Python server_grpc.py={sg.SCHEMA_MINOR}"
+    )
+
+    # 3) schemas.py ↔ server_grpc.py の冗長 cross-check（gRPC 経路の早期検知）
+    assert s.SCHEMA_MAJOR == sg.SCHEMA_MAJOR, (
+        f"SCHEMA_MAJOR drift: schemas.py={s.SCHEMA_MAJOR} server_grpc.py={sg.SCHEMA_MAJOR}"
+    )
+    assert s.SCHEMA_MINOR == sg.SCHEMA_MINOR, (
+        f"SCHEMA_MINOR drift: schemas.py={s.SCHEMA_MINOR} server_grpc.py={sg.SCHEMA_MINOR}"
     )
 
 

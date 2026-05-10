@@ -1368,13 +1368,55 @@ class NautilusRunner:
                     order_id_map=order_id_map,
                 )
             else:  # venue == "kabu_station"（venue validation で他値は弾かれている）
+                # issue #42 R1 review R2-C (CRITICAL, H-1 punt 解消):
+                # KabuStationLive* は LiveExecutionClient / LiveMarketDataClient を継承する。
+                # Nautilus 親が要求する追加引数（loop / client_id / venue / oms_type /
+                # account_type / base_currency / instrument_provider / msgbus / cache /
+                # clock）を node.kernel 経由で取得して super().__init__ に転送する。
+                # 単体テストでは KabuStationLive* factory 自体を monkeypatch するため
+                # kernel が無い FakeNode でも parent kwargs は無害に投げ捨てられる。
+                from nautilus_trader.common.providers import InstrumentProvider
+                from nautilus_trader.model.enums import AccountType, OmsType
+                from nautilus_trader.model.identifiers import ClientId, Venue
+
+                _kabu_parent_kwargs: dict = {}
+                _kernel = getattr(node, "kernel", None)
+                if _kernel is not None:
+                    _kabu_parent_kwargs = dict(
+                        loop=_kernel.loop,
+                        client_id=ClientId(f"KABUSTATION-{safe_id}"),
+                        venue=Venue("TSE"),
+                        oms_type=OmsType.NETTING,
+                        account_type=AccountType.CASH,
+                        base_currency=None,
+                        instrument_provider=InstrumentProvider(),
+                        msgbus=_kernel.msgbus,
+                        cache=_kernel.cache,
+                        clock=_kernel.clock,
+                    )
+
                 exec_client = KabuStationLiveExecutionClient(
+                    **_kabu_parent_kwargs,
                     kabu_venue=session,
                     strategy_id=strategy_id,
                     max_qty=max_qty,
                     max_notional_jpy=max_notional_jpy,
                 )
-                data_client = KabuStationLiveDataClient(on_event=on_event)
+                _kabu_data_parent_kwargs: dict = {}
+                if _kernel is not None:
+                    _kabu_data_parent_kwargs = dict(
+                        loop=_kernel.loop,
+                        client_id=ClientId(f"KABUSTATION-DATA-{safe_id}"),
+                        venue=Venue("TSE"),
+                        msgbus=_kernel.msgbus,
+                        cache=_kernel.cache,
+                        clock=_kernel.clock,
+                        instrument_provider=InstrumentProvider(),
+                    )
+                data_client = KabuStationLiveDataClient(
+                    **_kabu_data_parent_kwargs,
+                    on_event=on_event,
+                )
                 event_bridge = KabuStationEventBridge(client=exec_client)
 
             node._data_engine.register_client(data_client)

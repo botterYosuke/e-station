@@ -10,6 +10,13 @@
 
 KabuStationVenue / KabuOrderClient / KabuRestClient は MagicMock で置換し、
 ネットワーク依存を排除する。
+
+issue #42 R1 review R2-C (CRITICAL):
+``KabuStationLiveExecutionClient`` は ``LiveExecutionClient`` を継承するため
+``__init__`` に Nautilus 親必須引数（``loop`` / ``client_id`` / ``venue`` /
+``oms_type`` / ``account_type`` / ``base_currency`` / ``instrument_provider`` /
+``msgbus`` / ``cache`` / ``clock``）を渡す。`_nautilus_parent_kwargs()` ヘルパで
+共通化。
 """
 from __future__ import annotations
 
@@ -18,6 +25,37 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def _nautilus_parent_kwargs() -> dict:
+    """Nautilus ``LiveExecutionClient`` 親が要求する必須 kwargs を組み立てる。
+
+    Cython 側 type check のため実インスタンスを作る（MagicMock では落ちる）。
+    """
+    from nautilus_trader.cache.cache import Cache
+    from nautilus_trader.common.component import LiveClock, MessageBus
+    from nautilus_trader.common.providers import InstrumentProvider
+    from nautilus_trader.model.enums import AccountType, OmsType
+    from nautilus_trader.model.identifiers import ClientId, TraderId, Venue
+
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    clock = LiveClock()
+    trader_id = TraderId("KABUSTATION-TEST")
+    msgbus = MessageBus(trader_id=trader_id, clock=clock)
+    cache = Cache()
+
+    return dict(
+        loop=asyncio.get_event_loop(),
+        client_id=ClientId("KABUSTATION-EXEC-001"),
+        venue=Venue("TSE"),
+        oms_type=OmsType.NETTING,
+        account_type=AccountType.CASH,
+        base_currency=None,
+        instrument_provider=InstrumentProvider(),
+        msgbus=msgbus,
+        cache=cache,
+        clock=clock,
+    )
 
 
 def _make_kabu_venue_with_orders(records: list[dict] | None = None, raise_exc: Exception | None = None):
@@ -47,6 +85,7 @@ class TestWarmUpReturnsTrueOnSuccess:
 
         venue = _make_kabu_venue_with_orders([])  # 空でも成功なら True
         client = KabuStationLiveExecutionClient(
+            **_nautilus_parent_kwargs(),
             kabu_venue=venue,
             strategy_id="kabu-test",
             max_qty=100,
@@ -67,6 +106,7 @@ class TestWarmUpReturnsFalseOnException:
 
         venue = _make_kabu_venue_with_orders(raise_exc=RuntimeError("kabu /orders 503"))
         client = KabuStationLiveExecutionClient(
+            **_nautilus_parent_kwargs(),
             kabu_venue=venue,
             strategy_id="kabu-test",
             max_qty=100,
@@ -93,6 +133,7 @@ class TestCloseReleasesSession:
         venue.clear = MagicMock()
         venue.fetch_orders = AsyncMock(return_value=[])
         client = KabuStationLiveExecutionClient(
+            **_nautilus_parent_kwargs(),
             kabu_venue=venue,
             strategy_id="kabu-test",
             max_qty=100,
@@ -173,6 +214,7 @@ def _make_safety_test_client(*, max_qty=100, max_notional_jpy=500_000):
 
     venue = _make_kabu_venue_with_orders([])
     client = KabuStationLiveExecutionClient(
+        **_nautilus_parent_kwargs(),
         kabu_venue=venue,
         strategy_id="kabu-test",
         max_qty=max_qty,

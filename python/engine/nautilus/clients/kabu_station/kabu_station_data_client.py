@@ -12,8 +12,11 @@
 - 実 PUSH WebSocket 接続は ``server.py::_startup_kabu_station`` が管理する（Phase 4 minimal は
   「subscribe 経路と evict 通知契約」を確立することに専念）。
 
-LiveDataClient 互換 (``nautilus_trader.live.data_client.LiveDataClient``) の最小実装。
-parent class を継承しない thin adapter として実装し、必要 minimal API のみ公開する。
+issue #42 R1 review R2-C (CRITICAL, H-1 punt 解消):
+``LiveMarketDataClient`` (``nautilus_trader.live.data_client``) を継承する。
+Nautilus の ``LiveDataEngine.register_client`` は Cython 親型 ``MarketDataClient``
+互換を要求するため、未継承だと ``engine_runner.py::start_live`` の
+``register_client(data_client)`` が ``node.build()`` 経由で type check に失敗する。
 """
 from __future__ import annotations
 
@@ -21,32 +24,42 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from nautilus_trader.live.data_client import LiveMarketDataClient
+
 from engine.exchanges.kabusapi_register import RegisterSet, MAX_SYMBOLS
 
 log = logging.getLogger(__name__)
 
 
-class KabuStationLiveDataClient:
+class KabuStationLiveDataClient(LiveMarketDataClient):
     """kabuステーション 向け LiveDataClient adapter。
 
     50 銘柄 PUSH 上限に達したら最古銘柄を evict し ``SubscriptionEvicted{symbol}``
     を IPC で emit する（spec §3.2-G）。
 
+    issue #42 R1 review R2-C (CRITICAL, H-1 punt 解消):
+    ``LiveMarketDataClient`` を継承する。Nautilus 親が要求する追加引数
+    （``loop`` / ``client_id`` / ``venue`` / ``msgbus`` / ``cache`` / ``clock`` /
+    ``instrument_provider``）は ``*args, **kwargs`` で吸収して ``super().__init__``
+    に転送する。tachibana の ``TachibanaLiveDataClient`` と同じパターン。
+
     Args:
+        *args: ``LiveMarketDataClient.__init__`` への positional 引数。
         on_event: IPC イベント callback。``SubscriptionEvicted`` を流す。
         exchange: kabu の Exchange code（既定 1=東証）。本 adapter は単一 exchange 想定。
+        **kwargs: ``LiveMarketDataClient.__init__`` への keyword 引数。
     """
 
     def __init__(
         self,
-        *,
+        *args: Any,
         on_event: Callable[[dict], None] | None = None,
         exchange: int = 1,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> None:
+        super().__init__(*args, **kwargs)
         self._on_event = on_event if on_event is not None else (lambda _evt: None)
         self._exchange = exchange
-        self.id = "kabu_station-data"
         # spec §3.2-G: live strategy 用 RegisterSet は暗黙 LRU evict ＋ 通知方式。
         # on_evict callback で SubscriptionEvicted を emit する。
         self._register_set = RegisterSet(

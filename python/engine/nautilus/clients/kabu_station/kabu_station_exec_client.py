@@ -13,9 +13,14 @@
   modify は kabuStation API に存在しない（``supports_amend=False`` cap）ため
   reject を返す。cancel は ``KabuOrderClient.cancel_order()`` に委譲。
 
-LiveExecutionClient 互換 (``nautilus_trader.live.execution_client.LiveExecutionClient``)
-として実装するが、Phase 4 の最小スコープでは「warm_up / close / 安全装置 + 代表 1 経路
-(submit_order)」のみを通す。残りは TODO で残す。
+issue #42 R1 review R2-C (CRITICAL, H-1 punt 解消):
+``LiveExecutionClient`` を継承する。Nautilus の ``LiveExecutionEngine.register_client``
+は Cython 親型 ``ExecutionClient`` 互換を要求するため、未継承だと
+``engine_runner.py::start_live`` の ``register_client(exec_client)`` が
+``node.build()`` 経由で type check に失敗する。
+
+Phase 4 の最小スコープでは「warm_up / close / 安全装置 + 代表 1 経路 (submit_order)」
+のみを通す。残りは TODO で残す。
 """
 from __future__ import annotations
 
@@ -23,6 +28,8 @@ import logging
 import time as _time
 from decimal import Decimal
 from typing import Any, Optional
+
+from nautilus_trader.live.execution_client import LiveExecutionClient
 
 log = logging.getLogger(__name__)
 
@@ -77,28 +84,38 @@ def _check_safety_limits(
 # ---------------------------------------------------------------------------
 
 
-class KabuStationLiveExecutionClient:
+class KabuStationLiveExecutionClient(LiveExecutionClient):
     """kabuステーション 向け LiveExecutionClient adapter。
 
     既存 ``KabuStationVenue`` (``engine.exchanges.kabusapi``) に委譲する。
 
+    issue #42 R1 review R2-C (CRITICAL, H-1 punt 解消):
+    ``LiveExecutionClient`` を継承する。Nautilus 親が要求する追加引数
+    （``loop`` / ``client_id`` / ``venue`` / ``oms_type`` / ``account_type`` /
+    ``base_currency`` / ``instrument_provider`` / ``msgbus`` / ``cache`` /
+    ``clock`` / 任意 ``config``）は ``*args, **kwargs`` で吸収して ``super().__init__``
+    に転送する。tachibana の ``TachibanaLiveExecutionClient`` と同じパターン。
+
     Args:
+        *args: ``LiveExecutionClient.__init__`` への positional 引数。
         kabu_venue: ``KabuStationVenue`` インスタンス（または互換 mock）。
         strategy_id: strategy 識別子。
         max_qty: 1 注文あたりの最大株数（必須、未設定は起動拒否）。
         max_notional_jpy: 1 注文あたりの最大金額（円、必須、未設定は起動拒否）。
+        **kwargs: ``LiveExecutionClient.__init__`` への keyword 引数。
     """
 
     def __init__(
         self,
-        *,
+        *args: Any,
         kabu_venue: Any,
         strategy_id: str = "kabu_station",
         max_qty: Optional[int] = None,
         max_notional_jpy: Optional[int] = None,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> None:
         # 安全装置 — 数量 / 金額上限の設定必須（tachibana 同等）。
+        # super().__init__() より先にチェックして起動自体を拒否する。
         if max_qty is None:
             raise ValueError(
                 "KabuStationLiveExecutionClient: max_qty must be specified "
@@ -110,11 +127,12 @@ class KabuStationLiveExecutionClient:
                 "(safety guard). Example: max_notional_jpy=1_000_000"
             )
 
+        super().__init__(*args, **kwargs)
+
         self._kabu_venue = kabu_venue
         self._strategy_id = strategy_id
         self._max_qty = max_qty
         self._max_notional_jpy = max_notional_jpy
-        self.id = f"kabu_station-exec-{strategy_id}"
 
     # ------------------------------------------------------------------
     # warm-up: fetch open orders from kabu /orders（失敗時 False、Phase 1 互換）

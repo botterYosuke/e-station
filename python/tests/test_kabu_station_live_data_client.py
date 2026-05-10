@@ -8,6 +8,11 @@
   （docs/specs/live-strategy.md §3.2-G）
 
 50 銘柄上限の数値ソースは ``engine.exchanges.kabusapi_register.RegisterSet.MAX``。
+
+issue #42 R1 review R2-C (CRITICAL):
+``KabuStationLiveDataClient`` は ``LiveMarketDataClient`` を継承するため
+``__init__`` に Nautilus 親必須引数（``loop`` / ``client_id`` / ``venue`` /
+``msgbus`` / ``cache`` / ``clock`` / ``instrument_provider``）を渡す。
 """
 from __future__ import annotations
 
@@ -17,12 +22,37 @@ from unittest.mock import MagicMock
 import pytest
 
 
+def _nautilus_data_parent_kwargs() -> dict:
+    """Nautilus ``LiveMarketDataClient`` 親が要求する必須 kwargs を組み立てる。"""
+    from nautilus_trader.cache.cache import Cache
+    from nautilus_trader.common.component import LiveClock, MessageBus
+    from nautilus_trader.common.providers import InstrumentProvider
+    from nautilus_trader.model.identifiers import ClientId, TraderId, Venue
+
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    clock = LiveClock()
+    trader_id = TraderId("KABUSTATION-TEST-DATA")
+    msgbus = MessageBus(trader_id=trader_id, clock=clock)
+    cache = Cache()
+
+    return dict(
+        loop=asyncio.get_event_loop(),
+        client_id=ClientId("KABUSTATION-DATA-001"),
+        venue=Venue("TSE"),
+        msgbus=msgbus,
+        cache=cache,
+        clock=clock,
+        instrument_provider=InstrumentProvider(),
+    )
+
+
 def _make_data_client(events_sink: list):
     from engine.nautilus.clients.kabu_station.kabu_station_data_client import (
         KabuStationLiveDataClient,
     )
 
     client = KabuStationLiveDataClient(
+        **_nautilus_data_parent_kwargs(),
         on_event=events_sink.append,
     )
     return client
