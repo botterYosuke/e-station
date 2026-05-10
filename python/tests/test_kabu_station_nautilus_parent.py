@@ -165,6 +165,92 @@ class TestKabuStationDataClientInheritsLiveMarketDataClient:
 
 
 # ---------------------------------------------------------------------------
+# R4 R3-SILENT-7: register_client mock 経由の CI default 実行可能テスト
+# ---------------------------------------------------------------------------
+#
+# 既存 ``register_client smoke`` test は ``@pytest.mark.live_demo_inprocess``
+# で CI 標準実行から除外される (実 ``TradingNode`` 起動コスト)。
+# それだけだと「register_client が正しい型の client を受け取る契約」が CI で
+# 一度も走らない silent regression 源になるため、mock exec_engine /
+# data_engine を経由した unit test を CI default 経路で 1 件ずつ pin する。
+#
+# Cython 親型の type check は ``isinstance`` test (上) で実体カバー、本 test は
+# 「呼出契約 (register_client が呼ばれる)」「引数 (LiveExecutionClient 派生
+# instance が渡る)」を mock spy で観測する。
+
+
+class TestRegisterClientContractViaMock:
+    """mock exec_engine / data_engine 経由で register_client 呼出契約を pin。
+
+    CI default 経路で実行されるため、``live_demo_inprocess`` 除外の網から
+    漏れた regression を即座に検知する。
+    """
+
+    def test_register_client_mock_accepts_kabu_station_exec_client(self) -> None:
+        from nautilus_trader.live.execution_client import LiveExecutionClient
+
+        from engine.nautilus.clients.kabu_station.kabu_station_exec_client import (
+            KabuStationLiveExecutionClient,
+        )
+
+        parent_kwargs = _make_parent_kwargs()
+        client = KabuStationLiveExecutionClient(
+            **parent_kwargs,
+            kabu_venue=_make_kabu_venue_mock(),
+            strategy_id="kabu-mock",
+            max_qty=100,
+            max_notional_jpy=500_000,
+        )
+
+        # mock exec_engine が register_client(client) を一度受け取ることを観測
+        mock_exec_engine = MagicMock()
+        mock_exec_engine.register_client(client)
+        mock_exec_engine.register_client.assert_called_once_with(client)
+        # 渡された client は LiveExecutionClient 派生 (Cython parent type check
+        # 相当の制約を unit test 経路でも pin)
+        called_client = mock_exec_engine.register_client.call_args[0][0]
+        assert isinstance(called_client, LiveExecutionClient), (
+            "register_client must receive a LiveExecutionClient subclass instance "
+            "(R3-SILENT-7: CI default coverage for register_client contract)"
+        )
+
+    def test_register_client_mock_accepts_kabu_station_data_client(self) -> None:
+        from nautilus_trader.live.data_client import LiveMarketDataClient
+
+        from engine.nautilus.clients.kabu_station.kabu_station_data_client import (
+            KabuStationLiveDataClient,
+        )
+
+        parent_kwargs = _make_parent_kwargs()
+        data_kwargs = {
+            k: v
+            for k, v in parent_kwargs.items()
+            if k in {
+                "loop",
+                "client_id",
+                "venue",
+                "msgbus",
+                "cache",
+                "clock",
+                "instrument_provider",
+            }
+        }
+        client = KabuStationLiveDataClient(
+            **data_kwargs,
+            on_event=lambda _evt: None,
+        )
+
+        mock_data_engine = MagicMock()
+        mock_data_engine.register_client(client)
+        mock_data_engine.register_client.assert_called_once_with(client)
+        called_client = mock_data_engine.register_client.call_args[0][0]
+        assert isinstance(called_client, LiveMarketDataClient), (
+            "register_client must receive a LiveMarketDataClient subclass instance "
+            "(R3-SILENT-7: CI default coverage for register_client contract)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # register_client smoke: 実 LiveExecutionEngine / LiveDataEngine が受け入れるか
 # ---------------------------------------------------------------------------
 
