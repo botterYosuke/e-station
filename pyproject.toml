@@ -45,6 +45,8 @@ testpaths = ["python/tests"]
 markers = [
     "demo_tachibana: requires real Tachibana demo account credentials (DEV_TACHIBANA_USER_ID / DEV_TACHIBANA_PASSWORD)",
     "live: requires live exchange or J-Quants data",
+    "live_demo: live demo CLI/GUI smoke (workflow_dispatch only, attach mode)",
+    "live_demo_inprocess: live demo in-process smoke (ローカル限定、CI からは除外)",
 ]
 
 [tool.pyright]
