@@ -31,8 +31,8 @@ Phase 1 ``test_live_session_cli.py`` 側で別途 pin 済み。本テストは
 
 from __future__ import annotations
 
-import io
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -66,9 +66,11 @@ def test_attach_mode_full_lifecycle() -> None:
     """attach mode で実 engine に繋がる lifecycle を pin（CI workflow_dispatch のみ）。
 
     実 engine が無い CI 環境では ``FLOWSURFACE_ENGINE_TOKEN`` 未設定で skip。
-    立花 demo 環境のログインは事前に GUI / ``replay_session.py`` 経由で完了
-    している前提（attach mode は engine プロセスに **接続** するだけで
-    ログイン操作は行わない）。
+    立花 demo 環境のログインは engine 側で完了している前提（attach mode は
+    engine プロセスに **接続** するだけで credential を wire に流さない、
+    統一決定 #7）。``sess.login()`` は attach 経路では credential を明示渡し
+    せず ``RequestVenueLogin`` のみを送る ack handshake で、CLI と同じフロー
+    （``live_session_cli.py`` 参照）。
 
     期待 event 順序（部分列）: ``EngineStarted`` → ``LiveStrategyReady``
     → ``EngineStopped``。
@@ -91,8 +93,11 @@ def test_attach_mode_full_lifecycle() -> None:
 
     events: list[dict[str, Any]] = []
     with LiveSession(venue="tachibana", demo=True, force_mode="attach") as sess:
-        # attach mode: ログインは engine 側で完了済。``run()`` で
-        # ``StartEngine`` を送り EngineStarted / LiveStrategyReady を待つ。
+        # attach mode: ``LiveSession.run`` は ``_logged_in == True`` を要求する
+        # ため、``sess.login()`` を先に呼ぶ。attach 経路では credential を
+        # 明示渡ししなければ engine に ``RequestVenueLogin`` を送り
+        # ``VenueReady`` を待つだけ（CLI と同じフロー、live_session_cli.py 参照）。
+        sess.login()
         try:
             sess.run(
                 strategy_file=str(strategy_path),
@@ -220,8 +225,6 @@ def test_expected_subsequence_self_check() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_repo_root():
+def _resolve_repo_root() -> Path:
     """テストファイルから repo root への相対パスを解決する。"""
-    from pathlib import Path
-
     return Path(__file__).resolve().parents[2]
