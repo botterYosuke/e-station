@@ -206,7 +206,20 @@ def _resolve_second_password(
     """
     # attach mode: wire 経由送信を禁止 → CLI は受けない（DEV_TACHIBANA_SECOND_PASSWORD env が
     # 設定されていても LiveSession には渡さない）。engine 側 SessionHolder で事前設定済みの前提。
+    # ユーザーが明示的に passing したことに気付けるよう、--second-password / stdin /
+    # env のいずれかが解決可能だった場合は stderr に hint を出す（silent ignore 防止）。
     if mode == "attach":
+        provided = (
+            args.second_password_stdin
+            or os.environ.get("DEV_TACHIBANA_SECOND_PASSWORD")
+            or args.second_password is not None
+        )
+        if provided:
+            print(
+                "[live_session_cli] attach mode: 第二暗証番号は wire に流されません "
+                "(spec §3.2-D)。GUI 経由で engine 側に事前設定してください。",
+                file=stderr,
+            )
         return None
 
     # 1) --second-password-stdin

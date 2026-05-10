@@ -195,6 +195,14 @@ class TestWarmUpFailureExceptionPath:
             f"EngineStarted must NOT be emitted when warm_up fails, got {started!r}"
         )
 
+        # silent failure 対策: EngineStopped は emit される（Rust 側 state machine を
+        # unstuck するため。Rust は EngineStarted 無しの EngineStopped を no-op として扱う）。
+        stopped = [e for e in events if e.get("event") == "EngineStopped"]
+        assert len(stopped) == 1, (
+            f"EngineStopped must follow EngineError(warm_up_failed) to unstuck Rust, "
+            f"got events={events!r}"
+        )
+
 
 class TestWarmUpFailureFalseReturnPath:
     """warm_up が **`False` を返す** 場合（旧実装で見逃されていた経路）。"""
@@ -218,6 +226,13 @@ class TestWarmUpFailureFalseReturnPath:
         ready = [e for e in events if e.get("event") == "LiveStrategyReady"]
         assert ready == [], (
             f"LiveStrategyReady must NOT be emitted when warm_up returns False, got {ready!r}"
+        )
+
+        # silent failure 対策: EngineStopped emit
+        stopped = [e for e in events if e.get("event") == "EngineStopped"]
+        assert len(stopped) == 1, (
+            f"EngineStopped must follow EngineError(warm_up_failed) for False return, "
+            f"got events={events!r}"
         )
 
 

@@ -1169,6 +1169,24 @@ class NautilusRunner:
         import time as _time
         from datetime import datetime as _datetime, timezone as _timezone
 
+        def _emit_engine_stopped_for_early_abort() -> None:
+            """early-abort 経路（market_closed / warm_up_failed / node_build_failed）の
+            cleanup 用。``EngineStopped`` を emit して Rust 側 state machine を unstuck する。
+
+            silent failure 対策（issue #42 Phase 1 self-review）:
+            外側の ``try/finally`` (line ~1426) は ``node.build()`` 周辺だけを wrap して
+            おり、warm_up より前の early-abort 経路では ``EngineStopped`` が emit されない。
+            server.py の ``except Exception`` も ``start_live`` が **例外を raise しない**
+            なら trigger しないため、サーバ側 fallback も効かない。本 helper で明示的に
+            cleanup イベントを送出する。
+            """
+            on_event({
+                "event": "EngineStopped",
+                "strategy_id": strategy_id,
+                "final_equity": "0",
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+
         # issue #42 Phase 1 / 統一決定 #5: 市場閉場 → 即 abort（exec_client / TradingNode 構築前）。
         # is_market_open は module top で import され、テストは monkeypatch で差し替え可能。
         if not is_market_open(_datetime.now(_timezone.utc)):
@@ -1182,6 +1200,7 @@ class NautilusRunner:
                 "strategy_id": strategy_id,
                 "ts_event_ms": int(_time.time() * 1000),
             })
+            _emit_engine_stopped_for_early_abort()
             return
 
         from nautilus_trader.config import CacheConfig, TradingNodeConfig
@@ -1210,6 +1229,8 @@ class NautilusRunner:
             warm_up が失敗（例外 OR False 戻り）した時の共通 cleanup 経路。
             EngineError{code:"warm_up_failed"} を emit + ``await exec_client.close()``。
             HTTP session / WebSocket subscription のリーク防止のため close は必須。
+            最後に ``EngineStopped`` を emit して Rust 側 state machine を unstuck する
+            （silent failure 対策、self-review）。
             """
             on_event({
                 "event": "EngineError",
@@ -1226,6 +1247,7 @@ class NautilusRunner:
                     "[start_live] exec_client.close() raised during warm_up cleanup: %s",
                     close_exc,
                 )
+            _emit_engine_stopped_for_early_abort()
 
         async def _warming_up_ticker(stop_flag: _asyncio.Event) -> None:
             """issue #42 Phase 1 / 統一決定 #10: warm_up 中 5s 毎に進捗 emit。

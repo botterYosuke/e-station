@@ -95,8 +95,17 @@ class TestStartLiveRejectsWhenMarketClosed:
 
         # 4) 副作用ゼロ invariant: exec_client は構築されていない
         assert sentinel_called == [], (
-            "TachibanaLiveExecutionClient was constructed despite market_closed — "
+            "TachibanaLiveExecutionClient was constructed despite client construction — "
             "is_market_open() check must fire BEFORE client construction"
+        )
+
+        # 5) EngineStopped が emit される（silent failure 対策）。
+        # Rust 側 state machine を unstuck するため早期 abort 経路でも EngineStopped を
+        # 必ず流す。Rust は EngineStarted 無しの EngineStopped を no-op として扱う契約
+        # （server.py "Silent-M1" 参照）。
+        stopped = [e for e in events if e.get("event") == "EngineStopped"]
+        assert len(stopped) == 1, (
+            f"EngineStopped must be emitted to unstuck Rust state machine, got events={events!r}"
         )
 
     def test_start_live_includes_strategy_id_in_market_closed_error(self, monkeypatch) -> None:
