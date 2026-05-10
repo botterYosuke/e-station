@@ -46,6 +46,7 @@
 | 例外握り潰し後の資源継続登録 | HTTP 呼び出し失敗を except して飲み込んだあと、呼び出し元がセンチネルタスク・ストリームキーを「成功扱い」で継続登録する。"subscribed なのにデータが来ない" silent failure が生じる。戻り値 bool で成否を伝達し、失敗時は登録をスキップする設計が必要 | 1 |
 | タスク cancel 対称性欠如 | 起動メソッドでタスクを `create_task` しても、対応する cleanup メソッド（`_clear_kabu_session` 等）でそのタスクを `cancel()` していない。再ログイン・セッションリセット後も旧タスクが生き続け、資源の宙ぶらりんや二重起動ガードの誤発動を招く | 1 |
 | コールバック型シグネチャ陳腐化 | コールバックの戻り値型を変更したとき（`None` → `bool`）、呼び出し側の型アノテーションと処理が旧シグネチャのまま残り、失敗を示す `False` が無音で捨てられる。型ヒントとテストの両方で契約を固める | 1 |
+| ルーティング述語全フィールド照合 | ストリームのルーティング述語（`matches_stream` 等）が `PartialEq`（全フィールド一致）を使い、意味的に同等だが表現が異なる（`Client` vs `ServerSide`）ストリームをミスマッチと判定する。エミッター側が常に特定タグを使うとき、レシーバー側の登録タグと一致しなくなる | 1 |
 
 ---
 
@@ -2306,3 +2307,60 @@ Issue #28 / #35 の修正（PUSH WS 起動・PUT /register 実装）が正しく
    `test_ticker_and_default_market` は「デフォルト値を確認する」テストであり、「正しい仕様を守る」テストではない。
    "spot" というデフォルト値そのものを仕様として固定してしまった。
    テスト名には「何が守られるべきか」を書くべきで、実装詳細（default値）は書かない。
+
+---
+
+## 2026-05-10 — `matches_stream` が `depth_aggr` 不一致で Ladder データ未到達（issue #38）
+
+**見逃しパターン**: ルーティング述語全フィールド照合
+
+**不具合の概要**:
+`VenueCaps.client_aggr_depth = false`（KabuStation 国内株等）のティッカーで Ladder パネルを開くと、
+`DepthReceived` イベントが永久にパネルへ届かず「Waiting for data...」が表示され続ける。
+
+根本原因は三層の不整合：
+1. `engine-client/src/backend.rs` の `depth_stream` が常に `depth_aggr: StreamTicksize::Client` で emit する
+2. `data/src/layout/pane.rs` の `PaneSetup::new` は `client_aggr_depth = false` のとき `depth_aggr: StreamTicksize::ServerSide(TickMultiplier(50))` で登録する
+3. `src/connector/stream.rs` の `matches_stream` が `PartialEq`（全フィールド完全一致）で比較するため、`Client` vs `ServerSide` が不一致となりデータがルーティングされない
+
+**修正**: `src/connector/stream.rs` に `stream_eq` ヘルパーを追加し、`Depth` ストリームは `ticker_info` のみで照合するよう `matches_stream` を変更。
+
+**既存テストが見逃した理由**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `tests/kabu_venue_tests.rs` | ソースコードパターン検査（テキスト検索）のみ。`matches_stream` の実際のルーティング挙動を実行しない |
+| `tests/engine_event_routing*.rs` | 同様にソース検査。イベントディスパッチャの arm 存在確認のみ |
+| `tests/engine_event_routing_exhaustive.rs` | `map_engine_event_to_message` の arm 網羅性のみ。`DepthReceived` がパネルに届くか否かは検証しない |
+| E2E / smoke.sh | `DepthGap` ログはチェックするが「データが来ない」という silent failure は grep 対象外 |
+
+**構造的盲点**: `ResolvedStream::matches_stream` は単体テストがゼロだった。
+この述語はイベントルーティングの最初のフィルタであり、`false` を返すと上位ロジックへ
+何も伝わらない（silent drop）にもかかわらず、誰も直接テストしていなかった。
+
+**追加したテスト** (`src/connector/stream.rs` `#[cfg(test)] mod tests`):
+- `depth_matches_ignores_depth_aggr` — `ServerSide` 登録に `Client` emit がマッチすること（リグレッション Pin）
+- `depth_matches_same_depth_aggr` — `Client` ＋ `Client` の正常系が維持されること
+- `depth_does_not_match_different_ticker` — 異なる ticker は一致しないこと
+- `non_depth_stream_uses_exact_match` — `Trades` 等の非 Depth は完全一致のままであること
+
+**リグレッション確認**: `stream_eq` の `Depth` arm を除去（`a == b` に戻す）すると
+`depth_matches_ignores_depth_aggr` が FAIL する。修正を再適用すると PASS。
+
+**教訓**:
+
+1. **ルーティング述語は独立して単体テストする**:
+   `matches_stream` のような predicate が silent drop を引き起こす場合、
+   上位の E2E テストでは「データが来ない」としか観測できない。
+   predicate 自体を `(stored_stream, emitted_stream) → bool` の形で直接検証するテストが必要。
+
+2. **エミッター側の型と登録側の型が異なる場合は意味論的一致が必要**:
+   `StreamTicksize::Client` と `StreamTicksize::ServerSide(n)` は「エンジンが集約責任を持つ」
+   か「クライアントが持つ」かの実装詳細であり、同じ ticker のストリームを表す点では等価。
+   `PartialEq` の自動実装（全フィールド比較）は構造的一致だが、ドメイン的一致ではない。
+   ルーティング述語では「どのフィールドが識別子か」を意識的に選ぶ必要がある。
+
+3. **新取引所・新 VenueCaps フラグを追加するとき、`client_aggr_depth = false` のパスを必ず通すテストを書く**:
+   今回のバグは Bybit/Binance（常に `Client`）では発生せず、KabuStation のみで発生した。
+   取引所固有フラグが `false` のパスを単体テストで明示的にカバーすることで、
+   今後の新取引所追加時の同類バグを防げる。

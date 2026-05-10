@@ -3,6 +3,19 @@ use std::time::{Duration, Instant};
 use data::stream::PersistStreamKind;
 use exchange::adapter::StreamKind;
 
+/// `Depth` ストリームは `ticker_info` のみで照合する。
+/// engine-client が `depth_aggr` を常に `Client` で emit するため、
+/// `ServerSide` で登録したストリームとも一致させる必要がある。
+fn stream_eq(a: &StreamKind, b: &StreamKind) -> bool {
+    match (a, b) {
+        (
+            StreamKind::Depth { ticker_info: ta, .. },
+            StreamKind::Depth { ticker_info: tb, .. },
+        ) => ta == tb,
+        _ => a == b,
+    }
+}
+
 /// Persisted stream resolution to avoid loop retries
 const RESOLVE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -53,7 +66,7 @@ impl ResolvedStream {
 
     pub fn matches_stream(&self, stream: &StreamKind) -> bool {
         match self {
-            ResolvedStream::Ready(existing) => existing.iter().any(|s| s == stream),
+            ResolvedStream::Ready(existing) => existing.iter().any(|s| stream_eq(s, stream)),
             _ => false,
         }
     }
@@ -89,5 +102,115 @@ impl ResolvedStream {
                 streams.into_iter().map(PersistStreamKind::from).collect()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::{
+        PushFrequency, TickMultiplier, TickerInfo, Ticker,
+        adapter::{Exchange, StreamKind, StreamTicksize},
+    };
+
+    fn kabu_ticker() -> TickerInfo {
+        TickerInfo::new_stock(
+            Ticker::new("7203", Exchange::KabuStationTse),
+            1.0,
+            100.0,
+            100,
+        )
+    }
+
+    /// engine-client が常に Client タグで emit する場合でも、
+    /// ServerSide タグで登録した Depth ストリームと一致すること
+    #[test]
+    fn depth_matches_ignores_depth_aggr() {
+        let ticker = kabu_ticker();
+
+        let stored = StreamKind::Depth {
+            ticker_info: ticker,
+            depth_aggr: StreamTicksize::ServerSide(TickMultiplier(50)),
+            push_freq: PushFrequency::ServerDefault,
+        };
+        let resolved = ResolvedStream::Ready(vec![stored]);
+
+        let emitted = StreamKind::Depth {
+            ticker_info: ticker,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        assert!(
+            resolved.matches_stream(&emitted),
+            "ServerSide で登録した Depth に Client タグのイベントがマッチすること"
+        );
+    }
+
+    /// 同じ ticker の Depth ストリーム（両方 Client）は従来通り一致すること
+    #[test]
+    fn depth_matches_same_depth_aggr() {
+        let ticker = kabu_ticker();
+
+        let stored = StreamKind::Depth {
+            ticker_info: ticker,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+        let resolved = ResolvedStream::Ready(vec![stored]);
+
+        let emitted = StreamKind::Depth {
+            ticker_info: ticker,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        assert!(resolved.matches_stream(&emitted));
+    }
+
+    /// 異なる ticker は一致しないこと
+    #[test]
+    fn depth_does_not_match_different_ticker() {
+        let ticker_a = kabu_ticker();
+        let ticker_b = TickerInfo::new_stock(
+            Ticker::new("6758", Exchange::KabuStationTse),
+            1.0,
+            100.0,
+            100,
+        );
+
+        let stored = StreamKind::Depth {
+            ticker_info: ticker_a,
+            depth_aggr: StreamTicksize::ServerSide(TickMultiplier(50)),
+            push_freq: PushFrequency::ServerDefault,
+        };
+        let resolved = ResolvedStream::Ready(vec![stored]);
+
+        let emitted = StreamKind::Depth {
+            ticker_info: ticker_b,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        assert!(!resolved.matches_stream(&emitted));
+    }
+
+    /// 非 Depth ストリーム（Trades）は完全一致で比較されること
+    #[test]
+    fn non_depth_stream_uses_exact_match() {
+        let ticker = kabu_ticker();
+
+        let stored = StreamKind::Trades { ticker_info: ticker };
+        let resolved = ResolvedStream::Ready(vec![stored]);
+
+        assert!(resolved.matches_stream(&StreamKind::Trades { ticker_info: ticker }));
+        assert!(!resolved.matches_stream(&StreamKind::Trades {
+            ticker_info: TickerInfo::new_stock(
+                Ticker::new("6758", Exchange::KabuStationTse),
+                1.0,
+                100.0,
+                100,
+            )
+        }));
     }
 }
