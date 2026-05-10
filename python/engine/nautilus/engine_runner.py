@@ -62,6 +62,12 @@ from engine.nautilus.jquants_loader import (
     load_minute_bars,
     load_trades,
 )
+# issue #42 Phase 1 / 統一決定 #5 (R5-HIGH-3):
+# start_live() の冒頭で市場時間を authoritative に判定し、閉場時は
+# EngineError{code:"market_closed"} を emit して abort する。
+# テストは ``monkeypatch.setattr("engine.nautilus.engine_runner.is_market_open", ...)``
+# でこの module-level シンボルを差し替えて経路を切替える。
+from engine.exchanges.tachibana_ws import is_market_open
 
 log = logging.getLogger(__name__)
 
@@ -1161,6 +1167,22 @@ class NautilusRunner:
         import asyncio as _asyncio
         import threading as _threading
         import time as _time
+        from datetime import datetime as _datetime, timezone as _timezone
+
+        # issue #42 Phase 1 / 統一決定 #5: 市場閉場 → 即 abort（exec_client / TradingNode 構築前）。
+        # is_market_open は module top で import され、テストは monkeypatch で差し替え可能。
+        if not is_market_open(_datetime.now(_timezone.utc)):
+            on_event({
+                "event": "EngineError",
+                "code": "market_closed",
+                "message": (
+                    "market is closed; live strategy cannot start. "
+                    "Tokyo Stock Exchange sessions: 09:00-11:30 / 12:30-15:30 JST."
+                ),
+                "strategy_id": strategy_id,
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+            return
 
         from nautilus_trader.config import CacheConfig, TradingNodeConfig
         from nautilus_trader.live.node import TradingNode
@@ -1181,6 +1203,55 @@ class NautilusRunner:
         else:
             _sym = instrument_id
             _venue = "TSE"
+
+        async def _emit_warmup_failed_and_close(exc_message: str, exec_client_obj) -> None:
+            """issue #42 Phase 1 / 統一決定 #16:
+
+            warm_up が失敗（例外 OR False 戻り）した時の共通 cleanup 経路。
+            EngineError{code:"warm_up_failed"} を emit + ``await exec_client.close()``。
+            HTTP session / WebSocket subscription のリーク防止のため close は必須。
+            """
+            on_event({
+                "event": "EngineError",
+                "code": "warm_up_failed",
+                "message": exc_message,
+                "strategy_id": strategy_id,
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+            try:
+                if hasattr(exec_client_obj, "close"):
+                    await exec_client_obj.close()
+            except Exception as close_exc:  # noqa: BLE001
+                log.warning(
+                    "[start_live] exec_client.close() raised during warm_up cleanup: %s",
+                    close_exc,
+                )
+
+        async def _warming_up_ticker(stop_flag: _asyncio.Event) -> None:
+            """issue #42 Phase 1 / 統一決定 #10: warm_up 中 5s 毎に進捗 emit。
+
+            GUI の `LiveStrategyReady` 60s timeout カウンタリセットに使う。
+            最低限の段階的 message を emit（Phase 1 受け入れに必要十分）。
+            """
+            stages: list[tuple[float, str]] = [
+                (0.2, "connecting to tachibana"),
+                (0.5, "fetching open orders"),
+                (0.8, "synchronizing positions"),
+            ]
+            idx = 0
+            while not stop_flag.is_set():
+                try:
+                    await _asyncio.wait_for(stop_flag.wait(), timeout=5.0)
+                    break
+                except _asyncio.TimeoutError:
+                    progress, message = stages[min(idx, len(stages) - 1)]
+                    on_event({
+                        "event": "LiveStrategyWarmingUp",
+                        "strategy_id": strategy_id,
+                        "progress": progress,
+                        "message": message,
+                    })
+                    idx += 1
 
         async def _run_node() -> None:
             safe_id = strategy_id.replace("-", "_").replace(".", "_")
@@ -1219,17 +1290,47 @@ class NautilusRunner:
                 strategy = _load_user_strategy(strategy_file, strategy_init_kwargs)
                 node.add_strategies([strategy])
 
-            # warm_up: CLMOrderList から未決注文復元
+            # issue #42 Phase 1 / 統一決定 #16 (R5-HIGH-2):
+            # warm_up: CLMOrderList から未決注文復元。
+            # - 例外 raise → EngineError{warm_up_failed} + close + return
+            # - ``False`` 戻り値 → 同上（旧実装はこちらを見逃していた）
+            # ``True`` 戻り値時のみ後続処理に進む。
+            # 統一決定 #10: warm_up 中 5s 毎に LiveStrategyWarmingUp を emit する
+            # ticker を background task として走らせ、warm_up 完了で停止する。
+            warmup_stop = _asyncio.Event()
+            ticker_task = _asyncio.create_task(_warming_up_ticker(warmup_stop))
             try:
                 if hasattr(exec_client, "warm_up"):
-                    await exec_client.warm_up()
-            except Exception as exc:
-                on_event({
-                    "event": "Error",
-                    "code": "warm_up_failed",
-                    "message": str(exc),
-                })
-                return
+                    try:
+                        warm_up_ok = await exec_client.warm_up()
+                    except Exception as exc:
+                        await _emit_warmup_failed_and_close(str(exc), exec_client)
+                        return
+                    if warm_up_ok is False:
+                        await _emit_warmup_failed_and_close(
+                            "warm_up returned False", exec_client
+                        )
+                        return
+            finally:
+                warmup_stop.set()
+                try:
+                    await ticker_task
+                except Exception as ticker_exc:  # noqa: BLE001
+                    log.debug(
+                        "[start_live] LiveStrategyWarmingUp ticker raised on shutdown: %s",
+                        ticker_exc,
+                    )
+
+            # issue #42 Phase 1 / 統一決定 #15 (Open Q1):
+            # LiveStrategyReady は warm_up 成功直後 / node.build() より前に emit。
+            # Rust 側はこれを受信して 4 ペイン自動生成（冪等）の trigger とする。
+            on_event({
+                "event": "LiveStrategyReady",
+                "strategy_id": strategy_id,
+                "venue": "tachibana",
+                "instrument_id": instrument_id,
+                "ts_event_ms": int(_time.time() * 1000),
+            })
 
             # EngineStarted emit
             on_event({
@@ -1249,8 +1350,30 @@ class NautilusRunner:
             _bridge_threads: list[_threading.Thread] = []
 
             try:
-                # TradingNode ビルドと実行（_connect() 内で data_client._loop が確定する）
-                node.build()
+                # issue #42 Phase 1 / 統一決定 #15 副次 invariant:
+                # node.build() 失敗時は EngineError{code:"node_build_failed"} を
+                # emit + exec_client.close() で cleanup（HTTP / WS リーク防止）。
+                # Rust 側は teardown_live_panes で生成済みの 4 ペインを片付ける責務。
+                try:
+                    # TradingNode ビルドと実行（_connect() 内で data_client._loop が確定する）
+                    node.build()
+                except Exception as build_exc:
+                    on_event({
+                        "event": "EngineError",
+                        "code": "node_build_failed",
+                        "message": str(build_exc),
+                        "strategy_id": strategy_id,
+                        "ts_event_ms": int(_time.time() * 1000),
+                    })
+                    try:
+                        if hasattr(exec_client, "close"):
+                            await exec_client.close()
+                    except Exception as close_exc:  # noqa: BLE001
+                        log.warning(
+                            "[start_live] exec_client.close() raised after build failure: %s",
+                            close_exc,
+                        )
+                    return
 
                 # node.build() 完了後にブリッジを起動する。
                 # build() 内の _connect() で data_client._loop が asyncio.get_running_loop()
