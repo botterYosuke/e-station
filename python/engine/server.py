@@ -548,6 +548,13 @@ class DataEngineServer:
         # N1.11: streaming replay 中断用 stop_event レジストリ。
         # _handle_stop_engine が set()、_handle_start_engine の finally で pop する。
         self._engine_stop_events: dict[str, Any] = {}
+        # issue #42 Phase 1 / 統一決定 #13 (R3-H2 + R5-MED-1):
+        # 同一 venue で別 strategy_id の Live engine を多重起動すると LiveExecutionClient
+        # の resource 競合や注文の二重送信リスクがあるため、venue 単位で concurrent
+        # ガードする。``_engine_tasks`` の strategy_id 重複ガードはそのまま残し、
+        # 同一 venue + 別 strategy_id の場合は EngineBusy{busy_kind:"another_strategy_on_venue"}
+        # を emit する。
+        self._active_live_venues: set[str] = set()
         # N1.11: streaming replay の pacing 倍率。SetReplaySpeed で変更される。
         # compute_sleep_sec は multiplier >= 1 を要求するため、デフォルト 1 は安全。
         self._replay_speed_multiplier: int = 1
@@ -4754,6 +4761,36 @@ class DataEngineServer:
             await _drain()
             return
 
+        # issue #42 Phase 1 / 統一決定 #13 (R3-H2 + R5-MED-1):
+        # 同一 venue で別 strategy_id の Live engine が走行中なら EngineBusy で reject。
+        # ``engine_already_running`` ガード（同一 strategy_id）は上で先に判定済み。
+        # 順序: engine_already_running → venue concurrency。
+        # venue は ``self._connected_venue``（live mode で venue ログイン後に確定）を参照。
+        # ``getattr`` で defensive に参照する: テストが ``__init__`` を patch して
+        # ``_active_live_venues`` を初期化していないケースに備える。
+        if engine_kind == "Live":
+            active_live_venues = getattr(self, "_active_live_venues", None)
+            if active_live_venues is None:
+                active_live_venues = set()
+                self._active_live_venues = active_live_venues
+            current_venue = getattr(self, "_connected_venue", None) or "tachibana"
+            if current_venue in active_live_venues:
+                from engine.schemas import EngineBusy as EngineBusyModel
+                payload = EngineBusyModel(
+                    current_state="TRADING",
+                    attempted_command="StartEngine",
+                    reason=(
+                        f"another live strategy is already running on venue "
+                        f"{current_venue!r}"
+                    ),
+                    request_id=request_id,
+                    venue=current_venue,
+                    busy_kind="another_strategy_on_venue",
+                ).model_dump()
+                _emit(payload)
+                await _drain()
+                return
+
         # H-4: EngineStartConfig.model_validate() で extra フィールドや型違いを弾く。
         # extra="forbid" が機能するのはここだけ（raw dict のままでは機能しない）。
         try:
@@ -4790,6 +4827,21 @@ class DataEngineServer:
         runner = NautilusRunner()
         # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
         self._engine_tasks[strategy_id] = runner
+
+        # issue #42 Phase 1 / 統一決定 #13: live 起動を受理した直後に venue を
+        # ``_active_live_venues`` に登録する。後続の concurrent StartEngine{Live}
+        # が同 venue で来たら EngineBusy で reject される。
+        # 終了時（正常 / 例外 / timeout / warm_up failure 問わず）には
+        # finally 節で discard する。
+        live_venue_for_cleanup: "str | None" = None
+        if engine_kind == "Live":
+            live_venue_for_cleanup = (
+                getattr(self, "_connected_venue", None) or "tachibana"
+            )
+            # 上で初期化を保証済みだが defensive に再確認する。
+            if not hasattr(self, "_active_live_venues"):
+                self._active_live_venues = set()
+            self._active_live_venues.add(live_venue_for_cleanup)
 
         # B3: StartEngine 受理 → RUNNING 状態へ遷移（replay モードのみ）。
         if self._mode == "replay":
@@ -5068,6 +5120,13 @@ class DataEngineServer:
         finally:
             self._engine_tasks.pop(strategy_id, None)
             self._engine_stop_events.pop(strategy_id, None)
+            # issue #42 Phase 1 / 統一決定 #13: venue 単位 concurrent ガードの cleanup。
+            # 正常終了 / 例外 / timeout / warm_up failure / node_build_failed のいずれの
+            # 経路でも venue を discard する（次の StartEngine が同 venue で来たら受理）。
+            if live_venue_for_cleanup is not None:
+                _venues = getattr(self, "_active_live_venues", None)
+                if _venues is not None:
+                    _venues.discard(live_venue_for_cleanup)
             # B3 / MEDIUM-R3-2: 走行終了（正常・例外・timeout 問わず）→ IDLE 状態へ戻す。
             # ただし「全断 → 再接続 → LoadReplayData (LOADED)」が走った後に
             # 古い runner の to_thread 完了がここに到達するケースでは、
