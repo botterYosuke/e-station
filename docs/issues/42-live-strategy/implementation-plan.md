@@ -313,6 +313,39 @@ Wave 4: Final review
   - **CI 経路の追加**: `docs-lint` job は ubuntu-latest で 1 分以下で完了する想定。GitHub status check に追加する場合、branch protection rule の Required checks に `docs-lint` を入れることで lint 不合格 PR を block できる（merge 経路の物理ガード）
   - **`pytest.ini` の `pythonpath = python .`**: 将来 `tools.lint` 以外にもリポジトリ直下のパッケージ（`scripts.foo` 等）を test から import したくなった場合、すでに `.` が pythonpath に入っているので追加変更不要。pytest は両 ini ファイルの設定をマージせず、`pytest.ini` が見つかればそちらを優先するので、`pyproject.toml` 側の `pythonpath = ["python", "."]` 同期更新は将来の `pytest.ini` 廃止時の保険として保持
 
+#### Phase 6 レビュー反映（2026-05-10、ラウンド R1 + R2）
+
+R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent failure) を抽出 → 修正で 0 まで収束。
+
+**R1 修正 commit `07f346c`** (`test(lint): R1 review-fix — additional regression pins`):
+
+- ✅ MEDIUM-1: `test_module_level_with_block_without_login_fails` — モジュール直下 `with` (関数外) も検出
+- ✅ MEDIUM-2: `test_class_method_with_login_passes` / `test_class_method_with_run_without_login_fails` — `class` 内メソッド（`ast.ClassDef` 経路）も検出
+- ✅ MEDIUM-3: `test_check_live_login_call_fails_when_cli_path_missing` — ファイル不在ケースの対称性
+- ✅ MEDIUM-4: `python/tests/test_adr_0071_0072_accepted.py` 新設（8 テスト） — `check_adr_status.py` は **一般的な status invariant のみ** を検証し特定 ADR の昇格を pin できないため、0071/0072 が `accepted` で `source_commit:` を持ち、本文がコメントアウト雛形に戻っていないことを直接 assert
+
+**R2 修正 commit `fedeec0`** (`test(lint): R2 — tools 正規 package + python.engine 二重 import 防止`):
+
+- ✅ MEDIUM-R2-1（**silent failure**、新規発見）: `pythonpath = ["python", "."]` の併記により `engine` (正規) と `python.engine` (PEP 420 namespace 経由) の **2 つの module 経路** が両立する。両方使うと module-level singleton と class identity が壊れる:
+  ```python
+  >>> import engine; import python.engine
+  >>> engine is python.engine
+  False  # ← 別 module オブジェクト扱い、しかしファイルは同一
+  ```
+  対策: (1) `tools/__init__.py` を新設し `tools/` を正規 package 化（PEP 328、PEP 420 namespace 排除）、(2) `test_no_python_engine_namespace_collision_in_repo` を追加し repo 内（`python` / `tools` / `scripts` / `examples` 配下、`.venv` / `target` 等は scan_dirs root 限定で除外）の `from python.engine ...` / `import python.engine` 表記が一切無いことを re で pin
+
+**最終検証（R2 後）**:
+- `uv run pytest python/tests/` **2244 passed** / 106 skipped / 198 deselected（R0: 2231, R1: +12, R2: +1 = 計 +13 件）
+- `uv run python scripts/check_adr_status.py` OK（134 ADR files）
+- `uv run python -m tools.lint.check_examples_readme` OK
+- `uv run python -m tools.lint.check_live_login_call` OK
+- `cargo test --workspace` 全緑（既存 issue 範囲外）
+
+**収束**: CRITICAL 0 / HIGH 0 / MEDIUM 0 / LOW 残存はあるが対応不要（fence 検出の 4-backtick edge case、`with LiveSession` 以外のパターン非対応など、いずれもスコープ内で意図的に除外）。
+
+**新規見逃しパターン候補（次回 MISSES.md 追記候補）**:
+- `pytest pythonpath` に repo root を追加すると、サブディレクトリ名と同名の package が二重 import されうる（`engine` ↔ `python.engine` 等）。**namespace の二重化が silent failure になりうる**ことを「pythonpath 二重 import」パターンとして登録候補
+
 ### Phase 2 functional 完了（2026-05-10）
 - 担当: phase2-functional-agent
 - 主要 commit:
