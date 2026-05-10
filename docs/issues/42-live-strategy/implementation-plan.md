@@ -165,3 +165,35 @@ Wave 4: Final review
   - **`engine_event_variants` count は 56 のまま**（P3c は新 variant ではなくフィールド追加）。Phase 3 functional impl で `LiveStrategyReady` / `LiveStrategyWarmingUp` の `map_engine_event_to_message` arm に GUI 配線（現状は TODO 付き `None` arm）。
   - **gRPC integration test は `#[ignore]` 既定**（Python+grpcio 必要）。Phase 3 functional impl 完了後に `--include-ignored` で観測される想定。
   - **Phase 3.5 は schema bump 不要**（capability dict のキー追加のみ）。SCHEMA_MINOR は 28 で本 issue の schema chain は完了。
+
+### Phase 3 完了（2026-05-10）
+- 担当: phase3-agent
+- 主要 commit:
+  - `7f86ffd` — modal 拡張（strategy_init_kwargs / prod_mode / disabled_reason / pending_scenario_request_id + Action::Submit 拡張 + 18 unit tests）
+  - `44269d9` — LiveStrategyState 三つ組拡張 + auto_generate_live_panes + map_engine_event_to_message TODO 解消 + warm_up timeout (60s) + LiveStrategyScenarioLoaded prefill + LoadLiveStrategyScenario fallback (5s) + EngineRehello → LiveStrategyRehelloReplay + SecondPasswordRequired 固定文言 + strategy_parse_failed 解放
+  - `fb0c36b` — `tests/live_form_smoke.rs` source-pin 13 tests（受入基準 #2/#11/#13/#15/#17/#19/#8 GUI）
+- 設計判断:
+  - **LiveStrategyState 拡張箇所**: `src/main.rs` 内、`enum LiveStrategyState { Idle, Running { strategy_id, instrument_id, venue } }` で三つ組 SoT 化（`pending_live_config` 別フィールド案は撤回、Running 自体を兼用）
+  - **auto_generate_live_panes 配置**: `src/screen/dashboard.rs::Dashboard::auto_generate_live_panes(&mut self, main_window_id, strategy_id, instrument_id, venue)`。冪等 key は `live_pane_keys: HashSet<(String, String, String)>` フィールドで管理し、新規キーのときだけ CandlestickChart→TimeAndSales→OrderList→BuyingPower→Positions の 4+ ペインを生成、`clear_live_pane_keys()` で stop 時にリセット
+  - **timer 実装方針**: Subscription ではなく `Task::perform(tokio::time::sleep, ...)` + token bump 方式。`live_warmup_timeout_token: u64` を `LiveStarted` / `LiveWarmingUp` / `LiveStrategyReady` / `LiveStopped` で wrapping_add(1) して、`LiveWarmupTimeoutFired` 発火時に古い token は捨てる（リセット実装）。`LIVE_WARMUP_TIMEOUT_SECS=60` / `LIVE_SCENARIO_FALLBACK_TIMEOUT_SECS=5` を `pub(crate) const` で集約
+  - **pending_live_config の保持方法**: LiveStrategyState::Running を SoT として直接使用（別フィールドなし）。`LiveStrategyRehelloReplay` 内部メッセージで `Running` から三つ組を抽出して `auto_generate_live_panes` を冪等再呼出
+  - **EngineRehello 連携**: `src/handlers/venue.rs` の tachibana / kabu 両 EngineRehello arm で `Message::Replay(ReplayMsg::LiveStrategyRehelloReplay)` を chain。Python engine 側からの再 emit は要求しない
+  - **SecondPasswordRequired**: 既存 modal flow に加え `notifications.push(Toast::error("第二暗証番号を設定してください"))` で固定文言通知（CLI と統一）
+  - **strategy_parse_failed**: `IpcError{code:"strategy_parse_failed"}` を venue handler で `live_strategy_form_modal.pending_scenario_request_id` と照合して `release_scenario_pending()` 呼出 + 「手入力で続行」warn toast
+- ✅ 達成した受け入れ基準:
+  - #2 GUI File>Open → 4 ペイン自動生成（`test_live_strategy_ready_auto_generates_four_panes`）
+  - #11 LiveStrategyReady 冪等（`test_live_strategy_ready_idempotent_on_double_emit`）
+  - #13 LIVE_SCENARIO 戦略 → GUI prefill（`test_live_strategy_scenario_loaded_prefills_form`）
+  - #15 LiveStrategyReady timeout (60s) + LiveStrategyWarmingUp でリセット（`test_engine_started_without_live_strategy_ready_shows_timeout_banner` + `test_warming_up_resets_timeout_counter` + `test_live_warmup_timeout_constant_is_60s`）
+  - #17 reconnect 時の冪等再生（`test_engine_rehello_replays_live_strategy_ready_via_pending_config`）
+  - #19 LoadLiveStrategyScenario fallback（`test_load_live_strategy_scenario_timeout_falls_back_to_manual_input` + `test_strategy_parse_failed_releases_form`）
+  - #8 GUI 部分: 第二暗証番号 固定文言（`test_second_password_required_shows_status_banner`）
+- ❌ 後 Phase に委譲: なし（Phase 3 スコープ完遂）。Phase 3.5 で `prod_mode` の engine 配線（`is_production` cap が venue 単位で expose されたとき）と venue dropdown を解放する
+- 知見/Tips（次への引き継ぎ）:
+  - **handler_arm の char-boundary 落ち穴**: 日本語コメントが多い handler を fixed-byte slicing で切ると multibyte UTF-8 境界に落ちる。`tests/auto_generate_replay_panes_auto_bind.rs` の 15_000 byte slicing がこの罠を踏み、`auto_generate_live_panes` を sibling に追加した時点で一気に 4 件 panic した。`is_char_boundary()` で floor する helper を共通化（`tests/live_form_smoke.rs::handler_arm_match`）
+  - **handler_arm の同名衝突**: `Message::Replay(ReplayMsg::LiveWarmupTimeoutFired { ... })` の Task::perform 内コンストラクション呼出と、トップレベル match arm の `ReplayMsg::LiveWarmupTimeoutFired { strategy_id, token } =>` は同名で `match_indices` の最初の hit を取ると間違える。`handler_arm_match` は destructuring `{ field, ... } =>` を含む arm-style パターンを優先する
+  - **EngineRehello 経路**: tachibana / kabu の **両方** で `LiveStrategyRehelloReplay` を chain しないと、片方の venue 再ハンドシェイクで live ペインが復活しない事故が起きる。`tests/live_form_smoke.rs::test_engine_rehello_replays_live_strategy_ready_via_pending_config` で 2 件以上の occurrence を pin
+  - **`prod_mode` は今 Phase 3 では engine config に流れない**: `src/handlers/replay.rs::LiveStrategyFormMsg::Submit` で `let _ = prod_mode;` の TODO 残し。Phase 3.5 で `Ready.capabilities.venue_capabilities["tachibana"].is_production` を読んで disable 判定を解放したあと、engine 引数経路を加える
+  - **`auto_generate_live_panes` は最小実装**: replay の `auto_generate_replay_panes` の dismiss/registry 機構までは持たず、`live_pane_keys: HashSet<(String,String,String)>` だけで冪等性を確保する。実 pane 生成は CandlestickChart (M1) を root に → TimeAndSales → OrderList → BuyingPower → Positions の 5 split。`Configuration::Pane` の Starter 単独状態では bootstrap で root pane を作る（replay と同じ流儀）。dismiss 機構や stream binding（`set_content_and_streams` 相当）は live mode 用 helper 経路（既存）が担う想定なので、ここは pane 生成のみ。dismiss を追加するときは `replay_pane_registry` パターンを参考にする
+  - **`LiveStarted` の Running 遷移を撤回**: 旧コードは `EngineStarted`(live) で即 `Running { strategy_id }` に遷移していたが、`EngineStarted` イベントには `instrument_id` / `venue` が無いため拡張後の `Running { strategy_id, instrument_id, venue }` を組み立てられない。Phase 3 では `LiveStarted` は pending_strategy_id 設定 + 60s タイマー起動だけに変更し、Running 遷移は `LiveStrategyReady` 受信時のみ。これにより `EngineStarted` 後 `LiveStrategyReady` が来ない（warm_up 失敗）ケースで Running を空 state にしないという invariant も担保される
+  - **`LiveStopped` の matching 拡張**: pending_strategy_id（warm_up 中の停止）と Running.strategy_id（warm_up 後の停止）の両方を許容しないと、warm_up 中の stop が黙殺される。`pending_match || running_match` ロジックを使用
