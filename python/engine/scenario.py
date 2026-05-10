@@ -90,6 +90,17 @@ class Scenario_v3(TypedDict, total=False):
     initial_cash: int
 
 
+# issue #42 Phase 2: LIVE_SCENARIO 用の TypedDict。
+# replay 用 SCENARIO とは独立した定数で、live 専用フォーム prefill に使う。
+class LiveScenario(TypedDict, total=False):
+    schema_version: int                  # 必須・現状 1 のみ
+    instrument: str                      # 必須・単一銘柄（v1 では list 不可）
+    max_qty: int                         # 必須・1 注文あたりの最大株数
+    max_notional_jpy: int                # 必須・1 注文あたりの最大金額（円）
+    venue: str                           # 必須・"tachibana" / "kabu_station"
+    strategy_init_kwargs: dict           # 任意・Strategy.__init__ への kwargs
+
+
 # Scenario TypedDict から自動生成（3点管理廃止）
 _EXPECTED_TYPES: dict[str, type] = typing.get_type_hints(Scenario)
 REQUIRED_KEYS: frozenset[str] = frozenset(_EXPECTED_TYPES.keys())
@@ -112,6 +123,19 @@ _EXPECTED_TYPES_V3: dict[str, type] = {
 }
 REQUIRED_KEYS_V3: frozenset[str] = frozenset(_EXPECTED_TYPES_V3.keys())
 _OPTIONAL_KEYS_V3: frozenset[str] = frozenset({"instruments_ref"})
+
+# LIVE_SCENARIO (issue #42 Phase 2) — schema_version=1 のみ対応。
+# 必須: schema_version / instrument / max_qty / max_notional_jpy / venue
+# 任意: strategy_init_kwargs
+_LIVE_REQUIRED_TYPES_V1: dict[str, type] = {
+    "schema_version": int,
+    "instrument": str,
+    "max_qty": int,
+    "max_notional_jpy": int,
+    "venue": str,
+}
+LIVE_REQUIRED_KEYS_V1: frozenset[str] = frozenset(_LIVE_REQUIRED_TYPES_V1.keys())
+_LIVE_OPTIONAL_KEYS_V1: frozenset[str] = frozenset({"strategy_init_kwargs"})
 
 
 class ScenarioValidationError(Exception):
@@ -534,6 +558,159 @@ def extract(path: Path) -> Optional[dict]:  # type: ignore[type-arg]
 
     if found_result is not None:
         log.info("scenario.load path=%s keys=%d", path, len(found_result))
+    return found_result
+
+
+# ---------------------------------------------------------------------------
+# extract_live (issue #42 Phase 2): LIVE_SCENARIO 抽出
+# ---------------------------------------------------------------------------
+
+
+def _validate_live_v1(d: dict) -> None:  # type: ignore[type-arg]
+    """LIVE_SCENARIO (schema_version=1) のバリデーション。
+
+    statement of invariant:
+        - schema_version=1 では `instrument` は **単一銘柄 str のみ**（list 不可）
+        - 必須: schema_version / instrument / max_qty / max_notional_jpy / venue
+        - 任意: strategy_init_kwargs (dict)
+    """
+    missing = LIVE_REQUIRED_KEYS_V1 - d.keys()
+    if missing:
+        raise ScenarioValidationError(
+            f"LIVE_SCENARIO missing required keys: {sorted(missing)}"
+        )
+
+    extra = d.keys() - LIVE_REQUIRED_KEYS_V1 - _LIVE_OPTIONAL_KEYS_V1
+    if extra:
+        raise ScenarioValidationError(
+            f"LIVE_SCENARIO has unknown keys: {sorted(extra)}"
+        )
+
+    for key, expected_type in _LIVE_REQUIRED_TYPES_V1.items():
+        val = d[key]
+        # bool は Python では int のサブクラス。schema では int フィールドに bool を許可しない
+        if isinstance(val, bool) and expected_type is int:
+            raise ScenarioValidationError(
+                f"LIVE_SCENARIO[{key!r}] must be int, got bool"
+            )
+        if not isinstance(val, expected_type):
+            raise ScenarioValidationError(
+                f"LIVE_SCENARIO[{key!r}] must be {expected_type.__name__}, "
+                f"got {type(val).__name__}"
+            )
+
+    # 任意フィールド strategy_init_kwargs は dict のみ許可
+    if "strategy_init_kwargs" in d:
+        kwargs = d["strategy_init_kwargs"]
+        if not isinstance(kwargs, dict):
+            raise ScenarioValidationError(
+                f"LIVE_SCENARIO['strategy_init_kwargs'] must be dict, "
+                f"got {type(kwargs).__name__}"
+            )
+
+
+def extract_live(strategy_path: Path) -> Optional[dict]:  # type: ignore[type-arg]
+    """戦略 .py から LIVE_SCENARIO 定数を ast.literal_eval で安全抽出する。
+
+    issue #42 Phase 2 の対称ペア（``extract`` は SCENARIO / replay 用、
+    ``extract_live`` は LIVE_SCENARIO / live 用）。``ast.parse`` +
+    ``ast.literal_eval`` のみ使用し、import は一切発火しない（副作用ゼロ）。
+
+    AnnAssign 形（``LIVE_SCENARIO: LiveScenario = {...}``）と
+    Assign 形（``LIVE_SCENARIO = {...}``）の両方を許容する。
+
+    schema_version=1 のみ対応。``instrument`` は単一銘柄 str のみで、list は
+    ``ScenarioValidationError`` で reject する（統一決定）。
+
+    Args:
+        strategy_path: 戦略 .py の絶対パス。
+
+    Returns:
+        LIVE_SCENARIO dict が見つかった場合はその dict、見つからない場合は None。
+
+    Raises:
+        SyntaxError: strategy_path が構文エラーの .py の場合。
+        ValueError: LIVE_SCENARIO の値がリテラル dict でない場合。
+        ScenarioValidationError: 必須フィールド欠落 / 型違反 / 未知 schema_version 等。
+        OSError: strategy_path が読めない場合（呼び出し元の server 層が
+                 ``strategy_parse_failed`` Error code に変換する）。
+    """
+    source = strategy_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(strategy_path))
+
+    found_result: Optional[dict] = None  # type: ignore[type-arg]
+
+    for node in ast.iter_child_nodes(tree):
+        scenario_value: Optional[ast.expr] = None
+
+        if isinstance(node, ast.Assign):
+            # LIVE_SCENARIO = {...}
+            if (
+                len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "LIVE_SCENARIO"
+            ):
+                scenario_value = node.value
+
+        elif isinstance(node, ast.AnnAssign):
+            # LIVE_SCENARIO: LiveScenario = {...}  または  LIVE_SCENARIO: LiveScenario
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id == "LIVE_SCENARIO"
+            ):
+                if node.value is None:
+                    # 注釈のみ宣言 → 後続の Assign を見つけるためスキャンを継続
+                    log.debug(
+                        "scenario.load_live path=%s annotation_only_decl (continue scanning)",
+                        strategy_path,
+                    )
+                    continue
+                scenario_value = node.value
+
+        if scenario_value is not None:
+            # dict comprehension は拒否
+            if isinstance(scenario_value, ast.DictComp):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            # plain dict literal 以外は拒否
+            if not isinstance(scenario_value, ast.Dict):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            # dict unpacking（**other_dict → key が None）は拒否
+            if any(k is None for k in scenario_value.keys):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            # safe 評価（任意コード実行なし）
+            try:
+                result = ast.literal_eval(scenario_value)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(_NON_LITERAL_ERROR) from exc
+
+            if not isinstance(result, dict):
+                raise ValueError(_NON_LITERAL_ERROR)
+
+            # 多重 LIVE_SCENARIO 定義は明示エラー（extract() と整合）
+            if found_result is not None:
+                raise ScenarioValidationError(
+                    "multiple LIVE_SCENARIO assignments are not supported"
+                )
+            found_result = result
+
+    if found_result is None:
+        return None
+
+    # schema_version 判定 + バリデーション
+    sv = found_result.get("schema_version")
+    if sv == 1:
+        _validate_live_v1(found_result)
+    else:
+        raise ScenarioValidationError(
+            f"LIVE_SCENARIO schema_version must be 1, got {sv!r}"
+        )
+
+    log.info(
+        "scenario.load_live path=%s keys=%d", strategy_path, len(found_result)
+    )
     return found_result
 
 
