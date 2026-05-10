@@ -51,6 +51,14 @@ impl crate::Flowsurface {
                 self.buying_power_request_id = None;
                 self.order_list_request_id = None;
                 self.positions_request_id = None;
+                // R2-B M8: reconnect で in-flight な LoadLiveStrategyScenario の応答は
+                // 失われるため、live form が開いていれば pending を解除して手入力モードに
+                // 戻す。再起動後に form を再 open すれば再度 prefill 経路が走る (handler
+                // 側で新 request_id を発行)。同じ pending_scenario_request_id 整合の
+                // 流儀 (buying_power_request_id 等のリセットと対称) で扱う。
+                if let Some(form) = self.live_strategy_form_modal.as_mut() {
+                    form.release_scenario_pending();
+                }
                 self.active_dashboard_mut()
                     .distribute_buying_power_loading(main_window, false);
                 self.active_dashboard_mut()

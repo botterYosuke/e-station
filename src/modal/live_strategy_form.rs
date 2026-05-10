@@ -251,6 +251,19 @@ impl LiveStrategyFormModal {
         self.pending_scenario_request_id = None;
     }
 
+    /// R2-B M7: modal を表示中に venue state が変わったとき、`disabled_reason`
+    /// を動的に更新する setter。`Some(reason)` を渡すと Submit ボタンが disable に、
+    /// `None` を渡すと有効化される。`VenueReady` 受信時 → `set_disabled_reason(None)`、
+    /// `VenueLoginError{market_closed:true}` 受信時 → `set_disabled_reason(Some("市場が
+    /// 閉場中です".to_string()))` を呼ぶ運用。
+    ///
+    /// 注意: `is_production` cap は engine プロセスの env 変更が必要なため、
+    /// modal 表示中に動的に切り替わることはない（統一決定 #14）。本 setter は
+    /// venue 接続状態 / 市場開閉状態のみを対象とする。
+    pub fn set_disabled_reason(&mut self, reason: Option<String>) {
+        self.disabled_reason = reason;
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let strategy_label = self
             .strategy_file

@@ -12,6 +12,7 @@
 
 const HANDLER_REPLAY: &str = include_str!("../src/handlers/replay.rs");
 const HANDLER_VENUE: &str = include_str!("../src/handlers/venue.rs");
+const HANDLER_ENGINE: &str = include_str!("../src/handlers/engine.rs");
 const MAIN_RS: &str = include_str!("../src/main.rs");
 const MESSAGES: &str = include_str!("../src/messages.rs");
 const DASHBOARD: &str = include_str!("../src/screen/dashboard.rs");
@@ -248,6 +249,63 @@ fn test_node_build_failed_resets_state_and_teardowns_panes() {
     assert!(
         body.contains("panes.close"),
         "teardown_live_panes must close panes: {body}"
+    );
+}
+
+/// R2-B M8: EngineMsg::Connected (= reconnect) で live form の
+/// pending_scenario_request_id を解除する経路が engine handler にあること。
+/// reconnect で in-flight な LoadLiveStrategyScenario の応答は失われるため、
+/// pending を残したまま放置すると手入力で続行できなくなる。
+#[test]
+fn test_engine_connected_releases_scenario_pending() {
+    let pos = HANDLER_ENGINE
+        .find("EngineMsg::Connected(conn) =>")
+        .expect("EngineMsg::Connected arm not found");
+    let mut end = (pos + 3000).min(HANDLER_ENGINE.len());
+    while end > 0 && !HANDLER_ENGINE.is_char_boundary(end) {
+        end -= 1;
+    }
+    let arm = &HANDLER_ENGINE[pos..end];
+    assert!(
+        arm.contains("live_strategy_form_modal"),
+        "EngineMsg::Connected arm must reach live_strategy_form_modal: {arm}"
+    );
+    assert!(
+        arm.contains("release_scenario_pending"),
+        "EngineMsg::Connected arm must call release_scenario_pending on the form: {arm}"
+    );
+}
+
+/// R2-B M7: VenueReady で live form の disabled_reason を None に解除する
+/// 経路が tachibana / kabu 両方の handler arm に存在することを source-pin する。
+/// 同じく LoginError{market_closed:true} で「市場が閉場中です」を set する経路も pin。
+#[test]
+fn test_disabled_reason_cleared_on_venue_ready() {
+    // (1) live_strategy_form.rs: set_disabled_reason setter が存在する。
+    let modal_src = include_str!("../src/modal/live_strategy_form.rs");
+    assert!(
+        modal_src.contains("pub fn set_disabled_reason"),
+        "live_strategy_form.rs must declare pub fn set_disabled_reason"
+    );
+
+    // (2) venue handler: VenueEvent::Ready arm で set_disabled_reason(None) を呼ぶ。
+    //     tachibana / kabu の両 venue 経路で対称に必要。
+    let ready_calls = HANDLER_VENUE.matches("set_disabled_reason(None)").count();
+    assert!(
+        ready_calls >= 2,
+        "VenueEvent::Ready arm must call set_disabled_reason(None) for both tachibana and kabu \
+         (got {ready_calls} occurrences)"
+    );
+
+    // (3) venue handler: LoginError{market_closed:true} で
+    //     set_disabled_reason(Some("市場が閉場中です"...)) を呼ぶ経路がある。
+    assert!(
+        HANDLER_VENUE.contains("市場が閉場中です"),
+        "venue handler must use fixed wording 「市場が閉場中です」 for market_closed"
+    );
+    assert!(
+        HANDLER_VENUE.contains("market_closed") && HANDLER_VENUE.contains("set_disabled_reason"),
+        "venue handler must wire market_closed → set_disabled_reason"
     );
 }
 

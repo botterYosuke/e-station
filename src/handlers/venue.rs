@@ -167,6 +167,19 @@ impl crate::Flowsurface {
                     }
                     VenueEvent::Ready => {
                         log::info!("tachibana: VenueReady — venue is now authenticated");
+                        // R2-B M7: live form が開いていれば disabled_reason を解除する。
+                        // VenueReady = 認証完了 + 市場開場済の合成状態なので Submit を有効化できる。
+                        if let Some(form) = self.live_strategy_form_modal.as_mut() {
+                            form.set_disabled_reason(None);
+                        }
+                    }
+                    VenueEvent::LoginError { market_closed, .. } => {
+                        // R2-B M7: 市場閉場中は live form の Submit を disable して
+                        // 固定文言を提示する。market_closed=false の login error は別経路
+                        // (notification / banner) で扱う既存仕様を維持。
+                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut() {
+                            form.set_disabled_reason(Some("市場が閉場中です".to_string()));
+                        }
                     }
                     VenueEvent::EngineRehello => {
                         log::info!("tachibana: EngineRehello — state reset to Idle");
@@ -415,11 +428,24 @@ impl crate::Flowsurface {
                     }
                     VenueEvent::Ready => {
                         log::info!("kabu: VenueReady — venue is now authenticated");
+                        // R2-B M7: kabu でも live form の disabled_reason を解除する
+                        // (tachibana 経路と対称)。
+                        if let Some(form) = self.live_strategy_form_modal.as_mut() {
+                            form.set_disabled_reason(None);
+                        }
                     }
-                    VenueEvent::LoginError { message, .. } => {
+                    VenueEvent::LoginError {
+                        message,
+                        market_closed,
+                        ..
+                    } => {
                         log::warn!("kabu: VenueLoginError — {message}");
                         self.notifications
                             .push(Toast::error(format!("kabuログインエラー: {message}")));
+                        // R2-B M7: market_closed のみ live form を disable に倒す。
+                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut() {
+                            form.set_disabled_reason(Some("市場が閉場中です".to_string()));
+                        }
                     }
                     VenueEvent::EngineRehello => {
                         log::info!("kabu: EngineRehello — state reset to Idle");

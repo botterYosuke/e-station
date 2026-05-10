@@ -701,6 +701,12 @@ message ReplayStoppedEvent {
 }
 
 // Emitted when a command is rejected because the engine state machine cannot accept it.
+//
+// R2-B R1-RUST-8: 過去削除フィールドは存在しないため `reserved` は不要。
+// **将来このメッセージから field を削除する際は、必ず `reserved <tag>;` および
+// `reserved "<name>";` を追記し、tag 番号の再利用を proto レベルで禁止すること**
+// (wire 上の旧 client が削除済 field を別意味で解釈する事故を防ぐ)。
+// 追加だけの今回 (venue=5 / busy_kind=6) は backward-compat なので reserved 不要。
 message EngineBusyEvent {
   EngineState      current_state     = 1;
   AttemptedCommand attempted_command = 2;
@@ -709,7 +715,8 @@ message EngineBusyEvent {
   // issue #42 Phase 3 (schema 3.28): venue-scoped concurrent-live guard fields.
   // `venue` is the venue holding another strategy; `busy_kind` is the specific reject
   // category (e.g. "another_strategy_on_venue"). Older clients (minor < 28) absent
-  // both fields and decode them as None.
+  // both fields and decode them as None. Rust 側は R2-B H8 で `busy_kind` を
+  // `BusyKind` enum に格上げし、未知値は `None` フォールバック（wire 形は文字列のまま）。
   optional string  venue             = 5;
   optional string  busy_kind         = 6;
 }
