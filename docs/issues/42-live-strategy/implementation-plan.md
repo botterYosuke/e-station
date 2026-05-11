@@ -244,6 +244,7 @@ Wave 4: Final review
 - 知見/Tips（Phase 4 への引き継ぎ）:
   - **kabu_station の `supports_live_strategy=False` を True に flip する位置**: `python/engine/server.py::_handshake` 内、現状は約 line 941 (`is_production` の直下) に `"supports_live_strategy": False,` として直書きされている。Phase 4 で `NautilusRunner.start_live` が kabu_station 対応を完了したら、この値を **`True` に変更する 1 行 + `python/tests/test_capabilities_live.py::test_supports_live_strategy_per_venue` の kabu_station 期待値を `True` に変更する 1 行** で flip 可能。tachibana の `supports_live_strategy` は worker の `capabilities()` 内なので Phase 4 では触らない
   - **venue dropdown の追加経路**: `src/modal/live_strategy_form.rs::view()` で `prod_checkbox` の上に venue dropdown を挿入する。capability 読み取りは `engine_client::capabilities::supports_live_strategy(caps, venue)` を使い、`true` の venue のみ表示する（`["tachibana", "kabu_station"]` を for_each で filter）。`Action::Submit` には venue フィールドを追加する必要があり、`EngineStartConfig` には現状 venue field が無いので Phase 4 で追加するか、`engine` enum を `Live { venue }` のように拡張するかは Phase 4 の wire 設計で決める
+    - R2 (2026-05-11) 反映: venue dropdown + `LiveStrategyScenarioLoaded.venue` prefill + `connected_venue` (`tachibana_state.is_ready()` / `kabu_state.is_ready()` 由来) 一致チェックを実装。`available_venues` 空時は GUI 側判定を skip し server.py の `_connected_venue` reject 経路に委ねる compat 経路として残した
   - **`TACHIBANA_ALLOW_PROD` の "literal 1 only" 契約**: tachibana SKILL.md / `test_url_masker.py` と同じ流儀。`"true"` / `"yes"` 等は False（unsafe を倒すため）。`os.environ.get("TACHIBANA_ALLOW_PROD") == "1"` の判定を弱める提案が来ても拒否してよい
   - **modal 内の `tachibana_is_production` は engine 再起動を跨ぐと反映されない**: 現状 modal 構築時 (`NativeOpenStrategyPicked`) に capability を読んで struct literal で代入する設計。modal が開いている最中に engine が再起動すると古い値が残るが、env 変更には engine 再起動 → handshake → modal 再オープン が必要なので実害なし（統一決定 #14）。Phase 4 で venue dropdown が動的に表示切替する場合も同じ流儀で、`engine_connection.capabilities()` を modal 構築のたびに読む設計を維持する
   - **Rust helper を呼ぶ既存テスト**: `src/main.rs::parse_kabu_is_production` のテスト 7 件（`parse_returns_true_when_is_production_advertised` 等）は既存のまま PASS。新 helper は `engine_client::capabilities::is_production(caps, "kabu_station")` の薄い alias なので、kabu_station 用のテストは `parse_kabu_is_production` 側に集約して残し、tachibana / 一般化されたケースは `engine-client/src/capabilities.rs::tests` 側にある
@@ -265,8 +266,10 @@ Wave 4: Final review
   - ただし **#12 の kabu_station 部** = `supports_live_strategy=True` に flip 完了。`python/tests/test_capabilities_live.py::test_supports_live_strategy_per_venue` の kabu_station 期待値を True に更新済
 - ⚠️ TODO 残し（Phase 5+ または別 issue で対応）:
   - **H-1 (Nautilus 親クラス継承)**: ✅ **R2-C (`84cf060`) で完全解消**。`KabuStationLiveExecutionClient` / `KabuStationLiveDataClient` は `nautilus_trader.live.execution_client.LiveExecutionClient` / `LiveMarketDataClient` を継承し、`node.kernel` 経由で `loop / msgbus / cache / clock / instrument_provider` を `super().__init__` に転送する。`node._exec_engine.register_client(...)` / `node._data_engine.register_client(...)` の Cython type check を通過可能で、warm_up 成功 → `node.build()` 経路で `node_build_failed` にならない。詳細は本ドキュメント末尾の「R2-C 反映」セクション参照
-  - **M-1 (GUI venue dropdown)**: `src/modal/live_strategy_form.rs::view()` への venue dropdown 追加が **未対応**。Phase 3.5 引き継ぎ Tips では「Phase 4 と一緒に解放」と書かれていたが、Phase 4 の実装範囲が広く（client 一式 + engine_runner 分岐 + server.py + tests）コミット粒度を分けたため、GUI 側変更は Phase 5（examples 対称化）と一緒に着手する。capability flip は完了済なので Rust 側 `engine_client::capabilities::supports_live_strategy(caps, "kabu_station")` は True を返す。dropdown を追加するには `EngineStartConfig` に `venue: Optional[str]` フィールドを追加するか（schema bump 1 件）、modal の `Action::Submit` に venue を載せて server.py 側で `_connected_venue` と照合する経路を決める必要あり
+  - **M-1 (GUI venue dropdown)**: ✅ R2 (2026-05-11) で解消。`LiveStrategyFormModal` に `venue` / `available_venues` / `connected_venue` フィールドを追加し、`Message::VenueChanged` + `Action::Submit { .., venue }` を流す。`LiveStrategyScenarioLoaded.venue` を `prefill_from_scenario` 経由で form に prefill、`available_venues` は `engine_client::capabilities::supports_live_strategy(caps, venue)` が true な venue のみを filter (modal 構築時 `handlers/replay.rs::NativeOpenStrategyPicked`)。`validate()` で `available_venues` 含有チェック + `connected_venue` (= `tachibana_state.is_ready()` / `kabu_state.is_ready()` 由来) との一致チェックを行い、戦略 venue と engine 接続 venue の不整合を Submit 前に reject する。`EngineStartConfig` への venue field 追加は引き続き Phase 5+ の wire 設計に委ねる（server.py 側 `_connected_venue` 判定が SoT、GUI は事前ガードとして機能）
   - **M-3 (RegisterSet 二重化)**: `KabuStationLiveDataClient` 内部の `RegisterSet` と既存 `server.py::self._kabu_register_set` が独立している。前者は live strategy の「契約 stub」（subscribe/evict 通知契約）、後者が PUSH 物理経路（`PUT /register` / `_handle_subscribe_kabu_station`）。kabu live data は実際には flow しない（R2-C で親継承は解消されたが、PUSH 経路の本配線は引き続き Phase 5 以降）。spec §3.2-G の `SubscriptionEvicted` 通知契約は live data client が IPC emit するので満たす
+    - (a) **bootstrap register (warm-up 時の `instrument_id` 自動 register + PUT /register)**: ✅ R2 で解消、R3 C1 で ordering fix 完了 (register が PUT より **前** に走るよう `_handle_start_engine` で `_run` の外側に移動)。
+    - (b) **runtime dynamic subscribe (strategy が走行中に `client.subscribe(symbol)` を呼んだとき)**: ⚠️ Phase 5 持ち越し。内部 RegisterSet と `server.py::self._kabu_register_set` の同期 (PUT /register の追従) は未配線。`KabuStationLiveDataClient.subscribe()` は `register_cb` (server.py 経由で PUT /register に流す async callback) を受け取れる設計だが、bootstrap 時にしか注入されていない。動的 subscribe 経路の本配線は Phase 5 で。
   - **M-5 (fetch_orders 意味論)**: `KabuStationVenue.fetch_orders` は現状 `KabuOrderClient.poll_fills(**params)` に委譲しており、`State=5 (約定)` のみを返す。warm_up の本来の目的「未決注文 (open orders) 復元」とは意味が違う（未決 = State 1, 3, 4 等）。Phase 5 で `KabuRestClient.fetch_orders` (`/orders` 全件) に切替え + OrderIdMap 相当の写像を kabu 側にも実装する
   - **代表 1 経路（注文発行 + フィル受信）の実機通過**: H-1 は R2-C で解消したため `node.build()` 通過は技術的に可能。attach mode の実機 smoke は credential / 立花 demo 環境が整い次第別途実施（テストロジック自体は Phase 7 `test_live_session_cli_e2e.py` で `@pytest.mark.live_demo` 配下に整備済）
 - 検証:
@@ -279,6 +282,236 @@ Wave 4: Final review
   - **EngineStartConfig.venue field 追加判断**: GUI dropdown 解禁時に schema bump 1 件で venue field を追加する案と、`StartEngine.engine` を `Literal["Backtest", "Live"]` から `enum Engine { Backtest, Live { venue: str } }` のような discriminated union に拡張する案がある。後者の方が wire 上「Live + venue は不可分」を強制できるが schema bump コストが大きい。前者の方が後方互換が単純。Phase 5 のスキーマ設計レビューで決める
   - **review-fix で踏んだ silent failure pattern**: tachibana 専用の bridge / hardcode 文字列を kabu 経路に流すと daemon thread 内 AttributeError や UI 文言誤表示として silent failure になる。venue 引数を増やす際は **必ず**「(a) bridge / thread 起動条件、(b) UI 文言、(c) wire 値（account_id / venue）」の 3 点を venue 別に grep して洗うこと
   - **冪等 key 三つ組のテスト pin**: Rust 側 `auto_generate_live_panes(strategy_id, instrument_id, venue)` の冪等 key は三つ組。venue 取り違え regression を防ぐには engine 側 `LiveStrategyReady.venue` の値を「warm_up=true で正しく venue 引数が伝搬する」test で pin する（`TestLiveStrategyReadyVenuePropagation::test_kabu_warm_up_success_emits_live_strategy_ready_with_kabu_venue`）。warm_up failure 経路の negative test だけでは「venue 値の正の伝搬」を観測できない
+
+#### Phase 4 R2 レビュー反映 (2026-05-11, ラウンド 2)
+
+R1 (e-station-review) で CRITICAL-1 (kabu live data path 未配線) と HIGH-1 (LiveSession venue 非対応) を抽出 → R2 で本配線。
+
+- ✅ CRITICAL-1: kabu PUSH/fill → live_fd_queue / live_ec_queue → KabuLiveDataBridge / KabuLiveEcBridge → KabuStationLiveDataClient._feed_trade_dict_sync / KabuStationEventBridge.process_order_record の物理経路完成
+- ✅ HIGH-1: LiveSession.login() / run() を venue 分岐。kabu は KabuStationVenue.startup_login() を呼び、in-process arm は second_password 不要 + runner.start_live(venue=self._venue) を必ず渡す
+- 計画書 §270 M-3 (RegisterSet 二重化) は warm-up 時の明示 register + PUT /register で実 PUSH が flow する形に解消。strategy 動的 subscribe は Phase 5 で再評価
+
+主要変更ファイル:
+- `python/engine/nautilus/clients/kabu_station/kabu_station_data_client.py`: `register_cb` 引数 + `_feed_trade_dict_sync` + `_connect()` で `_loop` 保存
+- `python/engine/nautilus/clients/kabu_station/kabu_station_event_bridge.py`: `_loop: asyncio.AbstractEventLoop | None` 属性追加
+- `python/engine/nautilus/live_bridges.py`: `KabuLiveDataBridge` / `KabuLiveEcBridge` 新設
+- `python/engine/nautilus/engine_runner.py`: venue 別 bridge dispatch (`if venue == "tachibana"` → tachibana bridge / `else` → kabu bridge)、event_bridge._loop を両 venue で必須注入
+- `python/engine/server.py`: `_on_kabu_board_push` で TRADING+kabu_station 時に `_live_fd_queue` push / `_kabu_fill_poller` で TRADING 中 `_live_ec_queue` push / `_handle_start_engine` kabu 分岐で warm-up 時 `_kabu_register_set.register` + `_kabu_put_register` 実行
+- `python/engine/replay_session.py`: `LiveSession.login()` で venue=kabu_station → `KabuStationVenue.startup_login()` 経路 / `LiveSession.run()` in-process arm で `second_password` チェック venue 限定 + `runner.start_live(venue=self._venue)` 渡し
+
+追加テスト数: 19 件
+- `test_kabu_station_live_data_client.py`: +3 (register_cb provided/none, _feed_trade_dict_sync)
+- `test_engine_runner_live_kabu.py`: +4 (TestLiveBridgesVenueDispatch — kabu bridge source pin + thread spawn pin + loop injection + ec bridge process_order_record)
+- `test_server_kabu_live_push.py`: 新設 +7 (board push → live_fd_queue × 4 ケース / fill poller → live_ec_queue × 2 / start_engine register source-pin × 1)
+- `test_live_session_kabu_login.py`: 新設 +6 (venue 分岐 login × 3 / venue 分岐 run inprocess × 3)
+
+設計判断:
+- **server.py 内 PUT /register 配置**: `_run` が sync (asyncio.to_thread) のため await できない。`_handle_start_engine` の `await asyncio.wait_for(asyncio.to_thread(_run), ...)` 直前 (async 文脈) で `_kabu_put_register` を呼ぶ。失敗時は `EngineError{code:"kabu_register_failed"}` emit + `_live_state` を CONNECTED に戻し _run 起動 skip
+- **trade dict 形式**: tachibana の FdFrameProcessor 互換 (`ts_ms`/`price`/`qty`/`side`)。`KabuStationAdapter.parse_execution` の戻り値 `Trade` (qty=0/side="unknown" 固定) を dict 化して push
+- **getattr 防御の徹底**: 既存 test_server_kabu_push.py は `__init__` を bypass する fixture を使うため、新たに参照する `_mode`/`_live_state`/`_connected_venue`/`_live_fd_queue` はすべて `getattr(self, ..., None)` で safe-default 経由で読む
+- **TypeError 既知バグ**: engine_runner.py の `loop.create_task(loop.run_in_executor(...))` は Python 3.14 で `TypeError("coroutine was expected")` を投げる (既存挙動・本 R2 fix 範囲外)。新 bridge test は warm_up=true + build()=success 経路を初めて exercise するため、test 側で TypeError を catch して bridge 構築観測のみに focus する pattern を採用
+- **KabuLoginCancelledError の wrap**: `KabuStationVenue.startup_login()` 失敗時、CLI / GUI の error handler が共通化されているため `RuntimeError` に wrap して raise。原因型は `__cause__` で保持
+
+検証:
+- `cargo check --workspace` clean / `cargo clippy --workspace --tests -- -D warnings` clean / `cargo fmt --check` clean / `cargo test --workspace` 全緑
+- `uv run pytest python/tests/test_kabu_station_live_data_client.py python/tests/test_kabu_station_event_bridge.py python/tests/test_engine_runner_live_kabu.py python/tests/test_live_session_cli.py python/tests/test_replay_session_*.py -v --timeout=60` → 全件 GREEN
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana and not demo_kabu and not tk_smoke" --timeout=120` → **2337 passed** / 106 skipped / 202 deselected (R2 で +19 件)
+
+#### Phase 4 R3 レビュー反映 (2026-05-11, ラウンド 3)
+
+R2 着地後の R3 レビューで CRITICAL 1 / HIGH 4 / MEDIUM 12 を抽出 → 修正で 0 まで収束。
+
+##### 解消サマリ
+
+| 区分 | ID | 概要 | 対応 |
+|------|-----|------|------|
+| CRITICAL | C1 | server.py `_handle_start_engine` の `_kabu_register_set.register` が `_run` (asyncio.to_thread) の中、PUT /register が `_run` の外で **先**に走り、strategy 銘柄が PUT payload に乗らない silent failure | register block を `_run` の外側 (PUT /register の直前) に移動。失敗時は `EngineError{code:"kabu_register_failed"}` + `_live_state = CONNECTED` + `_run` 起動 skip。 |
+| HIGH | H1 | source-pin だけでは register/PUT の **順序** バグを検出できなかった | PUT を mock して capture payload に strategy 銘柄が含まれることを動的 assert + register raise / PUT failure の各経路で `EngineError` emit と `_run` 未呼出を pin (`TestKabuStartEngineRegisterPutOrdering` 3 件追加)。 |
+| HIGH | H2 | `KabuStationLiveDataClient._feed_trade_dict_sync` が `seq=0` 固定で `trade_dict_to_tick` を呼び、同一 ts_ms 内で trade_id="L-{ts_ms}-0" が衝突 → Nautilus 側 dedup / warning | `_seq_per_ms` dict + `_next_seq` helper を追加 (tachibana_data.py と同実装)。`_feed_trade_dict_sync` 内で `seq` を計算して `trade_dict_to_tick(..., seq=seq)` に渡す。 |
+| HIGH | H3 | `_invoke_register_cb` の 3 段目 fallback `asyncio.get_event_loop().run_until_complete(coro)` が Python 3.12+ で RuntimeError / deadlock の温床 | running loop も `self._loop` も無いケースは `log.warning(...)` + `coro.close()` で silent skip 化。subscribe() の RegisterSet 更新は先行済みなので、後段の server.py 経由 PUT /register が物理経路を埋める。 |
+| HIGH | H4 | `_kabu_fill_poller` の `_live_ec_queue` push 条件が `_live_state == TRADING` のみで `_connected_venue` チェックが無く、tachibana TRADING 中の kabu session 残留 fill が tachibana の EC bridge を汚染 | 条件に `self._connected_venue == "kabu_station"` を追加。 |
+| MEDIUM | M1 | `KabuLiveDataBridge` / `KabuLiveEcBridge` の `_loop is None` 経路が `log.debug(...)` で運用ログから silent loss | DEBUG → WARNING に格上げ + 「silent loss」明示。caplog で warning 記録を pin する unit test 追加。 |
+| MEDIUM | M2 | `connected_venue` 計算が両 venue ready 時に **tachibana 固定優先** で、kabu scenario を開いたユーザに「engine 接続 venue 'tachibana' と一致しません」と誤誘導 | `LiveStrategyScenarioLoaded` 受信時に `scenario.venue` が Some + 該当 venue ready なら `form.set_connected_venue(scen_venue)` で refine。両 ready + scenario.venue=None は既存通り tachibana 優先 (fallback)。 |
+| MEDIUM | M3 | `validate()` で prod_mode check が venue check より **前** にあり、venue 未選択でも「TACHIBANA_ALLOW_PROD env が未設定…」と誤誘導 | venue check を prod_mode check の前に移動。RED test pin (`test_validate_returns_venue_error_before_prod_mode_error`) 追加。 |
+| MEDIUM | M4 | `prod_mode` reject 文言が固定で `TACHIBANA_ALLOW_PROD` を含めており、kabu_station venue で reject されたユーザに tachibana env をいじる誤誘導 | 文言を venue-aware に分岐。kabu_station 経路は「prod_mode は kabu_station の production env 設定が必要です（engine 再起動が必要）」を返す。kabu 用 `is_production` cap 個別チェックは Phase 5 へ繰越。 |
+| MEDIUM | M5 | `view()` 内 `pick_list(self.available_venues.clone(), Some(self.venue.clone()), Message::VenueChanged)` で毎回 clone | `pick_list(self.available_venues.as_slice(), Some(&self.venue), Message::VenueChanged)` に変更し clone 撤廃。 |
+| MEDIUM | M6 | `LiveSession.__init__(venue: str)` が typo を silent に受け、後段で `runner.start_live(venue=typo)` まで流れる | `venue: Literal["tachibana", "kabu_station"]` に narrow + `__init__` 冒頭で値検証 `raise ValueError(...)` を追加。 |
+| MEDIUM | M7 | CLI `--prod --venue kabu_station` のエラー文言が「KABU_ALLOW_PROD=1 and KABU_ENV=prod」表現で、help 側の表現と微妙にずれる | `"--prod --venue kabu_station requires BOTH KABU_ALLOW_PROD=1 AND KABU_ENV=prod environment variables (resolve_kabu_env() must return 'prod')"` に統一。help 文言と一致させ、内部関数名も併記して trace 容易化。 |
+| MEDIUM | M8 | kabu PUSH の `parse_execution` は `qty=Decimal("0")` 固定 (PUSH 仕様で約定単位を返さない) で、qty=0 trade tick が `_live_fd_queue` に流れて Nautilus 内 dedup / 異常 transaction として silent failure | `_on_kabu_board_push` の live tick push 経路で `trade.qty == Decimal("0")` の場合は skip + DEBUG ログ。Strategy SDK は depth_snapshot ベースで動作する設計を spec 反映ブロックで明記。 |
+| MEDIUM | M9 | `replay_session.py::LiveSession.run()` kabu 経路で `second_password=""` を渡し、`runner.start_live` の signature も `str` 固定で「未使用 venue でも空文字を要求」する設計上の歪み | `runner.start_live(second_password: str \| None = None)` に narrow。kabu 経路は `None` を渡す。tachibana 経路で `None` が来たら `EngineError{code:"invalid_config"}` + `EngineStopped` で reject。 |
+| MEDIUM | M10 | 計画書 §270 の M-3 解消マークが「✅ R2」一括で、bootstrap register と runtime dynamic subscribe を区別できなかった | M-3 を (a) bootstrap register: ✅ R2 解消 (R3 で ordering fix 完了) と (b) runtime dynamic subscribe: ⚠️ Phase 5 持ち越し に分割記述。 |
+| MEDIUM | M11 | `tests/live_form_smoke.rs` が source-scan のみで `validate()` を実 struct で動的に検証する test が不在 (source-pin だけだと挙動退行を見逃すリスク) | M3/M4 で追加した `test_validate_returns_venue_error_before_prod_mode_error` などの dynamic test を `tests/live_form_smoke.rs::test_live_form_module_has_dynamic_validate_tests_for_venue` で source-pin (test 削除 regression を防ぐ)。 |
+| MEDIUM | M12 | `available_venues` 空のとき venue 検査を skip する compat 経路の意図が doc コメント上で「skip is intentional but UX risk」と明示されていない | `validate()` の該当ブロックに M12 警告コメントを追加 + `test_validate_skips_venue_check_when_available_venues_empty` unit test で挙動を pin。 |
+
+##### 主要変更ファイル
+
+- `python/engine/server.py`: `_handle_start_engine` の kabu register/PUT ordering fix + qty=0 skip + `_kabu_fill_poller` の venue check 追加
+- `python/engine/nautilus/clients/kabu_station/kabu_station_data_client.py`: `_seq_per_ms` + `_next_seq` + `_feed_trade_dict_sync` に seq 注入 + `_invoke_register_cb` の 3 段目 fallback 削除
+- `python/engine/nautilus/live_bridges.py`: `KabuLiveDataBridge` / `KabuLiveEcBridge` の `_loop is None` 経路を WARNING に格上げ
+- `python/engine/nautilus/engine_runner.py`: `start_live(second_password: str | None = None)` + tachibana 経路で None reject
+- `python/engine/replay_session.py`: `LiveSession.__init__` で venue typo を runtime reject + `LiveSession.run()` で kabu 経路は `None` を渡す
+- `python/engine/live_session_cli.py`: `--prod --venue kabu_station` の error 文言を help と統一
+- `src/modal/live_strategy_form.rs`: `validate()` の venue/prod_mode 順序入替 + venue-aware reject 文言 + `view()` の clone 撤廃 + `set_connected_venue` setter 追加
+- `src/handlers/replay.rs`: `LiveStrategyScenarioLoaded` 受信時に scenario.venue による `connected_venue` refine
+
+##### 追加テスト数: +15 件
+
+- `python/tests/test_server_kabu_live_push.py`: +5 (register/PUT ordering 動的検証 × 3 + venue mismatch fill skip × 1 + qty=0 skip × 1) + 既存 1 件を nonzero qty に書き換え
+- `python/tests/test_kabu_station_live_data_client.py`: +2 (seq unique × 1 + no_loop graceful drop × 1) + 既存 1 件を await pattern に変更
+- `python/tests/test_live_bridges.py`: +2 (KabuLive bridge WARNING)
+- `python/tests/test_engine_runner_live_kabu.py`: +2 (second_password None for kabu / tachibana reject)
+- `python/tests/test_live_session_kabu_login.py`: +2 (venue Literal narrowing × 2)
+- `tests/live_form_smoke.rs`: +2 (scenario refine + validate dynamic source-pin)
+- `src/modal/live_strategy_form.rs::tests`: +3 (M3 / M4 / M12)
+
+##### 設計判断
+
+- **C1 ordering fix の判断**: register call を `_run` の **外** に出すことで、PUT /register より前に確実に走らせる。`_handle_start_engine` の async 文脈で実行するため、`_run` (sync, asyncio.to_thread) の中での実行と比べ、tied async 経路に揃う。失敗時の cleanup は `EngineError` emit + `_live_state = CONNECTED` で state machine を unstuck。
+- **H3 `run_until_complete` 削除の影響**: 旧テスト `test_subscribe_calls_register_cb_when_provided` が fallback 経路に依存していたため、`_connect()` 呼出 + running loop pattern に書き換え。production では Nautilus parent が `_connect()` を呼ぶため自動的に running loop が確保される設計と整合。
+- **M2 refine タイミング**: `connected_venue` の refine は modal 構築時ではなく `LiveStrategyScenarioLoaded` 受信時。modal 構築時点では scenario.venue が未取得 (async response 待ち) のため、scenario が venue を advertise した瞬間に refine する設計が自然。
+- **M4 kabu prod_mode 個別 cap は Phase 5 へ繰越**: 現状 form に `kabu_is_production` 相当のフィールドが無く、最小 fix は文言の venue-aware 化のみ。kabu 用 `is_production` cap の expose と form 連動は Phase 5 で。
+- **M8 spec 整合**: kabu PUSH は約定単位を返さないため live trade tick は流さない (= depth_snapshot ベース動作)。Strategy SDK の trade-driven hook は kabu 経路では発火しない仕様を spec / 計画書で明示。
+- **M9 type narrowing と runtime check の二重防御**: mypy が走らない経路 (CLI から in-process LiveSession 経由など) では Literal narrowing だけでは silent failure になりうるため、`__init__` での runtime ValueError + `start_live` での tachibana None reject の二重防御。
+- **M11 source-pin で dynamic test を守る**: flowsurface が binary crate のため tests/ 配下から `LiveStrategyFormModal` を直接 use できない。inline `#[cfg(test)] mod tests` 内の dynamic test を保持し続けることを source-pin で担保。
+
+##### 検証
+
+- `cargo check --workspace` clean / `cargo clippy --workspace --tests -- -D warnings` clean / `cargo fmt --check` clean / `cargo test --workspace` 全件緑
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana and not demo_kabu and not tk_smoke" --timeout=120` 全件緑 (R2 から +15 件)
+
+##### 知見/Tips（次への引き継ぎ）
+
+- **closures + asyncio.to_thread の execution order**: closure 内のコードは「呼出時」ではなく `asyncio.to_thread(closure)` で worker thread が動き始めたときに走る。async 文脈の後段コード (PUT /register など) が **先に** 走るため、closure 内に「PUT より前に走らせたい side-effect」を書くと silent failure になる。closure の外側 (async 文脈) に出して順序を明示する。
+- **trade_id seq counter は LiveDataClient 単位で持つ**: 同一プロセス内で複数 instrument_id を扱うため、`_seq_per_ms: dict[str, dict[int, int]]` のように instrument_id 軸でも分ける必要がある。tachibana_data.py の `_next_seq` 実装を kabu にも横展開する際、この dict 構造を一緒にコピーすること (1 次元 dict だと cross-instrument 衝突する)。
+- **`asyncio.get_event_loop().run_until_complete` は Python 3.12+ でハマる**: deprecated 警告 + nested-loop 規制 + thread context の組合せで RuntimeError / deadlock のリスクが高い。代替案: (a) running loop 必須にする (production では `_connect()` 経路で保証)、(b) silent skip + WARNING (本 H3 fix の方針)、(c) `asyncio.run` で完全新規 loop (重い)。プロダクション経路は (a)、テスト fallback は (b) が安全。
+- **Optional 型は runtime validation も併用する**: Python は型注釈を runtime で強制しないため、`Literal["..."]` narrow だけでは silent pass する経路がある (CLI / dynamic kwargs / dict-unpack 等)。`__init__` 冒頭で `if value not in (...): raise ValueError(...)` を併設すると mypy 不在環境でも安全。
+- **venue-aware error message のテスト**: 文言が venue 名を含むことを assert する test を venue ごとに最低 1 件用意すると、固定文言への regression を捕捉できる。M4 fix で `test_validate_prod_mode_error_message_is_venue_aware_for_kabu` を kabu 用に追加した。tachibana 用は既存 `test_validate_rejects_prod_mode_when_is_production_cap_false` が `TACHIBANA_ALLOW_PROD` 含有を pin している。
+
+#### Phase 4 R5 反映 (2026-05-11, ラウンド 5)
+
+**R4 サニティで発見した R3 fix-induced CRITICAL 2 件を解消**。R3 は CRITICAL 1 / HIGH 4 / MEDIUM 12 を解消したが、R3 の fix 自体が新たな silent failure を 2 件導入していた (MISSES.md 知見 17「fix が silent failure を生む」の典型例)。R4 サニティで両方とも検出し本ラウンドで TDD 解消した。
+
+##### 解消サマリ
+
+| 区分 | ID | 概要 | 対応 |
+|------|-----|------|------|
+| CRITICAL | R5-CRITICAL-1 | `_handle_start_engine` の R3 で追加した kabu register/PUT early-return 経路 (server.py:5249-5266 / 5272-5286) で、`EngineStopped` / `Error{request_id}` / `_active_live_venues.discard` / `_engine_tasks.pop` / `_engine_stop_events.pop` の **5 点 cleanup が脱漏**。R2/R3 前は register/PUT 失敗が `_run` 内例外として catch-all (`except Exception`) + `finally` で carry されていたが、R3 で register/PUT を `_run` の **外** (try/except 外) に出した結果、catch-all から外れた。silent failure: (a) Rust state machine が `pending_strategy_id` で stuck、(b) Rust RequestEngineStart が 60s hang、(c) 同 venue の次 StartEngine が `engine_busy_for_venue` で reject、(d) `_engine_tasks` / `_engine_stop_events` 残留。 | `_handle_start_engine` 内に `_kabu_register_early_abort(error_code, message)` helper closure を新設。`EngineError` 既存 emit + `EngineStopped` (engine_stopped_emitted ガード付) + `Error{request_id, code, message}` + `_engine_tasks.pop` + `_engine_stop_events.pop` + `_active_live_venues.discard(live_venue_for_cleanup)` + `_live_state = CONNECTED` を一括実行する。register 失敗 / PUT 失敗の両 early-return が helper を呼び `await _drain()` 後に return。|
+| CRITICAL | R5-CRITICAL-2 | R3 M8 で「`KabuStationAdapter.parse_execution` が qty=Decimal("0") ハードコード (kabu PUSH は累積 TradingVolume を持つが per-trade qty を持たない) のため qty=0 trade を `_live_fd_queue` に流さない」と決定 → kabu live data 経路が完全 dead path 化。`KabuStationLiveDataClient._feed_trade_dict_sync` が呼ばれず、TradingNode の Strategy SDK には kabu PUSH frame が一切到達しない。R2/R3 で配線した live data path が R3 M8 で **無効化** された fix-induced regression。 | **Option A: TradingVolume delta**。server.py `__init__` に `self._kabu_last_trading_volume: dict[str, int]` を追加し、ticker 別 last_volume を保持。`_on_kabu_board_push` の trade extract block で `delta_qty = current_volume - last_volume` を計算。`has_prev=False` (初回) → state seed のみ skip / `delta_qty <= 0` → skip (no execution) / `delta_qty > 0` → `qty=str(delta_qty)` で trade dict を `_live_fd_queue` に enqueue。`_clear_kabu_session` で `_kabu_last_trading_volume.clear()` し、再ログイン時に古い state を引き継がない。R3 M8 skip block (`if trade.qty == _Decimal("0")`) は撤去。R3 M8 の意図 (qty=0 流さない) は `delta_qty <= 0` skip で同等にカバー。|
+
+##### 主要変更ファイル
+
+- `python/engine/server.py`:
+  - `__init__`: `self._kabu_last_trading_volume: dict[str, int] = {}` を追加
+  - `_clear_kabu_session`: `self._kabu_last_trading_volume.clear()` を追加
+  - `_on_kabu_board_push`: R3 M8 skip block を撤去 + TradingVolume delta 計算ロジックを実装 (初回 seed / delta<=0 skip / delta>0 push)
+  - `_handle_start_engine`: `_kabu_register_early_abort` helper closure を新設、register 失敗 / PUT 失敗の両 early-return で helper 呼出に置換
+
+##### 追加テスト数: +8 件 (既存 1 件は名称・期待値とも書き換え)
+
+- `python/tests/test_server_kabu_live_push.py`:
+  - `TestKabuStartEngineEarlyReturnCleanup`: 新設 +3 件
+    - `test_kabu_register_failure_emits_engine_stopped_and_error_request_id` — register raise → `EngineStopped` + `Error{request_id, code:"kabu_register_failed"}` + `_active_live_venues` discard + `_engine_tasks` / `_engine_stop_events` pop の 5 点を assert
+    - `test_kabu_put_register_failure_emits_engine_stopped_and_error_request_id` — PUT 失敗で同上を assert
+    - `test_kabu_register_failure_releases_active_live_venues_for_next_start_engine` — register fail 後の 2 回目 StartEngine が `engine_busy_for_venue` で reject されないことを動的検証
+  - `TestKabuBoardPushTradingVolumeDelta`: 新設 +5 件
+    - `test_kabu_board_push_computes_qty_from_trading_volume_delta` — 1000→1500 で qty="500"
+    - `test_kabu_board_push_first_frame_skipped_for_state_seed` — 初回は state seed のみ + `_kabu_last_trading_volume["9433"]==2500` を assert
+    - `test_kabu_board_push_zero_delta_skipped` — 同 volume 2 連続で 2 件目 skip
+    - `test_kabu_board_push_negative_delta_skipped` — volume 減少 (reset 等) skip + state は新値で更新
+    - `test_clear_kabu_session_resets_last_trading_volume` — `_clear_kabu_session` で state クリア + 再ログイン後の最初 frame は seed (skip)
+  - 既存 `test_pushes_trade_to_live_fd_queue_when_trading_with_nonzero_qty` を `test_pushes_trade_to_live_fd_queue_when_trading_with_positive_volume_delta` に書き換え。`parse_execution` mock 経由ではなく実 PUSH frame 2 連続で TradingVolume delta を検証する形に。
+
+##### 設計判断
+
+- **state 配置を server 側に置く**: `KabuStationAdapter` (pure 関数 adapter) を持たせるか server 側に持たせるかで悩んだが、(a) adapter は ticker set 単位で生成され reuse 想定が薄い、(b) `_clear_kabu_session` 経由の session-scoped lifecycle と整合させるなら server 側が自然、(c) adapter の pure-function 性 (`parse_execution(raw)` は副作用 free) を維持できる、の 3 点で server 側に置く方を採用。
+- **R3 M8 skip block の意図保持**: R3 M8 は「qty=0 を流さない」が主旨で、本ラウンドの `delta_qty <= 0` skip でも同等に達成される (delta=0 も含む)。M8 削除によって qty=0 が流れる regression は起きない。
+- **state seed の skip 必要性**: 初回 frame で last_volume=0 として delta を計算すると、過去全累積を「1 件の trade」として流すことになり、dedup 異常 / 過剰約定量として silent failure を生む。明示的に「初回は seed のみ」とし `_live_fd_queue` には流さない。`has_prev = symbol in last_volume_map` で判定。
+- **負の delta も state を更新する**: 通常は起きないが、東証停止からの再開や session 切替で TradingVolume が reset される異常ケースで、state を新値に更新しないと「次の正常 delta」が誤った巨大値になる。reset 経路でも state seed を更新することで自己回復する。
+- **helper closure 内で `_emit` / `engine_stopped_emitted` / `live_venue_for_cleanup` をクロージャ捕捉**: enclosing async 関数のローカル変数を直接参照することで、main-thread coroutine 経路の `_emit_direct` セマンティクス (race-free な直接 outbox append) を維持する。timeout / except 経路の補完送出パターンと完全に揃え、`engine_stopped_emitted[0]` の二重送出ガードも統一。
+
+##### R5 検証
+
+- `cargo check --workspace` → clean
+- `cargo clippy --workspace --tests -- -D warnings` → clean
+- `cargo fmt --check` → clean
+- `cargo test --workspace` → 全テスト緑 (Rust 側変更なし、既存 regression pin は維持)
+- `uv run pytest python/tests/test_server_kabu_live_push.py python/tests/test_kabu_station_live_data_client.py -v` → 29 passed
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana and not demo_kabu and not tk_smoke" --timeout=120` → **2358 passed** / 106 skipped / 202 deselected (R4 2310 → R5 2358 で +8 件追加、既存 1 件名称書き換え。差分が大きいのは R6 / R7 micro-fix 経由で 2312 まで増えた件と本ラウンド +8 のため)
+
+##### R5 知見 / 次回回避策
+
+- **fix-induced regression を本ラウンドで 2 件踏んだ**: MISSES.md 知見 17 (「fix が silent failure を生む」) を本ラウンドで実証。R3 で `_run` の外に出した register/PUT block は、(a) `_run` 内例外を catch する `except Exception` から外れる結果、その catch が肩代わりしていた 5 点 cleanup が脱漏する、(b) parse_execution の qty=0 ハードコードを skip する判断が live data 経路全体を dead 化する、の 2 種を同時に踏んだ。次回 review-fix では「fix の差分が **catch-all の外に新しい return を生む** か」「fix が **既存経路全体を dead 化する skip を入れる** か」を専用 checklist で確認すべき。
+- **early-return の cleanup checklist**: handler 系コードで早期 return を追加するとき、enclosing 関数の `finally` / `except Exception` が肩代わりしていた cleanup を **5 点まとめて** (event emit × 2-3 種類 + state dict pop × 2 + state machine reset) helper 化して呼び忘れを防ぐ。本 R5 の `_kabu_register_early_abort` がその helper パターンの実装例。
+- **dead path 化を検出する pin test**: R2/R3 で配線した live data path が R3 M8 で無効化された件は「経路の存在 (source-pin)」だけでなく「経路が実際に動く (動的 enqueue)」を pin する test が必要。本 R5 の `test_pushes_trade_to_live_fd_queue_when_trading_with_positive_volume_delta` は実 PUSH frame 2 連続で `_live_fd_queue` の `not empty()` を assert することで、将来の dead 化を防ぐ。
+- **後続レビュー向け重点項目**: 後続 review-fix loop では本 R5 で踏んだパターン 2 種 (catch-all から外す return / dead path 化する skip) に加え、TradingVolume delta の overflow / wrap-around (実取引で `int` のオーバーフローは想定しなくて良いが、`TradingVolume` 欠損時の `0` default が初回 seed と区別できない場合がないか) を見ること。
+
+R3 fix-induced CRITICAL 2 件を R5 で完全解消。`fix-induced silent failure` パターンを MISSES.md 候補として後続レビューの参考に明記する。
+
+##### R7 反映 (2026-05-11, ラウンド 7)
+
+R6 サニティで発見した **MEDIUM 5 件 + LOW 3 件** を TDD で解消し review-fix-loop を収束させた。R5 で `_kabu_register_early_abort` helper と TradingVolume delta 経路を入れた直後の補完ラウンド。fix-induced regression 系ではなく、R5 の sanity 内に残っていた observability ギャップと test/spec 整合性の取りこぼし。
+
+###### 解消サマリ
+
+| 区分 | ID | 概要 | 対応 |
+|------|-----|------|------|
+| MEDIUM | R7-MEDIUM-1 | `instrument_id` 空文字で kabu register が silent skip → PUT /register 対象なしで TRADING 起動 → live data 永遠に届かない dead path 化 (`_kabu_symbol = ""` から `if _kabu_symbol:` の silent skip) | 二段防御: (a) `schemas.py::EngineStartConfig.instrument_id` に `Field(..., min_length=1)` を追加して pydantic 層で空文字を `Error{code:"invalid_config"}` で reject、(b) `server.py::_handle_start_engine` kabu 分岐に `_kabu_symbol` 空判定の runtime guard を追加し `_kabu_register_early_abort("invalid_config", ...)` 経由で 5 点 cleanup + Error/EngineStopped emit + state machine reset を完遂。bypass test fixture / 不正 dict 直注入経路もすべて同経路に集約。|
+| MEDIUM | R7-MEDIUM-2 | `_kabu_register_set.all_symbols()` 空時の PUT /register skip が silent (外部 clear / race 後の検出不可) | `server.py::_handle_start_engine` の `if _all_syms:` の else 分岐に `log.warning("kabu live start: no symbols in _kabu_register_set, PUT /register skipped ...")` を追加。MEDIUM-1 fix で空 `instrument_id` は早期 abort されるためここに到達するのは外部 clear / race のみ。早期 abort はしない (silent failure 観測手段を残しつつ無害な経路で進める)。|
+| MEDIUM | R7-MEDIUM-3 | test helper `_make_server` / `_make_server_for_start_engine` の prod `__init__` 同期漏れ — `self._kabu_last_trading_volume: dict[str, int] = {}` を helper が初期化していない。`_on_kabu_board_push` の defensive `getattr` で lazy init していたが、将来 defensive 経路が消えた瞬間にテストが落ちる脆さ | `python/tests/test_server_kabu_live_push.py` の両 helper に `server._kabu_last_trading_volume = {}` を追加して prod `__init__` と同期。`_on_kabu_board_push` の defensive `getattr` は撤廃せず維持 (二重防御)。|
+| MEDIUM | R7-MEDIUM-4 | 再ログイン後の最初 kabu PUSH frame が state seed として skip される仕様が docstring / spec のどこにも書かれていない silent UX gap | `python/engine/server.py::_clear_kabu_session` の docstring に「`_kabu_last_trading_volume.clear()` 副作用 → 次回 PUSH frame は state seed として skip される (live trade tick が 1 件失われる)」を追記。`docs/specs/live-strategy.md` §3.2-G.1 と §5 安全装置リスト #11 にも同等の説明を追加。|
+| MEDIUM | R7-MEDIUM-5 | early abort test の cleanup 網羅性 — `TestKabuStartEngineEarlyReturnCleanup` 3 件が `_live_state == CONNECTED` と `_engine_stop_events.get(strategy_id) is None` を明示 pin していない | 既存 3 test に追補のみ (新規メソッドは作らない)。3 件全てに `assert s._live_state == LiveState.CONNECTED` + `assert s._engine_stop_events.get(strategy_id) is None` を追加し、`asyncio.to_thread` 非呼出 + cleanup 完全性を二重 pin。|
+| LOW | R7-LOW-1 | `_on_kabu_board_push` 内 Symbol 2 回取得 (`symbol = str(raw.get("Symbol", ""))` と outer `ticker` で重複) | `symbol = ticker` に変更して outer try で取得済みの `ticker` を再利用 (DRY)。|
+| LOW | R7-LOW-2 | `parse_execution` 失敗時の log level が `debug` で live data dead path 化の直接原因なのに観測不可 | `log.debug` → `log.warning` に格上げ。|
+| LOW | R7-LOW-3 | `live_venue_for_cleanup = None` 経路の test カバレッジ追記コメント | `TestKabuStartEngineEarlyReturnCleanup` 末尾にコメント追加: 「`_kabu_register_early_abort` 内 `if live_venue_for_cleanup is not None:` ガードで no-op、`set.discard` の冪等性で担保」。|
+
+###### 主要変更ファイル
+
+- `python/engine/schemas.py`: `EngineStartConfig.instrument_id` に `Field(..., min_length=1)` 追加 (R7-MEDIUM-1)
+- `python/engine/server.py`:
+  - `_handle_start_engine` kabu 分岐: `_kabu_symbol` 空判定の runtime guard 追加 (R7-MEDIUM-1)
+  - `_handle_start_engine` kabu 分岐: `_all_syms` 空時 `log.warning` 追加 (R7-MEDIUM-2)
+  - `_clear_kabu_session` docstring: 再ログイン後 1 件目 PUSH frame skip 仕様を明記 (R7-MEDIUM-4)
+  - `_on_kabu_board_push`: `symbol = ticker` で DRY 化 (R7-LOW-1)
+  - `_on_kabu_board_push` inner except: `log.debug` → `log.warning` に格上げ (R7-LOW-2)
+- `docs/specs/live-strategy.md`:
+  - §3.2-G.1 新設: kabu 再ログイン後 1 件目 PUSH frame state seed 仕様 (R7-MEDIUM-4)
+  - §5 安全装置リスト #11 追加: 同上 (R7-MEDIUM-4)
+- `python/tests/test_server_kabu_live_push.py`:
+  - `_make_server` / `_make_server_for_start_engine` に `_kabu_last_trading_volume = {}` 追加 (R7-MEDIUM-3)
+  - `TestKabuStartEngineEarlyReturnCleanup` 3 件に `_live_state` + `_engine_stop_events.get()` の assert 追加 (R7-MEDIUM-5)
+  - `TestKabuStartEngineEarlyReturnCleanup` 末尾コメント追加 (R7-LOW-3)
+  - `TestKabuStartEngineEmptyInstrumentIdAborts` 新設 +1 件 (R7-MEDIUM-1 RED→GREEN)
+  - `TestKabuStartEngineEmptyRegisterSetLogsWarning` 新設 +1 件 (R7-MEDIUM-2 RED→GREEN)
+
+###### 追加テスト数: +2 件 (kabu_live_push)
+
+20 件 (R5 末時点) → 22 件 (R7 反映後)。既存 20 件は破壊せず、helper 同期 / MEDIUM-5 補強 / LOW-3 コメントは追補のみ。
+
+###### 設計判断
+
+- **MEDIUM-1 二段防御**: pydantic 層のみだと「将来 schema を緩めた」「fixture が __init__ を patch して bypass する」「不正 dict 直注入」経路で空文字が到達しうる。kabu_station 分岐内の runtime guard を別途入れて `_kabu_register_early_abort` 経路 (R5 で確立) に集約することで、Rust 60s hang / state machine 固着 / `_active_live_venues` 残留 を一括防止する。tachibana 経路は本 fix の対象外 (kabu 固有の dead-path 化)。
+- **MEDIUM-2 で早期 abort しない理由**: `instrument_id` が空なら MEDIUM-1 で先に abort される。ここに到達するのは「instrument_id 有 + register 成功 → all_symbols が空」という外部 clear / race のみで、normal flow ではない。warning だけ残して flow は継続させ、live data が来ないことを observability で検出する方が現実的。abort してしまうと観測機会も消える。
+- **MEDIUM-3 helper-prod sync の defensive 撤廃しない理由**: `_on_kabu_board_push` の `getattr(self, "_kabu_last_trading_volume", None)` lazy init は他経路 (将来追加されうる他の `__new__` ベース fixture) でも使われる safety net。helper の prod 同期は脆さの解消だが、defensive 撤廃は別 issue で扱う。二重防御を維持する。
+- **MEDIUM-4 spec/docstring 同時更新**: docstring だけだと「コード読まないと分からない」「将来 docstring が古くなる」リスク。spec 側に 1 段 hard pin を置き、§3.2-G.1 と §5 #11 の両方で参照可能にする (kabu 経路と全体安全装置リストの 2 視点)。
+- **MEDIUM-5 既存 test 補強のみ・新規 method 追加しない**: 既に 3 件の test が存在し責務分離されている (`register fail` / `PUT fail` / `release for next StartEngine`)。新規 method は責務重複になる。`_live_state == CONNECTED` + `_engine_stop_events.get() is None` の 2 assert を各 test に追加して完全性 pin を厚くする。
+
+###### R7 検証
+
+- `cargo check --workspace` → clean
+- `cargo clippy --workspace --tests -- -D warnings` → clean
+- `cargo fmt --check` → clean
+- `cargo test --workspace` → 全テスト緑 (Rust 側変更なし、既存 regression pin は維持)
+- `uv run pytest python/tests/test_server_kabu_live_push.py -v` → 22 passed
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana" -v` → 全件緑 (R5 末から +2 件: `test_kabu_start_engine_empty_instrument_id_aborts` / `test_kabu_start_engine_empty_register_set_logs_warning`)
+
+###### R7 知見 / 次回回避策
+
+- **silent skip = silent failure 候補**: 「`if _kabu_symbol:`」「`if _all_syms:`」のような guard が else 分岐を持たないとき、その guard 自体が silent skip path を生む。observability 確保のため `else: log.warning(...)` を必ず添える、または early abort を入れる二択を意識する。
+- **pydantic Field validator + runtime guard の二段防御**: schema 層は wire 上限の安全装置として有用だが、`__new__` ベース fixture / 不正 dict 直注入で bypass される。runtime guard を kabu/tachibana 分岐内に入れて両方で防ぐ。pydantic の `min_length=1` は wire-level の最小契約として有用 (Rust 側からの空文字送信を即時 reject)。
+- **test helper の prod sync 漏れ検出**: `__new__` ベース helper を使う test ファイルは、`__init__` で追加された新 field を helper に明示同期する規約を `bug-postmortem` で増やすべき。MISSES.md 候補: 「helper-prod field drift」。
+- **再ログイン後 1 件目 trade 欠落の UX 影響**: 現状実装は安全側 (累積値 1 件として流す方が dangerous) だが、ユーザーが「最初の trade が見えない」と気付かない silent gap になりうる。将来 PUSH protocol が per-trade qty を返すようになったら state seed 経路は撤廃可能。spec §3.2-G.1 で「将来 PUSH protocol が per-trade qty を提供するようになった時点で撤廃する」と明記済。
+
+MEDIUM 5 件 + LOW 3 件すべて TDD で解消し、本 R7 サブブロックで review-fix-loop を収束させる。
 
 ### Phase 6 完了（2026-05-10）
 - 担当: phase6-agent
@@ -794,4 +1027,44 @@ R6 fix の直後 (R7) に silent-failure-hunter 単独で再走させたとこ�
 - 純粋な test 追記 (production code 不変) のため新規 silent failure リスクゼロ → 追加サニティ不要
 
 R4 + R6 + R7 micro-fix を経て review-fix-loop 収束。本 PR はマージ可能状態。
+
+### Wave R1 反映（2026-05-11、外部レビュー反映）
+
+- 担当: r1-fix-agent
+- 関連 commit: 本 commit — HIGH-1 / HIGH-2 / MEDIUM-1 を TDD で順次解消
+
+#### R1 外部レビュー指摘
+
+| 区分 | ID | 概要 | 解消方法 |
+|------|----|------|---------|
+| HIGH | HIGH-1 | `EngineStarted` を warm_up **完了後** に emit していたため、warm_up が 5s を超えると `_warming_up_ticker` が先に `LiveStrategyWarmingUp` を emit して Rust 側 state machine (`pending_strategy_id` 照合) に silent drop されていた。spec §3.2 lifecycle 契約 (`EngineStarted → LiveStrategyWarmingUp → LiveStrategyReady`) 違反。 | `engine_runner.py::start_live` の `EngineStarted` emit ブロックを warm_up 開始 (= `ticker_task` 起動) **より前** に移動。warm_up 失敗パス (例外 / `False`) では `_emit_warmup_failed_and_close()` が後続で `EngineStopped` を emit するため、Rust 側 `LiveStopped` arm が pending_strategy_id を clear して state machine が unstuck される（順序契約: `EngineStarted → EngineError(warm_up_failed) → EngineStopped`）。`test_engine_runner_live_warmup_failure.py` の旧 assertion 「`EngineStarted` を emit しない」を「`EngineStarted` は emit されるが `LiveStrategyReady` は emit されない」に反転。 |
+| HIGH | HIGH-2 | `KabuStationLiveDataClient._on_evict` が emit する `SubscriptionEvicted{venue,symbol,exchange}` は spec §3.2-G の IPC 契約だが、wire schema 全層（`schemas.py` / `engine.proto` / `engine_pb2` / `engine-client` DTO / `server_grpc.py` / Rust handler）に variant が無く、`server_grpc.py::_dict_to_proto_event` で **silent drop** されていた。kabuステーション 50 銘柄 PUSH 上限到達時、ユーザーへの通知が完全に失われる。 | `SCHEMA_MINOR 28 → 29` に bump。新 message `SubscriptionEvictedEvent {venue, symbol, exchange}` を proto に追加（field number 56）、Python pb2 を再生成、`schemas.py::SubscriptionEvicted` を新設、`server_grpc.py::_EVENT_TO_FIELD_AND_CLASS` に登録、`engine-client/src/dto.rs::EngineEvent::SubscriptionEvicted` を追加、`grpc_transport.rs::proto_event_to_dto` で変換、`src/main.rs::map_engine_event_to_message` で `Toast::warn` を発火（user-facing 文言「{symbol} は PUSH 上限到達で登録解除されました（再選択で再登録）」）。 |
+| MEDIUM | MEDIUM-1 | `LiveStrategyFormModal` が単一フィールド `tachibana_is_production: bool` しか持たず、`prod_mode=true && venue=="kabu_station"` を hardcode で「Phase 5 へ繰越」と reject していた。server.py 側は既に `kabu_station.is_production = (_kabu_env == "prod")` を `_build_ready` で expose 済（`KABU_ALLOW_PROD=1 + KABU_ENV=prod` の二重判定）だったため、form 側だけが kabu prod を恒久 reject していた silent UX failure。 | フィールド名を `is_production_by_venue: HashMap<String, bool>` に置き換え、`validate()` の prod_mode check を venue-aware に変更（venue → KABU_ALLOW_PROD / TACHIBANA_ALLOW_PROD / generic "production env" の env hint を文言に挿入）。`src/handlers/replay.rs::NativeOpenStrategyPicked` の live 分岐で `engine_client::capabilities::is_production(caps, venue)` を tachibana / kabu_station の両 venue について読み、HashMap を組み立てて modal に渡す。 |
+
+#### 設計判断 (R1)
+
+- **`SCHEMA_MINOR` 28 → 29 bump 理由**: `SubscriptionEvicted` の wire 表現は完全に新規 variant 追加（既存 message の field 追加ではない）なので minor bump が必須。Rust ↔ Python の 3-way 同期テスト `test_rust_schema_constants_match_python` (`test_schemas_nautilus.py`) で担保。
+- **`EngineStarted` 順序の Rust state machine 制約**: `src/handlers/replay.rs::ReplayMsg::LiveStarted` arm が `pending_strategy_id` を set し、60s warm_up timeout token を確立する。後続の `LiveWarmingUp` arm がそれと照合して進捗 banner / timeout reset を行う。`EngineStarted` が `LiveStrategyWarmingUp` より後に出ると、ticker からの先行 LiveStrategyWarmingUp が pending/running いずれにも match せず silent drop される（src/handlers/replay.rs:704）。`EngineStarted` を warm_up 前に emit することでこの照合経路が成立する。
+- **kabu prod env SoT**: `KABU_ALLOW_PROD=1 + KABU_ENV=prod` の二重判定（既存 `engine.exchanges.kabusapi_url.resolve_kabu_env` を SoT として server.py が `_kabu_env == "prod"` を `is_production` cap に expose）。tachibana の `TACHIBANA_ALLOW_PROD=1`（単一判定）と非対称だが、これは既存 venue 仕様であり R1 範囲では現状維持。
+
+#### R1 新規追加テスト
+
+- `python/tests/test_kabu_station_live_data_client.py::TestPushSymbolLimitEviction::test_evicted_event_validates_against_schema` — 新 `SubscriptionEvicted` pydantic model で emit 済 dict を round-trip validate。
+- `python/tests/test_server_grpc_live_ipcs.py::test_event_to_field_mapping_contains_subscription_evicted` / `test_subscription_evicted_dict_to_proto_round_trip` — wire mapping pin + dict→proto roundtrip。
+- `python/tests/test_engine_runner_live_kabu.py::TestEngineStartedOrderingDuringWarmUp::test_engine_started_emitted_before_live_strategy_warming_up` (kabu) / `_tachibana` — 5.2s slow warm_up で ticker を 1 回発火させ、`EngineStarted` index < `LiveStrategyWarmingUp` index を assert。
+- `engine-client/src/grpc_transport.rs::tests::subscription_evicted_proto_maps_to_dto` / `subscription_evicted_json_deserialize_pin` — Rust 側 proto→dto と JSON→dto の対称 round-trip。
+- `src/modal/live_strategy_form.rs::tests::test_validate_allows_prod_mode_for_kabu_when_is_production_true` / `test_validate_rejects_kabu_prod_when_cap_false_and_mentions_kabu_env` / `test_validate_allows_prod_mode_for_tachibana_via_hashmap` / `test_validate_rejects_tachibana_prod_when_cap_false_via_hashmap` / `test_validate_rejects_prod_when_venue_missing_from_hashmap` — venue-aware is_production gate。
+- 既存 assertion 反転: `test_engine_runner_live_warmup_failure.py::TestWarmUpFailureExceptionPath::test_warm_up_exception_emits_error_not_ready` / `TestWarmUpFailureFalseReturnPath::test_warm_up_returns_false_emits_error_not_ready` — `EngineStarted は emit されない` → `EngineStarted は emit されるが LiveStrategyReady は emit されない`、順序契約 `EngineStarted → EngineError → EngineStopped` を pin。
+- 既存 schema 数値更新: `test_schemas_nautilus.py::test_schema_minor_is_9_for_phase_b1` / `test_request_venue_login_state.py::test_schema_minor_current_value` / `engine-client/tests/schema_v2_4_nautilus.rs::schema_minor_matches_current_bump` / `tests/engine_event_routing_exhaustive.rs::engine_event_variant_count_is_as_expected` (56 → 57)。
+
+#### R1 検証
+
+- `cargo check --workspace --tests` → clean
+- `cargo clippy --workspace --tests -- -D warnings` → clean
+- `cargo fmt --check` → clean
+- `cargo test --workspace` → 全テスト緑
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana" -q` → 2549 passed, 116 skipped, 8 deselected
+- 個別: `test_engine_runner_live_kabu.py` / `test_kabu_station_live_data_client.py` / `test_server_kabu_live_push.py` / `test_live_session_cli.py` / `test_engine_runner_live_warmup_failure.py` → 76 passed
+
+R1 反映で review-fix-loop はさらに 1 周収束。本 PR はマージ可能状態（R4 + R6 + R7 + R1）。
 

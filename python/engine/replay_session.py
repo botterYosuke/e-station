@@ -1733,13 +1733,20 @@ class LiveSession:
     def __init__(
         self,
         *,
-        venue: str,
+        venue: Literal["tachibana", "kabu_station"],
         demo: bool = True,
         force_mode: _ForceMode = "auto",
         attach_endpoint: str | None = None,
         attach_timeout_s: float = 2.0,
         second_password: str | None = None,
     ) -> None:
+        # R3 M6: venue typo は runtime で reject する (Literal narrowing だけでは
+        # mypy が走らない経路 / 非型チェック環境で silent pass してしまうため)。
+        if venue not in ("tachibana", "kabu_station"):
+            raise ValueError(
+                f"LiveSession: invalid venue {venue!r} "
+                "(must be 'tachibana' or 'kabu_station')"
+            )
         self._venue = venue
         self._demo = demo
         self._force_mode = force_mode
@@ -1935,6 +1942,46 @@ class LiveSession:
                     "GUI/engine 側の保存済み credential か dev 用の credential を使ってください。"
                 )
             self._login_attach()
+            return
+
+        # issue #42 R2 HIGH-1: in-process mode の login() を venue 分岐する。
+        # - venue == "kabu_station": KabuStationVenue.startup_login() を呼ぶ
+        #   (kabusapi local app の独自ダイアログ。user_id/password は使わない)。
+        #   KabuLoginCancelledError は RuntimeError で wrap する。
+        # - venue == "tachibana": 既存経路 (_tachibana_login_call + DEV_TACHIBANA_*)。
+        if self._venue == "kabu_station":
+            from engine.exchanges.kabusapi import KabuStationVenue
+            from engine.exchanges.kabusapi_auth import KabuLoginCancelledError
+
+            kabu_venue = KabuStationVenue()
+            try:
+                asyncio.run(kabu_venue.startup_login())
+            except KabuLoginCancelledError as exc:
+                raise RuntimeError(
+                    f"KabuStation login cancelled by user: {exc}"
+                ) from exc
+            except RuntimeError as exc:
+                # nested event loop fallback
+                if (
+                    "asyncio.run() cannot be called" in str(exc)
+                    or "running event loop" in str(exc)
+                ):
+                    import concurrent.futures
+
+                    def _runner() -> object:
+                        return asyncio.run(kabu_venue.startup_login())
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        try:
+                            ex.submit(_runner).result()
+                        except KabuLoginCancelledError as kexc:
+                            raise RuntimeError(
+                                f"KabuStation login cancelled by user: {kexc}"
+                            ) from kexc
+                else:
+                    raise
+            self._session = kabu_venue
+            self._logged_in = True
             return
 
         resolved_user_id = user_id if user_id is not None else os.environ.get(
@@ -2176,7 +2223,9 @@ class LiveSession:
             return
 
         # in-process mode
-        if self._second_password is None:
+        # issue #42 R2 HIGH-1: second_password チェックは venue=="tachibana" 限定。
+        # kabu_station は KabuTradePasswordHolder 経由で別管理のため不要。
+        if self._venue == "tachibana" and self._second_password is None:
             # R4 Group B (silent-HIGH-2): attach 経路 (replay_session.py:2166) は
             # SecondPasswordRequired event を on_event に流すが、in-process arm は
             # RuntimeError を直接 raise するだけで何も emit していなかった。auto
@@ -2204,6 +2253,15 @@ class LiveSession:
         runner = NautilusRunner()
         self._stop_event = threading.Event()
         self._live_running = True
+        # issue #42 R2 HIGH-1 / R3 M9: venue 引数を必ず runner.start_live に渡す。
+        # kabu_station 経路は second_password 不要なので **None** を渡す
+        # (旧実装は "" だったが、型 (`str | None`) で表現することで
+        # tachibana 経路の必須性を runner 側で型 + runtime で reject 可能に)。
+        _second_password_arg: "str | None"
+        if self._venue == "kabu_station":
+            _second_password_arg = None
+        else:
+            _second_password_arg = self._second_password
         try:
             runner.start_live(
                 instrument_id=instrument_id,
@@ -2211,13 +2269,14 @@ class LiveSession:
                 strategy_init_kwargs=strategy_init_kwargs,
                 max_qty=max_qty,
                 max_notional_jpy=max_notional_jpy,
-                second_password=self._second_password,
+                second_password=_second_password_arg,
                 session=self._session,
                 fd_queue=__import__("queue").Queue(maxsize=10_000),
                 ec_queue=__import__("queue").Queue(maxsize=1_000),
                 on_event=_on_event,
                 stop_event=self._stop_event,
                 strategy_id=strategy_id,
+                venue=self._venue,
             )
         finally:
             self._live_running = False

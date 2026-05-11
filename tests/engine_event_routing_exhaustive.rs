@@ -151,9 +151,10 @@ fn engine_event_variant_count_is_as_expected() {
     // schema 3.26 (issue #42 Phase 3): LiveStrategyReady 追加で 54 → 55
     // schema 3.27 (issue #42 Phase 3): LiveStrategyWarmingUp 追加で 55 → 56
     // schema 3.28 (issue #42 Phase 3): EngineBusy.venue / busy_kind フィールド追加（variant 数は変わらず 56）
+    // schema 3.29 (issue #42 R1 HIGH-2): SubscriptionEvicted 追加で 56 → 57
     assert_eq!(
-        count, 56,
-        "EngineEvent variant count changed (got {count}, expected 56). \
+        count, 57,
+        "EngineEvent variant count changed (got {count}, expected 57). \
          Ensure the new/removed variant has an explicit arm in map_engine_event_to_message."
     );
 }

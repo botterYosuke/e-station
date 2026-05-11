@@ -524,10 +524,11 @@ def test_schema_minor_current_value():
     """SCHEMA_MINOR の現在値を固定するスモークテスト。
     変更時はここも更新すること（履歴は engine-client/src/lib.rs を参照）。
     28: EngineBusy.venue / EngineBusy.busy_kind 追加（issue #42 Phase 3、venue-scoped concurrent live ガード）。
+    29: SubscriptionEvicted 追加（issue #42 R1 HIGH-2、kabu 50 銘柄 PUSH 上限到達時の LRU evict 通知、spec §3.2-G）。
     """
     from engine.schemas import SCHEMA_MINOR
 
-    assert SCHEMA_MINOR == 28
+    assert SCHEMA_MINOR == 29
 
 
 @pytest.mark.demo_kabu

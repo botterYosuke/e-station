@@ -66,6 +66,8 @@ def _isolate_env(monkeypatch):
     """credential / prod env をテスト毎にリセットする。"""
     for key in [
         "TACHIBANA_ALLOW_PROD",
+        "KABU_ALLOW_PROD",
+        "KABU_ENV",
         "DEV_TACHIBANA_USER_ID",
         "DEV_TACHIBANA_PASSWORD",
         "DEV_TACHIBANA_SECOND_PASSWORD",
@@ -323,6 +325,175 @@ def test_prod_blocked_without_env(strategy_file) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(argv=args, stdin=io.StringIO(""))
     assert excinfo.value.code != 0
+
+
+def test_prod_blocked_for_tachibana_without_env(strategy_file) -> None:
+    """R1 HIGH-2: ``--venue tachibana --prod`` + env 未設定 → reject (venue 明示版).
+
+    ``test_prod_blocked_without_env`` の venue 指定明示版。venue 別分岐後でも
+    tachibana 経路の既存契約 (``TACHIBANA_ALLOW_PROD=1`` 必須) を pin する。
+    """
+    from engine.live_session_cli import main
+
+    args = _common_args(strategy_file)
+    idx = args.index("--demo")
+    args[idx] = "--prod"
+    args += ["--venue", "tachibana"]
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv=args, stdin=io.StringIO(""))
+    assert excinfo.value.code != 0
+
+
+def test_prod_for_tachibana_does_not_check_kabu_env(
+    fake_live_session, strategy_file, monkeypatch,
+) -> None:
+    """R1 HIGH-2: ``--venue tachibana --prod`` + ``TACHIBANA_ALLOW_PROD=1`` のみ → 受理.
+
+    ``KABU_ALLOW_PROD`` / ``KABU_ENV`` が未設定でも tachibana 経路は影響を受けない
+    (venue 分離の対称性を pin)。
+    """
+    from engine.live_session_cli import main
+
+    monkeypatch.setenv("TACHIBANA_ALLOW_PROD", "1")
+    monkeypatch.delenv("KABU_ALLOW_PROD", raising=False)
+    monkeypatch.delenv("KABU_ENV", raising=False)
+
+    captured: list[_FakeLiveSession] = []
+    orig_init = _FakeLiveSession.__init__
+
+    def _wrap_init(self, *a, **kw):
+        orig_init(self, *a, **kw)
+        self.injected_events = [
+            {"event": "EngineStopped", "strategy_id": "live-strategy",
+             "final_equity": "0", "ts_event_ms": 0},
+        ]
+        captured.append(self)
+
+    monkeypatch.setattr(_FakeLiveSession, "__init__", _wrap_init)
+
+    args = _common_args(strategy_file)
+    idx = args.index("--demo")
+    args[idx] = "--prod"
+    args += ["--venue", "tachibana"]
+    rc = main(argv=args, stdin=io.StringIO(""))
+    assert rc == 0, (
+        f"tachibana prod path must NOT check KABU envs; got rc={rc}"
+    )
+    assert captured
+    assert captured[0].venue == "tachibana"
+    assert captured[0].demo is False
+
+
+def test_prod_blocked_for_kabu_without_env(strategy_file, capsys) -> None:
+    """R1 HIGH-2 / R3 M7: ``--venue kabu_station --prod`` + env 未設定 → reject.
+
+    venue 別分岐後、kabu_station 経路は ``KABU_ALLOW_PROD=1`` + ``KABU_ENV=prod``
+    の二重判定を要求する (``resolve_kabu_env() == "prod"``)。env 未設定では
+    argparse error 経由で SystemExit する。
+    R3 M7: error 文言が必要 env 変数 (KABU_ALLOW_PROD / KABU_ENV) を **両方**
+    含めて、運用者がどちらか片方だけ立てる typo を防ぐ。
+    """
+    from engine.live_session_cli import main
+
+    args = _common_args(strategy_file)
+    idx = args.index("--demo")
+    args[idx] = "--prod"
+    args += ["--venue", "kabu_station"]
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv=args, stdin=io.StringIO(""))
+    assert excinfo.value.code != 0
+    # R3 M7: error 文言は両 env 変数を含めるべき。
+    captured = capsys.readouterr()
+    err_text = captured.err + captured.out
+    assert "KABU_ALLOW_PROD" in err_text, (
+        f"error must mention KABU_ALLOW_PROD (R3 M7); got: {err_text!r}"
+    )
+    assert "KABU_ENV" in err_text, (
+        f"error must mention KABU_ENV (R3 M7); got: {err_text!r}"
+    )
+
+
+def test_prod_blocked_for_kabu_with_only_one_env(strategy_file, monkeypatch) -> None:
+    """R1 HIGH-2: ``--venue kabu_station --prod`` + 片方 env のみ → reject.
+
+    ``KABU_ALLOW_PROD=1`` を立てただけ (``KABU_ENV`` 欠落) では
+    ``resolve_kabu_env()`` は ``"verify"`` を返すため reject されること。
+    """
+    from engine.live_session_cli import main
+
+    monkeypatch.setenv("KABU_ALLOW_PROD", "1")
+    monkeypatch.delenv("KABU_ENV", raising=False)
+
+    args = _common_args(strategy_file)
+    idx = args.index("--demo")
+    args[idx] = "--prod"
+    args += ["--venue", "kabu_station"]
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv=args, stdin=io.StringIO(""))
+    assert excinfo.value.code != 0
+
+
+def test_prod_blocked_for_kabu_with_only_kabu_env(strategy_file, monkeypatch) -> None:
+    """R1 HIGH-2: ``--venue kabu_station --prod`` + ``KABU_ENV=prod`` のみ → reject.
+
+    ``KABU_ENV=prod`` だけでは ``KABU_ALLOW_PROD=1`` が無いので
+    ``resolve_kabu_env() == "verify"`` となり argparse error。
+    """
+    from engine.live_session_cli import main
+
+    monkeypatch.delenv("KABU_ALLOW_PROD", raising=False)
+    monkeypatch.setenv("KABU_ENV", "prod")
+
+    args = _common_args(strategy_file)
+    idx = args.index("--demo")
+    args[idx] = "--prod"
+    args += ["--venue", "kabu_station"]
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv=args, stdin=io.StringIO(""))
+    assert excinfo.value.code != 0
+
+
+def test_prod_accepted_for_kabu_with_env(
+    fake_live_session, strategy_file, monkeypatch,
+) -> None:
+    """R1 HIGH-2: ``--venue kabu_station --prod`` + 両 env 揃い → 受理.
+
+    ``KABU_ALLOW_PROD=1`` + ``KABU_ENV=prod`` 揃えば
+    ``resolve_kabu_env() == "prod"`` となり argparse prod guard を通過する。
+    実際の login attempt は別経路 (LiveSession 側) で行われるため、
+    本テストは argparse 経路の OK パスのみを pin する。
+    """
+    from engine.live_session_cli import main
+
+    monkeypatch.setenv("KABU_ALLOW_PROD", "1")
+    monkeypatch.setenv("KABU_ENV", "prod")
+    # tachibana 系 env は未設定でも kabu 経路では影響を受けない (分離契約)
+    monkeypatch.delenv("TACHIBANA_ALLOW_PROD", raising=False)
+
+    captured: list[_FakeLiveSession] = []
+    orig_init = _FakeLiveSession.__init__
+
+    def _wrap_init(self, *a, **kw):
+        orig_init(self, *a, **kw)
+        self.injected_events = [
+            {"event": "EngineStopped", "strategy_id": "live-strategy",
+             "final_equity": "0", "ts_event_ms": 0},
+        ]
+        captured.append(self)
+
+    monkeypatch.setattr(_FakeLiveSession, "__init__", _wrap_init)
+
+    args = _common_args(strategy_file)
+    idx = args.index("--demo")
+    args[idx] = "--prod"
+    args += ["--venue", "kabu_station"]
+    rc = main(argv=args, stdin=io.StringIO(""))
+    assert rc == 0, (
+        f"kabu prod path must accept when both envs set; got rc={rc}"
+    )
+    assert captured
+    assert captured[0].venue == "kabu_station"
+    assert captured[0].demo is False
 
 
 # ---------------------------------------------------------------------------

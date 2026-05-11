@@ -39,6 +39,7 @@ from typing import Any, Sequence, TextIO
 # is_market_open は CLI の事前 hint 専用（authoritative reject ではない）。
 # authoritative reject は engine_runner.py::start_live() の冒頭で行われ、
 # CLI は engine から ``EngineError{code:"market_closed"}`` を受けたら stderr 表示する。
+from engine.exchanges.kabusapi_url import resolve_kabu_env
 from engine.exchanges.tachibana_ws import is_market_open
 from engine.replay_session import LiveSession
 
@@ -131,7 +132,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     grp.add_argument("--demo", dest="demo", action="store_true", default=True,
                      help="demo 環境に接続する（デフォルト）")
     grp.add_argument("--prod", dest="demo", action="store_false",
-                     help="本番環境に接続する（TACHIBANA_ALLOW_PROD=1 必須）")
+                     help=(
+                         "本番環境に接続する（venue 別の prod env 必須: "
+                         "tachibana=TACHIBANA_ALLOW_PROD=1 / "
+                         "kabu_station=KABU_ALLOW_PROD=1 + KABU_ENV=prod）"
+                     ))
 
     run_p.add_argument(
         "--mode", choices=["auto", "attach", "inprocess"], default="auto",
@@ -330,13 +335,40 @@ def main(
         parser.print_help(stderr)
         return EXIT_GENERAL_ERROR
 
-    # --prod は TACHIBANA_ALLOW_PROD=1 と AND 条件（統一決定 #14 / 受け入れ基準 #7）。
+    # --prod は venue 別に prod env と AND 条件（統一決定 #14 / 受け入れ基準 #7）。
+    # R1 HIGH-2: venue-agnostic に TACHIBANA_ALLOW_PROD のみ要求していた旧実装を
+    # venue 別に分岐する (`--venue kabu_station --prod` でも tachibana env を要求する
+    # 誤運用を解消)。
+    #   - tachibana   : `TACHIBANA_ALLOW_PROD == "1"` 必須
+    #   - kabu_station: `resolve_kabu_env() == "prod"` 必須
+    #                   (内部で `KABU_ALLOW_PROD=1` + `KABU_ENV=prod` の二重判定)
+    #   - 他 venue    : 将来追加された venue は fail-safe で reject
     if not args.demo:
-        allow_prod = os.environ.get("TACHIBANA_ALLOW_PROD", "")
-        if allow_prod != "1":
+        if args.venue == "tachibana":
+            allow_prod = os.environ.get("TACHIBANA_ALLOW_PROD", "")
+            if allow_prod != "1":
+                parser.error(
+                    "--prod --venue tachibana requires TACHIBANA_ALLOW_PROD=1 "
+                    "environment variable. Refusing to start live engine on "
+                    "production venue."
+                )
+        elif args.venue == "kabu_station":
+            if resolve_kabu_env() != "prod":
+                # R3 M7: error 文言を help 表記 (`KABU_ALLOW_PROD=1 + KABU_ENV=prod`)
+                # と統一する。両 env 変数の **両方** が必要であることを明示し、
+                # 内部の `resolve_kabu_env()` も併記して trace を容易にする。
+                parser.error(
+                    "--prod --venue kabu_station requires BOTH "
+                    "KABU_ALLOW_PROD=1 AND KABU_ENV=prod environment variables "
+                    "(resolve_kabu_env() must return 'prod'). Refusing to start "
+                    "live engine on production venue."
+                )
+        else:
+            # 将来 venue 追加時の fail-safe (argparse choices で reject 済のはずだが
+            # 二重防御として CLI 側でも明示 reject する)
             parser.error(
-                "--prod requires TACHIBANA_ALLOW_PROD=1 environment variable. "
-                "Refusing to start live engine on production venue."
+                f"--prod is not supported for venue={args.venue!r}; "
+                "no production env guard is defined for this venue."
             )
 
     # 第二暗証番号を解決（in-process では必須、attach では None で固定）。

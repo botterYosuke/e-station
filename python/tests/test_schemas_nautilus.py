@@ -52,7 +52,9 @@ def test_schema_minor_is_9_for_phase_b1() -> None:
     # (LiveStrategyWarmingUp 追加、warm_up 進捗 5s 毎 emit)
     # issue #42 Phase 3 (schema 3.28): SCHEMA_MINOR を 27 → 28 に bump
     # (EngineBusy.venue / EngineBusy.busy_kind 追加、venue-scoped concurrent live ガード)
-    assert s.SCHEMA_MINOR == 28
+    # issue #42 R1 HIGH-2 (schema 3.29): SCHEMA_MINOR を 28 → 29 に bump
+    # (SubscriptionEvicted 追加、kabu 50 銘柄 PUSH 上限到達時の LRU evict 通知、spec §3.2-G)
+    assert s.SCHEMA_MINOR == 29
     assert s.SCHEMA_MAJOR == 3
 
 

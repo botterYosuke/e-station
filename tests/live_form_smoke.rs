@@ -902,3 +902,140 @@ fn test_live_strategy_build_failed_handler_branches_on_code() {
         );
     }
 }
+
+// ── issue #42 R1 MEDIUM-1: GUI venue dropdown + prefill from scenario ───────
+
+/// R1 MEDIUM-1: `NativeOpenStrategyPicked` の live 分岐は modal を構築する際に
+/// `engine_client::capabilities::supports_live_strategy` で filter した
+/// `available_venues` を渡す。これがないと kabu-only / tachibana-only 構成で
+/// dropdown に non-supported venue が出る silent UX failure になる。
+#[test]
+fn test_native_open_strategy_picked_filters_available_venues_by_capability() {
+    let arm = handler_arm("ReplayMsg::NativeOpenStrategyPicked(picked) =>");
+    assert!(
+        arm.contains("supports_live_strategy"),
+        "NativeOpenStrategyPicked live arm must filter available_venues via \
+         engine_client::capabilities::supports_live_strategy: {arm}"
+    );
+    assert!(
+        arm.contains("available_venues"),
+        "NativeOpenStrategyPicked live arm must populate available_venues on \
+         LiveStrategyFormModal: {arm}"
+    );
+    // tachibana / kabu_station の両方が候補として走査される (cap filter で 0/1/2 件
+    // に絞られる)。
+    for venue in ["tachibana", "kabu_station"] {
+        assert!(
+            arm.contains(&format!("\"{venue}\"")),
+            "live arm must iterate venue {venue:?} for capability filter: {arm}"
+        );
+    }
+}
+
+/// R1 MEDIUM-1: `NativeOpenStrategyPicked` の live 分岐は modal の `connected_venue`
+/// を `tachibana_state.is_ready()` / `kabu_state.is_ready()` から導出する。
+/// これがないと「kabu に login 中だが tachibana 用 scenario を開いた」状況を
+/// `validate()` が検出できず、Submit 後の server.py `venue_not_supported` reject
+/// まで気付けない silent UX failure になる。
+#[test]
+fn test_native_open_strategy_picked_sets_connected_venue_from_state() {
+    let arm = handler_arm("ReplayMsg::NativeOpenStrategyPicked(picked) =>");
+    assert!(
+        arm.contains("connected_venue"),
+        "NativeOpenStrategyPicked live arm must pass connected_venue to modal: {arm}"
+    );
+    assert!(
+        arm.contains("tachibana_state.is_ready()"),
+        "connected_venue must be derived from tachibana_state.is_ready(): {arm}"
+    );
+    assert!(
+        arm.contains("kabu_state.is_ready()"),
+        "connected_venue must be derived from kabu_state.is_ready(): {arm}"
+    );
+}
+
+/// R1 MEDIUM-1: `LiveStrategyScenarioLoaded` arm は scenario.venue を form に
+/// prefill する。旧実装は `..` で venue を破棄していたため、戦略ファイル指定の
+/// venue が GUI 側に届かなかった (silent UX failure)。
+#[test]
+fn test_live_strategy_scenario_loaded_prefills_venue() {
+    let arm = handler_arm("ReplayMsg::LiveStrategyScenarioLoaded {");
+    assert!(
+        arm.contains("venue,"),
+        "LiveStrategyScenarioLoaded arm must destructure venue (not discard with `..`): {arm}"
+    );
+    // prefill_from_scenario(.., venue) で venue が確実に流れていること。
+    let prefill_pos = arm
+        .find("prefill_from_scenario(")
+        .expect("LiveStrategyScenarioLoaded must call prefill_from_scenario");
+    let mut prefill_end = (prefill_pos + 500).min(arm.len());
+    while prefill_end > 0 && !arm.is_char_boundary(prefill_end) {
+        prefill_end -= 1;
+    }
+    let prefill_window = &arm[prefill_pos..prefill_end];
+    assert!(
+        prefill_window.contains("venue"),
+        "prefill_from_scenario invocation must pass venue argument: {prefill_window}"
+    );
+}
+
+/// R3 M11: `LiveStrategyFormModal::validate()` の dynamic test が
+/// `src/modal/live_strategy_form.rs::tests` モジュール内に存在することを pin。
+/// flowsurface は binary crate のため tests/ 配下から直接 use できないが、
+/// inline test モジュールが venue 関連 validation を実 struct でカバーしている
+/// (M3/M4 の RED test を `test_validate_returns_venue_error_before_prod_mode_error`
+/// などとして追加済み)。本 source-pin は test 削除 regression を防ぐ。
+#[test]
+fn test_live_form_module_has_dynamic_validate_tests_for_venue() {
+    let form_src = include_str!("../src/modal/live_strategy_form.rs");
+    for needle in [
+        "fn test_validate_returns_venue_error_before_prod_mode_error",
+        "fn test_validate_rejects_venue_not_in_available_list",
+        "fn test_validate_rejects_venue_mismatch_with_connected",
+        "fn test_validate_prod_mode_error_message_is_venue_aware_for_kabu",
+    ] {
+        assert!(
+            form_src.contains(needle),
+            "live_strategy_form.rs::tests must contain dynamic validate test {needle:?} \
+             (R3 M11: do not delete venue / prod_mode validate coverage)"
+        );
+    }
+}
+
+/// R3 M2: `LiveStrategyScenarioLoaded` arm は scenario.venue が Some + その venue が
+/// ready のとき、form の `connected_venue` も scenario 側の値で上書きする。
+/// 両 venue Ready 時に initial が tachibana 固定だと、kabu scenario を開いたユーザに
+/// 「engine 接続 venue 'tachibana' と一致しない」誤誘導が出てしまうため、scenario
+/// を SoT として connected_venue を refine する。
+#[test]
+fn test_live_strategy_scenario_loaded_refines_connected_venue_from_scenario() {
+    let arm = handler_arm("ReplayMsg::LiveStrategyScenarioLoaded {");
+    assert!(
+        arm.contains("set_connected_venue") || arm.contains("connected_venue ="),
+        "LiveStrategyScenarioLoaded arm must refine form.connected_venue from \
+         scenario.venue when both ready (R3 M2): {arm}"
+    );
+    // scenario.venue は両 venue ready のとき SoT として使う = `tachibana_state` と
+    // `kabu_state` の両方を見て分岐していること。
+    assert!(
+        arm.contains("tachibana_state") && arm.contains("kabu_state"),
+        "scenario-based connected_venue refinement must consider both \
+         tachibana_state and kabu_state readiness (R3 M2): {arm}"
+    );
+}
+
+/// R1 MEDIUM-1: Action::Submit に venue フィールドが載っていて、handler 側で
+/// destructure している (Submit 経路が venue を unintentional に discard しない
+/// ことを pin する)。`EngineStartConfig` に venue field を載せる将来の経路の足場。
+#[test]
+fn test_live_strategy_form_msg_submit_destructures_venue() {
+    let arm = handler_arm("ReplayMsg::LiveStrategyFormMsg(msg) =>");
+    assert!(
+        arm.contains("Action::Submit {"),
+        "LiveStrategyFormMsg arm must match Action::Submit: {arm}"
+    );
+    assert!(
+        arm.contains("venue,"),
+        "LiveStrategyFormMsg::Submit arm must destructure venue field: {arm}"
+    );
+}

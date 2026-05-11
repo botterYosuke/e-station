@@ -1190,7 +1190,7 @@ class NautilusRunner:
         strategy_init_kwargs: "dict | None",
         max_qty: int,
         max_notional_jpy: int,
-        second_password: str,
+        second_password: "str | None",
         session: "Any",
         fd_queue: "queue.Queue",
         ec_queue: "queue.Queue",
@@ -1258,6 +1258,26 @@ class NautilusRunner:
                 "message": (
                     f"venue {venue!r} is not supported for live strategy execution. "
                     f"Supported venues: {_SUPPORTED_LIVE_VENUES!r}."
+                ),
+                "strategy_id": strategy_id,
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+            _emit_engine_stopped_for_early_abort()
+            return
+
+        # R3 M9: second_password の型を Optional に narrow。
+        # - tachibana: None は invalid_config で reject (第二暗証番号必須)。
+        #   空文字は server.py 側の SessionHolder 経路で別途検出されるので、
+        #   ここでは「型として None が漏れた場合」だけを reject する。
+        # - kabu_station: 不使用なので None / 空文字どちらでも通す
+        #   (KabuTradePasswordHolder で別管理)。
+        if venue == "tachibana" and second_password is None:
+            on_event({
+                "event": "EngineError",
+                "code": "invalid_config",
+                "message": (
+                    "tachibana venue requires non-None second_password "
+                    "(set via stdin / DEV_TACHIBANA_SECOND_PASSWORD env / GUI)."
                 ),
                 "strategy_id": strategy_id,
                 "ts_event_ms": int(_time.time() * 1000),
@@ -1498,6 +1518,29 @@ class NautilusRunner:
                 strategy = _load_user_strategy(strategy_file, strategy_init_kwargs)
                 node.add_strategies([strategy])
 
+            # issue #42 R1 HIGH-1: ``EngineStarted`` を warm_up 開始 (= ticker_task 起動)
+            # **より前** に emit する。Rust 側 (`src/handlers/replay.rs::ReplayMsg::LiveStarted`
+            # arm) が `pending_strategy_id` セット + 60s warm_up timeout token を確立し、
+            # 後続の `LiveWarmingUp` arm がそれと照合して進捗 banner / timeout reset を
+            # 行う state machine 設計（統一決定 #10 / #17）。順序が逆だと、warm_up が 5s を
+            # 超えた場合に ticker が先に LiveStrategyWarmingUp を emit し、Rust 側の
+            # pending/running 照合に失敗して silent drop される（spec 違反）。
+            # E2E 契約 (test_live_session_cli_e2e.py:_EXPECTED_LIFECYCLE) も
+            # ["EngineStarted", "LiveStrategyReady", "EngineStopped"] の部分列を要求する。
+            #
+            # warm_up 失敗パス (R1 HIGH-1 修正後の挙動): EngineStarted を先に出していても
+            # `_emit_warmup_failed_and_close()` が後続で `EngineStopped` を emit するので、
+            # Rust 側 `ReplayMsg::LiveStopped` arm が pending_strategy_id をクリアして
+            # state machine が unstuck される（`src/handlers/replay.rs::LiveStopped` arm 参照）。
+            #
+            # account_id は venue 名を流用（既存契約を踏襲）。
+            on_event({
+                "event": "EngineStarted",
+                "strategy_id": strategy_id,
+                "account_id": venue,
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+
             # issue #42 Phase 1 / 統一決定 #16 (R5-HIGH-2):
             # warm_up: CLMOrderList から未決注文復元。
             # - 例外 raise → EngineError{warm_up_failed} + close + return
@@ -1547,23 +1590,6 @@ class NautilusRunner:
                         ticker_exc,
                     )
 
-            # issue #42 R8 HIGH-1: EngineStarted を LiveStrategyReady より先に emit する。
-            # Rust 側 src/handlers/replay.rs::ReplayMsg::LiveStarted arm が
-            # `pending_strategy_id` セット + 60s warm_up timeout タイマー起動を担当し、
-            # 後続の `LiveStrategyReady` arm がそれをクリアする state machine 設計。
-            # 順序が逆だと Ready で先にクリア → Started で再セットされ、phantom warm_up
-            # timeout banner が 60s 後に GUI に出る silent regression を起こす。
-            # E2E 契約 (test_live_session_cli_e2e.py:_EXPECTED_LIFECYCLE) も
-            # ["EngineStarted", "LiveStrategyReady", "EngineStopped"] の部分列を要求する。
-            #
-            # EngineStarted emit — account_id は venue 名を流用（既存契約を踏襲）。
-            on_event({
-                "event": "EngineStarted",
-                "strategy_id": strategy_id,
-                "account_id": venue,
-                "ts_event_ms": int(_time.time() * 1000),
-            })
-
             # issue #42 Phase 1 / 統一決定 #15 (Open Q1):
             # LiveStrategyReady は warm_up 成功直後 / node.build() より前に emit。
             # Rust 側はこれを受信して 4 ペイン自動生成（冪等）の trigger とする。
@@ -1576,9 +1602,15 @@ class NautilusRunner:
                 "ts_event_ms": int(_time.time() * 1000),
             })
 
-            # live_bridges モジュール存在確認のみ（thread 起動は node.build() 後）
+            # live_bridges モジュール存在確認のみ（thread 起動は node.build() 後）。
+            # issue #42 R2 CRITICAL-1: venue 別 bridge class も import する。
             try:
-                from engine.nautilus.live_bridges import LiveDataBridge, LiveEcBridge
+                from engine.nautilus.live_bridges import (
+                    LiveDataBridge,
+                    LiveEcBridge,
+                    KabuLiveDataBridge,
+                    KabuLiveEcBridge,
+                )
                 _have_bridges = True
             except ImportError:
                 _have_bridges = False
@@ -1623,17 +1655,27 @@ class NautilusRunner:
                 # build() 内の _connect() で data_client._loop が asyncio.get_running_loop()
                 # に確定するため、ここまで待つ必要がある。
                 # event_bridge._loop は自動設定されないので明示的に注入する。
-                # issue #42 Phase 4 (review-fix H-2): LiveDataBridge / LiveEcBridge は
-                # tachibana の FD/EC frame 専用（``data_client._feed_trade_dict_sync``
-                # 等を呼ぶ）。kabu_station 経路では不要 + 起動すると AttributeError の
-                # silent failure になるため venue==tachibana で gate する。
-                # kabu PUSH 配信の物理経路は server.py 側 _handle_subscribe_kabu_station
-                # / _kabu_register_set / _startup_kabu_station が管理する（Phase 4 minimal
-                # scope では live data client への配線は TODO で残す）。
-                if _have_bridges and venue == "tachibana":
+                #
+                # issue #42 R2 CRITICAL-1: venue 別に bridge class を選択する。
+                # 旧版（R1 review-fix H-2）は ``venue == "tachibana"`` で gate していた
+                # ため kabu live data が一切 flow しない silent failure になっていた。
+                # 本配線:
+                #   tachibana    → LiveDataBridge / LiveEcBridge（既存）
+                #   kabu_station → KabuLiveDataBridge / KabuLiveEcBridge（R2 新規）
+                # event_bridge._loop は両 venue で必須（KabuStationEventBridge も
+                # call_soon_threadsafe で叩かれる）。
+                if _have_bridges:
                     event_bridge._loop = _asyncio.get_running_loop()
-                    data_bridge = LiveDataBridge(data_client, fd_queue, instrument_id, stop_event)
-                    ec_bridge = LiveEcBridge(event_bridge, ec_queue, stop_event)
+                    if venue == "tachibana":
+                        data_bridge = LiveDataBridge(
+                            data_client, fd_queue, instrument_id, stop_event
+                        )
+                        ec_bridge = LiveEcBridge(event_bridge, ec_queue, stop_event)
+                    else:  # venue == "kabu_station"
+                        data_bridge = KabuLiveDataBridge(
+                            data_client, fd_queue, instrument_id, stop_event
+                        )
+                        ec_bridge = KabuLiveEcBridge(event_bridge, ec_queue, stop_event)
                     t_data = _threading.Thread(target=data_bridge.run, daemon=True)
                     t_ec = _threading.Thread(target=ec_bridge.run, daemon=True)
                     t_data.start()

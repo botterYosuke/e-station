@@ -2004,6 +2004,18 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             progress,
             message,
         })),
+        // issue #42 R1 HIGH-2 (schema 3.29): SubscriptionEvicted — kabu 50 銘柄 PUSH 上限
+        // 到達時の LRU evict 通知。spec §3.2-G 契約。当該 symbol のチャート登録は解除済の
+        // ため、再登録するには再選択が必要。venue は kabu_station 固定 (spec) なので
+        // 文言には含めず、symbol のみ通知して再操作を促す。exchange は内部 routing
+        // 情報なので user-facing には出さない。
+        EngineEvent::SubscriptionEvicted {
+            venue: _,
+            symbol,
+            exchange: _,
+        } => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
+            "{symbol} は PUSH 上限到達で登録解除されました（再選択で再登録）"
+        ))))),
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
         // 正しいことを確認すること。`_ => None` で握り潰すと

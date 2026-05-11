@@ -50,3 +50,43 @@ def test_event_to_field_mapping_contains_live_strategy_warming_up() -> None:
     assert "LiveStrategyWarmingUp" in _EVENT_TO_FIELD_AND_CLASS
     field_name, _msg_class = _EVENT_TO_FIELD_AND_CLASS["LiveStrategyWarmingUp"]
     assert field_name == "live_strategy_warming_up"
+
+
+def test_event_to_field_mapping_contains_subscription_evicted() -> None:
+    """issue #42 R1 HIGH-2 (schema 3.29): gRPC outbound mapping に
+    ``SubscriptionEvicted`` が含まれること。旧版は schema 全層 variant 欠落で
+    silent drop されていた（spec §3.2-G 契約違反）。
+    """
+    from engine.server_grpc import _EVENT_TO_FIELD_AND_CLASS
+
+    assert "SubscriptionEvicted" in _EVENT_TO_FIELD_AND_CLASS, (
+        "_EVENT_TO_FIELD_AND_CLASS に SubscriptionEvicted が登録されていないと "
+        "kabu_station の 50 銘柄 PUSH 上限到達通知が silent drop される (spec §3.2-G)"
+    )
+    field_name, msg_class = _EVENT_TO_FIELD_AND_CLASS["SubscriptionEvicted"]
+    assert field_name == "subscription_evicted", (
+        f"field_name が一致しない: {field_name!r}"
+    )
+    # msg_class は proto SubscriptionEvictedEvent そのもの
+    from engine.proto import engine_pb2
+    assert msg_class is engine_pb2.SubscriptionEvictedEvent
+
+
+def test_subscription_evicted_dict_to_proto_round_trip() -> None:
+    """issue #42 R1 HIGH-2: ``_dict_to_proto_event`` 経由で wire dict → proto Event
+    にエンコードできること（silent drop = `None` 戻りの否定）。
+    """
+    from engine.server_grpc import _dict_to_proto_event
+
+    evt = _dict_to_proto_event({
+        "event": "SubscriptionEvicted",
+        "venue": "kabu_station",
+        "symbol": "7203.T",
+        "exchange": 1,
+    })
+    assert evt is not None, "SubscriptionEvicted must encode (was silent-dropped pre-3.29)"
+    assert evt.HasField("subscription_evicted")
+    inner = evt.subscription_evicted
+    assert inner.venue == "kabu_station"
+    assert inner.symbol == "7203.T"
+    assert inner.exchange == 1

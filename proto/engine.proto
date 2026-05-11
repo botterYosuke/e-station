@@ -137,6 +137,7 @@ message Event {
     LiveStrategyScenarioLoadedEvent live_strategy_scenario_loaded = 53;
     LiveStrategyReadyEvent          live_strategy_ready         = 54;
     LiveStrategyWarmingUpEvent      live_strategy_warming_up    = 55;
+    SubscriptionEvictedEvent        subscription_evicted        = 56;
   }
 }
 
@@ -787,6 +788,15 @@ message LiveStrategyWarmingUpEvent {
   string strategy_id = 1;
   float  progress    = 2;  // 0.0..=1.0
   string message     = 3;  // user-facing progress text
+}
+
+// issue #42 R1 HIGH-2 (schema 3.29): kabuステーション 50 銘柄 PUSH 上限到達時の
+// LRU evict 通知。docs/specs/live-strategy.md §3.2-G 契約。UI は当該 symbol チャートに
+// 「再登録が必要」を Toast で通知する。
+message SubscriptionEvictedEvent {
+  string venue    = 1;  // 現状 "kabu_station" のみ
+  string symbol   = 2;
+  uint32 exchange = 3;  // kabu Exchange code（1=東証 既定）
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

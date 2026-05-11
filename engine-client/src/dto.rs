@@ -1615,6 +1615,18 @@ pub enum EngineEvent {
         /// user-facing 進捗文言
         message: String,
     },
+
+    // ── issue #42 R1 HIGH-2 (schema 3.29): SubscriptionEvicted ────────────────
+    /// kabuステーション 50 銘柄 PUSH 上限到達時の LRU evict 通知（spec §3.2-G）。
+    /// UI は当該 symbol チャートに「PUSH 上限到達で登録解除されました（再選択で再登録）」を
+    /// Toast で通知する。旧実装は schema 全層 variant 欠落で
+    /// `server_grpc.py::_dict_to_proto_event` が unknown event として silent drop していた。
+    SubscriptionEvicted {
+        venue: String,
+        symbol: String,
+        /// kabu Exchange code（1=東証 既定）
+        exchange: u32,
+    },
 }
 
 fn default_true() -> bool {

@@ -300,24 +300,76 @@ impl crate::Flowsurface {
                     // LIVE_SCENARIO の prefill を要求する。同期的に request_id を保存し、
                     // 5s 経って応答が来なければ pending を解除して手入力 fallback に戻す。
                     let request_id = uuid::Uuid::new_v4().to_string();
-                    // issue #42 Phase 3.5: Ready から tachibana の `is_production` cap を
-                    // 抜いて modal の prod_mode disable 判定に渡す。engine 未接続のときは
-                    // 安全側 = false (= demo 扱い) で構築する。env 変更には engine 再起動が
-                    // 必要なため、modal 表示中の動的更新は不要 (統一決定 #14)。
-                    let tachibana_is_production = self
+                    // issue #42 R1 MEDIUM-1 (2026-05-11): Ready から各 venue の `is_production`
+                    // cap を venue 毎に抜いて modal の prod_mode disable 判定に渡す。
+                    // 旧版は tachibana 専用の単一フィールドだったため、kabu_station prod が
+                    // form 側で hardcode reject されていた（server.py 側では既に
+                    // `kabu_station.is_production` を expose 済だった silent UX failure）。
+                    //
+                    // engine 未接続のときは空 HashMap で構築 → validate() は安全側 false
+                    // にフォールバック（= demo 扱い）。env 変更には engine 再起動が必要なため、
+                    // modal 表示中の動的更新は不要（統一決定 #14）。
+                    let is_production_by_venue: std::collections::HashMap<String, bool> = self
                         .engine_connection
                         .as_ref()
                         .map(|conn| {
-                            engine_client::capabilities::is_production(
-                                conn.capabilities().as_ref(),
-                                "tachibana",
-                            )
+                            let caps = conn.capabilities();
+                            ["tachibana", "kabu_station"]
+                                .iter()
+                                .map(|v| {
+                                    (
+                                        (*v).to_string(),
+                                        engine_client::capabilities::is_production(
+                                            caps.as_ref(),
+                                            v,
+                                        ),
+                                    )
+                                })
+                                .collect()
                         })
-                        .unwrap_or(false);
+                        .unwrap_or_default();
+                    // issue #42 R1 MEDIUM-1: dropdown 用の available_venues を
+                    // `supports_live_strategy=true` で filter する。engine 未接続なら
+                    // 空 Vec で構築 (form 側の validate() は空のとき venue 検査を skip し、
+                    // server.py の `_handle_start_engine` の `_connected_venue` 判定に委ねる)。
+                    let available_venues: Vec<String> = self
+                        .engine_connection
+                        .as_ref()
+                        .map(|conn| {
+                            let caps = conn.capabilities();
+                            ["tachibana", "kabu_station"]
+                                .iter()
+                                .filter(|v| {
+                                    engine_client::capabilities::supports_live_strategy(
+                                        caps.as_ref(),
+                                        v,
+                                    )
+                                })
+                                .map(|v| v.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // issue #42 R1 MEDIUM-1: 現在 login 済 venue を form に渡して
+                    // 戦略 venue との不一致を validate() で検出可能にする。両方 Ready
+                    // のときは tachibana 優先（typical UX で最初に login する方）。
+                    let connected_venue = if self.tachibana_state.is_ready() {
+                        Some("tachibana".to_string())
+                    } else if self.kabu_state.is_ready() {
+                        Some("kabu_station".to_string())
+                    } else {
+                        None
+                    };
+                    // issue #42 R1 MEDIUM-1: dropdown の初期値を `connected_venue`
+                    // にしておく (LiveStrategyScenarioLoaded.venue が来たら上書きする)。
+                    // connected_venue が None なら空文字 (= default) のままにする。
+                    let initial_venue = connected_venue.clone().unwrap_or_default();
                     let form = modal::live_strategy_form::LiveStrategyFormModal {
                         strategy_file: path.clone(),
                         pending_scenario_request_id: Some(request_id.clone()),
-                        tachibana_is_production,
+                        is_production_by_venue,
+                        available_venues,
+                        connected_venue,
+                        venue: initial_venue,
                         ..Default::default()
                     };
                     self.live_strategy_form_modal = Some(form);
@@ -793,16 +845,43 @@ impl crate::Flowsurface {
                 max_qty,
                 max_notional_jpy,
                 strategy_init_kwargs,
-                ..
+                venue,
             } => {
+                // R3 M2: scenario.venue を SoT として `connected_venue` を refine する。
+                // 両 venue ready の場合、modal 構築時の `tachibana_state.is_ready()`
+                // / `kabu_state.is_ready()` 由来の固定優先 (tachibana 優先) では
+                // kabu scenario を開いたユーザに「engine 接続 venue 'tachibana' と
+                // 一致しない」誤誘導が出る。scenario が venue を明示しているとき、
+                // その venue が ready なら connected_venue を refine する。
+                let refined_connected_venue: Option<Option<String>> =
+                    if let Some(scen_venue) = venue.as_deref() {
+                        let tachi_ready = self.tachibana_state.is_ready();
+                        let kabu_ready = self.kabu_state.is_ready();
+                        match scen_venue {
+                            "tachibana" if tachi_ready => Some(Some("tachibana".to_string())),
+                            "kabu_station" if kabu_ready => Some(Some("kabu_station".to_string())),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                 if let Some(form) = self.live_strategy_form_modal.as_mut()
                     && form.pending_scenario_request_id.as_deref() == Some(request_id.as_str())
                 {
+                    // R3 M2: scenario が venue を明示し該当 venue が ready なら
+                    // connected_venue を refine する (両 ready 時の固定 tachibana 優先
+                    // による誤誘導を解消)。
+                    if let Some(new_cv) = refined_connected_venue {
+                        form.set_connected_venue(new_cv);
+                    }
+                    // issue #42 R1 MEDIUM-1: venue を form.venue に prefill する
+                    // (旧実装は `..` で破棄していた)。
                     form.prefill_from_scenario(
                         instrument_id,
                         max_qty,
                         max_notional_jpy,
                         strategy_init_kwargs,
+                        venue,
                     );
                 }
                 return Task::none();
@@ -919,6 +998,7 @@ impl crate::Flowsurface {
                             max_notional_jpy,
                             strategy_init_kwargs,
                             prod_mode,
+                            venue,
                         }) => {
                             let Some(conn) = self.engine_connection.as_ref().cloned() else {
                                 // フォームを閉じずにエラーを通知する
@@ -942,6 +1022,19 @@ impl crate::Flowsurface {
                             // のいずれかが成立する。よって StartEngine だけ送れば、
                             // engine は自分の env に従って demo / prod を決定する。
                             let _ = prod_mode;
+                            // issue #42 R1 MEDIUM-1: venue は現状 `EngineStartConfig` に
+                            // 載らない (Phase 4 §263 の wire 設計判断)。server.py の
+                            // `_handle_start_engine` が `_connected_venue` を SoT として
+                            // dispatch するため、ここで venue を渡す必要はない。modal
+                            // の `validate()` が `available_venues` 含有と `connected_venue`
+                            // 一致を済ませているので、Submit 到達時点で
+                            //   - venue == connected_venue (engine 側の dispatch と一致)、または
+                            //   - connected_venue=None (GUI 側で判定 skip → server.py の
+                            //     venue_not_supported reject に委ねる)
+                            // のいずれかが成立する。将来 `EngineStartConfig.venue` を
+                            // 追加するときは config struct literal に `venue: Some(venue)`
+                            // を載せる経路となる (schema bump 1 件)。
+                            let _ = venue;
                             return Task::perform(
                                 async move {
                                     conn.send(engine_client::dto::Command::StartEngine {

@@ -152,6 +152,21 @@ CLI 内部では `sys.stdin.read().rstrip("\r\n")` で読み取る。trailing ne
 - UI は当該 symbol のチャートに「再登録が必要」バナーを表示する。
 - 立花 venue は現状上限なしのため発火しないが、将来 venue 追加時の共通契約として定義する。
 
+### G.1 kabu 再ログイン後の最初 PUSH frame は state seed として skip する（R5 / R7）
+
+kabu PUSH は per-trade qty を持たず、累積 `TradingVolume` のみを返す。サーバ側で
+ticker 別 `_kabu_last_trading_volume` を保持し、`delta_qty = current_volume - last_volume`
+を per-trade qty として `_live_fd_queue` に流す（`KabuStationLiveDataClient` 経由
+で Strategy SDK に届く）。
+
+セッション再ログイン時 (`_clear_kabu_session` 経由) は `_kabu_last_trading_volume`
+を `clear()` する副作用があり、**再ログイン直後の最初の kabu PUSH frame は
+state seed として skip される**（累積値を 1 件の trade として流すと dedup 異常 /
+過剰約定量として silent failure を生むため意図的）。その結果、再ログイン後の
+1 件目 live trade tick は失われる。本契約は kabu live data 経路の安全装置と
+して扱い、将来 PUSH protocol が per-trade qty を提供するようになった時点で
+撤廃する。
+
 ## H. URL リテラル所在原則
 
 - 各 venue の API URL リテラルは Python 側 1 ファイル（kabusapi なら `kabusapi_url.py`、立花なら `tachibana_url.py`）に集約。
@@ -287,6 +302,7 @@ SoT とする（issue #42 統一決定 #5）。
 | 8 | 同一 strategy_id concurrent → `Error{code:"engine_already_running"}` | `server.py::_engine_tasks` ガード | #16 |
 | 9 | credential（特に第二暗証番号）を Rust / argv に流さない | §3.2-D / §3.2-D.1 | — |
 | 10 | `LiveSession.login()` 未呼出 → `LiveSession.run()` 経路の不在 | `tools/lint/check_live_login_call.py` AST lint | #10 |
+| 11 | kabu 再ログイン直後の最初 PUSH frame は state seed として skip（累積 TradingVolume を 1 件として流す silent failure 防止）| `server.py::_clear_kabu_session` + `_on_kabu_board_push` の state seed 判定 | §3.2-G.1 |
 
 **移行フロー推奨**:
 

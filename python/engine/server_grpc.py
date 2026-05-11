@@ -17,7 +17,7 @@ from engine.server import _ENGINE_VERSION
 # gRPC IPC schema version — source of truth for the gRPC transport layer.
 # Keep in sync with engine-client/src/lib.rs SCHEMA_MAJOR / SCHEMA_MINOR.
 SCHEMA_MAJOR: int = 3   # gRPC IPC schema major version
-SCHEMA_MINOR: int = 28  # gRPC IPC schema minor version
+SCHEMA_MINOR: int = 29  # gRPC IPC schema minor version
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +120,9 @@ _EVENT_TO_FIELD_AND_CLASS = {
     "LiveStrategyScenarioLoaded": ("live_strategy_scenario_loaded", engine_pb2.LiveStrategyScenarioLoadedEvent),
     "LiveStrategyReady":          ("live_strategy_ready",          engine_pb2.LiveStrategyReadyEvent),
     "LiveStrategyWarmingUp":      ("live_strategy_warming_up",     engine_pb2.LiveStrategyWarmingUpEvent),
+    # issue #42 R1 HIGH-2 (schema 3.29): SubscriptionEvicted 全 wire 同期。
+    # 旧版は spec §3.2-G 契約に対し schema 全層 variant 欠落 → silent drop していた。
+    "SubscriptionEvicted":        ("subscription_evicted",         engine_pb2.SubscriptionEvictedEvent),
 }
 
 

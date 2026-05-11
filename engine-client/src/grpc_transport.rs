@@ -1085,6 +1085,12 @@ fn proto_event_to_dto(event: engine::Event) -> Option<dto::EngineEvent> {
                 message: lswu.message,
             })
         }
+        // issue #42 R1 HIGH-2 (schema 3.29): SubscriptionEvicted — kabu 50 銘柄 PUSH 上限 LRU evict
+        Payload::SubscriptionEvicted(se) => Some(dto::EngineEvent::SubscriptionEvicted {
+            venue: se.venue,
+            symbol: se.symbol,
+            exchange: se.exchange,
+        }),
         // issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 応答
         Payload::LiveStrategyScenarioLoaded(lssl) => {
             // strategy_init_kwargs は wire 上 JSON 文字列。dict として decode する。
@@ -1538,6 +1544,60 @@ mod tests {
                 assert_eq!(progress, 0.0_f32, "NaN should fall back to 0.0");
             }
             other => panic!("expected LiveStrategyWarmingUp, got {other:?}"),
+        }
+    }
+
+    /// issue #42 R1 HIGH-2 (schema 3.29): proto `SubscriptionEvictedEvent` → dto
+    /// `EngineEvent::SubscriptionEvicted` への round-trip 変換。旧版は schema 全層に
+    /// variant が無く Python から emit しても server_grpc.py で silent drop されていた。
+    #[test]
+    fn subscription_evicted_proto_maps_to_dto() {
+        let proto = engine::SubscriptionEvictedEvent {
+            venue: "kabu_station".to_string(),
+            symbol: "7203.T".to_string(),
+            exchange: 1,
+        };
+        let dto_event = super::proto_event_to_dto(engine::Event {
+            payload: Some(engine::event::Payload::SubscriptionEvicted(proto)),
+        })
+        .expect("SubscriptionEvicted must round-trip via proto→dto");
+        match dto_event {
+            super::dto::EngineEvent::SubscriptionEvicted {
+                venue,
+                symbol,
+                exchange,
+            } => {
+                assert_eq!(venue, "kabu_station");
+                assert_eq!(symbol, "7203.T");
+                assert_eq!(exchange, 1);
+            }
+            other => panic!("expected SubscriptionEvicted, got {other:?}"),
+        }
+    }
+
+    /// issue #42 R1 HIGH-2: serde JSON round-trip — dto variant が wire JSON 形式と整合する。
+    /// Python schema (`SubscriptionEvicted`) と Rust enum tag が一致することを pin する。
+    #[test]
+    fn subscription_evicted_json_deserialize_pin() {
+        let json = serde_json::json!({
+            "event": "SubscriptionEvicted",
+            "venue": "kabu_station",
+            "symbol": "7203.T",
+            "exchange": 1
+        });
+        let evt: super::dto::EngineEvent =
+            serde_json::from_value(json).expect("JSON deserialize must match wire contract");
+        match evt {
+            super::dto::EngineEvent::SubscriptionEvicted {
+                venue,
+                symbol,
+                exchange,
+            } => {
+                assert_eq!(venue, "kabu_station");
+                assert_eq!(symbol, "7203.T");
+                assert_eq!(exchange, 1);
+            }
+            other => panic!("expected SubscriptionEvicted variant, got {other:?}"),
         }
     }
 

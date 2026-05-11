@@ -235,7 +235,9 @@ pub(crate) enum ReplayMsg {
         instrument_id: Option<String>,
         max_qty: Option<u32>,
         max_notional_jpy: Option<u64>,
-        #[allow(dead_code)]
+        /// issue #42 R1 MEDIUM-1: scenario が advertise する venue。
+        /// `handlers/replay.rs::LiveStrategyScenarioLoaded` arm が
+        /// `LiveStrategyFormModal::prefill_from_scenario` 経由で form.venue に流す。
         venue: Option<String>,
         strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     },

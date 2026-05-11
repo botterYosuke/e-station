@@ -47,10 +47,11 @@ fn schema_minor_matches_current_bump() {
     // schema 3.26: LiveStrategyReady 追加（issue #42 Phase 3、auto_generate_live_panes 冪等トリガー）
     // schema 3.27: LiveStrategyWarmingUp 追加（issue #42 Phase 3、warm_up 進捗 5s 毎 emit）
     // schema 3.28: EngineBusy.venue / EngineBusy.busy_kind 追加（issue #42 Phase 3、venue-scoped concurrent live ガード）
+    // schema 3.29: SubscriptionEvicted 追加（issue #42 R1 HIGH-2、kabu 50 銘柄 PUSH 上限到達時の LRU evict 通知、spec §3.2-G）
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        28,
-        "SCHEMA_MINOR must be 28 after EngineBusy.venue / busy_kind added (schema v3.28, issue #42 Phase 3)"
+        29,
+        "SCHEMA_MINOR must be 29 after SubscriptionEvicted added (schema v3.29, issue #42 R1 HIGH-2)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

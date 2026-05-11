@@ -23,6 +23,7 @@ Phase 4 の最小スコープ:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -48,6 +49,10 @@ class KabuStationEventBridge:
         self._client = client
         # 冪等化用 seen-set: (order_id, state)
         self._seen: set[tuple[str, int]] = set()
+        # issue #42 R2 CRITICAL-1: live_bridges.KabuLiveEcBridge から
+        # call_soon_threadsafe で叩くために TradingNode loop (loop B) を保持する。
+        # engine_runner.start_live() 内、node.build() 完了後に明示的に注入する。
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def process_order_record(self, record: dict[str, Any]) -> None:
         """kabu 注文レコードを 1 件処理し、対応する Nautilus event を発火する。"""

@@ -12,7 +12,7 @@ from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 # SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
 # 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 28
+SCHEMA_MINOR: int = 29
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -750,7 +750,13 @@ class EngineStartConfig(IpcMessage):
 
     model_config = ConfigDict(extra="forbid")
 
-    instrument_id: str
+    # R7 MEDIUM-1: 空文字を pydantic 層で reject する。
+    # 空 `instrument_id` で StartEngine を受理すると、kabu_station 経路で
+    # `_kabu_symbol = ""` → `if _kabu_symbol:` を silent skip → PUT /register
+    # 対象なしで TRADING 起動 → live data が永遠に届かない dead path 化を起こす。
+    # 二段防御: 本 pydantic 検証で `Error{code:"invalid_config"}` を返し、
+    # さらに kabu 分岐内の runtime guard でも early-abort する (server.py)。
+    instrument_id: str = Field(..., min_length=1)
     instrument_ids: list[str] | None = None
     # replay 専用フィールド（Optional 化）
     start_date: str | None = None
@@ -1270,6 +1276,25 @@ class LiveStrategyWarmingUp(IpcMessage):
     # R2-A M1: ``progress`` は 0.0–1.0 に制限する（範囲外は ValidationError）。
     progress: float = Field(ge=0.0, le=1.0)
     message: str
+
+
+# ── issue #42 R1 HIGH-2 / schema 3.29: SubscriptionEvicted ─────────────────
+
+
+class SubscriptionEvicted(IpcMessage):
+    """50 銘柄 PUSH 上限到達時の LRU evict 通知（spec §3.2-G）。
+
+    kabuステーション venue で発火。``RegisterSet`` が暗黙 LRU で最古銘柄を
+    evict したとき ``KabuStationLiveDataClient._on_evict`` 経由で emit される。
+    Rust 側 (`src/handlers/replay.rs`) は受信時に当該 symbol が登録解除された
+    旨を Toast で user に通知する（UI 文言契約は docs/specs/live-strategy.md §3.2-G）。
+    """
+
+    event: Literal["SubscriptionEvicted"] = "SubscriptionEvicted"
+    venue: str
+    symbol: str
+    # kabu Exchange code（1=東証 既定）。1 未満は invalid。
+    exchange: int = Field(ge=1)
 
 
 # ---------------------------------------------------------------------------

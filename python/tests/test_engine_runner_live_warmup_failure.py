@@ -7,7 +7,20 @@
 2. どちらの場合も:
    - ``EngineError{code:"warm_up_failed"}`` を emit
    - ``await exec_client.close()`` を必ず呼ぶ（HTTP session / WS subscription リーク防止）
-   - return（``EngineStarted`` / ``LiveStrategyReady`` を emit しない）
+   - return（``LiveStrategyReady`` を emit しない）
+
+issue #42 R1 HIGH-1 (2026-05-11): ``EngineStarted`` の emit タイミングを変更。
+**warm_up 開始前** に emit するよう改修した（旧実装は warm_up 成功後だった）。
+これにより warm_up が 5s を超えても先行 LiveStrategyWarmingUp が Rust 側 state
+machine の pending_strategy_id と照合できる（spec §3.2 lifecycle 契約）。
+帰結として warm_up 失敗パスの順序は:
+
+    EngineStarted → (warm_up でずっこける) → EngineError(warm_up_failed) → EngineStopped
+
+LiveStrategyReady は依然として **emit されない**（warm_up 失敗 = strategy 未到達）。
+Rust 側 `src/handlers/replay.rs::ReplayMsg::LiveStopped` arm は pending_strategy_id を
+クリアして state machine を unstuck するので、EngineStarted が先行していても
+phantom warm_up timeout banner は出ない。
 
 これらのテストは `TachibanaLiveExecutionClient` を fake に差し替えて
 warm_up の挙動だけ制御する。``node.build()`` には到達しないので
@@ -180,7 +193,11 @@ class TestWarmUpFailureExceptionPath:
     """warm_up が **例外を raise** した場合。"""
 
     def test_warm_up_exception_emits_error_not_ready(self, monkeypatch) -> None:
-        """例外時: EngineError{code:"warm_up_failed"} emit / LiveStrategyReady は出ない。"""
+        """例外時: EngineError{code:"warm_up_failed"} emit / LiveStrategyReady は出ない。
+
+        R1 HIGH-1 後: EngineStarted は warm_up 前に emit されるが LiveStrategyReady は出ない。
+        順序契約は EngineStarted → EngineError(warm_up_failed) → EngineStopped。
+        """
         _patch_min_dependencies(monkeypatch, warm_up_mode="raise")
 
         events: list[dict] = []
@@ -202,18 +219,31 @@ class TestWarmUpFailureExceptionPath:
             f"LiveStrategyReady must NOT be emitted when warm_up raises, got {ready!r}"
         )
 
-        # EngineStarted も emit されない
+        # R1 HIGH-1: EngineStarted は **warm_up 前に emit されている**
+        # （旧実装は warm_up 成功後だったが、それだと先行 LiveStrategyWarmingUp が
+        # Rust 側 state machine と照合できず silent drop されていた）。
         started = [e for e in events if e.get("event") == "EngineStarted"]
-        assert started == [], (
-            f"EngineStarted must NOT be emitted when warm_up fails, got {started!r}"
+        assert len(started) == 1, (
+            "R1 HIGH-1: EngineStarted は warm_up 開始前に emit されるべき "
+            f"(Rust state machine 契約 / spec §3.2 lifecycle), got events={events!r}"
         )
 
-        # silent failure 対策: EngineStopped は emit される（Rust 側 state machine を
-        # unstuck するため。Rust は EngineStarted 無しの EngineStopped を no-op として扱う）。
+        # silent failure 対策: EngineStopped が後続 emit される
+        # （Rust 側 LiveStopped arm が pending_strategy_id を clear → state machine unstuck）。
         stopped = [e for e in events if e.get("event") == "EngineStopped"]
         assert len(stopped) == 1, (
             f"EngineStopped must follow EngineError(warm_up_failed) to unstuck Rust, "
             f"got events={events!r}"
+        )
+
+        # 順序契約 pin: EngineStarted → EngineError(warm_up_failed) → EngineStopped。
+        started_idx = events.index(started[0])
+        error_idx = events.index(warm_up_failed[0])
+        stopped_idx = events.index(stopped[0])
+        assert started_idx < error_idx < stopped_idx, (
+            "順序契約 (R1 HIGH-1): EngineStarted → EngineError → EngineStopped; "
+            f"got started_idx={started_idx}, error_idx={error_idx}, stopped_idx={stopped_idx}, "
+            f"events={events!r}"
         )
 
 
@@ -221,7 +251,10 @@ class TestWarmUpFailureFalseReturnPath:
     """warm_up が **`False` を返す** 場合（旧実装で見逃されていた経路）。"""
 
     def test_warm_up_returns_false_emits_error_not_ready(self, monkeypatch) -> None:
-        """False 戻り値: EngineError{code:"warm_up_failed"} emit / Ready 不発。"""
+        """False 戻り値: EngineError{code:"warm_up_failed"} emit / Ready 不発。
+
+        R1 HIGH-1 後: EngineStarted は warm_up 前に emit されるが LiveStrategyReady は出ない。
+        """
         _patch_min_dependencies(monkeypatch, warm_up_mode="false")
 
         events: list[dict] = []
@@ -241,11 +274,27 @@ class TestWarmUpFailureFalseReturnPath:
             f"LiveStrategyReady must NOT be emitted when warm_up returns False, got {ready!r}"
         )
 
+        # R1 HIGH-1: EngineStarted は warm_up 前に emit される
+        started = [e for e in events if e.get("event") == "EngineStarted"]
+        assert len(started) == 1, (
+            "R1 HIGH-1: EngineStarted は warm_up 開始前に emit されるべき, "
+            f"got events={events!r}"
+        )
+
         # silent failure 対策: EngineStopped emit
         stopped = [e for e in events if e.get("event") == "EngineStopped"]
         assert len(stopped) == 1, (
             f"EngineStopped must follow EngineError(warm_up_failed) for False return, "
             f"got events={events!r}"
+        )
+
+        # 順序契約: EngineStarted → EngineError → EngineStopped
+        started_idx = events.index(started[0])
+        error_idx = events.index(warm_up_failed[0])
+        stopped_idx = events.index(stopped[0])
+        assert started_idx < error_idx < stopped_idx, (
+            "順序契約 (R1 HIGH-1): EngineStarted → EngineError → EngineStopped; "
+            f"events={events!r}"
         )
 
 
