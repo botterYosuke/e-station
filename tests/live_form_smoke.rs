@@ -478,6 +478,99 @@ fn test_disabled_reason_disables_submit() {
     );
 }
 
+// ── R4 R3-RUST-1 + R3-RUST-2: warm_up progress UI 完成 ───────────────────────
+
+/// 旧実装は `live_warmup_warming_message: Option<String>` を保持するだけで
+/// view() に描画パスが無く、`LiveWarmingUp.progress` は `progress: _` で捨てて
+/// いた。「進捗 banner + 数値表示」を実装するために
+/// `live_warmup_warming_progress: Option<f32>` を追加し、view() でメッセージと
+/// 進捗の両方をレンダリングする。
+#[test]
+fn test_main_rs_declares_live_warmup_warming_progress_field() {
+    assert!(
+        MAIN_RS.contains("live_warmup_warming_progress: Option<f32>"),
+        "main.rs must declare live_warmup_warming_progress: Option<f32> field"
+    );
+    // 初期化箇所も pin
+    assert!(
+        MAIN_RS.contains("live_warmup_warming_progress: None"),
+        "main.rs must initialize live_warmup_warming_progress to None"
+    );
+}
+
+#[test]
+fn test_live_warming_up_arm_saves_progress() {
+    let arm = handler_arm("ReplayMsg::LiveWarmingUp {");
+    // progress を `_` で捨てない。Some(progress) に保存する。
+    assert!(
+        arm.contains("live_warmup_warming_progress"),
+        "LiveWarmingUp arm must save progress to live_warmup_warming_progress: {arm}"
+    );
+    // `Some(progress)` の代入式 (任意の prefix を許す)
+    assert!(
+        arm.contains("Some(progress)"),
+        "LiveWarmingUp arm must wrap progress in Some(...) for the banner: {arm}"
+    );
+}
+
+#[test]
+fn test_view_renders_warming_up_progress_banner() {
+    // view() が live_warmup_warming_message を描画するブロックを持つこと
+    let pos = MAIN_RS
+        .find("if let Some(msg) = &self.live_warmup_warming_message")
+        .expect("view() must render live_warmup_warming_message via `if let Some(msg)`");
+    let mut end = (pos + 1500).min(MAIN_RS.len());
+    while end > 0 && !MAIN_RS.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &MAIN_RS[pos..end];
+    // progress の数値表示 (% フォーマット)
+    assert!(
+        window.contains("live_warmup_warming_progress"),
+        "warming-up banner must reference live_warmup_warming_progress: {window}"
+    );
+    // パーセンテージとして 0-100 にクランプして表示する
+    assert!(
+        window.contains("100.0") && window.contains("clamp"),
+        "warming-up banner must format progress as 0-100% using clamp: {window}"
+    );
+}
+
+#[test]
+fn test_warming_up_progress_clears_on_ready() {
+    let arm = handler_arm("ReplayMsg::LiveStrategyReady {");
+    assert!(
+        arm.contains("live_warmup_warming_progress = None"),
+        "LiveStrategyReady arm must reset live_warmup_warming_progress to None: {arm}"
+    );
+}
+
+#[test]
+fn test_warming_up_progress_clears_on_live_stopped() {
+    let arm = handler_arm("ReplayMsg::LiveStopped {");
+    assert!(
+        arm.contains("live_warmup_warming_progress = None"),
+        "LiveStopped arm must reset live_warmup_warming_progress to None: {arm}"
+    );
+}
+
+#[test]
+fn test_warming_up_progress_clears_on_engine_connected() {
+    // EngineConnected arm (handlers/engine.rs) 内でも progress を reset する
+    let pos = HANDLER_ENGINE
+        .find("EngineMsg::Connected(conn)")
+        .expect("EngineMsg::Connected arm not found");
+    let mut end = (pos + 6000).min(HANDLER_ENGINE.len());
+    while end > 0 && !HANDLER_ENGINE.is_char_boundary(end) {
+        end -= 1;
+    }
+    let arm = &HANDLER_ENGINE[pos..end];
+    assert!(
+        arm.contains("live_warmup_warming_progress = None"),
+        "EngineConnected arm must reset live_warmup_warming_progress when not Running: {arm}"
+    );
+}
+
 // ── R4 R3-SILENT-4: EngineConnected で pending_strategy_id を reset ──────────
 
 /// engine reconnect 時、live session が Running でなければ pending_strategy_id /

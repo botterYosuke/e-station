@@ -1258,6 +1258,10 @@ struct Flowsurface {
     live_warmup_timeout_banner: Option<String>,
     /// issue #42 Phase 3: `LiveStrategyWarmingUp` の最新 message を保持してバナーに表示する。
     live_warmup_warming_message: Option<String>,
+    /// issue #42 R4 R3-RUST-2: `LiveStrategyWarmingUp.progress` (0.0-1.0) の最新値を
+    /// 保持してバナーに % 形式で表示する。`LiveStrategyReady` / `LiveStopped` /
+    /// `EngineConnected` (Idle/pending 状態時) で `None` にリセットする。
+    live_warmup_warming_progress: Option<f32>,
     /// issue #42 Phase 3: warm_up timeout タイマーのトークン。`LiveStrategyWarmingUp` 受信や
     /// `LiveStrategyReady` 受信 / `EngineStopped` などで wrapping_add(1) して古いタイマー
     /// 発火を破棄する（タイマーリセットの実装）。
@@ -2288,6 +2292,7 @@ impl Flowsurface {
             live_strategy_pending_strategy_id: None,
             live_warmup_timeout_banner: None,
             live_warmup_warming_message: None,
+            live_warmup_warming_progress: None,
             live_warmup_timeout_token: 0,
             strategy_load_error: None,
             last_saved_bytes: None,
@@ -2473,6 +2478,19 @@ impl Flowsurface {
                 )
                 .padding(padding::all(8));
                 base = base.push(warmup_banner);
+            }
+            // R4 R3-RUST-1 + R3-RUST-2: warm_up 進捗 banner (LiveStrategyWarmingUp 受信ごとに更新)。
+            // timeout banner と共存可能 — progress message + timeout banner が同時表示でも
+            // OK で、timeout fired で `live_warmup_warming_message` が None に戻る設計。
+            if let Some(msg) = &self.live_warmup_warming_message {
+                let mut banner_row = row![text(msg.as_str())]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+                if let Some(p) = self.live_warmup_warming_progress {
+                    banner_row =
+                        banner_row.push(text(format!("{:.0}%", (p * 100.0).clamp(0.0, 100.0))));
+                }
+                base = base.push(container(banner_row).padding(padding::all(8)));
             }
             base = base.push(
                 match sidebar_pos {

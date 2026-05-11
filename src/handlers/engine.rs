@@ -70,6 +70,8 @@ impl crate::Flowsurface {
                     self.live_strategy_pending_strategy_id = None;
                     self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
                     self.live_warmup_warming_message = None;
+                    // R4 R3-RUST-2: reconnect で pending を捨てるとき progress も None に戻す。
+                    self.live_warmup_warming_progress = None;
                 }
                 self.active_dashboard_mut()
                     .distribute_buying_power_loading(main_window, false);

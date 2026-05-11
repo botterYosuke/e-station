@@ -636,6 +636,8 @@ impl crate::Flowsurface {
                 // タイマートークンを bump して未到達タイマーを無効化する。
                 self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
                 self.live_warmup_warming_message = None;
+                // R4 R3-RUST-2: Ready 受信で warming-up progress も None に戻す。
+                self.live_warmup_warming_progress = None;
                 let main_window_id = self.main_window.id;
                 self.active_dashboard_mut().auto_generate_live_panes(
                     main_window_id,
@@ -648,7 +650,7 @@ impl crate::Flowsurface {
             // issue #42 Phase 3: warm_up 進捗 banner 更新 + timeout カウンタリセット。
             ReplayMsg::LiveWarmingUp {
                 strategy_id,
-                progress: _,
+                progress,
                 message,
             } => {
                 // R2-B H3: 別 strategy 用の warm_up 進捗を誤って banner / timer に
@@ -674,6 +676,8 @@ impl crate::Flowsurface {
                     return Task::none();
                 }
                 self.live_warmup_warming_message = Some(message);
+                // R4 R3-RUST-2: progress も保持してバナーに % 形式で表示する。
+                self.live_warmup_warming_progress = Some(progress);
                 // 既存タイマーを無効化して 60s タイマーを再起動する（カウンタリセット）。
                 let token = self.live_warmup_timeout_token.wrapping_add(1);
                 self.live_warmup_timeout_token = token;
@@ -744,6 +748,8 @@ impl crate::Flowsurface {
                 self.live_strategy_pending_strategy_id = None;
                 self.live_warmup_timeout_banner = None;
                 self.live_warmup_warming_message = None;
+                // R4 R3-RUST-2: build_failed 経路でも warming-up progress を None に戻す。
+                self.live_warmup_warming_progress = None;
                 self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
                 self.menu_bar.live_bar = crate::menu_bar_state::LiveBarState::default();
 
@@ -829,6 +835,8 @@ impl crate::Flowsurface {
                     self.live_strategy_pending_strategy_id = None;
                     self.live_warmup_timeout_banner = None;
                     self.live_warmup_warming_message = None;
+                    // R4 R3-RUST-2: LiveStopped 経路でも warming-up progress を None に戻す。
+                    self.live_warmup_warming_progress = None;
                     self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
                     self.menu_bar.live_bar = crate::menu_bar_state::LiveBarState::default();
                     let main_window = self.main_window.id;
