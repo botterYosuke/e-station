@@ -711,3 +711,42 @@ fn test_live_warmup_timeout_clears_warming_message_and_progress() {
          stale progress bar persisting after timeout: {arm}"
     );
 }
+
+// ── R6 R5-SILENT-2: Error{code:"venue_not_connected"} を Rust 側で user 通知 ─────
+
+/// 旧実装は IpcError ルーターの `code == "venue_not_connected"` を
+/// buying_power / order_list / positions / strategy_load_failed / strategy_parse_failed
+/// のどれにも match させず、最終 `else log::debug!(...)` で握りつぶしていた。
+/// engine 側で venue 未接続のため live start を reject されているのに、GUI には
+/// 何も通知が出ない silent failure。Toast::error で user 通知し、
+/// `menu_bar.live_bar.strategy_file_stem` を clear して再試行可能な状態に戻す。
+#[test]
+fn test_venue_not_connected_user_notification() {
+    // (1) IpcError 直下に `code == "venue_not_connected"` 分岐を持つこと。
+    assert!(
+        HANDLER_VENUE.contains("venue_not_connected"),
+        "venue IpcError handler must branch on code == \"venue_not_connected\""
+    );
+    let pos = HANDLER_VENUE
+        .find("\"venue_not_connected\"")
+        .expect("venue_not_connected branch not found");
+    let mut end = (pos + 1500).min(HANDLER_VENUE.len());
+    while end > 0 && !HANDLER_VENUE.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &HANDLER_VENUE[pos..end];
+
+    // (2) Toast::error で user 通知すること。
+    assert!(
+        window.contains("Toast::error"),
+        "venue_not_connected branch must push a Toast::error to surface the failure \
+         to the user (no silent debug log): window=\n{window}"
+    );
+
+    // (3) live_bar.strategy_file_stem を None に戻して再試行可能な状態にすること。
+    assert!(
+        window.contains("strategy_file_stem = None"),
+        "venue_not_connected branch must clear menu_bar.live_bar.strategy_file_stem to \
+         allow retry: window=\n{window}"
+    );
+}

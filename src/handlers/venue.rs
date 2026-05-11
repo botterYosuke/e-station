@@ -821,6 +821,15 @@ impl crate::Flowsurface {
                              does not match live_strategy_form_modal pending request"
                         );
                     }
+                } else if code == "venue_not_connected" {
+                    // R6 R5-SILENT-2: engine 側で venue 未接続のため live start を reject
+                    // された旨を user に通知する。旧実装はここで握りつぶしていたため、
+                    // modal は閉じたまま「何も起きない」silent failure になっていた。
+                    self.notifications
+                        .push(Toast::error(format!("Live 起動失敗: {message}")));
+                    // 再試行可能な状態に戻す（modal は既に閉じられている前提で、
+                    // 2 段目バーの戦略ファイル表示だけクリアする）。
+                    self.menu_bar.live_bar.strategy_file_stem = None;
                 } else {
                     log::debug!(
                         "[IpcError] unrouted: request_id={request_id:?}, code={code}, \
