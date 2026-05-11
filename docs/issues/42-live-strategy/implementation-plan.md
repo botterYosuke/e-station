@@ -649,3 +649,12 @@ Phase 4 H-1 punt は R2-C で完全解消。`KabuStationLive*` は `nautilus_tra
 
 R3 sanity sweep で発見された全 15 件を R4 で完全解消。Wave R5 の追加 sanity は現状不要 (R4 fix が新規 silent failure を導入していないことを最終 review-fix-loop で確認可能)。
 
+### Wave R6 反映（2026-05-11、修正担当）
+
+- 担当: r6-agent
+- 主要 commit:
+  - `a3ea6a2` — fix(replay): R6 R5-SILENT-1 — warm_up timeout 発火時に warming banner / progress を None に reset
+  - `74e8a53` — fix(venue): R6 R5-SILENT-2 — IpcError code="venue_not_connected" を Toast::error で user 通知
+- 解消: R5-SILENT-1 (timeout で warming_message/progress reset), R5-SILENT-2 (venue_not_connected user 通知) = **MEDIUM 2 件**
+- 次: silent-failure-hunter 単独で R7 sanity → 0 件確認できれば収束 / PR 提出可能
+
