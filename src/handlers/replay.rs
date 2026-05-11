@@ -711,6 +711,11 @@ impl crate::Flowsurface {
                     // 別 strategy_id 用のタイマー（古い start のもの）→ 無視。
                     return Task::none();
                 }
+                // R6 R5-SILENT-1: timeout 発火時は warming banner / progress を消してから
+                // timeout banner を立てる。両方残ると view() で「Warming up...」と
+                // 「ライブ戦略起動失敗」が同時に出る silent UX failure になる。
+                self.live_warmup_warming_message = None;
+                self.live_warmup_warming_progress = None;
                 self.live_warmup_timeout_banner =
                     Some("ライブ戦略起動失敗（warm_up timeout）".to_string());
                 return Task::none();

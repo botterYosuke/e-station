@@ -688,3 +688,26 @@ fn test_replay_msg_has_live_strategy_ready_variant() {
         "ReplayMsg must declare LiveStrategyScenarioFallback for the 5s timeout fallback"
     );
 }
+
+// ── R6 R5-SILENT-1: warm_up timeout 発火時に warming_message / progress を None に戻す ───
+
+/// 旧実装は LiveWarmupTimeoutFired arm で banner だけ立て、
+/// `live_warmup_warming_message` / `live_warmup_warming_progress` が残ったままに
+/// なっていた。view() は warming banner と timeout banner の両方を描画するため、
+/// 「ライブ戦略起動失敗」バナーの直下に古い「Warming up...」進捗バーが残る silent
+/// UX failure になっていた。timeout 発火時に warming 系の表示状態を確実に消すこと
+/// を source-pin する。
+#[test]
+fn test_live_warmup_timeout_clears_warming_message_and_progress() {
+    let arm = handler_arm_match(&["ReplayMsg::LiveWarmupTimeoutFired { strategy_id, token } =>"]);
+    assert!(
+        arm.contains("live_warmup_warming_message = None"),
+        "LiveWarmupTimeoutFired arm must clear live_warmup_warming_message to avoid \
+         stale warming banner persisting after timeout: {arm}"
+    );
+    assert!(
+        arm.contains("live_warmup_warming_progress = None"),
+        "LiveWarmupTimeoutFired arm must clear live_warmup_warming_progress to avoid \
+         stale progress bar persisting after timeout: {arm}"
+    );
+}
