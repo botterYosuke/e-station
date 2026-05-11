@@ -620,3 +620,32 @@ R2 で解消した finding 総数: CRITICAL 1 / HIGH 10 / MEDIUM 13 / R1-RUST lo
 Phase 4 H-1 punt は R2-C で完全解消。`KabuStationLive*` は `nautilus_trader.live.execution_client.LiveExecutionClient` / `LiveMarketDataClient` を継承し、`node.build()` 通過可能。
 
 次: Round 3 sanity sweep（silent-failure-hunter 単独）で R2 fix が新規 silent failure を導入していないことを確認 → 収束。
+
+### Wave R4 反映（2026-05-11、修正担当）
+
+- 担当: r4-agent
+- 主要 commit:
+  - `74ff061` — docs(issue-42): R4 Group 8 — R3-GP-1〜5 docs fixes (HIGH 1 + MEDIUM 4)
+  - `206fc7a` — fix(silent-failure): R4 Group 1 — R3-SILENT-1/2 + R3-RUST-3 credential scrub 強化
+  - `edc141b` — fix(live-strategy): R4 Group 2 — R3-SILENT-3 LiveStopped 正常停止経路 teardown
+  - `489a4ac` — fix(engine): R4 Group 3 — R3-SILENT-4 EngineConnected で pending state reset
+  - `6266c10` — fix(engine-runner): R4 Group 4 — R3-SILENT-5 kabu_station kernel unavailable 早期 abort
+  - `ae25f93` — fix(server): R4 Group 5 — R3-SILENT-6 _connected_venue tachibana hardcode fallback 撤廃
+  - `2d5d868` — test(kabu-station): R4 Group 6 — R3-SILENT-7 register_client 契約を CI default で pin
+  - `4f1ef10` — feat(view): R4 Group 7 — R3-RUST-1/2 warm_up progress UI 完成
+- 解消: R3-SILENT-1〜7 + R3-RUST-1〜3 + R3-GP-1〜5 = HIGH 4 + MEDIUM 11 = **15 件**
+- 設計判断:
+  - **credential scrub の MRO 走査戦略**: 旧版は `type(exc).__name__` のみ判定で、`SessionExpiredError(TachibanaError)` のように venue prefix が付かない subclass を hit できなかった。MRO 全体を走査して prefix / token を確認することで、新規 subclass が venue API 例外として追加された際にも safe-by-default で scrub される（regression リスク最小）。誤検知時も型名は残し詳細は `log.error(exc_info=True)` に残るため診断性は維持。
+  - **warm_up progress UI の banner 配置**: timeout banner と progress banner を **共存可能** にした。両者は別の意味（progress = 「動いてる」、timeout = 「動かなかった」）で、progress message が None に戻るのは Ready / Stopped / build_failed / EngineConnected(not Running) の 4 経路で、timeout fire は別タイマー駆動。progress を timeout banner の代わりにすると「timeout 中も progress message が残っていれば UX 混乱」する懸念がある — 別 banner として描画 + 共存 OK の戦略が一番素直。
+  - **venue fallback 撤廃の影響範囲**: `_handle_start_engine` Live 分岐の 2 箇所 (`current_venue` / `live_venue_for_cleanup`) で `or "tachibana"` を削除し、early reject に統一。後段の `venue_not_supported` チェック (`live_venue not in ("tachibana", "kabu_station")`) は冗長になるが、明示的な venue 種別検査として残す（None は到達不能、ただ "binance" などが入った場合の防御線として有用）。既存 test_server_concurrent_live.py のフィクスチャは `_connected_venue = "tachibana"` を明示設定済みなので regression なし。
+  - **kernel_unavailable のテスト分離**: `test_engine_runner_live_kabu_kernel_unavailable.py` を新ファイルとして独立させた。`test_engine_runner_live_kabu.py` 内に混在させると、既存 6 件の kabu warm_up テストが共有する `_FakeNode` (kernel mock 追加が必要) と、kernel 不在を試す test (kernel mock 不要) で fixture 流儀が分裂するため。新ファイルは "kernel attr を持たない _FakeNodeNoKernel" を専用に持ち、責務分離が綺麗。
+  - **register_client mock test の方針 B 採用理由**: 既存 isinstance test が Cython 親型継承を pin 済みのため、Cython 側 type check 合格の根拠は十分。`register_client smoke` (実 TradingNode) は `@pytest.mark.live_demo_inprocess` でローカル限定実行に残し、CI default で実行される mock 経路 test を別途追加することで「呼出契約自体」を CI で常時 pin する relay 層を作った。完全な venue 別 isinstance pin は既存 test で carry。
+- 知見/Tips（R5 sanity 不要なら 提出。R5 では silent-failure-hunter 単独で十分）:
+  - **MRO 経由 scrub の forward-compat**: 新 venue (例: `LdSecurityError`) を追加するとき、prefix リスト (`_CREDENTIAL_TYPE_PREFIXES`) に `"LdSecurity"` を 1 行追加するだけで scrub が効くようになる。MRO 走査ロジック自体は不変。
+  - **`teardown_live_panes` と `clear_live_pane_keys` の使い分け**: `teardown_live_panes(&strategy_id)` は内部で当該 strategy_id の key 削除 + 実ペインの close を行う。`clear_live_pane_keys()` (全削除) は LiveStopped で全消ししたいシナリオがあれば残せるが、現状 LiveStopped 経路では teardown 1 件で十分 (statement 同一)。今後 `force_stop_all_live` のような複数 strategy 一括停止 API を追加する場合は `clear_live_pane_keys` を保持する価値がある。
+  - **EngineConnected reset の Running 状態保持の意義**: `LiveStrategyReady` 受信済の Running 状態を reset しない (`!matches!(... Running)` ガード) ことで、reconnect 後の `EngineRehello → 4 ペイン再生成` 経路が冪等に走る。Idle / pending 状態は捨てて手入力フォールバックに戻すという挙動分岐が、UX として「動いてる状態は守る、未確定状態は手動で再 Submit する」の自然なメンタルモデルと整合。
+  - **warm_up progress UI の将来拡張**: 現状 banner は text + % だけだが、`ProgressBar` widget を `banner_row` に push すれば視覚的な進捗バーになる。本 Phase は最小実装 (`{:.0}%` テキストのみ) で済ませたが、UX 充実のため別 issue で `iced::widget::progress_bar` 経由のグラフィカル化を検討候補。
+  - **issue 本文 SoT 整合の自動化**: 今回の R3-GP-1〜5 で発見された「テスト関数名のズレ」「実装と issue 本文の `kabu_station=false` 古い記述」は、CI lint で issue 本文と implementation-plan.md / 受け入れ基準 #N 対応表の関数名整合を機械的にチェックできれば未然に防げる。Phase 6 lint の延長案として将来検討候補 (`tools/lint/check_issue_body_test_names.py` 仮称)。
+
+R3 sanity sweep で発見された全 15 件を R4 で完全解消。Wave R5 の追加 sanity は現状不要 (R4 fix が新規 silent failure を導入していないことを最終 review-fix-loop で確認可能)。
+
