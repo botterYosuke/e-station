@@ -2177,6 +2177,23 @@ class LiveSession:
 
         # in-process mode
         if self._second_password is None:
+            # R4 Group B (silent-HIGH-2): attach 経路 (replay_session.py:2166) は
+            # SecondPasswordRequired event を on_event に流すが、in-process arm は
+            # RuntimeError を直接 raise するだけで何も emit していなかった。auto
+            # mode fallback で in-process 経路に流れたユーザーの GUI / CLI には
+            # 何も届かない silent UX failure。attach 経路と対称な event を 1 件
+            # emit してから RuntimeError を raise する (CLI の exit code 計算は
+            # 例外伝播に依存しているため raise 自体は維持)。credential は
+            # event の **どのフィールド** にも含めない。
+            import time as _time
+
+            _on_event(
+                {
+                    "event": "SecondPasswordRequired",
+                    "strategy_id": strategy_id,
+                    "ts_event_ms": int(_time.time() * 1000),
+                }
+            )
             raise RuntimeError(
                 "second_password is required for in-process live run. "
                 "Pass second_password=... to LiveSession()"

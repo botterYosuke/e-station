@@ -1187,6 +1187,119 @@ mod live_strategy_state_tests {
     }
 }
 
+#[cfg(test)]
+mod engine_error_routing_tests {
+    //! R4 Group A (silent-HIGH-1): `EngineError{strategy_id=Some(_)}` の以下の
+    //! code は GUI に通知される必要がある — 旧実装は `node_build_failed` だけを
+    //! `LiveStrategyBuildFailed` に変換し、それ以外 (`warm_up_failed` /
+    //! `kernel_unavailable` / `venue_not_supported` / `market_closed`) は
+    //! `log::warn!` で握りつぶしていた。
+    //!
+    //! 設計判断 (R4 Group A): 既存 `LiveStrategyBuildFailed` を再利用して
+    //! `code` field を追加 (handler 内で teardown + toast を担当) — 新
+    //! variant を作ると 4 系統で同じ teardown 経路を二重実装することになる。
+    //! warm_up 失敗時はまだ `auto_generate_live_panes` が呼ばれていないため
+    //! `teardown_live_panes` は実 pane に対して no-op になるが、bar / state
+    //! reset と pending_strategy_id クリアは必須 — 既存 handler が全てこなす。
+    use super::*;
+    use engine_client::dto::EngineEvent;
+
+    fn make_engine_error(code: &str) -> EngineEvent {
+        EngineEvent::EngineError {
+            code: code.to_string(),
+            message: format!("simulated {code} for routing test"),
+            strategy_id: Some("test-sid".to_string()),
+        }
+    }
+
+    fn assert_routes_to_build_failed(code: &str) {
+        let evt = make_engine_error(code);
+        let mapped = map_engine_event_to_message(evt);
+        match mapped {
+            Some(Message::Replay(messages::ReplayMsg::LiveStrategyBuildFailed {
+                strategy_id,
+                code: routed_code,
+                ..
+            })) => {
+                assert_eq!(strategy_id, "test-sid");
+                assert_eq!(routed_code, code);
+            }
+            other => panic!(
+                "EngineError code={code:?} must route to ReplayMsg::LiveStrategyBuildFailed; \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn engine_error_warm_up_failed_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("warm_up_failed");
+    }
+
+    #[test]
+    fn engine_error_kernel_unavailable_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("kernel_unavailable");
+    }
+
+    #[test]
+    fn engine_error_venue_not_supported_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("venue_not_supported");
+    }
+
+    #[test]
+    fn engine_error_market_closed_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("market_closed");
+    }
+
+    /// node_build_failed は従来通り routing される (regression pin).
+    #[test]
+    fn engine_error_node_build_failed_still_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("node_build_failed");
+    }
+
+    // R6 silent-HIGH-1: server.py の StartEngine ハンドラが
+    // `EngineError{code="engine_run_failed", strategy_id=Some}` (server.py:5252) と
+    // `EngineError{code="timeout", strategy_id=Some}` (server.py:5210) を emit する。
+    // R4 で導入した abort-codes 許可リストにこの 2 つが漏れていたため、
+    // 受信側で `log::warn!` のみ → `None` 返却 → `live_strategy_pending_strategy_id`
+    // がクリアされず state machine が固着し、次の live 起動が受け付けられなくなる
+    // silent regression を起こしていた。timeout は 3600s 後に必ず発火するため
+    // 長時間 live 戦略では確実に踏むパス。
+    #[test]
+    fn engine_error_engine_run_failed_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("engine_run_failed");
+    }
+
+    #[test]
+    fn engine_error_timeout_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("timeout");
+    }
+
+    /// 既知 code 以外 (`unknown_code` 等) は Some を返さない (silent ログ pass-through)。
+    #[test]
+    fn engine_error_unknown_strategy_level_code_returns_none() {
+        let evt = make_engine_error("totally_unknown_code");
+        assert!(
+            map_engine_event_to_message(evt).is_none(),
+            "unknown strategy-level codes should fall through to log::warn! and return None"
+        );
+    }
+
+    /// 接続レベル (strategy_id=None) は引き続き None を返す (regression pin).
+    #[test]
+    fn engine_error_connection_level_still_returns_none() {
+        let evt = EngineEvent::EngineError {
+            code: "auth_failed".to_string(),
+            message: "test".to_string(),
+            strategy_id: None,
+        };
+        assert!(
+            map_engine_event_to_message(evt).is_none(),
+            "connection-level EngineError (strategy_id=None) must not route to a Message"
+        );
+    }
+}
+
 struct Flowsurface {
     main_window: window::Window,
     sidebar: dashboard::Sidebar,
@@ -1626,13 +1739,38 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             // 生成済みの 4 ペインを teardown して LiveStrategyState を Idle に戻す。
             // 専用 ReplayMsg variant を経由して handler 内で完結させる
             // (notification も含む)。
-            if code == "node_build_failed" {
+            //
+            // R4 Group A (silent-HIGH-1): warm_up_failed / kernel_unavailable /
+            // venue_not_supported / market_closed も同じ teardown 経路に流す
+            // (旧実装はこれらを log::warn! のみで握りつぶしていた)。warm_up
+            // 失敗の場合まだ auto_generate_live_panes が呼ばれていないため
+            // teardown_live_panes は実 pane に対して no-op になるが、handler
+            // 側で bar / state reset と pending_strategy_id クリア、user toast
+            // を確実に走らせる必要がある。
+            // R6 silent-HIGH-1: server.py の StartEngine ハンドラが必ず emit する
+            // 2 つの strategy-level abort code を追加。
+            //   - "engine_run_failed": runner 内部例外 (server.py:5252)
+            //   - "timeout": 3600s wait_for タイムアウト (server.py:5210)
+            // これらが allow-list に無いと state machine が固着し次の live 起動が
+            // 受け付けられない silent regression を起こす。長時間 live 戦略では
+            // timeout が確実に発火するため見逃すと致命的。
+            const STRATEGY_ABORT_CODES: &[&str] = &[
+                "node_build_failed",
+                "warm_up_failed",
+                "kernel_unavailable",
+                "venue_not_supported",
+                "market_closed",
+                "engine_run_failed",
+                "timeout",
+            ];
+            if STRATEGY_ABORT_CODES.contains(&code.as_str()) {
                 log::warn!(
-                    "[engine] node_build_failed strategy={sid}: {message} \
+                    "[engine] strategy abort [{code}] strategy={sid}: {message} \
                      — tearing down live panes"
                 );
                 return Some(Message::Replay(ReplayMsg::LiveStrategyBuildFailed {
                     strategy_id: sid,
+                    code,
                     message,
                 }));
             }

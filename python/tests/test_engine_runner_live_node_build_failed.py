@@ -82,17 +82,16 @@ def _patch_tachibana_deps_with_build_failure(monkeypatch, build_exc: BaseExcepti
 
     class _FakeNode:
         def __init__(self, *_a, **_kw) -> None:
-            # R8 HIGH-2: canonical kernel surface (real TradingNode 準拠)。
-            _data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-            _exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
-
+            # R8 HIGH-2 / R4 Group F: canonical kernel surface のみ
+            # (real TradingNode 準拠)。underscore intermediate を残さず
+            # `data_engine` / `exec_engine` を class attr に直接代入する。
             class _Kernel:
                 loop = None
                 msgbus = None
                 cache = None
                 clock = None
-                data_engine = _data_engine
-                exec_engine = _exec_engine
+                data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+                exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
 
             self.kernel = _Kernel()
 

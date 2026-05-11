@@ -62,7 +62,8 @@ class _FakeExecClient:
         self.close_called = False
         self.warm_up_called = False
         # Nautilus Trader の LiveExecutionClient 互換 attr の最低限ダミー化。
-        # node._exec_engine.register_client が触る属性に備える。
+        # node.kernel.exec_engine.register_client が触る属性に備える
+        # (R8 HIGH-2 で underscore 経路は廃止済)。
         self.id = "fake-exec-client"
         type(self).instances.append(self)
 
@@ -133,17 +134,18 @@ def _patch_min_dependencies(monkeypatch, *, warm_up_mode: str) -> type[_FakeExec
     # TradingNode は build() に到達しないので最小スタブで十分。
     class _FakeNode:
         def __init__(self, *_a, **_kw) -> None:
-            # R8 HIGH-2: canonical kernel surface (real TradingNode 準拠)。
-            _data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-            _exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
-
+            # R8 HIGH-2 / R4 Group F: canonical kernel surface のみ持たせる
+            # (real TradingNode 準拠)。`data_engine` / `exec_engine` を class
+            # attr に直接代入し、underscore prefix の intermediate 変数を持たない
+            # ことで、production が誤って underscore 経路に fallback したら
+            # AttributeError で即 fail する設計。
             class _Kernel:
                 loop = None
                 msgbus = None
                 cache = None
                 clock = None
-                data_engine = _data_engine
-                exec_engine = _exec_engine
+                data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+                exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
 
             self.kernel = _Kernel()
 
@@ -343,17 +345,18 @@ def _patch_no_warmup_dependencies(monkeypatch) -> None:
 
     class _FakeNode:
         def __init__(self, *_a, **_kw) -> None:
-            # R8 HIGH-2: canonical kernel surface (real TradingNode 準拠)。
-            _data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-            _exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
-
+            # R8 HIGH-2 / R4 Group F: canonical kernel surface のみ持たせる
+            # (real TradingNode 準拠)。`data_engine` / `exec_engine` を class
+            # attr に直接代入し、underscore prefix の intermediate 変数を持たない
+            # ことで、production が誤って underscore 経路に fallback したら
+            # AttributeError で即 fail する設計。
             class _Kernel:
                 loop = None
                 msgbus = None
                 cache = None
                 clock = None
-                data_engine = _data_engine
-                exec_engine = _exec_engine
+                data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+                exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
 
             self.kernel = _Kernel()
 

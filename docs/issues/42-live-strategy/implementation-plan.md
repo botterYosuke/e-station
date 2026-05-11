@@ -558,7 +558,8 @@ R1 自己レビューで MEDIUM 4 件、R2 サニティで MEDIUM 1 件 (silent 
   - **M12 単一 source-of-truth 化**: `test_rust_schema_constants_match_python` に server_grpc.py 比較を 3-way で統合（Rust ↔ schemas.py / Rust ↔ server_grpc.py / schemas.py ↔ server_grpc.py）。既存 `test_r2h2_server_grpc_schema_constants_match_schemas` は冗長になったが、test_server_grpc_phase_b.py に元々あり、削除しても再追加コストが低いため残す
 - 知見/Tips:
   - **Nautilus Cython 親クラスの API**: `LiveExecutionClient.__init__` は `loop / client_id / venue / oms_type / account_type / base_currency / instrument_provider / msgbus / cache / clock / config` を要求。`LiveMarketDataClient.__init__` は `loop / client_id / venue / msgbus / cache / clock / instrument_provider / config / is_sync` を要求。両者とも Cython `cdef class` で `MagicMock` を投げると `TypeError: ... not of type <class 'nautilus_trader.common.providers.InstrumentProvider'>` で reject される
-  - **`node.kernel` 経由の attrs**: `TradingNode.__init__` 内で `NautilusKernel` が初期化され `kernel.loop / msgbus / cache / clock / exec_engine / data_engine` が即 ready 状態になる（`node.build()` 待ち不要）。一方 `node._exec_engine` / `node._data_engine` という直接 attribute は実存在しない — テストの `_FakeNode` のみが持つ test-only attr。本来は `node.kernel.exec_engine` / `node.kernel.data_engine` を呼ぶべきだが、`register_client` 呼出箇所は本 R2-C scope 外（既存テストとの後方互換維持のため）
+  - **`node.kernel` 経由の attrs**: `TradingNode.__init__` 内で `NautilusKernel` が初期化され `kernel.loop / msgbus / cache / clock / exec_engine / data_engine` が即 ready 状態になる（`node.build()` 待ち不要）。一方 `node._exec_engine` / `node._data_engine` という直接 attribute は実存在しない — テストの `_FakeNode` のみが持つ test-only attr。~~本来は `node.kernel.exec_engine` / `node.kernel.data_engine` を呼ぶべきだが、`register_client` 呼出箇所は本 R2-C scope 外（既存テストとの後方互換維持のため）~~  
+    **R8 で解消**: `engine_runner.py` の `register_client` 呼出箇所は `node.kernel.exec_engine.register_client` / `node.kernel.data_engine.register_client` (canonical surface) に統一済 (commit `ea113f3` HIGH-2)。`_FakeNode` 系テストも canonical surface のみ持つ形に揃えた (R4 Group F)。詳細は §「Wave R8 反映」を参照。
   - **`self.id` の手動設定禁止**: `LiveExecutionClient` の `id` は Cython getset_descriptor (parent の `client_id` から自動派生)。`__init__` で `self.id = "..."` と setattr すると AttributeError / 型エラー。継承後は parent の id getter に任せる
   - **`asyncio.set_event_loop()` の必要性**: `nautilus_trader.common.functions.get_event_loop()` が test 環境では `RuntimeError("No event loop available in test environment")` を投げる。test fixture や helper で `asyncio.set_event_loop(asyncio.new_event_loop())` を明示する必要がある（pytest-asyncio の auto mode でも fixture 引数を経由しないなら自動 bind されない）
 - ❗ 注意: H-1 punt は本 R2-C で完全解消。issue 本文の「punt」記述も R2-D で update 必要
@@ -657,4 +658,140 @@ R3 sanity sweep で発見された全 15 件を R4 で完全解消。Wave R5 の
   - `74e8a53` — fix(venue): R6 R5-SILENT-2 — IpcError code="venue_not_connected" を Toast::error で user 通知
 - 解消: R5-SILENT-1 (timeout で warming_message/progress reset), R5-SILENT-2 (venue_not_connected user 通知) = **MEDIUM 2 件**
 - 次: silent-failure-hunter 単独で R7 sanity → 0 件確認できれば収束 / PR 提出可能
+
+### Wave R8 反映（2026-05-11、外部レビュー反映 + R4 batch fix）
+
+- 担当: r4-batch-agent
+- 関連 commit:
+  - `ea113f3` — fix(issue-42): R8 external review — HIGH-1 / HIGH-2 / MEDIUM-1 解消
+  - 本 commit (R4 batch) — silent failure × HIGH 3 + MEDIUM 7 を TDD で順次解消
+
+#### ea113f3 (R8 外部レビュー指摘)
+- **HIGH-1**: Started→Ready 順序契約の確立。`EngineStarted` 受信時に Running 遷移しない設計を pin (instrument_id / venue を含まないため)。`LiveStrategyReady` 受信で初めて `try_running` factory を経由して Running に遷移する。
+- **HIGH-2**: `node._exec_engine` / `node._data_engine` という underscore prefix の private attribute (test-only) ではなく、`node.kernel.exec_engine` / `node.kernel.data_engine` (canonical surface, real `TradingNode` 準拠) で `register_client` を呼ぶ統一 (production / test 経路の drift 解消)。
+- **MEDIUM-1**: auto mode fallback (attach probe 失敗時に inprocess へ) で credential 不在が判明した場合の event 経路整備 (本 R4 Group B で完成)。
+
+#### R2 ローカル R8 で発見した HIGH-3
+- **HIGH-3**: `safe_slice_end` defensive hardening。`tests/issue_39_empty_state_pin.rs:47` の helper が `start > src.len()` を clamp していないため、caller が `&src[start..safe_slice_end(...)]` と書くと start>end で panic する余地。`start.min(src.len())` を追加して post-condition `end >= start_clamped` を保証 (R4 Group D で test 強化 + 実装 commit)。
+
+#### R3 サニティ → R4 で解消した HIGH 3 + MEDIUM 7
+
+| 区分 | ID | 概要 | 解消方法 |
+|------|----|------|---------|
+| HIGH | silent-HIGH-1 | `EngineError{strategy_id=Some(_)}` の `node_build_failed` 以外 (`warm_up_failed` / `kernel_unavailable` / `venue_not_supported` / `market_closed`) が `log::warn!` のみで GUI に通知されない | Group A: 既存 `LiveStrategyBuildFailed` variant に `code: String` field を追加し、5 つの code を同一 teardown 経路に流す。handler 側で code 別 toast prefix を出す。 |
+| HIGH | silent-HIGH-2 | `LiveSession.run()` in-process arm が `second_password=None` を `RuntimeError` 直接 raise し、`on_event` に何も emit しない (auto fallback 経由のユーザーに通知が届かない silent UX failure) | Group B: `RuntimeError` 直前に attach 経路と対称な `SecondPasswordRequired` event (`{event, strategy_id, ts_event_ms}`) を emit。credential は event のどのフィールドにも含めない。 |
+| HIGH | plan-HIGH-1 | R8 反映ブロックが implementation-plan.md に未記載 | Group I (本ブロック) で記述。 |
+| MEDIUM | silent-MEDIUM-1 | LiveStopped no-op 経路の Rust 側 pin 欠如 (Python 側コメント `test_engine_runner_live_warmup_failure.py:209` のみが契約の根拠) | Group C: `tests/live_form_smoke.rs::test_live_stopped_no_op_when_idle_pin` で `else` 分岐が state mutation を含まないことを source-pin。 |
+| MEDIUM | silent-MEDIUM-2 (rust) | `safe_slice_end` 境界値テスト不足 (`max_len=0` / `start=src.len()` / `start>src.len()` 系統未検証) | Group D: 3 ケース追加 + helper に defensive `start.min(src.len())` 追加。 |
+| MEDIUM | rust-MEDIUM-2 | `safe_slice_end(&src, ...)` で `&String` を渡している箇所が 8 箇所、`src.as_str()` で型を明示すべき | Group E: 8 箇所すべて `safe_slice_end(src.as_str(), ...)` に統一。 |
+| MEDIUM | plan-MEDIUM-1 | fake test の underscore intermediate 変数 (`_data_engine` / `_exec_engine`) が canonical surface のみの統一形に揃っていない | Group F: `test_engine_runner_live_warmup_failure.py` (2 箇所) / `test_engine_runner_live_node_build_failed.py` / `test_credential_scrub.py` / `test_engine_runner_live_kabu.py` の 5 箇所を canonical surface 直接代入に統一。 |
+| MEDIUM | plan-MEDIUM-2 | implementation-plan.md §R2-C Tip に「`register_client` 呼出箇所は本 R2-C scope 外」の旧記述が残存 | Group G: 取消線 + 「R8 で解消」note を併記。 |
+| MEDIUM | plan-MEDIUM-3 | spec.md §5.1 に `--mode auto` の意味論記述が欠如 | Group H: 「`--mode {auto|attach|inprocess}` の意味論」段落を追加 (auto = attach probe + inprocess fallback / credential は CLI 段階で強制せず `LiveSession.run()` 側で表面化 / attach は credential を wire に流さない、の 3 点)。 |
+| MEDIUM | plan-MEDIUM-4 | MISSES.md に「source-pin tests の固定 byte slicing が UTF-8 multibyte 境界を踏む」パターン未記載 | Group J で 1 件追加。 |
+
+#### 設計判断 (R4 Group A)
+- **`LiveStrategyBuildFailed` を再利用 / 新 variant を作らない**: 既存 handler が
+  必要な teardown (`state machine reset → pending_strategy_id=None → warmup banner clear → portfolio clear → teardown_live_panes → toast`) を全てこなしている。新 variant
+  を作ると同じ経路を二重実装することになる。warm_up 失敗の場合 `auto_generate_live_panes`
+  が呼ばれていないので `teardown_live_panes` は実 pane に対して no-op になるが、
+  `LiveBarState::default()` reset と `pending_strategy_id` クリア、user toast は必須 — 既存 handler が全てこなす。
+- **`code: String` field 追加 / enum 化しない**: 5 つの abort code は将来追加される
+  可能性があり、`String` のままにすることで schema bump 不要で拡張可能。handler の
+  `match code.as_str()` の `_` arm が code を toast 文言に echo するため、未知 code
+  も silent failure にならない。
+
+#### 検証 (R4 batch)
+- `cargo check --workspace` → clean
+- `cargo clippy --workspace --tests -- -D warnings` → clean
+- `cargo fmt --check` → clean
+- `cargo test --workspace` → 全テスト緑 (新規 Rust 試験 11 件追加)
+  - `engine_error_routing_tests` 7 件 (Group A 経路 5 + 既存 regression 2)
+  - `tests/live_form_smoke.rs::test_live_stopped_no_op_when_idle_pin` 1 件 (Group C)
+  - `tests/live_form_smoke.rs::test_live_strategy_build_failed_carries_code_field` / `test_engine_error_routes_warm_up_codes_to_build_failed_arm` / `test_live_strategy_build_failed_handler_branches_on_code` 3 件 (Group A pin)
+  - `tests/issue_39_empty_state_pin.rs::safe_slice_end_handles_max_len_zero` / `safe_slice_end_handles_start_at_end` / `safe_slice_end_clamps_start_beyond_len` 3 件 (Group D)
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana and not demo_kabu and not tk_smoke" --timeout=120` → 全件緑 (新規 Python 試験 2 件追加)
+  - `test_live_session_run_inprocess_no_password.py` 2 件 (Group B)
+
+#### 知見 / 次回回避策
+
+- **fake test と production code の API surface drift**: `_FakeNode` が canonical
+  surface (`kernel.data_engine`) と underscore intermediate (`_data_engine`) の両方を
+  持っていると、production が誤って underscore 経路に fallback しても test では検出
+  できない。fake は **canonical surface だけ持つ** ことで、drift を即時に
+  AttributeError として可視化できる (`test_register_client_called_via_kernel_not_private_attr`
+  のような専用 regression pin と組み合わせるとさらに堅牢)。
+- **source-pin tests UTF-8 罠**: `&src[start..(start + N).min(src.len())]` で固定
+  byte 窓を取るとき、対象ソースに日本語コメントが混じれば窓終端が char boundary
+  を踏んで panic する。共通 helper (`safe_slice_end`) を必ず経由し、helper 自体は
+  `start.min(src.len())` の defensive clamp も入れて caller の誤用を吸収する。
+  issue #39 + #42 の 2 箇所で踏んだ実績あり (MISSES.md §「2026-05-11 — source-pin
+  tests …」参照)。
+- **auto mode CLI fallback の event 経路**: attach 経路で表面化する event
+  (`SecondPasswordRequired` 等) は in-process 経路でも emit しないと、`force_mode=auto`
+  fallback ユーザーには `RuntimeError` の例外メッセージしか届かない。CLI / GUI の
+  event handler が両経路で同じ event を期待しているなら、両経路で emit 順序も
+  揃える (event emit → 例外 raise の順)。
+- **attach / in-process の対称性 audit checklist**: (a) login 失敗 → `VenueError`
+  / `ConnectionError` の対称性、(b) 第二暗証番号要求 → `SecondPasswordRequired`
+  event の対称性、(c) market_closed → `EngineError{code:"market_closed"}` の対称性、
+  (d) warm_up 失敗 → `EngineError{code:"warm_up_failed"} + EngineStopped` の対称性。
+  各境界に対して「attach は ev 流し、in-process は raise」の **片側のみ** になって
+  いないか機械的にチェックする lint があると 2 度目の同類バグを防げる
+  (`tools/lint/check_event_symmetry.py` 仮称、follow-up 候補)。
+
+R3 サニティで発見した HIGH 3 + MEDIUM 7 を R4 で完全解消。
+
+#### R5 サニティ → R6 で解消した HIGH 1 + MEDIUM 3
+
+R4 batch fix の直後 (R5) に silent-failure-hunter + rust-reviewer を再走させた
+ところ、R4 fix の延長で確認すべき新規発見が出たため R6 で追加修正した。
+
+| 区分 | ID | 概要 | 解消方法 |
+|------|----|------|---------|
+| HIGH | silent-R6-HIGH-1 | `STRATEGY_ABORT_CODES` allow-list に `engine_run_failed` (server.py:5252) と `timeout` (server.py:5210) が漏れており、これらが `strategy_id=Some` 付きで emit されたとき `log::warn!` のみで握りつぶし → `live_strategy_pending_strategy_id` がクリアされず state machine が固着 → 次の live 起動が受け付けられない silent regression。timeout は 3600s で必ず発火するため長時間 live で確実に踏む | R6-A: `src/main.rs::STRATEGY_ABORT_CODES` に 2 code を追加 + `src/handlers/replay.rs::ReplayMsg::LiveStrategyBuildFailed` arm の `match code.as_str()` に日本語 toast prefix (`"エンジン実行失敗"` / `"エンジンタイムアウト"`) を追加。`engine_error_routing_tests` に regression pin 2 件追加 (RED→GREEN 確認済)。 |
+| MEDIUM | silent-R6-MEDIUM-1 | `test_engine_runner_live_kabu_kernel_unavailable.py:77-78` の `_FakeNodeNoKernel` が R4 Group F の cleanup 対象から漏れ、`_data_engine` / `_exec_engine` underscore intermediate を保持。`TestRegisterClientUsesKernelPath` regression pin の意図と矛盾し、将来の開発者が production に underscore 参照を追加する誤読リスク | R6-B: `_FakeNodeNoKernel.__init__` から underscore intermediate を削除し、production が underscore に fallback したら `AttributeError` で即発覚する canonical-only fake に統一。 |
+| MEDIUM | silent-R6-MEDIUM-2 | `test_run_inprocess_second_password_required_event_contains_no_credential` の credential 漏洩テストがトップレベル shallow scan のみで、将来 event payload に nested dict / list (例: `{"context": {"hint": "..."}}`) が追加されたとき silent leak を見逃す | R6-C: `_walk_keys` / `_walk_values` 再帰 helper を追加し、キー側 = `password` / `credential` 含有禁止 / 値側 = login literal `pw456` 含有禁止 を任意の深さで検証。helper 自体の動作 pin として 2 件のユニットテストも追加。 |
+| MEDIUM | rust-R6-MEDIUM-1 | `messages.rs::ReplayMsg::LiveWarmingUp.progress` の `#[allow(dead_code)]` が R4 Group 7 (`4f1ef10`) で陳腐化 (handler / view が実際に使うようになった) | R6-D: `#[allow(dead_code)]` 削除。`coding-style.md`「`#[allow]` は理由コメント無しでは不可、陳腐化したものは即削除」に準拠。 |
+
+#### R6 検証
+- `cargo check --workspace` → clean
+- `cargo clippy --workspace --tests -- -D warnings` → clean
+- `cargo fmt --check` → clean
+- `cargo test --workspace` → 全テスト緑 (R4 から +2 件: `engine_error_routing_tests` の `engine_run_failed` / `timeout` routing pin)
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana and not demo_kabu and not tk_smoke" --timeout=120` → 全件緑 (R4 2310 → R6 2312 で +2 件: `_walk_keys` / `_walk_values` helper 動作 pin)
+
+#### R6 知見
+
+- **`STRATEGY_ABORT_CODES` allow-list の網羅性検査**: silent-failure-hunter が
+  「server.py の `EngineErrorModel(code=..., strategy_id=strategy_id)` を全 grep して
+  Rust 側 allow-list と突き合わせる」プロセスで R4 で見落とした 2 code を発見。
+  この種の「Python emit ↔ Rust receive 対称性」は CI lint 化候補 (例:
+  `tools/lint/check_engine_error_codes.py` で server.py の `code=` リテラルを抽出 →
+  `STRATEGY_ABORT_CODES` ソースと突合)。
+- **R4 cleanup で fixture ファイル網羅漏れ**: R4 Group F は `test_engine_runner_live_*.py`
+  4 ファイルを cleanup したが `test_engine_runner_live_kabu_kernel_unavailable.py`
+  (R4 Group 4 で別途 split された専用 fixture ファイル) を見落とした。**新ファイル
+  split 後は cleanup 対象リストを `git ls-files` で機械的に再確認** することを次回
+  の運用 checklist に追加。
+- **credential テストの shallow scan 罠**: イベント名自体が `SecondPasswordRequired`
+  のように credential 関連語を含むケースがあるため、無差別な再帰検査だと false positive
+  になる。**キー側 (新 field 追加の警告)** と **値側 (実 credential literal 検出)**
+  の二経路に分けて再帰すると、安全性と false positive 回避が両立する。MISSES.md
+  追加候補。
+
+#### R7 サニティ → R8 micro-fix で対称性回復
+
+R6 fix の直後 (R7) に silent-failure-hunter 単独で再走させたところ、R6-A の
+取りこぼし MEDIUM 1 件を発見し micro-fix で回収:
+
+| 区分 | ID | 概要 | 解消方法 |
+|------|----|------|---------|
+| MEDIUM | silent-R7-MEDIUM-1 | R6-A で `STRATEGY_ABORT_CODES` allow-list と handler の `match code.as_str()` toast prefix 表に `engine_run_failed` / `timeout` を追加したが、handler arm の prefix 出現を pin する `tests/live_form_smoke.rs::test_live_strategy_build_failed_handler_branches_on_code` の必須リストを更新し忘れていた → 将来 handler が `_` arm fallback (英語コード生出し) に退行しても CI が検出できない非対称 | R7-fix: 上記テストの `for prefix in [...]` に 2 code を追加。allow-list 側 (`test_engine_error_routes_warm_up_codes_to_build_failed_arm`) と完全対称化。 |
+
+#### R7 fix 検証
+- `cargo check / clippy / fmt / test --workspace` → 全件緑
+- `uv run pytest python/tests/ -m "not live_demo and not live_demo_inprocess and not demo_tachibana and not demo_kabu and not tk_smoke" --timeout=120` → 2312 passed
+- 純粋な test 追記 (production code 不変) のため新規 silent failure リスクゼロ → 追加サニティ不要
+
+R4 + R6 + R7 micro-fix を経て review-fix-loop 収束。本 PR はマージ可能状態。
 

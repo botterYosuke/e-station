@@ -750,3 +750,155 @@ fn test_venue_not_connected_user_notification() {
          allow retry: window=\n{window}"
     );
 }
+
+// ── R4 Group C (silent-MEDIUM-1): LiveStopped no-op pin ─────────────────────────
+
+/// `python/tests/test_engine_runner_live_warmup_failure.py:209-213` のコメントが
+/// 唯一の根拠だった「Rust は EngineStarted 無しの EngineStopped を no-op として
+/// 扱う」契約を Rust 側でも source-pin する。具体的には LiveStopped arm の `else`
+/// 分岐 (running_match=false && pending_match=false) が:
+///   - `log::warn!` を残し
+///   - `live_strategy = LiveStrategyState::Idle` などの state mutation を含まず
+///   - `teardown_live_panes` 等のペイン削除も呼ばない
+///
+/// ことを assert する。
+///
+/// この contract が壊れると、Python 側 `EngineStopped` emit が初期状態 (Idle) の
+/// Rust に届いた瞬間に LiveBarState::default() が呼ばれて bar が消える等の silent
+/// regression を生む。
+#[test]
+fn test_live_stopped_no_op_when_idle_pin() {
+    let arm = handler_arm("ReplayMsg::LiveStopped {");
+    let else_pos = arm
+        .find("} else {")
+        .expect("LiveStopped arm must have an `} else {` branch for no-op path");
+    let else_body = &arm[else_pos..];
+
+    assert!(
+        else_body.contains("log::warn!"),
+        "LiveStopped no-op arm must call log::warn! to keep the silent failure \
+         observable in logs: else_body=\n{else_body}"
+    );
+    assert!(
+        else_body.contains("strategy_id mismatch"),
+        "LiveStopped no-op arm warning must explain the mismatch (helps diagnose \
+         out-of-order EngineStopped events): else_body=\n{else_body}"
+    );
+
+    // state mutation が無いことを pin する (no-op contract)。
+    assert!(
+        !else_body.contains("LiveStrategyState::Idle"),
+        "LiveStopped no-op arm must NOT mutate state to Idle (already Idle by \
+         construction; mutation here would zero out an unrelated session): \
+         else_body=\n{else_body}"
+    );
+    assert!(
+        !else_body.contains("teardown_live_panes"),
+        "LiveStopped no-op arm must NOT call teardown_live_panes (panes are owned \
+         by the Running session whose strategy_id we don't match): \
+         else_body=\n{else_body}"
+    );
+    assert!(
+        !else_body.contains("LiveBarState::default()"),
+        "LiveStopped no-op arm must NOT reset menu_bar.live_bar (would erase the \
+         unrelated session's bar state): else_body=\n{else_body}"
+    );
+    assert!(
+        !else_body.contains("clear_live_strategy_portfolio"),
+        "LiveStopped no-op arm must NOT clear portfolio (would discard the \
+         unrelated session's data): else_body=\n{else_body}"
+    );
+}
+
+// ── R4 Group A (silent-HIGH-1): LiveStrategyBuildFailed が code を持つ ──────────
+
+/// `EngineError{code, strategy_id=Some(_)}` の以下 5 つを `LiveStrategyBuildFailed`
+/// に統合した (R4 Group A 設計判断: 既存 variant を再利用)。`messages.rs` 側で
+/// `code` field を持つこと、handler 側が code 別の toast 文言を出すことを pin する。
+#[test]
+fn test_live_strategy_build_failed_carries_code_field() {
+    assert!(
+        MESSAGES.contains("LiveStrategyBuildFailed {"),
+        "ReplayMsg must declare a LiveStrategyBuildFailed variant"
+    );
+    let var_pos = MESSAGES
+        .find("LiveStrategyBuildFailed {")
+        .expect("LiveStrategyBuildFailed variant not found");
+    let mut end = (var_pos + 600).min(MESSAGES.len());
+    while end > 0 && !MESSAGES.is_char_boundary(end) {
+        end -= 1;
+    }
+    let body = &MESSAGES[var_pos..end];
+    assert!(
+        body.contains("code:"),
+        "LiveStrategyBuildFailed must carry a `code: String` field so the handler \
+         can branch on EngineError.code for toast wording: body=\n{body}"
+    );
+}
+
+#[test]
+fn test_engine_error_routes_warm_up_codes_to_build_failed_arm() {
+    // map_engine_event_to_message in main.rs branches on a code allow-list.
+    //
+    // R6: needle を `const STRATEGY_ABORT_CODES` (= 定義の位置) に強化。
+    // 旧版 `find("STRATEGY_ABORT_CODES")` は doc コメント内の同名文字列に
+    // 先に hit して body が誤位置になる脆さがあった (R6 で実際に踏んだ)。
+    let abort_pos = MAIN_RS.find("const STRATEGY_ABORT_CODES").expect(
+        "`const STRATEGY_ABORT_CODES` must exist in main.rs to route warm_up_failed et al.",
+    );
+    let mut end = (abort_pos + 800).min(MAIN_RS.len());
+    while end > 0 && !MAIN_RS.is_char_boundary(end) {
+        end -= 1;
+    }
+    let body = &MAIN_RS[abort_pos..end];
+
+    for required_code in [
+        "warm_up_failed",
+        "kernel_unavailable",
+        "venue_not_supported",
+        "market_closed",
+        "node_build_failed",
+        // R6 silent-HIGH-1: server.py が必ず emit する 2 code (engine_run_failed
+        // = runner 内部例外, timeout = 3600s wait_for) もこの allow-list に
+        // 含まれていなければ silent regression を起こす (state machine 固着)。
+        "engine_run_failed",
+        "timeout",
+    ] {
+        assert!(
+            body.contains(required_code),
+            "abort-codes allow-list must include {required_code:?} so EngineError with \
+             that code routes to LiveStrategyBuildFailed (otherwise silent-HIGH-1 \
+             regression): body=\n{body}"
+        );
+    }
+}
+
+#[test]
+fn test_live_strategy_build_failed_handler_branches_on_code() {
+    // handler arm が code 別の toast prefix を出すこと
+    let arm = handler_arm("ReplayMsg::LiveStrategyBuildFailed {");
+    assert!(
+        arm.contains("code"),
+        "LiveStrategyBuildFailed handler must destructure code: {arm}"
+    );
+    for prefix in [
+        "warm_up_failed",
+        "kernel_unavailable",
+        "venue_not_supported",
+        "market_closed",
+        "node_build_failed",
+        // R7 サニティで発見: R6-A で abort-codes allow-list と handler の
+        // toast prefix 表に "engine_run_failed" / "timeout" を追加したが、
+        // 本テスト (handler arm の prefix pin) を更新し忘れていた。allow-list
+        // を pin する `test_engine_error_routes_warm_up_codes_to_build_failed_arm`
+        // と handler の toast 文言を pin する本テストの対称性を確保する。
+        "engine_run_failed",
+        "timeout",
+    ] {
+        assert!(
+            arm.contains(prefix),
+            "LiveStrategyBuildFailed handler must format toast prefix for code \
+             {prefix:?}: {arm}"
+        );
+    }
+}

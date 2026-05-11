@@ -732,6 +732,7 @@ impl crate::Flowsurface {
             // 走っていないペインを誤って teardown しないため）。
             ReplayMsg::LiveStrategyBuildFailed {
                 strategy_id,
+                code,
                 message,
             } => {
                 let matches_pending =
@@ -743,7 +744,7 @@ impl crate::Flowsurface {
                 if !matches_pending && !matches_running {
                     log::warn!(
                         "LiveStrategyBuildFailed ignored — strategy_id mismatch \
-                         (got={strategy_id}, message={message})"
+                         (got={strategy_id}, code={code}, message={message})"
                     );
                     return Task::none();
                 }
@@ -758,15 +759,29 @@ impl crate::Flowsurface {
                 self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
                 self.menu_bar.live_bar = crate::menu_bar_state::LiveBarState::default();
 
-                // ペイン teardown
+                // ペイン teardown (warm_up 失敗で auto_generate_live_panes が
+                // 呼ばれていないケースでも no-op で安全)
                 let main_window = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
                 dashboard.clear_live_strategy_portfolio(main_window);
                 dashboard.teardown_live_panes(&strategy_id);
 
-                // ユーザー通知（fix wording に合わせて固定文言 + 詳細を併記）
+                // R4 Group A: code に応じて toast の prefix を切り替える
+                // ("ライブ戦略起動失敗" を共通文言とし、code 別の根拠を併記)。
+                let reason = match code.as_str() {
+                    "node_build_failed" => "node.build 失敗",
+                    "warm_up_failed" => "warm_up 失敗",
+                    "kernel_unavailable" => "kernel 利用不可",
+                    "venue_not_supported" => "未対応 venue",
+                    "market_closed" => "市場閉場中",
+                    // R6 silent-HIGH-1 + LOW-1: server.py が必ず emit する 2 code の
+                    // 日本語化 (英語コードを toast に出すと UI トーン不一致になる)。
+                    "engine_run_failed" => "エンジン実行失敗",
+                    "timeout" => "エンジンタイムアウト",
+                    _ => code.as_str(),
+                };
                 self.notifications.push(Toast::error(format!(
-                    "ライブ戦略起動失敗（node.build 失敗）: {message}"
+                    "ライブ戦略起動失敗（{reason}）: {message}"
                 )));
                 return Task::none();
             }

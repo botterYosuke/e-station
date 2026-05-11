@@ -191,8 +191,17 @@ pub(crate) enum ReplayMsg {
     /// (a) `LiveStrategyState` を Idle に戻し、
     /// (b) 既に生成済みの 4 ペイン (`auto_generate_live_panes` の結果) を teardown し、
     /// (c) ユーザーに失敗を通知する。
+    ///
+    /// R4 Group A (silent-HIGH-1): `node_build_failed` だけでなく `warm_up_failed` /
+    /// `kernel_unavailable` / `venue_not_supported` / `market_closed` も同じ
+    /// teardown 経路を流す。`code` field を持たせ、handler はそれに応じて toast
+    /// 文言を切り替える。新 variant を増やさず既存経路に統合することで silent
+    /// failure を最小コストで解消する。
     LiveStrategyBuildFailed {
         strategy_id: String,
+        /// EngineError.code (`warm_up_failed` / `kernel_unavailable` /
+        /// `venue_not_supported` / `market_closed` / `node_build_failed` 等)。
+        code: String,
         message: String,
     },
     /// issue #42 Phase 3: live strategy warm_up 完了 → Running 遷移 + 4 ペイン自動生成。
@@ -207,7 +216,6 @@ pub(crate) enum ReplayMsg {
     /// issue #42 Phase 3: warm_up 進捗（5s 毎、`LiveStrategyReady` 60s timeout のリセットに使う）。
     LiveWarmingUp {
         strategy_id: String,
-        #[allow(dead_code)]
         progress: f32,
         message: String,
     },

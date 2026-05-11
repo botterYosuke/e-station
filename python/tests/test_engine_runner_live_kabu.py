@@ -111,18 +111,16 @@ def _patch_kabu_dependencies(
     # 早期 abort して EngineError(kernel_unavailable) を emit する。テスト経路は
     # kernel を mock で持たせて parent kwargs 組み立てを通す（factory 側で kwargs
     # は無害に投げ捨てられる）。
-    # R8 HIGH-2: register_client は ``kernel.{data,exec}_engine`` 経由のみ
-    # （real TradingNode 準拠）。
-    _data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-    _exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
-
+    # R8 HIGH-2 / R4 Group F: register_client は ``kernel.{data,exec}_engine``
+    # 経由のみ（real TradingNode 準拠）。intermediate underscore 変数を持たず、
+    # canonical な ``data_engine`` / ``exec_engine`` を class attr に直接代入する。
     class _FakeKernel:
         loop = None
         msgbus = None
         cache = None
         clock = None
-        data_engine = _data_engine
-        exec_engine = _exec_engine
+        data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+        exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
 
     class _FakeNode:
         def __init__(self, *_a, **_kw):

@@ -199,6 +199,31 @@ uv run python -m engine.live_session_cli run \
 - exit code:
   - `0` 正常 / `1` 一般エラー / `2` busy / `3` 第二暗証番号要求
 
+#### `--mode {auto|attach|inprocess}` の意味論
+
+`--mode` は `LiveSession` の経路選択 force-override で、既定値は `auto`:
+
+- **`auto`** — `engine-session.json` + `FLOWSURFACE_ENGINE_TOKEN` env が一致する
+  engine プロセスへ attach probe を試み、成功すれば `attach`、失敗すれば
+  `inprocess` に fallback する (`replay_session.py::_resolve_endpoint_and_token`)。
+  CLI 段階では credential の有無を確認しない (attach 経路では engine 側
+  `SessionHolder` が credential を保持しているため、CLI が知る必要が無い)。
+- **`attach`** — engine プロセスへの attach 必須。失敗時はエラーで終了する。
+  credential を CLI 引数で受け取っても **wire に流さない** (統一決定 #7
+  「credential を Rust に流さない」の不変条件)。`SecondPasswordRequired` event
+  を engine から受信した場合は固定文言を stderr 出力 + exit code `3`。
+- **`inprocess`** — helper プロセス内で `NautilusRunner` を直接起動する。
+  立花 venue は **credential が必須**: 第二暗証番号が無い場合、`LiveSession.run()`
+  は `SecondPasswordRequired` event を `on_event` に emit してから `RuntimeError`
+  を raise する (R4 Group B silent-HIGH-2 修正; attach 経路の event と対称)。
+  CLI は exit code `3` で終了する。
+
+`auto` 経路で credential 解決を CLI で強制しないのは、attach 経路に到達した場合に
+不要な credential 入力を求めない UX 設計 (CLI が解決を試みる場所は env / `--password` /
+stdin の 3 経路だけで、それらが無くても attach 経路では成立する)。`inprocess` への
+fallback で credential 不在が判明した場合のみ `LiveSession.run()` 側で
+`SecondPasswordRequired` event / `ValueError` として表面化する。
+
 `SecondPasswordRequired` を engine から受信した場合、CLI は stderr に固定文言
 **「第二暗証番号を設定してください」** を出力して exit code `3` で終了する
 （受け入れ基準 #8 CLI 部分、`SECOND_PASSWORD_REQUIRED_MESSAGE` 定数で pin）。

@@ -71,11 +71,17 @@ def _patch_kabu_deps_without_kernel(monkeypatch) -> None:
     )
 
     class _FakeNodeNoKernel:
-        """``kernel`` attr を持たない fake node。"""
+        """``kernel`` attr を持たない fake node。
+
+        R6 silent-MEDIUM-1: R4 Group F の cleanup と整合させ、underscore prefix
+        の ``_data_engine`` / ``_exec_engine`` 属性を意図的に **持たせない**。
+        production が ``getattr(node, "kernel", None) is None`` で早期 abort
+        するため、register_client 経路には到達しない。万一 production が
+        underscore 属性に fallback したら ``AttributeError`` で即発覚する設計。
+        """
 
         def __init__(self, *_a, **_kw):
-            self._data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-            self._exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+            pass  # _data_engine / _exec_engine は意図的に未定義
 
         def add_data(self, *_a, **_kw):
             pass
