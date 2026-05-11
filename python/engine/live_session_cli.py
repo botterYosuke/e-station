@@ -340,17 +340,35 @@ def main(
             )
 
     # 第二暗証番号を解決（in-process では必須、attach では None で固定）。
-    try:
-        second_password = _resolve_second_password(
-            args, stdin=stdin, stderr=stderr, mode=args.mode if args.mode != "auto" else "inprocess",
-        )
-        # NOTE: ``auto`` の場合は LiveSession 内部で attach probe → fallback inprocess の
-        # 順で解決する。CLI 段階では「inprocess かもしれない」前提で credential を要求する。
-        # attach 確定後でも second_password を保持してしまうが、
-        # LiveSession.run() は attach 経路では ``self._second_password`` を read しない。
-    except ValueError as exc:
-        # argparse error 経由で SystemExit にする（テストが SystemExit を想定するため）。
-        parser.error(str(exc))
+    # R8 MEDIUM-1: ``--mode auto`` で credential 未設定の場合に CLI 段階で
+    # SystemExit していた旧実装を修正する。auto モードでは ``LiveSession``
+    # 内部で attach probe → 必要に応じて inprocess fallback の順で解決するため、
+    # CLI 段階で credential を強制すると attach 経由のワークフローが実質使えなくなる。
+    #
+    # 解決方針:
+    #   - mode=attach   → 既存通り (attach は wire に流さない → None 返却)
+    #   - mode=inprocess → 既存通り (必須、欠落で argparse error)
+    #   - mode=auto      → attach 同様 wire 安全性を優先し、credential 解決を試みるが
+    #                      欠落しても ``None`` で先に進む。inprocess fallback が
+    #                      最終的に必要だった場合は ``LiveSession.run()`` 側で
+    #                      ``SecondPasswordRequired`` event か ValueError として出る。
+    if args.mode == "auto":
+        try:
+            second_password = _resolve_second_password(
+                args, stdin=stdin, stderr=stderr, mode="inprocess",
+            )
+        except ValueError:
+            # auto モードでは credential 未設定でも CLI で停めない。
+            # attach probe 成功時は LiveSession.run() は second_password を read しない。
+            second_password = None
+    else:
+        try:
+            second_password = _resolve_second_password(
+                args, stdin=stdin, stderr=stderr, mode=args.mode,
+            )
+        except ValueError as exc:
+            # argparse error 経由で SystemExit にする（テストが SystemExit を想定するため）。
+            parser.error(str(exc))
 
     # CLI 起動直後の事前 hint（authoritative reject は engine 経由）。
     _hint_market_status(stderr)

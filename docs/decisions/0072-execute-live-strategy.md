@@ -128,18 +128,26 @@ def start_live(
    から復元。**例外 OR `False` 戻り値の OR で abort** とし、
    `EngineError{code:"warm_up_failed"}` emit + `await exec_client.close()`
    呼出を必須にする（issue #42 統一決定 #16 / 受け入れ基準 #14）
-6. **`LiveStrategyReady` emit** — `warm_up()` 成功直後・`node.build()` より前。
-   理由: 4 ペイン自動生成は「データが流れ始める前」が望ましい
-   （受け入れ基準 #11、issue #42 統一決定 #21）
-7. **EngineStarted emit + Bridge threads 起動** — `LiveDataBridge` /
-   `LiveEcBridge` を daemon thread で起動し、`call_soon_threadsafe` 経由で
-   loop B 上の client を呼ぶ
-8. **TradingNode 起動** — `node.build()` → `node.run()`（blocking）。
+6. **`EngineStarted` emit** — `warm_up()` 成功直後 / `node.build()` より前。
+   account_id には venue 名（`"tachibana"` / `"kabu_station"`）をそのまま流す。
+   Rust 側 `src/handlers/replay.rs::ReplayMsg::LiveStarted` arm が
+   `pending_strategy_id` セット + 60s warm_up timeout タイマー起動を担当する。
+7. **`LiveStrategyReady` emit** — `EngineStarted` の **直後**（必ず Started → Ready の順）。
+   理由: 4 ペイン自動生成 + Rust state machine の `Running { strategy_id, instrument_id, venue }`
+   遷移を「データが流れ始める前」に終わらせるため
+   （受け入れ基準 #11、issue #42 統一決定 #21）。Rust 側 `ReplayMsg::LiveStrategyReady` arm が
+   step 6 で立てた `pending_strategy_id` / timeout token を解除する責務を持つため
+   **逆順だと phantom warm_up timeout banner が GUI に出る silent regression** を起こす
+   （R8 HIGH-1 で固定、E2E 契約 `_EXPECTED_LIFECYCLE` と一致）。
+8. **Bridge threads 起動** — `LiveDataBridge` / `LiveEcBridge` を daemon thread で
+   起動し、`call_soon_threadsafe` 経由で loop B 上の client を呼ぶ
+   （tachibana 専用 — kabu_station は `_handle_subscribe_kabu_station` 経路）。
+9. **TradingNode 起動** — `node.build()` → `node.run()`（blocking）。
    `node.build()` 失敗時は `EngineError{code:"node_build_failed"}` emit +
    Rust 側で `teardown_live_panes` を呼ぶ責務
-9. **finally** — bridge threads join（timeout=5s）+
-   `EngineStopped{strategy_id}` emit + `LiveState` を CONNECTED に戻す +
-   `_live_fd_queue` / `_live_ec_queue` をドレイン
+10. **finally** — bridge threads join（timeout=5s）+
+    `EngineStopped{strategy_id}` emit + `LiveState` を CONNECTED に戻す +
+    `_live_fd_queue` / `_live_ec_queue` をドレイン
 
 ### 4. 第二暗証番号の扱い
 

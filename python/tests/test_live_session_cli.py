@@ -440,6 +440,50 @@ def test_second_password_stdin_handles_heredoc_pipe_empty_and_noninteractive(
     assert captured[0].second_password == "interactive-pw"
 
 
+def test_auto_mode_without_second_password_does_not_error_at_cli(
+    fake_live_session, strategy_file, monkeypatch,
+) -> None:
+    """R8 MEDIUM-1: ``--mode auto`` で second_password が未設定でも CLI で error しない。
+
+    旧実装は ``_resolve_second_password(..., mode=args.mode if != "auto" else "inprocess")``
+    で auto を inprocess 扱いし、credential が無いと argparse error で停止していた。
+    結果として ``--mode auto`` で既存 engine に attach するワークフローが実質使えなかった。
+
+    本テストは auto モードで credential 未設定 → CLI が SystemExit せず、
+    ``LiveSession(force_mode="auto", second_password=None)`` を構築することを pin する。
+    実 attach probe の結果（attach 成功 / inprocess fallback）は LiveSession 側の責務。
+    """
+    from engine.live_session_cli import main
+
+    captured: list[_FakeLiveSession] = []
+    orig_init = _FakeLiveSession.__init__
+
+    def _wrap_init(self, *a, **kw):
+        orig_init(self, *a, **kw)
+        self.injected_events = [
+            {"event": "EngineStopped", "strategy_id": "live-strategy",
+             "final_equity": "0", "ts_event_ms": 0},
+        ]
+        captured.append(self)
+
+    monkeypatch.setattr(_FakeLiveSession, "__init__", _wrap_init)
+
+    # _common_args は ``--mode attach`` を含むので auto に差し替える。
+    args = [a if a != "attach" else "auto" for a in _common_args(strategy_file)]
+    # second_password 系の env / args は一切設定しない。
+    rc = main(argv=args, stdin=io.StringIO(""))
+
+    assert rc == 0, (
+        f"auto mode without second_password must NOT exit non-zero at CLI, got rc={rc}"
+    )
+    assert captured, "LiveSession was not constructed"
+    assert captured[0].force_mode == "auto"
+    assert captured[0].second_password is None, (
+        f"auto mode must defer second_password resolution to LiveSession; "
+        f"CLI passed {captured[0].second_password!r}"
+    )
+
+
 def test_attach_mode_does_not_accept_second_password(
     fake_live_session, strategy_file, monkeypatch,
 ) -> None:

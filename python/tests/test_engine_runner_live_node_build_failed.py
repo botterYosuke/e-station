@@ -82,8 +82,19 @@ def _patch_tachibana_deps_with_build_failure(monkeypatch, build_exc: BaseExcepti
 
     class _FakeNode:
         def __init__(self, *_a, **_kw) -> None:
-            self._data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-            self._exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+            # R8 HIGH-2: canonical kernel surface (real TradingNode 準拠)。
+            _data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+            _exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+
+            class _Kernel:
+                loop = None
+                msgbus = None
+                cache = None
+                clock = None
+                data_engine = _data_engine
+                exec_engine = _exec_engine
+
+            self.kernel = _Kernel()
 
         def add_data(self, *_a, **_kw) -> None:
             pass

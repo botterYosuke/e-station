@@ -111,16 +111,21 @@ def _patch_kabu_dependencies(
     # 早期 abort して EngineError(kernel_unavailable) を emit する。テスト経路は
     # kernel を mock で持たせて parent kwargs 組み立てを通す（factory 側で kwargs
     # は無害に投げ捨てられる）。
+    # R8 HIGH-2: register_client は ``kernel.{data,exec}_engine`` 経由のみ
+    # （real TradingNode 準拠）。
+    _data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+    _exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+
     class _FakeKernel:
         loop = None
         msgbus = None
         cache = None
         clock = None
+        data_engine = _data_engine
+        exec_engine = _exec_engine
 
     class _FakeNode:
         def __init__(self, *_a, **_kw):
-            self._data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-            self._exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
             self.kernel = _FakeKernel()
 
         def add_data(self, *_a, **_kw):
@@ -270,6 +275,18 @@ class TestLiveStrategyReadyVenuePropagation:
             "LiveStrategyReady must precede node_build_failed (warm_up→Ready→build 順)"
         )
 
+        # R8 HIGH-1: EngineStarted must be emitted BEFORE LiveStrategyReady.
+        # Rust 側 src/handlers/replay.rs:LiveStarted arm が pending_strategy_id /
+        # 60s warm_up timeout token をセットし、後続の LiveStrategyReady arm で
+        # クリアする設計（test_live_session_cli_e2e.py:_EXPECTED_LIFECYCLE と一致）。
+        # 順序が逆だと Ready で先にクリア → Started で再セットされ phantom
+        # warm_up timeout が 60s 後に GUI に出る silent regression を起こす。
+        started_idx = events.index(started_events[0])
+        assert started_idx < ready_idx, (
+            "EngineStarted must precede LiveStrategyReady "
+            f"(Rust state machine契約 / _EXPECTED_LIFECYCLE), got events={events!r}"
+        )
+
 
 class TestLiveBridgesNotStartedForKabuStation:
     """review-fix H-2: LiveDataBridge / LiveEcBridge は tachibana 専用なので
@@ -314,6 +331,99 @@ class TestWarmingUpTickerVenueText:
 # ---------------------------------------------------------------------------
 # tachibana 経路の後方互換: venue 省略 / venue="tachibana" は既存挙動
 # ---------------------------------------------------------------------------
+
+
+class TestRegisterClientUsesKernelPath:
+    """R8 HIGH-2: ``node.kernel.{data,exec}_engine.register_client`` 経由で
+    Nautilus 親型 type check を通すこと。
+
+    旧実装は ``node._data_engine`` / ``node._exec_engine`` という underscore
+    prefix の private 属性に直接 register_client していた。real ``TradingNode``
+    は canonical な surface として ``kernel.data_engine`` / ``kernel.exec_engine``
+    のみを expose しており、private 属性は内部実装次第で消失しうる。
+    fake test 経路は両方 mock していたため silent に通っていたが、
+    real ``TradingNode`` smoke (test_kabu_station_nautilus_parent.py の
+    ``@pytest.mark.live_demo_inprocess`` 群) は ``kernel.*_engine.register_client``
+    のみを使っており、production と test の経路が drift していた。
+
+    本 test では underscore 経路を **わざと AttributeError を出すように** 設計し、
+    kernel 経由のみ通る regression pin として固定する。
+    """
+
+    def test_register_client_called_via_kernel_not_private_attr(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "engine.nautilus.engine_runner.is_market_open",
+            lambda *_a, **_kw: True,
+        )
+        _FakeKabuExecClient.instances = []
+
+        def _exec_factory(*_a, **kwargs):
+            return _FakeKabuExecClient(warm_up_mode="true", **kwargs)
+
+        monkeypatch.setattr(
+            "engine.nautilus.clients.kabu_station.kabu_station_exec_client.KabuStationLiveExecutionClient",
+            _exec_factory,
+        )
+
+        class _FakeDataClient:
+            def __init__(self, *_a, **_kw):
+                self.id = "fake-kabu-data"
+
+        class _FakeEventBridge:
+            def __init__(self, *_a, **_kw):
+                self._loop = None
+
+        monkeypatch.setattr(
+            "engine.nautilus.clients.kabu_station.kabu_station_data_client.KabuStationLiveDataClient",
+            _FakeDataClient,
+        )
+        monkeypatch.setattr(
+            "engine.nautilus.clients.kabu_station.kabu_station_event_bridge.KabuStationEventBridge",
+            _FakeEventBridge,
+        )
+
+        # kernel surface のみを expose する fake. ``_data_engine`` / ``_exec_engine``
+        # 属性は **わざと持たせない** ことで、production code が underscore 経路に
+        # fallback したら AttributeError で即 fail する設計。
+        kernel_exec_mock = MagicMock()
+        kernel_data_mock = MagicMock()
+
+        class _KernelOnlyFakeKernel:
+            loop = None
+            msgbus = None
+            cache = None
+            clock = None
+            data_engine = kernel_data_mock
+            exec_engine = kernel_exec_mock
+
+        class _KernelOnlyFakeNode:
+            def __init__(self, *_a, **_kw):
+                self.kernel = _KernelOnlyFakeKernel()
+
+            def add_data(self, *_a, **_kw):
+                pass
+
+            def add_strategies(self, *_a, **_kw):
+                pass
+
+            def build(self):
+                raise RuntimeError("kernel-only smoke: stop here, no real build()")
+
+        monkeypatch.setattr("nautilus_trader.live.node.TradingNode", _KernelOnlyFakeNode)
+        monkeypatch.setattr(
+            "engine.nautilus.instrument_factory.make_equity_instrument",
+            lambda *_a, **_kw: object(),
+        )
+
+        events: list[dict] = []
+        runner = NautilusRunner()
+        runner.start_live(**_make_runner_args(events.append, venue="kabu_station"))
+
+        # kernel 経由で register_client が **一度ずつ** 呼ばれたこと。
+        kernel_exec_mock.register_client.assert_called_once()
+        kernel_data_mock.register_client.assert_called_once()
 
 
 class TestTachibanaBackwardsCompat:

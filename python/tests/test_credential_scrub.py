@@ -213,8 +213,22 @@ def _patch_min_dependencies(monkeypatch) -> None:
 
     class _FakeNode:
         def __init__(self, *_a, **_kw) -> None:
-            self._data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
-            self._exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+            # R8 HIGH-2: canonical kernel surface に揃える。register_client は
+            # ``kernel.{data,exec}_engine`` 経由でのみ呼ばれる契約（real
+            # ``TradingNode`` 準拠）。旧 ``_data_engine`` / ``_exec_engine``
+            # private attrs は real surface に存在しないので持たせない。
+            _data_engine = type("DE", (), {"register_client": lambda *a, **k: None})()
+            _exec_engine = type("EE", (), {"register_client": lambda *a, **k: None})()
+
+            class _Kernel:
+                loop = None
+                msgbus = None
+                cache = None
+                clock = None
+                data_engine = _data_engine
+                exec_engine = _exec_engine
+
+            self.kernel = _Kernel()
 
         def add_data(self, *_a, **_kw) -> None:
             pass

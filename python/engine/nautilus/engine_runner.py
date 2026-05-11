@@ -1377,6 +1377,42 @@ class NautilusRunner:
             )
             node = TradingNode(config=config)
 
+            # R8 HIGH-2: kernel canonical surface 経由で register_client する。
+            # real ``TradingNode`` は ``node.kernel.{data,exec}_engine`` のみを
+            # 公式 API surface として expose しており、旧実装の ``node._data_engine``
+            # / ``node._exec_engine`` という underscore prefix の private 属性は
+            # 内部実装次第で消失しうる。fake test 経路は両方 mock していたため
+            # silent に通っていたが、real ``TradingNode`` smoke
+            # (``test_kabu_station_nautilus_parent.py`` の
+            # ``@pytest.mark.live_demo_inprocess`` 群) は kernel 経由のみを
+            # 使っており、production / test の経路が drift していた。
+            # tachibana / kabu_station 両 venue で kernel_unavailable guard を
+            # 統一する。
+            _node_kernel = getattr(node, "kernel", None)
+            if _node_kernel is None:
+                log.error(
+                    "[start_live] node.kernel not available — "
+                    "cannot register clients (venue=%s)",
+                    venue,
+                )
+                on_event({
+                    "event": "EngineError",
+                    "code": "kernel_unavailable",
+                    "message": (
+                        "Nautilus TradingNode.kernel is not available — "
+                        f"cannot register clients (venue={venue})"
+                    ),
+                    "strategy_id": strategy_id,
+                    "ts_event_ms": int(_time.time() * 1000),
+                })
+                on_event({
+                    "event": "EngineStopped",
+                    "strategy_id": strategy_id,
+                    "final_equity": "0",
+                    "ts_event_ms": int(_time.time() * 1000),
+                })
+                return
+
             # issue #42 Phase 4: venue 引数で client 生成経路を分岐。
             # tachibana = 既存経路（PNoCounter + Tachibana* + OrderIdMap）。
             # kabu_station = KabuStationLive*（KabuStationVenue を session として渡す）。
@@ -1406,36 +1442,10 @@ class NautilusRunner:
                 from nautilus_trader.model.enums import AccountType, OmsType
                 from nautilus_trader.model.identifiers import ClientId, Venue
 
-                # R4 R3-SILENT-5: ``node.kernel`` 不在は kabu_station 経路の
-                # silent failure 源。旧実装は空 ``_kabu_parent_kwargs`` で
-                # client 構築を試み必須引数不足の ``TypeError`` で落ちて、
-                # ``EngineError`` も ``EngineStopped`` も出ない silent failure
-                # を抱えていた。早期 abort して ``kernel_unavailable`` + ``EngineStopped``
-                # を emit する。単体テスト経路は ``_FakeNode`` に ``kernel`` mock を
-                # 持たせて parent kwargs を組み立てる。
-                _kernel = getattr(node, "kernel", None)
-                if _kernel is None:
-                    log.error(
-                        "[start_live] kabu_station: node.kernel not available — "
-                        "cannot register clients"
-                    )
-                    on_event({
-                        "event": "EngineError",
-                        "code": "kernel_unavailable",
-                        "message": (
-                            "Nautilus TradingNode.kernel is not available — "
-                            "cannot register kabu_station clients"
-                        ),
-                        "strategy_id": strategy_id,
-                        "ts_event_ms": int(_time.time() * 1000),
-                    })
-                    on_event({
-                        "event": "EngineStopped",
-                        "strategy_id": strategy_id,
-                        "final_equity": "0",
-                        "ts_event_ms": int(_time.time() * 1000),
-                    })
-                    return
+                # R4 R3-SILENT-5 / R8 HIGH-2: ``node.kernel`` の None guard は
+                # venue 分岐 **前** で hoist 済み (上記 _node_kernel 取得を参照)。
+                # ここでは hoisted ``_node_kernel`` をそのまま parent kwargs に流す。
+                _kernel = _node_kernel
 
                 _kabu_parent_kwargs: dict = dict(
                     loop=_kernel.loop,
@@ -1472,8 +1482,12 @@ class NautilusRunner:
                 )
                 event_bridge = KabuStationEventBridge(client=exec_client)
 
-            node._data_engine.register_client(data_client)
-            node._exec_engine.register_client(exec_client)
+            # R8 HIGH-2: canonical kernel surface 経由で register_client する。
+            # 旧実装の ``node._data_engine`` / ``node._exec_engine`` は real
+            # ``TradingNode`` で AttributeError になる可能性があった (private 内部
+            # 実装に依存)。``kernel.{data,exec}_engine`` が公式 API surface。
+            _node_kernel.data_engine.register_client(data_client)
+            _node_kernel.exec_engine.register_client(exec_client)
 
             # Instrument 登録
             instrument = make_equity_instrument(_sym, _venue)
@@ -1533,6 +1547,23 @@ class NautilusRunner:
                         ticker_exc,
                     )
 
+            # issue #42 R8 HIGH-1: EngineStarted を LiveStrategyReady より先に emit する。
+            # Rust 側 src/handlers/replay.rs::ReplayMsg::LiveStarted arm が
+            # `pending_strategy_id` セット + 60s warm_up timeout タイマー起動を担当し、
+            # 後続の `LiveStrategyReady` arm がそれをクリアする state machine 設計。
+            # 順序が逆だと Ready で先にクリア → Started で再セットされ、phantom warm_up
+            # timeout banner が 60s 後に GUI に出る silent regression を起こす。
+            # E2E 契約 (test_live_session_cli_e2e.py:_EXPECTED_LIFECYCLE) も
+            # ["EngineStarted", "LiveStrategyReady", "EngineStopped"] の部分列を要求する。
+            #
+            # EngineStarted emit — account_id は venue 名を流用（既存契約を踏襲）。
+            on_event({
+                "event": "EngineStarted",
+                "strategy_id": strategy_id,
+                "account_id": venue,
+                "ts_event_ms": int(_time.time() * 1000),
+            })
+
             # issue #42 Phase 1 / 統一決定 #15 (Open Q1):
             # LiveStrategyReady は warm_up 成功直後 / node.build() より前に emit。
             # Rust 側はこれを受信して 4 ペイン自動生成（冪等）の trigger とする。
@@ -1542,14 +1573,6 @@ class NautilusRunner:
                 "strategy_id": strategy_id,
                 "venue": venue,
                 "instrument_id": instrument_id,
-                "ts_event_ms": int(_time.time() * 1000),
-            })
-
-            # EngineStarted emit — account_id は venue 名を流用（既存契約を踏襲）。
-            on_event({
-                "event": "EngineStarted",
-                "strategy_id": strategy_id,
-                "account_id": venue,
                 "ts_event_ms": int(_time.time() * 1000),
             })
 
