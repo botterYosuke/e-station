@@ -249,3 +249,91 @@ class TestTachibanaLiveDataClientExtensions:
             instrument_id,
             trade,
         )
+
+
+# ---------------------------------------------------------------------------
+# R3 M1: KabuLiveDataBridge / KabuLiveEcBridge の _loop=None 警告
+# ---------------------------------------------------------------------------
+
+
+class TestKabuBridgeLoopNoneWarning:
+    """R3 M1: client/bridge ._loop が None のときは silent drop ではなく WARNING
+    で観測性を確保する (live data / fill が落ちる事態を運用ログで気付けるように)。
+    """
+
+    def test_kabu_live_data_bridge_logs_warning_when_loop_none(self, caplog):
+        """KabuLiveDataBridge.run() で client._loop=None のとき WARNING ログを出す。"""
+        import logging
+        from engine.nautilus.live_bridges import KabuLiveDataBridge
+
+        data_client = MagicMock()
+        data_client._loop = None  # 未注入
+
+        fd_queue: queue.Queue = queue.Queue()
+        fd_queue.put({"price": "1500.0", "qty": "100", "side": "buy", "ts_ms": 1700000000000})
+
+        stop_event = threading.Event()
+        bridge = KabuLiveDataBridge(
+            data_client=data_client,
+            fd_queue=fd_queue,
+            instrument_id="9433.KabuStation Stock",
+            stop_event=stop_event,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="engine.nautilus.live_bridges"):
+            t = threading.Thread(target=bridge.run, daemon=True)
+            t.start()
+            # 1 件処理されるのを待つ
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if any("KabuLiveDataBridge" in rec.message for rec in caplog.records):
+                    break
+                time.sleep(0.01)
+            stop_event.set()
+            t.join(timeout=1.0)
+
+        # WARNING ログが出ている (silent loss 防止)
+        kabu_warns = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING and "KabuLiveDataBridge" in r.message
+        ]
+        assert kabu_warns, (
+            f"KabuLiveDataBridge must log WARNING when _loop is None; got {caplog.records!r}"
+        )
+
+    def test_kabu_live_ec_bridge_logs_warning_when_loop_none(self, caplog):
+        """KabuLiveEcBridge.run() で bridge._loop=None のとき WARNING ログを出す。"""
+        import logging
+        from engine.nautilus.live_bridges import KabuLiveEcBridge
+
+        event_bridge = MagicMock()
+        event_bridge._loop = None  # 未注入
+
+        ec_queue: queue.Queue = queue.Queue()
+        ec_queue.put({"OrderID": "X-1", "State": 5})
+
+        stop_event = threading.Event()
+        bridge = KabuLiveEcBridge(
+            event_bridge=event_bridge,
+            ec_queue=ec_queue,
+            stop_event=stop_event,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="engine.nautilus.live_bridges"):
+            t = threading.Thread(target=bridge.run, daemon=True)
+            t.start()
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if any("KabuLiveEcBridge" in rec.message for rec in caplog.records):
+                    break
+                time.sleep(0.01)
+            stop_event.set()
+            t.join(timeout=1.0)
+
+        kabu_warns = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING and "KabuLiveEcBridge" in r.message
+        ]
+        assert kabu_warns, (
+            f"KabuLiveEcBridge must log WARNING when _loop is None; got {caplog.records!r}"
+        )

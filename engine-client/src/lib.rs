@@ -46,5 +46,10 @@ pub use venue_caps::VenueCapsStore;
 ///   - 22: ReplayTimeUpdated 追加（分足・tick 足での current_day 時刻表示、Issue 3）
 ///   - 23: StrategyScenarioLoaded.resolved_instruments 追加（schema v3 instruments_ref 対応）
 ///   - 24: RequestVenueLogout コマンド追加（立花セッション明示破棄 IPC）
+///   - 25: LoadLiveStrategyScenario / LiveStrategyScenarioLoaded 追加（issue #42 Phase 2）
+///   - 26: LiveStrategyReady 追加（issue #42 Phase 3、auto_generate_live_panes 冪等トリガー）
+///   - 27: LiveStrategyWarmingUp 追加（issue #42 Phase 3、warm_up 進捗 5s 毎 emit）
+///   - 28: EngineBusy.venue / EngineBusy.busy_kind 追加（issue #42 Phase 3、venue-scoped concurrent live ガード）
+///   - 29: SubscriptionEvicted variant 追加（issue #42 R1 HIGH-2、spec §3.2-G — kabuステーション 50 銘柄 PUSH 上限到達時の LRU evict 通知）
 pub const SCHEMA_MAJOR: u32 = 3;
-pub const SCHEMA_MINOR: u32 = 24;
+pub const SCHEMA_MINOR: u32 = 29;

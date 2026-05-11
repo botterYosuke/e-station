@@ -17,7 +17,7 @@ from engine.server import _ENGINE_VERSION
 # gRPC IPC schema version — source of truth for the gRPC transport layer.
 # Keep in sync with engine-client/src/lib.rs SCHEMA_MAJOR / SCHEMA_MINOR.
 SCHEMA_MAJOR: int = 3   # gRPC IPC schema major version
-SCHEMA_MINOR: int = 24  # gRPC IPC schema minor version
+SCHEMA_MINOR: int = 29  # gRPC IPC schema minor version
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ _FIELD_TO_OP = {
     "load_strategy_scenario": "LoadStrategyScenario",
     "save_strategy_scenario": "SaveStrategyScenario",
     "request_venue_logout": "RequestVenueLogout",
+    "load_live_strategy_scenario": "LoadLiveStrategyScenario",
 }
 
 _EVENT_TO_FIELD_AND_CLASS = {
@@ -116,6 +117,12 @@ _EVENT_TO_FIELD_AND_CLASS = {
     "StrategyScenarioSaved":      ("strategy_scenario_saved",     engine_pb2.StrategyScenarioSavedEvent),
     "LiveBuyingPower":            ("live_buying_power",           engine_pb2.LiveBuyingPowerEvent),
     "ReplayTimeUpdated":          ("replay_time_updated",         engine_pb2.ReplayTimeUpdatedEvent),
+    "LiveStrategyScenarioLoaded": ("live_strategy_scenario_loaded", engine_pb2.LiveStrategyScenarioLoadedEvent),
+    "LiveStrategyReady":          ("live_strategy_ready",          engine_pb2.LiveStrategyReadyEvent),
+    "LiveStrategyWarmingUp":      ("live_strategy_warming_up",     engine_pb2.LiveStrategyWarmingUpEvent),
+    # issue #42 R1 HIGH-2 (schema 3.29): SubscriptionEvicted 全 wire 同期。
+    # 旧版は spec §3.2-G 契約に対し schema 全層 variant 欠落 → silent drop していた。
+    "SubscriptionEvicted":        ("subscription_evicted",         engine_pb2.SubscriptionEvictedEvent),
 }
 
 
@@ -251,6 +258,15 @@ def _dict_to_proto_event(event_dict: dict) -> engine_pb2.Event | None:
     # server.py の outbox には raw dict が入るため、ParseDict に渡す前に json.dumps する。
     if event_name == "StrategyScenarioLoaded" and isinstance(payload_dict.get("scenario"), dict):
         payload_dict = dict(payload_dict, scenario=json.dumps(payload_dict["scenario"]))
+
+    # issue #42 Phase 2: LiveStrategyScenarioLoaded.strategy_init_kwargs is wire-form
+    # JSON string. Outbox payload has raw dict, so json.dumps it before ParseDict.
+    if event_name == "LiveStrategyScenarioLoaded" and isinstance(
+        payload_dict.get("strategy_init_kwargs"), dict
+    ):
+        payload_dict = dict(
+            payload_dict, strategy_init_kwargs=json.dumps(payload_dict["strategy_init_kwargs"])
+        )
 
     try:
         payload = ParseDict(payload_dict, msg_class(), ignore_unknown_fields=False)

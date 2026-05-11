@@ -46,6 +46,27 @@ SCENARIO: Scenario = {
     "granularity": "Minute",
     "initial_cash": 1_000_000,
 }
+
+
+# issue #42 Phase 5: LIVE_SCENARIO は live モードのフォーム prefill 用。
+# 同じ戦略ファイルを replay → demo → prod の順で動かす建前のため、
+# `instrument` は SCENARIO['instrument'] と一致させる。
+# `extract_live()` は AST で抽出するためトップレベル assignment であること。
+# kabu_station venue で動かす場合の例:
+#     LIVE_SCENARIO = {
+#         "schema_version": 1,
+#         "instrument": "1301.TSE",
+#         "max_qty": 100,
+#         "max_notional_jpy": 500_000,
+#         "venue": "kabu_station",
+#     }
+LIVE_SCENARIO: dict = {
+    "schema_version": 1,
+    "instrument": "1301.TSE",
+    "max_qty": 100,
+    "max_notional_jpy": 500_000,
+    "venue": "tachibana",
+}
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import InstrumentId

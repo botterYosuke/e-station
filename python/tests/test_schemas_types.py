@@ -129,6 +129,216 @@ class TestEngineBusyOrthogonalRejection:
 
 
 # ---------------------------------------------------------------------------
+# R2-A H8 / H9: EngineBusy.busy_kind Literal + another_strategy_on_venue venue 必須
+# ---------------------------------------------------------------------------
+
+
+class TestEngineBusyBusyKindLiteral:
+    """H8: ``busy_kind`` は ``BusyKind`` Literal で固定（typo / 未予約値を拒否）。"""
+
+    def test_busy_kind_alias_is_defined(self) -> None:
+        assert hasattr(schemas, "BusyKind")
+
+    def test_busy_kind_accepts_another_strategy_on_venue(self) -> None:
+        evt = schemas.EngineBusy(
+            current_state="TRADING",
+            attempted_command="StartEngine",
+            reason="venue concurrency",
+            venue="tachibana",
+            busy_kind="another_strategy_on_venue",
+        )
+        assert evt.busy_kind == "another_strategy_on_venue"
+
+    def test_busy_kind_accepts_none(self) -> None:
+        evt = schemas.EngineBusy(
+            current_state="LOADED",
+            attempted_command="LoadReplayData",
+            reason="replay busy",
+        )
+        assert evt.busy_kind is None
+
+    def test_busy_kind_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError):
+            schemas.EngineBusy(
+                current_state="TRADING",
+                attempted_command="StartEngine",
+                reason="x",
+                venue="tachibana",
+                busy_kind="typo_value",  # type: ignore[arg-type]
+            )
+
+
+class TestEngineBusyAnotherStrategyRequiresVenue:
+    """H9: ``busy_kind='another_strategy_on_venue'`` のとき ``venue`` が必須。"""
+
+    def test_engine_busy_another_strategy_requires_venue(self) -> None:
+        with pytest.raises(ValidationError):
+            schemas.EngineBusy(
+                current_state="TRADING",
+                attempted_command="StartEngine",
+                reason="missing venue",
+                venue=None,
+                busy_kind="another_strategy_on_venue",
+            )
+
+    def test_engine_busy_another_strategy_with_venue_accepted(self) -> None:
+        evt = schemas.EngineBusy(
+            current_state="TRADING",
+            attempted_command="StartEngine",
+            reason="ok",
+            venue="tachibana",
+            busy_kind="another_strategy_on_venue",
+        )
+        assert evt.venue == "tachibana"
+
+
+# ---------------------------------------------------------------------------
+# R2-A M1: LiveStrategyWarmingUp.progress 範囲制約 [0.0, 1.0]
+# ---------------------------------------------------------------------------
+
+
+class TestLiveStrategyWarmingUpProgressRange:
+    """M1: ``progress`` は 0.0–1.0 の範囲外を拒否する。"""
+
+    def test_progress_zero_accepted(self) -> None:
+        evt = schemas.LiveStrategyWarmingUp(strategy_id="s", progress=0.0, message="m")
+        assert evt.progress == 0.0
+
+    def test_progress_one_accepted(self) -> None:
+        evt = schemas.LiveStrategyWarmingUp(strategy_id="s", progress=1.0, message="m")
+        assert evt.progress == 1.0
+
+    def test_progress_above_one_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            schemas.LiveStrategyWarmingUp(strategy_id="s", progress=1.5, message="m")
+
+    def test_progress_below_zero_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            schemas.LiveStrategyWarmingUp(strategy_id="s", progress=-0.1, message="m")
+
+
+# ---------------------------------------------------------------------------
+# R2-A M2: LiveStrategyScenarioLoaded all-or-none model_validator
+# ---------------------------------------------------------------------------
+
+
+class TestLiveStrategyScenarioLoadedAllOrNone:
+    """M2: ``instrument_id`` / ``max_qty`` / ``max_notional_jpy`` / ``venue`` は
+    全 None または全 Some が要求される（部分 None は ValidationError）。
+    ``strategy_init_kwargs`` は対象外（任意フィールド）。
+    """
+
+    def test_all_none_accepted(self) -> None:
+        evt = schemas.LiveStrategyScenarioLoaded(request_id="r")
+        assert evt.instrument_id is None
+        assert evt.max_qty is None
+        assert evt.max_notional_jpy is None
+        assert evt.venue is None
+
+    def test_all_set_accepted(self) -> None:
+        evt = schemas.LiveStrategyScenarioLoaded(
+            request_id="r",
+            instrument_id="8306.T",
+            max_qty=100,
+            max_notional_jpy=500_000,
+            venue="tachibana",
+        )
+        assert evt.instrument_id == "8306.T"
+
+    def test_partial_set_rejected_missing_venue(self) -> None:
+        with pytest.raises(ValidationError):
+            schemas.LiveStrategyScenarioLoaded(
+                request_id="r",
+                instrument_id="8306.T",
+                max_qty=100,
+                max_notional_jpy=500_000,
+                # venue=None — partial fill
+            )
+
+    def test_partial_set_rejected_missing_max_qty(self) -> None:
+        with pytest.raises(ValidationError):
+            schemas.LiveStrategyScenarioLoaded(
+                request_id="r",
+                instrument_id="8306.T",
+                # max_qty=None — partial fill
+                max_notional_jpy=500_000,
+                venue="tachibana",
+            )
+
+    def test_strategy_init_kwargs_can_be_set_alone_without_other_fields(self) -> None:
+        # strategy_init_kwargs は all-or-none の対象外（任意フィールド）。
+        # 他フィールドが全 None でも strategy_init_kwargs が dict を持つ構成は不正。
+        # → all-or-none は他 4 フィールドのみが対象なので、ここでは reject されない。
+        # （仕様: kwargs だけ持って prefill フィールドは null 応答する想定は無いが、
+        #  pydantic の型としては許容する）
+        evt = schemas.LiveStrategyScenarioLoaded(
+            request_id="r",
+            strategy_init_kwargs={"x": 1},
+        )
+        assert evt.strategy_init_kwargs == {"x": 1}
+
+
+# ---------------------------------------------------------------------------
+# R2-A M3: StartEngine{Live} は max_qty / max_notional_jpy を必須化
+# ---------------------------------------------------------------------------
+
+
+class TestStartEngineLiveRequiresSafetyLimits:
+    """M3: Live mode の StartEngine は ``max_qty`` / ``max_notional_jpy`` 必須。"""
+
+    def _config(self, **overrides):
+        base = dict(
+            instrument_id="8306.T",
+            max_qty=100,
+            max_notional_jpy=500_000,
+            strategy_file="dummy.py",
+        )
+        base.update(overrides)
+        return schemas.EngineStartConfig(**base)
+
+    def test_live_with_both_limits_accepted(self) -> None:
+        cfg = self._config()
+        msg = schemas.StartEngine(
+            request_id="r",
+            engine="Live",
+            strategy_id="sid",
+            config=cfg,
+        )
+        assert msg.engine == "Live"
+
+    def test_start_engine_live_rejects_missing_max_qty(self) -> None:
+        cfg = self._config(max_qty=None)
+        with pytest.raises(ValidationError):
+            schemas.StartEngine(
+                request_id="r",
+                engine="Live",
+                strategy_id="sid",
+                config=cfg,
+            )
+
+    def test_start_engine_live_rejects_missing_max_notional(self) -> None:
+        cfg = self._config(max_notional_jpy=None)
+        with pytest.raises(ValidationError):
+            schemas.StartEngine(
+                request_id="r",
+                engine="Live",
+                strategy_id="sid",
+                config=cfg,
+            )
+
+    def test_start_engine_backtest_does_not_require_live_limits(self) -> None:
+        # Backtest は max_qty / max_notional_jpy 不要（live 専用フィールド）
+        cfg = self._config(max_qty=None, max_notional_jpy=None)
+        msg = schemas.StartEngine(
+            request_id="r",
+            engine="Backtest",
+            strategy_id="sid",
+            config=cfg,
+        )
+        assert msg.engine == "Backtest"
+
+
+# ---------------------------------------------------------------------------
 # M-Type3: OrderListFilter.status は既知の OrderStatus 値のみ受理する
 # ---------------------------------------------------------------------------
 

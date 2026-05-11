@@ -12,7 +12,7 @@ from engine.exchanges.tachibana_codec import deserialize_tachibana_list
 # SCHEMA_MINOR 履歴は engine-client/src/lib.rs の SCHEMA_MINOR 履歴コメントを source of truth とする。
 # 両者は test_rust_schema_constants_match_python (test_schemas_nautilus.py) で一致を担保。
 SCHEMA_MAJOR: int = 3
-SCHEMA_MINOR: int = 24
+SCHEMA_MINOR: int = 29
 
 # ---------------------------------------------------------------------------
 # Phase 8 review-fix-loop R1 / Phase 1 (型基盤) — type aliases shared across
@@ -78,6 +78,12 @@ AttemptedCommand = Literal[
 
 # AUTH_FAILED_CODE: 認証失敗時の EngineError.code (Phase 2 以降が import 可能)
 AUTH_FAILED_CODE: str = "auth_failed"
+
+# R2-A H8: EngineBusy.busy_kind の Literal alias。
+# 統一決定 #13 (venue 単位 concurrent live ガード) 用に
+# "another_strategy_on_venue" のみを定義。将来的に
+# "strategy_id_already_running" 等を追加する場合は本 alias の Literal を拡張する。
+BusyKind = Literal["another_strategy_on_venue"]
 
 # SaveErrorCode (F6 / レビュー反映 2026-05-04 ラウンド1 / H1, ラウンド2 / H-R2-2):
 # `StrategyScenarioSaved.error` の wire 形を Literal で固定する。これら 10 値以外は
@@ -744,7 +750,13 @@ class EngineStartConfig(IpcMessage):
 
     model_config = ConfigDict(extra="forbid")
 
-    instrument_id: str
+    # R7 MEDIUM-1: 空文字を pydantic 層で reject する。
+    # 空 `instrument_id` で StartEngine を受理すると、kabu_station 経路で
+    # `_kabu_symbol = ""` → `if _kabu_symbol:` を silent skip → PUT /register
+    # 対象なしで TRADING 起動 → live data が永遠に届かない dead path 化を起こす。
+    # 二段防御: 本 pydantic 検証で `Error{code:"invalid_config"}` を返し、
+    # さらに kabu 分岐内の runtime guard でも early-abort する (server.py)。
+    instrument_id: str = Field(..., min_length=1)
     instrument_ids: list[str] | None = None
     # replay 専用フィールド（Optional 化）
     start_date: str | None = None
@@ -764,6 +776,19 @@ class StartEngine(IpcMessage):
     engine: Literal["Backtest", "Live"]
     strategy_id: str
     config: EngineStartConfig
+
+    @model_validator(mode="after")
+    def _validate_live_requires_safety_limits(self) -> "StartEngine":
+        # R2-A M3: Live mode の StartEngine は ``max_qty`` / ``max_notional_jpy``
+        # が必須（issue #42 受け入れ基準 #6 + 危険ガード）。Backtest mode では
+        # 不要（live 専用フィールド）。pydantic 層で reject することで、
+        # server 層の暗黙 None 許容に依存しない明示契約とする。
+        if self.engine == "Live":
+            if self.config.max_qty is None:
+                raise ValueError("StartEngine{Live}: max_qty is required")
+            if self.config.max_notional_jpy is None:
+                raise ValueError("StartEngine{Live}: max_notional_jpy is required")
+        return self
 
 
 class StopEngine(IpcMessage):
@@ -1021,6 +1046,15 @@ class EngineBusy(IpcMessage):
     # `events()` はこの値で「自分宛の reject」と「broadcast / 別 client 由来」を
     # 区別する。
     request_id: str | None = None
+    # issue #42 Phase 3 (schema 3.28): venue 単位の concurrent live ガードで使う追加情報。
+    # venue は reject 対象 venue（同一 venue で別 strategy が走っているとき）。
+    # busy_kind は具体的な reject 種別（``BusyKind`` Literal で固定）。
+    # 旧 schema (minor < 28) からの payload は両方とも None で deserialise される。
+    # R2-A H8: ``busy_kind`` は ``BusyKind`` Literal で型化し、typo / 未予約値を
+    # pydantic validation 層で reject する。将来的に ``"strategy_id_already_running"``
+    # 等を追加する場合は ``BusyKind`` の Literal を拡張する（issue #42 統一決定 #13）。
+    venue: str | None = None
+    busy_kind: BusyKind | None = None
 
     @model_validator(mode="after")
     def _validate_state_command_orthogonal(self) -> "EngineBusy":
@@ -1036,6 +1070,13 @@ class EngineBusy(IpcMessage):
             raise ValueError(
                 f"EngineBusy: live-only command {cmd!r} cannot be paired with "
                 f"replay state {state!r}"
+            )
+        # R2-A H9: busy_kind="another_strategy_on_venue" のとき venue は必須。
+        # venue 単位の concurrent live ガード（統一決定 #13）の意味的整合性を担保する。
+        if self.busy_kind == "another_strategy_on_venue" and not self.venue:
+            raise ValueError(
+                "EngineBusy: venue must be set when "
+                "busy_kind='another_strategy_on_venue'"
             )
         return self
 
@@ -1148,6 +1189,112 @@ class StrategyScenarioSaved(IpcMessage):
     # 未知値は pydantic validation で reject される。
     # schema v3 instruments_ref 対応で 8 値 → 10 値に拡張済み（unresolved_ref / relative_ref_crosses_dir 追加）。
     error: SaveErrorCode | None = None
+
+
+# ── issue #42 Phase 2 / schema 3.25: LIVE_SCENARIO 抽出 IPC ───────────────────
+
+
+class LoadLiveStrategyScenario(IpcMessage):
+    """戦略 .py から LIVE_SCENARIO 定数を ast.literal_eval で安全抽出するよう Python に要求する。
+
+    live モードの `File > Open` で .py を選択したときに Rust が送出する。
+    Python 側は importlib を使わず ast.parse + ast.literal_eval のみで抽出する（副作用ゼロ）。
+    SCENARIO とは独立した定数で、live 専用フォーム prefill に使う。
+    """
+
+    op: Literal["LoadLiveStrategyScenario"] = "LoadLiveStrategyScenario"
+    request_id: str
+    strategy_path: str  # 戦略 .py の絶対パス
+
+
+class LiveStrategyScenarioLoaded(IpcMessage):
+    """LoadLiveStrategyScenario の応答。LIVE_SCENARIO が見つかった場合は各フィールドを返す。
+
+    すべて Optional。LIVE_SCENARIO 不在時は全フィールド None で即時応答する（Open Q2 の SoT）。
+    `strategy_init_kwargs` は wire 上 dict（Rust 側では JSON 文字列を decode して受信）。
+    """
+
+    event: Literal["LiveStrategyScenarioLoaded"] = "LiveStrategyScenarioLoaded"
+    request_id: str
+    instrument_id: Optional[str] = None
+    max_qty: Optional[int] = None
+    max_notional_jpy: Optional[int] = None
+    venue: Optional[str] = None
+    strategy_init_kwargs: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _validate_all_or_none(self) -> "LiveStrategyScenarioLoaded":
+        # R2-A M2: ``instrument_id`` / ``max_qty`` / ``max_notional_jpy`` / ``venue``
+        # は all-or-none 不変条件。部分 None は LIVE_SCENARIO 不在を表す（受け入れ基準
+        # #23）か全フィールド充足の 2 状態のみが正規。``strategy_init_kwargs`` は任意。
+        fields = (
+            self.instrument_id,
+            self.max_qty,
+            self.max_notional_jpy,
+            self.venue,
+        )
+        any_set = any(f is not None for f in fields)
+        all_set = all(f is not None for f in fields)
+        if any_set and not all_set:
+            raise ValueError(
+                "LiveStrategyScenarioLoaded: instrument_id / max_qty / "
+                "max_notional_jpy / venue must all be set or all be None"
+            )
+        return self
+
+
+# ── issue #42 Phase 3 / schema 3.26: LiveStrategyReady ──────────────────────
+
+
+class LiveStrategyReady(IpcMessage):
+    """live strategy が ``warm_up()`` に成功し、発注可能になった時点で emit する。
+
+    ``node.build()`` より前に emit する（統一決定 #15）。Rust 側はこれを受信して
+    4 ペイン自動生成 (`auto_generate_live_panes(strategy_id, instrument_id, venue)`)
+    の冪等トリガーとして使う。reconnect 時にも再生される。
+    """
+
+    event: Literal["LiveStrategyReady"] = "LiveStrategyReady"
+    strategy_id: str
+    venue: str
+    instrument_id: str
+    ts_event_ms: int
+
+
+# ── issue #42 Phase 3 / schema 3.27: LiveStrategyWarmingUp ──────────────────
+
+
+class LiveStrategyWarmingUp(IpcMessage):
+    """warm_up 進捗を 5s 毎に emit する中間イベント。
+
+    GUI 側は ``LiveStrategyReady`` 60s timeout のリセットと banner 表示の更新に使う
+    （統一決定 #10）。``progress`` は 0.0–1.0、``message`` は user-facing 進捗文言。
+    """
+
+    event: Literal["LiveStrategyWarmingUp"] = "LiveStrategyWarmingUp"
+    strategy_id: str
+    # R2-A M1: ``progress`` は 0.0–1.0 に制限する（範囲外は ValidationError）。
+    progress: float = Field(ge=0.0, le=1.0)
+    message: str
+
+
+# ── issue #42 R1 HIGH-2 / schema 3.29: SubscriptionEvicted ─────────────────
+
+
+class SubscriptionEvicted(IpcMessage):
+    """50 銘柄 PUSH 上限到達時の LRU evict 通知（spec §3.2-G）。
+
+    kabuステーション venue で発火。``RegisterSet`` が暗黙 LRU で最古銘柄を
+    evict したとき ``KabuStationLiveDataClient._on_evict`` 経由で emit される。
+    Rust 側 (`src/handlers/replay.rs`) は受信時に当該 symbol が登録解除された
+    旨を Toast で user に通知する（UI 文言契約は docs/specs/live-strategy.md §3.2-G）。
+    """
+
+    event: Literal["SubscriptionEvicted"] = "SubscriptionEvicted"
+    venue: str
+    symbol: str
+    # kabu Exchange code（1=東証 既定）。1 未満は invalid。
+    exchange: int = Field(ge=1)
 
 
 # ---------------------------------------------------------------------------

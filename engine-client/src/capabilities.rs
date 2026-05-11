@@ -83,6 +83,37 @@ pub fn supported_timeframes_for(
     venue_capability::<Vec<String>>(capabilities, venue, "supported_timeframes")
 }
 
+/// issue #42 Phase 3.5: per-venue live strategy capability gate.
+///
+/// `Ready.capabilities.venue_capabilities[<venue>].supports_live_strategy` を
+/// 安全側 (`false` = "live 戦略未対応") にフォールバックして読む薄いラッパー。
+/// 旧 server (cap key 未 expose) / 異 venue / malformed wire いずれも `false` を返す。
+///
+/// 利用側 (例: `live_strategy_form.rs` の venue dropdown) は本ヘルパーが返す
+/// `bool` 値だけで列挙可否を判定すること。`Result` を直接返さないのは、cap 欠落を
+/// "対応なし" と解釈するのが UI 層では一貫した安全側挙動になるため。
+pub fn supports_live_strategy(capabilities: &Value, venue: &str) -> bool {
+    venue_capability::<bool>(capabilities, venue, "supports_live_strategy")
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+/// issue #42 Phase 3.5: per-venue production-mode capability gate.
+///
+/// `Ready.capabilities.venue_capabilities[<venue>].is_production` を安全側
+/// (`false` = "demo 扱い") にフォールバックして読む薄いラッパー。tachibana の
+/// `TACHIBANA_ALLOW_PROD == "1"` env や kabu_station の `KABU_ALLOW_PROD=1 +
+/// KABU_ENV=prod` 等、venue 側が自分の本番判定ロジックを expose する想定。
+/// 旧 server / 異 venue / malformed wire いずれも `false` を返すことで、
+/// GUI の prod_mode トグルが誤って解放されるのを予防する（統一決定 #14）。
+pub fn is_production(capabilities: &Value, venue: &str) -> bool {
+    venue_capability::<bool>(capabilities, venue, "is_production")
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
 /// UI state-model gate: should the timeframe selector enable `tf` for
 /// `venue`?
 ///
@@ -197,6 +228,97 @@ mod tests {
         });
         let v: Option<i64> = venue_capability(&caps, "kabu_station", "max_push_symbols").unwrap();
         assert_eq!(v, Some(50));
+    }
+
+    // ── issue #42 Phase 3.5: supports_live_strategy / is_production helpers ──
+
+    /// 受け入れ基準 #12: tachibana=true / kabu_station=false の expose を Rust 側が
+    /// 正しく解釈できる。
+    #[test]
+    fn test_supports_live_strategy_returns_true_for_tachibana() {
+        let caps = json!({
+            "venue_capabilities": {
+                "tachibana": {
+                    "supports_live_strategy": true,
+                    "is_production": false
+                }
+            }
+        });
+        assert!(supports_live_strategy(&caps, "tachibana"));
+    }
+
+    #[test]
+    fn test_supports_live_strategy_returns_false_for_kabu_station() {
+        let caps = json!({
+            "venue_capabilities": {
+                "kabu_station": {
+                    "supports_live_strategy": false
+                }
+            }
+        });
+        assert!(!supports_live_strategy(&caps, "kabu_station"));
+    }
+
+    /// 旧 server / 異 venue / 空 capabilities のいずれも安全側 = false にフォールバック。
+    #[test]
+    fn test_supports_live_strategy_falls_back_false_on_missing_key() {
+        // venue 自体が無い
+        let caps = json!({"venue_capabilities": {}});
+        assert!(!supports_live_strategy(&caps, "tachibana"));
+
+        // venue はあるがキーが無い (旧 server)
+        let caps = json!({
+            "venue_capabilities": {
+                "tachibana": { "supported_timeframes": ["1d"] }
+            }
+        });
+        assert!(!supports_live_strategy(&caps, "tachibana"));
+
+        // capabilities 自体が空
+        let caps = json!({});
+        assert!(!supports_live_strategy(&caps, "tachibana"));
+
+        // 型不一致 (malformed wire) も false にフォールバック (UI が誤って許可しない)
+        let caps = json!({
+            "venue_capabilities": {
+                "tachibana": { "supports_live_strategy": "yes" }
+            }
+        });
+        assert!(!supports_live_strategy(&caps, "tachibana"));
+    }
+
+    /// 受け入れ基準 #18: tachibana の is_production 読み取りを Rust ヘルパーで pin。
+    #[test]
+    fn test_is_production_returns_true_when_advertised() {
+        let caps = json!({
+            "venue_capabilities": {
+                "tachibana": { "is_production": true }
+            }
+        });
+        assert!(is_production(&caps, "tachibana"));
+    }
+
+    #[test]
+    fn test_is_production_falls_back_false_on_missing_key() {
+        // 旧 server (tachibana 用 is_production 未 expose)
+        let caps = json!({
+            "venue_capabilities": {
+                "tachibana": { "supported_timeframes": ["1d"] }
+            }
+        });
+        assert!(!is_production(&caps, "tachibana"));
+
+        // venue 自体が無い
+        let caps = json!({"venue_capabilities": {}});
+        assert!(!is_production(&caps, "tachibana"));
+
+        // 型不一致は安全側 (= demo) に倒す
+        let caps = json!({
+            "venue_capabilities": {
+                "tachibana": { "is_production": "true" }
+            }
+        });
+        assert!(!is_production(&caps, "tachibana"));
     }
 
     /// P4-3: `is_production` フラグを Rust 側から読めること。

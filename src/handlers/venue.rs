@@ -167,12 +167,40 @@ impl crate::Flowsurface {
                     }
                     VenueEvent::Ready => {
                         log::info!("tachibana: VenueReady — venue is now authenticated");
+                        // R2-B M7: live form が開いていれば disabled_reason を解除する。
+                        // VenueReady = 認証完了 + 市場開場済の合成状態なので Submit を有効化できる。
+                        if let Some(form) = self.live_strategy_form_modal.as_mut() {
+                            form.set_disabled_reason(None);
+                        }
+                    }
+                    VenueEvent::LoginError { market_closed, .. } => {
+                        // R2-B M7: 市場閉場中は live form の Submit を disable して
+                        // 固定文言を提示する。market_closed=false の login error は別経路
+                        // (notification / banner) で扱う既存仕様を維持。
+                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut()
+                        {
+                            form.set_disabled_reason(Some("市場が閉場中です".to_string()));
+                        }
                     }
                     VenueEvent::EngineRehello => {
                         log::info!("tachibana: EngineRehello — state reset to Idle");
                     }
                     _ => {}
                 }
+
+                // issue #42 Phase 3 (統一決定 #4): EngineRehello を観測したら live strategy
+                // が走っていれば auto_generate_live_panes を冪等に再実行する。Python engine
+                // からの再 emit は要求しない（EngineRehello は Rust 内部イベントで Python
+                // 側に emit 経路が無いため）。tachibana / kabu のどちらの venue rehello でも
+                // 一律で `LiveStrategyRehelloReplay` を発火し、handler 側で `Running` 状態の
+                // 三つ組のみ再生する（Idle のときは no-op）。
+                let live_replay_task = if matches!(event, VenueEvent::EngineRehello) {
+                    Task::done(Message::Replay(
+                        crate::messages::ReplayMsg::LiveStrategyRehelloReplay,
+                    ))
+                } else {
+                    Task::none()
+                };
 
                 let old_state = std::mem::replace(&mut self.tachibana_state, VenueState::Idle);
                 // Capture before `next()` consumes old_state.
@@ -330,7 +358,8 @@ impl crate::Flowsurface {
                 return replay
                     .chain(auto_fetch_buying_power)
                     .chain(auto_fetch_orders)
-                    .chain(auto_fetch_positions);
+                    .chain(auto_fetch_positions)
+                    .chain(live_replay_task);
             }
             // Message::RequestKabuLogin(trigger) => (post-refactor name below)
             VenueMsg::RequestKabuLogin(trigger) => {
@@ -400,17 +429,41 @@ impl crate::Flowsurface {
                     }
                     VenueEvent::Ready => {
                         log::info!("kabu: VenueReady — venue is now authenticated");
+                        // R2-B M7: kabu でも live form の disabled_reason を解除する
+                        // (tachibana 経路と対称)。
+                        if let Some(form) = self.live_strategy_form_modal.as_mut() {
+                            form.set_disabled_reason(None);
+                        }
                     }
-                    VenueEvent::LoginError { message, .. } => {
+                    VenueEvent::LoginError {
+                        message,
+                        market_closed,
+                        ..
+                    } => {
                         log::warn!("kabu: VenueLoginError — {message}");
                         self.notifications
                             .push(Toast::error(format!("kabuログインエラー: {message}")));
+                        // R2-B M7: market_closed のみ live form を disable に倒す。
+                        if *market_closed && let Some(form) = self.live_strategy_form_modal.as_mut()
+                        {
+                            form.set_disabled_reason(Some("市場が閉場中です".to_string()));
+                        }
                     }
                     VenueEvent::EngineRehello => {
                         log::info!("kabu: EngineRehello — state reset to Idle");
                     }
                     VenueEvent::Dismissed => {}
                 }
+
+                // issue #42 Phase 3 (統一決定 #4): EngineRehello で live strategy の
+                // 4 ペイン再生成を冪等に再実行する。tachibana 経路と対称。
+                let live_replay_task = if matches!(event, VenueEvent::EngineRehello) {
+                    Task::done(Message::Replay(
+                        crate::messages::ReplayMsg::LiveStrategyRehelloReplay,
+                    ))
+                } else {
+                    Task::none()
+                };
 
                 let old_state = std::mem::replace(&mut self.kabu_state, VenueState::Idle);
                 let needs_bump =
@@ -561,7 +614,8 @@ impl crate::Flowsurface {
                 return ticker_fetch
                     .chain(auto_fetch_buying_power)
                     .chain(auto_fetch_orders)
-                    .chain(auto_fetch_positions);
+                    .chain(auto_fetch_positions)
+                    .chain(live_replay_task);
             }
             // Message::EngineConnected(conn) => (post-refactor name below)
             VenueMsg::OrderToast(toast) => {
@@ -749,6 +803,33 @@ impl crate::Flowsurface {
                 } else if code == "strategy_load_failed" {
                     // N4.4: surface the error as a dismissable banner.
                     self.strategy_load_error = Some(message);
+                } else if code == "strategy_parse_failed"
+                    && let Some(req_id) = request_id.as_deref()
+                {
+                    // issue #42 Phase 3 (統一決定 #18 / 受入基準 #19): LoadLiveStrategyScenario
+                    // の AST parse 失敗 → live form の pending を解除して手入力フォールバック。
+                    if let Some(form) = self.live_strategy_form_modal.as_mut()
+                        && form.pending_scenario_request_id.as_deref() == Some(req_id)
+                    {
+                        form.release_scenario_pending();
+                        self.notifications.push(Toast::warn(format!(
+                            "戦略ファイルの解析に失敗しました（手入力で続行）: {message}"
+                        )));
+                    } else {
+                        log::debug!(
+                            "[IpcError strategy_parse_failed] request_id={request_id:?} \
+                             does not match live_strategy_form_modal pending request"
+                        );
+                    }
+                } else if code == "venue_not_connected" {
+                    // R6 R5-SILENT-2: engine 側で venue 未接続のため live start を reject
+                    // された旨を user に通知する。旧実装はここで握りつぶしていたため、
+                    // modal は閉じたまま「何も起きない」silent failure になっていた。
+                    self.notifications
+                        .push(Toast::error(format!("Live 起動失敗: {message}")));
+                    // 再試行可能な状態に戻す（modal は既に閉じられている前提で、
+                    // 2 段目バーの戦略ファイル表示だけクリアする）。
+                    self.menu_bar.live_bar.strategy_file_stem = None;
                 } else {
                     log::debug!(
                         "[IpcError] unrouted: request_id={request_id:?}, code={code}, \
@@ -922,6 +1003,11 @@ impl crate::Flowsurface {
             VenueMsg::SecondPasswordRequired(request_id) => {
                 self.second_password_modal =
                     Some(modal::second_password::SecondPasswordModal::new(request_id));
+                // issue #42 Phase 3 (統一決定 #8 / 受入基準 #8): GUI 側でも CLI と同じ固定文言で
+                // ステータスバー（notifications）に赤帯トーストを出して、第二暗証番号 modal が
+                // 開いていない経路（例: live form Submit 直後の race）でも明示的に通知する。
+                self.notifications
+                    .push(Toast::error("第二暗証番号を設定してください".to_string()));
             }
             VenueMsg::DismissSecondPasswordModal => {
                 self.second_password_modal = None;

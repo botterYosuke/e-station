@@ -37,7 +37,15 @@ fn auto_generate_replay_panes_calls_set_content_and_streams() {
     let after = &src[start..];
     // The function ends at the outer `}` — find the next `pub fn` or `}` at top level.
     // As a heuristic, grab a generous window covering the function (~185 lines ≈ 11 kB).
-    let window = &after[..after.len().min(15_000)];
+    // Fixed-byte slicing can land inside a multibyte UTF-8 character (Japanese
+    // comments are common). Floor to the nearest char boundary to avoid panics
+    // when a sibling function (e.g. `auto_generate_live_panes` from issue #42
+    // Phase 3) shifts byte offsets.
+    let mut end = after.len().min(15_000);
+    while end > 0 && !after.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &after[..end];
 
     assert!(
         window.contains("set_content_and_streams"),
@@ -109,7 +117,15 @@ fn auto_generate_replay_panes_skips_candlestick_for_trade_granularity() {
         .expect("auto_generate_replay_panes not found in dashboard.rs");
     let after = &src[start..];
     // Function is ~185 lines ≈ 11 kB; use 15 kB to cover the whole body.
-    let window = &after[..after.len().min(15_000)];
+    // Fixed-byte slicing can land inside a multibyte UTF-8 character (Japanese
+    // comments are common). Floor to the nearest char boundary to avoid panics
+    // when a sibling function (e.g. `auto_generate_live_panes` from issue #42
+    // Phase 3) shifts byte offsets.
+    let mut end = after.len().min(15_000);
+    while end > 0 && !after.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &after[..end];
 
     // The guard can be expressed as `if let Some(tf) = timeframe` or
     // `if granularity != Trade` etc. — we pin the existence of a conditional.
@@ -130,7 +146,15 @@ fn auto_generate_replay_panes_guards_against_double_pane_generation() {
         .find("fn auto_generate_replay_panes")
         .expect("auto_generate_replay_panes not found in dashboard.rs");
     let after = &src[start..];
-    let window = &after[..after.len().min(15_000)];
+    // Fixed-byte slicing can land inside a multibyte UTF-8 character (Japanese
+    // comments are common). Floor to the nearest char boundary to avoid panics
+    // when a sibling function (e.g. `auto_generate_live_panes` from issue #42
+    // Phase 3) shifts byte offsets.
+    let mut end = after.len().min(15_000);
+    while end > 0 && !after.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &after[..end];
     assert!(
         window.contains("replay_pane_registry") || window.contains("is_loaded"),
         "auto_generate_replay_panes must consult replay_pane_registry / is_loaded so a delayed \
@@ -149,7 +173,15 @@ fn auto_generate_replay_panes_reload_rebinds_candlestick_stream() {
         .find("fn auto_generate_replay_panes")
         .expect("auto_generate_replay_panes not found in dashboard.rs");
     let after = &src[start..];
-    let window = &after[..after.len().min(15_000)];
+    // Fixed-byte slicing can land inside a multibyte UTF-8 character (Japanese
+    // comments are common). Floor to the nearest char boundary to avoid panics
+    // when a sibling function (e.g. `auto_generate_live_panes` from issue #42
+    // Phase 3) shifts byte offsets.
+    let mut end = after.len().min(15_000);
+    while end > 0 && !after.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &after[..end];
 
     // The reload path (is_first = false) must call set_content_and_streams for
     // CandlestickChart when timeframe is Some — not just clear_replay_chart_data.

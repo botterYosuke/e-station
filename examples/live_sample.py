@@ -1,4 +1,20 @@
-"""E2E 用 live 戦略サンプル — デモ環境での動作確認用。
+"""最小 live ティック・ロガー — 発注しない、接続確認専用サンプル.
+
+このファイルは **発注を行わない** ティック・ロガーで、`LiveSession` の attach /
+inprocess 経路と event ループが正しく動くかをローカルで素早く確認するための
+最小サンプルです（issue #42 Phase 5 で位置づけを明示化）。
+
+**本番起動の正式 CLI は `python -m engine.live_session_cli run` を使ってください。**
+本ファイルは自前の `main()` で `LiveSession` を直接組み立てる旧ノート的サンプルで、
+``examples/README.md §C「ライブで動かす」`` から参照される **発注しない** 補助例です。
+
+役割の違い（issue #42 受け入れ基準 #1 / #3 との対応）:
+
+- ``python -m engine.live_session_cli run``: 受け入れ基準 #1 の SoT。`LIVE_SCENARIO`
+  prefill / `--max-qty` / `--prod` AND ガード / `SecondPasswordRequired` 固定文言など、
+  ライブ運用に必要な安全装置をすべて持つ。
+- ``python examples/live_sample.py``: 発注しない最小ロガー。`on_trade_tick` で
+  100 tick ごとに INFO ログだけ出す。安全装置は最小限なのでバックアップ用途のみ。
 
 Usage:
     python examples/live_sample.py

@@ -43,10 +43,15 @@ fn schema_minor_matches_current_bump() {
     // schema 3.22: ReplayTimeUpdated 追加（分足・tick 足での current_day 時刻表示）。
     // schema 3.23: StrategyScenarioLoaded.resolved_instruments 追加（schema v3 instruments_ref 対応）。
     // schema 3.24: RequestVenueLogout コマンド追加（立花セッション明示破棄 IPC）
+    // schema 3.25: LoadLiveStrategyScenario / LiveStrategyScenarioLoaded 追加（issue #42 Phase 2）
+    // schema 3.26: LiveStrategyReady 追加（issue #42 Phase 3、auto_generate_live_panes 冪等トリガー）
+    // schema 3.27: LiveStrategyWarmingUp 追加（issue #42 Phase 3、warm_up 進捗 5s 毎 emit）
+    // schema 3.28: EngineBusy.venue / EngineBusy.busy_kind 追加（issue #42 Phase 3、venue-scoped concurrent live ガード）
+    // schema 3.29: SubscriptionEvicted 追加（issue #42 R1 HIGH-2、kabu 50 銘柄 PUSH 上限到達時の LRU evict 通知、spec §3.2-G）
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MINOR,
-        24,
-        "SCHEMA_MINOR must be 24 after RequestVenueLogout command added (schema v3.24)"
+        29,
+        "SCHEMA_MINOR must be 29 after SubscriptionEvicted added (schema v3.29, issue #42 R1 HIGH-2)"
     );
     assert_eq!(
         flowsurface_engine_client::SCHEMA_MAJOR,

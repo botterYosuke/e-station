@@ -3,7 +3,7 @@
 //! StrategyScenarioLoaded / StrategyScenarioSaved イベントの
 //! JSON シリアライズ・デシリアライズを検証する。
 
-use flowsurface_engine_client::dto::{Command, EngineEvent};
+use flowsurface_engine_client::dto::{BusyKind, Command, EngineEvent};
 use flowsurface_engine_client::{SCHEMA_MAJOR, SCHEMA_MINOR};
 
 /// SCHEMA_MINOR が期待値以上であることを確認するリグレッションガード。
@@ -275,5 +275,334 @@ fn saved_with_ok_true_and_error_some_is_inconsistent() {
             assert!(error.is_some(), "error should still be present");
         }
         _ => panic!("Expected StrategyScenarioSaved"),
+    }
+}
+
+// ── issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 抽出の serde round-trip ──
+
+/// SCHEMA_MINOR は P2 完了後 25 以上であること。
+#[test]
+fn schema_minor_is_at_least_25_after_p2() {
+    const { assert!(SCHEMA_MINOR >= 25) };
+}
+
+/// LoadLiveStrategyScenario コマンドが正しく JSON シリアライズされる。
+#[test]
+fn load_live_strategy_scenario_serializes() {
+    let cmd = Command::LoadLiveStrategyScenario {
+        request_id: "live-req-1".to_string(),
+        strategy_path: "/path/to/live.py".to_string(),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    assert!(json.contains(r#""op":"LoadLiveStrategyScenario""#));
+    assert!(json.contains(r#""request_id":"live-req-1""#));
+    assert!(json.contains(r#""strategy_path":"/path/to/live.py""#));
+}
+
+/// LiveStrategyScenarioLoaded イベント（全フィールド設定）がデシリアライズできる。
+#[test]
+fn live_strategy_scenario_loaded_full_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyScenarioLoaded",
+        "request_id": "live-req-1",
+        "instrument_id": "7203.TSE",
+        "max_qty": 100,
+        "max_notional_jpy": 1000000,
+        "venue": "tachibana",
+        "strategy_init_kwargs": {"foo": 1, "bar": "baz"}
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        } => {
+            assert_eq!(request_id, "live-req-1");
+            assert_eq!(instrument_id.as_deref(), Some("7203.TSE"));
+            assert_eq!(max_qty, Some(100));
+            assert_eq!(max_notional_jpy, Some(1_000_000));
+            assert_eq!(venue.as_deref(), Some("tachibana"));
+            let kw = strategy_init_kwargs.expect("kwargs should be Some");
+            assert_eq!(kw.get("foo").and_then(|v| v.as_i64()), Some(1));
+            assert_eq!(kw.get("bar").and_then(|v| v.as_str()), Some("baz"));
+        }
+        _ => panic!("Expected LiveStrategyScenarioLoaded"),
+    }
+}
+
+/// LiveStrategyScenarioLoaded イベント（LIVE_SCENARIO 不在時 = 全フィールド省略）も
+/// デシリアライズできる（Open Q2: 即時応答 SoT）。
+#[test]
+fn live_strategy_scenario_loaded_all_absent_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyScenarioLoaded",
+        "request_id": "live-req-2"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        } => {
+            assert_eq!(request_id, "live-req-2");
+            assert!(instrument_id.is_none());
+            assert!(max_qty.is_none());
+            assert!(max_notional_jpy.is_none());
+            assert!(venue.is_none());
+            assert!(strategy_init_kwargs.is_none());
+        }
+        _ => panic!("Expected LiveStrategyScenarioLoaded"),
+    }
+}
+
+/// 旧 server (minor < 25) は LoadLiveStrategyScenario を unknown command として
+/// 握り潰す（forward compat）。新 client → 旧 server の wire 上の挙動を検証する。
+///
+/// proto wire-format では、未知の oneof variant field number は受信側の proto デコード時に
+/// 「未知フィールド」として silently 無視されるか、`payload: None` として届く。
+/// ここではコマンドが Some(payload) で構築できることだけを確認する（旧 server 側で
+/// `WhichOneof("payload") is None` または `_FIELD_TO_OP.get(which) is None` の経路で
+/// 無視される実装契約 = 後方互換性）。
+#[test]
+fn load_live_strategy_scenario_forward_compat() {
+    // 新 client: LoadLiveStrategyScenario を構築して wire 用 JSON serialise できる。
+    let cmd = Command::LoadLiveStrategyScenario {
+        request_id: "forward-1".to_string(),
+        strategy_path: "/strat.py".to_string(),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    // tag は `op`、旧 server からは未知の値として扱われる
+    assert!(json.contains(r#""op":"LoadLiveStrategyScenario""#));
+
+    // Command は serialise のみで deserialise されないため、wire 形が JSON 値として
+    // 取り出せることだけ確認する（旧 server は proto 側で oneof field を unknown と
+    // して skip し、`_FIELD_TO_OP.get(which) is None` の経路にも到達しない）。
+    let v: serde_json::Value = serde_json::from_str(&json).expect("json must parse");
+    assert_eq!(v["op"], "LoadLiveStrategyScenario");
+    assert_eq!(v["strategy_path"], "/strat.py");
+}
+
+/// LiveStrategyScenarioLoaded のうち kwargs が空の dict であるケースのデシリアライズ。
+#[test]
+fn live_strategy_scenario_loaded_empty_kwargs_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyScenarioLoaded",
+        "request_id": "live-req-3",
+        "strategy_init_kwargs": {}
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyScenarioLoaded {
+            strategy_init_kwargs,
+            ..
+        } => {
+            let kw = strategy_init_kwargs.expect("empty dict should still be Some");
+            assert!(kw.is_empty(), "empty dict should remain empty");
+        }
+        _ => panic!("Expected LiveStrategyScenarioLoaded"),
+    }
+}
+
+// ── issue #42 Phase 3 (schema 3.26): LiveStrategyReady の serde round-trip ──
+
+/// SCHEMA_MINOR は P3a 完了後 26 以上であること。
+#[test]
+fn schema_minor_is_at_least_26_after_p3a() {
+    const { assert!(SCHEMA_MINOR >= 26) };
+}
+
+/// LiveStrategyReady イベントが正しくデシリアライズされる。
+#[test]
+fn live_strategy_ready_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyReady",
+        "strategy_id": "live-strat-1",
+        "venue": "tachibana",
+        "instrument_id": "7203.TSE",
+        "ts_event_ms": 1700000000123
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyReady {
+            strategy_id,
+            venue,
+            instrument_id,
+            ts_event_ms,
+        } => {
+            assert_eq!(strategy_id, "live-strat-1");
+            assert_eq!(venue, "tachibana");
+            assert_eq!(instrument_id, "7203.TSE");
+            assert_eq!(ts_event_ms, 1_700_000_000_123);
+        }
+        _ => panic!("Expected LiveStrategyReady"),
+    }
+}
+
+/// LiveStrategyReady に未知 field があっても tolerated（forward compat）。
+#[test]
+fn live_strategy_ready_unknown_field_tolerated() {
+    let json = r#"{
+        "event": "LiveStrategyReady",
+        "strategy_id": "live-strat-2",
+        "venue": "tachibana",
+        "instrument_id": "7203.TSE",
+        "ts_event_ms": 1700000000456,
+        "future_unknown_field": 999
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyReady { strategy_id, .. } => {
+            assert_eq!(strategy_id, "live-strat-2");
+        }
+        _ => panic!("Expected LiveStrategyReady"),
+    }
+}
+
+// ── issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp の serde round-trip ──
+
+/// SCHEMA_MINOR は P3b 完了後 27 以上であること。
+#[test]
+fn schema_minor_is_at_least_27_after_p3b() {
+    const { assert!(SCHEMA_MINOR >= 27) };
+}
+
+/// LiveStrategyWarmingUp イベントが正しくデシリアライズされる。
+#[test]
+fn live_strategy_warming_up_deserializes() {
+    let json = r#"{
+        "event": "LiveStrategyWarmingUp",
+        "strategy_id": "live-strat-3",
+        "progress": 0.42,
+        "message": "warming up..."
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyWarmingUp {
+            strategy_id,
+            progress,
+            message,
+        } => {
+            assert_eq!(strategy_id, "live-strat-3");
+            assert!(
+                (progress - 0.42).abs() < 1e-5,
+                "progress 0.42 expected, got {progress}"
+            );
+            assert_eq!(message, "warming up...");
+        }
+        _ => panic!("Expected LiveStrategyWarmingUp"),
+    }
+}
+
+/// LiveStrategyWarmingUp に未知 field があっても tolerated（forward compat）。
+#[test]
+fn live_strategy_warming_up_unknown_field_tolerated() {
+    let json = r#"{
+        "event": "LiveStrategyWarmingUp",
+        "strategy_id": "live-strat-4",
+        "progress": 0.0,
+        "message": "init",
+        "future_field": "extra"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::LiveStrategyWarmingUp { progress, .. } => {
+            assert!(progress.abs() < 1e-6);
+        }
+        _ => panic!("Expected LiveStrategyWarmingUp"),
+    }
+}
+
+// ── issue #42 Phase 3 (schema 3.28): EngineBusy.venue / busy_kind round-trip ──
+
+/// SCHEMA_MINOR は P3c 完了後 28 以上であること。
+#[test]
+fn schema_minor_is_at_least_28_after_p3c() {
+    const { assert!(SCHEMA_MINOR >= 28) };
+}
+
+/// EngineBusy が新しい optional `venue` / `busy_kind` フィールドをデシリアライズする。
+/// venue 単位で別 strategy が走っているとき: busy_kind="another_strategy_on_venue"
+/// （統一決定 #7）。
+#[test]
+fn engine_busy_with_venue_and_busy_kind_deserializes() {
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "TRADING",
+        "attempted_command": "StartEngine",
+        "reason": "venue tachibana is hosting another strategy",
+        "request_id": "req-busy-1",
+        "venue": "tachibana",
+        "busy_kind": "another_strategy_on_venue"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::EngineBusy {
+            venue, busy_kind, ..
+        } => {
+            assert_eq!(venue.as_deref(), Some("tachibana"));
+            // R2-B H8: busy_kind は `Option<BusyKind>` 型。既知値は enum variant に decode。
+            assert_eq!(busy_kind, Some(BusyKind::AnotherStrategyOnVenue));
+        }
+        _ => panic!("Expected EngineBusy"),
+    }
+}
+
+/// 旧 wire 形（venue / busy_kind 不在）でも EngineBusy はデシリアライズに成功し、
+/// 両フィールドは `None` になる（後方互換）。
+#[test]
+fn engine_busy_missing_venue_busy_kind_falls_back_to_none() {
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "RUNNING",
+        "attempted_command": "LoadReplayData",
+        "reason": "already running",
+        "request_id": "req-busy-2"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::EngineBusy {
+            venue, busy_kind, ..
+        } => {
+            assert!(venue.is_none(), "venue must default to None on absent");
+            assert!(
+                busy_kind.is_none(),
+                "busy_kind must default to None on absent"
+            );
+        }
+        _ => panic!("Expected EngineBusy"),
+    }
+}
+
+/// EngineBusy の追加フィールド未知 field があっても tolerated（forward compat）。
+#[test]
+fn engine_busy_unknown_field_tolerated() {
+    let json = r#"{
+        "event": "EngineBusy",
+        "current_state": "TRADING",
+        "attempted_command": "StartEngine",
+        "reason": "duplicate venue",
+        "request_id": "req-busy-3",
+        "venue": "tachibana",
+        "busy_kind": "another_strategy_on_venue",
+        "future_field": "ignored-by-old-clients"
+    }"#;
+    let event: EngineEvent = serde_json::from_str(json).unwrap();
+    match event {
+        EngineEvent::EngineBusy {
+            venue, busy_kind, ..
+        } => {
+            assert_eq!(venue.as_deref(), Some("tachibana"));
+            // R2-B H8: busy_kind は `Option<BusyKind>`。
+            assert_eq!(busy_kind, Some(BusyKind::AnotherStrategyOnVenue));
+        }
+        _ => panic!("Expected EngineBusy"),
     }
 }

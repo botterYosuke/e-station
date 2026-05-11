@@ -106,24 +106,12 @@ fn kabu_is_production() -> bool {
 
 /// Extract the kabu venue's `is_production` flag from a `Ready.capabilities`
 /// JSON blob. P4-4: returns `false` when the field is absent (older engines /
-/// verify env), `true` only when explicitly advertised. Logs a warning on
-/// deserialization errors so Python/Rust schema drift surfaces visibly instead
-/// of silently defaulting to verify styling (R1-MEDIUM).
+/// verify env), `true` only when explicitly advertised. issue #42 Phase 3.5 で
+/// 共通ヘルパー `engine_client::capabilities::is_production` に薄いリネーム委譲。
+/// 安全側 (= verify 表示) フォールバック仕様は不変（malformed wire / 異 venue /
+/// cap 欠落いずれも false）。schema drift の検知は `/ipc-schema-check` skill 側で担う。
 fn parse_kabu_is_production(capabilities: &serde_json::Value) -> bool {
-    match engine_client::capabilities::venue_capability::<bool>(
-        capabilities,
-        KABU_STATION_VENUE_NAME,
-        "is_production",
-    ) {
-        Ok(v) => v.unwrap_or(false),
-        Err(e) => {
-            log::warn!(
-                "parse_kabu_is_production: capability parse error ({e}), \
-                 defaulting to verify (false) — check Python/Rust schema alignment"
-            );
-            false
-        }
-    }
+    engine_client::capabilities::is_production(capabilities, KABU_STATION_VENUE_NAME)
 }
 
 /// P4-4: produce the kabu chip's (label_prefix, dot_text, dot_color) when
@@ -667,6 +655,18 @@ const TACHIBANA_VENUE_NAME: &str = "tachibana";
 /// Wire-level identifier for the kabuステーション venue.
 const KABU_STATION_VENUE_NAME: &str = "kabu_station";
 
+/// issue #42 Phase 3 (統一決定 #17): live 戦略 `EngineStarted` 受信後 60 秒以内に
+/// `LiveStrategyReady` が来なければ "warm_up timeout" banner を表示する。
+/// `LiveStrategyWarmingUp` 受信ごとにカウンタ（token）が再起動されるため、
+/// engine が定期的に進捗 emit している限り timeout は発火しない。
+pub(crate) const LIVE_WARMUP_TIMEOUT_SECS: u64 = 60;
+
+/// issue #42 Phase 3 (統一決定 #18): `LoadLiveStrategyScenario` 送信後 5 秒以内に
+/// `LiveStrategyScenarioLoaded` も `Error` も来なければ手入力フォールバック
+/// （フォームを編集可能のままにする）。engine 無応答時の安全網であり、
+/// `LIVE_SCENARIO` 不在時は engine が即時応答するため通常は使わない（統一決定 #22）。
+pub(crate) const LIVE_SCENARIO_FALLBACK_TIMEOUT_SECS: u64 = 5;
+
 /// Canonical mapping of `Venue` enum variants to the IPC venue name strings.
 /// Referenced during initial setup and on every engine reconnect.
 /// **Includes `Tachibana`** — without the entry the venue would never
@@ -1078,18 +1078,225 @@ fn main() {
 }
 
 /// N4-live: live 戦略の実行状態。
+///
+/// issue #42 Phase 3 で `Running` に `instrument_id` / `venue` を追加し、
+/// reconnect 時の `auto_generate_live_panes` 再実行に必要な三つ組
+/// `(strategy_id, instrument_id, venue)` を SoT として保持する
+/// （統一決定 #4 / R3-C1 / R5-MED-2）。
+///
+/// `pending_live_config` を別フィールドに置く設計案は撤回し、`Running`
+/// 自体を「ランタイム state 兼 reconnect 用 pending 設定」として直接使う。
+/// `EngineRehello` 受信時に `Running` 状態なら `auto_generate_live_panes` を
+/// 冪等に再呼出する（VenueState には触らず、LiveStrategyState のみが
+/// `EngineRehello` で生き残る設計）。
 #[derive(Debug, Clone, Default)]
 enum LiveStrategyState {
     #[default]
     Idle,
     Running {
         strategy_id: String,
+        instrument_id: String,
+        venue: String,
     },
 }
 
 impl LiveStrategyState {
     fn is_running(&self) -> bool {
         matches!(self, LiveStrategyState::Running { .. })
+    }
+
+    /// R2-B H7: 空文字列 sentinel を防ぐ factory。
+    ///
+    /// `LiveStrategyState::Running { .. }` を直接 struct literal で生成すると、
+    /// caller の入力チェック漏れで `strategy_id == ""` 等の sentinel 状態に
+    /// 遷移してしまう（auto_generate_live_panes は instrument_id の空チェック
+    /// しかしておらず、strategy_id / venue が空でも 4 ペインを生成してしまう）。
+    /// 本 factory は 3 つ組すべての非空を契約として強制する。
+    ///
+    /// 失敗時は遷移を行わずに `Err` を返し、caller 側で `log::warn!` する。
+    pub(crate) fn try_running(
+        strategy_id: String,
+        instrument_id: String,
+        venue: String,
+    ) -> Result<Self, &'static str> {
+        if strategy_id.is_empty() {
+            return Err("strategy_id must not be empty");
+        }
+        if instrument_id.is_empty() {
+            return Err("instrument_id must not be empty");
+        }
+        if venue.is_empty() {
+            return Err("venue must not be empty");
+        }
+        Ok(Self::Running {
+            strategy_id,
+            instrument_id,
+            venue,
+        })
+    }
+}
+
+#[cfg(test)]
+mod live_strategy_state_tests {
+    use super::*;
+
+    /// R2-B H7: try_running は 3 つ組のうち空文字が混じっていれば Err を返す。
+    #[test]
+    fn test_live_strategy_state_try_running_rejects_empty_fields() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("", "8306.T", "tachibana", "strategy_id must not be empty"),
+            ("S1", "", "tachibana", "instrument_id must not be empty"),
+            ("S1", "8306.T", "", "venue must not be empty"),
+        ];
+        for (sid, iid, venue, expected_msg) in cases {
+            let result =
+                LiveStrategyState::try_running(sid.to_string(), iid.to_string(), venue.to_string());
+            assert!(
+                result.is_err(),
+                "expected Err for ({sid:?}, {iid:?}, {venue:?})"
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                *expected_msg,
+                "unexpected message for ({sid:?}, {iid:?}, {venue:?})"
+            );
+        }
+    }
+
+    /// R2-B H7: 全フィールド非空なら Running variant を返す。
+    #[test]
+    fn test_live_strategy_state_try_running_accepts_valid_triple() {
+        let result = LiveStrategyState::try_running(
+            "S1".to_string(),
+            "8306.T".to_string(),
+            "tachibana".to_string(),
+        );
+        assert!(result.is_ok(), "valid triple should succeed: {result:?}");
+        match result.unwrap() {
+            LiveStrategyState::Running {
+                strategy_id,
+                instrument_id,
+                venue,
+            } => {
+                assert_eq!(strategy_id, "S1");
+                assert_eq!(instrument_id, "8306.T");
+                assert_eq!(venue, "tachibana");
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod engine_error_routing_tests {
+    //! R4 Group A (silent-HIGH-1): `EngineError{strategy_id=Some(_)}` の以下の
+    //! code は GUI に通知される必要がある — 旧実装は `node_build_failed` だけを
+    //! `LiveStrategyBuildFailed` に変換し、それ以外 (`warm_up_failed` /
+    //! `kernel_unavailable` / `venue_not_supported` / `market_closed`) は
+    //! `log::warn!` で握りつぶしていた。
+    //!
+    //! 設計判断 (R4 Group A): 既存 `LiveStrategyBuildFailed` を再利用して
+    //! `code` field を追加 (handler 内で teardown + toast を担当) — 新
+    //! variant を作ると 4 系統で同じ teardown 経路を二重実装することになる。
+    //! warm_up 失敗時はまだ `auto_generate_live_panes` が呼ばれていないため
+    //! `teardown_live_panes` は実 pane に対して no-op になるが、bar / state
+    //! reset と pending_strategy_id クリアは必須 — 既存 handler が全てこなす。
+    use super::*;
+    use engine_client::dto::EngineEvent;
+
+    fn make_engine_error(code: &str) -> EngineEvent {
+        EngineEvent::EngineError {
+            code: code.to_string(),
+            message: format!("simulated {code} for routing test"),
+            strategy_id: Some("test-sid".to_string()),
+        }
+    }
+
+    fn assert_routes_to_build_failed(code: &str) {
+        let evt = make_engine_error(code);
+        let mapped = map_engine_event_to_message(evt);
+        match mapped {
+            Some(Message::Replay(messages::ReplayMsg::LiveStrategyBuildFailed {
+                strategy_id,
+                code: routed_code,
+                ..
+            })) => {
+                assert_eq!(strategy_id, "test-sid");
+                assert_eq!(routed_code, code);
+            }
+            other => panic!(
+                "EngineError code={code:?} must route to ReplayMsg::LiveStrategyBuildFailed; \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn engine_error_warm_up_failed_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("warm_up_failed");
+    }
+
+    #[test]
+    fn engine_error_kernel_unavailable_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("kernel_unavailable");
+    }
+
+    #[test]
+    fn engine_error_venue_not_supported_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("venue_not_supported");
+    }
+
+    #[test]
+    fn engine_error_market_closed_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("market_closed");
+    }
+
+    /// node_build_failed は従来通り routing される (regression pin).
+    #[test]
+    fn engine_error_node_build_failed_still_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("node_build_failed");
+    }
+
+    // R6 silent-HIGH-1: server.py の StartEngine ハンドラが
+    // `EngineError{code="engine_run_failed", strategy_id=Some}` (server.py:5252) と
+    // `EngineError{code="timeout", strategy_id=Some}` (server.py:5210) を emit する。
+    // R4 で導入した abort-codes 許可リストにこの 2 つが漏れていたため、
+    // 受信側で `log::warn!` のみ → `None` 返却 → `live_strategy_pending_strategy_id`
+    // がクリアされず state machine が固着し、次の live 起動が受け付けられなくなる
+    // silent regression を起こしていた。timeout は 3600s 後に必ず発火するため
+    // 長時間 live 戦略では確実に踏むパス。
+    #[test]
+    fn engine_error_engine_run_failed_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("engine_run_failed");
+    }
+
+    #[test]
+    fn engine_error_timeout_routes_to_live_strategy_build_failed() {
+        assert_routes_to_build_failed("timeout");
+    }
+
+    /// 既知 code 以外 (`unknown_code` 等) は Some を返さない (silent ログ pass-through)。
+    #[test]
+    fn engine_error_unknown_strategy_level_code_returns_none() {
+        let evt = make_engine_error("totally_unknown_code");
+        assert!(
+            map_engine_event_to_message(evt).is_none(),
+            "unknown strategy-level codes should fall through to log::warn! and return None"
+        );
+    }
+
+    /// 接続レベル (strategy_id=None) は引き続き None を返す (regression pin).
+    #[test]
+    fn engine_error_connection_level_still_returns_none() {
+        let evt = EngineEvent::EngineError {
+            code: "auth_failed".to_string(),
+            message: "test".to_string(),
+            strategy_id: None,
+        };
+        assert!(
+            map_engine_event_to_message(evt).is_none(),
+            "connection-level EngineError (strategy_id=None) must not route to a Message"
+        );
     }
 }
 
@@ -1150,8 +1357,28 @@ struct Flowsurface {
     replay_form_modal: Option<modal::replay_form::ReplayFormModal>,
     /// N4-live: ライブ戦略フォーム modal
     live_strategy_form_modal: Option<modal::live_strategy_form::LiveStrategyFormModal>,
-    /// N4-live: live 戦略の実行状態。Idle = 未実行、Running = 実行中（strategy_id 保持）。
+    /// N4-live: live 戦略の実行状態。Idle = 未実行、Running = 実行中。
+    /// issue #42 Phase 3: `Running { strategy_id, instrument_id, venue }` 三つ組を保持し、
+    /// `EngineRehello` 受信時に `auto_generate_live_panes` を冪等に再呼出する SoT。
     live_strategy: LiveStrategyState,
+    /// issue #42 Phase 3: `EngineStarted`(live) 受信後、`LiveStrategyReady` が来るまで
+    /// 保持する pending strategy_id。warm_up timeout タイマーの照合 / 異 strategy のタイマー
+    /// 無視に使う。`LiveStrategyReady` / `EngineStopped` で None に戻す。
+    live_strategy_pending_strategy_id: Option<String>,
+    /// issue #42 Phase 3: warm_up timeout banner（`None` = 表示しない）。
+    /// `EngineStarted` 後 60s 以内に `LiveStrategyReady` が来なければ Some にセット、
+    /// 「再試行」 / `LiveStrategyReady` / `EngineStopped` で None に戻す。
+    live_warmup_timeout_banner: Option<String>,
+    /// issue #42 Phase 3: `LiveStrategyWarmingUp` の最新 message を保持してバナーに表示する。
+    live_warmup_warming_message: Option<String>,
+    /// issue #42 R4 R3-RUST-2: `LiveStrategyWarmingUp.progress` (0.0-1.0) の最新値を
+    /// 保持してバナーに % 形式で表示する。`LiveStrategyReady` / `LiveStopped` /
+    /// `EngineConnected` (Idle/pending 状態時) で `None` にリセットする。
+    live_warmup_warming_progress: Option<f32>,
+    /// issue #42 Phase 3: warm_up timeout タイマーのトークン。`LiveStrategyWarmingUp` 受信や
+    /// `LiveStrategyReady` 受信 / `EngineStopped` などで wrapping_add(1) して古いタイマー
+    /// 発火を破棄する（タイマーリセットの実装）。
+    live_warmup_timeout_token: u64,
     /// N4.4: non-None while a `strategy_load_failed` error banner should be shown.
     /// Cleared by `Message::Replay(ReplayMsg::DismissStrategyLoadError)`.
     strategy_load_error: Option<String>,
@@ -1508,6 +1735,45 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
             strategy_id: Some(sid),
             ..
         } => {
+            // R2-B H4 / 統一決定 #21 副次 invariant: `node.build()` 失敗時は
+            // 生成済みの 4 ペインを teardown して LiveStrategyState を Idle に戻す。
+            // 専用 ReplayMsg variant を経由して handler 内で完結させる
+            // (notification も含む)。
+            //
+            // R4 Group A (silent-HIGH-1): warm_up_failed / kernel_unavailable /
+            // venue_not_supported / market_closed も同じ teardown 経路に流す
+            // (旧実装はこれらを log::warn! のみで握りつぶしていた)。warm_up
+            // 失敗の場合まだ auto_generate_live_panes が呼ばれていないため
+            // teardown_live_panes は実 pane に対して no-op になるが、handler
+            // 側で bar / state reset と pending_strategy_id クリア、user toast
+            // を確実に走らせる必要がある。
+            // R6 silent-HIGH-1: server.py の StartEngine ハンドラが必ず emit する
+            // 2 つの strategy-level abort code を追加。
+            //   - "engine_run_failed": runner 内部例外 (server.py:5252)
+            //   - "timeout": 3600s wait_for タイムアウト (server.py:5210)
+            // これらが allow-list に無いと state machine が固着し次の live 起動が
+            // 受け付けられない silent regression を起こす。長時間 live 戦略では
+            // timeout が確実に発火するため見逃すと致命的。
+            const STRATEGY_ABORT_CODES: &[&str] = &[
+                "node_build_failed",
+                "warm_up_failed",
+                "kernel_unavailable",
+                "venue_not_supported",
+                "market_closed",
+                "engine_run_failed",
+                "timeout",
+            ];
+            if STRATEGY_ABORT_CODES.contains(&code.as_str()) {
+                log::warn!(
+                    "[engine] strategy abort [{code}] strategy={sid}: {message} \
+                     — tearing down live panes"
+                );
+                return Some(Message::Replay(ReplayMsg::LiveStrategyBuildFailed {
+                    strategy_id: sid,
+                    code,
+                    message,
+                }));
+            }
             // strategy-level error; future UI toast when strategy panel is implemented
             log::warn!("[engine] strategy error [{code}] strategy={sid}: {message}");
             None
@@ -1581,9 +1847,11 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::EngineBusy {
             attempted_command,
             reason,
+            busy_kind,
+            venue,
             ..
         } => {
-            use engine_client::dto::AttemptedCommand;
+            use engine_client::dto::{AttemptedCommand, BusyKind};
             match attempted_command {
                 AttemptedCommand::StopReplay => {
                     Some(Message::Window(WindowMsg::ModeSwitchStopBusy))
@@ -1597,9 +1865,22 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
                 AttemptedCommand::ResumeReplay => {
                     Some(Message::Engine(EngineMsg::ResumeReplayBusy { reason }))
                 }
-                _ => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
-                    "操作を受け付けられませんでした: {attempted_command} — {reason}"
-                ))))),
+                _ => {
+                    // R4 R3-RUST-3: live 重複起動拒否時にどの venue で reject されたか
+                    // を toast に表示する。busy_kind が AnotherStrategyOnVenue なら
+                    // venue 名を含む専用文言、それ以外は汎用文言。venue が None の
+                    // 旧 server (minor < 28) からの応答は "unknown" で fallback する。
+                    let detail = match busy_kind {
+                        Some(BusyKind::AnotherStrategyOnVenue) => {
+                            let v = venue.as_deref().unwrap_or("unknown");
+                            format!("別の戦略が {v} で実行中です — {reason}")
+                        }
+                        _ => format!(
+                            "操作を受け付けられませんでした: {attempted_command} — {reason}"
+                        ),
+                    };
+                    Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(detail))))
+                }
             }
         }
         // Phase 8.1b: multi-client 接続ライフサイクルイベント
@@ -1682,6 +1963,59 @@ pub(crate) fn map_engine_event_to_message(ev: engine_client::dto::EngineEvent) -
         EngineEvent::ReplayHistoryChanged { has_history } => {
             Some(Message::Replay(ReplayMsg::HistoryChanged { has_history }))
         }
+        // issue #42 Phase 3 (schema 3.25): LiveStrategyScenarioLoaded — modal prefill。
+        // pending_scenario_request_id と突合して古い応答は handler 側で捨てる（replay 対称）。
+        EngineEvent::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        } => Some(Message::Replay(ReplayMsg::LiveStrategyScenarioLoaded {
+            request_id,
+            instrument_id,
+            max_qty,
+            max_notional_jpy,
+            venue,
+            strategy_init_kwargs,
+        })),
+        // issue #42 Phase 3 (schema 3.26): LiveStrategyReady — Running 遷移 +
+        // auto_generate_live_panes(strategy_id, instrument_id, venue) の冪等トリガー。
+        EngineEvent::LiveStrategyReady {
+            strategy_id,
+            venue,
+            instrument_id,
+            ts_event_ms,
+        } => Some(Message::Replay(ReplayMsg::LiveStrategyReady {
+            strategy_id,
+            instrument_id,
+            venue,
+            ts_event_ms,
+        })),
+        // issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp — 進捗 banner 更新 +
+        // 60s timeout カウンタリセット（統一決定 #17）。
+        EngineEvent::LiveStrategyWarmingUp {
+            strategy_id,
+            progress,
+            message,
+        } => Some(Message::Replay(ReplayMsg::LiveWarmingUp {
+            strategy_id,
+            progress,
+            message,
+        })),
+        // issue #42 R1 HIGH-2 (schema 3.29): SubscriptionEvicted — kabu 50 銘柄 PUSH 上限
+        // 到達時の LRU evict 通知。spec §3.2-G 契約。当該 symbol のチャート登録は解除済の
+        // ため、再登録するには再選択が必要。venue は kabu_station 固定 (spec) なので
+        // 文言には含めず、symbol のみ通知して再操作を促す。exchange は内部 routing
+        // 情報なので user-facing には出さない。
+        EngineEvent::SubscriptionEvicted {
+            venue: _,
+            symbol,
+            exchange: _,
+        } => Some(Message::Venue(VenueMsg::OrderToast(Toast::warn(format!(
+            "{symbol} は PUSH 上限到達で登録解除されました（再選択で再登録）"
+        ))))),
         // M-Rust2: 新しい `EngineEvent` バリアントを追加したときは、
         // ここに一致 arm を加えるか、`None`（=ディスパッチ対象外）が
         // 正しいことを確認すること。`_ => None` で握り潰すと
@@ -2105,6 +2439,11 @@ impl Flowsurface {
             replay_form_modal: None,
             live_strategy_form_modal: None,
             live_strategy: LiveStrategyState::default(),
+            live_strategy_pending_strategy_id: None,
+            live_warmup_timeout_banner: None,
+            live_warmup_warming_message: None,
+            live_warmup_warming_progress: None,
+            live_warmup_timeout_token: 0,
             strategy_load_error: None,
             last_saved_bytes: None,
             pending_exit_windows: None,
@@ -2272,6 +2611,36 @@ impl Flowsurface {
                 )
                 .padding(padding::all(8));
                 base = base.push(strategy_err_banner);
+            }
+            // R2-B H2 / 統一決定 #17: warm_up timeout banner (60s 経過しても
+            // LiveStrategyReady が来なかった場合)。「再試行」ボタンで dismiss。
+            // strategy_load_error と同じレイアウトで両者を共存可能にする。
+            if let Some(banner_msg) = &self.live_warmup_timeout_banner {
+                let warmup_banner = container(
+                    row![
+                        text(banner_msg.as_str()),
+                        button("再試行")
+                            .on_press(Message::Replay(ReplayMsg::DismissLiveWarmupTimeoutBanner))
+                            .style(button::primary),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding(padding::all(8));
+                base = base.push(warmup_banner);
+            }
+            // R4 R3-RUST-1 + R3-RUST-2: warm_up 進捗 banner (LiveStrategyWarmingUp 受信ごとに更新)。
+            // timeout banner と共存可能 — progress message + timeout banner が同時表示でも
+            // OK で、timeout fired で `live_warmup_warming_message` が None に戻る設計。
+            if let Some(msg) = &self.live_warmup_warming_message {
+                let mut banner_row = row![text(msg.as_str())]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+                if let Some(p) = self.live_warmup_warming_progress {
+                    banner_row =
+                        banner_row.push(text(format!("{:.0}%", (p * 100.0).clamp(0.0, 100.0))));
+                }
+                base = base.push(container(banner_row).padding(padding::all(8)));
             }
             base = base.push(
                 match sidebar_pos {

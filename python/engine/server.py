@@ -504,6 +504,16 @@ class DataEngineServer:
         self._kabu_adapter: KabuStationAdapter = KabuStationAdapter([])
         self._kabu_push_seq: int = 0
         self._kabu_push_ssid: str | None = None
+        # R5-CRITICAL-2: ticker 別 TradingVolume の last value を保持し、
+        # per-trade qty を delta で計算するための session-scoped state。
+        # `KabuStationAdapter.parse_execution` は qty=0 ハードコード (kabu PUSH は
+        # 累積 TradingVolume を持つが per-trade qty を持たない) のため、R3 M8 で
+        # qty=0 trade を skip すると kabu live data 経路が完全 dead path 化する
+        # silent failure に陥っていた。delta が正のときのみ trade dict を
+        # `_live_fd_queue` に流す (delta <= 0 は skip)。
+        # 初回 frame は last_volume が無いため state seed のみ (skip)。
+        # `_clear_kabu_session` でリセットして再ログイン時に古い state を引き継がない。
+        self._kabu_last_trading_volume: dict[str, int] = {}
         # VenueReady を emit した venue 名。None = 未接続 / "tachibana" / "kabu_station"。
         # StartEngine(engine="Live") の venue guard に使う。
         self._connected_venue: str | None = None
@@ -548,6 +558,13 @@ class DataEngineServer:
         # N1.11: streaming replay 中断用 stop_event レジストリ。
         # _handle_stop_engine が set()、_handle_start_engine の finally で pop する。
         self._engine_stop_events: dict[str, Any] = {}
+        # issue #42 Phase 1 / 統一決定 #13 (R3-H2 + R5-MED-1):
+        # 同一 venue で別 strategy_id の Live engine を多重起動すると LiveExecutionClient
+        # の resource 競合や注文の二重送信リスクがあるため、venue 単位で concurrent
+        # ガードする。``_engine_tasks`` の strategy_id 重複ガードはそのまま残し、
+        # 同一 venue + 別 strategy_id の場合は EngineBusy{busy_kind:"another_strategy_on_venue"}
+        # を emit する。
+        self._active_live_venues: set[str] = set()
         # N1.11: streaming replay の pacing 倍率。SetReplaySpeed で変更される。
         # compute_sleep_sec は multiplier >= 1 を要求するため、デフォルト 1 は安全。
         self._replay_speed_multiplier: int = 1
@@ -926,12 +943,17 @@ class DataEngineServer:
         # Phase 1: kabu_station は _workers に含まれないため capabilities を直接追記
         from engine.exchanges.kabusapi_register import RegisterSet as _KabuRegisterSet
         # P4-3: is_production フラグを追加。KABU_ALLOW_PROD=1 + KABU_ENV=prod の二重判定で True。
+        # issue #42 Phase 4: kabu_station venue で live strategy 起動経路を確立した
+        # （``NautilusRunner.start_live(venue="kabu_station")`` + KabuStationLive* 一式）ため、
+        # ``supports_live_strategy`` を **True** に flip。venue dropdown と GUI Submit 経路
+        # が解放される。Phase 3.5 では False で pin されていた。
         venue_caps["kabu_station"] = {
             "requires_local_app": True,
             "max_push_symbols": _KabuRegisterSet.MAX,  # architecture.md §8: 50 と一致を保証
             "supports_amend": False,
             "requires_trade_password_for_cancel": True,
             "is_production": self._kabu_env == "prod",
+            "supports_live_strategy": True,
         }
 
         ready = Ready(
@@ -1298,6 +1320,13 @@ class DataEngineServer:
             # F6: SCENARIO ブロックの libcst atomic 書き戻し。
             self._spawn_fetch(
                 self._do_save_strategy_scenario(msg), msg.get("request_id")
+            )
+
+        elif op == "LoadLiveStrategyScenario":
+            # issue #42 Phase 2: LIVE_SCENARIO 定数の安全抽出（live フォーム prefill 用）。
+            self._spawn_fetch(
+                self._handle_load_live_strategy_scenario(msg),
+                msg.get("request_id"),
             )
 
         else:
@@ -2000,7 +2029,16 @@ class DataEngineServer:
             self._session_holder.on_submit_success()
 
     def _clear_kabu_session(self) -> None:
-        """トークン期限切れ・接続断時に kabu セッション状態をリセットする。"""
+        """トークン期限切れ・接続断時に kabu セッション状態をリセットする。
+
+        R5: 本メソッドの副作用として `_kabu_last_trading_volume.clear()` が走るため、
+        **再ログイン直後の最初の kabu PUSH frame は state seed として skip される**
+        (累積 TradingVolume を 1 件の trade として `_live_fd_queue` に流すと
+        dedup 異常 / 過剰約定量として silent failure を生むため意図的に skip)。
+        その結果、再ログイン後の 1 件目 live trade tick は失われる。spec
+        `docs/specs/live-strategy.md §3.2-G` および §5 安全装置リストに同等の
+        記述を維持すること (R7 MEDIUM-4 反映)。
+        """
         if self._kabu_venue is not None:
             self._kabu_venue.clear()
         self._kabu_venue = None  # [M-2] 古い venue 参照が残らないようにする
@@ -2014,6 +2052,16 @@ class DataEngineServer:
         self._kabu_push_task = None
         self._connected_venue = None
         self._kabu_push_ssid = None  # C1: PUSH セッション ID をリセット
+        # R5-CRITICAL-2: TradingVolume delta 計算用 state も session ごとにリセット。
+        # 再ログイン後の最初 frame は古い last_volume を引き継がず、state seed として
+        # 扱う必要がある (引き継ぐと delta 計算が誤って大きな delta になり、過去
+        # 累積分を 1 件の trade として流す silent regression を起こす)。
+        # R6: `__new__` ベースの test helper (`test_kabu_server_orders._make_server`)
+        # は instance attr を手動 set するため `_kabu_last_trading_volume` が未定義に
+        # なる経路がある。defensive に getattr で取得して None なら skip する。
+        _last_vol = getattr(self, "_kabu_last_trading_volume", None)
+        if _last_vol is not None:
+            _last_vol.clear()
         self._live_state = LiveState.DISCONNECTED
 
     async def _do_submit_order_kabu(self, msg: dict, *, ws: ServerConnection | None = None) -> None:
@@ -3256,6 +3304,74 @@ class DataEngineServer:
                 ).model_dump(exclude_none=False)
             )
 
+    async def _handle_load_live_strategy_scenario(self, msg: dict) -> None:
+        """issue #42 Phase 2: ``LoadLiveStrategyScenario`` ハンドラ。
+
+        戦略 .py から ``LIVE_SCENARIO`` 定数を ``ast.literal_eval`` で安全抽出し、
+        live フォーム prefill 用に Rust GUI に返す。``_do_load_strategy_scenario``
+        （SCENARIO 抽出）の対称ペア。
+
+        emit する event:
+            - 成功（LIVE_SCENARIO 存在 + validate OK）→
+              ``LiveStrategyScenarioLoaded(instrument_id=..., max_qty=..., ..., venue=...)``
+            - LIVE_SCENARIO 不在 → ``LiveStrategyScenarioLoaded(全フィールド None)``
+              を **即時** emit する（5s 待たせない / 統一決定 #18 / 受け入れ基準 #23）。
+            - parse / IO / validate 失敗 →
+              ``Error{code:"strategy_parse_failed", request_id, message}``
+              （受け入れ基準 #19 の一部 — Rust 側 ``handlers/replay.rs`` の
+              IpcError handler が ``release_scenario_pending()`` を呼ぶ code）。
+        """
+        from engine import scenario as scenario_mod
+        from engine.schemas import Error, LiveStrategyScenarioLoaded
+
+        request_id = msg.get("request_id", "")
+        strategy_path = msg.get("strategy_path", "")
+
+        try:
+            live_scenario = scenario_mod.extract_live(Path(strategy_path))
+        except Exception as exc:
+            # AST parse / IO / ScenarioValidationError 等は全て strategy_parse_failed に
+            # 集約する（Rust 側 GUI は単一 code で release_scenario_pending する設計）。
+            log.warning(
+                "scenario.load_live failed reason=%s path=%r", exc, strategy_path
+            )
+            self._outbox.append(
+                Error(
+                    request_id=request_id,
+                    code="strategy_parse_failed",
+                    message=str(exc),
+                ).model_dump(exclude_none=False)
+            )
+            return
+
+        if live_scenario is None:
+            # 受け入れ基準 #23 / 統一決定 #18: LIVE_SCENARIO 不在は即時 null 応答。
+            # GUI 側の 5s timeout は engine 無応答時の fallback のみ。
+            self._outbox.append(
+                LiveStrategyScenarioLoaded(
+                    request_id=request_id,
+                    instrument_id=None,
+                    max_qty=None,
+                    max_notional_jpy=None,
+                    venue=None,
+                    strategy_init_kwargs=None,
+                ).model_dump(exclude_none=False)
+            )
+            return
+
+        # 成功: LIVE_SCENARIO の各フィールドを wire 形に詰める。
+        # extract_live の validation で全必須キーは保証されている。
+        self._outbox.append(
+            LiveStrategyScenarioLoaded(
+                request_id=request_id,
+                instrument_id=live_scenario["instrument"],
+                max_qty=live_scenario["max_qty"],
+                max_notional_jpy=live_scenario["max_notional_jpy"],
+                venue=live_scenario["venue"],
+                strategy_init_kwargs=live_scenario.get("strategy_init_kwargs"),
+            ).model_dump(exclude_none=False)
+        )
+
     async def _do_save_strategy_scenario(self, msg: dict) -> None:
         """SaveStrategyScenario: .py の SCENARIO ブロックを libcst で atomic 書き戻す。
 
@@ -4089,7 +4205,10 @@ class DataEngineServer:
 
         VenueReady 後にバックグラウンドタスクとして起動される。
         _clear_kabu_session() でキャンセルされる。
-        # TODO Phase 4: emit OrderFilled IPC event（現状はログのみ）
+
+        issue #42 R2 CRITICAL-1: TRADING 中の fill は _live_ec_queue に push する
+        ことで、KabuLiveEcBridge → KabuStationEventBridge.process_order_record
+        経路に乗せる。それ以外（CONNECTED）の状態では旧挙動通り info ログのみ。
         """
         _POLL_INTERVAL = 30.0
         try:
@@ -4101,7 +4220,22 @@ class DataEngineServer:
                     fills = await self._kabu_venue.poll_fills()
                     for fill in fills:
                         log.info("kabu fill: %s", fill)
-                        # TODO Phase 4: emit OrderFilled IPC event
+                        # R2 CRITICAL-1 / R3 H4: live strategy 走行中はキューに流す。
+                        # connected_venue == "kabu_station" を明示要求する
+                        # (tachibana TRADING 中に kabu session 残留 + fill 受信で
+                        # tachibana の EC bridge を汚染する cross-venue silent failure 防止)。
+                        if (
+                            self._mode == "live"
+                            and self._live_state == LiveState.TRADING
+                            and self._connected_venue == "kabu_station"
+                        ):
+                            try:
+                                self._live_ec_queue.put_nowait(fill)
+                            except _stdlib_queue.Full:
+                                log.warning(
+                                    "_kabu_fill_poller: live_ec_queue full, "
+                                    "dropping kabu fill record"
+                                )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -4188,6 +4322,97 @@ class DataEngineServer:
 
         # C-R2-1: 板処理後に約定ストリームも処理する（独立した try/except で例外を分離）
         self._on_kabu_trade_push(raw)
+
+        # issue #42 R2 CRITICAL-1 / R5-CRITICAL-2: live strategy 起動中 (TRADING) かつ
+        # connected_venue==kabu_station の場合、kabu 約定 PUSH を _live_fd_queue
+        # に流す。KabuLiveDataBridge → KabuStationLiveDataClient._feed_trade_dict_sync
+        # → TradeTick → LiveDataEngine の経路に乗せる。
+        # trade dict 形式は tachibana の FdFrameProcessor と互換 (ts_ms / price / qty / side)。
+        #
+        # R5-CRITICAL-2 (Option A): per-trade qty は `TradingVolume` の delta で計算する。
+        # `KabuStationAdapter.parse_execution` は qty=0 ハードコード (kabu PUSH は
+        # 累積 TradingVolume を持つが per-trade qty を持たない) のため、R3 M8 で
+        # qty=0 trade を skip すると kabu live data 経路が完全 dead path 化する
+        # silent failure に陥っていた (KabuStationLiveDataClient._feed_trade_dict_sync
+        # が呼ばれず TradingNode の Strategy SDK には kabu PUSH frame が一切到達しない)。
+        # delta_qty = current_volume - last_volume を計算し、delta_qty > 0 のときだけ
+        # trade dict を流す。delta_qty <= 0 (初回 seed / 同 volume / 異常 reset) は skip。
+        # R3 M8 の意図 (qty=0 を流さない) は delta_qty <= 0 skip で同等にカバーされる。
+        # getattr 防御: 既存テストは __init__ を bypass する fixture を使う
+        # ことがあり、_mode / _live_state / _connected_venue / _live_fd_queue が
+        # 未初期化のことがある。安全側で no-op になるよう default を渡す。
+        if (
+            getattr(self, "_mode", None) == "live"
+            and getattr(self, "_live_state", None) == LiveState.TRADING
+            and getattr(self, "_connected_venue", None) == "kabu_station"
+        ):
+            _live_fd_q = getattr(self, "_live_fd_queue", None)
+            if _live_fd_q is not None:
+                try:
+                    trade = self._kabu_adapter.parse_execution(raw)
+                    # R7 LOW-1: outer try で `ticker` を取得済みのため再利用する
+                    # (DRY: `raw.get("Symbol", "")` 2 回取得を排除)。
+                    symbol = ticker
+                    # `TradingVolume` を int で取得 (kabu PUSH の値は int 想定だが、
+                    # 欠損 / 型違いに備えて防御的に変換する)。
+                    try:
+                        current_volume = int(raw.get("TradingVolume", 0) or 0)
+                    except (TypeError, ValueError):
+                        current_volume = 0
+                    # session-scoped state を defensive に取得 (getattr で未初期化を許容)。
+                    last_volume_map = getattr(self, "_kabu_last_trading_volume", None)
+                    if last_volume_map is None:
+                        last_volume_map = {}
+                        self._kabu_last_trading_volume = last_volume_map
+                    has_prev = symbol in last_volume_map
+                    last_volume = last_volume_map.get(symbol, 0)
+                    delta_qty = current_volume - last_volume
+                    # state を必ず更新する。初回 / 正常 delta / 異常 reset の
+                    # いずれの場合も「次回 delta 計算の基準」として新値を覚える。
+                    last_volume_map[symbol] = current_volume
+
+                    if not has_prev:
+                        # 初回 frame: state seed のみ (skip)。
+                        # 累積 TradingVolume を 1 件の trade として流すと dedup 異常
+                        # / 過剰約定量として silent failure を生むため明示的に skip。
+                        log.debug(
+                            "_on_kabu_board_push: seeding _kabu_last_trading_volume "
+                            "for %s = %d (first frame, skipping live trade push)",
+                            symbol,
+                            current_volume,
+                        )
+                    elif delta_qty <= 0:
+                        # 同 volume (delta=0) または 異常な減少 (delta<0)。trade なし。
+                        log.debug(
+                            "_on_kabu_board_push: skipping zero/negative-delta trade "
+                            "for %s (delta=%d, last=%d, current=%d)",
+                            symbol,
+                            delta_qty,
+                            last_volume,
+                            current_volume,
+                        )
+                    else:
+                        ts_ms = int(trade.timestamp.timestamp() * 1000)
+                        trade_dict = {
+                            "ts_ms": ts_ms,
+                            "price": str(trade.price),
+                            "qty": str(delta_qty),
+                            "side": trade.side,
+                        }
+                        try:
+                            _live_fd_q.put_nowait(trade_dict)
+                        except _stdlib_queue.Full:
+                            log.warning(
+                                "_on_kabu_board_push: live_fd_queue full, dropping kabu trade frame"
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    # parse_execution 失敗 (CurrentPrice 欠損等) は board 経路と同様に
+                    # silent skip — board snapshot 経路は別 try/except で観測済み。
+                    # R7 LOW-2: live data dead path 化の直接原因になりうるため
+                    # debug → warning に格上げ (silent failure 観測性確保)。
+                    log.warning(
+                        "_on_kabu_board_push: live_fd_queue trade extract failed: %s", exc
+                    )
 
     def _on_kabu_trade_push(self, raw: dict) -> None:
         """Raw kabu PUSH 板 JSON の CurrentPrice から Trades wire dict → outbox.
@@ -4754,6 +4979,58 @@ class DataEngineServer:
             await _drain()
             return
 
+        # issue #42 Phase 1 / 統一決定 #13 (R3-H2 + R5-MED-1):
+        # 同一 venue で別 strategy_id の Live engine が走行中なら EngineBusy で reject。
+        # ``engine_already_running`` ガード（同一 strategy_id）は上で先に判定済み。
+        # 順序: engine_already_running → venue concurrency。
+        # venue は ``self._connected_venue``（live mode で venue ログイン後に確定）を参照。
+        # ``getattr`` で defensive に参照する: テストが ``__init__`` を patch して
+        # ``_active_live_venues`` を初期化していないケースに備える。
+        if engine_kind == "Live":
+            active_live_venues = getattr(self, "_active_live_venues", None)
+            if active_live_venues is None:
+                active_live_venues = set()
+                self._active_live_venues = active_live_venues
+            # R4 R3-SILENT-6: ``_connected_venue`` の hardcode fallback "tachibana"
+            # 撤廃。venue 未接続 (None / 空文字) のまま StartEngine が来たら、後段の
+            # venue_not_supported / `_active_live_venues` cleanup 漏れ等の silent
+            # failure を防ぐため早期 reject する。venue 種別の妥当性 (tachibana /
+            # kabu_station) 検査は live 分岐内の既存 venue_not_supported チェック
+            # に任せる (本ガードは「venue が確定しているか」だけを見る)。
+            current_venue = getattr(self, "_connected_venue", None)
+            if not current_venue:
+                log.error(
+                    "[StartEngine Live] _connected_venue is not set — "
+                    "cannot determine venue (request_id=%s)",
+                    request_id,
+                )
+                _emit(
+                    {
+                        "event": "Error",
+                        "request_id": request_id,
+                        "code": "venue_not_connected",
+                        "message": "venue が未接続です",
+                    }
+                )
+                await _drain()
+                return
+            if current_venue in active_live_venues:
+                from engine.schemas import EngineBusy as EngineBusyModel
+                payload = EngineBusyModel(
+                    current_state="TRADING",
+                    attempted_command="StartEngine",
+                    reason=(
+                        f"another live strategy is already running on venue "
+                        f"{current_venue!r}"
+                    ),
+                    request_id=request_id,
+                    venue=current_venue,
+                    busy_kind="another_strategy_on_venue",
+                ).model_dump()
+                _emit(payload)
+                await _drain()
+                return
+
         # H-4: EngineStartConfig.model_validate() で extra フィールドや型違いを弾く。
         # extra="forbid" が機能するのはここだけ（raw dict のままでは機能しない）。
         try:
@@ -4790,6 +5067,22 @@ class DataEngineServer:
         runner = NautilusRunner()
         # 走行中ハンドルを保持 (StopEngine で参照)。N1.4 は同時 1 戦略想定。
         self._engine_tasks[strategy_id] = runner
+
+        # issue #42 Phase 1 / 統一決定 #13: live 起動を受理した直後に venue を
+        # ``_active_live_venues`` に登録する。後続の concurrent StartEngine{Live}
+        # が同 venue で来たら EngineBusy で reject される。
+        # 終了時（正常 / 例外 / timeout / warm_up failure 問わず）には
+        # finally 節で discard する。
+        # R4 R3-SILENT-6: 旧実装の "tachibana" hardcode fallback を撤廃。上で
+        # ``_connected_venue`` 未設定なら早期 reject 済みなので、ここでは値が
+        # 確定している前提で使う。
+        live_venue_for_cleanup: "str | None" = None
+        if engine_kind == "Live":
+            live_venue_for_cleanup = getattr(self, "_connected_venue", None)
+            # 上で初期化を保証済みだが defensive に再確認する。
+            if not hasattr(self, "_active_live_venues"):
+                self._active_live_venues = set()
+            self._active_live_venues.add(live_venue_for_cleanup)
 
         # B3: StartEngine 受理 → RUNNING 状態へ遷移（replay モードのみ）。
         if self._mode == "replay":
@@ -4915,15 +5208,22 @@ class DataEngineServer:
                 # Phase 2: live 分岐。CONNECTED 状態のみ受理する。
                 if not self._check_live_state("StartEngine", LiveState.CONNECTED):
                     return
-                # tachibana 以外の venue でログイン済みの場合は拒否する。
-                # kabu_station の live 実行は未実装のため、ここで明示的にエラーを返す。
-                if self._connected_venue != "tachibana":
+                # issue #42 Phase 4: tachibana / kabu_station の両 venue を許可する。
+                # それ以外の venue（未ログイン含む）は明示的に reject。
+                # capability ベースの判定は Ready.capabilities.venue_capabilities
+                # [<venue>].supports_live_strategy で行われる（GUI 側）。engine 側は
+                # 接続済 venue が両 venue のいずれかであることだけ確認する。
+                live_venue = self._connected_venue
+                if live_venue not in ("tachibana", "kabu_station"):
                     _on_event_tracked(
                         {
                             "event": "Error",
                             "request_id": request_id,
                             "code": "venue_not_supported",
-                            "message": f"Live engine requires tachibana venue (connected: {self._connected_venue!r}). kabu_station live execution is not yet implemented.",
+                            "message": (
+                                f"Live engine requires tachibana or kabu_station venue "
+                                f"(connected: {live_venue!r})."
+                            ),
                         }
                     )
                     return
@@ -4938,16 +5238,37 @@ class DataEngineServer:
                         }
                     )
                     return
-                # SessionHolder から第二暗証番号を取得（env 変数不使用）
-                second_password = self._session_holder.get_password()
-                if second_password is None:
-                    _on_event_tracked(
-                        {
-                            "event": "SecondPasswordRequired",
-                            "request_id": request_id,
-                        }
-                    )
-                    return
+                # 第二暗証番号 / session の解決を venue 別に分ける。
+                # tachibana: SessionHolder から第二暗証番号を取得（env 変数不使用）。
+                # kabu_station: 第二暗証番号は使わず、KabuStationVenue の
+                # KabuTradePasswordHolder で取引パスワードを別管理（既存設計）。
+                if live_venue == "tachibana":
+                    second_password = self._session_holder.get_password()
+                    if second_password is None:
+                        _on_event_tracked(
+                            {
+                                "event": "SecondPasswordRequired",
+                                "request_id": request_id,
+                            }
+                        )
+                        return
+                    live_session = self._tachibana_session
+                else:  # live_venue == "kabu_station"
+                    if self._kabu_venue is None:
+                        _on_event_tracked(
+                            {
+                                "event": "Error",
+                                "request_id": request_id,
+                                "code": "venue_not_connected",
+                                "message": "kabu_station venue is not connected (no token)",
+                            }
+                        )
+                        return
+                    second_password = ""  # kabu_station では未使用
+                    live_session = self._kabu_venue
+                    # R3 C1: register call は _run の外側 (async 文脈) に移動した
+                    # （後段の PUT /register より **前** に走らせる必要があるため）。
+                    # 詳細は _run 直後のブロック参照。
                 self._live_state = LiveState.TRADING
                 stop_event = self._engine_stop_events.setdefault(
                     strategy_id, threading.Event()
@@ -4959,12 +5280,151 @@ class DataEngineServer:
                     max_qty=config_obj.max_qty,
                     max_notional_jpy=config_obj.max_notional_jpy,
                     second_password=second_password,
-                    session=self._tachibana_session,
+                    session=live_session,
                     fd_queue=self._live_fd_queue,
                     ec_queue=self._live_ec_queue,
                     on_event=_on_event_tracked,
                     stop_event=stop_event,
                     strategy_id=strategy_id,
+                    venue=live_venue,
+                )
+
+        # issue #42 R3 C1: live + kabu_station の場合、_run を起動する前に
+        # (a) strategy 銘柄を _kabu_register_set に register し、
+        # (b) PUT /register を走らせて kabu local app に PUSH 配信を開始させる。
+        # 旧実装 (R2) では (a) を _run の中で呼んでいたが、_run は asyncio.to_thread
+        # 経由で後段の `_kabu_put_register` 呼出より **後** に走るため、新しい
+        # strategy 銘柄が PUT /register payload に含まれず PUSH 配信が始まらない
+        # silent failure を生んでいた (live data が流れない)。
+        #
+        # 失敗時は live を起動せず EngineError を emit して return する。
+        # _live_state は CONNECTED に戻して state machine の固着を防ぐ。
+        #
+        # R5-CRITICAL-1: R3 で本ブロックを `_run` の外 (try/except 外) に移動した
+        # 結果、両 early-return path で以下が脱漏していた:
+        #   1. EngineStopped event (Rust state machine が pending_strategy_id で stuck)
+        #   2. Error{request_id, code, message} event (Rust 60s hang — RequestEngineStart
+        #      完了を待つ)
+        #   3. `_active_live_venues.discard(live_venue_for_cleanup)`
+        #      (次の StartEngine が engine_busy_for_venue で reject)
+        #   4. `_engine_tasks.pop(strategy_id, None)`
+        #   5. `_engine_stop_events.pop(strategy_id, None)`
+        # `_run` 内例外なら後段の `except Exception` (catch-all) + `finally` が
+        # 全て carry してくれるが、本ブロックは catch-all の外側で走るため、
+        # `_kabu_register_early_abort` helper で同等の cleanup を明示的に行う。
+        def _kabu_register_early_abort(error_code: str, message: str) -> None:
+            """register / PUT 失敗時の cleanup + event 補完 (R5-CRITICAL-1)。
+
+            - EngineError event を emit (既存の strategy-level error 通知)
+            - EngineStopped event を emit (Rust state machine unstuck)
+            - Error{request_id} event を emit (Rust の 60s hang を解消)
+            - `_engine_tasks` / `_engine_stop_events` から pop
+            - `_active_live_venues` から live_venue_for_cleanup を discard
+            - `_live_state` を CONNECTED に戻す
+            """
+            _emit(
+                EngineErrorModel(
+                    code=error_code,
+                    message=message,
+                    strategy_id=strategy_id,
+                ).model_dump()
+            )
+            if not engine_stopped_emitted[0]:
+                _emit(
+                    {
+                        "event": "EngineStopped",
+                        "strategy_id": strategy_id,
+                        "final_equity": "0",
+                        "ts_event_ms": int(time.time() * 1000),
+                    }
+                )
+                engine_stopped_emitted[0] = True
+            _emit(
+                {
+                    "event": "Error",
+                    "request_id": request_id,
+                    "code": error_code,
+                    "message": message,
+                }
+            )
+            self._engine_tasks.pop(strategy_id, None)
+            self._engine_stop_events.pop(strategy_id, None)
+            if live_venue_for_cleanup is not None:
+                _venues = getattr(self, "_active_live_venues", None)
+                if _venues is not None:
+                    _venues.discard(live_venue_for_cleanup)
+            self._live_state = LiveState.CONNECTED
+
+        if (
+            self._mode == "live"
+            and engine_kind == "Live"
+            and self._connected_venue == "kabu_station"
+        ):
+            # (a) instrument_id の symbol を _kabu_register_set に register する。
+            _instrument_id = config_obj.instrument_id or ""
+            _kabu_symbol = (
+                _instrument_id.split(".", 1)[0] if _instrument_id else ""
+            )
+            # R7 MEDIUM-1: `_kabu_symbol` が空のとき silent skip すると PUT /register
+            # 対象なしで TRADING 起動 → live data 永遠に届かない dead path 化を起こす。
+            # pydantic 層 (schemas.py::EngineStartConfig.instrument_id min_length=1) が
+            # 第一防衛線だが、二段防御として runtime guard も入れる。
+            # bypass test fixture / 未来の schema 緩和 / 不正 dict 直注入経路をすべて
+            # 同 early-abort 経路に集約する。
+            if not _kabu_symbol:
+                _kabu_register_early_abort(
+                    "invalid_config",
+                    (
+                        f"kabu_station live start requires non-empty instrument_id "
+                        f"(got: {_instrument_id!r}); cannot register PUSH symbol"
+                    ),
+                )
+                await _drain()
+                return
+            try:
+                self._kabu_register_set.register(_kabu_symbol, 1)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "[live_start] _kabu_register_set.register failed for %s: %s",
+                    _kabu_symbol, exc,
+                )
+                _kabu_register_early_abort(
+                    "kabu_register_failed",
+                    (
+                        f"kabu register failed for symbol {_kabu_symbol!r} "
+                        f"during live start: {exc}"
+                    ),
+                )
+                await _drain()
+                return
+
+            # (b) PUT /register を走らせる (register 後でないと strategy 銘柄が
+            # 含まれない)。
+            _all_syms = self._kabu_register_set.all_symbols()
+            if _all_syms:
+                if not await self._kabu_put_register(_all_syms):
+                    _kabu_register_early_abort(
+                        "kabu_register_failed",
+                        (
+                            "kabu PUT /register failed during live start; "
+                            "live data will not flow"
+                        ),
+                    )
+                    await _drain()
+                    return
+            else:
+                # R7 MEDIUM-2: register_set が空のときの PUT skip を観測可能化する。
+                # MEDIUM-1 fix で `_kabu_symbol` 空は early-abort されるため、ここに
+                # 到達するのは外部 clear や race で集合が空になった状態 (本来起きない
+                # はず) — silent skip すると live data が流れない dead path 化を
+                # 観測できないため WARNING を残す。早期 abort はしない (silent
+                # failure として外部観測する手段を残しつつ無害な経路で進める)。
+                log.warning(
+                    "kabu live start: no symbols in _kabu_register_set, "
+                    "PUT /register skipped (live data may not flow); "
+                    "strategy_id=%r instrument_id=%r",
+                    strategy_id,
+                    _instrument_id,
                 )
 
         try:
@@ -4986,6 +5446,18 @@ class DataEngineServer:
                         "[StartEngine] start_backtest_replay returned None; portfolio not updated for strategy_id=%r",
                         strategy_id,
                     )
+        except asyncio.CancelledError:
+            # R2-A H6: SIGTERM / cancel 経路で CancelledError が伝播してきた場合、
+            # 後続の ``finally:`` 節も走るため理論上は cleanup される。ただし
+            # CancelledError は ``Exception`` を継承しないため、もし将来 ``finally:``
+            # 内に await が入ったり順序が変わると discard を取りこぼす可能性がある。
+            # 二重防御として here で明示的に discard し、その後 raise で伝播継続する。
+            # set.discard は冪等なので finally 節と二重実行しても問題なし。
+            if live_venue_for_cleanup is not None:
+                _venues_cancel = getattr(self, "_active_live_venues", None)
+                if _venues_cancel is not None:
+                    _venues_cancel.discard(live_venue_for_cleanup)
+            raise
         except asyncio.TimeoutError as exc:
             log.error(
                 "StartEngine timed out: strategy_id=%r",
@@ -5049,10 +5521,15 @@ class DataEngineServer:
                     }
                 )
                 engine_stopped_emitted[0] = True
+            # R2-A M9: credential 漏洩防止。認証関連例外の str(exc) は wire に
+            # 流さず、engine_runner の helper を経由して scrub する。
+            # 詳細は log.error(..., exc_info=True) で local 側に残る。
+            from engine.nautilus.engine_runner import _scrub_credential_exception
+            scrubbed_msg = _scrub_credential_exception(exc)
             _emit(
                 EngineErrorModel(
                     code="engine_run_failed",
-                    message=str(exc),
+                    message=scrubbed_msg,
                     strategy_id=strategy_id,
                 ).model_dump()
             )
@@ -5062,12 +5539,19 @@ class DataEngineServer:
                     "event": "Error",
                     "request_id": request_id,
                     "code": "engine_run_failed",
-                    "message": str(exc),
+                    "message": scrubbed_msg,
                 }
             )
         finally:
             self._engine_tasks.pop(strategy_id, None)
             self._engine_stop_events.pop(strategy_id, None)
+            # issue #42 Phase 1 / 統一決定 #13: venue 単位 concurrent ガードの cleanup。
+            # 正常終了 / 例外 / timeout / warm_up failure / node_build_failed のいずれの
+            # 経路でも venue を discard する（次の StartEngine が同 venue で来たら受理）。
+            if live_venue_for_cleanup is not None:
+                _venues = getattr(self, "_active_live_venues", None)
+                if _venues is not None:
+                    _venues.discard(live_venue_for_cleanup)
             # B3 / MEDIUM-R3-2: 走行終了（正常・例外・timeout 問わず）→ IDLE 状態へ戻す。
             # ただし「全断 → 再接続 → LoadReplayData (LOADED)」が走った後に
             # 古い runner の to_thread 完了がここに到達するケースでは、

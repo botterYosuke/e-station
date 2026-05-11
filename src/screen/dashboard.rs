@@ -74,6 +74,11 @@ pub struct Dashboard {
     layout_id: uuid::Uuid,
     /// N1.14: tracks auto-generated REPLAY panes and user dismissals.
     pub replay_pane_registry: replay_pane_registry::ReplayPaneRegistry,
+    /// issue #42 Phase 3: 既に live ペインを生成済みの三つ組を冪等に管理する。
+    /// `(strategy_id, instrument_id, venue)` をキーに含めることで `EngineRehello`
+    /// 後の再生成と LiveStrategyReady 多重受信を no-op で吸収する。
+    /// `LiveStrategyState::Idle` 遷移時にクリアされる。
+    pub live_pane_keys: std::collections::HashSet<(String, String, String)>,
     /// Issue #25: currently selected venue for all order panels.
     /// Defaults to `Venue::Tachibana`; updated by `OrderVenueSelected`.
     pub order_venue: Venue,
@@ -92,6 +97,7 @@ impl Default for Dashboard {
             popout: HashMap::new(),
             layout_id: uuid::Uuid::new_v4(),
             replay_pane_registry: replay_pane_registry::ReplayPaneRegistry::new(),
+            live_pane_keys: std::collections::HashSet::new(),
             order_venue: Venue::Tachibana,
             tachibana_ready: false,
             kabu_ready: false,
@@ -177,6 +183,7 @@ impl Dashboard {
             popout,
             layout_id,
             replay_pane_registry: replay_pane_registry::ReplayPaneRegistry::new(),
+            live_pane_keys: std::collections::HashSet::new(),
             order_venue: Venue::Tachibana,
             tachibana_ready: false,
             kabu_ready: false,
@@ -1428,6 +1435,191 @@ impl Dashboard {
         // §4c: rebuild UniqueStreams so market_subscriptions() picks up the new
         // replay kline/trade streams on the next iced subscription cycle.
         self.refresh_streams(main_window_id)
+    }
+
+    /// issue #42 Phase 3 (統一決定 #9): live 戦略起動時の 4 ペイン自動生成。
+    ///
+    /// `LiveStrategyReady{strategy_id, instrument_id, venue}` 受信時に呼ばれ、
+    /// 同じ三つ組での再呼出は冪等に no-op となる（reconnect 時の `EngineRehello`
+    /// で同一三つ組のまま再呼出されるケースに耐える）。
+    ///
+    /// 生成するペイン:
+    /// 1. CandlestickChart (M1) — root pane（live は分足チャートを既定とする）
+    /// 2. TimeAndSales — 約定 tick 表示
+    /// 3. OrderList — Live 注文一覧（`is_replay = false`）
+    /// 4. BuyingPower — Live 買付余力（`is_replay = false`）
+    ///
+    /// 冪等 key: `(strategy_id, instrument_id, venue)` 三つ組。
+    /// 異なる三つ組（別 strategy_id 等）が来た場合は新しいキーで再生成する
+    /// （これは仕様上想定外 — 新しい live 戦略を立ち上げる前に必ず stop する）。
+    pub fn auto_generate_live_panes(
+        &mut self,
+        main_window_id: window::Id,
+        strategy_id: &str,
+        instrument_id: &str,
+        venue: &str,
+    ) {
+        if instrument_id.is_empty() {
+            log::error!("auto_generate_live_panes: instrument_id is empty — aborting");
+            return;
+        }
+        let key = (
+            strategy_id.to_string(),
+            instrument_id.to_string(),
+            venue.to_string(),
+        );
+        if self.live_pane_keys.contains(&key) {
+            // 冪等: 同じ三つ組の再呼出は no-op（reconnect EngineRehello 経路）。
+            log::debug!(
+                "auto_generate_live_panes: idempotent skip for \
+                 (strategy_id={strategy_id}, instrument_id={instrument_id}, venue={venue})"
+            );
+            return;
+        }
+        self.live_pane_keys.insert(key);
+
+        log::info!(
+            "auto_generate_live_panes: generating 4 panes for \
+             strategy_id={strategy_id} instrument_id={instrument_id} venue={venue}"
+        );
+
+        // base_pane の決定 — focus 優先、なければ最後の pane、それも無ければ
+        // Starter pane を bootstrap する（auto_generate_replay_panes と同じ流儀）。
+        let found = self
+            .focus
+            .filter(|(w, _)| *w == main_window_id)
+            .and_then(|(_, p)| self.panes.get(p).map(|_| p))
+            .or_else(|| self.panes.iter().last().map(|(p, _)| *p));
+        let is_lone_starter = self.panes.iter().count() == 1
+            && matches!(
+                self.panes.iter().next().map(|(_, s)| &s.content),
+                Some(pane::Content::Starter),
+            );
+        let found = if is_lone_starter { None } else { found };
+
+        // root として CandlestickChart を bootstrap（grid が空 / Starter のみのとき）。
+        let base_pane = match found {
+            Some(p) => p,
+            None => {
+                let initial =
+                    pane::State::with_kind(data::layout::pane::ContentKind::CandlestickChart);
+                let (grid_state, initial_pane) = pane_grid::State::new(initial);
+                self.panes = grid_state;
+                self.focus = Some((main_window_id, initial_pane));
+                initial_pane
+            }
+        };
+
+        let mut last = base_pane;
+
+        // ① TimeAndSales（垂直分割で右側に追加）
+        let ts_state = pane::State::with_kind(data::layout::pane::ContentKind::TimeAndSales);
+        if let Some((p, _)) = self.panes.split(pane_grid::Axis::Vertical, last, ts_state) {
+            last = p;
+        } else {
+            log::warn!("auto_generate_live_panes: TimeAndSales split failed");
+        }
+
+        // ② OrderList（水平分割で下側に追加）
+        let ol_state = pane::State::with_kind(data::layout::pane::ContentKind::OrderList);
+        if let Some((p, _)) = self
+            .panes
+            .split(pane_grid::Axis::Horizontal, last, ol_state)
+        {
+            last = p;
+        } else {
+            log::warn!("auto_generate_live_panes: OrderList split failed");
+        }
+
+        // ③ BuyingPower（さらに水平分割で下側に追加）
+        let bp_state = pane::State::with_kind(data::layout::pane::ContentKind::BuyingPower);
+        if let Some((p, _)) = self
+            .panes
+            .split(pane_grid::Axis::Horizontal, last, bp_state)
+        {
+            last = p;
+        } else {
+            log::warn!("auto_generate_live_panes: BuyingPower split failed");
+        }
+
+        // ④ Positions（水平分割で下側に追加）
+        let pos_state = pane::State::with_kind(data::layout::pane::ContentKind::Positions);
+        if let Some((_p, _)) = self
+            .panes
+            .split(pane_grid::Axis::Horizontal, last, pos_state)
+        {
+            // OK
+        } else {
+            log::warn!("auto_generate_live_panes: Positions split failed");
+        }
+    }
+
+    /// issue #42 Phase 3: live 戦略停止時に live_pane_keys をクリアする。
+    /// `EngineStopped` (live) を受信した replay handler から呼ばれる。
+    pub fn clear_live_pane_keys(&mut self) {
+        self.live_pane_keys.clear();
+    }
+
+    /// R2-B H4 / 統一決定 #21 副次 invariant:
+    /// `node.build()` 失敗 (`EngineError{code:"node_build_failed"}`) 受信時に
+    /// `auto_generate_live_panes` で生成済みの 4 ペイン (TimeAndSales / OrderList
+    /// / BuyingPower / Positions) を逆操作で teardown する。
+    ///
+    /// 動作:
+    /// - 該当 `strategy_id` の key を `live_pane_keys` から取り除く。
+    /// - `Content` が live 4 panel kind (TimeAndSales / OrderList / BuyingPower /
+    ///   Positions) のペインを `panes.close()` で閉じる。`CandlestickChart` 等は
+    ///   live 専用ではないため触らない（auto_generate_live_panes は base に対する
+    ///   分割で 4 panel を増やす実装なので、base 側の CandlestickChart は live 起動
+    ///   前から存在する pre-existing pane の可能性がある）。
+    ///
+    /// 副作用:
+    /// - 同 dashboard 上に live 起動と無関係に手動で配置された TimeAndSales /
+    ///   OrderList / BuyingPower / Positions ペインがあった場合、それも一緒に
+    ///   閉じる。`node_build_failed` は通常の運用フローでは稀なため、安全側
+    ///   (= 確実に live 4 ペインを掃除する) を優先する。GUI 上で再起動するときは
+    ///   ユーザーが手動でペインを再配置する設計（統一決定 #21）。
+    pub fn teardown_live_panes(&mut self, strategy_id: &str) {
+        // 1. live_pane_keys から該当 strategy_id を持つ key を全部削除する。
+        //    （`auto_generate_live_panes` は (strategy_id, instrument_id, venue) 三つ組を
+        //     登録するため、同 strategy_id で複数 venue / instrument_id があれば全部消す）
+        let removed: Vec<_> = self
+            .live_pane_keys
+            .iter()
+            .filter(|(sid, _, _)| sid == strategy_id)
+            .cloned()
+            .collect();
+        let removed_len = removed.len();
+        for key in removed {
+            self.live_pane_keys.remove(&key);
+        }
+
+        // 2. live 4 panel kind のペインを閉じる。
+        //    `pane_grid::State::iter()` で借用中に close できないため、対象 id を
+        //    先に集めてから close する（HashSet にしないのは順序を保つだけで本質ではない）。
+        let targets: Vec<_> = self
+            .panes
+            .iter()
+            .filter_map(|(id, state)| {
+                let is_live_panel = matches!(
+                    &state.content,
+                    pane::Content::TimeAndSales(_)
+                        | pane::Content::OrderList(_)
+                        | pane::Content::BuyingPower(_)
+                        | pane::Content::Positions(_)
+                );
+                if is_live_panel { Some(*id) } else { None }
+            })
+            .collect();
+        let closed_len = targets.len();
+        for id in targets {
+            self.panes.close(id);
+        }
+
+        log::info!(
+            "teardown_live_panes: strategy_id={strategy_id} \
+             removed_keys={removed_len} closed_panes={closed_len}"
+        );
     }
 
     pub fn view<'a>(

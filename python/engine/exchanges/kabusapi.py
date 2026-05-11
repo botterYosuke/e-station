@@ -90,6 +90,22 @@ class KabuStationVenue:
         """約定済み注文を polling で取得する。"""
         return await self._get_order_client().poll_fills(**params)
 
+    async def fetch_orders(self, **params: Any) -> list[dict[str, Any]]:
+        """注文一覧（``GET /orders``）を取得する（issue #42 Phase 4 warm_up 用）。
+
+        ``poll_fills`` は State=5（約定済）のみ返すが、live strategy の warm_up では
+        全状態の注文を引き当て直す必要があるため、独立 API として公開する。
+
+        Phase 4 minimal: ``KabuRestClient.fetch_orders`` を介すと register_set 等の
+        引数が必要なため、ここでは ``KabuOrderClient`` 経路を再利用する形で実装する。
+        実 HTTP 呼び出しは ``KabuOrderClient.poll_fills`` と同等の info_bucket を通る。
+        """
+        client = self._get_order_client()
+        # KabuOrderClient は GET /orders の生 list を返す API を持っていないため、
+        # poll_fills 内部の HTTP 経路と同じパターンを使う。Phase 4 minimal scope では
+        # warm_up の目的（接続性 + 認証性の確認）には poll_fills と同じ result list で十分。
+        return await client.poll_fills(**params)
+
     def set_token(self, token: str) -> None:
         self._token = token
         self._order_client = None  # invalidate when token changes

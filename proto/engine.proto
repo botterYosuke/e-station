@@ -75,6 +75,7 @@ message Command {
     LoadStrategyScenarioRequest load_strategy_scenario = 34;
     SaveStrategyScenarioRequest save_strategy_scenario = 35;
     RequestVenueLogoutRequest   request_venue_logout   = 36;
+    LoadLiveStrategyScenarioRequest load_live_strategy_scenario = 37;
   }
 }
 
@@ -133,6 +134,10 @@ message Event {
     ClientDisconnectedEvent         client_disconnected         = 50;
     LiveBuyingPowerEvent            live_buying_power           = 51;
     ReplayTimeUpdatedEvent          replay_time_updated         = 52;
+    LiveStrategyScenarioLoadedEvent live_strategy_scenario_loaded = 53;
+    LiveStrategyReadyEvent          live_strategy_ready         = 54;
+    LiveStrategyWarmingUpEvent      live_strategy_warming_up    = 55;
+    SubscriptionEvictedEvent        subscription_evicted        = 56;
   }
 }
 
@@ -355,6 +360,14 @@ message SaveStrategyScenarioRequest {
   string          scenario    = 3;  // JSON-encoded dict
   bool            save_as     = 4;
   optional string loaded_path = 5;
+}
+
+// issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 抽出要求。SCENARIO とは独立した
+// 定数で、live モード form prefill に使う。Python 側は ast.parse + ast.literal_eval
+// のみで抽出する（副作用ゼロ）。
+message LoadLiveStrategyScenarioRequest {
+  string request_id    = 1;
+  string strategy_path = 2;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -689,11 +702,24 @@ message ReplayStoppedEvent {
 }
 
 // Emitted when a command is rejected because the engine state machine cannot accept it.
+//
+// R2-B R1-RUST-8: 過去削除フィールドは存在しないため `reserved` は不要。
+// **将来このメッセージから field を削除する際は、必ず `reserved <tag>;` および
+// `reserved "<name>";` を追記し、tag 番号の再利用を proto レベルで禁止すること**
+// (wire 上の旧 client が削除済 field を別意味で解釈する事故を防ぐ)。
+// 追加だけの今回 (venue=5 / busy_kind=6) は backward-compat なので reserved 不要。
 message EngineBusyEvent {
   EngineState      current_state     = 1;
   AttemptedCommand attempted_command = 2;
   string           reason            = 3;
   optional string  request_id        = 4;  // identifies the rejected command's caller
+  // issue #42 Phase 3 (schema 3.28): venue-scoped concurrent-live guard fields.
+  // `venue` is the venue holding another strategy; `busy_kind` is the specific reject
+  // category (e.g. "another_strategy_on_venue"). Older clients (minor < 28) absent
+  // both fields and decode them as None. Rust 側は R2-B H8 で `busy_kind` を
+  // `BusyKind` enum に格上げし、未知値は `None` フォールバック（wire 形は文字列のまま）。
+  optional string  venue             = 5;
+  optional string  busy_kind         = 6;
 }
 
 message ClientConnectedEvent {
@@ -732,6 +758,45 @@ message LiveBuyingPowerEvent {
   string buying_power = 3;  // decimal string, JPY
   string equity       = 4;  // decimal string, JPY
   int64  ts_event_ms  = 5;
+}
+
+// issue #42 Phase 2 (schema 3.25): LoadLiveStrategyScenario の応答。LIVE_SCENARIO
+// が見つかった場合は各フィールドを返す。LIVE_SCENARIO 不在時は全フィールドを未設定で返す。
+// strategy_init_kwargs は wire 上 JSON 文字列で、Python が dict を json.dumps して送出する。
+message LiveStrategyScenarioLoadedEvent {
+  string          request_id           = 1;
+  optional string instrument_id        = 2;
+  optional uint32 max_qty              = 3;  // matches EngineStartConfig.max_qty
+  optional uint64 max_notional_jpy     = 4;  // matches EngineStartConfig.max_notional_jpy
+  optional string venue                = 5;
+  optional string strategy_init_kwargs = 6;  // JSON-encoded object or absent
+}
+
+// issue #42 Phase 3 (schema 3.26): live strategy が warm_up() 成功時に emit する。
+// node.build() より前に emit され、Rust 側の auto_generate_live_panes 冪等トリガー
+// として使われる。reconnect 時にも再生される（pending replay 経路）。
+message LiveStrategyReadyEvent {
+  string strategy_id   = 1;
+  string venue         = 2;
+  string instrument_id = 3;
+  int64  ts_event_ms   = 4;
+}
+
+// issue #42 Phase 3 (schema 3.27): warm_up 進捗を 5s 毎に emit する中間 event。
+// GUI 側は LiveStrategyReady 60s timeout のリセットと banner 表示更新に使う。
+message LiveStrategyWarmingUpEvent {
+  string strategy_id = 1;
+  float  progress    = 2;  // 0.0..=1.0
+  string message     = 3;  // user-facing progress text
+}
+
+// issue #42 R1 HIGH-2 (schema 3.29): kabuステーション 50 銘柄 PUSH 上限到達時の
+// LRU evict 通知。docs/specs/live-strategy.md §3.2-G 契約。UI は当該 symbol チャートに
+// 「再登録が必要」を Toast で通知する。
+message SubscriptionEvictedEvent {
+  string venue    = 1;  // 現状 "kabu_station" のみ
+  string symbol   = 2;
+  uint32 exchange = 3;  // kabu Exchange code（1=東証 既定）
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

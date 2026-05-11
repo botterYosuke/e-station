@@ -185,6 +185,70 @@ pub(crate) enum ReplayMsg {
     },
     LiveStartFailed(String),
     StopLiveStrategy,
+    /// R2-B H4 / 統一決定 #21 副次 invariant: live strategy の `warm_up()` 成功
+    /// (LiveStrategyReady emit) 直後に `node.build()` が失敗した場合、Python engine
+    /// が `EngineError{code:"node_build_failed", strategy_id}` を emit する。Rust 側は
+    /// (a) `LiveStrategyState` を Idle に戻し、
+    /// (b) 既に生成済みの 4 ペイン (`auto_generate_live_panes` の結果) を teardown し、
+    /// (c) ユーザーに失敗を通知する。
+    ///
+    /// R4 Group A (silent-HIGH-1): `node_build_failed` だけでなく `warm_up_failed` /
+    /// `kernel_unavailable` / `venue_not_supported` / `market_closed` も同じ
+    /// teardown 経路を流す。`code` field を持たせ、handler はそれに応じて toast
+    /// 文言を切り替える。新 variant を増やさず既存経路に統合することで silent
+    /// failure を最小コストで解消する。
+    LiveStrategyBuildFailed {
+        strategy_id: String,
+        /// EngineError.code (`warm_up_failed` / `kernel_unavailable` /
+        /// `venue_not_supported` / `market_closed` / `node_build_failed` 等)。
+        code: String,
+        message: String,
+    },
+    /// issue #42 Phase 3: live strategy warm_up 完了 → Running 遷移 + 4 ペイン自動生成。
+    /// `EngineEvent::LiveStrategyReady` を `map_engine_event_to_message` 経由で受け取る。
+    LiveStrategyReady {
+        strategy_id: String,
+        instrument_id: String,
+        venue: String,
+        #[allow(dead_code)]
+        ts_event_ms: i64,
+    },
+    /// issue #42 Phase 3: warm_up 進捗（5s 毎、`LiveStrategyReady` 60s timeout のリセットに使う）。
+    LiveWarmingUp {
+        strategy_id: String,
+        progress: f32,
+        message: String,
+    },
+    /// issue #42 Phase 3: `EngineStarted` 後 60s 以内に `LiveStrategyReady` が来なかったときに
+    /// `Task::perform` 経由で発火。`token` が古ければ捨てる（タイマーリセット用）。
+    LiveWarmupTimeoutFired {
+        strategy_id: String,
+        token: u64,
+    },
+    /// issue #42 Phase 3: warm_up timeout banner の「再試行」ボタンや dismiss 操作で発火。
+    /// R2-B H2: view() 内に live_warmup_timeout_banner を strategy_load_error と同じパターン
+    /// で描画し、「再試行」ボタンで本 variant を on_press する（dead_code 抑止解除）。
+    DismissLiveWarmupTimeoutBanner,
+    /// issue #42 Phase 3: `LoadLiveStrategyScenario` 応答 → modal prefill。
+    LiveStrategyScenarioLoaded {
+        request_id: String,
+        instrument_id: Option<String>,
+        max_qty: Option<u32>,
+        max_notional_jpy: Option<u64>,
+        /// issue #42 R1 MEDIUM-1: scenario が advertise する venue。
+        /// `handlers/replay.rs::LiveStrategyScenarioLoaded` arm が
+        /// `LiveStrategyFormModal::prefill_from_scenario` 経由で form.venue に流す。
+        venue: Option<String>,
+        strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+    /// issue #42 Phase 3: `LoadLiveStrategyScenario` の 5s timeout / `strategy_parse_failed`
+    /// 受信時に pending を解除し手入力モードへ戻す。
+    LiveStrategyScenarioFallback {
+        request_id: String,
+    },
+    /// issue #42 Phase 3: `EngineRehello` 受信時に `LiveStrategyState::Running` の
+    /// 三つ組で `auto_generate_live_panes` を冪等に再実行する。Rust 内部イベント。
+    LiveStrategyRehelloReplay,
     /// H-2: Commit replay_bar state after `LoadReplayData` succeeded.
     /// Emitted from the Submit Task callback for both `BothOk` and
     /// `StartFailed` outcomes — in either case the backend has loaded the new

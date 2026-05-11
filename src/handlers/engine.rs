@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use iced::Task;
 
-use crate::Message;
 use crate::messages::{DashboardMsg, EngineMsg, MenuMsg, VenueMsg};
 use crate::venue_state::VenueEvent;
 use crate::widget::toast::Toast;
+use crate::{LiveStrategyState, Message};
 
 impl crate::Flowsurface {
     pub(crate) fn handle_engine(&mut self, msg: EngineMsg) -> Task<Message> {
@@ -51,6 +51,28 @@ impl crate::Flowsurface {
                 self.buying_power_request_id = None;
                 self.order_list_request_id = None;
                 self.positions_request_id = None;
+                // R2-B M8: reconnect で in-flight な LoadLiveStrategyScenario の応答は
+                // 失われるため、live form が開いていれば pending を解除して手入力モードに
+                // 戻す。再起動後に form を再 open すれば再度 prefill 経路が走る (handler
+                // 側で新 request_id を発行)。同じ pending_scenario_request_id 整合の
+                // 流儀 (buying_power_request_id 等のリセットと対称) で扱う。
+                if let Some(form) = self.live_strategy_form_modal.as_mut() {
+                    form.release_scenario_pending();
+                }
+                // R4 R3-SILENT-4: live session が Running でなければ pending 状態を
+                // reset する。reconnect 直前に「pending だが Ready が来ない」状態
+                // だった場合、reconnect 後も古い pending_strategy_id が残ると
+                // 後続の LiveWarmupTimeoutFired を誤照合して既に消えた session の
+                // banner を出してしまう silent UX failure になる。
+                // Running 状態 (LiveStrategyReady 受信済み) は保持する — reconnect
+                // 後に EngineRehello → 4 ペイン再生成の冪等再生経路が走るため。
+                if !matches!(self.live_strategy, LiveStrategyState::Running { .. }) {
+                    self.live_strategy_pending_strategy_id = None;
+                    self.live_warmup_timeout_token = self.live_warmup_timeout_token.wrapping_add(1);
+                    self.live_warmup_warming_message = None;
+                    // R4 R3-RUST-2: reconnect で pending を捨てるとき progress も None に戻す。
+                    self.live_warmup_warming_progress = None;
+                }
                 self.active_dashboard_mut()
                     .distribute_buying_power_loading(main_window, false);
                 self.active_dashboard_mut()

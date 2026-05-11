@@ -306,6 +306,14 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         loaded_path: Option<String>,
     },
+
+    // ── issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 抽出 ─────────────────
+    /// 戦略 .py から LIVE_SCENARIO 定数を ast.literal_eval で安全抽出するよう Python に要求する。
+    /// SCENARIO とは独立した定数で、live モード form prefill に使う。Python 側は副作用ゼロ。
+    LoadLiveStrategyScenario {
+        request_id: String,
+        strategy_path: String,
+    },
 }
 
 /// Hand-rolled `Debug` for `Command` that masks `SetSecondPassword.value`
@@ -633,6 +641,14 @@ impl std::fmt::Debug for Command {
                 .debug_struct("StepBackward")
                 .field("request_id", request_id)
                 .finish(),
+            Command::LoadLiveStrategyScenario {
+                request_id,
+                strategy_path,
+            } => f
+                .debug_struct("LoadLiveStrategyScenario")
+                .field("request_id", request_id)
+                .field("strategy_path", strategy_path)
+                .finish(),
         }
     }
 }
@@ -878,6 +894,69 @@ impl std::fmt::Display for OrderStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_wire_str())
     }
+}
+
+/// `EngineBusy.busy_kind` の wire 値 (issue #42 Phase 3 / R2-B H8)。
+///
+/// venue 単位で別 strategy が走っている場合に Python が
+/// `another_strategy_on_venue` を emit する。新カテゴリが追加されたとき
+/// 旧クライアントでもデシリアライズが失敗しないよう、`grpc_transport.rs::
+/// proto_event_to_dto` で未知値は `None` にフォールバックする
+/// （R2-B H8: forward compatibility）。
+///
+/// `serde(rename_all = "snake_case")` で wire 表現は従来の文字列と互換。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BusyKind {
+    /// 同一 venue で別 strategy が走っている場合の reject カテゴリ。
+    AnotherStrategyOnVenue,
+}
+
+impl BusyKind {
+    /// Wire-form string (`"another_strategy_on_venue"`). Convenient for log lines.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            BusyKind::AnotherStrategyOnVenue => "another_strategy_on_venue",
+        }
+    }
+
+    /// Parse a wire string. Returns `None` for unknown values so callers can
+    /// implement forward-compatible fallback (proto path uses this; serde path
+    /// uses `deserialize_busy_kind_lenient`).
+    pub fn from_wire_str(s: &str) -> Option<Self> {
+        match s {
+            "another_strategy_on_venue" => Some(BusyKind::AnotherStrategyOnVenue),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BusyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
+
+/// Lenient deserializer for `Option<BusyKind>` — unknown wire strings degrade
+/// to `None` (forward compat) instead of producing a deserialize error.
+///
+/// `#[serde(default)]` covers the absent-field case; this function covers the
+/// "field present but value unknown" case (R2-B H8).
+fn deserialize_busy_kind_lenient<'de, D>(deserializer: D) -> Result<Option<BusyKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|s| {
+        let parsed = BusyKind::from_wire_str(&s);
+        if parsed.is_none() {
+            log::warn!(
+                target: "engine_client::dto",
+                "EngineBusy.busy_kind: unknown value {s:?} — falling back to None"
+            );
+        }
+        parsed
+    }))
 }
 
 /// Engine state machine の wire 名 (Python `schemas.CurrentEngineState` と一致)。
@@ -1425,6 +1504,23 @@ pub enum EngineEvent {
         /// 「broadcast / 別 client 由来」を区別するために使う。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        /// issue #42 Phase 3 (schema 3.28): reject 対象 venue（同一 venue で別 strategy
+        /// が走っている場合）。旧 server (minor < 28) からは `None` で deserialise される。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        venue: Option<String>,
+        /// issue #42 Phase 3 (schema 3.28): reject の具体カテゴリ。
+        /// R2-B H8: `Option<String>` から `Option<BusyKind>` へ enum 化。
+        /// 旧 server (minor < 28) からは `None`。`grpc_transport.rs::proto_event_to_dto`
+        /// で proto 文字列を enum に変換し、未知値は `None` + log warn にフォールバック
+        /// する (forward compat)。serde 経路でも `deserialize_busy_kind_lenient` で
+        /// 未知文字列を `None` に degrade し、新カテゴリ wire 拡張で旧クライアントが
+        /// 壊れないよう対称な振る舞いを保つ。
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_busy_kind_lenient"
+        )]
+        busy_kind: Option<BusyKind>,
     },
     /// 新規クライアントが engine WebSocket に接続したことを全 client に broadcast する。
     /// `count` は接続中のクライアント総数（接続後）。
@@ -1478,6 +1574,58 @@ pub enum EngineEvent {
         /// 評価額（decimal 文字列、円）
         equity: String,
         ts_event_ms: i64,
+    },
+
+    // ── issue #42 Phase 2 (schema 3.25): LIVE_SCENARIO 応答 ───────────────────
+    /// `LoadLiveStrategyScenario` の応答。LIVE_SCENARIO が見つかった場合は各フィールドを返す。
+    /// LIVE_SCENARIO 不在時は全フィールド None で即時応答する。
+    /// `strategy_init_kwargs` は wire 上 JSON 文字列で、Rust 側で decode して dict 化する。
+    LiveStrategyScenarioLoaded {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instrument_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_qty: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_notional_jpy: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        venue: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strategy_init_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+
+    // ── issue #42 Phase 3 (schema 3.26): LiveStrategyReady ────────────────────
+    /// live strategy が ``warm_up()`` 成功時に emit する。``node.build()`` より前。
+    /// Rust 側はこれを auto_generate_live_panes(strategy_id, instrument_id, venue) の
+    /// 冪等トリガーとして使う。reconnect 時にも再生される。
+    LiveStrategyReady {
+        strategy_id: String,
+        venue: String,
+        instrument_id: String,
+        ts_event_ms: i64,
+    },
+
+    // ── issue #42 Phase 3 (schema 3.27): LiveStrategyWarmingUp ────────────────
+    /// warm_up 進捗を 5s 毎に emit する中間 event。GUI banner 表示更新と
+    /// LiveStrategyReady 60s timeout のリセットに使う（統一決定 #10）。
+    LiveStrategyWarmingUp {
+        strategy_id: String,
+        /// 0.0–1.0 の進捗値
+        progress: f32,
+        /// user-facing 進捗文言
+        message: String,
+    },
+
+    // ── issue #42 R1 HIGH-2 (schema 3.29): SubscriptionEvicted ────────────────
+    /// kabuステーション 50 銘柄 PUSH 上限到達時の LRU evict 通知（spec §3.2-G）。
+    /// UI は当該 symbol チャートに「PUSH 上限到達で登録解除されました（再選択で再登録）」を
+    /// Toast で通知する。旧実装は schema 全層 variant 欠落で
+    /// `server_grpc.py::_dict_to_proto_event` が unknown event として silent drop していた。
+    SubscriptionEvicted {
+        venue: String,
+        symbol: String,
+        /// kabu Exchange code（1=東証 既定）
+        exchange: u32,
     },
 }
 

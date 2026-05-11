@@ -36,6 +36,127 @@ fn read_src(rel: &str) -> String {
         .unwrap_or_else(|_| panic!("{rel} が見つかりません"))
 }
 
+/// `start + max_len` で得られる byte index を `src` の有効な char boundary に丸める。
+///
+/// PR #45 R1 review HIGH-3 (Phase R8 外部レビュー) の defensive hardening。
+/// ピンテストは `&src[start..(start + N).min(src.len())]` のような byte slicing
+/// で固定窓を取るが、対象ソース (`pane.rs` 等) に日本語コメントが含まれるため、
+/// 窓の終端がたまたま multibyte char の途中に落ちると `byte index N is not a
+/// char boundary` で panic する。`is_char_boundary` で end を後退させて
+/// 安全な境界に丸める。
+///
+/// R4 Group D: `start > src.len()` の defensive clamp を追加。caller が誤って
+/// `find()` 失敗時の `usize::MAX` 等を渡したケースでも、戻り値が
+/// `[start_clamped, src.len()]` の正規範囲に収まることを保証する。
+fn safe_slice_end(src: &str, start: usize, max_len: usize) -> usize {
+    // R4 Group D defensive clamp: start も src.len() に丸める。これにより
+    // caller の `&src[start..safe_slice_end(...)]` が start>len で panic することを
+    // 完全に防ぐ (caller 側が start を別途 clamp する責任から解放)。
+    let start = start.min(src.len());
+    let mut end = start.saturating_add(max_len).min(src.len());
+    while end > start && !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+#[test]
+fn safe_slice_end_rounds_down_to_char_boundary() {
+    // "abc日本語def" の "日" は 3 byte (UTF-8)。start=0, max_len=4 だと
+    // 素朴な実装は byte index 4 (= 'c' の次の '日' の途中) を返し、
+    // `&src[0..4]` で panic する。helper は 3 (= '日' の手前) に丸める。
+    let s = "abc日本語def";
+    assert_eq!(safe_slice_end(s, 0, 3), 3, "ASCII 境界はそのまま返す");
+    assert_eq!(
+        safe_slice_end(s, 0, 4),
+        3,
+        "multibyte 途中は前の境界に丸めるべき"
+    );
+    assert_eq!(
+        safe_slice_end(s, 0, 5),
+        3,
+        "multibyte 途中 (2 byte 進入) も前の境界へ"
+    );
+    assert_eq!(
+        safe_slice_end(s, 0, 6),
+        6,
+        "1 char 完全包含 (= '日' の直後) は許容"
+    );
+    assert_eq!(
+        safe_slice_end(s, 0, 1000),
+        s.len(),
+        "max_len が src を超える場合は src.len() に clamp"
+    );
+    // 安全性: 返り値で実際に slice しても panic しない
+    let end = safe_slice_end(s, 0, 4);
+    let _ = &s[0..end];
+}
+
+// ── R4 Group D: safe_slice_end の境界値テスト追加 ────────────────────────────
+//
+// 既存テスト (`safe_slice_end_rounds_down_to_char_boundary`) は `start=0` 系統のみ
+// 検証していたため、helper を実装変更したときに以下のエッジケースで silent panic
+// する余地が残っていた。R4 review-fix-loop の rust-reviewer 推奨に従い 3 件追加:
+
+#[test]
+fn safe_slice_end_handles_max_len_zero() {
+    // 空スライス要求 → start を返す (常に start == end の空 slice が安全)。
+    let s = "abc日本語def";
+    assert_eq!(safe_slice_end(s, 3, 0), 3, "max_len=0 は start を返す");
+    // 安全性: 返り値で実際に slice しても panic しない
+    let end = safe_slice_end(s, 3, 0);
+    let _ = &s[3..end];
+}
+
+#[test]
+fn safe_slice_end_handles_start_at_end() {
+    // start = src.len() → end も src.len() (空 slice)。
+    let s = "abc日本語def";
+    let n = s.len();
+    assert_eq!(
+        safe_slice_end(s, n, 0),
+        n,
+        "start=src.len() は end=src.len() を返す"
+    );
+    assert_eq!(
+        safe_slice_end(s, n, 100),
+        n,
+        "start=src.len() で max_len>0 でも end=src.len() を返す"
+    );
+    let end = safe_slice_end(s, n, 100);
+    let _ = &s[n..end];
+}
+
+#[test]
+fn safe_slice_end_clamps_start_beyond_len() {
+    // start > src.len() でも panic せず src.len() に clamp して返す
+    // (defensive hardening — caller が start>len の狂った値を渡しても、helper の
+    // 戻り値は **常に start_clamped..end の安全な範囲** を表現する必要がある)。
+    //
+    // 旧実装は `start.saturating_add(max_len).min(src.len())` で end を src.len()
+    // に押さえるが、start 自体をクランプしないため caller が `&s[start..end]` で
+    // 即 panic していた (start=9999 > end=src.len())。defensive clamp `start.min(src.len())`
+    // で end >= start_clamped (= src.len()) の post-condition を成立させる。
+    let s = "abc日本語def";
+    let n = s.len();
+    assert_eq!(
+        safe_slice_end(s, 9999, 100),
+        n,
+        "start>src.len() は src.len() を end として返す"
+    );
+    // post-condition: end >= start_clamped。helper 戻り値 end が src.len() で、
+    // start を src.len() に clamp すれば `&s[start_clamped..end]` は空 slice として
+    // 安全になる。defensive clamp が無いと、caller がナイーブに `&s[start..end]`
+    // すると start > end で panic する。
+    let end = safe_slice_end(s, 9999, 100);
+    assert!(
+        end >= n.min(9999),
+        "post-condition: end ({end}) must be >= min(start, src.len()) ({}); \
+         this guards against caller-side `&s[start..end]` panics when start > src.len()",
+        n.min(9999)
+    );
+}
+
 fn scan_brace_body(src: &str, needle: &str) -> String {
     let start = src
         .find(needle)
@@ -100,7 +221,7 @@ fn stream_empty_reason_no_stream_case() {
         .find("stream_empty_reason: &'static str")
         .or_else(|| src.find("let stream_empty_reason"))
         .expect("stream_empty_reason の定義が見つかりません");
-    let context = &src[start..(start + 600).min(src.len())];
+    let context = &src[start..safe_slice_end(src.as_str(), start, 600)];
     assert!(
         context.contains("銘柄を選択してください"),
         "stream_empty_reason の None アーム（銘柄未選択）は\n\
@@ -116,7 +237,7 @@ fn stream_empty_reason_tachibana_not_ready() {
         .find("stream_empty_reason: &'static str")
         .or_else(|| src.find("let stream_empty_reason"))
         .expect("stream_empty_reason の定義が見つかりません");
-    let context = &src[start..(start + 600).min(src.len())];
+    let context = &src[start..safe_slice_end(src.as_str(), start, 600)];
     assert!(
         context.contains("立花へのログインが必要です"),
         "stream_empty_reason の Tachibana 未ログインアームは\n\
@@ -136,7 +257,7 @@ fn stream_empty_reason_kabu_not_ready() {
         .find("stream_empty_reason: &'static str")
         .or_else(|| src.find("let stream_empty_reason"))
         .expect("stream_empty_reason の定義が見つかりません");
-    let context = &src[start..(start + 600).min(src.len())];
+    let context = &src[start..safe_slice_end(src.as_str(), start, 600)];
     assert!(
         context.contains("kabuステーションへのログインが必要です"),
         "stream_empty_reason の KabuStation 未ログインアームは\n\
@@ -156,7 +277,7 @@ fn stream_empty_reason_fallback() {
         .find("stream_empty_reason: &'static str")
         .or_else(|| src.find("let stream_empty_reason"))
         .expect("stream_empty_reason の定義が見つかりません");
-    let context = &src[start..(start + 600).min(src.len())];
+    let context = &src[start..safe_slice_end(src.as_str(), start, 600)];
     assert!(
         context.contains("データ受信待ち"),
         "stream_empty_reason のフォールバックアームは\n\
@@ -175,7 +296,7 @@ fn order_venue_ready_uses_tachibana_and_kabu_ready() {
     let start = src
         .find("let order_venue_ready")
         .expect("order_venue_ready の定義が見つかりません");
-    let context = &src[start..(start + 400).min(src.len())];
+    let context = &src[start..safe_slice_end(src.as_str(), start, 400)];
     assert!(
         context.contains("tachibana_ready"),
         "order_venue_ready は tachibana_ready を参照しなければなりません。"
@@ -295,7 +416,7 @@ fn orders_view_shows_login_required_when_not_ready() {
     let is_empty_start = src
         .find("if panel.is_empty()")
         .expect("is_empty() ブロックが見つかりません");
-    let is_empty_block = &src[is_empty_start..(is_empty_start + 500).min(src.len())];
+    let is_empty_block = &src[is_empty_start..safe_slice_end(src.as_str(), is_empty_start, 500)];
     let loading_pos = is_empty_block.find("panel.loading").unwrap_or(usize::MAX);
     let venue_pos = is_empty_block.find("venue_ready").unwrap_or(usize::MAX);
     assert!(
@@ -341,7 +462,7 @@ fn positions_view_shows_login_required_when_not_ready() {
             .map(|o| replay_end + o)
     };
     let block_start = after_replay.unwrap_or(is_empty_start);
-    let is_empty_block = &src[block_start..(block_start + 500).min(src.len())];
+    let is_empty_block = &src[block_start..safe_slice_end(src.as_str(), block_start, 500)];
     let loading_pos = is_empty_block.find("panel.loading").unwrap_or(usize::MAX);
     let venue_pos = is_empty_block.find("venue_ready").unwrap_or(usize::MAX);
     assert!(
@@ -405,7 +526,7 @@ fn order_entry_view_gates_submit_on_venue_ready() {
         let start = src
             .find("let submit_btn")
             .expect("submit_btn の定義が見つかりません");
-        &src[start..(start + 600).min(src.len())]
+        &src[start..safe_slice_end(src.as_str(), start, 600)]
     };
     assert!(
         submit_btn_block.contains("venue_ready"),

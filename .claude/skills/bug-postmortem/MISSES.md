@@ -47,6 +47,7 @@
 | タスク cancel 対称性欠如 | 起動メソッドでタスクを `create_task` しても、対応する cleanup メソッド（`_clear_kabu_session` 等）でそのタスクを `cancel()` していない。再ログイン・セッションリセット後も旧タスクが生き続け、資源の宙ぶらりんや二重起動ガードの誤発動を招く | 1 |
 | コールバック型シグネチャ陳腐化 | コールバックの戻り値型を変更したとき（`None` → `bool`）、呼び出し側の型アノテーションと処理が旧シグネチャのまま残り、失敗を示す `False` が無音で捨てられる。型ヒントとテストの両方で契約を固める | 1 |
 | ルーティング述語全フィールド照合 | ストリームのルーティング述語（`matches_stream` 等）が `PartialEq`（全フィールド一致）を使い、意味的に同等だが表現が異なる（`Client` vs `ServerSide`）ストリームをミスマッチと判定する。エミッター側が常に特定タグを使うとき、レシーバー側の登録タグと一致しなくなる | 1 |
+| source-pin tests の固定 byte slicing が UTF-8 multibyte 境界を踏む | `&src[start..(start + N).min(src.len())]` のような固定窓 byte slicing で source-pin tests を書くと、対象ソース（`pane.rs` 等）に日本語コメントが含まれる場合に N が char boundary に落ちないと panic する（`byte index N is not a char boundary`）。`is_char_boundary()` で end を後退させる helper（`safe_slice_end`）に共通化し、helper 自体も `start.min(src.len())` で start>len の caller 誤用を吸収する | 2 |
 
 ---
 
@@ -2419,3 +2420,85 @@ PING payload `ff 78 27 16`（4 bytes）に対して空 PONG（0 bytes）を返�
    `async for` と `ws.recv()` 直接呼び出しでは例外伝播の挙動が異なる。
    `async for` はライブラリ内部で特定例外を `StopAsyncIteration` に変換する可能性がある。
    接続クローズ例外を `except` で拾いたい場合は `ws.recv()` を直接呼び出す。
+
+---
+
+## 2026-05-11 — source-pin tests の固定 byte slicing が UTF-8 multibyte 境界を踏む
+
+**見逃しパターン**: source-pin tests の固定 byte slicing が UTF-8 multibyte 境界を踏む
+
+**不具合の概要**:
+
+`tests/issue_39_empty_state_pin.rs` 等の source-pin tests は対象ソース
+（`src/screen/dashboard/pane.rs` 等）を `include_str!` / `read_to_string` で読み、
+特定文字列を `find()` した位置から固定 byte 数の窓を切り出してパターン照合する:
+
+```rust
+let context = &src[start..(start + 600).min(src.len())];
+```
+
+対象ソースに日本語コメント（`「ライブ戦略起動失敗」`等）が含まれる場合、`start + 600`
+が UTF-8 multibyte 文字（3 byte / char）の途中に落ちると Rust の slice 演算が
+`byte index 600 is not a char boundary; it is inside '日' (bytes 598..601)` で panic
+する。issue #39 / issue #42 の 2 つの異なる pin tests で同じ罠を踏んだ。
+
+**根本原因**:
+
+1. byte index と char index を混同している。`start + N` は byte index だが、
+   日本語ソースでは N byte 進んだ位置が char boundary に必ず一致するとは限らない。
+2. `String` の slice 演算は char boundary でしか許可されておらず、内部で
+   `is_char_boundary()` チェック → 失敗時 panic という仕様。
+3. 対象ソースが ASCII のみであれば silent に成功するため、初回開発時には気付かない。
+   後から日本語コメントを追加した瞬間に panic する隠れリグレッションになる。
+
+**なぜ既存テストが見逃したか**:
+
+| テスト | 見逃した理由 |
+|--------|------------|
+| `issue_39_empty_state_pin.rs` 初期版 | `start=0` 系統のみテストしており、`start + N` が multibyte 境界に落ちるエッジケースを試していなかった。対象ソースに日本語コメントが追加された瞬間に panic |
+| `live_form_smoke.rs` 初期版 | 同様。`scan_brace_body` 等の helper も `is_char_boundary` を考慮せず固定窓を取っていた |
+| Rust 公式ドキュメント | `String::slice` の char boundary 要件は `[T]::Index` の docs にあるが、source-pin tests のような unusual な use case では発見しづらい |
+
+**修正**:
+
+共通 helper `safe_slice_end(src: &str, start: usize, max_len: usize) -> usize` を
+両 pin test ファイルに導入:
+
+```rust
+fn safe_slice_end(src: &str, start: usize, max_len: usize) -> usize {
+    let start = start.min(src.len());  // R4 Group D defensive clamp
+    let mut end = start.saturating_add(max_len).min(src.len());
+    while end > start && !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+```
+
+**追加したテスト** (`tests/issue_39_empty_state_pin.rs`):
+
+- `safe_slice_end_rounds_down_to_char_boundary` — multibyte 中央が前の境界に丸まる
+- `safe_slice_end_handles_max_len_zero` — 空 slice 要求 (`max_len=0`) で start を返す
+- `safe_slice_end_handles_start_at_end` — `start = src.len()` で end も src.len()
+- `safe_slice_end_clamps_start_beyond_len` — `start > src.len()` を src.len() に clamp
+
+**リグレッション確認**: `start.min(src.len())` の defensive clamp を削除すると
+`safe_slice_end_clamps_start_beyond_len` が post-condition `end >= start_clamped`
+を満たさなくなり FAIL する。
+
+**教訓**:
+
+1. **byte index を扱う slicing は必ず `is_char_boundary()` でガードせよ**:
+   `&src[start..end]` の前に `src.is_char_boundary(start) && src.is_char_boundary(end)`
+   をチェックするか、共通 helper を経由する。固定窓を取る用途なら `safe_slice_end`
+   のような end 後退 helper を使う。
+2. **defensive clamp は helper 内側に閉じ込める**: caller が `find()` 失敗時の
+   `usize::MAX` を渡すケースまで helper で吸収すれば、caller 側の毎回の clamp
+   忘れが silent panic を起こすリスクを排除できる。
+3. **同じ罠は別 PR で繰り返す**: issue #39 で 1 度踏んでいたが、同じ helper を
+   別ファイル（`live_form_smoke.rs`）にコピペして同じバグを再生産した。
+   workspace 共通の helper crate / `tests/common/` への抽出が follow-up 課題。
+4. **新規日本語コメントを追加するときは pin tests を再実行**: 対象ソースに
+   日本語コメントを追加した瞬間に隠れていた panic が表面化する。`cargo test`
+   を後段で必ず回す CI hook が安全装置になる。
+
