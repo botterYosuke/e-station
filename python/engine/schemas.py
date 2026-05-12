@@ -996,7 +996,7 @@ class PositionRecord(IpcMessage):
     market_value: str  # 整数文字列、"0" は ¥0 表示
     position_type: Literal["cash", "margin_credit", "margin_general"]
     tategyoku_id: str | None = None
-    venue: Literal["tachibana", "replay"]
+    venue: Literal["tachibana", "replay", "kabu_station"]
 
 
 class PositionsUpdated(IpcMessage):

@@ -2502,3 +2502,62 @@ fn safe_slice_end(src: &str, start: usize, max_len: usize) -> usize {
    æ—¥æœ¬èªã‚³ãƒ¡ãƒ³ãƒˆã‚’è¿½åŠ ã—ãŸç¬é–“ã«éš ã‚Œã¦ã„ãŸ panic ãŒè¡¨é¢åŒ–ã™ã‚‹ã€‚`cargo test`
    ã‚’å¾Œæ®µã§å¿…ãšå›ã™ CI hook ãŒå®‰å…¨è£…ç½®ã«ãªã‚‹ã€‚
 
+
+---
+
+## 2026-05-12 ? kabu_station u•Û—L–Á•¿v‚ªuXV’†v‚Ì‚Ü‚Ü‰i‹v’â~
+
+**Œ©“¦‚µƒpƒ^[ƒ“**: IPC outbox dict ¨ proto ®‡«–¢ŒŸØiƒpƒ^[ƒ“ #44j
+
+**•s‹ï‡‚ÌŠT—v**:
+live ƒ‚[ƒh‚Å—§‰ÔƒƒOƒAƒEƒg ¨ kabuStation ƒƒOƒCƒ“ ó‘Ô‚É‚¨‚¢‚ÄA
+u•Û—L–Á•¿vƒpƒlƒ‹‚ªu? XV’†cv‚©‚çˆêØi“W‚µ‚È‚¢B
+
+**ª–{Œ´ˆö**:
+`server.py::_do_get_positions_kabu` ‚ª outbox ‚ÉÏ‚Ş `position_type` ƒtƒB[ƒ‹ƒh‚É
+`"LONG"` / `"SHORT"` ‚Æ‚¢‚¤•s³‚È’l‚ğg‚Á‚Ä‚¢‚½B
+
+`schemas.py::PositionRecord` ‚Ì Literal ‚Í `"cash"` / `"margin_credit"` / `"margin_general"` ‚Ì
+3 ’l‚µ‚©‹–‰Â‚µ‚Ä‚¢‚È‚¢B‚Ü‚½ `venue` Literal ‚à `"tachibana"` / `"replay"` ‚Ì‚İ‚ÅA
+`"kabu_station"` ‚ªŒ‡—‚µ‚Ä‚¢‚½B
+
+`server_grpc.py::_dict_to_proto_event` ‚Ì `ParseDict` ‚Í `ignore_unknown_fields=False` ‚Å“®ì‚·‚é‚½‚ßA
+`position_type="LONG"` ‚ğó‚¯æ‚é‚Æ proto •ÏŠ·‚É¸”s‚µ `Failed to build proto Event PositionsUpdated: ... ? dropping`
+‚Æ‚È‚Á‚Ä event ‚ª silently droppedB
+Œ‹‰Ê‚Æ‚µ‚Ä Rust ‘¤‚É PositionsUpdated ‚ª“Í‚©‚¸A`loading=true` ‚ª‰i‹v‚É‰ğœ‚³‚ê‚È‚¢B
+
+**C³**:
+
+| ƒtƒ@ƒCƒ‹ | •ÏX“à—e |
+|---------|---------|
+| `python/engine/schemas.py::PositionRecord.venue` | `"kabu_station"` ‚ğ Literal ‚É’Ç‰Á |
+| `python/engine/server.py::_do_get_positions_kabu` | `position_type` ‚ğ `"cash"` / `"margin_credit"` / `"margin_general"` ‚ÉÊ‘œB`Side=="1"` ‚ğ short ‚Æ‚µ‚Ä `qty` ‚ğƒ}ƒCƒiƒX‰»B`ExecutionID` ‚ğ `tategyoku_id` ‚ÉŠi”[ |
+
+**‚È‚ºŠù‘¶ƒeƒXƒg‚Å”­Œ©‚Å‚«‚È‚©‚Á‚½‚©**:
+
+| ƒeƒXƒg | Œ©“¦‚µ‚½——R |
+|--------|------------|
+| `test_kabusapi_rest.py` | REST ƒNƒ‰ƒCƒAƒ“ƒg’P‘ÌBoutbox ƒyƒCƒ[ƒhƒtƒH[ƒ}ƒbƒg‚ğŒŸØ‚µ‚Ä‚¢‚È‚¢ |
+| `test_tachibana_positions_dispatch.py` | —§‰Ô (tachibana venue) ƒpƒX‚Ì‚İƒJƒo[ |
+| `test_server_dispatch.py` | GetPositions ƒRƒ}ƒ“ƒh‚Ì kabu_station ƒ‹[ƒg‚ğƒeƒXƒg‚µ‚Ä‚¢‚È‚¢ |
+| proto •ÏŠ·ƒeƒXƒg | PositionsUpdated dict ¨ proto •ÏŠ·‚ª kabu ƒtƒH[ƒ}ƒbƒg‚Å¬Œ÷‚·‚é‚©‚ğŒŸØ‚·‚éƒeƒXƒg‚ª‚È‚©‚Á‚½ |
+
+**’Ç‰Á‚µ‚½ƒeƒXƒg**:
+- `python/tests/test_kabu_positions_payload.py::test_kabu_positions_produces_valid_protobuf_enum_variants`
+  ? `_do_get_positions_kabu` ‚ª `position_type` ‚É valid ‚È Literal ‚ğg‚¢Ashort ‚Í•‰ qty ‚É‚È‚é‚±‚Æ‚ğ assert
+
+**ƒŠƒOƒŒƒbƒVƒ‡ƒ“Šm”F**: `position_type="LONG"/"SHORT"` ‚É–ß‚·‚ÆVƒeƒXƒg‚ª ValidationError ‚Å FAIL ‚·‚é‚±‚Æ‚ğŠm”FBC³Œã PASSB
+
+**‹³ŒP**:
+
+1. **outbox dict ‚Ì enum ƒtƒB[ƒ‹ƒh‚Í PositionRecord schema ‚ÆÆ‡‚·‚éƒeƒXƒg‚ğ‘‚­**:
+   `ParseDict(ignore_unknown_fields=False)` ‚Í•s³‚È enum •¶š—ñ‚ÅƒCƒxƒ“ƒg‚ğ drop ‚·‚éB
+   outbox ‚ÉÏ‚Ş dict ‚ğ `PositionRecord(**fields)` ‚ÅƒoƒŠƒf[ƒVƒ‡ƒ“‚·‚é‚©Aproto •ÏŠ·¬Œ÷‚ğ integration test ‚ÅŠm”F‚·‚éB
+
+2. **V venue ’Ç‰Á‚Í schemas.py ‚Ì‘S Literal ƒtƒB[ƒ‹ƒh‚ğ“¯‚ÉŠm”F‚·‚é**:
+   `grep -n "Literal.*venue\|venue.*Literal" python/engine/schemas.py` ‚Å‘S‰ÓŠ‚ğŠm”F‚µA
+   V venue –¼‚ğ‚·‚×‚Ä‚Ì Literal ‚É’Ç‰Á‚·‚éB
+
+3. **proto silently drop ‚ÌƒfƒoƒbƒOwj**:
+   `Failed to build proto Event XXX: ... ? dropping` ƒƒO‚ªª‹’B
+   smoke.sh ‚Ì FAIL ğŒ‚É‚±‚ÌƒƒOƒpƒ^[ƒ“‚ğ’Ç‰Á‚·‚é‚±‚Æ‚ğŒŸ“¢‚·‚éB
