@@ -3157,17 +3157,31 @@ class DataEngineServer:
             return
 
         ts_ms = int(time.time() * 1000)
-        positions_json = [
-            {
+        positions_json = []
+        for p in raw_positions:
+            # Kabu API Side: "1" = 売(Short), "2" = 買(Long). For cash it's usually "2" or omitted.
+            is_short = p.get("Side") == "1"
+            qty = int(p.get("Leaves", 0))
+            if is_short:
+                qty = -qty
+
+            margin_type = p.get("MarginTradeType")
+            if margin_type == 1:
+                pos_type = "margin_credit"
+            elif margin_type in (2, 3):
+                pos_type = "margin_general"
+            else:
+                pos_type = "cash"
+
+            positions_json.append({
                 "instrument_id": f"{p.get('Symbol', '')}.KabuStation Stock",
-                "qty": str(int(p.get("Leaves", 0))),
+                "qty": str(qty),
                 "market_value": str(int(p.get("Price", 0) * p.get("Leaves", 0))),
-                "position_type": "LONG" if p.get("Side") == "1" else "SHORT",
-                "tategyoku_id": "",
+                "position_type": pos_type,
+                "tategyoku_id": p.get("ExecutionID", ""),
                 "venue": "kabu_station",
-            }
-            for p in raw_positions
-        ]
+            })
+
         self._outbox.append({
             "event": "PositionsUpdated",
             "request_id": req_id,
